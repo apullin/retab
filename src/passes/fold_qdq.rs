@@ -92,28 +92,21 @@ impl Pass for FoldAndAnnotateQParamsPass {
         if modified {
             let all_ids = graph.all_node_ids();
             for node_id in all_ids {
-                let should_update = {
-                    let node = match graph.node(node_id) {
-                        Some(n) => n,
-                        None => continue,
-                    };
-                    // Skip placeholders and outputs
-                    if node.op != OpType::CallFunction {
-                        continue;
+                let new_dtype = match graph.node(node_id) {
+                    Some(n) if n.op == OpType::CallFunction => {
+                        if !n.meta.input_qparams.is_empty() {
+                            Some(n.meta.input_qparams[0].1.dtype)
+                        } else if !n.meta.output_qparams.is_empty() {
+                            Some(n.meta.output_qparams[0].1.dtype)
+                        } else {
+                            None
+                        }
                     }
-                    // If the node has input qparams, it operates in quantized domain
-                    if !node.meta.input_qparams.is_empty() {
-                        // Use the dtype from input qparams (typically Int8)
-                        Some(node.meta.input_qparams[0].1.dtype)
-                    } else if !node.meta.output_qparams.is_empty() {
-                        Some(node.meta.output_qparams[0].1.dtype)
-                    } else {
-                        None
-                    }
+                    _ => None,
                 };
-                if let Some(new_dtype) = should_update {
+                if let Some(dt) = new_dtype {
                     if let Some(node) = graph.node_mut(node_id) {
-                        node.meta.val.dtype = new_dtype;
+                        node.meta.val.dtype = dt;
                     }
                 }
             }

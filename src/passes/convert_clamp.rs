@@ -27,11 +27,9 @@ impl Pass for ConvertToClampPass {
             match &node.target {
                 OpTarget::Relu => {
                     // Relu: clamp(x, min=0, max=MAX)
-                    // For quantized int8 models: relu clips to [0, 127]
-                    // For FP32: relu clips to [0, f32::MAX]
-                    let is_int8 = node.meta.val.dtype == DType::Int8;
-                    let min_val: i64 = 0;
-                    let max_val: i64 = if is_int8 { 127 } else { i32::MAX as i64 };
+                    // For quantized pipelines, we clamp to [0, 127] (int8 range).
+                    // Even if the node metadata still says Float32 (Q/DQ not yet folded),
+                    // the underlying operation is quantized and 127 is the correct max.
                     if let Some(node) = graph.node_mut(id) {
                         node.target = OpTarget::TosaClamp;
                         // Keep first arg (input), add min/max
@@ -39,8 +37,8 @@ impl Pass for ConvertToClampPass {
                             node.args.pop();
                         }
                         node.kwargs = vec![
-                            ("min_val".into(), Arg::Int(min_val)),
-                            ("max_val".into(), Arg::Int(max_val)),
+                            ("min_val".into(), Arg::Int(0)),
+                            ("max_val".into(), Arg::Int(127)),
                         ];
                         modified = true;
                     }

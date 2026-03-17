@@ -2,6 +2,7 @@ use crate::graph::ir::*;
 use crate::graph::Graph;
 use crate::passes::Pass;
 use crate::store::TensorStore;
+use smallvec::SmallVec;
 
 /// Extract an IntList from a positional arg, returning empty vec on mismatch.
 fn extract_intlist_arg(node: &Node, idx: usize) -> Vec<i64> {
@@ -56,9 +57,9 @@ impl Pass for CleanupPass {
                         // Keep only the input arg
                         n.args.truncate(1);
                         n.kwargs = vec![
-                            ("kernel".into(), Arg::IntList(kernel.into())),
-                            ("stride".into(), Arg::IntList(stride.into())),
-                            ("pad".into(), Arg::IntList(tosa_pad.into())),
+                            ("kernel".into(), Arg::IntList(SmallVec::from_vec(kernel))),
+                            ("stride".into(), Arg::IntList(SmallVec::from_vec(stride))),
+                            ("pad".into(), Arg::IntList(SmallVec::from_vec(tosa_pad))),
                         ];
                         modified = true;
                     }
@@ -80,9 +81,9 @@ impl Pass for CleanupPass {
                         n.target = OpTarget::TosaAvgPool2d;
                         n.args.truncate(1);
                         n.kwargs = vec![
-                            ("kernel".into(), Arg::IntList(kernel.into())),
-                            ("stride".into(), Arg::IntList(stride.into())),
-                            ("pad".into(), Arg::IntList(tosa_pad.into())),
+                            ("kernel".into(), Arg::IntList(SmallVec::from_vec(kernel))),
+                            ("stride".into(), Arg::IntList(SmallVec::from_vec(stride))),
+                            ("pad".into(), Arg::IntList(SmallVec::from_vec(tosa_pad))),
                         ];
                         modified = true;
                     }

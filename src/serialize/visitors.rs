@@ -275,6 +275,9 @@ pub fn emit_depthwise_conv2d(
 }
 
 /// Emit a RESCALE operator.
+///
+/// TOSA RESCALE takes 5 inputs: [input, multiplier, shift, input_zp, output_zp].
+/// The multiplier and shift come as Node args; input_zp and output_zp come as kwargs.
 pub fn emit_rescale(
     graph: &Graph,
     _node_id: NodeId,
@@ -290,6 +293,51 @@ pub fn emit_rescale(
     let per_channel = kwarg_bool(node, "per_channel", false);
     let input_unsigned = kwarg_bool(node, "input_unsigned", false);
     let output_unsigned = kwarg_bool(node, "output_unsigned", false);
+    let input_zp_val = kwarg_i32(node, "input_zp", 0);
+    let output_zp_val = kwarg_i32(node, "output_zp", 0);
+
+    // Create input_zp const tensor (scalar int32)
+    let input_zp_name = format!("{}_input_zp", node.name);
+    result.tensors.push(TosaTensor {
+        name: input_zp_name.clone(),
+        shape: vec![1],
+        dtype: DType::Int32,
+        data: input_zp_val.to_le_bytes().to_vec(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Const,
+        attribute: Attribute::Const(ConstAttribute),
+        inputs: vec![],
+        outputs: vec![input_zp_name.clone()],
+        location: None,
+    });
+
+    // Create output_zp const tensor (scalar int32)
+    let output_zp_name = format!("{}_output_zp", node.name);
+    result.tensors.push(TosaTensor {
+        name: output_zp_name.clone(),
+        shape: vec![1],
+        dtype: DType::Int32,
+        data: output_zp_val.to_le_bytes().to_vec(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Const,
+        attribute: Attribute::Const(ConstAttribute),
+        inputs: vec![],
+        outputs: vec![output_zp_name.clone()],
+        location: None,
+    });
+
+    // RESCALE inputs: [input, multiplier, shift, input_zp, output_zp]
+    let mut rescale_inputs = input_names;
+    rescale_inputs.push(input_zp_name);
+    rescale_inputs.push(output_zp_name);
 
     result.operators.push(TosaOperator {
         op: Op::Rescale,
@@ -300,7 +348,7 @@ pub fn emit_rescale(
             input_unsigned,
             output_unsigned,
         }),
-        inputs: input_names,
+        inputs: rescale_inputs,
         outputs: vec![node.name.clone()],
         location: None,
     });
@@ -384,6 +432,9 @@ pub fn emit_transpose(
 }
 
 /// Emit a RESHAPE operator.
+///
+/// TOSA RESHAPE takes 2 inputs: [input, shape]. We create a CONST_SHAPE
+/// tensor from the output shape.
 pub fn emit_reshape(
     graph: &Graph,
     _node_id: NodeId,
@@ -395,10 +446,45 @@ pub fn emit_reshape(
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
 
+    // Create a CONST_SHAPE tensor for the target shape
+    let out_shape: Vec<i32> = node
+        .meta
+        .val
+        .shape_slice()
+        .iter()
+        .map(|&d| d as i32)
+        .collect();
+    let rank = out_shape.len() as u32;
+    let shape_name = format!("{}_shape", node.name);
+
+    // Encode shape as little-endian i64 bytes (TOSA Shape dtype)
+    let shape_data: Vec<u8> = out_shape
+        .iter()
+        .flat_map(|&d| (d as i64).to_le_bytes())
+        .collect();
+
+    result.shapes.push(TosaShape {
+        name: shape_name.clone(),
+        rank,
+        data: shape_data,
+    });
+
+    result.operators.push(TosaOperator {
+        op: Op::ConstShape,
+        attribute: Attribute::ConstShape(ConstShapeAttribute),
+        inputs: vec![],
+        outputs: vec![shape_name.clone()],
+        location: None,
+    });
+
+    // RESHAPE inputs: [input, shape]
+    let mut reshape_inputs = input_names;
+    reshape_inputs.push(shape_name);
+
     result.operators.push(TosaOperator {
         op: Op::Reshape,
         attribute: Attribute::Reshape(ReshapeAttribute),
-        inputs: input_names,
+        inputs: reshape_inputs,
         outputs: vec![node.name.clone()],
         location: None,
     });

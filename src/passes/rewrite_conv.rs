@@ -182,11 +182,42 @@ fn rewrite_conv2d(graph: &mut Graph, store: &mut TensorStore, node_id: NodeId) -
         OpTarget::TosaConv2d
     };
 
+    // Ensure we have a bias node. If bias_arg is Arg::None, create a zero bias.
+    let actual_bias_arg = if let Arg::Node(_) = &bias_arg {
+        bias_arg
+    } else {
+        // Create zero bias const. For quantized conv, bias is int32 with shape [out_channels].
+        let out_channels = graph
+            .node(weight_id)
+            .map(|n| n.meta.val.shape_slice()[0])
+            .unwrap_or(1);
+        let bias_name = format!("{}_zero_bias", node_name);
+        let bias_data = vec![0u8; (out_channels as usize) * 4]; // int32 zeros
+        store.insert(
+            bias_name.clone(),
+            TensorData {
+                data: bias_data,
+                shape: vec![out_channels],
+                dtype: DType::Int32,
+            },
+        );
+        let bias_id = graph.insert_before(
+            node_id,
+            OpType::Placeholder,
+            OpTarget::TosaConst,
+            smallvec![],
+            vec![],
+            NodeMeta::new(TensorInfo::new(&[out_channels], DType::Int32)),
+            bias_name,
+        );
+        Arg::Node(bias_id)
+    };
+
     // Build args: [input, weight, bias, input_zp, weight_zp]
     let new_args: smallvec::SmallVec<[Arg; 4]> = smallvec![
         Arg::Node(input_id),
         Arg::Node(weight_id),
-        bias_arg,
+        actual_bias_arg,
         Arg::Node(izp_id),
         Arg::Node(wzp_id),
     ];
@@ -308,11 +339,41 @@ fn rewrite_linear(graph: &mut Graph, store: &mut TensorStore, node_id: NodeId) -
         wzp_name,
     );
 
+    // Ensure we have a bias node.
+    let actual_bias_arg = if let Arg::Node(_) = &bias_arg {
+        bias_arg
+    } else {
+        let out_features = graph
+            .node(weight_id)
+            .map(|n| n.meta.val.shape_slice()[0])
+            .unwrap_or(1);
+        let bias_name = format!("{}_zero_bias", node_name);
+        let bias_data = vec![0u8; (out_features as usize) * 4];
+        store.insert(
+            bias_name.clone(),
+            TensorData {
+                data: bias_data,
+                shape: vec![out_features],
+                dtype: DType::Int32,
+            },
+        );
+        let bias_id = graph.insert_before(
+            node_id,
+            OpType::Placeholder,
+            OpTarget::TosaConst,
+            smallvec![],
+            vec![],
+            NodeMeta::new(TensorInfo::new(&[out_features], DType::Int32)),
+            bias_name,
+        );
+        Arg::Node(bias_id)
+    };
+
     // Args: [input, weight, bias, input_zp, weight_zp]
     let new_args: smallvec::SmallVec<[Arg; 4]> = smallvec![
         Arg::Node(input_id),
         Arg::Node(weight_id),
-        bias_arg,
+        actual_bias_arg,
         Arg::Node(izp_id),
         Arg::Node(wzp_id),
     ];

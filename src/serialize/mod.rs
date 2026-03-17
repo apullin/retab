@@ -26,7 +26,9 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
             None => continue,
         };
 
-        eprintln!("[Serialize] node '{}' op={:?} target={:?}", node.name, node.op, node.target);
+        if std::env::var("TOSA_ENGINE_DEBUG").is_ok() {
+            eprintln!("[Serialize] node '{}' op={:?} target={:?}", node.name, node.op, node.target);
+        }
 
         match node.op {
             OpType::Placeholder => {

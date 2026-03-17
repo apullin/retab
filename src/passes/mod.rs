@@ -40,22 +40,24 @@ impl PassRunner {
     }
 
     pub fn run_all(&self, graph: &mut Graph, store: &mut TensorStore) {
+        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
         for pass in &self.passes {
             let before_count = graph.order.len();
             let modified = pass.run(graph, store);
             let after_count = graph.order.len();
-            eprintln!(
-                "[PassRunner] {} — modified={}, nodes: {} -> {}",
-                pass.name(),
-                modified,
-                before_count,
-                after_count
-            );
-            // Debug: print all node targets after each pass
-            for &nid in &graph.order {
-                if let Some(n) = graph.node(nid) {
-                    if n.op == crate::graph::ir::OpType::CallFunction {
-                        eprintln!("  node '{}': target={:?}, dtype={:?}", n.name, n.target, n.meta.val.dtype);
+            if debug {
+                eprintln!(
+                    "[PassRunner] {} — modified={}, nodes: {} -> {}",
+                    pass.name(),
+                    modified,
+                    before_count,
+                    after_count
+                );
+                for &nid in &graph.order {
+                    if let Some(n) = graph.node(nid) {
+                        if n.op == crate::graph::ir::OpType::CallFunction {
+                            eprintln!("  node '{}': target={:?}, dtype={:?}", n.name, n.target, n.meta.val.dtype);
+                        }
                     }
                 }
             }
@@ -121,8 +123,8 @@ impl Pass for RemoveNoopPass {
 
 pub fn build_phase1_pipeline() -> PassRunner {
     let mut runner = PassRunner::new();
-    runner.add(Box::new(convert_clamp::ConvertToClampPass));
     runner.add(Box::new(fold_qdq::FoldAndAnnotateQParamsPass));
+    runner.add(Box::new(convert_clamp::ConvertToClampPass));
     runner.add(Box::new(insert_rescale::InsertRescalePass));
     runner.add(Box::new(decompose_quant::DecomposeQuantNodesPass));
     runner.add(Box::new(rewrite_conv::RewriteConvPass));
