@@ -1,8 +1,9 @@
 use crate::graph::ir::*;
 use crate::graph::Graph;
 use crate::passes::Pass;
+use crate::shape;
 use crate::store::TensorStore;
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 
 /// Extract an IntList from a positional arg, returning empty vec on mismatch.
 fn extract_intlist_arg(node: &Node, idx: usize) -> Vec<i64> {
@@ -138,6 +139,11 @@ impl Pass for CleanupPass {
                         modified = true;
                     }
                 }
+                OpTarget::Sum => {
+                    if rewrite_sum_to_reduce(graph, *node_id) {
+                        modified = true;
+                    }
+                }
                 _ => {}
             }
         }
@@ -176,4 +182,105 @@ impl Pass for CleanupPass {
 
         modified
     }
+}
+
+/// Rewrite an ATen Sum node into one or more chained TosaReduceSum nodes.
+///
+/// TOSA REDUCE_SUM reduces one axis at a time. If the ATen Sum reduces multiple
+/// axes (e.g., dims=[2,3]), we chain reductions from highest axis to lowest so
+/// that earlier indices remain stable.
+fn rewrite_sum_to_reduce(graph: &mut Graph, node_id: NodeId) -> bool {
+    let (input_id, dims, node_meta) = {
+        let node = match graph.node(node_id) {
+            Some(n) => n,
+            None => return false,
+        };
+        let input_id = match node.args.first() {
+            Some(Arg::Node(id)) => *id,
+            _ => return false,
+        };
+        let dims = extract_intlist_arg(node, 1);
+        if dims.is_empty() {
+            return false;
+        }
+        (input_id, dims, node.meta.clone())
+    };
+
+    // Sort dims descending so reducing higher axes first keeps lower indices stable
+    let mut sorted_dims = dims;
+    sorted_dims.sort_unstable();
+    sorted_dims.reverse();
+
+    // Build the chain of TosaReduceSum nodes
+    let mut current_input = input_id;
+    let node_name = graph
+        .node(node_id)
+        .map(|n| n.name.clone())
+        .unwrap_or_default();
+
+    for (i, &dim) in sorted_dims.iter().enumerate() {
+        let is_last = i == sorted_dims.len() - 1;
+
+        // Compute output shape: input shape with this dim set to 1
+        let input_shape = graph
+            .node(current_input)
+            .map(|n| n.meta.val.shape_slice().to_vec())
+            .unwrap_or_default();
+        let input_dtype = graph
+            .node(current_input)
+            .map(|n| n.meta.val.dtype)
+            .unwrap_or(DType::Int8);
+
+        let mut out_shape = input_shape;
+        let dim_idx = dim as usize;
+        if dim_idx < out_shape.len() {
+            out_shape[dim_idx] = 1;
+        }
+
+        let reduce_name = format!("{}_reduce_axis{}", node_name, dim);
+        let mut reduce_meta = NodeMeta::new(TensorInfo::new(&out_shape, input_dtype));
+        // Carry forward qparams from the original node for the last reduction
+        if is_last {
+            reduce_meta.input_qparams = node_meta.input_qparams.clone();
+            reduce_meta.output_qparams = node_meta.output_qparams.clone();
+        }
+
+        if is_last {
+            // Rewrite the original node in place for the last reduction
+            if let Some(n) = graph.node_mut(node_id) {
+                n.target = OpTarget::TosaReduceSum;
+                n.args = smallvec![Arg::Node(current_input)];
+                n.kwargs = vec![("axis".into(), Arg::Int(dim))];
+                n.meta = reduce_meta;
+            }
+            // Update user lists: remove old input, add new
+            if current_input != input_id {
+                // The original node's input was input_id; we already removed it implicitly
+                // by changing args. Fix up user lists.
+                if let Some(orig_input) = graph.node_mut(input_id) {
+                    orig_input.users.retain(|u| *u != node_id);
+                }
+                if let Some(new_input) = graph.node_mut(current_input) {
+                    if !new_input.users.contains(&node_id) {
+                        new_input.users.push(node_id);
+                    }
+                }
+            }
+        } else {
+            // Insert intermediate reduction before the original node
+            let reduce_id = graph.insert_before(
+                node_id,
+                OpType::CallFunction,
+                OpTarget::TosaReduceSum,
+                smallvec![Arg::Node(current_input)],
+                vec![("axis".into(), Arg::Int(dim))],
+                reduce_meta,
+                reduce_name,
+            );
+            shape::propagate_shape(graph, reduce_id);
+            current_input = reduce_id;
+        }
+    }
+
+    true
 }

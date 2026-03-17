@@ -67,7 +67,8 @@ fn compute_output_info(graph: &Graph, node_id: NodeId) -> TensorInfo {
         | OpTarget::TosaAvgPool2d
         | OpTarget::TosaMaxPool2d => compute_pool2d(graph, node),
 
-        OpTarget::Sum | OpTarget::TosaReduceSum => compute_sum(graph, node),
+        OpTarget::Sum => compute_sum(graph, node),
+        OpTarget::TosaReduceSum => compute_tosa_reduce_sum(graph, node),
 
         OpTarget::Rsqrt
         | OpTarget::Neg
@@ -93,7 +94,13 @@ fn compute_output_info(graph: &Graph, node_id: NodeId) -> TensorInfo {
             info
         }
 
-        OpTarget::TosaRescale => input_info(graph, node, 0),
+        OpTarget::TosaRescale => {
+            // RESCALE preserves shape from input but keeps its own output dtype
+            // (set during insertion, e.g. Int8 for int32->int8 requantization).
+            let mut info = input_info(graph, node, 0);
+            info.dtype = node.meta.val.dtype;
+            info
+        }
 
         OpTarget::TosaConst => node.meta.val,
 
@@ -363,6 +370,38 @@ fn compute_pool2d(graph: &Graph, node: &Node) -> TensorInfo {
 fn compute_sum(graph: &Graph, node: &Node) -> TensorInfo {
     let input = input_info(graph, node, 0);
     compute_reduction(node, &input, 1)
+}
+
+/// TosaReduceSum: single-axis reduction with axis in kwargs. Always keepdim=true.
+fn compute_tosa_reduce_sum(graph: &Graph, node: &Node) -> TensorInfo {
+    let input = input_info(graph, node, 0);
+    let in_shape = input.shape_slice();
+
+    let axis = node
+        .kwargs
+        .iter()
+        .find_map(|(k, v)| {
+            if k == "axis" {
+                if let Arg::Int(a) = v {
+                    return Some(*a);
+                }
+            }
+            None
+        })
+        .unwrap_or(0);
+
+    let axis = if axis < 0 {
+        (axis + in_shape.len() as i64) as usize
+    } else {
+        axis as usize
+    };
+
+    let mut out = [0i64; 4];
+    let len = in_shape.len().min(4);
+    for i in 0..len {
+        out[i] = if i == axis { 1 } else { in_shape[i] };
+    }
+    TensorInfo::new(&out[..len], input.dtype)
 }
 
 // ---------------------------------------------------------------------------

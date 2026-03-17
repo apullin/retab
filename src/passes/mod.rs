@@ -10,6 +10,7 @@ pub mod fold_qdq;
 pub mod fuse_constants;
 pub mod fuse_quantized_activation;
 pub mod insert_rescale;
+pub mod insert_table_ops;
 pub mod match_arg_dtype;
 pub mod memory_format;
 pub mod rewrite_conv;
@@ -125,6 +126,7 @@ pub fn build_phase1_pipeline() -> PassRunner {
     let mut runner = PassRunner::new();
     runner.add(Box::new(fold_qdq::FoldAndAnnotateQParamsPass));
     runner.add(Box::new(convert_clamp::ConvertToClampPass));
+    runner.add(Box::new(insert_table_ops::InsertTableOpsPass));
     runner.add(Box::new(insert_rescale::InsertRescalePass));
     runner.add(Box::new(decompose_quant::DecomposeQuantNodesPass));
     runner.add(Box::new(rewrite_conv::RewriteConvPass));
@@ -157,6 +159,9 @@ pub fn build_phase2_pipeline() -> PassRunner {
 
     // 5. FoldAndAnnotateQParamsPass (existing)
     runner.add(Box::new(fold_qdq::FoldAndAnnotateQParamsPass));
+
+    // 5b. InsertTableOpsPass (replace quantized Rsqrt with TABLE)
+    runner.add(Box::new(insert_table_ops::InsertTableOpsPass));
 
     // 6. FuseDuplicateUsersPass (no-op for now)
     runner.add(Box::new(FuseDuplicateUsersPass));

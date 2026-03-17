@@ -103,7 +103,14 @@ fn rewrite_conv2d(graph: &mut Graph, store: &mut TensorStore, node_id: NodeId) -
         })
         .unwrap_or(0);
 
-    let is_depthwise = groups > 1 && groups == in_channels;
+    // Match the Python reference: depthwise when in_channels == groups and
+    // out_channels is a multiple of in_channels.
+    let out_channels = graph
+        .node(weight_id)
+        .map(|n| n.meta.val.shape_slice()[0])
+        .unwrap_or(0);
+    let is_depthwise =
+        in_channels > 0 && groups == in_channels && out_channels % in_channels == 0;
 
     // Create input_zp and weight_zp const nodes
     let input_qparams = graph

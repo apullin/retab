@@ -49,13 +49,14 @@ impl Pass for ToTosaMemoryFormatPass {
                 None => continue,
             };
 
-            // Check if input already comes from a transpose (avoid double transpose)
-            let input_is_transpose = graph
+            // Check if input already produces NHWC data (either a transpose or
+            // another NHWC op). If so, skip inserting another transpose.
+            let input_already_nhwc = graph
                 .node(input_id)
-                .map(|n| n.target == OpTarget::TosaTranspose)
+                .map(|n| n.target == OpTarget::TosaTranspose || is_nhwc_op(&n.target))
                 .unwrap_or(false);
 
-            if !input_is_transpose {
+            if !input_already_nhwc {
                 // Insert NCHW->NHWC transpose before this node
                 let input_info = graph.node(input_id).map(|n| n.meta.val).unwrap_or_default();
 
