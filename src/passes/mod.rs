@@ -13,6 +13,7 @@ pub mod insert_rescale;
 pub mod insert_table_ops;
 pub mod match_arg_dtype;
 pub mod memory_format;
+pub mod propagate_qparams;
 pub mod rewrite_conv;
 
 use crate::graph::Graph;
@@ -76,7 +77,11 @@ impl Default for PassRunner {
 // No-op placeholder passes (to be implemented later)
 // ---------------------------------------------------------------------------
 
-/// Placeholder: fuse nodes that produce identical results into a single node.
+/// Fuse nodes that have the same target and identical args into a single node.
+///
+/// When decomposition passes create duplicate subgraphs (e.g., both LayerNorm
+/// and Var decompose to `Sub(x, Mean(x, dims))`), this pass merges the
+/// duplicates by replacing all uses of the duplicate with the first occurrence.
 pub struct FuseDuplicateUsersPass;
 
 impl Pass for FuseDuplicateUsersPass {
@@ -84,10 +89,104 @@ impl Pass for FuseDuplicateUsersPass {
         "FuseDuplicateUsers"
     }
 
-    fn run(&self, _graph: &mut Graph, _store: &mut TensorStore) -> bool {
-        // No-op for now
-        false
+    fn run(&self, graph: &mut Graph, _store: &mut TensorStore) -> bool {
+        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+        let mut modified = false;
+
+        // Collect candidate groups: nodes with the same (target, args, kwargs).
+        // We iterate in order and keep the first occurrence of each signature.
+        loop {
+            let mut fused_any = false;
+            let all_ids = graph.all_node_ids();
+
+            // Map from signature -> first NodeId with that signature
+            let mut seen: std::collections::HashMap<FuseKey, crate::graph::ir::NodeId> =
+                std::collections::HashMap::new();
+            let mut to_fuse: Vec<(crate::graph::ir::NodeId, crate::graph::ir::NodeId)> = Vec::new();
+
+            for &nid in &all_ids {
+                let node = match graph.node(nid) {
+                    Some(n) => n,
+                    None => continue,
+                };
+
+                // Only fuse CallFunction nodes
+                if node.op != crate::graph::ir::OpType::CallFunction {
+                    continue;
+                }
+
+                // Skip nodes that shouldn't be fused (side-effectful, etc.)
+                if !is_fusable(&node.target) {
+                    continue;
+                }
+
+                let key = FuseKey {
+                    target: format!("{:?}", node.target),
+                    args: format!("{:?}", node.args),
+                    kwargs: format!("{:?}", node.kwargs),
+                };
+
+                if let Some(&first_id) = seen.get(&key) {
+                    to_fuse.push((nid, first_id));
+                } else {
+                    seen.insert(key, nid);
+                }
+            }
+
+            for (dup_id, keep_id) in to_fuse {
+                if debug {
+                    let dup_name = graph.node(dup_id).map(|n| n.name.clone()).unwrap_or_default();
+                    let keep_name = graph.node(keep_id).map(|n| n.name.clone()).unwrap_or_default();
+                    eprintln!(
+                        "[FuseDuplicateUsers] fusing '{}' into '{}'",
+                        dup_name, keep_name,
+                    );
+                }
+                graph.replace_all_uses(dup_id, keep_id);
+                graph.erase_node(dup_id);
+                fused_any = true;
+                modified = true;
+            }
+
+            if !fused_any {
+                break;
+            }
+        }
+
+        modified
     }
+}
+
+/// Signature key for detecting duplicate nodes.
+#[derive(Hash, PartialEq, Eq)]
+struct FuseKey {
+    target: String,
+    args: String,
+    kwargs: String,
+}
+
+/// Returns true for ops that are safe to fuse (pure, no side effects).
+fn is_fusable(target: &crate::graph::ir::OpTarget) -> bool {
+    use crate::graph::ir::OpTarget;
+    matches!(
+        target,
+        OpTarget::Add
+            | OpTarget::Sub
+            | OpTarget::Mul
+            | OpTarget::Reshape
+            | OpTarget::Mean
+            | OpTarget::Sum
+            | OpTarget::Full
+            | OpTarget::Rsqrt
+            | OpTarget::Var
+            | OpTarget::Clamp
+            | OpTarget::TosaAdd
+            | OpTarget::TosaSub
+            | OpTarget::TosaMul
+            | OpTarget::TosaReshape
+            | OpTarget::TosaReduceSum
+            | OpTarget::TosaClamp
+    )
 }
 
 /// Placeholder: fuse placeholders that reference the same underlying buffer.
@@ -159,6 +258,10 @@ pub fn build_phase2_pipeline() -> PassRunner {
 
     // 5. FoldAndAnnotateQParamsPass (existing)
     runner.add(Box::new(fold_qdq::FoldAndAnnotateQParamsPass));
+
+    // 5a. PropagateQParamsPass — propagate qparams through decomposed ops that
+    //     lack them because decomposition happened after quantization.
+    runner.add(Box::new(propagate_qparams::PropagateQParamsPass));
 
     // 5b. InsertTableOpsPass (replace quantized Rsqrt with TABLE)
     runner.add(Box::new(insert_table_ops::InsertTableOpsPass));

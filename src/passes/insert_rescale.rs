@@ -143,6 +143,12 @@ impl Pass for InsertRescalePass {
                     in_qp.dtype,
                 );
 
+                // Set output_qparams on the rescale node so downstream passes
+                // can detect further mismatches.
+                if let Some(rescale_node) = graph.node_mut(rescale_id) {
+                    rescale_node.meta.output_qparams.push((0, in_qp));
+                }
+
                 // Rewire: replace this specific use of node_id in user with rescale_id
                 if let Some(user) = graph.node_mut(user_id) {
                     for arg in &mut user.args {
@@ -306,6 +312,13 @@ fn insert_accumulator_rescale(
         }
     }
 
+    // Set output_qparams on the rescale node so that a subsequent
+    // InsertRescalePass run can detect mismatches between this rescale's
+    // output and its consumers' input_qparams.
+    if let Some(rescale_node) = graph.node_mut(rescale_id) {
+        rescale_node.meta.output_qparams.push((0, *out_qp));
+    }
+
     // Update the accumulator op's user list: remove all old users, add rescale
     if let Some(src_node) = graph.node_mut(node_id) {
         src_node.users.clear();
@@ -322,6 +335,9 @@ fn insert_accumulator_rescale(
 // Rescale node creation helper
 // ---------------------------------------------------------------------------
 
+/// Monotonically increasing counter to disambiguate rescale node names.
+static RESCALE_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Create a RESCALE node with its multiplier/shift const nodes, inserted
 /// before `ref_id` in the graph order. Returns the NodeId of the new RESCALE.
 fn create_rescale_node(
@@ -335,12 +351,13 @@ fn create_rescale_node(
     output_dtype: DType,
 ) -> NodeId {
     let (multiplier, shift) = compute_multiplier_and_shift(scale_ratio);
+    let counter = RESCALE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     let node_name_base = graph
         .node(input_id)
         .map(|n| n.name.clone())
         .unwrap_or_default();
-    let rescale_name = format!("{}_rescale", node_name_base);
+    let rescale_name = format!("{}_rescale_{}", node_name_base, counter);
 
     let meta_val = graph
         .node(input_id)

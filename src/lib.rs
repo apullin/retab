@@ -35,8 +35,20 @@ fn lower_to_tosa(
     let (mut graph, mut store) =
         ingest::fx_bridge::ingest_fx_graph(graph_module, state_dict, graph_signature)?;
 
-    // 2. Run passes
-    let pipeline = passes::build_phase1_pipeline();
+    // 2. Run passes — detect whether phase2 is needed based on the graph
+    //    containing ops that require decomposition (LayerNorm, Var, etc.).
+    use crate::graph::ir::OpTarget;
+    let needs_phase2 = graph.iter_nodes().any(|(_, n)| {
+        matches!(
+            n.target,
+            OpTarget::LayerNorm | OpTarget::Var | OpTarget::BatchNorm
+        )
+    });
+    let pipeline = if needs_phase2 {
+        passes::build_phase2_pipeline()
+    } else {
+        passes::build_phase1_pipeline()
+    };
     pipeline.run_all(&mut graph, &mut store);
 
     // 3. Serialize to TOSA

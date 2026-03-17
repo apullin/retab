@@ -113,7 +113,8 @@ impl Pass for ToTosaMemoryFormatPass {
                 }
             }
 
-            // Check users: if any user is NOT an NHWC op, insert NHWC->NCHW transpose
+            // Check users: if any user is NOT an NHWC op, insert a single
+            // shared NHWC->NCHW transpose and rewire all such users to it.
             let users: Vec<NodeId> = graph
                 .node(node_id)
                 .map(|n| n.users.to_vec())
@@ -121,51 +122,50 @@ impl Pass for ToTosaMemoryFormatPass {
 
             let output_info = graph.node(node_id).map(|n| n.meta.val).unwrap_or_default();
 
-            for user_id in users {
-                let user_target = match graph.node(user_id) {
-                    Some(n) => n.target.clone(),
-                    None => continue,
-                };
+            // Collect non-NHWC users that need a transpose
+            let non_nhwc_users: Vec<NodeId> = users
+                .iter()
+                .copied()
+                .filter(|&uid| {
+                    graph
+                        .node(uid)
+                        .map(|n| !is_nhwc_op(&n.target))
+                        .unwrap_or(false)
+                })
+                .collect();
 
-                // If the user is also an NHWC op, skip (it wants NHWC input)
-                if is_nhwc_op(&user_target) {
-                    continue;
-                }
+            if !non_nhwc_users.is_empty() && output_info.shape_len == 4 {
+                let nhwc_shape = output_info.shape_slice();
+                let nchw_shape = [nhwc_shape[0], nhwc_shape[3], nhwc_shape[1], nhwc_shape[2]];
 
-                // If output is 4D, insert NHWC->NCHW transpose
-                if output_info.shape_len == 4 {
-                    let nhwc_shape = output_info.shape_slice();
-                    // Output is currently NHWC-shaped after the op runs in NHWC
-                    // We need to transpose back to NCHW
-                    let nchw_shape = [nhwc_shape[0], nhwc_shape[3], nhwc_shape[1], nhwc_shape[2]];
+                let perm_name = format!(
+                    "{}_nhwc_to_nchw",
+                    graph
+                        .node(node_id)
+                        .map(|n| n.name.as_str())
+                        .unwrap_or("node")
+                );
 
-                    let perm_name = format!(
-                        "{}_nhwc_to_nchw",
-                        graph
-                            .node(node_id)
-                            .map(|n| n.name.as_str())
-                            .unwrap_or("node")
-                    );
+                let mut transpose_meta = NodeMeta::new(TensorInfo::new(&nchw_shape, output_info.dtype));
+                transpose_meta.tosa_dim_order = Some(SmallVec::from_slice(&[0, 3, 1, 2]));
 
-                    let mut transpose_meta = NodeMeta::new(TensorInfo::new(&nchw_shape, output_info.dtype));
-                    transpose_meta.tosa_dim_order = Some(SmallVec::from_slice(&[0, 3, 1, 2]));
+                let transpose_id = graph.insert_after(
+                    node_id,
+                    OpType::CallFunction,
+                    OpTarget::TosaTranspose,
+                    smallvec![
+                        Arg::Node(node_id),
+                        Arg::IntList(smallvec![0, 3, 1, 2]),
+                    ],
+                    vec![],
+                    transpose_meta,
+                    perm_name,
+                );
 
-                    let transpose_id = graph.insert_after(
-                        node_id,
-                        OpType::CallFunction,
-                        OpTarget::TosaTranspose,
-                        smallvec![
-                            Arg::Node(node_id),
-                            Arg::IntList(smallvec![0, 3, 1, 2]),
-                        ],
-                        vec![],
-                        transpose_meta,
-                        perm_name,
-                    );
+                shape::propagate_shape(graph, transpose_id);
 
-                    shape::propagate_shape(graph, transpose_id);
-
-                    // Rewire: replace node_id with transpose_id in user's args
+                // Rewire ALL non-NHWC users to use the single transpose
+                for &user_id in &non_nhwc_users {
                     if let Some(user) = graph.node_mut(user_id) {
                         for arg in &mut user.args {
                             if let Arg::Node(id) = arg {
@@ -176,7 +176,6 @@ impl Pass for ToTosaMemoryFormatPass {
                         }
                     }
 
-                    // Update user lists
                     if let Some(t_node) = graph.node_mut(transpose_id) {
                         if !t_node.users.contains(&user_id) {
                             t_node.users.push(user_id);
@@ -184,13 +183,17 @@ impl Pass for ToTosaMemoryFormatPass {
                     }
                     if let Some(src_node) = graph.node_mut(node_id) {
                         src_node.users.retain(|uid| *uid != user_id);
-                        if !src_node.users.contains(&transpose_id) {
-                            src_node.users.push(transpose_id);
-                        }
                     }
-
-                    modified = true;
                 }
+
+                // Ensure the source node lists the transpose as a user
+                if let Some(src_node) = graph.node_mut(node_id) {
+                    if !src_node.users.contains(&transpose_id) {
+                        src_node.users.push(transpose_id);
+                    }
+                }
+
+                modified = true;
             }
         }
 
