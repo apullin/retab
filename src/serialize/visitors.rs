@@ -137,6 +137,289 @@ fn make_nhwc_output_tensor(node: &Node) -> TosaTensor {
     }
 }
 
+/// Convert a node's NCHW meta shape to NHWC, returning `[N, H, W, C]`.
+///
+/// If the node has `tosa_dim_order = [0,2,3,1]`, it is already NHWC.
+/// Otherwise assume NCHW and permute.
+fn node_nhwc_shape(node: &Node) -> Vec<i32> {
+    let shape: Vec<i32> = node
+        .meta
+        .val
+        .shape_slice()
+        .iter()
+        .map(|&d| d as i32)
+        .collect();
+    if shape.len() == 4 {
+        let is_already_nhwc = node
+            .meta
+            .tosa_dim_order
+            .as_ref()
+            .map(|order| order.as_slice() == [0, 2, 3, 1])
+            .unwrap_or(false);
+        if is_already_nhwc {
+            shape
+        } else {
+            vec![shape[0], shape[2], shape[3], shape[1]]
+        }
+    } else {
+        shape
+    }
+}
+
+/// Compute the NHWC output shape for a TOSA CONV2D from the input and weight
+/// shapes and the conv attributes.
+///
+/// TOSA CONV2D:
+///   input  shape = [N, IH, IW, IC]  (NHWC)
+///   weight shape = [OC, KH, KW, IC] (OHWI)
+///   output shape = [N, OH, OW, OC]
+/// where:
+///   OH = (IH + pad_top + pad_bottom - (KH-1)*dilation_h - 1) / stride_h + 1
+///   OW = (IW + pad_left + pad_right - (KW-1)*dilation_w - 1) / stride_w + 1
+fn compute_conv2d_nhwc_output(
+    graph: &Graph,
+    node: &Node,
+    pad: &[i32],
+    stride: &[i32],
+    dilation: &[i32],
+) -> TosaTensor {
+    let dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+
+    // Try to compute from input + weight shapes
+    let computed = (|| -> Option<Vec<i32>> {
+        let input_id = match node.args.first()? {
+            Arg::Node(id) => *id,
+            _ => return None,
+        };
+        let weight_id = match node.args.get(1)? {
+            Arg::Node(id) => *id,
+            _ => return None,
+        };
+        let input_node = graph.node(input_id)?;
+        let weight_node = graph.node(weight_id)?;
+
+        // Input in NHWC: [N, IH, IW, IC]
+        let inp = node_nhwc_shape(input_node);
+        if inp.len() != 4 {
+            return None;
+        }
+        let (n, ih, iw) = (inp[0], inp[1], inp[2]);
+
+        // Weight in OHWI after permutation: [OC, KH, KW, IC]
+        // But the meta.val is still in OIHW: [OC, IC, KH, KW]
+        let ws = weight_node.meta.val.shape_slice();
+        if ws.len() != 4 {
+            return None;
+        }
+        // OIHW -> OHWI: oc=ws[0], kh=ws[2], kw=ws[3]
+        let (oc, kh, kw) = (ws[0] as i32, ws[2] as i32, ws[3] as i32);
+
+        let pad_top = *pad.first().unwrap_or(&0);
+        let pad_bottom = *pad.get(1).unwrap_or(&0);
+        let pad_left = *pad.get(2).unwrap_or(&0);
+        let pad_right = *pad.get(3).unwrap_or(&0);
+        let stride_h = *stride.first().unwrap_or(&1);
+        let stride_w = *stride.get(1).unwrap_or(&1);
+        let dil_h = *dilation.first().unwrap_or(&1);
+        let dil_w = *dilation.get(1).unwrap_or(&1);
+
+        let oh = (ih + pad_top + pad_bottom - (kh - 1) * dil_h - 1) / stride_h + 1;
+        let ow = (iw + pad_left + pad_right - (kw - 1) * dil_w - 1) / stride_w + 1;
+
+        Some(vec![n, oh, ow, oc])
+    })();
+
+    let final_shape = computed.unwrap_or_else(|| {
+        // Fallback: use the existing NCHW -> NHWC permutation
+        let shape: Vec<i32> = node
+            .meta
+            .val
+            .shape_slice()
+            .iter()
+            .map(|&d| d as i32)
+            .collect();
+        if shape.len() == 4 {
+            vec![shape[0], shape[2], shape[3], shape[1]]
+        } else {
+            shape
+        }
+    });
+
+    TosaTensor {
+        name: node.name.clone(),
+        shape: final_shape,
+        dtype,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    }
+}
+
+/// Compute the NHWC output shape for a TOSA DEPTHWISE_CONV2D from the input
+/// and weight shapes and the conv attributes.
+///
+/// TOSA DEPTHWISE_CONV2D:
+///   input  shape = [N, IH, IW, IC]         (NHWC)
+///   weight shape = [KH, KW, IC, M]         (HWIM)
+///   output shape = [N, OH, OW, IC * M]
+/// where:
+///   OH = (IH + pad_top + pad_bottom - (KH-1)*dilation_h - 1) / stride_h + 1
+///   OW = (IW + pad_left + pad_right - (KW-1)*dilation_w - 1) / stride_w + 1
+fn compute_depthwise_conv2d_nhwc_output(
+    graph: &Graph,
+    node: &Node,
+    pad: &[i32],
+    stride: &[i32],
+    dilation: &[i32],
+) -> TosaTensor {
+    let dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+
+    // Try to compute from input + weight shapes
+    let computed = (|| -> Option<Vec<i32>> {
+        let input_id = match node.args.first()? {
+            Arg::Node(id) => *id,
+            _ => return None,
+        };
+        let weight_id = match node.args.get(1)? {
+            Arg::Node(id) => *id,
+            _ => return None,
+        };
+        let input_node = graph.node(input_id)?;
+        let weight_node = graph.node(weight_id)?;
+
+        // Input in NHWC: [N, IH, IW, IC]
+        let inp = node_nhwc_shape(input_node);
+        if inp.len() != 4 {
+            return None;
+        }
+        let (n, ih, iw) = (inp[0], inp[1], inp[2]);
+
+        // Weight meta.val is OIHW: [OC, IC/groups, KH, KW]
+        // After permute to HWIM: [KH, KW, IC_per_group, M]
+        // OC = IC_per_group * M, so total output channels = OC
+        let ws = weight_node.meta.val.shape_slice();
+        if ws.len() != 4 {
+            return None;
+        }
+        // OIHW: oc=ws[0], kh=ws[2], kw=ws[3]
+        let (oc, kh, kw) = (ws[0] as i32, ws[2] as i32, ws[3] as i32);
+
+        let pad_top = *pad.first().unwrap_or(&0);
+        let pad_bottom = *pad.get(1).unwrap_or(&0);
+        let pad_left = *pad.get(2).unwrap_or(&0);
+        let pad_right = *pad.get(3).unwrap_or(&0);
+        let stride_h = *stride.first().unwrap_or(&1);
+        let stride_w = *stride.get(1).unwrap_or(&1);
+        let dil_h = *dilation.first().unwrap_or(&1);
+        let dil_w = *dilation.get(1).unwrap_or(&1);
+
+        let oh = (ih + pad_top + pad_bottom - (kh - 1) * dil_h - 1) / stride_h + 1;
+        let ow = (iw + pad_left + pad_right - (kw - 1) * dil_w - 1) / stride_w + 1;
+
+        Some(vec![n, oh, ow, oc])
+    })();
+
+    let final_shape = computed.unwrap_or_else(|| {
+        // Fallback: use the existing NCHW -> NHWC permutation
+        let shape: Vec<i32> = node
+            .meta
+            .val
+            .shape_slice()
+            .iter()
+            .map(|&d| d as i32)
+            .collect();
+        if shape.len() == 4 {
+            vec![shape[0], shape[2], shape[3], shape[1]]
+        } else {
+            shape
+        }
+    });
+
+    TosaTensor {
+        name: node.name.clone(),
+        shape: final_shape,
+        dtype,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    }
+}
+
+/// Compute the NHWC output shape for a TOSA MAX_POOL2D / AVG_POOL2D from the
+/// input shape and the pool attributes.
+///
+/// Pool ops preserve channels:
+///   input  shape = [N, IH, IW, C]  (NHWC)
+///   output shape = [N, OH, OW, C]
+/// where:
+///   OH = (IH + pad_top + pad_bottom - kernel_h) / stride_h + 1
+///   OW = (IW + pad_left + pad_right - kernel_w) / stride_w + 1
+fn compute_pool_nhwc_output(
+    graph: &Graph,
+    node: &Node,
+    kernel: &[i32],
+    stride: &[i32],
+    pad: &[i32],
+) -> TosaTensor {
+    let dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+
+    let computed = (|| -> Option<Vec<i32>> {
+        let input_id = match node.args.first()? {
+            Arg::Node(id) => *id,
+            _ => return None,
+        };
+        let input_node = graph.node(input_id)?;
+
+        // Input in NHWC: [N, IH, IW, C]
+        let inp = node_nhwc_shape(input_node);
+        if inp.len() != 4 {
+            return None;
+        }
+        let (n, ih, iw, c) = (inp[0], inp[1], inp[2], inp[3]);
+
+        let kh = *kernel.first().unwrap_or(&2);
+        let kw = *kernel.get(1).unwrap_or(&2);
+        let pad_top = *pad.first().unwrap_or(&0);
+        let pad_bottom = *pad.get(1).unwrap_or(&0);
+        let pad_left = *pad.get(2).unwrap_or(&0);
+        let pad_right = *pad.get(3).unwrap_or(&0);
+        let stride_h = *stride.first().unwrap_or(&2);
+        let stride_w = *stride.get(1).unwrap_or(&2);
+
+        let oh = (ih + pad_top + pad_bottom - kh) / stride_h + 1;
+        let ow = (iw + pad_left + pad_right - kw) / stride_w + 1;
+
+        Some(vec![n, oh, ow, c])
+    })();
+
+    let final_shape = computed.unwrap_or_else(|| {
+        let shape: Vec<i32> = node
+            .meta
+            .val
+            .shape_slice()
+            .iter()
+            .map(|&d| d as i32)
+            .collect();
+        if shape.len() == 4 {
+            vec![shape[0], shape[2], shape[3], shape[1]]
+        } else {
+            shape
+        }
+    });
+
+    TosaTensor {
+        name: node.name.clone(),
+        shape: final_shape,
+        dtype,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    }
+}
+
 /// Extract an i32 list from a kwarg by name.
 fn kwarg_i32_list(node: &Node, name: &str) -> Vec<i32> {
     for (k, v) in &node.kwargs {
@@ -225,7 +508,6 @@ pub fn emit_aten_conv2d(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_nhwc_output_tensor(node));
 
     // Extract from positional args (ATen convolution layout)
     let stride = arg_i32_list(node, 3);
@@ -335,7 +617,11 @@ pub fn emit_aten_conv2d(
     let stride = if stride.is_empty() { vec![1, 1] } else { stride };
     let dilation = if dilation.is_empty() { vec![1, 1] } else { dilation };
 
+    // Compute NHWC output shape from TOSA formula
     if is_depthwise {
+        result.tensors.push(compute_depthwise_conv2d_nhwc_output(
+            graph, node, &pad, &stride, &dilation,
+        ));
         result.operators.push(TosaOperator {
             op: Op::DepthwiseConv2d,
             attribute: Attribute::DepthwiseConv2d(DepthwiseConv2dAttribute {
@@ -350,6 +636,9 @@ pub fn emit_aten_conv2d(
             location: None,
         });
     } else {
+        result.tensors.push(compute_conv2d_nhwc_output(
+            graph, node, &pad, &stride, &dilation,
+        ));
         result.operators.push(TosaOperator {
             op: Op::Conv2d,
             attribute: Attribute::Conv2d(Conv2dAttribute {
@@ -380,7 +669,6 @@ pub fn emit_aten_max_pool2d(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_nhwc_output_tensor(node));
 
     let kernel = arg_i32_list(node, 1);
     let stride = arg_i32_list(node, 2);
@@ -393,6 +681,13 @@ pub fn emit_aten_max_pool2d(
     } else {
         vec![0, 0, 0, 0]
     };
+
+    // Compute NHWC output shape from pool formula
+    let kernel_for_shape = if kernel.is_empty() { vec![2, 2] } else { kernel.clone() };
+    let stride_for_shape = if stride.is_empty() { vec![2, 2] } else { stride.clone() };
+    result.tensors.push(compute_pool_nhwc_output(
+        graph, node, &kernel_for_shape, &stride_for_shape, &pad,
+    ));
 
     result.operators.push(TosaOperator {
         op: Op::MaxPool2d,
@@ -707,7 +1002,6 @@ pub fn emit_conv2d(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_nhwc_output_tensor(node));
 
     // Extract attribute from kwargs, falling back to positional args.
     // Nodes created by rewrite_conv_to_tosa store pad/stride/dilation as
@@ -725,6 +1019,16 @@ pub fn emit_conv2d(
         if kw.is_empty() { arg_i32_list(node, 5) } else { kw }
     };
     let local_bound = kwarg_bool(node, "local_bound", false);
+
+    // Compute NHWC output shape from TOSA formula using input/weight shapes
+    // and conv attributes, rather than relying on node.meta.val which may be
+    // incorrect NCHW values from the original FX graph.
+    let pad_for_shape = if pad.is_empty() { vec![0, 0, 0, 0] } else { pad.clone() };
+    let stride_for_shape = if stride.is_empty() { vec![1, 1] } else { stride.clone() };
+    let dilation_for_shape = if dilation.is_empty() { vec![1, 1] } else { dilation.clone() };
+    result.tensors.push(compute_conv2d_nhwc_output(
+        graph, node, &pad_for_shape, &stride_for_shape, &dilation_for_shape,
+    ));
 
     // Determine accumulator type — default to Int32 for quantized
     let acc_type = DType::Int32;
@@ -837,7 +1141,6 @@ pub fn emit_depthwise_conv2d(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_nhwc_output_tensor(node));
 
     // Extract attribute from kwargs, falling back to positional args.
     let pad = {
@@ -854,6 +1157,15 @@ pub fn emit_depthwise_conv2d(
     };
     let local_bound = kwarg_bool(node, "local_bound", false);
     let acc_type = DType::Int32;
+
+    // Compute NHWC output shape from TOSA formula using input/weight shapes
+    // and conv attributes.
+    let pad_for_shape = if pad.is_empty() { vec![0, 0, 0, 0] } else { pad.clone() };
+    let stride_for_shape = if stride.is_empty() { vec![1, 1] } else { stride.clone() };
+    let dilation_for_shape = if dilation.is_empty() { vec![1, 1] } else { dilation.clone() };
+    result.tensors.push(compute_depthwise_conv2d_nhwc_output(
+        graph, node, &pad_for_shape, &stride_for_shape, &dilation_for_shape,
+    ));
 
     // If we already have 5 inputs, pass them through; otherwise create zp tensors.
     let conv_inputs = if input_names.len() >= 5 {
@@ -1174,11 +1486,18 @@ pub fn emit_max_pool2d(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_nhwc_output_tensor(node));
 
     let kernel = kwarg_i32_list(node, "kernel");
     let stride = kwarg_i32_list(node, "stride");
     let pad = kwarg_i32_list(node, "pad");
+
+    // Compute NHWC output shape from pool formula
+    let kernel_for_shape = if kernel.is_empty() { vec![2, 2] } else { kernel.clone() };
+    let stride_for_shape = if stride.is_empty() { vec![2, 2] } else { stride.clone() };
+    let pad_for_shape = if pad.is_empty() { vec![0, 0, 0, 0] } else { pad.clone() };
+    result.tensors.push(compute_pool_nhwc_output(
+        graph, node, &kernel_for_shape, &stride_for_shape, &pad_for_shape,
+    ));
 
     result.operators.push(TosaOperator {
         op: Op::MaxPool2d,
@@ -1490,11 +1809,18 @@ pub fn emit_avg_pool2d(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_nhwc_output_tensor(node));
 
     let kernel = kwarg_i32_list(node, "kernel");
     let stride = kwarg_i32_list(node, "stride");
     let pad = kwarg_i32_list(node, "pad");
+
+    // Compute NHWC output shape from pool formula
+    let kernel_for_shape = if kernel.is_empty() { vec![2, 2] } else { kernel.clone() };
+    let stride_for_shape = if stride.is_empty() { vec![2, 2] } else { stride.clone() };
+    let pad_for_shape = if pad.is_empty() { vec![0, 0, 0, 0] } else { pad.clone() };
+    result.tensors.push(compute_pool_nhwc_output(
+        graph, node, &kernel_for_shape, &stride_for_shape, &pad_for_shape,
+    ));
     let acc_type = DType::Int32;
     let input_zp = kwarg_i32(node, "input_zp", 0);
     let output_zp = kwarg_i32(node, "output_zp", 0);
