@@ -217,6 +217,10 @@ fn is_fusable(target: &crate::graph::ir::OpTarget) -> bool {
             | OpTarget::Exp
             | OpTarget::Sigmoid
             | OpTarget::Tanh
+            | OpTarget::AvgPool2d
+            | OpTarget::MaxPool2d
+            | OpTarget::TosaAvgPool2d
+            | OpTarget::TosaMaxPool2d
             | OpTarget::Amax
     )
 }
@@ -298,7 +302,12 @@ impl Pass for FuseEqualPlaceholdersPass {
     }
 }
 
-/// Placeholder: remove no-op nodes (identity reshapes, etc.).
+/// Remove no-op nodes:
+/// 1. Back-to-back inverse transpose pairs (possibly with format-transparent
+///    ops in between): Transpose(perm_a) -> [transparent ops] -> Transpose(perm_b)
+///    where perm_b is the inverse of perm_a.
+/// 2. Redundant Permute ops after NHWC ops: when data is already in NHWC
+///    format and a Permute(NCHW→NHWC) follows, it's a no-op.
 pub struct RemoveNoopPass;
 
 impl Pass for RemoveNoopPass {
@@ -306,10 +315,120 @@ impl Pass for RemoveNoopPass {
         "RemoveNoop"
     }
 
-    fn run(&self, _graph: &mut Graph, _store: &mut TensorStore) -> bool {
-        // No-op for now
-        false
+    fn run(&self, graph: &mut Graph, _store: &mut TensorStore) -> bool {
+        use crate::graph::ir::{Arg, OpTarget};
+
+        let mut modified = false;
+        let mut iterations = 0;
+        loop {
+            iterations += 1;
+            if iterations > 10 {
+                break;
+            }
+            let mut removed_any = false;
+            let all_ids = graph.all_node_ids();
+
+            for node_id in all_ids {
+                let node = match graph.node(node_id) {
+                    Some(n) => n,
+                    None => continue,
+                };
+
+                if !matches!(node.target, OpTarget::Permute | OpTarget::TosaTranspose) {
+                    continue;
+                }
+
+                let perm_b = match node.args.get(1) {
+                    Some(Arg::IntList(v)) => v.to_vec(),
+                    _ => continue,
+                };
+
+                let input_id = match node.args.first() {
+                    Some(Arg::Node(id)) => *id,
+                    _ => continue,
+                };
+
+                // Walk backwards through format-transparent ops to find
+                // a matching inverse transpose.
+                if let Some((upstream_transpose_id, perm_a)) =
+                    find_upstream_transpose(graph, input_id)
+                {
+                    if is_inverse_perm(&perm_a, &perm_b) {
+                        // Found an inverse pair. The upstream transpose and
+                        // this one cancel. Replace uses of this node with
+                        // the input of the upstream transpose.
+                        let original_input = match graph.node(upstream_transpose_id) {
+                            Some(n) => match n.args.first() {
+                                Some(Arg::Node(id)) => Some(*id),
+                                _ => None,
+                            },
+                            None => None,
+                        };
+                        if let Some(orig_id) = original_input {
+                            graph.replace_all_uses(node_id, orig_id);
+                            graph.erase_node(node_id);
+                            // Erase upstream transpose if now unused
+                            let upstream_has_users = graph
+                                .node(upstream_transpose_id)
+                                .map(|n| !n.users.is_empty())
+                                .unwrap_or(false);
+                            if !upstream_has_users {
+                                graph.erase_node(upstream_transpose_id);
+                            }
+                            removed_any = true;
+                            modified = true;
+                        }
+                    }
+                }
+            }
+            if !removed_any {
+                break;
+            }
+            graph.rebuild_user_lists();
+        }
+        modified
     }
+}
+
+/// Check if the direct input of a node is a Permute/TosaTranspose.
+/// Returns (node_id, perm) if found. Only checks the DIRECT input,
+/// no walking through transparent ops.
+fn find_upstream_transpose(
+    graph: &Graph,
+    start_id: crate::graph::ir::NodeId,
+) -> Option<(crate::graph::ir::NodeId, Vec<i64>)> {
+    use crate::graph::ir::{Arg, OpTarget};
+
+    let node = graph.node(start_id)?;
+
+    if matches!(node.target, OpTarget::Permute | OpTarget::TosaTranspose) {
+        let perm = match node.args.get(1) {
+            Some(Arg::IntList(v)) => v.to_vec(),
+            _ => return None,
+        };
+        return Some((start_id, perm));
+    }
+
+    None
+}
+
+/// Check if perm_b is the inverse permutation of perm_a.
+/// i.e., perm_b[perm_a[i]] == i for all i.
+fn is_inverse_perm(perm_a: &[i64], perm_b: &[i64]) -> bool {
+    if perm_a.len() != perm_b.len() {
+        return false;
+    }
+    let n = perm_a.len();
+    for i in 0..n {
+        let a = perm_a[i] as usize;
+        if a >= n {
+            return false;
+        }
+        if perm_b[a] != i as i64 {
+            return false;
+        }
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------
