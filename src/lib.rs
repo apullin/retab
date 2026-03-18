@@ -176,11 +176,36 @@ fn lower_to_tosa_v2(
     Ok(PyBytes::new_bound(py, &tosa_bytes).unbind())
 }
 
+/// Ingest-and-serialize only: convert an already-lowered FX graph to TOSA
+/// flatbuffer without running any IR passes.
+///
+/// Use this after `run_fx_passes()` has already transformed the graph on the
+/// Python side.  Unlike `lower_to_tosa` (which runs the full phase-2 IR
+/// pipeline), this function only ingests the FX graph into Rust IR and
+/// serializes it -- no duplicate pass execution.
+#[pyfunction]
+fn ingest_and_serialize(
+    py: Python<'_>,
+    graph_module: &Bound<'_, PyAny>,
+    state_dict: &Bound<'_, PyDict>,
+    graph_signature: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyBytes>> {
+    // 1. Ingest FX graph into Rust IR (read-only snapshot)
+    let (graph, store) =
+        ingest::fx_bridge::ingest_fx_graph(graph_module, state_dict, graph_signature)?;
+
+    // 2. Serialize directly to TOSA flatbuffer -- no IR passes
+    let tosa_bytes = serialize::serialize_to_tosa(&graph, &store);
+
+    Ok(PyBytes::new_bound(py, &tosa_bytes).unbind())
+}
+
 #[pymodule]
 fn arm_tosa_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ingest_graph, m)?)?;
     m.add_function(wrap_pyfunction!(lower_to_tosa, m)?)?;
     m.add_function(wrap_pyfunction!(lower_to_tosa_v2, m)?)?;
+    m.add_function(wrap_pyfunction!(ingest_and_serialize, m)?)?;
     m.add_function(wrap_pyfunction!(fold_qdq_fx, m)?)?;
     m.add_function(wrap_pyfunction!(insert_rescale_fx, m)?)?;
     m.add_function(wrap_pyfunction!(run_fx_passes, m)?)?;

@@ -160,7 +160,13 @@ def _all_rust_preprocess(
     edge_program: ExportedProgram,
     compile_spec: "TosaCompileSpec",
 ) -> PreprocessResult:
-    """All-Rust: FX-direct passes + Rust TOSA serialization."""
+    """All-Rust: FX-direct passes + Rust TOSA serialization.
+
+    IMPORTANT: After run_fx_passes() transforms the FX graph, we must use
+    ingest_and_serialize() (ingest + serialize only) rather than lower_to_tosa()
+    (which would re-run the full IR pass pipeline on top of the already-
+    transformed graph, causing double rescales, double transposes, etc.).
+    """
     import time
 
     t0 = time.perf_counter()
@@ -172,8 +178,10 @@ def _all_rust_preprocess(
     arm_tosa_engine.run_fx_passes(gm, edge_program)
     t_passes = time.perf_counter() - t0
 
-    # Serialize to TOSA via Rust
-    tosa_bytes = arm_tosa_engine.lower_to_tosa(
+    # Ingest + serialize only -- do NOT re-run IR passes (they already ran
+    # as FX-direct passes above).  lower_to_tosa() would run build_phase2_pipeline()
+    # again, corrupting the graph with duplicate transformations.
+    tosa_bytes = arm_tosa_engine.ingest_and_serialize(
         gm, dict(edge_program.state_dict), edge_program.graph_signature
     )
     t_total = time.perf_counter() - t0
