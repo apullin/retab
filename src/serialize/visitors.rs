@@ -480,6 +480,50 @@ fn arg_bool(node: &Node, idx: usize, default: bool) -> bool {
     }
 }
 
+/// Get the number of output channels from the weight tensor at arg position 1.
+///
+/// For conv weights in OIHW format, OC = shape[0].
+fn get_weight_out_channels(graph: &Graph, node: &Node) -> Option<usize> {
+    let weight_id = match node.args.get(1) {
+        Some(Arg::Node(id)) => *id,
+        _ => return None,
+    };
+    let weight_node = graph.node(weight_id)?;
+    let ws = weight_node.meta.val.shape_slice();
+    if ws.is_empty() {
+        return None;
+    }
+    Some(ws[0] as usize)
+}
+
+/// Encode a zero-point value using the correct number of bytes for the dtype.
+///
+/// INT8 -> 1 byte, INT16 -> 2 bytes, INT32 -> 4 bytes, etc.
+/// This matches the Python serializer's `convertDataToUint8Vec` behavior.
+fn encode_zp_for_dtype(zp_val: i32, dtype: DType) -> Vec<u8> {
+    match dtype {
+        DType::Int8 | DType::Bool => vec![zp_val as u8],
+        DType::Int16 | DType::Fp16 | DType::Bf16 => (zp_val as i16).to_le_bytes().to_vec(),
+        DType::Int32 | DType::Fp32 => zp_val.to_le_bytes().to_vec(),
+        DType::Int48 => {
+            let bytes = (zp_val as i64).to_le_bytes();
+            bytes[..6].to_vec()
+        }
+        DType::Int64 => (zp_val as i64).to_le_bytes().to_vec(),
+        _ => vec![zp_val as u8],
+    }
+}
+
+/// Build per-channel weight_zp data (one byte per output channel).
+///
+/// The Python reference (`add_input_weight_zp_consts`) creates weight_zp with
+/// shape=[1] but data containing one value per output channel. For symmetric
+/// int8 quantization the zero points are all 0, but we still need the correct
+/// number of bytes to match the reference.
+fn make_weight_zp_data(zp_val: i32, num_channels: usize) -> Vec<u8> {
+    vec![zp_val as u8; num_channels]
+}
+
 // ---------------------------------------------------------------------------
 // ATen-to-TOSA fallback emitters
 //
@@ -561,13 +605,15 @@ pub fn emit_aten_conv2d(
         location: None,
     });
 
-    // Create weight_zp const tensor (scalar int8, matching input dtype)
+    // Create weight_zp const tensor (per-channel: one byte per OC)
     let weight_zp_name = format!("{}_weight_zp", node.name);
+    let num_oc = get_weight_out_channels(graph, node).unwrap_or(1);
+    let weight_zp_data = make_weight_zp_data(weight_zp_val, num_oc);
     result.tensors.push(TosaTensor {
         name: weight_zp_name.clone(),
         shape: vec![1],
         dtype: DType::Int8,
-        data: vec![weight_zp_val as u8],
+        data: weight_zp_data,
         variable: false,
         is_unranked: false,
         variable_name: String::new(),
@@ -1072,13 +1118,15 @@ pub fn emit_conv2d(
             location: None,
         });
 
-        // Create weight_zp const tensor (scalar int8, matching input dtype)
+        // Create weight_zp const tensor (per-channel: one byte per OC)
         let weight_zp_name = format!("{}_weight_zp", node.name);
+        let num_oc = get_weight_out_channels(graph, node).unwrap_or(1);
+        let weight_zp_data = make_weight_zp_data(weight_zp_val, num_oc);
         result.tensors.push(TosaTensor {
             name: weight_zp_name.clone(),
             shape: vec![1],
             dtype: DType::Int8,
-            data: vec![weight_zp_val as u8],
+            data: weight_zp_data,
             variable: false,
             is_unranked: false,
             variable_name: String::new(),
@@ -1206,13 +1254,15 @@ pub fn emit_depthwise_conv2d(
             location: None,
         });
 
-        // Create weight_zp const tensor (scalar int8, matching input dtype)
+        // Create weight_zp const tensor (per-channel: one byte per OC)
         let weight_zp_name = format!("{}_weight_zp", node.name);
+        let num_oc = get_weight_out_channels(graph, node).unwrap_or(1);
+        let weight_zp_data = make_weight_zp_data(weight_zp_val, num_oc);
         result.tensors.push(TosaTensor {
             name: weight_zp_name.clone(),
             shape: vec![1],
             dtype: DType::Int8,
-            data: vec![weight_zp_val as u8],
+            data: weight_zp_data,
             variable: false,
             is_unranked: false,
             variable_name: String::new(),
@@ -1398,11 +1448,12 @@ pub fn emit_rescale(
     } else {
         DType::Int8
     };
+    let input_zp_data = encode_zp_for_dtype(input_zp_val, input_zp_tosa_dtype);
     result.tensors.push(TosaTensor {
         name: input_zp_name.clone(),
         shape: vec![1],
         dtype: input_zp_tosa_dtype,
-        data: input_zp_val.to_le_bytes().to_vec(),
+        data: input_zp_data,
         variable: false,
         is_unranked: false,
         variable_name: String::new(),
@@ -1418,11 +1469,12 @@ pub fn emit_rescale(
     // Create output_zp const tensor (scalar, uses rescale output dtype)
     let output_zp_name = format!("{}_output_zp", node.name);
     let output_zp_tosa_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+    let output_zp_data = encode_zp_for_dtype(output_zp_val, output_zp_tosa_dtype);
     result.tensors.push(TosaTensor {
         name: output_zp_name.clone(),
         shape: vec![1],
         dtype: output_zp_tosa_dtype,
-        data: output_zp_val.to_le_bytes().to_vec(),
+        data: output_zp_data,
         variable: false,
         is_unranked: false,
         variable_name: String::new(),
@@ -1463,17 +1515,45 @@ pub fn emit_rescale(
 }
 
 /// Convert a floating-point scale to a fixed-point (multiplier, shift) pair
-/// matching the Python `_compute_multiplier_and_shift` behavior.
+/// matching the Python `_compute_multiplier_and_shift` behavior exactly.
+///
+/// Uses `frexp`-equivalent decomposition: scale = mantissa * 2^exponent
+/// where 0.5 <= mantissa < 1.0. Then:
+///   shifted_mantissa = round(mantissa * 2^31)
+///   right_shift = 31 - exponent
 fn compute_multiplier_and_shift(scale: f64) -> (i32, i8) {
     if scale == 0.0 {
         return (0, 0);
     }
+
+    // frexp: scale = mantissa * 2^exponent, 0.5 <= mantissa < 1.0
     let bits = scale.to_bits();
-    let exponent = ((bits >> 52) & 0x7FF) as i32 - 1022;
+    let biased_exp = ((bits >> 52) & 0x7FF) as i32;
+    let exponent = biased_exp - 1022; // = frexp exponent
     let mantissa = f64::from_bits((bits & 0x800F_FFFF_FFFF_FFFF) | 0x3FE0_0000_0000_0000);
-    let shift = 31 - exponent;
-    let multiplier = (mantissa * (1i64 << 31) as f64).round() as i32;
-    (multiplier, shift as i8)
+
+    let const_2_31: i64 = 1 << 31;
+    let mut shifted_mantissa = (mantissa * const_2_31 as f64).round() as i64;
+    let mut shift = exponent;
+
+    // Handle rounding up to 2^31
+    if shifted_mantissa == const_2_31 {
+        shifted_mantissa /= 2;
+        shift += 1;
+    }
+
+    // TOSA expects right shift = offset - shift where offset = 31
+    let right_shift = 31 - shift;
+
+    // Clamp shift to valid range and adjust multiplier if needed
+    let mut multiplier = shifted_mantissa as i32;
+    let mut final_shift = right_shift;
+    if final_shift > 62 {
+        multiplier >>= (final_shift - 62).min(31);
+        final_shift = 62;
+    }
+
+    (multiplier, final_shift as i8)
 }
 
 /// Emit a MAX_POOL2D operator.

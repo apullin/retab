@@ -63,6 +63,40 @@ fn qp_get_i64(qp: &Bound<'_, PyAny>, attr: &str, dict_key: Option<&str>, default
     default
 }
 
+/// Read a float list from a QuantArgs namedtuple or plain dict.
+///
+/// Returns all scale values for per-channel quant, or a single-element list
+/// for per-tensor quant. Falls back to `[default]` if extraction fails.
+fn qp_get_f64_list(qp: &Bound<'_, PyAny>, attr: &str, default: f64) -> Vec<f64> {
+    if let Ok(val) = qp.getattr(attr) {
+        // Try extracting as a list first (per-channel)
+        if let Ok(list) = val.extract::<Vec<f64>>() {
+            if !list.is_empty() {
+                return list;
+            }
+        }
+        // Try as a single float (per-tensor)
+        if let Ok(v) = val.extract::<f64>() {
+            return vec![v];
+        }
+        // Try indexing (could be a tuple or other sequence)
+        if let Ok(len) = val.len() {
+            let mut result = Vec::with_capacity(len);
+            for i in 0..len {
+                if let Ok(item) = val.get_item(i) {
+                    if let Ok(v) = item.extract::<f64>() {
+                        result.push(v);
+                    }
+                }
+            }
+            if !result.is_empty() {
+                return result;
+            }
+        }
+    }
+    vec![default]
+}
+
 /// Read dtype string from either a QuantArgs namedtuple or a plain dict.
 fn qp_get_dtype_str(qp: &Bound<'_, PyAny>, default: &str) -> String {
     if let Ok(val) = qp.getattr("dtype") {
@@ -581,7 +615,7 @@ impl FxPass for FxInsertRescalePass {
                 continue;
             }
 
-            // Read input_qparams to get input_scale (pos 0) and weight_scale (pos 1)
+            // Read input_qparams to get input_scale (pos 0) and weight_scales (pos 1)
             let meta = node.getattr("meta")?;
             let input_qparams = match meta.call_method1("get", ("input_qparams",)) {
                 Ok(v) if !v.is_none() => v,
@@ -592,12 +626,13 @@ impl FxPass for FxInsertRescalePass {
                 Ok(qp) => qp_get_f64(&qp, "scale", None, 1.0),
                 Err(_) => continue,
             };
-            let weight_scale = match input_qparams.get_item(1_usize) {
-                Ok(qp) => qp_get_f64(&qp, "scale", None, 1.0),
+            // Read per-channel weight scales (list for per-channel, single for per-tensor)
+            let weight_scales: Vec<f64> = match input_qparams.get_item(1_usize) {
+                Ok(qp) => qp_get_f64_list(&qp, "scale", 1.0),
                 Err(_) => continue,
             };
 
-            // Read output_qparams to get output_scale and output_zp
+            // Read output_qparams to get output_scale(s) and output_zp
             let output_qparams = match meta.call_method1("get", ("output_qparams",)) {
                 Ok(v) if !v.is_none() => v,
                 _ => continue,
@@ -621,14 +656,18 @@ impl FxPass for FxInsertRescalePass {
                 continue;
             }
 
-            let accumulator_scale = input_scale * weight_scale;
-            let rescale_scale = accumulator_scale / output_scale;
+            // Compute per-channel rescale scales:
+            //   rescale_scale[i] = (input_scale * weight_scale[i]) / output_scale
+            let rescale_scales: Vec<f64> = weight_scales
+                .iter()
+                .map(|&ws| (input_scale * ws) / output_scale)
+                .collect();
 
             if debug {
                 let name = FxGraphModule::node_name(node)?;
                 eprintln!(
-                    "[InsertRescale] accumulator rescale after '{}': in_s={}, w_s={}, out_s={}, ratio={}",
-                    name, input_scale, weight_scale, output_scale, rescale_scale,
+                    "[InsertRescale] accumulator rescale after '{}': in_s={}, w_s={:?}, out_s={}, num_scales={}",
+                    name, input_scale, &weight_scales[..weight_scales.len().min(4)], output_scale, rescale_scales.len(),
                 );
             }
 
@@ -644,7 +683,7 @@ impl FxPass for FxInsertRescalePass {
                     node,        // ref_node
                     node,        // input_node
                     &torch_int8,
-                    vec![rescale_scale],
+                    rescale_scales,
                     0_i64,       // input_zp (accumulator is zero-centered)
                     output_zp,   // output_zp from output qparams
                     true,        // after
