@@ -21,6 +21,9 @@ use crate::fx_rewrite_conv;
 ///   7. Insert TOSA rescale nodes (DQ->Q pairs + INT32 accumulators)
 ///   8. Rewrite conv2d targets and annotate conv metadata
 ///   9. Annotate TOSA memory format (dim_order, spatial_rank)
+///  10. Final dedup — steps 5-9 may create or expose duplicate nodes
+///      (e.g. ConvertSum creates chained sum nodes whose reshape args
+///      are now redundant, InsertRescale may split shared inputs).
 pub fn build_fx_pipeline() -> Vec<Box<dyn FxPass>> {
     vec![
         Box::new(fx_fuse_quant_activation::FxFuseQuantizedActivationPass),
@@ -32,5 +35,7 @@ pub fn build_fx_pipeline() -> Vec<Box<dyn FxPass>> {
         Box::new(fx_insert_rescale::FxInsertRescalePass),
         Box::new(fx_rewrite_conv::FxRewriteConvPass),
         Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
+        // Final dedup: clean up duplicates introduced or exposed by passes 5-9
+        Box::new(fx_fuse_duplicate_users::FxFuseDuplicateUsersPass),
     ]
 }

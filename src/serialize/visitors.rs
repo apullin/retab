@@ -479,6 +479,127 @@ pub fn emit_aten_mul(
     emit_mul(graph, _node_id, node, _store)
 }
 
+/// Emit one or more TOSA REDUCE_SUM ops from an ATen `sum.dim_IntList` node.
+///
+/// ATen sum args: [input, dims_intlist, keepdim].
+/// After `FxConvertSumPass`, each Sum node typically has a single dim,
+/// but we handle multi-dim by chaining REDUCE_SUM ops (descending axis
+/// order so earlier reductions don't shift later indices).
+pub fn emit_aten_sum(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+
+    let input_names = collect_input_names(graph, node);
+    let input_name = input_names.first().cloned().unwrap_or_default();
+
+    // Extract dims from args[1] (IntList)
+    let mut dims = arg_i32_list(node, 1);
+    if dims.is_empty() {
+        // Fallback: check kwargs "axis" (IR-level nodes use this)
+        let axis = kwarg_i32(node, "axis", -1);
+        if axis >= 0 {
+            dims = vec![axis];
+        }
+    }
+
+    if dims.is_empty() || input_name.is_empty() {
+        // Can't emit without dims or input — fall back to a single REDUCE_SUM axis=0
+        result.tensors.push(make_output_tensor(node));
+        result.operators.push(TosaOperator {
+            op: Op::ReduceSum,
+            attribute: Attribute::ReduceSum(ReduceSumAttribute { axis: 0 }),
+            inputs: vec![input_name],
+            outputs: vec![node.name.clone()],
+            location: None,
+        });
+        return result;
+    }
+
+    // Sort dims descending so higher axes are reduced first
+    dims.sort_unstable();
+    dims.reverse();
+
+    if dims.len() == 1 {
+        // Single axis — straightforward
+        result.tensors.push(make_output_tensor(node));
+        result.operators.push(TosaOperator {
+            op: Op::ReduceSum,
+            attribute: Attribute::ReduceSum(ReduceSumAttribute { axis: dims[0] }),
+            inputs: vec![input_name],
+            outputs: vec![node.name.clone()],
+            location: None,
+        });
+    } else {
+        // Multi-axis — chain REDUCE_SUM ops with intermediate tensors
+        let mut current_input = input_name;
+
+        // Compute intermediate shapes by reducing dims one at a time
+        let base_shape: Vec<i32> = node
+            .meta
+            .val
+            .shape_slice()
+            .iter()
+            .map(|&d| d as i32)
+            .collect();
+        let base_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+
+        // We need the input shape to compute intermediates
+        let input_shape: Vec<i32> = graph
+            .node(match node.args.first() {
+                Some(Arg::Node(id)) => *id,
+                _ => return result,
+            })
+            .map(|n| n.meta.val.shape_slice().iter().map(|&d| d as i32).collect())
+            .unwrap_or_else(|| base_shape.clone());
+
+        let mut current_shape = input_shape;
+
+        for (i, &dim) in dims.iter().enumerate() {
+            let is_last = i == dims.len() - 1;
+            let dim_idx = dim as usize;
+
+            // Output shape: current shape with this dim set to 1
+            let mut out_shape = current_shape.clone();
+            if dim_idx < out_shape.len() {
+                out_shape[dim_idx] = 1;
+            }
+
+            let out_name = if is_last {
+                node.name.clone()
+            } else {
+                format!("{}_reduce_axis{}", node.name, dim)
+            };
+
+            result.tensors.push(TosaTensor {
+                name: out_name.clone(),
+                shape: out_shape.clone(),
+                dtype: base_dtype,
+                data: Vec::new(),
+                variable: false,
+                is_unranked: false,
+                variable_name: String::new(),
+            });
+
+            result.operators.push(TosaOperator {
+                op: Op::ReduceSum,
+                attribute: Attribute::ReduceSum(ReduceSumAttribute { axis: dim }),
+                inputs: vec![current_input],
+                outputs: vec![out_name.clone()],
+                location: None,
+            });
+
+            current_input = out_name;
+            current_shape = out_shape;
+        }
+    }
+
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Per-op visitors
 // ---------------------------------------------------------------------------
@@ -2004,6 +2125,7 @@ pub fn emit_node(
         OpTarget::Pad => Some(emit_pad(graph, node_id, node, store)),
         OpTarget::Slice => Some(emit_slice(graph, node_id, node, store)),
         OpTarget::Select => Some(emit_select(graph, node_id, node, store)),
+        OpTarget::Sum => Some(emit_aten_sum(graph, node_id, node, store)),
         OpTarget::ConvTranspose2d => {
             Some(emit_transpose_conv2d(graph, node_id, node, store))
         }

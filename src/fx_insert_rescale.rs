@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
@@ -338,11 +339,66 @@ impl FxPass for FxInsertRescalePass {
                 continue;
             }
 
+            let node_name = FxGraphModule::node_name(node)?;
+
             // Must have output_qparams (set by fold_qdq from the downstream Q node)
             let meta = node.getattr("meta")?;
+            let has_output_qp;
             let output_qp = match meta.call_method1("get", ("output_qparams",)) {
-                Ok(v) if !v.is_none() => v,
-                _ => continue,
+                Ok(v) if !v.is_none() => {
+                    has_output_qp = true;
+                    v
+                }
+                _ => {
+                    has_output_qp = false;
+                    if debug {
+                        eprintln!(
+                            "[AccumRescale] SKIP {} (target='{}'): no output_qparams",
+                            node_name, target
+                        );
+                    }
+                    // Try to infer output_qparams from the node's users:
+                    // If any user has input_qparams for the position that references
+                    // this node, use those qparams as our output_qparams.
+                    let users = FxGraphModule::node_users(node)?;
+                    let mut inferred = false;
+                    for user in &users {
+                        let user_meta = user.getattr("meta")?;
+                        let user_iqp = match user_meta.call_method1("get", ("input_qparams",)) {
+                            Ok(v) if !v.is_none() => v,
+                            _ => continue,
+                        };
+                        // Find which position of user's args references our node
+                        let user_args = FxGraphModule::node_args(user)?;
+                        for (pos, arg) in user_args.iter().enumerate() {
+                            if FxGraphModule::is_node(arg) && arg.is(node) {
+                                if let Ok(qp) = user_iqp.get_item(pos) {
+                                    if !qp.is_none() {
+                                        // Use this as output_qparams
+                                        let oqp_dict = PyDict::new_bound(py);
+                                        oqp_dict.set_item(0, &qp)?;
+                                        meta.set_item("output_qparams", &oqp_dict)?;
+                                        inferred = true;
+                                        if debug {
+                                            eprintln!(
+                                                "[AccumRescale] INFERRED output_qparams for {} from user '{}' pos {}",
+                                                node_name, FxGraphModule::node_name(user)?, pos
+                                            );
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if inferred {
+                            break;
+                        }
+                    }
+                    if !inferred {
+                        continue;
+                    }
+                    meta.call_method1("get", ("output_qparams",))?
+                }
             };
             let oqp_len: usize = py
                 .import_bound("builtins")?
@@ -350,7 +406,20 @@ impl FxPass for FxInsertRescalePass {
                 .extract()
                 .unwrap_or(0);
             if oqp_len == 0 {
+                if debug {
+                    eprintln!(
+                        "[AccumRescale] SKIP {} (target='{}'): output_qparams empty",
+                        node_name, target
+                    );
+                }
                 continue;
+            }
+
+            if debug && has_output_qp {
+                eprintln!(
+                    "[AccumRescale] ACCEPT {} (target='{}'): has output_qparams (len={})",
+                    node_name, target, oqp_len
+                );
             }
             accum_nodes.push(node.clone());
         }
@@ -362,7 +431,15 @@ impl FxPass for FxInsertRescalePass {
             // Get input_qparams to compute the accumulator scale
             let input_qp = match meta.call_method1("get", ("input_qparams",)) {
                 Ok(v) if !v.is_none() => v,
-                _ => continue,
+                _ => {
+                    if debug {
+                        eprintln!(
+                            "[AccumRescale] SKIP processing {}: no input_qparams",
+                            node_name
+                        );
+                    }
+                    continue;
+                }
             };
 
             // Position 0 = activation input, position 1 = weight
@@ -371,14 +448,30 @@ impl FxPass for FxInsertRescalePass {
                     .call_method1("get", ("scale",))?
                     .extract()
                     .unwrap_or(1.0),
-                Err(_) => continue,
+                Err(_) => {
+                    if debug {
+                        eprintln!(
+                            "[AccumRescale] SKIP processing {}: no input_qparams[0]",
+                            node_name
+                        );
+                    }
+                    continue;
+                }
             };
             let weight_scale: f64 = match input_qp.get_item(1_usize) {
                 Ok(qp1) => qp1
                     .call_method1("get", ("scale",))?
                     .extract()
                     .unwrap_or(1.0),
-                Err(_) => continue,
+                Err(_) => {
+                    if debug {
+                        eprintln!(
+                            "[AccumRescale] SKIP processing {}: no input_qparams[1]",
+                            node_name
+                        );
+                    }
+                    continue;
+                }
             };
 
             // Output qparams from the downstream Q node
