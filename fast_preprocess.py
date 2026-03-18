@@ -156,6 +156,34 @@ def _fast_python_preprocess(
     return PreprocessResult(processed_bytes=bytes(tosa_bytes))
 
 
+def _all_rust_preprocess(
+    edge_program: ExportedProgram,
+    compile_spec: "TosaCompileSpec",
+) -> PreprocessResult:
+    """All-Rust: FX-direct passes + Rust TOSA serialization."""
+    import time
+
+    t0 = time.perf_counter()
+    gm = edge_program.graph_module
+
+    import arm_tosa_engine
+
+    # Run the full FX-direct pipeline (all passes in Rust via PyO3)
+    arm_tosa_engine.run_fx_passes(gm, edge_program)
+    t_passes = time.perf_counter() - t0
+
+    # Serialize to TOSA via Rust
+    tosa_bytes = arm_tosa_engine.lower_to_tosa(
+        gm, dict(edge_program.state_dict), edge_program.graph_signature
+    )
+    t_total = time.perf_counter() - t0
+    logger.info(
+        f"[all_rust] passes={t_passes:.3f}s, serialize={t_total-t_passes:.3f}s, total={t_total:.3f}s"
+    )
+
+    return PreprocessResult(processed_bytes=bytes(tosa_bytes))
+
+
 # -- Public API: patching and subclass alternatives --------------------------
 
 
@@ -199,10 +227,13 @@ def patch_tosa_backend(mode="fast"):
         logger.info(
             "[fast_preprocess] Patched TOSABackend (python_passes_fast mode)"
         )
+    elif mode == "all_rust":
+        TOSABackend._preprocess = staticmethod(_all_rust_preprocess)
+        logger.info("[fast_preprocess] Patched TOSABackend (all_rust mode)")
     else:
         raise ValueError(
             f"Unknown mode: {mode!r}. "
-            "Use 'fast', 'python_passes', or 'python_passes_fast'."
+            "Use 'fast', 'all_rust', 'python_passes', or 'python_passes_fast'."
         )
 
 
