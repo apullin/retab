@@ -85,7 +85,8 @@ impl Pass for FuseConstantArgsPass {
                     OpTarget::Mul | OpTarget::TosaMul => {
                         eval_binary_elementwise(graph, store, &input_ids, meta_val, BinOp::Mul)
                     }
-                    OpTarget::Reshape | OpTarget::TosaReshape | OpTarget::View => {
+                    OpTarget::Reshape | OpTarget::TosaReshape | OpTarget::View
+                    | OpTarget::Flatten | OpTarget::Unsqueeze | OpTarget::Squeeze => {
                         eval_reshape(graph, store, &input_ids, &args_clone, meta_val)
                     }
                     OpTarget::Permute | OpTarget::TosaTranspose => {

@@ -54,6 +54,33 @@ impl Graph {
         }
         ids
     }
+
+    /// Recompute all user lists from scratch by walking args.
+    /// This fixes any stale edges left by passes that don't maintain users correctly.
+    pub fn rebuild_user_lists(&mut self) {
+        // Clear all user lists
+        for (_, node) in self.nodes.iter_mut() {
+            node.users.clear();
+        }
+
+        // Rebuild by walking all args
+        let all_ids: Vec<NodeId> = self.order.clone();
+        for &node_id in &all_ids {
+            let input_ids: SmallVec<[NodeId; 8]> = {
+                match self.nodes.get(node_id) {
+                    Some(node) => Self::collect_input_ids(node),
+                    None => continue,
+                }
+            };
+            for input_id in input_ids {
+                if let Some(input_node) = self.nodes.get_mut(input_id) {
+                    if !input_node.users.contains(&node_id) {
+                        input_node.users.push(node_id);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Default for Graph {

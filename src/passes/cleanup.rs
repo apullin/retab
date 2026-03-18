@@ -19,7 +19,7 @@ fn extract_intlist_arg(node: &Node, idx: usize) -> Vec<i64> {
 ///
 /// Also rewrites remaining ATen ops that have direct TOSA equivalents:
 /// - MaxPool2d -> TosaMaxPool2d
-/// - Reshape / View -> TosaReshape
+/// - Reshape / View / Flatten / Unsqueeze / Squeeze -> TosaReshape
 pub struct CleanupPass;
 
 impl Pass for CleanupPass {
@@ -89,7 +89,8 @@ impl Pass for CleanupPass {
                         modified = true;
                     }
                 }
-                OpTarget::Reshape | OpTarget::View | OpTarget::Flatten => {
+                OpTarget::Reshape | OpTarget::View | OpTarget::Flatten
+                | OpTarget::Unsqueeze | OpTarget::Squeeze => {
                     if let Some(node) = graph.node_mut(*node_id) {
                         node.target = OpTarget::TosaReshape;
                         modified = true;

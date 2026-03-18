@@ -56,7 +56,8 @@ fn compute_output_info(graph: &Graph, node_id: NodeId) -> TensorInfo {
 
         OpTarget::Permute | OpTarget::TosaTranspose => compute_permute(graph, node),
 
-        OpTarget::Reshape | OpTarget::View | OpTarget::TosaReshape => {
+        OpTarget::Reshape | OpTarget::View | OpTarget::TosaReshape
+        | OpTarget::Flatten | OpTarget::Unsqueeze | OpTarget::Squeeze => {
             compute_reshape(graph, node)
         }
 

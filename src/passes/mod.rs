@@ -64,6 +64,9 @@ impl PassRunner {
                 }
             }
         }
+
+        // Rebuild user lists to fix any stale edges from pass mutations
+        graph.rebuild_user_lists();
     }
 }
 
@@ -248,6 +251,21 @@ impl Pass for DiagnosticPass {
     }
 }
 
+/// Pass that rebuilds all user lists from scratch to fix stale edges.
+/// Insert this before passes that are sensitive to user-list integrity.
+pub struct RebuildUserListsPass;
+
+impl Pass for RebuildUserListsPass {
+    fn name(&self) -> &str {
+        "RebuildUserLists"
+    }
+
+    fn run(&self, graph: &mut Graph, _store: &mut TensorStore) -> bool {
+        graph.rebuild_user_lists();
+        false // doesn't modify graph structure
+    }
+}
+
 /// Placeholder: fuse placeholders that reference the same underlying buffer.
 pub struct FuseEqualPlaceholdersPass;
 
@@ -328,6 +346,9 @@ pub fn build_phase2_pipeline() -> PassRunner {
     // 5b. InsertTableOpsPass (replace quantized Rsqrt with TABLE)
     runner.add(Box::new(insert_table_ops::InsertTableOpsPass));
 
+    // 5c. Rebuild user lists before dedup (fixes stale edges from prior passes)
+    runner.add(Box::new(RebuildUserListsPass));
+
     // 6. FuseDuplicateUsersPass
     runner.add(Box::new(FuseDuplicateUsersPass));
 
@@ -338,6 +359,9 @@ pub fn build_phase2_pipeline() -> PassRunner {
     runner.add(Box::new(
         insert_arithmetic_rescales::InsertArithmeticRescalesPass,
     ));
+
+    // 6b. Rebuild user lists before rescale insertion
+    runner.add(Box::new(RebuildUserListsPass));
 
     // 7. InsertRescaleInt32Pass — accumulator rescales + remaining mismatches
     runner.add(Box::new(insert_rescale::InsertRescalePass));
@@ -378,11 +402,17 @@ pub fn build_phase2_pipeline() -> PassRunner {
     // 15c. Diagnostic (gated behind TOSA_ENGINE_DEBUG)
     runner.add(Box::new(DiagnosticPass { label: "before_final_rescale" }));
 
+    // 15d. Rebuild user lists before final rescale insertion
+    runner.add(Box::new(RebuildUserListsPass));
+
     // 16. InsertRescalePass (existing — final rescale insertion)
     runner.add(Box::new(insert_rescale::InsertRescalePass));
 
     // 17. FuseEqualPlaceholdersPass (no-op for now)
     runner.add(Box::new(FuseEqualPlaceholdersPass));
+
+    // 17a. Rebuild user lists before cleanup
+    runner.add(Box::new(RebuildUserListsPass));
 
     // 18. CleanupPass (existing)
     runner.add(Box::new(cleanup::CleanupPass));
