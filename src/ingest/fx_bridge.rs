@@ -96,7 +96,13 @@ pub fn ingest_fx_graph(
         let kwargs = extract_kwargs(&py_kwargs, &name_map)?;
 
         // --- meta ---
-        let meta = extract_meta(&py_node, op_type)?;
+        let mut meta = extract_meta(&py_node, op_type)?;
+
+        // --- qparams from meta["input_qparams"] / meta["output_qparams"] ---
+        // The FX-direct passes store qparams as Python dicts in node.meta.
+        // Extract them into the Rust NodeMeta so downstream passes can use them.
+        let meta_dict = py_node.getattr("meta")?;
+        extract_qparams_from_meta(&meta_dict, &mut meta)?;
 
         // --- create node ---
         let node_id = graph.create_node(op_type, op_target, args, kwargs, meta, name.clone());
@@ -128,14 +134,20 @@ pub fn ingest_fx_graph(
             .collect::<PyResult<Vec<_>>>()?;
 
         // Get dtype
-        let dtype = parse_torch_dtype(&value.getattr("dtype")?.str()?.extract::<String>()?);
+        let mut dtype = parse_torch_dtype(&value.getattr("dtype")?.str()?.extract::<String>()?);
 
         // Get raw bytes: tensor.contiguous().cpu().numpy().tobytes()
         let contiguous = value.call_method0("contiguous")?;
         let cpu = contiguous.call_method0("cpu")?;
         let numpy = cpu.call_method0("numpy")?;
         let bytes_obj = numpy.call_method0("tobytes")?;
-        let data: Vec<u8> = bytes_obj.extract()?;
+        let mut data: Vec<u8> = bytes_obj.extract()?;
+
+        // Cast Int64 -> Int32: TOSA/U55 does not support Int64
+        if dtype == DType::Int64 {
+            data = cast_i64_bytes_to_i32(&data);
+            dtype = DType::Int32;
+        }
 
         store.insert(
             tensor_name,
@@ -174,18 +186,23 @@ pub fn ingest_fx_graph(
                     .iter()
                     .and_then(|it| it.map(|s| s.and_then(|v| v.extract::<i64>())).collect::<PyResult<Vec<_>>>())
                 {
-                    let dtype = tensor
+                    let mut dtype = tensor
                         .getattr("dtype")
                         .and_then(|d| d.str()?.extract::<String>())
                         .map(|s| parse_torch_dtype(&s))
                         .unwrap_or(DType::Float32);
-                    if let Ok(data) = tensor
+                    if let Ok(mut data) = tensor
                         .call_method0("contiguous")
                         .and_then(|c| c.call_method0("cpu"))
                         .and_then(|c| c.call_method0("numpy"))
                         .and_then(|n| n.call_method0("tobytes"))
                         .and_then(|b| b.extract::<Vec<u8>>())
                     {
+                        // Cast Int64 -> Int32: TOSA/U55 does not support Int64
+                        if dtype == DType::Int64 {
+                            data = cast_i64_bytes_to_i32(&data);
+                            dtype = DType::Int32;
+                        }
                         store.insert(
                             placeholder_name.clone(),
                             TensorData { data, shape, dtype },
@@ -195,6 +212,17 @@ pub fn ingest_fx_graph(
             }
         }
     }
+
+    // -----------------------------------------------------------------
+    // 5. Fix up dtypes based on quantization parameters
+    // -----------------------------------------------------------------
+    // The FX-direct passes store qparams in meta but don't update
+    // meta["val"].dtype (the FakeTensor retains its original FP32 dtype).
+    // Now that we have qparams in our Rust NodeMeta, fix up the dtypes:
+    //   - Nodes with input_qparams or output_qparams: use the quantized dtype
+    //   - Accumulator ops (Conv2d, etc.): output is Int32
+    //   - Placeholder nodes with Int64: already handled above during ingestion
+    fixup_quantized_dtypes(&mut graph);
 
     Ok((graph, store))
 }
@@ -415,5 +443,289 @@ fn parse_torch_dtype(dtype_str: &str) -> DType {
         s if s.contains("int64") => DType::Int64,
         s if s.contains("bool") => DType::Bool,
         _ => DType::Float32, // default fallback
+    }
+}
+
+// ---------------------------------------------------------------------------
+// QParam extraction from Python meta dicts
+// ---------------------------------------------------------------------------
+
+/// Extract `input_qparams` and `output_qparams` from a Python node's meta dict
+/// into the Rust `NodeMeta`.
+///
+/// The FX-direct `FxFoldAndAnnotateQParamsPass` stores qparams as Python dicts:
+///   meta["input_qparams"]  = {position: {scale, zero_point, qmin, qmax, dtype}}
+///   meta["output_qparams"] = {position: {scale, zero_point, qmin, qmax, dtype}}
+fn extract_qparams_from_meta(
+    meta_dict: &Bound<'_, PyAny>,
+    node_meta: &mut NodeMeta,
+) -> PyResult<()> {
+    // Extract input_qparams
+    if let Ok(input_qp) = meta_dict.call_method1("get", ("input_qparams",)) {
+        if !input_qp.is_none() {
+            if let Ok(dict) = input_qp.downcast::<PyDict>() {
+                for (pos_key, qp_val) in dict.iter() {
+                    if let Ok(pos) = pos_key.extract::<u32>() {
+                        if let Some(qa) = extract_quantargs_from_py(&qp_val) {
+                            if !node_meta.input_qparams.iter().any(|(p, _)| *p == pos) {
+                                node_meta.input_qparams.push((pos, qa));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Extract output_qparams
+    if let Ok(output_qp) = meta_dict.call_method1("get", ("output_qparams",)) {
+        if !output_qp.is_none() {
+            if let Ok(dict) = output_qp.downcast::<PyDict>() {
+                for (pos_key, qp_val) in dict.iter() {
+                    if let Ok(pos) = pos_key.extract::<u32>() {
+                        if let Some(qa) = extract_quantargs_from_py(&qp_val) {
+                            if !node_meta.output_qparams.iter().any(|(p, _)| *p == pos) {
+                                node_meta.output_qparams.push((pos, qa));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract a `QuantArgs` from a Python dict like `{scale, zero_point, qmin, qmax, dtype}`.
+fn extract_quantargs_from_py(py_dict: &Bound<'_, PyAny>) -> Option<QuantArgs> {
+    let scale = py_dict
+        .call_method1("get", ("scale",))
+        .ok()
+        .and_then(|v| v.extract::<f64>().ok())?;
+    let zero_point = py_dict
+        .call_method1("get", ("zero_point",))
+        .ok()
+        .and_then(|v| v.extract::<i64>().ok())
+        .unwrap_or(0);
+    let qmin = py_dict
+        .call_method1("get", ("qmin",))
+        .ok()
+        .and_then(|v| v.extract::<i64>().ok())
+        .unwrap_or(-128);
+    let qmax = py_dict
+        .call_method1("get", ("qmax",))
+        .ok()
+        .and_then(|v| v.extract::<i64>().ok())
+        .unwrap_or(127);
+    let dtype = py_dict
+        .call_method1("get", ("dtype",))
+        .ok()
+        .and_then(|v| v.extract::<String>().ok())
+        .map(|s| parse_torch_dtype(&s))
+        .unwrap_or(DType::Int8);
+    Some(QuantArgs {
+        scale,
+        zero_point,
+        dtype,
+        qmin,
+        qmax,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Int64 -> Int32 byte casting
+// ---------------------------------------------------------------------------
+
+/// Reinterpret a byte buffer of little-endian i64 values as i32 (truncating).
+fn cast_i64_bytes_to_i32(data: &[u8]) -> Vec<u8> {
+    data.chunks_exact(8)
+        .flat_map(|chunk| {
+            let val = i64::from_le_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3],
+                chunk[4], chunk[5], chunk[6], chunk[7],
+            ]);
+            (val as i32).to_le_bytes()
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Post-ingestion dtype fixup
+// ---------------------------------------------------------------------------
+
+/// Returns true for ops that produce int32 accumulator outputs.
+fn is_accumulator_op(target: &OpTarget) -> bool {
+    matches!(
+        target,
+        OpTarget::Conv2d
+            | OpTarget::DepthwiseConv2d
+            | OpTarget::TosaConv2d
+            | OpTarget::TosaDepthwiseConv2d
+            | OpTarget::TosaTransposeConv2d
+            | OpTarget::TosaFullyConnected
+            | OpTarget::Linear
+            | OpTarget::Addmm
+            | OpTarget::Matmul
+            | OpTarget::Bmm
+            | OpTarget::TosaMatmul
+    )
+}
+
+/// Fix up `meta.val.dtype` on all nodes based on quantization parameters.
+///
+/// After ingestion, FakeTensor dtypes are still FP32 because the Python
+/// pipeline's FX-direct passes don't modify `meta["val"]`. This function:
+///   1. Sets dtype to the quantized type (from qparams) for CallFunction nodes
+///   2. Sets accumulator ops' output dtype to Int32
+///   3. Casts placeholder nodes with Int64 dtype to Int32
+///   4. Infers placeholder dtypes from consumer node qparams
+fn fixup_quantized_dtypes(graph: &mut Graph) {
+    let all_ids = graph.all_node_ids();
+    for node_id in all_ids {
+        let (op, target, has_input_qp, has_output_qp, input_qp_dtype, output_qp_dtype, current_dtype) = {
+            let node = match graph.node(node_id) {
+                Some(n) => n,
+                None => continue,
+            };
+            let iqp_dtype = node
+                .meta
+                .input_qparams
+                .first()
+                .map(|(_, qa)| qa.dtype);
+            let oqp_dtype = node
+                .meta
+                .output_qparams
+                .first()
+                .map(|(_, qa)| qa.dtype);
+            (
+                node.op,
+                node.target.clone(),
+                !node.meta.input_qparams.is_empty(),
+                !node.meta.output_qparams.is_empty(),
+                iqp_dtype,
+                oqp_dtype,
+                node.meta.val.dtype,
+            )
+        };
+
+        // Fix 1: CallFunction nodes with qparams should use the quantized dtype
+        if op == OpType::CallFunction {
+            // Accumulator ops produce Int32 output
+            if is_accumulator_op(&target) && (has_input_qp || has_output_qp) {
+                if let Some(node) = graph.node_mut(node_id) {
+                    node.meta.val.dtype = DType::Int32;
+                }
+                continue;
+            }
+
+            // RESCALE output: use the output qparam dtype, or extract from args.
+            // FX-direct rescale nodes have args: [input, out_dtype, scales, input_zp, output_zp]
+            // Rust-IR rescale nodes have args: [input, multiplier, shift] with kwargs.
+            if target == OpTarget::TosaRescale {
+                let rescale_dtype = if let Some(dt) = output_qp_dtype {
+                    Some(dt)
+                } else {
+                    // Try to extract dtype from args[1] (FX-direct format)
+                    graph.node(node_id).and_then(|n| {
+                        match n.args.get(1) {
+                            Some(Arg::Dtype(dt)) => Some(*dt),
+                            _ => None,
+                        }
+                    })
+                };
+                if let Some(dt) = rescale_dtype {
+                    if let Some(node) = graph.node_mut(node_id) {
+                        node.meta.val.dtype = dt;
+                    }
+                }
+                continue;
+            }
+
+            // General case: prefer output_qparams dtype, then input_qparams dtype
+            let new_dtype = if let Some(dt) = output_qp_dtype {
+                Some(dt)
+            } else if let Some(dt) = input_qp_dtype {
+                Some(dt)
+            } else {
+                None
+            };
+
+            if let Some(dt) = new_dtype {
+                if let Some(node) = graph.node_mut(node_id) {
+                    node.meta.val.dtype = dt;
+                }
+            }
+        }
+
+        // Fix 2: Placeholder nodes with Int64 should be Int32
+        if op == OpType::Placeholder && current_dtype == DType::Int64 {
+            if let Some(node) = graph.node_mut(node_id) {
+                node.meta.val.dtype = DType::Int32;
+            }
+        }
+    }
+
+    // Fix 3: Infer placeholder dtypes from consumer qparams.
+    // Runtime input placeholders (no store data) may still have FP32 dtype
+    // when they should be Int8 (because the Q node was folded). Check if
+    // any consumer has input_qparams for the arg position that references
+    // this placeholder.
+    let all_ids2 = graph.all_node_ids();
+    for node_id in &all_ids2 {
+        let (is_placeholder, current_dt, users) = {
+            let node = match graph.node(*node_id) {
+                Some(n) => n,
+                None => continue,
+            };
+            if node.op != OpType::Placeholder {
+                continue;
+            }
+            // Only fix FP32 placeholders (Int8/Int32 are already correct)
+            if node.meta.val.dtype != DType::Float32 {
+                continue;
+            }
+            (true, node.meta.val.dtype, node.users.to_vec())
+        };
+
+        if !is_placeholder {
+            continue;
+        }
+
+        // Check each user for input_qparams referencing this placeholder
+        for user_id in &users {
+            let inferred_dtype = {
+                let user = match graph.node(*user_id) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                // Find which arg position references this placeholder
+                let pos = user.args.iter().enumerate().find_map(|(i, arg)| {
+                    match arg {
+                        Arg::Node(id) if *id == *node_id => Some(i as u32),
+                        _ => None,
+                    }
+                });
+                let pos = match pos {
+                    Some(p) => p,
+                    None => continue,
+                };
+                // Get the input_qparams for that position
+                user.meta
+                    .input_qparams
+                    .iter()
+                    .find(|(p, _)| *p == pos)
+                    .map(|(_, qa)| qa.dtype)
+            };
+
+            if let Some(dt) = inferred_dtype {
+                if dt != current_dt {
+                    if let Some(node) = graph.node_mut(*node_id) {
+                        node.meta.val.dtype = dt;
+                    }
+                }
+                break; // Only need one inference
+            }
+        }
     }
 }

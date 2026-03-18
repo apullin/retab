@@ -132,6 +132,233 @@ fn kwarg_bool(node: &Node, name: &str, default: bool) -> bool {
     default
 }
 
+/// Extract a single i64 from an arg at the given index.
+fn arg_i64(node: &Node, idx: usize, default: i64) -> i64 {
+    match node.args.get(idx) {
+        Some(Arg::Int(i)) => *i,
+        _ => default,
+    }
+}
+
+/// Extract a bool from an arg at the given index.
+fn arg_bool(node: &Node, idx: usize, default: bool) -> bool {
+    match node.args.get(idx) {
+        Some(Arg::Bool(b)) => *b,
+        _ => default,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ATen-to-TOSA fallback emitters
+//
+// When lower_to_tosa_v2's FX passes don't fully rewrite an op to a TOSA
+// target, these emitters allow the serializer to handle common ATen ops
+// by emitting the equivalent TOSA operator.
+// ---------------------------------------------------------------------------
+
+/// Emit TOSA CONV2D from an ATen convolution node.
+///
+/// ATen convolution args: [input, weight, bias, stride, padding, dilation,
+///                         transposed, output_padding, groups]
+pub fn emit_aten_conv2d(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+
+    // Extract from positional args (ATen convolution layout)
+    let stride = arg_i32_list(node, 3);
+    let padding = arg_i32_list(node, 4);
+    let dilation = arg_i32_list(node, 5);
+
+    // TOSA pad format is [top, bottom, left, right] from ATen [H, W]
+    let pad = if padding.len() >= 2 {
+        vec![padding[0], padding[0], padding[1], padding[1]]
+    } else if padding.len() == 1 {
+        vec![padding[0], padding[0], padding[0], padding[0]]
+    } else {
+        vec![0, 0, 0, 0]
+    };
+
+    let acc_type = DType::Int32;
+
+    result.operators.push(TosaOperator {
+        op: Op::Conv2d,
+        attribute: Attribute::Conv2d(Conv2dAttribute {
+            pad,
+            stride: if stride.is_empty() { vec![1, 1] } else { stride },
+            dilation: if dilation.is_empty() { vec![1, 1] } else { dilation },
+            local_bound: false,
+            acc_type,
+        }),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
+/// Emit TOSA MAX_POOL2D from an ATen max_pool2d node.
+///
+/// ATen max_pool2d args: [input, kernel_size, stride, padding, dilation, ceil_mode]
+pub fn emit_aten_max_pool2d(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+
+    let kernel = arg_i32_list(node, 1);
+    let stride = arg_i32_list(node, 2);
+    let padding = arg_i32_list(node, 3);
+
+    let pad = if padding.len() >= 2 {
+        vec![padding[0], padding[0], padding[1], padding[1]]
+    } else if padding.len() == 1 {
+        vec![padding[0], padding[0], padding[0], padding[0]]
+    } else {
+        vec![0, 0, 0, 0]
+    };
+
+    result.operators.push(TosaOperator {
+        op: Op::MaxPool2d,
+        attribute: Attribute::MaxPool2d(MaxPool2dAttribute {
+            kernel: if kernel.is_empty() { vec![2, 2] } else { kernel },
+            stride: if stride.is_empty() { vec![2, 2] } else { stride },
+            pad,
+            nan_mode: NanPropagationMode::Propagate,
+        }),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
+/// Emit TOSA CLAMP from an ATen clamp node.
+///
+/// ATen clamp args: [input, min_val, max_val]
+pub fn emit_aten_clamp(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+
+    // Extract min/max from positional args
+    let min_val = match node.args.get(1) {
+        Some(Arg::Int(i)) => (*i as i8).to_le_bytes().to_vec(),
+        Some(Arg::Float(f)) => (*f as f32).to_le_bytes().to_vec(),
+        _ => vec![],
+    };
+    let max_val = match node.args.get(2) {
+        Some(Arg::Int(i)) => (*i as i8).to_le_bytes().to_vec(),
+        Some(Arg::Float(f)) => (*f as f32).to_le_bytes().to_vec(),
+        _ => vec![],
+    };
+
+    result.operators.push(TosaOperator {
+        op: Op::Clamp,
+        attribute: Attribute::Clamp(ClampAttribute {
+            min_val,
+            max_val,
+            nan_mode: NanPropagationMode::Propagate,
+        }),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
+/// Emit TOSA RESHAPE from an ATen reshape/view/flatten node.
+///
+/// Uses the node's output shape from metadata.
+pub fn emit_aten_reshape(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    // Delegate to the existing reshape emitter (it uses output shape from meta)
+    emit_reshape(graph, _node_id, node, _store)
+}
+
+/// Emit TOSA TRANSPOSE from an ATen permute node.
+///
+/// ATen permute args: [input, dims]
+pub fn emit_aten_permute(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+
+    let perms = arg_i32_list(node, 1);
+
+    result.operators.push(TosaOperator {
+        op: Op::Transpose,
+        attribute: Attribute::Transpose(TransposeAttribute {
+            perms,
+        }),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
+/// Emit TOSA ADD from an ATen add node.
+pub fn emit_aten_add(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    emit_add(graph, _node_id, node, _store)
+}
+
+/// Emit TOSA SUB from an ATen sub node.
+pub fn emit_aten_sub(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    emit_sub(graph, _node_id, node, _store)
+}
+
+/// Emit TOSA MUL from an ATen mul node.
+pub fn emit_aten_mul(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    emit_mul(graph, _node_id, node, _store)
+}
+
 // ---------------------------------------------------------------------------
 // Per-op visitors
 // ---------------------------------------------------------------------------
@@ -1453,7 +1680,53 @@ pub fn emit_node(
         OpTarget::TosaTransposeConv2d => {
             Some(emit_transpose_conv2d(graph, node_id, node, store))
         }
+
+        // -----------------------------------------------------------------
+        // ATen fallbacks: handle ops that FX-direct passes didn't rewrite
+        // to TOSA form. This allows lower_to_tosa_v2 (hybrid pipeline) to
+        // produce valid TOSA output even when not all passes run.
+        // -----------------------------------------------------------------
+        OpTarget::Conv2d => Some(emit_aten_conv2d(graph, node_id, node, store)),
+        OpTarget::MaxPool2d => Some(emit_aten_max_pool2d(graph, node_id, node, store)),
+        OpTarget::Clamp | OpTarget::Hardtanh | OpTarget::Relu => {
+            Some(emit_aten_clamp(graph, node_id, node, store))
+        }
+        OpTarget::Reshape | OpTarget::Flatten | OpTarget::View => {
+            Some(emit_aten_reshape(graph, node_id, node, store))
+        }
+        OpTarget::Permute => Some(emit_aten_permute(graph, node_id, node, store)),
+        OpTarget::Add => Some(emit_aten_add(graph, node_id, node, store)),
+        OpTarget::Sub => Some(emit_aten_sub(graph, node_id, node, store)),
+        OpTarget::Mul => Some(emit_aten_mul(graph, node_id, node, store)),
+        OpTarget::AvgPool2d => Some(emit_avg_pool2d(graph, node_id, node, store)),
+        OpTarget::Sigmoid => Some(emit_sigmoid(graph, node_id, node, store)),
+        OpTarget::Tanh => Some(emit_tanh(graph, node_id, node, store)),
+        OpTarget::Exp => Some(emit_exp(graph, node_id, node, store)),
+        OpTarget::Log => Some(emit_log(graph, node_id, node, store)),
+        OpTarget::Neg => Some(emit_negate(graph, node_id, node, store)),
+        OpTarget::Abs => Some(emit_abs(graph, node_id, node, store)),
+        OpTarget::Ceil => Some(emit_ceil(graph, node_id, node, store)),
+        OpTarget::Floor => Some(emit_floor(graph, node_id, node, store)),
+        OpTarget::Reciprocal => Some(emit_reciprocal(graph, node_id, node, store)),
+        OpTarget::Rsqrt => Some(emit_rsqrt(graph, node_id, node, store)),
+        OpTarget::Matmul | OpTarget::Bmm => Some(emit_matmul(graph, node_id, node, store)),
+        OpTarget::Cat => Some(emit_concat(graph, node_id, node, store)),
+        OpTarget::Pad => Some(emit_pad(graph, node_id, node, store)),
+        OpTarget::Slice => Some(emit_slice(graph, node_id, node, store)),
+        OpTarget::Select => Some(emit_select(graph, node_id, node, store)),
+        OpTarget::ConvTranspose2d => {
+            Some(emit_transpose_conv2d(graph, node_id, node, store))
+        }
+
         // Ops not yet handled — skip silently for now.
-        _ => None,
+        _ => {
+            if std::env::var("TOSA_ENGINE_DEBUG").is_ok() {
+                eprintln!(
+                    "[emit_node] SKIPPED unhandled target: {:?} (node '{}')",
+                    node.target, node.name
+                );
+            }
+            None
+        }
     }
 }
