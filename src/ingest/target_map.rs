@@ -158,7 +158,7 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
 
     // ATen ops — order matters for ops whose names are substrings of others
     // (e.g. "conv2d" vs "conv_transpose2d")
-    if target_str.contains("aten.conv_transpose2d") || target_str.contains("aten.convolution") && target_str.contains("transpose") {
+    if target_str.contains("aten.conv_transpose2d") {
         return OpTarget::ConvTranspose2d;
     }
     if target_str.contains("aten.conv2d") || target_str.contains("aten.convolution") {

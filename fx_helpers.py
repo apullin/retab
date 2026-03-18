@@ -482,10 +482,10 @@ def decompose_linear_node(graph_module, node: Node) -> None:
     for dim in input_shape[:-1]:
         batches *= dim
 
-    # input has shape (..., Ci) -> reshape to (N, Ci, 1, 1)
-    input_reshaped_shape = [batches, input_shape[-1], 1, 1]
-    # weights have shape (Co, Ci) -> reshape to (Co, Ci, 1, 1)
-    weights_reshaped_shape = [weights_shape[0], weights_shape[1], 1, 1]
+    # input has shape (..., Ci) -> reshape to (N, 1, 1, Ci)  [NHWC for TOSA]
+    input_reshaped_shape = [batches, 1, 1, input_shape[-1]]
+    # weights have shape (Co, Ci) -> reshape to (Co, 1, 1, Ci)  [OHWI for TOSA]
+    weights_reshaped_shape = [weights_shape[0], 1, 1, weights_shape[1]]
 
     view_copy_op = _get_edge_op("aten.view_copy.default")
     conv_op = _get_edge_op("aten.convolution.default")

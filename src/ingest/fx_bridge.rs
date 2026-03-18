@@ -214,7 +214,15 @@ pub fn ingest_fx_graph(
     }
 
     // -----------------------------------------------------------------
-    // 5. Fix up dtypes based on quantization parameters
+    // 5. Fix up output shapes for decomposed-linear nodes
+    // -----------------------------------------------------------------
+    // _create_node in fx_helpers.py copies meta from the original linear
+    // node, so the intermediate view_copy and convolution nodes have the
+    // wrong output shape. Fix them by reading the actual shape from args.
+    fixup_reshape_shapes(&mut graph);
+
+    // -----------------------------------------------------------------
+    // 6. Fix up dtypes based on quantization parameters
     // -----------------------------------------------------------------
     // The FX-direct passes store qparams in meta but don't update
     // meta["val"].dtype (the FakeTensor retains its original FP32 dtype).
@@ -588,6 +596,161 @@ fn cast_i64_bytes_to_i32(data: &[u8]) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// Post-ingestion shape fixup
+// ---------------------------------------------------------------------------
+
+/// Fix output shapes for Reshape/View/Flatten nodes and their downstream conv.
+///
+/// The `decompose_linear_node` in `fx_helpers.py` uses `_create_node` which
+/// copies meta (including `val` FakeTensor) from the original linear node.
+/// This means the intermediate view_copy and convolution nodes have the linear
+/// output's shape (e.g. `[1, 10]`) instead of their actual output shapes:
+///   - view_copy(input, [1, 1568, 1, 1]) should have shape [1, 1568, 1, 1]
+///   - view_copy(weights, [10, 1568, 1, 1]) should have shape [10, 1568, 1, 1]
+///   - conv2d(input_4d, weight_4d, ...) should have 4D output shape
+///   - view_copy(conv_out, [1, 10]) should have shape [1, 10]
+///
+/// For reshape-like ops: read the target shape from args[1] (IntList).
+/// For conv: compute output shape from input shape, weight shape, and params.
+fn fixup_reshape_shapes(graph: &mut Graph) {
+    let all_ids = graph.all_node_ids();
+    for node_id in &all_ids {
+        let (target, arg1_shape, current_shape_len) = {
+            let node = match graph.node(*node_id) {
+                Some(n) => n,
+                None => continue,
+            };
+            if node.op != OpType::CallFunction {
+                continue;
+            }
+            let is_reshape = matches!(
+                node.target,
+                OpTarget::Reshape | OpTarget::View | OpTarget::Flatten
+            );
+            if !is_reshape {
+                continue;
+            }
+            // Extract shape from args[1] (IntList)
+            let shape = match node.args.get(1) {
+                Some(Arg::IntList(list)) => {
+                    let v: Vec<i64> = list.iter().copied().collect();
+                    Some(v)
+                }
+                _ => None,
+            };
+            (node.target.clone(), shape, node.meta.val.shape_len)
+        };
+
+        if let Some(new_shape) = arg1_shape {
+            // Check if current shape matches the intended shape from args
+            let node = graph.node(*node_id).unwrap();
+            let current = node.meta.val.shape_slice();
+            if current != new_shape.as_slice() {
+                let dt = node.meta.val.dtype;
+                if let Some(node_mut) = graph.node_mut(*node_id) {
+                    node_mut.meta.val = TensorInfo::new(&new_shape, dt);
+                }
+            }
+        }
+    }
+
+    // Also fix Conv2d nodes whose output shape doesn't match their inputs.
+    // The decomposed linear creates conv2d with 4D inputs but inherits 2D
+    // output shape from the original linear. Fix by computing output shape:
+    //   output = [batch, out_channels, oH, oW] where oH/oW come from
+    //   (input_H + 2*pad - dilation*(kernel-1) - 1) / stride + 1
+    let all_ids2 = graph.all_node_ids();
+    for node_id in &all_ids2 {
+        let (is_conv, input_id, weight_id, current_shape_len) = {
+            let node = match graph.node(*node_id) {
+                Some(n) => n,
+                None => continue,
+            };
+            if node.op != OpType::CallFunction {
+                continue;
+            }
+            let is_conv = matches!(node.target, OpTarget::Conv2d);
+            if !is_conv {
+                continue;
+            }
+            let input_id = match node.args.get(0) {
+                Some(Arg::Node(id)) => Some(*id),
+                _ => None,
+            };
+            let weight_id = match node.args.get(1) {
+                Some(Arg::Node(id)) => Some(*id),
+                _ => None,
+            };
+            (true, input_id, weight_id, node.meta.val.shape_len)
+        };
+
+        if !is_conv {
+            continue;
+        }
+
+        // Only fix if the current shape is not 4D (indicates it was not properly set)
+        if current_shape_len == 4 {
+            continue;
+        }
+
+        if let (Some(input_id), Some(weight_id)) = (input_id, weight_id) {
+            let (input_shape, weight_shape) = {
+                let input_node = graph.node(input_id);
+                let weight_node = graph.node(weight_id);
+                (
+                    input_node.map(|n| n.meta.val.shape_slice().to_vec()),
+                    weight_node.map(|n| n.meta.val.shape_slice().to_vec()),
+                )
+            };
+
+            if let (Some(ishape), Some(wshape)) = (input_shape, weight_shape) {
+                if ishape.len() == 4 && wshape.len() == 4 {
+                    // Extract conv params from args
+                    let node = graph.node(*node_id).unwrap();
+                    let stride = match node.args.get(3) {
+                        Some(Arg::IntList(l)) => l.iter().copied().collect::<Vec<_>>(),
+                        _ => vec![1, 1],
+                    };
+                    let padding = match node.args.get(4) {
+                        Some(Arg::IntList(l)) => l.iter().copied().collect::<Vec<_>>(),
+                        _ => vec![0, 0],
+                    };
+                    let dilation = match node.args.get(5) {
+                        Some(Arg::IntList(l)) => l.iter().copied().collect::<Vec<_>>(),
+                        _ => vec![1, 1],
+                    };
+
+                    // Input is NHWC: [N, H, W, C]
+                    // Weight is OHWI: [OC, KH, KW, IC]
+                    let batch = ishape[0];
+                    let ih = ishape[1];
+                    let iw = ishape[2];
+                    let out_channels = wshape[0];
+                    let kh = wshape[1];
+                    let kw = wshape[2];
+                    let sh = if stride.len() >= 2 { stride[0] } else { 1 };
+                    let sw = if stride.len() >= 2 { stride[1] } else { 1 };
+                    let ph = if padding.len() >= 2 { padding[0] } else { 0 };
+                    let pw = if padding.len() >= 2 { padding[1] } else { 0 };
+                    let dh = if dilation.len() >= 2 { dilation[0] } else { 1 };
+                    let dw = if dilation.len() >= 2 { dilation[1] } else { 1 };
+
+                    let oh = (ih + 2 * ph - dh * (kh - 1) - 1) / sh + 1;
+                    let ow = (iw + 2 * pw - dw * (kw - 1) - 1) / sw + 1;
+
+                    // Output is NHWC: [N, OH, OW, OC]
+                    let new_shape = [batch, oh, ow, out_channels];
+                    let dt = node.meta.val.dtype;
+                    if let Some(node_mut) = graph.node_mut(*node_id) {
+                        node_mut.meta.val = TensorInfo::new(&new_shape, dt);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Post-ingestion dtype fixup
 // ---------------------------------------------------------------------------
 
@@ -763,6 +926,68 @@ fn fixup_quantized_dtypes(graph: &mut Graph) {
                 }
                 break; // Only need one inference
             }
+        }
+    }
+
+    // Fix 4: Propagate dtype through reshape-like ops.
+    // Reshape, View, Flatten, Squeeze, Unsqueeze do not change dtype —
+    // they should inherit it from their first (input) argument. After
+    // FX-direct passes, these ops may retain the original FP32 dtype
+    // from meta["val"] because the passes don't update FakeTensor dtypes.
+    // Run multiple iterations to handle chains (e.g. view -> view -> conv).
+    for _iter in 0..3 {
+        let all_ids4 = graph.all_node_ids();
+        let mut changed = false;
+        for node_id in &all_ids4 {
+            let (is_reshape, current_dt, input_id) = {
+                let node = match graph.node(*node_id) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                if node.op != OpType::CallFunction {
+                    continue;
+                }
+                let is_reshape = matches!(
+                    node.target,
+                    OpTarget::Reshape
+                        | OpTarget::View
+                        | OpTarget::Flatten
+                        | OpTarget::Squeeze
+                        | OpTarget::Unsqueeze
+                        | OpTarget::TosaReshape
+                );
+                if !is_reshape {
+                    continue;
+                }
+                // Only fix FP32 nodes (quantized dtypes are already correct)
+                if node.meta.val.dtype != DType::Float32 {
+                    continue;
+                }
+                let input_id = match node.args.first() {
+                    Some(Arg::Node(id)) => Some(*id),
+                    _ => None,
+                };
+                (true, node.meta.val.dtype, input_id)
+            };
+
+            if !is_reshape {
+                continue;
+            }
+
+            if let Some(input_id) = input_id {
+                let input_dt = graph.node(input_id).map(|n| n.meta.val.dtype);
+                if let Some(dt) = input_dt {
+                    if dt != current_dt && dt != DType::Float32 {
+                        if let Some(node) = graph.node_mut(*node_id) {
+                            node.meta.val.dtype = dt;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
         }
     }
 }

@@ -257,17 +257,17 @@ pub fn emit_aten_conv2d(
     conv_inputs.push(input_zp_name);
     conv_inputs.push(weight_zp_name);
 
-    // Detect depthwise: match Python reference logic.
-    // Depthwise when in_channels == groups and out_channels % in_channels == 0.
-    // For tiny_cnn first conv: in_channels=1, groups=1 -> depthwise.
-    // First check conv_info from FxRewriteConvPass if available.
+    // Detect depthwise: prefer the conv_info from FxRewriteConvPass if available.
+    // Fallback: use groups == in_channels heuristic, but require groups > 1 to
+    // avoid false positives on 1x1 convs from decomposed linear (whose shapes
+    // may be in NHWC format making s[1] != in_channels).
     let is_depthwise = if let Some(conv_info_entry) = node.kwargs.iter().find(|(k, _)| k == "conv_info_is_depthwise") {
         match &conv_info_entry.1 {
             Arg::Int(v) => *v != 0,
             _ => false,
         }
-    } else {
-        // Fallback: compute from input and weight shapes
+    } else if groups > 1 {
+        // groups > 1 is a reliable indicator — check if groups == in_channels
         let in_channels = if let Some(Arg::Node(input_id)) = node.args.first() {
             graph.node(*input_id)
                 .map(|n| {
@@ -278,14 +278,9 @@ pub fn emit_aten_conv2d(
         } else {
             0
         };
-        let out_channels = if let Some(Arg::Node(weight_id)) = node.args.get(1) {
-            graph.node(*weight_id)
-                .map(|n| n.meta.val.shape_slice()[0])
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        in_channels > 0 && groups == in_channels && out_channels % in_channels == 0
+        groups == in_channels
+    } else {
+        false
     };
 
     let stride = if stride.is_empty() { vec![1, 1] } else { stride };
@@ -665,10 +660,21 @@ pub fn emit_conv2d(
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
 
-    // Extract attribute from kwargs or use defaults
-    let pad = kwarg_i32_list(node, "pad");
-    let stride = kwarg_i32_list(node, "stride");
-    let dilation = kwarg_i32_list(node, "dilation");
+    // Extract attribute from kwargs, falling back to positional args.
+    // Nodes created by rewrite_conv_to_tosa store pad/stride/dilation as
+    // positional args: (input, weight, bias, stride, pad, dilation).
+    let pad = {
+        let kw = kwarg_i32_list(node, "pad");
+        if kw.is_empty() { arg_i32_list(node, 4) } else { kw }
+    };
+    let stride = {
+        let kw = kwarg_i32_list(node, "stride");
+        if kw.is_empty() { arg_i32_list(node, 3) } else { kw }
+    };
+    let dilation = {
+        let kw = kwarg_i32_list(node, "dilation");
+        if kw.is_empty() { arg_i32_list(node, 5) } else { kw }
+    };
     let local_bound = kwarg_bool(node, "local_bound", false);
 
     // Determine accumulator type — default to Int32 for quantized
@@ -771,9 +777,19 @@ pub fn emit_depthwise_conv2d(
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
 
-    let pad = kwarg_i32_list(node, "pad");
-    let stride = kwarg_i32_list(node, "stride");
-    let dilation = kwarg_i32_list(node, "dilation");
+    // Extract attribute from kwargs, falling back to positional args.
+    let pad = {
+        let kw = kwarg_i32_list(node, "pad");
+        if kw.is_empty() { arg_i32_list(node, 4) } else { kw }
+    };
+    let stride = {
+        let kw = kwarg_i32_list(node, "stride");
+        if kw.is_empty() { arg_i32_list(node, 3) } else { kw }
+    };
+    let dilation = {
+        let kw = kwarg_i32_list(node, "dilation");
+        if kw.is_empty() { arg_i32_list(node, 5) } else { kw }
+    };
     let local_bound = kwarg_bool(node, "local_bound", false);
     let acc_type = DType::Int32;
 
