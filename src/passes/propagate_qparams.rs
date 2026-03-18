@@ -151,6 +151,56 @@ impl Pass for PropagateQParamsPass {
                 }
             }
 
+            // Reverse-output: propagate output_qparams from consumer back to
+            // producer. This handles the case where an accumulator op (Conv2d)
+            // sits behind a pass-through op (Reshape) that already has
+            // output_qparams. We walk forward through the user chain to find
+            // the first node with output_qparams and copy it back.
+            let mut reverse_updates: Vec<(NodeId, QuantArgs)> = Vec::new();
+
+            for &node_id in &all_ids {
+                let node = match graph.node(node_id) {
+                    Some(n) => n,
+                    None => continue,
+                };
+
+                if node.op != OpType::CallFunction {
+                    continue;
+                }
+
+                // Only apply to nodes missing output_qparams
+                if !node.meta.output_qparams.is_empty() {
+                    continue;
+                }
+
+                // Must have input_qparams (i.e., is a quantized op)
+                if node.meta.input_qparams.is_empty() {
+                    continue;
+                }
+
+                // Walk forward through single-user pass-through ops to find
+                // a node with output_qparams.
+                let qp = walk_users_for_output_qparams(graph, node_id);
+                if let Some(qp) = qp {
+                    reverse_updates.push((node_id, qp));
+                }
+            }
+
+            for (node_id, qp) in reverse_updates {
+                if let Some(n) = graph.node_mut(node_id) {
+                    if n.meta.output_qparams.is_empty() {
+                        n.meta.output_qparams.push((0, qp));
+                        changed_this_round = true;
+                        if debug {
+                            eprintln!(
+                                "[PropagateQParams] reverse-output: set output_qparams on '{}' ({:?}) (scale={})",
+                                n.name, n.target, qp.scale,
+                            );
+                        }
+                    }
+                }
+            }
+
             if changed_this_round {
                 modified = true;
             } else {
@@ -160,6 +210,52 @@ impl Pass for PropagateQParamsPass {
 
         modified
     }
+}
+
+/// Walk forward from a node through pass-through ops (Reshape, Transpose, etc.)
+/// to find the first node that has output_qparams. Returns those qparams so
+/// they can be propagated back to the original node.
+fn walk_users_for_output_qparams(graph: &Graph, start_id: NodeId) -> Option<QuantArgs> {
+    let mut current = start_id;
+    for _ in 0..20 {
+        let users = match graph.node(current) {
+            Some(n) => n.users.to_vec(),
+            None => return None,
+        };
+        // Only follow single-user chains to avoid ambiguity
+        if users.len() != 1 {
+            return None;
+        }
+        let user_id = users[0];
+        let user = match graph.node(user_id) {
+            Some(n) => n,
+            None => return None,
+        };
+        // If the user has output_qparams, we found what we need
+        if let Some((_, qp)) = user.meta.output_qparams.iter().find(|(p, _)| *p == 0) {
+            return Some(*qp);
+        }
+        // If the user is a pass-through op, keep walking
+        if is_passthrough(&user.target) {
+            current = user_id;
+            continue;
+        }
+        return None;
+    }
+    None
+}
+
+/// Returns true for ops that pass through quantization parameters unchanged
+/// (they don't change the data domain, just reshape/reorder it).
+fn is_passthrough(target: &OpTarget) -> bool {
+    matches!(
+        target,
+        OpTarget::Reshape
+            | OpTarget::View
+            | OpTarget::Permute
+            | OpTarget::TosaReshape
+            | OpTarget::TosaTranspose
+    )
 }
 
 /// Ops that produce accumulator outputs (int32) and should NOT have their

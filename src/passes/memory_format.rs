@@ -21,6 +21,82 @@ fn is_nhwc_op(target: &OpTarget) -> bool {
     )
 }
 
+/// Returns true for ops that are "format-transparent": they don't care about
+/// spatial layout and just pass through whatever format their input uses.
+/// When these sit between two NHWC ops, no transpose is needed.
+fn is_format_transparent(target: &OpTarget) -> bool {
+    matches!(
+        target,
+        OpTarget::TosaRescale
+            | OpTarget::TosaClamp
+            | OpTarget::TosaAdd
+            | OpTarget::TosaSub
+            | OpTarget::TosaMul
+            | OpTarget::TosaNeg
+            | OpTarget::TosaAbs
+            | OpTarget::TosaTable
+    )
+}
+
+/// Walk backwards through format-transparent ops to check if the chain
+/// ultimately originates from an NHWC op or a TosaTranspose.
+fn input_produces_nhwc(graph: &Graph, start_id: NodeId) -> bool {
+    let mut current = start_id;
+    let mut depth = 0;
+    loop {
+        if depth > 20 {
+            return false; // safety limit
+        }
+        let node = match graph.node(current) {
+            Some(n) => n,
+            None => return false,
+        };
+        if node.target == OpTarget::TosaTranspose || is_nhwc_op(&node.target) {
+            return true;
+        }
+        if !is_format_transparent(&node.target) {
+            return false;
+        }
+        // Follow arg 0 backwards
+        match node.args.first() {
+            Some(Arg::Node(id)) => {
+                current = *id;
+                depth += 1;
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// Walk forwards through format-transparent ops to check if ALL paths
+/// eventually reach an NHWC op. If so, no NHWC→NCHW transpose is needed.
+fn all_users_consume_nhwc(graph: &Graph, node_id: NodeId) -> bool {
+    let users = match graph.node(node_id) {
+        Some(n) => n.users.to_vec(),
+        None => return false,
+    };
+    if users.is_empty() {
+        return false;
+    }
+    for &uid in &users {
+        let user = match graph.node(uid) {
+            Some(n) => n,
+            None => return false,
+        };
+        if is_nhwc_op(&user.target) {
+            continue;
+        }
+        if is_format_transparent(&user.target) {
+            // Recursively check if this transparent op's users all consume NHWC
+            if all_users_consume_nhwc(graph, uid) {
+                continue;
+            }
+        }
+        return false;
+    }
+    true
+}
+
 impl Pass for ToTosaMemoryFormatPass {
     fn name(&self) -> &str {
         "ToTosaMemoryFormat"
@@ -49,12 +125,9 @@ impl Pass for ToTosaMemoryFormatPass {
                 None => continue,
             };
 
-            // Check if input already produces NHWC data (either a transpose or
-            // another NHWC op). If so, skip inserting another transpose.
-            let input_already_nhwc = graph
-                .node(input_id)
-                .map(|n| n.target == OpTarget::TosaTranspose || is_nhwc_op(&n.target))
-                .unwrap_or(false);
+            // Check if input already produces NHWC data — walk back through
+            // format-transparent ops to find an NHWC source.
+            let input_already_nhwc = input_produces_nhwc(graph, input_id);
 
             if !input_already_nhwc {
                 // Insert NCHW->NHWC transpose before this node
@@ -113,8 +186,9 @@ impl Pass for ToTosaMemoryFormatPass {
                 }
             }
 
-            // Check users: if any user is NOT an NHWC op, insert a single
-            // shared NHWC->NCHW transpose and rewire all such users to it.
+            // Check users: if any user is NOT an NHWC op and NOT a
+            // format-transparent op that eventually feeds into an NHWC op,
+            // insert a single shared NHWC->NCHW transpose.
             let users: Vec<NodeId> = graph
                 .node(node_id)
                 .map(|n| n.users.to_vec())
@@ -122,15 +196,26 @@ impl Pass for ToTosaMemoryFormatPass {
 
             let output_info = graph.node(node_id).map(|n| n.meta.val).unwrap_or_default();
 
-            // Collect non-NHWC users that need a transpose
+            // Collect users that genuinely need NCHW data
             let non_nhwc_users: Vec<NodeId> = users
                 .iter()
                 .copied()
                 .filter(|&uid| {
-                    graph
-                        .node(uid)
-                        .map(|n| !is_nhwc_op(&n.target))
-                        .unwrap_or(false)
+                    let user = match graph.node(uid) {
+                        Some(n) => n,
+                        None => return false,
+                    };
+                    if is_nhwc_op(&user.target) {
+                        return false;
+                    }
+                    // If this is a format-transparent op whose downstream
+                    // users all eventually consume NHWC, no transpose needed.
+                    if is_format_transparent(&user.target)
+                        && all_users_consume_nhwc(graph, uid)
+                    {
+                        return false;
+                    }
+                    true
                 })
                 .collect();
 

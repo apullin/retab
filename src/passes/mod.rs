@@ -342,8 +342,8 @@ pub fn build_phase2_pipeline() -> PassRunner {
     // 2. ConvertToClampPass (from 2A)
     runner.add(Box::new(convert_clamp::ConvertToClampPass));
 
-    // 3. FuseQuantizedActivationPass
-    runner.add(Box::new(fuse_quantized_activation::FuseQuantizedActivationPass));
+    // 3. FuseQuantizedActivationPass — MOVED to after PropagateQParamsPass (step 5a)
+    //    so that output_qparams are available on predecessor nodes.
 
     // 4. Decomposition passes (from 2A)
     runner.add(Box::new(decompose::layernorm::DecomposeLayerNormPass));
@@ -376,6 +376,12 @@ pub fn build_phase2_pipeline() -> PassRunner {
 
     // 5a-diag. Diagnostic pass to measure qparam coverage (gated behind TOSA_ENGINE_DEBUG)
     runner.add(Box::new(DiagnosticPass { label: "after_propagate" }));
+
+    // 5a2. FuseQuantizedActivationPass — fuse Clamp/Relu into preceding op's
+    //      output_qparams (qmin/qmax), eliminating separate CLAMP ops.
+    //      Must run after FoldAndAnnotateQParams + PropagateQParams so that
+    //      predecessor nodes have output_qparams populated.
+    runner.add(Box::new(fuse_quantized_activation::FuseQuantizedActivationPass));
 
     // 5b. InsertTableOpsPass (replace quantized Rsqrt with TABLE)
     runner.add(Box::new(insert_table_ops::InsertTableOpsPass));
