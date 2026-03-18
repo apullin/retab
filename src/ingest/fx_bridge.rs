@@ -955,6 +955,8 @@ fn fixup_quantized_dtypes(graph: &mut Graph) {
                         | OpTarget::Squeeze
                         | OpTarget::Unsqueeze
                         | OpTarget::TosaReshape
+                        | OpTarget::Permute
+                        | OpTarget::TosaTranspose
                 );
                 if !is_reshape {
                     continue;

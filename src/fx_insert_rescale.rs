@@ -87,10 +87,15 @@ fn qp_get_dtype_str(qp: &Bound<'_, PyAny>, default: &str) -> String {
 /// Phase 1: Replace surviving DQ->Q pairs with TOSA RESCALE (InsertRescalePass)
 /// Phase 2: Insert INT32 rescales around elementwise ops (InsertRescaleInt32Pass)
 ///
-/// Phase 3 (accumulator rescales after conv/linear) is NOT part of the Python
-/// InsertRescale passes -- it is handled separately. We keep it here for
-/// backward compatibility but it should not affect the InsertRescale comparison.
+/// Phase 3: Insert accumulator rescales after tosa.CONV2D / tosa.DEPTHWISE_CONV2D.
+///   After RewriteConvPass, conv nodes produce INT32 accumulators that must be
+///   rescaled to INT8 using: scale = (input_scale * weight_scale) / output_scale.
 pub struct FxInsertRescalePass;
+
+/// Returns true for TOSA accumulator-producing ops that need INT32 -> INT8 rescale.
+fn is_tosa_accumulator_op(target: &str) -> bool {
+    target.contains("CONV2D") || target.contains("DEPTHWISE_CONV2D")
+}
 
 fn is_dq(target: &str) -> bool {
     target.contains("dequantize_per_tensor") || target.contains("dequantize_per_channel")
@@ -555,6 +560,111 @@ impl FxPass for FxInsertRescalePass {
                     }
                 }
             }
+        }
+
+        // ------------------------------------------------------------------
+        // Phase 3: Insert accumulator rescales after TOSA CONV2D / DEPTHWISE_CONV2D
+        // These ops produce INT32 accumulators; rescale to INT8 using
+        // scale = (input_scale * weight_scale) / output_scale.
+        // ------------------------------------------------------------------
+        let all_nodes = gm.nodes()?;
+        let torch_int8 = py.eval_bound("__import__('torch').int8", None, None)?;
+        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+
+        for node in &all_nodes {
+            let op = FxGraphModule::node_op(node)?;
+            if op != "call_function" {
+                continue;
+            }
+            let target = FxGraphModule::node_target_str(node)?;
+            if !is_tosa_accumulator_op(&target) {
+                continue;
+            }
+
+            // Read input_qparams to get input_scale (pos 0) and weight_scale (pos 1)
+            let meta = node.getattr("meta")?;
+            let input_qparams = match meta.call_method1("get", ("input_qparams",)) {
+                Ok(v) if !v.is_none() => v,
+                _ => continue,
+            };
+
+            let input_scale = match input_qparams.get_item(0_usize) {
+                Ok(qp) => qp_get_f64(&qp, "scale", None, 1.0),
+                Err(_) => continue,
+            };
+            let weight_scale = match input_qparams.get_item(1_usize) {
+                Ok(qp) => qp_get_f64(&qp, "scale", None, 1.0),
+                Err(_) => continue,
+            };
+
+            // Read output_qparams to get output_scale and output_zp
+            let output_qparams = match meta.call_method1("get", ("output_qparams",)) {
+                Ok(v) if !v.is_none() => v,
+                _ => continue,
+            };
+            let oqp_len: usize = py
+                .import_bound("builtins")?
+                .call_method1("len", (&output_qparams,))?
+                .extract()
+                .unwrap_or(0);
+            if oqp_len == 0 {
+                continue;
+            }
+            let oqp = match output_qparams.get_item(0_usize) {
+                Ok(qp) => qp,
+                Err(_) => continue,
+            };
+            let output_scale = qp_get_f64(&oqp, "scale", None, 1.0);
+            let output_zp = qp_get_i64(&oqp, "zp", Some("zero_point"), 0);
+
+            if output_scale == 0.0 {
+                continue;
+            }
+
+            let accumulator_scale = input_scale * weight_scale;
+            let rescale_scale = accumulator_scale / output_scale;
+
+            if debug {
+                let name = FxGraphModule::node_name(node)?;
+                eprintln!(
+                    "[InsertRescale] accumulator rescale after '{}': in_s={}, w_s={}, out_s={}, ratio={}",
+                    name, input_scale, weight_scale, output_scale, rescale_scale,
+                );
+            }
+
+            // Capture users before inserting the rescale
+            let users = FxGraphModule::node_users(node)?;
+
+            // Insert RESCALE after the conv node: INT32 -> INT8
+            // input_zp = 0 (accumulator is zero-centered)
+            let rescale_node = helpers.call_method1(
+                "insert_rescale_node",
+                (
+                    gm.gm_ref(),
+                    node,        // ref_node
+                    node,        // input_node
+                    &torch_int8,
+                    vec![rescale_scale],
+                    0_i64,       // input_zp (accumulator is zero-centered)
+                    output_zp,   // output_zp from output qparams
+                    true,        // after
+                ),
+            )?;
+
+            // Copy the conv node's meta onto the rescale node
+            let conv_meta = node.getattr("meta")?;
+            let copy_mod = py.import_bound("copy")?;
+            let meta_copy = copy_mod.call_method1("copy", (&conv_meta,))?;
+            rescale_node.setattr("meta", &meta_copy)?;
+
+            // Rewire all users of the conv to use the rescale instead
+            for user in &users {
+                if !user.is(&rescale_node) {
+                    user.call_method1("replace_input_with", (node, &rescale_node))?;
+                }
+            }
+
+            modified = true;
         }
 
         if modified {

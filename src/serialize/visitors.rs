@@ -876,8 +876,13 @@ pub fn emit_depthwise_conv2d(
 
 /// Emit a RESCALE operator.
 ///
+/// Handles two ingestion formats:
+/// 1. **Graph-IR format** (from InsertRescalePass): args = [input, multiplier_const, shift_const],
+///    kwargs = {input_zp, output_zp}. Multiplier/shift are separate placeholder nodes.
+/// 2. **FX-direct format** (from fx_helpers.insert_rescale_node): args = [input, dtype, scales, input_zp, output_zp].
+///    Scales are FloatList and we compute multiplier/shift inline.
+///
 /// TOSA RESCALE takes 5 inputs: [input, multiplier, shift, input_zp, output_zp].
-/// The multiplier and shift come as Node args; input_zp and output_zp come as kwargs.
 pub fn emit_rescale(
     graph: &Graph,
     _node_id: NodeId,
@@ -889,19 +894,98 @@ pub fn emit_rescale(
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
 
-    let scale32 = kwarg_bool(node, "scale32", true);
-    let per_channel = kwarg_bool(node, "per_channel", false);
+    // Detect format: Graph-IR has >=3 Node args (input, mult, shift);
+    // FX-direct has 1 Node arg (input) + literal scales/zps.
+    let is_fx_direct = input_names.len() < 3;
+
+    let (input_zp_val, output_zp_val, multiplier_name, shift_name, scale32, per_channel);
+
+    if is_fx_direct {
+        // FX-direct format: args = [Node(input), Dtype, FloatList(scales), Int(input_zp), Int(output_zp)]
+        let scales: Vec<f64> = match node.args.get(2) {
+            Some(Arg::FloatList(list)) => list.iter().copied().collect(),
+            Some(Arg::Float(f)) => vec![*f],
+            _ => vec![1.0],
+        };
+        input_zp_val = arg_i64(node, 3, 0) as i32;
+        output_zp_val = arg_i64(node, 4, 0) as i32;
+        per_channel = scales.len() > 1;
+        scale32 = true;
+
+        // Compute multiplier/shift from scales
+        let (multipliers, shifts): (Vec<i32>, Vec<i8>) = scales
+            .iter()
+            .map(|&s| compute_multiplier_and_shift(s))
+            .unzip();
+
+        // Create multiplier const tensor
+        let mult_name = format!("{}_multipliers", node.name);
+        let mult_data: Vec<u8> = multipliers.iter().flat_map(|m| m.to_le_bytes()).collect();
+        result.tensors.push(TosaTensor {
+            name: mult_name.clone(),
+            shape: vec![multipliers.len() as i32],
+            dtype: DType::Int32,
+            data: mult_data,
+            variable: false,
+            is_unranked: false,
+            variable_name: String::new(),
+        });
+        result.operators.push(TosaOperator {
+            op: Op::Const,
+            attribute: Attribute::Const(ConstAttribute),
+            inputs: vec![],
+            outputs: vec![mult_name.clone()],
+            location: None,
+        });
+
+        // Create shift const tensor
+        let shift_name_str = format!("{}_shifts", node.name);
+        let shift_data: Vec<u8> = shifts.iter().map(|&s| s as u8).collect();
+        result.tensors.push(TosaTensor {
+            name: shift_name_str.clone(),
+            shape: vec![shifts.len() as i32],
+            dtype: DType::Int8,
+            data: shift_data,
+            variable: false,
+            is_unranked: false,
+            variable_name: String::new(),
+        });
+        result.operators.push(TosaOperator {
+            op: Op::Const,
+            attribute: Attribute::Const(ConstAttribute),
+            inputs: vec![],
+            outputs: vec![shift_name_str.clone()],
+            location: None,
+        });
+
+        multiplier_name = mult_name;
+        shift_name = shift_name_str;
+    } else {
+        // Graph-IR format: input_names = [input, multiplier, shift]
+        multiplier_name = input_names.get(1).cloned().unwrap_or_default();
+        shift_name = input_names.get(2).cloned().unwrap_or_default();
+        input_zp_val = kwarg_i32(node, "input_zp", 0);
+        output_zp_val = kwarg_i32(node, "output_zp", 0);
+        scale32 = kwarg_bool(node, "scale32", true);
+        per_channel = kwarg_bool(node, "per_channel", false);
+    }
+
     let input_unsigned = kwarg_bool(node, "input_unsigned", false);
     let output_unsigned = kwarg_bool(node, "output_unsigned", false);
-    let input_zp_val = kwarg_i32(node, "input_zp", 0);
-    let output_zp_val = kwarg_i32(node, "output_zp", 0);
 
-    // Create input_zp const tensor (scalar int32)
+    // Create input_zp const tensor (scalar, uses input node's dtype)
     let input_zp_name = format!("{}_input_zp", node.name);
+    let input_zp_tosa_dtype = if let Some(Arg::Node(input_id)) = node.args.first() {
+        graph.node(*input_id)
+            .map(|n| ir_dtype_to_tosa(n.meta.val.dtype))
+            .unwrap_or(DType::Int8)
+    } else {
+        DType::Int8
+    };
     result.tensors.push(TosaTensor {
         name: input_zp_name.clone(),
         shape: vec![1],
-        dtype: DType::Int32,
+        dtype: input_zp_tosa_dtype,
         data: input_zp_val.to_le_bytes().to_vec(),
         variable: false,
         is_unranked: false,
@@ -915,12 +999,13 @@ pub fn emit_rescale(
         location: None,
     });
 
-    // Create output_zp const tensor (scalar int32)
+    // Create output_zp const tensor (scalar, uses rescale output dtype)
     let output_zp_name = format!("{}_output_zp", node.name);
+    let output_zp_tosa_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
     result.tensors.push(TosaTensor {
         name: output_zp_name.clone(),
         shape: vec![1],
-        dtype: DType::Int32,
+        dtype: output_zp_tosa_dtype,
         data: output_zp_val.to_le_bytes().to_vec(),
         variable: false,
         is_unranked: false,
@@ -935,9 +1020,14 @@ pub fn emit_rescale(
     });
 
     // RESCALE inputs: [input, multiplier, shift, input_zp, output_zp]
-    let mut rescale_inputs = input_names;
-    rescale_inputs.push(input_zp_name);
-    rescale_inputs.push(output_zp_name);
+    let input_name = input_names.first().cloned().unwrap_or_default();
+    let rescale_inputs = vec![
+        input_name,
+        multiplier_name,
+        shift_name,
+        input_zp_name,
+        output_zp_name,
+    ];
 
     result.operators.push(TosaOperator {
         op: Op::Rescale,
@@ -954,6 +1044,20 @@ pub fn emit_rescale(
     });
 
     result
+}
+
+/// Convert a floating-point scale to a fixed-point (multiplier, shift) pair
+/// matching the Python `_compute_multiplier_and_shift` behavior.
+fn compute_multiplier_and_shift(scale: f64) -> (i32, i8) {
+    if scale == 0.0 {
+        return (0, 0);
+    }
+    let bits = scale.to_bits();
+    let exponent = ((bits >> 52) & 0x7FF) as i32 - 1022;
+    let mantissa = f64::from_bits((bits & 0x800F_FFFF_FFFF_FFFF) | 0x3FE0_0000_0000_0000);
+    let shift = 31 - exponent;
+    let multiplier = (mantissa * (1i64 << 31) as f64).round() as i32;
+    (multiplier, shift as i8)
 }
 
 /// Emit a MAX_POOL2D operator.

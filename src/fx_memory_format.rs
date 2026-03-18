@@ -47,6 +47,48 @@ fn initial_spatial_rank(tensor_rank: usize) -> usize {
     }
 }
 
+/// Check whether a tensor shape would be laid out differently in channels-first
+/// (NCHW) versus channels-last (NHWC) memory format. Returns false when the
+/// formats are equivalent (e.g. C==1 or all spatial dims are 1).
+fn memory_format_differs(shape: &[i64], rank: usize) -> bool {
+    if rank <= 2 {
+        return false;
+    }
+    let spatial_rank = initial_spatial_rank(rank);
+    if spatial_rank == 0 {
+        return false;
+    }
+    let channel_idx = rank.saturating_sub(spatial_rank + 1);
+    let channel_dim = shape.get(channel_idx).copied().unwrap_or(1);
+    let spatial_dims = &shape[channel_idx + 1..];
+    if spatial_dims.is_empty() {
+        return false;
+    }
+    channel_dim > 1 && spatial_dims.iter().any(|&d| d > 1)
+}
+
+/// Check whether a reshape touches the channel or batch dimensions (4D+/5D+ -> 4D+/5D+).
+/// Returns true when the channel dimension or consolidated batch dimension changes.
+fn is_channel_reshape(input_shape: &[i64], output_shape: &[i64]) -> bool {
+    let valid = [4, 5, 6];
+    if !valid.contains(&input_shape.len()) || !valid.contains(&output_shape.len()) {
+        return false;
+    }
+    let in_sr = initial_spatial_rank(input_shape.len());
+    let out_sr = initial_spatial_rank(output_shape.len());
+
+    let in_ch_idx = input_shape.len().saturating_sub(in_sr + 1);
+    let out_ch_idx = output_shape.len().saturating_sub(out_sr + 1);
+
+    let c_old = input_shape.get(in_ch_idx).copied().unwrap_or(1);
+    let c_new = output_shape.get(out_ch_idx).copied().unwrap_or(1);
+
+    let n_old: i64 = input_shape[..in_ch_idx].iter().product();
+    let n_new: i64 = output_shape[..out_ch_idx].iter().product();
+
+    n_old != n_new || c_old != c_new
+}
+
 /// Check if a node is a non-parameter placeholder (i.e. a user input).
 /// In ExportedProgram, parameter placeholders have names starting with "p_"
 /// (parameters) or "b_" (buffers), while user inputs have names like "x",
@@ -273,7 +315,126 @@ impl FxPass for FxToTosaMemoryFormatPass {
             modified = true;
         }
 
-        // 4b: Before the output node, insert NHWC->NCHW transpose for 4D+ outputs.
+        // 4b: Around view_copy nodes that cross 4D+/<4D boundaries, insert
+        // transposes so the reshape sees the data in the correct memory order.
+        //   - >=4D -> <4D (NHWC territory -> NCHW): insert NHWC->NCHW before the view
+        //   - <4D -> >=4D (NCHW -> NHWC territory): insert NCHW->NHWC after the view
+        let all_nodes = gm.nodes()?;
+        for node in &all_nodes {
+            let op = FxGraphModule::node_op(node)?;
+            if op != "call_function" {
+                continue;
+            }
+            let target = FxGraphModule::node_target_str(node)?;
+            if !target.contains("view_copy") {
+                continue;
+            }
+
+            let args = FxGraphModule::node_args(node)?;
+            let input_node = match args.first() {
+                Some(n) if FxGraphModule::is_node(n) => n,
+                _ => continue,
+            };
+
+            // Get input rank
+            let input_meta = input_node.getattr("meta")?;
+            let input_val = match input_meta.call_method1("get", ("val",)) {
+                Ok(v) if !v.is_none() => v,
+                _ => continue,
+            };
+            let input_shape = match input_val.getattr("shape") {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let input_rank: usize = py
+                .import_bound("builtins")?
+                .call_method1("len", (&input_shape,))?
+                .extract()
+                .unwrap_or(0);
+
+            // Get output rank
+            let node_meta = node.getattr("meta")?;
+            let output_val = match node_meta.call_method1("get", ("val",)) {
+                Ok(v) if !v.is_none() => v,
+                _ => continue,
+            };
+            let output_shape = match output_val.getattr("shape") {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let output_rank: usize = py
+                .import_bound("builtins")?
+                .call_method1("len", (&output_shape,))?
+                .extract()
+                .unwrap_or(0);
+
+            let input_shape_vec: Vec<i64> = input_shape.extract().unwrap_or_default();
+            let output_shape_vec: Vec<i64> = output_shape.extract().unwrap_or_default();
+
+            let nhwc_to_nchw = input_rank >= 4 && output_rank < 4;
+            let nchw_to_nhwc = input_rank < 4 && output_rank >= 4;
+            let channel_reshape = is_channel_reshape(&input_shape_vec, &output_shape_vec);
+
+            // Input transpose: NHWC -> NCHW before the view when crossing from
+            // NHWC territory to NCHW, or when a channel reshape requires NCHW order.
+            if (channel_reshape || nhwc_to_nchw)
+                && memory_format_differs(&input_shape_vec, input_rank)
+            {
+                let input_spatial_rank: usize = input_meta
+                    .call_method1("get", ("tosa_spatial_rank",))?
+                    .extract()
+                    .unwrap_or(2);
+
+                // NHWC -> NCHW: inverse of channels_last
+                let perm = channels_last_inverse_order(input_rank, input_spatial_rank);
+                let perm_py: Vec<i64> = perm.iter().map(|&p| p as i64).collect();
+
+                if debug {
+                    let name = FxGraphModule::node_name(node)?;
+                    eprintln!(
+                        "[MemoryFormat] inserting NHWC->NCHW transpose before view '{}' (input_rank={}, perm={:?})",
+                        name, input_rank, perm_py
+                    );
+                }
+
+                helpers.call_method1(
+                    "insert_transpose_before",
+                    (gm.gm_ref(), node, input_node, perm_py.clone()),
+                )?;
+                modified = true;
+            }
+
+            // Output transpose: NCHW -> NHWC after the view when crossing into
+            // NHWC territory, or when a channel reshape needs to return to NHWC.
+            if (channel_reshape || nchw_to_nhwc)
+                && memory_format_differs(&output_shape_vec, output_rank)
+            {
+                let output_spatial_rank: usize = node_meta
+                    .call_method1("get", ("tosa_spatial_rank",))?
+                    .extract()
+                    .unwrap_or(2);
+
+                // NCHW -> NHWC: channels_last_order
+                let perm = channels_last_order(output_rank, output_spatial_rank);
+                let perm_py: Vec<i64> = perm.iter().map(|&p| p as i64).collect();
+
+                if debug {
+                    let name = FxGraphModule::node_name(node)?;
+                    eprintln!(
+                        "[MemoryFormat] inserting NCHW->NHWC transpose after view '{}' (output_rank={}, perm={:?})",
+                        name, output_rank, perm_py
+                    );
+                }
+
+                helpers.call_method1(
+                    "insert_transpose_after",
+                    (gm.gm_ref(), node, perm_py.clone()),
+                )?;
+                modified = true;
+            }
+        }
+
+        // 4c: Before the output node, insert NHWC->NCHW transpose for 4D+ outputs.
         // The output node's args are the tensors being returned; they're in NHWC
         // format internally but the caller expects NCHW.
         //
