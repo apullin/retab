@@ -70,10 +70,18 @@ fn lower_to_tosa(
 ///
 /// This mutates the graph in-place (removes Q/DQ nodes, annotates qparams
 /// in node.meta) and returns True if any modifications were made.
+///
+/// The optional `exported_program` is needed to resolve parameter tensor
+/// nodes (per-channel scales/zero-points stored as graph parameters).
 #[pyfunction]
-fn fold_qdq_fx(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
+#[pyo3(signature = (graph_module, exported_program=None))]
+fn fold_qdq_fx(
+    graph_module: &Bound<'_, PyAny>,
+    exported_program: Option<&Bound<'_, PyAny>>,
+) -> PyResult<bool> {
     let gm = fx_graph::FxGraphModule::new(graph_module);
-    let pass = fx_fold_qdq::FxFoldAndAnnotateQParamsPass;
+    let ep = exported_program.map(|ep| ep.clone().unbind());
+    let pass = fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(ep);
     fx_pass::FxPass::run(&pass, &gm)
 }
 

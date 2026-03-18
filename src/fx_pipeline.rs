@@ -28,11 +28,11 @@ use crate::fx_rewrite_conv;
 /// which read those QuantArgs. This avoids the Python fold pass (which
 /// requires ARM annotation metadata from edge lowering) while still
 /// producing correct rescale ops.
-pub fn build_fx_pipeline(_exported_program: Option<pyo3::PyObject>) -> Vec<Box<dyn FxPass>> {
+pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dyn FxPass>> {
     vec![
         Box::new(fx_fuse_quant_activation::FxFuseQuantizedActivationPass),
         // Rust fold: removes Q/DQ nodes, stores QuantArgs namedtuples in node.meta
-        Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass),
+        Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(exported_program)),
         // Python rescale-only: reads QuantArgs from meta, inserts TOSA RESCALE ops
         Box::new(fx_python_bridge::FxPythonRescaleOnlyPass),
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
