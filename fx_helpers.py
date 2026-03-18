@@ -344,15 +344,10 @@ def insert_table_op(
 # ---------------------------------------------------------------------------
 
 def get_tosa_reduce_sum_op():
-    """Return the tosa.REDUCE_SUM op target."""
-    try:
-        from executorch.exir.dialects._ops import ops as exir_ops
-        return exir_ops.backend.tosa.REDUCE_SUM.default
-    except Exception:
-        try:
-            return torch.ops.tosa.reduce_sum.default
-        except Exception:
-            return "tosa::reduce_sum"
+    """Return an op target for single-axis reduce_sum.
+    Uses aten.sum since TOSA ops aren't registered in PyTorch's op registry.
+    The serializer handles the ATen→TOSA REDUCE_SUM mapping."""
+    return torch.ops.aten.sum.dim_IntList
 
 
 def convert_sum_to_reduce_sum(
@@ -387,7 +382,7 @@ def convert_sum_to_reduce_sum(
     for dim in sorted_dims:
         with graph.inserting_before(node):
             reduce_node = graph.call_function(
-                target, args=(current_input, dim, keepdim)
+                target, args=(current_input, [dim], keepdim)
             )
             reduce_node.name = f"{node.name}_reduce_dim{dim}"
             reduce_node.meta = copy(node.meta)
