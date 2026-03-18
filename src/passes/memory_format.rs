@@ -9,7 +9,9 @@ use smallvec::{smallvec, SmallVec};
 /// memory formats around TOSA conv and pool operations.
 pub struct ToTosaMemoryFormatPass;
 
-/// Targets that operate in NHWC format in TOSA.
+/// Targets that operate in NHWC format in TOSA and whose shapes have
+/// already been converted to NHWC.  Only these ops are iterated over by
+/// the main pass loop (they get input/output transposes inserted).
 fn is_nhwc_op(target: &OpTarget) -> bool {
     matches!(
         target,
@@ -20,6 +22,7 @@ fn is_nhwc_op(target: &OpTarget) -> bool {
             | OpTarget::TosaMaxPool2d
     )
 }
+
 
 /// Returns true for ops that are "format-transparent": they don't care about
 /// spatial layout and just pass through whatever format their input uses.
@@ -125,6 +128,20 @@ impl Pass for ToTosaMemoryFormatPass {
                 None => continue,
             };
 
+            // Skip memory format conversion when spatial dimensions are 1x1.
+            // For 1x1 convolutions (e.g., Linear decomposed as Conv2d),
+            // NCHW and NHWC are equivalent and no transpose is needed.
+            {
+                let input_shape = graph.node(input_id).map(|n| n.meta.val).unwrap_or_default();
+                if input_shape.shape_len == 4 {
+                    let s = input_shape.shape_slice();
+                    // s is NCHW: [N, C, H, W]
+                    if s[2] == 1 && s[3] == 1 {
+                        continue;
+                    }
+                }
+            }
+
             // Check if input already produces NHWC data — walk back through
             // format-transparent ops to find an NHWC source.
             let input_already_nhwc = input_produces_nhwc(graph, input_id);
@@ -220,8 +237,10 @@ impl Pass for ToTosaMemoryFormatPass {
                 .collect();
 
             if !non_nhwc_users.is_empty() && output_info.shape_len == 4 {
-                let nhwc_shape = output_info.shape_slice();
-                let nchw_shape = [nhwc_shape[0], nhwc_shape[3], nhwc_shape[1], nhwc_shape[2]];
+                // The node's stored shape is in NCHW format (from
+                // compute_conv2d / compute_pool2d). The NHWC→NCHW
+                // transpose output should be the original NCHW shape.
+                let nchw_shape = output_info.shape_slice();
 
                 let perm_name = format!(
                     "{}_nhwc_to_nchw",

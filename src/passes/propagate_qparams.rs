@@ -178,6 +178,14 @@ impl Pass for PropagateQParamsPass {
                     continue;
                 }
 
+                // Skip accumulator-like ops — their output_qparams were
+                // intentionally cleared by InsertRescalePass after inserting
+                // an accumulator rescale.  Re-populating them here would cause
+                // the second InsertRescalePass run to insert duplicates.
+                if is_accumulator_like(&node.target) {
+                    continue;
+                }
+
                 // Walk forward through single-user pass-through ops to find
                 // a node with output_qparams.
                 let qp = walk_users_for_output_qparams(graph, node_id);

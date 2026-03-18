@@ -14,6 +14,79 @@ fn extract_intlist_arg(node: &Node, idx: usize) -> Vec<i64> {
     }
 }
 
+/// Rewrite ATen pool ops (MaxPool2d, AvgPool2d) to TOSA equivalents.
+///
+/// Must run before `ToTosaMemoryFormatPass` so the memory format pass
+/// can correctly identify all NHWC ops.
+pub struct RewritePoolOpsPass;
+
+impl Pass for RewritePoolOpsPass {
+    fn name(&self) -> &str {
+        "RewritePoolOps"
+    }
+
+    fn run(&self, graph: &mut Graph, _store: &mut TensorStore) -> bool {
+        let mut modified = false;
+        let all_ids = graph.all_node_ids();
+        for node_id in &all_ids {
+            let target = match graph.node(*node_id) {
+                Some(n) => n.target.clone(),
+                None => continue,
+            };
+            match target {
+                OpTarget::MaxPool2d => {
+                    let node = graph.node(*node_id).unwrap();
+                    let kernel = extract_intlist_arg(node, 1);
+                    let stride = extract_intlist_arg(node, 2);
+                    let padding = extract_intlist_arg(node, 3);
+                    let tosa_pad = if padding.len() >= 2 {
+                        vec![padding[0], padding[0], padding[1], padding[1]]
+                    } else if padding.len() == 1 {
+                        vec![padding[0], padding[0], padding[0], padding[0]]
+                    } else {
+                        vec![0, 0, 0, 0]
+                    };
+                    if let Some(n) = graph.node_mut(*node_id) {
+                        n.target = OpTarget::TosaMaxPool2d;
+                        n.args.truncate(1);
+                        n.kwargs = vec![
+                            ("kernel".into(), Arg::IntList(SmallVec::from_vec(kernel))),
+                            ("stride".into(), Arg::IntList(SmallVec::from_vec(stride))),
+                            ("pad".into(), Arg::IntList(SmallVec::from_vec(tosa_pad))),
+                        ];
+                        modified = true;
+                    }
+                }
+                OpTarget::AvgPool2d => {
+                    let node = graph.node(*node_id).unwrap();
+                    let kernel = extract_intlist_arg(node, 1);
+                    let stride = extract_intlist_arg(node, 2);
+                    let padding = extract_intlist_arg(node, 3);
+                    let tosa_pad = if padding.len() >= 2 {
+                        vec![padding[0], padding[0], padding[1], padding[1]]
+                    } else if padding.len() == 1 {
+                        vec![padding[0], padding[0], padding[0], padding[0]]
+                    } else {
+                        vec![0, 0, 0, 0]
+                    };
+                    if let Some(n) = graph.node_mut(*node_id) {
+                        n.target = OpTarget::TosaAvgPool2d;
+                        n.args.truncate(1);
+                        n.kwargs = vec![
+                            ("kernel".into(), Arg::IntList(SmallVec::from_vec(kernel))),
+                            ("stride".into(), Arg::IntList(SmallVec::from_vec(stride))),
+                            ("pad".into(), Arg::IntList(SmallVec::from_vec(tosa_pad))),
+                        ];
+                        modified = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        modified
+    }
+}
+
 /// Remove dead (unused) nodes from the graph. A node is dead if it has no
 /// users and is not the output node.
 ///

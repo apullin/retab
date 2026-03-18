@@ -1013,18 +1013,40 @@ fn decompose_linear(graph: &mut Graph, lin_id: NodeId) {
         format!("linear_decomp_{suffix}_{counter}")
     };
 
-    // Reshape input to (N, Ci, 1, 1)
-    let x_shape: smallvec::SmallVec<[i64; 6]> = smallvec![batch, ci, 1, 1];
-    let x_reshaped = graph.insert_before(
-        lin_id,
-        OpType::CallFunction,
-        OpTarget::Reshape,
-        smallvec![Arg::Node(x_id), Arg::IntList(x_shape)],
-        vec![],
-        placeholder_meta(),
-        next_name("reshape_input"),
-    );
-    crate::shape::propagate_shape(graph, x_reshaped);
+    // Reshape input to (N, Ci, 1, 1).
+    // Optimization: if the input is already a Reshape producing a 2D tensor
+    // (e.g., from nn.Flatten), modify that reshape's target shape in-place
+    // to produce [N, Ci, 1, 1] directly, avoiding an extra reshape op.
+    let x_shape_4d: smallvec::SmallVec<[i64; 6]> = smallvec![batch, ci, 1, 1];
+    let input_is_reshape_2d = graph.node(x_id).map(|n| {
+        (n.target == OpTarget::Reshape || n.target == OpTarget::View
+            || n.target == OpTarget::TosaReshape)
+            && n.meta.val.shape_len == 2
+    }).unwrap_or(false);
+
+    let x_reshaped = if input_is_reshape_2d {
+        // Modify existing reshape to output [N, Ci, 1, 1] instead of [N, Ci]
+        if let Some(node) = graph.node_mut(x_id) {
+            // Update the shape argument (arg 1) to the 4D shape
+            if node.args.len() >= 2 {
+                node.args[1] = Arg::IntList(x_shape_4d);
+            }
+        }
+        crate::shape::propagate_shape(graph, x_id);
+        x_id
+    } else {
+        let x_reshaped = graph.insert_before(
+            lin_id,
+            OpType::CallFunction,
+            OpTarget::Reshape,
+            smallvec![Arg::Node(x_id), Arg::IntList(x_shape_4d)],
+            vec![],
+            placeholder_meta(),
+            next_name("reshape_input"),
+        );
+        crate::shape::propagate_shape(graph, x_reshaped);
+        x_reshaped
+    };
 
     // Reshape weight to (Co, Ci, 1, 1)
     let w_shape_4d: smallvec::SmallVec<[i64; 6]> = smallvec![co, ci, 1, 1];

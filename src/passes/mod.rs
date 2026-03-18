@@ -429,6 +429,13 @@ pub fn build_phase2_pipeline() -> PassRunner {
     runner.add(Box::new(rewrite_pad::RewritePadPass));
     runner.add(Box::new(rewrite_slice::RewriteSlicePass));
 
+    // 13c. Rewrite pool ops early so ToTosaMemoryFormatPass can identify
+    //      all NHWC ops (MaxPool2d -> TosaMaxPool2d, AvgPool2d -> TosaAvgPool2d).
+    runner.add(Box::new(cleanup::RewritePoolOpsPass));
+
+    // 13d. Rebuild user lists before memory format pass
+    runner.add(Box::new(RebuildUserListsPass));
+
     // 14. ToTosaMemoryFormatPass (existing)
     runner.add(Box::new(memory_format::ToTosaMemoryFormatPass));
 
