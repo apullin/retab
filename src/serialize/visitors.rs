@@ -4,7 +4,7 @@
 // returns the TOSA operator(s) + tensor(s) that should be added to the basic
 // block being built.
 
-use crate::graph::ir::{Arg, Node, NodeId};
+use crate::graph::ir::{Arg, Node, NodeId, OpTarget};
 use crate::graph::Graph;
 use crate::store::TensorStore;
 
@@ -80,6 +80,55 @@ fn make_output_tensor(node: &Node) -> TosaTensor {
     TosaTensor {
         name: node.name.clone(),
         shape,
+        dtype,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    }
+}
+
+/// Build an output tensor with NHWC shape for TOSA conv/pool ops.
+///
+/// If the node's shape is 4D and appears to be in NCHW order (based on
+/// `tosa_dim_order` metadata), permute it to NHWC [N, H, W, C].
+/// Otherwise return the shape as-is.
+fn make_nhwc_output_tensor(node: &Node) -> TosaTensor {
+    let shape: Vec<i32> = node
+        .meta
+        .val
+        .shape_slice()
+        .iter()
+        .map(|&d| d as i32)
+        .collect();
+    let dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+
+    // If this is a 4D tensor and the dim_order indicates NHWC (or is absent,
+    // meaning it came from ingested FX where NCHW is the default), permute
+    // from NCHW [N,C,H,W] to NHWC [N,H,W,C].
+    let final_shape = if shape.len() == 4 {
+        // Check if already in NHWC via tosa_dim_order = [0,2,3,1]
+        let is_already_nhwc = node
+            .meta
+            .tosa_dim_order
+            .as_ref()
+            .map(|order| order.as_slice() == [0, 2, 3, 1])
+            .unwrap_or(false);
+
+        if is_already_nhwc {
+            // Already NHWC — use as-is
+            shape
+        } else {
+            // Assume NCHW — permute to NHWC: [N,C,H,W] -> [N,H,W,C]
+            vec![shape[0], shape[2], shape[3], shape[1]]
+        }
+    } else {
+        shape
+    };
+
+    TosaTensor {
+        name: node.name.clone(),
+        shape: final_shape,
         dtype,
         data: Vec::new(),
         variable: false,
@@ -176,7 +225,7 @@ pub fn emit_aten_conv2d(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_output_tensor(node));
+    result.tensors.push(make_nhwc_output_tensor(node));
 
     // Extract from positional args (ATen convolution layout)
     let stride = arg_i32_list(node, 3);
@@ -211,13 +260,13 @@ pub fn emit_aten_conv2d(
         .map(|(_, qp)| qp.zero_point as i32)
         .unwrap_or(0);
 
-    // Create input_zp const tensor (scalar int8)
+    // Create input_zp const tensor (scalar int8, matching input dtype)
     let input_zp_name = format!("{}_input_zp", node.name);
     result.tensors.push(TosaTensor {
         name: input_zp_name.clone(),
         shape: vec![1],
         dtype: DType::Int8,
-        data: vec![input_zp_val as i8 as u8],
+        data: vec![input_zp_val as u8],
         variable: false,
         is_unranked: false,
         variable_name: String::new(),
@@ -230,13 +279,13 @@ pub fn emit_aten_conv2d(
         location: None,
     });
 
-    // Create weight_zp const tensor (scalar int8)
+    // Create weight_zp const tensor (scalar int8, matching input dtype)
     let weight_zp_name = format!("{}_weight_zp", node.name);
     result.tensors.push(TosaTensor {
         name: weight_zp_name.clone(),
         shape: vec![1],
         dtype: DType::Int8,
-        data: vec![weight_zp_val as i8 as u8],
+        data: vec![weight_zp_val as u8],
         variable: false,
         is_unranked: false,
         variable_name: String::new(),
@@ -331,7 +380,7 @@ pub fn emit_aten_max_pool2d(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_output_tensor(node));
+    result.tensors.push(make_nhwc_output_tensor(node));
 
     let kernel = arg_i32_list(node, 1);
     let stride = arg_i32_list(node, 2);
@@ -658,7 +707,7 @@ pub fn emit_conv2d(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_output_tensor(node));
+    result.tensors.push(make_nhwc_output_tensor(node));
 
     // Extract attribute from kwargs, falling back to positional args.
     // Nodes created by rewrite_conv_to_tosa store pad/stride/dilation as
@@ -684,16 +733,29 @@ pub fn emit_conv2d(
     let conv_inputs = if input_names.len() >= 5 {
         input_names
     } else {
-        let input_zp_val = kwarg_i32(node, "input_zp", 0);
-        let weight_zp_val = kwarg_i32(node, "weight_zp", 0);
+        // Get zero-points from qparams metadata or conv_info kwargs
+        let input_zp_val: i32 = node
+            .meta
+            .input_qparams
+            .iter()
+            .find(|(pos, _)| *pos == 0)
+            .map(|(_, qp)| qp.zero_point as i32)
+            .unwrap_or_else(|| kwarg_i32(node, "input_zp", 0));
+        let weight_zp_val: i32 = node
+            .meta
+            .input_qparams
+            .iter()
+            .find(|(pos, _)| *pos == 1)
+            .map(|(_, qp)| qp.zero_point as i32)
+            .unwrap_or_else(|| kwarg_i32(node, "weight_zp", 0));
 
-        // Create input_zp const tensor (scalar int8)
+        // Create input_zp const tensor (scalar int8, matching input dtype)
         let input_zp_name = format!("{}_input_zp", node.name);
         result.tensors.push(TosaTensor {
             name: input_zp_name.clone(),
             shape: vec![1],
             dtype: DType::Int8,
-            data: vec![input_zp_val as i8 as u8],
+            data: vec![input_zp_val as u8],
             variable: false,
             is_unranked: false,
             variable_name: String::new(),
@@ -706,13 +768,13 @@ pub fn emit_conv2d(
             location: None,
         });
 
-        // Create weight_zp const tensor (scalar int8)
+        // Create weight_zp const tensor (scalar int8, matching input dtype)
         let weight_zp_name = format!("{}_weight_zp", node.name);
         result.tensors.push(TosaTensor {
             name: weight_zp_name.clone(),
             shape: vec![1],
             dtype: DType::Int8,
-            data: vec![weight_zp_val as i8 as u8],
+            data: vec![weight_zp_val as u8],
             variable: false,
             is_unranked: false,
             variable_name: String::new(),
@@ -775,7 +837,7 @@ pub fn emit_depthwise_conv2d(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_output_tensor(node));
+    result.tensors.push(make_nhwc_output_tensor(node));
 
     // Extract attribute from kwargs, falling back to positional args.
     let pad = {
@@ -797,16 +859,29 @@ pub fn emit_depthwise_conv2d(
     let conv_inputs = if input_names.len() >= 5 {
         input_names
     } else {
-        let input_zp_val = kwarg_i32(node, "input_zp", 0);
-        let weight_zp_val = kwarg_i32(node, "weight_zp", 0);
+        // Get zero-points from qparams metadata or conv_info kwargs
+        let input_zp_val: i32 = node
+            .meta
+            .input_qparams
+            .iter()
+            .find(|(pos, _)| *pos == 0)
+            .map(|(_, qp)| qp.zero_point as i32)
+            .unwrap_or_else(|| kwarg_i32(node, "input_zp", 0));
+        let weight_zp_val: i32 = node
+            .meta
+            .input_qparams
+            .iter()
+            .find(|(pos, _)| *pos == 1)
+            .map(|(_, qp)| qp.zero_point as i32)
+            .unwrap_or_else(|| kwarg_i32(node, "weight_zp", 0));
 
-        // Create input_zp const tensor (scalar int8)
+        // Create input_zp const tensor (scalar int8, matching input dtype)
         let input_zp_name = format!("{}_input_zp", node.name);
         result.tensors.push(TosaTensor {
             name: input_zp_name.clone(),
             shape: vec![1],
             dtype: DType::Int8,
-            data: vec![input_zp_val as i8 as u8],
+            data: vec![input_zp_val as u8],
             variable: false,
             is_unranked: false,
             variable_name: String::new(),
@@ -819,13 +894,13 @@ pub fn emit_depthwise_conv2d(
             location: None,
         });
 
-        // Create weight_zp const tensor (scalar int8)
+        // Create weight_zp const tensor (scalar int8, matching input dtype)
         let weight_zp_name = format!("{}_weight_zp", node.name);
         result.tensors.push(TosaTensor {
             name: weight_zp_name.clone(),
             shape: vec![1],
             dtype: DType::Int8,
-            data: vec![weight_zp_val as i8 as u8],
+            data: vec![weight_zp_val as u8],
             variable: false,
             is_unranked: false,
             variable_name: String::new(),
@@ -892,7 +967,36 @@ pub fn emit_rescale(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_output_tensor(node));
+
+    // RESCALE is format-transparent: its output shape should match its input's
+    // actual layout. If the input is an NHWC producer (conv, pool), our conv
+    // emitter already produces NHWC tensors, so the rescale should too.
+    let input_is_nhwc = match node.args.first() {
+        Some(Arg::Node(input_id)) => graph
+            .node(*input_id)
+            .map(|n| {
+                matches!(
+                    n.target,
+                    OpTarget::TosaConv2d
+                        | OpTarget::TosaDepthwiseConv2d
+                        | OpTarget::TosaTransposeConv2d
+                        | OpTarget::TosaAvgPool2d
+                        | OpTarget::TosaMaxPool2d
+                        | OpTarget::Conv2d
+                        | OpTarget::DepthwiseConv2d
+                        | OpTarget::AvgPool2d
+                        | OpTarget::MaxPool2d
+                )
+            })
+            .unwrap_or(false),
+        _ => false,
+    };
+
+    if input_is_nhwc {
+        result.tensors.push(make_nhwc_output_tensor(node));
+    } else {
+        result.tensors.push(make_output_tensor(node));
+    }
 
     // Detect format: Graph-IR has >=3 Node args (input, mult, shift);
     // FX-direct has 1 Node arg (input) + literal scales/zps.
@@ -1070,7 +1174,7 @@ pub fn emit_max_pool2d(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_output_tensor(node));
+    result.tensors.push(make_nhwc_output_tensor(node));
 
     let kernel = kwarg_i32_list(node, "kernel");
     let stride = kwarg_i32_list(node, "stride");
@@ -1386,7 +1490,7 @@ pub fn emit_avg_pool2d(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_output_tensor(node));
+    result.tensors.push(make_nhwc_output_tensor(node));
 
     let kernel = kwarg_i32_list(node, "kernel");
     let stride = kwarg_i32_list(node, "stride");
@@ -2154,8 +2258,6 @@ pub fn emit_transpose_conv2d(
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
-
-use crate::graph::ir::OpTarget;
 
 /// Dispatch to the correct per-op visitor based on the node's target.
 pub fn emit_node(

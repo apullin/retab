@@ -1,13 +1,156 @@
 pub mod tosa_generated;
 pub mod visitors;
 
-use crate::graph::ir::{Arg, OpType};
+use crate::graph::ir::{Arg, OpTarget, OpType};
 use crate::graph::Graph;
 use crate::store::TensorStore;
 
 use flatbuffers::{FlatBufferBuilder, TableFinishedWIPOffset, WIPOffset};
+use std::collections::HashMap;
 use tosa_generated::{Attribute, TosaOperator, TosaShape, TosaTensor};
 use visitors::ir_dtype_to_tosa;
+
+// ---------------------------------------------------------------------------
+// Weight permutation helpers (OIHW -> OHWI for TOSA)
+// ---------------------------------------------------------------------------
+
+/// Describes how a weight tensor should be permuted for TOSA.
+#[derive(Debug, Clone, Copy)]
+enum WeightPermKind {
+    /// Standard conv2d: OIHW [OC, IC, KH, KW] -> OHWI [OC, KH, KW, IC]
+    Conv2d,
+    /// Depthwise conv2d: OIHW [OC, 1, KH, KW] -> HWIM [KH, KW, IC, M]
+    /// where IC = in_channels/groups = 1 (per group), M = depth_multiplier
+    DepthwiseConv2d,
+}
+
+/// Permute a 4D tensor's raw bytes from OIHW to OHWI or depthwise format.
+///
+/// For Conv2d (OIHW -> OHWI):
+///   perm = [0, 2, 3, 1]
+///   output[o][h][w][i] = input[o][i][h][w]
+///
+/// For DepthwiseConv2d (OIHW -> HWIM):
+///   perm = [2, 3, 1, 0]
+///   output[h][w][i][m] = input[m][i][h][w]
+///   where OC = in_channels * depth_multiplier, I = 1 (per group), M = depth_multiplier
+fn permute_weight_data(
+    data: &[u8],
+    shape: &[i64],
+    elem_size: usize,
+    kind: WeightPermKind,
+) -> (Vec<u8>, Vec<i64>) {
+    if shape.len() != 4 {
+        return (data.to_vec(), shape.to_vec());
+    }
+
+    let (d0, d1, d2, d3) = (
+        shape[0] as usize,
+        shape[1] as usize,
+        shape[2] as usize,
+        shape[3] as usize,
+    );
+
+    match kind {
+        WeightPermKind::Conv2d => {
+            // OIHW -> OHWI: perm [0, 2, 3, 1]
+            let new_shape = vec![shape[0], shape[2], shape[3], shape[1]];
+            let (no, nh, nw, ni) = (d0, d2, d3, d1);
+            let mut out = vec![0u8; data.len()];
+
+            for o in 0..d0 {
+                for i in 0..d1 {
+                    for h in 0..d2 {
+                        for w in 0..d3 {
+                            let src_idx = ((o * d1 + i) * d2 + h) * d3 + w;
+                            let dst_idx = ((o * nh + h) * nw + w) * ni + i;
+                            let src_off = src_idx * elem_size;
+                            let dst_off = dst_idx * elem_size;
+                            if src_off + elem_size <= data.len()
+                                && dst_off + elem_size <= out.len()
+                            {
+                                out[dst_off..dst_off + elem_size]
+                                    .copy_from_slice(&data[src_off..src_off + elem_size]);
+                            }
+                        }
+                    }
+                }
+            }
+            (out, new_shape)
+        }
+        WeightPermKind::DepthwiseConv2d => {
+            // OIHW -> HWIM: perm [2, 3, 1, 0]
+            // TOSA depthwise weight: [KH, KW, IC_per_group, depth_multiplier]
+            // PyTorch weight: [OC, IC/groups, KH, KW] where IC/groups=1 for depthwise
+            let new_shape = vec![shape[2], shape[3], shape[1], shape[0]];
+            let (_nh, nw, ni, nm) = (d2, d3, d1, d0);
+            let mut out = vec![0u8; data.len()];
+
+            for o in 0..d0 {
+                for i in 0..d1 {
+                    for h in 0..d2 {
+                        for w in 0..d3 {
+                            let src_idx = ((o * d1 + i) * d2 + h) * d3 + w;
+                            let dst_idx = ((h * nw + w) * ni + i) * nm + o;
+                            let src_off = src_idx * elem_size;
+                            let dst_off = dst_idx * elem_size;
+                            if src_off + elem_size <= data.len()
+                                && dst_off + elem_size <= out.len()
+                            {
+                                out[dst_off..dst_off + elem_size]
+                                    .copy_from_slice(&data[src_off..src_off + elem_size]);
+                            }
+                        }
+                    }
+                }
+            }
+            (out, new_shape)
+        }
+    }
+}
+
+/// Element size in bytes for a given DType.
+fn dtype_elem_size(dtype: crate::graph::ir::DType) -> usize {
+    use crate::graph::ir::DType;
+    match dtype {
+        DType::Bool | DType::Int8 | DType::Int4 => 1,
+        DType::Int16 | DType::Float16 | DType::BFloat16 => 2,
+        DType::Int32 | DType::Float32 => 4,
+        DType::Int48 => 6,
+        DType::Int64 => 8,
+    }
+}
+
+/// Build a map of weight tensor names to their permutation kind by scanning
+/// all conv ops in the graph.
+fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind> {
+    let mut perms = HashMap::new();
+    for &nid in &graph.order {
+        let node = match graph.node(nid) {
+            Some(n) => n,
+            None => continue,
+        };
+        let kind = match &node.target {
+            OpTarget::TosaConv2d | OpTarget::Conv2d => Some(WeightPermKind::Conv2d),
+            OpTarget::TosaDepthwiseConv2d | OpTarget::DepthwiseConv2d => {
+                Some(WeightPermKind::DepthwiseConv2d)
+            }
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            // Weight is arg[1]
+            if let Some(Arg::Node(weight_id)) = node.args.get(1) {
+                if let Some(weight_node) = graph.node(*weight_id) {
+                    // Only permute placeholder/const nodes with 4D shapes
+                    if weight_node.meta.val.shape_len == 4 {
+                        perms.insert(weight_node.name.clone(), kind);
+                    }
+                }
+            }
+        }
+    }
+    perms
+}
 
 /// Serialize the IR graph and its constant data into a TOSA flatbuffer byte
 /// vector.
@@ -15,6 +158,9 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
     eprintln!("[Serialize] starting topo sort on {} nodes...", graph.order.len());
     let sorted = graph.topological_sort();
     eprintln!("[Serialize] topo sort done, {} sorted nodes", sorted.len());
+
+    // Pre-compute which weight tensors need OIHW -> OHWI permutation
+    let weight_perms = collect_weight_permutations(graph);
 
     let mut tensors: Vec<TosaTensor> = Vec::new();
     let mut shapes: Vec<TosaShape> = Vec::new();
@@ -45,11 +191,28 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
                 let dtype = ir_dtype_to_tosa(node.meta.val.dtype);
 
                 if let Some(tensor_data) = store.get(name) {
+                    // Check if this weight tensor needs OIHW -> OHWI permutation
+                    let (final_data, final_shape) =
+                        if let Some(&perm_kind) = weight_perms.get(name) {
+                            let elem_sz = dtype_elem_size(node.meta.val.dtype);
+                            let (pdata, pshape) = permute_weight_data(
+                                &tensor_data.data,
+                                node.meta.val.shape_slice(),
+                                elem_sz,
+                                perm_kind,
+                            );
+                            let pshape_i32: Vec<i32> =
+                                pshape.iter().map(|&d| d as i32).collect();
+                            (pdata, pshape_i32)
+                        } else {
+                            (tensor_data.data.clone(), shape)
+                        };
+
                     tensors.push(TosaTensor {
                         name: name.clone(),
-                        shape,
+                        shape: final_shape,
                         dtype,
-                        data: tensor_data.data.clone(),
+                        data: final_data,
                         variable: false,
                         is_unranked: false,
                         variable_name: String::new(),
