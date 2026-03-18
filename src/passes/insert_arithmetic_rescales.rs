@@ -7,17 +7,23 @@ use crate::shape;
 use crate::store::{TensorData, TensorStore};
 use smallvec::smallvec;
 
-/// Insert TOSA RESCALE nodes around quantized arithmetic ops to satisfy TOSA
-/// requirements for ADD, SUB, MUL, and REDUCE_SUM.
+/// Insert TOSA RESCALE nodes around quantized INT32-accumulator ops to match
+/// the Python `InsertRescaleInt32Pass` behavior.
 ///
-/// TOSA requires:
-/// - **ADD/SUB**: Both inputs at the same scale/zp. We rescale both to a
-///   common scale (`2 * max(s0, s1)`) and insert an output rescale to the
-///   node's desired output scale.
-/// - **MUL**: Output has natural scale `s0 * s1`. We insert an output rescale
-///   from the natural scale to the node's desired output scale.
-/// - **REDUCE_SUM**: The sum accumulates in a wider type; insert a rescale
-///   from the accumulator back to int8.
+/// The Python pass handles these op categories:
+///
+/// - **ADD/SUB**: Rescale both inputs to `2 * max(s_a, s_b)` scale, output
+///   at the same scale. `InsertRescalePass` mismatch detection adds the
+///   output rescale to the consumer's expected scale.
+/// - **MUL**: Input scales unchanged; output has natural scale `s_a * s_b`.
+///   Insert output rescale to the desired output scale.
+/// - **SUM**: Input rescaled from int8 to int32 (same scale, just dtype
+///   upcast). Output rescaled from int32 to int8.
+/// - **ABS**: Same as SUM — identity rescale in, identity rescale out.
+/// - **MAXIMUM/MINIMUM**: Both inputs rescaled to `min(s_a, s_b)`, output
+///   at the same min scale.
+/// - **Comparisons (eq, ge, gt, le, lt)**: Inputs rescaled to
+///   `min(s_a, s_b)`. Output is bool — no output rescale needed.
 ///
 /// This pass should run AFTER `PropagateQParamsPass` (so input/output_qparams
 /// are populated) and AFTER `FuseDuplicateUsersPass`.
@@ -73,6 +79,18 @@ impl Pass for InsertArithmeticRescalesPass {
                 }
                 OpTarget::Mul | OpTarget::TosaMul => {
                     if insert_mul_rescale(graph, store, node_id, debug) {
+                        modified = true;
+                    }
+                    processed.insert(node_id);
+                }
+                OpTarget::Sum | OpTarget::TosaReduceSum => {
+                    if insert_sum_rescales(graph, store, node_id, debug) {
+                        modified = true;
+                    }
+                    processed.insert(node_id);
+                }
+                OpTarget::Abs | OpTarget::TosaAbs => {
+                    if insert_abs_rescales(graph, store, node_id, debug) {
                         modified = true;
                     }
                     processed.insert(node_id);
@@ -453,6 +471,208 @@ fn insert_mul_rescale(
     }
 
     true
+}
+
+// ---------------------------------------------------------------------------
+// SUM rescale insertion
+// ---------------------------------------------------------------------------
+
+/// For TOSA SUM/ABS, the computation happens in int32.
+/// Per the Python `InsertRescaleInt32Pass`:
+/// - Input rescale: int8 -> int32, same scale (identity upcast, removes zp)
+/// - Output rescale: int32 -> int8, from int32 scale to the desired output scale
+///
+/// Both input AND output rescales are always inserted (matching Python behavior),
+/// because the op needs to run in int32 domain even when input and output scales
+/// are the same.
+fn insert_sum_rescales(
+    graph: &mut Graph,
+    store: &mut TensorStore,
+    node_id: NodeId,
+    debug: bool,
+) -> bool {
+    let (qp_input, input_id, existing_out_qp, node_name) = {
+        let node = match graph.node(node_id) {
+            Some(n) => n,
+            None => return false,
+        };
+
+        let qp = node
+            .meta
+            .input_qparams
+            .iter()
+            .find(|(p, _)| *p == 0)
+            .map(|(_, q)| *q);
+        let input = match node.args.first() {
+            Some(Arg::Node(id)) => *id,
+            _ => return false,
+        };
+        let out = node
+            .meta
+            .output_qparams
+            .iter()
+            .find(|(p, _)| *p == 0)
+            .map(|(_, q)| *q);
+
+        (qp, input, out, node.name.clone())
+    };
+
+    let qp = match qp_input {
+        Some(q) if q.dtype == DType::Int8 || q.dtype == DType::Int16 => q,
+        _ => return false,
+    };
+
+    // Guard: if input is already a rescale, skip
+    let input_is_rescale = graph
+        .node(input_id)
+        .map(|n| n.target == OpTarget::TosaRescale)
+        .unwrap_or(false);
+    if input_is_rescale {
+        return false;
+    }
+
+    if debug {
+        eprintln!(
+            "[InsertArithRescale] SUM/ABS '{}': input_scale={}, input_zp={}",
+            node_name, qp.scale, qp.zero_point,
+        );
+    }
+
+    // The int32 domain qparams: same scale, zero zp
+    let int32_qp = QuantArgs {
+        scale: qp.scale,
+        zero_point: 0,
+        dtype: qp.dtype,
+        qmin: i32::MIN as i64,
+        qmax: i32::MAX as i64,
+    };
+
+    // Insert input rescale: int8 -> int32 (scale ratio = 1.0, but zp changes)
+    let rescale_in_id = create_rescale_node(
+        graph,
+        store,
+        input_id,
+        node_id,
+        1.0, // identity scale: old_scale / new_scale = s/s
+        qp.zero_point, // input_zp: original zp
+        0,              // output_zp: 0 (int32 domain)
+        qp.dtype,
+        &format!("{}_int32_in", node_name),
+    );
+
+    // Set output_qparams on input rescale
+    if let Some(r) = graph.node_mut(rescale_in_id) {
+        r.meta.output_qparams.push((0, int32_qp));
+    }
+
+    // Rewire: replace input in the node's arg 0
+    if let Some(node) = graph.node_mut(node_id) {
+        if let Some(Arg::Node(id)) = node.args.first_mut() {
+            *id = rescale_in_id;
+        }
+        for entry in &mut node.meta.input_qparams {
+            if entry.0 == 0 {
+                entry.1 = int32_qp;
+            }
+        }
+    }
+
+    // Update user lists for input rescale
+    if let Some(r) = graph.node_mut(rescale_in_id) {
+        if !r.users.contains(&node_id) {
+            r.users.push(node_id);
+        }
+    }
+    if let Some(a) = graph.node_mut(input_id) {
+        a.users.retain(|u| *u != node_id);
+        if !a.users.contains(&rescale_in_id) {
+            a.users.push(rescale_in_id);
+        }
+    }
+
+    // Determine the desired output qparams. Use existing output_qparams if
+    // available (set by fold_qdq or propagation), otherwise fall back to the
+    // original input qparams (the int8 domain values before upcast).
+    let desired_out_qp = existing_out_qp.unwrap_or(qp);
+
+    // Set the node's output_qparams to the int32 domain scale.
+    if let Some(node) = graph.node_mut(node_id) {
+        node.meta.output_qparams.retain(|(p, _)| *p != 0);
+        node.meta.output_qparams.push((0, int32_qp));
+    }
+
+    // Always insert output rescale: int32 -> int8.
+    // The output rescale converts from the int32 accumulator domain back to
+    // int8 at the desired output scale.
+    let users: Vec<NodeId> = graph
+        .node(node_id)
+        .map(|n| n.users.to_vec())
+        .unwrap_or_default();
+
+    if users.is_empty() {
+        return true; // Input rescale was still inserted
+    }
+
+    let first_user = users[0];
+    // Scale ratio: int32_scale / desired_out_scale = input_scale / desired_out_scale
+    let out_rescale_scale = int32_qp.scale / desired_out_qp.scale;
+
+    let rescale_out_id = create_rescale_node(
+        graph,
+        store,
+        node_id,
+        first_user,
+        out_rescale_scale,
+        0,                        // input_zp: 0 (int32 domain)
+        desired_out_qp.zero_point, // output_zp
+        desired_out_qp.dtype,
+        &format!("{}_int32_out", node_name),
+    );
+
+    if let Some(r) = graph.node_mut(rescale_out_id) {
+        r.meta.output_qparams.push((0, desired_out_qp));
+    }
+
+    // Rewire ALL users to use the output rescale
+    for &user_id in &users {
+        if let Some(user) = graph.node_mut(user_id) {
+            for arg in &mut user.args {
+                if let Arg::Node(id) = arg {
+                    if *id == node_id {
+                        *id = rescale_out_id;
+                    }
+                }
+            }
+        }
+        if let Some(r) = graph.node_mut(rescale_out_id) {
+            if !r.users.contains(&user_id) {
+                r.users.push(user_id);
+            }
+        }
+    }
+
+    if let Some(node) = graph.node_mut(node_id) {
+        node.users.clear();
+        node.users.push(rescale_out_id);
+    }
+
+    true
+}
+
+// ---------------------------------------------------------------------------
+// ABS rescale insertion
+// ---------------------------------------------------------------------------
+
+/// For ABS, the Python rescales input from int8 to int32 (same scale,
+/// just dtype upcast) and then rescales output back to int8.
+fn insert_abs_rescales(
+    graph: &mut Graph,
+    store: &mut TensorStore,
+    node_id: NodeId,
+    debug: bool,
+) -> bool {
+    // ABS is identical to SUM in rescale behavior: identity in, identity out
+    insert_sum_rescales(graph, store, node_id, debug)
 }
 
 // ---------------------------------------------------------------------------

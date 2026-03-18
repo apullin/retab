@@ -259,9 +259,20 @@ impl FxPass for FxInsertRescalePass {
                 node.setattr("args", args_tuple)?;
 
                 // Insert output rescale: int32 -> int8
+                // Use output_qparams if available, otherwise fall back to input_qparams[0]
+                // (passthrough ops like Sum/Abs preserve the input scale)
                 let output_qp = match meta.call_method1("get", ("output_qparams",)) {
-                    Ok(v) if !v.is_none() => v,
-                    _ => continue,
+                    Ok(v) if !v.is_none() && {
+                        let l: usize = py.import_bound("builtins")
+                            .and_then(|b| b.call_method1("len", (&v,)))
+                            .and_then(|r| r.extract())
+                            .unwrap_or(0);
+                        l > 0
+                    } => v,
+                    _ => {
+                        // Fallback: use input_qparams as output (passthrough scale)
+                        input_qp.clone()
+                    }
                 };
                 let oqp_len: usize = py
                     .import_bound("builtins")?
