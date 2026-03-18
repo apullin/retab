@@ -230,6 +230,18 @@ fn kwarg_bool(node: &Node, name: &str, default: bool) -> bool {
     default
 }
 
+/// Look up a kwarg by name and return it as a Vec<i64>.
+fn kwarg_int_list(node: &Node, name: &str) -> Vec<i64> {
+    for (k, v) in &node.kwargs {
+        if k == name {
+            if let Arg::IntList(list) = v {
+                return list.to_vec();
+            }
+        }
+    }
+    Vec::new()
+}
+
 // ---------------------------------------------------------------------------
 // Conv2d  (ATen & TOSA)
 // ---------------------------------------------------------------------------
@@ -246,26 +258,58 @@ fn compute_conv2d(graph: &Graph, node: &Node) -> TensorInfo {
         return input;
     }
 
+    // After RewriteConvPass, TosaConv2d/TosaDepthwiseConv2d nodes store
+    // stride/pad/dilation in kwargs, and args are [input, weight, bias,
+    // input_zp, weight_zp]. The ATen Conv2d nodes store them in positional
+    // args at indices 3,4,5.
+    let is_tosa = matches!(
+        node.target,
+        OpTarget::TosaConv2d | OpTarget::TosaDepthwiseConv2d
+    );
+
     let n = in_shape[0];
+    // ATen: NCHW [N,C,H,W]; weight OIHW [OC,IC,KH,KW]
     let h_in = in_shape[2];
     let w_in = in_shape[3];
     let c_out = w_shape[0];
     let k_h = w_shape[2];
     let k_w = w_shape[3];
 
-    let stride = int_list_arg(node, 3);
-    let padding = int_list_arg(node, 4);
-    let dilation = int_list_arg(node, 5);
+    let (stride_h, stride_w, pad_top, pad_bottom, pad_left, pad_right, dil_h, dil_w) = if is_tosa
+    {
+        // Read from kwargs
+        let stride = kwarg_int_list(node, "stride");
+        let pad = kwarg_int_list(node, "pad");
+        let dilation = kwarg_int_list(node, "dilation");
 
-    let stride_h = stride.first().copied().unwrap_or(1);
-    let stride_w = stride.get(1).copied().unwrap_or(stride_h);
-    let pad_h = padding.first().copied().unwrap_or(0);
-    let pad_w = padding.get(1).copied().unwrap_or(pad_h);
-    let dil_h = dilation.first().copied().unwrap_or(1);
-    let dil_w = dilation.get(1).copied().unwrap_or(dil_h);
+        let sh = stride.first().copied().unwrap_or(1);
+        let sw = stride.get(1).copied().unwrap_or(sh);
+        // TOSA padding: [top, bottom, left, right]
+        let pt = pad.first().copied().unwrap_or(0);
+        let pb = pad.get(1).copied().unwrap_or(pt);
+        let pl = pad.get(2).copied().unwrap_or(0);
+        let pr = pad.get(3).copied().unwrap_or(pl);
+        let dh = dilation.first().copied().unwrap_or(1);
+        let dw = dilation.get(1).copied().unwrap_or(dh);
+        (sh, sw, pt, pb, pl, pr, dh, dw)
+    } else {
+        // ATen Conv2d: positional args [input, weight, bias, stride, padding, dilation]
+        let stride = int_list_arg(node, 3);
+        let padding = int_list_arg(node, 4);
+        let dilation = int_list_arg(node, 5);
 
-    let h_out = (h_in + 2 * pad_h - dil_h * (k_h - 1) - 1) / stride_h + 1;
-    let w_out = (w_in + 2 * pad_w - dil_w * (k_w - 1) - 1) / stride_w + 1;
+        let sh = stride.first().copied().unwrap_or(1);
+        let sw = stride.get(1).copied().unwrap_or(sh);
+        // ATen padding: [pad_h, pad_w] (symmetric)
+        let ph = padding.first().copied().unwrap_or(0);
+        let pw = padding.get(1).copied().unwrap_or(ph);
+        let dh = dilation.first().copied().unwrap_or(1);
+        let dw = dilation.get(1).copied().unwrap_or(dh);
+        (sh, sw, ph, ph, pw, pw, dh, dw)
+    };
+
+    let h_out = (h_in + pad_top + pad_bottom - dil_h * (k_h - 1) - 1) / stride_h + 1;
+    let w_out = (w_in + pad_left + pad_right - dil_w * (k_w - 1) - 1) / stride_w + 1;
 
     TensorInfo::new(&[n, c_out, h_out, w_out], input.dtype)
 }
@@ -1289,5 +1333,91 @@ mod tests {
                 target,
             );
         }
+    }
+
+    #[test]
+    fn test_tosa_conv2d_with_kwargs() {
+        // After RewriteConvPass, TosaConv2d nodes have:
+        //   args = [input, weight, bias, input_zp, weight_zp]
+        //   kwargs = [("pad", [1,1,1,1]), ("stride", [1,1]), ("dilation", [1,1])]
+        // Input: (1,1,28,28), Weight: (16,1,3,3), pad=[1,1,1,1] -> (1,16,28,28)
+        let (mut g, op_id) = build_graph_with_op(
+            &[
+                (&[1, 1, 28, 28], DType::Float32), // input
+                (&[16, 1, 3, 3], DType::Float32),  // weight
+                (&[16], DType::Float32),            // bias
+            ],
+            OpTarget::TosaConv2d,
+            vec![
+                Arg::None, // input
+                Arg::None, // weight
+                Arg::None, // bias
+            ],
+            vec![
+                ("pad".into(), Arg::IntList(smallvec![1, 1, 1, 1])),
+                ("stride".into(), Arg::IntList(smallvec![1, 1])),
+                ("dilation".into(), Arg::IntList(smallvec![1, 1])),
+            ],
+        );
+
+        propagate_shape(&mut g, op_id);
+        let info = g.node(op_id).unwrap().meta.val;
+        assert_eq!(info.shape_slice(), &[1, 16, 28, 28]);
+    }
+
+    #[test]
+    fn test_tosa_conv2d_no_padding_kwargs() {
+        // TosaConv2d with pad=[0,0,0,0]: output shrinks
+        // Input: (1,1,28,28), Weight: (16,1,3,3), pad=[0,0,0,0] -> (1,16,26,26)
+        let (mut g, op_id) = build_graph_with_op(
+            &[
+                (&[1, 1, 28, 28], DType::Float32),
+                (&[16, 1, 3, 3], DType::Float32),
+                (&[16], DType::Float32),
+            ],
+            OpTarget::TosaConv2d,
+            vec![
+                Arg::None,
+                Arg::None,
+                Arg::None,
+            ],
+            vec![
+                ("pad".into(), Arg::IntList(smallvec![0, 0, 0, 0])),
+                ("stride".into(), Arg::IntList(smallvec![1, 1])),
+                ("dilation".into(), Arg::IntList(smallvec![1, 1])),
+            ],
+        );
+
+        propagate_shape(&mut g, op_id);
+        let info = g.node(op_id).unwrap().meta.val;
+        assert_eq!(info.shape_slice(), &[1, 16, 26, 26]);
+    }
+
+    #[test]
+    fn test_tosa_depthwise_conv2d_kwargs() {
+        // TosaDepthwiseConv2d with kwargs
+        // Input: (1,16,28,28), Weight: (16,1,3,3), pad=[1,1,1,1] -> (1,16,28,28)
+        let (mut g, op_id) = build_graph_with_op(
+            &[
+                (&[1, 16, 28, 28], DType::Float32),
+                (&[16, 1, 3, 3], DType::Float32),
+                (&[16], DType::Float32),
+            ],
+            OpTarget::TosaDepthwiseConv2d,
+            vec![
+                Arg::None,
+                Arg::None,
+                Arg::None,
+            ],
+            vec![
+                ("pad".into(), Arg::IntList(smallvec![1, 1, 1, 1])),
+                ("stride".into(), Arg::IntList(smallvec![1, 1])),
+                ("dilation".into(), Arg::IntList(smallvec![1, 1])),
+            ],
+        );
+
+        propagate_shape(&mut g, op_id);
+        let info = g.node(op_id).unwrap().meta.val;
+        assert_eq!(info.shape_slice(), &[1, 16, 28, 28]);
     }
 }
