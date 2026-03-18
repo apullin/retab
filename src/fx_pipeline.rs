@@ -1,53 +1,86 @@
+use crate::fx_cast_int64;
 use crate::fx_convert_clamp;
 use crate::fx_convert_sum;
 use crate::fx_decompose_linear;
 use crate::fx_decompose_quant;
 use crate::fx_fold_qdq;
+use crate::fx_fuse_constant_args;
 use crate::fx_fuse_duplicate_users;
+use crate::fx_fuse_equal_placeholders;
 use crate::fx_fuse_quant_activation;
 use crate::fx_insert_rescale;
 use crate::fx_insert_table_ops;
 use crate::fx_memory_format;
 use crate::fx_pass::FxPass;
+use crate::fx_quantize_clamp_args;
+use crate::fx_remove_noop;
 use crate::fx_rewrite_conv;
 
 /// Build the full FX-direct lowering pipeline in execution order.
 ///
-/// The ordering mirrors the Python `ArmPassManager` pipeline:
-///   1. Fuse quantized activations (relu between conv and Q)
-///   2. **Rust** fold Q/DQ and annotate QuantArgs namedtuples in node.meta
-///   3. **Rust** insert rescales (DQ->Q pairs + INT32 elementwise rescales)
-///   4. Insert TABLE ops (quantised lookup tables for rsqrt, exp, etc.)
-///   5. Fuse duplicate users (deduplicate identical call_function nodes)
-///   6. Decompose linear into reshape+conv2d+reshape
-///   7. Decompose remaining Q/DQ nodes into primitive arithmetic
-///   8. Convert sum to chained TOSA REDUCE_SUM ops
-///   9. Convert relu/hardtanh to clamp
-///  10. Rewrite conv2d targets and annotate conv metadata
-///  11. Annotate TOSA memory format (dim_order, spatial_rank)
-///  12. Final dedup -- steps 8-11 may create or expose duplicate nodes
+/// The ordering mirrors the Python `ArmPassManager._tosa_pipeline()`:
 ///
-/// Steps 2 and 3 are both Rust passes. Step 2 stores real QuantArgs
-/// namedtuples in node.meta. Step 3 reads those QuantArgs and inserts
-/// TOSA RESCALE ops, matching the Python InsertRescalePass +
-/// InsertRescaleInt32Pass behavior exactly.
+///   Pre-fold:
+///    1. Fuse quantized activations (relu between conv and Q)
+///    2. Convert relu/hardtanh to clamp (before Q/DQ fold)
+///
+///   Fold Q/DQ + rescale:
+///    3. **Rust** fold Q/DQ and annotate QuantArgs namedtuples in node.meta
+///    4. Fuse duplicate users (deduplicate identical call_function nodes)
+///    5. Decompose linear into reshape+conv2d+reshape
+///    6. **Rust** insert rescales (DQ->Q pairs + INT32 elementwise rescales)
+///    7. Decompose remaining Q/DQ nodes into primitive arithmetic
+///
+///   Post-fold decompositions:
+///    8. Quantize clamp min/max args to match output quantization scale
+///    9. Fuse constant args (evaluate ops with all-constant inputs)
+///   10. Convert sum to chained TOSA REDUCE_SUM ops
+///   11. Insert TABLE ops (quantised lookup tables for rsqrt, exp, etc.)
+///
+///   ATen -> TOSA conversion:
+///   12. Rewrite conv2d to TOSA CONV2D/DEPTHWISE_CONV2D
+///
+///   Postprocessing/cleanup (matches Python ordering):
+///   13. Cast int64 buffers to int32
+///   14. Fuse equal placeholders (dedup identical constant tensors)
+///   15. Annotate TOSA memory format (dim_order, spatial_rank, transposes)
+///   16. Remove no-op nodes (identity, alias_copy, detach_copy, etc.)
+///   17. Final rescale insertion (InsertRescalePass)
+///   18. Final dedup -- cleanup may create or expose duplicate nodes
 pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dyn FxPass>> {
+    // Clone the EP handle for passes that need it. Py<T>.clone() requires the GIL.
+    let (ep_for_fuse, ep_for_cast, ep_for_fuse_placeholders) = pyo3::Python::with_gil(|py| {
+        (
+            exported_program.as_ref().map(|ep| ep.clone_ref(py)),
+            exported_program.as_ref().map(|ep| ep.clone_ref(py)),
+            exported_program.as_ref().map(|ep| ep.clone_ref(py)),
+        )
+    });
+
     vec![
+        // -- Pre-fold --
         Box::new(fx_fuse_quant_activation::FxFuseQuantizedActivationPass),
-        // Rust fold: removes Q/DQ nodes, stores QuantArgs namedtuples in node.meta
-        Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(exported_program)),
-        // Rust rescale: replaces DQ->Q pairs and inserts INT32 rescales
-        Box::new(fx_insert_rescale::FxInsertRescalePass),
-        Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
-        Box::new(fx_fuse_duplicate_users::FxFuseDuplicateUsersPass),
-        // Post-fold decompositions
-        Box::new(fx_decompose_linear::FxDecomposeLinearPass),
-        Box::new(fx_decompose_quant::FxDecomposeQuantNodesPass),
-        Box::new(fx_convert_sum::FxConvertSumPass),
         Box::new(fx_convert_clamp::FxConvertToClampPass),
+        // -- Fold Q/DQ + rescale --
+        Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(exported_program)),
+        Box::new(fx_fuse_duplicate_users::FxFuseDuplicateUsersPass),
+        Box::new(fx_decompose_linear::FxDecomposeLinearPass),
+        Box::new(fx_insert_rescale::FxInsertRescalePass),
+        Box::new(fx_decompose_quant::FxDecomposeQuantNodesPass),
+        // -- Post-fold decompositions --
+        Box::new(fx_quantize_clamp_args::FxQuantizeClampArgsPass),
+        Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(ep_for_fuse)),
+        Box::new(fx_convert_sum::FxConvertSumPass),
+        Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
+        // -- ATen -> TOSA conversion --
         Box::new(fx_rewrite_conv::FxRewriteConvPass),
+        // -- Postprocessing/cleanup (Python ordering) --
+        Box::new(fx_cast_int64::FxCastInt64ToInt32Pass::new(ep_for_cast)),
+        Box::new(fx_fuse_equal_placeholders::FxFuseEqualPlaceholdersPass::new(ep_for_fuse_placeholders)),
         Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
-        // Final dedup: clean up duplicates introduced or exposed by passes 8-12
+        Box::new(fx_remove_noop::FxRemoveNoopPass),
+        Box::new(fx_insert_rescale::FxInsertRescalePass),
+        // Final dedup: clean up duplicates introduced or exposed by cleanup passes
         Box::new(fx_fuse_duplicate_users::FxFuseDuplicateUsersPass),
     ]
 }

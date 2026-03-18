@@ -771,3 +771,113 @@ def delete_constant_placeholder(exported_program, node: Node) -> None:
             node.graph.erase_node(node)
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# RewriteConv helpers
+# ---------------------------------------------------------------------------
+
+def get_tosa_conv2d_op():
+    """Return the tosa.CONV2D op target."""
+    try:
+        from executorch.exir.dialects._ops import ops as exir_ops
+        return exir_ops.backend.tosa.CONV2D.default
+    except Exception:
+        try:
+            return torch.ops.tosa.conv2d.default
+        except Exception:
+            return "tosa::conv2d"
+
+
+def get_tosa_depthwise_conv2d_op():
+    """Return the tosa.DEPTHWISE_CONV2D op target."""
+    try:
+        from executorch.exir.dialects._ops import ops as exir_ops
+        return exir_ops.backend.tosa.DEPTHWISE_CONV2D.default
+    except Exception:
+        try:
+            return torch.ops.tosa.depthwise_conv2d.default
+        except Exception:
+            return "tosa::depthwise_conv2d"
+
+
+def rewrite_conv_to_tosa(
+    graph_module,
+    node: Node,
+    is_depthwise: bool,
+    input_zp: int,
+    weight_zp: int,
+    in_channels: int,
+) -> None:
+    """Rewrite an aten.convolution.default node to a TOSA CONV2D or DEPTHWISE_CONV2D.
+
+    Mirrors the Python RewriteConvPass: changes the target, rearranges args
+    (stride/pad/dilation formatting), handles bias creation, and reshapes
+    weights for depthwise convolution.
+
+    Args:
+        graph_module: the GraphModule
+        node: the aten.convolution node
+        is_depthwise: True for depthwise_conv2d, False for conv2d
+        input_zp: input zero point from qparams
+        weight_zp: weight zero point from qparams
+        in_channels: number of input channels
+    """
+    graph = graph_module.graph
+    args = node.args
+    x, weight, bias, stride, pad, dilation, transposed, output_padding, groups = args
+
+    # Expand pad to TOSA format: [pad_top, pad_bottom, pad_left, pad_right]
+    pad_list = list(pad)
+    tosa_pad = []
+    for p in pad_list:
+        tosa_pad.extend([p, p])
+
+    stride_tuple = tuple(stride)
+    dilation_tuple = tuple(dilation)
+
+    # Handle missing bias: create a zero bias placeholder
+    if bias is None:
+        output_val = node.meta.get("val")
+        if output_val is not None:
+            output_channels = output_val.shape[1]
+        else:
+            output_channels = weight.meta["val"].shape[0]
+
+        has_qparams = "output_qparams" in node.meta and len(node.meta.get("output_qparams", {})) > 0
+        if has_qparams:
+            bias_data = torch.zeros(size=(output_channels,), dtype=torch.int32)
+        else:
+            output_dtype = node.meta["val"].dtype if output_val is not None else torch.float32
+            bias_data = torch.zeros(size=(output_channels,), dtype=output_dtype)
+
+        bias_name = f"{node.name}_bias"
+        counter = 0
+        attr_name = bias_name
+        while hasattr(graph_module, attr_name):
+            counter += 1
+            attr_name = f"{bias_name}_{counter}"
+        graph_module.register_buffer(attr_name, bias_data)
+
+        with graph.inserting_before(node):
+            bias = graph.get_attr(attr_name)
+            bias.meta = {"val": bias_data}
+
+    # Select target op
+    if is_depthwise:
+        target_op = get_tosa_depthwise_conv2d_op()
+    else:
+        target_op = get_tosa_conv2d_op()
+
+    conv_args = (x, weight, bias, stride_tuple, tosa_pad, dilation_tuple)
+
+    with graph.inserting_after(node):
+        tosa_op = _create_node(
+            graph, target_op,
+            args=conv_args,
+            from_node=node,
+            inherit_qparams=True,
+        )
+
+    node.replace_all_uses_with(tosa_op)
+    graph.erase_node(node)

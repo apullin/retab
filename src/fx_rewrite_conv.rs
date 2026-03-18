@@ -5,11 +5,12 @@ use crate::fx_pass::FxPass;
 
 /// FX-graph-direct implementation of conv rewriting.
 ///
-/// Detects `aten.convolution.default` nodes and rewrites their target to
-/// `tosa.conv2d` or `tosa.depthwise_conv2d` based on the weight shape and
-/// groups parameter.  Also attaches quantization zero-point information from
-/// `node.meta["input_qparams"]` so downstream TOSA serialisation can emit
-/// the correct RESCALE attributes.
+/// Detects `aten.convolution.default` nodes and rewrites them to TOSA
+/// `CONV2D` or `DEPTHWISE_CONV2D` ops via the Python helper. This matches
+/// the Python `RewriteConvPass` behavior:
+///   - Changes target from aten.convolution to tosa.CONV2D/DEPTHWISE_CONV2D
+///   - Rearranges args (pad format, bias handling)
+///   - Attaches conv_info metadata with quantization zero-points
 pub struct FxRewriteConvPass;
 
 fn is_convolution(target: &str) -> bool {
@@ -26,6 +27,10 @@ impl FxPass for FxRewriteConvPass {
         let helpers = py.import_bound("fx_helpers")?;
         let mut modified = false;
         let all_nodes = gm.nodes()?;
+
+        // Collect candidates to avoid mutating during iteration (the helper
+        // erases nodes and inserts new ones).
+        let mut candidates: Vec<(Bound<'_, PyAny>, bool, i64, i64, i64, i64, i64)> = Vec::new();
 
         for node in &all_nodes {
             let op = FxGraphModule::node_op(node)?;
@@ -48,7 +53,6 @@ impl FxPass for FxRewriteConvPass {
             let weight_node = &args[1];
             let groups: i64 = args[8].extract().unwrap_or(1);
 
-            // Determine weight shape to decide conv2d vs depthwise_conv2d.
             // Weight shape for conv: [out_channels, in_channels/groups, kH, kW]
             let weight_shape = match FxGraphModule::node_shape(weight_node) {
                 Ok(s) => s,
@@ -69,7 +73,6 @@ impl FxPass for FxRewriteConvPass {
 
             // Match Python reference: depthwise when in_channels == groups and
             // out_channels is a multiple of in_channels.
-            // For tiny_cnn's first conv: in_channels=1, groups=1 -> depthwise.
             let is_depthwise = in_channels > 0
                 && groups == in_channels
                 && out_channels % in_channels == 0;
@@ -82,9 +85,7 @@ impl FxPass for FxRewriteConvPass {
             let mut weight_zp: i64 = 0;
 
             if !input_qparams.is_none() {
-                // Position 0 = activation input qparams
                 if let Ok(qp0) = input_qparams.get_item(0_usize) {
-                    // Support both QuantArgs namedtuple (.zp attr) and dict (["zero_point"] key)
                     input_zp = qp0
                         .getattr("zp")
                         .and_then(|v| v.extract())
@@ -94,7 +95,6 @@ impl FxPass for FxRewriteConvPass {
                         })
                         .unwrap_or(0);
                 }
-                // Position 1 = weight qparams
                 if let Ok(qp1) = input_qparams.get_item(1_usize) {
                     weight_zp = qp1
                         .getattr("zp")
@@ -107,16 +107,7 @@ impl FxPass for FxRewriteConvPass {
                 }
             }
 
-            let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
-            if debug {
-                let node_name = FxGraphModule::node_name(node)?;
-                eprintln!(
-                    "[RewriteConv] {}: in_ch={}, out_ch={}, groups={}, depthwise={}",
-                    node_name, in_channels, out_channels, groups, is_depthwise
-                );
-            }
-
-            // Store conv metadata for downstream passes
+            // Store conv metadata for downstream passes (rescale, serialization)
             let conv_meta = pyo3::types::PyDict::new_bound(py);
             conv_meta.set_item("is_depthwise", is_depthwise)?;
             conv_meta.set_item("input_zp", input_zp)?;
@@ -126,14 +117,43 @@ impl FxPass for FxRewriteConvPass {
             conv_meta.set_item("out_channels", out_channels)?;
             FxGraphModule::set_meta(node, "conv_info", conv_meta.as_ref())?;
 
-            // Note: We annotate but don't actually swap the target to a TOSA op
-            // here, because the TOSA op overloads require special Python imports
-            // and may not be registered yet.  We use the Python helper to do
-            // the target swap so it can resolve the correct op overload.
-            //
-            // For the prototype, annotating conv_info in meta is sufficient —
-            // downstream TOSA serialization can read it.
-            let _ = helpers; // suppress unused warning
+            candidates.push((
+                node.clone(),
+                is_depthwise,
+                input_zp,
+                weight_zp,
+                in_channels,
+                out_channels,
+                groups,
+            ));
+        }
+
+        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+
+        for (node, is_depthwise, input_zp, weight_zp, in_channels, out_channels, groups) in
+            &candidates
+        {
+            if debug {
+                let node_name = FxGraphModule::node_name(node)?;
+                eprintln!(
+                    "[RewriteConv] {}: in_ch={}, out_ch={}, groups={}, depthwise={}",
+                    node_name, in_channels, out_channels, groups, is_depthwise
+                );
+            }
+
+            // Delegate the actual target swap and arg rearrangement to Python.
+            // This avoids needing to resolve TOSA op overloads from Rust.
+            helpers.call_method1(
+                "rewrite_conv_to_tosa",
+                (
+                    gm.gm_ref(),
+                    node,
+                    *is_depthwise,
+                    *input_zp,
+                    *weight_zp,
+                    *in_channels,
+                ),
+            )?;
             modified = true;
         }
 
