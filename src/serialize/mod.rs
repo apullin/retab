@@ -312,7 +312,29 @@ fn build_fb_attribute(
         | Attribute::Add(_)
         | Attribute::Sub(_)
         | Attribute::Reshape(_)
-        | Attribute::Table(_) => {
+        | Attribute::Table(_)
+        | Attribute::Sigmoid(_)
+        | Attribute::Tanh(_)
+        | Attribute::Exp(_)
+        | Attribute::Log(_)
+        | Attribute::Negate(_)
+        | Attribute::Abs(_)
+        | Attribute::Ceil(_)
+        | Attribute::Floor(_)
+        | Attribute::Reciprocal(_)
+        | Attribute::Erf(_)
+        | Attribute::Cos(_)
+        | Attribute::Sin(_)
+        | Attribute::Rsqrt(_)
+        | Attribute::MatMul(_)
+        | Attribute::Pad(_)
+        | Attribute::Slice(_)
+        | Attribute::Gather(_)
+        | Attribute::Select(_)
+        | Attribute::Cast(_)
+        | Attribute::Equal(_)
+        | Attribute::Greater(_)
+        | Attribute::GreaterEqual(_) => {
             // Empty tables
             let start = builder.start_table();
             let off = builder.end_table(start);
@@ -415,6 +437,25 @@ fn build_fb_attribute(
         Attribute::ReduceSum(a) => {
             let start = builder.start_table();
             builder.push_slot::<i32>(4, a.axis, 0);
+            let off = builder.end_table(start);
+            (attr.union_type(), Some(off))
+        }
+
+        Attribute::Concat(a) => {
+            let start = builder.start_table();
+            builder.push_slot::<i32>(4, a.axis, 0);
+            let off = builder.end_table(start);
+            (attr.union_type(), Some(off))
+        }
+
+        Attribute::TransposeConv2d(a) => {
+            let out_pad = builder.create_vector(&a.out_pad);
+            let stride = builder.create_vector(&a.stride);
+            let start = builder.start_table();
+            builder.push_slot_always::<WIPOffset<_>>(4, out_pad);
+            builder.push_slot_always::<WIPOffset<_>>(6, stride);
+            builder.push_slot::<bool>(8, a.local_bound, false);
+            builder.push_slot::<u32>(10, a.acc_type as u32, 0);
             let off = builder.end_table(start);
             (attr.union_type(), Some(off))
         }

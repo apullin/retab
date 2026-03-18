@@ -241,6 +241,109 @@ pub struct ReduceSumAttribute {
 #[derive(Debug, Clone)]
 pub struct TableAttribute;
 
+/// SigmoidAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct SigmoidAttribute;
+
+/// TanhAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct TanhAttribute;
+
+/// ExpAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct ExpAttribute;
+
+/// LogAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct LogAttribute;
+
+/// NegateAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct NegateAttribute;
+
+/// AbsAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct AbsAttribute;
+
+/// CeilAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct CeilAttribute;
+
+/// FloorAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct FloorAttribute;
+
+/// ReciprocalAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct ReciprocalAttribute;
+
+/// ErfAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct ErfAttribute;
+
+/// CosAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct CosAttribute;
+
+/// SinAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct SinAttribute;
+
+/// RsqrtAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct RsqrtAttribute;
+
+/// MatMulAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct MatMulAttribute;
+
+/// ConcatAttribute — axis for concatenation.
+#[derive(Debug, Clone)]
+pub struct ConcatAttribute {
+    pub axis: i32,
+}
+
+/// PadAttribute — empty (padding comes from input shapes).
+#[derive(Debug, Clone)]
+pub struct PadAttribute;
+
+/// SliceAttribute — empty (start/size come from input shapes).
+#[derive(Debug, Clone)]
+pub struct SliceAttribute;
+
+/// GatherAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct GatherAttribute;
+
+/// SelectAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct SelectAttribute;
+
+/// CastAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct CastAttribute;
+
+/// EqualAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct EqualAttribute;
+
+/// GreaterAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct GreaterAttribute;
+
+/// GreaterEqualAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct GreaterEqualAttribute;
+
+/// TransposeConv2dAttribute — deconvolution parameters.
+#[derive(Debug, Clone)]
+pub struct TransposeConv2dAttribute {
+    pub out_pad: Vec<i32>,
+    pub stride: Vec<i32>,
+    pub local_bound: bool,
+    pub acc_type: DType,
+}
+
 // ---------------------------------------------------------------------------
 // Attribute union
 // ---------------------------------------------------------------------------
@@ -264,6 +367,30 @@ pub enum Attribute {
     AvgPool2d(AvgPool2dAttribute),
     ReduceSum(ReduceSumAttribute),
     Table(TableAttribute),
+    Sigmoid(SigmoidAttribute),
+    Tanh(TanhAttribute),
+    Exp(ExpAttribute),
+    Log(LogAttribute),
+    Negate(NegateAttribute),
+    Abs(AbsAttribute),
+    Ceil(CeilAttribute),
+    Floor(FloorAttribute),
+    Reciprocal(ReciprocalAttribute),
+    Erf(ErfAttribute),
+    Cos(CosAttribute),
+    Sin(SinAttribute),
+    Rsqrt(RsqrtAttribute),
+    MatMul(MatMulAttribute),
+    Concat(ConcatAttribute),
+    Pad(PadAttribute),
+    Slice(SliceAttribute),
+    Gather(GatherAttribute),
+    Select(SelectAttribute),
+    Cast(CastAttribute),
+    Equal(EqualAttribute),
+    Greater(GreaterAttribute),
+    GreaterEqual(GreaterEqualAttribute),
+    TransposeConv2d(TransposeConv2dAttribute),
 }
 
 impl Attribute {
@@ -287,6 +414,30 @@ impl Attribute {
             Attribute::AvgPool2d(_) => 2,       // AvgPool2dAttribute
             Attribute::ReduceSum(_) => 54,      // ReduceSumAttribute
             Attribute::Table(_) => 31,          // TableAttribute
+            Attribute::Sigmoid(_) => 13,        // SigmoidAttribute
+            Attribute::Tanh(_) => 14,           // TanhAttribute
+            Attribute::Exp(_) => 37,            // ExpAttribute
+            Attribute::Log(_) => 39,            // LogAttribute
+            Attribute::Negate(_) => 41,         // NegateAttribute
+            Attribute::Abs(_) => 32,            // AbsAttribute
+            Attribute::Ceil(_) => 34,           // CeilAttribute
+            Attribute::Floor(_) => 38,          // FloorAttribute
+            Attribute::Reciprocal(_) => 42,     // ReciprocalAttribute
+            Attribute::Erf(_) => 12,            // ErfAttribute
+            Attribute::Cos(_) => 36,            // CosAttribute
+            Attribute::Sin(_) => 44,            // SinAttribute
+            Attribute::Rsqrt(_) => 43,          // RsqrtAttribute
+            Attribute::MatMul(_) => 7,          // MatMulAttribute
+            Attribute::Concat(_) => 55,         // ConcatAttribute
+            Attribute::Pad(_) => 56,            // PadAttribute
+            Attribute::Slice(_) => 59,          // SliceAttribute
+            Attribute::Gather(_) => 62,         // GatherAttribute
+            Attribute::Select(_) => 45,         // SelectAttribute
+            Attribute::Cast(_) => 65,           // CastAttribute
+            Attribute::Equal(_) => 46,          // EqualAttribute
+            Attribute::Greater(_) => 47,        // GreaterAttribute
+            Attribute::GreaterEqual(_) => 48,   // GreaterEqualAttribute
+            Attribute::TransposeConv2d(_) => 10, // TransposeConv2dAttribute
         }
     }
 }

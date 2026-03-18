@@ -9,11 +9,15 @@ use crate::graph::Graph;
 use crate::store::TensorStore;
 
 use super::tosa_generated::{
-    AddAttribute, Attribute, AvgPool2dAttribute, ClampAttribute, ConstAttribute,
-    ConstShapeAttribute, Conv2dAttribute, DType, DepthwiseConv2dAttribute, MaxPool2dAttribute,
-    MulAttribute, NanPropagationMode, Op, ReduceSumAttribute, RescaleAttribute, ReshapeAttribute,
-    RoundingMode, SubAttribute, TableAttribute, TosaOperator, TosaShape, TosaTensor,
-    TransposeAttribute,
+    AbsAttribute, AddAttribute, Attribute, AvgPool2dAttribute, CastAttribute, CeilAttribute,
+    ClampAttribute, ConcatAttribute, ConstAttribute, ConstShapeAttribute, Conv2dAttribute,
+    CosAttribute, DType, DepthwiseConv2dAttribute, EqualAttribute, ErfAttribute, ExpAttribute,
+    FloorAttribute, GatherAttribute, GreaterAttribute, GreaterEqualAttribute, LogAttribute,
+    MatMulAttribute, MaxPool2dAttribute, MulAttribute, NanPropagationMode, NegateAttribute, Op,
+    PadAttribute, ReciprocalAttribute, ReduceSumAttribute, RescaleAttribute, ReshapeAttribute,
+    RoundingMode, RsqrtAttribute, SelectAttribute, SigmoidAttribute, SinAttribute, SliceAttribute,
+    SubAttribute, TableAttribute, TanhAttribute, TosaOperator, TosaShape, TosaTensor,
+    TransposeAttribute, TransposeConv2dAttribute,
 };
 
 // ---------------------------------------------------------------------------
@@ -820,6 +824,578 @@ pub fn emit_table(
 }
 
 // ---------------------------------------------------------------------------
+// Simple unary/binary visitors (empty attribute)
+// ---------------------------------------------------------------------------
+
+/// Emit a SIGMOID operator.
+pub fn emit_sigmoid(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Sigmoid,
+        attribute: Attribute::Sigmoid(SigmoidAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a TANH operator.
+pub fn emit_tanh(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Tanh,
+        attribute: Attribute::Tanh(TanhAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit an EXP operator.
+pub fn emit_exp(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Exp,
+        attribute: Attribute::Exp(ExpAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a LOG operator.
+pub fn emit_log(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Log,
+        attribute: Attribute::Log(LogAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a NEGATE operator.
+pub fn emit_negate(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Negate,
+        attribute: Attribute::Negate(NegateAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit an ABS operator.
+pub fn emit_abs(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Abs,
+        attribute: Attribute::Abs(AbsAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a CEIL operator.
+pub fn emit_ceil(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Ceil,
+        attribute: Attribute::Ceil(CeilAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a FLOOR operator.
+pub fn emit_floor(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Floor,
+        attribute: Attribute::Floor(FloorAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a RECIPROCAL operator.
+pub fn emit_reciprocal(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Reciprocal,
+        attribute: Attribute::Reciprocal(ReciprocalAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit an ERF operator.
+pub fn emit_erf(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Erf,
+        attribute: Attribute::Erf(ErfAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a COS operator.
+pub fn emit_cos(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Cos,
+        attribute: Attribute::Cos(CosAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a SIN operator.
+pub fn emit_sin(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Sin,
+        attribute: Attribute::Sin(SinAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit an RSQRT operator.
+pub fn emit_rsqrt(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Rsqrt,
+        attribute: Attribute::Rsqrt(RsqrtAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a SELECT operator (ternary: condition, on_true, on_false).
+pub fn emit_select(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Select,
+        attribute: Attribute::Select(SelectAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit an EQUAL operator.
+pub fn emit_equal(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Equal,
+        attribute: Attribute::Equal(EqualAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a GREATER operator.
+pub fn emit_greater(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Greater,
+        attribute: Attribute::Greater(GreaterAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a GREATER_EQUAL operator.
+pub fn emit_greater_equal(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::GreaterEqual,
+        attribute: Attribute::GreaterEqual(GreaterEqualAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a CAST operator.
+pub fn emit_cast(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Cast,
+        attribute: Attribute::Cast(CastAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a GATHER operator.
+pub fn emit_gather(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Gather,
+        attribute: Attribute::Gather(GatherAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Parameterised visitors
+// ---------------------------------------------------------------------------
+
+/// Emit a MATMUL operator.
+///
+/// TOSA MATMUL takes 4 inputs: [A, B, A_zp, B_zp].
+/// We create inline const tensors for the zero-point scalars.
+pub fn emit_matmul(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+
+    let a_zp = kwarg_i32(node, "A_zp", 0);
+    let b_zp = kwarg_i32(node, "B_zp", 0);
+
+    // Create A_zp const tensor
+    let a_zp_name = format!("{}_A_zp", node.name);
+    result.tensors.push(TosaTensor {
+        name: a_zp_name.clone(),
+        shape: vec![1],
+        dtype: DType::Int32,
+        data: a_zp.to_le_bytes().to_vec(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Const,
+        attribute: Attribute::Const(ConstAttribute),
+        inputs: vec![],
+        outputs: vec![a_zp_name.clone()],
+        location: None,
+    });
+
+    // Create B_zp const tensor
+    let b_zp_name = format!("{}_B_zp", node.name);
+    result.tensors.push(TosaTensor {
+        name: b_zp_name.clone(),
+        shape: vec![1],
+        dtype: DType::Int32,
+        data: b_zp.to_le_bytes().to_vec(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Const,
+        attribute: Attribute::Const(ConstAttribute),
+        inputs: vec![],
+        outputs: vec![b_zp_name.clone()],
+        location: None,
+    });
+
+    // MATMUL inputs: [A, B, A_zp, B_zp]
+    let mut matmul_inputs = input_names;
+    matmul_inputs.push(a_zp_name);
+    matmul_inputs.push(b_zp_name);
+
+    result.operators.push(TosaOperator {
+        op: Op::Matmul,
+        attribute: Attribute::MatMul(MatMulAttribute),
+        inputs: matmul_inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
+/// Emit a CONCAT operator.
+pub fn emit_concat(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+
+    let axis = kwarg_i32(node, "axis", 0);
+
+    result.operators.push(TosaOperator {
+        op: Op::Concat,
+        attribute: Attribute::Concat(ConcatAttribute { axis }),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
+/// Emit a PAD operator.
+///
+/// TOSA PAD takes 2 inputs: [input, padding_shape].
+/// The padding shape is a CONST_SHAPE tensor.
+pub fn emit_pad(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+
+    result.operators.push(TosaOperator {
+        op: Op::Pad,
+        attribute: Attribute::Pad(PadAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
+/// Emit a SLICE operator.
+///
+/// TOSA SLICE takes 3 inputs: [input, start_shape, size_shape].
+pub fn emit_slice(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+
+    result.operators.push(TosaOperator {
+        op: Op::Slice,
+        attribute: Attribute::Slice(SliceAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
+/// Emit a TRANSPOSE_CONV2D operator.
+pub fn emit_transpose_conv2d(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+
+    let out_pad = kwarg_i32_list(node, "out_pad");
+    let stride = kwarg_i32_list(node, "stride");
+    let local_bound = kwarg_bool(node, "local_bound", false);
+    let acc_type = DType::Int32;
+
+    result.operators.push(TosaOperator {
+        op: Op::TransposeConv2d,
+        attribute: Attribute::TransposeConv2d(TransposeConv2dAttribute {
+            out_pad: if out_pad.is_empty() {
+                vec![0, 0, 0, 0]
+            } else {
+                out_pad
+            },
+            stride: if stride.is_empty() {
+                vec![1, 1]
+            } else {
+                stride
+            },
+            local_bound,
+            acc_type,
+        }),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
@@ -849,6 +1425,34 @@ pub fn emit_node(
         OpTarget::TosaAvgPool2d => Some(emit_avg_pool2d(graph, node_id, node, store)),
         OpTarget::TosaReduceSum => Some(emit_reduce_sum(graph, node_id, node, store)),
         OpTarget::TosaTable => Some(emit_table(graph, node_id, node, store)),
+        OpTarget::TosaSigmoid => Some(emit_sigmoid(graph, node_id, node, store)),
+        OpTarget::TosaTanh => Some(emit_tanh(graph, node_id, node, store)),
+        OpTarget::TosaExp => Some(emit_exp(graph, node_id, node, store)),
+        OpTarget::TosaLog => Some(emit_log(graph, node_id, node, store)),
+        OpTarget::TosaNeg | OpTarget::TosaNegate => {
+            Some(emit_negate(graph, node_id, node, store))
+        }
+        OpTarget::TosaAbs => Some(emit_abs(graph, node_id, node, store)),
+        OpTarget::TosaCeil => Some(emit_ceil(graph, node_id, node, store)),
+        OpTarget::TosaFloor => Some(emit_floor(graph, node_id, node, store)),
+        OpTarget::TosaReciprocal => Some(emit_reciprocal(graph, node_id, node, store)),
+        OpTarget::TosaErf => Some(emit_erf(graph, node_id, node, store)),
+        OpTarget::TosaCos => Some(emit_cos(graph, node_id, node, store)),
+        OpTarget::TosaSin => Some(emit_sin(graph, node_id, node, store)),
+        OpTarget::TosaRsqrt => Some(emit_rsqrt(graph, node_id, node, store)),
+        OpTarget::TosaMatmul => Some(emit_matmul(graph, node_id, node, store)),
+        OpTarget::TosaConcat => Some(emit_concat(graph, node_id, node, store)),
+        OpTarget::TosaPad => Some(emit_pad(graph, node_id, node, store)),
+        OpTarget::TosaSlice => Some(emit_slice(graph, node_id, node, store)),
+        OpTarget::TosaGather => Some(emit_gather(graph, node_id, node, store)),
+        OpTarget::TosaSelect => Some(emit_select(graph, node_id, node, store)),
+        OpTarget::TosaCast => Some(emit_cast(graph, node_id, node, store)),
+        OpTarget::TosaEqual => Some(emit_equal(graph, node_id, node, store)),
+        OpTarget::TosaGreater => Some(emit_greater(graph, node_id, node, store)),
+        OpTarget::TosaGreaterEqual => Some(emit_greater_equal(graph, node_id, node, store)),
+        OpTarget::TosaTransposeConv2d => {
+            Some(emit_transpose_conv2d(graph, node_id, node, store))
+        }
         // Ops not yet handled — skip silently for now.
         _ => None,
     }

@@ -71,6 +71,7 @@ fn compute_output_info(graph: &Graph, node_id: NodeId) -> TensorInfo {
         OpTarget::Sum => compute_sum(graph, node),
         OpTarget::TosaReduceSum => compute_tosa_reduce_sum(graph, node),
 
+        // Element-wise unary ops: same shape as input
         OpTarget::Rsqrt
         | OpTarget::Neg
         | OpTarget::Abs
@@ -79,9 +80,88 @@ fn compute_output_info(graph: &Graph, node_id: NodeId) -> TensorInfo {
         | OpTarget::Log
         | OpTarget::Sigmoid
         | OpTarget::Tanh
-        | OpTarget::TosaTable => input_info(graph, node, 0),
+        | OpTarget::Gelu
+        | OpTarget::Ceil
+        | OpTarget::Floor
+        | OpTarget::Sqrt
+        | OpTarget::Log1p
+        | OpTarget::Expm1
+        | OpTarget::Sign
+        | OpTarget::Round
+        | OpTarget::Pow
+        | OpTarget::LeakyRelu
+        | OpTarget::TosaTable
+        | OpTarget::TosaSigmoid
+        | OpTarget::TosaTanh
+        | OpTarget::TosaExp
+        | OpTarget::TosaLog
+        | OpTarget::TosaNeg
+        | OpTarget::TosaAbs
+        | OpTarget::TosaCeil
+        | OpTarget::TosaFloor
+        | OpTarget::TosaReciprocal
+        | OpTarget::TosaErf
+        | OpTarget::TosaCos
+        | OpTarget::TosaSin
+        | OpTarget::TosaRsqrt
+        | OpTarget::TosaNegate => input_info(graph, node, 0),
 
-        OpTarget::Mean | OpTarget::Var => compute_mean(graph, node),
+        OpTarget::Softmax => input_info(graph, node, 0),
+
+        // TosaCast: same shape, different dtype (preserve existing meta dtype)
+        OpTarget::TosaCast => {
+            let mut info = input_info(graph, node, 0);
+            info.dtype = node.meta.val.dtype;
+            info
+        }
+
+        // Comparison ops: broadcast shape, Bool dtype
+        OpTarget::TosaEqual | OpTarget::TosaGreater | OpTarget::TosaGreaterEqual => {
+            let mut info = compute_broadcast(graph, node);
+            info.dtype = DType::Bool;
+            info
+        }
+
+        // TosaSelect: output shape = condition shape (first arg)
+        OpTarget::TosaSelect => input_info(graph, node, 0),
+
+        // TosaGather: output shape from indices
+        OpTarget::TosaGather => {
+            let values = input_info(graph, node, 0);
+            let indices = input_info(graph, node, 1);
+            let v_shape = values.shape_slice();
+            let i_shape = indices.shape_slice();
+            // gather(values[N,K,C], indices[N,W]) -> [N,W,C]
+            if v_shape.len() >= 3 && i_shape.len() >= 2 {
+                let n = v_shape[0];
+                let w = i_shape[1];
+                let c = v_shape[2];
+                TensorInfo::new(&[n, w, c], values.dtype)
+            } else {
+                values
+            }
+        }
+
+        // TosaMatmul: (B,M,K) x (B,K,N) -> (B,M,N) or (M,K) x (K,N) -> (M,N)
+        OpTarget::TosaMatmul | OpTarget::Matmul | OpTarget::Bmm => {
+            compute_matmul(graph, node)
+        }
+
+        // TosaConcat: sum the concat dimension
+        OpTarget::TosaConcat | OpTarget::Cat => compute_concat(graph, node),
+
+        // TosaPad: add padding to dims
+        OpTarget::TosaPad | OpTarget::Pad => compute_pad(graph, node),
+
+        // TosaSlice: output from start/size
+        OpTarget::TosaSlice | OpTarget::Slice => compute_slice(graph, node),
+
+        OpTarget::Mean | OpTarget::Var | OpTarget::Amax => compute_mean(graph, node),
+        OpTarget::TosaReduceMax => compute_tosa_reduce_sum(graph, node),
+
+        OpTarget::Linear => compute_linear(graph, node),
+        OpTarget::Addmm => compute_addmm(graph, node),
+        OpTarget::GroupNorm => input_info(graph, node, 0),
 
         OpTarget::QuantizePerTensor => {
             let mut info = input_info(graph, node, 0);
@@ -415,6 +495,41 @@ fn compute_mean(graph: &Graph, node: &Node) -> TensorInfo {
 }
 
 // ---------------------------------------------------------------------------
+// Linear: (*, Ci) x (Co, Ci) -> (*, Co)
+// ---------------------------------------------------------------------------
+
+fn compute_linear(graph: &Graph, node: &Node) -> TensorInfo {
+    let input = input_info(graph, node, 0);
+    let weight = input_info(graph, node, 1);
+    let in_shape = input.shape_slice();
+    let w_shape = weight.shape_slice();
+    if in_shape.is_empty() || w_shape.is_empty() {
+        return input;
+    }
+    let mut out_shape = in_shape.to_vec();
+    // Last dim becomes Co (first dim of weight)
+    *out_shape.last_mut().unwrap() = w_shape[0];
+    let len = out_shape.len().min(4);
+    TensorInfo::new(&out_shape[..len], input.dtype)
+}
+
+// ---------------------------------------------------------------------------
+// Addmm: addmm(bias, x, weight) -> matmul(x, weight) + bias
+// Output shape from matmul: (N, K) x (K, M) -> (N, M)
+// ---------------------------------------------------------------------------
+
+fn compute_addmm(graph: &Graph, node: &Node) -> TensorInfo {
+    let x = input_info(graph, node, 1);
+    let weight = input_info(graph, node, 2);
+    let x_shape = x.shape_slice();
+    let w_shape = weight.shape_slice();
+    if x_shape.len() < 2 || w_shape.len() < 2 {
+        return x;
+    }
+    TensorInfo::new(&[x_shape[0], w_shape[1]], x.dtype)
+}
+
+// ---------------------------------------------------------------------------
 // Shared reduction logic for sum / mean
 // ---------------------------------------------------------------------------
 
@@ -464,6 +579,201 @@ fn compute_reduction(node: &Node, input: &TensorInfo, dims_arg_idx: usize) -> Te
         let len = out_shape.len().min(4);
         TensorInfo::new(&out_shape[..len], input.dtype)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Matmul / Bmm / TosaMatmul
+// ---------------------------------------------------------------------------
+
+fn compute_matmul(graph: &Graph, node: &Node) -> TensorInfo {
+    let a = input_info(graph, node, 0);
+    let b = input_info(graph, node, 1);
+    let a_shape = a.shape_slice();
+    let b_shape = b.shape_slice();
+
+    match (a_shape.len(), b_shape.len()) {
+        // (M,K) x (K,N) -> (M,N)
+        (2, 2) => TensorInfo::new(&[a_shape[0], b_shape[1]], a.dtype),
+        // (B,M,K) x (B,K,N) -> (B,M,N)
+        (3, 3) => TensorInfo::new(&[a_shape[0], a_shape[1], b_shape[2]], a.dtype),
+        // (B1,B2,M,K) x (B1,B2,K,N) -> (B1,B2,M,N)
+        (4, 4) => TensorInfo::new(
+            &[a_shape[0], a_shape[1], a_shape[2], b_shape[3]],
+            a.dtype,
+        ),
+        _ => a,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Concat / Cat / TosaConcat
+// ---------------------------------------------------------------------------
+
+fn compute_concat(graph: &Graph, node: &Node) -> TensorInfo {
+    // Cat: args[0] = NodeList of tensors, args[1] = dim
+    // TosaConcat: similar, with axis in kwargs
+    let first_input = match node.args.first() {
+        Some(Arg::NodeList(ids)) if !ids.is_empty() => {
+            graph.node(ids[0]).map(|n| n.meta.val).unwrap_or_default()
+        }
+        Some(Arg::Node(_)) => input_info(graph, node, 0),
+        _ => return node.meta.val,
+    };
+    let in_shape = first_input.shape_slice();
+    if in_shape.is_empty() {
+        return first_input;
+    }
+
+    // Get the concat axis
+    let axis = match node.args.get(1) {
+        Some(Arg::Int(d)) => *d,
+        _ => node
+            .kwargs
+            .iter()
+            .find_map(|(k, v)| {
+                if k == "axis" {
+                    if let Arg::Int(a) = v {
+                        return Some(*a);
+                    }
+                }
+                None
+            })
+            .unwrap_or(0),
+    };
+    let ndim = in_shape.len() as i64;
+    let axis = if axis < 0 { (axis + ndim) as usize } else { axis as usize };
+
+    // Sum the concat dimension across all inputs
+    let total_dim: i64 = match node.args.first() {
+        Some(Arg::NodeList(ids)) => ids
+            .iter()
+            .map(|id| {
+                graph
+                    .node(*id)
+                    .map(|n| {
+                        let s = n.meta.val.shape_slice();
+                        if axis < s.len() { s[axis] } else { 0 }
+                    })
+                    .unwrap_or(0)
+            })
+            .sum(),
+        _ => in_shape.get(axis).copied().unwrap_or(0),
+    };
+
+    let mut out = [0i64; 4];
+    let len = in_shape.len().min(4);
+    for i in 0..len {
+        out[i] = if i == axis { total_dim } else { in_shape[i] };
+    }
+    TensorInfo::new(&out[..len], first_input.dtype)
+}
+
+// ---------------------------------------------------------------------------
+// Pad / TosaPad
+// ---------------------------------------------------------------------------
+
+fn compute_pad(graph: &Graph, node: &Node) -> TensorInfo {
+    let input = input_info(graph, node, 0);
+    let in_shape = input.shape_slice();
+    if in_shape.is_empty() {
+        return input;
+    }
+
+    // ATen pad: args[1] = IntList of pad values [last_dim_left, last_dim_right, ...]
+    // TosaPad: padding in kwargs or args
+    let padding = int_list_arg(node, 1);
+    if padding.is_empty() {
+        return input;
+    }
+
+    let mut out = [0i64; 4];
+    let len = in_shape.len().min(4);
+    for i in 0..len {
+        out[i] = in_shape[i];
+    }
+
+    // ATen padding is in reverse dimension order: pairs for last dim, then second-to-last, etc.
+    let num_pairs = padding.len() / 2;
+    for p in 0..num_pairs {
+        let dim = len.saturating_sub(1 + p);
+        let left = padding[p * 2];
+        let right = padding[p * 2 + 1];
+        out[dim] += left + right;
+    }
+
+    TensorInfo::new(&out[..len], input.dtype)
+}
+
+// ---------------------------------------------------------------------------
+// Slice / TosaSlice
+// ---------------------------------------------------------------------------
+
+fn compute_slice(graph: &Graph, node: &Node) -> TensorInfo {
+    let input = input_info(graph, node, 0);
+    let in_shape = input.shape_slice();
+    if in_shape.is_empty() {
+        return input;
+    }
+
+    // ATen slice: args = [input, dim, start, end, step]
+    // TosaSlice: start/size in kwargs
+    let dim = match node.args.get(1) {
+        Some(Arg::Int(d)) => {
+            let d = *d;
+            if d < 0 { (d + in_shape.len() as i64) as usize } else { d as usize }
+        }
+        _ => {
+            // TosaSlice: check kwargs for start/size
+            let _start_kw = node.kwargs.iter().find_map(|(k, v)| {
+                if k == "start" {
+                    if let Arg::IntList(s) = v { return Some(s.to_vec()); }
+                }
+                None
+            });
+            let size_kw = node.kwargs.iter().find_map(|(k, v)| {
+                if k == "size" {
+                    if let Arg::IntList(s) = v { return Some(s.to_vec()); }
+                }
+                None
+            });
+            if let Some(size) = size_kw {
+                let len = size.len().min(4).min(in_shape.len());
+                return TensorInfo::new(&size[..len], input.dtype);
+            }
+            return input;
+        }
+    };
+
+    let start = match node.args.get(2) {
+        Some(Arg::Int(s)) => (*s).max(0),
+        _ => 0,
+    };
+    let end = match node.args.get(3) {
+        Some(Arg::Int(e)) => {
+            let e = *e;
+            if e < 0 {
+                (e + in_shape[dim]).max(0)
+            } else {
+                e.min(in_shape[dim])
+            }
+        }
+        _ => in_shape[dim],
+    };
+    let step = match node.args.get(4) {
+        Some(Arg::Int(s)) => (*s).max(1),
+        _ => 1,
+    };
+
+    let mut out = [0i64; 4];
+    let len = in_shape.len().min(4);
+    for i in 0..len {
+        out[i] = in_shape[i];
+    }
+    if dim < len {
+        let sliced = (end - start + step - 1) / step;
+        out[dim] = sliced.max(0);
+    }
+    TensorInfo::new(&out[..len], input.dtype)
 }
 
 // ---------------------------------------------------------------------------
@@ -807,5 +1117,177 @@ mod tests {
         let info = g.node(op_id).unwrap().meta.val;
         assert_eq!(info.shape_slice(), &[2, 3, 4, 5]);
         assert_eq!(info.dtype, DType::Float32);
+    }
+
+    #[test]
+    fn test_matmul_2d() {
+        // (4,3) x (3,5) -> (4,5)
+        let (mut g, op_id) = build_graph_with_op(
+            &[
+                (&[4, 3], DType::Float32),
+                (&[3, 5], DType::Float32),
+            ],
+            OpTarget::Matmul,
+            vec![Arg::None, Arg::None],
+            vec![],
+        );
+
+        propagate_shape(&mut g, op_id);
+        let info = g.node(op_id).unwrap().meta.val;
+        assert_eq!(info.shape_slice(), &[4, 5]);
+    }
+
+    #[test]
+    fn test_matmul_3d() {
+        // (2,4,3) x (2,3,5) -> (2,4,5)
+        let (mut g, op_id) = build_graph_with_op(
+            &[
+                (&[2, 4, 3], DType::Float32),
+                (&[2, 3, 5], DType::Float32),
+            ],
+            OpTarget::TosaMatmul,
+            vec![Arg::None, Arg::None],
+            vec![],
+        );
+
+        propagate_shape(&mut g, op_id);
+        let info = g.node(op_id).unwrap().meta.val;
+        assert_eq!(info.shape_slice(), &[2, 4, 5]);
+    }
+
+    #[test]
+    fn test_concat() {
+        // Cat([t1(1,3,4), t2(1,5,4)], dim=1) -> (1,8,4)
+        let mut g = Graph::new();
+        let t1 = g.nodes.insert(Node {
+            op: OpType::Placeholder,
+            target: OpTarget::Other("t1".into()),
+            args: smallvec![],
+            kwargs: vec![],
+            meta: NodeMeta::new(TensorInfo::new(&[1, 3, 4], DType::Float32)),
+            users: smallvec![],
+            name: "t1".into(),
+        });
+        g.order.push(t1);
+        let t2 = g.nodes.insert(Node {
+            op: OpType::Placeholder,
+            target: OpTarget::Other("t2".into()),
+            args: smallvec![],
+            kwargs: vec![],
+            meta: NodeMeta::new(TensorInfo::new(&[1, 5, 4], DType::Float32)),
+            users: smallvec![],
+            name: "t2".into(),
+        });
+        g.order.push(t2);
+
+        let cat_node = Node {
+            op: OpType::CallFunction,
+            target: OpTarget::Cat,
+            args: smallvec![
+                Arg::NodeList(smallvec![t1, t2]),
+                Arg::Int(1),
+            ],
+            kwargs: vec![],
+            meta: NodeMeta::new(TensorInfo::default()),
+            users: smallvec![],
+            name: "cat".into(),
+        };
+        let cat_id = g.nodes.insert(cat_node);
+        g.order.push(cat_id);
+
+        propagate_shape(&mut g, cat_id);
+        let info = g.node(cat_id).unwrap().meta.val;
+        assert_eq!(info.shape_slice(), &[1, 8, 4]);
+    }
+
+    #[test]
+    fn test_slice() {
+        // slice(input(1,10,4), dim=1, start=2, end=7, step=1) -> (1,5,4)
+        let (mut g, op_id) = build_graph_with_op(
+            &[(&[1, 10, 4], DType::Float32)],
+            OpTarget::Slice,
+            vec![
+                Arg::None,
+                Arg::Int(1),   // dim
+                Arg::Int(2),   // start
+                Arg::Int(7),   // end
+                Arg::Int(1),   // step
+            ],
+            vec![],
+        );
+
+        propagate_shape(&mut g, op_id);
+        let info = g.node(op_id).unwrap().meta.val;
+        assert_eq!(info.shape_slice(), &[1, 5, 4]);
+    }
+
+    #[test]
+    fn test_pad() {
+        // pad(input(1,3,4), [1,1,2,2]) -> (1,7,6)
+        // ATen pad: last dim gets [1,1], second-to-last gets [2,2]
+        let (mut g, op_id) = build_graph_with_op(
+            &[(&[1, 3, 4], DType::Float32)],
+            OpTarget::Pad,
+            vec![
+                Arg::None,
+                Arg::IntList(smallvec![1, 1, 2, 2]),
+            ],
+            vec![],
+        );
+
+        propagate_shape(&mut g, op_id);
+        let info = g.node(op_id).unwrap().meta.val;
+        assert_eq!(info.shape_slice(), &[1, 7, 6]);
+    }
+
+    #[test]
+    fn test_tosa_comparison_output_dtype() {
+        // TosaEqual should produce Bool dtype
+        let (mut g, op_id) = build_graph_with_op(
+            &[
+                (&[1, 16], DType::Float32),
+                (&[1, 16], DType::Float32),
+            ],
+            OpTarget::TosaEqual,
+            vec![Arg::None, Arg::None],
+            vec![],
+        );
+
+        propagate_shape(&mut g, op_id);
+        let info = g.node(op_id).unwrap().meta.val;
+        assert_eq!(info.shape_slice(), &[1, 16]);
+        assert_eq!(info.dtype, DType::Bool);
+    }
+
+    #[test]
+    fn test_elementwise_unary_ops() {
+        // All unary ops should preserve shape
+        for target in &[
+            OpTarget::Sqrt,
+            OpTarget::Log1p,
+            OpTarget::Expm1,
+            OpTarget::Sign,
+            OpTarget::Round,
+            OpTarget::TosaErf,
+            OpTarget::TosaCos,
+            OpTarget::TosaSin,
+            OpTarget::TosaRsqrt,
+        ] {
+            let (mut g, op_id) = build_graph_with_op(
+                &[(&[2, 3, 4], DType::Float32)],
+                target.clone(),
+                vec![Arg::None],
+                vec![],
+            );
+
+            propagate_shape(&mut g, op_id);
+            let info = g.node(op_id).unwrap().meta.val;
+            assert_eq!(
+                info.shape_slice(),
+                &[2, 3, 4],
+                "Shape mismatch for {:?}",
+                target,
+            );
+        }
     }
 }

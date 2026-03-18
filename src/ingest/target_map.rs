@@ -103,10 +103,10 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     if target_str.contains("aten.cat") {
         return OpTarget::Cat;
     }
-    if target_str.contains("aten.slice") {
+    if target_str.contains("aten.slice_copy") || target_str.contains("aten.slice") {
         return OpTarget::Slice;
     }
-    if target_str.contains("aten.select") {
+    if target_str.contains("aten.select_copy") || target_str.contains("aten.select") || target_str.contains("aten.index_select") {
         return OpTarget::Select;
     }
     if target_str.contains("aten.unsqueeze") {
@@ -118,7 +118,7 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     if target_str.contains("aten.flatten") {
         return OpTarget::Flatten;
     }
-    if target_str.contains("aten.pad") {
+    if target_str.contains("aten.constant_pad_nd") || target_str.contains("aten.pad") {
         return OpTarget::Pad;
     }
     if target_str.contains("aten.embedding") {
@@ -160,11 +160,50 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     if target_str.contains("aten.to.") || target_str.contains("aten._to_copy") {
         return OpTarget::To;
     }
+    if target_str.contains("aten.group_norm") {
+        return OpTarget::GroupNorm;
+    }
+    if target_str.contains("aten.amax") {
+        return OpTarget::Amax;
+    }
     if target_str.contains("aten.var.") {
         return OpTarget::Var;
     }
     if target_str.contains("aten.full_like") {
         return OpTarget::FullLike;
+    }
+    if target_str.contains("aten.where") {
+        return OpTarget::Where;
+    }
+    if target_str.contains("aten.floor_divide") {
+        return OpTarget::FloorDivide;
+    }
+    if target_str.contains("aten.gather") {
+        return OpTarget::Other("aten.gather".into());
+    }
+    if target_str.contains("aten.arange") {
+        return OpTarget::Arange;
+    }
+    if target_str.contains("aten.leaky_relu") {
+        return OpTarget::LeakyRelu;
+    }
+    if target_str.contains("aten.sqrt") {
+        return OpTarget::Sqrt;
+    }
+    if target_str.contains("aten.log1p") {
+        return OpTarget::Log1p;
+    }
+    if target_str.contains("aten.expm1") {
+        return OpTarget::Expm1;
+    }
+    if target_str.contains("aten.remainder") {
+        return OpTarget::Remainder;
+    }
+    if target_str.contains("aten.sign") {
+        return OpTarget::Sign;
+    }
+    if target_str.contains("aten.round") {
+        return OpTarget::Round;
     }
 
     OpTarget::Other(target_str.to_string())

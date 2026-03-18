@@ -16,6 +16,9 @@ pub mod match_arg_dtype;
 pub mod memory_format;
 pub mod propagate_qparams;
 pub mod rewrite_conv;
+pub mod rewrite_matmul;
+pub mod rewrite_pad;
+pub mod rewrite_slice;
 
 use crate::graph::Graph;
 use crate::store::TensorStore;
@@ -198,8 +201,23 @@ fn is_fusable(target: &crate::graph::ir::OpTarget) -> bool {
             | OpTarget::TosaReshape
             | OpTarget::TosaTranspose
             | OpTarget::TosaReduceSum
+            | OpTarget::TosaReduceMax
             | OpTarget::TosaClamp
             | OpTarget::TosaTable
+            | OpTarget::TosaSigmoid
+            | OpTarget::TosaTanh
+            | OpTarget::TosaExp
+            | OpTarget::TosaLog
+            | OpTarget::TosaNeg
+            | OpTarget::TosaAbs
+            | OpTarget::TosaCeil
+            | OpTarget::TosaFloor
+            | OpTarget::TosaReciprocal
+            | OpTarget::Reciprocal
+            | OpTarget::Exp
+            | OpTarget::Sigmoid
+            | OpTarget::Tanh
+            | OpTarget::Amax
     )
 }
 
@@ -333,6 +351,22 @@ pub fn build_phase2_pipeline() -> PassRunner {
     runner.add(Box::new(decompose::meandim::DecomposeMeanDimPass));
     runner.add(Box::new(convert_full::ConvertFullLikeToFullPass));
 
+    // 4a. Math/activation decomposition passes (Phase 3A)
+    runner.add(Box::new(decompose::math::DecomposeSoftmaxPass));
+    runner.add(Box::new(decompose::math::DecomposeGeluPass));
+    runner.add(Box::new(decompose::math::DecomposeBatchNormPass));
+    runner.add(Box::new(decompose::math::DecomposeGroupNormPass));
+    runner.add(Box::new(decompose::math::DecomposeLinearPass));
+    runner.add(Box::new(decompose::math::DecomposeAddmmPass));
+
+    // 4b. Tensor operation decompositions (from 3B)
+    runner.add(Box::new(decompose::tensor_ops::DecomposeSelectPass));
+    runner.add(Box::new(decompose::tensor_ops::DecomposeEmbeddingPass));
+    runner.add(Box::new(decompose::tensor_ops::DecomposeCatPass));
+    runner.add(Box::new(decompose::tensor_ops::DecomposeDivPass));
+    runner.add(Box::new(decompose::tensor_ops::DecomposeFloorDividePass));
+    runner.add(Box::new(decompose::tensor_ops::DecomposeWherePass));
+
     // 5. FoldAndAnnotateQParamsPass (existing)
     runner.add(Box::new(fold_qdq::FoldAndAnnotateQParamsPass));
 
@@ -383,6 +417,11 @@ pub fn build_phase2_pipeline() -> PassRunner {
 
     // 13. RewriteConvPass (existing)
     runner.add(Box::new(rewrite_conv::RewriteConvPass));
+
+    // 13b. Rewrite passes (from 3B)
+    runner.add(Box::new(rewrite_matmul::RewriteMatmulPass));
+    runner.add(Box::new(rewrite_pad::RewritePadPass));
+    runner.add(Box::new(rewrite_slice::RewriteSlicePass));
 
     // 14. ToTosaMemoryFormatPass (existing)
     runner.add(Box::new(memory_format::ToTosaMemoryFormatPass));
