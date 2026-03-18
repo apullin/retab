@@ -156,10 +156,17 @@ fn arg_bool(node: &Node, idx: usize, default: bool) -> bool {
 // by emitting the equivalent TOSA operator.
 // ---------------------------------------------------------------------------
 
-/// Emit TOSA CONV2D from an ATen convolution node.
+/// Emit TOSA CONV2D (or DEPTHWISE_CONV2D) from an ATen convolution node.
 ///
 /// ATen convolution args: [input, weight, bias, stride, padding, dilation,
 ///                         transposed, output_padding, groups]
+///
+/// TOSA CONV2D requires 5 inputs: [input, weight, bias, input_zp, weight_zp].
+/// We create inline const tensors for the zero-point scalars from qparams
+/// metadata, defaulting to 0 for symmetric quantization.
+///
+/// Depthwise detection: if groups == in_channels and weight.shape[1] == 1,
+/// emit DEPTHWISE_CONV2D instead.
 pub fn emit_aten_conv2d(
     graph: &Graph,
     _node_id: NodeId,
@@ -175,6 +182,7 @@ pub fn emit_aten_conv2d(
     let stride = arg_i32_list(node, 3);
     let padding = arg_i32_list(node, 4);
     let dilation = arg_i32_list(node, 5);
+    let groups = arg_i64(node, 8, 1);
 
     // TOSA pad format is [top, bottom, left, right] from ATen [H, W]
     let pad = if padding.len() >= 2 {
@@ -187,19 +195,115 @@ pub fn emit_aten_conv2d(
 
     let acc_type = DType::Int32;
 
+    // Get zero-points from qparams (default to 0 for symmetric quantization)
+    let input_zp_val: i32 = node
+        .meta
+        .input_qparams
+        .iter()
+        .find(|(pos, _)| *pos == 0)
+        .map(|(_, qp)| qp.zero_point as i32)
+        .unwrap_or(0);
+    let weight_zp_val: i32 = node
+        .meta
+        .input_qparams
+        .iter()
+        .find(|(pos, _)| *pos == 1)
+        .map(|(_, qp)| qp.zero_point as i32)
+        .unwrap_or(0);
+
+    // Create input_zp const tensor (scalar int8)
+    let input_zp_name = format!("{}_input_zp", node.name);
+    result.tensors.push(TosaTensor {
+        name: input_zp_name.clone(),
+        shape: vec![1],
+        dtype: DType::Int8,
+        data: vec![input_zp_val as i8 as u8],
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
     result.operators.push(TosaOperator {
-        op: Op::Conv2d,
-        attribute: Attribute::Conv2d(Conv2dAttribute {
-            pad,
-            stride: if stride.is_empty() { vec![1, 1] } else { stride },
-            dilation: if dilation.is_empty() { vec![1, 1] } else { dilation },
-            local_bound: false,
-            acc_type,
-        }),
-        inputs: input_names,
-        outputs: vec![node.name.clone()],
+        op: Op::Const,
+        attribute: Attribute::Const(ConstAttribute),
+        inputs: vec![],
+        outputs: vec![input_zp_name.clone()],
         location: None,
     });
+
+    // Create weight_zp const tensor (scalar int8)
+    let weight_zp_name = format!("{}_weight_zp", node.name);
+    result.tensors.push(TosaTensor {
+        name: weight_zp_name.clone(),
+        shape: vec![1],
+        dtype: DType::Int8,
+        data: vec![weight_zp_val as i8 as u8],
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Const,
+        attribute: Attribute::Const(ConstAttribute),
+        inputs: vec![],
+        outputs: vec![weight_zp_name.clone()],
+        location: None,
+    });
+
+    // Build 5-input list: [input, weight, bias, input_zp, weight_zp]
+    // ATen conv has more args (stride, padding, etc.) as Arg::IntList, not
+    // Arg::Node, so collect_input_names only picks up the first 3 node refs.
+    let mut conv_inputs = input_names;
+    conv_inputs.truncate(3);
+    conv_inputs.push(input_zp_name);
+    conv_inputs.push(weight_zp_name);
+
+    // Detect depthwise: check if the weight tensor (arg[1]) has shape[1] == 1
+    // and groups == in_channels (weight.shape[0] for OIHW layout).
+    let is_depthwise = if let Some(Arg::Node(weight_id)) = node.args.get(1) {
+        if let Some(weight_node) = graph.node(*weight_id) {
+            let ws = weight_node.meta.val.shape_slice();
+            // Weight shape for conv2d is [out_channels, in_channels/groups, kH, kW]
+            // For depthwise: in_channels/groups == 1, and groups == in_channels
+            ws.len() == 4 && ws[1] == 1 && groups > 1
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let stride = if stride.is_empty() { vec![1, 1] } else { stride };
+    let dilation = if dilation.is_empty() { vec![1, 1] } else { dilation };
+
+    if is_depthwise {
+        result.operators.push(TosaOperator {
+            op: Op::DepthwiseConv2d,
+            attribute: Attribute::DepthwiseConv2d(DepthwiseConv2dAttribute {
+                pad,
+                stride,
+                dilation,
+                local_bound: false,
+                acc_type,
+            }),
+            inputs: conv_inputs,
+            outputs: vec![node.name.clone()],
+            location: None,
+        });
+    } else {
+        result.operators.push(TosaOperator {
+            op: Op::Conv2d,
+            attribute: Attribute::Conv2d(Conv2dAttribute {
+                pad,
+                stride,
+                dilation,
+                local_bound: false,
+                acc_type,
+            }),
+            inputs: conv_inputs,
+            outputs: vec![node.name.clone()],
+            location: None,
+        });
+    }
 
     result
 }
@@ -409,6 +513,10 @@ pub fn emit_const(
 }
 
 /// Emit a CONV2D operator.
+///
+/// TOSA CONV2D requires 5 inputs: [input, weight, bias, input_zp, weight_zp].
+/// If the incoming node only provides 3 inputs, we create inline const tensors
+/// for the zero-point scalars from kwargs or qparams metadata.
 pub fn emit_conv2d(
     graph: &Graph,
     _node_id: NodeId,
@@ -428,6 +536,58 @@ pub fn emit_conv2d(
 
     // Determine accumulator type — default to Int32 for quantized
     let acc_type = DType::Int32;
+
+    // If we already have 5 inputs, pass them through; otherwise create zp tensors.
+    let conv_inputs = if input_names.len() >= 5 {
+        input_names
+    } else {
+        let input_zp_val = kwarg_i32(node, "input_zp", 0);
+        let weight_zp_val = kwarg_i32(node, "weight_zp", 0);
+
+        // Create input_zp const tensor (scalar int8)
+        let input_zp_name = format!("{}_input_zp", node.name);
+        result.tensors.push(TosaTensor {
+            name: input_zp_name.clone(),
+            shape: vec![1],
+            dtype: DType::Int8,
+            data: vec![input_zp_val as i8 as u8],
+            variable: false,
+            is_unranked: false,
+            variable_name: String::new(),
+        });
+        result.operators.push(TosaOperator {
+            op: Op::Const,
+            attribute: Attribute::Const(ConstAttribute),
+            inputs: vec![],
+            outputs: vec![input_zp_name.clone()],
+            location: None,
+        });
+
+        // Create weight_zp const tensor (scalar int8)
+        let weight_zp_name = format!("{}_weight_zp", node.name);
+        result.tensors.push(TosaTensor {
+            name: weight_zp_name.clone(),
+            shape: vec![1],
+            dtype: DType::Int8,
+            data: vec![weight_zp_val as i8 as u8],
+            variable: false,
+            is_unranked: false,
+            variable_name: String::new(),
+        });
+        result.operators.push(TosaOperator {
+            op: Op::Const,
+            attribute: Attribute::Const(ConstAttribute),
+            inputs: vec![],
+            outputs: vec![weight_zp_name.clone()],
+            location: None,
+        });
+
+        let mut inputs = input_names;
+        inputs.truncate(3);
+        inputs.push(input_zp_name);
+        inputs.push(weight_zp_name);
+        inputs
+    };
 
     result.operators.push(TosaOperator {
         op: Op::Conv2d,
@@ -450,7 +610,7 @@ pub fn emit_conv2d(
             local_bound,
             acc_type,
         }),
-        inputs: input_names,
+        inputs: conv_inputs,
         outputs: vec![node.name.clone()],
         location: None,
     });
@@ -459,6 +619,10 @@ pub fn emit_conv2d(
 }
 
 /// Emit a DEPTHWISE_CONV2D operator.
+///
+/// TOSA DEPTHWISE_CONV2D requires 5 inputs: [input, weight, bias, input_zp, weight_zp].
+/// If the incoming node only provides 3 inputs, we create inline const tensors
+/// for the zero-point scalars from kwargs or qparams metadata.
 pub fn emit_depthwise_conv2d(
     graph: &Graph,
     _node_id: NodeId,
@@ -475,6 +639,58 @@ pub fn emit_depthwise_conv2d(
     let dilation = kwarg_i32_list(node, "dilation");
     let local_bound = kwarg_bool(node, "local_bound", false);
     let acc_type = DType::Int32;
+
+    // If we already have 5 inputs, pass them through; otherwise create zp tensors.
+    let conv_inputs = if input_names.len() >= 5 {
+        input_names
+    } else {
+        let input_zp_val = kwarg_i32(node, "input_zp", 0);
+        let weight_zp_val = kwarg_i32(node, "weight_zp", 0);
+
+        // Create input_zp const tensor (scalar int8)
+        let input_zp_name = format!("{}_input_zp", node.name);
+        result.tensors.push(TosaTensor {
+            name: input_zp_name.clone(),
+            shape: vec![1],
+            dtype: DType::Int8,
+            data: vec![input_zp_val as i8 as u8],
+            variable: false,
+            is_unranked: false,
+            variable_name: String::new(),
+        });
+        result.operators.push(TosaOperator {
+            op: Op::Const,
+            attribute: Attribute::Const(ConstAttribute),
+            inputs: vec![],
+            outputs: vec![input_zp_name.clone()],
+            location: None,
+        });
+
+        // Create weight_zp const tensor (scalar int8)
+        let weight_zp_name = format!("{}_weight_zp", node.name);
+        result.tensors.push(TosaTensor {
+            name: weight_zp_name.clone(),
+            shape: vec![1],
+            dtype: DType::Int8,
+            data: vec![weight_zp_val as i8 as u8],
+            variable: false,
+            is_unranked: false,
+            variable_name: String::new(),
+        });
+        result.operators.push(TosaOperator {
+            op: Op::Const,
+            attribute: Attribute::Const(ConstAttribute),
+            inputs: vec![],
+            outputs: vec![weight_zp_name.clone()],
+            location: None,
+        });
+
+        let mut inputs = input_names;
+        inputs.truncate(3);
+        inputs.push(input_zp_name);
+        inputs.push(weight_zp_name);
+        inputs
+    };
 
     result.operators.push(TosaOperator {
         op: Op::DepthwiseConv2d,
@@ -497,7 +713,7 @@ pub fn emit_depthwise_conv2d(
             local_bound,
             acc_type,
         }),
-        inputs: input_names,
+        inputs: conv_inputs,
         outputs: vec![node.name.clone()],
         location: None,
     });
@@ -1583,6 +1799,10 @@ pub fn emit_slice(
 }
 
 /// Emit a TRANSPOSE_CONV2D operator.
+///
+/// TOSA TRANSPOSE_CONV2D requires 5 inputs: [input, weight, bias, input_zp, weight_zp].
+/// If the incoming node only provides 3 inputs, we create inline const tensors
+/// for the zero-point scalars.
 pub fn emit_transpose_conv2d(
     graph: &Graph,
     _node_id: NodeId,
@@ -1597,6 +1817,58 @@ pub fn emit_transpose_conv2d(
     let stride = kwarg_i32_list(node, "stride");
     let local_bound = kwarg_bool(node, "local_bound", false);
     let acc_type = DType::Int32;
+
+    // If we already have 5 inputs, pass them through; otherwise create zp tensors.
+    let conv_inputs = if input_names.len() >= 5 {
+        input_names
+    } else {
+        let input_zp_val = kwarg_i32(node, "input_zp", 0);
+        let weight_zp_val = kwarg_i32(node, "weight_zp", 0);
+
+        // Create input_zp const tensor (scalar int8)
+        let input_zp_name = format!("{}_input_zp", node.name);
+        result.tensors.push(TosaTensor {
+            name: input_zp_name.clone(),
+            shape: vec![1],
+            dtype: DType::Int8,
+            data: vec![input_zp_val as i8 as u8],
+            variable: false,
+            is_unranked: false,
+            variable_name: String::new(),
+        });
+        result.operators.push(TosaOperator {
+            op: Op::Const,
+            attribute: Attribute::Const(ConstAttribute),
+            inputs: vec![],
+            outputs: vec![input_zp_name.clone()],
+            location: None,
+        });
+
+        // Create weight_zp const tensor (scalar int8)
+        let weight_zp_name = format!("{}_weight_zp", node.name);
+        result.tensors.push(TosaTensor {
+            name: weight_zp_name.clone(),
+            shape: vec![1],
+            dtype: DType::Int8,
+            data: vec![weight_zp_val as i8 as u8],
+            variable: false,
+            is_unranked: false,
+            variable_name: String::new(),
+        });
+        result.operators.push(TosaOperator {
+            op: Op::Const,
+            attribute: Attribute::Const(ConstAttribute),
+            inputs: vec![],
+            outputs: vec![weight_zp_name.clone()],
+            location: None,
+        });
+
+        let mut inputs = input_names;
+        inputs.truncate(3);
+        inputs.push(input_zp_name);
+        inputs.push(weight_zp_name);
+        inputs
+    };
 
     result.operators.push(TosaOperator {
         op: Op::TransposeConv2d,
@@ -1614,7 +1886,7 @@ pub fn emit_transpose_conv2d(
             local_bound,
             acc_type,
         }),
-        inputs: input_names,
+        inputs: conv_inputs,
         outputs: vec![node.name.clone()],
         location: None,
     });
@@ -1686,7 +1958,9 @@ pub fn emit_node(
         // to TOSA form. This allows lower_to_tosa_v2 (hybrid pipeline) to
         // produce valid TOSA output even when not all passes run.
         // -----------------------------------------------------------------
-        OpTarget::Conv2d => Some(emit_aten_conv2d(graph, node_id, node, store)),
+        OpTarget::Conv2d | OpTarget::DepthwiseConv2d => {
+            Some(emit_aten_conv2d(graph, node_id, node, store))
+        }
         OpTarget::MaxPool2d => Some(emit_aten_max_pool2d(graph, node_id, node, store)),
         OpTarget::Clamp | OpTarget::Hardtanh | OpTarget::Relu => {
             Some(emit_aten_clamp(graph, node_id, node, store))
