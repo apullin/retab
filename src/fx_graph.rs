@@ -16,6 +16,11 @@ impl<'py> FxGraphModule<'py> {
         self.gm.py()
     }
 
+    /// Borrow the underlying Python `GraphModule` object.
+    pub fn gm_ref(&self) -> &Bound<'py, PyAny> {
+        &self.gm
+    }
+
     // ------------------------------------------------------------------
     // Read helpers
     // ------------------------------------------------------------------

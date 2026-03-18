@@ -2,9 +2,16 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
 mod compile_spec;
+mod fx_convert_clamp;
+mod fx_decompose;
 mod fx_fold_qdq;
+mod fx_fuse_quant_activation;
 mod fx_graph;
+mod fx_insert_rescale;
+mod fx_memory_format;
 mod fx_pass;
+mod fx_pipeline;
+mod fx_rewrite_conv;
 mod graph;
 mod ingest;
 mod passes;
@@ -82,11 +89,25 @@ fn fx_graph_summary(graph_module: &Bound<'_, PyAny>) -> PyResult<Vec<(String, St
     Ok(result)
 }
 
+/// Run the full FX-direct lowering pipeline on a Python FX GraphModule.
+///
+/// This executes all passes in order: fuse activations, fold Q/DQ, convert
+/// to clamp, insert rescales, rewrite conv, annotate memory format.
+/// Returns True if any pass modified the graph.
+#[pyfunction]
+fn run_fx_passes(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let gm = fx_graph::FxGraphModule::new(graph_module);
+    let pipeline = fx_pipeline::build_fx_pipeline();
+    let pass_refs: Vec<&dyn fx_pass::FxPass> = pipeline.iter().map(|p| p.as_ref()).collect();
+    fx_pass::run_fx_passes(&gm, &pass_refs)
+}
+
 #[pymodule]
 fn arm_tosa_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ingest_graph, m)?)?;
     m.add_function(wrap_pyfunction!(lower_to_tosa, m)?)?;
     m.add_function(wrap_pyfunction!(fold_qdq_fx, m)?)?;
+    m.add_function(wrap_pyfunction!(run_fx_passes, m)?)?;
     m.add_function(wrap_pyfunction!(fx_graph_summary, m)?)?;
     Ok(())
 }
