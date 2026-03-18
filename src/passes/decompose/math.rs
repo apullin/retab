@@ -959,7 +959,7 @@ impl Pass for DecomposeLinearPass {
 }
 
 fn decompose_linear(graph: &mut Graph, lin_id: NodeId) {
-    let (x_id, weight_id, bias_id, input_info, weight_info, output_info) = {
+    let (x_id, weight_id, bias_id, input_info, weight_info, output_info, lin_input_qparams, lin_output_qparams) = {
         let node = match graph.node(lin_id) {
             Some(n) => n,
             None => return,
@@ -991,7 +991,11 @@ fn decompose_linear(graph: &mut Graph, lin_id: NodeId) {
             None => return,
         };
 
-        (x_id, weight_id, bias_id, input_info, weight_info, node.meta.val)
+        // Capture qparams from the original linear node (set by fold_qdq)
+        let iqp = node.meta.input_qparams.clone();
+        let oqp = node.meta.output_qparams.clone();
+
+        (x_id, weight_id, bias_id, input_info, weight_info, node.meta.val, iqp, oqp)
     };
 
     let in_shape = input_info.shape_slice();
@@ -1020,7 +1024,7 @@ fn decompose_linear(graph: &mut Graph, lin_id: NodeId) {
     let x_shape_4d: smallvec::SmallVec<[i64; 6]> = smallvec![batch, ci, 1, 1];
     let input_is_reshape_2d = graph.node(x_id).map(|n| {
         (n.target == OpTarget::Reshape || n.target == OpTarget::View
-            || n.target == OpTarget::TosaReshape)
+            || n.target == OpTarget::TosaReshape || n.target == OpTarget::Flatten)
             && n.meta.val.shape_len == 2
     }).unwrap_or(false);
 
@@ -1067,6 +1071,14 @@ fn decompose_linear(graph: &mut Graph, lin_id: NodeId) {
         None => Arg::OptionalNode(None),
     };
 
+    let conv_meta = {
+        let mut m = placeholder_meta();
+        // Inherit qparams from the original linear node (matches Python's
+        // inherit_qparams=True in create_node for the decomposed conv).
+        m.input_qparams = lin_input_qparams;
+        m.output_qparams = lin_output_qparams;
+        m
+    };
     let conv_id = graph.insert_before(
         lin_id,
         OpType::CallFunction,
@@ -1080,7 +1092,7 @@ fn decompose_linear(graph: &mut Graph, lin_id: NodeId) {
             Arg::IntList(smallvec![1, 1]),  // dilation
         ],
         vec![],
-        placeholder_meta(),
+        conv_meta,
         next_name("conv2d"),
     );
     crate::shape::propagate_shape(graph, conv_id);

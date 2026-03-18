@@ -239,6 +239,12 @@ fn walk_users_for_output_qparams(graph: &Graph, start_id: NodeId) -> Option<Quan
             Some(n) => n,
             None => return None,
         };
+        // Skip accumulator ops — their output_qparams represent a different
+        // scale domain (post-accumulation) and must not be propagated backwards
+        // to their inputs.
+        if is_accumulator_like(&user.target) {
+            return None;
+        }
         // If the user has output_qparams, we found what we need
         if let Some((_, qp)) = user.meta.output_qparams.iter().find(|(p, _)| *p == 0) {
             return Some(*qp);

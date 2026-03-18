@@ -339,11 +339,15 @@ pub fn build_phase2_pipeline() -> PassRunner {
     // 1. AnnotateOutputDimOrderPass
     runner.add(Box::new(annotate_dim_order::AnnotateOutputDimOrderPass));
 
-    // 2. ConvertToClampPass (from 2A)
-    runner.add(Box::new(convert_clamp::ConvertToClampPass));
+    // 1a. FuseQuantizedActivationPass — runs on pre-fold Q/DQ graph
+    //     (matches Python pipeline order: before ConvertToClamp and FoldQDQ).
+    //     Removes relu/hardtanh(min=0) nodes between conv/linear and Q nodes
+    //     when zp==qmin, so fold_qdq will fold the Q node directly onto the
+    //     conv's output_qparams. No separate CLAMP needed for relu.
+    runner.add(Box::new(fuse_quantized_activation::FuseQuantizedActivationPass));
 
-    // 3. FuseQuantizedActivationPass — MOVED to after PropagateQParamsPass (step 5a)
-    //    so that output_qparams are available on predecessor nodes.
+    // 2. ConvertToClampPass — converts remaining (unfused) relu/hardtanh to TosaClamp
+    runner.add(Box::new(convert_clamp::ConvertToClampPass));
 
     // 4. Decomposition passes (from 2A)
     runner.add(Box::new(decompose::layernorm::DecomposeLayerNormPass));
@@ -352,12 +356,14 @@ pub fn build_phase2_pipeline() -> PassRunner {
     runner.add(Box::new(convert_full::ConvertFullLikeToFullPass));
 
     // 4a. Math/activation decomposition passes (Phase 3A)
+    //     DecomposeLinearPass and DecomposeAddmmPass are intentionally placed
+    //     after FoldAndAnnotateQParamsPass (step 5a1) to match the Python
+    //     pipeline order — linear/addmm must be folded first so the decomposed
+    //     conv inherits qparams.
     runner.add(Box::new(decompose::math::DecomposeSoftmaxPass));
     runner.add(Box::new(decompose::math::DecomposeGeluPass));
     runner.add(Box::new(decompose::math::DecomposeBatchNormPass));
     runner.add(Box::new(decompose::math::DecomposeGroupNormPass));
-    runner.add(Box::new(decompose::math::DecomposeLinearPass));
-    runner.add(Box::new(decompose::math::DecomposeAddmmPass));
 
     // 4b. Tensor operation decompositions (from 3B)
     runner.add(Box::new(decompose::tensor_ops::DecomposeSelectPass));
@@ -370,6 +376,12 @@ pub fn build_phase2_pipeline() -> PassRunner {
     // 5. FoldAndAnnotateQParamsPass (existing)
     runner.add(Box::new(fold_qdq::FoldAndAnnotateQParamsPass));
 
+    // 5a1. DecomposeLinearPass / DecomposeAddmmPass — placed after fold_qdq
+    //      so that the original linear/addmm node has output_qparams folded.
+    //      The decomposition copies qparams to the synthesized conv node.
+    runner.add(Box::new(decompose::math::DecomposeLinearPass));
+    runner.add(Box::new(decompose::math::DecomposeAddmmPass));
+
     // 5a. PropagateQParamsPass — propagate qparams through decomposed ops that
     //     lack them because decomposition happened after quantization.
     runner.add(Box::new(propagate_qparams::PropagateQParamsPass));
@@ -377,11 +389,7 @@ pub fn build_phase2_pipeline() -> PassRunner {
     // 5a-diag. Diagnostic pass to measure qparam coverage (gated behind TOSA_ENGINE_DEBUG)
     runner.add(Box::new(DiagnosticPass { label: "after_propagate" }));
 
-    // 5a2. FuseQuantizedActivationPass — fuse Clamp/Relu into preceding op's
-    //      output_qparams (qmin/qmax), eliminating separate CLAMP ops.
-    //      Must run after FoldAndAnnotateQParams + PropagateQParams so that
-    //      predecessor nodes have output_qparams populated.
-    runner.add(Box::new(fuse_quantized_activation::FuseQuantizedActivationPass));
+    // 5a2. (FuseQuantizedActivationPass moved to step 1a, before fold_qdq)
 
     // 5b. InsertTableOpsPass (replace quantized Rsqrt with TABLE)
     runner.add(Box::new(insert_table_ops::InsertTableOpsPass));

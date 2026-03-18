@@ -156,6 +156,46 @@ pub fn ingest_fx_graph(
         }
     }
 
+    // -----------------------------------------------------------------
+    // 4. Extract frozen tensor constants from graph module attributes
+    // -----------------------------------------------------------------
+    // After pt2e quantization, parameters become frozen constants stored
+    // as attributes on the graph module (e.g., graph_module._frozen_param0).
+    // These aren't in state_dict, so we extract them directly.
+    for (placeholder_name, sd_key) in &placeholder_to_sd_key {
+        if store.get(placeholder_name).is_some() {
+            continue; // Already have data from state_dict
+        }
+        // Try to get the tensor from graph_module as an attribute
+        // The sd_key typically looks like "_frozen_param0"
+        if let Ok(tensor) = graph_module.getattr(sd_key.as_str()) {
+            if let Ok(shape_obj) = tensor.getattr("shape") {
+                if let Ok(shape) = shape_obj
+                    .iter()
+                    .and_then(|it| it.map(|s| s.and_then(|v| v.extract::<i64>())).collect::<PyResult<Vec<_>>>())
+                {
+                    let dtype = tensor
+                        .getattr("dtype")
+                        .and_then(|d| d.str()?.extract::<String>())
+                        .map(|s| parse_torch_dtype(&s))
+                        .unwrap_or(DType::Float32);
+                    if let Ok(data) = tensor
+                        .call_method0("contiguous")
+                        .and_then(|c| c.call_method0("cpu"))
+                        .and_then(|c| c.call_method0("numpy"))
+                        .and_then(|n| n.call_method0("tobytes"))
+                        .and_then(|b| b.extract::<Vec<u8>>())
+                    {
+                        store.insert(
+                            placeholder_name.clone(),
+                            TensorData { data, shape, dtype },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     Ok((graph, store))
 }
 
