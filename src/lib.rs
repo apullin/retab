@@ -102,10 +102,41 @@ fn run_fx_passes(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
     fx_pass::run_fx_passes(&gm, &pass_refs)
 }
 
+/// Hybrid pipeline: FX-direct passes (correct graph mutations via Python FX)
+/// followed by Rust ingestion + TOSA serialization (fast).
+///
+/// This is the recommended entry point. It combines:
+/// 1. FX-direct passes on the live Python graph (correct by construction)
+/// 2. Ingest the post-pass graph into Rust IR (one-time, no mutations needed)
+/// 3. Serialize to TOSA flatbuffer in Rust (fast)
+#[pyfunction]
+fn lower_to_tosa_v2(
+    py: Python<'_>,
+    graph_module: &Bound<'_, PyAny>,
+    state_dict: &Bound<'_, PyDict>,
+    graph_signature: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyBytes>> {
+    // 1. Run FX-direct passes (mutates Python graph in place)
+    let gm = fx_graph::FxGraphModule::new(graph_module);
+    let pipeline = fx_pipeline::build_fx_pipeline();
+    let pass_refs: Vec<&dyn fx_pass::FxPass> = pipeline.iter().map(|p| p.as_ref()).collect();
+    fx_pass::run_fx_passes(&gm, &pass_refs)?;
+
+    // 2. Ingest the post-pass graph into Rust IR (read-only, no mutations)
+    let (graph, store) =
+        ingest::fx_bridge::ingest_fx_graph(graph_module, state_dict, graph_signature)?;
+
+    // 3. Serialize to TOSA flatbuffer
+    let tosa_bytes = serialize::serialize_to_tosa(&graph, &store);
+
+    Ok(PyBytes::new_bound(py, &tosa_bytes).unbind())
+}
+
 #[pymodule]
 fn arm_tosa_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ingest_graph, m)?)?;
     m.add_function(wrap_pyfunction!(lower_to_tosa, m)?)?;
+    m.add_function(wrap_pyfunction!(lower_to_tosa_v2, m)?)?;
     m.add_function(wrap_pyfunction!(fold_qdq_fx, m)?)?;
     m.add_function(wrap_pyfunction!(run_fx_passes, m)?)?;
     m.add_function(wrap_pyfunction!(fx_graph_summary, m)?)?;
