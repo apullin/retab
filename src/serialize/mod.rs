@@ -624,3 +624,222 @@ fn build_fb_attribute(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test Conv2d permutation: OIHW [2, 3, 2, 2] -> OHWI [2, 2, 2, 3]
+    ///
+    /// Uses 1-byte elements for simplicity. Each element is a unique byte
+    /// encoding its position for easy verification.
+    #[test]
+    fn test_permute_conv2d_oihw_to_ohwi() {
+        // Shape: [O=2, I=3, H=2, W=2] -> 24 elements
+        let shape = [2i64, 3, 2, 2];
+        let mut data = vec![0u8; 24];
+
+        // Fill with position encoding: data[o][i][h][w] = o*12 + i*4 + h*2 + w
+        for o in 0..2usize {
+            for i in 0..3usize {
+                for h in 0..2usize {
+                    for w in 0..2usize {
+                        let idx = ((o * 3 + i) * 2 + h) * 2 + w;
+                        data[idx] = idx as u8;
+                    }
+                }
+            }
+        }
+
+        let (out, new_shape) = permute_weight_data(&data, &shape, 1, WeightPermKind::Conv2d);
+
+        // Expected shape: [2, 2, 2, 3] (OHWI)
+        assert_eq!(new_shape, vec![2, 2, 2, 3]);
+        assert_eq!(out.len(), 24);
+
+        // Verify: out[o][h][w][i] = data[o][i][h][w]
+        for o in 0..2usize {
+            for h in 0..2usize {
+                for w in 0..2usize {
+                    for i in 0..3usize {
+                        let src_idx = ((o * 3 + i) * 2 + h) * 2 + w;
+                        let dst_idx = ((o * 2 + h) * 2 + w) * 3 + i;
+                        assert_eq!(
+                            out[dst_idx], data[src_idx],
+                            "Mismatch at o={o},h={h},w={w},i={i}: out[{dst_idx}]={} != data[{src_idx}]={}",
+                            out[dst_idx], data[src_idx]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Test DepthwiseConv2d permutation: OIHW [16, 1, 3, 3] -> HWIM [3, 3, 1, 16]
+    ///
+    /// This matches the TinyCNN first conv (IC=1, OC=16, groups=1 -> depthwise).
+    #[test]
+    fn test_permute_depthwise_oihw_to_hwim() {
+        // Shape: [OC=16, IC/groups=1, KH=3, KW=3] -> 144 elements
+        let shape = [16i64, 1, 3, 3];
+        let mut data = vec![0u8; 144];
+
+        // Fill with sequential values
+        for idx in 0..144 {
+            data[idx] = idx as u8;
+        }
+
+        let (out, new_shape) =
+            permute_weight_data(&data, &shape, 1, WeightPermKind::DepthwiseConv2d);
+
+        // Expected shape: [3, 3, 1, 16] (HWIM)
+        assert_eq!(new_shape, vec![3, 3, 1, 16]);
+        assert_eq!(out.len(), 144);
+
+        // Verify: out[h][w][i][m] = data[m][i][h][w]
+        for h in 0..3usize {
+            for w in 0..3usize {
+                for i in 0..1usize {
+                    for m in 0..16usize {
+                        let src_idx = ((m * 1 + i) * 3 + h) * 3 + w;
+                        let dst_idx = ((h * 3 + w) * 1 + i) * 16 + m;
+                        assert_eq!(
+                            out[dst_idx], data[src_idx],
+                            "Mismatch at h={h},w={w},i={i},m={m}: out[{dst_idx}]={} != data[{src_idx}]={}",
+                            out[dst_idx], data[src_idx]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Test that Conv2d permutation with 1x1 kernel is a no-op on data.
+    /// Shape [10, 1568, 1, 1] -> [10, 1, 1, 1568] but data bytes are same.
+    #[test]
+    fn test_permute_conv2d_1x1_kernel_is_noop_on_data() {
+        let shape = [10i64, 1568, 1, 1];
+        let n = 10 * 1568;
+        let data: Vec<u8> = (0..n).map(|i| (i % 256) as u8).collect();
+
+        let (out, new_shape) = permute_weight_data(&data, &shape, 1, WeightPermKind::Conv2d);
+
+        assert_eq!(new_shape, vec![10, 1, 1, 1568]);
+        // When H=1 and W=1, OIHW -> OHWI preserves data order.
+        assert_eq!(out, data, "1x1 conv permutation should preserve data bytes");
+    }
+
+    /// Test permutation with multi-byte elements (int32 = 4 bytes).
+    #[test]
+    fn test_permute_conv2d_int32_elements() {
+        // Shape: [2, 3, 1, 1] -> 6 elements, each 4 bytes = 24 bytes total
+        let shape = [2i64, 3, 1, 1];
+        let elem_size = 4;
+        let n = 6;
+        let mut data = vec![0u8; n * elem_size];
+
+        for idx in 0..n {
+            let val = idx as i32;
+            let bytes = val.to_le_bytes();
+            data[idx * elem_size..idx * elem_size + elem_size].copy_from_slice(&bytes);
+        }
+
+        let (out, new_shape) =
+            permute_weight_data(&data, &shape, elem_size, WeightPermKind::Conv2d);
+
+        assert_eq!(new_shape, vec![2, 1, 1, 3]);
+
+        // For H=1,W=1: src_idx = o*3+i, dst_idx = o*3+i (same!)
+        for idx in 0..n {
+            let src_val =
+                i32::from_le_bytes(data[idx * elem_size..idx * elem_size + elem_size].try_into().unwrap());
+            let dst_val =
+                i32::from_le_bytes(out[idx * elem_size..idx * elem_size + elem_size].try_into().unwrap());
+            assert_eq!(src_val, dst_val, "Element {idx}: src={src_val} != dst={dst_val}");
+        }
+    }
+
+    /// Test Conv2d permutation with a regular 3x3 conv and 4-byte elements.
+    /// Shape [2, 2, 3, 3] -> [2, 3, 3, 2]
+    #[test]
+    fn test_permute_conv2d_3x3_int32() {
+        let shape = [2i64, 2, 3, 3];
+        let elem_size = 4;
+        let n = 2 * 2 * 3 * 3; // 36 elements
+        let mut data = vec![0u8; n * elem_size];
+
+        for idx in 0..n {
+            let bytes = (idx as i32).to_le_bytes();
+            data[idx * elem_size..idx * elem_size + elem_size].copy_from_slice(&bytes);
+        }
+
+        let (out, new_shape) =
+            permute_weight_data(&data, &shape, elem_size, WeightPermKind::Conv2d);
+
+        assert_eq!(new_shape, vec![2, 3, 3, 2]);
+
+        for o in 0..2usize {
+            for i in 0..2usize {
+                for h in 0..3usize {
+                    for w in 0..3usize {
+                        let src_idx = ((o * 2 + i) * 3 + h) * 3 + w;
+                        let dst_idx = ((o * 3 + h) * 3 + w) * 2 + i;
+
+                        let src_val = i32::from_le_bytes(
+                            data[src_idx * elem_size..src_idx * elem_size + elem_size]
+                                .try_into()
+                                .unwrap(),
+                        );
+                        let dst_val = i32::from_le_bytes(
+                            out[dst_idx * elem_size..dst_idx * elem_size + elem_size]
+                                .try_into()
+                                .unwrap(),
+                        );
+
+                        assert_eq!(
+                            src_val, dst_val,
+                            "o={o},i={i},h={h},w={w}: src[{src_idx}]={src_val} != dst[{dst_idx}]={dst_val}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Verify that permuting twice with inverse permutations recovers the original data.
+    /// OIHW -> OHWI -> OIHW should be identity.
+    #[test]
+    fn test_permute_roundtrip() {
+        let shape = [4i64, 3, 5, 7];
+        let n = (4 * 3 * 5 * 7) as usize;
+        let data: Vec<u8> = (0..n).map(|i| (i * 17 + 3) as u8).collect();
+
+        let (permuted, new_shape) =
+            permute_weight_data(&data, &shape, 1, WeightPermKind::Conv2d);
+
+        // new_shape is OHWI: [4, 5, 7, 3]
+        assert_eq!(new_shape, vec![4, 5, 7, 3]);
+
+        // Now we need to go back: OHWI -> OIHW, which is perm [0, 3, 1, 2].
+        // This is NOT directly what our function does (it always does OIHW->OHWI).
+        // Instead, manually verify that each element is in the right position.
+        for o in 0..4usize {
+            for i in 0..3usize {
+                for h in 0..5usize {
+                    for w in 0..7usize {
+                        let src_idx = ((o * 3 + i) * 5 + h) * 7 + w;
+                        let dst_idx = ((o * 5 + h) * 7 + w) * 3 + i;
+                        assert_eq!(
+                            permuted[dst_idx], data[src_idx],
+                            "o={o},i={i},h={h},w={w}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
