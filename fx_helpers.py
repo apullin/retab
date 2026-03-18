@@ -280,19 +280,34 @@ def insert_table_op(
     graph = graph_module.graph
     meta = node.meta
 
-    # Extract qparams
+    # Extract qparams -- supports both QuantArgs namedtuples (from Python fold pass)
+    # and plain dicts (legacy Rust fold pass).
     input_qp = meta["input_qparams"][0]
     output_qp = meta["output_qparams"][0]
 
-    input_scale = float(input_qp["scale"])
-    input_zp = int(input_qp["zero_point"])
-    input_qmin = int(input_qp.get("qmin", -128))
-    input_qmax = int(input_qp.get("qmax", 127))
+    def _get(qp, attr, default=None):
+        """Read a field from either a QuantArgs namedtuple or a dict."""
+        if hasattr(qp, attr):
+            return getattr(qp, attr)
+        if isinstance(qp, dict):
+            return qp.get(attr, default)
+        return default
 
-    output_scale = float(output_qp["scale"])
-    output_zp = int(output_qp["zero_point"])
-    output_qmin = int(output_qp.get("qmin", -128))
-    output_qmax = int(output_qp.get("qmax", 127))
+    def _scalar(val):
+        """Ensure we get a scalar float from scale (which may be a list)."""
+        if isinstance(val, (list, tuple)):
+            return val[0] if val else 1.0
+        return val
+
+    input_scale = float(_scalar(_get(input_qp, "scale", 1.0)))
+    input_zp = int(_scalar(_get(input_qp, "zp", _get(input_qp, "zero_point", 0))))
+    input_qmin = int(_get(input_qp, "qmin", -128))
+    input_qmax = int(_get(input_qp, "qmax", 127))
+
+    output_scale = float(_scalar(_get(output_qp, "scale", 1.0)))
+    output_zp = int(_scalar(_get(output_qp, "zp", _get(output_qp, "zero_point", 0))))
+    output_qmin = int(_get(output_qp, "qmin", -128))
+    output_qmax = int(_get(output_qp, "qmax", 127))
 
     # Compute the lookup table
     table_data = _compute_table(

@@ -4,6 +4,91 @@ use pyo3::types::PyDict;
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
 
+// ---------------------------------------------------------------------------
+// Dual-format qparam field access (QuantArgs namedtuple or legacy dict)
+// ---------------------------------------------------------------------------
+
+/// Read a float field from either a QuantArgs namedtuple or a plain dict.
+/// For QuantArgs: tries attribute access (e.g. `.scale`).
+/// For dicts: tries `.get(key)`.
+fn qp_get_f64(qp: &Bound<'_, PyAny>, attr: &str, dict_key: Option<&str>, default: f64) -> f64 {
+    // Attribute access first (QuantArgs namedtuple)
+    if let Ok(val) = qp.getattr(attr) {
+        if let Ok(v) = val.extract::<f64>() {
+            return v;
+        }
+        // Could be a list — take first element
+        if let Ok(item) = val.get_item(0_usize) {
+            if let Ok(v) = item.extract::<f64>() {
+                return v;
+            }
+        }
+    }
+    // Dict fallback
+    if let Some(key) = dict_key {
+        if let Ok(val) = qp.call_method1("get", (key,)) {
+            if let Ok(v) = val.extract::<f64>() {
+                return v;
+            }
+        }
+    }
+    // Also try dict access with the primary attr name
+    if let Ok(val) = qp.call_method1("get", (attr,)) {
+        if let Ok(v) = val.extract::<f64>() {
+            return v;
+        }
+    }
+    default
+}
+
+/// Read an int field from either a QuantArgs namedtuple or a plain dict.
+fn qp_get_i64(qp: &Bound<'_, PyAny>, attr: &str, dict_key: Option<&str>, default: i64) -> i64 {
+    if let Ok(val) = qp.getattr(attr) {
+        if let Ok(v) = val.extract::<i64>() {
+            return v;
+        }
+        // Could be a list — take first element
+        if let Ok(item) = val.get_item(0_usize) {
+            if let Ok(v) = item.extract::<i64>() {
+                return v;
+            }
+        }
+    }
+    if let Some(key) = dict_key {
+        if let Ok(val) = qp.call_method1("get", (key,)) {
+            if let Ok(v) = val.extract::<i64>() {
+                return v;
+            }
+        }
+    }
+    if let Ok(val) = qp.call_method1("get", (attr,)) {
+        if let Ok(v) = val.extract::<i64>() {
+            return v;
+        }
+    }
+    default
+}
+
+/// Read a string field from either a QuantArgs namedtuple or a plain dict.
+fn qp_get_dtype_str(qp: &Bound<'_, PyAny>, default: &str) -> String {
+    // Try QuantArgs .dtype attribute (a torch.dtype object)
+    if let Ok(val) = qp.getattr("dtype") {
+        if let Ok(s) = val.str() {
+            return s.to_string();
+        }
+    }
+    // Try dict .get("dtype")
+    if let Ok(val) = qp.call_method1("get", ("dtype",)) {
+        if let Ok(s) = val.extract::<String>() {
+            return s;
+        }
+        if let Ok(s) = val.str() {
+            return s.to_string();
+        }
+    }
+    default.to_string()
+}
+
 /// FX-graph-direct implementation of `InsertRescalePass`.
 ///
 /// Finds adjacent DQ -> Q pairs that survived fold_qdq (because they represent
@@ -212,20 +297,11 @@ impl FxPass for FxInsertRescalePass {
                     continue;
                 }
 
-                // Get qparams for this input position
+                // Get qparams for this input position (supports QuantArgs or dict)
                 let qp = input_qp.get_item(idx)?;
-                let scale: f64 = qp
-                    .call_method1("get", ("scale",))?
-                    .extract()
-                    .unwrap_or(1.0);
-                let zp: i64 = qp
-                    .call_method1("get", ("zero_point",))?
-                    .extract()
-                    .unwrap_or(0);
-                let dtype_str: String = qp
-                    .call_method1("get", ("dtype",))?
-                    .extract()
-                    .unwrap_or_else(|_| "torch.int8".to_string());
+                let scale = qp_get_f64(&qp, "scale", None, 1.0);
+                let zp = qp_get_i64(&qp, "zp", Some("zero_point"), 0);
+                let dtype_str = qp_get_dtype_str(&qp, "torch.int8");
 
                 // Only rescale int8/int16 inputs
                 if !dtype_str.contains("int8") && !dtype_str.contains("int16") {
@@ -284,18 +360,9 @@ impl FxPass for FxInsertRescalePass {
                 }
 
                 let oqp = output_qp.get_item(0)?;
-                let out_scale: f64 = oqp
-                    .call_method1("get", ("scale",))?
-                    .extract()
-                    .unwrap_or(1.0);
-                let out_zp: i64 = oqp
-                    .call_method1("get", ("zero_point",))?
-                    .extract()
-                    .unwrap_or(0);
-                let out_dtype_str: String = oqp
-                    .call_method1("get", ("dtype",))?
-                    .extract()
-                    .unwrap_or_else(|_| "torch.int8".to_string());
+                let out_scale = qp_get_f64(&oqp, "scale", None, 1.0);
+                let out_zp = qp_get_i64(&oqp, "zp", Some("zero_point"), 0);
+                let out_dtype_str = qp_get_dtype_str(&oqp, "torch.int8");
 
                 let out_dtype = if out_dtype_str.contains("int16") {
                     py.eval_bound("__import__('torch').int16", None, None)?
@@ -455,10 +522,7 @@ impl FxPass for FxInsertRescalePass {
 
             // Position 0 = activation input, position 1 = weight
             let input_scale: f64 = match input_qp.get_item(0_usize) {
-                Ok(qp0) => qp0
-                    .call_method1("get", ("scale",))?
-                    .extract()
-                    .unwrap_or(1.0),
+                Ok(qp0) => qp_get_f64(&qp0, "scale", None, 1.0),
                 Err(_) => {
                     if debug {
                         eprintln!(
@@ -470,10 +534,7 @@ impl FxPass for FxInsertRescalePass {
                 }
             };
             let weight_scale: f64 = match input_qp.get_item(1_usize) {
-                Ok(qp1) => qp1
-                    .call_method1("get", ("scale",))?
-                    .extract()
-                    .unwrap_or(1.0),
+                Ok(qp1) => qp_get_f64(&qp1, "scale", None, 1.0),
                 Err(_) => {
                     if debug {
                         eprintln!(
@@ -488,18 +549,9 @@ impl FxPass for FxInsertRescalePass {
             // Output qparams from the downstream Q node
             let output_qp = meta.call_method1("get", ("output_qparams",))?;
             let oqp = output_qp.get_item(0)?;
-            let out_scale: f64 = oqp
-                .call_method1("get", ("scale",))?
-                .extract()
-                .unwrap_or(1.0);
-            let out_zp: i64 = oqp
-                .call_method1("get", ("zero_point",))?
-                .extract()
-                .unwrap_or(0);
-            let out_dtype_str: String = oqp
-                .call_method1("get", ("dtype",))?
-                .extract()
-                .unwrap_or_else(|_| "torch.int8".to_string());
+            let out_scale = qp_get_f64(&oqp, "scale", None, 1.0);
+            let out_zp = qp_get_i64(&oqp, "zp", Some("zero_point"), 0);
+            let out_dtype_str = qp_get_dtype_str(&oqp, "torch.int8");
 
             // Accumulator rescale: INT32 -> INT8
             // scale = (input_scale * weight_scale) / output_scale

@@ -497,33 +497,70 @@ fn extract_qparams_from_meta(
     Ok(())
 }
 
-/// Extract a `QuantArgs` from a Python dict like `{scale, zero_point, qmin, qmax, dtype}`.
-fn extract_quantargs_from_py(py_dict: &Bound<'_, PyAny>) -> Option<QuantArgs> {
-    let scale = py_dict
-        .call_method1("get", ("scale",))
+/// Extract a `QuantArgs` from a Python QuantArgs namedtuple or a plain dict.
+///
+/// Python's `QuantArgs` (NamedTuple) has fields: scale, zp, qmin, qmax, dtype.
+/// The legacy Rust fold pass stored dicts with keys: scale, zero_point, qmin, qmax, dtype.
+/// This function handles both formats.
+fn extract_quantargs_from_py(py_obj: &Bound<'_, PyAny>) -> Option<QuantArgs> {
+    // Helper: try attribute access first (NamedTuple), then dict .get().
+    fn get_field<T: for<'a> pyo3::FromPyObject<'a>>(
+        obj: &Bound<'_, PyAny>,
+        attr: &str,
+        fallback_key: Option<&str>,
+    ) -> Option<T> {
+        if let Ok(val) = obj.getattr(attr) {
+            if let Ok(v) = val.extract::<T>() {
+                return Some(v);
+            }
+        }
+        if let Some(key) = fallback_key {
+            if let Ok(val) = obj.call_method1("get", (key,)) {
+                if let Ok(v) = val.extract::<T>() {
+                    return Some(v);
+                }
+            }
+        }
+        // Also try dict-style get on the primary attr name
+        if let Ok(val) = obj.call_method1("get", (attr,)) {
+            if let Ok(v) = val.extract::<T>() {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    // scale can be a float or a list of floats; extract as f64 first,
+    // then try list and take the first element.
+    let scale: f64 = get_field(py_obj, "scale", None).or_else(|| {
+        // Try extracting as a list and taking the first element
+        py_obj
+            .getattr("scale")
+            .ok()
+            .and_then(|v| v.get_item(0).ok())
+            .and_then(|v| v.extract().ok())
+    })?;
+
+    // QuantArgs uses "zp"; legacy dicts use "zero_point"
+    let zero_point: i64 = get_field(py_obj, "zp", Some("zero_point")).unwrap_or(0);
+    let qmin: i64 = get_field(py_obj, "qmin", None).unwrap_or(-128);
+    let qmax: i64 = get_field(py_obj, "qmax", None).unwrap_or(127);
+
+    // dtype: QuantArgs stores a torch.dtype object, dicts store a string.
+    let dtype = py_obj
+        .getattr("dtype")
         .ok()
-        .and_then(|v| v.extract::<f64>().ok())?;
-    let zero_point = py_dict
-        .call_method1("get", ("zero_point",))
-        .ok()
-        .and_then(|v| v.extract::<i64>().ok())
-        .unwrap_or(0);
-    let qmin = py_dict
-        .call_method1("get", ("qmin",))
-        .ok()
-        .and_then(|v| v.extract::<i64>().ok())
-        .unwrap_or(-128);
-    let qmax = py_dict
-        .call_method1("get", ("qmax",))
-        .ok()
-        .and_then(|v| v.extract::<i64>().ok())
-        .unwrap_or(127);
-    let dtype = py_dict
-        .call_method1("get", ("dtype",))
-        .ok()
-        .and_then(|v| v.extract::<String>().ok())
+        .or_else(|| py_obj.call_method1("get", ("dtype",)).ok())
+        .and_then(|v| {
+            // First try as string directly
+            v.extract::<String>()
+                .ok()
+                // Otherwise stringify the torch.dtype object
+                .or_else(|| v.str().ok().and_then(|s| s.extract().ok()))
+        })
         .map(|s| parse_torch_dtype(&s))
         .unwrap_or(DType::Int8);
+
     Some(QuantArgs {
         scale,
         zero_point,

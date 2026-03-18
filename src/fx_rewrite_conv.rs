@@ -84,16 +84,25 @@ impl FxPass for FxRewriteConvPass {
             if !input_qparams.is_none() {
                 // Position 0 = activation input qparams
                 if let Ok(qp0) = input_qparams.get_item(0_usize) {
+                    // Support both QuantArgs namedtuple (.zp attr) and dict (["zero_point"] key)
                     input_zp = qp0
-                        .call_method1("get", ("zero_point",))?
-                        .extract()
+                        .getattr("zp")
+                        .and_then(|v| v.extract())
+                        .or_else(|_| {
+                            qp0.call_method1("get", ("zero_point",))
+                                .and_then(|v| v.extract())
+                        })
                         .unwrap_or(0);
                 }
                 // Position 1 = weight qparams
                 if let Ok(qp1) = input_qparams.get_item(1_usize) {
                     weight_zp = qp1
-                        .call_method1("get", ("zero_point",))?
-                        .extract()
+                        .getattr("zp")
+                        .and_then(|v| v.extract())
+                        .or_else(|_| {
+                            qp1.call_method1("get", ("zero_point",))
+                                .and_then(|v| v.extract())
+                        })
                         .unwrap_or(0);
                 }
             }

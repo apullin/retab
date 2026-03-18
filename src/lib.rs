@@ -14,6 +14,7 @@ mod fx_insert_table_ops;
 mod fx_memory_format;
 mod fx_pass;
 mod fx_pipeline;
+mod fx_python_bridge;
 mod fx_rewrite_conv;
 mod graph;
 mod ingest;
@@ -94,13 +95,22 @@ fn fx_graph_summary(graph_module: &Bound<'_, PyAny>) -> PyResult<Vec<(String, St
 
 /// Run the full FX-direct lowering pipeline on a Python FX GraphModule.
 ///
-/// This executes all passes in order: fuse activations, fold Q/DQ, convert
-/// to clamp, insert rescales, rewrite conv, annotate memory format.
-/// Returns True if any pass modified the graph.
+/// This executes all passes in order: fuse activations, Python fold Q/DQ +
+/// rescales, insert table ops, convert to clamp, rewrite conv, annotate
+/// memory format. Returns True if any pass modified the graph.
+///
+/// The optional `exported_program` is forwarded to Python's
+/// `FoldAndAnnotateQParamsPass` so it can resolve parameter tensor nodes
+/// (per-channel scales/zero-points stored as graph parameters).
 #[pyfunction]
-fn run_fx_passes(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
+#[pyo3(signature = (graph_module, exported_program=None))]
+fn run_fx_passes(
+    graph_module: &Bound<'_, PyAny>,
+    exported_program: Option<&Bound<'_, PyAny>>,
+) -> PyResult<bool> {
     let gm = fx_graph::FxGraphModule::new(graph_module);
-    let pipeline = fx_pipeline::build_fx_pipeline();
+    let ep = exported_program.map(|ep| ep.clone().unbind());
+    let pipeline = fx_pipeline::build_fx_pipeline(ep);
     let pass_refs: Vec<&dyn fx_pass::FxPass> = pipeline.iter().map(|p| p.as_ref()).collect();
     fx_pass::run_fx_passes(&gm, &pass_refs)
 }
@@ -112,16 +122,22 @@ fn run_fx_passes(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
 /// 1. FX-direct passes on the live Python graph (correct by construction)
 /// 2. Ingest the post-pass graph into Rust IR (one-time, no mutations needed)
 /// 3. Serialize to TOSA flatbuffer in Rust (fast)
+///
+/// The optional `exported_program` is forwarded to Python's
+/// `FoldAndAnnotateQParamsPass` for resolving parameter tensor nodes.
 #[pyfunction]
+#[pyo3(signature = (graph_module, state_dict, graph_signature, exported_program=None))]
 fn lower_to_tosa_v2(
     py: Python<'_>,
     graph_module: &Bound<'_, PyAny>,
     state_dict: &Bound<'_, PyDict>,
     graph_signature: &Bound<'_, PyAny>,
+    exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyBytes>> {
     // 1. Run FX-direct passes (mutates Python graph in place)
     let gm = fx_graph::FxGraphModule::new(graph_module);
-    let pipeline = fx_pipeline::build_fx_pipeline();
+    let ep = exported_program.map(|ep| ep.clone().unbind());
+    let pipeline = fx_pipeline::build_fx_pipeline(ep);
     let pass_refs: Vec<&dyn fx_pass::FxPass> = pipeline.iter().map(|p| p.as_ref()).collect();
     fx_pass::run_fx_passes(&gm, &pass_refs)?;
 

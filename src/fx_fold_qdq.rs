@@ -5,12 +5,26 @@ use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
 
 /// Quantization parameters extracted from a DQ or Q node.
-struct QParams {
-    scale: f64,
-    zero_point: i64,
+struct QParams<'py> {
+    scale: ScaleValue<'py>,
+    zero_point: ZpValue<'py>,
     qmin: i64,
     qmax: i64,
-    dtype_str: String,
+    dtype: Bound<'py, PyAny>, // Python torch.dtype object
+    axis: i64,
+    per_channel: bool,
+}
+
+/// Scale can be a scalar float (per-tensor) or a list of floats (per-channel).
+enum ScaleValue<'py> {
+    Scalar(f64),
+    Tensor(Bound<'py, PyAny>), // Python list or tensor — kept as-is for QuantArgs
+}
+
+/// Zero-point can be a scalar int (per-tensor) or a list of ints (per-channel).
+enum ZpValue<'py> {
+    Scalar(i64),
+    Tensor(Bound<'py, PyAny>), // Python list or tensor — kept as-is for QuantArgs
 }
 
 /// FX-graph-direct implementation of `FoldAndAnnotateQParamsPass`.
@@ -54,7 +68,10 @@ fn is_quantize_per_tensor(target: &str) -> bool {
 
 /// Extract QParams from a dequantize_per_tensor node.
 /// Args layout: [input, scale, zero_point, quant_min, quant_max, dtype]
-fn extract_dq_per_tensor_qparams(args: &[Bound<'_, PyAny>]) -> PyResult<Option<QParams>> {
+fn extract_dq_per_tensor_qparams<'py>(
+    py: Python<'py>,
+    args: &[Bound<'py, PyAny>],
+) -> PyResult<Option<QParams<'py>>> {
     if args.len() < 2 {
         return Ok(None);
     }
@@ -65,99 +82,140 @@ fn extract_dq_per_tensor_qparams(args: &[Bound<'_, PyAny>]) -> PyResult<Option<Q
     let zero_point: i64 = args.get(2).and_then(|a| a.extract().ok()).unwrap_or(0);
     let qmin: i64 = args.get(3).and_then(|a| a.extract().ok()).unwrap_or(-128);
     let qmax: i64 = args.get(4).and_then(|a| a.extract().ok()).unwrap_or(127);
-    let dtype_str = args
-        .get(5)
-        .and_then(|a| a.str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "torch.int8".to_string());
+    let dtype = match args.get(5) {
+        Some(d) => d.clone(),
+        None => py.eval_bound("__import__('torch').int8", None, None)?,
+    };
     Ok(Some(QParams {
-        scale,
-        zero_point,
+        scale: ScaleValue::Scalar(scale),
+        zero_point: ZpValue::Scalar(zero_point),
         qmin,
         qmax,
-        dtype_str,
+        dtype,
+        axis: 0,
+        per_channel: false,
     }))
 }
 
 /// Extract QParams from a dequantize_per_channel node.
-/// Args layout: [input, scale_tensor, zp_tensor, axis, quant_min, quant_max, dtype]
-/// We take the first element of the scale/zp tensors as a representative.
-fn extract_dq_per_channel_qparams(
-    _py: Python<'_>,
-    args: &[Bound<'_, PyAny>],
-) -> PyResult<Option<QParams>> {
+/// Args layout: [input, scale_node, zp_node, axis, quant_min, quant_max, dtype]
+///
+/// scale and zp may be FX Node references (pointing to parameter tensors) or
+/// direct tensor/list values. For per-channel QuantArgs we need Python lists,
+/// so we call `.tolist()` on tensors.
+fn extract_dq_per_channel_qparams<'py>(
+    py: Python<'py>,
+    args: &[Bound<'py, PyAny>],
+    gm: &FxGraphModule<'py>,
+) -> PyResult<Option<QParams<'py>>> {
     if args.len() < 2 {
         return Ok(None);
     }
-    // scale might be a tensor or a float
-    let scale: f64 = if let Ok(v) = args[1].extract::<f64>() {
-        v
-    } else {
-        // Try indexing [0] on a tensor / list
-        match args[1].call_method1("__getitem__", (0_i64,)) {
-            Ok(v) => {
-                // Could be a tensor scalar — call .item()
-                v.call_method0("item")
-                    .and_then(|i| i.extract())
-                    .or_else(|_| v.extract())
-                    .unwrap_or(1.0)
+
+    // Resolve a value that may be an FX Node referencing a parameter tensor.
+    // If it's a Node, look up the tensor via graph_module.get_attr(node.target).
+    let resolve_param = |arg: &Bound<'py, PyAny>| -> PyResult<Bound<'py, PyAny>> {
+        if FxGraphModule::is_node(arg) {
+            // It's an FX Node — get the underlying tensor from graph_module attrs
+            let target: String = arg.getattr("target")?.extract()?;
+            match gm.gm_ref().getattr(target.as_str()) {
+                Ok(tensor) => Ok(tensor),
+                Err(_) => Ok(arg.clone()), // fall back to the node itself
             }
-            Err(_) => return Ok(None),
+        } else {
+            Ok(arg.clone())
         }
     };
-    let zero_point: i64 = if let Ok(v) = args.get(2).map(|a| a.extract::<i64>()).unwrap_or(Ok(0))
-    {
-        v
-    } else {
-        // tensor / list — take [0]
-        args.get(2)
-            .and_then(|a| {
-                a.call_method1("__getitem__", (0_i64,))
-                    .ok()
-                    .and_then(|v| {
-                        v.call_method0("item")
-                            .and_then(|i| i.extract().map_err(Into::into))
-                            .or_else(|_: PyErr| v.extract())
-                            .ok()
-                    })
-            })
-            .unwrap_or(0)
+
+    // Convert a tensor/scalar to a Python list for QuantArgs.
+    let to_list = |val: &Bound<'py, PyAny>| -> PyResult<Bound<'py, PyAny>> {
+        // Already a list
+        if val.is_instance_of::<pyo3::types::PyList>() {
+            return Ok(val.clone());
+        }
+        // Tensor — call .tolist()
+        if let Ok(list_val) = val.call_method0("tolist") {
+            return Ok(list_val);
+        }
+        // Scalar — wrap in a list
+        Ok(val.clone())
     };
-    // axis at index 3 (ignored)
+
+    let scale_raw = resolve_param(&args[1])?;
+    let scale_list = to_list(&scale_raw)?;
+
+    let zp_raw = args
+        .get(2)
+        .map(|a| resolve_param(a))
+        .transpose()?
+        .unwrap_or_else(|| py.eval_bound("[0]", None, None).unwrap());
+    let zp_list = to_list(&zp_raw)?;
+
+    let axis: i64 = args.get(3).and_then(|a| a.extract().ok()).unwrap_or(0);
     let qmin: i64 = args.get(4).and_then(|a| a.extract().ok()).unwrap_or(-128);
     let qmax: i64 = args.get(5).and_then(|a| a.extract().ok()).unwrap_or(127);
-    let dtype_str = args
-        .get(6)
-        .and_then(|a| a.str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "torch.int8".to_string());
+    let dtype = match args.get(6) {
+        Some(d) => d.clone(),
+        None => py.eval_bound("__import__('torch').int8", None, None)?,
+    };
+
     Ok(Some(QParams {
-        scale,
-        zero_point,
+        scale: ScaleValue::Tensor(scale_list),
+        zero_point: ZpValue::Tensor(zp_list),
         qmin,
         qmax,
-        dtype_str,
+        dtype,
+        axis,
+        per_channel: true,
     }))
 }
 
 /// Extract QParams from a quantize_per_tensor node.
 /// Same arg layout as dequantize_per_tensor.
-fn extract_q_per_tensor_qparams(args: &[Bound<'_, PyAny>]) -> PyResult<Option<QParams>> {
-    extract_dq_per_tensor_qparams(args)
+fn extract_q_per_tensor_qparams<'py>(
+    py: Python<'py>,
+    args: &[Bound<'py, PyAny>],
+) -> PyResult<Option<QParams<'py>>> {
+    extract_dq_per_tensor_qparams(py, args)
 }
 
 // ---------------------------------------------------------------------------
-// Helper: build a Python dict representing qparams
+// Helper: build a Python QuantArgs namedtuple from our Rust QParams
 // ---------------------------------------------------------------------------
 
-fn qparams_to_py_dict<'py>(py: Python<'py>, qp: &QParams) -> PyResult<Bound<'py, PyDict>> {
-    let d = PyDict::new_bound(py);
-    d.set_item("scale", qp.scale)?;
-    d.set_item("zero_point", qp.zero_point)?;
-    d.set_item("qmin", qp.qmin)?;
-    d.set_item("qmax", qp.qmax)?;
-    d.set_item("dtype", &qp.dtype_str)?;
-    Ok(d)
+/// Import and cache the QuantArgs class from the ARM backend.
+fn get_quant_args_cls<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    py.import_bound("executorch.backends.arm._passes.quant_args")?
+        .getattr("QuantArgs")
+}
+
+/// Create a Python `QuantArgs(scale, zp, qmin, qmax, dtype, axis, per_channel)` namedtuple.
+fn qparams_to_quant_args<'py>(
+    py: Python<'py>,
+    qp: &QParams<'py>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let cls = get_quant_args_cls(py)?;
+
+    let scale_arg: Bound<'py, PyAny> = match &qp.scale {
+        ScaleValue::Scalar(v) => v.into_py(py).into_bound(py),
+        ScaleValue::Tensor(list) => list.clone(),
+    };
+    let zp_arg: Bound<'py, PyAny> = match &qp.zero_point {
+        ZpValue::Scalar(v) => v.into_py(py).into_bound(py),
+        ZpValue::Tensor(list) => list.clone(),
+    };
+
+    let kwargs = PyDict::new_bound(py);
+    kwargs.set_item("scale", &scale_arg)?;
+    kwargs.set_item("zp", &zp_arg)?;
+    kwargs.set_item("qmin", qp.qmin)?;
+    kwargs.set_item("qmax", qp.qmax)?;
+    kwargs.set_item("dtype", &qp.dtype)?;
+    kwargs.set_item("axis", qp.axis)?;
+    kwargs.set_item("per_channel", qp.per_channel)?;
+
+    // QuantArgs(**kwargs) — NamedTuple supports keyword construction
+    cls.call((), Some(&kwargs))
 }
 
 /// Find which arg positions in `user_node.args` reference `target_node`
@@ -195,12 +253,7 @@ impl FxPass for FxFoldAndAnnotateQParamsPass {
         // ------------------------------------------------------------------
         // Pass 1: Annotate input_qparams on DQ users
         // ------------------------------------------------------------------
-        struct DqInfo<'py> {
-            node: Bound<'py, PyAny>,
-            #[allow(dead_code)]
-            qparams: QParams,
-        }
-        let mut dq_nodes: Vec<DqInfo> = Vec::new();
+        let mut dq_nodes: Vec<Bound<'_, PyAny>> = Vec::new();
 
         for node in &all_nodes {
             let op = FxGraphModule::node_op(node)?;
@@ -214,9 +267,9 @@ impl FxPass for FxFoldAndAnnotateQParamsPass {
 
             let args = FxGraphModule::node_args(node)?;
             let qp = if is_dequantize_per_channel(&target) {
-                extract_dq_per_channel_qparams(py, &args)?
+                extract_dq_per_channel_qparams(py, &args, gm)?
             } else {
-                extract_dq_per_tensor_qparams(&args)?
+                extract_dq_per_tensor_qparams(py, &args)?
             };
 
             let qp = match qp {
@@ -224,13 +277,15 @@ impl FxPass for FxFoldAndAnnotateQParamsPass {
                 None => continue,
             };
 
+            // Build the QuantArgs namedtuple once for this DQ node
+            let quant_args = qparams_to_quant_args(py, &qp)?;
+
             // For each user of this DQ node, annotate input_qparams
             let users = FxGraphModule::node_users(node)?;
-            let qp_dict = qparams_to_py_dict(py, &qp)?;
 
             for user in &users {
                 let positions = find_arg_positions(user, node)?;
-                // Get or create node.meta["input_qparams"] (a Python dict: pos -> qparams)
+                // Get or create node.meta["input_qparams"] (a Python dict: pos -> QuantArgs)
                 let meta = user.getattr("meta")?;
                 let input_qp = match meta.call_method1("get", ("input_qparams",)) {
                     Ok(v) if !v.is_none() => v,
@@ -241,29 +296,20 @@ impl FxPass for FxFoldAndAnnotateQParamsPass {
                     }
                 };
                 for pos in positions {
-                    // Only set if not already present (use dict.get to avoid KeyError)
                     let existing = input_qp.call_method1("get", (pos,))?;
                     if existing.is_none() {
-                        input_qp.set_item(pos, &qp_dict)?;
+                        input_qp.set_item(pos, &quant_args)?;
                     }
                 }
             }
 
-            dq_nodes.push(DqInfo {
-                node: node.clone(),
-                qparams: qp,
-            });
+            dq_nodes.push(node.clone());
         }
 
         // ------------------------------------------------------------------
         // Pass 2: Annotate output_qparams on Q inputs
         // ------------------------------------------------------------------
-        struct QInfo<'py> {
-            node: Bound<'py, PyAny>,
-            #[allow(dead_code)]
-            qparams: QParams,
-        }
-        let mut q_nodes: Vec<QInfo> = Vec::new();
+        let mut q_nodes: Vec<Bound<'_, PyAny>> = Vec::new();
 
         for node in &all_nodes {
             let op = FxGraphModule::node_op(node)?;
@@ -276,7 +322,7 @@ impl FxPass for FxFoldAndAnnotateQParamsPass {
             }
 
             let args = FxGraphModule::node_args(node)?;
-            let qp = match extract_q_per_tensor_qparams(&args)? {
+            let qp = match extract_q_per_tensor_qparams(py, &args)? {
                 Some(qp) => qp,
                 None => continue,
             };
@@ -293,47 +339,37 @@ impl FxPass for FxFoldAndAnnotateQParamsPass {
                             d.into_any()
                         }
                     };
-                    let qp_dict = qparams_to_py_dict(py, &qp)?;
-                    // Position 0 for the single output
+                    let quant_args = qparams_to_quant_args(py, &qp)?;
                     let existing = output_qp.call_method1("get", (0,))?;
                     if existing.is_none() {
-                        output_qp.set_item(0, &qp_dict)?;
+                        output_qp.set_item(0, &quant_args)?;
                     }
                 }
             }
 
-            q_nodes.push(QInfo {
-                node: node.clone(),
-                qparams: qp,
-            });
+            q_nodes.push(node.clone());
         }
 
         // ------------------------------------------------------------------
         // Pass 3: Bypass DQ and Q nodes
         // ------------------------------------------------------------------
-        for dq in &dq_nodes {
-            let args = FxGraphModule::node_args(&dq.node)?;
+        for dq_node in &dq_nodes {
+            let args = FxGraphModule::node_args(dq_node)?;
             if let Some(input_node) = args.first() {
                 if FxGraphModule::is_node(input_node) {
-                    FxGraphModule::replace_all_uses_with(&dq.node, input_node)?;
-                    gm.erase_node(&dq.node)?;
+                    FxGraphModule::replace_all_uses_with(dq_node, input_node)?;
+                    gm.erase_node(dq_node)?;
                     modified = true;
                 }
             }
         }
 
-        for q in &q_nodes {
-            // Q node's output feeds into its users.  Replace uses of Q with
-            // the Q node's own output-side user?  No — Q is a passthrough
-            // from the quantized domain.  We replace uses of Q with Q's input
-            // (args[0]).  But wait, at this point the DQ nodes are already
-            // erased, so Q's input (which was a DQ output) has been rewired.
-            // Actually, the Q node's users should now point to Q's first arg.
-            let args = FxGraphModule::node_args(&q.node)?;
+        for q_node in &q_nodes {
+            let args = FxGraphModule::node_args(q_node)?;
             if let Some(input_node) = args.first() {
                 if FxGraphModule::is_node(input_node) {
-                    FxGraphModule::replace_all_uses_with(&q.node, input_node)?;
-                    gm.erase_node(&q.node)?;
+                    FxGraphModule::replace_all_uses_with(q_node, input_node)?;
+                    gm.erase_node(q_node)?;
                     modified = true;
                 }
             }
