@@ -111,6 +111,51 @@ def _full_python_preprocess(
     return PreprocessResult(processed_bytes=bytes(tosa_bytes))
 
 
+def _fast_python_preprocess(
+    edge_program: ExportedProgram,
+    compile_spec: TosaCompileSpec,
+) -> PreprocessResult:
+    """Run Python ArmPassManager passes with smart no-op skipping + Rust serialization.
+
+    Same as python_passes mode but installs the smart pass skipping optimization
+    which scans graph ops before each pass and skips passes whose target ops are
+    absent. Saves ~35-40s by avoiding ExportPass retrace on ~70 no-op passes.
+    """
+    import arm_tosa_engine
+    from fast_pass_manager import install_smart_skipping, uninstall_smart_skipping
+
+    t0 = time.perf_counter()
+
+    install_smart_skipping()
+    try:
+        graph_module = edge_program.graph_module
+
+        from executorch.backends.arm._passes import ArmPassManager
+
+        pass_manager = ArmPassManager(compile_spec)
+        graph_module = pass_manager.transform_to_backend_pipeline(
+            exported_program=edge_program, graph_module=graph_module
+        )
+    finally:
+        uninstall_smart_skipping()
+
+    t_passes = time.perf_counter() - t0
+
+    state_dict = dict(edge_program.state_dict)
+    graph_signature = edge_program.graph_signature
+    tosa_bytes = arm_tosa_engine.lower_to_tosa(
+        graph_module, state_dict, graph_signature
+    )
+
+    t_total = time.perf_counter() - t0
+    logger.info(
+        f"[fast_python_preprocess] TOSA generation: {t_total:.3f}s "
+        f"(passes={t_passes:.3f}s, serialize={t_total - t_passes:.3f}s)"
+    )
+
+    return PreprocessResult(processed_bytes=bytes(tosa_bytes))
+
+
 # -- Public API: patching and subclass alternatives --------------------------
 
 
@@ -137,6 +182,8 @@ def patch_tosa_backend(mode="fast"):
         mode: "fast" uses Rust passes + Rust serialization (default).
               "python_passes" uses Python passes + Rust serialization
               (correctness baseline).
+              "python_passes_fast" uses Python passes with smart no-op
+              skipping + Rust serialization (~40s savings).
     """
     from executorch.backends.arm.tosa.backend import TOSABackend
 
@@ -147,8 +194,16 @@ def patch_tosa_backend(mode="fast"):
     elif mode == "python_passes":
         TOSABackend._preprocess = staticmethod(_full_python_preprocess)
         logger.info("[fast_preprocess] Patched TOSABackend (python_passes mode)")
+    elif mode == "python_passes_fast":
+        TOSABackend._preprocess = staticmethod(_fast_python_preprocess)
+        logger.info(
+            "[fast_preprocess] Patched TOSABackend (python_passes_fast mode)"
+        )
     else:
-        raise ValueError(f"Unknown mode: {mode!r}. Use 'fast' or 'python_passes'.")
+        raise ValueError(
+            f"Unknown mode: {mode!r}. "
+            "Use 'fast', 'python_passes', or 'python_passes_fast'."
+        )
 
 
 def unpatch_tosa_backend():

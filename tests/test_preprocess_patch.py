@@ -90,7 +90,7 @@ def main():
     parser.add_argument(
         "--modes",
         default="fast,python_passes",
-        help="Comma-separated modes to test (fast, python_passes)",
+        help="Comma-separated modes to test (fast, python_passes, python_passes_fast)",
     )
     parser.add_argument(
         "--skip-unpatched",
