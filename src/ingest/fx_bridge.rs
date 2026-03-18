@@ -67,12 +67,64 @@ pub fn ingest_fx_graph(
         let op_str: String = py_node.getattr("op")?.extract()?;
         let name: String = py_node.getattr("name")?.extract()?;
 
+        let is_get_attr = op_str == "get_attr";
         let op_type = match op_str.as_str() {
-            "placeholder" => OpType::Placeholder,
+            "placeholder" | "get_attr" => OpType::Placeholder,
             "call_function" => OpType::CallFunction,
             "output" => OpType::Output,
-            _ => OpType::CallFunction, // get_attr, call_method, etc.
+            _ => OpType::CallFunction, // call_method, etc.
         };
+
+        // Skip dead placeholder/get_attr nodes (no users in the FX graph).
+        // After fold_qdq, scale/zero_point placeholders that fed DQ nodes
+        // become dead (no consumers). Serializing them creates spurious
+        // FP32 CONST tensors that confuse Vela and reduce NPU op count.
+        if op_type == OpType::Placeholder {
+            let users_obj = py_node.getattr("users")?;
+            let user_count: usize = users_obj.len()?;
+            if user_count == 0 {
+                continue;
+            }
+        }
+
+        // For get_attr nodes, extract the tensor data from graph_module
+        // and add it to the store. These are constants registered as buffers
+        // (bias tensors, table lookup data, etc.) by FX-direct passes.
+        if is_get_attr {
+            let attr_name: String = py_node.getattr("target")?.str()?.extract()?;
+            if store.get(&name).is_none() {
+                if let Ok(tensor) = graph_module.getattr(attr_name.as_str()) {
+                    if let Ok(shape_obj) = tensor.getattr("shape") {
+                        if let Ok(shape) = shape_obj
+                            .iter()
+                            .and_then(|it| it.map(|s| s.and_then(|v| v.extract::<i64>())).collect::<PyResult<Vec<_>>>())
+                        {
+                            let mut dtype = tensor
+                                .getattr("dtype")
+                                .and_then(|d| d.str()?.extract::<String>())
+                                .map(|s| parse_torch_dtype(&s))
+                                .unwrap_or(DType::Float32);
+                            if let Ok(mut data) = tensor
+                                .call_method0("contiguous")
+                                .and_then(|c| c.call_method0("cpu"))
+                                .and_then(|c| c.call_method0("numpy"))
+                                .and_then(|n| n.call_method0("tobytes"))
+                                .and_then(|b| b.extract::<Vec<u8>>())
+                            {
+                                if dtype == DType::Int64 {
+                                    data = cast_i64_bytes_to_i32(&data);
+                                    dtype = DType::Int32;
+                                }
+                                store.insert(
+                                    name.clone(),
+                                    TensorData { data, shape, dtype },
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // --- target ---
         let op_target = if op_type == OpType::CallFunction {
