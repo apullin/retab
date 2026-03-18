@@ -85,6 +85,17 @@ fn fold_qdq_fx(
     fx_pass::FxPass::run(&pass, &gm)
 }
 
+/// Run only the Rust InsertRescale pass on a Python FX GraphModule.
+///
+/// This is for diagnostic comparison against the Python InsertRescale passes.
+/// The graph must already be Q/DQ-folded (with QuantArgs in node.meta).
+#[pyfunction]
+fn insert_rescale_fx(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let gm = fx_graph::FxGraphModule::new(graph_module);
+    let pass = fx_insert_rescale::FxInsertRescalePass;
+    fx_pass::FxPass::run(&pass, &gm)
+}
+
 /// Return a summary of the FX graph: node count plus a list of
 /// (name, op, target_str) triples.  Useful for quick sanity checks.
 #[pyfunction]
@@ -103,13 +114,12 @@ fn fx_graph_summary(graph_module: &Bound<'_, PyAny>) -> PyResult<Vec<(String, St
 
 /// Run the full FX-direct lowering pipeline on a Python FX GraphModule.
 ///
-/// This executes all passes in order: fuse activations, Python fold Q/DQ +
-/// rescales, insert table ops, convert to clamp, rewrite conv, annotate
-/// memory format. Returns True if any pass modified the graph.
+/// This executes all passes in order: fuse activations, Rust fold Q/DQ,
+/// Rust insert rescales, insert table ops, convert to clamp, rewrite conv,
+/// annotate memory format. Returns True if any pass modified the graph.
 ///
-/// The optional `exported_program` is forwarded to Python's
-/// `FoldAndAnnotateQParamsPass` so it can resolve parameter tensor nodes
-/// (per-channel scales/zero-points stored as graph parameters).
+/// The optional `exported_program` is forwarded to the Rust fold pass
+/// so it can resolve parameter tensor nodes (per-channel scales/zps).
 #[pyfunction]
 #[pyo3(signature = (graph_module, exported_program=None))]
 fn run_fx_passes(
@@ -165,6 +175,7 @@ fn arm_tosa_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lower_to_tosa, m)?)?;
     m.add_function(wrap_pyfunction!(lower_to_tosa_v2, m)?)?;
     m.add_function(wrap_pyfunction!(fold_qdq_fx, m)?)?;
+    m.add_function(wrap_pyfunction!(insert_rescale_fx, m)?)?;
     m.add_function(wrap_pyfunction!(run_fx_passes, m)?)?;
     m.add_function(wrap_pyfunction!(fx_graph_summary, m)?)?;
     Ok(())
