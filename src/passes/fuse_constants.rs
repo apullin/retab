@@ -18,7 +18,13 @@ impl Pass for FuseConstantArgsPass {
         let mut modified = false;
 
         // Iterate until no more fusions are possible (cascading constants)
+        let mut iterations = 0;
         loop {
+            iterations += 1;
+            if iterations > 10 {
+                eprintln!("[WARN] FuseConstantArgsPass hit max iterations");
+                break;
+            }
             let mut fused_any = false;
             let all_ids = graph.all_node_ids();
 

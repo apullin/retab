@@ -9,6 +9,7 @@ pub mod decompose_quant;
 pub mod fold_qdq;
 pub mod fuse_constants;
 pub mod fuse_quantized_activation;
+pub mod insert_arithmetic_rescales;
 pub mod insert_rescale;
 pub mod insert_table_ops;
 pub mod match_arg_dtype;
@@ -29,7 +30,7 @@ pub trait Pass {
 }
 
 pub struct PassRunner {
-    passes: Vec<Box<dyn Pass>>,
+    pub passes: Vec<Box<dyn Pass>>,
 }
 
 impl PassRunner {
@@ -43,18 +44,17 @@ impl PassRunner {
 
     pub fn run_all(&self, graph: &mut Graph, store: &mut TensorStore) {
         let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
-        for pass in &self.passes {
+        use std::io::Write;
+        for (i, pass) in self.passes.iter().enumerate() {
+            // Always log pass start to stderr and flush immediately
+            let _ = writeln!(std::io::stderr(), "[PassRunner] starting pass {}/{}: {}", i+1, self.passes.len(), pass.name());
+            let _ = std::io::stderr().flush();
             let before_count = graph.order.len();
             let modified = pass.run(graph, store);
             let after_count = graph.order.len();
+            let _ = writeln!(std::io::stderr(), "[PassRunner] {} — modified={}, nodes: {} -> {}", pass.name(), modified, before_count, after_count);
+            let _ = std::io::stderr().flush();
             if debug {
-                eprintln!(
-                    "[PassRunner] {} — modified={}, nodes: {} -> {}",
-                    pass.name(),
-                    modified,
-                    before_count,
-                    after_count
-                );
                 for &nid in &graph.order {
                     if let Some(n) = graph.node(nid) {
                         if n.op == crate::graph::ir::OpType::CallFunction {
@@ -95,7 +95,13 @@ impl Pass for FuseDuplicateUsersPass {
 
         // Collect candidate groups: nodes with the same (target, args, kwargs).
         // We iterate in order and keep the first occurrence of each signature.
+        let mut iterations = 0;
         loop {
+            iterations += 1;
+            if iterations > 5 {
+                eprintln!("[WARN] FuseDuplicateUsersPass hit max iterations (5)");
+                break;
+            }
             let mut fused_any = false;
             let all_ids = graph.all_node_ids();
 
@@ -174,19 +180,72 @@ fn is_fusable(target: &crate::graph::ir::OpTarget) -> bool {
             | OpTarget::Sub
             | OpTarget::Mul
             | OpTarget::Reshape
+            | OpTarget::View
             | OpTarget::Mean
             | OpTarget::Sum
             | OpTarget::Full
+            | OpTarget::FullLike
             | OpTarget::Rsqrt
             | OpTarget::Var
             | OpTarget::Clamp
+            | OpTarget::Permute
             | OpTarget::TosaAdd
             | OpTarget::TosaSub
             | OpTarget::TosaMul
             | OpTarget::TosaReshape
+            | OpTarget::TosaTranspose
             | OpTarget::TosaReduceSum
             | OpTarget::TosaClamp
+            | OpTarget::TosaTable
     )
+}
+
+/// Diagnostic pass to count qparam coverage. Gated behind TOSA_ENGINE_DEBUG.
+struct DiagnosticPass { label: &'static str }
+impl Pass for DiagnosticPass {
+    fn name(&self) -> &str { "Diagnostic" }
+    fn run(&self, graph: &mut Graph, _store: &mut TensorStore) -> bool {
+        if std::env::var("TOSA_ENGINE_DEBUG").is_err() {
+            return false;
+        }
+        let mut has_input = 0;
+        let mut has_output = 0;
+        let mut has_both = 0;
+        let mut call_fn_count = 0;
+        let mut no_qp = Vec::new();
+        for &id in &graph.all_node_ids() {
+            if let Some(node) = graph.node(id) {
+                if node.op == crate::graph::ir::OpType::CallFunction {
+                    call_fn_count += 1;
+                    let has_i = !node.meta.input_qparams.is_empty();
+                    let has_o = !node.meta.output_qparams.is_empty();
+                    if has_i { has_input += 1; }
+                    if has_o { has_output += 1; }
+                    if has_i && has_o { has_both += 1; }
+                    if !has_i && !has_o {
+                        no_qp.push(format!("  {} ({:?})", node.name, node.target));
+                    }
+                }
+            }
+        }
+        eprintln!("[Diagnostic:{}] CallFunction nodes: {call_fn_count}, with input_qp: {has_input}, with output_qp: {has_output}, with both: {has_both}",
+            self.label);
+        if !no_qp.is_empty() {
+            eprintln!("[Diagnostic:{}] Nodes with NO qparams ({}):", self.label, no_qp.len());
+            for s in &no_qp { eprintln!("{}", s); }
+        }
+        for &id in &graph.all_node_ids() {
+            if let Some(node) = graph.node(id) {
+                if node.op == crate::graph::ir::OpType::CallFunction {
+                    let in_scales: Vec<_> = node.meta.input_qparams.iter().map(|(p, q)| format!("{}:{:.6}", p, q.scale)).collect();
+                    let out_scales: Vec<_> = node.meta.output_qparams.iter().map(|(p, q)| format!("{}:{:.6}", p, q.scale)).collect();
+                    eprintln!("[Diagnostic:{}]   '{}' ({:?}) in=[{}] out=[{}]",
+                        self.label, node.name, node.target, in_scales.join(","), out_scales.join(","));
+                }
+            }
+        }
+        false
+    }
 }
 
 /// Placeholder: fuse placeholders that reference the same underlying buffer.
@@ -263,13 +322,24 @@ pub fn build_phase2_pipeline() -> PassRunner {
     //     lack them because decomposition happened after quantization.
     runner.add(Box::new(propagate_qparams::PropagateQParamsPass));
 
+    // 5a-diag. Diagnostic pass to measure qparam coverage (gated behind TOSA_ENGINE_DEBUG)
+    runner.add(Box::new(DiagnosticPass { label: "after_propagate" }));
+
     // 5b. InsertTableOpsPass (replace quantized Rsqrt with TABLE)
     runner.add(Box::new(insert_table_ops::InsertTableOpsPass));
 
-    // 6. FuseDuplicateUsersPass (no-op for now)
+    // 6. FuseDuplicateUsersPass
     runner.add(Box::new(FuseDuplicateUsersPass));
 
-    // 7. InsertRescaleInt32Pass — use existing InsertRescalePass
+    // 6a. InsertArithmeticRescalesPass — insert rescales around ADD/SUB/MUL
+    //     per TOSA requirements (input rescales for ADD/SUB, output rescales
+    //     for MUL). This MUST run before InsertRescalePass so that the
+    //     mismatch detection can fill in remaining inter-op rescales.
+    runner.add(Box::new(
+        insert_arithmetic_rescales::InsertArithmeticRescalesPass,
+    ));
+
+    // 7. InsertRescaleInt32Pass — accumulator rescales + remaining mismatches
     runner.add(Box::new(insert_rescale::InsertRescalePass));
 
     // 8. DecomposeQuantNodesPass (existing)
@@ -295,6 +365,18 @@ pub fn build_phase2_pipeline() -> PassRunner {
 
     // 15. RemoveNoopPass (no-op for now)
     runner.add(Box::new(RemoveNoopPass));
+
+    // 15a. PropagateQParamsPass — re-propagate qparams through nodes inserted
+    //      by BroadcastArgs, MatchArgDtype, MemoryFormat, etc.
+    runner.add(Box::new(propagate_qparams::PropagateQParamsPass));
+
+    // 15b. InsertArithmeticRescalesPass — second pass for newly inserted nodes
+    runner.add(Box::new(
+        insert_arithmetic_rescales::InsertArithmeticRescalesPass,
+    ));
+
+    // 15c. Diagnostic (gated behind TOSA_ENGINE_DEBUG)
+    runner.add(Box::new(DiagnosticPass { label: "before_final_rescale" }));
 
     // 16. InsertRescalePass (existing — final rescale insertion)
     runner.add(Box::new(insert_rescale::InsertRescalePass));

@@ -150,7 +150,13 @@ impl Pass for CleanupPass {
 
         // Pass 2: Dead code elimination
         // Iterate until no more nodes can be removed
+        let mut dce_iterations = 0;
         loop {
+            dce_iterations += 1;
+            if dce_iterations > 10 {
+                eprintln!("[WARN] CleanupPass DCE hit max iterations");
+                break;
+            }
             let mut removed_any = false;
             let ids = graph.all_node_ids();
             for node_id in ids {

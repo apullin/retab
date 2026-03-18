@@ -17,6 +17,11 @@ use crate::store::TensorStore;
 ///    missing `input_qparams` for a specific arg position, look at the
 ///    producer's `output_qparams` and use those.
 ///
+/// 3. **Shape-only pass-through**: nodes like Reshape, Transpose, Clamp that
+///    do not change the quantization domain propagate qparams from input to
+///    output even when they have no input_qparams yet — as long as their
+///    single Node-typed arg producer has output_qparams.
+///
 /// The pass iterates until convergence so that chains of ops all get annotated.
 pub struct PropagateQParamsPass;
 
@@ -35,7 +40,8 @@ impl Pass for PropagateQParamsPass {
 
             let all_ids = graph.all_node_ids();
 
-            // Forward: propagate output_qparams from input_qparams
+            // Forward: propagate output_qparams from input_qparams.
+            // For most ops, output_scale = input_scale[0] (pass-through).
             for &node_id in &all_ids {
                 let (should_propagate_output, qp_to_set) = {
                     let node = match graph.node(node_id) {
@@ -72,8 +78,8 @@ impl Pass for PropagateQParamsPass {
                         changed_this_round = true;
                         if debug {
                             eprintln!(
-                                "[PropagateQParams] forward: set output_qparams on '{}' (scale={})",
-                                node.name, qp_to_set.scale,
+                                "[PropagateQParams] forward: set output_qparams on '{}' ({:?}) (scale={})",
+                                node.name, node.target, qp_to_set.scale,
                             );
                         }
                     }

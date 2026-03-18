@@ -12,7 +12,9 @@ use visitors::ir_dtype_to_tosa;
 /// Serialize the IR graph and its constant data into a TOSA flatbuffer byte
 /// vector.
 pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
+    eprintln!("[Serialize] starting topo sort on {} nodes...", graph.order.len());
     let sorted = graph.topological_sort();
+    eprintln!("[Serialize] topo sort done, {} sorted nodes", sorted.len());
 
     let mut tensors: Vec<TosaTensor> = Vec::new();
     let mut shapes: Vec<TosaShape> = Vec::new();
@@ -119,13 +121,19 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
         }
     }
 
+    eprintln!("[Serialize] topo sort done, collected {} tensors, {} operators, {} shapes", tensors.len(), operators.len(), shapes.len());
+
     // Build the flatbuffer bottom-up
-    let mut builder = FlatBufferBuilder::with_capacity(64 * 1024);
+    let mut builder = FlatBufferBuilder::with_capacity(2 * 1024 * 1024); // 2MB initial
 
     // Pre-serialize all sub-tables
+    eprintln!("[Serialize] building fb tensors...");
     let fb_tensors = build_fb_tensors(&mut builder, &tensors);
+    eprintln!("[Serialize] building fb shapes...");
     let fb_shapes = build_fb_shapes(&mut builder, &shapes);
+    eprintln!("[Serialize] building fb operators...");
     let fb_operators = build_fb_operators(&mut builder, &operators);
+    eprintln!("[Serialize] assembling graph...");
 
     // Build input/output name vectors
     let fb_input_strs: Vec<_> = input_names
