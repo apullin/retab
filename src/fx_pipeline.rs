@@ -1,5 +1,7 @@
 use crate::fx_convert_clamp;
 use crate::fx_convert_sum;
+use crate::fx_decompose_linear;
+use crate::fx_decompose_quant;
 use crate::fx_fold_qdq;
 use crate::fx_fuse_duplicate_users;
 use crate::fx_fuse_quant_activation;
@@ -17,11 +19,13 @@ use crate::fx_rewrite_conv;
 ///   3. **Rust** insert rescales (DQ->Q pairs + INT32 elementwise rescales)
 ///   4. Insert TABLE ops (quantised lookup tables for rsqrt, exp, etc.)
 ///   5. Fuse duplicate users (deduplicate identical call_function nodes)
-///   6. Convert sum to chained TOSA REDUCE_SUM ops
-///   7. Convert relu/hardtanh to clamp
-///   8. Rewrite conv2d targets and annotate conv metadata
-///   9. Annotate TOSA memory format (dim_order, spatial_rank)
-///  10. Final dedup -- steps 6-9 may create or expose duplicate nodes
+///   6. Decompose linear into reshape+conv2d+reshape
+///   7. Decompose remaining Q/DQ nodes into primitive arithmetic
+///   8. Convert sum to chained TOSA REDUCE_SUM ops
+///   9. Convert relu/hardtanh to clamp
+///  10. Rewrite conv2d targets and annotate conv metadata
+///  11. Annotate TOSA memory format (dim_order, spatial_rank)
+///  12. Final dedup -- steps 8-11 may create or expose duplicate nodes
 ///
 /// Steps 2 and 3 are both Rust passes. Step 2 stores real QuantArgs
 /// namedtuples in node.meta. Step 3 reads those QuantArgs and inserts
@@ -36,11 +40,14 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_insert_rescale::FxInsertRescalePass),
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
         Box::new(fx_fuse_duplicate_users::FxFuseDuplicateUsersPass),
+        // Post-fold decompositions
+        Box::new(fx_decompose_linear::FxDecomposeLinearPass),
+        Box::new(fx_decompose_quant::FxDecomposeQuantNodesPass),
         Box::new(fx_convert_sum::FxConvertSumPass),
         Box::new(fx_convert_clamp::FxConvertToClampPass),
         Box::new(fx_rewrite_conv::FxRewriteConvPass),
         Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
-        // Final dedup: clean up duplicates introduced or exposed by passes 6-9
+        // Final dedup: clean up duplicates introduced or exposed by passes 8-12
         Box::new(fx_fuse_duplicate_users::FxFuseDuplicateUsersPass),
     ]
 }
