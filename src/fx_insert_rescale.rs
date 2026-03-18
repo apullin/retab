@@ -51,6 +51,15 @@ fn is_int32_accumulator_op(target: &str) -> bool {
         || target.contains("lt.Tensor")
 }
 
+/// Check if a target is a conv/depthwise_conv/linear/matmul that produces INT32 accumulators.
+fn is_accumulator_producer(target: &str) -> bool {
+    target.contains("convolution.default")
+        || target.contains("linear.default")
+        || target.contains("addmm.default")
+        || target.contains("mm.default")
+        || target.contains("bmm.default")
+}
+
 impl FxPass for FxInsertRescalePass {
     fn name(&self) -> &str {
         "FxInsertRescale"
@@ -306,6 +315,128 @@ impl FxPass for FxInsertRescalePass {
 
                 modified = true;
             }
+        }
+
+        // ------------------------------------------------------------------
+        // Phase 3: Insert accumulator rescales after conv/linear
+        // ------------------------------------------------------------------
+        // After fold_qdq, conv2d/depthwise_conv2d/linear nodes have
+        // output_qparams. They produce INT32 accumulators that need RESCALE
+        // to INT8. The rescale scale = (input_scale * weight_scale) / output_scale.
+        let all_nodes = gm.nodes()?;
+        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+
+        // Collect candidates first to avoid mutation during iteration.
+        let mut accum_nodes: Vec<Bound<'_, PyAny>> = Vec::new();
+        for node in &all_nodes {
+            let op = FxGraphModule::node_op(node)?;
+            if op != "call_function" {
+                continue;
+            }
+            let target = FxGraphModule::node_target_str(node)?;
+            if !is_accumulator_producer(&target) {
+                continue;
+            }
+
+            // Must have output_qparams (set by fold_qdq from the downstream Q node)
+            let meta = node.getattr("meta")?;
+            let output_qp = match meta.call_method1("get", ("output_qparams",)) {
+                Ok(v) if !v.is_none() => v,
+                _ => continue,
+            };
+            let oqp_len: usize = py
+                .import_bound("builtins")?
+                .call_method1("len", (&output_qp,))?
+                .extract()
+                .unwrap_or(0);
+            if oqp_len == 0 {
+                continue;
+            }
+            accum_nodes.push(node.clone());
+        }
+
+        for node in &accum_nodes {
+            let meta = node.getattr("meta")?;
+            let node_name = FxGraphModule::node_name(node)?;
+
+            // Get input_qparams to compute the accumulator scale
+            let input_qp = match meta.call_method1("get", ("input_qparams",)) {
+                Ok(v) if !v.is_none() => v,
+                _ => continue,
+            };
+
+            // Position 0 = activation input, position 1 = weight
+            let input_scale: f64 = match input_qp.get_item(0_usize) {
+                Ok(qp0) => qp0
+                    .call_method1("get", ("scale",))?
+                    .extract()
+                    .unwrap_or(1.0),
+                Err(_) => continue,
+            };
+            let weight_scale: f64 = match input_qp.get_item(1_usize) {
+                Ok(qp1) => qp1
+                    .call_method1("get", ("scale",))?
+                    .extract()
+                    .unwrap_or(1.0),
+                Err(_) => continue,
+            };
+
+            // Output qparams from the downstream Q node
+            let output_qp = meta.call_method1("get", ("output_qparams",))?;
+            let oqp = output_qp.get_item(0)?;
+            let out_scale: f64 = oqp
+                .call_method1("get", ("scale",))?
+                .extract()
+                .unwrap_or(1.0);
+            let out_zp: i64 = oqp
+                .call_method1("get", ("zero_point",))?
+                .extract()
+                .unwrap_or(0);
+            let out_dtype_str: String = oqp
+                .call_method1("get", ("dtype",))?
+                .extract()
+                .unwrap_or_else(|_| "torch.int8".to_string());
+
+            // Accumulator rescale: INT32 -> INT8
+            // scale = (input_scale * weight_scale) / output_scale
+            let rescale_scale = (input_scale * weight_scale) / out_scale;
+
+            let out_dtype = if out_dtype_str.contains("int16") {
+                py.eval_bound("__import__('torch').int16", None, None)?
+            } else {
+                py.eval_bound("__import__('torch').int8", None, None)?
+            };
+
+            if debug {
+                eprintln!(
+                    "[InsertRescale] accumulator rescale for {}: scale={:.6} (in={:.6} * wt={:.6} / out={:.6}), out_zp={}",
+                    node_name, rescale_scale, input_scale, weight_scale, out_scale, out_zp
+                );
+            }
+
+            let rescale_node = helpers.call_method1(
+                "insert_rescale_node",
+                (
+                    gm.gm_ref(),
+                    node,
+                    node,
+                    &out_dtype,
+                    vec![rescale_scale],
+                    0_i64,   // in_zp: 0 (accumulators are zero-centered)
+                    out_zp,  // out_zp: from output_qparams
+                    true,    // after the conv node
+                ),
+            )?;
+
+            // Rewire: all users of conv (except the rescale) should use the rescale
+            let users = FxGraphModule::node_users(node)?;
+            for user in &users {
+                if !user.is(&rescale_node) {
+                    user.call_method1("replace_input_with", (node, &rescale_node))?;
+                }
+            }
+
+            modified = true;
         }
 
         if modified {

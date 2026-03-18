@@ -44,12 +44,12 @@ impl FxPass for FxRewriteConvPass {
                 continue;
             }
 
+            let input_node = &args[0];
             let weight_node = &args[1];
             let groups: i64 = args[8].extract().unwrap_or(1);
 
             // Determine weight shape to decide conv2d vs depthwise_conv2d.
             // Weight shape for conv: [out_channels, in_channels/groups, kH, kW]
-            // Depthwise when groups == in_channels == out_channels
             let weight_shape = match FxGraphModule::node_shape(weight_node) {
                 Ok(s) => s,
                 Err(_) => continue,
@@ -60,9 +60,19 @@ impl FxPass for FxRewriteConvPass {
             }
 
             let out_channels = weight_shape[0];
-            let in_channels_per_group = weight_shape[1];
 
-            let is_depthwise = groups > 1 && in_channels_per_group == 1 && groups == out_channels;
+            // Get in_channels from the input tensor shape [N, C, H, W]
+            let in_channels = match FxGraphModule::node_shape(input_node) {
+                Ok(s) if s.len() >= 2 => s[1],
+                _ => 0,
+            };
+
+            // Match Python reference: depthwise when in_channels == groups and
+            // out_channels is a multiple of in_channels.
+            // For tiny_cnn's first conv: in_channels=1, groups=1 -> depthwise.
+            let is_depthwise = in_channels > 0
+                && groups == in_channels
+                && out_channels % in_channels == 0;
 
             // Get quantization info from meta if available
             let meta = node.getattr("meta")?;
@@ -88,12 +98,23 @@ impl FxPass for FxRewriteConvPass {
                 }
             }
 
+            let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+            if debug {
+                let node_name = FxGraphModule::node_name(node)?;
+                eprintln!(
+                    "[RewriteConv] {}: in_ch={}, out_ch={}, groups={}, depthwise={}",
+                    node_name, in_channels, out_channels, groups, is_depthwise
+                );
+            }
+
             // Store conv metadata for downstream passes
             let conv_meta = pyo3::types::PyDict::new_bound(py);
             conv_meta.set_item("is_depthwise", is_depthwise)?;
             conv_meta.set_item("input_zp", input_zp)?;
             conv_meta.set_item("weight_zp", weight_zp)?;
             conv_meta.set_item("groups", groups)?;
+            conv_meta.set_item("in_channels", in_channels)?;
+            conv_meta.set_item("out_channels", out_channels)?;
             FxGraphModule::set_meta(node, "conv_info", conv_meta.as_ref())?;
 
             // Note: We annotate but don't actually swap the target to a TOSA op

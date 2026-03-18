@@ -5,13 +5,10 @@ use crate::fx_pass::FxPass;
 
 /// FX-graph-direct implementation of `ToTosaMemoryFormatPass`.
 ///
-/// Annotates each node with `tosa_dim_order` metadata indicating the
-/// channels-last permutation, and `tosa_spatial_rank`.
-///
-/// For the prototype this pass only does the annotation phase (dim_order and
-/// spatial_rank metadata).  The transpose-insertion phase (NCHW <-> NHWC) is
-/// complex and depends on FakeTensor shapes that are easiest to handle from
-/// Python, so we defer actual TRANSPOSE node creation to a follow-up.
+/// Annotates each node with `tosa_dim_order` and `tosa_spatial_rank` metadata,
+/// then inserts TOSA TRANSPOSE nodes at NCHW/NHWC boundaries:
+///   - After 4D+ input placeholders: NCHW->NHWC transpose (perm [0,2,3,1])
+///   - Before the output node for 4D+ args: NHWC->NCHW transpose (perm [0,3,1,2])
 pub struct FxToTosaMemoryFormatPass;
 
 /// Compute the channels-last permutation for a tensor of given rank and spatial rank.
@@ -28,6 +25,17 @@ fn channels_last_order(rank: usize, spatial_rank: usize) -> Vec<usize> {
     order
 }
 
+/// Compute the inverse of channels_last_order: maps NHWC back to NCHW.
+/// E.g. rank=4, spatial_rank=2 -> (0, 3, 1, 2) for NHWC -> NCHW.
+fn channels_last_inverse_order(rank: usize, spatial_rank: usize) -> Vec<usize> {
+    let order = channels_last_order(rank, spatial_rank);
+    let mut inverse = vec![0usize; rank];
+    for (idx, &axis) in order.iter().enumerate() {
+        inverse[axis] = idx;
+    }
+    inverse
+}
+
 /// Infer the initial spatial rank from tensor rank.
 fn initial_spatial_rank(tensor_rank: usize) -> usize {
     if tensor_rank >= 4 {
@@ -37,6 +45,35 @@ fn initial_spatial_rank(tensor_rank: usize) -> usize {
     } else {
         0
     }
+}
+
+/// Check if a node is a non-parameter placeholder (i.e. a user input).
+/// In ExportedProgram, parameter placeholders have names starting with "p_"
+/// (parameters) or "b_" (buffers), while user inputs have names like "x",
+/// "arg0_1", etc.
+fn is_input_placeholder(node: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let op = FxGraphModule::node_op(node)?;
+    if op != "placeholder" {
+        return Ok(false);
+    }
+    let meta = node.getattr("meta")?;
+    let val = match meta.call_method1("get", ("val",)) {
+        Ok(v) if !v.is_none() => v,
+        _ => return Ok(false),
+    };
+    // Skip SymInt values
+    let type_name: String = val.get_type().getattr("__name__")?.extract()?;
+    if type_name == "SymInt" {
+        return Ok(false);
+    }
+    // Filter out parameter/buffer/constant placeholders by name convention.
+    // In ExportedProgram: parameters start with "p_", buffers with "b_",
+    // lifted tensor constants with "c_".
+    let name = FxGraphModule::node_name(node)?;
+    if name.starts_with("p_") || name.starts_with("b_") || name.starts_with("c_") {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 impl FxPass for FxToTosaMemoryFormatPass {
@@ -173,9 +210,149 @@ impl FxPass for FxToTosaMemoryFormatPass {
             modified = true;
         }
 
-        // Note: We intentionally skip transpose insertion in this prototype.
-        // The annotation phase is sufficient for downstream consumers that
-        // read tosa_dim_order from node.meta.
+        // ------------------------------------------------------------------
+        // Phase 4: Insert TRANSPOSE nodes at NCHW/NHWC boundaries
+        // ------------------------------------------------------------------
+        let helpers = py.import_bound("fx_helpers")?;
+        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+
+        // Re-snapshot nodes for transpose insertion.
+        let all_nodes = gm.nodes()?;
+
+        // 4a: After 4D+ input placeholders, insert NCHW->NHWC transpose.
+        // The input comes in NCHW format; internal ops expect NHWC.
+        // The permutation is channels_last_order: (0, 2, 3, 1).
+        for node in &all_nodes {
+            let op = FxGraphModule::node_op(node)?;
+            if op != "placeholder" {
+                continue;
+            }
+            if !is_input_placeholder(node)? {
+                continue;
+            }
+
+            let meta = node.getattr("meta")?;
+            let val = meta.call_method1("get", ("val",))?;
+            let shape = match val.getattr("shape") {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let rank: usize = py
+                .import_bound("builtins")?
+                .call_method1("len", (&shape,))?
+                .extract()
+                .unwrap_or(0);
+
+            // Only transpose 4D+ tensors (the ones that differ between NCHW/NHWC)
+            if rank < 4 {
+                continue;
+            }
+
+            let spatial_rank: usize = meta
+                .call_method1("get", ("tosa_spatial_rank",))?
+                .extract()
+                .unwrap_or(2);
+
+            // The dim_order for the placeholder is identity (NCHW).
+            // We need channels_last_order to convert NCHW -> NHWC.
+            let perm = channels_last_order(rank, spatial_rank);
+            let perm_py: Vec<i64> = perm.iter().map(|&p| p as i64).collect();
+
+            if debug {
+                let name = FxGraphModule::node_name(node)?;
+                eprintln!(
+                    "[MemoryFormat] inserting NCHW->NHWC transpose after input '{}' (rank={}, perm={:?})",
+                    name, rank, perm_py
+                );
+            }
+
+            helpers.call_method1(
+                "insert_transpose_after",
+                (gm.gm_ref(), node, perm_py.clone()),
+            )?;
+            modified = true;
+        }
+
+        // 4b: Before the output node, insert NHWC->NCHW transpose for 4D+ outputs.
+        // The output node's args are the tensors being returned; they're in NHWC
+        // format internally but the caller expects NCHW.
+        //
+        // FX output node args pattern: args=((result_node1, result_node2, ...),)
+        // So args[0] is a Python tuple of the actual output nodes.
+        let all_nodes = gm.nodes()?;
+        for node in &all_nodes {
+            let op = FxGraphModule::node_op(node)?;
+            if op != "output" {
+                continue;
+            }
+
+            // output node's args[0] is typically a tuple of output nodes
+            let args = FxGraphModule::node_args(node)?;
+
+            // Collect output nodes: either direct nodes in args, or nodes
+            // inside a tuple at args[0].
+            let mut output_nodes: Vec<Bound<'_, PyAny>> = Vec::new();
+            for arg in &args {
+                if FxGraphModule::is_node(arg) {
+                    output_nodes.push(arg.clone());
+                } else {
+                    // Try iterating as a tuple/list of nodes
+                    if let Ok(iter) = arg.iter() {
+                        for item in iter {
+                            if let Ok(item) = item {
+                                if FxGraphModule::is_node(&item) {
+                                    output_nodes.push(item);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            for output_arg in &output_nodes {
+                let arg_meta = output_arg.getattr("meta")?;
+                let val = match arg_meta.call_method1("get", ("val",)) {
+                    Ok(v) if !v.is_none() => v,
+                    _ => continue,
+                };
+                let shape = match val.getattr("shape") {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let rank: usize = py
+                    .import_bound("builtins")?
+                    .call_method1("len", (&shape,))?
+                    .extract()
+                    .unwrap_or(0);
+
+                if rank < 4 {
+                    continue;
+                }
+
+                let spatial_rank: usize = arg_meta
+                    .call_method1("get", ("tosa_spatial_rank",))?
+                    .extract()
+                    .unwrap_or(2);
+
+                // Inverse of channels_last: converts NHWC -> NCHW
+                let perm = channels_last_inverse_order(rank, spatial_rank);
+                let perm_py: Vec<i64> = perm.iter().map(|&p| p as i64).collect();
+
+                if debug {
+                    let name = FxGraphModule::node_name(output_arg)?;
+                    eprintln!(
+                        "[MemoryFormat] inserting NHWC->NCHW transpose before output for '{}' (rank={}, perm={:?})",
+                        name, rank, perm_py
+                    );
+                }
+
+                helpers.call_method1(
+                    "insert_transpose_before",
+                    (gm.gm_ref(), node, output_arg, perm_py.clone()),
+                )?;
+                modified = true;
+            }
+        }
 
         if modified {
             gm.recompile()?;

@@ -257,19 +257,35 @@ pub fn emit_aten_conv2d(
     conv_inputs.push(input_zp_name);
     conv_inputs.push(weight_zp_name);
 
-    // Detect depthwise: check if the weight tensor (arg[1]) has shape[1] == 1
-    // and groups == in_channels (weight.shape[0] for OIHW layout).
-    let is_depthwise = if let Some(Arg::Node(weight_id)) = node.args.get(1) {
-        if let Some(weight_node) = graph.node(*weight_id) {
-            let ws = weight_node.meta.val.shape_slice();
-            // Weight shape for conv2d is [out_channels, in_channels/groups, kH, kW]
-            // For depthwise: in_channels/groups == 1, and groups == in_channels
-            ws.len() == 4 && ws[1] == 1 && groups > 1
-        } else {
-            false
+    // Detect depthwise: match Python reference logic.
+    // Depthwise when in_channels == groups and out_channels % in_channels == 0.
+    // For tiny_cnn first conv: in_channels=1, groups=1 -> depthwise.
+    // First check conv_info from FxRewriteConvPass if available.
+    let is_depthwise = if let Some(conv_info_entry) = node.kwargs.iter().find(|(k, _)| k == "conv_info_is_depthwise") {
+        match &conv_info_entry.1 {
+            Arg::Int(v) => *v != 0,
+            _ => false,
         }
     } else {
-        false
+        // Fallback: compute from input and weight shapes
+        let in_channels = if let Some(Arg::Node(input_id)) = node.args.first() {
+            graph.node(*input_id)
+                .map(|n| {
+                    let s = n.meta.val.shape_slice();
+                    if s.len() >= 2 { s[1] } else { 0 }
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let out_channels = if let Some(Arg::Node(weight_id)) = node.args.get(1) {
+            graph.node(*weight_id)
+                .map(|n| n.meta.val.shape_slice()[0])
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        in_channels > 0 && groups == in_channels && out_channels % in_channels == 0
     };
 
     let stride = if stride.is_empty() { vec![1, 1] } else { stride };

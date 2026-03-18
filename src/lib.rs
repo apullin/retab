@@ -3,11 +3,14 @@ use pyo3::types::{PyBytes, PyDict};
 
 mod compile_spec;
 mod fx_convert_clamp;
+mod fx_convert_sum;
 mod fx_decompose;
 mod fx_fold_qdq;
+mod fx_fuse_duplicate_users;
 mod fx_fuse_quant_activation;
 mod fx_graph;
 mod fx_insert_rescale;
+mod fx_insert_table_ops;
 mod fx_memory_format;
 mod fx_pass;
 mod fx_pipeline;
