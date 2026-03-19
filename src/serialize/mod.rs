@@ -298,23 +298,11 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
                     shapes.extend(emit_result.shapes);
                     operators.extend(emit_result.operators);
                 } else {
-                    let shape: Vec<i32> = node
-                        .meta
-                        .val
-                        .shape_slice()
-                        .iter()
-                        .map(|&d| d as i32)
-                        .collect();
-                    let dtype = ir_dtype_to_tosa(node.meta.val.dtype);
-                    tensors.push(TosaTensor {
-                        name: node.name.clone(),
-                        shape,
-                        dtype,
-                        data: Vec::new(),
-                        variable: false,
-                        is_unranked: false,
-                        variable_name: String::new(),
-                    });
+                    panic!(
+                        "serialize_to_tosa: unhandled call_function node '{}' target {:?}; \
+                         refusing to serialize a producer-less internal tensor",
+                        node.name, node.target
+                    );
                 }
             }
             OpType::Output => {
