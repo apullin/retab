@@ -29,6 +29,9 @@ from torch.export.exported_program import ExportedProgram
 logger = logging.getLogger(__name__)
 
 _ORIGINAL_GEN_EDGE_MANAGER_FOR_PARTITIONERS = None
+_ORIGINAL_REGISTER_CONSTANTS_AS_BUFFERS = None
+_ORIGINAL_APPLY_RUNTIME_ASSERTION_PASS = None
+_ORIGINAL_REMOVE_UNNECESSARY_COPY_OP_PASS = None
 
 
 def _program_contains_targets(program: ExportedProgram, targets: set) -> bool:
@@ -195,6 +198,173 @@ def _install_edge_decomp_fast_path() -> None:
     )
 
 
+def _graph_node_count(graph_module) -> int:
+    import torch
+
+    count = 0
+    for module in graph_module.modules():
+        if isinstance(module, torch.fx.GraphModule):
+            count += sum(1 for _ in module.graph.nodes)
+    return count
+
+
+def _install_run_decomp_fast_path() -> None:
+    """Trim no-op recompiles in torch export decomposition helpers."""
+    global _ORIGINAL_REGISTER_CONSTANTS_AS_BUFFERS
+    global _ORIGINAL_APPLY_RUNTIME_ASSERTION_PASS
+    global _ORIGINAL_REMOVE_UNNECESSARY_COPY_OP_PASS
+
+    import functools
+
+    import torch
+    import torch.export._trace as trace_mod
+    import torch.export.exported_program as exported_program_mod
+    from torch._export.utils import _get_shape_env_from_gm
+    from torch._export.passes._node_metadata_hook import (
+        _node_metadata_hook,
+        _set_node_metadata_hook,
+    )
+    from torch._functorch._aot_autograd.input_output_analysis import (
+        _graph_output_names,
+    )
+    from torch.export.exported_program import pytree
+
+    try:
+        runtime_assert_globals = trace_mod.apply_runtime_assertion_pass.__globals__
+        insert_deferred_runtime_asserts = runtime_assert_globals[
+            "insert_deferred_runtime_asserts"
+        ]
+        insert_aten_to_metadata_assert_pass = runtime_assert_globals[
+            "_insert_aten_to_metadata_assert_pass"
+        ]
+        first_call_function_nn_module_stack = runtime_assert_globals[
+            "first_call_function_nn_module_stack"
+        ]
+    except (AttributeError, KeyError) as exc:
+        logger.warning(
+            "[fast_preprocess] skipping run_decomp fast path; torch internals differ: %s",
+            exc,
+        )
+        return
+
+    if _ORIGINAL_REGISTER_CONSTANTS_AS_BUFFERS is None:
+        _ORIGINAL_REGISTER_CONSTANTS_AS_BUFFERS = (
+            exported_program_mod._register_constants_as_buffers
+        )
+
+        def fast_register_constants_as_buffers(
+            mod, state_dict, non_persistent_buffers
+        ):
+            from torch.export.unflatten import _assign_attr, _AttrKind
+
+            temp_registered_constants = set()
+
+            for node in mod.graph.nodes:
+                if node.op != "get_attr":
+                    continue
+                target = torch.fx.graph_module._get_attr(mod, node.target)
+                if not isinstance(target, torch.Tensor):
+                    continue
+                if (node.target in state_dict) or (
+                    node.target in non_persistent_buffers
+                ):
+                    continue
+
+                torch.fx.graph_module._del_attr(mod, node.target)
+                _assign_attr(target, mod, node.target, _AttrKind.BUFFER, False)
+                temp_registered_constants.add(node.target)
+
+            if temp_registered_constants:
+                mod.recompile()
+
+            return temp_registered_constants
+
+        exported_program_mod._register_constants_as_buffers = (
+            fast_register_constants_as_buffers
+        )
+
+    if _ORIGINAL_APPLY_RUNTIME_ASSERTION_PASS is None:
+        _ORIGINAL_APPLY_RUNTIME_ASSERTION_PASS = trace_mod.apply_runtime_assertion_pass
+
+        def fast_apply_runtime_assertion_pass(gm, graph_signature):
+            modified = False
+
+            if not torch._dynamo.config.do_not_emit_runtime_asserts:
+                stack_trace = (
+                    'File "torch/fx/passes/runtime_assert.py", line 24, '
+                    "in insert_deferred_runtime_asserts"
+                )
+                before_nodes = _graph_node_count(gm)
+
+                with _set_node_metadata_hook(
+                    gm,
+                    functools.partial(
+                        _node_metadata_hook,
+                        metadata={"stack_trace": stack_trace},
+                    ),
+                ):
+                    shape_env = _get_shape_env_from_gm(gm)
+                    if shape_env:
+                        insert_deferred_runtime_asserts(
+                            gm,
+                            shape_env,
+                            "exported program: "
+                            f"{first_call_function_nn_module_stack(gm.graph)}",
+                            export=True,
+                        )
+
+                insert_aten_to_metadata_assert_pass(gm)
+                modified = _graph_node_count(gm) != before_nodes
+
+            if modified:
+                gm.recompile()
+
+            graph_signature.user_outputs = _graph_output_names(gm)
+            return gm, graph_signature
+
+        trace_mod.apply_runtime_assertion_pass = fast_apply_runtime_assertion_pass
+
+    if _ORIGINAL_REMOVE_UNNECESSARY_COPY_OP_PASS is None:
+        _ORIGINAL_REMOVE_UNNECESSARY_COPY_OP_PASS = (
+            exported_program_mod._remove_unnecessary_copy_op_pass
+        )
+
+        def fast_remove_unnecessary_copy_op_pass(gm, new_graph_signature):
+            modified = False
+
+            with gm._set_replace_hook(new_graph_signature.get_replace_hook()):
+                for node in gm.graph.nodes:
+                    if node.op != "output":
+                        continue
+
+                    args, _ = pytree.tree_flatten(node.args)
+                    for out in args:
+                        if not isinstance(out, torch.fx.Node):
+                            continue
+                        if (
+                            out.name not in new_graph_signature.buffers_to_mutate
+                            and out.name
+                            not in new_graph_signature.parameters_to_mutate
+                        ):
+                            continue
+                        if (
+                            out.op == "call_function"
+                            and out.target is torch.ops.aten.copy.default
+                        ):
+                            out.replace_all_uses_with(out.args[1])  # type: ignore[arg-type]
+                            gm.graph.erase_node(out)
+                            modified = True
+
+                if modified:
+                    gm.recompile()
+
+            return gm, new_graph_signature
+
+        exported_program_mod._remove_unnecessary_copy_op_pass = (
+            fast_remove_unnecessary_copy_op_pass
+        )
+
+
 def _uninstall_edge_decomp_fast_path() -> None:
     global _ORIGINAL_GEN_EDGE_MANAGER_FOR_PARTITIONERS
 
@@ -207,6 +377,33 @@ def _uninstall_edge_decomp_fast_path() -> None:
         _ORIGINAL_GEN_EDGE_MANAGER_FOR_PARTITIONERS
     )
     _ORIGINAL_GEN_EDGE_MANAGER_FOR_PARTITIONERS = None
+
+
+def _uninstall_run_decomp_fast_path() -> None:
+    global _ORIGINAL_REGISTER_CONSTANTS_AS_BUFFERS
+    global _ORIGINAL_APPLY_RUNTIME_ASSERTION_PASS
+    global _ORIGINAL_REMOVE_UNNECESSARY_COPY_OP_PASS
+
+    import torch.export._trace as trace_mod
+    import torch.export.exported_program as exported_program_mod
+
+    if _ORIGINAL_REGISTER_CONSTANTS_AS_BUFFERS is not None:
+        exported_program_mod._register_constants_as_buffers = (
+            _ORIGINAL_REGISTER_CONSTANTS_AS_BUFFERS
+        )
+        _ORIGINAL_REGISTER_CONSTANTS_AS_BUFFERS = None
+
+    if _ORIGINAL_APPLY_RUNTIME_ASSERTION_PASS is not None:
+        trace_mod.apply_runtime_assertion_pass = (
+            _ORIGINAL_APPLY_RUNTIME_ASSERTION_PASS
+        )
+        _ORIGINAL_APPLY_RUNTIME_ASSERTION_PASS = None
+
+    if _ORIGINAL_REMOVE_UNNECESSARY_COPY_OP_PASS is not None:
+        exported_program_mod._remove_unnecessary_copy_op_pass = (
+            _ORIGINAL_REMOVE_UNNECESSARY_COPY_OP_PASS
+        )
+        _ORIGINAL_REMOVE_UNNECESSARY_COPY_OP_PASS = None
 
 
 # -- Internal implementations ------------------------------------------------
@@ -671,6 +868,7 @@ def patch_tosa_backend(mode="fast"):
     from executorch.backends.arm.tosa.backend import TOSABackend
 
     _install_edge_decomp_fast_path()
+    _install_run_decomp_fast_path()
 
     if mode == "fast":
         TOSABackend._preprocess = staticmethod(_fast_preprocess)
@@ -700,6 +898,7 @@ def unpatch_tosa_backend():
 
     import executorch.backends.arm.tosa.backend as mod
 
+    _uninstall_run_decomp_fast_path()
     _uninstall_edge_decomp_fast_path()
     importlib.reload(mod)
     logger.info("[fast_preprocess] Restored original TOSABackend")
