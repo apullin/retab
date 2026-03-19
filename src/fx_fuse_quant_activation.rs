@@ -33,7 +33,9 @@ fn is_dequantize(target: &str) -> bool {
 }
 
 fn is_conv_or_linear(target: &str) -> bool {
-    target.contains("convolution.default") || target.contains("linear.default")
+    target.contains("convolution.default")
+        || target.contains("conv2d.default")
+        || target.contains("linear.default")
 }
 
 impl FxPass for FxFuseQuantizedActivationPass {
@@ -110,14 +112,8 @@ impl FxPass for FxFuseQuantizedActivationPass {
             // the Python FuseQuantizedActivationPass exactly).
             let q_args = FxGraphModule::node_args(q_user)?;
             // Args: [input, scale, zero_point, qmin, qmax, dtype]
-            let zp: i64 = q_args
-                .get(2)
-                .and_then(|a| a.extract().ok())
-                .unwrap_or(0);
-            let qmin: i64 = q_args
-                .get(3)
-                .and_then(|a| a.extract().ok())
-                .unwrap_or(-128);
+            let zp: i64 = q_args.get(2).and_then(|a| a.extract().ok()).unwrap_or(0);
+            let qmin: i64 = q_args.get(3).and_then(|a| a.extract().ok()).unwrap_or(-128);
 
             if debug {
                 eprintln!(
@@ -205,7 +201,10 @@ impl FxPass for FxFuseQuantizedActivationPass {
             }
 
             if debug {
-                eprintln!("[FuseQuantActivation] fusing {} (zp==qmin={})", node_name, qmin);
+                eprintln!(
+                    "[FuseQuantActivation] fusing {} (zp==qmin={})",
+                    node_name, qmin
+                );
             }
 
             // Bypass: replace all uses of relu/hardtanh with its input (the DQ node)

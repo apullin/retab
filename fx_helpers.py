@@ -915,7 +915,7 @@ def rewrite_conv_to_tosa(
     weight_zp: int,
     in_channels: int,
 ) -> None:
-    """Rewrite an aten.convolution.default node to a TOSA CONV2D or DEPTHWISE_CONV2D.
+    """Rewrite an aten.convolution.default or aten.conv2d.default node to TOSA.
 
     Mirrors the Python RewriteConvPass: changes the target, rearranges args
     (stride/pad/dilation formatting), handles bias creation, and reshapes
@@ -923,7 +923,7 @@ def rewrite_conv_to_tosa(
 
     Args:
         graph_module: the GraphModule
-        node: the aten.convolution node
+        node: the convolution node
         is_depthwise: True for depthwise_conv2d, False for conv2d
         input_zp: input zero point from qparams
         weight_zp: weight zero point from qparams
@@ -931,7 +931,33 @@ def rewrite_conv_to_tosa(
     """
     graph = graph_module.graph
     args = node.args
-    x, weight, bias, stride, pad, dilation, transposed, output_padding, groups = args
+    target_str = str(node.target)
+    if "conv2d.default" in target_str:
+        if len(args) < 5:
+            raise RuntimeError(
+                f"Expected aten.conv2d.default to have at least 5 args, got {len(args)}"
+            )
+        x, weight, bias, stride, pad = args[:5]
+        dilation = args[5] if len(args) > 5 else (1, 1)
+        groups = args[6] if len(args) > 6 else 1
+        transposed = False
+        output_padding = (0, 0)
+    else:
+        if len(args) < 9:
+            raise RuntimeError(
+                f"Expected aten.convolution.default to have 9 args, got {len(args)}"
+            )
+        (
+            x,
+            weight,
+            bias,
+            stride,
+            pad,
+            dilation,
+            transposed,
+            output_padding,
+            groups,
+        ) = args[:9]
 
     # Expand pad to TOSA format: [pad_top, pad_bottom, pad_left, pad_right]
     pad_list = list(pad)

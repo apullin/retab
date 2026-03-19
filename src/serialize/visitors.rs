@@ -41,6 +41,21 @@ pub fn ir_dtype_to_tosa(dt: crate::graph::ir::DType) -> DType {
     }
 }
 
+fn node_output_dtype(node: &Node) -> DType {
+    if let Some((_, qp)) = node.meta.output_qparams.first() {
+        return ir_dtype_to_tosa(qp.dtype);
+    }
+    ir_dtype_to_tosa(node.meta.val.dtype)
+}
+
+fn normalize_rescale_zp(dtype: DType, zp: i32, is_unsigned: bool) -> i32 {
+    match dtype {
+        DType::Int8 => zp,
+        DType::Int16 if is_unsigned => zp,
+        _ => 0,
+    }
+}
+
 /// Result of visiting a single graph node: zero or more TOSA operators and
 /// tensors (including const data tensors and shape entries) to append to the
 /// basic block.
@@ -482,6 +497,10 @@ fn compute_conv2d_nhwc_output(
     stride: &[i32],
     dilation: &[i32],
 ) -> TosaTensor {
+    // Quantized convs accumulate into Int32/Int48. Ingestion already fixes
+    // `meta.val.dtype` for accumulator ops, so do not override it from
+    // output_qparams here or we will incorrectly serialize the conv output as
+    // the post-rescale activation dtype.
     let dtype = ir_dtype_to_tosa(node.meta.val.dtype);
 
     // Try to compute from input + weight shapes
@@ -669,7 +688,7 @@ fn compute_pool_nhwc_output(
     stride: &[i32],
     pad: &[i32],
 ) -> TosaTensor {
-    let dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+    let dtype = node_output_dtype(node);
 
     let computed = (|| -> Option<Vec<i32>> {
         let input_id = match node.args.first()? {
@@ -1884,6 +1903,7 @@ pub fn emit_rescale(
     } else {
         DType::Int8
     };
+    let input_zp_val = normalize_rescale_zp(input_zp_tosa_dtype, input_zp_val, input_unsigned);
     let input_zp_data = encode_zp_for_dtype(input_zp_val, input_zp_tosa_dtype);
     result.tensors.push(TosaTensor {
         name: input_zp_name.clone(),
@@ -1905,6 +1925,8 @@ pub fn emit_rescale(
     // Create output_zp const tensor (scalar, uses rescale output dtype)
     let output_zp_name = format!("{}_output_zp", node.name);
     let output_zp_tosa_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+    let output_zp_val =
+        normalize_rescale_zp(output_zp_tosa_dtype, output_zp_val, output_unsigned);
     let output_zp_data = encode_zp_for_dtype(output_zp_val, output_zp_tosa_dtype);
     result.tensors.push(TosaTensor {
         name: output_zp_name.clone(),

@@ -5,7 +5,8 @@ use crate::fx_pass::FxPass;
 
 /// FX-graph-direct implementation of conv rewriting.
 ///
-/// Detects `aten.convolution.default` nodes and rewrites them to TOSA
+/// Detects `aten.convolution.default` and raw `aten.conv2d.default` nodes and
+/// rewrites them to TOSA
 /// `CONV2D` or `DEPTHWISE_CONV2D` ops via the Python helper. This matches
 /// the Python `RewriteConvPass` behavior:
 ///   - Changes target from aten.convolution to tosa.CONV2D/DEPTHWISE_CONV2D
@@ -14,7 +15,7 @@ use crate::fx_pass::FxPass;
 pub struct FxRewriteConvPass;
 
 fn is_convolution(target: &str) -> bool {
-    target.contains("convolution.default")
+    target.contains("convolution.default") || target.contains("conv2d.default")
 }
 
 impl FxPass for FxRewriteConvPass {
@@ -43,37 +44,46 @@ impl FxPass for FxRewriteConvPass {
             }
 
             let args = FxGraphModule::node_args(node)?;
+            let is_raw_conv2d = target.contains("conv2d.default");
+
             // aten.convolution args:
-            // [input, weight, bias, stride, padding, dilation, transposed, output_padding, groups]
-            if args.len() < 9 {
+            // [input, weight, bias, stride, padding, dilation, transposed,
+            //  output_padding, groups]
+            //
+            // aten.conv2d args can appear in compact form after earlier FX
+            // normalization:
+            // [input, weight, bias, stride, padding]
+            // [input, weight, bias, stride, padding, dilation]
+            // [input, weight, bias, stride, padding, dilation, groups]
+            if (!is_raw_conv2d && args.len() < 9) || (is_raw_conv2d && args.len() < 5) {
                 continue;
             }
 
             let input_node = &args[0];
             let weight_node = &args[1];
-            let groups: i64 = args[8].extract().unwrap_or(1);
+            let groups: i64 = if is_raw_conv2d {
+                args.get(6).and_then(|arg| arg.extract().ok()).unwrap_or(1)
+            } else {
+                args[8].extract().unwrap_or(1)
+            };
 
             // Weight shape for conv: [out_channels, in_channels/groups, kH, kW]
-            let weight_shape = match FxGraphModule::node_shape(weight_node) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-            if weight_shape.len() < 4 {
-                continue;
-            }
-
-            let out_channels = weight_shape[0];
+            // Raw fast-lane graphs can arrive with partially-normalized
+            // metadata; use best-effort shape recovery and only require exact
+            // channel inference when deciding whether the op is depthwise.
+            let weight_shape = FxGraphModule::node_shape(weight_node).unwrap_or_default();
+            let out_channels = weight_shape.first().copied().unwrap_or(0);
 
             // Get in_channels from the input tensor shape [N, C, H, W]
-            let in_channels = match FxGraphModule::node_shape(input_node) {
-                Ok(s) if s.len() >= 2 => s[1],
-                _ => 0,
-            };
+            let in_channels = FxGraphModule::node_shape(input_node)
+                .ok()
+                .and_then(|s| s.get(1).copied())
+                .unwrap_or(0);
 
             // Match Python reference: depthwise when in_channels == groups and
             // out_channels is a multiple of in_channels.
-            let is_depthwise = in_channels > 0
+            let is_depthwise = weight_shape.len() >= 4
+                && in_channels > 0
                 && groups == in_channels
                 && out_channels % in_channels == 0;
 
