@@ -118,6 +118,11 @@ impl FxPass for FxFuseEqualPlaceholdersPass {
                 .push((node.clone(), tensor));
         }
 
+        // Import fx_helpers once (its delete wrapper gracefully handles
+        // get_attr nodes like TABLE constants that aren't registered in
+        // the ExportedProgram's graph signature).
+        let helpers = py.import_bound("fx_helpers")?;
+
         // For each bucket with duplicates, fuse them
         for nodes_tensors in hash_buckets.values() {
             if nodes_tensors.len() < 2 {
@@ -140,19 +145,10 @@ impl FxPass for FxFuseEqualPlaceholdersPass {
             for (dup_node, _) in &nodes_tensors[1..] {
                 FxGraphModule::replace_all_uses_with(dup_node, canonical)?;
 
-                // Try to delete the constant placeholder from the program
-                // If the helper is available, use it; otherwise just erase the node
-                let delete_fn = py
-                    .import_bound("executorch.backends.transforms.utils")
-                    .and_then(|m| m.getattr("delete_constant_placeholder"));
-                match delete_fn {
-                    Ok(f) => {
-                        f.call1((&ep, dup_node))?;
-                    }
-                    Err(_) => {
-                        gm.erase_node(dup_node)?;
-                    }
-                }
+                let _ = helpers.call_method1(
+                    "delete_constant_placeholder",
+                    (&ep, dup_node),
+                );
                 modified = true;
             }
         }

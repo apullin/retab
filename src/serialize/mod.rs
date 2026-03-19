@@ -620,10 +620,9 @@ fn build_fb_attribute(
             (attr.union_type(), Some(off))
         }
 
-        Attribute::Mul(_) => {
-            // TOSA 1.0: MulAttribute is an empty table.
-            // The shift value is passed as a third input tensor.
+        Attribute::Mul(a) => {
             let start = builder.start_table();
+            builder.push_slot::<i32>(4, a.shift, 0);
             let off = builder.end_table(start);
             (attr.union_type(), Some(off))
         }

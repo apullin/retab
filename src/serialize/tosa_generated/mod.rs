@@ -214,9 +214,16 @@ pub struct AddAttribute;
 #[derive(Debug, Clone)]
 pub struct SubAttribute;
 
-/// MulAttribute — empty in TOSA 1.0 (shift is a third input tensor).
+/// MulAttribute — contains `shift` for TOSA compatibility.
+///
+/// In TOSA 1.0 the shift is a third input tensor and the attribute table is
+/// empty, but the U55 toolchain (Vela) expects the older schema where shift
+/// lives inside the attribute. Keeping shift = 0 here ensures the flatbuffer
+/// validates correctly on both paths.
 #[derive(Debug, Clone)]
-pub struct MulAttribute;
+pub struct MulAttribute {
+    pub shift: i32,
+}
 
 /// AvgPool2dAttribute — pooling parameters.
 /// In TOSA 1.0, input_zp and output_zp are separate input tensors,

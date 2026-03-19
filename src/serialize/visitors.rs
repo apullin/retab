@@ -1867,7 +1867,7 @@ pub fn emit_mul(
 
     result.operators.push(TosaOperator {
         op: Op::Mul,
-        attribute: Attribute::Mul(MulAttribute),
+        attribute: Attribute::Mul(MulAttribute { shift: 0 }),
         inputs: mul_inputs,
         outputs: vec![node.name.clone()],
         location: None,
