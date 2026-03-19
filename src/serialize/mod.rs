@@ -236,13 +236,23 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
                 let dtype = ir_dtype_to_tosa(node.meta.val.dtype);
 
                 if let Some(tensor_data) = store.get(name) {
+                    // Use the store's dtype for constant tensors.
+                    //
+                    // `fixup_quantized_dtypes` may have changed node.meta.val.dtype
+                    // (e.g. Float32 -> Int8) based on consumer qparams, but the
+                    // store data is in the original dtype.  Using the node meta's
+                    // dtype here would produce a data-size/shape mismatch
+                    // ("malformed constant buffer").
+                    let store_dtype = ir_dtype_to_tosa(tensor_data.dtype);
+                    let store_shape: Vec<i32> = tensor_data.shape.iter().map(|&d| d as i32).collect();
+
                     // Check if this weight tensor needs OIHW -> OHWI permutation
                     let (final_data, final_shape) =
                         if let Some(&perm_kind) = weight_perms.get(name) {
-                            let elem_sz = dtype_elem_size(node.meta.val.dtype);
+                            let elem_sz = dtype_elem_size(tensor_data.dtype);
                             let (pdata, pshape) = permute_weight_data(
                                 &tensor_data.data,
-                                node.meta.val.shape_slice(),
+                                &tensor_data.shape,
                                 elem_sz,
                                 perm_kind,
                             );
@@ -250,13 +260,13 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
                                 pshape.iter().map(|&d| d as i32).collect();
                             (pdata, pshape_i32)
                         } else {
-                            (tensor_data.data.clone(), shape)
+                            (tensor_data.data.clone(), store_shape)
                         };
 
                     tensors.push(TosaTensor {
                         name: name.clone(),
                         shape: final_shape,
-                        dtype,
+                        dtype: store_dtype,
                         data: final_data,
                         variable: false,
                         is_unranked: false,
