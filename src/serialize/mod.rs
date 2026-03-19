@@ -287,7 +287,7 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
     eprintln!("[Serialize] topo sort done, collected {} tensors, {} operators, {} shapes", tensors.len(), operators.len(), shapes.len());
 
     // Build the flatbuffer bottom-up
-    let mut builder = FlatBufferBuilder::with_capacity(2 * 1024 * 1024); // 2MB initial
+    let mut builder = FlatBufferBuilder::with_capacity(16 * 1024 * 1024); // 16MB initial
 
     // Pre-serialize all sub-tables
     eprintln!("[Serialize] building fb tensors...");
@@ -575,14 +575,17 @@ fn build_fb_attribute(
             (attr.union_type(), Some(off))
         }
 
-        Attribute::Mul(a) => {
+        Attribute::Mul(_) => {
+            // TOSA 1.0: MulAttribute is an empty table.
+            // The shift value is passed as a third input tensor.
             let start = builder.start_table();
-            builder.push_slot::<i32>(4, a.shift, 0);
             let off = builder.end_table(start);
             (attr.union_type(), Some(off))
         }
 
         Attribute::AvgPool2d(a) => {
+            // TOSA 1.0: AvgPool2dAttribute has kernel, stride, pad, acc_type.
+            // input_zp and output_zp are separate input tensors, not in the attribute.
             let kernel = builder.create_vector(&a.kernel);
             let stride = builder.create_vector(&a.stride);
             let pad = builder.create_vector(&a.pad);
@@ -591,8 +594,6 @@ fn build_fb_attribute(
             builder.push_slot_always::<WIPOffset<_>>(6, stride);
             builder.push_slot_always::<WIPOffset<_>>(8, pad);
             builder.push_slot::<u32>(10, a.acc_type as u32, 0);
-            builder.push_slot::<i32>(12, a.input_zp, 0);
-            builder.push_slot::<i32>(14, a.output_zp, 0);
             let off = builder.end_table(start);
             (attr.union_type(), Some(off))
         }

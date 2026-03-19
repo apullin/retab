@@ -1867,7 +1867,7 @@ pub fn emit_mul(
 
     result.operators.push(TosaOperator {
         op: Op::Mul,
-        attribute: Attribute::Mul(MulAttribute { shift: 0 }),
+        attribute: Attribute::Mul(MulAttribute),
         inputs: mul_inputs,
         outputs: vec![node.name.clone()],
         location: None,
@@ -1905,13 +1905,24 @@ pub fn emit_avg_pool2d(
     let input_zp = kwarg_i32(node, "input_zp", 0);
     let output_zp = kwarg_i32(node, "output_zp", 0);
 
-    // Create input_zp const tensor (scalar int32)
+    // Determine input dtype (typically Int8 for quantized models)
+    let input_dtype = match node.args.first() {
+        Some(Arg::Node(input_id)) => graph
+            .node(*input_id)
+            .map(|n| ir_dtype_to_tosa(n.meta.val.dtype))
+            .unwrap_or(DType::Int8),
+        _ => DType::Int8,
+    };
+    let output_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+
+    // Create input_zp const tensor (matches input dtype)
     let input_zp_name = format!("{}_input_zp", node.name);
+    let input_zp_data = encode_zp_for_dtype(input_zp, input_dtype);
     result.tensors.push(TosaTensor {
         name: input_zp_name.clone(),
         shape: vec![1],
-        dtype: DType::Int32,
-        data: (input_zp).to_le_bytes().to_vec(),
+        dtype: input_dtype,
+        data: input_zp_data,
         variable: false,
         is_unranked: false,
         variable_name: String::new(),
@@ -1924,13 +1935,14 @@ pub fn emit_avg_pool2d(
         location: None,
     });
 
-    // Create output_zp const tensor (scalar int32)
+    // Create output_zp const tensor (matches output dtype)
     let output_zp_name = format!("{}_output_zp", node.name);
+    let output_zp_data = encode_zp_for_dtype(output_zp, output_dtype);
     result.tensors.push(TosaTensor {
         name: output_zp_name.clone(),
         shape: vec![1],
-        dtype: DType::Int32,
-        data: (output_zp).to_le_bytes().to_vec(),
+        dtype: output_dtype,
+        data: output_zp_data,
         variable: false,
         is_unranked: false,
         variable_name: String::new(),
@@ -1967,8 +1979,6 @@ pub fn emit_avg_pool2d(
                 pad
             },
             acc_type,
-            input_zp,
-            output_zp,
         }),
         inputs: pool_inputs,
         outputs: vec![node.name.clone()],

@@ -156,6 +156,12 @@ pub fn ingest_fx_graph(
         let meta_dict = py_node.getattr("meta")?;
         extract_qparams_from_meta(&meta_dict, &mut meta)?;
 
+        // --- tosa_dim_order from meta["tosa_dim_order"] ---
+        // The FX-direct memory format pass stores the dimension order
+        // (e.g. [0,2,3,1] for NHWC) in node.meta. Extract it so the
+        // serializer knows which tensors are already in NHWC format.
+        extract_tosa_dim_order(&meta_dict, &mut meta)?;
+
         // --- create node ---
         let node_id = graph.create_node(op_type, op_target, args, kwargs, meta, name.clone());
 
@@ -554,6 +560,32 @@ fn extract_qparams_from_meta(
         }
     }
 
+    Ok(())
+}
+
+/// Extract `tosa_dim_order` from a Python node's meta dict.
+///
+/// The FX-direct `FxToTosaMemoryFormatPass` stores a list like `[0, 2, 3, 1]`
+/// (NHWC) or `[0, 1, 2, 3]` (NCHW) in `node.meta["tosa_dim_order"]`.
+fn extract_tosa_dim_order(
+    meta_dict: &Bound<'_, PyAny>,
+    node_meta: &mut NodeMeta,
+) -> PyResult<()> {
+    if let Ok(dim_order) = meta_dict.call_method1("get", ("tosa_dim_order",)) {
+        if !dim_order.is_none() {
+            if let Ok(order_list) = dim_order
+                .iter()
+                .and_then(|it| {
+                    it.map(|item| item.and_then(|v| v.extract::<u8>()))
+                        .collect::<PyResult<smallvec::SmallVec<[u8; 6]>>>()
+                })
+            {
+                if !order_list.is_empty() {
+                    node_meta.tosa_dim_order = Some(order_list);
+                }
+            }
+        }
+    }
     Ok(())
 }
 

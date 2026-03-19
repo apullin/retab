@@ -214,21 +214,19 @@ pub struct AddAttribute;
 #[derive(Debug, Clone)]
 pub struct SubAttribute;
 
-/// MulAttribute — shift for integer multiply.
+/// MulAttribute — empty in TOSA 1.0 (shift is a third input tensor).
 #[derive(Debug, Clone)]
-pub struct MulAttribute {
-    pub shift: i32,
-}
+pub struct MulAttribute;
 
 /// AvgPool2dAttribute — pooling parameters.
+/// In TOSA 1.0, input_zp and output_zp are separate input tensors,
+/// not part of the attribute table.
 #[derive(Debug, Clone)]
 pub struct AvgPool2dAttribute {
     pub kernel: Vec<i32>,
     pub stride: Vec<i32>,
     pub pad: Vec<i32>,
     pub acc_type: DType,
-    pub input_zp: i32,
-    pub output_zp: i32,
 }
 
 /// ReduceSumAttribute — reduction axis.

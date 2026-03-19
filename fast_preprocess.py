@@ -167,10 +167,16 @@ def _all_rust_preprocess(
     (which would re-run the full IR pass pipeline on top of the already-
     transformed graph, causing double rescales, double transposes, etc.).
     """
+    import copy
     import time
 
     t0 = time.perf_counter()
     gm = edge_program.graph_module
+
+    # Deep-copy the state_dict BEFORE passes run, because some FX-direct
+    # passes (e.g. RewriteConv) may mutate ep.state_dict in-place.
+    # We want the original (un-mutated) weight data for ingestion.
+    original_state_dict = copy.deepcopy(dict(edge_program.state_dict))
 
     import arm_tosa_engine
 
@@ -182,7 +188,7 @@ def _all_rust_preprocess(
     # as FX-direct passes above).  lower_to_tosa() would run build_phase2_pipeline()
     # again, corrupting the graph with duplicate transformations.
     tosa_bytes = arm_tosa_engine.ingest_and_serialize(
-        gm, dict(edge_program.state_dict), edge_program.graph_signature
+        gm, original_state_dict, edge_program.graph_signature
     )
     t_total = time.perf_counter() - t0
     logger.info(
