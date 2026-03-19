@@ -1,7 +1,7 @@
 use crate::graph::ir::*;
 use crate::graph::Graph;
 use crate::passes::Pass;
-use crate::store::TensorStore;
+use crate::store::{TensorData, TensorStore};
 use smallvec::smallvec;
 
 /// Decompose `Mean(x, dims, keepdim)` into:
@@ -17,20 +17,20 @@ impl Pass for DecomposeMeanDimPass {
         "DecomposeMeanDim"
     }
 
-    fn run(&self, graph: &mut Graph, _store: &mut TensorStore) -> bool {
+    fn run(&self, graph: &mut Graph, store: &mut TensorStore) -> bool {
         let targets: Vec<NodeId> = graph.nodes_by_target(&OpTarget::Mean);
         if targets.is_empty() {
             return false;
         }
 
         for mean_id in targets {
-            decompose_one(graph, mean_id);
+            decompose_one(graph, store, mean_id);
         }
         true
     }
 }
 
-fn decompose_one(graph: &mut Graph, mean_id: NodeId) {
+fn decompose_one(graph: &mut Graph, store: &mut TensorStore, mean_id: NodeId) {
     let (x_id, dims, keepdim, input_info, output_info) = {
         let node = match graph.node(mean_id) {
             Some(n) => n,
@@ -126,16 +126,24 @@ fn decompose_one(graph: &mut Graph, mean_id: NodeId) {
     let full_shape_sv: smallvec::SmallVec<[i64; 6]> = full_shape.iter().copied().collect();
     let inv_count = 1.0 / (count as f64);
 
-    let count_id = graph.insert_before(
-        mean_id,
-        OpType::CallFunction,
-        OpTarget::Full,
-        smallvec![Arg::IntList(full_shape_sv), Arg::Float(inv_count)],
-        vec![("dtype".into(), Arg::Dtype(dtype))],
-        placeholder_meta(),
-        next_name("full_inv_count"),
-    );
-    crate::shape::propagate_shape(graph, count_id);
+    let count_name = next_name("full_inv_count");
+    let count_id = if let Some(const_id) =
+        insert_scalar_broadcast_const(graph, store, mean_id, &count_name, &full_shape, inv_count, dtype)
+    {
+        const_id
+    } else {
+        let full_id = graph.insert_before(
+            mean_id,
+            OpType::CallFunction,
+            OpTarget::Full,
+            smallvec![Arg::IntList(full_shape_sv), Arg::Float(inv_count)],
+            vec![("dtype".into(), Arg::Dtype(dtype))],
+            placeholder_meta(),
+            count_name,
+        );
+        crate::shape::propagate_shape(graph, full_id);
+        full_id
+    };
 
     // 3. result = Mul(sum, count_tensor)
     let mul_id = graph.insert_before(
@@ -156,4 +164,98 @@ fn decompose_one(graph: &mut Graph, mean_id: NodeId) {
 
     graph.replace_all_uses(mean_id, mul_id);
     graph.erase_node(mean_id);
+}
+
+fn insert_scalar_broadcast_const(
+    graph: &mut Graph,
+    store: &mut TensorStore,
+    ref_id: NodeId,
+    name: &str,
+    shape: &[i64],
+    value: f64,
+    dtype: DType,
+) -> Option<NodeId> {
+    let data = match dtype {
+        DType::Float32 => (value as f32).to_le_bytes().to_vec(),
+        DType::Int32 => (value as i32).to_le_bytes().to_vec(),
+        DType::Int64 => (value as i64).to_le_bytes().to_vec(),
+        DType::Int8 => vec![(value as i8) as u8],
+        _ => return None,
+    };
+
+    store.insert(
+        name.to_string(),
+        TensorData {
+            data,
+            shape: shape.to_vec(),
+            dtype,
+        },
+    );
+
+    Some(graph.insert_before(
+        ref_id,
+        OpType::Placeholder,
+        OpTarget::TosaConst,
+        smallvec![],
+        vec![],
+        NodeMeta::new(TensorInfo::new(shape, dtype)),
+        name.to_string(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::Graph;
+
+    #[test]
+    fn decompose_meandim_materializes_const_factor() {
+        let mut graph = Graph::new();
+        let mut store = TensorStore::new();
+
+        let input_id = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Other("input".into()),
+            smallvec![],
+            vec![],
+            NodeMeta::new(TensorInfo::new(&[2, 4], DType::Float32)),
+            "input".into(),
+        );
+
+        let mean_id = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::Mean,
+            smallvec![
+                Arg::Node(input_id),
+                Arg::IntList(smallvec![1]),
+                Arg::Bool(true),
+            ],
+            vec![],
+            NodeMeta::new(TensorInfo::new(&[2, 1], DType::Float32)),
+            "mean".into(),
+        );
+
+        let pass = DecomposeMeanDimPass;
+        assert!(pass.run(&mut graph, &mut store));
+
+        assert!(graph.node(mean_id).is_none());
+        assert!(graph.nodes_by_target(&OpTarget::Full).is_empty());
+
+        let const_ids = graph.nodes_by_target(&OpTarget::TosaConst);
+        assert_eq!(const_ids.len(), 1);
+
+        let const_node = graph.node(const_ids[0]).unwrap();
+        assert_eq!(const_node.op, OpType::Placeholder);
+        assert_eq!(const_node.meta.val.shape_slice(), &[1, 1]);
+
+        let tensor = store.get(&const_node.name).unwrap();
+        assert_eq!(tensor.shape, vec![1, 1]);
+        assert_eq!(tensor.dtype, DType::Float32);
+        assert_eq!(tensor.data, 0.25f32.to_le_bytes().to_vec());
+
+        let mul_ids = graph.nodes_by_target(&OpTarget::Mul);
+        assert_eq!(mul_ids.len(), 1);
+        let mul_node = graph.node(mul_ids[0]).unwrap();
+        assert!(mul_node.args.iter().any(|arg| matches!(arg, Arg::Node(id) if *id == const_ids[0])));
+    }
 }

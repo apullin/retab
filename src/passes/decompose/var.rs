@@ -1,7 +1,7 @@
 use crate::graph::ir::*;
 use crate::graph::Graph;
 use crate::passes::Pass;
-use crate::store::TensorStore;
+use crate::store::{TensorData, TensorStore};
 use smallvec::smallvec;
 
 /// Decompose `Var(x, dims, correction=c, keepdim=k)` into:
@@ -18,20 +18,20 @@ impl Pass for DecomposeVarPass {
         "DecomposeVar"
     }
 
-    fn run(&self, graph: &mut Graph, _store: &mut TensorStore) -> bool {
+    fn run(&self, graph: &mut Graph, store: &mut TensorStore) -> bool {
         let targets: Vec<NodeId> = graph.nodes_by_target(&OpTarget::Var);
         if targets.is_empty() {
             return false;
         }
 
         for var_id in targets {
-            decompose_one(graph, var_id);
+            decompose_one(graph, store, var_id);
         }
         true
     }
 }
 
-fn decompose_one(graph: &mut Graph, var_id: NodeId) {
+fn decompose_one(graph: &mut Graph, store: &mut TensorStore, var_id: NodeId) {
     let (x_id, dims, correction, keepdim, input_info, output_info) = {
         let node = match graph.node(var_id) {
             Some(n) => n,
@@ -184,16 +184,24 @@ fn decompose_one(graph: &mut Graph, var_id: NodeId) {
     let full_shape_sv: smallvec::SmallVec<[i64; 6]> = full_shape.iter().copied().collect();
     let inv_denom = 1.0 / (denominator as f64);
 
-    let div_id = graph.insert_before(
-        var_id,
-        OpType::CallFunction,
-        OpTarget::Full,
-        smallvec![Arg::IntList(full_shape_sv), Arg::Float(inv_denom)],
-        vec![("dtype".into(), Arg::Dtype(dtype))],
-        placeholder_meta(),
-        next_name("full_inv_denom"),
-    );
-    crate::shape::propagate_shape(graph, div_id);
+    let div_name = next_name("full_inv_denom");
+    let div_id = if let Some(const_id) =
+        insert_scalar_broadcast_const(graph, store, var_id, &div_name, &full_shape, inv_denom, dtype)
+    {
+        const_id
+    } else {
+        let full_id = graph.insert_before(
+            var_id,
+            OpType::CallFunction,
+            OpTarget::Full,
+            smallvec![Arg::IntList(full_shape_sv), Arg::Float(inv_denom)],
+            vec![("dtype".into(), Arg::Dtype(dtype))],
+            placeholder_meta(),
+            div_name,
+        );
+        crate::shape::propagate_shape(graph, full_id);
+        full_id
+    };
 
     // 6. result = Mul(sum_sq, divisor)
     let result_id = graph.insert_before(
@@ -214,4 +222,99 @@ fn decompose_one(graph: &mut Graph, var_id: NodeId) {
 
     graph.replace_all_uses(var_id, result_id);
     graph.erase_node(var_id);
+}
+
+fn insert_scalar_broadcast_const(
+    graph: &mut Graph,
+    store: &mut TensorStore,
+    ref_id: NodeId,
+    name: &str,
+    shape: &[i64],
+    value: f64,
+    dtype: DType,
+) -> Option<NodeId> {
+    let data = match dtype {
+        DType::Float32 => (value as f32).to_le_bytes().to_vec(),
+        DType::Int32 => (value as i32).to_le_bytes().to_vec(),
+        DType::Int64 => (value as i64).to_le_bytes().to_vec(),
+        DType::Int8 => vec![(value as i8) as u8],
+        _ => return None,
+    };
+
+    store.insert(
+        name.to_string(),
+        TensorData {
+            data,
+            shape: shape.to_vec(),
+            dtype,
+        },
+    );
+
+    Some(graph.insert_before(
+        ref_id,
+        OpType::Placeholder,
+        OpTarget::TosaConst,
+        smallvec![],
+        vec![],
+        NodeMeta::new(TensorInfo::new(shape, dtype)),
+        name.to_string(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::Graph;
+
+    #[test]
+    fn decompose_var_materializes_const_divisor() {
+        let mut graph = Graph::new();
+        let mut store = TensorStore::new();
+
+        let input_id = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Other("input".into()),
+            smallvec![],
+            vec![],
+            NodeMeta::new(TensorInfo::new(&[2, 4], DType::Float32)),
+            "input".into(),
+        );
+
+        let var_id = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::Var,
+            smallvec![
+                Arg::Node(input_id),
+                Arg::IntList(smallvec![1]),
+                Arg::Int(0),
+                Arg::Bool(true),
+            ],
+            vec![],
+            NodeMeta::new(TensorInfo::new(&[2, 1], DType::Float32)),
+            "var".into(),
+        );
+
+        let pass = DecomposeVarPass;
+        assert!(pass.run(&mut graph, &mut store));
+
+        assert!(graph.node(var_id).is_none());
+        assert!(graph.nodes_by_target(&OpTarget::Full).is_empty());
+
+        let const_ids = graph.nodes_by_target(&OpTarget::TosaConst);
+        assert_eq!(const_ids.len(), 1);
+
+        let const_node = graph.node(const_ids[0]).unwrap();
+        assert_eq!(const_node.op, OpType::Placeholder);
+        assert_eq!(const_node.meta.val.shape_slice(), &[1, 1]);
+
+        let tensor = store.get(&const_node.name).unwrap();
+        assert_eq!(tensor.shape, vec![1, 1]);
+        assert_eq!(tensor.dtype, DType::Float32);
+        assert_eq!(tensor.data, 0.25f32.to_le_bytes().to_vec());
+
+        let mul_ids = graph.nodes_by_target(&OpTarget::Mul);
+        assert_eq!(mul_ids.len(), 2);
+        let result_mul = graph.node(*mul_ids.last().unwrap()).unwrap();
+        assert!(result_mul.args.iter().any(|arg| matches!(arg, Arg::Node(id) if *id == const_ids[0])));
+    }
 }
