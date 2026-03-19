@@ -1958,16 +1958,36 @@ pub fn emit_avg_pool2d(
 
     let input_names = collect_input_names(graph, node);
 
-    let kernel = kwarg_i32_list(node, "kernel");
-    let stride = kwarg_i32_list(node, "stride");
-    let pad = kwarg_i32_list(node, "pad");
+    let kernel = {
+        let kw = kwarg_i32_list(node, "kernel");
+        if kw.is_empty() { arg_i32_list(node, 1) } else { kw }
+    };
+    let mut stride = {
+        let kw = kwarg_i32_list(node, "stride");
+        if kw.is_empty() { arg_i32_list(node, 2) } else { kw }
+    };
+    let pad = {
+        let kw = kwarg_i32_list(node, "pad");
+        if !kw.is_empty() {
+            kw
+        } else {
+            let padding = arg_i32_list(node, 3);
+            if padding.len() >= 2 {
+                vec![padding[0], padding[0], padding[1], padding[1]]
+            } else if padding.len() == 1 {
+                vec![padding[0], padding[0], padding[0], padding[0]]
+            } else {
+                vec![0, 0, 0, 0]
+            }
+        }
+    };
+    if stride.is_empty() {
+        stride = kernel.clone();
+    }
 
     // Compute NHWC output shape from pool formula
-    let kernel_for_shape = if kernel.is_empty() { vec![2, 2] } else { kernel.clone() };
-    let stride_for_shape = if stride.is_empty() { vec![2, 2] } else { stride.clone() };
-    let pad_for_shape = if pad.is_empty() { vec![0, 0, 0, 0] } else { pad.clone() };
     result.tensors.push(compute_pool_nhwc_output(
-        graph, node, &kernel_for_shape, &stride_for_shape, &pad_for_shape,
+        graph, node, &kernel, &stride, &pad,
     ));
     let acc_type = DType::Int32;
     let input_zp = kwarg_i32(node, "input_zp", 0);
@@ -2031,21 +2051,9 @@ pub fn emit_avg_pool2d(
     result.operators.push(TosaOperator {
         op: Op::AvgPool2d,
         attribute: Attribute::AvgPool2d(AvgPool2dAttribute {
-            kernel: if kernel.is_empty() {
-                vec![2, 2]
-            } else {
-                kernel
-            },
-            stride: if stride.is_empty() {
-                vec![2, 2]
-            } else {
-                stride
-            },
-            pad: if pad.is_empty() {
-                vec![0, 0, 0, 0]
-            } else {
-                pad
-            },
+            kernel,
+            stride,
+            pad,
             acc_type,
         }),
         inputs: pool_inputs,
