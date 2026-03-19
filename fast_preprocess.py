@@ -28,6 +28,186 @@ from torch.export.exported_program import ExportedProgram
 
 logger = logging.getLogger(__name__)
 
+_ORIGINAL_GEN_EDGE_MANAGER_FOR_PARTITIONERS = None
+
+
+def _program_contains_targets(program: ExportedProgram, targets: set) -> bool:
+    """Return True if the program or control-flow submodules contain any target."""
+    from executorch.exir.program import _program as program_mod
+
+    for node in program.graph.nodes:
+        if node.op == "call_function" and node.target in targets:
+            return True
+
+    for _, submod, _ in program_mod.get_control_flow_submodules(program.graph_module):
+        for node in submod.graph.nodes:
+            if node.op == "call_function" and node.target in targets:
+                return True
+
+    return False
+
+
+def _install_edge_decomp_fast_path() -> None:
+    """Skip redundant EDGE_DO_NOT_DECOMP cleanup decompositions.
+
+    ExecuTorch's EDGE_DO_NOT_DECOMP path always runs a second
+    `run_decompositions(default_table)` pass after the preserve-op rewrite
+    phase. That second pass is only needed if the first pass actually left any
+    preserve-candidate ops in the graph. When none remain, the second pass is a
+    no-op that still costs multiple seconds on large models.
+    """
+    global _ORIGINAL_GEN_EDGE_MANAGER_FOR_PARTITIONERS
+
+    from collections import defaultdict
+    import copy
+
+    from executorch.exir.program import _program as program_mod
+
+    current = program_mod._gen_edge_manager_for_partitioners
+    if getattr(current, "__arm_tosa_engine_patched__", False):
+        return
+
+    _ORIGINAL_GEN_EDGE_MANAGER_FOR_PARTITIONERS = current
+
+    def optimized_gen_edge_manager_for_partitioners(
+        partitioner,
+        aten_programs,
+        config,
+        constant_methods,
+        generate_etrecord=False,
+    ):
+        ops_set_to_not_decompose_by_program = defaultdict(list)
+        edge_programs = {}
+        skipped_second_passes = 0
+
+        for name, program in aten_programs.items():
+            # Functionalize program before asking partitioners to preserve ops.
+            program = program.run_decompositions({})
+
+            if partitioner is not None:
+                partitioners_for_program = partitioner.get(name, [])
+                final_ops_to_preserve = set()
+
+                if not partitioners_for_program:
+                    table = program_mod._default_decomposition_table()
+                    for op in config.preserve_ops:
+                        table.pop(op, None)
+                    program = program.run_decompositions(table)
+
+                for curr_partitioner in partitioners_for_program:
+                    curr_ops_no_decomp, _ = curr_partitioner.ops_to_not_decompose(
+                        program
+                    )
+
+                    can_skip_using_edge_do_not_decomp = (
+                        program_mod._can_skip_using_EDGE_DO_NOT_DECOMP(
+                            curr_partitioner, program
+                        )
+                    )
+
+                    if can_skip_using_edge_do_not_decomp:
+                        table = program_mod._default_decomposition_table()
+                        ops_needing_preservation = []
+
+                        for op in curr_ops_no_decomp:
+                            if table.pop(op, None) is not None:
+                                ops_needing_preservation.append(op)
+
+                        program = program.run_decompositions(table)
+                        final_ops_to_preserve.update(ops_needing_preservation)
+                    else:
+                        curr_ops_no_decomp = (
+                            program_mod._remove_invalid_ops_for_not_decompose(
+                                curr_ops_no_decomp
+                            )
+                        )
+
+                        table = program_mod._default_decomposition_table()
+                        for op in curr_ops_no_decomp:
+                            table.pop(op, None)
+
+                        # First pass: preserve this partitioner's candidate ops
+                        # from nested decompositions.
+                        program = program.run_decompositions(table)
+
+                        if not _program_contains_targets(
+                            program, set(curr_ops_no_decomp)
+                        ):
+                            skipped_second_passes += 1
+                            continue
+
+                        temp_partitioner_dict = {name: [curr_partitioner]}
+                        preserved_ops = (
+                            program_mod._replace_aten_ops_with_transformed_ops(
+                                name, program, temp_partitioner_dict
+                            )
+                            or []
+                        )
+                        final_ops_to_preserve.update(preserved_ops)
+
+                        # Second pass is only needed when preserve-candidate ops
+                        # actually survive the first pass.
+                        program = program.run_decompositions(
+                            program_mod._default_decomposition_table()
+                        )
+                        program_mod._restore_transformed_ops_to_aten_ops(program)
+
+                ops_set_to_not_decompose_by_program[name].extend(final_ops_to_preserve)
+
+            edge_programs[name] = program_mod._generate_edge_program(
+                config,
+                program,
+                preserve_ops=ops_set_to_not_decompose_by_program.get(name, []),
+            )
+
+        all_ops_not_to_decompose = list(
+            set().union(*ops_set_to_not_decompose_by_program.values())
+        )
+        config._core_aten_ops_exception_list = list(
+            set(config._core_aten_ops_exception_list) | set(all_ops_not_to_decompose)
+        )
+
+        edge_manager = program_mod.EdgeProgramManager(
+            edge_programs,
+            constant_methods,
+            config,
+            all_ops_not_to_decompose,
+        )
+
+        if generate_etrecord:
+            etrecord = program_mod._create_empty_etrecord()
+            etrecord.add_exported_program(aten_programs)
+            etrecord.add_edge_dialect_program(copy.deepcopy(edge_manager))
+            edge_manager._etrecord = etrecord
+
+        if skipped_second_passes:
+            logger.info(
+                "[fast_preprocess] skipped %d redundant EDGE_DO_NOT_DECOMP cleanup passes",
+                skipped_second_passes,
+            )
+
+        return edge_manager
+
+    optimized_gen_edge_manager_for_partitioners.__arm_tosa_engine_patched__ = True
+    optimized_gen_edge_manager_for_partitioners.__wrapped__ = current
+    program_mod._gen_edge_manager_for_partitioners = (
+        optimized_gen_edge_manager_for_partitioners
+    )
+
+
+def _uninstall_edge_decomp_fast_path() -> None:
+    global _ORIGINAL_GEN_EDGE_MANAGER_FOR_PARTITIONERS
+
+    if _ORIGINAL_GEN_EDGE_MANAGER_FOR_PARTITIONERS is None:
+        return
+
+    from executorch.exir.program import _program as program_mod
+
+    program_mod._gen_edge_manager_for_partitioners = (
+        _ORIGINAL_GEN_EDGE_MANAGER_FOR_PARTITIONERS
+    )
+    _ORIGINAL_GEN_EDGE_MANAGER_FOR_PARTITIONERS = None
+
 
 # -- Internal implementations ------------------------------------------------
 
@@ -490,6 +670,8 @@ def patch_tosa_backend(mode="fast"):
     """
     from executorch.backends.arm.tosa.backend import TOSABackend
 
+    _install_edge_decomp_fast_path()
+
     if mode == "fast":
         TOSABackend._preprocess = staticmethod(_fast_preprocess)
         TOSABackend.preprocess = staticmethod(fast_preprocess)
@@ -518,6 +700,7 @@ def unpatch_tosa_backend():
 
     import executorch.backends.arm.tosa.backend as mod
 
+    _uninstall_edge_decomp_fast_path()
     importlib.reload(mod)
     logger.info("[fast_preprocess] Restored original TOSABackend")
 
