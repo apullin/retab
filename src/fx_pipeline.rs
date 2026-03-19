@@ -46,11 +46,14 @@ use crate::fx_rewrite_conv;
 ///   15. Annotate TOSA memory format (dim_order, spatial_rank, transposes)
 ///   16. Remove no-op nodes (identity, alias_copy, detach_copy, etc.)
 ///   17. Final rescale insertion (InsertRescalePass)
-///   18. Final dedup -- cleanup may create or expose duplicate nodes
+///   18. Late fold of generated zero-input FULL nodes only
+///   19. Final dedup -- cleanup may create or expose duplicate nodes
 pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dyn FxPass>> {
     // Clone the EP handle for passes that need it. Py<T>.clone() requires the GIL.
-    let (ep_for_fuse, ep_for_cast, ep_for_fuse_placeholders) = pyo3::Python::with_gil(|py| {
+    let (ep_for_fuse, ep_for_cast, ep_for_fuse_placeholders, ep_for_fuse_late) =
+        pyo3::Python::with_gil(|py| {
         (
+            exported_program.as_ref().map(|ep| ep.clone_ref(py)),
             exported_program.as_ref().map(|ep| ep.clone_ref(py)),
             exported_program.as_ref().map(|ep| ep.clone_ref(py)),
             exported_program.as_ref().map(|ep| ep.clone_ref(py)),
@@ -80,6 +83,9 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
         Box::new(fx_remove_noop::FxRemoveNoopPass),
         Box::new(fx_insert_rescale::FxInsertRescalePass),
+        Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new_zero_input_full_only(
+            ep_for_fuse_late,
+        )),
         // Final dedup: clean up duplicates introduced or exposed by cleanup passes
         Box::new(fx_fuse_duplicate_users::FxFuseDuplicateUsersPass),
     ]

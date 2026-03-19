@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
@@ -20,11 +21,28 @@ use crate::fx_pass::FxPass;
 /// should not be folded, matching the Python implementation.
 pub struct FxFuseConstantArgsPass {
     exported_program: Option<PyObject>,
+    mode: FuseMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FuseMode {
+    General,
+    ZeroInputFullOnly,
 }
 
 impl FxFuseConstantArgsPass {
     pub fn new(exported_program: Option<PyObject>) -> Self {
-        Self { exported_program }
+        Self {
+            exported_program,
+            mode: FuseMode::General,
+        }
+    }
+
+    pub fn new_zero_input_full_only(exported_program: Option<PyObject>) -> Self {
+        Self {
+            exported_program,
+            mode: FuseMode::ZeroInputFullOnly,
+        }
     }
 }
 
@@ -37,9 +55,68 @@ fn is_skip_target(target: &str) -> bool {
         || target.contains("tosa.TRANSPOSE")
 }
 
+fn is_zero_input_full(target: &str, input_nodes: &[Bound<'_, PyAny>]) -> bool {
+    input_nodes.is_empty() && target.contains("aten.full.default")
+}
+
+fn fold_zero_input_full(
+    gm: &FxGraphModule,
+    node: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    let py = gm.py();
+    let graph = gm.gm_ref().getattr("graph")?;
+    let torch = py.import_bound("torch")?;
+
+    let args = FxGraphModule::node_args(node)?;
+    if args.len() < 2 {
+        return Ok(false);
+    }
+
+    let shape = &args[0];
+    let fill_value = &args[1];
+
+    let meta = node.getattr("meta")?;
+    let val = meta.get_item("val")?;
+    let dtype = val.getattr("dtype")?;
+
+    let full_kwargs = PyDict::new_bound(py);
+    full_kwargs.set_item("dtype", &dtype)?;
+    let const_tensor = torch.call_method("full", (shape, fill_value), Some(&full_kwargs))?;
+
+    let node_name = FxGraphModule::node_name(node)?;
+    let mut attr_name = format!("{}_fused_const", node_name);
+    let mut counter = 0usize;
+    while gm.gm_ref().hasattr(attr_name.as_str())? {
+        counter += 1;
+        attr_name = format!("{}_fused_const_{}", node_name, counter);
+    }
+
+    gm.gm_ref()
+        .call_method1("register_buffer", (attr_name.as_str(), &const_tensor))?;
+
+    let insert_ctx = graph.call_method1("inserting_before", (node,))?;
+    insert_ctx.call_method0("__enter__")?;
+    let const_node_result = (|| -> PyResult<Bound<'_, PyAny>> {
+        let const_node = graph.call_method1("get_attr", (attr_name.as_str(),))?;
+        let const_meta = PyDict::new_bound(py);
+        const_meta.set_item("val", &const_tensor)?;
+        const_node.setattr("meta", &const_meta)?;
+        Ok(const_node)
+    })();
+    insert_ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+    let const_node = const_node_result?;
+
+    FxGraphModule::replace_all_uses_with(node, &const_node)?;
+    gm.erase_node(node)?;
+    Ok(true)
+}
+
 impl FxPass for FxFuseConstantArgsPass {
     fn name(&self) -> &str {
-        "FxFuseConstantArgs"
+        match self.mode {
+            FuseMode::General => "FxFuseConstantArgs",
+            FuseMode::ZeroInputFullOnly => "FxFoldZeroInputFull",
+        }
     }
 
     fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
@@ -85,6 +162,20 @@ impl FxPass for FxFuseConstantArgsPass {
                     .iter()?
                     .filter_map(|n| n.ok())
                     .collect();
+
+                if is_zero_input_full(&target, &input_nodes) {
+                    if fold_zero_input_full(gm, node)? {
+                        modified = true;
+                        made_progress = true;
+                        gm.recompile()?;
+                        break;
+                    }
+                    continue;
+                }
+
+                if self.mode == FuseMode::ZeroInputFullOnly {
+                    continue;
+                }
 
                 if input_nodes.is_empty() {
                     continue;
