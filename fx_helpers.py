@@ -240,19 +240,20 @@ def _compute_table(
     output_qmin: int,
     output_qmax: int,
 ) -> list[int]:
-    """Compute a 513-entry lookup table for a unary math function.
+    """Compute a lookup table for a quantized unary math function.
 
-    For each integer i in [qmin, qmax+1]:
+    For each integer i in [qmin, qmax]:
         x_float = (i - input_zp) * input_scale
         y_float = math_fn(x_float)
         y_quant = clamp(round(y_float / output_scale + output_zp), output_qmin, output_qmax)
-        table[i - qmin] = y_quant   (as int16)
+        table[i - qmin] = y_quant
 
-    Returns a list of 513 int16 values.
+    For int8 tensors this yields 256 entries, matching the Python reference
+    and the TOSA backend's emitted TABLE constants for Ethos-U flows.
     """
     fn = _TABLE_MATH_FNS[kind]
     table = []
-    for i in range(input_qmin, input_qmax + 2):  # +2 to get 513 entries (qmin..=qmax+1)
+    for i in range(input_qmin, input_qmax + 1):
         x_float = (i - input_zp) * input_scale
         y_float = fn(x_float)
         y_quant = int(round(y_float / output_scale + output_zp))
@@ -299,6 +300,21 @@ def insert_table_op(
             return val[0] if val else 1.0
         return val
 
+    def _torch_dtype(val, default=torch.int8):
+        """Normalize a QuantArgs dtype field to a torch.dtype."""
+        if isinstance(val, torch.dtype):
+            return val
+        if isinstance(val, str):
+            return {
+                "torch.int8": torch.int8,
+                "int8": torch.int8,
+                "torch.int16": torch.int16,
+                "int16": torch.int16,
+                "torch.int32": torch.int32,
+                "int32": torch.int32,
+            }.get(val, default)
+        return default
+
     input_scale = float(_scalar(_get(input_qp, "scale", 1.0)))
     input_zp = int(_scalar(_get(input_qp, "zp", _get(input_qp, "zero_point", 0))))
     input_qmin = int(_get(input_qp, "qmin", -128))
@@ -308,6 +324,7 @@ def insert_table_op(
     output_zp = int(_scalar(_get(output_qp, "zp", _get(output_qp, "zero_point", 0))))
     output_qmin = int(_get(output_qp, "qmin", -128))
     output_qmax = int(_get(output_qp, "qmax", 127))
+    output_dtype = _torch_dtype(_get(output_qp, "dtype", torch.int8))
 
     # Compute the lookup table
     table_data = _compute_table(
@@ -317,7 +334,7 @@ def insert_table_op(
     )
 
     # Create a tensor constant for the table
-    table_tensor = torch.tensor(table_data, dtype=torch.int16)
+    table_tensor = torch.tensor(table_data, dtype=output_dtype)
 
     # Register the table tensor as a buffer on the graph module so it
     # persists and can be referenced by a get_attr node.
@@ -345,9 +362,9 @@ def insert_table_op(
         # Carry over meta from original node
         from copy import copy
         table_op_node.meta = copy(node.meta)
-        # Clear qparams on the TABLE node (it's already quantized)
-        table_op_node.meta.pop("input_qparams", None)
-        table_op_node.meta.pop("output_qparams", None)
+        old_val = node.meta.get("val")
+        if old_val is not None:
+            table_op_node.meta["val"] = old_val.new_empty(old_val.shape, dtype=output_dtype)
 
     # Replace all uses of the original node and erase it
     node.replace_all_uses_with(table_op_node)
