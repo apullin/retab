@@ -54,8 +54,70 @@ pub struct EmitResult {
 /// Get the name of a node referenced by an Arg::Node.
 fn resolve_input_name(graph: &Graph, arg: &Arg) -> Option<String> {
     match arg {
-        Arg::Node(id) => graph.node(*id).map(|n| n.name.clone()),
+        Arg::Node(id) => {
+            let node = graph.node(*id)?;
+            if is_getitem_node(node) {
+                let source_id = match node.args.first() {
+                    Some(Arg::Node(source_id)) => *source_id,
+                    _ => return Some(node.name.clone()),
+                };
+                let source = graph.node(source_id)?;
+                let output_idx = match node.args.get(1) {
+                    Some(Arg::Int(idx)) => *idx,
+                    _ => 0,
+                };
+                if output_idx == 0 {
+                    return Some(primary_output_name(graph, source));
+                }
+            }
+            Some(node.name.clone())
+        }
         _ => None,
+    }
+}
+
+fn is_getitem_node(node: &Node) -> bool {
+    matches!(&node.target, OpTarget::Other(target) if target.contains("getitem"))
+}
+
+/// Match the Python serializer's multi-output convention: when an op's users
+/// are all `getitem` nodes, emit the first real tensor result under the
+/// `getitem(..., 0)` node name instead of the tuple-producing node name.
+fn primary_output_name(graph: &Graph, node: &Node) -> String {
+    if node.users.is_empty() {
+        return node.name.clone();
+    }
+
+    let mut all_getitems = true;
+    let mut first_output_alias: Option<String> = None;
+    let mut fallback_alias: Option<String> = None;
+
+    for user_id in &node.users {
+        let user = match graph.node(*user_id) {
+            Some(user) => user,
+            None => {
+                all_getitems = false;
+                break;
+            }
+        };
+        if !is_getitem_node(user) {
+            all_getitems = false;
+            break;
+        }
+        if fallback_alias.is_none() {
+            fallback_alias = Some(user.name.clone());
+        }
+        if matches!(user.args.get(1), Some(Arg::Int(0))) && first_output_alias.is_none() {
+            first_output_alias = Some(user.name.clone());
+        }
+    }
+
+    if all_getitems {
+        first_output_alias
+            .or(fallback_alias)
+            .unwrap_or_else(|| node.name.clone())
+    } else {
+        node.name.clone()
     }
 }
 
@@ -713,6 +775,7 @@ pub fn emit_aten_max_pool2d(
     _store: &TensorStore,
 ) -> EmitResult {
     let mut result = EmitResult::default();
+    let output_name = primary_output_name(graph, node);
 
     let input_names = collect_input_names(graph, node);
 
@@ -731,9 +794,11 @@ pub fn emit_aten_max_pool2d(
     // Compute NHWC output shape from pool formula
     let kernel_for_shape = if kernel.is_empty() { vec![2, 2] } else { kernel.clone() };
     let stride_for_shape = if stride.is_empty() { vec![2, 2] } else { stride.clone() };
-    result.tensors.push(compute_pool_nhwc_output(
+    let mut output_tensor = compute_pool_nhwc_output(
         graph, node, &kernel_for_shape, &stride_for_shape, &pad,
-    ));
+    );
+    output_tensor.name = output_name.clone();
+    result.tensors.push(output_tensor);
 
     result.operators.push(TosaOperator {
         op: Op::MaxPool2d,
@@ -744,7 +809,7 @@ pub fn emit_aten_max_pool2d(
             nan_mode: NanPropagationMode::Propagate,
         }),
         inputs: input_names,
-        outputs: vec![node.name.clone()],
+        outputs: vec![output_name],
         location: None,
     });
 
@@ -1564,6 +1629,7 @@ pub fn emit_max_pool2d(
     _store: &TensorStore,
 ) -> EmitResult {
     let mut result = EmitResult::default();
+    let output_name = primary_output_name(graph, node);
 
     let input_names = collect_input_names(graph, node);
 
@@ -1575,9 +1641,11 @@ pub fn emit_max_pool2d(
     let kernel_for_shape = if kernel.is_empty() { vec![2, 2] } else { kernel.clone() };
     let stride_for_shape = if stride.is_empty() { vec![2, 2] } else { stride.clone() };
     let pad_for_shape = if pad.is_empty() { vec![0, 0, 0, 0] } else { pad.clone() };
-    result.tensors.push(compute_pool_nhwc_output(
+    let mut output_tensor = compute_pool_nhwc_output(
         graph, node, &kernel_for_shape, &stride_for_shape, &pad_for_shape,
-    ));
+    );
+    output_tensor.name = output_name.clone();
+    result.tensors.push(output_tensor);
 
     result.operators.push(TosaOperator {
         op: Op::MaxPool2d,
@@ -1600,7 +1668,7 @@ pub fn emit_max_pool2d(
             nan_mode: NanPropagationMode::Propagate,
         }),
         inputs: input_names,
-        outputs: vec![node.name.clone()],
+        outputs: vec![output_name],
         location: None,
     });
 
@@ -2767,6 +2835,7 @@ pub fn emit_node(
         OpTarget::ConvTranspose2d => {
             Some(emit_transpose_conv2d(graph, node_id, node, store))
         }
+        OpTarget::Other(target) if target.contains("getitem") => Some(EmitResult::default()),
 
         // Ops not yet handled — skip silently for now.
         _ => {
