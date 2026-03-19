@@ -368,6 +368,10 @@ impl FxPass for FxInsertRescalePass {
             let copy_mod = py.import_bound("copy")?;
             let meta_copy = copy_mod.call_method1("copy", (&q_meta,))?;
             rescale_node.setattr("meta", &meta_copy)?;
+            helpers.call_method1(
+                "restamp_rescale_output_meta",
+                (&rescale_node, &dq_input, &q_dtype),
+            )?;
 
             FxGraphModule::replace_all_uses_with(q_node, &rescale_node)?;
             gm.erase_node(q_node)?;
@@ -594,6 +598,11 @@ impl FxPass for FxInsertRescalePass {
                     }
                 }
             }
+
+            // Python retraces the modified graph after InsertRescaleInt32Pass.
+            // Refresh the touched node's FakeTensor eagerly so downstream
+            // passes and serialization observe the INT32 accumulator dtype.
+            helpers.call_method1("refresh_node_fake_tensor", (node,))?;
         }
 
         // ------------------------------------------------------------------
@@ -695,6 +704,10 @@ impl FxPass for FxInsertRescalePass {
             let copy_mod = py.import_bound("copy")?;
             let meta_copy = copy_mod.call_method1("copy", (&conv_meta,))?;
             rescale_node.setattr("meta", &meta_copy)?;
+            helpers.call_method1(
+                "restamp_rescale_output_meta",
+                (&rescale_node, node, &torch_int8),
+            )?;
 
             // Rewire all users of the conv to use the rescale instead
             for user in &users {

@@ -32,6 +32,235 @@ logger = logging.getLogger(__name__)
 # -- Internal implementations ------------------------------------------------
 
 
+def _serialize_with_python_tosa(
+    edge_program: ExportedProgram,
+    compile_spec: TosaCompileSpec,
+    merged_state_dict: dict,
+) -> bytes:
+    """Serialize an already-lowered FX graph using ExecuTorch's Python TOSA serializer.
+
+    This bypasses ArmPassManager by temporarily turning its transform hook into
+    an identity function. The expensive graph-lowering work has already been
+    done by the Rust FX-direct pipeline; this only reuses the known-good Python
+    TOSA serializer on the post-pass graph.
+    """
+    import tosa_serializer as ts
+
+    import torch
+    from torch.fx import GraphModule
+    from torch.export.graph_signature import InputKind
+
+    from executorch.backends.arm._passes import ArmPassManager
+    from executorch.backends.arm.tosa.backend import TOSABackend
+    from executorch.backends.transforms.utils import create_constant_placeholder
+
+    def first_meta_val(node):
+        val = node.meta.get("val")
+        if isinstance(val, (list, tuple)):
+            return val[0] if val else None
+        return val
+
+    def qparam_dtype(qp):
+        if hasattr(qp, "dtype"):
+            return qp.dtype
+        if isinstance(qp, dict):
+            return qp.get("dtype")
+        return None
+
+    def normalize_tensor_getattrs() -> int:
+        """Convert tensor get_attr nodes into constant placeholders.
+
+        The ExecuTorch Python TOSA serializer only accepts get_attr nodes that
+        reference nested GraphModules. Our Rust FX-direct passes still create
+        tensor get_attr nodes for some synthetic constants (late-folded FULL,
+        TABLE buffers, zero biases). Canonicalize those back into proper
+        constant placeholders before invoking the Python serializer.
+        """
+        graph_module = edge_program.graph_module
+        graph = graph_module.graph
+
+        insert_pos = None
+        for node in graph.nodes:
+            if (
+                node.op == "placeholder"
+                and node.name in edge_program.graph_signature.user_inputs
+            ):
+                insert_pos = node
+                break
+        if insert_pos is None:
+            insert_pos = next(iter(graph.nodes), None)
+        if insert_pos is None:
+            return 0
+
+        converted = 0
+        for node in list(graph.nodes):
+            if node.op != "get_attr":
+                continue
+
+            attr_name = str(node.target)
+            attr = getattr(graph_module, attr_name, None)
+            if isinstance(attr, GraphModule):
+                continue
+            if not isinstance(attr, torch.Tensor):
+                continue
+
+            placeholder_name = f"{attr_name}_placeholder"
+            counter = 0
+            existing_names = {n.name for n in graph.nodes}
+            while placeholder_name in existing_names:
+                counter += 1
+                placeholder_name = f"{attr_name}_placeholder_{counter}"
+
+            with graph.inserting_before(insert_pos):
+                const_node = create_constant_placeholder(
+                    exp_program=edge_program,
+                    graph=graph,
+                    kind=InputKind.BUFFER,
+                    name=placeholder_name,
+                    data=attr.detach().clone(),
+                    persistent_buffer=True,
+                )
+
+            for key, value in node.meta.items():
+                if key == "val":
+                    continue
+                const_node.meta[key] = value
+            const_node.meta["arm_constant_placeholder"] = True
+
+            node.replace_all_uses_with(const_node)
+            graph.erase_node(node)
+            converted += 1
+
+        if converted:
+            graph.eliminate_dead_code()
+            graph_module.recompile()
+
+        return converted
+
+    def normalize_quantized_tensor_meta() -> int:
+        """Fix stale FakeTensor dtypes on quantized-region nodes.
+
+        The Rust FX-direct passes rely on qparam metadata and explicit op args
+        more than on node.meta["val"]. The Python serializer is stricter and
+        uses meta["val"] as the source of truth for output dtype. Canonicalize
+        obviously stale floating-point FakeTensor metadata before serialization.
+        """
+        fixed = 0
+        graph = edge_program.graph_module.graph
+        float_dtypes = {
+            torch.float16,
+            torch.float32,
+            torch.float64,
+            torch.bfloat16,
+        }
+        same_dtype_ops = (
+            "aten.permute_copy",
+            "aten.avg_pool2d",
+            "aten.max_pool2d_with_indices",
+            "aten.clamp.default",
+            "aten.view_copy",
+            "aten.add.Tensor",
+            "aten.sub.Tensor",
+            "aten.mul.Tensor",
+            "sum.dim_IntList",
+            "tosa.TRANSPOSE",
+        )
+
+        for node in graph.nodes:
+            if node.op != "call_function":
+                continue
+
+            val = first_meta_val(node)
+            if val is None or not hasattr(val, "new_empty"):
+                continue
+            if getattr(val, "dtype", None) not in float_dtypes:
+                continue
+
+            target = str(node.target)
+            new_dtype = None
+
+            if any(op in target for op in same_dtype_ops):
+                if node.args and hasattr(node.args[0], "meta"):
+                    input_val = first_meta_val(node.args[0])
+                    if input_val is not None:
+                        new_dtype = getattr(input_val, "dtype", None)
+            elif "tosa.RESCALE" in target:
+                if len(node.args) > 1 and isinstance(node.args[1], torch.dtype):
+                    new_dtype = node.args[1]
+            elif any(
+                op in target
+                for op in ("tosa.CONV2D", "tosa.DEPTHWISE_CONV2D", "tosa.CONV3D")
+            ):
+                if node.args and hasattr(node.args[0], "meta"):
+                    input_val = first_meta_val(node.args[0])
+                    if input_val is not None and getattr(input_val, "dtype", None) in (
+                        torch.int8,
+                        torch.int16,
+                    ):
+                        new_dtype = torch.int32
+            else:
+                output_qparams = node.meta.get("output_qparams")
+                if output_qparams:
+                    qp = output_qparams.get(0) if hasattr(output_qparams, "get") else None
+                    if qp is None:
+                        try:
+                            qp = output_qparams[0]
+                        except Exception:
+                            qp = None
+                    new_dtype = qparam_dtype(qp)
+
+            if new_dtype is not None and new_dtype != val.dtype:
+                node.meta["val"] = val.new_empty(val.shape, dtype=new_dtype)
+                fixed += 1
+
+        return fixed
+
+    artifact_path = compile_spec.get_intermediate_path() or ""
+    version = compile_spec.tosa_spec.version
+    tosa_graph = ts.TosaSerializer(
+        artifact_path,
+        targetMajor=version.major,
+        targetMinor=version.minor,
+        targetPatch=version.micro,
+        targetDraft=True if version.minor > 0 else False,
+    )
+
+    live_state_dict = edge_program.state_dict
+    live_snapshot = dict(live_state_dict)
+    orig_transform = ArmPassManager.transform_to_backend_pipeline
+    ArmPassManager.transform_to_backend_pipeline = (
+        lambda self, exported_program, graph_module: graph_module
+    )
+
+    try:
+        live_state_dict.clear()
+        live_state_dict.update(merged_state_dict)
+        normalized_getattrs = normalize_tensor_getattrs()
+        if normalized_getattrs:
+            logger.info(
+                "[fast_preprocess] normalized %d tensor get_attr nodes for Python TOSA serializer",
+                normalized_getattrs,
+            )
+        normalized_meta = normalize_quantized_tensor_meta()
+        if normalized_meta:
+            logger.info(
+                "[fast_preprocess] normalized %d quantized node metadata dtypes for Python TOSA serializer",
+                normalized_meta,
+            )
+        TOSABackend._preprocess_module(
+            edge_program.graph_module,
+            edge_program,
+            compile_spec,
+            tosa_graph,
+            None,
+        )
+        return bytes(tosa_graph.serialize())
+    finally:
+        ArmPassManager.transform_to_backend_pipeline = orig_transform
+        live_state_dict.clear()
+        live_state_dict.update(live_snapshot)
+
+
 def _fast_preprocess(
     edge_program: ExportedProgram,
     compile_spec: TosaCompileSpec,
@@ -177,7 +406,9 @@ def _all_rust_preprocess(
 
     # Deep-copy the state_dict BEFORE passes run, because some FX-direct
     # passes (e.g. RewriteConv) may mutate ep.state_dict in-place.
-    # We want the original (un-mutated) weight data for ingestion.
+    # We want the original (un-mutated) weight data for pre-existing tensors,
+    # but we still need to ingest any new constant placeholders created by the
+    # FX passes later in the pipeline.
     original_state_dict = copy.deepcopy(dict(edge_program.state_dict))
 
     import arm_tosa_engine
@@ -186,12 +417,32 @@ def _all_rust_preprocess(
     arm_tosa_engine.run_fx_passes(gm, edge_program)
     t_passes = time.perf_counter() - t0
 
-    # Ingest + serialize only -- do NOT re-run IR passes (they already ran
-    # as FX-direct passes above).  lower_to_tosa() would run build_phase2_pipeline()
-    # again, corrupting the graph with duplicate transformations.
-    tosa_bytes = arm_tosa_engine.ingest_and_serialize(
-        gm, original_state_dict, edge_program.graph_signature
-    )
+    # Merge in any pass-created constant placeholders added to the live
+    # ExportedProgram after the pre-pass snapshot. Keep original entries for
+    # existing keys so we do not pick up in-place mutations to legacy weights.
+    merged_state_dict = original_state_dict
+    for key, value in dict(edge_program.state_dict).items():
+        if key not in merged_state_dict:
+            merged_state_dict[key] = copy.deepcopy(value)
+
+    serializer_backend = os.environ.get("ARM_TOSA_ENGINE_SERIALIZER", "python")
+    if serializer_backend == "rust":
+        # Ingest + serialize only -- do NOT re-run IR passes (they already ran
+        # as FX-direct passes above).  lower_to_tosa() would run
+        # build_phase2_pipeline() again, corrupting the graph with duplicate
+        # transformations.
+        tosa_bytes = arm_tosa_engine.ingest_and_serialize(
+            gm, merged_state_dict, edge_program.graph_signature
+        )
+    elif serializer_backend == "python":
+        tosa_bytes = _serialize_with_python_tosa(
+            edge_program, compile_spec, merged_state_dict
+        )
+    else:
+        raise ValueError(
+            f"Unknown ARM_TOSA_ENGINE_SERIALIZER={serializer_backend!r}. "
+            "Use 'python' or 'rust'."
+        )
 
     dump_path = os.environ.get("ARM_TOSA_ENGINE_DUMP_TOSA")
     if dump_path:

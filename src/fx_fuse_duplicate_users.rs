@@ -1,58 +1,120 @@
+use std::collections::{HashMap, VecDeque};
+
 use pyo3::prelude::*;
-use std::collections::HashMap;
+use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
 
-/// FX-graph-direct implementation of `FuseDuplicateUsersPass`.
+/// FX-graph-direct implementation of ExecuTorch's `FuseDuplicateUsersPass`.
 ///
-/// The LayerNorm decomposition (and others) can produce duplicate nodes —
-/// two `call_function` nodes with the same target and identical argument
-/// lists.  This pass deduplicates them: if two nodes have the same
-/// (target, args, kwargs) signature, all uses of the second are replaced
-/// with the first and the second is erased.
-///
-/// The pass iterates until convergence because fusing one pair of
-/// duplicates can expose further duplicates.
+/// This only fuses duplicate *sibling* users of the same producer, matching the
+/// Python reference pass. A global dedup is unsafe here because repeated
+/// layernorm-style blocks legitimately reuse the same op shapes and kwargs.
 pub struct FxFuseDuplicateUsersPass;
 
-/// Build a hashable signature string for a `call_function` node.
-///
-/// Two nodes are considered duplicates iff they share the same target and
-/// their positional arguments match element-wise (Node args by name,
-/// literal args by value).  kwargs are included in the key as well.
-fn node_signature(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-    let op = FxGraphModule::node_op(node)?;
-    if op != "call_function" {
+fn node_is_live(node: &Bound<'_, PyAny>) -> PyResult<bool> {
+    Ok(!node.getattr("graph")?.is_none())
+}
+
+fn target_key(node: &Bound<'_, PyAny>) -> PyResult<String> {
+    FxGraphModule::node_target_str(node)
+}
+
+fn normalize_value(value: &Bound<'_, PyAny>) -> PyResult<String> {
+    if value.is_none() {
+        return Ok("None".into());
+    }
+
+    if value.getattr("name").is_ok() && value.getattr("op").is_ok() {
+        return Ok(format!("Node({})", FxGraphModule::node_name(value)?));
+    }
+
+    if value.is_instance_of::<PyTuple>() || value.is_instance_of::<PyList>() {
+        let items = value.iter()?.collect::<PyResult<Vec<_>>>()?;
+        let mut out = String::from("[");
+        for (i, item) in items.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&normalize_value(item)?);
+        }
+        out.push(']');
+        return Ok(out);
+    }
+
+    if let Ok(dict) = value.downcast::<PyDict>() {
+        let mut items: Vec<(String, String)> = Vec::new();
+        for (k, v) in dict.iter() {
+            items.push((k.repr()?.extract()?, normalize_value(&v)?));
+        }
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        let body = items
+            .into_iter()
+            .map(|(k, v)| format!("{k}:{v}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        return Ok(format!("{{{body}}}"));
+    }
+
+    if value.is_instance_of::<PyString>() {
+        return Ok(format!("str({})", value.extract::<String>()?));
+    }
+
+    Ok(value.repr()?.extract()?)
+}
+
+fn normalize_node_args(args: &[Bound<'_, PyAny>]) -> PyResult<String> {
+    let mut out = String::from("[");
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&normalize_value(arg)?);
+    }
+    out.push(']');
+    Ok(out)
+}
+
+fn build_user_signature(node: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    if FxGraphModule::node_op(node)? != "call_function" {
         return Ok(None);
     }
 
-    let target = FxGraphModule::node_target_str(node)?;
     let args = FxGraphModule::node_args(node)?;
+    let kwargs = FxGraphModule::node_kwargs(node)?;
 
-    let mut parts: Vec<String> = Vec::with_capacity(args.len() + 2);
-    parts.push(target);
+    let norm_args = normalize_node_args(&args)?;
+    let norm_kwargs = normalize_value(&kwargs)?;
+    Ok(Some(format!(
+        "{}|{}|{}|{}",
+        FxGraphModule::node_op(node)?,
+        target_key(node)?,
+        norm_args,
+        norm_kwargs
+    )))
+}
 
-    for arg in &args {
-        if FxGraphModule::is_node(arg) {
-            let name = FxGraphModule::node_name(arg)?;
-            parts.push(format!("N:{}", name));
-        } else {
-            // For lists/tuples inside args, repr them so order matters.
-            let repr = arg.repr()?.extract::<String>()?;
-            parts.push(format!("V:{}", repr));
+fn candidate_groups<'py>(
+    producer: &Bound<'py, PyAny>,
+) -> PyResult<Vec<Vec<Bound<'py, PyAny>>>> {
+    let mut users_by_target: HashMap<(String, String), Vec<Bound<'_, PyAny>>> = HashMap::new();
+    for user in &FxGraphModule::node_users(producer)? {
+        if !node_is_live(user)? {
+            continue;
         }
+        let op = FxGraphModule::node_op(user)?;
+        if op != "call_function" {
+            continue;
+        }
+        let key = (op, target_key(user)?);
+        users_by_target.entry(key).or_default().push(user.clone());
     }
 
-    // Include kwargs in the signature for completeness.
-    let kwargs = FxGraphModule::node_kwargs(node)?;
-    let kwargs_repr = kwargs.repr()?.extract::<String>()?;
-    parts.push(format!("KW:{}", kwargs_repr));
-
-    // Suppress unused variable warning — py is needed for the trait bound
-    let _ = py;
-
-    Ok(Some(parts.join("|")))
+    Ok(users_by_target
+        .into_values()
+        .filter(|group| group.len() > 1)
+        .collect())
 }
 
 impl FxPass for FxFuseDuplicateUsersPass {
@@ -61,51 +123,48 @@ impl FxPass for FxFuseDuplicateUsersPass {
     }
 
     fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let mut any_modified = false;
+        let mut modified = false;
+        let mut producers: VecDeque<Bound<'_, PyAny>> = gm.nodes()?.into();
 
-        // Iterate until convergence — fusing one pair may expose more.
-        loop {
-            let mut modified_this_round = false;
+        while let Some(producer) = producers.pop_front() {
+            if !node_is_live(&producer)? {
+                continue;
+            }
 
-            let all_nodes = gm.nodes()?;
+            if FxGraphModule::node_users(&producer)?.len() < 2 {
+                continue;
+            }
 
-            // Map: signature -> first node with that signature.
-            let mut seen: HashMap<String, Bound<'_, PyAny>> = HashMap::new();
+            let mut signature_to_user: HashMap<String, Bound<'_, PyAny>> = HashMap::new();
+            for group in candidate_groups(&producer)? {
+                for user in group {
+                    let Some(signature) = build_user_signature(&user)? else {
+                        continue;
+                    };
 
-            // Collect (duplicate_node, canonical_node) pairs to process.
-            let mut to_fuse: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)> = Vec::new();
+                    let Some(representative) = signature_to_user.get(&signature) else {
+                        signature_to_user.insert(signature, user);
+                        continue;
+                    };
 
-            for node in &all_nodes {
-                let sig = match node_signature(py, node)? {
-                    Some(s) => s,
-                    None => continue,
-                };
+                    if user.is(representative) {
+                        continue;
+                    }
 
-                if let Some(canonical) = seen.get(&sig) {
-                    to_fuse.push((node.clone(), canonical.clone()));
-                } else {
-                    seen.insert(sig, node.clone());
+                    FxGraphModule::replace_all_uses_with(&user, representative)?;
+                    gm.erase_node(&user)?;
+                    modified = true;
+
+                    producers.push_back(producer.clone());
+                    producers.push_back(representative.clone());
                 }
             }
-
-            for (dup, canonical) in &to_fuse {
-                FxGraphModule::replace_all_uses_with(dup, canonical)?;
-                gm.erase_node(dup)?;
-                modified_this_round = true;
-            }
-
-            if modified_this_round {
-                any_modified = true;
-            } else {
-                break;
-            }
         }
 
-        if any_modified {
+        if modified {
             gm.recompile()?;
         }
-        Ok(any_modified)
+        Ok(modified)
     }
 }
 

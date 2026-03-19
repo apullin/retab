@@ -48,5 +48,11 @@ pub fn run_fx_passes(gm: &FxGraphModule, passes: &[&dyn FxPass]) -> PyResult<boo
             any_modified = true;
         }
     }
+
+    if any_modified {
+        let helpers = gm.py().import_bound("fx_helpers")?;
+        helpers.call_method1("refresh_safe_quantized_fake_tensors", (gm.gm_ref(),))?;
+    }
+
     Ok(any_modified)
 }

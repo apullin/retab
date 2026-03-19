@@ -496,6 +496,43 @@ def _resolve_fake_arg(arg):
     return arg
 
 
+def refresh_node_fake_tensor(node: Node) -> None:
+    """Recompute node.meta['val'] from the current FX args/kwargs when possible."""
+    op_target = node.target
+    try:
+        fake_args = tuple(_resolve_fake_arg(arg) for arg in node.args)
+        fake_kwargs = {
+            key: _resolve_fake_arg(value) for key, value in dict(node.kwargs).items()
+        }
+        node.meta["val"] = op_target(*fake_args, **fake_kwargs)
+    except Exception:
+        pass
+
+
+_SAFE_META_REFRESH_TARGETS = (
+    "aten.permute_copy",
+    "aten.avg_pool2d",
+    "aten.max_pool2d_with_indices",
+    "aten.clamp.default",
+    "aten.view_copy",
+    "aten.add.Tensor",
+    "aten.sub.Tensor",
+    "aten.mul.Tensor",
+    "sum.dim_IntList",
+    "tosa.TRANSPOSE",
+)
+
+
+def refresh_safe_quantized_fake_tensors(graph_module) -> None:
+    """Refresh FakeTensor metadata for ops whose output follows current inputs."""
+    for node in graph_module.graph.nodes:
+        if node.op != "call_function":
+            continue
+        target = str(node.target)
+        if any(key in target for key in _SAFE_META_REFRESH_TARGETS):
+            refresh_node_fake_tensor(node)
+
+
 def _create_node(graph, op_target, args, kwargs=None, from_node=None, inherit_qparams=False):
     """Simplified version of arm_pass_utils.create_node for FX-direct passes."""
     node = graph.create_node("call_function", op_target, args=args, kwargs=kwargs or {})
@@ -509,14 +546,7 @@ def _create_node(graph, op_target, args, kwargs=None, from_node=None, inherit_qp
             if "output_qparams" in new_meta:
                 new_meta["output_qparams"] = {}
     node.meta = new_meta
-    try:
-        fake_args = tuple(_resolve_fake_arg(arg) for arg in args)
-        fake_kwargs = {
-            key: _resolve_fake_arg(value) for key, value in (kwargs or {}).items()
-        }
-        node.meta["val"] = op_target(*fake_args, **fake_kwargs)
-    except Exception:
-        pass
+    refresh_node_fake_tensor(node)
     return node
 
 

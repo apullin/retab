@@ -109,6 +109,92 @@ fn permute_weight_data(
     }
 }
 
+/// Permute a tensor's raw bytes according to an arbitrary output-axis order.
+///
+/// `order[i]` gives the source/input axis for output axis `i`.
+/// Example: `[0, 2, 3, 1]` maps NCHW -> NHWC.
+fn permute_tensor_by_order(
+    data: &[u8],
+    shape: &[i64],
+    elem_size: usize,
+    order: &[u8],
+) -> (Vec<u8>, Vec<i64>) {
+    if shape.len() != order.len() || shape.is_empty() {
+        return (data.to_vec(), shape.to_vec());
+    }
+
+    if order
+        .iter()
+        .enumerate()
+        .all(|(idx, &axis)| idx == axis as usize)
+    {
+        return (data.to_vec(), shape.to_vec());
+    }
+
+    let rank = shape.len();
+    let numel: usize = match shape
+        .iter()
+        .try_fold(1usize, |acc, &dim| usize::try_from(dim).ok().and_then(|d| acc.checked_mul(d)))
+    {
+        Some(v) => v,
+        None => return (data.to_vec(), shape.to_vec()),
+    };
+
+    if numel == 0 || numel.saturating_mul(elem_size) != data.len() {
+        return (data.to_vec(), shape.to_vec());
+    }
+
+    let new_shape: Vec<i64> = order
+        .iter()
+        .filter_map(|&axis| shape.get(axis as usize).copied())
+        .collect();
+    if new_shape.len() != rank {
+        return (data.to_vec(), shape.to_vec());
+    }
+
+    let mut input_strides = vec![1usize; rank];
+    for i in (0..rank.saturating_sub(1)).rev() {
+        input_strides[i] = input_strides[i + 1]
+            .checked_mul(shape[i + 1] as usize)
+            .unwrap_or(0);
+    }
+
+    let mut output_strides = vec![1usize; rank];
+    for i in (0..rank.saturating_sub(1)).rev() {
+        output_strides[i] = output_strides[i + 1]
+            .checked_mul(new_shape[i + 1] as usize)
+            .unwrap_or(0);
+    }
+
+    let mut out = vec![0u8; data.len()];
+    let mut coords = vec![0usize; rank];
+    let mut dst_coords = vec![0usize; rank];
+
+    for src_linear in 0..numel {
+        let mut rem = src_linear;
+        for axis in 0..rank {
+            let stride = input_strides[axis];
+            coords[axis] = if stride == 0 { 0 } else { rem / stride };
+            rem = if stride == 0 { 0 } else { rem % stride };
+        }
+
+        for (out_axis, &in_axis) in order.iter().enumerate() {
+            dst_coords[out_axis] = coords[in_axis as usize];
+        }
+
+        let mut dst_linear = 0usize;
+        for axis in 0..rank {
+            dst_linear += dst_coords[axis] * output_strides[axis];
+        }
+
+        let src_off = src_linear * elem_size;
+        let dst_off = dst_linear * elem_size;
+        out[dst_off..dst_off + elem_size].copy_from_slice(&data[src_off..src_off + elem_size]);
+    }
+
+    (out, new_shape)
+}
+
 /// Element size in bytes for a given DType.
 fn dtype_elem_size(dtype: crate::graph::ir::DType) -> usize {
     use crate::graph::ir::DType;
@@ -244,24 +330,34 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
                     // dtype here would produce a data-size/shape mismatch
                     // ("malformed constant buffer").
                     let store_dtype = ir_dtype_to_tosa(tensor_data.dtype);
-                    let store_shape: Vec<i32> = tensor_data.shape.iter().map(|&d| d as i32).collect();
+                    let elem_sz = dtype_elem_size(tensor_data.dtype);
 
-                    // Check if this weight tensor needs OIHW -> OHWI permutation
-                    let (final_data, final_shape) =
+                    // Constant placeholders must be serialized in their physical
+                    // TOSA layout. The FX memory-format pass annotates this via
+                    // `tosa_dim_order` but does not rewrite the underlying store
+                    // tensor shape/data. Apply that permutation here for general
+                    // constants, while keeping the dedicated conv-weight path
+                    // separate so we do not double-permute OIHW weights.
+                    let (final_data, final_shape_i64) =
                         if let Some(&perm_kind) = weight_perms.get(name) {
-                            let elem_sz = dtype_elem_size(tensor_data.dtype);
-                            let (pdata, pshape) = permute_weight_data(
+                            permute_weight_data(
                                 &tensor_data.data,
                                 &tensor_data.shape,
                                 elem_sz,
                                 perm_kind,
-                            );
-                            let pshape_i32: Vec<i32> =
-                                pshape.iter().map(|&d| d as i32).collect();
-                            (pdata, pshape_i32)
+                            )
+                        } else if let Some(order) = node.meta.tosa_dim_order.as_ref() {
+                            permute_tensor_by_order(
+                                &tensor_data.data,
+                                &tensor_data.shape,
+                                elem_sz,
+                                order,
+                            )
                         } else {
-                            (tensor_data.data.clone(), store_shape)
+                            (tensor_data.data.clone(), tensor_data.shape.clone())
                         };
+                    let final_shape: Vec<i32> =
+                        final_shape_i64.iter().map(|&d| d as i32).collect();
 
                     tensors.push(TosaTensor {
                         name: name.clone(),

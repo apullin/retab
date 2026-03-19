@@ -76,6 +76,14 @@ fn resolve_input_name(graph: &Graph, arg: &Arg) -> Option<String> {
     }
 }
 
+/// Collect input tensor names from node args (only Arg::Node entries).
+fn collect_input_names(graph: &Graph, node: &Node) -> Vec<String> {
+    node.args
+        .iter()
+        .filter_map(|a| resolve_input_name(graph, a))
+        .collect()
+}
+
 fn is_getitem_node(node: &Node) -> bool {
     matches!(&node.target, OpTarget::Other(target) if target.contains("getitem"))
 }
@@ -121,12 +129,194 @@ fn primary_output_name(graph: &Graph, node: &Node) -> String {
     }
 }
 
-/// Collect input tensor names from node args (only Arg::Node entries).
-fn collect_input_names(graph: &Graph, node: &Node) -> Vec<String> {
-    node.args
+fn literal_output_shape(node: &Node) -> Option<Vec<i32>> {
+    match node.args.get(1) {
+        Some(Arg::IntList(shape)) => Some(shape.iter().map(|&d| d as i32).collect()),
+        _ => None,
+    }
+}
+
+fn apply_tosa_dim_order(node: &Node, shape: Vec<i32>) -> Vec<i32> {
+    if let Some(order) = node.meta.tosa_dim_order.as_ref() {
+        if order.len() == shape.len() {
+            let reordered: Vec<i32> = order
+                .iter()
+                .filter_map(|&idx| shape.get(idx as usize).copied())
+                .collect();
+            if reordered.len() == shape.len() {
+                return reordered;
+            }
+        }
+    }
+    shape
+}
+
+fn map_axis_to_tosa_dim_order(node: &Node, axis: i32) -> i32 {
+    let rank = node.meta.val.shape_len as i32;
+    let normalized = if axis < 0 { axis + rank } else { axis };
+    if normalized < 0 || normalized >= rank {
+        return axis;
+    }
+
+    if let Some(order) = node.meta.tosa_dim_order.as_ref() {
+        if let Some(pos) = order.iter().position(|&dim| dim as i32 == normalized) {
+            return pos as i32;
+        }
+    }
+
+    normalized
+}
+
+/// Best-effort reconstruction of the actual TOSA tensor shape for a node.
+///
+/// This differs from `meta.val.shape` in two important cases:
+/// 1. NHWC-native op outputs still carry PyTorch's logical NCHW shape.
+/// 2. FX-inserted TRANSPOSE/RESHAPE nodes may already have a physical TOSA
+///    layout that should be derived from their input tensor, not reused from
+///    stale metadata.
+fn actual_tensor_shape(graph: &Graph, node: &Node) -> Vec<i32> {
+    if node.target == OpTarget::TosaReshape {
+        if let Some(shape) = literal_output_shape(node) {
+            return shape;
+        }
+    }
+
+    if node.target == OpTarget::TosaRescale {
+        if let Some(Arg::Node(input_id)) = node.args.first() {
+            if let Some(input_node) = graph.node(*input_id) {
+                return actual_tensor_shape(graph, input_node);
+            }
+        }
+    }
+
+    if matches!(node.target, OpTarget::TosaTranspose | OpTarget::Permute) {
+        let perms = {
+            let perms = arg_i32_list(node, 1);
+            if perms.is_empty() {
+                kwarg_i32_list(node, "perms")
+            } else {
+                perms
+            }
+        };
+        if let Some(Arg::Node(input_id)) = node.args.first() {
+            if let Some(input_node) = graph.node(*input_id) {
+                let input_shape = actual_tensor_shape(graph, input_node);
+                if input_shape.len() == perms.len() {
+                    let output_shape: Vec<i32> = perms
+                        .iter()
+                        .filter_map(|&idx| input_shape.get(idx as usize).copied())
+                        .collect();
+                    if output_shape.len() == input_shape.len() {
+                        return output_shape;
+                    }
+                }
+            }
+        }
+    }
+
+    let raw_shape: Vec<i32> = node
+        .meta
+        .val
+        .shape_slice()
         .iter()
-        .filter_map(|a| resolve_input_name(graph, a))
-        .collect()
+        .map(|&d| d as i32)
+        .collect();
+
+    let reordered_shape = apply_tosa_dim_order(node, raw_shape.clone());
+
+    let logical_nhwc = raw_shape.len() == 4
+        && (is_getitem_node(node)
+            || matches!(
+                node.target,
+                OpTarget::Conv2d
+                    | OpTarget::DepthwiseConv2d
+                    | OpTarget::TosaConv2d
+                    | OpTarget::TosaDepthwiseConv2d
+                    | OpTarget::MaxPool2d
+                    | OpTarget::AvgPool2d
+                    | OpTarget::TosaMaxPool2d
+                    | OpTarget::TosaAvgPool2d
+            ));
+
+    if logical_nhwc && reordered_shape == raw_shape {
+        vec![raw_shape[0], raw_shape[2], raw_shape[3], raw_shape[1]]
+    } else {
+        reordered_shape
+    }
+}
+
+fn maybe_materialize_scalar_broadcast(
+    graph: &Graph,
+    node: &Node,
+    result: &mut EmitResult,
+    input_names: &mut [String],
+) {
+    if input_names.len() < 2 {
+        return;
+    }
+
+    let input_nodes: Vec<&Node> = node
+        .args
+        .iter()
+        .filter_map(|arg| match arg {
+            Arg::Node(id) => graph.node(*id),
+            _ => None,
+        })
+        .collect();
+    if input_nodes.len() < 2 {
+        return;
+    }
+
+    let input_shapes = [
+        actual_tensor_shape(graph, input_nodes[0]),
+        actual_tensor_shape(graph, input_nodes[1]),
+    ];
+
+    let (scalar_idx, target_shape) = if input_shapes[0].is_empty() && !input_shapes[1].is_empty() {
+        (0usize, vec![1; input_shapes[1].len()])
+    } else if input_shapes[1].is_empty() && !input_shapes[0].is_empty() {
+        (1usize, vec![1; input_shapes[0].len()])
+    } else {
+        return;
+    };
+
+    let broadcast_name = format!("{}_input{}_broadcast", node.name, scalar_idx);
+    let shape_name = format!("{}_shape", broadcast_name);
+    let rank = target_shape.len() as u32;
+    let shape_data: Vec<u8> = target_shape
+        .iter()
+        .flat_map(|&d| (d as i64).to_le_bytes())
+        .collect();
+
+    result.tensors.push(TosaTensor {
+        name: broadcast_name.clone(),
+        shape: target_shape,
+        dtype: ir_dtype_to_tosa(input_nodes[scalar_idx].meta.val.dtype),
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.shapes.push(TosaShape {
+        name: shape_name.clone(),
+        rank,
+        data: shape_data,
+    });
+    result.operators.push(TosaOperator {
+        op: Op::ConstShape,
+        attribute: Attribute::ConstShape(ConstShapeAttribute),
+        inputs: vec![],
+        outputs: vec![shape_name.clone()],
+        location: None,
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Reshape,
+        attribute: Attribute::Reshape(ReshapeAttribute),
+        inputs: vec![input_names[scalar_idx].clone(), shape_name],
+        outputs: vec![broadcast_name.clone()],
+        location: None,
+    });
+    input_names[scalar_idx] = broadcast_name;
 }
 
 /// Build the output tensor entry for a node.
@@ -138,10 +328,11 @@ fn make_output_tensor(node: &Node) -> TosaTensor {
         .iter()
         .map(|&d| d as i32)
         .collect();
+    let final_shape = apply_tosa_dim_order(node, shape);
     let dtype = ir_dtype_to_tosa(node.meta.val.dtype);
     TosaTensor {
         name: node.name.clone(),
-        shape,
+        shape: final_shape,
         dtype,
         data: Vec::new(),
         variable: false,
@@ -152,9 +343,9 @@ fn make_output_tensor(node: &Node) -> TosaTensor {
 
 /// Build an output tensor with NHWC shape for TOSA conv/pool ops.
 ///
-/// If the node's shape is 4D and appears to be in NCHW order (based on
-/// `tosa_dim_order` metadata), permute it to NHWC [N, H, W, C].
-/// Otherwise return the shape as-is.
+/// For 4D tensors, always permutes NCHW [N,C,H,W] to NHWC [N,H,W,C].
+/// The `meta.val` shape is always in NCHW (PyTorch convention) -- the FX
+/// memory-format pass annotates `tosa_dim_order` but never rewrites shapes.
 fn make_nhwc_output_tensor(node: &Node) -> TosaTensor {
     let shape: Vec<i32> = node
         .meta
@@ -165,25 +356,15 @@ fn make_nhwc_output_tensor(node: &Node) -> TosaTensor {
         .collect();
     let dtype = ir_dtype_to_tosa(node.meta.val.dtype);
 
-    // If this is a 4D tensor and the dim_order indicates NHWC (or is absent,
-    // meaning it came from ingested FX where NCHW is the default), permute
-    // from NCHW [N,C,H,W] to NHWC [N,H,W,C].
+    // Always permute 4D shapes from NCHW to NHWC.
+    //
+    // The `meta.val` shape is always in NCHW order (PyTorch convention) — the
+    // FX memory-format pass sets `tosa_dim_order` to flag logical layout but
+    // never rewrites the actual shape values.  Checking `tosa_dim_order` here
+    // would incorrectly skip the permutation, leaving shapes in NCHW and
+    // causing Vela to fuse fewer ops.
     let final_shape = if shape.len() == 4 {
-        // Check if already in NHWC via tosa_dim_order = [0,2,3,1]
-        let is_already_nhwc = node
-            .meta
-            .tosa_dim_order
-            .as_ref()
-            .map(|order| order.as_slice() == [0, 2, 3, 1])
-            .unwrap_or(false);
-
-        if is_already_nhwc {
-            // Already NHWC — use as-is
-            shape
-        } else {
-            // Assume NCHW — permute to NHWC: [N,C,H,W] -> [N,H,W,C]
-            vec![shape[0], shape[2], shape[3], shape[1]]
-        }
+        vec![shape[0], shape[2], shape[3], shape[1]]
     } else {
         shape
     };
@@ -201,8 +382,8 @@ fn make_nhwc_output_tensor(node: &Node) -> TosaTensor {
 
 /// Convert a node's NCHW meta shape to NHWC, returning `[N, H, W, C]`.
 ///
-/// If the node has `tosa_dim_order = [0,2,3,1]`, it is already NHWC.
-/// Otherwise assume NCHW and permute.
+/// Always permutes: `meta.val` shapes are always NCHW (PyTorch convention).
+/// `tosa_dim_order` is a logical flag that does not change actual shape values.
 fn node_nhwc_shape(node: &Node) -> Vec<i32> {
     let shape: Vec<i32> = node
         .meta
@@ -212,17 +393,7 @@ fn node_nhwc_shape(node: &Node) -> Vec<i32> {
         .map(|&d| d as i32)
         .collect();
     if shape.len() == 4 {
-        let is_already_nhwc = node
-            .meta
-            .tosa_dim_order
-            .as_ref()
-            .map(|order| order.as_slice() == [0, 2, 3, 1])
-            .unwrap_or(false);
-        if is_already_nhwc {
-            shape
-        } else {
-            vec![shape[0], shape[2], shape[3], shape[1]]
-        }
+        vec![shape[0], shape[2], shape[3], shape[1]]
     } else {
         shape
     }
@@ -261,20 +432,27 @@ fn compute_conv2d_nhwc_output(
         let weight_node = graph.node(weight_id)?;
 
         // Input in NHWC: [N, IH, IW, IC]
-        let inp = node_nhwc_shape(input_node);
+        let inp = actual_tensor_shape(graph, input_node);
         if inp.len() != 4 {
             return None;
         }
         let (n, ih, iw) = (inp[0], inp[1], inp[2]);
 
-        // Weight in OHWI after permutation: [OC, KH, KW, IC]
-        // But the meta.val is still in OIHW: [OC, IC, KH, KW]
-        let ws = weight_node.meta.val.shape_slice();
+        // Weight may be either:
+        //   - an original PyTorch constant in OIHW [OC, IC, KH, KW], or
+        //   - a synthesized reshape already in TOSA OHWI [OC, KH, KW, IC].
+        let ws = actual_tensor_shape(graph, weight_node);
         if ws.len() != 4 {
             return None;
         }
-        // OIHW -> OHWI: oc=ws[0], kh=ws[2], kw=ws[3]
-        let (oc, kh, kw) = (ws[0] as i32, ws[2] as i32, ws[3] as i32);
+        let ic = *inp.get(3)?;
+        let (oc, kh, kw) = if ws[3] == ic {
+            // Already OHWI
+            (ws[0], ws[1], ws[2])
+        } else {
+            // Original OIHW -> interpret as OHWI after permutation
+            (ws[0], ws[2], ws[3])
+        };
 
         let pad_top = *pad.first().unwrap_or(&0);
         let pad_bottom = *pad.get(1).unwrap_or(&0);
@@ -351,7 +529,7 @@ fn compute_depthwise_conv2d_nhwc_output(
         let weight_node = graph.node(weight_id)?;
 
         // Input in NHWC: [N, IH, IW, IC]
-        let inp = node_nhwc_shape(input_node);
+        let inp = actual_tensor_shape(graph, input_node);
         if inp.len() != 4 {
             return None;
         }
@@ -435,7 +613,7 @@ fn compute_pool_nhwc_output(
         let input_node = graph.node(input_id)?;
 
         // Input in NHWC: [N, IH, IW, C]
-        let inp = node_nhwc_shape(input_node);
+        let inp = actual_tensor_shape(graph, input_node);
         if inp.len() != 4 {
             return None;
         }
@@ -576,14 +754,41 @@ fn encode_zp_for_dtype(zp_val: i32, dtype: DType) -> Vec<u8> {
     }
 }
 
-/// Build per-channel weight_zp data (one byte per output channel).
-///
-/// The Python reference (`add_input_weight_zp_consts`) creates weight_zp with
-/// shape=[1] but data containing one value per output channel. For symmetric
-/// int8 quantization the zero points are all 0, but we still need the correct
-/// number of bytes to match the reference.
+/// Match the Python reference's odd `weight_zp` encoding:
+/// tensor shape is scalar `[1]`, but payload length equals output channels.
 fn make_weight_zp_data(zp_val: i32, num_channels: usize) -> Vec<u8> {
     vec![zp_val as u8; num_channels]
+}
+
+fn default_clamp_bound_bytes(dtype: crate::graph::ir::DType, is_min: bool) -> Vec<u8> {
+    use crate::graph::ir::DType as IrDtype;
+    match dtype {
+        IrDtype::Bool => vec![if is_min { 0 } else { 1 }],
+        IrDtype::Int4 | IrDtype::Int8 => vec![(if is_min { i8::MIN } else { i8::MAX }) as u8],
+        IrDtype::Int16 => {
+            (if is_min { i16::MIN } else { i16::MAX }).to_le_bytes().to_vec()
+        }
+        IrDtype::Int32 => {
+            (if is_min { i32::MIN } else { i32::MAX }).to_le_bytes().to_vec()
+        }
+        IrDtype::Int64 => {
+            (if is_min { i64::MIN } else { i64::MAX }).to_le_bytes().to_vec()
+        }
+        IrDtype::Int48 => {
+            let bytes = (if is_min { i64::MIN } else { i64::MAX }).to_le_bytes();
+            bytes[..6].to_vec()
+        }
+        IrDtype::Float32 => {
+            (if is_min { f32::MIN } else { f32::MAX }).to_le_bytes().to_vec()
+        }
+        // Match the finite dtype bounds used by torch.finfo for default clamp args.
+        IrDtype::Float16 => {
+            if is_min { vec![0xff, 0xfb] } else { vec![0xff, 0x7b] }
+        }
+        IrDtype::BFloat16 => {
+            if is_min { vec![0x7f, 0xff] } else { vec![0x7f, 0x7f] }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -667,7 +872,8 @@ pub fn emit_aten_conv2d(
         location: None,
     });
 
-    // Create weight_zp const tensor (per-channel: one byte per OC)
+    // Match the reference serializer exactly: scalar shape but one byte per
+    // output channel in the payload.
     let weight_zp_name = format!("{}_weight_zp", node.name);
     let num_oc = get_weight_out_channels(graph, node).unwrap_or(1);
     let weight_zp_data = make_weight_zp_data(weight_zp_val, num_oc);
@@ -829,17 +1035,18 @@ pub fn emit_aten_clamp(
 
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
+    let clamp_dtype = node.meta.val.dtype;
 
     // Extract min/max from positional args
     let min_val = match node.args.get(1) {
         Some(Arg::Int(i)) => (*i as i8).to_le_bytes().to_vec(),
         Some(Arg::Float(f)) => (*f as f32).to_le_bytes().to_vec(),
-        _ => vec![],
+        _ => default_clamp_bound_bytes(clamp_dtype, true),
     };
     let max_val = match node.args.get(2) {
         Some(Arg::Int(i)) => (*i as i8).to_le_bytes().to_vec(),
         Some(Arg::Float(f)) => (*f as f32).to_le_bytes().to_vec(),
-        _ => vec![],
+        _ => default_clamp_bound_bytes(clamp_dtype, false),
     };
 
     result.operators.push(TosaOperator {
@@ -945,6 +1152,10 @@ pub fn emit_aten_sum(
 
     let input_names = collect_input_names(graph, node);
     let input_name = input_names.first().cloned().unwrap_or_default();
+    let input_node = match node.args.first() {
+        Some(Arg::Node(id)) => graph.node(*id),
+        _ => None,
+    };
 
     // Extract dims from args[1] (IntList)
     let mut dims = arg_i32_list(node, 1);
@@ -975,10 +1186,13 @@ pub fn emit_aten_sum(
 
     if dims.len() == 1 {
         // Single axis — straightforward
+        let axis = input_node
+            .map(|n| map_axis_to_tosa_dim_order(n, dims[0]))
+            .unwrap_or(dims[0]);
         result.tensors.push(make_output_tensor(node));
         result.operators.push(TosaOperator {
             op: Op::ReduceSum,
-            attribute: Attribute::ReduceSum(ReduceSumAttribute { axis: dims[0] }),
+            attribute: Attribute::ReduceSum(ReduceSumAttribute { axis }),
             inputs: vec![input_name],
             outputs: vec![node.name.clone()],
             location: None,
@@ -1011,6 +1225,9 @@ pub fn emit_aten_sum(
         for (i, &dim) in dims.iter().enumerate() {
             let is_last = i == dims.len() - 1;
             let dim_idx = dim as usize;
+            let axis = input_node
+                .map(|n| map_axis_to_tosa_dim_order(n, dim))
+                .unwrap_or(dim);
 
             // Output shape: current shape with this dim set to 1
             let mut out_shape = current_shape.clone();
@@ -1036,7 +1253,7 @@ pub fn emit_aten_sum(
 
             result.operators.push(TosaOperator {
                 op: Op::ReduceSum,
-                attribute: Attribute::ReduceSum(ReduceSumAttribute { axis: dim }),
+                attribute: Attribute::ReduceSum(ReduceSumAttribute { axis }),
                 inputs: vec![current_input],
                 outputs: vec![out_name.clone()],
                 location: None,
@@ -1064,19 +1281,28 @@ pub fn emit_const(
     let mut result = EmitResult::default();
 
     let name = &node.name;
-    let shape: Vec<i32> = node
-        .meta
-        .val
-        .shape_slice()
-        .iter()
-        .map(|&d| d as i32)
-        .collect();
-    let dtype = ir_dtype_to_tosa(node.meta.val.dtype);
-
-    let data = store
-        .get(name)
-        .map(|td| td.data.clone())
-        .unwrap_or_default();
+    let (shape, dtype, data) = if let Some(tensor_data) = store.get(name) {
+        // Generated TOSA CONST nodes can retain stale FakeTensor metadata after
+        // dtype/shape fixups. When backing bytes exist in the tensor store,
+        // serialize the store's authoritative shape and dtype to keep the
+        // flatbuffer internally consistent.
+        (
+            tensor_data.shape.iter().map(|&d| d as i32).collect(),
+            ir_dtype_to_tosa(tensor_data.dtype),
+            tensor_data.data.clone(),
+        )
+    } else {
+        (
+            node.meta
+                .val
+                .shape_slice()
+                .iter()
+                .map(|&d| d as i32)
+                .collect(),
+            ir_dtype_to_tosa(node.meta.val.dtype),
+            Vec::new(),
+        )
+    };
 
     result.tensors.push(TosaTensor {
         name: name.clone(),
@@ -1183,7 +1409,8 @@ pub fn emit_conv2d(
             location: None,
         });
 
-        // Create weight_zp const tensor (per-channel: one byte per OC)
+        // Match the reference serializer exactly: scalar shape but one byte
+        // per output channel in the payload.
         let weight_zp_name = format!("{}_weight_zp", node.name);
         let num_oc = get_weight_out_channels(graph, node).unwrap_or(1);
         let weight_zp_data = make_weight_zp_data(weight_zp_val, num_oc);
@@ -1319,7 +1546,8 @@ pub fn emit_depthwise_conv2d(
             location: None,
         });
 
-        // Create weight_zp const tensor (per-channel: one byte per OC)
+        // Match the reference serializer exactly: scalar shape but one byte
+        // per output channel in the payload.
         let weight_zp_name = format!("{}_weight_zp", node.name);
         let num_oc = get_weight_out_channels(graph, node).unwrap_or(1);
         let weight_zp_data = make_weight_zp_data(weight_zp_val, num_oc);
@@ -1395,35 +1623,17 @@ pub fn emit_rescale(
 
     let input_names = collect_input_names(graph, node);
 
-    // RESCALE is format-transparent: its output shape should match its input's
-    // actual layout. If the input is an NHWC producer (conv, pool), our conv
-    // emitter already produces NHWC tensors, so the rescale should too.
-    let input_is_nhwc = match node.args.first() {
-        Some(Arg::Node(input_id)) => graph
-            .node(*input_id)
-            .map(|n| {
-                matches!(
-                    n.target,
-                    OpTarget::TosaConv2d
-                        | OpTarget::TosaDepthwiseConv2d
-                        | OpTarget::TosaTransposeConv2d
-                        | OpTarget::TosaAvgPool2d
-                        | OpTarget::TosaMaxPool2d
-                        | OpTarget::Conv2d
-                        | OpTarget::DepthwiseConv2d
-                        | OpTarget::AvgPool2d
-                        | OpTarget::MaxPool2d
-                )
-            })
-            .unwrap_or(false),
-        _ => false,
-    };
-
-    if input_is_nhwc {
-        result.tensors.push(make_nhwc_output_tensor(node));
-    } else {
-        result.tensors.push(make_output_tensor(node));
-    }
+    // RESCALE is format-transparent: serialize exactly the same physical shape
+    // that downstream shape propagation will observe.
+    result.tensors.push(TosaTensor {
+        name: node.name.clone(),
+        shape: actual_tensor_shape(graph, node),
+        dtype: ir_dtype_to_tosa(node.meta.val.dtype),
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
 
     // Detect format: Graph-IR has >=3 Node args (input, mult, shift);
     // FX-direct has 1 Node arg (input) + literal scales/zps.
@@ -1685,18 +1895,49 @@ pub fn emit_transpose(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_output_tensor(node));
-
-    let perms = arg_i32_list(node, 1);
+    let perms = {
+        let perms = arg_i32_list(node, 1);
+        if perms.is_empty() {
+            kwarg_i32_list(node, "perms")
+        } else {
+            perms
+        }
+    };
+    let mut output_shape: Vec<i32> = node
+        .meta
+        .val
+        .shape_slice()
+        .iter()
+        .map(|&d| d as i32)
+        .collect();
+    if let Some(Arg::Node(input_id)) = node.args.first() {
+        if let Some(input_node) = graph.node(*input_id) {
+            let input_shape = actual_tensor_shape(graph, input_node);
+            if input_shape.len() == perms.len() {
+                let candidate: Vec<i32> = perms
+                    .iter()
+                    .filter_map(|&idx| input_shape.get(idx as usize).copied())
+                    .collect();
+                if candidate.len() == input_shape.len() {
+                    output_shape = candidate;
+                }
+            }
+        }
+    }
+    result.tensors.push(TosaTensor {
+        name: node.name.clone(),
+        shape: output_shape,
+        dtype: ir_dtype_to_tosa(node.meta.val.dtype),
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
 
     result.operators.push(TosaOperator {
         op: Op::Transpose,
         attribute: Attribute::Transpose(TransposeAttribute {
-            perms: if perms.is_empty() {
-                kwarg_i32_list(node, "perms")
-            } else {
-                perms
-            },
+            perms,
         }),
         inputs: input_names,
         outputs: vec![node.name.clone()],
@@ -1719,16 +1960,22 @@ pub fn emit_reshape(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_output_tensor(node));
+
+    // Use one physical shape consistently for both the RESHAPE output tensor
+    // and its CONST_SHAPE input. Mixing raw meta.val with reordered output
+    // tensor shapes produces an internally inconsistent flatbuffer.
+    let out_shape = actual_tensor_shape(graph, node);
+    result.tensors.push(TosaTensor {
+        name: node.name.clone(),
+        shape: out_shape.clone(),
+        dtype: ir_dtype_to_tosa(node.meta.val.dtype),
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
 
     // Create a CONST_SHAPE tensor for the target shape
-    let out_shape: Vec<i32> = node
-        .meta
-        .val
-        .shape_slice()
-        .iter()
-        .map(|&d| d as i32)
-        .collect();
     let rank = out_shape.len() as u32;
     let shape_name = format!("{}_shape", node.name);
 
@@ -1813,6 +2060,7 @@ pub fn emit_clamp(
 
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
+    let clamp_dtype = node.meta.val.dtype;
 
     // Extract min/max bytes from kwargs
     let mut min_val = Vec::new();
@@ -1832,6 +2080,13 @@ pub fn emit_clamp(
                 max_val = (*i as i8).to_le_bytes().to_vec();
             }
         }
+    }
+
+    if min_val.is_empty() {
+        min_val = default_clamp_bound_bytes(clamp_dtype, true);
+    }
+    if max_val.is_empty() {
+        max_val = default_clamp_bound_bytes(clamp_dtype, false);
     }
 
     result.operators.push(TosaOperator {
@@ -1908,6 +2163,8 @@ pub fn emit_mul(
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
+    let mut mul_inputs = input_names;
+    maybe_materialize_scalar_broadcast(graph, node, &mut result, &mut mul_inputs);
     result.tensors.push(make_output_tensor(node));
 
     // Create the shift const tensor (scalar int8 = 0)
@@ -1930,7 +2187,6 @@ pub fn emit_mul(
     });
 
     // Build the MUL inputs: [lhs, rhs, shift]
-    let mut mul_inputs = input_names;
     mul_inputs.push(shift_name);
 
     result.operators.push(TosaOperator {
@@ -2079,7 +2335,13 @@ pub fn emit_reduce_sum(
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
 
-    let axis = kwarg_i32(node, "axis", 0);
+    let axis = match node.args.first() {
+        Some(Arg::Node(input_id)) => graph
+            .node(*input_id)
+            .map(|input_node| map_axis_to_tosa_dim_order(input_node, kwarg_i32(node, "axis", 0)))
+            .unwrap_or_else(|| kwarg_i32(node, "axis", 0)),
+        _ => kwarg_i32(node, "axis", 0),
+    };
 
     result.operators.push(TosaOperator {
         op: Op::ReduceSum,
@@ -2697,13 +2959,16 @@ pub fn emit_transpose_conv2d(
             location: None,
         });
 
-        // Create weight_zp const tensor (scalar int8)
+        // Match the reference serializer exactly: scalar shape but one byte
+        // per output channel in the payload.
         let weight_zp_name = format!("{}_weight_zp", node.name);
+        let num_oc = get_weight_out_channels(graph, node).unwrap_or(1);
+        let weight_zp_data = make_weight_zp_data(weight_zp_val, num_oc);
         result.tensors.push(TosaTensor {
             name: weight_zp_name.clone(),
             shape: vec![1],
             dtype: DType::Int8,
-            data: vec![weight_zp_val as i8 as u8],
+            data: weight_zp_data,
             variable: false,
             is_unranked: false,
             variable_name: String::new(),
