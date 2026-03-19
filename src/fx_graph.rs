@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use std::time::Instant;
 
 /// Thin wrapper around a Python `torch.fx.GraphModule`, operating directly
 /// on the live Python FX graph via PyO3.  No Rust-side IR copy is made —
@@ -138,7 +139,15 @@ impl<'py> FxGraphModule<'py> {
 
     /// `graph_module.recompile()`.
     pub fn recompile(&self) -> PyResult<()> {
+        let t0 = if crate::fx_profile::enabled() {
+            Some(Instant::now())
+        } else {
+            None
+        };
         self.gm.call_method0("recompile")?;
+        if let Some(t0) = t0 {
+            crate::fx_profile::record_recompile(t0.elapsed());
+        }
         Ok(())
     }
 
@@ -154,7 +163,10 @@ impl<'py> FxGraphModule<'py> {
         let graph = self.gm.getattr("graph")?;
         let nodes = graph.getattr("nodes")?;
         // torch.fx.Graph.nodes supports len()
-        let len = self.gm.py().import_bound("builtins")?
+        let len = self
+            .gm
+            .py()
+            .import_bound("builtins")?
             .call_method1("len", (&nodes,))?
             .extract::<usize>()?;
         Ok(len)
