@@ -59,10 +59,7 @@ fn is_zero_input_full(target: &str, input_nodes: &[Bound<'_, PyAny>]) -> bool {
     input_nodes.is_empty() && target.contains("aten.full.default")
 }
 
-fn fold_zero_input_full(
-    gm: &FxGraphModule,
-    node: &Bound<'_, PyAny>,
-) -> PyResult<bool> {
+fn fold_zero_input_full(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult<bool> {
     let py = gm.py();
     let graph = gm.gm_ref().getattr("graph")?;
     let torch = py.import_bound("torch")?;
@@ -151,9 +148,10 @@ impl FxPass for FxFuseConstantArgsPass {
         // Nodes to try deleting after all fusions (dead-code cleanup).
         let mut stale_inputs: Vec<Bound<'_, PyAny>> = Vec::new();
 
-        // We iterate in topological order. After fusing a node we recompile
-        // so that chained constant ops can be resolved in the next iteration.
-        // Use a simple fixed-point loop (matching the Python pass behavior).
+        // Fixed-point loop: fuse as many nodes as possible in each sweep, then
+        // recompile once before restarting. This preserves chained constant
+        // folding behavior while avoiding per-node `graph_module.recompile()`
+        // costs on large graphs.
         let mut made_progress = true;
         while made_progress {
             made_progress = false;
@@ -181,8 +179,6 @@ impl FxPass for FxFuseConstantArgsPass {
                     if fold_zero_input_full(gm, node)? {
                         modified = true;
                         made_progress = true;
-                        gm.recompile()?;
-                        break;
                     }
                     continue;
                 }
@@ -224,33 +220,28 @@ impl FxPass for FxFuseConstantArgsPass {
                 //   4. Creates a new constant placeholder node
                 //   5. Replaces all uses of the original node
                 // Returns True if the node was fused, False if skipped (e.g. tensor grew).
-                let did_fuse: bool = match helpers.call_method1(
-                    "fuse_constant_node",
-                    (gm.gm_ref(), &ep, node),
-                ) {
-                    Ok(result) => result.extract().unwrap_or(false),
-                    Err(e) => {
-                        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
-                        if debug {
-                            let name = FxGraphModule::node_name(node).unwrap_or_default();
-                            eprintln!(
-                                "[FuseConstantArgs] failed to fuse {}: {}",
-                                name, e
-                            );
+                let did_fuse: bool =
+                    match helpers.call_method1("fuse_constant_node", (gm.gm_ref(), &ep, node)) {
+                        Ok(result) => result.extract().unwrap_or(false),
+                        Err(e) => {
+                            let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+                            if debug {
+                                let name = FxGraphModule::node_name(node).unwrap_or_default();
+                                eprintln!("[FuseConstantArgs] failed to fuse {}: {}", name, e);
+                            }
+                            false
                         }
-                        false
-                    }
-                };
+                    };
 
                 if did_fuse {
                     stale_inputs.extend(input_nodes);
                     modified = true;
                     made_progress = true;
-                    // Recompile after each fusion so chained constant ops
-                    // become visible in the next iteration.
-                    gm.recompile()?;
-                    break; // Restart iteration with fresh node list
                 }
+            }
+
+            if made_progress {
+                gm.recompile()?;
             }
         }
 
@@ -263,10 +254,7 @@ impl FxPass for FxFuseConstantArgsPass {
                 // Only delete if the node has no remaining users.
                 let users = FxGraphModule::node_users(inp)?;
                 if users.is_empty() {
-                    let _ = helpers.call_method1(
-                        "delete_constant_placeholder",
-                        (&ep, inp),
-                    );
+                    let _ = helpers.call_method1("delete_constant_placeholder", (&ep, inp));
                 }
             }
 
