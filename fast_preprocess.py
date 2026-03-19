@@ -168,7 +168,9 @@ def _all_rust_preprocess(
     transformed graph, causing double rescales, double transposes, etc.).
     """
     import copy
+    import os
     import time
+    from pathlib import Path
 
     t0 = time.perf_counter()
     gm = edge_program.graph_module
@@ -190,6 +192,14 @@ def _all_rust_preprocess(
     tosa_bytes = arm_tosa_engine.ingest_and_serialize(
         gm, original_state_dict, edge_program.graph_signature
     )
+
+    dump_path = os.environ.get("ARM_TOSA_ENGINE_DUMP_TOSA")
+    if dump_path:
+        dump_file = Path(dump_path)
+        dump_file.parent.mkdir(parents=True, exist_ok=True)
+        dump_file.write_bytes(bytes(tosa_bytes))
+        logger.info(f"[all_rust] dumped TOSA flatbuffer to {dump_file}")
+
     t_total = time.perf_counter() - t0
     logger.info(
         f"[all_rust] passes={t_passes:.3f}s, serialize={t_total-t_passes:.3f}s, total={t_total:.3f}s"
