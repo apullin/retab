@@ -191,10 +191,13 @@ fn ingest_and_serialize(
     graph_signature: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyBytes>> {
     // 1. Ingest FX graph into Rust IR (read-only snapshot)
-    let (graph, store) =
+    let (mut graph, store) =
         ingest::fx_bridge::ingest_fx_graph(graph_module, state_dict, graph_signature)?;
 
-    // 2. Serialize directly to TOSA flatbuffer -- no IR passes
+    // 2. Rebuild user lists to fix stale edges from FX pass mutations
+    graph.rebuild_user_lists();
+
+    // 3. Serialize directly to TOSA flatbuffer -- no IR passes
     let tosa_bytes = serialize::serialize_to_tosa(&graph, &store);
 
     Ok(PyBytes::new_bound(py, &tosa_bytes).unbind())
