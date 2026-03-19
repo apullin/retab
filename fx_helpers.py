@@ -115,9 +115,28 @@ def insert_rescale_node(
     target = get_tosa_rescale_op()
     args = (input_node, out_dtype, scales, input_zp, output_zp)
     if after:
-        return insert_node_after(graph_module, ref_node, target, args)
+        rescale = insert_node_after(graph_module, ref_node, target, args)
     else:
-        return insert_node_before(graph_module, ref_node, target, args)
+        rescale = insert_node_before(graph_module, ref_node, target, args)
+
+    restamp_rescale_output_meta(rescale, input_node, out_dtype)
+
+    return rescale
+
+
+def restamp_rescale_output_meta(
+    rescale_node: Node,
+    input_node: Node,
+    out_dtype,
+) -> None:
+    """Refresh a RESCALE node's FakeTensor metadata from its real output dtype."""
+    input_val = input_node.meta.get("val")
+    if isinstance(input_val, (list, tuple)):
+        input_val = input_val[0] if input_val else None
+    if input_val is not None and hasattr(input_val, "new_empty"):
+        rescale_node.meta["val"] = input_val.new_empty(
+            input_val.shape, dtype=out_dtype
+        )
 
 
 def insert_transpose_after(
@@ -145,6 +164,10 @@ def insert_transpose_after(
         old_shape = list(old_val.shape)
         new_shape = [old_shape[p] for p in perm]
         transpose.meta["val"] = old_val.new_empty(new_shape)
+        transpose.meta["tosa_dim_order"] = tuple(perm)
+        node.meta["tosa_dim_order"] = tuple(range(len(old_shape)))
+        if "tosa_spatial_rank" in node.meta:
+            transpose.meta["tosa_spatial_rank"] = node.meta["tosa_spatial_rank"]
 
     # Rewire: all users of node (except transpose itself) should use transpose
     users = [u for u in node.users if u is not transpose]
@@ -181,6 +204,9 @@ def insert_transpose_before(
         old_shape = list(old_val.shape)
         new_shape = [old_shape[p] for p in perm]
         transpose.meta["val"] = old_val.new_empty(new_shape)
+        transpose.meta["tosa_dim_order"] = tuple(range(len(old_shape)))
+        if "tosa_spatial_rank" in input_node.meta:
+            transpose.meta["tosa_spatial_rank"] = input_node.meta["tosa_spatial_rank"]
 
     ref_node.replace_input_with(input_node, transpose)
     return transpose
@@ -459,6 +485,17 @@ def _get_edge_op(name: str):
     return obj
 
 
+def _resolve_fake_arg(arg):
+    """Resolve FX Node arguments to their fake/meta values recursively."""
+    if isinstance(arg, Node):
+        return _get_first_fake_tensor(arg)
+    if isinstance(arg, tuple):
+        return tuple(_resolve_fake_arg(x) for x in arg)
+    if isinstance(arg, list):
+        return [_resolve_fake_arg(x) for x in arg]
+    return arg
+
+
 def _create_node(graph, op_target, args, kwargs=None, from_node=None, inherit_qparams=False):
     """Simplified version of arm_pass_utils.create_node for FX-direct passes."""
     node = graph.create_node("call_function", op_target, args=args, kwargs=kwargs or {})
@@ -472,6 +509,14 @@ def _create_node(graph, op_target, args, kwargs=None, from_node=None, inherit_qp
             if "output_qparams" in new_meta:
                 new_meta["output_qparams"] = {}
     node.meta = new_meta
+    try:
+        fake_args = tuple(_resolve_fake_arg(arg) for arg in args)
+        fake_kwargs = {
+            key: _resolve_fake_arg(value) for key, value in (kwargs or {}).items()
+        }
+        node.meta["val"] = op_target(*fake_args, **fake_kwargs)
+    except Exception:
+        pass
     return node
 
 
@@ -668,6 +713,17 @@ def decompose_quant_node(graph_module, node: Node, is_quantize: bool) -> None:
 
 def _get_param_tensor(exported_program, node: Node):
     """Resolve the actual tensor data for a constant placeholder node."""
+    try:
+        from executorch.backends.arm._passes.arm_pass_utils import (
+            get_param_tensor as _arm_get_param_tensor,
+        )
+
+        tensor = _arm_get_param_tensor(exported_program, node)
+        if tensor is not None:
+            return tensor
+    except Exception:
+        pass
+
     import torch._export.utils
     if torch._export.utils.is_param(exported_program, node):
         fqn = exported_program.graph_signature.inputs_to_parameters.get(node.name, None)
@@ -771,7 +827,10 @@ def fuse_constant_node(graph_module, exported_program, node: Node) -> bool:
         if data.abs().max() <= special_dtype.max():
             const_node.meta[TosaSpecialDtype.meta_key()] = special_dtype
 
+    const_node.meta["arm_constant_placeholder"] = True
+
     node.replace_all_uses_with(const_node)
+    node.graph.erase_node(node)
     return True
 
 
@@ -895,6 +954,29 @@ def rewrite_conv_to_tosa(
             from_node=node,
             inherit_qparams=True,
         )
+
+    input_fake = _get_first_fake_tensor(x)
+    output_fake = _get_first_fake_tensor(node)
+    bias_fake = _get_first_fake_tensor(bias) if bias is not None else None
+    try:
+        tosa_op.meta["val"] = target_op(
+            input_fake,
+            _get_first_fake_tensor(weight),
+            bias_fake,
+            *conv_args[3:],
+        )
+    except Exception:
+        if output_fake is not None and getattr(input_fake, "dtype", None) in (
+            torch.int8,
+            torch.int16,
+        ):
+            tosa_op.meta["val"] = output_fake.new_empty(
+                output_fake.shape, dtype=torch.int32
+            )
+            if input_fake.dtype == torch.int16:
+                from executorch.backends.arm.tosa.mapping import TosaSpecialDtype
+
+                tosa_op.meta[TosaSpecialDtype.meta_key()] = TosaSpecialDtype.INT48
 
     node.replace_all_uses_with(tosa_op)
     graph.erase_node(node)

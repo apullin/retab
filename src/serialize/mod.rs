@@ -5,7 +5,7 @@ use crate::graph::ir::{Arg, OpTarget, OpType};
 use crate::graph::Graph;
 use crate::store::TensorStore;
 
-use flatbuffers::{FlatBufferBuilder, TableFinishedWIPOffset, WIPOffset};
+use flatbuffers::{FlatBufferBuilder, TableFinishedWIPOffset, Vector, WIPOffset};
 use std::collections::HashMap;
 use tosa_generated::{Attribute, TosaOperator, TosaShape, TosaTensor};
 use visitors::ir_dtype_to_tosa;
@@ -419,6 +419,19 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
 // Flatbuffer builder helpers
 // ============================================================================
 
+fn create_force_aligned_u8_vector<'fbb>(
+    builder: &mut FlatBufferBuilder<'fbb>,
+    data: &[u8],
+) -> WIPOffset<Vector<'fbb, u8>> {
+    // The flatbuffers Rust runtime does not expose schema-level vector
+    // `force_align` directly. Treating each `u8` as an 8-byte-aligned element
+    // corrupts the payload (e.g. int8 weights become interleaved with zeros).
+    //
+    // Dense byte data is required for TOSA tensor buffers, so emit a normal
+    // `[ubyte]` vector here.
+    builder.create_vector(data)
+}
+
 fn build_fb_tensors(
     builder: &mut FlatBufferBuilder<'_>,
     tensors: &[TosaTensor],
@@ -428,7 +441,7 @@ fn build_fb_tensors(
         let name = builder.create_string(&t.name);
         let shape = builder.create_vector(&t.shape);
         let data = if !t.data.is_empty() {
-            Some(builder.create_vector(&t.data))
+            Some(create_force_aligned_u8_vector(builder, &t.data))
         } else {
             None
         };
@@ -463,7 +476,7 @@ fn build_fb_shapes(
     for s in shapes {
         let name = builder.create_string(&s.name);
         let data = if !s.data.is_empty() {
-            Some(builder.create_vector(&s.data))
+            Some(create_force_aligned_u8_vector(builder, &s.data))
         } else {
             None
         };
@@ -608,8 +621,8 @@ fn build_fb_attribute(
         }
 
         Attribute::Clamp(a) => {
-            let min_val = builder.create_vector(&a.min_val);
-            let max_val = builder.create_vector(&a.max_val);
+            let min_val = create_force_aligned_u8_vector(builder, &a.min_val);
+            let max_val = create_force_aligned_u8_vector(builder, &a.max_val);
             let start = builder.start_table();
             builder.push_slot_always::<WIPOffset<_>>(4, min_val);
             builder.push_slot_always::<WIPOffset<_>>(6, max_val);

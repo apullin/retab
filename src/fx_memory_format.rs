@@ -99,6 +99,13 @@ fn is_input_placeholder(node: &Bound<'_, PyAny>) -> PyResult<bool> {
         return Ok(false);
     }
     let meta = node.getattr("meta")?;
+    let is_arm_constant_placeholder: bool = meta
+        .call_method1("get", ("arm_constant_placeholder", false))?
+        .extract()
+        .unwrap_or(false);
+    if is_arm_constant_placeholder {
+        return Ok(false);
+    }
     let val = match meta.call_method1("get", ("val",)) {
         Ok(v) if !v.is_none() => v,
         _ => return Ok(false),
@@ -116,6 +123,31 @@ fn is_input_placeholder(node: &Bound<'_, PyAny>) -> PyResult<bool> {
         return Ok(false);
     }
     Ok(true)
+}
+
+/// Check whether a rank-4 tensor is consumed as the weight input to a
+/// TRANSPOSE_CONV2D op. Python annotates these with a dedicated HWIO-like
+/// order instead of generic channels-last.
+fn is_transpose_conv2d_weight(node: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let users = FxGraphModule::node_users(node)?;
+    for user in &users {
+        let op = FxGraphModule::node_op(user)?;
+        if op != "call_function" {
+            continue;
+        }
+        let target = FxGraphModule::node_target_str(user)?.to_ascii_lowercase();
+        if !(target.contains("transpose_conv2d") || target.contains("transposeconv2d")) {
+            continue;
+        }
+
+        let args = FxGraphModule::node_args(user)?;
+        if let Some(arg) = args.get(1) {
+            if arg.is(node) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 impl FxPass for FxToTosaMemoryFormatPass {
@@ -237,9 +269,11 @@ impl FxPass for FxToTosaMemoryFormatPass {
 
             let op = FxGraphModule::node_op(node)?;
 
-            let dim_order = if op == "placeholder" || op == "output" {
-                // For placeholders/outputs, use identity order (original format)
+            let dim_order = if is_input_placeholder(node)? || op == "output" {
+                // True external inputs/outputs keep their original format.
                 (0..rank).collect::<Vec<_>>()
+            } else if rank == 4 && is_transpose_conv2d_weight(node)? {
+                vec![1, 2, 3, 0]
             } else if rank >= 4 {
                 channels_last_order(rank, spatial_rank)
             } else {
