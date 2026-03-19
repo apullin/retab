@@ -341,6 +341,72 @@ fn make_output_tensor(node: &Node) -> TosaTensor {
     }
 }
 
+fn shape_numel(shape: &[i32]) -> Option<usize> {
+    if shape.is_empty() {
+        return Some(1);
+    }
+
+    shape.iter().try_fold(1usize, |acc, &dim| {
+        let dim = usize::try_from(dim).ok()?;
+        acc.checked_mul(dim)
+    })
+}
+
+fn scalar_fill_bytes(dtype: crate::graph::ir::DType, value: f64) -> Option<Vec<u8>> {
+    use crate::graph::ir::DType as IrDType;
+
+    Some(match dtype {
+        IrDType::Float32 => (value as f32).to_le_bytes().to_vec(),
+        IrDType::Int8 => (value as i8).to_le_bytes().to_vec(),
+        IrDType::Int16 => (value as i16).to_le_bytes().to_vec(),
+        IrDType::Int32 => (value as i32).to_le_bytes().to_vec(),
+        IrDType::Int64 => (value as i64).to_le_bytes().to_vec(),
+        IrDType::Bool => vec![(value != 0.0) as u8],
+        // The raw fast-lane currently only materializes FP32/INT32/INT8
+        // scalar fills here. Add half-precision packing when a real model
+        // needs it instead of silently emitting malformed payloads.
+        IrDType::Float16 | IrDType::BFloat16 | IrDType::Int4 | IrDType::Int48 => {
+            return None
+        }
+    })
+}
+
+fn make_filled_const_tensor(
+    name: String,
+    shape: Vec<i32>,
+    dtype: crate::graph::ir::DType,
+    value: f64,
+) -> Option<TosaTensor> {
+    let scalar = scalar_fill_bytes(dtype, value)?;
+    let numel = shape_numel(&shape)?;
+    let mut data = Vec::with_capacity(scalar.len().saturating_mul(numel));
+    for _ in 0..numel {
+        data.extend_from_slice(&scalar);
+    }
+
+    Some(TosaTensor {
+        name,
+        shape,
+        dtype: ir_dtype_to_tosa(dtype),
+        data,
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    })
+}
+
+fn push_inline_const(result: &mut EmitResult, tensor: TosaTensor) {
+    let name = tensor.name.clone();
+    result.tensors.push(tensor);
+    result.operators.push(TosaOperator {
+        op: Op::Const,
+        attribute: Attribute::Const(ConstAttribute),
+        inputs: vec![],
+        outputs: vec![name],
+        location: None,
+    });
+}
+
 /// Build an output tensor with NHWC shape for TOSA conv/pool ops.
 ///
 /// For 4D tensors, always permutes NCHW [N,C,H,W] to NHWC [N,H,W,C].
@@ -765,28 +831,36 @@ fn default_clamp_bound_bytes(dtype: crate::graph::ir::DType, is_min: bool) -> Ve
     match dtype {
         IrDtype::Bool => vec![if is_min { 0 } else { 1 }],
         IrDtype::Int4 | IrDtype::Int8 => vec![(if is_min { i8::MIN } else { i8::MAX }) as u8],
-        IrDtype::Int16 => {
-            (if is_min { i16::MIN } else { i16::MAX }).to_le_bytes().to_vec()
-        }
-        IrDtype::Int32 => {
-            (if is_min { i32::MIN } else { i32::MAX }).to_le_bytes().to_vec()
-        }
-        IrDtype::Int64 => {
-            (if is_min { i64::MIN } else { i64::MAX }).to_le_bytes().to_vec()
-        }
+        IrDtype::Int16 => (if is_min { i16::MIN } else { i16::MAX })
+            .to_le_bytes()
+            .to_vec(),
+        IrDtype::Int32 => (if is_min { i32::MIN } else { i32::MAX })
+            .to_le_bytes()
+            .to_vec(),
+        IrDtype::Int64 => (if is_min { i64::MIN } else { i64::MAX })
+            .to_le_bytes()
+            .to_vec(),
         IrDtype::Int48 => {
             let bytes = (if is_min { i64::MIN } else { i64::MAX }).to_le_bytes();
             bytes[..6].to_vec()
         }
-        IrDtype::Float32 => {
-            (if is_min { f32::MIN } else { f32::MAX }).to_le_bytes().to_vec()
-        }
+        IrDtype::Float32 => (if is_min { f32::MIN } else { f32::MAX })
+            .to_le_bytes()
+            .to_vec(),
         // Match the finite dtype bounds used by torch.finfo for default clamp args.
         IrDtype::Float16 => {
-            if is_min { vec![0xff, 0xfb] } else { vec![0xff, 0x7b] }
+            if is_min {
+                vec![0xff, 0xfb]
+            } else {
+                vec![0xff, 0x7b]
+            }
         }
         IrDtype::BFloat16 => {
-            if is_min { vec![0x7f, 0xff] } else { vec![0x7f, 0x7f] }
+            if is_min {
+                vec![0x7f, 0xff]
+            } else {
+                vec![0x7f, 0x7f]
+            }
         }
     }
 }
@@ -906,7 +980,11 @@ pub fn emit_aten_conv2d(
     // Fallback: use groups == in_channels heuristic, but require groups > 1 to
     // avoid false positives on 1x1 convs from decomposed linear (whose shapes
     // may be in NHWC format making s[1] != in_channels).
-    let is_depthwise = if let Some(conv_info_entry) = node.kwargs.iter().find(|(k, _)| k == "conv_info_is_depthwise") {
+    let is_depthwise = if let Some(conv_info_entry) = node
+        .kwargs
+        .iter()
+        .find(|(k, _)| k == "conv_info_is_depthwise")
+    {
         match &conv_info_entry.1 {
             Arg::Int(v) => *v != 0,
             _ => false,
@@ -914,10 +992,15 @@ pub fn emit_aten_conv2d(
     } else if groups > 1 {
         // groups > 1 is a reliable indicator — check if groups == in_channels
         let in_channels = if let Some(Arg::Node(input_id)) = node.args.first() {
-            graph.node(*input_id)
+            graph
+                .node(*input_id)
                 .map(|n| {
                     let s = n.meta.val.shape_slice();
-                    if s.len() >= 2 { s[1] } else { 0 }
+                    if s.len() >= 2 {
+                        s[1]
+                    } else {
+                        0
+                    }
                 })
                 .unwrap_or(0)
         } else {
@@ -928,8 +1011,16 @@ pub fn emit_aten_conv2d(
         false
     };
 
-    let stride = if stride.is_empty() { vec![1, 1] } else { stride };
-    let dilation = if dilation.is_empty() { vec![1, 1] } else { dilation };
+    let stride = if stride.is_empty() {
+        vec![1, 1]
+    } else {
+        stride
+    };
+    let dilation = if dilation.is_empty() {
+        vec![1, 1]
+    } else {
+        dilation
+    };
 
     // Compute NHWC output shape from TOSA formula
     if is_depthwise {
@@ -998,19 +1089,34 @@ pub fn emit_aten_max_pool2d(
     };
 
     // Compute NHWC output shape from pool formula
-    let kernel_for_shape = if kernel.is_empty() { vec![2, 2] } else { kernel.clone() };
-    let stride_for_shape = if stride.is_empty() { vec![2, 2] } else { stride.clone() };
-    let mut output_tensor = compute_pool_nhwc_output(
-        graph, node, &kernel_for_shape, &stride_for_shape, &pad,
-    );
+    let kernel_for_shape = if kernel.is_empty() {
+        vec![2, 2]
+    } else {
+        kernel.clone()
+    };
+    let stride_for_shape = if stride.is_empty() {
+        vec![2, 2]
+    } else {
+        stride.clone()
+    };
+    let mut output_tensor =
+        compute_pool_nhwc_output(graph, node, &kernel_for_shape, &stride_for_shape, &pad);
     output_tensor.name = output_name.clone();
     result.tensors.push(output_tensor);
 
     result.operators.push(TosaOperator {
         op: Op::MaxPool2d,
         attribute: Attribute::MaxPool2d(MaxPool2dAttribute {
-            kernel: if kernel.is_empty() { vec![2, 2] } else { kernel },
-            stride: if stride.is_empty() { vec![2, 2] } else { stride },
+            kernel: if kernel.is_empty() {
+                vec![2, 2]
+            } else {
+                kernel
+            },
+            stride: if stride.is_empty() {
+                vec![2, 2]
+            } else {
+                stride
+            },
             pad,
             nan_mode: NanPropagationMode::Propagate,
         }),
@@ -1095,9 +1201,7 @@ pub fn emit_aten_permute(
 
     result.operators.push(TosaOperator {
         op: Op::Transpose,
-        attribute: Attribute::Transpose(TransposeAttribute {
-            perms,
-        }),
+        attribute: Attribute::Transpose(TransposeAttribute { perms }),
         inputs: input_names,
         outputs: vec![node.name.clone()],
         location: None,
@@ -1345,26 +1449,54 @@ pub fn emit_conv2d(
     // positional args: (input, weight, bias, stride, pad, dilation).
     let pad = {
         let kw = kwarg_i32_list(node, "pad");
-        if kw.is_empty() { arg_i32_list(node, 4) } else { kw }
+        if kw.is_empty() {
+            arg_i32_list(node, 4)
+        } else {
+            kw
+        }
     };
     let stride = {
         let kw = kwarg_i32_list(node, "stride");
-        if kw.is_empty() { arg_i32_list(node, 3) } else { kw }
+        if kw.is_empty() {
+            arg_i32_list(node, 3)
+        } else {
+            kw
+        }
     };
     let dilation = {
         let kw = kwarg_i32_list(node, "dilation");
-        if kw.is_empty() { arg_i32_list(node, 5) } else { kw }
+        if kw.is_empty() {
+            arg_i32_list(node, 5)
+        } else {
+            kw
+        }
     };
     let local_bound = kwarg_bool(node, "local_bound", false);
 
     // Compute NHWC output shape from TOSA formula using input/weight shapes
     // and conv attributes, rather than relying on node.meta.val which may be
     // incorrect NCHW values from the original FX graph.
-    let pad_for_shape = if pad.is_empty() { vec![0, 0, 0, 0] } else { pad.clone() };
-    let stride_for_shape = if stride.is_empty() { vec![1, 1] } else { stride.clone() };
-    let dilation_for_shape = if dilation.is_empty() { vec![1, 1] } else { dilation.clone() };
+    let pad_for_shape = if pad.is_empty() {
+        vec![0, 0, 0, 0]
+    } else {
+        pad.clone()
+    };
+    let stride_for_shape = if stride.is_empty() {
+        vec![1, 1]
+    } else {
+        stride.clone()
+    };
+    let dilation_for_shape = if dilation.is_empty() {
+        vec![1, 1]
+    } else {
+        dilation.clone()
+    };
     result.tensors.push(compute_conv2d_nhwc_output(
-        graph, node, &pad_for_shape, &stride_for_shape, &dilation_for_shape,
+        graph,
+        node,
+        &pad_for_shape,
+        &stride_for_shape,
+        &dilation_for_shape,
     ));
 
     // Determine accumulator type — default to Int32 for quantized
@@ -1485,26 +1617,54 @@ pub fn emit_depthwise_conv2d(
     // Extract attribute from kwargs, falling back to positional args.
     let pad = {
         let kw = kwarg_i32_list(node, "pad");
-        if kw.is_empty() { arg_i32_list(node, 4) } else { kw }
+        if kw.is_empty() {
+            arg_i32_list(node, 4)
+        } else {
+            kw
+        }
     };
     let stride = {
         let kw = kwarg_i32_list(node, "stride");
-        if kw.is_empty() { arg_i32_list(node, 3) } else { kw }
+        if kw.is_empty() {
+            arg_i32_list(node, 3)
+        } else {
+            kw
+        }
     };
     let dilation = {
         let kw = kwarg_i32_list(node, "dilation");
-        if kw.is_empty() { arg_i32_list(node, 5) } else { kw }
+        if kw.is_empty() {
+            arg_i32_list(node, 5)
+        } else {
+            kw
+        }
     };
     let local_bound = kwarg_bool(node, "local_bound", false);
     let acc_type = DType::Int32;
 
     // Compute NHWC output shape from TOSA formula using input/weight shapes
     // and conv attributes.
-    let pad_for_shape = if pad.is_empty() { vec![0, 0, 0, 0] } else { pad.clone() };
-    let stride_for_shape = if stride.is_empty() { vec![1, 1] } else { stride.clone() };
-    let dilation_for_shape = if dilation.is_empty() { vec![1, 1] } else { dilation.clone() };
+    let pad_for_shape = if pad.is_empty() {
+        vec![0, 0, 0, 0]
+    } else {
+        pad.clone()
+    };
+    let stride_for_shape = if stride.is_empty() {
+        vec![1, 1]
+    } else {
+        stride.clone()
+    };
+    let dilation_for_shape = if dilation.is_empty() {
+        vec![1, 1]
+    } else {
+        dilation.clone()
+    };
     result.tensors.push(compute_depthwise_conv2d_nhwc_output(
-        graph, node, &pad_for_shape, &stride_for_shape, &dilation_for_shape,
+        graph,
+        node,
+        &pad_for_shape,
+        &stride_for_shape,
+        &dilation_for_shape,
     ));
 
     // If we already have 5 inputs, pass them through; otherwise create zp tensors.
@@ -1717,7 +1877,8 @@ pub fn emit_rescale(
     // Create input_zp const tensor (scalar, uses input node's dtype)
     let input_zp_name = format!("{}_input_zp", node.name);
     let input_zp_tosa_dtype = if let Some(Arg::Node(input_id)) = node.args.first() {
-        graph.node(*input_id)
+        graph
+            .node(*input_id)
             .map(|n| ir_dtype_to_tosa(n.meta.val.dtype))
             .unwrap_or(DType::Int8)
     } else {
@@ -1848,11 +2009,27 @@ pub fn emit_max_pool2d(
     let pad = kwarg_i32_list(node, "pad");
 
     // Compute NHWC output shape from pool formula
-    let kernel_for_shape = if kernel.is_empty() { vec![2, 2] } else { kernel.clone() };
-    let stride_for_shape = if stride.is_empty() { vec![2, 2] } else { stride.clone() };
-    let pad_for_shape = if pad.is_empty() { vec![0, 0, 0, 0] } else { pad.clone() };
+    let kernel_for_shape = if kernel.is_empty() {
+        vec![2, 2]
+    } else {
+        kernel.clone()
+    };
+    let stride_for_shape = if stride.is_empty() {
+        vec![2, 2]
+    } else {
+        stride.clone()
+    };
+    let pad_for_shape = if pad.is_empty() {
+        vec![0, 0, 0, 0]
+    } else {
+        pad.clone()
+    };
     let mut output_tensor = compute_pool_nhwc_output(
-        graph, node, &kernel_for_shape, &stride_for_shape, &pad_for_shape,
+        graph,
+        node,
+        &kernel_for_shape,
+        &stride_for_shape,
+        &pad_for_shape,
     );
     output_tensor.name = output_name.clone();
     result.tensors.push(output_tensor);
@@ -1936,9 +2113,7 @@ pub fn emit_transpose(
 
     result.operators.push(TosaOperator {
         op: Op::Transpose,
-        attribute: Attribute::Transpose(TransposeAttribute {
-            perms,
-        }),
+        attribute: Attribute::Transpose(TransposeAttribute { perms }),
         inputs: input_names,
         outputs: vec![node.name.clone()],
         location: None,
@@ -2105,12 +2280,7 @@ pub fn emit_clamp(
 }
 
 /// Emit an ADD operator.
-pub fn emit_add(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub fn emit_add(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
@@ -2128,12 +2298,7 @@ pub fn emit_add(
 }
 
 /// Emit a SUB operator.
-pub fn emit_sub(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub fn emit_sub(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
@@ -2154,12 +2319,7 @@ pub fn emit_sub(
 ///
 /// TOSA MUL takes 3 inputs: lhs, rhs, and a shift tensor (scalar int8, typically 0).
 /// We create an inline const tensor for the shift value.
-pub fn emit_mul(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub fn emit_mul(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
@@ -2216,11 +2376,19 @@ pub fn emit_avg_pool2d(
 
     let kernel = {
         let kw = kwarg_i32_list(node, "kernel");
-        if kw.is_empty() { arg_i32_list(node, 1) } else { kw }
+        if kw.is_empty() {
+            arg_i32_list(node, 1)
+        } else {
+            kw
+        }
     };
     let mut stride = {
         let kw = kwarg_i32_list(node, "stride");
-        if kw.is_empty() { arg_i32_list(node, 2) } else { kw }
+        if kw.is_empty() {
+            arg_i32_list(node, 2)
+        } else {
+            kw
+        }
     };
     let pad = {
         let kw = kwarg_i32_list(node, "pad");
@@ -2406,12 +2574,7 @@ pub fn emit_sigmoid(
 }
 
 /// Emit a TANH operator.
-pub fn emit_tanh(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub fn emit_tanh(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
@@ -2426,12 +2589,7 @@ pub fn emit_tanh(
 }
 
 /// Emit an EXP operator.
-pub fn emit_exp(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub fn emit_exp(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
@@ -2446,12 +2604,7 @@ pub fn emit_exp(
 }
 
 /// Emit a LOG operator.
-pub fn emit_log(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub fn emit_log(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
@@ -2486,12 +2639,7 @@ pub fn emit_negate(
 }
 
 /// Emit an ABS operator.
-pub fn emit_abs(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub fn emit_abs(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
@@ -2506,12 +2654,7 @@ pub fn emit_abs(
 }
 
 /// Emit a CEIL operator.
-pub fn emit_ceil(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub fn emit_ceil(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
@@ -2545,6 +2688,158 @@ pub fn emit_floor(
     result
 }
 
+/// Emit a ROUND operator by expanding it into primitive TOSA ops.
+///
+/// TOSA has no standalone ROUND op. For backend-owned raw graphs, expand:
+///   round(x) = select(x >= 0, floor(x + 0.5), ceil(x - 0.5))
+/// using filled const tensors that match the output shape.
+pub fn emit_round(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    _store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let input_name = match input_names.first() {
+        Some(name) => name.clone(),
+        None => return result,
+    };
+
+    let shape = actual_tensor_shape(graph, node);
+    let dtype = node.meta.val.dtype;
+
+    let zero_name = format!("{}_round_zero", node.name);
+    let half_name = format!("{}_round_half", node.name);
+    let ge_name = format!("{}_round_ge", node.name);
+    let plus_half_name = format!("{}_round_plus_half", node.name);
+    let minus_half_name = format!("{}_round_minus_half", node.name);
+    let floor_name = format!("{}_round_floor", node.name);
+    let ceil_name = format!("{}_round_ceil", node.name);
+
+    let zero_tensor = make_filled_const_tensor(zero_name.clone(), shape.clone(), dtype, 0.0)
+        .unwrap_or_else(|| {
+            panic!(
+                "emit_round: unsupported zero-fill dtype {:?} for node '{}'",
+                dtype, node.name
+            )
+        });
+    let half_tensor = make_filled_const_tensor(half_name.clone(), shape.clone(), dtype, 0.5)
+        .unwrap_or_else(|| {
+            panic!(
+                "emit_round: unsupported half-fill dtype {:?} for node '{}'",
+                dtype, node.name
+            )
+        });
+
+    push_inline_const(&mut result, zero_tensor);
+    push_inline_const(&mut result, half_tensor);
+
+    result.tensors.push(TosaTensor {
+        name: ge_name.clone(),
+        shape: shape.clone(),
+        dtype: DType::Bool,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::GreaterEqual,
+        attribute: Attribute::GreaterEqual(GreaterEqualAttribute),
+        inputs: vec![input_name.clone(), zero_name],
+        outputs: vec![ge_name.clone()],
+        location: None,
+    });
+
+    result.tensors.push(TosaTensor {
+        name: plus_half_name.clone(),
+        shape: shape.clone(),
+        dtype: ir_dtype_to_tosa(dtype),
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Add,
+        attribute: Attribute::Add(AddAttribute),
+        inputs: vec![input_name.clone(), half_name.clone()],
+        outputs: vec![plus_half_name.clone()],
+        location: None,
+    });
+
+    result.tensors.push(TosaTensor {
+        name: minus_half_name.clone(),
+        shape: shape.clone(),
+        dtype: ir_dtype_to_tosa(dtype),
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Sub,
+        attribute: Attribute::Sub(SubAttribute),
+        inputs: vec![input_name.clone(), half_name],
+        outputs: vec![minus_half_name.clone()],
+        location: None,
+    });
+
+    result.tensors.push(TosaTensor {
+        name: floor_name.clone(),
+        shape: shape.clone(),
+        dtype: ir_dtype_to_tosa(dtype),
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Floor,
+        attribute: Attribute::Floor(FloorAttribute),
+        inputs: vec![plus_half_name],
+        outputs: vec![floor_name.clone()],
+        location: None,
+    });
+
+    result.tensors.push(TosaTensor {
+        name: ceil_name.clone(),
+        shape: shape.clone(),
+        dtype: ir_dtype_to_tosa(dtype),
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Ceil,
+        attribute: Attribute::Ceil(CeilAttribute),
+        inputs: vec![minus_half_name],
+        outputs: vec![ceil_name.clone()],
+        location: None,
+    });
+
+    result.tensors.push(TosaTensor {
+        name: node.name.clone(),
+        shape,
+        dtype: ir_dtype_to_tosa(dtype),
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Select,
+        attribute: Attribute::Select(SelectAttribute),
+        inputs: vec![ge_name, floor_name, ceil_name],
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
 /// Emit a RECIPROCAL operator.
 pub fn emit_reciprocal(
     graph: &Graph,
@@ -2566,12 +2861,7 @@ pub fn emit_reciprocal(
 }
 
 /// Emit an ERF operator.
-pub fn emit_erf(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub fn emit_erf(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
@@ -2586,12 +2876,7 @@ pub fn emit_erf(
 }
 
 /// Emit a COS operator.
-pub fn emit_cos(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub fn emit_cos(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
@@ -2606,12 +2891,7 @@ pub fn emit_cos(
 }
 
 /// Emit a SIN operator.
-pub fn emit_sin(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub fn emit_sin(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
@@ -2726,12 +3006,7 @@ pub fn emit_greater_equal(
 }
 
 /// Emit a CAST operator.
-pub fn emit_cast(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub fn emit_cast(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
@@ -2868,12 +3143,7 @@ pub fn emit_concat(
 ///
 /// TOSA PAD takes 2 inputs: [input, padding_shape].
 /// The padding shape is a CONST_SHAPE tensor.
-pub fn emit_pad(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub fn emit_pad(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
@@ -3026,9 +3296,7 @@ pub fn emit_node(
     match &node.target {
         OpTarget::TosaConst => Some(emit_const(graph, node_id, node, store)),
         OpTarget::TosaConv2d => Some(emit_conv2d(graph, node_id, node, store)),
-        OpTarget::TosaDepthwiseConv2d => {
-            Some(emit_depthwise_conv2d(graph, node_id, node, store))
-        }
+        OpTarget::TosaDepthwiseConv2d => Some(emit_depthwise_conv2d(graph, node_id, node, store)),
         OpTarget::TosaRescale => Some(emit_rescale(graph, node_id, node, store)),
         OpTarget::TosaMaxPool2d => Some(emit_max_pool2d(graph, node_id, node, store)),
         OpTarget::TosaTranspose => Some(emit_transpose(graph, node_id, node, store)),
@@ -3044,9 +3312,7 @@ pub fn emit_node(
         OpTarget::TosaTanh => Some(emit_tanh(graph, node_id, node, store)),
         OpTarget::TosaExp => Some(emit_exp(graph, node_id, node, store)),
         OpTarget::TosaLog => Some(emit_log(graph, node_id, node, store)),
-        OpTarget::TosaNeg | OpTarget::TosaNegate => {
-            Some(emit_negate(graph, node_id, node, store))
-        }
+        OpTarget::TosaNeg | OpTarget::TosaNegate => Some(emit_negate(graph, node_id, node, store)),
         OpTarget::TosaAbs => Some(emit_abs(graph, node_id, node, store)),
         OpTarget::TosaCeil => Some(emit_ceil(graph, node_id, node, store)),
         OpTarget::TosaFloor => Some(emit_floor(graph, node_id, node, store)),
@@ -3065,9 +3331,7 @@ pub fn emit_node(
         OpTarget::TosaEqual => Some(emit_equal(graph, node_id, node, store)),
         OpTarget::TosaGreater => Some(emit_greater(graph, node_id, node, store)),
         OpTarget::TosaGreaterEqual => Some(emit_greater_equal(graph, node_id, node, store)),
-        OpTarget::TosaTransposeConv2d => {
-            Some(emit_transpose_conv2d(graph, node_id, node, store))
-        }
+        OpTarget::TosaTransposeConv2d => Some(emit_transpose_conv2d(graph, node_id, node, store)),
 
         // -----------------------------------------------------------------
         // ATen fallbacks: handle ops that FX-direct passes didn't rewrite
@@ -3085,6 +3349,7 @@ pub fn emit_node(
             Some(emit_aten_reshape(graph, node_id, node, store))
         }
         OpTarget::Permute => Some(emit_aten_permute(graph, node_id, node, store)),
+        OpTarget::To => Some(emit_cast(graph, node_id, node, store)),
         OpTarget::Add => Some(emit_aten_add(graph, node_id, node, store)),
         OpTarget::Sub => Some(emit_aten_sub(graph, node_id, node, store)),
         OpTarget::Mul => Some(emit_aten_mul(graph, node_id, node, store)),
@@ -3097,6 +3362,7 @@ pub fn emit_node(
         OpTarget::Abs => Some(emit_abs(graph, node_id, node, store)),
         OpTarget::Ceil => Some(emit_ceil(graph, node_id, node, store)),
         OpTarget::Floor => Some(emit_floor(graph, node_id, node, store)),
+        OpTarget::Round => Some(emit_round(graph, node_id, node, store)),
         OpTarget::Reciprocal => Some(emit_reciprocal(graph, node_id, node, store)),
         OpTarget::Rsqrt => Some(emit_rsqrt(graph, node_id, node, store)),
         OpTarget::Matmul | OpTarget::Bmm => Some(emit_matmul(graph, node_id, node, store)),
@@ -3105,9 +3371,7 @@ pub fn emit_node(
         OpTarget::Slice => Some(emit_slice(graph, node_id, node, store)),
         OpTarget::Select => Some(emit_select(graph, node_id, node, store)),
         OpTarget::Sum => Some(emit_aten_sum(graph, node_id, node, store)),
-        OpTarget::ConvTranspose2d => {
-            Some(emit_transpose_conv2d(graph, node_id, node, store))
-        }
+        OpTarget::ConvTranspose2d => Some(emit_transpose_conv2d(graph, node_id, node, store)),
         OpTarget::Other(target) if target.contains("getitem") => Some(EmitResult::default()),
 
         // Ops not yet handled — skip silently for now.

@@ -245,7 +245,10 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     if target_str.contains("aten.slice_copy") || target_str.contains("aten.slice") {
         return OpTarget::Slice;
     }
-    if target_str.contains("aten.select_copy") || target_str.contains("aten.select") || target_str.contains("aten.index_select") {
+    if target_str.contains("aten.select_copy")
+        || target_str.contains("aten.select")
+        || target_str.contains("aten.index_select")
+    {
         return OpTarget::Select;
     }
     if target_str.contains("aten.unsqueeze") {
@@ -296,7 +299,11 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     if target_str.contains("aten.view") || target_str.contains("aten._unsafe_view") {
         return OpTarget::View;
     }
-    if target_str.contains("aten.to.") || target_str.contains("aten._to_copy") {
+    if target_str.contains("aten.to.")
+        || target_str.contains("aten._to_copy")
+        || target_str.contains("dim_order_ops._to_dim_order_copy")
+        || target_str.contains("dim_order_ops._clone_dim_order")
+    {
         return OpTarget::To;
     }
     if target_str.contains("aten.group_norm") {
