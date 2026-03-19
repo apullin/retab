@@ -44,7 +44,7 @@ impl Graph {
     }
 
     /// Collect all NodeId references from a node's args and kwargs.
-    fn collect_input_ids(node: &Node) -> SmallVec<[NodeId; 8]> {
+    pub fn collect_input_ids(node: &Node) -> SmallVec<[NodeId; 8]> {
         let mut ids = SmallVec::new();
         for arg in &node.args {
             ids.extend(arg.node_refs());

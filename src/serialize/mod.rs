@@ -155,9 +155,54 @@ fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind>
 /// Serialize the IR graph and its constant data into a TOSA flatbuffer byte
 /// vector.
 pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
-    eprintln!("[Serialize] starting topo sort on {} nodes...", graph.order.len());
-    let sorted = graph.topological_sort();
-    eprintln!("[Serialize] topo sort done, {} sorted nodes", sorted.len());
+    // Use insertion order directly instead of topological sort.
+    //
+    // The FX graph is topologically ordered by construction (Python FX enforces
+    // this), and ingestion walks nodes in that order, so `graph.order` is
+    // already a valid topological ordering.  IR passes that create new nodes
+    // via `insert_before`/`insert_after`/`create_node` also maintain this
+    // invariant.
+    //
+    // The Kahn-based topological_sort() has a subtle inconsistency between
+    // in-degree computation (from args) and propagation (from user lists)
+    // that causes large numbers of nodes to be flagged as "stale" and
+    // appended out of order, producing malformed TOSA flatbuffers.
+    let sorted = graph.all_node_ids();
+    eprintln!("[Serialize] using insertion order, {} nodes", sorted.len());
+
+    // Debug-mode validation: verify insertion order is topological
+    if std::env::var("TOSA_ENGINE_DEBUG").is_ok() {
+        let mut position: std::collections::HashMap<crate::graph::ir::NodeId, usize> =
+            std::collections::HashMap::new();
+        for (i, &id) in sorted.iter().enumerate() {
+            position.insert(id, i);
+        }
+        let mut violations = 0;
+        for (i, &id) in sorted.iter().enumerate() {
+            if let Some(node) = graph.node(id) {
+                let input_ids = Graph::collect_input_ids(node);
+                for input_id in &input_ids {
+                    if let Some(&input_pos) = position.get(input_id) {
+                        if input_pos >= i {
+                            if violations < 10 {
+                                eprintln!(
+                                    "[Serialize] WARNING: '{}' at position {} depends on input at position {}",
+                                    node.name, i, input_pos
+                                );
+                            }
+                            violations += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if violations > 0 {
+            eprintln!(
+                "[Serialize] WARNING: {} topological order violations detected",
+                violations
+            );
+        }
+    }
 
     // Pre-compute which weight tensors need OIHW -> OHWI permutation
     let weight_perms = collect_weight_permutations(graph);
