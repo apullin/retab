@@ -81,7 +81,21 @@ fn fold_zero_input_full(
 
     let full_kwargs = PyDict::new_bound(py);
     full_kwargs.set_item("dtype", &dtype)?;
-    let const_tensor = torch.call_method("full", (shape, fill_value), Some(&full_kwargs))?;
+    let mut const_tensor = torch.call_method("full", (shape, fill_value), Some(&full_kwargs))?;
+
+    // Match the general constant-folding helper: if the FULL output is already
+    // annotated with output_qparams, materialize the frozen buffer in that
+    // quantized domain instead of preserving the original FP32 data.
+    if let Ok(output_qparams) = meta.call_method1("get", ("output_qparams",)) {
+        if !output_qparams.is_none() && output_qparams.len().unwrap_or(0) > 0 {
+            if let Ok(values) = output_qparams.call_method0("values") {
+                if let Some(first_qp) = values.iter()?.next() {
+                    let first_qp = first_qp?;
+                    const_tensor = first_qp.call_method1("quantize_value", (&const_tensor,))?;
+                }
+            }
+        }
+    }
 
     let node_name = FxGraphModule::node_name(node)?;
     let mut attr_name = format!("{}_fused_const", node_name);
@@ -98,7 +112,7 @@ fn fold_zero_input_full(
     insert_ctx.call_method0("__enter__")?;
     let const_node_result = (|| -> PyResult<Bound<'_, PyAny>> {
         let const_node = graph.call_method1("get_attr", (attr_name.as_str(),))?;
-        let const_meta = PyDict::new_bound(py);
+        let const_meta = meta.call_method0("copy")?;
         const_meta.set_item("val", &const_tensor)?;
         const_node.setattr("meta", &const_meta)?;
         Ok(const_node)
