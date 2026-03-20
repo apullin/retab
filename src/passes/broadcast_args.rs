@@ -72,10 +72,10 @@ impl Pass for BroadcastArgsPass {
             }
 
             // Determine which input needs reshaping (the lower-rank one)
-            let (smaller_id, smaller_rank, target_rank, arg_idx) = if lhs_rank < rhs_rank {
-                (lhs_id, lhs_rank, rhs_rank, 0usize)
+            let (smaller_id, smaller_rank, larger_id, target_rank, arg_idx) = if lhs_rank < rhs_rank {
+                (lhs_id, lhs_rank, rhs_id, rhs_rank, 0usize)
             } else {
-                (rhs_id, rhs_rank, lhs_rank, 1usize)
+                (rhs_id, rhs_rank, lhs_id, lhs_rank, 1usize)
             };
 
             // Build the new shape: prepend 1-dims
@@ -87,6 +87,14 @@ impl Pass for BroadcastArgsPass {
             let leading_ones = (target_rank - smaller_rank) as usize;
             let mut new_shape_vec: Vec<i64> = vec![1; leading_ones];
             new_shape_vec.extend_from_slice(old_shape);
+
+            // Preserve the surviving operand's logical layout. In NHWC regions
+            // this keeps channel-affine reshapes channel-last for serialization.
+            let larger_order = graph
+                .node(larger_id)
+                .and_then(|n| n.meta.tosa_dim_order.clone())
+                .or_else(|| graph.node(node_id).and_then(|n| n.meta.tosa_dim_order.clone()));
+
             let new_shape_len = new_shape_vec.len().min(4);
 
             let node_name = graph
@@ -95,9 +103,11 @@ impl Pass for BroadcastArgsPass {
                 .unwrap_or_default();
             let reshape_name = format!("{}_broadcast_reshape_{}", node_name, arg_idx);
 
-            let reshape_meta =
-                NodeMeta::new(TensorInfo::new(&new_shape_vec[..new_shape_len], smaller_info.dtype));
-
+            let mut reshape_meta = NodeMeta::new(TensorInfo::new(
+                &new_shape_vec[..new_shape_len],
+                smaller_info.dtype,
+            ));
+            reshape_meta.tosa_dim_order = larger_order;
             let shape_arg: smallvec::SmallVec<[i64; 6]> =
                 new_shape_vec[..new_shape_len].iter().copied().collect();
 

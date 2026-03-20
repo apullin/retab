@@ -50,18 +50,34 @@ impl PassRunner {
         use std::io::Write;
         for (i, pass) in self.passes.iter().enumerate() {
             // Always log pass start to stderr and flush immediately
-            let _ = writeln!(std::io::stderr(), "[PassRunner] starting pass {}/{}: {}", i+1, self.passes.len(), pass.name());
+            let _ = writeln!(
+                std::io::stderr(),
+                "[PassRunner] starting pass {}/{}: {}",
+                i + 1,
+                self.passes.len(),
+                pass.name()
+            );
             let _ = std::io::stderr().flush();
             let before_count = graph.order.len();
             let modified = pass.run(graph, store);
             let after_count = graph.order.len();
-            let _ = writeln!(std::io::stderr(), "[PassRunner] {} — modified={}, nodes: {} -> {}", pass.name(), modified, before_count, after_count);
+            let _ = writeln!(
+                std::io::stderr(),
+                "[PassRunner] {} — modified={}, nodes: {} -> {}",
+                pass.name(),
+                modified,
+                before_count,
+                after_count
+            );
             let _ = std::io::stderr().flush();
             if debug {
                 for &nid in &graph.order {
                     if let Some(n) = graph.node(nid) {
                         if n.op == crate::graph::ir::OpType::CallFunction {
-                            eprintln!("  node '{}': target={:?}, dtype={:?}", n.name, n.target, n.meta.val.dtype);
+                            eprintln!(
+                                "  node '{}': target={:?}, dtype={:?}",
+                                n.name, n.target, n.meta.val.dtype
+                            );
                         }
                     }
                 }
@@ -147,8 +163,14 @@ impl Pass for FuseDuplicateUsersPass {
 
             for (dup_id, keep_id) in to_fuse {
                 if debug {
-                    let dup_name = graph.node(dup_id).map(|n| n.name.clone()).unwrap_or_default();
-                    let keep_name = graph.node(keep_id).map(|n| n.name.clone()).unwrap_or_default();
+                    let dup_name = graph
+                        .node(dup_id)
+                        .map(|n| n.name.clone())
+                        .unwrap_or_default();
+                    let keep_name = graph
+                        .node(keep_id)
+                        .map(|n| n.name.clone())
+                        .unwrap_or_default();
                     eprintln!(
                         "[FuseDuplicateUsers] fusing '{}' into '{}'",
                         dup_name, keep_name,
@@ -226,9 +248,13 @@ fn is_fusable(target: &crate::graph::ir::OpTarget) -> bool {
 }
 
 /// Diagnostic pass to count qparam coverage. Gated behind TOSA_ENGINE_DEBUG.
-struct DiagnosticPass { label: &'static str }
+struct DiagnosticPass {
+    label: &'static str,
+}
 impl Pass for DiagnosticPass {
-    fn name(&self) -> &str { "Diagnostic" }
+    fn name(&self) -> &str {
+        "Diagnostic"
+    }
     fn run(&self, graph: &mut Graph, _store: &mut TensorStore) -> bool {
         if std::env::var("TOSA_ENGINE_DEBUG").is_err() {
             return false;
@@ -244,9 +270,15 @@ impl Pass for DiagnosticPass {
                     call_fn_count += 1;
                     let has_i = !node.meta.input_qparams.is_empty();
                     let has_o = !node.meta.output_qparams.is_empty();
-                    if has_i { has_input += 1; }
-                    if has_o { has_output += 1; }
-                    if has_i && has_o { has_both += 1; }
+                    if has_i {
+                        has_input += 1;
+                    }
+                    if has_o {
+                        has_output += 1;
+                    }
+                    if has_i && has_o {
+                        has_both += 1;
+                    }
                     if !has_i && !has_o {
                         no_qp.push(format!("  {} ({:?})", node.name, node.target));
                     }
@@ -256,16 +288,38 @@ impl Pass for DiagnosticPass {
         eprintln!("[Diagnostic:{}] CallFunction nodes: {call_fn_count}, with input_qp: {has_input}, with output_qp: {has_output}, with both: {has_both}",
             self.label);
         if !no_qp.is_empty() {
-            eprintln!("[Diagnostic:{}] Nodes with NO qparams ({}):", self.label, no_qp.len());
-            for s in &no_qp { eprintln!("{}", s); }
+            eprintln!(
+                "[Diagnostic:{}] Nodes with NO qparams ({}):",
+                self.label,
+                no_qp.len()
+            );
+            for s in &no_qp {
+                eprintln!("{}", s);
+            }
         }
         for &id in &graph.all_node_ids() {
             if let Some(node) = graph.node(id) {
                 if node.op == crate::graph::ir::OpType::CallFunction {
-                    let in_scales: Vec<_> = node.meta.input_qparams.iter().map(|(p, q)| format!("{}:{:.6}", p, q.scale)).collect();
-                    let out_scales: Vec<_> = node.meta.output_qparams.iter().map(|(p, q)| format!("{}:{:.6}", p, q.scale)).collect();
-                    eprintln!("[Diagnostic:{}]   '{}' ({:?}) in=[{}] out=[{}]",
-                        self.label, node.name, node.target, in_scales.join(","), out_scales.join(","));
+                    let in_scales: Vec<_> = node
+                        .meta
+                        .input_qparams
+                        .iter()
+                        .map(|(p, q)| format!("{}:{:.6}", p, q.scale))
+                        .collect();
+                    let out_scales: Vec<_> = node
+                        .meta
+                        .output_qparams
+                        .iter()
+                        .map(|(p, q)| format!("{}:{:.6}", p, q.scale))
+                        .collect();
+                    eprintln!(
+                        "[Diagnostic:{}]   '{}' ({:?}) in=[{}] out=[{}]",
+                        self.label,
+                        node.name,
+                        node.target,
+                        in_scales.join(","),
+                        out_scales.join(",")
+                    );
                 }
             }
         }
@@ -463,7 +517,9 @@ pub fn build_phase2_pipeline() -> PassRunner {
     //     Removes relu/hardtanh(min=0) nodes between conv/linear and Q nodes
     //     when zp==qmin, so fold_qdq will fold the Q node directly onto the
     //     conv's output_qparams. No separate CLAMP needed for relu.
-    runner.add(Box::new(fuse_quantized_activation::FuseQuantizedActivationPass));
+    runner.add(Box::new(
+        fuse_quantized_activation::FuseQuantizedActivationPass,
+    ));
 
     // 2. ConvertToClampPass — converts remaining (unfused) relu/hardtanh to TosaClamp
     runner.add(Box::new(convert_clamp::ConvertToClampPass));
@@ -506,7 +562,9 @@ pub fn build_phase2_pipeline() -> PassRunner {
     runner.add(Box::new(propagate_qparams::PropagateQParamsPass));
 
     // 5a-diag. Diagnostic pass to measure qparam coverage (gated behind TOSA_ENGINE_DEBUG)
-    runner.add(Box::new(DiagnosticPass { label: "after_propagate" }));
+    runner.add(Box::new(DiagnosticPass {
+        label: "after_propagate",
+    }));
 
     // 5a2. (FuseQuantizedActivationPass moved to step 1a, before fold_qdq)
 
@@ -566,6 +624,11 @@ pub fn build_phase2_pipeline() -> PassRunner {
     // 14. ToTosaMemoryFormatPass (existing)
     runner.add(Box::new(memory_format::ToTosaMemoryFormatPass));
 
+    // 14a. Re-run broadcast legalization after NHWC conversion so lower-rank
+    //      affine tensors feeding transparent NHWC chains can be reshaped into
+    //      channel-last-compatible rank-4 forms.
+    runner.add(Box::new(broadcast_args::BroadcastArgsPass));
+
     // 15. RemoveNoopPass (no-op for now)
     runner.add(Box::new(RemoveNoopPass));
 
@@ -579,13 +642,20 @@ pub fn build_phase2_pipeline() -> PassRunner {
     ));
 
     // 15c. Diagnostic (gated behind TOSA_ENGINE_DEBUG)
-    runner.add(Box::new(DiagnosticPass { label: "before_final_rescale" }));
+    runner.add(Box::new(DiagnosticPass {
+        label: "before_final_rescale",
+    }));
 
     // 15d. Rebuild user lists before final rescale insertion
     runner.add(Box::new(RebuildUserListsPass));
 
     // 16. InsertRescalePass (existing — final rescale insertion)
     runner.add(Box::new(insert_rescale::InsertRescalePass));
+
+    // 16a. Re-run broadcast legalization after the final rescale insertion.
+    //      Late rescale nodes can reintroduce lower-rank constants feeding
+    //      NHWC binary chains, so we need one last reshape sweep here.
+    runner.add(Box::new(broadcast_args::BroadcastArgsPass));
 
     // 17. FuseEqualPlaceholdersPass (no-op for now)
     runner.add(Box::new(FuseEqualPlaceholdersPass));
