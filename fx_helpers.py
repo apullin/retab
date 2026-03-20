@@ -653,6 +653,113 @@ def decompose_linear_node(graph_module, node: Node) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Conv1d legalization helpers
+# ---------------------------------------------------------------------------
+
+def unsqueeze_conv1d_node(graph_module, node: Node) -> None:
+    """Convert a 1D convolution into a 2D convolution wrapped in view_copy ops."""
+    graph = graph_module.graph
+    args = node.args
+    target_str = str(node.target)
+
+    if "conv1d.default" in target_str:
+        if len(args) < 5:
+            raise RuntimeError(
+                f"Expected aten.conv1d.default to have at least 5 args, got {len(args)}"
+            )
+        x, weight, bias, stride, pad = args[:5]
+        dilation = args[5] if len(args) > 5 else (1,)
+        groups = args[6] if len(args) > 6 else 1
+        transposed = False
+        output_padding = (0,)
+    else:
+        if len(args) < 9:
+            raise RuntimeError(
+                f"Expected aten.convolution.default to have 9 args, got {len(args)}"
+            )
+        (
+            x,
+            weight,
+            bias,
+            stride,
+            pad,
+            dilation,
+            transposed,
+            output_padding,
+            groups,
+        ) = args[:9]
+
+    stride_tuple = tuple(stride)
+    if len(stride_tuple) != 1:
+        return
+
+    pad_tuple = tuple(pad)
+    dilation_tuple = tuple(dilation)
+    output_padding_tuple = tuple(output_padding)
+
+    view_copy_op = _get_edge_op("aten.view_copy.default")
+    conv_op = _get_edge_op("aten.convolution.default")
+
+    with graph.inserting_before(node):
+        x_unsqueezed = _create_node(
+            graph,
+            view_copy_op,
+            args=(x, list(_get_first_fake_tensor(x).shape) + [1]),
+            from_node=node,
+            inherit_qparams=False,
+        )
+        x_unsqueezed.meta["input_qparams"] = {}
+        x_unsqueezed.meta["output_qparams"] = {}
+        refresh_node_fake_tensor(x_unsqueezed)
+
+        w_unsqueezed = _create_node(
+            graph,
+            view_copy_op,
+            args=(weight, list(_get_first_fake_tensor(weight).shape) + [1]),
+            from_node=node,
+            inherit_qparams=False,
+        )
+        w_unsqueezed.meta["input_qparams"] = {}
+        w_unsqueezed.meta["output_qparams"] = {}
+        refresh_node_fake_tensor(w_unsqueezed)
+
+        conv2d = _create_node(
+            graph,
+            conv_op,
+            args=(
+                x_unsqueezed,
+                w_unsqueezed,
+                bias,
+                stride_tuple + (1,),
+                pad_tuple + (0,),
+                dilation_tuple + (1,),
+                transposed,
+                output_padding_tuple + (0,),
+                groups,
+            ),
+            kwargs=dict(node.kwargs),
+            from_node=node,
+            inherit_qparams=True,
+        )
+
+    with graph.inserting_after(conv2d):
+        squeezed = _create_node(
+            graph,
+            view_copy_op,
+            args=(conv2d, list(_get_first_fake_tensor(conv2d).shape)[:-1]),
+            from_node=node,
+            inherit_qparams=False,
+        )
+        squeezed.meta["input_qparams"] = {}
+        squeezed.meta["output_qparams"] = {}
+        refresh_node_fake_tensor(squeezed)
+
+    node.replace_all_uses_with(squeezed)
+    graph.erase_node(node)
+    graph.eliminate_dead_code()
+
+
+# ---------------------------------------------------------------------------
 # DecomposeQuantNodes helpers
 # ---------------------------------------------------------------------------
 

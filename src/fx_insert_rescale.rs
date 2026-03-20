@@ -130,11 +130,6 @@ pub struct FxInsertRescalePass;
 fn is_tosa_accumulator_op(target: &str) -> bool {
     target.contains("CONV2D")
         || target.contains("DEPTHWISE_CONV2D")
-        // The direct fast lane still exposes some raw convs after rewrite
-        // normalization. They carry quant metadata and serialize as TOSA convs,
-        // so they need the same post-accumulator requantization before pool/eltwise.
-        || target.contains("conv2d.default")
-        || target.contains("convolution.default")
 }
 
 fn is_dq(target: &str) -> bool {

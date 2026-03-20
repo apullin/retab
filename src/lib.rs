@@ -4,6 +4,7 @@ use pyo3::types::{PyBytes, PyDict};
 mod compile_spec;
 mod fx_cast_int64;
 mod fx_convert_clamp;
+mod fx_conv1d_unsqueeze;
 mod fx_convert_sum;
 mod fx_decompose;
 mod fx_decompose_linear;
