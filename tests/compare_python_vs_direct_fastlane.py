@@ -43,9 +43,6 @@ def _parse_result_json(output: str) -> dict[str, object] | None:
 
 
 def _spawn_reference(model: str, seed: int) -> dict[str, object]:
-    env = os.environ.copy()
-    env.pop("ARM_TOSA_ENGINE_SERIALIZER", None)
-
     cmd = [
         sys.executable,
         __file__,
@@ -59,7 +56,7 @@ def _spawn_reference(model: str, seed: int) -> dict[str, object]:
     proc = subprocess.run(
         cmd,
         cwd=str(HERE),
-        env=env,
+        env=os.environ.copy(),
         text=True,
         capture_output=True,
     )
@@ -76,7 +73,6 @@ def _spawn_reference(model: str, seed: int) -> dict[str, object]:
 
 def _spawn_direct(model: str, seed: int) -> dict[str, object]:
     env = os.environ.copy()
-    env["ARM_TOSA_ENGINE_SERIALIZER"] = "rust"
     with tempfile.TemporaryDirectory() as tmpdir:
         dump_path = Path(tmpdir) / f"{model}.tosa"
         env["ARM_TOSA_ENGINE_DUMP_TOSA"] = str(dump_path)

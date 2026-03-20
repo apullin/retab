@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test: patch TOSABackend._preprocess and run the full edge-lowering flow.
+"""Test the dedicated all_rust TOSABackend patch in the full edge flow.
 
 The EthosU pipeline is:
   EthosUBackend.preprocess
@@ -12,7 +12,7 @@ to_edge_transform_and_lower flow and compare results.
 Usage:
     bash build.sh && python tests/test_preprocess_patch.py
     bash build.sh && python tests/test_preprocess_patch.py --skip-unpatched
-    bash build.sh && python tests/test_preprocess_patch.py --model tiny_cnn --modes fast
+    bash build.sh && python tests/test_preprocess_patch.py --model tiny_cnn
 """
 
 import argparse
@@ -88,18 +88,11 @@ def main():
         choices=["tiny_cnn", "cnn_layernorm4d", "cnn_raw_layernorm"],
     )
     parser.add_argument(
-        "--modes",
-        default="fast,python_passes",
-        help="Comma-separated modes to test (fast, python_passes, python_passes_fast)",
-    )
-    parser.add_argument(
         "--skip-unpatched",
         action="store_true",
         help="Skip the slow unpatched baseline",
     )
     args = parser.parse_args()
-
-    modes = [m.strip() for m in args.modes.split(",")]
 
     print(f"Model: {args.model}")
     print("=" * 70)
@@ -135,27 +128,26 @@ def main():
             traceback.print_exc()
             results["unpatched"] = {"time": None, "error": str(e)}
 
-    # --- Patched modes ---
+    # --- Dedicated all_rust path ---
     from fast_preprocess import patch_tosa_backend, unpatch_tosa_backend
 
-    for mode in modes:
-        print(f"\n{'=' * 70}")
-        print(f"PATCHED: {mode} (Rust TOSA generation + Vela)")
-        print("=" * 70)
+    print(f"\n{'=' * 70}")
+    print("PATCHED: all_rust (dedicated Rust TOSA generation + Vela)")
+    print("=" * 70)
 
-        unpatch_tosa_backend()
-        patch_tosa_backend(mode=mode)
+    unpatch_tosa_backend()
+    patch_tosa_backend()
 
-        try:
-            elapsed, edge = run_edge_lower(quantized_ep, compile_spec)
-            print(f"  to_edge_transform_and_lower: {elapsed:.3f}s")
-            results[mode] = {"time": elapsed}
-        except Exception as e:
-            print(f"  FAILED: {e}")
-            import traceback
+    try:
+        elapsed, edge = run_edge_lower(quantized_ep, compile_spec)
+        print(f"  to_edge_transform_and_lower: {elapsed:.3f}s")
+        results["all_rust"] = {"time": elapsed}
+    except Exception as e:
+        print(f"  FAILED: {e}")
+        import traceback
 
-            traceback.print_exc()
-            results[mode] = {"time": None, "error": str(e)}
+        traceback.print_exc()
+        results["all_rust"] = {"time": None, "error": str(e)}
 
     # --- Summary ---
     print(f"\n{'=' * 70}")
@@ -170,13 +162,12 @@ def main():
             print(f"  {name:20s}: FAILED ({res.get('error', '?')})")
 
     baseline = results.get("unpatched", {}).get("time")
-    for mode in modes:
-        patched_time = results.get(mode, {}).get("time")
-        if baseline and patched_time:
-            speedup = baseline / patched_time
-            print(f"\n  {mode} vs unpatched: {speedup:.1f}x faster")
-            # Note: both include Vela time (~2s), so speedup on the TOSA
-            # generation step alone is higher.
+    patched_time = results.get("all_rust", {}).get("time")
+    if baseline and patched_time:
+        speedup = baseline / patched_time
+        print(f"\n  all_rust vs unpatched: {speedup:.1f}x faster")
+        # Note: both include Vela time (~2s), so speedup on the TOSA
+        # generation step alone is higher.
 
     print()
 

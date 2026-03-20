@@ -86,7 +86,9 @@ def _patched_tosa_backend(mode: str | None):
 
     unpatch_tosa_backend()
     if mode is not None:
-        patch_tosa_backend(mode=mode)
+        if mode != "all_rust":
+            raise ValueError(f"Unsupported mode: {mode!r}")
+        patch_tosa_backend()
     try:
         yield
     finally:

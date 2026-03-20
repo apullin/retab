@@ -96,7 +96,6 @@ def run_one_model(model_name: str) -> dict[str, Any]:
     )
     from fast_preprocess import patch_tosa_backend
 
-    os.environ.setdefault("ARM_TOSA_ENGINE_SERIALIZER", "rust")
     logging.basicConfig(level=logging.WARNING)
 
     spec = all_model_specs()[model_name]
@@ -105,7 +104,6 @@ def run_one_model(model_name: str) -> dict[str, Any]:
         "family": spec.family,
         "notes": spec.notes,
         "input_shape": list(spec.input_shape),
-        "serializer": os.environ.get("ARM_TOSA_ENGINE_SERIALIZER"),
     }
 
     t0 = time.perf_counter()
@@ -119,7 +117,7 @@ def run_one_model(model_name: str) -> dict[str, Any]:
         result["traceback"] = traceback.format_exc(limit=20)
         return result
 
-    patch_tosa_backend(mode="all_rust")
+    patch_tosa_backend()
     partitioner = EthosUPartitioner(compile_spec)
 
     t1 = time.perf_counter()

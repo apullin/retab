@@ -5,7 +5,7 @@ This script times the outer `to_edge_transform_and_lower(...)` pipeline and
 breaks out the main ET-side phases around our Rust lowering core.
 
 Example:
-    ARM_TOSA_ENGINE_SERIALIZER=rust python profile_et_outer.py --model cnn_layernorm4d
+    python profile_et_outer.py --model cnn_layernorm4d
 """
 
 from __future__ import annotations
@@ -248,7 +248,7 @@ def main() -> None:
     try:
         quantized_ep, compile_spec = prepare_quantized_program(args.model)
 
-        patch_tosa_backend(mode="all_rust")
+        patch_tosa_backend()
         partitioner = EthosUPartitioner(compile_spec)
 
         t0 = time.perf_counter()
