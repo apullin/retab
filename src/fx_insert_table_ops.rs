@@ -70,6 +70,21 @@ fn table_op_spec(node: &Bound<'_, PyAny>, target: &str) -> PyResult<Option<Table
             kind: "pow",
             scalar_arg: Some(scalar_arg),
         }))
+    } else if target.contains("gelu.default") {
+        Ok(Some(TableOpSpec {
+            kind: "gelu",
+            scalar_arg: None,
+        }))
+    } else if target.contains("silu.default") {
+        Ok(Some(TableOpSpec {
+            kind: "silu",
+            scalar_arg: None,
+        }))
+    } else if target.contains("erf.default") {
+        Ok(Some(TableOpSpec {
+            kind: "erf",
+            scalar_arg: None,
+        }))
     } else {
         Ok(None)
     }

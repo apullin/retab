@@ -253,6 +253,11 @@ _TABLE_MATH_FNS = {
     "log": lambda x: math.log(max(x, 1e-10)),
     "sigmoid": lambda x: 1.0 / (1.0 + math.exp(-x)),
     "tanh": math.tanh,
+    "erf": math.erf,
+    "silu": lambda x: float(torch.nn.functional.silu(torch.tensor(x, dtype=torch.float32)).item()),
+    "gelu": lambda x: float(
+        torch.nn.functional.gelu(torch.tensor(x, dtype=torch.float32), approximate="none").item()
+    ),
 }
 
 
@@ -319,7 +324,8 @@ def insert_table_op(
     Args:
         graph_module: the GraphModule
         node: the unary math node to replace (e.g. rsqrt)
-        kind: one of "rsqrt", "reciprocal", "pow", "exp", "log", "sigmoid", "tanh"
+        kind: one of "rsqrt", "reciprocal", "pow", "exp", "log", "sigmoid",
+            "tanh", "erf", "silu", "gelu"
         scalar_arg: embedded scalar exponent for `pow.Tensor_Scalar`
     """
     graph = graph_module.graph
