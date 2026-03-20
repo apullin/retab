@@ -208,17 +208,11 @@ fn map_axis_to_tosa_dim_order(node: &Node, axis: i32) -> i32 {
 /// 2. FX-inserted TRANSPOSE/RESHAPE nodes may already have a physical TOSA
 ///    layout that should be derived from their input tensor, not reused from
 ///    stale metadata.
-fn actual_tensor_shape(graph: &Graph, node: &Node) -> Vec<i32> {
-    if node.op == OpType::Placeholder {
-        return node
-            .meta
-            .val
-            .shape_slice()
-            .iter()
-            .map(|&d| d as i32)
-            .collect();
-    }
+fn is_runtime_input_placeholder(node: &Node, store: &TensorStore) -> bool {
+    node.op == OpType::Placeholder && store.get(&node.name).is_none()
+}
 
+fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Vec<i32> {
     if node.target == OpTarget::TosaReshape {
         if let Some(shape) = literal_output_shape(node) {
             return shape;
@@ -228,7 +222,7 @@ fn actual_tensor_shape(graph: &Graph, node: &Node) -> Vec<i32> {
     if node.target == OpTarget::TosaRescale {
         if let Some(Arg::Node(input_id)) = node.args.first() {
             if let Some(input_node) = graph.node(*input_id) {
-                return actual_tensor_shape(graph, input_node);
+                return actual_tensor_shape(graph, store, input_node);
             }
         }
     }
@@ -244,7 +238,7 @@ fn actual_tensor_shape(graph: &Graph, node: &Node) -> Vec<i32> {
         };
         if let Some(Arg::Node(input_id)) = node.args.first() {
             if let Some(input_node) = graph.node(*input_id) {
-                let input_shape = actual_tensor_shape(graph, input_node);
+                let input_shape = actual_tensor_shape(graph, store, input_node);
                 if input_shape.len() == perms.len() {
                     let output_shape: Vec<i32> = perms
                         .iter()
@@ -265,6 +259,13 @@ fn actual_tensor_shape(graph: &Graph, node: &Node) -> Vec<i32> {
         .iter()
         .map(|&d| d as i32)
         .collect();
+
+    // Runtime graph inputs are still expressed in logical PyTorch layout.
+    // Store-backed placeholders and lifted constants should continue through
+    // the normal physical-layout reordering path below.
+    if is_runtime_input_placeholder(node, store) {
+        return raw_shape;
+    }
 
     let reordered_shape = apply_tosa_dim_order(node, raw_shape.clone());
 
@@ -291,6 +292,7 @@ fn actual_tensor_shape(graph: &Graph, node: &Node) -> Vec<i32> {
 
 fn maybe_materialize_binary_broadcast(
     graph: &Graph,
+    store: &TensorStore,
     node: &Node,
     result: &mut EmitResult,
     input_names: &mut [String],
@@ -312,8 +314,8 @@ fn maybe_materialize_binary_broadcast(
     }
 
     let input_shapes = [
-        actual_tensor_shape(graph, input_nodes[0]),
-        actual_tensor_shape(graph, input_nodes[1]),
+        actual_tensor_shape(graph, store, input_nodes[0]),
+        actual_tensor_shape(graph, store, input_nodes[1]),
     ];
 
     let (smaller_idx, target_shape) = if input_shapes[0].len() < input_shapes[1].len() {
@@ -606,6 +608,7 @@ fn node_nhwc_shape(node: &Node) -> Vec<i32> {
 ///   OW = (IW + pad_left + pad_right - (KW-1)*dilation_w - 1) / stride_w + 1
 fn compute_conv2d_nhwc_output(
     graph: &Graph,
+    store: &TensorStore,
     node: &Node,
     pad: &[i32],
     stride: &[i32],
@@ -631,7 +634,7 @@ fn compute_conv2d_nhwc_output(
         let weight_node = graph.node(weight_id)?;
 
         // Input in NHWC: [N, IH, IW, IC]
-        let inp = actual_tensor_shape(graph, input_node);
+        let inp = actual_tensor_shape(graph, store, input_node);
         if inp.len() != 4 {
             return None;
         }
@@ -640,7 +643,7 @@ fn compute_conv2d_nhwc_output(
         // Weight may be either:
         //   - an original PyTorch constant in OIHW [OC, IC, KH, KW], or
         //   - a synthesized reshape already in TOSA OHWI [OC, KH, KW, IC].
-        let ws = actual_tensor_shape(graph, weight_node);
+        let ws = actual_tensor_shape(graph, store, weight_node);
         if ws.len() != 4 {
             return None;
         }
@@ -707,6 +710,7 @@ fn compute_conv2d_nhwc_output(
 ///   OW = (IW + pad_left + pad_right - (KW-1)*dilation_w - 1) / stride_w + 1
 fn compute_depthwise_conv2d_nhwc_output(
     graph: &Graph,
+    store: &TensorStore,
     node: &Node,
     pad: &[i32],
     stride: &[i32],
@@ -728,7 +732,7 @@ fn compute_depthwise_conv2d_nhwc_output(
         let weight_node = graph.node(weight_id)?;
 
         // Input in NHWC: [N, IH, IW, IC]
-        let inp = actual_tensor_shape(graph, input_node);
+        let inp = actual_tensor_shape(graph, store, input_node);
         if inp.len() != 4 {
             return None;
         }
@@ -797,6 +801,7 @@ fn compute_depthwise_conv2d_nhwc_output(
 ///   OW = (IW + pad_left + pad_right - kernel_w) / stride_w + 1
 fn compute_pool_nhwc_output(
     graph: &Graph,
+    store: &TensorStore,
     node: &Node,
     kernel: &[i32],
     stride: &[i32],
@@ -812,7 +817,7 @@ fn compute_pool_nhwc_output(
         let input_node = graph.node(input_id)?;
 
         // Input in NHWC: [N, IH, IW, C]
-        let inp = actual_tensor_shape(graph, input_node);
+        let inp = actual_tensor_shape(graph, store, input_node);
         if inp.len() != 4 {
             return None;
         }
@@ -1158,7 +1163,7 @@ pub fn emit_aten_conv2d(
     // Compute NHWC output shape from TOSA formula
     if is_depthwise {
         result.tensors.push(compute_depthwise_conv2d_nhwc_output(
-            graph, node, &pad, &stride, &dilation,
+            graph, _store, node, &pad, &stride, &dilation,
         ));
         result.operators.push(TosaOperator {
             op: Op::DepthwiseConv2d,
@@ -1175,7 +1180,7 @@ pub fn emit_aten_conv2d(
         });
     } else {
         result.tensors.push(compute_conv2d_nhwc_output(
-            graph, node, &pad, &stride, &dilation,
+            graph, _store, node, &pad, &stride, &dilation,
         ));
         result.operators.push(TosaOperator {
             op: Op::Conv2d,
@@ -1233,7 +1238,7 @@ pub fn emit_aten_max_pool2d(
         stride.clone()
     };
     let mut output_tensor =
-        compute_pool_nhwc_output(graph, node, &kernel_for_shape, &stride_for_shape, &pad);
+        compute_pool_nhwc_output(graph, _store, node, &kernel_for_shape, &stride_for_shape, &pad);
     output_tensor.name = output_name.clone();
     result.tensors.push(output_tensor);
 
@@ -1626,6 +1631,7 @@ pub fn emit_conv2d(
     };
     result.tensors.push(compute_conv2d_nhwc_output(
         graph,
+        _store,
         node,
         &pad_for_shape,
         &stride_for_shape,
@@ -1794,6 +1800,7 @@ pub fn emit_depthwise_conv2d(
     };
     result.tensors.push(compute_depthwise_conv2d_nhwc_output(
         graph,
+        _store,
         node,
         &pad_for_shape,
         &stride_for_shape,
@@ -1920,7 +1927,7 @@ pub fn emit_rescale(
     // that downstream shape propagation will observe.
     result.tensors.push(TosaTensor {
         name: node.name.clone(),
-        shape: actual_tensor_shape(graph, node),
+        shape: actual_tensor_shape(graph, _store, node),
         dtype: ir_dtype_to_tosa(node.meta.val.dtype),
         data: Vec::new(),
         variable: false,
@@ -2162,6 +2169,7 @@ pub fn emit_max_pool2d(
     };
     let mut output_tensor = compute_pool_nhwc_output(
         graph,
+        _store,
         node,
         &kernel_for_shape,
         &stride_for_shape,
@@ -2225,7 +2233,7 @@ pub fn emit_transpose(
         .collect();
     if let Some(Arg::Node(input_id)) = node.args.first() {
         if let Some(input_node) = graph.node(*input_id) {
-            let input_shape = actual_tensor_shape(graph, input_node);
+            let input_shape = actual_tensor_shape(graph, _store, input_node);
             if input_shape.len() == perms.len() {
                 let candidate: Vec<i32> = perms
                     .iter()
@@ -2275,7 +2283,7 @@ pub fn emit_reshape(
     // Use one physical shape consistently for both the RESHAPE output tensor
     // and its CONST_SHAPE input. Mixing raw meta.val with reordered output
     // tensor shapes produces an internally inconsistent flatbuffer.
-    let out_shape = actual_tensor_shape(graph, node);
+    let out_shape = actual_tensor_shape(graph, _store, node);
     result.tensors.push(TosaTensor {
         name: node.name.clone(),
         shape: out_shape.clone(),
@@ -2421,7 +2429,7 @@ pub fn emit_add(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorSto
 
     let input_names = collect_input_names(graph, node);
     let mut add_inputs = input_names;
-    maybe_materialize_binary_broadcast(graph, node, &mut result, &mut add_inputs);
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut add_inputs);
     result.tensors.push(make_output_tensor(node));
 
     result.operators.push(TosaOperator {
@@ -2441,7 +2449,7 @@ pub fn emit_sub(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorSto
 
     let input_names = collect_input_names(graph, node);
     let mut sub_inputs = input_names;
-    maybe_materialize_binary_broadcast(graph, node, &mut result, &mut sub_inputs);
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut sub_inputs);
     result.tensors.push(make_output_tensor(node));
 
     result.operators.push(TosaOperator {
@@ -2464,7 +2472,7 @@ pub fn emit_mul(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorSto
 
     let input_names = collect_input_names(graph, node);
     let mut mul_inputs = input_names;
-    maybe_materialize_binary_broadcast(graph, node, &mut result, &mut mul_inputs);
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut mul_inputs);
     result.tensors.push(make_output_tensor(node));
 
     // Create the shift const tensor (scalar int8 = 0)
@@ -2551,7 +2559,7 @@ pub fn emit_avg_pool2d(
 
     // Compute NHWC output shape from pool formula
     result.tensors.push(compute_pool_nhwc_output(
-        graph, node, &kernel, &stride, &pad,
+        graph, _store, node, &kernel, &stride, &pad,
     ));
     let acc_type = DType::Int32;
     let input_zp = kwarg_i32(node, "input_zp", 0);
@@ -2846,7 +2854,7 @@ pub fn emit_round(
         None => return result,
     };
 
-    let shape = actual_tensor_shape(graph, node);
+    let shape = actual_tensor_shape(graph, _store, node);
     let dtype = node.meta.val.dtype;
 
     let zero_name = format!("{}_round_zero", node.name);
@@ -3197,7 +3205,7 @@ pub fn emit_matmul(
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let out_dtype = node_output_dtype(node);
-    let out_shape = actual_tensor_shape(graph, node);
+    let out_shape = actual_tensor_shape(graph, _store, node);
     let matmul_out_dtype = if out_shape.len() == 2 {
         DType::Int32
     } else {
@@ -3208,11 +3216,11 @@ pub fn emit_matmul(
         (Some(Arg::Node(a_id)), Some(Arg::Node(b_id))) => {
             let a_shape = graph
                 .node(*a_id)
-                .map(|n| actual_tensor_shape(graph, n))
+                .map(|n| actual_tensor_shape(graph, _store, n))
                 .unwrap_or_default();
             let b_shape = graph
                 .node(*b_id)
-                .map(|n| actual_tensor_shape(graph, n))
+                .map(|n| actual_tensor_shape(graph, _store, n))
                 .unwrap_or_default();
             a_shape.len() == 2 && b_shape.len() == 2
         }
@@ -3231,11 +3239,11 @@ pub fn emit_matmul(
             (Some(Arg::Node(a_id)), Some(Arg::Node(b_id))) => {
                 let a_shape = graph
                     .node(*a_id)
-                    .map(|n| actual_tensor_shape(graph, n))
+                    .map(|n| actual_tensor_shape(graph, _store, n))
                     .unwrap_or_default();
                 let b_shape = graph
                     .node(*b_id)
-                    .map(|n| actual_tensor_shape(graph, n))
+                    .map(|n| actual_tensor_shape(graph, _store, n))
                     .unwrap_or_default();
                 (a_shape, b_shape)
             }
@@ -3412,7 +3420,7 @@ pub fn emit_pad(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorSto
             Arg::Node(id) => graph.node(*id),
             _ => None,
         })
-        .map(|input_node| actual_tensor_shape(graph, input_node))
+        .map(|input_node| actual_tensor_shape(graph, _store, input_node))
         .unwrap_or_else(|| {
             node.meta
                 .val
@@ -3483,7 +3491,7 @@ pub fn emit_slice(
         _ => None,
     };
     let input_shape = input_node
-        .map(|n| actual_tensor_shape(graph, n))
+        .map(|n| actual_tensor_shape(graph, _store, n))
         .unwrap_or_else(|| {
             node.meta
                 .val
