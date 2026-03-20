@@ -9,6 +9,7 @@ import os
 import random
 import sys
 import time
+import traceback
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,10 +23,13 @@ U55_ROOT = ENGINE_ROOT.parent
 ROOT = U55_ROOT.parent
 ET_ROOT = ROOT / "executorch"
 
-for path in (ET_ROOT / "src", U55_ROOT, ENGINE_ROOT):
+for path in (ET_ROOT / "src", U55_ROOT, ENGINE_ROOT, ENGINE_ROOT / "tests"):
     sys.path.insert(0, str(path))
 
-from model_corpus import all_model_specs, get_model_and_example  # noqa: E402
+from families import load_all_families  # noqa: E402
+from lib.registry import all_model_specs, get_model_and_example  # noqa: E402
+
+load_all_families()
 
 
 @dataclass(frozen=True)
@@ -194,14 +198,16 @@ def _summarize_tosa_bytes(buf: bytes) -> dict[str, Any]:
         tensor = block.Tensors(i)
         name = tensor.Name().decode() if tensor.Name() else ""
         tensors.append(
-            {
-                "name": name,
-                "shape": [tensor.Shape(j) for j in range(tensor.ShapeLength())],
-                "dtype": tensor.Type(),
-                "dtype_name": dtype_names.get(tensor.Type(), f"?{tensor.Type()}"),
-                "data_len": tensor.DataLength(),
-                "data": bytes(tensor.DataAsNumpy()) if tensor.DataLength() > 0 else b"",
-            }
+                {
+                    "name": name,
+                    "shape": [tensor.Shape(j) for j in range(tensor.ShapeLength())],
+                    "dtype": tensor.Type(),
+                    "dtype_name": dtype_names.get(tensor.Type(), f"?{tensor.Type()}"),
+                    "data_len": tensor.DataLength(),
+                    "data_hex": bytes(tensor.DataAsNumpy()).hex()
+                    if tensor.DataLength() > 0
+                    else "",
+                }
         )
 
     ops = []
@@ -288,12 +294,17 @@ def _capture_preprocess(mode: str | None, model_name: str, seed: int = 0) -> dic
             "status": "failed",
             "prepare_s": round(time.perf_counter() - t0, 3),
             "error": f"{type(exc).__name__}: {exc}",
+            "traceback": traceback.format_exc(limit=20),
         }
 
 
+def run_single_path(model_name: str, mode: str | None, seed: int = 0) -> dict[str, Any]:
+    return _capture_preprocess(mode, model_name, seed=seed)
+
+
 def run_reference_and_direct(model_name: str, seed: int = 0) -> dict[str, Any]:
-    reference = _capture_preprocess(None, model_name, seed=seed)
-    direct = _capture_preprocess("all_rust", model_name, seed=seed)
+    reference = run_single_path(model_name, None, seed=seed)
+    direct = run_single_path(model_name, "all_rust", seed=seed)
 
     comparison = None
     if reference["status"] == "success" and direct["status"] == "success":
@@ -341,7 +352,7 @@ def compare_tosa_artifacts(reference: dict[str, Any], direct: dict[str, Any]) ->
                 }
             )
         if ref_t["data_len"] > 0 and fast_t["data_len"] > 0:
-            if ref_t["data"] == fast_t["data"]:
+            if bytes.fromhex(ref_t["data_hex"]) == bytes.fromhex(fast_t["data_hex"]):
                 same_payload.append(name)
             else:
                 diff_payload.append(name)
