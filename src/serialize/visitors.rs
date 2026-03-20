@@ -260,7 +260,7 @@ fn actual_tensor_shape(graph: &Graph, node: &Node) -> Vec<i32> {
     }
 }
 
-fn maybe_materialize_scalar_broadcast(
+fn maybe_materialize_binary_broadcast(
     graph: &Graph,
     node: &Node,
     result: &mut EmitResult,
@@ -287,15 +287,17 @@ fn maybe_materialize_scalar_broadcast(
         actual_tensor_shape(graph, input_nodes[1]),
     ];
 
-    let (scalar_idx, target_shape) = if input_shapes[0].is_empty() && !input_shapes[1].is_empty() {
-        (0usize, vec![1; input_shapes[1].len()])
-    } else if input_shapes[1].is_empty() && !input_shapes[0].is_empty() {
-        (1usize, vec![1; input_shapes[0].len()])
+    let (smaller_idx, target_shape) = if input_shapes[0].len() < input_shapes[1].len() {
+        let target_shape = broadcast_shape_for_binary_inputs(&input_shapes[0], &input_shapes[1]);
+        (0usize, target_shape)
+    } else if input_shapes[1].len() < input_shapes[0].len() {
+        let target_shape = broadcast_shape_for_binary_inputs(&input_shapes[1], &input_shapes[0]);
+        (1usize, target_shape)
     } else {
         return;
     };
 
-    let broadcast_name = format!("{}_input{}_broadcast", node.name, scalar_idx);
+    let broadcast_name = format!("{}_input{}_broadcast", node.name, smaller_idx);
     let shape_name = format!("{}_shape", broadcast_name);
     let rank = target_shape.len() as u32;
     let shape_data: Vec<u8> = target_shape
@@ -306,7 +308,7 @@ fn maybe_materialize_scalar_broadcast(
     result.tensors.push(TosaTensor {
         name: broadcast_name.clone(),
         shape: target_shape,
-        dtype: ir_dtype_to_tosa(input_nodes[scalar_idx].meta.val.dtype),
+        dtype: ir_dtype_to_tosa(input_nodes[smaller_idx].meta.val.dtype),
         data: Vec::new(),
         variable: false,
         is_unranked: false,
@@ -327,11 +329,30 @@ fn maybe_materialize_scalar_broadcast(
     result.operators.push(TosaOperator {
         op: Op::Reshape,
         attribute: Attribute::Reshape(ReshapeAttribute),
-        inputs: vec![input_names[scalar_idx].clone(), shape_name],
+        inputs: vec![input_names[smaller_idx].clone(), shape_name],
         outputs: vec![broadcast_name.clone()],
         location: None,
     });
-    input_names[scalar_idx] = broadcast_name;
+    input_names[smaller_idx] = broadcast_name;
+}
+
+/// Best-effort rank-4 NHWC broadcast shape for lower-rank binary operands.
+///
+/// The direct fast lane commonly produces per-channel constants with shapes
+/// like `[C, 1, 1]` feeding rank-4 NHWC binary ops. TOSA requires equal ranks
+/// for these binary ops, so we materialize a broadcast reshape that preserves
+/// the channel value in the last dimension.
+fn broadcast_shape_for_binary_inputs(smaller: &[i32], larger: &[i32]) -> Vec<i32> {
+    if larger.len() == 4 && smaller.len() < 4 {
+        let non_ones: Vec<i32> = smaller.iter().copied().filter(|&d| d != 1).collect();
+        if non_ones.len() <= 1 {
+            return vec![1, 1, 1, non_ones.first().copied().unwrap_or(1)];
+        }
+    }
+
+    let mut shape = vec![1; larger.len().saturating_sub(smaller.len())];
+    shape.extend_from_slice(smaller);
+    shape
 }
 
 /// Build the output tensor entry for a node.
@@ -2306,12 +2327,14 @@ pub fn emit_add(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorSto
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
+    let mut add_inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, node, &mut result, &mut add_inputs);
     result.tensors.push(make_output_tensor(node));
 
     result.operators.push(TosaOperator {
         op: Op::Add,
         attribute: Attribute::Add(AddAttribute),
-        inputs: input_names,
+        inputs: add_inputs,
         outputs: vec![node.name.clone()],
         location: None,
     });
@@ -2324,12 +2347,14 @@ pub fn emit_sub(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorSto
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
+    let mut sub_inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, node, &mut result, &mut sub_inputs);
     result.tensors.push(make_output_tensor(node));
 
     result.operators.push(TosaOperator {
         op: Op::Sub,
         attribute: Attribute::Sub(SubAttribute),
-        inputs: input_names,
+        inputs: sub_inputs,
         outputs: vec![node.name.clone()],
         location: None,
     });
@@ -2346,7 +2371,7 @@ pub fn emit_mul(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorSto
 
     let input_names = collect_input_names(graph, node);
     let mut mul_inputs = input_names;
-    maybe_materialize_scalar_broadcast(graph, node, &mut result, &mut mul_inputs);
+    maybe_materialize_binary_broadcast(graph, node, &mut result, &mut mul_inputs);
     result.tensors.push(make_output_tensor(node));
 
     // Create the shift const tensor (scalar int8 = 0)
