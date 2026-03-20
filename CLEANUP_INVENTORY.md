@@ -75,27 +75,28 @@ These are useful for archaeology, but they should stop cluttering the repo root.
 
 ### Historical Writeups
 
-The repo root contains many one-off writeups:
-- [ASSESSMENT.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/ASSESSMENT.md)
-- [AUDIT.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/AUDIT.md)
-- [PHASE1_STATUS.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/PHASE1_STATUS.md)
-- [P0_FIXES_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/P0_FIXES_WRITEUP.md)
-- [P2_FIXES_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/P2_FIXES_WRITEUP.md)
-- [P3_FIXES_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/P3_FIXES_WRITEUP.md)
-- [TICKET_1A_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/TICKET_1A_WRITEUP.md)
-- [TICKET_1B_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/TICKET_1B_WRITEUP.md)
-- [TICKET_1C_IMPL_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/TICKET_1C_IMPL_WRITEUP.md)
-- [TICKET_1C_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/TICKET_1C_WRITEUP.md)
-- [TICKET_1D_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/TICKET_1D_WRITEUP.md)
-- [TICKET_1E_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/TICKET_1E_WRITEUP.md)
-- [TICKET_1F_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/TICKET_1F_WRITEUP.md)
-- [TICKET_2A_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/TICKET_2A_WRITEUP.md)
-- [TICKET_2B_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/TICKET_2B_WRITEUP.md)
-- [TICKET_2C_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/TICKET_2C_WRITEUP.md)
+Historical writeups are now archived under [docs/history/](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history):
+- [ASSESSMENT.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/ASSESSMENT.md)
+- [AUDIT.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/AUDIT.md)
+- [PHASE1_STATUS.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/PHASE1_STATUS.md)
+- [P0_FIXES_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/P0_FIXES_WRITEUP.md)
+- [P2_FIXES_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/P2_FIXES_WRITEUP.md)
+- [P3_FIXES_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/P3_FIXES_WRITEUP.md)
+- [REVIEW_1B.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/REVIEW_1B.md)
+- [TICKET_1A_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/TICKET_1A_WRITEUP.md)
+- [TICKET_1B_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/TICKET_1B_WRITEUP.md)
+- [TICKET_1C_IMPL_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/TICKET_1C_IMPL_WRITEUP.md)
+- [TICKET_1C_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/TICKET_1C_WRITEUP.md)
+- [TICKET_1D_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/TICKET_1D_WRITEUP.md)
+- [TICKET_1E_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/TICKET_1E_WRITEUP.md)
+- [TICKET_1F_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/TICKET_1F_WRITEUP.md)
+- [TICKET_2A_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/TICKET_2A_WRITEUP.md)
+- [TICKET_2B_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/TICKET_2B_WRITEUP.md)
+- [TICKET_2C_WRITEUP.md](/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/docs/history/TICKET_2C_WRITEUP.md)
 
 Recommended cleanup:
-- move them under `docs/history/` or `docs/bringup/`
-- leave a short top-level README pointer instead of keeping them in the root
+- keep new bring-up archaeology under `docs/history/`
+- avoid adding fresh one-off status writeups in the repo root
 
 ### Diagnostic / Audit Scripts
 
