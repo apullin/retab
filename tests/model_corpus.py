@@ -8,7 +8,7 @@ themselves through the shared registry in `tests/lib/registry.py`.
 from __future__ import annotations
 
 from families import load_all_families
-from lib.registry import get_model_and_example, iter_model_specs
+from lib.registry import all_model_specs, get_model_and_example, iter_model_specs
 
 
 load_all_families()
