@@ -41,6 +41,20 @@ class RMSNorm2d(nn.Module):
         return x * rms * self.weight + self.bias
 
 
+class ChannelAffineNorm2d(nn.Module):
+    def __init__(self, channels: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(channels, 1, 1))
+        self.bias = nn.Parameter(torch.zeros(channels, 1, 1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        mean = x.mean(dim=1, keepdim=True)
+        var = x.var(dim=1, keepdim=True, correction=0)
+        inv_std = torch.reciprocal(torch.sqrt(var + self.eps))
+        return (x - mean) * inv_std * self.weight + self.bias
+
+
 class ResidualAvgPoolCNN(nn.Module):
     def __init__(self, num_classes: int = 6) -> None:
         super().__init__()
@@ -136,6 +150,75 @@ class RMSNormResidualCNN(nn.Module):
         x = F.relu(self.norm1(self.conv1(x)))
         x = self.norm2(self.conv2(x))
         x = self.pool(F.relu(x + residual))
+        return self.head(x)
+
+
+class ChannelNormBlockCNN(nn.Module):
+    def __init__(self, num_classes: int = 6) -> None:
+        super().__init__()
+        self.stem = nn.Conv2d(2, 8, kernel_size=3, padding=1)
+        self.norm = ChannelAffineNorm2d(8)
+        self.post = nn.Conv2d(8, 8, kernel_size=1)
+        self.head = nn.Sequential(
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(8, num_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        x = F.relu(self.norm(x))
+        x = self.post(x)
+        return self.head(x)
+
+
+class RMSNormBlockCNN(nn.Module):
+    def __init__(self, num_classes: int = 6) -> None:
+        super().__init__()
+        self.stem = nn.Conv2d(2, 8, kernel_size=3, padding=1)
+        self.norm = RMSNorm2d(8)
+        self.post = nn.Conv2d(8, 8, kernel_size=1)
+        self.head = nn.Sequential(
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(8, num_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        x = F.relu(self.norm(x))
+        x = self.post(x)
+        return self.head(x)
+
+
+class ReshapeReduceBroadcastCNN(nn.Module):
+    def __init__(self, num_classes: int = 5) -> None:
+        super().__init__()
+        channels = 6
+        self.stem = nn.Conv2d(2, channels, kernel_size=3, padding=1)
+        self.post = nn.Conv2d(channels, channels, kernel_size=1)
+        self.weight = nn.Parameter(torch.ones(channels, 1))
+        self.bias = nn.Parameter(torch.zeros(channels, 1))
+        self.head = nn.Sequential(
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(channels, num_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.relu(self.stem(x))
+        n, c, h, w = x.shape
+        flat = x.reshape(n, c, h * w)
+        mean = flat.mean(dim=2, keepdim=True)
+        centered = flat - mean
+        var = (centered * centered).mean(dim=2, keepdim=True)
+        scaled = centered * torch.rsqrt(var + 1e-6)
+        scaled = scaled * self.weight + self.bias
+        x = scaled.reshape(n, c, h, w)
+        x = self.post(x)
         return self.head(x)
 
 
@@ -235,6 +318,27 @@ EXTRA_MODEL_SPECS: Dict[str, ModelSpec] = {
         input_shape=(1, 2, 16, 16),
         family="norm",
         notes="Residual CNN using RMSNorm-style decomposition",
+    ),
+    "channel_norm_block_cnn": ModelSpec(
+        name="channel_norm_block_cnn",
+        factory=ChannelNormBlockCNN,
+        input_shape=(1, 2, 16, 16),
+        family="norm",
+        notes="Small conv block with channel-wise mean/var norm and affine broadcast",
+    ),
+    "rmsnorm_block_cnn": ModelSpec(
+        name="rmsnorm_block_cnn",
+        factory=RMSNormBlockCNN,
+        input_shape=(1, 2, 16, 16),
+        family="norm",
+        notes="Small conv block with RMSNorm-style affine broadcast",
+    ),
+    "reshape_reduce_broadcast_cnn": ModelSpec(
+        name="reshape_reduce_broadcast_cnn",
+        factory=ReshapeReduceBroadcastCNN,
+        input_shape=(1, 2, 16, 16),
+        family="reshape_norm",
+        notes="Conv block with reshape -> reduce -> rsqrt -> broadcast affine -> reshape",
     ),
     "elman_rnn_decomposed": ModelSpec(
         name="elman_rnn_decomposed",

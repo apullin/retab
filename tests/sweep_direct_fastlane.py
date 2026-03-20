@@ -223,6 +223,11 @@ def print_summary(results: list[dict[str, Any]]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", help="Run a single model in child mode")
+    parser.add_argument(
+        "--family",
+        action="append",
+        help="Restrict parent-mode sweep to one or more model families",
+    )
     parser.add_argument("--json-only", action="store_true")
     parser.add_argument(
         "--json-out",
@@ -235,7 +240,11 @@ def main() -> None:
         print(f"RESULT_JSON={json.dumps(result, sort_keys=True)}")
         return
 
-    models = sorted(all_model_specs())
+    specs = all_model_specs()
+    models = sorted(specs)
+    if args.family:
+        families = set(args.family)
+        models = [name for name in models if specs[name].family in families]
     results = run_subprocess_sweep(models)
     print_summary(results)
     if args.json_out:
