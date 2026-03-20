@@ -248,11 +248,26 @@ import numpy as np
 # Map of supported math functions for table generation.
 _TABLE_MATH_FNS = {
     "rsqrt": lambda x: 1.0 / math.sqrt(max(x, 1e-10)),
+    "reciprocal": lambda x: 0.0 if abs(x) < 1e-10 else 1.0 / x,
     "exp": math.exp,
     "log": lambda x: math.log(max(x, 1e-10)),
     "sigmoid": lambda x: 1.0 / (1.0 + math.exp(-x)),
     "tanh": math.tanh,
 }
+
+
+def _table_math_fn(kind: str, scalar_arg: float | None = None):
+    if kind != "pow":
+        return _TABLE_MATH_FNS[kind]
+
+    if scalar_arg is None:
+        raise ValueError("pow table op requires a scalar exponent")
+
+    def _pow_fn(x: float) -> float:
+        value = torch.pow(torch.tensor(x, dtype=torch.float32), float(scalar_arg))
+        return float(value.item())
+
+    return _pow_fn
 
 
 def _compute_table(
@@ -265,6 +280,7 @@ def _compute_table(
     output_zp: int,
     output_qmin: int,
     output_qmax: int,
+    scalar_arg: float | None = None,
 ) -> list[int]:
     """Compute a lookup table for a quantized unary math function.
 
@@ -277,7 +293,7 @@ def _compute_table(
     For int8 tensors this yields 256 entries, matching the Python reference
     and the TOSA backend's emitted TABLE constants for Ethos-U flows.
     """
-    fn = _TABLE_MATH_FNS[kind]
+    fn = _table_math_fn(kind, scalar_arg)
     table = []
     for i in range(input_qmin, input_qmax + 1):
         x_float = (i - input_zp) * input_scale
@@ -292,6 +308,7 @@ def insert_table_op(
     graph_module,
     node: Node,
     kind: str,
+    scalar_arg: float | None = None,
 ) -> None:
     """Replace a unary math node with a TOSA TABLE op.
 
@@ -302,7 +319,8 @@ def insert_table_op(
     Args:
         graph_module: the GraphModule
         node: the unary math node to replace (e.g. rsqrt)
-        kind: one of "rsqrt", "exp", "log", "sigmoid", "tanh"
+        kind: one of "rsqrt", "reciprocal", "pow", "exp", "log", "sigmoid", "tanh"
+        scalar_arg: embedded scalar exponent for `pow.Tensor_Scalar`
     """
     graph = graph_module.graph
     meta = node.meta
@@ -357,6 +375,7 @@ def insert_table_op(
         kind,
         input_scale, input_zp, input_qmin, input_qmax,
         output_scale, output_zp, output_qmin, output_qmax,
+        scalar_arg,
     )
 
     # Create a tensor constant for the table

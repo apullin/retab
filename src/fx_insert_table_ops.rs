@@ -5,30 +5,73 @@ use crate::fx_pass::FxPass;
 
 /// FX-graph-direct implementation of `InsertTableOpsPass`.
 ///
-/// Finds unary math ops (`rsqrt`, `exp`, `log`, `sigmoid`, `tanh`) that have
-/// both `input_qparams` and `output_qparams` in their node metadata, and
-/// replaces them with a TOSA TABLE op backed by a precomputed 513-entry
-/// lookup table.
+/// Finds quantized math ops that should become TOSA TABLEs on U55 and
+/// replaces them with a TOSA TABLE op backed by a precomputed lookup table.
 ///
 /// The heavy matching logic lives in Rust; the actual table computation and
 /// node creation are delegated to `fx_helpers.py` to avoid reimplementing
 /// NumPy / FakeTensor bookkeeping.
 pub struct FxInsertTableOpsPass;
 
-/// Recognised unary targets that can be lowered to TABLE ops.
-fn table_op_kind(target: &str) -> Option<&'static str> {
+#[derive(Clone, Copy)]
+struct TableOpSpec {
+    kind: &'static str,
+    scalar_arg: Option<f64>,
+}
+
+fn node_scalar_arg(node: &Bound<'_, PyAny>, idx: usize) -> PyResult<Option<f64>> {
+    let args = FxGraphModule::node_args(node)?;
+    let Some(arg) = args.get(idx) else {
+        return Ok(None);
+    };
+    if let Ok(v) = arg.extract::<f64>() {
+        return Ok(Some(v));
+    }
+    if let Ok(v) = arg.extract::<i64>() {
+        return Ok(Some(v as f64));
+    }
+    Ok(None)
+}
+
+/// Recognised targets that can be lowered to TABLE ops.
+fn table_op_spec(node: &Bound<'_, PyAny>, target: &str) -> PyResult<Option<TableOpSpec>> {
     if target.contains("rsqrt.default") {
-        Some("rsqrt")
+        Ok(Some(TableOpSpec {
+            kind: "rsqrt",
+            scalar_arg: None,
+        }))
+    } else if target.contains("reciprocal.default") {
+        Ok(Some(TableOpSpec {
+            kind: "reciprocal",
+            scalar_arg: None,
+        }))
     } else if target.contains("exp.default") {
-        Some("exp")
+        Ok(Some(TableOpSpec {
+            kind: "exp",
+            scalar_arg: None,
+        }))
     } else if target.contains("log.default") {
-        Some("log")
+        Ok(Some(TableOpSpec {
+            kind: "log",
+            scalar_arg: None,
+        }))
     } else if target.contains("sigmoid.default") {
-        Some("sigmoid")
+        Ok(Some(TableOpSpec {
+            kind: "sigmoid",
+            scalar_arg: None,
+        }))
     } else if target.contains("tanh.default") {
-        Some("tanh")
+        Ok(Some(TableOpSpec {
+            kind: "tanh",
+            scalar_arg: None,
+        }))
+    } else if target.contains("pow.Tensor_Scalar") {
+        Ok(node_scalar_arg(node, 1)?.map(|scalar_arg| TableOpSpec {
+            kind: "pow",
+            scalar_arg: Some(scalar_arg),
+        }))
     } else {
-        None
+        Ok(None)
     }
 }
 
@@ -44,10 +87,9 @@ impl FxPass for FxInsertTableOpsPass {
 
         let all_nodes = gm.nodes()?;
 
-        // Collect candidates first to avoid mutation during iteration.
         struct TableCandidate<'py> {
             node: Bound<'py, PyAny>,
-            kind: &'static str,
+            spec: TableOpSpec,
         }
         let mut candidates: Vec<TableCandidate> = Vec::new();
 
@@ -57,8 +99,8 @@ impl FxPass for FxInsertTableOpsPass {
                 continue;
             }
             let target = FxGraphModule::node_target_str(node)?;
-            let kind = match table_op_kind(&target) {
-                Some(k) => k,
+            let spec = match table_op_spec(node, &target)? {
+                Some(spec) => spec,
                 None => continue,
             };
 
@@ -93,7 +135,7 @@ impl FxPass for FxInsertTableOpsPass {
             if has_input_qp && has_output_qp {
                 candidates.push(TableCandidate {
                     node: node.clone(),
-                    kind,
+                    spec,
                 });
             }
         }
@@ -108,7 +150,12 @@ impl FxPass for FxInsertTableOpsPass {
             //   5. Erases the original node
             helpers.call_method1(
                 "insert_table_op",
-                (gm.gm_ref(), &cand.node, cand.kind),
+                (
+                    gm.gm_ref(),
+                    &cand.node,
+                    cand.spec.kind,
+                    cand.spec.scalar_arg,
+                ),
             )?;
             modified = true;
         }
