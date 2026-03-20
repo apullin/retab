@@ -40,8 +40,11 @@ class SlicePadCatCNN(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self.stem(x))
-        cropped = x[:, :, 1:-1, 1:-1]
-        padded = F.pad(cropped, (1, 1, 1, 1))
+        # Use explicit ATen ops instead of Python indexing sugar so the test
+        # exercises the same operator surface as the Arm support tables.
+        cropped = torch.ops.aten.slice_copy.Tensor(x, 2, 1, -1, 1)
+        cropped = torch.ops.aten.slice_copy.Tensor(cropped, 3, 1, -1, 1)
+        padded = torch.ops.aten.constant_pad_nd.default(cropped, [1, 1, 1, 1], 0.0)
         x = torch.cat([x, padded], dim=1)
         x = F.relu(self.mix(x))
         return self.head(x)

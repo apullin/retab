@@ -4,7 +4,7 @@
 // returns the TOSA operator(s) + tensor(s) that should be added to the basic
 // block being built.
 
-use crate::graph::ir::{Arg, Node, NodeId, OpTarget};
+use crate::graph::ir::{Arg, Node, NodeId, OpTarget, OpType};
 use crate::graph::Graph;
 use crate::store::TensorStore;
 
@@ -76,37 +76,46 @@ pub struct EmitResult {
     pub shapes: Vec<TosaShape>,
 }
 
-/// Get the name of a node referenced by an Arg::Node.
-fn resolve_input_name(graph: &Graph, arg: &Arg) -> Option<String> {
-    match arg {
-        Arg::Node(id) => {
-            let node = graph.node(*id)?;
-            if is_getitem_node(node) {
-                let source_id = match node.args.first() {
-                    Some(Arg::Node(source_id)) => *source_id,
-                    _ => return Some(node.name.clone()),
-                };
-                let source = graph.node(source_id)?;
-                let output_idx = match node.args.get(1) {
-                    Some(Arg::Int(idx)) => *idx,
-                    _ => 0,
-                };
-                if output_idx == 0 {
-                    return Some(primary_output_name(graph, source));
-                }
-            }
-            Some(node.name.clone())
+fn resolve_input_name_from_node_id(graph: &Graph, id: NodeId) -> Option<String> {
+    let node = graph.node(id)?;
+    if is_getitem_node(node) {
+        let source_id = match node.args.first() {
+            Some(Arg::Node(source_id)) => *source_id,
+            _ => return Some(node.name.clone()),
+        };
+        let source = graph.node(source_id)?;
+        let output_idx = match node.args.get(1) {
+            Some(Arg::Int(idx)) => *idx,
+            _ => 0,
+        };
+        if output_idx == 0 {
+            return Some(primary_output_name(graph, source));
         }
-        _ => None,
     }
+    Some(node.name.clone())
 }
 
 /// Collect input tensor names from node args (only Arg::Node entries).
 fn collect_input_names(graph: &Graph, node: &Node) -> Vec<String> {
-    node.args
-        .iter()
-        .filter_map(|a| resolve_input_name(graph, a))
-        .collect()
+    let mut names = Vec::new();
+    for arg in &node.args {
+        match arg {
+            Arg::Node(id) => {
+                if let Some(name) = resolve_input_name_from_node_id(graph, *id) {
+                    names.push(name);
+                }
+            }
+            Arg::NodeList(ids) => {
+                for id in ids {
+                    if let Some(name) = resolve_input_name_from_node_id(graph, *id) {
+                        names.push(name);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 fn is_getitem_node(node: &Node) -> bool {
@@ -200,6 +209,16 @@ fn map_axis_to_tosa_dim_order(node: &Node, axis: i32) -> i32 {
 ///    layout that should be derived from their input tensor, not reused from
 ///    stale metadata.
 fn actual_tensor_shape(graph: &Graph, node: &Node) -> Vec<i32> {
+    if node.op == OpType::Placeholder {
+        return node
+            .meta
+            .val
+            .shape_slice()
+            .iter()
+            .map(|&d| d as i32)
+            .collect();
+    }
+
     if node.target == OpTarget::TosaReshape {
         if let Some(shape) = literal_output_shape(node) {
             return shape;
@@ -385,6 +404,70 @@ fn make_output_tensor(node: &Node) -> TosaTensor {
         is_unranked: false,
         variable_name: String::new(),
     }
+}
+
+fn push_reshape_with_shape(
+    result: &mut EmitResult,
+    input_name: String,
+    output_name: String,
+    shape_name: String,
+    out_shape: Vec<i32>,
+    dtype: DType,
+) {
+    result.tensors.push(TosaTensor {
+        name: output_name.clone(),
+        shape: out_shape.clone(),
+        dtype,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+
+    let rank = out_shape.len() as u32;
+    let shape_data: Vec<u8> = out_shape
+        .iter()
+        .flat_map(|&d| (d as i64).to_le_bytes())
+        .collect();
+    result.shapes.push(TosaShape {
+        name: shape_name.clone(),
+        rank,
+        data: shape_data,
+    });
+    result.operators.push(TosaOperator {
+        op: Op::ConstShape,
+        attribute: Attribute::ConstShape(ConstShapeAttribute),
+        inputs: vec![],
+        outputs: vec![shape_name.clone()],
+        location: None,
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Reshape,
+        attribute: Attribute::Reshape(ReshapeAttribute),
+        inputs: vec![input_name, shape_name],
+        outputs: vec![output_name],
+        location: None,
+    });
+}
+
+fn push_const_shape(result: &mut EmitResult, shape_name: String, values: Vec<i32>) {
+    let rank = values.len() as u32;
+    let data: Vec<u8> = values
+        .iter()
+        .flat_map(|&d| (d as i64).to_le_bytes())
+        .collect();
+    result.shapes.push(TosaShape {
+        name: shape_name.clone(),
+        rank,
+        data,
+    });
+    result.operators.push(TosaOperator {
+        op: Op::ConstShape,
+        attribute: Attribute::ConstShape(ConstShapeAttribute),
+        inputs: vec![],
+        outputs: vec![shape_name],
+        location: None,
+    });
 }
 
 fn shape_numel(shape: &[i32]) -> Option<usize> {
@@ -3113,10 +3196,97 @@ pub fn emit_matmul(
 ) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_output_tensor(node));
+    let out_dtype = node_output_dtype(node);
+    let out_shape = actual_tensor_shape(graph, node);
+    let matmul_out_dtype = if out_shape.len() == 2 {
+        DType::Int32
+    } else {
+        out_dtype
+    };
+
+    let promote_2d = match (node.args.first(), node.args.get(1)) {
+        (Some(Arg::Node(a_id)), Some(Arg::Node(b_id))) => {
+            let a_shape = graph
+                .node(*a_id)
+                .map(|n| actual_tensor_shape(graph, n))
+                .unwrap_or_default();
+            let b_shape = graph
+                .node(*b_id)
+                .map(|n| actual_tensor_shape(graph, n))
+                .unwrap_or_default();
+            a_shape.len() == 2 && b_shape.len() == 2
+        }
+        _ => false,
+    };
+
+    if !promote_2d {
+        result.tensors.push(make_output_tensor(node));
+    }
 
     let a_zp = kwarg_i32(node, "A_zp", 0);
     let b_zp = kwarg_i32(node, "B_zp", 0);
+
+    let mut matmul_inputs = if promote_2d {
+        let (a_shape, b_shape) = match (node.args.first(), node.args.get(1)) {
+            (Some(Arg::Node(a_id)), Some(Arg::Node(b_id))) => {
+                let a_shape = graph
+                    .node(*a_id)
+                    .map(|n| actual_tensor_shape(graph, n))
+                    .unwrap_or_default();
+                let b_shape = graph
+                    .node(*b_id)
+                    .map(|n| actual_tensor_shape(graph, n))
+                    .unwrap_or_default();
+                (a_shape, b_shape)
+            }
+            _ => (Vec::new(), Vec::new()),
+        };
+
+        let a_name = input_names.first().cloned().unwrap_or_default();
+        let b_name = input_names.get(1).cloned().unwrap_or_default();
+        let a_reshape_name = format!("{}_A_reshape", node.name);
+        let b_reshape_name = format!("{}_B_reshape", node.name);
+        let temp_out_name = format!("{}_batched", node.name);
+
+        if a_shape.len() == 2 && b_shape.len() == 2 {
+            let a_out_shape = vec![1, a_shape[0], a_shape[1]];
+            let b_out_shape = vec![1, b_shape[0], b_shape[1]];
+            let temp_out_shape = vec![1, a_shape[0], b_shape[1]];
+
+            push_reshape_with_shape(
+                &mut result,
+                a_name,
+                a_reshape_name.clone(),
+                format!("{}_shape", a_reshape_name),
+                a_out_shape,
+                matmul_input_dtype(graph, node, 0),
+            );
+            push_reshape_with_shape(
+                &mut result,
+                b_name,
+                b_reshape_name.clone(),
+                format!("{}_shape", b_reshape_name),
+                b_out_shape,
+                matmul_input_dtype(graph, node, 1),
+            );
+
+            result.tensors.push(TosaTensor {
+                name: temp_out_name.clone(),
+                shape: temp_out_shape,
+                dtype: matmul_out_dtype,
+                data: Vec::new(),
+                variable: false,
+                is_unranked: false,
+                variable_name: String::new(),
+            });
+
+            vec![a_reshape_name, b_reshape_name]
+        } else {
+            vec![]
+        }
+    } else {
+        input_names
+    };
 
     // Create A_zp const tensor
     let a_zp_name = format!("{}_A_zp", node.name);
@@ -3157,17 +3327,33 @@ pub fn emit_matmul(
     });
 
     // MATMUL inputs: [A, B, A_zp, B_zp]
-    let mut matmul_inputs = input_names;
     matmul_inputs.push(a_zp_name);
     matmul_inputs.push(b_zp_name);
+
+    let matmul_output_name = if promote_2d {
+        format!("{}_batched", node.name)
+    } else {
+        node.name.clone()
+    };
 
     result.operators.push(TosaOperator {
         op: Op::Matmul,
         attribute: Attribute::MatMul(MatMulAttribute),
         inputs: matmul_inputs,
-        outputs: vec![node.name.clone()],
+        outputs: vec![matmul_output_name.clone()],
         location: None,
     });
+
+    if promote_2d {
+        push_reshape_with_shape(
+            &mut result,
+            matmul_output_name,
+            node.name.clone(),
+            format!("{}_shape", node.name),
+            out_shape,
+            matmul_out_dtype,
+        );
+    }
 
     result
 }
@@ -3183,7 +3369,23 @@ pub fn emit_concat(
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
 
-    let axis = kwarg_i32(node, "axis", 0);
+    let raw_axis = match node.args.get(1) {
+        Some(Arg::Int(axis)) => *axis as i32,
+        _ => kwarg_i32(node, "axis", 0),
+    };
+
+    let axis = match node.args.first() {
+        Some(Arg::Node(input_id)) => graph
+            .node(*input_id)
+            .map(|input_node| map_axis_to_tosa_dim_order(input_node, raw_axis))
+            .unwrap_or(raw_axis),
+        Some(Arg::NodeList(ids)) => ids
+            .first()
+            .and_then(|input_id| graph.node(*input_id))
+            .map(|input_node| map_axis_to_tosa_dim_order(input_node, raw_axis))
+            .unwrap_or(raw_axis),
+        _ => raw_axis,
+    };
 
     result.operators.push(TosaOperator {
         op: Op::Concat,
@@ -3203,12 +3405,61 @@ pub fn emit_concat(
 pub fn emit_pad(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_output_tensor(node));
+    let input_shape = node
+        .args
+        .first()
+        .and_then(|arg| match arg {
+            Arg::Node(id) => graph.node(*id),
+            _ => None,
+        })
+        .map(|input_node| actual_tensor_shape(graph, input_node))
+        .unwrap_or_else(|| {
+            node.meta
+                .val
+                .shape_slice()
+                .iter()
+                .map(|&d| d as i32)
+                .collect()
+        });
+    let pad = arg_i32_list(node, 1);
+
+    let mut output_shape = input_shape.clone();
+    let pad_pairs: Vec<(i32, i32)> = pad
+        .chunks(2)
+        .filter_map(|pair| match pair {
+            [before, after] => Some((*before as i32, *after as i32)),
+            _ => None,
+        })
+        .collect();
+    for (i, (before, after)) in pad_pairs.iter().rev().enumerate() {
+        let dim = output_shape.len().saturating_sub(1 + i);
+        if let Some(slot) = output_shape.get_mut(dim) {
+            *slot += before + after;
+        }
+    }
+    result.tensors.push(TosaTensor {
+        name: node.name.clone(),
+        shape: output_shape,
+        dtype: ir_dtype_to_tosa(node.meta.val.dtype),
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+
+    let mut pad_shape = vec![0; input_shape.len() * 2 - pad.len()];
+    for pair in pad.chunks(2).rev() {
+        if let [before, after] = pair {
+            pad_shape.push(*before as i32);
+            pad_shape.push(*after as i32);
+        }
+    }
+    push_const_shape(&mut result, format!("{}_pad_shape", node.name), pad_shape);
 
     result.operators.push(TosaOperator {
         op: Op::Pad,
         attribute: Attribute::Pad(PadAttribute),
-        inputs: input_names,
+        inputs: vec![input_names.first().cloned().unwrap_or_default(), format!("{}_pad_shape", node.name)],
         outputs: vec![node.name.clone()],
         location: None,
     });
@@ -3227,12 +3478,66 @@ pub fn emit_slice(
 ) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_output_tensor(node));
+    let input_node = match node.args.first() {
+        Some(Arg::Node(id)) => graph.node(*id),
+        _ => None,
+    };
+    let input_shape = input_node
+        .map(|n| actual_tensor_shape(graph, n))
+        .unwrap_or_else(|| {
+            node.meta
+                .val
+                .shape_slice()
+                .iter()
+                .map(|&d| d as i32)
+                .collect()
+        });
+
+    let raw_dim = arg_i64(node, 1, 0);
+    let rank = input_shape.len() as i64;
+    let raw_dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };
+    let raw_dim = raw_dim.clamp(0, rank.saturating_sub(1));
+    let dim = input_node
+        .map(|n| map_axis_to_tosa_dim_order(n, raw_dim as i32) as i64)
+        .unwrap_or(raw_dim) as usize;
+    let start = arg_i64(node, 2, 0);
+    let end = arg_i64(node, 3, input_shape.get(dim).copied().unwrap_or(0) as i64);
+    let step = arg_i64(node, 4, 1);
+    let input_dim = input_shape.get(dim).copied().unwrap_or(0) as i64;
+    let start_idx = if start < 0 { (input_dim + start).max(0) } else { start.min(input_dim) };
+    let mut end_idx = if end < 0 { input_dim + end } else { end };
+    end_idx = end_idx.clamp(start_idx, input_dim);
+    let slice_len = if step == 1 {
+        (end_idx - start_idx).max(0)
+    } else {
+        ((end_idx - start_idx).max(0) + step - 1) / step
+    };
+
+    let mut start_shape = vec![0; input_shape.len()];
+    start_shape[dim] = start_idx as i32;
+    let mut size_shape = input_shape.clone();
+    size_shape[dim] = slice_len as i32;
+
+    push_const_shape(&mut result, format!("{}_slice_start", node.name), start_shape);
+    push_const_shape(&mut result, format!("{}_slice_size", node.name), size_shape.clone());
+    result.tensors.push(TosaTensor {
+        name: node.name.clone(),
+        shape: size_shape,
+        dtype: ir_dtype_to_tosa(node.meta.val.dtype),
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
 
     result.operators.push(TosaOperator {
         op: Op::Slice,
         attribute: Attribute::Slice(SliceAttribute),
-        inputs: input_names,
+        inputs: vec![
+            input_names.first().cloned().unwrap_or_default(),
+            format!("{}_slice_start", node.name),
+            format!("{}_slice_size", node.name),
+        ],
         outputs: vec![node.name.clone()],
         location: None,
     });
@@ -3427,6 +3732,7 @@ pub fn emit_node(
         OpTarget::Pad => Some(emit_pad(graph, node_id, node, store)),
         OpTarget::Slice => Some(emit_slice(graph, node_id, node, store)),
         OpTarget::Select => Some(emit_select(graph, node_id, node, store)),
+        OpTarget::Where => Some(emit_select(graph, node_id, node, store)),
         OpTarget::Sum => Some(emit_aten_sum(graph, node_id, node, store)),
         OpTarget::ConvTranspose2d => Some(emit_transpose_conv2d(graph, node_id, node, store)),
         OpTarget::Other(target) if target.contains("getitem") => Some(EmitResult::default()),
