@@ -128,7 +128,13 @@ pub struct FxInsertRescalePass;
 
 /// Returns true for TOSA accumulator-producing ops that need INT32 -> INT8 rescale.
 fn is_tosa_accumulator_op(target: &str) -> bool {
-    target.contains("CONV2D") || target.contains("DEPTHWISE_CONV2D")
+    target.contains("CONV2D")
+        || target.contains("DEPTHWISE_CONV2D")
+        // The direct fast lane still exposes some raw convs after rewrite
+        // normalization. They carry quant metadata and serialize as TOSA convs,
+        // so they need the same post-accumulator requantization before pool/eltwise.
+        || target.contains("conv2d.default")
+        || target.contains("convolution.default")
 }
 
 fn is_dq(target: &str) -> bool {
@@ -141,14 +147,8 @@ fn is_q(target: &str) -> bool {
 
 /// Extract (scale, zero_point) from a DQ/Q node's args.
 fn extract_scale_zp(args: &[Bound<'_, PyAny>]) -> PyResult<(f64, i64)> {
-    let scale: f64 = args
-        .get(1)
-        .and_then(|a| a.extract().ok())
-        .unwrap_or(1.0);
-    let zp: i64 = args
-        .get(2)
-        .and_then(|a| a.extract().ok())
-        .unwrap_or(0);
+    let scale: f64 = args.get(1).and_then(|a| a.extract().ok()).unwrap_or(1.0);
+    let zp: i64 = args.get(2).and_then(|a| a.extract().ok()).unwrap_or(0);
     Ok((scale, zp))
 }
 
@@ -244,7 +244,11 @@ fn read_input_qparams(
 
 /// Compute the INT32 rescaled input scales based on op kind.
 /// Returns a Vec of new scales (one per input key, in same order as keys).
-fn compute_rescaled_input_scales(kind: Int32OpKind, scales: &[f64], dtype_strs: &[String]) -> Vec<f64> {
+fn compute_rescaled_input_scales(
+    kind: Int32OpKind,
+    scales: &[f64],
+    dtype_strs: &[String],
+) -> Vec<f64> {
     match kind {
         Int32OpKind::MinScale => {
             let min_scale = scales.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -261,18 +265,13 @@ fn compute_rescaled_input_scales(kind: Int32OpKind, scales: &[f64], dtype_strs: 
             let new_scale = max_scale_2x / (1u64 << shift_bits) as f64;
             vec![new_scale; scales.len()]
         }
-        Int32OpKind::Passthrough => {
-            scales.to_vec()
-        }
+        Int32OpKind::Passthrough => scales.to_vec(),
     }
 }
 
 /// Compute the output rescale scale (INT32 domain) for the given op.
 /// Returns None if no output rescale is needed (comparison ops).
-fn compute_output_int32_scale(
-    target: &str,
-    rescaled_input_scales: &[f64],
-) -> Option<f64> {
+fn compute_output_int32_scale(target: &str, rescaled_input_scales: &[f64]) -> Option<f64> {
     if is_comparison_op(target) {
         return None;
     }
@@ -404,11 +403,10 @@ impl FxPass for FxInsertRescalePass {
             };
 
             // Read input_qparams
-            let (keys, scales, zps, dtype_strs) =
-                match read_input_qparams(py, node)? {
-                    Some(v) => v,
-                    None => continue,
-                };
+            let (keys, scales, zps, dtype_strs) = match read_input_qparams(py, node)? {
+                Some(v) => v,
+                None => continue,
+            };
 
             // Check that at least one input is int8/int16
             let has_quantized_input = dtype_strs
@@ -463,8 +461,8 @@ impl FxPass for FxInsertRescalePass {
                     "insert_rescale_node",
                     (
                         gm.gm_ref(),
-                        arg_node,      // ref_node: insert after the arg
-                        arg_node,      // input_node: the arg itself
+                        arg_node, // ref_node: insert after the arg
+                        arg_node, // input_node: the arg itself
                         &torch_int32,
                         vec![rescale_scale],
                         old_zp,
@@ -557,9 +555,9 @@ impl FxPass for FxInsertRescalePass {
                             node,
                             &out_dtype,
                             vec![rescale_scale],
-                            0_i64,         // in_zp: 0 (INT32 accumulator)
-                            out_orig_zp,   // out_zp: original output zp
-                            true,          // after
+                            0_i64,       // in_zp: 0 (INT32 accumulator)
+                            out_orig_zp, // out_zp: original output zp
+                            true,        // after
                         ),
                     )?;
 
@@ -689,13 +687,13 @@ impl FxPass for FxInsertRescalePass {
                 "insert_rescale_node",
                 (
                     gm.gm_ref(),
-                    node,        // ref_node
-                    node,        // input_node
+                    node, // ref_node
+                    node, // input_node
                     &torch_int8,
                     rescale_scales,
-                    0_i64,       // input_zp (accumulator is zero-centered)
-                    output_zp,   // output_zp from output qparams
-                    true,        // after
+                    0_i64,     // input_zp (accumulator is zero-centered)
+                    output_zp, // output_zp from output qparams
+                    true,      // after
                 ),
             )?;
 
