@@ -48,6 +48,16 @@ fn node_output_dtype(node: &Node) -> DType {
     ir_dtype_to_tosa(node.meta.val.dtype)
 }
 
+fn matmul_input_dtype(graph: &Graph, node: &Node, index: usize) -> DType {
+    match node.args.get(index) {
+        Some(Arg::Node(id)) => graph
+            .node(*id)
+            .map(|input_node| ir_dtype_to_tosa(input_node.meta.val.dtype))
+            .unwrap_or(DType::Int32),
+        _ => DType::Int32,
+    }
+}
+
 fn normalize_rescale_zp(dtype: DType, zp: i32, is_unsigned: bool) -> i32 {
     match dtype {
         DType::Int8 => zp,
@@ -3113,7 +3123,7 @@ pub fn emit_matmul(
     result.tensors.push(TosaTensor {
         name: a_zp_name.clone(),
         shape: vec![1],
-        dtype: DType::Int32,
+        dtype: matmul_input_dtype(graph, node, 0),
         data: a_zp.to_le_bytes().to_vec(),
         variable: false,
         is_unranked: false,
@@ -3132,7 +3142,7 @@ pub fn emit_matmul(
     result.tensors.push(TosaTensor {
         name: b_zp_name.clone(),
         shape: vec![1],
-        dtype: DType::Int32,
+        dtype: matmul_input_dtype(graph, node, 1),
         data: b_zp.to_le_bytes().to_vec(),
         variable: false,
         is_unranked: false,
