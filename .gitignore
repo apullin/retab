@@ -4,8 +4,13 @@
 *.pyd
 __pycache__/
 *.pyc
+.uv-cache/
 .eggs/
 *.egg-info/
+arm_tosa_engine/
+arm_tosa_engine-*.dist-info/
 dist/
 build/
+tmp_*/
+tmp_*.log
 *.whl
