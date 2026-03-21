@@ -421,8 +421,13 @@ def _all_rust_preprocess(
     transformed graph, causing double rescales, double transposes, etc.).
     """
     import copy
+    import json
     import os
     from pathlib import Path
+
+    from executorch.backends.arm.common.arm_compile_spec import ArmCompileSpec
+    from executorch.backends.arm.common.debug import debug_tosa_dump
+    from executorch.backends.arm.tosa.backend import arm_get_first_delegation_tag
 
     t0 = time.perf_counter()
     gm = edge_program.graph_module
@@ -455,6 +460,27 @@ def _all_rust_preprocess(
     tosa_bytes = arm_tosa_engine.ingest_and_serialize(
         gm, merged_state_dict, edge_program.graph_signature
     )
+
+    artifact_path = _compile_spec.get_intermediate_path()
+    if artifact_path:
+        tag = arm_get_first_delegation_tag(edge_program.graph_module)
+        suffix = "{}".format(f"_{tag}" if tag else "") + f"_{_compile_spec.tosa_spec}"
+        debug_tosa_dump(bytes(tosa_bytes), artifact_path, suffix=suffix)
+
+        if _compile_spec.tosa_debug_mode == ArmCompileSpec.DebugMode.JSON:
+            debug_json_path = Path(artifact_path) / "debug.json"
+            debug_json_path.parent.mkdir(parents=True, exist_ok=True)
+            debug_json_path.write_text(
+                json.dumps(
+                    {
+                        "tosa_spec": str(_compile_spec.tosa_spec),
+                        "num_bytes": len(tosa_bytes),
+                        "delegate_tag": tag,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
 
     dump_path = os.environ.get("ARM_TOSA_ENGINE_DUMP_TOSA")
     if dump_path:
