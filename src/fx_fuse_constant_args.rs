@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyTuple};
 
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
@@ -59,9 +59,49 @@ fn is_zero_input_full(target: &str, input_nodes: &[Bound<'_, PyAny>]) -> bool {
     input_nodes.is_empty() && target.contains("aten.full.default")
 }
 
-fn fold_zero_input_full(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult<bool> {
+fn is_zero_input_arange(target: &str, input_nodes: &[Bound<'_, PyAny>]) -> bool {
+    input_nodes.is_empty() && target.contains("arange")
+}
+
+fn materialize_zero_input_const(
+    gm: &FxGraphModule,
+    node: &Bound<'_, PyAny>,
+    const_tensor: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
     let py = gm.py();
     let graph = gm.gm_ref().getattr("graph")?;
+    let meta = node.getattr("meta")?;
+
+    let node_name = FxGraphModule::node_name(node)?;
+    let mut attr_name = format!("{}_fused_const", node_name);
+    let mut counter = 0usize;
+    while gm.gm_ref().hasattr(attr_name.as_str())? {
+        counter += 1;
+        attr_name = format!("{}_fused_const_{}", node_name, counter);
+    }
+
+    gm.gm_ref()
+        .call_method1("register_buffer", (attr_name.as_str(), const_tensor))?;
+
+    let insert_ctx = graph.call_method1("inserting_before", (node,))?;
+    insert_ctx.call_method0("__enter__")?;
+    let const_node_result = (|| -> PyResult<Bound<'_, PyAny>> {
+        let const_node = graph.call_method1("get_attr", (attr_name.as_str(),))?;
+        let const_meta = meta.call_method0("copy")?;
+        const_meta.set_item("val", const_tensor)?;
+        const_node.setattr("meta", &const_meta)?;
+        Ok(const_node)
+    })();
+    insert_ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+    let const_node = const_node_result?;
+
+    FxGraphModule::replace_all_uses_with(node, &const_node)?;
+    gm.erase_node(node)?;
+    Ok(true)
+}
+
+fn fold_zero_input_full(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = gm.py();
     let torch = py.import_bound("torch")?;
 
     let args = FxGraphModule::node_args(node)?;
@@ -94,32 +134,35 @@ fn fold_zero_input_full(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult
         }
     }
 
-    let node_name = FxGraphModule::node_name(node)?;
-    let mut attr_name = format!("{}_fused_const", node_name);
-    let mut counter = 0usize;
-    while gm.gm_ref().hasattr(attr_name.as_str())? {
-        counter += 1;
-        attr_name = format!("{}_fused_const_{}", node_name, counter);
+    materialize_zero_input_const(gm, node, &const_tensor)
+}
+
+fn fold_zero_input_arange(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = gm.py();
+    let args = FxGraphModule::node_args(node)?;
+    let kwargs = node.getattr("kwargs")?;
+    let target = node.getattr("target")?;
+    let args_tuple = PyTuple::new_bound(py, args.iter());
+
+    let mut const_tensor = if let Ok(kwargs_dict) = kwargs.downcast::<PyDict>() {
+        target.call(&args_tuple, Some(&kwargs_dict))?
+    } else {
+        target.call1(&args_tuple)?
+    };
+
+    let meta = node.getattr("meta")?;
+    if let Ok(output_qparams) = meta.call_method1("get", ("output_qparams",)) {
+        if !output_qparams.is_none() && output_qparams.len().unwrap_or(0) > 0 {
+            if let Ok(values) = output_qparams.call_method0("values") {
+                if let Some(first_qp) = values.iter()?.next() {
+                    let first_qp = first_qp?;
+                    const_tensor = first_qp.call_method1("quantize_value", (&const_tensor,))?;
+                }
+            }
+        }
     }
 
-    gm.gm_ref()
-        .call_method1("register_buffer", (attr_name.as_str(), &const_tensor))?;
-
-    let insert_ctx = graph.call_method1("inserting_before", (node,))?;
-    insert_ctx.call_method0("__enter__")?;
-    let const_node_result = (|| -> PyResult<Bound<'_, PyAny>> {
-        let const_node = graph.call_method1("get_attr", (attr_name.as_str(),))?;
-        let const_meta = meta.call_method0("copy")?;
-        const_meta.set_item("val", &const_tensor)?;
-        const_node.setattr("meta", &const_meta)?;
-        Ok(const_node)
-    })();
-    insert_ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
-    let const_node = const_node_result?;
-
-    FxGraphModule::replace_all_uses_with(node, &const_node)?;
-    gm.erase_node(node)?;
-    Ok(true)
+    materialize_zero_input_const(gm, node, &const_tensor)
 }
 
 impl FxPass for FxFuseConstantArgsPass {
@@ -177,6 +220,14 @@ impl FxPass for FxFuseConstantArgsPass {
 
                 if is_zero_input_full(&target, &input_nodes) {
                     if fold_zero_input_full(gm, node)? {
+                        modified = true;
+                        made_progress = true;
+                    }
+                    continue;
+                }
+
+                if is_zero_input_arange(&target, &input_nodes) {
+                    if fold_zero_input_arange(gm, node)? {
                         modified = true;
                         made_progress = true;
                     }
