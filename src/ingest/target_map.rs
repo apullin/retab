@@ -57,6 +57,9 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
         if lower.contains("reduce_max") || lower.contains("reducemax") {
             return OpTarget::TosaReduceMax;
         }
+        if lower.contains("reduce_min") || lower.contains("reducemin") {
+            return OpTarget::TosaReduceMin;
+        }
         if lower.contains("concat") {
             return OpTarget::TosaConcat;
         }
@@ -301,6 +304,7 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     }
     if target_str.contains("aten.to.")
         || target_str.contains("aten._to_copy")
+        || target_str.contains("aten.clone")
         || target_str.contains("dim_order_ops._to_dim_order_copy")
         || target_str.contains("dim_order_ops._clone_dim_order")
     {
@@ -311,6 +315,9 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     }
     if target_str.contains("aten.amax") {
         return OpTarget::Amax;
+    }
+    if target_str.contains("aten.amin") {
+        return OpTarget::Amin;
     }
     if target_str.contains("aten.var.") {
         return OpTarget::Var;

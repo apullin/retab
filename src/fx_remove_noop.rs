@@ -5,7 +5,7 @@ use crate::fx_pass::FxPass;
 
 /// FX-graph-direct implementation of `RemoveNoopPass`.
 ///
-/// Removes identity-like nodes from the graph: clone_dim_order,
+/// Removes identity-like nodes from the graph: clone_dim_order, raw clone,
 /// _to_dim_order_copy, alias_copy, copy, and detach_copy where input and
 /// output dtypes match. These nodes become no-ops after earlier passes have
 /// resolved memory formats and dtypes.
@@ -17,6 +17,7 @@ pub struct FxRemoveNoopPass;
 
 /// Target strings that are candidates for noop removal.
 const NOOP_TARGETS: &[&str] = &[
+    "aten.clone.default",
     "_clone_dim_order.default",
     "_to_dim_order_copy.default",
     "alias_copy.default",
@@ -79,10 +80,8 @@ impl FxPass for FxRemoveNoopPass {
             // Get output dtype: check kwargs for explicit dtype, else use node's own dtype
             let output_dtype = {
                 let kwargs = FxGraphModule::node_kwargs(node)?;
-                let explicit: Option<String> = kwargs
-                    .call_method1("get", ("dtype",))
-                    .ok()
-                    .and_then(|v| {
+                let explicit: Option<String> =
+                    kwargs.call_method1("get", ("dtype",)).ok().and_then(|v| {
                         if v.is_none() {
                             None
                         } else {
