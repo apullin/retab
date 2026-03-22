@@ -20,11 +20,27 @@ pub fn ingest_fx_graph(
     state_dict: &Bound<'_, PyDict>,
     graph_signature: &Bound<'_, PyAny>,
 ) -> PyResult<(Graph, TensorStore)> {
+    ingest_fx_graph_with_prefix(graph_module, state_dict, graph_signature, None)
+}
+
+fn ingest_fx_graph_with_prefix(
+    graph_module: &Bound<'_, PyAny>,
+    state_dict: &Bound<'_, PyDict>,
+    graph_signature: &Bound<'_, PyAny>,
+    name_prefix: Option<&str>,
+) -> PyResult<(Graph, TensorStore)> {
     let mut graph = Graph::new();
     let mut store = TensorStore::new();
 
     // name → NodeId mapping for resolving node references in args
     let mut name_map: HashMap<String, NodeId> = HashMap::new();
+
+    let qualify_name = |name: &str| -> String {
+        match name_prefix {
+            Some(prefix) => format!("{prefix}{name}"),
+            None => name.to_string(),
+        }
+    };
 
     // Build placeholder-name → state-dict-key mapping from graph_signature
     let mut placeholder_to_sd_key: HashMap<String, String> = HashMap::new();
@@ -39,7 +55,7 @@ pub fn ingest_fx_graph(
                     if let (Ok(placeholder_name), Ok(sd_key)) =
                         (k.extract::<String>(), v.extract::<String>())
                     {
-                        placeholder_to_sd_key.insert(placeholder_name, sd_key);
+                        placeholder_to_sd_key.insert(qualify_name(&placeholder_name), sd_key);
                     }
                 }
             }
@@ -48,7 +64,7 @@ pub fn ingest_fx_graph(
                 for item in items.iter()? {
                     let item = item?;
                     if let Ok(tuple) = item.extract::<(String, String)>() {
-                        placeholder_to_sd_key.insert(tuple.0, tuple.1);
+                        placeholder_to_sd_key.insert(qualify_name(&tuple.0), tuple.1);
                     }
                 }
             }
@@ -65,7 +81,8 @@ pub fn ingest_fx_graph(
         let py_node = py_node?;
 
         let op_str: String = py_node.getattr("op")?.extract()?;
-        let name: String = py_node.getattr("name")?.extract()?;
+        let original_name: String = py_node.getattr("name")?.extract()?;
+        let name = qualify_name(&original_name);
 
         let is_get_attr = op_str == "get_attr";
         let op_type = match op_str.as_str() {
@@ -92,13 +109,20 @@ pub fn ingest_fx_graph(
         // (bias tensors, table lookup data, etc.) by FX-direct passes.
         if is_get_attr {
             let attr_name: String = py_node.getattr("target")?.str()?.extract()?;
+            if let Ok(attr) = graph_module.getattr(attr_name.as_str()) {
+                if attr.getattr("graph").is_ok() {
+                    // Control-flow branch/body submodules are serialized as
+                    // named regions, not tensor placeholders.
+                    continue;
+                }
+            }
             if store.get(&name).is_none() {
                 if let Ok(tensor) = graph_module.getattr(attr_name.as_str()) {
                     if let Ok(shape_obj) = tensor.getattr("shape") {
-                        if let Ok(shape) = shape_obj
-                            .iter()
-                            .and_then(|it| it.map(|s| s.and_then(|v| v.extract::<i64>())).collect::<PyResult<Vec<_>>>())
-                        {
+                        if let Ok(shape) = shape_obj.iter().and_then(|it| {
+                            it.map(|s| s.and_then(|v| v.extract::<i64>()))
+                                .collect::<PyResult<Vec<_>>>()
+                        }) {
                             let mut dtype = tensor
                                 .getattr("dtype")
                                 .and_then(|d| d.str()?.extract::<String>())
@@ -115,10 +139,7 @@ pub fn ingest_fx_graph(
                                     data = cast_i64_bytes_to_i32(&data);
                                     dtype = DType::Int32;
                                 }
-                                store.insert(
-                                    name.clone(),
-                                    TensorData { data, shape, dtype },
-                                );
+                                store.insert(name.clone(), TensorData { data, shape, dtype });
                             }
                         }
                     }
@@ -141,11 +162,11 @@ pub fn ingest_fx_graph(
 
         // --- args ---
         let py_args = py_node.getattr("args")?;
-        let args = extract_args(&py_args, &name_map)?;
+        let args = extract_args(graph_module, &py_args, &name_map, name_prefix)?;
 
         // --- kwargs ---
         let py_kwargs = py_node.getattr("kwargs")?;
-        let kwargs = extract_kwargs(&py_kwargs, &name_map)?;
+        let kwargs = extract_kwargs(graph_module, &py_kwargs, &name_map, name_prefix)?;
 
         // --- meta ---
         let mut meta = extract_meta(&py_node, op_type)?;
@@ -161,6 +182,7 @@ pub fn ingest_fx_graph(
         // (e.g. [0,2,3,1] for NHWC) in node.meta. Extract it so the
         // serializer knows which tensors are already in NHWC format.
         extract_tosa_dim_order(&meta_dict, &mut meta)?;
+        extract_tosa_special_dtype(&meta_dict, &mut meta)?;
 
         // --- create node ---
         let node_id = graph.create_node(op_type, op_target, args, kwargs, meta, name.clone());
@@ -175,7 +197,7 @@ pub fn ingest_fx_graph(
             graph.output = Some(node_id);
         }
 
-        name_map.insert(name, node_id);
+        name_map.insert(original_name, node_id);
     }
 
     // -----------------------------------------------------------------
@@ -207,10 +229,7 @@ pub fn ingest_fx_graph(
             dtype = DType::Int32;
         }
 
-        store.insert(
-            tensor_name,
-            TensorData { data, shape, dtype },
-        );
+        store.insert(tensor_name, TensorData { data, shape, dtype });
     }
 
     // -----------------------------------------------------------------
@@ -240,10 +259,10 @@ pub fn ingest_fx_graph(
         // The sd_key typically looks like "_frozen_param0"
         if let Ok(tensor) = graph_module.getattr(sd_key.as_str()) {
             if let Ok(shape_obj) = tensor.getattr("shape") {
-                if let Ok(shape) = shape_obj
-                    .iter()
-                    .and_then(|it| it.map(|s| s.and_then(|v| v.extract::<i64>())).collect::<PyResult<Vec<_>>>())
-                {
+                if let Ok(shape) = shape_obj.iter().and_then(|it| {
+                    it.map(|s| s.and_then(|v| v.extract::<i64>()))
+                        .collect::<PyResult<Vec<_>>>()
+                }) {
                     let mut dtype = tensor
                         .getattr("dtype")
                         .and_then(|d| d.str()?.extract::<String>())
@@ -261,10 +280,7 @@ pub fn ingest_fx_graph(
                             data = cast_i64_bytes_to_i32(&data);
                             dtype = DType::Int32;
                         }
-                        store.insert(
-                            placeholder_name.clone(),
-                            TensorData { data, shape, dtype },
-                        );
+                        store.insert(placeholder_name.clone(), TensorData { data, shape, dtype });
                     }
                 }
             }
@@ -293,27 +309,111 @@ pub fn ingest_fx_graph(
     Ok((graph, store))
 }
 
+pub fn ingest_fx_graph_hierarchy(
+    graph_module: &Bound<'_, PyAny>,
+    state_dict: &Bound<'_, PyDict>,
+    graph_signature: &Bound<'_, PyAny>,
+) -> PyResult<(Vec<(String, Graph)>, TensorStore)> {
+    let (main_graph, mut store) = ingest_fx_graph(graph_module, state_dict, graph_signature)?;
+    let mut graphs = vec![(String::from("main"), main_graph)];
+    collect_control_flow_subgraphs(
+        graph_module,
+        state_dict,
+        graph_signature,
+        &mut graphs,
+        &mut store,
+        None,
+    )?;
+    Ok((graphs, store))
+}
+
+fn collect_control_flow_subgraphs(
+    graph_module: &Bound<'_, PyAny>,
+    state_dict: &Bound<'_, PyDict>,
+    graph_signature: &Bound<'_, PyAny>,
+    graphs: &mut Vec<(String, Graph)>,
+    store: &mut TensorStore,
+    name_prefix: Option<&str>,
+) -> PyResult<()> {
+    let fx_graph = graph_module.getattr("graph")?;
+    let nodes = fx_graph.getattr("nodes")?;
+
+    for py_node in nodes.iter()? {
+        let py_node = py_node?;
+        let op_str: String = py_node.getattr("op")?.extract()?;
+        if op_str != "get_attr" {
+            continue;
+        }
+
+        let attr_name: String = py_node.getattr("target")?.str()?.extract()?;
+        let Ok(attr) = graph_module.getattr(attr_name.as_str()) else {
+            continue;
+        };
+        let Ok(sub_graph) = attr.getattr("graph") else {
+            continue;
+        };
+        if sub_graph.is_none() {
+            continue;
+        }
+
+        let graph_name = match name_prefix {
+            Some(prefix) => format!("{prefix}{attr_name}"),
+            None => attr_name.clone(),
+        };
+        if graphs.iter().any(|(name, _)| name == &graph_name) {
+            continue;
+        }
+
+        let child_prefix = format!("{graph_name}::");
+        let (submodule_graph, submodule_store) = ingest_fx_graph_with_prefix(
+            &attr,
+            state_dict,
+            graph_signature,
+            Some(&child_prefix),
+        )?;
+        for (key, value) in submodule_store.buffers {
+            if store.get(&key).is_none() {
+                store.insert(key, value);
+            }
+        }
+        graphs.push((graph_name, submodule_graph));
+        collect_control_flow_subgraphs(
+            &attr,
+            state_dict,
+            graph_signature,
+            graphs,
+            store,
+            Some(&child_prefix),
+        )?;
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Arg extraction helpers
 // ---------------------------------------------------------------------------
 
 /// Extract positional args from a Python tuple/list of FX node args.
 fn extract_args(
+    graph_module: &Bound<'_, PyAny>,
     py_args: &Bound<'_, PyAny>,
     name_map: &HashMap<String, NodeId>,
+    name_prefix: Option<&str>,
 ) -> PyResult<SmallVec<[Arg; 4]>> {
     let mut args = SmallVec::new();
 
     // py_args is typically a tuple
-    let items: Vec<Bound<'_, PyAny>> = if py_args.is_instance_of::<PyTuple>() || py_args.is_instance_of::<PyList>() {
-        py_args.iter()?.collect::<PyResult<Vec<_>>>()?
-    } else {
-        // Single value
-        vec![py_args.clone()]
-    };
+    let items: Vec<Bound<'_, PyAny>> =
+        if py_args.is_instance_of::<PyTuple>() || py_args.is_instance_of::<PyList>() {
+            py_args.iter()?.collect::<PyResult<Vec<_>>>()?
+        } else {
+            // Single value
+            vec![py_args.clone()]
+        };
 
     for item in &items {
-        args.push(extract_single_arg(item, name_map)?);
+        args.push(extract_single_arg(graph_module, item, name_map, name_prefix)?);
     }
 
     Ok(args)
@@ -321,15 +421,17 @@ fn extract_args(
 
 /// Extract kwargs from a Python dict.
 fn extract_kwargs(
+    graph_module: &Bound<'_, PyAny>,
     py_kwargs: &Bound<'_, PyAny>,
     name_map: &HashMap<String, NodeId>,
+    name_prefix: Option<&str>,
 ) -> PyResult<Vec<(String, Arg)>> {
     let mut kwargs = Vec::new();
 
     if let Ok(dict) = py_kwargs.downcast::<PyDict>() {
         for (key, value) in dict.iter() {
             let key_str: String = key.extract()?;
-            let arg = extract_single_arg(&value, name_map)?;
+            let arg = extract_single_arg(graph_module, &value, name_map, name_prefix)?;
             kwargs.push((key_str, arg));
         }
     }
@@ -339,8 +441,10 @@ fn extract_kwargs(
 
 /// Convert a single Python value into an `Arg`.
 fn extract_single_arg(
+    graph_module: &Bound<'_, PyAny>,
     value: &Bound<'_, PyAny>,
     name_map: &HashMap<String, NodeId>,
+    name_prefix: Option<&str>,
 ) -> PyResult<Arg> {
     // Check for None
     if value.is_none() {
@@ -348,10 +452,18 @@ fn extract_single_arg(
     }
 
     // Check if it is an FX Node (has .name and .op attributes)
-    if let (Ok(node_name), Ok(_op)) = (value.getattr("name"), value.getattr("op")) {
+    if let (Ok(node_name), Ok(op_name)) = (value.getattr("name"), value.getattr("op")) {
         let node_name: String = node_name.extract()?;
         if let Some(&node_id) = name_map.get(&node_name) {
             return Ok(Arg::Node(node_id));
+        }
+        let op_name: String = op_name.extract()?;
+        if op_name == "get_attr" {
+            let qualified = match name_prefix {
+                Some(prefix) => format!("{prefix}{node_name}"),
+                None => node_name,
+            };
+            return Ok(Arg::String(qualified));
         }
         // Node not yet seen — this shouldn't happen in topological order
         return Ok(Arg::None);
@@ -375,6 +487,15 @@ fn extract_single_arg(
     // Check for string
     if value.is_instance_of::<PyString>() {
         let s: String = value.extract()?;
+        if let Ok(attr) = graph_module.getattr(s.as_str()) {
+            if attr.getattr("graph").is_ok() {
+                let qualified = match name_prefix {
+                    Some(prefix) => format!("{prefix}{s}"),
+                    None => s,
+                };
+                return Ok(Arg::String(qualified));
+            }
+        }
         return Ok(Arg::String(s));
     }
 
@@ -567,23 +688,36 @@ fn extract_qparams_from_meta(
 ///
 /// The FX-direct `FxToTosaMemoryFormatPass` stores a list like `[0, 2, 3, 1]`
 /// (NHWC) or `[0, 1, 2, 3]` (NCHW) in `node.meta["tosa_dim_order"]`.
-fn extract_tosa_dim_order(
-    meta_dict: &Bound<'_, PyAny>,
-    node_meta: &mut NodeMeta,
-) -> PyResult<()> {
+fn extract_tosa_dim_order(meta_dict: &Bound<'_, PyAny>, node_meta: &mut NodeMeta) -> PyResult<()> {
     if let Ok(dim_order) = meta_dict.call_method1("get", ("tosa_dim_order",)) {
         if !dim_order.is_none() {
-            if let Ok(order_list) = dim_order
-                .iter()
-                .and_then(|it| {
-                    it.map(|item| item.and_then(|v| v.extract::<u8>()))
-                        .collect::<PyResult<smallvec::SmallVec<[u8; 6]>>>()
-                })
-            {
+            if let Ok(order_list) = dim_order.iter().and_then(|it| {
+                it.map(|item| item.and_then(|v| v.extract::<u8>()))
+                    .collect::<PyResult<smallvec::SmallVec<[u8; 6]>>>()
+            }) {
                 if !order_list.is_empty() {
                     node_meta.tosa_dim_order = Some(order_list);
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+fn extract_tosa_special_dtype(
+    meta_dict: &Bound<'_, PyAny>,
+    node_meta: &mut NodeMeta,
+) -> PyResult<()> {
+    if let Ok(special_dtype) = meta_dict.call_method1("get", ("tosa_special_dtype",)) {
+        if !special_dtype.is_none() {
+            let special_dtype_str = special_dtype.str()?.extract::<String>()?;
+            node_meta.tosa_special_dtype = if special_dtype_str.contains("INT48") {
+                Some(DType::Int48)
+            } else if special_dtype_str.contains("INT4") {
+                Some(DType::Int4)
+            } else {
+                None
+            };
         }
     }
     Ok(())
@@ -671,8 +805,7 @@ fn cast_i64_bytes_to_i32(data: &[u8]) -> Vec<u8> {
     data.chunks_exact(8)
         .flat_map(|chunk| {
             let val = i64::from_le_bytes([
-                chunk[0], chunk[1], chunk[2], chunk[3],
-                chunk[4], chunk[5], chunk[6], chunk[7],
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
             ]);
             (val as i32).to_le_bytes()
         })
@@ -867,21 +1000,21 @@ fn is_accumulator_op(target: &OpTarget) -> bool {
 fn fixup_quantized_dtypes(graph: &mut Graph) {
     let all_ids = graph.all_node_ids();
     for node_id in all_ids {
-        let (op, target, has_input_qp, has_output_qp, input_qp_dtype, output_qp_dtype, current_dtype) = {
+        let (
+            op,
+            target,
+            has_input_qp,
+            has_output_qp,
+            input_qp_dtype,
+            output_qp_dtype,
+            current_dtype,
+        ) = {
             let node = match graph.node(node_id) {
                 Some(n) => n,
                 None => continue,
             };
-            let iqp_dtype = node
-                .meta
-                .input_qparams
-                .first()
-                .map(|(_, qa)| qa.dtype);
-            let oqp_dtype = node
-                .meta
-                .output_qparams
-                .first()
-                .map(|(_, qa)| qa.dtype);
+            let iqp_dtype = node.meta.input_qparams.first().map(|(_, qa)| qa.dtype);
+            let oqp_dtype = node.meta.output_qparams.first().map(|(_, qa)| qa.dtype);
             (
                 node.op,
                 node.target.clone(),
@@ -907,17 +1040,14 @@ fn fixup_quantized_dtypes(graph: &mut Graph) {
             // FX-direct rescale nodes have args: [input, out_dtype, scales, input_zp, output_zp]
             // Rust-IR rescale nodes have args: [input, multiplier, shift] with kwargs.
             if target == OpTarget::TosaRescale {
-                let rescale_dtype = if let Some(dt) = output_qp_dtype {
-                    Some(dt)
-                } else {
-                    // Try to extract dtype from args[1] (FX-direct format)
-                    graph.node(node_id).and_then(|n| {
-                        match n.args.get(1) {
-                            Some(Arg::Dtype(dt)) => Some(*dt),
-                            _ => None,
-                        }
-                    })
-                };
+                // FX-direct rescale nodes carry the actual destination dtype in
+                // args[1]. Prefer that over output_qparams, which may still
+                // describe the eventual quantized consumer rather than this
+                // intermediate accumulator rescale.
+                let rescale_dtype = graph.node(node_id).and_then(|n| match n.args.get(1) {
+                    Some(Arg::Dtype(dt)) => Some(*dt),
+                    _ => output_qp_dtype,
+                });
                 if let Some(dt) = rescale_dtype {
                     if let Some(node) = graph.node_mut(node_id) {
                         node.meta.val.dtype = dt;
@@ -984,11 +1114,9 @@ fn fixup_quantized_dtypes(graph: &mut Graph) {
                     None => continue,
                 };
                 // Find which arg position references this placeholder
-                let pos = user.args.iter().enumerate().find_map(|(i, arg)| {
-                    match arg {
-                        Arg::Node(id) if *id == *node_id => Some(i as u32),
-                        _ => None,
-                    }
+                let pos = user.args.iter().enumerate().find_map(|(i, arg)| match arg {
+                    Arg::Node(id) if *id == *node_id => Some(i as u32),
+                    _ => None,
                 });
                 let pos = match pos {
                     Some(p) => p,
