@@ -549,6 +549,154 @@ impl FxPass for FxToTosaMemoryFormatPass {
             }
         }
 
+        // ------------------------------------------------------------------
+        // Phase 4d: Remap permute_copy perm args from NCHW to NHWC domain.
+        //
+        // After phases 4a-4c, rank-4 data flows in NHWC format between the
+        // input transpose and the output transpose.  Any explicit user
+        // `permute_copy` node was authored in NCHW order, so its perm vector
+        // is wrong for the now-NHWC data.  We detect such nodes by checking
+        // whether their input comes from a TOSA TRANSPOSE (the NCHW->NHWC
+        // we inserted in 4a), and remap:
+        //
+        //   P_nhwc[j] = F_inv[P_nchw[F[j]]]
+        //
+        // where F = NCHW->NHWC perm and F_inv = NHWC->NCHW perm.
+        // ------------------------------------------------------------------
+        let all_nodes = gm.nodes()?;
+        for node in &all_nodes {
+            let op = FxGraphModule::node_op(node)?;
+            if op != "call_function" {
+                continue;
+            }
+            let target = FxGraphModule::node_target_str(node)?;
+            if !target.contains("permute_copy") {
+                continue;
+            }
+
+            let args = FxGraphModule::node_args(node)?;
+            if args.len() < 2 {
+                continue;
+            }
+            let input_node = &args[0];
+            if !FxGraphModule::is_node(input_node) {
+                continue;
+            }
+
+            // Get the input rank from FakeTensor metadata
+            let input_rank: usize = {
+                let input_meta = input_node.getattr("meta")?;
+                let input_val = match input_meta.call_method1("get", ("val",)) {
+                    Ok(v) if !v.is_none() => v,
+                    _ => continue,
+                };
+                let input_shape = match input_val.getattr("shape") {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                py.import_bound("builtins")?
+                    .call_method1("len", (&input_shape,))?
+                    .extract()
+                    .unwrap_or(0)
+            };
+            if input_rank < 4 {
+                continue;
+            }
+
+            // Check if the input was produced by the NCHW->NHWC transpose
+            // we inserted earlier (target contains "tosa" and "TRANSPOSE"
+            // or "transpose"). A more robust check: the input node has
+            // tosa_dim_order == channels_last_order.
+            let input_target = FxGraphModule::node_target_str(input_node).unwrap_or_default();
+            let input_is_nhwc = {
+                let input_meta = input_node.getattr("meta")?;
+                let dim_order_val = input_meta.call_method1("get", ("tosa_dim_order",))?;
+                if dim_order_val.is_none() {
+                    // Fall back: check if input is a TOSA TRANSPOSE node
+                    let input_op = FxGraphModule::node_op(input_node)?;
+                    input_op == "call_function"
+                        && (input_target.contains("TRANSPOSE")
+                            || input_target.contains("transpose"))
+                        && input_target.contains("tosa")
+                } else {
+                    // tosa_dim_order is channels_last when we've already
+                    // transposed: e.g. (0, 2, 3, 1) for rank 4.
+                    let spatial_rank: usize = input_meta
+                        .call_method1("get", ("tosa_spatial_rank",))?
+                        .extract()
+                        .unwrap_or(2);
+                    let expected_cl = channels_last_order(input_rank, spatial_rank);
+                    let actual: Vec<usize> =
+                        dim_order_val.extract().unwrap_or_else(|_| (0..input_rank).collect());
+                    actual == expected_cl
+                }
+            };
+
+            if !input_is_nhwc {
+                continue;
+            }
+
+            // Extract the user's NCHW perm from args[1]
+            let user_perm: Vec<i64> = match args[1].extract::<Vec<i64>>() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if user_perm.len() != input_rank {
+                continue;
+            }
+
+            let spatial_rank = {
+                let input_meta = input_node.getattr("meta")?;
+                input_meta
+                    .call_method1("get", ("tosa_spatial_rank",))?
+                    .extract::<usize>()
+                    .unwrap_or(2)
+            };
+
+            // F = NCHW -> NHWC (channels_last_order)
+            let f = channels_last_order(input_rank, spatial_rank);
+            // F_inv = NHWC -> NCHW (channels_last_inverse_order)
+            let f_inv = channels_last_inverse_order(input_rank, spatial_rank);
+
+            // P_nhwc[j] = F_inv[P_nchw[F[j]]]
+            //
+            // Derivation: the overall data flow is:
+            //   input(NCHW) -> T_in=F -> data(NHWC) -> P_nhwc -> result(NHWC) -> T_out=F_inv -> output(NCHW)
+            // We need T_in[P_nhwc[T_out[k]]] = P_user[k], where T_out = F_inv, T_in = F.
+            // Solving: P_nhwc[j] = F_inv[P_user[F[j]]].
+            let mut p_nhwc = vec![0i64; input_rank];
+            for j in 0..input_rank {
+                let nchw_axis = f[j];                       // map NHWC pos j -> NCHW axis
+                let user_mapped = user_perm[nchw_axis] as usize; // user's perm in NCHW
+                p_nhwc[j] = f_inv[user_mapped] as i64;      // map result NCHW axis -> NHWC pos
+            }
+
+            if debug {
+                let name = FxGraphModule::node_name(node)?;
+                eprintln!(
+                    "[MemoryFormat] remapping permute '{}' perm {:?} -> {:?} (NCHW->NHWC)",
+                    name, user_perm, p_nhwc
+                );
+            }
+
+            // Update the node's args[1] with the remapped perm
+            let new_perm_list = pyo3::types::PyList::new_bound(py, p_nhwc.iter().copied());
+            let new_args = pyo3::types::PyTuple::new_bound(
+                py,
+                &[input_node.as_ref(), new_perm_list.as_ref()],
+            );
+            node.setattr("args", new_args)?;
+
+            // Update the FakeTensor in meta to reflect the new output shape.
+            // After permute in NHWC domain, the output shape changes.
+            let _ = {
+                let fxh = py.import_bound("fx_helpers")?;
+                fxh.call_method1("refresh_node_fake_tensor", (node,))
+            };
+
+            modified = true;
+        }
+
         if modified {
             gm.recompile()?;
         }

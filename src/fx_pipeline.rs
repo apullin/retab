@@ -3,6 +3,8 @@ use crate::fx_convert_clamp;
 use crate::fx_conv1d_unsqueeze;
 use crate::fx_convert_sum;
 use crate::fx_decompose_linear;
+use crate::fx_decompose_masked_fill;
+use crate::fx_decompose_mean;
 use crate::fx_decompose_ops;
 use crate::fx_decompose_quant;
 use crate::fx_fold_qdq;
@@ -65,8 +67,8 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
 
     vec![
         // -- Early decompositions (before fold_qdq) --
-        // Decompose atanh, masked_fill, hardsigmoid, stack, unbind into
-        // primitive ops that TOSA can represent.
+        // Decompose atanh, hardsigmoid, stack, unbind into primitive ops
+        // that TOSA can represent. (masked_fill handled post-fold below.)
         Box::new(fx_decompose_ops::FxDecomposeOpsPass),
         // -- Pre-fold --
         Box::new(fx_fuse_quant_activation::FxFuseQuantizedActivationPass),
@@ -81,10 +83,15 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_insert_rescale::FxInsertRescalePass),
         Box::new(fx_decompose_quant::FxDecomposeQuantNodesPass),
         // -- Post-fold decompositions --
+        // Decompose masked_fill -> where(mask, quantized_full, x).  Runs after
+        // fold_qdq so the fill scalar can be quantized with output qparams.
+        Box::new(fx_decompose_masked_fill::FxDecomposeMaskedFillPass),
         Box::new(fx_quantize_clamp_args::FxQuantizeClampArgsPass),
         Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(
             ep_for_fuse,
         )),
+        // Decompose mean.dim into sum+mul(1/count) before sum conversion.
+        Box::new(fx_decompose_mean::FxDecomposeMeanPass),
         Box::new(fx_convert_sum::FxConvertSumPass),
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
         // -- ATen -> TOSA conversion --

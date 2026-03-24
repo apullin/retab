@@ -14,7 +14,12 @@ use crate::fx_pass::FxPass;
 pub struct FxRewriteSqueezePass;
 
 fn is_squeeze(target: &str) -> bool {
-    target.contains("squeeze_copy") || target.contains("squeeze.dim")
+    // Match squeeze_copy.default, squeeze_copy.dim, squeeze_copy.dims,
+    // squeeze.default, squeeze.dim, squeeze.dims — but NOT unsqueeze variants.
+    if target.contains("unsqueeze") {
+        return false;
+    }
+    target.contains("squeeze_copy") || target.contains("squeeze.dim") || target.contains("squeeze.default") || target.contains("squeeze.dims")
 }
 
 fn is_unsqueeze(target: &str) -> bool {

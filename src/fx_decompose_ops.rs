@@ -12,18 +12,16 @@ use crate::fx_pass::FxPass;
 ///
 /// Supported decompositions:
 ///   - atanh(x)       -> 0.5 * log((1+x)/(1-x))
-///   - masked_fill    -> where(mask, full(value), x)
 ///   - hardsigmoid(x) -> clamp((x + 3) / 6, 0, 1)
 ///   - stack          -> unsqueeze each + cat
 ///   - unbind         -> slice + squeeze for each element
+///
+/// Note: `masked_fill` is handled separately by `FxDecomposeMaskedFillPass`
+/// (runs after fold_qdq so the fill value can be quantized correctly).
 pub struct FxDecomposeOpsPass;
 
 fn is_atanh(target: &str) -> bool {
     target.contains("atanh.default")
-}
-
-fn is_masked_fill(target: &str) -> bool {
-    target.contains("masked_fill")
 }
 
 fn is_hardsigmoid(target: &str) -> bool {
@@ -40,14 +38,13 @@ fn is_unbind(target: &str) -> bool {
 
 enum DecompKind {
     Atanh,
-    MaskedFill,
     Hardsigmoid,
     Stack,
     Unbind,
 }
 
 /// Resolve an ATen op target, trying exir_ops.edge.aten first, then torch.ops.aten.
-fn resolve_aten_op<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+pub fn resolve_aten_op<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
     let parts: Vec<&str> = name.split('.').collect();
     let op_name = parts[0];
     let overload = if parts.len() > 1 { parts[1] } else { "default" };
@@ -85,7 +82,7 @@ fn py_int<'py>(py: Python<'py>, v: i64) -> PyResult<Bound<'py, PyAny>> {
 
 /// Helper: insert a call_function node before `ref_node` using graph.inserting_before.
 /// Copies meta from `meta_src` and refreshes the FakeTensor if possible.
-fn insert_call_before<'py>(
+pub fn insert_call_before<'py>(
     py: Python<'py>,
     graph: &Bound<'py, PyAny>,
     ref_node: &Bound<'py, PyAny>,
@@ -144,8 +141,6 @@ impl FxPass for FxDecomposeOpsPass {
 
             if is_atanh(&target) {
                 candidates.push((node.clone(), DecompKind::Atanh));
-            } else if is_masked_fill(&target) {
-                candidates.push((node.clone(), DecompKind::MaskedFill));
             } else if is_hardsigmoid(&target) {
                 candidates.push((node.clone(), DecompKind::Hardsigmoid));
             } else if is_stack(&target) {
@@ -165,10 +160,6 @@ impl FxPass for FxDecomposeOpsPass {
             match kind {
                 DecompKind::Atanh => {
                     decompose_atanh(py, &graph, gm, node, debug)?;
-                    modified = true;
-                }
-                DecompKind::MaskedFill => {
-                    decompose_masked_fill(py, &graph, gm, node, debug)?;
                     modified = true;
                 }
                 DecompKind::Hardsigmoid => {
@@ -258,54 +249,6 @@ fn decompose_atanh<'py>(
     let result = insert_call_before(py, graph, node, &mul_op, mul_args.as_ref(), node)?;
 
     // Copy original node's meta (with qparams) onto the final result
-    let copy_mod = py.import_bound("copy")?;
-    let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    result.setattr("meta", &final_meta)?;
-
-    FxGraphModule::replace_all_uses_with(node, &result)?;
-    gm.erase_node(node)?;
-    Ok(())
-}
-
-/// masked_fill(x, mask, value) -> where(mask, full(value, shape, dtype), x)
-fn decompose_masked_fill<'py>(
-    py: Python<'py>,
-    graph: &Bound<'py, PyAny>,
-    gm: &FxGraphModule<'py>,
-    node: &Bound<'py, PyAny>,
-    debug: bool,
-) -> PyResult<()> {
-    let args = FxGraphModule::node_args(node)?;
-    if args.len() < 3 {
-        return Ok(());
-    }
-    let x = &args[0];
-    let mask = &args[1];
-    let value = &args[2]; // scalar or tensor
-
-    if debug {
-        let name = FxGraphModule::node_name(node)?;
-        eprintln!("[DecomposeOps] decomposing masked_fill: {}", name);
-    }
-
-    let full_op = resolve_aten_op(py, "full.default")?;
-    let where_op = resolve_aten_op(py, "where.self")?;
-
-    // Get input shape for the full constant
-    let input_shape = FxGraphModule::node_shape(x).unwrap_or_else(|_| vec![1]);
-    let shape_tuple = PyTuple::new_bound(py, input_shape.iter().copied());
-
-    // Create full(shape, value) -- fill value matches x dtype
-    let full_args = PyTuple::new_bound(py, &[shape_tuple.as_ref(), value.as_ref()]);
-    let fill_node =
-        insert_call_before(py, graph, node, &full_op, full_args.as_ref(), node)?;
-
-    // where(mask, fill_value, x) -- True positions get fill_value, False get x
-    let where_args =
-        PyTuple::new_bound(py, &[mask.as_ref(), fill_node.as_ref(), x.as_ref()]);
-    let result =
-        insert_call_before(py, graph, node, &where_op, where_args.as_ref(), node)?;
-
     let copy_mod = py.import_bound("copy")?;
     let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
     result.setattr("meta", &final_meta)?;

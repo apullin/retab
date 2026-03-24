@@ -8,6 +8,8 @@ mod fx_conv1d_unsqueeze;
 mod fx_convert_sum;
 mod fx_decompose;
 mod fx_decompose_linear;
+mod fx_decompose_masked_fill;
+mod fx_decompose_mean;
 mod fx_decompose_ops;
 mod fx_decompose_quant;
 mod fx_fold_qdq;

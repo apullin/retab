@@ -1,0 +1,187 @@
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyTuple};
+
+use crate::fx_decompose_ops::resolve_aten_op;
+use crate::fx_graph::FxGraphModule;
+use crate::fx_pass::FxPass;
+
+/// Late-stage decomposition of `masked_fill` into `where(mask, full(value), x)`.
+///
+/// Runs AFTER `FxFoldAndAnnotateQParamsPass` so that:
+///   - The `masked_fill` node already has `input_qparams` / `output_qparams`.
+///   - The fill value scalar can be quantized to match the tensor data type.
+///   - The created `full` constant is quantized at the same scale/zp as `x`.
+///
+/// For non-quantized (FP) graphs, the pass simply produces float `full` + `where`.
+pub struct FxDecomposeMaskedFillPass;
+
+fn is_masked_fill(target: &str) -> bool {
+    target.contains("masked_fill")
+}
+
+impl FxPass for FxDecomposeMaskedFillPass {
+    fn name(&self) -> &str {
+        "FxDecomposeMaskedFill"
+    }
+
+    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
+        let py = gm.py();
+        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+        let mut modified = false;
+
+        let all_nodes = gm.nodes()?;
+        let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
+
+        for node in &all_nodes {
+            let op = FxGraphModule::node_op(node)?;
+            if op != "call_function" {
+                continue;
+            }
+            let target = FxGraphModule::node_target_str(node)?;
+            if is_masked_fill(&target) {
+                candidates.push(node.clone());
+            }
+        }
+
+        if candidates.is_empty() {
+            return Ok(false);
+        }
+
+        let graph = gm.gm_ref().getattr("graph")?;
+
+        for node in &candidates {
+            decompose_masked_fill(py, &graph, gm, node, debug)?;
+            modified = true;
+        }
+
+        if modified {
+            gm.recompile()?;
+        }
+        Ok(modified)
+    }
+}
+
+fn decompose_masked_fill<'py>(
+    py: Python<'py>,
+    graph: &Bound<'py, PyAny>,
+    gm: &FxGraphModule<'py>,
+    node: &Bound<'py, PyAny>,
+    debug: bool,
+) -> PyResult<()> {
+    let args = FxGraphModule::node_args(node)?;
+    if args.len() < 3 {
+        return Ok(());
+    }
+    let x = &args[0];
+    let mask = &args[1];
+    let value = &args[2]; // scalar
+
+    if debug {
+        let name = FxGraphModule::node_name(node)?;
+        eprintln!("[DecomposeMaskedFill] decomposing masked_fill: {}", name);
+    }
+
+    let full_op = resolve_aten_op(py, "full.default")?;
+    let where_op = resolve_aten_op(py, "where.self")?;
+
+    // Get the input shape for the full constant
+    let input_shape = FxGraphModule::node_shape(x).unwrap_or_else(|_| vec![1]);
+    let shape_tuple = PyTuple::new_bound(py, input_shape.iter().copied());
+
+    // Check whether the graph is quantized: look for output_qparams on the node.
+    let meta = node.getattr("meta")?;
+    let output_qparams = meta.call_method1("get", ("output_qparams",))?;
+    let is_quantized = !output_qparams.is_none()
+        && output_qparams.downcast::<PyDict>().map(|d| !d.is_empty()).unwrap_or(false);
+
+    // Determine the fill value and dtype for the full node.
+    let qparams_0 = if is_quantized {
+        match output_qparams.call_method1("get", (0,)) {
+            Ok(v) if !v.is_none() => Some(v),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let (fill_value, full_kwargs): (Bound<'py, PyAny>, Option<Bound<'py, PyDict>>) =
+        if let Some(qparams) = &qparams_0 {
+            let scale: f64 = qparams.getattr("scale")?.extract().unwrap_or(1.0);
+            let zp: i64 = qparams
+                .getattr("zp")
+                .or_else(|_| qparams.getattr("zero_point"))
+                .and_then(|v| v.extract())
+                .unwrap_or(0);
+            let qmin: i64 = qparams
+                .getattr("qmin")
+                .and_then(|v| v.extract())
+                .unwrap_or(-128);
+            let qmax: i64 = qparams
+                .getattr("qmax")
+                .and_then(|v| v.extract())
+                .unwrap_or(127);
+            let output_dtype = qparams.getattr("dtype")?;
+
+            let float_val: f64 = value.extract().unwrap_or(0.0);
+            let quantized_val = ((float_val / scale) + zp as f64).round() as i64;
+            let clamped = quantized_val.max(qmin).min(qmax);
+
+            if debug {
+                eprintln!(
+                    "[DecomposeMaskedFill] quantizing fill value: {} -> {} (scale={}, zp={})",
+                    float_val, clamped, scale, zp
+                );
+            }
+
+            let builtins = py.import_bound("builtins")?;
+            let fill_py = builtins.call_method1("int", (clamped,))?;
+            let kwargs = PyDict::new_bound(py);
+            kwargs.set_item("dtype", output_dtype)?;
+            (fill_py, Some(kwargs))
+        } else {
+            // FP path: use the scalar value directly.
+            (value.clone(), None)
+        };
+
+    // Create full(shape, fill_value, dtype=...)
+    let inserting = graph.call_method1("inserting_before", (node,))?;
+    inserting.call_method0("__enter__")?;
+
+    let full_args = PyTuple::new_bound(py, &[shape_tuple.as_ref(), fill_value.as_ref()]);
+    let full_kwargs_dict = full_kwargs.unwrap_or_else(|| PyDict::new_bound(py));
+    let fill_node =
+        graph.call_method1("call_function", (&full_op, &full_args, &full_kwargs_dict))?;
+
+    // Copy meta from original node for the full node
+    let copy_mod = py.import_bound("copy")?;
+    let full_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
+    // Clear qparams for the intermediate full node
+    let _ = full_meta.call_method1("__setitem__", ("input_qparams", PyDict::new_bound(py)));
+    let _ = full_meta.call_method1("__setitem__", ("output_qparams", PyDict::new_bound(py)));
+    fill_node.setattr("meta", &full_meta)?;
+    // Refresh FakeTensor
+    let _ = {
+        let fxh = py.import_bound("fx_helpers")?;
+        fxh.call_method1("refresh_node_fake_tensor", (&fill_node,))
+    };
+
+    // Create where(mask, fill_value, x) -- True positions get fill_value
+    let where_args =
+        PyTuple::new_bound(py, &[mask.as_ref(), fill_node.as_ref(), x.as_ref()]);
+    let result_node = graph.call_method1("call_function", (&where_op, &where_args))?;
+
+    // Copy the original node's full meta (including qparams) to the where node
+    let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
+    result_node.setattr("meta", &final_meta)?;
+    // Refresh FakeTensor for where
+    let _ = {
+        let fxh = py.import_bound("fx_helpers")?;
+        fxh.call_method1("refresh_node_fake_tensor", (&result_node,))
+    };
+
+    inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
+
+    FxGraphModule::replace_all_uses_with(node, &result_node)?;
+    gm.erase_node(node)?;
+    Ok(())
+}
