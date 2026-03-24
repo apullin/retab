@@ -1,8 +1,11 @@
 use crate::fx_cast_int64;
 use crate::fx_convert_clamp;
+use crate::fx_convert_full_like;
 use crate::fx_conv1d_unsqueeze;
 use crate::fx_convert_sum;
+use crate::fx_decompose_addmm;
 use crate::fx_decompose_linear;
+use crate::fx_decompose_logit;
 use crate::fx_decompose_masked_fill;
 use crate::fx_decompose_mean;
 use crate::fx_decompose_ops;
@@ -70,6 +73,12 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         // Decompose atanh, hardsigmoid, stack, unbind into primitive ops
         // that TOSA can represent. (masked_fill handled post-fold below.)
         Box::new(fx_decompose_ops::FxDecomposeOpsPass),
+        // Decompose addmm -> mm + mul + add (Python DecomposeAddmmPass)
+        Box::new(fx_decompose_addmm::FxDecomposeAddmmPass),
+        // Decompose logit -> clamp + mul + add + reciprocal + log (Python DecomposeLogitPass)
+        Box::new(fx_decompose_logit::FxDecomposeLogitPass),
+        // Convert full_like -> full with explicit shape (Python ConvertFullLikeToFullPass)
+        Box::new(fx_convert_full_like::FxConvertFullLikeToFullPass),
         // -- Pre-fold --
         Box::new(fx_fuse_quant_activation::FxFuseQuantizedActivationPass),
         Box::new(fx_convert_clamp::FxConvertToClampPass),
