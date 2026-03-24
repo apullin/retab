@@ -136,6 +136,20 @@ pub enum OpTarget {
     TosaRsqrt,
     TosaCast,
     TosaNegate,
+    TosaReduceMin,
+    TosaReduceAny,
+    TosaMaximum,
+    TosaMinimum,
+    TosaCondIf,
+    TosaWhileLoop,
+
+    // Aliases for control flow (used by visitors)
+    CondIf,
+    WhileLoop,
+
+    // ATen ops that may appear in post-pass graphs
+    Amin,
+    Any,
 
     // Escape hatch
     Other(String),

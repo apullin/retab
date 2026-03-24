@@ -774,6 +774,63 @@ fn build_fb_attribute(
             let off = builder.end_table(start);
             (attr.union_type(), Some(off))
         }
+
+        Attribute::CondIf(a) => {
+            let then_g = builder.create_string(&a.then_graph);
+            let else_g = builder.create_string(&a.else_graph);
+            let start = builder.start_table();
+            builder.push_slot_always::<WIPOffset<_>>(4, then_g);
+            builder.push_slot_always::<WIPOffset<_>>(6, else_g);
+            let off = builder.end_table(start);
+            (attr.union_type(), Some(off))
+        }
+
+        Attribute::WhileLoop(a) => {
+            let cond_g = builder.create_string(&a.cond_branch);
+            let body_g = builder.create_string(&a.body_branch);
+            let start = builder.start_table();
+            builder.push_slot_always::<WIPOffset<_>>(4, cond_g);
+            builder.push_slot_always::<WIPOffset<_>>(6, body_g);
+            let off = builder.end_table(start);
+            (attr.union_type(), Some(off))
+        }
+
+        Attribute::Maximum(a) => {
+            let start = builder.start_table();
+            builder.push_slot::<u32>(4, a.nan_mode as u32, 0);
+            let off = builder.end_table(start);
+            (attr.union_type(), Some(off))
+        }
+
+        Attribute::Minimum(a) => {
+            let start = builder.start_table();
+            builder.push_slot::<u32>(4, a.nan_mode as u32, 0);
+            let off = builder.end_table(start);
+            (attr.union_type(), Some(off))
+        }
+
+        Attribute::ReduceAny(a) => {
+            let start = builder.start_table();
+            builder.push_slot::<i32>(4, a.axis, 0);
+            let off = builder.end_table(start);
+            (attr.union_type(), Some(off))
+        }
+
+        Attribute::ReduceMax(a) => {
+            let start = builder.start_table();
+            builder.push_slot::<i32>(4, a.axis, 0);
+            builder.push_slot::<u32>(6, a.nan_mode as u32, 0);
+            let off = builder.end_table(start);
+            (attr.union_type(), Some(off))
+        }
+
+        Attribute::ReduceMin(a) => {
+            let start = builder.start_table();
+            builder.push_slot::<i32>(4, a.axis, 0);
+            builder.push_slot::<u32>(6, a.nan_mode as u32, 0);
+            let off = builder.end_table(start);
+            (attr.union_type(), Some(off))
+        }
     }
 }
 

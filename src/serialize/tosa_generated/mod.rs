@@ -340,6 +340,31 @@ pub struct GreaterAttribute;
 #[derive(Debug, Clone)]
 pub struct GreaterEqualAttribute;
 
+/// CondIfAttribute — conditional branch.
+#[derive(Debug, Clone)]
+pub struct CondIfAttribute {
+    pub then_graph: String,
+    pub else_graph: String,
+}
+
+/// WhileLoopAttribute — while loop.
+#[derive(Debug, Clone)]
+pub struct WhileLoopAttribute {
+    pub cond_branch: String,
+    pub body_branch: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MaximumAttribute { pub nan_mode: NanPropagationMode }
+#[derive(Debug, Clone)]
+pub struct MinimumAttribute { pub nan_mode: NanPropagationMode }
+#[derive(Debug, Clone)]
+pub struct ReduceAnyAttribute { pub axis: i32 }
+#[derive(Debug, Clone)]
+pub struct ReduceMaxAttribute { pub axis: i32, pub nan_mode: NanPropagationMode }
+#[derive(Debug, Clone)]
+pub struct ReduceMinAttribute { pub axis: i32, pub nan_mode: NanPropagationMode }
+
 /// TransposeConv2dAttribute — deconvolution parameters.
 #[derive(Debug, Clone)]
 pub struct TransposeConv2dAttribute {
@@ -396,6 +421,13 @@ pub enum Attribute {
     Greater(GreaterAttribute),
     GreaterEqual(GreaterEqualAttribute),
     TransposeConv2d(TransposeConv2dAttribute),
+    CondIf(CondIfAttribute),
+    WhileLoop(WhileLoopAttribute),
+    Maximum(MaximumAttribute),
+    Minimum(MinimumAttribute),
+    ReduceAny(ReduceAnyAttribute),
+    ReduceMax(ReduceMaxAttribute),
+    ReduceMin(ReduceMinAttribute),
 }
 
 impl Attribute {
@@ -443,6 +475,13 @@ impl Attribute {
             Attribute::Greater(_) => 47,        // GreaterAttribute
             Attribute::GreaterEqual(_) => 48,   // GreaterEqualAttribute
             Attribute::TransposeConv2d(_) => 10, // TransposeConv2dAttribute
+            Attribute::CondIf(_) => 70,         // CondIfAttribute
+            Attribute::WhileLoop(_) => 71,      // WhileLoopAttribute
+            Attribute::Maximum(_) => 26,        // MaximumAttribute
+            Attribute::Minimum(_) => 27,        // MinimumAttribute
+            Attribute::ReduceAny(_) => 50,      // ReduceAnyAttribute
+            Attribute::ReduceMax(_) => 51,      // ReduceMaxAttribute
+            Attribute::ReduceMin(_) => 52,      // ReduceMinAttribute
         }
     }
 }
