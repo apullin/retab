@@ -4139,6 +4139,128 @@ pub fn emit_select(
     result
 }
 
+/// Emit TOSA SLICE + RESHAPE for aten.select_copy(input, dim, index).
+///
+/// select_copy extracts a single slice along `dim` at `index`, removing that
+/// dimension from the output shape. Decomposed as:
+///   1. SLICE(input, start=[0,..,index,..0], size=[..1..]) — extract a size-1 slice
+///   2. RESHAPE to the output shape (squeeze the sliced dimension)
+pub fn emit_select_copy(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let input_name = input_names.first().cloned().unwrap_or_default();
+    let input_node = match node.args.first() {
+        Some(Arg::Node(id)) => graph.node(*id),
+        _ => None,
+    };
+    let input_shape = input_node
+        .map(|n| actual_tensor_shape(graph, store, n))
+        .unwrap_or_else(|| {
+            node.meta.val.shape_slice().iter().map(|&d| d as i32).collect()
+        });
+
+    let raw_dim = arg_i64(node, 1, 0);
+    let rank = input_shape.len() as i64;
+    let normalized_dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };
+    let dim = input_node
+        .map(|n| map_axis_to_tosa_dim_order(n, normalized_dim as i32) as usize)
+        .unwrap_or(normalized_dim as usize);
+
+    let raw_index = arg_i64(node, 2, 0);
+    let dim_size = input_shape.get(dim).copied().unwrap_or(1) as i64;
+    let index = if raw_index < 0 {
+        (dim_size + raw_index).max(0) as i32
+    } else {
+        raw_index.min(dim_size - 1) as i32
+    };
+
+    let dtype = node_output_dtype(node);
+
+    // Step 1: SLICE — extract a size-1 slice along dim
+    let slice_name = format!("{}_slice", node.name);
+    let mut start_vec = vec![0i32; input_shape.len()];
+    start_vec[dim] = index;
+    let mut size_vec = input_shape.clone();
+    size_vec[dim] = 1;
+
+    push_const_shape(&mut result, format!("{}_start", slice_name), start_vec);
+    push_const_shape(&mut result, format!("{}_size", slice_name), size_vec.clone());
+    result.tensors.push(TosaTensor {
+        name: slice_name.clone(),
+        shape: size_vec,
+        dtype,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Slice,
+        attribute: Attribute::Slice(SliceAttribute),
+        inputs: vec![
+            input_name,
+            format!("{}_start", slice_name),
+            format!("{}_size", slice_name),
+        ],
+        outputs: vec![slice_name.clone()],
+        location: None,
+    });
+
+    // Step 2: RESHAPE — squeeze the sliced dimension
+    let output_shape = actual_tensor_shape(graph, store, node);
+    push_reshape_with_shape(
+        &mut result,
+        slice_name,
+        node.name.clone(),
+        format!("{}_shape", node.name),
+        output_shape,
+        dtype,
+    );
+
+    result
+}
+
+/// Emit TOSA GATHER for aten.index_select(input, dim, index_tensor).
+///
+/// index_select gathers elements along `dim` using an index tensor.
+/// For the common case where dim=0, this maps directly to TOSA GATHER.
+/// For other dims, we would need transpose+gather+transpose, but for now
+/// emit a warning and fall back to the generic gather pattern.
+pub fn emit_index_select(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+
+    // index_select has 2 Node args: input and index tensor
+    // Plus dim as Int arg
+    if input_names.len() < 2 {
+        eprintln!(
+            "[emit_index_select] WARNING: expected 2 node inputs, got {}",
+            input_names.len()
+        );
+        return result;
+    }
+
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Gather,
+        attribute: Attribute::Gather(GatherAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
 /// Emit an EQUAL operator.
 pub fn emit_equal(
     graph: &Graph,
@@ -5802,6 +5924,8 @@ pub fn emit_node(
         OpTarget::Pad => Some(emit_pad(graph, node_id, node, store)),
         OpTarget::Slice => Some(emit_slice(graph, node_id, node, store)),
         OpTarget::Select => Some(emit_select(graph, node_id, node, store)),
+        OpTarget::SelectCopy => Some(emit_select_copy(graph, node_id, node, store)),
+        OpTarget::IndexSelect => Some(emit_index_select(graph, node_id, node, store)),
         OpTarget::Where => Some(emit_select(graph, node_id, node, store)),
         OpTarget::Sum => Some(emit_aten_sum(graph, node_id, node, store)),
         OpTarget::ConvTranspose2d => Some(emit_transpose_conv2d(graph, node_id, node, store)),

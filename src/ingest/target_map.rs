@@ -248,11 +248,13 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     if target_str.contains("aten.slice_copy") || target_str.contains("aten.slice") {
         return OpTarget::Slice;
     }
+    if target_str.contains("aten.index_select") {
+        return OpTarget::IndexSelect;
+    }
     if target_str.contains("aten.select_copy")
         || target_str.contains("aten.select")
-        || target_str.contains("aten.index_select")
     {
-        return OpTarget::Select;
+        return OpTarget::SelectCopy;
     }
     if target_str.contains("aten.unsqueeze") {
         return OpTarget::Unsqueeze;

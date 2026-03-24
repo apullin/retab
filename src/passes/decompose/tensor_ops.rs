@@ -19,7 +19,7 @@ impl Pass for DecomposeSelectPass {
     }
 
     fn run(&self, graph: &mut Graph, _store: &mut TensorStore) -> bool {
-        let targets: Vec<NodeId> = graph.nodes_by_target(&OpTarget::Select);
+        let targets: Vec<NodeId> = graph.nodes_by_target(&OpTarget::SelectCopy);
         if targets.is_empty() {
             return false;
         }
@@ -213,11 +213,11 @@ fn decompose_embedding(graph: &mut Graph, node_id: NodeId) {
     );
     crate::shape::propagate_shape(graph, flat_id);
 
-    // 2. IndexSelect: Select(weight, 0, flat_indices)
+    // 2. IndexSelect: IndexSelect(weight, 0, flat_indices)
     let select_id = graph.insert_before(
         node_id,
         OpType::CallFunction,
-        OpTarget::Select,
+        OpTarget::IndexSelect,
         smallvec![
             Arg::Node(weight_id),
             Arg::Int(0),

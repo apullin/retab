@@ -72,6 +72,8 @@ pub enum OpTarget {
     GroupNorm,
     Amax,
     Select,
+    SelectCopy,
+    IndexSelect,
     Where,
     FloorDivide,
     Arange,
