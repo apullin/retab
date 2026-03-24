@@ -45,15 +45,20 @@ impl FxPass for FxConv1dUnsqueezePass {
             }
 
             let args = FxGraphModule::node_args(node)?;
-            let Some(stride) = args.get(3) else {
-                continue;
-            };
-            let stride_len: usize = builtins
-                .call_method1("len", (stride,))?
-                .extract()
-                .unwrap_or(0);
-            if stride_len == 1 {
+
+            // For conv1d.default, the op is always 1D regardless of arg count
+            // (optional args stride/padding/dilation/groups may be omitted).
+            // For convolution.default, check stride length to identify 1D.
+            if target.contains("conv1d.default") {
                 candidates.push(node.clone());
+            } else if let Some(stride) = args.get(3) {
+                let stride_len: usize = builtins
+                    .call_method1("len", (stride,))?
+                    .extract()
+                    .unwrap_or(0);
+                if stride_len == 1 {
+                    candidates.push(node.clone());
+                }
             }
         }
 
