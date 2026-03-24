@@ -359,5 +359,132 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
         return OpTarget::Round;
     }
 
+    // Bitwise ops
+    if target_str.contains("aten.bitwise_not") {
+        return OpTarget::BitwiseNot;
+    }
+    if target_str.contains("aten.bitwise_and") {
+        return OpTarget::BitwiseAnd;
+    }
+    if target_str.contains("aten.bitwise_or") {
+        return OpTarget::BitwiseOr;
+    }
+    if target_str.contains("aten.bitwise_xor") {
+        return OpTarget::BitwiseXor;
+    }
+    if target_str.contains("aten.bitwise_left_shift") {
+        return OpTarget::BitwiseLeftShift;
+    }
+    if target_str.contains("aten.bitwise_right_shift") {
+        return OpTarget::BitwiseRightShift;
+    }
+
+    // Logical ops
+    if target_str.contains("aten.logical_not") {
+        return OpTarget::LogicalNot;
+    }
+    if target_str.contains("aten.logical_and") {
+        return OpTarget::LogicalAnd;
+    }
+    if target_str.contains("aten.logical_or") {
+        return OpTarget::LogicalOr;
+    }
+
+    // Comparison ops — order matters: gt before ge to avoid aten.gt matching aten.ge
+    if target_str.contains("aten.gt.") || target_str.contains("aten.gt_") {
+        return OpTarget::Gt;
+    }
+    if target_str.contains("aten.ge.") || target_str.contains("aten.ge_") {
+        return OpTarget::Ge;
+    }
+    if target_str.contains("aten.lt.") || target_str.contains("aten.lt_") {
+        return OpTarget::Lt;
+    }
+    if target_str.contains("aten.le.") || target_str.contains("aten.le_") {
+        return OpTarget::Le;
+    }
+    if target_str.contains("aten.eq.") || target_str.contains("aten.eq_") {
+        return OpTarget::Eq;
+    }
+
+    // Trig / math ops
+    if target_str.contains("aten.sin.") {
+        return OpTarget::Sin;
+    }
+    if target_str.contains("aten.cos.") {
+        return OpTarget::Cos;
+    }
+    if target_str.contains("aten.tan.") {
+        return OpTarget::Tan;
+    }
+    if target_str.contains("aten.asin.") {
+        return OpTarget::Asin;
+    }
+    if target_str.contains("aten.acos.") {
+        return OpTarget::Acos;
+    }
+    if target_str.contains("aten.atan.") {
+        return OpTarget::Atan;
+    }
+    if target_str.contains("aten.sinh.") {
+        return OpTarget::Sinh;
+    }
+    if target_str.contains("aten.cosh.") {
+        return OpTarget::Cosh;
+    }
+    if target_str.contains("aten.asinh.") {
+        return OpTarget::Asinh;
+    }
+    if target_str.contains("aten.acosh.") {
+        return OpTarget::Acosh;
+    }
+    if target_str.contains("aten.elu.") || target_str.contains("aten.elu_") {
+        return OpTarget::Elu;
+    }
+    if target_str.contains("aten.hardswish") {
+        return OpTarget::Hardswish;
+    }
+    if target_str.contains("aten.silu") {
+        return OpTarget::Silu;
+    }
+
+    // Additional ops
+    if target_str.contains("aten._adaptive_avg_pool2d") || target_str.contains("aten.adaptive_avg_pool2d") {
+        return OpTarget::AdaptiveAvgPool2d;
+    }
+    if target_str.contains("aten.upsample_nearest2d") {
+        return OpTarget::UpsampleNearest2d;
+    }
+    if target_str.contains("aten.conv1d") {
+        return OpTarget::Conv1d;
+    }
+    if target_str.contains("aten.scalar_tensor") {
+        return OpTarget::ScalarTensor;
+    }
+    if target_str.contains("aten.zeros.") {
+        return OpTarget::Zeros;
+    }
+    if target_str.contains("aten.repeat.") {
+        return OpTarget::Repeat;
+    }
+    if target_str.contains("aten.cumsum") {
+        return OpTarget::Cumsum;
+    }
+    if target_str.contains("aten.erfinv") {
+        return OpTarget::Erfinv;
+    }
+    if target_str.contains("aten.unfold_copy") || target_str.contains("aten.unfold.") {
+        return OpTarget::UnfoldCopy;
+    }
+    if target_str.contains("aten.split_with_sizes_copy") || target_str.contains("aten.split_with_sizes.") {
+        return OpTarget::SplitWithSizesCopy;
+    }
+    if target_str.contains("aten.index.Tensor") {
+        return OpTarget::IndexTensor;
+    }
+    if target_str.contains("aten.any.") || target_str.contains("aten.any_") {
+        return OpTarget::Any;
+    }
+
     OpTarget::Other(target_str.to_string())
 }

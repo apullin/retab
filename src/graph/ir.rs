@@ -151,6 +151,54 @@ pub enum OpTarget {
     Amin,
     Any,
 
+    // Bitwise ops
+    BitwiseNot,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    BitwiseLeftShift,
+    BitwiseRightShift,
+
+    // Logical ops
+    LogicalNot,
+    LogicalAnd,
+    LogicalOr,
+
+    // Comparison ops (ATen)
+    Gt,
+    Ge,
+    Lt,
+    Le,
+    Eq,
+
+    // Trig / math ops
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Sinh,
+    Cosh,
+    Asinh,
+    Acosh,
+    Elu,
+    Hardswish,
+    Silu,
+
+    // Additional ops
+    AdaptiveAvgPool2d,
+    UpsampleNearest2d,
+    Conv1d,
+    ScalarTensor,
+    Zeros,
+    Repeat,
+    Cumsum,
+    Erfinv,
+    UnfoldCopy,
+    SplitWithSizesCopy,
+    IndexTensor,
+
     // Escape hatch
     Other(String),
 }

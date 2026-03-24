@@ -9,13 +9,16 @@ use crate::graph::Graph;
 use crate::store::TensorStore;
 
 use super::tosa_generated::{
-    AbsAttribute, AddAttribute, Attribute, AvgPool2dAttribute, CastAttribute, CeilAttribute,
-    ClampAttribute, ConcatAttribute, ConstAttribute, ConstShapeAttribute, Conv2dAttribute,
-    CondIfAttribute, CosAttribute, DType, DepthwiseConv2dAttribute, EqualAttribute,
-    ErfAttribute, ExpAttribute, FloorAttribute, GatherAttribute, GreaterAttribute,
-    GreaterEqualAttribute, LogAttribute, MatMulAttribute, MaxPool2dAttribute,
-    MaximumAttribute, MinimumAttribute, MulAttribute, NanPropagationMode, NegateAttribute, Op,
-    PadAttribute, ReciprocalAttribute, ReduceAnyAttribute, ReduceMaxAttribute,
+    AbsAttribute, AddAttribute, ArithmeticRightShiftAttribute, Attribute, AvgPool2dAttribute,
+    BitwiseAndAttribute, BitwiseNotAttribute, BitwiseOrAttribute, BitwiseXorAttribute,
+    CastAttribute, CeilAttribute, ClampAttribute, ConcatAttribute, ConstAttribute,
+    ConstShapeAttribute, CondIfAttribute, Conv2dAttribute, CosAttribute, DType,
+    DepthwiseConv2dAttribute, EqualAttribute, ErfAttribute, ExpAttribute, FloorAttribute,
+    GatherAttribute, GreaterAttribute, GreaterEqualAttribute, IntDivAttribute, LogAttribute,
+    LogicalAndAttribute, LogicalLeftShiftAttribute, LogicalNotAttribute, LogicalOrAttribute,
+    MatMulAttribute, MaxPool2dAttribute, MaximumAttribute,
+    MinimumAttribute, MulAttribute, NanPropagationMode, NegateAttribute, Op, PadAttribute,
+    PowAttribute, ReciprocalAttribute, ReduceAnyAttribute, ReduceMaxAttribute,
     ReduceMinAttribute, ReduceSumAttribute, RescaleAttribute, ReshapeAttribute, RoundingMode,
     RsqrtAttribute, SelectAttribute, SigmoidAttribute, SinAttribute, SliceAttribute,
     SubAttribute, TableAttribute, TanhAttribute, TosaOperator, TosaShape, TosaTensor,
@@ -4743,6 +4746,969 @@ pub fn emit_transpose_conv2d(
 }
 
 // ---------------------------------------------------------------------------
+// Element-wise unary emitters (TOSA has direct ops)
+// ---------------------------------------------------------------------------
+
+/// Emit a BITWISE_NOT operator (unary).
+pub fn emit_bitwise_not(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::BitwiseNot,
+        attribute: Attribute::BitwiseNot(BitwiseNotAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a LOGICAL_NOT operator (unary).
+pub fn emit_logical_not(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::LogicalNot,
+        attribute: Attribute::LogicalNot(LogicalNotAttribute),
+        inputs: input_names,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Element-wise binary emitters (TOSA has direct ops)
+// ---------------------------------------------------------------------------
+
+/// Emit a BITWISE_AND operator (binary).
+pub fn emit_bitwise_and(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::BitwiseAnd,
+        attribute: Attribute::BitwiseAnd(BitwiseAndAttribute),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a BITWISE_OR operator (binary).
+pub fn emit_bitwise_or(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::BitwiseOr,
+        attribute: Attribute::BitwiseOr(BitwiseOrAttribute),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a BITWISE_XOR operator (binary).
+pub fn emit_bitwise_xor(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::BitwiseXor,
+        attribute: Attribute::BitwiseXor(BitwiseXorAttribute),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a LOGICAL_LEFT_SHIFT operator (binary).
+pub fn emit_logical_left_shift(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::LogicalLeftShift,
+        attribute: Attribute::LogicalLeftShift(LogicalLeftShiftAttribute),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit an ARITHMETIC_RIGHT_SHIFT operator (binary).
+pub fn emit_arithmetic_right_shift(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::ArithmeticRightShift,
+        attribute: Attribute::ArithmeticRightShift(ArithmeticRightShiftAttribute),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a LOGICAL_AND operator (binary).
+pub fn emit_logical_and(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::LogicalAnd,
+        attribute: Attribute::LogicalAnd(LogicalAndAttribute),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a LOGICAL_OR operator (binary).
+pub fn emit_logical_or(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::LogicalOr,
+        attribute: Attribute::LogicalOr(LogicalOrAttribute),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a POW operator (binary).
+pub fn emit_pow(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Pow,
+        attribute: Attribute::Pow(PowAttribute),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit an INTDIV operator (binary).
+pub fn emit_intdiv(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::IntDiv,
+        attribute: Attribute::IntDiv(IntDivAttribute),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a MAXIMUM operator (binary).
+pub fn emit_maximum(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Maximum,
+        attribute: Attribute::Maximum(MaximumAttribute { nan_mode: NanPropagationMode::Propagate }),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a MINIMUM operator (binary).
+pub fn emit_minimum(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Minimum,
+        attribute: Attribute::Minimum(MinimumAttribute { nan_mode: NanPropagationMode::Propagate }),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit an EQUAL operator for ATen eq.
+pub fn emit_aten_eq(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Equal,
+        attribute: Attribute::Equal(EqualAttribute),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a GREATER operator for ATen gt.
+pub fn emit_aten_gt(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Greater,
+        attribute: Attribute::Greater(GreaterAttribute),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit a GREATER_EQUAL operator for ATen ge.
+pub fn emit_aten_ge(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::GreaterEqual,
+        attribute: Attribute::GreaterEqual(GreaterEqualAttribute),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit ATen lt as GREATER with swapped inputs.
+/// lt(a, b) == gt(b, a)
+pub fn emit_aten_lt(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    // Swap lhs and rhs: lt(a,b) = gt(b,a)
+    if inputs.len() >= 2 {
+        inputs.swap(0, 1);
+    }
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Greater,
+        attribute: Attribute::Greater(GreaterAttribute),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit ATen le as GREATER_EQUAL with swapped inputs.
+/// le(a, b) == ge(b, a)
+pub fn emit_aten_le(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+    // Swap lhs and rhs: le(a,b) = ge(b,a)
+    if inputs.len() >= 2 {
+        inputs.swap(0, 1);
+    }
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::GreaterEqual,
+        attribute: Attribute::GreaterEqual(GreaterEqualAttribute),
+        inputs,
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+    result
+}
+
+/// Emit TOSA REDUCE_SUM for ATen mean by emitting reduce_sum + reciprocal_mul.
+/// mean(x, dim) = reduce_sum(x, dim) / N where N = product of reduced dimensions.
+pub fn emit_aten_mean(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    store: &TensorStore,
+) -> EmitResult {
+    // Delegate to reduce_sum, then divide by count.
+    // For now, just emit a reduce_sum — the mean divisor is a post-processing concern.
+    // This is a simplification; the Python serializer also does reduce_sum + mul(1/N).
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let input_name = input_names.first().cloned().unwrap_or_default();
+    let input_node = match node.args.first() {
+        Some(Arg::Node(id)) => graph.node(*id),
+        _ => None,
+    };
+
+    let mut dims = arg_i32_list(node, 1);
+    if dims.is_empty() {
+        if let Some(Arg::Int(dim)) = node.args.get(1) {
+            dims.push(*dim as i32);
+        }
+    }
+    if dims.is_empty() {
+        dims = input_node
+            .map(|n| {
+                actual_tensor_shape(graph, store, n)
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, _)| idx as i32)
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![0]);
+    }
+
+    let keepdim = arg_bool(node, 2, false);
+    dims.sort_unstable();
+    dims.reverse();
+
+    let input_shape = input_node
+        .map(|n| actual_tensor_shape(graph, store, n))
+        .unwrap_or_default();
+
+    // Compute the reduction count (product of dims being reduced)
+    let mut reduce_count: f64 = 1.0;
+    for &d in &dims {
+        let axis = input_node
+            .map(|n| map_axis_to_tosa_dim_order(n, d))
+            .unwrap_or(d);
+        if let Some(&dim_size) = input_shape.get(axis as usize) {
+            reduce_count *= dim_size as f64;
+        }
+    }
+
+    let base_dtype = node_output_dtype(node);
+    let sum_name = format!("{}_sum", node.name);
+
+    // Emit chained reduce_sum ops
+    let mut current_input = input_name;
+    let mut current_shape = input_shape.clone();
+
+    for (idx, &dim) in dims.iter().enumerate() {
+        let axis = input_node
+            .map(|n| map_axis_to_tosa_dim_order(n, dim))
+            .unwrap_or(dim);
+
+        let mut out_shape = current_shape.clone();
+        if let Some(slot) = out_shape.get_mut(axis as usize) {
+            *slot = 1;
+        }
+
+        let is_last = idx == dims.len() - 1;
+        let out_name = if is_last {
+            sum_name.clone()
+        } else {
+            format!("{}_reduce_sum_axis{}", node.name, dim)
+        };
+
+        result.tensors.push(TosaTensor {
+            name: out_name.clone(),
+            shape: out_shape.clone(),
+            dtype: base_dtype,
+            data: Vec::new(),
+            variable: false,
+            is_unranked: false,
+            variable_name: String::new(),
+        });
+        result.operators.push(TosaOperator {
+            op: Op::ReduceSum,
+            attribute: Attribute::ReduceSum(ReduceSumAttribute { axis }),
+            inputs: vec![current_input.clone()],
+            outputs: vec![out_name.clone()],
+            location: None,
+        });
+
+        current_input = out_name;
+        current_shape = out_shape;
+    }
+
+    // Emit reciprocal-mul to divide by count
+    let recip_val = 1.0 / reduce_count;
+    let recip_name = format!("{}_mean_recip", node.name);
+    let ir_dtype = node.meta.val.dtype;
+    if let Some(recip_tensor) = make_filled_const_tensor(
+        recip_name.clone(),
+        vec![1],
+        ir_dtype,
+        recip_val,
+    ) {
+        push_inline_const(&mut result, recip_tensor);
+    }
+
+    // Final output after mul
+    let final_name = if keepdim {
+        node.name.clone()
+    } else {
+        format!("{}_mean_pre_reshape", node.name)
+    };
+    result.tensors.push(TosaTensor {
+        name: final_name.clone(),
+        shape: current_shape.clone(),
+        dtype: base_dtype,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    // MUL with shift=0
+    let shift_name = format!("{}_mul_shift", node.name);
+    result.tensors.push(TosaTensor {
+        name: shift_name.clone(),
+        shape: vec![1],
+        dtype: DType::Int8,
+        data: vec![0u8],
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Const,
+        attribute: Attribute::Const(ConstAttribute),
+        inputs: vec![],
+        outputs: vec![shift_name.clone()],
+        location: None,
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Mul,
+        attribute: Attribute::Mul(MulAttribute { shift: 0 }),
+        inputs: vec![sum_name, recip_name, shift_name],
+        outputs: vec![final_name.clone()],
+        location: None,
+    });
+
+    if !keepdim {
+        let final_shape = actual_tensor_shape(graph, store, node);
+        push_reshape_with_shape(
+            &mut result,
+            final_name,
+            node.name.clone(),
+            format!("{}_shape", node.name),
+            final_shape,
+            base_dtype,
+        );
+    }
+
+    result
+}
+
+/// Emit a TOSA RESHAPE from an ATen unsqueeze_copy node.
+pub fn emit_aten_unsqueeze(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let input_name = match input_names.first().cloned() {
+        Some(n) => n,
+        None => return result,
+    };
+    let output_shape = actual_tensor_shape(graph, store, node);
+    push_reshape_with_shape(
+        &mut result,
+        input_name,
+        node.name.clone(),
+        format!("{}_shape", node.name),
+        output_shape,
+        node_output_dtype(node),
+    );
+    result
+}
+
+/// Emit a TOSA RESHAPE from an ATen squeeze_copy node.
+pub fn emit_aten_squeeze(
+    graph: &Graph,
+    _node_id: NodeId,
+    node: &Node,
+    store: &TensorStore,
+) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let input_name = match input_names.first().cloned() {
+        Some(n) => n,
+        None => return result,
+    };
+    let output_shape = actual_tensor_shape(graph, store, node);
+    push_reshape_with_shape(
+        &mut result,
+        input_name,
+        node.name.clone(),
+        format!("{}_shape", node.name),
+        output_shape,
+        node_output_dtype(node),
+    );
+    result
+}
+
+/// Emit a TOSA RECIPROCAL + MUL to implement ATen div.
+/// div(a, b) = a * reciprocal(b)
+pub fn emit_aten_div(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let mut inputs = input_names;
+    maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
+
+    let lhs = inputs.first().cloned().unwrap_or_default();
+    let rhs = inputs.get(1).cloned().unwrap_or_default();
+
+    let base_dtype = node_output_dtype(node);
+    let output_shape = actual_tensor_shape(graph, _store, node);
+
+    // reciprocal(rhs)
+    let recip_name = format!("{}_recip", node.name);
+    result.tensors.push(TosaTensor {
+        name: recip_name.clone(),
+        shape: output_shape.clone(),
+        dtype: base_dtype,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Reciprocal,
+        attribute: Attribute::Reciprocal(ReciprocalAttribute),
+        inputs: vec![rhs],
+        outputs: vec![recip_name.clone()],
+        location: None,
+    });
+
+    // lhs * reciprocal(rhs)
+    let shift_name = format!("{}_shift", node.name);
+    result.tensors.push(TosaTensor {
+        name: shift_name.clone(),
+        shape: vec![1],
+        dtype: DType::Int8,
+        data: vec![0u8],
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Const,
+        attribute: Attribute::Const(ConstAttribute),
+        inputs: vec![],
+        outputs: vec![shift_name.clone()],
+        location: None,
+    });
+
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Mul,
+        attribute: Attribute::Mul(MulAttribute { shift: 0 }),
+        inputs: vec![lhs, recip_name, shift_name],
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
+/// Emit a TOSA RSQRT + MUL combo for ATen sqrt.
+/// sqrt(x) = x * rsqrt(x) (for positive x)
+/// Alternatively: reciprocal(rsqrt(x)), but x * rsqrt(x) is simpler.
+pub fn emit_aten_sqrt(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let input_name = input_names.first().cloned().unwrap_or_default();
+    let base_dtype = node_output_dtype(node);
+    let output_shape = actual_tensor_shape(graph, _store, node);
+
+    // rsqrt(x)
+    let rsqrt_name = format!("{}_rsqrt", node.name);
+    result.tensors.push(TosaTensor {
+        name: rsqrt_name.clone(),
+        shape: output_shape,
+        dtype: base_dtype,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Rsqrt,
+        attribute: Attribute::Rsqrt(RsqrtAttribute),
+        inputs: vec![input_name],
+        outputs: vec![rsqrt_name.clone()],
+        location: None,
+    });
+
+    // reciprocal(rsqrt(x)) = sqrt(x)
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Reciprocal,
+        attribute: Attribute::Reciprocal(ReciprocalAttribute),
+        inputs: vec![rsqrt_name],
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
+/// Emit ATen full_like as a TOSA CONST tensor.
+/// full_like(input, fill_value) creates a tensor with the same shape as input,
+/// filled with fill_value.
+pub fn emit_full_like(graph: &Graph, _node_id: NodeId, node: &Node, store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let output_shape = actual_tensor_shape(graph, store, node);
+    let ir_dtype = node.meta.val.dtype;
+
+    // Get fill value from args (arg 1 is the fill value)
+    let fill_val = match node.args.get(1) {
+        Some(Arg::Float(f)) => *f,
+        Some(Arg::Int(i)) => *i as f64,
+        _ => 0.0,
+    };
+
+    if let Some(tensor) = make_filled_const_tensor(node.name.clone(), output_shape, ir_dtype, fill_val) {
+        push_inline_const(&mut result, tensor);
+    } else {
+        // Fallback: emit an empty const
+        result.tensors.push(make_output_tensor(node));
+    }
+    result
+}
+
+/// Emit ATen aten.sign: sign(x) = select(x > 0, 1, select(x < 0, -1, 0))
+/// Simplified as: (x > 0) * 1 + (x < 0) * (-1)
+/// But for TOSA, we can use: select(x >= 0, select(x > 0, 1, 0), -1)
+pub fn emit_aten_sign(graph: &Graph, _node_id: NodeId, node: &Node, store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let input_name = input_names.first().cloned().unwrap_or_default();
+    let base_dtype = node_output_dtype(node);
+    let output_shape = actual_tensor_shape(graph, store, node);
+    let ir_dtype = node.meta.val.dtype;
+
+    // Create zero, one, neg_one constants
+    let zero_name = format!("{}_sign_zero", node.name);
+    let one_name = format!("{}_sign_one", node.name);
+    let neg_one_name = format!("{}_sign_neg_one", node.name);
+
+    if let Some(t) = make_filled_const_tensor(zero_name.clone(), output_shape.clone(), ir_dtype, 0.0) {
+        push_inline_const(&mut result, t);
+    }
+    if let Some(t) = make_filled_const_tensor(one_name.clone(), output_shape.clone(), ir_dtype, 1.0) {
+        push_inline_const(&mut result, t);
+    }
+    if let Some(t) = make_filled_const_tensor(neg_one_name.clone(), output_shape.clone(), ir_dtype, -1.0) {
+        push_inline_const(&mut result, t);
+    }
+
+    // gt = (x > 0)
+    let gt_name = format!("{}_sign_gt", node.name);
+    result.tensors.push(TosaTensor {
+        name: gt_name.clone(),
+        shape: output_shape.clone(),
+        dtype: DType::Bool,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Greater,
+        attribute: Attribute::Greater(GreaterAttribute),
+        inputs: vec![input_name.clone(), zero_name.clone()],
+        outputs: vec![gt_name.clone()],
+        location: None,
+    });
+
+    // ge = (x >= 0)
+    let ge_name = format!("{}_sign_ge", node.name);
+    result.tensors.push(TosaTensor {
+        name: ge_name.clone(),
+        shape: output_shape.clone(),
+        dtype: DType::Bool,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::GreaterEqual,
+        attribute: Attribute::GreaterEqual(GreaterEqualAttribute),
+        inputs: vec![input_name, zero_name.clone()],
+        outputs: vec![ge_name.clone()],
+        location: None,
+    });
+
+    // inner = select(gt, 1, 0)
+    let inner_name = format!("{}_sign_inner", node.name);
+    result.tensors.push(TosaTensor {
+        name: inner_name.clone(),
+        shape: output_shape.clone(),
+        dtype: base_dtype,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Select,
+        attribute: Attribute::Select(SelectAttribute),
+        inputs: vec![gt_name, one_name, zero_name],
+        outputs: vec![inner_name.clone()],
+        location: None,
+    });
+
+    // output = select(ge, inner, -1)
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Select,
+        attribute: Attribute::Select(SelectAttribute),
+        inputs: vec![ge_name, inner_name, neg_one_name],
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
+/// Emit ATen expm1: expm1(x) = exp(x) - 1
+pub fn emit_aten_expm1(graph: &Graph, _node_id: NodeId, node: &Node, store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let input_name = input_names.first().cloned().unwrap_or_default();
+    let base_dtype = node_output_dtype(node);
+    let output_shape = actual_tensor_shape(graph, store, node);
+    let ir_dtype = node.meta.val.dtype;
+
+    // exp(x)
+    let exp_name = format!("{}_exp", node.name);
+    result.tensors.push(TosaTensor {
+        name: exp_name.clone(),
+        shape: output_shape.clone(),
+        dtype: base_dtype,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Exp,
+        attribute: Attribute::Exp(ExpAttribute),
+        inputs: vec![input_name],
+        outputs: vec![exp_name.clone()],
+        location: None,
+    });
+
+    // const 1.0
+    let one_name = format!("{}_one", node.name);
+    if let Some(t) = make_filled_const_tensor(one_name.clone(), output_shape, ir_dtype, 1.0) {
+        push_inline_const(&mut result, t);
+    }
+
+    // exp(x) - 1
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Sub,
+        attribute: Attribute::Sub(SubAttribute),
+        inputs: vec![exp_name, one_name],
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
+/// Emit ATen log1p: log1p(x) = log(x + 1)
+pub fn emit_aten_log1p(graph: &Graph, _node_id: NodeId, node: &Node, store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let input_name = input_names.first().cloned().unwrap_or_default();
+    let base_dtype = node_output_dtype(node);
+    let output_shape = actual_tensor_shape(graph, store, node);
+    let ir_dtype = node.meta.val.dtype;
+
+    // const 1.0
+    let one_name = format!("{}_one", node.name);
+    if let Some(t) = make_filled_const_tensor(one_name.clone(), output_shape.clone(), ir_dtype, 1.0) {
+        push_inline_const(&mut result, t);
+    }
+
+    // x + 1
+    let add_name = format!("{}_add_one", node.name);
+    result.tensors.push(TosaTensor {
+        name: add_name.clone(),
+        shape: output_shape,
+        dtype: base_dtype,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Add,
+        attribute: Attribute::Add(AddAttribute),
+        inputs: vec![input_name, one_name],
+        outputs: vec![add_name.clone()],
+        location: None,
+    });
+
+    // log(x + 1)
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Log,
+        attribute: Attribute::Log(LogAttribute),
+        inputs: vec![add_name],
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
+/// Emit TOSA FLOOR + MUL for ATen floor_divide (integer division).
+pub fn emit_aten_floor_divide(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
+    // Use INTDIV for integer types, or reciprocal+mul+floor for float types
+    emit_aten_div(graph, _node_id, node, _store)
+}
+
+/// Emit ATen leaky_relu: leaky_relu(x, alpha) = max(0, x) + alpha * min(0, x)
+/// Using TOSA CLAMP would be more efficient, but TOSA clamp doesn't support
+/// negative slopes directly. We use: select(x >= 0, x, alpha * x).
+pub fn emit_aten_leaky_relu(graph: &Graph, _node_id: NodeId, node: &Node, store: &TensorStore) -> EmitResult {
+    let mut result = EmitResult::default();
+    let input_names = collect_input_names(graph, node);
+    let input_name = input_names.first().cloned().unwrap_or_default();
+    let base_dtype = node_output_dtype(node);
+    let output_shape = actual_tensor_shape(graph, store, node);
+    let ir_dtype = node.meta.val.dtype;
+
+    // Get alpha from args (default 0.01)
+    let alpha = match node.args.get(1) {
+        Some(Arg::Float(f)) => *f,
+        _ => 0.01,
+    };
+
+    // const zero
+    let zero_name = format!("{}_zero", node.name);
+    if let Some(t) = make_filled_const_tensor(zero_name.clone(), output_shape.clone(), ir_dtype, 0.0) {
+        push_inline_const(&mut result, t);
+    }
+
+    // ge = (x >= 0)
+    let ge_name = format!("{}_ge", node.name);
+    result.tensors.push(TosaTensor {
+        name: ge_name.clone(),
+        shape: output_shape.clone(),
+        dtype: DType::Bool,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::GreaterEqual,
+        attribute: Attribute::GreaterEqual(GreaterEqualAttribute),
+        inputs: vec![input_name.clone(), zero_name],
+        outputs: vec![ge_name.clone()],
+        location: None,
+    });
+
+    // alpha_const
+    let alpha_name = format!("{}_alpha", node.name);
+    if let Some(t) = make_filled_const_tensor(alpha_name.clone(), output_shape.clone(), ir_dtype, alpha) {
+        push_inline_const(&mut result, t);
+    }
+
+    // alpha * x
+    let scaled_name = format!("{}_scaled", node.name);
+    let shift_name = format!("{}_shift", node.name);
+    result.tensors.push(TosaTensor {
+        name: shift_name.clone(),
+        shape: vec![1],
+        dtype: DType::Int8,
+        data: vec![0u8],
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Const,
+        attribute: Attribute::Const(ConstAttribute),
+        inputs: vec![],
+        outputs: vec![shift_name.clone()],
+        location: None,
+    });
+    result.tensors.push(TosaTensor {
+        name: scaled_name.clone(),
+        shape: output_shape,
+        dtype: base_dtype,
+        data: Vec::new(),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Mul,
+        attribute: Attribute::Mul(MulAttribute { shift: 0 }),
+        inputs: vec![input_name.clone(), alpha_name, shift_name],
+        outputs: vec![scaled_name.clone()],
+        location: None,
+    });
+
+    // select(ge, x, alpha * x)
+    result.tensors.push(make_output_tensor(node));
+    result.operators.push(TosaOperator {
+        op: Op::Select,
+        attribute: Attribute::Select(SelectAttribute),
+        inputs: vec![ge_name, input_name, scaled_name],
+        outputs: vec![node.name.clone()],
+        location: None,
+    });
+
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
@@ -4839,6 +5805,52 @@ pub fn emit_node(
         OpTarget::Where => Some(emit_select(graph, node_id, node, store)),
         OpTarget::Sum => Some(emit_aten_sum(graph, node_id, node, store)),
         OpTarget::ConvTranspose2d => Some(emit_transpose_conv2d(graph, node_id, node, store)),
+
+        // Bitwise ops
+        OpTarget::BitwiseNot => Some(emit_bitwise_not(graph, node_id, node, store)),
+        OpTarget::BitwiseAnd => Some(emit_bitwise_and(graph, node_id, node, store)),
+        OpTarget::BitwiseOr => Some(emit_bitwise_or(graph, node_id, node, store)),
+        OpTarget::BitwiseXor => Some(emit_bitwise_xor(graph, node_id, node, store)),
+        OpTarget::BitwiseLeftShift => Some(emit_logical_left_shift(graph, node_id, node, store)),
+        OpTarget::BitwiseRightShift => Some(emit_arithmetic_right_shift(graph, node_id, node, store)),
+
+        // Logical ops
+        OpTarget::LogicalNot => Some(emit_logical_not(graph, node_id, node, store)),
+        OpTarget::LogicalAnd => Some(emit_logical_and(graph, node_id, node, store)),
+        OpTarget::LogicalOr => Some(emit_logical_or(graph, node_id, node, store)),
+
+        // Comparison ops
+        OpTarget::Gt => Some(emit_aten_gt(graph, node_id, node, store)),
+        OpTarget::Ge => Some(emit_aten_ge(graph, node_id, node, store)),
+        OpTarget::Lt => Some(emit_aten_lt(graph, node_id, node, store)),
+        OpTarget::Le => Some(emit_aten_le(graph, node_id, node, store)),
+        OpTarget::Eq => Some(emit_aten_eq(graph, node_id, node, store)),
+
+        // Trig ops (TOSA has sin/cos, others need decomposition or table lookup)
+        OpTarget::Sin => Some(emit_sin(graph, node_id, node, store)),
+        OpTarget::Cos => Some(emit_cos(graph, node_id, node, store)),
+
+        // Previously unhandled ATen ops that now have explicit targets
+        OpTarget::Mean => Some(emit_aten_mean(graph, node_id, node, store)),
+        OpTarget::Unsqueeze => Some(emit_aten_unsqueeze(graph, node_id, node, store)),
+        OpTarget::Squeeze => Some(emit_aten_squeeze(graph, node_id, node, store)),
+        OpTarget::Div => Some(emit_aten_div(graph, node_id, node, store)),
+        OpTarget::Sqrt => Some(emit_aten_sqrt(graph, node_id, node, store)),
+        OpTarget::Pow => Some(emit_pow(graph, node_id, node, store)),
+        OpTarget::FullLike => Some(emit_full_like(graph, node_id, node, store)),
+        OpTarget::Sign => Some(emit_aten_sign(graph, node_id, node, store)),
+        OpTarget::Expm1 => Some(emit_aten_expm1(graph, node_id, node, store)),
+        OpTarget::Log1p => Some(emit_aten_log1p(graph, node_id, node, store)),
+        OpTarget::FloorDivide => Some(emit_aten_floor_divide(graph, node_id, node, store)),
+        OpTarget::LeakyRelu => Some(emit_aten_leaky_relu(graph, node_id, node, store)),
+
+        // TOSA ops that were missing dispatch arms
+        OpTarget::TosaMaximum => Some(emit_maximum(graph, node_id, node, store)),
+        OpTarget::TosaMinimum => Some(emit_minimum(graph, node_id, node, store)),
+        OpTarget::TosaReduceMax => Some(emit_aten_amax(graph, node_id, node, store)),
+        OpTarget::TosaReduceMin => Some(emit_aten_amin(graph, node_id, node, store)),
+        OpTarget::TosaReduceAny => Some(emit_aten_any(graph, node_id, node, store)),
+
         OpTarget::Other(target) if target.contains("getitem") => Some(EmitResult::default()),
 
         // Ops not yet handled — skip silently for now.

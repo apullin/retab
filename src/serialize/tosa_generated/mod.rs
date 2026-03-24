@@ -365,6 +365,43 @@ pub struct ReduceMaxAttribute { pub axis: i32, pub nan_mode: NanPropagationMode 
 #[derive(Debug, Clone)]
 pub struct ReduceMinAttribute { pub axis: i32, pub nan_mode: NanPropagationMode }
 
+/// BitwiseNotAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct BitwiseNotAttribute;
+/// BitwiseAndAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct BitwiseAndAttribute;
+/// BitwiseOrAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct BitwiseOrAttribute;
+/// BitwiseXorAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct BitwiseXorAttribute;
+/// LogicalLeftShiftAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct LogicalLeftShiftAttribute;
+/// LogicalRightShiftAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct LogicalRightShiftAttribute;
+/// ArithmeticRightShiftAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct ArithmeticRightShiftAttribute;
+/// LogicalNotAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct LogicalNotAttribute;
+/// LogicalAndAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct LogicalAndAttribute;
+/// LogicalOrAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct LogicalOrAttribute;
+/// PowAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct PowAttribute;
+/// IntDivAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct IntDivAttribute;
+
 /// TransposeConv2dAttribute — deconvolution parameters.
 #[derive(Debug, Clone)]
 pub struct TransposeConv2dAttribute {
@@ -428,6 +465,18 @@ pub enum Attribute {
     ReduceAny(ReduceAnyAttribute),
     ReduceMax(ReduceMaxAttribute),
     ReduceMin(ReduceMinAttribute),
+    BitwiseNot(BitwiseNotAttribute),
+    BitwiseAnd(BitwiseAndAttribute),
+    BitwiseOr(BitwiseOrAttribute),
+    BitwiseXor(BitwiseXorAttribute),
+    LogicalLeftShift(LogicalLeftShiftAttribute),
+    LogicalRightShift(LogicalRightShiftAttribute),
+    ArithmeticRightShift(ArithmeticRightShiftAttribute),
+    LogicalNot(LogicalNotAttribute),
+    LogicalAnd(LogicalAndAttribute),
+    LogicalOr(LogicalOrAttribute),
+    Pow(PowAttribute),
+    IntDiv(IntDivAttribute),
 }
 
 impl Attribute {
@@ -482,6 +531,18 @@ impl Attribute {
             Attribute::ReduceAny(_) => 50,      // ReduceAnyAttribute
             Attribute::ReduceMax(_) => 51,      // ReduceMaxAttribute
             Attribute::ReduceMin(_) => 52,      // ReduceMinAttribute
+            Attribute::BitwiseNot(_) => 33,     // BitwiseNotAttribute
+            Attribute::BitwiseAnd(_) => 17,     // BitwiseAndAttribute
+            Attribute::BitwiseOr(_) => 18,      // BitwiseOrAttribute
+            Attribute::BitwiseXor(_) => 19,     // BitwiseXorAttribute
+            Attribute::LogicalLeftShift(_) => 22,  // LogicalLeftShiftAttribute
+            Attribute::LogicalRightShift(_) => 23, // LogicalRightShiftAttribute
+            Attribute::ArithmeticRightShift(_) => 16, // ArithmeticRightShiftAttribute
+            Attribute::LogicalNot(_) => 40,     // LogicalNotAttribute
+            Attribute::LogicalAnd(_) => 21,     // LogicalAndAttribute
+            Attribute::LogicalOr(_) => 24,      // LogicalOrAttribute
+            Attribute::Pow(_) => 29,            // PowAttribute
+            Attribute::IntDiv(_) => 20,         // IntDivAttribute
         }
     }
 }
