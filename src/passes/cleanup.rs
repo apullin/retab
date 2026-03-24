@@ -345,8 +345,17 @@ fn rewrite_sum_to_reduce(graph: &mut Graph, node_id: NodeId) -> bool {
         (input_id, dims, node.meta.clone())
     };
 
+    // Normalize negative dims: TOSA requires non-negative axis values.
+    let input_rank = graph
+        .node(input_id)
+        .map(|n| n.meta.val.shape_slice().len() as i64)
+        .unwrap_or(0);
+
     // Sort dims descending so reducing higher axes first keeps lower indices stable
-    let mut sorted_dims = dims;
+    let mut sorted_dims: Vec<i64> = dims
+        .into_iter()
+        .map(|d| if d < 0 { d + input_rank } else { d })
+        .collect();
     sorted_dims.sort_unstable();
     sorted_dims.reverse();
 
@@ -443,7 +452,16 @@ fn rewrite_amax_to_reduce(graph: &mut Graph, node_id: NodeId) -> bool {
         (input_id, dims, node.meta.clone())
     };
 
-    let mut sorted_dims = dims;
+    // Normalize negative dims: TOSA requires non-negative axis values.
+    let amax_input_rank = graph
+        .node(input_id)
+        .map(|n| n.meta.val.shape_slice().len() as i64)
+        .unwrap_or(0);
+
+    let mut sorted_dims: Vec<i64> = dims
+        .into_iter()
+        .map(|d| if d < 0 { d + amax_input_rank } else { d })
+        .collect();
     sorted_dims.sort_unstable();
     sorted_dims.reverse();
 

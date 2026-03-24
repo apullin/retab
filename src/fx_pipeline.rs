@@ -3,6 +3,7 @@ use crate::fx_convert_clamp;
 use crate::fx_conv1d_unsqueeze;
 use crate::fx_convert_sum;
 use crate::fx_decompose_linear;
+use crate::fx_decompose_ops;
 use crate::fx_decompose_quant;
 use crate::fx_fold_qdq;
 use crate::fx_fuse_constant_args;
@@ -16,6 +17,7 @@ use crate::fx_pass::FxPass;
 use crate::fx_quantize_clamp_args;
 use crate::fx_remove_noop;
 use crate::fx_rewrite_conv;
+use crate::fx_rewrite_squeeze;
 
 /// Build the full FX-direct lowering pipeline in execution order.
 ///
@@ -62,6 +64,10 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         });
 
     vec![
+        // -- Early decompositions (before fold_qdq) --
+        // Decompose atanh, masked_fill, hardsigmoid, stack, unbind into
+        // primitive ops that TOSA can represent.
+        Box::new(fx_decompose_ops::FxDecomposeOpsPass),
         // -- Pre-fold --
         Box::new(fx_fuse_quant_activation::FxFuseQuantizedActivationPass),
         Box::new(fx_convert_clamp::FxConvertToClampPass),
@@ -83,6 +89,10 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
         // -- ATen -> TOSA conversion --
         Box::new(fx_rewrite_conv::FxRewriteConvPass),
+        // Rewrite squeeze/unsqueeze to view_copy with explicit shape,
+        // and transpose_copy to permute_copy with full permutation.
+        // Runs after conv rewriting so shapes are stable.
+        Box::new(fx_rewrite_squeeze::FxRewriteSqueezePass),
         // -- Postprocessing/cleanup (Python ordering) --
         Box::new(fx_cast_int64::FxCastInt64ToInt32Pass::new(ep_for_cast)),
         Box::new(

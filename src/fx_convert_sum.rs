@@ -73,6 +73,14 @@ impl FxPass for FxConvertSumPass {
                 continue;
             }
 
+            // Normalize negative dims: TOSA REDUCE_SUM requires non-negative axes.
+            let input_shape = FxGraphModule::node_shape(input_node).unwrap_or_default();
+            let input_rank = input_shape.len() as i64;
+            let dims: Vec<i64> = dims
+                .into_iter()
+                .map(|d| if d < 0 { d + input_rank } else { d })
+                .collect();
+
             // Check for keepdim (args[2] if present, default True for TOSA).
             let keepdim: bool = args
                 .get(2)
