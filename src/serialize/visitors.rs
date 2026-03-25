@@ -4007,6 +4007,21 @@ pub fn emit_round(
 ) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
+    let input_dtype = passthrough_input_dtype(graph, node);
+
+    // For INT types, round is a no-op — emit IDENTITY
+    if matches!(input_dtype, DType::Int8 | DType::Int16 | DType::Int32) {
+        result.tensors.push(make_output_tensor(node));
+        result.operators.push(TosaOperator {
+            op: Op::Identity,
+            attribute: Attribute::None,
+            inputs: input_names,
+            outputs: vec![node.name.clone()],
+            location: None,
+        });
+        return result;
+    }
+
     let input_name = match input_names.first() {
         Some(name) => name.clone(),
         None => return result,
