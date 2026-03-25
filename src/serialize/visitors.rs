@@ -3830,6 +3830,9 @@ pub fn emit_log(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorSto
 }
 
 /// Emit a NEGATE operator.
+///
+/// TOSA NEGATE requires 3 inputs: [input, input1_zp, output_zp].
+/// For INT8, zero points come from qparams; for other dtypes they're 0.
 pub fn emit_negate(
     graph: &Graph,
     _node_id: NodeId,
@@ -3838,11 +3841,77 @@ pub fn emit_negate(
 ) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
+    let input_dtype = passthrough_input_dtype(graph, node);
     result.tensors.push(make_output_tensor(node));
+
+    let is_int8 = input_dtype == DType::Int8;
+    let (input_zp, output_zp) = if is_int8 {
+        let izp = node
+            .meta
+            .input_qparams
+            .iter()
+            .find(|(pos, _)| *pos == 0)
+            .map(|(_, qp)| qp.zero_point as i32)
+            .unwrap_or(0);
+        let ozp = node
+            .meta
+            .output_qparams
+            .first()
+            .map(|(_, qp)| qp.zero_point as i32)
+            .unwrap_or(0);
+        (izp, ozp)
+    } else {
+        (0i32, 0i32)
+    };
+
+    let zp_dtype = input_dtype;
+    let input_zp_name = format!("{}_input_zp", node.name);
+    let output_zp_name = format!("{}_output_zp", node.name);
+
+    // Create input_zp CONST tensor + operator
+    result.tensors.push(TosaTensor {
+        name: input_zp_name.clone(),
+        shape: vec![1],
+        dtype: zp_dtype,
+        data: encode_zp_for_dtype(input_zp, zp_dtype),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Const,
+        attribute: Attribute::Const(ConstAttribute),
+        inputs: vec![],
+        outputs: vec![input_zp_name.clone()],
+        location: None,
+    });
+
+    // Create output_zp CONST tensor + operator
+    result.tensors.push(TosaTensor {
+        name: output_zp_name.clone(),
+        shape: vec![1],
+        dtype: zp_dtype,
+        data: encode_zp_for_dtype(output_zp, zp_dtype),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Const,
+        attribute: Attribute::Const(ConstAttribute),
+        inputs: vec![],
+        outputs: vec![output_zp_name.clone()],
+        location: None,
+    });
+
+    let mut negate_inputs = input_names;
+    negate_inputs.push(input_zp_name);
+    negate_inputs.push(output_zp_name);
+
     result.operators.push(TosaOperator {
         op: Op::Negate,
         attribute: Attribute::Negate(NegateAttribute),
-        inputs: input_names,
+        inputs: negate_inputs,
         outputs: vec![node.name.clone()],
         location: None,
     });
