@@ -5098,7 +5098,7 @@ pub fn emit_aten_eq(graph: &Graph, _node_id: NodeId, node: &Node, _store: &Tenso
     let input_names = collect_input_names(graph, node);
     let mut inputs = input_names;
     maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
-    result.tensors.push(make_output_tensor(node));
+    result.tensors.push(make_bool_output_tensor(graph, _store, node));
     result.operators.push(TosaOperator {
         op: Op::Equal,
         attribute: Attribute::Equal(EqualAttribute),
@@ -5115,7 +5115,7 @@ pub fn emit_aten_gt(graph: &Graph, _node_id: NodeId, node: &Node, _store: &Tenso
     let input_names = collect_input_names(graph, node);
     let mut inputs = input_names;
     maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
-    result.tensors.push(make_output_tensor(node));
+    result.tensors.push(make_bool_output_tensor(graph, _store, node));
     result.operators.push(TosaOperator {
         op: Op::Greater,
         attribute: Attribute::Greater(GreaterAttribute),
@@ -5132,7 +5132,7 @@ pub fn emit_aten_ge(graph: &Graph, _node_id: NodeId, node: &Node, _store: &Tenso
     let input_names = collect_input_names(graph, node);
     let mut inputs = input_names;
     maybe_materialize_binary_broadcast(graph, _store, node, &mut result, &mut inputs);
-    result.tensors.push(make_output_tensor(node));
+    result.tensors.push(make_bool_output_tensor(graph, _store, node));
     result.operators.push(TosaOperator {
         op: Op::GreaterEqual,
         attribute: Attribute::GreaterEqual(GreaterEqualAttribute),
@@ -5154,7 +5154,7 @@ pub fn emit_aten_lt(graph: &Graph, _node_id: NodeId, node: &Node, _store: &Tenso
     if inputs.len() >= 2 {
         inputs.swap(0, 1);
     }
-    result.tensors.push(make_output_tensor(node));
+    result.tensors.push(make_bool_output_tensor(graph, _store, node));
     result.operators.push(TosaOperator {
         op: Op::Greater,
         attribute: Attribute::Greater(GreaterAttribute),
@@ -5176,7 +5176,7 @@ pub fn emit_aten_le(graph: &Graph, _node_id: NodeId, node: &Node, _store: &Tenso
     if inputs.len() >= 2 {
         inputs.swap(0, 1);
     }
-    result.tensors.push(make_output_tensor(node));
+    result.tensors.push(make_bool_output_tensor(graph, _store, node));
     result.operators.push(TosaOperator {
         op: Op::GreaterEqual,
         attribute: Attribute::GreaterEqual(GreaterEqualAttribute),
