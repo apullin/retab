@@ -22,6 +22,7 @@ use crate::fx_pass::FxPass;
 use crate::fx_quantize_clamp_args;
 use crate::fx_remove_noop;
 use crate::fx_rewrite_conv;
+use crate::fx_rewrite_matmul;
 use crate::fx_rewrite_squeeze;
 
 /// Build the full FX-direct lowering pipeline in execution order.
@@ -120,6 +121,9 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
         Box::new(fx_remove_noop::FxRemoveNoopPass),
         Box::new(fx_insert_rescale::FxInsertRescalePass),
+        // Fix matmul rescale: accumulator_scale = A_scale * B_scale,
+        // not just input_scale. Must run after InsertRescalePass.
+        Box::new(fx_rewrite_matmul::FxRewriteMatmulRescalePass),
         Box::new(
             fx_fuse_constant_args::FxFuseConstantArgsPass::new_zero_input_full_only(
                 ep_for_fuse_late,
