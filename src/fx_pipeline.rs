@@ -1,6 +1,7 @@
 use crate::fx_cast_int64;
 use crate::fx_convert_clamp;
 use crate::fx_convert_full_like;
+use crate::fx_decompose_adaptive_avgpool;
 use crate::fx_convert_split_to_slice;
 use crate::fx_conv1d_unsqueeze;
 use crate::fx_convert_sum;
@@ -107,7 +108,9 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(
             ep_for_fuse,
         )),
-        // Decompose mean.dim into avg_pool2d (spatial) + sum*mul (batch/channel)
+        // Decompose adaptive_avg_pool2d → avg_pool2d (or slice+pool+cat)
+        Box::new(fx_decompose_adaptive_avgpool::FxDecomposeAdaptiveAvgPoolPass),
+        // Decompose mean.dim into sum*mul with keepdim=True + reshape
         Box::new(fx_decompose_mean::FxDecomposeMeanPass),
         Box::new(fx_convert_sum::FxConvertSumPass),
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),

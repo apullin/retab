@@ -5,6 +5,7 @@ mod compile_spec;
 mod fx_cast_int64;
 mod fx_convert_clamp;
 mod fx_convert_full_like;
+mod fx_decompose_adaptive_avgpool;
 mod fx_convert_split_to_slice;
 mod fx_conv1d_unsqueeze;
 mod fx_convert_sum;
