@@ -55,7 +55,13 @@ impl FxPass for FxRewriteConvPass {
             // [input, weight, bias, stride, padding]
             // [input, weight, bias, stride, padding, dilation]
             // [input, weight, bias, stride, padding, dilation, groups]
-            if (!is_raw_conv2d && args.len() < 9) || (is_raw_conv2d && args.len() < 5) {
+            // aten.convolution.default needs 9 args; aten.conv2d.default needs
+            // at least 2 (input, weight).  After fold_qdq, conv2d may have
+            // only 2-3 args if bias/stride/padding were simplified.
+            if !is_raw_conv2d && args.len() < 9 {
+                continue;
+            }
+            if is_raw_conv2d && args.len() < 2 {
                 continue;
             }
 

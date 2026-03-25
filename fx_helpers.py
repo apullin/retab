@@ -1072,11 +1072,15 @@ def rewrite_conv_to_tosa(
     args = node.args
     target_str = str(node.target)
     if "conv2d.default" in target_str:
-        if len(args) < 5:
+        if len(args) < 2:
             raise RuntimeError(
-                f"Expected aten.conv2d.default to have at least 5 args, got {len(args)}"
+                f"Expected aten.conv2d.default to have at least 2 args, got {len(args)}"
             )
-        x, weight, bias, stride, pad = args[:5]
+        x = args[0]
+        weight = args[1]
+        bias = args[2] if len(args) > 2 else None
+        stride = args[3] if len(args) > 3 else (1, 1)
+        pad = args[4] if len(args) > 4 else (0, 0)
         dilation = args[5] if len(args) > 5 else (1, 1)
         groups = args[6] if len(args) > 6 else 1
         transposed = False
