@@ -2248,7 +2248,15 @@ pub fn emit_aten_sum(
     let input_shape = input_node
         .map(|n| actual_tensor_shape(graph, store, n))
         .unwrap_or_default();
-    let base_dtype = node_output_dtype(node);
+    // TOSA REDUCE_SUM: INT8 input → INT32 accumulator.
+    let input_dtype = input_node
+        .map(|n| passthrough_input_dtype(graph, n))
+        .unwrap_or_else(|| node_output_dtype(node));
+    let base_dtype = match input_dtype {
+        DType::Int8 => DType::Int32,
+        DType::Int16 => DType::Int32,
+        _ => node_output_dtype(node),
+    };
     let mut current_input = input_name;
     let mut current_shape = input_shape;
 
@@ -3518,10 +3526,21 @@ pub fn emit_reduce_sum(
         format!("{}_reduce_axis{}", node.name, raw_axis)
     };
 
+    // TOSA REDUCE_SUM: INT8 input → INT32 accumulator output.
+    // Python metadata may say INT64 but TOSA only supports INT32.
+    let input_dtype = input_node
+        .map(|n| passthrough_input_dtype(graph, n))
+        .unwrap_or_else(|| node_output_dtype(node));
+    let reduce_dtype = match input_dtype {
+        DType::Int8 => DType::Int32,
+        DType::Int16 => DType::Int32,
+        _ => node_output_dtype(node),
+    };
+
     result.tensors.push(TosaTensor {
         name: reduce_output.clone(),
         shape: reduce_shape.clone(),
-        dtype: node_output_dtype(node),
+        dtype: reduce_dtype,
         data: Vec::new(),
         variable: false,
         is_unranked: false,
