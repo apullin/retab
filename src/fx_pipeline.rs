@@ -6,11 +6,14 @@ use crate::fx_convert_split_to_slice;
 use crate::fx_conv1d_unsqueeze;
 use crate::fx_convert_sum;
 use crate::fx_decompose_addmm;
+use crate::fx_decompose_cumsum;
+use crate::fx_decompose_grouped_conv;
 use crate::fx_decompose_linear;
 use crate::fx_decompose_logit;
 use crate::fx_decompose_masked_fill;
 use crate::fx_decompose_mean;
 use crate::fx_decompose_ops;
+use crate::fx_decompose_pixel_shuffle;
 use crate::fx_decompose_quant;
 use crate::fx_fold_qdq;
 use crate::fx_fuse_constant_args;
@@ -102,6 +105,10 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         // Decompose addmm -> mm + mul + add
         // Python runs DecomposeAddmmPass post-fold (line 297 in arm_pass_manager.py)
         Box::new(fx_decompose_addmm::FxDecomposeAddmmPass),
+        // Decompose cumsum into chained slice_copy + add + cat
+        Box::new(fx_decompose_cumsum::FxDecomposeCumsumPass),
+        // Decompose pixel_shuffle/pixel_unshuffle into view+permute+view
+        Box::new(fx_decompose_pixel_shuffle::FxDecomposePixelShufflePass),
         Box::new(fx_quantize_clamp_args::FxQuantizeClampArgsPass),
         // Convert full_like -> full with explicit shape
         // Python runs ConvertFullLikeToFullPass in scalars section (line 330)
@@ -116,6 +123,9 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_convert_sum::FxConvertSumPass),
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
         // -- ATen -> TOSA conversion --
+        // Decompose grouped convolutions (groups>1, not depthwise) into
+        // per-group slice_copy -> conv(groups=1) -> cat before TOSA rewrite.
+        Box::new(fx_decompose_grouped_conv::FxDecomposeGroupedConvPass),
         Box::new(fx_rewrite_conv::FxRewriteConvPass),
         // Adjust input sizes for conv/pool to yield exact integer output dims
         Box::new(fx_size_adjust_input::FxSizeAdjustInputPass),
