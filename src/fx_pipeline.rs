@@ -1,6 +1,7 @@
 use crate::fx_cast_int64;
 use crate::fx_convert_clamp;
 use crate::fx_convert_full_like;
+use crate::fx_convert_split_to_slice;
 use crate::fx_conv1d_unsqueeze;
 use crate::fx_convert_sum;
 use crate::fx_decompose_addmm;
@@ -87,6 +88,9 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_insert_rescale::FxInsertRescalePass),
         Box::new(fx_decompose_quant::FxDecomposeQuantNodesPass),
         // -- Post-fold decompositions (matches Python ordering) --
+        // Convert split_with_sizes_copy → multiple slice_copy ops
+        // Python runs ConvertSplitToSlicePass post-fold (line 281)
+        Box::new(fx_convert_split_to_slice::FxConvertSplitToSlicePass),
         // Decompose masked_fill -> where(mask, quantized_full, x).  Runs after
         // fold_qdq so the fill scalar can be quantized with output qparams.
         Box::new(fx_decompose_masked_fill::FxDecomposeMaskedFillPass),
