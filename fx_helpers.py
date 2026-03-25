@@ -254,6 +254,13 @@ _TABLE_MATH_FNS = {
     "sigmoid": lambda x: 1.0 / (1.0 + math.exp(-x)),
     "tanh": math.tanh,
     "erf": math.erf,
+    "sinh": math.sinh,
+    "cosh": math.cosh,
+    "tan": math.tan,
+    "acos": math.acos,
+    "asin": math.asin,
+    "atan": math.atan,
+    "expm1": math.expm1,
     "silu": lambda x: float(torch.nn.functional.silu(torch.tensor(x, dtype=torch.float32)).item()),
     "gelu": lambda x: float(
         torch.nn.functional.gelu(torch.tensor(x, dtype=torch.float32), approximate="none").item()

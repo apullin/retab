@@ -85,6 +85,41 @@ fn table_op_spec(node: &Bound<'_, PyAny>, target: &str) -> PyResult<Option<Table
             kind: "erf",
             scalar_arg: None,
         }))
+    } else if target.contains("sinh.default") {
+        Ok(Some(TableOpSpec {
+            kind: "sinh",
+            scalar_arg: None,
+        }))
+    } else if target.contains("cosh.default") {
+        Ok(Some(TableOpSpec {
+            kind: "cosh",
+            scalar_arg: None,
+        }))
+    } else if target.contains("tan.default") {
+        Ok(Some(TableOpSpec {
+            kind: "tan",
+            scalar_arg: None,
+        }))
+    } else if target.contains("acos.default") {
+        Ok(Some(TableOpSpec {
+            kind: "acos",
+            scalar_arg: None,
+        }))
+    } else if target.contains("asin.default") {
+        Ok(Some(TableOpSpec {
+            kind: "asin",
+            scalar_arg: None,
+        }))
+    } else if target.contains("atan.default") {
+        Ok(Some(TableOpSpec {
+            kind: "atan",
+            scalar_arg: None,
+        }))
+    } else if target.contains("expm1.default") {
+        Ok(Some(TableOpSpec {
+            kind: "expm1",
+            scalar_arg: None,
+        }))
     } else {
         Ok(None)
     }
