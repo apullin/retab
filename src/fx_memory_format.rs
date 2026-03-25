@@ -360,7 +360,8 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 continue;
             }
             let target = FxGraphModule::node_target_str(node)?;
-            if !target.contains("view_copy") {
+            // Match both aten.view_copy.default and aten.view.default
+            if !(target.contains("view_copy") || target.contains("aten.view.")) {
                 continue;
             }
 
