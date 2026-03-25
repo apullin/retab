@@ -123,7 +123,8 @@ fn convert_full_like<'py>(
     let inserting = graph.call_method1("inserting_before", (node,))?;
     inserting.call_method0("__enter__")?;
     let full_args = PyTuple::new_bound(py, &[shape_py.as_ref(), fill_value.as_ref()]);
-    let new_node = graph.call_method("call_function", (&full_op, &full_args), Some(&kwargs))?;
+    // Graph.call_function(target, args, kwargs) — kwargs is a positional param
+    let new_node = graph.call_method1("call_function", (&full_op, &full_args, &kwargs))?;
     inserting.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
 
     // Copy meta from original node
