@@ -79,25 +79,37 @@ impl FxPass for FxSizeAdjustInputPass {
                 let stride: Vec<i64> = args.get(3)
                     .and_then(|a| a.extract().ok())
                     .unwrap_or_else(|| vec![1, 1]);
-                let pad: Vec<i64> = args.get(4)
+                let raw_pad: Vec<i64> = args.get(4)
                     .and_then(|a| a.extract().ok())
                     .unwrap_or_else(|| vec![0, 0]);
                 let dilation: Vec<i64> = args.get(5)
                     .and_then(|a| a.extract().ok())
                     .unwrap_or_else(|| vec![1, 1]);
 
+                // Handle both ATen pad [pad_h, pad_w] and TOSA pad [top, bottom, left, right]
+                let pad_per_dim: Vec<(i64, i64)> = if raw_pad.len() == 4 {
+                    // TOSA format: [top, bottom, left, right]
+                    vec![(raw_pad[0], raw_pad[1]), (raw_pad[2], raw_pad[3])]
+                } else if raw_pad.len() == 2 {
+                    // ATen format: symmetric [pad_h, pad_w]
+                    vec![(raw_pad[0], raw_pad[0]), (raw_pad[1], raw_pad[1])]
+                } else {
+                    vec![(0, 0), (0, 0)]
+                };
+
                 let mut slices = Vec::new();
                 for i in 0..2 {
                     let dim = i + 2;
                     let s = stride.get(i).copied().unwrap_or(1);
-                    let p = pad.get(i).copied().unwrap_or(0);
+                    let (pad_before, pad_after) = pad_per_dim.get(i).copied().unwrap_or((0, 0));
+                    let total_pad = pad_before + pad_after;
                     let d = dilation.get(i).copied().unwrap_or(1);
                     let k = weight_shape.get(dim).copied().unwrap_or(1);
                     let input_len = input_shape.get(dim).copied().unwrap_or(1);
 
-                    let remainder = (input_len + 2 * p - d * (k - 1) - 1) % s;
-                    if remainder > p {
-                        let adjustment = remainder - p;
+                    let remainder = (input_len + total_pad - d * (k - 1) - 1) % s;
+                    if remainder > 0 {
+                        let adjustment = remainder;
                         slices.push((dim as i64, 0i64, input_len - adjustment));
                     }
                 }
