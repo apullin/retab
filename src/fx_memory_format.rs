@@ -570,7 +570,8 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 continue;
             }
             let target = FxGraphModule::node_target_str(node)?;
-            if !target.contains("permute_copy") {
+            // Match aten.permute_copy.default and aten.permute.default
+            if !(target.contains("permute_copy") || target.contains("aten.permute.")) {
                 continue;
             }
 
@@ -671,6 +672,20 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 p_nhwc[j] = f_inv[user_mapped] as i64;      // map result NCHW axis -> NHWC pos
             }
 
+            // Skip if the remapped perm is identical to the original —
+            // no change needed, and refresh_node_fake_tensor would corrupt
+            // the metadata for identity-like permutations.
+            if p_nhwc == user_perm {
+                if debug {
+                    let name = FxGraphModule::node_name(node)?;
+                    eprintln!(
+                        "[MemoryFormat] skipping permute '{}' — perm {:?} unchanged after remap",
+                        name, user_perm
+                    );
+                }
+                continue;
+            }
+
             if debug {
                 let name = FxGraphModule::node_name(node)?;
                 eprintln!(
@@ -687,12 +702,9 @@ impl FxPass for FxToTosaMemoryFormatPass {
             );
             node.setattr("args", new_args)?;
 
-            // Update the FakeTensor in meta to reflect the new output shape.
-            // After permute in NHWC domain, the output shape changes.
-            let _ = {
-                let fxh = py.import_bound("fx_helpers")?;
-                fxh.call_method1("refresh_node_fake_tensor", (node,))
-            };
+            // Do NOT call refresh_node_fake_tensor — the remapped perm changes
+            // the physical layout but the logical NCHW shape in meta.val must
+            // stay unchanged for downstream passes and serialization.
 
             modified = true;
         }

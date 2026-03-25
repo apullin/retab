@@ -432,14 +432,7 @@ fn map_axis_to_tosa_dim_order(node: &Node, axis: i32) -> i32 {
 /// This differs from `meta.val.shape` in two important cases:
 /// 1. NHWC-native op outputs still carry PyTorch's logical NCHW shape.
 pub(crate) fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Vec<i32> {
-    // For reshape-like ops, use the literal target shape from args[1] when
-    // available.  This avoids apply_tosa_dim_order reordering the target shape,
-    // which is wrong for view_copy / flatten that carry NCHW shapes while the
-    // memory format pass has already inserted NHWC transposes around them.
-    if matches!(
-        node.target,
-        OpTarget::TosaReshape | OpTarget::Reshape | OpTarget::View | OpTarget::Flatten
-    ) {
+    if node.target == OpTarget::TosaReshape {
         if let Some(shape) = literal_output_shape(node) {
             return shape;
         }
