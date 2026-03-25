@@ -6086,6 +6086,9 @@ pub fn emit_node(
         OpTarget::TosaReduceMin => Some(emit_aten_amin(graph, node_id, node, store)),
         OpTarget::TosaReduceAny => Some(emit_aten_any(graph, node_id, node, store)),
 
+        // Zeros is just full(shape, 0)
+        OpTarget::Zeros => Some(emit_full(graph, node_id, node, store)),
+
         OpTarget::Other(target) if target.contains("getitem") => Some(EmitResult::default()),
 
         // Ops not yet handled — skip silently for now.
