@@ -269,6 +269,8 @@ _TABLE_MATH_FNS = {
     "sqrt": lambda x: math.sqrt(max(x, 0.0)),
     "sin": math.sin,
     "cos": math.cos,
+    "hardsigmoid": lambda x: max(0.0, min(1.0, x / 6.0 + 0.5)),
+    "hardswish": lambda x: x * max(0.0, min(1.0, x / 6.0 + 0.5)),
     "silu": lambda x: float(torch.nn.functional.silu(torch.tensor(x, dtype=torch.float32)).item()),
     "gelu": lambda x: float(
         torch.nn.functional.gelu(torch.tensor(x, dtype=torch.float32), approximate="none").item()

@@ -130,6 +130,16 @@ fn table_op_spec(node: &Bound<'_, PyAny>, target: &str) -> PyResult<Option<Table
             kind: "expm1",
             scalar_arg: None,
         }))
+    } else if target.contains("hardsigmoid.default") {
+        Ok(Some(TableOpSpec {
+            kind: "hardsigmoid",
+            scalar_arg: None,
+        }))
+    } else if target.contains("hardswish.default") {
+        Ok(Some(TableOpSpec {
+            kind: "hardswish",
+            scalar_arg: None,
+        }))
     } else if target.contains("elu.default") || target.contains("elu_") {
         // elu(x, alpha) = x if x >= 0, alpha * (exp(x) - 1) if x < 0
         // Default alpha = 1.0

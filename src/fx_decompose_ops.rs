@@ -142,7 +142,10 @@ impl FxPass for FxDecomposeOpsPass {
             if is_atanh(&target) {
                 candidates.push((node.clone(), DecompKind::Atanh));
             } else if is_hardsigmoid(&target) {
-                candidates.push((node.clone(), DecompKind::Hardsigmoid));
+                // Skip hardsigmoid decomposition for quantized graphs —
+                // InsertTableOpsPass handles it via TABLE lookup instead.
+                // The arithmetic decomposition (x+3)/6 causes INT32/FP32
+                // dtype mismatches in the quantized pipeline.
             } else if is_stack(&target) {
                 candidates.push((node.clone(), DecompKind::Stack));
             } else if is_unbind(&target) {
