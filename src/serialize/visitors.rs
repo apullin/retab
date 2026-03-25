@@ -3937,18 +3937,30 @@ pub fn emit_abs(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorSto
 pub fn emit_ceil(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorStore) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
+    let input_dtype = passthrough_input_dtype(graph, node);
     result.tensors.push(make_output_tensor(node));
-    result.operators.push(TosaOperator {
-        op: Op::Ceil,
-        attribute: Attribute::Ceil(CeilAttribute),
-        inputs: input_names,
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+    if matches!(input_dtype, DType::Int8 | DType::Int16 | DType::Int32) {
+        result.operators.push(TosaOperator {
+            op: Op::Identity,
+            attribute: Attribute::None,
+            inputs: input_names,
+            outputs: vec![node.name.clone()],
+            location: None,
+        });
+    } else {
+        result.operators.push(TosaOperator {
+            op: Op::Ceil,
+            attribute: Attribute::Ceil(CeilAttribute),
+            inputs: input_names,
+            outputs: vec![node.name.clone()],
+            location: None,
+        });
+    }
     result
 }
 
 /// Emit a FLOOR operator.
+/// For integer types, floor is a no-op — emit IDENTITY instead.
 pub fn emit_floor(
     graph: &Graph,
     _node_id: NodeId,
@@ -3957,14 +3969,28 @@ pub fn emit_floor(
 ) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
+    let input_dtype = passthrough_input_dtype(graph, node);
     result.tensors.push(make_output_tensor(node));
-    result.operators.push(TosaOperator {
-        op: Op::Floor,
-        attribute: Attribute::Floor(FloorAttribute),
-        inputs: input_names,
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+
+    // TOSA FLOOR only accepts FP types. For INT8/INT16/INT32 (quantized),
+    // floor is a no-op — emit IDENTITY instead.
+    if matches!(input_dtype, DType::Int8 | DType::Int16 | DType::Int32) {
+        result.operators.push(TosaOperator {
+            op: Op::Identity,
+            attribute: Attribute::None,
+            inputs: input_names,
+            outputs: vec![node.name.clone()],
+            location: None,
+        });
+    } else {
+        result.operators.push(TosaOperator {
+            op: Op::Floor,
+            attribute: Attribute::Floor(FloorAttribute),
+            inputs: input_names,
+            outputs: vec![node.name.clone()],
+            location: None,
+        });
+    }
     result
 }
 
