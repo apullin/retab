@@ -25,6 +25,7 @@ use crate::fx_quantize_clamp_args;
 use crate::fx_remove_noop;
 use crate::fx_rewrite_conv;
 use crate::fx_rewrite_matmul;
+use crate::fx_size_adjust_input;
 use crate::fx_rewrite_squeeze;
 
 /// Build the full FX-direct lowering pipeline in execution order.
@@ -116,6 +117,8 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
         // -- ATen -> TOSA conversion --
         Box::new(fx_rewrite_conv::FxRewriteConvPass),
+        // Adjust input sizes for conv/pool to yield exact integer output dims
+        Box::new(fx_size_adjust_input::FxSizeAdjustInputPass),
         // Rewrite squeeze/unsqueeze to view_copy with explicit shape,
         // and transpose_copy to permute_copy with full permutation.
         // Runs after conv rewriting so shapes are stable.
