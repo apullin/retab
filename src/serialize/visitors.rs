@@ -4739,10 +4739,35 @@ pub fn emit_pad(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorSto
     }
     push_const_shape(&mut result, format!("{}_pad_shape", node.name), pad_shape);
 
+    // TOSA PAD needs a pad_const input (the fill value, usually 0)
+    let pad_const_name = format!("{}_pad_const", node.name);
+    let pad_value = kwarg_i32(node, "value", 0);
+    let pad_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+    result.tensors.push(TosaTensor {
+        name: pad_const_name.clone(),
+        shape: vec![1],
+        dtype: pad_dtype,
+        data: encode_zp_for_dtype(pad_value, pad_dtype),
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    });
+    result.operators.push(TosaOperator {
+        op: Op::Const,
+        attribute: Attribute::Const(ConstAttribute),
+        inputs: vec![],
+        outputs: vec![pad_const_name.clone()],
+        location: None,
+    });
+
     result.operators.push(TosaOperator {
         op: Op::Pad,
         attribute: Attribute::Pad(PadAttribute),
-        inputs: vec![input_names.first().cloned().unwrap_or_default(), format!("{}_pad_shape", node.name)],
+        inputs: vec![
+            input_names.first().cloned().unwrap_or_default(),
+            format!("{}_pad_shape", node.name),
+            pad_const_name,
+        ],
         outputs: vec![node.name.clone()],
         location: None,
     });
