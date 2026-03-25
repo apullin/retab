@@ -50,6 +50,23 @@ fn node_output_dtype(node: &Node) -> DType {
     if let Some(dt) = node.meta.tosa_special_dtype {
         return ir_dtype_to_tosa(dt);
     }
+    // Comparison ops always output BOOL regardless of inherited qparams.
+    if matches!(
+        node.target,
+        OpTarget::Eq
+            | OpTarget::Gt
+            | OpTarget::Ge
+            | OpTarget::Lt
+            | OpTarget::Le
+            | OpTarget::TosaEqual
+            | OpTarget::TosaGreater
+            | OpTarget::TosaGreaterEqual
+            | OpTarget::LogicalNot
+            | OpTarget::LogicalAnd
+            | OpTarget::LogicalOr
+    ) {
+        return DType::Bool;
+    }
     // Materialized placeholder/get_attr tensors should follow their actual
     // stored tensor dtype. Some folded constants intentionally keep floating
     // values in branch graphs even if stale qparams remain in node.meta.
