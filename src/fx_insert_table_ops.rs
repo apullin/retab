@@ -80,9 +80,19 @@ fn table_op_spec(node: &Bound<'_, PyAny>, target: &str) -> PyResult<Option<Table
             kind: "silu",
             scalar_arg: None,
         }))
-    } else if target.contains("erf.default") {
+    } else if target.contains("erf.default") && !target.contains("erfinv") {
         Ok(Some(TableOpSpec {
             kind: "erf",
+            scalar_arg: None,
+        }))
+    } else if target.contains("aten.sin.") && !target.contains("sinh") && !target.contains("asin") {
+        Ok(Some(TableOpSpec {
+            kind: "sin",
+            scalar_arg: None,
+        }))
+    } else if target.contains("aten.cos.") && !target.contains("cosh") && !target.contains("acos") {
+        Ok(Some(TableOpSpec {
+            kind: "cos",
             scalar_arg: None,
         }))
     } else if target.contains("sinh.default") {
