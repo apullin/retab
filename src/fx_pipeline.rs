@@ -73,12 +73,6 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         // Decompose atanh, hardsigmoid, stack, unbind into primitive ops
         // that TOSA can represent. (masked_fill handled post-fold below.)
         Box::new(fx_decompose_ops::FxDecomposeOpsPass),
-        // Decompose addmm -> mm + mul + add (Python DecomposeAddmmPass)
-        Box::new(fx_decompose_addmm::FxDecomposeAddmmPass),
-        // Decompose logit -> clamp + mul + add + reciprocal + log (Python DecomposeLogitPass)
-        Box::new(fx_decompose_logit::FxDecomposeLogitPass),
-        // Convert full_like -> full with explicit shape (Python ConvertFullLikeToFullPass)
-        Box::new(fx_convert_full_like::FxConvertFullLikeToFullPass),
         // -- Pre-fold --
         Box::new(fx_fuse_quant_activation::FxFuseQuantizedActivationPass),
         Box::new(fx_convert_clamp::FxConvertToClampPass),
@@ -91,15 +85,24 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_conv1d_unsqueeze::FxConv1dUnsqueezePass),
         Box::new(fx_insert_rescale::FxInsertRescalePass),
         Box::new(fx_decompose_quant::FxDecomposeQuantNodesPass),
-        // -- Post-fold decompositions --
+        // -- Post-fold decompositions (matches Python ordering) --
         // Decompose masked_fill -> where(mask, quantized_full, x).  Runs after
         // fold_qdq so the fill scalar can be quantized with output qparams.
         Box::new(fx_decompose_masked_fill::FxDecomposeMaskedFillPass),
+        // Decompose logit -> clamp + mul + add + reciprocal + log
+        // Python runs DecomposeLogitPass post-fold (line 285 in arm_pass_manager.py)
+        Box::new(fx_decompose_logit::FxDecomposeLogitPass),
+        // Decompose addmm -> mm + mul + add
+        // Python runs DecomposeAddmmPass post-fold (line 297 in arm_pass_manager.py)
+        Box::new(fx_decompose_addmm::FxDecomposeAddmmPass),
         Box::new(fx_quantize_clamp_args::FxQuantizeClampArgsPass),
+        // Convert full_like -> full with explicit shape
+        // Python runs ConvertFullLikeToFullPass in scalars section (line 330)
+        Box::new(fx_convert_full_like::FxConvertFullLikeToFullPass),
         Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(
             ep_for_fuse,
         )),
-        // Decompose mean.dim into sum+mul(1/count) before sum conversion.
+        // Decompose mean.dim into avg_pool2d (spatial) + sum*mul (batch/channel)
         Box::new(fx_decompose_mean::FxDecomposeMeanPass),
         Box::new(fx_convert_sum::FxConvertSumPass),
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
