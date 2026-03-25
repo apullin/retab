@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
+use crate::fx_decompose_ops::{insert_call_before, propagate_qparams, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
 
@@ -143,11 +143,13 @@ fn decompose_cumsum<'py>(
         // elem = add(prev, curr)
         let add_args = PyTuple::new_bound(py, &[prev.as_ref(), curr.as_ref()]);
         let elem = insert_call_before(py, graph, node, &add_op, add_args.as_ref(), node)?;
+        propagate_qparams(node, &elem)?;
 
         // result = cat([result, elem], dim)
         let cat_list = pyo3::types::PyList::new_bound(py, &[result.as_ref(), elem.as_ref()]);
         let cat_args = PyTuple::new_bound(py, &[cat_list.as_ref(), dim_py.as_ref()]);
         result = insert_call_before(py, graph, node, &cat_op, cat_args.as_ref(), node)?;
+        propagate_qparams(node, &result)?;
     }
 
     // Copy original node's meta onto the final result

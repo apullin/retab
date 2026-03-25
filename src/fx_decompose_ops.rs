@@ -112,6 +112,31 @@ pub fn insert_call_before<'py>(
     Ok(new_node)
 }
 
+/// Propagate qparams from a source node to a target node.
+/// Sets input_qparams and output_qparams on the target's meta.
+/// For intermediate nodes in a decomposition, use the source's qparams.
+pub fn propagate_qparams<'py>(
+    src: &Bound<'py, PyAny>,
+    dst: &Bound<'py, PyAny>,
+) -> PyResult<()> {
+    let src_meta = src.getattr("meta")?;
+    let dst_meta = dst.getattr("meta")?;
+
+    // Copy input_qparams if available
+    if let Ok(iqp) = src_meta.call_method1("get", ("input_qparams",)) {
+        if !iqp.is_none() {
+            dst_meta.set_item("input_qparams", &iqp)?;
+        }
+    }
+    // Copy output_qparams if available
+    if let Ok(oqp) = src_meta.call_method1("get", ("output_qparams",)) {
+        if !oqp.is_none() {
+            dst_meta.set_item("output_qparams", &oqp)?;
+        }
+    }
+    Ok(())
+}
+
 /// Try to refresh a node's meta["val"] from its target and args.
 fn refresh_fake_tensor(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<()> {
     let helpers = py.import_bound("fx_helpers")?;
