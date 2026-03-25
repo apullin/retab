@@ -261,6 +261,12 @@ _TABLE_MATH_FNS = {
     "asin": math.asin,
     "atan": math.atan,
     "expm1": math.expm1,
+    "acosh": math.acosh,
+    "asinh": math.asinh,
+    "atanh": math.atanh,
+    "erfinv": lambda x: float(torch.erfinv(torch.tensor(x, dtype=torch.float64)).item()),
+    "log1p": math.log1p,
+    "sqrt": lambda x: math.sqrt(max(x, 0.0)),
     "silu": lambda x: float(torch.nn.functional.silu(torch.tensor(x, dtype=torch.float32)).item()),
     "gelu": lambda x: float(
         torch.nn.functional.gelu(torch.tensor(x, dtype=torch.float32), approximate="none").item()
@@ -269,17 +275,24 @@ _TABLE_MATH_FNS = {
 
 
 def _table_math_fn(kind: str, scalar_arg: float | None = None):
-    if kind != "pow":
+    if kind == "pow":
+        if scalar_arg is None:
+            raise ValueError("pow table op requires a scalar exponent")
+        def _pow_fn(x: float) -> float:
+            value = torch.pow(torch.tensor(x, dtype=torch.float32), float(scalar_arg))
+            return float(value.item())
+        return _pow_fn
+
+    if kind == "elu":
+        alpha = scalar_arg if scalar_arg is not None else 1.0
+        def _elu_fn(x: float) -> float:
+            return x if x >= 0.0 else alpha * (math.exp(x) - 1.0)
+        return _elu_fn
+
+    if kind in _TABLE_MATH_FNS:
         return _TABLE_MATH_FNS[kind]
 
-    if scalar_arg is None:
-        raise ValueError("pow table op requires a scalar exponent")
-
-    def _pow_fn(x: float) -> float:
-        value = torch.pow(torch.tensor(x, dtype=torch.float32), float(scalar_arg))
-        return float(value.item())
-
-    return _pow_fn
+    raise ValueError(f"Unknown table op kind: {kind}")
 
 
 def _compute_table(

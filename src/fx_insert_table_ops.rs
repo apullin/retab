@@ -120,6 +120,45 @@ fn table_op_spec(node: &Bound<'_, PyAny>, target: &str) -> PyResult<Option<Table
             kind: "expm1",
             scalar_arg: None,
         }))
+    } else if target.contains("elu.default") || target.contains("elu_") {
+        // elu(x, alpha) = x if x >= 0, alpha * (exp(x) - 1) if x < 0
+        // Default alpha = 1.0
+        let alpha = node_scalar_arg(node, 1)?.unwrap_or(1.0);
+        Ok(Some(TableOpSpec {
+            kind: "elu",
+            scalar_arg: Some(alpha),
+        }))
+    } else if target.contains("acosh.default") {
+        Ok(Some(TableOpSpec {
+            kind: "acosh",
+            scalar_arg: None,
+        }))
+    } else if target.contains("asinh.default") {
+        Ok(Some(TableOpSpec {
+            kind: "asinh",
+            scalar_arg: None,
+        }))
+    } else if target.contains("atanh.default") {
+        // atanh is already handled by FxDecomposeOpsPass, but add TABLE fallback
+        Ok(Some(TableOpSpec {
+            kind: "atanh",
+            scalar_arg: None,
+        }))
+    } else if target.contains("erfinv.default") {
+        Ok(Some(TableOpSpec {
+            kind: "erfinv",
+            scalar_arg: None,
+        }))
+    } else if target.contains("log1p.default") {
+        Ok(Some(TableOpSpec {
+            kind: "log1p",
+            scalar_arg: None,
+        }))
+    } else if target.contains("sqrt.default") {
+        Ok(Some(TableOpSpec {
+            kind: "sqrt",
+            scalar_arg: None,
+        }))
     } else {
         Ok(None)
     }
