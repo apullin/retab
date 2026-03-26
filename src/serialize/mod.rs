@@ -7,7 +7,7 @@ use crate::store::TensorStore;
 
 use flatbuffers::{FlatBufferBuilder, TableFinishedWIPOffset, Vector, WIPOffset};
 use std::collections::HashMap;
-use tosa_generated::{Attribute, TosaOperator, TosaShape, TosaTensor};
+use tosa_generated::{Attribute, DType, TosaOperator, TosaShape, TosaTensor};
 use visitors::ir_dtype_to_tosa;
 
 // ---------------------------------------------------------------------------
@@ -234,6 +234,22 @@ fn dtype_elem_size(dtype: crate::graph::ir::DType) -> usize {
     }
 }
 
+fn pack_int4_data(data: &[u8]) -> Vec<u8> {
+    let mut packed = Vec::with_capacity((data.len() + 1) / 2);
+    let mut idx = 0usize;
+    while idx < data.len() {
+        let lo = data[idx] & 0x0F;
+        let hi = if idx + 1 < data.len() {
+            data[idx + 1] & 0x0F
+        } else {
+            0
+        };
+        packed.push(lo | (hi << 4));
+        idx += 2;
+    }
+    packed
+}
+
 /// Build a map of weight tensor names to their permutation kind by scanning
 /// all conv ops in the graph.
 fn infer_depthwise_in_channels(graph: &Graph, node: &crate::graph::ir::Node, oc: usize) -> usize {
@@ -400,7 +416,12 @@ fn collect_serialized_graph_items(graph: &Graph, store: &TensorStore) -> Seriali
                 let dtype = ir_dtype_to_tosa(node.meta.val.dtype);
 
                 if let Some(tensor_data) = store.get(name) {
-                    // Use the store's dtype for constant tensors.
+                    // Parse, don't validate: constant placeholders may carry a
+                    // special TOSA dtype (for example INT4 weights) that is
+                    // not representable in the physical torch tensor dtype
+                    // stored in TensorStore. We still use the store bytes for
+                    // layout permutation, but the serialized tensor dtype must
+                    // respect the node metadata.
                     //
                     // `fixup_quantized_dtypes` may have changed node.meta.val.dtype
                     // (e.g. Float32 -> Int8) based on consumer qparams, but the
@@ -408,6 +429,11 @@ fn collect_serialized_graph_items(graph: &Graph, store: &TensorStore) -> Seriali
                     // dtype here would produce a data-size/shape mismatch
                     // ("malformed constant buffer").
                     let store_dtype = ir_dtype_to_tosa(tensor_data.dtype);
+                    let tensor_dtype = node
+                        .meta
+                        .tosa_special_dtype
+                        .map(ir_dtype_to_tosa)
+                        .unwrap_or(store_dtype);
                     let elem_sz = dtype_elem_size(tensor_data.dtype);
 
                     // Constant placeholders must be serialized in their physical
@@ -436,11 +462,17 @@ fn collect_serialized_graph_items(graph: &Graph, store: &TensorStore) -> Seriali
                         };
                     let final_shape: Vec<i32> =
                         final_shape_i64.iter().map(|&d| d as i32).collect();
+                    let final_data = if tensor_dtype == DType::Int4 && store_dtype != DType::Int4
+                    {
+                        pack_int4_data(&final_data)
+                    } else {
+                        final_data
+                    };
 
                     tensors.push(TosaTensor {
                         name: name.clone(),
                         shape: final_shape,
-                        dtype: store_dtype,
+                        dtype: tensor_dtype,
                         data: final_data,
                         variable: false,
                         is_unranked: false,

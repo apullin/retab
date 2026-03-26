@@ -134,6 +134,25 @@ fn quant_args_from_operator<'py>(
     cls.call_method1("from_operator", (target, resolved_args))
 }
 
+fn int4_special_dtype<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    py.import_bound("executorch.backends.arm.tosa.mapping")?
+        .getattr("TosaSpecialDtype")?
+        .getattr("INT4")
+}
+
+fn quant_args_is_int4(quant_args: &Bound<'_, PyAny>) -> bool {
+    let qmin: Option<i64> = quant_args.getattr("qmin").ok().and_then(|v| v.extract().ok());
+    let qmax: Option<i64> = quant_args.getattr("qmax").ok().and_then(|v| v.extract().ok());
+    let dtype = quant_args
+        .getattr("dtype")
+        .ok()
+        .and_then(|v| v.str().ok().map(|s| s.to_string_lossy().into_owned()));
+
+    matches!(qmin, Some(-7))
+        && matches!(qmax, Some(7))
+        && dtype.as_deref().is_some_and(|s| s.contains("int8"))
+}
+
 /// Resolve DQ node args: if scale (args[1]) or zp (args[2]) are FX Nodes
 /// referencing parameters, replace them with the actual tensor values.
 ///
@@ -277,11 +296,21 @@ impl FxPass for FxFoldAndAnnotateQParamsPass {
 
                 if let Some(qa) = input_qp_for_pos {
                     input_qparams.set_item(i, &qa)?;
+                    let special_dtype = if quant_args_is_int4(&qa) {
+                        Some(int4_special_dtype(py)?)
+                    } else {
+                        None
+                    };
 
                     // Bypass each DQ node: replace the foldable node's input
                     // from the DQ to the DQ's input (dq.args[0])
                     for dq_node in &dq_nodes_to_bypass {
                         let dq_input = dq_node.getattr("args")?.get_item(0)?;
+                        if let Some(ref special_dtype) = special_dtype {
+                            dq_input
+                                .getattr("meta")?
+                                .set_item("tosa_special_dtype", special_dtype)?;
+                        }
                         // node.replace_input_with(dq_node, dq_input)
                         node.call_method1("replace_input_with", (dq_node, &dq_input))?;
                         // Erase if no remaining users

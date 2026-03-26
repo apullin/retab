@@ -178,7 +178,8 @@ fn decompose_grouped_conv<'py>(
             ],
         );
         let input_slice =
-            insert_call_before(py, graph, node, &slice_op, input_slice_args.as_ref(), node)?;
+            insert_call_before(py, graph, node, &slice_op, input_slice_args.as_ref(), input_node)?;
+        propagate_qparams(input_node, &input_slice)?;
 
         // Slice weight along dim 0 (output channels for normal, input channels for transposed)
         let (w_start, w_stop) = if transposed {
@@ -196,7 +197,8 @@ fn decompose_grouped_conv<'py>(
             ],
         );
         let weight_slice =
-            insert_call_before(py, graph, node, &slice_op, weight_slice_args.as_ref(), node)?;
+            insert_call_before(py, graph, node, &slice_op, weight_slice_args.as_ref(), weight_node)?;
+        propagate_qparams(weight_node, &weight_slice)?;
 
         // Slice bias along dim 0 (output channels)
         let bias_slice = if bias_node.is_none() {
@@ -213,7 +215,16 @@ fn decompose_grouped_conv<'py>(
                     b_stop.into_py(py).into_bound(py).as_ref(),
                 ],
             );
-            insert_call_before(py, graph, node, &slice_op, bias_slice_args.as_ref(), node)?
+            let bias_slice = insert_call_before(
+                py,
+                graph,
+                node,
+                &slice_op,
+                bias_slice_args.as_ref(),
+                bias_node,
+            )?;
+            propagate_qparams(bias_node, &bias_slice)?;
+            bias_slice
         };
 
         // Build conv args with groups=1
