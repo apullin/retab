@@ -56,13 +56,27 @@ def _collect_delegate_info_meta(graph_module):
 
 def _get_matching_fake_tensor(node):
     """Return a fake tensor matching a node's value and Arm dim-order metadata."""
+    import torch
+
     from executorch.exir.dim_order_utils import get_memory_format
 
     fake_tensor = node.meta["val"]
     desired_dim_order = node.meta.get("tosa_dim_order")
     if desired_dim_order is None:
         return fake_tensor
-    return fake_tensor.to(memory_format=get_memory_format(list(desired_dim_order)))
+
+    # Some control-flow rewrites preserve a 4D dim-order annotation while the
+    # effective value has already collapsed to a lower-rank tensor. In that
+    # case the stale memory-format hint is no longer applicable; keep the fake
+    # tensor as-is instead of crashing on a rank/layout mismatch.
+    if fake_tensor.dim() != len(desired_dim_order):
+        return fake_tensor
+
+    memory_format = get_memory_format(list(desired_dim_order))
+    if memory_format == torch.channels_last and fake_tensor.dim() != 4:
+        return fake_tensor
+
+    return fake_tensor.to(memory_format=memory_format)
 
 
 def _refresh_tosa_dim_order_fake_tensors(graph_module) -> None:
@@ -180,7 +194,13 @@ def _extract_effective_node_qparam(node):
     return None
 
 
-def _regularize_control_flow_submodule(submodule, submodule_node) -> None:
+def _regularize_control_flow_submodule(
+    submodule,
+    submodule_node,
+    *,
+    include_inputs: bool = True,
+    include_outputs: bool = True,
+) -> None:
     """Mirror the Python Arm backend's submodule metadata normalization.
 
     Control-flow submodules need their placeholder/output fake tensors aligned
@@ -211,17 +231,18 @@ def _regularize_control_flow_submodule(submodule, submodule_node) -> None:
                 f"Unexpected control flow target: {submodule_node.target}"
             )
 
-    for submodule_input, submodule_arg in zip(submodule_inputs, args, strict=True):
-        submodule_input.meta["val"] = _get_matching_fake_tensor(submodule_arg)
-        if submodule_arg.meta.get("tosa_dim_order") is not None:
-            submodule_input.meta["tosa_dim_order"] = tuple(
-                submodule_arg.meta["tosa_dim_order"]
-            )
-        output_qparams = submodule_input.meta.get("output_qparams")
-        if isinstance(output_qparams, dict) and 0 in output_qparams:
-            submodule_input.meta["arm_control_flow_saved_output_qparams"] = {
-                0: output_qparams[0]
-            }
+    if include_inputs:
+        for submodule_input, submodule_arg in zip(submodule_inputs, args, strict=True):
+            submodule_input.meta["val"] = _get_matching_fake_tensor(submodule_arg)
+            if submodule_arg.meta.get("tosa_dim_order") is not None:
+                submodule_input.meta["tosa_dim_order"] = tuple(
+                    submodule_arg.meta["tosa_dim_order"]
+                )
+            output_qparams = submodule_input.meta.get("output_qparams")
+            if isinstance(output_qparams, dict) and 0 in output_qparams:
+                submodule_input.meta["arm_control_flow_saved_output_qparams"] = {
+                    0: output_qparams[0]
+                }
 
     output_node = submodule.graph.output_node()
     if hasattr(output_node.args[0], "op"):
@@ -243,29 +264,40 @@ def _regularize_control_flow_submodule(submodule, submodule_node) -> None:
         output_node.meta["arm_control_flow_output_dequant_qparams"] = (
             output_dequant_qparams
         )
-    output_node.meta["arm_control_flow_output_fake_tensors"] = {
-        idx: _get_matching_fake_tensor(submodule_user)
-        for idx, submodule_user in enumerate(_ordered_control_flow_users(submodule_node))
-    }
+    if include_outputs:
+        output_node.meta["arm_control_flow_output_fake_tensors"] = {
+            idx: _get_matching_fake_tensor(submodule_user)
+            for idx, submodule_user in enumerate(_ordered_control_flow_users(submodule_node))
+        }
 
-    for submodule_output, submodule_user in zip(
-        output_args, _ordered_control_flow_users(submodule_node)
-    ):
-        submodule_output.meta["val"] = _get_matching_fake_tensor(submodule_user)
-        if submodule_user.meta.get("tosa_dim_order") is not None:
-            submodule_output.meta["tosa_dim_order"] = tuple(
-                submodule_user.meta["tosa_dim_order"]
-            )
+        for submodule_output, submodule_user in zip(
+            output_args, _ordered_control_flow_users(submodule_node)
+        ):
+            submodule_output.meta["val"] = _get_matching_fake_tensor(submodule_user)
+            if submodule_user.meta.get("tosa_dim_order") is not None:
+                submodule_output.meta["tosa_dim_order"] = tuple(
+                    submodule_user.meta["tosa_dim_order"]
+                )
 
 
-def _regularize_control_flow_submodules(graph_module) -> None:
+def _regularize_control_flow_submodules(
+    graph_module,
+    *,
+    include_inputs: bool = True,
+    include_outputs: bool = True,
+) -> None:
     from executorch.backends.arm._passes.arm_pass_utils import (
         get_cond_while_submodules_nested,
     )
 
     regularized = 0
     for _, submodule, control_flow_node in get_cond_while_submodules_nested(graph_module):
-        _regularize_control_flow_submodule(submodule, control_flow_node)
+        _regularize_control_flow_submodule(
+            submodule,
+            control_flow_node,
+            include_inputs=include_inputs,
+            include_outputs=include_outputs,
+        )
         regularized += 1
 
     if regularized:
@@ -2276,10 +2308,23 @@ def _normalize_control_flow_input_layouts(graph_module) -> None:
             )
             _log_node_chain(layout_user)
 
-            anchor.meta["val"] = layout_user.meta.get("val", anchor.meta.get("val"))
+            # Parse, don't validate: the submodule input boundary is the
+            # placeholder itself, not any interior dequant/rescale helper that
+            # happened to survive the FX-direct pass stack. Collapse the full
+            # placeholder -> passthrough* -> layout chain back to the
+            # placeholder so all cond branches expose the same TOSA-visible
+            # input signature.
+            replacement = node
+            replacement.meta["val"] = layout_user.meta.get(
+                "val", anchor.meta.get("val", replacement.meta.get("val"))
+            )
             if layout_user.meta.get("tosa_dim_order") is not None:
-                anchor.meta["tosa_dim_order"] = tuple(layout_user.meta["tosa_dim_order"])
-            layout_user.replace_all_uses_with(anchor)
+                replacement.meta["tosa_dim_order"] = tuple(layout_user.meta["tosa_dim_order"])
+            if anchor.meta.get("input_qparams") is not None:
+                replacement.meta["input_qparams"] = dict(anchor.meta["input_qparams"])
+            if anchor.meta.get("output_qparams") is not None:
+                replacement.meta["output_qparams"] = dict(anchor.meta["output_qparams"])
+            layout_user.replace_all_uses_with(replacement)
             if len(layout_user.users) == 0:
                 submodule.graph.erase_node(layout_user)
             rewritten += 1
@@ -2784,7 +2829,7 @@ def _all_rust_preprocess(
     )
     _prune_duplicate_control_flow_rescales(gm)
     _quantize_constant_only_control_flow_outputs(gm)
-    _regularize_control_flow_submodules(gm)
+    _regularize_control_flow_submodules(gm, include_inputs=False, include_outputs=True)
     _refresh_tosa_dim_order_fake_tensors(gm)
     _dump_control_flow_submodules(gm, "after_control_flow_normalize")
 
