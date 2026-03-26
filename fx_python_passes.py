@@ -16,11 +16,42 @@ from executorch.backends.arm._passes.insert_rescales_pass import (
 from executorch.backends.arm._passes.decompose_int16_activation_conv_pass import (
     DecomposeConvWithInt16ActivationPass,
 )
+from executorch.exir.dialects._ops import ops as exir_ops
 from executorch.exir import ExportedProgram
 from executorch.backends.arm.tosa.specification import (
     TosaLoweringContext,
     TosaSpecification,
 )
+
+
+def _extract_qparam_dtype(qparam):
+    if qparam is None:
+        return None
+    dtype = getattr(qparam, "dtype", None)
+    if dtype is not None:
+        return dtype
+    getter = getattr(qparam, "get", None)
+    if getter is None:
+        return None
+    try:
+        return getter("dtype", None)
+    except TypeError:
+        return getter("dtype")
+
+
+def _has_int16_activation_conv(graph_module) -> bool:
+    for node in graph_module.graph.nodes:
+        if node.op != "call_function":
+            continue
+        if node.target != exir_ops.edge.aten.convolution.default:
+            continue
+        if len(node.args) < 3 or node.args[2] is None:
+            continue
+        input_qparams = node.meta.get("input_qparams", {})
+        qparam = input_qparams.get(0) if hasattr(input_qparams, "get") else None
+        if _extract_qparam_dtype(qparam) == torch.int16:
+            return True
+    return False
 
 
 def run_python_fold_and_rescale(graph_module, exported_program=None):
@@ -93,6 +124,8 @@ def run_python_decompose_int16_activation_conv(graph_module):
     serialization of int16 conv bias.
     """
     gm = graph_module
+    if not _has_int16_activation_conv(gm):
+        return gm
     int16_spec = TosaSpecification.create_from_string("TOSA-1.0+INT+int16")
     with TosaLoweringContext(int16_spec):
         result = DecomposeConvWithInt16ActivationPass()(gm)
