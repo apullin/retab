@@ -6,6 +6,23 @@ use crate::graph::ir::OpTarget;
 /// look like `"quantized_decomposed.quantize_per_tensor.default"`. We match on
 /// substrings so we tolerate different overload suffixes.
 pub fn parse_op_target(target_str: &str) -> OpTarget {
+    // Control-flow ops can arrive either with the full higher_order target name
+    // or as the short symbol name after lowering/export rewrites.
+    if matches!(
+        target_str,
+        "cond" | "higher_order.cond" | "torch.ops.higher_order.cond"
+    ) {
+        return OpTarget::CondIf;
+    }
+    if matches!(
+        target_str,
+        "while_loop"
+            | "higher_order.while_loop"
+            | "torch.ops.higher_order.while_loop"
+    ) {
+        return OpTarget::WhileLoop;
+    }
+
     // ---------------------------------------------------------------
     // TOSA ops — check first so they don't get caught by ATen matches.
     // FX-direct passes (fx_helpers.py) create nodes with targets like
@@ -390,6 +407,9 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     }
     if target_str.contains("aten.logical_or") {
         return OpTarget::LogicalOr;
+    }
+    if target_str.contains("aten.logical_xor") {
+        return OpTarget::LogicalXor;
     }
 
     // Comparison ops — order matters: gt before ge to avoid aten.gt matching aten.ge

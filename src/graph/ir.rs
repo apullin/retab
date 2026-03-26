@@ -165,6 +165,7 @@ pub enum OpTarget {
     LogicalNot,
     LogicalAnd,
     LogicalOr,
+    LogicalXor,
 
     // Comparison ops (ATen)
     Gt,

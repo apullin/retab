@@ -12,6 +12,15 @@ import torch
 from torch.fx import Graph, Node
 
 
+def _apply_fake_tensor_dim_order(fake_tensor, dim_order):
+    """Return a fake tensor with the requested Arm dim-order memory format."""
+    if fake_tensor is None or dim_order is None:
+        return fake_tensor
+    from executorch.exir.dim_order_utils import get_memory_format
+
+    return fake_tensor.to(memory_format=get_memory_format(list(dim_order)))
+
+
 def insert_node_after(
     graph_module,
     ref_node: Node,
@@ -134,8 +143,9 @@ def restamp_rescale_output_meta(
     if isinstance(input_val, (list, tuple)):
         input_val = input_val[0] if input_val else None
     if input_val is not None and hasattr(input_val, "new_empty"):
-        rescale_node.meta["val"] = input_val.new_empty(
-            input_val.shape, dtype=out_dtype
+        rescale_node.meta["val"] = _apply_fake_tensor_dim_order(
+            input_val.new_empty(input_val.shape, dtype=out_dtype),
+            input_node.meta.get("tosa_dim_order"),
         )
 
 
@@ -242,59 +252,52 @@ def get_tosa_table_op():
 
 
 import math
-import numpy as np
 
 
-# Map of supported math functions for table generation.
-_TABLE_MATH_FNS = {
-    "rsqrt": lambda x: 1.0 / math.sqrt(max(x, 1e-10)),
-    "reciprocal": lambda x: 0.0 if abs(x) < 1e-10 else 1.0 / x,
-    "exp": math.exp,
-    "log": lambda x: math.log(max(x, 1e-10)),
-    "sigmoid": lambda x: 1.0 / (1.0 + math.exp(-x)),
-    "tanh": math.tanh,
-    "erf": math.erf,
-    "sinh": math.sinh,
-    "cosh": math.cosh,
-    "tan": lambda x: max(-1e10, min(math.tan(x), 1e10)),
-    "acos": lambda x: math.acos(max(-1.0, min(x, 1.0))),
-    "asin": lambda x: math.asin(max(-1.0, min(x, 1.0))),
-    "atan": math.atan,
-    "expm1": math.expm1,
-    "acosh": lambda x: math.acosh(max(x, 1.0)),
-    "asinh": math.asinh,
-    "atanh": lambda x: math.atanh(max(-0.9999999, min(x, 0.9999999))),
-    "erfinv": lambda x: float(torch.erfinv(torch.tensor(x, dtype=torch.float64)).item()),
-    "log1p": math.log1p,
-    "sqrt": lambda x: math.sqrt(max(x, 0.0)),
-    "sin": math.sin,
-    "cos": math.cos,
-    "hardsigmoid": lambda x: max(0.0, min(1.0, x / 6.0 + 0.5)),
-    "hardswish": lambda x: x * max(0.0, min(1.0, x / 6.0 + 0.5)),
-    "silu": lambda x: float(torch.nn.functional.silu(torch.tensor(x, dtype=torch.float32)).item()),
-    "gelu": lambda x: float(
-        torch.nn.functional.gelu(torch.tensor(x, dtype=torch.float32), approximate="none").item()
-    ),
+_TABLE_TORCH_FNS = {
+    "ceil": torch.ceil,
+    "floor": torch.floor,
+    "rsqrt": torch.rsqrt,
+    "reciprocal": torch.reciprocal,
+    "exp": torch.exp,
+    "log": torch.log,
+    "sigmoid": torch.sigmoid,
+    "tanh": torch.tanh,
+    "erf": torch.erf,
+    "sinh": torch.sinh,
+    "cosh": torch.cosh,
+    "tan": torch.tan,
+    "acos": torch.acos,
+    "asin": torch.asin,
+    "atan": torch.atan,
+    "expm1": torch.expm1,
+    "acosh": torch.acosh,
+    "asinh": torch.asinh,
+    "atanh": torch.atanh,
+    "erfinv": torch.erfinv,
+    "log1p": torch.log1p,
+    "sqrt": torch.sqrt,
+    "sin": torch.sin,
+    "cos": torch.cos,
+    "hardsigmoid": torch.nn.functional.hardsigmoid,
+    "hardswish": torch.nn.functional.hardswish,
+    "silu": torch.nn.functional.silu,
+    "gelu": lambda x: torch.nn.functional.gelu(x, approximate="none"),
 }
 
 
-def _table_math_fn(kind: str, scalar_arg: float | None = None):
+def _table_torch_fn(kind: str, scalar_arg: float | None = None):
     if kind == "pow":
         if scalar_arg is None:
             raise ValueError("pow table op requires a scalar exponent")
-        def _pow_fn(x: float) -> float:
-            value = torch.pow(torch.tensor(x, dtype=torch.float32), float(scalar_arg))
-            return float(value.item())
-        return _pow_fn
+        return lambda x: torch.pow(x, float(scalar_arg))
 
     if kind == "elu":
         alpha = scalar_arg if scalar_arg is not None else 1.0
-        def _elu_fn(x: float) -> float:
-            return x if x >= 0.0 else alpha * (math.exp(x) - 1.0)
-        return _elu_fn
+        return lambda x: torch.nn.functional.elu(x, alpha=alpha)
 
-    if kind in _TABLE_MATH_FNS:
-        return _TABLE_MATH_FNS[kind]
+    if kind in _TABLE_TORCH_FNS:
+        return _TABLE_TORCH_FNS[kind]
 
     raise ValueError(f"Unknown table op kind: {kind}")
 
@@ -305,32 +308,66 @@ def _compute_table(
     input_zp: int,
     input_qmin: int,
     input_qmax: int,
+    input_dtype,
     output_scale: float,
     output_zp: int,
     output_qmin: int,
     output_qmax: int,
+    output_dtype,
     scalar_arg: float | None = None,
-) -> list[int]:
-    """Compute a lookup table for a quantized unary math function.
+) -> tuple[torch.Tensor, int]:
+    """Compute TABLE contents by mirroring Arm's Python InsertTableOps pass.
 
-    For each integer i in [qmin, qmax]:
-        x_float = (i - input_zp) * input_scale
-        y_float = math_fn(x_float)
-        y_quant = clamp(round(y_float / output_scale + output_zp), output_qmin, output_qmax)
-        table[i - qmin] = y_quant
-
-    For int8 tensors this yields 256 entries, matching the Python reference
-    and the TOSA backend's emitted TABLE constants for Ethos-U flows.
+    The important part is semantic fidelity, not "helpful" scalar guarding.
+    Domain-sensitive ops like acos/asin rely on the exact torch behavior here;
+    clamping invalid inputs changes the table bytes and therefore the model.
     """
-    fn = _table_math_fn(kind, scalar_arg)
-    table = []
-    for i in range(input_qmin, input_qmax + 1):
-        x_float = (i - input_zp) * input_scale
-        y_float = fn(x_float)
-        y_quant = int(round(y_float / output_scale + output_zp))
-        y_quant = max(output_qmin, min(output_qmax, y_quant))
-        table.append(y_quant)
-    return table
+    from executorch.backends.arm._passes.quant_args import QuantArgs
+
+    torch_op = _table_torch_fn(kind, scalar_arg)
+    in_quantargs = QuantArgs(
+        scale=input_scale,
+        zp=input_zp,
+        qmin=input_qmin,
+        qmax=input_qmax,
+        dtype=input_dtype,
+    )
+    out_quantargs = QuantArgs(
+        scale=output_scale,
+        zp=output_zp,
+        qmin=output_qmin,
+        qmax=output_qmax,
+        dtype=output_dtype,
+    )
+
+    if output_dtype == torch.int8:
+        quantized_inputs = torch.linspace(
+            start=input_qmin,
+            end=input_qmax,
+            steps=256,
+            dtype=torch.int8,
+        )
+        dequantized_inputs = in_quantargs.dequantize_value(quantized_inputs)
+        return out_quantargs.quantize_value(torch_op(dequantized_inputs)).to(
+            dtype=torch.int8
+        ), 0
+
+    if output_dtype in (torch.int16, torch.int32):
+        quantized_inputs = torch.linspace(
+            start=input_qmin,
+            end=input_qmax + 1,
+            steps=513,
+            dtype=torch.int32,
+        )
+        dequantized_inputs = in_quantargs.dequantize_value(
+            (quantized_inputs.clamp(input_qmin, input_qmax).to(dtype=input_dtype) & ~0x7F)
+        )
+        lut_values = out_quantargs.quantize_value(torch_op(dequantized_inputs))
+        rshift = int(torch.ceil(torch.log2(lut_values.abs().max())).item()) + 1 - 16
+        rescale_lshift = rshift - 7
+        return (lut_values >> rshift).to(dtype=torch.int16), rescale_lshift
+
+    raise ValueError(f"Unsupported output dtype for table: {output_dtype}")
 
 
 def insert_table_op(
@@ -393,6 +430,7 @@ def insert_table_op(
     input_zp = int(_scalar(_get(input_qp, "zp", _get(input_qp, "zero_point", 0))))
     input_qmin = int(_get(input_qp, "qmin", -128))
     input_qmax = int(_get(input_qp, "qmax", 127))
+    input_dtype = _torch_dtype(_get(input_qp, "dtype", torch.int8))
 
     output_scale = float(_scalar(_get(output_qp, "scale", 1.0)))
     output_zp = int(_scalar(_get(output_qp, "zp", _get(output_qp, "zero_point", 0))))
@@ -401,15 +439,13 @@ def insert_table_op(
     output_dtype = _torch_dtype(_get(output_qp, "dtype", torch.int8))
 
     # Compute the lookup table
-    table_data = _compute_table(
+    table_tensor, rescale_lshift = _compute_table(
         kind,
-        input_scale, input_zp, input_qmin, input_qmax,
+        input_scale, input_zp, input_qmin, input_qmax, input_dtype,
         output_scale, output_zp, output_qmin, output_qmax,
+        output_dtype,
         scalar_arg,
     )
-
-    # Create a tensor constant for the table
-    table_tensor = torch.tensor(table_data, dtype=output_dtype)
 
     # Register the table tensor as a buffer on the graph module so it
     # persists and can be referenced by a get_attr node.
@@ -439,10 +475,26 @@ def insert_table_op(
         table_op_node.meta = copy(node.meta)
         old_val = node.meta.get("val")
         if old_val is not None:
-            table_op_node.meta["val"] = old_val.new_empty(old_val.shape, dtype=output_dtype)
+            table_output_dtype = output_dtype if rescale_lshift == 0 else torch.int32
+            table_op_node.meta["val"] = old_val.new_empty(
+                old_val.shape, dtype=table_output_dtype
+            )
+
+    output_node = table_op_node
+    if rescale_lshift != 0:
+        output_node = insert_rescale_node(
+            graph_module,
+            table_op_node,
+            table_op_node,
+            output_dtype,
+            [2.0**rescale_lshift],
+            0,
+            0,
+            after=True,
+        )
 
     # Replace all uses of the original node and erase it
-    node.replace_all_uses_with(table_op_node)
+    node.replace_all_uses_with(output_node)
     graph.erase_node(node)
 
 
@@ -485,6 +537,8 @@ def convert_sum_to_reduce_sum(
 
     current_input = input_node
     last_reduce = None
+    current_input_qparams = copy(node.meta.get("input_qparams", {}))
+    current_output_qparams = copy(node.meta.get("output_qparams", {}))
 
     for dim in sorted_dims:
         with graph.inserting_before(node):
@@ -493,12 +547,23 @@ def convert_sum_to_reduce_sum(
             )
             reduce_node.name = f"{node.name}_reduce_dim{dim}"
             reduce_node.meta = copy(node.meta)
-            # Clear stale qparams (the reduce inherits from the sum node)
-            if "input_qparams" in reduce_node.meta:
-                reduce_node.meta["input_qparams"] = {}
-            if "output_qparams" in reduce_node.meta:
-                reduce_node.meta["output_qparams"] = {}
+            reduce_node.meta["input_qparams"] = copy(current_input_qparams)
+            reduce_node.meta["output_qparams"] = copy(current_output_qparams)
+            input_val = current_input.meta.get("val")
+            if isinstance(input_val, (list, tuple)):
+                input_val = input_val[0] if input_val else None
+            if input_val is not None and hasattr(input_val, "new_empty"):
+                input_shape = list(input_val.shape)
+                rank = len(input_shape)
+                normalized_dim = dim % rank
+                output_shape = list(input_shape)
+                if keepdim:
+                    output_shape[normalized_dim] = 1
+                else:
+                    del output_shape[normalized_dim]
+                reduce_node.meta["val"] = input_val.new_empty(output_shape)
         current_input = reduce_node
+        current_input_qparams = copy(current_output_qparams)
         last_reduce = reduce_node
 
     # Copy qparams from original node onto the final reduce
@@ -553,7 +618,10 @@ def refresh_node_fake_tensor(node: Node) -> None:
         fake_kwargs = {
             key: _resolve_fake_arg(value) for key, value in dict(node.kwargs).items()
         }
-        node.meta["val"] = op_target(*fake_args, **fake_kwargs)
+        node.meta["val"] = _apply_fake_tensor_dim_order(
+            op_target(*fake_args, **fake_kwargs),
+            node.meta.get("tosa_dim_order"),
+        )
     except Exception:
         pass
 
@@ -569,6 +637,8 @@ _SAFE_META_REFRESH_TARGETS = (
     "aten.mul.Tensor",
     "sum.dim_IntList",
     "tosa.TRANSPOSE",
+    "tosa.RESCALE",
+    "rescale.default",
 )
 
 
@@ -623,10 +693,13 @@ def decompose_linear_node(graph_module, node: Node) -> None:
     for dim in input_shape[:-1]:
         batches *= dim
 
-    # input has shape (..., Ci) -> reshape to (N, 1, 1, Ci)  [NHWC for TOSA]
-    input_reshaped_shape = [batches, 1, 1, input_shape[-1]]
-    # weights have shape (Co, Ci) -> reshape to (Co, 1, 1, Ci)  [OHWI for TOSA]
-    weights_reshaped_shape = [weights_shape[0], 1, 1, weights_shape[1]]
+    # Parse, don't validate: keep the same logical decomposition as the
+    # Python Arm pass, then let the memory-format pass legalize layout later.
+    #
+    # input has shape (..., Ci) -> reshape to (N, Ci, 1, 1)
+    input_reshaped_shape = [batches, input_shape[-1], 1, 1]
+    # weights have shape (Co, Ci) -> reshape to (Co, Ci, 1, 1)
+    weights_reshaped_shape = [weights_shape[0], weights_shape[1], 1, 1]
 
     view_copy_op = _get_edge_op("aten.view_copy.default")
     conv_op = _get_edge_op("aten.convolution.default")
@@ -1070,6 +1143,19 @@ def get_tosa_depthwise_conv2d_op():
             return "tosa::depthwise_conv2d"
 
 
+def get_tosa_scatter_op():
+    """Return the tosa.SCATTER op target."""
+    try:
+        from executorch.exir.dialects._ops import ops as exir_ops
+
+        return exir_ops.backend.tosa.SCATTER.default
+    except Exception:
+        try:
+            return torch.ops.tosa.scatter.default
+        except Exception:
+            return "tosa::scatter"
+
+
 def rewrite_conv_to_tosa(
     graph_module,
     node: Node,
@@ -1203,3 +1289,176 @@ def rewrite_conv_to_tosa(
 
     node.replace_all_uses_with(tosa_op)
     graph.erase_node(node)
+
+
+def _calculate_tosa_scatter_dims(
+    index_shape: list[int], source_shape: list[int], num_index_dims: int
+) -> tuple[int, int, int, int]:
+    n, k, w, c = 1, 1, 1, 1
+    w = math.prod(index_shape) if index_shape else 1
+    for i, dim in enumerate(source_shape):
+        if i < num_index_dims:
+            k *= dim
+    total_vals = math.prod(source_shape)
+    c = int(total_vals / k) if k else 1
+    return n, k, w, c
+
+
+def _calculate_values_stride(source_shape: list[int]) -> list[int]:
+    values_strides: list[int] = []
+    stride = 1
+    for dim in reversed(source_shape):
+        values_strides.insert(0, stride)
+        stride *= dim
+    return values_strides
+
+
+def rewrite_index_put_to_tosa(graph_module, node: Node) -> None:
+    """Rewrite aten.index_put into view+scatter+view.
+
+    This mirrors the Python RewriteIndexPutPass shape:
+      1. Expand None indices to explicit arange tensors
+      2. Flatten indices into [N, W]
+      3. Reshape source to [N, K, C], values to [N, W, C]
+      4. Emit tosa.SCATTER
+      5. Reshape back to the original source shape
+    """
+    graph = graph_module.graph
+    args = node.args
+    if len(args) < 3:
+        return
+
+    source = args[0]
+    indices = args[1]
+    values = args[2]
+    accumulate = bool(args[3]) if len(args) > 3 else False
+    if accumulate or not isinstance(indices, (list, tuple)):
+        return
+
+    source_shape = list(_get_first_fake_tensor(source).shape)
+    if not source_shape:
+        return
+
+    index_dtype = None
+    for idx in indices:
+        if isinstance(idx, Node):
+            index_dtype = _get_first_fake_tensor(idx).dtype
+            break
+    if index_dtype is None:
+        return
+
+    arange_op = _get_edge_op("aten.arange.start_step")
+    view_copy_op = _get_edge_op("aten.view_copy.default")
+    add_op = _get_edge_op("aten.add.Tensor")
+    mul_op = _get_edge_op("aten.mul.Tensor")
+    full_op = _get_edge_op("aten.full.default")
+    scatter_op = get_tosa_scatter_op()
+
+    processed_indices: list[Node] = []
+    with graph.inserting_before(node):
+        for dim_idx, idx in enumerate(indices):
+            if idx is None:
+                expanded = _create_node(
+                    graph,
+                    arange_op,
+                    args=(0, int(source_shape[dim_idx]), 1),
+                    kwargs={"dtype": index_dtype},
+                    from_node=node,
+                    inherit_qparams=False,
+                )
+                processed_indices.append(expanded)
+            elif isinstance(idx, Node):
+                processed_indices.append(idx)
+            else:
+                return
+
+    if not processed_indices:
+        return
+
+    index_shapes = [tuple(_get_first_fake_tensor(idx).shape) for idx in processed_indices]
+    try:
+        broadcast_shape = list(torch.broadcast_shapes(*index_shapes))
+    except Exception:
+        return
+
+    n, k, w, c = _calculate_tosa_scatter_dims(
+        broadcast_shape, source_shape, len(processed_indices)
+    )
+    if not (n > 0 and k > 0 and w > 0 and c > 0):
+        return
+
+    values_strides = _calculate_values_stride(source_shape)
+
+    with graph.inserting_before(node):
+        flat_indices = None
+        for dim_idx, index_node in enumerate(processed_indices):
+            scale_val = int(values_strides[dim_idx] / c)
+            mul_const = _create_node(
+                graph,
+                full_op,
+                args=((1,), scale_val),
+                kwargs={"dtype": index_dtype},
+                from_node=node,
+                inherit_qparams=False,
+            )
+            scaled_index = _create_node(
+                graph,
+                mul_op,
+                args=(index_node, mul_const),
+                from_node=node,
+                inherit_qparams=False,
+            )
+            flat_indices = (
+                scaled_index
+                if flat_indices is None
+                else _create_node(
+                    graph,
+                    add_op,
+                    args=(scaled_index, flat_indices),
+                    from_node=node,
+                    inherit_qparams=False,
+                )
+            )
+
+        if flat_indices is None:
+            return
+
+        reshape_indices = _create_node(
+            graph,
+            view_copy_op,
+            args=(flat_indices, [n, w]),
+            from_node=node,
+            inherit_qparams=False,
+        )
+        reshape_source = _create_node(
+            graph,
+            view_copy_op,
+            args=(source, [n, k, c]),
+            from_node=node,
+            inherit_qparams=False,
+        )
+        reshape_values = _create_node(
+            graph,
+            view_copy_op,
+            args=(values, [n, w, c]),
+            from_node=node,
+            inherit_qparams=False,
+        )
+        scatter_node = _create_node(
+            graph,
+            scatter_op,
+            args=(reshape_source, reshape_indices, reshape_values),
+            from_node=node,
+            inherit_qparams=False,
+        )
+        output = _create_node(
+            graph,
+            view_copy_op,
+            args=(scatter_node, source_shape),
+            from_node=node,
+            inherit_qparams=False,
+        )
+
+    node.replace_all_uses_with(output)
+    graph.erase_node(node)
+    graph.eliminate_dead_code()

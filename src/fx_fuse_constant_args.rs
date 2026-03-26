@@ -59,8 +59,11 @@ fn is_zero_input_full(target: &str, input_nodes: &[Bound<'_, PyAny>]) -> bool {
     input_nodes.is_empty() && target.contains("aten.full.default")
 }
 
-fn is_zero_input_arange(target: &str, input_nodes: &[Bound<'_, PyAny>]) -> bool {
-    input_nodes.is_empty() && target.contains("arange")
+fn is_zero_input_range_like(target: &str, input_nodes: &[Bound<'_, PyAny>]) -> bool {
+    // Range builders with no tensor inputs should become frozen buffers before
+    // lowering. Leaving them as runtime ops leaks unsupported ATen nodes into
+    // the TOSA graph even though their values are fully known at compile time.
+    input_nodes.is_empty() && (target.contains("arange") || target.contains("linspace"))
 }
 
 fn materialize_zero_input_const(
@@ -137,7 +140,7 @@ fn fold_zero_input_full(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult
     materialize_zero_input_const(gm, node, &const_tensor)
 }
 
-fn fold_zero_input_arange(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult<bool> {
+fn fold_zero_input_range_like(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult<bool> {
     let py = gm.py();
     let args = FxGraphModule::node_args(node)?;
     let kwargs = node.getattr("kwargs")?;
@@ -226,8 +229,8 @@ impl FxPass for FxFuseConstantArgsPass {
                     continue;
                 }
 
-                if is_zero_input_arange(&target, &input_nodes) {
-                    if fold_zero_input_arange(gm, node)? {
+                if is_zero_input_range_like(&target, &input_nodes) {
+                    if fold_zero_input_range_like(gm, node)? {
                         modified = true;
                         made_progress = true;
                     }

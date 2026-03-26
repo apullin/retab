@@ -40,6 +40,16 @@ fn table_op_spec(node: &Bound<'_, PyAny>, target: &str) -> PyResult<Option<Table
             kind: "rsqrt",
             scalar_arg: None,
         }))
+    } else if target.contains("ceil.default") {
+        Ok(Some(TableOpSpec {
+            kind: "ceil",
+            scalar_arg: None,
+        }))
+    } else if target.contains("floor.default") {
+        Ok(Some(TableOpSpec {
+            kind: "floor",
+            scalar_arg: None,
+        }))
     } else if target.contains("reciprocal.default") {
         Ok(Some(TableOpSpec {
             kind: "reciprocal",
@@ -58,6 +68,28 @@ fn table_op_spec(node: &Bound<'_, PyAny>, target: &str) -> PyResult<Option<Table
     } else if target.contains("sigmoid.default") {
         Ok(Some(TableOpSpec {
             kind: "sigmoid",
+            scalar_arg: None,
+        }))
+    } else if target.contains("atanh.default") {
+        // Parse, don't validate: match the longer inverse-hyperbolic suffix
+        // before the shorter "tanh.default" substring.
+        Ok(Some(TableOpSpec {
+            kind: "atanh",
+            scalar_arg: None,
+        }))
+    } else if target.contains("asinh.default") {
+        Ok(Some(TableOpSpec {
+            kind: "asinh",
+            scalar_arg: None,
+        }))
+    } else if target.contains("acosh.default") {
+        Ok(Some(TableOpSpec {
+            kind: "acosh",
+            scalar_arg: None,
+        }))
+    } else if target.contains("atan.default") {
+        Ok(Some(TableOpSpec {
+            kind: "atan",
             scalar_arg: None,
         }))
     } else if target.contains("tanh.default") {
@@ -120,11 +152,6 @@ fn table_op_spec(node: &Bound<'_, PyAny>, target: &str) -> PyResult<Option<Table
             kind: "asin",
             scalar_arg: None,
         }))
-    } else if target.contains("atan.default") {
-        Ok(Some(TableOpSpec {
-            kind: "atan",
-            scalar_arg: None,
-        }))
     } else if target.contains("expm1.default") {
         Ok(Some(TableOpSpec {
             kind: "expm1",
@@ -147,22 +174,6 @@ fn table_op_spec(node: &Bound<'_, PyAny>, target: &str) -> PyResult<Option<Table
         Ok(Some(TableOpSpec {
             kind: "elu",
             scalar_arg: Some(alpha),
-        }))
-    } else if target.contains("acosh.default") {
-        Ok(Some(TableOpSpec {
-            kind: "acosh",
-            scalar_arg: None,
-        }))
-    } else if target.contains("asinh.default") {
-        Ok(Some(TableOpSpec {
-            kind: "asinh",
-            scalar_arg: None,
-        }))
-    } else if target.contains("atanh.default") {
-        // atanh is already handled by FxDecomposeOpsPass, but add TABLE fallback
-        Ok(Some(TableOpSpec {
-            kind: "atanh",
-            scalar_arg: None,
         }))
     } else if target.contains("erfinv.default") {
         Ok(Some(TableOpSpec {

@@ -150,6 +150,37 @@ fn is_transpose_conv2d_weight(node: &Bound<'_, PyAny>) -> PyResult<bool> {
     Ok(false)
 }
 
+fn collect_output_nodes<'py>(node_args: &[Bound<'py, PyAny>]) -> Vec<Bound<'py, PyAny>> {
+    let mut output_nodes = Vec::new();
+    for arg in node_args {
+        if FxGraphModule::is_node(arg) {
+            output_nodes.push(arg.clone());
+            continue;
+        }
+        if let Ok(iter) = arg.iter() {
+            for item in iter.flatten() {
+                if FxGraphModule::is_node(&item) {
+                    output_nodes.push(item);
+                }
+            }
+        }
+    }
+    output_nodes
+}
+
+fn extract_output_dim_order(node: &Bound<'_, PyAny>) -> PyResult<Option<Vec<usize>>> {
+    let meta = node.getattr("meta")?;
+    let val = match meta.call_method1("get", ("val",)) {
+        Ok(v) if !v.is_none() => v,
+        _ => return Ok(None),
+    };
+    let dim_order = match val.call_method0("dim_order") {
+        Ok(order) => order,
+        Err(_) => return Ok(None),
+    };
+    Ok(dim_order.extract::<Vec<usize>>().ok())
+}
+
 impl FxPass for FxToTosaMemoryFormatPass {
     fn name(&self) -> &str {
         "FxToTosaMemoryFormat"
@@ -269,8 +300,30 @@ impl FxPass for FxToTosaMemoryFormatPass {
 
             let op = FxGraphModule::node_op(node)?;
 
-            let dim_order = if is_input_placeholder(node)? || op == "output" {
-                // True external inputs/outputs keep their original format.
+            if op == "output" {
+                let existing = meta.call_method1("get", ("original_dim_orders",))?;
+                if existing.is_none() {
+                    let args = FxGraphModule::node_args(node)?;
+                    let output_nodes = collect_output_nodes(&args);
+                    let output_dim_orders: Vec<Vec<usize>> = output_nodes
+                        .iter()
+                        .filter_map(|output_node| extract_output_dim_order(output_node).ok().flatten())
+                        .collect();
+                    if !output_dim_orders.is_empty() {
+                        let py_dim_orders = pyo3::types::PyList::empty_bound(py);
+                        for order in &output_dim_orders {
+                            py_dim_orders.append(order.clone())?;
+                        }
+                        meta.set_item("original_dim_orders", py_dim_orders)?;
+                    }
+                }
+            }
+
+            let dim_order = if is_input_placeholder(node)? {
+                extract_output_dim_order(node)?
+                    .unwrap_or_else(|| (0..rank).collect::<Vec<_>>())
+            } else if op == "output" {
+                // True external outputs keep their original logical format.
                 (0..rank).collect::<Vec<_>>()
             } else if rank == 4 && is_transpose_conv2d_weight(node)? {
                 vec![1, 2, 3, 0]
@@ -422,8 +475,9 @@ impl FxPass for FxToTosaMemoryFormatPass {
             }
         }
 
-        // 4b: After 4D+ input placeholders, insert NCHW->NHWC transpose.
-        // The input comes in NCHW format; internal ops expect NHWC.
+        // 4b: After 4D+ input placeholders, insert NCHW->NHWC transpose when
+        // the external input is actually channels-first. Channels-last inputs
+        // already arrive in the internal layout and must not be transposed again.
         // Runs AFTER view transposes (4a) so views see the original NCHW shapes.
         let all_nodes = gm.nodes()?;
         for node in &all_nodes {
@@ -456,7 +510,14 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 .extract()
                 .unwrap_or(2);
 
+            let current_dim_order: Vec<usize> = meta
+                .call_method1("get", ("tosa_dim_order",))?
+                .extract()
+                .unwrap_or_else(|_| (0..rank).collect());
             let perm = channels_last_order(rank, spatial_rank);
+            if current_dim_order == perm {
+                continue;
+            }
             let perm_py: Vec<i64> = perm.iter().map(|&p| p as i64).collect();
 
             if debug {
@@ -487,30 +548,12 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 continue;
             }
 
-            // output node's args[0] is typically a tuple of output nodes
             let args = FxGraphModule::node_args(node)?;
+            let output_nodes = collect_output_nodes(&args);
+            let output_meta = node.getattr("meta")?;
+            let original_dim_orders = output_meta.call_method1("get", ("original_dim_orders",))?;
 
-            // Collect output nodes: either direct nodes in args, or nodes
-            // inside a tuple at args[0].
-            let mut output_nodes: Vec<Bound<'_, PyAny>> = Vec::new();
-            for arg in &args {
-                if FxGraphModule::is_node(arg) {
-                    output_nodes.push(arg.clone());
-                } else {
-                    // Try iterating as a tuple/list of nodes
-                    if let Ok(iter) = arg.iter() {
-                        for item in iter {
-                            if let Ok(item) = item {
-                                if FxGraphModule::is_node(&item) {
-                                    output_nodes.push(item);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            for output_arg in &output_nodes {
+            for (index, output_arg) in output_nodes.iter().enumerate() {
                 let arg_meta = output_arg.getattr("meta")?;
                 let val = match arg_meta.call_method1("get", ("val",)) {
                     Ok(v) if !v.is_none() => v,
@@ -534,6 +577,22 @@ impl FxPass for FxToTosaMemoryFormatPass {
                     .call_method1("get", ("tosa_spatial_rank",))?
                     .extract()
                     .unwrap_or(2);
+
+                let output_dim_order: Option<Vec<usize>> = if original_dim_orders.is_none() {
+                    None
+                } else {
+                    original_dim_orders
+                        .get_item(index)
+                        .ok()
+                        .and_then(|order| order.extract::<Vec<usize>>().ok())
+                };
+                let is_channels_first_output = output_dim_order
+                    .as_ref()
+                    .map(|order| *order == (0..rank).collect::<Vec<_>>())
+                    .unwrap_or(true);
+                if !is_channels_first_output {
+                    continue;
+                }
 
                 // Inverse of channels_last: converts NHWC -> NCHW
                 let perm = channels_last_inverse_order(rank, spatial_rank);

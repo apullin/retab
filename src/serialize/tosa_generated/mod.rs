@@ -320,6 +320,10 @@ pub struct SliceAttribute;
 #[derive(Debug, Clone)]
 pub struct GatherAttribute;
 
+/// ScatterAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct ScatterAttribute;
+
 /// SelectAttribute — empty.
 #[derive(Debug, Clone)]
 pub struct SelectAttribute;
@@ -395,6 +399,9 @@ pub struct LogicalAndAttribute;
 /// LogicalOrAttribute — empty.
 #[derive(Debug, Clone)]
 pub struct LogicalOrAttribute;
+/// LogicalXorAttribute — empty.
+#[derive(Debug, Clone)]
+pub struct LogicalXorAttribute;
 /// PowAttribute — empty.
 #[derive(Debug, Clone)]
 pub struct PowAttribute;
@@ -452,6 +459,7 @@ pub enum Attribute {
     Pad(PadAttribute),
     Slice(SliceAttribute),
     Gather(GatherAttribute),
+    Scatter(ScatterAttribute),
     Select(SelectAttribute),
     Cast(CastAttribute),
     Equal(EqualAttribute),
@@ -475,6 +483,7 @@ pub enum Attribute {
     LogicalNot(LogicalNotAttribute),
     LogicalAnd(LogicalAndAttribute),
     LogicalOr(LogicalOrAttribute),
+    LogicalXor(LogicalXorAttribute),
     Pow(PowAttribute),
     IntDiv(IntDivAttribute),
 }
@@ -518,6 +527,7 @@ impl Attribute {
             Attribute::Pad(_) => 56,            // PadAttribute
             Attribute::Slice(_) => 59,          // SliceAttribute
             Attribute::Gather(_) => 62,         // GatherAttribute
+            Attribute::Scatter(_) => 63,        // ScatterAttribute
             Attribute::Select(_) => 45,         // SelectAttribute
             Attribute::Cast(_) => 65,           // CastAttribute
             Attribute::Equal(_) => 46,          // EqualAttribute
@@ -541,6 +551,7 @@ impl Attribute {
             Attribute::LogicalNot(_) => 40,     // LogicalNotAttribute
             Attribute::LogicalAnd(_) => 21,     // LogicalAndAttribute
             Attribute::LogicalOr(_) => 24,      // LogicalOrAttribute
+            Attribute::LogicalXor(_) => 25,     // LogicalXorAttribute
             Attribute::Pow(_) => 29,            // PowAttribute
             Attribute::IntDiv(_) => 20,         // IntDivAttribute
         }

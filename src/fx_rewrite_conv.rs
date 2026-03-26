@@ -18,6 +18,44 @@ fn is_convolution(target: &str) -> bool {
     target.contains("convolution.default") || target.contains("conv2d.default")
 }
 
+fn infer_in_channels(
+    input_node: &Bound<'_, PyAny>,
+    input_shape: &[i64],
+    weight_shape: &[i64],
+    groups: i64,
+) -> PyResult<i64> {
+    // The direct path may already have converted activations into channels-last
+    // layout before conv rewriting. Respect `tosa_dim_order` when present so
+    // we read the logical C axis, not just shape[1].
+    let meta = input_node.getattr("meta")?;
+    let dim_order = meta.call_method1("get", ("tosa_dim_order",))?;
+    if !dim_order.is_none() {
+        let order: Vec<usize> = dim_order.extract().unwrap_or_default();
+        if let Some(channel_axis) = order.iter().position(|&axis| axis == 1) {
+            if let Some(&channels) = input_shape.get(channel_axis) {
+                if channels > 0 {
+                    return Ok(channels);
+                }
+            }
+        }
+    }
+
+    if let Some(&channels) = input_shape.get(1) {
+        if channels > 0 {
+            return Ok(channels);
+        }
+    }
+
+    if weight_shape.len() >= 2 {
+        let channels_per_group = weight_shape[1];
+        if channels_per_group > 0 && groups > 0 {
+            return Ok(channels_per_group * groups);
+        }
+    }
+
+    Ok(0)
+}
+
 impl FxPass for FxRewriteConvPass {
     fn name(&self) -> &str {
         "FxRewriteConv"
@@ -79,16 +117,13 @@ impl FxPass for FxRewriteConvPass {
             // channel inference when deciding whether the op is depthwise.
             let weight_shape = FxGraphModule::node_shape(weight_node).unwrap_or_default();
             let out_channels = weight_shape.first().copied().unwrap_or(0);
-
-            // Get in_channels from the input tensor shape [N, C, H, W]
-            let in_channels = FxGraphModule::node_shape(input_node)
-                .ok()
-                .and_then(|s| s.get(1).copied())
-                .unwrap_or(0);
+            let input_shape = FxGraphModule::node_shape(input_node).unwrap_or_default();
+            let in_channels = infer_in_channels(input_node, &input_shape, &weight_shape, groups)?;
 
             // Match Python reference: depthwise when in_channels == groups and
             // out_channels is a multiple of in_channels.
             let is_depthwise = weight_shape.len() >= 4
+                && groups > 1
                 && in_channels > 0
                 && groups == in_channels
                 && out_channels % in_channels == 0;

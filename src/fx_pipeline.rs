@@ -1,6 +1,8 @@
+use crate::fx_annotate_output_dim_order;
 use crate::fx_cast_int64;
 use crate::fx_convert_clamp;
 use crate::fx_convert_full_like;
+use crate::fx_decompose_as_strided_copy;
 use crate::fx_decompose_adaptive_avgpool;
 use crate::fx_convert_split_to_slice;
 use crate::fx_conv1d_unsqueeze;
@@ -27,6 +29,7 @@ use crate::fx_pass::FxPass;
 use crate::fx_quantize_clamp_args;
 use crate::fx_remove_noop;
 use crate::fx_rewrite_conv;
+use crate::fx_rewrite_index_put;
 use crate::fx_rewrite_matmul;
 use crate::fx_size_adjust_input;
 use crate::fx_rewrite_squeeze;
@@ -77,6 +80,7 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
 
     vec![
         // -- Early decompositions (before fold_qdq) --
+        Box::new(fx_annotate_output_dim_order::FxAnnotateOutputDimOrderPass),
         // Decompose atanh, hardsigmoid, stack, unbind into primitive ops
         // that TOSA can represent. (masked_fill handled post-fold below.)
         Box::new(fx_decompose_ops::FxDecomposeOpsPass),
@@ -109,6 +113,9 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_decompose_cumsum::FxDecomposeCumsumPass),
         // Decompose pixel_shuffle/pixel_unshuffle into view+permute+view
         Box::new(fx_decompose_pixel_shuffle::FxDecomposePixelShufflePass),
+        // Replace contiguous zero-offset as_strided_copy with view_copy,
+        // matching the Python Arm pass and avoiding a raw unsupported ATen op.
+        Box::new(fx_decompose_as_strided_copy::FxDecomposeAsStridedCopyPass),
         Box::new(fx_quantize_clamp_args::FxQuantizeClampArgsPass),
         // Convert full_like -> full with explicit shape
         // Python runs ConvertFullLikeToFullPass in scalars section (line 330)
@@ -135,6 +142,7 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_rewrite_squeeze::FxRewriteSqueezePass),
         // -- Postprocessing/cleanup (Python ordering) --
         Box::new(fx_cast_int64::FxCastInt64ToInt32Pass::new(ep_for_cast)),
+        Box::new(fx_rewrite_index_put::FxRewriteIndexPutPass),
         Box::new(
             fx_fuse_equal_placeholders::FxFuseEqualPlaceholdersPass::new(ep_for_fuse_placeholders),
         ),

@@ -128,8 +128,111 @@ pub struct FxInsertRescalePass;
 
 /// Returns true for TOSA accumulator-producing ops that need INT32 -> INT8 rescale.
 fn is_tosa_accumulator_op(target: &str) -> bool {
-    target.contains("CONV2D")
-        || target.contains("DEPTHWISE_CONV2D")
+    let lowered = target.to_ascii_lowercase();
+    lowered.contains("conv2d")
+        || lowered.contains("depthwise_conv2d")
+}
+
+fn is_layout_passthrough_user(target: &str) -> bool {
+    let lowered = target.to_ascii_lowercase();
+    lowered.contains("view")
+        || lowered.contains("reshape")
+        || lowered.contains("transpose")
+        || lowered.contains("permute")
+        || lowered.contains("squeeze")
+        || lowered.contains("unsqueeze")
+        || lowered.contains("flatten")
+        || lowered.contains("contiguous")
+}
+
+fn extract_output_qparams<'py>(
+    py: Python<'py>,
+    meta: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let output_qparams = match meta.call_method1("get", ("output_qparams",)) {
+        Ok(v) if !v.is_none() => v,
+        _ => return Ok(None),
+    };
+    let len: usize = py
+        .import_bound("builtins")?
+        .call_method1("len", (&output_qparams,))?
+        .extract()
+        .unwrap_or(0);
+    if len == 0 {
+        return Ok(None);
+    }
+    Ok(Some(output_qparams))
+}
+
+fn recover_downstream_output_qparams<'py>(
+    py: Python<'py>,
+    start: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let mut current = start.clone();
+    let mut visited: HashSet<String> = HashSet::new();
+
+    loop {
+        let name = FxGraphModule::node_name(&current)?;
+        if !visited.insert(name) {
+            return Ok(None);
+        }
+
+        let users = FxGraphModule::node_users(&current)?;
+        if users.len() != 1 {
+            return Ok(None);
+        }
+        let user = users[0].clone();
+        let user_meta = user.getattr("meta")?;
+        if let Some(output_qparams) = extract_output_qparams(py, &user_meta)? {
+            return Ok(Some(output_qparams));
+        }
+
+        let target = FxGraphModule::node_target_str(&user)?;
+        if !is_layout_passthrough_user(&target) {
+            return Ok(None);
+        }
+        current = user;
+    }
+}
+
+fn has_downstream_rescale(start: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let mut current = start.clone();
+    let mut visited: HashSet<String> = HashSet::new();
+
+    loop {
+        let name = FxGraphModule::node_name(&current)?;
+        if !visited.insert(name) {
+            return Ok(false);
+        }
+
+        let users = FxGraphModule::node_users(&current)?;
+        if users.len() != 1 {
+            return Ok(false);
+        }
+        let user = users[0].clone();
+        let target = FxGraphModule::node_target_str(&user)?;
+        let lowered = target.to_ascii_lowercase();
+        if lowered.contains("rescale") {
+            return Ok(true);
+        }
+        if !is_layout_passthrough_user(&target) {
+            return Ok(false);
+        }
+        if (lowered.contains("view")
+            || lowered.contains("reshape")
+            || lowered.contains("flatten")
+            || lowered.contains("squeeze")
+            || lowered.contains("unsqueeze"))
+            && FxGraphModule::node_shape(&current)
+                .ok()
+                .zip(FxGraphModule::node_shape(&user).ok())
+                .map(|(before, after)| before.len() != after.len())
+                .unwrap_or(false)
+        {
+            return Ok(false);
+        }
+        current = user;
+    }
 }
 
 fn is_dq(target: &str) -> bool {
@@ -616,40 +719,106 @@ impl FxPass for FxInsertRescalePass {
             if !is_tosa_accumulator_op(&target) {
                 continue;
             }
+            let node_name = if debug {
+                Some(FxGraphModule::node_name(node)?)
+            } else {
+                None
+            };
 
             // Read input_qparams to get input_scale (pos 0) and weight_scales (pos 1)
             let meta = node.getattr("meta")?;
             let input_qparams = match meta.call_method1("get", ("input_qparams",)) {
                 Ok(v) if !v.is_none() => v,
-                _ => continue,
+                _ => {
+                    if let Some(name) = &node_name {
+                        eprintln!(
+                            "[InsertRescale] skip '{}': missing input_qparams (target={})",
+                            name, target
+                        );
+                    }
+                    continue;
+                }
             };
+            if has_downstream_rescale(node)? {
+                if let Some(name) = &node_name {
+                    eprintln!(
+                        "[InsertRescale] skip '{}': downstream rescale already present",
+                        name
+                    );
+                }
+                continue;
+            }
+            if debug {
+                let input_qp_len: usize = py
+                    .import_bound("builtins")?
+                    .call_method1("len", (&input_qparams,))?
+                    .extract()
+                    .unwrap_or(0);
+                eprintln!(
+                    "[InsertRescale] inspect '{}': target={}, input_qparams={}",
+                    node_name.as_deref().unwrap_or("<unknown>"),
+                    target,
+                    input_qp_len
+                );
+            }
 
             let input_scale = match input_qparams.get_item(0_usize) {
                 Ok(qp) => qp_get_f64(&qp, "scale", None, 1.0),
-                Err(_) => continue,
+                Err(_) => {
+                    if let Some(name) = &node_name {
+                        eprintln!(
+                            "[InsertRescale] skip '{}': missing input qparam[0]",
+                            name
+                        );
+                    }
+                    continue;
+                }
             };
             // Read per-channel weight scales (list for per-channel, single for per-tensor)
             let weight_scales: Vec<f64> = match input_qparams.get_item(1_usize) {
                 Ok(qp) => qp_get_f64_list(&qp, "scale", 1.0),
-                Err(_) => continue,
+                Err(_) => {
+                    if let Some(name) = &node_name {
+                        eprintln!(
+                            "[InsertRescale] skip '{}': missing weight qparam[1]",
+                            name
+                        );
+                    }
+                    continue;
+                }
             };
 
             // Read output_qparams to get output_scale(s) and output_zp
-            let output_qparams = match meta.call_method1("get", ("output_qparams",)) {
-                Ok(v) if !v.is_none() => v,
-                _ => continue,
-            };
-            let oqp_len: usize = py
-                .import_bound("builtins")?
-                .call_method1("len", (&output_qparams,))?
-                .extract()
-                .unwrap_or(0);
-            if oqp_len == 0 {
+            let output_qparams = if let Some(qparams) = extract_output_qparams(py, &meta)? {
+                qparams
+            } else if let Some(qparams) = recover_downstream_output_qparams(py, node)? {
+                if let Some(name) = &node_name {
+                    eprintln!(
+                        "[InsertRescale] recovered output_qparams for '{}' from downstream user",
+                        name
+                    );
+                }
+                qparams
+            } else {
+                if let Some(name) = &node_name {
+                    eprintln!(
+                        "[InsertRescale] skip '{}': no output_qparams on node or downstream layout chain",
+                        name
+                    );
+                }
                 continue;
-            }
+            };
             let oqp = match output_qparams.get_item(0_usize) {
                 Ok(qp) => qp,
-                Err(_) => continue,
+                Err(_) => {
+                    if let Some(name) = &node_name {
+                        eprintln!(
+                            "[InsertRescale] skip '{}': missing output qparam[0]",
+                            name
+                        );
+                    }
+                    continue;
+                }
             };
             let output_scale = qp_get_f64(&oqp, "scale", None, 1.0);
             let output_zp = qp_get_i64(&oqp, "zp", Some("zero_point"), 0);

@@ -145,4 +145,5 @@ impl FxRemoveNoopPass {
         let dtype = val.getattr("dtype").ok()?;
         Some(dtype.str().ok()?.to_string())
     }
+
 }

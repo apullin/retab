@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
+use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
+use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
 
@@ -16,6 +16,59 @@ pub struct FxDecomposeAdaptiveAvgPoolPass;
 
 fn is_adaptive_avgpool(target: &str) -> bool {
     target.contains("adaptive_avg_pool2d")
+}
+
+fn refresh_fake_tensor(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<()> {
+    let helpers = py.import_bound("fx_helpers")?;
+    helpers.call_method1("refresh_node_fake_tensor", (node,))?;
+    Ok(())
+}
+
+fn copied_meta<'py>(
+    py: Python<'py>,
+    node: &Bound<'py, PyAny>,
+    clear_qparams: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let copy_mod = py.import_bound("copy")?;
+    let meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
+    if clear_qparams {
+        meta.set_item("input_qparams", PyDict::new_bound(py))?;
+        meta.set_item("output_qparams", PyDict::new_bound(py))?;
+    }
+    Ok(meta)
+}
+
+fn set_meta_and_refresh(
+    py: Python<'_>,
+    inserted: &Bound<'_, PyAny>,
+    meta: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    inserted.setattr("meta", meta)?;
+    refresh_fake_tensor(py, inserted)
+}
+
+fn set_meta_with_value(
+    inserted: &Bound<'_, PyAny>,
+    meta: &Bound<'_, PyAny>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    meta.set_item("val", value)?;
+    inserted.setattr("meta", meta)?;
+    Ok(())
+}
+
+fn cat_fake_tensor<'py>(
+    py: Python<'py>,
+    inputs: &[Bound<'py, PyAny>],
+    dim: i64,
+) -> PyResult<Bound<'py, PyAny>> {
+    let torch = py.import_bound("torch")?;
+    let fake_inputs = PyList::empty_bound(py);
+    for input in inputs {
+        let meta = input.getattr("meta")?;
+        fake_inputs.append(meta.get_item("val")?)?;
+    }
+    torch.call_method1("cat", (fake_inputs.as_ref(), dim))
 }
 
 impl FxPass for FxDecomposeAdaptiveAvgPoolPass {
@@ -102,36 +155,15 @@ fn decompose_adaptive<'py>(
     let slice_op = resolve_aten_op(py, "slice_copy.Tensor")?;
     let cat_op = resolve_aten_op(py, "cat.default")?;
 
-    // Simple case: integer division → single avg_pool2d
-    if input_h % output_h == 0 && input_w % output_w == 0 {
-        let kh = input_h / output_h;
-        let kw = input_w / output_w;
-        let kernel = pyo3::types::PyList::new_bound(py, [kh, kw].iter().copied());
-        let stride = pyo3::types::PyList::new_bound(py, [kh, kw].iter().copied());
-        let padding = pyo3::types::PyList::new_bound(py, [0i64, 0].iter().copied());
-        let pool_args = PyTuple::new_bound(
-            py,
-            &[x.as_ref(), kernel.as_ref(), stride.as_ref(), padding.as_ref()],
-        );
-        let result =
-            insert_call_before(py, graph, node, &avgpool_op, pool_args.as_ref(), node)?;
-
-        let copy_mod = py.import_bound("copy")?;
-        let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-        result.setattr("meta", &final_meta)?;
-
-        FxGraphModule::replace_all_uses_with(node, &result)?;
-        gm.erase_node(node)?;
-        return Ok(());
-    }
-
-    // General case: slice + pool + cat (matching Python)
-    // For each output element, compute pooling region, slice, pool, then concat
+    // Match the Python Arm pass literally: always slice pooling regions,
+    // apply avg_pool2d with stride 1, then concatenate. The old “single pool
+    // on divisible shapes” shortcut leaks oversized stride values and diverges
+    // from the backend path we are trying to reproduce.
     let inserting = graph.call_method1("inserting_before", (node,))?;
     inserting.call_method0("__enter__")?;
 
-    // Metadata without qparams for slice/cat (they don't change quantization)
-    let copy_mod = py.import_bound("copy")?;
+    let meta_with_qparams = copied_meta(py, node, false)?;
+    let meta_without_qparams = copied_meta(py, node, true)?;
 
     let mut rows: Vec<Bound<'py, PyAny>> = Vec::new();
     for out_i in 0..output_h {
@@ -155,6 +187,7 @@ fn decompose_adaptive<'py>(
                 ],
             );
             let x_h = graph.call_method1("call_function", (&slice_op, &h_args))?;
+            set_meta_and_refresh(py, &x_h, &meta_without_qparams)?;
 
             // Slice along W
             let w_args = PyTuple::new_bound(
@@ -167,6 +200,7 @@ fn decompose_adaptive<'py>(
                 ],
             );
             let x_hw = graph.call_method1("call_function", (&slice_op, &w_args))?;
+            set_meta_and_refresh(py, &x_hw, &meta_without_qparams)?;
 
             // avg_pool2d with kernel = region size
             let kh = end_h - start_h;
@@ -179,36 +213,46 @@ fn decompose_adaptive<'py>(
                 &[x_hw.as_ref(), kernel.as_ref(), stride.as_ref(), padding.as_ref()],
             );
             let pooled = graph.call_method1("call_function", (&avgpool_op, &pool_args))?;
-
-            // Copy metadata from original node
-            let meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-            pooled.setattr("meta", &meta)?;
+            set_meta_and_refresh(py, &pooled, &meta_with_qparams)?;
 
             row.push(pooled);
         }
 
-        // Cat row along W (dim=3)
-        let row_list = pyo3::types::PyList::new_bound(py, &row);
-        let cat_args = PyTuple::new_bound(
-            py,
-            &[row_list.as_ref(), 3i64.into_py(py).into_bound(py).as_ref()],
-        );
-        let row_tensor = graph.call_method1("call_function", (&cat_op, &cat_args))?;
-        rows.push(row_tensor);
+        // Avoid emitting invalid single-input CONCATs; otherwise attach an
+        // exact fake tensor instead of relying on generic refresh logic.
+        if row.len() == 1 {
+            rows.push(row.into_iter().next().unwrap());
+        } else {
+            let row_list = pyo3::types::PyList::new_bound(py, &row);
+            let cat_args = PyTuple::new_bound(
+                py,
+                &[row_list.as_ref(), 3i64.into_py(py).into_bound(py).as_ref()],
+            );
+            let row_tensor = graph.call_method1("call_function", (&cat_op, &cat_args))?;
+            let row_meta = copied_meta(py, node, true)?;
+            let row_fake_val = cat_fake_tensor(py, &row, 3)?;
+            set_meta_with_value(&row_tensor, &row_meta, &row_fake_val)?;
+            rows.push(row_tensor);
+        }
     }
 
     // Cat all rows along H (dim=2)
-    let rows_list = pyo3::types::PyList::new_bound(py, &rows);
-    let cat_args = PyTuple::new_bound(
-        py,
-        &[rows_list.as_ref(), 2i64.into_py(py).into_bound(py).as_ref()],
-    );
-    let result = graph.call_method1("call_function", (&cat_op, &cat_args))?;
+    let result = if rows.len() == 1 {
+        rows.into_iter().next().unwrap()
+    } else {
+        let rows_list = pyo3::types::PyList::new_bound(py, &rows);
+        let cat_args = PyTuple::new_bound(
+            py,
+            &[rows_list.as_ref(), 2i64.into_py(py).into_bound(py).as_ref()],
+        );
+        let result = graph.call_method1("call_function", (&cat_op, &cat_args))?;
+        let result_meta = copied_meta(py, node, true)?;
+        let result_fake_val = cat_fake_tensor(py, &rows, 2)?;
+        set_meta_with_value(&result, &result_meta, &result_fake_val)?;
+        result
+    };
 
     inserting.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
-
-    let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    result.setattr("meta", &final_meta)?;
 
     FxGraphModule::replace_all_uses_with(node, &result)?;
     gm.erase_node(node)?;

@@ -2,9 +2,11 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
 mod compile_spec;
+mod fx_annotate_output_dim_order;
 mod fx_cast_int64;
 mod fx_convert_clamp;
 mod fx_convert_full_like;
+mod fx_decompose_as_strided_copy;
 mod fx_decompose_adaptive_avgpool;
 mod fx_convert_split_to_slice;
 mod fx_conv1d_unsqueeze;
@@ -36,6 +38,7 @@ mod fx_python_bridge;
 mod fx_quantize_clamp_args;
 mod fx_remove_noop;
 mod fx_rewrite_conv;
+mod fx_rewrite_index_put;
 mod fx_size_adjust_input;
 mod fx_rewrite_matmul;
 mod fx_rewrite_squeeze;
@@ -182,12 +185,14 @@ fn lower_to_tosa_v2(
     let pass_refs: Vec<&dyn fx_pass::FxPass> = pipeline.iter().map(|p| p.as_ref()).collect();
     fx_pass::run_fx_passes(&gm, &pass_refs)?;
 
-    // 2. Ingest the post-pass graph into Rust IR (read-only, no mutations)
-    let (graph, store) =
-        ingest::fx_bridge::ingest_fx_graph(graph_module, state_dict, graph_signature)?;
+    // 2. Ingest the post-pass graph hierarchy into Rust IR so control-flow
+    // regions survive serialization instead of collapsing into a single main
+    // graph.
+    let (graphs, store) =
+        ingest::fx_bridge::ingest_fx_graph_hierarchy(graph_module, state_dict, graph_signature)?;
 
     // 3. Serialize to TOSA flatbuffer
-    let tosa_bytes = serialize::serialize_to_tosa(&graph, &store);
+    let tosa_bytes = serialize::serialize_graphs_to_tosa(&graphs, &store);
 
     Ok(PyBytes::new_bound(py, &tosa_bytes).unbind())
 }
@@ -206,15 +211,18 @@ fn ingest_and_serialize(
     state_dict: &Bound<'_, PyDict>,
     graph_signature: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyBytes>> {
-    // 1. Ingest FX graph into Rust IR (read-only snapshot)
-    let (mut graph, store) =
-        ingest::fx_bridge::ingest_fx_graph(graph_module, state_dict, graph_signature)?;
+    // 1. Ingest the full FX graph hierarchy so cond/while regions are emitted
+    // as named TOSA regions instead of dangling references from main.
+    let (mut graphs, store) =
+        ingest::fx_bridge::ingest_fx_graph_hierarchy(graph_module, state_dict, graph_signature)?;
 
-    // 2. Rebuild user lists to fix stale edges from FX pass mutations
-    graph.rebuild_user_lists();
+    // 2. Rebuild user lists to fix stale edges from FX pass mutations.
+    for (_, graph) in &mut graphs {
+        graph.rebuild_user_lists();
+    }
 
-    // 3. Serialize directly to TOSA flatbuffer -- no IR passes
-    let tosa_bytes = serialize::serialize_to_tosa(&graph, &store);
+    // 3. Serialize directly to TOSA flatbuffer -- no duplicate IR passes.
+    let tosa_bytes = serialize::serialize_graphs_to_tosa(&graphs, &store);
 
     Ok(PyBytes::new_bound(py, &tosa_bytes).unbind())
 }

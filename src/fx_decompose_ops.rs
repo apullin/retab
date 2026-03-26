@@ -36,6 +36,33 @@ fn is_unbind(target: &str) -> bool {
     target.contains("unbind.int") || target.contains("unbind_copy.int")
 }
 
+fn is_dequantize(target: &str) -> bool {
+    target.contains("dequantize_per_tensor") || target.contains("dequantize_per_channel")
+}
+
+fn is_quantize(target: &str) -> bool {
+    target.contains("quantize_per_tensor") || target.contains("quantize_per_channel")
+}
+
+fn has_quantized_envelope(node: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let args = FxGraphModule::node_args(node)?;
+    let Some(input) = args.first() else {
+        return Ok(false);
+    };
+    if !FxGraphModule::is_node(input) {
+        return Ok(false);
+    }
+    let input_target = FxGraphModule::node_target_str(input)?;
+    if !is_dequantize(&input_target) {
+        return Ok(false);
+    }
+
+    let users = FxGraphModule::node_users(node)?;
+    Ok(users
+        .iter()
+        .any(|user| FxGraphModule::node_target_str(user).map(|target| is_quantize(&target)).unwrap_or(false)))
+}
+
 enum DecompKind {
     Atanh,
     Hardsigmoid,
@@ -165,6 +192,9 @@ impl FxPass for FxDecomposeOpsPass {
             let target = FxGraphModule::node_target_str(node)?;
 
             if is_atanh(&target) {
+                if has_quantized_envelope(node)? {
+                    continue;
+                }
                 candidates.push((node.clone(), DecompKind::Atanh));
             } else if is_hardsigmoid(&target) {
                 // Skip hardsigmoid decomposition for quantized graphs —

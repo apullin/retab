@@ -20,8 +20,21 @@ enum WeightPermKind {
     /// Standard conv2d: OIHW [OC, IC, KH, KW] -> OHWI [OC, KH, KW, IC]
     Conv2d,
     /// Depthwise conv2d: OIHW [OC, 1, KH, KW] -> HWIM [KH, KW, IC, M]
-    /// where IC = in_channels/groups = 1 (per group), M = depth_multiplier
-    DepthwiseConv2d,
+    /// where IC is the true input-channel count and M = depth_multiplier.
+    DepthwiseConv2d { in_channels: usize },
+}
+
+fn apply_tosa_dim_order(node: &crate::graph::ir::Node, shape: Vec<i32>) -> Vec<i32> {
+    let Some(order) = node.meta.tosa_dim_order.as_ref() else {
+        return shape;
+    };
+    if order.len() != shape.len() {
+        return shape;
+    }
+    order
+        .iter()
+        .filter_map(|&src_idx| shape.get(src_idx as usize).copied())
+        .collect()
 }
 
 /// Permute a 4D tensor's raw bytes from OIHW to OHWI or depthwise format.
@@ -78,28 +91,42 @@ fn permute_weight_data(
             }
             (out, new_shape)
         }
-        WeightPermKind::DepthwiseConv2d => {
-            // OIHW -> HWIM: perm [2, 3, 1, 0]
-            // TOSA depthwise weight: [KH, KW, IC_per_group, depth_multiplier]
-            // PyTorch weight: [OC, IC/groups, KH, KW] where IC/groups=1 for depthwise
-            let new_shape = vec![shape[2], shape[3], shape[1], shape[0]];
-            let (_nh, nw, ni, nm) = (d2, d3, d1, d0);
+        WeightPermKind::DepthwiseConv2d { in_channels } => {
+            // Parse, don't validate: depthwise serialization needs the real
+            // input-channel count to produce TOSA's HWIM layout. The previous
+            // logic only worked for IC=1 and silently serialized shared
+            // depthwise weights as [KH, KW, 1, OC].
+            if in_channels == 0 || d1 != 1 || d0 % in_channels != 0 {
+                return (data.to_vec(), shape.to_vec());
+            }
+
+            let depth_multiplier = d0 / in_channels;
+            if depth_multiplier == 0 {
+                return (data.to_vec(), shape.to_vec());
+            }
+
+            let new_shape = vec![
+                shape[2],
+                shape[3],
+                in_channels as i64,
+                depth_multiplier as i64,
+            ];
+            let (_nh, nw, ni, nm) = (d2, d3, in_channels, depth_multiplier);
             let mut out = vec![0u8; data.len()];
 
-            for o in 0..d0 {
-                for i in 0..d1 {
-                    for h in 0..d2 {
-                        for w in 0..d3 {
-                            let src_idx = ((o * d1 + i) * d2 + h) * d3 + w;
-                            let dst_idx = ((h * nw + w) * ni + i) * nm + o;
-                            let src_off = src_idx * elem_size;
-                            let dst_off = dst_idx * elem_size;
-                            if src_off + elem_size <= data.len()
-                                && dst_off + elem_size <= out.len()
-                            {
-                                out[dst_off..dst_off + elem_size]
-                                    .copy_from_slice(&data[src_off..src_off + elem_size]);
-                            }
+            for oc in 0..d0 {
+                let ic = oc / depth_multiplier;
+                let m = oc % depth_multiplier;
+                for h in 0..d2 {
+                    for w in 0..d3 {
+                        let src_idx = ((oc * d1) * d2 + h) * d3 + w;
+                        let dst_idx = ((h * nw + w) * ni + ic) * nm + m;
+                        let src_off = src_idx * elem_size;
+                        let dst_off = dst_idx * elem_size;
+                        if src_off + elem_size <= data.len() && dst_off + elem_size <= out.len()
+                        {
+                            out[dst_off..dst_off + elem_size]
+                                .copy_from_slice(&data[src_off..src_off + elem_size]);
                         }
                     }
                 }
@@ -209,6 +236,31 @@ fn dtype_elem_size(dtype: crate::graph::ir::DType) -> usize {
 
 /// Build a map of weight tensor names to their permutation kind by scanning
 /// all conv ops in the graph.
+fn infer_depthwise_in_channels(graph: &Graph, node: &crate::graph::ir::Node, oc: usize) -> usize {
+    let Some(Arg::Node(input_id)) = node.args.first() else {
+        return 0;
+    };
+    let Some(input_node) = graph.node(*input_id) else {
+        return 0;
+    };
+
+    let shape = input_node.meta.val.shape_slice();
+    for candidate in [
+        shape.last().copied(),
+        shape.get(1).copied(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let candidate = candidate as usize;
+        if candidate > 0 && oc % candidate == 0 {
+            return candidate;
+        }
+    }
+
+    0
+}
+
 fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind> {
     let mut perms = HashMap::new();
     for &nid in &graph.order {
@@ -219,7 +271,24 @@ fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind>
         let kind = match &node.target {
             OpTarget::TosaConv2d | OpTarget::Conv2d => Some(WeightPermKind::Conv2d),
             OpTarget::TosaDepthwiseConv2d | OpTarget::DepthwiseConv2d => {
-                Some(WeightPermKind::DepthwiseConv2d)
+                let Some(Arg::Node(weight_id)) = node.args.get(1) else {
+                    continue;
+                };
+                let Some(weight_node) = graph.node(*weight_id) else {
+                    continue;
+                };
+                let oc = weight_node
+                    .meta
+                    .val
+                    .shape_slice()
+                    .first()
+                    .copied()
+                    .unwrap_or(0) as usize;
+                let in_channels = infer_depthwise_in_channels(graph, node, oc);
+                if in_channels == 0 {
+                    continue;
+                }
+                Some(WeightPermKind::DepthwiseConv2d { in_channels })
             }
             _ => None,
         };
@@ -240,7 +309,15 @@ fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind>
 
 /// Serialize the IR graph and its constant data into a TOSA flatbuffer byte
 /// vector.
-pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
+struct SerializedGraphItems {
+    tensors: Vec<TosaTensor>,
+    shapes: Vec<TosaShape>,
+    operators: Vec<TosaOperator>,
+    input_names: Vec<String>,
+    output_names: Vec<String>,
+}
+
+fn collect_serialized_graph_items(graph: &Graph, store: &TensorStore) -> SerializedGraphItems {
     // Use insertion order directly instead of topological sort.
     //
     // The FX graph is topologically ordered by construction (Python FX enforces
@@ -312,13 +389,14 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
         match node.op {
             OpType::Placeholder => {
                 let name = &node.name;
-                let shape: Vec<i32> = node
+                let raw_shape: Vec<i32> = node
                     .meta
                     .val
                     .shape_slice()
                     .iter()
                     .map(|&d| d as i32)
                     .collect();
+                let shape = apply_tosa_dim_order(node, raw_shape);
                 let dtype = ir_dtype_to_tosa(node.meta.val.dtype);
 
                 if let Some(tensor_data) = store.get(name) {
@@ -422,26 +500,48 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
         }
     }
 
-    eprintln!("[Serialize] topo sort done, collected {} tensors, {} operators, {} shapes", tensors.len(), operators.len(), shapes.len());
+    eprintln!(
+        "[Serialize] topo sort done, collected {} tensors, {} operators, {} shapes",
+        tensors.len(),
+        operators.len(),
+        shapes.len()
+    );
+
+    SerializedGraphItems {
+        tensors,
+        shapes,
+        operators,
+        input_names,
+        output_names,
+    }
+}
+
+fn build_fb_region<'fbb>(
+    builder: &mut FlatBufferBuilder<'fbb>,
+    region_name: &str,
+    graph: &Graph,
+    store: &TensorStore,
+) -> WIPOffset<TableFinishedWIPOffset> {
+    let serialized = collect_serialized_graph_items(graph, store);
 
     // Build the flatbuffer bottom-up
-    let mut builder = FlatBufferBuilder::with_capacity(16 * 1024 * 1024); // 16MB initial
-
     // Pre-serialize all sub-tables
     eprintln!("[Serialize] building fb tensors...");
-    let fb_tensors = build_fb_tensors(&mut builder, &tensors);
+    let fb_tensors = build_fb_tensors(builder, &serialized.tensors);
     eprintln!("[Serialize] building fb shapes...");
-    let fb_shapes = build_fb_shapes(&mut builder, &shapes);
+    let fb_shapes = build_fb_shapes(builder, &serialized.shapes);
     eprintln!("[Serialize] building fb operators...");
-    let fb_operators = build_fb_operators(&mut builder, &operators);
+    let fb_operators = build_fb_operators(builder, &serialized.operators);
     eprintln!("[Serialize] assembling graph...");
 
     // Build input/output name vectors
-    let fb_input_strs: Vec<_> = input_names
+    let fb_input_strs: Vec<_> = serialized
+        .input_names
         .iter()
         .map(|s| builder.create_string(s))
         .collect();
-    let fb_output_strs: Vec<_> = output_names
+    let fb_output_strs: Vec<_> = serialized
+        .output_names
         .iter()
         .map(|s| builder.create_string(s))
         .collect();
@@ -453,7 +553,7 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
     let fb_operators_vec = builder.create_vector(&fb_operators);
 
     // Build basic block
-    let block_name = builder.create_string("main");
+    let block_name = builder.create_string(region_name);
     let block = {
         let start = builder.start_table();
         builder.push_slot_always::<WIPOffset<_>>(4, block_name);
@@ -467,7 +567,7 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
 
     // Build region
     let blocks_vec = builder.create_vector(&[block]);
-    let region_name = builder.create_string("main");
+    let region_name = builder.create_string(region_name);
     let region = {
         let start = builder.start_table();
         builder.push_slot_always::<WIPOffset<_>>(4, region_name);
@@ -475,6 +575,13 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
         builder.end_table(start)
     };
 
+    region
+}
+
+fn finish_tosa_graph(
+    builder: &mut FlatBufferBuilder<'_>,
+    regions: &[WIPOffset<TableFinishedWIPOffset>],
+) -> Vec<u8> {
     // Build software version
     let modifier_str = builder.create_string("arm-tosa-engine");
     let sw_version = {
@@ -497,7 +604,7 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
     };
 
     // Build root TosaGraph
-    let regions_vec = builder.create_vector(&[region]);
+    let regions_vec = builder.create_vector(regions);
     let tosa_graph = {
         let start = builder.start_table();
         builder.push_slot_always::<WIPOffset<_>>(4, version);
@@ -508,6 +615,21 @@ pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
 
     builder.finish(tosa_graph, Some("TOSA"));
     builder.finished_data().to_vec()
+}
+
+pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(16 * 1024 * 1024); // 16MB initial
+    let region = build_fb_region(&mut builder, "main", graph, store);
+    finish_tosa_graph(&mut builder, &[region])
+}
+
+pub fn serialize_graphs_to_tosa(graphs: &[(String, Graph)], store: &TensorStore) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(16 * 1024 * 1024); // 16MB initial
+    let regions: Vec<_> = graphs
+        .iter()
+        .map(|(name, graph)| build_fb_region(&mut builder, name, graph, store))
+        .collect();
+    finish_tosa_graph(&mut builder, &regions)
 }
 
 // ============================================================================
@@ -644,6 +766,7 @@ fn build_fb_attribute(
         | Attribute::Pad(_)
         | Attribute::Slice(_)
         | Attribute::Gather(_)
+        | Attribute::Scatter(_)
         | Attribute::Select(_)
         | Attribute::Cast(_)
         | Attribute::Equal(_)
@@ -659,6 +782,7 @@ fn build_fb_attribute(
         | Attribute::LogicalNot(_)
         | Attribute::LogicalAnd(_)
         | Attribute::LogicalOr(_)
+        | Attribute::LogicalXor(_)
         | Attribute::Pow(_)
         | Attribute::IntDiv(_) => {
             // Empty tables
@@ -914,7 +1038,7 @@ mod tests {
         }
 
         let (out, new_shape) =
-            permute_weight_data(&data, &shape, 1, WeightPermKind::DepthwiseConv2d);
+            permute_weight_data(&data, &shape, 1, WeightPermKind::DepthwiseConv2d { in_channels: 1 });
 
         // Expected shape: [3, 3, 1, 16] (HWIM)
         assert_eq!(new_shape, vec![3, 3, 1, 16]);
@@ -933,6 +1057,40 @@ mod tests {
                             out[dst_idx], data[src_idx]
                         );
                     }
+                }
+            }
+        }
+    }
+
+    /// Test a real depthwise case where IC>1 and depth_multiplier=1.
+    #[test]
+    fn test_permute_depthwise_oihw_to_hwim_multi_channel() {
+        let shape = [6i64, 1, 2, 2];
+        let mut data = vec![0u8; 24];
+        for (idx, byte) in data.iter_mut().enumerate() {
+            *byte = idx as u8;
+        }
+
+        let (out, new_shape) = permute_weight_data(
+            &data,
+            &shape,
+            1,
+            WeightPermKind::DepthwiseConv2d { in_channels: 6 },
+        );
+
+        assert_eq!(new_shape, vec![2, 2, 6, 1]);
+        assert_eq!(out.len(), 24);
+
+        for oc in 0..6usize {
+            for h in 0..2usize {
+                for w in 0..2usize {
+                    let src_idx = ((oc * 1) * 2 + h) * 2 + w;
+                    let dst_idx = ((h * 2 + w) * 6 + oc) * 1;
+                    assert_eq!(
+                        out[dst_idx], data[src_idx],
+                        "Mismatch at oc={oc},h={h},w={w}: out[{dst_idx}]={} != data[{src_idx}]={}",
+                        out[dst_idx], data[src_idx]
+                    );
                 }
             }
         }

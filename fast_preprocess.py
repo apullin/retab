@@ -65,6 +65,33 @@ def _get_matching_fake_tensor(node):
     return fake_tensor.to(memory_format=get_memory_format(list(desired_dim_order)))
 
 
+def _refresh_tosa_dim_order_fake_tensors(graph_module) -> None:
+    """Re-sync fake tensors with `tosa_dim_order` after FX-direct rewrites.
+
+    Several Rust/Python passes update `meta["tosa_dim_order"]` without forcing
+    a matching FakeTensor memory-format refresh. The runner later decodes TOSA
+    outputs using the FakeTensor's dim_order, so stale contiguous fake tensors
+    can turn a logically correct NHWC result into a numerically scrambled NCHW
+    tensor. Metadata is part of the program here; keep the fake tensors aligned.
+    """
+    from executorch.backends.arm._passes.arm_pass_utils import (
+        get_cond_while_submodules_nested,
+    )
+
+    modules = [graph_module]
+    modules.extend(submodule for _, submodule, _ in get_cond_while_submodules_nested(graph_module))
+
+    for module in modules:
+        updated = False
+        for node in module.graph.nodes:
+            if "val" not in node.meta or node.meta.get("tosa_dim_order") is None:
+                continue
+            node.meta["val"] = _get_matching_fake_tensor(node)
+            updated = True
+        if updated:
+            module.recompile()
+
+
 def _ordered_control_flow_users(node):
     def _user_sort_key(user):
         target_str = str(getattr(user, "target", ""))
@@ -1884,7 +1911,12 @@ def _is_control_flow_input_passthrough_node(node) -> bool:
     if getattr(node, "op", None) != "call_function":
         return False
     target_str = str(getattr(node, "target", ""))
-    return "dequantize_per_tensor" in target_str
+    return (
+        "dequantize_per_tensor" in target_str
+        or "tosa_RESCALE" in target_str
+        or "tosa.RESCALE" in target_str
+        or "TosaRescale" in target_str
+    )
 
 
 def _describe_node_brief(node) -> str:
@@ -2416,11 +2448,26 @@ def _install_edge_decomp_fast_path() -> None:
 
                 ops_set_to_not_decompose_by_program[name].extend(final_ops_to_preserve)
 
-            edge_programs[name] = program_mod._generate_edge_program(
+            edge_program = program_mod._generate_edge_program(
                 config,
                 program,
                 preserve_ops=ops_set_to_not_decompose_by_program.get(name, []),
             )
+            if os.environ.get("ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING") == "1":
+                try:
+                    from executorch.backends.arm.tosa.partitioner import (
+                        _sync_direct_delegate_output_meta,
+                    )
+
+                    _sync_direct_delegate_output_meta(edge_program)
+                except Exception as exc:
+                    logger.info(
+                        "[fast_preprocess] direct delegate output-meta sync failed for %s: %s",
+                        name,
+                        exc,
+                    )
+
+            edge_programs[name] = edge_program
 
         all_ops_not_to_decompose = list(
             set().union(*ops_set_to_not_decompose_by_program.values())
@@ -2686,6 +2733,9 @@ def _all_rust_preprocess(
 
     from executorch.backends.arm.common.arm_compile_spec import ArmCompileSpec
     from executorch.backends.arm.common.debug import debug_tosa_dump
+    from executorch.backends.arm._passes.arm_pass_utils import (
+        get_cond_while_submodules_nested,
+    )
     from executorch.backends.arm.tosa.backend import arm_get_first_delegation_tag
     t0 = time.perf_counter()
     gm = edge_program.graph_module
@@ -2706,6 +2756,15 @@ def _all_rust_preprocess(
 
     # Run the full FX-direct pipeline (all passes in Rust via PyO3)
     arm_tosa_engine.run_fx_passes(gm, edge_program)
+    # Control-flow branch graphs are separate GraphModules. Run the same
+    # FX-direct pipeline on them too, otherwise ingest sees raw
+    # dequantize->aten.sin/cos/sigmoid->quantize islands inside regions.
+    for name, submodule, _ in get_cond_while_submodules_nested(gm):
+        arm_tosa_engine.run_fx_passes(submodule, edge_program)
+        logger.info(
+            "[fast_preprocess] ran recursive fx pass pipeline on control-flow submodule %s",
+            name,
+        )
     _reapply_control_flow_table_ops(gm, edge_program)
     _repair_control_flow_binary_rescales(gm, _compile_spec.tosa_spec)
     _canonicalize_control_flow_pool_binary_rescales(gm)
@@ -2727,6 +2786,7 @@ def _all_rust_preprocess(
     _prune_duplicate_control_flow_rescales(gm)
     _quantize_constant_only_control_flow_outputs(gm)
     _regularize_control_flow_submodules(gm)
+    _refresh_tosa_dim_order_fake_tensors(gm)
     _dump_control_flow_submodules(gm, "after_control_flow_normalize")
 
     # Merge in any pass-created constant placeholders added to the live
