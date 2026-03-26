@@ -103,3 +103,31 @@ impl FxPass for FxPythonRescaleOnlyPass {
         Ok(true)
     }
 }
+
+/// Run Python's DecomposeConvWithInt16ActivationPass.
+///
+/// The Arm backend uses this pass to rewrite int16-activation convolutions with
+/// bias into no-bias conv + bias add. Without it, the serializer emits an
+/// illegal direct int16 conv bias contract that the TOSA reference model
+/// rejects.
+pub struct FxPythonInt16ActivationConvPass;
+
+impl FxPass for FxPythonInt16ActivationConvPass {
+    fn name(&self) -> &str {
+        "PythonDecomposeInt16ActivationConv"
+    }
+
+    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
+        let py = gm.py();
+        ensure_engine_on_sys_path(py)?;
+
+        let module = py.import_bound("fx_python_passes")?;
+        let new_gm = module.call_method1(
+            "run_python_decompose_int16_activation_conv",
+            (gm.gm_ref(),),
+        )?;
+
+        swap_graph_if_needed(gm.gm_ref(), &new_gm)?;
+        Ok(true)
+    }
+}

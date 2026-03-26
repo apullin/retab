@@ -250,6 +250,16 @@ fn pack_int4_data(data: &[u8]) -> Vec<u8> {
     packed
 }
 
+fn widen_int32_data_to_int48(data: &[u8]) -> Vec<u8> {
+    let mut widened = Vec::with_capacity((data.len() / 4) * 6);
+    for chunk in data.chunks_exact(4) {
+        let value = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as i64;
+        let bytes = value.to_le_bytes();
+        widened.extend_from_slice(&bytes[..6]);
+    }
+    widened
+}
+
 /// Build a map of weight tensor names to their permutation kind by scanning
 /// all conv ops in the graph.
 fn infer_depthwise_in_channels(graph: &Graph, node: &crate::graph::ir::Node, oc: usize) -> usize {
@@ -462,11 +472,12 @@ fn collect_serialized_graph_items(graph: &Graph, store: &TensorStore) -> Seriali
                         };
                     let final_shape: Vec<i32> =
                         final_shape_i64.iter().map(|&d| d as i32).collect();
-                    let final_data = if tensor_dtype == DType::Int4 && store_dtype != DType::Int4
-                    {
-                        pack_int4_data(&final_data)
-                    } else {
-                        final_data
+                    let final_data = match (tensor_dtype, store_dtype) {
+                        (DType::Int4, _) if store_dtype != DType::Int4 => {
+                            pack_int4_data(&final_data)
+                        }
+                        (DType::Int48, DType::Int32) => widen_int32_data_to_int48(&final_data),
+                        _ => final_data,
                     };
 
                     tensors.push(TosaTensor {

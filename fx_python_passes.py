@@ -13,7 +13,14 @@ from executorch.backends.arm._passes.insert_rescales_pass import (
     InsertRescaleInt32Pass,
     InsertRescalePass,
 )
+from executorch.backends.arm._passes.decompose_int16_activation_conv_pass import (
+    DecomposeConvWithInt16ActivationPass,
+)
 from executorch.exir import ExportedProgram
+from executorch.backends.arm.tosa.specification import (
+    TosaLoweringContext,
+    TosaSpecification,
+)
 
 
 def run_python_fold_and_rescale(graph_module, exported_program=None):
@@ -75,4 +82,20 @@ def run_python_rescale_only(graph_module):
     if result is not None and hasattr(result, "graph_module"):
         gm = result.graph_module
 
+    return gm
+
+
+def run_python_decompose_int16_activation_conv(graph_module):
+    """Run Python's int16-activation conv decomposition on the graph module.
+
+    This mirrors the Arm backend pass that rewrites conv+bias with int16
+    activations into no-bias conv + bias add, avoiding illegal direct
+    serialization of int16 conv bias.
+    """
+    gm = graph_module
+    int16_spec = TosaSpecification.create_from_string("TOSA-1.0+INT+int16")
+    with TosaLoweringContext(int16_spec):
+        result = DecomposeConvWithInt16ActivationPass()(gm)
+        if result is not None and hasattr(result, "graph_module"):
+            gm = result.graph_module
     return gm

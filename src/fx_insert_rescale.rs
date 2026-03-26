@@ -708,6 +708,7 @@ impl FxPass for FxInsertRescalePass {
         // ------------------------------------------------------------------
         let all_nodes = gm.nodes()?;
         let torch_int8 = py.eval_bound("__import__('torch').int8", None, None)?;
+        let torch_int16 = py.eval_bound("__import__('torch').int16", None, None)?;
         let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
 
         for node in &all_nodes {
@@ -822,6 +823,12 @@ impl FxPass for FxInsertRescalePass {
             };
             let output_scale = qp_get_f64(&oqp, "scale", None, 1.0);
             let output_zp = qp_get_i64(&oqp, "zp", Some("zero_point"), 0);
+            let output_dtype_str = qp_get_dtype_str(&oqp, "torch.int8");
+            let output_dtype = if output_dtype_str.contains("int16") {
+                &torch_int16
+            } else {
+                &torch_int8
+            };
 
             if output_scale == 0.0 {
                 continue;
@@ -845,7 +852,7 @@ impl FxPass for FxInsertRescalePass {
             // Capture users before inserting the rescale
             let users = FxGraphModule::node_users(node)?;
 
-            // Insert RESCALE after the conv node: INT32 -> INT8
+            // Insert RESCALE after the conv node: INT32 -> quantized output dtype
             // input_zp = 0 (accumulator is zero-centered)
             let rescale_node = helpers.call_method1(
                 "insert_rescale_node",
@@ -853,7 +860,7 @@ impl FxPass for FxInsertRescalePass {
                     gm.gm_ref(),
                     node, // ref_node
                     node, // input_node
-                    &torch_int8,
+                    output_dtype,
                     rescale_scales,
                     0_i64,     // input_zp (accumulator is zero-centered)
                     output_zp, // output_zp from output qparams
@@ -868,7 +875,7 @@ impl FxPass for FxInsertRescalePass {
             rescale_node.setattr("meta", &meta_copy)?;
             helpers.call_method1(
                 "restamp_rescale_output_meta",
-                (&rescale_node, node, &torch_int8),
+                (&rescale_node, node, output_dtype),
             )?;
 
             // Rewire all users of the conv to use the rescale instead

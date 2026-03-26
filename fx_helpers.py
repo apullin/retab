@@ -139,6 +139,10 @@ def restamp_rescale_output_meta(
     out_dtype,
 ) -> None:
     """Refresh a RESCALE node's FakeTensor metadata from its real output dtype."""
+    # RESCALE materializes a new tensor in the requested output dtype; it
+    # should not inherit accumulator-only special dtypes like INT48 from the
+    # producer node.
+    rescale_node.meta.pop("tosa_special_dtype", None)
     input_val = input_node.meta.get("val")
     if isinstance(input_val, (list, tuple)):
         input_val = input_val[0] if input_val else None
@@ -1247,6 +1251,11 @@ def rewrite_conv_to_tosa(
         with graph.inserting_before(node):
             bias = graph.get_attr(attr_name)
             bias.meta = {"val": bias_data}
+            input_dtype = getattr(_get_first_fake_tensor(x), "dtype", None)
+            if input_dtype == torch.int16:
+                from executorch.backends.arm.tosa.mapping import TosaSpecialDtype
+
+                bias.meta[TosaSpecialDtype.meta_key()] = TosaSpecialDtype.INT48
 
     # Select target op
     if is_depthwise:
