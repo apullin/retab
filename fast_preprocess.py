@@ -1524,14 +1524,13 @@ def _reapply_control_flow_boundary_rescales(
                 output_qparams,
                 saved_output_qparams,
             )
+            # Keep the placeholder itself in the parent boundary qparam domain.
+            # The old behavior restored the branch-local saved qparams directly
+            # onto the placeholder, which silently reintroduced a lossy q->dq
+            # roundtrip on branch entry. Any branch-local domain adjustment
+            # should happen via an explicit rescale node instead.
             effective_qparam = qparam
-            if isinstance(saved_output_qparams, dict) and 0 in saved_output_qparams:
-                placeholder.meta["output_qparams"] = {0: saved_output_qparams[0]}
-                effective_qparam = saved_output_qparams[0]
-            elif isinstance(output_qparams, dict) and 0 in output_qparams:
-                effective_qparam = output_qparams[0]
-            elif not output_qparams:
-                placeholder.meta["output_qparams"] = {0: qparam}
+            placeholder.meta["output_qparams"] = {0: qparam}
             placeholder.meta["input_qparams"] = {0: qparam}
             fake_val = placeholder.meta.get("val")
             if (
