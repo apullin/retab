@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
+use crate::fx_decompose_ops::{insert_call_before, propagate_qparams, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
 

@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
+use crate::fx_decompose_ops::{insert_call_before, propagate_qparams, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
 
@@ -252,6 +252,8 @@ fn decompose_grouped_conv<'py>(
 
         let conv_node =
             insert_call_before(py, graph, node, &conv_op, conv_args.as_ref(), node)?;
+        // Propagate qparams so InsertRescalePass handles this conv correctly
+        propagate_qparams(node, &conv_node)?;
         output_slices.push(conv_node);
     }
 
