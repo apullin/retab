@@ -143,7 +143,29 @@ fn decompose_cumsum<'py>(
         // elem = add(prev, curr)
         let add_args = PyTuple::new_bound(py, &[prev.as_ref(), curr.as_ref()]);
         let elem = insert_call_before(py, graph, node, &add_op, add_args.as_ref(), node)?;
-        propagate_qparams(node, &elem)?;
+        // ADD needs input_qparams for BOTH inputs: {0: qp, 1: qp}
+        {
+            let src_meta = node.getattr("meta")?;
+            let dst_meta = elem.getattr("meta")?;
+            if let Ok(iqp) = src_meta.call_method1("get", ("input_qparams",)) {
+                if !iqp.is_none() {
+                    // Get qp[0] and set it for both inputs
+                    if let Ok(qp0) = iqp.call_method1("get", (0,)) {
+                        if !qp0.is_none() {
+                            let new_iqp = pyo3::types::PyDict::new_bound(py);
+                            new_iqp.set_item(0, &qp0)?;
+                            new_iqp.set_item(1, &qp0)?;
+                            dst_meta.set_item("input_qparams", new_iqp)?;
+                        }
+                    }
+                }
+            }
+            if let Ok(oqp) = src_meta.call_method1("get", ("output_qparams",)) {
+                if !oqp.is_none() {
+                    dst_meta.set_item("output_qparams", &oqp)?;
+                }
+            }
+        }
 
         // result = cat([result, elem], dim)
         let cat_list = pyo3::types::PyList::new_bound(py, &[result.as_ref(), elem.as_ref()]);
