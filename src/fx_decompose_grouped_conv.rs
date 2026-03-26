@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-use crate::fx_decompose_ops::{insert_call_before, propagate_qparams, resolve_aten_op};
+use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
 
@@ -17,6 +17,89 @@ pub struct FxDecomposeGroupedConvPass;
 
 fn is_convolution(target: &str) -> bool {
     target.contains("convolution.default") || target.contains("conv2d.default")
+}
+
+fn is_per_channel_qparams(qarg: &Bound<'_, PyAny>) -> PyResult<bool> {
+    Ok(qarg.getattr("per_channel")?.extract().unwrap_or(false))
+}
+
+fn split_per_channel_qparams<'py>(
+    py: Python<'py>,
+    qarg: &Bound<'py, PyAny>,
+    start_index: i64,
+    stop_index: i64,
+) -> PyResult<Bound<'py, PyAny>> {
+    let scales: Vec<f64> = qarg.getattr("scale")?.extract()?;
+    let zps: Vec<i64> = qarg.getattr("zp")?.extract()?;
+    let qmin: i64 = qarg.getattr("qmin")?.extract()?;
+    let qmax: i64 = qarg.getattr("qmax")?.extract()?;
+    let dtype = qarg.getattr("dtype")?;
+    let axis: i64 = qarg.getattr("axis")?.extract().unwrap_or(0);
+    let quant_args = py
+        .import_bound("executorch.backends.arm._passes.quant_args")?
+        .getattr("QuantArgs")?;
+
+    let start = start_index.max(0) as usize;
+    let stop = stop_index.max(start_index).max(0) as usize;
+    let scale_slice = scales[start..stop].to_vec();
+    let zp_slice = zps[start..stop].to_vec();
+
+    quant_args.call1((scale_slice, zp_slice, qmin, qmax, dtype, axis, true))
+}
+
+fn configure_grouped_conv_qparams<'py>(
+    py: Python<'py>,
+    src_node: &Bound<'py, PyAny>,
+    conv_node: &Bound<'py, PyAny>,
+    group_index: i64,
+    output_slice_size: i64,
+    transposed: bool,
+) -> PyResult<()> {
+    let src_meta = src_node.getattr("meta")?;
+    let conv_meta = conv_node.getattr("meta")?;
+
+    if let Ok(output_qparams) = src_meta.call_method1("get", ("output_qparams",)) {
+        if !output_qparams.is_none() {
+            conv_meta.set_item("output_qparams", &output_qparams)?;
+        }
+    }
+
+    let Ok(input_qparams) = src_meta.call_method1("get", ("input_qparams",)) else {
+        return Ok(());
+    };
+    if input_qparams.is_none() || input_qparams.len().unwrap_or(0) == 0 {
+        return Ok(());
+    }
+
+    let new_qparams = input_qparams.call_method0("copy")?;
+
+    if let Ok(weight_qarg) = new_qparams.get_item(1) {
+        if is_per_channel_qparams(&weight_qarg)? {
+            if transposed {
+                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "Grouped transpose conv with per-channel quantization is unsupported",
+                ));
+            }
+            let start_index = group_index * output_slice_size;
+            let stop_index = (group_index + 1) * output_slice_size;
+            let split =
+                split_per_channel_qparams(py, &weight_qarg, start_index, stop_index)?;
+            new_qparams.set_item(1, split)?;
+        }
+    }
+
+    if let Ok(bias_qarg) = new_qparams.get_item(2) {
+        if is_per_channel_qparams(&bias_qarg)? {
+            let start_index = group_index * output_slice_size;
+            let stop_index = (group_index + 1) * output_slice_size;
+            let split =
+                split_per_channel_qparams(py, &bias_qarg, start_index, stop_index)?;
+            new_qparams.set_item(2, split)?;
+        }
+    }
+
+    conv_meta.set_item("input_qparams", &new_qparams)?;
+    Ok(())
 }
 
 impl FxPass for FxDecomposeGroupedConvPass {
@@ -179,7 +262,6 @@ fn decompose_grouped_conv<'py>(
         );
         let input_slice =
             insert_call_before(py, graph, node, &slice_op, input_slice_args.as_ref(), input_node)?;
-        propagate_qparams(input_node, &input_slice)?;
 
         // Slice weight along dim 0 (output channels for normal, input channels for transposed)
         let (w_start, w_stop) = if transposed {
@@ -198,7 +280,6 @@ fn decompose_grouped_conv<'py>(
         );
         let weight_slice =
             insert_call_before(py, graph, node, &slice_op, weight_slice_args.as_ref(), weight_node)?;
-        propagate_qparams(weight_node, &weight_slice)?;
 
         // Slice bias along dim 0 (output channels)
         let bias_slice = if bias_node.is_none() {
@@ -223,7 +304,6 @@ fn decompose_grouped_conv<'py>(
                 bias_slice_args.as_ref(),
                 bias_node,
             )?;
-            propagate_qparams(bias_node, &bias_slice)?;
             bias_slice
         };
 
@@ -263,8 +343,14 @@ fn decompose_grouped_conv<'py>(
 
         let conv_node =
             insert_call_before(py, graph, node, &conv_op, conv_args.as_ref(), node)?;
-        // Propagate qparams so InsertRescalePass handles this conv correctly
-        propagate_qparams(node, &conv_node)?;
+        configure_grouped_conv_qparams(
+            py,
+            node,
+            &conv_node,
+            i,
+            output_slice_size,
+            transposed,
+        )?;
         output_slices.push(conv_node);
     }
 

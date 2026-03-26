@@ -68,9 +68,16 @@ use crate::fx_rewrite_squeeze;
 ///   19. Late fold of generated zero-input FULL nodes only
 pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dyn FxPass>> {
     // Clone the EP handle for passes that need it. Py<T>.clone() requires the GIL.
-    let (ep_for_fuse, ep_for_cast, ep_for_fuse_placeholders, ep_for_fuse_late) =
+    let (
+        ep_for_fuse,
+        ep_for_fuse_grouped,
+        ep_for_cast,
+        ep_for_fuse_placeholders,
+        ep_for_fuse_late,
+    ) =
         pyo3::Python::with_gil(|py| {
             (
+                exported_program.as_ref().map(|ep| ep.clone_ref(py)),
                 exported_program.as_ref().map(|ep| ep.clone_ref(py)),
                 exported_program.as_ref().map(|ep| ep.clone_ref(py)),
                 exported_program.as_ref().map(|ep| ep.clone_ref(py)),
@@ -133,6 +140,12 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         // Decompose grouped convolutions (groups>1, not depthwise) into
         // per-group slice_copy -> conv(groups=1) -> cat before TOSA rewrite.
         Box::new(fx_decompose_grouped_conv::FxDecomposeGroupedConvPass),
+        // Grouped-conv decomposition creates fresh slice_copy nodes over
+        // constant weights and biases. Fold them immediately so each per-group
+        // conv sees real constant tensors instead of a shared base weight.
+        Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(
+            ep_for_fuse_grouped,
+        )),
         Box::new(fx_rewrite_conv::FxRewriteConvPass),
         // Adjust input sizes for conv/pool to yield exact integer output dims
         Box::new(fx_size_adjust_input::FxSizeAdjustInputPass),
