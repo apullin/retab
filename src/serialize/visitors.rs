@@ -4766,20 +4766,45 @@ pub fn emit_pad(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorSto
         });
     let pad = arg_i32_list(node, 1);
 
-    let mut output_shape = input_shape.clone();
+    // Build per-dimension padding from PyTorch format (last dim first)
+    let rank = input_shape.len();
     let pad_pairs: Vec<(i32, i32)> = pad
         .chunks(2)
         .filter_map(|pair| match pair {
-            [before, after] => Some((*before as i32, *after as i32)),
+            [before, after] => Some((*before, *after)),
             _ => None,
         })
         .collect();
-    for (i, (before, after)) in pad_pairs.iter().rev().enumerate() {
-        let dim = output_shape.len().saturating_sub(1 + i);
-        if let Some(slot) = output_shape.get_mut(dim) {
+
+    // Convert from PyTorch dim order (last dim first) to per-dim array
+    let mut per_dim_pad = vec![(0i32, 0i32); rank];
+    for (i, &pair) in pad_pairs.iter().enumerate() {
+        let dim = rank.saturating_sub(1 + i);
+        if dim < rank {
+            per_dim_pad[dim] = pair;
+        }
+    }
+
+    // Reorder padding to match TOSA dim_order (NHWC)
+    let dim_order = node.meta.tosa_dim_order.as_ref();
+    let reordered_pad: Vec<(i32, i32)> = if let Some(order) = dim_order {
+        if order.len() == rank {
+            order.iter().map(|&idx| per_dim_pad.get(idx as usize).copied().unwrap_or((0, 0))).collect()
+        } else {
+            per_dim_pad.clone()
+        }
+    } else {
+        per_dim_pad.clone()
+    };
+
+    // Compute output shape
+    let mut output_shape = input_shape.clone();
+    for (i, (before, after)) in reordered_pad.iter().enumerate() {
+        if let Some(slot) = output_shape.get_mut(i) {
             *slot += before + after;
         }
     }
+
     result.tensors.push(TosaTensor {
         name: node.name.clone(),
         shape: output_shape,
@@ -4790,19 +4815,32 @@ pub fn emit_pad(graph: &Graph, _node_id: NodeId, node: &Node, _store: &TensorSto
         variable_name: String::new(),
     });
 
-    let mut pad_shape = vec![0; input_shape.len() * 2 - pad.len()];
-    for pair in pad.chunks(2).rev() {
-        if let [before, after] = pair {
-            pad_shape.push(*before as i32);
-            pad_shape.push(*after as i32);
-        }
+    // Build TOSA pad_shape: flat array of [before, after] per NHWC dim
+    let mut pad_shape: Vec<i32> = Vec::with_capacity(rank * 2);
+    for (before, after) in &reordered_pad {
+        pad_shape.push(*before);
+        pad_shape.push(*after);
     }
     push_const_shape(&mut result, format!("{}_pad_shape", node.name), pad_shape);
 
-    // TOSA PAD needs a pad_const input (the fill value, usually 0)
+    // TOSA PAD needs a pad_const input (the fill value).
+    // For quantized INT8, quantize the fill value using output qparams.
     let pad_const_name = format!("{}_pad_const", node.name);
-    let pad_value = kwarg_i32(node, "value", 0);
+    let raw_pad_value = kwarg_i32(node, "value", 0);
     let pad_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+    let pad_value = if pad_dtype == DType::Int8 {
+        // Quantize: q_val = round(float_val / scale) + zp
+        if let Some((_, qp)) = node.meta.output_qparams.first() {
+            let scale = qp.scale as f64;
+            let zp = qp.zero_point;
+            let q_val = ((raw_pad_value as f64 / scale) + zp as f64).round() as i32;
+            q_val.max(-128).min(127)
+        } else {
+            raw_pad_value
+        }
+    } else {
+        raw_pad_value
+    };
     result.tensors.push(TosaTensor {
         name: pad_const_name.clone(),
         shape: vec![1],
