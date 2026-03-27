@@ -116,12 +116,20 @@ fn fold_zero_input_full(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult
     let fill_value = &args[1];
 
     let meta = node.getattr("meta")?;
-    let val = meta.get_item("val")?;
-    let dtype = val.getattr("dtype")?;
+    let val = meta.call_method1("get", ("val",))?;
 
-    let full_kwargs = PyDict::new_bound(py);
-    full_kwargs.set_item("dtype", &dtype)?;
-    let mut const_tensor = torch.call_method("full", (shape, fill_value), Some(&full_kwargs))?;
+    // Parse, don't validate: branch-local zero-input FULL nodes may lose their
+    // fake tensor metadata during control-flow rewrites. If `meta["val"]` is
+    // absent, fall back to eager `torch.full` inference instead of crashing the
+    // entire recursive pass stack on a bookkeeping hole.
+    let mut const_tensor = if val.is_none() {
+        torch.call_method1("full", (shape, fill_value))?
+    } else {
+        let dtype = val.getattr("dtype")?;
+        let full_kwargs = PyDict::new_bound(py);
+        full_kwargs.set_item("dtype", &dtype)?;
+        torch.call_method("full", (shape, fill_value), Some(&full_kwargs))?
+    };
 
     // Match the general constant-folding helper: if the FULL output is already
     // annotated with output_qparams, materialize the frozen buffer in that

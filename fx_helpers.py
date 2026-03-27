@@ -6,6 +6,7 @@ fragile because we need proper meta["val"] FakeTensors and the correct
 torch op overload objects.
 """
 
+import os
 from copy import copy
 
 import torch
@@ -19,6 +20,20 @@ def _apply_fake_tensor_dim_order(fake_tensor, dim_order):
     from executorch.exir.dim_order_utils import get_memory_format
 
     return fake_tensor.to(memory_format=get_memory_format(list(dim_order)))
+
+
+def _effective_tosa_dim_order(node: Node):
+    current = node
+    seen = set()
+    while hasattr(current, "op") and id(current) not in seen:
+        seen.add(id(current))
+        dim_order = current.meta.get("tosa_dim_order") if hasattr(current, "meta") else None
+        if dim_order is not None:
+            return tuple(dim_order)
+        if not getattr(current, "args", None) or not hasattr(current.args[0], "op"):
+            break
+        current = current.args[0]
+    return None
 
 
 def insert_node_after(
@@ -464,7 +479,106 @@ def insert_table_op(
     graph_module.register_buffer(attr_name, table_tensor)
 
     # Create a get_attr node for the table constant
+    def _extract_node_qparam(current: Node):
+        seen = set()
+        while hasattr(current, "op") and id(current) not in seen:
+            seen.add(id(current))
+
+            output_qparams = current.meta.get("output_qparams")
+            if isinstance(output_qparams, dict):
+                if 0 in output_qparams:
+                    return output_qparams[0]
+                if len(output_qparams) == 1:
+                    return next(iter(output_qparams.values()))
+            elif output_qparams:
+                return output_qparams
+
+            input_qparams = current.meta.get("input_qparams")
+            if isinstance(input_qparams, dict):
+                if 0 in input_qparams:
+                    return input_qparams[0]
+                if len(input_qparams) == 1:
+                    return next(iter(input_qparams.values()))
+            elif input_qparams:
+                return input_qparams
+
+            try:
+                from executorch.backends.arm._passes.quant_args import QuantArgs
+
+                return QuantArgs.from_operator(current.target, current.args)
+            except Exception:
+                pass
+
+            if not getattr(current, "args", None) or not hasattr(current.args[0], "op"):
+                break
+            current = current.args[0]
+        return None
+
+    def _is_dequantize_node(current: Node) -> bool:
+        target_str = str(getattr(current, "target", ""))
+        return "dequantize_per_tensor" in target_str
+
+    def _is_quantize_node(current: Node) -> bool:
+        target_str = str(getattr(current, "target", ""))
+        return "quantize_per_tensor" in target_str
+
+    def _same_qparam(lhs, rhs) -> bool:
+        if lhs is None or rhs is None:
+            return False
+        return (
+            float(_scalar(_get(lhs, "scale", 1.0)))
+            == float(_scalar(_get(rhs, "scale", 1.0)))
+            and int(_scalar(_get(lhs, "zp", _get(lhs, "zero_point", 0))))
+            == int(_scalar(_get(rhs, "zp", _get(rhs, "zero_point", 0))))
+            and int(_get(lhs, "qmin", -128)) == int(_get(rhs, "qmin", -128))
+            and int(_get(lhs, "qmax", 127)) == int(_get(rhs, "qmax", 127))
+            and _torch_dtype(_get(lhs, "dtype", torch.int8))
+            == _torch_dtype(_get(rhs, "dtype", torch.int8))
+        )
+
+    original_users = list(node.users)
     input_node = node.args[0]
+    producer_qp = _extract_node_qparam(input_node) if hasattr(input_node, "meta") else None
+
+    # Parse, don't validate: TOSA TABLE is a quantized op. If the source is a
+    # dequantize node, lower the TABLE against the quantized producer instead
+    # of preserving the transient FP32 view. That matches the generic Arm path
+    # and lets any required branch-local domain fixup happen as an explicit
+    # RESCALE before TABLE.
+    if (
+        hasattr(input_node, "op")
+        and _is_dequantize_node(input_node)
+        and getattr(input_node, "args", None)
+        and hasattr(input_node.args[0], "meta")
+    ):
+        quantized_source = input_node.args[0]
+        quantized_source_qp = producer_qp or _extract_node_qparam(quantized_source)
+        if quantized_source_qp is not None:
+            input_node = quantized_source
+            producer_qp = quantized_source_qp
+
+    if (
+        producer_qp is not None
+        and (
+            float(_scalar(_get(producer_qp, "scale", 1.0))) != input_scale
+            or int(_scalar(_get(producer_qp, "zp", _get(producer_qp, "zero_point", 0))))
+            != input_zp
+            or _torch_dtype(_get(producer_qp, "dtype", torch.int8)) != input_dtype
+        )
+    ):
+        input_node = insert_rescale_node(
+            graph_module,
+            node,
+            input_node,
+            input_dtype,
+            [float(_scalar(_get(producer_qp, "scale", 1.0))) / input_scale],
+            int(_scalar(_get(producer_qp, "zp", _get(producer_qp, "zero_point", 0)))),
+            input_zp,
+            after=False,
+        )
+        input_node.meta["input_qparams"] = {0: producer_qp}
+        input_node.meta["output_qparams"] = {0: input_qp}
+
     with graph.inserting_before(node):
         table_node = graph.get_attr(attr_name)
         table_node.meta = {"val": table_tensor}
@@ -478,10 +592,34 @@ def insert_table_op(
         from copy import copy
         table_op_node.meta = copy(node.meta)
         old_val = node.meta.get("val")
-        if old_val is not None:
+        input_val = (
+            input_node.meta.get("val")
+            if hasattr(input_node, "meta")
+            else None
+        )
+        input_dim_order = _effective_tosa_dim_order(input_node)
+        if os.environ.get("TOSA_ENGINE_DEBUG"):
+            print(
+                "[table-meta]",
+                node.name,
+                "node_dim_order=",
+                node.meta.get("tosa_dim_order"),
+                "input_dim_order=",
+                input_dim_order,
+                "input_meta_dim_order=",
+                input_node.meta.get("tosa_dim_order") if hasattr(input_node, "meta") else None,
+                "node_shape=",
+                tuple(old_val.shape) if old_val is not None and hasattr(old_val, "shape") else None,
+                "input_shape=",
+                tuple(input_val.shape) if input_val is not None and hasattr(input_val, "shape") else None,
+            )
+        if input_dim_order is not None:
+            table_op_node.meta["tosa_dim_order"] = input_dim_order
+        source_val = input_val if input_val is not None else old_val
+        if source_val is not None and hasattr(source_val, "new_empty"):
             table_output_dtype = output_dtype if rescale_lshift == 0 else torch.int32
-            table_op_node.meta["val"] = old_val.new_empty(
-                old_val.shape, dtype=table_output_dtype
+            table_op_node.meta["val"] = source_val.new_empty(
+                source_val.shape, dtype=table_output_dtype
             )
 
     output_node = table_op_node
@@ -499,6 +637,20 @@ def insert_table_op(
 
     # Replace all uses of the original node and erase it
     node.replace_all_uses_with(output_node)
+
+    # Absorb a trailing quantize node when TABLE already materializes the same
+    # quantized domain. This keeps the branch graph in the same higher-level
+    # contract as the generic Arm path instead of leaving a now-invalid
+    # quantize(INT8) wrapper around the TABLE result.
+    for user in original_users:
+        if not hasattr(user, "op") or user.op != "call_function" or not _is_quantize_node(user):
+            continue
+        quant_qp = _extract_node_qparam(user)
+        if not _same_qparam(quant_qp, output_qp):
+            continue
+        user.replace_all_uses_with(output_node)
+        graph.erase_node(user)
+
     graph.erase_node(node)
 
 

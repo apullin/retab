@@ -162,11 +162,23 @@ fn ingest_fx_graph_with_prefix(
 
         // --- args ---
         let py_args = py_node.getattr("args")?;
-        let args = extract_args(graph_module, &py_args, &name_map, name_prefix)?;
+        let args = extract_args(
+            graph_module,
+            &py_args,
+            &mut graph,
+            &mut name_map,
+            name_prefix,
+        )?;
 
         // --- kwargs ---
         let py_kwargs = py_node.getattr("kwargs")?;
-        let kwargs = extract_kwargs(graph_module, &py_kwargs, &name_map, name_prefix)?;
+        let kwargs = extract_kwargs(
+            graph_module,
+            &py_kwargs,
+            &mut graph,
+            &mut name_map,
+            name_prefix,
+        )?;
 
         // --- meta ---
         let mut meta = extract_meta(&py_node, op_type)?;
@@ -398,7 +410,8 @@ fn collect_control_flow_subgraphs(
 fn extract_args(
     graph_module: &Bound<'_, PyAny>,
     py_args: &Bound<'_, PyAny>,
-    name_map: &HashMap<String, NodeId>,
+    graph: &mut Graph,
+    name_map: &mut HashMap<String, NodeId>,
     name_prefix: Option<&str>,
 ) -> PyResult<SmallVec<[Arg; 4]>> {
     let mut args = SmallVec::new();
@@ -413,7 +426,13 @@ fn extract_args(
         };
 
     for item in &items {
-        args.push(extract_single_arg(graph_module, item, name_map, name_prefix)?);
+        args.push(extract_single_arg(
+            graph_module,
+            item,
+            graph,
+            name_map,
+            name_prefix,
+        )?);
     }
 
     Ok(args)
@@ -423,7 +442,8 @@ fn extract_args(
 fn extract_kwargs(
     graph_module: &Bound<'_, PyAny>,
     py_kwargs: &Bound<'_, PyAny>,
-    name_map: &HashMap<String, NodeId>,
+    graph: &mut Graph,
+    name_map: &mut HashMap<String, NodeId>,
     name_prefix: Option<&str>,
 ) -> PyResult<Vec<(String, Arg)>> {
     let mut kwargs = Vec::new();
@@ -431,7 +451,7 @@ fn extract_kwargs(
     if let Ok(dict) = py_kwargs.downcast::<PyDict>() {
         for (key, value) in dict.iter() {
             let key_str: String = key.extract()?;
-            let arg = extract_single_arg(graph_module, &value, name_map, name_prefix)?;
+            let arg = extract_single_arg(graph_module, &value, graph, name_map, name_prefix)?;
             kwargs.push((key_str, arg));
         }
     }
@@ -443,7 +463,8 @@ fn extract_kwargs(
 fn extract_single_arg(
     graph_module: &Bound<'_, PyAny>,
     value: &Bound<'_, PyAny>,
-    name_map: &HashMap<String, NodeId>,
+    graph: &mut Graph,
+    name_map: &mut HashMap<String, NodeId>,
     name_prefix: Option<&str>,
 ) -> PyResult<Arg> {
     // Check for None
@@ -459,14 +480,25 @@ fn extract_single_arg(
         }
         let op_name: String = op_name.extract()?;
         if op_name == "get_attr" {
-            let qualified = match name_prefix {
-                Some(prefix) => format!("{prefix}{node_name}"),
-                None => node_name,
-            };
-            return Ok(Arg::String(qualified));
+            let target_name: String = value.getattr("target")?.str()?.extract()?;
+            if let Ok(attr) = graph_module.getattr(target_name.as_str()) {
+                if attr.getattr("graph").is_ok() {
+                    let qualified = match name_prefix {
+                        Some(prefix) => format!("{prefix}{node_name}"),
+                        None => node_name,
+                    };
+                    return Ok(Arg::String(qualified));
+                }
+            }
         }
-        // Node not yet seen — this shouldn't happen in topological order
-        return Ok(Arg::None);
+        return Ok(Arg::Node(materialize_external_placeholder(
+            graph_module,
+            graph,
+            name_map,
+            value,
+            &node_name,
+            name_prefix,
+        )?));
     }
 
     // Check for bool before int (bool is a subtype of int in Python)
@@ -515,6 +547,15 @@ fn extract_single_arg(
                     let node_name: String = node_name.extract()?;
                     if let Some(&node_id) = name_map.get(&node_name) {
                         node_ids.push(node_id);
+                    } else {
+                        node_ids.push(materialize_external_placeholder(
+                            graph_module,
+                            graph,
+                            name_map,
+                            item,
+                            &node_name,
+                            name_prefix,
+                        )?);
                     }
                 }
             }
@@ -550,6 +591,49 @@ fn extract_single_arg(
     // Fallback: convert to string representation
     let repr: String = value.str()?.extract()?;
     Ok(Arg::String(repr))
+}
+
+fn materialize_external_placeholder(
+    graph_module: &Bound<'_, PyAny>,
+    graph: &mut Graph,
+    name_map: &mut HashMap<String, NodeId>,
+    value: &Bound<'_, PyAny>,
+    original_name: &str,
+    name_prefix: Option<&str>,
+) -> PyResult<NodeId> {
+    if let Some(&node_id) = name_map.get(original_name) {
+        return Ok(node_id);
+    }
+
+    let qualified_name = match name_prefix {
+        Some(prefix) => format!("{prefix}{original_name}"),
+        None => original_name.to_string(),
+    };
+
+    let mut meta = extract_meta(value, OpType::Placeholder)?;
+    let meta_dict = value.getattr("meta")?;
+    extract_qparams_from_meta(&meta_dict, &mut meta)?;
+    extract_tosa_dim_order(&meta_dict, &mut meta)?;
+    extract_tosa_special_dtype(&meta_dict, &mut meta)?;
+
+    let target_name = value
+        .getattr("target")
+        .ok()
+        .and_then(|target| target.str().ok())
+        .and_then(|target| target.extract::<String>().ok())
+        .unwrap_or_else(|| original_name.to_string());
+
+    let node_id = graph.create_node(
+        OpType::Placeholder,
+        OpTarget::Other(target_name),
+        SmallVec::new(),
+        Vec::new(),
+        meta,
+        qualified_name,
+    );
+    graph.inputs.push(node_id);
+    name_map.insert(original_name.to_string(), node_id);
+    Ok(node_id)
 }
 
 // ---------------------------------------------------------------------------

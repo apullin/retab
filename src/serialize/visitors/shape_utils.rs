@@ -84,7 +84,17 @@ fn passthrough_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> 
     if !is_layout_passthrough_qdq(node) {
         return None;
     }
-    Some(actual_tensor_shape(graph, store, first_input_node(graph, node)?))
+    let input_shape = actual_tensor_shape(graph, store, first_input_node(graph, node)?);
+    let raw_shape = raw_i32_shape(node);
+    // Pass-through q/dq/rescale chains often inherit an already-TOSA-ordered
+    // shape from an upstream pass-through node. Only apply this node's own
+    // dim-order when the inherited shape still matches the node's raw logical
+    // shape; otherwise we would reorder the same tensor multiple times.
+    if input_shape == raw_shape {
+        Some(apply_tosa_dim_order(node, input_shape))
+    } else {
+        Some(input_shape)
+    }
 }
 
 fn transposed_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
