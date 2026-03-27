@@ -2375,9 +2375,23 @@ def _quantize_constant_only_control_flow_outputs(graph_module) -> None:
     def _constant_tensor_from_node(submodule, source) -> torch.Tensor | None:
         if getattr(source, "op", None) == "get_attr":
             constant_value = getattr(submodule, source.target, None)
-            if isinstance(constant_value, torch.Tensor) and constant_value.is_floating_point():
+            if not isinstance(constant_value, torch.Tensor):
+                return None
+            if constant_value.is_floating_point():
                 return constant_value
-            return None
+
+            source_qparam = _extract_single_qparam_entry(
+                source.meta.get("output_qparams")
+            ) or _extract_single_qparam_entry(source.meta.get("input_qparams"))
+            if source_qparam is None or source_qparam.per_channel:
+                return None
+
+            scale = source_qparam.get_scale_per_tensor()
+            if scale == 0:
+                return None
+            return (constant_value.detach().to(torch.float32) - int(source_qparam.zp)) * float(
+                scale
+            )
 
         target_str = str(getattr(source, "target", ""))
         if "aten.full.default" not in target_str:
@@ -2511,7 +2525,13 @@ def _fold_zero_input_full_in_control_flow_submodules(graph_module) -> None:
         return torch.full(shape, fill_scalar, dtype=dtype)
 
     rewritten = 0
-    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+    for _, submodule, control_flow_node in get_cond_while_submodules_nested(graph_module):
+        placeholders = [n for n in submodule.graph.nodes if n.op == "placeholder"]
+        output_qparams_map = _infer_control_flow_output_qparams_map(control_flow_node)
+        output_node = submodule.graph.output_node()
+        output_arg0 = output_node.args[0]
+        wrapped_single = hasattr(output_arg0, "op")
+        output_args = [output_arg0] if wrapped_single else list(output_arg0)
         updated = False
         for node in list(submodule.graph.nodes):
             if getattr(node, "op", None) != "call_function":
@@ -2523,7 +2543,14 @@ def _fold_zero_input_full_in_control_flow_submodules(graph_module) -> None:
             if const_value is None:
                 continue
 
-            output_qparams = _extract_single_qparam_entry(node.meta.get("output_qparams"))
+            output_qparams = None
+            if not placeholders and output_qparams_map:
+                for idx, output_arg in enumerate(output_args):
+                    if output_arg is node:
+                        output_qparams = output_qparams_map.get(idx)
+                        break
+            if output_qparams is None:
+                output_qparams = _extract_single_qparam_entry(node.meta.get("output_qparams"))
             if output_qparams is not None and not getattr(output_qparams, "per_channel", False):
                 const_value = output_qparams.quantize_value(const_value)
 
