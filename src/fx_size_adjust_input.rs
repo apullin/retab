@@ -15,13 +15,17 @@ use crate::fx_pass::FxPass;
 pub struct FxSizeAdjustInputPass;
 
 fn is_target(target: &str) -> bool {
-    target.contains("convolution.default")
-        || target.contains("conv2d.default")
-        || target.contains("max_pool2d")
-        || target.contains("avg_pool2d")
-        || target.contains("CONV2D")
-        || target.contains("MAX_POOL2D")
-        || target.contains("AVG_POOL2D")
+    let lowered = target.to_ascii_lowercase();
+    if lowered.contains("transpose_conv2d") || lowered.contains("transposeconv2d") {
+        return false;
+    }
+    lowered.contains("convolution.default")
+        || lowered.contains("conv2d.default")
+        || lowered.contains("max_pool2d")
+        || lowered.contains("avg_pool2d")
+        || lowered.contains("conv2d")
+        || lowered.contains("max_pool2d")
+        || lowered.contains("avg_pool2d")
 }
 
 impl FxPass for FxSizeAdjustInputPass {

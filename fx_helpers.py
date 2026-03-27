@@ -19,7 +19,16 @@ def _apply_fake_tensor_dim_order(fake_tensor, dim_order):
         return fake_tensor
     from executorch.exir.dim_order_utils import get_memory_format
 
-    return fake_tensor.to(memory_format=get_memory_format(list(dim_order)))
+    try:
+        memory_format = get_memory_format(list(dim_order))
+    except AssertionError:
+        # Some Arm-internal dim orders are metadata-only tensor layouts, not
+        # representable torch.memory_format values. Preserve the tensor and let
+        # the explicit tosa_dim_order metadata carry the contract.
+        return fake_tensor
+    if memory_format == torch.channels_last and fake_tensor.dim() != 4:
+        return fake_tensor
+    return fake_tensor.to(memory_format=memory_format)
 
 
 def _effective_tosa_dim_order(node: Node):
@@ -1299,6 +1308,28 @@ def get_tosa_depthwise_conv2d_op():
             return "tosa::depthwise_conv2d"
 
 
+def get_tosa_transpose_conv2d_op():
+    """Return the tosa.TRANSPOSE_CONV2D op target."""
+    try:
+        from executorch.exir.dialects._ops import ops as exir_ops
+        return exir_ops.backend.tosa.TRANSPOSE_CONV2D.default
+    except Exception:
+        try:
+            return torch.ops.tosa.transpose_conv2d.default
+        except Exception:
+            return "tosa::transpose_conv2d"
+
+
+def _expand_spatial_param(param, spatial_rank: int) -> list[int]:
+    """Expand scalar/1-element spatial params to the requested rank."""
+    if isinstance(param, int):
+        return [param] * spatial_rank
+    param_list = list(param)
+    if len(param_list) == 1 and spatial_rank > 1:
+        param_list *= spatial_rank
+    return param_list
+
+
 def get_tosa_scatter_op():
     """Return the tosa.SCATTER op target."""
     try:
@@ -1368,14 +1399,15 @@ def rewrite_conv_to_tosa(
             groups,
         ) = args[:9]
 
-    # Expand pad to TOSA format: [pad_top, pad_bottom, pad_left, pad_right]
-    pad_list = list(pad)
-    tosa_pad = []
-    for p in pad_list:
-        tosa_pad.extend([p, p])
+    input_val = _get_first_fake_tensor(x)
+    spatial_rank = max(len(getattr(input_val, "shape", ())) - 2, 0)
+    stride_list = _expand_spatial_param(stride, spatial_rank)
+    dilation_list = _expand_spatial_param(dilation, spatial_rank)
+    pad_list = _expand_spatial_param(pad, spatial_rank)
+    output_padding_list = _expand_spatial_param(output_padding, spatial_rank)
 
-    stride_tuple = tuple(stride)
-    dilation_tuple = tuple(dilation)
+    stride_tuple = tuple(stride_list)
+    dilation_tuple = tuple(dilation_list)
 
     # Handle missing bias: create a zero bias placeholder
     if bias is None:
@@ -1410,17 +1442,49 @@ def rewrite_conv_to_tosa(
                 bias.meta[TosaSpecialDtype.meta_key()] = TosaSpecialDtype.INT48
 
     # Select target op
-    if is_depthwise:
+    if transposed:
+        if spatial_rank != 2:
+            raise RuntimeError(
+                "Only 2D transpose convolutions are supported in the Arm backend."
+            )
+        if any(d != 1 for d in dilation_list):
+            raise RuntimeError(
+                "Transpose convolutions with dilation are not supported in the Arm backend."
+            )
+        target_op = get_tosa_transpose_conv2d_op()
+        conv_args = (
+            x,
+            weight,
+            bias,
+            [
+                -pad_list[0],
+                -pad_list[0] + output_padding_list[0],
+                -pad_list[1],
+                -pad_list[1] + output_padding_list[1],
+            ],
+            stride_tuple,
+        )
+        conv_kwargs = {"input_zp": input_zp, "weight_zp": weight_zp}
+    elif is_depthwise:
+        tosa_pad = []
+        for p in pad_list:
+            tosa_pad.extend([p, p])
         target_op = get_tosa_depthwise_conv2d_op()
+        conv_args = (x, weight, bias, stride_tuple, tosa_pad, dilation_tuple)
+        conv_kwargs = None
     else:
+        tosa_pad = []
+        for p in pad_list:
+            tosa_pad.extend([p, p])
         target_op = get_tosa_conv2d_op()
-
-    conv_args = (x, weight, bias, stride_tuple, tosa_pad, dilation_tuple)
+        conv_args = (x, weight, bias, stride_tuple, tosa_pad, dilation_tuple)
+        conv_kwargs = None
 
     with graph.inserting_after(node):
         tosa_op = _create_node(
             graph, target_op,
             args=conv_args,
+            kwargs=conv_kwargs,
             from_node=node,
             inherit_qparams=True,
         )

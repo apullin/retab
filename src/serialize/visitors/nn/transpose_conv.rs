@@ -8,22 +8,53 @@ pub(in crate::serialize::visitors) fn emit_transpose_conv2d(
 ) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_output_tensor(node));
+    let output_shape = apply_tosa_dim_order(node, raw_i32_shape(node));
+    let acc_type = conv_accumulator_dtype(node);
+    result
+        .tensors
+        .push(make_empty_tensor(node.name.clone(), output_shape, acc_type));
 
-    let out_pad = kwarg_i32_list(node, "out_pad");
-    let stride = kwarg_i32_list(node, "stride");
+    let out_pad = {
+        let args = arg_i32_list(node, 3);
+        if args.is_empty() {
+            kwarg_i32_list(node, "out_pad")
+        } else {
+            args
+        }
+    };
+    let stride = {
+        let args = arg_i32_list(node, 4);
+        if args.is_empty() {
+            kwarg_i32_list(node, "stride")
+        } else {
+            args
+        }
+    };
     let local_bound = kwarg_bool(node, "local_bound", false);
-    let acc_type = DType::Int32;
 
     let conv_inputs = if input_names.len() >= 5 {
         input_names
     } else {
+        let input_zp_val = node
+            .meta
+            .input_qparams
+            .iter()
+            .find(|(pos, _)| *pos == 0)
+            .map(|(_, qp)| qp.zero_point as i32)
+            .unwrap_or_else(|| kwarg_i32(node, "input_zp", 0));
+        let weight_zp_val = node
+            .meta
+            .input_qparams
+            .iter()
+            .find(|(pos, _)| *pos == 1)
+            .map(|(_, qp)| qp.zero_point as i32)
+            .unwrap_or_else(|| kwarg_i32(node, "weight_zp", 0));
         let (input_zp_name, weight_zp_name) = push_input_weight_zp_tensors(
             &mut result,
             graph,
             node,
-            kwarg_i32(node, "input_zp", 0),
-            kwarg_i32(node, "weight_zp", 0),
+            input_zp_val,
+            weight_zp_val,
         );
         extend_conv_inputs(input_names, input_zp_name, weight_zp_name)
     };

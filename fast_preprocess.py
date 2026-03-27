@@ -72,7 +72,12 @@ def _get_matching_fake_tensor(node):
     if fake_tensor.dim() != len(desired_dim_order):
         return fake_tensor
 
-    memory_format = get_memory_format(list(desired_dim_order))
+    try:
+        memory_format = get_memory_format(list(desired_dim_order))
+    except AssertionError:
+        # Some TOSA-only tensor orders, like transpose-conv weights, are
+        # metadata-only layouts and do not map to a torch.memory_format.
+        return fake_tensor
     if memory_format == torch.channels_last and fake_tensor.dim() != 4:
         return fake_tensor
 

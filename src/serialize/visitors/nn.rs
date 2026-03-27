@@ -33,11 +33,14 @@ fn push_input_weight_zp_tensors(
     );
 
     let weight_zp_name = format!("{}_weight_zp", node.name);
-    let num_oc = get_weight_out_channels(graph, node).unwrap_or(1);
-    let weight_zp_data = make_weight_zp_data(weight_zp_val, num_oc, weight_dtype);
     push_inline_const(
         result,
-        make_rank1_const_tensor(weight_zp_name.clone(), weight_dtype, weight_zp_data, 1),
+        make_rank1_const_tensor(
+            weight_zp_name.clone(),
+            weight_dtype,
+            encode_zp_for_dtype(weight_zp_val, weight_dtype),
+            1,
+        ),
     );
 
     (input_zp_name, weight_zp_name)
