@@ -60,7 +60,10 @@ fn configure_grouped_conv_qparams<'py>(
 
     if let Ok(output_qparams) = src_meta.call_method1("get", ("output_qparams",)) {
         if !output_qparams.is_none() {
-            conv_meta.set_item("output_qparams", &output_qparams)?;
+            // Match Python DecomposeGroupedConvPass: per-group convs keep the
+            // original output-domain qparams, while only weight/bias input
+            // qparams are sliced to the per-group channel range.
+            conv_meta.set_item("output_qparams", output_qparams.call_method0("copy")?)?;
         }
     }
 
@@ -99,6 +102,174 @@ fn configure_grouped_conv_qparams<'py>(
     }
 
     conv_meta.set_item("input_qparams", &new_qparams)?;
+    restamp_grouped_conv_output_meta(&src_meta, &conv_meta, output_slice_size)?;
+    Ok(())
+}
+
+fn restamp_grouped_conv_output_meta(
+    src_meta: &Bound<'_, PyAny>,
+    conv_meta: &Bound<'_, PyAny>,
+    output_slice_size: i64,
+) -> PyResult<()> {
+    let mut output_val = match src_meta.call_method1("get", ("val",)) {
+        Ok(val) if !val.is_none() => val,
+        _ => return Ok(()),
+    };
+    if let Ok(seq) = output_val.downcast::<pyo3::types::PyTuple>() {
+        if let Ok(first) = seq.get_item(0) {
+            output_val = first;
+        }
+    } else if let Ok(seq) = output_val.downcast::<pyo3::types::PyList>() {
+        if let Ok(first) = seq.get_item(0) {
+            output_val = first;
+        }
+    }
+    if !output_val.hasattr("shape")? || !output_val.hasattr("new_empty")? {
+        return Ok(());
+    }
+
+    let mut shape: Vec<i64> = output_val.getattr("shape")?.extract().unwrap_or_default();
+    if shape.len() >= 2 {
+        shape[1] = output_slice_size;
+        let dtype = output_val.getattr("dtype")?;
+        let kwargs = pyo3::types::PyDict::new_bound(output_val.py());
+        kwargs.set_item("dtype", dtype)?;
+        let new_val = output_val.call_method("new_empty", (shape,), Some(&kwargs))?;
+        conv_meta.set_item("val", new_val)?;
+    }
+    Ok(())
+}
+
+fn restamp_grouped_cat_qparams<'py>(
+    py: Python<'py>,
+    final_meta: &Bound<'py, PyAny>,
+    output_slices: &[Bound<'py, PyAny>],
+) -> PyResult<()> {
+    let copy_mod = py.import_bound("copy")?;
+    final_meta.set_item("input_qparams", pyo3::types::PyDict::new_bound(py))?;
+
+    if output_slices.is_empty() {
+        return Ok(());
+    }
+
+    let cat_output_qparams = pyo3::types::PyDict::new_bound(py);
+
+    for slice in output_slices.iter() {
+        let slice_meta = slice.getattr("meta")?;
+        let output_qparams = match slice_meta.call_method1("get", ("output_qparams",)) {
+            Ok(v) if !v.is_none() => v,
+            _ => continue,
+        };
+        if output_qparams.len().unwrap_or(0) == 0 {
+            continue;
+        }
+        let qp0 = output_qparams.get_item(0)?;
+        let qp_copy = copy_mod.call_method1("copy", (&qp0,))?;
+        cat_output_qparams.set_item(0, qp_copy)?;
+        break;
+    }
+    if cat_output_qparams.len() > 0 {
+        final_meta.set_item("output_qparams", cat_output_qparams)?;
+    }
+    Ok(())
+}
+
+fn get_single_output_qparam<'py>(node: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let meta = node.getattr("meta")?;
+    let output_qparams = match meta.call_method1("get", ("output_qparams",)) {
+        Ok(v) if !v.is_none() => v,
+        _ => return Ok(None),
+    };
+    if output_qparams.len().unwrap_or(0) == 0 {
+        return Ok(None);
+    }
+    Ok(Some(output_qparams.get_item(0)?))
+}
+
+fn same_per_tensor_qparam(lhs: &Bound<'_, PyAny>, rhs: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let lhs_pc: bool = lhs.getattr("per_channel")?.extract().unwrap_or(false);
+    let rhs_pc: bool = rhs.getattr("per_channel")?.extract().unwrap_or(false);
+    if lhs_pc || rhs_pc {
+        return Ok(false);
+    }
+
+    let lhs_scale: f64 = lhs.getattr("scale")?.extract().unwrap_or(0.0);
+    let rhs_scale: f64 = rhs.getattr("scale")?.extract().unwrap_or(0.0);
+    let lhs_zp: i64 = lhs.getattr("zp")?.extract().unwrap_or(0);
+    let rhs_zp: i64 = rhs.getattr("zp")?.extract().unwrap_or(0);
+    let lhs_dtype = lhs.getattr("dtype")?.str()?.to_string();
+    let rhs_dtype = rhs.getattr("dtype")?.str()?.to_string();
+
+    Ok(lhs_scale == rhs_scale && lhs_zp == rhs_zp && lhs_dtype == rhs_dtype)
+}
+
+fn bypass_redundant_grouped_output_boundaries(
+    gm: &FxGraphModule<'_>,
+    original_node: &Bound<'_, PyAny>,
+    cat_node: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let Some(cat_output_qparam) = get_single_output_qparam(cat_node)? else {
+        return Ok(());
+    };
+
+    for user in FxGraphModule::node_users(original_node)? {
+        if FxGraphModule::node_op(&user)? != "call_function" {
+            continue;
+        }
+
+        let target = FxGraphModule::node_target_str(&user)?;
+        if !target.contains("tosa.RESCALE.default")
+            && !target.contains("quantize_per_tensor.default")
+        {
+            continue;
+        }
+
+        let args = FxGraphModule::node_args(&user)?;
+        if args.is_empty() || !args[0].is(original_node) {
+            continue;
+        }
+
+        let Some(user_output_qparam) = get_single_output_qparam(&user)? else {
+            continue;
+        };
+        if !same_per_tensor_qparam(&cat_output_qparam, &user_output_qparam)? {
+            continue;
+        }
+
+        FxGraphModule::replace_all_uses_with(&user, cat_node)?;
+        gm.erase_node(&user)?;
+    }
+
+    Ok(())
+}
+
+fn grouped_conv_debug_enabled() -> bool {
+    std::env::var("ARM_TOSA_ENGINE_DEBUG_GROUPED_CONV").is_ok()
+}
+
+fn log_grouped_cat_meta(
+    cat_node: &Bound<'_, PyAny>,
+    output_slices: &[Bound<'_, PyAny>],
+) -> PyResult<()> {
+    if !grouped_conv_debug_enabled() {
+        return Ok(());
+    }
+
+    let cat_meta = cat_node.getattr("meta")?;
+    eprintln!(
+        "[GroupedConvDebug] cat={} qin={} qout={}",
+        FxGraphModule::node_name(cat_node).unwrap_or_else(|_| "<unknown>".into()),
+        cat_meta.call_method1("get", ("input_qparams",))?.str()?,
+        cat_meta.call_method1("get", ("output_qparams",))?.str()?,
+    );
+    for slice in output_slices {
+        let meta = slice.getattr("meta")?;
+        eprintln!(
+            "[GroupedConvDebug] slice={} qout={}",
+            FxGraphModule::node_name(slice).unwrap_or_else(|_| "<unknown>".into()),
+            meta.call_method1("get", ("output_qparams",))?.str()?,
+        );
+    }
     Ok(())
 }
 
@@ -364,11 +535,10 @@ fn decompose_grouped_conv<'py>(
         ],
     );
     let cat_node = insert_call_before(py, graph, node, &cat_op, cat_args.as_ref(), node)?;
-
-    // Copy original node's meta onto the cat result (preserves qparams)
-    let copy_mod = py.import_bound("copy")?;
-    let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    cat_node.setattr("meta", &final_meta)?;
+    let cat_meta = cat_node.getattr("meta")?;
+    restamp_grouped_cat_qparams(py, &cat_meta, &output_slices)?;
+    log_grouped_cat_meta(&cat_node, &output_slices)?;
+    bypass_redundant_grouped_output_boundaries(gm, node, &cat_node)?;
 
     FxGraphModule::replace_all_uses_with(node, &cat_node)?;
     gm.erase_node(node)?;
