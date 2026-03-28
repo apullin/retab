@@ -193,11 +193,22 @@ fn rewrite_conv2d(graph: &mut Graph, store: &mut TensorStore, node_id: NodeId) -
     let actual_bias_arg = if let Arg::Node(_) = &bias_arg {
         bias_arg
     } else {
-        // Create zero bias const. For quantized conv, bias is int32 with shape [out_channels].
+        // Create zero bias const. For quantized conv, bias storage is int32
+        // with shape [out_channels], but int16-activation convs require the
+        // TOSA-visible bias contract to be INT48.
         let out_channels = graph
             .node(weight_id)
             .map(|n| n.meta.val.shape_slice()[0])
             .unwrap_or(1);
+        let input_dtype = graph
+            .node(input_id)
+            .map(|n| n.meta.val.dtype)
+            .unwrap_or(DType::Int32);
+        let input_contract_dtype = input_qparams
+            .iter()
+            .find(|(p, _)| *p == 0)
+            .map(|(_, qa)| qa.dtype)
+            .unwrap_or(input_dtype);
         let bias_name = format!("{}_zero_bias", node_name);
         let bias_data = vec![0u8; (out_channels as usize) * 4]; // int32 zeros
         store.insert(
@@ -208,13 +219,17 @@ fn rewrite_conv2d(graph: &mut Graph, store: &mut TensorStore, node_id: NodeId) -
                 dtype: DType::Int32,
             },
         );
+        let mut bias_meta = NodeMeta::new(TensorInfo::new(&[out_channels], DType::Int32));
+        if input_contract_dtype == DType::Int16 {
+            bias_meta.tosa_special_dtype = Some(DType::Int48);
+        }
         let bias_id = graph.insert_before(
             node_id,
             OpType::Placeholder,
             OpTarget::TosaConst,
             smallvec![],
             vec![],
-            NodeMeta::new(TensorInfo::new(&[out_channels], DType::Int32)),
+            bias_meta,
             bias_name,
         );
         Arg::Node(bias_id)

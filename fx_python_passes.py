@@ -39,19 +39,97 @@ def _extract_qparam_dtype(qparam):
         return getter("dtype")
 
 
+def _is_convolution_like_target(target):
+    target_str = str(target)
+    return (
+        target == exir_ops.edge.aten.convolution.default
+        or target == exir_ops.edge.aten.conv2d.default
+        or "aten.convolution.default" in target_str
+        or "aten.conv2d.default" in target_str
+    )
+
+
+def _is_raw_conv2d_target(target):
+    target_str = str(target)
+    return target == exir_ops.edge.aten.conv2d.default or "aten.conv2d.default" in target_str
+
+
+def _node_has_int16_activation_conv_bias(node) -> bool:
+    if node.op != "call_function":
+        return False
+    if not _is_convolution_like_target(node.target):
+        return False
+    if len(node.args) < 3 or node.args[2] is None:
+        return False
+
+    input_qparams = node.meta.get("input_qparams", {})
+    qparam = input_qparams.get(0) if hasattr(input_qparams, "get") else None
+    return _extract_qparam_dtype(qparam) == torch.int16
+
+
 def _has_int16_activation_conv(graph_module) -> bool:
     for node in graph_module.graph.nodes:
-        if node.op != "call_function":
-            continue
-        if node.target != exir_ops.edge.aten.convolution.default:
-            continue
-        if len(node.args) < 3 or node.args[2] is None:
-            continue
-        input_qparams = node.meta.get("input_qparams", {})
-        qparam = input_qparams.get(0) if hasattr(input_qparams, "get") else None
-        if _extract_qparam_dtype(qparam) == torch.int16:
+        if _node_has_int16_activation_conv_bias(node):
             return True
     return False
+
+
+def _normalize_raw_conv2d_to_convolution_for_int16_bias(graph_module):
+    """Rewrite raw `aten.conv2d.default` into `aten.convolution.default`.
+
+    The upstream Python int16-activation conv decomposition only matches
+    `aten.convolution.default`. Direct lowering often still carries raw
+    `aten.conv2d.default` nodes at this point, so normalize only the exact
+    int16+bias subset the pass expects.
+    """
+    graph = graph_module.graph
+    modified = False
+
+    for node in list(graph.nodes):
+        if not _node_has_int16_activation_conv_bias(node):
+            continue
+        if not _is_raw_conv2d_target(node.target):
+            continue
+
+        if len(node.args) < 3:
+            continue
+
+        input_node, weight_node, bias_node = node.args[:3]
+        kwargs = dict(getattr(node, "kwargs", {}) or {})
+        stride = node.args[3] if len(node.args) > 3 else kwargs.pop("stride", (1, 1))
+        padding = node.args[4] if len(node.args) > 4 else kwargs.pop("padding", (0, 0))
+        dilation = node.args[5] if len(node.args) > 5 else kwargs.pop("dilation", (1, 1))
+        groups = node.args[6] if len(node.args) > 6 else kwargs.pop("groups", 1)
+        convolution_args = (
+            input_node,
+            weight_node,
+            bias_node,
+            stride,
+            padding,
+            dilation,
+            False,
+            (0, 0),
+            groups,
+        )
+
+        with graph.inserting_before(node):
+            new_node = graph.call_function(
+                exir_ops.edge.aten.convolution.default,
+                convolution_args,
+                kwargs,
+            )
+
+        new_node.meta = node.meta.copy()
+        node.replace_all_uses_with(new_node)
+        graph.erase_node(node)
+        modified = True
+
+    if modified:
+        graph.eliminate_dead_code()
+        graph.lint()
+        graph_module.recompile()
+
+    return graph_module
 
 
 def run_python_fold_and_rescale(graph_module, exported_program=None):
@@ -126,6 +204,7 @@ def run_python_decompose_int16_activation_conv(graph_module):
     gm = graph_module
     if not _has_int16_activation_conv(gm):
         return gm
+    gm = _normalize_raw_conv2d_to_convolution_for_int16_bias(gm)
     int16_spec = TosaSpecification.create_from_string("TOSA-1.0+INT+int16")
     with TosaLoweringContext(int16_spec):
         result = DecomposeConvWithInt16ActivationPass()(gm)

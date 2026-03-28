@@ -1296,6 +1296,19 @@ def get_tosa_conv2d_op():
             return "tosa::conv2d"
 
 
+def get_tosa_conv3d_op():
+    """Return the tosa.CONV3D op target."""
+    try:
+        from executorch.exir.dialects._ops import ops as exir_ops
+
+        return exir_ops.backend.tosa.CONV3D.default
+    except Exception:
+        try:
+            return torch.ops.tosa.conv3d.default
+        except Exception:
+            return "tosa::conv3d"
+
+
 def get_tosa_depthwise_conv2d_op():
     """Return the tosa.DEPTHWISE_CONV2D op target."""
     try:
@@ -1328,6 +1341,21 @@ def _expand_spatial_param(param, spatial_rank: int) -> list[int]:
     if len(param_list) == 1 and spatial_rank > 1:
         param_list *= spatial_rank
     return param_list
+
+
+def _adjust_pad_if_needed(
+    input_size: int,
+    kernel_size: int,
+    stride: int,
+    pad: int,
+    dilation: int,
+) -> int:
+    """Mirror Arm RewriteConvPass trailing-pad legality adjustment."""
+    effective_kernel = (kernel_size - 1) * dilation + 1
+    remainder = (input_size + 2 * pad - effective_kernel) % stride
+    if remainder > pad:
+        return pad
+    return pad - remainder
 
 
 def get_tosa_scatter_op():
@@ -1408,6 +1436,9 @@ def rewrite_conv_to_tosa(
 
     stride_tuple = tuple(stride_list)
     dilation_tuple = tuple(dilation_list)
+    weight_val = _get_first_fake_tensor(weight)
+    input_shape = list(getattr(input_val, "shape", ()))
+    weight_shape = list(getattr(weight_val, "shape", ()))
 
     # Handle missing bias: create a zero bias placeholder
     if bias is None:
@@ -1435,8 +1466,16 @@ def rewrite_conv_to_tosa(
         with graph.inserting_before(node):
             bias = graph.get_attr(attr_name)
             bias.meta = {"val": bias_data}
+            input_qparams = node.meta.get("input_qparams") or {}
+            if isinstance(input_qparams, dict):
+                input_qparam = input_qparams.get(0)
+                if input_qparam is None and len(input_qparams) == 1:
+                    input_qparam = next(iter(input_qparams.values()))
+            else:
+                input_qparam = None
             input_dtype = getattr(_get_first_fake_tensor(x), "dtype", None)
-            if input_dtype == torch.int16:
+            input_contract_dtype = getattr(input_qparam, "dtype", input_dtype)
+            if input_contract_dtype == torch.int16:
                 from executorch.backends.arm.tosa.mapping import TosaSpecialDtype
 
                 bias.meta[TosaSpecialDtype.meta_key()] = TosaSpecialDtype.INT48
@@ -1467,15 +1506,50 @@ def rewrite_conv_to_tosa(
         conv_kwargs = {"input_zp": input_zp, "weight_zp": weight_zp}
     elif is_depthwise:
         tosa_pad = []
-        for p in pad_list:
+        for axis_index, p in enumerate(pad_list):
             tosa_pad.extend([p, p])
+            trailing_index = axis_index * 2 + 1
+            tosa_pad[trailing_index] = _adjust_pad_if_needed(
+                input_shape[axis_index + 2],
+                weight_shape[axis_index + 2],
+                stride_list[axis_index],
+                tosa_pad[trailing_index],
+                dilation_list[axis_index],
+            )
         target_op = get_tosa_depthwise_conv2d_op()
+        conv_args = (x, weight, bias, stride_tuple, tosa_pad, dilation_tuple)
+        conv_kwargs = None
+    elif spatial_rank == 3:
+        if groups != 1:
+            raise RuntimeError(
+                "CONV3D with groups != 1 is not supported in the Arm backend."
+            )
+        tosa_pad = []
+        for axis_index, p in enumerate(pad_list):
+            tosa_pad.extend([p, p])
+            trailing_index = axis_index * 2 + 1
+            tosa_pad[trailing_index] = _adjust_pad_if_needed(
+                input_shape[axis_index + 2],
+                weight_shape[axis_index + 2],
+                stride_list[axis_index],
+                tosa_pad[trailing_index],
+                dilation_list[axis_index],
+            )
+        target_op = get_tosa_conv3d_op()
         conv_args = (x, weight, bias, stride_tuple, tosa_pad, dilation_tuple)
         conv_kwargs = None
     else:
         tosa_pad = []
-        for p in pad_list:
+        for axis_index, p in enumerate(pad_list):
             tosa_pad.extend([p, p])
+            trailing_index = axis_index * 2 + 1
+            tosa_pad[trailing_index] = _adjust_pad_if_needed(
+                input_shape[axis_index + 2],
+                weight_shape[axis_index + 2],
+                stride_list[axis_index],
+                tosa_pad[trailing_index],
+                dilation_list[axis_index],
+            )
         target_op = get_tosa_conv2d_op()
         conv_args = (x, weight, bias, stride_tuple, tosa_pad, dilation_tuple)
         conv_kwargs = None
@@ -1512,7 +1586,75 @@ def rewrite_conv_to_tosa(
 
                 tosa_op.meta[TosaSpecialDtype.meta_key()] = TosaSpecialDtype.INT48
 
-    node.replace_all_uses_with(tosa_op)
+    replacement = tosa_op
+    if spatial_rank == 3 and output_fake is not None and input_fake is not None:
+        def _qparam_get(qparams, idx):
+            if isinstance(qparams, dict):
+                return qparams.get(idx)
+            if isinstance(qparams, (list, tuple)):
+                return qparams[idx] if idx < len(qparams) else None
+            return None
+
+        def _field(qparam, attr, default=None):
+            if qparam is None:
+                return default
+            if hasattr(qparam, attr):
+                return getattr(qparam, attr)
+            if isinstance(qparam, dict):
+                return qparam.get(attr, default)
+            getter = getattr(qparam, "get", None)
+            if getter is None:
+                return default
+            try:
+                return getter(attr, default)
+            except TypeError:
+                value = getter(attr)
+                return default if value is None else value
+
+        input_qp = _qparam_get(node.meta.get("input_qparams", {}), 0)
+        weight_qp = _qparam_get(node.meta.get("input_qparams", {}), 1)
+        output_qp = _qparam_get(node.meta.get("output_qparams", {}), 0)
+
+        if (
+            input_fake.dtype == torch.int8
+            and getattr(tosa_op.meta.get("val"), "dtype", None) == torch.int32
+            and input_qp is not None
+            and weight_qp is not None
+            and output_qp is not None
+        ):
+            input_scale = _field(input_qp, "scale", 1.0)
+            output_scale = _field(output_qp, "scale", 1.0)
+            output_zp = int(_field(output_qp, "zp", _field(output_qp, "zero_point", 0)) or 0)
+            output_dtype = _field(output_qp, "dtype", output_fake.dtype)
+            per_channel = bool(_field(weight_qp, "per_channel", False))
+            if per_channel:
+                weight_scales = _field(weight_qp, "scale", [1.0])
+            else:
+                weight_scales = [_field(weight_qp, "scale", 1.0)]
+            if not isinstance(weight_scales, (list, tuple)):
+                weight_scales = [weight_scales]
+            input_scale_scalar = input_scale[0] if isinstance(input_scale, (list, tuple)) else input_scale
+            output_scale_scalar = output_scale[0] if isinstance(output_scale, (list, tuple)) else output_scale
+            if output_scale_scalar:
+                post_conv_scale = [
+                    (float(input_scale_scalar) * float(weight_scale)) / float(output_scale_scalar)
+                    for weight_scale in weight_scales
+                ]
+                rescale = insert_rescale_node(
+                    graph_module,
+                    tosa_op,
+                    tosa_op,
+                    output_dtype,
+                    post_conv_scale,
+                    0,
+                    output_zp,
+                    after=True,
+                )
+                rescale.meta["input_qparams"] = {0: input_qp}
+                rescale.meta["output_qparams"] = {0: output_qp}
+                replacement = rescale
+
+    node.replace_all_uses_with(replacement)
     graph.erase_node(node)
 
 

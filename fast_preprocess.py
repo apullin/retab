@@ -5221,6 +5221,119 @@ def _restore_missing_control_flow_rescale_qparams(graph_module) -> None:
         )
 
 
+def _prune_duplicate_terminal_rescales(graph_module) -> None:
+    import math
+    import torch
+
+    from executorch.backends.arm._passes.arm_pass_utils import (
+        get_cond_while_submodules_nested,
+    )
+
+    def _modules():
+        yield graph_module
+        for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+            yield submodule
+
+    def _single_qparam_entry(qparams):
+        if not qparams:
+            return None
+        if isinstance(qparams, dict):
+            if 0 in qparams:
+                return qparams[0]
+            if len(qparams) == 1:
+                return next(iter(qparams.values()))
+        return qparams
+
+    def _normalize_scale_arg(scale_arg):
+        if isinstance(scale_arg, (list, tuple)):
+            try:
+                return [float(value) for value in scale_arg]
+            except (TypeError, ValueError):
+                return None
+        try:
+            return [float(scale_arg)]
+        except (TypeError, ValueError):
+            return None
+
+    def _same_scale_list(lhs, rhs):
+        lhs_vals = _normalize_scale_arg(lhs)
+        rhs_vals = _normalize_scale_arg(rhs)
+        if lhs_vals is None or rhs_vals is None or len(lhs_vals) != len(rhs_vals):
+            return False
+        return all(
+            math.isclose(lval, rval, rel_tol=1e-5, abs_tol=1e-9)
+            for lval, rval in zip(lhs_vals, rhs_vals, strict=True)
+        )
+
+    pruned = 0
+    for module in _modules():
+        modified = False
+        for node in list(module.graph.nodes):
+            if not _is_tosa_rescale_node(node):
+                continue
+            if len(getattr(node, "users", ())) != 1:
+                continue
+
+            user = next(iter(node.users))
+            if not _is_tosa_rescale_node(user):
+                continue
+
+            if len(getattr(node, "args", ())) < 5 or len(getattr(user, "args", ())) < 5:
+                continue
+            if user.args[0] is not node:
+                continue
+            if node.args[1] != user.args[1]:
+                continue
+            if node.args[1] not in (torch.int8, torch.int16):
+                continue
+            if node.args[3] != user.args[3] or node.args[4] != user.args[4]:
+                continue
+            if not _same_scale_list(node.args[2], user.args[2]):
+                continue
+
+            first_output_qparam = _single_qparam_entry(node.meta.get("output_qparams"))
+            final_output_qparam = _single_qparam_entry(user.meta.get("output_qparams"))
+            if first_output_qparam is not None:
+                continue
+            if final_output_qparam is None:
+                continue
+
+            source = node.args[0]
+            node.args = (
+                source,
+                user.args[1],
+                user.args[2],
+                user.args[3],
+                user.args[4],
+            )
+            node.meta["val"] = user.meta.get("val", node.meta.get("val"))
+            if node.meta.get("input_qparams") is None:
+                source_qparam = _single_qparam_entry(
+                    getattr(source, "meta", {}).get("output_qparams")
+                )
+                if source_qparam is not None:
+                    node.meta["input_qparams"] = {0: source_qparam}
+            node.meta["output_qparams"] = {0: final_output_qparam}
+            if user.meta.get("tosa_dim_order") is not None:
+                node.meta["tosa_dim_order"] = tuple(user.meta["tosa_dim_order"])
+
+            user.replace_all_uses_with(node)
+            module.graph.erase_node(user)
+            pruned += 1
+            modified = True
+
+        if modified:
+            module.graph.eliminate_dead_code()
+            module.graph.lint()
+            module.recompile()
+
+    if pruned:
+        logger.info(
+            "[fast_preprocess] pruned %d duplicate terminal rescale node(s)",
+            pruned,
+        )
+
+
 def _dump_control_flow_submodules(graph_module, label: str) -> None:
     if not _control_flow_debug_enabled():
         return
@@ -5755,6 +5868,7 @@ def _all_rust_preprocess(
     _annotate_control_flow_rank4_dim_order(gm)
     _force_control_flow_rank4_output_dim_order(gm)
     _refresh_tosa_dim_order_fake_tensors(gm)
+    _prune_duplicate_terminal_rescales(gm)
     _dump_control_flow_submodules(gm, "after_control_flow_normalize")
 
     # Merge in any pass-created constant placeholders added to the live
