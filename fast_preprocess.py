@@ -1155,6 +1155,7 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
     )
     from executorch.backends.arm._passes.quant_args import QuantArgs
     from executorch.backends.arm.tosa.specification import TosaLoweringContext
+    import fx_helpers
 
     def _replace_submodule(root_module, target: str, replacement) -> None:
         atoms = target.split(".")
@@ -1174,6 +1175,41 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
             return False
         target_str = str(getattr(node, "target", ""))
         return "tosa.TABLE" in target_str or "tosa::table" in target_str
+
+    def _rescale_output_qparam(node):
+        if not _is_tosa_rescale_node(node):
+            return _extract_qparam(node)
+        if len(getattr(node, "args", ())) < 5:
+            return _extract_qparam(node)
+
+        output_dtype = node.args[1]
+        if output_dtype not in (torch.int8, torch.int16, torch.int32):
+            return _extract_qparam(node)
+
+        source_node = node.args[0]
+        if not hasattr(source_node, "op"):
+            return _extract_qparam(node)
+        source_qparam = _extract_qparam(source_node)
+        scale_arg = node.args[2]
+        if (
+            source_qparam is None
+            or not isinstance(scale_arg, (list, tuple))
+            or len(scale_arg) != 1
+            or scale_arg[0] in (0, 0.0)
+        ):
+            return _extract_qparam(node)
+
+        try:
+            qinfo = torch.iinfo(output_dtype)
+            return QuantArgs(
+                scale=source_qparam.get_scale_per_tensor() / float(scale_arg[0]),
+                zp=int(node.args[4]),
+                qmin=int(qinfo.min),
+                qmax=int(qinfo.max),
+                dtype=output_dtype,
+            )
+        except Exception:
+            return _extract_qparam(node)
 
     def _chain_nodes(node):
         current = node
@@ -1221,6 +1257,50 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
                     break
             candidate = next_arg
         return None
+
+    def _is_quantized_binary_result(node):
+        if not _is_tosa_rescale_node(node):
+            return False
+        args = getattr(node, "args", ())
+        if not args or not hasattr(args[0], "op"):
+            return False
+        source = args[0]
+        if getattr(source, "op", None) != "call_function":
+            return False
+        target_str = str(getattr(source, "target", ""))
+        return "aten.add.Tensor" in target_str or "aten.sub.Tensor" in target_str
+
+    def _preferred_quantized_binary_output_rescale(source_node):
+        if getattr(source_node, "op", None) != "call_function":
+            return None
+        target_str = str(getattr(source_node, "target", ""))
+        if "aten.add.Tensor" not in target_str and "aten.sub.Tensor" not in target_str:
+            return None
+
+        best = None
+        best_score = -1
+        for user in list(getattr(source_node, "users", ())):
+            if not _is_tosa_rescale_node(user):
+                continue
+            if len(getattr(user, "args", ())) < 5:
+                continue
+            if user.args[1] not in (torch.int8, torch.int16):
+                continue
+            output_qparam = _rescale_output_qparam(user)
+            if output_qparam is None:
+                continue
+
+            score = 0
+            for grand_user in list(getattr(user, "users", ())):
+                if getattr(grand_user, "op", None) == "output":
+                    score += 4
+                elif _is_tosa_rescale_node(grand_user):
+                    score += 2
+            if score > best_score:
+                best = (user, output_qparam)
+                best_score = score
+
+        return best
 
     def _extract_qparam(node):
         def _consumer_qparam(value_node):
@@ -1414,6 +1494,16 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
         )
         return output_qparam
 
+    def _int32_accumulator_qparam(scale: float):
+        qinfo = torch.iinfo(torch.int32)
+        return QuantArgs(
+            scale=scale,
+            zp=0,
+            qmin=int(qinfo.min),
+            qmax=int(qinfo.max),
+            dtype=torch.int32,
+        )
+
     repaired = 0
     synthesized = 0
     for name, submodule, control_flow_node in get_cond_while_submodules_nested(graph_module):
@@ -1527,7 +1617,39 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
             for idx, arg in enumerate(node.args[:2]):
                 if not hasattr(arg, "op"):
                     continue
-                if _extract_qparam(arg) is not None:
+                candidate_source = arg
+                if _is_tosa_rescale_node(arg) and getattr(arg, "args", None):
+                    source_arg = arg.args[0]
+                    if hasattr(source_arg, "op"):
+                        candidate_source = source_arg
+                preferred = _preferred_quantized_binary_output_rescale(candidate_source)
+                if preferred is not None:
+                    quant_rescale, output_qparam = preferred
+                    cloned = fx_helpers.insert_rescale_node(
+                        submodule,
+                        node,
+                        candidate_source,
+                        quant_rescale.args[1],
+                        list(quant_rescale.args[2]),
+                        int(quant_rescale.args[3]),
+                        int(quant_rescale.args[4]),
+                        after=False,
+                    )
+                    source_qparam = _extract_qparam(candidate_source)
+                    if source_qparam is not None:
+                        cloned.meta["input_qparams"] = {0: source_qparam}
+                    cloned.meta["output_qparams"] = {0: output_qparam}
+                    node.replace_input_with(arg, cloned)
+                    updated_graph = True
+                    logger.info(
+                        "[fast_preprocess] cloned control-flow binary output rescale %s for %s arg%d via %s",
+                        getattr(cloned, "name", "?"),
+                        getattr(node, "name", "?"),
+                        idx,
+                        getattr(quant_rescale, "name", "?"),
+                    )
+                    arg = cloned
+                if _extract_effective_node_qparam(arg) is not None:
                     continue
                 sibling = node.args[1 - idx] if len(node.args) > 1 - idx else None
                 if not hasattr(sibling, "op"):
@@ -1536,7 +1658,10 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
                 sibling_input = None
                 if getattr(sibling, "args", None) and hasattr(sibling.args[0], "op"):
                     sibling_input = sibling.args[0]
-                if sibling_input is not None and _extract_qparam(sibling_input) is not None:
+                if (
+                    sibling_input is not None
+                    and _extract_effective_node_qparam(sibling_input) is not None
+                ):
                     promoted = sibling_input
                 else:
                     promoted = _promote_binary_input(arg, sibling)
@@ -1573,6 +1698,11 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
             for user in list(node.users):
                 if not _is_tosa_rescale_node(user):
                     continue
+                if (
+                    len(getattr(user, "args", ())) >= 2
+                    and user.args[1] in (torch.int8, torch.int16)
+                ):
+                    continue
                 _reconstruct_binary_output_qparam(node, user)
                 for grand_user in list(user.users):
                     grand_user.replace_input_with(user, node)
@@ -1589,7 +1719,7 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
                 if not hasattr(arg, "op"):
                     continue
 
-                producer_qparam = _extract_qparam(arg)
+                producer_qparam = _extract_effective_node_qparam(arg)
                 if producer_qparam is None:
                     producer_qparam = _lookup_control_flow_input_qparam(arg)
                     if producer_qparam is not None:
@@ -1600,7 +1730,16 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
                             producer_qparam,
                         )
                 sibling = node.args[1 - idx] if len(node.args) > 1 - idx else None
-                sibling_qparam = _extract_qparam(sibling) if hasattr(sibling, "op") else None
+                sibling_qparam = (
+                    _extract_effective_node_qparam(sibling) if hasattr(sibling, "op") else None
+                )
+                sibling_binary_output_qparam = None
+                if hasattr(sibling, "op"):
+                    preferred_sibling_quantized = _preferred_quantized_binary_output_rescale(
+                        sibling
+                    )
+                    if preferred_sibling_quantized is not None:
+                        _, sibling_binary_output_qparam = preferred_sibling_quantized
                 if (
                     producer_qparam is not None
                     and getattr(producer_qparam, "dtype", None) == torch.int32
@@ -1628,6 +1767,35 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
                                 idx,
                                 preferred_qparam,
                             )
+                if (
+                    producer_qparam is not None
+                    and (
+                        sibling_qparam is not None or sibling_binary_output_qparam is not None
+                    )
+                    and getattr(producer_qparam, "dtype", None)
+                    in (torch.int8, torch.int16)
+                    and getattr(
+                        sibling_binary_output_qparam or sibling_qparam, "dtype", None
+                    )
+                    in (torch.int8, torch.int16)
+                    and (
+                        (hasattr(sibling, "op") and _is_quantized_binary_result(sibling))
+                        or sibling_binary_output_qparam is not None
+                    )
+                    and (
+                        float(producer_qparam.scale)
+                        != float((sibling_binary_output_qparam or sibling_qparam).scale)
+                        or int(producer_qparam.zp)
+                        != int((sibling_binary_output_qparam or sibling_qparam).zp)
+                    )
+                ):
+                    producer_qparam = sibling_binary_output_qparam or sibling_qparam
+                    logger.info(
+                        "[fast_preprocess] aligned binary operand qparams for %s arg%d to sibling quantized result: %s",
+                        getattr(node, "name", "?"),
+                        idx,
+                        producer_qparam,
+                    )
                 if producer_qparam is None:
                     if hasattr(sibling, "op"):
                         sibling_input_qparams = sibling.meta.get("input_qparams")
@@ -1646,7 +1814,7 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
                         and getattr(sibling, "args", None)
                         and hasattr(sibling.args[0], "op")
                     ):
-                        producer_qparam = _extract_qparam(sibling.args[0])
+                        producer_qparam = _extract_effective_node_qparam(sibling.args[0])
                 if producer_qparam is None:
                     continue
 
@@ -1688,6 +1856,139 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
                     )
 
             node.meta["input_qparams"] = input_qparams
+            if len(input_qparams) == 2:
+                lhs_qparam = input_qparams.get(0)
+                rhs_qparam = input_qparams.get(1)
+                if {
+                    getattr(lhs_qparam, "dtype", None),
+                    getattr(rhs_qparam, "dtype", None),
+                } <= {torch.int8, torch.int16, torch.int32} and (
+                    getattr(lhs_qparam, "dtype", None)
+                    != getattr(rhs_qparam, "dtype", None)
+                ):
+                    for mixed_idx in (0, 1):
+                        mixed_qparam = input_qparams.get(mixed_idx)
+                        sibling_qparam = input_qparams.get(1 - mixed_idx)
+                        if (
+                            getattr(mixed_qparam, "dtype", None) != torch.int32
+                            or getattr(sibling_qparam, "dtype", None)
+                            not in (torch.int8, torch.int16)
+                        ):
+                            continue
+
+                        mixed_arg = node.args[mixed_idx] if len(node.args) > mixed_idx else None
+                        recovered_qparam = None
+                        if hasattr(mixed_arg, "op"):
+                            if _is_tosa_rescale_node(mixed_arg) and getattr(
+                                mixed_arg, "args", None
+                            ):
+                                source_arg = mixed_arg.args[0]
+                                if hasattr(source_arg, "op"):
+                                    recovered_qparam = _extract_effective_node_qparam(
+                                        source_arg
+                                    )
+                                    if recovered_qparam is None:
+                                        recovered_qparam = _reconstruct_rescale_source_qparam(
+                                            node, mixed_idx, mixed_arg
+                                        )
+                            if recovered_qparam is None:
+                                preferred_quantized = _preferred_quantized_binary_output_rescale(
+                                    mixed_arg
+                                )
+                                if preferred_quantized is not None:
+                                    _, recovered_qparam = preferred_quantized
+                            if recovered_qparam is None and getattr(
+                                mixed_arg, "op", None
+                            ) == "call_function":
+                                mixed_target = str(getattr(mixed_arg, "target", ""))
+                                if (
+                                    "aten.add.Tensor" in mixed_target
+                                    or "aten.sub.Tensor" in mixed_target
+                                    or "aten.mul.Tensor" in mixed_target
+                                ):
+                                    for source_arg in mixed_arg.args[:2]:
+                                        if not hasattr(source_arg, "op"):
+                                            continue
+                                        source_qparam = _extract_effective_node_qparam(
+                                            source_arg
+                                        )
+                                        if (
+                                            getattr(source_qparam, "dtype", None)
+                                            == getattr(sibling_qparam, "dtype", None)
+                                        ):
+                                            recovered_qparam = source_qparam
+                                            break
+
+                        if (
+                            getattr(recovered_qparam, "dtype", None)
+                            == getattr(sibling_qparam, "dtype", None)
+                        ):
+                            input_qparams[mixed_idx] = recovered_qparam
+                            lhs_qparam = input_qparams.get(0)
+                            rhs_qparam = input_qparams.get(1)
+                            updated_graph = True
+                            logger.info(
+                                "[fast_preprocess] recovered mixed control-flow binary input_qparams for %s arg%d -> %s",
+                                getattr(node, "name", "?"),
+                                mixed_idx,
+                                recovered_qparam,
+                            )
+                            break
+
+                if (
+                    getattr(lhs_qparam, "dtype", None)
+                    == getattr(rhs_qparam, "dtype", None)
+                    and getattr(lhs_qparam, "dtype", None) in (torch.int8, torch.int16)
+                ):
+                    shift_bits = 12 if lhs_qparam.dtype == torch.int16 else 20
+                    accumulator_scale = (
+                        2.0
+                        * max(
+                            float(lhs_qparam.get_scale_per_tensor()),
+                            float(rhs_qparam.get_scale_per_tensor()),
+                        )
+                        / float(1 << shift_bits)
+                    )
+                    accumulator_qparam = _int32_accumulator_qparam(accumulator_scale)
+                    node.meta["input_qparams"] = {
+                        0: accumulator_qparam,
+                        1: accumulator_qparam,
+                    }
+                    node.meta["output_qparams"] = {0: accumulator_qparam}
+                    updated_graph = True
+                    logger.info(
+                        "[fast_preprocess] recomputed control-flow binary accumulator qparams for %s -> %s",
+                        getattr(node, "name", "?"),
+                        accumulator_qparam,
+                    )
+
+                    for user in list(node.users):
+                        if not _is_tosa_rescale_node(user):
+                            continue
+                        if len(getattr(user, "args", ())) < 5:
+                            continue
+                        if user.args[1] not in (torch.int8, torch.int16):
+                            continue
+                        user_output_qparam = _rescale_output_qparam(user)
+                        if user_output_qparam is None:
+                            continue
+                        user.update_arg(
+                            2,
+                            [
+                                accumulator_qparam.get_scale_per_tensor()
+                                / user_output_qparam.get_scale_per_tensor()
+                            ],
+                        )
+                        user.update_arg(3, accumulator_qparam.get_zp_per_tensor())
+                        user.update_arg(4, user_output_qparam.get_zp_per_tensor())
+                        user.meta["input_qparams"] = {0: accumulator_qparam}
+                        user.meta["output_qparams"] = {0: user_output_qparam}
+                        updated_graph = True
+                        logger.info(
+                            "[fast_preprocess] realigned pre-pass control-flow binary output rescale %s from %s",
+                            getattr(user, "name", "?"),
+                            getattr(node, "name", "?"),
+                        )
             if len(input_qparams) != 2:
                 _log_control_flow_debug(
                     "[fast_preprocess] incomplete control-flow binary qparams for %s %s",
@@ -1728,8 +2029,42 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
                         repr(getattr(arg, "kwargs", None)),
                     )
 
-        with TosaLoweringContext(tosa_spec):
-            result = InsertRescaleInt32Pass().call(submodule)
+        try:
+            with TosaLoweringContext(tosa_spec):
+                result = InsertRescaleInt32Pass().call(submodule)
+        except Exception:
+            if _control_flow_debug_enabled():
+                print(f"[fast_preprocess] InsertRescaleInt32Pass failed in {name}")
+                for subnode in list(submodule.graph.nodes):
+                    if getattr(subnode, "op", None) != "call_function":
+                        continue
+                    target_str = str(getattr(subnode, "target", ""))
+                    if (
+                        "aten.add.Tensor" not in target_str
+                        and "aten.sub.Tensor" not in target_str
+                        and "aten.mul.Tensor" not in target_str
+                    ):
+                        continue
+                    print(
+                        "[fast_preprocess] failing binary",
+                        _describe_node_brief(subnode),
+                        "input_qparams=",
+                        repr(subnode.meta.get("input_qparams")),
+                        "output_qparams=",
+                        repr(subnode.meta.get("output_qparams")),
+                    )
+                    for idx, arg in enumerate(subnode.args[:2]):
+                        if not hasattr(arg, "op"):
+                            continue
+                        print(
+                            f"[fast_preprocess] failing binary arg{idx}",
+                            _describe_node_brief(arg),
+                            "input_qparams=",
+                            repr(arg.meta.get("input_qparams")),
+                            "output_qparams=",
+                            repr(arg.meta.get("output_qparams")),
+                        )
+            raise
         if result.modified:
             repaired += 1
             _replace_submodule(graph_module, name, result.graph_module)
@@ -1878,16 +2213,392 @@ def _canonicalize_control_flow_pool_binary_rescales(graph_module) -> None:
         )
 
 
-def _refresh_control_flow_binary_input_rescales(graph_module) -> None:
+def _restore_control_flow_pool_quant_boundaries(graph_module) -> None:
     import torch
 
     from executorch.backends.arm._passes.arm_pass_utils import (
         get_cond_while_submodules_nested,
     )
 
-    refreshed = 0
+    import fx_helpers
+
+    def _is_avg_pool_node(node) -> bool:
+        if getattr(node, "op", None) != "call_function":
+            return False
+        target_str = str(getattr(node, "target", ""))
+        return "AVG_POOL2D" in target_str or "avg_pool2d" in target_str
+
+    def _is_view_like(node) -> bool:
+        if getattr(node, "op", None) != "call_function":
+            return False
+        target_str = str(getattr(node, "target", ""))
+        return "view_copy" in target_str or "RESHAPE" in target_str
+
+    restored = 0
     for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+        modified = False
+        for placeholder in list(submodule.graph.nodes):
+            if placeholder.op != "placeholder":
+                continue
+
+            input_qparam = _extract_single_qparam_entry(placeholder.meta.get("input_qparams"))
+            if getattr(input_qparam, "dtype", None) not in (torch.int8, torch.int16):
+                continue
+
+            for avg_pool in list(getattr(placeholder, "users", ())):
+                if not _is_avg_pool_node(avg_pool):
+                    continue
+
+                existing_boundary = None
+                for user in list(getattr(placeholder, "users", ())):
+                    if not _is_tosa_rescale_node(user):
+                        continue
+                    if not getattr(user, "meta", {}).get(
+                        "arm_preserve_control_flow_quant_boundary", False
+                    ):
+                        continue
+                    if avg_pool in getattr(user, "users", ()):
+                        existing_boundary = user
+                        break
+
+                quant_boundary = existing_boundary
+                if quant_boundary is None:
+                    quant_boundary = fx_helpers.insert_rescale_node(
+                        submodule,
+                        placeholder,
+                        placeholder,
+                        input_qparam.dtype,
+                        [1.0],
+                        input_qparam.get_zp_per_tensor(),
+                        input_qparam.get_zp_per_tensor(),
+                        after=True,
+                    )
+                    quant_boundary.meta["input_qparams"] = {0: input_qparam}
+                    quant_boundary.meta["output_qparams"] = {0: input_qparam}
+                    quant_boundary.meta["arm_preserve_control_flow_quant_boundary"] = True
+                    restored += 1
+                    modified = True
+                    logger.info(
+                        "[fast_preprocess] restored control-flow pool quant boundary %s -> %s",
+                        getattr(placeholder, "name", "?"),
+                        getattr(quant_boundary, "name", "?"),
+                    )
+
+                avg_pool.replace_input_with(placeholder, quant_boundary)
+                avg_pool.meta["input_qparams"] = {0: input_qparam}
+                avg_pool.meta["output_qparams"] = {0: input_qparam}
+                fx_helpers.refresh_node_fake_tensor(avg_pool)
+
+                avg_pool_users = [
+                    user for user in list(getattr(avg_pool, "users", ())) if hasattr(user, "op")
+                ]
+                if not avg_pool_users or not all(_is_view_like(user) for user in avg_pool_users):
+                    continue
+
+                for view_user in avg_pool_users:
+                    view_user.meta["input_qparams"] = {0: input_qparam}
+                    view_user.meta["output_qparams"] = {0: input_qparam}
+                    fx_helpers.refresh_node_fake_tensor(view_user)
+
+                modified = True
+                logger.info(
+                    "[fast_preprocess] refreshed control-flow pool/view quant metadata for %s",
+                    getattr(avg_pool, "name", "?"),
+                )
+
+        if modified:
+            submodule.graph.eliminate_dead_code()
+            submodule.graph.lint()
+            submodule.recompile()
+
+    if restored:
+        logger.info(
+            "[fast_preprocess] restored %d control-flow pool quant boundary rescale(s)",
+            restored,
+        )
+
+
+def _restore_control_flow_unary_quant_boundaries(graph_module) -> None:
+    import torch
+
+    from executorch.backends.arm._passes.arm_pass_utils import (
+        get_cond_while_submodules_nested,
+    )
+
+    import fx_helpers
+
+    def _is_relu_like(node) -> bool:
+        if getattr(node, "op", None) != "call_function":
+            return False
+        target_str = str(getattr(node, "target", ""))
+        return "aten.relu.default" in target_str or "aten.clamp.default" in target_str
+
+    restored = 0
+    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+        modified = False
+        for placeholder in list(submodule.graph.nodes):
+            if placeholder.op != "placeholder":
+                continue
+
+            input_qparam = _extract_single_qparam_entry(placeholder.meta.get("input_qparams"))
+            if getattr(input_qparam, "dtype", None) not in (torch.int8, torch.int16):
+                continue
+
+            for unary_node in list(getattr(placeholder, "users", ())):
+                if not _is_relu_like(unary_node):
+                    continue
+
+                existing_boundary = None
+                for user in list(getattr(placeholder, "users", ())):
+                    if not _is_tosa_rescale_node(user):
+                        continue
+                    if not getattr(user, "meta", {}).get(
+                        "arm_preserve_control_flow_quant_boundary", False
+                    ):
+                        continue
+                    if unary_node in getattr(user, "users", ()):
+                        existing_boundary = user
+                        break
+
+                quant_boundary = existing_boundary
+                if quant_boundary is None:
+                    quant_boundary = fx_helpers.insert_rescale_node(
+                        submodule,
+                        placeholder,
+                        placeholder,
+                        input_qparam.dtype,
+                        [1.0],
+                        input_qparam.get_zp_per_tensor(),
+                        input_qparam.get_zp_per_tensor(),
+                        after=True,
+                    )
+                    quant_boundary.meta["input_qparams"] = {0: input_qparam}
+                    quant_boundary.meta["output_qparams"] = {0: input_qparam}
+                    quant_boundary.meta["arm_preserve_control_flow_quant_boundary"] = True
+                    restored += 1
+                    modified = True
+                    logger.info(
+                        "[fast_preprocess] restored control-flow unary quant boundary %s -> %s",
+                        getattr(placeholder, "name", "?"),
+                        getattr(quant_boundary, "name", "?"),
+                    )
+
+                unary_node.replace_input_with(placeholder, quant_boundary)
+                unary_node.meta["input_qparams"] = {0: input_qparam}
+                unary_node.meta["output_qparams"] = {0: input_qparam}
+                fx_helpers.refresh_node_fake_tensor(unary_node)
+                modified = True
+                logger.info(
+                    "[fast_preprocess] refreshed control-flow unary quant metadata for %s",
+                    getattr(unary_node, "name", "?"),
+                )
+
+        if modified:
+            submodule.graph.eliminate_dead_code()
+            submodule.graph.lint()
+            submodule.recompile()
+
+    if restored:
+        logger.info(
+            "[fast_preprocess] restored %d control-flow unary quant boundary rescale(s)",
+            restored,
+        )
+
+
+def _refresh_control_flow_binary_input_rescales(graph_module) -> None:
+    import torch
+
+    from executorch.backends.arm._passes.arm_pass_utils import (
+        get_cond_while_submodules_nested,
+    )
+    from executorch.backends.arm._passes.quant_args import QuantArgs
+    import fx_helpers
+
+    def _rescale_output_qparam(node):
+        if not _is_tosa_rescale_node(node):
+            return _extract_single_qparam_entry(getattr(node, "meta", {}).get("output_qparams"))
+        if len(getattr(node, "args", ())) < 5:
+            return _extract_single_qparam_entry(getattr(node, "meta", {}).get("output_qparams"))
+        output_dtype = node.args[1]
+        if output_dtype not in (torch.int8, torch.int16, torch.int32):
+            return _extract_single_qparam_entry(getattr(node, "meta", {}).get("output_qparams"))
+
+        source_node = node.args[0]
+        if not hasattr(source_node, "op"):
+            return _extract_single_qparam_entry(getattr(node, "meta", {}).get("output_qparams"))
+        source_qparam = _extract_effective_node_qparam(source_node)
+        scale_arg = node.args[2]
+        if (
+            source_qparam is None
+            or not isinstance(scale_arg, (list, tuple))
+            or len(scale_arg) != 1
+            or scale_arg[0] in (0, 0.0)
+        ):
+            return _extract_single_qparam_entry(getattr(node, "meta", {}).get("output_qparams"))
+
+        try:
+            qinfo = torch.iinfo(output_dtype)
+            return QuantArgs(
+                scale=source_qparam.get_scale_per_tensor() / float(scale_arg[0]),
+                zp=int(node.args[4]),
+                qmin=int(qinfo.min),
+                qmax=int(qinfo.max),
+                dtype=output_dtype,
+            )
+        except Exception:
+            return _extract_single_qparam_entry(getattr(node, "meta", {}).get("output_qparams"))
+
+    def _preferred_quantized_binary_output_rescale(source_node):
+        if getattr(source_node, "op", None) != "call_function":
+            return None
+        target_str = str(getattr(source_node, "target", ""))
+        if "aten.add.Tensor" not in target_str and "aten.sub.Tensor" not in target_str:
+            return None
+
+        best = None
+        best_score = -1
+        for user in list(getattr(source_node, "users", ())):
+            if not _is_tosa_rescale_node(user):
+                continue
+            if len(getattr(user, "args", ())) < 5:
+                continue
+            out_dtype = user.args[1]
+            if out_dtype not in (torch.int8, torch.int16):
+                continue
+            output_qparam = _rescale_output_qparam(user)
+            if output_qparam is None:
+                continue
+
+            # Parse, don't validate: when a branch-local binary result is both
+            # returned and reused by another binary op, the quantized branch
+            # output contract is the stable source of truth. Prefer the rescale
+            # edge that is already headed toward a branch output/dequantize path.
+            score = 0
+            for grand_user in list(getattr(user, "users", ())):
+                if getattr(grand_user, "op", None) == "output":
+                    score += 4
+                elif _is_tosa_rescale_node(grand_user):
+                    score += 2
+            if score > best_score:
+                best = (user, output_qparam)
+                best_score = score
+
+        return best
+
+    def _clone_quantized_binary_output_rescale(submodule, ref_node, quant_rescale, source_node):
+        if len(getattr(quant_rescale, "args", ())) < 5:
+            return None
+
+        cloned = fx_helpers.insert_rescale_node(
+            submodule,
+            ref_node,
+            source_node,
+            quant_rescale.args[1],
+            list(quant_rescale.args[2]),
+            int(quant_rescale.args[3]),
+            int(quant_rescale.args[4]),
+            after=False,
+        )
+        cloned.meta["input_qparams"] = dict(quant_rescale.meta.get("input_qparams") or {})
+        reconstructed_qparam = _rescale_output_qparam(cloned)
+        if reconstructed_qparam is not None:
+            cloned.meta["output_qparams"] = {0: reconstructed_qparam}
+        else:
+            cloned.meta["output_qparams"] = dict(quant_rescale.meta.get("output_qparams") or {})
+        return cloned
+
+    def _int32_accumulator_qparam(scale: float):
+        qinfo = torch.iinfo(torch.int32)
+        return QuantArgs(
+            scale=scale,
+            zp=0,
+            qmin=int(qinfo.min),
+            qmax=int(qinfo.max),
+            dtype=torch.int32,
+        )
+
+    def _binary_operand_qparam(arg):
+        if not hasattr(arg, "op"):
+            return None
+        if (
+            _is_tosa_rescale_node(arg)
+            and len(getattr(arg, "args", ())) >= 5
+            and arg.args[1] == torch.int32
+            and hasattr(arg.args[0], "op")
+        ):
+            source_qparam = _rescale_output_qparam(arg.args[0])
+            if source_qparam is None:
+                source_qparam = _extract_effective_node_qparam(arg.args[0])
+            if getattr(source_qparam, "dtype", None) in (torch.int8, torch.int16):
+                return source_qparam
+        source_qparam = _extract_effective_node_qparam(arg)
+        if getattr(source_qparam, "dtype", None) in (torch.int8, torch.int16):
+            return source_qparam
+        return None
+
+    def _same_qparam(lhs, rhs):
+        if lhs is None or rhs is None:
+            return False
+        return (
+            float(lhs.scale) == float(rhs.scale)
+            and int(lhs.zp) == int(rhs.zp)
+            and getattr(lhs, "dtype", None) == getattr(rhs, "dtype", None)
+        )
+
+    def _matching_quantized_rescale(source_node, desired_qparam):
+        if not hasattr(source_node, "op") or desired_qparam is None:
+            return None
+        for user in list(getattr(source_node, "users", ())):
+            if not _is_tosa_rescale_node(user):
+                continue
+            if len(getattr(user, "args", ())) < 5:
+                continue
+            if user.args[1] not in (torch.int8, torch.int16):
+                continue
+            user_qparam = _rescale_output_qparam(user)
+            if _same_qparam(user_qparam, desired_qparam):
+                return user
+        return None
+
+    refreshed = 0
+    for _, submodule, control_flow_node in get_cond_while_submodules_nested(graph_module):
         updated = False
+        output_qparams_map = _infer_control_flow_output_qparams_map(control_flow_node)
+        output_node = submodule.graph.output_node()
+        raw_outputs = output_node.args[0]
+        output_args = [raw_outputs] if hasattr(raw_outputs, "op") else list(raw_outputs)
+
+        def _branch_output_target_qparam(candidate):
+            for idx, output_arg in enumerate(output_args):
+                current = output_arg
+                seen = set()
+                while hasattr(current, "op") and current not in seen:
+                    if current is candidate:
+                        return output_qparams_map.get(idx)
+                    seen.add(current)
+                    if (
+                        _is_tosa_rescale_node(current)
+                        and getattr(current, "args", None)
+                        and hasattr(current.args[0], "op")
+                    ):
+                        current = current.args[0]
+                        continue
+                    break
+            return None
+
+        def _terminal_branch_output_qparam(candidate):
+            target_qparam = _branch_output_target_qparam(candidate)
+            if target_qparam is None:
+                return None
+            for user in list(getattr(candidate, "users", ())):
+                if (
+                    _is_tosa_rescale_node(user)
+                    and len(getattr(user, "args", ())) >= 2
+                    and user.args[1] in (torch.int8, torch.int16)
+                ):
+                    return None
+            return target_qparam
+
         for node in list(submodule.graph.nodes):
             if node.op != "call_function":
                 continue
@@ -1904,11 +2615,137 @@ def _refresh_control_flow_binary_input_rescales(graph_module) -> None:
                 if not hasattr(source_node, "op"):
                     continue
 
+                output_qparam = _extract_single_qparam_entry(arg.meta.get("output_qparams"))
+                if output_qparam is None:
+                    node_input_qparams = node.meta.get("input_qparams") or {}
+                    output_qparam = _extract_single_qparam_entry(
+                        {0: node_input_qparams.get(idx)}
+                    )
+
                 source_fake_val = source_node.meta.get("val")
+                if getattr(source_fake_val, "dtype", None) == torch.int32:
+                    preferred = _preferred_quantized_binary_output_rescale(source_node)
+                    if preferred is not None:
+                        quant_rescale, quant_qparam = preferred
+                        sibling = node.args[1 - idx] if len(node.args) > 1 - idx else None
+                        sibling_source = sibling
+                        if (
+                            hasattr(sibling, "op")
+                            and _is_tosa_rescale_node(sibling)
+                            and len(getattr(sibling, "args", ())) >= 2
+                            and sibling.args[1] == torch.int32
+                            and hasattr(sibling.args[0], "op")
+                        ):
+                            sibling_source = sibling.args[0]
+                        sibling_source_qparam = (
+                            _extract_effective_node_qparam(sibling_source)
+                            if hasattr(sibling_source, "op")
+                            else None
+                        )
+                        cloned_quant_rescale = _clone_quantized_binary_output_rescale(
+                            submodule, arg, quant_rescale, source_node
+                        )
+                        if cloned_quant_rescale is not None:
+                            cloned_quant_rescale.meta["output_qparams"] = {0: quant_qparam}
+                            for quant_user in list(getattr(quant_rescale, "users", ())):
+                                quant_user.replace_input_with(
+                                    quant_rescale, cloned_quant_rescale
+                                )
+                            if len(getattr(quant_rescale, "users", ())) == 0:
+                                submodule.graph.erase_node(quant_rescale)
+                            arg.update_arg(0, cloned_quant_rescale)
+                            arg.meta["input_qparams"] = {0: quant_qparam}
+                            source_node = cloned_quant_rescale
+                            source_fake_val = source_node.meta.get("val")
+                            if output_qparam is not None:
+                                arg.update_arg(
+                                    2,
+                                    [
+                                        quant_qparam.get_scale_per_tensor()
+                                        / output_qparam.get_scale_per_tensor()
+                                    ],
+                                )
+                                arg.update_arg(3, quant_qparam.get_zp_per_tensor())
+                                arg.update_arg(4, output_qparam.get_zp_per_tensor())
+                            updated = True
+                            refreshed += 1
+                            logger.info(
+                                "[fast_preprocess] cloned quantized control-flow binary output %s for %s arg%d via %s",
+                                getattr(source_node, "name", "?"),
+                                getattr(node, "name", "?"),
+                                idx,
+                                getattr(quant_rescale, "name", "?"),
+                            )
+                            source_fake_val = source_node.meta.get("val")
+                source_fake_val = source_node.meta.get("val")
+                source_qparam = None
+                sibling_align_qparam = None
+                sibling = node.args[1 - idx] if len(node.args) > 1 - idx else None
+                if hasattr(source_node, "op"):
+                    source_qparam = _extract_single_qparam_entry(
+                        getattr(source_node, "meta", {}).get("input_qparams")
+                    )
+                    if source_qparam is None:
+                        source_qparam = _extract_effective_node_qparam(source_node)
+                if hasattr(sibling, "op"):
+                    sibling_align_qparam = _extract_single_qparam_entry(
+                        getattr(sibling, "meta", {}).get("input_qparams")
+                    )
+                current_output_qparam = _rescale_output_qparam(arg)
+                if (
+                    hasattr(source_node, "op")
+                    and getattr(source_node, "op", None) == "placeholder"
+                    and source_qparam is not None
+                    and sibling_align_qparam is not None
+                    and current_output_qparam is not None
+                    and getattr(source_qparam, "dtype", None)
+                    in (torch.int8, torch.int16)
+                    and getattr(sibling_align_qparam, "dtype", None)
+                    == getattr(source_qparam, "dtype", None)
+                    and (
+                        float(source_qparam.scale)
+                        != float(sibling_align_qparam.scale)
+                        or int(source_qparam.zp) != int(sibling_align_qparam.zp)
+                    )
+                ):
+                    aligned_source = fx_helpers.insert_rescale_node(
+                        submodule,
+                        arg,
+                        source_node,
+                        sibling_align_qparam.dtype,
+                        [
+                            source_qparam.get_scale_per_tensor()
+                            / sibling_align_qparam.get_scale_per_tensor()
+                        ],
+                        source_qparam.get_zp_per_tensor(),
+                        sibling_align_qparam.get_zp_per_tensor(),
+                        after=False,
+                    )
+                    aligned_source.meta["input_qparams"] = {0: source_qparam}
+                    aligned_source.meta["output_qparams"] = {0: sibling_align_qparam}
+                    arg.update_arg(0, aligned_source)
+                    arg.update_arg(
+                        2,
+                        [
+                            sibling_align_qparam.get_scale_per_tensor()
+                            / current_output_qparam.get_scale_per_tensor()
+                        ],
+                    )
+                    arg.update_arg(3, sibling_align_qparam.get_zp_per_tensor())
+                    source_node = aligned_source
+                    source_fake_val = source_node.meta.get("val")
+                    source_qparam = sibling_align_qparam
+                    refreshed += 1
+                    updated = True
+                    logger.info(
+                        "[fast_preprocess] aligned control-flow binary input %s arg%d through sibling domain %s",
+                        getattr(node, "name", "?"),
+                        idx,
+                        sibling_align_qparam,
+                    )
                 if getattr(source_fake_val, "dtype", None) == torch.int32:
                     desired_input_zp = 0
                 else:
-                    source_qparam = _extract_effective_node_qparam(source_node)
                     if source_qparam is None:
                         continue
                     if source_qparam.dtype not in (torch.int8, torch.int16):
@@ -1928,6 +2765,445 @@ def _refresh_control_flow_binary_input_rescales(graph_module) -> None:
                     getattr(node, "name", "?"),
                     idx,
                     desired_input_zp,
+                )
+
+        for node in list(submodule.graph.nodes):
+            if getattr(node, "op", None) != "call_function":
+                continue
+            if "aten.add.Tensor" not in str(getattr(node, "target", "")):
+                continue
+            if len(getattr(node, "args", ())) < 2:
+                continue
+            lhs, rhs = node.args[:2]
+            if not (_is_tosa_rescale_node(lhs) and _is_tosa_rescale_node(rhs)):
+                continue
+            if len(getattr(lhs, "args", ())) < 5 or lhs.args[1] != torch.int32:
+                continue
+            lhs_source = lhs.args[0]
+            if not hasattr(lhs_source, "op") or getattr(lhs_source, "op", None) != "placeholder":
+                continue
+            lhs_source_qparam = _extract_single_qparam_entry(
+                getattr(lhs_source, "meta", {}).get("input_qparams")
+            )
+            rhs_input_qparam = _extract_single_qparam_entry(
+                getattr(rhs, "meta", {}).get("input_qparams")
+            )
+            lhs_output_qparam = _rescale_output_qparam(lhs)
+            if (
+                lhs_source_qparam is None
+                or rhs_input_qparam is None
+                or lhs_output_qparam is None
+                or getattr(lhs_source_qparam, "dtype", None)
+                not in (torch.int8, torch.int16)
+                or getattr(rhs_input_qparam, "dtype", None)
+                != getattr(lhs_source_qparam, "dtype", None)
+                or (
+                    float(lhs_source_qparam.scale) == float(rhs_input_qparam.scale)
+                    and int(lhs_source_qparam.zp) == int(rhs_input_qparam.zp)
+                )
+            ):
+                continue
+
+            aligned_source = fx_helpers.insert_rescale_node(
+                submodule,
+                lhs,
+                lhs_source,
+                rhs_input_qparam.dtype,
+                [
+                    lhs_source_qparam.get_scale_per_tensor()
+                    / rhs_input_qparam.get_scale_per_tensor()
+                ],
+                lhs_source_qparam.get_zp_per_tensor(),
+                rhs_input_qparam.get_zp_per_tensor(),
+                after=False,
+            )
+            aligned_source.meta["input_qparams"] = {0: lhs_source_qparam}
+            aligned_source.meta["output_qparams"] = {0: rhs_input_qparam}
+            lhs.update_arg(0, aligned_source)
+            lhs.update_arg(
+                2,
+                [
+                    rhs_input_qparam.get_scale_per_tensor()
+                    / lhs_output_qparam.get_scale_per_tensor()
+                ],
+            )
+            lhs.update_arg(3, rhs_input_qparam.get_zp_per_tensor())
+            refreshed += 1
+            updated = True
+            logger.info(
+                    "[fast_preprocess] explicitly aligned add input %s through %s",
+                    getattr(node, "name", "?"),
+                    rhs_input_qparam,
+                )
+
+        for node in list(submodule.graph.nodes):
+            if getattr(node, "op", None) != "call_function":
+                continue
+            target_str = str(getattr(node, "target", ""))
+            if "aten.add.Tensor" not in target_str and "aten.sub.Tensor" not in target_str:
+                continue
+            desired_input_qparams = getattr(node, "meta", {}).get("input_qparams") or {}
+            desired_output_qparam = _extract_single_qparam_entry(
+                getattr(node, "meta", {}).get("output_qparams")
+            )
+            if not (
+                getattr(desired_input_qparams.get(0), "dtype", None) == torch.int32
+                and getattr(desired_input_qparams.get(1), "dtype", None) == torch.int32
+                and getattr(desired_output_qparam, "dtype", None) == torch.int32
+            ):
+                continue
+
+            for idx, arg in enumerate(node.args[:2]):
+                source_node = arg
+                source_qparam = _binary_operand_qparam(arg)
+                if getattr(source_qparam, "dtype", None) not in (torch.int8, torch.int16):
+                    continue
+                desired_input_qparam = desired_input_qparams[idx]
+                current_arg = node.args[idx]
+                if (
+                    _is_tosa_rescale_node(current_arg)
+                    and len(getattr(current_arg, "args", ())) >= 5
+                    and current_arg.args[1] == torch.int32
+                    and hasattr(current_arg.args[0], "op")
+                ):
+                    lift = current_arg
+                    source_node = current_arg.args[0]
+                else:
+                    lift = fx_helpers.insert_rescale_node(
+                        submodule,
+                        node,
+                        source_node,
+                        torch.int32,
+                        [
+                            source_qparam.get_scale_per_tensor()
+                            / desired_input_qparam.get_scale_per_tensor()
+                        ],
+                        source_qparam.get_zp_per_tensor(),
+                        desired_input_qparam.get_zp_per_tensor(),
+                        after=False,
+                    )
+                    node.update_arg(idx, lift)
+                    refreshed += 1
+                    updated = True
+                lift.update_arg(0, source_node)
+                lift.update_arg(
+                    2,
+                    [
+                        source_qparam.get_scale_per_tensor()
+                        / desired_input_qparam.get_scale_per_tensor()
+                    ],
+                )
+                lift.update_arg(3, source_qparam.get_zp_per_tensor())
+                lift.update_arg(4, desired_input_qparam.get_zp_per_tensor())
+                lift.meta["input_qparams"] = {0: source_qparam}
+                lift.meta["output_qparams"] = {0: desired_input_qparam}
+
+        for node in list(submodule.graph.nodes):
+            if getattr(node, "op", None) != "call_function":
+                continue
+            target_str = str(getattr(node, "target", ""))
+            if "aten.add.Tensor" not in target_str and "aten.sub.Tensor" not in target_str:
+                continue
+            operand_qparams = {}
+            for idx, arg in enumerate(node.args[:2]):
+                operand_qparam = _binary_operand_qparam(arg)
+                if operand_qparam is not None:
+                    operand_qparams[idx] = operand_qparam
+            if len(operand_qparams) != 2:
+                continue
+            lhs_qparam = operand_qparams[0]
+            rhs_qparam = operand_qparams[1]
+            if getattr(lhs_qparam, "dtype", None) != getattr(rhs_qparam, "dtype", None):
+                continue
+            if getattr(lhs_qparam, "dtype", None) not in (torch.int8, torch.int16):
+                continue
+            shift_bits = 12 if lhs_qparam.dtype == torch.int16 else 20
+            accumulator_scale = (
+                2.0
+                * max(
+                    float(lhs_qparam.get_scale_per_tensor()),
+                    float(rhs_qparam.get_scale_per_tensor()),
+                )
+                / float(1 << shift_bits)
+            )
+            accumulator_qparam = _int32_accumulator_qparam(accumulator_scale)
+            current_input_qparams = getattr(node, "meta", {}).get("input_qparams") or {}
+            current_output_qparam = _extract_single_qparam_entry(
+                getattr(node, "meta", {}).get("output_qparams")
+            )
+            if (
+                _same_qparam(current_input_qparams.get(0), accumulator_qparam)
+                and _same_qparam(current_input_qparams.get(1), accumulator_qparam)
+                and _same_qparam(current_output_qparam, accumulator_qparam)
+            ):
+                continue
+            node.meta["input_qparams"] = {0: accumulator_qparam, 1: accumulator_qparam}
+            node.meta["output_qparams"] = {0: accumulator_qparam}
+            refreshed += 1
+            updated = True
+            logger.info(
+                "[fast_preprocess] recomputed control-flow binary accumulator qparams for %s -> %s",
+                getattr(node, "name", "?"),
+                accumulator_qparam,
+            )
+
+            for user in list(getattr(node, "users", ())):
+                if not _is_tosa_rescale_node(user):
+                    continue
+                if len(getattr(user, "args", ())) < 5:
+                    continue
+                if user.args[1] not in (torch.int8, torch.int16):
+                    continue
+                user_output_qparam = _branch_output_target_qparam(user)
+                if user_output_qparam is None:
+                    user_output_qparam = _extract_effective_node_qparam(user)
+                if user_output_qparam is None:
+                    user_output_qparam = _rescale_output_qparam(user)
+                if getattr(user_output_qparam, "dtype", None) != user.args[1]:
+                    continue
+                user.update_arg(
+                    2,
+                    [
+                        accumulator_qparam.get_scale_per_tensor()
+                        / user_output_qparam.get_scale_per_tensor()
+                    ],
+                )
+                user.update_arg(3, accumulator_qparam.get_zp_per_tensor())
+                user.update_arg(4, user_output_qparam.get_zp_per_tensor())
+                user.meta["input_qparams"] = {0: accumulator_qparam}
+                user.meta["output_qparams"] = {0: user_output_qparam}
+                refreshed += 1
+                updated = True
+                logger.info(
+                    "[fast_preprocess] realigned control-flow binary output rescale %s from %s",
+                    getattr(user, "name", "?"),
+                    getattr(node, "name", "?"),
+                )
+
+        for node in list(submodule.graph.nodes):
+            if getattr(node, "op", None) != "call_function":
+                continue
+            if "aten.mul.Tensor" not in str(getattr(node, "target", "")):
+                continue
+
+            operand_specs = {}
+            for idx, arg in enumerate(node.args[:2]):
+                source_node = arg
+                source_qparam = None
+
+                if (
+                    _is_tosa_rescale_node(arg)
+                    and len(getattr(arg, "args", ())) >= 5
+                    and arg.args[1] == torch.int32
+                    and hasattr(arg.args[0], "op")
+                ):
+                    source_node = arg.args[0]
+                    source_qparam = _rescale_output_qparam(source_node)
+                    if source_qparam is None:
+                        source_qparam = _extract_effective_node_qparam(source_node)
+                elif _is_tosa_rescale_node(arg) and len(getattr(arg, "args", ())) >= 5:
+                    source_qparam = _rescale_output_qparam(arg)
+                else:
+                    if getattr(arg, "op", None) == "placeholder":
+                        branch_qparam = _branch_local_control_flow_output_qparam(arg)
+                        branch_source = _matching_quantized_rescale(arg, branch_qparam)
+                        if branch_source is not None:
+                            source_node = branch_source
+                            source_qparam = branch_qparam
+                    if source_qparam is None:
+                        source_qparam = _extract_effective_node_qparam(arg)
+
+                if getattr(source_qparam, "dtype", None) not in (torch.int8, torch.int16):
+                    continue
+                operand_specs[idx] = (source_node, source_qparam)
+
+            if len(operand_specs) != 2:
+                continue
+
+            lhs_source, lhs_qparam = operand_specs[0]
+            rhs_source, rhs_qparam = operand_specs[1]
+            if getattr(lhs_qparam, "dtype", None) != getattr(rhs_qparam, "dtype", None):
+                continue
+
+            lhs_int32_qparam = _int32_accumulator_qparam(lhs_qparam.get_scale_per_tensor())
+            rhs_int32_qparam = _int32_accumulator_qparam(rhs_qparam.get_scale_per_tensor())
+            output_qparam = _int32_accumulator_qparam(
+                lhs_qparam.get_scale_per_tensor() * rhs_qparam.get_scale_per_tensor()
+            )
+            desired_input_qparams = {0: lhs_int32_qparam, 1: rhs_int32_qparam}
+
+            current_input_qparams = getattr(node, "meta", {}).get("input_qparams") or {}
+            current_output_qparam = _extract_single_qparam_entry(
+                getattr(node, "meta", {}).get("output_qparams")
+            )
+            if not (
+                _same_qparam(current_input_qparams.get(0), lhs_int32_qparam)
+                and _same_qparam(current_input_qparams.get(1), rhs_int32_qparam)
+                and _same_qparam(current_output_qparam, output_qparam)
+            ):
+                node.meta["input_qparams"] = desired_input_qparams
+                node.meta["output_qparams"] = {0: output_qparam}
+                refreshed += 1
+                updated = True
+                logger.info(
+                    "[fast_preprocess] recomputed control-flow mul qparams for %s -> lhs=%s rhs=%s out=%s",
+                    getattr(node, "name", "?"),
+                    lhs_int32_qparam,
+                    rhs_int32_qparam,
+                    output_qparam,
+                )
+
+            for idx, (source_node, source_qparam) in operand_specs.items():
+                current_arg = node.args[idx]
+                desired_input_qparam = desired_input_qparams[idx]
+                if (
+                    _is_tosa_rescale_node(current_arg)
+                    and len(getattr(current_arg, "args", ())) >= 5
+                    and current_arg.args[1] == torch.int32
+                ):
+                    lift = current_arg
+                    lift.update_arg(0, source_node)
+                else:
+                    lift = fx_helpers.insert_rescale_node(
+                        submodule,
+                        node,
+                        source_node,
+                        torch.int32,
+                        [
+                            source_qparam.get_scale_per_tensor()
+                            / desired_input_qparam.get_scale_per_tensor()
+                        ],
+                        source_qparam.get_zp_per_tensor(),
+                        desired_input_qparam.get_zp_per_tensor(),
+                        after=False,
+                    )
+                    node.update_arg(idx, lift)
+                    refreshed += 1
+                    updated = True
+                lift.update_arg(
+                    2,
+                    [
+                        source_qparam.get_scale_per_tensor()
+                        / desired_input_qparam.get_scale_per_tensor()
+                    ],
+                )
+                lift.update_arg(3, source_qparam.get_zp_per_tensor())
+                lift.update_arg(4, desired_input_qparam.get_zp_per_tensor())
+                lift.meta["input_qparams"] = {0: source_qparam}
+                lift.meta["output_qparams"] = {0: desired_input_qparam}
+
+            for user in list(getattr(node, "users", ())):
+                if not _is_tosa_rescale_node(user):
+                    continue
+                if len(getattr(user, "args", ())) < 5:
+                    continue
+                if user.args[1] not in (torch.int8, torch.int16):
+                    continue
+                user_output_qparam = _terminal_branch_output_qparam(user)
+                if user_output_qparam is None:
+                    user_output_qparam = _extract_effective_node_qparam(user)
+                if user_output_qparam is None:
+                    user_output_qparam = _rescale_output_qparam(user)
+                if getattr(user_output_qparam, "dtype", None) != user.args[1]:
+                    continue
+                user.update_arg(
+                    2,
+                    [
+                        output_qparam.get_scale_per_tensor()
+                        / user_output_qparam.get_scale_per_tensor()
+                    ],
+                )
+                user.update_arg(3, output_qparam.get_zp_per_tensor())
+                user.update_arg(4, user_output_qparam.get_zp_per_tensor())
+                user.meta["input_qparams"] = {0: output_qparam}
+                user.meta["output_qparams"] = {0: user_output_qparam}
+                refreshed += 1
+                updated = True
+                logger.info(
+                    "[fast_preprocess] realigned control-flow mul output rescale %s from %s",
+                    getattr(user, "name", "?"),
+                    getattr(node, "name", "?"),
+                )
+
+        for node in list(submodule.graph.nodes):
+            if getattr(node, "op", None) != "call_function":
+                continue
+            target_str = str(getattr(node, "target", ""))
+            if "aten.add.Tensor" not in target_str and "aten.sub.Tensor" not in target_str:
+                continue
+            node_input_qparams = getattr(node, "meta", {}).get("input_qparams") or {}
+            for idx, arg in enumerate(node.args[:2]):
+                if not _is_tosa_rescale_node(arg):
+                    continue
+                if len(getattr(arg, "args", ())) < 5 or arg.args[1] != torch.int32:
+                    continue
+                desired_output_qparam = _extract_single_qparam_entry({0: node_input_qparams.get(idx)})
+                source_node = arg.args[0]
+                if not hasattr(source_node, "op"):
+                    continue
+                if (
+                    _is_tosa_rescale_node(source_node)
+                    and len(getattr(source_node, "args", ())) >= 5
+                    and source_node.args[1] in (torch.int8, torch.int16)
+                    and hasattr(source_node.args[0], "op")
+                    and getattr(source_node.args[0], "op", None) == "placeholder"
+                ):
+                    placeholder_source = source_node.args[0]
+                    align_qparam = _rescale_output_qparam(source_node)
+                    branch_qparam = _branch_local_control_flow_output_qparam(
+                        placeholder_source
+                    )
+                    if (
+                        align_qparam is not None
+                        and branch_qparam is not None
+                        and (
+                            float(align_qparam.scale) != float(branch_qparam.scale)
+                            or int(align_qparam.zp) != int(branch_qparam.zp)
+                        )
+                    ):
+                        arg.update_arg(0, placeholder_source)
+                        if len(getattr(source_node, "users", ())) == 0:
+                            submodule.graph.erase_node(source_node)
+                        source_node = placeholder_source
+                        updated = True
+                        logger.info(
+                            "[fast_preprocess] collapsed non-branch-local binary aligner %s before %s arg%d",
+                            getattr(source_node, "name", "?"),
+                            getattr(node, "name", "?"),
+                            idx,
+                        )
+                source_qparam = _extract_effective_node_qparam(source_node)
+                if (
+                    source_qparam is None
+                    or desired_output_qparam is None
+                    or getattr(source_qparam, "dtype", None)
+                    not in (torch.int8, torch.int16)
+                    or getattr(desired_output_qparam, "dtype", None) != torch.int32
+                ):
+                    continue
+                desired_scale = (
+                    source_qparam.get_scale_per_tensor()
+                    / desired_output_qparam.get_scale_per_tensor()
+                )
+                current_scale = arg.args[2] if len(arg.args) > 2 else None
+                current_input_zp = arg.args[3] if len(arg.args) > 3 else None
+                current_output_zp = arg.args[4] if len(arg.args) > 4 else None
+                if (
+                    current_scale == [desired_scale]
+                    and current_input_zp == source_qparam.get_zp_per_tensor()
+                    and current_output_zp == desired_output_qparam.get_zp_per_tensor()
+                ):
+                    continue
+                arg.update_arg(2, [desired_scale])
+                arg.update_arg(3, source_qparam.get_zp_per_tensor())
+                arg.update_arg(4, desired_output_qparam.get_zp_per_tensor())
+                refreshed += 1
+                updated = True
+                logger.info(
+                    "[fast_preprocess] realigned control-flow binary lift %s arg%d to node input qparams %s",
+                    getattr(node, "name", "?"),
+                    idx,
+                    desired_output_qparam,
                 )
 
         if updated:
@@ -1994,12 +3270,14 @@ def _reapply_control_flow_boundary_rescales(
                     "feeds_binary_directly=",
                     feeds_binary_directly,
                 )
-            if feeds_binary_directly:
+            effective_output_qparam = _branch_local_control_flow_output_qparam(
+                placeholder
+            )
+            if (
+                effective_output_qparam is None
+                and feeds_binary_directly
+            ):
                 effective_output_qparam = qparam
-            else:
-                effective_output_qparam = _branch_local_control_flow_output_qparam(
-                    placeholder
-                )
             _log_control_flow_debug(
                 "[fast_preprocess] restore submodule input qparams %s %s idx=%d incoming=%s branch_output_qparams=%s",
                 getattr(submodule, "__class__", type(submodule)).__name__,
@@ -2117,6 +3395,66 @@ def _reapply_control_flow_boundary_rescales(
         input_qparams = output_node.meta.get("input_qparams")
         return bool(input_qparams)
 
+    def _same_qparam(lhs, rhs) -> bool:
+        if lhs is None or rhs is None:
+            return False
+        return (
+            float(lhs.scale) == float(rhs.scale)
+            and int(lhs.zp) == int(rhs.zp)
+            and getattr(lhs, "dtype", None) == getattr(rhs, "dtype", None)
+        )
+
+    def _quantized_rescale_chain_depth(node) -> int:
+        depth = 0
+        current = node
+        seen = set()
+        while hasattr(current, "op") and current not in seen:
+            if not _is_tosa_rescale_node(current):
+                break
+            if len(getattr(current, "args", ())) < 2:
+                break
+            if current.args[1] not in (torch.int8, torch.int16):
+                break
+            seen.add(current)
+            depth += 1
+            if not getattr(current, "args", None) or not hasattr(current.args[0], "op"):
+                break
+            current = current.args[0]
+        return depth
+
+    def _existing_output_rescale_qparams(submodule) -> dict[int, QuantArgs]:
+        output_node = submodule.graph.output_node()
+        outputs = output_node.args[0]
+        output_args = [outputs] if hasattr(outputs, "op") else list(outputs)
+        existing_qparams: dict[int, QuantArgs] = {}
+        for idx, output_arg in enumerate(output_args):
+            qparam = _extract_effective_node_qparam(output_arg)
+            if qparam is not None:
+                existing_qparams[idx] = qparam
+        return existing_qparams
+
+    def _filter_output_qparams_map(submodule, output_qparams_map):
+        if not output_qparams_map:
+            return {}
+        output_node = submodule.graph.output_node()
+        outputs = output_node.args[0]
+        output_args = [outputs] if hasattr(outputs, "op") else list(outputs)
+        existing_qparams = _existing_output_rescale_qparams(submodule)
+        filtered: dict[int, QuantArgs] = {}
+        for idx, target_qparam in output_qparams_map.items():
+            if idx >= len(output_args):
+                continue
+            output_arg = output_args[idx]
+            current_qparam = existing_qparams.get(idx)
+            if (
+                _quantized_rescale_chain_depth(output_arg) >= 2
+                and current_qparam is not None
+                and _same_qparam(current_qparam, target_qparam)
+            ):
+                continue
+            filtered[idx] = target_qparam
+        return filtered
+
     rescale_pass = InsertControlFlowRescalesPass()
     modified = False
     for node in graph_module.graph.nodes:
@@ -2151,13 +3489,22 @@ def _reapply_control_flow_boundary_rescales(
             if include_outputs and output_qparams_map:
                 _refresh_submodule_output_input_qparams(if_graph)
                 _refresh_submodule_output_input_qparams(else_graph)
-                if _has_submodule_output_input_qparams(if_graph):
+                if_output_qparams_map = _filter_output_qparams_map(
+                    if_graph, output_qparams_map
+                )
+                else_output_qparams_map = _filter_output_qparams_map(
+                    else_graph, output_qparams_map
+                )
+                if _has_submodule_output_input_qparams(if_graph) and if_output_qparams_map:
                     modified |= rescale_pass._rescale_submodule_outputs(
-                        if_graph, output_qparams_map
+                        if_graph, if_output_qparams_map
                     )
-                if _has_submodule_output_input_qparams(else_graph):
+                if (
+                    _has_submodule_output_input_qparams(else_graph)
+                    and else_output_qparams_map
+                ):
                     modified |= rescale_pass._rescale_submodule_outputs(
-                        else_graph, output_qparams_map
+                        else_graph, else_output_qparams_map
                     )
         elif node.target == torch.ops.higher_order.while_loop:
             cond_graph = graph_module.get_submodule(node.args[0].target)
@@ -2182,9 +3529,12 @@ def _reapply_control_flow_boundary_rescales(
             output_qparams_map = _infer_control_flow_output_qparams_map(node)
             if include_outputs and output_qparams_map:
                 _refresh_submodule_output_input_qparams(body_graph)
-                if _has_submodule_output_input_qparams(body_graph):
+                body_output_qparams_map = _filter_output_qparams_map(
+                    body_graph, output_qparams_map
+                )
+                if _has_submodule_output_input_qparams(body_graph) and body_output_qparams_map:
                     modified |= rescale_pass._rescale_submodule_outputs(
-                        body_graph, output_qparams_map
+                        body_graph, body_output_qparams_map
                     )
 
     if not modified:
@@ -2229,6 +3579,8 @@ def _prune_duplicate_control_flow_rescales(graph_module) -> None:
 
     def _is_identity_rescale(node):
         if not _is_tosa_rescale_node(node):
+            return False
+        if node.meta.get("arm_preserve_control_flow_quant_boundary", False):
             return False
         args = getattr(node, "args", ())
         if len(args) < 5:
@@ -2524,6 +3876,50 @@ def _fold_zero_input_full_in_control_flow_submodules(graph_module) -> None:
         dtype = getattr(fake_val, "dtype", torch.float32)
         return torch.full(shape, fill_scalar, dtype=dtype)
 
+    def _infer_control_flow_full_qparam(node):
+        # Parse, don't validate: scalar FULL nodes inside cond branches usually
+        # participate in a binary op with the captured branch tensor. When the
+        # FULL node lost its own qparam annotation during earlier rewrites,
+        # recover the branch-local quantized contract from nearby quantized
+        # structure instead of freezing an FP32 const and hoping later
+        # serializer logic repairs it.
+        for user in list(getattr(node, "users", ())):
+            qparam = _extract_effective_node_qparam(user)
+            if qparam is not None and not getattr(qparam, "per_channel", False):
+                return qparam
+
+            if getattr(user, "op", None) != "call_function":
+                continue
+            target_str = str(getattr(user, "target", ""))
+            if "aten.add.Tensor" not in target_str and "aten.sub.Tensor" not in target_str:
+                continue
+            for arg in user.args[:2]:
+                if arg is node or not hasattr(arg, "op"):
+                    continue
+                qparam = _extract_effective_node_qparam(arg)
+                if qparam is not None and not getattr(qparam, "per_channel", False):
+                    return qparam
+        return None
+
+    def _feeds_binary_downstream(node) -> bool:
+        stack = list(getattr(node, "users", ()))
+        seen = set()
+        while stack:
+            user = stack.pop()
+            if id(user) in seen:
+                continue
+            seen.add(id(user))
+            target_str = str(getattr(user, "target", ""))
+            if "aten.add.Tensor" in target_str or "aten.sub.Tensor" in target_str:
+                return True
+            if (
+                _is_quantize_node(user)
+                or _is_dequantize_node(user)
+                or _is_tosa_rescale_node(user)
+            ):
+                stack.extend(list(getattr(user, "users", ())))
+        return False
+
     rewritten = 0
     for _, submodule, control_flow_node in get_cond_while_submodules_nested(graph_module):
         placeholders = [n for n in submodule.graph.nodes if n.op == "placeholder"]
@@ -2542,6 +3938,8 @@ def _fold_zero_input_full_in_control_flow_submodules(graph_module) -> None:
             const_value = _build_full_const(node)
             if const_value is None:
                 continue
+            if _feeds_binary_downstream(node):
+                continue
 
             output_qparams = None
             if not placeholders and output_qparams_map:
@@ -2551,6 +3949,8 @@ def _fold_zero_input_full_in_control_flow_submodules(graph_module) -> None:
                         break
             if output_qparams is None:
                 output_qparams = _extract_single_qparam_entry(node.meta.get("output_qparams"))
+            if output_qparams is None:
+                output_qparams = _infer_control_flow_full_qparam(node)
             if output_qparams is not None and not getattr(output_qparams, "per_channel", False):
                 const_value = output_qparams.quantize_value(const_value)
 
@@ -2566,6 +3966,9 @@ def _fold_zero_input_full_in_control_flow_submodules(graph_module) -> None:
 
             const_node.meta = node.meta.copy()
             const_node.meta["val"] = const_value
+            if output_qparams is not None:
+                const_node.meta["input_qparams"] = {0: output_qparams}
+                const_node.meta["output_qparams"] = {0: output_qparams}
             node.replace_all_uses_with(const_node)
             submodule.graph.erase_node(node)
             updated = True
@@ -2995,6 +4398,8 @@ def _normalize_control_flow_output_layouts(graph_module) -> None:
 
 
 def _restore_control_flow_output_dequantizes(graph_module) -> None:
+    import torch
+
     from executorch.backends.arm._passes.arm_pass_utils import (
         get_cond_while_submodules_nested,
     )
@@ -3020,12 +4425,32 @@ def _restore_control_flow_output_dequantizes(graph_module) -> None:
         output_node = submodule.graph.output_node()
         return bool(output_node.meta.get("input_qparams"))
 
+    def _current_output_already_quantized(submodule, idx: int) -> bool:
+        output_node = submodule.graph.output_node()
+        outputs = output_node.args[0]
+        output_args = [outputs] if hasattr(outputs, "op") else list(outputs)
+        if idx >= len(output_args):
+            return False
+        output_arg = output_args[idx]
+        return (
+            _is_tosa_rescale_node(output_arg)
+            and len(getattr(output_arg, "args", ())) >= 2
+            and output_arg.args[1] in (torch.int8, torch.int16)
+        )
+
     rescale_pass = InsertControlFlowRescalesPass()
     restored = 0
     for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
         output_qparams_map = submodule.graph.output_node().meta.get(
             "arm_control_flow_output_dequant_qparams", {}
         )
+        if not output_qparams_map:
+            continue
+        output_qparams_map = {
+            idx: qparam
+            for idx, qparam in output_qparams_map.items()
+            if not _current_output_already_quantized(submodule, idx)
+        }
         if not output_qparams_map:
             continue
         _refresh_submodule_output_input_qparams(submodule)
@@ -3278,6 +4703,49 @@ def _rewrite_control_flow_quantize_nodes(graph_module) -> None:
             per_channel=False,
         )
 
+    def _build_full_const(node) -> torch.Tensor | None:
+        if "aten.full.default" not in str(getattr(node, "target", "")):
+            return None
+        args = tuple(getattr(node, "args", ()))
+        if len(args) < 2:
+            return None
+        shape_arg, fill_value = args[0], args[1]
+        if not isinstance(shape_arg, (list, tuple)):
+            return None
+        try:
+            shape = tuple(int(dim) for dim in shape_arg)
+            fill_scalar = float(fill_value)
+        except (TypeError, ValueError):
+            return None
+
+        fake_val = getattr(node, "meta", {}).get("val")
+        dtype = getattr(fake_val, "dtype", torch.float32)
+        return torch.full(shape, fill_scalar, dtype=dtype)
+
+    def _is_zero_input_const_source(node) -> bool:
+        if not hasattr(node, "op"):
+            return False
+        if node.op == "get_attr":
+            return True
+        if node.op != "call_function":
+            return False
+        return not list(getattr(node, "all_input_nodes", ()))
+
+    def _feeds_scalar_binary(node) -> bool:
+        stack = list(getattr(node, "users", ()))
+        seen = set()
+        while stack:
+            user = stack.pop()
+            if id(user) in seen:
+                continue
+            seen.add(id(user))
+            target_str = str(getattr(user, "target", ""))
+            if "aten.add.Tensor" in target_str or "aten.sub.Tensor" in target_str:
+                return True
+            if _is_tosa_rescale_node(user):
+                stack.extend(list(getattr(user, "users", ())))
+        return False
+
     rewritten = 0
     for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
         modified = False
@@ -3305,6 +4773,14 @@ def _rewrite_control_flow_quantize_nodes(graph_module) -> None:
                     continue
                 float_source = quant_node.args[0] if getattr(quant_node, "args", None) else None
                 if not hasattr(float_source, "op"):
+                    continue
+                # Parse, don't validate: branch-local zero-input constants need
+                # to keep their quantized boundary when they feed a binary op.
+                # If we collapse q->dq to the raw FULL/get_attr here, later
+                # control-flow binary repair sees a missing-qparam operand and
+                # can incorrectly substitute the sibling activation path,
+                # turning `x +/- c` into `x +/- x`.
+                if _is_zero_input_const_source(float_source) and _feeds_scalar_binary(node):
                     continue
                 if os.environ.get("TOSA_ENGINE_DEBUG"):
                     print(
@@ -3345,8 +4821,6 @@ def _rewrite_control_flow_quantize_nodes(graph_module) -> None:
                     "output_qparams=",
                     node.meta.get("output_qparams"),
                 )
-            if source_dtype not in (torch.int8, torch.int16, torch.int32) and source_qparam is None:
-                continue
 
             try:
                 output_qparam = QuantArgs.from_operator(node.target, node.args)
@@ -3356,10 +4830,53 @@ def _rewrite_control_flow_quantize_nodes(graph_module) -> None:
                     continue
 
             if (
+                source_dtype not in (torch.int8, torch.int16, torch.int32)
+                and source_qparam is None
+                and not _is_zero_input_const_source(source_node)
+            ):
+                continue
+
+            if (
                 source_qparam is None
                 or source_qparam.per_channel
                 or output_qparam.per_channel
             ):
+                if source_qparam is None and _is_zero_input_const_source(source_node):
+                    const_value = _build_full_const(source_node)
+                    if const_value is not None:
+                        quantized_value = output_qparam.quantize_value(const_value)
+                        const_name = (
+                            f"{getattr(source_node, 'name', 'const')}_quantized_const"
+                        )
+                        suffix = 0
+                        while hasattr(submodule, const_name):
+                            suffix += 1
+                            const_name = (
+                                f"{getattr(source_node, 'name', 'const')}_quantized_const_{suffix}"
+                            )
+
+                        submodule.register_buffer(const_name, quantized_value)
+                        with submodule.graph.inserting_before(node):
+                            const_node = submodule.graph.get_attr(const_name)
+
+                        const_node.meta = source_node.meta.copy()
+                        const_node.meta["val"] = quantized_value
+                        const_node.meta["input_qparams"] = {0: output_qparam}
+                        const_node.meta["output_qparams"] = {0: output_qparam}
+                        node.replace_all_uses_with(const_node)
+                        submodule.graph.erase_node(node)
+                        if len(getattr(source_node, "users", ())) == 0:
+                            submodule.graph.erase_node(source_node)
+                        rewritten += 1
+                        modified = True
+                        if os.environ.get("TOSA_ENGINE_DEBUG"):
+                            print(
+                                "[cf-quantize-rewrite] materialized const",
+                                getattr(node, "name", "?"),
+                                "->",
+                                getattr(const_node, "name", "?"),
+                            )
+                        continue
                 if os.environ.get("TOSA_ENGINE_DEBUG"):
                     print(
                         "[cf-quantize-rewrite] skip",
@@ -3422,9 +4939,38 @@ def _rewrite_control_flow_quantize_nodes(graph_module) -> None:
 
 
 def _rewrite_control_flow_dequantize_nodes(graph_module) -> None:
+    import torch
+
     from executorch.backends.arm._passes.arm_pass_utils import (
         get_cond_while_submodules_nested,
     )
+    import fx_helpers
+
+    def _single_qparam_entry(qparams):
+        if not qparams:
+            return None
+        if isinstance(qparams, dict):
+            if 0 in qparams:
+                return qparams[0]
+            if len(qparams) == 1:
+                return next(iter(qparams.values()))
+        return qparams
+
+    def _same_qparam(lhs, rhs) -> bool:
+        if lhs is None or rhs is None:
+            return False
+        return (
+            float(lhs.scale) == float(rhs.scale)
+            and int(lhs.zp) == int(rhs.zp)
+            and getattr(lhs, "dtype", None) == getattr(rhs, "dtype", None)
+        )
+
+    def _binary_input_qparam(user, value_node):
+        input_qparams = getattr(user, "meta", {}).get("input_qparams") or {}
+        for idx, arg in enumerate(getattr(user, "args", ())):
+            if arg is value_node and idx in input_qparams:
+                return input_qparams[idx]
+        return _single_qparam_entry(input_qparams)
 
     rewritten = 0
     for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
@@ -3439,6 +4985,60 @@ def _rewrite_control_flow_dequantize_nodes(graph_module) -> None:
             users = list(getattr(node, "users", ()))
             if not users:
                 continue
+
+            source_qparam = _extract_effective_node_qparam(source_node)
+            if getattr(source_qparam, "dtype", None) in (torch.int8, torch.int16):
+                desired_qparam = None
+                binary_users = []
+                for user in users:
+                    if getattr(user, "op", None) != "call_function":
+                        binary_users = []
+                        break
+                    target_str = str(getattr(user, "target", ""))
+                    if (
+                        "aten.add.Tensor" not in target_str
+                        and "aten.sub.Tensor" not in target_str
+                        and "aten.mul.Tensor" not in target_str
+                    ):
+                        binary_users = []
+                        break
+                    user_qparam = _binary_input_qparam(user, node)
+                    if getattr(user_qparam, "dtype", None) != torch.int32:
+                        binary_users = []
+                        break
+                    if desired_qparam is None:
+                        desired_qparam = user_qparam
+                    elif not _same_qparam(desired_qparam, user_qparam):
+                        binary_users = []
+                        break
+                    binary_users.append(user)
+
+                if binary_users and desired_qparam is not None:
+                    lifted = fx_helpers.insert_rescale_node(
+                        submodule,
+                        binary_users[0],
+                        source_node,
+                        torch.int32,
+                        [
+                            source_qparam.get_scale_per_tensor()
+                            / desired_qparam.get_scale_per_tensor()
+                        ],
+                        source_qparam.get_zp_per_tensor(),
+                        desired_qparam.get_zp_per_tensor(),
+                        after=False,
+                    )
+                    lifted.meta["input_qparams"] = {0: source_qparam}
+                    lifted.meta["output_qparams"] = {0: desired_qparam}
+                    node.replace_all_uses_with(lifted)
+                    submodule.graph.erase_node(node)
+                    rewritten += 1
+                    modified = True
+                    logger.info(
+                        "[fast_preprocess] rewrote control-flow dequantize %s into int32 lift %s",
+                        getattr(node, "name", "?"),
+                        getattr(lifted, "name", "?"),
+                    )
+                    continue
 
             if not all(
                 _is_tosa_rescale_node(user) or getattr(user, "op", None) == "output"
@@ -3555,6 +5155,72 @@ def _normalize_control_flow_input_layouts(graph_module) -> None:
         )
 
 
+def _restore_missing_control_flow_rescale_qparams(graph_module) -> None:
+    import torch
+
+    from executorch.backends.arm._passes.arm_pass_utils import (
+        get_cond_while_submodules_nested,
+    )
+    from executorch.backends.arm._passes.quant_args import QuantArgs
+
+    restored = 0
+    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+        submodule_modified = False
+        for node in submodule.graph.nodes:
+            if not _is_tosa_rescale_node(node):
+                continue
+            if len(getattr(node, "args", ())) < 5:
+                continue
+            if node.meta.get("input_qparams") and node.meta.get("output_qparams"):
+                continue
+
+            source = node.args[0]
+            if not hasattr(source, "op"):
+                continue
+            source_qparam = _extract_effective_node_qparam(source)
+            if source_qparam is None:
+                continue
+
+            output_dtype = node.args[1]
+            scale_arg = node.args[2]
+            if output_dtype not in (torch.int8, torch.int16, torch.int32):
+                continue
+            if not (
+                isinstance(scale_arg, (list, tuple))
+                and len(scale_arg) == 1
+                and scale_arg[0] not in (0, 0.0)
+            ):
+                continue
+
+            try:
+                qinfo = torch.iinfo(output_dtype)
+                output_qparam = QuantArgs(
+                    scale=source_qparam.get_scale_per_tensor() / float(scale_arg[0]),
+                    zp=int(node.args[4]),
+                    qmin=int(qinfo.min),
+                    qmax=int(qinfo.max),
+                    dtype=output_dtype,
+                )
+            except Exception:
+                continue
+
+            if not node.meta.get("input_qparams"):
+                node.meta["input_qparams"] = {0: source_qparam}
+            if not node.meta.get("output_qparams"):
+                node.meta["output_qparams"] = {0: output_qparam}
+            restored += 1
+            submodule_modified = True
+
+        if submodule_modified:
+            submodule.recompile()
+
+    if restored:
+        logger.info(
+            "[fast_preprocess] restored qparams on %d control-flow rescale node(s)",
+            restored,
+        )
+
+
 def _dump_control_flow_submodules(graph_module, label: str) -> None:
     if not _control_flow_debug_enabled():
         return
@@ -3563,19 +5229,34 @@ def _dump_control_flow_submodules(graph_module, label: str) -> None:
         get_cond_while_submodules_nested,
     )
 
+    def _node_line(node) -> str:
+        meta = getattr(node, "meta", {})
+        fake_val = meta.get("val")
+        shape = tuple(fake_val.shape) if hasattr(fake_val, "shape") else None
+        dtype = getattr(fake_val, "dtype", None)
+        return (
+            f"{node.name} | {node.op} | {node.target} | "
+            f"shape={shape} dtype={dtype} "
+            f"qin={meta.get('input_qparams')} "
+            f"qout={meta.get('output_qparams')} "
+            f"saved_qout={meta.get('arm_control_flow_saved_output_qparams')}"
+        )
+
     for name, submodule, _ in get_cond_while_submodules_nested(graph_module):
         try:
             readable = submodule.print_readable(print_output=False)
         except TypeError:
             readable = submodule.print_readable()
+        node_dump = "\n".join(_node_line(node) for node in submodule.graph.nodes)
         print(
-            f"[fast_preprocess] control-flow submodule dump ({label}:{name})\n{readable}"
+            f"[fast_preprocess] control-flow submodule dump ({label}:{name})\n{readable}\n[node-meta]\n{node_dump}"
         )
         logger.info(
-            "[fast_preprocess] control-flow submodule dump (%s:%s)\n%s",
+            "[fast_preprocess] control-flow submodule dump (%s:%s)\n%s\n[node-meta]\n%s",
             label,
             name,
             readable,
+            node_dump,
         )
 
 
@@ -4057,8 +5738,11 @@ def _all_rust_preprocess(
     _regularize_control_flow_submodules(gm)
     _normalize_control_flow_input_layouts(gm)
     _restore_missing_control_flow_input_rescales(gm)
+    _restore_control_flow_unary_quant_boundaries(gm)
+    _restore_control_flow_pool_quant_boundaries(gm)
     _refresh_control_flow_binary_input_rescales(gm)
     _normalize_control_flow_output_layouts(gm)
+    _restore_missing_control_flow_rescale_qparams(gm)
     _reapply_control_flow_boundary_rescales(
         gm, include_inputs=False, include_outputs=True
     )
