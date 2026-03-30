@@ -657,6 +657,26 @@ pub struct TosaTensor {
     pub variable_name: String,
 }
 
+impl TosaTensor {
+    /// Empty output tensor (no data, not variable, not unranked).
+    pub fn new(name: String, shape: Vec<i32>, dtype: DType) -> Self {
+        Self {
+            name,
+            shape,
+            dtype,
+            data: Vec::new(),
+            variable: false,
+            is_unranked: false,
+            variable_name: String::new(),
+        }
+    }
+
+    /// Const tensor with inline data.
+    pub fn with_data(name: String, shape: Vec<i32>, dtype: DType, data: Vec<u8>) -> Self {
+        Self { data, ..Self::new(name, shape, dtype) }
+    }
+}
+
 /// TosaShape — named shape value.
 #[derive(Debug, Clone)]
 pub struct TosaShape {
