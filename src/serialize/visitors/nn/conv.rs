@@ -1,11 +1,9 @@
 use super::*;
 
-pub(in crate::serialize::visitors) fn emit_aten_conv2d(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let stride = arg_i32_list(node, 3);
@@ -108,12 +106,10 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(
     result
 }
 
-pub(in crate::serialize::visitors) fn emit_conv2d(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_conv2d(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let pad = {
@@ -220,12 +216,10 @@ pub(in crate::serialize::visitors) fn emit_conv2d(
     result
 }
 
-pub(in crate::serialize::visitors) fn emit_conv3d(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_conv3d(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let pad = {
@@ -332,12 +326,10 @@ pub(in crate::serialize::visitors) fn emit_conv3d(
     result
 }
 
-pub(in crate::serialize::visitors) fn emit_depthwise_conv2d(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_depthwise_conv2d(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let pad = {

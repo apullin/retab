@@ -1,11 +1,9 @@
 use super::*;
 
-pub(in crate::serialize::visitors) fn emit_reduce_sum(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_reduce_sum(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let spec = ParsedSingleAxisReduceSpec::parse(graph, node, store);
     let mut result = EmitResult::default();
 
@@ -50,12 +48,10 @@ pub(in crate::serialize::visitors) fn emit_reduce_sum(
     result
 }
 
-pub(in crate::serialize::visitors) fn emit_aten_sum(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let spec = ParsedReduceSpec::parse(graph, node, store, false);
     let mut result = EmitResult::default();
 

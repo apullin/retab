@@ -21,12 +21,10 @@ fn pad_fill_value(node: &Node) -> i32 {
         .unwrap_or(0)
 }
 
-pub(in crate::serialize::visitors) fn emit_pad(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let input_shape = node

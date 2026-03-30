@@ -74,29 +74,14 @@ fn emit_reduce_extrema(
     result
 }
 
-pub(in crate::serialize::visitors) fn emit_aten_amax(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
-    emit_reduce_extrema(graph, node, store, Op::ReduceMax, ReduceExtremaKind::Max)
+pub(in crate::serialize::visitors) fn emit_aten_amax(ctx: &EmitContext) -> EmitResult {
+    emit_reduce_extrema(ctx.graph, ctx.node, ctx.store, Op::ReduceMax, ReduceExtremaKind::Max)
 }
 
-pub(in crate::serialize::visitors) fn emit_aten_any(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
-    emit_reduce_extrema(graph, node, store, Op::ReduceAny, ReduceExtremaKind::Any)
+pub(in crate::serialize::visitors) fn emit_aten_any(ctx: &EmitContext) -> EmitResult {
+    emit_reduce_extrema(ctx.graph, ctx.node, ctx.store, Op::ReduceAny, ReduceExtremaKind::Any)
 }
 
-pub(in crate::serialize::visitors) fn emit_aten_amin(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
-    emit_reduce_extrema(graph, node, store, Op::ReduceMin, ReduceExtremaKind::Min)
+pub(in crate::serialize::visitors) fn emit_aten_amin(ctx: &EmitContext) -> EmitResult {
+    emit_reduce_extrema(ctx.graph, ctx.node, ctx.store, Op::ReduceMin, ReduceExtremaKind::Min)
 }

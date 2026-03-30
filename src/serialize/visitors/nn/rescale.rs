@@ -207,12 +207,10 @@ fn push_rescale_zp_tensor(
     )
 }
 
-pub(in crate::serialize::visitors) fn emit_rescale(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_rescale(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let output_plan = plan_rescale_output(graph, node, store);

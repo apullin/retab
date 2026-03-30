@@ -12,6 +12,7 @@ mod control_flow;
 mod dtype_quant;
 mod elementwise;
 mod emit_result;
+mod emitter;
 mod graph_utils;
 mod indexing;
 mod layout;
@@ -21,6 +22,8 @@ mod nn;
 mod reductions;
 mod shape_utils;
 mod tensor_ops;
+
+pub use emitter::*;
 
 use super::tosa_generated::{
     AbsAttribute, AddAttribute, ArithmeticRightShiftAttribute, Attribute, AvgPool2dAttribute,
@@ -88,6 +91,153 @@ use tensor_ops::{
     emit_repeat, emit_reshape, emit_resize, emit_scalar_tensor, emit_transpose,
 };
 
+fn build_emitter_table() -> std::collections::HashMap<OpTarget, EmitFn> {
+    let mut t: std::collections::HashMap<OpTarget, EmitFn> = std::collections::HashMap::new();
+
+    // TOSA-lowered ops
+    t.insert(OpTarget::TosaConst, emit_const);
+    t.insert(OpTarget::Full, emit_full);
+    t.insert(OpTarget::ScalarTensor, emit_scalar_tensor);
+    t.insert(OpTarget::TosaConv2d, emit_conv2d);
+    t.insert(OpTarget::TosaConv3d, emit_conv3d);
+    t.insert(OpTarget::TosaDepthwiseConv2d, emit_depthwise_conv2d);
+    t.insert(OpTarget::TosaRescale, emit_rescale);
+    t.insert(OpTarget::TosaResize, emit_resize);
+    t.insert(OpTarget::TosaMaxPool2d, emit_max_pool2d);
+    t.insert(OpTarget::TosaTranspose, emit_transpose);
+    t.insert(OpTarget::TosaReshape, emit_reshape);
+    t.insert(OpTarget::TosaClamp, emit_clamp);
+    t.insert(OpTarget::TosaAdd, emit_add);
+    t.insert(OpTarget::TosaSub, emit_sub);
+    t.insert(OpTarget::TosaMul, emit_mul);
+    t.insert(OpTarget::TosaAvgPool2d, emit_avg_pool2d);
+    t.insert(OpTarget::TosaReduceSum, emit_reduce_sum);
+    t.insert(OpTarget::Any, emit_aten_any);
+    t.insert(OpTarget::Amax, emit_aten_amax);
+    t.insert(OpTarget::Amin, emit_aten_amin);
+    t.insert(OpTarget::TosaTable, emit_table);
+    t.insert(OpTarget::TosaSigmoid, emit_sigmoid);
+    t.insert(OpTarget::TosaTanh, emit_tanh);
+    t.insert(OpTarget::TosaExp, emit_exp);
+    t.insert(OpTarget::TosaLog, emit_log);
+    t.insert(OpTarget::TosaNeg, emit_negate);
+    t.insert(OpTarget::TosaNegate, emit_negate);
+    t.insert(OpTarget::TosaAbs, emit_abs);
+    t.insert(OpTarget::TosaCeil, emit_ceil);
+    t.insert(OpTarget::TosaFloor, emit_floor);
+    t.insert(OpTarget::TosaReciprocal, emit_reciprocal);
+    t.insert(OpTarget::TosaErf, emit_erf);
+    t.insert(OpTarget::TosaCos, emit_cos);
+    t.insert(OpTarget::TosaSin, emit_sin);
+    t.insert(OpTarget::TosaRsqrt, emit_rsqrt);
+    t.insert(OpTarget::TosaMatmul, emit_matmul);
+    t.insert(OpTarget::TosaConcat, emit_concat);
+    t.insert(OpTarget::TosaPad, emit_pad);
+    t.insert(OpTarget::TosaSlice, emit_slice);
+    t.insert(OpTarget::TosaGather, emit_gather);
+    t.insert(OpTarget::TosaScatter, emit_scatter);
+    t.insert(OpTarget::TosaSelect, emit_select);
+    t.insert(OpTarget::TosaCast, emit_cast);
+    t.insert(OpTarget::TosaEqual, emit_equal);
+    t.insert(OpTarget::TosaGreater, emit_greater);
+    t.insert(OpTarget::TosaGreaterEqual, emit_greater_equal);
+    t.insert(OpTarget::TosaTransposeConv2d, emit_transpose_conv2d);
+    t.insert(OpTarget::CondIf, emit_cond_if);
+
+    // ATen fallbacks: handle ops that FX-direct passes didn't rewrite
+    // to TOSA form.
+    t.insert(OpTarget::Conv2d, emit_aten_conv2d);
+    t.insert(OpTarget::DepthwiseConv2d, emit_aten_conv2d);
+    t.insert(OpTarget::MaxPool2d, emit_aten_max_pool2d);
+    t.insert(OpTarget::Clamp, emit_aten_clamp);
+    t.insert(OpTarget::Hardtanh, emit_aten_clamp);
+    t.insert(OpTarget::Relu, emit_aten_clamp);
+    t.insert(OpTarget::Expand, emit_expand);
+    t.insert(OpTarget::Repeat, emit_repeat);
+    t.insert(OpTarget::Reshape, emit_aten_reshape);
+    t.insert(OpTarget::Flatten, emit_aten_reshape);
+    t.insert(OpTarget::View, emit_aten_reshape);
+    t.insert(OpTarget::Permute, emit_aten_permute);
+    t.insert(OpTarget::To, emit_cast);
+    t.insert(OpTarget::Add, emit_aten_add);
+    t.insert(OpTarget::Sub, emit_aten_sub);
+    t.insert(OpTarget::Mul, emit_aten_mul);
+    t.insert(OpTarget::AvgPool2d, emit_avg_pool2d);
+    t.insert(OpTarget::UpsampleNearest2d, emit_resize);
+    t.insert(OpTarget::UpsampleBilinear2d, emit_resize);
+    t.insert(OpTarget::Sigmoid, emit_sigmoid);
+    t.insert(OpTarget::Tanh, emit_tanh);
+    t.insert(OpTarget::Exp, emit_exp);
+    t.insert(OpTarget::Log, emit_log);
+    t.insert(OpTarget::Neg, emit_negate);
+    t.insert(OpTarget::Abs, emit_abs);
+    t.insert(OpTarget::Ceil, emit_ceil);
+    t.insert(OpTarget::Floor, emit_floor);
+    t.insert(OpTarget::Round, emit_round);
+    t.insert(OpTarget::Reciprocal, emit_reciprocal);
+    t.insert(OpTarget::Rsqrt, emit_rsqrt);
+    t.insert(OpTarget::Matmul, emit_matmul);
+    t.insert(OpTarget::Bmm, emit_matmul);
+    t.insert(OpTarget::Cat, emit_concat);
+    t.insert(OpTarget::Pad, emit_pad);
+    t.insert(OpTarget::Slice, emit_slice);
+    t.insert(OpTarget::Select, emit_select);
+    t.insert(OpTarget::SelectCopy, emit_select_copy);
+    t.insert(OpTarget::IndexSelect, emit_index_select);
+    t.insert(OpTarget::Where, emit_select);
+    t.insert(OpTarget::Sum, emit_aten_sum);
+    t.insert(OpTarget::ConvTranspose2d, emit_transpose_conv2d);
+
+    t.insert(OpTarget::BitwiseNot, emit_bitwise_not);
+    t.insert(OpTarget::BitwiseAnd, emit_bitwise_and);
+    t.insert(OpTarget::BitwiseOr, emit_bitwise_or);
+    t.insert(OpTarget::BitwiseXor, emit_bitwise_xor);
+    t.insert(OpTarget::BitwiseLeftShift, emit_logical_left_shift);
+    t.insert(OpTarget::BitwiseRightShift, emit_arithmetic_right_shift);
+
+    t.insert(OpTarget::LogicalNot, emit_logical_not);
+    t.insert(OpTarget::LogicalAnd, emit_logical_and);
+    t.insert(OpTarget::LogicalOr, emit_logical_or);
+    t.insert(OpTarget::LogicalXor, emit_logical_xor);
+
+    t.insert(OpTarget::Gt, emit_aten_gt);
+    t.insert(OpTarget::Ge, emit_aten_ge);
+    t.insert(OpTarget::Lt, emit_aten_lt);
+    t.insert(OpTarget::Le, emit_aten_le);
+    t.insert(OpTarget::Eq, emit_aten_eq);
+
+    t.insert(OpTarget::Sin, emit_sin);
+    t.insert(OpTarget::Cos, emit_cos);
+
+    t.insert(OpTarget::Mean, emit_aten_mean);
+    t.insert(OpTarget::Unsqueeze, emit_aten_unsqueeze);
+    t.insert(OpTarget::Squeeze, emit_aten_squeeze);
+    t.insert(OpTarget::Div, emit_aten_div);
+    t.insert(OpTarget::Sqrt, emit_aten_sqrt);
+    t.insert(OpTarget::Pow, emit_pow);
+    t.insert(OpTarget::FullLike, emit_full_like);
+    t.insert(OpTarget::Sign, emit_aten_sign);
+    t.insert(OpTarget::Expm1, emit_aten_expm1);
+    t.insert(OpTarget::Log1p, emit_aten_log1p);
+    t.insert(OpTarget::FloorDivide, emit_aten_floor_divide);
+    t.insert(OpTarget::LeakyRelu, emit_aten_leaky_relu);
+
+    t.insert(OpTarget::TosaMaximum, emit_maximum);
+    t.insert(OpTarget::TosaMinimum, emit_minimum);
+    t.insert(OpTarget::TosaReduceMax, emit_aten_amax);
+    t.insert(OpTarget::TosaReduceMin, emit_aten_amin);
+    t.insert(OpTarget::TosaReduceAny, emit_aten_any);
+
+    t.insert(OpTarget::Zeros, emit_full);
+
+    t
+}
+
+// Cached emitter dispatch table, built once per thread.
+thread_local! {
+    static EMITTER_TABLE: std::collections::HashMap<OpTarget, EmitFn> = build_emitter_table();
+}
+
 /// Dispatch to the correct per-op visitor based on the node's target.
 pub fn emit_node(
     graph: &Graph,
@@ -95,148 +245,23 @@ pub fn emit_node(
     node: &Node,
     store: &TensorStore,
 ) -> Option<EmitResult> {
-    match &node.target {
-        OpTarget::TosaConst => Some(emit_const(graph, node_id, node, store)),
-        OpTarget::Full => Some(emit_full(graph, node_id, node, store)),
-        OpTarget::ScalarTensor => Some(emit_scalar_tensor(graph, node_id, node, store)),
-        OpTarget::TosaConv2d => Some(emit_conv2d(graph, node_id, node, store)),
-        OpTarget::TosaConv3d => Some(emit_conv3d(graph, node_id, node, store)),
-        OpTarget::TosaDepthwiseConv2d => Some(emit_depthwise_conv2d(graph, node_id, node, store)),
-        OpTarget::TosaRescale => Some(emit_rescale(graph, node_id, node, store)),
-        OpTarget::TosaResize => Some(emit_resize(graph, node_id, node, store)),
-        OpTarget::TosaMaxPool2d => Some(emit_max_pool2d(graph, node_id, node, store)),
-        OpTarget::TosaTranspose => Some(emit_transpose(graph, node_id, node, store)),
-        OpTarget::TosaReshape => Some(emit_reshape(graph, node_id, node, store)),
-        OpTarget::TosaClamp => Some(emit_clamp(graph, node_id, node, store)),
-        OpTarget::TosaAdd => Some(emit_add(graph, node_id, node, store)),
-        OpTarget::TosaSub => Some(emit_sub(graph, node_id, node, store)),
-        OpTarget::TosaMul => Some(emit_mul(graph, node_id, node, store)),
-        OpTarget::TosaAvgPool2d => Some(emit_avg_pool2d(graph, node_id, node, store)),
-        OpTarget::TosaReduceSum => Some(emit_reduce_sum(graph, node_id, node, store)),
-        OpTarget::Any => Some(emit_aten_any(graph, node_id, node, store)),
-        OpTarget::Amax => Some(emit_aten_amax(graph, node_id, node, store)),
-        OpTarget::Amin => Some(emit_aten_amin(graph, node_id, node, store)),
-        OpTarget::TosaTable => Some(emit_table(graph, node_id, node, store)),
-        OpTarget::TosaSigmoid => Some(emit_sigmoid(graph, node_id, node, store)),
-        OpTarget::TosaTanh => Some(emit_tanh(graph, node_id, node, store)),
-        OpTarget::TosaExp => Some(emit_exp(graph, node_id, node, store)),
-        OpTarget::TosaLog => Some(emit_log(graph, node_id, node, store)),
-        OpTarget::TosaNeg | OpTarget::TosaNegate => Some(emit_negate(graph, node_id, node, store)),
-        OpTarget::TosaAbs => Some(emit_abs(graph, node_id, node, store)),
-        OpTarget::TosaCeil => Some(emit_ceil(graph, node_id, node, store)),
-        OpTarget::TosaFloor => Some(emit_floor(graph, node_id, node, store)),
-        OpTarget::TosaReciprocal => Some(emit_reciprocal(graph, node_id, node, store)),
-        OpTarget::TosaErf => Some(emit_erf(graph, node_id, node, store)),
-        OpTarget::TosaCos => Some(emit_cos(graph, node_id, node, store)),
-        OpTarget::TosaSin => Some(emit_sin(graph, node_id, node, store)),
-        OpTarget::TosaRsqrt => Some(emit_rsqrt(graph, node_id, node, store)),
-        OpTarget::TosaMatmul => Some(emit_matmul(graph, node_id, node, store)),
-        OpTarget::TosaConcat => Some(emit_concat(graph, node_id, node, store)),
-        OpTarget::TosaPad => Some(emit_pad(graph, node_id, node, store)),
-        OpTarget::TosaSlice => Some(emit_slice(graph, node_id, node, store)),
-        OpTarget::TosaGather => Some(emit_gather(graph, node_id, node, store)),
-        OpTarget::TosaScatter => Some(emit_scatter(graph, node_id, node, store)),
-        OpTarget::TosaSelect => Some(emit_select(graph, node_id, node, store)),
-        OpTarget::TosaCast => Some(emit_cast(graph, node_id, node, store)),
-        OpTarget::TosaEqual => Some(emit_equal(graph, node_id, node, store)),
-        OpTarget::TosaGreater => Some(emit_greater(graph, node_id, node, store)),
-        OpTarget::TosaGreaterEqual => Some(emit_greater_equal(graph, node_id, node, store)),
-        OpTarget::TosaTransposeConv2d => Some(emit_transpose_conv2d(graph, node_id, node, store)),
-        OpTarget::CondIf => Some(emit_cond_if(graph, node_id, node, store)),
-
-        // ATen fallbacks: handle ops that FX-direct passes didn't rewrite
-        // to TOSA form. This allows lower_to_tosa_v2 (hybrid pipeline) to
-        // produce valid TOSA output even when not all passes run.
-        OpTarget::Conv2d | OpTarget::DepthwiseConv2d => {
-            Some(emit_aten_conv2d(graph, node_id, node, store))
+    // Handle the `getitem` special case first (dynamic Other variant).
+    if let OpTarget::Other(target) = &node.target {
+        if target.contains("getitem") {
+            return Some(EmitResult::default());
         }
-        OpTarget::MaxPool2d => Some(emit_aten_max_pool2d(graph, node_id, node, store)),
-        OpTarget::Clamp | OpTarget::Hardtanh | OpTarget::Relu => {
-            Some(emit_aten_clamp(graph, node_id, node, store))
-        }
-        OpTarget::Expand => Some(emit_expand(graph, node_id, node, store)),
-        OpTarget::Repeat => Some(emit_repeat(graph, node_id, node, store)),
-        OpTarget::Reshape | OpTarget::Flatten | OpTarget::View => {
-            Some(emit_aten_reshape(graph, node_id, node, store))
-        }
-        OpTarget::Permute => Some(emit_aten_permute(graph, node_id, node, store)),
-        OpTarget::To => Some(emit_cast(graph, node_id, node, store)),
-        OpTarget::Add => Some(emit_aten_add(graph, node_id, node, store)),
-        OpTarget::Sub => Some(emit_aten_sub(graph, node_id, node, store)),
-        OpTarget::Mul => Some(emit_aten_mul(graph, node_id, node, store)),
-        OpTarget::AvgPool2d => Some(emit_avg_pool2d(graph, node_id, node, store)),
-        OpTarget::UpsampleNearest2d | OpTarget::UpsampleBilinear2d => {
-            Some(emit_resize(graph, node_id, node, store))
-        }
-        OpTarget::Sigmoid => Some(emit_sigmoid(graph, node_id, node, store)),
-        OpTarget::Tanh => Some(emit_tanh(graph, node_id, node, store)),
-        OpTarget::Exp => Some(emit_exp(graph, node_id, node, store)),
-        OpTarget::Log => Some(emit_log(graph, node_id, node, store)),
-        OpTarget::Neg => Some(emit_negate(graph, node_id, node, store)),
-        OpTarget::Abs => Some(emit_abs(graph, node_id, node, store)),
-        OpTarget::Ceil => Some(emit_ceil(graph, node_id, node, store)),
-        OpTarget::Floor => Some(emit_floor(graph, node_id, node, store)),
-        OpTarget::Round => Some(emit_round(graph, node_id, node, store)),
-        OpTarget::Reciprocal => Some(emit_reciprocal(graph, node_id, node, store)),
-        OpTarget::Rsqrt => Some(emit_rsqrt(graph, node_id, node, store)),
-        OpTarget::Matmul | OpTarget::Bmm => Some(emit_matmul(graph, node_id, node, store)),
-        OpTarget::Cat => Some(emit_concat(graph, node_id, node, store)),
-        OpTarget::Pad => Some(emit_pad(graph, node_id, node, store)),
-        OpTarget::Slice => Some(emit_slice(graph, node_id, node, store)),
-        OpTarget::Select => Some(emit_select(graph, node_id, node, store)),
-        OpTarget::SelectCopy => Some(emit_select_copy(graph, node_id, node, store)),
-        OpTarget::IndexSelect => Some(emit_index_select(graph, node_id, node, store)),
-        OpTarget::Where => Some(emit_select(graph, node_id, node, store)),
-        OpTarget::Sum => Some(emit_aten_sum(graph, node_id, node, store)),
-        OpTarget::ConvTranspose2d => Some(emit_transpose_conv2d(graph, node_id, node, store)),
+    }
 
-        OpTarget::BitwiseNot => Some(emit_bitwise_not(graph, node_id, node, store)),
-        OpTarget::BitwiseAnd => Some(emit_bitwise_and(graph, node_id, node, store)),
-        OpTarget::BitwiseOr => Some(emit_bitwise_or(graph, node_id, node, store)),
-        OpTarget::BitwiseXor => Some(emit_bitwise_xor(graph, node_id, node, store)),
-        OpTarget::BitwiseLeftShift => Some(emit_logical_left_shift(graph, node_id, node, store)),
-        OpTarget::BitwiseRightShift => {
-            Some(emit_arithmetic_right_shift(graph, node_id, node, store))
-        }
-
-        OpTarget::LogicalNot => Some(emit_logical_not(graph, node_id, node, store)),
-        OpTarget::LogicalAnd => Some(emit_logical_and(graph, node_id, node, store)),
-        OpTarget::LogicalOr => Some(emit_logical_or(graph, node_id, node, store)),
-        OpTarget::LogicalXor => Some(emit_logical_xor(graph, node_id, node, store)),
-
-        OpTarget::Gt => Some(emit_aten_gt(graph, node_id, node, store)),
-        OpTarget::Ge => Some(emit_aten_ge(graph, node_id, node, store)),
-        OpTarget::Lt => Some(emit_aten_lt(graph, node_id, node, store)),
-        OpTarget::Le => Some(emit_aten_le(graph, node_id, node, store)),
-        OpTarget::Eq => Some(emit_aten_eq(graph, node_id, node, store)),
-
-        OpTarget::Sin => Some(emit_sin(graph, node_id, node, store)),
-        OpTarget::Cos => Some(emit_cos(graph, node_id, node, store)),
-
-        OpTarget::Mean => Some(emit_aten_mean(graph, node_id, node, store)),
-        OpTarget::Unsqueeze => Some(emit_aten_unsqueeze(graph, node_id, node, store)),
-        OpTarget::Squeeze => Some(emit_aten_squeeze(graph, node_id, node, store)),
-        OpTarget::Div => Some(emit_aten_div(graph, node_id, node, store)),
-        OpTarget::Sqrt => Some(emit_aten_sqrt(graph, node_id, node, store)),
-        OpTarget::Pow => Some(emit_pow(graph, node_id, node, store)),
-        OpTarget::FullLike => Some(emit_full_like(graph, node_id, node, store)),
-        OpTarget::Sign => Some(emit_aten_sign(graph, node_id, node, store)),
-        OpTarget::Expm1 => Some(emit_aten_expm1(graph, node_id, node, store)),
-        OpTarget::Log1p => Some(emit_aten_log1p(graph, node_id, node, store)),
-        OpTarget::FloorDivide => Some(emit_aten_floor_divide(graph, node_id, node, store)),
-        OpTarget::LeakyRelu => Some(emit_aten_leaky_relu(graph, node_id, node, store)),
-
-        OpTarget::TosaMaximum => Some(emit_maximum(graph, node_id, node, store)),
-        OpTarget::TosaMinimum => Some(emit_minimum(graph, node_id, node, store)),
-        OpTarget::TosaReduceMax => Some(emit_aten_amax(graph, node_id, node, store)),
-        OpTarget::TosaReduceMin => Some(emit_aten_amin(graph, node_id, node, store)),
-        OpTarget::TosaReduceAny => Some(emit_aten_any(graph, node_id, node, store)),
-
-        OpTarget::Zeros => Some(emit_full(graph, node_id, node, store)),
-
-        OpTarget::Other(target) if target.contains("getitem") => Some(EmitResult::default()),
-
-        _ => {
+    EMITTER_TABLE.with(|table| {
+        if let Some(emitter) = table.get(&node.target) {
+            let ctx = EmitContext {
+                graph,
+                node_id,
+                node,
+                store,
+            };
+            Some(emitter(&ctx))
+        } else {
             if std::env::var("TOSA_ENGINE_DEBUG").is_ok() {
                 eprintln!(
                     "[emit_node] SKIPPED unhandled target: {:?} (node '{}')",
@@ -245,5 +270,5 @@ pub fn emit_node(
             }
             None
         }
-    }
+    })
 }

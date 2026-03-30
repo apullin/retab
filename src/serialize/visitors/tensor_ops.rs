@@ -1,4 +1,5 @@
 use super::*;
+use super::emitter::EmitContext;
 
 struct ParsedResizeSpec {
     input_name: String,
@@ -211,8 +212,6 @@ struct ParsedShapeTransformSpec {
 }
 
 impl ParsedShapeTransformSpec {
-    // Parse once at the shape-op boundary so emitters can work from a typed
-    // representation of the target tensor instead of re-deriving it ad hoc.
     fn parse(graph: &Graph, store: &TensorStore, node: &Node) -> Self {
         Self {
             input_names: collect_input_names(graph, node),
@@ -223,12 +222,10 @@ impl ParsedShapeTransformSpec {
     }
 }
 
-pub(super) fn emit_full(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_full(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let output_shape = actual_tensor_shape(graph, store, node);
     let fill_value = node.args.get(1).map_or(0.0, Arg::as_f64);
     let dtype = node.meta.val.dtype;
@@ -244,16 +241,12 @@ pub(super) fn emit_full(
     result
 }
 
-pub(super) fn emit_scalar_tensor(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_scalar_tensor(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut output_shape = actual_tensor_shape(graph, store, node);
     if output_shape.is_empty() {
-        // TOSA scalar constants are represented as rank-1 [1] tensors and then
-        // broadcast by consumers such as ADD/WHERE.
         output_shape.push(1);
     }
     let fill_value = node.args.first().map_or(0.0, Arg::as_f64);
@@ -277,12 +270,10 @@ pub(super) fn emit_scalar_tensor(
     result
 }
 
-pub(super) fn emit_resize(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_resize(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let Some(spec) = ParsedResizeSpec::parse(graph, node, store) else {
         return EmitResult::default();
     };
@@ -364,21 +355,14 @@ pub(super) fn emit_resize(
     result
 }
 
-pub(super) fn emit_aten_reshape(
-    graph: &Graph,
-    node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
-    emit_reshape(graph, node_id, node, store)
+pub(super) fn emit_aten_reshape(ctx: &EmitContext) -> EmitResult {
+    emit_reshape(ctx)
 }
 
-pub(super) fn emit_aten_permute(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_aten_permute(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let spec = ParsedShapeTransformSpec::parse(graph, store, node);
     let perms = arg_i32_list(node, 1);
@@ -497,12 +481,10 @@ fn emit_tile_like(
     result
 }
 
-pub(super) fn emit_expand(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_expand(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let Some(Arg::Node(input_id)) = node.args.first() else {
         return EmitResult::default();
     };
@@ -534,22 +516,17 @@ pub(super) fn emit_expand(
     emit_tile_like(graph, node, store, multiples)
 }
 
-pub(super) fn emit_repeat(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_repeat(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let multiples = apply_tosa_dim_order(node, arg_i32_list(node, 1));
     emit_tile_like(graph, node, store, multiples)
 }
 
-pub(super) fn emit_const(
-    _graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_const(ctx: &EmitContext) -> EmitResult {
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let name = &node.name;
     let (shape, dtype, data) = if let Some(tensor_data) = store.get(name) {
@@ -578,12 +555,10 @@ pub(super) fn emit_const(
     result
 }
 
-pub(super) fn emit_transpose(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_transpose(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let perms = {
@@ -623,12 +598,10 @@ pub(super) fn emit_transpose(
     result
 }
 
-pub(super) fn emit_reshape(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_reshape(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let out_shape = actual_tensor_shape(graph, store, node);
@@ -666,12 +639,9 @@ pub(super) fn emit_reshape(
     result
 }
 
-pub(super) fn emit_concat(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_concat(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let raw_axis = match node.args.get(1) {

@@ -1,4 +1,5 @@
 use super::*;
+use super::emitter::EmitContext;
 use crate::graph::ir::Arg;
 
 mod extrema;

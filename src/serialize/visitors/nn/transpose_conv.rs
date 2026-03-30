@@ -1,11 +1,8 @@
 use super::*;
 
-pub(in crate::serialize::visitors) fn emit_transpose_conv2d(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_transpose_conv2d(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let output_shape = apply_tosa_dim_order(node, raw_i32_shape(node));

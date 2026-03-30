@@ -1,11 +1,10 @@
 use super::*;
+use super::emitter::EmitContext;
 
-pub(super) fn emit_matmul(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let out_shape = actual_tensor_shape(graph, store, node);

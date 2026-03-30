@@ -1,4 +1,5 @@
 use super::*;
+use super::emitter::EmitContext;
 use crate::graph::ir::Arg;
 
 #[derive(Debug)]
@@ -26,8 +27,6 @@ struct ParsedSliceSpec {
 }
 
 impl ParsedSelectCopySpec {
-    // Parse and normalize axis/index once so emission works with a precise,
-    // already-bounded view of the operation.
     fn parse(graph: &Graph, node: &Node, store: &TensorStore) -> Self {
         let input_names = collect_input_names(graph, node);
         let input_name = input_names.first().cloned().unwrap_or_default();
@@ -137,12 +136,10 @@ impl ParsedSliceSpec {
     }
 }
 
-pub(super) fn emit_select(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_select(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let mut input_names = collect_input_names(graph, node);
     maybe_materialize_select_scalar_inputs(graph, node, store, &mut result, &mut input_names);
@@ -209,12 +206,10 @@ fn maybe_materialize_select_scalar_inputs(
     }
 }
 
-pub(super) fn emit_select_copy(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_select_copy(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let spec = ParsedSelectCopySpec::parse(graph, node, store);
     let mut result = EmitResult::default();
 
@@ -259,12 +254,9 @@ pub(super) fn emit_select_copy(
     result
 }
 
-pub(super) fn emit_index_select(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_index_select(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
 
@@ -286,12 +278,9 @@ pub(super) fn emit_index_select(
     result
 }
 
-pub(super) fn emit_gather(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_gather(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
     let mut result = EmitResult::default();
     result.push_output_op(
         make_output_tensor(node),
@@ -302,12 +291,9 @@ pub(super) fn emit_gather(
     result
 }
 
-pub(super) fn emit_scatter(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_scatter(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
     let mut result = EmitResult::default();
     result.push_output_op(
         make_output_tensor(node),
@@ -318,12 +304,10 @@ pub(super) fn emit_scatter(
     result
 }
 
-pub(super) fn emit_slice(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_slice(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let spec = ParsedSliceSpec::parse(graph, node, store);
     let mut result = EmitResult::default();
 

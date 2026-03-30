@@ -1,11 +1,9 @@
 use super::*;
 
-pub(in crate::serialize::visitors) fn emit_aten_mean(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let spec = ParsedReduceSpec::parse(graph, node, store, false);
     let mut result = EmitResult::default();
 

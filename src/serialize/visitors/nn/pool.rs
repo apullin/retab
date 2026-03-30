@@ -80,12 +80,10 @@ fn adjusted_max_pool_pad(
     vec![symmetric_pad[0], post_pad_h, symmetric_pad[1], post_pad_w]
 }
 
-pub(in crate::serialize::visitors) fn emit_aten_max_pool2d(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_aten_max_pool2d(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let output_name = primary_output_name(graph, node);
     let input_names = collect_input_names(graph, node);
@@ -145,12 +143,10 @@ pub(in crate::serialize::visitors) fn emit_aten_max_pool2d(
     result
 }
 
-pub(in crate::serialize::visitors) fn emit_max_pool2d(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_max_pool2d(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let output_name = primary_output_name(graph, node);
     let input_names = collect_input_names(graph, node);
@@ -210,12 +206,10 @@ pub(in crate::serialize::visitors) fn emit_max_pool2d(
     result
 }
 
-pub(in crate::serialize::visitors) fn emit_avg_pool2d(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let kernel = {

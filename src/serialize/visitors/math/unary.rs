@@ -1,11 +1,8 @@
 use super::*;
 
-pub(in crate::serialize::visitors) fn emit_negate(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_negate(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let input_dtype = passthrough_input_dtype(graph, node);
@@ -62,12 +59,9 @@ pub(in crate::serialize::visitors) fn emit_negate(
     result
 }
 
-pub(in crate::serialize::visitors) fn emit_ceil(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_ceil(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
     let input_dtype = passthrough_input_dtype(graph, node);
     if is_integral_dtype(input_dtype) {
         emit_identity(graph, node)
@@ -85,12 +79,9 @@ pub(in crate::serialize::visitors) fn emit_ceil(
     }
 }
 
-pub(in crate::serialize::visitors) fn emit_floor(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_floor(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
     let input_dtype = passthrough_input_dtype(graph, node);
     if is_integral_dtype(input_dtype) {
         emit_identity(graph, node)
@@ -108,12 +99,10 @@ pub(in crate::serialize::visitors) fn emit_floor(
     }
 }
 
-pub(in crate::serialize::visitors) fn emit_round(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_round(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let input_dtype = passthrough_input_dtype(graph, node);
     if is_integral_dtype(input_dtype) {
         return emit_identity(graph, node);

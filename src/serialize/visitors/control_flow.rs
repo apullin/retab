@@ -1,4 +1,5 @@
 use super::*;
+use super::emitter::EmitContext;
 use crate::graph::ir::Arg;
 use crate::serialize::tosa_generated::CondIfAttribute;
 
@@ -55,12 +56,9 @@ fn cond_output_tensors(graph: &Graph, node: &Node) -> Vec<TosaTensor> {
     }
 }
 
-pub(super) fn emit_cond_if(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_cond_if(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
     let spec = CondIfSpec::parse(graph, node);
     let output_names = spec
         .output_tensors

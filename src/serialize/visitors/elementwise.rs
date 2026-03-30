@@ -1,4 +1,5 @@
 use super::*;
+use super::emitter::EmitContext;
 
 mod comparison;
 mod logical;

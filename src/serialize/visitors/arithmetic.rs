@@ -1,4 +1,5 @@
 use super::*;
+use super::emitter::EmitContext;
 
 struct ParsedReshapeEmitterSpec {
     input_name: String,
@@ -43,12 +44,10 @@ fn push_shift_const(result: &mut EmitResult, node_name: &str) -> String {
     shift_name
 }
 
-pub(super) fn emit_aten_clamp(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
 
     let input_names = collect_input_names(graph, node);
@@ -172,39 +171,21 @@ pub(super) fn emit_aten_clamp(
     result
 }
 
-pub(super) fn emit_aten_add(
-    graph: &Graph,
-    node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
-    emit_add(graph, node_id, node, store)
+pub(super) fn emit_aten_add(ctx: &EmitContext) -> EmitResult {
+    emit_add(ctx)
 }
 
-pub(super) fn emit_aten_sub(
-    graph: &Graph,
-    node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
-    emit_sub(graph, node_id, node, store)
+pub(super) fn emit_aten_sub(ctx: &EmitContext) -> EmitResult {
+    emit_sub(ctx)
 }
 
-pub(super) fn emit_aten_mul(
-    graph: &Graph,
-    node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
-    emit_mul(graph, node_id, node, store)
+pub(super) fn emit_aten_mul(ctx: &EmitContext) -> EmitResult {
+    emit_mul(ctx)
 }
 
-pub(super) fn emit_clamp(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    _store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_clamp(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let clamp_dtype = node.meta.val.dtype;
@@ -232,30 +213,18 @@ pub(super) fn emit_clamp(
     result
 }
 
-pub(super) fn emit_add(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
-    emit_direct_binary(graph, node, store, Op::Add, Attribute::Add(AddAttribute))
+pub(super) fn emit_add(ctx: &EmitContext) -> EmitResult {
+    emit_direct_binary(ctx.graph, ctx.node, ctx.store, Op::Add, Attribute::Add(AddAttribute))
 }
 
-pub(super) fn emit_sub(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
-    emit_direct_binary(graph, node, store, Op::Sub, Attribute::Sub(SubAttribute))
+pub(super) fn emit_sub(ctx: &EmitContext) -> EmitResult {
+    emit_direct_binary(ctx.graph, ctx.node, ctx.store, Op::Sub, Attribute::Sub(SubAttribute))
 }
 
-pub(super) fn emit_mul(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_mul(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let mut inputs = collect_input_names(graph, node);
     maybe_materialize_binary_broadcast(graph, store, node, &mut result, &mut inputs);
@@ -269,12 +238,10 @@ pub(super) fn emit_mul(
     result
 }
 
-pub(super) fn emit_aten_unsqueeze(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_aten_unsqueeze(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let spec = ParsedReshapeEmitterSpec::parse(graph, store, node).unwrap_or_else(|| {
         panic!(
@@ -293,12 +260,10 @@ pub(super) fn emit_aten_unsqueeze(
     result
 }
 
-pub(super) fn emit_aten_squeeze(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(super) fn emit_aten_squeeze(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let spec = ParsedReshapeEmitterSpec::parse(graph, store, node)
         .unwrap_or_else(|| panic!("emit_aten_squeeze: missing input for node '{}'", node.name));

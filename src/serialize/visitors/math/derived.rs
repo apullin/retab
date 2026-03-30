@@ -4,12 +4,10 @@ fn temp_tensor(name: String, shape: Vec<i32>, dtype: DType) -> TosaTensor {
     make_empty_tensor(name, shape, dtype)
 }
 
-pub(in crate::serialize::visitors) fn emit_aten_div(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_aten_div(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let spec =
         ParsedBinaryTensorSpec::parse(graph, store, node, &mut result).unwrap_or_else(|| {
@@ -41,12 +39,10 @@ pub(in crate::serialize::visitors) fn emit_aten_div(
     result
 }
 
-pub(in crate::serialize::visitors) fn emit_aten_sqrt(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_aten_sqrt(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let spec = ParsedUnaryTensorSpec::parse(graph, store, node)
         .unwrap_or_else(|| panic!("emit_aten_sqrt: missing input for node '{}'", node.name));
@@ -66,12 +62,10 @@ pub(in crate::serialize::visitors) fn emit_aten_sqrt(
     result
 }
 
-pub(in crate::serialize::visitors) fn emit_full_like(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_full_like(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let output_shape = actual_tensor_shape(graph, store, node);
     let fill_val = match node.args.get(1) {
@@ -93,12 +87,10 @@ pub(in crate::serialize::visitors) fn emit_full_like(
     result
 }
 
-pub(in crate::serialize::visitors) fn emit_aten_sign(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_aten_sign(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let spec = ParsedUnaryTensorSpec::parse(graph, store, node)
         .unwrap_or_else(|| panic!("emit_aten_sign: missing input for node '{}'", node.name));
@@ -155,12 +147,10 @@ pub(in crate::serialize::visitors) fn emit_aten_sign(
     result
 }
 
-pub(in crate::serialize::visitors) fn emit_aten_expm1(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_aten_expm1(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let spec = ParsedUnaryTensorSpec::parse(graph, store, node)
         .unwrap_or_else(|| panic!("emit_aten_expm1: missing input for node '{}'", node.name));
@@ -188,12 +178,10 @@ pub(in crate::serialize::visitors) fn emit_aten_expm1(
     result
 }
 
-pub(in crate::serialize::visitors) fn emit_aten_log1p(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_aten_log1p(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let spec = ParsedUnaryTensorSpec::parse(graph, store, node)
         .unwrap_or_else(|| panic!("emit_aten_log1p: missing input for node '{}'", node.name));
@@ -224,21 +212,14 @@ pub(in crate::serialize::visitors) fn emit_aten_log1p(
     result
 }
 
-pub(in crate::serialize::visitors) fn emit_aten_floor_divide(
-    graph: &Graph,
-    node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
-    emit_aten_div(graph, node_id, node, store)
+pub(in crate::serialize::visitors) fn emit_aten_floor_divide(ctx: &EmitContext) -> EmitResult {
+    emit_aten_div(ctx)
 }
 
-pub(in crate::serialize::visitors) fn emit_aten_leaky_relu(
-    graph: &Graph,
-    _node_id: NodeId,
-    node: &Node,
-    store: &TensorStore,
-) -> EmitResult {
+pub(in crate::serialize::visitors) fn emit_aten_leaky_relu(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let spec = ParsedUnaryTensorSpec::parse(graph, store, node).unwrap_or_else(|| {
         panic!(
