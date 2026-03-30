@@ -36,15 +36,12 @@ pub(in crate::serialize::visitors) fn emit_negate(
         (input_zp_name.clone(), input_zp),
         (output_zp_name.clone(), output_zp),
     ] {
-        result.tensors.push(TosaTensor {
-            name: name.clone(),
-            shape: vec![1],
-            dtype: input_dtype,
-            data: encode_zp_for_dtype(value, input_dtype),
-            variable: false,
-            is_unranked: false,
-            variable_name: String::new(),
-        });
+        result.tensors.push(TosaTensor::with_data(
+            name.clone(),
+            vec![1],
+            input_dtype,
+            encode_zp_for_dtype(value, input_dtype),
+        ));
         result.operators.push(TosaOperator {
             op: Op::Const,
             attribute: Attribute::Const(ConstAttribute),
@@ -171,19 +168,15 @@ pub(in crate::serialize::visitors) fn emit_round(
         minus_half_name.clone(),
     ] {
         let is_bool = tensor_name == ge_name;
-        result.tensors.push(TosaTensor {
-            name: tensor_name,
-            shape: spec.output_shape.clone(),
-            dtype: if is_bool {
+        result.tensors.push(TosaTensor::new(
+            tensor_name,
+            spec.output_shape.clone(),
+            if is_bool {
                 DType::Bool
             } else {
                 ir_dtype_to_tosa(spec.ir_dtype)
             },
-            data: Vec::new(),
-            variable: false,
-            is_unranked: false,
-            variable_name: String::new(),
-        });
+        ));
     }
 
     result.operators.push(TosaOperator {
@@ -212,15 +205,11 @@ pub(in crate::serialize::visitors) fn emit_round(
         (floor_name.clone(), Op::Floor, plus_half_name),
         (ceil_name.clone(), Op::Ceil, minus_half_name),
     ] {
-        result.tensors.push(TosaTensor {
-            name: tensor_name.clone(),
-            shape: spec.output_shape.clone(),
-            dtype: ir_dtype_to_tosa(spec.ir_dtype),
-            data: Vec::new(),
-            variable: false,
-            is_unranked: false,
-            variable_name: String::new(),
-        });
+        result.tensors.push(TosaTensor::new(
+            tensor_name.clone(),
+            spec.output_shape.clone(),
+            ir_dtype_to_tosa(spec.ir_dtype),
+        ));
         result.operators.push(TosaOperator {
             op,
             attribute: if op == Op::Floor {
@@ -234,15 +223,11 @@ pub(in crate::serialize::visitors) fn emit_round(
         });
     }
 
-    result.tensors.push(TosaTensor {
-        name: node.name.clone(),
-        shape: spec.output_shape,
-        dtype: ir_dtype_to_tosa(spec.ir_dtype),
-        data: Vec::new(),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    });
+    result.tensors.push(TosaTensor::new(
+        node.name.clone(),
+        spec.output_shape,
+        ir_dtype_to_tosa(spec.ir_dtype),
+    ));
     result.operators.push(TosaOperator {
         op: Op::Select,
         attribute: Attribute::Select(SelectAttribute),

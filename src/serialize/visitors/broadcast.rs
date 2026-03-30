@@ -54,15 +54,11 @@ pub(super) fn maybe_materialize_binary_broadcast(
         .flat_map(|&d| (d as i64).to_le_bytes())
         .collect();
 
-    result.tensors.push(TosaTensor {
-        name: broadcast_name.clone(),
-        shape: target_shape,
-        dtype: ir_dtype_to_tosa(input_nodes[smaller_idx].meta.val.dtype),
-        data: Vec::new(),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    });
+    result.tensors.push(TosaTensor::new(
+        broadcast_name.clone(),
+        target_shape,
+        ir_dtype_to_tosa(input_nodes[smaller_idx].meta.val.dtype),
+    ));
     result.shapes.push(TosaShape {
         name: shape_name.clone(),
         rank,

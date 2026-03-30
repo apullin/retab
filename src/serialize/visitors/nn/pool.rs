@@ -271,15 +271,12 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(
     let output_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
 
     let input_zp_name = format!("{}_input_zp", node.name);
-    result.tensors.push(TosaTensor {
-        name: input_zp_name.clone(),
-        shape: vec![1],
-        dtype: input_dtype,
-        data: encode_zp_for_dtype(input_zp, input_dtype),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    });
+    result.tensors.push(TosaTensor::with_data(
+        input_zp_name.clone(),
+        vec![1],
+        input_dtype,
+        encode_zp_for_dtype(input_zp, input_dtype),
+    ));
     result.operators.push(TosaOperator {
         op: Op::Const,
         attribute: Attribute::Const(ConstAttribute),
@@ -289,15 +286,12 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(
     });
 
     let output_zp_name = format!("{}_output_zp", node.name);
-    result.tensors.push(TosaTensor {
-        name: output_zp_name.clone(),
-        shape: vec![1],
-        dtype: output_dtype,
-        data: encode_zp_for_dtype(output_zp, output_dtype),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    });
+    result.tensors.push(TosaTensor::with_data(
+        output_zp_name.clone(),
+        vec![1],
+        output_dtype,
+        encode_zp_for_dtype(output_zp, output_dtype),
+    ));
     result.operators.push(TosaOperator {
         op: Op::Const,
         attribute: Attribute::Const(ConstAttribute),

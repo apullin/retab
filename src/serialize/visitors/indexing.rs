@@ -231,15 +231,11 @@ pub(super) fn emit_select_copy(
         format!("{}_size", slice_name),
         size_vec.clone(),
     );
-    result.tensors.push(TosaTensor {
-        name: slice_name.clone(),
-        shape: size_vec,
-        dtype: spec.dtype,
-        data: Vec::new(),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    });
+    result.tensors.push(TosaTensor::new(
+        slice_name.clone(),
+        size_vec,
+        spec.dtype,
+    ));
     result.operators.push(TosaOperator {
         op: Op::Slice,
         attribute: Attribute::Slice(SliceAttribute),
@@ -361,15 +357,11 @@ pub(super) fn emit_slice(
         format!("{}_slice_size", node.name),
         spec.size_shape.clone(),
     );
-    result.tensors.push(TosaTensor {
-        name: node.name.clone(),
-        shape: spec.size_shape,
-        dtype: ir_dtype_to_tosa(node.meta.val.dtype),
-        data: Vec::new(),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    });
+    result.tensors.push(TosaTensor::new(
+        node.name.clone(),
+        spec.size_shape,
+        ir_dtype_to_tosa(node.meta.val.dtype),
+    ));
 
     result.operators.push(TosaOperator {
         op: Op::Slice,

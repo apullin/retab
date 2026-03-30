@@ -76,15 +76,11 @@ pub(in crate::serialize::visitors) fn emit_pad(
         }
     }
 
-    result.tensors.push(TosaTensor {
-        name: node.name.clone(),
-        shape: output_shape,
-        dtype: ir_dtype_to_tosa(node.meta.val.dtype),
-        data: Vec::new(),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    });
+    result.tensors.push(TosaTensor::new(
+        node.name.clone(),
+        output_shape,
+        ir_dtype_to_tosa(node.meta.val.dtype),
+    ));
 
     let mut pad_shape = Vec::with_capacity(rank * 2);
     for (before, after) in &reordered_pad {
@@ -104,15 +100,12 @@ pub(in crate::serialize::visitors) fn emit_pad(
         }
         _ => raw_pad_value,
     };
-    result.tensors.push(TosaTensor {
-        name: pad_const_name.clone(),
-        shape: vec![1],
-        dtype: pad_dtype,
-        data: encode_zp_for_dtype(pad_value, pad_dtype),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    });
+    result.tensors.push(TosaTensor::with_data(
+        pad_const_name.clone(),
+        vec![1],
+        pad_dtype,
+        encode_zp_for_dtype(pad_value, pad_dtype),
+    ));
     result.operators.push(TosaOperator {
         op: Op::Const,
         attribute: Attribute::Const(ConstAttribute),

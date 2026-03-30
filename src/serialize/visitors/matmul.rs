@@ -21,15 +21,11 @@ pub(super) fn emit_matmul(
     };
 
     if !promote_2d {
-        result.tensors.push(TosaTensor {
-            name: node.name.clone(),
-            shape: out_shape.clone(),
-            dtype: matmul_out_dtype,
-            data: Vec::new(),
-            variable: false,
-            is_unranked: false,
-            variable_name: String::new(),
-        });
+        result.tensors.push(TosaTensor::new(
+            node.name.clone(),
+            out_shape.clone(),
+            matmul_out_dtype,
+        ));
     }
 
     let a_zp = node
@@ -97,15 +93,11 @@ pub(super) fn emit_matmul(
                 b_dtype,
             );
 
-            result.tensors.push(TosaTensor {
-                name: temp_out_name.clone(),
-                shape: temp_out_shape,
-                dtype: matmul_out_dtype,
-                data: Vec::new(),
-                variable: false,
-                is_unranked: false,
-                variable_name: String::new(),
-            });
+            result.tensors.push(TosaTensor::new(
+                temp_out_name.clone(),
+                temp_out_shape,
+                matmul_out_dtype,
+            ));
 
             vec![a_reshape_name, b_reshape_name]
         } else {
@@ -116,15 +108,12 @@ pub(super) fn emit_matmul(
     };
 
     let a_zp_name = format!("{}_A_zp", node.name);
-    result.tensors.push(TosaTensor {
-        name: a_zp_name.clone(),
-        shape: vec![1],
-        dtype: a_dtype,
-        data: encode_zp_for_dtype(a_zp, a_dtype),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    });
+    result.tensors.push(TosaTensor::with_data(
+        a_zp_name.clone(),
+        vec![1],
+        a_dtype,
+        encode_zp_for_dtype(a_zp, a_dtype),
+    ));
     result.operators.push(TosaOperator {
         op: Op::Const,
         attribute: Attribute::Const(ConstAttribute),
@@ -134,15 +123,12 @@ pub(super) fn emit_matmul(
     });
 
     let b_zp_name = format!("{}_B_zp", node.name);
-    result.tensors.push(TosaTensor {
-        name: b_zp_name.clone(),
-        shape: vec![1],
-        dtype: b_dtype,
-        data: encode_zp_for_dtype(b_zp, b_dtype),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    });
+    result.tensors.push(TosaTensor::with_data(
+        b_zp_name.clone(),
+        vec![1],
+        b_dtype,
+        encode_zp_for_dtype(b_zp, b_dtype),
+    ));
     result.operators.push(TosaOperator {
         op: Op::Const,
         attribute: Attribute::Const(ConstAttribute),

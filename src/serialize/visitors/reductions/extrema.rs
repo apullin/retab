@@ -31,15 +31,11 @@ fn emit_reduce_extrema(
             format!("{}_{}_axis{}", node.name, name, axis.raw_dim)
         };
 
-        result.tensors.push(TosaTensor {
-            name: out_name.clone(),
-            shape: out_shape.clone(),
-            dtype: base_dtype,
-            data: Vec::new(),
-            variable: false,
-            is_unranked: false,
-            variable_name: String::new(),
-        });
+        result.tensors.push(TosaTensor::new(
+            out_name.clone(),
+            out_shape.clone(),
+            base_dtype,
+        ));
         result.operators.push(TosaOperator {
             op,
             attribute: match kind {

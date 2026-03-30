@@ -20,15 +20,11 @@ pub(in crate::serialize::visitors) fn emit_reduce_sum(
         format!("{}_reduce_axis{}", node.name, spec.raw_axis)
     };
 
-    result.tensors.push(TosaTensor {
-        name: reduce_output.clone(),
-        shape: reduce_shape.clone(),
-        dtype: spec.reduce_dtype,
-        data: Vec::new(),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    });
+    result.tensors.push(TosaTensor::new(
+        reduce_output.clone(),
+        reduce_shape.clone(),
+        spec.reduce_dtype,
+    ));
 
     result.operators.push(TosaOperator {
         op: Op::ReduceSum,
@@ -103,15 +99,11 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(
             format!("{}_reduce_axis{}", node.name, axis.raw_dim)
         };
 
-        result.tensors.push(TosaTensor {
-            name: out_name.clone(),
-            shape: out_shape.clone(),
-            dtype: base_dtype,
-            data: Vec::new(),
-            variable: false,
-            is_unranked: false,
-            variable_name: String::new(),
-        });
+        result.tensors.push(TosaTensor::new(
+            out_name.clone(),
+            out_shape.clone(),
+            base_dtype,
+        ));
 
         result.operators.push(TosaOperator {
             op: Op::ReduceSum,

@@ -34,15 +34,11 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(
             format!("{}_reduce_sum_axis{}", node.name, axis.raw_dim)
         };
 
-        result.tensors.push(TosaTensor {
-            name: out_name.clone(),
-            shape: out_shape.clone(),
-            dtype: base_dtype,
-            data: Vec::new(),
-            variable: false,
-            is_unranked: false,
-            variable_name: String::new(),
-        });
+        result.tensors.push(TosaTensor::new(
+            out_name.clone(),
+            out_shape.clone(),
+            base_dtype,
+        ));
         result.operators.push(TosaOperator {
             op: Op::ReduceSum,
             attribute: Attribute::ReduceSum(ReduceSumAttribute {
@@ -71,26 +67,19 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(
     } else {
         format!("{}_mean_pre_reshape", node.name)
     };
-    result.tensors.push(TosaTensor {
-        name: final_name.clone(),
-        shape: current_shape.clone(),
-        dtype: base_dtype,
-        data: Vec::new(),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    });
+    result.tensors.push(TosaTensor::new(
+        final_name.clone(),
+        current_shape.clone(),
+        base_dtype,
+    ));
 
     let shift_name = format!("{}_mul_shift", node.name);
-    result.tensors.push(TosaTensor {
-        name: shift_name.clone(),
-        shape: vec![1],
-        dtype: DType::Int8,
-        data: vec![0u8],
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    });
+    result.tensors.push(TosaTensor::with_data(
+        shift_name.clone(),
+        vec![1],
+        DType::Int8,
+        vec![0u8],
+    ));
     result.operators.push(TosaOperator {
         op: Op::Const,
         attribute: Attribute::Const(ConstAttribute),

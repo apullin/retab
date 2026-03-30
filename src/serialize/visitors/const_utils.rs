@@ -6,15 +6,7 @@ pub(super) fn make_tensor(
     dtype: DType,
     data: Vec<u8>,
 ) -> TosaTensor {
-    TosaTensor {
-        name,
-        shape,
-        dtype,
-        data,
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    }
+    TosaTensor::with_data(name, shape, dtype, data)
 }
 
 pub(super) fn make_empty_tensor(name: String, shape: Vec<i32>, dtype: DType) -> TosaTensor {

@@ -75,15 +75,7 @@ pub(super) fn compute_conv2d_nhwc_output(
         _ => fallback_shape,
     };
 
-    TosaTensor {
-        name: node.name.clone(),
-        shape: final_shape,
-        dtype,
-        data: Vec::new(),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    }
+    TosaTensor::new(node.name.clone(), final_shape, dtype)
 }
 
 pub(super) fn compute_conv3d_ndhwc_output(
@@ -158,15 +150,7 @@ pub(super) fn compute_conv3d_ndhwc_output(
         _ => fallback_shape,
     };
 
-    TosaTensor {
-        name: node.name.clone(),
-        shape: final_shape,
-        dtype,
-        data: Vec::new(),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    }
+    TosaTensor::new(node.name.clone(), final_shape, dtype)
 }
 
 pub(super) fn compute_depthwise_conv2d_nhwc_output(
@@ -227,15 +211,7 @@ pub(super) fn compute_depthwise_conv2d_nhwc_output(
         }
     });
 
-    TosaTensor {
-        name: node.name.clone(),
-        shape: final_shape,
-        dtype,
-        data: Vec::new(),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    }
+    TosaTensor::new(node.name.clone(), final_shape, dtype)
 }
 
 pub(super) fn compute_pool_nhwc_output(
@@ -290,15 +266,7 @@ pub(super) fn compute_pool_nhwc_output(
         _ => fallback_shape,
     };
 
-    TosaTensor {
-        name: node.name.clone(),
-        shape: final_shape,
-        dtype,
-        data: Vec::new(),
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
-    }
+    TosaTensor::new(node.name.clone(), final_shape, dtype)
 }
 
 fn conv_pad_remainder(input_len: i32, pad: i32, dilation: i32, kernel: i32, stride: i32) -> i32 {
