@@ -701,6 +701,13 @@ pub struct TosaOperator {
     pub location: Option<OpLocation>,
 }
 
+impl TosaOperator {
+    /// Create an operator with no location metadata (the common case).
+    pub fn new(op: Op, attribute: Attribute, inputs: Vec<String>, outputs: Vec<String>) -> Self {
+        Self { op, attribute, inputs, outputs, location: None }
+    }
+}
+
 /// TosaBasicBlock — contains operators and their tensors.
 #[derive(Debug, Clone)]
 pub struct TosaBasicBlock {

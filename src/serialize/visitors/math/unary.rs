@@ -42,25 +42,23 @@ pub(in crate::serialize::visitors) fn emit_negate(
             input_dtype,
             encode_zp_for_dtype(value, input_dtype),
         ));
-        result.operators.push(TosaOperator {
-            op: Op::Const,
-            attribute: Attribute::Const(ConstAttribute),
-            inputs: vec![],
-            outputs: vec![name],
-            location: None,
-        });
+        result.operators.push(TosaOperator::new(
+            Op::Const,
+            Attribute::Const(ConstAttribute),
+            vec![],
+            vec![name],
+        ));
     }
 
     let mut negate_inputs = input_names;
     negate_inputs.push(input_zp_name);
     negate_inputs.push(output_zp_name);
-    result.operators.push(TosaOperator {
-        op: Op::Negate,
-        attribute: Attribute::Negate(NegateAttribute),
-        inputs: negate_inputs,
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Negate,
+        Attribute::Negate(NegateAttribute),
+        negate_inputs,
+        vec![node.name.clone()],
+    ));
     result
 }
 
@@ -77,13 +75,12 @@ pub(in crate::serialize::visitors) fn emit_ceil(
         let mut result = EmitResult::default();
         let input_names = collect_input_names(graph, node);
         result.tensors.push(make_output_tensor(node));
-        result.operators.push(TosaOperator {
-            op: Op::Ceil,
-            attribute: Attribute::Ceil(CeilAttribute),
-            inputs: input_names,
-            outputs: vec![node.name.clone()],
-            location: None,
-        });
+        result.operators.push(TosaOperator::new(
+            Op::Ceil,
+            Attribute::Ceil(CeilAttribute),
+            input_names,
+            vec![node.name.clone()],
+        ));
         result
     }
 }
@@ -101,13 +98,12 @@ pub(in crate::serialize::visitors) fn emit_floor(
         let mut result = EmitResult::default();
         let input_names = collect_input_names(graph, node);
         result.tensors.push(make_output_tensor(node));
-        result.operators.push(TosaOperator {
-            op: Op::Floor,
-            attribute: Attribute::Floor(FloorAttribute),
-            inputs: input_names,
-            outputs: vec![node.name.clone()],
-            location: None,
-        });
+        result.operators.push(TosaOperator::new(
+            Op::Floor,
+            Attribute::Floor(FloorAttribute),
+            input_names,
+            vec![node.name.clone()],
+        ));
         result
     }
 }
@@ -179,27 +175,24 @@ pub(in crate::serialize::visitors) fn emit_round(
         ));
     }
 
-    result.operators.push(TosaOperator {
-        op: Op::GreaterEqual,
-        attribute: Attribute::GreaterEqual(GreaterEqualAttribute),
-        inputs: vec![spec.input_name.clone(), zero_name],
-        outputs: vec![ge_name.clone()],
-        location: None,
-    });
-    result.operators.push(TosaOperator {
-        op: Op::Add,
-        attribute: Attribute::Add(AddAttribute),
-        inputs: vec![spec.input_name.clone(), half_name.clone()],
-        outputs: vec![plus_half_name.clone()],
-        location: None,
-    });
-    result.operators.push(TosaOperator {
-        op: Op::Sub,
-        attribute: Attribute::Sub(SubAttribute),
-        inputs: vec![spec.input_name.clone(), half_name],
-        outputs: vec![minus_half_name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::GreaterEqual,
+        Attribute::GreaterEqual(GreaterEqualAttribute),
+        vec![spec.input_name.clone(), zero_name],
+        vec![ge_name.clone()],
+    ));
+    result.operators.push(TosaOperator::new(
+        Op::Add,
+        Attribute::Add(AddAttribute),
+        vec![spec.input_name.clone(), half_name.clone()],
+        vec![plus_half_name.clone()],
+    ));
+    result.operators.push(TosaOperator::new(
+        Op::Sub,
+        Attribute::Sub(SubAttribute),
+        vec![spec.input_name.clone(), half_name],
+        vec![minus_half_name.clone()],
+    ));
 
     for (tensor_name, op, input) in [
         (floor_name.clone(), Op::Floor, plus_half_name),
@@ -210,17 +203,16 @@ pub(in crate::serialize::visitors) fn emit_round(
             spec.output_shape.clone(),
             ir_dtype_to_tosa(spec.ir_dtype),
         ));
-        result.operators.push(TosaOperator {
+        result.operators.push(TosaOperator::new(
             op,
-            attribute: if op == Op::Floor {
+            if op == Op::Floor {
                 Attribute::Floor(FloorAttribute)
             } else {
                 Attribute::Ceil(CeilAttribute)
             },
-            inputs: vec![input],
-            outputs: vec![tensor_name],
-            location: None,
-        });
+            vec![input],
+            vec![tensor_name],
+        ));
     }
 
     result.tensors.push(TosaTensor::new(
@@ -228,12 +220,11 @@ pub(in crate::serialize::visitors) fn emit_round(
         spec.output_shape,
         ir_dtype_to_tosa(spec.ir_dtype),
     ));
-    result.operators.push(TosaOperator {
-        op: Op::Select,
-        attribute: Attribute::Select(SelectAttribute),
-        inputs: vec![ge_name, floor_name, ceil_name],
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Select,
+        Attribute::Select(SelectAttribute),
+        vec![ge_name, floor_name, ceil_name],
+        vec![node.name.clone()],
+    ));
     result
 }

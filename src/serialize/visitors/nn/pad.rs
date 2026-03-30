@@ -106,24 +106,22 @@ pub(in crate::serialize::visitors) fn emit_pad(
         pad_dtype,
         encode_zp_for_dtype(pad_value, pad_dtype),
     ));
-    result.operators.push(TosaOperator {
-        op: Op::Const,
-        attribute: Attribute::Const(ConstAttribute),
-        inputs: vec![],
-        outputs: vec![pad_const_name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Const,
+        Attribute::Const(ConstAttribute),
+        vec![],
+        vec![pad_const_name.clone()],
+    ));
 
-    result.operators.push(TosaOperator {
-        op: Op::Pad,
-        attribute: Attribute::Pad(PadAttribute),
-        inputs: vec![
+    result.operators.push(TosaOperator::new(
+        Op::Pad,
+        Attribute::Pad(PadAttribute),
+        vec![
             input_names.first().cloned().unwrap_or_default(),
             format!("{}_pad_shape", node.name),
             pad_const_name,
         ],
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+        vec![node.name.clone()],
+    ));
     result
 }

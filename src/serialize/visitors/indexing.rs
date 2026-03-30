@@ -147,13 +147,12 @@ pub(super) fn emit_select(
     let mut input_names = collect_input_names(graph, node);
     maybe_materialize_select_scalar_inputs(graph, node, store, &mut result, &mut input_names);
     result.tensors.push(make_output_tensor(node));
-    result.operators.push(TosaOperator {
-        op: Op::Select,
-        attribute: Attribute::Select(SelectAttribute),
-        inputs: input_names,
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Select,
+        Attribute::Select(SelectAttribute),
+        input_names,
+        vec![node.name.clone()],
+    ));
     result
 }
 
@@ -236,17 +235,16 @@ pub(super) fn emit_select_copy(
         size_vec,
         spec.dtype,
     ));
-    result.operators.push(TosaOperator {
-        op: Op::Slice,
-        attribute: Attribute::Slice(SliceAttribute),
-        inputs: vec![
+    result.operators.push(TosaOperator::new(
+        Op::Slice,
+        Attribute::Slice(SliceAttribute),
+        vec![
             spec.input_name,
             format!("{}_start", slice_name),
             format!("{}_size", slice_name),
         ],
-        outputs: vec![slice_name.clone()],
-        location: None,
-    });
+        vec![slice_name.clone()],
+    ));
 
     let output_shape = actual_tensor_shape(graph, store, node);
     push_reshape_with_shape(
@@ -279,13 +277,12 @@ pub(super) fn emit_index_select(
     }
 
     result.tensors.push(make_output_tensor(node));
-    result.operators.push(TosaOperator {
-        op: Op::Gather,
-        attribute: Attribute::Gather(GatherAttribute),
-        inputs: input_names,
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Gather,
+        Attribute::Gather(GatherAttribute),
+        input_names,
+        vec![node.name.clone()],
+    ));
     result
 }
 
@@ -363,17 +360,16 @@ pub(super) fn emit_slice(
         ir_dtype_to_tosa(node.meta.val.dtype),
     ));
 
-    result.operators.push(TosaOperator {
-        op: Op::Slice,
-        attribute: Attribute::Slice(SliceAttribute),
-        inputs: vec![
+    result.operators.push(TosaOperator::new(
+        Op::Slice,
+        Attribute::Slice(SliceAttribute),
+        vec![
             spec.input_name,
             format!("{}_slice_start", node.name),
             format!("{}_slice_size", node.name),
         ],
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+        vec![node.name.clone()],
+    ));
 
     result
 }

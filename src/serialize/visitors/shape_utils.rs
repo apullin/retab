@@ -407,18 +407,16 @@ pub(super) fn push_reshape_with_shape(
         rank,
         data: shape_data,
     });
-    result.operators.push(TosaOperator {
-        op: Op::ConstShape,
-        attribute: Attribute::ConstShape(ConstShapeAttribute),
-        inputs: vec![],
-        outputs: vec![shape_name.clone()],
-        location: None,
-    });
-    result.operators.push(TosaOperator {
-        op: Op::Reshape,
-        attribute: Attribute::Reshape(ReshapeAttribute),
-        inputs: vec![input_name, shape_name],
-        outputs: vec![output_name],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::ConstShape,
+        Attribute::ConstShape(ConstShapeAttribute),
+        vec![],
+        vec![shape_name.clone()],
+    ));
+    result.operators.push(TosaOperator::new(
+        Op::Reshape,
+        Attribute::Reshape(ReshapeAttribute),
+        vec![input_name, shape_name],
+        vec![output_name],
+    ));
 }

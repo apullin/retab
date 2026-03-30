@@ -33,13 +33,12 @@ pub(super) fn push_const_shape(result: &mut EmitResult, shape_name: String, valu
         rank,
         data,
     });
-    result.operators.push(TosaOperator {
-        op: Op::ConstShape,
-        attribute: Attribute::ConstShape(ConstShapeAttribute),
-        inputs: vec![],
-        outputs: vec![shape_name],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::ConstShape,
+        Attribute::ConstShape(ConstShapeAttribute),
+        vec![],
+        vec![shape_name],
+    ));
 }
 
 fn shape_numel(shape: &[i32]) -> Option<usize> {

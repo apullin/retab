@@ -70,15 +70,14 @@ pub(super) fn emit_cond_if(
 
     let mut result = EmitResult::default();
     result.tensors.extend(spec.output_tensors);
-    result.operators.push(TosaOperator {
-        op: Op::CondIf,
-        attribute: Attribute::CondIf(CondIfAttribute {
+    result.operators.push(TosaOperator::new(
+        Op::CondIf,
+        Attribute::CondIf(CondIfAttribute {
             then_graph: spec.then_graph,
             else_graph: spec.else_graph,
         }),
-        inputs: spec.input_names,
-        outputs: output_names,
-        location: None,
-    });
+        spec.input_names,
+        output_names,
+    ));
     result
 }

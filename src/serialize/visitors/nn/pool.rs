@@ -123,9 +123,9 @@ pub(in crate::serialize::visitors) fn emit_aten_max_pool2d(
     );
     output_tensor.name = output_name.clone();
     result.tensors.push(output_tensor);
-    result.operators.push(TosaOperator {
-        op: Op::MaxPool2d,
-        attribute: Attribute::MaxPool2d(MaxPool2dAttribute {
+    result.operators.push(TosaOperator::new(
+        Op::MaxPool2d,
+        Attribute::MaxPool2d(MaxPool2dAttribute {
             kernel: if kernel.is_empty() {
                 vec![2, 2]
             } else {
@@ -139,10 +139,9 @@ pub(in crate::serialize::visitors) fn emit_aten_max_pool2d(
             pad,
             nan_mode: NanPropagationMode::Propagate,
         }),
-        inputs: input_names,
-        outputs: vec![output_name],
-        location: None,
-    });
+        input_names,
+        vec![output_name],
+    ));
     result
 }
 
@@ -189,9 +188,9 @@ pub(in crate::serialize::visitors) fn emit_max_pool2d(
     );
     output_tensor.name = output_name.clone();
     result.tensors.push(output_tensor);
-    result.operators.push(TosaOperator {
-        op: Op::MaxPool2d,
-        attribute: Attribute::MaxPool2d(MaxPool2dAttribute {
+    result.operators.push(TosaOperator::new(
+        Op::MaxPool2d,
+        Attribute::MaxPool2d(MaxPool2dAttribute {
             kernel: if kernel.is_empty() {
                 vec![2, 2]
             } else {
@@ -205,10 +204,9 @@ pub(in crate::serialize::visitors) fn emit_max_pool2d(
             pad: pad_for_shape,
             nan_mode: NanPropagationMode::Propagate,
         }),
-        inputs: input_names,
-        outputs: vec![output_name],
-        location: None,
-    });
+        input_names,
+        vec![output_name],
+    ));
     result
 }
 
@@ -277,13 +275,12 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(
         input_dtype,
         encode_zp_for_dtype(input_zp, input_dtype),
     ));
-    result.operators.push(TosaOperator {
-        op: Op::Const,
-        attribute: Attribute::Const(ConstAttribute),
-        inputs: vec![],
-        outputs: vec![input_zp_name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Const,
+        Attribute::Const(ConstAttribute),
+        vec![],
+        vec![input_zp_name.clone()],
+    ));
 
     let output_zp_name = format!("{}_output_zp", node.name);
     result.tensors.push(TosaTensor::with_data(
@@ -292,28 +289,26 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(
         output_dtype,
         encode_zp_for_dtype(output_zp, output_dtype),
     ));
-    result.operators.push(TosaOperator {
-        op: Op::Const,
-        attribute: Attribute::Const(ConstAttribute),
-        inputs: vec![],
-        outputs: vec![output_zp_name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Const,
+        Attribute::Const(ConstAttribute),
+        vec![],
+        vec![output_zp_name.clone()],
+    ));
 
     let mut pool_inputs = input_names;
     pool_inputs.push(input_zp_name);
     pool_inputs.push(output_zp_name);
-    result.operators.push(TosaOperator {
-        op: Op::AvgPool2d,
-        attribute: Attribute::AvgPool2d(AvgPool2dAttribute {
+    result.operators.push(TosaOperator::new(
+        Op::AvgPool2d,
+        Attribute::AvgPool2d(AvgPool2dAttribute {
             kernel,
             stride,
             pad,
             acc_type,
         }),
-        inputs: pool_inputs,
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+        pool_inputs,
+        vec![node.name.clone()],
+    ));
     result
 }

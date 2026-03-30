@@ -63,13 +63,12 @@ fn emit_identity(graph: &Graph, node: &Node) -> EmitResult {
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
-    result.operators.push(TosaOperator {
-        op: Op::Identity,
-        attribute: Attribute::None,
-        inputs: input_names,
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Identity,
+        Attribute::None,
+        input_names,
+        vec![node.name.clone()],
+    ));
     result
 }
 

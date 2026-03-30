@@ -26,15 +26,14 @@ pub(in crate::serialize::visitors) fn emit_reduce_sum(
         spec.reduce_dtype,
     ));
 
-    result.operators.push(TosaOperator {
-        op: Op::ReduceSum,
-        attribute: Attribute::ReduceSum(ReduceSumAttribute {
+    result.operators.push(TosaOperator::new(
+        Op::ReduceSum,
+        Attribute::ReduceSum(ReduceSumAttribute {
             axis: spec.tosa_axis,
         }),
-        inputs: spec.input_names,
-        outputs: vec![reduce_output.clone()],
-        location: None,
-    });
+        spec.input_names,
+        vec![reduce_output.clone()],
+    ));
 
     if !spec.keepdim {
         let final_shape = actual_tensor_shape(graph, store, node);
@@ -62,13 +61,12 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(
 
     if spec.input_name.is_empty() {
         result.tensors.push(make_output_tensor(node));
-        result.operators.push(TosaOperator {
-            op: Op::ReduceSum,
-            attribute: Attribute::ReduceSum(ReduceSumAttribute { axis: 0 }),
-            inputs: vec![spec.input_name],
-            outputs: vec![node.name.clone()],
-            location: None,
-        });
+        result.operators.push(TosaOperator::new(
+            Op::ReduceSum,
+            Attribute::ReduceSum(ReduceSumAttribute { axis: 0 }),
+            vec![spec.input_name],
+            vec![node.name.clone()],
+        ));
         return result;
     }
 
@@ -105,15 +103,14 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(
             base_dtype,
         ));
 
-        result.operators.push(TosaOperator {
-            op: Op::ReduceSum,
-            attribute: Attribute::ReduceSum(ReduceSumAttribute {
+        result.operators.push(TosaOperator::new(
+            Op::ReduceSum,
+            Attribute::ReduceSum(ReduceSumAttribute {
                 axis: axis.tosa_axis,
             }),
-            inputs: vec![current_input.clone()],
-            outputs: vec![out_name.clone()],
-            location: None,
-        });
+            vec![current_input.clone()],
+            vec![out_name.clone()],
+        ));
 
         current_input = out_name;
         current_shape = out_shape;

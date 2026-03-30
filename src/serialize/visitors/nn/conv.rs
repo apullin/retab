@@ -75,36 +75,34 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(
         result.tensors.push(compute_depthwise_conv2d_nhwc_output(
             graph, store, node, &pad, &stride, &dilation,
         ));
-        result.operators.push(TosaOperator {
-            op: Op::DepthwiseConv2d,
-            attribute: Attribute::DepthwiseConv2d(DepthwiseConv2dAttribute {
+        result.operators.push(TosaOperator::new(
+            Op::DepthwiseConv2d,
+            Attribute::DepthwiseConv2d(DepthwiseConv2dAttribute {
                 pad,
                 stride,
                 dilation,
                 local_bound: false,
                 acc_type,
             }),
-            inputs: conv_inputs,
-            outputs: vec![node.name.clone()],
-            location: None,
-        });
+            conv_inputs,
+            vec![node.name.clone()],
+        ));
     } else {
         result.tensors.push(compute_conv2d_nhwc_output(
             graph, store, node, &pad, &stride, &dilation,
         ));
-        result.operators.push(TosaOperator {
-            op: Op::Conv2d,
-            attribute: Attribute::Conv2d(Conv2dAttribute {
+        result.operators.push(TosaOperator::new(
+            Op::Conv2d,
+            Attribute::Conv2d(Conv2dAttribute {
                 pad,
                 stride,
                 dilation,
                 local_bound: false,
                 acc_type,
             }),
-            inputs: conv_inputs,
-            outputs: vec![node.name.clone()],
-            location: None,
-        });
+            conv_inputs,
+            vec![node.name.clone()],
+        ));
     }
 
     result
@@ -199,9 +197,9 @@ pub(in crate::serialize::visitors) fn emit_conv2d(
         extend_conv_inputs(input_names, input_zp_name, weight_zp_name)
     };
 
-    result.operators.push(TosaOperator {
-        op: Op::Conv2d,
-        attribute: Attribute::Conv2d(Conv2dAttribute {
+    result.operators.push(TosaOperator::new(
+        Op::Conv2d,
+        Attribute::Conv2d(Conv2dAttribute {
             pad: pad_for_shape,
             stride: if stride.is_empty() {
                 vec![1, 1]
@@ -216,10 +214,9 @@ pub(in crate::serialize::visitors) fn emit_conv2d(
             local_bound,
             acc_type,
         }),
-        inputs: conv_inputs,
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+        conv_inputs,
+        vec![node.name.clone()],
+    ));
     result
 }
 
@@ -312,9 +309,9 @@ pub(in crate::serialize::visitors) fn emit_conv3d(
         extend_conv_inputs(input_names, input_zp_name, weight_zp_name)
     };
 
-    result.operators.push(TosaOperator {
-        op: Op::Conv3d,
-        attribute: Attribute::Conv3d(Conv3dAttribute {
+    result.operators.push(TosaOperator::new(
+        Op::Conv3d,
+        Attribute::Conv3d(Conv3dAttribute {
             pad: pad_for_shape,
             stride: if stride.is_empty() {
                 vec![1, 1, 1]
@@ -329,10 +326,9 @@ pub(in crate::serialize::visitors) fn emit_conv3d(
             local_bound,
             acc_type,
         }),
-        inputs: conv_inputs,
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+        conv_inputs,
+        vec![node.name.clone()],
+    ));
     result
 }
 
@@ -425,9 +421,9 @@ pub(in crate::serialize::visitors) fn emit_depthwise_conv2d(
         extend_conv_inputs(input_names, input_zp_name, weight_zp_name)
     };
 
-    result.operators.push(TosaOperator {
-        op: Op::DepthwiseConv2d,
-        attribute: Attribute::DepthwiseConv2d(DepthwiseConv2dAttribute {
+    result.operators.push(TosaOperator::new(
+        Op::DepthwiseConv2d,
+        Attribute::DepthwiseConv2d(DepthwiseConv2dAttribute {
             pad: pad_for_shape,
             stride: if stride.is_empty() {
                 vec![1, 1]
@@ -442,9 +438,8 @@ pub(in crate::serialize::visitors) fn emit_depthwise_conv2d(
             local_bound,
             acc_type,
         }),
-        inputs: conv_inputs,
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+        conv_inputs,
+        vec![node.name.clone()],
+    ));
     result
 }

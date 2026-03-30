@@ -114,13 +114,12 @@ pub(super) fn emit_matmul(
         a_dtype,
         encode_zp_for_dtype(a_zp, a_dtype),
     ));
-    result.operators.push(TosaOperator {
-        op: Op::Const,
-        attribute: Attribute::Const(ConstAttribute),
-        inputs: vec![],
-        outputs: vec![a_zp_name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Const,
+        Attribute::Const(ConstAttribute),
+        vec![],
+        vec![a_zp_name.clone()],
+    ));
 
     let b_zp_name = format!("{}_B_zp", node.name);
     result.tensors.push(TosaTensor::with_data(
@@ -129,13 +128,12 @@ pub(super) fn emit_matmul(
         b_dtype,
         encode_zp_for_dtype(b_zp, b_dtype),
     ));
-    result.operators.push(TosaOperator {
-        op: Op::Const,
-        attribute: Attribute::Const(ConstAttribute),
-        inputs: vec![],
-        outputs: vec![b_zp_name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Const,
+        Attribute::Const(ConstAttribute),
+        vec![],
+        vec![b_zp_name.clone()],
+    ));
 
     matmul_inputs.push(a_zp_name);
     matmul_inputs.push(b_zp_name);
@@ -150,13 +148,12 @@ pub(super) fn emit_matmul(
         node.name.clone()
     };
 
-    result.operators.push(TosaOperator {
-        op: Op::Matmul,
-        attribute: Attribute::MatMul(MatMulAttribute),
-        inputs: matmul_inputs,
-        outputs: vec![matmul_output_name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Matmul,
+        Attribute::MatMul(MatMulAttribute),
+        matmul_inputs,
+        vec![matmul_output_name.clone()],
+    ));
 
     if promote_2d && !defer_reshape_to_rescale {
         push_reshape_with_shape(

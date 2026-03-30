@@ -36,9 +36,9 @@ fn emit_reduce_extrema(
             out_shape.clone(),
             base_dtype,
         ));
-        result.operators.push(TosaOperator {
+        result.operators.push(TosaOperator::new(
             op,
-            attribute: match kind {
+            match kind {
                 ReduceExtremaKind::Any => Attribute::ReduceAny(ReduceAnyAttribute {
                     axis: axis.tosa_axis,
                 }),
@@ -51,10 +51,9 @@ fn emit_reduce_extrema(
                     nan_mode: NanPropagationMode::Propagate,
                 }),
             },
-            inputs: vec![current_input.clone()],
-            outputs: vec![out_name.clone()],
-            location: None,
-        });
+            vec![current_input.clone()],
+            vec![out_name.clone()],
+        ));
 
         current_input = out_name;
         current_shape = out_shape;

@@ -22,13 +22,7 @@ fn emit_direct_unary(graph: &Graph, node: &Node, op: Op, attribute: Attribute) -
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     result.tensors.push(make_output_tensor(node));
-    result.operators.push(TosaOperator {
-        op,
-        attribute,
-        inputs: input_names,
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(op, attribute, input_names, vec![node.name.clone()]));
     result
 }
 
@@ -43,13 +37,7 @@ fn emit_direct_binary(
     let mut inputs = collect_input_names(graph, node);
     maybe_materialize_binary_broadcast(graph, store, node, &mut result, &mut inputs);
     result.tensors.push(make_output_tensor(node));
-    result.operators.push(TosaOperator {
-        op,
-        attribute,
-        inputs,
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(op, attribute, inputs, vec![node.name.clone()]));
     result
 }
 
@@ -70,12 +58,6 @@ fn emit_bool_binary(
     result
         .tensors
         .push(make_bool_output_tensor(graph, store, node));
-    result.operators.push(TosaOperator {
-        op,
-        attribute,
-        inputs,
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(op, attribute, inputs, vec![node.name.clone()]));
     result
 }

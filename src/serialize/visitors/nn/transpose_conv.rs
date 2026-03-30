@@ -54,9 +54,9 @@ pub(in crate::serialize::visitors) fn emit_transpose_conv2d(
         extend_conv_inputs(input_names, input_zp_name, weight_zp_name)
     };
 
-    result.operators.push(TosaOperator {
-        op: Op::TransposeConv2d,
-        attribute: Attribute::TransposeConv2d(TransposeConv2dAttribute {
+    result.operators.push(TosaOperator::new(
+        Op::TransposeConv2d,
+        Attribute::TransposeConv2d(TransposeConv2dAttribute {
             out_pad: if out_pad.is_empty() {
                 vec![0, 0, 0, 0]
             } else {
@@ -70,9 +70,8 @@ pub(in crate::serialize::visitors) fn emit_transpose_conv2d(
             local_bound,
             acc_type,
         }),
-        inputs: conv_inputs,
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+        conv_inputs,
+        vec![node.name.clone()],
+    ));
     result
 }

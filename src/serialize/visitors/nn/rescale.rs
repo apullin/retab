@@ -245,25 +245,24 @@ pub(in crate::serialize::visitors) fn emit_rescale(
         params.output_unsigned,
     );
 
-    result.operators.push(TosaOperator {
-        op: Op::Rescale,
-        attribute: Attribute::Rescale(RescaleAttribute {
+    result.operators.push(TosaOperator::new(
+        Op::Rescale,
+        Attribute::Rescale(RescaleAttribute {
             scale32: params.scale32,
             rounding_mode: RoundingMode::SingleRound,
             per_channel: params.per_channel,
             input_unsigned: params.input_unsigned,
             output_unsigned: params.output_unsigned,
         }),
-        inputs: vec![
+        vec![
             input_names.first().cloned().unwrap_or_default(),
             params.multiplier_name,
             params.shift_name,
             input_zp_name,
             output_zp_name,
         ],
-        outputs: vec![output_plan.output_name.clone()],
-        location: None,
-    });
+        vec![output_plan.output_name.clone()],
+    ));
 
     if let Some(post_reshape) = output_plan.post_reshape {
         push_reshape_with_shape(

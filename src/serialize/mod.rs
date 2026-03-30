@@ -530,13 +530,12 @@ fn collect_serialized_graph_items(graph: &Graph, store: &TensorStore) -> Seriali
                         is_unranked: false,
                         variable_name: String::new(),
                     });
-                    operators.push(TosaOperator {
-                        op: tosa_generated::Op::Const,
-                        attribute: Attribute::Const(tosa_generated::ConstAttribute),
-                        inputs: vec![],
-                        outputs: vec![name.clone()],
-                        location: None,
-                    });
+                    operators.push(TosaOperator::new(
+                        tosa_generated::Op::Const,
+                        Attribute::Const(tosa_generated::ConstAttribute),
+                        vec![],
+                        vec![name.clone()],
+                    ));
                 } else {
                     tensors.push(TosaTensor {
                         name: name.clone(),

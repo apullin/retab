@@ -387,13 +387,12 @@ pub(super) fn emit_aten_permute(
         spec.output_shape,
         spec.output_dtype,
     ));
-    result.operators.push(TosaOperator {
-        op: Op::Transpose,
-        attribute: Attribute::Transpose(TransposeAttribute { perms }),
-        inputs: spec.input_names,
-        outputs: vec![spec.output_name],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Transpose,
+        Attribute::Transpose(TransposeAttribute { perms }),
+        spec.input_names,
+        vec![spec.output_name],
+    ));
     result
 }
 
@@ -439,13 +438,12 @@ fn emit_tile_like(
             padded_input_shape.clone(),
             actual_tensor_dtype(graph, input_node),
         ));
-        result.operators.push(TosaOperator {
-            op: Op::Reshape,
-            attribute: Attribute::Reshape(ReshapeAttribute),
-            inputs: vec![tile_input_name, reshape_shape_name],
-            outputs: vec![reshaped_name.clone()],
-            location: None,
-        });
+        result.operators.push(TosaOperator::new(
+            Op::Reshape,
+            Attribute::Reshape(ReshapeAttribute),
+            vec![tile_input_name, reshape_shape_name],
+            vec![reshaped_name.clone()],
+        ));
         tile_input_name = reshaped_name;
 
         if let Some(perms) = node
@@ -469,13 +467,12 @@ fn emit_tile_like(
                     transposed_shape,
                     actual_tensor_dtype(graph, input_node),
                 ));
-                result.operators.push(TosaOperator {
-                    op: Op::Transpose,
-                    attribute: Attribute::Transpose(TransposeAttribute { perms }),
-                    inputs: vec![tile_input_name],
-                    outputs: vec![transposed_name.clone()],
-                    location: None,
-                });
+                result.operators.push(TosaOperator::new(
+                    Op::Transpose,
+                    Attribute::Transpose(TransposeAttribute { perms }),
+                    vec![tile_input_name],
+                    vec![transposed_name.clone()],
+                ));
                 tile_input_name = transposed_name;
             }
         }
@@ -491,13 +488,12 @@ fn emit_tile_like(
         output_shape,
         actual_tensor_dtype(graph, input_node),
     ));
-    result.operators.push(TosaOperator {
-        op: Op::Tile,
-        attribute: Attribute::None,
-        inputs: vec![tile_input_name, multiples_name],
-        outputs: vec![primary_output_name(graph, node)],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Tile,
+        Attribute::None,
+        vec![tile_input_name, multiples_name],
+        vec![primary_output_name(graph, node)],
+    ));
     result
 }
 
@@ -573,13 +569,12 @@ pub(super) fn emit_const(
     result
         .tensors
         .push(make_tensor(name.clone(), shape, dtype, data));
-    result.operators.push(TosaOperator {
-        op: Op::Const,
-        attribute: Attribute::Const(ConstAttribute),
-        inputs: vec![],
-        outputs: vec![name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Const,
+        Attribute::Const(ConstAttribute),
+        vec![],
+        vec![name.clone()],
+    ));
     result
 }
 
@@ -619,13 +614,12 @@ pub(super) fn emit_transpose(
         output_shape,
         passthrough_input_dtype(graph, node),
     ));
-    result.operators.push(TosaOperator {
-        op: Op::Transpose,
-        attribute: Attribute::Transpose(TransposeAttribute { perms }),
-        inputs: input_names,
-        outputs: vec![primary_output_name(graph, node)],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Transpose,
+        Attribute::Transpose(TransposeAttribute { perms }),
+        input_names,
+        vec![primary_output_name(graph, node)],
+    ));
     result
 }
 
@@ -654,23 +648,21 @@ pub(super) fn emit_reshape(
         rank: out_shape.len() as u32,
         data: shape_data,
     });
-    result.operators.push(TosaOperator {
-        op: Op::ConstShape,
-        attribute: Attribute::ConstShape(ConstShapeAttribute),
-        inputs: vec![],
-        outputs: vec![shape_name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::ConstShape,
+        Attribute::ConstShape(ConstShapeAttribute),
+        vec![],
+        vec![shape_name.clone()],
+    ));
 
     let mut reshape_inputs = input_names;
     reshape_inputs.push(shape_name);
-    result.operators.push(TosaOperator {
-        op: Op::Reshape,
-        attribute: Attribute::Reshape(ReshapeAttribute),
-        inputs: reshape_inputs,
-        outputs: vec![primary_output_name(graph, node)],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Reshape,
+        Attribute::Reshape(ReshapeAttribute),
+        reshape_inputs,
+        vec![primary_output_name(graph, node)],
+    ));
     result
 }
 
@@ -699,12 +691,11 @@ pub(super) fn emit_concat(
         _ => raw_axis,
     };
     result.tensors.push(make_output_tensor(node));
-    result.operators.push(TosaOperator {
-        op: Op::Concat,
-        attribute: Attribute::Concat(ConcatAttribute { axis }),
-        inputs: input_names,
-        outputs: vec![node.name.clone()],
-        location: None,
-    });
+    result.operators.push(TosaOperator::new(
+        Op::Concat,
+        Attribute::Concat(ConcatAttribute { axis }),
+        input_names,
+        vec![node.name.clone()],
+    ));
     result
 }
