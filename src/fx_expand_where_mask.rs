@@ -1,9 +1,10 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyList, PyTuple};
 
 use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
+use crate::fx_utils;
 
 /// Expand lower-rank boolean masks feeding `where` to the full output shape.
 ///
@@ -15,26 +16,6 @@ pub struct FxExpandWhereMaskPass;
 
 fn is_where(target: &str) -> bool {
     target.contains("where.self") || target.contains("aten_where")
-}
-
-fn copied_meta<'py>(
-    py: Python<'py>,
-    node: &Bound<'py, PyAny>,
-    clear_qparams: bool,
-) -> PyResult<Bound<'py, PyAny>> {
-    let copy_mod = py.import_bound("copy")?;
-    let meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    if clear_qparams {
-        meta.set_item("input_qparams", PyDict::new_bound(py))?;
-        meta.set_item("output_qparams", PyDict::new_bound(py))?;
-    }
-    Ok(meta)
-}
-
-fn refresh_fake_tensor(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<()> {
-    let helpers = py.import_bound("fx_helpers")?;
-    helpers.call_method1("refresh_node_fake_tensor", (node,))?;
-    Ok(())
 }
 
 impl FxPass for FxExpandWhereMaskPass {
@@ -139,9 +120,7 @@ fn expand_where_mask<'py>(
     );
     let result_node = insert_call_before(py, graph, node, &where_op, where_args.as_ref(), node)?;
 
-    let final_meta = copied_meta(py, node, false)?;
-    result_node.setattr("meta", &final_meta)?;
-    let _ = refresh_fake_tensor(py, &result_node);
+    fx_utils::copy_meta_and_refresh(py, node, &result_node)?;
 
     FxGraphModule::replace_all_uses_with(node, &result_node)?;
     gm.erase_node(node)?;

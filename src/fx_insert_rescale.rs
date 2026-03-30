@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
+use crate::fx_utils;
 
 // ---------------------------------------------------------------------------
 // Dual-format qparam field access (QuantArgs namedtuple or legacy dict)
@@ -502,10 +503,7 @@ impl FxPass for FxInsertRescalePass {
             )?;
 
             // Copy Q node's meta onto the rescale (Python: rescale_node.meta = copy(user.meta))
-            let q_meta = q_node.getattr("meta")?;
-            let copy_mod = py.import_bound("copy")?;
-            let meta_copy = copy_mod.call_method1("copy", (&q_meta,))?;
-            rescale_node.setattr("meta", &meta_copy)?;
+            fx_utils::copy_meta(py, q_node, &rescale_node)?;
             helpers.call_method1(
                 "restamp_rescale_output_meta",
                 (&rescale_node, &dq_input, &q_dtype),
@@ -901,10 +899,7 @@ impl FxPass for FxInsertRescalePass {
             )?;
 
             // Copy the conv node's meta onto the rescale node
-            let conv_meta = node.getattr("meta")?;
-            let copy_mod = py.import_bound("copy")?;
-            let meta_copy = copy_mod.call_method1("copy", (&conv_meta,))?;
-            rescale_node.setattr("meta", &meta_copy)?;
+            fx_utils::copy_meta(py, node, &rescale_node)?;
             helpers.call_method1(
                 "restamp_rescale_output_meta",
                 (&rescale_node, node, output_dtype),

@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
+use crate::fx_utils;
 
 /// FX-graph-direct rewrite of squeeze_copy and unsqueeze_copy to view_copy.
 ///
@@ -143,7 +144,6 @@ impl FxPass for FxRewriteSqueezePass {
         })?;
 
         let graph = gm.gm_ref().getattr("graph")?;
-        let copy_mod = py.import_bound("copy")?;
 
         for (node, kind) in &candidates {
             let args = FxGraphModule::node_args(node)?;
@@ -196,10 +196,7 @@ impl FxPass for FxRewriteSqueezePass {
                     );
                     let new_node =
                         graph.call_method1("call_function", (&view_copy_op, new_args))?;
-                    // Copy meta from original node
-                    let orig_meta = node.getattr("meta")?;
-                    let meta_copy = copy_mod.call_method1("copy", (&orig_meta,))?;
-                    new_node.setattr("meta", &meta_copy)?;
+                    fx_utils::copy_meta(py, node, &new_node)?;
                     inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
 
                     FxGraphModule::replace_all_uses_with(node, &new_node)?;
@@ -237,9 +234,7 @@ impl FxPass for FxRewriteSqueezePass {
                     );
                     let new_node =
                         graph.call_method1("call_function", (&view_copy_op, new_args))?;
-                    let orig_meta = node.getattr("meta")?;
-                    let meta_copy = copy_mod.call_method1("copy", (&orig_meta,))?;
-                    new_node.setattr("meta", &meta_copy)?;
+                    fx_utils::copy_meta(py, node, &new_node)?;
                     inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
 
                     FxGraphModule::replace_all_uses_with(node, &new_node)?;
@@ -286,9 +281,7 @@ impl FxPass for FxRewriteSqueezePass {
                     );
                     let new_node =
                         graph.call_method1("call_function", (&permute_copy_op, new_args))?;
-                    let orig_meta = node.getattr("meta")?;
-                    let meta_copy = copy_mod.call_method1("copy", (&orig_meta,))?;
-                    new_node.setattr("meta", &meta_copy)?;
+                    fx_utils::copy_meta(py, node, &new_node)?;
                     inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
 
                     FxGraphModule::replace_all_uses_with(node, &new_node)?;

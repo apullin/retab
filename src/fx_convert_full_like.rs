@@ -4,6 +4,7 @@ use pyo3::types::PyTuple;
 use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
+use crate::fx_utils;
 
 /// FX-graph-direct conversion of `aten.full_like.default` to `aten.full.default`.
 ///
@@ -127,20 +128,8 @@ fn convert_full_like<'py>(
     let new_node = graph.call_method1("call_function", (&full_op, &full_args, &kwargs))?;
     inserting.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
 
-    // Copy meta from original node
-    let copy_mod = py.import_bound("copy")?;
-    let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    new_node.setattr("meta", &final_meta)?;
-
-    // Try to refresh FakeTensor
-    let _ = {
-        let fxh = py.import_bound("fx_helpers");
-        if let Ok(fxh) = fxh {
-            fxh.call_method1("refresh_node_fake_tensor", (&new_node,))
-        } else {
-            Ok(py.None().into_bound(py))
-        }
-    };
+    // Copy meta and refresh FakeTensor
+    fx_utils::copy_meta_and_refresh(py, node, &new_node)?;
 
     FxGraphModule::replace_all_uses_with(node, &new_node)?;
     gm.erase_node(node)?;

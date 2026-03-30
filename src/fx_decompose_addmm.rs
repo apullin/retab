@@ -3,6 +3,7 @@ use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
+use crate::fx_utils;
 
 crate::fx_pass!(
     /// Decompose `aten.addmm` into mm + mul + add.
@@ -93,9 +94,7 @@ fn decompose_addmm<'py>(
     let add_args = PyTuple::new_bound(py, &[scaled_mm.as_ref(), scaled_input.as_ref()]);
     let result = insert_call_before(py, graph, node, &add_op, add_args.as_ref(), node)?;
 
-    let copy_mod = py.import_bound("copy")?;
-    let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    result.setattr("meta", &final_meta)?;
+    fx_utils::copy_meta(py, node, &result)?;
 
     FxGraphModule::replace_all_uses_with(node, &result)?;
     gm.erase_node(node)?;

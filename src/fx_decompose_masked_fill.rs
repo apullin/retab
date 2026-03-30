@@ -3,6 +3,7 @@ use pyo3::types::{PyDict, PyTuple};
 
 use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
+use crate::fx_utils;
 
 crate::fx_pass!(
     /// Late-stage decomposition of `masked_fill` into `where(mask, full(value), x)`.
@@ -46,20 +47,11 @@ fn decompose_masked_fill<'py>(
     let shape_tuple = PyTuple::new_bound(py, input_shape.iter().copied());
 
     // Check whether the graph is quantized: look for output_qparams on the node.
-    let meta = node.getattr("meta")?;
-    let output_qparams = meta.call_method1("get", ("output_qparams",))?;
-    let is_quantized = !output_qparams.is_none()
-        && output_qparams
-            .downcast::<PyDict>()
-            .map(|d| !d.is_empty())
-            .unwrap_or(false);
+    let is_quantized = fx_utils::is_quantized(node);
 
     // Determine the fill value and dtype for the full node.
     let qparams_0 = if is_quantized {
-        match output_qparams.call_method1("get", (0,)) {
-            Ok(v) if !v.is_none() => Some(v),
-            _ => None,
-        }
+        fx_utils::get_output_qparam(node)
     } else {
         None
     };
@@ -113,30 +105,19 @@ fn decompose_masked_fill<'py>(
         graph.call_method1("call_function", (&full_op, &full_args, &full_kwargs_dict))?;
 
     // Copy meta from original node for the full node
-    let copy_mod = py.import_bound("copy")?;
-    let full_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
+    fx_utils::copy_meta(py, node, &fill_node)?;
     // Clear qparams for the intermediate full node
+    let full_meta = fill_node.getattr("meta")?;
     let _ = full_meta.call_method1("__setitem__", ("input_qparams", PyDict::new_bound(py)));
     let _ = full_meta.call_method1("__setitem__", ("output_qparams", PyDict::new_bound(py)));
-    fill_node.setattr("meta", &full_meta)?;
-    // Refresh FakeTensor
-    let _ = {
-        let fxh = py.import_bound("fx_helpers")?;
-        fxh.call_method1("refresh_node_fake_tensor", (&fill_node,))
-    };
+    fx_utils::refresh_fake_tensor(py, &fill_node)?;
 
     // Create where(mask, fill_value, x) -- True positions get fill_value
     let where_args = PyTuple::new_bound(py, &[mask.as_ref(), fill_node.as_ref(), x.as_ref()]);
     let result_node = graph.call_method1("call_function", (&where_op, &where_args))?;
 
     // Copy the original node's full meta (including qparams) to the where node
-    let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    result_node.setattr("meta", &final_meta)?;
-    // Refresh FakeTensor for where
-    let _ = {
-        let fxh = py.import_bound("fx_helpers")?;
-        fxh.call_method1("refresh_node_fake_tensor", (&result_node,))
-    };
+    fx_utils::copy_meta_and_refresh(py, node, &result_node)?;
 
     inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
 

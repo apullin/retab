@@ -3,6 +3,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
+use crate::fx_utils;
 
 crate::fx_pass!(
     /// FX-graph-direct decomposition of adaptive_avg_pool2d -> avg_pool2d.
@@ -16,12 +17,6 @@ crate::fx_pass!(
     matches: |target| target.contains("adaptive_avg_pool2d"),
     transform: |py, graph, gm, node, debug| decompose_adaptive(py, &graph, gm, node, debug)
 );
-
-fn refresh_fake_tensor(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<()> {
-    let helpers = py.import_bound("fx_helpers")?;
-    helpers.call_method1("refresh_node_fake_tensor", (node,))?;
-    Ok(())
-}
 
 fn copied_meta<'py>(
     py: Python<'py>,
@@ -43,7 +38,7 @@ fn set_meta_and_refresh(
     meta: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     inserted.setattr("meta", meta)?;
-    refresh_fake_tensor(py, inserted)
+    fx_utils::refresh_fake_tensor(py, inserted)
 }
 
 fn set_meta_with_value(

@@ -3,6 +3,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
+use crate::fx_utils;
 
 crate::fx_pass!(
     /// FX-graph-direct decomposition of `aten.unfold_copy` into
@@ -34,12 +35,6 @@ fn copied_meta<'py>(
     Ok(meta)
 }
 
-fn refresh_fake_tensor(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<()> {
-    let helpers = py.import_bound("fx_helpers")?;
-    helpers.call_method1("refresh_node_fake_tensor", (node,))?;
-    Ok(())
-}
-
 fn insert_call_before_with_kwargs<'py>(
     py: Python<'py>,
     graph: &Bound<'py, PyAny>,
@@ -55,7 +50,7 @@ fn insert_call_before_with_kwargs<'py>(
     let new_node = graph.call_method1("call_function", (target, args, kwargs))?;
     let meta_copy = copied_meta(py, meta_src, clear_qparams)?;
     new_node.setattr("meta", &meta_copy)?;
-    let _ = refresh_fake_tensor(py, &new_node);
+    let _ = fx_utils::refresh_fake_tensor(py, &new_node);
     inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
     Ok(new_node)
 }
@@ -385,8 +380,7 @@ fn decompose_unfold_copy<'py>(
         permuted
     };
 
-    let final_meta = copied_meta(py, node, false)?;
-    result.setattr("meta", &final_meta)?;
+    fx_utils::copy_meta(py, node, &result)?;
 
     FxGraphModule::replace_all_uses_with(node, &result)?;
     gm.erase_node(node)?;

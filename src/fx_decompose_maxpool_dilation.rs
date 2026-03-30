@@ -4,6 +4,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
+use crate::fx_utils;
 
 /// FX-graph-direct decomposition of dilated max_pool2d into a space-to-batch
 /// envelope around a non-dilated max_pool2d. This mirrors the Python Arm pass
@@ -12,12 +13,6 @@ pub struct FxDecomposeMaxPoolDilationPass;
 
 fn is_max_pool2d(target: &str) -> bool {
     target.contains("max_pool2d") && !target.contains("with_indices")
-}
-
-fn refresh_fake_tensor(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<()> {
-    let helpers = py.import_bound("fx_helpers")?;
-    helpers.call_method1("refresh_node_fake_tensor", (node,))?;
-    Ok(())
 }
 
 fn copied_meta<'py>(
@@ -43,7 +38,7 @@ fn set_meta_and_refresh(
     meta: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     inserted.setattr("meta", meta)?;
-    refresh_fake_tensor(py, inserted)
+    fx_utils::refresh_fake_tensor(py, inserted)
 }
 
 fn normalize_pair_arg(

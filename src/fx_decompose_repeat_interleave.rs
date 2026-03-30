@@ -3,6 +3,7 @@ use pyo3::types::{PyList, PyTuple};
 
 use crate::fx_decompose_ops::{insert_call_before, propagate_qparams, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
+use crate::fx_utils;
 
 crate::fx_pass!(
     /// Decompose `repeat_interleave.self_int` into unsqueeze + repeat + view.
@@ -90,9 +91,7 @@ fn decompose_repeat_interleave_self_int<'py>(
     let result = insert_call_before(py, graph, node, &view_op, view_args.as_ref(), node)?;
     propagate_qparams(node, &result)?;
 
-    let copy_mod = py.import_bound("copy")?;
-    let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    result.setattr("meta", &final_meta)?;
+    fx_utils::copy_meta(py, node, &result)?;
 
     FxGraphModule::replace_all_uses_with(node, &result)?;
     gm.erase_node(node)?;

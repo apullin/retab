@@ -4,6 +4,7 @@ use pyo3::types::PyTuple;
 use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
+use crate::fx_utils;
 
 /// FX-graph-direct implementation of SizeAdjustInputPass.
 ///
@@ -153,10 +154,7 @@ impl FxPass for FxSizeAdjustInputPass {
                         );
                         let slice_node =
                             graph.call_method1("call_function", (&slice_op, &slice_args))?;
-                        // Copy meta
-                        let copy_mod = py.import_bound("copy")?;
-                        let meta = copy_mod.call_method1("copy", (input_node.getattr("meta")?,))?;
-                        slice_node.setattr("meta", &meta)?;
+                        fx_utils::copy_meta(py, input_node, &slice_node)?;
                         inserting.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
 
                         // Replace input of the conv/pool node
@@ -219,9 +217,7 @@ impl FxPass for FxSizeAdjustInputPass {
                         );
                         let slice_node =
                             graph.call_method1("call_function", (&slice_op, &slice_args))?;
-                        let copy_mod = py.import_bound("copy")?;
-                        let meta = copy_mod.call_method1("copy", (input_node.getattr("meta")?,))?;
-                        slice_node.setattr("meta", &meta)?;
+                        fx_utils::copy_meta(py, input_node, &slice_node)?;
                         inserting.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
 
                         node.call_method1("replace_input_with", (&current_input, &slice_node))?;

@@ -3,6 +3,7 @@ use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
+use crate::fx_utils;
 
 crate::fx_pass!(
     /// FX-graph-direct conversion of split_with_sizes_copy/split_copy to
@@ -136,8 +137,8 @@ fn convert_split<'py>(
         let slice_node = graph.call_method1("call_function", (slice_op, &slice_args))?;
 
         // Copy metadata from the split node, selecting the right index
-        let copy_mod = py.import_bound("copy")?;
-        let meta = copy_mod.call_method1("copy", (split_node.getattr("meta")?,))?;
+        fx_utils::copy_meta(py, split_node, &slice_node)?;
+        let meta = slice_node.getattr("meta")?;
 
         // Select the right val/tensor_meta for this index
         let val = meta.call_method1("get", ("val",))?;
@@ -159,17 +160,7 @@ fn convert_split<'py>(
             }
         }
 
-        slice_node.setattr("meta", &meta)?;
-
-        // Refresh FakeTensor
-        let _ = {
-            let fxh = py.import_bound("fx_helpers");
-            if let Ok(fxh) = fxh {
-                fxh.call_method1("refresh_node_fake_tensor", (&slice_node,))
-            } else {
-                Ok(py.None().into_bound(py))
-            }
-        };
+        fx_utils::refresh_fake_tensor(py, &slice_node)?;
 
         // Replace getitem with slice
         FxGraphModule::replace_all_uses_with(user, &slice_node)?;

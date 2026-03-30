@@ -4,6 +4,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
+use crate::fx_utils;
 
 /// FX-graph-direct decomposition of `aten.mean.dim` into
 /// `sum(keepdim=True) + mul(1/count) + view_copy(output_shape)`.
@@ -96,13 +97,12 @@ fn insert_call_before_with_kwargs<'py>(
     let inserting = graph.call_method1("inserting_before", (ref_node,))?;
     inserting.call_method0("__enter__")?;
     let new_node = graph.call_method1("call_function", (target, args, kwargs))?;
-    let copy_mod = py.import_bound("copy")?;
-    let meta_copy = copy_mod.call_method1("copy", (meta_src.getattr("meta")?,))?;
+    fx_utils::copy_meta(py, meta_src, &new_node)?;
+    // Clear qparams for intermediate node
+    let meta_copy = new_node.getattr("meta")?;
     meta_copy.set_item("input_qparams", PyDict::new_bound(py))?;
     meta_copy.set_item("output_qparams", PyDict::new_bound(py))?;
-    new_node.setattr("meta", &meta_copy)?;
-    let helpers = py.import_bound("fx_helpers")?;
-    let _ = helpers.call_method1("refresh_node_fake_tensor", (&new_node,));
+    fx_utils::refresh_fake_tensor(py, &new_node)?;
     inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
     Ok(new_node)
 }
@@ -118,11 +118,7 @@ fn insert_call_before_preserving_meta<'py>(
     let inserting = graph.call_method1("inserting_before", (ref_node,))?;
     inserting.call_method0("__enter__")?;
     let new_node = graph.call_method1("call_function", (target, args))?;
-    let copy_mod = py.import_bound("copy")?;
-    let meta_copy = copy_mod.call_method1("copy", (meta_src.getattr("meta")?,))?;
-    new_node.setattr("meta", &meta_copy)?;
-    let helpers = py.import_bound("fx_helpers")?;
-    let _ = helpers.call_method1("refresh_node_fake_tensor", (&new_node,));
+    fx_utils::copy_meta_and_refresh(py, meta_src, &new_node)?;
     inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
     Ok(new_node)
 }
@@ -443,9 +439,7 @@ fn decompose_mean<'py>(
     }
 
     // Copy original node's meta onto the final result
-    let copy_mod = py.import_bound("copy")?;
-    let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    result.setattr("meta", &final_meta)?;
+    fx_utils::copy_meta(py, node, &result)?;
     annotate_quantized_mean(py, node, &sum_node, &count_node, &result, count)?;
 
     FxGraphModule::replace_all_uses_with(node, &result)?;

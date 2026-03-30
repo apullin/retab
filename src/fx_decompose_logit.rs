@@ -4,6 +4,7 @@ use pyo3::types::PyTuple;
 use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
+use crate::fx_utils;
 
 /// FX-graph-direct decomposition of `aten.logit` into primitive ops.
 ///
@@ -146,9 +147,7 @@ fn decompose_logit<'py>(
     let result = insert_call_before(py, graph, node, &log_op, log_args.as_ref(), node)?;
 
     // Copy original node's meta onto the final result
-    let copy_mod = py.import_bound("copy")?;
-    let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    result.setattr("meta", &final_meta)?;
+    fx_utils::copy_meta(py, node, &result)?;
 
     FxGraphModule::replace_all_uses_with(node, &result)?;
     gm.erase_node(node)?;

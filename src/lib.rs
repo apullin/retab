@@ -44,6 +44,7 @@ mod fx_memory_format;
 mod fx_pass;
 mod fx_pipeline;
 mod fx_profile;
+mod fx_utils;
 mod fx_quantize_clamp_args;
 mod fx_remove_noop;
 mod fx_rewrite_conv;

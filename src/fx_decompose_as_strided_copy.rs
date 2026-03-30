@@ -4,6 +4,7 @@ use pyo3::types::{PyDict, PyTuple};
 use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
+use crate::fx_utils;
 
 pub struct FxDecomposeAsStridedCopyPass;
 
@@ -75,11 +76,7 @@ fn insert_view_copy_before<'py>(
     inserting.call_method0("__enter__")?;
     let result = (|| -> PyResult<Bound<'py, PyAny>> {
         let new_node = graph.call_method1("call_function", (&view_op, &args))?;
-        let copy_mod = py.import_bound("copy")?;
-        let meta_copy = copy_mod.call_method1("copy", (ref_node.getattr("meta")?,))?;
-        new_node.setattr("meta", &meta_copy)?;
-        let helpers = py.import_bound("fx_helpers")?;
-        let _ = helpers.call_method1("refresh_node_fake_tensor", (&new_node,));
+        fx_utils::copy_meta_and_refresh(py, ref_node, &new_node)?;
         Ok(new_node)
     })();
     inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;

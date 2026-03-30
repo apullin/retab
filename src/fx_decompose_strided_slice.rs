@@ -4,6 +4,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
+use crate::fx_utils;
 
 /// Mirror the Python Arm backend's non-unit-step slice_copy decomposition:
 /// unit-step slice + optional right pad + view + slice + view.
@@ -20,12 +21,6 @@ fn copied_meta<'py>(py: Python<'py>, node: &Bound<'py, PyAny>) -> PyResult<Bound
     meta.set_item("input_qparams", PyDict::new_bound(py))?;
     meta.set_item("output_qparams", PyDict::new_bound(py))?;
     Ok(meta)
-}
-
-fn refresh_fake_tensor(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<()> {
-    let helpers = py.import_bound("fx_helpers")?;
-    let _ = helpers.call_method1("refresh_node_fake_tensor", (node,));
-    Ok(())
 }
 
 fn copy_first_output_qparams<'py>(
@@ -69,7 +64,7 @@ fn insert_call_before<'py>(
     let meta_copy = copied_meta(py, meta_src)?;
     copy_first_output_qparams(py, &meta_copy, qparam_sources)?;
     new_node.setattr("meta", &meta_copy)?;
-    let _ = refresh_fake_tensor(py, &new_node);
+    let _ = fx_utils::refresh_fake_tensor(py, &new_node);
     inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
     Ok(new_node)
 }
