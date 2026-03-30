@@ -1,6 +1,25 @@
 use super::*;
 use super::emitter::EmitContext;
 
+pub fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>) {
+    use crate::graph::ir::OpTarget;
+    // TOSA-lowered arithmetic
+    table.insert(OpTarget::TosaAdd, emit_add);
+    table.insert(OpTarget::TosaSub, emit_sub);
+    table.insert(OpTarget::TosaMul, emit_mul);
+    table.insert(OpTarget::TosaClamp, emit_clamp);
+    // ATen arithmetic fallbacks
+    table.insert(OpTarget::Add, emit_aten_add);
+    table.insert(OpTarget::Sub, emit_aten_sub);
+    table.insert(OpTarget::Mul, emit_aten_mul);
+    table.insert(OpTarget::Clamp, emit_aten_clamp);
+    table.insert(OpTarget::Hardtanh, emit_aten_clamp);
+    table.insert(OpTarget::Relu, emit_aten_clamp);
+    // Squeeze/unsqueeze (reshape-based arithmetic helpers)
+    table.insert(OpTarget::Unsqueeze, emit_aten_unsqueeze);
+    table.insert(OpTarget::Squeeze, emit_aten_squeeze);
+}
+
 struct ParsedReshapeEmitterSpec {
     input_name: String,
     output_shape: Vec<i32>,

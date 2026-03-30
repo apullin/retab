@@ -6,9 +6,12 @@ mod extrema;
 mod mean;
 mod sum_ops;
 
-pub(super) use extrema::{emit_aten_amax, emit_aten_amin, emit_aten_any};
-pub(super) use mean::emit_aten_mean;
-pub(super) use sum_ops::{emit_aten_sum, emit_reduce_sum};
+pub fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>) {
+    extrema::register(table);
+    mean::register(table);
+    sum_ops::register(table);
+}
+
 
 #[derive(Debug, Clone, Copy)]
 struct ReduceAxis {

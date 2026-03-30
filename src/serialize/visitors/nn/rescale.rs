@@ -1,5 +1,10 @@
 use super::*;
 
+pub(super) fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, crate::serialize::visitors::emitter::EmitFn>) {
+    use crate::graph::ir::OpTarget;
+    table.insert(OpTarget::TosaRescale, emit_rescale);
+}
+
 struct PostRescaleReshape {
     input_name: String,
     output_shape: Vec<i32>,

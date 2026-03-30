@@ -1,5 +1,21 @@
 use super::*;
 
+pub(super) fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, crate::serialize::visitors::emitter::EmitFn>) {
+    use crate::graph::ir::OpTarget;
+    // Bitwise ops
+    table.insert(OpTarget::BitwiseNot, emit_bitwise_not);
+    table.insert(OpTarget::BitwiseAnd, emit_bitwise_and);
+    table.insert(OpTarget::BitwiseOr, emit_bitwise_or);
+    table.insert(OpTarget::BitwiseXor, emit_bitwise_xor);
+    table.insert(OpTarget::BitwiseLeftShift, emit_logical_left_shift);
+    table.insert(OpTarget::BitwiseRightShift, emit_arithmetic_right_shift);
+    // Logical ops
+    table.insert(OpTarget::LogicalNot, emit_logical_not);
+    table.insert(OpTarget::LogicalAnd, emit_logical_and);
+    table.insert(OpTarget::LogicalOr, emit_logical_or);
+    table.insert(OpTarget::LogicalXor, emit_logical_xor);
+}
+
 fn is_bool_output(node: &Node) -> bool {
     node_output_dtype(node) == DType::Bool
 }

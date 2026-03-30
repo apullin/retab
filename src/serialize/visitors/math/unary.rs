@@ -1,5 +1,19 @@
 use super::*;
 
+pub(super) fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, crate::serialize::visitors::emitter::EmitFn>) {
+    use crate::graph::ir::OpTarget;
+    // TOSA-lowered
+    table.insert(OpTarget::TosaNeg, emit_negate);
+    table.insert(OpTarget::TosaNegate, emit_negate);
+    table.insert(OpTarget::TosaCeil, emit_ceil);
+    table.insert(OpTarget::TosaFloor, emit_floor);
+    // ATen fallbacks
+    table.insert(OpTarget::Neg, emit_negate);
+    table.insert(OpTarget::Ceil, emit_ceil);
+    table.insert(OpTarget::Floor, emit_floor);
+    table.insert(OpTarget::Round, emit_round);
+}
+
 pub(in crate::serialize::visitors) fn emit_negate(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;

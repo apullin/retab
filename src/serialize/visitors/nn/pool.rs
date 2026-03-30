@@ -1,5 +1,13 @@
 use super::*;
 
+pub(super) fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, crate::serialize::visitors::emitter::EmitFn>) {
+    use crate::graph::ir::OpTarget;
+    table.insert(OpTarget::TosaMaxPool2d, emit_max_pool2d);
+    table.insert(OpTarget::TosaAvgPool2d, emit_avg_pool2d);
+    table.insert(OpTarget::MaxPool2d, emit_aten_max_pool2d);
+    table.insert(OpTarget::AvgPool2d, emit_avg_pool2d);
+}
+
 fn adjusted_pool_post_pad(
     input_size: i32,
     kernel_size: i32,

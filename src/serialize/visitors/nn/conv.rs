@@ -1,5 +1,16 @@
 use super::*;
 
+pub(super) fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, crate::serialize::visitors::emitter::EmitFn>) {
+    use crate::graph::ir::OpTarget;
+    // TOSA-lowered conv ops
+    table.insert(OpTarget::TosaConv2d, emit_conv2d);
+    table.insert(OpTarget::TosaConv3d, emit_conv3d);
+    table.insert(OpTarget::TosaDepthwiseConv2d, emit_depthwise_conv2d);
+    // ATen conv fallbacks
+    table.insert(OpTarget::Conv2d, emit_aten_conv2d);
+    table.insert(OpTarget::DepthwiseConv2d, emit_aten_conv2d);
+}
+
 pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;

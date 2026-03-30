@@ -1,5 +1,17 @@
 use super::*;
 
+pub(super) fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, crate::serialize::visitors::emitter::EmitFn>) {
+    use crate::graph::ir::OpTarget;
+    table.insert(OpTarget::Div, emit_aten_div);
+    table.insert(OpTarget::Sqrt, emit_aten_sqrt);
+    table.insert(OpTarget::FullLike, emit_full_like);
+    table.insert(OpTarget::Sign, emit_aten_sign);
+    table.insert(OpTarget::Expm1, emit_aten_expm1);
+    table.insert(OpTarget::Log1p, emit_aten_log1p);
+    table.insert(OpTarget::FloorDivide, emit_aten_floor_divide);
+    table.insert(OpTarget::LeakyRelu, emit_aten_leaky_relu);
+}
+
 fn temp_tensor(name: String, shape: Vec<i32>, dtype: DType) -> TosaTensor {
     make_empty_tensor(name, shape, dtype)
 }

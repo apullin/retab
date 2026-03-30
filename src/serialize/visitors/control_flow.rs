@@ -3,6 +3,11 @@ use super::emitter::EmitContext;
 use crate::graph::ir::Arg;
 use crate::serialize::tosa_generated::CondIfAttribute;
 
+pub fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>) {
+    use crate::graph::ir::OpTarget;
+    table.insert(OpTarget::CondIf, emit_cond_if);
+}
+
 // Parse the raw control-flow node once at the boundary, then emit from a
 // typed shape rather than repeatedly indexing loosely-structured args.
 #[derive(Debug)]

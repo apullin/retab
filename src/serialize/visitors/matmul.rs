@@ -1,6 +1,13 @@
 use super::*;
 use super::emitter::EmitContext;
 
+pub fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>) {
+    use crate::graph::ir::OpTarget;
+    table.insert(OpTarget::TosaMatmul, emit_matmul);
+    table.insert(OpTarget::Matmul, emit_matmul);
+    table.insert(OpTarget::Bmm, emit_matmul);
+}
+
 pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;

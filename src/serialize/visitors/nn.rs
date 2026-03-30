@@ -7,11 +7,14 @@ mod pool;
 mod rescale;
 mod transpose_conv;
 
-pub(super) use conv::{emit_aten_conv2d, emit_conv2d, emit_conv3d, emit_depthwise_conv2d};
-pub(super) use pad::emit_pad;
-pub(super) use pool::{emit_aten_max_pool2d, emit_avg_pool2d, emit_max_pool2d};
-pub(super) use rescale::emit_rescale;
-pub(super) use transpose_conv::emit_transpose_conv2d;
+pub fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>) {
+    conv::register(table);
+    pad::register(table);
+    pool::register(table);
+    rescale::register(table);
+    transpose_conv::register(table);
+}
+
 
 fn push_input_weight_zp_tensors(
     result: &mut EmitResult,

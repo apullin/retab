@@ -4,11 +4,11 @@ use super::emitter::EmitContext;
 mod derived;
 mod unary;
 
-pub(super) use derived::{
-    emit_aten_div, emit_aten_expm1, emit_aten_floor_divide, emit_aten_leaky_relu, emit_aten_log1p,
-    emit_aten_sign, emit_aten_sqrt, emit_full_like,
-};
-pub(super) use unary::{emit_ceil, emit_floor, emit_negate, emit_round};
+pub fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>) {
+    unary::register(table);
+    derived::register(table);
+}
+
 
 struct ParsedUnaryTensorSpec {
     input_name: String,

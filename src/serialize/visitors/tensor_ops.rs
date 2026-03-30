@@ -1,6 +1,29 @@
 use super::*;
 use super::emitter::EmitContext;
 
+pub fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>) {
+    use crate::graph::ir::OpTarget;
+    // TOSA-lowered ops
+    table.insert(OpTarget::TosaConst, emit_const);
+    table.insert(OpTarget::Full, emit_full);
+    table.insert(OpTarget::ScalarTensor, emit_scalar_tensor);
+    table.insert(OpTarget::TosaResize, emit_resize);
+    table.insert(OpTarget::TosaTranspose, emit_transpose);
+    table.insert(OpTarget::TosaReshape, emit_reshape);
+    table.insert(OpTarget::TosaConcat, emit_concat);
+    // ATen fallbacks
+    table.insert(OpTarget::Expand, emit_expand);
+    table.insert(OpTarget::Repeat, emit_repeat);
+    table.insert(OpTarget::Reshape, emit_aten_reshape);
+    table.insert(OpTarget::Flatten, emit_aten_reshape);
+    table.insert(OpTarget::View, emit_aten_reshape);
+    table.insert(OpTarget::Permute, emit_aten_permute);
+    table.insert(OpTarget::UpsampleNearest2d, emit_resize);
+    table.insert(OpTarget::UpsampleBilinear2d, emit_resize);
+    table.insert(OpTarget::Cat, emit_concat);
+    table.insert(OpTarget::Zeros, emit_full);
+}
+
 struct ParsedResizeSpec {
     input_name: String,
     resize_output_name: String,

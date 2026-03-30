@@ -1,5 +1,11 @@
 use super::*;
 
+pub(super) fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, crate::serialize::visitors::emitter::EmitFn>) {
+    use crate::graph::ir::OpTarget;
+    table.insert(OpTarget::TosaPad, emit_pad);
+    table.insert(OpTarget::Pad, emit_pad);
+}
+
 fn pad_fill_value(node: &Node) -> i32 {
     let kwarg_value = kwarg_i32(node, "value", i32::MIN);
     if kwarg_value != i32::MIN {

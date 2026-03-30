@@ -1,5 +1,33 @@
 use super::*;
 
+pub(super) fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, crate::serialize::visitors::emitter::EmitFn>) {
+    use crate::graph::ir::OpTarget;
+    // TOSA-lowered unary ops
+    table.insert(OpTarget::TosaTable, emit_table);
+    table.insert(OpTarget::TosaSigmoid, emit_sigmoid);
+    table.insert(OpTarget::TosaTanh, emit_tanh);
+    table.insert(OpTarget::TosaExp, emit_exp);
+    table.insert(OpTarget::TosaLog, emit_log);
+    table.insert(OpTarget::TosaAbs, emit_abs);
+    table.insert(OpTarget::TosaReciprocal, emit_reciprocal);
+    table.insert(OpTarget::TosaErf, emit_erf);
+    table.insert(OpTarget::TosaCos, emit_cos);
+    table.insert(OpTarget::TosaSin, emit_sin);
+    table.insert(OpTarget::TosaRsqrt, emit_rsqrt);
+    table.insert(OpTarget::TosaCast, emit_cast);
+    // ATen fallbacks
+    table.insert(OpTarget::Sigmoid, emit_sigmoid);
+    table.insert(OpTarget::Tanh, emit_tanh);
+    table.insert(OpTarget::Exp, emit_exp);
+    table.insert(OpTarget::Log, emit_log);
+    table.insert(OpTarget::Abs, emit_abs);
+    table.insert(OpTarget::Reciprocal, emit_reciprocal);
+    table.insert(OpTarget::Rsqrt, emit_rsqrt);
+    table.insert(OpTarget::Sin, emit_sin);
+    table.insert(OpTarget::Cos, emit_cos);
+    table.insert(OpTarget::To, emit_cast);
+}
+
 pub(in crate::serialize::visitors) fn emit_table(ctx: &EmitContext) -> EmitResult {
     emit_direct_unary(ctx.graph, ctx.node, Op::Table, Attribute::Table(TableAttribute))
 }

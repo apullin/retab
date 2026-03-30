@@ -1,5 +1,22 @@
 use super::*;
 
+pub(super) fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, crate::serialize::visitors::emitter::EmitFn>) {
+    use crate::graph::ir::OpTarget;
+    // TOSA-lowered comparison ops
+    table.insert(OpTarget::TosaEqual, emit_equal);
+    table.insert(OpTarget::TosaGreater, emit_greater);
+    table.insert(OpTarget::TosaGreaterEqual, emit_greater_equal);
+    table.insert(OpTarget::TosaMaximum, emit_maximum);
+    table.insert(OpTarget::TosaMinimum, emit_minimum);
+    // ATen comparison fallbacks
+    table.insert(OpTarget::Gt, emit_aten_gt);
+    table.insert(OpTarget::Ge, emit_aten_ge);
+    table.insert(OpTarget::Lt, emit_aten_lt);
+    table.insert(OpTarget::Le, emit_aten_le);
+    table.insert(OpTarget::Eq, emit_aten_eq);
+    table.insert(OpTarget::Pow, emit_pow);
+}
+
 pub(in crate::serialize::visitors) fn emit_equal(ctx: &EmitContext) -> EmitResult {
     emit_bool_binary(
         ctx.graph,

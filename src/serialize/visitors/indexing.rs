@@ -2,6 +2,21 @@ use super::*;
 use super::emitter::EmitContext;
 use crate::graph::ir::Arg;
 
+pub fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>) {
+    use crate::graph::ir::OpTarget;
+    // TOSA-lowered ops
+    table.insert(OpTarget::TosaSlice, emit_slice);
+    table.insert(OpTarget::TosaGather, emit_gather);
+    table.insert(OpTarget::TosaScatter, emit_scatter);
+    table.insert(OpTarget::TosaSelect, emit_select);
+    // ATen fallbacks
+    table.insert(OpTarget::Slice, emit_slice);
+    table.insert(OpTarget::Select, emit_select);
+    table.insert(OpTarget::SelectCopy, emit_select_copy);
+    table.insert(OpTarget::IndexSelect, emit_index_select);
+    table.insert(OpTarget::Where, emit_select);
+}
+
 #[derive(Debug)]
 struct ParsedSelectCopySpec {
     input_name: String,
