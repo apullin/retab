@@ -143,8 +143,6 @@ pub enum OpTarget {
     TosaReduceAny,
     TosaMaximum,
     TosaMinimum,
-    TosaCondIf,
-    TosaWhileLoop,
 
     // Aliases for control flow (used by visitors)
     CondIf,
@@ -276,8 +274,6 @@ pub enum Arg {
     Bool(bool),
     IntList(SmallVec<[i64; 6]>),
     FloatList(SmallVec<[f64; 4]>),
-    OptionalNode(Option<NodeId>),
-    OptionalInt(Option<i64>),
     Dtype(DType),
     None,
     String(String),
@@ -289,7 +285,6 @@ impl Arg {
         match self {
             Arg::Node(id) => smallvec::smallvec![*id],
             Arg::NodeList(ids) => ids.clone(),
-            Arg::OptionalNode(Some(id)) => smallvec::smallvec![*id],
             _ => SmallVec::new(),
         }
     }

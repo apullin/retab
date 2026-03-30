@@ -1,6 +1,5 @@
 pub mod builder;
 pub mod ir;
-pub mod topo;
 
 use ir::{Node, NodeId};
 use slotmap::SlotMap;

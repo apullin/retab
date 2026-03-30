@@ -67,7 +67,6 @@ fn has_quantized_envelope(node: &Bound<'_, PyAny>) -> PyResult<bool> {
 
 enum DecompKind {
     Atanh,
-    Hardsigmoid,
     Stack,
     Unbind,
 }
@@ -213,10 +212,6 @@ impl FxPass for FxDecomposeOpsPass {
                     decompose_atanh(py, &graph, gm, node, debug)?;
                     modified = true;
                 }
-                DecompKind::Hardsigmoid => {
-                    decompose_hardsigmoid(py, &graph, gm, node, debug)?;
-                    modified = true;
-                }
                 DecompKind::Stack => {
                     decompose_stack(py, &graph, gm, node, debug)?;
                     modified = true;
@@ -296,67 +291,6 @@ fn decompose_atanh<'py>(
     let result = insert_call_before(py, graph, node, &mul_op, mul_args.as_ref(), node)?;
 
     // Copy original node's meta (with qparams) onto the final result
-    let copy_mod = py.import_bound("copy")?;
-    let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    result.setattr("meta", &final_meta)?;
-
-    FxGraphModule::replace_all_uses_with(node, &result)?;
-    gm.erase_node(node)?;
-    Ok(())
-}
-
-/// hardsigmoid(x) = clamp((x + 3) / 6, 0, 1)
-fn decompose_hardsigmoid<'py>(
-    py: Python<'py>,
-    graph: &Bound<'py, PyAny>,
-    gm: &FxGraphModule<'py>,
-    node: &Bound<'py, PyAny>,
-    debug: bool,
-) -> PyResult<()> {
-    let args = FxGraphModule::node_args(node)?;
-    if args.is_empty() {
-        return Ok(());
-    }
-    let x = &args[0];
-
-    if debug {
-        let name = FxGraphModule::node_name(node)?;
-        eprintln!("[DecomposeOps] decomposing hardsigmoid: {}", name);
-    }
-
-    let add_op = resolve_aten_op(py, "add.Tensor")?;
-    let div_op = resolve_aten_op(py, "div.Tensor")?;
-    let clamp_op = resolve_aten_op(py, "clamp.default")?;
-    let full_op = resolve_aten_op(py, "full.default")?;
-
-    let input_shape = FxGraphModule::node_shape(x).unwrap_or_else(|_| vec![1]);
-    let shape_tuple = PyTuple::new_bound(py, input_shape.iter().copied());
-
-    // Create constant 3.0
-    let three_val = py_float(py, 3.0)?;
-    let three_args = PyTuple::new_bound(py, &[shape_tuple.as_ref(), three_val.as_ref()]);
-    let three = insert_call_before(py, graph, node, &full_op, three_args.as_ref(), node)?;
-
-    // Create constant 6.0
-    let six_val = py_float(py, 6.0)?;
-    let six_args = PyTuple::new_bound(py, &[shape_tuple.as_ref(), six_val.as_ref()]);
-    let six = insert_call_before(py, graph, node, &full_op, six_args.as_ref(), node)?;
-
-    // x_plus_3 = add(x, 3)
-    let add_args = PyTuple::new_bound(py, &[x.as_ref(), three.as_ref()]);
-    let x_plus_3 = insert_call_before(py, graph, node, &add_op, add_args.as_ref(), node)?;
-
-    // divided = div(x_plus_3, 6)
-    let div_args = PyTuple::new_bound(py, &[x_plus_3.as_ref(), six.as_ref()]);
-    let divided = insert_call_before(py, graph, node, &div_op, div_args.as_ref(), node)?;
-
-    // result = clamp(divided, 0.0, 1.0)
-    let zero_val = py_float(py, 0.0)?;
-    let one_val = py_float(py, 1.0)?;
-    let clamp_args =
-        PyTuple::new_bound(py, &[divided.as_ref(), zero_val.as_ref(), one_val.as_ref()]);
-    let result = insert_call_before(py, graph, node, &clamp_op, clamp_args.as_ref(), node)?;
-
     let copy_mod = py.import_bound("copy")?;
     let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
     result.setattr("meta", &final_meta)?;

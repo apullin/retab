@@ -74,14 +74,8 @@ pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
     let input_names = collect_input_names(graph, node);
     let clamp_dtype = node.meta.val.dtype;
     let needs_extrema_lowering = clamp_dtype == crate::graph::ir::DType::Int32
-        || matches!(
-            node.args.get(1),
-            Some(Arg::Node(_)) | Some(Arg::OptionalNode(Some(_)))
-        )
-        || matches!(
-            node.args.get(2),
-            Some(Arg::Node(_)) | Some(Arg::OptionalNode(Some(_)))
-        );
+        || matches!(node.args.get(1), Some(Arg::Node(_)))
+        || matches!(node.args.get(2), Some(Arg::Node(_)));
 
     if needs_extrema_lowering {
         let input_name = input_names.first().cloned().unwrap_or_default();

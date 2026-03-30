@@ -100,12 +100,6 @@ impl<'py> FxGraphModule<'py> {
         dtype.str()?.extract()
     }
 
-    /// Read `node.meta[key]`.  Returns the raw Python object.
-    pub fn get_meta(node: &Bound<'py, PyAny>, key: &str) -> PyResult<Bound<'py, PyAny>> {
-        let meta = node.getattr("meta")?;
-        meta.get_item(key)
-    }
-
     /// Write `node.meta[key] = value`.
     pub fn set_meta(
         node: &Bound<'py, PyAny>,
@@ -148,13 +142,6 @@ impl<'py> FxGraphModule<'py> {
         if let Some(t0) = t0 {
             crate::fx_profile::record_recompile(t0.elapsed());
         }
-        Ok(())
-    }
-
-    /// `graph.lint()` — validates the graph.
-    pub fn lint(&self) -> PyResult<()> {
-        let graph = self.gm.getattr("graph")?;
-        graph.call_method0("lint")?;
         Ok(())
     }
 

@@ -127,9 +127,6 @@ pub(super) fn resolve_clamp_bound_input(
         Some(Arg::Node(id)) => {
             resolve_input_name_from_node_id(graph, *id).map(|name| (name, Some(*id)))
         }
-        Some(Arg::OptionalNode(Some(id))) => {
-            resolve_input_name_from_node_id(graph, *id).map(|name| (name, Some(*id)))
-        }
         Some(arg @ (Arg::Int(_) | Arg::Float(_) | Arg::Bool(_))) => {
             let name = format!("{}_{}_const", node.name, suffix);
             let tensor = make_filled_const_tensor(name.clone(), shape, dtype, arg.as_f64())?;
