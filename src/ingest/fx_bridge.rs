@@ -723,44 +723,38 @@ fn parse_torch_dtype(dtype_str: &str) -> DType {
 /// The FX-direct `FxFoldAndAnnotateQParamsPass` stores qparams as Python dicts:
 ///   meta["input_qparams"]  = {position: {scale, zero_point, qmin, qmax, dtype}}
 ///   meta["output_qparams"] = {position: {scale, zero_point, qmin, qmax, dtype}}
+/// Parse a Python qparams dict `{pos: QuantArgs}` into entries, skipping
+/// positions already present in `existing`.
+fn parse_qparams_dict(
+    py_obj: &Bound<'_, PyAny>,
+    existing: &[(u32, QuantArgs)],
+) -> Vec<(u32, QuantArgs)> {
+    if py_obj.is_none() {
+        return vec![];
+    }
+    let Ok(dict) = py_obj.downcast::<PyDict>() else { return vec![] };
+    let mut out = vec![];
+    for (pos_key, qp_val) in dict.iter() {
+        let Ok(pos) = pos_key.extract::<u32>() else { continue };
+        let Some(qa) = extract_quantargs_from_py(&qp_val) else { continue };
+        if existing.iter().any(|(p, _)| *p == pos) { continue; }
+        out.push((pos, qa));
+    }
+    out
+}
+
 fn extract_qparams_from_meta(
     meta_dict: &Bound<'_, PyAny>,
     node_meta: &mut NodeMeta,
 ) -> PyResult<()> {
-    // Extract input_qparams
     if let Ok(input_qp) = meta_dict.call_method1("get", ("input_qparams",)) {
-        if !input_qp.is_none() {
-            if let Ok(dict) = input_qp.downcast::<PyDict>() {
-                for (pos_key, qp_val) in dict.iter() {
-                    if let Ok(pos) = pos_key.extract::<u32>() {
-                        if let Some(qa) = extract_quantargs_from_py(&qp_val) {
-                            if !node_meta.input_qparams.iter().any(|(p, _)| *p == pos) {
-                                node_meta.input_qparams.push((pos, qa));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let entries = parse_qparams_dict(&input_qp, &node_meta.input_qparams);
+        node_meta.input_qparams.extend(entries);
     }
-
-    // Extract output_qparams
     if let Ok(output_qp) = meta_dict.call_method1("get", ("output_qparams",)) {
-        if !output_qp.is_none() {
-            if let Ok(dict) = output_qp.downcast::<PyDict>() {
-                for (pos_key, qp_val) in dict.iter() {
-                    if let Ok(pos) = pos_key.extract::<u32>() {
-                        if let Some(qa) = extract_quantargs_from_py(&qp_val) {
-                            if !node_meta.output_qparams.iter().any(|(p, _)| *p == pos) {
-                                node_meta.output_qparams.push((pos, qa));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let entries = parse_qparams_dict(&output_qp, &node_meta.output_qparams);
+        node_meta.output_qparams.extend(entries);
     }
-
     Ok(())
 }
 
