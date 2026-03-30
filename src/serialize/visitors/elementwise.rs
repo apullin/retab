@@ -5,13 +5,13 @@ mod logical;
 mod unary;
 
 pub(super) use comparison::{
-    emit_aten_eq, emit_aten_ge, emit_aten_gt, emit_aten_le, emit_aten_lt, emit_equal,
-    emit_greater, emit_greater_equal, emit_maximum, emit_minimum, emit_pow,
+    emit_aten_eq, emit_aten_ge, emit_aten_gt, emit_aten_le, emit_aten_lt, emit_equal, emit_greater,
+    emit_greater_equal, emit_maximum, emit_minimum, emit_pow,
 };
 pub(super) use logical::{
     emit_arithmetic_right_shift, emit_bitwise_and, emit_bitwise_not, emit_bitwise_or,
-    emit_bitwise_xor, emit_logical_and, emit_logical_left_shift, emit_logical_not,
-    emit_logical_or, emit_logical_xor,
+    emit_bitwise_xor, emit_logical_and, emit_logical_left_shift, emit_logical_not, emit_logical_or,
+    emit_logical_xor,
 };
 pub(super) use unary::{
     emit_abs, emit_cast, emit_cos, emit_erf, emit_exp, emit_log, emit_reciprocal, emit_rsqrt,
@@ -67,7 +67,9 @@ fn emit_bool_binary(
     if swap_inputs && inputs.len() >= 2 {
         inputs.swap(0, 1);
     }
-    result.tensors.push(make_bool_output_tensor(graph, store, node));
+    result
+        .tensors
+        .push(make_bool_output_tensor(graph, store, node));
     result.operators.push(TosaOperator {
         op,
         attribute,

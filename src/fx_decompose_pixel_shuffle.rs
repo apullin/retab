@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-use crate::fx_decompose_ops::{insert_call_before, propagate_qparams, resolve_aten_op};
+use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
 
@@ -114,7 +114,13 @@ fn decompose_pixel_shuffle<'py>(
         let name = FxGraphModule::node_name(node)?;
         eprintln!(
             "[DecomposePixelShuffle] {} r={} shape={:?} -> ({},{},{},{})",
-            name, r, input_shape, n, c, h * r, w * r
+            name,
+            r,
+            input_shape,
+            n,
+            c,
+            h * r,
+            w * r
         );
     }
 
@@ -180,7 +186,13 @@ fn decompose_pixel_unshuffle<'py>(
         let name = FxGraphModule::node_name(node)?;
         eprintln!(
             "[DecomposePixelUnshuffle] {} r={} shape={:?} -> ({},{},{},{})",
-            name, r, input_shape, n, c * r * r, h_out, w_out
+            name,
+            r,
+            input_shape,
+            n,
+            c * r * r,
+            h_out,
+            w_out
         );
     }
 

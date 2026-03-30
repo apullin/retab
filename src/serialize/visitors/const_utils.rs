@@ -1,6 +1,11 @@
 use super::*;
 
-pub(super) fn make_tensor(name: String, shape: Vec<i32>, dtype: DType, data: Vec<u8>) -> TosaTensor {
+pub(super) fn make_tensor(
+    name: String,
+    shape: Vec<i32>,
+    dtype: DType,
+    data: Vec<u8>,
+) -> TosaTensor {
     TosaTensor {
         name,
         shape,

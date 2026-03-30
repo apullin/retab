@@ -38,15 +38,14 @@ fn push_rank1_const(
     values: Vec<u8>,
     len: usize,
 ) -> String {
-    push_inline_const(result, make_rank1_const_tensor(name.clone(), dtype, values, len));
+    push_inline_const(
+        result,
+        make_rank1_const_tensor(name.clone(), dtype, values, len),
+    );
     name
 }
 
-fn plan_rescale_output(
-    graph: &Graph,
-    node: &Node,
-    store: &TensorStore,
-) -> RescaleOutputPlan {
+fn plan_rescale_output(graph: &Graph, node: &Node, store: &TensorStore) -> RescaleOutputPlan {
     let logical_output_shape = actual_tensor_shape(graph, store, node);
     let output_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
     let input_tosa_dtype = first_input_node(graph, node)
@@ -199,7 +198,13 @@ fn push_rescale_zp_tensor(
     is_unsigned: bool,
 ) -> String {
     let normalized = normalize_rescale_zp(dtype, value, is_unsigned);
-    push_rank1_const(result, name, dtype, encode_zp_for_dtype(normalized, dtype), 1)
+    push_rank1_const(
+        result,
+        name,
+        dtype,
+        encode_zp_for_dtype(normalized, dtype),
+        1,
+    )
 }
 
 pub(in crate::serialize::visitors) fn emit_rescale(
@@ -219,7 +224,12 @@ pub(in crate::serialize::visitors) fn emit_rescale(
         rescale_dtype,
     ));
 
-    let params = parse_rescale_params(&input_names, node, &mut result, output_plan.input_tosa_dtype);
+    let params = parse_rescale_params(
+        &input_names,
+        node,
+        &mut result,
+        output_plan.input_tosa_dtype,
+    );
     let input_zp_name = push_rescale_zp_tensor(
         &mut result,
         format!("{}_input_zp", node.name),

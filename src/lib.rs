@@ -1,25 +1,37 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
+use crate::graph::Graph;
+use crate::store::TensorStore;
+
 mod fx_annotate_output_dim_order;
 mod fx_cast_int64;
+mod fx_conv1d_unsqueeze;
 mod fx_convert_clamp;
 mod fx_convert_full_like;
-mod fx_decompose_as_strided_copy;
-mod fx_decompose_adaptive_avgpool;
 mod fx_convert_split_to_slice;
-mod fx_conv1d_unsqueeze;
 mod fx_convert_sum;
+mod fx_decompose_adaptive_avgpool;
 mod fx_decompose_addmm;
+mod fx_decompose_as_strided_copy;
 mod fx_decompose_cumsum;
 mod fx_decompose_grouped_conv;
+mod fx_decompose_index_select;
+mod fx_decompose_index_tensor;
 mod fx_decompose_linear;
 mod fx_decompose_logit;
 mod fx_decompose_masked_fill;
+mod fx_decompose_maxpool_dilation;
 mod fx_decompose_mean;
 mod fx_decompose_ops;
 mod fx_decompose_pixel_shuffle;
 mod fx_decompose_quant;
+mod fx_decompose_repeat_interleave;
+mod fx_decompose_select_scatter;
+mod fx_decompose_strided_slice;
+mod fx_decompose_tril;
+mod fx_decompose_unfold;
+mod fx_expand_where_mask;
 mod fx_fold_qdq;
 mod fx_fuse_constant_args;
 mod fx_fuse_duplicate_users;
@@ -36,13 +48,84 @@ mod fx_quantize_clamp_args;
 mod fx_remove_noop;
 mod fx_rewrite_conv;
 mod fx_rewrite_index_put;
-mod fx_size_adjust_input;
 mod fx_rewrite_matmul;
 mod fx_rewrite_squeeze;
+mod fx_size_adjust_input;
 mod graph;
 mod ingest;
+mod runner_logging;
 mod serialize;
 mod store;
+
+type GraphHierarchy = Vec<(String, Graph)>;
+
+fn clone_bound_pyobject(exported_program: Option<&Bound<'_, PyAny>>) -> Option<PyObject> {
+    exported_program.map(|ep| ep.clone().unbind())
+}
+
+fn to_py_bytes(py: Python<'_>, data: Vec<u8>) -> Py<PyBytes> {
+    PyBytes::new_bound(py, &data).unbind()
+}
+
+fn summarize_ingested_graph(graph: &Graph, tensor_store: &TensorStore) -> String {
+    format!(
+        "Ingested {} nodes, {} tensors",
+        graph.order.len(),
+        tensor_store.buffers.len()
+    )
+}
+
+fn run_single_fx_pass<P: fx_pass::FxPass>(
+    graph_module: &Bound<'_, PyAny>,
+    pass: P,
+) -> PyResult<bool> {
+    let gm = fx_graph::FxGraphModule::new(graph_module);
+    fx_pass::FxPass::run(&pass, &gm)
+}
+
+fn run_full_fx_pipeline(
+    graph_module: &Bound<'_, PyAny>,
+    exported_program: Option<PyObject>,
+) -> PyResult<bool> {
+    let gm = fx_graph::FxGraphModule::new(graph_module);
+    let pipeline = fx_pipeline::build_fx_pipeline(exported_program);
+    fx_pass::run_boxed_fx_passes(&gm, &pipeline)
+}
+
+fn ingest_graph_hierarchy(
+    graph_module: &Bound<'_, PyAny>,
+    state_dict: &Bound<'_, PyDict>,
+    graph_signature: &Bound<'_, PyAny>,
+) -> PyResult<(GraphHierarchy, TensorStore)> {
+    ingest::fx_bridge::ingest_fx_graph_hierarchy(graph_module, state_dict, graph_signature)
+}
+
+fn rebuild_graph_users(graphs: &mut [(String, Graph)]) {
+    for (_, graph) in graphs {
+        graph.rebuild_user_lists();
+    }
+}
+
+fn lower_fx_graph_to_tosa_bytes(
+    graph_module: &Bound<'_, PyAny>,
+    state_dict: &Bound<'_, PyDict>,
+    graph_signature: &Bound<'_, PyAny>,
+    exported_program: Option<PyObject>,
+) -> PyResult<Vec<u8>> {
+    run_full_fx_pipeline(graph_module, exported_program)?;
+    let (graphs, store) = ingest_graph_hierarchy(graph_module, state_dict, graph_signature)?;
+    Ok(serialize::serialize_graphs_to_tosa(&graphs, &store))
+}
+
+fn ingest_and_serialize_tosa_bytes(
+    graph_module: &Bound<'_, PyAny>,
+    state_dict: &Bound<'_, PyDict>,
+    graph_signature: &Bound<'_, PyAny>,
+) -> PyResult<Vec<u8>> {
+    let (mut graphs, store) = ingest_graph_hierarchy(graph_module, state_dict, graph_signature)?;
+    rebuild_graph_users(&mut graphs);
+    Ok(serialize::serialize_graphs_to_tosa(&graphs, &store))
+}
 
 #[pyfunction]
 fn ingest_graph(
@@ -52,11 +135,7 @@ fn ingest_graph(
 ) -> PyResult<String> {
     let (graph, tensor_store) =
         ingest::fx_bridge::ingest_fx_graph(graph_module, state_dict, graph_signature)?;
-    Ok(format!(
-        "Ingested {} nodes, {} tensors",
-        graph.order.len(),
-        tensor_store.buffers.len()
-    ))
+    Ok(summarize_ingested_graph(&graph, &tensor_store))
 }
 
 // ---------------------------------------------------------------------------
@@ -76,10 +155,10 @@ fn fold_qdq_fx(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<bool> {
-    let gm = fx_graph::FxGraphModule::new(graph_module);
-    let ep = exported_program.map(|ep| ep.clone().unbind());
-    let pass = fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(ep);
-    fx_pass::FxPass::run(&pass, &gm)
+    run_single_fx_pass(
+        graph_module,
+        fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(clone_bound_pyobject(exported_program)),
+    )
 }
 
 /// Run only the Rust InsertRescale pass on a Python FX GraphModule.
@@ -88,9 +167,7 @@ fn fold_qdq_fx(
 /// The graph must already be Q/DQ-folded (with QuantArgs in node.meta).
 #[pyfunction]
 fn insert_rescale_fx(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let gm = fx_graph::FxGraphModule::new(graph_module);
-    let pass = fx_insert_rescale::FxInsertRescalePass;
-    fx_pass::FxPass::run(&pass, &gm)
+    run_single_fx_pass(graph_module, fx_insert_rescale::FxInsertRescalePass)
 }
 
 /// Return a summary of the FX graph: node count plus a list of
@@ -123,11 +200,7 @@ fn run_fx_passes(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<bool> {
-    let gm = fx_graph::FxGraphModule::new(graph_module);
-    let ep = exported_program.map(|ep| ep.clone().unbind());
-    let pipeline = fx_pipeline::build_fx_pipeline(ep);
-    let pass_refs: Vec<&dyn fx_pass::FxPass> = pipeline.iter().map(|p| p.as_ref()).collect();
-    fx_pass::run_fx_passes(&gm, &pass_refs)
+    run_full_fx_pipeline(graph_module, clone_bound_pyobject(exported_program))
 }
 
 /// Hybrid pipeline: FX-direct passes (correct graph mutations via Python FX)
@@ -149,23 +222,15 @@ fn lower_to_tosa_v2(
     graph_signature: &Bound<'_, PyAny>,
     exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyBytes>> {
-    // 1. Run FX-direct passes (mutates Python graph in place)
-    let gm = fx_graph::FxGraphModule::new(graph_module);
-    let ep = exported_program.map(|ep| ep.clone().unbind());
-    let pipeline = fx_pipeline::build_fx_pipeline(ep);
-    let pass_refs: Vec<&dyn fx_pass::FxPass> = pipeline.iter().map(|p| p.as_ref()).collect();
-    fx_pass::run_fx_passes(&gm, &pass_refs)?;
-
-    // 2. Ingest the post-pass graph hierarchy into Rust IR so control-flow
-    // regions survive serialization instead of collapsing into a single main
-    // graph.
-    let (graphs, store) =
-        ingest::fx_bridge::ingest_fx_graph_hierarchy(graph_module, state_dict, graph_signature)?;
-
-    // 3. Serialize to TOSA flatbuffer
-    let tosa_bytes = serialize::serialize_graphs_to_tosa(&graphs, &store);
-
-    Ok(PyBytes::new_bound(py, &tosa_bytes).unbind())
+    Ok(to_py_bytes(
+        py,
+        lower_fx_graph_to_tosa_bytes(
+            graph_module,
+            state_dict,
+            graph_signature,
+            clone_bound_pyobject(exported_program),
+        )?,
+    ))
 }
 
 /// Ingest-and-serialize only: convert an already-lowered FX graph to TOSA
@@ -182,20 +247,10 @@ fn ingest_and_serialize(
     state_dict: &Bound<'_, PyDict>,
     graph_signature: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyBytes>> {
-    // 1. Ingest the full FX graph hierarchy so cond/while regions are emitted
-    // as named TOSA regions instead of dangling references from main.
-    let (mut graphs, store) =
-        ingest::fx_bridge::ingest_fx_graph_hierarchy(graph_module, state_dict, graph_signature)?;
-
-    // 2. Rebuild user lists to fix stale edges from FX pass mutations.
-    for (_, graph) in &mut graphs {
-        graph.rebuild_user_lists();
-    }
-
-    // 3. Serialize directly to TOSA flatbuffer -- no duplicate IR passes.
-    let tosa_bytes = serialize::serialize_graphs_to_tosa(&graphs, &store);
-
-    Ok(PyBytes::new_bound(py, &tosa_bytes).unbind())
+    Ok(to_py_bytes(
+        py,
+        ingest_and_serialize_tosa_bytes(graph_module, state_dict, graph_signature)?,
+    ))
 }
 
 #[pymodule]

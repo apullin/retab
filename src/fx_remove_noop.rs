@@ -25,7 +25,6 @@ const NOOP_TARGETS: &[&str] = &[
     "detach_copy.default",
 ];
 
-
 fn is_noop_target(target: &str) -> bool {
     NOOP_TARGETS.iter().any(|t| target.contains(t))
 }
@@ -145,5 +144,4 @@ impl FxRemoveNoopPass {
         let dtype = val.getattr("dtype").ok()?;
         Some(dtype.str().ok()?.to_string())
     }
-
 }

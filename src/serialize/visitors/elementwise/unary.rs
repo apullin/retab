@@ -15,7 +15,12 @@ pub(in crate::serialize::visitors) fn emit_sigmoid(
     node: &Node,
     _store: &TensorStore,
 ) -> EmitResult {
-    emit_direct_unary(graph, node, Op::Sigmoid, Attribute::Sigmoid(SigmoidAttribute))
+    emit_direct_unary(
+        graph,
+        node,
+        Op::Sigmoid,
+        Attribute::Sigmoid(SigmoidAttribute),
+    )
 }
 
 pub(in crate::serialize::visitors) fn emit_tanh(

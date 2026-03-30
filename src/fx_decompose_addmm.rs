@@ -132,8 +132,7 @@ fn decompose_addmm<'py>(
         let builtins = py.import_bound("builtins")?;
         let alpha_val = builtins.call_method1("float", (alpha,))?;
         let full_args = PyTuple::new_bound(py, &[ones_shape.as_ref(), alpha_val.as_ref()]);
-        let alpha_node =
-            insert_call_before(py, graph, node, &full_op, full_args.as_ref(), node)?;
+        let alpha_node = insert_call_before(py, graph, node, &full_op, full_args.as_ref(), node)?;
         let mul_args = PyTuple::new_bound(py, &[mm_result.as_ref(), alpha_node.as_ref()]);
         insert_call_before(py, graph, node, &mul_op, mul_args.as_ref(), node)?
     } else {
@@ -147,8 +146,7 @@ fn decompose_addmm<'py>(
         let builtins = py.import_bound("builtins")?;
         let beta_val = builtins.call_method1("float", (beta,))?;
         let full_args = PyTuple::new_bound(py, &[ones_shape.as_ref(), beta_val.as_ref()]);
-        let beta_node =
-            insert_call_before(py, graph, node, &full_op, full_args.as_ref(), node)?;
+        let beta_node = insert_call_before(py, graph, node, &full_op, full_args.as_ref(), node)?;
         let mul_args = PyTuple::new_bound(py, &[input.as_ref(), beta_node.as_ref()]);
         insert_call_before(py, graph, node, &mul_op, mul_args.as_ref(), node)?
     } else {

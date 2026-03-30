@@ -127,9 +127,8 @@ pub(in crate::serialize::visitors) fn emit_round(
     }
 
     let mut result = EmitResult::default();
-    let spec = ParsedUnaryTensorSpec::parse(graph, store, node).unwrap_or_else(|| {
-        panic!("emit_round: missing input for node '{}'", node.name)
-    });
+    let spec = ParsedUnaryTensorSpec::parse(graph, store, node)
+        .unwrap_or_else(|| panic!("emit_round: missing input for node '{}'", node.name));
 
     let zero_name = format!("{}_round_zero", node.name);
     let half_name = format!("{}_round_half", node.name);
@@ -139,31 +138,47 @@ pub(in crate::serialize::visitors) fn emit_round(
     let floor_name = format!("{}_round_floor", node.name);
     let ceil_name = format!("{}_round_ceil", node.name);
 
-    let zero_tensor =
-        make_filled_const_tensor(zero_name.clone(), spec.output_shape.clone(), spec.ir_dtype, 0.0)
-            .unwrap_or_else(|| {
-                panic!(
-                    "emit_round: unsupported zero-fill dtype {:?} for node '{}'",
-                    spec.ir_dtype, node.name
-                )
-            });
-    let half_tensor =
-        make_filled_const_tensor(half_name.clone(), spec.output_shape.clone(), spec.ir_dtype, 0.5)
-            .unwrap_or_else(|| {
-                panic!(
-                    "emit_round: unsupported half-fill dtype {:?} for node '{}'",
-                    spec.ir_dtype, node.name
-                )
-            });
+    let zero_tensor = make_filled_const_tensor(
+        zero_name.clone(),
+        spec.output_shape.clone(),
+        spec.ir_dtype,
+        0.0,
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "emit_round: unsupported zero-fill dtype {:?} for node '{}'",
+            spec.ir_dtype, node.name
+        )
+    });
+    let half_tensor = make_filled_const_tensor(
+        half_name.clone(),
+        spec.output_shape.clone(),
+        spec.ir_dtype,
+        0.5,
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "emit_round: unsupported half-fill dtype {:?} for node '{}'",
+            spec.ir_dtype, node.name
+        )
+    });
     push_inline_const(&mut result, zero_tensor);
     push_inline_const(&mut result, half_tensor);
 
-    for tensor_name in [ge_name.clone(), plus_half_name.clone(), minus_half_name.clone()] {
+    for tensor_name in [
+        ge_name.clone(),
+        plus_half_name.clone(),
+        minus_half_name.clone(),
+    ] {
         let is_bool = tensor_name == ge_name;
         result.tensors.push(TosaTensor {
             name: tensor_name,
             shape: spec.output_shape.clone(),
-            dtype: if is_bool { DType::Bool } else { ir_dtype_to_tosa(spec.ir_dtype) },
+            dtype: if is_bool {
+                DType::Bool
+            } else {
+                ir_dtype_to_tosa(spec.ir_dtype)
+            },
             data: Vec::new(),
             variable: false,
             is_unranked: false,

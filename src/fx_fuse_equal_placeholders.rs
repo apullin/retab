@@ -107,11 +107,12 @@ impl FxPass for FxFuseEqualPlaceholdersPass {
             let numpy_bytes = t_cpu.call_method0("numpy")?.call_method0("tobytes")?;
 
             let sha1 = hashlib.call_method1("sha1", (&numpy_bytes,))?;
-            let hex_digest: String = sha1
-                .call_method1("hexdigest", ())?
-                .extract()?;
+            let hex_digest: String = sha1.call_method1("hexdigest", ())?.extract()?;
 
-            let key = format!("{}|{}|{}|{}", special_dtype, dtype_str, shape_str, hex_digest);
+            let key = format!(
+                "{}|{}|{}|{}",
+                special_dtype, dtype_str, shape_str, hex_digest
+            );
             hash_buckets
                 .entry(key)
                 .or_default()
@@ -145,10 +146,7 @@ impl FxPass for FxFuseEqualPlaceholdersPass {
             for (dup_node, _) in &nodes_tensors[1..] {
                 FxGraphModule::replace_all_uses_with(dup_node, canonical)?;
 
-                let _ = helpers.call_method1(
-                    "delete_constant_placeholder",
-                    (&ep, dup_node),
-                );
+                let _ = helpers.call_method1("delete_constant_placeholder", (&ep, dup_node));
                 modified = true;
             }
         }

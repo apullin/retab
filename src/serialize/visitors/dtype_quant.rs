@@ -73,7 +73,10 @@ pub(super) fn conv_accumulator_dtype(node: &Node) -> DType {
 
 pub(super) fn node_tensor_dtype(graph: &Graph, node: &Node, index: usize) -> DType {
     match node.args.get(index) {
-        Some(Arg::Node(id)) => graph.node(*id).map(node_output_dtype).unwrap_or(DType::Int32),
+        Some(Arg::Node(id)) => graph
+            .node(*id)
+            .map(node_output_dtype)
+            .unwrap_or(DType::Int32),
         _ => DType::Int32,
     }
 }
@@ -82,7 +85,7 @@ pub(super) fn passthrough_input_dtype(graph: &Graph, node: &Node) -> DType {
     match node.args.first() {
         Some(Arg::Node(id)) => graph
             .node(*id)
-            .map(node_output_dtype)
+            .map(|input| actual_tensor_dtype(graph, input))
             .unwrap_or_else(|| node_output_dtype(node)),
         _ => node_output_dtype(node),
     }
@@ -162,7 +165,13 @@ fn producer_output_zero_point(graph: &Graph, node: &Node, pos: usize) -> Option<
         .output_qparams
         .iter()
         .find(|(qp_pos, _)| *qp_pos == 0)
-        .or_else(|| input_node.meta.input_qparams.iter().find(|(qp_pos, _)| *qp_pos == 0))
+        .or_else(|| {
+            input_node
+                .meta
+                .input_qparams
+                .iter()
+                .find(|(qp_pos, _)| *qp_pos == 0)
+        })
         .map(|(_, qp)| qp.zero_point as i32)
 }
 
@@ -222,19 +231,6 @@ pub(super) fn normalize_rescale_zp(dtype: DType, zp: i32, is_unsigned: bool) -> 
     }
 }
 
-pub(super) fn get_weight_out_channels(graph: &Graph, node: &Node) -> Option<usize> {
-    let weight_id = match node.args.get(1) {
-        Some(Arg::Node(id)) => *id,
-        _ => return None,
-    };
-    let weight_node = graph.node(weight_id)?;
-    let ws = weight_node.meta.val.shape_slice();
-    if ws.is_empty() {
-        return None;
-    }
-    Some(ws[0] as usize)
-}
-
 pub(super) fn encode_zp_for_dtype(zp_val: i32, dtype: DType) -> Vec<u8> {
     match dtype {
         DType::Int8 | DType::Bool => vec![zp_val as u8],
@@ -247,15 +243,6 @@ pub(super) fn encode_zp_for_dtype(zp_val: i32, dtype: DType) -> Vec<u8> {
         DType::Int64 => (zp_val as i64).to_le_bytes().to_vec(),
         _ => vec![zp_val as u8],
     }
-}
-
-pub(super) fn make_weight_zp_data(zp_val: i32, num_channels: usize, dtype: DType) -> Vec<u8> {
-    let encoded = encode_zp_for_dtype(zp_val, dtype);
-    let mut out = Vec::with_capacity(encoded.len() * num_channels);
-    for _ in 0..num_channels {
-        out.extend_from_slice(&encoded);
-    }
-    out
 }
 
 pub(super) fn default_clamp_bound_bytes(dtype: crate::graph::ir::DType, is_min: bool) -> Vec<u8> {
@@ -320,16 +307,10 @@ pub(super) fn clamp_bound_bytes_from_arg(
     is_min: bool,
 ) -> Vec<u8> {
     match arg {
-        Some(Arg::Int(i)) => {
-            clamp_bound_bytes_from_scalar(dtype, *i as f64)
+        Some(arg @ (Arg::Int(_) | Arg::Float(_) | Arg::Bool(_))) => {
+            clamp_bound_bytes_from_scalar(dtype, arg.as_f64())
                 .unwrap_or_else(|| default_clamp_bound_bytes(dtype, is_min))
         }
-        Some(Arg::Float(f)) => {
-            clamp_bound_bytes_from_scalar(dtype, *f)
-                .unwrap_or_else(|| default_clamp_bound_bytes(dtype, is_min))
-        }
-        Some(Arg::Bool(b)) => clamp_bound_bytes_from_scalar(dtype, if *b { 1.0 } else { 0.0 })
-            .unwrap_or_else(|| default_clamp_bound_bytes(dtype, is_min)),
         Some(Arg::IntList(list)) => {
             let bytes: Option<Vec<u8>> = list
                 .iter()

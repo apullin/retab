@@ -78,8 +78,8 @@ impl FxPass for FxDecomposeQuantNodesPass {
                 let args = FxGraphModule::node_args(node)?;
                 if let Some(input) = args.first() {
                     if FxGraphModule::is_node(input) {
-                        let input_target = FxGraphModule::node_target_str(input)
-                            .unwrap_or_default();
+                        let input_target =
+                            FxGraphModule::node_target_str(input).unwrap_or_default();
                         if is_dq(&input_target) {
                             continue;
                         }
@@ -93,10 +93,7 @@ impl FxPass for FxDecomposeQuantNodesPass {
         for node in &candidates {
             let target = FxGraphModule::node_target_str(node)?;
             let is_quant = is_q(&target);
-            helpers.call_method1(
-                "decompose_quant_node",
-                (gm.gm_ref(), node, is_quant),
-            )?;
+            helpers.call_method1("decompose_quant_node", (gm.gm_ref(), node, is_quant))?;
             modified = true;
         }
 

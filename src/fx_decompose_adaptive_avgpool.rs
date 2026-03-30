@@ -170,11 +170,19 @@ fn decompose_adaptive<'py>(
         let mut row: Vec<Bound<'py, PyAny>> = Vec::new();
         for out_j in 0..output_w {
             let start_h = (out_i * input_h / output_h) as i64;
-            let end_h = ((out_i + 1) * input_h / output_h +
-                         if ((out_i + 1) * input_h) % output_h != 0 { 1 } else { 0 }) as i64;
+            let end_h = ((out_i + 1) * input_h / output_h
+                + if ((out_i + 1) * input_h) % output_h != 0 {
+                    1
+                } else {
+                    0
+                }) as i64;
             let start_w = (out_j * input_w / output_w) as i64;
-            let end_w = ((out_j + 1) * input_w / output_w +
-                         if ((out_j + 1) * input_w) % output_w != 0 { 1 } else { 0 }) as i64;
+            let end_w = ((out_j + 1) * input_w / output_w
+                + if ((out_j + 1) * input_w) % output_w != 0 {
+                    1
+                } else {
+                    0
+                }) as i64;
 
             // Slice along H
             let h_args = PyTuple::new_bound(
@@ -210,7 +218,12 @@ fn decompose_adaptive<'py>(
             let padding = pyo3::types::PyList::new_bound(py, [0i64, 0].iter().copied());
             let pool_args = PyTuple::new_bound(
                 py,
-                &[x_hw.as_ref(), kernel.as_ref(), stride.as_ref(), padding.as_ref()],
+                &[
+                    x_hw.as_ref(),
+                    kernel.as_ref(),
+                    stride.as_ref(),
+                    padding.as_ref(),
+                ],
             );
             let pooled = graph.call_method1("call_function", (&avgpool_op, &pool_args))?;
             set_meta_and_refresh(py, &pooled, &meta_with_qparams)?;

@@ -16,9 +16,7 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     }
     if matches!(
         target_str,
-        "while_loop"
-            | "higher_order.while_loop"
-            | "torch.ops.higher_order.while_loop"
+        "while_loop" | "higher_order.while_loop" | "torch.ops.higher_order.while_loop"
     ) {
         return OpTarget::WhileLoop;
     }
@@ -34,6 +32,9 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
         let lower = target_str.to_ascii_lowercase();
         if lower.contains("rescale") {
             return OpTarget::TosaRescale;
+        }
+        if lower.contains("resize") {
+            return OpTarget::TosaResize;
         }
         if lower.contains("depthwise_conv2d") {
             return OpTarget::TosaDepthwiseConv2d;
@@ -250,6 +251,12 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     if target_str.contains("aten.tanh") {
         return OpTarget::Tanh;
     }
+    if target_str.contains("aten.maximum") {
+        return OpTarget::TosaMaximum;
+    }
+    if target_str.contains("aten.minimum") {
+        return OpTarget::TosaMinimum;
+    }
     if target_str.contains("aten.clamp") {
         return OpTarget::Clamp;
     }
@@ -268,9 +275,7 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     if target_str.contains("aten.index_select") {
         return OpTarget::IndexSelect;
     }
-    if target_str.contains("aten.select_copy")
-        || target_str.contains("aten.select")
-    {
+    if target_str.contains("aten.select_copy") || target_str.contains("aten.select") {
         return OpTarget::SelectCopy;
     }
     if target_str.contains("aten.unsqueeze") {
@@ -471,11 +476,16 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     }
 
     // Additional ops
-    if target_str.contains("aten._adaptive_avg_pool2d") || target_str.contains("aten.adaptive_avg_pool2d") {
+    if target_str.contains("aten._adaptive_avg_pool2d")
+        || target_str.contains("aten.adaptive_avg_pool2d")
+    {
         return OpTarget::AdaptiveAvgPool2d;
     }
     if target_str.contains("aten.upsample_nearest2d") {
         return OpTarget::UpsampleNearest2d;
+    }
+    if target_str.contains("aten.upsample_bilinear2d") {
+        return OpTarget::UpsampleBilinear2d;
     }
     if target_str.contains("aten.conv1d") {
         return OpTarget::Conv1d;
@@ -498,7 +508,9 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     if target_str.contains("aten.unfold_copy") || target_str.contains("aten.unfold.") {
         return OpTarget::UnfoldCopy;
     }
-    if target_str.contains("aten.split_with_sizes_copy") || target_str.contains("aten.split_with_sizes.") {
+    if target_str.contains("aten.split_with_sizes_copy")
+        || target_str.contains("aten.split_with_sizes.")
+    {
         return OpTarget::SplitWithSizesCopy;
     }
     if target_str.contains("aten.index.Tensor") {

@@ -21,9 +21,11 @@ fn is_target(target: &str) -> bool {
     }
     lowered.contains("convolution.default")
         || lowered.contains("conv2d.default")
+        || lowered.contains("conv3d.default")
         || lowered.contains("max_pool2d")
         || lowered.contains("avg_pool2d")
         || lowered.contains("conv2d")
+        || lowered.contains("conv3d")
         || lowered.contains("max_pool2d")
         || lowered.contains("avg_pool2d")
 }
@@ -46,6 +48,13 @@ impl FxPass for FxSizeAdjustInputPass {
             let op = FxGraphModule::node_op(node)?;
             if op != "call_function" {
                 continue;
+            }
+            if let Ok(meta) = node.getattr("meta") {
+                if let Ok(skip) = meta.call_method1("get", ("skip_size_adjust", false)) {
+                    if skip.extract::<bool>().unwrap_or(false) {
+                        continue;
+                    }
+                }
             }
             let target = FxGraphModule::node_target_str(node)?;
             if !is_target(&target) {
@@ -76,33 +85,41 @@ impl FxPass for FxSizeAdjustInputPass {
                 let weight_shape = weight_node
                     .and_then(|w| FxGraphModule::node_shape(w).ok())
                     .unwrap_or_default();
-                if weight_shape.len() < 4 {
+                if weight_shape.len() < input_shape.len() {
+                    continue;
+                }
+                let spatial_rank = input_shape.len().saturating_sub(2);
+                if spatial_rank == 0 {
                     continue;
                 }
 
-                let stride: Vec<i64> = args.get(3)
+                let stride: Vec<i64> = args
+                    .get(3)
                     .and_then(|a| a.extract().ok())
-                    .unwrap_or_else(|| vec![1, 1]);
-                let raw_pad: Vec<i64> = args.get(4)
+                    .unwrap_or_else(|| vec![1; spatial_rank]);
+                let raw_pad: Vec<i64> = args
+                    .get(4)
                     .and_then(|a| a.extract().ok())
-                    .unwrap_or_else(|| vec![0, 0]);
-                let dilation: Vec<i64> = args.get(5)
+                    .unwrap_or_else(|| vec![0; spatial_rank]);
+                let dilation: Vec<i64> = args
+                    .get(5)
                     .and_then(|a| a.extract().ok())
-                    .unwrap_or_else(|| vec![1, 1]);
+                    .unwrap_or_else(|| vec![1; spatial_rank]);
 
-                // Handle both ATen pad [pad_h, pad_w] and TOSA pad [top, bottom, left, right]
-                let pad_per_dim: Vec<(i64, i64)> = if raw_pad.len() == 4 {
-                    // TOSA format: [top, bottom, left, right]
-                    vec![(raw_pad[0], raw_pad[1]), (raw_pad[2], raw_pad[3])]
-                } else if raw_pad.len() == 2 {
-                    // ATen format: symmetric [pad_h, pad_w]
-                    vec![(raw_pad[0], raw_pad[0]), (raw_pad[1], raw_pad[1])]
+                // Handle both ATen pad [pad_d, pad_h, pad_w] and TOSA pad
+                // [front, back, top, bottom, left, right] for arbitrary spatial rank.
+                let pad_per_dim: Vec<(i64, i64)> = if raw_pad.len() == spatial_rank * 2 {
+                    (0..spatial_rank)
+                        .map(|i| (raw_pad[i * 2], raw_pad[i * 2 + 1]))
+                        .collect()
+                } else if raw_pad.len() == spatial_rank {
+                    raw_pad.iter().copied().map(|p| (p, p)).collect()
                 } else {
-                    vec![(0, 0), (0, 0)]
+                    vec![(0, 0); spatial_rank]
                 };
 
                 let mut slices = Vec::new();
-                for i in 0..2 {
+                for i in 0..spatial_rank {
                     let dim = i + 2;
                     let s = stride.get(i).copied().unwrap_or(1);
                     let (pad_before, pad_after) = pad_per_dim.get(i).copied().unwrap_or((0, 0));
@@ -112,8 +129,10 @@ impl FxPass for FxSizeAdjustInputPass {
                     let input_len = input_shape.get(dim).copied().unwrap_or(1);
 
                     let remainder = (input_len + total_pad - d * (k - 1) - 1) % s;
-                    if remainder > 0 {
-                        let adjustment = remainder;
+                    // Match Python Arm SizeAdjustInputPass: only trim beyond
+                    // what the existing padding already accounts for.
+                    if remainder > pad_before {
+                        let adjustment = remainder - pad_before;
                         slices.push((dim as i64, 0i64, input_len - adjustment));
                     }
                 }
@@ -132,10 +151,8 @@ impl FxPass for FxSizeAdjustInputPass {
                                 end.into_py(py).into_bound(py).as_ref(),
                             ],
                         );
-                        let slice_node = graph.call_method1(
-                            "call_function",
-                            (&slice_op, &slice_args),
-                        )?;
+                        let slice_node =
+                            graph.call_method1("call_function", (&slice_op, &slice_args))?;
                         // Copy meta
                         let copy_mod = py.import_bound("copy")?;
                         let meta = copy_mod.call_method1("copy", (input_node.getattr("meta")?,))?;
@@ -158,13 +175,16 @@ impl FxPass for FxSizeAdjustInputPass {
                 }
             } else if is_pool {
                 // Pool: args = [input, kernel_size, stride, padding, ...]
-                let kernel: Vec<i64> = args.get(1)
+                let kernel: Vec<i64> = args
+                    .get(1)
                     .and_then(|a| a.extract().ok())
                     .unwrap_or_else(|| vec![2, 2]);
-                let stride: Vec<i64> = args.get(2)
+                let stride: Vec<i64> = args
+                    .get(2)
                     .and_then(|a| a.extract().ok())
                     .unwrap_or_else(|| kernel.clone());
-                let pad: Vec<i64> = args.get(3)
+                let pad: Vec<i64> = args
+                    .get(3)
                     .and_then(|a| a.extract().ok())
                     .unwrap_or_else(|| vec![0, 0]);
 
@@ -197,10 +217,8 @@ impl FxPass for FxSizeAdjustInputPass {
                                 end.into_py(py).into_bound(py).as_ref(),
                             ],
                         );
-                        let slice_node = graph.call_method1(
-                            "call_function",
-                            (&slice_op, &slice_args),
-                        )?;
+                        let slice_node =
+                            graph.call_method1("call_function", (&slice_op, &slice_args))?;
                         let copy_mod = py.import_bound("copy")?;
                         let meta = copy_mod.call_method1("copy", (input_node.getattr("meta")?,))?;
                         slice_node.setattr("meta", &meta)?;

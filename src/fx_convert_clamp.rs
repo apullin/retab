@@ -45,14 +45,8 @@ impl FxPass for FxConvertToClampPass {
             } else if is_hardtanh(&target) {
                 // hardtanh(x, min_val, max_val) -> clamp(x, min_val, max_val)
                 let args = FxGraphModule::node_args(node)?;
-                let min_val: f64 = args
-                    .get(1)
-                    .and_then(|a| a.extract().ok())
-                    .unwrap_or(-1.0);
-                let max_val: f64 = args
-                    .get(2)
-                    .and_then(|a| a.extract().ok())
-                    .unwrap_or(1.0);
+                let min_val: f64 = args.get(1).and_then(|a| a.extract().ok()).unwrap_or(-1.0);
+                let max_val: f64 = args.get(2).and_then(|a| a.extract().ok()).unwrap_or(1.0);
                 helpers.call_method1(
                     "replace_target_with_clamp",
                     (gm.gm_ref(), node, min_val, max_val),

@@ -93,10 +93,7 @@ fn decompose_logit<'py>(
 
     if debug {
         let name = FxGraphModule::node_name(node)?;
-        eprintln!(
-            "[DecomposeLogit] decomposing: {} (eps={:?})",
-            name, eps
-        );
+        eprintln!("[DecomposeLogit] decomposing: {} (eps={:?})", name, eps);
     }
 
     let mul_op = resolve_aten_op(py, "mul.Tensor")?;
@@ -121,10 +118,8 @@ fn decompose_logit<'py>(
         let clamp_op = resolve_aten_op(py, "clamp.default")?;
         let eps_py = builtins.call_method1("float", (eps_val,))?;
         let one_minus_eps = builtins.call_method1("float", (1.0 - eps_val,))?;
-        let clamp_args = PyTuple::new_bound(
-            py,
-            &[x.as_ref(), eps_py.as_ref(), one_minus_eps.as_ref()],
-        );
+        let clamp_args =
+            PyTuple::new_bound(py, &[x.as_ref(), eps_py.as_ref(), one_minus_eps.as_ref()]);
         x = insert_call_before(py, graph, node, &clamp_op, clamp_args.as_ref(), node)?;
     }
 
@@ -144,8 +139,7 @@ fn decompose_logit<'py>(
 
     // log_input = mul(x, frac)  => x / (1 - x)
     let log_input_args = PyTuple::new_bound(py, &[x.as_ref(), frac.as_ref()]);
-    let log_input =
-        insert_call_before(py, graph, node, &mul_op, log_input_args.as_ref(), node)?;
+    let log_input = insert_call_before(py, graph, node, &mul_op, log_input_args.as_ref(), node)?;
 
     // result = log(log_input)
     let log_args = PyTuple::new_bound(py, &[log_input.as_ref()]);

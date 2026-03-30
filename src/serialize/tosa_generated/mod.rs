@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 // Manual Rust definitions for the subset of TOSA 1.0 flatbuffer types
 // we need for Phase 1 serialization. These mirror the schema at
 // tosa-tools/serialization/schema/tosa.fbs.
@@ -128,6 +130,15 @@ pub enum RoundingMode {
     DoubleRound = 3,
 }
 
+/// Resize mode used by RESIZE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum ResizeMode {
+    Unknown = 0,
+    Nearest = 1,
+    Bilinear = 2,
+}
+
 /// NaN propagation mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
@@ -144,6 +155,16 @@ pub enum NanPropagationMode {
 /// Conv2dAttribute — pad, stride, dilation, local_bound, acc_type.
 #[derive(Debug, Clone)]
 pub struct Conv2dAttribute {
+    pub pad: Vec<i32>,
+    pub stride: Vec<i32>,
+    pub dilation: Vec<i32>,
+    pub local_bound: bool,
+    pub acc_type: DType,
+}
+
+/// Conv3dAttribute — same fields as Conv2d, but for 3 spatial dims.
+#[derive(Debug, Clone)]
+pub struct Conv3dAttribute {
     pub pad: Vec<i32>,
     pub stride: Vec<i32>,
     pub dilation: Vec<i32>,
@@ -324,6 +345,12 @@ pub struct GatherAttribute;
 #[derive(Debug, Clone)]
 pub struct ScatterAttribute;
 
+/// ResizeAttribute.
+#[derive(Debug, Clone)]
+pub struct ResizeAttribute {
+    pub mode: ResizeMode,
+}
+
 /// SelectAttribute — empty.
 #[derive(Debug, Clone)]
 pub struct SelectAttribute;
@@ -359,15 +386,27 @@ pub struct WhileLoopAttribute {
 }
 
 #[derive(Debug, Clone)]
-pub struct MaximumAttribute { pub nan_mode: NanPropagationMode }
+pub struct MaximumAttribute {
+    pub nan_mode: NanPropagationMode,
+}
 #[derive(Debug, Clone)]
-pub struct MinimumAttribute { pub nan_mode: NanPropagationMode }
+pub struct MinimumAttribute {
+    pub nan_mode: NanPropagationMode,
+}
 #[derive(Debug, Clone)]
-pub struct ReduceAnyAttribute { pub axis: i32 }
+pub struct ReduceAnyAttribute {
+    pub axis: i32,
+}
 #[derive(Debug, Clone)]
-pub struct ReduceMaxAttribute { pub axis: i32, pub nan_mode: NanPropagationMode }
+pub struct ReduceMaxAttribute {
+    pub axis: i32,
+    pub nan_mode: NanPropagationMode,
+}
 #[derive(Debug, Clone)]
-pub struct ReduceMinAttribute { pub axis: i32, pub nan_mode: NanPropagationMode }
+pub struct ReduceMinAttribute {
+    pub axis: i32,
+    pub nan_mode: NanPropagationMode,
+}
 
 /// BitwiseNotAttribute — empty.
 #[derive(Debug, Clone)]
@@ -427,6 +466,7 @@ pub struct TransposeConv2dAttribute {
 pub enum Attribute {
     None,
     Conv2d(Conv2dAttribute),
+    Conv3d(Conv3dAttribute),
     DepthwiseConv2d(DepthwiseConv2dAttribute),
     Rescale(RescaleAttribute),
     MaxPool2d(MaxPool2dAttribute),
@@ -460,6 +500,7 @@ pub enum Attribute {
     Slice(SliceAttribute),
     Gather(GatherAttribute),
     Scatter(ScatterAttribute),
+    Resize(ResizeAttribute),
     Select(SelectAttribute),
     Cast(CastAttribute),
     Equal(EqualAttribute),
@@ -494,66 +535,68 @@ impl Attribute {
     pub fn union_type(&self) -> u8 {
         match self {
             Attribute::None => 0,
-            Attribute::Conv2d(_) => 3,          // Conv2dAttribute
-            Attribute::DepthwiseConv2d(_) => 5, // DepthwiseConv2dAttribute
-            Attribute::Rescale(_) => 66,        // RescaleAttribute
-            Attribute::MaxPool2d(_) => 8,       // MaxPool2dAttribute
-            Attribute::Transpose(_) => 61,      // TransposeAttribute
-            Attribute::Reshape(_) => 57,        // ReshapeAttribute
-            Attribute::Clamp(_) => 11,          // ClampAttribute
-            Attribute::Const(_) => 67,          // ConstAttribute
-            Attribute::ConstShape(_) => 75,     // ConstShapeAttribute
-            Attribute::Add(_) => 15,            // AddAttribute
-            Attribute::Sub(_) => 30,            // SubAttribute
-            Attribute::Mul(_) => 28,            // MulAttribute
-            Attribute::AvgPool2d(_) => 2,       // AvgPool2dAttribute
-            Attribute::ReduceSum(_) => 54,      // ReduceSumAttribute
-            Attribute::Table(_) => 31,          // TableAttribute
-            Attribute::Sigmoid(_) => 13,        // SigmoidAttribute
-            Attribute::Tanh(_) => 14,           // TanhAttribute
-            Attribute::Exp(_) => 37,            // ExpAttribute
-            Attribute::Log(_) => 39,            // LogAttribute
-            Attribute::Negate(_) => 41,         // NegateAttribute
-            Attribute::Abs(_) => 32,            // AbsAttribute
-            Attribute::Ceil(_) => 34,           // CeilAttribute
-            Attribute::Floor(_) => 38,          // FloorAttribute
-            Attribute::Reciprocal(_) => 42,     // ReciprocalAttribute
-            Attribute::Erf(_) => 12,            // ErfAttribute
-            Attribute::Cos(_) => 36,            // CosAttribute
-            Attribute::Sin(_) => 44,            // SinAttribute
-            Attribute::Rsqrt(_) => 43,          // RsqrtAttribute
-            Attribute::MatMul(_) => 7,          // MatMulAttribute
-            Attribute::Concat(_) => 55,         // ConcatAttribute
-            Attribute::Pad(_) => 56,            // PadAttribute
-            Attribute::Slice(_) => 59,          // SliceAttribute
-            Attribute::Gather(_) => 62,         // GatherAttribute
-            Attribute::Scatter(_) => 63,        // ScatterAttribute
-            Attribute::Select(_) => 45,         // SelectAttribute
-            Attribute::Cast(_) => 65,           // CastAttribute
-            Attribute::Equal(_) => 46,          // EqualAttribute
-            Attribute::Greater(_) => 47,        // GreaterAttribute
-            Attribute::GreaterEqual(_) => 48,   // GreaterEqualAttribute
-            Attribute::TransposeConv2d(_) => 10, // TransposeConv2dAttribute
-            Attribute::CondIf(_) => 70,         // CondIfAttribute
-            Attribute::WhileLoop(_) => 71,      // WhileLoopAttribute
-            Attribute::Maximum(_) => 26,        // MaximumAttribute
-            Attribute::Minimum(_) => 27,        // MinimumAttribute
-            Attribute::ReduceAny(_) => 50,      // ReduceAnyAttribute
-            Attribute::ReduceMax(_) => 51,      // ReduceMaxAttribute
-            Attribute::ReduceMin(_) => 52,      // ReduceMinAttribute
-            Attribute::BitwiseNot(_) => 33,     // BitwiseNotAttribute
-            Attribute::BitwiseAnd(_) => 17,     // BitwiseAndAttribute
-            Attribute::BitwiseOr(_) => 18,      // BitwiseOrAttribute
-            Attribute::BitwiseXor(_) => 19,     // BitwiseXorAttribute
-            Attribute::LogicalLeftShift(_) => 22,  // LogicalLeftShiftAttribute
-            Attribute::LogicalRightShift(_) => 23, // LogicalRightShiftAttribute
+            Attribute::Conv2d(_) => 3,                // Conv2dAttribute
+            Attribute::Conv3d(_) => 4,                // Conv3dAttribute
+            Attribute::DepthwiseConv2d(_) => 5,       // DepthwiseConv2dAttribute
+            Attribute::Rescale(_) => 66,              // RescaleAttribute
+            Attribute::MaxPool2d(_) => 8,             // MaxPool2dAttribute
+            Attribute::Transpose(_) => 61,            // TransposeAttribute
+            Attribute::Reshape(_) => 57,              // ReshapeAttribute
+            Attribute::Clamp(_) => 11,                // ClampAttribute
+            Attribute::Const(_) => 67,                // ConstAttribute
+            Attribute::ConstShape(_) => 75,           // ConstShapeAttribute
+            Attribute::Add(_) => 15,                  // AddAttribute
+            Attribute::Sub(_) => 30,                  // SubAttribute
+            Attribute::Mul(_) => 28,                  // MulAttribute
+            Attribute::AvgPool2d(_) => 2,             // AvgPool2dAttribute
+            Attribute::ReduceSum(_) => 54,            // ReduceSumAttribute
+            Attribute::Table(_) => 31,                // TableAttribute
+            Attribute::Sigmoid(_) => 13,              // SigmoidAttribute
+            Attribute::Tanh(_) => 14,                 // TanhAttribute
+            Attribute::Exp(_) => 37,                  // ExpAttribute
+            Attribute::Log(_) => 39,                  // LogAttribute
+            Attribute::Negate(_) => 41,               // NegateAttribute
+            Attribute::Abs(_) => 32,                  // AbsAttribute
+            Attribute::Ceil(_) => 34,                 // CeilAttribute
+            Attribute::Floor(_) => 38,                // FloorAttribute
+            Attribute::Reciprocal(_) => 42,           // ReciprocalAttribute
+            Attribute::Erf(_) => 12,                  // ErfAttribute
+            Attribute::Cos(_) => 36,                  // CosAttribute
+            Attribute::Sin(_) => 44,                  // SinAttribute
+            Attribute::Rsqrt(_) => 43,                // RsqrtAttribute
+            Attribute::MatMul(_) => 7,                // MatMulAttribute
+            Attribute::Concat(_) => 55,               // ConcatAttribute
+            Attribute::Pad(_) => 56,                  // PadAttribute
+            Attribute::Slice(_) => 59,                // SliceAttribute
+            Attribute::Gather(_) => 62,               // GatherAttribute
+            Attribute::Scatter(_) => 63,              // ScatterAttribute
+            Attribute::Resize(_) => 64,               // ResizeAttribute
+            Attribute::Select(_) => 45,               // SelectAttribute
+            Attribute::Cast(_) => 65,                 // CastAttribute
+            Attribute::Equal(_) => 46,                // EqualAttribute
+            Attribute::Greater(_) => 47,              // GreaterAttribute
+            Attribute::GreaterEqual(_) => 48,         // GreaterEqualAttribute
+            Attribute::TransposeConv2d(_) => 10,      // TransposeConv2dAttribute
+            Attribute::CondIf(_) => 70,               // CondIfAttribute
+            Attribute::WhileLoop(_) => 71,            // WhileLoopAttribute
+            Attribute::Maximum(_) => 26,              // MaximumAttribute
+            Attribute::Minimum(_) => 27,              // MinimumAttribute
+            Attribute::ReduceAny(_) => 50,            // ReduceAnyAttribute
+            Attribute::ReduceMax(_) => 51,            // ReduceMaxAttribute
+            Attribute::ReduceMin(_) => 52,            // ReduceMinAttribute
+            Attribute::BitwiseNot(_) => 33,           // BitwiseNotAttribute
+            Attribute::BitwiseAnd(_) => 17,           // BitwiseAndAttribute
+            Attribute::BitwiseOr(_) => 18,            // BitwiseOrAttribute
+            Attribute::BitwiseXor(_) => 19,           // BitwiseXorAttribute
+            Attribute::LogicalLeftShift(_) => 22,     // LogicalLeftShiftAttribute
+            Attribute::LogicalRightShift(_) => 23,    // LogicalRightShiftAttribute
             Attribute::ArithmeticRightShift(_) => 16, // ArithmeticRightShiftAttribute
-            Attribute::LogicalNot(_) => 40,     // LogicalNotAttribute
-            Attribute::LogicalAnd(_) => 21,     // LogicalAndAttribute
-            Attribute::LogicalOr(_) => 24,      // LogicalOrAttribute
-            Attribute::LogicalXor(_) => 25,     // LogicalXorAttribute
-            Attribute::Pow(_) => 29,            // PowAttribute
-            Attribute::IntDiv(_) => 20,         // IntDivAttribute
+            Attribute::LogicalNot(_) => 40,           // LogicalNotAttribute
+            Attribute::LogicalAnd(_) => 21,           // LogicalAndAttribute
+            Attribute::LogicalOr(_) => 24,            // LogicalOrAttribute
+            Attribute::LogicalXor(_) => 25,           // LogicalXorAttribute
+            Attribute::Pow(_) => 29,                  // PowAttribute
+            Attribute::IntDiv(_) => 20,               // IntDivAttribute
         }
     }
 }

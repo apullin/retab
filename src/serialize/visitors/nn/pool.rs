@@ -1,5 +1,85 @@
 use super::*;
 
+fn adjusted_pool_post_pad(
+    input_size: i32,
+    kernel_size: i32,
+    stride: i32,
+    pad: i32,
+    ceil_mode: bool,
+) -> i32 {
+    let numer = input_size - kernel_size + 2 * pad;
+    let output_size = if ceil_mode {
+        ((numer + stride - 1) / stride) + 1
+    } else {
+        (numer / stride) + 1
+    };
+    (output_size - 1) * stride - input_size + kernel_size - pad
+}
+
+fn adjusted_max_pool_pad(
+    graph: &Graph,
+    store: &TensorStore,
+    node: &Node,
+    kernel: &[i32],
+    stride: &[i32],
+    padding: &[i32],
+    ceil_mode: bool,
+) -> Vec<i32> {
+    if padding.len() == 4 {
+        return padding.to_vec();
+    }
+
+    let symmetric_pad = if padding.len() >= 2 {
+        vec![padding[0], padding[1]]
+    } else if padding.len() == 1 {
+        vec![padding[0], padding[0]]
+    } else {
+        vec![0, 0]
+    };
+
+    let Some(Arg::Node(input_id)) = node.args.first() else {
+        return vec![
+            symmetric_pad[0],
+            symmetric_pad[0],
+            symmetric_pad[1],
+            symmetric_pad[1],
+        ];
+    };
+    let Some(input_node) = graph.node(*input_id) else {
+        return vec![
+            symmetric_pad[0],
+            symmetric_pad[0],
+            symmetric_pad[1],
+            symmetric_pad[1],
+        ];
+    };
+    let input_shape = actual_tensor_shape(graph, store, input_node);
+    if input_shape.len() != 4 {
+        return vec![
+            symmetric_pad[0],
+            symmetric_pad[0],
+            symmetric_pad[1],
+            symmetric_pad[1],
+        ];
+    }
+
+    let post_pad_h = adjusted_pool_post_pad(
+        input_shape[1],
+        *kernel.first().unwrap_or(&2),
+        *stride.first().unwrap_or(&2),
+        symmetric_pad[0],
+        ceil_mode,
+    );
+    let post_pad_w = adjusted_pool_post_pad(
+        input_shape[2],
+        *kernel.get(1).unwrap_or(&2),
+        *stride.get(1).unwrap_or(&2),
+        symmetric_pad[1],
+        ceil_mode,
+    );
+    vec![symmetric_pad[0], post_pad_h, symmetric_pad[1], post_pad_w]
+}
+
 pub(in crate::serialize::visitors) fn emit_aten_max_pool2d(
     graph: &Graph,
     _node_id: NodeId,
@@ -12,25 +92,50 @@ pub(in crate::serialize::visitors) fn emit_aten_max_pool2d(
     let kernel = arg_i32_list(node, 1);
     let stride = arg_i32_list(node, 2);
     let padding = arg_i32_list(node, 3);
-    let pad = if padding.len() >= 2 {
-        vec![padding[0], padding[0], padding[1], padding[1]]
-    } else if padding.len() == 1 {
-        vec![padding[0], padding[0], padding[0], padding[0]]
-    } else {
-        vec![0, 0, 0, 0]
-    };
+    let ceil_mode = arg_bool(node, 5, false);
 
-    let kernel_for_shape = if kernel.is_empty() { vec![2, 2] } else { kernel.clone() };
-    let stride_for_shape = if stride.is_empty() { vec![2, 2] } else { stride.clone() };
-    let mut output_tensor =
-        compute_pool_nhwc_output(graph, store, node, &kernel_for_shape, &stride_for_shape, &pad);
+    let kernel_for_shape = if kernel.is_empty() {
+        vec![2, 2]
+    } else {
+        kernel.clone()
+    };
+    let stride_for_shape = if stride.is_empty() {
+        kernel_for_shape.clone()
+    } else {
+        stride.clone()
+    };
+    let pad = adjusted_max_pool_pad(
+        graph,
+        store,
+        node,
+        &kernel_for_shape,
+        &stride_for_shape,
+        &padding,
+        ceil_mode,
+    );
+    let mut output_tensor = compute_pool_nhwc_output(
+        graph,
+        store,
+        node,
+        &kernel_for_shape,
+        &stride_for_shape,
+        &pad,
+    );
     output_tensor.name = output_name.clone();
     result.tensors.push(output_tensor);
     result.operators.push(TosaOperator {
         op: Op::MaxPool2d,
         attribute: Attribute::MaxPool2d(MaxPool2dAttribute {
-            kernel: if kernel.is_empty() { vec![2, 2] } else { kernel },
-            stride: if stride.is_empty() { vec![2, 2] } else { stride },
+            kernel: if kernel.is_empty() {
+                vec![2, 2]
+            } else {
+                kernel
+            },
+            stride: if stride.is_empty() {
+                kernel_for_shape
+            } else {
+                stride
+            },
             pad,
             nan_mode: NanPropagationMode::Propagate,
         }),
@@ -53,10 +158,27 @@ pub(in crate::serialize::visitors) fn emit_max_pool2d(
     let kernel = kwarg_i32_list(node, "kernel");
     let stride = kwarg_i32_list(node, "stride");
     let pad = kwarg_i32_list(node, "pad");
+    let ceil_mode = kwarg_bool(node, "ceil_mode", false);
 
-    let kernel_for_shape = if kernel.is_empty() { vec![2, 2] } else { kernel.clone() };
-    let stride_for_shape = if stride.is_empty() { vec![2, 2] } else { stride.clone() };
-    let pad_for_shape = if pad.is_empty() { vec![0, 0, 0, 0] } else { pad.clone() };
+    let kernel_for_shape = if kernel.is_empty() {
+        vec![2, 2]
+    } else {
+        kernel.clone()
+    };
+    let stride_for_shape = if stride.is_empty() {
+        kernel_for_shape.clone()
+    } else {
+        stride.clone()
+    };
+    let pad_for_shape = adjusted_max_pool_pad(
+        graph,
+        store,
+        node,
+        &kernel_for_shape,
+        &stride_for_shape,
+        &pad,
+        ceil_mode,
+    );
     let mut output_tensor = compute_pool_nhwc_output(
         graph,
         store,
@@ -70,9 +192,17 @@ pub(in crate::serialize::visitors) fn emit_max_pool2d(
     result.operators.push(TosaOperator {
         op: Op::MaxPool2d,
         attribute: Attribute::MaxPool2d(MaxPool2dAttribute {
-            kernel: if kernel.is_empty() { vec![2, 2] } else { kernel },
-            stride: if stride.is_empty() { vec![2, 2] } else { stride },
-            pad: if pad.is_empty() { vec![0, 0, 0, 0] } else { pad },
+            kernel: if kernel.is_empty() {
+                vec![2, 2]
+            } else {
+                kernel
+            },
+            stride: if stride.is_empty() {
+                kernel_for_shape
+            } else {
+                stride
+            },
+            pad: pad_for_shape,
             nan_mode: NanPropagationMode::Propagate,
         }),
         inputs: input_names,
@@ -92,11 +222,19 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(
     let input_names = collect_input_names(graph, node);
     let kernel = {
         let kw = kwarg_i32_list(node, "kernel");
-        if kw.is_empty() { arg_i32_list(node, 1) } else { kw }
+        if kw.is_empty() {
+            arg_i32_list(node, 1)
+        } else {
+            kw
+        }
     };
     let mut stride = {
         let kw = kwarg_i32_list(node, "stride");
-        if kw.is_empty() { arg_i32_list(node, 2) } else { kw }
+        if kw.is_empty() {
+            arg_i32_list(node, 2)
+        } else {
+            kw
+        }
     };
     let pad = {
         let kw = kwarg_i32_list(node, "pad");

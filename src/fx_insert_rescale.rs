@@ -121,7 +121,7 @@ fn qp_get_dtype_str(qp: &Bound<'_, PyAny>, default: &str) -> String {
 /// Phase 1: Replace surviving DQ->Q pairs with TOSA RESCALE (InsertRescalePass)
 /// Phase 2: Insert INT32 rescales around elementwise ops (InsertRescaleInt32Pass)
 ///
-/// Phase 3: Insert accumulator rescales after tosa.CONV2D / tosa.DEPTHWISE_CONV2D.
+/// Phase 3: Insert accumulator rescales after lowered TOSA convolution ops.
 ///   After RewriteConvPass, conv nodes produce INT32 accumulators that must be
 ///   rescaled to INT8 using: scale = (input_scale * weight_scale) / output_scale.
 pub struct FxInsertRescalePass;
@@ -129,8 +129,7 @@ pub struct FxInsertRescalePass;
 /// Returns true for TOSA accumulator-producing ops that need INT32 -> INT8 rescale.
 fn is_tosa_accumulator_op(target: &str) -> bool {
     let lowered = target.to_ascii_lowercase();
-    lowered.contains("conv2d")
-        || lowered.contains("depthwise_conv2d")
+    lowered.contains("conv2d") || lowered.contains("depthwise_conv2d") || lowered.contains("conv3d")
 }
 
 fn is_layout_passthrough_user(target: &str) -> bool {
@@ -233,6 +232,48 @@ fn has_downstream_rescale(start: &Bound<'_, PyAny>) -> PyResult<bool> {
         }
         current = user;
     }
+}
+
+fn producer_old_zero_point(
+    py: Python<'_>,
+    arg_node: &Bound<'_, PyAny>,
+    fallback_zp: i64,
+) -> PyResult<i64> {
+    let op = arg_node
+        .getattr("op")
+        .ok()
+        .and_then(|v| v.extract::<String>().ok())
+        .unwrap_or_default();
+    if op == "call_function" {
+        let target = FxGraphModule::node_target_str(arg_node)?;
+        if classify_int32_op(&target).is_some() {
+            return Ok(0);
+        }
+    }
+
+    let meta = arg_node.getattr("meta")?;
+    if let Some(output_qparams) = extract_output_qparams(py, &meta)? {
+        if let Ok(qp) = output_qparams.get_item(0_usize) {
+            let dtype_str = qp_get_dtype_str(&qp, "torch.int8");
+            if dtype_str.contains("int32") {
+                return Ok(0);
+            }
+            return Ok(qp_get_i64(&qp, "zp", Some("zero_point"), fallback_zp));
+        }
+    }
+
+    let arg_fake_val = match meta.call_method1("get", ("val",)) {
+        Ok(v) if !v.is_none() => v,
+        _ => return Ok(fallback_zp),
+    };
+    let is_int32 = arg_fake_val
+        .getattr("dtype")
+        .ok()
+        .and_then(|dtype| dtype.str().ok())
+        .map(|dtype| dtype.to_string_lossy().into_owned())
+        .map(|dtype| dtype.contains("int32"))
+        .unwrap_or(false);
+    Ok(if is_int32 { 0 } else { fallback_zp })
 }
 
 fn is_dq(target: &str) -> bool {
@@ -552,7 +593,7 @@ impl FxPass for FxInsertRescalePass {
                 let old_scale = scales[key_idx];
                 let new_scale = rescaled_scales[key_idx];
                 let rescale_scale = old_scale / new_scale;
-                let old_zp = zps[key_idx];
+                let old_zp = producer_old_zero_point(py, arg_node, zps[key_idx])?;
                 let new_zp = 0_i64; // INT32 always has zp=0
 
                 let rescale = helpers.call_method1(
@@ -702,7 +743,7 @@ impl FxPass for FxInsertRescalePass {
         }
 
         // ------------------------------------------------------------------
-        // Phase 3: Insert accumulator rescales after TOSA CONV2D / DEPTHWISE_CONV2D
+        // Phase 3: Insert accumulator rescales after lowered TOSA convolution ops
         // These ops produce INT32 accumulators; rescale to INT8 using
         // scale = (input_scale * weight_scale) / output_scale.
         // ------------------------------------------------------------------
@@ -767,10 +808,7 @@ impl FxPass for FxInsertRescalePass {
                 Ok(qp) => qp_get_f64(&qp, "scale", None, 1.0),
                 Err(_) => {
                     if let Some(name) = &node_name {
-                        eprintln!(
-                            "[InsertRescale] skip '{}': missing input qparam[0]",
-                            name
-                        );
+                        eprintln!("[InsertRescale] skip '{}': missing input qparam[0]", name);
                     }
                     continue;
                 }
@@ -780,10 +818,7 @@ impl FxPass for FxInsertRescalePass {
                 Ok(qp) => qp_get_f64_list(&qp, "scale", 1.0),
                 Err(_) => {
                     if let Some(name) = &node_name {
-                        eprintln!(
-                            "[InsertRescale] skip '{}': missing weight qparam[1]",
-                            name
-                        );
+                        eprintln!("[InsertRescale] skip '{}': missing weight qparam[1]", name);
                     }
                     continue;
                 }
@@ -813,10 +848,7 @@ impl FxPass for FxInsertRescalePass {
                 Ok(qp) => qp,
                 Err(_) => {
                     if let Some(name) = &node_name {
-                        eprintln!(
-                            "[InsertRescale] skip '{}': missing output qparam[0]",
-                            name
-                        );
+                        eprintln!("[InsertRescale] skip '{}': missing output qparam[0]", name);
                     }
                     continue;
                 }

@@ -141,8 +141,14 @@ fn int4_special_dtype<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
 }
 
 fn quant_args_is_int4(quant_args: &Bound<'_, PyAny>) -> bool {
-    let qmin: Option<i64> = quant_args.getattr("qmin").ok().and_then(|v| v.extract().ok());
-    let qmax: Option<i64> = quant_args.getattr("qmax").ok().and_then(|v| v.extract().ok());
+    let qmin: Option<i64> = quant_args
+        .getattr("qmin")
+        .ok()
+        .and_then(|v| v.extract().ok());
+    let qmax: Option<i64> = quant_args
+        .getattr("qmax")
+        .ok()
+        .and_then(|v| v.extract().ok());
     let dtype = quant_args
         .getattr("dtype")
         .ok()
@@ -285,10 +291,8 @@ impl FxPass for FxFoldAndAnnotateQParamsPass {
 
                     // DQ node -- extract qparams
                     let dq_target = arg_node.getattr("target")?;
-                    let resolved_args =
-                        resolve_dq_args(py, arg_node, gm, &exported_program)?;
-                    let quant_args =
-                        quant_args_from_operator(py, &dq_target, &resolved_args)?;
+                    let resolved_args = resolve_dq_args(py, arg_node, gm, &exported_program)?;
+                    let quant_args = quant_args_from_operator(py, &dq_target, &resolved_args)?;
 
                     dq_nodes_to_bypass.push(arg_node.clone());
                     input_qp_for_pos = Some(quant_args);

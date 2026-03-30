@@ -15,16 +15,15 @@ fn extract_static_tuple(arg: &Bound<'_, PyAny>) -> Option<Vec<i64>> {
     arg.extract::<Vec<i64>>().ok()
 }
 
-fn extract_storage_offset(
-    args: &[Bound<'_, PyAny>],
-    kwargs: &Bound<'_, PyDict>,
-) -> Option<i64> {
+fn extract_storage_offset(args: &[Bound<'_, PyAny>], kwargs: &Bound<'_, PyDict>) -> Option<i64> {
     if let Ok(value) = kwargs.get_item("storage_offset") {
         if let Some(value) = value {
             return value.extract::<i64>().ok();
         }
     }
-    args.get(3).and_then(|value| value.extract::<i64>().ok()).or(Some(0))
+    args.get(3)
+        .and_then(|value| value.extract::<i64>().ok())
+        .or(Some(0))
 }
 
 fn contiguous_strides(shape: &[i64]) -> Vec<i64> {
@@ -42,7 +41,8 @@ fn stride_matches(shape: &[i64], stride: &[i64]) -> bool {
         return false;
     }
     let expected = contiguous_strides(shape);
-    shape.iter()
+    shape
+        .iter()
         .zip(stride.iter())
         .zip(expected.iter())
         .enumerate()

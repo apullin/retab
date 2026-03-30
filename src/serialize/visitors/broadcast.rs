@@ -130,26 +130,15 @@ pub(super) fn resolve_clamp_bound_input(
 ) -> Option<(String, Option<NodeId>)> {
     let shape = vec![1; output_rank];
     match arg {
-        Some(Arg::Node(id)) => resolve_input_name_from_node_id(graph, *id).map(|name| (name, Some(*id))),
+        Some(Arg::Node(id)) => {
+            resolve_input_name_from_node_id(graph, *id).map(|name| (name, Some(*id)))
+        }
         Some(Arg::OptionalNode(Some(id))) => {
             resolve_input_name_from_node_id(graph, *id).map(|name| (name, Some(*id)))
         }
-        Some(Arg::Int(value)) => {
+        Some(arg @ (Arg::Int(_) | Arg::Float(_) | Arg::Bool(_))) => {
             let name = format!("{}_{}_const", node.name, suffix);
-            let tensor = make_filled_const_tensor(name.clone(), shape, dtype, *value as f64)?;
-            push_inline_const(result, tensor);
-            Some((name, None))
-        }
-        Some(Arg::Float(value)) => {
-            let name = format!("{}_{}_const", node.name, suffix);
-            let tensor = make_filled_const_tensor(name.clone(), shape, dtype, *value)?;
-            push_inline_const(result, tensor);
-            Some((name, None))
-        }
-        Some(Arg::Bool(value)) => {
-            let name = format!("{}_{}_const", node.name, suffix);
-            let scalar = if *value { 1.0 } else { 0.0 };
-            let tensor = make_filled_const_tensor(name.clone(), shape, dtype, scalar)?;
+            let tensor = make_filled_const_tensor(name.clone(), shape, dtype, arg.as_f64())?;
             push_inline_const(result, tensor);
             Some((name, None))
         }

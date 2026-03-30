@@ -84,7 +84,11 @@ impl ParsedSliceSpec {
             .map(|n| map_axis_to_tosa_dim_order(n, raw_dim as i32) as i64)
             .unwrap_or(raw_dim) as usize;
         let start = arg_i64(node, 2, 0);
-        let end = arg_i64(node, 3, input_shape.get(mapped_dim).copied().unwrap_or(0) as i64);
+        let end = arg_i64(
+            node,
+            3,
+            input_shape.get(mapped_dim).copied().unwrap_or(0) as i64,
+        );
         let step = arg_i64(node, 4, 1);
         let input_dim = input_shape.get(mapped_dim).copied().unwrap_or(0) as i64;
         let start_idx = if start < 0 {
@@ -109,7 +113,12 @@ impl ParsedSliceSpec {
             .map(|n| format!("{:?}", n.target))
             .unwrap_or_else(|| "<none>".to_string());
         let input_order = input_node
-            .and_then(|n| n.meta.tosa_dim_order.as_ref().map(|order| format!("{:?}", order)))
+            .and_then(|n| {
+                n.meta
+                    .tosa_dim_order
+                    .as_ref()
+                    .map(|order| format!("{:?}", order))
+            })
             .unwrap_or_else(|| "<none>".to_string());
 
         Self {
@@ -132,10 +141,11 @@ pub(super) fn emit_select(
     graph: &Graph,
     _node_id: NodeId,
     node: &Node,
-    _store: &TensorStore,
+    store: &TensorStore,
 ) -> EmitResult {
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
+    let mut input_names = collect_input_names(graph, node);
+    maybe_materialize_select_scalar_inputs(graph, node, store, &mut result, &mut input_names);
     result.tensors.push(make_output_tensor(node));
     result.operators.push(TosaOperator {
         op: Op::Select,
@@ -145,6 +155,59 @@ pub(super) fn emit_select(
         location: None,
     });
     result
+}
+
+fn maybe_materialize_select_scalar_inputs(
+    graph: &Graph,
+    node: &Node,
+    store: &TensorStore,
+    result: &mut EmitResult,
+    input_names: &mut [String],
+) {
+    let output_shape = actual_tensor_shape(graph, store, node);
+    if output_shape.is_empty() {
+        return;
+    }
+
+    for (idx, arg) in node.args.iter().enumerate() {
+        let Arg::Node(input_id) = arg else {
+            continue;
+        };
+        let Some(input_node) = graph.node(*input_id) else {
+            continue;
+        };
+        if !matches!(input_node.target, OpTarget::ScalarTensor) {
+            continue;
+        }
+        let scalar_shape = actual_tensor_shape(graph, store, input_node);
+        if scalar_shape != vec![1] {
+            continue;
+        }
+
+        let raw_value = input_node.args.first().map_or(0.0, Arg::as_f64);
+        let fill_value = match (
+            input_node.meta.val.dtype,
+            input_node.meta.output_qparams.first(),
+        ) {
+            (crate::graph::ir::DType::Int8 | crate::graph::ir::DType::Int16, Some((_, qp))) => {
+                let quantized = ((raw_value / qp.scale) + qp.zero_point as f64).round() as i64;
+                quantized.clamp(qp.qmin, qp.qmax) as f64
+            }
+            _ => raw_value,
+        };
+
+        let const_name = format!("{}_input{}_broadcast", node.name, idx);
+        let Some(tensor) = make_filled_const_tensor(
+            const_name.clone(),
+            output_shape.clone(),
+            input_node.meta.val.dtype,
+            fill_value,
+        ) else {
+            continue;
+        };
+        push_inline_const(result, tensor);
+        input_names[idx] = const_name;
+    }
 }
 
 pub(super) fn emit_select_copy(
@@ -163,7 +226,11 @@ pub(super) fn emit_select_copy(
     size_vec[spec.mapped_dim] = 1;
 
     push_const_shape(&mut result, format!("{}_start", slice_name), start_vec);
-    push_const_shape(&mut result, format!("{}_size", slice_name), size_vec.clone());
+    push_const_shape(
+        &mut result,
+        format!("{}_size", slice_name),
+        size_vec.clone(),
+    );
     result.tensors.push(TosaTensor {
         name: slice_name.clone(),
         shape: size_vec,

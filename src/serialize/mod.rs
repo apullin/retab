@@ -19,6 +19,8 @@ use visitors::ir_dtype_to_tosa;
 enum WeightPermKind {
     /// Standard conv2d: OIHW [OC, IC, KH, KW] -> OHWI [OC, KH, KW, IC]
     Conv2d,
+    /// Standard conv3d: OIDHW [OC, IC, KD, KH, KW] -> ODHWI [OC, KD, KH, KW, IC]
+    Conv3d,
     /// Depthwise conv2d: OIHW [OC, 1, KH, KW] -> HWIM [KH, KW, IC, M]
     /// where IC is the true input-channel count and M = depth_multiplier.
     DepthwiseConv2d { in_channels: usize },
@@ -37,7 +39,7 @@ fn apply_tosa_dim_order(node: &crate::graph::ir::Node, shape: Vec<i32>) -> Vec<i
         .collect()
 }
 
-/// Permute a 4D tensor's raw bytes from OIHW to OHWI or depthwise format.
+/// Permute convolution weight tensors into their physical TOSA layout.
 ///
 /// For Conv2d (OIHW -> OHWI):
 ///   perm = [0, 2, 3, 1]
@@ -53,7 +55,11 @@ fn permute_weight_data(
     elem_size: usize,
     kind: WeightPermKind,
 ) -> (Vec<u8>, Vec<i64>) {
-    if shape.len() != 4 {
+    let expected_rank = match kind {
+        WeightPermKind::Conv3d => 5,
+        _ => 4,
+    };
+    if shape.len() != expected_rank {
         return (data.to_vec(), shape.to_vec());
     }
 
@@ -68,7 +74,7 @@ fn permute_weight_data(
         WeightPermKind::Conv2d => {
             // OIHW -> OHWI: perm [0, 2, 3, 1]
             let new_shape = vec![shape[0], shape[2], shape[3], shape[1]];
-            let (no, nh, nw, ni) = (d0, d2, d3, d1);
+            let (nh, nw, ni) = (d2, d3, d1);
             let mut out = vec![0u8; data.len()];
 
             for o in 0..d0 {
@@ -79,11 +85,44 @@ fn permute_weight_data(
                             let dst_idx = ((o * nh + h) * nw + w) * ni + i;
                             let src_off = src_idx * elem_size;
                             let dst_off = dst_idx * elem_size;
-                            if src_off + elem_size <= data.len()
-                                && dst_off + elem_size <= out.len()
+                            if src_off + elem_size <= data.len() && dst_off + elem_size <= out.len()
                             {
                                 out[dst_off..dst_off + elem_size]
                                     .copy_from_slice(&data[src_off..src_off + elem_size]);
+                            }
+                        }
+                    }
+                }
+            }
+            (out, new_shape)
+        }
+        WeightPermKind::Conv3d => {
+            let (d0, d1, d2, d3, d4) = (
+                shape[0] as usize,
+                shape[1] as usize,
+                shape[2] as usize,
+                shape[3] as usize,
+                shape[4] as usize,
+            );
+            let new_shape = vec![shape[0], shape[2], shape[3], shape[4], shape[1]];
+            let (nd, nh, nw, ni) = (d2, d3, d4, d1);
+            let mut out = vec![0u8; data.len()];
+
+            for o in 0..d0 {
+                for i in 0..d1 {
+                    for d in 0..d2 {
+                        for h in 0..d3 {
+                            for w in 0..d4 {
+                                let src_idx = ((((o * d1 + i) * d2 + d) * d3 + h) * d4) + w;
+                                let dst_idx = ((((o * nd + d) * nh + h) * nw + w) * ni) + i;
+                                let src_off = src_idx * elem_size;
+                                let dst_off = dst_idx * elem_size;
+                                if src_off + elem_size <= data.len()
+                                    && dst_off + elem_size <= out.len()
+                                {
+                                    out[dst_off..dst_off + elem_size]
+                                        .copy_from_slice(&data[src_off..src_off + elem_size]);
+                                }
                             }
                         }
                     }
@@ -123,8 +162,7 @@ fn permute_weight_data(
                         let dst_idx = ((h * nw + w) * ni + ic) * nm + m;
                         let src_off = src_idx * elem_size;
                         let dst_off = dst_idx * elem_size;
-                        if src_off + elem_size <= data.len() && dst_off + elem_size <= out.len()
-                        {
+                        if src_off + elem_size <= data.len() && dst_off + elem_size <= out.len() {
                             out[dst_off..dst_off + elem_size]
                                 .copy_from_slice(&data[src_off..src_off + elem_size]);
                         }
@@ -159,10 +197,9 @@ fn permute_tensor_by_order(
     }
 
     let rank = shape.len();
-    let numel: usize = match shape
-        .iter()
-        .try_fold(1usize, |acc, &dim| usize::try_from(dim).ok().and_then(|d| acc.checked_mul(d)))
-    {
+    let numel: usize = match shape.iter().try_fold(1usize, |acc, &dim| {
+        usize::try_from(dim).ok().and_then(|d| acc.checked_mul(d))
+    }) {
         Some(v) => v,
         None => return (data.to_vec(), shape.to_vec()),
     };
@@ -271,12 +308,9 @@ fn infer_depthwise_in_channels(graph: &Graph, node: &crate::graph::ir::Node, oc:
     };
 
     let shape = input_node.meta.val.shape_slice();
-    for candidate in [
-        shape.last().copied(),
-        shape.get(1).copied(),
-    ]
-    .into_iter()
-    .flatten()
+    for candidate in [shape.last().copied(), shape.get(1).copied()]
+        .into_iter()
+        .flatten()
     {
         let candidate = candidate as usize;
         if candidate > 0 && oc % candidate == 0 {
@@ -296,6 +330,7 @@ fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind>
         };
         let kind = match &node.target {
             OpTarget::TosaConv2d | OpTarget::Conv2d => Some(WeightPermKind::Conv2d),
+            OpTarget::TosaConv3d => Some(WeightPermKind::Conv3d),
             OpTarget::TosaDepthwiseConv2d | OpTarget::DepthwiseConv2d => {
                 let Some(Arg::Node(weight_id)) = node.args.get(1) else {
                     continue;
@@ -322,8 +357,12 @@ fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind>
             // Weight is arg[1]
             if let Some(Arg::Node(weight_id)) = node.args.get(1) {
                 if let Some(weight_node) = graph.node(*weight_id) {
-                    // Only permute placeholder/const nodes with 4D shapes
-                    if weight_node.meta.val.shape_len == 4 {
+                    // Only permute placeholder/const nodes with the expected conv weight rank.
+                    let expected_rank = match kind {
+                        WeightPermKind::Conv3d => 5,
+                        _ => 4,
+                    };
+                    if weight_node.meta.val.shape_len == expected_rank {
                         perms.insert(weight_node.name.clone(), kind);
                     }
                 }
@@ -409,7 +448,10 @@ fn collect_serialized_graph_items(graph: &Graph, store: &TensorStore) -> Seriali
         };
 
         if std::env::var("TOSA_ENGINE_DEBUG").is_ok() {
-            eprintln!("[Serialize] node '{}' op={:?} target={:?}", node.name, node.op, node.target);
+            eprintln!(
+                "[Serialize] node '{}' op={:?} target={:?}",
+                node.name, node.op, node.target
+            );
         }
 
         match node.op {
@@ -470,8 +512,7 @@ fn collect_serialized_graph_items(graph: &Graph, store: &TensorStore) -> Seriali
                         } else {
                             (tensor_data.data.clone(), tensor_data.shape.clone())
                         };
-                    let final_shape: Vec<i32> =
-                        final_shape_i64.iter().map(|&d| d as i32).collect();
+                    let final_shape: Vec<i32> = final_shape_i64.iter().map(|&d| d as i32).collect();
                     let final_data = match (tensor_dtype, store_dtype) {
                         (DType::Int4, _) if store_dtype != DType::Int4 => {
                             pack_int4_data(&final_data)
@@ -629,9 +670,9 @@ fn finish_tosa_graph(
     let modifier_str = builder.create_string("arm-tosa-engine");
     let sw_version = {
         let start = builder.start_table();
-        builder.push_slot::<i32>(4, 0, -1);  // major
-        builder.push_slot::<i32>(6, 1, -1);  // minor
-        builder.push_slot::<i32>(8, 0, -1);  // micro
+        builder.push_slot::<i32>(4, 0, -1); // major
+        builder.push_slot::<i32>(6, 1, -1); // minor
+        builder.push_slot::<i32>(8, 0, -1); // micro
         builder.push_slot_always::<WIPOffset<_>>(10, modifier_str);
         builder.end_table(start)
     };
@@ -639,10 +680,10 @@ fn finish_tosa_graph(
     // Build version
     let version = {
         let start = builder.start_table();
-        builder.push_slot::<i32>(4, 1, -1);  // major
-        builder.push_slot::<i32>(6, 0, -1);  // minor
-        builder.push_slot::<i32>(8, 0, -1);  // patch
-        builder.push_slot::<bool>(10, false, true);  // draft
+        builder.push_slot::<i32>(4, 1, -1); // major
+        builder.push_slot::<i32>(6, 0, -1); // minor
+        builder.push_slot::<i32>(8, 0, -1); // patch
+        builder.push_slot::<bool>(10, false, true); // draft
         builder.end_table(start)
     };
 
@@ -712,16 +753,16 @@ fn build_fb_tensors(
         };
 
         let start = builder.start_table();
-        builder.push_slot_always::<WIPOffset<_>>(4, name);       // name
-        builder.push_slot_always::<WIPOffset<_>>(6, shape);      // shape
-        builder.push_slot::<u32>(8, t.dtype as u32, 0);          // type
+        builder.push_slot_always::<WIPOffset<_>>(4, name); // name
+        builder.push_slot_always::<WIPOffset<_>>(6, shape); // shape
+        builder.push_slot::<u32>(8, t.dtype as u32, 0); // type
         if let Some(d) = data {
-            builder.push_slot_always::<WIPOffset<_>>(10, d);     // data
+            builder.push_slot_always::<WIPOffset<_>>(10, d); // data
         }
-        builder.push_slot::<bool>(12, t.variable, false);        // variable
-        builder.push_slot::<bool>(14, t.is_unranked, false);     // is_unranked
+        builder.push_slot::<bool>(12, t.variable, false); // variable
+        builder.push_slot::<bool>(14, t.is_unranked, false); // is_unranked
         if let Some(vn) = var_name {
-            builder.push_slot_always::<WIPOffset<_>>(16, vn);    // variable_name
+            builder.push_slot_always::<WIPOffset<_>>(16, vn); // variable_name
         }
         offsets.push(builder.end_table(start));
     }
@@ -759,20 +800,24 @@ fn build_fb_operators(
     let mut offsets = Vec::with_capacity(operators.len());
     for op in operators {
         let input_strs: Vec<_> = op.inputs.iter().map(|s| builder.create_string(s)).collect();
-        let output_strs: Vec<_> = op.outputs.iter().map(|s| builder.create_string(s)).collect();
+        let output_strs: Vec<_> = op
+            .outputs
+            .iter()
+            .map(|s| builder.create_string(s))
+            .collect();
         let inputs = builder.create_vector(&input_strs);
         let outputs = builder.create_vector(&output_strs);
 
         let (attr_type, attr_offset) = build_fb_attribute(builder, &op.attribute);
 
         let start = builder.start_table();
-        builder.push_slot::<u32>(4, op.op as u32, 0);           // op
-        builder.push_slot::<u8>(6, attr_type, 0);               // attribute_type
+        builder.push_slot::<u32>(4, op.op as u32, 0); // op
+        builder.push_slot::<u8>(6, attr_type, 0); // attribute_type
         if let Some(attr) = attr_offset {
-            builder.push_slot_always::<WIPOffset<_>>(8, attr);  // attribute
+            builder.push_slot_always::<WIPOffset<_>>(8, attr); // attribute
         }
-        builder.push_slot_always::<WIPOffset<_>>(10, inputs);   // inputs
-        builder.push_slot_always::<WIPOffset<_>>(12, outputs);  // outputs
+        builder.push_slot_always::<WIPOffset<_>>(10, inputs); // inputs
+        builder.push_slot_always::<WIPOffset<_>>(12, outputs); // outputs
         offsets.push(builder.end_table(start));
     }
     offsets
@@ -848,6 +893,20 @@ fn build_fb_attribute(
             (attr.union_type(), Some(off))
         }
 
+        Attribute::Conv3d(a) => {
+            let pad = builder.create_vector(&a.pad);
+            let stride = builder.create_vector(&a.stride);
+            let dilation = builder.create_vector(&a.dilation);
+            let start = builder.start_table();
+            builder.push_slot_always::<WIPOffset<_>>(4, pad);
+            builder.push_slot_always::<WIPOffset<_>>(6, stride);
+            builder.push_slot_always::<WIPOffset<_>>(8, dilation);
+            builder.push_slot::<bool>(10, a.local_bound, false);
+            builder.push_slot::<u32>(12, a.acc_type as u32, 0);
+            let off = builder.end_table(start);
+            (attr.union_type(), Some(off))
+        }
+
         Attribute::DepthwiseConv2d(a) => {
             let pad = builder.create_vector(&a.pad);
             let stride = builder.create_vector(&a.stride);
@@ -869,6 +928,13 @@ fn build_fb_attribute(
             builder.push_slot::<bool>(8, a.per_channel, false);
             builder.push_slot::<bool>(10, a.input_unsigned, false);
             builder.push_slot::<bool>(12, a.output_unsigned, false);
+            let off = builder.end_table(start);
+            (attr.union_type(), Some(off))
+        }
+
+        Attribute::Resize(a) => {
+            let start = builder.start_table();
+            builder.push_slot::<u32>(4, a.mode as u32, 0);
             let off = builder.end_table(start);
             (attr.union_type(), Some(off))
         }
@@ -1080,8 +1146,12 @@ mod tests {
             data[idx] = idx as u8;
         }
 
-        let (out, new_shape) =
-            permute_weight_data(&data, &shape, 1, WeightPermKind::DepthwiseConv2d { in_channels: 1 });
+        let (out, new_shape) = permute_weight_data(
+            &data,
+            &shape,
+            1,
+            WeightPermKind::DepthwiseConv2d { in_channels: 1 },
+        );
 
         // Expected shape: [3, 3, 1, 16] (HWIM)
         assert_eq!(new_shape, vec![3, 3, 1, 16]);
@@ -1176,11 +1246,20 @@ mod tests {
 
         // For H=1,W=1: src_idx = o*3+i, dst_idx = o*3+i (same!)
         for idx in 0..n {
-            let src_val =
-                i32::from_le_bytes(data[idx * elem_size..idx * elem_size + elem_size].try_into().unwrap());
-            let dst_val =
-                i32::from_le_bytes(out[idx * elem_size..idx * elem_size + elem_size].try_into().unwrap());
-            assert_eq!(src_val, dst_val, "Element {idx}: src={src_val} != dst={dst_val}");
+            let src_val = i32::from_le_bytes(
+                data[idx * elem_size..idx * elem_size + elem_size]
+                    .try_into()
+                    .unwrap(),
+            );
+            let dst_val = i32::from_le_bytes(
+                out[idx * elem_size..idx * elem_size + elem_size]
+                    .try_into()
+                    .unwrap(),
+            );
+            assert_eq!(
+                src_val, dst_val,
+                "Element {idx}: src={src_val} != dst={dst_val}"
+            );
         }
     }
 
@@ -1239,8 +1318,7 @@ mod tests {
         let n = (4 * 3 * 5 * 7) as usize;
         let data: Vec<u8> = (0..n).map(|i| (i * 17 + 3) as u8).collect();
 
-        let (permuted, new_shape) =
-            permute_weight_data(&data, &shape, 1, WeightPermKind::Conv2d);
+        let (permuted, new_shape) = permute_weight_data(&data, &shape, 1, WeightPermKind::Conv2d);
 
         // new_shape is OHWI: [4, 5, 7, 3]
         assert_eq!(new_shape, vec![4, 5, 7, 3]);
@@ -1254,10 +1332,7 @@ mod tests {
                     for w in 0..7usize {
                         let src_idx = ((o * 3 + i) * 5 + h) * 7 + w;
                         let dst_idx = ((o * 5 + h) * 7 + w) * 3 + i;
-                        assert_eq!(
-                            permuted[dst_idx], data[src_idx],
-                            "o={o},i={i},h={h},w={w}"
-                        );
+                        assert_eq!(permuted[dst_idx], data[src_idx], "o={o},i={i},h={h},w={w}");
                     }
                 }
             }

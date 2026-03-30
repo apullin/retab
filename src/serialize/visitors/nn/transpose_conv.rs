@@ -49,13 +49,8 @@ pub(in crate::serialize::visitors) fn emit_transpose_conv2d(
             .find(|(pos, _)| *pos == 1)
             .map(|(_, qp)| qp.zero_point as i32)
             .unwrap_or_else(|| kwarg_i32(node, "weight_zp", 0));
-        let (input_zp_name, weight_zp_name) = push_input_weight_zp_tensors(
-            &mut result,
-            graph,
-            node,
-            input_zp_val,
-            weight_zp_val,
-        );
+        let (input_zp_name, weight_zp_name) =
+            push_input_weight_zp_tensors(&mut result, graph, node, input_zp_val, weight_zp_val);
         extend_conv_inputs(input_names, input_zp_name, weight_zp_name)
     };
 

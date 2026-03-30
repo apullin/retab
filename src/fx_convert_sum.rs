@@ -82,10 +82,7 @@ impl FxPass for FxConvertSumPass {
                 .collect();
 
             // Check for keepdim (args[2] if present, default True for TOSA).
-            let keepdim: bool = args
-                .get(2)
-                .and_then(|a| a.extract().ok())
-                .unwrap_or(false);
+            let keepdim: bool = args.get(2).and_then(|a| a.extract().ok()).unwrap_or(false);
 
             // Delegate to Python helper which:
             //   1. Sorts dims descending

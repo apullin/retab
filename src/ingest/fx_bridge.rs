@@ -377,12 +377,8 @@ fn collect_control_flow_subgraphs(
         }
 
         let child_prefix = format!("{graph_name}::");
-        let (submodule_graph, submodule_store) = ingest_fx_graph_with_prefix(
-            &attr,
-            state_dict,
-            graph_signature,
-            Some(&child_prefix),
-        )?;
+        let (submodule_graph, submodule_store) =
+            ingest_fx_graph_with_prefix(&attr, state_dict, graph_signature, Some(&child_prefix))?;
         for (key, value) in submodule_store.buffers {
             if store.get(&key).is_none() {
                 store.insert(key, value);
@@ -594,7 +590,7 @@ fn extract_single_arg(
 }
 
 fn materialize_external_placeholder(
-    graph_module: &Bound<'_, PyAny>,
+    _graph_module: &Bound<'_, PyAny>,
     graph: &mut Graph,
     name_map: &mut HashMap<String, NodeId>,
     value: &Bound<'_, PyAny>,
@@ -913,10 +909,39 @@ fn cast_i64_bytes_to_i32(data: &[u8]) -> Vec<u8> {
 ///
 /// For reshape-like ops: read the target shape from args[1] (IntList).
 /// For conv: compute output shape from input shape, weight shape, and params.
+fn resolve_inferred_reshape_shape(shape: &[i64], input_shape: &[i64]) -> Option<Vec<i64>> {
+    let negative_positions: Vec<usize> = shape
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &dim)| (dim < 0).then_some(idx))
+        .collect();
+    if negative_positions.is_empty() {
+        return Some(shape.to_vec());
+    }
+    if negative_positions.len() > 1 {
+        return None;
+    }
+
+    let input_numel = input_shape
+        .iter()
+        .try_fold(1i64, |acc, &dim| acc.checked_mul(dim))?;
+    let known_product = shape
+        .iter()
+        .filter(|&&dim| dim >= 0)
+        .try_fold(1i64, |acc, &dim| acc.checked_mul(dim))?;
+    if known_product == 0 || input_numel % known_product != 0 {
+        return None;
+    }
+
+    let mut resolved = shape.to_vec();
+    resolved[negative_positions[0]] = input_numel / known_product;
+    Some(resolved)
+}
+
 fn fixup_reshape_shapes(graph: &mut Graph) {
     let all_ids = graph.all_node_ids();
     for node_id in &all_ids {
-        let (target, arg1_shape, current_shape_len) = {
+        let (arg1_shape, input_id) = {
             let node = match graph.node(*node_id) {
                 Some(n) => n,
                 None => continue,
@@ -939,17 +964,31 @@ fn fixup_reshape_shapes(graph: &mut Graph) {
                 }
                 _ => None,
             };
-            (node.target.clone(), shape, node.meta.val.shape_len)
+            let input_id = match node.args.first() {
+                Some(Arg::Node(id)) => Some(*id),
+                _ => None,
+            };
+            (shape, input_id)
         };
 
         if let Some(new_shape) = arg1_shape {
+            let resolved_shape = if new_shape.iter().any(|&dim| dim < 0) {
+                input_id
+                    .and_then(|id| graph.node(id))
+                    .and_then(|input| {
+                        resolve_inferred_reshape_shape(&new_shape, input.meta.val.shape_slice())
+                    })
+                    .unwrap_or(new_shape)
+            } else {
+                new_shape
+            };
             // Check if current shape matches the intended shape from args
             let node = graph.node(*node_id).unwrap();
             let current = node.meta.val.shape_slice();
-            if current != new_shape.as_slice() {
+            if current != resolved_shape.as_slice() {
                 let dt = node.meta.val.dtype;
                 if let Some(node_mut) = graph.node_mut(*node_id) {
-                    node_mut.meta.val = TensorInfo::new(&new_shape, dt);
+                    node_mut.meta.val = TensorInfo::new(&resolved_shape, dt);
                 }
             }
         }

@@ -15,13 +15,32 @@ mod emit_result;
 mod graph_utils;
 mod indexing;
 mod layout;
-mod matmul;
 mod math;
+mod matmul;
 mod nn;
 mod reductions;
 mod shape_utils;
 mod tensor_ops;
 
+use super::tosa_generated::{
+    AbsAttribute, AddAttribute, ArithmeticRightShiftAttribute, Attribute, AvgPool2dAttribute,
+    BitwiseAndAttribute, BitwiseNotAttribute, BitwiseOrAttribute, BitwiseXorAttribute,
+    CastAttribute, CeilAttribute, ClampAttribute, ConcatAttribute, ConstAttribute,
+    ConstShapeAttribute, Conv2dAttribute, Conv3dAttribute, CosAttribute, DType,
+    DepthwiseConv2dAttribute, EqualAttribute, ErfAttribute, ExpAttribute, FloorAttribute,
+    GatherAttribute, GreaterAttribute, GreaterEqualAttribute, LogAttribute, LogicalAndAttribute,
+    LogicalLeftShiftAttribute, LogicalNotAttribute, LogicalOrAttribute, LogicalXorAttribute,
+    MatMulAttribute, MaxPool2dAttribute, MaximumAttribute, MinimumAttribute, MulAttribute,
+    NanPropagationMode, NegateAttribute, Op, PadAttribute, PowAttribute, ReciprocalAttribute,
+    ReduceAnyAttribute, ReduceMaxAttribute, ReduceMinAttribute, ReduceSumAttribute,
+    RescaleAttribute, ReshapeAttribute, ResizeAttribute, ResizeMode, RoundingMode, RsqrtAttribute,
+    ScatterAttribute, SelectAttribute, SigmoidAttribute, SinAttribute, SliceAttribute,
+    SubAttribute, TableAttribute, TanhAttribute, TosaOperator, TosaShape, TosaTensor,
+    TransposeAttribute, TransposeConv2dAttribute,
+};
+use crate::graph::ir::{Arg, Node, NodeId, OpTarget, OpType};
+use crate::graph::Graph;
+use crate::store::TensorStore;
 use arg_utils::*;
 use arithmetic::{
     emit_add, emit_aten_add, emit_aten_clamp, emit_aten_mul, emit_aten_squeeze, emit_aten_sub,
@@ -29,64 +48,44 @@ use arithmetic::{
 };
 use broadcast::*;
 use const_utils::*;
-use crate::graph::ir::{Arg, Node, NodeId, OpTarget, OpType};
-use crate::graph::Graph;
-use crate::store::TensorStore;
 use control_flow::emit_cond_if;
 pub(crate) use dtype_quant::ir_dtype_to_tosa;
 use dtype_quant::{
     accumulator_output_dtype, actual_tensor_dtype, clamp_bound_bytes_from_arg,
     compute_multiplier_and_shift_with_width, conv_accumulator_dtype, encode_zp_for_dtype,
-    get_weight_out_channels, has_only_tosa_rescale_users, make_weight_zp_data,
-    matmul_input_dtype, node_input_zero_point, node_output_dtype, node_output_zero_point,
-    node_tensor_dtype, normalize_rescale_zp, passthrough_input_dtype,
+    has_only_tosa_rescale_users, matmul_input_dtype, node_input_zero_point, node_output_dtype,
+    node_output_zero_point, node_tensor_dtype, normalize_rescale_zp, passthrough_input_dtype,
 };
 use elementwise::{
-    emit_abs, emit_arithmetic_right_shift, emit_aten_eq, emit_aten_ge, emit_aten_gt,
-    emit_aten_le, emit_aten_lt, emit_bitwise_and, emit_bitwise_not, emit_bitwise_or,
-    emit_bitwise_xor, emit_cast, emit_cos, emit_equal, emit_erf, emit_exp, emit_greater,
-    emit_greater_equal, emit_log, emit_logical_and, emit_logical_left_shift, emit_logical_not,
-    emit_logical_or, emit_logical_xor, emit_maximum, emit_minimum, emit_pow, emit_reciprocal, emit_rsqrt,
-    emit_sigmoid, emit_sin, emit_table, emit_tanh,
+    emit_abs, emit_arithmetic_right_shift, emit_aten_eq, emit_aten_ge, emit_aten_gt, emit_aten_le,
+    emit_aten_lt, emit_bitwise_and, emit_bitwise_not, emit_bitwise_or, emit_bitwise_xor, emit_cast,
+    emit_cos, emit_equal, emit_erf, emit_exp, emit_greater, emit_greater_equal, emit_log,
+    emit_logical_and, emit_logical_left_shift, emit_logical_not, emit_logical_or, emit_logical_xor,
+    emit_maximum, emit_minimum, emit_pow, emit_reciprocal, emit_rsqrt, emit_sigmoid, emit_sin,
+    emit_table, emit_tanh,
 };
 use emit_result::EmitResult;
 use graph_utils::*;
-use indexing::{emit_gather, emit_index_select, emit_scatter, emit_select, emit_select_copy, emit_slice};
+use indexing::{
+    emit_gather, emit_index_select, emit_scatter, emit_select, emit_select_copy, emit_slice,
+};
 use layout::*;
-use matmul::emit_matmul;
 use math::{
     emit_aten_div, emit_aten_expm1, emit_aten_floor_divide, emit_aten_leaky_relu, emit_aten_log1p,
-    emit_aten_sign, emit_aten_sqrt, emit_ceil, emit_floor, emit_full_like, emit_negate,
-    emit_round,
+    emit_aten_sign, emit_aten_sqrt, emit_ceil, emit_floor, emit_full_like, emit_negate, emit_round,
 };
+use matmul::emit_matmul;
 use nn::{
-    emit_aten_conv2d, emit_aten_max_pool2d, emit_avg_pool2d, emit_conv2d, emit_depthwise_conv2d,
-    emit_max_pool2d, emit_pad, emit_rescale, emit_transpose_conv2d,
+    emit_aten_conv2d, emit_aten_max_pool2d, emit_avg_pool2d, emit_conv2d, emit_conv3d,
+    emit_depthwise_conv2d, emit_max_pool2d, emit_pad, emit_rescale, emit_transpose_conv2d,
 };
 use reductions::{
     emit_aten_amax, emit_aten_amin, emit_aten_any, emit_aten_mean, emit_aten_sum, emit_reduce_sum,
 };
 use shape_utils::*;
-use super::tosa_generated::{
-    AbsAttribute, AddAttribute, ArithmeticRightShiftAttribute, Attribute, AvgPool2dAttribute,
-    BitwiseAndAttribute, BitwiseNotAttribute, BitwiseOrAttribute, BitwiseXorAttribute,
-    CastAttribute, CeilAttribute, ClampAttribute, ConcatAttribute, ConstAttribute,
-    ConstShapeAttribute, Conv2dAttribute, CosAttribute, DType, DepthwiseConv2dAttribute,
-    EqualAttribute, ErfAttribute, ExpAttribute, FloorAttribute, GatherAttribute,
-    GreaterAttribute, GreaterEqualAttribute, LogAttribute, LogicalAndAttribute,
-    LogicalLeftShiftAttribute, LogicalNotAttribute, LogicalOrAttribute, LogicalXorAttribute,
-    MatMulAttribute,
-    MaxPool2dAttribute, MaximumAttribute, MinimumAttribute, MulAttribute, NanPropagationMode,
-    NegateAttribute, Op, PadAttribute, PowAttribute, ReciprocalAttribute, ReduceAnyAttribute,
-    ReduceMaxAttribute, ReduceMinAttribute, ReduceSumAttribute, RescaleAttribute,
-    ReshapeAttribute, RoundingMode, RsqrtAttribute, ScatterAttribute, SelectAttribute,
-    SigmoidAttribute, SinAttribute, SliceAttribute, SubAttribute, TableAttribute,
-    TanhAttribute, TosaOperator, TosaShape, TosaTensor, TransposeAttribute,
-    TransposeConv2dAttribute,
-};
 use tensor_ops::{
     emit_aten_permute, emit_aten_reshape, emit_concat, emit_const, emit_expand, emit_full,
-    emit_reshape, emit_transpose,
+    emit_repeat, emit_reshape, emit_resize, emit_scalar_tensor, emit_transpose,
 };
 
 /// Dispatch to the correct per-op visitor based on the node's target.
@@ -99,9 +98,12 @@ pub fn emit_node(
     match &node.target {
         OpTarget::TosaConst => Some(emit_const(graph, node_id, node, store)),
         OpTarget::Full => Some(emit_full(graph, node_id, node, store)),
+        OpTarget::ScalarTensor => Some(emit_scalar_tensor(graph, node_id, node, store)),
         OpTarget::TosaConv2d => Some(emit_conv2d(graph, node_id, node, store)),
+        OpTarget::TosaConv3d => Some(emit_conv3d(graph, node_id, node, store)),
         OpTarget::TosaDepthwiseConv2d => Some(emit_depthwise_conv2d(graph, node_id, node, store)),
         OpTarget::TosaRescale => Some(emit_rescale(graph, node_id, node, store)),
+        OpTarget::TosaResize => Some(emit_resize(graph, node_id, node, store)),
         OpTarget::TosaMaxPool2d => Some(emit_max_pool2d(graph, node_id, node, store)),
         OpTarget::TosaTranspose => Some(emit_transpose(graph, node_id, node, store)),
         OpTarget::TosaReshape => Some(emit_reshape(graph, node_id, node, store)),
@@ -153,6 +155,7 @@ pub fn emit_node(
             Some(emit_aten_clamp(graph, node_id, node, store))
         }
         OpTarget::Expand => Some(emit_expand(graph, node_id, node, store)),
+        OpTarget::Repeat => Some(emit_repeat(graph, node_id, node, store)),
         OpTarget::Reshape | OpTarget::Flatten | OpTarget::View => {
             Some(emit_aten_reshape(graph, node_id, node, store))
         }
@@ -162,6 +165,9 @@ pub fn emit_node(
         OpTarget::Sub => Some(emit_aten_sub(graph, node_id, node, store)),
         OpTarget::Mul => Some(emit_aten_mul(graph, node_id, node, store)),
         OpTarget::AvgPool2d => Some(emit_avg_pool2d(graph, node_id, node, store)),
+        OpTarget::UpsampleNearest2d | OpTarget::UpsampleBilinear2d => {
+            Some(emit_resize(graph, node_id, node, store))
+        }
         OpTarget::Sigmoid => Some(emit_sigmoid(graph, node_id, node, store)),
         OpTarget::Tanh => Some(emit_tanh(graph, node_id, node, store)),
         OpTarget::Exp => Some(emit_exp(graph, node_id, node, store)),

@@ -1,24 +1,86 @@
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
+use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::fx_decompose_ops::{insert_call_before, propagate_qparams, resolve_aten_op};
+use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
 
-/// FX-graph-direct decomposition of `aten.cumsum` into chained
-/// slice_copy + add ops.
-///
-/// cumsum(x, dim) is decomposed as:
-///   result = slice(x, dim, 0, 1)
-///   for i in 1..size[dim]:
-///       prev = slice(result, dim, i-1, i)
-///       curr = slice(x, dim, i, i+1)
-///       elem = add(prev, curr)
-///       result = cat([result, elem], dim)
+/// Mirror the Python Arm backend's cumsum lowering:
+/// reshape -> convolution(with ones kernel) -> slice -> reshape.
 pub struct FxDecomposeCumsumPass;
 
 fn is_cumsum(target: &str) -> bool {
     target.contains("cumsum")
+}
+
+fn copied_meta<'py>(
+    py: Python<'py>,
+    node: &Bound<'py, PyAny>,
+    clear_qparams: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let copy_mod = py.import_bound("copy")?;
+    let meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
+    if clear_qparams {
+        meta.set_item("input_qparams", PyDict::new_bound(py))?;
+        meta.set_item("output_qparams", PyDict::new_bound(py))?;
+    }
+    Ok(meta)
+}
+
+fn refresh_fake_tensor(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<()> {
+    let helpers = py.import_bound("fx_helpers")?;
+    let _ = helpers.call_method1("refresh_node_fake_tensor", (node,));
+    Ok(())
+}
+
+fn insert_call_before<'py>(
+    py: Python<'py>,
+    graph: &Bound<'py, PyAny>,
+    ref_node: &Bound<'py, PyAny>,
+    target: &Bound<'py, PyAny>,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+    meta_src: &Bound<'py, PyAny>,
+    clear_qparams: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let inserting = graph.call_method1("inserting_before", (ref_node,))?;
+    inserting.call_method0("__enter__")?;
+    let new_node = match kwargs {
+        Some(kwargs) => graph.call_method1("call_function", (target, args, kwargs))?,
+        None => graph.call_method1("call_function", (target, args))?,
+    };
+    let meta_copy = copied_meta(py, meta_src, clear_qparams)?;
+    new_node.setattr("meta", &meta_copy)?;
+    let _ = refresh_fake_tensor(py, &new_node);
+    inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
+    Ok(new_node)
+}
+
+fn make_qparam<'py>(
+    py: Python<'py>,
+    scale: f64,
+    zero_point: i64,
+    qmin: i64,
+    qmax: i64,
+    dtype: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    py.import_bound("executorch.backends.arm._passes.quant_args")?
+        .getattr("QuantArgs")?
+        .call1((scale, zero_point, qmin, qmax, dtype))
+}
+
+fn set_qparam_map<'py>(
+    py: Python<'py>,
+    meta: &Bound<'py, PyAny>,
+    key: &str,
+    entries: &[(usize, Bound<'py, PyAny>)],
+) -> PyResult<()> {
+    let qparams = PyDict::new_bound(py);
+    for (index, qparam) in entries {
+        qparams.set_item(*index, qparam)?;
+    }
+    meta.set_item(key, qparams)?;
+    Ok(())
 }
 
 impl FxPass for FxDecomposeCumsumPass {
@@ -35,8 +97,7 @@ impl FxPass for FxDecomposeCumsumPass {
         let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
 
         for node in &all_nodes {
-            let op = FxGraphModule::node_op(node)?;
-            if op != "call_function" {
+            if FxGraphModule::node_op(node)? != "call_function" {
                 continue;
             }
             let target = FxGraphModule::node_target_str(node)?;
@@ -50,10 +111,10 @@ impl FxPass for FxDecomposeCumsumPass {
         }
 
         let graph = gm.gm_ref().getattr("graph")?;
-
         for node in &candidates {
-            decompose_cumsum(py, &graph, gm, node, debug)?;
-            modified = true;
+            if decompose_cumsum(py, &graph, gm, node, debug)? {
+                modified = true;
+            }
         }
 
         if modified {
@@ -69,117 +130,158 @@ fn decompose_cumsum<'py>(
     gm: &FxGraphModule<'py>,
     node: &Bound<'py, PyAny>,
     debug: bool,
-) -> PyResult<()> {
+) -> PyResult<bool> {
     let args = FxGraphModule::node_args(node)?;
-    if args.is_empty() {
-        return Ok(());
-    }
-    let x = &args[0];
-
-    let input_shape = FxGraphModule::node_shape(x).unwrap_or_default();
-    let rank = input_shape.len() as i64;
-    if rank == 0 {
-        return Ok(());
+    if args.len() != 2 || !FxGraphModule::is_node(&args[0]) {
+        return Ok(false);
     }
 
-    // Extract dim from args[1] (default 0)
-    let dim_raw: i64 = if args.len() > 1 {
-        args[1].extract().unwrap_or(0)
+    let input_node = &args[0];
+    let original_shape = FxGraphModule::node_shape(input_node)?;
+    if original_shape.is_empty() {
+        return Ok(false);
+    }
+
+    let rank = original_shape.len() as i64;
+    let dim_raw: i64 = args[1].extract()?;
+    let dim = dim_raw.rem_euclid(rank) as usize;
+
+    let pre_cumsum_dim: i64 = if dim > 0 {
+        original_shape[..dim].iter().product()
     } else {
-        0
+        1
     };
-    // Normalize negative dims
-    let dim = ((dim_raw % rank) + rank) % rank;
-    let dim_size = input_shape.get(dim as usize).copied().unwrap_or(0);
+    let cumsum_dim = original_shape[dim];
+    let post_cumsum_dim: i64 = if dim < original_shape.len() - 1 {
+        original_shape[dim + 1..].iter().product()
+    } else {
+        1
+    };
 
-    if dim_size <= 1 {
-        // Nothing to accumulate -- just replace with the input
-        FxGraphModule::replace_all_uses_with(node, x)?;
+    if cumsum_dim <= 1 {
+        FxGraphModule::replace_all_uses_with(node, input_node)?;
         gm.erase_node(node)?;
-        return Ok(());
+        return Ok(true);
     }
+
+    let conv_shape = vec![pre_cumsum_dim, 1, cumsum_dim, post_cumsum_dim];
+    let pad_shape = vec![cumsum_dim - 1, 0];
+    let weight_shape = vec![1, 1, cumsum_dim, 1];
 
     if debug {
         let name = FxGraphModule::node_name(node)?;
         eprintln!(
-            "[DecomposeCumsum] {} dim={} dim_size={} shape={:?}",
-            name, dim, dim_size, input_shape
+            "[DecomposeCumsum] {} dim={} shape={:?} conv_shape={:?}",
+            name, dim, original_shape, conv_shape
         );
     }
 
+    let view_op = resolve_aten_op(py, "view_copy.default")?;
+    let conv_op = resolve_aten_op(py, "convolution.default")?;
     let slice_op = resolve_aten_op(py, "slice_copy.Tensor")?;
-    let add_op = resolve_aten_op(py, "add.Tensor")?;
-    let cat_op = resolve_aten_op(py, "cat.default")?;
+    let full_op = resolve_aten_op(py, "full.default")?;
 
-    // result = slice(x, dim, 0, 1)
-    let dim_py = dim.into_py(py).into_bound(py);
-    let zero_py = 0i64.into_py(py).into_bound(py);
+    let view_shape_py = PyList::new_bound(py, conv_shape.iter().copied());
+    let view_args = PyTuple::new_bound(py, &[input_node.as_ref(), view_shape_py.as_ref()]);
+    let view_node = insert_call_before(py, graph, node, &view_op, &view_args, None, node, true)?;
+
+    let input_meta = input_node.getattr("meta")?;
+    let input_val = input_meta.call_method1("get", ("val",))?;
+    let dtype = if !input_val.is_none() {
+        input_val.getattr("dtype").ok()
+    } else {
+        None
+    };
     let one_py = 1i64.into_py(py).into_bound(py);
-    let init_args = PyTuple::new_bound(
-        py,
-        &[x.as_ref(), dim_py.as_ref(), zero_py.as_ref(), one_py.as_ref()],
-    );
-    let mut result = insert_call_before(py, graph, node, &slice_op, init_args.as_ref(), node)?;
 
-    for i in 1..dim_size {
-        let i_py = i.into_py(py).into_bound(py);
-        let i_plus_1_py = (i + 1).into_py(py).into_bound(py);
-        let i_minus_1_py = (i - 1).into_py(py).into_bound(py);
-
-        // prev = slice(result, dim, i-1, i)
-        let prev_args = PyTuple::new_bound(
-            py,
-            &[result.as_ref(), dim_py.as_ref(), i_minus_1_py.as_ref(), i_py.as_ref()],
-        );
-        let prev = insert_call_before(py, graph, node, &slice_op, prev_args.as_ref(), node)?;
-
-        // curr = slice(x, dim, i, i+1)
-        let curr_args = PyTuple::new_bound(
-            py,
-            &[x.as_ref(), dim_py.as_ref(), i_py.as_ref(), i_plus_1_py.as_ref()],
-        );
-        let curr = insert_call_before(py, graph, node, &slice_op, curr_args.as_ref(), node)?;
-
-        // elem = add(prev, curr)
-        let add_args = PyTuple::new_bound(py, &[prev.as_ref(), curr.as_ref()]);
-        let elem = insert_call_before(py, graph, node, &add_op, add_args.as_ref(), node)?;
-        // ADD needs input_qparams for BOTH inputs: {0: qp, 1: qp}
-        {
-            let src_meta = node.getattr("meta")?;
-            let dst_meta = elem.getattr("meta")?;
-            if let Ok(iqp) = src_meta.call_method1("get", ("input_qparams",)) {
-                if !iqp.is_none() {
-                    // Get qp[0] and set it for both inputs
-                    if let Ok(qp0) = iqp.call_method1("get", (0,)) {
-                        if !qp0.is_none() {
-                            let new_iqp = pyo3::types::PyDict::new_bound(py);
-                            new_iqp.set_item(0, &qp0)?;
-                            new_iqp.set_item(1, &qp0)?;
-                            dst_meta.set_item("input_qparams", new_iqp)?;
-                        }
-                    }
-                }
-            }
-            if let Ok(oqp) = src_meta.call_method1("get", ("output_qparams",)) {
-                if !oqp.is_none() {
-                    dst_meta.set_item("output_qparams", &oqp)?;
-                }
-            }
+    let weight_shape_py = PyTuple::new_bound(py, weight_shape.iter().copied());
+    let weight_args = PyTuple::new_bound(py, &[weight_shape_py.as_ref(), one_py.as_ref()]);
+    let weight_kwargs = PyDict::new_bound(py);
+    if let Some(dtype) = dtype.as_ref() {
+        weight_kwargs.set_item("dtype", dtype)?;
+    }
+    if let Ok(device) = input_val.getattr("device") {
+        if !device.is_none() {
+            weight_kwargs.set_item("device", device)?;
         }
+    }
+    let weight_node = insert_call_before(
+        py,
+        graph,
+        node,
+        &full_op,
+        &weight_args,
+        Some(&weight_kwargs),
+        node,
+        true,
+    )?;
 
-        // result = cat([result, elem], dim)
-        let cat_list = pyo3::types::PyList::new_bound(py, &[result.as_ref(), elem.as_ref()]);
-        let cat_args = PyTuple::new_bound(py, &[cat_list.as_ref(), dim_py.as_ref()]);
-        result = insert_call_before(py, graph, node, &cat_op, cat_args.as_ref(), node)?;
-        propagate_qparams(node, &result)?;
+    let stride_py = PyList::new_bound(py, [1i64, 1i64]);
+    let pad_py = PyList::new_bound(py, pad_shape.iter().copied());
+    let dilation_py = PyList::new_bound(py, [1i64, 1i64]);
+    let transposed_false = false.into_py(py).into_bound(py);
+    let output_padding_py = PyList::new_bound(py, [0i64]);
+    let groups_one = 1i64.into_py(py).into_bound(py);
+    let conv_args = PyTuple::new_bound(
+        py,
+        &[
+            view_node.as_ref(),
+            weight_node.as_ref(),
+            py.None().bind(py).as_ref(),
+            stride_py.as_ref(),
+            pad_py.as_ref(),
+            dilation_py.as_ref(),
+            transposed_false.as_ref(),
+            output_padding_py.as_ref(),
+            groups_one.as_ref(),
+        ],
+    );
+    let conv_node = insert_call_before(py, graph, node, &conv_op, &conv_args, None, node, false)?;
+
+    let node_meta = node.getattr("meta")?;
+    let original_input_qparams = node_meta.call_method1("get", ("input_qparams",))?;
+    if !original_input_qparams.is_none() && original_input_qparams.len().unwrap_or(0) > 0 {
+        let torch_int8 = py.import_bound("torch")?.getattr("int8")?;
+        let weight_qp = make_qparam(py, 1.0, 0, -128, 127, &torch_int8)?;
+
+        let conv_meta = conv_node.getattr("meta")?;
+        let new_input_qparams = original_input_qparams.call_method0("copy")?;
+        new_input_qparams.set_item(1, &weight_qp)?;
+        conv_meta.set_item("input_qparams", new_input_qparams)?;
+
+        let weight_meta = weight_node.getattr("meta")?;
+        set_qparam_map(py, &weight_meta, "output_qparams", &[(0, weight_qp)])?;
     }
 
-    // Copy original node's meta onto the final result
-    let copy_mod = py.import_bound("copy")?;
-    let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    result.setattr("meta", &final_meta)?;
+    let slice_dim_py = 2i64.into_py(py).into_bound(py);
+    let zero_py = 0i64.into_py(py).into_bound(py);
+    let end_py = cumsum_dim.into_py(py).into_bound(py);
+    let slice_args = PyTuple::new_bound(
+        py,
+        &[
+            conv_node.as_ref(),
+            slice_dim_py.as_ref(),
+            zero_py.as_ref(),
+            end_py.as_ref(),
+        ],
+    );
+    let slice_node = insert_call_before(py, graph, node, &slice_op, &slice_args, None, node, true)?;
+
+    let original_shape_py = PyList::new_bound(py, original_shape.iter().copied());
+    let view_original_args =
+        PyTuple::new_bound(py, &[slice_node.as_ref(), original_shape_py.as_ref()]);
+    let result = insert_call_before(
+        py,
+        graph,
+        node,
+        &view_op,
+        &view_original_args,
+        None,
+        node,
+        true,
+    )?;
 
     FxGraphModule::replace_all_uses_with(node, &result)?;
     gm.erase_node(node)?;
-    Ok(())
+    Ok(true)
 }

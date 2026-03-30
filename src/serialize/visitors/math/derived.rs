@@ -11,13 +11,21 @@ pub(in crate::serialize::visitors) fn emit_aten_div(
     store: &TensorStore,
 ) -> EmitResult {
     let mut result = EmitResult::default();
-    let spec = ParsedBinaryTensorSpec::parse(graph, store, node, &mut result).unwrap_or_else(|| {
-        panic!("emit_aten_div: missing binary inputs for node '{}'", node.name)
-    });
+    let spec =
+        ParsedBinaryTensorSpec::parse(graph, store, node, &mut result).unwrap_or_else(|| {
+            panic!(
+                "emit_aten_div: missing binary inputs for node '{}'",
+                node.name
+            )
+        });
 
     let recip_name = format!("{}_recip", node.name);
     result.push_output_op(
-        temp_tensor(recip_name.clone(), spec.output_shape.clone(), spec.base_dtype),
+        temp_tensor(
+            recip_name.clone(),
+            spec.output_shape.clone(),
+            spec.base_dtype,
+        ),
         Op::Reciprocal,
         Attribute::Reciprocal(ReciprocalAttribute),
         vec![spec.rhs],
@@ -40,9 +48,8 @@ pub(in crate::serialize::visitors) fn emit_aten_sqrt(
     store: &TensorStore,
 ) -> EmitResult {
     let mut result = EmitResult::default();
-    let spec = ParsedUnaryTensorSpec::parse(graph, store, node).unwrap_or_else(|| {
-        panic!("emit_aten_sqrt: missing input for node '{}'", node.name)
-    });
+    let spec = ParsedUnaryTensorSpec::parse(graph, store, node)
+        .unwrap_or_else(|| panic!("emit_aten_sqrt: missing input for node '{}'", node.name));
     let rsqrt_name = format!("{}_rsqrt", node.name);
     result.push_output_op(
         temp_tensor(rsqrt_name.clone(), spec.output_shape, spec.base_dtype),
@@ -93,9 +100,8 @@ pub(in crate::serialize::visitors) fn emit_aten_sign(
     store: &TensorStore,
 ) -> EmitResult {
     let mut result = EmitResult::default();
-    let spec = ParsedUnaryTensorSpec::parse(graph, store, node).unwrap_or_else(|| {
-        panic!("emit_aten_sign: missing input for node '{}'", node.name)
-    });
+    let spec = ParsedUnaryTensorSpec::parse(graph, store, node)
+        .unwrap_or_else(|| panic!("emit_aten_sign: missing input for node '{}'", node.name));
 
     let zero_name = format!("{}_sign_zero", node.name);
     let one_name = format!("{}_sign_one", node.name);
@@ -156,9 +162,8 @@ pub(in crate::serialize::visitors) fn emit_aten_expm1(
     store: &TensorStore,
 ) -> EmitResult {
     let mut result = EmitResult::default();
-    let spec = ParsedUnaryTensorSpec::parse(graph, store, node).unwrap_or_else(|| {
-        panic!("emit_aten_expm1: missing input for node '{}'", node.name)
-    });
+    let spec = ParsedUnaryTensorSpec::parse(graph, store, node)
+        .unwrap_or_else(|| panic!("emit_aten_expm1: missing input for node '{}'", node.name));
 
     let exp_name = format!("{}_exp", node.name);
     result.push_output_op(
@@ -190,9 +195,8 @@ pub(in crate::serialize::visitors) fn emit_aten_log1p(
     store: &TensorStore,
 ) -> EmitResult {
     let mut result = EmitResult::default();
-    let spec = ParsedUnaryTensorSpec::parse(graph, store, node).unwrap_or_else(|| {
-        panic!("emit_aten_log1p: missing input for node '{}'", node.name)
-    });
+    let spec = ParsedUnaryTensorSpec::parse(graph, store, node)
+        .unwrap_or_else(|| panic!("emit_aten_log1p: missing input for node '{}'", node.name));
 
     let one_name = format!("{}_one", node.name);
     if let Some(t) = make_filled_const_tensor(
@@ -237,7 +241,10 @@ pub(in crate::serialize::visitors) fn emit_aten_leaky_relu(
 ) -> EmitResult {
     let mut result = EmitResult::default();
     let spec = ParsedUnaryTensorSpec::parse(graph, store, node).unwrap_or_else(|| {
-        panic!("emit_aten_leaky_relu: missing input for node '{}'", node.name)
+        panic!(
+            "emit_aten_leaky_relu: missing input for node '{}'",
+            node.name
+        )
     });
     let alpha = match node.args.get(1) {
         Some(Arg::Float(f)) => *f,

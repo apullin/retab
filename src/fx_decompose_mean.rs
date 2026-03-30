@@ -49,10 +49,7 @@ fn get_qparam_dtype<'py>(qparam: &Bound<'py, PyAny>) -> Option<Bound<'py, PyAny>
         .or_else(|| qparam.call_method1("get", ("dtype",)).ok())
 }
 
-fn first_meta_qparam<'py>(
-    meta: &Bound<'py, PyAny>,
-    key: &str,
-) -> Option<Bound<'py, PyAny>> {
+fn first_meta_qparam<'py>(meta: &Bound<'py, PyAny>, key: &str) -> Option<Bound<'py, PyAny>> {
     let qparams = meta.call_method1("get", (key,)).ok()?;
     if qparams.is_none() {
         return None;
@@ -130,6 +127,82 @@ fn insert_call_before_preserving_meta<'py>(
     Ok(new_node)
 }
 
+fn resolve_edge_quantized_op<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    let parts: Vec<&str> = name.split('.').collect();
+    let op_name = parts[0];
+    let overload = if parts.len() > 1 { parts[1] } else { "default" };
+
+    py.import_bound("executorch.exir.dialects._ops")?
+        .getattr("ops")?
+        .getattr("edge")?
+        .getattr("quantized_decomposed")?
+        .getattr(op_name)?
+        .getattr(overload)
+}
+
+fn maybe_insert_q_dq_after<'py>(
+    py: Python<'py>,
+    graph: &Bound<'py, PyAny>,
+    op: &Bound<'py, PyAny>,
+    meta_src: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let input_nodes = op.getattr("all_input_nodes")?;
+    let mut input_iter = input_nodes.iter()?;
+    let Some(first_input) = input_iter.next() else {
+        return Ok(op.clone());
+    };
+    let input_node = first_input?;
+    if input_iter.next().is_some() {
+        return Ok(op.clone());
+    }
+
+    let input_target = FxGraphModule::node_target_str(&input_node).unwrap_or_default();
+    let (quant_op, dequant_op) = if input_target.contains("dequantize_per_tensor.default") {
+        (
+            resolve_edge_quantized_op(py, "quantize_per_tensor.default")?,
+            resolve_edge_quantized_op(py, "dequantize_per_tensor.default")?,
+        )
+    } else if input_target.contains("dequantize_per_channel.default") {
+        (
+            resolve_edge_quantized_op(py, "quantize_per_channel.default")?,
+            resolve_edge_quantized_op(py, "dequantize_per_channel.default")?,
+        )
+    } else {
+        return Ok(op.clone());
+    };
+
+    let input_args = FxGraphModule::node_args(&input_node)?;
+    if input_args.len() < 2 {
+        return Ok(op.clone());
+    }
+
+    let mut quant_args: Vec<Bound<'py, PyAny>> = Vec::with_capacity(input_args.len());
+    quant_args.push(op.clone());
+    quant_args.extend(input_args.iter().skip(1).cloned());
+    let quant_args_tuple = PyTuple::new_bound(py, quant_args.iter().map(|arg| arg.as_ref()));
+    let quant_node = insert_call_before_preserving_meta(
+        py,
+        graph,
+        meta_src,
+        &quant_op,
+        &quant_args_tuple,
+        meta_src,
+    )?;
+
+    let mut dequant_args: Vec<Bound<'py, PyAny>> = Vec::with_capacity(input_args.len());
+    dequant_args.push(quant_node.clone());
+    dequant_args.extend(input_args.iter().skip(1).cloned());
+    let dequant_args_tuple = PyTuple::new_bound(py, dequant_args.iter().map(|arg| arg.as_ref()));
+    insert_call_before_preserving_meta(
+        py,
+        graph,
+        meta_src,
+        &dequant_op,
+        &dequant_args_tuple,
+        meta_src,
+    )
+}
+
 fn annotate_quantized_mean<'py>(
     py: Python<'py>,
     node: &Bound<'py, PyAny>,
@@ -171,12 +244,7 @@ fn annotate_quantized_mean<'py>(
         "input_qparams",
         &[(0, sum_qp.clone()), (1, full_qp)],
     )?;
-    set_qparam_map(
-        py,
-        &mul_meta,
-        "output_qparams",
-        &[(0, output_qp)],
-    )?;
+    set_qparam_map(py, &mul_meta, "output_qparams", &[(0, output_qp)])?;
     Ok(())
 }
 
@@ -298,30 +366,18 @@ fn decompose_mean<'py>(
             let stride = vec![1i64, 1];
             let kernel_py = PyList::new_bound(py, kernel.iter().copied());
             let stride_py = PyList::new_bound(py, stride.iter().copied());
-            let pool_args = PyTuple::new_bound(
-                py,
-                &[x.as_ref(), kernel_py.as_ref(), stride_py.as_ref()],
-            );
-            let mut result = insert_call_before_preserving_meta(
-                py,
-                graph,
-                node,
-                &avgpool_op,
-                &pool_args,
-                node,
-            )?;
+            let pool_args =
+                PyTuple::new_bound(py, &[x.as_ref(), kernel_py.as_ref(), stride_py.as_ref()]);
+            let mut result =
+                insert_call_before_preserving_meta(py, graph, node, &avgpool_op, &pool_args, node)?;
+            result = maybe_insert_q_dq_after(py, graph, &result, node)?;
 
             if !keepdim {
                 let view_op = resolve_aten_op(py, "view_copy.default")?;
                 let shape_list = PyList::new_bound(py, output_shape.iter().copied());
                 let view_args = PyTuple::new_bound(py, &[result.as_ref(), shape_list.as_ref()]);
                 result = insert_call_before_preserving_meta(
-                    py,
-                    graph,
-                    node,
-                    &view_op,
-                    &view_args,
-                    node,
+                    py, graph, node, &view_op, &view_args, node,
                 )?;
             }
 
@@ -355,10 +411,7 @@ fn decompose_mean<'py>(
     // sum(x, dims, keepdim=True) — always keepdim=True to preserve rank
     let dims_py = pyo3::types::PyList::new_bound(py, dims.iter().copied());
     let keepdim_true = true.into_py(py).into_bound(py);
-    let sum_args = PyTuple::new_bound(
-        py,
-        &[x.as_ref(), dims_py.as_ref(), keepdim_true.as_ref()],
-    );
+    let sum_args = PyTuple::new_bound(py, &[x.as_ref(), dims_py.as_ref(), keepdim_true.as_ref()]);
     let sum_node = insert_call_before(py, graph, node, &sum_op, sum_args.as_ref(), node)?;
 
     // full([1]*input_rank, 1/count, dtype=node.dtype)
@@ -374,15 +427,8 @@ fn decompose_mean<'py>(
             full_kwargs.set_item("device", device)?;
         }
     }
-    let count_node = insert_call_before_with_kwargs(
-        py,
-        graph,
-        node,
-        &full_op,
-        &full_args,
-        &full_kwargs,
-        node,
-    )?;
+    let count_node =
+        insert_call_before_with_kwargs(py, graph, node, &full_op, &full_args, &full_kwargs, node)?;
 
     // mul(sum, 1/count)
     let mul_args = PyTuple::new_bound(py, &[sum_node.as_ref(), count_node.as_ref()]);

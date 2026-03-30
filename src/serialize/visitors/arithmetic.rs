@@ -146,7 +146,12 @@ pub(super) fn emit_aten_clamp(
         }
 
         if !has_min_input && !has_max_input {
-            result.push_output_op(make_output_tensor(node), Op::Identity, Attribute::None, vec![current_name]);
+            result.push_output_op(
+                make_output_tensor(node),
+                Op::Identity,
+                Attribute::None,
+                vec![current_name],
+            );
         }
 
         return result;
@@ -272,7 +277,10 @@ pub(super) fn emit_aten_unsqueeze(
 ) -> EmitResult {
     let mut result = EmitResult::default();
     let spec = ParsedReshapeEmitterSpec::parse(graph, store, node).unwrap_or_else(|| {
-        panic!("emit_aten_unsqueeze: missing input for node '{}'", node.name)
+        panic!(
+            "emit_aten_unsqueeze: missing input for node '{}'",
+            node.name
+        )
     });
     push_reshape_with_shape(
         &mut result,
@@ -292,9 +300,8 @@ pub(super) fn emit_aten_squeeze(
     store: &TensorStore,
 ) -> EmitResult {
     let mut result = EmitResult::default();
-    let spec = ParsedReshapeEmitterSpec::parse(graph, store, node).unwrap_or_else(|| {
-        panic!("emit_aten_squeeze: missing input for node '{}'", node.name)
-    });
+    let spec = ParsedReshapeEmitterSpec::parse(graph, store, node)
+        .unwrap_or_else(|| panic!("emit_aten_squeeze: missing input for node '{}'", node.name));
     push_reshape_with_shape(
         &mut result,
         spec.input_name,

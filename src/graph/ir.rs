@@ -102,6 +102,7 @@ pub enum OpTarget {
     TosaMul,
     TosaSub,
     TosaRescale,
+    TosaResize,
     TosaReshape,
     TosaTranspose,
     TosaAvgPool2d,
@@ -192,6 +193,7 @@ pub enum OpTarget {
     // Additional ops
     AdaptiveAvgPool2d,
     UpsampleNearest2d,
+    UpsampleBilinear2d,
     Conv1d,
     ScalarTensor,
     Zeros,
@@ -228,15 +230,15 @@ pub enum DType {
 // ---------------------------------------------------------------------------
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TensorInfo {
-    pub shape: [i64; 4],
+    pub shape: [i64; 6],
     pub shape_len: u8,
     pub dtype: DType,
 }
 
 impl TensorInfo {
     pub fn new(shape: &[i64], dtype: DType) -> Self {
-        let mut arr = [0i64; 4];
-        let len = shape.len().min(4);
+        let mut arr = [0i64; 6];
+        let len = shape.len().min(6);
         arr[..len].copy_from_slice(&shape[..len]);
         Self {
             shape: arr,
@@ -289,6 +291,43 @@ impl Arg {
             Arg::NodeList(ids) => ids.clone(),
             Arg::OptionalNode(Some(id)) => smallvec::smallvec![*id],
             _ => SmallVec::new(),
+        }
+    }
+
+    pub fn as_f64(&self) -> f64 {
+        match self {
+            Arg::Float(value) => *value,
+            Arg::Int(value) => *value as f64,
+            Arg::Bool(value) => i32::from(*value) as f64,
+            _ => 0.0,
+        }
+    }
+
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Arg::Int(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Arg::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn as_int_list(&self) -> Option<&[i64]> {
+        match self {
+            Arg::IntList(values) => Some(values.as_slice()),
+            _ => None,
+        }
+    }
+
+    pub fn as_dtype(&self) -> Option<DType> {
+        match self {
+            Arg::Dtype(dtype) => Some(*dtype),
+            _ => None,
         }
     }
 }

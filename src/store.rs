@@ -36,16 +36,6 @@ impl TensorStore {
     pub fn remove(&mut self, name: &str) -> Option<TensorData> {
         self.buffers.remove(name)
     }
-
-    /// Number of stored buffers.
-    pub fn len(&self) -> usize {
-        self.buffers.len()
-    }
-
-    /// Whether the store is empty.
-    pub fn is_empty(&self) -> bool {
-        self.buffers.is_empty()
-    }
 }
 
 impl Default for TensorStore {

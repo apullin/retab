@@ -1109,7 +1109,7 @@ def decompose_quant_node(graph_module, node: Node, is_quantize: bool) -> None:
             )
             clamped = _create_node(
                 graph, clamp_op,
-                args=(shifted, float(qmin), float(qmax)), from_node=node,
+                args=(shifted, qmin, qmax), from_node=node,
             )
             output = _create_node(
                 graph, to_copy_op,

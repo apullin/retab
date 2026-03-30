@@ -66,7 +66,8 @@ impl Graph {
             let missing = active_ids.len() - sorted.len();
             eprintln!(
                 "[topo_sort] WARNING: {} of {} nodes not in topo order (cycles or stale edges)",
-                missing, active_ids.len()
+                missing,
+                active_ids.len()
             );
             for &id in &active_ids {
                 if !sorted_set.contains(&id) {

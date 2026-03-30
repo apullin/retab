@@ -63,7 +63,7 @@ impl FxPass for FxConvertSplitToSlicePass {
 fn convert_split<'py>(
     py: Python<'py>,
     graph: &Bound<'py, PyAny>,
-    gm: &FxGraphModule<'py>,
+    _gm: &FxGraphModule<'py>,
     split_node: &Bound<'py, PyAny>,
     slice_op: &Bound<'py, PyAny>,
     debug: bool,

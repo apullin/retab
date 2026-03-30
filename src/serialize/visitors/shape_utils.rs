@@ -8,12 +8,51 @@ pub(super) fn literal_output_shape(node: &Node) -> Option<Vec<i32>> {
 }
 
 pub(super) fn raw_i32_shape(node: &Node) -> Vec<i32> {
-    node.meta
+    let shape: Vec<i32> = node
+        .meta
         .val
         .shape_slice()
         .iter()
         .map(|&d| d as i32)
-        .collect()
+        .collect();
+
+    if shape.is_empty() && matches!(node.target, OpTarget::ScalarTensor) {
+        // TOSA does not model rank-0 tensors directly; represent scalar_tensor
+        // as a rank-1 [1] tensor so downstream broadcast/rescale shapes stay
+        // self-consistent.
+        return vec![1];
+    }
+
+    shape
+}
+
+fn resolve_inferred_shape(shape: &[i32], input_shape: &[i32]) -> Option<Vec<i32>> {
+    let negative_positions: Vec<usize> = shape
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &dim)| (dim < 0).then_some(idx))
+        .collect();
+    if negative_positions.is_empty() {
+        return Some(shape.to_vec());
+    }
+    if negative_positions.len() > 1 {
+        return None;
+    }
+
+    let input_numel = input_shape
+        .iter()
+        .try_fold(1i64, |acc, &dim| acc.checked_mul(dim as i64))?;
+    let known_product = shape
+        .iter()
+        .filter(|&&dim| dim >= 0)
+        .try_fold(1i64, |acc, &dim| acc.checked_mul(dim as i64))?;
+    if known_product == 0 || input_numel % known_product != 0 {
+        return None;
+    }
+
+    let mut resolved = shape.to_vec();
+    resolved[negative_positions[0]] = (input_numel / known_product) as i32;
+    Some(resolved)
 }
 
 pub(super) fn apply_tosa_dim_order(node: &Node, shape: Vec<i32>) -> Vec<i32> {
@@ -246,9 +285,17 @@ fn nhwc_layout_shape(node: &Node, raw_shape: &[i32], reordered_shape: &[i32]) ->
 /// Reconstruct the concrete TOSA tensor shape once at the serializer boundary
 /// instead of re-validating dim-order and layout facts ad hoc at each emitter.
 pub(super) fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Vec<i32> {
-    if matches!(node.target, OpTarget::TosaReshape | OpTarget::Reshape | OpTarget::View) {
+    if matches!(
+        node.target,
+        OpTarget::TosaReshape | OpTarget::Reshape | OpTarget::View
+    ) {
         if let Some(shape) = literal_output_shape(node) {
-            return apply_tosa_dim_order(node, shape);
+            let input_shape = first_input_node(graph, node)
+                .map(|input| actual_tensor_shape(graph, store, input))
+                .unwrap_or_default();
+            if let Some(resolved_shape) = resolve_inferred_shape(&shape, &input_shape) {
+                return apply_tosa_dim_order(node, resolved_shape);
+            }
         }
     }
 
@@ -268,7 +315,15 @@ pub(super) fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Nod
         return shape;
     }
 
-    let raw_shape = raw_i32_shape(node);
+    let mut raw_shape = raw_i32_shape(node);
+    if raw_shape.iter().any(|&dim| dim < 0) {
+        if let Some(input_node) = first_input_node(graph, node) {
+            let input_shape = actual_tensor_shape(graph, store, input_node);
+            if let Some(resolved_shape) = resolve_inferred_shape(&raw_shape, &input_shape) {
+                raw_shape = resolved_shape;
+            }
+        }
+    }
     let reordered_shape = apply_tosa_dim_order(node, raw_shape.clone());
 
     if node.op == OpType::Placeholder {
@@ -321,7 +376,11 @@ pub(super) fn make_bool_output_tensor(
     store: &TensorStore,
     node: &Node,
 ) -> TosaTensor {
-    make_empty_tensor(node.name.clone(), actual_tensor_shape(graph, store, node), DType::Bool)
+    make_empty_tensor(
+        node.name.clone(),
+        actual_tensor_shape(graph, store, node),
+        DType::Bool,
+    )
 }
 
 pub(super) fn push_reshape_with_shape(
@@ -332,9 +391,11 @@ pub(super) fn push_reshape_with_shape(
     out_shape: Vec<i32>,
     dtype: DType,
 ) {
-    result
-        .tensors
-        .push(make_empty_tensor(output_name.clone(), out_shape.clone(), dtype));
+    result.tensors.push(make_empty_tensor(
+        output_name.clone(),
+        out_shape.clone(),
+        dtype,
+    ));
 
     let rank = out_shape.len() as u32;
     let shape_data: Vec<u8> = out_shape

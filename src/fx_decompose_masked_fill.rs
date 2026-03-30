@@ -92,7 +92,10 @@ fn decompose_masked_fill<'py>(
     let meta = node.getattr("meta")?;
     let output_qparams = meta.call_method1("get", ("output_qparams",))?;
     let is_quantized = !output_qparams.is_none()
-        && output_qparams.downcast::<PyDict>().map(|d| !d.is_empty()).unwrap_or(false);
+        && output_qparams
+            .downcast::<PyDict>()
+            .map(|d| !d.is_empty())
+            .unwrap_or(false);
 
     // Determine the fill value and dtype for the full node.
     let qparams_0 = if is_quantized {
@@ -166,8 +169,7 @@ fn decompose_masked_fill<'py>(
     };
 
     // Create where(mask, fill_value, x) -- True positions get fill_value
-    let where_args =
-        PyTuple::new_bound(py, &[mask.as_ref(), fill_node.as_ref(), x.as_ref()]);
+    let where_args = PyTuple::new_bound(py, &[mask.as_ref(), fill_node.as_ref(), x.as_ref()]);
     let result_node = graph.call_method1("call_function", (&where_op, &where_args))?;
 
     // Copy the original node's full meta (including qparams) to the where node

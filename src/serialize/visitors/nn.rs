@@ -6,7 +6,7 @@ mod pool;
 mod rescale;
 mod transpose_conv;
 
-pub(super) use conv::{emit_aten_conv2d, emit_conv2d, emit_depthwise_conv2d};
+pub(super) use conv::{emit_aten_conv2d, emit_conv2d, emit_conv3d, emit_depthwise_conv2d};
 pub(super) use pad::emit_pad;
 pub(super) use pool::{emit_aten_max_pool2d, emit_avg_pool2d, emit_max_pool2d};
 pub(super) use rescale::emit_rescale;

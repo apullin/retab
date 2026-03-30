@@ -19,7 +19,10 @@ fn is_squeeze(target: &str) -> bool {
     if target.contains("unsqueeze") {
         return false;
     }
-    target.contains("squeeze_copy") || target.contains("squeeze.dim") || target.contains("squeeze.default") || target.contains("squeeze.dims")
+    target.contains("squeeze_copy")
+        || target.contains("squeeze.dim")
+        || target.contains("squeeze.default")
+        || target.contains("squeeze.dims")
 }
 
 fn is_unsqueeze(target: &str) -> bool {
@@ -61,11 +64,7 @@ fn compute_squeeze_shape(input_shape: &[i64], dims: &[i64], rank: usize) -> Vec<
 fn compute_unsqueeze_shape(input_shape: &[i64], dim: i64, rank: usize) -> Vec<i64> {
     // For unsqueeze, the rank of the OUTPUT is input_rank + 1
     let out_rank = rank + 1;
-    let normalized = if dim < 0 {
-        dim + out_rank as i64
-    } else {
-        dim
-    };
+    let normalized = if dim < 0 { dim + out_rank as i64 } else { dim };
     let pos = normalized as usize;
 
     let mut result = Vec::with_capacity(input_shape.len() + 1);
@@ -189,15 +188,14 @@ impl FxPass for FxRewriteSqueezePass {
                     // Create view_copy node via graph.inserting_before context manager
                     let shape_list =
                         pyo3::types::PyList::new_bound(py, output_shape.iter().copied());
-                    let inserting =
-                        graph.call_method1("inserting_before", (node,))?;
+                    let inserting = graph.call_method1("inserting_before", (node,))?;
                     inserting.call_method0("__enter__")?;
-                    let new_args =
-                        pyo3::types::PyTuple::new_bound(py, &[input_node.as_ref(), shape_list.as_ref()]);
-                    let new_node = graph.call_method1(
-                        "call_function",
-                        (&view_copy_op, new_args),
-                    )?;
+                    let new_args = pyo3::types::PyTuple::new_bound(
+                        py,
+                        &[input_node.as_ref(), shape_list.as_ref()],
+                    );
+                    let new_node =
+                        graph.call_method1("call_function", (&view_copy_op, new_args))?;
                     // Copy meta from original node
                     let orig_meta = node.getattr("meta")?;
                     let meta_copy = copy_mod.call_method1("copy", (&orig_meta,))?;
@@ -231,15 +229,14 @@ impl FxPass for FxRewriteSqueezePass {
 
                     let shape_list =
                         pyo3::types::PyList::new_bound(py, output_shape.iter().copied());
-                    let inserting =
-                        graph.call_method1("inserting_before", (node,))?;
+                    let inserting = graph.call_method1("inserting_before", (node,))?;
                     inserting.call_method0("__enter__")?;
-                    let new_args =
-                        pyo3::types::PyTuple::new_bound(py, &[input_node.as_ref(), shape_list.as_ref()]);
-                    let new_node = graph.call_method1(
-                        "call_function",
-                        (&view_copy_op, new_args),
-                    )?;
+                    let new_args = pyo3::types::PyTuple::new_bound(
+                        py,
+                        &[input_node.as_ref(), shape_list.as_ref()],
+                    );
+                    let new_node =
+                        graph.call_method1("call_function", (&view_copy_op, new_args))?;
                     let orig_meta = node.getattr("meta")?;
                     let meta_copy = copy_mod.call_method1("copy", (&orig_meta,))?;
                     new_node.setattr("meta", &meta_copy)?;
@@ -280,17 +277,15 @@ impl FxPass for FxRewriteSqueezePass {
                         );
                     }
 
-                    let perm_list =
-                        pyo3::types::PyList::new_bound(py, perm.iter().copied());
-                    let inserting =
-                        graph.call_method1("inserting_before", (node,))?;
+                    let perm_list = pyo3::types::PyList::new_bound(py, perm.iter().copied());
+                    let inserting = graph.call_method1("inserting_before", (node,))?;
                     inserting.call_method0("__enter__")?;
-                    let new_args =
-                        pyo3::types::PyTuple::new_bound(py, &[input_node.as_ref(), perm_list.as_ref()]);
-                    let new_node = graph.call_method1(
-                        "call_function",
-                        (&permute_copy_op, new_args),
-                    )?;
+                    let new_args = pyo3::types::PyTuple::new_bound(
+                        py,
+                        &[input_node.as_ref(), perm_list.as_ref()],
+                    );
+                    let new_node =
+                        graph.call_method1("call_function", (&permute_copy_op, new_args))?;
                     let orig_meta = node.getattr("meta")?;
                     let meta_copy = copy_mod.call_method1("copy", (&orig_meta,))?;
                     new_node.setattr("meta", &meta_copy)?;

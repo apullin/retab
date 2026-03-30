@@ -95,9 +95,7 @@ fn build_user_signature(node: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
     )))
 }
 
-fn candidate_groups<'py>(
-    producer: &Bound<'py, PyAny>,
-) -> PyResult<Vec<Vec<Bound<'py, PyAny>>>> {
+fn candidate_groups<'py>(producer: &Bound<'py, PyAny>) -> PyResult<Vec<Vec<Bound<'py, PyAny>>>> {
     let mut users_by_target: HashMap<(String, String), Vec<Bound<'_, PyAny>>> = HashMap::new();
     for user in &FxGraphModule::node_users(producer)? {
         if !node_is_live(user)? {

@@ -140,13 +140,13 @@ impl FxPass for FxRewriteMatmulRescalePass {
                     "insert_rescale_node",
                     (
                         gm.gm_ref(),
-                        node,          // ref_node (insert after)
-                        node,          // input_node
-                        &out_dtype,    // out_dtype
-                        &scale_list,   // scales
-                        &input_zp,     // input_zp = 0 (accumulator)
-                        &output_zp,    // output_zp
-                        true,          // after=True
+                        node,        // ref_node (insert after)
+                        node,        // input_node
+                        &out_dtype,  // out_dtype
+                        &scale_list, // scales
+                        &input_zp,   // input_zp = 0 (accumulator)
+                        &output_zp,  // output_zp
+                        true,        // after=True
                     ),
                 )?;
 
@@ -157,7 +157,7 @@ impl FxPass for FxRewriteMatmulRescalePass {
                 let rescale_args = FxGraphModule::node_args(&rescale_node)?;
                 if !rescale_args.is_empty() {
                     let mut arg_refs: Vec<&pyo3::Bound<'_, pyo3::PyAny>> = Vec::new();
-                    arg_refs.push(node);  // args[0] = matmul
+                    arg_refs.push(node); // args[0] = matmul
                     for a in &rescale_args[1..] {
                         arg_refs.push(a);
                     }

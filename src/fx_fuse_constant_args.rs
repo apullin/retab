@@ -70,6 +70,7 @@ fn materialize_zero_input_const(
     gm: &FxGraphModule,
     node: &Bound<'_, PyAny>,
     const_tensor: &Bound<'_, PyAny>,
+    qparam: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<bool> {
     let py = gm.py();
     let graph = gm.gm_ref().getattr("graph")?;
@@ -92,6 +93,12 @@ fn materialize_zero_input_const(
         let const_node = graph.call_method1("get_attr", (attr_name.as_str(),))?;
         let const_meta = meta.call_method0("copy")?;
         const_meta.set_item("val", const_tensor)?;
+        if let Some(qparam) = qparam {
+            let qparam_map = PyDict::new_bound(py);
+            qparam_map.set_item(0, qparam)?;
+            const_meta.set_item("input_qparams", &qparam_map)?;
+            const_meta.set_item("output_qparams", &qparam_map)?;
+        }
         const_node.setattr("meta", &const_meta)?;
         Ok(const_node)
     })();
@@ -101,6 +108,87 @@ fn materialize_zero_input_const(
     FxGraphModule::replace_all_uses_with(node, &const_node)?;
     gm.erase_node(node)?;
     Ok(true)
+}
+
+fn extract_single_qparam_entry<'py>(
+    qparams: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    if qparams.is_none() {
+        return Ok(None);
+    }
+    if let Ok(qparams_dict) = qparams.downcast::<PyDict>() {
+        if let Some(qparam) = qparams_dict.get_item(0)? {
+            return Ok(Some(qparam));
+        }
+        if qparams_dict.len() == 1 {
+            if let Some((_, qparam)) = qparams_dict.iter().next() {
+                return Ok(Some(qparam));
+            }
+        }
+        return Ok(None);
+    }
+    Ok(Some(qparams.clone()))
+}
+
+fn extract_effective_node_qparam<'py>(
+    node: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let mut current = node.clone();
+    loop {
+        let meta = current.getattr("meta")?;
+        let output_qparams = meta.call_method1("get", ("output_qparams",))?;
+        if let Some(qparam) = extract_single_qparam_entry(&output_qparams)? {
+            return Ok(Some(qparam));
+        }
+        let input_qparams = meta.call_method1("get", ("input_qparams",))?;
+        if let Some(qparam) = extract_single_qparam_entry(&input_qparams)? {
+            return Ok(Some(qparam));
+        }
+
+        let quant_args_mod = current
+            .py()
+            .import_bound("executorch.backends.arm._passes.quant_args")?;
+        let quant_args_cls = quant_args_mod.getattr("QuantArgs")?;
+        if let Ok(qparam) = quant_args_cls.call_method1(
+            "from_operator",
+            (current.getattr("target")?, current.getattr("args")?),
+        ) {
+            return Ok(Some(qparam));
+        }
+
+        let args = FxGraphModule::node_args(&current)?;
+        let Some(next_arg) = args.first() else {
+            return Ok(None);
+        };
+        if !FxGraphModule::is_node(next_arg) {
+            return Ok(None);
+        }
+        current = next_arg.clone();
+    }
+}
+
+fn infer_binary_full_qparam<'py>(node: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    for user in FxGraphModule::node_users(node)? {
+        if let Some(qparam) = extract_effective_node_qparam(&user)? {
+            return Ok(Some(qparam));
+        }
+        if FxGraphModule::node_op(&user)? != "call_function" {
+            continue;
+        }
+        let target = FxGraphModule::node_target_str(&user)?;
+        if !target.contains("aten.add.Tensor") && !target.contains("aten.sub.Tensor") {
+            continue;
+        }
+        for arg in FxGraphModule::node_args(&user)?.iter().take(2) {
+            if !FxGraphModule::is_node(arg) || arg.is(node) {
+                continue;
+            }
+            if let Some(qparam) = extract_effective_node_qparam(arg)? {
+                return Ok(Some(qparam));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn fold_zero_input_full(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult<bool> {
@@ -134,18 +222,18 @@ fn fold_zero_input_full(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult
     // Match the general constant-folding helper: if the FULL output is already
     // annotated with output_qparams, materialize the frozen buffer in that
     // quantized domain instead of preserving the original FP32 data.
+    let mut qparam = None;
     if let Ok(output_qparams) = meta.call_method1("get", ("output_qparams",)) {
-        if !output_qparams.is_none() && output_qparams.len().unwrap_or(0) > 0 {
-            if let Ok(values) = output_qparams.call_method0("values") {
-                if let Some(first_qp) = values.iter()?.next() {
-                    let first_qp = first_qp?;
-                    const_tensor = first_qp.call_method1("quantize_value", (&const_tensor,))?;
-                }
-            }
-        }
+        qparam = extract_single_qparam_entry(&output_qparams)?;
+    }
+    if qparam.is_none() {
+        qparam = infer_binary_full_qparam(node)?;
+    }
+    if let Some(qparam) = qparam.as_ref() {
+        const_tensor = qparam.call_method1("quantize_value", (&const_tensor,))?;
     }
 
-    materialize_zero_input_const(gm, node, &const_tensor)
+    materialize_zero_input_const(gm, node, &const_tensor, qparam.as_ref())
 }
 
 fn fold_zero_input_range_like(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult<bool> {
@@ -173,7 +261,7 @@ fn fold_zero_input_range_like(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> Py
         }
     }
 
-    materialize_zero_input_const(gm, node, &const_tensor)
+    materialize_zero_input_const(gm, node, &const_tensor, None)
 }
 
 impl FxPass for FxFuseConstantArgsPass {

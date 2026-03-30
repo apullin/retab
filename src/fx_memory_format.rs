@@ -39,9 +39,7 @@ fn channels_last_inverse_order(rank: usize, spatial_rank: usize) -> Vec<usize> {
 /// Infer the initial spatial rank from tensor rank.
 fn initial_spatial_rank(tensor_rank: usize) -> usize {
     if tensor_rank >= 4 {
-        2
-    } else if tensor_rank == 3 {
-        1
+        tensor_rank - 2
     } else {
         0
     }
@@ -213,10 +211,7 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let rank: usize = match py
-                .import_bound("builtins")?
-                .call_method1("len", (&shape,))
-            {
+            let rank: usize = match py.import_bound("builtins")?.call_method1("len", (&shape,)) {
                 Ok(v) => v.extract().unwrap_or(0),
                 Err(_) => continue,
             };
@@ -241,9 +236,7 @@ impl FxPass for FxToTosaMemoryFormatPass {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
-                let rank: usize = match py
-                    .import_bound("builtins")?
-                    .call_method1("len", (&shape,))
+                let rank: usize = match py.import_bound("builtins")?.call_method1("len", (&shape,))
                 {
                     Ok(v) => v.extract().unwrap_or(0),
                     Err(_) => continue,
@@ -285,10 +278,7 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let rank: usize = match py
-                .import_bound("builtins")?
-                .call_method1("len", (&shape,))
-            {
+            let rank: usize = match py.import_bound("builtins")?.call_method1("len", (&shape,)) {
                 Ok(v) => v.extract().unwrap_or(0),
                 Err(_) => continue,
             };
@@ -307,7 +297,9 @@ impl FxPass for FxToTosaMemoryFormatPass {
                     let output_nodes = collect_output_nodes(&args);
                     let output_dim_orders: Vec<Vec<usize>> = output_nodes
                         .iter()
-                        .filter_map(|output_node| extract_output_dim_order(output_node).ok().flatten())
+                        .filter_map(|output_node| {
+                            extract_output_dim_order(output_node).ok().flatten()
+                        })
                         .collect();
                     if !output_dim_orders.is_empty() {
                         let py_dim_orders = pyo3::types::PyList::empty_bound(py);
@@ -320,8 +312,7 @@ impl FxPass for FxToTosaMemoryFormatPass {
             }
 
             let dim_order = if is_input_placeholder(node)? {
-                extract_output_dim_order(node)?
-                    .unwrap_or_else(|| (0..rank).collect::<Vec<_>>())
+                extract_output_dim_order(node)?.unwrap_or_else(|| (0..rank).collect::<Vec<_>>())
             } else if op == "output" {
                 // True external outputs keep their original logical format.
                 (0..rank).collect::<Vec<_>>()
@@ -333,8 +324,7 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 (0..rank).collect()
             };
 
-            let py_dim_order =
-                pyo3::types::PyTuple::new_bound(py, dim_order.iter().map(|&d| d));
+            let py_dim_order = pyo3::types::PyTuple::new_bound(py, dim_order.iter().map(|&d| d));
             meta.set_item("tosa_dim_order", py_dim_order)?;
             modified = true;
         }
@@ -353,8 +343,6 @@ impl FxPass for FxToTosaMemoryFormatPass {
         // then inputs (line 350).  If we insert placeholder transposes
         // first, the view_copy sees NHWC shapes and memory_format_differs
         // returns false for cases where C=1 in the NHWC layout.
-        let all_nodes = gm.nodes()?;
-
         // 4a: Around view_copy nodes that cross 4D+/<4D boundaries, insert
         // transposes so the reshape sees the data in the correct memory order.
         //   - >=4D -> <4D (NHWC territory -> NCHW): insert NHWC->NCHW before the view
@@ -692,8 +680,9 @@ impl FxPass for FxToTosaMemoryFormatPass {
                         .extract()
                         .unwrap_or(2);
                     let expected_cl = channels_last_order(input_rank, spatial_rank);
-                    let actual: Vec<usize> =
-                        dim_order_val.extract().unwrap_or_else(|_| (0..input_rank).collect());
+                    let actual: Vec<usize> = dim_order_val
+                        .extract()
+                        .unwrap_or_else(|_| (0..input_rank).collect());
                     actual == expected_cl
                 }
             };
@@ -732,9 +721,9 @@ impl FxPass for FxToTosaMemoryFormatPass {
             // Solving: P_nhwc[j] = F_inv[P_user[F[j]]].
             let mut p_nhwc = vec![0i64; input_rank];
             for j in 0..input_rank {
-                let nchw_axis = f[j];                       // map NHWC pos j -> NCHW axis
+                let nchw_axis = f[j]; // map NHWC pos j -> NCHW axis
                 let user_mapped = user_perm[nchw_axis] as usize; // user's perm in NCHW
-                p_nhwc[j] = f_inv[user_mapped] as i64;      // map result NCHW axis -> NHWC pos
+                p_nhwc[j] = f_inv[user_mapped] as i64; // map result NCHW axis -> NHWC pos
             }
 
             // Skip if the remapped perm is identical to the original —
@@ -761,10 +750,8 @@ impl FxPass for FxToTosaMemoryFormatPass {
 
             // Update the node's args[1] with the remapped perm
             let new_perm_list = pyo3::types::PyList::new_bound(py, p_nhwc.iter().copied());
-            let new_args = pyo3::types::PyTuple::new_bound(
-                py,
-                &[input_node.as_ref(), new_perm_list.as_ref()],
-            );
+            let new_args =
+                pyo3::types::PyTuple::new_bound(py, &[input_node.as_ref(), new_perm_list.as_ref()]);
             node.setattr("args", new_args)?;
 
             // Do NOT call refresh_node_fake_tensor — the remapped perm changes

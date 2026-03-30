@@ -85,8 +85,7 @@ fn configure_grouped_conv_qparams<'py>(
             }
             let start_index = group_index * output_slice_size;
             let stop_index = (group_index + 1) * output_slice_size;
-            let split =
-                split_per_channel_qparams(py, &weight_qarg, start_index, stop_index)?;
+            let split = split_per_channel_qparams(py, &weight_qarg, start_index, stop_index)?;
             new_qparams.set_item(1, split)?;
         }
     }
@@ -95,8 +94,7 @@ fn configure_grouped_conv_qparams<'py>(
         if is_per_channel_qparams(&bias_qarg)? {
             let start_index = group_index * output_slice_size;
             let stop_index = (group_index + 1) * output_slice_size;
-            let split =
-                split_per_channel_qparams(py, &bias_qarg, start_index, stop_index)?;
+            let split = split_per_channel_qparams(py, &bias_qarg, start_index, stop_index)?;
             new_qparams.set_item(2, split)?;
         }
     }
@@ -431,8 +429,14 @@ fn decompose_grouped_conv<'py>(
                 in_stop.into_py(py).into_bound(py).as_ref(),
             ],
         );
-        let input_slice =
-            insert_call_before(py, graph, node, &slice_op, input_slice_args.as_ref(), input_node)?;
+        let input_slice = insert_call_before(
+            py,
+            graph,
+            node,
+            &slice_op,
+            input_slice_args.as_ref(),
+            input_node,
+        )?;
 
         // Slice weight along dim 0 (output channels for normal, input channels for transposed)
         let (w_start, w_stop) = if transposed {
@@ -449,8 +453,14 @@ fn decompose_grouped_conv<'py>(
                 w_stop.into_py(py).into_bound(py).as_ref(),
             ],
         );
-        let weight_slice =
-            insert_call_before(py, graph, node, &slice_op, weight_slice_args.as_ref(), weight_node)?;
+        let weight_slice = insert_call_before(
+            py,
+            graph,
+            node,
+            &slice_op,
+            weight_slice_args.as_ref(),
+            weight_node,
+        )?;
 
         // Slice bias along dim 0 (output channels)
         let bias_slice = if bias_node.is_none() {
@@ -512,16 +522,8 @@ fn decompose_grouped_conv<'py>(
             PyTuple::new_bound(py, &conv_arg_vec)
         };
 
-        let conv_node =
-            insert_call_before(py, graph, node, &conv_op, conv_args.as_ref(), node)?;
-        configure_grouped_conv_qparams(
-            py,
-            node,
-            &conv_node,
-            i,
-            output_slice_size,
-            transposed,
-        )?;
+        let conv_node = insert_call_before(py, graph, node, &conv_op, conv_args.as_ref(), node)?;
+        configure_grouped_conv_qparams(py, node, &conv_node, i, output_slice_size, transposed)?;
         output_slices.push(conv_node);
     }
 
