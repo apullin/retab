@@ -26,7 +26,6 @@ use crate::fx_insert_rescale;
 use crate::fx_insert_table_ops;
 use crate::fx_memory_format;
 use crate::fx_pass::FxPass;
-use crate::fx_python_bridge;
 use crate::fx_quantize_clamp_args;
 use crate::fx_remove_noop;
 use crate::fx_rewrite_conv;
@@ -147,10 +146,6 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(
             ep_for_fuse_grouped,
         )),
-        // Mirror the Python Arm backend: int16-activation convs with bias must
-        // be decomposed before TOSA conv rewriting, otherwise the reference
-        // model rejects the direct bias contract.
-        Box::new(fx_python_bridge::FxPythonInt16ActivationConvPass),
         Box::new(fx_rewrite_conv::FxRewriteConvPass),
         // Adjust input sizes for conv/pool to yield exact integer output dims
         Box::new(fx_size_adjust_input::FxSizeAdjustInputPass),

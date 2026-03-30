@@ -1,7 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
-mod compile_spec;
 mod fx_annotate_output_dim_order;
 mod fx_cast_int64;
 mod fx_convert_clamp;
@@ -11,7 +10,6 @@ mod fx_decompose_adaptive_avgpool;
 mod fx_convert_split_to_slice;
 mod fx_conv1d_unsqueeze;
 mod fx_convert_sum;
-mod fx_decompose;
 mod fx_decompose_addmm;
 mod fx_decompose_cumsum;
 mod fx_decompose_grouped_conv;
@@ -34,7 +32,6 @@ mod fx_memory_format;
 mod fx_pass;
 mod fx_pipeline;
 mod fx_profile;
-mod fx_python_bridge;
 mod fx_quantize_clamp_args;
 mod fx_remove_noop;
 mod fx_rewrite_conv;
