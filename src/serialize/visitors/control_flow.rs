@@ -1,9 +1,11 @@
-use super::*;
 use super::emitter::EmitContext;
+use super::*;
 use crate::graph::ir::Arg;
 use crate::serialize::tosa_generated::CondIfAttribute;
 
-pub fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>) {
+pub fn register(
+    table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>,
+) {
     use crate::graph::ir::OpTarget;
     table.insert(OpTarget::CondIf, emit_cond_if);
 }

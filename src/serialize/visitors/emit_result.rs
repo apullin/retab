@@ -18,7 +18,8 @@ impl EmitResult {
         inputs: Vec<String>,
         outputs: Vec<String>,
     ) {
-        self.operators.push(TosaOperator::new(op, attribute, inputs, outputs));
+        self.operators
+            .push(TosaOperator::new(op, attribute, inputs, outputs));
     }
 
     pub fn push_output_op(

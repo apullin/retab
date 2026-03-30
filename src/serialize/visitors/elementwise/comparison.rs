@@ -1,6 +1,11 @@
 use super::*;
 
-pub(super) fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, crate::serialize::visitors::emitter::EmitFn>) {
+pub(super) fn register(
+    table: &mut std::collections::HashMap<
+        crate::graph::ir::OpTarget,
+        crate::serialize::visitors::emitter::EmitFn,
+    >,
+) {
     use crate::graph::ir::OpTarget;
     // TOSA-lowered comparison ops
     table.insert(OpTarget::TosaEqual, emit_equal);
@@ -51,7 +56,13 @@ pub(in crate::serialize::visitors) fn emit_greater_equal(ctx: &EmitContext) -> E
 }
 
 pub(in crate::serialize::visitors) fn emit_pow(ctx: &EmitContext) -> EmitResult {
-    emit_direct_binary(ctx.graph, ctx.node, ctx.store, Op::Pow, Attribute::Pow(PowAttribute))
+    emit_direct_binary(
+        ctx.graph,
+        ctx.node,
+        ctx.store,
+        Op::Pow,
+        Attribute::Pow(PowAttribute),
+    )
 }
 
 pub(in crate::serialize::visitors) fn emit_maximum(ctx: &EmitContext) -> EmitResult {

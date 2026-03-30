@@ -1,5 +1,5 @@
-use super::*;
 use super::emitter::EmitContext;
+use super::*;
 
 mod conv;
 mod pad;
@@ -7,14 +7,15 @@ mod pool;
 mod rescale;
 mod transpose_conv;
 
-pub fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>) {
+pub fn register(
+    table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>,
+) {
     conv::register(table);
     pad::register(table);
     pool::register(table);
     rescale::register(table);
     transpose_conv::register(table);
 }
-
 
 fn push_input_weight_zp_tensors(
     result: &mut EmitResult,

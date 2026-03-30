@@ -1,6 +1,11 @@
 use super::*;
 
-pub(super) fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, crate::serialize::visitors::emitter::EmitFn>) {
+pub(super) fn register(
+    table: &mut std::collections::HashMap<
+        crate::graph::ir::OpTarget,
+        crate::serialize::visitors::emitter::EmitFn,
+    >,
+) {
     use crate::graph::ir::OpTarget;
     table.insert(OpTarget::Any, emit_aten_any);
     table.insert(OpTarget::Amax, emit_aten_amax);
@@ -85,13 +90,31 @@ fn emit_reduce_extrema(
 }
 
 pub(in crate::serialize::visitors) fn emit_aten_amax(ctx: &EmitContext) -> EmitResult {
-    emit_reduce_extrema(ctx.graph, ctx.node, ctx.store, Op::ReduceMax, ReduceExtremaKind::Max)
+    emit_reduce_extrema(
+        ctx.graph,
+        ctx.node,
+        ctx.store,
+        Op::ReduceMax,
+        ReduceExtremaKind::Max,
+    )
 }
 
 pub(in crate::serialize::visitors) fn emit_aten_any(ctx: &EmitContext) -> EmitResult {
-    emit_reduce_extrema(ctx.graph, ctx.node, ctx.store, Op::ReduceAny, ReduceExtremaKind::Any)
+    emit_reduce_extrema(
+        ctx.graph,
+        ctx.node,
+        ctx.store,
+        Op::ReduceAny,
+        ReduceExtremaKind::Any,
+    )
 }
 
 pub(in crate::serialize::visitors) fn emit_aten_amin(ctx: &EmitContext) -> EmitResult {
-    emit_reduce_extrema(ctx.graph, ctx.node, ctx.store, Op::ReduceMin, ReduceExtremaKind::Min)
+    emit_reduce_extrema(
+        ctx.graph,
+        ctx.node,
+        ctx.store,
+        Op::ReduceMin,
+        ReduceExtremaKind::Min,
+    )
 }

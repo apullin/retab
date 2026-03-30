@@ -44,7 +44,6 @@ mod fx_memory_format;
 mod fx_pass;
 mod fx_pipeline;
 mod fx_profile;
-mod fx_utils;
 mod fx_quantize_clamp_args;
 mod fx_remove_noop;
 mod fx_rewrite_conv;
@@ -52,6 +51,7 @@ mod fx_rewrite_index_put;
 mod fx_rewrite_matmul;
 mod fx_rewrite_squeeze;
 mod fx_size_adjust_input;
+mod fx_utils;
 mod graph;
 mod ingest;
 mod runner_logging;
@@ -66,14 +66,6 @@ fn clone_bound_pyobject(exported_program: Option<&Bound<'_, PyAny>>) -> Option<P
 
 fn to_py_bytes(py: Python<'_>, data: Vec<u8>) -> Py<PyBytes> {
     PyBytes::new_bound(py, &data).unbind()
-}
-
-fn summarize_ingested_graph(graph: &Graph, tensor_store: &TensorStore) -> String {
-    format!(
-        "Ingested {} nodes, {} tensors",
-        graph.order.len(),
-        tensor_store.buffers.len()
-    )
 }
 
 fn run_single_fx_pass<P: fx_pass::FxPass>(
@@ -126,17 +118,6 @@ fn ingest_and_serialize_tosa_bytes(
     let (mut graphs, store) = ingest_graph_hierarchy(graph_module, state_dict, graph_signature)?;
     rebuild_graph_users(&mut graphs);
     Ok(serialize::serialize_graphs_to_tosa(&graphs, &store))
-}
-
-#[pyfunction]
-fn ingest_graph(
-    graph_module: &Bound<'_, PyAny>,
-    state_dict: &Bound<'_, PyDict>,
-    graph_signature: &Bound<'_, PyAny>,
-) -> PyResult<String> {
-    let (graph, tensor_store) =
-        ingest::fx_bridge::ingest_fx_graph(graph_module, state_dict, graph_signature)?;
-    Ok(summarize_ingested_graph(&graph, &tensor_store))
 }
 
 // ---------------------------------------------------------------------------

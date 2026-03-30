@@ -673,7 +673,10 @@ impl TosaTensor {
 
     /// Const tensor with inline data.
     pub fn with_data(name: String, shape: Vec<i32>, dtype: DType, data: Vec<u8>) -> Self {
-        Self { data, ..Self::new(name, shape, dtype) }
+        Self {
+            data,
+            ..Self::new(name, shape, dtype)
+        }
     }
 }
 
@@ -704,7 +707,13 @@ pub struct TosaOperator {
 impl TosaOperator {
     /// Create an operator with no location metadata (the common case).
     pub fn new(op: Op, attribute: Attribute, inputs: Vec<String>, outputs: Vec<String>) -> Self {
-        Self { op, attribute, inputs, outputs, location: None }
+        Self {
+            op,
+            attribute,
+            inputs,
+            outputs,
+            location: None,
+        }
     }
 }
 

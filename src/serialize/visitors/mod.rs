@@ -81,7 +81,7 @@ thread_local! {
 /// Dispatch to the correct per-op visitor based on the node's target.
 pub fn emit_node(
     graph: &Graph,
-    node_id: NodeId,
+    _node_id: NodeId,
     node: &Node,
     store: &TensorStore,
 ) -> Option<EmitResult> {
@@ -94,12 +94,7 @@ pub fn emit_node(
 
     EMITTER_TABLE.with(|table| {
         if let Some(emitter) = table.get(&node.target) {
-            let ctx = EmitContext {
-                graph,
-                node_id,
-                node,
-                store,
-            };
+            let ctx = EmitContext { graph, node, store };
             Some(emitter(&ctx))
         } else {
             if std::env::var("TOSA_ENGINE_DEBUG").is_ok() {

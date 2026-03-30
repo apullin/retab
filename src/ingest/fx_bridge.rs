@@ -732,12 +732,20 @@ fn parse_qparams_dict(
     if py_obj.is_none() {
         return vec![];
     }
-    let Ok(dict) = py_obj.downcast::<PyDict>() else { return vec![] };
+    let Ok(dict) = py_obj.downcast::<PyDict>() else {
+        return vec![];
+    };
     let mut out = vec![];
     for (pos_key, qp_val) in dict.iter() {
-        let Ok(pos) = pos_key.extract::<u32>() else { continue };
-        let Some(qa) = extract_quantargs_from_py(&qp_val) else { continue };
-        if existing.iter().any(|(p, _)| *p == pos) { continue; }
+        let Ok(pos) = pos_key.extract::<u32>() else {
+            continue;
+        };
+        let Some(qa) = extract_quantargs_from_py(&qp_val) else {
+            continue;
+        };
+        if existing.iter().any(|(p, _)| *p == pos) {
+            continue;
+        }
         out.push((pos, qa));
     }
     out

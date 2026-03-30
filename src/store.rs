@@ -31,11 +31,6 @@ impl TensorStore {
     pub fn get(&self, name: &str) -> Option<&TensorData> {
         self.buffers.get(name)
     }
-
-    /// Remove a tensor buffer, returning it if it existed.
-    pub fn remove(&mut self, name: &str) -> Option<TensorData> {
-        self.buffers.remove(name)
-    }
 }
 
 impl Default for TensorStore {

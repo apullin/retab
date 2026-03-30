@@ -700,12 +700,6 @@ fn finish_tosa_graph(
     builder.finished_data().to_vec()
 }
 
-pub fn serialize_to_tosa(graph: &Graph, store: &TensorStore) -> Vec<u8> {
-    let mut builder = FlatBufferBuilder::with_capacity(16 * 1024 * 1024); // 16MB initial
-    let region = build_fb_region(&mut builder, "main", graph, store);
-    finish_tosa_graph(&mut builder, &[region])
-}
-
 pub fn serialize_graphs_to_tosa(graphs: &[(String, Graph)], store: &TensorStore) -> Vec<u8> {
     let mut builder = FlatBufferBuilder::with_capacity(16 * 1024 * 1024); // 16MB initial
     let regions: Vec<_> = graphs

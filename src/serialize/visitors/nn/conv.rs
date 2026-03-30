@@ -1,6 +1,11 @@
 use super::*;
 
-pub(super) fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, crate::serialize::visitors::emitter::EmitFn>) {
+pub(super) fn register(
+    table: &mut std::collections::HashMap<
+        crate::graph::ir::OpTarget,
+        crate::serialize::visitors::emitter::EmitFn,
+    >,
+) {
     use crate::graph::ir::OpTarget;
     // TOSA-lowered conv ops
     table.insert(OpTarget::TosaConv2d, emit_conv2d);

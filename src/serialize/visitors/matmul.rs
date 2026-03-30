@@ -1,7 +1,9 @@
-use super::*;
 use super::emitter::EmitContext;
+use super::*;
 
-pub fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>) {
+pub fn register(
+    table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>,
+) {
     use crate::graph::ir::OpTarget;
     table.insert(OpTarget::TosaMatmul, emit_matmul);
     table.insert(OpTarget::Matmul, emit_matmul);

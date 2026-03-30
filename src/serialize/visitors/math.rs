@@ -1,14 +1,15 @@
-use super::*;
 use super::emitter::EmitContext;
+use super::*;
 
 mod derived;
 mod unary;
 
-pub fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>) {
+pub fn register(
+    table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>,
+) {
     unary::register(table);
     derived::register(table);
 }
-
 
 struct ParsedUnaryTensorSpec {
     input_name: String,

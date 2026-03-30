@@ -1,7 +1,9 @@
-use super::*;
 use super::emitter::EmitContext;
+use super::*;
 
-pub fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>) {
+pub fn register(
+    table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>,
+) {
     use crate::graph::ir::OpTarget;
     // TOSA-lowered arithmetic
     table.insert(OpTarget::TosaAdd, emit_add);
@@ -233,11 +235,23 @@ pub(super) fn emit_clamp(ctx: &EmitContext) -> EmitResult {
 }
 
 pub(super) fn emit_add(ctx: &EmitContext) -> EmitResult {
-    emit_direct_binary(ctx.graph, ctx.node, ctx.store, Op::Add, Attribute::Add(AddAttribute))
+    emit_direct_binary(
+        ctx.graph,
+        ctx.node,
+        ctx.store,
+        Op::Add,
+        Attribute::Add(AddAttribute),
+    )
 }
 
 pub(super) fn emit_sub(ctx: &EmitContext) -> EmitResult {
-    emit_direct_binary(ctx.graph, ctx.node, ctx.store, Op::Sub, Attribute::Sub(SubAttribute))
+    emit_direct_binary(
+        ctx.graph,
+        ctx.node,
+        ctx.store,
+        Op::Sub,
+        Attribute::Sub(SubAttribute),
+    )
 }
 
 pub(super) fn emit_mul(ctx: &EmitContext) -> EmitResult {

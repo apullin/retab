@@ -1,17 +1,18 @@
-use super::*;
 use super::emitter::EmitContext;
+use super::*;
 use crate::graph::ir::Arg;
 
 mod extrema;
 mod mean;
 mod sum_ops;
 
-pub fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>) {
+pub fn register(
+    table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>,
+) {
     extrema::register(table);
     mean::register(table);
     sum_ops::register(table);
 }
-
 
 #[derive(Debug, Clone, Copy)]
 struct ReduceAxis {

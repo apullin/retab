@@ -1,6 +1,11 @@
 use super::*;
 
-pub(super) fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, crate::serialize::visitors::emitter::EmitFn>) {
+pub(super) fn register(
+    table: &mut std::collections::HashMap<
+        crate::graph::ir::OpTarget,
+        crate::serialize::visitors::emitter::EmitFn,
+    >,
+) {
     use crate::graph::ir::OpTarget;
     // TOSA-lowered unary ops
     table.insert(OpTarget::TosaTable, emit_table);
@@ -29,7 +34,12 @@ pub(super) fn register(table: &mut std::collections::HashMap<crate::graph::ir::O
 }
 
 pub(in crate::serialize::visitors) fn emit_table(ctx: &EmitContext) -> EmitResult {
-    emit_direct_unary(ctx.graph, ctx.node, Op::Table, Attribute::Table(TableAttribute))
+    emit_direct_unary(
+        ctx.graph,
+        ctx.node,
+        Op::Table,
+        Attribute::Table(TableAttribute),
+    )
 }
 
 pub(in crate::serialize::visitors) fn emit_sigmoid(ctx: &EmitContext) -> EmitResult {
@@ -42,7 +52,12 @@ pub(in crate::serialize::visitors) fn emit_sigmoid(ctx: &EmitContext) -> EmitRes
 }
 
 pub(in crate::serialize::visitors) fn emit_tanh(ctx: &EmitContext) -> EmitResult {
-    emit_direct_unary(ctx.graph, ctx.node, Op::Tanh, Attribute::Tanh(TanhAttribute))
+    emit_direct_unary(
+        ctx.graph,
+        ctx.node,
+        Op::Tanh,
+        Attribute::Tanh(TanhAttribute),
+    )
 }
 
 pub(in crate::serialize::visitors) fn emit_exp(ctx: &EmitContext) -> EmitResult {
@@ -79,9 +94,19 @@ pub(in crate::serialize::visitors) fn emit_sin(ctx: &EmitContext) -> EmitResult 
 }
 
 pub(in crate::serialize::visitors) fn emit_rsqrt(ctx: &EmitContext) -> EmitResult {
-    emit_direct_unary(ctx.graph, ctx.node, Op::Rsqrt, Attribute::Rsqrt(RsqrtAttribute))
+    emit_direct_unary(
+        ctx.graph,
+        ctx.node,
+        Op::Rsqrt,
+        Attribute::Rsqrt(RsqrtAttribute),
+    )
 }
 
 pub(in crate::serialize::visitors) fn emit_cast(ctx: &EmitContext) -> EmitResult {
-    emit_direct_unary(ctx.graph, ctx.node, Op::Cast, Attribute::Cast(CastAttribute))
+    emit_direct_unary(
+        ctx.graph,
+        ctx.node,
+        Op::Cast,
+        Attribute::Cast(CastAttribute),
+    )
 }

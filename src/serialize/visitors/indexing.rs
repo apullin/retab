@@ -1,8 +1,10 @@
-use super::*;
 use super::emitter::EmitContext;
+use super::*;
 use crate::graph::ir::Arg;
 
-pub fn register(table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>) {
+pub fn register(
+    table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>,
+) {
     use crate::graph::ir::OpTarget;
     // TOSA-lowered ops
     table.insert(OpTarget::TosaSlice, emit_slice);
@@ -240,11 +242,9 @@ pub(super) fn emit_select_copy(ctx: &EmitContext) -> EmitResult {
         format!("{}_size", slice_name),
         size_vec.clone(),
     );
-    result.tensors.push(TosaTensor::new(
-        slice_name.clone(),
-        size_vec,
-        spec.dtype,
-    ));
+    result
+        .tensors
+        .push(TosaTensor::new(slice_name.clone(), size_vec, spec.dtype));
     result.operators.push(TosaOperator::new(
         Op::Slice,
         Attribute::Slice(SliceAttribute),

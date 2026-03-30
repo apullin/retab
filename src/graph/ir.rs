@@ -323,13 +323,6 @@ impl Arg {
             _ => None,
         }
     }
-
-    pub fn as_dtype(&self) -> Option<DType> {
-        match self {
-            Arg::Dtype(dtype) => Some(*dtype),
-            _ => None,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
