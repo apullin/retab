@@ -3,55 +3,13 @@ use pyo3::types::{PyList, PyTuple};
 
 use crate::fx_decompose_ops::{insert_call_before, propagate_qparams, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
-use crate::fx_pass::FxPass;
 
-pub struct FxDecomposeRepeatInterleavePass;
-
-fn is_repeat_interleave_self_int(target: &str) -> bool {
-    target.contains("repeat_interleave.self_int")
-}
-
-impl FxPass for FxDecomposeRepeatInterleavePass {
-    fn name(&self) -> &str {
-        "FxDecomposeRepeatInterleave"
-    }
-
-    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
-        let mut modified = false;
-
-        let all_nodes = gm.nodes()?;
-        let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
-
-        for node in &all_nodes {
-            let op = FxGraphModule::node_op(node)?;
-            if op != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-            if is_repeat_interleave_self_int(&target) {
-                candidates.push(node.clone());
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(false);
-        }
-
-        let graph = gm.gm_ref().getattr("graph")?;
-        for node in &candidates {
-            if decompose_repeat_interleave_self_int(py, &graph, gm, node, debug)? {
-                modified = true;
-            }
-        }
-
-        if modified {
-            gm.recompile()?;
-        }
-        Ok(modified)
-    }
-}
+crate::fx_pass!(
+    /// Decompose `repeat_interleave.self_int` into unsqueeze + repeat + view.
+    FxDecomposeRepeatInterleavePass, "FxDecomposeRepeatInterleave",
+    matches: |target| target.contains("repeat_interleave.self_int"),
+    transform: |py, graph, gm, node, debug| decompose_repeat_interleave_self_int(py, &graph, gm, node, debug).map(|_| ())
+);
 
 fn decompose_repeat_interleave_self_int<'py>(
     py: Python<'py>,

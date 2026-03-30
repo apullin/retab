@@ -18,6 +18,76 @@ pub trait FxPass {
     fn run(&self, gm: &FxGraphModule) -> PyResult<bool>;
 }
 
+/// Declare an FX pass that collects candidate nodes by target match,
+/// then transforms each one.
+///
+/// Eliminates ~15 lines of boilerplate per pass (struct, impl FxPass,
+/// candidate collection loop, recompile).
+///
+/// # Usage
+/// ```ignore
+/// fx_pass!(FxDecomposeAddmmPass, "FxDecomposeAddmm",
+///     matches: |target| target.contains("addmm"),
+///     transform: |py, graph, gm, node, debug| decompose_addmm(py, graph, gm, node, debug)
+/// );
+/// ```
+#[macro_export]
+macro_rules! fx_pass {
+    (
+        $(#[$meta:meta])*
+        $struct_name:ident, $name_str:expr,
+        matches: |$target:ident| $match_expr:expr,
+        transform: |$py:ident, $graph:ident, $gm:ident, $node:ident, $debug:ident| $transform_expr:expr
+    ) => {
+        $(#[$meta])*
+        pub struct $struct_name;
+
+        impl $crate::fx_pass::FxPass for $struct_name {
+            fn name(&self) -> &str {
+                $name_str
+            }
+
+            fn run(&self, gm: &$crate::fx_graph::FxGraphModule) -> pyo3::PyResult<bool> {
+                let $py = gm.py();
+                let $debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+                let mut modified = false;
+
+                let all_nodes = gm.nodes()?;
+                let mut candidates: Vec<pyo3::Bound<'_, pyo3::PyAny>> = Vec::new();
+
+                for node in &all_nodes {
+                    let op = $crate::fx_graph::FxGraphModule::node_op(node)?;
+                    if op != "call_function" {
+                        continue;
+                    }
+                    let $target = $crate::fx_graph::FxGraphModule::node_target_str(node)?;
+                    if $match_expr {
+                        candidates.push(node.clone());
+                    }
+                }
+
+                if candidates.is_empty() {
+                    return Ok(false);
+                }
+
+                let $graph = gm.gm_ref().getattr("graph")?;
+                let $gm = gm;
+
+                for $node in &candidates {
+                    let result: pyo3::PyResult<()> = (|| { $transform_expr })();
+                    result?;
+                    modified = true;
+                }
+
+                if modified {
+                    gm.recompile()?;
+                }
+                Ok(modified)
+            }
+        }
+    };
+}
+
 /// Run a sequence of `FxPass`es, logging progress to stderr.
 pub fn run_fx_passes(gm: &FxGraphModule, passes: &[&dyn FxPass]) -> PyResult<bool> {
     let profile_enabled = crate::fx_profile::enabled();

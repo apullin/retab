@@ -3,19 +3,18 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
-use crate::fx_pass::FxPass;
 
-/// FX-graph-direct decomposition of `aten.tril` into
-/// arange + view + add(diagonal) + ge + where / bitwise_and,
-/// mirroring the Python Arm pass.
-pub struct FxDecomposeTrilPass;
-
-fn is_tril(target: &str) -> bool {
-    target.contains("aten.tril")
+crate::fx_pass!(
+    /// FX-graph-direct decomposition of `aten.tril` into
+    /// arange + view + add(diagonal) + ge + where / bitwise_and,
+    /// mirroring the Python Arm pass.
+    FxDecomposeTrilPass, "FxDecomposeTril",
+    matches: |target| target.contains("aten.tril")
         || target.contains("aten_tril")
         || target.contains("aten.tril_copy")
-        || target.contains("aten_tril_copy")
-}
+        || target.contains("aten_tril_copy"),
+    transform: |py, graph, gm, node, debug| decompose_tril(py, &graph, gm, node, debug).map(|_| ())
+);
 
 fn copied_meta<'py>(
     py: Python<'py>,
@@ -110,47 +109,6 @@ fn zero_scalar_value_and_kwargs<'py>(
         .getattr("dtype")?;
     kwargs.set_item("dtype", input_dtype)?;
     Ok((builtins.call_method1("int", (0,))?, kwargs))
-}
-
-impl FxPass for FxDecomposeTrilPass {
-    fn name(&self) -> &str {
-        "FxDecomposeTril"
-    }
-
-    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
-        let mut modified = false;
-
-        let all_nodes = gm.nodes()?;
-        let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
-
-        for node in &all_nodes {
-            if FxGraphModule::node_op(node)? != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-            if is_tril(&target) {
-                candidates.push(node.clone());
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(false);
-        }
-
-        let graph = gm.gm_ref().getattr("graph")?;
-        for node in &candidates {
-            if decompose_tril(py, &graph, gm, node, debug)? {
-                modified = true;
-            }
-        }
-
-        if modified {
-            gm.recompile()?;
-        }
-        Ok(modified)
-    }
 }
 
 fn decompose_tril<'py>(

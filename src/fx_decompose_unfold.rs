@@ -3,15 +3,14 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
-use crate::fx_pass::FxPass;
 
-/// FX-graph-direct decomposition of `aten.unfold_copy` into
-/// `backend.tosa.GATHER` plus shape-only ops, mirroring the Python Arm pass.
-pub struct FxDecomposeUnfoldToGatherPass;
-
-fn is_unfold_copy(target: &str) -> bool {
-    target.contains("unfold_copy")
-}
+crate::fx_pass!(
+    /// FX-graph-direct decomposition of `aten.unfold_copy` into
+    /// `backend.tosa.GATHER` plus shape-only ops, mirroring the Python Arm pass.
+    FxDecomposeUnfoldToGatherPass, "FxDecomposeUnfoldToGather",
+    matches: |target| target.contains("unfold_copy"),
+    transform: |py, graph, gm, node, debug| decompose_unfold_copy(py, &graph, gm, node, debug).map(|_| ())
+);
 
 fn resolve_tosa_gather_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     py.eval_bound(
@@ -97,47 +96,6 @@ fn product(shape: &[i64]) -> i64 {
         1
     } else {
         shape.iter().copied().product()
-    }
-}
-
-impl FxPass for FxDecomposeUnfoldToGatherPass {
-    fn name(&self) -> &str {
-        "FxDecomposeUnfoldToGather"
-    }
-
-    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
-        let mut modified = false;
-
-        let all_nodes = gm.nodes()?;
-        let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
-
-        for node in &all_nodes {
-            if FxGraphModule::node_op(node)? != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-            if is_unfold_copy(&target) {
-                candidates.push(node.clone());
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(false);
-        }
-
-        let graph = gm.gm_ref().getattr("graph")?;
-        for node in &candidates {
-            if decompose_unfold_copy(py, &graph, gm, node, debug)? {
-                modified = true;
-            }
-        }
-
-        if modified {
-            gm.recompile()?;
-        }
-        Ok(modified)
     }
 }
 

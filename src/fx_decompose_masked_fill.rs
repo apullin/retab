@@ -3,63 +3,20 @@ use pyo3::types::{PyDict, PyTuple};
 
 use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
-use crate::fx_pass::FxPass;
 
-/// Late-stage decomposition of `masked_fill` into `where(mask, full(value), x)`.
-///
-/// Runs AFTER `FxFoldAndAnnotateQParamsPass` so that:
-///   - The `masked_fill` node already has `input_qparams` / `output_qparams`.
-///   - The fill value scalar can be quantized to match the tensor data type.
-///   - The created `full` constant is quantized at the same scale/zp as `x`.
-///
-/// For non-quantized (FP) graphs, the pass simply produces float `full` + `where`.
-pub struct FxDecomposeMaskedFillPass;
-
-fn is_masked_fill(target: &str) -> bool {
-    target.contains("masked_fill")
-}
-
-impl FxPass for FxDecomposeMaskedFillPass {
-    fn name(&self) -> &str {
-        "FxDecomposeMaskedFill"
-    }
-
-    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
-        let mut modified = false;
-
-        let all_nodes = gm.nodes()?;
-        let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
-
-        for node in &all_nodes {
-            let op = FxGraphModule::node_op(node)?;
-            if op != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-            if is_masked_fill(&target) {
-                candidates.push(node.clone());
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(false);
-        }
-
-        let graph = gm.gm_ref().getattr("graph")?;
-
-        for node in &candidates {
-            decompose_masked_fill(py, &graph, gm, node, debug)?;
-            modified = true;
-        }
-
-        if modified {
-            gm.recompile()?;
-        }
-        Ok(modified)
-    }
-}
+crate::fx_pass!(
+    /// Late-stage decomposition of `masked_fill` into `where(mask, full(value), x)`.
+    ///
+    /// Runs AFTER `FxFoldAndAnnotateQParamsPass` so that:
+    ///   - The `masked_fill` node already has `input_qparams` / `output_qparams`.
+    ///   - The fill value scalar can be quantized to match the tensor data type.
+    ///   - The created `full` constant is quantized at the same scale/zp as `x`.
+    ///
+    /// For non-quantized (FP) graphs, the pass simply produces float `full` + `where`.
+    FxDecomposeMaskedFillPass, "FxDecomposeMaskedFill",
+    matches: |target| target.contains("masked_fill"),
+    transform: |py, graph, gm, node, debug| decompose_masked_fill(py, &graph, gm, node, debug)
+);
 
 fn decompose_masked_fill<'py>(
     py: Python<'py>,

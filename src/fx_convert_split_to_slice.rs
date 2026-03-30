@@ -3,61 +3,29 @@ use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
-use crate::fx_pass::FxPass;
 
-/// FX-graph-direct conversion of split_with_sizes_copy/split_copy to
-/// multiple slice_copy ops.  Mirrors Python `ConvertSplitToSlicePass`.
-///
-/// split(tensor, sizes, dim) → [slice(tensor, dim, start, end) for each chunk]
-/// Each getitem user of the split is replaced with its corresponding slice.
-pub struct FxConvertSplitToSlicePass;
+crate::fx_pass!(
+    /// FX-graph-direct conversion of split_with_sizes_copy/split_copy to
+    /// multiple slice_copy ops.  Mirrors Python `ConvertSplitToSlicePass`.
+    ///
+    /// split(tensor, sizes, dim) -> [slice(tensor, dim, start, end) for each chunk]
+    /// Each getitem user of the split is replaced with its corresponding slice.
+    FxConvertSplitToSlicePass, "FxConvertSplitToSlice",
+    matches: |target| target.contains("split_with_sizes_copy") || target.contains("split_copy"),
+    transform: |py, graph, gm, node, debug| convert_split_wrapper(py, &graph, gm, node, debug)
+);
 
-fn is_split(target: &str) -> bool {
-    target.contains("split_with_sizes_copy") || target.contains("split_copy")
-}
-
-impl FxPass for FxConvertSplitToSlicePass {
-    fn name(&self) -> &str {
-        "FxConvertSplitToSlice"
-    }
-
-    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
-        let mut modified = false;
-
-        let all_nodes = gm.nodes()?;
-        let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
-
-        for node in &all_nodes {
-            let op = FxGraphModule::node_op(node)?;
-            if op != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-            if is_split(&target) {
-                candidates.push(node.clone());
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(false);
-        }
-
-        let graph = gm.gm_ref().getattr("graph")?;
-        let slice_op = resolve_aten_op(py, "slice_copy.Tensor")?;
-
-        for split_node in &candidates {
-            convert_split(py, &graph, gm, split_node, &slice_op, debug)?;
-            modified = true;
-        }
-
-        if modified {
-            graph.call_method0("eliminate_dead_code")?;
-            gm.recompile()?;
-        }
-        Ok(modified)
-    }
+fn convert_split_wrapper<'py>(
+    py: Python<'py>,
+    graph: &Bound<'py, PyAny>,
+    gm: &FxGraphModule<'py>,
+    node: &Bound<'py, PyAny>,
+    debug: bool,
+) -> PyResult<()> {
+    let slice_op = resolve_aten_op(py, "slice_copy.Tensor")?;
+    convert_split(py, graph, gm, node, &slice_op, debug)?;
+    graph.call_method0("eliminate_dead_code")?;
+    Ok(())
 }
 
 fn convert_split<'py>(

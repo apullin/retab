@@ -3,15 +3,14 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
-use crate::fx_pass::FxPass;
 
-/// FX-graph-direct decomposition of `aten.select_scatter` into
-/// arange + view + eq + unsqueeze + expand + where, mirroring the Python pass.
-pub struct FxDecomposeSelectScatterPass;
-
-fn is_select_scatter(target: &str) -> bool {
-    target.contains("select_scatter.default")
-}
+crate::fx_pass!(
+    /// FX-graph-direct decomposition of `aten.select_scatter` into
+    /// arange + view + eq + unsqueeze + expand + where, mirroring the Python pass.
+    FxDecomposeSelectScatterPass, "FxDecomposeSelectScatter",
+    matches: |target| target.contains("select_scatter.default"),
+    transform: |py, graph, gm, node, debug| decompose_select_scatter(py, &graph, gm, node, debug).map(|_| ())
+);
 
 fn copied_meta<'py>(
     py: Python<'py>,
@@ -65,47 +64,6 @@ fn copy_qparams_only(src_meta: &Bound<'_, PyAny>, dst_meta: &Bound<'_, PyAny>) -
         }
     }
     Ok(())
-}
-
-impl FxPass for FxDecomposeSelectScatterPass {
-    fn name(&self) -> &str {
-        "FxDecomposeSelectScatter"
-    }
-
-    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
-        let mut modified = false;
-
-        let all_nodes = gm.nodes()?;
-        let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
-
-        for node in &all_nodes {
-            if FxGraphModule::node_op(node)? != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-            if is_select_scatter(&target) {
-                candidates.push(node.clone());
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(false);
-        }
-
-        let graph = gm.gm_ref().getattr("graph")?;
-        for node in &candidates {
-            if decompose_select_scatter(py, &graph, gm, node, debug)? {
-                modified = true;
-            }
-        }
-
-        if modified {
-            gm.recompile()?;
-        }
-        Ok(modified)
-    }
 }
 
 fn decompose_select_scatter<'py>(

@@ -3,15 +3,14 @@ use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::{insert_call_before, propagate_qparams, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
-use crate::fx_pass::FxPass;
 
-/// FX-graph-direct decomposition of `aten.index.Tensor` into
-/// `backend.tosa.GATHER` plus basic arith.
-pub struct FxDecomposeIndexTensorPass;
-
-fn is_index_tensor(target: &str) -> bool {
-    target.contains("aten.index.Tensor")
-}
+crate::fx_pass!(
+    /// FX-graph-direct decomposition of `aten.index.Tensor` into
+    /// `backend.tosa.GATHER` plus basic arith.
+    FxDecomposeIndexTensorPass, "FxDecomposeIndexTensor",
+    matches: |target| target.contains("aten.index.Tensor"),
+    transform: |py, graph, gm, node, _debug| decompose_single_index_tensor(py, &graph, gm, node).map(|_| ())
+);
 
 fn resolve_tosa_gather_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     py.eval_bound(
@@ -118,45 +117,6 @@ fn insert_full_before<'py>(
     let _ = fx_helpers.call_method1("refresh_node_fake_tensor", (&new_node,));
     inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
     Ok(new_node)
-}
-
-impl FxPass for FxDecomposeIndexTensorPass {
-    fn name(&self) -> &str {
-        "FxDecomposeIndexTensor"
-    }
-
-    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let mut modified = false;
-        let all_nodes = gm.nodes()?;
-        let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
-
-        for node in &all_nodes {
-            if FxGraphModule::node_op(node)? != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-            if is_index_tensor(&target) {
-                candidates.push(node.clone());
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(false);
-        }
-
-        let graph = gm.gm_ref().getattr("graph")?;
-        for node in &candidates {
-            if decompose_single_index_tensor(py, &graph, gm, node)? {
-                modified = true;
-            }
-        }
-
-        if modified {
-            gm.recompile()?;
-        }
-        Ok(modified)
-    }
 }
 
 fn decompose_single_index_tensor<'py>(

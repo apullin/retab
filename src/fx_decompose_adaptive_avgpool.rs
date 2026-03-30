@@ -3,20 +3,19 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
-use crate::fx_pass::FxPass;
 
-/// FX-graph-direct decomposition of adaptive_avg_pool2d → avg_pool2d.
-///
-/// For the common case where input_h % output_h == 0 and input_w % output_w == 0,
-/// this is a single avg_pool2d with kernel = (input/output, input/output).
-///
-/// For the general case, mirrors Python DecomposeAdaptiveAvgPool2dPass:
-/// slice into pooling regions, avg_pool2d each, concatenate.
-pub struct FxDecomposeAdaptiveAvgPoolPass;
-
-fn is_adaptive_avgpool(target: &str) -> bool {
-    target.contains("adaptive_avg_pool2d")
-}
+crate::fx_pass!(
+    /// FX-graph-direct decomposition of adaptive_avg_pool2d -> avg_pool2d.
+    ///
+    /// For the common case where input_h % output_h == 0 and input_w % output_w == 0,
+    /// this is a single avg_pool2d with kernel = (input/output, input/output).
+    ///
+    /// For the general case, mirrors Python DecomposeAdaptiveAvgPool2dPass:
+    /// slice into pooling regions, avg_pool2d each, concatenate.
+    FxDecomposeAdaptiveAvgPoolPass, "FxDecomposeAdaptiveAvgPool",
+    matches: |target| target.contains("adaptive_avg_pool2d"),
+    transform: |py, graph, gm, node, debug| decompose_adaptive(py, &graph, gm, node, debug)
+);
 
 fn refresh_fake_tensor(py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<()> {
     let helpers = py.import_bound("fx_helpers")?;
@@ -71,48 +70,6 @@ fn cat_fake_tensor<'py>(
     torch.call_method1("cat", (fake_inputs.as_ref(), dim))
 }
 
-impl FxPass for FxDecomposeAdaptiveAvgPoolPass {
-    fn name(&self) -> &str {
-        "FxDecomposeAdaptiveAvgPool"
-    }
-
-    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
-        let mut modified = false;
-
-        let all_nodes = gm.nodes()?;
-        let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
-
-        for node in &all_nodes {
-            let op = FxGraphModule::node_op(node)?;
-            if op != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-            if is_adaptive_avgpool(&target) {
-                candidates.push(node.clone());
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(false);
-        }
-
-        let graph = gm.gm_ref().getattr("graph")?;
-
-        for node in &candidates {
-            decompose_adaptive(py, &graph, gm, node, debug)?;
-            modified = true;
-        }
-
-        if modified {
-            gm.recompile()?;
-        }
-        Ok(modified)
-    }
-}
-
 fn decompose_adaptive<'py>(
     py: Python<'py>,
     graph: &Bound<'py, PyAny>,
@@ -156,8 +113,8 @@ fn decompose_adaptive<'py>(
     let cat_op = resolve_aten_op(py, "cat.default")?;
 
     // Match the Python Arm pass literally: always slice pooling regions,
-    // apply avg_pool2d with stride 1, then concatenate. The old “single pool
-    // on divisible shapes” shortcut leaks oversized stride values and diverges
+    // apply avg_pool2d with stride 1, then concatenate. The old "single pool
+    // on divisible shapes" shortcut leaks oversized stride values and diverges
     // from the backend path we are trying to reproduce.
     let inserting = graph.call_method1("inserting_before", (node,))?;
     inserting.call_method0("__enter__")?;
