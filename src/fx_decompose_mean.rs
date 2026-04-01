@@ -3,20 +3,19 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
-use crate::fx_pass::FxPass;
 use crate::fx_utils;
 
-/// FX-graph-direct decomposition of `aten.mean.dim` into
-/// `sum(keepdim=True) + mul(1/count) + view_copy(output_shape)`.
-///
-/// Always uses keepdim=True for the sum to keep tensors at input rank,
-/// then reshapes to the target output shape.  For 4D inputs with spatial
-/// dim reductions, uses avg_pool2d (matching Python DecomposeMeanDimPass).
-pub struct FxDecomposeMeanPass;
-
-fn is_mean_dim(target: &str) -> bool {
-    target.contains("mean.dim") || target.contains("mean.default")
-}
+crate::fx_pass!(
+    /// FX-graph-direct decomposition of `aten.mean.dim` into
+    /// `sum(keepdim=True) + mul(1/count) + view_copy(output_shape)`.
+    ///
+    /// Always uses keepdim=True for the sum to keep tensors at input rank,
+    /// then reshapes to the target output shape.  For 4D inputs with spatial
+    /// dim reductions, uses avg_pool2d (matching Python DecomposeMeanDimPass).
+    FxDecomposeMeanPass, "FxDecomposeMean",
+    matches: |target| target.contains("mean.dim") || target.contains("mean.default"),
+    transform: |py, graph, gm, node, debug| decompose_mean(py, &graph, gm, node, debug)
+);
 
 fn get_qparam_field<'py, T: for<'a> FromPyObject<'a>>(
     qparam: &Bound<'py, PyAny>,
@@ -242,48 +241,6 @@ fn annotate_quantized_mean<'py>(
     )?;
     set_qparam_map(py, &mul_meta, "output_qparams", &[(0, output_qp)])?;
     Ok(())
-}
-
-impl FxPass for FxDecomposeMeanPass {
-    fn name(&self) -> &str {
-        "FxDecomposeMean"
-    }
-
-    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let debug = FxGraphModule::debug();
-        let mut modified = false;
-
-        let all_nodes = gm.nodes()?;
-        let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
-
-        for node in &all_nodes {
-            let op = FxGraphModule::node_op(node)?;
-            if op != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-            if is_mean_dim(&target) {
-                candidates.push(node.clone());
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(false);
-        }
-
-        let graph = gm.gm_ref().getattr("graph")?;
-
-        for node in &candidates {
-            decompose_mean(py, &graph, gm, node, debug)?;
-            modified = true;
-        }
-
-        if modified {
-            gm.recompile()?;
-        }
-        Ok(modified)
-    }
 }
 
 fn decompose_mean<'py>(

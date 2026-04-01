@@ -3,17 +3,16 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
-use crate::fx_pass::FxPass;
 use crate::fx_utils;
 
-/// FX-graph-direct decomposition of dilated max_pool2d into a space-to-batch
-/// envelope around a non-dilated max_pool2d. This mirrors the Python Arm pass
-/// closely enough that the serializer only needs to handle the ordinary pool.
-pub struct FxDecomposeMaxPoolDilationPass;
-
-fn is_max_pool2d(target: &str) -> bool {
-    target.contains("max_pool2d") && !target.contains("with_indices")
-}
+crate::fx_pass!(
+    /// FX-graph-direct decomposition of dilated max_pool2d into a space-to-batch
+    /// envelope around a non-dilated max_pool2d. This mirrors the Python Arm pass
+    /// closely enough that the serializer only needs to handle the ordinary pool.
+    FxDecomposeMaxPoolDilationPass, "FxDecomposeMaxPoolDilation",
+    matches: |target| target.contains("max_pool2d") && !target.contains("with_indices"),
+    transform: |py, graph, gm, node, debug| decompose_max_pool_dilation(py, &graph, gm, node)
+);
 
 fn copied_meta<'py>(
     py: Python<'py>,
@@ -113,59 +112,20 @@ fn pad_value_for_input<'py>(
     }
 }
 
-impl FxPass for FxDecomposeMaxPoolDilationPass {
-    fn name(&self) -> &str {
-        "FxDecomposeMaxPoolDilation"
-    }
-
-    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let mut modified = false;
-        let all_nodes = gm.nodes()?;
-        let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
-
-        for node in &all_nodes {
-            if FxGraphModule::node_op(node)? != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-            if is_max_pool2d(&target) {
-                candidates.push(node.clone());
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(false);
-        }
-
-        let graph = gm.gm_ref().getattr("graph")?;
-        for node in &candidates {
-            if decompose_max_pool_dilation(py, &graph, gm, node)? {
-                modified = true;
-            }
-        }
-
-        if modified {
-            gm.recompile()?;
-        }
-        Ok(modified)
-    }
-}
-
 fn decompose_max_pool_dilation<'py>(
     py: Python<'py>,
     graph: &Bound<'py, PyAny>,
     gm: &FxGraphModule<'py>,
     node: &Bound<'py, PyAny>,
-) -> PyResult<bool> {
+) -> PyResult<()> {
     let args = FxGraphModule::node_args(node)?;
     let Some(x) = args.first() else {
-        return Ok(false);
+        return Ok(());
     };
 
     let input_shape = FxGraphModule::node_shape(x)?;
     if input_shape.len() < 4 {
-        return Ok(false);
+        return Ok(());
     }
     let [n, c, h, w]: [i64; 4] = [
         input_shape[0],
@@ -181,7 +141,7 @@ fn decompose_max_pool_dilation<'py>(
     let ceil_mode = bool_arg(args.get(5), false)?;
 
     if d_h == 1 && d_w == 1 {
-        return Ok(false);
+        return Ok(());
     }
 
     let (h_pack, bottom_padding, h_final) = pack_dimension(d_h, pad_h, h, k_h, s_h);
@@ -245,7 +205,7 @@ fn decompose_max_pool_dilation<'py>(
     let pooled_shape = FxGraphModule::node_shape(&pooled)?;
     if pooled_shape.len() < 4 {
         inserting.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
-        return Ok(false);
+        return Ok(());
     }
     let c_out = pooled_shape[1];
     let h_out = pooled_shape[2];
@@ -295,5 +255,5 @@ fn decompose_max_pool_dilation<'py>(
 
     FxGraphModule::replace_all_uses_with(node, &out_hw)?;
     gm.erase_node(node)?;
-    Ok(true)
+    Ok(())
 }
