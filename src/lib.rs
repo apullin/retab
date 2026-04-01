@@ -187,6 +187,32 @@ fn run_fx_passes(
     run_full_fx_pipeline(graph_module, clone_bound_pyobject(exported_program))
 }
 
+/// Run a safe subset of FX passes on a control-flow submodule graph.
+///
+/// This runs only TABLE lowering and layout annotation -- the minimal set
+/// validated for branch-local graphs.  Call this on each submodule returned
+/// by `get_cond_while_submodules_nested` after the main `run_fx_passes`.
+#[pyfunction]
+#[pyo3(signature = (graph_module))]
+fn run_fx_submodule_passes(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let gm = fx_graph::FxGraphModule::new(graph_module);
+    let pipeline = fx_pipeline::build_fx_submodule_pipeline();
+    fx_pass::run_boxed_fx_passes(&gm, &pipeline)
+}
+
+/// Extended submodule passes for cond branches (includes fold_qdq).
+#[pyfunction]
+#[pyo3(signature = (graph_module, exported_program=None))]
+fn run_fx_cond_passes(
+    graph_module: &Bound<'_, PyAny>,
+    exported_program: Option<&Bound<'_, PyAny>>,
+) -> PyResult<bool> {
+    let ep = exported_program.map(|e| e.clone().unbind());
+    let gm = fx_graph::FxGraphModule::new(graph_module);
+    let pipeline = fx_pipeline::build_fx_cond_submodule_pipeline(ep);
+    fx_pass::run_boxed_fx_passes(&gm, &pipeline)
+}
+
 /// Hybrid pipeline: FX-direct passes (correct graph mutations via Python FX)
 /// followed by Rust ingestion + TOSA serialization (fast).
 ///
@@ -244,6 +270,8 @@ fn arm_tosa_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fold_qdq_fx, m)?)?;
     m.add_function(wrap_pyfunction!(insert_rescale_fx, m)?)?;
     m.add_function(wrap_pyfunction!(run_fx_passes, m)?)?;
+    m.add_function(wrap_pyfunction!(run_fx_submodule_passes, m)?)?;
+    m.add_function(wrap_pyfunction!(run_fx_cond_passes, m)?)?;
     m.add_function(wrap_pyfunction!(fx_graph_summary, m)?)?;
     Ok(())
 }

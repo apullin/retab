@@ -545,6 +545,15 @@ impl FxPass for FxToTosaMemoryFormatPass {
             }
 
             let meta = node.getattr("meta")?;
+            // Skip control-flow submodule placeholders — they receive data
+            // already in NHWC layout from the parent graph.
+            let is_cf_placeholder: bool = meta
+                .call_method1("get", ("arm_control_flow_placeholder",))
+                .and_then(|v| v.extract())
+                .unwrap_or(false);
+            if is_cf_placeholder {
+                continue;
+            }
             let is_layout_neutral: bool = meta
                 .call_method1("get", ("arm_layout_neutral", false))?
                 .extract()

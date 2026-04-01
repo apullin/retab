@@ -231,3 +231,28 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         ),
     ]
 }
+
+/// Build a minimal FX pipeline for control-flow submodule graphs.
+///
+/// This is the safe subset -- just TABLE lowering and layout annotation.
+/// We'll expand it later as more passes are validated on branch graphs.
+pub fn build_fx_submodule_pipeline() -> Vec<Box<dyn FxPass>> {
+    vec![
+        Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
+        Box::new(fx_insert_rescale::FxInsertRescalePass),
+        Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
+    ]
+}
+
+/// Extended submodule pipeline for cond branches (not while loops).
+/// Includes fold_qdq which is safe for cond but breaks while-loop carried state.
+pub fn build_fx_cond_submodule_pipeline(
+    exported_program: Option<pyo3::PyObject>,
+) -> Vec<Box<dyn FxPass>> {
+    vec![
+        Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(exported_program)),
+        Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
+        Box::new(fx_insert_rescale::FxInsertRescalePass),
+        Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
+    ]
+}

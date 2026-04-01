@@ -17,10 +17,11 @@ By replacing _preprocess, we only swap the TOSA generation step. Vela
 compilation still happens normally downstream.
 """
 
+import dataclasses
 import logging
 import os
 import time
-from typing import List, cast
+from typing import Any, List, cast
 
 from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
 from executorch.exir.backend.backend_details import PreprocessResult
@@ -97,6 +98,68 @@ def _actual_shape_from_meta(node) -> list[int] | None:
     ):
         return [shape[idx] for idx in dim_order]
     return shape
+
+
+@dataclasses.dataclass
+class CfSubmoduleCtx:
+    """Pre-computed context for a control-flow submodule."""
+    submodule: Any  # GraphModule
+    cf_node: Any    # the cond/while_loop Node in parent graph
+    graph: Any      # submodule.graph
+
+    # Pre-computed structural facts
+    placeholders: list  # placeholder nodes in order
+    output_node: Any    # the single output node
+    is_cond: bool
+    is_while: bool
+
+    @classmethod
+    def from_submodule(cls, submodule, cf_node):
+        graph = submodule.graph
+        placeholders = [n for n in graph.nodes if n.op == "placeholder"]
+        output_nodes = [n for n in graph.nodes if n.op == "output"]
+        output_node = output_nodes[0] if output_nodes else None
+        cf_target = str(getattr(cf_node, "target", "")) if cf_node else ""
+        return cls(
+            submodule=submodule,
+            cf_node=cf_node,
+            graph=graph,
+            placeholders=placeholders,
+            output_node=output_node,
+            is_cond="cond" in cf_target,
+            is_while="while" in cf_target,
+        )
+
+    def call_function_nodes(self):
+        """All call_function nodes."""
+        return [n for n in self.graph.nodes if n.op == "call_function"]
+
+    def recompile(self):
+        self.submodule.recompile()
+
+
+def _for_each_cf_submodule(graph_module, visitor, *, include_parent=False):
+    """Iterate control-flow submodules, calling visitor(ctx: CfSubmoduleCtx) on each.
+
+    If visitor modifies the graph, it should return True. Recompile happens
+    automatically after each modified submodule.
+    """
+    from executorch.backends.arm._passes.arm_pass_utils import (
+        get_cond_while_submodules_nested,
+    )
+    modules = []
+    if include_parent:
+        modules.append((graph_module, None))
+    modules.extend(
+        (sm, cf) for _, sm, cf in get_cond_while_submodules_nested(graph_module)
+    )
+    modified = False
+    for submodule, cf_node in modules:
+        ctx = CfSubmoduleCtx.from_submodule(submodule, cf_node)
+        if visitor(ctx):
+            ctx.recompile()
+            modified = True
+    return modified
 
 
 def _refresh_tosa_dim_order_fake_tensors(graph_module) -> None:
@@ -1258,9 +1321,6 @@ def _reapply_control_flow_table_ops(graph_module, exported_program) -> None:
 
 
 def _snapshot_control_flow_table_qparams(graph_module) -> None:
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
     from executorch.backends.arm._passes.insert_table_ops import (
         TableOps,
     )
@@ -1269,8 +1329,9 @@ def _snapshot_control_flow_table_qparams(graph_module) -> None:
     table_targets = list(TableOps.included_ops())
     snapshotted = 0
 
-    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
-        for node in submodule.graph.nodes:
+    def _visit(ctx):
+        nonlocal snapshotted
+        for node in ctx.graph.nodes:
             if node.op != "call_function" or node.target not in table_targets:
                 continue
 
@@ -1297,6 +1358,9 @@ def _snapshot_control_flow_table_qparams(graph_module) -> None:
             if output_qparam is not None:
                 node.meta["arm_saved_table_output_qparam"] = output_qparam
                 snapshotted += 1
+        return False  # metadata-only, no graph structure changes
+
+    _for_each_cf_submodule(graph_module, _visit)
 
     if snapshotted:
         logger.info(
@@ -2374,20 +2438,24 @@ def _canonicalize_control_flow_pool_binary_rescales(graph_module) -> None:
         )
 
 
-def _restore_control_flow_pool_quant_boundaries(graph_module) -> None:
-    import torch
+def _restore_control_flow_quant_boundaries(graph_module, *, mode: str) -> None:
+    """Restore quantization boundary rescales for pool or unary ops inside control-flow.
 
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
+    *mode* selects which op types to match:
+      - ``"pool"``: AVG_POOL2D / avg_pool2d, with downstream view-like refresh
+      - ``"unary"``: relu / clamp
+    """
+    import torch
 
     import fx_helpers
 
-    def _is_avg_pool_node(node) -> bool:
+    def _is_target_op(node) -> bool:
         if getattr(node, "op", None) != "call_function":
             return False
         target_str = str(getattr(node, "target", ""))
-        return "AVG_POOL2D" in target_str or "avg_pool2d" in target_str
+        if mode == "pool":
+            return "AVG_POOL2D" in target_str or "avg_pool2d" in target_str
+        return "aten.relu.default" in target_str or "aten.clamp.default" in target_str
 
     def _is_view_like(node) -> bool:
         if getattr(node, "op", None) != "call_function":
@@ -2396,18 +2464,18 @@ def _restore_control_flow_pool_quant_boundaries(graph_module) -> None:
         return "view_copy" in target_str or "RESHAPE" in target_str
 
     restored = 0
-    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+
+    def _visit(ctx):
+        nonlocal restored
         modified = False
-        for placeholder in list(submodule.graph.nodes):
-            if placeholder.op != "placeholder":
-                continue
+        for placeholder in list(ctx.placeholders):
 
             input_qparam = _extract_single_qparam_entry(placeholder.meta.get("input_qparams"))
             if getattr(input_qparam, "dtype", None) not in (torch.int8, torch.int16):
                 continue
 
-            for avg_pool in list(getattr(placeholder, "users", ())):
-                if not _is_avg_pool_node(avg_pool):
+            for target_node in list(getattr(placeholder, "users", ())):
+                if not _is_target_op(target_node):
                     continue
 
                 existing_boundary = None
@@ -2418,14 +2486,14 @@ def _restore_control_flow_pool_quant_boundaries(graph_module) -> None:
                         "arm_preserve_control_flow_quant_boundary", False
                     ):
                         continue
-                    if avg_pool in getattr(user, "users", ()):
+                    if target_node in getattr(user, "users", ()):
                         existing_boundary = user
                         break
 
                 quant_boundary = existing_boundary
                 if quant_boundary is None:
                     quant_boundary = fx_helpers.insert_rescale_node(
-                        submodule,
+                        ctx.submodule,
                         placeholder,
                         placeholder,
                         input_qparam.dtype,
@@ -2440,130 +2508,59 @@ def _restore_control_flow_pool_quant_boundaries(graph_module) -> None:
                     restored += 1
                     modified = True
                     logger.info(
-                        "[fast_preprocess] restored control-flow pool quant boundary %s -> %s",
+                        "[fast_preprocess] restored control-flow %s quant boundary %s -> %s",
+                        mode,
                         getattr(placeholder, "name", "?"),
                         getattr(quant_boundary, "name", "?"),
                     )
 
-                avg_pool.replace_input_with(placeholder, quant_boundary)
-                avg_pool.meta["input_qparams"] = {0: input_qparam}
-                avg_pool.meta["output_qparams"] = {0: input_qparam}
-                fx_helpers.refresh_node_fake_tensor(avg_pool)
+                target_node.replace_input_with(placeholder, quant_boundary)
+                target_node.meta["input_qparams"] = {0: input_qparam}
+                target_node.meta["output_qparams"] = {0: input_qparam}
+                fx_helpers.refresh_node_fake_tensor(target_node)
 
-                avg_pool_users = [
-                    user for user in list(getattr(avg_pool, "users", ())) if hasattr(user, "op")
-                ]
-                if not avg_pool_users or not all(_is_view_like(user) for user in avg_pool_users):
-                    continue
-
-                for view_user in avg_pool_users:
-                    view_user.meta["input_qparams"] = {0: input_qparam}
-                    view_user.meta["output_qparams"] = {0: input_qparam}
-                    fx_helpers.refresh_node_fake_tensor(view_user)
-
-                modified = True
-                logger.info(
-                    "[fast_preprocess] refreshed control-flow pool/view quant metadata for %s",
-                    getattr(avg_pool, "name", "?"),
-                )
+                if mode == "pool":
+                    target_users = [
+                        user for user in list(getattr(target_node, "users", ())) if hasattr(user, "op")
+                    ]
+                    if target_users and all(_is_view_like(user) for user in target_users):
+                        for view_user in target_users:
+                            view_user.meta["input_qparams"] = {0: input_qparam}
+                            view_user.meta["output_qparams"] = {0: input_qparam}
+                            fx_helpers.refresh_node_fake_tensor(view_user)
+                        modified = True
+                        logger.info(
+                            "[fast_preprocess] refreshed control-flow pool/view quant metadata for %s",
+                            getattr(target_node, "name", "?"),
+                        )
+                else:
+                    modified = True
+                    logger.info(
+                        "[fast_preprocess] refreshed control-flow unary quant metadata for %s",
+                        getattr(target_node, "name", "?"),
+                    )
 
         if modified:
-            submodule.graph.eliminate_dead_code()
-            submodule.graph.lint()
-            submodule.recompile()
+            ctx.graph.eliminate_dead_code()
+            ctx.graph.lint()
+        return modified
+
+    _for_each_cf_submodule(graph_module, _visit)
 
     if restored:
         logger.info(
-            "[fast_preprocess] restored %d control-flow pool quant boundary rescale(s)",
+            "[fast_preprocess] restored %d control-flow %s quant boundary rescale(s)",
             restored,
+            mode,
         )
+
+
+def _restore_control_flow_pool_quant_boundaries(graph_module) -> None:
+    _restore_control_flow_quant_boundaries(graph_module, mode="pool")
 
 
 def _restore_control_flow_unary_quant_boundaries(graph_module) -> None:
-    import torch
-
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
-
-    import fx_helpers
-
-    def _is_relu_like(node) -> bool:
-        if getattr(node, "op", None) != "call_function":
-            return False
-        target_str = str(getattr(node, "target", ""))
-        return "aten.relu.default" in target_str or "aten.clamp.default" in target_str
-
-    restored = 0
-    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
-        modified = False
-        for placeholder in list(submodule.graph.nodes):
-            if placeholder.op != "placeholder":
-                continue
-
-            input_qparam = _extract_single_qparam_entry(placeholder.meta.get("input_qparams"))
-            if getattr(input_qparam, "dtype", None) not in (torch.int8, torch.int16):
-                continue
-
-            for unary_node in list(getattr(placeholder, "users", ())):
-                if not _is_relu_like(unary_node):
-                    continue
-
-                existing_boundary = None
-                for user in list(getattr(placeholder, "users", ())):
-                    if not _is_tosa_rescale_node(user):
-                        continue
-                    if not getattr(user, "meta", {}).get(
-                        "arm_preserve_control_flow_quant_boundary", False
-                    ):
-                        continue
-                    if unary_node in getattr(user, "users", ()):
-                        existing_boundary = user
-                        break
-
-                quant_boundary = existing_boundary
-                if quant_boundary is None:
-                    quant_boundary = fx_helpers.insert_rescale_node(
-                        submodule,
-                        placeholder,
-                        placeholder,
-                        input_qparam.dtype,
-                        [1.0],
-                        input_qparam.get_zp_per_tensor(),
-                        input_qparam.get_zp_per_tensor(),
-                        after=True,
-                    )
-                    quant_boundary.meta["input_qparams"] = {0: input_qparam}
-                    quant_boundary.meta["output_qparams"] = {0: input_qparam}
-                    quant_boundary.meta["arm_preserve_control_flow_quant_boundary"] = True
-                    restored += 1
-                    modified = True
-                    logger.info(
-                        "[fast_preprocess] restored control-flow unary quant boundary %s -> %s",
-                        getattr(placeholder, "name", "?"),
-                        getattr(quant_boundary, "name", "?"),
-                    )
-
-                unary_node.replace_input_with(placeholder, quant_boundary)
-                unary_node.meta["input_qparams"] = {0: input_qparam}
-                unary_node.meta["output_qparams"] = {0: input_qparam}
-                fx_helpers.refresh_node_fake_tensor(unary_node)
-                modified = True
-                logger.info(
-                    "[fast_preprocess] refreshed control-flow unary quant metadata for %s",
-                    getattr(unary_node, "name", "?"),
-                )
-
-        if modified:
-            submodule.graph.eliminate_dead_code()
-            submodule.graph.lint()
-            submodule.recompile()
-
-    if restored:
-        logger.info(
-            "[fast_preprocess] restored %d control-flow unary quant boundary rescale(s)",
-            restored,
-        )
+    _restore_control_flow_quant_boundaries(graph_module, mode="unary")
 
 
 def _refresh_control_flow_binary_input_rescales(graph_module) -> None:
@@ -3752,10 +3749,6 @@ def _prune_duplicate_control_flow_rescales(graph_module) -> None:
     import math
     import torch
 
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
-
     def _canonicalize_rescale_arg(arg):
         if isinstance(arg, float):
             return round(arg, 12)
@@ -3806,9 +3799,11 @@ def _prune_duplicate_control_flow_rescales(graph_module) -> None:
         return True
 
     pruned = 0
-    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+
+    def _visit(ctx):
+        nonlocal pruned
         updated = False
-        for node in list(submodule.graph.nodes):
+        for node in list(ctx.graph.nodes):
             if not _is_tosa_rescale_node(node):
                 continue
             if not getattr(node, "args", None) or not hasattr(node.args[0], "op"):
@@ -3822,7 +3817,7 @@ def _prune_duplicate_control_flow_rescales(graph_module) -> None:
                     source.meta["output_qparams"] = dict(node.meta["output_qparams"])
 
                 node.replace_all_uses_with(source)
-                submodule.graph.erase_node(node)
+                ctx.graph.erase_node(node)
                 pruned += 1
                 updated = True
                 logger.info(
@@ -3843,7 +3838,7 @@ def _prune_duplicate_control_flow_rescales(graph_module) -> None:
                 source.meta["output_qparams"] = dict(node.meta["output_qparams"])
 
             node.replace_all_uses_with(source)
-            submodule.graph.erase_node(node)
+            ctx.graph.erase_node(node)
             pruned += 1
             updated = True
             logger.info(
@@ -3853,9 +3848,11 @@ def _prune_duplicate_control_flow_rescales(graph_module) -> None:
             )
 
         if updated:
-            submodule.graph.eliminate_dead_code()
-            submodule.graph.lint()
-            submodule.recompile()
+            ctx.graph.eliminate_dead_code()
+            ctx.graph.lint()
+        return updated
+
+    _for_each_cf_submodule(graph_module, _visit)
 
     if pruned:
         logger.info(
@@ -3903,10 +3900,6 @@ def _infer_control_flow_output_qparams_map(control_flow_node):
 
 def _quantize_constant_only_control_flow_outputs(graph_module) -> None:
     import torch
-
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
 
     def _quantize_tensor(value: torch.Tensor, qparam) -> torch.Tensor | None:
         if qparam.per_channel:
@@ -3960,16 +3953,20 @@ def _quantize_constant_only_control_flow_outputs(graph_module) -> None:
         return torch.full(shape, fill_scalar, dtype=torch.float32)
 
     rewritten = 0
-    for _, submodule, control_flow_node in get_cond_while_submodules_nested(graph_module):
-        placeholders = [node for node in submodule.graph.nodes if node.op == "placeholder"]
-        if placeholders:
-            continue
 
-        output_qparams_map = _infer_control_flow_output_qparams_map(control_flow_node)
+    def _visit(ctx):
+        nonlocal rewritten
+        if ctx.placeholders:
+            return False
+
+        if ctx.cf_node is None:
+            return False
+
+        output_qparams_map = _infer_control_flow_output_qparams_map(ctx.cf_node)
         if not output_qparams_map:
-            continue
+            return False
 
-        output_node = submodule.graph.output_node()
+        output_node = ctx.output_node
         output_arg0 = output_node.args[0]
         wrapped_single = hasattr(output_arg0, "op")
         output_args = [output_arg0] if wrapped_single else list(output_arg0)
@@ -3988,7 +3985,7 @@ def _quantize_constant_only_control_flow_outputs(graph_module) -> None:
             ):
                 source = output_arg.args[0]
 
-            constant_value = _constant_tensor_from_node(submodule, source)
+            constant_value = _constant_tensor_from_node(ctx.submodule, source)
             if constant_value is None:
                 continue
 
@@ -4000,18 +3997,18 @@ def _quantize_constant_only_control_flow_outputs(graph_module) -> None:
             if getattr(source, "op", None) != "get_attr":
                 const_name = f"_arm_cf_const_output_{idx}"
                 suffix = idx
-                while hasattr(submodule, const_name):
+                while hasattr(ctx.submodule, const_name):
                     suffix += 1
                     const_name = f"_arm_cf_const_output_{suffix}"
-                submodule.register_buffer(const_name, quantized_value)
-                with submodule.graph.inserting_before(output_node):
-                    const_node = submodule.graph.get_attr(const_name)
+                ctx.submodule.register_buffer(const_name, quantized_value)
+                with ctx.graph.inserting_before(output_node):
+                    const_node = ctx.graph.get_attr(const_name)
                 const_node.meta["val"] = quantized_value
                 if source.meta.get("tosa_dim_order") is not None:
                     const_node.meta["tosa_dim_order"] = tuple(source.meta["tosa_dim_order"])
                 source = const_node
             else:
-                submodule.register_buffer(const_name, quantized_value)
+                ctx.submodule.register_buffer(const_name, quantized_value)
                 source.meta["val"] = quantized_value
 
             source.meta["input_qparams"] = {0: qparam}
@@ -4033,9 +4030,11 @@ def _quantize_constant_only_control_flow_outputs(graph_module) -> None:
                 for idx, qparam in output_qparams_map.items()
                 if idx < len(output_args)
             }
-            submodule.graph.eliminate_dead_code()
-            submodule.graph.lint()
-            submodule.recompile()
+            ctx.graph.eliminate_dead_code()
+            ctx.graph.lint()
+        return updated
+
+    _for_each_cf_submodule(graph_module, _visit)
 
     if rewritten:
         logger.info(
@@ -4044,147 +4043,7 @@ def _quantize_constant_only_control_flow_outputs(graph_module) -> None:
         )
 
 
-def _fold_zero_input_full_in_control_flow_submodules(graph_module) -> None:
-    import torch
-
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
-
-    def _build_full_const(node) -> torch.Tensor | None:
-        if "aten.full.default" not in str(getattr(node, "target", "")):
-            return None
-        args = tuple(getattr(node, "args", ()))
-        if len(args) < 2:
-            return None
-        shape_arg, fill_value = args[0], args[1]
-        if not isinstance(shape_arg, (list, tuple)):
-            return None
-        try:
-            shape = tuple(int(dim) for dim in shape_arg)
-            fill_scalar = float(fill_value)
-        except (TypeError, ValueError):
-            return None
-
-        fake_val = getattr(node, "meta", {}).get("val")
-        dtype = getattr(fake_val, "dtype", torch.float32)
-        return torch.full(shape, fill_scalar, dtype=dtype)
-
-    def _infer_control_flow_full_qparam(node):
-        # Parse, don't validate: scalar FULL nodes inside cond branches usually
-        # participate in a binary op with the captured branch tensor. When the
-        # FULL node lost its own qparam annotation during earlier rewrites,
-        # recover the branch-local quantized contract from nearby quantized
-        # structure instead of freezing an FP32 const and hoping later
-        # serializer logic repairs it.
-        for user in list(getattr(node, "users", ())):
-            qparam = _extract_effective_node_qparam(user)
-            if qparam is not None and not getattr(qparam, "per_channel", False):
-                return qparam
-
-            if getattr(user, "op", None) != "call_function":
-                continue
-            target_str = str(getattr(user, "target", ""))
-            if "aten.add.Tensor" not in target_str and "aten.sub.Tensor" not in target_str:
-                continue
-            for arg in user.args[:2]:
-                if arg is node or not hasattr(arg, "op"):
-                    continue
-                qparam = _extract_effective_node_qparam(arg)
-                if qparam is not None and not getattr(qparam, "per_channel", False):
-                    return qparam
-        return None
-
-    def _feeds_binary_downstream(node) -> bool:
-        stack = list(getattr(node, "users", ()))
-        seen = set()
-        while stack:
-            user = stack.pop()
-            if id(user) in seen:
-                continue
-            seen.add(id(user))
-            target_str = str(getattr(user, "target", ""))
-            if "aten.add.Tensor" in target_str or "aten.sub.Tensor" in target_str:
-                return True
-            if (
-                _is_quantize_node(user)
-                or _is_dequantize_node(user)
-                or _is_tosa_rescale_node(user)
-            ):
-                stack.extend(list(getattr(user, "users", ())))
-        return False
-
-    rewritten = 0
-    for _, submodule, control_flow_node in get_cond_while_submodules_nested(graph_module):
-        placeholders = [n for n in submodule.graph.nodes if n.op == "placeholder"]
-        output_qparams_map = _infer_control_flow_output_qparams_map(control_flow_node)
-        output_node = submodule.graph.output_node()
-        output_arg0 = output_node.args[0]
-        wrapped_single = hasattr(output_arg0, "op")
-        output_args = [output_arg0] if wrapped_single else list(output_arg0)
-        updated = False
-        for node in list(submodule.graph.nodes):
-            if getattr(node, "op", None) != "call_function":
-                continue
-            if list(getattr(node, "all_input_nodes", ())):
-                continue
-
-            const_value = _build_full_const(node)
-            if const_value is None:
-                continue
-            if _feeds_binary_downstream(node):
-                continue
-
-            output_qparams = None
-            if not placeholders and output_qparams_map:
-                for idx, output_arg in enumerate(output_args):
-                    if output_arg is node:
-                        output_qparams = output_qparams_map.get(idx)
-                        break
-            if output_qparams is None:
-                output_qparams = _extract_single_qparam_entry(node.meta.get("output_qparams"))
-            if output_qparams is None:
-                output_qparams = _infer_control_flow_full_qparam(node)
-            if output_qparams is not None and not getattr(output_qparams, "per_channel", False):
-                const_value = output_qparams.quantize_value(const_value)
-
-            const_name = f"{getattr(node, 'name', 'full')}_fused_const"
-            suffix = 0
-            while hasattr(submodule, const_name):
-                suffix += 1
-                const_name = f"{getattr(node, 'name', 'full')}_fused_const_{suffix}"
-
-            submodule.register_buffer(const_name, const_value)
-            with submodule.graph.inserting_before(node):
-                const_node = submodule.graph.get_attr(const_name)
-
-            const_node.meta = node.meta.copy()
-            const_node.meta["val"] = const_value
-            if output_qparams is not None:
-                const_node.meta["input_qparams"] = {0: output_qparams}
-                const_node.meta["output_qparams"] = {0: output_qparams}
-            node.replace_all_uses_with(const_node)
-            submodule.graph.erase_node(node)
-            updated = True
-            rewritten += 1
-
-        if updated:
-            submodule.graph.eliminate_dead_code()
-            submodule.graph.lint()
-            submodule.recompile()
-
-    if rewritten:
-        logger.info(
-            "[fast_preprocess] folded %d zero-input FULL node(s) inside control-flow submodules",
-            rewritten,
-        )
-
-
 def _remove_control_flow_noop_passthroughs(graph_module) -> None:
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
-
     def _is_noop_passthrough(node) -> bool:
         if getattr(node, "op", None) != "call_function":
             return False
@@ -4200,9 +4059,11 @@ def _remove_control_flow_noop_passthroughs(graph_module) -> None:
         )
 
     rewritten = 0
-    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+
+    def _visit(ctx):
+        nonlocal rewritten
         updated = False
-        for node in list(submodule.graph.nodes):
+        for node in list(ctx.graph.nodes):
             if not _is_noop_passthrough(node):
                 continue
             if not getattr(node, "args", None) or not hasattr(node.args[0], "op"):
@@ -4246,14 +4107,16 @@ def _remove_control_flow_noop_passthroughs(graph_module) -> None:
                 source.meta["output_qparams"] = dict(node.meta["output_qparams"])
 
             node.replace_all_uses_with(source)
-            submodule.graph.erase_node(node)
+            ctx.graph.erase_node(node)
             rewritten += 1
             updated = True
 
         if updated:
-            submodule.graph.eliminate_dead_code()
-            submodule.graph.lint()
-            submodule.recompile()
+            ctx.graph.eliminate_dead_code()
+            ctx.graph.lint()
+        return updated
+
+    _for_each_cf_submodule(graph_module, _visit)
 
     if rewritten:
         logger.info(
@@ -4267,7 +4130,6 @@ def _restore_control_flow_float_compare_inputs(graph_module) -> None:
 
     from executorch.backends.arm._passes.arm_pass_utils import (
         create_node,
-        get_cond_while_submodules_nested,
     )
     from executorch.exir.dialects._ops import ops as exir_ops
 
@@ -4290,9 +4152,11 @@ def _restore_control_flow_float_compare_inputs(graph_module) -> None:
         return dtype in (torch.float16, torch.float32, torch.float64)
 
     restored = 0
-    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+
+    def _visit(ctx):
+        nonlocal restored
         updated = False
-        for node in list(submodule.graph.nodes):
+        for node in list(ctx.graph.nodes):
             if not _is_compare_node(node):
                 continue
             args = list(getattr(node, "args", ()))
@@ -4320,9 +4184,9 @@ def _restore_control_flow_float_compare_inputs(graph_module) -> None:
                 if qparam is None or qparam.per_channel:
                     continue
 
-                with submodule.graph.inserting_before(node):
+                with ctx.graph.inserting_before(node):
                     dq = create_node(
-                        graph=submodule.graph,
+                        graph=ctx.graph,
                         op_target=exir_ops.edge.quantized_decomposed.dequantize_per_tensor.default,
                         args=(
                             arg,
@@ -4344,22 +4208,17 @@ def _restore_control_flow_float_compare_inputs(graph_module) -> None:
                 break
 
         if updated:
-            submodule.graph.eliminate_dead_code()
-            submodule.graph.lint()
-            submodule.recompile()
+            ctx.graph.eliminate_dead_code()
+            ctx.graph.lint()
+        return updated
+
+    _for_each_cf_submodule(graph_module, _visit)
 
     if restored:
         logger.info(
             "[fast_preprocess] restored %d control-flow float-compare dequantize input(s)",
             restored,
         )
-
-
-def _is_dim_order_copy_node(node) -> bool:
-    return (
-        getattr(node, "op", None) == "call_function"
-        and "_to_dim_order_copy" in str(getattr(node, "target", ""))
-    )
 
 
 def _is_layout_output_node(node) -> bool:
@@ -4604,110 +4463,6 @@ def _debug_binary_rescales(graph_module, stage: str) -> None:
                         _is_tosa_rescale_node(user),
                         _extract_effective_node_qparam(user),
                     )
-
-
-def _refresh_binary_input_rescales(graph_module) -> None:
-    import torch
-
-    refreshed = 0
-    modified = False
-
-    for node in list(graph_module.graph.nodes):
-        if getattr(node, "op", None) != "call_function":
-            continue
-        target_str = str(getattr(node, "target", ""))
-        if "aten.add.Tensor" not in target_str and "aten.sub.Tensor" not in target_str:
-            continue
-
-        desired_input_qparams = getattr(node, "meta", {}).get("input_qparams") or {}
-        for idx, arg in enumerate(node.args[:2]):
-            if not _is_tosa_rescale_node(arg):
-                continue
-            if len(getattr(arg, "args", ())) < 5 or arg.args[1] != torch.int32:
-                continue
-            source_node = arg.args[0]
-            if not hasattr(source_node, "op"):
-                continue
-
-            desired_output_qparam = _extract_single_qparam_entry(
-                {0: desired_input_qparams.get(idx)}
-            )
-            if getattr(desired_output_qparam, "dtype", None) != torch.int32:
-                continue
-
-            source_qparam = None
-            source_fake_val = getattr(source_node, "meta", {}).get("val")
-            if getattr(source_fake_val, "dtype", None) == torch.int32:
-                preferred = _preferred_quantized_rescale_user(source_node)
-                if preferred is not None:
-                    source_node, source_qparam = preferred
-                else:
-                    source_qparam = _extract_accumulator_rescale_qparam(source_node)
-
-            if source_qparam is None:
-                source_qparam = _extract_effective_node_qparam(source_node)
-            if getattr(source_qparam, "dtype", None) not in (
-                torch.int8,
-                torch.int16,
-                torch.int32,
-            ):
-                continue
-
-            desired_scale = desired_output_qparam.get_scale_per_tensor()
-            if getattr(source_qparam, "per_channel", False):
-                new_scales = [
-                    scale / desired_scale
-                    for scale in source_qparam.get_scale_per_channel()
-                ]
-                new_input_zp = 0
-            else:
-                new_scales = [
-                    source_qparam.get_scale_per_tensor() / desired_scale
-                ]
-                new_input_zp = (
-                    0
-                    if getattr(source_qparam, "dtype", None) == torch.int32
-                    else source_qparam.get_zp_per_tensor()
-                )
-            new_output_zp = desired_output_qparam.get_zp_per_tensor()
-
-            current_scales = list(arg.args[2]) if len(arg.args) > 2 else []
-            current_input_zp = arg.args[3] if len(arg.args) > 3 else None
-            current_output_zp = arg.args[4] if len(arg.args) > 4 else None
-            if (
-                arg.args[0] is source_node
-                and current_scales == new_scales
-                and current_input_zp == new_input_zp
-                and current_output_zp == new_output_zp
-            ):
-                continue
-
-            arg.update_arg(0, source_node)
-            arg.update_arg(2, new_scales)
-            arg.update_arg(3, new_input_zp)
-            arg.update_arg(4, new_output_zp)
-            arg.meta["input_qparams"] = {0: source_qparam}
-            arg.meta["output_qparams"] = {0: desired_output_qparam}
-            refreshed += 1
-            modified = True
-            logger.info(
-                "[fast_preprocess] refreshed binary input rescale %s arg%d via %s -> %s",
-                getattr(node, "name", "?"),
-                idx,
-                getattr(source_node, "name", "?"),
-                desired_output_qparam,
-            )
-
-    if modified:
-        graph_module.graph.eliminate_dead_code()
-        graph_module.graph.lint()
-        graph_module.recompile()
-
-    if refreshed:
-        logger.info(
-            "[fast_preprocess] refreshed %d top-level binary input rescale(s)",
-            refreshed,
-        )
 
 
 def _is_dequantize_node(node) -> bool:
@@ -5141,16 +4896,12 @@ def _normalize_control_flow_output_layouts(graph_module) -> None:
 
 
 def _restamp_control_flow_placeholder_dtypes(graph_module) -> None:
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
-
     restamped = 0
-    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+
+    def _visit(ctx):
+        nonlocal restamped
         updated = False
-        for node in submodule.graph.nodes:
-            if getattr(node, "op", None) != "placeholder":
-                continue
+        for node in ctx.placeholders:
             if any(_is_quantize_node(user) for user in list(getattr(node, "users", ()))):
                 continue
             qparam = _extract_single_qparam_entry(node.meta.get("input_qparams"))
@@ -5167,8 +4918,10 @@ def _restamp_control_flow_placeholder_dtypes(graph_module) -> None:
             updated = True
             restamped += 1
         if updated:
-            submodule.graph.lint()
-            submodule.recompile()
+            ctx.graph.lint()
+        return updated
+
+    _for_each_cf_submodule(graph_module, _visit)
 
     if restamped:
         logger.info(
@@ -5180,9 +4933,6 @@ def _restamp_control_flow_placeholder_dtypes(graph_module) -> None:
 def _restore_control_flow_output_dequantizes(graph_module) -> None:
     import torch
 
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
     from executorch.backends.arm._passes.insert_rescales_pass import (
         InsertControlFlowRescalesPass,
     )
@@ -5221,33 +4971,38 @@ def _restore_control_flow_output_dequantizes(graph_module) -> None:
     rescale_pass = InsertControlFlowRescalesPass()
     restored = 0
     seen_while_submodules = {}
-    for _, submodule, control_flow_node in get_cond_while_submodules_nested(graph_module):
-        if control_flow_node.target == torch.ops.higher_order.while_loop:
-            while_key = id(control_flow_node)
+
+    def _visit(ctx):
+        nonlocal restored
+        if ctx.cf_node is not None and ctx.is_while:
+            while_key = id(ctx.cf_node)
             while_idx = seen_while_submodules.get(while_key, 0)
             seen_while_submodules[while_key] = while_idx + 1
             if while_idx == 1:
-                continue
-        output_qparams_map = submodule.graph.output_node().meta.get(
+                return False
+        output_qparams_map = ctx.output_node.meta.get(
             "arm_control_flow_output_dequant_qparams", {}
         )
         if not output_qparams_map:
-            continue
+            return False
         output_qparams_map = {
             idx: qparam
             for idx, qparam in output_qparams_map.items()
-            if not _current_output_already_quantized(submodule, idx)
+            if not _current_output_already_quantized(ctx.submodule, idx)
         }
         if not output_qparams_map:
-            continue
-        _refresh_submodule_output_input_qparams(submodule)
-        if not _has_submodule_output_input_qparams(submodule):
-            continue
-        if rescale_pass._rescale_submodule_outputs(submodule, output_qparams_map):
+            return False
+        _refresh_submodule_output_input_qparams(ctx.submodule)
+        if not _has_submodule_output_input_qparams(ctx.submodule):
+            return False
+        if rescale_pass._rescale_submodule_outputs(ctx.submodule, output_qparams_map):
             restored += len(output_qparams_map)
-            submodule.graph.eliminate_dead_code()
-            submodule.graph.lint()
-            submodule.recompile()
+            ctx.graph.eliminate_dead_code()
+            ctx.graph.lint()
+            return True
+        return False
+
+    _for_each_cf_submodule(graph_module, _visit)
 
     if restored:
         logger.info(
@@ -5257,14 +5012,13 @@ def _restore_control_flow_output_dequantizes(graph_module) -> None:
 
 
 def _force_control_flow_rank4_output_dim_order(graph_module) -> None:
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
-
     desired_dim_order = (0, 2, 3, 1)
     forced = 0
-    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
-        output_node = submodule.graph.output_node()
+
+    def _visit(ctx):
+        nonlocal forced
+        modified = False
+        output_node = ctx.output_node
         outputs = output_node.args[0]
         output_args = [outputs] if hasattr(outputs, "op") else list(outputs)
         for output_arg in output_args:
@@ -5276,13 +5030,15 @@ def _force_control_flow_rank4_output_dim_order(graph_module) -> None:
                 continue
             output_arg.meta["tosa_dim_order"] = desired_dim_order
             forced += 1
+            modified = True
             print(
                 "[fast_preprocess] forced control-flow output dim_order",
                 getattr(output_arg, "name", "?"),
                 output_arg.meta["tosa_dim_order"],
             )
-        if forced:
-            submodule.recompile()
+        return modified
+
+    _for_each_cf_submodule(graph_module, _visit)
 
     if forced:
         logger.info(
@@ -5292,15 +5048,13 @@ def _force_control_flow_rank4_output_dim_order(graph_module) -> None:
 
 
 def _annotate_control_flow_rank4_dim_order(graph_module) -> None:
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
-
     desired_dim_order = (0, 2, 3, 1)
     annotated = 0
-    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
-        submodule_modified = False
-        for node in submodule.graph.nodes:
+
+    def _visit(ctx):
+        nonlocal annotated
+        modified = False
+        for node in ctx.graph.nodes:
             if node.op != "call_function":
                 continue
             if node.meta.get("tosa_dim_order") is not None:
@@ -5310,9 +5064,10 @@ def _annotate_control_flow_rank4_dim_order(graph_module) -> None:
                 continue
             node.meta["tosa_dim_order"] = desired_dim_order
             annotated += 1
-            submodule_modified = True
-        if submodule_modified:
-            submodule.recompile()
+            modified = True
+        return modified
+
+    _for_each_cf_submodule(graph_module, _visit)
 
     if annotated:
         logger.info(
@@ -5322,14 +5077,12 @@ def _annotate_control_flow_rank4_dim_order(graph_module) -> None:
 
 
 def _annotate_control_flow_parent_rank4_dim_order(graph_module) -> None:
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
-
     desired_dim_order = (0, 2, 3, 1)
     annotated = 0
-    for _, _, control_flow_node in get_cond_while_submodules_nested(graph_module):
-        for user in _ordered_control_flow_users(control_flow_node):
+
+    def _visit(ctx):
+        nonlocal annotated
+        for user in _ordered_control_flow_users(ctx.cf_node):
             fake_val = user.meta.get("val")
             if not hasattr(fake_val, "dim") or fake_val.dim() != 4:
                 continue
@@ -5345,6 +5098,9 @@ def _annotate_control_flow_parent_rank4_dim_order(graph_module) -> None:
                 user.meta["tosa_dim_order"],
             )
             annotated += 1
+        return False  # operates on parent graph nodes, not submodule graph
+
+    _for_each_cf_submodule(graph_module, _visit)
 
     if annotated:
         logger.info(
@@ -5364,18 +5120,14 @@ def _same_control_flow_qparam(lhs, rhs) -> bool:
 
 
 def _restore_missing_control_flow_input_rescales(graph_module) -> None:
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
-
     import fx_helpers
 
     restored = 0
-    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+
+    def _visit(ctx):
+        nonlocal restored
         submodule_modified = False
-        for placeholder in list(submodule.graph.nodes):
-            if placeholder.op != "placeholder":
-                continue
+        for placeholder in list(ctx.placeholders):
 
             input_qparam = _extract_single_qparam_entry(placeholder.meta.get("input_qparams"))
             output_qparam = _branch_local_control_flow_output_qparam(placeholder)
@@ -5440,7 +5192,7 @@ def _restore_missing_control_flow_input_rescales(graph_module) -> None:
                     output_qparam,
                 )
             rescale = fx_helpers.insert_rescale_node(
-                submodule,
+                ctx.submodule,
                 placeholder,
                 placeholder,
                 output_qparam.dtype,
@@ -5464,9 +5216,11 @@ def _restore_missing_control_flow_input_rescales(graph_module) -> None:
             submodule_modified = True
 
         if submodule_modified:
-            submodule.graph.eliminate_dead_code()
-            submodule.graph.lint()
-            submodule.recompile()
+            ctx.graph.eliminate_dead_code()
+            ctx.graph.lint()
+        return submodule_modified
+
+    _for_each_cf_submodule(graph_module, _visit)
 
     if restored:
         logger.info(
@@ -5966,102 +5720,17 @@ def _rewrite_control_flow_dequantize_nodes(graph_module) -> None:
         )
 
 
-def _normalize_control_flow_input_layouts(graph_module) -> None:
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
-
-    rewritten = 0
-    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
-        updated = False
-        for node in list(submodule.graph.nodes):
-            if node.op != "placeholder":
-                continue
-
-            anchor = node
-            users = list(anchor.users)
-            while len(users) == 1:
-                next_user = users[0]
-                if _is_layout_output_node(next_user):
-                    break
-                if not _is_control_flow_input_passthrough_node(next_user):
-                    next_user = None
-                    break
-                anchor = next_user
-                users = list(anchor.users)
-
-            if len(users) != 1:
-                continue
-            layout_user = users[0]
-            if not _is_layout_output_node(layout_user):
-                continue
-
-            logger.info(
-                "[fast_preprocess] control-flow input candidate placeholder=%s anchor=%s user=%s target=%s",
-                getattr(node, "name", "?"),
-                getattr(anchor, "name", "?"),
-                getattr(layout_user, "name", "?"),
-                getattr(layout_user, "target", "?"),
-            )
-            _log_node_chain(layout_user)
-
-            # Parse, don't validate: the submodule input boundary is the
-            # placeholder itself, not any interior dequant/rescale helper that
-            # happened to survive the FX-direct pass stack. Collapse the full
-            # placeholder -> passthrough* -> layout chain back to the
-            # placeholder so all cond branches expose the same TOSA-visible
-            # input signature.
-            replacement = node
-            replacement.meta["val"] = layout_user.meta.get(
-                "val", anchor.meta.get("val", replacement.meta.get("val"))
-            )
-            if layout_user.meta.get("tosa_dim_order") is not None:
-                replacement.meta["tosa_dim_order"] = tuple(layout_user.meta["tosa_dim_order"])
-            if (
-                replacement.meta.get("input_qparams") is None
-                and anchor.meta.get("input_qparams") is not None
-            ):
-                replacement.meta["input_qparams"] = dict(anchor.meta["input_qparams"])
-            branch_output_qparam = _branch_local_control_flow_output_qparam(
-                replacement
-            )
-            if branch_output_qparam is not None:
-                replacement.meta["output_qparams"] = {0: branch_output_qparam}
-            elif (
-                replacement.meta.get("output_qparams") is None
-                and anchor.meta.get("output_qparams") is not None
-            ):
-                replacement.meta["output_qparams"] = dict(anchor.meta["output_qparams"])
-            layout_user.replace_all_uses_with(replacement)
-            if len(layout_user.users) == 0:
-                submodule.graph.erase_node(layout_user)
-            rewritten += 1
-            updated = True
-
-        if updated:
-            submodule.graph.eliminate_dead_code()
-            submodule.graph.lint()
-            submodule.recompile()
-
-    if rewritten:
-        logger.info(
-            "[fast_preprocess] rewrote %d control-flow input layout node(s)",
-            rewritten,
-        )
-
-
 def _restore_missing_control_flow_rescale_qparams(graph_module) -> None:
     import torch
 
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
     from executorch.backends.arm._passes.quant_args import QuantArgs
 
     restored = 0
-    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
-        submodule_modified = False
-        for node in submodule.graph.nodes:
+
+    def _visit(ctx):
+        nonlocal restored
+        modified = False
+        for node in ctx.graph.nodes:
             if not _is_tosa_rescale_node(node):
                 continue
             if len(getattr(node, "args", ())) < 5:
@@ -6104,10 +5773,10 @@ def _restore_missing_control_flow_rescale_qparams(graph_module) -> None:
             if not node.meta.get("output_qparams"):
                 node.meta["output_qparams"] = {0: output_qparam}
             restored += 1
-            submodule_modified = True
+            modified = True
+        return modified
 
-        if submodule_modified:
-            submodule.recompile()
+    _for_each_cf_submodule(graph_module, _visit)
 
     if restored:
         logger.info(
@@ -6119,15 +5788,6 @@ def _restore_missing_control_flow_rescale_qparams(graph_module) -> None:
 def _prune_duplicate_terminal_rescales(graph_module) -> None:
     import math
     import torch
-
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
-
-    def _modules():
-        yield graph_module
-        for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
-            yield submodule
 
     def _single_qparam_entry(qparams):
         if not qparams:
@@ -6161,9 +5821,11 @@ def _prune_duplicate_terminal_rescales(graph_module) -> None:
         )
 
     pruned = 0
-    for module in _modules():
+
+    def _visit(ctx):
+        nonlocal pruned
         modified = False
-        for node in list(module.graph.nodes):
+        for node in list(ctx.graph.nodes):
             if not _is_tosa_rescale_node(node):
                 continue
             if len(getattr(node, "users", ())) != 1:
@@ -6213,14 +5875,16 @@ def _prune_duplicate_terminal_rescales(graph_module) -> None:
                 node.meta["tosa_dim_order"] = tuple(user.meta["tosa_dim_order"])
 
             user.replace_all_uses_with(node)
-            module.graph.erase_node(user)
+            ctx.graph.erase_node(user)
             pruned += 1
             modified = True
 
         if modified:
-            module.graph.eliminate_dead_code()
-            module.graph.lint()
-            module.recompile()
+            ctx.graph.eliminate_dead_code()
+            ctx.graph.lint()
+        return modified
+
+    _for_each_cf_submodule(graph_module, _visit, include_parent=True)
 
     if pruned:
         logger.info(
@@ -6232,10 +5896,6 @@ def _prune_duplicate_terminal_rescales(graph_module) -> None:
 def _dump_control_flow_submodules(graph_module, label: str) -> None:
     if not _control_flow_debug_enabled():
         return
-
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
 
     def _node_line(node) -> str:
         meta = getattr(node, "meta", {})
@@ -6250,12 +5910,13 @@ def _dump_control_flow_submodules(graph_module, label: str) -> None:
             f"saved_qout={meta.get('arm_control_flow_saved_output_qparams')}"
         )
 
-    for name, submodule, _ in get_cond_while_submodules_nested(graph_module):
+    def _visit(ctx):
+        name = getattr(ctx.cf_node, "name", "<unknown>")
         try:
-            readable = submodule.print_readable(print_output=False)
+            readable = ctx.submodule.print_readable(print_output=False)
         except TypeError:
-            readable = submodule.print_readable()
-        node_dump = "\n".join(_node_line(node) for node in submodule.graph.nodes)
+            readable = ctx.submodule.print_readable()
+        node_dump = "\n".join(_node_line(node) for node in ctx.graph.nodes)
         print(
             f"[fast_preprocess] control-flow submodule dump ({label}:{name})\n{readable}\n[node-meta]\n{node_dump}"
         )
@@ -6266,6 +5927,9 @@ def _dump_control_flow_submodules(graph_module, label: str) -> None:
             readable,
             node_dump,
         )
+        return False
+
+    _for_each_cf_submodule(graph_module, _visit)
 
 
 _ORIGINAL_GEN_EDGE_MANAGER_FOR_PARTITIONERS = None
@@ -6709,6 +6373,7 @@ def _all_rust_preprocess(
     # recursive FX-direct pass stack strips that local qparam context away,
     # then keep the later repair pass as a safety net for any surviving raw
     # table-capable ops.
+    # TESTING: Rust submodule pass handles this
     _reapply_control_flow_table_ops(gm, edge_program)
 
     # Collapse decomposed banker's-rounding into a TABLE before Rust passes.
@@ -6720,8 +6385,6 @@ def _all_rust_preprocess(
     # Run the full FX-direct pipeline (all passes in Rust via PyO3)
     arm_tosa_engine.run_fx_passes(gm, edge_program)
     _debug_binary_rescales(gm, "after_run_fx_passes")
-    _refresh_binary_input_rescales(gm)
-    _debug_binary_rescales(gm, "after_refresh_binary_input_rescales")
     # The top-level graph still needs the full FX-direct pass stack, but
     # recursively replaying that whole stack on control-flow submodules has
     # proven too aggressive: it decomposes branch-local q/dq boundaries into
@@ -6738,13 +6401,20 @@ def _all_rust_preprocess(
                 "[fast_preprocess] ran recursive fx pass pipeline on control-flow submodule %s",
                 name,
             )
+    # Run safe pass subset on control-flow submodules.
+    # Cond branches get fold_qdq (safe); while loops don't (breaks carried state).
+    for name, submodule, cf_node in get_cond_while_submodules_nested(gm):
+        cf_target = str(getattr(cf_node, "target", ""))
+        if "cond" in cf_target:
+            arm_tosa_engine.run_fx_cond_passes(submodule, edge_program)
+        else:
+            arm_tosa_engine.run_fx_submodule_passes(submodule)
+
     _reapply_control_flow_table_ops(gm, edge_program)
     _rewrite_control_flow_quantize_nodes(gm)
     _rewrite_control_flow_dequantize_nodes(gm)
     _canonicalize_control_flow_pool_binary_rescales(gm)
     _reapply_control_flow_boundary_rescales(gm, include_inputs=True, include_outputs=False)
-    _rewrite_control_flow_quantize_nodes(gm)
-    _rewrite_control_flow_dequantize_nodes(gm)
     _prune_duplicate_control_flow_rescales(gm)
     _repair_control_flow_binary_rescales(gm, _compile_spec.tosa_spec)
     _restore_control_flow_output_dequantizes(gm)
@@ -6754,11 +6424,11 @@ def _all_rust_preprocess(
     # Re-apply the same normalization after passes so serializer ingest sees
     # branch signatures that still match the parent control-flow nodes.
     _regularize_control_flow_submodules(gm)
-    _normalize_control_flow_input_layouts(gm)
     _restore_missing_control_flow_input_rescales(gm)
     _restore_control_flow_unary_quant_boundaries(gm)
     _restore_control_flow_pool_quant_boundaries(gm)
     _refresh_control_flow_binary_input_rescales(gm)
+    # Covered by Rust submodule passes — MUST KEEP for while-loop correctness
     _normalize_control_flow_output_layouts(gm)
     _restamp_control_flow_placeholder_dtypes(gm)
     _restore_missing_control_flow_rescale_qparams(gm)
@@ -6767,10 +6437,9 @@ def _all_rust_preprocess(
     )
     _rewrite_control_flow_quantize_nodes(gm)
     _rewrite_control_flow_dequantize_nodes(gm)
-    _prune_duplicate_control_flow_rescales(gm)
-    _fold_zero_input_full_in_control_flow_submodules(gm)
     _quantize_constant_only_control_flow_outputs(gm)
     _regularize_control_flow_submodules(gm, include_inputs=False, include_outputs=True)
+    # Covered by Rust submodule passes — MUST KEEP for while-loop correctness
     _remove_control_flow_noop_passthroughs(gm)
     _annotate_control_flow_parent_rank4_dim_order(gm)
     _annotate_control_flow_rank4_dim_order(gm)
