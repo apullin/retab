@@ -72,9 +72,8 @@ impl FxPass for FxRemoveNoopPass {
             let input_node = &args[0];
 
             // Get input dtype
-            let input_dtype = match Self::get_node_dtype(input_node) {
-                Some(d) => d,
-                None => continue,
+            let Some(input_dtype) = Self::get_node_dtype(input_node) else {
+                continue;
             };
 
             // Get output dtype: check kwargs for explicit dtype, else use node's own dtype

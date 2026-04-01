@@ -224,9 +224,8 @@ impl FxPass for FxInsertTableOpsPass {
                 continue;
             }
             let target = FxGraphModule::node_target_str(node)?;
-            let spec = match table_op_spec(node, &target)? {
-                Some(spec) => spec,
-                None => continue,
+            let Some(spec) = table_op_spec(node, &target)? else {
+                continue;
             };
 
             // Only convert when the node has *both* input and output qparams

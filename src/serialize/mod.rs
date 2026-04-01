@@ -383,9 +383,8 @@ fn infer_depthwise_in_channels(graph: &Graph, node: &crate::graph::ir::Node, oc:
 fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind> {
     let mut perms = HashMap::new();
     for &nid in &graph.order {
-        let node = match graph.node(nid) {
-            Some(n) => n,
-            None => continue,
+        let Some(node) = graph.node(nid) else {
+            continue;
         };
         let kind = match &node.target {
             OpTarget::TosaConv2d | OpTarget::Conv2d => Some(WeightPermKind::Conv2d),
@@ -688,9 +687,8 @@ fn collect_serialized_graph_items(
     let mut output_names: Vec<String> = Vec::new();
 
     for &node_id in &sorted {
-        let node = match graph.node(node_id) {
-            Some(n) => n,
-            None => continue,
+        let Some(node) = graph.node(node_id) else {
+            continue;
         };
 
         if FxGraphModule::debug() {

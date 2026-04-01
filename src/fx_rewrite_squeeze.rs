@@ -148,9 +148,8 @@ impl FxPass for FxRewriteSqueezePass {
                 continue;
             }
 
-            let input_shape = match FxGraphModule::node_shape(input_node) {
-                Ok(s) => s,
-                Err(_) => continue,
+            let Ok(input_shape) = FxGraphModule::node_shape(input_node) else {
+                continue;
             };
             let input_rank = input_shape.len();
 
@@ -198,10 +197,10 @@ impl FxPass for FxRewriteSqueezePass {
                 RewriteKind::Unsqueeze => {
                     // Extract dim from args[1]
                     let dim: i64 = if args.len() > 1 {
-                        match args[1].extract::<i64>() {
-                            Ok(d) => d,
-                            Err(_) => continue,
-                        }
+                        let Ok(d) = args[1].extract::<i64>() else {
+                            continue;
+                        };
+                        d
                     } else {
                         continue;
                     };
@@ -238,13 +237,11 @@ impl FxPass for FxRewriteSqueezePass {
                     if args.len() < 3 {
                         continue;
                     }
-                    let dim0: i64 = match args[1].extract::<i64>() {
-                        Ok(d) => d,
-                        Err(_) => continue,
+                    let Ok(dim0): Result<i64, _> = args[1].extract::<i64>() else {
+                        continue;
                     };
-                    let dim1: i64 = match args[2].extract::<i64>() {
-                        Ok(d) => d,
-                        Err(_) => continue,
+                    let Ok(dim1): Result<i64, _> = args[2].extract::<i64>() else {
+                        continue;
                     };
 
                     // Normalize negative dims

@@ -68,9 +68,8 @@ impl FxPass for FxFuseQuantizedActivationPass {
             if is_hardtanh_node {
                 let args = FxGraphModule::node_args(node)?;
                 if let Some(min_arg) = args.get(1) {
-                    let min_val: f64 = match min_arg.extract() {
-                        Ok(v) => v,
-                        Err(_) => continue,
+                    let Ok(min_val): Result<f64, _> = min_arg.extract() else {
+                        continue;
                     };
                     if min_val != 0.0 {
                         continue;

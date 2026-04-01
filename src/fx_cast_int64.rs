@@ -64,9 +64,8 @@ impl FxPass for FxCastInt64ToInt32Pass {
             };
 
             // Check if it's a FakeTensor (has dtype attribute)
-            let dtype = match val.getattr("dtype") {
-                Ok(d) => d,
-                Err(_) => continue,
+            let Ok(dtype) = val.getattr("dtype") else {
+                continue;
             };
 
             // Only process int64 tensors
@@ -84,10 +83,10 @@ impl FxPass for FxCastInt64ToInt32Pass {
             let graph_sig = ep.getattr("graph_signature")?;
             let inputs_to_buffers = graph_sig.getattr("inputs_to_buffers")?;
             let node_name = FxGraphModule::node_name(node)?;
-            let buffer_name: String = match inputs_to_buffers.get_item(&node_name) {
-                Ok(v) => v.extract()?,
-                Err(_) => continue,
+            let Ok(buffer_name_obj) = inputs_to_buffers.get_item(&node_name) else {
+                continue;
             };
+            let buffer_name: String = buffer_name_obj.extract()?;
 
             // Get the actual buffer tensor from state_dict
             let state_dict = ep.getattr("state_dict")?;

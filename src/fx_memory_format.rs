@@ -247,14 +247,13 @@ impl FxPass for FxToTosaMemoryFormatPass {
             }
 
             // Get tensor rank
-            let shape = match val.getattr("shape") {
-                Ok(s) => s,
-                Err(_) => continue,
+            let Ok(shape) = val.getattr("shape") else {
+                continue;
             };
-            let rank: usize = match py.import_bound("builtins")?.call_method1("len", (&shape,)) {
-                Ok(v) => v.extract().unwrap_or(0),
-                Err(_) => continue,
+            let Ok(rank_val) = py.import_bound("builtins")?.call_method1("len", (&shape,)) else {
+                continue;
             };
+            let rank: usize = rank_val.extract().unwrap_or(0);
 
             let spatial_rank = initial_spatial_rank(rank);
             meta.set_item("tosa_spatial_rank", spatial_rank)?;
@@ -272,15 +271,15 @@ impl FxPass for FxToTosaMemoryFormatPass {
                     Ok(v) if !v.is_none() => v,
                     _ => continue,
                 };
-                let shape = match val.getattr("shape") {
-                    Ok(s) => s,
-                    Err(_) => continue,
+                let Ok(shape) = val.getattr("shape") else {
+                    continue;
                 };
-                let rank: usize = match py.import_bound("builtins")?.call_method1("len", (&shape,))
-                {
-                    Ok(v) => v.extract().unwrap_or(0),
-                    Err(_) => continue,
+                let Ok(rank_val) =
+                    py.import_bound("builtins")?.call_method1("len", (&shape,))
+                else {
+                    continue;
                 };
+                let rank: usize = rank_val.extract().unwrap_or(0);
                 let limit = rank.saturating_sub(2);
 
                 let current: usize = meta
@@ -314,14 +313,13 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 Ok(v) if !v.is_none() => v,
                 _ => continue,
             };
-            let shape = match val.getattr("shape") {
-                Ok(s) => s,
-                Err(_) => continue,
+            let Ok(shape) = val.getattr("shape") else {
+                continue;
             };
-            let rank: usize = match py.import_bound("builtins")?.call_method1("len", (&shape,)) {
-                Ok(v) => v.extract().unwrap_or(0),
-                Err(_) => continue,
+            let Ok(rank_val) = py.import_bound("builtins")?.call_method1("len", (&shape,)) else {
+                continue;
             };
+            let rank: usize = rank_val.extract().unwrap_or(0);
 
             let spatial_rank: usize = meta
                 .call_method1("get", ("tosa_spatial_rank",))?
@@ -435,9 +433,8 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 Ok(v) if !v.is_none() => v,
                 _ => continue,
             };
-            let input_shape = match input_val.getattr("shape") {
-                Ok(s) => s,
-                Err(_) => continue,
+            let Ok(input_shape) = input_val.getattr("shape") else {
+                continue;
             };
             let input_rank: usize = py
                 .import_bound("builtins")?
@@ -458,9 +455,8 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 Ok(v) if !v.is_none() => v,
                 _ => continue,
             };
-            let output_shape = match output_val.getattr("shape") {
-                Ok(s) => s,
-                Err(_) => continue,
+            let Ok(output_shape) = output_val.getattr("shape") else {
+                continue;
             };
             let output_rank: usize = py
                 .import_bound("builtins")?
@@ -557,9 +553,8 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 continue;
             }
             let val = meta.call_method1("get", ("val",))?;
-            let shape = match val.getattr("shape") {
-                Ok(s) => s,
-                Err(_) => continue,
+            let Ok(shape) = val.getattr("shape") else {
+                continue;
             };
             let rank: usize = py
                 .import_bound("builtins")?
@@ -641,9 +636,8 @@ impl FxPass for FxToTosaMemoryFormatPass {
                         Ok(v) if !v.is_none() => v,
                         _ => continue,
                     };
-                    let shape = match val.getattr("shape") {
-                        Ok(s) => s,
-                        Err(_) => continue,
+                    let Ok(shape) = val.getattr("shape") else {
+                        continue;
                     };
                     let rank: usize = py
                         .import_bound("builtins")?
@@ -754,9 +748,8 @@ impl FxPass for FxToTosaMemoryFormatPass {
                     Ok(v) if !v.is_none() => v,
                     _ => continue,
                 };
-                let input_shape = match input_val.getattr("shape") {
-                    Ok(s) => s,
-                    Err(_) => continue,
+                let Ok(input_shape) = input_val.getattr("shape") else {
+                    continue;
                 };
                 py.import_bound("builtins")?
                     .call_method1("len", (&input_shape,))?
@@ -802,9 +795,8 @@ impl FxPass for FxToTosaMemoryFormatPass {
             }
 
             // Extract the user's NCHW perm from args[1]
-            let user_perm: Vec<i64> = match args[1].extract::<Vec<i64>>() {
-                Ok(p) => p,
-                Err(_) => continue,
+            let Ok(user_perm): Result<Vec<i64>, _> = args[1].extract::<Vec<i64>>() else {
+                continue;
             };
             if user_perm.len() != input_rank {
                 continue;

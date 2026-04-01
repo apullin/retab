@@ -924,9 +924,8 @@ fn fixup_reshape_shapes(graph: &mut Graph) {
     let all_ids = graph.all_node_ids();
     for node_id in &all_ids {
         let (arg1_shape, input_id) = {
-            let node = match graph.node(*node_id) {
-                Some(n) => n,
-                None => continue,
+            let Some(node) = graph.node(*node_id) else {
+                continue;
             };
             if node.op != OpType::CallFunction {
                 continue;
@@ -984,9 +983,8 @@ fn fixup_reshape_shapes(graph: &mut Graph) {
     let all_ids2 = graph.all_node_ids();
     for node_id in &all_ids2 {
         let (is_conv, input_id, weight_id, current_shape_len) = {
-            let node = match graph.node(*node_id) {
-                Some(n) => n,
-                None => continue,
+            let Some(node) = graph.node(*node_id) else {
+                continue;
             };
             if node.op != OpType::CallFunction {
                 continue;
@@ -1114,9 +1112,8 @@ fn fixup_quantized_dtypes(graph: &mut Graph) {
             output_qp_dtype,
             current_dtype,
         ) = {
-            let node = match graph.node(node_id) {
-                Some(n) => n,
-                None => continue,
+            let Some(node) = graph.node(node_id) else {
+                continue;
             };
             let iqp_dtype = node.meta.input_qparams.first().map(|(_, qa)| qa.dtype);
             let oqp_dtype = node.meta.output_qparams.first().map(|(_, qa)| qa.dtype);
@@ -1220,9 +1217,8 @@ fn fixup_quantized_dtypes(graph: &mut Graph) {
     let all_ids2 = graph.all_node_ids();
     for node_id in &all_ids2 {
         let (is_placeholder, current_dt, users) = {
-            let node = match graph.node(*node_id) {
-                Some(n) => n,
-                None => continue,
+            let Some(node) = graph.node(*node_id) else {
+                continue;
             };
             if node.op != OpType::Placeholder {
                 continue;
@@ -1241,18 +1237,16 @@ fn fixup_quantized_dtypes(graph: &mut Graph) {
         // Check each user for input_qparams referencing this placeholder
         for user_id in &users {
             let inferred_dtype = {
-                let user = match graph.node(*user_id) {
-                    Some(n) => n,
-                    None => continue,
+                let Some(user) = graph.node(*user_id) else {
+                    continue;
                 };
                 // Find which arg position references this placeholder
                 let pos = user.args.iter().enumerate().find_map(|(i, arg)| match arg {
                     Arg::Node(id) if *id == *node_id => Some(i as u32),
                     _ => None,
                 });
-                let pos = match pos {
-                    Some(p) => p,
-                    None => continue,
+                let Some(pos) = pos else {
+                    continue;
                 };
                 // Get the input_qparams for that position
                 user.meta
@@ -1284,9 +1278,8 @@ fn fixup_quantized_dtypes(graph: &mut Graph) {
         let mut changed = false;
         for node_id in &all_ids4 {
             let (is_reshape, current_dt, input_id) = {
-                let node = match graph.node(*node_id) {
-                    Some(n) => n,
-                    None => continue,
+                let Some(node) = graph.node(*node_id) else {
+                    continue;
                 };
                 if node.op != OpType::CallFunction {
                     continue;

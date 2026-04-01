@@ -636,14 +636,12 @@ impl FxPass for FxInsertRescalePass {
             }
             let target = FxGraphModule::node_target_str(node)?;
 
-            let op_kind = match classify_int32_op(&target) {
-                Some(kind) => kind,
-                None => continue,
+            let Some(op_kind) = classify_int32_op(&target) else {
+                continue;
             };
 
-            let (keys, scales, zps, dtype_strs) = match read_input_qparams(node)? {
-                Some(v) => v,
-                None => continue,
+            let Some((keys, scales, zps, dtype_strs)) = read_input_qparams(node)? else {
+                continue;
             };
 
             let has_quantized_input = dtype_strs

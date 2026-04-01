@@ -66,10 +66,10 @@ impl Graph {
         let all_ids: Vec<NodeId> = self.order.clone();
         for &node_id in &all_ids {
             let input_ids: SmallVec<[NodeId; 8]> = {
-                match self.nodes.get(node_id) {
-                    Some(node) => Self::collect_input_ids(node),
-                    None => continue,
-                }
+                let Some(node) = self.nodes.get(node_id) else {
+                    continue;
+                };
+                Self::collect_input_ids(node)
             };
             for input_id in input_ids {
                 if let Some(input_node) = self.nodes.get_mut(input_id) {
