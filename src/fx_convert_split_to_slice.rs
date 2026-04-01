@@ -12,7 +12,7 @@ crate::fx_pass!(
     /// split(tensor, sizes, dim) -> [slice(tensor, dim, start, end) for each chunk]
     /// Each getitem user of the split is replaced with its corresponding slice.
     FxConvertSplitToSlicePass, "FxConvertSplitToSlice",
-    matches: |target| target.contains("split_with_sizes_copy") || target.contains("split_copy"),
+    matches: |target, _node| target.contains("split_with_sizes_copy") || target.contains("split_copy"),
     transform: |py, graph, gm, node, debug| convert_split_wrapper(py, &graph, gm, node, debug)
 );
 

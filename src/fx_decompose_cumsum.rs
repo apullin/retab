@@ -9,7 +9,7 @@ crate::fx_pass!(
     /// Mirror the Python Arm backend's cumsum lowering:
     /// reshape -> convolution(with ones kernel) -> slice -> reshape.
     FxDecomposeCumsumPass, "FxDecomposeCumsum",
-    matches: |target| target.contains("cumsum"),
+    matches: |target, _node| target.contains("cumsum"),
     transform: |py, graph, gm, node, debug| {
         decompose_cumsum(py, &graph, gm, node, debug)?;
         Ok(())

@@ -27,7 +27,7 @@ pub trait FxPass {
 /// # Usage
 /// ```ignore
 /// fx_pass!(FxDecomposeAddmmPass, "FxDecomposeAddmm",
-///     matches: |target| target.contains("addmm"),
+///     matches: |target, _node| target.contains("addmm"),
 ///     transform: |py, graph, gm, node, debug| decompose_addmm(py, graph, gm, node, debug)
 /// );
 /// ```
@@ -36,7 +36,7 @@ macro_rules! fx_pass {
     (
         $(#[$meta:meta])*
         $struct_name:ident, $name_str:expr,
-        matches: |$target:ident| $match_expr:expr,
+        matches: |$target:ident, $mnode:ident| $match_expr:expr,
         transform: |$py:ident, $graph:ident, $gm:ident, $node:ident, $debug:ident| $transform_expr:expr
     ) => {
         $(#[$meta])*
@@ -52,17 +52,11 @@ macro_rules! fx_pass {
                 let $debug = $crate::fx_graph::FxGraphModule::debug();
                 let mut modified = false;
 
-                let all_nodes = gm.nodes()?;
                 let mut candidates: Vec<pyo3::Bound<'_, pyo3::PyAny>> = Vec::new();
 
-                for node in &all_nodes {
-                    let op = $crate::fx_graph::FxGraphModule::node_op(node)?;
-                    if op != "call_function" {
-                        continue;
-                    }
-                    let $target = $crate::fx_graph::FxGraphModule::node_target_str(node)?;
+                for ($mnode, $target) in gm.call_functions()? {
                     if $match_expr {
-                        candidates.push(node.clone());
+                        candidates.push($mnode.clone());
                     }
                 }
 

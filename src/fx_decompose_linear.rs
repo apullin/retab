@@ -12,7 +12,7 @@ crate::fx_pass!(
     /// The graph surgery (node creation with proper FakeTensor metadata) is
     /// delegated to `fx_helpers.decompose_linear_node()`.
     FxDecomposeLinearPass, "FxDecomposeLinear",
-    matches: |target| target.contains("linear.default"),
+    matches: |target, _node| target.contains("linear.default"),
     transform: |py, graph, gm, node, debug| {
         let _ = (&graph, &debug); // suppress unused warnings
         let helpers = py.import_bound("fx_helpers")?;

@@ -15,7 +15,7 @@ crate::fx_pass!(
     ///
     /// For non-quantized (FP) graphs, the pass simply produces float `full` + `where`.
     FxDecomposeMaskedFillPass, "FxDecomposeMaskedFill",
-    matches: |target| target.contains("masked_fill"),
+    matches: |target, _node| target.contains("masked_fill"),
     transform: |py, graph, gm, node, debug| decompose_masked_fill(py, &graph, gm, node, debug)
 );
 

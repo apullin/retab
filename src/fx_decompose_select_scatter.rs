@@ -9,7 +9,7 @@ crate::fx_pass!(
     /// FX-graph-direct decomposition of `aten.select_scatter` into
     /// arange + view + eq + unsqueeze + expand + where, mirroring the Python pass.
     FxDecomposeSelectScatterPass, "FxDecomposeSelectScatter",
-    matches: |target| target.contains("select_scatter.default"),
+    matches: |target, _node| target.contains("select_scatter.default"),
     transform: |py, graph, gm, node, debug| decompose_select_scatter(py, &graph, gm, node, debug).map(|_| ())
 );
 

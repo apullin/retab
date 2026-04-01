@@ -3,20 +3,57 @@ use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
-use crate::fx_pass::FxPass;
-
-/// FX-graph-direct decomposition of grouped convolutions into
-/// `slice_copy -> conv2d (groups=1) -> cat`.
-///
-/// TOSA does not support grouped convolutions (groups > 1) that are not
-/// depthwise. This pass splits them into per-group convolutions using
-/// slice_copy on input/weight/bias, then concatenates the results.
-///
-/// Matches Python `DecomposeGroupedConvPass`.
-pub struct FxDecomposeGroupedConvPass;
 
 fn is_convolution(target: &str) -> bool {
     target.contains("convolution.default") || target.contains("conv2d.default")
+}
+
+/// Check whether a convolution node is a grouped (non-depthwise) conv with groups > 1.
+fn is_grouped_conv(target: &str, node: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if !is_convolution(target) {
+        return Ok(false);
+    }
+
+    let args = FxGraphModule::node_args(node)?;
+    let is_raw_conv2d = target.contains("conv2d.default");
+
+    // Need enough args to extract groups
+    if !is_raw_conv2d && args.len() < 9 {
+        return Ok(false);
+    }
+    if is_raw_conv2d && args.len() < 2 {
+        return Ok(false);
+    }
+
+    let groups: i64 = if is_raw_conv2d {
+        args.get(6).and_then(|a| a.extract().ok()).unwrap_or(1)
+    } else {
+        args[8].extract().unwrap_or(1)
+    };
+
+    if groups <= 1 {
+        return Ok(false);
+    }
+
+    // Check if depthwise (in_channels == groups) -- skip those
+    let input_node = &args[0];
+    let in_channels = FxGraphModule::node_shape(input_node)
+        .ok()
+        .and_then(|s| s.get(1).copied())
+        .unwrap_or(0);
+
+    let transposed: bool = if is_raw_conv2d {
+        false
+    } else {
+        args[6].extract().unwrap_or(false)
+    };
+
+    if !transposed && in_channels == groups {
+        // Depthwise -- handled by FxRewriteConvPass
+        return Ok(false);
+    }
+
+    Ok(true)
 }
 
 fn is_per_channel_qparams(qarg: &Bound<'_, PyAny>) -> PyResult<bool> {
@@ -271,88 +308,21 @@ fn log_grouped_cat_meta(
     Ok(())
 }
 
-impl FxPass for FxDecomposeGroupedConvPass {
-    fn name(&self) -> &str {
-        "FxDecomposeGroupedConv"
+crate::fx_pass!(
+    /// FX-graph-direct decomposition of grouped convolutions into
+    /// `slice_copy -> conv2d (groups=1) -> cat`.
+    ///
+    /// TOSA does not support grouped convolutions (groups > 1) that are not
+    /// depthwise. This pass splits them into per-group convolutions using
+    /// slice_copy on input/weight/bias, then concatenates the results.
+    ///
+    /// Matches Python `DecomposeGroupedConvPass`.
+    FxDecomposeGroupedConvPass, "FxDecomposeGroupedConv",
+    matches: |target, node| is_grouped_conv(&target, &node).unwrap_or(false),
+    transform: |py, graph, gm, node, debug| {
+        decompose_grouped_conv(py, &graph, gm, node, debug)
     }
-
-    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let debug = FxGraphModule::debug();
-        let mut modified = false;
-
-        let all_nodes = gm.nodes()?;
-        let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
-
-        for node in &all_nodes {
-            let op = FxGraphModule::node_op(node)?;
-            if op != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-            if !is_convolution(&target) {
-                continue;
-            }
-
-            let args = FxGraphModule::node_args(node)?;
-            let is_raw_conv2d = target.contains("conv2d.default");
-
-            // Need enough args to extract groups
-            if !is_raw_conv2d && args.len() < 9 {
-                continue;
-            }
-            if is_raw_conv2d && args.len() < 2 {
-                continue;
-            }
-
-            let groups: i64 = if is_raw_conv2d {
-                args.get(6).and_then(|a| a.extract().ok()).unwrap_or(1)
-            } else {
-                args[8].extract().unwrap_or(1)
-            };
-
-            if groups <= 1 {
-                continue;
-            }
-
-            // Check if depthwise (in_channels == groups) — skip those
-            let input_node = &args[0];
-            let in_channels = FxGraphModule::node_shape(input_node)
-                .ok()
-                .and_then(|s| s.get(1).copied())
-                .unwrap_or(0);
-
-            let transposed: bool = if is_raw_conv2d {
-                false
-            } else {
-                args[6].extract().unwrap_or(false)
-            };
-
-            if !transposed && in_channels == groups {
-                // Depthwise — handled by FxRewriteConvPass
-                continue;
-            }
-
-            candidates.push(node.clone());
-        }
-
-        if candidates.is_empty() {
-            return Ok(false);
-        }
-
-        let graph = gm.gm_ref().getattr("graph")?;
-
-        for node in &candidates {
-            decompose_grouped_conv(py, &graph, gm, node, debug)?;
-            modified = true;
-        }
-
-        if modified {
-            gm.recompile()?;
-        }
-        Ok(modified)
-    }
-}
+);
 
 fn decompose_grouped_conv<'py>(
     py: Python<'py>,

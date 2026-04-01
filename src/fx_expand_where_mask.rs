@@ -13,7 +13,7 @@ crate::fx_pass!(
     /// emission is stricter, so we materialize the broadcast explicitly as
     /// `view_copy + expand_copy` in the FX graph.
     FxExpandWhereMaskPass, "FxExpandWhereMask",
-    matches: |target| target.contains("where.self") || target.contains("aten_where"),
+    matches: |target, _node| target.contains("where.self") || target.contains("aten_where"),
     transform: |py, graph, gm, node, debug| expand_where_mask(py, &graph, gm, node)
 );
 

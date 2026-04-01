@@ -9,7 +9,7 @@ crate::fx_pass!(
     /// FX-graph-direct decomposition of `aten.unfold_copy` into
     /// `backend.tosa.GATHER` plus shape-only ops, mirroring the Python Arm pass.
     FxDecomposeUnfoldToGatherPass, "FxDecomposeUnfoldToGather",
-    matches: |target| target.contains("unfold_copy"),
+    matches: |target, _node| target.contains("unfold_copy"),
     transform: |py, graph, gm, node, debug| decompose_unfold_copy(py, &graph, gm, node, debug).map(|_| ())
 );
 

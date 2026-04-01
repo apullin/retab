@@ -10,7 +10,7 @@ crate::fx_pass!(
     /// envelope around a non-dilated max_pool2d. This mirrors the Python Arm pass
     /// closely enough that the serializer only needs to handle the ordinary pool.
     FxDecomposeMaxPoolDilationPass, "FxDecomposeMaxPoolDilation",
-    matches: |target| target.contains("max_pool2d") && !target.contains("with_indices"),
+    matches: |target, _node| target.contains("max_pool2d") && !target.contains("with_indices"),
     transform: |py, graph, gm, node, debug| decompose_max_pool_dilation(py, &graph, gm, node)
 );
 

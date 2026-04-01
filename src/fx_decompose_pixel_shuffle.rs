@@ -41,14 +41,13 @@ impl FxPass for FxDecomposePixelShufflePass {
 
         let mut candidates: Vec<(Bound<'_, PyAny>, PixelKind)> = Vec::new();
 
-        gm.for_each_call_function(|node, target| {
-            if is_pixel_unshuffle(target) {
-                candidates.push((node.clone(), PixelKind::Unshuffle));
-            } else if is_pixel_shuffle(target) {
-                candidates.push((node.clone(), PixelKind::Shuffle));
+        for (node, target) in gm.call_functions()? {
+            if is_pixel_unshuffle(&target) {
+                candidates.push((node, PixelKind::Unshuffle));
+            } else if is_pixel_shuffle(&target) {
+                candidates.push((node, PixelKind::Shuffle));
             }
-            Ok(false)
-        })?;
+        }
 
         if candidates.is_empty() {
             return Ok(false);

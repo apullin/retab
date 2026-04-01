@@ -14,7 +14,7 @@ crate::fx_pass!(
     /// TOSA has no full_like equivalent; this converts to the explicit-shape form
     /// so the serializer can emit a CONST tensor.
     FxConvertFullLikeToFullPass, "FxConvertFullLikeToFull",
-    matches: |target| target.contains("full_like"),
+    matches: |target, _node| target.contains("full_like"),
     transform: |py, graph, gm, node, debug| {
         convert_full_like(py, &graph, gm, node, debug)
     }

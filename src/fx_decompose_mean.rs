@@ -13,7 +13,7 @@ crate::fx_pass!(
     /// then reshapes to the target output shape.  For 4D inputs with spatial
     /// dim reductions, uses avg_pool2d (matching Python DecomposeMeanDimPass).
     FxDecomposeMeanPass, "FxDecomposeMean",
-    matches: |target| target.contains("mean.dim") || target.contains("mean.default"),
+    matches: |target, _node| target.contains("mean.dim") || target.contains("mean.default"),
     transform: |py, graph, gm, node, debug| decompose_mean(py, &graph, gm, node, debug)
 );
 

@@ -9,7 +9,7 @@ crate::fx_pass!(
     /// FX-graph-direct canonicalization of `aten.gather` into
     /// `backend.tosa.GATHER` plus shape-only ops, mirroring the Python Arm pass.
     FxCanonicalizeGatherPass, "FxCanonicalizeGather",
-    matches: |target| target.contains("aten.gather.default"),
+    matches: |target, _node| target.contains("aten.gather.default"),
     transform: |py, graph, gm, node, debug| canonicalize_gather(py, &graph, gm, node, debug).map(|_| ())
 );
 

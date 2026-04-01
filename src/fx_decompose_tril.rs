@@ -10,7 +10,7 @@ crate::fx_pass!(
     /// arange + view + add(diagonal) + ge + where / bitwise_and,
     /// mirroring the Python Arm pass.
     FxDecomposeTrilPass, "FxDecomposeTril",
-    matches: |target| target.contains("aten.tril")
+    matches: |target, _node| target.contains("aten.tril")
         || target.contains("aten_tril")
         || target.contains("aten.tril_copy")
         || target.contains("aten_tril_copy"),

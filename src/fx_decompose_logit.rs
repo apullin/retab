@@ -20,7 +20,7 @@ crate::fx_pass!(
     ///
     /// Must run before fold_qdq so the decomposed ops get quantization handling.
     FxDecomposeLogitPass, "FxDecomposeLogit",
-    matches: |target| target.contains("logit"),
+    matches: |target, _node| target.contains("logit"),
     transform: |py, graph, gm, node, debug| {
         decompose_logit(py, &graph, gm, node, debug)
     }

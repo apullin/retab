@@ -9,7 +9,7 @@ crate::fx_pass!(
     /// FX-graph-direct decomposition of `aten.index_select` into
     /// `backend.tosa.GATHER` plus shape-only ops, mirroring the Python Arm pass.
     FxDecomposeIndexSelectToGatherPass, "FxDecomposeIndexSelectToGather",
-    matches: |target| target.contains("index_select.default"),
+    matches: |target, _node| target.contains("index_select.default"),
     transform: |py, graph, gm, node, debug| decompose_index_select(py, &graph, gm, node, debug).map(|_| ())
 );
 

@@ -15,7 +15,7 @@ crate::fx_pass!(
     ///   - Calls qargs.quantize_value(min_val) and qargs.quantize_value(max_val)
     ///   - Updates args[1] and args[2] in-place with the quantized values
     FxQuantizeClampArgsPass, "FxQuantizeClampArgs",
-    matches: |target| target.contains("clamp.default"),
+    matches: |target, _node| target.contains("clamp.default"),
     transform: |py, graph, gm, node, debug| quantize_clamp_args(py, node)
 );
 

@@ -8,7 +8,7 @@ use crate::fx_utils;
 crate::fx_pass!(
     /// Decompose `repeat_interleave.self_int` into unsqueeze + repeat + view.
     FxDecomposeRepeatInterleavePass, "FxDecomposeRepeatInterleave",
-    matches: |target| target.contains("repeat_interleave.self_int"),
+    matches: |target, _node| target.contains("repeat_interleave.self_int"),
     transform: |py, graph, gm, node, debug| decompose_repeat_interleave_self_int(py, &graph, gm, node, debug).map(|_| ())
 );
 

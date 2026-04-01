@@ -9,7 +9,7 @@ crate::fx_pass!(
     /// Mirror the Python Arm backend's non-unit-step slice_copy decomposition:
     /// unit-step slice + optional right pad + view + slice + view.
     FxDecomposeStridedSlicePass, "FxDecomposeStridedSlice",
-    matches: |target| {
+    matches: |target, _node| {
         (target.contains("slice_copy.Tensor") || target.contains("slice.Tensor"))
             && !target.contains("slice_scatter")
     },

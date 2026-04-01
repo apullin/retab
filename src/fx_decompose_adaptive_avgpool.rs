@@ -14,7 +14,7 @@ crate::fx_pass!(
     /// For the general case, mirrors Python DecomposeAdaptiveAvgPool2dPass:
     /// slice into pooling regions, avg_pool2d each, concatenate.
     FxDecomposeAdaptiveAvgPoolPass, "FxDecomposeAdaptiveAvgPool",
-    matches: |target| target.contains("adaptive_avg_pool2d"),
+    matches: |target, _node| target.contains("adaptive_avg_pool2d"),
     transform: |py, graph, gm, node, debug| decompose_adaptive(py, &graph, gm, node, debug)
 );
 

@@ -12,7 +12,7 @@ crate::fx_pass!(
     /// For multi-axis reductions the dims are processed in descending order
     /// so that earlier reductions don't shift the indices of later ones.
     FxConvertSumPass, "FxConvertSum",
-    matches: |target| target.contains("sum.dim_IntList"),
+    matches: |target, _node| target.contains("sum.dim_IntList"),
     transform: |py, graph, gm, node, debug| convert_sum(py, &graph, gm, node)
 );
 

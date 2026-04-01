@@ -100,16 +100,15 @@ impl FxPass for FxRewriteSqueezePass {
         }
         let mut candidates: Vec<(Bound<'_, PyAny>, RewriteKind)> = Vec::new();
 
-        gm.for_each_call_function(|node, target| {
-            if is_squeeze(target) {
-                candidates.push((node.clone(), RewriteKind::Squeeze));
-            } else if is_unsqueeze(target) {
-                candidates.push((node.clone(), RewriteKind::Unsqueeze));
-            } else if is_transpose(target) {
-                candidates.push((node.clone(), RewriteKind::Transpose));
+        for (node, target) in gm.call_functions()? {
+            if is_squeeze(&target) {
+                candidates.push((node, RewriteKind::Squeeze));
+            } else if is_unsqueeze(&target) {
+                candidates.push((node, RewriteKind::Unsqueeze));
+            } else if is_transpose(&target) {
+                candidates.push((node, RewriteKind::Transpose));
             }
-            Ok(false)
-        })?;
+        }
 
         // Resolve view_copy and permute_copy op targets
         let view_copy_op = py.eval_bound(

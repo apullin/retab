@@ -9,7 +9,7 @@ crate::fx_pass!(
     /// FX-graph-direct decomposition of `aten.index.Tensor` into
     /// `backend.tosa.GATHER` plus basic arith.
     FxDecomposeIndexTensorPass, "FxDecomposeIndexTensor",
-    matches: |target| target.contains("aten.index.Tensor"),
+    matches: |target, _node| target.contains("aten.index.Tensor"),
     transform: |py, graph, gm, node, _debug| decompose_single_index_tensor(py, &graph, gm, node).map(|_| ())
 );
 

@@ -9,7 +9,7 @@ crate::fx_pass!(
     /// Decompose `aten.addmm` into mm + mul + add.
     /// Mirrors Python `DecomposeAddmmPass`.
     FxDecomposeAddmmPass, "FxDecomposeAddmm",
-    matches: |target| target.contains("addmm"),
+    matches: |target, _node| target.contains("addmm"),
     transform: |py, graph, gm, node, debug| decompose_addmm(py, &graph, gm, node, debug)
 );
 
