@@ -3,63 +3,22 @@ use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
-use crate::fx_pass::FxPass;
 use crate::fx_utils;
 
-/// FX-graph-direct conversion of `aten.full_like.default` to `aten.full.default`.
-///
-/// Mirrors Python `ConvertFullLikeToFullPass`:
-///   full_like(x, fill_value) -> full(x.shape, fill_value, dtype=x.dtype)
-///
-/// TOSA has no full_like equivalent; this converts to the explicit-shape form
-/// so the serializer can emit a CONST tensor.
-pub struct FxConvertFullLikeToFullPass;
-
-fn is_full_like(target: &str) -> bool {
-    target.contains("full_like")
-}
-
-impl FxPass for FxConvertFullLikeToFullPass {
-    fn name(&self) -> &str {
-        "FxConvertFullLikeToFull"
+crate::fx_pass!(
+    /// FX-graph-direct conversion of `aten.full_like.default` to `aten.full.default`.
+    ///
+    /// Mirrors Python `ConvertFullLikeToFullPass`:
+    ///   full_like(x, fill_value) -> full(x.shape, fill_value, dtype=x.dtype)
+    ///
+    /// TOSA has no full_like equivalent; this converts to the explicit-shape form
+    /// so the serializer can emit a CONST tensor.
+    FxConvertFullLikeToFullPass, "FxConvertFullLikeToFull",
+    matches: |target| target.contains("full_like"),
+    transform: |py, graph, gm, node, debug| {
+        convert_full_like(py, &graph, gm, node, debug)
     }
-
-    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let debug = FxGraphModule::debug();
-        let mut modified = false;
-
-        let all_nodes = gm.nodes()?;
-        let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
-
-        for node in &all_nodes {
-            let op = FxGraphModule::node_op(node)?;
-            if op != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-            if is_full_like(&target) {
-                candidates.push(node.clone());
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(false);
-        }
-
-        let graph = gm.gm_ref().getattr("graph")?;
-
-        for node in &candidates {
-            convert_full_like(py, &graph, gm, node, debug)?;
-            modified = true;
-        }
-
-        if modified {
-            gm.recompile()?;
-        }
-        Ok(modified)
-    }
-}
+);
 
 fn convert_full_like<'py>(
     py: Python<'py>,

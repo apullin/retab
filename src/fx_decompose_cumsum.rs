@@ -3,16 +3,18 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
-use crate::fx_pass::FxPass;
 use crate::fx_utils;
 
-/// Mirror the Python Arm backend's cumsum lowering:
-/// reshape -> convolution(with ones kernel) -> slice -> reshape.
-pub struct FxDecomposeCumsumPass;
-
-fn is_cumsum(target: &str) -> bool {
-    target.contains("cumsum")
-}
+crate::fx_pass!(
+    /// Mirror the Python Arm backend's cumsum lowering:
+    /// reshape -> convolution(with ones kernel) -> slice -> reshape.
+    FxDecomposeCumsumPass, "FxDecomposeCumsum",
+    matches: |target| target.contains("cumsum"),
+    transform: |py, graph, gm, node, debug| {
+        decompose_cumsum(py, &graph, gm, node, debug)?;
+        Ok(())
+    }
+);
 
 fn copied_meta<'py>(
     py: Python<'py>,
@@ -76,47 +78,6 @@ fn set_qparam_map<'py>(
     }
     meta.set_item(key, qparams)?;
     Ok(())
-}
-
-impl FxPass for FxDecomposeCumsumPass {
-    fn name(&self) -> &str {
-        "FxDecomposeCumsum"
-    }
-
-    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let debug = FxGraphModule::debug();
-        let mut modified = false;
-
-        let all_nodes = gm.nodes()?;
-        let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
-
-        for node in &all_nodes {
-            if FxGraphModule::node_op(node)? != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-            if is_cumsum(&target) {
-                candidates.push(node.clone());
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(false);
-        }
-
-        let graph = gm.gm_ref().getattr("graph")?;
-        for node in &candidates {
-            if decompose_cumsum(py, &graph, gm, node, debug)? {
-                modified = true;
-            }
-        }
-
-        if modified {
-            gm.recompile()?;
-        }
-        Ok(modified)
-    }
 }
 
 fn decompose_cumsum<'py>(

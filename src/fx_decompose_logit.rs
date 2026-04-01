@@ -3,69 +3,28 @@ use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
 use crate::fx_graph::FxGraphModule;
-use crate::fx_pass::FxPass;
 use crate::fx_utils;
 
-/// FX-graph-direct decomposition of `aten.logit` into primitive ops.
-///
-/// Mirrors Python `DecomposeLogitPass`:
-///   logit(x, eps=None) ->
-///     if eps is not None:
-///       x = clamp(x, eps, 1 - eps)
-///     neg_x = mul(x, -1.0)
-///     denom = add(neg_x, 1.0)       # (1 - x)
-///     frac = reciprocal(denom)       # 1 / (1 - x)
-///     log_input = mul(x, frac)       # x / (1 - x)
-///     result = log(log_input)
-///
-/// Must run before fold_qdq so the decomposed ops get quantization handling.
-pub struct FxDecomposeLogitPass;
-
-fn is_logit(target: &str) -> bool {
-    target.contains("logit")
-}
-
-impl FxPass for FxDecomposeLogitPass {
-    fn name(&self) -> &str {
-        "FxDecomposeLogit"
+crate::fx_pass!(
+    /// FX-graph-direct decomposition of `aten.logit` into primitive ops.
+    ///
+    /// Mirrors Python `DecomposeLogitPass`:
+    ///   logit(x, eps=None) ->
+    ///     if eps is not None:
+    ///       x = clamp(x, eps, 1 - eps)
+    ///     neg_x = mul(x, -1.0)
+    ///     denom = add(neg_x, 1.0)       # (1 - x)
+    ///     frac = reciprocal(denom)       # 1 / (1 - x)
+    ///     log_input = mul(x, frac)       # x / (1 - x)
+    ///     result = log(log_input)
+    ///
+    /// Must run before fold_qdq so the decomposed ops get quantization handling.
+    FxDecomposeLogitPass, "FxDecomposeLogit",
+    matches: |target| target.contains("logit"),
+    transform: |py, graph, gm, node, debug| {
+        decompose_logit(py, &graph, gm, node, debug)
     }
-
-    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let debug = FxGraphModule::debug();
-        let mut modified = false;
-
-        let all_nodes = gm.nodes()?;
-        let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
-
-        for node in &all_nodes {
-            let op = FxGraphModule::node_op(node)?;
-            if op != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-            if is_logit(&target) {
-                candidates.push(node.clone());
-            }
-        }
-
-        if candidates.is_empty() {
-            return Ok(false);
-        }
-
-        let graph = gm.gm_ref().getattr("graph")?;
-
-        for node in &candidates {
-            decompose_logit(py, &graph, gm, node, debug)?;
-            modified = true;
-        }
-
-        if modified {
-            gm.recompile()?;
-        }
-        Ok(modified)
-    }
-}
+);
 
 fn decompose_logit<'py>(
     py: Python<'py>,
