@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyTuple};
 
-use crate::fx_decompose_ops::{insert_call_before, propagate_qparams, resolve_aten_op};
+use crate::fx_decompose_ops::{propagate_qparams, resolve_aten_op, NodeInserter};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_utils;
 
@@ -62,18 +62,12 @@ fn decompose_repeat_interleave_self_int<'py>(
     let repeat_op = resolve_aten_op(py, "repeat.default")?;
     let view_op = resolve_aten_op(py, "view_copy.default")?;
     let builtins = py.import_bound("builtins")?;
+    let ins = NodeInserter::before(py, graph, node);
 
     let unsqueeze_dim = dim + 1;
     let unsqueeze_dim_obj = builtins.call_method1("int", (unsqueeze_dim,))?;
     let unsqueeze_args = PyTuple::new_bound(py, &[x.as_ref(), unsqueeze_dim_obj.as_ref()]);
-    let unsqueezed = insert_call_before(
-        py,
-        graph,
-        node,
-        &unsqueeze_op,
-        unsqueeze_args.as_ref(),
-        node,
-    )?;
+    let unsqueezed = ins.call(&unsqueeze_op, unsqueeze_args.as_ref())?;
     propagate_qparams(node, &unsqueezed)?;
 
     let repeat_rank = rank + 1;
@@ -81,14 +75,14 @@ fn decompose_repeat_interleave_self_int<'py>(
     multiples[unsqueeze_dim as usize] = repeats;
     let multiples_list = PyList::new_bound(py, multiples);
     let repeat_args = PyTuple::new_bound(py, &[unsqueezed.as_ref(), multiples_list.as_ref()]);
-    let repeated = insert_call_before(py, graph, node, &repeat_op, repeat_args.as_ref(), node)?;
+    let repeated = ins.call(&repeat_op, repeat_args.as_ref())?;
     propagate_qparams(node, &repeated)?;
 
     let mut final_shape = input_shape;
     final_shape[dim as usize] *= repeats;
     let final_shape_list = PyList::new_bound(py, final_shape);
     let view_args = PyTuple::new_bound(py, &[repeated.as_ref(), final_shape_list.as_ref()]);
-    let result = insert_call_before(py, graph, node, &view_op, view_args.as_ref(), node)?;
+    let result = ins.call(&view_op, view_args.as_ref())?;
     propagate_qparams(node, &result)?;
 
     fx_utils::copy_meta(py, node, &result)?;

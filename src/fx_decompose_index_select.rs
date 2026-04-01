@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
+use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_utils;
 
@@ -21,39 +21,6 @@ fn resolve_tosa_gather_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     )
 }
 
-fn copied_meta<'py>(
-    py: Python<'py>,
-    node: &Bound<'py, PyAny>,
-    clear_qparams: bool,
-) -> PyResult<Bound<'py, PyAny>> {
-    let copy_mod = py.import_bound("copy")?;
-    let meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    if clear_qparams {
-        meta.set_item("input_qparams", PyDict::new_bound(py))?;
-        meta.set_item("output_qparams", PyDict::new_bound(py))?;
-    }
-    Ok(meta)
-}
-
-fn insert_call_before_with_kwargs<'py>(
-    py: Python<'py>,
-    graph: &Bound<'py, PyAny>,
-    ref_node: &Bound<'py, PyAny>,
-    target: &Bound<'py, PyAny>,
-    args: &Bound<'py, PyAny>,
-    kwargs: &Bound<'py, PyDict>,
-    meta_src: &Bound<'py, PyAny>,
-    clear_qparams: bool,
-) -> PyResult<Bound<'py, PyAny>> {
-    let inserting = graph.call_method1("inserting_before", (ref_node,))?;
-    inserting.call_method0("__enter__")?;
-    let new_node = graph.call_method1("call_function", (target, args, kwargs))?;
-    let meta_copy = copied_meta(py, meta_src, clear_qparams)?;
-    new_node.setattr("meta", &meta_copy)?;
-    let _ = fx_utils::refresh_fake_tensor(py, &new_node);
-    inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
-    Ok(new_node)
-}
 
 fn set_tensor_meta_val_shape(
     template_meta: &Bound<'_, PyAny>,
@@ -150,48 +117,33 @@ fn decompose_index_select<'py>(
     let to_copy_op = resolve_aten_op(py, "_to_copy.default")?;
     let gather_op = resolve_tosa_gather_op(py)?;
 
+    let ins = NodeInserter::before(py, graph, node);
+
     let mut x_for_gather = x.clone();
     if needs_bool_cast {
         let cast_args = PyTuple::new_bound(py, &[x.as_ref()]);
         let cast_kwargs = PyDict::new_bound(py);
         cast_kwargs.set_item("dtype", int8_dtype)?;
-        x_for_gather = insert_call_before_with_kwargs(
-            py,
-            graph,
-            node,
-            &to_copy_op,
-            cast_args.as_ref(),
-            &cast_kwargs,
-            x,
-            true,
-        )?;
+        x_for_gather = ins.clone().meta_from(x).call_with_kwargs(&to_copy_op, cast_args.as_ref(), &cast_kwargs)?;
     }
 
     let values_shape = PyList::new_bound(py, [n, k, c]);
     let values_args = PyTuple::new_bound(py, &[x_for_gather.as_ref(), values_shape.as_ref()]);
-    let values_nkc = insert_call_before(
-        py,
-        graph,
-        node,
-        &view_op,
-        values_args.as_ref(),
-        &x_for_gather,
-    )?;
+    let values_nkc = ins.clone().meta_from(&x_for_gather).call(&view_op, values_args.as_ref())?;
     copy_qparams_only(&x_for_gather.getattr("meta")?, &values_nkc.getattr("meta")?)?;
 
     let idx_1w_args = PyTuple::new_bound(
         py,
         &[index.as_ref(), 0i64.into_py(py).into_bound(py).as_ref()],
     );
-    let idx_1w = insert_call_before(py, graph, node, &unsqueeze_op, idx_1w_args.as_ref(), index)?;
+    let idx_1w = ins.clone().meta_from(index).call(&unsqueeze_op, idx_1w_args.as_ref())?;
 
     let indices_shape = PyList::new_bound(py, [n, w]);
     let indices_args = PyTuple::new_bound(py, &[idx_1w.as_ref(), indices_shape.as_ref()]);
-    let indices_nw =
-        insert_call_before(py, graph, node, &expand_op, indices_args.as_ref(), &idx_1w)?;
+    let indices_nw = ins.clone().meta_from(&idx_1w).call(&expand_op, indices_args.as_ref())?;
 
     let gather_args = PyTuple::new_bound(py, &[values_nkc.as_ref(), indices_nw.as_ref()]);
-    let gathered_nwc = insert_call_before(py, graph, node, &gather_op, gather_args.as_ref(), node)?;
+    let gathered_nwc = ins.call(&gather_op, gather_args.as_ref())?;
     {
         let gather_meta = gathered_nwc.getattr("meta")?;
         let gather_template_meta = x_for_gather.getattr("meta")?;
@@ -199,6 +151,7 @@ fn decompose_index_select<'py>(
         copy_qparams_only(&gather_template_meta, &gather_meta)?;
     }
 
+    let ins = NodeInserter::before(py, graph, node);
     let out_shape: Vec<i64> = before
         .iter()
         .copied()
@@ -207,23 +160,14 @@ fn decompose_index_select<'py>(
         .collect();
     let out_shape_py = PyList::new_bound(py, out_shape.iter().copied());
     let out_args = PyTuple::new_bound(py, &[gathered_nwc.as_ref(), out_shape_py.as_ref()]);
-    let out = insert_call_before(py, graph, node, &view_op, out_args.as_ref(), &gathered_nwc)?;
+    let out = ins.clone().meta_from(&gathered_nwc).call(&view_op, out_args.as_ref())?;
     copy_qparams_only(&gathered_nwc.getattr("meta")?, &out.getattr("meta")?)?;
 
     let result = if needs_bool_cast {
         let cast_args = PyTuple::new_bound(py, &[out.as_ref()]);
         let cast_kwargs = PyDict::new_bound(py);
         cast_kwargs.set_item("dtype", bool_dtype)?;
-        insert_call_before_with_kwargs(
-            py,
-            graph,
-            node,
-            &to_copy_op,
-            cast_args.as_ref(),
-            &cast_kwargs,
-            &out,
-            true,
-        )?
+        ins.clone().meta_from(&out).call_with_kwargs(&to_copy_op, cast_args.as_ref(), &cast_kwargs)?
     } else {
         out
     };

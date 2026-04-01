@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
+use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
 use crate::fx_utils;
@@ -120,21 +120,22 @@ fn decompose_pixel_shuffle<'py>(
 
     let view_op = resolve_aten_op(py, "view_copy.default")?;
     let permute_op = resolve_aten_op(py, "permute_copy.default")?;
+    let ins = NodeInserter::before(py, graph, node);
 
     // view(x, (N, C, r, r, H, W))
     let shape1 = pyo3::types::PyList::new_bound(py, [n, c, r, r, h, w]);
     let view1_args = PyTuple::new_bound(py, &[x.as_ref(), shape1.as_ref()]);
-    let view1 = insert_call_before(py, graph, node, &view_op, view1_args.as_ref(), node)?;
+    let view1 = ins.call(&view_op, view1_args.as_ref())?;
 
     // permute(view1, (0, 1, 4, 2, 5, 3))
     let perm = pyo3::types::PyList::new_bound(py, [0i64, 1, 4, 2, 5, 3]);
     let perm_args = PyTuple::new_bound(py, &[view1.as_ref(), perm.as_ref()]);
-    let permuted = insert_call_before(py, graph, node, &permute_op, perm_args.as_ref(), node)?;
+    let permuted = ins.call(&permute_op, perm_args.as_ref())?;
 
     // view(permuted, (N, C, H*r, W*r))
     let shape2 = pyo3::types::PyList::new_bound(py, [n, c, h * r, w * r]);
     let view2_args = PyTuple::new_bound(py, &[permuted.as_ref(), shape2.as_ref()]);
-    let result = insert_call_before(py, graph, node, &view_op, view2_args.as_ref(), node)?;
+    let result = ins.call(&view_op, view2_args.as_ref())?;
 
     // Copy original node's meta onto the final result
     fx_utils::copy_meta(py, node, &result)?;
@@ -190,21 +191,22 @@ fn decompose_pixel_unshuffle<'py>(
 
     let view_op = resolve_aten_op(py, "view_copy.default")?;
     let permute_op = resolve_aten_op(py, "permute_copy.default")?;
+    let ins = NodeInserter::before(py, graph, node);
 
     // view(x, (N, C, H//r, r, W//r, r))
     let shape1 = pyo3::types::PyList::new_bound(py, [n, c, h_out, r, w_out, r]);
     let view1_args = PyTuple::new_bound(py, &[x.as_ref(), shape1.as_ref()]);
-    let view1 = insert_call_before(py, graph, node, &view_op, view1_args.as_ref(), node)?;
+    let view1 = ins.call(&view_op, view1_args.as_ref())?;
 
     // permute(view1, (0, 1, 3, 5, 2, 4))
     let perm = pyo3::types::PyList::new_bound(py, [0i64, 1, 3, 5, 2, 4]);
     let perm_args = PyTuple::new_bound(py, &[view1.as_ref(), perm.as_ref()]);
-    let permuted = insert_call_before(py, graph, node, &permute_op, perm_args.as_ref(), node)?;
+    let permuted = ins.call(&permute_op, perm_args.as_ref())?;
 
     // view(permuted, (N, C*r*r, H//r, W//r))
     let shape2 = pyo3::types::PyList::new_bound(py, [n, c * r * r, h_out, w_out]);
     let view2_args = PyTuple::new_bound(py, &[permuted.as_ref(), shape2.as_ref()]);
-    let result = insert_call_before(py, graph, node, &view_op, view2_args.as_ref(), node)?;
+    let result = ins.call(&view_op, view2_args.as_ref())?;
 
     // Copy original node's meta onto the final result
     fx_utils::copy_meta(py, node, &result)?;

@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-use crate::fx_decompose_ops::{insert_call_before, propagate_qparams, resolve_aten_op};
+use crate::fx_decompose_ops::{propagate_qparams, resolve_aten_op, NodeInserter};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_utils;
 
@@ -177,9 +177,11 @@ fn decompose_single_index_tensor<'py>(
         .get_item("val")?
         .getattr("dtype")?;
 
+    let ins = NodeInserter::before(py, graph, node);
+
     let x_shape_1kc = pyo3::types::PyList::new_bound(py, [1i64, k, c]);
     let x_view_args = PyTuple::new_bound(py, &[x.as_ref(), x_shape_1kc.as_ref()]);
-    let x_1kc = insert_call_before(py, graph, node, &view_op, x_view_args.as_ref(), node)?;
+    let x_1kc = ins.call(&view_op, x_view_args.as_ref())?;
     propagate_qparams(x, &x_1kc)?;
 
     let mut lin_w: Option<Bound<'py, PyAny>> = None;
@@ -196,25 +198,17 @@ fn decompose_single_index_tensor<'py>(
             let aligned_shape_py = pyo3::types::PyList::new_bound(py, aligned_shape);
             let idx_aligned_args =
                 PyTuple::new_bound(py, &[idx_current.as_ref(), aligned_shape_py.as_ref()]);
-            idx_current =
-                insert_call_before(py, graph, node, &view_op, idx_aligned_args.as_ref(), node)?;
+            idx_current = ins.call(&view_op, idx_aligned_args.as_ref())?;
         }
 
         let broadcast_py = pyo3::types::PyList::new_bound(py, broadcast.iter().copied());
         let idx_broadcast_args =
             PyTuple::new_bound(py, &[idx_current.as_ref(), broadcast_py.as_ref()]);
-        let idx_broadcast = insert_call_before(
-            py,
-            graph,
-            node,
-            &expand_op,
-            idx_broadcast_args.as_ref(),
-            node,
-        )?;
+        let idx_broadcast = ins.call(&expand_op, idx_broadcast_args.as_ref())?;
 
         let idx_shape_w = pyo3::types::PyList::new_bound(py, [w]);
         let idx_view_args = PyTuple::new_bound(py, &[idx_broadcast.as_ref(), idx_shape_w.as_ref()]);
-        let idx_flat = insert_call_before(py, graph, node, &view_op, idx_view_args.as_ref(), node)?;
+        let idx_flat = ins.call(&view_op, idx_view_args.as_ref())?;
 
         let scale_const = insert_full_before(
             py,
@@ -227,20 +221,13 @@ fn decompose_single_index_tensor<'py>(
             &index_dtype,
         )?;
         let idx_scaled_args = PyTuple::new_bound(py, &[idx_flat.as_ref(), scale_const.as_ref()]);
-        let idx_scaled = insert_call_before(
-            py,
-            graph,
-            node,
-            &mul_tensor_op,
-            idx_scaled_args.as_ref(),
-            node,
-        )?;
+        let idx_scaled = ins.call(&mul_tensor_op, idx_scaled_args.as_ref())?;
 
         lin_w = Some(match lin_w {
             None => idx_scaled,
             Some(prev) => {
                 let add_args = PyTuple::new_bound(py, &[prev.as_ref(), idx_scaled.as_ref()]);
-                insert_call_before(py, graph, node, &add_tensor_op, add_args.as_ref(), node)?
+                ins.call(&add_tensor_op, add_args.as_ref())?
             }
         });
     }
@@ -253,17 +240,10 @@ fn decompose_single_index_tensor<'py>(
         py,
         &[lin_w.as_ref(), 0i64.into_py(py).into_bound(py).as_ref()],
     );
-    let idx_1w = insert_call_before(
-        py,
-        graph,
-        node,
-        &unsqueeze_op,
-        unsqueeze_args.as_ref(),
-        node,
-    )?;
+    let idx_1w = ins.call(&unsqueeze_op, unsqueeze_args.as_ref())?;
 
     let gather_args = PyTuple::new_bound(py, &[x_1kc.as_ref(), idx_1w.as_ref()]);
-    let gathered = insert_call_before(py, graph, node, &gather_op, gather_args.as_ref(), node)?;
+    let gathered = ins.call(&gather_op, gather_args.as_ref())?;
     {
         let gathered_meta = gathered.getattr("meta")?;
         set_tensor_meta_val_shape(&x_meta, &gathered_meta, &[1, w, c])?;
@@ -277,7 +257,7 @@ fn decompose_single_index_tensor<'py>(
         .collect();
     let out_shape_py = pyo3::types::PyList::new_bound(py, out_shape.iter().copied());
     let out_view_args = PyTuple::new_bound(py, &[gathered.as_ref(), out_shape_py.as_ref()]);
-    let out = insert_call_before(py, graph, node, &view_op, out_view_args.as_ref(), node)?;
+    let out = ins.call(&view_op, out_view_args.as_ref())?;
     {
         let out_meta = out.getattr("meta")?;
         set_tensor_meta_val_shape(&x_meta, &out_meta, &out_shape)?;

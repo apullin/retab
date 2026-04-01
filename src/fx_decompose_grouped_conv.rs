@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
+use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
 use crate::fx_graph::FxGraphModule;
 
 fn is_convolution(target: &str) -> bool {
@@ -384,6 +384,7 @@ fn decompose_grouped_conv<'py>(
         resolve_aten_op(py, "convolution.default")?
     };
 
+    let ins = NodeInserter::before(py, graph, node);
     let mut output_slices: Vec<Bound<'py, PyAny>> = Vec::new();
 
     for i in 0..groups {
@@ -399,14 +400,7 @@ fn decompose_grouped_conv<'py>(
                 in_stop.into_py(py).into_bound(py).as_ref(),
             ],
         );
-        let input_slice = insert_call_before(
-            py,
-            graph,
-            node,
-            &slice_op,
-            input_slice_args.as_ref(),
-            input_node,
-        )?;
+        let input_slice = ins.clone().meta_from(input_node).call(&slice_op, input_slice_args.as_ref())?;
 
         // Slice weight along dim 0 (output channels for normal, input channels for transposed)
         let (w_start, w_stop) = if transposed {
@@ -423,14 +417,7 @@ fn decompose_grouped_conv<'py>(
                 w_stop.into_py(py).into_bound(py).as_ref(),
             ],
         );
-        let weight_slice = insert_call_before(
-            py,
-            graph,
-            node,
-            &slice_op,
-            weight_slice_args.as_ref(),
-            weight_node,
-        )?;
+        let weight_slice = ins.clone().meta_from(weight_node).call(&slice_op, weight_slice_args.as_ref())?;
 
         // Slice bias along dim 0 (output channels)
         let bias_slice = if bias_node.is_none() {
@@ -447,15 +434,7 @@ fn decompose_grouped_conv<'py>(
                     b_stop.into_py(py).into_bound(py).as_ref(),
                 ],
             );
-            let bias_slice = insert_call_before(
-                py,
-                graph,
-                node,
-                &slice_op,
-                bias_slice_args.as_ref(),
-                bias_node,
-            )?;
-            bias_slice
+            ins.clone().meta_from(bias_node).call(&slice_op, bias_slice_args.as_ref())?
         };
 
         // Build conv args with groups=1
@@ -492,7 +471,7 @@ fn decompose_grouped_conv<'py>(
             PyTuple::new_bound(py, &conv_arg_vec)
         };
 
-        let conv_node = insert_call_before(py, graph, node, &conv_op, conv_args.as_ref(), node)?;
+        let conv_node = ins.call(&conv_op, conv_args.as_ref())?;
         configure_grouped_conv_qparams(py, node, &conv_node, i, output_slice_size, transposed)?;
         output_slices.push(conv_node);
     }
@@ -506,7 +485,7 @@ fn decompose_grouped_conv<'py>(
             1i64.into_py(py).into_bound(py).as_ref(),
         ],
     );
-    let cat_node = insert_call_before(py, graph, node, &cat_op, cat_args.as_ref(), node)?;
+    let cat_node = ins.call(&cat_op, cat_args.as_ref())?;
     let cat_meta = cat_node.getattr("meta")?;
     restamp_grouped_cat_qparams(py, &cat_meta, &output_slices)?;
     log_grouped_cat_meta(&cat_node, &output_slices)?;

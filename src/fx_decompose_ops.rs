@@ -207,23 +207,6 @@ impl<'py> NodeInserter<'py> {
     }
 }
 
-/// Helper: insert a call_function node before `ref_node` using graph.inserting_before.
-/// Copies meta from `meta_src` and refreshes the FakeTensor if possible.
-///
-/// Thin wrapper around [`NodeInserter`] for backwards compatibility.
-pub fn insert_call_before<'py>(
-    py: Python<'py>,
-    graph: &Bound<'py, PyAny>,
-    ref_node: &Bound<'py, PyAny>,
-    target: &Bound<'py, PyAny>,
-    args: &Bound<'py, PyAny>,
-    meta_src: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyAny>> {
-    NodeInserter::before(py, graph, ref_node)
-        .meta_from(meta_src)
-        .call(target, args)
-}
-
 /// Propagate qparams from a source node to a target node.
 /// Sets input_qparams and output_qparams on the target's meta.
 /// For intermediate nodes in a decomposition, use the source's qparams.
@@ -350,35 +333,37 @@ fn decompose_atanh<'py>(
     let input_shape = FxGraphModule::node_shape(x).unwrap_or_else(|_| vec![1]);
     let shape_tuple = PyTuple::new_bound(py, input_shape.iter().copied());
 
+    let ins = NodeInserter::before(py, graph, node);
+
     // Create constant 1.0
     let one_val = py_float(py, 1.0)?;
     let one_args = PyTuple::new_bound(py, &[shape_tuple.as_ref(), one_val.as_ref()]);
-    let one = insert_call_before(py, graph, node, &full_op, one_args.as_ref(), node)?;
+    let one = ins.call(&full_op, one_args.as_ref())?;
 
     // Create constant 0.5
     let half_val = py_float(py, 0.5)?;
     let half_args = PyTuple::new_bound(py, &[shape_tuple.as_ref(), half_val.as_ref()]);
-    let half = insert_call_before(py, graph, node, &full_op, half_args.as_ref(), node)?;
+    let half = ins.call(&full_op, half_args.as_ref())?;
 
     // one_plus_x = add(1, x) = 1 + x
     let one_plus_args = PyTuple::new_bound(py, &[one.as_ref(), x.as_ref()]);
-    let one_plus_x = insert_call_before(py, graph, node, &add_op, one_plus_args.as_ref(), node)?;
+    let one_plus_x = ins.call(&add_op, one_plus_args.as_ref())?;
 
     // one_minus_x = sub(1, x) = 1 - x
     let one_minus_args = PyTuple::new_bound(py, &[one.as_ref(), x.as_ref()]);
-    let one_minus_x = insert_call_before(py, graph, node, &sub_op, one_minus_args.as_ref(), node)?;
+    let one_minus_x = ins.call(&sub_op, one_minus_args.as_ref())?;
 
     // ratio = div(one_plus_x, one_minus_x)
     let div_args = PyTuple::new_bound(py, &[one_plus_x.as_ref(), one_minus_x.as_ref()]);
-    let ratio = insert_call_before(py, graph, node, &div_op, div_args.as_ref(), node)?;
+    let ratio = ins.call(&div_op, div_args.as_ref())?;
 
     // log_ratio = log(ratio)
     let log_args = PyTuple::new_bound(py, &[ratio.as_ref()]);
-    let log_ratio = insert_call_before(py, graph, node, &log_op, log_args.as_ref(), node)?;
+    let log_ratio = ins.call(&log_op, log_args.as_ref())?;
 
     // result = mul(0.5, log_ratio)
     let mul_args = PyTuple::new_bound(py, &[half.as_ref(), log_ratio.as_ref()]);
-    let result = insert_call_before(py, graph, node, &mul_op, mul_args.as_ref(), node)?;
+    let result = ins.call(&mul_op, mul_args.as_ref())?;
 
     // Copy original node's meta (with qparams) onto the final result
     let copy_mod = py.import_bound("copy")?;
@@ -433,25 +418,20 @@ fn decompose_stack<'py>(
 
     let dim_py = py_int(py, dim)?;
 
+    let ins = NodeInserter::before(py, graph, node);
+
     // Unsqueeze each tensor at the stack dimension
     let mut unsqueezed: Vec<Bound<'_, PyAny>> = Vec::with_capacity(tensors.len());
     for tensor in &tensors {
         let unsqueeze_args = PyTuple::new_bound(py, &[tensor.as_ref(), dim_py.as_ref()]);
-        let unsq = insert_call_before(
-            py,
-            graph,
-            node,
-            &unsqueeze_op,
-            unsqueeze_args.as_ref(),
-            node,
-        )?;
+        let unsq = ins.call(&unsqueeze_op, unsqueeze_args.as_ref())?;
         unsqueezed.push(unsq);
     }
 
     // Cat the unsqueezed tensors along dim
     let unsqueezed_list = PyList::new_bound(py, &unsqueezed);
     let cat_args = PyTuple::new_bound(py, &[unsqueezed_list.as_ref(), dim_py.as_ref()]);
-    let result = insert_call_before(py, graph, node, &cat_op, cat_args.as_ref(), node)?;
+    let result = ins.call(&cat_op, cat_args.as_ref())?;
 
     let copy_mod = py.import_bound("copy")?;
     let final_meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
@@ -530,6 +510,7 @@ fn decompose_unbind<'py>(
     for (getitem_node, idx) in &getitem_users {
         let idx_py = py_int(py, *idx)?;
         let idx_plus_one_py = py_int(py, idx + 1)?;
+        let ins = NodeInserter::before(py, graph, getitem_node).meta_from(node);
 
         // slice_copy(x, dim, idx, idx+1)
         let slice_args = PyTuple::new_bound(
@@ -541,26 +522,12 @@ fn decompose_unbind<'py>(
                 idx_plus_one_py.as_ref(),
             ],
         );
-        let sliced = insert_call_before(
-            py,
-            graph,
-            getitem_node,
-            &slice_op,
-            slice_args.as_ref(),
-            node,
-        )?;
+        let sliced = ins.call(&slice_op, slice_args.as_ref())?;
 
         // squeeze_copy(sliced, [dim])
         let dims_list = PyList::new_bound(py, &[norm_dim as i64]);
         let squeeze_args = PyTuple::new_bound(py, &[sliced.as_ref(), dims_list.as_ref()]);
-        let squeezed = insert_call_before(
-            py,
-            graph,
-            getitem_node,
-            &squeeze_op,
-            squeeze_args.as_ref(),
-            node,
-        )?;
+        let squeezed = ins.call(&squeeze_op, squeeze_args.as_ref())?;
 
         // Copy getitem's meta to the squeezed node for correct shape
         let gi_meta = copy_mod.call_method1("copy", (getitem_node.getattr("meta")?,))?;

@@ -1,9 +1,8 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::fx_decompose_ops::resolve_aten_op;
+use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
 use crate::fx_graph::FxGraphModule;
-use crate::fx_utils;
 
 crate::fx_pass!(
     /// Mirror the Python Arm backend's cumsum lowering:
@@ -16,42 +15,6 @@ crate::fx_pass!(
     }
 );
 
-fn copied_meta<'py>(
-    py: Python<'py>,
-    node: &Bound<'py, PyAny>,
-    clear_qparams: bool,
-) -> PyResult<Bound<'py, PyAny>> {
-    let copy_mod = py.import_bound("copy")?;
-    let meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    if clear_qparams {
-        meta.set_item("input_qparams", PyDict::new_bound(py))?;
-        meta.set_item("output_qparams", PyDict::new_bound(py))?;
-    }
-    Ok(meta)
-}
-
-fn insert_call_before<'py>(
-    py: Python<'py>,
-    graph: &Bound<'py, PyAny>,
-    ref_node: &Bound<'py, PyAny>,
-    target: &Bound<'py, PyAny>,
-    args: &Bound<'py, PyTuple>,
-    kwargs: Option<&Bound<'py, PyDict>>,
-    meta_src: &Bound<'py, PyAny>,
-    clear_qparams: bool,
-) -> PyResult<Bound<'py, PyAny>> {
-    let inserting = graph.call_method1("inserting_before", (ref_node,))?;
-    inserting.call_method0("__enter__")?;
-    let new_node = match kwargs {
-        Some(kwargs) => graph.call_method1("call_function", (target, args, kwargs))?,
-        None => graph.call_method1("call_function", (target, args))?,
-    };
-    let meta_copy = copied_meta(py, meta_src, clear_qparams)?;
-    new_node.setattr("meta", &meta_copy)?;
-    let _ = fx_utils::refresh_fake_tensor(py, &new_node);
-    inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
-    Ok(new_node)
-}
 
 fn make_qparam<'py>(
     py: Python<'py>,
@@ -136,10 +99,11 @@ fn decompose_cumsum<'py>(
     let conv_op = resolve_aten_op(py, "convolution.default")?;
     let slice_op = resolve_aten_op(py, "slice_copy.Tensor")?;
     let full_op = resolve_aten_op(py, "full.default")?;
+    let ins = NodeInserter::before(py, graph, node);
 
     let view_shape_py = PyList::new_bound(py, conv_shape.iter().copied());
     let view_args = PyTuple::new_bound(py, &[input_node.as_ref(), view_shape_py.as_ref()]);
-    let view_node = insert_call_before(py, graph, node, &view_op, &view_args, None, node, true)?;
+    let view_node = ins.call(&view_op, view_args.as_ref())?;
 
     let input_meta = input_node.getattr("meta")?;
     let input_val = input_meta.call_method1("get", ("val",))?;
@@ -161,16 +125,7 @@ fn decompose_cumsum<'py>(
             weight_kwargs.set_item("device", device)?;
         }
     }
-    let weight_node = insert_call_before(
-        py,
-        graph,
-        node,
-        &full_op,
-        &weight_args,
-        Some(&weight_kwargs),
-        node,
-        true,
-    )?;
+    let weight_node = ins.call_with_kwargs(&full_op, weight_args.as_ref(), &weight_kwargs)?;
 
     let stride_py = PyList::new_bound(py, [1i64, 1i64]);
     let pad_py = PyList::new_bound(py, pad_shape.iter().copied());
@@ -192,7 +147,7 @@ fn decompose_cumsum<'py>(
             groups_one.as_ref(),
         ],
     );
-    let conv_node = insert_call_before(py, graph, node, &conv_op, &conv_args, None, node, false)?;
+    let conv_node = ins.clone().keep_qparams().call(&conv_op, conv_args.as_ref())?;
 
     let node_meta = node.getattr("meta")?;
     let original_input_qparams = node_meta.call_method1("get", ("input_qparams",))?;
@@ -221,21 +176,12 @@ fn decompose_cumsum<'py>(
             end_py.as_ref(),
         ],
     );
-    let slice_node = insert_call_before(py, graph, node, &slice_op, &slice_args, None, node, true)?;
+    let slice_node = ins.call(&slice_op, slice_args.as_ref())?;
 
     let original_shape_py = PyList::new_bound(py, original_shape.iter().copied());
     let view_original_args =
         PyTuple::new_bound(py, &[slice_node.as_ref(), original_shape_py.as_ref()]);
-    let result = insert_call_before(
-        py,
-        graph,
-        node,
-        &view_op,
-        &view_original_args,
-        None,
-        node,
-        true,
-    )?;
+    let result = ins.call(&view_op, view_original_args.as_ref())?;
 
     FxGraphModule::replace_all_uses_with(node, &result)?;
     gm.erase_node(node)?;

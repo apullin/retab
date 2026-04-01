@@ -1,9 +1,8 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::fx_decompose_ops::resolve_aten_op;
+use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
 use crate::fx_graph::FxGraphModule;
-use crate::fx_utils;
 
 crate::fx_pass!(
     /// Mirror the Python Arm backend's non-unit-step slice_copy decomposition:
@@ -18,14 +17,6 @@ crate::fx_pass!(
         Ok(())
     }
 );
-
-fn copied_meta<'py>(py: Python<'py>, node: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-    let copy_mod = py.import_bound("copy")?;
-    let meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    meta.set_item("input_qparams", PyDict::new_bound(py))?;
-    meta.set_item("output_qparams", PyDict::new_bound(py))?;
-    Ok(meta)
-}
 
 fn copy_first_output_qparams<'py>(
     py: Python<'py>,
@@ -59,17 +50,12 @@ fn insert_call_before<'py>(
     meta_src: &Bound<'py, PyAny>,
     qparam_sources: &[&Bound<'py, PyAny>],
 ) -> PyResult<Bound<'py, PyAny>> {
-    let inserting = graph.call_method1("inserting_before", (ref_node,))?;
-    inserting.call_method0("__enter__")?;
+    let ins = NodeInserter::before(py, graph, ref_node).meta_from(meta_src);
     let new_node = match kwargs {
-        Some(kwargs) => graph.call_method1("call_function", (target, args, kwargs))?,
-        None => graph.call_method1("call_function", (target, args))?,
+        Some(kw) => ins.call_with_kwargs(target, args.as_ref(), kw)?,
+        None => ins.call(target, args.as_ref())?,
     };
-    let meta_copy = copied_meta(py, meta_src)?;
-    copy_first_output_qparams(py, &meta_copy, qparam_sources)?;
-    new_node.setattr("meta", &meta_copy)?;
-    let _ = fx_utils::refresh_fake_tensor(py, &new_node);
-    inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
+    copy_first_output_qparams(py, &new_node.getattr("meta")?, qparam_sources)?;
     Ok(new_node)
 }
 

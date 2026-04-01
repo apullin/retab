@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
+use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_utils;
 
@@ -21,39 +21,6 @@ fn resolve_tosa_gather_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     )
 }
 
-fn copied_meta<'py>(
-    py: Python<'py>,
-    node: &Bound<'py, PyAny>,
-    clear_qparams: bool,
-) -> PyResult<Bound<'py, PyAny>> {
-    let copy_mod = py.import_bound("copy")?;
-    let meta = copy_mod.call_method1("copy", (node.getattr("meta")?,))?;
-    if clear_qparams {
-        meta.set_item("input_qparams", PyDict::new_bound(py))?;
-        meta.set_item("output_qparams", PyDict::new_bound(py))?;
-    }
-    Ok(meta)
-}
-
-fn insert_call_before_with_kwargs<'py>(
-    py: Python<'py>,
-    graph: &Bound<'py, PyAny>,
-    ref_node: &Bound<'py, PyAny>,
-    target: &Bound<'py, PyAny>,
-    args: &Bound<'py, PyAny>,
-    kwargs: &Bound<'py, PyDict>,
-    meta_src: &Bound<'py, PyAny>,
-    clear_qparams: bool,
-) -> PyResult<Bound<'py, PyAny>> {
-    let inserting = graph.call_method1("inserting_before", (ref_node,))?;
-    inserting.call_method0("__enter__")?;
-    let new_node = graph.call_method1("call_function", (target, args, kwargs))?;
-    let meta_copy = copied_meta(py, meta_src, clear_qparams)?;
-    new_node.setattr("meta", &meta_copy)?;
-    let _ = fx_utils::refresh_fake_tensor(py, &new_node);
-    inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
-    Ok(new_node)
-}
 
 fn set_tensor_meta_val_shape(
     template_meta: &Bound<'_, PyAny>,
@@ -147,33 +114,24 @@ fn canonicalize_gather<'py>(
     let permute_copy_op = resolve_aten_op(py, "permute_copy.default")?;
     let gather_op = resolve_tosa_gather_op(py)?;
 
+    let ins = NodeInserter::before(py, graph, node);
+
     let mut values_in = x.clone();
     if needs_bool_cast {
         let cast_args = PyTuple::new_bound(py, &[x.as_ref()]);
         let cast_kwargs = PyDict::new_bound(py);
         cast_kwargs.set_item("dtype", int8_dtype)?;
-        values_in = insert_call_before_with_kwargs(
-            py,
-            graph,
-            node,
-            &to_copy_op,
-            cast_args.as_ref(),
-            &cast_kwargs,
-            x,
-            true,
-        )?;
+        values_in = ins.clone().meta_from(x).call_with_kwargs(&to_copy_op, cast_args.as_ref(), &cast_kwargs)?;
     }
 
     let gathered = if x_shape.len() == 2 {
         let values_shape = PyList::new_bound(py, [n, k, 1]);
         let values_args = PyTuple::new_bound(py, &[values_in.as_ref(), values_shape.as_ref()]);
-        let values_3d =
-            insert_call_before(py, graph, node, &view_op, values_args.as_ref(), &values_in)?;
+        let values_3d = ins.clone().meta_from(&values_in).call(&view_op, values_args.as_ref())?;
         copy_qparams_only(&values_in.getattr("meta")?, &values_3d.getattr("meta")?)?;
 
         let gather_args = PyTuple::new_bound(py, &[values_3d.as_ref(), index.as_ref()]);
-        let gathered_3d =
-            insert_call_before(py, graph, node, &gather_op, gather_args.as_ref(), node)?;
+        let gathered_3d = ins.call(&gather_op, gather_args.as_ref())?;
         {
             let gather_meta = gathered_3d.getattr("meta")?;
             let gather_template_meta = values_in.getattr("meta")?;
@@ -183,7 +141,7 @@ fn canonicalize_gather<'py>(
 
         let out_shape = PyList::new_bound(py, [n, w]);
         let out_args = PyTuple::new_bound(py, &[gathered_3d.as_ref(), out_shape.as_ref()]);
-        let out = insert_call_before(py, graph, node, &view_op, out_args.as_ref(), &gathered_3d)?;
+        let out = ins.clone().meta_from(&gathered_3d).call(&view_op, out_args.as_ref())?;
         copy_qparams_only(&gathered_3d.getattr("meta")?, &out.getattr("meta")?)?;
         out
     } else {
@@ -191,14 +149,7 @@ fn canonicalize_gather<'py>(
 
         let values_perm = PyList::new_bound(py, [0, 2, 1]);
         let values_perm_args = PyTuple::new_bound(py, &[values_in.as_ref(), values_perm.as_ref()]);
-        let values_permuted = insert_call_before(
-            py,
-            graph,
-            node,
-            &permute_copy_op,
-            values_perm_args.as_ref(),
-            &values_in,
-        )?;
+        let values_permuted = ins.clone().meta_from(&values_in).call(&permute_copy_op, values_perm_args.as_ref())?;
         copy_qparams_only(
             &values_in.getattr("meta")?,
             &values_permuted.getattr("meta")?,
@@ -207,14 +158,7 @@ fn canonicalize_gather<'py>(
         let values_shape = PyList::new_bound(py, [n * c, k, 1]);
         let values_shape_args =
             PyTuple::new_bound(py, &[values_permuted.as_ref(), values_shape.as_ref()]);
-        let values_reshaped = insert_call_before(
-            py,
-            graph,
-            node,
-            &view_op,
-            values_shape_args.as_ref(),
-            &values_permuted,
-        )?;
+        let values_reshaped = ins.clone().meta_from(&values_permuted).call(&view_op, values_shape_args.as_ref())?;
         copy_qparams_only(
             &values_permuted.getattr("meta")?,
             &values_reshaped.getattr("meta")?,
@@ -222,31 +166,16 @@ fn canonicalize_gather<'py>(
 
         let indices_perm = PyList::new_bound(py, [0, 2, 1]);
         let indices_perm_args = PyTuple::new_bound(py, &[index.as_ref(), indices_perm.as_ref()]);
-        let indices_permuted = insert_call_before(
-            py,
-            graph,
-            node,
-            &permute_copy_op,
-            indices_perm_args.as_ref(),
-            index,
-        )?;
+        let indices_permuted = ins.clone().meta_from(index).call(&permute_copy_op, indices_perm_args.as_ref())?;
 
         let indices_shape = PyList::new_bound(py, [n * c, w]);
         let indices_shape_args =
             PyTuple::new_bound(py, &[indices_permuted.as_ref(), indices_shape.as_ref()]);
-        let indices_reshaped = insert_call_before(
-            py,
-            graph,
-            node,
-            &view_op,
-            indices_shape_args.as_ref(),
-            &indices_permuted,
-        )?;
+        let indices_reshaped = ins.clone().meta_from(&indices_permuted).call(&view_op, indices_shape_args.as_ref())?;
 
         let gather_args =
             PyTuple::new_bound(py, &[values_reshaped.as_ref(), indices_reshaped.as_ref()]);
-        let gathered_raw =
-            insert_call_before(py, graph, node, &gather_op, gather_args.as_ref(), node)?;
+        let gathered_raw = ins.call(&gather_op, gather_args.as_ref())?;
         {
             let gather_meta = gathered_raw.getattr("meta")?;
             let gather_template_meta = values_in.getattr("meta")?;
@@ -257,14 +186,7 @@ fn canonicalize_gather<'py>(
         let gathered_shape = PyList::new_bound(py, [n, c, w]);
         let gathered_shape_args =
             PyTuple::new_bound(py, &[gathered_raw.as_ref(), gathered_shape.as_ref()]);
-        let gathered_reshaped = insert_call_before(
-            py,
-            graph,
-            node,
-            &view_op,
-            gathered_shape_args.as_ref(),
-            &gathered_raw,
-        )?;
+        let gathered_reshaped = ins.clone().meta_from(&gathered_raw).call(&view_op, gathered_shape_args.as_ref())?;
         copy_qparams_only(
             &gathered_raw.getattr("meta")?,
             &gathered_reshaped.getattr("meta")?,
@@ -273,32 +195,17 @@ fn canonicalize_gather<'py>(
         let out_perm = PyList::new_bound(py, [0, 2, 1]);
         let out_perm_args =
             PyTuple::new_bound(py, &[gathered_reshaped.as_ref(), out_perm.as_ref()]);
-        let out = insert_call_before(
-            py,
-            graph,
-            node,
-            &permute_copy_op,
-            out_perm_args.as_ref(),
-            &gathered_reshaped,
-        )?;
+        let out = ins.clone().meta_from(&gathered_reshaped).call(&permute_copy_op, out_perm_args.as_ref())?;
         copy_qparams_only(&gathered_reshaped.getattr("meta")?, &out.getattr("meta")?)?;
         out
     };
 
+    let ins = NodeInserter::before(py, graph, node);
     let result = if needs_bool_cast {
         let cast_args = PyTuple::new_bound(py, &[gathered.as_ref()]);
         let cast_kwargs = PyDict::new_bound(py);
         cast_kwargs.set_item("dtype", bool_dtype)?;
-        insert_call_before_with_kwargs(
-            py,
-            graph,
-            node,
-            &to_copy_op,
-            cast_args.as_ref(),
-            &cast_kwargs,
-            &gathered,
-            true,
-        )?
+        ins.clone().meta_from(&gathered).call_with_kwargs(&to_copy_op, cast_args.as_ref(), &cast_kwargs)?
     } else {
         gathered
     };

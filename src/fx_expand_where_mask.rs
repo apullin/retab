@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyTuple};
 
-use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
+use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_utils;
 
@@ -57,27 +57,21 @@ fn expand_where_mask<'py>(
     let view_op = resolve_aten_op(py, "view_copy.default")?;
     let expand_op = resolve_aten_op(py, "expand_copy.default")?;
     let where_op = resolve_aten_op(py, "where.self")?;
+    let ins = NodeInserter::before(py, graph, node);
 
     let view_shape = PyList::new_bound(py, padded_mask_shape.iter().copied());
     let view_args = PyTuple::new_bound(py, &[mask.as_ref(), view_shape.as_ref()]);
-    let viewed_mask = insert_call_before(py, graph, node, &view_op, view_args.as_ref(), mask)?;
+    let viewed_mask = ins.clone().meta_from(mask).call(&view_op, view_args.as_ref())?;
 
     let expand_shape = PyList::new_bound(py, output_shape.iter().copied());
     let expand_args = PyTuple::new_bound(py, &[viewed_mask.as_ref(), expand_shape.as_ref()]);
-    let expanded_mask = insert_call_before(
-        py,
-        graph,
-        node,
-        &expand_op,
-        expand_args.as_ref(),
-        &viewed_mask,
-    )?;
+    let expanded_mask = ins.clone().meta_from(&viewed_mask).call(&expand_op, expand_args.as_ref())?;
 
     let where_args = PyTuple::new_bound(
         py,
         &[expanded_mask.as_ref(), args[1].as_ref(), args[2].as_ref()],
     );
-    let result_node = insert_call_before(py, graph, node, &where_op, where_args.as_ref(), node)?;
+    let result_node = ins.call(&where_op, where_args.as_ref())?;
 
     fx_utils::copy_meta_and_refresh(py, node, &result_node)?;
 
