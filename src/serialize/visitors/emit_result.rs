@@ -45,4 +45,61 @@ impl EmitResult {
         );
         name
     }
+
+    // ── Chainable builder helpers for multi-op decompositions ──────────
+
+    /// Emit a unary op: one input -> one output (same shape).
+    pub fn unary(
+        &mut self,
+        name: String,
+        shape: Vec<i32>,
+        dtype: DType,
+        op: Op,
+        attr: Attribute,
+        input: String,
+    ) -> &mut Self {
+        self.push_output_op(TosaTensor::new(name, shape, dtype), op, attr, vec![input]);
+        self
+    }
+
+    /// Emit a binary op: two inputs -> one output (same shape as first).
+    pub fn binary(
+        &mut self,
+        name: String,
+        shape: Vec<i32>,
+        dtype: DType,
+        op: Op,
+        attr: Attribute,
+        lhs: String,
+        rhs: String,
+    ) -> &mut Self {
+        self.push_output_op(
+            TosaTensor::new(name, shape, dtype),
+            op,
+            attr,
+            vec![lhs, rhs],
+        );
+        self
+    }
+
+    /// Emit a ternary op (e.g. MUL with shift, SELECT): three inputs -> one output.
+    pub fn ternary(
+        &mut self,
+        name: String,
+        shape: Vec<i32>,
+        dtype: DType,
+        op: Op,
+        attr: Attribute,
+        a: String,
+        b: String,
+        c: String,
+    ) -> &mut Self {
+        self.push_output_op(
+            TosaTensor::new(name, shape, dtype),
+            op,
+            attr,
+            vec![a, b, c],
+        );
+        self
+    }
 }

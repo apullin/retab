@@ -156,102 +156,25 @@ pub(in crate::serialize::visitors) fn emit_round(ctx: &EmitContext) -> EmitResul
         push_inline_const(&mut result, tensor);
     }
 
+    let s = spec.output_shape.clone();
+    let d = spec.base_dtype;
     let shift_name = push_shift_const(&mut result, &node.name);
 
-    result.push_output_op(
-        temp_tensor(floor_x_name.clone(), spec.output_shape.clone(), spec.base_dtype),
-        Op::Floor,
-        Attribute::Floor(FloorAttribute),
-        vec![spec.input_name.clone()],
-    );
-    result.push_output_op(
-        temp_tensor(frac_name.clone(), spec.output_shape.clone(), spec.base_dtype),
-        Op::Sub,
-        Attribute::Sub(SubAttribute),
-        vec![spec.input_name.clone(), floor_x_name.clone()],
-    );
-    result.push_output_op(
-        temp_tensor(is_tie_name.clone(), spec.output_shape.clone(), DType::Bool),
-        Op::Equal,
-        Attribute::Equal(EqualAttribute),
-        vec![frac_name, half_name.clone()],
-    );
-    result.push_output_op(
-        temp_tensor(
-            plus_half_name.clone(),
-            spec.output_shape.clone(),
-            spec.base_dtype,
-        ),
-        Op::Add,
-        Attribute::Add(AddAttribute),
-        vec![spec.input_name.clone(), half_name.clone()],
-    );
-    result.push_output_op(
-        temp_tensor(round_up_name.clone(), spec.output_shape.clone(), spec.base_dtype),
-        Op::Floor,
-        Attribute::Floor(FloorAttribute),
-        vec![plus_half_name],
-    );
-    result.push_output_op(
-        temp_tensor(
-            half_floor_mul_name.clone(),
-            spec.output_shape.clone(),
-            spec.base_dtype,
-        ),
-        Op::Mul,
-        Attribute::Mul(MulAttribute { shift: 0 }),
-        vec![floor_x_name.clone(), half_name, shift_name.clone()],
-    );
-    result.push_output_op(
-        temp_tensor(
-            half_floor_name.clone(),
-            spec.output_shape.clone(),
-            spec.base_dtype,
-        ),
-        Op::Floor,
-        Attribute::Floor(FloorAttribute),
-        vec![half_floor_mul_name],
-    );
-    result.push_output_op(
-        temp_tensor(
-            even_floor_name.clone(),
-            spec.output_shape.clone(),
-            spec.base_dtype,
-        ),
-        Op::Mul,
-        Attribute::Mul(MulAttribute { shift: 0 }),
-        vec![half_floor_name, two_name, shift_name],
-    );
-    result.push_output_op(
-        temp_tensor(
-            floor_is_even_name.clone(),
-            spec.output_shape.clone(),
-            DType::Bool,
-        ),
-        Op::Equal,
-        Attribute::Equal(EqualAttribute),
-        vec![floor_x_name.clone(), even_floor_name],
-    );
-    result.push_output_op(
-        temp_tensor(
-            floor_plus_one_name.clone(),
-            spec.output_shape.clone(),
-            spec.base_dtype,
-        ),
-        Op::Add,
-        Attribute::Add(AddAttribute),
-        vec![floor_x_name.clone(), one_name],
-    );
-    result.push_output_op(
-        temp_tensor(
-            tie_result_name.clone(),
-            spec.output_shape.clone(),
-            spec.base_dtype,
-        ),
-        Op::Select,
-        Attribute::Select(SelectAttribute),
-        vec![floor_is_even_name, floor_x_name, floor_plus_one_name],
-    );
+    // 12-op banker's-rounding decomposition using the chainable builder API.
+    result
+        .unary(floor_x_name.clone(), s.clone(), d, Op::Floor, Attribute::Floor(FloorAttribute), spec.input_name.clone())
+        .binary(frac_name.clone(), s.clone(), d, Op::Sub, Attribute::Sub(SubAttribute), spec.input_name.clone(), floor_x_name.clone())
+        .binary(is_tie_name.clone(), s.clone(), DType::Bool, Op::Equal, Attribute::Equal(EqualAttribute), frac_name, half_name.clone())
+        .binary(plus_half_name.clone(), s.clone(), d, Op::Add, Attribute::Add(AddAttribute), spec.input_name.clone(), half_name.clone())
+        .unary(round_up_name.clone(), s.clone(), d, Op::Floor, Attribute::Floor(FloorAttribute), plus_half_name)
+        .ternary(half_floor_mul_name.clone(), s.clone(), d, Op::Mul, Attribute::Mul(MulAttribute { shift: 0 }), floor_x_name.clone(), half_name, shift_name.clone())
+        .unary(half_floor_name.clone(), s.clone(), d, Op::Floor, Attribute::Floor(FloorAttribute), half_floor_mul_name)
+        .ternary(even_floor_name.clone(), s.clone(), d, Op::Mul, Attribute::Mul(MulAttribute { shift: 0 }), half_floor_name, two_name, shift_name)
+        .binary(floor_is_even_name.clone(), s.clone(), DType::Bool, Op::Equal, Attribute::Equal(EqualAttribute), floor_x_name.clone(), even_floor_name)
+        .binary(floor_plus_one_name.clone(), s.clone(), d, Op::Add, Attribute::Add(AddAttribute), floor_x_name.clone(), one_name)
+        .ternary(tie_result_name.clone(), s.clone(), d, Op::Select, Attribute::Select(SelectAttribute), floor_is_even_name, floor_x_name, floor_plus_one_name);
+
+    // Final output uses the actual output tensor (not a temp), so use push_output_op directly.
     result.push_output_op(
         make_actual_output_tensor(graph, store, node),
         Op::Select,

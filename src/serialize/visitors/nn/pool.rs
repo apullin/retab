@@ -10,6 +10,78 @@ pub(super) fn register(table: &mut EmitterTable) {
     ]);
 }
 
+// Parse pool args once at the function boundary. Downstream max-pool
+// emitters then work with fully-normalised, typed fields instead of
+// repeatedly fishing values out of raw node args.
+#[derive(Debug)]
+struct ParsedPoolSpec {
+    input_names: Vec<String>,
+    kernel: Vec<i32>,
+    stride: Vec<i32>,
+    /// Fully-adjusted 4-element pad (already accounts for ceil_mode).
+    pad: Vec<i32>,
+}
+
+enum PoolArgSource {
+    /// aten positional args (arg_i32_list / arg_bool)
+    Positional,
+    /// tosa kwargs (kwarg_i32_list / kwarg_bool)
+    Keyword,
+}
+
+impl ParsedPoolSpec {
+    fn parse(
+        graph: &Graph,
+        node: &Node,
+        store: &TensorStore,
+        source: PoolArgSource,
+    ) -> Self {
+        let input_names = collect_input_names(graph, node);
+
+        let (raw_kernel, raw_stride, raw_padding, ceil_mode) = match source {
+            PoolArgSource::Positional => (
+                arg_i32_list(node, 1),
+                arg_i32_list(node, 2),
+                arg_i32_list(node, 3),
+                arg_bool(node, 5, false),
+            ),
+            PoolArgSource::Keyword => (
+                kwarg_i32_list(node, "kernel"),
+                kwarg_i32_list(node, "stride"),
+                kwarg_i32_list(node, "pad"),
+                kwarg_bool(node, "ceil_mode", false),
+            ),
+        };
+
+        let kernel = if raw_kernel.is_empty() {
+            vec![2, 2]
+        } else {
+            raw_kernel
+        };
+        let stride = if raw_stride.is_empty() {
+            kernel.clone()
+        } else {
+            raw_stride
+        };
+        let pad = adjusted_max_pool_pad(
+            graph,
+            store,
+            node,
+            &kernel,
+            &stride,
+            &raw_padding,
+            ceil_mode,
+        );
+
+        Self {
+            input_names,
+            kernel,
+            stride,
+            pad,
+        }
+    }
+}
+
 fn adjusted_pool_post_pad(
     input_size: i32,
     kernel_size: i32,
@@ -91,125 +163,37 @@ fn adjusted_max_pool_pad(
 }
 
 pub(in crate::serialize::visitors) fn emit_aten_max_pool2d(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
-    let node = ctx.node;
-    let store = ctx.store;
-    let mut result = EmitResult::default();
-    let output_name = primary_output_name(graph, node);
-    let input_names = collect_input_names(graph, node);
-    let kernel = arg_i32_list(node, 1);
-    let stride = arg_i32_list(node, 2);
-    let padding = arg_i32_list(node, 3);
-    let ceil_mode = arg_bool(node, 5, false);
-
-    let kernel_for_shape = if kernel.is_empty() {
-        vec![2, 2]
-    } else {
-        kernel.clone()
-    };
-    let stride_for_shape = if stride.is_empty() {
-        kernel_for_shape.clone()
-    } else {
-        stride.clone()
-    };
-    let pad = adjusted_max_pool_pad(
-        graph,
-        store,
-        node,
-        &kernel_for_shape,
-        &stride_for_shape,
-        &padding,
-        ceil_mode,
-    );
-    let mut output_tensor = compute_pool_nhwc_output(
-        graph,
-        store,
-        node,
-        &kernel_for_shape,
-        &stride_for_shape,
-        &pad,
-    );
-    output_tensor.name = output_name.clone();
-    result.push_output_op(
-        output_tensor,
-        Op::MaxPool2d,
-        Attribute::MaxPool2d(MaxPool2dAttribute {
-            kernel: if kernel.is_empty() {
-                vec![2, 2]
-            } else {
-                kernel
-            },
-            stride: if stride.is_empty() {
-                kernel_for_shape
-            } else {
-                stride
-            },
-            pad,
-            nan_mode: NanPropagationMode::Propagate,
-        }),
-        input_names,
-    );
-    result
+    let spec = ParsedPoolSpec::parse(ctx.graph, ctx.node, ctx.store, PoolArgSource::Positional);
+    emit_max_pool2d_from_spec(ctx, spec)
 }
 
 pub(in crate::serialize::visitors) fn emit_max_pool2d(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
-    let node = ctx.node;
-    let store = ctx.store;
-    let mut result = EmitResult::default();
-    let output_name = primary_output_name(graph, node);
-    let input_names = collect_input_names(graph, node);
-    let kernel = kwarg_i32_list(node, "kernel");
-    let stride = kwarg_i32_list(node, "stride");
-    let pad = kwarg_i32_list(node, "pad");
-    let ceil_mode = kwarg_bool(node, "ceil_mode", false);
+    let spec = ParsedPoolSpec::parse(ctx.graph, ctx.node, ctx.store, PoolArgSource::Keyword);
+    emit_max_pool2d_from_spec(ctx, spec)
+}
 
-    let kernel_for_shape = if kernel.is_empty() {
-        vec![2, 2]
-    } else {
-        kernel.clone()
-    };
-    let stride_for_shape = if stride.is_empty() {
-        kernel_for_shape.clone()
-    } else {
-        stride.clone()
-    };
-    let pad_for_shape = adjusted_max_pool_pad(
-        graph,
-        store,
-        node,
-        &kernel_for_shape,
-        &stride_for_shape,
-        &pad,
-        ceil_mode,
-    );
+fn emit_max_pool2d_from_spec(ctx: &EmitContext, spec: ParsedPoolSpec) -> EmitResult {
+    let mut result = EmitResult::default();
+    let output_name = primary_output_name(ctx.graph, ctx.node);
     let mut output_tensor = compute_pool_nhwc_output(
-        graph,
-        store,
-        node,
-        &kernel_for_shape,
-        &stride_for_shape,
-        &pad_for_shape,
+        ctx.graph,
+        ctx.store,
+        ctx.node,
+        &spec.kernel,
+        &spec.stride,
+        &spec.pad,
     );
     output_tensor.name = output_name.clone();
     result.push_output_op(
         output_tensor,
         Op::MaxPool2d,
         Attribute::MaxPool2d(MaxPool2dAttribute {
-            kernel: if kernel.is_empty() {
-                vec![2, 2]
-            } else {
-                kernel
-            },
-            stride: if stride.is_empty() {
-                kernel_for_shape
-            } else {
-                stride
-            },
-            pad: pad_for_shape,
+            kernel: spec.kernel,
+            stride: spec.stride,
+            pad: spec.pad,
             nan_mode: NanPropagationMode::Propagate,
         }),
-        input_names,
+        spec.input_names,
     );
     result
 }
