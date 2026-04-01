@@ -880,8 +880,8 @@ fn cast_i64_bytes_to_i32(data: &[u8]) -> Vec<u8> {
 
 /// Fix output shapes for Reshape/View/Flatten nodes and their downstream conv.
 ///
-/// The `decompose_linear_node` in `fx_helpers.py` uses `_create_node` which
-/// copies meta (including `val` FakeTensor) from the original linear node.
+/// The linear decomposition pass (`FxDecomposeLinearPass`) creates nodes whose
+/// meta (including `val` FakeTensor) is copied from the original linear node.
 /// This means the intermediate view_copy and convolution nodes have the linear
 /// output's shape (e.g. `[1, 10]`) instead of their actual output shapes:
 ///   - view_copy(input, [1, 1568, 1, 1]) should have shape [1, 1568, 1, 1]

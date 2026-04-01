@@ -96,6 +96,21 @@ pub fn resolve_aten_op<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, 
     }
 }
 
+/// Resolve an edge-dialect op target by dotted name.
+///
+/// Walks `exir_ops.edge.<name>`, splitting on `.`.  This handles namespaces
+/// like `dim_order_ops._to_dim_order_copy.default` that aren't under `aten`.
+pub fn resolve_edge_op<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    let mut obj = py
+        .import_bound("executorch.exir.dialects._ops")?
+        .getattr("ops")?
+        .getattr("edge")?;
+    for part in name.split('.') {
+        obj = obj.getattr(part)?;
+    }
+    Ok(obj)
+}
+
 /// Resolve the TOSA GATHER op target: `backend.tosa.GATHER.default`.
 pub fn resolve_tosa_gather_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     py.eval_bound(
@@ -103,6 +118,71 @@ pub fn resolve_tosa_gather_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny
         None,
         None,
     )
+}
+
+/// Resolve the TOSA SCATTER op target: `backend.tosa.SCATTER.default`.
+pub fn resolve_tosa_scatter_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    py.eval_bound(
+        "getattr(getattr(getattr(getattr(__import__('executorch.exir.dialects._ops', fromlist=['ops']), 'ops'), 'backend'), 'tosa'), 'SCATTER').default",
+        None,
+        None,
+    )
+}
+
+/// Resolve a TOSA backend op target: `backend.tosa.<NAME>.default`.
+///
+/// Tries `exir_ops.backend.tosa.<uppercase>` first, then falls back to
+/// `torch.ops.tosa.<lowercase>`, then to a plain string `tosa::<lowercase>`.
+fn resolve_tosa_backend_op<'py>(py: Python<'py>, upper: &str, lower: &str) -> PyResult<Bound<'py, PyAny>> {
+    // Try exir_ops.backend.tosa.<UPPER>.default
+    let exir_result = py
+        .import_bound("executorch.exir.dialects._ops")
+        .and_then(|m| m.getattr("ops"))
+        .and_then(|ops| ops.getattr("backend"))
+        .and_then(|backend| backend.getattr("tosa"))
+        .and_then(|tosa| tosa.getattr(upper))
+        .and_then(|op| op.getattr("default"));
+    if let Ok(op) = exir_result {
+        return Ok(op);
+    }
+    // Try torch.ops.tosa.<lower>.default
+    let torch_result = py
+        .import_bound("torch")
+        .and_then(|m| m.getattr("ops"))
+        .and_then(|ops| ops.getattr("tosa"))
+        .and_then(|tosa| tosa.getattr(lower))
+        .and_then(|op| op.getattr("default"));
+    if let Ok(op) = torch_result {
+        return Ok(op);
+    }
+    // Final fallback: return a string target
+    let s = format!("tosa::{}", lower);
+    Ok(s.into_py(py).into_bound(py))
+}
+
+/// Resolve `backend.tosa.CONV2D.default`.
+pub fn resolve_tosa_conv2d_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    resolve_tosa_backend_op(py, "CONV2D", "conv2d")
+}
+
+/// Resolve `backend.tosa.CONV3D.default`.
+pub fn resolve_tosa_conv3d_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    resolve_tosa_backend_op(py, "CONV3D", "conv3d")
+}
+
+/// Resolve `backend.tosa.DEPTHWISE_CONV2D.default`.
+pub fn resolve_tosa_depthwise_conv2d_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    resolve_tosa_backend_op(py, "DEPTHWISE_CONV2D", "depthwise_conv2d")
+}
+
+/// Resolve `backend.tosa.TRANSPOSE_CONV2D.default`.
+pub fn resolve_tosa_transpose_conv2d_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    resolve_tosa_backend_op(py, "TRANSPOSE_CONV2D", "transpose_conv2d")
+}
+
+/// Resolve `backend.tosa.RESCALE.default`.
+pub fn resolve_tosa_rescale_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    resolve_tosa_backend_op(py, "RESCALE", "rescale")
 }
 
 /// Convert a Rust f64 into a Bound Python float.
@@ -142,6 +222,7 @@ pub struct NodeInserter<'py> {
     ref_node: Bound<'py, PyAny>,
     meta_src: Bound<'py, PyAny>,
     clear_qparams: bool,
+    insert_after: bool,
 }
 
 impl<'py> NodeInserter<'py> {
@@ -156,6 +237,23 @@ impl<'py> NodeInserter<'py> {
             ref_node: ref_node.clone(),
             meta_src: ref_node.clone(),
             clear_qparams: true,
+            insert_after: false,
+        }
+    }
+
+    /// Create an inserter that places new nodes *after* the reference node.
+    pub fn after(
+        py: Python<'py>,
+        graph: &Bound<'py, PyAny>,
+        ref_node: &Bound<'py, PyAny>,
+    ) -> Self {
+        Self {
+            py,
+            graph: graph.clone(),
+            ref_node: ref_node.clone(),
+            meta_src: ref_node.clone(),
+            clear_qparams: true,
+            insert_after: true,
         }
     }
 
@@ -196,7 +294,11 @@ impl<'py> NodeInserter<'py> {
         args: &Bound<'py, PyAny>,
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let inserting = self.graph.call_method1("inserting_before", (&self.ref_node,))?;
+        let inserting = if self.insert_after {
+            self.graph.call_method1("inserting_after", (&self.ref_node,))?
+        } else {
+            self.graph.call_method1("inserting_before", (&self.ref_node,))?
+        };
         inserting.call_method0("__enter__")?;
         let new_node = if let Some(kw) = kwargs {
             self.graph.call_method1("call_function", (target, args, kw))?
@@ -556,6 +658,26 @@ impl<'py> FxDecomposer<'py> {
         self.ins.call_with_kwargs(&op, args.as_ref(), &kw)
     }
 
+    /// `round.default(x)`
+    pub fn round(&self, x: &N<'py>) -> PyResult<N<'py>> {
+        let op = self.resolve("round.default")?;
+        let args = PyTuple::new_bound(self.py, &[x.as_ref()]);
+        self.ins.call(&op, args.as_ref())
+    }
+
+    /// `dim_order_ops._to_dim_order_copy.default(x, dtype=dtype)`
+    ///
+    /// This is the ExecuTorch edge-dialect cast op.  Unlike [`cast`] which
+    /// resolves `aten._to_copy`, this resolves through
+    /// `exir_ops.edge.dim_order_ops._to_dim_order_copy.default` so the
+    /// resulting node stays in the edge dialect expected by TOSA lowering.
+    pub fn cast_dim_order(&self, x: &N<'py>, dtype: &Bound<'py, PyAny>) -> PyResult<N<'py>> {
+        let op = resolve_edge_op(self.py, "dim_order_ops._to_dim_order_copy.default")?;
+        let args = PyTuple::new_bound(self.py, &[x.as_ref()]);
+        let kw = self.dtype_kwargs(dtype)?;
+        self.ins.call_with_kwargs(&op, args.as_ref(), &kw)
+    }
+
     /// `log.default(x)`
     pub fn log(&self, x: &N<'py>) -> PyResult<N<'py>> {
         let op = self.resolve("log.default")?;
@@ -705,6 +827,21 @@ impl<'py> FxDecomposer<'py> {
     pub fn gather(&self, values: &N<'py>, indices: &N<'py>) -> PyResult<N<'py>> {
         let op = resolve_tosa_gather_op(self.py)?;
         let args = PyTuple::new_bound(self.py, &[values.as_ref(), indices.as_ref()]);
+        self.ins.call(&op, args.as_ref())
+    }
+
+    /// `backend.tosa.SCATTER.default(values_in, indices, input)`
+    pub fn scatter(
+        &self,
+        values_in: &N<'py>,
+        indices: &N<'py>,
+        input: &N<'py>,
+    ) -> PyResult<N<'py>> {
+        let op = resolve_tosa_scatter_op(self.py)?;
+        let args = PyTuple::new_bound(
+            self.py,
+            &[values_in.as_ref(), indices.as_ref(), input.as_ref()],
+        );
         self.ins.call(&op, args.as_ref())
     }
 
