@@ -1,9 +1,7 @@
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
 
-use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
+use crate::fx_decompose_ops::FxDecomposer;
 use crate::fx_graph::FxGraphModule;
-use crate::fx_utils;
 
 crate::fx_pass!(
     /// Decompose `aten.addmm` into mm + mul + add.
@@ -57,48 +55,32 @@ fn decompose_addmm<'py>(
         );
     }
 
-    let mm_op = resolve_aten_op(py, "mm.default")?;
-    let mul_op = resolve_aten_op(py, "mul.Tensor")?;
-    let add_op = resolve_aten_op(py, "add.Tensor")?;
-    let full_op = resolve_aten_op(py, "full.default")?;
+    let d = FxDecomposer::new(py, graph, gm, node);
 
-    let ins = NodeInserter::before(py, graph, node);
-
-    let mm_args = PyTuple::new_bound(py, &[mat1.as_ref(), mat2.as_ref()]);
-    let mm_result = ins.call(&mm_op, mm_args.as_ref())?;
+    let mm_result = d.mm(mat1, mat2)?;
 
     let scaled_mm = if (alpha - 1.0).abs() > 1e-10 {
-        let input_shape = FxGraphModule::node_shape(&mm_result).unwrap_or_else(|_| vec![1]);
-        let ones_shape = PyTuple::new_bound(py, vec![1i64; input_shape.len()].iter().copied());
-        let builtins = py.import_bound("builtins")?;
-        let alpha_val = builtins.call_method1("float", (alpha,))?;
-        let full_args = PyTuple::new_bound(py, &[ones_shape.as_ref(), alpha_val.as_ref()]);
-        let alpha_node = ins.call(&full_op, full_args.as_ref())?;
-        let mul_args = PyTuple::new_bound(py, &[mm_result.as_ref(), alpha_node.as_ref()]);
-        ins.call(&mul_op, mul_args.as_ref())?
+        let rank = FxGraphModule::node_shape(&mm_result)
+            .unwrap_or_else(|_| vec![1])
+            .len();
+        let alpha_node = d.full_scalar(rank, alpha)?;
+        d.mul(&mm_result, &alpha_node)?
     } else {
         mm_result
     };
 
     let scaled_input = if (beta - 1.0).abs() > 1e-10 {
-        let input_shape = FxGraphModule::node_shape(input).unwrap_or_else(|_| vec![1]);
-        let ones_shape = PyTuple::new_bound(py, vec![1i64; input_shape.len()].iter().copied());
-        let builtins = py.import_bound("builtins")?;
-        let beta_val = builtins.call_method1("float", (beta,))?;
-        let full_args = PyTuple::new_bound(py, &[ones_shape.as_ref(), beta_val.as_ref()]);
-        let beta_node = ins.call(&full_op, full_args.as_ref())?;
-        let mul_args = PyTuple::new_bound(py, &[input.as_ref(), beta_node.as_ref()]);
-        ins.call(&mul_op, mul_args.as_ref())?
+        let rank = FxGraphModule::node_shape(input)
+            .unwrap_or_else(|_| vec![1])
+            .len();
+        let beta_node = d.full_scalar(rank, beta)?;
+        d.mul(input, &beta_node)?
     } else {
         input.clone()
     };
 
-    let add_args = PyTuple::new_bound(py, &[scaled_mm.as_ref(), scaled_input.as_ref()]);
-    let result = ins.call(&add_op, add_args.as_ref())?;
+    let result = d.add(&scaled_mm, &scaled_input)?;
 
-    fx_utils::copy_meta(py, node, &result)?;
-
-    FxGraphModule::replace_all_uses_with(node, &result)?;
-    gm.erase_node(node)?;
+    d.replace(&result)?;
     Ok(())
 }

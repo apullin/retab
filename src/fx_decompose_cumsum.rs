@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::PyDict;
 
-use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
+use crate::fx_decompose_ops::FxDecomposer;
 use crate::fx_graph::FxGraphModule;
 
 crate::fx_pass!(
@@ -95,16 +95,12 @@ fn decompose_cumsum<'py>(
         );
     }
 
-    let view_op = resolve_aten_op(py, "view_copy.default")?;
-    let conv_op = resolve_aten_op(py, "convolution.default")?;
-    let slice_op = resolve_aten_op(py, "slice_copy.Tensor")?;
-    let full_op = resolve_aten_op(py, "full.default")?;
-    let ins = NodeInserter::before(py, graph, node);
+    let d = FxDecomposer::new(py, graph, gm, node);
 
-    let view_shape_py = PyList::new_bound(py, conv_shape.iter().copied());
-    let view_args = PyTuple::new_bound(py, &[input_node.as_ref(), view_shape_py.as_ref()]);
-    let view_node = ins.call(&view_op, view_args.as_ref())?;
+    // view(input, conv_shape)
+    let view_node = d.view(input_node, &conv_shape)?;
 
+    // Extract dtype and device from the input tensor's meta val
     let input_meta = input_node.getattr("meta")?;
     let input_val = input_meta.call_method1("get", ("val",))?;
     let dtype = if !input_val.is_none() {
@@ -112,43 +108,34 @@ fn decompose_cumsum<'py>(
     } else {
         None
     };
-    let one_py = 1i64.into_py(py).into_bound(py);
+    let device = if !input_val.is_none() {
+        input_val.getattr("device").ok().filter(|d| !d.is_none())
+    } else {
+        None
+    };
 
-    let weight_shape_py = PyTuple::new_bound(py, weight_shape.iter().copied());
-    let weight_args = PyTuple::new_bound(py, &[weight_shape_py.as_ref(), one_py.as_ref()]);
-    let weight_kwargs = PyDict::new_bound(py);
-    if let Some(dtype) = dtype.as_ref() {
-        weight_kwargs.set_item("dtype", dtype)?;
-    }
-    if let Ok(device) = input_val.getattr("device") {
-        if !device.is_none() {
-            weight_kwargs.set_item("device", device)?;
-        }
-    }
-    let weight_node = ins.call_with_kwargs(&full_op, weight_args.as_ref(), &weight_kwargs)?;
+    // full(weight_shape, 1.0, dtype=dtype, device=device)
+    let weight_node = d.full_with_device(
+        &weight_shape,
+        1.0,
+        dtype.as_ref(),
+        device.as_ref(),
+    )?;
 
-    let stride_py = PyList::new_bound(py, [1i64, 1i64]);
-    let pad_py = PyList::new_bound(py, pad_shape.iter().copied());
-    let dilation_py = PyList::new_bound(py, [1i64, 1i64]);
-    let transposed_false = false.into_py(py).into_bound(py);
-    let output_padding_py = PyList::new_bound(py, [0i64]);
-    let groups_one = 1i64.into_py(py).into_bound(py);
-    let conv_args = PyTuple::new_bound(
-        py,
-        &[
-            view_node.as_ref(),
-            weight_node.as_ref(),
-            py.None().bind(py).as_ref(),
-            stride_py.as_ref(),
-            pad_py.as_ref(),
-            dilation_py.as_ref(),
-            transposed_false.as_ref(),
-            output_padding_py.as_ref(),
-            groups_one.as_ref(),
-        ],
-    );
-    let conv_node = ins.clone().keep_qparams().call(&conv_op, conv_args.as_ref())?;
+    // convolution(view, weight, None, [1,1], [cumsum_dim-1, 0], [1,1], false, [0], 1)
+    let conv_node = d.convolution(
+        &view_node,
+        &weight_node,
+        None,
+        &[1, 1],
+        &pad_shape,
+        &[1, 1],
+        false,
+        &[0],
+        1,
+    )?;
 
+    // Quantization parameter fixup for the convolution weight
     let node_meta = node.getattr("meta")?;
     let original_input_qparams = node_meta.call_method1("get", ("input_qparams",))?;
     if !original_input_qparams.is_none() && original_input_qparams.len().unwrap_or(0) > 0 {
@@ -164,24 +151,11 @@ fn decompose_cumsum<'py>(
         set_qparam_map(py, &weight_meta, "output_qparams", &[(0, weight_qp)])?;
     }
 
-    let slice_dim_py = 2i64.into_py(py).into_bound(py);
-    let zero_py = 0i64.into_py(py).into_bound(py);
-    let end_py = cumsum_dim.into_py(py).into_bound(py);
-    let slice_args = PyTuple::new_bound(
-        py,
-        &[
-            conv_node.as_ref(),
-            slice_dim_py.as_ref(),
-            zero_py.as_ref(),
-            end_py.as_ref(),
-        ],
-    );
-    let slice_node = ins.call(&slice_op, slice_args.as_ref())?;
+    // slice(conv, dim=2, start=0, end=cumsum_dim)
+    let slice_node = d.slice(&conv_node, 2, 0, cumsum_dim)?;
 
-    let original_shape_py = PyList::new_bound(py, original_shape.iter().copied());
-    let view_original_args =
-        PyTuple::new_bound(py, &[slice_node.as_ref(), original_shape_py.as_ref()]);
-    let result = ins.call(&view_op, view_original_args.as_ref())?;
+    // view(slice, original_shape)
+    let result = d.view(&slice_node, &original_shape)?;
 
     FxGraphModule::replace_all_uses_with(node, &result)?;
     gm.erase_node(node)?;

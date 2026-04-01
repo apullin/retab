@@ -1,9 +1,7 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
 
-use crate::fx_decompose_ops::{propagate_qparams, resolve_aten_op, NodeInserter};
+use crate::fx_decompose_ops::FxDecomposer;
 use crate::fx_graph::FxGraphModule;
-use crate::fx_utils;
 
 crate::fx_pass!(
     /// Decompose `repeat_interleave.self_int` into unsqueeze + repeat + view.
@@ -58,36 +56,26 @@ fn decompose_repeat_interleave_self_int<'py>(
         );
     }
 
-    let unsqueeze_op = resolve_aten_op(py, "unsqueeze_copy.default")?;
-    let repeat_op = resolve_aten_op(py, "repeat.default")?;
-    let view_op = resolve_aten_op(py, "view_copy.default")?;
-    let builtins = py.import_bound("builtins")?;
-    let ins = NodeInserter::before(py, graph, node);
+    let d = FxDecomposer::new(py, graph, gm, node);
 
+    // unsqueeze(x, dim + 1)
     let unsqueeze_dim = dim + 1;
-    let unsqueeze_dim_obj = builtins.call_method1("int", (unsqueeze_dim,))?;
-    let unsqueeze_args = PyTuple::new_bound(py, &[x.as_ref(), unsqueeze_dim_obj.as_ref()]);
-    let unsqueezed = ins.call(&unsqueeze_op, unsqueeze_args.as_ref())?;
-    propagate_qparams(node, &unsqueezed)?;
+    let unsqueezed = d.unsqueeze(x, unsqueeze_dim)?;
+    d.propagate_qparams(&unsqueezed)?;
 
+    // repeat(unsqueezed, multiples) where multiples[unsqueeze_dim] = repeats
     let repeat_rank = rank + 1;
     let mut multiples = vec![1i64; repeat_rank as usize];
     multiples[unsqueeze_dim as usize] = repeats;
-    let multiples_list = PyList::new_bound(py, multiples);
-    let repeat_args = PyTuple::new_bound(py, &[unsqueezed.as_ref(), multiples_list.as_ref()]);
-    let repeated = ins.call(&repeat_op, repeat_args.as_ref())?;
-    propagate_qparams(node, &repeated)?;
+    let repeated = d.repeat(&unsqueezed, &multiples)?;
+    d.propagate_qparams(&repeated)?;
 
+    // view(repeated, final_shape) where final_shape[dim] *= repeats
     let mut final_shape = input_shape;
     final_shape[dim as usize] *= repeats;
-    let final_shape_list = PyList::new_bound(py, final_shape);
-    let view_args = PyTuple::new_bound(py, &[repeated.as_ref(), final_shape_list.as_ref()]);
-    let result = ins.call(&view_op, view_args.as_ref())?;
-    propagate_qparams(node, &result)?;
+    let result = d.view(&repeated, &final_shape)?;
+    d.propagate_qparams(&result)?;
 
-    fx_utils::copy_meta(py, node, &result)?;
-
-    FxGraphModule::replace_all_uses_with(node, &result)?;
-    gm.erase_node(node)?;
+    d.replace(&result)?;
     Ok(true)
 }

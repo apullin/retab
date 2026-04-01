@@ -1,10 +1,8 @@
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
 
-use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
+use crate::fx_decompose_ops::FxDecomposer;
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
-use crate::fx_utils;
 
 /// FX-graph-direct decomposition of `pixel_shuffle` and `pixel_unshuffle`
 /// into reshape + permute + reshape chains.
@@ -83,7 +81,7 @@ impl FxPass for FxDecomposePixelShufflePass {
 fn decompose_pixel_shuffle<'py>(
     py: Python<'py>,
     graph: &Bound<'py, PyAny>,
-    gm: &FxGraphModule<'py>,
+    gm: &'py FxGraphModule<'py>,
     node: &Bound<'py, PyAny>,
     debug: bool,
 ) -> PyResult<()> {
@@ -108,40 +106,17 @@ fn decompose_pixel_shuffle<'py>(
         let name = FxGraphModule::node_name(node)?;
         eprintln!(
             "[DecomposePixelShuffle] {} r={} shape={:?} -> ({},{},{},{})",
-            name,
-            r,
-            input_shape,
-            n,
-            c,
-            h * r,
-            w * r
+            name, r, input_shape, n, c, h * r, w * r
         );
     }
 
-    let view_op = resolve_aten_op(py, "view_copy.default")?;
-    let permute_op = resolve_aten_op(py, "permute_copy.default")?;
-    let ins = NodeInserter::before(py, graph, node);
+    let d = FxDecomposer::new(py, graph, gm, node);
 
-    // view(x, (N, C, r, r, H, W))
-    let shape1 = pyo3::types::PyList::new_bound(py, [n, c, r, r, h, w]);
-    let view1_args = PyTuple::new_bound(py, &[x.as_ref(), shape1.as_ref()]);
-    let view1 = ins.call(&view_op, view1_args.as_ref())?;
+    let view1 = d.view(x, &[n, c, r, r, h, w])?;
+    let permuted = d.permute(&view1, &[0, 1, 4, 2, 5, 3])?;
+    let result = d.view(&permuted, &[n, c, h * r, w * r])?;
 
-    // permute(view1, (0, 1, 4, 2, 5, 3))
-    let perm = pyo3::types::PyList::new_bound(py, [0i64, 1, 4, 2, 5, 3]);
-    let perm_args = PyTuple::new_bound(py, &[view1.as_ref(), perm.as_ref()]);
-    let permuted = ins.call(&permute_op, perm_args.as_ref())?;
-
-    // view(permuted, (N, C, H*r, W*r))
-    let shape2 = pyo3::types::PyList::new_bound(py, [n, c, h * r, w * r]);
-    let view2_args = PyTuple::new_bound(py, &[permuted.as_ref(), shape2.as_ref()]);
-    let result = ins.call(&view_op, view2_args.as_ref())?;
-
-    // Copy original node's meta onto the final result
-    fx_utils::copy_meta(py, node, &result)?;
-
-    FxGraphModule::replace_all_uses_with(node, &result)?;
-    gm.erase_node(node)?;
+    d.replace(&result)?;
     Ok(())
 }
 
@@ -153,7 +128,7 @@ fn decompose_pixel_shuffle<'py>(
 fn decompose_pixel_unshuffle<'py>(
     py: Python<'py>,
     graph: &Bound<'py, PyAny>,
-    gm: &FxGraphModule<'py>,
+    gm: &'py FxGraphModule<'py>,
     node: &Bound<'py, PyAny>,
     debug: bool,
 ) -> PyResult<()> {
@@ -179,39 +154,16 @@ fn decompose_pixel_unshuffle<'py>(
         let name = FxGraphModule::node_name(node)?;
         eprintln!(
             "[DecomposePixelUnshuffle] {} r={} shape={:?} -> ({},{},{},{})",
-            name,
-            r,
-            input_shape,
-            n,
-            c * r * r,
-            h_out,
-            w_out
+            name, r, input_shape, n, c * r * r, h_out, w_out
         );
     }
 
-    let view_op = resolve_aten_op(py, "view_copy.default")?;
-    let permute_op = resolve_aten_op(py, "permute_copy.default")?;
-    let ins = NodeInserter::before(py, graph, node);
+    let d = FxDecomposer::new(py, graph, gm, node);
 
-    // view(x, (N, C, H//r, r, W//r, r))
-    let shape1 = pyo3::types::PyList::new_bound(py, [n, c, h_out, r, w_out, r]);
-    let view1_args = PyTuple::new_bound(py, &[x.as_ref(), shape1.as_ref()]);
-    let view1 = ins.call(&view_op, view1_args.as_ref())?;
+    let view1 = d.view(x, &[n, c, h_out, r, w_out, r])?;
+    let permuted = d.permute(&view1, &[0, 1, 3, 5, 2, 4])?;
+    let result = d.view(&permuted, &[n, c * r * r, h_out, w_out])?;
 
-    // permute(view1, (0, 1, 3, 5, 2, 4))
-    let perm = pyo3::types::PyList::new_bound(py, [0i64, 1, 3, 5, 2, 4]);
-    let perm_args = PyTuple::new_bound(py, &[view1.as_ref(), perm.as_ref()]);
-    let permuted = ins.call(&permute_op, perm_args.as_ref())?;
-
-    // view(permuted, (N, C*r*r, H//r, W//r))
-    let shape2 = pyo3::types::PyList::new_bound(py, [n, c * r * r, h_out, w_out]);
-    let view2_args = PyTuple::new_bound(py, &[permuted.as_ref(), shape2.as_ref()]);
-    let result = ins.call(&view_op, view2_args.as_ref())?;
-
-    // Copy original node's meta onto the final result
-    fx_utils::copy_meta(py, node, &result)?;
-
-    FxGraphModule::replace_all_uses_with(node, &result)?;
-    gm.erase_node(node)?;
+    d.replace(&result)?;
     Ok(())
 }

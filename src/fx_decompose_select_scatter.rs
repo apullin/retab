@@ -1,9 +1,8 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::PyTuple;
 
-use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
+use crate::fx_decompose_ops::{py_int, resolve_aten_op, FxDecomposer};
 use crate::fx_graph::FxGraphModule;
-use crate::fx_utils;
 
 crate::fx_pass!(
     /// FX-graph-direct decomposition of `aten.select_scatter` into
@@ -12,20 +11,6 @@ crate::fx_pass!(
     matches: |target, _node| target.contains("select_scatter.default"),
     transform: |py, graph, gm, node, debug| decompose_select_scatter(py, &graph, gm, node, debug).map(|_| ())
 );
-
-fn copy_qparams_only(src_meta: &Bound<'_, PyAny>, dst_meta: &Bound<'_, PyAny>) -> PyResult<()> {
-    if let Ok(input_qparams) = src_meta.call_method1("get", ("input_qparams",)) {
-        if !input_qparams.is_none() {
-            dst_meta.set_item("input_qparams", input_qparams)?;
-        }
-    }
-    if let Ok(output_qparams) = src_meta.call_method1("get", ("output_qparams",)) {
-        if !output_qparams.is_none() {
-            dst_meta.set_item("output_qparams", output_qparams)?;
-        }
-    }
-    Ok(())
-}
 
 fn decompose_select_scatter<'py>(
     py: Python<'py>,
@@ -69,77 +54,48 @@ fn decompose_select_scatter<'py>(
     let torch = py.import_bound("torch")?;
     let int32_dtype = torch.getattr("int32")?;
 
-    let arange_op = resolve_aten_op(py, "arange.start_step")?;
-    let eq_op = resolve_aten_op(py, "eq.Tensor")?;
-    let where_op = resolve_aten_op(py, "where.self")?;
-    let expand_op = resolve_aten_op(py, "expand_copy.default")?;
-    let unsqueeze_op = resolve_aten_op(py, "unsqueeze_copy.default")?;
-    let view_op = resolve_aten_op(py, "view_copy.default")?;
-    let full_op = resolve_aten_op(py, "full.default")?;
+    let d = FxDecomposer::new(py, graph, gm, node);
 
-    let ins = NodeInserter::before(py, graph, node);
+    // arange(0, dim_size, dtype=int32)
+    let arange_node = d.arange(0, dim_size, &int32_dtype)?;
 
-    let arange_args = PyTuple::new_bound(
-        py,
-        &[
-            0i64.into_py(py).into_bound(py).as_ref(),
-            dim_size.into_py(py).into_bound(py).as_ref(),
-        ],
-    );
-    let arange_kwargs = PyDict::new_bound(py);
-    arange_kwargs.set_item("dtype", int32_dtype.clone())?;
-    let arange_node = ins.call_with_kwargs(&arange_op, arange_args.as_ref(), &arange_kwargs)?;
-
+    // view(arange, mask_shape) where mask_shape = [1, ..., dim_size, ..., 1]
     let mut mask_shape = vec![1i64; rank as usize];
     mask_shape[dim_norm] = dim_size;
-    let mask_shape_py = PyList::new_bound(py, mask_shape.iter().copied());
-    let view_args = PyTuple::new_bound(py, &[arange_node.as_ref(), mask_shape_py.as_ref()]);
-    let viewed_arange = ins.clone().meta_from(&arange_node).call(&view_op, view_args.as_ref())?;
+    let viewed_arange = d.view(&arange_node, &mask_shape)?;
 
-    let scalar_shape = PyTuple::new_bound(py, [1i64]);
-    let scalar_value = index.into_py(py).into_bound(py);
-    let scalar_kwargs = PyDict::new_bound(py);
-    scalar_kwargs.set_item("dtype", int32_dtype)?;
-    let scalar_args = PyTuple::new_bound(py, &[scalar_shape.as_ref(), scalar_value.as_ref()]);
-    let index_tensor = ins.call_with_kwargs(&full_op, scalar_args.as_ref(), &scalar_kwargs)?;
+    // full([1], index, dtype=int32)
+    let index_tensor = d.full_int(&[1], index, &int32_dtype)?;
 
-    let mask_args = PyTuple::new_bound(py, &[viewed_arange.as_ref(), index_tensor.as_ref()]);
-    let mask_node = ins.call(&eq_op, mask_args.as_ref())?;
+    // eq(viewed_arange, index_tensor) -> boolean mask
+    let mask_node = d.eq(&viewed_arange, &index_tensor)?;
 
-    let unsqueeze_args = PyTuple::new_bound(
-        py,
-        &[
-            src_tensor.as_ref(),
-            (dim_norm as i64).into_py(py).into_bound(py).as_ref(),
-        ],
-    );
-    let unsqueeze_node = ins.clone().meta_from(src_tensor).call(&unsqueeze_op, unsqueeze_args.as_ref())?;
-    copy_qparams_only(
-        &src_tensor.getattr("meta")?,
-        &unsqueeze_node.getattr("meta")?,
-    )?;
+    // unsqueeze(src, dim) — needs meta from src_tensor and qparams preserved
+    let unsqueeze_op = resolve_aten_op(py, "unsqueeze_copy.default")?;
+    let dim_py = py_int(py, dim_norm as i64)?;
+    let unsqueeze_args = PyTuple::new_bound(py, &[src_tensor.as_ref(), dim_py.as_ref()]);
+    let unsqueeze_node = d
+        .inserter()
+        .clone()
+        .meta_from(src_tensor)
+        .keep_qparams()
+        .call(&unsqueeze_op, unsqueeze_args.as_ref())?;
 
-    let expand_shape_py = PyList::new_bound(py, input_shape.iter().copied());
-    let expand_args = PyTuple::new_bound(py, &[unsqueeze_node.as_ref(), expand_shape_py.as_ref()]);
-    let expand_node = ins.clone().meta_from(&unsqueeze_node).call(&expand_op, expand_args.as_ref())?;
-    copy_qparams_only(
-        &unsqueeze_node.getattr("meta")?,
-        &expand_node.getattr("meta")?,
-    )?;
+    // expand(unsqueezed, input_shape) — needs meta from unsqueeze_node and qparams preserved
+    let expand_op = resolve_aten_op(py, "expand_copy.default")?;
+    let expand_shape_py = pyo3::types::PyList::new_bound(py, input_shape.iter().copied());
+    let expand_args =
+        PyTuple::new_bound(py, &[unsqueeze_node.as_ref(), expand_shape_py.as_ref()]);
+    let expand_node = d
+        .inserter()
+        .clone()
+        .meta_from(&unsqueeze_node)
+        .keep_qparams()
+        .call(&expand_op, expand_args.as_ref())?;
 
-    let where_args = PyTuple::new_bound(
-        py,
-        &[
-            mask_node.as_ref(),
-            expand_node.as_ref(),
-            input_tensor.as_ref(),
-        ],
-    );
-    let where_node = ins.call(&where_op, where_args.as_ref())?;
+    // where(mask, expanded_src, input) -> result
+    let where_node = d.where_(&mask_node, &expand_node, input_tensor)?;
 
-    fx_utils::copy_meta(py, node, &where_node)?;
-
-    FxGraphModule::replace_all_uses_with(node, &where_node)?;
-    gm.erase_node(node)?;
+    d.replace(&where_node)?;
     Ok(true)
 }

@@ -1,9 +1,8 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::PyTuple;
 
-use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
+use crate::fx_decompose_ops::{propagate_qparams, FxDecomposer};
 use crate::fx_graph::FxGraphModule;
-use crate::fx_utils;
 
 crate::fx_pass!(
     /// FX-graph-direct decomposition of `aten.unfold_copy` into
@@ -12,32 +11,6 @@ crate::fx_pass!(
     matches: |target, _node| target.contains("unfold_copy"),
     transform: |py, graph, gm, node, debug| decompose_unfold_copy(py, &graph, gm, node, debug).map(|_| ())
 );
-
-fn resolve_tosa_gather_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-    py.eval_bound(
-        "getattr(getattr(getattr(getattr(__import__('executorch.exir.dialects._ops', fromlist=['ops']), 'ops'), 'backend'), 'tosa'), 'GATHER').default",
-        None,
-        None,
-    )
-}
-
-
-fn set_tensor_meta_val_shape(
-    template_meta: &Bound<'_, PyAny>,
-    dst_meta: &Bound<'_, PyAny>,
-    shape: &[i64],
-) -> PyResult<()> {
-    let template_val = template_meta.get_item("val")?;
-    if !template_val.hasattr("new_empty")? {
-        return Ok(());
-    }
-    let dtype = template_val.getattr("dtype")?;
-    let kwargs = PyDict::new_bound(template_val.py());
-    kwargs.set_item("dtype", dtype)?;
-    let new_val = template_val.call_method("new_empty", (shape.to_vec(),), Some(&kwargs))?;
-    dst_meta.set_item("val", new_val)?;
-    Ok(())
-}
 
 fn copy_qparams_only(src_meta: &Bound<'_, PyAny>, dst_meta: &Bound<'_, PyAny>) -> PyResult<()> {
     if let Ok(input_qparams) = src_meta.call_method1("get", ("input_qparams",)) {
@@ -87,7 +60,7 @@ fn product(shape: &[i64]) -> i64 {
 fn decompose_unfold_copy<'py>(
     py: Python<'py>,
     graph: &Bound<'py, PyAny>,
-    gm: &FxGraphModule<'py>,
+    gm: &'py FxGraphModule<'py>,
     node: &Bound<'py, PyAny>,
     debug: bool,
 ) -> PyResult<bool> {
@@ -146,127 +119,73 @@ fn decompose_unfold_copy<'py>(
     let int32_dtype = torch.getattr("int32")?;
     let bool_dtype = torch.getattr("bool")?;
 
-    let view_op = resolve_aten_op(py, "view_copy.default")?;
-    let unsqueeze_op = resolve_aten_op(py, "unsqueeze_copy.default")?;
-    let expand_op = resolve_aten_op(py, "expand_copy.default")?;
-    let add_tensor_op = resolve_aten_op(py, "add.Tensor")?;
-    let mul_tensor_op = resolve_aten_op(py, "mul.Tensor")?;
-    let arange_op = resolve_aten_op(py, "arange.start_step")?;
-    let permute_op = resolve_aten_op(py, "permute_copy.default")?;
-    let to_copy_op = resolve_aten_op(py, "_to_copy.default")?;
-    let full_op = resolve_aten_op(py, "full.default")?;
-    let gather_op = resolve_tosa_gather_op(py)?;
+    let d = FxDecomposer::new(py, graph, gm, node);
 
-    let ins = NodeInserter::before(py, graph, node);
-
+    // Optional bool -> int8 cast
     let mut x_for_gather = x.clone();
     if needs_bool_cast {
-        let cast_args = PyTuple::new_bound(py, &[x.as_ref()]);
-        let cast_kwargs = PyDict::new_bound(py);
-        cast_kwargs.set_item("dtype", int8_dtype)?;
-        x_for_gather = ins.clone().meta_from(x).call_with_kwargs(&to_copy_op, cast_args.as_ref(), &cast_kwargs)?;
+        x_for_gather = d.cast(x, &int8_dtype)?;
         mark_layout_neutral(py, &x_for_gather)?;
     }
 
-    let values_shape = PyList::new_bound(py, [p, k, q]);
-    let values_args = PyTuple::new_bound(py, &[x_for_gather.as_ref(), values_shape.as_ref()]);
-    let values_pkq = ins.clone().meta_from(&x_for_gather).call(&view_op, values_args.as_ref())?;
+    // Flatten input to (P, K, Q) for GATHER
+    let values_pkq = d.view(&x_for_gather, &[p, k, q])?;
     mark_layout_neutral(py, &values_pkq)?;
-    copy_qparams_only(&x_for_gather.getattr("meta")?, &values_pkq.getattr("meta")?)?;
+    propagate_qparams(&x_for_gather, &values_pkq)?;
 
-    let arange_kwargs = PyDict::new_bound(py);
-    arange_kwargs.set_item("dtype", int32_dtype.clone())?;
-
-    let idx_u_args = PyTuple::new_bound(
-        py,
-        &[
-            0i64.into_py(py).into_bound(py).as_ref(),
-            u.into_py(py).into_bound(py).as_ref(),
-        ],
-    );
-    let idx_u = ins.call_with_kwargs(&arange_op, idx_u_args.as_ref(), &arange_kwargs)?;
+    // Build sliding-window index: arange(0, U) * step  +  arange(0, size)
+    //   idx_u_scaled: shape (U,) with values [0, step, 2*step, ...]
+    let idx_u = d.arange(0, u, &int32_dtype)?;
     mark_layout_neutral(py, &idx_u)?;
 
-    let step_shape = PyTuple::new_bound(py, [1i64]);
-    let step_value = step.into_py(py).into_bound(py);
-    let step_kwargs = PyDict::new_bound(py);
-    step_kwargs.set_item("dtype", int32_dtype.clone())?;
-    let step_args = PyTuple::new_bound(py, &[step_shape.as_ref(), step_value.as_ref()]);
-    let step_tensor = ins.call_with_kwargs(&full_op, step_args.as_ref(), &step_kwargs)?;
+    let step_tensor = d.full_int(&[1], step, &int32_dtype)?;
     mark_layout_neutral(py, &step_tensor)?;
 
-    let idx_u_scaled_args = PyTuple::new_bound(py, &[idx_u.as_ref(), step_tensor.as_ref()]);
-    let idx_u_scaled = ins.call(&mul_tensor_op, idx_u_scaled_args.as_ref())?;
+    let idx_u_scaled = d.mul(&idx_u, &step_tensor)?;
     mark_layout_neutral(py, &idx_u_scaled)?;
 
-    let idx_u2d_args = PyTuple::new_bound(
-        py,
-        &[
-            idx_u_scaled.as_ref(),
-            1i64.into_py(py).into_bound(py).as_ref(),
-        ],
-    );
-    let idx_u2d = ins.call(&unsqueeze_op, idx_u2d_args.as_ref())?;
+    //   Reshape to (U, 1) for broadcast add
+    let idx_u2d = d.unsqueeze(&idx_u_scaled, 1)?;
     mark_layout_neutral(py, &idx_u2d)?;
 
-    let idx_c_args = PyTuple::new_bound(
-        py,
-        &[
-            0i64.into_py(py).into_bound(py).as_ref(),
-            size.into_py(py).into_bound(py).as_ref(),
-        ],
-    );
-    let idx_c = ins.call_with_kwargs(&arange_op, idx_c_args.as_ref(), &arange_kwargs)?;
+    //   idx_c: shape (size,) with values [0, 1, ..., size-1]
+    let idx_c = d.arange(0, size, &int32_dtype)?;
     mark_layout_neutral(py, &idx_c)?;
 
-    let idx_c2d_args = PyTuple::new_bound(
-        py,
-        &[idx_c.as_ref(), 0i64.into_py(py).into_bound(py).as_ref()],
-    );
-    let idx_c2d = ins.call(&unsqueeze_op, idx_c2d_args.as_ref())?;
+    //   Reshape to (1, size) for broadcast add
+    let idx_c2d = d.unsqueeze(&idx_c, 0)?;
     mark_layout_neutral(py, &idx_c2d)?;
 
-    let idx2d_args = PyTuple::new_bound(py, &[idx_u2d.as_ref(), idx_c2d.as_ref()]);
-    let idx2d = ins.call(&add_tensor_op, idx2d_args.as_ref())?;
+    //   2D index (U, size) via broadcast add, then flatten to (U*size,)
+    let idx2d = d.add(&idx_u2d, &idx_c2d)?;
     mark_layout_neutral(py, &idx2d)?;
 
-    let idx1d_shape = PyList::new_bound(py, [uc]);
-    let idx1d_args = PyTuple::new_bound(py, &[idx2d.as_ref(), idx1d_shape.as_ref()]);
-    let idx1d = ins.call(&view_op, idx1d_args.as_ref())?;
+    let idx1d = d.view(&idx2d, &[uc])?;
     mark_layout_neutral(py, &idx1d)?;
 
-    let idx_1xuc_args = PyTuple::new_bound(
-        py,
-        &[idx1d.as_ref(), 0i64.into_py(py).into_bound(py).as_ref()],
-    );
-    let idx_1xuc = ins.call(&unsqueeze_op, idx_1xuc_args.as_ref())?;
+    //   Unsqueeze to (1, U*size), then expand to (P, U*size)
+    let idx_1xuc = d.unsqueeze(&idx1d, 0)?;
     mark_layout_neutral(py, &idx_1xuc)?;
 
-    let indices_shape = PyList::new_bound(py, [p, uc]);
-    let indices_args = PyTuple::new_bound(py, &[idx_1xuc.as_ref(), indices_shape.as_ref()]);
-    let indices_puc = ins.call(&expand_op, indices_args.as_ref())?;
+    let indices_puc = d.expand(&idx_1xuc, &[p, uc])?;
     mark_layout_neutral(py, &indices_puc)?;
 
-    let gather_args = PyTuple::new_bound(py, &[values_pkq.as_ref(), indices_puc.as_ref()]);
-    let gathered = ins.call(&gather_op, gather_args.as_ref())?;
+    // GATHER(values_pkq, indices_puc) -> (P, U*size, Q)
+    let gathered = d.gather(&values_pkq, &indices_puc)?;
     mark_layout_neutral(py, &gathered)?;
     {
-        let gather_meta = gathered.getattr("meta")?;
-        let gather_template_meta = x_for_gather.getattr("meta")?;
-        set_tensor_meta_val_shape(&gather_template_meta, &gather_meta, &[p, uc, q])?;
-        copy_qparams_only(&gather_template_meta, &gather_meta)?;
+        d.set_meta_val_shape(&x_for_gather, &gathered, &[p, uc, q])?;
+        copy_qparams_only(&x_for_gather.getattr("meta")?, &gathered.getattr("meta")?)?;
     }
 
-    let pucq_shape = PyList::new_bound(py, [p, u, size, q]);
-    let pucq_args = PyTuple::new_bound(py, &[gathered.as_ref(), pucq_shape.as_ref()]);
-    let pucq = ins.clone().meta_from(&gathered).call(&view_op, pucq_args.as_ref())?;
+    // Reshape (P, U*size, Q) -> (P, U, size, Q)
+    let pucq = d.view(&gathered, &[p, u, size, q])?;
     mark_layout_neutral(py, &pucq)?;
     copy_qparams_only(&gathered.getattr("meta")?, &pucq.getattr("meta")?)?;
 
+    // Reshape to (...pre, U, size, ...post) — collapse P and Q back
     let mut shaped = if post.is_empty() {
-        let shape = PyList::new_bound(py, [p, u, size]);
-        let args = PyTuple::new_bound(py, &[pucq.as_ref(), shape.as_ref()]);
-        let out = ins.clone().meta_from(&pucq).call(&view_op, args.as_ref())?;
+        let out = d.view(&pucq, &[p, u, size])?;
         mark_layout_neutral(py, &out)?;
         copy_qparams_only(&pucq.getattr("meta")?, &out.getattr("meta")?)?;
         out
@@ -276,26 +195,14 @@ fn decompose_unfold_copy<'py>(
             .chain(std::iter::once(size))
             .chain(post.iter().copied())
             .collect();
-        let shape_py = PyList::new_bound(py, shape.iter().copied());
-        let args = PyTuple::new_bound(py, &[pucq.as_ref(), shape_py.as_ref()]);
-        let out = ins.clone().meta_from(&pucq).call(&view_op, args.as_ref())?;
+        let out = d.view(&pucq, &shape)?;
         mark_layout_neutral(py, &out)?;
         copy_qparams_only(&pucq.getattr("meta")?, &out.getattr("meta")?)?;
         out
     };
 
-    if pre.is_empty() {
-        let shape: Vec<i64> = std::iter::once(u)
-            .chain(std::iter::once(size))
-            .chain(post.iter().copied())
-            .collect();
-        let shape_py = PyList::new_bound(py, shape.iter().copied());
-        let args = PyTuple::new_bound(py, &[shaped.as_ref(), shape_py.as_ref()]);
-        let out = ins.clone().meta_from(&shaped).call(&view_op, args.as_ref())?;
-        mark_layout_neutral(py, &out)?;
-        copy_qparams_only(&shaped.getattr("meta")?, &out.getattr("meta")?)?;
-        shaped = out;
-    } else {
+    // Expand P back to pre dims
+    {
         let shape: Vec<i64> = pre
             .iter()
             .copied()
@@ -303,14 +210,14 @@ fn decompose_unfold_copy<'py>(
             .chain(std::iter::once(size))
             .chain(post.iter().copied())
             .collect();
-        let shape_py = PyList::new_bound(py, shape.iter().copied());
-        let args = PyTuple::new_bound(py, &[shaped.as_ref(), shape_py.as_ref()]);
-        let out = ins.clone().meta_from(&shaped).call(&view_op, args.as_ref())?;
+        let out = d.view(&shaped, &shape)?;
         mark_layout_neutral(py, &out)?;
         copy_qparams_only(&shaped.getattr("meta")?, &out.getattr("meta")?)?;
         shaped = out;
     }
 
+    // Permute to move the `size` dimension to the end:
+    //   (...pre, U, size, ...post) -> (...pre, U, ...post, size)
     let pre_len = pre.len() as i64;
     let post_len = post.len() as i64;
     let rank_cur = pre_len + 1 + 1 + post_len;
@@ -319,23 +226,19 @@ fn decompose_unfold_copy<'py>(
         .chain(c_idx + 1..rank_cur)
         .chain(std::iter::once(c_idx))
         .collect();
-    let perm_py = PyList::new_bound(py, perm.iter().copied());
-    let perm_args = PyTuple::new_bound(py, &[shaped.as_ref(), perm_py.as_ref()]);
-    let permuted = ins.clone().meta_from(&shaped).call(&permute_op, perm_args.as_ref())?;
+    let permuted = d.permute(&shaped, &perm)?;
     mark_layout_neutral(py, &permuted)?;
     copy_qparams_only(&shaped.getattr("meta")?, &permuted.getattr("meta")?)?;
 
+    // Optional int8 -> bool cast back
     let result = if needs_bool_cast {
-        let cast_args = PyTuple::new_bound(py, &[permuted.as_ref()]);
-        let cast_kwargs = PyDict::new_bound(py);
-        cast_kwargs.set_item("dtype", bool_dtype)?;
-        ins.clone().meta_from(&permuted).call_with_kwargs(&to_copy_op, cast_args.as_ref(), &cast_kwargs)?
+        d.cast(&permuted, &bool_dtype)?
     } else {
         permuted
     };
     mark_layout_neutral(py, &result)?;
 
-    fx_utils::copy_meta(py, node, &result)?;
+    crate::fx_utils::copy_meta(py, node, &result)?;
     mark_layout_neutral(py, &result)?;
     for user in &original_users {
         mark_layout_neutral(py, user)?;
