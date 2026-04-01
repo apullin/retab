@@ -39,17 +39,12 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
         let zero_point = input_qparam.map(|qp| qp.zero_point as f64).unwrap_or(0.0);
 
         let cast_name = format!("{}_mean_input_cast", node.name);
-        result.tensors.push(TosaTensor::new(
-            cast_name.clone(),
-            current_shape.clone(),
-            semantic_output_dtype,
-        ));
-        result.operators.push(TosaOperator::new(
+        result.push_output_op(
+            TosaTensor::new(cast_name.clone(), current_shape.clone(), semantic_output_dtype),
             Op::Cast,
             Attribute::Cast(CastAttribute),
             vec![current_input.clone()],
-            vec![cast_name.clone()],
-        ));
+        );
         current_input = cast_name;
 
         if zero_point != 0.0 {
@@ -62,17 +57,12 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
             ) {
                 push_inline_const(&mut result, zp_tensor);
                 let sub_name = format!("{}_mean_input_sub", node.name);
-                result.tensors.push(TosaTensor::new(
-                    sub_name.clone(),
-                    current_shape.clone(),
-                    semantic_output_dtype,
-                ));
-                result.operators.push(TosaOperator::new(
+                result.push_output_op(
+                    TosaTensor::new(sub_name.clone(), current_shape.clone(), semantic_output_dtype),
                     Op::Sub,
                     Attribute::Sub(SubAttribute),
                     vec![current_input, zp_name],
-                    vec![sub_name.clone()],
-                ));
+                );
                 current_input = sub_name;
             }
         }
@@ -89,17 +79,12 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
                 let shift_name =
                     push_shift_const(&mut result, &format!("{}_mean_input", node.name));
                 let mul_name = format!("{}_mean_input_float", node.name);
-                result.tensors.push(TosaTensor::new(
-                    mul_name.clone(),
-                    current_shape.clone(),
-                    semantic_output_dtype,
-                ));
-                result.operators.push(TosaOperator::new(
+                result.push_output_op(
+                    TosaTensor::new(mul_name.clone(), current_shape.clone(), semantic_output_dtype),
                     Op::Mul,
                     Attribute::Mul(MulAttribute { shift: 0 }),
                     vec![current_input, scale_name, shift_name],
-                    vec![mul_name.clone()],
-                ));
+                );
                 current_input = mul_name;
             }
         }
@@ -120,19 +105,14 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
             format!("{}_reduce_sum_axis{}", node.name, axis.raw_dim)
         };
 
-        result.tensors.push(TosaTensor::new(
-            out_name.clone(),
-            out_shape.clone(),
-            base_dtype,
-        ));
-        result.operators.push(TosaOperator::new(
+        result.push_output_op(
+            TosaTensor::new(out_name.clone(), out_shape.clone(), base_dtype),
             Op::ReduceSum,
             Attribute::ReduceSum(ReduceSumAttribute {
                 axis: axis.tosa_axis,
             }),
             vec![current_input.clone()],
-            vec![out_name.clone()],
-        ));
+        );
 
         current_input = out_name;
         current_shape = out_shape;
@@ -152,31 +132,19 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
     } else {
         format!("{}_mean_pre_reshape", node.name)
     };
-    result.tensors.push(TosaTensor::new(
-        final_name.clone(),
-        current_shape.clone(),
-        base_dtype,
-    ));
-
     let shift_name = format!("{}_mul_shift", node.name);
-    result.tensors.push(TosaTensor::with_data(
+    result.push_const(TosaTensor::with_data(
         shift_name.clone(),
         vec![1],
         DType::Int8,
         vec![0u8],
     ));
-    result.operators.push(TosaOperator::new(
-        Op::Const,
-        Attribute::Const(ConstAttribute),
-        vec![],
-        vec![shift_name.clone()],
-    ));
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        TosaTensor::new(final_name.clone(), current_shape.clone(), base_dtype),
         Op::Mul,
         Attribute::Mul(MulAttribute { shift: 0 }),
         vec![sum_name, recip_name, shift_name],
-        vec![final_name.clone()],
-    ));
+    );
 
     if !spec.keepdim {
         let final_shape = actual_tensor_shape(graph, store, node);

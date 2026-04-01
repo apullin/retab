@@ -232,13 +232,12 @@ pub(super) fn emit_select(ctx: &EmitContext) -> EmitResult {
     let mut result = EmitResult::default();
     let mut input_names = collect_input_names(graph, node);
     maybe_materialize_select_scalar_inputs(graph, node, store, &mut result, &mut input_names);
-    result.tensors.push(make_output_tensor(node));
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        make_output_tensor(node),
         Op::Select,
         Attribute::Select(SelectAttribute),
         input_names,
-        vec![node.name.clone()],
-    ));
+    );
     result
 }
 
@@ -314,10 +313,8 @@ pub(super) fn emit_select_copy(ctx: &EmitContext) -> EmitResult {
         format!("{}_size", slice_name),
         size_vec.clone(),
     );
-    result
-        .tensors
-        .push(TosaTensor::new(slice_name.clone(), size_vec.clone(), spec.dtype));
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        TosaTensor::new(slice_name.clone(), size_vec.clone(), spec.dtype),
         Op::Slice,
         Attribute::Slice(SliceAttribute),
         vec![
@@ -325,8 +322,7 @@ pub(super) fn emit_select_copy(ctx: &EmitContext) -> EmitResult {
             format!("{}_start", slice_name),
             format!("{}_size", slice_name),
         ],
-        vec![slice_name.clone()],
-    ));
+    );
 
     let mut reshape_input_name = slice_name;
     let reshape_input_shape = size_vec;
@@ -336,15 +332,12 @@ pub(super) fn emit_select_copy(ctx: &EmitContext) -> EmitResult {
             .iter()
             .map(|&axis| reshape_input_shape[axis as usize])
             .collect();
-        result
-            .tensors
-            .push(TosaTensor::new(transpose_name.clone(), transpose_shape, spec.dtype));
-        result.operators.push(TosaOperator::new(
+        result.push_output_op(
+            TosaTensor::new(transpose_name.clone(), transpose_shape, spec.dtype),
             Op::Transpose,
             Attribute::Transpose(TransposeAttribute { perms }),
             vec![reshape_input_name],
-            vec![transpose_name.clone()],
-        ));
+        );
         reshape_input_name = transpose_name;
     }
 
@@ -375,13 +368,12 @@ pub(super) fn emit_index_select(ctx: &EmitContext) -> EmitResult {
         return result;
     }
 
-    result.tensors.push(make_output_tensor(node));
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        make_output_tensor(node),
         Op::Gather,
         Attribute::Gather(GatherAttribute),
         input_names,
-        vec![node.name.clone()],
-    ));
+    );
     result
 }
 
@@ -445,13 +437,12 @@ pub(super) fn emit_slice(ctx: &EmitContext) -> EmitResult {
         format!("{}_slice_size", node.name),
         spec.size_shape.clone(),
     );
-    result.tensors.push(TosaTensor::new(
-        node.name.clone(),
-        spec.size_shape,
-        ir_dtype_to_tosa(node.meta.val.dtype),
-    ));
-
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        TosaTensor::new(
+            node.name.clone(),
+            spec.size_shape,
+            ir_dtype_to_tosa(node.meta.val.dtype),
+        ),
         Op::Slice,
         Attribute::Slice(SliceAttribute),
         vec![
@@ -459,8 +450,7 @@ pub(super) fn emit_slice(ctx: &EmitContext) -> EmitResult {
             format!("{}_slice_start", node.name),
             format!("{}_slice_size", node.name),
         ],
-        vec![node.name.clone()],
-    ));
+    );
 
     result
 }

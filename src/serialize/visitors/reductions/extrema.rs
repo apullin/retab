@@ -43,12 +43,8 @@ fn emit_reduce_extrema(
             format!("{}_{}_axis{}", node.name, name, axis.raw_dim)
         };
 
-        result.tensors.push(TosaTensor::new(
-            out_name.clone(),
-            out_shape.clone(),
-            base_dtype,
-        ));
-        result.operators.push(TosaOperator::new(
+        result.push_output_op(
+            TosaTensor::new(out_name.clone(), out_shape.clone(), base_dtype),
             op,
             match kind {
                 ReduceExtremaKind::Any => Attribute::ReduceAny(ReduceAnyAttribute {
@@ -64,8 +60,7 @@ fn emit_reduce_extrema(
                 }),
             },
             vec![current_input.clone()],
-            vec![out_name.clone()],
-        ));
+        );
 
         current_input = out_name;
         current_shape = out_shape;

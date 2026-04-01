@@ -554,17 +554,16 @@ fn emit_tile_like(
             reshape_shape_name.clone(),
             padded_input_shape.clone(),
         );
-        result.tensors.push(make_empty_tensor(
-            reshaped_name.clone(),
-            padded_input_shape.clone(),
-            actual_tensor_dtype(graph, input_node),
-        ));
-        result.operators.push(TosaOperator::new(
+        result.push_output_op(
+            make_empty_tensor(
+                reshaped_name.clone(),
+                padded_input_shape.clone(),
+                actual_tensor_dtype(graph, input_node),
+            ),
             Op::Reshape,
             Attribute::Reshape(ReshapeAttribute),
             vec![tile_input_name, reshape_shape_name],
-            vec![reshaped_name.clone()],
-        ));
+        );
         tile_input_name = reshaped_name;
         tile_input_shape = padded_input_shape.clone();
 
@@ -584,19 +583,18 @@ fn emit_tile_like(
                 .collect();
             if is_non_identity && transposed_shape.len() == padded_input_shape.len() {
                 let transposed_name = format!("{}_input_layout", node.name);
-                result.tensors.push(make_empty_tensor(
-                    transposed_name.clone(),
-                    transposed_shape.clone(),
-                    actual_tensor_dtype(graph, input_node),
-                ));
-                result.operators.push(TosaOperator::new(
+                result.push_output_op(
+                    make_empty_tensor(
+                        transposed_name.clone(),
+                        transposed_shape.clone(),
+                        actual_tensor_dtype(graph, input_node),
+                    ),
                     Op::Transpose,
                     Attribute::Transpose(TransposeAttribute {
                         perms: perms.clone(),
                     }),
                     vec![tile_input_name],
-                    vec![transposed_name.clone()],
-                ));
+                );
                 tile_multiples = perms
                     .iter()
                     .filter_map(|&idx| tile_multiples.get(idx as usize).copied())
@@ -621,17 +619,16 @@ fn emit_tile_like(
         &mut result,
         make_shape_const_tensor(multiples_name.clone(), tile_multiples),
     );
-    result.tensors.push(make_empty_tensor(
-        primary_output_name(graph, node),
-        output_shape,
-        actual_tensor_dtype(graph, input_node),
-    ));
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        make_empty_tensor(
+            primary_output_name(graph, node),
+            output_shape,
+            actual_tensor_dtype(graph, input_node),
+        ),
         Op::Tile,
         Attribute::None,
         vec![tile_input_name, multiples_name],
-        vec![primary_output_name(graph, node)],
-    ));
+    );
     result
 }
 
@@ -676,17 +673,16 @@ pub(super) fn emit_expand(ctx: &EmitContext) -> EmitResult {
             reshape_shape_name.clone(),
             padded_input_shape.clone(),
         );
-        result.tensors.push(make_empty_tensor(
-            reshaped_name.clone(),
-            padded_input_shape.clone(),
-            actual_tensor_dtype(graph, input_node),
-        ));
-        result.operators.push(TosaOperator::new(
+        result.push_output_op(
+            make_empty_tensor(
+                reshaped_name.clone(),
+                padded_input_shape.clone(),
+                actual_tensor_dtype(graph, input_node),
+            ),
             Op::Reshape,
             Attribute::Reshape(ReshapeAttribute),
             vec![tile_input_name, reshape_shape_name],
-            vec![reshaped_name.clone()],
-        ));
+        );
         tile_input_name = reshaped_name;
         tile_input_shape = padded_input_shape.clone();
 
@@ -706,19 +702,18 @@ pub(super) fn emit_expand(ctx: &EmitContext) -> EmitResult {
                 .collect();
             if is_non_identity && transposed_shape.len() == padded_input_shape.len() {
                 let transposed_name = format!("{}_input_layout", node.name);
-                result.tensors.push(make_empty_tensor(
-                    transposed_name.clone(),
-                    transposed_shape.clone(),
-                    actual_tensor_dtype(graph, input_node),
-                ));
-                result.operators.push(TosaOperator::new(
+                result.push_output_op(
+                    make_empty_tensor(
+                        transposed_name.clone(),
+                        transposed_shape.clone(),
+                        actual_tensor_dtype(graph, input_node),
+                    ),
                     Op::Transpose,
                     Attribute::Transpose(TransposeAttribute {
                         perms: perms.clone(),
                     }),
                     vec![tile_input_name],
-                    vec![transposed_name.clone()],
-                ));
+                );
                 tile_input_name = transposed_name;
                 tile_input_shape = transposed_shape;
             }
@@ -744,17 +739,16 @@ pub(super) fn emit_expand(ctx: &EmitContext) -> EmitResult {
         &mut result,
         make_shape_const_tensor(multiples_name.clone(), multiples),
     );
-    result.tensors.push(make_empty_tensor(
-        primary_output_name(graph, node),
-        output_shape,
-        actual_tensor_dtype(graph, input_node),
-    ));
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        make_empty_tensor(
+            primary_output_name(graph, node),
+            output_shape,
+            actual_tensor_dtype(graph, input_node),
+        ),
         Op::Tile,
         Attribute::None,
         vec![tile_input_name, multiples_name],
-        vec![primary_output_name(graph, node)],
-    ));
+    );
     result
 }
 
@@ -792,15 +786,12 @@ pub(super) fn emit_const(ctx: &EmitContext) -> EmitResult {
         )
     };
 
-    result
-        .tensors
-        .push(make_tensor(name.clone(), shape, dtype, data));
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        make_tensor(name.clone(), shape, dtype, data),
         Op::Const,
         Attribute::Const(ConstAttribute),
         vec![],
-        vec![name.clone()],
-    ));
+    );
     result
 }
 
@@ -842,19 +833,18 @@ pub(super) fn emit_reshape(ctx: &EmitContext) -> EmitResult {
         if needs_avgpool_rank_drop_fix {
             let transpose_name = format!("{}_pre_reshape_nchw", node.name);
             let transpose_shape = vec![input_shape[0], input_shape[3], input_shape[1], input_shape[2]];
-            result.tensors.push(make_empty_tensor(
-                transpose_name.clone(),
-                transpose_shape,
-                output_dtype,
-            ));
-            result.operators.push(TosaOperator::new(
+            result.push_output_op(
+                make_empty_tensor(
+                    transpose_name.clone(),
+                    transpose_shape,
+                    output_dtype,
+                ),
                 Op::Transpose,
                 Attribute::Transpose(TransposeAttribute {
                     perms: vec![0, 3, 1, 2],
                 }),
                 input_names.clone(),
-                vec![transpose_name.clone()],
-            ));
+            );
 
             push_reshape_with_shape(
                 &mut result,
@@ -923,12 +913,11 @@ pub(super) fn emit_concat(ctx: &EmitContext) -> EmitResult {
             .unwrap_or(raw_axis),
         _ => raw_axis,
     };
-    result.tensors.push(make_output_tensor(node));
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        make_output_tensor(node),
         Op::Concat,
         Attribute::Concat(ConcatAttribute { axis }),
         input_names,
-        vec![node.name.clone()],
-    ));
+    );
     result
 }
