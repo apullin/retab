@@ -150,6 +150,27 @@ impl<'py> FxGraphModule<'py> {
         Ok(())
     }
 
+    /// Iterate over all `call_function` nodes, providing (node, target_str) to the callback.
+    /// Returns Ok(true) if the callback returned true for any node.
+    pub fn for_each_call_function<F>(&self, mut f: F) -> PyResult<bool>
+    where
+        F: FnMut(&Bound<'py, PyAny>, &str) -> PyResult<bool>,
+    {
+        let all_nodes = self.nodes()?;
+        let mut modified = false;
+        for node in &all_nodes {
+            let op = Self::node_op(node)?;
+            if op != "call_function" {
+                continue;
+            }
+            let target = Self::node_target_str(node)?;
+            if f(node, &target)? {
+                modified = true;
+            }
+        }
+        Ok(modified)
+    }
+
     /// Return the number of nodes in the graph.
     pub fn node_count(&self) -> PyResult<usize> {
         let graph = self.gm.getattr("graph")?;

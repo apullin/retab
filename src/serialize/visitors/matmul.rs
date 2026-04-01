@@ -116,32 +116,26 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
     };
 
     let a_zp_name = format!("{}_A_zp", node.name);
-    result.tensors.push(TosaTensor::with_data(
-        a_zp_name.clone(),
-        vec![1],
-        a_dtype,
-        encode_zp_for_dtype(a_zp, a_dtype),
-    ));
-    result.operators.push(TosaOperator::new(
-        Op::Const,
-        Attribute::Const(ConstAttribute),
-        vec![],
-        vec![a_zp_name.clone()],
-    ));
+    push_inline_const(
+        &mut result,
+        TosaTensor::with_data(
+            a_zp_name.clone(),
+            vec![1],
+            a_dtype,
+            encode_zp_for_dtype(a_zp, a_dtype),
+        ),
+    );
 
     let b_zp_name = format!("{}_B_zp", node.name);
-    result.tensors.push(TosaTensor::with_data(
-        b_zp_name.clone(),
-        vec![1],
-        b_dtype,
-        encode_zp_for_dtype(b_zp, b_dtype),
-    ));
-    result.operators.push(TosaOperator::new(
-        Op::Const,
-        Attribute::Const(ConstAttribute),
-        vec![],
-        vec![b_zp_name.clone()],
-    ));
+    push_inline_const(
+        &mut result,
+        TosaTensor::with_data(
+            b_zp_name.clone(),
+            vec![1],
+            b_dtype,
+            encode_zp_for_dtype(b_zp, b_dtype),
+        ),
+    );
 
     matmul_inputs.push(a_zp_name);
     matmul_inputs.push(b_zp_name);

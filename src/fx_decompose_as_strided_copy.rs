@@ -94,15 +94,12 @@ impl FxPass for FxDecomposeAsStridedCopyPass {
         let mut modified = false;
 
         let mut candidates: Vec<Bound<'_, PyAny>> = Vec::new();
-        for node in gm.nodes()? {
-            if FxGraphModule::node_op(&node)? != "call_function" {
-                continue;
+        gm.for_each_call_function(|node, target| {
+            if is_as_strided_copy(target) {
+                candidates.push(node.clone());
             }
-            let target = FxGraphModule::node_target_str(&node)?;
-            if is_as_strided_copy(&target) {
-                candidates.push(node);
-            }
-        }
+            Ok(false)
+        })?;
 
         for node in &candidates {
             let args = FxGraphModule::node_args(node)?;

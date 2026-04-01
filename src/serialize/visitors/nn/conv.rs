@@ -81,10 +81,10 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> Emi
     };
 
     if is_depthwise {
-        result.tensors.push(compute_depthwise_conv2d_nhwc_output(
-            graph, store, node, &pad, &stride, &dilation,
-        ));
-        result.operators.push(TosaOperator::new(
+        result.push_output_op(
+            compute_depthwise_conv2d_nhwc_output(
+                graph, store, node, &pad, &stride, &dilation,
+            ),
             Op::DepthwiseConv2d,
             Attribute::DepthwiseConv2d(DepthwiseConv2dAttribute {
                 pad,
@@ -94,13 +94,12 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> Emi
                 acc_type,
             }),
             conv_inputs,
-            vec![node.name.clone()],
-        ));
+        );
     } else {
-        result.tensors.push(compute_conv2d_nhwc_output(
-            graph, store, node, &pad, &stride, &dilation,
-        ));
-        result.operators.push(TosaOperator::new(
+        result.push_output_op(
+            compute_conv2d_nhwc_output(
+                graph, store, node, &pad, &stride, &dilation,
+            ),
             Op::Conv2d,
             Attribute::Conv2d(Conv2dAttribute {
                 pad,
@@ -110,8 +109,7 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> Emi
                 acc_type,
             }),
             conv_inputs,
-            vec![node.name.clone()],
-        ));
+        );
     }
 
     result

@@ -92,8 +92,6 @@ impl FxPass for FxRewriteSqueezePass {
         let debug = FxGraphModule::debug();
         let mut modified = false;
 
-        let all_nodes = gm.nodes()?;
-
         // Collect candidates to avoid mutation during iteration
         enum RewriteKind {
             Squeeze,
@@ -102,21 +100,16 @@ impl FxPass for FxRewriteSqueezePass {
         }
         let mut candidates: Vec<(Bound<'_, PyAny>, RewriteKind)> = Vec::new();
 
-        for node in &all_nodes {
-            let op = FxGraphModule::node_op(node)?;
-            if op != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-
-            if is_squeeze(&target) {
+        gm.for_each_call_function(|node, target| {
+            if is_squeeze(target) {
                 candidates.push((node.clone(), RewriteKind::Squeeze));
-            } else if is_unsqueeze(&target) {
+            } else if is_unsqueeze(target) {
                 candidates.push((node.clone(), RewriteKind::Unsqueeze));
-            } else if is_transpose(&target) {
+            } else if is_transpose(target) {
                 candidates.push((node.clone(), RewriteKind::Transpose));
             }
-        }
+            Ok(false)
+        })?;
 
         // Resolve view_copy and permute_copy op targets
         let view_copy_op = py.eval_bound(

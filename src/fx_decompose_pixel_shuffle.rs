@@ -39,22 +39,16 @@ impl FxPass for FxDecomposePixelShufflePass {
         let debug = FxGraphModule::debug();
         let mut modified = false;
 
-        let all_nodes = gm.nodes()?;
         let mut candidates: Vec<(Bound<'_, PyAny>, PixelKind)> = Vec::new();
 
-        for node in &all_nodes {
-            let op = FxGraphModule::node_op(node)?;
-            if op != "call_function" {
-                continue;
-            }
-            let target = FxGraphModule::node_target_str(node)?;
-
-            if is_pixel_unshuffle(&target) {
+        gm.for_each_call_function(|node, target| {
+            if is_pixel_unshuffle(target) {
                 candidates.push((node.clone(), PixelKind::Unshuffle));
-            } else if is_pixel_shuffle(&target) {
+            } else if is_pixel_shuffle(target) {
                 candidates.push((node.clone(), PixelKind::Shuffle));
             }
-        }
+            Ok(false)
+        })?;
 
         if candidates.is_empty() {
             return Ok(false);

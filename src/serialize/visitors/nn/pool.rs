@@ -130,8 +130,8 @@ pub(in crate::serialize::visitors) fn emit_aten_max_pool2d(ctx: &EmitContext) ->
         &pad,
     );
     output_tensor.name = output_name.clone();
-    result.tensors.push(output_tensor);
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        output_tensor,
         Op::MaxPool2d,
         Attribute::MaxPool2d(MaxPool2dAttribute {
             kernel: if kernel.is_empty() {
@@ -148,8 +148,7 @@ pub(in crate::serialize::visitors) fn emit_aten_max_pool2d(ctx: &EmitContext) ->
             nan_mode: NanPropagationMode::Propagate,
         }),
         input_names,
-        vec![output_name],
-    ));
+    );
     result
 }
 
@@ -193,8 +192,8 @@ pub(in crate::serialize::visitors) fn emit_max_pool2d(ctx: &EmitContext) -> Emit
         &pad_for_shape,
     );
     output_tensor.name = output_name.clone();
-    result.tensors.push(output_tensor);
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        output_tensor,
         Op::MaxPool2d,
         Attribute::MaxPool2d(MaxPool2dAttribute {
             kernel: if kernel.is_empty() {
@@ -211,8 +210,7 @@ pub(in crate::serialize::visitors) fn emit_max_pool2d(ctx: &EmitContext) -> Emit
             nan_mode: NanPropagationMode::Propagate,
         }),
         input_names,
-        vec![output_name],
-    ));
+    );
     result
 }
 
@@ -273,32 +271,26 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
     let output_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
 
     let input_zp_name = format!("{}_input_zp", node.name);
-    result.tensors.push(TosaTensor::with_data(
-        input_zp_name.clone(),
-        vec![1],
-        input_dtype,
-        encode_zp_for_dtype(input_zp, input_dtype),
-    ));
-    result.operators.push(TosaOperator::new(
-        Op::Const,
-        Attribute::Const(ConstAttribute),
-        vec![],
-        vec![input_zp_name.clone()],
-    ));
+    push_inline_const(
+        &mut result,
+        TosaTensor::with_data(
+            input_zp_name.clone(),
+            vec![1],
+            input_dtype,
+            encode_zp_for_dtype(input_zp, input_dtype),
+        ),
+    );
 
     let output_zp_name = format!("{}_output_zp", node.name);
-    result.tensors.push(TosaTensor::with_data(
-        output_zp_name.clone(),
-        vec![1],
-        output_dtype,
-        encode_zp_for_dtype(output_zp, output_dtype),
-    ));
-    result.operators.push(TosaOperator::new(
-        Op::Const,
-        Attribute::Const(ConstAttribute),
-        vec![],
-        vec![output_zp_name.clone()],
-    ));
+    push_inline_const(
+        &mut result,
+        TosaTensor::with_data(
+            output_zp_name.clone(),
+            vec![1],
+            output_dtype,
+            encode_zp_for_dtype(output_zp, output_dtype),
+        ),
+    );
 
     let mut pool_inputs = input_names;
     pool_inputs.push(input_zp_name);
