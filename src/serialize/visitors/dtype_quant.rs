@@ -339,6 +339,16 @@ pub(super) fn clamp_bound_bytes_from_arg(
     }
 }
 
+pub(super) fn single_qparam(node: &Node) -> Option<crate::graph::ir::QuantArgs> {
+    node.meta.output_qparams.first()
+        .or_else(|| node.meta.input_qparams.first())
+        .map(|(_, qp)| *qp)
+}
+
+pub(super) fn is_float_dtype(dtype: DType) -> bool {
+    matches!(dtype, DType::Fp32 | DType::Fp16 | DType::Bf16)
+}
+
 pub(super) fn compute_multiplier_and_shift_with_width(scale: f64, scale_width: i32) -> (i32, i8) {
     if scale == 0.0 {
         return (0, 0);

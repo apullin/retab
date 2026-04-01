@@ -5,18 +5,6 @@ pub(super) fn register(table: &mut EmitterTable) {
     table.extend([(OpTarget::Mean, emit_aten_mean as EmitFn)]);
 }
 
-fn single_qparam(node: &Node) -> Option<crate::graph::ir::QuantArgs> {
-    node.meta
-        .output_qparams
-        .first()
-        .or_else(|| node.meta.input_qparams.first())
-        .map(|(_, qp)| *qp)
-}
-
-fn is_float_dtype(dtype: DType) -> bool {
-    matches!(dtype, DType::Fp32 | DType::Fp16 | DType::Bf16)
-}
-
 pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;

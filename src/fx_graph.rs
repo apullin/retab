@@ -17,6 +17,11 @@ impl<'py> FxGraphModule<'py> {
         self.gm.py()
     }
 
+    pub fn debug() -> bool {
+        static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *DEBUG.get_or_init(|| std::env::var("TOSA_ENGINE_DEBUG").is_ok())
+    }
+
     /// Borrow the underlying Python `GraphModule` object.
     pub fn gm_ref(&self) -> &Bound<'py, PyAny> {
         &self.gm

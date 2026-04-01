@@ -857,7 +857,7 @@ impl FxPass for FxInsertRescalePass {
 
         // Phase 3: insert accumulator rescales after lowered TOSA conv ops.
         let all_nodes = gm.nodes()?;
-        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+        let debug = FxGraphModule::debug();
 
         for node in &all_nodes {
             let op = FxGraphModule::node_op(node)?;

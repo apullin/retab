@@ -53,8 +53,9 @@ pub(crate) use shape_utils::actual_tensor_shape;
 use dtype_quant::{
     accumulator_output_dtype, actual_tensor_dtype, clamp_bound_bytes_from_arg,
     compute_multiplier_and_shift_with_width, conv_accumulator_dtype, encode_zp_for_dtype,
-    has_only_tosa_rescale_users, matmul_input_dtype, node_input_zero_point, node_output_dtype,
-    node_output_zero_point, node_tensor_dtype, normalize_rescale_zp, passthrough_input_dtype,
+    has_only_tosa_rescale_users, is_float_dtype, matmul_input_dtype, node_input_zero_point,
+    node_output_dtype, node_output_zero_point, node_tensor_dtype, normalize_rescale_zp,
+    passthrough_input_dtype, single_qparam,
 };
 use emit_result::EmitResult;
 use graph_utils::*;
@@ -104,7 +105,7 @@ pub fn emit_node(
             let ctx = EmitContext { graph, node, store };
             Some(emitter(&ctx))
         } else {
-            if std::env::var("TOSA_ENGINE_DEBUG").is_ok() {
+            if crate::fx_graph::FxGraphModule::debug() {
                 eprintln!(
                     "[emit_node] SKIPPED unhandled target: {:?} (node '{}')",
                     node.target, node.name

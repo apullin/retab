@@ -85,7 +85,7 @@ impl FxPass for FxDecomposeCumsumPass {
 
     fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
         let py = gm.py();
-        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+        let debug = FxGraphModule::debug();
         let mut modified = false;
 
         let all_nodes = gm.nodes()?;

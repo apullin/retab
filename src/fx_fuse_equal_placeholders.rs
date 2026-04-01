@@ -30,7 +30,7 @@ impl FxPass for FxFuseEqualPlaceholdersPass {
 
     fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
         let py = gm.py();
-        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+        let debug = FxGraphModule::debug();
 
         let ep = match &self.exported_program {
             Some(ep) => ep.bind(py).clone(),

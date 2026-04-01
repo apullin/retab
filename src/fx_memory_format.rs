@@ -383,7 +383,7 @@ impl FxPass for FxToTosaMemoryFormatPass {
         // Phase 4: Insert TRANSPOSE nodes at NCHW/NHWC boundaries
         // ------------------------------------------------------------------
         let helpers = py.import_bound("fx_helpers")?;
-        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+        let debug = FxGraphModule::debug();
 
         // Re-snapshot nodes for transpose insertion.
         //

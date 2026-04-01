@@ -179,7 +179,7 @@ impl FxPass for FxRewriteConvPass {
             ));
         }
 
-        let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+        let debug = FxGraphModule::debug();
 
         for (node, is_depthwise, input_zp, weight_zp, in_channels, out_channels, groups) in
             &candidates

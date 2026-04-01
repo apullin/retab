@@ -376,7 +376,7 @@ impl FxPass for FxFuseConstantArgsPass {
                     match helpers.call_method1("fuse_constant_node", (gm.gm_ref(), &ep, node)) {
                         Ok(result) => result.extract().unwrap_or(false),
                         Err(e) => {
-                            let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+                            let debug = FxGraphModule::debug();
                             if debug {
                                 let name = FxGraphModule::node_name(node).unwrap_or_default();
                                 eprintln!("[FuseConstantArgs] failed to fuse {}: {}", name, e);

@@ -1,6 +1,7 @@
 pub mod tosa_generated;
 pub mod visitors;
 
+use crate::fx_graph::FxGraphModule;
 use crate::graph::ir::{Arg, Node, OpTarget, OpType};
 use crate::graph::Graph;
 use crate::store::{TensorData, TensorStore};
@@ -644,7 +645,7 @@ fn collect_serialized_graph_items(
     eprintln!("[Serialize] using insertion order, {} nodes", sorted.len());
 
     // Debug-mode validation: verify insertion order is topological
-    if std::env::var("TOSA_ENGINE_DEBUG").is_ok() {
+    if FxGraphModule::debug() {
         let mut position: std::collections::HashMap<crate::graph::ir::NodeId, usize> =
             std::collections::HashMap::new();
         for (i, &id) in sorted.iter().enumerate() {
@@ -692,7 +693,7 @@ fn collect_serialized_graph_items(
             None => continue,
         };
 
-        if std::env::var("TOSA_ENGINE_DEBUG").is_ok() {
+        if FxGraphModule::debug() {
             eprintln!(
                 "[Serialize] node '{}' op={:?} target={:?}",
                 node.name, node.op, node.target

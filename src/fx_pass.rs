@@ -49,7 +49,7 @@ macro_rules! fx_pass {
 
             fn run(&self, gm: &$crate::fx_graph::FxGraphModule) -> pyo3::PyResult<bool> {
                 let $py = gm.py();
-                let $debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
+                let $debug = $crate::fx_graph::FxGraphModule::debug();
                 let mut modified = false;
 
                 let all_nodes = gm.nodes()?;

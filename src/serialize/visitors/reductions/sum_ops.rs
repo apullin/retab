@@ -8,18 +8,6 @@ pub(super) fn register(table: &mut EmitterTable) {
     ]);
 }
 
-fn single_qparam(node: &Node) -> Option<crate::graph::ir::QuantArgs> {
-    node.meta
-        .output_qparams
-        .first()
-        .or_else(|| node.meta.input_qparams.first())
-        .map(|(_, qp)| *qp)
-}
-
-fn is_float_dtype(dtype: DType) -> bool {
-    matches!(dtype, DType::Fp32 | DType::Fp16 | DType::Bf16)
-}
-
 fn reduction_pre_reshape_perms(input_node: &Node, node: &Node, raw_axes: &[i32]) -> Option<Vec<i32>> {
     let input_rank = input_node.meta.val.shape_len as usize;
     if input_rank == 0 || raw_axes.is_empty() {
