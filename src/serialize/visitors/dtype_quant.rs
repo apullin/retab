@@ -20,6 +20,9 @@ pub(super) fn node_output_dtype(node: &Node) -> DType {
     if let Some(dt) = node.meta.tosa_special_dtype {
         return ir_dtype_to_tosa(dt);
     }
+    if node.target == OpTarget::TosaTable {
+        return ir_dtype_to_tosa(node.meta.val.dtype);
+    }
     if matches!(
         node.target,
         OpTarget::Eq
@@ -117,6 +120,12 @@ pub(super) fn accumulator_output_dtype(node: &Node) -> DType {
 }
 
 pub(super) fn actual_tensor_dtype(graph: &Graph, node: &Node) -> DType {
+    if matches!(node.target, OpTarget::Sum) {
+        let semantic_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+        if matches!(semantic_dtype, DType::Fp32 | DType::Fp16 | DType::Bf16) {
+            return semantic_dtype;
+        }
+    }
     match node.target {
         OpTarget::Reshape
         | OpTarget::View
@@ -146,10 +155,17 @@ pub(super) fn actual_tensor_dtype(graph: &Graph, node: &Node) -> DType {
         | OpTarget::TosaTransposeConv2d
         | OpTarget::TosaFullyConnected
         | OpTarget::TosaMatmul => accumulator_output_dtype(node),
-        OpTarget::Sum => match passthrough_input_dtype(graph, node) {
-            DType::Int8 | DType::Int16 | DType::Int32 => DType::Int32,
-            other => other,
-        },
+        OpTarget::Sum => {
+            let semantic_dtype = node_output_dtype(node);
+            if matches!(semantic_dtype, DType::Fp32 | DType::Fp16 | DType::Bf16) {
+                semantic_dtype
+            } else {
+                match passthrough_input_dtype(graph, node) {
+                    DType::Int8 | DType::Int16 | DType::Int32 => DType::Int32,
+                    other => other,
+                }
+            }
+        }
         _ => node_output_dtype(node),
     }
 }

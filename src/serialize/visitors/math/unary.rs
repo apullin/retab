@@ -1,31 +1,41 @@
 use super::*;
 
-pub(super) fn register(
-    table: &mut std::collections::HashMap<
-        crate::graph::ir::OpTarget,
-        crate::serialize::visitors::emitter::EmitFn,
-    >,
-) {
+pub(super) fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
-    // TOSA-lowered
-    table.insert(OpTarget::TosaNeg, emit_negate);
-    table.insert(OpTarget::TosaNegate, emit_negate);
-    table.insert(OpTarget::TosaCeil, emit_ceil);
-    table.insert(OpTarget::TosaFloor, emit_floor);
-    // ATen fallbacks
-    table.insert(OpTarget::Neg, emit_negate);
-    table.insert(OpTarget::Ceil, emit_ceil);
-    table.insert(OpTarget::Floor, emit_floor);
-    table.insert(OpTarget::Round, emit_round);
+    table.extend([
+        (OpTarget::TosaNeg, emit_negate as EmitFn),
+        (OpTarget::TosaNegate, emit_negate),
+        (OpTarget::TosaCeil, emit_ceil),
+        (OpTarget::TosaFloor, emit_floor),
+        (OpTarget::Neg, emit_negate),
+        (OpTarget::Ceil, emit_ceil),
+        (OpTarget::Floor, emit_floor),
+        (OpTarget::Round, emit_round),
+    ]);
+}
+
+fn emit_integral_passthrough_or_unary(
+    graph: &Graph,
+    store: &TensorStore,
+    node: &Node,
+    op: Op,
+    attribute: Attribute,
+) -> EmitResult {
+    if is_integral_dtype(passthrough_input_dtype(graph, node)) {
+        emit_identity(graph, store, node)
+    } else {
+        emit_direct_unary(graph, store, node, op, attribute)
+    }
 }
 
 pub(in crate::serialize::visitors) fn emit_negate(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let input_dtype = passthrough_input_dtype(graph, node);
-    result.tensors.push(make_output_tensor(node));
+    result.tensors.push(make_actual_output_tensor(graph, store, node));
 
     let (input_zp, output_zp) = if input_dtype == DType::Int8 {
         let input_zp = node
@@ -79,43 +89,23 @@ pub(in crate::serialize::visitors) fn emit_negate(ctx: &EmitContext) -> EmitResu
 }
 
 pub(in crate::serialize::visitors) fn emit_ceil(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
-    let node = ctx.node;
-    let input_dtype = passthrough_input_dtype(graph, node);
-    if is_integral_dtype(input_dtype) {
-        emit_identity(graph, node)
-    } else {
-        let mut result = EmitResult::default();
-        let input_names = collect_input_names(graph, node);
-        result.tensors.push(make_output_tensor(node));
-        result.operators.push(TosaOperator::new(
-            Op::Ceil,
-            Attribute::Ceil(CeilAttribute),
-            input_names,
-            vec![node.name.clone()],
-        ));
-        result
-    }
+    emit_integral_passthrough_or_unary(
+        ctx.graph,
+        ctx.store,
+        ctx.node,
+        Op::Ceil,
+        Attribute::Ceil(CeilAttribute),
+    )
 }
 
 pub(in crate::serialize::visitors) fn emit_floor(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
-    let node = ctx.node;
-    let input_dtype = passthrough_input_dtype(graph, node);
-    if is_integral_dtype(input_dtype) {
-        emit_identity(graph, node)
-    } else {
-        let mut result = EmitResult::default();
-        let input_names = collect_input_names(graph, node);
-        result.tensors.push(make_output_tensor(node));
-        result.operators.push(TosaOperator::new(
-            Op::Floor,
-            Attribute::Floor(FloorAttribute),
-            input_names,
-            vec![node.name.clone()],
-        ));
-        result
-    }
+    emit_integral_passthrough_or_unary(
+        ctx.graph,
+        ctx.store,
+        ctx.node,
+        Op::Floor,
+        Attribute::Floor(FloorAttribute),
+    )
 }
 
 pub(in crate::serialize::visitors) fn emit_round(ctx: &EmitContext) -> EmitResult {
@@ -124,115 +114,149 @@ pub(in crate::serialize::visitors) fn emit_round(ctx: &EmitContext) -> EmitResul
     let store = ctx.store;
     let input_dtype = passthrough_input_dtype(graph, node);
     if is_integral_dtype(input_dtype) {
-        return emit_identity(graph, node);
+        return emit_identity(graph, store, node);
     }
 
     let mut result = EmitResult::default();
     let spec = ParsedUnaryTensorSpec::parse(graph, store, node)
         .unwrap_or_else(|| panic!("emit_round: missing input for node '{}'", node.name));
 
-    let zero_name = format!("{}_round_zero", node.name);
     let half_name = format!("{}_round_half", node.name);
-    let ge_name = format!("{}_round_ge", node.name);
+    let one_name = format!("{}_round_one", node.name);
+    let two_name = format!("{}_round_two", node.name);
+    let floor_x_name = format!("{}_round_floor_x", node.name);
+    let frac_name = format!("{}_round_frac", node.name);
+    let is_tie_name = format!("{}_round_is_tie", node.name);
     let plus_half_name = format!("{}_round_plus_half", node.name);
-    let minus_half_name = format!("{}_round_minus_half", node.name);
-    let floor_name = format!("{}_round_floor", node.name);
-    let ceil_name = format!("{}_round_ceil", node.name);
+    let round_up_name = format!("{}_round_up", node.name);
+    let half_floor_mul_name = format!("{}_round_half_floor_mul", node.name);
+    let half_floor_name = format!("{}_round_half_floor", node.name);
+    let even_floor_name = format!("{}_round_even_floor", node.name);
+    let floor_is_even_name = format!("{}_round_floor_is_even", node.name);
+    let floor_plus_one_name = format!("{}_round_floor_plus_one", node.name);
+    let tie_result_name = format!("{}_round_tie_result", node.name);
 
-    let zero_tensor = make_filled_const_tensor(
-        zero_name.clone(),
-        spec.output_shape.clone(),
-        spec.ir_dtype,
-        0.0,
-    )
-    .unwrap_or_else(|| {
-        panic!(
-            "emit_round: unsupported zero-fill dtype {:?} for node '{}'",
-            spec.ir_dtype, node.name
-        )
-    });
-    let half_tensor = make_filled_const_tensor(
-        half_name.clone(),
-        spec.output_shape.clone(),
-        spec.ir_dtype,
-        0.5,
-    )
-    .unwrap_or_else(|| {
-        panic!(
-            "emit_round: unsupported half-fill dtype {:?} for node '{}'",
-            spec.ir_dtype, node.name
-        )
-    });
-    push_inline_const(&mut result, zero_tensor);
-    push_inline_const(&mut result, half_tensor);
-
-    for tensor_name in [
-        ge_name.clone(),
-        plus_half_name.clone(),
-        minus_half_name.clone(),
+    for (name, value, label) in [
+        (half_name.clone(), 0.5, "half"),
+        (one_name.clone(), 1.0, "one"),
+        (two_name.clone(), 2.0, "two"),
     ] {
-        let is_bool = tensor_name == ge_name;
-        result.tensors.push(TosaTensor::new(
-            tensor_name,
+        let tensor = make_filled_const_tensor(
+            name,
             spec.output_shape.clone(),
-            if is_bool {
-                DType::Bool
-            } else {
-                ir_dtype_to_tosa(spec.ir_dtype)
-            },
-        ));
+            spec.ir_dtype,
+            quantize_fill_value(node, value),
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "emit_round: unsupported {}-fill dtype {:?} for node '{}'",
+                label, spec.ir_dtype, node.name
+            )
+        });
+        push_inline_const(&mut result, tensor);
     }
 
-    result.operators.push(TosaOperator::new(
-        Op::GreaterEqual,
-        Attribute::GreaterEqual(GreaterEqualAttribute),
-        vec![spec.input_name.clone(), zero_name],
-        vec![ge_name.clone()],
-    ));
-    result.operators.push(TosaOperator::new(
+    let shift_name = push_shift_const(&mut result, &node.name);
+
+    result.push_output_op(
+        temp_tensor(floor_x_name.clone(), spec.output_shape.clone(), spec.base_dtype),
+        Op::Floor,
+        Attribute::Floor(FloorAttribute),
+        vec![spec.input_name.clone()],
+    );
+    result.push_output_op(
+        temp_tensor(frac_name.clone(), spec.output_shape.clone(), spec.base_dtype),
+        Op::Sub,
+        Attribute::Sub(SubAttribute),
+        vec![spec.input_name.clone(), floor_x_name.clone()],
+    );
+    result.push_output_op(
+        temp_tensor(is_tie_name.clone(), spec.output_shape.clone(), DType::Bool),
+        Op::Equal,
+        Attribute::Equal(EqualAttribute),
+        vec![frac_name, half_name.clone()],
+    );
+    result.push_output_op(
+        temp_tensor(
+            plus_half_name.clone(),
+            spec.output_shape.clone(),
+            spec.base_dtype,
+        ),
         Op::Add,
         Attribute::Add(AddAttribute),
         vec![spec.input_name.clone(), half_name.clone()],
-        vec![plus_half_name.clone()],
-    ));
-    result.operators.push(TosaOperator::new(
-        Op::Sub,
-        Attribute::Sub(SubAttribute),
-        vec![spec.input_name.clone(), half_name],
-        vec![minus_half_name.clone()],
-    ));
-
-    for (tensor_name, op, input) in [
-        (floor_name.clone(), Op::Floor, plus_half_name),
-        (ceil_name.clone(), Op::Ceil, minus_half_name),
-    ] {
-        result.tensors.push(TosaTensor::new(
-            tensor_name.clone(),
+    );
+    result.push_output_op(
+        temp_tensor(round_up_name.clone(), spec.output_shape.clone(), spec.base_dtype),
+        Op::Floor,
+        Attribute::Floor(FloorAttribute),
+        vec![plus_half_name],
+    );
+    result.push_output_op(
+        temp_tensor(
+            half_floor_mul_name.clone(),
             spec.output_shape.clone(),
-            ir_dtype_to_tosa(spec.ir_dtype),
-        ));
-        result.operators.push(TosaOperator::new(
-            op,
-            if op == Op::Floor {
-                Attribute::Floor(FloorAttribute)
-            } else {
-                Attribute::Ceil(CeilAttribute)
-            },
-            vec![input],
-            vec![tensor_name],
-        ));
-    }
-
-    result.tensors.push(TosaTensor::new(
-        node.name.clone(),
-        spec.output_shape,
-        ir_dtype_to_tosa(spec.ir_dtype),
-    ));
-    result.operators.push(TosaOperator::new(
+            spec.base_dtype,
+        ),
+        Op::Mul,
+        Attribute::Mul(MulAttribute { shift: 0 }),
+        vec![floor_x_name.clone(), half_name, shift_name.clone()],
+    );
+    result.push_output_op(
+        temp_tensor(
+            half_floor_name.clone(),
+            spec.output_shape.clone(),
+            spec.base_dtype,
+        ),
+        Op::Floor,
+        Attribute::Floor(FloorAttribute),
+        vec![half_floor_mul_name],
+    );
+    result.push_output_op(
+        temp_tensor(
+            even_floor_name.clone(),
+            spec.output_shape.clone(),
+            spec.base_dtype,
+        ),
+        Op::Mul,
+        Attribute::Mul(MulAttribute { shift: 0 }),
+        vec![half_floor_name, two_name, shift_name],
+    );
+    result.push_output_op(
+        temp_tensor(
+            floor_is_even_name.clone(),
+            spec.output_shape.clone(),
+            DType::Bool,
+        ),
+        Op::Equal,
+        Attribute::Equal(EqualAttribute),
+        vec![floor_x_name.clone(), even_floor_name],
+    );
+    result.push_output_op(
+        temp_tensor(
+            floor_plus_one_name.clone(),
+            spec.output_shape.clone(),
+            spec.base_dtype,
+        ),
+        Op::Add,
+        Attribute::Add(AddAttribute),
+        vec![floor_x_name.clone(), one_name],
+    );
+    result.push_output_op(
+        temp_tensor(
+            tie_result_name.clone(),
+            spec.output_shape.clone(),
+            spec.base_dtype,
+        ),
         Op::Select,
         Attribute::Select(SelectAttribute),
-        vec![ge_name, floor_name, ceil_name],
-        vec![node.name.clone()],
-    ));
+        vec![floor_is_even_name, floor_x_name, floor_plus_one_name],
+    );
+    result.push_output_op(
+        make_actual_output_tensor(graph, store, node),
+        Op::Select,
+        Attribute::Select(SelectAttribute),
+        vec![is_tie_name, tie_result_name, round_up_name],
+    );
     result
 }

@@ -1,14 +1,11 @@
 use super::*;
 
-pub(super) fn register(
-    table: &mut std::collections::HashMap<
-        crate::graph::ir::OpTarget,
-        crate::serialize::visitors::emitter::EmitFn,
-    >,
-) {
+pub(super) fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
-    table.insert(OpTarget::TosaPad, emit_pad);
-    table.insert(OpTarget::Pad, emit_pad);
+    table.extend([
+        (OpTarget::TosaPad, emit_pad as EmitFn),
+        (OpTarget::Pad, emit_pad),
+    ]);
 }
 
 fn pad_fill_value(node: &Node) -> i32 {

@@ -1,13 +1,8 @@
 use super::*;
 
-pub(super) fn register(
-    table: &mut std::collections::HashMap<
-        crate::graph::ir::OpTarget,
-        crate::serialize::visitors::emitter::EmitFn,
-    >,
-) {
+pub(super) fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
-    table.insert(OpTarget::TosaRescale, emit_rescale);
+    table.extend([(OpTarget::TosaRescale, emit_rescale as EmitFn)]);
 }
 
 struct PostRescaleReshape {
@@ -34,30 +29,150 @@ struct RescaleParams {
     output_unsigned: bool,
 }
 
-fn first_input_node<'a>(graph: &'a Graph, node: &Node) -> Option<&'a Node> {
-    let Arg::Node(input_id) = node.args.first()? else {
-        return None;
-    };
-    graph.node(*input_id)
+fn rescale_input_shape(graph: &Graph, store: &TensorStore, input_node: &Node) -> Vec<i32> {
+    match input_node.target {
+        OpTarget::Conv2d | OpTarget::TosaConv2d => {
+            let pad = {
+                let kw = kwarg_i32_list(input_node, "pad");
+                if kw.is_empty() {
+                    arg_i32_list(input_node, 4)
+                } else {
+                    kw
+                }
+            };
+            let stride = {
+                let kw = kwarg_i32_list(input_node, "stride");
+                if kw.is_empty() {
+                    arg_i32_list(input_node, 3)
+                } else {
+                    kw
+                }
+            };
+            let dilation = {
+                let kw = kwarg_i32_list(input_node, "dilation");
+                if kw.is_empty() {
+                    arg_i32_list(input_node, 5)
+                } else {
+                    kw
+                }
+            };
+            let stride_for_shape = if stride.is_empty() { vec![1, 1] } else { stride };
+            let dilation_for_shape = if dilation.is_empty() {
+                vec![1, 1]
+            } else {
+                dilation
+            };
+            let raw_pad = if pad.is_empty() {
+                vec![0, 0, 0, 0]
+            } else {
+                pad
+            };
+            let pad_for_shape = match input_node.target {
+                OpTarget::Conv2d => adjusted_tosa_pad_for_raw_aten_conv(
+                    graph,
+                    store,
+                    input_node,
+                    &raw_pad,
+                    &stride_for_shape,
+                    &dilation_for_shape,
+                ),
+                _ => adjusted_tosa_pad_for_emitted_conv2d(
+                    graph,
+                    store,
+                    input_node,
+                    &raw_pad,
+                    &stride_for_shape,
+                    &dilation_for_shape,
+                ),
+            };
+            compute_conv2d_nhwc_output(
+                graph,
+                store,
+                input_node,
+                &pad_for_shape,
+                &stride_for_shape,
+                &dilation_for_shape,
+            )
+            .shape
+        }
+        OpTarget::DepthwiseConv2d | OpTarget::TosaDepthwiseConv2d => {
+            let pad = {
+                let kw = kwarg_i32_list(input_node, "pad");
+                if kw.is_empty() {
+                    arg_i32_list(input_node, 4)
+                } else {
+                    kw
+                }
+            };
+            let stride = {
+                let kw = kwarg_i32_list(input_node, "stride");
+                if kw.is_empty() {
+                    arg_i32_list(input_node, 3)
+                } else {
+                    kw
+                }
+            };
+            let dilation = {
+                let kw = kwarg_i32_list(input_node, "dilation");
+                if kw.is_empty() {
+                    arg_i32_list(input_node, 5)
+                } else {
+                    kw
+                }
+            };
+            let stride_for_shape = if stride.is_empty() { vec![1, 1] } else { stride };
+            let dilation_for_shape = if dilation.is_empty() {
+                vec![1, 1]
+            } else {
+                dilation
+            };
+            let raw_pad = if pad.is_empty() {
+                vec![0, 0, 0, 0]
+            } else {
+                pad
+            };
+            let pad_for_shape = match input_node.target {
+                OpTarget::DepthwiseConv2d => adjusted_tosa_pad_for_raw_aten_conv(
+                    graph,
+                    store,
+                    input_node,
+                    &raw_pad,
+                    &stride_for_shape,
+                    &dilation_for_shape,
+                ),
+                _ => adjusted_tosa_pad_for_emitted_conv2d(
+                    graph,
+                    store,
+                    input_node,
+                    &raw_pad,
+                    &stride_for_shape,
+                    &dilation_for_shape,
+                ),
+            };
+            compute_depthwise_conv2d_nhwc_output(
+                graph,
+                store,
+                input_node,
+                &pad_for_shape,
+                &stride_for_shape,
+                &dilation_for_shape,
+            )
+            .shape
+        }
+        _ => actual_tensor_shape(graph, store, input_node),
+    }
 }
 
-fn push_rank1_const(
-    result: &mut EmitResult,
-    name: String,
-    dtype: DType,
-    values: Vec<u8>,
-    len: usize,
-) -> String {
-    push_inline_const(
-        result,
-        make_rank1_const_tensor(name.clone(), dtype, values, len),
-    );
-    name
+fn rescale_output_dtype(node: &Node) -> DType {
+    match node.args.get(1) {
+        Some(Arg::Dtype(dtype)) => ir_dtype_to_tosa(*dtype),
+        _ => ir_dtype_to_tosa(node.meta.val.dtype),
+    }
 }
 
 fn plan_rescale_output(graph: &Graph, node: &Node, store: &TensorStore) -> RescaleOutputPlan {
-    let logical_output_shape = actual_tensor_shape(graph, store, node);
-    let output_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+    let logical_output_shape = raw_i32_shape(node);
+    let output_dtype = rescale_output_dtype(node);
     let input_tosa_dtype = first_input_node(graph, node)
         .map(|input_node| match input_node.op {
             OpType::Placeholder => store
@@ -72,16 +187,17 @@ fn plan_rescale_output(graph: &Graph, node: &Node, store: &TensorStore) -> Resca
         return RescaleOutputPlan {
             input_tosa_dtype,
             output_name: node.name.clone(),
-            output_shape: logical_output_shape,
+            output_shape: actual_tensor_shape(graph, store, node),
             post_reshape: None,
         };
     };
+    let input_shape = rescale_input_shape(graph, store, input_node);
 
     let Some(batched_shape) = promoted_2d_matmul_shape(graph, store, input_node) else {
         return RescaleOutputPlan {
             input_tosa_dtype,
             output_name: node.name.clone(),
-            output_shape: logical_output_shape,
+            output_shape: input_shape,
             post_reshape: None,
         };
     };
@@ -224,7 +340,7 @@ pub(in crate::serialize::visitors) fn emit_rescale(ctx: &EmitContext) -> EmitRes
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let output_plan = plan_rescale_output(graph, node, store);
-    let rescale_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+    let rescale_dtype = rescale_output_dtype(node);
 
     result.tensors.push(make_empty_tensor(
         output_plan.output_name.clone(),

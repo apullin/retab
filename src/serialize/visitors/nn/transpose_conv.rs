@@ -1,14 +1,14 @@
 use super::*;
 
-pub(super) fn register(
-    table: &mut std::collections::HashMap<
-        crate::graph::ir::OpTarget,
-        crate::serialize::visitors::emitter::EmitFn,
-    >,
-) {
+pub(super) fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
-    table.insert(OpTarget::TosaTransposeConv2d, emit_transpose_conv2d);
-    table.insert(OpTarget::ConvTranspose2d, emit_transpose_conv2d);
+    table.extend([
+        (
+            OpTarget::TosaTransposeConv2d,
+            emit_transpose_conv2d as EmitFn,
+        ),
+        (OpTarget::ConvTranspose2d, emit_transpose_conv2d),
+    ]);
 }
 
 pub(in crate::serialize::visitors) fn emit_transpose_conv2d(ctx: &EmitContext) -> EmitResult {

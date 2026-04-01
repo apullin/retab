@@ -1,13 +1,13 @@
 pub mod tosa_generated;
 pub mod visitors;
 
-use crate::graph::ir::{Arg, OpTarget, OpType};
+use crate::graph::ir::{Arg, Node, OpTarget, OpType};
 use crate::graph::Graph;
-use crate::store::TensorStore;
+use crate::store::{TensorData, TensorStore};
 
 use flatbuffers::{FlatBufferBuilder, TableFinishedWIPOffset, Vector, WIPOffset};
 use std::collections::HashMap;
-use tosa_generated::{Attribute, DType, TosaOperator, TosaShape, TosaTensor};
+use tosa_generated::{Attribute, DType, Op, TosaOperator, TosaShape, TosaTensor, TransposeAttribute};
 use visitors::ir_dtype_to_tosa;
 
 // ---------------------------------------------------------------------------
@@ -36,6 +36,64 @@ fn apply_tosa_dim_order(node: &crate::graph::ir::Node, shape: Vec<i32>) -> Vec<i
     order
         .iter()
         .filter_map(|&src_idx| shape.get(src_idx as usize).copied())
+        .collect()
+}
+
+fn raw_i32_shape(node: &Node) -> Vec<i32> {
+    node.meta
+        .val
+        .shape_slice()
+        .iter()
+        .map(|&dim| dim as i32)
+        .collect()
+}
+
+fn node_tensor_dtype(node: &Node) -> DType {
+    node.meta
+        .tosa_special_dtype
+        .map(ir_dtype_to_tosa)
+        .unwrap_or_else(|| ir_dtype_to_tosa(node.meta.val.dtype))
+}
+
+fn inverse_tosa_dim_order(order: &[u8]) -> Option<Vec<i32>> {
+    let mut inverse = vec![0i32; order.len()];
+    for (idx, &axis) in order.iter().enumerate() {
+        let axis = axis as usize;
+        if axis >= order.len() {
+            return None;
+        }
+        inverse[axis] = idx as i32;
+    }
+    Some(inverse)
+}
+
+fn infer_shape_permutation(actual_shape: &[i32], raw_shape: &[i32]) -> Option<Vec<i32>> {
+    if actual_shape.len() != raw_shape.len() {
+        return None;
+    }
+
+    let mut used = vec![false; actual_shape.len()];
+    let mut perms = Vec::with_capacity(raw_shape.len());
+    for &raw_dim in raw_shape {
+        let pos = actual_shape
+            .iter()
+            .enumerate()
+            .find_map(|(idx, &actual_dim)| (!used[idx] && actual_dim == raw_dim).then_some(idx))?;
+        used[pos] = true;
+        perms.push(pos as i32);
+    }
+
+    Some(perms)
+}
+
+fn permute_shape(shape: &[i32], perms: &[i32]) -> Option<Vec<i32>> {
+    if shape.len() != perms.len() {
+        return None;
+    }
+
+    perms
+        .iter()
+        .map(|&idx| shape.get(idx as usize).copied())
         .collect()
 }
 
@@ -372,6 +430,189 @@ fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind>
     perms
 }
 
+fn make_graph_tensor(name: String, shape: Vec<i32>, dtype: DType, data: Vec<u8>) -> TosaTensor {
+    TosaTensor {
+        name,
+        shape,
+        dtype,
+        data,
+        variable: false,
+        is_unranked: false,
+        variable_name: String::new(),
+    }
+}
+
+fn placeholder_decl(node: &Node) -> (Vec<i32>, DType) {
+    let raw_shape: Vec<i32> = node
+        .meta
+        .val
+        .shape_slice()
+        .iter()
+        .map(|&d| d as i32)
+        .collect();
+    (
+        apply_tosa_dim_order(node, raw_shape),
+        ir_dtype_to_tosa(node.meta.val.dtype),
+    )
+}
+
+fn serialize_const_placeholder(
+    node: &Node,
+    tensor_data: &TensorData,
+    weight_perms: &HashMap<String, WeightPermKind>,
+) -> TosaTensor {
+    let store_dtype = ir_dtype_to_tosa(tensor_data.dtype);
+    let tensor_dtype = node
+        .meta
+        .tosa_special_dtype
+        .map(ir_dtype_to_tosa)
+        .unwrap_or(store_dtype);
+    let elem_sz = dtype_elem_size(tensor_data.dtype);
+
+    let (final_data, final_shape_i64) = if let Some(&perm_kind) = weight_perms.get(&node.name) {
+        permute_weight_data(&tensor_data.data, &tensor_data.shape, elem_sz, perm_kind)
+    } else if let Some(order) = node.meta.tosa_dim_order.as_ref() {
+        permute_tensor_by_order(&tensor_data.data, &tensor_data.shape, elem_sz, order)
+    } else {
+        (tensor_data.data.clone(), tensor_data.shape.clone())
+    };
+    let final_shape: Vec<i32> = final_shape_i64.iter().map(|&d| d as i32).collect();
+    let final_data = match (tensor_dtype, store_dtype) {
+        (DType::Int4, _) if store_dtype != DType::Int4 => pack_int4_data(&final_data),
+        (DType::Int48, DType::Int32) => widen_int32_data_to_int48(&final_data),
+        _ => final_data,
+    };
+
+    make_graph_tensor(node.name.clone(), final_shape, tensor_dtype, final_data)
+}
+
+fn append_output_names(graph: &Graph, arg: &Arg, output_names: &mut Vec<String>) {
+    match arg {
+        Arg::Node(id) => {
+            if let Some(node) = graph.node(*id) {
+                output_names.push(node.name.clone());
+            }
+        }
+        Arg::NodeList(ids) => {
+            for id in ids {
+                if let Some(node) = graph.node(*id) {
+                    output_names.push(node.name.clone());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn append_normalized_output_names(
+    graph: &Graph,
+    store: &TensorStore,
+    arg: &Arg,
+    tensors: &mut Vec<TosaTensor>,
+    operators: &mut Vec<TosaOperator>,
+    output_names: &mut Vec<String>,
+) {
+    let mut append_one = |node: &Node| {
+        let raw_shape = raw_i32_shape(node);
+        let serialized_shape = apply_tosa_dim_order(node, raw_shape.clone());
+        let actual_shape = visitors::actual_tensor_shape(graph, store, node);
+        let preserves_non_identity_layout = node
+            .meta
+            .tosa_dim_order
+            .as_ref()
+            .map(|order| {
+                order
+                    .iter()
+                    .enumerate()
+                    .any(|(idx, &axis)| axis as usize != idx)
+            })
+            .unwrap_or(false);
+        let has_explicit_output_layout = matches!(node.target, OpTarget::TosaTranspose);
+        if node.meta.arm_control_flow_parent_output_user && raw_shape.len() == 4 {
+            if let Some(perms) = node
+                .meta
+                .tosa_dim_order
+                .as_ref()
+                .and_then(|order| inverse_tosa_dim_order(order))
+            {
+                if let Some(output_shape) = permute_shape(&serialized_shape, &perms) {
+                    let output_name = format!("{}_output_layout", node.name);
+                    tensors.push(TosaTensor::new(
+                        output_name.clone(),
+                        output_shape,
+                        node_tensor_dtype(node),
+                    ));
+                    operators.push(TosaOperator::new(
+                        Op::Transpose,
+                        Attribute::Transpose(TransposeAttribute { perms }),
+                        vec![node.name.clone()],
+                        vec![output_name.clone()],
+                    ));
+                    output_names.push(output_name);
+                    return;
+                }
+            }
+        }
+        // External outputs that still advertise a non-identity dim order are
+        // intentionally user-visible channels-last tensors. Keep those in the
+        // serializer's native layout so the runner can decode them using the
+        // FX fake tensor metadata instead of fighting a hidden extra transpose.
+        if raw_shape.len() != 4
+            || actual_shape == raw_shape
+            || preserves_non_identity_layout
+            || has_explicit_output_layout
+        {
+            output_names.push(node.name.clone());
+            return;
+        }
+
+        let perms = node
+            .meta
+            .tosa_dim_order
+            .as_ref()
+            .and_then(|order| {
+                (apply_tosa_dim_order(node, raw_shape.clone()) == actual_shape)
+                    .then(|| inverse_tosa_dim_order(order))
+                    .flatten()
+            })
+            .or_else(|| infer_shape_permutation(&actual_shape, &raw_shape));
+        let Some(perms) = perms else {
+            output_names.push(node.name.clone());
+            return;
+        };
+
+        let output_name = format!("{}_output_layout", node.name);
+        tensors.push(TosaTensor::new(
+            output_name.clone(),
+            raw_shape,
+            node_tensor_dtype(node),
+        ));
+        operators.push(TosaOperator::new(
+            Op::Transpose,
+            Attribute::Transpose(TransposeAttribute { perms }),
+            vec![node.name.clone()],
+            vec![output_name.clone()],
+        ));
+        output_names.push(output_name);
+    };
+
+    match arg {
+        Arg::Node(id) => {
+            if let Some(node) = graph.node(*id) {
+                append_one(node);
+            }
+        }
+        Arg::NodeList(ids) => {
+            for id in ids {
+                if let Some(node) = graph.node(*id) {
+                    append_one(node);
+                }
+            }
+        }
+        _ => append_output_names(graph, arg, output_names),
+    }
+}
+
 /// Serialize the IR graph and its constant data into a TOSA flatbuffer byte
 /// vector.
 struct SerializedGraphItems {
@@ -382,7 +623,11 @@ struct SerializedGraphItems {
     output_names: Vec<String>,
 }
 
-fn collect_serialized_graph_items(graph: &Graph, store: &TensorStore) -> SerializedGraphItems {
+fn collect_serialized_graph_items(
+    graph: &Graph,
+    store: &TensorStore,
+    normalize_outputs: bool,
+) -> SerializedGraphItems {
     // Use insertion order directly instead of topological sort.
     //
     // The FX graph is topologically ordered by construction (Python FX enforces
@@ -457,79 +702,14 @@ fn collect_serialized_graph_items(graph: &Graph, store: &TensorStore) -> Seriali
         match node.op {
             OpType::Placeholder => {
                 let name = &node.name;
-                let raw_shape: Vec<i32> = node
-                    .meta
-                    .val
-                    .shape_slice()
-                    .iter()
-                    .map(|&d| d as i32)
-                    .collect();
-                let shape = apply_tosa_dim_order(node, raw_shape);
-                let dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+                let (shape, dtype) = placeholder_decl(node);
 
                 if let Some(tensor_data) = store.get(name) {
-                    // Parse, don't validate: constant placeholders may carry a
-                    // special TOSA dtype (for example INT4 weights) that is
-                    // not representable in the physical torch tensor dtype
-                    // stored in TensorStore. We still use the store bytes for
-                    // layout permutation, but the serialized tensor dtype must
-                    // respect the node metadata.
-                    //
-                    // `fixup_quantized_dtypes` may have changed node.meta.val.dtype
-                    // (e.g. Float32 -> Int8) based on consumer qparams, but the
-                    // store data is in the original dtype.  Using the node meta's
-                    // dtype here would produce a data-size/shape mismatch
-                    // ("malformed constant buffer").
-                    let store_dtype = ir_dtype_to_tosa(tensor_data.dtype);
-                    let tensor_dtype = node
-                        .meta
-                        .tosa_special_dtype
-                        .map(ir_dtype_to_tosa)
-                        .unwrap_or(store_dtype);
-                    let elem_sz = dtype_elem_size(tensor_data.dtype);
-
-                    // Constant placeholders must be serialized in their physical
-                    // TOSA layout. The FX memory-format pass annotates this via
-                    // `tosa_dim_order` but does not rewrite the underlying store
-                    // tensor shape/data. Apply that permutation here for general
-                    // constants, while keeping the dedicated conv-weight path
-                    // separate so we do not double-permute OIHW weights.
-                    let (final_data, final_shape_i64) =
-                        if let Some(&perm_kind) = weight_perms.get(name) {
-                            permute_weight_data(
-                                &tensor_data.data,
-                                &tensor_data.shape,
-                                elem_sz,
-                                perm_kind,
-                            )
-                        } else if let Some(order) = node.meta.tosa_dim_order.as_ref() {
-                            permute_tensor_by_order(
-                                &tensor_data.data,
-                                &tensor_data.shape,
-                                elem_sz,
-                                order,
-                            )
-                        } else {
-                            (tensor_data.data.clone(), tensor_data.shape.clone())
-                        };
-                    let final_shape: Vec<i32> = final_shape_i64.iter().map(|&d| d as i32).collect();
-                    let final_data = match (tensor_dtype, store_dtype) {
-                        (DType::Int4, _) if store_dtype != DType::Int4 => {
-                            pack_int4_data(&final_data)
-                        }
-                        (DType::Int48, DType::Int32) => widen_int32_data_to_int48(&final_data),
-                        _ => final_data,
-                    };
-
-                    tensors.push(TosaTensor {
-                        name: name.clone(),
-                        shape: final_shape,
-                        dtype: tensor_dtype,
-                        data: final_data,
-                        variable: false,
-                        is_unranked: false,
-                        variable_name: String::new(),
-                    });
+                    tensors.push(serialize_const_placeholder(
+                        node,
+                        tensor_data,
+                        &weight_perms,
+                    ));
                     operators.push(TosaOperator::new(
                         tosa_generated::Op::Const,
                         Attribute::Const(tosa_generated::ConstAttribute),
@@ -537,15 +717,7 @@ fn collect_serialized_graph_items(graph: &Graph, store: &TensorStore) -> Seriali
                         vec![name.clone()],
                     ));
                 } else {
-                    tensors.push(TosaTensor {
-                        name: name.clone(),
-                        shape,
-                        dtype,
-                        data: Vec::new(),
-                        variable: false,
-                        is_unranked: false,
-                        variable_name: String::new(),
-                    });
+                    tensors.push(make_graph_tensor(name.clone(), shape, dtype, Vec::new()));
                     input_names.push(name.clone());
                 }
             }
@@ -563,20 +735,17 @@ fn collect_serialized_graph_items(graph: &Graph, store: &TensorStore) -> Seriali
             }
             OpType::Output => {
                 for arg in &node.args {
-                    match arg {
-                        Arg::Node(id) => {
-                            if let Some(n) = graph.node(*id) {
-                                output_names.push(n.name.clone());
-                            }
-                        }
-                        Arg::NodeList(ids) => {
-                            for id in ids {
-                                if let Some(n) = graph.node(*id) {
-                                    output_names.push(n.name.clone());
-                                }
-                            }
-                        }
-                        _ => {}
+                    if normalize_outputs {
+                        append_normalized_output_names(
+                            graph,
+                            store,
+                            arg,
+                            &mut tensors,
+                            &mut operators,
+                            &mut output_names,
+                        );
+                    } else {
+                        append_output_names(graph, arg, &mut output_names);
                     }
                 }
             }
@@ -605,7 +774,12 @@ fn build_fb_region<'fbb>(
     graph: &Graph,
     store: &TensorStore,
 ) -> WIPOffset<TableFinishedWIPOffset> {
-    let serialized = collect_serialized_graph_items(graph, store);
+    // Region outputs are only true external program outputs on the root graph.
+    // Control-flow subgraphs feed COND_IF/WHILE_LOOP directly and must retain
+    // their internal layout instead of being normalized back to the user-facing
+    // output shape at region boundaries.
+    let normalize_outputs = region_name == "main";
+    let serialized = collect_serialized_graph_items(graph, store, normalize_outputs);
 
     // Build the flatbuffer bottom-up
     // Pre-serialize all sub-tables
@@ -816,6 +990,155 @@ fn build_fb_operators(
     offsets
 }
 
+fn finish_attr(
+    builder: &mut FlatBufferBuilder<'_>,
+    attr: &Attribute,
+    fill: impl FnOnce(&mut FlatBufferBuilder<'_>),
+) -> (u8, Option<WIPOffset<TableFinishedWIPOffset>>) {
+    let start = builder.start_table();
+    fill(builder);
+    let off = builder.end_table(start);
+    (attr.union_type(), Some(off))
+}
+
+fn empty_attr(
+    builder: &mut FlatBufferBuilder<'_>,
+    attr: &Attribute,
+) -> (u8, Option<WIPOffset<TableFinishedWIPOffset>>) {
+    finish_attr(builder, attr, |_| {})
+}
+
+fn conv_attr(
+    builder: &mut FlatBufferBuilder<'_>,
+    attr: &Attribute,
+    pad: &[i32],
+    stride: &[i32],
+    dilation: &[i32],
+    local_bound: bool,
+    acc_type: u32,
+) -> (u8, Option<WIPOffset<TableFinishedWIPOffset>>) {
+    let pad = builder.create_vector(pad);
+    let stride = builder.create_vector(stride);
+    let dilation = builder.create_vector(dilation);
+    finish_attr(builder, attr, |builder| {
+        builder.push_slot_always::<WIPOffset<_>>(4, pad);
+        builder.push_slot_always::<WIPOffset<_>>(6, stride);
+        builder.push_slot_always::<WIPOffset<_>>(8, dilation);
+        builder.push_slot::<bool>(10, local_bound, false);
+        builder.push_slot::<u32>(12, acc_type, 0);
+    })
+}
+
+fn pool_attr(
+    builder: &mut FlatBufferBuilder<'_>,
+    attr: &Attribute,
+    kernel: &[i32],
+    stride: &[i32],
+    pad: &[i32],
+    field10: u32,
+) -> (u8, Option<WIPOffset<TableFinishedWIPOffset>>) {
+    let kernel = builder.create_vector(kernel);
+    let stride = builder.create_vector(stride);
+    let pad = builder.create_vector(pad);
+    finish_attr(builder, attr, |builder| {
+        builder.push_slot_always::<WIPOffset<_>>(4, kernel);
+        builder.push_slot_always::<WIPOffset<_>>(6, stride);
+        builder.push_slot_always::<WIPOffset<_>>(8, pad);
+        builder.push_slot::<u32>(10, field10, 0);
+    })
+}
+
+fn scalar_i32_attr(
+    builder: &mut FlatBufferBuilder<'_>,
+    attr: &Attribute,
+    value: i32,
+) -> (u8, Option<WIPOffset<TableFinishedWIPOffset>>) {
+    finish_attr(builder, attr, |builder| {
+        builder.push_slot::<i32>(4, value, 0);
+    })
+}
+
+fn scalar_u32_attr(
+    builder: &mut FlatBufferBuilder<'_>,
+    attr: &Attribute,
+    value: u32,
+) -> (u8, Option<WIPOffset<TableFinishedWIPOffset>>) {
+    finish_attr(builder, attr, |builder| {
+        builder.push_slot::<u32>(4, value, 0);
+    })
+}
+
+fn vector_i32_attr(
+    builder: &mut FlatBufferBuilder<'_>,
+    attr: &Attribute,
+    values: &[i32],
+) -> (u8, Option<WIPOffset<TableFinishedWIPOffset>>) {
+    let values = builder.create_vector(values);
+    finish_attr(builder, attr, |builder| {
+        builder.push_slot_always::<WIPOffset<_>>(4, values);
+    })
+}
+
+fn axis_nan_mode_attr(
+    builder: &mut FlatBufferBuilder<'_>,
+    attr: &Attribute,
+    axis: i32,
+    nan_mode: u32,
+) -> (u8, Option<WIPOffset<TableFinishedWIPOffset>>) {
+    finish_attr(builder, attr, |builder| {
+        builder.push_slot::<i32>(4, axis, 0);
+        builder.push_slot::<u32>(6, nan_mode, 0);
+    })
+}
+
+fn transpose_conv_attr(
+    builder: &mut FlatBufferBuilder<'_>,
+    attr: &Attribute,
+    out_pad: &[i32],
+    stride: &[i32],
+    local_bound: bool,
+    acc_type: u32,
+) -> (u8, Option<WIPOffset<TableFinishedWIPOffset>>) {
+    let out_pad = builder.create_vector(out_pad);
+    let stride = builder.create_vector(stride);
+    finish_attr(builder, attr, |builder| {
+        builder.push_slot_always::<WIPOffset<_>>(4, out_pad);
+        builder.push_slot_always::<WIPOffset<_>>(6, stride);
+        builder.push_slot::<bool>(8, local_bound, false);
+        builder.push_slot::<u32>(10, acc_type, 0);
+    })
+}
+
+fn string_pair_attr(
+    builder: &mut FlatBufferBuilder<'_>,
+    attr: &Attribute,
+    first: &str,
+    second: &str,
+) -> (u8, Option<WIPOffset<TableFinishedWIPOffset>>) {
+    let first = builder.create_string(first);
+    let second = builder.create_string(second);
+    finish_attr(builder, attr, |builder| {
+        builder.push_slot_always::<WIPOffset<_>>(4, first);
+        builder.push_slot_always::<WIPOffset<_>>(6, second);
+    })
+}
+
+fn clamp_attr(
+    builder: &mut FlatBufferBuilder<'_>,
+    attr: &Attribute,
+    min_val: &[u8],
+    max_val: &[u8],
+    nan_mode: u32,
+) -> (u8, Option<WIPOffset<TableFinishedWIPOffset>>) {
+    let min_val = create_force_aligned_u8_vector(builder, min_val);
+    let max_val = create_force_aligned_u8_vector(builder, max_val);
+    finish_attr(builder, attr, |builder| {
+        builder.push_slot_always::<WIPOffset<_>>(4, min_val);
+        builder.push_slot_always::<WIPOffset<_>>(6, max_val);
+        builder.push_slot::<u32>(8, nan_mode, 0);
+    })
+}
+
 /// Build a flatbuffer attribute table and return (union_type_byte, optional offset).
 fn build_fb_attribute(
     builder: &mut FlatBufferBuilder<'_>,
@@ -865,209 +1188,94 @@ fn build_fb_attribute(
         | Attribute::LogicalOr(_)
         | Attribute::LogicalXor(_)
         | Attribute::Pow(_)
-        | Attribute::IntDiv(_) => {
-            // Empty tables
-            let start = builder.start_table();
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        | Attribute::IntDiv(_) => empty_attr(builder, attr),
 
-        Attribute::Conv2d(a) => {
-            let pad = builder.create_vector(&a.pad);
-            let stride = builder.create_vector(&a.stride);
-            let dilation = builder.create_vector(&a.dilation);
-            let start = builder.start_table();
-            builder.push_slot_always::<WIPOffset<_>>(4, pad);
-            builder.push_slot_always::<WIPOffset<_>>(6, stride);
-            builder.push_slot_always::<WIPOffset<_>>(8, dilation);
-            builder.push_slot::<bool>(10, a.local_bound, false);
-            builder.push_slot::<u32>(12, a.acc_type as u32, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        Attribute::Conv2d(a) => conv_attr(
+            builder,
+            attr,
+            &a.pad,
+            &a.stride,
+            &a.dilation,
+            a.local_bound,
+            a.acc_type as u32,
+        ),
+        Attribute::Conv3d(a) => conv_attr(
+            builder,
+            attr,
+            &a.pad,
+            &a.stride,
+            &a.dilation,
+            a.local_bound,
+            a.acc_type as u32,
+        ),
+        Attribute::DepthwiseConv2d(a) => conv_attr(
+            builder,
+            attr,
+            &a.pad,
+            &a.stride,
+            &a.dilation,
+            a.local_bound,
+            a.acc_type as u32,
+        ),
 
-        Attribute::Conv3d(a) => {
-            let pad = builder.create_vector(&a.pad);
-            let stride = builder.create_vector(&a.stride);
-            let dilation = builder.create_vector(&a.dilation);
-            let start = builder.start_table();
-            builder.push_slot_always::<WIPOffset<_>>(4, pad);
-            builder.push_slot_always::<WIPOffset<_>>(6, stride);
-            builder.push_slot_always::<WIPOffset<_>>(8, dilation);
-            builder.push_slot::<bool>(10, a.local_bound, false);
-            builder.push_slot::<u32>(12, a.acc_type as u32, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
-
-        Attribute::DepthwiseConv2d(a) => {
-            let pad = builder.create_vector(&a.pad);
-            let stride = builder.create_vector(&a.stride);
-            let dilation = builder.create_vector(&a.dilation);
-            let start = builder.start_table();
-            builder.push_slot_always::<WIPOffset<_>>(4, pad);
-            builder.push_slot_always::<WIPOffset<_>>(6, stride);
-            builder.push_slot_always::<WIPOffset<_>>(8, dilation);
-            builder.push_slot::<bool>(10, a.local_bound, false);
-            builder.push_slot::<u32>(12, a.acc_type as u32, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
-
-        Attribute::Rescale(a) => {
-            let start = builder.start_table();
+        Attribute::Rescale(a) => finish_attr(builder, attr, |builder| {
             builder.push_slot::<bool>(4, a.scale32, false);
             builder.push_slot::<u32>(6, a.rounding_mode as u32, 0);
             builder.push_slot::<bool>(8, a.per_channel, false);
             builder.push_slot::<bool>(10, a.input_unsigned, false);
             builder.push_slot::<bool>(12, a.output_unsigned, false);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        }),
 
-        Attribute::Resize(a) => {
-            let start = builder.start_table();
-            builder.push_slot::<u32>(4, a.mode as u32, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        Attribute::Resize(a) => scalar_u32_attr(builder, attr, a.mode as u32),
 
-        Attribute::MaxPool2d(a) => {
-            let kernel = builder.create_vector(&a.kernel);
-            let stride = builder.create_vector(&a.stride);
-            let pad = builder.create_vector(&a.pad);
-            let start = builder.start_table();
-            builder.push_slot_always::<WIPOffset<_>>(4, kernel);
-            builder.push_slot_always::<WIPOffset<_>>(6, stride);
-            builder.push_slot_always::<WIPOffset<_>>(8, pad);
-            builder.push_slot::<u32>(10, a.nan_mode as u32, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        Attribute::MaxPool2d(a) => pool_attr(
+            builder,
+            attr,
+            &a.kernel,
+            &a.stride,
+            &a.pad,
+            a.nan_mode as u32,
+        ),
 
-        Attribute::Transpose(a) => {
-            let perms = builder.create_vector(&a.perms);
-            let start = builder.start_table();
-            builder.push_slot_always::<WIPOffset<_>>(4, perms);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        Attribute::Transpose(a) => vector_i32_attr(builder, attr, &a.perms),
 
-        Attribute::Clamp(a) => {
-            let min_val = create_force_aligned_u8_vector(builder, &a.min_val);
-            let max_val = create_force_aligned_u8_vector(builder, &a.max_val);
-            let start = builder.start_table();
-            builder.push_slot_always::<WIPOffset<_>>(4, min_val);
-            builder.push_slot_always::<WIPOffset<_>>(6, max_val);
-            builder.push_slot::<u32>(8, a.nan_mode as u32, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        Attribute::Clamp(a) => clamp_attr(builder, attr, &a.min_val, &a.max_val, a.nan_mode as u32),
 
-        Attribute::Mul(a) => {
-            let start = builder.start_table();
-            builder.push_slot::<i32>(4, a.shift, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        Attribute::Mul(a) => scalar_i32_attr(builder, attr, a.shift),
 
-        Attribute::AvgPool2d(a) => {
-            // TOSA 1.0: AvgPool2dAttribute has kernel, stride, pad, acc_type.
-            // input_zp and output_zp are separate input tensors, not in the attribute.
-            let kernel = builder.create_vector(&a.kernel);
-            let stride = builder.create_vector(&a.stride);
-            let pad = builder.create_vector(&a.pad);
-            let start = builder.start_table();
-            builder.push_slot_always::<WIPOffset<_>>(4, kernel);
-            builder.push_slot_always::<WIPOffset<_>>(6, stride);
-            builder.push_slot_always::<WIPOffset<_>>(8, pad);
-            builder.push_slot::<u32>(10, a.acc_type as u32, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        Attribute::AvgPool2d(a) => pool_attr(
+            builder,
+            attr,
+            &a.kernel,
+            &a.stride,
+            &a.pad,
+            a.acc_type as u32,
+        ),
 
-        Attribute::ReduceSum(a) => {
-            let start = builder.start_table();
-            builder.push_slot::<i32>(4, a.axis, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        Attribute::ReduceSum(a) => scalar_i32_attr(builder, attr, a.axis),
+        Attribute::Concat(a) => scalar_i32_attr(builder, attr, a.axis),
 
-        Attribute::Concat(a) => {
-            let start = builder.start_table();
-            builder.push_slot::<i32>(4, a.axis, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        Attribute::TransposeConv2d(a) => transpose_conv_attr(
+            builder,
+            attr,
+            &a.out_pad,
+            &a.stride,
+            a.local_bound,
+            a.acc_type as u32,
+        ),
 
-        Attribute::TransposeConv2d(a) => {
-            let out_pad = builder.create_vector(&a.out_pad);
-            let stride = builder.create_vector(&a.stride);
-            let start = builder.start_table();
-            builder.push_slot_always::<WIPOffset<_>>(4, out_pad);
-            builder.push_slot_always::<WIPOffset<_>>(6, stride);
-            builder.push_slot::<bool>(8, a.local_bound, false);
-            builder.push_slot::<u32>(10, a.acc_type as u32, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        Attribute::CondIf(a) => string_pair_attr(builder, attr, &a.then_graph, &a.else_graph),
 
-        Attribute::CondIf(a) => {
-            let then_g = builder.create_string(&a.then_graph);
-            let else_g = builder.create_string(&a.else_graph);
-            let start = builder.start_table();
-            builder.push_slot_always::<WIPOffset<_>>(4, then_g);
-            builder.push_slot_always::<WIPOffset<_>>(6, else_g);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        Attribute::WhileLoop(a) => string_pair_attr(builder, attr, &a.cond_branch, &a.body_branch),
 
-        Attribute::WhileLoop(a) => {
-            let cond_g = builder.create_string(&a.cond_branch);
-            let body_g = builder.create_string(&a.body_branch);
-            let start = builder.start_table();
-            builder.push_slot_always::<WIPOffset<_>>(4, cond_g);
-            builder.push_slot_always::<WIPOffset<_>>(6, body_g);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        Attribute::Maximum(a) => scalar_u32_attr(builder, attr, a.nan_mode as u32),
+        Attribute::Minimum(a) => scalar_u32_attr(builder, attr, a.nan_mode as u32),
 
-        Attribute::Maximum(a) => {
-            let start = builder.start_table();
-            builder.push_slot::<u32>(4, a.nan_mode as u32, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        Attribute::ReduceAny(a) => scalar_i32_attr(builder, attr, a.axis),
 
-        Attribute::Minimum(a) => {
-            let start = builder.start_table();
-            builder.push_slot::<u32>(4, a.nan_mode as u32, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        Attribute::ReduceMax(a) => axis_nan_mode_attr(builder, attr, a.axis, a.nan_mode as u32),
 
-        Attribute::ReduceAny(a) => {
-            let start = builder.start_table();
-            builder.push_slot::<i32>(4, a.axis, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
-
-        Attribute::ReduceMax(a) => {
-            let start = builder.start_table();
-            builder.push_slot::<i32>(4, a.axis, 0);
-            builder.push_slot::<u32>(6, a.nan_mode as u32, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
-
-        Attribute::ReduceMin(a) => {
-            let start = builder.start_table();
-            builder.push_slot::<i32>(4, a.axis, 0);
-            builder.push_slot::<u32>(6, a.nan_mode as u32, 0);
-            let off = builder.end_table(start);
-            (attr.union_type(), Some(off))
-        }
+        Attribute::ReduceMin(a) => axis_nan_mode_attr(builder, attr, a.axis, a.nan_mode as u32),
     }
 }
 

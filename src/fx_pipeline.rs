@@ -1,4 +1,6 @@
 use crate::fx_annotate_output_dim_order;
+use crate::fx_canonicalize_gather;
+use crate::fx_collapse_round;
 use crate::fx_cast_int64;
 use crate::fx_conv1d_unsqueeze;
 use crate::fx_convert_clamp;
@@ -139,6 +141,9 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         // Decompose masked_fill -> where(mask, quantized_full, x).  Runs after
         // fold_qdq so the fill scalar can be quantized with output qparams.
         Box::new(fx_decompose_masked_fill::FxDecomposeMaskedFillPass),
+        // Mirror the Python Arm backend's gather canonicalization:
+        // reshape/permute/cast into backend.tosa.GATHER-compatible form.
+        Box::new(fx_canonicalize_gather::FxCanonicalizeGatherPass),
         // Lower supported single-index index.Tensor cases directly to
         // backend.tosa.GATHER before ingestion/serialization.
         Box::new(fx_decompose_index_tensor::FxDecomposeIndexTensorPass),
@@ -215,10 +220,12 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_fuse_equal_placeholders::FxFuseEqualPlaceholdersPass::new(fuse_placeholders)),
         Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
         Box::new(fx_remove_noop::FxRemoveNoopPass),
-        Box::new(fx_insert_rescale::FxInsertRescalePass),
-        // Fix matmul rescale: accumulator_scale = A_scale * B_scale,
-        // not just input_scale. Must run after InsertRescalePass.
+        // Matmul rescale MUST run BEFORE InsertRescalePass: it inserts a
+        // RESCALE(INT32→INT8) after bmm to bring the accumulator output back
+        // to the quantized dtype.  InsertRescalePass then correctly creates
+        // INT8→INT32 upscales for downstream arithmetic ops (sub, add, etc.).
         Box::new(fx_rewrite_matmul::FxRewriteMatmulRescalePass),
+        Box::new(fx_insert_rescale::FxInsertRescalePass),
         Box::new(
             fx_fuse_constant_args::FxFuseConstantArgsPass::new_zero_input_full_only(fuse_late),
         ),

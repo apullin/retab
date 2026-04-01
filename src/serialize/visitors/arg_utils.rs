@@ -58,6 +58,13 @@ pub(super) fn arg_i64(node: &Node, idx: usize, default: i64) -> i64 {
     }
 }
 
+pub(super) fn arg_string(node: &Node, idx: usize) -> Option<String> {
+    match node.args.get(idx) {
+        Some(Arg::String(value)) => Some(value.clone()),
+        _ => None,
+    }
+}
+
 pub(super) fn arg_bool(node: &Node, idx: usize, default: bool) -> bool {
     match node.args.get(idx) {
         Some(arg) => arg.as_bool().unwrap_or(default),

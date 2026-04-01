@@ -4,11 +4,10 @@ use super::*;
 mod derived;
 mod unary;
 
-pub fn register(
-    table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>,
-) {
-    unary::register(table);
-    derived::register(table);
+pub fn register(table: &mut EmitterTable) {
+    for register in [unary::register as fn(&mut EmitterTable), derived::register] {
+        register(table);
+    }
 }
 
 struct ParsedUnaryTensorSpec {
@@ -55,30 +54,4 @@ impl ParsedBinaryTensorSpec {
             base_dtype: node_output_dtype(node),
         })
     }
-}
-
-fn is_integral_dtype(dtype: DType) -> bool {
-    matches!(dtype, DType::Int8 | DType::Int16 | DType::Int32)
-}
-
-fn emit_identity(graph: &Graph, node: &Node) -> EmitResult {
-    let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
-    result.tensors.push(make_output_tensor(node));
-    result.operators.push(TosaOperator::new(
-        Op::Identity,
-        Attribute::None,
-        input_names,
-        vec![node.name.clone()],
-    ));
-    result
-}
-
-fn push_shift_const(result: &mut EmitResult, name: &str) -> String {
-    let shift_name = format!("{}_shift", name);
-    push_inline_const(
-        result,
-        make_rank1_const_tensor(shift_name.clone(), DType::Int8, vec![0u8], 1),
-    );
-    shift_name
 }

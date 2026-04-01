@@ -204,13 +204,25 @@ fn fold_zero_input_full(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult
     let fill_value = &args[1];
 
     let meta = node.getattr("meta")?;
-    let val = meta.call_method1("get", ("val",))?;
 
+    // Match the Python ComputeConstantOpsAOT behavior: if the FULL output is
+    // already annotated with output_qparams, compute the tensor in floating
+    // point and quantize exactly once. Using the folded node's int8 dtype here
+    // would truncate scalar fills like 3.14 to 3 before quantization.
+    let mut qparam = None;
+    if let Ok(output_qparams) = meta.call_method1("get", ("output_qparams",)) {
+        qparam = extract_single_qparam_entry(&output_qparams)?;
+    }
+    if qparam.is_none() {
+        qparam = infer_binary_full_qparam(node)?;
+    }
+
+    let val = meta.call_method1("get", ("val",))?;
     // Parse, don't validate: branch-local zero-input FULL nodes may lose their
     // fake tensor metadata during control-flow rewrites. If `meta["val"]` is
     // absent, fall back to eager `torch.full` inference instead of crashing the
     // entire recursive pass stack on a bookkeeping hole.
-    let mut const_tensor = if val.is_none() {
+    let mut const_tensor = if qparam.is_some() || val.is_none() {
         torch.call_method1("full", (shape, fill_value))?
     } else {
         let dtype = val.getattr("dtype")?;
@@ -219,16 +231,6 @@ fn fold_zero_input_full(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult
         torch.call_method("full", (shape, fill_value), Some(&full_kwargs))?
     };
 
-    // Match the general constant-folding helper: if the FULL output is already
-    // annotated with output_qparams, materialize the frozen buffer in that
-    // quantized domain instead of preserving the original FP32 data.
-    let mut qparam = None;
-    if let Ok(output_qparams) = meta.call_method1("get", ("output_qparams",)) {
-        qparam = extract_single_qparam_entry(&output_qparams)?;
-    }
-    if qparam.is_none() {
-        qparam = infer_binary_full_qparam(node)?;
-    }
     if let Some(qparam) = qparam.as_ref() {
         const_tensor = qparam.call_method1("quantize_value", (&const_tensor,))?;
     }

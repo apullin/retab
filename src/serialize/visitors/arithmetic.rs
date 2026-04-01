@@ -1,25 +1,22 @@
 use super::emitter::EmitContext;
 use super::*;
 
-pub fn register(
-    table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>,
-) {
+pub fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
-    // TOSA-lowered arithmetic
-    table.insert(OpTarget::TosaAdd, emit_add);
-    table.insert(OpTarget::TosaSub, emit_sub);
-    table.insert(OpTarget::TosaMul, emit_mul);
-    table.insert(OpTarget::TosaClamp, emit_clamp);
-    // ATen arithmetic fallbacks
-    table.insert(OpTarget::Add, emit_aten_add);
-    table.insert(OpTarget::Sub, emit_aten_sub);
-    table.insert(OpTarget::Mul, emit_aten_mul);
-    table.insert(OpTarget::Clamp, emit_aten_clamp);
-    table.insert(OpTarget::Hardtanh, emit_aten_clamp);
-    table.insert(OpTarget::Relu, emit_aten_clamp);
-    // Squeeze/unsqueeze (reshape-based arithmetic helpers)
-    table.insert(OpTarget::Unsqueeze, emit_aten_unsqueeze);
-    table.insert(OpTarget::Squeeze, emit_aten_squeeze);
+    table.extend([
+        (OpTarget::TosaAdd, emit_add as EmitFn),
+        (OpTarget::TosaSub, emit_sub),
+        (OpTarget::TosaMul, emit_mul),
+        (OpTarget::TosaClamp, emit_clamp),
+        (OpTarget::Add, emit_aten_add),
+        (OpTarget::Sub, emit_aten_sub),
+        (OpTarget::Mul, emit_aten_mul),
+        (OpTarget::Clamp, emit_aten_clamp),
+        (OpTarget::Hardtanh, emit_aten_clamp),
+        (OpTarget::Relu, emit_aten_clamp),
+        (OpTarget::Unsqueeze, emit_aten_unsqueeze),
+        (OpTarget::Squeeze, emit_aten_squeeze),
+    ]);
 }
 
 struct ParsedReshapeEmitterSpec {
@@ -38,31 +35,6 @@ impl ParsedReshapeEmitterSpec {
             output_dtype: node_output_dtype(node),
         })
     }
-}
-
-fn emit_direct_binary(
-    graph: &Graph,
-    node: &Node,
-    store: &TensorStore,
-    op: Op,
-    attribute: Attribute,
-) -> EmitResult {
-    let mut result = EmitResult::default();
-    let mut inputs = collect_input_names(graph, node);
-    maybe_materialize_binary_broadcast(graph, store, node, &mut result, &mut inputs);
-    result.push_output_op(make_output_tensor(node), op, attribute, inputs);
-    result
-}
-
-fn push_shift_const(result: &mut EmitResult, node_name: &str) -> String {
-    let shift_name = format!("{}_shift", node_name);
-    result.push_const(make_rank1_const_tensor(
-        shift_name.clone(),
-        DType::Int8,
-        vec![0u8],
-        1,
-    ));
-    shift_name
 }
 
 pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
@@ -161,7 +133,7 @@ pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
 
         if !has_min_input && !has_max_input {
             result.push_output_op(
-                make_output_tensor(node),
+                make_actual_output_tensor(graph, store, node),
                 Op::Identity,
                 Attribute::None,
                 vec![current_name],
@@ -174,7 +146,7 @@ pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
     let min_val = clamp_bound_bytes_from_arg(clamp_dtype, node.args.get(1), true);
     let max_val = clamp_bound_bytes_from_arg(clamp_dtype, node.args.get(2), false);
     result.push_output_op(
-        make_output_tensor(node),
+        make_actual_output_tensor(graph, store, node),
         Op::Clamp,
         Attribute::Clamp(ClampAttribute {
             min_val,
@@ -201,6 +173,7 @@ pub(super) fn emit_aten_mul(ctx: &EmitContext) -> EmitResult {
 pub(super) fn emit_clamp(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;
+    let store = ctx.store;
     let mut result = EmitResult::default();
     let input_names = collect_input_names(graph, node);
     let clamp_dtype = node.meta.val.dtype;
@@ -216,7 +189,7 @@ pub(super) fn emit_clamp(ctx: &EmitContext) -> EmitResult {
     let max_val = clamp_bound_bytes_from_arg(clamp_dtype, max_arg, false);
 
     result.push_output_op(
-        make_output_tensor(node),
+        make_actual_output_tensor(graph, store, node),
         Op::Clamp,
         Attribute::Clamp(ClampAttribute {
             min_val,
@@ -257,7 +230,7 @@ pub(super) fn emit_mul(ctx: &EmitContext) -> EmitResult {
     maybe_materialize_binary_broadcast(graph, store, node, &mut result, &mut inputs);
     inputs.push(push_shift_const(&mut result, &node.name));
     result.push_output_op(
-        make_output_tensor(node),
+        make_actual_output_tensor(graph, store, node),
         Op::Mul,
         Attribute::Mul(MulAttribute { shift: 0 }),
         inputs,

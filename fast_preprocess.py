@@ -84,6 +84,21 @@ def _get_matching_fake_tensor(node):
     return fake_tensor.to(memory_format=memory_format)
 
 
+def _actual_shape_from_meta(node) -> list[int] | None:
+    fake_tensor = node.meta.get("val")
+    if not hasattr(fake_tensor, "shape"):
+        return None
+    shape = list(fake_tensor.shape)
+    dim_order = node.meta.get("tosa_dim_order")
+    if (
+        dim_order is not None
+        and len(dim_order) == len(shape)
+        and tuple(dim_order) != tuple(range(len(shape)))
+    ):
+        return [shape[idx] for idx in dim_order]
+    return shape
+
+
 def _refresh_tosa_dim_order_fake_tensors(graph_module) -> None:
     """Re-sync fake tensors with `tosa_dim_order` after FX-direct rewrites.
 
@@ -106,6 +121,57 @@ def _refresh_tosa_dim_order_fake_tensors(graph_module) -> None:
             if "val" not in node.meta or node.meta.get("tosa_dim_order") is None:
                 continue
             node.meta["val"] = _get_matching_fake_tensor(node)
+            updated = True
+        if updated:
+            module.recompile()
+
+
+def _refresh_tosa_transpose_fake_tensors(graph_module) -> None:
+    from executorch.backends.arm._passes.arm_pass_utils import (
+        get_cond_while_submodules_nested,
+    )
+
+    def _is_tosa_transpose_node(node) -> bool:
+        if getattr(node, "op", None) != "call_function":
+            return False
+        target_str = str(getattr(node, "target", ""))
+        return (
+            "tosa.TRANSPOSE" in target_str
+            or "tosa_TRANSPOSE" in target_str
+            or "TosaTranspose" in target_str
+        )
+
+    modules = [graph_module]
+    modules.extend(submodule for _, submodule, _ in get_cond_while_submodules_nested(graph_module))
+
+    for module in modules:
+        updated = False
+        for node in module.graph.nodes:
+            if not _is_tosa_transpose_node(node):
+                continue
+            if not getattr(node, "args", None) or len(node.args) < 2:
+                continue
+            input_node = node.args[0]
+            if not hasattr(input_node, "op"):
+                continue
+            input_fake = input_node.meta.get("val")
+            if not hasattr(input_fake, "new_empty"):
+                continue
+            input_shape = _actual_shape_from_meta(input_node)
+            if input_shape is None:
+                continue
+            try:
+                perm = [int(idx) for idx in node.args[1]]
+            except TypeError:
+                continue
+            if len(perm) != len(input_shape):
+                continue
+            new_shape = [input_shape[idx] for idx in perm]
+            node_fake = node.meta.get("val", input_fake)
+            base_tensor = node_fake if hasattr(node_fake, "new_empty") else input_fake
+            dtype = getattr(node_fake, "dtype", None) or getattr(input_fake, "dtype", None)
+            node.meta["val"] = base_tensor.new_empty(new_shape, dtype=dtype)
+            node.meta["tosa_dim_order"] = tuple(range(len(new_shape)))
             updated = True
         if updated:
             module.recompile()
@@ -272,19 +338,38 @@ def _regularize_control_flow_submodule(
             output_dequant_qparams
         )
     if include_outputs:
-        output_node.meta["arm_control_flow_output_fake_tensors"] = {
-            idx: _get_matching_fake_tensor(submodule_user)
-            for idx, submodule_user in enumerate(_ordered_control_flow_users(submodule_node))
-        }
-
-        for submodule_output, submodule_user in zip(
-            output_args, _ordered_control_flow_users(submodule_node)
+        seeded_output_fake_tensors = {}
+        for idx, (submodule_output, submodule_user) in enumerate(
+            zip(output_args, _ordered_control_flow_users(submodule_node))
         ):
-            submodule_output.meta["val"] = _get_matching_fake_tensor(submodule_user)
+            # Control-flow outputs need the parent-visible boundary contract,
+            # not the raw getitem fake tensor. For while-loop carried values in
+            # particular, the parent getitem can still look float while the
+            # loop body output has already been repaired back into its carried
+            # quantized dtype.
+            desired_fake_tensor = _get_control_flow_output_fake_tensor(submodule_user)
+            current_fake_tensor = submodule_output.meta.get("val")
+            seeded_fake_tensor = (
+                current_fake_tensor
+                if _preserve_control_flow_output_meta(
+                    current_fake_tensor, desired_fake_tensor
+                )
+                else desired_fake_tensor
+            )
+            seeded_output_fake_tensors[idx] = seeded_fake_tensor
+            submodule_output.meta["val"] = seeded_fake_tensor
+            if (
+                seeded_fake_tensor is current_fake_tensor
+                and submodule_output.meta.get("tosa_dim_order") is None
+            ):
+                continue
             if submodule_user.meta.get("tosa_dim_order") is not None:
                 submodule_output.meta["tosa_dim_order"] = tuple(
                     submodule_user.meta["tosa_dim_order"]
                 )
+        output_node.meta["arm_control_flow_output_fake_tensors"] = (
+            seeded_output_fake_tensors
+        )
 
 
 def _regularize_control_flow_submodules(
@@ -858,6 +943,8 @@ def _infer_control_flow_placeholder_output_qparam(placeholder):
 
 
 def _reapply_control_flow_table_ops(graph_module, exported_program) -> None:
+    import torch
+
     from executorch.backends.arm._passes.arm_pass_utils import (
         get_cond_while_submodules_nested,
     )
@@ -868,6 +955,20 @@ def _reapply_control_flow_table_ops(graph_module, exported_program) -> None:
 
     table_targets = list(TableOps.included_ops())
     repaired = 0
+
+    def _normalize_qparam_dtype(dtype):
+        if isinstance(dtype, torch.dtype):
+            return dtype
+        if isinstance(dtype, str):
+            return {
+                "torch.int8": torch.int8,
+                "int8": torch.int8,
+                "torch.int16": torch.int16,
+                "int16": torch.int16,
+                "torch.int32": torch.int32,
+                "int32": torch.int32,
+            }.get(dtype)
+        return None
 
     def _table_spec(node):
         target_str = str(node.target)
@@ -1041,6 +1142,64 @@ def _reapply_control_flow_table_ops(graph_module, exported_program) -> None:
                     )
         return updated
 
+    def _restamp_control_flow_table_meta(submodule) -> int:
+        updated = 0
+        for node in submodule.graph.nodes:
+            if getattr(node, "op", None) != "call_function":
+                continue
+            target_str = str(getattr(node, "target", ""))
+            if "tosa.TABLE" not in target_str and "tosa::table" not in target_str:
+                continue
+            if not getattr(node, "args", None) or not hasattr(node.args[0], "meta"):
+                continue
+
+            input_node = node.args[0]
+            input_val = input_node.meta.get("val")
+            if input_val is None or not hasattr(input_val, "new_empty"):
+                continue
+
+            input_qparams = node.meta.get("input_qparams") or {}
+            input_qparam = None
+            if isinstance(input_qparams, dict):
+                if 0 in input_qparams:
+                    input_qparam = input_qparams[0]
+                elif len(input_qparams) == 1:
+                    input_qparam = next(iter(input_qparams.values()))
+            elif input_qparams:
+                input_qparam = input_qparams
+
+            input_dtype = None
+            if input_qparam is not None:
+                if hasattr(input_qparam, "dtype"):
+                    input_dtype = getattr(input_qparam, "dtype")
+                elif isinstance(input_qparam, dict):
+                    input_dtype = input_qparam.get("dtype")
+                input_dtype = _normalize_qparam_dtype(input_dtype)
+
+            if input_dtype is None:
+                input_dtype = getattr(input_val, "dtype", None)
+
+            desired_dtype = torch.int32 if input_dtype == torch.int16 else input_dtype
+            current_val = node.meta.get("val")
+            current_shape = tuple(getattr(current_val, "shape", ()))
+            desired_shape = tuple(input_val.shape)
+            current_dtype = getattr(current_val, "dtype", None)
+
+            if current_shape == desired_shape and current_dtype == desired_dtype:
+                continue
+
+            node.meta["val"] = input_val.new_empty(input_val.shape, dtype=desired_dtype)
+            if input_node.meta.get("tosa_dim_order") is not None:
+                node.meta["tosa_dim_order"] = tuple(input_node.meta["tosa_dim_order"])
+            updated += 1
+            logger.info(
+                "[fast_preprocess] restamped control-flow table meta %s -> shape=%s dtype=%s",
+                getattr(node, "name", "?"),
+                desired_shape,
+                desired_dtype,
+            )
+        return updated
+
     for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
         canonicalized = 0
         for node in submodule.graph.nodes:
@@ -1083,11 +1242,13 @@ def _reapply_control_flow_table_ops(graph_module, exported_program) -> None:
             fx_helpers.insert_table_op(submodule, node, kind, scalar_arg)
             modified = True
 
-        if modified:
+        restamped = _restamp_control_flow_table_meta(submodule)
+
+        if modified or restamped:
             submodule.graph.eliminate_dead_code()
             submodule.graph.lint()
             submodule.recompile()
-            repaired += 1
+            repaired += int(modified)
 
     if repaired:
         logger.info(
@@ -3376,7 +3537,35 @@ def _reapply_control_flow_boundary_rescales(
 
         return input_qparams_map
 
+    def _backfill_submodule_input_qparams(submodule, input_qparams_map):
+        merged = dict(input_qparams_map or {})
+        placeholders = [node for node in submodule.graph.nodes if node.op == "placeholder"]
+        for idx, placeholder in enumerate(placeholders):
+            if idx in merged:
+                continue
+            qparam = _extract_single_qparam_entry(placeholder.meta.get("input_qparams"))
+            if qparam is None:
+                qparam = _branch_local_control_flow_output_qparam(placeholder)
+            if qparam is not None:
+                merged[idx] = qparam
+        return merged
+
     def _refresh_submodule_output_input_qparams(submodule) -> None:
+        def _effective_output_qparam(output_arg):
+            current = output_arg
+            seen = set()
+            while hasattr(current, "op") and id(current) not in seen:
+                seen.add(id(current))
+                qparam = _extract_effective_node_qparam(current)
+                if qparam is not None:
+                    return qparam
+                if getattr(current, "op", None) == "placeholder":
+                    return _branch_local_control_flow_output_qparam(current)
+                if not getattr(current, "args", None) or not hasattr(current.args[0], "op"):
+                    break
+                current = current.args[0]
+            return None
+
         output_node = submodule.graph.output_node()
         outputs = output_node.args[0]
         output_args = [outputs] if hasattr(outputs, "op") else list(outputs)
@@ -3384,7 +3573,7 @@ def _reapply_control_flow_boundary_rescales(
         for idx, output_arg in enumerate(output_args):
             if not hasattr(output_arg, "op"):
                 continue
-            qparam = _extract_effective_node_qparam(output_arg)
+            qparam = _effective_output_qparam(output_arg)
             if qparam is not None:
                 input_qparams_map[idx] = qparam
         if input_qparams_map:
@@ -3514,6 +3703,9 @@ def _reapply_control_flow_boundary_rescales(
                 input_qparams_map = _infer_control_flow_input_qparams_map(node, 2)
             if not input_qparams_map:
                 input_qparams_map = rescale_pass._get_input_qparams_map(node, 2)
+            input_qparams_map = _backfill_submodule_input_qparams(
+                body_graph, _backfill_submodule_input_qparams(cond_graph, input_qparams_map)
+            )
             if include_inputs and input_qparams_map:
                 _restore_submodule_input_qparams(cond_graph, input_qparams_map)
                 _restore_submodule_input_qparams(body_graph, input_qparams_map)
@@ -3526,11 +3718,13 @@ def _reapply_control_flow_boundary_rescales(
                 _annotate_submodule_input_rescales(cond_graph, input_qparams_map)
                 _annotate_submodule_input_rescales(body_graph, input_qparams_map)
 
-            output_qparams_map = _infer_control_flow_output_qparams_map(node)
-            if include_outputs and output_qparams_map:
+            # While body outputs are loop-carried values, so they must be
+            # rescaled back to the carried-input qparams rather than to the
+            # outer getitem users' post-loop dtype.
+            if include_outputs and input_qparams_map:
                 _refresh_submodule_output_input_qparams(body_graph)
                 body_output_qparams_map = _filter_output_qparams_map(
-                    body_graph, output_qparams_map
+                    body_graph, input_qparams_map
                 )
                 if _has_submodule_output_input_qparams(body_graph) and body_output_qparams_map:
                     modified |= rescale_pass._rescale_submodule_outputs(
@@ -3986,6 +4180,181 @@ def _fold_zero_input_full_in_control_flow_submodules(graph_module) -> None:
         )
 
 
+def _remove_control_flow_noop_passthroughs(graph_module) -> None:
+    from executorch.backends.arm._passes.arm_pass_utils import (
+        get_cond_while_submodules_nested,
+    )
+
+    def _is_noop_passthrough(node) -> bool:
+        if getattr(node, "op", None) != "call_function":
+            return False
+        target_str = str(getattr(node, "target", ""))
+        return any(
+            marker in target_str
+            for marker in (
+                "dim_order_ops._clone_dim_order",
+                "aten.clone",
+                "aten.alias_copy",
+                "aten.detach_copy",
+            )
+        )
+
+    rewritten = 0
+    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+        updated = False
+        for node in list(submodule.graph.nodes):
+            if not _is_noop_passthrough(node):
+                continue
+            if not getattr(node, "args", None) or not hasattr(node.args[0], "op"):
+                continue
+
+            source = node.args[0]
+            node_val = node.meta.get("val")
+            source_val = source.meta.get("val")
+            node_dtype = getattr(node_val, "dtype", None)
+            source_dtype = getattr(source_val, "dtype", None)
+            if (
+                node_dtype is not None
+                and source_dtype is not None
+                and node_dtype != source_dtype
+            ):
+                continue
+
+            node_shape = getattr(node_val, "shape", None)
+            source_shape = getattr(source_val, "shape", None)
+            if (
+                node_shape is not None
+                and source_shape is not None
+                and tuple(node_shape) != tuple(source_shape)
+            ):
+                continue
+
+            node_dim_order = node.meta.get("tosa_dim_order")
+            source_dim_order = source.meta.get("tosa_dim_order")
+            if (
+                node_dim_order is not None
+                and source_dim_order is not None
+                and tuple(node_dim_order) != tuple(source_dim_order)
+            ):
+                continue
+
+            if source.meta.get("tosa_dim_order") is None and node_dim_order is not None:
+                source.meta["tosa_dim_order"] = tuple(node_dim_order)
+            if source.meta.get("input_qparams") is None and node.meta.get("input_qparams"):
+                source.meta["input_qparams"] = dict(node.meta["input_qparams"])
+            if source.meta.get("output_qparams") is None and node.meta.get("output_qparams"):
+                source.meta["output_qparams"] = dict(node.meta["output_qparams"])
+
+            node.replace_all_uses_with(source)
+            submodule.graph.erase_node(node)
+            rewritten += 1
+            updated = True
+
+        if updated:
+            submodule.graph.eliminate_dead_code()
+            submodule.graph.lint()
+            submodule.recompile()
+
+    if rewritten:
+        logger.info(
+            "[fast_preprocess] removed %d control-flow no-op passthrough node(s)",
+            rewritten,
+        )
+
+
+def _restore_control_flow_float_compare_inputs(graph_module) -> None:
+    import torch
+
+    from executorch.backends.arm._passes.arm_pass_utils import (
+        create_node,
+        get_cond_while_submodules_nested,
+    )
+    from executorch.exir.dialects._ops import ops as exir_ops
+
+    def _is_compare_node(node) -> bool:
+        if getattr(node, "op", None) != "call_function":
+            return False
+        target_str = str(getattr(node, "target", ""))
+        return any(
+            token in target_str
+            for token in (
+                "aten.gt.",
+                "aten.ge.",
+                "aten.lt.",
+                "aten.le.",
+                "aten.eq.",
+            )
+        )
+
+    def _is_float_dtype(dtype) -> bool:
+        return dtype in (torch.float16, torch.float32, torch.float64)
+
+    restored = 0
+    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+        updated = False
+        for node in list(submodule.graph.nodes):
+            if not _is_compare_node(node):
+                continue
+            args = list(getattr(node, "args", ()))
+            if len(args) != 2:
+                continue
+
+            for idx, arg in enumerate(args):
+                if not hasattr(arg, "op"):
+                    continue
+                other = args[1 - idx]
+                if not hasattr(other, "op"):
+                    continue
+
+                arg_val = arg.meta.get("val")
+                other_val = other.meta.get("val")
+                arg_dtype = getattr(arg_val, "dtype", None)
+                other_dtype = getattr(other_val, "dtype", None)
+                if not (
+                    arg_dtype in (torch.int8, torch.int16, torch.int32)
+                    and _is_float_dtype(other_dtype)
+                ):
+                    continue
+
+                qparam = _extract_effective_node_qparam(arg)
+                if qparam is None or qparam.per_channel:
+                    continue
+
+                with submodule.graph.inserting_before(node):
+                    dq = create_node(
+                        graph=submodule.graph,
+                        op_target=exir_ops.edge.quantized_decomposed.dequantize_per_tensor.default,
+                        args=(
+                            arg,
+                            float(qparam.scale),
+                            int(qparam.zp),
+                            int(qparam.qmin),
+                            int(qparam.qmax),
+                            qparam.dtype,
+                        ),
+                        from_node=node,
+                    )
+                if hasattr(arg_val, "to"):
+                    dq.meta["val"] = arg_val.to(dtype=other_dtype)
+                dq.meta["input_qparams"] = {0: qparam}
+                dq.meta["output_qparams"] = {}
+                node.update_arg(idx, dq)
+                restored += 1
+                updated = True
+                break
+
+        if updated:
+            submodule.graph.eliminate_dead_code()
+            submodule.graph.lint()
+            submodule.recompile()
+
+    if restored:
+        logger.info(
+            "[fast_preprocess] restored %d control-flow float-compare dequantize input(s)",
+            restored,
+        )
+
+
 def _is_dim_order_copy_node(node) -> bool:
     return (
         getattr(node, "op", None) == "call_function"
@@ -4014,6 +4383,331 @@ def _is_tosa_rescale_node(node) -> bool:
         or "tosa.RESCALE" in target_str
         or "TosaRescale" in target_str
     )
+
+
+def _preferred_quantized_rescale_user(source_node):
+    import torch
+
+    if not hasattr(source_node, "op"):
+        return None
+
+    best = None
+    best_score = -1
+    for user in list(getattr(source_node, "users", ())):
+        if not _is_tosa_rescale_node(user):
+            continue
+        if len(getattr(user, "args", ())) < 5:
+            continue
+        if user.args[1] not in (torch.int8, torch.int16):
+            continue
+
+        output_qparam = _extract_single_qparam_entry(user.meta.get("output_qparams"))
+        if output_qparam is None:
+            output_qparam = _extract_effective_node_qparam(user)
+        if getattr(output_qparam, "dtype", None) != user.args[1]:
+            continue
+
+        score = 0
+        for grand_user in list(getattr(user, "users", ())):
+            if _is_tosa_rescale_node(grand_user):
+                score += 2
+            elif _is_dequantize_node(grand_user):
+                score += 1
+            elif getattr(grand_user, "op", None) == "output":
+                score += 4
+        if score > best_score:
+            best = (user, output_qparam)
+            best_score = score
+
+    return best
+
+
+def _extract_accumulator_rescale_qparam(source_node):
+    import torch
+
+    from executorch.backends.arm._passes.quant_args import QuantArgs
+
+    target_str = str(getattr(source_node, "target", ""))
+    if not any(
+        token in target_str
+        for token in (
+            "tosa.CONV2D.default",
+            "tosa.CONV3D.default",
+            "tosa.DEPTHWISE_CONV2D.default",
+            "tosa.TRANSPOSE_CONV2D.default",
+            "tosa.MATMUL.default",
+        )
+    ):
+        return None
+
+    input_qparams = getattr(source_node, "meta", {}).get("input_qparams") or {}
+    if not isinstance(input_qparams, dict):
+        return None
+
+    qinfo = torch.iinfo(torch.int32)
+    bias_qparam = input_qparams.get(2)
+    if getattr(bias_qparam, "dtype", None) == torch.int32:
+        if getattr(bias_qparam, "per_channel", False):
+            scales = list(bias_qparam.get_scale_per_channel())
+            zps = [0] * len(scales)
+            return QuantArgs(
+                scale=scales,
+                zp=zps,
+                qmin=int(qinfo.min),
+                qmax=int(qinfo.max),
+                dtype=torch.int32,
+                axis=getattr(bias_qparam, "axis", 0),
+                per_channel=True,
+            )
+
+        return QuantArgs(
+            scale=float(bias_qparam.get_scale_per_tensor()),
+            zp=0,
+            qmin=int(qinfo.min),
+            qmax=int(qinfo.max),
+            dtype=torch.int32,
+            axis=0,
+            per_channel=False,
+        )
+
+    lhs_qparam = input_qparams.get(0)
+    rhs_qparam = input_qparams.get(1)
+    if lhs_qparam is None or rhs_qparam is None:
+        return None
+
+    def _scale_list(qparam):
+        if getattr(qparam, "per_channel", False):
+            return [float(v) for v in qparam.get_scale_per_channel()]
+        return [float(qparam.get_scale_per_tensor())]
+
+    lhs_scales = _scale_list(lhs_qparam)
+    rhs_scales = _scale_list(rhs_qparam)
+    count = max(len(lhs_scales), len(rhs_scales))
+    if len(lhs_scales) == 1:
+        lhs_scales = lhs_scales * count
+    if len(rhs_scales) == 1:
+        rhs_scales = rhs_scales * count
+    if len(lhs_scales) != len(rhs_scales):
+        return None
+
+    accumulator_scales = [lhs * rhs for lhs, rhs in zip(lhs_scales, rhs_scales)]
+    if len(accumulator_scales) == 1:
+        return QuantArgs(
+            scale=accumulator_scales[0],
+            zp=0,
+            qmin=int(qinfo.min),
+            qmax=int(qinfo.max),
+            dtype=torch.int32,
+            axis=0,
+            per_channel=False,
+        )
+
+    return QuantArgs(
+        scale=accumulator_scales,
+        zp=[0] * len(accumulator_scales),
+        qmin=int(qinfo.min),
+        qmax=int(qinfo.max),
+        dtype=torch.int32,
+        axis=getattr(rhs_qparam, "axis", 0),
+        per_channel=True,
+    )
+
+
+def _debug_binary_rescales(graph_module, stage: str) -> None:
+    import os
+    import torch
+
+    if os.environ.get("ARM_TOSA_ENGINE_DEBUG_BINARY_RESCALES") != "1":
+        return
+
+    logger.info("[fast_preprocess] binary rescale trace stage=%s", stage)
+    for node in list(graph_module.graph.nodes):
+        if getattr(node, "op", None) != "call_function":
+            continue
+        target_str = str(getattr(node, "target", ""))
+        if "aten.add.Tensor" not in target_str and "aten.sub.Tensor" not in target_str:
+            continue
+
+        node_meta = getattr(node, "meta", {})
+        logger.info(
+            "[fast_preprocess] binary node=%s target=%s input_qparams=%s output_qparams=%s val_dtype=%s",
+            node.name,
+            target_str,
+            node_meta.get("input_qparams"),
+            node_meta.get("output_qparams"),
+            getattr(node_meta.get("val"), "dtype", None),
+        )
+        for idx, arg in enumerate(node.args[:2]):
+            if not hasattr(arg, "name"):
+                logger.info(
+                    "[fast_preprocess]   arg[%d] literal=%r type=%s",
+                    idx,
+                    arg,
+                    type(arg).__name__,
+                )
+                continue
+
+            arg_meta = getattr(arg, "meta", {})
+            logger.info(
+                "[fast_preprocess]   arg[%d]=%s target=%s val_dtype=%s rescale=%s qparams=%s",
+                idx,
+                arg.name,
+                getattr(arg, "target", None),
+                getattr(arg_meta.get("val"), "dtype", None),
+                _is_tosa_rescale_node(arg),
+                _extract_effective_node_qparam(arg),
+            )
+            if not _is_tosa_rescale_node(arg):
+                continue
+
+            source_node = arg.args[0] if len(getattr(arg, "args", ())) > 0 else None
+            logger.info(
+                "[fast_preprocess]     rescale dtype_arg=%s scales=%s input_zp=%s output_zp=%s",
+                arg.args[1] if len(arg.args) > 1 else None,
+                arg.args[2] if len(arg.args) > 2 else None,
+                arg.args[3] if len(arg.args) > 3 else None,
+                arg.args[4] if len(arg.args) > 4 else None,
+            )
+            if not hasattr(source_node, "name"):
+                logger.info(
+                    "[fast_preprocess]     source literal=%r type=%s",
+                    source_node,
+                    type(source_node).__name__,
+                )
+                continue
+
+            preferred = _preferred_quantized_rescale_user(source_node)
+            source_meta = getattr(source_node, "meta", {})
+            logger.info(
+                "[fast_preprocess]     source=%s target=%s val_dtype=%s input_qparams=%s output_qparams=%s qparams=%s preferred=%s",
+                source_node.name,
+                getattr(source_node, "target", None),
+                getattr(source_meta.get("val"), "dtype", None),
+                source_meta.get("input_qparams"),
+                source_meta.get("output_qparams"),
+                _extract_effective_node_qparam(source_node),
+                (
+                    preferred[0].name,
+                    preferred[1],
+                )
+                if preferred is not None
+                else None,
+            )
+            if hasattr(source_node, "users"):
+                for user in list(source_node.users):
+                    user_meta = getattr(user, "meta", {})
+                    logger.info(
+                        "[fast_preprocess]       source user=%s target=%s val_dtype=%s rescale=%s qparams=%s",
+                        user.name,
+                        getattr(user, "target", None),
+                        getattr(user_meta.get("val"), "dtype", None),
+                        _is_tosa_rescale_node(user),
+                        _extract_effective_node_qparam(user),
+                    )
+
+
+def _refresh_binary_input_rescales(graph_module) -> None:
+    import torch
+
+    refreshed = 0
+    modified = False
+
+    for node in list(graph_module.graph.nodes):
+        if getattr(node, "op", None) != "call_function":
+            continue
+        target_str = str(getattr(node, "target", ""))
+        if "aten.add.Tensor" not in target_str and "aten.sub.Tensor" not in target_str:
+            continue
+
+        desired_input_qparams = getattr(node, "meta", {}).get("input_qparams") or {}
+        for idx, arg in enumerate(node.args[:2]):
+            if not _is_tosa_rescale_node(arg):
+                continue
+            if len(getattr(arg, "args", ())) < 5 or arg.args[1] != torch.int32:
+                continue
+            source_node = arg.args[0]
+            if not hasattr(source_node, "op"):
+                continue
+
+            desired_output_qparam = _extract_single_qparam_entry(
+                {0: desired_input_qparams.get(idx)}
+            )
+            if getattr(desired_output_qparam, "dtype", None) != torch.int32:
+                continue
+
+            source_qparam = None
+            source_fake_val = getattr(source_node, "meta", {}).get("val")
+            if getattr(source_fake_val, "dtype", None) == torch.int32:
+                preferred = _preferred_quantized_rescale_user(source_node)
+                if preferred is not None:
+                    source_node, source_qparam = preferred
+                else:
+                    source_qparam = _extract_accumulator_rescale_qparam(source_node)
+
+            if source_qparam is None:
+                source_qparam = _extract_effective_node_qparam(source_node)
+            if getattr(source_qparam, "dtype", None) not in (
+                torch.int8,
+                torch.int16,
+                torch.int32,
+            ):
+                continue
+
+            desired_scale = desired_output_qparam.get_scale_per_tensor()
+            if getattr(source_qparam, "per_channel", False):
+                new_scales = [
+                    scale / desired_scale
+                    for scale in source_qparam.get_scale_per_channel()
+                ]
+                new_input_zp = 0
+            else:
+                new_scales = [
+                    source_qparam.get_scale_per_tensor() / desired_scale
+                ]
+                new_input_zp = (
+                    0
+                    if getattr(source_qparam, "dtype", None) == torch.int32
+                    else source_qparam.get_zp_per_tensor()
+                )
+            new_output_zp = desired_output_qparam.get_zp_per_tensor()
+
+            current_scales = list(arg.args[2]) if len(arg.args) > 2 else []
+            current_input_zp = arg.args[3] if len(arg.args) > 3 else None
+            current_output_zp = arg.args[4] if len(arg.args) > 4 else None
+            if (
+                arg.args[0] is source_node
+                and current_scales == new_scales
+                and current_input_zp == new_input_zp
+                and current_output_zp == new_output_zp
+            ):
+                continue
+
+            arg.update_arg(0, source_node)
+            arg.update_arg(2, new_scales)
+            arg.update_arg(3, new_input_zp)
+            arg.update_arg(4, new_output_zp)
+            arg.meta["input_qparams"] = {0: source_qparam}
+            arg.meta["output_qparams"] = {0: desired_output_qparam}
+            refreshed += 1
+            modified = True
+            logger.info(
+                "[fast_preprocess] refreshed binary input rescale %s arg%d via %s -> %s",
+                getattr(node, "name", "?"),
+                idx,
+                getattr(source_node, "name", "?"),
+                desired_output_qparam,
+            )
+
+    if modified:
+        graph_module.graph.eliminate_dead_code()
+        graph_module.graph.lint()
+        graph_module.recompile()
+
+    if refreshed:
+        logger.info(
+            "[fast_preprocess] refreshed %d top-level binary input rescale(s)",
+            refreshed,
+        )
 
 
 def _is_dequantize_node(node) -> bool:
@@ -4092,6 +4786,14 @@ def _get_control_flow_output_fake_tensor(submodule_user):
     return fake_tensor
 
 
+def _preserve_control_flow_output_meta(current_fake_tensor, desired_fake_tensor) -> bool:
+    current_dtype = getattr(current_fake_tensor, "dtype", None)
+    desired_dtype = getattr(desired_fake_tensor, "dtype", None)
+    return current_dtype is not None and str(current_dtype) == "torch.bool" and (
+        desired_dtype is None or str(desired_dtype) != "torch.bool"
+    )
+
+
 def _log_node_chain(node, limit: int = 8) -> None:
     current = node
     depth = 0
@@ -4130,6 +4832,19 @@ def _select_control_flow_output_value(node, submodule_user):
         current = current.args[0]
 
     return preferred_candidate or candidate
+
+
+def _trace_control_flow_output_source(node):
+    current = node
+    seen = set()
+    while hasattr(current, "op") and id(current) not in seen:
+        seen.add(id(current))
+        if getattr(current, "op", None) == "placeholder":
+            return current
+        if not getattr(current, "args", None) or not hasattr(current.args[0], "op"):
+            break
+        current = current.args[0]
+    return None
 
 
 def _is_trivial_control_flow_output_chain(node) -> bool:
@@ -4188,13 +4903,43 @@ def _normalize_control_flow_output_layouts(graph_module) -> None:
         updated = False
 
         for idx, submodule_output in enumerate(output_args):
-            submodule_user = (
-                ordered_users[idx] if idx < len(ordered_users) else control_flow_node
-            )
-            desired_fake_tensor = _get_control_flow_output_fake_tensor(submodule_user)
-            desired_dim_order = submodule_user.meta.get("tosa_dim_order")
+            fallback_source = None
+            if idx < len(ordered_users):
+                submodule_user = ordered_users[idx]
+                desired_fake_tensor = _get_control_flow_output_fake_tensor(submodule_user)
+                desired_dim_order = submodule_user.meta.get("tosa_dim_order")
+            else:
+                fallback_source = _trace_control_flow_output_source(submodule_output)
+                submodule_user = fallback_source or control_flow_node
+                desired_fake_tensor = (
+                    _get_matching_fake_tensor(fallback_source)
+                    if fallback_source is not None
+                    else _get_matching_fake_tensor(control_flow_node)
+                )
+                desired_dim_order = (
+                    fallback_source.meta.get("tosa_dim_order")
+                    if fallback_source is not None
+                    else control_flow_node.meta.get("tosa_dim_order")
+                )
             if desired_dim_order is None:
                 desired_dim_order = _infer_output_dim_order(submodule_output)
+            current_fake_tensor = submodule_output.meta.get("val")
+            if _preserve_control_flow_output_meta(
+                current_fake_tensor, desired_fake_tensor
+            ):
+                logger.info(
+                    "[fast_preprocess] preserving boolean control-flow output %s shape=%s dtype=%s over desired shape=%s dtype=%s",
+                    getattr(submodule_output, "name", "?"),
+                    tuple(current_fake_tensor.shape)
+                    if hasattr(current_fake_tensor, "shape")
+                    else None,
+                    getattr(current_fake_tensor, "dtype", None),
+                    tuple(desired_fake_tensor.shape)
+                    if hasattr(desired_fake_tensor, "shape")
+                    else None,
+                    getattr(desired_fake_tensor, "dtype", None),
+                )
+                continue
             _log_control_flow_debug(
                 "[fast_preprocess] inspect output idx=%d node=%s target=%s user=%s user_target=%s",
                 idx,
@@ -4312,8 +5057,6 @@ def _normalize_control_flow_output_layouts(graph_module) -> None:
                     updated = True
                     rewritten += 1
                     continue
-
-            current_fake_tensor = submodule_output.meta.get("val")
             current_dim_order = submodule_output.meta.get("tosa_dim_order")
             if desired_dim_order is not None and tuple(desired_dim_order) != tuple(
                 current_dim_order or ()
@@ -4397,6 +5140,43 @@ def _normalize_control_flow_output_layouts(graph_module) -> None:
         )
 
 
+def _restamp_control_flow_placeholder_dtypes(graph_module) -> None:
+    from executorch.backends.arm._passes.arm_pass_utils import (
+        get_cond_while_submodules_nested,
+    )
+
+    restamped = 0
+    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+        updated = False
+        for node in submodule.graph.nodes:
+            if getattr(node, "op", None) != "placeholder":
+                continue
+            if any(_is_quantize_node(user) for user in list(getattr(node, "users", ()))):
+                continue
+            qparam = _extract_single_qparam_entry(node.meta.get("input_qparams"))
+            if qparam is None:
+                qparam = _branch_local_control_flow_output_qparam(node)
+            fake_val = node.meta.get("val")
+            if (
+                qparam is None
+                or not hasattr(fake_val, "to")
+                or getattr(fake_val, "dtype", None) == getattr(qparam, "dtype", None)
+            ):
+                continue
+            node.meta["val"] = fake_val.to(dtype=qparam.dtype)
+            updated = True
+            restamped += 1
+        if updated:
+            submodule.graph.lint()
+            submodule.recompile()
+
+    if restamped:
+        logger.info(
+            "[fast_preprocess] restamped %d control-flow placeholder dtype(s)",
+            restamped,
+        )
+
+
 def _restore_control_flow_output_dequantizes(graph_module) -> None:
     import torch
 
@@ -4440,7 +5220,14 @@ def _restore_control_flow_output_dequantizes(graph_module) -> None:
 
     rescale_pass = InsertControlFlowRescalesPass()
     restored = 0
-    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+    seen_while_submodules = {}
+    for _, submodule, control_flow_node in get_cond_while_submodules_nested(graph_module):
+        if control_flow_node.target == torch.ops.higher_order.while_loop:
+            while_key = id(control_flow_node)
+            while_idx = seen_while_submodules.get(while_key, 0)
+            seen_while_submodules[while_key] = while_idx + 1
+            if while_idx == 1:
+                continue
         output_qparams_map = submodule.graph.output_node().meta.get(
             "arm_control_flow_output_dequant_qparams", {}
         )
@@ -4534,6 +5321,38 @@ def _annotate_control_flow_rank4_dim_order(graph_module) -> None:
         )
 
 
+def _annotate_control_flow_parent_rank4_dim_order(graph_module) -> None:
+    from executorch.backends.arm._passes.arm_pass_utils import (
+        get_cond_while_submodules_nested,
+    )
+
+    desired_dim_order = (0, 2, 3, 1)
+    annotated = 0
+    for _, _, control_flow_node in get_cond_while_submodules_nested(graph_module):
+        for user in _ordered_control_flow_users(control_flow_node):
+            fake_val = user.meta.get("val")
+            if not hasattr(fake_val, "dim") or fake_val.dim() != 4:
+                continue
+            user.meta["arm_control_flow_parent_output_user"] = True
+            if tuple(user.meta.get("tosa_dim_order") or ()) == desired_dim_order:
+                continue
+            user.meta["tosa_dim_order"] = desired_dim_order
+            _log_control_flow_debug(
+                "[fast_preprocess] parent control-flow user %s target=%s shape=%s dim_order=%s",
+                getattr(user, "name", "?"),
+                getattr(user, "target", "?"),
+                tuple(fake_val.shape),
+                user.meta["tosa_dim_order"],
+            )
+            annotated += 1
+
+    if annotated:
+        logger.info(
+            "[fast_preprocess] annotated NHWC dim-order on %d parent control-flow output user(s)",
+            annotated,
+        )
+
+
 def _same_control_flow_qparam(lhs, rhs) -> bool:
     if lhs is None or rhs is None:
         return False
@@ -4560,6 +5379,15 @@ def _restore_missing_control_flow_input_rescales(graph_module) -> None:
 
             input_qparam = _extract_single_qparam_entry(placeholder.meta.get("input_qparams"))
             output_qparam = _branch_local_control_flow_output_qparam(placeholder)
+            users = [user for user in list(placeholder.users) if hasattr(user, "op")]
+            placeholder_dtype = getattr(placeholder.meta.get("val"), "dtype", None)
+            same_qparam = _same_control_flow_qparam(input_qparam, output_qparam)
+            needs_noop_quant_boundary = (
+                same_qparam
+                and output_qparam is not None
+                and placeholder_dtype != getattr(output_qparam, "dtype", None)
+                and bool(users)
+            )
             if os.environ.get("TOSA_ENGINE_DEBUG"):
                 print(
                     "[cf-entry-rescale-check]",
@@ -4569,14 +5397,16 @@ def _restore_missing_control_flow_input_rescales(graph_module) -> None:
                     "output_qparam=",
                     output_qparam,
                     "users=",
-                    [getattr(user, "name", "?") for user in list(getattr(placeholder, "users", ()))],
+                    [getattr(user, "name", "?") for user in users],
+                    "placeholder_dtype=",
+                    placeholder_dtype,
+                    "needs_noop_quant_boundary=",
+                    needs_noop_quant_boundary,
                 )
             if input_qparam is None or output_qparam is None:
                 continue
-            if _same_control_flow_qparam(input_qparam, output_qparam):
+            if same_qparam and not needs_noop_quant_boundary:
                 continue
-
-            users = [user for user in list(placeholder.users) if hasattr(user, "op")]
             if not users:
                 continue
 
@@ -4972,6 +5802,27 @@ def _rewrite_control_flow_dequantize_nodes(graph_module) -> None:
                 return input_qparams[idx]
         return _single_qparam_entry(input_qparams)
 
+    def _is_compare_user(user) -> bool:
+        if getattr(user, "op", None) != "call_function":
+            return False
+        target_str = str(getattr(user, "target", ""))
+        return any(
+            token in target_str
+            for token in (
+                "aten.gt.",
+                "aten.ge.",
+                "aten.lt.",
+                "aten.le.",
+                "aten.eq.",
+                "tosa.GREATER",
+                "tosa.GREATER_EQUAL",
+                "tosa.EQUAL",
+                "TosaGreater",
+                "TosaGreaterEqual",
+                "TosaEqual",
+            )
+        )
+
     rewritten = 0
     for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
         modified = False
@@ -5035,6 +5886,50 @@ def _rewrite_control_flow_dequantize_nodes(graph_module) -> None:
                     modified = True
                     logger.info(
                         "[fast_preprocess] rewrote control-flow dequantize %s into int32 lift %s",
+                        getattr(node, "name", "?"),
+                        getattr(lifted, "name", "?"),
+                    )
+                    continue
+
+                desired_qparam = None
+                compare_users = []
+                for user in users:
+                    if not _is_compare_user(user):
+                        compare_users = []
+                        break
+                    user_qparam = _binary_input_qparam(user, node)
+                    if getattr(user_qparam, "dtype", None) != torch.int32:
+                        compare_users = []
+                        break
+                    if desired_qparam is None:
+                        desired_qparam = user_qparam
+                    elif not _same_qparam(desired_qparam, user_qparam):
+                        compare_users = []
+                        break
+                    compare_users.append(user)
+
+                if compare_users and desired_qparam is not None:
+                    lifted = fx_helpers.insert_rescale_node(
+                        submodule,
+                        compare_users[0],
+                        source_node,
+                        torch.int32,
+                        [
+                            source_qparam.get_scale_per_tensor()
+                            / desired_qparam.get_scale_per_tensor()
+                        ],
+                        source_qparam.get_zp_per_tensor(),
+                        desired_qparam.get_zp_per_tensor(),
+                        after=False,
+                    )
+                    lifted.meta["input_qparams"] = {0: source_qparam}
+                    lifted.meta["output_qparams"] = {0: desired_qparam}
+                    node.replace_all_uses_with(lifted)
+                    submodule.graph.erase_node(node)
+                    rewritten += 1
+                    modified = True
+                    logger.info(
+                        "[fast_preprocess] rewrote control-flow compare dequantize %s into int32 lift %s",
                         getattr(node, "name", "?"),
                         getattr(lifted, "name", "?"),
                     )
@@ -5806,6 +6701,7 @@ def _all_rust_preprocess(
     # Match the control-flow submodule fake tensors to the parent graph before
     # the Rust passes inspect placeholders and outputs.
     _regularize_control_flow_submodules(gm)
+    _annotate_control_flow_parent_rank4_dim_order(gm)
     _prepare_control_flow_qparams(gm, edge_program)
     _snapshot_control_flow_table_qparams(gm)
     # Parse, don't validate: control-flow table ops still have their original
@@ -5815,8 +6711,17 @@ def _all_rust_preprocess(
     # table-capable ops.
     _reapply_control_flow_table_ops(gm, edge_program)
 
+    # Collapse decomposed banker's-rounding into a TABLE before Rust passes.
+    # Python DecomposeRoundPass runs during quantization and the 12-op
+    # decomposition loses precision at the 0.5 tie-break; a TABLE is exact.
+    from fx_helpers import collapse_decomposed_round_to_table
+    collapse_decomposed_round_to_table(gm)
+
     # Run the full FX-direct pipeline (all passes in Rust via PyO3)
     arm_tosa_engine.run_fx_passes(gm, edge_program)
+    _debug_binary_rescales(gm, "after_run_fx_passes")
+    _refresh_binary_input_rescales(gm)
+    _debug_binary_rescales(gm, "after_refresh_binary_input_rescales")
     # The top-level graph still needs the full FX-direct pass stack, but
     # recursively replaying that whole stack on control-flow submodules has
     # proven too aggressive: it decomposes branch-local q/dq boundaries into
@@ -5855,6 +6760,7 @@ def _all_rust_preprocess(
     _restore_control_flow_pool_quant_boundaries(gm)
     _refresh_control_flow_binary_input_rescales(gm)
     _normalize_control_flow_output_layouts(gm)
+    _restamp_control_flow_placeholder_dtypes(gm)
     _restore_missing_control_flow_rescale_qparams(gm)
     _reapply_control_flow_boundary_rescales(
         gm, include_inputs=False, include_outputs=True
@@ -5865,10 +6771,16 @@ def _all_rust_preprocess(
     _fold_zero_input_full_in_control_flow_submodules(gm)
     _quantize_constant_only_control_flow_outputs(gm)
     _regularize_control_flow_submodules(gm, include_inputs=False, include_outputs=True)
+    _remove_control_flow_noop_passthroughs(gm)
+    _annotate_control_flow_parent_rank4_dim_order(gm)
     _annotate_control_flow_rank4_dim_order(gm)
     _force_control_flow_rank4_output_dim_order(gm)
+    _refresh_tosa_transpose_fake_tensors(gm)
     _refresh_tosa_dim_order_fake_tensors(gm)
     _prune_duplicate_terminal_rescales(gm)
+    _restamp_control_flow_placeholder_dtypes(gm)
+    _restore_control_flow_float_compare_inputs(gm)
+    _debug_binary_rescales(gm, "before_ingest_and_serialize")
     _dump_control_flow_submodules(gm, "after_control_flow_normalize")
 
     # Merge in any pass-created constant placeholders added to the live

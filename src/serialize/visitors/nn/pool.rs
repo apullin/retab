@@ -1,16 +1,13 @@
 use super::*;
 
-pub(super) fn register(
-    table: &mut std::collections::HashMap<
-        crate::graph::ir::OpTarget,
-        crate::serialize::visitors::emitter::EmitFn,
-    >,
-) {
+pub(super) fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
-    table.insert(OpTarget::TosaMaxPool2d, emit_max_pool2d);
-    table.insert(OpTarget::TosaAvgPool2d, emit_avg_pool2d);
-    table.insert(OpTarget::MaxPool2d, emit_aten_max_pool2d);
-    table.insert(OpTarget::AvgPool2d, emit_avg_pool2d);
+    table.extend([
+        (OpTarget::TosaMaxPool2d, emit_max_pool2d as EmitFn),
+        (OpTarget::TosaAvgPool2d, emit_avg_pool2d),
+        (OpTarget::MaxPool2d, emit_aten_max_pool2d),
+        (OpTarget::AvgPool2d, emit_avg_pool2d),
+    ]);
 }
 
 fn adjusted_pool_post_pad(

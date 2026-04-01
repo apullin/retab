@@ -54,6 +54,8 @@ pub enum OpTarget {
     Hardtanh,
     Var,
     FullLike,
+    Copy,
+    Eye,
     Pad,
     ConvTranspose2d,
     DepthwiseConv2d,
@@ -330,6 +332,7 @@ pub struct NodeMeta {
     pub output_qparams: SmallVec<[(u32, QuantArgs); 1]>,
     pub tosa_dim_order: Option<SmallVec<[u8; 6]>>,
     pub tosa_special_dtype: Option<DType>,
+    pub arm_control_flow_parent_output_user: bool,
 }
 
 impl NodeMeta {
@@ -340,6 +343,7 @@ impl NodeMeta {
             output_qparams: SmallVec::new(),
             tosa_dim_order: None,
             tosa_special_dtype: None,
+            arm_control_flow_parent_output_user: false,
         }
     }
 }

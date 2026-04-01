@@ -50,6 +50,11 @@ fn table_op_spec(node: &Bound<'_, PyAny>, target: &str) -> PyResult<Option<Table
             kind: "floor",
             scalar_arg: None,
         }))
+    } else if target.contains("round.default") {
+        Ok(Some(TableOpSpec {
+            kind: "round",
+            scalar_arg: None,
+        }))
     } else if target.contains("reciprocal.default") {
         Ok(Some(TableOpSpec {
             kind: "reciprocal",
@@ -63,6 +68,11 @@ fn table_op_spec(node: &Bound<'_, PyAny>, target: &str) -> PyResult<Option<Table
     } else if target.contains("log.default") {
         Ok(Some(TableOpSpec {
             kind: "log",
+            scalar_arg: None,
+        }))
+    } else if target.contains("hardsigmoid.default") {
+        Ok(Some(TableOpSpec {
+            kind: "hardsigmoid",
             scalar_arg: None,
         }))
     } else if target.contains("sigmoid.default") {
@@ -155,11 +165,6 @@ fn table_op_spec(node: &Bound<'_, PyAny>, target: &str) -> PyResult<Option<Table
     } else if target.contains("expm1.default") {
         Ok(Some(TableOpSpec {
             kind: "expm1",
-            scalar_arg: None,
-        }))
-    } else if target.contains("hardsigmoid.default") {
-        Ok(Some(TableOpSpec {
-            kind: "hardsigmoid",
             scalar_arg: None,
         }))
     } else if target.contains("hardswish.default") {

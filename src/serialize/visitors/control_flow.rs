@@ -1,13 +1,14 @@
 use super::emitter::EmitContext;
 use super::*;
 use crate::graph::ir::Arg;
-use crate::serialize::tosa_generated::CondIfAttribute;
+use crate::serialize::tosa_generated::{CondIfAttribute, WhileLoopAttribute};
 
-pub fn register(
-    table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>,
-) {
+pub fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
-    table.insert(OpTarget::CondIf, emit_cond_if);
+    table.extend([
+        (OpTarget::CondIf, emit_cond_if as EmitFn),
+        (OpTarget::WhileLoop, emit_while_loop as EmitFn),
+    ]);
 }
 
 // Parse the raw control-flow node once at the boundary, then emit from a
@@ -20,6 +21,14 @@ struct CondIfSpec {
     else_graph: String,
 }
 
+#[derive(Debug)]
+struct WhileLoopSpec {
+    input_names: Vec<String>,
+    output_tensors: Vec<TosaTensor>,
+    cond_graph: String,
+    body_graph: String,
+}
+
 impl CondIfSpec {
     fn parse(graph: &Graph, node: &Node) -> Self {
         Self {
@@ -27,6 +36,33 @@ impl CondIfSpec {
             output_tensors: cond_output_tensors(graph, node),
             then_graph: resolve_region_name(graph, node.args.get(1)),
             else_graph: resolve_region_name(graph, node.args.get(2)),
+        }
+    }
+}
+
+impl WhileLoopSpec {
+    fn parse(ctx: &EmitContext) -> Self {
+        let graph = ctx.graph;
+        let node = ctx.node;
+        let carried_input_ids = carried_input_ids(node);
+        let input_names = carried_input_ids
+            .iter()
+            .filter_map(|id| resolve_input_name_from_node_id(graph, *id))
+            .collect();
+        let mut output_tensors = cond_output_tensors(graph, node);
+        extend_missing_while_outputs(
+            &mut output_tensors,
+            graph,
+            ctx.store,
+            node,
+            &carried_input_ids,
+        );
+
+        Self {
+            input_names,
+            output_tensors,
+            cond_graph: resolve_region_name(graph, node.args.first()),
+            body_graph: resolve_region_name(graph, node.args.get(1)),
         }
     }
 }
@@ -63,6 +99,37 @@ fn cond_output_tensors(graph: &Graph, node: &Node) -> Vec<TosaTensor> {
     }
 }
 
+fn carried_input_ids(node: &Node) -> Vec<NodeId> {
+    match node.args.get(2) {
+        Some(Arg::NodeList(ids)) => ids.iter().copied().collect(),
+        Some(Arg::Node(id)) => vec![*id],
+        _ => Vec::new(),
+    }
+}
+
+fn extend_missing_while_outputs(
+    output_tensors: &mut Vec<TosaTensor>,
+    graph: &Graph,
+    store: &TensorStore,
+    node: &Node,
+    carried_input_ids: &[NodeId],
+) {
+    if output_tensors.len() >= carried_input_ids.len() {
+        return;
+    }
+
+    for (idx, input_id) in carried_input_ids.iter().enumerate().skip(output_tensors.len()) {
+        let Some(input_node) = graph.node(*input_id) else {
+            continue;
+        };
+        output_tensors.push(TosaTensor::new(
+            format!("{}_dummy_{}", node.name, idx),
+            actual_tensor_shape(graph, store, input_node),
+            actual_tensor_dtype(graph, input_node),
+        ));
+    }
+}
+
 pub(super) fn emit_cond_if(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;
@@ -80,6 +147,28 @@ pub(super) fn emit_cond_if(ctx: &EmitContext) -> EmitResult {
         Attribute::CondIf(CondIfAttribute {
             then_graph: spec.then_graph,
             else_graph: spec.else_graph,
+        }),
+        spec.input_names,
+        output_names,
+    ));
+    result
+}
+
+pub(super) fn emit_while_loop(ctx: &EmitContext) -> EmitResult {
+    let spec = WhileLoopSpec::parse(ctx);
+    let output_names = spec
+        .output_tensors
+        .iter()
+        .map(|tensor| tensor.name.clone())
+        .collect();
+
+    let mut result = EmitResult::default();
+    result.tensors.extend(spec.output_tensors);
+    result.operators.push(TosaOperator::new(
+        Op::WhileLoop,
+        Attribute::WhileLoop(WhileLoopAttribute {
+            cond_branch: spec.cond_graph,
+            body_branch: spec.body_graph,
         }),
         spec.input_names,
         output_names,

@@ -369,6 +369,17 @@ fn decompose_mean<'py>(
             result = maybe_insert_q_dq_after(py, graph, &result, node)?;
 
             if !keepdim {
+                // avg_pool2d lowers through NHWC. Before collapsing the trailing
+                // singleton spatial dim, rotate the tensor back into the
+                // logical NCHW view so view_copy preserves the channel-major
+                // layout expected by mean(dim=[2] / dim=[3]).
+                let permute_op = resolve_aten_op(py, "permute_copy.default")?;
+                let perm = PyList::new_bound(py, [0i64, 3, 1, 2]);
+                let permute_args = PyTuple::new_bound(py, &[result.as_ref(), perm.as_ref()]);
+                result = insert_call_before_preserving_meta(
+                    py, graph, node, &permute_op, &permute_args, node,
+                )?;
+
                 let view_op = resolve_aten_op(py, "view_copy.default")?;
                 let shape_list = PyList::new_bound(py, output_shape.iter().copied());
                 let view_args = PyTuple::new_bound(py, &[result.as_ref(), shape_list.as_ref()]);

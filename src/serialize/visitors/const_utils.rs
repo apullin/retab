@@ -66,6 +66,15 @@ fn scalar_fill_bytes(dtype: crate::graph::ir::DType, value: f64) -> Option<Vec<u
     })
 }
 
+fn append_scalar_fill_bytes(
+    data: &mut Vec<u8>,
+    dtype: crate::graph::ir::DType,
+    value: f64,
+) -> Option<()> {
+    data.extend_from_slice(&scalar_fill_bytes(dtype, value)?);
+    Some(())
+}
+
 pub(super) fn make_filled_const_tensor(
     name: String,
     shape: Vec<i32>,
@@ -80,6 +89,39 @@ pub(super) fn make_filled_const_tensor(
     }
 
     Some(make_tensor(name, shape, ir_dtype_to_tosa(dtype), data))
+}
+
+pub(super) fn make_eye_const_tensor(
+    name: String,
+    shape: Vec<i32>,
+    dtype: crate::graph::ir::DType,
+    zero_value: f64,
+    one_value: f64,
+) -> Option<TosaTensor> {
+    if shape.len() != 2 {
+        return None;
+    }
+    let rows = usize::try_from(shape[0]).ok()?;
+    let cols = usize::try_from(shape[1]).ok()?;
+    let elem_size = scalar_fill_bytes(dtype, zero_value)?.len();
+    let mut data = Vec::with_capacity(rows.checked_mul(cols)?.checked_mul(elem_size)?);
+    for row in 0..rows {
+        for col in 0..cols {
+            let value = if row == col { one_value } else { zero_value };
+            append_scalar_fill_bytes(&mut data, dtype, value)?;
+        }
+    }
+    Some(make_tensor(name, shape, ir_dtype_to_tosa(dtype), data))
+}
+
+pub(super) fn quantize_fill_value(node: &Node, value: f64) -> f64 {
+    match (node.meta.val.dtype, node.meta.output_qparams.first()) {
+        (crate::graph::ir::DType::Int8 | crate::graph::ir::DType::Int16, Some((_, qp))) => {
+            let quantized = ((value / qp.scale) + qp.zero_point as f64).round() as i64;
+            quantized.clamp(qp.qmin, qp.qmax) as f64
+        }
+        _ => value,
+    }
 }
 
 pub(super) fn push_inline_const(result: &mut EmitResult, tensor: TosaTensor) {

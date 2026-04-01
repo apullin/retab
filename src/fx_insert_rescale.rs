@@ -1,86 +1,54 @@
 use std::collections::HashSet;
 
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyModule};
 
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
 use crate::fx_utils;
 
-// ---------------------------------------------------------------------------
-// Dual-format qparam field access (QuantArgs namedtuple or legacy dict)
-// ---------------------------------------------------------------------------
-
-/// Read a float field from either a QuantArgs namedtuple or a plain dict.
-fn qp_get_f64(qp: &Bound<'_, PyAny>, attr: &str, dict_key: Option<&str>, default: f64) -> f64 {
-    if let Ok(val) = qp.getattr(attr) {
-        if let Ok(v) = val.extract::<f64>() {
-            return v;
-        }
-        if let Ok(item) = val.get_item(0_usize) {
-            if let Ok(v) = item.extract::<f64>() {
-                return v;
-            }
-        }
-    }
-    if let Some(key) = dict_key {
-        if let Ok(val) = qp.call_method1("get", (key,)) {
-            if let Ok(v) = val.extract::<f64>() {
-                return v;
-            }
-        }
-    }
-    if let Ok(val) = qp.call_method1("get", (attr,)) {
-        if let Ok(v) = val.extract::<f64>() {
-            return v;
-        }
-    }
-    default
+fn qp_get_value<'py>(
+    qp: &Bound<'py, PyAny>,
+    attr: &str,
+    dict_key: Option<&str>,
+) -> Option<Bound<'py, PyAny>> {
+    qp.getattr(attr).ok().or_else(|| {
+        dict_key
+            .and_then(|key| qp.call_method1("get", (key,)).ok())
+            .or_else(|| qp.call_method1("get", (attr,)).ok())
+    })
 }
 
-/// Read an int field from either a QuantArgs namedtuple or a plain dict.
-fn qp_get_i64(qp: &Bound<'_, PyAny>, attr: &str, dict_key: Option<&str>, default: i64) -> i64 {
-    if let Ok(val) = qp.getattr(attr) {
-        if let Ok(v) = val.extract::<i64>() {
-            return v;
+macro_rules! qp_get_scalar {
+    ($name:ident, $ty:ty) => {
+        fn $name(qp: &Bound<'_, PyAny>, attr: &str, dict_key: Option<&str>, default: $ty) -> $ty {
+            qp_get_value(qp, attr, dict_key)
+                .and_then(|value| {
+                    value.extract::<$ty>().ok().or_else(|| {
+                        value
+                            .get_item(0_usize)
+                            .ok()
+                            .and_then(|item| item.extract::<$ty>().ok())
+                    })
+                })
+                .unwrap_or(default)
         }
-        if let Ok(item) = val.get_item(0_usize) {
-            if let Ok(v) = item.extract::<i64>() {
-                return v;
-            }
-        }
-    }
-    if let Some(key) = dict_key {
-        if let Ok(val) = qp.call_method1("get", (key,)) {
-            if let Ok(v) = val.extract::<i64>() {
-                return v;
-            }
-        }
-    }
-    if let Ok(val) = qp.call_method1("get", (attr,)) {
-        if let Ok(v) = val.extract::<i64>() {
-            return v;
-        }
-    }
-    default
+    };
 }
 
-/// Read a float list from a QuantArgs namedtuple or plain dict.
-///
-/// Returns all scale values for per-channel quant, or a single-element list
-/// for per-tensor quant. Falls back to `[default]` if extraction fails.
+qp_get_scalar!(qp_get_f64, f64);
+qp_get_scalar!(qp_get_i64, i64);
+
 fn qp_get_f64_list(qp: &Bound<'_, PyAny>, attr: &str, default: f64) -> Vec<f64> {
-    if let Ok(val) = qp.getattr(attr) {
-        // Try extracting as a list first (per-channel)
+    if let Some(val) = qp_get_value(qp, attr, None) {
         if let Ok(list) = val.extract::<Vec<f64>>() {
             if !list.is_empty() {
                 return list;
             }
         }
-        // Try as a single float (per-tensor)
         if let Ok(v) = val.extract::<f64>() {
             return vec![v];
         }
-        // Try indexing (could be a tuple or other sequence)
         if let Ok(len) = val.len() {
             let mut result = Vec::with_capacity(len);
             for i in 0..len {
@@ -98,14 +66,8 @@ fn qp_get_f64_list(qp: &Bound<'_, PyAny>, attr: &str, default: f64) -> Vec<f64> 
     vec![default]
 }
 
-/// Read dtype string from either a QuantArgs namedtuple or a plain dict.
 fn qp_get_dtype_str(qp: &Bound<'_, PyAny>, default: &str) -> String {
-    if let Ok(val) = qp.getattr("dtype") {
-        if let Ok(s) = val.str() {
-            return s.to_string();
-        }
-    }
-    if let Ok(val) = qp.call_method1("get", ("dtype",)) {
+    if let Some(val) = qp_get_value(qp, "dtype", None) {
         if let Ok(s) = val.extract::<String>() {
             return s;
         }
@@ -116,15 +78,232 @@ fn qp_get_dtype_str(qp: &Bound<'_, PyAny>, default: &str) -> String {
     default.to_string()
 }
 
-/// FX-graph-direct implementation matching Python's InsertRescalePass +
-/// InsertRescaleInt32Pass exactly.
-///
-/// Phase 1: Replace surviving DQ->Q pairs with TOSA RESCALE (InsertRescalePass)
-/// Phase 2: Insert INT32 rescales around elementwise ops (InsertRescaleInt32Pass)
-///
-/// Phase 3: Insert accumulator rescales after lowered TOSA convolution ops.
-///   After RewriteConvPass, conv nodes produce INT32 accumulators that must be
-///   rescaled to INT8 using: scale = (input_scale * weight_scale) / output_scale.
+fn py_len(value: &Bound<'_, PyAny>) -> usize {
+    value.len().unwrap_or(0)
+}
+
+fn meta_non_empty_item<'py>(
+    meta: &Bound<'py, PyAny>,
+    key: &str,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let value = match meta.call_method1("get", (key,)) {
+        Ok(v) if !v.is_none() => v,
+        _ => return Ok(None),
+    };
+    Ok((py_len(&value) > 0).then_some(value))
+}
+
+fn first_qparam<'py>(qparams: &Bound<'py, PyAny>) -> Option<Bound<'py, PyAny>> {
+    qparams.get_item(0_usize).ok()
+}
+
+fn qparam_scale_zp_dtype(
+    qp: &Bound<'_, PyAny>,
+    fallback_zp: i64,
+    default_dtype: &str,
+) -> (f64, i64, String) {
+    (
+        qp_get_f64(qp, "scale", None, 1.0),
+        qp_get_i64(qp, "zp", Some("zero_point"), fallback_zp),
+        qp_get_dtype_str(qp, default_dtype),
+    )
+}
+
+const I32_MIN: i64 = -2_147_483_648;
+const I32_MAX: i64 = 2_147_483_647;
+
+fn debug_skip(node_name: Option<&str>, message: impl std::fmt::Display) {
+    if let Some(name) = node_name {
+        eprintln!("[InsertRescale] skip '{}': {}", name, message);
+    }
+}
+
+enum LayoutChainStep<T> {
+    Return(T),
+    Continue,
+    Stop,
+}
+
+fn walk_single_user_layout_chain<'py, T>(
+    start: &Bound<'py, PyAny>,
+    mut visit: impl FnMut(&Bound<'py, PyAny>, &Bound<'py, PyAny>, &str) -> PyResult<LayoutChainStep<T>>,
+) -> PyResult<Option<T>> {
+    let mut current = start.clone();
+    let mut visited: HashSet<String> = HashSet::new();
+
+    loop {
+        let name = FxGraphModule::node_name(&current)?;
+        if !visited.insert(name) {
+            return Ok(None);
+        }
+
+        let users = FxGraphModule::node_users(&current)?;
+        if users.len() != 1 {
+            return Ok(None);
+        }
+        let user = users[0].clone();
+        let target = FxGraphModule::node_target_str(&user)?;
+        match visit(&current, &user, &target)? {
+            LayoutChainStep::Return(value) => return Ok(Some(value)),
+            LayoutChainStep::Continue => current = user,
+            LayoutChainStep::Stop => return Ok(None),
+        }
+    }
+}
+
+fn changes_rank_across_layout_chain(
+    current: &Bound<'_, PyAny>,
+    user: &Bound<'_, PyAny>,
+    target: &str,
+) -> bool {
+    if !(target.contains("view")
+        || target.contains("reshape")
+        || target.contains("flatten")
+        || target.contains("squeeze")
+        || target.contains("unsqueeze"))
+    {
+        return false;
+    }
+    FxGraphModule::node_shape(current)
+        .ok()
+        .zip(FxGraphModule::node_shape(user).ok())
+        .map(|(before, after)| before.len() != after.len())
+        .unwrap_or(false)
+}
+
+struct QuantEnv<'py> {
+    quantargs_cls: Bound<'py, PyAny>,
+    int8: Bound<'py, PyAny>,
+    int16: Bound<'py, PyAny>,
+    int32: Bound<'py, PyAny>,
+}
+
+impl<'py> QuantEnv<'py> {
+    fn new(py: Python<'py>) -> PyResult<Self> {
+        let quantargs_cls = py
+            .import_bound("executorch.backends.arm._passes.quant_args")?
+            .getattr("QuantArgs")?;
+        let torch = py.import_bound("torch")?;
+        Ok(Self {
+            quantargs_cls,
+            int8: torch.getattr("int8")?,
+            int16: torch.getattr("int16")?,
+            int32: torch.getattr("int32")?,
+        })
+    }
+
+    fn dtype_for_str(&self, dtype_str: &str) -> &Bound<'py, PyAny> {
+        if dtype_str.contains("int16") {
+            &self.int16
+        } else {
+            &self.int8
+        }
+    }
+
+    fn make_int32_qparam(&self, scale: f64) -> PyResult<Bound<'py, PyAny>> {
+        self.quantargs_cls
+            .call1((scale, 0_i64, I32_MIN, I32_MAX, &self.int32))
+    }
+
+    fn set_int32_qparams(
+        &self,
+        py: Python<'py>,
+        meta: &Bound<'py, PyAny>,
+        key: &str,
+        entries: impl IntoIterator<Item = (usize, f64)>,
+    ) -> PyResult<()> {
+        let qparams = PyDict::new_bound(py);
+        for (index, scale) in entries {
+            qparams.set_item(index, self.make_int32_qparam(scale)?)?;
+        }
+        meta.set_item(key, &qparams)?;
+        Ok(())
+    }
+
+    fn update_node_dtype_kwarg(&self, node: &Bound<'py, PyAny>) -> PyResult<()> {
+        let kwargs = FxGraphModule::node_kwargs(node)?;
+        if let Ok(true) = kwargs.contains("dtype") {
+            if let Ok(kwargs) = kwargs.downcast::<PyDict>() {
+                kwargs.set_item("dtype", &self.int32)?;
+                node.setattr("kwargs", kwargs)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+struct RescaleOps<'py, 'gm> {
+    gm: &'gm FxGraphModule<'py>,
+    helpers: Bound<'py, PyModule>,
+}
+
+impl<'py, 'gm> RescaleOps<'py, 'gm> {
+    fn new(gm: &'gm FxGraphModule<'py>, helpers: Bound<'py, PyModule>) -> Self {
+        Self { gm, helpers }
+    }
+
+    fn insert(
+        &self,
+        ref_node: &Bound<'py, PyAny>,
+        input_node: &Bound<'py, PyAny>,
+        dtype: &Bound<'py, PyAny>,
+        scales: Vec<f64>,
+        in_zp: i64,
+        out_zp: i64,
+        after: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.helpers.call_method1(
+            "insert_rescale_node",
+            (
+                self.gm.gm_ref(),
+                ref_node,
+                input_node,
+                dtype,
+                scales,
+                in_zp,
+                out_zp,
+                after,
+            ),
+        )
+    }
+
+    fn restamp_output_meta(
+        &self,
+        py: Python<'py>,
+        meta_source: &Bound<'py, PyAny>,
+        rescale: &Bound<'py, PyAny>,
+        input_node: &Bound<'py, PyAny>,
+        dtype: &Bound<'py, PyAny>,
+    ) -> PyResult<()> {
+        fx_utils::copy_meta(py, meta_source, rescale)?;
+        self.helpers
+            .call_method1("restamp_rescale_output_meta", (rescale, input_node, dtype))?;
+        Ok(())
+    }
+
+    fn rewire_users(
+        &self,
+        old_input: &Bound<'py, PyAny>,
+        replacement: &Bound<'py, PyAny>,
+        users: &[Bound<'py, PyAny>],
+    ) -> PyResult<()> {
+        for user in users {
+            if !user.is(replacement) {
+                user.call_method1("replace_input_with", (old_input, replacement))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn refresh_fake_tensor(&self, node: &Bound<'py, PyAny>) -> PyResult<()> {
+        self.helpers
+            .call_method1("refresh_node_fake_tensor", (node,))?;
+        Ok(())
+    }
+}
+
+/// FX-graph-direct implementation of Python's InsertRescalePass,
+/// InsertRescaleInt32Pass, and the post-conv accumulator rescale step.
 pub struct FxInsertRescalePass;
 
 /// Returns true for TOSA accumulator-producing ops that need INT32 -> INT8 rescale.
@@ -145,101 +324,45 @@ fn is_layout_passthrough_user(target: &str) -> bool {
         || lowered.contains("contiguous")
 }
 
-fn extract_output_qparams<'py>(
-    py: Python<'py>,
-    meta: &Bound<'py, PyAny>,
-) -> PyResult<Option<Bound<'py, PyAny>>> {
-    let output_qparams = match meta.call_method1("get", ("output_qparams",)) {
-        Ok(v) if !v.is_none() => v,
-        _ => return Ok(None),
-    };
-    let len: usize = py
-        .import_bound("builtins")?
-        .call_method1("len", (&output_qparams,))?
-        .extract()
-        .unwrap_or(0);
-    if len == 0 {
-        return Ok(None);
-    }
-    Ok(Some(output_qparams))
+fn extract_output_qparams<'py>(meta: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    meta_non_empty_item(meta, "output_qparams")
 }
 
 fn recover_downstream_output_qparams<'py>(
-    py: Python<'py>,
     start: &Bound<'py, PyAny>,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
-    let mut current = start.clone();
-    let mut visited: HashSet<String> = HashSet::new();
-
-    loop {
-        let name = FxGraphModule::node_name(&current)?;
-        if !visited.insert(name) {
-            return Ok(None);
-        }
-
-        let users = FxGraphModule::node_users(&current)?;
-        if users.len() != 1 {
-            return Ok(None);
-        }
-        let user = users[0].clone();
+    walk_single_user_layout_chain(start, |_, user, target| {
         let user_meta = user.getattr("meta")?;
-        if let Some(output_qparams) = extract_output_qparams(py, &user_meta)? {
-            return Ok(Some(output_qparams));
+        if let Some(output_qparams) = extract_output_qparams(&user_meta)? {
+            return Ok(LayoutChainStep::Return(output_qparams));
         }
-
-        let target = FxGraphModule::node_target_str(&user)?;
-        if !is_layout_passthrough_user(&target) {
-            return Ok(None);
-        }
-        current = user;
-    }
+        Ok(if is_layout_passthrough_user(target) {
+            LayoutChainStep::Continue
+        } else {
+            LayoutChainStep::Stop
+        })
+    })
 }
 
 fn has_downstream_rescale(start: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let mut current = start.clone();
-    let mut visited: HashSet<String> = HashSet::new();
-
-    loop {
-        let name = FxGraphModule::node_name(&current)?;
-        if !visited.insert(name) {
-            return Ok(false);
-        }
-
-        let users = FxGraphModule::node_users(&current)?;
-        if users.len() != 1 {
-            return Ok(false);
-        }
-        let user = users[0].clone();
-        let target = FxGraphModule::node_target_str(&user)?;
-        let lowered = target.to_ascii_lowercase();
-        if lowered.contains("rescale") {
-            return Ok(true);
-        }
-        if !is_layout_passthrough_user(&target) {
-            return Ok(false);
-        }
-        if (lowered.contains("view")
-            || lowered.contains("reshape")
-            || lowered.contains("flatten")
-            || lowered.contains("squeeze")
-            || lowered.contains("unsqueeze"))
-            && FxGraphModule::node_shape(&current)
-                .ok()
-                .zip(FxGraphModule::node_shape(&user).ok())
-                .map(|(before, after)| before.len() != after.len())
-                .unwrap_or(false)
-        {
-            return Ok(false);
-        }
-        current = user;
-    }
+    Ok(
+        walk_single_user_layout_chain(start, |current, user, target| {
+            let lowered = target.to_ascii_lowercase();
+            if lowered.contains("rescale") {
+                return Ok(LayoutChainStep::Return(true));
+            }
+            if !is_layout_passthrough_user(target)
+                || changes_rank_across_layout_chain(current, user, &lowered)
+            {
+                return Ok(LayoutChainStep::Stop);
+            }
+            Ok(LayoutChainStep::Continue)
+        })?
+        .unwrap_or(false),
+    )
 }
 
-fn producer_old_zero_point(
-    py: Python<'_>,
-    arg_node: &Bound<'_, PyAny>,
-    fallback_zp: i64,
-) -> PyResult<i64> {
+fn producer_old_zero_point(arg_node: &Bound<'_, PyAny>, fallback_zp: i64) -> PyResult<i64> {
     let op = arg_node
         .getattr("op")
         .ok()
@@ -253,13 +376,13 @@ fn producer_old_zero_point(
     }
 
     let meta = arg_node.getattr("meta")?;
-    if let Some(output_qparams) = extract_output_qparams(py, &meta)? {
-        if let Ok(qp) = output_qparams.get_item(0_usize) {
-            let dtype_str = qp_get_dtype_str(&qp, "torch.int8");
+    if let Some(output_qparams) = extract_output_qparams(&meta)? {
+        if let Some(qp) = first_qparam(&output_qparams) {
+            let (_, zp, dtype_str) = qparam_scale_zp_dtype(&qp, fallback_zp, "torch.int8");
             if dtype_str.contains("int32") {
                 return Ok(0);
             }
-            return Ok(qp_get_i64(&qp, "zp", Some("zero_point"), fallback_zp));
+            return Ok(zp);
         }
     }
 
@@ -345,22 +468,12 @@ fn is_mul_op(target: &str) -> bool {
 
 /// Read input_qparams from node.meta, returning (keys, scales, zps, dtype_strs).
 fn read_input_qparams(
-    py: Python<'_>,
     node: &Bound<'_, PyAny>,
 ) -> PyResult<Option<(Vec<usize>, Vec<f64>, Vec<i64>, Vec<String>)>> {
     let meta = node.getattr("meta")?;
-    let input_qp = match meta.call_method1("get", ("input_qparams",)) {
-        Ok(v) if !v.is_none() => v,
-        _ => return Ok(None),
-    };
-    let len: usize = py
-        .import_bound("builtins")?
-        .call_method1("len", (&input_qp,))?
-        .extract()
-        .unwrap_or(0);
-    if len == 0 {
+    let Some(input_qp) = meta_non_empty_item(&meta, "input_qparams")? else {
         return Ok(None);
-    }
+    };
 
     let keys: Vec<usize> = input_qp
         .call_method0("keys")?
@@ -374,9 +487,10 @@ fn read_input_qparams(
 
     for &idx in &keys {
         let qp = input_qp.get_item(idx)?;
-        scales.push(qp_get_f64(&qp, "scale", None, 1.0));
-        zps.push(qp_get_i64(&qp, "zp", Some("zero_point"), 0));
-        dtype_strs.push(qp_get_dtype_str(&qp, "torch.int8"));
+        let (scale, zp, dtype_str) = qparam_scale_zp_dtype(&qp, 0, "torch.int8");
+        scales.push(scale);
+        zps.push(zp);
+        dtype_strs.push(dtype_str);
     }
 
     Ok(Some((keys, scales, zps, dtype_strs)))
@@ -409,8 +523,6 @@ fn compute_rescaled_input_scales(
     }
 }
 
-/// Compute the output rescale scale (INT32 domain) for the given op.
-/// Returns None if no output rescale is needed (comparison ops).
 fn compute_output_int32_scale(target: &str, rescaled_input_scales: &[f64]) -> Option<f64> {
     if is_comparison_op(target) {
         return None;
@@ -426,8 +538,17 @@ fn compute_output_int32_scale(target: &str, rescaled_input_scales: &[f64]) -> Op
         let product: f64 = rescaled_input_scales.iter().product();
         return Some(product);
     }
-    // abs, sum, add, sub: output scale == first input's rescaled scale
     Some(rescaled_input_scales[0])
+}
+
+fn qparam_signature(qp: &Bound<'_, PyAny>, default_dtype: &str) -> (f64, i64, i64, i64, String) {
+    (
+        qp_get_f64(qp, "scale", None, 1.0),
+        qp_get_i64(qp, "zp", Some("zero_point"), 0),
+        qp_get_i64(qp, "qmin", None, -128),
+        qp_get_i64(qp, "qmax", None, 127),
+        qp_get_dtype_str(qp, default_dtype),
+    )
 }
 
 impl FxPass for FxInsertRescalePass {
@@ -437,12 +558,10 @@ impl FxPass for FxInsertRescalePass {
 
     fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
         let py = gm.py();
-        let helpers = py.import_bound("fx_helpers")?;
+        let rescale_ops = RescaleOps::new(gm, py.import_bound("fx_helpers")?);
+        let quant = QuantEnv::new(py)?;
         let mut modified = false;
 
-        // ------------------------------------------------------------------
-        // Phase 1: Replace surviving DQ -> Q pairs with TOSA RESCALE
-        // ------------------------------------------------------------------
         let all_nodes = gm.nodes()?;
         let mut dq_q_pairs: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)> = Vec::new();
 
@@ -482,32 +601,19 @@ impl FxPass for FxInsertRescalePass {
                 _ => continue,
             };
 
-            let q_dtype = q_args.get(5).cloned().unwrap_or_else(|| {
-                py.eval_bound("__import__('torch').int8", None, None)
-                    .unwrap()
-            });
+            let q_dtype = q_args.get(5).cloned().unwrap_or_else(|| quant.int8.clone());
 
-            // Insert RESCALE before the DQ node (matching Python: inserting_before(node))
-            let rescale_node = helpers.call_method1(
-                "insert_rescale_node",
-                (
-                    gm.gm_ref(),
-                    dq_node,
-                    &dq_input,
-                    &q_dtype,
-                    vec![new_scale],
-                    dq_zp,
-                    q_zp,
-                    false, // before
-                ),
+            let rescale_node = rescale_ops.insert(
+                dq_node,
+                &dq_input,
+                &q_dtype,
+                vec![new_scale],
+                dq_zp,
+                q_zp,
+                false,
             )?;
 
-            // Copy Q node's meta onto the rescale (Python: rescale_node.meta = copy(user.meta))
-            fx_utils::copy_meta(py, q_node, &rescale_node)?;
-            helpers.call_method1(
-                "restamp_rescale_output_meta",
-                (&rescale_node, &dq_input, &q_dtype),
-            )?;
+            rescale_ops.restamp_output_meta(py, q_node, &rescale_node, &dq_input, &q_dtype)?;
 
             FxGraphModule::replace_all_uses_with(q_node, &rescale_node)?;
             gm.erase_node(q_node)?;
@@ -520,12 +626,8 @@ impl FxPass for FxInsertRescalePass {
             modified = true;
         }
 
-        // ------------------------------------------------------------------
-        // Phase 2: Insert INT32 rescales around element-wise ops
-        // Matches Python InsertRescaleInt32Pass exactly.
-        // ------------------------------------------------------------------
+        // Phase 2: insert INT32 rescales around elementwise ops.
         let all_nodes = gm.nodes()?;
-        let torch_int32 = py.eval_bound("__import__('torch').int32", None, None)?;
 
         for node in &all_nodes {
             let op = FxGraphModule::node_op(node)?;
@@ -539,13 +641,11 @@ impl FxPass for FxInsertRescalePass {
                 None => continue,
             };
 
-            // Read input_qparams
-            let (keys, scales, zps, dtype_strs) = match read_input_qparams(py, node)? {
+            let (keys, scales, zps, dtype_strs) = match read_input_qparams(node)? {
                 Some(v) => v,
                 None => continue,
             };
 
-            // Check that at least one input is int8/int16
             let has_quantized_input = dtype_strs
                 .iter()
                 .any(|d| d.contains("int8") || d.contains("int16"));
@@ -553,15 +653,10 @@ impl FxPass for FxInsertRescalePass {
                 continue;
             }
 
-            // Compute the rescaled INT32 input scales
             let rescaled_scales = compute_rescaled_input_scales(op_kind, &scales, &dtype_strs);
-
-            // Compute the output INT32 scale
             let output_int32_scale = compute_output_int32_scale(&target, &rescaled_scales);
 
-            // --- Insert input rescales ---
             let args = FxGraphModule::node_args(node)?;
-            let mut new_args: Vec<Bound<'_, PyAny>> = args.clone();
             let mut rescaled_inputs = false;
             let mut seen_arg_names: HashSet<String> = HashSet::new();
 
@@ -580,8 +675,6 @@ impl FxPass for FxInsertRescalePass {
                     continue;
                 }
 
-                // Python's seen_args dedup: skip if we already inserted a rescale
-                // for this exact arg node (e.g., add(x, x) only inserts one rescale).
                 let arg_name = FxGraphModule::node_name(arg_node)?;
                 if seen_arg_names.contains(&arg_name) {
                     continue;
@@ -591,29 +684,20 @@ impl FxPass for FxInsertRescalePass {
                 let old_scale = scales[key_idx];
                 let new_scale = rescaled_scales[key_idx];
                 let rescale_scale = old_scale / new_scale;
-                let old_zp = producer_old_zero_point(py, arg_node, zps[key_idx])?;
-                let new_zp = 0_i64; // INT32 always has zp=0
+                let old_zp = producer_old_zero_point(arg_node, zps[key_idx])?;
+                let new_zp = 0_i64;
 
-                let rescale = helpers.call_method1(
-                    "insert_rescale_node",
-                    (
-                        gm.gm_ref(),
-                        arg_node, // ref_node: insert after the arg
-                        arg_node, // input_node: the arg itself
-                        &torch_int32,
-                        vec![rescale_scale],
-                        old_zp,
-                        new_zp,
-                        true, // after
-                    ),
+                let rescale = rescale_ops.insert(
+                    arg_node,
+                    arg_node,
+                    &quant.int32,
+                    vec![rescale_scale],
+                    old_zp,
+                    new_zp,
+                    true,
                 )?;
 
-                // Python uses node.replace_input_with(arg_node, rescale_node)
                 node.call_method1("replace_input_with", (arg_node, &rescale))?;
-
-                // Also update new_args for tracking (though replace_input_with
-                // already handles the graph edge)
-                new_args[pos] = rescale;
                 rescaled_inputs = true;
             }
 
@@ -621,133 +705,158 @@ impl FxPass for FxInsertRescalePass {
                 continue;
             }
 
-            // Inputs were rescaled, so this node was modified
             modified = true;
 
-            // Update input_qparams metadata to reflect rescaled INT32 params
             let meta = node.getattr("meta")?;
-            let quantargs_cls = py
-                .import_bound("executorch.backends.arm._passes.quant_args")?
-                .getattr("QuantArgs")?;
-            let torch_mod = py.import_bound("torch")?;
-            let torch_int32_dtype = torch_mod.getattr("int32")?;
-            let i32_min: i64 = -2_147_483_648;
-            let i32_max: i64 = 2_147_483_647;
+            quant.set_int32_qparams(
+                py,
+                &meta,
+                "input_qparams",
+                keys.iter()
+                    .enumerate()
+                    .map(|(key_idx, &pos)| (pos, rescaled_scales[key_idx])),
+            )?;
 
-            let new_input_qp = pyo3::types::PyDict::new_bound(py);
-            for (key_idx, &pos) in keys.iter().enumerate() {
-                let new_qa = quantargs_cls.call1((
-                    rescaled_scales[key_idx],
-                    0_i64,
-                    i32_min,
-                    i32_max,
-                    &torch_int32_dtype,
-                ))?;
-                new_input_qp.set_item(pos, &new_qa)?;
-            }
-            meta.set_item("input_qparams", &new_input_qp)?;
-
-            // --- Insert output rescale (only if op produces quantized output) ---
             let mut outputs_was_rescaled = false;
             if let Some(out_int32_scale) = output_int32_scale {
-                let output_qp = match meta.call_method1("get", ("output_qparams",)) {
-                    Ok(v) if !v.is_none() => v,
-                    _ => {
-                        // No output_qparams -- skip output rescale but input
-                        // rescales are still valid.
-                        continue;
-                    }
-                };
-                let oqp_len: usize = py
-                    .import_bound("builtins")?
-                    .call_method1("len", (&output_qp,))?
-                    .extract()
-                    .unwrap_or(0);
-                if oqp_len == 0 {
+                let Some(output_qp) = meta_non_empty_item(&meta, "output_qparams")? else {
                     continue;
-                }
+                };
 
-                let oqp = output_qp.get_item(0)?;
-                let out_orig_scale = qp_get_f64(&oqp, "scale", None, 1.0);
-                let out_orig_zp = qp_get_i64(&oqp, "zp", Some("zero_point"), 0);
-                let out_orig_dtype_str = qp_get_dtype_str(&oqp, "torch.int8");
+                let Some(oqp) = first_qparam(&output_qp) else {
+                    continue;
+                };
+                let (out_orig_scale, out_orig_zp, out_orig_dtype_str) =
+                    qparam_scale_zp_dtype(&oqp, 0, "torch.int8");
 
                 if out_orig_dtype_str.contains("int8") || out_orig_dtype_str.contains("int16") {
-                    // Output rescale: INT32 -> original dtype
-                    // Scale = computed_int32_scale / original_output_scale
                     let rescale_scale = out_int32_scale / out_orig_scale;
-                    let out_dtype = if out_orig_dtype_str.contains("int16") {
-                        py.eval_bound("__import__('torch').int16", None, None)?
-                    } else {
-                        py.eval_bound("__import__('torch').int8", None, None)?
-                    };
-
                     let users = FxGraphModule::node_users(node)?;
-
-                    let rescale_out = helpers.call_method1(
-                        "insert_rescale_node",
-                        (
-                            gm.gm_ref(),
-                            node,
-                            node,
-                            &out_dtype,
-                            vec![rescale_scale],
-                            0_i64,       // in_zp: 0 (INT32 accumulator)
-                            out_orig_zp, // out_zp: original output zp
-                            true,        // after
-                        ),
+                    let rescale_out = rescale_ops.insert(
+                        node,
+                        node,
+                        quant.dtype_for_str(&out_orig_dtype_str),
+                        vec![rescale_scale],
+                        0_i64,
+                        out_orig_zp,
+                        true,
                     )?;
-
-                    for user in &users {
-                        if !user.is(&rescale_out) {
-                            user.call_method1("replace_input_with", (node, &rescale_out))?;
-                        }
-                    }
+                    rescale_ops.rewire_users(node, &rescale_out, &users)?;
 
                     outputs_was_rescaled = true;
                 }
             }
 
-            // Update output_qparams metadata if output was rescaled
             if outputs_was_rescaled {
                 if let Some(out_int32_scale) = output_int32_scale {
-                    let new_output_qp = pyo3::types::PyDict::new_bound(py);
-                    let out_qa = quantargs_cls.call1((
-                        out_int32_scale,
-                        0_i64,
-                        i32_min,
-                        i32_max,
-                        &torch_int32_dtype,
-                    ))?;
-                    new_output_qp.set_item(0_usize, &out_qa)?;
-                    meta.set_item("output_qparams", &new_output_qp)?;
-
-                    // If "dtype" is in node.kwargs, change it to torch.int32
-                    let kwargs = FxGraphModule::node_kwargs(node)?;
-                    if kwargs.contains("dtype").unwrap_or(false) {
-                        let new_kwargs = kwargs.downcast::<pyo3::types::PyDict>().ok();
-                        if let Some(kw) = new_kwargs {
-                            kw.set_item("dtype", &torch_int32)?;
-                            node.setattr("kwargs", kw)?;
-                        }
-                    }
+                    quant.set_int32_qparams(
+                        py,
+                        &meta,
+                        "output_qparams",
+                        [(0_usize, out_int32_scale)],
+                    )?;
+                    quant.update_node_dtype_kwarg(node)?;
                 }
             }
 
-            // Python retraces the modified graph after InsertRescaleInt32Pass.
-            // Refresh the touched node's FakeTensor eagerly so downstream
-            // passes and serialization observe the INT32 accumulator dtype.
-            helpers.call_method1("refresh_node_fake_tensor", (node,))?;
+            rescale_ops.refresh_fake_tensor(node)?;
         }
 
-        // ------------------------------------------------------------------
-        // Phase 3: Insert accumulator rescales after lowered TOSA convolution ops
-        // These ops produce INT32 accumulators; rescale to INT8 using
-        // scale = (input_scale * weight_scale) / output_scale.
-        // ------------------------------------------------------------------
+        // Phase 2b: insert output rescales after quantized `where` nodes when
+        // the branch tensors share a quantization domain that differs from the
+        // annotated output domain.
         let all_nodes = gm.nodes()?;
-        let torch_int8 = py.eval_bound("__import__('torch').int8", None, None)?;
-        let torch_int16 = py.eval_bound("__import__('torch').int16", None, None)?;
+        for node in &all_nodes {
+            let op = FxGraphModule::node_op(node)?;
+            if op != "call_function" {
+                continue;
+            }
+            let target = FxGraphModule::node_target_str(node)?;
+            if !target.contains("where.self") {
+                continue;
+            }
+
+            let meta = node.getattr("meta")?;
+            let Some(input_qparams) = meta_non_empty_item(&meta, "input_qparams")? else {
+                continue;
+            };
+            let Some(output_qparams) = meta_non_empty_item(&meta, "output_qparams")? else {
+                continue;
+            };
+
+            let Ok(then_qp) = input_qparams.get_item(1_usize) else {
+                continue;
+            };
+            let Ok(else_qp) = input_qparams.get_item(2_usize) else {
+                continue;
+            };
+            let Some(out_qp) = first_qparam(&output_qparams) else {
+                continue;
+            };
+
+            let then_sig = qparam_signature(&then_qp, "torch.int8");
+            let else_sig = qparam_signature(&else_qp, "torch.int8");
+            if then_sig != else_sig {
+                continue;
+            }
+
+            let out_sig = qparam_signature(&out_qp, "torch.int8");
+            let output_dtype = meta
+                .call_method1("get", ("val",))?
+                .getattr("dtype")
+                .ok()
+                .and_then(|dt| dt.str().ok())
+                .and_then(|s| s.extract::<String>().ok())
+                .unwrap_or_else(|| out_sig.4.clone());
+
+            let needs_noop_quant_boundary = then_sig == out_sig && output_dtype != out_sig.4;
+            if then_sig == out_sig && !needs_noop_quant_boundary {
+                continue;
+            }
+
+            if !out_sig.4.contains("int8") && !out_sig.4.contains("int16") {
+                continue;
+            }
+
+            let branch_output_qparams = PyDict::new_bound(py);
+            branch_output_qparams.set_item(0_usize, &then_qp)?;
+
+            if needs_noop_quant_boundary {
+                let output_dtype = quant.dtype_for_str(&out_sig.4);
+                rescale_ops
+                    .helpers
+                    .call_method1("restamp_node_output_meta", (node, node, output_dtype))?;
+                meta.set_item("output_qparams", &branch_output_qparams)?;
+                modified = true;
+                continue;
+            }
+
+            let users = FxGraphModule::node_users(node)?;
+            let rescale_out = rescale_ops.insert(
+                node,
+                node,
+                quant.dtype_for_str(&out_sig.4),
+                vec![then_sig.0 / out_sig.0],
+                then_sig.1,
+                out_sig.1,
+                true,
+            )?;
+            rescale_ops.restamp_output_meta(
+                py,
+                node,
+                &rescale_out,
+                node,
+                quant.dtype_for_str(&out_sig.4),
+            )?;
+            rescale_ops.rewire_users(node, &rescale_out, &users)?;
+
+            meta.set_item("output_qparams", &branch_output_qparams)?;
+            rescale_ops.refresh_fake_tensor(node)?;
+            modified = true;
+        }
+
+        // Phase 3: insert accumulator rescales after lowered TOSA conv ops.
+        let all_nodes = gm.nodes()?;
         let debug = std::env::var("TOSA_ENGINE_DEBUG").is_ok();
 
         for node in &all_nodes {
@@ -759,73 +868,55 @@ impl FxPass for FxInsertRescalePass {
             if !is_tosa_accumulator_op(&target) {
                 continue;
             }
+            rescale_ops.refresh_fake_tensor(node)?;
             let node_name = if debug {
                 Some(FxGraphModule::node_name(node)?)
             } else {
                 None
             };
 
-            // Read input_qparams to get input_scale (pos 0) and weight_scales (pos 1)
             let meta = node.getattr("meta")?;
-            let input_qparams = match meta.call_method1("get", ("input_qparams",)) {
-                Ok(v) if !v.is_none() => v,
+            let input_qparams = match meta_non_empty_item(&meta, "input_qparams")? {
+                Some(v) => v,
                 _ => {
-                    if let Some(name) = &node_name {
-                        eprintln!(
-                            "[InsertRescale] skip '{}': missing input_qparams (target={})",
-                            name, target
-                        );
-                    }
+                    debug_skip(
+                        node_name.as_deref(),
+                        format_args!("missing input_qparams (target={})", target),
+                    );
                     continue;
                 }
             };
             if has_downstream_rescale(node)? {
-                if let Some(name) = &node_name {
-                    eprintln!(
-                        "[InsertRescale] skip '{}': downstream rescale already present",
-                        name
-                    );
-                }
+                debug_skip(node_name.as_deref(), "downstream rescale already present");
                 continue;
             }
             if debug {
-                let input_qp_len: usize = py
-                    .import_bound("builtins")?
-                    .call_method1("len", (&input_qparams,))?
-                    .extract()
-                    .unwrap_or(0);
                 eprintln!(
                     "[InsertRescale] inspect '{}': target={}, input_qparams={}",
                     node_name.as_deref().unwrap_or("<unknown>"),
                     target,
-                    input_qp_len
+                    py_len(&input_qparams)
                 );
             }
 
             let input_scale = match input_qparams.get_item(0_usize) {
                 Ok(qp) => qp_get_f64(&qp, "scale", None, 1.0),
                 Err(_) => {
-                    if let Some(name) = &node_name {
-                        eprintln!("[InsertRescale] skip '{}': missing input qparam[0]", name);
-                    }
+                    debug_skip(node_name.as_deref(), "missing input qparam[0]");
                     continue;
                 }
             };
-            // Read per-channel weight scales (list for per-channel, single for per-tensor)
             let weight_scales: Vec<f64> = match input_qparams.get_item(1_usize) {
                 Ok(qp) => qp_get_f64_list(&qp, "scale", 1.0),
                 Err(_) => {
-                    if let Some(name) = &node_name {
-                        eprintln!("[InsertRescale] skip '{}': missing weight qparam[1]", name);
-                    }
+                    debug_skip(node_name.as_deref(), "missing weight qparam[1]");
                     continue;
                 }
             };
 
-            // Read output_qparams to get output_scale(s) and output_zp
-            let output_qparams = if let Some(qparams) = extract_output_qparams(py, &meta)? {
+            let output_qparams = if let Some(qparams) = extract_output_qparams(&meta)? {
                 qparams
-            } else if let Some(qparams) = recover_downstream_output_qparams(py, node)? {
+            } else if let Some(qparams) = recover_downstream_output_qparams(node)? {
                 if let Some(name) = &node_name {
                     eprintln!(
                         "[InsertRescale] recovered output_qparams for '{}' from downstream user",
@@ -834,38 +925,24 @@ impl FxPass for FxInsertRescalePass {
                 }
                 qparams
             } else {
-                if let Some(name) = &node_name {
-                    eprintln!(
-                        "[InsertRescale] skip '{}': no output_qparams on node or downstream layout chain",
-                        name
-                    );
-                }
+                debug_skip(
+                    node_name.as_deref(),
+                    "no output_qparams on node or downstream layout chain",
+                );
                 continue;
             };
-            let oqp = match output_qparams.get_item(0_usize) {
-                Ok(qp) => qp,
-                Err(_) => {
-                    if let Some(name) = &node_name {
-                        eprintln!("[InsertRescale] skip '{}': missing output qparam[0]", name);
-                    }
-                    continue;
-                }
+            let Some(oqp) = first_qparam(&output_qparams) else {
+                debug_skip(node_name.as_deref(), "missing output qparam[0]");
+                continue;
             };
-            let output_scale = qp_get_f64(&oqp, "scale", None, 1.0);
-            let output_zp = qp_get_i64(&oqp, "zp", Some("zero_point"), 0);
-            let output_dtype_str = qp_get_dtype_str(&oqp, "torch.int8");
-            let output_dtype = if output_dtype_str.contains("int16") {
-                &torch_int16
-            } else {
-                &torch_int8
-            };
+            let (output_scale, output_zp, output_dtype_str) =
+                qparam_scale_zp_dtype(&oqp, 0, "torch.int8");
+            let output_dtype = quant.dtype_for_str(&output_dtype_str);
 
             if output_scale == 0.0 {
                 continue;
             }
 
-            // Compute per-channel rescale scales:
-            //   rescale_scale[i] = (input_scale * weight_scale[i]) / output_scale
             let rescale_scales: Vec<f64> = weight_scales
                 .iter()
                 .map(|&ws| (input_scale * ws) / output_scale)
@@ -879,38 +956,19 @@ impl FxPass for FxInsertRescalePass {
                 );
             }
 
-            // Capture users before inserting the rescale
             let users = FxGraphModule::node_users(node)?;
-
-            // Insert RESCALE after the conv node: INT32 -> quantized output dtype
-            // input_zp = 0 (accumulator is zero-centered)
-            let rescale_node = helpers.call_method1(
-                "insert_rescale_node",
-                (
-                    gm.gm_ref(),
-                    node, // ref_node
-                    node, // input_node
-                    output_dtype,
-                    rescale_scales,
-                    0_i64,     // input_zp (accumulator is zero-centered)
-                    output_zp, // output_zp from output qparams
-                    true,      // after
-                ),
+            let rescale_node = rescale_ops.insert(
+                node,
+                node,
+                output_dtype,
+                rescale_scales,
+                0_i64,
+                output_zp,
+                true,
             )?;
 
-            // Copy the conv node's meta onto the rescale node
-            fx_utils::copy_meta(py, node, &rescale_node)?;
-            helpers.call_method1(
-                "restamp_rescale_output_meta",
-                (&rescale_node, node, output_dtype),
-            )?;
-
-            // Rewire all users of the conv to use the rescale instead
-            for user in &users {
-                if !user.is(&rescale_node) {
-                    user.call_method1("replace_input_with", (node, &rescale_node))?;
-                }
-            }
+            rescale_ops.restamp_output_meta(py, node, &rescale_node, node, output_dtype)?;
+            rescale_ops.rewire_users(node, &rescale_node, &users)?;
 
             modified = true;
         }

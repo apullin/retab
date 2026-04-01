@@ -1,14 +1,75 @@
 use super::*;
 
-pub(super) fn register(
-    table: &mut std::collections::HashMap<
-        crate::graph::ir::OpTarget,
-        crate::serialize::visitors::emitter::EmitFn,
-    >,
-) {
+pub(super) fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
-    table.insert(OpTarget::TosaReduceSum, emit_reduce_sum);
-    table.insert(OpTarget::Sum, emit_aten_sum);
+    table.extend([
+        (OpTarget::TosaReduceSum, emit_reduce_sum as EmitFn),
+        (OpTarget::Sum, emit_aten_sum),
+    ]);
+}
+
+fn single_qparam(node: &Node) -> Option<crate::graph::ir::QuantArgs> {
+    node.meta
+        .output_qparams
+        .first()
+        .or_else(|| node.meta.input_qparams.first())
+        .map(|(_, qp)| *qp)
+}
+
+fn is_float_dtype(dtype: DType) -> bool {
+    matches!(dtype, DType::Fp32 | DType::Fp16 | DType::Bf16)
+}
+
+fn reduction_pre_reshape_perms(input_node: &Node, node: &Node, raw_axes: &[i32]) -> Option<Vec<i32>> {
+    let input_rank = input_node.meta.val.shape_len as usize;
+    if input_rank == 0 || raw_axes.is_empty() {
+        return None;
+    }
+
+    let input_order: Vec<usize> = input_node
+        .meta
+        .tosa_dim_order
+        .clone()
+        .map(|order| order.into_iter().map(|axis| axis as usize).collect())
+        .unwrap_or_else(|| (0..input_rank).collect());
+    let output_order: Vec<usize> = node
+        .meta
+        .tosa_dim_order
+        .clone()
+        .map(|order| order.into_iter().map(|axis| axis as usize).collect())
+        .unwrap_or_else(|| (0..input_rank.saturating_sub(raw_axes.len())).collect());
+
+    let reduced_axes: Vec<usize> = raw_axes
+        .iter()
+        .map(|&axis| if axis < 0 { axis + input_rank as i32 } else { axis })
+        .filter(|&axis| axis >= 0 && axis < input_rank as i32)
+        .map(|axis| axis as usize)
+        .collect();
+    if reduced_axes.is_empty() {
+        return None;
+    }
+
+    let remaining_axes: Vec<usize> = (0..input_rank)
+        .filter(|axis| !reduced_axes.contains(axis))
+        .collect();
+    let mut desired_axes: Vec<usize> = output_order
+        .iter()
+        .filter_map(|&output_axis| remaining_axes.get(output_axis).copied())
+        .collect();
+    desired_axes.extend(reduced_axes.iter().copied());
+
+    let perms: Vec<i32> = desired_axes
+        .iter()
+        .filter_map(|axis| input_order.iter().position(|&candidate| candidate == *axis))
+        .map(|pos| pos as i32)
+        .collect();
+    if perms.len() != input_rank
+        || !perms.iter().enumerate().any(|(idx, &perm)| perm != idx as i32)
+    {
+        return None;
+    }
+
+    Some(perms)
 }
 
 pub(in crate::serialize::visitors) fn emit_reduce_sum(ctx: &EmitContext) -> EmitResult {
@@ -84,12 +145,87 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitRe
     let input_dtype = input_node
         .map(|n| passthrough_input_dtype(graph, n))
         .unwrap_or_else(|| node_output_dtype(node));
-    let base_dtype = match input_dtype {
+    let semantic_output_dtype = node_output_dtype(node);
+    let mut base_dtype = match input_dtype {
         DType::Int8 | DType::Int16 => DType::Int32,
-        _ => node_output_dtype(node),
+        _ => semantic_output_dtype,
     };
-    let mut current_input = spec.input_name;
-    let mut current_shape = spec.input_shape;
+    let mut current_input = spec.input_name.clone();
+    let mut current_shape = spec.input_shape.clone();
+
+    if matches!(input_dtype, DType::Int8 | DType::Int16) && is_float_dtype(semantic_output_dtype) {
+        let ir_output_dtype = node.meta.val.dtype;
+        let input_qparam = input_node.and_then(single_qparam);
+        let scale = input_qparam.map(|qp| qp.scale).unwrap_or(1.0);
+        let zero_point = input_qparam.map(|qp| qp.zero_point as f64).unwrap_or(0.0);
+
+        let cast_name = format!("{}_sum_input_cast", node.name);
+        result.tensors.push(TosaTensor::new(
+            cast_name.clone(),
+            current_shape.clone(),
+            semantic_output_dtype,
+        ));
+        result.operators.push(TosaOperator::new(
+            Op::Cast,
+            Attribute::Cast(CastAttribute),
+            vec![current_input.clone()],
+            vec![cast_name.clone()],
+        ));
+        current_input = cast_name;
+
+        if zero_point != 0.0 {
+            let zp_name = format!("{}_sum_input_zp", node.name);
+            if let Some(zp_tensor) = make_filled_const_tensor(
+                zp_name.clone(),
+                current_shape.clone(),
+                ir_output_dtype,
+                zero_point,
+            ) {
+                push_inline_const(&mut result, zp_tensor);
+                let sub_name = format!("{}_sum_input_sub", node.name);
+                result.tensors.push(TosaTensor::new(
+                    sub_name.clone(),
+                    current_shape.clone(),
+                    semantic_output_dtype,
+                ));
+                result.operators.push(TosaOperator::new(
+                    Op::Sub,
+                    Attribute::Sub(SubAttribute),
+                    vec![current_input, zp_name],
+                    vec![sub_name.clone()],
+                ));
+                current_input = sub_name;
+            }
+        }
+
+        if (scale - 1.0).abs() > f64::EPSILON {
+            let scale_name = format!("{}_sum_input_scale", node.name);
+            if let Some(scale_tensor) = make_filled_const_tensor(
+                scale_name.clone(),
+                current_shape.clone(),
+                ir_output_dtype,
+                scale,
+            ) {
+                push_inline_const(&mut result, scale_tensor);
+                let shift_name = push_shift_const(&mut result, &format!("{}_sum_input", node.name));
+                let mul_name = format!("{}_sum_input_float", node.name);
+                result.tensors.push(TosaTensor::new(
+                    mul_name.clone(),
+                    current_shape.clone(),
+                    semantic_output_dtype,
+                ));
+                result.operators.push(TosaOperator::new(
+                    Op::Mul,
+                    Attribute::Mul(MulAttribute { shift: 0 }),
+                    vec![current_input, scale_name, shift_name],
+                    vec![mul_name.clone()],
+                ));
+                current_input = mul_name;
+            }
+        }
+
+        base_dtype = semantic_output_dtype;
+    }
 
     for (idx, axis) in spec.axes.iter().enumerate() {
         let mut out_shape = current_shape.clone();
@@ -124,10 +260,36 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitRe
     }
 
     if !spec.keepdim {
+        let mut reshape_input = current_input;
+        if let Some(input_node) = input_node {
+            let raw_axes: Vec<i32> = spec.axes.iter().map(|axis| axis.raw_dim).collect();
+            if let Some(perms) = reduction_pre_reshape_perms(input_node, node, &raw_axes) {
+                let transpose_name = format!("{}_layout", node.name);
+                let transpose_shape: Vec<i32> = perms
+                    .iter()
+                    .filter_map(|&axis| current_shape.get(axis as usize).copied())
+                    .collect();
+                if transpose_shape.len() == current_shape.len() {
+                    result.tensors.push(TosaTensor::new(
+                        transpose_name.clone(),
+                        transpose_shape,
+                        base_dtype,
+                    ));
+                    result.operators.push(TosaOperator::new(
+                        Op::Transpose,
+                        Attribute::Transpose(TransposeAttribute { perms }),
+                        vec![reshape_input],
+                        vec![transpose_name.clone()],
+                    ));
+                    reshape_input = transpose_name;
+                }
+            }
+        }
+
         let final_shape = actual_tensor_shape(graph, store, node);
         push_reshape_with_shape(
             &mut result,
-            current_input,
+            reshape_input,
             node.name.clone(),
             format!("{}_shape", node.name),
             final_shape,

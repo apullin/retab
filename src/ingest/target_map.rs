@@ -346,6 +346,15 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     if target_str.contains("aten.var.") {
         return OpTarget::Var;
     }
+    if target_str.contains("aten.fill_") {
+        return OpTarget::FullLike;
+    }
+    if target_str.contains("aten.copy_") {
+        return OpTarget::Copy;
+    }
+    if target_str.contains("aten.eye") {
+        return OpTarget::Eye;
+    }
     if target_str.contains("aten.full_like") {
         return OpTarget::FullLike;
     }
@@ -356,7 +365,7 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
         return OpTarget::FloorDivide;
     }
     if target_str.contains("aten.gather") {
-        return OpTarget::Other("aten.gather".into());
+        return OpTarget::TosaGather;
     }
     if target_str.contains("aten.arange") {
         return OpTarget::Arange;

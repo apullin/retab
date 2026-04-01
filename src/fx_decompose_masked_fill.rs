@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
@@ -39,78 +39,16 @@ fn decompose_masked_fill<'py>(
         eprintln!("[DecomposeMaskedFill] decomposing masked_fill: {}", name);
     }
 
-    let full_op = resolve_aten_op(py, "full.default")?;
+    let full_like_op = resolve_aten_op(py, "full_like.default")?;
     let where_op = resolve_aten_op(py, "where.self")?;
-
-    // Get the input shape for the full constant
-    let input_shape = FxGraphModule::node_shape(x).unwrap_or_else(|_| vec![1]);
-    let shape_tuple = PyTuple::new_bound(py, input_shape.iter().copied());
-
-    // Check whether the graph is quantized: look for output_qparams on the node.
-    let is_quantized = fx_utils::is_quantized(node);
-
-    // Determine the fill value and dtype for the full node.
-    let qparams_0 = if is_quantized {
-        fx_utils::get_output_qparam(node)
-    } else {
-        None
-    };
-
-    let (fill_value, full_kwargs): (Bound<'py, PyAny>, Option<Bound<'py, PyDict>>) =
-        if let Some(qparams) = &qparams_0 {
-            let scale: f64 = qparams.getattr("scale")?.extract().unwrap_or(1.0);
-            let zp: i64 = qparams
-                .getattr("zp")
-                .or_else(|_| qparams.getattr("zero_point"))
-                .and_then(|v| v.extract())
-                .unwrap_or(0);
-            let qmin: i64 = qparams
-                .getattr("qmin")
-                .and_then(|v| v.extract())
-                .unwrap_or(-128);
-            let qmax: i64 = qparams
-                .getattr("qmax")
-                .and_then(|v| v.extract())
-                .unwrap_or(127);
-            let output_dtype = qparams.getattr("dtype")?;
-
-            let float_val: f64 = value.extract().unwrap_or(0.0);
-            let quantized_val = ((float_val / scale) + zp as f64).round() as i64;
-            let clamped = quantized_val.max(qmin).min(qmax);
-
-            if debug {
-                eprintln!(
-                    "[DecomposeMaskedFill] quantizing fill value: {} -> {} (scale={}, zp={})",
-                    float_val, clamped, scale, zp
-                );
-            }
-
-            let builtins = py.import_bound("builtins")?;
-            let fill_py = builtins.call_method1("int", (clamped,))?;
-            let kwargs = PyDict::new_bound(py);
-            kwargs.set_item("dtype", output_dtype)?;
-            (fill_py, Some(kwargs))
-        } else {
-            // FP path: use the scalar value directly.
-            (value.clone(), None)
-        };
 
     // Create full(shape, fill_value, dtype=...)
     let inserting = graph.call_method1("inserting_before", (node,))?;
     inserting.call_method0("__enter__")?;
 
-    let full_args = PyTuple::new_bound(py, &[shape_tuple.as_ref(), fill_value.as_ref()]);
-    let full_kwargs_dict = full_kwargs.unwrap_or_else(|| PyDict::new_bound(py));
-    let fill_node =
-        graph.call_method1("call_function", (&full_op, &full_args, &full_kwargs_dict))?;
-
-    // Copy meta from original node for the full node
-    fx_utils::copy_meta(py, node, &fill_node)?;
-    // Clear qparams for the intermediate full node
-    let full_meta = fill_node.getattr("meta")?;
-    let _ = full_meta.call_method1("__setitem__", ("input_qparams", PyDict::new_bound(py)));
-    let _ = full_meta.call_method1("__setitem__", ("output_qparams", PyDict::new_bound(py)));
-    fx_utils::refresh_fake_tensor(py, &fill_node)?;
+    let full_like_args = PyTuple::new_bound(py, &[x.as_ref(), value.as_ref()]);
+    let fill_node = graph.call_method1("call_function", (&full_like_op, &full_like_args))?;
+    fx_utils::copy_meta_and_refresh(py, node, &fill_node)?;
 
     // Create where(mask, fill_value, x) -- True positions get fill_value
     let where_args = PyTuple::new_bound(py, &[mask.as_ref(), fill_node.as_ref(), x.as_ref()]);

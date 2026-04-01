@@ -123,6 +123,37 @@ fn is_input_placeholder(node: &Bound<'_, PyAny>) -> PyResult<bool> {
     Ok(true)
 }
 
+fn is_control_flow_submodule(gm: &FxGraphModule) -> PyResult<bool> {
+    for node in gm.nodes()? {
+        match FxGraphModule::node_op(&node)?.as_str() {
+            "placeholder" => {
+                let meta = node.getattr("meta")?;
+                let is_control_flow_placeholder: bool = meta
+                    .call_method1("get", ("arm_control_flow_placeholder", false))?
+                    .extract()
+                    .unwrap_or(false);
+                if is_control_flow_placeholder {
+                    return Ok(true);
+                }
+            }
+            "output" => {
+                let meta = node.getattr("meta")?;
+                let has_control_flow_outputs = !meta
+                    .call_method1("get", ("arm_control_flow_output_fake_tensors",))?
+                    .is_none();
+                let has_control_flow_dequant_qparams = !meta
+                    .call_method1("get", ("arm_control_flow_output_dequant_qparams",))?
+                    .is_none();
+                if has_control_flow_outputs || has_control_flow_dequant_qparams {
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
+}
+
 /// Check whether a rank-4 tensor is consumed as the weight input to a
 /// TRANSPOSE_CONV2D op. Python annotates these with a dedicated HWIO-like
 /// order instead of generic channels-last.
@@ -186,12 +217,21 @@ impl FxPass for FxToTosaMemoryFormatPass {
 
     fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
         let py = gm.py();
+        let is_control_flow_gm = is_control_flow_submodule(gm)?;
         let mut modified = false;
         let all_nodes = gm.nodes()?;
 
         // Phase 1: Annotate tosa_spatial_rank on every node that has a val in meta.
         for node in &all_nodes {
             let meta = node.getattr("meta")?;
+            let is_layout_neutral: bool = meta
+                .call_method1("get", ("arm_layout_neutral", false))?
+                .extract()
+                .unwrap_or(false);
+            if is_layout_neutral {
+                meta.set_item("tosa_spatial_rank", 0)?;
+                continue;
+            }
 
             // Skip nodes without a "val" tensor in meta
             let val = match meta.call_method1("get", ("val",)) {
@@ -289,8 +329,12 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 .unwrap_or(0);
 
             let op = FxGraphModule::node_op(node)?;
+            let is_layout_neutral: bool = meta
+                .call_method1("get", ("arm_layout_neutral", false))?
+                .extract()
+                .unwrap_or(false);
 
-            if op == "output" {
+            if op == "output" && !is_control_flow_gm {
                 let existing = meta.call_method1("get", ("original_dim_orders",))?;
                 if existing.is_none() {
                     let args = FxGraphModule::node_args(node)?;
@@ -311,11 +355,17 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 }
             }
 
-            let dim_order = if is_input_placeholder(node)? {
+            let dim_order = if is_layout_neutral {
+                (0..rank).collect::<Vec<_>>()
+            } else if is_input_placeholder(node)? {
                 extract_output_dim_order(node)?.unwrap_or_else(|| (0..rank).collect::<Vec<_>>())
             } else if op == "output" {
-                // True external outputs keep their original logical format.
-                (0..rank).collect::<Vec<_>>()
+                if is_control_flow_gm && rank >= 4 {
+                    channels_last_order(rank, spatial_rank)
+                } else {
+                    // True external outputs keep their original logical format.
+                    (0..rank).collect::<Vec<_>>()
+                }
             } else if rank == 4 && is_transpose_conv2d_weight(node)? {
                 vec![1, 2, 3, 0]
             } else if rank >= 4 {
@@ -354,8 +404,18 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 continue;
             }
             let target = FxGraphModule::node_target_str(node)?;
-            // Match both aten.view_copy.default and aten.view.default
-            if !(target.contains("view_copy") || target.contains("aten.view.")) {
+            // Match view/reshape-like ops that reinterpret linear storage.
+            // `reshape` needs the same boundary handling as `view_copy`;
+            // otherwise rank changes can silently reinterpret tensors in the
+            // wrong layout domain before the serializer ever sees them.
+            //
+            // PyTorch matmul decomposition uses `_unsafe_view` for the
+            // rank-restoring reshape after mm/bmm.
+            if !(target.contains("view_copy")
+                || target.contains("reshape")
+                || target.contains("aten.view.")
+                || target.contains("aten._unsafe_view"))
+            {
                 continue;
             }
 
@@ -367,6 +427,10 @@ impl FxPass for FxToTosaMemoryFormatPass {
 
             // Get input rank
             let input_meta = input_node.getattr("meta")?;
+            let input_layout_neutral: bool = input_meta
+                .call_method1("get", ("arm_layout_neutral", false))?
+                .extract()
+                .unwrap_or(false);
             let input_val = match input_meta.call_method1("get", ("val",)) {
                 Ok(v) if !v.is_none() => v,
                 _ => continue,
@@ -383,6 +447,13 @@ impl FxPass for FxToTosaMemoryFormatPass {
 
             // Get output rank
             let node_meta = node.getattr("meta")?;
+            let node_layout_neutral: bool = node_meta
+                .call_method1("get", ("arm_layout_neutral", false))?
+                .extract()
+                .unwrap_or(false);
+            if input_layout_neutral || node_layout_neutral {
+                continue;
+            }
             let output_val = match node_meta.call_method1("get", ("val",)) {
                 Ok(v) if !v.is_none() => v,
                 _ => continue,
@@ -478,6 +549,13 @@ impl FxPass for FxToTosaMemoryFormatPass {
             }
 
             let meta = node.getattr("meta")?;
+            let is_layout_neutral: bool = meta
+                .call_method1("get", ("arm_layout_neutral", false))?
+                .extract()
+                .unwrap_or(false);
+            if is_layout_neutral {
+                continue;
+            }
             let val = meta.call_method1("get", ("val",))?;
             let shape = match val.getattr("shape") {
                 Ok(s) => s,
@@ -529,76 +607,93 @@ impl FxPass for FxToTosaMemoryFormatPass {
         //
         // FX output node args pattern: args=((result_node1, result_node2, ...),)
         // So args[0] is a Python tuple of the actual output nodes.
-        let all_nodes = gm.nodes()?;
-        for node in &all_nodes {
-            let op = FxGraphModule::node_op(node)?;
-            if op != "output" {
-                continue;
-            }
-
-            let args = FxGraphModule::node_args(node)?;
-            let output_nodes = collect_output_nodes(&args);
-            let output_meta = node.getattr("meta")?;
-            let original_dim_orders = output_meta.call_method1("get", ("original_dim_orders",))?;
-
-            for (index, output_arg) in output_nodes.iter().enumerate() {
-                let arg_meta = output_arg.getattr("meta")?;
-                let val = match arg_meta.call_method1("get", ("val",)) {
-                    Ok(v) if !v.is_none() => v,
-                    _ => continue,
-                };
-                let shape = match val.getattr("shape") {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                let rank: usize = py
-                    .import_bound("builtins")?
-                    .call_method1("len", (&shape,))?
-                    .extract()
-                    .unwrap_or(0);
-
-                if rank < 4 {
+        if !is_control_flow_gm {
+            let all_nodes = gm.nodes()?;
+            for node in &all_nodes {
+                let op = FxGraphModule::node_op(node)?;
+                if op != "output" {
                     continue;
                 }
 
-                let spatial_rank: usize = arg_meta
-                    .call_method1("get", ("tosa_spatial_rank",))?
-                    .extract()
-                    .unwrap_or(2);
+                let args = FxGraphModule::node_args(node)?;
+                let output_nodes = collect_output_nodes(&args);
+                let output_meta = node.getattr("meta")?;
+                let original_dim_orders =
+                    output_meta.call_method1("get", ("original_dim_orders",))?;
 
-                let output_dim_order: Option<Vec<usize>> = if original_dim_orders.is_none() {
-                    None
-                } else {
-                    original_dim_orders
-                        .get_item(index)
-                        .ok()
-                        .and_then(|order| order.extract::<Vec<usize>>().ok())
-                };
-                let is_channels_first_output = output_dim_order
-                    .as_ref()
-                    .map(|order| *order == (0..rank).collect::<Vec<_>>())
-                    .unwrap_or(true);
-                if !is_channels_first_output {
-                    continue;
+                for (index, output_arg) in output_nodes.iter().enumerate() {
+                    let arg_meta = output_arg.getattr("meta")?;
+                    let is_layout_neutral: bool = arg_meta
+                        .call_method1("get", ("arm_layout_neutral", false))?
+                        .extract()
+                        .unwrap_or(false);
+                    if is_layout_neutral {
+                        continue;
+                    }
+                    let is_control_flow_parent_output_user: bool = arg_meta
+                        .call_method1("get", ("arm_control_flow_parent_output_user", false))?
+                        .extract()
+                        .unwrap_or(false);
+                    if is_control_flow_parent_output_user {
+                        continue;
+                    }
+                    let val = match arg_meta.call_method1("get", ("val",)) {
+                        Ok(v) if !v.is_none() => v,
+                        _ => continue,
+                    };
+                    let shape = match val.getattr("shape") {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    let rank: usize = py
+                        .import_bound("builtins")?
+                        .call_method1("len", (&shape,))?
+                        .extract()
+                        .unwrap_or(0);
+
+                    if rank < 4 {
+                        continue;
+                    }
+
+                    let spatial_rank: usize = arg_meta
+                        .call_method1("get", ("tosa_spatial_rank",))?
+                        .extract()
+                        .unwrap_or(2);
+
+                    let output_dim_order: Option<Vec<usize>> = if original_dim_orders.is_none() {
+                        None
+                    } else {
+                        original_dim_orders
+                            .get_item(index)
+                            .ok()
+                            .and_then(|order| order.extract::<Vec<usize>>().ok())
+                    };
+                    let is_channels_first_output = output_dim_order
+                        .as_ref()
+                        .map(|order| *order == (0..rank).collect::<Vec<_>>())
+                        .unwrap_or(true);
+                    if !is_channels_first_output {
+                        continue;
+                    }
+
+                    // Inverse of channels_last: converts NHWC -> NCHW
+                    let perm = channels_last_inverse_order(rank, spatial_rank);
+                    let perm_py: Vec<i64> = perm.iter().map(|&p| p as i64).collect();
+
+                    if debug {
+                        let name = FxGraphModule::node_name(output_arg)?;
+                        eprintln!(
+                            "[MemoryFormat] inserting NHWC->NCHW transpose before output for '{}' (rank={}, perm={:?})",
+                            name, rank, perm_py
+                        );
+                    }
+
+                    helpers.call_method1(
+                        "insert_transpose_before",
+                        (gm.gm_ref(), node, output_arg, perm_py.clone()),
+                    )?;
+                    modified = true;
                 }
-
-                // Inverse of channels_last: converts NHWC -> NCHW
-                let perm = channels_last_inverse_order(rank, spatial_rank);
-                let perm_py: Vec<i64> = perm.iter().map(|&p| p as i64).collect();
-
-                if debug {
-                    let name = FxGraphModule::node_name(output_arg)?;
-                    eprintln!(
-                        "[MemoryFormat] inserting NHWC->NCHW transpose before output for '{}' (rank={}, perm={:?})",
-                        name, rank, perm_py
-                    );
-                }
-
-                helpers.call_method1(
-                    "insert_transpose_before",
-                    (gm.gm_ref(), node, output_arg, perm_py.clone()),
-                )?;
-                modified = true;
             }
         }
 
@@ -636,10 +731,25 @@ impl FxPass for FxToTosaMemoryFormatPass {
             if !FxGraphModule::is_node(input_node) {
                 continue;
             }
+            let node_meta = node.getattr("meta")?;
+            let node_layout_neutral: bool = node_meta
+                .call_method1("get", ("arm_layout_neutral", false))?
+                .extract()
+                .unwrap_or(false);
+            if node_layout_neutral {
+                continue;
+            }
 
             // Get the input rank from FakeTensor metadata
             let input_rank: usize = {
                 let input_meta = input_node.getattr("meta")?;
+                let input_layout_neutral: bool = input_meta
+                    .call_method1("get", ("arm_layout_neutral", false))?
+                    .extract()
+                    .unwrap_or(false);
+                if input_layout_neutral {
+                    continue;
+                }
                 let input_val = match input_meta.call_method1("get", ("val",)) {
                     Ok(v) if !v.is_none() => v,
                     _ => continue,

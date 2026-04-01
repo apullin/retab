@@ -1,24 +1,19 @@
 use super::*;
 
-pub(super) fn register(
-    table: &mut std::collections::HashMap<
-        crate::graph::ir::OpTarget,
-        crate::serialize::visitors::emitter::EmitFn,
-    >,
-) {
+pub(super) fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
-    // Bitwise ops
-    table.insert(OpTarget::BitwiseNot, emit_bitwise_not);
-    table.insert(OpTarget::BitwiseAnd, emit_bitwise_and);
-    table.insert(OpTarget::BitwiseOr, emit_bitwise_or);
-    table.insert(OpTarget::BitwiseXor, emit_bitwise_xor);
-    table.insert(OpTarget::BitwiseLeftShift, emit_logical_left_shift);
-    table.insert(OpTarget::BitwiseRightShift, emit_arithmetic_right_shift);
-    // Logical ops
-    table.insert(OpTarget::LogicalNot, emit_logical_not);
-    table.insert(OpTarget::LogicalAnd, emit_logical_and);
-    table.insert(OpTarget::LogicalOr, emit_logical_or);
-    table.insert(OpTarget::LogicalXor, emit_logical_xor);
+    table.extend([
+        (OpTarget::BitwiseNot, emit_bitwise_not as EmitFn),
+        (OpTarget::BitwiseAnd, emit_bitwise_and),
+        (OpTarget::BitwiseOr, emit_bitwise_or),
+        (OpTarget::BitwiseXor, emit_bitwise_xor),
+        (OpTarget::BitwiseLeftShift, emit_logical_left_shift),
+        (OpTarget::BitwiseRightShift, emit_arithmetic_right_shift),
+        (OpTarget::LogicalNot, emit_logical_not),
+        (OpTarget::LogicalAnd, emit_logical_and),
+        (OpTarget::LogicalOr, emit_logical_or),
+        (OpTarget::LogicalXor, emit_logical_xor),
+    ]);
 }
 
 fn is_bool_output(node: &Node) -> bool {
@@ -29,6 +24,7 @@ pub(in crate::serialize::visitors) fn emit_bitwise_not(ctx: &EmitContext) -> Emi
     if is_bool_output(ctx.node) {
         return emit_direct_unary(
             ctx.graph,
+            ctx.store,
             ctx.node,
             Op::LogicalNot,
             Attribute::LogicalNot(LogicalNotAttribute),
@@ -36,19 +32,18 @@ pub(in crate::serialize::visitors) fn emit_bitwise_not(ctx: &EmitContext) -> Emi
     }
     emit_direct_unary(
         ctx.graph,
+        ctx.store,
         ctx.node,
         Op::BitwiseNot,
         Attribute::BitwiseNot(BitwiseNotAttribute),
     )
 }
 
-pub(in crate::serialize::visitors) fn emit_logical_not(ctx: &EmitContext) -> EmitResult {
-    emit_direct_unary(
-        ctx.graph,
-        ctx.node,
+direct_unary_emitters! {
+    pub(in crate::serialize::visitors) fn emit_logical_not => (
         Op::LogicalNot,
-        Attribute::LogicalNot(LogicalNotAttribute),
-    )
+        Attribute::LogicalNot(LogicalNotAttribute)
+    );
 }
 
 pub(in crate::serialize::visitors) fn emit_bitwise_and(ctx: &EmitContext) -> EmitResult {
@@ -111,53 +106,29 @@ pub(in crate::serialize::visitors) fn emit_bitwise_xor(ctx: &EmitContext) -> Emi
     )
 }
 
-pub(in crate::serialize::visitors) fn emit_logical_left_shift(ctx: &EmitContext) -> EmitResult {
-    emit_direct_binary(
-        ctx.graph,
-        ctx.node,
-        ctx.store,
+direct_binary_emitters! {
+    pub(in crate::serialize::visitors) fn emit_logical_left_shift => (
         Op::LogicalLeftShift,
-        Attribute::LogicalLeftShift(LogicalLeftShiftAttribute),
-    )
-}
-
-pub(in crate::serialize::visitors) fn emit_arithmetic_right_shift(ctx: &EmitContext) -> EmitResult {
-    emit_direct_binary(
-        ctx.graph,
-        ctx.node,
-        ctx.store,
+        Attribute::LogicalLeftShift(LogicalLeftShiftAttribute)
+    );
+    pub(in crate::serialize::visitors) fn emit_arithmetic_right_shift => (
         Op::ArithmeticRightShift,
-        Attribute::ArithmeticRightShift(ArithmeticRightShiftAttribute),
-    )
-}
-
-pub(in crate::serialize::visitors) fn emit_logical_and(ctx: &EmitContext) -> EmitResult {
-    emit_direct_binary(
-        ctx.graph,
-        ctx.node,
-        ctx.store,
+        Attribute::ArithmeticRightShift(ArithmeticRightShiftAttribute)
+    );
+    pub(in crate::serialize::visitors) fn emit_logical_and => (
         Op::LogicalAnd,
-        Attribute::LogicalAnd(LogicalAndAttribute),
-    )
-}
-
-pub(in crate::serialize::visitors) fn emit_logical_or(ctx: &EmitContext) -> EmitResult {
-    emit_direct_binary(
-        ctx.graph,
-        ctx.node,
-        ctx.store,
+        Attribute::LogicalAnd(LogicalAndAttribute)
+    );
+    pub(in crate::serialize::visitors) fn emit_logical_or => (
         Op::LogicalOr,
-        Attribute::LogicalOr(LogicalOrAttribute),
-    )
+        Attribute::LogicalOr(LogicalOrAttribute)
+    );
 }
 
-pub(in crate::serialize::visitors) fn emit_logical_xor(ctx: &EmitContext) -> EmitResult {
-    emit_bool_binary(
-        ctx.graph,
-        ctx.node,
-        ctx.store,
+bool_binary_emitters! {
+    pub(in crate::serialize::visitors) fn emit_logical_xor => (
         Op::LogicalXor,
         Attribute::LogicalXor(LogicalXorAttribute),
-        false,
-    )
+        false
+    );
 }

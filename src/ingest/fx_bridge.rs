@@ -35,13 +35,6 @@ fn ingest_fx_graph_with_prefix(
     // name → NodeId mapping for resolving node references in args
     let mut name_map: HashMap<String, NodeId> = HashMap::new();
 
-    let qualify_name = |name: &str| -> String {
-        match name_prefix {
-            Some(prefix) => format!("{prefix}{name}"),
-            None => name.to_string(),
-        }
-    };
-
     // Build placeholder-name → state-dict-key mapping from graph_signature
     let mut placeholder_to_sd_key: HashMap<String, String> = HashMap::new();
     for attr_name in &[
@@ -55,7 +48,8 @@ fn ingest_fx_graph_with_prefix(
                     if let (Ok(placeholder_name), Ok(sd_key)) =
                         (k.extract::<String>(), v.extract::<String>())
                     {
-                        placeholder_to_sd_key.insert(qualify_name(&placeholder_name), sd_key);
+                        placeholder_to_sd_key
+                            .insert(qualify_name(name_prefix, &placeholder_name), sd_key);
                     }
                 }
             }
@@ -64,7 +58,7 @@ fn ingest_fx_graph_with_prefix(
                 for item in items.iter()? {
                     let item = item?;
                     if let Ok(tuple) = item.extract::<(String, String)>() {
-                        placeholder_to_sd_key.insert(qualify_name(&tuple.0), tuple.1);
+                        placeholder_to_sd_key.insert(qualify_name(name_prefix, &tuple.0), tuple.1);
                     }
                 }
             }
@@ -82,7 +76,7 @@ fn ingest_fx_graph_with_prefix(
 
         let op_str: String = py_node.getattr("op")?.extract()?;
         let original_name: String = py_node.getattr("name")?.extract()?;
-        let name = qualify_name(&original_name);
+        let name = qualify_name(name_prefix, &original_name);
 
         let is_get_attr = op_str == "get_attr";
         let op_type = match op_str.as_str() {
@@ -96,10 +90,15 @@ fn ingest_fx_graph_with_prefix(
         // After fold_qdq, scale/zero_point placeholders that fed DQ nodes
         // become dead (no consumers). Serializing them creates spurious
         // FP32 CONST tensors that confuse Vela and reduce NPU op count.
+        //
+        // Control-flow subgraphs are different: unused region placeholders
+        // still participate in the cond/body function signature and must be
+        // preserved so WHILE/COND region arity matches the carried inputs.
         if op_type == OpType::Placeholder {
             let users_obj = py_node.getattr("users")?;
             let user_count: usize = users_obj.len()?;
-            if user_count == 0 {
+            let preserve_region_placeholder = !is_get_attr && name_prefix.is_some();
+            if user_count == 0 && !preserve_region_placeholder {
                 continue;
             }
         }
@@ -118,30 +117,8 @@ fn ingest_fx_graph_with_prefix(
             }
             if store.get(&name).is_none() {
                 if let Ok(tensor) = graph_module.getattr(attr_name.as_str()) {
-                    if let Ok(shape_obj) = tensor.getattr("shape") {
-                        if let Ok(shape) = shape_obj.iter().and_then(|it| {
-                            it.map(|s| s.and_then(|v| v.extract::<i64>()))
-                                .collect::<PyResult<Vec<_>>>()
-                        }) {
-                            let mut dtype = tensor
-                                .getattr("dtype")
-                                .and_then(|d| d.str()?.extract::<String>())
-                                .map(|s| parse_torch_dtype(&s))
-                                .unwrap_or(DType::Float32);
-                            if let Ok(mut data) = tensor
-                                .call_method0("contiguous")
-                                .and_then(|c| c.call_method0("cpu"))
-                                .and_then(|c| c.call_method0("numpy"))
-                                .and_then(|n| n.call_method0("tobytes"))
-                                .and_then(|b| b.extract::<Vec<u8>>())
-                            {
-                                if dtype == DType::Int64 {
-                                    data = cast_i64_bytes_to_i32(&data);
-                                    dtype = DType::Int32;
-                                }
-                                store.insert(name.clone(), TensorData { data, shape, dtype });
-                            }
-                        }
+                    if let Ok(tensor_data) = extract_tensor_data(&tensor) {
+                        store.insert(name.clone(), tensor_data);
                     }
                 }
             }
@@ -183,18 +160,8 @@ fn ingest_fx_graph_with_prefix(
         // --- meta ---
         let mut meta = extract_meta(&py_node, op_type)?;
 
-        // --- qparams from meta["input_qparams"] / meta["output_qparams"] ---
-        // The FX-direct passes store qparams as Python dicts in node.meta.
-        // Extract them into the Rust NodeMeta so downstream passes can use them.
         let meta_dict = py_node.getattr("meta")?;
-        extract_qparams_from_meta(&meta_dict, &mut meta)?;
-
-        // --- tosa_dim_order from meta["tosa_dim_order"] ---
-        // The FX-direct memory format pass stores the dimension order
-        // (e.g. [0,2,3,1] for NHWC) in node.meta. Extract it so the
-        // serializer knows which tensors are already in NHWC format.
-        extract_tosa_dim_order(&meta_dict, &mut meta)?;
-        extract_tosa_special_dtype(&meta_dict, &mut meta)?;
+        enrich_meta_from_meta_dict(&meta_dict, &mut meta)?;
 
         // --- create node ---
         let node_id = graph.create_node(op_type, op_target, args, kwargs, meta, name.clone());
@@ -217,31 +184,7 @@ fn ingest_fx_graph_with_prefix(
     // -----------------------------------------------------------------
     for (key, value) in state_dict.iter() {
         let tensor_name: String = key.extract()?;
-
-        // Get shape
-        let shape_tuple = value.getattr("shape")?;
-        let shape: Vec<i64> = shape_tuple
-            .iter()?
-            .map(|s| s.and_then(|v| v.extract::<i64>()))
-            .collect::<PyResult<Vec<_>>>()?;
-
-        // Get dtype
-        let mut dtype = parse_torch_dtype(&value.getattr("dtype")?.str()?.extract::<String>()?);
-
-        // Get raw bytes: tensor.contiguous().cpu().numpy().tobytes()
-        let contiguous = value.call_method0("contiguous")?;
-        let cpu = contiguous.call_method0("cpu")?;
-        let numpy = cpu.call_method0("numpy")?;
-        let bytes_obj = numpy.call_method0("tobytes")?;
-        let mut data: Vec<u8> = bytes_obj.extract()?;
-
-        // Cast Int64 -> Int32: TOSA/U55 does not support Int64
-        if dtype == DType::Int64 {
-            data = cast_i64_bytes_to_i32(&data);
-            dtype = DType::Int32;
-        }
-
-        store.insert(tensor_name, TensorData { data, shape, dtype });
+        store.insert(tensor_name, extract_tensor_data(&value)?);
     }
 
     // -----------------------------------------------------------------
@@ -270,31 +213,8 @@ fn ingest_fx_graph_with_prefix(
         // Try to get the tensor from graph_module as an attribute
         // The sd_key typically looks like "_frozen_param0"
         if let Ok(tensor) = graph_module.getattr(sd_key.as_str()) {
-            if let Ok(shape_obj) = tensor.getattr("shape") {
-                if let Ok(shape) = shape_obj.iter().and_then(|it| {
-                    it.map(|s| s.and_then(|v| v.extract::<i64>()))
-                        .collect::<PyResult<Vec<_>>>()
-                }) {
-                    let mut dtype = tensor
-                        .getattr("dtype")
-                        .and_then(|d| d.str()?.extract::<String>())
-                        .map(|s| parse_torch_dtype(&s))
-                        .unwrap_or(DType::Float32);
-                    if let Ok(mut data) = tensor
-                        .call_method0("contiguous")
-                        .and_then(|c| c.call_method0("cpu"))
-                        .and_then(|c| c.call_method0("numpy"))
-                        .and_then(|n| n.call_method0("tobytes"))
-                        .and_then(|b| b.extract::<Vec<u8>>())
-                    {
-                        // Cast Int64 -> Int32: TOSA/U55 does not support Int64
-                        if dtype == DType::Int64 {
-                            data = cast_i64_bytes_to_i32(&data);
-                            dtype = DType::Int32;
-                        }
-                        store.insert(placeholder_name.clone(), TensorData { data, shape, dtype });
-                    }
-                }
+            if let Ok(tensor_data) = extract_tensor_data(&tensor) {
+                store.insert(placeholder_name.clone(), tensor_data);
             }
         }
     }
@@ -601,16 +521,11 @@ fn materialize_external_placeholder(
         return Ok(node_id);
     }
 
-    let qualified_name = match name_prefix {
-        Some(prefix) => format!("{prefix}{original_name}"),
-        None => original_name.to_string(),
-    };
+    let qualified_name = qualify_name(name_prefix, original_name);
 
     let mut meta = extract_meta(value, OpType::Placeholder)?;
     let meta_dict = value.getattr("meta")?;
-    extract_qparams_from_meta(&meta_dict, &mut meta)?;
-    extract_tosa_dim_order(&meta_dict, &mut meta)?;
-    extract_tosa_special_dtype(&meta_dict, &mut meta)?;
+    enrich_meta_from_meta_dict(&meta_dict, &mut meta)?;
 
     let target_name = value
         .getattr("target")
@@ -630,6 +545,49 @@ fn materialize_external_placeholder(
     graph.inputs.push(node_id);
     name_map.insert(original_name.to_string(), node_id);
     Ok(node_id)
+}
+
+fn qualify_name(name_prefix: Option<&str>, name: &str) -> String {
+    match name_prefix {
+        Some(prefix) => format!("{prefix}{name}"),
+        None => name.to_string(),
+    }
+}
+
+fn extract_tensor_shape(value: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
+    value
+        .getattr("shape")?
+        .iter()?
+        .map(|dim| dim.and_then(|v| v.extract::<i64>()))
+        .collect()
+}
+
+fn extract_tensor_dtype(value: &Bound<'_, PyAny>) -> DType {
+    value
+        .getattr("dtype")
+        .and_then(|dtype| dtype.str()?.extract::<String>())
+        .map(|dtype| parse_torch_dtype(&dtype))
+        .unwrap_or(DType::Float32)
+}
+
+fn extract_tensor_bytes(value: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    value
+        .call_method0("contiguous")?
+        .call_method0("cpu")?
+        .call_method0("numpy")?
+        .call_method0("tobytes")?
+        .extract()
+}
+
+fn extract_tensor_data(value: &Bound<'_, PyAny>) -> PyResult<TensorData> {
+    let shape = extract_tensor_shape(value)?;
+    let mut dtype = extract_tensor_dtype(value);
+    let mut data = extract_tensor_bytes(value)?;
+    if dtype == DType::Int64 {
+        data = cast_i64_bytes_to_i32(&data);
+        dtype = DType::Int32;
+    }
+    Ok(TensorData { data, shape, dtype })
 }
 
 // ---------------------------------------------------------------------------
@@ -751,6 +709,17 @@ fn parse_qparams_dict(
     out
 }
 
+fn enrich_meta_from_meta_dict(
+    meta_dict: &Bound<'_, PyAny>,
+    node_meta: &mut NodeMeta,
+) -> PyResult<()> {
+    extract_qparams_from_meta(meta_dict, node_meta)?;
+    extract_tosa_dim_order(meta_dict, node_meta)?;
+    extract_tosa_special_dtype(meta_dict, node_meta)?;
+    extract_control_flow_meta(meta_dict, node_meta)?;
+    Ok(())
+}
+
 fn extract_qparams_from_meta(
     meta_dict: &Bound<'_, PyAny>,
     node_meta: &mut NodeMeta,
@@ -801,6 +770,17 @@ fn extract_tosa_special_dtype(
                 None
             };
         }
+    }
+    Ok(())
+}
+
+fn extract_control_flow_meta(
+    meta_dict: &Bound<'_, PyAny>,
+    node_meta: &mut NodeMeta,
+) -> PyResult<()> {
+    if let Ok(flag) = meta_dict.call_method1("get", ("arm_control_flow_parent_output_user", false))
+    {
+        node_meta.arm_control_flow_parent_output_user = flag.extract().unwrap_or(false);
     }
     Ok(())
 }
@@ -1161,6 +1141,23 @@ fn fixup_quantized_dtypes(graph: &mut Graph) {
                 continue;
             }
 
+            // TOSA TABLE output dtype is determined by its input dtype:
+            // INT8 -> INT8, INT16 -> INT32.
+            if target == OpTarget::TosaTable {
+                let table_dtype = graph.node(node_id).and_then(|n| match n.args.first() {
+                    Some(Arg::Node(input_id)) => {
+                        graph.node(*input_id).map(|input| input.meta.val.dtype)
+                    }
+                    _ => input_qp_dtype,
+                });
+                if let Some(dt) = table_dtype {
+                    if let Some(node) = graph.node_mut(node_id) {
+                        node.meta.val.dtype = if dt == DType::Int16 { DType::Int32 } else { dt };
+                    }
+                }
+                continue;
+            }
+
             // RESCALE output: use the output qparam dtype, or extract from args.
             // FX-direct rescale nodes have args: [input, out_dtype, scales, input_zp, output_zp]
             // Rust-IR rescale nodes have args: [input, multiplier, shift] with kwargs.
@@ -1178,6 +1175,16 @@ fn fixup_quantized_dtypes(graph: &mut Graph) {
                         node.meta.val.dtype = dt;
                     }
                 }
+                continue;
+            }
+
+            // Dequantize nodes consume quantized tensors but produce float
+            // tensors. Preserve the FX-provided float meta dtype here instead
+            // of falling through to the generic qparam-based dtype rewrite.
+            if matches!(
+                target,
+                OpTarget::DequantizePerTensor | OpTarget::DequantizePerChannel
+            ) {
                 continue;
             }
 

@@ -54,10 +54,12 @@ pub(super) fn maybe_materialize_binary_broadcast(
         .flat_map(|&d| (d as i64).to_le_bytes())
         .collect();
 
+    let broadcast_dtype = actual_tensor_dtype(graph, input_nodes[smaller_idx]);
+
     result.tensors.push(TosaTensor::new(
         broadcast_name.clone(),
         target_shape,
-        ir_dtype_to_tosa(input_nodes[smaller_idx].meta.val.dtype),
+        broadcast_dtype,
     ));
     result.shapes.push(TosaShape {
         name: shape_name.clone(),

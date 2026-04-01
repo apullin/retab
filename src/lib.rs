@@ -5,6 +5,7 @@ use crate::graph::Graph;
 use crate::store::TensorStore;
 
 mod fx_annotate_output_dim_order;
+mod fx_canonicalize_gather;
 mod fx_cast_int64;
 mod fx_conv1d_unsqueeze;
 mod fx_convert_clamp;
@@ -39,6 +40,7 @@ mod fx_fuse_equal_placeholders;
 mod fx_fuse_quant_activation;
 mod fx_graph;
 mod fx_insert_rescale;
+mod fx_collapse_round;
 mod fx_insert_table_ops;
 mod fx_memory_format;
 mod fx_pass;

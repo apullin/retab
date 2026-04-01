@@ -1,18 +1,15 @@
 use super::*;
 
-pub(super) fn register(
-    table: &mut std::collections::HashMap<
-        crate::graph::ir::OpTarget,
-        crate::serialize::visitors::emitter::EmitFn,
-    >,
-) {
+pub(super) fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
-    table.insert(OpTarget::Any, emit_aten_any);
-    table.insert(OpTarget::Amax, emit_aten_amax);
-    table.insert(OpTarget::Amin, emit_aten_amin);
-    table.insert(OpTarget::TosaReduceMax, emit_aten_amax);
-    table.insert(OpTarget::TosaReduceMin, emit_aten_amin);
-    table.insert(OpTarget::TosaReduceAny, emit_aten_any);
+    table.extend([
+        (OpTarget::Any, emit_aten_any as EmitFn),
+        (OpTarget::Amax, emit_aten_amax),
+        (OpTarget::Amin, emit_aten_amin),
+        (OpTarget::TosaReduceMax, emit_aten_amax),
+        (OpTarget::TosaReduceMin, emit_aten_amin),
+        (OpTarget::TosaReduceAny, emit_aten_any),
+    ]);
 }
 
 fn emit_reduce_extrema(

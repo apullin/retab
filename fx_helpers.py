@@ -177,6 +177,23 @@ def restamp_rescale_output_meta(
         )
 
 
+def restamp_node_output_meta(
+    node: Node,
+    source_node: Node,
+    out_dtype,
+) -> None:
+    """Retype an existing node's FakeTensor metadata without inserting an op."""
+    node.meta.pop("tosa_special_dtype", None)
+    source_val = source_node.meta.get("val")
+    if isinstance(source_val, (list, tuple)):
+        source_val = source_val[0] if source_val else None
+    if source_val is not None and hasattr(source_val, "new_empty"):
+        node.meta["val"] = _apply_fake_tensor_dim_order(
+            source_val.new_empty(source_val.shape, dtype=out_dtype),
+            source_node.meta.get("tosa_dim_order"),
+        )
+
+
 def insert_transpose_after(
     graph_module,
     node: Node,
@@ -199,7 +216,7 @@ def insert_transpose_after(
     # Update the val shape in meta for the permuted output
     if "val" in node.meta:
         old_val = node.meta["val"]
-        old_shape = list(old_val.shape)
+        old_shape = _node_actual_shape(node) or list(old_val.shape)
         new_shape = [old_shape[p] for p in perm]
         transpose.meta["val"] = old_val.new_empty(new_shape)
         transpose.meta["tosa_dim_order"] = tuple(perm)
@@ -213,6 +230,20 @@ def insert_transpose_after(
         user.replace_input_with(node, transpose)
 
     return transpose
+
+
+def _node_actual_shape(node: Node) -> list[int] | None:
+    if "val" not in node.meta:
+        return None
+    old_shape = list(node.meta["val"].shape)
+    dim_order = node.meta.get("tosa_dim_order")
+    if (
+        dim_order is not None
+        and len(dim_order) == len(old_shape)
+        and tuple(dim_order) != tuple(range(len(old_shape)))
+    ):
+        return [old_shape[p] for p in dim_order]
+    return old_shape
 
 
 def insert_transpose_before(
@@ -239,7 +270,7 @@ def insert_transpose_before(
     # Update the val shape in meta for the permuted output
     if "val" in input_node.meta:
         old_val = input_node.meta["val"]
-        old_shape = list(old_val.shape)
+        old_shape = _node_actual_shape(input_node) or list(old_val.shape)
         new_shape = [old_shape[p] for p in perm]
         transpose.meta["val"] = old_val.new_empty(new_shape)
         transpose.meta["tosa_dim_order"] = tuple(range(len(old_shape)))
@@ -285,6 +316,7 @@ import math
 _TABLE_TORCH_FNS = {
     "ceil": torch.ceil,
     "floor": torch.floor,
+    "round": torch.round,
     "rsqrt": torch.rsqrt,
     "reciprocal": torch.reciprocal,
     "exp": torch.exp,
@@ -454,6 +486,40 @@ def insert_table_op(
             }.get(val, default)
         return default
 
+    def _quant_args_from_operator(current: Node):
+        try:
+            from executorch.backends.arm._passes.quant_args import QuantArgs
+
+            return QuantArgs.from_operator(current.target, current.args)
+        except Exception:
+            return None
+
+    def _is_dequantize_node(current: Node) -> bool:
+        target_str = str(getattr(current, "target", ""))
+        return "dequantize_per_tensor" in target_str
+
+    def _is_quantize_node(current: Node) -> bool:
+        target_str = str(getattr(current, "target", ""))
+        return "quantize_per_tensor" in target_str
+
+    # Prefer the quantization contract encoded by the adjacent quantize /
+    # dequantize operators. Direct lowering can preserve stale node.meta
+    # qparams across rewrites, while the operator args remain authoritative.
+    input_node = node.args[0] if getattr(node, "args", None) else None
+    if hasattr(input_node, "op") and _is_dequantize_node(input_node):
+        derived_input_qp = _quant_args_from_operator(input_node)
+        if derived_input_qp is not None:
+            input_qp = derived_input_qp
+
+    original_users = list(node.users)
+    for user in original_users:
+        if not hasattr(user, "op") or user.op != "call_function" or not _is_quantize_node(user):
+            continue
+        derived_output_qp = _quant_args_from_operator(user)
+        if derived_output_qp is not None:
+            output_qp = derived_output_qp
+            break
+
     input_scale = float(_scalar(_get(input_qp, "scale", 1.0)))
     input_zp = int(_scalar(_get(input_qp, "zp", _get(input_qp, "zero_point", 0))))
     input_qmin = int(_get(input_qp, "qmin", -128))
@@ -466,6 +532,30 @@ def insert_table_op(
     output_qmax = int(_get(output_qp, "qmax", 127))
     output_dtype = _torch_dtype(_get(output_qp, "dtype", torch.int8))
 
+    if os.environ.get("TOSA_ENGINE_DEBUG"):
+        print(
+            "[insert_table_op:qparams]",
+            node.name,
+            "kind=",
+            kind,
+            "input=",
+            {
+                "scale": input_scale,
+                "zp": input_zp,
+                "qmin": input_qmin,
+                "qmax": input_qmax,
+                "dtype": str(input_dtype),
+            },
+            "output=",
+            {
+                "scale": output_scale,
+                "zp": output_zp,
+                "qmin": output_qmin,
+                "qmax": output_qmax,
+                "dtype": str(output_dtype),
+            },
+        )
+
     # Compute the lookup table
     table_tensor, rescale_lshift = _compute_table(
         kind,
@@ -474,6 +564,18 @@ def insert_table_op(
         output_dtype,
         scalar_arg,
     )
+
+    if os.environ.get("TOSA_ENGINE_DEBUG"):
+        print(
+            "[insert_table_op:table]",
+            node.name,
+            "min=",
+            int(table_tensor.min().item()),
+            "max=",
+            int(table_tensor.max().item()),
+            "head=",
+            [int(v) for v in table_tensor.flatten()[:8]],
+        )
 
     # Register the table tensor as a buffer on the graph module so it
     # persists and can be referenced by a get_attr node.
@@ -502,6 +604,65 @@ def insert_table_op(
             elif output_qparams:
                 return output_qparams
 
+            target_str = str(getattr(current, "target", ""))
+            if (
+                "tosa.RESCALE" in target_str
+                and len(getattr(current, "args", ())) >= 5
+                and isinstance(current.args[1], torch.dtype)
+                and hasattr(current.args[0], "op")
+            ):
+                source_qparam = _extract_node_qparam(current.args[0])
+                if source_qparam is not None:
+                    from executorch.backends.arm._passes.quant_args import QuantArgs
+
+                    multiplier_arg = current.args[2]
+                    output_dtype = current.args[1]
+                    output_zp = int(current.args[4])
+                    qinfo = torch.iinfo(output_dtype)
+                    if getattr(source_qparam, "per_channel", False):
+                        source_scales = [float(v) for v in source_qparam.get_scale_per_channel()]
+                        if isinstance(multiplier_arg, (list, tuple)):
+                            if len(multiplier_arg) == 1:
+                                multiplier_values = [float(multiplier_arg[0])] * len(source_scales)
+                            elif len(multiplier_arg) == len(source_scales):
+                                multiplier_values = [float(v) for v in multiplier_arg]
+                            else:
+                                multiplier_values = None
+                        else:
+                            multiplier_values = [float(multiplier_arg)] * len(source_scales)
+                        if multiplier_values and all(v not in (0.0,) for v in multiplier_values):
+                            return QuantArgs(
+                                scale=[
+                                    src / mult
+                                    for src, mult in zip(source_scales, multiplier_values)
+                                ],
+                                zp=[output_zp] * len(source_scales),
+                                qmin=int(qinfo.min),
+                                qmax=int(qinfo.max),
+                                dtype=output_dtype,
+                                axis=getattr(source_qparam, "axis", 0),
+                                per_channel=True,
+                            )
+                    else:
+                        source_scale = float(_scalar(_get(source_qparam, "scale", 1.0)))
+                        if isinstance(multiplier_arg, (list, tuple)):
+                            if len(multiplier_arg) != 1 or float(multiplier_arg[0]) == 0.0:
+                                multiplier_value = None
+                            else:
+                                multiplier_value = float(multiplier_arg[0])
+                        else:
+                            multiplier_value = float(multiplier_arg)
+                        if multiplier_value not in (None, 0.0):
+                            return QuantArgs(
+                                scale=source_scale / multiplier_value,
+                                zp=output_zp,
+                                qmin=int(qinfo.min),
+                                qmax=int(qinfo.max),
+                                dtype=output_dtype,
+                                axis=0,
+                                per_channel=False,
+                            )
+
             input_qparams = current.meta.get("input_qparams")
             if isinstance(input_qparams, dict):
                 if 0 in input_qparams:
@@ -523,14 +684,6 @@ def insert_table_op(
             current = current.args[0]
         return None
 
-    def _is_dequantize_node(current: Node) -> bool:
-        target_str = str(getattr(current, "target", ""))
-        return "dequantize_per_tensor" in target_str
-
-    def _is_quantize_node(current: Node) -> bool:
-        target_str = str(getattr(current, "target", ""))
-        return "quantize_per_tensor" in target_str
-
     def _same_qparam(lhs, rhs) -> bool:
         if lhs is None or rhs is None:
             return False
@@ -545,7 +698,6 @@ def insert_table_op(
             == _torch_dtype(_get(rhs, "dtype", torch.int8))
         )
 
-    original_users = list(node.users)
     input_node = node.args[0]
     producer_qp = _extract_node_qparam(input_node) if hasattr(input_node, "meta") else None
 
@@ -626,7 +778,10 @@ def insert_table_op(
             table_op_node.meta["tosa_dim_order"] = input_dim_order
         source_val = input_val if input_val is not None else old_val
         if source_val is not None and hasattr(source_val, "new_empty"):
-            table_output_dtype = output_dtype if rescale_lshift == 0 else torch.int32
+            # TOSA TABLE's output dtype is determined by the TABLE input dtype,
+            # not by the eventual quantized result dtype after an optional
+            # RESCALE. INT8 TABLE returns INT8, while INT16 TABLE returns INT32.
+            table_output_dtype = torch.int32 if input_dtype == torch.int16 else input_dtype
             table_op_node.meta["val"] = source_val.new_empty(
                 source_val.shape, dtype=table_output_dtype
             )
@@ -661,6 +816,205 @@ def insert_table_op(
         graph.erase_node(user)
 
     graph.erase_node(node)
+
+
+# ---------------------------------------------------------------------------
+# Collapse decomposed round back to TABLE
+# ---------------------------------------------------------------------------
+
+def _skip_passthrough(node):
+    """Follow arg[0] through dequantize/quantize/RESCALE/Identity wrappers."""
+    for _ in range(8):
+        if not isinstance(node, Node) or node.op != "call_function":
+            break
+        t = str(node.target)
+        if "dequantize" in t or "quantize" in t or "RESCALE" in t or "rescale" in t or "Identity" in t:
+            node = node.args[0] if node.args else node
+        else:
+            break
+    return node
+
+
+def collapse_decomposed_round_to_table(graph_module) -> bool:
+    """Replace the decomposed banker's-rounding subgraph with a single TABLE.
+
+    Must run BEFORE q/dq folding (on the pre-folded graph where math ops sit
+    between dequantize/quantize pairs).  The TABLE takes INT8 input, outputs
+    INT8, and a trailing dequantize converts back to float so the rest of the
+    pre-folding graph is happy.
+    """
+    graph = graph_module.graph
+    modified = False
+    debug = os.environ.get("TOSA_ENGINE_DEBUG")
+
+    # Phase 1: find candidates.
+    candidates = []  # list of (final_where_node, quantized_input_node, scale, zp, qmin, qmax)
+
+    for node in graph.nodes:
+        if node.op != "call_function" or "where" not in str(node.target):
+            continue
+        args = node.args
+        if len(args) < 3:
+            continue
+
+        # where(is_tie, tie_result, round_up) — condition is arg[0]
+        is_tie = args[0]
+        if not isinstance(is_tie, Node) or is_tie.op != "call_function":
+            continue
+        if "eq" not in str(is_tie.target):
+            continue
+        if len(is_tie.args) < 2:
+            continue
+
+        # eq(frac, half_const) — frac is arg[0], might be through dq
+        frac_raw = is_tie.args[0]
+        frac_node = frac_raw
+        # Skip one dequantize wrapper
+        if isinstance(frac_node, Node) and "dequantize" in str(getattr(frac_node, 'target', '')):
+            frac_node = frac_node.args[0] if frac_node.args else frac_node
+        # Skip one quantize wrapper
+        if isinstance(frac_node, Node) and "quantize" in str(getattr(frac_node, 'target', '')):
+            frac_node = frac_node.args[0] if frac_node.args else frac_node
+
+        if not isinstance(frac_node, Node) or frac_node.op != "call_function":
+            continue
+        if "sub" not in str(frac_node.target):
+            continue
+
+        # sub.args[0] is the round input (possibly through dq)
+        round_input_float = frac_node.args[0]
+        if not isinstance(round_input_float, Node):
+            continue
+
+        # Find the quantized (INT8) version: if round_input is a dequantize,
+        # its arg[0] is the quantized tensor.
+        quantized_input = None
+        scale = zp = qmin = qmax = None
+        if "dequantize" in str(getattr(round_input_float, 'target', '')):
+            dq_args = round_input_float.args
+            quantized_input = dq_args[0] if dq_args else None
+            if len(dq_args) >= 5:
+                try:
+                    scale = float(dq_args[1])
+                    zp = int(dq_args[2])
+                    qmin = int(dq_args[3])
+                    qmax = int(dq_args[4])
+                except (TypeError, ValueError):
+                    continue
+
+        if quantized_input is None or scale is None:
+            continue
+
+        # Verify floor(x) is the second arg of sub
+        floor_raw = frac_node.args[1] if len(frac_node.args) > 1 else None
+        # Walk through possible dq/q wrappers
+        floor_check = floor_raw
+        for _ in range(3):
+            if isinstance(floor_check, Node) and floor_check.op == "call_function":
+                t = str(floor_check.target)
+                if "dequantize" in t or "quantize" in t:
+                    floor_check = floor_check.args[0] if floor_check.args else floor_check
+                else:
+                    break
+            else:
+                break
+        if not isinstance(floor_check, Node) or "floor" not in str(getattr(floor_check, 'target', '')):
+            continue
+
+        # Extract output qparams from the quantize node after where_1
+        out_scale, out_zp, out_qmin, out_qmax = scale, zp, qmin, qmax
+        for user in node.users:
+            if isinstance(user, Node) and user.op == "call_function":
+                ut = str(user.target)
+                if "quantize" in ut and "dequantize" not in ut:
+                    u_args = user.args
+                    if len(u_args) >= 5:
+                        try:
+                            out_scale = float(u_args[1])
+                            out_zp = int(u_args[2])
+                            out_qmin = int(u_args[3])
+                            out_qmax = int(u_args[4])
+                        except (TypeError, ValueError):
+                            pass
+                    break
+
+        if debug:
+            print(f"[collapse_round] matched: where={node.name} q_input={quantized_input.name} in_scale={scale} in_zp={zp} out_scale={out_scale} out_zp={out_zp}")
+        candidates.append((node, quantized_input, round_input_float, scale, zp, qmin, qmax, out_scale, out_zp, out_qmin, out_qmax))
+
+    # Phase 2: replace each candidate with TABLE + dequantize.
+    for final_where, quantized_input, float_input, scale, zp, qmin, qmax, out_scale, out_zp, out_qmin, out_qmax in candidates:
+        # Compute the round TABLE: for each INT8 value, dequant → round → requant
+        # Input uses (scale, zp), output uses (out_scale, out_zp).
+        table_entries = []
+        for q in range(qmin, qmax + 1):
+            float_val = (q - zp) * scale
+            rounded = round(float_val)  # Python round = banker's rounding
+            requant = int(max(out_qmin, min(out_qmax, round(rounded / out_scale + out_zp))))
+            table_entries.append(requant)
+        table_tensor = torch.tensor(table_entries, dtype=torch.int8)
+
+        if debug:
+            print(f"[collapse_round] table head={table_entries[:8]} tail={table_entries[-4:]}")
+
+        # Register table as buffer
+        attr_name = f"{final_where.name}_round_table"
+        counter = 0
+        while hasattr(graph_module, attr_name):
+            counter += 1
+            attr_name = f"{final_where.name}_round_table_{counter}"
+        graph_module.register_buffer(attr_name, table_tensor)
+
+        # Create nodes: get_attr → TABLE → dequantize
+        with graph.inserting_before(final_where):
+            table_const = graph.get_attr(attr_name)
+            table_const.meta["val"] = table_tensor
+
+            table_target = get_tosa_table_op()
+            table_node = graph.call_function(table_target, args=(quantized_input, table_const))
+
+            # TABLE output is INT8 with same qparams as input
+            input_val = float_input.meta.get("val")
+            if input_val is not None and hasattr(input_val, "new_empty"):
+                table_node.meta["val"] = input_val.new_empty(input_val.shape, dtype=torch.int8)
+            else:
+                table_node.meta["val"] = table_tensor.new_empty([])
+
+            # Dequantize TABLE output back to float for the pre-folding graph
+            # Use OUTPUT qparams since the TABLE output is requantized with those.
+            dq_target = torch.ops.quantized_decomposed.dequantize_per_tensor.default
+            dq_node = graph.call_function(
+                dq_target,
+                args=(table_node, out_scale, out_zp, out_qmin, out_qmax, torch.int8),
+            )
+            if input_val is not None:
+                dq_node.meta["val"] = input_val.clone() if hasattr(input_val, 'clone') else input_val
+
+        # Replace all uses of final_where with dq_node
+        final_where.replace_all_uses_with(dq_node)
+        # Fix: replace_all_uses also changed dq_node's own args
+        dq_node.args = (table_node, out_scale, out_zp, out_qmin, out_qmax, torch.int8)
+
+        graph.erase_node(final_where)
+        modified = True
+
+        if debug:
+            print(f"[collapse_round] replaced {final_where.name} with TABLE → dequantize")
+
+    if modified:
+        # Clean up dead decomposition nodes
+        changed = True
+        while changed:
+            changed = False
+            for node in reversed(list(graph.nodes)):
+                if node.op == "call_function" and len(node.users) == 0:
+                    try:
+                        graph.erase_node(node)
+                        changed = True
+                    except Exception:
+                        pass
+        graph_module.recompile()
+    return modified
 
 
 # ---------------------------------------------------------------------------
@@ -1439,6 +1793,15 @@ def rewrite_conv_to_tosa(
     weight_val = _get_first_fake_tensor(weight)
     input_shape = list(getattr(input_val, "shape", ()))
     weight_shape = list(getattr(weight_val, "shape", ()))
+    input_qparams = node.meta.get("input_qparams") or {}
+    if isinstance(input_qparams, dict):
+        input_qparam = input_qparams.get(0)
+        if input_qparam is None and len(input_qparams) == 1:
+            input_qparam = next(iter(input_qparams.values()))
+    else:
+        input_qparam = None
+    input_dtype = getattr(_get_first_fake_tensor(x), "dtype", None)
+    input_contract_dtype = getattr(input_qparam, "dtype", input_dtype)
 
     # Handle missing bias: create a zero bias placeholder
     if bias is None:
@@ -1466,19 +1829,12 @@ def rewrite_conv_to_tosa(
         with graph.inserting_before(node):
             bias = graph.get_attr(attr_name)
             bias.meta = {"val": bias_data}
-            input_qparams = node.meta.get("input_qparams") or {}
-            if isinstance(input_qparams, dict):
-                input_qparam = input_qparams.get(0)
-                if input_qparam is None and len(input_qparams) == 1:
-                    input_qparam = next(iter(input_qparams.values()))
-            else:
-                input_qparam = None
-            input_dtype = getattr(_get_first_fake_tensor(x), "dtype", None)
-            input_contract_dtype = getattr(input_qparam, "dtype", input_dtype)
-            if input_contract_dtype == torch.int16:
-                from executorch.backends.arm.tosa.mapping import TosaSpecialDtype
+    if bias is not None and input_contract_dtype == torch.int16:
+        from executorch.backends.arm.tosa.mapping import TosaSpecialDtype
 
-                bias.meta[TosaSpecialDtype.meta_key()] = TosaSpecialDtype.INT48
+        if not hasattr(bias, "meta") or bias.meta is None:
+            bias.meta = {}
+        bias.meta[TosaSpecialDtype.meta_key()] = TosaSpecialDtype.INT48
 
     # Select target op
     if transposed:

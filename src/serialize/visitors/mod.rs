@@ -19,6 +19,7 @@ mod layout;
 mod math;
 mod matmul;
 mod nn;
+mod op_utils;
 mod reductions;
 mod shape_utils;
 mod tensor_ops;
@@ -48,6 +49,7 @@ use arg_utils::*;
 use broadcast::*;
 use const_utils::*;
 pub(crate) use dtype_quant::ir_dtype_to_tosa;
+pub(crate) use shape_utils::actual_tensor_shape;
 use dtype_quant::{
     accumulator_output_dtype, actual_tensor_dtype, clamp_bound_bytes_from_arg,
     compute_multiplier_and_shift_with_width, conv_accumulator_dtype, encode_zp_for_dtype,
@@ -57,25 +59,30 @@ use dtype_quant::{
 use emit_result::EmitResult;
 use graph_utils::*;
 use layout::*;
+use op_utils::*;
 use shape_utils::*;
 
-fn build_emitter_table() -> std::collections::HashMap<OpTarget, EmitFn> {
-    let mut t: std::collections::HashMap<OpTarget, EmitFn> = std::collections::HashMap::new();
-    arithmetic::register(&mut t);
-    tensor_ops::register(&mut t);
-    indexing::register(&mut t);
-    matmul::register(&mut t);
-    control_flow::register(&mut t);
-    elementwise::register(&mut t);
-    math::register(&mut t);
-    nn::register(&mut t);
-    reductions::register(&mut t);
-    t
+fn build_emitter_table() -> EmitterTable {
+    let mut table = EmitterTable::new();
+    for register in [
+        arithmetic::register as fn(&mut EmitterTable),
+        tensor_ops::register,
+        indexing::register,
+        matmul::register,
+        control_flow::register,
+        elementwise::register,
+        math::register,
+        nn::register,
+        reductions::register,
+    ] {
+        register(&mut table);
+    }
+    table
 }
 
 // Cached emitter dispatch table, built once per thread.
 thread_local! {
-    static EMITTER_TABLE: std::collections::HashMap<OpTarget, EmitFn> = build_emitter_table();
+    static EMITTER_TABLE: EmitterTable = build_emitter_table();
 }
 
 /// Dispatch to the correct per-op visitor based on the node's target.

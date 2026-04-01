@@ -284,6 +284,14 @@ fn conv_tosa_pad_remainder(
     (input_len + pad_before + pad_after - dilation * (kernel - 1) - 1) % stride
 }
 
+fn same_padding_pair(input_len: i32, kernel: i32, stride: i32, dilation: i32) -> (i32, i32) {
+    let out_len = (input_len + stride - 1) / stride;
+    let needed = ((out_len - 1) * stride + dilation * (kernel - 1) + 1 - input_len).max(0);
+    let before = needed / 2;
+    let after = needed - before;
+    (before, after)
+}
+
 pub(super) fn adjusted_tosa_pad_for_raw_aten_conv(
     graph: &Graph,
     store: &TensorStore,
@@ -338,6 +346,14 @@ pub(super) fn adjusted_tosa_pad_for_raw_aten_conv(
     let stride_w = *stride.get(1).unwrap_or(&stride_h);
     let dilation_h = *dilation.first().unwrap_or(&1);
     let dilation_w = *dilation.get(1).unwrap_or(&dilation_h);
+
+    let padding_mode = arg_string(node, 4).or_else(|| kwarg_string(node, "padding"));
+    if matches!(padding_mode.as_deref(), Some("same")) {
+        let (pad_top, pad_bottom) = same_padding_pair(input_h, kernel_h, stride_h, dilation_h);
+        let (pad_left, pad_right) = same_padding_pair(input_w, kernel_w, stride_w, dilation_w);
+        return vec![pad_top, pad_bottom, pad_left, pad_right];
+    }
+
     let pad_h = *padding.first().unwrap_or(&0);
     let pad_w = *padding.get(1).unwrap_or(&pad_h);
 

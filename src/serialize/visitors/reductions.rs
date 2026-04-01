@@ -6,12 +6,14 @@ mod extrema;
 mod mean;
 mod sum_ops;
 
-pub fn register(
-    table: &mut std::collections::HashMap<crate::graph::ir::OpTarget, super::emitter::EmitFn>,
-) {
-    extrema::register(table);
-    mean::register(table);
-    sum_ops::register(table);
+pub fn register(table: &mut EmitterTable) {
+    for register in [
+        extrema::register as fn(&mut EmitterTable),
+        mean::register,
+        sum_ops::register,
+    ] {
+        register(table);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -63,7 +65,7 @@ impl ParsedReduceSpec {
             .map(|raw_dim| ReduceAxis {
                 raw_dim,
                 tosa_axis: input_node
-                    .map(|n| map_axis_to_tosa_dim_order(n, raw_dim))
+                    .map(|n| map_axis_to_tosa_dim_order(graph, n, raw_dim))
                     .unwrap_or(raw_dim),
             })
             .collect();
@@ -94,7 +96,7 @@ impl ParsedSingleAxisReduceSpec {
             }
         };
         let tosa_axis = input_node
-            .map(|input_node| map_axis_to_tosa_dim_order(input_node, raw_axis))
+            .map(|input_node| map_axis_to_tosa_dim_order(graph, input_node, raw_axis))
             .unwrap_or(raw_axis);
         let keepdim = arg_bool(node, 2, true);
         let input_shape = input_node
