@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
+use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_utils;
 
@@ -62,6 +62,8 @@ fn decompose_logit<'py>(
     let log_op = resolve_aten_op(py, "log.default")?;
     let full_op = resolve_aten_op(py, "full.default")?;
 
+    let ins = NodeInserter::before(py, graph, node);
+
     let input_shape = FxGraphModule::node_shape(&x).unwrap_or_else(|_| vec![1]);
     let builtins = py.import_bound("builtins")?;
 
@@ -70,7 +72,7 @@ fn decompose_logit<'py>(
         let ones_shape = PyTuple::new_bound(py, vec![1i64; input_shape.len()].iter().copied());
         let float_val = builtins.call_method1("float", (val,))?;
         let full_args = PyTuple::new_bound(py, &[ones_shape.as_ref(), float_val.as_ref()]);
-        insert_call_before(py, graph, node, &full_op, full_args.as_ref(), node)
+        ins.call(&full_op, full_args.as_ref())
     };
 
     // If eps is not None: x = clamp(x, eps, 1 - eps)
@@ -80,30 +82,30 @@ fn decompose_logit<'py>(
         let one_minus_eps = builtins.call_method1("float", (1.0 - eps_val,))?;
         let clamp_args =
             PyTuple::new_bound(py, &[x.as_ref(), eps_py.as_ref(), one_minus_eps.as_ref()]);
-        x = insert_call_before(py, graph, node, &clamp_op, clamp_args.as_ref(), node)?;
+        x = ins.call(&clamp_op, clamp_args.as_ref())?;
     }
 
     // neg_x = mul(x, -1.0)
     let neg_one = make_scalar(-1.0)?;
     let neg_x_args = PyTuple::new_bound(py, &[x.as_ref(), neg_one.as_ref()]);
-    let neg_x = insert_call_before(py, graph, node, &mul_op, neg_x_args.as_ref(), node)?;
+    let neg_x = ins.call(&mul_op, neg_x_args.as_ref())?;
 
     // denom = add(neg_x, 1.0)  => (1 - x)
     let one = make_scalar(1.0)?;
     let denom_args = PyTuple::new_bound(py, &[neg_x.as_ref(), one.as_ref()]);
-    let denom = insert_call_before(py, graph, node, &add_op, denom_args.as_ref(), node)?;
+    let denom = ins.call(&add_op, denom_args.as_ref())?;
 
     // frac = reciprocal(denom)  => 1 / (1 - x)
     let frac_args = PyTuple::new_bound(py, &[denom.as_ref()]);
-    let frac = insert_call_before(py, graph, node, &reciprocal_op, frac_args.as_ref(), node)?;
+    let frac = ins.call(&reciprocal_op, frac_args.as_ref())?;
 
     // log_input = mul(x, frac)  => x / (1 - x)
     let log_input_args = PyTuple::new_bound(py, &[x.as_ref(), frac.as_ref()]);
-    let log_input = insert_call_before(py, graph, node, &mul_op, log_input_args.as_ref(), node)?;
+    let log_input = ins.call(&mul_op, log_input_args.as_ref())?;
 
     // result = log(log_input)
     let log_args = PyTuple::new_bound(py, &[log_input.as_ref()]);
-    let result = insert_call_before(py, graph, node, &log_op, log_args.as_ref(), node)?;
+    let result = ins.call(&log_op, log_args.as_ref())?;
 
     // Copy original node's meta onto the final result
     fx_utils::copy_meta(py, node, &result)?;

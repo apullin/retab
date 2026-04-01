@@ -108,8 +108,109 @@ fn py_int<'py>(py: Python<'py>, v: i64) -> PyResult<Bound<'py, PyAny>> {
     builtins.call_method1("int", (v,))
 }
 
+/// Fluent builder for inserting `call_function` nodes before a reference node.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Simple case — meta copied from ref_node, qparams cleared:
+/// let n = NodeInserter::before(py, &graph, &node).call(&op, &args)?;
+///
+/// // Custom meta source:
+/// let n = NodeInserter::before(py, &graph, &node)
+///     .meta_from(&other)
+///     .call(&op, &args)?;
+///
+/// // Keep qparams and pass kwargs:
+/// let n = NodeInserter::before(py, &graph, &node)
+///     .keep_qparams()
+///     .call_with_kwargs(&op, &args, &kw)?;
+/// ```
+#[derive(Clone)]
+pub struct NodeInserter<'py> {
+    py: Python<'py>,
+    graph: Bound<'py, PyAny>,
+    ref_node: Bound<'py, PyAny>,
+    meta_src: Bound<'py, PyAny>,
+    clear_qparams: bool,
+}
+
+impl<'py> NodeInserter<'py> {
+    pub fn before(
+        py: Python<'py>,
+        graph: &Bound<'py, PyAny>,
+        ref_node: &Bound<'py, PyAny>,
+    ) -> Self {
+        Self {
+            py,
+            graph: graph.clone(),
+            ref_node: ref_node.clone(),
+            meta_src: ref_node.clone(),
+            clear_qparams: true,
+        }
+    }
+
+    /// Copy meta from a specific source node (default: ref_node).
+    pub fn meta_from(mut self, src: &Bound<'py, PyAny>) -> Self {
+        self.meta_src = src.clone();
+        self
+    }
+
+    /// Keep qparams from the meta source (default: clear them).
+    pub fn keep_qparams(mut self) -> Self {
+        self.clear_qparams = false;
+        self
+    }
+
+    /// Insert a call_function node with the given target and args.
+    pub fn call(
+        &self,
+        target: &Bound<'py, PyAny>,
+        args: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.call_impl(target, args, None)
+    }
+
+    /// Insert a call_function node with args and kwargs.
+    pub fn call_with_kwargs(
+        &self,
+        target: &Bound<'py, PyAny>,
+        args: &Bound<'py, PyAny>,
+        kwargs: &Bound<'py, PyDict>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.call_impl(target, args, Some(kwargs))
+    }
+
+    fn call_impl(
+        &self,
+        target: &Bound<'py, PyAny>,
+        args: &Bound<'py, PyAny>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inserting = self.graph.call_method1("inserting_before", (&self.ref_node,))?;
+        inserting.call_method0("__enter__")?;
+        let new_node = if let Some(kw) = kwargs {
+            self.graph.call_method1("call_function", (target, args, kw))?
+        } else {
+            self.graph.call_method1("call_function", (target, args))?
+        };
+        let copy_mod = self.py.import_bound("copy")?;
+        let meta_copy = copy_mod.call_method1("copy", (self.meta_src.getattr("meta")?,))?;
+        if self.clear_qparams {
+            let _ = meta_copy.call_method1("__setitem__", ("input_qparams", PyDict::new_bound(self.py)));
+            let _ = meta_copy.call_method1("__setitem__", ("output_qparams", PyDict::new_bound(self.py)));
+        }
+        new_node.setattr("meta", &meta_copy)?;
+        let _ = refresh_fake_tensor(self.py, &new_node);
+        inserting.call_method("__exit__", (self.py.None(), self.py.None(), self.py.None()), None)?;
+        Ok(new_node)
+    }
+}
+
 /// Helper: insert a call_function node before `ref_node` using graph.inserting_before.
 /// Copies meta from `meta_src` and refreshes the FakeTensor if possible.
+///
+/// Thin wrapper around [`NodeInserter`] for backwards compatibility.
 pub fn insert_call_before<'py>(
     py: Python<'py>,
     graph: &Bound<'py, PyAny>,
@@ -118,20 +219,9 @@ pub fn insert_call_before<'py>(
     args: &Bound<'py, PyAny>,
     meta_src: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let inserting = graph.call_method1("inserting_before", (ref_node,))?;
-    inserting.call_method0("__enter__")?;
-    let new_node = graph.call_method1("call_function", (target, args))?;
-    // Copy meta from source node, then clear stale qparams
-    let copy_mod = py.import_bound("copy")?;
-    let meta_copy = copy_mod.call_method1("copy", (meta_src.getattr("meta")?,))?;
-    // Clear qparams to avoid stale references on intermediate nodes
-    let _ = meta_copy.call_method1("__setitem__", ("input_qparams", PyDict::new_bound(py)));
-    let _ = meta_copy.call_method1("__setitem__", ("output_qparams", PyDict::new_bound(py)));
-    new_node.setattr("meta", &meta_copy)?;
-    // Try to refresh FakeTensor metadata
-    let _ = refresh_fake_tensor(py, &new_node);
-    inserting.call_method("__exit__", (py.None(), py.None(), py.None()), None)?;
-    Ok(new_node)
+    NodeInserter::before(py, graph, ref_node)
+        .meta_from(meta_src)
+        .call(target, args)
 }
 
 /// Propagate qparams from a source node to a target node.

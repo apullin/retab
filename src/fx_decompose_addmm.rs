@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-use crate::fx_decompose_ops::{insert_call_before, resolve_aten_op};
+use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
 use crate::fx_graph::FxGraphModule;
 use crate::fx_utils;
 
@@ -62,8 +62,10 @@ fn decompose_addmm<'py>(
     let add_op = resolve_aten_op(py, "add.Tensor")?;
     let full_op = resolve_aten_op(py, "full.default")?;
 
+    let ins = NodeInserter::before(py, graph, node);
+
     let mm_args = PyTuple::new_bound(py, &[mat1.as_ref(), mat2.as_ref()]);
-    let mm_result = insert_call_before(py, graph, node, &mm_op, mm_args.as_ref(), node)?;
+    let mm_result = ins.call(&mm_op, mm_args.as_ref())?;
 
     let scaled_mm = if (alpha - 1.0).abs() > 1e-10 {
         let input_shape = FxGraphModule::node_shape(&mm_result).unwrap_or_else(|_| vec![1]);
@@ -71,9 +73,9 @@ fn decompose_addmm<'py>(
         let builtins = py.import_bound("builtins")?;
         let alpha_val = builtins.call_method1("float", (alpha,))?;
         let full_args = PyTuple::new_bound(py, &[ones_shape.as_ref(), alpha_val.as_ref()]);
-        let alpha_node = insert_call_before(py, graph, node, &full_op, full_args.as_ref(), node)?;
+        let alpha_node = ins.call(&full_op, full_args.as_ref())?;
         let mul_args = PyTuple::new_bound(py, &[mm_result.as_ref(), alpha_node.as_ref()]);
-        insert_call_before(py, graph, node, &mul_op, mul_args.as_ref(), node)?
+        ins.call(&mul_op, mul_args.as_ref())?
     } else {
         mm_result
     };
@@ -84,15 +86,15 @@ fn decompose_addmm<'py>(
         let builtins = py.import_bound("builtins")?;
         let beta_val = builtins.call_method1("float", (beta,))?;
         let full_args = PyTuple::new_bound(py, &[ones_shape.as_ref(), beta_val.as_ref()]);
-        let beta_node = insert_call_before(py, graph, node, &full_op, full_args.as_ref(), node)?;
+        let beta_node = ins.call(&full_op, full_args.as_ref())?;
         let mul_args = PyTuple::new_bound(py, &[input.as_ref(), beta_node.as_ref()]);
-        insert_call_before(py, graph, node, &mul_op, mul_args.as_ref(), node)?
+        ins.call(&mul_op, mul_args.as_ref())?
     } else {
         input.clone()
     };
 
     let add_args = PyTuple::new_bound(py, &[scaled_mm.as_ref(), scaled_input.as_ref()]);
-    let result = insert_call_before(py, graph, node, &add_op, add_args.as_ref(), node)?;
+    let result = ins.call(&add_op, add_args.as_ref())?;
 
     fx_utils::copy_meta(py, node, &result)?;
 
