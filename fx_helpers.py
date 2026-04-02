@@ -6,11 +6,23 @@ fragile because we need proper meta["val"] FakeTensors and the correct
 torch op overload objects.
 """
 
+import dataclasses
 import os
 from copy import copy
 
 import torch
 from torch.fx import Graph, Node
+
+
+@dataclasses.dataclass(frozen=True)
+class QuantSpec:
+    """Quantization parameters for a single tensor."""
+
+    scale: float
+    zp: int
+    qmin: int
+    qmax: int
+    dtype: object  # torch.dtype
 
 
 def _apply_fake_tensor_dim_order(fake_tensor, dim_order):
@@ -362,16 +374,8 @@ def _table_torch_fn(kind: str, scalar_arg: float | None = None):
 
 def _compute_table(
     kind: str,
-    input_scale: float,
-    input_zp: int,
-    input_qmin: int,
-    input_qmax: int,
-    input_dtype,
-    output_scale: float,
-    output_zp: int,
-    output_qmin: int,
-    output_qmax: int,
-    output_dtype,
+    input_qspec: QuantSpec,
+    output_qspec: QuantSpec,
     scalar_arg: float | None = None,
 ) -> tuple[torch.Tensor, int]:
     """Compute TABLE contents by mirroring Arm's Python InsertTableOps pass.
@@ -384,24 +388,24 @@ def _compute_table(
 
     torch_op = _table_torch_fn(kind, scalar_arg)
     in_quantargs = QuantArgs(
-        scale=input_scale,
-        zp=input_zp,
-        qmin=input_qmin,
-        qmax=input_qmax,
-        dtype=input_dtype,
+        scale=input_qspec.scale,
+        zp=input_qspec.zp,
+        qmin=input_qspec.qmin,
+        qmax=input_qspec.qmax,
+        dtype=input_qspec.dtype,
     )
     out_quantargs = QuantArgs(
-        scale=output_scale,
-        zp=output_zp,
-        qmin=output_qmin,
-        qmax=output_qmax,
-        dtype=output_dtype,
+        scale=output_qspec.scale,
+        zp=output_qspec.zp,
+        qmin=output_qspec.qmin,
+        qmax=output_qspec.qmax,
+        dtype=output_qspec.dtype,
     )
 
-    if output_dtype == torch.int8:
+    if output_qspec.dtype == torch.int8:
         quantized_inputs = torch.linspace(
-            start=input_qmin,
-            end=input_qmax,
+            start=input_qspec.qmin,
+            end=input_qspec.qmax,
             steps=256,
             dtype=torch.int8,
         )
@@ -410,22 +414,22 @@ def _compute_table(
             dtype=torch.int8
         ), 0
 
-    if output_dtype in (torch.int16, torch.int32):
+    if output_qspec.dtype in (torch.int16, torch.int32):
         quantized_inputs = torch.linspace(
-            start=input_qmin,
-            end=input_qmax + 1,
+            start=input_qspec.qmin,
+            end=input_qspec.qmax + 1,
             steps=513,
             dtype=torch.int32,
         )
         dequantized_inputs = in_quantargs.dequantize_value(
-            (quantized_inputs.clamp(input_qmin, input_qmax).to(dtype=input_dtype) & ~0x7F)
+            (quantized_inputs.clamp(input_qspec.qmin, input_qspec.qmax).to(dtype=input_qspec.dtype) & ~0x7F)
         )
         lut_values = out_quantargs.quantize_value(torch_op(dequantized_inputs))
         rshift = int(torch.ceil(torch.log2(lut_values.abs().max())).item()) + 1 - 16
         rescale_lshift = rshift - 7
         return (lut_values >> rshift).to(dtype=torch.int16), rescale_lshift
 
-    raise ValueError(f"Unsupported output dtype for table: {output_dtype}")
+    raise ValueError(f"Unsupported output dtype for table: {output_qspec.dtype}")
 
 
 def insert_table_op(
@@ -555,13 +559,9 @@ def insert_table_op(
         )
 
     # Compute the lookup table
-    table_tensor, rescale_lshift = _compute_table(
-        kind,
-        input_scale, input_zp, input_qmin, input_qmax, input_dtype,
-        output_scale, output_zp, output_qmin, output_qmax,
-        output_dtype,
-        scalar_arg,
-    )
+    in_qspec = QuantSpec(input_scale, input_zp, input_qmin, input_qmax, input_dtype)
+    out_qspec = QuantSpec(output_scale, output_zp, output_qmin, output_qmax, output_dtype)
+    table_tensor, rescale_lshift = _compute_table(kind, in_qspec, out_qspec, scalar_arg)
 
     if os.environ.get("TOSA_ENGINE_DEBUG"):
         print(
