@@ -1,14 +1,39 @@
 use super::*;
 
-pub(super) fn compute_conv2d_nhwc_output(
+/// Compute a single spatial output dimension for convolution:
+///   output = (input + pad_before + pad_after - (kernel - 1) * dilation - 1) / stride + 1
+fn conv_spatial_output_dim(
+    input_len: i32,
+    pad_before: i32,
+    pad_after: i32,
+    kernel: i32,
+    dilation: i32,
+    stride: i32,
+) -> i32 {
+    (input_len + pad_before + pad_after - (kernel - 1) * dilation - 1) / stride + 1
+}
+
+/// Unified convolution output shape computation for 2D, 3D, and depthwise
+/// convolutions in NHWC / NDHWC layout. The spatial rank is inferred from
+/// `stride.len()`.
+///
+/// For depthwise convolutions (`is_depthwise = true`), the weight shape is read
+/// from the node metadata (logical NCHW layout) and the output-channel count is
+/// taken from `ws[0]` with kernels at `ws[2..]`.  For regular convolutions the
+/// weight shape comes from `actual_tensor_shape` and the kernel/OC split is
+/// inferred from whether the last weight dim matches the input channel count.
+fn compute_conv_output_impl(
     graph: &Graph,
     store: &TensorStore,
     node: &Node,
     pad: &[i32],
     stride: &[i32],
     dilation: &[i32],
+    is_depthwise: bool,
 ) -> TosaTensor {
     let dtype = conv_accumulator_dtype(node);
+    let spatial_rank = stride.len(); // 2 for conv2d / depthwise, 3 for conv3d
+    let tensor_rank = spatial_rank + 2; // N + spatial dims + C
 
     let computed = (|| -> Option<Vec<i32>> {
         let input_id = match node.args.first()? {
@@ -23,41 +48,72 @@ pub(super) fn compute_conv2d_nhwc_output(
         let weight_node = graph.node(weight_id)?;
 
         let inp = actual_tensor_shape(graph, store, input_node);
-        if inp.len() != 4 {
+        if inp.len() != tensor_rank {
             return None;
         }
-        let (n, ih, iw) = (inp[0], inp[1], inp[2]);
+        let n = inp[0];
+        // Spatial input dims are inp[1..1+spatial_rank].
+        let spatial_inputs: Vec<i32> = inp[1..1 + spatial_rank].to_vec();
 
-        let ws = actual_tensor_shape(graph, store, weight_node);
-        if ws.len() != 4 {
-            return None;
-        }
-        let ic = *inp.get(3)?;
-        let (oc, kh, kw) = if ws[3] == ic {
-            (ws[0], ws[1], ws[2])
+        // Determine output channels and kernel spatial dims.
+        let (oc, kernels): (i32, Vec<i32>) = if is_depthwise {
+            let ws = weight_node.meta.val.shape_slice();
+            if ws.len() != tensor_rank {
+                return None;
+            }
+            // Depthwise weight layout is [OC, 1, kH, kW] (NCHW-style metadata).
+            let oc = ws[0] as i32;
+            let kernels: Vec<i32> = ws[2..2 + spatial_rank].iter().map(|&d| d as i32).collect();
+            (oc, kernels)
         } else {
-            (ws[0], ws[2], ws[3])
+            let ws = actual_tensor_shape(graph, store, weight_node);
+            if ws.len() != tensor_rank {
+                return None;
+            }
+            let ic = *inp.get(1 + spatial_rank)?; // last dim of NHWC input
+            let oc = ws[0];
+            // If last dim of weight matches input channels, kernels are at
+            // ws[1..1+spatial_rank]; otherwise they are at ws[2..2+spatial_rank]
+            // (weight stored in a different layout).
+            let kernels: Vec<i32> = if ws[tensor_rank - 1] == ic {
+                ws[1..1 + spatial_rank].to_vec()
+            } else {
+                ws[2..2 + spatial_rank].to_vec()
+            };
+            (oc, kernels)
         };
 
-        let pad_top = *pad.first().unwrap_or(&0);
-        let pad_bottom = *pad.get(1).unwrap_or(&0);
-        let pad_left = *pad.get(2).unwrap_or(&0);
-        let pad_right = *pad.get(3).unwrap_or(&0);
-        let stride_h = *stride.first().unwrap_or(&1);
-        let stride_w = *stride.get(1).unwrap_or(&1);
-        let dil_h = *dilation.first().unwrap_or(&1);
-        let dil_w = *dilation.get(1).unwrap_or(&1);
+        // Compute each spatial output dimension.
+        let mut shape = Vec::with_capacity(tensor_rank);
+        shape.push(n);
+        for i in 0..spatial_rank {
+            let pad_before = *pad.get(i * 2).unwrap_or(&0);
+            let pad_after = *pad.get(i * 2 + 1).unwrap_or(&0);
+            let s = *stride.get(i).unwrap_or(&1);
+            let d = *dilation.get(i).unwrap_or(&1);
+            shape.push(conv_spatial_output_dim(
+                spatial_inputs[i],
+                pad_before,
+                pad_after,
+                kernels[i],
+                d,
+                s,
+            ));
+        }
+        shape.push(oc);
 
-        let oh = (ih + pad_top + pad_bottom - (kh - 1) * dil_h - 1) / stride_h + 1;
-        let ow = (iw + pad_left + pad_right - (kw - 1) * dil_w - 1) / stride_w + 1;
-
-        Some(vec![n, oh, ow, oc])
+        Some(shape)
     })();
 
     let fallback_shape = {
         let shape = raw_i32_shape(node);
-        if shape.len() == 4 {
-            vec![shape[0], shape[2], shape[3], shape[1]]
+        if shape.len() == tensor_rank && tensor_rank >= 3 {
+            // Permute from NCHW/NCDHW to NHWC/NDHWC: move dim[1] to the end.
+            let mut nhwc = Vec::with_capacity(tensor_rank);
+            nhwc.push(shape[0]);
+            nhwc.extend_from_slice(&shape[2..]);
+            nhwc.push(shape[1]);
+            nhwc
         } else {
             shape
         }
@@ -78,6 +134,17 @@ pub(super) fn compute_conv2d_nhwc_output(
     TosaTensor::new(node.name.clone(), final_shape, dtype)
 }
 
+pub(super) fn compute_conv2d_nhwc_output(
+    graph: &Graph,
+    store: &TensorStore,
+    node: &Node,
+    pad: &[i32],
+    stride: &[i32],
+    dilation: &[i32],
+) -> TosaTensor {
+    compute_conv_output_impl(graph, store, node, pad, stride, dilation, false)
+}
+
 pub(super) fn compute_conv3d_ndhwc_output(
     graph: &Graph,
     store: &TensorStore,
@@ -86,71 +153,7 @@ pub(super) fn compute_conv3d_ndhwc_output(
     stride: &[i32],
     dilation: &[i32],
 ) -> TosaTensor {
-    let dtype = conv_accumulator_dtype(node);
-
-    let computed = (|| -> Option<Vec<i32>> {
-        let input_id = match node.args.first()? {
-            Arg::Node(id) => *id,
-            _ => return None,
-        };
-        let weight_id = match node.args.get(1)? {
-            Arg::Node(id) => *id,
-            _ => return None,
-        };
-        let input_node = graph.node(input_id)?;
-        let weight_node = graph.node(weight_id)?;
-
-        let inp = actual_tensor_shape(graph, store, input_node);
-        if inp.len() != 5 {
-            return None;
-        }
-        let (n, id, ih, iw, ic) = (inp[0], inp[1], inp[2], inp[3], inp[4]);
-
-        let ws = actual_tensor_shape(graph, store, weight_node);
-        if ws.len() != 5 {
-            return None;
-        }
-        let (oc, kd, kh, kw) = if ws[4] == ic {
-            (ws[0], ws[1], ws[2], ws[3])
-        } else {
-            (ws[0], ws[2], ws[3], ws[4])
-        };
-
-        let pad_front = *pad.first().unwrap_or(&0);
-        let pad_back = *pad.get(1).unwrap_or(&0);
-        let pad_top = *pad.get(2).unwrap_or(&0);
-        let pad_bottom = *pad.get(3).unwrap_or(&0);
-        let pad_left = *pad.get(4).unwrap_or(&0);
-        let pad_right = *pad.get(5).unwrap_or(&0);
-        let stride_d = *stride.first().unwrap_or(&1);
-        let stride_h = *stride.get(1).unwrap_or(&1);
-        let stride_w = *stride.get(2).unwrap_or(&1);
-        let dil_d = *dilation.first().unwrap_or(&1);
-        let dil_h = *dilation.get(1).unwrap_or(&1);
-        let dil_w = *dilation.get(2).unwrap_or(&1);
-
-        let od = (id + pad_front + pad_back - (kd - 1) * dil_d - 1) / stride_d + 1;
-        let oh = (ih + pad_top + pad_bottom - (kh - 1) * dil_h - 1) / stride_h + 1;
-        let ow = (iw + pad_left + pad_right - (kw - 1) * dil_w - 1) / stride_w + 1;
-
-        Some(vec![n, od, oh, ow, oc])
-    })();
-
-    let fallback_shape = {
-        let shape = raw_i32_shape(node);
-        if shape.len() == 5 {
-            vec![shape[0], shape[2], shape[3], shape[4], shape[1]]
-        } else {
-            shape
-        }
-    };
-
-    let final_shape = match computed {
-        Some(shape) if shape.iter().all(|&dim| dim > 0) => shape,
-        _ => fallback_shape,
-    };
-
-    TosaTensor::new(node.name.clone(), final_shape, dtype)
+    compute_conv_output_impl(graph, store, node, pad, stride, dilation, false)
 }
 
 pub(super) fn compute_depthwise_conv2d_nhwc_output(
@@ -161,57 +164,7 @@ pub(super) fn compute_depthwise_conv2d_nhwc_output(
     stride: &[i32],
     dilation: &[i32],
 ) -> TosaTensor {
-    let dtype = conv_accumulator_dtype(node);
-
-    let computed = (|| -> Option<Vec<i32>> {
-        let input_id = match node.args.first()? {
-            Arg::Node(id) => *id,
-            _ => return None,
-        };
-        let weight_id = match node.args.get(1)? {
-            Arg::Node(id) => *id,
-            _ => return None,
-        };
-        let input_node = graph.node(input_id)?;
-        let weight_node = graph.node(weight_id)?;
-
-        let inp = actual_tensor_shape(graph, store, input_node);
-        if inp.len() != 4 {
-            return None;
-        }
-        let (n, ih, iw) = (inp[0], inp[1], inp[2]);
-
-        let ws = weight_node.meta.val.shape_slice();
-        if ws.len() != 4 {
-            return None;
-        }
-        let (oc, kh, kw) = (ws[0] as i32, ws[2] as i32, ws[3] as i32);
-
-        let pad_top = *pad.first().unwrap_or(&0);
-        let pad_bottom = *pad.get(1).unwrap_or(&0);
-        let pad_left = *pad.get(2).unwrap_or(&0);
-        let pad_right = *pad.get(3).unwrap_or(&0);
-        let stride_h = *stride.first().unwrap_or(&1);
-        let stride_w = *stride.get(1).unwrap_or(&1);
-        let dil_h = *dilation.first().unwrap_or(&1);
-        let dil_w = *dilation.get(1).unwrap_or(&1);
-
-        let oh = (ih + pad_top + pad_bottom - (kh - 1) * dil_h - 1) / stride_h + 1;
-        let ow = (iw + pad_left + pad_right - (kw - 1) * dil_w - 1) / stride_w + 1;
-
-        Some(vec![n, oh, ow, oc])
-    })();
-
-    let final_shape = computed.unwrap_or_else(|| {
-        let shape = raw_i32_shape(node);
-        if shape.len() == 4 {
-            vec![shape[0], shape[2], shape[3], shape[1]]
-        } else {
-            shape
-        }
-    });
-
-    TosaTensor::new(node.name.clone(), final_shape, dtype)
+    compute_conv_output_impl(graph, store, node, pad, stride, dilation, true)
 }
 
 pub(super) fn compute_pool_nhwc_output(
