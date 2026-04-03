@@ -502,30 +502,74 @@ pub(super) fn emit_aten_permute(ctx: &EmitContext) -> EmitResult {
     )
 }
 
-fn emit_tile_like(
+/// If the node has a non-identity `tosa_dim_order`, insert a transpose op and
+/// permute `multiples` to match. Returns the (possibly updated) input name,
+/// input shape, and multiples.
+fn maybe_insert_transpose(
+    result: &mut EmitResult,
+    node: &Node,
+    padded_input_shape: &[i32],
+    input_name: String,
+    mut multiples: Vec<i32>,
+    dtype: DType,
+) -> (String, Vec<i32>, Vec<i32>) {
+    if let Some(perms) = node
+        .meta
+        .tosa_dim_order
+        .as_ref()
+        .map(|order| order.iter().map(|&dim| dim as i32).collect::<Vec<_>>())
+    {
+        let is_non_identity = perms
+            .iter()
+            .enumerate()
+            .any(|(idx, &dim)| dim as usize != idx);
+        let transposed_shape: Vec<i32> = perms
+            .iter()
+            .filter_map(|&idx| padded_input_shape.get(idx as usize).copied())
+            .collect();
+        if is_non_identity && transposed_shape.len() == padded_input_shape.len() {
+            let transposed_name = format!("{}_input_layout", node.name);
+            result.push_output_op(
+                make_empty_tensor(
+                    transposed_name.clone(),
+                    transposed_shape.clone(),
+                    dtype,
+                ),
+                Op::Transpose,
+                Attribute::Transpose(TransposeAttribute {
+                    perms: perms.clone(),
+                }),
+                vec![input_name],
+            );
+            multiples = perms
+                .iter()
+                .filter_map(|&idx| multiples.get(idx as usize).copied())
+                .collect();
+            return (transposed_name, transposed_shape, multiples);
+        }
+    }
+    (input_name, padded_input_shape.to_vec(), multiples)
+}
+
+/// Shared implementation for tile-like ops (`repeat` and `expand`).
+///
+/// Pads the input shape to `tile_rank` if needed, optionally transposes to
+/// match the node's `tosa_dim_order`, then emits a TOSA `Tile` operator.
+fn emit_tile_with_multiples(
     graph: &Graph,
     node: &Node,
     store: &TensorStore,
+    input_name: String,
+    input_node: &Node,
     multiples: Vec<i32>,
+    tile_rank: usize,
 ) -> EmitResult {
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
-    let Some(input_name) = input_names.first().cloned() else {
-        return result;
-    };
-    let Some(Arg::Node(input_id)) = node.args.first() else {
-        return result;
-    };
-    let Some(input_node) = graph.node(*input_id) else {
-        return result;
-    };
-
     let input_shape = actual_tensor_shape(graph, store, input_node);
     if multiples.is_empty() {
         return result;
     }
 
-    let tile_rank = multiples.len();
     let mut tile_multiples = multiples;
     let mut tile_input_name = input_name;
     let mut tile_input_shape = input_shape.clone();
@@ -550,45 +594,18 @@ fn emit_tile_like(
             Attribute::Reshape(ReshapeAttribute),
             vec![tile_input_name, reshape_shape_name],
         );
-        tile_input_name = reshaped_name;
-        tile_input_shape = padded_input_shape.clone();
 
-        if let Some(perms) = node
-            .meta
-            .tosa_dim_order
-            .as_ref()
-            .map(|order| order.iter().map(|&dim| dim as i32).collect::<Vec<_>>())
-        {
-            let is_non_identity = perms
-                .iter()
-                .enumerate()
-                .any(|(idx, &dim)| dim as usize != idx);
-            let transposed_shape: Vec<i32> = perms
-                .iter()
-                .filter_map(|&idx| padded_input_shape.get(idx as usize).copied())
-                .collect();
-            if is_non_identity && transposed_shape.len() == padded_input_shape.len() {
-                let transposed_name = format!("{}_input_layout", node.name);
-                result.push_output_op(
-                    make_empty_tensor(
-                        transposed_name.clone(),
-                        transposed_shape.clone(),
-                        actual_tensor_dtype(graph, input_node),
-                    ),
-                    Op::Transpose,
-                    Attribute::Transpose(TransposeAttribute {
-                        perms: perms.clone(),
-                    }),
-                    vec![tile_input_name],
-                );
-                tile_multiples = perms
-                    .iter()
-                    .filter_map(|&idx| tile_multiples.get(idx as usize).copied())
-                    .collect();
-                tile_input_name = transposed_name;
-                tile_input_shape = transposed_shape;
-            }
-        }
+        let (name, shape, mults) = maybe_insert_transpose(
+            &mut result,
+            node,
+            &padded_input_shape,
+            reshaped_name,
+            tile_multiples,
+            actual_tensor_dtype(graph, input_node),
+        );
+        tile_input_name = name;
+        tile_input_shape = shape;
+        tile_multiples = mults;
     }
 
     let output_shape: Vec<i32> = tile_input_shape
@@ -618,97 +635,69 @@ fn emit_tile_like(
     result
 }
 
+fn emit_tile_like(
+    graph: &Graph,
+    node: &Node,
+    store: &TensorStore,
+    multiples: Vec<i32>,
+) -> EmitResult {
+    let input_names = collect_input_names(graph, node);
+    let Some(input_name) = input_names.first().cloned() else {
+        return EmitResult::default();
+    };
+    let Some(Arg::Node(input_id)) = node.args.first() else {
+        return EmitResult::default();
+    };
+    let Some(input_node) = graph.node(*input_id) else {
+        return EmitResult::default();
+    };
+    let tile_rank = multiples.len();
+    emit_tile_with_multiples(graph, node, store, input_name, input_node, multiples, tile_rank)
+}
+
 pub(super) fn emit_expand(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;
     let store = ctx.store;
-    let mut result = EmitResult::default();
     let input_names = ctx.input_names();
     let Some(input_name) = input_names.first().cloned() else {
-        return result;
+        return EmitResult::default();
     };
     let Some(Arg::Node(input_id)) = node.args.first() else {
-        return result;
+        return EmitResult::default();
     };
     let Some(input_node) = graph.node(*input_id) else {
-        return result;
+        return EmitResult::default();
     };
+
     let raw_input_shape = raw_i32_shape(input_node);
     let raw_output_shape = raw_i32_shape(node);
     let input_shape = actual_tensor_shape(graph, store, input_node);
-    let output_shape = if raw_input_shape.len() == raw_output_shape.len() {
+
+    // Compute multiples in logical (pre-transpose) order so that
+    // emit_tile_with_multiples can permute them during transpose.
+    let target_shape = if raw_input_shape.len() == raw_output_shape.len() {
         actual_tensor_shape(graph, store, node)
     } else {
-        apply_tosa_dim_order(node, raw_output_shape)
+        raw_output_shape
     };
-    if output_shape.is_empty() {
-        return result;
+    if target_shape.is_empty() {
+        return EmitResult::default();
     }
+    let tile_rank = target_shape.len();
 
-    let tile_rank = output_shape.len();
-    let mut tile_input_name = input_name;
-    let mut tile_input_shape = input_shape.clone();
-    if tile_input_shape.len() < tile_rank {
-        let mut padded_input_shape = vec![1; tile_rank - tile_input_shape.len()];
-        padded_input_shape.extend(tile_input_shape.iter().copied());
+    // Pad input shape to tile_rank in logical order (matching emit_tile_with_multiples).
+    let logical_input: Vec<i32> = if input_shape.len() < tile_rank {
+        let mut padded = vec![1; tile_rank - input_shape.len()];
+        padded.extend(input_shape.iter().copied());
+        padded
+    } else {
+        input_shape
+    };
 
-        let reshaped_name = format!("{}_input_reshape", node.name);
-        let reshape_shape_name = format!("{}_input_shape", node.name);
-        push_const_shape(
-            &mut result,
-            reshape_shape_name.clone(),
-            padded_input_shape.clone(),
-        );
-        result.push_output_op(
-            make_empty_tensor(
-                reshaped_name.clone(),
-                padded_input_shape.clone(),
-                actual_tensor_dtype(graph, input_node),
-            ),
-            Op::Reshape,
-            Attribute::Reshape(ReshapeAttribute),
-            vec![tile_input_name, reshape_shape_name],
-        );
-        tile_input_name = reshaped_name;
-        tile_input_shape = padded_input_shape.clone();
-
-        if let Some(perms) = node
-            .meta
-            .tosa_dim_order
-            .as_ref()
-            .map(|order| order.iter().map(|&dim| dim as i32).collect::<Vec<_>>())
-        {
-            let is_non_identity = perms
-                .iter()
-                .enumerate()
-                .any(|(idx, &dim)| dim as usize != idx);
-            let transposed_shape: Vec<i32> = perms
-                .iter()
-                .filter_map(|&idx| padded_input_shape.get(idx as usize).copied())
-                .collect();
-            if is_non_identity && transposed_shape.len() == padded_input_shape.len() {
-                let transposed_name = format!("{}_input_layout", node.name);
-                result.push_output_op(
-                    make_empty_tensor(
-                        transposed_name.clone(),
-                        transposed_shape.clone(),
-                        actual_tensor_dtype(graph, input_node),
-                    ),
-                    Op::Transpose,
-                    Attribute::Transpose(TransposeAttribute {
-                        perms: perms.clone(),
-                    }),
-                    vec![tile_input_name],
-                );
-                tile_input_name = transposed_name;
-                tile_input_shape = transposed_shape;
-            }
-        }
-    }
-
-    let multiples: Vec<i32> = tile_input_shape
+    let multiples: Vec<i32> = logical_input
         .iter()
-        .zip(output_shape.iter())
+        .zip(target_shape.iter())
         .map(|(&input_dim, &output_dim)| {
             if input_dim == output_dim {
                 1
@@ -720,22 +709,7 @@ pub(super) fn emit_expand(ctx: &EmitContext) -> EmitResult {
         })
         .collect();
 
-    let multiples_name = format!("{}_multiples", node.name);
-    push_inline_const(
-        &mut result,
-        make_shape_const_tensor(multiples_name.clone(), multiples),
-    );
-    result.push_output_op(
-        make_empty_tensor(
-            primary_output_name(graph, node),
-            output_shape,
-            actual_tensor_dtype(graph, input_node),
-        ),
-        Op::Tile,
-        Attribute::None,
-        vec![tile_input_name, multiples_name],
-    );
-    result
+    emit_tile_with_multiples(graph, node, store, input_name, input_node, multiples, tile_rank)
 }
 
 pub(super) fn emit_repeat(ctx: &EmitContext) -> EmitResult {
