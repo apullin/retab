@@ -1,33 +1,32 @@
 use super::emitter::EmitContext;
 use super::*;
 
-macro_rules! direct_unary_emitters {
-    ($($vis:vis fn $name:ident => ($op:expr, $attr:expr);)+) => {
-        $(
-            $vis fn $name(ctx: &EmitContext) -> EmitResult {
-                ctx.emit_unary($op, $attr)
-            }
-        )+
+/// Register direct unary ops from a flat table of `(OpTarget, Op, Attribute)`.
+/// Each entry becomes an inline non-capturing closure coerced to `EmitFn`.
+macro_rules! register_unary {
+    ($table:expr; $( $target:expr => $op:expr, $attr:expr; )+) => {
+        $table.extend([
+            $( ($target, (|ctx: &EmitContext| ctx.emit_unary($op, $attr)) as EmitFn), )+
+        ]);
     };
 }
 
-macro_rules! direct_binary_emitters {
-    ($($vis:vis fn $name:ident => ($op:expr, $attr:expr);)+) => {
-        $(
-            $vis fn $name(ctx: &EmitContext) -> EmitResult {
-                ctx.emit_binary($op, $attr)
-            }
-        )+
+/// Register direct binary ops from a flat table of `(OpTarget, Op, Attribute)`.
+macro_rules! register_binary {
+    ($table:expr; $( $target:expr => $op:expr, $attr:expr; )+) => {
+        $table.extend([
+            $( ($target, (|ctx: &EmitContext| ctx.emit_binary($op, $attr)) as EmitFn), )+
+        ]);
     };
 }
 
-macro_rules! bool_binary_emitters {
-    ($($vis:vis fn $name:ident => ($op:expr, $attr:expr, $swap_inputs:expr);)+) => {
-        $(
-            $vis fn $name(ctx: &EmitContext) -> EmitResult {
-                ctx.emit_bool_binary($op, $attr, $swap_inputs)
-            }
-        )+
+/// Register bool-output binary ops from a flat table of
+/// `(OpTarget, Op, Attribute, swap_inputs)`.
+macro_rules! register_bool_binary {
+    ($table:expr; $( $target:expr => $op:expr, $attr:expr, $swap:expr; )+) => {
+        $table.extend([
+            $( ($target, (|ctx: &EmitContext| ctx.emit_bool_binary($op, $attr, $swap)) as EmitFn), )+
+        ]);
     };
 }
 
