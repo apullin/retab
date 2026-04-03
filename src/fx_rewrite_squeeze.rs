@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 
+use crate::fx_decompose_ops::resolve_aten_op;
 use crate::fx_graph::FxGraphModule;
 use crate::fx_pass::FxPass;
 use crate::fx_utils;
@@ -111,29 +112,8 @@ impl FxPass for FxRewriteSqueezePass {
         }
 
         // Resolve view_copy and permute_copy op targets
-        let view_copy_op = py.eval_bound(
-            "getattr(getattr(getattr(getattr(__import__('executorch.exir.dialects._ops', fromlist=['ops']), 'ops'), 'edge'), 'aten'), 'view_copy').default",
-            None,
-            None,
-        ).or_else(|_| {
-            py.eval_bound(
-                "__import__('torch').ops.aten.view_copy.default",
-                None,
-                None,
-            )
-        })?;
-
-        let permute_copy_op = py.eval_bound(
-            "getattr(getattr(getattr(getattr(__import__('executorch.exir.dialects._ops', fromlist=['ops']), 'ops'), 'edge'), 'aten'), 'permute_copy').default",
-            None,
-            None,
-        ).or_else(|_| {
-            py.eval_bound(
-                "__import__('torch').ops.aten.permute_copy.default",
-                None,
-                None,
-            )
-        })?;
+        let view_copy_op = resolve_aten_op(py, "view_copy.default")?;
+        let permute_copy_op = resolve_aten_op(py, "permute_copy.default")?;
 
         let graph = gm.gm_ref().getattr("graph")?;
 

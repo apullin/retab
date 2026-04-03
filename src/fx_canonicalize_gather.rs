@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
+use crate::fx_decompose_ops::{resolve_aten_op, resolve_tosa_gather_op, NodeInserter};
 use crate::fx_graph::{meta_val, FxGraphModule};
 use crate::fx_utils;
 
@@ -12,14 +12,6 @@ crate::fx_pass!(
     matches: |target, _node| target.contains("aten.gather.default"),
     transform: |py, graph, gm, node, debug| canonicalize_gather(py, &graph, gm, node, debug).map(|_| ())
 );
-
-fn resolve_tosa_gather_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-    py.eval_bound(
-        "getattr(getattr(getattr(getattr(__import__('executorch.exir.dialects._ops', fromlist=['ops']), 'ops'), 'backend'), 'tosa'), 'GATHER').default",
-        None,
-        None,
-    )
-}
 
 
 fn set_tensor_meta_val_shape(

@@ -113,20 +113,12 @@ pub fn resolve_edge_op<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, 
 
 /// Resolve the TOSA GATHER op target: `backend.tosa.GATHER.default`.
 pub fn resolve_tosa_gather_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-    py.eval_bound(
-        "getattr(getattr(getattr(getattr(__import__('executorch.exir.dialects._ops', fromlist=['ops']), 'ops'), 'backend'), 'tosa'), 'GATHER').default",
-        None,
-        None,
-    )
+    resolve_tosa_backend_op(py, "GATHER", "gather")
 }
 
 /// Resolve the TOSA SCATTER op target: `backend.tosa.SCATTER.default`.
 pub fn resolve_tosa_scatter_op<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-    py.eval_bound(
-        "getattr(getattr(getattr(getattr(__import__('executorch.exir.dialects._ops', fromlist=['ops']), 'ops'), 'backend'), 'tosa'), 'SCATTER').default",
-        None,
-        None,
-    )
+    resolve_tosa_backend_op(py, "SCATTER", "scatter")
 }
 
 /// Resolve a TOSA backend op target: `backend.tosa.<NAME>.default`.
