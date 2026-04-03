@@ -1,6 +1,5 @@
 use crate::fx_annotate_output_dim_order;
 use crate::fx_canonicalize_gather;
-use crate::fx_collapse_round;
 use crate::fx_cast_int64;
 use crate::fx_conv1d_unsqueeze;
 use crate::fx_convert_clamp;

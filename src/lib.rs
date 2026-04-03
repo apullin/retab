@@ -40,7 +40,6 @@ mod fx_fuse_equal_placeholders;
 mod fx_fuse_quant_activation;
 mod fx_graph;
 mod fx_insert_rescale;
-mod fx_collapse_round;
 mod fx_insert_table_ops;
 mod fx_memory_format;
 mod fx_pass;
