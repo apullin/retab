@@ -30,7 +30,7 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
     let mut base_dtype = semantic_output_dtype;
     let sum_name = format!("{}_sum", node.name);
     let mut current_input = spec.input_name;
-    let mut current_shape = spec.input_shape.clone();
+    let current_shape = spec.input_shape.clone();
 
     if matches!(input_dtype, DType::Int8 | DType::Int16) && is_float_dtype(semantic_output_dtype) {
         let ir_output_dtype = node.meta.val.dtype;
@@ -38,85 +38,39 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
         let scale = input_qparam.map(|qp| qp.scale).unwrap_or(1.0);
         let zero_point = input_qparam.map(|qp| qp.zero_point as f64).unwrap_or(0.0);
 
-        let cast_name = format!("{}_mean_input_cast", node.name);
-        result.push_output_op(
-            TosaTensor::new(cast_name.clone(), current_shape.clone(), semantic_output_dtype),
-            Op::Cast,
-            Attribute::Cast(CastAttribute),
-            vec![current_input.clone()],
+        current_input = super::emit_quant_to_float_chain(
+            &mut result,
+            &node.name,
+            current_input,
+            &current_shape,
+            ir_output_dtype,
+            semantic_output_dtype,
+            scale,
+            zero_point,
+            "mean",
         );
-        current_input = cast_name;
-
-        if zero_point != 0.0 {
-            let zp_name = format!("{}_mean_input_zp", node.name);
-            if let Some(zp_tensor) = make_filled_const_tensor(
-                zp_name.clone(),
-                current_shape.clone(),
-                ir_output_dtype,
-                zero_point,
-            ) {
-                push_inline_const(&mut result, zp_tensor);
-                let sub_name = format!("{}_mean_input_sub", node.name);
-                result.push_output_op(
-                    TosaTensor::new(sub_name.clone(), current_shape.clone(), semantic_output_dtype),
-                    Op::Sub,
-                    Attribute::Sub(SubAttribute),
-                    vec![current_input, zp_name],
-                );
-                current_input = sub_name;
-            }
-        }
-
-        if (scale - 1.0).abs() > f64::EPSILON {
-            let scale_name = format!("{}_mean_input_scale", node.name);
-            if let Some(scale_tensor) = make_filled_const_tensor(
-                scale_name.clone(),
-                current_shape.clone(),
-                ir_output_dtype,
-                scale,
-            ) {
-                push_inline_const(&mut result, scale_tensor);
-                let shift_name =
-                    push_shift_const(&mut result, &format!("{}_mean_input", node.name));
-                let mul_name = format!("{}_mean_input_float", node.name);
-                result.push_output_op(
-                    TosaTensor::new(mul_name.clone(), current_shape.clone(), semantic_output_dtype),
-                    Op::Mul,
-                    Attribute::Mul(MulAttribute { shift: 0 }),
-                    vec![current_input, scale_name, shift_name],
-                );
-                current_input = mul_name;
-            }
-        }
 
         base_dtype = semantic_output_dtype;
     }
 
-    for (idx, axis) in spec.axes.iter().enumerate() {
-        let mut out_shape = current_shape.clone();
-        if let Some(slot) = out_shape.get_mut(axis.tosa_axis as usize) {
-            *slot = 1;
-        }
-
-        let is_last = idx == spec.axes.len() - 1;
-        let out_name = if is_last {
-            sum_name.clone()
-        } else {
-            format!("{}_reduce_sum_axis{}", node.name, axis.raw_dim)
-        };
-
-        result.push_output_op(
-            TosaTensor::new(out_name.clone(), out_shape.clone(), base_dtype),
-            Op::ReduceSum,
-            Attribute::ReduceSum(ReduceSumAttribute {
-                axis: axis.tosa_axis,
-            }),
-            vec![current_input.clone()],
-        );
-
-        current_input = out_name;
-        current_shape = out_shape;
-    }
+    let (reduce_output, reduce_shape) = super::emit_multi_axis_reduce_loop(
+        &mut result,
+        &node.name,
+        &spec.axes,
+        spec.keepdim,
+        current_input,
+        current_shape,
+        base_dtype,
+        Op::ReduceSum,
+        |tosa_axis| {
+            Attribute::ReduceSum(ReduceSumAttribute { axis: tosa_axis })
+        },
+        "reduce_sum_axis",
+        sum_name.clone(),
+        true, // final_on_last: always use sum_name on last iteration
+    );
+    let _current_input = reduce_output;
+    let current_shape = reduce_shape;
 
     let recip_val = 1.0 / reduce_count;
     let recip_name = format!("{}_mean_recip", node.name);

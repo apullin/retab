@@ -22,49 +22,45 @@ fn emit_reduce_extrema(
     let spec = ParsedReduceSpec::parse(graph, node, store, false);
     let mut result = EmitResult::default();
     let base_dtype = node_output_dtype(node);
-    let mut current_input = spec.input_name;
-    let mut current_shape = spec.input_shape.clone();
 
-    for (idx, axis) in spec.axes.iter().enumerate() {
-        let mut out_shape = current_shape.clone();
-        if let Some(slot) = out_shape.get_mut(axis.tosa_axis as usize) {
-            *slot = 1;
-        }
+    let intermediate_prefix = match kind {
+        ReduceExtremaKind::Any => "reduce_any_axis",
+        ReduceExtremaKind::Max => "reduce_max_axis",
+        ReduceExtremaKind::Min => "reduce_min_axis",
+    };
 
-        let is_last_reduce = idx == spec.axes.len() - 1 && spec.keepdim;
-        let out_name = if is_last_reduce {
-            node.name.clone()
-        } else {
-            let name = match kind {
-                ReduceExtremaKind::Any => "reduce_any",
-                ReduceExtremaKind::Max => "reduce_max",
-                ReduceExtremaKind::Min => "reduce_min",
-            };
-            format!("{}_{}_axis{}", node.name, name, axis.raw_dim)
-        };
+    let make_attr: Box<dyn Fn(i32) -> Attribute> = match kind {
+        ReduceExtremaKind::Any => Box::new(|tosa_axis| {
+            Attribute::ReduceAny(ReduceAnyAttribute { axis: tosa_axis })
+        }),
+        ReduceExtremaKind::Min => Box::new(|tosa_axis| {
+            Attribute::ReduceMin(ReduceMinAttribute {
+                axis: tosa_axis,
+                nan_mode: NanPropagationMode::Propagate,
+            })
+        }),
+        ReduceExtremaKind::Max => Box::new(|tosa_axis| {
+            Attribute::ReduceMax(ReduceMaxAttribute {
+                axis: tosa_axis,
+                nan_mode: NanPropagationMode::Propagate,
+            })
+        }),
+    };
 
-        result.push_output_op(
-            TosaTensor::new(out_name.clone(), out_shape.clone(), base_dtype),
-            op,
-            match kind {
-                ReduceExtremaKind::Any => Attribute::ReduceAny(ReduceAnyAttribute {
-                    axis: axis.tosa_axis,
-                }),
-                ReduceExtremaKind::Min => Attribute::ReduceMin(ReduceMinAttribute {
-                    axis: axis.tosa_axis,
-                    nan_mode: NanPropagationMode::Propagate,
-                }),
-                ReduceExtremaKind::Max => Attribute::ReduceMax(ReduceMaxAttribute {
-                    axis: axis.tosa_axis,
-                    nan_mode: NanPropagationMode::Propagate,
-                }),
-            },
-            vec![current_input.clone()],
-        );
-
-        current_input = out_name;
-        current_shape = out_shape;
-    }
+    let (current_input, _current_shape) = super::emit_multi_axis_reduce_loop(
+        &mut result,
+        &node.name,
+        &spec.axes,
+        spec.keepdim,
+        spec.input_name,
+        spec.input_shape.clone(),
+        base_dtype,
+        op,
+        make_attr,
+        intermediate_prefix,
+        node.name.clone(),
+        false, // final_on_last: only use node.name when keepdim
+    );
 
     if !spec.keepdim {
         let final_shape = actual_tensor_shape(graph, store, node);

@@ -11,36 +11,163 @@ pub(super) fn register(table: &mut EmitterTable) {
     ]);
 }
 
+// ---------------------------------------------------------------------------
+// Shared infrastructure for all conv emitters
+// ---------------------------------------------------------------------------
+
+struct ParsedConvSpec {
+    input_names: Vec<String>,
+    pad: Vec<i32>,
+    stride: Vec<i32>,
+    dilation: Vec<i32>,
+    input_zp: i32,
+    weight_zp: i32,
+    acc_type: DType,
+    local_bound: bool,
+}
+
+impl ParsedConvSpec {
+    /// Parse from aten-style positional args (used by `emit_aten_conv2d`).
+    fn parse_aten(ctx: &EmitContext) -> Self {
+        let node = ctx.node;
+        let input_names = ctx.input_names();
+        let stride = arg_i32_list(node, 3);
+        let dilation = arg_i32_list(node, 5);
+        let acc_type = conv_accumulator_dtype(node);
+        let (input_zp, weight_zp) = Self::extract_zp_from_qparams(node);
+        // For aten, pad is computed externally via adjusted_tosa_pad_for_raw_aten_conv,
+        // so we store the raw padding arg here for the caller to use.
+        let pad = arg_i32_list(node, 4);
+        Self {
+            input_names,
+            pad,
+            stride,
+            dilation,
+            input_zp,
+            weight_zp,
+            acc_type,
+            local_bound: false,
+        }
+    }
+
+    /// Parse from TOSA-style kwargs-first, positional-fallback args
+    /// (used by `emit_conv2d`, `emit_conv3d`, `emit_depthwise_conv2d`).
+    fn parse_tosa(ctx: &EmitContext) -> Self {
+        let node = ctx.node;
+        let input_names = ctx.input_names();
+        let pad = {
+            let kw = kwarg_i32_list(node, "pad");
+            if kw.is_empty() { arg_i32_list(node, 4) } else { kw }
+        };
+        let stride = {
+            let kw = kwarg_i32_list(node, "stride");
+            if kw.is_empty() { arg_i32_list(node, 3) } else { kw }
+        };
+        let dilation = {
+            let kw = kwarg_i32_list(node, "dilation");
+            if kw.is_empty() { arg_i32_list(node, 5) } else { kw }
+        };
+        let local_bound = kwarg_bool(node, "local_bound", false);
+        let acc_type = conv_accumulator_dtype(node);
+        let (input_zp, weight_zp) = Self::extract_zp_tosa(node);
+        Self {
+            input_names,
+            pad,
+            stride,
+            dilation,
+            input_zp,
+            weight_zp,
+            acc_type,
+            local_bound,
+        }
+    }
+
+    /// Extract zero-point values from input_qparams (aten path -- no kwarg fallback).
+    fn extract_zp_from_qparams(node: &Node) -> (i32, i32) {
+        let input_zp = node
+            .meta
+            .input_qparams
+            .iter()
+            .find(|(pos, _)| *pos == 0)
+            .map(|(_, qp)| qp.zero_point as i32)
+            .unwrap_or(0);
+        let weight_zp = node
+            .meta
+            .input_qparams
+            .iter()
+            .find(|(pos, _)| *pos == 1)
+            .map(|(_, qp)| qp.zero_point as i32)
+            .unwrap_or(0);
+        (input_zp, weight_zp)
+    }
+
+    /// Extract zero-point values with kwarg fallback (tosa path).
+    fn extract_zp_tosa(node: &Node) -> (i32, i32) {
+        let input_zp = node
+            .meta
+            .input_qparams
+            .iter()
+            .find(|(pos, _)| *pos == 0)
+            .map(|(_, qp)| qp.zero_point as i32)
+            .unwrap_or_else(|| kwarg_i32(node, "input_zp", 0));
+        let weight_zp = node
+            .meta
+            .input_qparams
+            .iter()
+            .find(|(pos, _)| *pos == 1)
+            .map(|(_, qp)| qp.zero_point as i32)
+            .unwrap_or_else(|| kwarg_i32(node, "weight_zp", 0));
+        (input_zp, weight_zp)
+    }
+
+    /// Create zero-point tensors and build the full conv input name list.
+    /// If inputs already have 5+ entries (zp already present), returns them as-is.
+    fn prepare_inputs(
+        &self,
+        result: &mut EmitResult,
+        graph: &Graph,
+        node: &Node,
+    ) -> Vec<String> {
+        if self.input_names.len() >= 5 {
+            return self.input_names.clone();
+        }
+        let (izp, wzp) =
+            push_input_weight_zp_tensors(result, graph, node, self.input_zp, self.weight_zp);
+        extend_conv_inputs(self.input_names.clone(), izp, wzp)
+    }
+
+    /// Return stride with a default fill value when empty.
+    fn stride_or(&self, default: Vec<i32>) -> Vec<i32> {
+        if self.stride.is_empty() { default } else { self.stride.clone() }
+    }
+
+    /// Return dilation with a default fill value when empty.
+    fn dilation_or(&self, default: Vec<i32>) -> Vec<i32> {
+        if self.dilation.is_empty() { default } else { self.dilation.clone() }
+    }
+
+    /// Return pad with a default fill value when empty.
+    fn pad_or(&self, default: Vec<i32>) -> Vec<i32> {
+        if self.pad.is_empty() { default } else { self.pad.clone() }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Emitters
+// ---------------------------------------------------------------------------
+
 pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = ctx.input_names();
-    let stride = arg_i32_list(node, 3);
-    let padding = arg_i32_list(node, 4);
-    let dilation = arg_i32_list(node, 5);
-    let groups = arg_i64(node, 8, 1);
-    let pad = adjusted_tosa_pad_for_raw_aten_conv(graph, store, node, &padding, &stride, &dilation);
-    let acc_type = conv_accumulator_dtype(node);
 
-    let input_zp_val = node
-        .meta
-        .input_qparams
-        .iter()
-        .find(|(pos, _)| *pos == 0)
-        .map(|(_, qp)| qp.zero_point as i32)
-        .unwrap_or(0);
-    let weight_zp_val = node
-        .meta
-        .input_qparams
-        .iter()
-        .find(|(pos, _)| *pos == 1)
-        .map(|(_, qp)| qp.zero_point as i32)
-        .unwrap_or(0);
-    let (input_zp_name, weight_zp_name) =
-        push_input_weight_zp_tensors(&mut result, graph, node, input_zp_val, weight_zp_val);
-    let conv_inputs = extend_conv_inputs(input_names, input_zp_name, weight_zp_name);
+    let spec = ParsedConvSpec::parse_aten(ctx);
+    let groups = arg_i64(node, 8, 1);
+    let pad = adjusted_tosa_pad_for_raw_aten_conv(
+        graph, store, node, &spec.pad, &spec.stride, &spec.dilation,
+    );
+    let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
 
     let is_depthwise = if let Some(conv_info_entry) = node
         .kwargs
@@ -54,11 +181,7 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> Emi
                 .node(*input_id)
                 .map(|n| {
                     let s = n.meta.val.shape_slice();
-                    if s.len() >= 2 {
-                        s[1]
-                    } else {
-                        0
-                    }
+                    if s.len() >= 2 { s[1] } else { 0 }
                 })
                 .unwrap_or(0)
         } else {
@@ -69,44 +192,32 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> Emi
         false
     };
 
-    let stride = if stride.is_empty() {
-        vec![1, 1]
-    } else {
-        stride
-    };
-    let dilation = if dilation.is_empty() {
-        vec![1, 1]
-    } else {
-        dilation
-    };
+    let stride = spec.stride_or(vec![1, 1]);
+    let dilation = spec.dilation_or(vec![1, 1]);
 
     if is_depthwise {
         result.push_output_op(
-            compute_depthwise_conv2d_nhwc_output(
-                graph, store, node, &pad, &stride, &dilation,
-            ),
+            compute_depthwise_conv2d_nhwc_output(graph, store, node, &pad, &stride, &dilation),
             Op::DepthwiseConv2d,
             Attribute::DepthwiseConv2d(DepthwiseConv2dAttribute {
                 pad,
                 stride,
                 dilation,
                 local_bound: false,
-                acc_type,
+                acc_type: spec.acc_type,
             }),
             conv_inputs,
         );
     } else {
         result.push_output_op(
-            compute_conv2d_nhwc_output(
-                graph, store, node, &pad, &stride, &dilation,
-            ),
+            compute_conv2d_nhwc_output(graph, store, node, &pad, &stride, &dilation),
             Op::Conv2d,
             Attribute::Conv2d(Conv2dAttribute {
                 pad,
                 stride,
                 dilation,
                 local_bound: false,
-                acc_type,
+                acc_type: spec.acc_type,
             }),
             conv_inputs,
         );
@@ -120,108 +231,26 @@ pub(in crate::serialize::visitors) fn emit_conv2d(ctx: &EmitContext) -> EmitResu
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = ctx.input_names();
-    let pad = {
-        let kw = kwarg_i32_list(node, "pad");
-        if kw.is_empty() {
-            arg_i32_list(node, 4)
-        } else {
-            kw
-        }
-    };
-    let stride = {
-        let kw = kwarg_i32_list(node, "stride");
-        if kw.is_empty() {
-            arg_i32_list(node, 3)
-        } else {
-            kw
-        }
-    };
-    let dilation = {
-        let kw = kwarg_i32_list(node, "dilation");
-        if kw.is_empty() {
-            arg_i32_list(node, 5)
-        } else {
-            kw
-        }
-    };
-    let local_bound = kwarg_bool(node, "local_bound", false);
 
-    let raw_pad = if pad.is_empty() {
-        vec![0, 0, 0, 0]
-    } else {
-        pad.clone()
-    };
-    let stride_for_shape = if stride.is_empty() {
-        vec![1, 1]
-    } else {
-        stride.clone()
-    };
-    let dilation_for_shape = if dilation.is_empty() {
-        vec![1, 1]
-    } else {
-        dilation.clone()
-    };
-    let pad_for_shape = adjusted_tosa_pad_for_emitted_conv2d(
-        graph,
-        store,
-        node,
-        &raw_pad,
-        &stride_for_shape,
-        &dilation_for_shape,
-    );
-    result.tensors.push(compute_conv2d_nhwc_output(
-        graph,
-        store,
-        node,
-        &pad_for_shape,
-        &stride_for_shape,
-        &dilation_for_shape,
-    ));
+    let spec = ParsedConvSpec::parse_tosa(ctx);
+    let raw_pad = spec.pad_or(vec![0, 0, 0, 0]);
+    let stride = spec.stride_or(vec![1, 1]);
+    let dilation = spec.dilation_or(vec![1, 1]);
+    let pad = adjusted_tosa_pad_for_emitted_conv2d(graph, store, node, &raw_pad, &stride, &dilation);
+    let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
 
-    let acc_type = conv_accumulator_dtype(node);
-    let conv_inputs = if input_names.len() >= 5 {
-        input_names
-    } else {
-        let input_zp_val = node
-            .meta
-            .input_qparams
-            .iter()
-            .find(|(pos, _)| *pos == 0)
-            .map(|(_, qp)| qp.zero_point as i32)
-            .unwrap_or_else(|| kwarg_i32(node, "input_zp", 0));
-        let weight_zp_val = node
-            .meta
-            .input_qparams
-            .iter()
-            .find(|(pos, _)| *pos == 1)
-            .map(|(_, qp)| qp.zero_point as i32)
-            .unwrap_or_else(|| kwarg_i32(node, "weight_zp", 0));
-        let (input_zp_name, weight_zp_name) =
-            push_input_weight_zp_tensors(&mut result, graph, node, input_zp_val, weight_zp_val);
-        extend_conv_inputs(input_names, input_zp_name, weight_zp_name)
-    };
-
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        compute_conv2d_nhwc_output(graph, store, node, &pad, &stride, &dilation),
         Op::Conv2d,
         Attribute::Conv2d(Conv2dAttribute {
-            pad: pad_for_shape,
-            stride: if stride.is_empty() {
-                vec![1, 1]
-            } else {
-                stride
-            },
-            dilation: if dilation.is_empty() {
-                vec![1, 1]
-            } else {
-                dilation
-            },
-            local_bound,
-            acc_type,
+            pad,
+            stride,
+            dilation,
+            local_bound: spec.local_bound,
+            acc_type: spec.acc_type,
         }),
         conv_inputs,
-        vec![node.name.clone()],
-    ));
+    );
     result
 }
 
@@ -230,108 +259,26 @@ pub(in crate::serialize::visitors) fn emit_conv3d(ctx: &EmitContext) -> EmitResu
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = ctx.input_names();
-    let pad = {
-        let kw = kwarg_i32_list(node, "pad");
-        if kw.is_empty() {
-            arg_i32_list(node, 4)
-        } else {
-            kw
-        }
-    };
-    let stride = {
-        let kw = kwarg_i32_list(node, "stride");
-        if kw.is_empty() {
-            arg_i32_list(node, 3)
-        } else {
-            kw
-        }
-    };
-    let dilation = {
-        let kw = kwarg_i32_list(node, "dilation");
-        if kw.is_empty() {
-            arg_i32_list(node, 5)
-        } else {
-            kw
-        }
-    };
-    let local_bound = kwarg_bool(node, "local_bound", false);
 
-    let raw_pad = if pad.is_empty() {
-        vec![0, 0, 0, 0, 0, 0]
-    } else {
-        pad.clone()
-    };
-    let stride_for_shape = if stride.is_empty() {
-        vec![1, 1, 1]
-    } else {
-        stride.clone()
-    };
-    let dilation_for_shape = if dilation.is_empty() {
-        vec![1, 1, 1]
-    } else {
-        dilation.clone()
-    };
-    let pad_for_shape = adjusted_tosa_pad_for_emitted_conv3d(
-        graph,
-        store,
-        node,
-        &raw_pad,
-        &stride_for_shape,
-        &dilation_for_shape,
-    );
-    result.tensors.push(compute_conv3d_ndhwc_output(
-        graph,
-        store,
-        node,
-        &pad_for_shape,
-        &stride_for_shape,
-        &dilation_for_shape,
-    ));
+    let spec = ParsedConvSpec::parse_tosa(ctx);
+    let raw_pad = spec.pad_or(vec![0, 0, 0, 0, 0, 0]);
+    let stride = spec.stride_or(vec![1, 1, 1]);
+    let dilation = spec.dilation_or(vec![1, 1, 1]);
+    let pad = adjusted_tosa_pad_for_emitted_conv3d(graph, store, node, &raw_pad, &stride, &dilation);
+    let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
 
-    let acc_type = conv_accumulator_dtype(node);
-    let conv_inputs = if input_names.len() >= 5 {
-        input_names
-    } else {
-        let input_zp_val = node
-            .meta
-            .input_qparams
-            .iter()
-            .find(|(pos, _)| *pos == 0)
-            .map(|(_, qp)| qp.zero_point as i32)
-            .unwrap_or_else(|| kwarg_i32(node, "input_zp", 0));
-        let weight_zp_val = node
-            .meta
-            .input_qparams
-            .iter()
-            .find(|(pos, _)| *pos == 1)
-            .map(|(_, qp)| qp.zero_point as i32)
-            .unwrap_or_else(|| kwarg_i32(node, "weight_zp", 0));
-        let (input_zp_name, weight_zp_name) =
-            push_input_weight_zp_tensors(&mut result, graph, node, input_zp_val, weight_zp_val);
-        extend_conv_inputs(input_names, input_zp_name, weight_zp_name)
-    };
-
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        compute_conv3d_ndhwc_output(graph, store, node, &pad, &stride, &dilation),
         Op::Conv3d,
         Attribute::Conv3d(Conv3dAttribute {
-            pad: pad_for_shape,
-            stride: if stride.is_empty() {
-                vec![1, 1, 1]
-            } else {
-                stride
-            },
-            dilation: if dilation.is_empty() {
-                vec![1, 1, 1]
-            } else {
-                dilation
-            },
-            local_bound,
-            acc_type,
+            pad,
+            stride,
+            dilation,
+            local_bound: spec.local_bound,
+            acc_type: spec.acc_type,
         }),
         conv_inputs,
-        vec![node.name.clone()],
-    ));
+    );
     result
 }
 
@@ -340,107 +287,25 @@ pub(in crate::serialize::visitors) fn emit_depthwise_conv2d(ctx: &EmitContext) -
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = ctx.input_names();
-    let pad = {
-        let kw = kwarg_i32_list(node, "pad");
-        if kw.is_empty() {
-            arg_i32_list(node, 4)
-        } else {
-            kw
-        }
-    };
-    let stride = {
-        let kw = kwarg_i32_list(node, "stride");
-        if kw.is_empty() {
-            arg_i32_list(node, 3)
-        } else {
-            kw
-        }
-    };
-    let dilation = {
-        let kw = kwarg_i32_list(node, "dilation");
-        if kw.is_empty() {
-            arg_i32_list(node, 5)
-        } else {
-            kw
-        }
-    };
-    let local_bound = kwarg_bool(node, "local_bound", false);
-    let acc_type = conv_accumulator_dtype(node);
 
-    let raw_pad = if pad.is_empty() {
-        vec![0, 0, 0, 0]
-    } else {
-        pad.clone()
-    };
-    let stride_for_shape = if stride.is_empty() {
-        vec![1, 1]
-    } else {
-        stride.clone()
-    };
-    let dilation_for_shape = if dilation.is_empty() {
-        vec![1, 1]
-    } else {
-        dilation.clone()
-    };
-    let pad_for_shape = adjusted_tosa_pad_for_emitted_conv2d(
-        graph,
-        store,
-        node,
-        &raw_pad,
-        &stride_for_shape,
-        &dilation_for_shape,
-    );
-    result.tensors.push(compute_depthwise_conv2d_nhwc_output(
-        graph,
-        store,
-        node,
-        &pad_for_shape,
-        &stride_for_shape,
-        &dilation_for_shape,
-    ));
+    let spec = ParsedConvSpec::parse_tosa(ctx);
+    let raw_pad = spec.pad_or(vec![0, 0, 0, 0]);
+    let stride = spec.stride_or(vec![1, 1]);
+    let dilation = spec.dilation_or(vec![1, 1]);
+    let pad = adjusted_tosa_pad_for_emitted_conv2d(graph, store, node, &raw_pad, &stride, &dilation);
+    let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
 
-    let conv_inputs = if input_names.len() >= 5 {
-        input_names
-    } else {
-        let input_zp_val = node
-            .meta
-            .input_qparams
-            .iter()
-            .find(|(pos, _)| *pos == 0)
-            .map(|(_, qp)| qp.zero_point as i32)
-            .unwrap_or_else(|| kwarg_i32(node, "input_zp", 0));
-        let weight_zp_val = node
-            .meta
-            .input_qparams
-            .iter()
-            .find(|(pos, _)| *pos == 1)
-            .map(|(_, qp)| qp.zero_point as i32)
-            .unwrap_or_else(|| kwarg_i32(node, "weight_zp", 0));
-        let (input_zp_name, weight_zp_name) =
-            push_input_weight_zp_tensors(&mut result, graph, node, input_zp_val, weight_zp_val);
-        extend_conv_inputs(input_names, input_zp_name, weight_zp_name)
-    };
-
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        compute_depthwise_conv2d_nhwc_output(graph, store, node, &pad, &stride, &dilation),
         Op::DepthwiseConv2d,
         Attribute::DepthwiseConv2d(DepthwiseConv2dAttribute {
-            pad: pad_for_shape,
-            stride: if stride.is_empty() {
-                vec![1, 1]
-            } else {
-                stride
-            },
-            dilation: if dilation.is_empty() {
-                vec![1, 1]
-            } else {
-                dilation
-            },
-            local_bound,
-            acc_type,
+            pad,
+            stride,
+            dilation,
+            local_bound: spec.local_bound,
+            acc_type: spec.acc_type,
         }),
         conv_inputs,
-        vec![node.name.clone()],
-    ));
+    );
     result
 }

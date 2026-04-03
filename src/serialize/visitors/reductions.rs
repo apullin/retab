@@ -152,3 +152,133 @@ enum ReduceExtremaKind {
     Max,
     Min,
 }
+
+/// Emit the dequantize-to-float chain: Cast -> Sub(zp) -> Mul(scale).
+///
+/// Given a quantised INT8/INT16 input, this appends up to three TOSA ops that
+/// convert it to a floating-point representation:
+///   1. Cast to `target_dtype`
+///   2. Sub(zero_point)  – skipped when zero_point == 0
+///   3. Mul(scale)       – skipped when scale == 1.0
+///
+/// Returns the name of the tensor produced by the last op in the chain.
+fn emit_quant_to_float_chain(
+    result: &mut EmitResult,
+    node_name: &str,
+    input_name: String,
+    input_shape: &[i32],
+    ir_dtype: crate::graph::ir::DType,
+    target_dtype: DType,
+    scale: f64,
+    zero_point: f64,
+    prefix: &str,
+) -> String {
+    // 1. Cast
+    let cast_name = format!("{}_{}_input_cast", node_name, prefix);
+    result.push_output_op(
+        TosaTensor::new(cast_name.clone(), input_shape.to_vec(), target_dtype),
+        Op::Cast,
+        Attribute::Cast(CastAttribute),
+        vec![input_name],
+    );
+    let mut current = cast_name;
+
+    // 2. Sub zero-point (when non-zero)
+    if zero_point != 0.0 {
+        let zp_name = format!("{}_{}_input_zp", node_name, prefix);
+        if let Some(zp_tensor) =
+            make_filled_const_tensor(zp_name.clone(), input_shape.to_vec(), ir_dtype, zero_point)
+        {
+            push_inline_const(result, zp_tensor);
+            let sub_name = format!("{}_{}_input_sub", node_name, prefix);
+            result.push_output_op(
+                TosaTensor::new(sub_name.clone(), input_shape.to_vec(), target_dtype),
+                Op::Sub,
+                Attribute::Sub(SubAttribute),
+                vec![current, zp_name],
+            );
+            current = sub_name;
+        }
+    }
+
+    // 3. Mul scale (when != 1.0)
+    if (scale - 1.0).abs() > f64::EPSILON {
+        let scale_name = format!("{}_{}_input_scale", node_name, prefix);
+        if let Some(scale_tensor) =
+            make_filled_const_tensor(scale_name.clone(), input_shape.to_vec(), ir_dtype, scale)
+        {
+            push_inline_const(result, scale_tensor);
+            let shift_name =
+                push_shift_const(result, &format!("{}_{}_input", node_name, prefix));
+            let mul_name = format!("{}_{}_input_float", node_name, prefix);
+            result.push_output_op(
+                TosaTensor::new(mul_name.clone(), input_shape.to_vec(), target_dtype),
+                Op::Mul,
+                Attribute::Mul(MulAttribute { shift: 0 }),
+                vec![current, scale_name, shift_name],
+            );
+            current = mul_name;
+        }
+    }
+
+    current
+}
+
+/// Emit a per-axis reduction loop, optionally followed by a reshape when
+/// `keepdim` is false.
+///
+/// Each iteration collapses one axis of the current tensor via `op` +
+/// `make_attr(tosa_axis)`.  The caller controls naming through:
+///
+///   - `intermediate_prefix` – used to build names for non-final reduce outputs
+///     (e.g. `"reduce_axis"` → `"{node}_reduce_axis{raw_dim}"`).
+///   - `final_name` – the tensor name to use for the last reduce output.
+///   - `final_on_last` – if `true`, `final_name` is used unconditionally on
+///     the last iteration; if `false`, it is only used when `keepdim` is set.
+///
+/// Returns `(last_tensor_name, last_shape)` so the caller can do any
+/// post-processing (e.g. multiply by reciprocal for mean, reshape, etc.).
+fn emit_multi_axis_reduce_loop(
+    result: &mut EmitResult,
+    node_name: &str,
+    axes: &[ReduceAxis],
+    keepdim: bool,
+    input_name: String,
+    input_shape: Vec<i32>,
+    dtype: DType,
+    op: Op,
+    make_attr: impl Fn(i32) -> Attribute,
+    intermediate_prefix: &str,
+    final_name: String,
+    final_on_last: bool,
+) -> (String, Vec<i32>) {
+    let mut current_input = input_name;
+    let mut current_shape = input_shape;
+
+    for (idx, axis) in axes.iter().enumerate() {
+        let mut out_shape = current_shape.clone();
+        if let Some(slot) = out_shape.get_mut(axis.tosa_axis as usize) {
+            *slot = 1;
+        }
+
+        let is_last = idx == axes.len() - 1;
+        let use_final = if final_on_last { is_last } else { is_last && keepdim };
+        let out_name = if use_final {
+            final_name.clone()
+        } else {
+            format!("{}_{}{}", node_name, intermediate_prefix, axis.raw_dim)
+        };
+
+        result.push_output_op(
+            TosaTensor::new(out_name.clone(), out_shape.clone(), dtype),
+            op,
+            make_attr(axis.tosa_axis),
+            vec![current_input.clone()],
+        );
+
+        current_input = out_name;
+        current_shape = out_shape;
+    }
+
+    (current_input, current_shape)
+}
