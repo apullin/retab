@@ -42,6 +42,7 @@ from fast_preprocess_cf_rewrites import (
     _restore_control_flow_output_dequantizes,
     _restore_missing_control_flow_input_rescales,
     _restore_missing_control_flow_rescale_qparams,
+    _rewrite_control_flow_quantization_boundaries,
 )
 from fast_preprocess_decomp_hooks import (
     _install_edge_decomp_fast_path,
@@ -65,12 +66,126 @@ from fast_preprocess_control_flow import (
     _restamp_control_flow_placeholder_dtypes,
     _restore_control_flow_pool_quant_boundaries,
     _restore_control_flow_unary_quant_boundaries,
-    _rewrite_control_flow_dequantize_nodes_standalone,
-    _rewrite_control_flow_quantize_nodes_standalone,
     _snapshot_control_flow_table_qparams,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _run_pre_rust_control_flow_phase(gm, edge_program) -> None:
+    from fx_helpers import collapse_decomposed_round_to_table
+
+    _regularize_control_flow_submodules(gm)
+    _annotate_control_flow_parent_rank4_dim_order(gm)
+    _prepare_control_flow_qparams(gm, edge_program)
+    _snapshot_control_flow_table_qparams(gm)
+    _reapply_control_flow_table_ops(gm, edge_program)
+    collapse_decomposed_round_to_table(gm)
+
+
+def _run_control_flow_submodule_rust_passes(gm, edge_program, arm_tosa_engine) -> None:
+    from executorch.backends.arm._passes.arm_pass_utils import (
+        get_cond_while_submodules_nested,
+    )
+
+    if os.environ.get("ARM_TOSA_ENGINE_FORCE_CF_RECURSIVE_PASSES") == "1":
+        for name, submodule, _ in get_cond_while_submodules_nested(gm):
+            arm_tosa_engine.run_fx_passes(submodule, edge_program)
+            logger.info(
+                "[fast_preprocess] ran recursive fx pass pipeline on control-flow submodule %s",
+                name,
+            )
+
+    for _, submodule, cf_node in get_cond_while_submodules_nested(gm):
+        cf_target = str(getattr(cf_node, "target", ""))
+        if "cond" in cf_target:
+            arm_tosa_engine.run_fx_cond_passes(submodule, edge_program)
+        else:
+            arm_tosa_engine.run_fx_submodule_passes(submodule)
+
+
+def _run_post_rust_control_flow_boundary_phase(gm, edge_program, compile_spec) -> None:
+    _reapply_control_flow_table_ops(gm, edge_program)
+    _rewrite_control_flow_quantization_boundaries(gm)
+    _canonicalize_control_flow_pool_binary_rescales(gm)
+    _reapply_control_flow_boundary_rescales(gm, include_inputs=True, include_outputs=False)
+    _prune_duplicate_control_flow_rescales(gm)
+    _repair_control_flow_binary_rescales(gm, compile_spec.tosa_spec)
+    _restore_control_flow_output_dequantizes(gm)
+
+    _regularize_control_flow_submodules(gm)
+    _restore_missing_control_flow_input_rescales(gm)
+    _restore_control_flow_unary_quant_boundaries(gm)
+    _restore_control_flow_pool_quant_boundaries(gm)
+    _refresh_control_flow_binary_input_rescales(gm)
+
+
+def _run_output_normalize_phase(gm) -> None:
+    _normalize_control_flow_output_layouts(gm)
+    _restamp_control_flow_placeholder_dtypes(gm)
+    _restore_missing_control_flow_rescale_qparams(gm)
+    _reapply_control_flow_boundary_rescales(
+        gm, include_inputs=False, include_outputs=True
+    )
+    _rewrite_control_flow_quantization_boundaries(gm)
+    _quantize_constant_only_control_flow_outputs(gm)
+    _regularize_control_flow_submodules(gm, include_inputs=False, include_outputs=True)
+    _remove_control_flow_noop_passthroughs(gm)
+    _annotate_control_flow_parent_rank4_dim_order(gm)
+    _annotate_control_flow_rank4_dim_order(gm)
+    _force_control_flow_rank4_output_dim_order(gm)
+    _refresh_tosa_transpose_fake_tensors(gm)
+    _refresh_tosa_dim_order_fake_tensors(gm)
+    _prune_duplicate_terminal_rescales(gm)
+    _restamp_control_flow_placeholder_dtypes(gm)
+    _restore_control_flow_float_compare_inputs(gm)
+
+
+def _merge_preprocess_state_dict(original_state_dict, edge_program):
+    import copy
+
+    merged_state_dict = original_state_dict
+    for key, value in dict(edge_program.state_dict).items():
+        if key not in merged_state_dict:
+            merged_state_dict[key] = copy.deepcopy(value)
+    return merged_state_dict
+
+
+def _maybe_dump_tosa_artifacts(edge_program, compile_spec, tosa_bytes) -> None:
+    import json
+    from pathlib import Path
+
+    from executorch.backends.arm.common.arm_compile_spec import ArmCompileSpec
+    from executorch.backends.arm.common.debug import debug_tosa_dump
+    from executorch.backends.arm.tosa.backend import arm_get_first_delegation_tag
+
+    artifact_path = compile_spec.get_intermediate_path()
+    if artifact_path:
+        tag = arm_get_first_delegation_tag(edge_program.graph_module)
+        suffix = "{}".format(f"_{tag}" if tag else "") + f"_{compile_spec.tosa_spec}"
+        debug_tosa_dump(bytes(tosa_bytes), artifact_path, suffix=suffix)
+
+        if compile_spec.tosa_debug_mode == ArmCompileSpec.DebugMode.JSON:
+            debug_json_path = Path(artifact_path) / "debug.json"
+            debug_json_path.parent.mkdir(parents=True, exist_ok=True)
+            debug_json_path.write_text(
+                json.dumps(
+                    {
+                        "tosa_spec": str(compile_spec.tosa_spec),
+                        "num_bytes": len(tosa_bytes),
+                        "delegate_tag": tag,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+
+    dump_path = os.environ.get("ARM_TOSA_ENGINE_DUMP_TOSA")
+    if dump_path:
+        dump_file = Path(dump_path)
+        dump_file.parent.mkdir(parents=True, exist_ok=True)
+        dump_file.write_bytes(bytes(tosa_bytes))
+        logger.info("[all_rust] dumped TOSA flatbuffer to %s", dump_file)
 
 
 
@@ -91,16 +206,6 @@ def _all_rust_preprocess(
     transformed graph, causing double rescales, double transposes, etc.).
     """
     import copy
-    import json
-    import os
-    from pathlib import Path
-
-    from executorch.backends.arm.common.arm_compile_spec import ArmCompileSpec
-    from executorch.backends.arm.common.debug import debug_tosa_dump
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
-    from executorch.backends.arm.tosa.backend import arm_get_first_delegation_tag
     t0 = time.perf_counter()
     gm = edge_program.graph_module
 
@@ -113,139 +218,23 @@ def _all_rust_preprocess(
 
     import arm_tosa_engine
 
-    # Match the control-flow submodule fake tensors to the parent graph before
-    # the Rust passes inspect placeholders and outputs.
-    _regularize_control_flow_submodules(gm)
-    _annotate_control_flow_parent_rank4_dim_order(gm)
-    _prepare_control_flow_qparams(gm, edge_program)
-    _snapshot_control_flow_table_qparams(gm)
-    # Parse, don't validate: control-flow table ops still have their original
-    # q/dq scaffolding at this point. Reapply TABLE lowering before the
-    # recursive FX-direct pass stack strips that local qparam context away,
-    # then keep the later repair pass as a safety net for any surviving raw
-    # table-capable ops.
-    # TESTING: Rust submodule pass handles this
-    _reapply_control_flow_table_ops(gm, edge_program)
-
-    # Collapse decomposed banker's-rounding into a TABLE before Rust passes.
-    # Python DecomposeRoundPass runs during quantization and the 12-op
-    # decomposition loses precision at the 0.5 tie-break; a TABLE is exact.
-    from fx_helpers import collapse_decomposed_round_to_table
-    collapse_decomposed_round_to_table(gm)
-
-    # Run the full FX-direct pipeline (all passes in Rust via PyO3)
+    _run_pre_rust_control_flow_phase(gm, edge_program)
     arm_tosa_engine.run_fx_passes(gm, edge_program)
     _debug_binary_rescales(gm, "after_run_fx_passes")
-    # The top-level graph still needs the full FX-direct pass stack, but
-    # recursively replaying that whole stack on control-flow submodules has
-    # proven too aggressive: it decomposes branch-local q/dq boundaries into
-    # large quant-arithmetic islands that diverge from the generic Arm path and
-    # destabilize TABLE/control-flow numerics. The explicit control-flow repair
-    # passes around this point already normalize branch signatures, qparams,
-    # table lowering, and boundary rescales, so keep branch graphs at that
-    # higher-level form by default. Set ARM_TOSA_ENGINE_FORCE_CF_RECURSIVE_PASSES=1
-    # to restore the old behavior for debugging.
-    if os.environ.get("ARM_TOSA_ENGINE_FORCE_CF_RECURSIVE_PASSES") == "1":
-        for name, submodule, _ in get_cond_while_submodules_nested(gm):
-            arm_tosa_engine.run_fx_passes(submodule, edge_program)
-            logger.info(
-                "[fast_preprocess] ran recursive fx pass pipeline on control-flow submodule %s",
-                name,
-            )
-    # Run safe pass subset on control-flow submodules.
-    # Cond branches get fold_qdq (safe); while loops don't (breaks carried state).
-    for name, submodule, cf_node in get_cond_while_submodules_nested(gm):
-        cf_target = str(getattr(cf_node, "target", ""))
-        if "cond" in cf_target:
-            arm_tosa_engine.run_fx_cond_passes(submodule, edge_program)
-        else:
-            arm_tosa_engine.run_fx_submodule_passes(submodule)
-
-    _reapply_control_flow_table_ops(gm, edge_program)
-    _rewrite_control_flow_quantize_nodes_standalone(gm)
-    _rewrite_control_flow_dequantize_nodes_standalone(gm)
-    _canonicalize_control_flow_pool_binary_rescales(gm)
-    _reapply_control_flow_boundary_rescales(gm, include_inputs=True, include_outputs=False)
-    _prune_duplicate_control_flow_rescales(gm)
-    _repair_control_flow_binary_rescales(gm, _compile_spec.tosa_spec)
-    _restore_control_flow_output_dequantizes(gm)
+    _run_control_flow_submodule_rust_passes(gm, edge_program, arm_tosa_engine)
+    _run_post_rust_control_flow_boundary_phase(gm, edge_program, _compile_spec)
     t_passes = time.perf_counter() - t0
     _dump_control_flow_submodules(gm, "after_rust_passes")
-
-    # Re-apply the same normalization after passes so serializer ingest sees
-    # branch signatures that still match the parent control-flow nodes.
-    _regularize_control_flow_submodules(gm)
-    _restore_missing_control_flow_input_rescales(gm)
-    _restore_control_flow_unary_quant_boundaries(gm)
-    _restore_control_flow_pool_quant_boundaries(gm)
-    _refresh_control_flow_binary_input_rescales(gm)
-    # Covered by Rust submodule passes — MUST KEEP for while-loop correctness
-    _normalize_control_flow_output_layouts(gm)
-    _restamp_control_flow_placeholder_dtypes(gm)
-    _restore_missing_control_flow_rescale_qparams(gm)
-    _reapply_control_flow_boundary_rescales(
-        gm, include_inputs=False, include_outputs=True
-    )
-    _rewrite_control_flow_quantize_nodes_standalone(gm)
-    _rewrite_control_flow_dequantize_nodes_standalone(gm)
-    _quantize_constant_only_control_flow_outputs(gm)
-    _regularize_control_flow_submodules(gm, include_inputs=False, include_outputs=True)
-    # Covered by Rust submodule passes — MUST KEEP for while-loop correctness
-    _remove_control_flow_noop_passthroughs(gm)
-    _annotate_control_flow_parent_rank4_dim_order(gm)
-    _annotate_control_flow_rank4_dim_order(gm)
-    _force_control_flow_rank4_output_dim_order(gm)
-    _refresh_tosa_transpose_fake_tensors(gm)
-    _refresh_tosa_dim_order_fake_tensors(gm)
-    _prune_duplicate_terminal_rescales(gm)
-    _restamp_control_flow_placeholder_dtypes(gm)
-    _restore_control_flow_float_compare_inputs(gm)
+    _run_output_normalize_phase(gm)
     _debug_binary_rescales(gm, "before_ingest_and_serialize")
     _dump_control_flow_submodules(gm, "after_control_flow_normalize")
 
-    # Merge in any pass-created constant placeholders added to the live
-    # ExportedProgram after the pre-pass snapshot. Keep original entries for
-    # existing keys so we do not pick up in-place mutations to legacy weights.
-    merged_state_dict = original_state_dict
-    for key, value in dict(edge_program.state_dict).items():
-        if key not in merged_state_dict:
-            merged_state_dict[key] = copy.deepcopy(value)
-
-    # Ingest + serialize only -- do NOT re-run IR passes (they already ran
-    # as FX-direct passes above). lower_to_tosa() would run
-    # build_phase2_pipeline() again, corrupting the graph with duplicate
-    # transformations.
+    merged_state_dict = _merge_preprocess_state_dict(original_state_dict, edge_program)
     tosa_bytes = arm_tosa_engine.ingest_and_serialize(
         gm, merged_state_dict, edge_program.graph_signature
     )
 
-    artifact_path = _compile_spec.get_intermediate_path()
-    if artifact_path:
-        tag = arm_get_first_delegation_tag(edge_program.graph_module)
-        suffix = "{}".format(f"_{tag}" if tag else "") + f"_{_compile_spec.tosa_spec}"
-        debug_tosa_dump(bytes(tosa_bytes), artifact_path, suffix=suffix)
-
-        if _compile_spec.tosa_debug_mode == ArmCompileSpec.DebugMode.JSON:
-            debug_json_path = Path(artifact_path) / "debug.json"
-            debug_json_path.parent.mkdir(parents=True, exist_ok=True)
-            debug_json_path.write_text(
-                json.dumps(
-                    {
-                        "tosa_spec": str(_compile_spec.tosa_spec),
-                        "num_bytes": len(tosa_bytes),
-                        "delegate_tag": tag,
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-            )
-
-    dump_path = os.environ.get("ARM_TOSA_ENGINE_DUMP_TOSA")
-    if dump_path:
-        dump_file = Path(dump_path)
-        dump_file.parent.mkdir(parents=True, exist_ok=True)
-        dump_file.write_bytes(bytes(tosa_bytes))
-        logger.info(f"[all_rust] dumped TOSA flatbuffer to {dump_file}")
+    _maybe_dump_tosa_artifacts(edge_program, _compile_spec, tosa_bytes)
 
     t_total = time.perf_counter() - t0
     logger.info(

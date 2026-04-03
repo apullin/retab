@@ -9,6 +9,16 @@ from fast_preprocess_cf_ctx import (
     _for_each_cf_submodule,
     _get_matching_fake_tensor,
 )
+from fast_preprocess_contracts import (
+    _ControlFlowBinaryAlignmentPlan,
+    _ControlFlowBinaryAlignmentEnv,
+    _ControlFlowBinaryOperandSpec,
+    _ControlFlowBinaryQparamContract,
+    _ControlFlowBinarySiblingAlignment,
+    _ControlFlowBoundarySite,
+    _ControlFlowInputBoundaryContract,
+    _ControlFlowOutputBoundaryContract,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,38 +115,6 @@ def _cleanup_and_recompile(module) -> None:
 
 
 @dataclass(frozen=True)
-class _ControlFlowInputBoundaryContract:
-    submodule: object
-    index: int
-    placeholder: object
-    input_qparam: object
-    output_qparam: object
-
-
-@dataclass(frozen=True)
-class _ControlFlowOutputBoundaryContract:
-    submodule: object
-    index: int
-    target_qparam: object
-
-
-@dataclass(frozen=True)
-class _ControlFlowBinaryQparamContract:
-    input_qparams: dict[int, object]
-    output_qparam: object
-
-
-@dataclass(frozen=True)
-class _ControlFlowBinaryAlignmentEnv:
-    parent_args: tuple[object, ...]
-    placeholders: tuple[object, ...]
-    placeholder_qparams: dict[int, object]
-    placeholder_index_by_name: dict[str, int]
-    output_args: tuple[object, ...]
-    output_qparams_map: dict[int, object]
-
-
-@dataclass(frozen=True)
 class _ControlFlowRescaleEdit:
     submodule: object
     anchor: object
@@ -164,6 +142,68 @@ class _ControlFlowRescaleEdit:
             current_node=current_node,
             after=True,
             preserve_boundary=preserve_boundary,
+        )
+
+    @classmethod
+    def from_output_boundary_contract(
+        cls,
+        contract,
+        *,
+        source_node,
+        input_qparam,
+        current_node=None,
+    ):
+        anchor = contract.output_arg or contract.site.output_node
+        return cls(
+            submodule=contract.submodule,
+            anchor=anchor,
+            source_node=source_node,
+            input_qparam=input_qparam,
+            output_qparam=contract.target_qparam,
+            current_node=current_node,
+        )
+
+    @classmethod
+    def from_source(
+        cls,
+        *,
+        submodule,
+        anchor,
+        source_node,
+        input_qparam,
+        output_qparam,
+        current_node=None,
+        after: bool = False,
+        preserve_boundary: bool = False,
+    ):
+        return cls(
+            submodule=submodule,
+            anchor=anchor,
+            source_node=source_node,
+            input_qparam=input_qparam,
+            output_qparam=output_qparam,
+            current_node=current_node,
+            after=after,
+            preserve_boundary=preserve_boundary,
+        )
+
+    @classmethod
+    def from_binary_operand_spec(
+        cls,
+        *,
+        submodule,
+        anchor,
+        operand_spec,
+        output_qparam,
+        current_node=None,
+    ):
+        return cls.from_source(
+            submodule=submodule,
+            anchor=anchor,
+            source_node=operand_spec.source_node,
+            input_qparam=operand_spec.qparam,
+            output_qparam=output_qparam,
+            current_node=current_node,
         )
 
     def ensure(self):
@@ -595,7 +635,14 @@ def _infer_control_flow_placeholder_output_qparam(placeholder):
             continue
         seen.add(id(user))
 
-        qparam = _extract_effective_node_qparam(user)
+        if _is_quantize_node(user):
+            qparam = _extract_effective_node_qparam(
+                user,
+                parse_operator_qparams=True,
+                prefer_input_qparams=False,
+            )
+        else:
+            qparam = _extract_effective_node_qparam(user)
         if qparam is not None:
             if getattr(qparam, "dtype", None) in (torch.int8, torch.int16):
                 return qparam
@@ -684,6 +731,12 @@ def _iter_control_flow_call_function_nodes(submodule, predicate):
 def _iter_control_flow_binary_nodes(submodule):
     yield from _iter_control_flow_call_function_nodes(
         submodule, _is_control_flow_binary_tensor_op
+    )
+
+
+def _iter_control_flow_binary_or_mul_nodes(submodule):
+    yield from _iter_control_flow_call_function_nodes(
+        submodule, _is_control_flow_binary_or_mul_tensor_op
     )
 
 
@@ -950,26 +1003,41 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
     synthesized = 0
     for name, submodule, control_flow_node in get_cond_while_submodules_nested(graph_module):
         env = _collect_control_flow_binary_alignment_env(submodule, control_flow_node)
+        binary_nodes = tuple(_iter_control_flow_binary_or_mul_nodes(submodule))
+        binary_placeholders = {
+            placeholder
+            for node in binary_nodes
+            for placeholder in _placeholder_dependencies(node)
+        }
         updated_graph = False
 
         for idx, placeholder in enumerate(env.placeholders):
             if idx >= len(env.parent_args):
                 continue
+            if placeholder not in binary_placeholders:
+                continue
             if placeholder.meta.get("output_qparams"):
                 continue
+            input_qparam = env.placeholder_qparams.get(idx)
+            output_qparam = _branch_local_control_flow_output_qparam(placeholder)
             parent_qparam = _repair_control_flow_qparam(env.parent_args[idx])
-            if parent_qparam is None:
+            if input_qparam is None:
+                input_qparam = parent_qparam
+            if output_qparam is None and getattr(input_qparam, "dtype", None) in (
+                torch.int8,
+                torch.int16,
+            ):
+                output_qparam = input_qparam
+            if input_qparam is None or output_qparam is None:
+                if parent_qparam is None:
+                    continue
+                input_qparam, output_qparam = parent_qparam, parent_qparam
+            if getattr(output_qparam, "dtype", None) is None:
                 continue
-            _stamp_single_qparams(placeholder, parent_qparam, parent_qparam)
+            _stamp_single_qparams(placeholder, input_qparam, output_qparam)
             updated_graph = True
-            logger.info(
-                "[fast_preprocess] restored control-flow placeholder qparams %s idx=%d -> %s",
-                getattr(placeholder, "name", "?"),
-                idx,
-                parent_qparam,
-            )
 
-        for node in _iter_control_flow_binary_nodes(submodule):
+        for node in binary_nodes:
             # Prefer an unused branch placeholder over a TABLE-derived dequantize
             # chain so InsertRescaleInt32Pass can rebuild the missing sibling path.
             unused_placeholders = [
@@ -1006,23 +1074,25 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
             for idx, arg in enumerate(node.args[:2]):
                 if not hasattr(arg, "op"):
                     continue
-                candidate_source = arg
-                if _is_tosa_rescale_node(arg) and getattr(arg, "args", None):
-                    source_arg = arg.args[0]
-                    if hasattr(source_arg, "op"):
-                        candidate_source = source_arg
-                cloned_preferred = (
-                    _maybe_clone_preferred_control_flow_quantized_binary_output_rescale(
-                        submodule,
-                        node,
-                        candidate_source,
-                        rescale_output_qparam_fn=_repair_control_flow_rescale_output_qparam,
-                    )
+                operand_spec = _resolve_control_flow_binary_operand_spec(
+                    arg,
+                    rescale_output_qparam_fn=_repair_control_flow_rescale_output_qparam,
+                    allow_branch_local_rescale=True,
                 )
-                if cloned_preferred is not None:
-                    cloned, quant_rescale, output_qparam = cloned_preferred
-                    source_qparam = _repair_control_flow_qparam(candidate_source)
-                    _stamp_single_qparams(cloned, source_qparam, output_qparam)
+                prepared_preferred = (
+                    _apply_preferred_control_flow_quantized_binary_output_rescale(
+                        submodule=submodule,
+                        ref_node=node,
+                        operand_spec=operand_spec,
+                        rescale_output_qparam_fn=_repair_control_flow_rescale_output_qparam,
+                        source_qparam_fn=_repair_control_flow_qparam,
+                        replace_quant_users=False,
+                    )
+                    if operand_spec is not None
+                    else None
+                )
+                if prepared_preferred is not None:
+                    cloned, quant_rescale, _ = prepared_preferred
                     node.replace_input_with(arg, cloned)
                     updated_graph = True
                     logger.info(
@@ -1061,149 +1131,56 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
                     getattr(promoted, "name", "?"),
                 )
 
-            for idx, arg, source in _iter_control_flow_binary_rescale_args(node):
-                if arg.meta.get("arm_promoted_control_flow_binary_input"):
-                    continue
-                _reconstruct_control_flow_rescale_source_qparam(node, idx, arg)
-                node.replace_input_with(arg, source)
-                updated_graph = True
-                logger.info(
-                    "[fast_preprocess] stripped pre-existing control-flow binary input rescale %s from %s arg%d",
-                    getattr(arg, "name", "?"),
-                    getattr(node, "name", "?"),
-                    idx,
-                )
+            updated_graph |= bool(_strip_control_flow_binary_input_rescales(node))
+            updated_graph |= bool(_strip_control_flow_binary_output_rescales(node))
 
-            for user in list(node.users):
-                if not _is_tosa_rescale_node(user):
-                    continue
-                if (
-                    len(getattr(user, "args", ())) >= 2
-                    and user.args[1] in (torch.int8, torch.int16)
-                ):
-                    continue
-                _reconstruct_control_flow_binary_output_qparam(node, user)
-                for grand_user in list(user.users):
-                    grand_user.replace_input_with(user, node)
-                updated_graph = True
-                logger.info(
-                    "[fast_preprocess] stripped pre-existing control-flow binary output rescale %s from %s",
-                    getattr(user, "name", "?"),
-                    getattr(node, "name", "?"),
-                )
-
-            input_qparams = {}
-
-            for idx, arg in enumerate(node.args[:2]):
-                producer_qparam = _resolve_repaired_control_flow_binary_input_qparam(
+            operand_specs = _collect_control_flow_binary_operand_specs(
+                node,
+                rescale_output_qparam_fn=_repair_control_flow_rescale_output_qparam,
+                allow_branch_local_rescale=True,
+            )
+            input_qparams, synthesized_count, input_qparams_updated = (
+                _synthesize_repaired_control_flow_binary_input_qparams(
                     node,
-                    idx,
-                    arg,
                     env=env,
+                    operand_specs=operand_specs,
                 )
-                if producer_qparam is None:
-                    continue
-                input_qparams[idx] = producer_qparam
-                synthesized += 1
-                updated_graph = True
-                logger.info(
-                    "[fast_preprocess] synthesized control-flow binary input_qparams for %s arg%d: %s",
-                    getattr(node, "name", "?"),
-                    idx,
-                    producer_qparam,
-                )
-
-            if len(input_qparams) == 1:
-                missing_idx = 0 if 0 not in input_qparams else 1
-                present_idx = 1 - missing_idx
-                missing_arg = node.args[missing_idx] if len(node.args) > missing_idx else None
-                present_arg = node.args[present_idx] if len(node.args) > present_idx else None
-                present_qparam = input_qparams.get(present_idx)
-                missing_dtype = getattr(
-                    getattr(missing_arg, "meta", {}).get("val"), "dtype", None
-                )
-                present_dtype = getattr(
-                    getattr(present_arg, "meta", {}).get("val"), "dtype", None
-                )
-                if (
-                    present_qparam is not None
-                    and missing_dtype is not None
-                    and missing_dtype == present_dtype == present_qparam.dtype
-                ):
-                    input_qparams[missing_idx] = present_qparam
-                    updated_graph = True
-                    logger.info(
-                        "[fast_preprocess] mirrored control-flow binary input_qparams for %s arg%d from arg%d: %s",
-                        getattr(node, "name", "?"),
-                        missing_idx,
-                        present_idx,
-                        present_qparam,
-                    )
-
+            )
+            synthesized += synthesized_count
+            updated_graph |= input_qparams_updated
             node.meta["input_qparams"] = input_qparams
             if len(input_qparams) == 2:
                 lhs_qparam = input_qparams.get(0)
                 rhs_qparam = input_qparams.get(1)
-                if {
-                    getattr(lhs_qparam, "dtype", None),
-                    getattr(rhs_qparam, "dtype", None),
-                } <= {torch.int8, torch.int16, torch.int32} and (
-                    getattr(lhs_qparam, "dtype", None)
-                    != getattr(rhs_qparam, "dtype", None)
-                ):
-                    for mixed_idx in (0, 1):
-                        mixed_qparam = input_qparams.get(mixed_idx)
-                        sibling_qparam = input_qparams.get(1 - mixed_idx)
-                        if (
-                            getattr(mixed_qparam, "dtype", None) != torch.int32
-                            or getattr(sibling_qparam, "dtype", None)
-                            not in (torch.int8, torch.int16)
-                        ):
-                            continue
-
-                        mixed_arg = node.args[mixed_idx] if len(node.args) > mixed_idx else None
-                        recovered_qparam = _recover_mixed_control_flow_binary_operand_qparam(
-                            node,
-                            mixed_idx,
-                            mixed_arg,
-                            sibling_qparam,
-                        )
-
-                        if (
-                            getattr(recovered_qparam, "dtype", None)
-                            == getattr(sibling_qparam, "dtype", None)
-                        ):
-                            input_qparams[mixed_idx] = recovered_qparam
-                            lhs_qparam = input_qparams.get(0)
-                            rhs_qparam = input_qparams.get(1)
-                            updated_graph = True
-                            logger.info(
-                                "[fast_preprocess] recovered mixed control-flow binary input_qparams for %s arg%d -> %s",
-                                getattr(node, "name", "?"),
-                                mixed_idx,
-                                recovered_qparam,
-                            )
-                            break
-
                 if (
                     getattr(lhs_qparam, "dtype", None)
                     == getattr(rhs_qparam, "dtype", None)
                     and getattr(lhs_qparam, "dtype", None) in (torch.int8, torch.int16)
                 ):
-                    contract = _additive_binary_qparam_contract(lhs_qparam, rhs_qparam)
-                    node_updated, _ = _enforce_control_flow_binary_contract(
-                        submodule,
-                        node,
-                        {},
-                        contract,
+                    plan = _build_control_flow_binary_alignment_plan(
+                        submodule=submodule,
+                        node=node,
                         env=env,
-                        terminal_outputs_only=False,
-                        qparam_log_message="[fast_preprocess] recomputed control-flow binary accumulator qparams for %s -> %s",
-                        qparam_log_value=contract.output_qparam,
-                        output_rescale_log_message="[fast_preprocess] realigned %d pre-pass control-flow binary output rescale(s) from %s",
-                        insert_operand_lifts=False,
+                        rescale_output_qparam_fn=_repair_control_flow_rescale_output_qparam,
+                        allow_branch_local_rescale=True,
+                        contract_resolver=(
+                            _resolve_mul_control_flow_binary_contract
+                            if _is_control_flow_mul_tensor_op(node)
+                            else _resolve_additive_control_flow_binary_contract
+                        ),
+                        mode="repair",
+                        operand_specs=operand_specs,
                     )
-                    updated_graph |= node_updated
+                    if plan is not None:
+                        node_updated, _ = _enforce_control_flow_binary_contract(
+                            plan,
+                            terminal_outputs_only=False,
+                            qparam_log_message="[fast_preprocess] recomputed control-flow binary accumulator qparams for %s -> %s",
+                            qparam_log_value=plan.qparam_contract.output_qparam,
+                            output_rescale_log_message="[fast_preprocess] realigned %d pre-pass control-flow binary output rescale(s) from %s",
+                            insert_operand_lifts=False,
+                        )
+                        updated_graph |= node_updated
             if len(input_qparams) != 2:
                 _log_control_flow_debug(
                     "[fast_preprocess] incomplete control-flow binary qparams for %s %s",
@@ -1218,7 +1195,7 @@ def _repair_control_flow_binary_rescales(graph_module, tosa_spec) -> None:
         if updated_graph:
             _cleanup_and_recompile(submodule)
 
-        for node in _iter_control_flow_binary_nodes(submodule):
+        for node in _iter_control_flow_binary_or_mul_nodes(submodule):
             _log_control_flow_binary_debug_state(
                 node,
                 prefix="[fast_preprocess] pre-InsertRescaleInt32Pass",
@@ -1269,64 +1246,11 @@ def _restore_control_flow_quant_boundaries(
             return _is_call_function_target(node, "AVG_POOL2D", "avg_pool2d")
         return _is_call_function_target(node, "aten.relu.default", "aten.clamp.default")
 
-    canonicalized = 0
     if mode == "pool" and canonicalize_pool_binary_sources:
-        def _canonicalize_pool_binary_sources(ctx):
-            nonlocal canonicalized
-            updated = False
-            for node in list(ctx.graph.nodes):
-                if not _is_control_flow_quant_input_node(node):
-                    continue
-
-                rescale_users = [
-                    user
-                    for user in list(getattr(node, "users", ()))
-                    if _is_tosa_rescale_node(user)
-                ]
-                if len(rescale_users) != 3:
-                    continue
-
-                avg_pool_source = None
-                binary_sources = []
-                for rescale in rescale_users:
-                    downstream = list(_downstream_non_view_like_users(rescale))
-                    if any(_is_target_op(user) for user in downstream):
-                        avg_pool_source = rescale
-                    if any(_is_control_flow_binary_tensor_op(user) for user in downstream):
-                        binary_sources.append(rescale)
-
-                if avg_pool_source is None or len(binary_sources) != 2:
-                    continue
-
-                for binary_source in binary_sources:
-                    if binary_source is avg_pool_source:
-                        continue
-                    if (
-                        not getattr(binary_source, "args", None)
-                        or binary_source.args[0] is not node
-                    ):
-                        continue
-                    binary_source.update_arg(0, avg_pool_source)
-                    updated = True
-                    canonicalized += 1
-                    logger.info(
-                        "[fast_preprocess] rewired control-flow binary rescale %s to share avg-pool source %s",
-                        getattr(binary_source, "name", "?"),
-                        getattr(avg_pool_source, "name", "?"),
-                    )
-
-            if updated:
-                _topologically_rebuild_graph_module(ctx.submodule)
-                _cleanup_graph(ctx.submodule.graph)
-            return updated
-
-        _for_each_cf_submodule(graph_module, _canonicalize_pool_binary_sources)
-
-        if canonicalized:
-            logger.info(
-                "[fast_preprocess] canonicalized %d control-flow pool/binary rescale edge(s)",
-                canonicalized,
-            )
+        _canonicalize_control_flow_pool_binary_sources(
+            graph_module,
+            target_user_predicate=_is_target_op,
+        )
 
     restored = 0
 
@@ -1334,67 +1258,68 @@ def _restore_control_flow_quant_boundaries(
         nonlocal restored
         modified = False
         for placeholder in list(ctx.placeholders):
-
             input_qparam = _extract_single_qparam_entry(placeholder.meta.get("input_qparams"))
             if getattr(input_qparam, "dtype", None) not in (torch.int8, torch.int16):
                 continue
 
-            for target_node in list(getattr(placeholder, "users", ())):
-                if not _is_target_op(target_node):
-                    continue
-
-                contract = _ControlFlowInputBoundaryContract(
-                    submodule=ctx.submodule,
-                    index=-1,
-                    placeholder=placeholder,
-                    input_qparam=input_qparam,
-                    output_qparam=input_qparam,
+            site = _ControlFlowBoundarySite.for_input(
+                submodule=ctx.submodule,
+                index=-1,
+                placeholder=placeholder,
+                cf_node=ctx.cf_node,
+            )
+            contract = _ControlFlowInputBoundaryContract.from_site(
+                site,
+                input_qparam=input_qparam,
+                output_qparam=input_qparam,
+            )
+            applied, _ = _restore_input_boundary_contracts(
+                [contract],
+                user_selector=lambda current: [
+                    user
+                    for user in list(getattr(current.placeholder, "users", ()))
+                    if _is_target_op(user)
+                ],
+                preserve_boundary=True,
+            )
+            if not applied:
+                continue
+            restored += len(applied)
+            modified = True
+            for _, quant_boundary, target_nodes in applied:
+                logger.info(
+                    "[fast_preprocess] restored control-flow %s quant boundary %s -> %s",
+                    mode,
+                    getattr(placeholder, "name", "?"),
+                    getattr(quant_boundary, "name", "?"),
                 )
-                quant_boundary, boundary_modified = _apply_control_flow_input_boundary_contract(
-                    contract,
-                    [target_node],
-                    preserve_boundary=True,
-                    require_preserve_boundary=True,
-                )
-                if boundary_modified:
-                    restored += 1
-                    modified = True
-                    logger.info(
-                        "[fast_preprocess] restored control-flow %s quant boundary %s -> %s",
-                        mode,
-                        getattr(placeholder, "name", "?"),
-                        getattr(quant_boundary, "name", "?"),
-                    )
+                for target_node in target_nodes:
+                    _stamp_single_qparams(target_node, input_qparam, input_qparam)
+                    fx_helpers.refresh_node_fake_tensor(target_node)
 
-                target_node.replace_input_with(placeholder, quant_boundary)
-                _stamp_single_qparams(target_node, input_qparam, input_qparam)
-                fx_helpers.refresh_node_fake_tensor(target_node)
-
-                if mode == "pool":
-                    target_users = [
-                        user
-                        for user in list(getattr(target_node, "users", ()))
-                        if hasattr(user, "op")
-                    ]
-                    if target_users and all(
-                        _is_control_flow_view_like(user) for user in target_users
-                    ):
-                        for view_user in target_users:
-                            _stamp_single_qparams(
-                                view_user, input_qparam, input_qparam
+                    if mode == "pool":
+                        target_users = [
+                            user
+                            for user in list(getattr(target_node, "users", ()))
+                            if hasattr(user, "op")
+                        ]
+                        if target_users and all(
+                            _is_control_flow_view_like(user) for user in target_users
+                        ):
+                            for view_user in target_users:
+                                _stamp_single_qparams(
+                                    view_user, input_qparam, input_qparam
+                                )
+                                fx_helpers.refresh_node_fake_tensor(view_user)
+                            logger.info(
+                                "[fast_preprocess] refreshed control-flow pool/view quant metadata for %s",
+                                getattr(target_node, "name", "?"),
                             )
-                            fx_helpers.refresh_node_fake_tensor(view_user)
-                        modified = True
+                    else:
                         logger.info(
-                            "[fast_preprocess] refreshed control-flow pool/view quant metadata for %s",
+                            "[fast_preprocess] refreshed control-flow unary quant metadata for %s",
                             getattr(target_node, "name", "?"),
                         )
-                else:
-                    modified = True
-                    logger.info(
-                        "[fast_preprocess] refreshed control-flow unary quant metadata for %s",
-                        getattr(target_node, "name", "?"),
-                    )
 
         if modified:
             _cleanup_graph(ctx.graph)
@@ -1433,35 +1358,29 @@ def _refresh_control_flow_binary_input_rescales(graph_module) -> None:
                     output_qparam = _extract_single_qparam_entry(
                         {0: node_input_qparams.get(idx)}
                     )
+                source_spec = _resolve_control_flow_binary_operand_spec(
+                    arg,
+                    rescale_output_qparam_fn=_binary_rescale_output_qparam,
+                )
 
                 if getattr(source_node.meta.get("val"), "dtype", None) == torch.int32:
-                    cloned_preferred = (
-                        _maybe_clone_preferred_control_flow_quantized_binary_output_rescale(
-                            submodule,
-                            arg,
-                            source_node,
+                    prepared_preferred = (
+                        _apply_preferred_control_flow_quantized_binary_output_rescale(
+                            submodule=submodule,
+                            ref_node=arg,
+                            operand_spec=source_spec,
+                            current_rescale=arg,
+                            output_qparam=output_qparam,
                             rescale_output_qparam_fn=_binary_rescale_output_qparam,
+                            source_qparam_fn=_binary_rescale_output_qparam,
+                            replace_quant_users=True,
                         )
+                        if source_spec is not None
+                        else None
                     )
-                    if cloned_preferred is not None:
-                        cloned_quant_rescale, quant_rescale, quant_qparam = cloned_preferred
-                        cloned_quant_rescale.meta["output_qparams"] = {0: quant_qparam}
-                        for quant_user in list(getattr(quant_rescale, "users", ())):
-                            quant_user.replace_input_with(
-                                quant_rescale, cloned_quant_rescale
-                            )
-                        if len(getattr(quant_rescale, "users", ())) == 0:
-                            submodule.graph.erase_node(quant_rescale)
-                        arg.update_arg(0, cloned_quant_rescale)
+                    if prepared_preferred is not None:
+                        cloned_quant_rescale, quant_rescale, _ = prepared_preferred
                         source_node = cloned_quant_rescale
-                        if output_qparam is not None:
-                            _retune_rescale_qparams(
-                                arg,
-                                input_qparam=quant_qparam,
-                                output_qparam=output_qparam,
-                            )
-                        else:
-                            _stamp_single_qparams(arg, input_qparam=quant_qparam)
                         updated = True
                         refreshed += 1
                         logger.info(
@@ -1473,12 +1392,10 @@ def _refresh_control_flow_binary_input_rescales(graph_module) -> None:
                         )
                 sibling_align_qparam = None
                 sibling = node.args[1 - idx] if len(node.args) > 1 - idx else None
-                source_spec = _resolve_control_flow_binary_operand_spec(
-                    arg,
-                    rescale_output_qparam_fn=_binary_rescale_output_qparam,
-                )
                 source_qparam = (
-                    source_spec[1] if source_spec is not None else _extract_effective_node_qparam(source_node)
+                    source_spec.qparam
+                    if source_spec is not None
+                    else _extract_effective_node_qparam(source_node)
                 )
                 if hasattr(sibling, "op"):
                     sibling_align_qparam = _extract_single_qparam_entry(
@@ -1501,16 +1418,16 @@ def _refresh_control_flow_binary_input_rescales(graph_module) -> None:
                         or int(source_qparam.zp) != int(sibling_align_qparam.zp)
                     )
                 ):
-                    aligned_source, _ = _ControlFlowRescaleEdit(
+                    aligned_source, _ = _ControlFlowRescaleEdit.from_source(
                         submodule=submodule,
                         anchor=arg,
                         source_node=source_node,
                         input_qparam=source_qparam,
                         output_qparam=sibling_align_qparam,
                     ).ensure()
-                    arg.update_arg(0, aligned_source)
-                    _retune_rescale_qparams(
+                    _rebind_control_flow_rescale_source(
                         arg,
+                        aligned_source,
                         input_qparam=sibling_align_qparam,
                         output_qparam=current_output_qparam,
                     )
@@ -1550,49 +1467,33 @@ def _refresh_control_flow_binary_input_rescales(graph_module) -> None:
                 )
 
         for node in _iter_control_flow_binary_nodes(submodule):
-            desired_input_qparams = getattr(node, "meta", {}).get("input_qparams") or {}
-            desired_output_qparam = _extract_single_qparam_entry(
-                getattr(node, "meta", {}).get("output_qparams")
+            plan = _build_control_flow_binary_alignment_plan(
+                submodule,
+                node,
+                env,
+                rescale_output_qparam_fn=_binary_rescale_output_qparam,
+                allow_branch_local_rescale=False,
+                contract_resolver=_resolve_existing_int32_control_flow_binary_contract,
+                mode="refresh",
             )
-            if not (
-                getattr(desired_input_qparams.get(0), "dtype", None) == torch.int32
-                and getattr(desired_input_qparams.get(1), "dtype", None) == torch.int32
-                and getattr(desired_output_qparam, "dtype", None) == torch.int32
-            ):
+            if plan is None:
                 continue
-
-            for idx, arg in enumerate(node.args[:2]):
-                operand_spec = _resolve_control_flow_binary_operand_spec(
-                    arg,
-                    rescale_output_qparam_fn=_binary_rescale_output_qparam,
-                )
-                if operand_spec is None:
-                    continue
-                source_node, source_qparam = operand_spec
-                desired_input_qparam = desired_input_qparams[idx]
-                current_arg = node.args[idx]
-                lift, inserted = _ControlFlowRescaleEdit(
-                    submodule=submodule,
-                    anchor=node,
-                    source_node=source_node,
-                    input_qparam=source_qparam,
-                    output_qparam=desired_input_qparam,
-                    current_node=current_arg,
-                ).ensure()
-                if inserted:
-                    node.update_arg(idx, lift)
-                    refreshed += 1
-                    updated = True
+            node_updated, node_refreshed = _enforce_control_flow_binary_contract(
+                plan,
+                terminal_outputs_only=False,
+                qparam_log_message=None,
+                qparam_log_value=None,
+                output_rescale_log_message=None,
+                apply_qparam_contract=False,
+            )
+            refreshed += node_refreshed
+            updated |= node_updated
 
         for refresh_cfg in (
             dict(
                 predicate=_is_control_flow_binary_tensor_op,
                 allow_branch_local_rescale=False,
-                accept_qparams=lambda lhs_qparam, _rhs_qparam: getattr(
-                    lhs_qparam, "dtype", None
-                )
-                in (torch.int8, torch.int16),
-                contract_fn=_additive_binary_qparam_contract,
+                contract_resolver=_resolve_additive_control_flow_binary_contract,
                 terminal_outputs_only=False,
                 qparam_log_message="[fast_preprocess] recomputed control-flow binary accumulator qparams for %s -> %s",
                 qparam_log_value_fn=lambda contract: contract.output_qparam,
@@ -1601,15 +1502,10 @@ def _refresh_control_flow_binary_input_rescales(graph_module) -> None:
             dict(
                 predicate=_is_control_flow_mul_tensor_op,
                 allow_branch_local_rescale=True,
-                accept_qparams=lambda _lhs_qparam, _rhs_qparam: True,
-                contract_fn=_mul_binary_qparam_contract,
+                contract_resolver=_resolve_mul_control_flow_binary_contract,
                 terminal_outputs_only=True,
                 qparam_log_message="[fast_preprocess] recomputed control-flow mul qparams for %s -> %s",
-                qparam_log_value_fn=lambda contract: (
-                    contract.input_qparams[0],
-                    contract.input_qparams[1],
-                    contract.output_qparam,
-                ),
+                qparam_log_value_fn=_control_flow_mul_contract_log_value,
                 output_rescale_log_message="[fast_preprocess] realigned %d control-flow mul output rescale(s) from %s",
             ),
         ):
@@ -1707,27 +1603,43 @@ def _refresh_control_flow_binary_input_rescales(graph_module) -> None:
 def _build_control_flow_input_boundary_contracts(
     submodule, input_qparams_map=None, *, current_only: bool = False
 ):
+    import torch
+
     contracts = []
     for idx, placeholder in enumerate(_placeholder_nodes(submodule)):
         input_qparam = (input_qparams_map or {}).get(idx)
         if input_qparam is None:
             input_qparam = _extract_single_qparam_entry(placeholder.meta.get("input_qparams"))
+        output_qparam = _branch_local_control_flow_output_qparam(placeholder)
+        if (
+            current_only
+            and getattr(input_qparam, "dtype", None) not in (torch.int8, torch.int16)
+            and getattr(output_qparam, "dtype", None) in (torch.int8, torch.int16)
+        ):
+            input_qparam = output_qparam
         if input_qparam is None and not current_only:
-            input_qparam = _branch_local_control_flow_output_qparam(placeholder)
+            input_qparam = output_qparam
         if input_qparam is None:
             continue
-        output_qparam = _branch_local_control_flow_output_qparam(placeholder)
+        if (
+            getattr(input_qparam, "dtype", None) in (torch.int8, torch.int16)
+            and getattr(output_qparam, "dtype", None) not in (torch.int8, torch.int16)
+        ):
+            output_qparam = input_qparam
         if output_qparam is None and current_only:
             continue
         if output_qparam is None and _placeholder_feeds_binary_directly(placeholder):
             output_qparam = input_qparam
         if output_qparam is None:
             output_qparam = input_qparam
+        site = _ControlFlowBoundarySite.for_input(
+            submodule=submodule,
+            index=idx,
+            placeholder=placeholder,
+        )
         contracts.append(
-            _ControlFlowInputBoundaryContract(
-                submodule=submodule,
-                index=idx,
-                placeholder=placeholder,
+            _ControlFlowInputBoundaryContract.from_site(
+                site,
                 input_qparam=input_qparam,
                 output_qparam=output_qparam,
             )
@@ -1751,16 +1663,105 @@ def _build_control_flow_output_boundary_contracts(
     if not submodule.graph.output_node().meta.get("input_qparams"):
         return []
 
+    output_node = submodule.graph.output_node()
+    output_args = _output_node_args(output_node)
+
     return [
-        _ControlFlowOutputBoundaryContract(
-            submodule=submodule,
-            index=idx,
+        _ControlFlowOutputBoundaryContract.from_site(
+            _ControlFlowBoundarySite.for_output(
+                submodule=submodule,
+                index=idx,
+                output_node=output_node,
+                output_arg=output_args[idx] if idx < len(output_args) else None,
+            ),
             target_qparam=target_qparam,
         )
         for idx, target_qparam in _filter_output_qparams_map(
             submodule, output_qparams_map
         ).items()
     ]
+
+
+def _reapply_control_flow_submodule_boundary_contracts(
+    submodule,
+    *,
+    rescale_pass,
+    input_contracts=None,
+    output_contracts=None,
+    include_inputs: bool = True,
+    include_outputs: bool = True,
+):
+    modified = False
+    if include_inputs:
+        contracts = input_contracts or []
+        if contracts:
+            input_qparams_map = {
+                contract.index: contract.input_qparam for contract in contracts
+            }
+            for contract in contracts:
+                placeholder = contract.placeholder
+                _log_control_flow_debug(
+                    "[fast_preprocess] restore submodule input qparams %s %s idx=%d incoming=%s branch_output_qparams=%s",
+                    getattr(contract.submodule, "__class__", type(contract.submodule)).__name__,
+                    getattr(placeholder, "name", "?"),
+                    contract.index,
+                    contract.input_qparam,
+                    contract.output_qparam,
+                )
+                _stamp_single_qparams(
+                    placeholder,
+                    contract.input_qparam,
+                    contract.output_qparam,
+                )
+                placeholder.meta["arm_control_flow_saved_output_qparams"] = {
+                    0: contract.output_qparam
+                }
+                fake_val = placeholder.meta.get("val")
+                preserves_float_boundary = any(
+                    _is_quantize_node(user)
+                    for user in list(getattr(placeholder, "users", ()))
+                )
+                if (
+                    not preserves_float_boundary
+                    and hasattr(fake_val, "to")
+                    and getattr(fake_val, "dtype", None) != contract.output_qparam.dtype
+                ):
+                    placeholder.meta["val"] = fake_val.to(
+                        dtype=contract.output_qparam.dtype
+                    )
+
+            modified |= rescale_pass._rescale_submodule_inputs(submodule, input_qparams_map)
+            for contract in contracts:
+                for user in list(getattr(contract.placeholder, "users", ())):
+                    if not _is_tosa_rescale_node(user):
+                        continue
+                    if (
+                        len(getattr(user, "args", ())) >= 2
+                        and user.args[1] != contract.output_qparam.dtype
+                    ):
+                        continue
+                    _stamp_single_qparams(
+                        user,
+                        contract.input_qparam,
+                        contract.output_qparam,
+                    )
+                    logger.info(
+                        "[fast_preprocess] annotated control-flow input rescale %s idx=%d input=%s output=%s",
+                        getattr(user, "name", "?"),
+                        contract.index,
+                        contract.input_qparam,
+                        contract.output_qparam,
+                    )
+
+    if include_outputs:
+        contracts = output_contracts or []
+        if contracts:
+            modified |= rescale_pass._rescale_submodule_outputs(
+                contracts[0].submodule,
+                {contract.index: contract.target_qparam for contract in contracts},
+            )
+
+    return modified
 
 
 def _reapply_control_flow_boundary_rescales(
@@ -1791,59 +1792,54 @@ def _reapply_control_flow_boundary_rescales(
                 getattr(node, "name", "?"),
                 seed_input_qparams_map,
             )
-            if include_inputs:
-                for submodule in (if_graph, else_graph):
-                    contracts = _build_control_flow_input_boundary_contracts(
-                        submodule, seed_input_qparams_map
-                    )
-                    if not contracts:
-                        continue
-                    modified |= _reapply_control_flow_input_boundary_rescales(
-                        contracts,
-                        rescale_pass=rescale_pass,
-                    )
-
-            output_qparams_map = _infer_control_flow_output_qparams_map(node)
-            if include_outputs and output_qparams_map:
-                for submodule in (if_graph, else_graph):
-                    modified |= _reapply_control_flow_output_boundary_rescales(
-                        _build_control_flow_output_boundary_contracts(
-                            submodule,
-                            output_qparams_map,
-                            allow_placeholder_fallback=True,
-                        ),
-                        rescale_pass=rescale_pass,
-                    )
+            for submodule in (if_graph, else_graph):
+                input_contracts = _build_control_flow_input_boundary_contracts(
+                    submodule, seed_input_qparams_map
+                )
+                output_contracts = _build_control_flow_output_boundary_contracts(
+                    submodule,
+                    _infer_control_flow_output_qparams_map(node),
+                    allow_placeholder_fallback=True,
+                )
+                modified |= _reapply_control_flow_submodule_boundary_contracts(
+                    submodule,
+                    rescale_pass=rescale_pass,
+                    input_contracts=input_contracts,
+                    output_contracts=output_contracts,
+                    include_inputs=include_inputs,
+                    include_outputs=include_outputs,
+                )
         elif node.target == torch.ops.higher_order.while_loop:
             cond_graph = graph_module.get_submodule(node.args[0].target)
             body_graph = graph_module.get_submodule(node.args[1].target)
             seed_input_qparams_map = _seed_control_flow_input_qparams_map(
                 node, 2, rescale_pass
             )
-            if include_inputs:
-                for submodule in (cond_graph, body_graph):
-                    contracts = _build_control_flow_input_boundary_contracts(
-                        submodule, seed_input_qparams_map
-                    )
-                    if not contracts:
-                        continue
-                    modified |= _reapply_control_flow_input_boundary_rescales(
-                        contracts,
-                        rescale_pass=rescale_pass,
-                    )
+            for submodule in (cond_graph, body_graph):
+                modified |= _reapply_control_flow_submodule_boundary_contracts(
+                    submodule,
+                    rescale_pass=rescale_pass,
+                    input_contracts=_build_control_flow_input_boundary_contracts(
+                        submodule,
+                        seed_input_qparams_map,
+                    ),
+                    include_inputs=include_inputs,
+                    include_outputs=False,
+                )
 
             # While body outputs are loop-carried, so rescale them to the
             # carried-input qparams rather than the post-loop getitem dtype.
-            body_output_contracts = _build_control_flow_output_boundary_contracts(
+            modified |= _reapply_control_flow_submodule_boundary_contracts(
                 body_graph,
-                seed_input_qparams_map,
-                allow_placeholder_fallback=True,
+                rescale_pass=rescale_pass,
+                output_contracts=_build_control_flow_output_boundary_contracts(
+                    body_graph,
+                    seed_input_qparams_map,
+                    allow_placeholder_fallback=True,
+                ),
+                include_inputs=False,
+                include_outputs=include_outputs,
             )
-            if include_outputs and body_output_contracts:
-                modified |= _reapply_control_flow_output_boundary_rescales(
-                    body_output_contracts,
-                    rescale_pass=rescale_pass,
-                )
 
     if not modified:
         return
@@ -2022,6 +2018,74 @@ def _mul_binary_qparam_contract(lhs_qparam, rhs_qparam):
     )
 
 
+def _binary_operand_qparam_pair(operand_specs):
+    lhs_spec = operand_specs.get(0)
+    rhs_spec = operand_specs.get(1)
+    if lhs_spec is None or rhs_spec is None:
+        return None, None
+    return lhs_spec.qparam, rhs_spec.qparam
+
+
+def _matching_control_flow_binary_contract(
+    operand_specs,
+    *,
+    builder,
+    allowed_dtypes=None,
+):
+    lhs_qparam, rhs_qparam = _binary_operand_qparam_pair(operand_specs)
+    lhs_dtype = getattr(lhs_qparam, "dtype", None)
+    rhs_dtype = getattr(rhs_qparam, "dtype", None)
+    if lhs_dtype is None or lhs_dtype != rhs_dtype:
+        return None
+    if allowed_dtypes is not None and lhs_dtype not in allowed_dtypes:
+        return None
+    return builder(lhs_qparam, rhs_qparam)
+
+
+def _resolve_existing_int32_control_flow_binary_contract(current_node, _operand_specs):
+    import torch
+
+    contract = _current_control_flow_binary_qparam_contract(current_node)
+    if contract is None:
+        return None
+    lhs_qparam, rhs_qparam = (
+        contract.input_qparams.get(0),
+        contract.input_qparams.get(1),
+    )
+    if (
+        getattr(lhs_qparam, "dtype", None) == torch.int32
+        and getattr(rhs_qparam, "dtype", None) == torch.int32
+        and getattr(contract.output_qparam, "dtype", None) == torch.int32
+    ):
+        return contract
+    return None
+
+
+def _resolve_additive_control_flow_binary_contract(_current_node, operand_specs):
+    import torch
+
+    return _matching_control_flow_binary_contract(
+        operand_specs,
+        builder=_additive_binary_qparam_contract,
+        allowed_dtypes={torch.int8, torch.int16},
+    )
+
+
+def _resolve_mul_control_flow_binary_contract(_current_node, operand_specs):
+    return _matching_control_flow_binary_contract(
+        operand_specs,
+        builder=_mul_binary_qparam_contract,
+    )
+
+
+def _control_flow_mul_contract_log_value(contract):
+    return (
+        contract.input_qparams.get(0),
+        contract.input_qparams.get(1),
+        contract.output_qparam,
+    )
+
+
 def _apply_control_flow_binary_qparam_contract(
     node,
     contract,
@@ -2063,43 +2127,63 @@ def _apply_control_flow_binary_qparam_contract(
     return updated, retuned
 
 
+def _current_control_flow_binary_qparam_contract(node):
+    input_qparams = getattr(node, "meta", {}).get("input_qparams") or {}
+    output_qparam = _extract_single_qparam_entry(
+        getattr(node, "meta", {}).get("output_qparams")
+    )
+    if len(input_qparams) != 2 or output_qparam is None:
+        return None
+    return _ControlFlowBinaryQparamContract(
+        input_qparams=dict(input_qparams),
+        output_qparam=output_qparam,
+    )
+
+
 def _enforce_control_flow_binary_contract(
-    submodule,
-    node,
-    operand_specs,
-    contract,
+    plan,
     *,
-    env,
     terminal_outputs_only: bool,
     qparam_log_message: str,
     qparam_log_value,
     output_rescale_log_message: str,
     insert_operand_lifts: bool = True,
+    apply_qparam_contract: bool = True,
 ):
+    submodule = plan.submodule
+    node = plan.binary_node
+    operand_specs = plan.operand_specs
+    contract = plan.qparam_contract
+    env = plan.env
     refreshed = 0
     updated = False
-    qparams_updated, retuned = _apply_control_flow_binary_qparam_contract(
-        node,
-        contract,
-        output_args=env.output_args,
-        output_qparams_map=env.output_qparams_map,
-        terminal_outputs_only=terminal_outputs_only,
-    )
+    qparams_updated = False
+    retuned = 0
+    if apply_qparam_contract:
+        qparams_updated, retuned = _apply_control_flow_binary_qparam_contract(
+            node,
+            contract,
+            output_args=env.output_args,
+            output_qparams_map=env.output_qparams_map,
+            terminal_outputs_only=terminal_outputs_only,
+        )
     if qparams_updated:
         refreshed += 1
         updated = True
-        logger.info(qparam_log_message, getattr(node, "name", "?"), qparam_log_value)
+        if qparam_log_message is not None:
+            logger.info(qparam_log_message, getattr(node, "name", "?"), qparam_log_value)
 
     if insert_operand_lifts:
-        for idx, (source_node, source_qparam) in operand_specs.items():
+        for idx, operand_spec in operand_specs.items():
+            source_node = operand_spec.source_node
+            source_qparam = operand_spec.qparam
             desired_input_qparam = contract.input_qparams.get(idx)
             if desired_input_qparam is None:
                 continue
-            lift, inserted = _ControlFlowRescaleEdit(
+            lift, inserted = _ControlFlowRescaleEdit.from_binary_operand_spec(
                 submodule=submodule,
                 anchor=node,
-                source_node=source_node,
-                input_qparam=source_qparam,
+                operand_spec=operand_spec,
                 output_qparam=desired_input_qparam,
                 current_node=node.args[idx],
             ).ensure()
@@ -2111,9 +2195,42 @@ def _enforce_control_flow_binary_contract(
     if retuned:
         refreshed += retuned
         updated = True
-        logger.info(output_rescale_log_message, retuned, getattr(node, "name", "?"))
+        if output_rescale_log_message is not None:
+            logger.info(output_rescale_log_message, retuned, getattr(node, "name", "?"))
 
     return updated, refreshed
+
+
+def _build_control_flow_binary_alignment_plan(
+    submodule,
+    node,
+    env,
+    *,
+    rescale_output_qparam_fn,
+    allow_branch_local_rescale: bool,
+    contract_resolver,
+    mode: str,
+    operand_specs=None,
+):
+    if operand_specs is None:
+        operand_specs = _collect_control_flow_binary_operand_specs(
+            node,
+            rescale_output_qparam_fn=rescale_output_qparam_fn,
+            allow_branch_local_rescale=allow_branch_local_rescale,
+        )
+    if len(operand_specs) != 2:
+        return None
+    contract = contract_resolver(node, operand_specs)
+    if contract is None:
+        return None
+    return _ControlFlowBinaryAlignmentPlan(
+        submodule=submodule,
+        binary_node=node,
+        operand_specs=operand_specs,
+        env=env,
+        qparam_contract=contract,
+        mode=mode,
+    )
 
 
 def _refresh_control_flow_binary_contract_nodes(
@@ -2122,8 +2239,7 @@ def _refresh_control_flow_binary_contract_nodes(
     *,
     predicate,
     allow_branch_local_rescale: bool,
-    accept_qparams,
-    contract_fn,
+    contract_resolver,
     terminal_outputs_only: bool,
     qparam_log_message: str,
     qparam_log_value_fn,
@@ -2132,29 +2248,22 @@ def _refresh_control_flow_binary_contract_nodes(
     refreshed = 0
     updated = False
     for node in _iter_control_flow_call_function_nodes(submodule, predicate):
-        operand_specs = _collect_control_flow_binary_operand_specs(
-            node,
-            rescale_output_qparam_fn=_binary_rescale_output_qparam,
-            allow_branch_local_rescale=allow_branch_local_rescale,
-        )
-        if len(operand_specs) != 2:
-            continue
-        lhs_qparam = operand_specs[0][1]
-        rhs_qparam = operand_specs[1][1]
-        if getattr(lhs_qparam, "dtype", None) != getattr(rhs_qparam, "dtype", None):
-            continue
-        if not accept_qparams(lhs_qparam, rhs_qparam):
-            continue
-        contract = contract_fn(lhs_qparam, rhs_qparam)
-        node_updated, node_refreshed = _enforce_control_flow_binary_contract(
+        plan = _build_control_flow_binary_alignment_plan(
             submodule,
             node,
-            operand_specs,
-            contract,
-            env=env,
+            env,
+            rescale_output_qparam_fn=_binary_rescale_output_qparam,
+            allow_branch_local_rescale=allow_branch_local_rescale,
+            contract_resolver=contract_resolver,
+            mode="refresh",
+        )
+        if plan is None:
+            continue
+        node_updated, node_refreshed = _enforce_control_flow_binary_contract(
+            plan,
             terminal_outputs_only=terminal_outputs_only,
             qparam_log_message=qparam_log_message,
-            qparam_log_value=qparam_log_value_fn(contract),
+            qparam_log_value=qparam_log_value_fn(plan.qparam_contract),
             output_rescale_log_message=output_rescale_log_message,
         )
         refreshed += node_refreshed
@@ -2689,53 +2798,65 @@ def _ensure_control_flow_rescale_node(
     )
 
 
-def _apply_control_flow_input_boundary_contract(
-    contract,
-    users,
+def _restore_input_boundary_contracts(
+    contracts,
     *,
+    user_selector,
     preserve_boundary: bool,
-    require_preserve_boundary: bool,
 ):
-    placeholder = contract.placeholder
-    target_user = users[0] if len(users) == 1 else None
-    boundary = None
-    for user in list(getattr(placeholder, "users", ())):
-        if not _is_tosa_rescale_node(user):
+    applied = []
+    modified = False
+    for contract in contracts:
+        users = [user for user in user_selector(contract) if hasattr(user, "op")]
+        if not users:
             continue
-        if (
-            require_preserve_boundary
-            and not user.meta.get("arm_preserve_control_flow_quant_boundary", False)
-        ):
+        placeholder = contract.placeholder
+        target_user = users[0] if len(users) == 1 else None
+        boundary = None
+        for user in list(getattr(placeholder, "users", ())):
+            if not _is_tosa_rescale_node(user):
+                continue
+            if (
+                preserve_boundary
+                and not user.meta.get("arm_preserve_control_flow_quant_boundary", False)
+            ):
+                continue
+            if (
+                len(getattr(user, "args", ())) >= 2
+                and user.args[1] != contract.output_qparam.dtype
+            ):
+                continue
+            if not _same_control_flow_qparam(
+                _extract_single_qparam_entry(user.meta.get("input_qparams")),
+                contract.input_qparam,
+            ) or not _same_control_flow_qparam(
+                _extract_single_qparam_entry(user.meta.get("output_qparams")),
+                contract.output_qparam,
+            ):
+                continue
+            if (
+                target_user is not None
+                and target_user is not user
+                and target_user not in getattr(user, "users", ())
+            ):
+                continue
+            boundary = user
+            break
+        boundary, boundary_modified = _ControlFlowRescaleEdit.from_input_boundary_contract(
+            contract,
+            current_node=boundary,
+            preserve_boundary=preserve_boundary,
+        ).ensure()
+        for user in users:
+            if user is boundary or placeholder not in getattr(user, "all_input_nodes", ()):
+                continue
+            user.replace_input_with(placeholder, boundary)
+            boundary_modified = True
+        if not boundary_modified:
             continue
-        if (
-            len(getattr(user, "args", ())) >= 2
-            and user.args[1] != contract.output_qparam.dtype
-        ):
-            continue
-        if not _same_control_flow_qparam(
-            _extract_single_qparam_entry(user.meta.get("input_qparams")),
-            contract.input_qparam,
-        ) or not _same_control_flow_qparam(
-            _extract_single_qparam_entry(user.meta.get("output_qparams")),
-            contract.output_qparam,
-        ):
-            continue
-        if target_user is not None and target_user not in getattr(user, "users", ()):
-            continue
-        boundary = user
-        break
-    rescale, inserted = _ControlFlowRescaleEdit.from_input_boundary_contract(
-        contract,
-        current_node=boundary,
-        preserve_boundary=preserve_boundary,
-    ).ensure()
-    modified = inserted
-    for user in users:
-        if user is rescale or placeholder not in getattr(user, "all_input_nodes", ()):
-            continue
-        user.replace_input_with(placeholder, rescale)
+        applied.append((contract, boundary, users))
         modified = True
-    return rescale, modified
+    return applied, modified
 
 
 def _retune_control_flow_quantized_output_users(
@@ -3032,7 +3153,24 @@ def _resolve_control_flow_binary_operand_spec(
     if source_qparam is None:
         source_qparam = _extract_effective_node_qparam(arg)
     if getattr(source_qparam, "dtype", None) in (torch.int8, torch.int16):
-        return source_node, source_qparam
+        preferred_output_rescale, preferred_output_qparam = (
+            _preferred_control_flow_quantized_binary_output_rescale(
+                source_node,
+                rescale_output_qparam_fn=rescale_output_qparam_fn,
+            )
+            or (None, None)
+        )
+        return _ControlFlowBinaryOperandSpec(
+            arg_idx=-1,
+            arg=arg,
+            source_node=source_node,
+            qparam=source_qparam,
+            is_lift=_is_tosa_rescale_node(arg)
+            and getattr(source_node, "op", None) != getattr(arg, "op", None),
+            is_scalar_like=not hasattr(source_node, "all_input_nodes"),
+            preferred_output_rescale=preferred_output_rescale,
+            preferred_output_qparam=preferred_output_qparam,
+        )
     return None
 
 
@@ -3050,7 +3188,16 @@ def _collect_control_flow_binary_operand_specs(
             allow_branch_local_rescale=allow_branch_local_rescale,
         )
         if operand_spec is not None:
-            operand_specs[idx] = operand_spec
+            operand_specs[idx] = _ControlFlowBinaryOperandSpec(
+                arg_idx=idx,
+                arg=arg,
+                source_node=operand_spec.source_node,
+                qparam=operand_spec.qparam,
+                is_lift=operand_spec.is_lift,
+                is_scalar_like=operand_spec.is_scalar_like,
+                preferred_output_rescale=operand_spec.preferred_output_rescale,
+                preferred_output_qparam=operand_spec.preferred_output_qparam,
+            )
     return operand_specs
 
 
@@ -3059,50 +3206,136 @@ def _resolve_control_flow_binary_operand_qparam(
     *,
     rescale_output_qparam_fn,
     allow_branch_local_rescale: bool = False,
-    placeholder_qparams=None,
-    placeholder_index_by_name=None,
+    env=None,
+    operand_spec=None,
 ):
-    operand_spec = _resolve_control_flow_binary_operand_spec(
-        arg,
-        rescale_output_qparam_fn=rescale_output_qparam_fn,
-        allow_branch_local_rescale=allow_branch_local_rescale,
-    )
+    if operand_spec is None:
+        operand_spec = _resolve_control_flow_binary_operand_spec(
+            arg,
+            rescale_output_qparam_fn=rescale_output_qparam_fn,
+            allow_branch_local_rescale=allow_branch_local_rescale,
+        )
     if operand_spec is not None:
-        return operand_spec[1], False
-    if placeholder_qparams is None or placeholder_index_by_name is None:
+        return operand_spec.qparam, False
+    if env is None:
         return None, False
     qparam = _lookup_control_flow_input_qparam(
         arg,
-        placeholder_qparams,
-        placeholder_index_by_name,
+        env.placeholder_qparams,
+        env.placeholder_index_by_name,
     )
     return qparam, qparam is not None
 
 
-def _maybe_clone_preferred_control_flow_quantized_binary_output_rescale(
-    submodule,
-    ref_node,
+def _resolve_control_flow_binary_sibling_alignment(
+    sibling,
+    *,
+    env,
+    rescale_output_qparam_fn,
+    allow_branch_local_rescale: bool,
+    operand_spec=None,
+):
+    if not hasattr(sibling, "op"):
+        return _ControlFlowBinarySiblingAlignment(None, None, None)
+    sibling_qparam, recovered_from_boundary = _resolve_control_flow_binary_operand_qparam(
+        sibling,
+        rescale_output_qparam_fn=rescale_output_qparam_fn,
+        allow_branch_local_rescale=allow_branch_local_rescale,
+        env=env,
+        operand_spec=operand_spec,
+    )
+    preferred_output_qparam = getattr(operand_spec, "preferred_output_qparam", None)
+    if preferred_output_qparam is None:
+        preferred_sibling_quantized = _preferred_control_flow_quantized_binary_output_rescale(
+            sibling,
+            rescale_output_qparam_fn=rescale_output_qparam_fn,
+        )
+        preferred_output_qparam = (
+            preferred_sibling_quantized[1]
+            if preferred_sibling_quantized is not None
+            else None
+        )
+    if sibling_qparam is None and not recovered_from_boundary:
+        sibling_qparam = _extract_single_qparam_entry(sibling.meta.get("input_qparams")) or (
+            _extract_effective_node_qparam(sibling.args[0])
+            if getattr(sibling, "args", None) and hasattr(sibling.args[0], "op")
+            else None
+        )
+    return _ControlFlowBinarySiblingAlignment(
+        input_qparam=sibling_qparam,
+        target_qparam=preferred_output_qparam or sibling_qparam,
+        preferred_output_qparam=preferred_output_qparam,
+    )
+
+
+def _replace_control_flow_quant_rescale_users(quant_rescale, replacement, *, submodule):
+    for quant_user in list(getattr(quant_rescale, "users", ())):
+        quant_user.replace_input_with(quant_rescale, replacement)
+    if len(getattr(quant_rescale, "users", ())) == 0:
+        submodule.graph.erase_node(quant_rescale)
+
+
+def _rebind_control_flow_rescale_source(
+    rescale_node,
     source_node,
     *,
-    rescale_output_qparam_fn,
+    input_qparam,
+    output_qparam=None,
 ):
-    preferred = _preferred_control_flow_quantized_binary_output_rescale(
-        source_node,
-        rescale_output_qparam_fn=rescale_output_qparam_fn,
-    )
-    if preferred is None:
+    rescale_node.update_arg(0, source_node)
+    if output_qparam is not None:
+        _retune_rescale_qparams(
+            rescale_node,
+            input_qparam=input_qparam,
+            output_qparam=output_qparam,
+        )
+    else:
+        _stamp_single_qparams(rescale_node, input_qparam=input_qparam)
+
+
+def _apply_preferred_control_flow_quantized_binary_output_rescale(
+    *,
+    submodule,
+    ref_node,
+    operand_spec,
+    current_rescale=None,
+    output_qparam=None,
+    rescale_output_qparam_fn,
+    source_qparam_fn,
+    replace_quant_users: bool,
+):
+    preferred_quant_rescale = getattr(operand_spec, "preferred_output_rescale", None)
+    preferred_output_qparam = getattr(operand_spec, "preferred_output_qparam", None)
+    if preferred_quant_rescale is None or preferred_output_qparam is None:
         return None
-    quant_rescale, output_qparam = preferred
     cloned = _clone_quantized_binary_output_rescale(
         submodule,
         ref_node,
-        quant_rescale,
-        source_node,
+        preferred_quant_rescale,
+        operand_spec.source_node,
         rescale_output_qparam_fn=rescale_output_qparam_fn,
     )
     if cloned is None:
         return None
-    return cloned, quant_rescale, output_qparam
+    _stamp_single_qparams(
+        cloned,
+        source_qparam_fn(operand_spec.source_node),
+        preferred_output_qparam,
+    )
+    if replace_quant_users:
+        _replace_control_flow_quant_rescale_users(
+            preferred_quant_rescale,
+            cloned,
+            submodule=submodule,
+        )
+    if current_rescale is not None:
+        _rebind_control_flow_rescale_source(
+            current_rescale,
+            cloned,
+            input_qparam=preferred_output_qparam,
+            output_qparam=output_qparam,
+        )
+    return cloned, preferred_quant_rescale, preferred_output_qparam
 
 
 def _resolve_repaired_control_flow_binary_input_qparam(
@@ -3111,18 +3344,20 @@ def _resolve_repaired_control_flow_binary_input_qparam(
     arg,
     *,
     env,
+    operand_specs=None,
 ):
     import torch
 
     if not hasattr(arg, "op"):
         return None
 
+    operand_spec = (operand_specs or {}).get(idx)
     producer_qparam, recovered_from_boundary = _resolve_control_flow_binary_operand_qparam(
         arg,
         rescale_output_qparam_fn=_repair_control_flow_rescale_output_qparam,
         allow_branch_local_rescale=True,
-        placeholder_qparams=env.placeholder_qparams,
-        placeholder_index_by_name=env.placeholder_index_by_name,
+        env=env,
+        operand_spec=operand_spec,
     )
     if recovered_from_boundary:
         logger.info(
@@ -3133,23 +3368,16 @@ def _resolve_repaired_control_flow_binary_input_qparam(
         )
 
     sibling = node.args[1 - idx] if len(node.args) > 1 - idx else None
-    sibling_qparam = None
-    sibling_binary_output_qparam = None
-    if hasattr(sibling, "op"):
-        sibling_qparam, _ = _resolve_control_flow_binary_operand_qparam(
-            sibling,
-            rescale_output_qparam_fn=_repair_control_flow_rescale_output_qparam,
-            allow_branch_local_rescale=True,
-            placeholder_qparams=env.placeholder_qparams,
-            placeholder_index_by_name=env.placeholder_index_by_name,
-        )
-        preferred_sibling_quantized = _preferred_control_flow_quantized_binary_output_rescale(
-            sibling,
-            rescale_output_qparam_fn=_repair_control_flow_rescale_output_qparam,
-        )
-        if preferred_sibling_quantized is not None:
-            sibling_binary_output_qparam = preferred_sibling_quantized[1]
-    sibling_target_qparam = sibling_binary_output_qparam or sibling_qparam
+    sibling_spec = (operand_specs or {}).get(1 - idx)
+    sibling_alignment = _resolve_control_flow_binary_sibling_alignment(
+        sibling,
+        env=env,
+        rescale_output_qparam_fn=_repair_control_flow_rescale_output_qparam,
+        allow_branch_local_rescale=True,
+        operand_spec=sibling_spec,
+    )
+    sibling_qparam = sibling_alignment.input_qparam
+    sibling_target_qparam = sibling_alignment.target_qparam
 
     if (
         producer_qparam is not None
@@ -3188,7 +3416,7 @@ def _resolve_repaired_control_flow_binary_input_qparam(
         and getattr(sibling_target_qparam, "dtype", None) in (torch.int8, torch.int16)
         and (
             (hasattr(sibling, "op") and _is_quantized_binary_result(sibling))
-            or sibling_binary_output_qparam is not None
+            or sibling_alignment.preferred_output_qparam is not None
         )
         and not _same_control_flow_qparam(
             producer_qparam, sibling_target_qparam
@@ -3204,15 +3432,7 @@ def _resolve_repaired_control_flow_binary_input_qparam(
 
     if producer_qparam is not None:
         return producer_qparam
-    if not hasattr(sibling, "op"):
-        return None
-    return _extract_single_qparam_entry(
-        sibling.meta.get("input_qparams")
-    ) or (
-        _extract_effective_node_qparam(sibling.args[0])
-        if getattr(sibling, "args", None) and hasattr(sibling.args[0], "op")
-        else None
-    )
+    return sibling_qparam
 
 
 def _recover_mixed_control_flow_binary_operand_qparam(
@@ -3220,6 +3440,8 @@ def _recover_mixed_control_flow_binary_operand_qparam(
     mixed_idx,
     mixed_arg,
     sibling_qparam,
+    *,
+    operand_specs=None,
 ):
     if not hasattr(mixed_arg, "op"):
         return None
@@ -3236,23 +3458,194 @@ def _recover_mixed_control_flow_binary_operand_qparam(
             )
             if reconstructed_qparam is not None:
                 return reconstructed_qparam
+    mixed_operand_spec = (operand_specs or {}).get(mixed_idx)
+    if mixed_operand_spec is None:
+        mixed_operand_spec = _resolve_control_flow_binary_operand_spec(
+            mixed_arg,
+            rescale_output_qparam_fn=_repair_control_flow_rescale_output_qparam,
+            allow_branch_local_rescale=True,
+        )
     recovered_qparam, _ = _resolve_control_flow_binary_operand_qparam(
         mixed_arg,
         rescale_output_qparam_fn=_repair_control_flow_rescale_output_qparam,
         allow_branch_local_rescale=True,
+        operand_spec=mixed_operand_spec,
     )
     if getattr(recovered_qparam, "dtype", None) == getattr(sibling_qparam, "dtype", None):
         return recovered_qparam
     if not _is_control_flow_binary_or_mul_tensor_op(mixed_arg):
         return None
-    for _, source_qparam in _collect_control_flow_binary_operand_specs(
+    nested_operand_specs = _collect_control_flow_binary_operand_specs(
         mixed_arg,
         rescale_output_qparam_fn=_repair_control_flow_rescale_output_qparam,
         allow_branch_local_rescale=True,
-    ).values():
+    )
+    for operand_spec in nested_operand_specs.values():
+        source_qparam = operand_spec.qparam
         if getattr(source_qparam, "dtype", None) == getattr(sibling_qparam, "dtype", None):
             return source_qparam
     return None
+
+
+def _strip_control_flow_binary_input_rescales(node):
+    stripped = 0
+    for idx, arg, source in _iter_control_flow_binary_rescale_args(node):
+        if arg.meta.get("arm_promoted_control_flow_binary_input"):
+            continue
+        _reconstruct_control_flow_rescale_source_qparam(node, idx, arg)
+        node.replace_input_with(arg, source)
+        stripped += 1
+        logger.info(
+            "[fast_preprocess] stripped pre-existing control-flow binary input rescale %s from %s arg%d",
+            getattr(arg, "name", "?"),
+            getattr(node, "name", "?"),
+            idx,
+        )
+    return stripped
+
+
+def _strip_control_flow_binary_output_rescales(node):
+    import torch
+
+    stripped = 0
+    for user in list(node.users):
+        if not _is_tosa_rescale_node(user):
+            continue
+        if (
+            len(getattr(user, "args", ())) >= 2
+            and user.args[1] in (torch.int8, torch.int16)
+        ):
+            continue
+        _reconstruct_control_flow_binary_output_qparam(node, user)
+        for grand_user in list(user.users):
+            grand_user.replace_input_with(user, node)
+        stripped += 1
+        logger.info(
+            "[fast_preprocess] stripped pre-existing control-flow binary output rescale %s from %s",
+            getattr(user, "name", "?"),
+            getattr(node, "name", "?"),
+        )
+    return stripped
+
+
+def _mirror_control_flow_binary_input_qparams(node, input_qparams):
+    if len(input_qparams) != 1:
+        return False
+    missing_idx = 0 if 0 not in input_qparams else 1
+    present_idx = 1 - missing_idx
+    missing_arg = node.args[missing_idx] if len(node.args) > missing_idx else None
+    present_arg = node.args[present_idx] if len(node.args) > present_idx else None
+    present_qparam = input_qparams.get(present_idx)
+    missing_dtype = getattr(getattr(missing_arg, "meta", {}).get("val"), "dtype", None)
+    present_dtype = getattr(getattr(present_arg, "meta", {}).get("val"), "dtype", None)
+    if (
+        present_qparam is None
+        or missing_dtype is None
+        or missing_dtype != present_dtype
+        or present_dtype != getattr(present_qparam, "dtype", None)
+    ):
+        return False
+    input_qparams[missing_idx] = present_qparam
+    logger.info(
+        "[fast_preprocess] mirrored control-flow binary input_qparams for %s arg%d from arg%d: %s",
+        getattr(node, "name", "?"),
+        missing_idx,
+        present_idx,
+        present_qparam,
+    )
+    return True
+
+
+def _recover_mixed_control_flow_binary_input_qparams(
+    node,
+    input_qparams,
+    *,
+    operand_specs=None,
+):
+    import torch
+
+    if len(input_qparams) != 2:
+        return False
+    lhs_qparam = input_qparams.get(0)
+    rhs_qparam = input_qparams.get(1)
+    if not (
+        {
+            getattr(lhs_qparam, "dtype", None),
+            getattr(rhs_qparam, "dtype", None),
+        }
+        <= {torch.int8, torch.int16, torch.int32}
+        and getattr(lhs_qparam, "dtype", None)
+        != getattr(rhs_qparam, "dtype", None)
+    ):
+        return False
+
+    for mixed_idx in (0, 1):
+        mixed_qparam = input_qparams.get(mixed_idx)
+        sibling_qparam = input_qparams.get(1 - mixed_idx)
+        if (
+            getattr(mixed_qparam, "dtype", None) != torch.int32
+            or getattr(sibling_qparam, "dtype", None) not in (torch.int8, torch.int16)
+        ):
+            continue
+        mixed_arg = node.args[mixed_idx] if len(node.args) > mixed_idx else None
+        recovered_qparam = _recover_mixed_control_flow_binary_operand_qparam(
+            node,
+            mixed_idx,
+            mixed_arg,
+            sibling_qparam,
+            operand_specs=operand_specs,
+        )
+        if (
+            getattr(recovered_qparam, "dtype", None)
+            == getattr(sibling_qparam, "dtype", None)
+        ):
+            input_qparams[mixed_idx] = recovered_qparam
+            logger.info(
+                "[fast_preprocess] recovered mixed control-flow binary input_qparams for %s arg%d -> %s",
+                getattr(node, "name", "?"),
+                mixed_idx,
+                recovered_qparam,
+            )
+            return True
+    return False
+
+
+def _synthesize_repaired_control_flow_binary_input_qparams(
+    node,
+    *,
+    env,
+    operand_specs=None,
+):
+    input_qparams = {}
+    synthesized = 0
+    updated = False
+    for idx, arg in enumerate(node.args[:2]):
+        producer_qparam = _resolve_repaired_control_flow_binary_input_qparam(
+            node,
+            idx,
+            arg,
+            env=env,
+            operand_specs=operand_specs,
+        )
+        if producer_qparam is None:
+            continue
+        input_qparams[idx] = producer_qparam
+        synthesized += 1
+        updated = True
+        logger.info(
+            "[fast_preprocess] synthesized control-flow binary input_qparams for %s arg%d: %s",
+            getattr(node, "name", "?"),
+            idx,
+            producer_qparam,
+        )
+
+    updated |= _mirror_control_flow_binary_input_qparams(node, input_qparams)
+    updated |= _recover_mixed_control_flow_binary_input_qparams(
+        node,
+        input_qparams,
+        operand_specs=operand_specs,
+    )
+    return input_qparams, synthesized, updated
 
 
 def _clone_quantized_binary_output_rescale(
@@ -3287,22 +3680,6 @@ def _clone_quantized_binary_output_rescale(
     return cloned
 
 
-def _effective_submodule_output_qparam(output_arg, *, allow_placeholder_fallback: bool) -> object:
-    current = output_arg
-    seen = set()
-    while hasattr(current, "op") and id(current) not in seen:
-        seen.add(id(current))
-        qparam = _extract_effective_node_qparam(current)
-        if qparam is not None:
-            return qparam
-        if allow_placeholder_fallback and getattr(current, "op", None) == "placeholder":
-            return _branch_local_control_flow_output_qparam(current)
-        if not getattr(current, "args", None) or not hasattr(current.args[0], "op"):
-            break
-        current = current.args[0]
-    return None
-
-
 def _refresh_submodule_output_input_qparams(
     submodule, *, allow_placeholder_fallback: bool
 ) -> None:
@@ -3312,10 +3689,20 @@ def _refresh_submodule_output_input_qparams(
     for idx, output_arg in enumerate(output_args):
         if not hasattr(output_arg, "op"):
             continue
-        qparam = _effective_submodule_output_qparam(
-            output_arg,
-            allow_placeholder_fallback=allow_placeholder_fallback,
-        )
+        current = output_arg
+        seen = set()
+        qparam = None
+        while hasattr(current, "op") and id(current) not in seen:
+            seen.add(id(current))
+            qparam = _extract_effective_node_qparam(current)
+            if qparam is not None:
+                break
+            if allow_placeholder_fallback and getattr(current, "op", None) == "placeholder":
+                qparam = _branch_local_control_flow_output_qparam(current)
+                break
+            if not getattr(current, "args", None) or not hasattr(current.args[0], "op"):
+                break
+            current = current.args[0]
         if qparam is not None:
             input_qparams_map[idx] = qparam
     if input_qparams_map:
@@ -3391,84 +3778,6 @@ def _filter_output_qparams_map(submodule, output_qparams_map):
     return filtered
 
 
-def _reapply_control_flow_input_boundary_rescales(
-    contracts,
-    *,
-    rescale_pass,
-):
-    if not contracts:
-        return False
-
-    submodule = contracts[0].submodule
-    input_qparams_map = {contract.index: contract.input_qparam for contract in contracts}
-    for contract in contracts:
-        placeholder = contract.placeholder
-        _log_control_flow_debug(
-            "[fast_preprocess] restore submodule input qparams %s %s idx=%d incoming=%s branch_output_qparams=%s",
-            getattr(contract.submodule, "__class__", type(contract.submodule)).__name__,
-            getattr(placeholder, "name", "?"),
-            contract.index,
-            contract.input_qparam,
-            contract.output_qparam,
-        )
-        _stamp_single_qparams(
-            placeholder,
-            contract.input_qparam,
-            contract.output_qparam,
-        )
-        placeholder.meta["arm_control_flow_saved_output_qparams"] = {
-            0: contract.output_qparam
-        }
-        fake_val = placeholder.meta.get("val")
-        preserves_float_boundary = any(
-            _is_quantize_node(user) for user in list(getattr(placeholder, "users", ()))
-        )
-        if (
-            not preserves_float_boundary
-            and hasattr(fake_val, "to")
-            and getattr(fake_val, "dtype", None) != contract.output_qparam.dtype
-        ):
-            placeholder.meta["val"] = fake_val.to(dtype=contract.output_qparam.dtype)
-
-    modified = rescale_pass._rescale_submodule_inputs(submodule, input_qparams_map)
-    for contract in contracts:
-        for user in list(getattr(contract.placeholder, "users", ())):
-            if not _is_tosa_rescale_node(user):
-                continue
-            if (
-                len(getattr(user, "args", ())) >= 2
-                and user.args[1] != contract.output_qparam.dtype
-            ):
-                continue
-            _stamp_single_qparams(
-                user,
-                contract.input_qparam,
-                contract.output_qparam,
-            )
-            logger.info(
-                "[fast_preprocess] annotated control-flow input rescale %s idx=%d input=%s output=%s",
-                getattr(user, "name", "?"),
-                contract.index,
-                contract.input_qparam,
-                contract.output_qparam,
-            )
-    return modified
-
-
-def _reapply_control_flow_output_boundary_rescales(
-    contracts,
-    *,
-    rescale_pass,
-):
-    if not contracts:
-        return False
-
-    return rescale_pass._rescale_submodule_outputs(
-        contracts[0].submodule,
-        {contract.index: contract.target_qparam for contract in contracts},
-    )
-
-
 # ---------------------------------------------------------------------------
 # Compatibility wrappers -- original pipeline call ordering (pre-consolidation)
 # ---------------------------------------------------------------------------
@@ -3487,34 +3796,6 @@ def _prepare_control_flow_qparams(graph_module, exported_program) -> None:
     from executorch.backends.arm._passes.arm_pass_utils import (
         get_cond_while_submodules_nested,
     )
-
-    def _topologically_rebuild_graph_module(module) -> None:
-        new_graph = torch.fx.Graph()
-        env = {}
-
-        for old_node in module.graph.nodes:
-            if old_node.op not in ("placeholder", "get_attr"):
-                continue
-            new_node = new_graph.node_copy(old_node, lambda old: env[old])
-            new_node.meta = dict(old_node.meta)
-            env[old_node] = new_node
-
-        def _copy_node(old_node):
-            if old_node in env:
-                return env[old_node]
-            for dep in old_node.all_input_nodes:
-                _copy_node(dep)
-            new_node = new_graph.node_copy(old_node, lambda old: env[old])
-            new_node.meta = dict(old_node.meta)
-            env[old_node] = new_node
-            return new_node
-
-        for old_node in module.graph.nodes:
-            if old_node.op == "output":
-                _copy_node(old_node)
-
-        module.graph = new_graph
-        module.recompile()
 
     def _extract_boundary_qparam(node):
         current = node
@@ -3638,8 +3919,8 @@ def _force_control_flow_rank4_output_dim_order(graph_module) -> None:
             output_arg.meta["tosa_dim_order"] = desired_dim_order
             forced += 1
             modified = True
-            print(
-                "[fast_preprocess] forced control-flow output dim_order",
+            _log_control_flow_debug(
+                "[fast_preprocess] forced control-flow output dim_order %s %s",
                 getattr(output_arg, "name", "?"),
                 output_arg.meta["tosa_dim_order"],
             )
@@ -3655,6 +3936,8 @@ def _force_control_flow_rank4_output_dim_order(graph_module) -> None:
 
 
 def _restamp_control_flow_placeholder_dtypes(graph_module) -> None:
+    import torch
+
     restamped = 0
 
     def _visit(ctx):
@@ -3663,9 +3946,11 @@ def _restamp_control_flow_placeholder_dtypes(graph_module) -> None:
         for node in ctx.placeholders:
             if any(_is_quantize_node(user) for user in list(getattr(node, "users", ()))):
                 continue
-            qparam = _extract_single_qparam_entry(node.meta.get("input_qparams"))
-            if qparam is None:
-                qparam = _branch_local_control_flow_output_qparam(node)
+            qparam = _branch_local_control_flow_output_qparam(node)
+            if getattr(qparam, "dtype", None) not in (torch.int8, torch.int16):
+                input_qparam = _extract_single_qparam_entry(node.meta.get("input_qparams"))
+                if input_qparam is not None:
+                    qparam = input_qparam
             fake_val = node.meta.get("val")
             if (
                 qparam is None
@@ -3689,76 +3974,17 @@ def _restamp_control_flow_placeholder_dtypes(graph_module) -> None:
         )
 
 
-def _canonicalize_control_flow_pool_binary_rescales(graph_module) -> None:
-    import torch
-
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
-
-    def _topologically_rebuild_graph_module(module) -> None:
-        new_graph = torch.fx.Graph()
-        env = {}
-
-        for old_node in module.graph.nodes:
-            if old_node.op not in ("placeholder", "get_attr"):
-                continue
-            new_node = new_graph.node_copy(old_node, lambda old: env[old])
-            new_node.meta = dict(old_node.meta)
-            env[old_node] = new_node
-
-        def _copy_node(old_node):
-            if old_node in env:
-                return env[old_node]
-            for dep in old_node.all_input_nodes:
-                _copy_node(dep)
-            new_node = new_graph.node_copy(old_node, lambda old: env[old])
-            new_node.meta = dict(old_node.meta)
-            env[old_node] = new_node
-            return new_node
-
-        for old_node in module.graph.nodes:
-            if old_node.op == "output":
-                _copy_node(old_node)
-
-        module.graph = new_graph
-        module.recompile()
-
-    def _is_avg_pool_node(node) -> bool:
-        if getattr(node, "op", None) != "call_function":
-            return False
-        target_str = str(getattr(node, "target", ""))
-        return "AVG_POOL2D" in target_str or "avg_pool2d" in target_str
-
-    def _is_binary_node(node) -> bool:
-        if getattr(node, "op", None) != "call_function":
-            return False
-        target_str = str(getattr(node, "target", ""))
-        return "aten.add.Tensor" in target_str or "aten.sub.Tensor" in target_str
-
-    def _is_reshape_node(node) -> bool:
-        if getattr(node, "op", None) != "call_function":
-            return False
-        target_str = str(getattr(node, "target", ""))
-        return "RESHAPE" in target_str or "view_copy" in target_str
-
-    def _downstream_non_reshape_users(node):
-        stack = list(getattr(node, "users", ()))
-        seen = set()
-        while stack:
-            user = stack.pop()
-            if id(user) in seen:
-                continue
-            seen.add(id(user))
-            if _is_reshape_node(user):
-                stack.extend(list(getattr(user, "users", ())))
-                continue
-            yield user
-
+def _canonicalize_control_flow_pool_binary_sources(
+    graph_module,
+    *,
+    target_user_predicate,
+):
     canonicalized = 0
-    for _, submodule, _ in get_cond_while_submodules_nested(graph_module):
+
+    def _visit(ctx):
+        nonlocal canonicalized
         updated = False
-        for node in list(submodule.graph.nodes):
+        for node in list(ctx.graph.nodes):
             if not _is_control_flow_quant_input_node(node):
                 continue
 
@@ -3770,37 +3996,41 @@ def _canonicalize_control_flow_pool_binary_rescales(graph_module) -> None:
             if len(rescale_users) != 3:
                 continue
 
-            avg_pool_source = None
+            target_source = None
             binary_sources = []
             for rescale in rescale_users:
-                downstream = list(_downstream_non_reshape_users(rescale))
-                if any(_is_avg_pool_node(user) for user in downstream):
-                    avg_pool_source = rescale
-                if any(_is_binary_node(user) for user in downstream):
+                downstream = list(_downstream_non_view_like_users(rescale))
+                if any(target_user_predicate(user) for user in downstream):
+                    target_source = rescale
+                if any(_is_control_flow_binary_tensor_op(user) for user in downstream):
                     binary_sources.append(rescale)
 
-            if avg_pool_source is None or len(binary_sources) != 2:
+            if target_source is None or len(binary_sources) != 2:
                 continue
 
             for binary_source in binary_sources:
-                if binary_source is avg_pool_source:
+                if binary_source is target_source:
                     continue
-                if not getattr(binary_source, "args", None) or binary_source.args[0] is not node:
+                if (
+                    not getattr(binary_source, "args", None)
+                    or binary_source.args[0] is not node
+                ):
                     continue
-                binary_source.update_arg(0, avg_pool_source)
+                binary_source.update_arg(0, target_source)
                 updated = True
                 canonicalized += 1
                 logger.info(
-                    "[fast_preprocess] rewired control-flow binary rescale %s to share avg-pool source %s",
+                    "[fast_preprocess] rewired control-flow binary rescale %s to share source %s",
                     getattr(binary_source, "name", "?"),
-                    getattr(avg_pool_source, "name", "?"),
+                    getattr(target_source, "name", "?"),
                 )
 
         if updated:
-            _topologically_rebuild_graph_module(submodule)
-            submodule.graph.eliminate_dead_code()
-            submodule.graph.lint()
-            submodule.recompile()
+            _topologically_rebuild_graph_module(ctx.submodule)
+            _cleanup_graph(ctx.submodule.graph)
+        return updated
+
+    _for_each_cf_submodule(graph_module, _visit)
 
     if canonicalized:
         logger.info(
@@ -3809,56 +4039,18 @@ def _canonicalize_control_flow_pool_binary_rescales(graph_module) -> None:
         )
 
 
+def _canonicalize_control_flow_pool_binary_rescales(graph_module) -> None:
+    _canonicalize_control_flow_pool_binary_sources(
+        graph_module,
+        target_user_predicate=lambda node: _is_call_function_target(
+            node, "AVG_POOL2D", "avg_pool2d"
+        ),
+    )
+
+
 def _restore_control_flow_pool_quant_boundaries(graph_module) -> None:
     _restore_control_flow_quant_boundaries(graph_module, mode="pool")
 
 
 def _restore_control_flow_unary_quant_boundaries(graph_module) -> None:
     _restore_control_flow_quant_boundaries(graph_module, mode="unary")
-
-
-def _rewrite_control_flow_quantize_nodes_standalone(graph_module) -> None:
-    """Top-level wrapper that rewrites quantize nodes without collapsing q/dq pairs."""
-    from executorch.backends.arm._passes.quant_args import QuantArgs
-    from fast_preprocess_cf_rewrites import (
-        _rewrite_control_flow_quantize_nodes as _rewrite_quantize_visitor,
-    )
-
-    stats = {"quant": 0, "dequant": 0}
-
-    def _visit(ctx):
-        modified = _rewrite_quantize_visitor(ctx, stats, QuantArgs)
-        if modified:
-            _cleanup_graph(ctx.graph)
-        return modified
-
-    _for_each_cf_submodule(graph_module, _visit)
-
-    if stats["quant"]:
-        logger.info(
-            "[fast_preprocess] rewrote %d control-flow quantize node(s) into explicit rescale/no-op edges",
-            stats["quant"],
-        )
-
-
-def _rewrite_control_flow_dequantize_nodes_standalone(graph_module) -> None:
-    """Top-level wrapper that rewrites dequantize nodes without collapsing q/dq pairs."""
-    from fast_preprocess_cf_rewrites import (
-        _rewrite_control_flow_dequantize_nodes as _rewrite_dequantize_visitor,
-    )
-
-    stats = {"quant": 0, "dequant": 0}
-
-    def _visit(ctx):
-        modified = _rewrite_dequantize_visitor(ctx, stats)
-        if modified:
-            _cleanup_graph(ctx.graph)
-        return modified
-
-    _for_each_cf_submodule(graph_module, _visit)
-
-    if stats["dequant"]:
-        logger.info(
-            "[fast_preprocess] rewrote %d control-flow dequantize node(s) into direct quant-domain edges",
-            stats["dequant"],
-        )

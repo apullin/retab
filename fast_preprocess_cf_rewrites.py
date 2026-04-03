@@ -7,9 +7,10 @@ from fast_preprocess_cf_ctx import (
     _for_each_cf_submodule,
     _get_matching_fake_tensor,
 )
+from fast_preprocess_contracts import _ControlFlowOutputContract
 from fast_preprocess_control_flow import (
     _ControlFlowRescaleEdit,
-    _apply_control_flow_input_boundary_contract,
+    _restore_input_boundary_contracts,
     _build_control_flow_input_boundary_contracts,
     _build_control_flow_output_boundary_contracts,
     _branch_local_control_flow_output_qparam,
@@ -33,7 +34,7 @@ from fast_preprocess_control_flow import (
     _output_node_args,
     _ordered_control_flow_users,
     _preserve_control_flow_output_meta,
-    _reapply_control_flow_output_boundary_rescales,
+    _reapply_control_flow_submodule_boundary_contracts,
     _same_control_flow_qparam,
     _stamp_single_qparams,
 )
@@ -64,6 +65,86 @@ class _ControlFlowOutputEdit:
     desired_dim_order: object
     structural: bool = True
     rewire_source: object = None
+
+    @classmethod
+    def from_contract(cls, contract):
+        submodule_output = contract.submodule_output
+        submodule_user = contract.submodule_user
+        desired_fake_tensor = contract.desired_fake_tensor
+        desired_dim_order = contract.desired_dim_order
+        direct_source = _first_node_arg(submodule_output)
+        layout_wrapper = None
+        source_input = None
+        if _is_layout_output_node(submodule_output):
+            source_input = direct_source
+        elif (
+            _is_dequantize_node(submodule_output) or _is_tosa_rescale_node(submodule_output)
+        ) and hasattr(direct_source, "op") and _is_layout_output_node(direct_source):
+            source_input = _first_node_arg(direct_source)
+            layout_wrapper = direct_source
+        if source_input is None:
+            if _is_trivial_control_flow_output_chain(submodule_output):
+                replacement = _select_control_flow_output_value(
+                    submodule_output, submodule_user
+                )
+                if replacement is not None:
+                    _log_control_flow_debug(
+                        "[fast_preprocess] selected control-flow replacement %s",
+                        _describe_node_brief(replacement),
+                    )
+                    return cls(
+                        output_value=replacement,
+                        contract_node=replacement,
+                        desired_fake_tensor=desired_fake_tensor,
+                        desired_dim_order=desired_dim_order,
+                    )
+            current_fake_tensor = submodule_output.meta.get("val")
+            current_dim_order = submodule_output.meta.get("tosa_dim_order")
+            dim_order_changed = desired_dim_order is not None and tuple(
+                desired_dim_order
+            ) != tuple(current_dim_order or ())
+            tensor_changed = desired_fake_tensor is not None and (
+                getattr(current_fake_tensor, "shape", None)
+                != getattr(desired_fake_tensor, "shape", None)
+                or getattr(current_fake_tensor, "dtype", None)
+                != getattr(desired_fake_tensor, "dtype", None)
+                or dim_order_changed
+            )
+            if dim_order_changed or tensor_changed:
+                return cls(
+                    output_value=submodule_output,
+                    contract_node=submodule_output,
+                    desired_fake_tensor=desired_fake_tensor,
+                    desired_dim_order=desired_dim_order,
+                    structural=False,
+                )
+            return None
+        if layout_wrapper is None:
+            logger.info(
+                "[fast_preprocess] retargeting control-flow output layout %s -> %s",
+                getattr(submodule_output, "name", "?"),
+                getattr(source_input, "name", "?"),
+            )
+            return cls(
+                output_value=source_input,
+                contract_node=source_input,
+                desired_fake_tensor=desired_fake_tensor,
+                desired_dim_order=desired_dim_order,
+            )
+
+        logger.info(
+            "[fast_preprocess] retargeting control-flow output %s through %s -> %s",
+            getattr(submodule_output, "name", "?"),
+            getattr(layout_wrapper, "name", "?"),
+            getattr(source_input, "name", "?"),
+        )
+        return cls(
+            output_value=submodule_output,
+            contract_node=submodule_output,
+            desired_fake_tensor=desired_fake_tensor,
+            desired_dim_order=desired_dim_order,
+            rewire_source=source_input,
+        )
 
     def apply(self, output_args, idx) -> None:
         if self.rewire_source is not None:
@@ -163,7 +244,7 @@ def _rewrite_dequantize_int32_lift(
     if cluster is None:
         return False
     users, desired_qparam = cluster
-    lifted, _ = _ControlFlowRescaleEdit(
+    lifted, _ = _ControlFlowRescaleEdit.from_source(
         submodule=ctx.submodule,
         anchor=users[0],
         source_node=source_node,
@@ -351,13 +432,20 @@ def _rewrite_control_flow_quantize_nodes(ctx, stats, QuantArgs) -> bool:
             modified = True
             continue
 
-        rescale, _ = _ControlFlowRescaleEdit(
+        rescale, _ = _ControlFlowRescaleEdit.from_source(
             submodule=ctx.submodule,
             anchor=node,
             source_node=source_node,
             input_qparam=source_qparam,
             output_qparam=output_qparam,
         ).ensure()
+        logger.info(
+            "[fast_preprocess] quantize rewrite rescale %s via %s from %s to %s",
+            getattr(node, "name", "?"),
+            getattr(rescale, "name", "?"),
+            source_qparam,
+            output_qparam,
+        )
         _log_control_flow_debug(
             "[cf-quantize-rewrite] rescale %s from %s to %s",
             getattr(node, "name", "?"),
@@ -841,111 +929,6 @@ def _annotate_control_flow_rank4_nodes(ctx, stats) -> bool:
     return updated
 
 
-def _desired_control_flow_output_contract(ctx, idx, submodule_output, ordered_users):
-    fallback_source = None
-    if idx < len(ordered_users):
-        submodule_user = ordered_users[idx]
-        desired_fake_tensor = _get_control_flow_output_fake_tensor(submodule_user)
-        desired_dim_order = submodule_user.meta.get("tosa_dim_order")
-    else:
-        fallback_source = _trace_control_flow_output_source(submodule_output)
-        submodule_user = fallback_source or ctx.cf_node
-        desired_fake_tensor = (
-            _get_matching_fake_tensor(fallback_source)
-            if fallback_source is not None
-            else _get_matching_fake_tensor(ctx.cf_node)
-        )
-        desired_dim_order = (
-            fallback_source.meta.get("tosa_dim_order")
-            if fallback_source is not None
-            else ctx.cf_node.meta.get("tosa_dim_order")
-        )
-    if desired_dim_order is None:
-        desired_dim_order = _infer_control_flow_output_dim_order(submodule_output)
-    return submodule_user, desired_fake_tensor, desired_dim_order
-
-
-def _plan_control_flow_output_edit(
-    submodule_output,
-    submodule_user,
-    desired_fake_tensor,
-    desired_dim_order,
-):
-    direct_source = _first_node_arg(submodule_output)
-    layout_wrapper = None
-    source_input = None
-    if _is_layout_output_node(submodule_output):
-        source_input = direct_source
-    elif (_is_dequantize_node(submodule_output) or _is_tosa_rescale_node(submodule_output)) and hasattr(
-        direct_source, "op"
-    ) and _is_layout_output_node(direct_source):
-        source_input = _first_node_arg(direct_source)
-        layout_wrapper = direct_source
-    if source_input is None:
-        if _is_trivial_control_flow_output_chain(submodule_output):
-            replacement = _select_control_flow_output_value(
-                submodule_output, submodule_user
-            )
-            if replacement is not None:
-                _log_control_flow_debug(
-                    "[fast_preprocess] selected control-flow replacement %s",
-                    _describe_node_brief(replacement),
-                )
-                return _ControlFlowOutputEdit(
-                    output_value=replacement,
-                    contract_node=replacement,
-                    desired_fake_tensor=desired_fake_tensor,
-                    desired_dim_order=desired_dim_order,
-                )
-        current_fake_tensor = submodule_output.meta.get("val")
-        current_dim_order = submodule_output.meta.get("tosa_dim_order")
-        dim_order_changed = desired_dim_order is not None and tuple(
-            desired_dim_order
-        ) != tuple(current_dim_order or ())
-        tensor_changed = desired_fake_tensor is not None and (
-            getattr(current_fake_tensor, "shape", None)
-            != getattr(desired_fake_tensor, "shape", None)
-            or getattr(current_fake_tensor, "dtype", None)
-            != getattr(desired_fake_tensor, "dtype", None)
-            or dim_order_changed
-        )
-        if dim_order_changed or tensor_changed:
-            return _ControlFlowOutputEdit(
-                output_value=submodule_output,
-                contract_node=submodule_output,
-                desired_fake_tensor=desired_fake_tensor,
-                desired_dim_order=desired_dim_order,
-                structural=False,
-            )
-        return None
-    if layout_wrapper is None:
-        logger.info(
-            "[fast_preprocess] retargeting control-flow output layout %s -> %s",
-            getattr(submodule_output, "name", "?"),
-            getattr(source_input, "name", "?"),
-        )
-        return _ControlFlowOutputEdit(
-            output_value=source_input,
-            contract_node=source_input,
-            desired_fake_tensor=desired_fake_tensor,
-            desired_dim_order=desired_dim_order,
-        )
-
-    logger.info(
-        "[fast_preprocess] retargeting control-flow output %s through %s -> %s",
-        getattr(submodule_output, "name", "?"),
-        getattr(layout_wrapper, "name", "?"),
-        getattr(source_input, "name", "?"),
-    )
-    return _ControlFlowOutputEdit(
-        output_value=submodule_output,
-        contract_node=submodule_output,
-        desired_fake_tensor=desired_fake_tensor,
-        desired_dim_order=desired_dim_order,
-        rewire_source=source_input,
-    )
-
-
 def _normalize_control_flow_outputs_for_ctx(ctx, stats) -> bool:
     if ctx.output_node is None or ctx.cf_node is None:
         return False
@@ -962,11 +945,33 @@ def _normalize_control_flow_outputs_for_ctx(ctx, stats) -> bool:
 
     updated = False
     for idx, submodule_output in enumerate(output_args):
-        submodule_user, desired_fake_tensor, desired_dim_order = (
-            _desired_control_flow_output_contract(
-                ctx, idx, submodule_output, ordered_users
+        if idx < len(ordered_users):
+            submodule_user = ordered_users[idx]
+            desired_fake_tensor = _get_control_flow_output_fake_tensor(submodule_user)
+            desired_dim_order = submodule_user.meta.get("tosa_dim_order")
+        else:
+            fallback_source = _trace_control_flow_output_source(submodule_output)
+            submodule_user = fallback_source or ctx.cf_node
+            desired_fake_tensor = (
+                _get_matching_fake_tensor(fallback_source)
+                if fallback_source is not None
+                else _get_matching_fake_tensor(ctx.cf_node)
             )
+            desired_dim_order = (
+                fallback_source.meta.get("tosa_dim_order")
+                if fallback_source is not None
+                else ctx.cf_node.meta.get("tosa_dim_order")
+            )
+        if desired_dim_order is None:
+            desired_dim_order = _infer_control_flow_output_dim_order(submodule_output)
+        contract = _ControlFlowOutputContract(
+            submodule_output=submodule_output,
+            submodule_user=submodule_user,
+            desired_fake_tensor=desired_fake_tensor,
+            desired_dim_order=desired_dim_order,
         )
+        desired_fake_tensor = contract.desired_fake_tensor
+        desired_dim_order = contract.desired_dim_order
 
         current_fake_tensor = submodule_output.meta.get("val")
         if _preserve_control_flow_output_meta(
@@ -986,12 +991,7 @@ def _normalize_control_flow_outputs_for_ctx(ctx, stats) -> bool:
             )
             continue
 
-        edit = _plan_control_flow_output_edit(
-            submodule_output,
-            submodule_user,
-            desired_fake_tensor,
-            desired_dim_order,
-        )
+        edit = _ControlFlowOutputEdit.from_contract(contract)
         if edit is not None:
             edit.apply(output_args, idx)
             updated = True
@@ -1110,9 +1110,12 @@ def _restore_control_flow_output_dequantizes(graph_module) -> None:
         )
         if not contracts:
             return False
-        if _reapply_control_flow_output_boundary_rescales(
-            contracts,
+        if _reapply_control_flow_submodule_boundary_contracts(
+            ctx.submodule,
             rescale_pass=rescale_pass,
+            output_contracts=contracts,
+            include_inputs=False,
+            include_outputs=True,
         ):
             restored += len(contracts)
             _cleanup_graph(ctx.graph)
@@ -1134,10 +1137,8 @@ def _restore_missing_control_flow_input_rescales(graph_module) -> None:
     def _visit(ctx):
         nonlocal restored
         submodule_modified = False
-        for contract in _build_control_flow_input_boundary_contracts(
-            ctx.submodule,
-            current_only=True,
-        ):
+        pending_contracts = []
+        for contract in _build_control_flow_input_boundary_contracts(ctx.submodule, current_only=True):
             placeholder = contract.placeholder
             users = [user for user in list(placeholder.users) if hasattr(user, "op")]
             placeholder_dtype = getattr(placeholder.meta.get("val"), "dtype", None)
@@ -1162,23 +1163,15 @@ def _restore_missing_control_flow_input_rescales(graph_module) -> None:
                 continue
             if not users:
                 continue
+            pending_contracts.append(contract)
 
-            rescale, boundary_modified = _apply_control_flow_input_boundary_contract(
-                contract,
-                users,
-                preserve_boundary=False,
-                require_preserve_boundary=False,
-            )
-
-            if not boundary_modified:
-                continue
-            _log_control_flow_debug(
-                "[cf-entry-rescale-insert] %s from %s to %s",
-                getattr(placeholder, "name", "?"),
-                contract.input_qparam,
-                contract.output_qparam,
-            )
-            restored += 1
+        applied, _ = _restore_input_boundary_contracts(
+            pending_contracts,
+            user_selector=lambda contract: list(getattr(contract.placeholder, "users", ())),
+            preserve_boundary=False,
+        )
+        if applied:
+            restored += len(applied)
             submodule_modified = True
 
         if submodule_modified:
@@ -1392,290 +1385,5 @@ def _dump_control_flow_submodules(graph_module, label: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _log_node_chain(node, limit: int = 8) -> None:
-    current = node
-    depth = 0
-    while hasattr(current, "op") and depth < limit:
-        logger.info("[fast_preprocess] chain[%d] %s", depth, _describe_node_brief(current))
-        if not getattr(current, "args", None) or not hasattr(current.args[0], "op"):
-            break
-        current = current.args[0]
-        depth += 1
-
-
 def _normalize_control_flow_output_layouts(graph_module) -> None:
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
-
-    def _infer_output_dim_order(node):
-        current = node
-        seen = set()
-        while hasattr(current, "op") and id(current) not in seen:
-            seen.add(id(current))
-            dim_order = current.meta.get("tosa_dim_order")
-            if dim_order is not None:
-                return tuple(dim_order)
-            next_arg = None
-            for maybe_arg in getattr(current, "args", ()):
-                if hasattr(maybe_arg, "op"):
-                    next_arg = maybe_arg
-                    break
-            current = next_arg
-
-        fake_val = node.meta.get("val")
-        if hasattr(fake_val, "dim") and fake_val.dim() == 4:
-            return (0, 2, 3, 1)
-        return None
-
-    rewritten = 0
-    for name, submodule, control_flow_node in get_cond_while_submodules_nested(graph_module):
-        output_node = submodule.graph.output_node()
-        output_arg0 = output_node.args[0]
-        wrapped_single = hasattr(output_arg0, "op")
-        output_args = [output_arg0] if wrapped_single else list(output_arg0)
-        ordered_users = _ordered_control_flow_users(control_flow_node)
-        _log_control_flow_debug(
-            "[fast_preprocess] normalize outputs name=%s output_count=%d user_count=%d",
-            name,
-            len(output_args),
-            len(ordered_users),
-        )
-        updated = False
-
-        for idx, submodule_output in enumerate(output_args):
-            fallback_source = None
-            if idx < len(ordered_users):
-                submodule_user = ordered_users[idx]
-                desired_fake_tensor = _get_control_flow_output_fake_tensor(submodule_user)
-                desired_dim_order = submodule_user.meta.get("tosa_dim_order")
-            else:
-                fallback_source = _trace_control_flow_output_source(submodule_output)
-                submodule_user = fallback_source or control_flow_node
-                desired_fake_tensor = (
-                    _get_matching_fake_tensor(fallback_source)
-                    if fallback_source is not None
-                    else _get_matching_fake_tensor(control_flow_node)
-                )
-                desired_dim_order = (
-                    fallback_source.meta.get("tosa_dim_order")
-                    if fallback_source is not None
-                    else control_flow_node.meta.get("tosa_dim_order")
-                )
-            if desired_dim_order is None:
-                desired_dim_order = _infer_output_dim_order(submodule_output)
-            current_fake_tensor = submodule_output.meta.get("val")
-            if _preserve_control_flow_output_meta(
-                current_fake_tensor, desired_fake_tensor
-            ):
-                logger.info(
-                    "[fast_preprocess] preserving boolean control-flow output %s shape=%s dtype=%s over desired shape=%s dtype=%s",
-                    getattr(submodule_output, "name", "?"),
-                    tuple(current_fake_tensor.shape)
-                    if hasattr(current_fake_tensor, "shape")
-                    else None,
-                    getattr(current_fake_tensor, "dtype", None),
-                    tuple(desired_fake_tensor.shape)
-                    if hasattr(desired_fake_tensor, "shape")
-                    else None,
-                    getattr(desired_fake_tensor, "dtype", None),
-                )
-                continue
-            _log_control_flow_debug(
-                "[fast_preprocess] inspect output idx=%d node=%s target=%s user=%s user_target=%s",
-                idx,
-                getattr(submodule_output, "name", "?"),
-                getattr(submodule_output, "target", "?"),
-                getattr(submodule_user, "name", "?"),
-                getattr(submodule_user, "target", "?"),
-            )
-            logger.info(
-                "[fast_preprocess] inspect control-flow output idx=%d name=%s target=%s user=%s user_target=%s",
-                idx,
-                getattr(submodule_output, "name", "?"),
-                getattr(submodule_output, "target", "?"),
-                getattr(submodule_user, "name", "?"),
-                getattr(submodule_user, "target", "?"),
-            )
-            if _is_layout_output_node(submodule_output):
-                source_input = (
-                    submodule_output.args[0]
-                    if getattr(submodule_output, "args", None)
-                    and hasattr(submodule_output.args[0], "op")
-                    else None
-                )
-                if source_input is not None:
-                    logger.info(
-                        "[fast_preprocess] retargeting control-flow output layout %s -> %s",
-                        getattr(submodule_output, "name", "?"),
-                        getattr(source_input, "name", "?"),
-                    )
-                    source_input.meta["val"] = _get_control_flow_output_fake_tensor(
-                        submodule_user
-                    )
-                    if submodule_user.meta.get("tosa_dim_order") is not None:
-                        source_input.meta["tosa_dim_order"] = tuple(
-                            submodule_user.meta["tosa_dim_order"]
-                        )
-                    output_args[idx] = source_input
-                    updated = True
-                    rewritten += 1
-                    continue
-            if _is_dequantize_node(submodule_output):
-                layout_input = submodule_output.args[0] if getattr(
-                    submodule_output, "args", None
-                ) else None
-                source_input = (
-                    layout_input.args[0]
-                    if hasattr(layout_input, "op")
-                    and _is_layout_output_node(layout_input)
-                    and getattr(layout_input, "args", None)
-                    and hasattr(layout_input.args[0], "op")
-                    else None
-                )
-                if source_input is not None:
-                    logger.info(
-                        "[fast_preprocess] retargeting control-flow output dequantize %s through %s -> %s",
-                        getattr(submodule_output, "name", "?"),
-                        getattr(layout_input, "name", "?"),
-                        getattr(source_input, "name", "?"),
-                    )
-                    submodule_output.update_arg(0, source_input)
-                    submodule_output.meta["val"] = _get_control_flow_output_fake_tensor(
-                        submodule_user
-                    )
-                    if submodule_user.meta.get("tosa_dim_order") is not None:
-                        submodule_output.meta["tosa_dim_order"] = tuple(
-                            submodule_user.meta["tosa_dim_order"]
-                        )
-                    updated = True
-                    rewritten += 1
-                    continue
-
-            if _is_tosa_rescale_node(submodule_output):
-                layout_input = submodule_output.args[0] if getattr(
-                    submodule_output, "args", None
-                ) else None
-                _log_control_flow_debug(
-                    "[fast_preprocess] inspect rescale output node=%s input=%s input_target=%s is_layout=%s",
-                    getattr(submodule_output, "name", "?"),
-                    getattr(layout_input, "name", "?"),
-                    getattr(layout_input, "target", "?"),
-                    _is_layout_output_node(layout_input)
-                    if hasattr(layout_input, "op")
-                    else False,
-                )
-                logger.info(
-                    "[fast_preprocess] rescale output candidate %s input=%s input_target=%s is_layout=%s",
-                    getattr(submodule_output, "name", "?"),
-                    getattr(layout_input, "name", "?"),
-                    getattr(layout_input, "target", "?"),
-                    _is_layout_output_node(layout_input) if hasattr(layout_input, "op") else False,
-                )
-                source_input = (
-                    layout_input.args[0]
-                    if hasattr(layout_input, "op")
-                    and _is_layout_output_node(layout_input)
-                    and getattr(layout_input, "args", None)
-                    and hasattr(layout_input.args[0], "op")
-                    else None
-                )
-                if source_input is not None:
-                    logger.info(
-                        "[fast_preprocess] retargeting control-flow output rescale %s through %s -> %s",
-                        getattr(submodule_output, "name", "?"),
-                        getattr(layout_input, "name", "?"),
-                        getattr(source_input, "name", "?"),
-                    )
-                    submodule_output.update_arg(0, source_input)
-                    submodule_output.meta["val"] = _get_control_flow_output_fake_tensor(
-                        submodule_user
-                    )
-                    if submodule_user.meta.get("tosa_dim_order") is not None:
-                        submodule_output.meta["tosa_dim_order"] = tuple(
-                            submodule_user.meta["tosa_dim_order"]
-                        )
-                    updated = True
-                    rewritten += 1
-                    continue
-            current_dim_order = submodule_output.meta.get("tosa_dim_order")
-            if desired_dim_order is not None and tuple(desired_dim_order) != tuple(
-                current_dim_order or ()
-            ):
-                submodule_output.meta["tosa_dim_order"] = tuple(desired_dim_order)
-                current_dim_order = submodule_output.meta.get("tosa_dim_order")
-                updated = True
-                print(
-                    "[fast_preprocess] stamped control-flow output dim_order",
-                    getattr(submodule_output, "name", "?"),
-                    current_dim_order,
-                )
-            if desired_fake_tensor is not None and (
-                getattr(current_fake_tensor, "shape", None)
-                != getattr(desired_fake_tensor, "shape", None)
-                or getattr(current_fake_tensor, "dtype", None)
-                != getattr(desired_fake_tensor, "dtype", None)
-                or (
-                    desired_dim_order is not None
-                    and tuple(desired_dim_order) != tuple(current_dim_order or ())
-                )
-            ):
-                submodule_output.meta["val"] = desired_fake_tensor
-                if desired_dim_order is not None:
-                    submodule_output.meta["tosa_dim_order"] = tuple(desired_dim_order)
-                updated = True
-                logger.info(
-                    "[fast_preprocess] restamped control-flow output %s -> shape=%s dtype=%s dim_order=%s",
-                    getattr(submodule_output, "name", "?"),
-                    tuple(desired_fake_tensor.shape),
-                    getattr(desired_fake_tensor, "dtype", None),
-                    desired_dim_order,
-                )
-
-            if not _is_trivial_control_flow_output_chain(submodule_output):
-                continue
-            logger.info(
-                "[fast_preprocess] control-flow output candidate name=%s target=%s user=%s user_target=%s",
-                getattr(submodule_output, "name", "?"),
-                getattr(submodule_output, "target", "?"),
-                getattr(submodule_user, "name", "?"),
-                getattr(submodule_user, "target", "?"),
-            )
-            _log_node_chain(submodule_output)
-
-            replacement = _select_control_flow_output_value(submodule_output, submodule_user)
-            if replacement is None:
-                continue
-
-            logger.info(
-                "[fast_preprocess] selected control-flow replacement %s",
-                _describe_node_brief(replacement),
-            )
-            replacement.meta["val"] = _get_control_flow_output_fake_tensor(submodule_user)
-            if submodule_user.meta.get("tosa_dim_order") is not None:
-                replacement.meta["tosa_dim_order"] = tuple(
-                    submodule_user.meta["tosa_dim_order"]
-                )
-            output_args[idx] = replacement
-            updated = True
-            rewritten += 1
-
-        if updated:
-            replacement = output_args[0] if wrapped_single else tuple(output_args)
-            output_node.update_arg(0, replacement)
-            final_outputs = output_node.args[0]
-            if hasattr(final_outputs, "op"):
-                final_outputs = [final_outputs]
-            logger.info(
-                "[fast_preprocess] final control-flow outputs %s",
-                [getattr(n, "name", "?") for n in final_outputs],
-            )
-            submodule.graph.eliminate_dead_code()
-            submodule.graph.lint()
-            submodule.recompile()
-
-    if rewritten:
-        logger.info(
-            "[fast_preprocess] rewrote %d control-flow output layout node(s)",
-            rewritten,
-        )
+    _normalize_control_flow_output_contracts(graph_module, normalize_outputs=True)

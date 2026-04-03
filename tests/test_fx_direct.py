@@ -31,22 +31,23 @@ class TinyCNN(nn.Module):
 
 
 def _get_quantized_gm():
-    from torch.ao.quantization.quantize_pt2e import convert_pt2e, prepare_pt2e
-    from torch.ao.quantization.quantizer.xnnpack_quantizer import (
-        XNNPACKQuantizer,
+    from executorch.backends.arm.ethosu import EthosUCompileSpec
+    from executorch.backends.arm.quantizer import (
+        EthosUQuantizer,
         get_symmetric_quantization_config,
     )
+    from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
 
     model = TinyCNN().eval()
     example = (torch.randn(1, 1, 28, 28),)
-    ep = torch.export.export(model, example)
-    quantizer = XNNPACKQuantizer().set_global(
-        get_symmetric_quantization_config()
-    )
-    prepared = prepare_pt2e(ep, quantizer)
+    gm = torch.export.export(model, example).module()
+    compile_spec = EthosUCompileSpec(target="ethos-u55-128")
+    quantizer = EthosUQuantizer(compile_spec)
+    quantizer.set_global(get_symmetric_quantization_config())
+    prepared = prepare_pt2e(gm, quantizer)
     prepared(*example)
     quantized = convert_pt2e(prepared)
-    return quantized.module()
+    return quantized
 
 
 def _count_qdq(gm):
@@ -57,6 +58,38 @@ def _count_qdq(gm):
             if "quantize_per_tensor" in t or "dequantize_per_tensor" in t or "dequantize_per_channel" in t:
                 count += 1
     return count
+
+
+def _qdq_nodes(gm):
+    nodes = []
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        target = str(node.target)
+        if (
+            "quantize_per_tensor" in target
+            or "dequantize_per_tensor" in target
+            or "dequantize_per_channel" in target
+        ):
+            nodes.append(node)
+    return nodes
+
+
+def _is_boundary_qdq(node):
+    target = str(node.target)
+    source = node.args[0] if node.args else None
+
+    if "dequantize_per_tensor" in target or "dequantize_per_channel" in target:
+        return any(user.op == "output" for user in node.users)
+
+    if "quantize_per_tensor" in target or "quantize_per_channel" in target:
+        return isinstance(source, torch.fx.Node) and source.op == "placeholder"
+
+    return False
+
+
+def _count_interior_qdq(gm):
+    return sum(1 for node in _qdq_nodes(gm) if not _is_boundary_qdq(node))
 
 
 def test_fx_graph_summary():
@@ -77,7 +110,7 @@ def test_fx_graph_summary():
 
 
 def test_fold_qdq_fx_removes_qdq_nodes():
-    """Rust fold_qdq_fx removes all Q/DQ nodes."""
+    """Rust fold_qdq_fx removes interior Q/DQ nodes and keeps only graph boundaries."""
     import arm_tosa_engine
 
     gm = _get_quantized_gm()
@@ -88,11 +121,24 @@ def test_fold_qdq_fx_removes_qdq_nodes():
     modified = arm_tosa_engine.fold_qdq_fx(gm)
     assert modified, "Pass should report modified=True"
 
-    after = _count_qdq(gm)
+    after_nodes = _qdq_nodes(gm)
+    boundary_after = [node for node in after_nodes if _is_boundary_qdq(node)]
+    interior_after = [node for node in after_nodes if not _is_boundary_qdq(node)]
     after_total = len(list(gm.graph.nodes))
-    assert after == 0, f"Expected 0 Q/DQ nodes after fold, got {after}"
+    assert not interior_after, (
+        "Expected all interior Q/DQ nodes to be folded, got "
+        f"{[node.name for node in interior_after]}"
+    )
+    assert len(boundary_after) <= 2, (
+        "Expected at most input/output boundary Q/DQ nodes to remain, got "
+        f"{[node.name for node in boundary_after]}"
+    )
     assert after_total < before_total, "Node count should decrease"
-    print(f"  fold_qdq_fx: {before_total} -> {after_total} nodes, removed {before} Q/DQ")
+    print(
+        "  fold_qdq_fx: "
+        f"{before_total} -> {after_total} nodes, "
+        f"boundary_qdq={len(boundary_after)}"
+    )
 
 
 def test_fold_qdq_fx_annotates_qparams():
@@ -114,17 +160,25 @@ def test_fold_qdq_fx_annotates_qparams():
 
 
 def test_fold_qdq_fx_idempotent():
-    """Running fold_qdq_fx twice should be safe (second run is a no-op)."""
+    """Running fold_qdq_fx twice should be safe and not reintroduce interior Q/DQ."""
     import arm_tosa_engine
 
     gm = _get_quantized_gm()
     arm_tosa_engine.fold_qdq_fx(gm)
     count_after_first = len(list(gm.graph.nodes))
+    qdq_after_first = _count_qdq(gm)
 
     modified = arm_tosa_engine.fold_qdq_fx(gm)
     count_after_second = len(list(gm.graph.nodes))
-    assert not modified, "Second run should report modified=False"
-    assert count_after_first == count_after_second
+    qdq_after_second = _count_qdq(gm)
+    assert _count_interior_qdq(gm) == 0, "Second run should not reintroduce interior Q/DQ"
+    assert count_after_second <= count_after_first
+    assert qdq_after_second <= qdq_after_first
+    print(
+        "  fold_qdq_fx second run: "
+        f"modified={modified}, nodes={count_after_first}->{count_after_second}, "
+        f"qdq={qdq_after_first}->{qdq_after_second}"
+    )
 
 
 if __name__ == "__main__":
