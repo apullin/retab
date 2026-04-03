@@ -22,21 +22,9 @@ fn is_bool_output(node: &Node) -> bool {
 
 pub(in crate::serialize::visitors) fn emit_bitwise_not(ctx: &EmitContext) -> EmitResult {
     if is_bool_output(ctx.node) {
-        return emit_direct_unary(
-            ctx.graph,
-            ctx.store,
-            ctx.node,
-            Op::LogicalNot,
-            Attribute::LogicalNot(LogicalNotAttribute),
-        );
+        return ctx.emit_unary(Op::LogicalNot, Attribute::LogicalNot(LogicalNotAttribute));
     }
-    emit_direct_unary(
-        ctx.graph,
-        ctx.store,
-        ctx.node,
-        Op::BitwiseNot,
-        Attribute::BitwiseNot(BitwiseNotAttribute),
-    )
+    ctx.emit_unary(Op::BitwiseNot, Attribute::BitwiseNot(BitwiseNotAttribute))
 }
 
 direct_unary_emitters! {
@@ -48,62 +36,23 @@ direct_unary_emitters! {
 
 pub(in crate::serialize::visitors) fn emit_bitwise_and(ctx: &EmitContext) -> EmitResult {
     if is_bool_output(ctx.node) {
-        return emit_bool_binary(
-            ctx.graph,
-            ctx.node,
-            ctx.store,
-            Op::LogicalAnd,
-            Attribute::LogicalAnd(LogicalAndAttribute),
-            false,
-        );
+        return ctx.emit_bool_binary(Op::LogicalAnd, Attribute::LogicalAnd(LogicalAndAttribute), false);
     }
-    emit_direct_binary(
-        ctx.graph,
-        ctx.node,
-        ctx.store,
-        Op::BitwiseAnd,
-        Attribute::BitwiseAnd(BitwiseAndAttribute),
-    )
+    ctx.emit_binary(Op::BitwiseAnd, Attribute::BitwiseAnd(BitwiseAndAttribute))
 }
 
 pub(in crate::serialize::visitors) fn emit_bitwise_or(ctx: &EmitContext) -> EmitResult {
     if is_bool_output(ctx.node) {
-        return emit_bool_binary(
-            ctx.graph,
-            ctx.node,
-            ctx.store,
-            Op::LogicalOr,
-            Attribute::LogicalOr(LogicalOrAttribute),
-            false,
-        );
+        return ctx.emit_bool_binary(Op::LogicalOr, Attribute::LogicalOr(LogicalOrAttribute), false);
     }
-    emit_direct_binary(
-        ctx.graph,
-        ctx.node,
-        ctx.store,
-        Op::BitwiseOr,
-        Attribute::BitwiseOr(BitwiseOrAttribute),
-    )
+    ctx.emit_binary(Op::BitwiseOr, Attribute::BitwiseOr(BitwiseOrAttribute))
 }
 
 pub(in crate::serialize::visitors) fn emit_bitwise_xor(ctx: &EmitContext) -> EmitResult {
     if is_bool_output(ctx.node) {
-        return emit_bool_binary(
-            ctx.graph,
-            ctx.node,
-            ctx.store,
-            Op::LogicalXor,
-            Attribute::LogicalXor(LogicalXorAttribute),
-            false,
-        );
+        return ctx.emit_bool_binary(Op::LogicalXor, Attribute::LogicalXor(LogicalXorAttribute), false);
     }
-    emit_direct_binary(
-        ctx.graph,
-        ctx.node,
-        ctx.store,
-        Op::BitwiseXor,
-        Attribute::BitwiseXor(BitwiseXorAttribute),
-    )
+    ctx.emit_binary(Op::BitwiseXor, Attribute::BitwiseXor(BitwiseXorAttribute))
 }
 
 direct_binary_emitters! {

@@ -5,7 +5,7 @@ macro_rules! direct_unary_emitters {
     ($($vis:vis fn $name:ident => ($op:expr, $attr:expr);)+) => {
         $(
             $vis fn $name(ctx: &EmitContext) -> EmitResult {
-                emit_direct_unary(ctx.graph, ctx.store, ctx.node, $op, $attr)
+                ctx.emit_unary($op, $attr)
             }
         )+
     };
@@ -15,7 +15,7 @@ macro_rules! direct_binary_emitters {
     ($($vis:vis fn $name:ident => ($op:expr, $attr:expr);)+) => {
         $(
             $vis fn $name(ctx: &EmitContext) -> EmitResult {
-                emit_direct_binary(ctx.graph, ctx.node, ctx.store, $op, $attr)
+                ctx.emit_binary($op, $attr)
             }
         )+
     };
@@ -25,7 +25,7 @@ macro_rules! bool_binary_emitters {
     ($($vis:vis fn $name:ident => ($op:expr, $attr:expr, $swap_inputs:expr);)+) => {
         $(
             $vis fn $name(ctx: &EmitContext) -> EmitResult {
-                emit_bool_binary(ctx.graph, ctx.node, ctx.store, $op, $attr, $swap_inputs)
+                ctx.emit_bool_binary($op, $attr, $swap_inputs)
             }
         )+
     };
