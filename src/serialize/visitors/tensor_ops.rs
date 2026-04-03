@@ -92,14 +92,13 @@ fn parse_resize_mode(node: &Node) -> ResizeMode {
 }
 
 pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
     let node = ctx.node;
     let mut result = EmitResult::default();
-    let Some(input_name) = collect_input_names(graph, node).first().cloned() else {
+    let Some(input_name) = ctx.input_names().first().cloned() else {
         return result;
     };
 
-    let output_shape = actual_tensor_shape(graph, ctx.store, node);
+    let output_shape = ctx.shape();
     let ir_output_dtype = node.meta.val.dtype;
     let output_dtype = match ir_output_dtype {
         crate::graph::ir::DType::Float16 => DType::Fp16,
@@ -352,18 +351,15 @@ fn emit_shape_transform(
 }
 
 pub(super) fn emit_full(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
     let node = ctx.node;
-    let store = ctx.store;
-    let output_shape = actual_tensor_shape(graph, store, node);
+    let output_shape = ctx.shape();
     let fill_value = node.args.get(1).map_or(0.0, Arg::as_f64);
     emit_filled_const(node, output_shape, fill_value, "emit_full")
 }
 
 pub(super) fn emit_copy(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
     let node = ctx.node;
-    let mut inputs = collect_input_names(graph, node);
+    let mut inputs = ctx.input_names();
     let source = inputs
         .pop()
         .unwrap_or_else(|| panic!("emit_copy: missing source input for node '{}'", node.name));
@@ -378,10 +374,8 @@ pub(super) fn emit_copy(ctx: &EmitContext) -> EmitResult {
 }
 
 pub(super) fn emit_eye(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
     let node = ctx.node;
-    let store = ctx.store;
-    let output_shape = actual_tensor_shape(graph, store, node);
+    let output_shape = ctx.shape();
     let zero_value = quantize_fill_value(node, 0.0);
     let one_value = quantize_fill_value(node, 1.0);
     let tensor = make_eye_const_tensor(
@@ -403,10 +397,8 @@ pub(super) fn emit_eye(ctx: &EmitContext) -> EmitResult {
 }
 
 pub(super) fn emit_scalar_tensor(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
     let node = ctx.node;
-    let store = ctx.store;
-    let mut output_shape = actual_tensor_shape(graph, store, node);
+    let mut output_shape = ctx.shape();
     if output_shape.is_empty() {
         output_shape.push(1);
     }
@@ -415,10 +407,7 @@ pub(super) fn emit_scalar_tensor(ctx: &EmitContext) -> EmitResult {
 }
 
 pub(super) fn emit_resize(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
-    let node = ctx.node;
-    let store = ctx.store;
-    let Some(spec) = ParsedResizeSpec::parse(graph, node, store) else {
+    let Some(spec) = ParsedResizeSpec::parse(ctx.graph, ctx.node, ctx.store) else {
         return EmitResult::default();
     };
 
@@ -504,11 +493,8 @@ pub(super) fn emit_aten_reshape(ctx: &EmitContext) -> EmitResult {
 }
 
 pub(super) fn emit_aten_permute(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
-    let node = ctx.node;
-    let store = ctx.store;
-    let spec = ParsedShapeTransformSpec::parse(graph, store, node);
-    let perms = arg_i32_list(node, 1);
+    let spec = ParsedShapeTransformSpec::parse(ctx.graph, ctx.store, ctx.node);
+    let perms = ctx.arg_i32_list(1);
     emit_shape_transform(
         spec,
         Op::Transpose,
@@ -637,7 +623,7 @@ pub(super) fn emit_expand(ctx: &EmitContext) -> EmitResult {
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
+    let input_names = ctx.input_names();
     let Some(input_name) = input_names.first().cloned() else {
         return result;
     };
@@ -756,7 +742,7 @@ pub(super) fn emit_repeat(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;
     let store = ctx.store;
-    let mut multiples = arg_i32_list(node, 1);
+    let mut multiples = ctx.arg_i32_list(1);
     if let Some(Arg::Node(input_id)) = node.args.first() {
         if let Some(input_node) = graph.node(*input_id) {
             if raw_i32_shape(input_node).len() == multiples.len() {
@@ -815,10 +801,10 @@ pub(super) fn emit_reshape(ctx: &EmitContext) -> EmitResult {
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
-    let out_shape = actual_tensor_shape(graph, store, node);
-    let output_name = primary_output_name(graph, node);
-    let output_dtype = passthrough_input_dtype(graph, node);
+    let input_names = ctx.input_names();
+    let out_shape = ctx.shape();
+    let output_name = ctx.primary_output_name();
+    let output_dtype = ctx.passthrough_dtype();
 
     if let Some(input_node) = first_input_node(graph, node) {
         let input_shape = actual_tensor_shape(graph, store, input_node);
@@ -896,7 +882,7 @@ pub(super) fn emit_concat(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
+    let input_names = ctx.input_names();
     let raw_axis = match node.args.get(1) {
         Some(Arg::Int(axis)) => *axis as i32,
         _ => kwarg_i32(node, "axis", 0),

@@ -16,7 +16,7 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> Emi
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
+    let input_names = ctx.input_names();
     let stride = arg_i32_list(node, 3);
     let padding = arg_i32_list(node, 4);
     let dilation = arg_i32_list(node, 5);
@@ -120,7 +120,7 @@ pub(in crate::serialize::visitors) fn emit_conv2d(ctx: &EmitContext) -> EmitResu
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
+    let input_names = ctx.input_names();
     let pad = {
         let kw = kwarg_i32_list(node, "pad");
         if kw.is_empty() {
@@ -230,7 +230,7 @@ pub(in crate::serialize::visitors) fn emit_conv3d(ctx: &EmitContext) -> EmitResu
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
+    let input_names = ctx.input_names();
     let pad = {
         let kw = kwarg_i32_list(node, "pad");
         if kw.is_empty() {
@@ -340,7 +340,7 @@ pub(in crate::serialize::visitors) fn emit_depthwise_conv2d(ctx: &EmitContext) -
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
+    let input_names = ctx.input_names();
     let pad = {
         let kw = kwarg_i32_list(node, "pad");
         if kw.is_empty() {

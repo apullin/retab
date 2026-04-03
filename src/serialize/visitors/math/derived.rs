@@ -41,7 +41,7 @@ pub(in crate::serialize::visitors) fn emit_aten_div(ctx: &EmitContext) -> EmitRe
 
     let shift_name = push_shift_const(&mut result, &node.name);
     result.push_output_op(
-        make_actual_output_tensor(graph, store, node),
+        ctx.make_output(),
         Op::Mul,
         Attribute::Mul(MulAttribute { shift: 0 }),
         vec![spec.lhs, recip_name, shift_name],
@@ -64,7 +64,7 @@ pub(in crate::serialize::visitors) fn emit_aten_sqrt(ctx: &EmitContext) -> EmitR
         vec![spec.input_name],
     );
     result.push_output_op(
-        make_actual_output_tensor(graph, store, node),
+        ctx.make_output(),
         Op::Reciprocal,
         Attribute::Reciprocal(ReciprocalAttribute),
         vec![rsqrt_name],
@@ -73,11 +73,9 @@ pub(in crate::serialize::visitors) fn emit_aten_sqrt(ctx: &EmitContext) -> EmitR
 }
 
 pub(in crate::serialize::visitors) fn emit_full_like(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
     let node = ctx.node;
-    let store = ctx.store;
     let mut result = EmitResult::default();
-    let output_shape = actual_tensor_shape(graph, store, node);
+    let output_shape = ctx.shape();
     let fill_val = match node.args.get(1) {
         Some(Arg::Float(f)) => *f,
         Some(Arg::Int(i)) => *i as f64,
@@ -95,7 +93,7 @@ pub(in crate::serialize::visitors) fn emit_full_like(ctx: &EmitContext) -> EmitR
     } else {
         result
             .tensors
-            .push(make_actual_output_tensor(graph, store, node));
+            .push(ctx.make_output());
     }
     result
 }
@@ -153,7 +151,7 @@ pub(in crate::serialize::visitors) fn emit_aten_sign(ctx: &EmitContext) -> EmitR
         vec![gt_name, one_name, zero_name],
     );
     result.push_output_op(
-        make_actual_output_tensor(graph, store, node),
+        ctx.make_output(),
         Op::Select,
         Attribute::Select(SelectAttribute),
         vec![ge_name, inner_name, neg_one_name],
@@ -184,7 +182,7 @@ pub(in crate::serialize::visitors) fn emit_aten_expm1(ctx: &EmitContext) -> Emit
         push_inline_const(&mut result, t);
     }
     result.push_output_op(
-        make_actual_output_tensor(graph, store, node),
+        ctx.make_output(),
         Op::Sub,
         Attribute::Sub(SubAttribute),
         vec![exp_name, one_name],
@@ -218,7 +216,7 @@ pub(in crate::serialize::visitors) fn emit_aten_log1p(ctx: &EmitContext) -> Emit
         vec![spec.input_name, one_name],
     );
     result.push_output_op(
-        make_actual_output_tensor(graph, store, node),
+        ctx.make_output(),
         Op::Log,
         Attribute::Log(LogAttribute),
         vec![add_name],
@@ -284,7 +282,7 @@ pub(in crate::serialize::visitors) fn emit_aten_leaky_relu(ctx: &EmitContext) ->
     );
 
     result.push_output_op(
-        make_actual_output_tensor(graph, store, node),
+        ctx.make_output(),
         Op::Select,
         Attribute::Select(SelectAttribute),
         vec![ge_name, spec.input_name, scaled_name],

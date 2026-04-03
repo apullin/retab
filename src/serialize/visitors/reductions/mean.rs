@@ -147,7 +147,7 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
     );
 
     if !spec.keepdim {
-        let final_shape = actual_tensor_shape(graph, store, node);
+        let final_shape = ctx.shape();
         push_reshape_with_shape(
             &mut result,
             final_name,

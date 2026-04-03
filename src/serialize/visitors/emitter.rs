@@ -6,16 +6,18 @@
 
 use std::collections::HashMap;
 
-use crate::graph::ir::Node;
+use crate::graph::ir::{Arg, Node};
 use crate::graph::ir::OpTarget;
 use crate::graph::Graph;
 use crate::store::TensorStore;
 
+use super::arg_utils::{arg_bool, arg_i32_list, kwarg_i32_list};
 use super::emit_result::EmitResult;
-use super::graph_utils::collect_input_names;
+use super::dtype_quant::{actual_tensor_dtype, node_output_dtype, passthrough_input_dtype};
+use super::graph_utils::{collect_input_names, primary_output_name};
 use super::op_utils::{emit_bool_binary, emit_direct_binary, emit_direct_unary, emit_identity};
-use super::shape_utils::make_actual_output_tensor;
-use crate::serialize::tosa_generated::{Attribute, Op, TosaTensor};
+use super::shape_utils::{actual_tensor_shape, make_actual_output_tensor, make_bool_output_tensor};
+use crate::serialize::tosa_generated::{Attribute, DType, Op, TosaTensor};
 
 /// Everything an emitter needs to produce TOSA operators + tensors for one node.
 pub struct EmitContext<'a> {
@@ -24,6 +26,7 @@ pub struct EmitContext<'a> {
     pub store: &'a TensorStore,
 }
 
+#[allow(dead_code)]
 impl<'a> EmitContext<'a> {
     /// Collect input tensor names from node args.
     pub fn input_names(&self) -> Vec<String> {
@@ -53,6 +56,71 @@ impl<'a> EmitContext<'a> {
     /// Emit an identity (passthrough) op.
     pub fn emit_identity(&self) -> EmitResult {
         emit_identity(self.graph, self.store, self.node)
+    }
+
+    // ---- Shape / dtype accessors ----
+
+    /// Concrete TOSA tensor shape for this node.
+    pub fn shape(&self) -> Vec<i32> {
+        actual_tensor_shape(self.graph, self.store, self.node)
+    }
+
+    /// Semantic output dtype for this node.
+    pub fn dtype(&self) -> DType {
+        node_output_dtype(self.node)
+    }
+
+    /// Dtype inherited from the first input (passthrough).
+    pub fn passthrough_dtype(&self) -> DType {
+        passthrough_input_dtype(self.graph, self.node)
+    }
+
+    /// Structural dtype that accounts for accumulator / quantization rules.
+    pub fn actual_dtype(&self) -> DType {
+        actual_tensor_dtype(self.graph, self.node)
+    }
+
+    // ---- Node accessors ----
+
+    /// Node name.
+    pub fn name(&self) -> &str {
+        &self.node.name
+    }
+
+    /// Node positional args.
+    pub fn args(&self) -> &[Arg] {
+        &self.node.args
+    }
+
+    /// Primary output name (follows getitem convention).
+    pub fn primary_output_name(&self) -> String {
+        primary_output_name(self.graph, self.node)
+    }
+
+    // ---- Common arg helpers ----
+
+    pub fn arg_i32_list(&self, idx: usize) -> Vec<i32> {
+        arg_i32_list(self.node, idx)
+    }
+
+    pub fn arg_bool(&self, idx: usize, default: bool) -> bool {
+        arg_bool(self.node, idx, default)
+    }
+
+    pub fn kwarg_i32_list(&self, key: &str) -> Vec<i32> {
+        kwarg_i32_list(self.node, key)
+    }
+
+    // ---- Tensor creation shortcuts ----
+
+    /// Create the output tensor using actual shape and dtype.
+    pub fn make_output(&self) -> TosaTensor {
+        make_actual_output_tensor(self.graph, self.store, self.node)
+    }
+
+    /// Create a bool-typed output tensor using actual shape.
+    pub fn make_bool_output(&self) -> TosaTensor {
+        make_bool_output_tensor(self.graph, self.store, self.node)
     }
 }
 

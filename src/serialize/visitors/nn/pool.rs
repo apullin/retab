@@ -203,7 +203,7 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
+    let input_names = ctx.input_names();
     let kernel = {
         let kw = kwarg_i32_list(node, "kernel");
         if kw.is_empty() {

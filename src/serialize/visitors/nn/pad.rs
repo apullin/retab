@@ -34,7 +34,7 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
+    let input_names = ctx.input_names();
     let input_shape = node
         .args
         .first()

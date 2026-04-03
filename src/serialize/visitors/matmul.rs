@@ -15,8 +15,8 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
-    let out_shape = actual_tensor_shape(graph, store, node);
+    let input_names = ctx.input_names();
+    let out_shape = ctx.shape();
     let promoted_shape = promoted_2d_matmul_shape(graph, store, node);
     let promote_2d = promoted_shape.is_some();
     let defer_reshape_to_rescale = promote_2d && has_only_tosa_rescale_users(graph, node);

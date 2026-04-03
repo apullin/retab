@@ -28,11 +28,11 @@ struct ParsedReshapeEmitterSpec {
 impl ParsedReshapeEmitterSpec {
     // Parse once at the edge of the arithmetic/shape wrapper and emit from a
     // typed spec instead of repeatedly open-coding "first input + meta shape".
-    fn parse(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Self> {
+    fn parse(ctx: &EmitContext) -> Option<Self> {
         Some(Self {
-            input_name: collect_input_names(graph, node).first()?.clone(),
-            output_shape: actual_tensor_shape(graph, store, node),
-            output_dtype: node_output_dtype(node),
+            input_name: ctx.input_names().first()?.clone(),
+            output_shape: ctx.shape(),
+            output_dtype: ctx.dtype(),
         })
     }
 }
@@ -43,7 +43,7 @@ pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
     let store = ctx.store;
     let mut result = EmitResult::default();
 
-    let input_names = collect_input_names(graph, node);
+    let input_names = ctx.input_names();
     let clamp_dtype = node.meta.val.dtype;
     let needs_extrema_lowering = clamp_dtype == crate::graph::ir::DType::Int32
         || matches!(node.args.get(1), Some(Arg::Node(_)))
@@ -51,7 +51,7 @@ pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
 
     if needs_extrema_lowering {
         let input_name = input_names.first().cloned().unwrap_or_default();
-        let output_shape = actual_tensor_shape(graph, store, node);
+        let output_shape = ctx.shape();
         let output_dtype = ir_dtype_to_tosa(clamp_dtype);
         let output_rank = output_shape.len();
 
@@ -133,7 +133,7 @@ pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
 
         if !has_min_input && !has_max_input {
             result.push_output_op(
-                make_actual_output_tensor(graph, store, node),
+                ctx.make_output(),
                 Op::Identity,
                 Attribute::None,
                 vec![current_name],
@@ -146,7 +146,7 @@ pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
     let min_val = clamp_bound_bytes_from_arg(clamp_dtype, node.args.get(1), true);
     let max_val = clamp_bound_bytes_from_arg(clamp_dtype, node.args.get(2), false);
     result.push_output_op(
-        make_actual_output_tensor(graph, store, node),
+        ctx.make_output(),
         Op::Clamp,
         Attribute::Clamp(ClampAttribute {
             min_val,
@@ -171,11 +171,9 @@ pub(super) fn emit_aten_mul(ctx: &EmitContext) -> EmitResult {
 }
 
 pub(super) fn emit_clamp(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
     let node = ctx.node;
-    let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
+    let input_names = ctx.input_names();
     let clamp_dtype = node.meta.val.dtype;
     let min_arg = node
         .kwargs
@@ -189,7 +187,7 @@ pub(super) fn emit_clamp(ctx: &EmitContext) -> EmitResult {
     let max_val = clamp_bound_bytes_from_arg(clamp_dtype, max_arg, false);
 
     result.push_output_op(
-        make_actual_output_tensor(graph, store, node),
+        ctx.make_output(),
         Op::Clamp,
         Attribute::Clamp(ClampAttribute {
             min_val,
@@ -214,11 +212,11 @@ pub(super) fn emit_mul(ctx: &EmitContext) -> EmitResult {
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let mut inputs = collect_input_names(graph, node);
+    let mut inputs = ctx.input_names();
     maybe_materialize_binary_broadcast(graph, store, node, &mut result, &mut inputs);
     inputs.push(push_shift_const(&mut result, &node.name));
     result.push_output_op(
-        make_actual_output_tensor(graph, store, node),
+        ctx.make_output(),
         Op::Mul,
         Attribute::Mul(MulAttribute { shift: 0 }),
         inputs,
@@ -227,21 +225,18 @@ pub(super) fn emit_mul(ctx: &EmitContext) -> EmitResult {
 }
 
 pub(super) fn emit_aten_unsqueeze(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
-    let node = ctx.node;
-    let store = ctx.store;
     let mut result = EmitResult::default();
-    let spec = ParsedReshapeEmitterSpec::parse(graph, store, node).unwrap_or_else(|| {
+    let spec = ParsedReshapeEmitterSpec::parse(ctx).unwrap_or_else(|| {
         panic!(
             "emit_aten_unsqueeze: missing input for node '{}'",
-            node.name
+            ctx.name()
         )
     });
     push_reshape_with_shape(
         &mut result,
         spec.input_name,
-        node.name.clone(),
-        format!("{}_shape", node.name),
+        ctx.node.name.clone(),
+        format!("{}_shape", ctx.name()),
         spec.output_shape,
         spec.output_dtype,
     );
@@ -249,17 +244,14 @@ pub(super) fn emit_aten_unsqueeze(ctx: &EmitContext) -> EmitResult {
 }
 
 pub(super) fn emit_aten_squeeze(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
-    let node = ctx.node;
-    let store = ctx.store;
     let mut result = EmitResult::default();
-    let spec = ParsedReshapeEmitterSpec::parse(graph, store, node)
-        .unwrap_or_else(|| panic!("emit_aten_squeeze: missing input for node '{}'", node.name));
+    let spec = ParsedReshapeEmitterSpec::parse(ctx)
+        .unwrap_or_else(|| panic!("emit_aten_squeeze: missing input for node '{}'", ctx.name()));
     push_reshape_with_shape(
         &mut result,
         spec.input_name,
-        node.name.clone(),
-        format!("{}_shape", node.name),
+        ctx.node.name.clone(),
+        format!("{}_shape", ctx.name()),
         spec.output_shape,
         spec.output_dtype,
     );

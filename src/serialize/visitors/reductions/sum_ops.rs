@@ -88,14 +88,14 @@ pub(in crate::serialize::visitors) fn emit_reduce_sum(ctx: &EmitContext) -> Emit
     );
 
     if !spec.keepdim {
-        let final_shape = actual_tensor_shape(graph, store, node);
+        let final_shape = ctx.shape();
         push_reshape_with_shape(
             &mut result,
             reduce_output,
             node.name.clone(),
             format!("{}_shape", node.name),
             final_shape,
-            node_output_dtype(node),
+            ctx.dtype(),
         );
     }
 
@@ -125,8 +125,8 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitRe
     };
     let input_dtype = input_node
         .map(|n| passthrough_input_dtype(graph, n))
-        .unwrap_or_else(|| node_output_dtype(node));
-    let semantic_output_dtype = node_output_dtype(node);
+        .unwrap_or_else(|| ctx.dtype());
+    let semantic_output_dtype = ctx.dtype();
     let mut base_dtype = match input_dtype {
         DType::Int8 | DType::Int16 => DType::Int32,
         _ => semantic_output_dtype,
@@ -241,7 +241,7 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitRe
             }
         }
 
-        let final_shape = actual_tensor_shape(graph, store, node);
+        let final_shape = ctx.shape();
         push_reshape_with_shape(
             &mut result,
             reshape_input,

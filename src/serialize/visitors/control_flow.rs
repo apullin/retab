@@ -131,9 +131,7 @@ fn extend_missing_while_outputs(
 }
 
 pub(super) fn emit_cond_if(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
-    let node = ctx.node;
-    let spec = CondIfSpec::parse(graph, node);
+    let spec = CondIfSpec::parse(ctx.graph, ctx.node);
     let output_names = spec
         .output_tensors
         .iter()

@@ -230,7 +230,7 @@ pub(super) fn emit_select(ctx: &EmitContext) -> EmitResult {
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let mut input_names = collect_input_names(graph, node);
+    let mut input_names = ctx.input_names();
     maybe_materialize_select_scalar_inputs(graph, node, store, &mut result, &mut input_names);
     result.push_output_op(
         make_output_tensor(node),
@@ -341,7 +341,7 @@ pub(super) fn emit_select_copy(ctx: &EmitContext) -> EmitResult {
         reshape_input_name = transpose_name;
     }
 
-    let output_shape = actual_tensor_shape(graph, store, node);
+    let output_shape = ctx.shape();
     push_reshape_with_shape(
         &mut result,
         reshape_input_name,
@@ -355,10 +355,9 @@ pub(super) fn emit_select_copy(ctx: &EmitContext) -> EmitResult {
 }
 
 pub(super) fn emit_index_select(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
     let node = ctx.node;
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
+    let input_names = ctx.input_names();
 
     if input_names.len() < 2 {
         eprintln!(
@@ -378,36 +377,32 @@ pub(super) fn emit_index_select(ctx: &EmitContext) -> EmitResult {
 }
 
 pub(super) fn emit_gather(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
     let node = ctx.node;
     let mut result = EmitResult::default();
     result.push_output_op(
         make_output_tensor(node),
         Op::Gather,
         Attribute::Gather(GatherAttribute),
-        collect_input_names(graph, node),
+        ctx.input_names(),
     );
     result
 }
 
 pub(super) fn emit_scatter(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
     let node = ctx.node;
     let mut result = EmitResult::default();
     result.push_output_op(
         make_output_tensor(node),
         Op::Scatter,
         Attribute::Scatter(ScatterAttribute),
-        collect_input_names(graph, node),
+        ctx.input_names(),
     );
     result
 }
 
 pub(super) fn emit_slice(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
     let node = ctx.node;
-    let store = ctx.store;
-    let spec = ParsedSliceSpec::parse(graph, node, store);
+    let spec = ParsedSliceSpec::parse(ctx.graph, node, ctx.store);
     let mut result = EmitResult::default();
 
     if std::env::var("ARM_TOSA_ENGINE_DEBUG_SLICE").ok().as_deref() == Some("1") {

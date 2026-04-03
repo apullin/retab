@@ -29,13 +29,11 @@ fn emit_integral_passthrough_or_unary(
 }
 
 pub(in crate::serialize::visitors) fn emit_negate(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
     let node = ctx.node;
-    let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
-    let input_dtype = passthrough_input_dtype(graph, node);
-    result.tensors.push(make_actual_output_tensor(graph, store, node));
+    let input_names = ctx.input_names();
+    let input_dtype = ctx.passthrough_dtype();
+    result.tensors.push(ctx.make_output());
 
     let (input_zp, output_zp) = if input_dtype == DType::Int8 {
         let input_zp = node
@@ -112,9 +110,9 @@ pub(in crate::serialize::visitors) fn emit_round(ctx: &EmitContext) -> EmitResul
     let graph = ctx.graph;
     let node = ctx.node;
     let store = ctx.store;
-    let input_dtype = passthrough_input_dtype(graph, node);
+    let input_dtype = ctx.passthrough_dtype();
     if is_integral_dtype(input_dtype) {
-        return emit_identity(graph, store, node);
+        return ctx.emit_identity();
     }
 
     let mut result = EmitResult::default();
@@ -176,7 +174,7 @@ pub(in crate::serialize::visitors) fn emit_round(ctx: &EmitContext) -> EmitResul
 
     // Final output uses the actual output tensor (not a temp), so use push_output_op directly.
     result.push_output_op(
-        make_actual_output_tensor(graph, store, node),
+        ctx.make_output(),
         Op::Select,
         Attribute::Select(SelectAttribute),
         vec![is_tie_name, tie_result_name, round_up_name],

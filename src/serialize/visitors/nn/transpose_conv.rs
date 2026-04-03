@@ -15,7 +15,7 @@ pub(in crate::serialize::visitors) fn emit_transpose_conv2d(ctx: &EmitContext) -
     let graph = ctx.graph;
     let node = ctx.node;
     let mut result = EmitResult::default();
-    let input_names = collect_input_names(graph, node);
+    let input_names = ctx.input_names();
     let output_shape = apply_tosa_dim_order(node, raw_i32_shape(node));
     let acc_type = conv_accumulator_dtype(node);
     result
