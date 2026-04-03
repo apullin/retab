@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use smallvec::SmallVec;
 
+use crate::fx_graph::{meta_get, meta_val};
 use crate::graph::ir::*;
 use crate::graph::Graph;
 use crate::ingest::target_map::parse_op_target;
@@ -600,12 +601,9 @@ fn extract_meta(py_node: &Bound<'_, PyAny>, op_type: OpType) -> PyResult<NodeMet
     let meta_dict = py_node.getattr("meta")?;
 
     // Try to get the "val" entry
-    let val = match meta_dict.call_method1("get", ("val",)) {
-        Ok(v) if !v.is_none() => v,
-        _ => {
-            // No val — return a default TensorInfo
-            return Ok(NodeMeta::new(TensorInfo::new(&[], DType::Float32)));
-        }
+    let Some(val) = meta_val(&meta_dict, "val") else {
+        // No val — return a default TensorInfo
+        return Ok(NodeMeta::new(TensorInfo::new(&[], DType::Float32)));
     };
 
     // For output nodes, val is often a tuple of tensors — take the first one
@@ -724,11 +722,11 @@ fn extract_qparams_from_meta(
     meta_dict: &Bound<'_, PyAny>,
     node_meta: &mut NodeMeta,
 ) -> PyResult<()> {
-    if let Ok(input_qp) = meta_dict.call_method1("get", ("input_qparams",)) {
+    if let Some(input_qp) = meta_val(meta_dict, "input_qparams") {
         let entries = parse_qparams_dict(&input_qp, &node_meta.input_qparams);
         node_meta.input_qparams.extend(entries);
     }
-    if let Ok(output_qp) = meta_dict.call_method1("get", ("output_qparams",)) {
+    if let Some(output_qp) = meta_val(meta_dict, "output_qparams") {
         let entries = parse_qparams_dict(&output_qp, &node_meta.output_qparams);
         node_meta.output_qparams.extend(entries);
     }
@@ -740,15 +738,13 @@ fn extract_qparams_from_meta(
 /// The FX-direct `FxToTosaMemoryFormatPass` stores a list like `[0, 2, 3, 1]`
 /// (NHWC) or `[0, 1, 2, 3]` (NCHW) in `node.meta["tosa_dim_order"]`.
 fn extract_tosa_dim_order(meta_dict: &Bound<'_, PyAny>, node_meta: &mut NodeMeta) -> PyResult<()> {
-    if let Ok(dim_order) = meta_dict.call_method1("get", ("tosa_dim_order",)) {
-        if !dim_order.is_none() {
-            if let Ok(order_list) = dim_order.iter().and_then(|it| {
-                it.map(|item| item.and_then(|v| v.extract::<u8>()))
-                    .collect::<PyResult<smallvec::SmallVec<[u8; 6]>>>()
-            }) {
-                if !order_list.is_empty() {
-                    node_meta.tosa_dim_order = Some(order_list);
-                }
+    if let Some(dim_order) = meta_val(meta_dict, "tosa_dim_order") {
+        if let Ok(order_list) = dim_order.iter().and_then(|it| {
+            it.map(|item| item.and_then(|v| v.extract::<u8>()))
+                .collect::<PyResult<smallvec::SmallVec<[u8; 6]>>>()
+        }) {
+            if !order_list.is_empty() {
+                node_meta.tosa_dim_order = Some(order_list);
             }
         }
     }
@@ -759,17 +755,15 @@ fn extract_tosa_special_dtype(
     meta_dict: &Bound<'_, PyAny>,
     node_meta: &mut NodeMeta,
 ) -> PyResult<()> {
-    if let Ok(special_dtype) = meta_dict.call_method1("get", ("tosa_special_dtype",)) {
-        if !special_dtype.is_none() {
-            let special_dtype_str = special_dtype.str()?.extract::<String>()?;
-            node_meta.tosa_special_dtype = if special_dtype_str.contains("INT48") {
-                Some(DType::Int48)
-            } else if special_dtype_str.contains("INT4") {
-                Some(DType::Int4)
-            } else {
-                None
-            };
-        }
+    if let Some(special_dtype) = meta_val(meta_dict, "tosa_special_dtype") {
+        let special_dtype_str = special_dtype.str()?.extract::<String>()?;
+        node_meta.tosa_special_dtype = if special_dtype_str.contains("INT48") {
+            Some(DType::Int48)
+        } else if special_dtype_str.contains("INT4") {
+            Some(DType::Int4)
+        } else {
+            None
+        };
     }
     Ok(())
 }
@@ -778,10 +772,7 @@ fn extract_control_flow_meta(
     meta_dict: &Bound<'_, PyAny>,
     node_meta: &mut NodeMeta,
 ) -> PyResult<()> {
-    if let Ok(flag) = meta_dict.call_method1("get", ("arm_control_flow_parent_output_user", false))
-    {
-        node_meta.arm_control_flow_parent_output_user = flag.extract().unwrap_or(false);
-    }
+    node_meta.arm_control_flow_parent_output_user = meta_get(meta_dict, "arm_control_flow_parent_output_user", false);
     Ok(())
 }
 
@@ -803,14 +794,14 @@ fn extract_quantargs_from_py(py_obj: &Bound<'_, PyAny>) -> Option<QuantArgs> {
             }
         }
         if let Some(key) = fallback_key {
-            if let Ok(val) = obj.call_method1("get", (key,)) {
+            if let Some(val) = meta_val(obj, key) {
                 if let Ok(v) = val.extract::<T>() {
                     return Some(v);
                 }
             }
         }
         // Also try dict-style get on the primary attr name
-        if let Ok(val) = obj.call_method1("get", (attr,)) {
+        if let Some(val) = meta_val(obj, attr) {
             if let Ok(v) = val.extract::<T>() {
                 return Some(v);
             }
@@ -838,7 +829,7 @@ fn extract_quantargs_from_py(py_obj: &Bound<'_, PyAny>) -> Option<QuantArgs> {
     let dtype = py_obj
         .getattr("dtype")
         .ok()
-        .or_else(|| py_obj.call_method1("get", ("dtype",)).ok())
+        .or_else(|| meta_val(py_obj, "dtype"))
         .and_then(|v| {
             // First try as string directly
             v.extract::<String>()

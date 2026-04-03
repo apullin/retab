@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_val, FxGraphModule};
 use crate::fx_pass::FxPass;
 
 /// FX-graph-direct implementation of `InsertTableOpsPass`.
@@ -232,29 +232,25 @@ impl FxPass for FxInsertTableOpsPass {
             // (i.e. it sits inside a quantised region).
             let meta = node.getattr("meta")?;
 
-            let has_input_qp = match meta.call_method1("get", ("input_qparams",)) {
-                Ok(v) if !v.is_none() => {
-                    let len: usize = py
-                        .import_bound("builtins")?
-                        .call_method1("len", (&v,))?
-                        .extract()
-                        .unwrap_or(0);
-                    len > 0
-                }
-                _ => false,
-            };
+            let has_input_qp = meta_val(&meta, "input_qparams")
+                .map(|v| {
+                    py.import_bound("builtins")
+                        .and_then(|b| b.call_method1("len", (&v,)))
+                        .and_then(|l| l.extract::<usize>())
+                        .unwrap_or(0)
+                        > 0
+                })
+                .unwrap_or(false);
 
-            let has_output_qp = match meta.call_method1("get", ("output_qparams",)) {
-                Ok(v) if !v.is_none() => {
-                    let len: usize = py
-                        .import_bound("builtins")?
-                        .call_method1("len", (&v,))?
-                        .extract()
-                        .unwrap_or(0);
-                    len > 0
-                }
-                _ => false,
-            };
+            let has_output_qp = meta_val(&meta, "output_qparams")
+                .map(|v| {
+                    py.import_bound("builtins")
+                        .and_then(|b| b.call_method1("len", (&v,)))
+                        .and_then(|l| l.extract::<usize>())
+                        .unwrap_or(0)
+                        > 0
+                })
+                .unwrap_or(false);
 
             if has_input_qp && has_output_qp {
                 candidates.push(TableCandidate {

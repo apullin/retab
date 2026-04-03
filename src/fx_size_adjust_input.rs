@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::resolve_aten_op;
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_get, FxGraphModule};
 use crate::fx_pass::FxPass;
 use crate::fx_utils;
 
@@ -50,12 +50,14 @@ impl FxPass for FxSizeAdjustInputPass {
             if op != "call_function" {
                 continue;
             }
-            if let Ok(meta) = node.getattr("meta") {
-                if let Ok(skip) = meta.call_method1("get", ("skip_size_adjust", false)) {
-                    if skip.extract::<bool>().unwrap_or(false) {
-                        continue;
-                    }
-                }
+            // Flat traverse: skip nodes marked with skip_size_adjust.
+            let should_skip = node
+                .getattr("meta")
+                .ok()
+                .map(|meta| meta_get(&meta, "skip_size_adjust", false))
+                .unwrap_or(false);
+            if should_skip {
+                continue;
             }
             let target = FxGraphModule::node_target_str(node)?;
             if !is_target(&target) {

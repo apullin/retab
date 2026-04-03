@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_val, FxGraphModule};
 use crate::fx_pass::FxPass;
 
 /// FX-graph-direct implementation of `RemoveNoopPass`.
@@ -80,13 +80,8 @@ impl FxPass for FxRemoveNoopPass {
             let output_dtype = {
                 let kwargs = FxGraphModule::node_kwargs(node)?;
                 let explicit: Option<String> =
-                    kwargs.call_method1("get", ("dtype",)).ok().and_then(|v| {
-                        if v.is_none() {
-                            None
-                        } else {
-                            v.str().ok().map(|s| s.to_string())
-                        }
-                    });
+                    meta_val(&kwargs, "dtype")
+                        .and_then(|v| v.str().ok().map(|s| s.to_string()));
                 explicit.unwrap_or(input_dtype.clone())
             };
 
@@ -136,10 +131,7 @@ impl FxRemoveNoopPass {
     /// Extract dtype string from a node's meta["val"].dtype.
     fn get_node_dtype(node: &Bound<'_, PyAny>) -> Option<String> {
         let meta = node.getattr("meta").ok()?;
-        let val = meta.call_method1("get", ("val",)).ok()?;
-        if val.is_none() {
-            return None;
-        }
+        let val = meta_val(&meta, "val")?;
         let dtype = val.getattr("dtype").ok()?;
         Some(dtype.str().ok()?.to_string())
     }

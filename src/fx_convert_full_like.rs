@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::resolve_aten_op;
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_val, FxGraphModule};
 use crate::fx_utils;
 
 crate::fx_pass!(
@@ -38,12 +38,8 @@ fn convert_full_like<'py>(
     // Get input shape and dtype
     let input_shape = FxGraphModule::node_shape(input_node)?;
     let input_meta = input_node.getattr("meta")?;
-    let input_val = input_meta.call_method1("get", ("val",))?;
-    let dtype = if !input_val.is_none() {
-        input_val.getattr("dtype").ok()
-    } else {
-        None
-    };
+    let input_val = meta_val(&input_meta, "val");
+    let dtype = input_val.as_ref().and_then(|v| v.getattr("dtype").ok());
 
     if debug {
         let name = FxGraphModule::node_name(node)?;
@@ -63,18 +59,12 @@ fn convert_full_like<'py>(
     if let Some(dt) = dtype {
         kwargs.set_item("dtype", dt)?;
     }
-    // Carry over any kwargs from the original full_like node
+    // Flat extract: carry over non-None kwargs from the original full_like node.
     let orig_kwargs = node.getattr("kwargs")?;
-    if let Ok(iter) = orig_kwargs.call_method0("items") {
-        if let Ok(items) = iter.iter() {
-            for item in items {
-                if let Ok(item) = item {
-                    let key: String = item.get_item(0)?.extract()?;
-                    let val = item.get_item(1)?;
-                    if !val.is_none() {
-                        kwargs.set_item(key, val)?;
-                    }
-                }
+    if let Ok(orig_dict) = orig_kwargs.downcast::<pyo3::types::PyDict>() {
+        for (key, val) in orig_dict.iter() {
+            if !val.is_none() {
+                kwargs.set_item(key, val)?;
             }
         }
     }

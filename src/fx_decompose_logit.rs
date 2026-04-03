@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 
 use crate::fx_decompose_ops::FxDecomposer;
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_val, FxGraphModule};
 
 crate::fx_pass!(
     /// FX-graph-direct decomposition of `aten.logit` into primitive ops.
@@ -43,10 +43,7 @@ fn decompose_logit<'py>(
         args[1].extract().ok()
     } else {
         let kwargs = node.getattr("kwargs")?;
-        match kwargs.call_method1("get", ("eps",)) {
-            Ok(v) if !v.is_none() => v.extract().ok(),
-            _ => None,
-        }
+        meta_val(&kwargs, "eps").and_then(|v| v.extract().ok())
     };
 
     if debug {

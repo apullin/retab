@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
-use crate::fx_graph::{py_attr, FxGraphModule};
+use crate::fx_graph::{arg_extract, meta_val, py_attr, FxGraphModule};
 
 fn is_convolution(target: &str) -> bool {
     target.contains("convolution.default") || target.contains("conv2d.default")
@@ -26,7 +26,7 @@ fn is_grouped_conv(target: &str, node: &Bound<'_, PyAny>) -> PyResult<bool> {
     }
 
     let groups: i64 = if is_raw_conv2d {
-        args.get(6).and_then(|a| a.extract().ok()).unwrap_or(1)
+        arg_extract(&args, 6, 1)
     } else {
         args[8].extract().unwrap_or(1)
     };
@@ -95,19 +95,17 @@ fn configure_grouped_conv_qparams<'py>(
     let src_meta = src_node.getattr("meta")?;
     let conv_meta = conv_node.getattr("meta")?;
 
-    if let Ok(output_qparams) = src_meta.call_method1("get", ("output_qparams",)) {
-        if !output_qparams.is_none() {
-            // Match Python DecomposeGroupedConvPass: per-group convs keep the
-            // original output-domain qparams, while only weight/bias input
-            // qparams are sliced to the per-group channel range.
-            conv_meta.set_item("output_qparams", output_qparams.call_method0("copy")?)?;
-        }
+    if let Some(output_qparams) = meta_val(&src_meta, "output_qparams") {
+        // Match Python DecomposeGroupedConvPass: per-group convs keep the
+        // original output-domain qparams, while only weight/bias input
+        // qparams are sliced to the per-group channel range.
+        conv_meta.set_item("output_qparams", output_qparams.call_method0("copy")?)?;
     }
 
-    let Ok(input_qparams) = src_meta.call_method1("get", ("input_qparams",)) else {
+    let Some(input_qparams) = meta_val(&src_meta, "input_qparams") else {
         return Ok(());
     };
-    if input_qparams.is_none() || input_qparams.len().unwrap_or(0) == 0 {
+    if input_qparams.len().unwrap_or(0) == 0 {
         return Ok(());
     }
 
@@ -146,10 +144,7 @@ fn restamp_grouped_conv_output_meta(
     conv_meta: &Bound<'_, PyAny>,
     output_slice_size: i64,
 ) -> PyResult<()> {
-    let mut output_val = match src_meta.call_method1("get", ("val",)) {
-        Ok(val) if !val.is_none() => val,
-        _ => return Ok(()),
-    };
+    let Some(mut output_val) = meta_val(&src_meta, "val") else { return Ok(()) };
     if let Ok(seq) = output_val.downcast::<pyo3::types::PyTuple>() {
         if let Ok(first) = seq.get_item(0) {
             output_val = first;
@@ -191,10 +186,7 @@ fn restamp_grouped_cat_qparams<'py>(
 
     for slice in output_slices.iter() {
         let slice_meta = slice.getattr("meta")?;
-        let output_qparams = match slice_meta.call_method1("get", ("output_qparams",)) {
-            Ok(v) if !v.is_none() => v,
-            _ => continue,
-        };
+        let Some(output_qparams) = meta_val(&slice_meta, "output_qparams") else { continue };
         if output_qparams.len().unwrap_or(0) == 0 {
             continue;
         }
@@ -211,10 +203,7 @@ fn restamp_grouped_cat_qparams<'py>(
 
 fn get_single_output_qparam<'py>(node: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
     let meta = node.getattr("meta")?;
-    let output_qparams = match meta.call_method1("get", ("output_qparams",)) {
-        Ok(v) if !v.is_none() => v,
-        _ => return Ok(None),
-    };
+    let Some(output_qparams) = meta_val(&meta, "output_qparams") else { return Ok(None) };
     if output_qparams.len().unwrap_or(0) == 0 {
         return Ok(None);
     }
@@ -340,7 +329,7 @@ fn decompose_grouped_conv<'py>(
     let bias_node = &args[2];
 
     let groups: i64 = if is_raw_conv2d {
-        args.get(6).and_then(|a| a.extract().ok()).unwrap_or(1)
+        arg_extract(&args, 6, 1)
     } else {
         args[8].extract().unwrap_or(1)
     };

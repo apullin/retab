@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use std::collections::HashMap;
 
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_val, FxGraphModule};
 use crate::fx_pass::FxPass;
 
 /// FX-graph-direct implementation of `FuseEqualPlaceholdersPass`.
@@ -88,9 +88,8 @@ impl FxPass for FxFuseEqualPlaceholdersPass {
 
             // Check for special dtype metadata (int48 tensors must not merge with int32)
             let meta = node.getattr("meta")?;
-            let special_dtype: String = meta
-                .call_method1("get", ("tosa_special_dtype",))?
-                .str()
+            let special_dtype: String = meta_val(&meta, "tosa_special_dtype")
+                .and_then(|v| v.str().ok())
                 .map(|s| s.to_string())
                 .unwrap_or_default();
 

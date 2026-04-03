@@ -5,7 +5,7 @@ use crate::fx_decompose_ops::{
     resolve_tosa_conv2d_op, resolve_tosa_conv3d_op, resolve_tosa_depthwise_conv2d_op,
     resolve_tosa_rescale_op, resolve_tosa_transpose_conv2d_op, NodeInserter,
 };
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{arg_extract, meta_val, py_is_sequence, FxGraphModule};
 use crate::fx_pass::FxPass;
 
 /// FX-graph-direct implementation of conv rewriting.
@@ -35,8 +35,7 @@ fn infer_in_channels(
     // layout before conv rewriting. Respect `tosa_dim_order` when present so
     // we read the logical C axis, not just shape[1].
     let meta = input_node.getattr("meta")?;
-    let dim_order = meta.call_method1("get", ("tosa_dim_order",))?;
-    if !dim_order.is_none() {
+    if let Some(dim_order) = meta_val(&meta, "tosa_dim_order") {
         let order: Vec<usize> = dim_order.extract().unwrap_or_default();
         if let Some(channel_axis) = order.iter().position(|&axis| axis == 1) {
             if let Some(&channels) = input_shape.get(channel_axis) {
@@ -104,20 +103,7 @@ fn adjust_pad_if_needed(
 fn get_first_fake_tensor<'py>(node: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     let meta = node.getattr("meta")?;
     let val = meta.get_item("val")?;
-    let builtins = node.py().import_bound("builtins")?;
-    let is_seq = builtins
-        .call_method1(
-            "isinstance",
-            (
-                &val,
-                PyTuple::new_bound(
-                    node.py(),
-                    &[builtins.getattr("list")?, builtins.getattr("tuple")?],
-                ),
-            ),
-        )?
-        .extract::<bool>()?;
-    if is_seq {
+    if py_is_sequence(&val) {
         val.get_item(0)
     } else {
         Ok(val)
@@ -136,18 +122,11 @@ fn qparam_field<'py>(
         }
     }
     if let Some(key) = fallback_key {
-        if let Ok(val) = qparam.call_method1("get", (key,)) {
-            if !val.is_none() {
-                return Some(val);
-            }
-        }
-    }
-    if let Ok(val) = qparam.call_method1("get", (attr,)) {
-        if !val.is_none() {
+        if let Some(val) = meta_val(qparam, key) {
             return Some(val);
         }
     }
-    None
+    meta_val(qparam, attr)
 }
 
 fn qparam_f64(qparam: &Bound<'_, PyAny>, attr: &str, default: f64) -> f64 {
@@ -178,7 +157,7 @@ fn qparam_get<'py>(
     qparams: &Bound<'py, PyAny>,
     idx: usize,
 ) -> Option<Bound<'py, PyAny>> {
-    // Could be a dict or a list/tuple
+    // Could be a dict or a list/tuple -- integer key, not string key
     if let Ok(val) = qparams.call_method1("get", (idx,)) {
         if !val.is_none() {
             return Some(val);
@@ -302,28 +281,20 @@ fn rewrite_conv_to_tosa<'py>(
 
     // -- Determine input contract dtype from qparams -------------------------
     let meta = node.getattr("meta")?;
-    let input_qparams_raw = meta.call_method1("get", ("input_qparams",))?;
-    let input_qparam = if !input_qparams_raw.is_none() {
-        // Could be a dict
-        let qp = input_qparams_raw.call_method1("get", (0,));
-        match qp {
-            Ok(v) if !v.is_none() => Some(v),
-            _ => {
-                // single-entry dict: get the only value
-                if let Ok(vals) = input_qparams_raw.call_method0("values") {
-                    if let Ok(mut it) = vals.iter() {
-                        it.next().and_then(|v| v.ok())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-        }
-    } else {
-        None
-    };
+    let input_qparams_raw = meta_val(&meta, "input_qparams");
+    // Flat extract: first qparam from input_qparams dict (key 0, or single entry).
+    let input_qparam = input_qparams_raw.as_ref().and_then(|raw| {
+        raw.call_method1("get", (0,))
+            .ok()
+            .filter(|v| !v.is_none())
+            .or_else(|| {
+                raw.call_method0("values")
+                    .ok()
+                    .and_then(|vals| vals.iter().ok())
+                    .and_then(|mut it| it.next())
+                    .and_then(|v| v.ok())
+            })
+    });
 
     let input_dtype = input_fake.getattr("dtype")?;
     let input_contract_dtype = if let Some(ref qp) = input_qparam {
@@ -334,34 +305,30 @@ fn rewrite_conv_to_tosa<'py>(
 
     // -- Handle missing bias: create a zero bias buffer ----------------------
     if bias_opt.is_none() {
-        let output_val = meta.call_method1("get", ("val",))?;
-        let output_channels: i64 = if !output_val.is_none() {
-            let shape: Vec<i64> = output_val.getattr("shape")?.extract()?;
+        let output_val = meta_val(&meta, "val");
+        let output_channels: i64 = if let Some(ref ov) = output_val {
+            let shape: Vec<i64> = ov.getattr("shape")?.extract()?;
             shape.get(1).copied().unwrap_or(0)
         } else {
             weight.getattr("meta")?.get_item("val")?.getattr("shape")?.get_item(0)?.extract()?
         };
 
-        let has_qparams = {
-            let oqp = meta.call_method1("get", ("output_qparams",))?;
-            if oqp.is_none() {
-                false
-            } else {
-                let builtins = py.import_bound("builtins")?;
-                let length: usize = builtins
-                    .call_method1("len", (&oqp,))
-                    .and_then(|v| v.extract())
-                    .unwrap_or(0);
-                length > 0
-            }
-        };
+        let has_qparams = meta_val(&meta, "output_qparams")
+            .map(|oqp| {
+                py.import_bound("builtins")
+                    .and_then(|b| b.call_method1("len", (&oqp,)))
+                    .and_then(|v| v.extract::<usize>())
+                    .unwrap_or(0)
+                    > 0
+            })
+            .unwrap_or(false);
 
         let torch = py.import_bound("torch")?;
         let bias_dtype = if has_qparams {
             torch.getattr("int32")?
         } else {
-            if !output_val.is_none() {
-                output_val.getattr("dtype")?
+            if let Some(ref ov) = output_val {
+                ov.getattr("dtype")?
             } else {
                 torch.getattr("float32")?
             }
@@ -606,14 +573,16 @@ fn rewrite_conv_to_tosa<'py>(
         Ok(())
     })();
 
+    // Flat traverse: apply quantized-op fallback when primary meta stamping failed.
     if set_meta_result.is_err() {
-        // Fallback for quantized ops
         let int8_dtype = torch.getattr("int8")?;
         let int16_dtype = torch.getattr("int16")?;
         let int32_dtype = torch.getattr("int32")?;
         let input_dt = input_fake.getattr("dtype")?;
+        let is_quantized_input = input_dt.eq(&int8_dtype)? || input_dt.eq(&int16_dtype)?;
+
         if let Ok(ref output_fake) = output_fake_result {
-            if input_dt.eq(&int8_dtype)? || input_dt.eq(&int16_dtype)? {
+            if is_quantized_input {
                 let new_val = output_fake.call_method(
                     "new_empty",
                     (output_fake.getattr("shape")?,),
@@ -643,131 +612,102 @@ fn rewrite_conv_to_tosa<'py>(
     }
 
     // -- For 3D quantized conv, insert output RESCALE ------------------------
+    // Flat traverse: extract qparams and insert RESCALE for 3D quantized convolutions.
     let mut replacement = tosa_op.clone();
 
-    if spatial_rank == 3 {
-        if output_fake_result.is_ok() {
-            let input_qp = {
-                let iqp = meta.call_method1("get", ("input_qparams",))?;
-                if iqp.is_none() {
-                    None
-                } else {
-                    qparam_get(&iqp, 0)
-                }
-            };
-            let weight_qp = {
-                let iqp = meta.call_method1("get", ("input_qparams",))?;
-                if iqp.is_none() {
-                    None
-                } else {
-                    qparam_get(&iqp, 1)
-                }
-            };
-            let output_qp = {
-                let oqp = meta.call_method1("get", ("output_qparams",))?;
-                if oqp.is_none() {
-                    None
-                } else {
-                    qparam_get(&oqp, 0)
-                }
-            };
+    if spatial_rank == 3 && output_fake_result.is_ok() {
+        let iqp_raw = meta_val(&meta, "input_qparams");
+        let oqp_raw = meta_val(&meta, "output_qparams");
+        let input_qp = iqp_raw.as_ref().and_then(|raw| qparam_get(raw, 0));
+        let weight_qp = iqp_raw.as_ref().and_then(|raw| qparam_get(raw, 1));
+        let output_qp = oqp_raw.as_ref().and_then(|raw| qparam_get(raw, 0));
 
-            let int8_dtype = torch.getattr("int8")?;
-            let int32_dtype = torch.getattr("int32")?;
-            let input_dt = input_fake.getattr("dtype")?;
-            let tosa_val_dt = tosa_op
-                .getattr("meta")?
-                .call_method1("get", ("val",))?;
-            let tosa_op_dtype = if !tosa_val_dt.is_none() {
-                tosa_val_dt.getattr("dtype").ok()
-            } else {
-                None
-            };
+        let int8_dtype = torch.getattr("int8")?;
+        let int32_dtype = torch.getattr("int32")?;
+        let input_dt = input_fake.getattr("dtype")?;
+        let tosa_op_dtype = meta_val(&tosa_op.getattr("meta")?, "val")
+            .and_then(|v| v.getattr("dtype").ok());
+        let tosa_is_int32 = tosa_op_dtype
+            .as_ref()
+            .map(|d| d.eq(&int32_dtype).unwrap_or(false))
+            .unwrap_or(false);
 
-            if input_dt.eq(&int8_dtype)?
-                && tosa_op_dtype
-                    .as_ref()
-                    .map(|d| d.eq(&int32_dtype).unwrap_or(false))
-                    .unwrap_or(false)
-                && input_qp.is_some()
-                && weight_qp.is_some()
-                && output_qp.is_some()
-            {
-                let input_qp = input_qp.unwrap();
-                let weight_qp = weight_qp.unwrap();
-                let output_qp = output_qp.unwrap();
+        if input_dt.eq(&int8_dtype)?
+            && tosa_is_int32
+            && input_qp.is_some()
+            && weight_qp.is_some()
+            && output_qp.is_some()
+        {
+            let input_qp = input_qp.unwrap();
+            let weight_qp = weight_qp.unwrap();
+            let output_qp = output_qp.unwrap();
 
-                let input_scale = qparam_f64(&input_qp, "scale", 1.0);
-                let output_scale = qparam_f64(&output_qp, "scale", 1.0);
-                let output_zp_val =
-                    qparam_i64(&output_qp, "zp", Some("zero_point"), 0);
-                let output_dtype = output_qp.getattr("dtype")?;
-                let per_channel = qparam_field(&weight_qp, "per_channel", None)
-                    .and_then(|v| v.extract::<bool>().ok())
-                    .unwrap_or(false);
+            let input_scale = qparam_f64(&input_qp, "scale", 1.0);
+            let output_scale = qparam_f64(&output_qp, "scale", 1.0);
+            let output_zp_val =
+                qparam_i64(&output_qp, "zp", Some("zero_point"), 0);
+            let output_dtype = output_qp.getattr("dtype")?;
+            let per_channel = qparam_field(&weight_qp, "per_channel", None)
+                .and_then(|v| v.extract::<bool>().ok())
+                .unwrap_or(false);
 
-                let weight_scales: Vec<f64> = if per_channel {
-                    qparam_field(&weight_qp, "scale", None)
-                        .and_then(|v| {
-                            v.extract::<Vec<f64>>().ok().or_else(|| {
-                                v.extract::<f64>().ok().map(|s| vec![s])
-                            })
+            let weight_scales: Vec<f64> = if per_channel {
+                qparam_field(&weight_qp, "scale", None)
+                    .and_then(|v| {
+                        v.extract::<Vec<f64>>().ok().or_else(|| {
+                            v.extract::<f64>().ok().map(|s| vec![s])
                         })
-                        .unwrap_or_else(|| vec![1.0])
-                } else {
-                    vec![qparam_f64(&weight_qp, "scale", 1.0)]
-                };
+                    })
+                    .unwrap_or_else(|| vec![1.0])
+            } else {
+                vec![qparam_f64(&weight_qp, "scale", 1.0)]
+            };
 
-                if output_scale != 0.0 {
-                    let post_conv_scale: Vec<f64> = weight_scales
-                        .iter()
-                        .map(|ws| (input_scale * ws) / output_scale)
-                        .collect();
+            if output_scale != 0.0 {
+                let post_conv_scale: Vec<f64> = weight_scales
+                    .iter()
+                    .map(|ws| (input_scale * ws) / output_scale)
+                    .collect();
 
-                    // Insert RESCALE node after tosa_op
-                    let rescale_op = resolve_tosa_rescale_op(py)?;
-                    let scale_list = PyList::new_bound(py, &post_conv_scale);
-                    let rescale_args = PyTuple::new_bound(
-                        py,
-                        &[
-                            tosa_op.as_ref(),
-                            output_dtype.as_ref(),
-                            scale_list.as_ref(),
-                            0i64.into_py(py).bind(py).as_ref(),
-                            output_zp_val.into_py(py).bind(py).as_ref(),
-                        ],
-                    );
-                    let rescale_ins = NodeInserter::after(py, &graph, &tosa_op);
-                    let rescale = rescale_ins.call(&rescale_op, rescale_args.as_ref())?;
+                let rescale_op = resolve_tosa_rescale_op(py)?;
+                let scale_list = PyList::new_bound(py, &post_conv_scale);
+                let rescale_args = PyTuple::new_bound(
+                    py,
+                    &[
+                        tosa_op.as_ref(),
+                        output_dtype.as_ref(),
+                        scale_list.as_ref(),
+                        0i64.into_py(py).bind(py).as_ref(),
+                        output_zp_val.into_py(py).bind(py).as_ref(),
+                    ],
+                );
+                let rescale_ins = NodeInserter::after(py, &graph, &tosa_op);
+                let rescale = rescale_ins.call(&rescale_op, rescale_args.as_ref())?;
 
-                    // Restamp rescale output metadata
-                    let tosa_val = get_first_fake_tensor(&tosa_op)?;
-                    if tosa_val.hasattr("new_empty")? {
-                        let new_val = tosa_val.call_method(
-                            "new_empty",
-                            (tosa_val.getattr("shape")?,),
-                            Some(&{
-                                let kw = PyDict::new_bound(py);
-                                kw.set_item("dtype", &output_dtype)?;
-                                kw
-                            }),
-                        )?;
-                        rescale.getattr("meta")?.set_item("val", &new_val)?;
-                    }
-
-                    // Propagate qparams
-                    let rescale_meta = rescale.getattr("meta")?;
-                    let iqp_map = PyDict::new_bound(py);
-                    iqp_map.set_item(0, &input_qp)?;
-                    rescale_meta.set_item("input_qparams", &iqp_map)?;
-                    let oqp_map = PyDict::new_bound(py);
-                    oqp_map.set_item(0, &output_qp)?;
-                    rescale_meta.set_item("output_qparams", &oqp_map)?;
-                    // Remove any inherited tosa_special_dtype
-                    let _ = rescale_meta.call_method1("pop", ("tosa_special_dtype", py.None()));
-
-                    replacement = rescale;
+                let tosa_val = get_first_fake_tensor(&tosa_op)?;
+                if tosa_val.hasattr("new_empty")? {
+                    let new_val = tosa_val.call_method(
+                        "new_empty",
+                        (tosa_val.getattr("shape")?,),
+                        Some(&{
+                            let kw = PyDict::new_bound(py);
+                            kw.set_item("dtype", &output_dtype)?;
+                            kw
+                        }),
+                    )?;
+                    rescale.getattr("meta")?.set_item("val", &new_val)?;
                 }
+
+                let rescale_meta = rescale.getattr("meta")?;
+                let iqp_map = PyDict::new_bound(py);
+                iqp_map.set_item(0, &input_qp)?;
+                rescale_meta.set_item("input_qparams", &iqp_map)?;
+                let oqp_map = PyDict::new_bound(py);
+                oqp_map.set_item(0, &output_qp)?;
+                rescale_meta.set_item("output_qparams", &oqp_map)?;
+                let _ = rescale_meta.call_method1("pop", ("tosa_special_dtype", py.None()));
+
+                replacement = rescale;
             }
         }
     }
@@ -820,7 +760,7 @@ impl FxPass for FxRewriteConvPass {
             let input_node = &args[0];
             let weight_node = &args[1];
             let groups: i64 = if is_raw_conv2d {
-                args.get(6).and_then(|arg| arg.extract().ok()).unwrap_or(1)
+                arg_extract(&args, 6, 1)
             } else {
                 args[8].extract().unwrap_or(1)
             };
@@ -839,12 +779,12 @@ impl FxPass for FxRewriteConvPass {
 
             // Get quantization info from meta if available
             let meta = node.getattr("meta")?;
-            let input_qparams = meta.call_method1("get", ("input_qparams",))?;
+            let input_qparams = meta_val(&meta, "input_qparams");
 
             let mut input_zp: i64 = 0;
             let mut weight_zp: i64 = 0;
 
-            if !input_qparams.is_none() {
+            if let Some(ref input_qparams) = input_qparams {
                 if let Ok(qp0) = input_qparams.get_item(0_usize) {
                     input_zp = qp0
                         .getattr("zp")

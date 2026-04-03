@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::{propagate_qparams, FxDecomposer};
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_val, FxGraphModule};
 
 crate::fx_pass!(
     /// FX-graph-direct decomposition of `aten.unfold_copy` into
@@ -13,15 +13,11 @@ crate::fx_pass!(
 );
 
 fn copy_qparams_only(src_meta: &Bound<'_, PyAny>, dst_meta: &Bound<'_, PyAny>) -> PyResult<()> {
-    if let Ok(input_qparams) = src_meta.call_method1("get", ("input_qparams",)) {
-        if !input_qparams.is_none() {
-            dst_meta.set_item("input_qparams", input_qparams)?;
-        }
+    if let Some(input_qparams) = meta_val(src_meta, "input_qparams") {
+        dst_meta.set_item("input_qparams", input_qparams)?;
     }
-    if let Ok(output_qparams) = src_meta.call_method1("get", ("output_qparams",)) {
-        if !output_qparams.is_none() {
-            dst_meta.set_item("output_qparams", output_qparams)?;
-        }
+    if let Some(output_qparams) = meta_val(src_meta, "output_qparams") {
+        dst_meta.set_item("output_qparams", output_qparams)?;
     }
     Ok(())
 }
@@ -31,10 +27,7 @@ fn mark_layout_neutral<'py>(py: Python<'py>, node: &Bound<'py, PyAny>) -> PyResu
     meta.set_item("arm_layout_neutral", true)?;
     meta.set_item("tosa_spatial_rank", 0)?;
 
-    let val = match meta.call_method1("get", ("val",)) {
-        Ok(v) if !v.is_none() => v,
-        _ => return Ok(()),
-    };
+    let Some(val) = meta_val(&meta, "val") else { return Ok(()) };
     let shape = match val.getattr("shape") {
         Ok(s) => s,
         Err(_) => return Ok(()),

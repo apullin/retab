@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
-use crate::fx_graph::{py_attr, FxGraphModule};
+use crate::fx_graph::{meta_val, py_attr, FxGraphModule};
 use crate::fx_pass::FxPass;
 
 /// FX-graph-direct pass that inserts a TOSA RESCALE after matmul ops
@@ -44,14 +44,8 @@ impl FxPass for FxRewriteMatmulRescalePass {
 
             // Check if the matmul has qparams (quantized path)
             let meta = node.getattr("meta")?;
-            let input_qparams = match meta.call_method1("get", ("input_qparams",)) {
-                Ok(v) if !v.is_none() => v,
-                _ => continue,
-            };
-            let output_qparams = match meta.call_method1("get", ("output_qparams",)) {
-                Ok(v) if !v.is_none() => v,
-                _ => continue,
-            };
+            let Some(input_qparams) = meta_val(&meta, "input_qparams") else { continue };
+            let Some(output_qparams) = meta_val(&meta, "output_qparams") else { continue };
 
             // Get input_qparams[0] and input_qparams[1] scales
             let qp_a = match input_qparams.call_method1("get", (0,)) {

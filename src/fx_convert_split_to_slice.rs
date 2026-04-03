@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::resolve_aten_op;
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_val, FxGraphModule};
 use crate::fx_utils;
 
 crate::fx_pass!(
@@ -141,8 +141,7 @@ fn convert_split<'py>(
         let meta = slice_node.getattr("meta")?;
 
         // Select the right val/tensor_meta for this index
-        let val = meta.call_method1("get", ("val",))?;
-        if !val.is_none() {
+        if let Some(val) = meta_val(&meta, "val") {
             if let Ok(val_list) = val.extract::<Vec<Bound<'_, PyAny>>>() {
                 if index < val_list.len() {
                     meta.set_item("val", &val_list[index])?;
@@ -154,10 +153,8 @@ fn convert_split<'py>(
 
         // Copy output_qparams from the getitem user (not the split)
         let user_meta = user.getattr("meta")?;
-        if let Ok(oqp) = user_meta.call_method1("get", ("output_qparams",)) {
-            if !oqp.is_none() {
-                meta.set_item("output_qparams", oqp)?;
-            }
+        if let Some(oqp) = meta_val(&user_meta, "output_qparams") {
+            meta.set_item("output_qparams", oqp)?;
         }
 
         fx_utils::refresh_fake_tensor(py, &slice_node)?;

@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_get, meta_val, FxGraphModule};
 use crate::fx_pass::FxPass;
 
 /// FX-graph-direct implementation of `FoldAndAnnotateQParamsPass`.
@@ -84,10 +84,9 @@ fn is_foldable(node: &Bound<'_, PyAny>) -> PyResult<bool> {
 
     // Check ARM annotation info: node.meta.get("custom", {}).get("_arm_annotation_info")
     let meta = node.getattr("meta")?;
-    let custom = meta.call_method1("get", ("custom",))?;
-    if custom.is_none() {
+    let Some(custom) = meta_val(&meta, "custom") else {
         return Ok(false);
-    }
+    };
 
     // Check for the annotation key
     let ann_key = "_arm_annotation_info";
@@ -101,10 +100,7 @@ fn is_foldable(node: &Bound<'_, PyAny>) -> PyResult<bool> {
 
     // Check quantized flag
     let ann_dict = custom.get_item(ann_key)?;
-    let quantized: bool = ann_dict
-        .call_method1("get", ("quantized", false))
-        .and_then(|v| v.extract())
-        .unwrap_or(false);
+    let quantized: bool = meta_get(&ann_dict, "quantized", false);
 
     Ok(quantized)
 }

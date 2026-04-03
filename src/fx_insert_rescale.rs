@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{arg_extract, meta_val, FxGraphModule};
 use crate::fx_pass::FxPass;
 use crate::fx_utils;
 
@@ -14,8 +14,8 @@ fn qp_get_value<'py>(
 ) -> Option<Bound<'py, PyAny>> {
     qp.getattr(attr).ok().or_else(|| {
         dict_key
-            .and_then(|key| qp.call_method1("get", (key,)).ok())
-            .or_else(|| qp.call_method1("get", (attr,)).ok())
+            .and_then(|key| meta_val(qp, key))
+            .or_else(|| meta_val(qp, attr))
     })
 }
 
@@ -86,10 +86,7 @@ fn meta_non_empty_item<'py>(
     meta: &Bound<'py, PyAny>,
     key: &str,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
-    let value = match meta.call_method1("get", (key,)) {
-        Ok(v) if !v.is_none() => v,
-        _ => return Ok(None),
-    };
+    let Some(value) = meta_val(meta, key) else { return Ok(None) };
     Ok((py_len(&value) > 0).then_some(value))
 }
 
@@ -222,12 +219,10 @@ impl<'py> QuantEnv<'py> {
 
     fn update_node_dtype_kwarg(&self, node: &Bound<'py, PyAny>) -> PyResult<()> {
         let kwargs = FxGraphModule::node_kwargs(node)?;
-        if let Ok(true) = kwargs.contains("dtype") {
-            if let Ok(kwargs) = kwargs.downcast::<PyDict>() {
-                kwargs.set_item("dtype", &self.int32)?;
-                node.setattr("kwargs", kwargs)?;
-            }
-        }
+        let Ok(true) = kwargs.contains("dtype") else { return Ok(()); };
+        let Ok(kwargs) = kwargs.downcast::<PyDict>() else { return Ok(()); };
+        kwargs.set_item("dtype", &self.int32)?;
+        node.setattr("kwargs", kwargs)?;
         Ok(())
     }
 }
@@ -386,10 +381,7 @@ fn producer_old_zero_point(arg_node: &Bound<'_, PyAny>, fallback_zp: i64) -> PyR
         }
     }
 
-    let arg_fake_val = match meta.call_method1("get", ("val",)) {
-        Ok(v) if !v.is_none() => v,
-        _ => return Ok(fallback_zp),
-    };
+    let Some(arg_fake_val) = meta_val(&meta, "val") else { return Ok(fallback_zp) };
     let is_int32 = arg_fake_val
         .getattr("dtype")
         .ok()
@@ -410,8 +402,8 @@ fn is_q(target: &str) -> bool {
 
 /// Extract (scale, zero_point) from a DQ/Q node's args.
 fn extract_scale_zp(args: &[Bound<'_, PyAny>]) -> PyResult<(f64, i64)> {
-    let scale: f64 = args.get(1).and_then(|a| a.extract().ok()).unwrap_or(1.0);
-    let zp: i64 = args.get(2).and_then(|a| a.extract().ok()).unwrap_or(0);
+    let scale: f64 = arg_extract(&args, 1, 1.0);
+    let zp: i64 = arg_extract(&args, 2, 0);
     Ok((scale, zp))
 }
 
@@ -799,10 +791,8 @@ impl FxPass for FxInsertRescalePass {
             }
 
             let out_sig = qparam_signature(&out_qp, "torch.int8");
-            let output_dtype = meta
-                .call_method1("get", ("val",))?
-                .getattr("dtype")
-                .ok()
+            let output_dtype = meta_val(&meta, "val")
+                .and_then(|v| v.getattr("dtype").ok())
                 .and_then(|dt| dt.str().ok())
                 .and_then(|s| s.extract::<String>().ok())
                 .unwrap_or_else(|| out_sig.4.clone());

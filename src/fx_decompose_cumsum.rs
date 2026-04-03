@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::fx_decompose_ops::FxDecomposer;
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_val, FxGraphModule};
 
 crate::fx_pass!(
     /// Mirror the Python Arm backend's cumsum lowering:
@@ -102,17 +102,11 @@ fn decompose_cumsum<'py>(
 
     // Extract dtype and device from the input tensor's meta val
     let input_meta = input_node.getattr("meta")?;
-    let input_val = input_meta.call_method1("get", ("val",))?;
-    let dtype = if !input_val.is_none() {
-        input_val.getattr("dtype").ok()
-    } else {
-        None
-    };
-    let device = if !input_val.is_none() {
-        input_val.getattr("device").ok().filter(|d| !d.is_none())
-    } else {
-        None
-    };
+    let input_val = meta_val(&input_meta, "val");
+    let dtype = input_val.as_ref().and_then(|v| v.getattr("dtype").ok());
+    let device = input_val.as_ref()
+        .and_then(|v| v.getattr("device").ok())
+        .filter(|d| !d.is_none());
 
     // full(weight_shape, 1.0, dtype=dtype, device=device)
     let weight_node = d.full_with_device(
@@ -137,8 +131,9 @@ fn decompose_cumsum<'py>(
 
     // Quantization parameter fixup for the convolution weight
     let node_meta = node.getattr("meta")?;
-    let original_input_qparams = node_meta.call_method1("get", ("input_qparams",))?;
-    if !original_input_qparams.is_none() && original_input_qparams.len().unwrap_or(0) > 0 {
+    let original_input_qparams = meta_val(&node_meta, "input_qparams");
+    if original_input_qparams.as_ref().map_or(false, |v| v.len().unwrap_or(0) > 0) {
+        let original_input_qparams = original_input_qparams.unwrap();
         let torch_int8 = py.import_bound("torch")?.getattr("int8")?;
         let weight_qp = make_qparam(py, 1.0, 0, -128, 127, &torch_int8)?;
 

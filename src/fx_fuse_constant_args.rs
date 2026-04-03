@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_val, FxGraphModule};
 use crate::fx_pass::FxPass;
 
 /// FX-graph-direct implementation of `FuseConstantArgsPass`.
@@ -136,11 +136,13 @@ fn extract_effective_node_qparam<'py>(
     let mut current = node.clone();
     loop {
         let meta = current.getattr("meta")?;
-        let output_qparams = meta.call_method1("get", ("output_qparams",))?;
+        let output_qparams = meta_val(&meta, "output_qparams")
+            .unwrap_or_else(|| current.py().None().into_bound(current.py()));
         if let Some(qparam) = extract_single_qparam_entry(&output_qparams)? {
             return Ok(Some(qparam));
         }
-        let input_qparams = meta.call_method1("get", ("input_qparams",))?;
+        let input_qparams = meta_val(&meta, "input_qparams")
+            .unwrap_or_else(|| current.py().None().into_bound(current.py()));
         if let Some(qparam) = extract_single_qparam_entry(&input_qparams)? {
             return Ok(Some(qparam));
         }
@@ -210,14 +212,15 @@ fn fold_zero_input_full(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult
     // point and quantize exactly once. Using the folded node's int8 dtype here
     // would truncate scalar fills like 3.14 to 3 before quantization.
     let mut qparam = None;
-    if let Ok(output_qparams) = meta.call_method1("get", ("output_qparams",)) {
+    if let Some(output_qparams) = meta_val(&meta, "output_qparams") {
         qparam = extract_single_qparam_entry(&output_qparams)?;
     }
     if qparam.is_none() {
         qparam = infer_binary_full_qparam(node)?;
     }
 
-    let val = meta.call_method1("get", ("val",))?;
+    let val = meta_val(&meta, "val")
+        .unwrap_or_else(|| py.None().into_bound(py));
     // Parse, don't validate: branch-local zero-input FULL nodes may lose their
     // fake tensor metadata during control-flow rewrites. If `meta["val"]` is
     // absent, fall back to eager `torch.full` inference instead of crashing the
@@ -252,8 +255,8 @@ fn fold_zero_input_range_like(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> Py
     };
 
     let meta = node.getattr("meta")?;
-    if let Ok(output_qparams) = meta.call_method1("get", ("output_qparams",)) {
-        if !output_qparams.is_none() && output_qparams.len().unwrap_or(0) > 0 {
+    if let Some(output_qparams) = meta_val(&meta, "output_qparams") {
+        if output_qparams.len().unwrap_or(0) > 0 {
             if let Ok(values) = output_qparams.call_method0("values") {
                 if let Some(first_qp) = values.iter()?.next() {
                     let first_qp = first_qp?;

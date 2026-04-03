@@ -7,17 +7,16 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use crate::fx_graph::meta_val;
+
 /// Check whether a node has quantization parameters.
 pub fn is_quantized(node: &Bound<'_, PyAny>) -> bool {
     let Ok(meta) = node.getattr("meta") else {
         return false;
     };
-    let Ok(iqp) = meta.call_method1("get", ("input_qparams",)) else {
+    let Some(iqp) = meta_val(&meta, "input_qparams") else {
         return false;
     };
-    if iqp.is_none() {
-        return false;
-    }
     iqp.downcast::<PyDict>()
         .map(|d| !d.is_empty())
         .unwrap_or(false)
@@ -26,10 +25,8 @@ pub fn is_quantized(node: &Bound<'_, PyAny>) -> bool {
 /// Get `output_qparams[0]` from a node, if it exists.
 pub fn get_output_qparam<'py>(node: &Bound<'py, PyAny>) -> Option<Bound<'py, PyAny>> {
     let meta = node.getattr("meta").ok()?;
-    let oqp = meta.call_method1("get", ("output_qparams",)).ok()?;
-    if oqp.is_none() {
-        return None;
-    }
+    let oqp = meta_val(&meta, "output_qparams")?;
+    // .get(0,) is an integer key on a dict, not a string key -- keep as-is
     let qp = oqp.call_method1("get", (0,)).ok()?;
     if qp.is_none() {
         None

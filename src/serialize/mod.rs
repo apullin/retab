@@ -654,18 +654,17 @@ fn collect_serialized_graph_items(
         for (i, &id) in sorted.iter().enumerate() {
             if let Some(node) = graph.node(id) {
                 let input_ids = Graph::collect_input_ids(node);
+                // Flat traverse: detect topological order violations.
                 for input_id in &input_ids {
-                    if let Some(&input_pos) = position.get(input_id) {
-                        if input_pos >= i {
-                            if violations < 10 {
-                                eprintln!(
-                                    "[Serialize] WARNING: '{}' at position {} depends on input at position {}",
-                                    node.name, i, input_pos
-                                );
-                            }
-                            violations += 1;
-                        }
+                    let Some(&input_pos) = position.get(input_id) else { continue; };
+                    if input_pos < i { continue; }
+                    if violations < 10 {
+                        eprintln!(
+                            "[Serialize] WARNING: '{}' at position {} depends on input at position {}",
+                            node.name, i, input_pos
+                        );
                     }
+                    violations += 1;
                 }
             }
         }

@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 
 use crate::fx_decompose_ops::FxDecomposer;
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{arg_extract, FxGraphModule};
 
 crate::fx_pass!(
     /// FX-graph-direct decomposition of `aten.tril` into
@@ -32,7 +32,7 @@ fn decompose_tril<'py>(
         return Ok(false);
     }
 
-    let diagonal = args.get(1).and_then(|a| a.extract::<i64>().ok()).unwrap_or(0);
+    let diagonal: i64 = arg_extract(&args, 1, 0);
 
     let shape = FxGraphModule::node_shape(input)?;
     if shape.len() < 2 {

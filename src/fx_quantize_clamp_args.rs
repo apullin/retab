@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_val, FxGraphModule};
 
 crate::fx_pass!(
     /// FX-graph-direct implementation of `QuantizeClampArgumentsPass`.
@@ -25,10 +25,7 @@ fn quantize_clamp_args<'py>(
 ) -> PyResult<()> {
     // Check for output_qparams in meta.
     let meta = node.getattr("meta")?;
-    let output_qparams = match meta.call_method1("get", ("output_qparams",)) {
-        Ok(v) if !v.is_none() => v,
-        _ => return Ok(()),
-    };
+    let Some(output_qparams) = meta_val(&meta, "output_qparams") else { return Ok(()) };
 
     // output_qparams is a dict[int, QuantArgs]; grab the first value.
     let values = match output_qparams.call_method0("values") {

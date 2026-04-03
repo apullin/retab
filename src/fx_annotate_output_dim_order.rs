@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_val, FxGraphModule};
 use crate::fx_pass::FxPass;
 
 pub struct FxAnnotateOutputDimOrderPass;
@@ -25,10 +25,7 @@ fn collect_output_nodes<'py>(node_args: &[Bound<'py, PyAny>]) -> Vec<Bound<'py, 
 
 fn extract_output_dim_order(node: &Bound<'_, PyAny>) -> PyResult<Option<Vec<usize>>> {
     let meta = node.getattr("meta")?;
-    let val = match meta.call_method1("get", ("val",)) {
-        Ok(v) if !v.is_none() => v,
-        _ => return Ok(None),
-    };
+    let Some(val) = meta_val(&meta, "val") else { return Ok(None) };
     let dim_order = match val.call_method0("dim_order") {
         Ok(order) => order,
         Err(_) => return Ok(None),
@@ -51,8 +48,7 @@ impl FxPass for FxAnnotateOutputDimOrderPass {
             }
 
             let meta = node.getattr("meta")?;
-            let existing = meta.call_method1("get", ("original_dim_orders",))?;
-            if !existing.is_none() {
+            if meta_val(&meta, "original_dim_orders").is_some() {
                 continue;
             }
 

@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_val, FxGraphModule};
 use crate::fx_utils;
 
 crate::fx_pass!(
@@ -28,13 +28,13 @@ fn get_qparam_field<'py, T: for<'a> FromPyObject<'a>>(
         }
     }
     if let Some(key) = fallback_key {
-        if let Ok(value) = qparam.call_method1("get", (key,)) {
+        if let Some(value) = meta_val(qparam, key) {
             if let Ok(parsed) = value.extract::<T>() {
                 return Some(parsed);
             }
         }
     }
-    if let Ok(value) = qparam.call_method1("get", (attr,)) {
+    if let Some(value) = meta_val(qparam, attr) {
         if let Ok(parsed) = value.extract::<T>() {
             return Some(parsed);
         }
@@ -46,14 +46,11 @@ fn get_qparam_dtype<'py>(qparam: &Bound<'py, PyAny>) -> Option<Bound<'py, PyAny>
     qparam
         .getattr("dtype")
         .ok()
-        .or_else(|| qparam.call_method1("get", ("dtype",)).ok())
+        .or_else(|| meta_val(qparam, "dtype"))
 }
 
 fn first_meta_qparam<'py>(meta: &Bound<'py, PyAny>, key: &str) -> Option<Bound<'py, PyAny>> {
-    let qparams = meta.call_method1("get", (key,)).ok()?;
-    if qparams.is_none() {
-        return None;
-    }
+    let qparams = meta_val(meta, key)?;
     qparams.get_item(0).ok()
 }
 

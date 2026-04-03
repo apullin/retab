@@ -326,16 +326,12 @@ pub fn propagate_qparams<'py>(src: &Bound<'py, PyAny>, dst: &Bound<'py, PyAny>) 
     let dst_meta = dst.getattr("meta")?;
 
     // Copy input_qparams if available
-    if let Ok(iqp) = src_meta.call_method1("get", ("input_qparams",)) {
-        if !iqp.is_none() {
-            dst_meta.set_item("input_qparams", &iqp)?;
-        }
+    if let Some(iqp) = crate::fx_graph::meta_val(&src_meta, "input_qparams") {
+        dst_meta.set_item("input_qparams", &iqp)?;
     }
     // Copy output_qparams if available
-    if let Ok(oqp) = src_meta.call_method1("get", ("output_qparams",)) {
-        if !oqp.is_none() {
-            dst_meta.set_item("output_qparams", &oqp)?;
-        }
+    if let Some(oqp) = crate::fx_graph::meta_val(&src_meta, "output_qparams") {
+        dst_meta.set_item("output_qparams", &oqp)?;
     }
     Ok(())
 }
@@ -1125,19 +1121,16 @@ fn decompose_unbind<'py>(
     // Collect getitem users of the unbind node
     let users = FxGraphModule::node_users(node)?;
     let mut getitem_users: Vec<(Bound<'_, PyAny>, i64)> = Vec::new();
+    // Flat traverse: extract getitem users with valid integer indices.
     for user in &users {
         let user_op = FxGraphModule::node_op(user)?;
-        if user_op == "call_function" {
-            let user_target = FxGraphModule::node_target_str(user)?;
-            if user_target.contains("getitem") {
-                let user_args = FxGraphModule::node_args(user)?;
-                if user_args.len() >= 2 {
-                    if let Ok(idx) = user_args[1].extract::<i64>() {
-                        getitem_users.push((user.clone(), idx));
-                    }
-                }
-            }
-        }
+        if user_op != "call_function" { continue; }
+        let user_target = FxGraphModule::node_target_str(user)?;
+        if !user_target.contains("getitem") { continue; }
+        let user_args = FxGraphModule::node_args(user)?;
+        if user_args.len() < 2 { continue; }
+        let Ok(idx) = user_args[1].extract::<i64>() else { continue; };
+        getitem_users.push((user.clone(), idx));
     }
 
     let copy_mod = py.import_bound("copy")?;

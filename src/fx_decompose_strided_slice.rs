@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_val, FxGraphModule};
 
 crate::fx_pass!(
     /// Mirror the Python Arm backend's non-unit-step slice_copy decomposition:
@@ -26,10 +26,7 @@ fn copy_first_output_qparams<'py>(
     let copy_mod = py.import_bound("copy")?;
     for src_node in src_nodes {
         let src_meta = src_node.getattr("meta")?;
-        let output_qparams = match src_meta.call_method1("get", ("output_qparams",)) {
-            Ok(v) if !v.is_none() => v,
-            _ => continue,
-        };
+        let Some(output_qparams) = meta_val(&src_meta, "output_qparams") else { continue };
         if output_qparams.len().unwrap_or(0) == 0 {
             continue;
         }
@@ -176,12 +173,8 @@ fn decompose_strided_slice<'py>(
             .collect();
 
         let input_meta = input.getattr("meta")?;
-        let input_val = input_meta.call_method1("get", ("val",))?;
-        let dtype = if !input_val.is_none() {
-            input_val.getattr("dtype").ok()
-        } else {
-            None
-        };
+        let input_val = meta_val(&input_meta, "val");
+        let dtype = input_val.as_ref().and_then(|v| v.getattr("dtype").ok());
 
         let fill_value = match dtype.as_ref() {
             Some(dtype) if dtype.str()?.to_str()? == "torch.bool" => {
@@ -196,10 +189,11 @@ fn decompose_strided_slice<'py>(
         if let Some(dtype) = dtype {
             full_kwargs.set_item("dtype", dtype)?;
         }
-        if let Ok(device) = input_val.getattr("device") {
-            if !device.is_none() {
-                full_kwargs.set_item("device", device)?;
-            }
+        if let Some(device) = input_val.as_ref()
+            .and_then(|v| v.getattr("device").ok())
+            .filter(|d| !d.is_none())
+        {
+            full_kwargs.set_item("device", device)?;
         }
         let z = insert_call_before(
             py,

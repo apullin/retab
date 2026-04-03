@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::FxDecomposer;
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{py_is_sequence, FxGraphModule};
 
 /// Compute (N, K, W, C) dimensions for the TOSA scatter op.
 ///
@@ -77,17 +77,7 @@ fn rewrite_index_put_to_tosa<'py>(
     }
 
     // indices must be a list/tuple
-    let builtins = py.import_bound("builtins")?;
-    let is_list_or_tuple = builtins
-        .call_method1(
-            "isinstance",
-            (indices_obj, PyTuple::new_bound(py, &[
-                builtins.getattr("list")?,
-                builtins.getattr("tuple")?,
-            ])),
-        )?
-        .extract::<bool>()?;
-    if !is_list_or_tuple {
+    if !py_is_sequence(indices_obj) {
         return Ok(());
     }
 
@@ -97,6 +87,7 @@ fn rewrite_index_put_to_tosa<'py>(
     }
 
     // Collect indices, expanding None to arange
+    let builtins = py.import_bound("builtins")?;
     let indices_len: usize = builtins
         .call_method1("len", (indices_obj,))?
         .extract()?;

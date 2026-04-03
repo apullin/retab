@@ -1,6 +1,24 @@
 use pyo3::prelude::*;
 use std::time::Instant;
 
+/// Extract a typed value from a positional arg list.
+/// Returns `default` if the index is out of bounds or extraction fails.
+pub fn arg_extract<'py, T: pyo3::FromPyObject<'py>>(
+    args: &[pyo3::Bound<'py, pyo3::PyAny>],
+    idx: usize,
+    default: T,
+) -> T {
+    args.get(idx)
+        .and_then(|a| a.extract().ok())
+        .unwrap_or(default)
+}
+
+/// Check if a Python object is a list or tuple (without calling isinstance).
+pub fn py_is_sequence(obj: &pyo3::Bound<'_, pyo3::PyAny>) -> bool {
+    obj.downcast::<pyo3::types::PyList>().is_ok()
+        || obj.downcast::<pyo3::types::PyTuple>().is_ok()
+}
+
 /// Extract a typed attribute from a Python object, trying multiple names.
 /// Returns `default` if none of the names exist or extraction fails.
 pub fn py_attr<'py, T: pyo3::FromPyObject<'py>>(
@@ -12,6 +30,30 @@ pub fn py_attr<'py, T: pyo3::FromPyObject<'py>>(
         .find_map(|name| obj.getattr(*name).ok())
         .and_then(|v| v.extract().ok())
         .unwrap_or(default)
+}
+
+/// Extract a typed value from a Python dict via `.get(key)`.
+/// Returns `default` if the key doesn't exist, is None, or extraction fails.
+pub fn meta_get<'py, T: pyo3::FromPyObject<'py>>(
+    dict: &pyo3::Bound<'py, pyo3::PyAny>,
+    key: &str,
+    default: T,
+) -> T {
+    dict.call_method1("get", (key,))
+        .ok()
+        .filter(|v| !v.is_none())
+        .and_then(|v| v.extract().ok())
+        .unwrap_or(default)
+}
+
+/// Get a Python value from a dict, returning None if missing or None.
+pub fn meta_val<'py>(
+    dict: &pyo3::Bound<'py, pyo3::PyAny>,
+    key: &str,
+) -> Option<pyo3::Bound<'py, pyo3::PyAny>> {
+    dict.call_method1("get", (key,))
+        .ok()
+        .filter(|v| !v.is_none())
 }
 
 /// Thin wrapper around a Python `torch.fx.GraphModule`, operating directly

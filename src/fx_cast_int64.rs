@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_val, FxGraphModule};
 use crate::fx_pass::FxPass;
 
 /// FX-graph-direct implementation of `CastInt64BuffersToInt32Pass`.
@@ -58,10 +58,7 @@ impl FxPass for FxCastInt64ToInt32Pass {
             let meta = node.getattr("meta")?;
 
             // Skip nodes without a "val" in meta
-            let val = match meta.call_method1("get", ("val",)) {
-                Ok(v) if !v.is_none() => v,
-                _ => continue,
-            };
+            let Some(val) = meta_val(&meta, "val") else { continue };
 
             // Check if it's a FakeTensor (has dtype attribute)
             let Ok(dtype) = val.getattr("dtype") else {

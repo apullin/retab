@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 
 use crate::fx_decompose_ops::FxDecomposer;
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{meta_get, FxGraphModule};
 
 crate::fx_pass!(
     /// Decompose `aten.addmm` into mm + mul + add.
@@ -32,19 +32,13 @@ fn decompose_addmm<'py>(
     let beta: f64 = if args.len() > 3 {
         args[3].extract().unwrap_or(1.0)
     } else {
-        match kwargs.call_method1("get", ("beta", 1.0f64)) {
-            Ok(v) => v.extract().unwrap_or(1.0),
-            Err(_) => 1.0,
-        }
+        meta_get(&kwargs, "beta", 1.0f64)
     };
 
     let alpha: f64 = if args.len() > 4 {
         args[4].extract().unwrap_or(1.0)
     } else {
-        match kwargs.call_method1("get", ("alpha", 1.0f64)) {
-            Ok(v) => v.extract().unwrap_or(1.0),
-            Err(_) => 1.0,
-        }
+        meta_get(&kwargs, "alpha", 1.0f64)
     };
 
     if debug {

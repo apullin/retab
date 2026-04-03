@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{arg_extract, FxGraphModule};
 use crate::fx_pass::FxPass;
 
 /// FX-graph-direct implementation of `FuseQuantizedActivationPass`.
@@ -111,8 +111,8 @@ impl FxPass for FxFuseQuantizedActivationPass {
             // the Python FuseQuantizedActivationPass exactly).
             let q_args = FxGraphModule::node_args(q_user)?;
             // Args: [input, scale, zero_point, qmin, qmax, dtype]
-            let zp: i64 = q_args.get(2).and_then(|a| a.extract().ok()).unwrap_or(0);
-            let qmin: i64 = q_args.get(3).and_then(|a| a.extract().ok()).unwrap_or(-128);
+            let zp: i64 = arg_extract(&q_args, 2, 0);
+            let qmin: i64 = arg_extract(&q_args, 3, -128);
 
             if debug {
                 eprintln!(

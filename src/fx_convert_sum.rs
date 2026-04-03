@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{arg_extract, meta_val, FxGraphModule};
 
 crate::fx_pass!(
     /// FX-graph-direct implementation of sum-to-REDUCE_SUM conversion.
@@ -61,7 +61,7 @@ fn convert_sum<'py>(
         .collect();
 
     // Check for keepdim (args[2] if present, default false).
-    let keepdim: bool = args.get(2).and_then(|a| a.extract().ok()).unwrap_or(false);
+    let keepdim: bool = arg_extract(&args, 2, false);
 
     // Sort dims descending to keep indices stable during chained reductions.
     dims.sort_unstable_by(|a, b| b.cmp(a));
@@ -84,12 +84,12 @@ fn convert_sum<'py>(
     // subsequent reduces take the previous output_qparams as their input_qparams.
     let orig_meta = node.getattr("meta")?;
     let mut current_input_qparams = copy_mod.call_method1("copy", (
-        orig_meta.call_method1("get", ("input_qparams",))
-            .unwrap_or_else(|_| py.None().into_bound(py)),
+        meta_val(&orig_meta, "input_qparams")
+            .unwrap_or_else(|| py.None().into_bound(py)),
     ))?;
     let current_output_qparams = copy_mod.call_method1("copy", (
-        orig_meta.call_method1("get", ("output_qparams",))
-            .unwrap_or_else(|_| py.None().into_bound(py)),
+        meta_val(&orig_meta, "output_qparams")
+            .unwrap_or_else(|| py.None().into_bound(py)),
     ))?;
 
     for dim in &dims {
@@ -116,7 +116,8 @@ fn convert_sum<'py>(
 
         // Compute the output shape for this reduce step and set meta["val"]
         let cur_input_meta = current_input.getattr("meta")?;
-        let cur_input_val = cur_input_meta.call_method1("get", ("val",))?;
+        let cur_input_val = meta_val(&cur_input_meta, "val")
+            .unwrap_or_else(|| py.None().into_bound(py));
         // Handle list/tuple vals
         let input_val = if cur_input_val.is_instance_of::<pyo3::types::PyList>()
             || cur_input_val.is_instance_of::<pyo3::types::PyTuple>()
@@ -153,15 +154,11 @@ fn convert_sum<'py>(
     // Copy qparams from original node onto the final reduce, then replace.
     if let Some(ref final_node) = last_reduce {
         let final_meta = final_node.getattr("meta")?;
-        if let Ok(iqp) = orig_meta.call_method1("get", ("input_qparams",)) {
-            if !iqp.is_none() {
-                final_meta.set_item("input_qparams", iqp)?;
-            }
+        if let Some(iqp) = meta_val(&orig_meta, "input_qparams") {
+            final_meta.set_item("input_qparams", iqp)?;
         }
-        if let Ok(oqp) = orig_meta.call_method1("get", ("output_qparams",)) {
-            if !oqp.is_none() {
-                final_meta.set_item("output_qparams", oqp)?;
-            }
+        if let Some(oqp) = meta_val(&orig_meta, "output_qparams") {
+            final_meta.set_item("output_qparams", oqp)?;
         }
 
         FxGraphModule::replace_all_uses_with(node, final_node)?;
