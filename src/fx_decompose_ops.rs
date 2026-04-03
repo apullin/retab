@@ -347,6 +347,158 @@ pub fn propagate_qparams<'py>(src: &Bound<'py, PyAny>, dst: &Bound<'py, PyAny>) 
 /// Shorthand for a node reference in the FX graph.
 pub type N<'py> = Bound<'py, PyAny>;
 
+// -------------------------------------------------------------------------
+// decomposer_ops! — generates simple FxDecomposer methods from a table
+// -------------------------------------------------------------------------
+
+/// Generates `FxDecomposer` methods from a declarative table of op signatures.
+///
+/// Supported patterns:
+///   - `unary name(x) => "op";`           — 1 node arg, uses `self.ins.call`
+///   - `unary_from name(x) => "op";`      — 1 node arg, uses `self.ins_from(x)`
+///   - `binary name(a, b) => "op";`       — 2 node args, uses `self.ins.call`
+///   - `ternary name(a, b, c) => "op";`   — 3 node args, uses `self.ins.call`
+///   - `node_int name(x, v) => "op";`     — 1 node + 1 i64, uses `self.ins.call`
+///   - `node_int_from name(x, v) => "op";`— 1 node + 1 i64, uses `self.ins_from(x)`
+///   - `node_list name(x, l) => "op";`    — 1 node + 1 &[i64], uses `self.ins.call`
+///   - `node_list_from name(x, l) => "op";`— 1 node + 1 &[i64], uses `self.ins_from(x)`
+///   - `node_3int name(x, a, b, c) => "op";` — 1 node + 3 i64, uses `self.ins.call`
+macro_rules! decomposer_ops {
+    // -- internal arms ----------------------------------------------------
+
+    // unary: 1 node, self.ins
+    (@method $name:ident, unary, $op:expr, $x:ident) => {
+        pub fn $name(&self, $x: &N<'py>) -> PyResult<N<'py>> {
+            let op = self.resolve($op)?;
+            let args = PyTuple::new_bound(self.py, &[$x.as_ref()]);
+            self.ins.call(&op, args.as_ref())
+        }
+    };
+    // unary_from: 1 node, self.ins_from(x)
+    (@method $name:ident, unary_from, $op:expr, $x:ident) => {
+        pub fn $name(&self, $x: &N<'py>) -> PyResult<N<'py>> {
+            let op = self.resolve($op)?;
+            let args = PyTuple::new_bound(self.py, &[$x.as_ref()]);
+            self.ins_from($x).call(&op, args.as_ref())
+        }
+    };
+    // binary: 2 nodes, self.ins
+    (@method $name:ident, binary, $op:expr, $a:ident, $b:ident) => {
+        pub fn $name(&self, $a: &N<'py>, $b: &N<'py>) -> PyResult<N<'py>> {
+            let op = self.resolve($op)?;
+            let args = PyTuple::new_bound(self.py, &[$a.as_ref(), $b.as_ref()]);
+            self.ins.call(&op, args.as_ref())
+        }
+    };
+    // ternary: 3 nodes, self.ins
+    (@method $name:ident, ternary, $op:expr, $a:ident, $b:ident, $c:ident) => {
+        pub fn $name(&self, $a: &N<'py>, $b: &N<'py>, $c: &N<'py>) -> PyResult<N<'py>> {
+            let op = self.resolve($op)?;
+            let args = PyTuple::new_bound(
+                self.py,
+                &[$a.as_ref(), $b.as_ref(), $c.as_ref()],
+            );
+            self.ins.call(&op, args.as_ref())
+        }
+    };
+    // node_int: 1 node + 1 i64, self.ins
+    (@method $name:ident, node_int, $op:expr, $x:ident, $v:ident) => {
+        pub fn $name(&self, $x: &N<'py>, $v: i64) -> PyResult<N<'py>> {
+            let op = self.resolve($op)?;
+            let v_py = py_int(self.py, $v)?;
+            let args = PyTuple::new_bound(self.py, &[$x.as_ref(), v_py.as_ref()]);
+            self.ins.call(&op, args.as_ref())
+        }
+    };
+    // node_int_from: 1 node + 1 i64, self.ins_from(x)
+    (@method $name:ident, node_int_from, $op:expr, $x:ident, $v:ident) => {
+        pub fn $name(&self, $x: &N<'py>, $v: i64) -> PyResult<N<'py>> {
+            let op = self.resolve($op)?;
+            let v_py = py_int(self.py, $v)?;
+            let args = PyTuple::new_bound(self.py, &[$x.as_ref(), v_py.as_ref()]);
+            self.ins_from($x).call(&op, args.as_ref())
+        }
+    };
+    // node_list: 1 node + &[i64], self.ins
+    (@method $name:ident, node_list, $op:expr, $x:ident, $l:ident) => {
+        pub fn $name(&self, $x: &N<'py>, $l: &[i64]) -> PyResult<N<'py>> {
+            let op = self.resolve($op)?;
+            let list_py = self.py_list($l)?;
+            let args = PyTuple::new_bound(self.py, &[$x.as_ref(), list_py.as_ref()]);
+            self.ins.call(&op, args.as_ref())
+        }
+    };
+    // node_list_from: 1 node + &[i64], self.ins_from(x)
+    (@method $name:ident, node_list_from, $op:expr, $x:ident, $l:ident) => {
+        pub fn $name(&self, $x: &N<'py>, $l: &[i64]) -> PyResult<N<'py>> {
+            let op = self.resolve($op)?;
+            let list_py = self.py_list($l)?;
+            let args = PyTuple::new_bound(self.py, &[$x.as_ref(), list_py.as_ref()]);
+            self.ins_from($x).call(&op, args.as_ref())
+        }
+    };
+    // node_3int: 1 node + 3 i64, self.ins
+    (@method $name:ident, node_3int, $op:expr, $x:ident, $a:ident, $b:ident, $c:ident) => {
+        pub fn $name(&self, $x: &N<'py>, $a: i64, $b: i64, $c: i64) -> PyResult<N<'py>> {
+            let op = self.resolve($op)?;
+            let a_py = py_int(self.py, $a)?;
+            let b_py = py_int(self.py, $b)?;
+            let c_py = py_int(self.py, $c)?;
+            let args = PyTuple::new_bound(
+                self.py,
+                &[$x.as_ref(), a_py.as_ref(), b_py.as_ref(), c_py.as_ref()],
+            );
+            self.ins.call(&op, args.as_ref())
+        }
+    };
+
+    // -- main entry -------------------------------------------------------
+
+    ($(
+        $kind:ident $name:ident($($param:ident),+) => $op:expr;
+    )+) => {
+        impl<'py> FxDecomposer<'py> {
+            $(
+                decomposer_ops!(@method $name, $kind, $op, $($param),+);
+            )+
+        }
+    };
+}
+
+decomposer_ops! {
+    // Unary ops
+    unary       log(x)             => "log.default";
+    unary       reciprocal(x)      => "reciprocal.default";
+    unary       round(x)           => "round.default";
+
+    // Binary ops
+    binary      add(a, b)          => "add.Tensor";
+    binary      sub(a, b)          => "sub.Tensor";
+    binary      mul(a, b)          => "mul.Tensor";
+    binary      div(a, b)          => "div.Tensor";
+    binary      eq(a, b)           => "eq.Tensor";
+    binary      ge(a, b)           => "ge.Tensor";
+    binary      mm(a, b)           => "mm.default";
+    binary      bitwise_and(a, b)  => "bitwise_and.Tensor";
+
+    // Ternary ops
+    ternary     where_(c, a, b)    => "where.self";
+
+    // Node + int ops
+    node_int      unsqueeze(x, dim)    => "unsqueeze_copy.default";
+    node_int_from add_scalar(x, val)   => "add.Scalar";
+
+    // Node + list ops
+    node_list_from view(x, shape)      => "view_copy.default";
+    node_list      permute(x, dims)    => "permute_copy.default";
+    node_list      expand(x, shape)    => "expand_copy.default";
+    node_list      squeeze(x, dims)    => "squeeze_copy.dims";
+    node_list      repeat(x, reps)     => "repeat.default";
+
+    // Node + 3 ints
+    node_3int   slice(x, dim, start, end) => "slice_copy.Tensor";
+}
+
 /// Fluent DSL for decomposing a single FX node into primitive ATen ops.
 ///
 /// Wraps a [`NodeInserter`] and the decomposition context (graph, gm, original
@@ -404,90 +556,6 @@ impl<'py> FxDecomposer<'py> {
         let kw = PyDict::new_bound(self.py);
         kw.set_item("dtype", dtype)?;
         Ok(kw)
-    }
-
-    // =====================================================================
-    // Shape ops
-    // =====================================================================
-
-    /// `view_copy.default(x, shape)`
-    pub fn view(&self, x: &N<'py>, shape: &[i64]) -> PyResult<N<'py>> {
-        let op = self.resolve("view_copy.default")?;
-        let shape_list = self.py_list(shape)?;
-        let args = PyTuple::new_bound(self.py, &[x.as_ref(), shape_list.as_ref()]);
-        self.ins_from(x).call(&op, args.as_ref())
-    }
-
-    /// `unsqueeze_copy.default(x, dim)`
-    pub fn unsqueeze(&self, x: &N<'py>, dim: i64) -> PyResult<N<'py>> {
-        let op = self.resolve("unsqueeze_copy.default")?;
-        let dim_py = py_int(self.py, dim)?;
-        let args = PyTuple::new_bound(self.py, &[x.as_ref(), dim_py.as_ref()]);
-        self.ins.call(&op, args.as_ref())
-    }
-
-    /// `permute_copy.default(x, dims)`
-    pub fn permute(&self, x: &N<'py>, dims: &[i64]) -> PyResult<N<'py>> {
-        let op = self.resolve("permute_copy.default")?;
-        let dims_list = self.py_list(dims)?;
-        let args = PyTuple::new_bound(self.py, &[x.as_ref(), dims_list.as_ref()]);
-        self.ins.call(&op, args.as_ref())
-    }
-
-    /// `expand_copy.default(x, shape)`
-    pub fn expand(&self, x: &N<'py>, shape: &[i64]) -> PyResult<N<'py>> {
-        let op = self.resolve("expand_copy.default")?;
-        let shape_list = self.py_list(shape)?;
-        let args = PyTuple::new_bound(self.py, &[x.as_ref(), shape_list.as_ref()]);
-        self.ins.call(&op, args.as_ref())
-    }
-
-    /// `squeeze_copy.dims(x, [dim])`
-    pub fn squeeze(&self, x: &N<'py>, dim: i64) -> PyResult<N<'py>> {
-        let op = self.resolve("squeeze_copy.dims")?;
-        let dims_list = self.py_list(&[dim])?;
-        let args = PyTuple::new_bound(self.py, &[x.as_ref(), dims_list.as_ref()]);
-        self.ins.call(&op, args.as_ref())
-    }
-
-    // =====================================================================
-    // Arithmetic ops
-    // =====================================================================
-
-    /// `add.Tensor(a, b)`
-    pub fn add(&self, a: &N<'py>, b: &N<'py>) -> PyResult<N<'py>> {
-        let op = self.resolve("add.Tensor")?;
-        let args = PyTuple::new_bound(self.py, &[a.as_ref(), b.as_ref()]);
-        self.ins.call(&op, args.as_ref())
-    }
-
-    /// `sub.Tensor(a, b)`
-    pub fn sub(&self, a: &N<'py>, b: &N<'py>) -> PyResult<N<'py>> {
-        let op = self.resolve("sub.Tensor")?;
-        let args = PyTuple::new_bound(self.py, &[a.as_ref(), b.as_ref()]);
-        self.ins.call(&op, args.as_ref())
-    }
-
-    /// `mul.Tensor(a, b)`
-    pub fn mul(&self, a: &N<'py>, b: &N<'py>) -> PyResult<N<'py>> {
-        let op = self.resolve("mul.Tensor")?;
-        let args = PyTuple::new_bound(self.py, &[a.as_ref(), b.as_ref()]);
-        self.ins.call(&op, args.as_ref())
-    }
-
-    /// `div.Tensor(a, b)`
-    pub fn div(&self, a: &N<'py>, b: &N<'py>) -> PyResult<N<'py>> {
-        let op = self.resolve("div.Tensor")?;
-        let args = PyTuple::new_bound(self.py, &[a.as_ref(), b.as_ref()]);
-        self.ins.call(&op, args.as_ref())
-    }
-
-    /// `add.Scalar(x, val)`
-    pub fn add_scalar(&self, x: &N<'py>, val: i64) -> PyResult<N<'py>> {
-        let op = self.resolve("add.Scalar")?;
-        let val_py = py_int(self.py, val)?;
-        let args = PyTuple::new_bound(self.py, &[x.as_ref(), val_py.as_ref()]);
-        self.ins_from(x).call(&op, args.as_ref())
     }
 
     // =====================================================================
@@ -592,53 +660,7 @@ impl<'py> FxDecomposer<'py> {
     }
 
     // =====================================================================
-    // Selection / comparison ops
-    // =====================================================================
-
-    /// `where.self(cond, on_true, on_false)`
-    pub fn where_(
-        &self,
-        cond: &N<'py>,
-        on_true: &N<'py>,
-        on_false: &N<'py>,
-    ) -> PyResult<N<'py>> {
-        let op = self.resolve("where.self")?;
-        let args = PyTuple::new_bound(
-            self.py,
-            &[cond.as_ref(), on_true.as_ref(), on_false.as_ref()],
-        );
-        self.ins.call(&op, args.as_ref())
-    }
-
-    /// `slice_copy.Tensor(x, dim, start, end)`
-    pub fn slice(&self, x: &N<'py>, dim: i64, start: i64, end: i64) -> PyResult<N<'py>> {
-        let op = self.resolve("slice_copy.Tensor")?;
-        let dim_py = py_int(self.py, dim)?;
-        let start_py = py_int(self.py, start)?;
-        let end_py = py_int(self.py, end)?;
-        let args = PyTuple::new_bound(
-            self.py,
-            &[x.as_ref(), dim_py.as_ref(), start_py.as_ref(), end_py.as_ref()],
-        );
-        self.ins.call(&op, args.as_ref())
-    }
-
-    /// `eq.Tensor(a, b)`
-    pub fn eq(&self, a: &N<'py>, b: &N<'py>) -> PyResult<N<'py>> {
-        let op = self.resolve("eq.Tensor")?;
-        let args = PyTuple::new_bound(self.py, &[a.as_ref(), b.as_ref()]);
-        self.ins.call(&op, args.as_ref())
-    }
-
-    /// `ge.Tensor(a, b)`
-    pub fn ge(&self, a: &N<'py>, b: &N<'py>) -> PyResult<N<'py>> {
-        let op = self.resolve("ge.Tensor")?;
-        let args = PyTuple::new_bound(self.py, &[a.as_ref(), b.as_ref()]);
-        self.ins.call(&op, args.as_ref())
-    }
-
-    // =====================================================================
-    // Other ops
+    // Other ops (complex signatures kept as manual methods)
     // =====================================================================
 
     /// `cat.default([tensors], dim)`
@@ -658,13 +680,6 @@ impl<'py> FxDecomposer<'py> {
         self.ins.call_with_kwargs(&op, args.as_ref(), &kw)
     }
 
-    /// `round.default(x)`
-    pub fn round(&self, x: &N<'py>) -> PyResult<N<'py>> {
-        let op = self.resolve("round.default")?;
-        let args = PyTuple::new_bound(self.py, &[x.as_ref()]);
-        self.ins.call(&op, args.as_ref())
-    }
-
     /// `dim_order_ops._to_dim_order_copy.default(x, dtype=dtype)`
     ///
     /// This is the ExecuTorch edge-dialect cast op.  Unlike [`cast`] which
@@ -678,35 +693,6 @@ impl<'py> FxDecomposer<'py> {
         self.ins.call_with_kwargs(&op, args.as_ref(), &kw)
     }
 
-    /// `log.default(x)`
-    pub fn log(&self, x: &N<'py>) -> PyResult<N<'py>> {
-        let op = self.resolve("log.default")?;
-        let args = PyTuple::new_bound(self.py, &[x.as_ref()]);
-        self.ins.call(&op, args.as_ref())
-    }
-
-    /// `reciprocal.default(x)`
-    pub fn reciprocal(&self, x: &N<'py>) -> PyResult<N<'py>> {
-        let op = self.resolve("reciprocal.default")?;
-        let args = PyTuple::new_bound(self.py, &[x.as_ref()]);
-        self.ins.call(&op, args.as_ref())
-    }
-
-    /// `repeat.default(x, repeats)`
-    pub fn repeat(&self, x: &N<'py>, repeats: &[i64]) -> PyResult<N<'py>> {
-        let op = self.resolve("repeat.default")?;
-        let repeats_list = self.py_list(repeats)?;
-        let args = PyTuple::new_bound(self.py, &[x.as_ref(), repeats_list.as_ref()]);
-        self.ins.call(&op, args.as_ref())
-    }
-
-    /// `bitwise_and.Tensor(a, b)`
-    pub fn bitwise_and(&self, a: &N<'py>, b: &N<'py>) -> PyResult<N<'py>> {
-        let op = self.resolve("bitwise_and.Tensor")?;
-        let args = PyTuple::new_bound(self.py, &[a.as_ref(), b.as_ref()]);
-        self.ins.call(&op, args.as_ref())
-    }
-
     /// `clamp.default(x, min, max)`
     pub fn clamp(&self, x: &N<'py>, min_val: f64, max_val: f64) -> PyResult<N<'py>> {
         let op = self.resolve("clamp.default")?;
@@ -716,13 +702,6 @@ impl<'py> FxDecomposer<'py> {
             self.py,
             &[x.as_ref(), min_py.as_ref(), max_py.as_ref()],
         );
-        self.ins.call(&op, args.as_ref())
-    }
-
-    /// `mm.default(a, b)`
-    pub fn mm(&self, a: &N<'py>, b: &N<'py>) -> PyResult<N<'py>> {
-        let op = self.resolve("mm.default")?;
-        let args = PyTuple::new_bound(self.py, &[a.as_ref(), b.as_ref()]);
         self.ins.call(&op, args.as_ref())
     }
 
