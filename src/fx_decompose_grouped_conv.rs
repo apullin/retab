@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
 use crate::fx_decompose_ops::{resolve_aten_op, NodeInserter};
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{py_attr, FxGraphModule};
 
 fn is_convolution(target: &str) -> bool {
     target.contains("convolution.default") || target.contains("conv2d.default")
@@ -57,7 +57,7 @@ fn is_grouped_conv(target: &str, node: &Bound<'_, PyAny>) -> PyResult<bool> {
 }
 
 fn is_per_channel_qparams(qarg: &Bound<'_, PyAny>) -> PyResult<bool> {
-    Ok(qarg.getattr("per_channel")?.extract().unwrap_or(false))
+    Ok(py_attr(qarg, &["per_channel"], false))
 }
 
 fn split_per_channel_qparams<'py>(
@@ -71,7 +71,7 @@ fn split_per_channel_qparams<'py>(
     let qmin: i64 = qarg.getattr("qmin")?.extract()?;
     let qmax: i64 = qarg.getattr("qmax")?.extract()?;
     let dtype = qarg.getattr("dtype")?;
-    let axis: i64 = qarg.getattr("axis")?.extract().unwrap_or(0);
+    let axis: i64 = py_attr(qarg, &["axis"], 0);
     let quant_args = py
         .import_bound("executorch.backends.arm._passes.quant_args")?
         .getattr("QuantArgs")?;
@@ -163,7 +163,7 @@ fn restamp_grouped_conv_output_meta(
         return Ok(());
     }
 
-    let mut shape: Vec<i64> = output_val.getattr("shape")?.extract().unwrap_or_default();
+    let mut shape: Vec<i64> = py_attr(&output_val, &["shape"], Vec::new());
     if shape.len() >= 2 {
         shape[1] = output_slice_size;
         let dtype = output_val.getattr("dtype")?;
@@ -222,16 +222,16 @@ fn get_single_output_qparam<'py>(node: &Bound<'py, PyAny>) -> PyResult<Option<Bo
 }
 
 fn same_per_tensor_qparam(lhs: &Bound<'_, PyAny>, rhs: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let lhs_pc: bool = lhs.getattr("per_channel")?.extract().unwrap_or(false);
-    let rhs_pc: bool = rhs.getattr("per_channel")?.extract().unwrap_or(false);
+    let lhs_pc: bool = py_attr(lhs, &["per_channel"], false);
+    let rhs_pc: bool = py_attr(rhs, &["per_channel"], false);
     if lhs_pc || rhs_pc {
         return Ok(false);
     }
 
-    let lhs_scale: f64 = lhs.getattr("scale")?.extract().unwrap_or(0.0);
-    let rhs_scale: f64 = rhs.getattr("scale")?.extract().unwrap_or(0.0);
-    let lhs_zp: i64 = lhs.getattr("zp")?.extract().unwrap_or(0);
-    let rhs_zp: i64 = rhs.getattr("zp")?.extract().unwrap_or(0);
+    let lhs_scale: f64 = py_attr(lhs, &["scale"], 0.0);
+    let rhs_scale: f64 = py_attr(rhs, &["scale"], 0.0);
+    let lhs_zp: i64 = py_attr(lhs, &["zp"], 0);
+    let rhs_zp: i64 = py_attr(rhs, &["zp"], 0);
     let lhs_dtype = lhs.getattr("dtype")?.str()?.to_string();
     let rhs_dtype = rhs.getattr("dtype")?.str()?.to_string();
 

@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{py_attr, FxGraphModule};
 use crate::fx_pass::FxPass;
 
 /// FX-graph-direct pass that inserts a TOSA RESCALE after matmul ops
@@ -67,14 +67,10 @@ impl FxPass for FxRewriteMatmulRescalePass {
                 _ => continue,
             };
 
-            let scale_a: f64 = qp_a.getattr("scale")?.extract().unwrap_or(1.0);
-            let scale_b: f64 = qp_b.getattr("scale")?.extract().unwrap_or(1.0);
-            let scale_out: f64 = out_qp.getattr("scale")?.extract().unwrap_or(1.0);
-            let out_zp: i64 = out_qp
-                .getattr("zp")
-                .or_else(|_| out_qp.getattr("zero_point"))
-                .and_then(|v| v.extract())
-                .unwrap_or(0);
+            let scale_a: f64 = py_attr(&qp_a, &["scale"], 1.0);
+            let scale_b: f64 = py_attr(&qp_b, &["scale"], 1.0);
+            let scale_out: f64 = py_attr(&out_qp, &["scale"], 1.0);
+            let out_zp: i64 = py_attr(&out_qp, &["zp", "zero_point"], 0);
             let out_dtype = out_qp.getattr("dtype")?;
 
             // Accumulator scale = A_scale * B_scale

@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::fx_graph::FxGraphModule;
+use crate::fx_graph::{py_attr, FxGraphModule};
 use crate::fx_pass::FxPass;
 
 /// FX-graph-direct decomposition of ops that TOSA cannot represent directly.
@@ -619,19 +619,9 @@ impl<'py> FxDecomposer<'py> {
 
         if crate::fx_utils::is_quantized(node) {
             if let Some(qparams) = crate::fx_utils::get_output_qparam(node) {
-                let zp: i64 = qparams
-                    .getattr("zp")
-                    .or_else(|_| qparams.getattr("zero_point"))
-                    .and_then(|v| v.extract())
-                    .unwrap_or(0);
-                let qmin: i64 = qparams
-                    .getattr("qmin")
-                    .and_then(|v| v.extract())
-                    .unwrap_or(-128);
-                let qmax: i64 = qparams
-                    .getattr("qmax")
-                    .and_then(|v| v.extract())
-                    .unwrap_or(127);
+                let zp: i64 = py_attr(&qparams, &["zp", "zero_point"], 0);
+                let qmin: i64 = py_attr(&qparams, &["qmin"], -128);
+                let qmax: i64 = py_attr(&qparams, &["qmax"], 127);
                 let output_dtype = qparams.getattr("dtype")?;
                 let clamped = zp.max(qmin).min(qmax);
                 if debug {
@@ -935,19 +925,11 @@ impl FxPass for FxDecomposeOpsPass {
 
         for (node, kind) in &candidates {
             match kind {
-                DecompKind::Atanh => {
-                    decompose_atanh(py, &graph, gm, node, debug)?;
-                    modified = true;
-                }
-                DecompKind::Stack => {
-                    decompose_stack(py, &graph, gm, node, debug)?;
-                    modified = true;
-                }
-                DecompKind::Unbind => {
-                    decompose_unbind(py, &graph, gm, node, debug)?;
-                    modified = true;
-                }
-            }
+                DecompKind::Atanh => decompose_atanh(py, &graph, gm, node, debug)?,
+                DecompKind::Stack => decompose_stack(py, &graph, gm, node, debug)?,
+                DecompKind::Unbind => decompose_unbind(py, &graph, gm, node, debug)?,
+            };
+            modified = true;
         }
 
         if modified {

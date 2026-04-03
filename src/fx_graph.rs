@@ -1,6 +1,19 @@
 use pyo3::prelude::*;
 use std::time::Instant;
 
+/// Extract a typed attribute from a Python object, trying multiple names.
+/// Returns `default` if none of the names exist or extraction fails.
+pub fn py_attr<'py, T: pyo3::FromPyObject<'py>>(
+    obj: &pyo3::Bound<'py, pyo3::PyAny>,
+    names: &[&str],
+    default: T,
+) -> T {
+    names.iter()
+        .find_map(|name| obj.getattr(*name).ok())
+        .and_then(|v| v.extract().ok())
+        .unwrap_or(default)
+}
+
 /// Thin wrapper around a Python `torch.fx.GraphModule`, operating directly
 /// on the live Python FX graph via PyO3.  No Rust-side IR copy is made —
 /// every read/write goes straight through to Python.
