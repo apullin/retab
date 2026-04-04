@@ -243,15 +243,27 @@ pub fn build_fx_submodule_pipeline() -> Vec<Box<dyn FxPass>> {
     ]
 }
 
-/// Extended submodule pipeline for cond branches (not while loops).
-/// Includes fold_qdq which is safe for cond but breaks while-loop carried state.
+/// Extended submodule pipeline for cond branches.
+/// Includes fold_qdq + the core passes. Decomposition passes are excluded
+/// because they create new ops that break submodule boundary contracts.
 pub fn build_fx_cond_submodule_pipeline(
     exported_program: Option<pyo3::PyObject>,
 ) -> Vec<Box<dyn FxPass>> {
+    let ep = ExportedProgramClones::new(exported_program);
     vec![
-        Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(exported_program)),
-        Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
+        // Q/DQ folding + rescale (the core quantization passes)
+        Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(ep.fold_qdq)),
+        Box::new(fx_fuse_duplicate_users::FxFuseDuplicateUsersPass),
         Box::new(fx_insert_rescale::FxInsertRescalePass),
+        // TABLE lowering for quantized math ops
+        Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
+        // Cleanup
+        Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(ep.fuse)),
+        Box::new(fx_remove_noop::FxRemoveNoopPass),
+        // Matmul rescale + second rescale pass
+        Box::new(fx_rewrite_matmul::FxRewriteMatmulRescalePass),
+        Box::new(fx_insert_rescale::FxInsertRescalePass),
+        // Layout
         Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
     ]
 }
