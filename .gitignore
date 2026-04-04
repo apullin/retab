@@ -14,3 +14,7 @@ build/
 tmp_*/
 tmp_*.log
 *.whl
+
+# Local dev artifacts
+.claude/
+*.md.bak
