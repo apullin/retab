@@ -151,7 +151,7 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
     };
 
     result.operators.push(TosaOperator::new(
-        Op::Matmul,
+        Op::MatMul,
         Attribute::MatMul(MatMulAttribute),
         matmul_inputs,
         vec![matmul_output_name.clone()],

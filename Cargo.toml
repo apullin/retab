@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 flatbuffers = "24.3"
+tosa-rs = { path = "../../rust-tosa" }
 pyo3 = { version = "0.22", features = ["extension-module"] }
 smallvec = "1.13"
 slotmap = "1"

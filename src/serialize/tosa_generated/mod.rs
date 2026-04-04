@@ -1,467 +1,272 @@
 #![allow(dead_code)]
 
-// Manual Rust definitions for the subset of TOSA 1.0 flatbuffer types
-// we need for Phase 1 serialization. These mirror the schema at
-// tosa-tools/serialization/schema/tosa.fbs.
-//
-// When flatc codegen is available, this file can be replaced by the
-// generated output.
+// Compatibility re-export module: bridges tosa-rs types to the API
+// that the rest of retab expects. Where types are identical they are
+// re-exported directly; where they differ thin wrappers preserve the
+// existing call-site contract.
 
 // ---------------------------------------------------------------------------
-// Enums
+// Enums -- identical, re-export directly
 // ---------------------------------------------------------------------------
-
-/// TOSA data type (matches DType:uint32 in the schema).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u32)]
-pub enum DType {
-    Unknown = 0,
-    Bool = 1,
-    Int4 = 2,
-    Int8 = 3,
-    Int16 = 4,
-    Int32 = 5,
-    Int48 = 6,
-    Fp32 = 7,
-    Fp16 = 8,
-    Bf16 = 9,
-    Shape = 10,
-    Fp8E4M3 = 11,
-    Fp8E5M2 = 12,
-    Fp6E2M3 = 13,
-    Fp6E3M2 = 14,
-    Fp4E2M1 = 15,
-    Fp8Ue8M0 = 16,
-    Int64 = 17,
-    Mxint8 = 18,
-}
-
-/// TOSA operator enum (matches Op:uint32 in the schema).
-/// Only the operators needed for Phase 1 are given named variants;
-/// the rest can be represented via their raw u32 value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u32)]
-pub enum Op {
-    Unknown = 0,
-    ArgMax = 1,
-    AvgPool2d = 2,
-    Conv2d = 3,
-    Conv3d = 4,
-    DepthwiseConv2d = 5,
-    Fft2d = 6,
-    Matmul = 7,
-    MaxPool2d = 8,
-    Rfft2d = 9,
-    TransposeConv2d = 10,
-    Clamp = 11,
-    Erf = 12,
-    Sigmoid = 13,
-    Tanh = 14,
-    Add = 15,
-    ArithmeticRightShift = 16,
-    BitwiseAnd = 17,
-    BitwiseOr = 18,
-    BitwiseXor = 19,
-    IntDiv = 20,
-    LogicalAnd = 21,
-    LogicalLeftShift = 22,
-    LogicalRightShift = 23,
-    LogicalOr = 24,
-    LogicalXor = 25,
-    Maximum = 26,
-    Minimum = 27,
-    Mul = 28,
-    Pow = 29,
-    Sub = 30,
-    Table = 31,
-    Abs = 32,
-    BitwiseNot = 33,
-    Ceil = 34,
-    Clz = 35,
-    Cos = 36,
-    Exp = 37,
-    Floor = 38,
-    Log = 39,
-    LogicalNot = 40,
-    Negate = 41,
-    Reciprocal = 42,
-    Rsqrt = 43,
-    Sin = 44,
-    Select = 45,
-    Equal = 46,
-    Greater = 47,
-    GreaterEqual = 48,
-    ReduceAll = 49,
-    ReduceAny = 50,
-    ReduceMax = 51,
-    ReduceMin = 52,
-    ReduceProduct = 53,
-    ReduceSum = 54,
-    Concat = 55,
-    Pad = 56,
-    Reshape = 57,
-    Reverse = 58,
-    Slice = 59,
-    Tile = 60,
-    Transpose = 61,
-    Gather = 62,
-    Scatter = 63,
-    Resize = 64,
-    Cast = 65,
-    Rescale = 66,
-    Const = 67,
-    Identity = 68,
-    Custom = 69,
-    CondIf = 70,
-    WhileLoop = 71,
-    Variable = 72,
-    VariableWrite = 73,
-    VariableRead = 74,
-    ConstShape = 75,
-}
-
-/// Rounding mode used by RESCALE.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u32)]
-pub enum RoundingMode {
-    Unknown = 0,
-    SingleRound = 1,
-    InexactRound = 2,
-    DoubleRound = 3,
-}
-
-/// Resize mode used by RESIZE.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u32)]
-pub enum ResizeMode {
-    Unknown = 0,
-    Nearest = 1,
-    Bilinear = 2,
-}
-
-/// NaN propagation mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u32)]
-pub enum NanPropagationMode {
-    Unknown = 0,
-    Propagate = 1,
-    Ignore = 2,
-}
+pub use tosa_rs::{DType, NanPropagationMode, Op, ResizeMode, RoundingMode};
 
 // ---------------------------------------------------------------------------
-// Attribute types (tables in the schema)
+// Attribute structs -- re-export those whose fields match exactly
 // ---------------------------------------------------------------------------
+pub use tosa_rs::{
+    AvgPool2dAttribute, ClampAttribute, ConcatAttribute, CondIfAttribute, Conv2dAttribute,
+    Conv3dAttribute, DepthwiseConv2dAttribute, MaxPool2dAttribute, MaximumAttribute,
+    MinimumAttribute, ReduceAnyAttribute, ReduceMaxAttribute, ReduceMinAttribute,
+    ReduceSumAttribute, RescaleAttribute, ResizeAttribute, TransposeAttribute,
+    TransposeConv2dAttribute,
+};
 
-/// Conv2dAttribute — pad, stride, dilation, local_bound, acc_type.
-#[derive(Debug, Clone)]
-pub struct Conv2dAttribute {
-    pub pad: Vec<i32>,
-    pub stride: Vec<i32>,
-    pub dilation: Vec<i32>,
-    pub local_bound: bool,
-    pub acc_type: DType,
+// ---------------------------------------------------------------------------
+// Empty attribute structs -- tosa-rs uses `struct Foo {}` (braced) but
+// retab call sites use unit-struct syntax (`FooAttribute`). Define
+// local unit structs so existing code compiles unchanged.
+// ---------------------------------------------------------------------------
+macro_rules! unit_attr {
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[derive(Debug, Clone)]
+            pub struct $name;
+
+            impl From<$name> for tosa_rs::$name {
+                fn from(_: $name) -> Self { tosa_rs::$name {} }
+            }
+        )*
+    };
 }
 
-/// Conv3dAttribute — same fields as Conv2d, but for 3 spatial dims.
-#[derive(Debug, Clone)]
-pub struct Conv3dAttribute {
-    pub pad: Vec<i32>,
-    pub stride: Vec<i32>,
-    pub dilation: Vec<i32>,
-    pub local_bound: bool,
-    pub acc_type: DType,
-}
+unit_attr!(
+    AddAttribute,
+    SubAttribute,
+    ReshapeAttribute,
+    ConstAttribute,
+    ConstShapeAttribute,
+    TableAttribute,
+    SigmoidAttribute,
+    TanhAttribute,
+    ExpAttribute,
+    LogAttribute,
+    NegateAttribute,
+    AbsAttribute,
+    CeilAttribute,
+    FloorAttribute,
+    ReciprocalAttribute,
+    ErfAttribute,
+    CosAttribute,
+    SinAttribute,
+    RsqrtAttribute,
+    MatMulAttribute,
+    PadAttribute,
+    SliceAttribute,
+    GatherAttribute,
+    ScatterAttribute,
+    SelectAttribute,
+    CastAttribute,
+    EqualAttribute,
+    GreaterAttribute,
+    GreaterEqualAttribute,
+    BitwiseNotAttribute,
+    BitwiseAndAttribute,
+    BitwiseOrAttribute,
+    BitwiseXorAttribute,
+    LogicalLeftShiftAttribute,
+    LogicalRightShiftAttribute,
+    ArithmeticRightShiftAttribute,
+    LogicalNotAttribute,
+    LogicalAndAttribute,
+    LogicalOrAttribute,
+    LogicalXorAttribute,
+    PowAttribute,
+    IntDivAttribute,
+);
 
-/// DepthwiseConv2dAttribute — same fields as Conv2d.
-#[derive(Debug, Clone)]
-pub struct DepthwiseConv2dAttribute {
-    pub pad: Vec<i32>,
-    pub stride: Vec<i32>,
-    pub dilation: Vec<i32>,
-    pub local_bound: bool,
-    pub acc_type: DType,
-}
-
-/// RescaleAttribute.
-#[derive(Debug, Clone)]
-pub struct RescaleAttribute {
-    pub scale32: bool,
-    pub rounding_mode: RoundingMode,
-    pub per_channel: bool,
-    pub input_unsigned: bool,
-    pub output_unsigned: bool,
-}
-
-/// MaxPool2dAttribute.
-#[derive(Debug, Clone)]
-pub struct MaxPool2dAttribute {
-    pub kernel: Vec<i32>,
-    pub stride: Vec<i32>,
-    pub pad: Vec<i32>,
-    pub nan_mode: NanPropagationMode,
-}
-
-/// TransposeAttribute — permutation vector.
-#[derive(Debug, Clone)]
-pub struct TransposeAttribute {
-    pub perms: Vec<i32>,
-}
-
-/// ReshapeAttribute — empty in the schema.
-#[derive(Debug, Clone)]
-pub struct ReshapeAttribute;
-
-/// ClampAttribute — min/max stored as raw bytes.
-#[derive(Debug, Clone)]
-pub struct ClampAttribute {
-    pub min_val: Vec<u8>,
-    pub max_val: Vec<u8>,
-    pub nan_mode: NanPropagationMode,
-}
-
-/// ConstAttribute — empty; value is in the output TosaTensor.
-#[derive(Debug, Clone)]
-pub struct ConstAttribute;
-
-/// ConstShapeAttribute — empty; value is in the output TosaTensor.
-#[derive(Debug, Clone)]
-pub struct ConstShapeAttribute;
-
-/// AddAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct AddAttribute;
-
-/// SubAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct SubAttribute;
-
-/// MulAttribute — contains `shift` for TOSA compatibility.
-///
-/// In TOSA 1.0 the shift is a third input tensor and the attribute table is
-/// empty, but the U55 toolchain (Vela) expects the older schema where shift
-/// lives inside the attribute. Keeping shift = 0 here ensures the flatbuffer
-/// validates correctly on both paths.
+// ---------------------------------------------------------------------------
+// MulAttribute -- retab carries a `shift` field for U55/Vela compat;
+// tosa-rs MulAttribute is empty (TOSA 1.0 puts shift in an input tensor).
+// Keep the local struct so serialization code can read `a.shift`.
+// ---------------------------------------------------------------------------
 #[derive(Debug, Clone)]
 pub struct MulAttribute {
     pub shift: i32,
 }
 
-/// AvgPool2dAttribute — pooling parameters.
-/// In TOSA 1.0, input_zp and output_zp are separate input tensors,
-/// not part of the attribute table.
-#[derive(Debug, Clone)]
-pub struct AvgPool2dAttribute {
-    pub kernel: Vec<i32>,
-    pub stride: Vec<i32>,
-    pub pad: Vec<i32>,
-    pub acc_type: DType,
-}
-
-/// ReduceSumAttribute — reduction axis.
-#[derive(Debug, Clone)]
-pub struct ReduceSumAttribute {
-    pub axis: i32,
-}
-
-/// TableAttribute — empty (table data is an input tensor).
-#[derive(Debug, Clone)]
-pub struct TableAttribute;
-
-/// SigmoidAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct SigmoidAttribute;
-
-/// TanhAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct TanhAttribute;
-
-/// ExpAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct ExpAttribute;
-
-/// LogAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct LogAttribute;
-
-/// NegateAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct NegateAttribute;
-
-/// AbsAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct AbsAttribute;
-
-/// CeilAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct CeilAttribute;
-
-/// FloorAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct FloorAttribute;
-
-/// ReciprocalAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct ReciprocalAttribute;
-
-/// ErfAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct ErfAttribute;
-
-/// CosAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct CosAttribute;
-
-/// SinAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct SinAttribute;
-
-/// RsqrtAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct RsqrtAttribute;
-
-/// MatMulAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct MatMulAttribute;
-
-/// ConcatAttribute — axis for concatenation.
-#[derive(Debug, Clone)]
-pub struct ConcatAttribute {
-    pub axis: i32,
-}
-
-/// PadAttribute — empty (padding comes from input shapes).
-#[derive(Debug, Clone)]
-pub struct PadAttribute;
-
-/// SliceAttribute — empty (start/size come from input shapes).
-#[derive(Debug, Clone)]
-pub struct SliceAttribute;
-
-/// GatherAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct GatherAttribute;
-
-/// ScatterAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct ScatterAttribute;
-
-/// ResizeAttribute.
-#[derive(Debug, Clone)]
-pub struct ResizeAttribute {
-    pub mode: ResizeMode,
-}
-
-/// SelectAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct SelectAttribute;
-
-/// CastAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct CastAttribute;
-
-/// EqualAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct EqualAttribute;
-
-/// GreaterAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct GreaterAttribute;
-
-/// GreaterEqualAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct GreaterEqualAttribute;
-
-/// CondIfAttribute — conditional branch.
-#[derive(Debug, Clone)]
-pub struct CondIfAttribute {
-    pub then_graph: String,
-    pub else_graph: String,
-}
-
-/// WhileLoopAttribute — while loop.
+// ---------------------------------------------------------------------------
+// WhileLoopAttribute -- retab uses cond_branch / body_branch;
+// tosa-rs uses cond_graph / body_graph. Thin wrapper preserves field names.
+// ---------------------------------------------------------------------------
 #[derive(Debug, Clone)]
 pub struct WhileLoopAttribute {
     pub cond_branch: String,
     pub body_branch: String,
 }
 
+// ---------------------------------------------------------------------------
+// Structural types -- re-export those that are layout-compatible
+// ---------------------------------------------------------------------------
+pub use tosa_rs::{OpLocation, SoftwareVersion, TosaRegion, TosaShape};
+
+// ---------------------------------------------------------------------------
+// Version -- same fields, but retab default is (1,0,0,false) while
+// tosa-rs default is (-1,-1,-1,true). Re-export the struct, override Default.
+// ---------------------------------------------------------------------------
+/// Version table -- wraps tosa_rs::Version with retab's default.
 #[derive(Debug, Clone)]
-pub struct MaximumAttribute {
-    pub nan_mode: NanPropagationMode,
-}
-#[derive(Debug, Clone)]
-pub struct MinimumAttribute {
-    pub nan_mode: NanPropagationMode,
-}
-#[derive(Debug, Clone)]
-pub struct ReduceAnyAttribute {
-    pub axis: i32,
-}
-#[derive(Debug, Clone)]
-pub struct ReduceMaxAttribute {
-    pub axis: i32,
-    pub nan_mode: NanPropagationMode,
-}
-#[derive(Debug, Clone)]
-pub struct ReduceMinAttribute {
-    pub axis: i32,
-    pub nan_mode: NanPropagationMode,
+pub struct Version {
+    pub major: i32,
+    pub minor: i32,
+    pub patch: i32,
+    pub draft: bool,
 }
 
-/// BitwiseNotAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct BitwiseNotAttribute;
-/// BitwiseAndAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct BitwiseAndAttribute;
-/// BitwiseOrAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct BitwiseOrAttribute;
-/// BitwiseXorAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct BitwiseXorAttribute;
-/// LogicalLeftShiftAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct LogicalLeftShiftAttribute;
-/// LogicalRightShiftAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct LogicalRightShiftAttribute;
-/// ArithmeticRightShiftAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct ArithmeticRightShiftAttribute;
-/// LogicalNotAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct LogicalNotAttribute;
-/// LogicalAndAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct LogicalAndAttribute;
-/// LogicalOrAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct LogicalOrAttribute;
-/// LogicalXorAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct LogicalXorAttribute;
-/// PowAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct PowAttribute;
-/// IntDivAttribute — empty.
-#[derive(Debug, Clone)]
-pub struct IntDivAttribute;
+impl Default for Version {
+    fn default() -> Self {
+        Self {
+            major: 1,
+            minor: 0,
+            patch: 0,
+            draft: false,
+        }
+    }
+}
 
-/// TransposeConv2dAttribute — deconvolution parameters.
-#[derive(Debug, Clone)]
-pub struct TransposeConv2dAttribute {
-    pub out_pad: Vec<i32>,
-    pub stride: Vec<i32>,
-    pub local_bound: bool,
-    pub acc_type: DType,
+impl From<Version> for tosa_rs::Version {
+    fn from(v: Version) -> Self {
+        tosa_rs::Version {
+            major: v.major,
+            minor: v.minor,
+            patch: v.patch,
+            draft: v.draft,
+        }
+    }
+}
+
+impl From<tosa_rs::Version> for Version {
+    fn from(v: tosa_rs::Version) -> Self {
+        Version {
+            major: v.major,
+            minor: v.minor,
+            patch: v.patch,
+            draft: v.draft,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Attribute union
+// TosaTensor -- retab uses Vec<u8>/String where tosa-rs uses
+// Option<Vec<u8>>/Option<String>, plus tosa-rs has offset/size fields.
+// Keep a local struct with convenience constructors.
 // ---------------------------------------------------------------------------
+#[derive(Debug, Clone)]
+pub struct TosaTensor {
+    pub name: String,
+    pub shape: Vec<i32>,
+    pub dtype: DType,
+    pub data: Vec<u8>,
+    pub variable: bool,
+    pub is_unranked: bool,
+    pub variable_name: String,
+}
 
-/// Union of all operator attributes we support.
+impl TosaTensor {
+    /// Empty output tensor (no data, not variable, not unranked).
+    pub fn new(name: String, shape: Vec<i32>, dtype: DType) -> Self {
+        Self {
+            name,
+            shape,
+            dtype,
+            data: Vec::new(),
+            variable: false,
+            is_unranked: false,
+            variable_name: String::new(),
+        }
+    }
+
+    /// Const tensor with inline data.
+    pub fn with_data(name: String, shape: Vec<i32>, dtype: DType, data: Vec<u8>) -> Self {
+        Self {
+            data,
+            ..Self::new(name, shape, dtype)
+        }
+    }
+}
+
+impl From<TosaTensor> for tosa_rs::TosaTensor {
+    fn from(t: TosaTensor) -> Self {
+        tosa_rs::TosaTensor {
+            name: t.name,
+            shape: t.shape,
+            dtype: t.dtype,
+            data: if t.data.is_empty() { None } else { Some(t.data) },
+            variable: t.variable,
+            is_unranked: t.is_unranked,
+            variable_name: if t.variable_name.is_empty() {
+                None
+            } else {
+                Some(t.variable_name)
+            },
+            offset: 0,
+            size: 0,
+        }
+    }
+}
+
+impl From<tosa_rs::TosaTensor> for TosaTensor {
+    fn from(t: tosa_rs::TosaTensor) -> Self {
+        TosaTensor {
+            name: t.name,
+            shape: t.shape,
+            dtype: t.dtype,
+            data: t.data.unwrap_or_default(),
+            variable: t.variable,
+            is_unranked: t.is_unranked,
+            variable_name: t.variable_name.unwrap_or_default(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TosaOperator -- same fields but keep local so it uses our Attribute/Op.
+// ---------------------------------------------------------------------------
+#[derive(Debug, Clone)]
+pub struct TosaOperator {
+    pub op: Op,
+    pub attribute: Attribute,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+    pub location: Option<OpLocation>,
+}
+
+impl TosaOperator {
+    /// Create an operator with no location metadata (the common case).
+    pub fn new(op: Op, attribute: Attribute, inputs: Vec<String>, outputs: Vec<String>) -> Self {
+        Self {
+            op,
+            attribute,
+            inputs,
+            outputs,
+            location: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TosaGraph -- same fields but uses our local Version.
+// ---------------------------------------------------------------------------
+#[derive(Debug, Clone)]
+pub struct TosaGraph {
+    pub version: Version,
+    pub regions: Vec<TosaRegion>,
+    pub software_version: Option<SoftwareVersion>,
+}
+
+// ---------------------------------------------------------------------------
+// Attribute union -- local copy so we can include our MulAttribute (with
+// shift) and WhileLoopAttribute (with cond_branch/body_branch).
+// ---------------------------------------------------------------------------
 #[derive(Debug, Clone)]
 pub enum Attribute {
     None,
@@ -535,210 +340,68 @@ impl Attribute {
     pub fn union_type(&self) -> u8 {
         match self {
             Attribute::None => 0,
-            Attribute::Conv2d(_) => 3,                // Conv2dAttribute
-            Attribute::Conv3d(_) => 4,                // Conv3dAttribute
-            Attribute::DepthwiseConv2d(_) => 5,       // DepthwiseConv2dAttribute
-            Attribute::Rescale(_) => 66,              // RescaleAttribute
-            Attribute::MaxPool2d(_) => 8,             // MaxPool2dAttribute
-            Attribute::Transpose(_) => 61,            // TransposeAttribute
-            Attribute::Reshape(_) => 57,              // ReshapeAttribute
-            Attribute::Clamp(_) => 11,                // ClampAttribute
-            Attribute::Const(_) => 67,                // ConstAttribute
-            Attribute::ConstShape(_) => 75,           // ConstShapeAttribute
-            Attribute::Add(_) => 15,                  // AddAttribute
-            Attribute::Sub(_) => 30,                  // SubAttribute
-            Attribute::Mul(_) => 28,                  // MulAttribute
-            Attribute::AvgPool2d(_) => 2,             // AvgPool2dAttribute
-            Attribute::ReduceSum(_) => 54,            // ReduceSumAttribute
-            Attribute::Table(_) => 31,                // TableAttribute
-            Attribute::Sigmoid(_) => 13,              // SigmoidAttribute
-            Attribute::Tanh(_) => 14,                 // TanhAttribute
-            Attribute::Exp(_) => 37,                  // ExpAttribute
-            Attribute::Log(_) => 39,                  // LogAttribute
-            Attribute::Negate(_) => 41,               // NegateAttribute
-            Attribute::Abs(_) => 32,                  // AbsAttribute
-            Attribute::Ceil(_) => 34,                 // CeilAttribute
-            Attribute::Floor(_) => 38,                // FloorAttribute
-            Attribute::Reciprocal(_) => 42,           // ReciprocalAttribute
-            Attribute::Erf(_) => 12,                  // ErfAttribute
-            Attribute::Cos(_) => 36,                  // CosAttribute
-            Attribute::Sin(_) => 44,                  // SinAttribute
-            Attribute::Rsqrt(_) => 43,                // RsqrtAttribute
-            Attribute::MatMul(_) => 7,                // MatMulAttribute
-            Attribute::Concat(_) => 55,               // ConcatAttribute
-            Attribute::Pad(_) => 56,                  // PadAttribute
-            Attribute::Slice(_) => 59,                // SliceAttribute
-            Attribute::Gather(_) => 62,               // GatherAttribute
-            Attribute::Scatter(_) => 63,              // ScatterAttribute
-            Attribute::Resize(_) => 64,               // ResizeAttribute
-            Attribute::Select(_) => 45,               // SelectAttribute
-            Attribute::Cast(_) => 65,                 // CastAttribute
-            Attribute::Equal(_) => 46,                // EqualAttribute
-            Attribute::Greater(_) => 47,              // GreaterAttribute
-            Attribute::GreaterEqual(_) => 48,         // GreaterEqualAttribute
-            Attribute::TransposeConv2d(_) => 10,      // TransposeConv2dAttribute
-            Attribute::CondIf(_) => 70,               // CondIfAttribute
-            Attribute::WhileLoop(_) => 71,            // WhileLoopAttribute
-            Attribute::Maximum(_) => 26,              // MaximumAttribute
-            Attribute::Minimum(_) => 27,              // MinimumAttribute
-            Attribute::ReduceAny(_) => 50,            // ReduceAnyAttribute
-            Attribute::ReduceMax(_) => 51,            // ReduceMaxAttribute
-            Attribute::ReduceMin(_) => 52,            // ReduceMinAttribute
-            Attribute::BitwiseNot(_) => 33,           // BitwiseNotAttribute
-            Attribute::BitwiseAnd(_) => 17,           // BitwiseAndAttribute
-            Attribute::BitwiseOr(_) => 18,            // BitwiseOrAttribute
-            Attribute::BitwiseXor(_) => 19,           // BitwiseXorAttribute
-            Attribute::LogicalLeftShift(_) => 22,     // LogicalLeftShiftAttribute
-            Attribute::LogicalRightShift(_) => 23,    // LogicalRightShiftAttribute
-            Attribute::ArithmeticRightShift(_) => 16, // ArithmeticRightShiftAttribute
-            Attribute::LogicalNot(_) => 40,           // LogicalNotAttribute
-            Attribute::LogicalAnd(_) => 21,           // LogicalAndAttribute
-            Attribute::LogicalOr(_) => 24,            // LogicalOrAttribute
-            Attribute::LogicalXor(_) => 25,           // LogicalXorAttribute
-            Attribute::Pow(_) => 29,                  // PowAttribute
-            Attribute::IntDiv(_) => 20,               // IntDivAttribute
+            Attribute::Conv2d(_) => 3,
+            Attribute::Conv3d(_) => 4,
+            Attribute::DepthwiseConv2d(_) => 5,
+            Attribute::Rescale(_) => 66,
+            Attribute::MaxPool2d(_) => 8,
+            Attribute::Transpose(_) => 61,
+            Attribute::Reshape(_) => 57,
+            Attribute::Clamp(_) => 11,
+            Attribute::Const(_) => 67,
+            Attribute::ConstShape(_) => 75,
+            Attribute::Add(_) => 15,
+            Attribute::Sub(_) => 30,
+            Attribute::Mul(_) => 28,
+            Attribute::AvgPool2d(_) => 2,
+            Attribute::ReduceSum(_) => 54,
+            Attribute::Table(_) => 31,
+            Attribute::Sigmoid(_) => 13,
+            Attribute::Tanh(_) => 14,
+            Attribute::Exp(_) => 37,
+            Attribute::Log(_) => 39,
+            Attribute::Negate(_) => 41,
+            Attribute::Abs(_) => 32,
+            Attribute::Ceil(_) => 34,
+            Attribute::Floor(_) => 38,
+            Attribute::Reciprocal(_) => 42,
+            Attribute::Erf(_) => 12,
+            Attribute::Cos(_) => 36,
+            Attribute::Sin(_) => 44,
+            Attribute::Rsqrt(_) => 43,
+            Attribute::MatMul(_) => 7,
+            Attribute::Concat(_) => 55,
+            Attribute::Pad(_) => 56,
+            Attribute::Slice(_) => 59,
+            Attribute::Gather(_) => 62,
+            Attribute::Scatter(_) => 63,
+            Attribute::Resize(_) => 64,
+            Attribute::Select(_) => 45,
+            Attribute::Cast(_) => 65,
+            Attribute::Equal(_) => 46,
+            Attribute::Greater(_) => 47,
+            Attribute::GreaterEqual(_) => 48,
+            Attribute::TransposeConv2d(_) => 10,
+            Attribute::CondIf(_) => 70,
+            Attribute::WhileLoop(_) => 71,
+            Attribute::Maximum(_) => 26,
+            Attribute::Minimum(_) => 27,
+            Attribute::ReduceAny(_) => 50,
+            Attribute::ReduceMax(_) => 51,
+            Attribute::ReduceMin(_) => 52,
+            Attribute::BitwiseNot(_) => 33,
+            Attribute::BitwiseAnd(_) => 17,
+            Attribute::BitwiseOr(_) => 18,
+            Attribute::BitwiseXor(_) => 19,
+            Attribute::LogicalLeftShift(_) => 22,
+            Attribute::LogicalRightShift(_) => 23,
+            Attribute::ArithmeticRightShift(_) => 16,
+            Attribute::LogicalNot(_) => 40,
+            Attribute::LogicalAnd(_) => 21,
+            Attribute::LogicalOr(_) => 24,
+            Attribute::LogicalXor(_) => 25,
+            Attribute::Pow(_) => 29,
+            Attribute::IntDiv(_) => 20,
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Structural tables
-// ---------------------------------------------------------------------------
-
-/// Version table.
-#[derive(Debug, Clone)]
-pub struct Version {
-    pub major: i32,
-    pub minor: i32,
-    pub patch: i32,
-    pub draft: bool,
-}
-
-impl Default for Version {
-    fn default() -> Self {
-        Self {
-            major: 1,
-            minor: 0,
-            patch: 0,
-            draft: false,
-        }
-    }
-}
-
-/// SoftwareVersion table.
-#[derive(Debug, Clone)]
-pub struct SoftwareVersion {
-    pub major: i32,
-    pub minor: i32,
-    pub micro: i32,
-    pub modifier: String,
-}
-
-impl Default for SoftwareVersion {
-    fn default() -> Self {
-        Self {
-            major: 0,
-            minor: 1,
-            micro: 0,
-            modifier: String::from("retab"),
-        }
-    }
-}
-
-/// TosaTensor — a named tensor with shape, dtype, and optional inline data.
-#[derive(Debug, Clone)]
-pub struct TosaTensor {
-    pub name: String,
-    pub shape: Vec<i32>,
-    pub dtype: DType,
-    pub data: Vec<u8>,
-    pub variable: bool,
-    pub is_unranked: bool,
-    pub variable_name: String,
-}
-
-impl TosaTensor {
-    /// Empty output tensor (no data, not variable, not unranked).
-    pub fn new(name: String, shape: Vec<i32>, dtype: DType) -> Self {
-        Self {
-            name,
-            shape,
-            dtype,
-            data: Vec::new(),
-            variable: false,
-            is_unranked: false,
-            variable_name: String::new(),
-        }
-    }
-
-    /// Const tensor with inline data.
-    pub fn with_data(name: String, shape: Vec<i32>, dtype: DType, data: Vec<u8>) -> Self {
-        Self {
-            data,
-            ..Self::new(name, shape, dtype)
-        }
-    }
-}
-
-/// TosaShape — named shape value.
-#[derive(Debug, Clone)]
-pub struct TosaShape {
-    pub name: String,
-    pub rank: u32,
-    pub data: Vec<u8>,
-}
-
-/// OpLocation — opaque source location.
-#[derive(Debug, Clone)]
-pub struct OpLocation {
-    pub text: String,
-}
-
-/// TosaOperator — one op node in a basic block.
-#[derive(Debug, Clone)]
-pub struct TosaOperator {
-    pub op: Op,
-    pub attribute: Attribute,
-    pub inputs: Vec<String>,
-    pub outputs: Vec<String>,
-    pub location: Option<OpLocation>,
-}
-
-impl TosaOperator {
-    /// Create an operator with no location metadata (the common case).
-    pub fn new(op: Op, attribute: Attribute, inputs: Vec<String>, outputs: Vec<String>) -> Self {
-        Self {
-            op,
-            attribute,
-            inputs,
-            outputs,
-            location: None,
-        }
-    }
-}
-
-/// TosaBasicBlock — contains operators and their tensors.
-#[derive(Debug, Clone)]
-pub struct TosaBasicBlock {
-    pub name: String,
-    pub operators: Vec<TosaOperator>,
-    pub tensors: Vec<TosaTensor>,
-    pub inputs: Vec<String>,
-    pub outputs: Vec<String>,
-    pub shapes: Vec<TosaShape>,
-}
-
-/// TosaRegion — contains basic blocks.
-#[derive(Debug, Clone)]
-pub struct TosaRegion {
-    pub name: String,
-    pub blocks: Vec<TosaBasicBlock>,
-}
-
-/// TosaGraph — the root flatbuffer table.
-#[derive(Debug, Clone)]
-pub struct TosaGraph {
-    pub version: Version,
-    pub regions: Vec<TosaRegion>,
-    pub software_version: Option<SoftwareVersion>,
 }
