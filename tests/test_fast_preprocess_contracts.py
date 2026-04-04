@@ -5,16 +5,16 @@ from dataclasses import dataclass, field
 import pytest
 import torch
 
-from fast_preprocess_cf_rewrites import _ControlFlowOutputEdit
-from fast_preprocess_contracts import (
+from retab._cf_rewrites import _ControlFlowOutputEdit
+from retab._contracts import (
     _ControlFlowBinaryOperandSpec,
     _ControlFlowBoundarySite,
     _ControlFlowInputBoundaryContract,
     _ControlFlowOutputBoundaryContract,
     _ControlFlowOutputContract,
 )
-from fast_preprocess_control_flow import _ControlFlowRescaleEdit
-from fast_preprocess_control_flow import (
+from retab._control_flow import _ControlFlowRescaleEdit
+from retab._control_flow import (
     _reapply_control_flow_submodule_boundary_contracts,
     _reconstruct_control_flow_rescale_source_qparam,
     _restore_input_boundary_contracts,

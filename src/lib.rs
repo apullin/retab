@@ -263,7 +263,7 @@ fn ingest_and_serialize(
 }
 
 #[pymodule]
-fn retab(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lower_to_tosa_v2, m)?)?;
     m.add_function(wrap_pyfunction!(ingest_and_serialize, m)?)?;
     m.add_function(wrap_pyfunction!(fold_qdq_fx, m)?)?;

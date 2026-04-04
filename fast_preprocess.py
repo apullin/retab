@@ -1,22 +1,13 @@
-"""Public fast-preprocess shim.
+"""Backward-compatibility shim.
 
-This module keeps the historical import path stable while the implementation
-is split into smaller modules. The current implementation lives in
-`fast_preprocess_pipeline.py`.
+Redirects the old ``from fast_preprocess import ...`` import path to the
+new ``retab`` package.  Remove once all external callers have migrated.
 """
 
-from fast_preprocess_pipeline import (  # noqa: F401
+from retab import (  # noqa: F401
     FastTOSABackend,
     _all_rust_preprocess,
     fast_preprocess,
     patch_tosa_backend,
     unpatch_tosa_backend,
 )
-
-__all__ = [
-    "FastTOSABackend",
-    "_all_rust_preprocess",
-    "fast_preprocess",
-    "patch_tosa_backend",
-    "unpatch_tosa_backend",
-]
