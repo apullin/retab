@@ -240,22 +240,19 @@ fn emit_direct_rescale_param_tensors(
     let scales = direct_rescale_scales(node);
     let scale32 = input_tosa_dtype != DType::Int48;
     let scale_width = if scale32 { 32 } else { 16 };
-    // TOSA apply_scale_32 requires |value| < 2^(shift-1).  When the input
-    // is INT32 (accumulator from conv/matmul), values can reach ~2^17, so
-    // enforce shift >= 18 by reducing the multiplier.  INT8/INT16 inputs
-    // (max |value| = 128/32768) are fine with any shift >= 2.
-    let min_shift: i8 = match input_tosa_dtype {
-        DType::Int32 => 18,
-        _ => 2,
-    };
+    // TOSA apply_scale_32 requires |value| < 2^(shift-1).  When scale > 1
+    // the computed shift is small, and large INT32 accumulator values can
+    // overflow.  Clamp shift to >= 20 only for large-scale INT32 rescales
+    // (accumulator→output).  Small-scale INT32 rescales (INT8→INT32 upscale,
+    // scale ≤ 1) already produce shift >= 31 and don't need clamping.
     let (multipliers, shifts): (Vec<i32>, Vec<i8>) = scales
         .iter()
         .map(|&scale| {
             let (mut m, mut s) = compute_multiplier_and_shift_with_width(scale, scale_width);
-            if s < min_shift {
-                let deficit = (min_shift - s) as i32;
+            if input_tosa_dtype == DType::Int32 && scale > 1.0 && s < 20 {
+                let deficit = (20 - s) as i32;
                 m >>= deficit.min(31);
-                s = min_shift;
+                s = 20;
             }
             (m, s)
         })
