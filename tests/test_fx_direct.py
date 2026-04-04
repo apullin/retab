@@ -94,10 +94,10 @@ def _count_interior_qdq(gm):
 
 def test_fx_graph_summary():
     """Rust can iterate FX graph nodes and read op/target/name."""
-    import arm_tosa_engine
+    import retab
 
     gm = _get_quantized_gm()
-    summary = arm_tosa_engine.fx_graph_summary(gm)
+    summary = retab.fx_graph_summary(gm)
     assert len(summary) > 0, "Summary should be non-empty"
 
     # Each entry is (name, op, target)
@@ -111,14 +111,14 @@ def test_fx_graph_summary():
 
 def test_fold_qdq_fx_removes_qdq_nodes():
     """Rust fold_qdq_fx removes interior Q/DQ nodes and keeps only graph boundaries."""
-    import arm_tosa_engine
+    import retab
 
     gm = _get_quantized_gm()
     before = _count_qdq(gm)
     assert before > 0, "Quantized model should have Q/DQ nodes"
     before_total = len(list(gm.graph.nodes))
 
-    modified = arm_tosa_engine.fold_qdq_fx(gm)
+    modified = retab.fold_qdq_fx(gm)
     assert modified, "Pass should report modified=True"
 
     after_nodes = _qdq_nodes(gm)
@@ -143,10 +143,10 @@ def test_fold_qdq_fx_removes_qdq_nodes():
 
 def test_fold_qdq_fx_annotates_qparams():
     """After fold, at least some nodes have input_qparams or output_qparams in meta."""
-    import arm_tosa_engine
+    import retab
 
     gm = _get_quantized_gm()
-    arm_tosa_engine.fold_qdq_fx(gm)
+    retab.fold_qdq_fx(gm)
 
     annotated = 0
     for node in gm.graph.nodes:
@@ -161,14 +161,14 @@ def test_fold_qdq_fx_annotates_qparams():
 
 def test_fold_qdq_fx_idempotent():
     """Running fold_qdq_fx twice should be safe and not reintroduce interior Q/DQ."""
-    import arm_tosa_engine
+    import retab
 
     gm = _get_quantized_gm()
-    arm_tosa_engine.fold_qdq_fx(gm)
+    retab.fold_qdq_fx(gm)
     count_after_first = len(list(gm.graph.nodes))
     qdq_after_first = _count_qdq(gm)
 
-    modified = arm_tosa_engine.fold_qdq_fx(gm)
+    modified = retab.fold_qdq_fx(gm)
     count_after_second = len(list(gm.graph.nodes))
     qdq_after_second = _count_qdq(gm)
     assert _count_interior_qdq(gm) == 0, "Second run should not reintroduce interior Q/DQ"

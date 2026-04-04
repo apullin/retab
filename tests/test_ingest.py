@@ -26,8 +26,8 @@ qmodel = convert_pt2e(qmodel)
 quantized_ep = torch.export.export(qmodel, (example_input,), strict=True)
 
 # Now test ingestion
-import arm_tosa_engine
-result = arm_tosa_engine.ingest_graph(
+import retab
+result = retab.ingest_graph(
     quantized_ep.graph_module,
     dict(quantized_ep.state_dict),
     quantized_ep.graph_signature,

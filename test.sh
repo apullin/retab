@@ -5,7 +5,7 @@ export VIRTUAL_ENV=/Users/andrewpullin/personal/executorch-work/u55-pipeline/.ve
 export PATH="/Users/andrewpullin/.cargo/bin:$VIRTUAL_ENV/bin:/Users/andrewpullin/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
 echo "=== Test 1: Basic import ==="
-python -c "import arm_tosa_engine; print('Import OK:', dir(arm_tosa_engine))"
+python -c "import retab; print('Import OK:', dir(retab))"
 
 echo ""
 echo "=== Test 2: Ingestion test ==="

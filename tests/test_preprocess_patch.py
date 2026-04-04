@@ -22,7 +22,7 @@ import time
 
 sys.path.insert(0, "/Users/andrewpullin/personal/executorch-work/u55-pipeline")
 sys.path.insert(
-    0, "/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine"
+    0, "/Users/andrewpullin/personal/executorch-work/u55-pipeline/retab"
 )
 
 import torch

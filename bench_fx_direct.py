@@ -76,11 +76,11 @@ def main():
     print(f"Graph has {total_nodes} nodes, {qdq_count} Q/DQ nodes")
 
     # ---- Rust-on-FX benchmark ----
-    import arm_tosa_engine
+    import retab
 
     # Warm up
     gm_rust = copy.deepcopy(gm)
-    arm_tosa_engine.fold_qdq_fx(gm_rust)
+    retab.fold_qdq_fx(gm_rust)
 
     # Summary after fold
     remaining_qdq = count_qdq_nodes(gm_rust)
@@ -88,7 +88,7 @@ def main():
     print(f"\nAfter Rust fold_qdq_fx: {remaining_total} nodes, {remaining_qdq} Q/DQ remaining")
 
     # Quick sanity: print summary
-    summary = arm_tosa_engine.fx_graph_summary(gm_rust)
+    summary = retab.fx_graph_summary(gm_rust)
     print(f"  Summary has {len(summary)} entries")
     for name, op, target in summary[:5]:
         print(f"    {name}: op={op}, target={target}")
@@ -101,7 +101,7 @@ def main():
     for _ in range(N):
         gm_copy = copy.deepcopy(gm)
         t0 = time.perf_counter()
-        arm_tosa_engine.fold_qdq_fx(gm_copy)
+        retab.fold_qdq_fx(gm_copy)
         elapsed = time.perf_counter() - t0
         times_rust.append(elapsed)
 
@@ -111,7 +111,7 @@ def main():
 
     # ---- Check for meta annotations ----
     gm_check = copy.deepcopy(gm)
-    arm_tosa_engine.fold_qdq_fx(gm_check)
+    retab.fold_qdq_fx(gm_check)
     annotated = 0
     for node in gm_check.graph.nodes:
         if node.op == "call_function":

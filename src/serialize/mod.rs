@@ -838,7 +838,7 @@ fn finish_tosa_graph(
     regions: &[WIPOffset<TableFinishedWIPOffset>],
 ) -> Vec<u8> {
     // Build software version
-    let modifier_str = builder.create_string("arm-tosa-engine");
+    let modifier_str = builder.create_string("retab");
     let sw_version = {
         let start = builder.start_table();
         builder.push_slot::<i32>(4, 0, -1); // major

@@ -7,8 +7,8 @@ __pycache__/
 .uv-cache/
 .eggs/
 *.egg-info/
-arm_tosa_engine/
-arm_tosa_engine-*.dist-info/
+retab/
+retab-*.dist-info/
 dist/
 build/
 tmp_*/

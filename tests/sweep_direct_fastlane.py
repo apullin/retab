@@ -23,7 +23,7 @@ from typing import Any
 
 ROOT = Path("/Users/andrewpullin/personal/executorch-work")
 U55_ROOT = ROOT / "u55-pipeline"
-ENGINE_ROOT = U55_ROOT / "arm-tosa-engine"
+ENGINE_ROOT = U55_ROOT / "retab"
 ET_ROOT = ROOT / "executorch"
 
 sys.path.insert(0, str(ET_ROOT / "src"))

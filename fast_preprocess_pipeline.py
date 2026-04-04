@@ -83,14 +83,14 @@ def _run_pre_rust_control_flow_phase(gm, edge_program) -> None:
     collapse_decomposed_round_to_table(gm)
 
 
-def _run_control_flow_submodule_rust_passes(gm, edge_program, arm_tosa_engine) -> None:
+def _run_control_flow_submodule_rust_passes(gm, edge_program, retab) -> None:
     from executorch.backends.arm._passes.arm_pass_utils import (
         get_cond_while_submodules_nested,
     )
 
     if os.environ.get("ARM_TOSA_ENGINE_FORCE_CF_RECURSIVE_PASSES") == "1":
         for name, submodule, _ in get_cond_while_submodules_nested(gm):
-            arm_tosa_engine.run_fx_passes(submodule, edge_program)
+            retab.run_fx_passes(submodule, edge_program)
             logger.info(
                 "[fast_preprocess] ran recursive fx pass pipeline on control-flow submodule %s",
                 name,
@@ -99,9 +99,9 @@ def _run_control_flow_submodule_rust_passes(gm, edge_program, arm_tosa_engine) -
     for _, submodule, cf_node in get_cond_while_submodules_nested(gm):
         cf_target = str(getattr(cf_node, "target", ""))
         if "cond" in cf_target:
-            arm_tosa_engine.run_fx_cond_passes(submodule, edge_program)
+            retab.run_fx_cond_passes(submodule, edge_program)
         else:
-            arm_tosa_engine.run_fx_submodule_passes(submodule)
+            retab.run_fx_submodule_passes(submodule)
 
 
 def _run_post_rust_control_flow_boundary_phase(gm, edge_program, compile_spec) -> None:
@@ -216,12 +216,12 @@ def _all_rust_preprocess(
     # FX passes later in the pipeline.
     original_state_dict = copy.deepcopy(dict(edge_program.state_dict))
 
-    import arm_tosa_engine
+    import retab
 
     _run_pre_rust_control_flow_phase(gm, edge_program)
-    arm_tosa_engine.run_fx_passes(gm, edge_program)
+    retab.run_fx_passes(gm, edge_program)
     _debug_binary_rescales(gm, "after_run_fx_passes")
-    _run_control_flow_submodule_rust_passes(gm, edge_program, arm_tosa_engine)
+    _run_control_flow_submodule_rust_passes(gm, edge_program, retab)
     _run_post_rust_control_flow_boundary_phase(gm, edge_program, _compile_spec)
     t_passes = time.perf_counter() - t0
     _dump_control_flow_submodules(gm, "after_rust_passes")
@@ -230,7 +230,7 @@ def _all_rust_preprocess(
     _dump_control_flow_submodules(gm, "after_control_flow_normalize")
 
     merged_state_dict = _merge_preprocess_state_dict(original_state_dict, edge_program)
-    tosa_bytes = arm_tosa_engine.ingest_and_serialize(
+    tosa_bytes = retab.ingest_and_serialize(
         gm, merged_state_dict, edge_program.graph_signature
     )
 

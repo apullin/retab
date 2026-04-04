@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 
 REPO_ROOT = Path("/Users/andrewpullin/personal/executorch-work/u55-pipeline")
-ENGINE_ROOT = REPO_ROOT / "arm-tosa-engine"
+ENGINE_ROOT = REPO_ROOT / "retab"
 
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(ENGINE_ROOT))

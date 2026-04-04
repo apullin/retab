@@ -24,8 +24,8 @@ qmodel = convert_pt2e(qmodel)
 quantized_ep = torch.export.export(qmodel, (example_input,), strict=True)
 
 # Run Rust path
-import arm_tosa_engine
-rust_tosa = arm_tosa_engine.lower_to_tosa(
+import retab
+rust_tosa = retab.lower_to_tosa(
     quantized_ep.graph_module,
     dict(quantized_ep.state_dict),
     quantized_ep.graph_signature,
@@ -33,7 +33,7 @@ rust_tosa = arm_tosa_engine.lower_to_tosa(
 print(f"Rust TOSA output: {len(rust_tosa)} bytes")
 
 # Compare with reference
-ref_path = "/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine/test_data/tiny_cnn_reference.tosa"
+ref_path = "/Users/andrewpullin/personal/executorch-work/u55-pipeline/retab/test_data/tiny_cnn_reference.tosa"
 try:
     with open(ref_path, "rb") as f:
         ref_tosa = f.read()

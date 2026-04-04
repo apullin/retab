@@ -1,10 +1,10 @@
 [package]
-name = "arm_tosa_engine"
+name = "retab"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "arm_tosa_engine"
+name = "retab"
 crate-type = ["cdylib"]
 
 [dependencies]

@@ -4,13 +4,13 @@ Runs both pipelines, then feeds both TOSA outputs through the reference
 model with the same inputs and compares numerical results.
 
 Usage (inside Docker):
-    python /work/ws/u55-pipeline/arm-tosa-engine/tests/compare_pipelines.py [num_seeds]
+    python /work/ws/u55-pipeline/retab/tests/compare_pipelines.py [num_seeds]
 """
 import copy, os, random, sys, time
 import numpy as np
 sys.path.insert(0, "/work/ws/executorch/src")
 sys.path.insert(0, "/work/ws/u55-pipeline")
-sys.path.insert(0, "/work/ws/u55-pipeline/arm-tosa-engine")
+sys.path.insert(0, "/work/ws/u55-pipeline/retab")
 sys.path.insert(0, "/work/ws/executorch/examples/arm/arm-scratch/tosa-tools/reference_model/build/lib")
 
 import torch, torch.nn as nn

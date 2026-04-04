@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Benchmark: Python pass pipeline vs Rust arm-tosa-engine.
+Benchmark: Python pass pipeline vs Rust retab.
 
 Compares the inner operation (post-quantization graph → TOSA flatbuffer)
 to isolate the pass pipeline speedup from export/quantization overhead.
@@ -72,7 +72,7 @@ def bench_python_path(quantized_ep, compile_spec, warmup=1, runs=3):
 
 def bench_rust_path(quantized_ep, warmup=1, runs=5):
     """Time the Rust pass pipeline (ingest + passes + serialize)."""
-    import arm_tosa_engine
+    import retab
 
     gm = quantized_ep.graph_module
     sd = dict(quantized_ep.state_dict)
@@ -85,12 +85,12 @@ def bench_rust_path(quantized_ep, warmup=1, runs=5):
     for i in range(warmup + runs):
         # Time ingestion separately
         t0 = time.perf_counter()
-        ingest_result = arm_tosa_engine.ingest_graph(gm, sd, gs)
+        ingest_result = retab.ingest_graph(gm, sd, gs)
         t_ingest = time.perf_counter() - t0
 
         # Time full lower_to_tosa (includes ingest + passes + serialize)
         t0 = time.perf_counter()
-        tosa_bytes = arm_tosa_engine.lower_to_tosa(gm, sd, gs)
+        tosa_bytes = retab.lower_to_tosa(gm, sd, gs)
         t_total = time.perf_counter() - t0
 
         t_passes_serialize = t_total - t_ingest  # approximate
@@ -131,7 +131,7 @@ def main():
 
     # Rust path
     print(f"\n{'='*60}")
-    print("RUST PATH (arm-tosa-engine)")
+    print("RUST PATH (retab)")
     print(f"{'='*60}")
     rust_total, rust_ingest, rust_lower = bench_rust_path(quantized_ep, warmup=1, runs=5)
 

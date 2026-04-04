@@ -45,7 +45,7 @@ def _install_edge_decomp_fast_path() -> None:
     from executorch.exir.program import _program as program_mod
 
     current = program_mod._gen_edge_manager_for_partitioners
-    if getattr(current, "__arm_tosa_engine_patched__", False):
+    if getattr(current, "__retab_patched__", False):
         return
 
     _ORIGINAL_GEN_EDGE_MANAGER_FOR_PARTITIONERS = current
@@ -184,7 +184,7 @@ def _install_edge_decomp_fast_path() -> None:
 
         return edge_manager
 
-    optimized_gen_edge_manager_for_partitioners.__arm_tosa_engine_patched__ = True
+    optimized_gen_edge_manager_for_partitioners.__retab_patched__ = True
     optimized_gen_edge_manager_for_partitioners.__wrapped__ = current
     program_mod._gen_edge_manager_for_partitioners = (
         optimized_gen_edge_manager_for_partitioners

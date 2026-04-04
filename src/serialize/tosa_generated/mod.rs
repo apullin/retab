@@ -640,7 +640,7 @@ impl Default for SoftwareVersion {
             major: 0,
             minor: 1,
             micro: 0,
-            modifier: String::from("arm-tosa-engine"),
+            modifier: String::from("retab"),
         }
     }
 }
