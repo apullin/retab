@@ -258,7 +258,7 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
     push_inline_const(
         &mut result,
         TosaTensor::with_data(
-            input_zp_name.clone(),
+            &input_zp_name,
             vec![1],
             input_dtype,
             encode_zp_for_dtype(input_zp, input_dtype),
@@ -269,7 +269,7 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
     push_inline_const(
         &mut result,
         TosaTensor::with_data(
-            output_zp_name.clone(),
+            &output_zp_name,
             vec![1],
             output_dtype,
             encode_zp_for_dtype(output_zp, output_dtype),

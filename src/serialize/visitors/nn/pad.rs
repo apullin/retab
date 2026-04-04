@@ -83,7 +83,7 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
     }
 
     result.tensors.push(TosaTensor::new(
-        node.name.clone(),
+        &node.name,
         output_shape,
         ir_dtype_to_tosa(node.meta.val.dtype),
     ));
@@ -107,21 +107,21 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
         _ => raw_pad_value,
     };
     result.tensors.push(TosaTensor::with_data(
-        pad_const_name.clone(),
+        &pad_const_name,
         vec![1],
         pad_dtype,
         encode_zp_for_dtype(pad_value, pad_dtype),
     ));
     result.operators.push(TosaOperator::new(
         Op::Const,
-        Attribute::Const(ConstAttribute),
+        Attribute::Const(ConstAttribute {}),
         vec![],
         vec![pad_const_name.clone()],
     ));
 
     result.operators.push(TosaOperator::new(
         Op::Pad,
-        Attribute::Pad(PadAttribute),
+        Attribute::Pad(PadAttribute {}),
         vec![
             input_names.first().cloned().unwrap_or_default(),
             format!("{}_pad_shape", node.name),

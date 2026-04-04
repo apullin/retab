@@ -30,7 +30,7 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
 
     if !promote_2d {
         result.tensors.push(TosaTensor::new(
-            node.name.clone(),
+            &node.name,
             out_shape.clone(),
             matmul_out_dtype,
         ));
@@ -102,7 +102,7 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
             );
 
             result.tensors.push(TosaTensor::new(
-                temp_out_name.clone(),
+                &temp_out_name,
                 temp_out_shape,
                 matmul_out_dtype,
             ));
@@ -119,7 +119,7 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
     push_inline_const(
         &mut result,
         TosaTensor::with_data(
-            a_zp_name.clone(),
+            &a_zp_name,
             vec![1],
             a_dtype,
             encode_zp_for_dtype(a_zp, a_dtype),
@@ -130,7 +130,7 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
     push_inline_const(
         &mut result,
         TosaTensor::with_data(
-            b_zp_name.clone(),
+            &b_zp_name,
             vec![1],
             b_dtype,
             encode_zp_for_dtype(b_zp, b_dtype),
@@ -152,7 +152,7 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
 
     result.operators.push(TosaOperator::new(
         Op::MatMul,
-        Attribute::MatMul(MatMulAttribute),
+        Attribute::MatMul(MatMulAttribute {}),
         matmul_inputs,
         vec![matmul_output_name.clone()],
     ));

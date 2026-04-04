@@ -5,19 +5,19 @@ pub(super) fn register(table: &mut EmitterTable) {
 
     // Bool-output binary comparisons
     register_bool_binary!(table;
-        OpTarget::TosaEqual        => Op::Equal,        Attribute::Equal(EqualAttribute),        false;
-        OpTarget::TosaGreater      => Op::Greater,      Attribute::Greater(GreaterAttribute),      false;
-        OpTarget::TosaGreaterEqual => Op::GreaterEqual,  Attribute::GreaterEqual(GreaterEqualAttribute), false;
-        OpTarget::Eq               => Op::Equal,        Attribute::Equal(EqualAttribute),        false;
-        OpTarget::Gt               => Op::Greater,      Attribute::Greater(GreaterAttribute),      false;
-        OpTarget::Ge               => Op::GreaterEqual,  Attribute::GreaterEqual(GreaterEqualAttribute), false;
-        OpTarget::Lt               => Op::Greater,      Attribute::Greater(GreaterAttribute),      true;
-        OpTarget::Le               => Op::GreaterEqual,  Attribute::GreaterEqual(GreaterEqualAttribute), true;
+        OpTarget::TosaEqual        => Op::Equal,        Attribute::Equal(EqualAttribute {}),        false;
+        OpTarget::TosaGreater      => Op::Greater,      Attribute::Greater(GreaterAttribute {}),      false;
+        OpTarget::TosaGreaterEqual => Op::GreaterEqual,  Attribute::GreaterEqual(GreaterEqualAttribute {}), false;
+        OpTarget::Eq               => Op::Equal,        Attribute::Equal(EqualAttribute {}),        false;
+        OpTarget::Gt               => Op::Greater,      Attribute::Greater(GreaterAttribute {}),      false;
+        OpTarget::Ge               => Op::GreaterEqual,  Attribute::GreaterEqual(GreaterEqualAttribute {}), false;
+        OpTarget::Lt               => Op::Greater,      Attribute::Greater(GreaterAttribute {}),      true;
+        OpTarget::Le               => Op::GreaterEqual,  Attribute::GreaterEqual(GreaterEqualAttribute {}), true;
     );
 
     // Direct binary ops
     register_binary!(table;
-        OpTarget::Pow         => Op::Pow, Attribute::Pow(PowAttribute);
+        OpTarget::Pow         => Op::Pow, Attribute::Pow(PowAttribute {});
         OpTarget::TosaMaximum => Op::Maximum, Attribute::Maximum(MaximumAttribute {
             nan_mode: NanPropagationMode::Propagate,
         });

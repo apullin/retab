@@ -35,7 +35,7 @@ pub(in crate::serialize::visitors) fn emit_aten_div(ctx: &EmitContext) -> EmitRe
             spec.base_dtype,
         ),
         Op::Reciprocal,
-        Attribute::Reciprocal(ReciprocalAttribute),
+        Attribute::Reciprocal(ReciprocalAttribute {}),
         vec![spec.rhs],
     );
 
@@ -60,13 +60,13 @@ pub(in crate::serialize::visitors) fn emit_aten_sqrt(ctx: &EmitContext) -> EmitR
     result.push_output_op(
         temp_tensor(rsqrt_name.clone(), spec.output_shape, spec.base_dtype),
         Op::Rsqrt,
-        Attribute::Rsqrt(RsqrtAttribute),
+        Attribute::Rsqrt(RsqrtAttribute {}),
         vec![spec.input_name],
     );
     result.push_output_op(
         ctx.make_output(),
         Op::Reciprocal,
-        Attribute::Reciprocal(ReciprocalAttribute),
+        Attribute::Reciprocal(ReciprocalAttribute {}),
         vec![rsqrt_name],
     );
     result
@@ -132,13 +132,13 @@ pub(in crate::serialize::visitors) fn emit_aten_sign(ctx: &EmitContext) -> EmitR
 
     result.push_op(
         Op::Greater,
-        Attribute::Greater(GreaterAttribute),
+        Attribute::Greater(GreaterAttribute {}),
         vec![spec.input_name.clone(), zero_name.clone()],
         vec![gt_name.clone()],
     );
     result.push_op(
         Op::GreaterEqual,
-        Attribute::GreaterEqual(GreaterEqualAttribute),
+        Attribute::GreaterEqual(GreaterEqualAttribute {}),
         vec![spec.input_name.clone(), zero_name.clone()],
         vec![ge_name.clone()],
     );
@@ -147,13 +147,13 @@ pub(in crate::serialize::visitors) fn emit_aten_sign(ctx: &EmitContext) -> EmitR
     result.push_output_op(
         temp_tensor(inner_name.clone(), spec.output_shape, spec.base_dtype),
         Op::Select,
-        Attribute::Select(SelectAttribute),
+        Attribute::Select(SelectAttribute {}),
         vec![gt_name, one_name, zero_name],
     );
     result.push_output_op(
         ctx.make_output(),
         Op::Select,
-        Attribute::Select(SelectAttribute),
+        Attribute::Select(SelectAttribute {}),
         vec![ge_name, inner_name, neg_one_name],
     );
     result
@@ -171,7 +171,7 @@ pub(in crate::serialize::visitors) fn emit_aten_expm1(ctx: &EmitContext) -> Emit
     result.push_output_op(
         temp_tensor(exp_name.clone(), spec.output_shape.clone(), spec.base_dtype),
         Op::Exp,
-        Attribute::Exp(ExpAttribute),
+        Attribute::Exp(ExpAttribute {}),
         vec![spec.input_name],
     );
 
@@ -184,7 +184,7 @@ pub(in crate::serialize::visitors) fn emit_aten_expm1(ctx: &EmitContext) -> Emit
     result.push_output_op(
         ctx.make_output(),
         Op::Sub,
-        Attribute::Sub(SubAttribute),
+        Attribute::Sub(SubAttribute {}),
         vec![exp_name, one_name],
     );
     result
@@ -212,13 +212,13 @@ pub(in crate::serialize::visitors) fn emit_aten_log1p(ctx: &EmitContext) -> Emit
     result.push_output_op(
         temp_tensor(add_name.clone(), spec.output_shape, spec.base_dtype),
         Op::Add,
-        Attribute::Add(AddAttribute),
+        Attribute::Add(AddAttribute {}),
         vec![spec.input_name, one_name],
     );
     result.push_output_op(
         ctx.make_output(),
         Op::Log,
-        Attribute::Log(LogAttribute),
+        Attribute::Log(LogAttribute {}),
         vec![add_name],
     );
     result
@@ -258,7 +258,7 @@ pub(in crate::serialize::visitors) fn emit_aten_leaky_relu(ctx: &EmitContext) ->
     result.push_output_op(
         temp_tensor(ge_name.clone(), spec.output_shape.clone(), DType::Bool),
         Op::GreaterEqual,
-        Attribute::GreaterEqual(GreaterEqualAttribute),
+        Attribute::GreaterEqual(GreaterEqualAttribute {}),
         vec![spec.input_name.clone(), zero_name],
     );
 
@@ -284,7 +284,7 @@ pub(in crate::serialize::visitors) fn emit_aten_leaky_relu(ctx: &EmitContext) ->
     result.push_output_op(
         ctx.make_output(),
         Op::Select,
-        Attribute::Select(SelectAttribute),
+        Attribute::Select(SelectAttribute {}),
         vec![ge_name, spec.input_name, scaled_name],
     );
     result

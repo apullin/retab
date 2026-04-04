@@ -176,9 +176,9 @@ fn emit_quant_to_float_chain(
     // 1. Cast
     let cast_name = format!("{}_{}_input_cast", node_name, prefix);
     result.push_output_op(
-        TosaTensor::new(cast_name.clone(), input_shape.to_vec(), target_dtype),
+        TosaTensor::new(&cast_name, input_shape.to_vec(), target_dtype),
         Op::Cast,
-        Attribute::Cast(CastAttribute),
+        Attribute::Cast(CastAttribute {}),
         vec![input_name],
     );
     let mut current = cast_name;
@@ -192,9 +192,9 @@ fn emit_quant_to_float_chain(
             push_inline_const(result, zp_tensor);
             let sub_name = format!("{}_{}_input_sub", node_name, prefix);
             result.push_output_op(
-                TosaTensor::new(sub_name.clone(), input_shape.to_vec(), target_dtype),
+                TosaTensor::new(&sub_name, input_shape.to_vec(), target_dtype),
                 Op::Sub,
-                Attribute::Sub(SubAttribute),
+                Attribute::Sub(SubAttribute {}),
                 vec![current, zp_name],
             );
             current = sub_name;
@@ -212,7 +212,7 @@ fn emit_quant_to_float_chain(
                 push_shift_const(result, &format!("{}_{}_input", node_name, prefix));
             let mul_name = format!("{}_{}_input_float", node_name, prefix);
             result.push_output_op(
-                TosaTensor::new(mul_name.clone(), input_shape.to_vec(), target_dtype),
+                TosaTensor::new(&mul_name, input_shape.to_vec(), target_dtype),
                 Op::Mul,
                 Attribute::Mul(MulAttribute { shift: 0 }),
                 vec![current, scale_name, shift_name],
@@ -270,7 +270,7 @@ fn emit_multi_axis_reduce_loop(
         };
 
         result.push_output_op(
-            TosaTensor::new(out_name.clone(), out_shape.clone(), dtype),
+            TosaTensor::new(&out_name, out_shape.clone(), dtype),
             op,
             make_attr(axis.tosa_axis),
             vec![current_input.clone()],

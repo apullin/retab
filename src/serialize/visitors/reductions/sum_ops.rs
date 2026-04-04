@@ -79,7 +79,7 @@ pub(in crate::serialize::visitors) fn emit_reduce_sum(ctx: &EmitContext) -> Emit
     };
 
     result.push_output_op(
-        TosaTensor::new(reduce_output.clone(), reduce_shape.clone(), spec.reduce_dtype),
+        TosaTensor::new(&reduce_output, reduce_shape.clone(), spec.reduce_dtype),
         Op::ReduceSum,
         Attribute::ReduceSum(ReduceSumAttribute {
             axis: spec.tosa_axis,
@@ -186,7 +186,7 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitRe
                     .collect();
                 if transpose_shape.len() == current_shape.len() {
                     result.push_output_op(
-                        TosaTensor::new(transpose_name.clone(), transpose_shape, base_dtype),
+                        TosaTensor::new(&transpose_name, transpose_shape, base_dtype),
                         Op::Transpose,
                         Attribute::Transpose(TransposeAttribute { perms }),
                         vec![reshape_input],

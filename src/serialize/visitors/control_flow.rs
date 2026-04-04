@@ -122,8 +122,9 @@ fn extend_missing_while_outputs(
         let Some(input_node) = graph.node(*input_id) else {
             continue;
         };
+        let name = format!("{}_dummy_{}", node.name, idx);
         output_tensors.push(TosaTensor::new(
-            format!("{}_dummy_{}", node.name, idx),
+            &name,
             actual_tensor_shape(graph, store, input_node),
             actual_tensor_dtype(graph, input_node),
         ));

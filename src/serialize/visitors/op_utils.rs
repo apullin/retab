@@ -70,7 +70,7 @@ pub(super) fn emit_bool_binary(
         ));
         result.operators.push(TosaOperator::new(
             Op::Cast,
-            Attribute::Cast(CastAttribute),
+            Attribute::Cast(CastAttribute {}),
             vec![inputs[idx].clone()],
             vec![cast_name.clone()],
         ));

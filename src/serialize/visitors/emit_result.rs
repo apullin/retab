@@ -39,7 +39,7 @@ impl EmitResult {
         self.tensors.push(tensor);
         self.push_op(
             Op::Const,
-            Attribute::Const(ConstAttribute),
+            Attribute::Const(ConstAttribute {}),
             vec![],
             vec![name.clone()],
         );
@@ -58,7 +58,7 @@ impl EmitResult {
         attr: Attribute,
         input: String,
     ) -> &mut Self {
-        self.push_output_op(TosaTensor::new(name, shape, dtype), op, attr, vec![input]);
+        self.push_output_op(TosaTensor::new(&name, shape, dtype), op, attr, vec![input]);
         self
     }
 
@@ -74,7 +74,7 @@ impl EmitResult {
         rhs: String,
     ) -> &mut Self {
         self.push_output_op(
-            TosaTensor::new(name, shape, dtype),
+            TosaTensor::new(&name, shape, dtype),
             op,
             attr,
             vec![lhs, rhs],
@@ -95,7 +95,7 @@ impl EmitResult {
         c: String,
     ) -> &mut Self {
         self.push_output_op(
-            TosaTensor::new(name, shape, dtype),
+            TosaTensor::new(&name, shape, dtype),
             op,
             attr,
             vec![a, b, c],

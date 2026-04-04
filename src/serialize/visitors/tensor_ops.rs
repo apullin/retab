@@ -117,7 +117,7 @@ pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
     result.push_output_op(
         make_empty_tensor(cast_output_name.clone(), output_shape.clone(), output_dtype),
         Op::Cast,
-        Attribute::Cast(CastAttribute),
+        Attribute::Cast(CastAttribute {}),
         vec![input_name],
     );
 
@@ -143,7 +143,7 @@ pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
             result.push_output_op(
                 make_empty_tensor(sub_output_name.clone(), output_shape.clone(), output_dtype),
                 Op::Sub,
-                Attribute::Sub(SubAttribute),
+                Attribute::Sub(SubAttribute {}),
                 vec![current_name, zp_name],
             );
             current_name = sub_output_name;
@@ -591,7 +591,7 @@ fn emit_tile_with_multiples(
                 actual_tensor_dtype(graph, input_node),
             ),
             Op::Reshape,
-            Attribute::Reshape(ReshapeAttribute),
+            Attribute::Reshape(ReshapeAttribute {}),
             vec![tile_input_name, reshape_shape_name],
         );
 
@@ -749,7 +749,7 @@ pub(super) fn emit_const(ctx: &EmitContext) -> EmitResult {
     result.push_output_op(
         make_tensor(name.clone(), shape, dtype, data),
         Op::Const,
-        Attribute::Const(ConstAttribute),
+        Attribute::Const(ConstAttribute {}),
         vec![],
     );
     result
@@ -836,7 +836,7 @@ pub(super) fn emit_reshape(ctx: &EmitContext) -> EmitResult {
     });
     result.operators.push(TosaOperator::new(
         Op::ConstShape,
-        Attribute::ConstShape(ConstShapeAttribute),
+        Attribute::ConstShape(ConstShapeAttribute {}),
         vec![],
         vec![shape_name.clone()],
     ));
@@ -845,7 +845,7 @@ pub(super) fn emit_reshape(ctx: &EmitContext) -> EmitResult {
     reshape_inputs.push(shape_name);
     result.operators.push(TosaOperator::new(
         Op::Reshape,
-        Attribute::Reshape(ReshapeAttribute),
+        Attribute::Reshape(ReshapeAttribute {}),
         reshape_inputs,
         vec![output_name],
     ));

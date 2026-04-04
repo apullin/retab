@@ -525,13 +525,13 @@ pub(super) fn push_reshape_with_shape(
     });
     result.operators.push(TosaOperator::new(
         Op::ConstShape,
-        Attribute::ConstShape(ConstShapeAttribute),
+        Attribute::ConstShape(ConstShapeAttribute {}),
         vec![],
         vec![shape_name.clone()],
     ));
     result.operators.push(TosaOperator::new(
         Op::Reshape,
-        Attribute::Reshape(ReshapeAttribute),
+        Attribute::Reshape(ReshapeAttribute {}),
         vec![input_name, shape_name],
         vec![output_name],
     ));

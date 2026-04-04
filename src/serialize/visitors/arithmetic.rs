@@ -200,11 +200,11 @@ pub(super) fn emit_clamp(ctx: &EmitContext) -> EmitResult {
 }
 
 pub(super) fn emit_add(ctx: &EmitContext) -> EmitResult {
-    ctx.emit_binary(Op::Add, Attribute::Add(AddAttribute))
+    ctx.emit_binary(Op::Add, Attribute::Add(AddAttribute {}))
 }
 
 pub(super) fn emit_sub(ctx: &EmitContext) -> EmitResult {
-    ctx.emit_binary(Op::Sub, Attribute::Sub(SubAttribute))
+    ctx.emit_binary(Op::Sub, Attribute::Sub(SubAttribute {}))
 }
 
 pub(super) fn emit_mul(ctx: &EmitContext) -> EmitResult {

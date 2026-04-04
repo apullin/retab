@@ -235,7 +235,7 @@ pub(super) fn emit_select(ctx: &EmitContext) -> EmitResult {
     result.push_output_op(
         make_output_tensor(node),
         Op::Select,
-        Attribute::Select(SelectAttribute),
+        Attribute::Select(SelectAttribute {}),
         input_names,
     );
     result
@@ -314,9 +314,9 @@ pub(super) fn emit_select_copy(ctx: &EmitContext) -> EmitResult {
         size_vec.clone(),
     );
     result.push_output_op(
-        TosaTensor::new(slice_name.clone(), size_vec.clone(), spec.dtype),
+        TosaTensor::new(&slice_name, size_vec.clone(), spec.dtype),
         Op::Slice,
-        Attribute::Slice(SliceAttribute),
+        Attribute::Slice(SliceAttribute {}),
         vec![
             spec.input_name,
             format!("{}_start", slice_name),
@@ -333,7 +333,7 @@ pub(super) fn emit_select_copy(ctx: &EmitContext) -> EmitResult {
             .map(|&axis| reshape_input_shape[axis as usize])
             .collect();
         result.push_output_op(
-            TosaTensor::new(transpose_name.clone(), transpose_shape, spec.dtype),
+            TosaTensor::new(&transpose_name, transpose_shape, spec.dtype),
             Op::Transpose,
             Attribute::Transpose(TransposeAttribute { perms }),
             vec![reshape_input_name],
@@ -370,7 +370,7 @@ pub(super) fn emit_index_select(ctx: &EmitContext) -> EmitResult {
     result.push_output_op(
         make_output_tensor(node),
         Op::Gather,
-        Attribute::Gather(GatherAttribute),
+        Attribute::Gather(GatherAttribute {}),
         input_names,
     );
     result
@@ -382,7 +382,7 @@ pub(super) fn emit_gather(ctx: &EmitContext) -> EmitResult {
     result.push_output_op(
         make_output_tensor(node),
         Op::Gather,
-        Attribute::Gather(GatherAttribute),
+        Attribute::Gather(GatherAttribute {}),
         ctx.input_names(),
     );
     result
@@ -394,7 +394,7 @@ pub(super) fn emit_scatter(ctx: &EmitContext) -> EmitResult {
     result.push_output_op(
         make_output_tensor(node),
         Op::Scatter,
-        Attribute::Scatter(ScatterAttribute),
+        Attribute::Scatter(ScatterAttribute {}),
         ctx.input_names(),
     );
     result
@@ -434,12 +434,12 @@ pub(super) fn emit_slice(ctx: &EmitContext) -> EmitResult {
     );
     result.push_output_op(
         TosaTensor::new(
-            node.name.clone(),
+            &node.name,
             spec.size_shape,
             ir_dtype_to_tosa(node.meta.val.dtype),
         ),
         Op::Slice,
-        Attribute::Slice(SliceAttribute),
+        Attribute::Slice(SliceAttribute {}),
         vec![
             spec.input_name,
             format!("{}_slice_start", node.name),

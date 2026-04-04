@@ -88,13 +88,13 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
     };
     let shift_name = format!("{}_mul_shift", node.name);
     result.push_const(TosaTensor::with_data(
-        shift_name.clone(),
+        &shift_name,
         vec![1],
         DType::Int8,
         vec![0u8],
     ));
     result.push_output_op(
-        TosaTensor::new(final_name.clone(), current_shape.clone(), base_dtype),
+        TosaTensor::new(&final_name, current_shape.clone(), base_dtype),
         Op::Mul,
         Attribute::Mul(MulAttribute { shift: 0 }),
         vec![sum_name, recip_name, shift_name],

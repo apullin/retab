@@ -6,11 +6,11 @@ pub(super) fn make_tensor(
     dtype: DType,
     data: Vec<u8>,
 ) -> TosaTensor {
-    TosaTensor::with_data(name, shape, dtype, data)
+    TosaTensor::with_data(&name, shape, dtype, data)
 }
 
 pub(super) fn make_empty_tensor(name: String, shape: Vec<i32>, dtype: DType) -> TosaTensor {
-    make_tensor(name, shape, dtype, Vec::new())
+    TosaTensor::new(&name, shape, dtype)
 }
 
 pub(super) fn make_rank1_const_tensor(
@@ -35,7 +35,7 @@ pub(super) fn push_const_shape(result: &mut EmitResult, shape_name: String, valu
     });
     result.operators.push(TosaOperator::new(
         Op::ConstShape,
-        Attribute::ConstShape(ConstShapeAttribute),
+        Attribute::ConstShape(ConstShapeAttribute {}),
         vec![],
         vec![shape_name],
     ));
@@ -133,5 +133,5 @@ pub(super) fn make_shape_const_tensor(name: String, values: Vec<i32>) -> TosaTen
         .iter()
         .flat_map(|&d| (d as i64).to_le_bytes())
         .collect();
-    make_tensor(name, vec![values.len() as i32], DType::Shape, data)
+    TosaTensor::with_data(&name, vec![values.len() as i32], DType::Shape, data)
 }

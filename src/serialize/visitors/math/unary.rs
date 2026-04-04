@@ -61,14 +61,14 @@ pub(in crate::serialize::visitors) fn emit_negate(ctx: &EmitContext) -> EmitResu
         (output_zp_name.clone(), output_zp),
     ] {
         result.tensors.push(TosaTensor::with_data(
-            name.clone(),
+            &name,
             vec![1],
             input_dtype,
             encode_zp_for_dtype(value, input_dtype),
         ));
         result.operators.push(TosaOperator::new(
             Op::Const,
-            Attribute::Const(ConstAttribute),
+            Attribute::Const(ConstAttribute {}),
             vec![],
             vec![name],
         ));
@@ -79,7 +79,7 @@ pub(in crate::serialize::visitors) fn emit_negate(ctx: &EmitContext) -> EmitResu
     negate_inputs.push(output_zp_name);
     result.operators.push(TosaOperator::new(
         Op::Negate,
-        Attribute::Negate(NegateAttribute),
+        Attribute::Negate(NegateAttribute {}),
         negate_inputs,
         vec![node.name.clone()],
     ));
@@ -92,7 +92,7 @@ pub(in crate::serialize::visitors) fn emit_ceil(ctx: &EmitContext) -> EmitResult
         ctx.store,
         ctx.node,
         Op::Ceil,
-        Attribute::Ceil(CeilAttribute),
+        Attribute::Ceil(CeilAttribute {}),
     )
 }
 
@@ -102,7 +102,7 @@ pub(in crate::serialize::visitors) fn emit_floor(ctx: &EmitContext) -> EmitResul
         ctx.store,
         ctx.node,
         Op::Floor,
-        Attribute::Floor(FloorAttribute),
+        Attribute::Floor(FloorAttribute {}),
     )
 }
 
@@ -160,23 +160,23 @@ pub(in crate::serialize::visitors) fn emit_round(ctx: &EmitContext) -> EmitResul
 
     // 12-op banker's-rounding decomposition using the chainable builder API.
     result
-        .unary(floor_x_name.clone(), s.clone(), d, Op::Floor, Attribute::Floor(FloorAttribute), spec.input_name.clone())
-        .binary(frac_name.clone(), s.clone(), d, Op::Sub, Attribute::Sub(SubAttribute), spec.input_name.clone(), floor_x_name.clone())
-        .binary(is_tie_name.clone(), s.clone(), DType::Bool, Op::Equal, Attribute::Equal(EqualAttribute), frac_name, half_name.clone())
-        .binary(plus_half_name.clone(), s.clone(), d, Op::Add, Attribute::Add(AddAttribute), spec.input_name.clone(), half_name.clone())
-        .unary(round_up_name.clone(), s.clone(), d, Op::Floor, Attribute::Floor(FloorAttribute), plus_half_name)
+        .unary(floor_x_name.clone(), s.clone(), d, Op::Floor, Attribute::Floor(FloorAttribute {}), spec.input_name.clone())
+        .binary(frac_name.clone(), s.clone(), d, Op::Sub, Attribute::Sub(SubAttribute {}), spec.input_name.clone(), floor_x_name.clone())
+        .binary(is_tie_name.clone(), s.clone(), DType::Bool, Op::Equal, Attribute::Equal(EqualAttribute {}), frac_name, half_name.clone())
+        .binary(plus_half_name.clone(), s.clone(), d, Op::Add, Attribute::Add(AddAttribute {}), spec.input_name.clone(), half_name.clone())
+        .unary(round_up_name.clone(), s.clone(), d, Op::Floor, Attribute::Floor(FloorAttribute {}), plus_half_name)
         .ternary(half_floor_mul_name.clone(), s.clone(), d, Op::Mul, Attribute::Mul(MulAttribute { shift: 0 }), floor_x_name.clone(), half_name, shift_name.clone())
-        .unary(half_floor_name.clone(), s.clone(), d, Op::Floor, Attribute::Floor(FloorAttribute), half_floor_mul_name)
+        .unary(half_floor_name.clone(), s.clone(), d, Op::Floor, Attribute::Floor(FloorAttribute {}), half_floor_mul_name)
         .ternary(even_floor_name.clone(), s.clone(), d, Op::Mul, Attribute::Mul(MulAttribute { shift: 0 }), half_floor_name, two_name, shift_name)
-        .binary(floor_is_even_name.clone(), s.clone(), DType::Bool, Op::Equal, Attribute::Equal(EqualAttribute), floor_x_name.clone(), even_floor_name)
-        .binary(floor_plus_one_name.clone(), s.clone(), d, Op::Add, Attribute::Add(AddAttribute), floor_x_name.clone(), one_name)
-        .ternary(tie_result_name.clone(), s.clone(), d, Op::Select, Attribute::Select(SelectAttribute), floor_is_even_name, floor_x_name, floor_plus_one_name);
+        .binary(floor_is_even_name.clone(), s.clone(), DType::Bool, Op::Equal, Attribute::Equal(EqualAttribute {}), floor_x_name.clone(), even_floor_name)
+        .binary(floor_plus_one_name.clone(), s.clone(), d, Op::Add, Attribute::Add(AddAttribute {}), floor_x_name.clone(), one_name)
+        .ternary(tie_result_name.clone(), s.clone(), d, Op::Select, Attribute::Select(SelectAttribute {}), floor_is_even_name, floor_x_name, floor_plus_one_name);
 
     // Final output uses the actual output tensor (not a temp), so use push_output_op directly.
     result.push_output_op(
         ctx.make_output(),
         Op::Select,
-        Attribute::Select(SelectAttribute),
+        Attribute::Select(SelectAttribute {}),
         vec![is_tie_name, tie_result_name, round_up_name],
     );
     result

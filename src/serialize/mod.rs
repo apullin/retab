@@ -431,14 +431,10 @@ fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind>
 }
 
 fn make_graph_tensor(name: String, shape: Vec<i32>, dtype: DType, data: Vec<u8>) -> TosaTensor {
-    TosaTensor {
-        name,
-        shape,
-        dtype,
-        data,
-        variable: false,
-        is_unranked: false,
-        variable_name: String::new(),
+    if data.is_empty() {
+        TosaTensor::new(&name, shape, dtype)
+    } else {
+        TosaTensor::with_data(&name, shape, dtype, data)
     }
 }
 
@@ -538,7 +534,7 @@ fn append_normalized_output_names(
                 if let Some(output_shape) = permute_shape(&serialized_shape, &perms) {
                     let output_name = format!("{}_output_layout", node.name);
                     tensors.push(TosaTensor::new(
-                        output_name.clone(),
+                        &output_name,
                         output_shape,
                         node_tensor_dtype(node),
                     ));
@@ -583,7 +579,7 @@ fn append_normalized_output_names(
 
         let output_name = format!("{}_output_layout", node.name);
         tensors.push(TosaTensor::new(
-            output_name.clone(),
+            &output_name,
             raw_shape,
             node_tensor_dtype(node),
         ));
@@ -710,7 +706,7 @@ fn collect_serialized_graph_items(
                     ));
                     operators.push(TosaOperator::new(
                         tosa_generated::Op::Const,
-                        Attribute::Const(tosa_generated::ConstAttribute),
+                        Attribute::Const(tosa_generated::ConstAttribute {}),
                         vec![],
                         vec![name.clone()],
                     ));
@@ -906,16 +902,16 @@ fn build_fb_tensors(
     for t in tensors {
         let name = builder.create_string(&t.name);
         let shape = builder.create_vector(&t.shape);
-        let data = if !t.data.is_empty() {
-            Some(create_force_aligned_u8_vector(builder, &t.data))
-        } else {
-            None
-        };
-        let var_name = if !t.variable_name.is_empty() {
-            Some(builder.create_string(&t.variable_name))
-        } else {
-            None
-        };
+        let data = t
+            .data
+            .as_ref()
+            .filter(|d| !d.is_empty())
+            .map(|d| create_force_aligned_u8_vector(builder, d));
+        let var_name = t
+            .variable_name
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .map(|s| builder.create_string(s));
 
         let start = builder.start_table();
         builder.push_slot_always::<WIPOffset<_>>(4, name); // name
@@ -1274,6 +1270,8 @@ fn build_fb_attribute(
         Attribute::ReduceMax(a) => axis_nan_mode_attr(builder, attr, a.axis, a.nan_mode as u32),
 
         Attribute::ReduceMin(a) => axis_nan_mode_attr(builder, attr, a.axis, a.nan_mode as u32),
+
+        other => unimplemented!("build_fb_attribute: unsupported attribute variant {:?}", other),
     }
 }
 

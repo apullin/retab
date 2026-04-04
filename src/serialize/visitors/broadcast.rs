@@ -57,7 +57,7 @@ pub(super) fn maybe_materialize_binary_broadcast(
     let broadcast_dtype = actual_tensor_dtype(graph, input_nodes[smaller_idx]);
 
     result.tensors.push(TosaTensor::new(
-        broadcast_name.clone(),
+        &broadcast_name,
         target_shape,
         broadcast_dtype,
     ));
@@ -68,13 +68,13 @@ pub(super) fn maybe_materialize_binary_broadcast(
     });
     result.operators.push(TosaOperator::new(
         Op::ConstShape,
-        Attribute::ConstShape(ConstShapeAttribute),
+        Attribute::ConstShape(ConstShapeAttribute {}),
         vec![],
         vec![shape_name.clone()],
     ));
     result.operators.push(TosaOperator::new(
         Op::Reshape,
-        Attribute::Reshape(ReshapeAttribute),
+        Attribute::Reshape(ReshapeAttribute {}),
         vec![input_names[smaller_idx].clone(), shape_name],
         vec![broadcast_name.clone()],
     ));
