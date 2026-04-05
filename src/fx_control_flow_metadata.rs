@@ -135,7 +135,53 @@ fn is_quantize_node(node: &Bound<'_, PyAny>) -> bool {
 //    Syncs placeholder fake tensors with parent args, stamps metadata.
 // ---------------------------------------------------------------------------
 
-fn regularize_control_flow_submodules<'py>(
+/// Resolve parent args for a control-flow node (cond or while_loop).
+fn resolve_cf_parent_args<'py>(
+    cf_node: &Bound<'py, PyAny>,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let target_str = cf_node
+        .getattr("target")
+        .and_then(|t| t.str().map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    let all_args = FxGraphModule::node_args(cf_node)?;
+    if target_str.contains("cond") {
+        // cond: last arg is the list of operands
+        if let Some(last) = all_args.last() {
+            let mut v = Vec::new();
+            if let Ok(iter) = last.iter() {
+                for item in iter {
+                    v.push(item?);
+                }
+            }
+            Ok(v)
+        } else {
+            Ok(Vec::new())
+        }
+    } else if target_str.contains("while_loop") {
+        // while_loop: args[-2] + args[-1]
+        let len = all_args.len();
+        if len >= 2 {
+            let mut v = Vec::new();
+            for list_arg in &all_args[len - 2..] {
+                if let Ok(iter) = list_arg.iter() {
+                    for item in iter {
+                        v.push(item?);
+                    }
+                }
+            }
+            Ok(v)
+        } else {
+            Ok(Vec::new())
+        }
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// Structural regularization: stamps placeholder markers, syncs fake tensors
+/// and dim_order, but does NOT propagate qparams. Run before parent passes.
+fn regularize_control_flow_submodules_structural<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
@@ -146,7 +192,6 @@ fn regularize_control_flow_submodules<'py>(
     let mut regularized: u32 = 0;
 
     for (_name, submodule, cf_node) in &submodules {
-        // Mark placeholders
         let placeholders = submodule_placeholders(submodule)?;
         for ph in &placeholders {
             let meta = ph.getattr("meta")?;
@@ -154,47 +199,8 @@ fn regularize_control_flow_submodules<'py>(
             meta.set_item("arm_control_flow_placeholder", true)?;
         }
 
-        // Determine parent args based on target
-        let target_str = cf_node
-            .getattr("target")
-            .and_then(|t| t.str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let parent_args = resolve_cf_parent_args(cf_node)?;
 
-        let all_args = FxGraphModule::node_args(cf_node)?;
-        let parent_args: Vec<Bound<'py, PyAny>> = if target_str.contains("cond") {
-            // cond: last arg is the list of operands
-            if let Some(last) = all_args.last() {
-                let mut v = Vec::new();
-                if let Ok(iter) = last.iter() {
-                    for item in iter {
-                        v.push(item?);
-                    }
-                }
-                v
-            } else {
-                Vec::new()
-            }
-        } else if target_str.contains("while_loop") {
-            // while_loop: args[-2] + args[-1]
-            let len = all_args.len();
-            if len >= 2 {
-                let mut v = Vec::new();
-                for list_arg in &all_args[len - 2..] {
-                    if let Ok(iter) = list_arg.iter() {
-                        for item in iter {
-                            v.push(item?);
-                        }
-                    }
-                }
-                v
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-
-        // Sync placeholder fake tensors with parent args
         for (ph, parent_arg) in placeholders.iter().zip(parent_args.iter()) {
             let fake = get_matching_fake_tensor.call1((parent_arg,))?;
             let meta = ph.getattr("meta")?;
@@ -207,20 +213,60 @@ fn regularize_control_flow_submodules<'py>(
                 let py_tuple = builtins.call_method1("tuple", (&dim_order,))?;
                 meta.set_item("tosa_dim_order", &py_tuple)?;
             }
-
-            // Propagate qparams
-            for qp_key in &["input_qparams", "output_qparams"] {
-                if let Some(parent_qp) = meta_val(&parent_meta, qp_key) {
-                    let copied = parent_qp.call_method0("copy").unwrap_or(parent_qp.clone());
-                    meta.set_item(*qp_key, &copied)?;
-                }
-            }
+            // No qparam propagation here — that happens post-parent-passes
         }
 
         regularized += 1;
     }
 
     Ok(regularized)
+}
+
+/// Full regularization including qparam propagation. Used by the legacy path.
+fn regularize_control_flow_submodules<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let count = regularize_control_flow_submodules_structural(py, gm)?;
+    propagate_parent_qparams_to_placeholders(py, gm)?;
+    Ok(count)
+}
+
+/// Copy input_qparams and output_qparams from parent args to submodule
+/// placeholders. Run AFTER parent passes so placeholders see post-fold qparams.
+pub(crate) fn propagate_parent_qparams_to_placeholders<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let submodules = get_cf_submodules(py, gm)?;
+    let mut propagated: u32 = 0;
+
+    for (_name, submodule, cf_node) in &submodules {
+        let placeholders = submodule_placeholders(submodule)?;
+        let parent_args = resolve_cf_parent_args(cf_node)?;
+
+        for (ph, parent_arg) in placeholders.iter().zip(parent_args.iter()) {
+            let meta = ph.getattr("meta")?;
+            let parent_meta = parent_arg.getattr("meta")?;
+
+            for qp_key in &["input_qparams", "output_qparams"] {
+                if let Some(parent_qp) = meta_val(&parent_meta, qp_key) {
+                    let copied = parent_qp.call_method0("copy").unwrap_or(parent_qp.clone());
+                    meta.set_item(*qp_key, &copied)?;
+                    propagated += 1;
+                }
+            }
+        }
+    }
+
+    if propagated > 0 {
+        log_line(format_args!(
+            "[propagate-boundary-qparams] propagated {} qparam(s) from parent args to submodule placeholders",
+            propagated
+        ));
+    }
+
+    Ok(propagated)
 }
 
 // ---------------------------------------------------------------------------
@@ -693,6 +739,95 @@ impl FxPass for FxControlFlowMetadataPass {
         }
 
         Ok(any_modified)
+    }
+}
+
+// ===========================================================================
+// Structural-only pre-pass (no qparam propagation)
+// ===========================================================================
+
+/// Pre-pass that stamps structural metadata on control-flow submodules WITHOUT
+/// propagating qparams. Run before parent passes.
+pub struct FxControlFlowStructuralPass;
+
+impl FxPass for FxControlFlowStructuralPass {
+    fn name(&self) -> &str {
+        "FxControlFlowStructural"
+    }
+
+    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
+        let py = gm.py();
+        let gm_ref = gm.gm_ref();
+
+        let submodules = get_cf_submodules(py, gm_ref)?;
+        if submodules.is_empty() {
+            return Ok(false);
+        }
+        drop(submodules);
+
+        let mut any_modified = false;
+
+        // 1. Structural regularize (no qparams)
+        let count = regularize_control_flow_submodules_structural(py, gm_ref)?;
+        if count > 0 {
+            any_modified = true;
+        }
+
+        // 2-4. Dim order annotations
+        annotate_cf_parent_rank4_dim_order(py, gm_ref)?;
+        annotate_cf_rank4_dim_order(py, gm_ref)?;
+        force_cf_rank4_output_dim_order(py, gm_ref)?;
+
+        // 5. Restamp placeholder dtypes
+        restamp_cf_placeholder_dtypes(py, gm_ref)?;
+
+        // 6. Snapshot table qparams
+        snapshot_cf_table_qparams(py, gm_ref)?;
+
+        // 7. Refresh fake tensors with dim_order
+        refresh_tosa_dim_order_fake_tensors(py, gm_ref)?;
+
+        if any_modified {
+            gm.recompile()?;
+        }
+
+        Ok(any_modified)
+    }
+}
+
+// ===========================================================================
+// QParam propagation post-pass
+// ===========================================================================
+
+/// Post-pass that copies parent post-pass qparams onto submodule placeholders.
+/// Run AFTER parent passes so placeholders see correct post-fold qparams.
+pub struct FxControlFlowQParamPropagationPass;
+
+impl FxPass for FxControlFlowQParamPropagationPass {
+    fn name(&self) -> &str {
+        "FxControlFlowQParamPropagation"
+    }
+
+    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
+        let py = gm.py();
+        let gm_ref = gm.gm_ref();
+
+        let submodules = get_cf_submodules(py, gm_ref)?;
+        if submodules.is_empty() {
+            return Ok(false);
+        }
+        drop(submodules);
+
+        // Propagate qparams from parent args to submodule placeholders
+        let count = propagate_parent_qparams_to_placeholders(py, gm_ref)?;
+
+        // Restamp placeholder dtypes now that qparams are present
+        restamp_cf_placeholder_dtypes(py, gm_ref)?;
+
+        // Re-snapshot table qparams with correct qparams
+        snapshot_cf_table_qparams(py, gm_ref)?;
+
+        Ok(count > 0)
     }
 }
 
@@ -1999,5 +2134,37 @@ pub(crate) fn run_boundary_phase<'py>(
         let cf_mod = py.import_bound("retab._control_flow")?;
         cf_mod.call_method1("_refresh_control_flow_binary_input_rescales", (gm,))?;
     }
+    Ok(())
+}
+
+// ===========================================================================
+// Minimal Output Phase (for correct-propagation pipeline)
+// ===========================================================================
+
+/// Minimal output phase for the fixed pipeline where qparams are propagated
+/// before submodule passes. Layout normalization, Q/DQ cleanup, and metadata.
+pub(crate) fn run_minimal_output_phase<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<()> {
+    // 1. Rewrite Q/DQ boundaries (collapse pairs, rewrite lone Q/DQ)
+    rewrite_control_flow_quantization_boundaries(py, gm)?;
+    // 2. Normalize output layouts (layout bypass — still needed)
+    normalize_control_flow_output_layouts(py, gm)?;
+    // 3. Remove noop passthroughs
+    remove_control_flow_noop_passthroughs(py, gm)?;
+    // 4. Re-stamp metadata after mutations
+    {
+        let gm_wrapper = crate::fx_graph::FxGraphModule::new(gm);
+        crate::fx_pass::FxPass::run(&FxControlFlowMetadataPass, &gm_wrapper)?;
+    }
+    // 5. Refresh TOSA transpose fake tensors
+    refresh_tosa_transpose_fake_tensors(py, gm)?;
+    // 6. Refresh TOSA dim_order fake tensors
+    refresh_tosa_dim_order_fake_tensors(py, gm)?;
+    // 7. Prune duplicate terminal rescales (safety net)
+    prune_duplicate_terminal_rescales(py, gm)?;
+    // 8. Restore float compare inputs
+    restore_control_flow_float_compare_inputs(py, gm)?;
     Ok(())
 }

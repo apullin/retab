@@ -274,6 +274,22 @@ fn stamp_control_flow_metadata(graph_module: &Bound<'_, PyAny>) -> PyResult<bool
     fx_pass::FxPass::run(&pass_, &gm)
 }
 
+/// Structural-only metadata stamp (no qparam propagation). Run before parent passes.
+#[pyfunction]
+#[pyo3(signature = (graph_module))]
+fn stamp_control_flow_structural(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let gm = fx_graph::FxGraphModule::new(graph_module);
+    fx_pass::FxPass::run(&fx_control_flow_metadata::FxControlFlowStructuralPass, &gm)
+}
+
+/// Propagate parent post-pass qparams to submodule placeholders. Run after parent passes.
+#[pyfunction]
+#[pyo3(signature = (graph_module))]
+fn propagate_control_flow_qparams(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let gm = fx_graph::FxGraphModule::new(graph_module);
+    fx_pass::FxPass::run(&fx_control_flow_metadata::FxControlFlowQParamPropagationPass, &gm)
+}
+
 /// Run control-flow cleanup (graph surgery) on the main graph.
 /// Replaces Python functions: remove_noop_passthroughs, prune_duplicate_rescales,
 /// restore_missing_rescale_qparams, restore_output_dequantizes,
@@ -408,6 +424,14 @@ fn cf_run_output_normalize_phase(graph_module: &Bound<'_, PyAny>) -> PyResult<()
     fx_control_flow_metadata::run_output_normalize_phase(py, graph_module)
 }
 
+/// Minimal output phase for the fixed pipeline (no boundary repair needed).
+#[pyfunction]
+#[pyo3(signature = (graph_module))]
+fn cf_run_minimal_output_phase(graph_module: &Bound<'_, PyAny>) -> PyResult<()> {
+    let py = graph_module.py();
+    fx_control_flow_metadata::run_minimal_output_phase(py, graph_module)
+}
+
 /// Run the full post-Rust boundary phase in one Rust call.
 #[pyfunction]
 #[pyo3(signature = (graph_module, tosa_spec))]
@@ -445,6 +469,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cf_quantize_constant_only_outputs, m)?)?;
     m.add_function(wrap_pyfunction!(cf_run_output_normalize_phase, m)?)?;
     m.add_function(wrap_pyfunction!(cf_run_boundary_phase, m)?)?;
+    m.add_function(wrap_pyfunction!(cf_run_minimal_output_phase, m)?)?;
+    m.add_function(wrap_pyfunction!(stamp_control_flow_structural, m)?)?;
+    m.add_function(wrap_pyfunction!(propagate_control_flow_qparams, m)?)?;
     m.add_function(wrap_pyfunction!(fx_graph_summary, m)?)?;
     Ok(())
 }
