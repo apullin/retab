@@ -552,13 +552,37 @@ fn read_input_qparams(
     let mut zps = Vec::new();
     let mut dtype_strs = Vec::new();
 
+    let debug_carried = std::env::var("TOSA_TRACE").as_deref() == Ok("1");
     for (idx, arg) in args.iter().enumerate().take(2) {
         if !FxGraphModule::is_node(arg) {
             continue;
         }
+        if debug_carried {
+            let arg_name = FxGraphModule::node_name(arg).unwrap_or_default();
+            let arg_op = FxGraphModule::node_op(arg).unwrap_or_default();
+            let arg_meta = arg.getattr("meta").ok();
+            let has_oqp = arg_meta.as_ref()
+                .and_then(|m| m.get_item("output_qparams").ok())
+                .map(|v| v.is_truthy().unwrap_or(false))
+                .unwrap_or(false);
+            let has_iqp = arg_meta.as_ref()
+                .and_then(|m| m.get_item("input_qparams").ok())
+                .map(|v| v.is_truthy().unwrap_or(false))
+                .unwrap_or(false);
+            log_line(format_args!(
+                "[InsertRescale-fallback] arg {} name={} op={} has_output_qparams={} has_input_qparams={}",
+                idx, arg_name, arg_op, has_oqp, has_iqp
+            ));
+        }
         if let Some(oqp) = recover_producer_qparam(arg)? {
             if let Some(qp) = first_qparam(&oqp) {
                 let (scale, zp, dtype_str) = qparam_scale_zp_dtype(&qp, 0, "torch.int8");
+                if debug_carried {
+                    log_line(format_args!(
+                        "[InsertRescale-fallback] arg {} recovered scale={} zp={} dtype={}",
+                        idx, scale, zp, dtype_str
+                    ));
+                }
                 if dtype_str.contains("int8") || dtype_str.contains("int16") {
                     keys.push(idx);
                     scales.push(scale);
@@ -566,6 +590,8 @@ fn read_input_qparams(
                     dtype_strs.push(dtype_str);
                 }
             }
+        } else if debug_carried {
+            log_line(format_args!("[InsertRescale-fallback] arg {} no producer qparam found", idx));
         }
     }
 
@@ -720,6 +746,13 @@ impl FxPass for FxInsertRescalePass {
             };
 
             let Some((keys, scales, zps, dtype_strs)) = read_input_qparams(node)? else {
+                if self.output_qparam_source == OutputQParamSource::Carried {
+                    let name = FxGraphModule::node_name(node).unwrap_or_default();
+                    log_line(format_args!(
+                        "[InsertRescale-Carried] Phase 2 SKIP {}: no input_qparams for {}",
+                        name, target
+                    ));
+                }
                 continue;
             };
 

@@ -242,17 +242,11 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
 /// repair Python functions still handle boundary rescaling until this pipeline
 /// is expanded to handle the loop-carried constraint natively.
 pub fn build_fx_submodule_pipeline() -> Vec<Box<dyn FxPass>> {
-    let ep = ExportedProgramClones::new(None);
     vec![
         Box::new(fx_control_flow_metadata::FxControlFlowMetadataPass),
-        Box::new(fx_insert_rescale::FxInsertRescalePass::new()),
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
-        Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(ep.fuse)),
-        Box::new(fx_remove_noop::FxRemoveNoopPass),
-        Box::new(fx_rewrite_matmul::FxRewriteMatmulRescalePass),
-        Box::new(fx_insert_rescale::FxInsertRescalePass::new()),
-        Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
         Box::new(fx_insert_rescale::FxInsertRescalePass::carried()),
+        Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
     ]
 }
 

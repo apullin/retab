@@ -2303,7 +2303,6 @@ pub(crate) fn normalize_control_flow_output_layouts<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
-    if std::env::var("NO_WPY").as_deref() == Ok("1") { return Ok(0); }
     let submodules = get_cf_submodules(py, gm)?;
     if submodules.is_empty() {
         return Ok(0);
@@ -2332,7 +2331,6 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
     include_inputs: bool,
     include_outputs: bool,
 ) -> PyResult<u32> {
-    if std::env::var("NO_WPY").as_deref() == Ok("1") { return Ok(0); }
     let cf_module = py.import_bound("retab._control_flow")?;
     let kwargs = pyo3::types::PyDict::new_bound(py);
     kwargs.set_item("include_inputs", include_inputs)?;
@@ -2394,7 +2392,7 @@ pub(crate) fn run_boundary_phase<'py>(
         crate::fx_pass::FxPass::run(&FxControlFlowMetadataPass, &gm_wrapper)?;
     }
     // 4. Refresh binary input rescales (still needed for while_loop captured buffers)
-    if std::env::var("NO_WPY").as_deref() != Ok("1") {
+    {
         let cf_mod = py.import_bound("retab._control_flow")?;
         cf_mod.call_method1("_refresh_control_flow_binary_input_rescales", (gm,))?;
     }
