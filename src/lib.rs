@@ -408,6 +408,17 @@ fn cf_run_output_normalize_phase(graph_module: &Bound<'_, PyAny>) -> PyResult<()
     fx_control_flow_metadata::run_output_normalize_phase(py, graph_module)
 }
 
+/// Run the full post-Rust boundary phase in one Rust call.
+#[pyfunction]
+#[pyo3(signature = (graph_module, tosa_spec))]
+fn cf_run_boundary_phase(
+    graph_module: &Bound<'_, PyAny>,
+    tosa_spec: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let py = graph_module.py();
+    fx_control_flow_metadata::run_boundary_phase(py, graph_module, tosa_spec)
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lower_to_tosa_v2, m)?)?;
@@ -433,6 +444,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cf_restore_missing_input_rescales, m)?)?;
     m.add_function(wrap_pyfunction!(cf_quantize_constant_only_outputs, m)?)?;
     m.add_function(wrap_pyfunction!(cf_run_output_normalize_phase, m)?)?;
+    m.add_function(wrap_pyfunction!(cf_run_boundary_phase, m)?)?;
     m.add_function(wrap_pyfunction!(fx_graph_summary, m)?)?;
     Ok(())
 }
