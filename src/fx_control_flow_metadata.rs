@@ -2094,48 +2094,20 @@ pub(crate) fn run_output_normalize_phase<'py>(
 pub(crate) fn run_boundary_phase<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
-    tosa_spec: &Bound<'py, PyAny>,
+    _tosa_spec: &Bound<'py, PyAny>,
 ) -> PyResult<()> {
     // 1. Rewrite quantization boundaries
     rewrite_control_flow_quantization_boundaries(py, gm)?;
     // 2. Reapply boundary rescales (inputs only)
     reapply_control_flow_boundary_rescales(py, gm, true, false)?;
-    // 3. ET InsertRescaleInt32Pass on submodules
-    {
-        let arm_utils = py.import_bound("executorch.backends.arm._passes.arm_pass_utils")?;
-        let get_cf_subs = arm_utils.getattr("get_cond_while_submodules_nested")?;
-        let rescale_mod = py.import_bound("executorch.backends.arm._passes.insert_rescales_pass")?;
-        let rescale_cls = rescale_mod.getattr("InsertRescaleInt32Pass")?;
-        let tosa_spec_mod = py.import_bound("executorch.backends.arm.tosa.specification")?;
-        let lowering_ctx_cls = tosa_spec_mod.getattr("TosaLoweringContext")?;
-
-        let subs_iter = get_cf_subs.call1((gm,))?;
-        for item in subs_iter.iter()? {
-            let tuple = item?;
-            let sm = tuple.get_item(1)?;
-            // with TosaLoweringContext(tosa_spec): InsertRescaleInt32Pass().call(sm)
-            let ctx = lowering_ctx_cls.call1((tosa_spec,))?;
-            let _ = ctx.call_method0("__enter__");
-            let result = rescale_cls.call0()?.call_method1("call", (&sm,));
-            let _ = ctx.call_method("__exit__", (py.None(), py.None(), py.None()), None);
-            // Swallow errors like the Python version does
-            let _ = result;
-        }
-    }
-    // 4. Stamp control-flow metadata
+    // DEAD with correct propagation: InsertRescaleInt32Pass, restore_missing_input_rescales
+    // 3. Stamp control-flow metadata
     {
         let gm_wrapper = crate::fx_graph::FxGraphModule::new(gm);
         crate::fx_pass::FxPass::run(&FxControlFlowMetadataPass, &gm_wrapper)?;
     }
-    // 5. Restore missing input rescales
-    restore_missing_control_flow_input_rescales_pub(py, gm)?;
-    // 6. Refresh binary input rescales (delegates to Python 813-line function)
-    //    With correct qparam propagation (CF_QPARAM_FIX=1), this is only needed
-    //    for while_loop models where captured buffers create cross-domain binary ops.
-    //    Cond-only and non-CF models don't need it.
+    // 4. Refresh binary input rescales (still needed for while_loop captured buffers)
     {
-        // Always run for now — still needed for both cond and while CF models.
-        // For non-CF models, this is a no-op (returns immediately when no submodules).
         let cf_mod = py.import_bound("retab._control_flow")?;
         cf_mod.call_method1("_refresh_control_flow_binary_input_rescales", (gm,))?;
     }
