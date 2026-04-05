@@ -2130,10 +2130,12 @@ pub(crate) fn run_boundary_phase<'py>(
     // 5. Restore missing input rescales
     restore_missing_control_flow_input_rescales_pub(py, gm)?;
     // 6. Refresh binary input rescales (delegates to Python 813-line function)
-    //    Still needed for while_loop models (loop-carried state creates circular
-    //    qparam dependencies that simple propagation doesn't handle).
-    //    Cond-only models and all non-CF models don't need this with correct propagation.
+    //    With correct qparam propagation (CF_QPARAM_FIX=1), this is only needed
+    //    for while_loop models where captured buffers create cross-domain binary ops.
+    //    Cond-only and non-CF models don't need it.
     {
+        // Always run for now — still needed for both cond and while CF models.
+        // For non-CF models, this is a no-op (returns immediately when no submodules).
         let cf_mod = py.import_bound("retab._control_flow")?;
         cf_mod.call_method1("_refresh_control_flow_binary_input_rescales", (gm,))?;
     }
@@ -2156,22 +2158,24 @@ pub(crate) fn run_minimal_output_phase<'py>(
     reapply_control_flow_boundary_rescales(py, gm, true, true)?;
     // 3. Restore missing rescale qparams
     restore_missing_control_flow_rescale_qparams(py, gm)?;
-    // 4. Normalize output layouts (layout bypass — still needed)
+    // 4. Quantize constant-only outputs
+    quantize_constant_only_control_flow_outputs(py, gm)?;
+    // 5. Normalize output layouts (layout bypass — still needed)
     normalize_control_flow_output_layouts(py, gm)?;
-    // 5. Remove noop passthroughs
+    // 6. Remove noop passthroughs
     remove_control_flow_noop_passthroughs(py, gm)?;
-    // 6. Re-stamp metadata after mutations
+    // 7. Re-stamp metadata after mutations
     {
         let gm_wrapper = crate::fx_graph::FxGraphModule::new(gm);
         crate::fx_pass::FxPass::run(&FxControlFlowMetadataPass, &gm_wrapper)?;
     }
-    // 7. Refresh TOSA transpose fake tensors
+    // 8. Refresh TOSA transpose fake tensors
     refresh_tosa_transpose_fake_tensors(py, gm)?;
-    // 8. Refresh TOSA dim_order fake tensors
+    // 9. Refresh TOSA dim_order fake tensors
     refresh_tosa_dim_order_fake_tensors(py, gm)?;
-    // 9. Prune duplicate terminal rescales
+    // 10. Prune duplicate terminal rescales
     prune_duplicate_terminal_rescales(py, gm)?;
-    // 10. Restore float compare inputs
+    // 11. Restore float compare inputs
     restore_control_flow_float_compare_inputs(py, gm)?;
     Ok(())
 }
