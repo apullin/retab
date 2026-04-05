@@ -232,14 +232,16 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
     ]
 }
 
-/// Build a minimal FX pipeline for while_loop submodule graphs.
+/// Build the FX pipeline for while_loop submodule graphs.
 ///
-/// Uses Carried output qparam source: output[i] must match placeholder[i]
-/// because while_loop body outputs feed back as inputs on the next iteration.
+/// Uses Carried output qparam source on the final rescale: output[i] must
+/// match placeholder[i] because while_loop body outputs feed back as inputs.
+///
+/// NOTE: This is more minimal than the cond pipeline because the full pipeline
+/// (with fold_qdq) can double-transform while_loop bodies. The while_loop
+/// repair Python functions still handle boundary rescaling until this pipeline
+/// is expanded to handle the loop-carried constraint natively.
 pub fn build_fx_submodule_pipeline() -> Vec<Box<dyn FxPass>> {
-    // TODO: OutputQParamSource::Carried should also be plumbed through
-    // FxFoldAndAnnotateQParamsPass and other passes that reason about qparams,
-    // not just FxInsertRescalePass. For now, only the rescale pass needs it.
     vec![
         Box::new(fx_control_flow_metadata::FxControlFlowMetadataPass),
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
