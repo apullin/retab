@@ -2092,9 +2092,6 @@ pub(crate) fn restore_control_flow_float_compare_inputs<'py>(
         .getattr("dequantize_per_tensor")?
         .getattr("default")?;
 
-    let cf_mod = py.import_bound("retab._control_flow")?;
-    let cleanup_graph_fn = cf_mod.getattr("_cleanup_graph")?;
-
     let compare_markers = &[
         "aten.gt.",
         "aten.ge.",
@@ -2244,7 +2241,7 @@ pub(crate) fn restore_control_flow_float_compare_inputs<'py>(
         }
 
         if updated {
-            cleanup_graph_fn.call1((&graph,))?;
+            cleanup_graph(&graph)?;
             recompile(&submodule)?;
         }
     }
