@@ -1914,6 +1914,118 @@ fn rewrite_control_flow_dequantize_nodes<'py>(
     Ok(modified)
 }
 
+/// Rewrite standalone quantize nodes in a submodule graph.
+/// Cases 1 (same qparam bypass) and 3 (rescale insertion) in Rust,
+/// case 2 (const materialization) delegates to Python.
+fn rewrite_control_flow_quantize_nodes<'py>(
+    py: Python<'py>,
+    graph: &Bound<'py, PyAny>,
+    submodule: &Bound<'py, PyAny>,
+    cf_node: &Bound<'py, PyAny>,
+    quant_count: &mut u32,
+) -> PyResult<bool> {
+    let mut modified = false;
+    let nodes: Vec<Bound<'py, PyAny>> = graph
+        .getattr("nodes")?
+        .iter()?
+        .filter_map(|n| n.ok())
+        .collect();
+
+    let torch = py.import_bound("torch")?;
+    let int8 = torch.getattr("int8")?;
+    let int16 = torch.getattr("int16")?;
+    let int32 = torch.getattr("int32")?;
+
+    for node in &nodes {
+        if !is_quantize_node(node) {
+            continue;
+        }
+        let args = FxGraphModule::node_args(node)?;
+        if args.is_empty() || !FxGraphModule::is_node(&args[0]) {
+            continue;
+        }
+        let source_node = &args[0];
+
+        // Get source qparam
+        let source_qparam = extract_effective_node_qparam(py, source_node)?;
+
+        // Get output qparam from Q node's args
+        let output_qparam = parse_per_tensor_qparam(py, node)?;
+        let output_qparam = match output_qparam {
+            Some(qp) => qp,
+            None => continue,
+        };
+
+        // Check if source is quantized int
+        let source_dtype_str = source_node
+            .getattr("meta")?
+            .get_item("val")
+            .ok()
+            .and_then(|v| v.getattr("dtype").ok())
+            .map(|d| format!("{}", d))
+            .unwrap_or_default();
+        let source_is_int = source_dtype_str.contains("int8")
+            || source_dtype_str.contains("int16")
+            || source_dtype_str.contains("int32");
+
+        if !source_is_int && source_qparam.is_none() && !is_zero_input_const_source(source_node) {
+            continue;
+        }
+
+        // Per-channel or missing source qparam: delegate to Python for const materialization
+        let is_per_channel = |qp: &Bound<'_, PyAny>| -> bool {
+            qp.getattr("per_channel").and_then(|v| v.extract()).unwrap_or(false)
+        };
+        if source_qparam.is_none()
+            || source_qparam.as_ref().map(|q| is_per_channel(q)).unwrap_or(false)
+            || is_per_channel(&output_qparam)
+        {
+            if source_qparam.is_none() && is_zero_input_const_source(source_node) {
+                // TODO: port _materialize_quantized_constant_node to Rust
+                // For now, skip this node (const materialization case)
+                log_line(format_args!(
+                    "[cf-quantize-rewrite] skipping const materialization for {}",
+                    node.getattr("name").map(|n| format!("{}", n)).unwrap_or("?".into())
+                ));
+            }
+            continue;
+        }
+
+        let source_qparam = source_qparam.unwrap();
+
+        // Case 1: same qparam → bypass
+        if same_control_flow_qparam(&source_qparam, &output_qparam, true) {
+            node.call_method1("replace_all_uses_with", (source_node,))?;
+            graph.call_method1("erase_node", (node,))?;
+            *quant_count += 1;
+            modified = true;
+            continue;
+        }
+
+        // Case 3: different qparam → insert RESCALE
+        let helpers = py.import_bound("retab._helpers")?;
+        let insert_fn = helpers.getattr("insert_rescale_node")?;
+        let scale_ratio = source_qparam.getattr("scale")?.extract::<f64>().unwrap_or(1.0)
+            / output_qparam.getattr("scale")?.extract::<f64>().unwrap_or(1.0);
+        let input_zp: i64 = source_qparam.getattr("zp")?.extract().unwrap_or(0);
+        let output_zp: i64 = output_qparam.getattr("zp")?.extract().unwrap_or(0);
+        let out_dtype = output_qparam.getattr("dtype")?;
+        let scales = pyo3::types::PyList::new_bound(py, &[scale_ratio]);
+        let kwargs = PyDict::new_bound(py);
+        kwargs.set_item("after", false)?;
+        let rescale = insert_fn.call(
+            (submodule, node, source_node, &out_dtype, &scales, input_zp, output_zp),
+            Some(&kwargs),
+        )?;
+        stamp_single_qparams(py, &rescale, Some(&source_qparam), Some(&output_qparam))?;
+        node.call_method1("replace_all_uses_with", (&rescale,))?;
+        graph.call_method1("erase_node", (node,))?;
+        *quant_count += 1;
+        modified = true;
+    }
+    Ok(modified)
+}
+
 // ---------------------------------------------------------------------------
 // _rewrite_control_flow_quantization_boundaries
 //
@@ -1937,32 +2049,17 @@ pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
         return Ok(0);
     }
 
-    // rewrite_quantize_nodes still delegates to Python (needs _ControlFlowRescaleEdit)
-    let cf_rewrites = py.import_bound("retab._cf_rewrites")?;
-    let rewrite_quant_fn = cf_rewrites.getattr("_rewrite_control_flow_quantize_nodes")?;
-    let cf_ctx_mod = py.import_bound("retab._cf_ctx")?;
-    let ctx_cls = cf_ctx_mod.getattr("CfSubmoduleCtx")?;
-    let quant_args_mod =
-        py.import_bound("executorch.backends.arm._passes.quant_args")?;
-    let quant_args_cls = quant_args_mod.getattr("QuantArgs")?;
-
     let mut total_rewrites: u32 = 0;
     let mut quant_count: u32 = 0;
     let mut dequant_count: u32 = 0;
 
-    // Stats dict for the remaining Python sub-function
-    let stats = PyDict::new_bound(py);
-    stats.set_item("quant", 0i64)?;
-
     for (_name, submodule, cf_node) in &submodules {
-        let ctx = ctx_cls.call_method1("from_submodule", (submodule, cf_node))?;
-        let graph = ctx.getattr("graph")?;
+        let graph = submodule.getattr("graph")?;
 
-        // Step 1: Rust-native Q/DQ collapse
         let m1 = collapse_control_flow_qdq_pairs(py, &graph, &mut quant_count)?;
-        // Step 2: Python delegate (rewrite lone Q nodes — needs _ControlFlowRescaleEdit)
-        let m2: bool = rewrite_quant_fn.call1((&ctx, &stats, &quant_args_cls))?.extract()?;
-        // Step 3: Rust-native DQ rewrite (with Python fallback for int32 cluster)
+        let m2 = rewrite_control_flow_quantize_nodes(
+            py, &graph, submodule, cf_node, &mut quant_count,
+        )?;
         let m3 = rewrite_control_flow_dequantize_nodes(
             py, &graph, submodule, cf_node, &mut dequant_count,
         )?;
@@ -1973,9 +2070,6 @@ pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
             total_rewrites += 1;
         }
     }
-
-    let py_quant_count: i64 = stats.get_item("quant")?.map(|v| v.extract().unwrap_or(0)).unwrap_or(0);
-    quant_count += py_quant_count as u32;
 
     if quant_count > 0 {
         log_line(format_args!(
