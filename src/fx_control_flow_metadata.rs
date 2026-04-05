@@ -2142,29 +2142,33 @@ pub(crate) fn run_boundary_phase<'py>(
 // ===========================================================================
 
 /// Minimal output phase for the fixed pipeline where qparams are propagated
-/// before submodule passes. Layout normalization, Q/DQ cleanup, and metadata.
+/// before submodule passes. Boundary cleanup, layout normalization, and metadata.
 pub(crate) fn run_minimal_output_phase<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<()> {
     // 1. Rewrite Q/DQ boundaries (collapse pairs, rewrite lone Q/DQ)
     rewrite_control_flow_quantization_boundaries(py, gm)?;
-    // 2. Normalize output layouts (layout bypass — still needed)
+    // 2. Reapply boundary rescales (both inputs and outputs)
+    reapply_control_flow_boundary_rescales(py, gm, true, true)?;
+    // 3. Restore missing rescale qparams
+    restore_missing_control_flow_rescale_qparams(py, gm)?;
+    // 4. Normalize output layouts (layout bypass — still needed)
     normalize_control_flow_output_layouts(py, gm)?;
-    // 3. Remove noop passthroughs
+    // 5. Remove noop passthroughs
     remove_control_flow_noop_passthroughs(py, gm)?;
-    // 4. Re-stamp metadata after mutations
+    // 6. Re-stamp metadata after mutations
     {
         let gm_wrapper = crate::fx_graph::FxGraphModule::new(gm);
         crate::fx_pass::FxPass::run(&FxControlFlowMetadataPass, &gm_wrapper)?;
     }
-    // 5. Refresh TOSA transpose fake tensors
+    // 7. Refresh TOSA transpose fake tensors
     refresh_tosa_transpose_fake_tensors(py, gm)?;
-    // 6. Refresh TOSA dim_order fake tensors
+    // 8. Refresh TOSA dim_order fake tensors
     refresh_tosa_dim_order_fake_tensors(py, gm)?;
-    // 7. Prune duplicate terminal rescales (safety net)
+    // 9. Prune duplicate terminal rescales
     prune_duplicate_terminal_rescales(py, gm)?;
-    // 8. Restore float compare inputs
+    // 10. Restore float compare inputs
     restore_control_flow_float_compare_inputs(py, gm)?;
     Ok(())
 }
