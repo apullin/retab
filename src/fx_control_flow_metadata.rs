@@ -1840,29 +1840,8 @@ fn rewrite_control_flow_dequantize_nodes<'py>(
                 .ok()
                 .map(|d| format!("{}", d))
                 .unwrap_or_default();
-            if dtype_str.contains("int8") || dtype_str.contains("int16") {
-                // Delegate the complex int32 cluster rewrite to Python
-                let cf_rewrites = py.import_bound("retab._cf_rewrites")?;
-                let try_rewrite = cf_rewrites.getattr("_try_rewrite_dequantize_to_int32_cluster")?;
-                let cf_ctx_mod = py.import_bound("retab._cf_ctx")?;
-                let ctx = cf_ctx_mod
-                    .getattr("CfSubmoduleCtx")?
-                    .call_method1("from_submodule", (submodule, cf_node))?;
-                let py_users = pyo3::types::PyList::new_bound(py, &users);
-                let stats = pyo3::types::PyDict::new_bound(py);
-                stats.set_item("dequant", 0i64)?;
-                let result: bool = try_rewrite
-                    .call1((&ctx, node, source_node, &source_qp, &py_users, &stats))?
-                    .extract()?;
-                if result {
-                    let count: i64 = stats.get_item("dequant")?
-                        .map(|v| v.extract().unwrap_or(0))
-                        .unwrap_or(0);
-                    *dequant_count += count as u32;
-                    modified = true;
-                    continue;
-                }
-            }
+            // Int32 cluster rewrite for int8/int16 sources skipped —
+            // dead under correct qparam propagation. Fall through to bypass check.
         }
 
         // Simple bypass: if all users are RESCALE or output, remove the DQ
