@@ -2130,6 +2130,9 @@ pub(crate) fn run_boundary_phase<'py>(
     // 5. Restore missing input rescales
     restore_missing_control_flow_input_rescales_pub(py, gm)?;
     // 6. Refresh binary input rescales (delegates to Python 813-line function)
+    //    Still needed for while_loop models (loop-carried state creates circular
+    //    qparam dependencies that simple propagation doesn't handle).
+    //    Cond-only models and all non-CF models don't need this with correct propagation.
     {
         let cf_mod = py.import_bound("retab._control_flow")?;
         cf_mod.call_method1("_refresh_control_flow_binary_input_rescales", (gm,))?;
