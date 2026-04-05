@@ -1051,6 +1051,7 @@ impl FxPass for FxInsertRescalePass {
         // Phase 4: loop-carried output rescaling.
         // For while_loop bodies, ensure each output arg has the same qparams
         // as its corresponding placeholder (output[i] feeds back as input[i]).
+        // The placeholder qparams are the source of truth — no inference needed.
         if self.output_qparam_source == OutputQParamSource::Carried {
             let placeholders: Vec<Bound<'_, PyAny>> = gm.nodes()?
                 .into_iter()
@@ -1063,9 +1064,7 @@ impl FxPass for FxInsertRescalePass {
 
             if let Some(output) = output_node {
                 let output_args = FxGraphModule::node_args(&output)?;
-                // output_args[0] is either a single value or a tuple of values
                 let output_vals: Vec<Bound<'_, PyAny>> = if output_args.len() == 1 {
-                    // Could be a tuple
                     if let Ok(iter) = output_args[0].iter() {
                         iter.filter_map(|v| v.ok()).collect()
                     } else {
@@ -1079,48 +1078,20 @@ impl FxPass for FxInsertRescalePass {
                     if !FxGraphModule::is_node(out_val) {
                         continue;
                     }
-                    // Get placeholder's effective qparam (what the output must match)
+
+                    // Placeholder qparams are the target (already propagated)
                     let ph_meta = ph.getattr("meta")?;
-                    let ph_qparam = if let Ok(oqp) = ph_meta.get_item("output_qparams") {
+                    let ph_qp = if let Ok(oqp) = ph_meta.get_item("output_qparams") {
                         first_qparam(&oqp)
                     } else if let Ok(iqp) = ph_meta.get_item("input_qparams") {
                         first_qparam(&iqp)
                     } else {
                         None
                     };
-                    let ph_qp = match ph_qparam {
+                    let ph_qp = match ph_qp {
                         Some(qp) => qp,
                         None => continue,
                     };
-
-                    // Get output arg's current qparam
-                    let out_meta = out_val.getattr("meta")?;
-                    let out_qparam = if let Ok(oqp) = out_meta.get_item("output_qparams") {
-                        first_qparam(&oqp)
-                    } else {
-                        None
-                    };
-
-                    // Check if they already match
-                    let already_matches = out_qparam.as_ref().map(|oqp| {
-                        let ph_s = qp_get_f64(&ph_qp, "scale", None, 1.0);
-                        let ph_z: i64 = qp_get_i64(&ph_qp, "zp", None, 0);
-                        let out_s = qp_get_f64(oqp, "scale", None, 1.0);
-                        let out_z: i64 = qp_get_i64(oqp, "zp", None, 0);
-                        (ph_s - out_s).abs() < 1e-10 && ph_z == out_z
-                    }).unwrap_or(false);
-
-                    if already_matches {
-                        continue;
-                    }
-
-                    // Insert rescale: out_val -> placeholder qparams
-                    let out_scale = out_qparam.as_ref()
-                        .map(|q| qp_get_f64(q, "scale", None, 1.0))
-                        .unwrap_or(1.0);
-                    let out_zp = out_qparam.as_ref()
-                        .map(|q| qp_get_i64(q, "zp", None, 0))
-                        .unwrap_or(0);
                     let ph_scale = qp_get_f64(&ph_qp, "scale", None, 1.0);
                     let ph_zp: i64 = qp_get_i64(&ph_qp, "zp", None, 0);
                     let ph_dtype_str = ph_qp.getattr("dtype")
@@ -1128,25 +1099,71 @@ impl FxPass for FxInsertRescalePass {
                         .unwrap_or("torch.int8".into());
                     let ph_dtype = quant.dtype_for_str(&ph_dtype_str);
 
-                    if out_scale == 0.0 || ph_scale == 0.0 {
+                    if ph_scale == 0.0 {
                         continue;
                     }
+
+                    // Get output arg's scale from its fake tensor or from the
+                    // RESCALE node that produced it. Walk the producer to find scale.
+                    let out_scale;
+                    let out_zp;
+                    let out_target = FxGraphModule::node_target_str(out_val)
+                        .unwrap_or_default();
+
+                    if out_target.contains("RESCALE") || out_target.contains("rescale") {
+                        // Output arg is already a RESCALE — read its output zp from args[4]
+                        let r_args = FxGraphModule::node_args(out_val)?;
+                        if r_args.len() >= 5 {
+                            let mult: f64 = r_args[2].get_item(0_usize)
+                                .ok()
+                                .and_then(|v| v.extract().ok())
+                                .unwrap_or(1.0);
+                            // Source of the rescale
+                            let source_meta = if FxGraphModule::is_node(&r_args[0]) {
+                                r_args[0].getattr("meta").ok()
+                            } else { None };
+                            let source_oqp = source_meta.as_ref()
+                                .and_then(|m| m.get_item("output_qparams").ok())
+                                .and_then(|oqp| first_qparam(&oqp));
+                            let source_scale = source_oqp.as_ref()
+                                .map(|q| qp_get_f64(q, "scale", None, 1.0))
+                                .unwrap_or(1.0);
+                            out_scale = if mult != 0.0 { source_scale / mult } else { 1.0 };
+                            out_zp = r_args[4].extract::<i64>().unwrap_or(0);
+                        } else {
+                            out_scale = 1.0;
+                            out_zp = 0;
+                        }
+                    } else {
+                        // Not a RESCALE — try output_qparams metadata
+                        let out_meta = out_val.getattr("meta")?;
+                        let oqp = out_meta.get_item("output_qparams").ok()
+                            .and_then(|oqp| first_qparam(&oqp));
+                        out_scale = oqp.as_ref()
+                            .map(|q| qp_get_f64(q, "scale", None, 1.0))
+                            .unwrap_or(ph_scale); // default to ph_scale = no-op
+                        out_zp = oqp.as_ref()
+                            .map(|q| qp_get_i64(q, "zp", None, 0))
+                            .unwrap_or(ph_zp);
+                    }
+
+                    // Skip if already matching
+                    if (out_scale - ph_scale).abs() < 1e-10 && out_zp == ph_zp {
+                        continue;
+                    }
+
+                    if out_scale == 0.0 {
+                        continue;
+                    }
+
                     let rescale_ratio = out_scale / ph_scale;
-
                     let rescale = rescale_ops.insert(
-                        out_val,
-                        out_val,
-                        ph_dtype,
-                        vec![rescale_ratio],
-                        out_zp,
-                        ph_zp,
-                        true, // after
+                        out_val, out_val, ph_dtype,
+                        vec![rescale_ratio], out_zp, ph_zp,
+                        true,
                     )?;
-
                     rescale_ops.restamp_output_meta(py, out_val, &rescale, out_val, ph_dtype)?;
 
-                    // Rewire: output node should reference the rescale, not the original
-                    // We need to update the output node's args
                     if output_vals.len() == 1 {
                         output.call_method("update_arg", (0i64, &rescale), None)?;
                     } else {
