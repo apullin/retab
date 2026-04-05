@@ -3,9 +3,12 @@
 //! Rust port of the 7 simplest metadata-stamping functions from
 //! `python/retab/_control_flow.py` and `python/retab/_cf_ctx.py`.
 //! None of these perform graph surgery -- they only read/write `node.meta`.
+//!
+//! Also contains the cleanup pass (`FxControlFlowCleanupPass`) which ports
+//! graph-surgery functions from `_cf_rewrites.py` and `_cf_ctx.py`.
 
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
+use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_graph::{meta_get, meta_val, py_attr, FxGraphModule};
 use crate::fx_pass::FxPass;
@@ -690,5 +693,790 @@ impl FxPass for FxControlFlowMetadataPass {
         }
 
         Ok(any_modified)
+    }
+}
+
+// ===========================================================================
+// Cleanup pass: graph surgery functions ported from _cf_rewrites.py / _cf_ctx.py
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Helpers for the cleanup pass
+// ---------------------------------------------------------------------------
+
+/// Check if a node is a call_function whose target string contains any of the given markers.
+fn is_call_function_target(node: &Bound<'_, PyAny>, markers: &[&str]) -> bool {
+    let op: String = py_attr(node, &["op"], String::new());
+    if op != "call_function" {
+        return false;
+    }
+    let target_str = node
+        .getattr("target")
+        .and_then(|t| t.str().map(|s| s.to_string()))
+        .unwrap_or_default();
+    markers.iter().any(|m| target_str.contains(m))
+}
+
+/// Check if a node is a TOSA RESCALE call_function.
+fn is_tosa_rescale_node(node: &Bound<'_, PyAny>) -> bool {
+    is_call_function_target(
+        node,
+        &["tosa_RESCALE", "tosa.RESCALE", "TosaRescale"],
+    )
+}
+
+/// Check if a node is a TOSA TRANSPOSE call_function.
+fn is_tosa_transpose_node(node: &Bound<'_, PyAny>) -> bool {
+    is_call_function_target(
+        node,
+        &["tosa.TRANSPOSE", "tosa_TRANSPOSE", "TosaTranspose"],
+    )
+}
+
+/// Cleanup graph: eliminate dead code + lint.
+fn cleanup_graph(graph: &Bound<'_, PyAny>) -> PyResult<()> {
+    graph.call_method0("eliminate_dead_code")?;
+    graph.call_method0("lint")?;
+    Ok(())
+}
+
+/// Get the rescale signature: canonicalized args[1:5].
+fn rescale_signature<'py>(node: &Bound<'py, PyAny>) -> Option<Vec<String>> {
+    if !is_tosa_rescale_node(node) {
+        return None;
+    }
+    let args = FxGraphModule::node_args(node).ok()?;
+    if args.len() < 5 {
+        return None;
+    }
+    let mut sig = Vec::new();
+    for arg in &args[1..5] {
+        sig.push(format!("{}", arg));
+    }
+    Some(sig)
+}
+
+/// Extract a single qparam entry from a qparams dict.
+/// Mirrors Python `_extract_single_qparam_entry`.
+fn extract_single_qparam_entry<'py>(
+    py: Python<'py>,
+    qparams: &Bound<'py, PyAny>,
+) -> Option<Bound<'py, PyAny>> {
+    if qparams.is_none() {
+        return None;
+    }
+    let is_truthy = qparams.is_truthy().unwrap_or(false);
+    if !is_truthy {
+        return None;
+    }
+    // Try dict with key 0
+    if let Ok(val) = qparams.get_item(0i64) {
+        if !val.is_none() {
+            return Some(val);
+        }
+    }
+    // Try dict with len==1 -> return first value
+    if let Ok(len) = qparams.len() {
+        if len == 1 {
+            if let Ok(values) = qparams.call_method0("values") {
+                if let Ok(mut iter) = values.iter() {
+                    if let Some(Ok(val)) = iter.next() {
+                        return Some(val);
+                    }
+                }
+            }
+        }
+    }
+    // Return qparams itself as fallback
+    let _ = py;
+    Some(qparams.clone())
+}
+
+/// Stamp single qparams on a node (input_qparam and/or output_qparam).
+fn stamp_single_qparams<'py>(
+    py: Python<'py>,
+    node: &Bound<'py, PyAny>,
+    input_qparam: Option<&Bound<'py, PyAny>>,
+    output_qparam: Option<&Bound<'py, PyAny>>,
+) -> PyResult<()> {
+    let meta = node.getattr("meta")?;
+    if let Some(iqp) = input_qparam {
+        let d = PyDict::new_bound(py);
+        d.set_item(0i64, iqp)?;
+        meta.set_item("input_qparams", &d)?;
+    }
+    if let Some(oqp) = output_qparam {
+        let d = PyDict::new_bound(py);
+        d.set_item(0i64, oqp)?;
+        meta.set_item("output_qparams", &d)?;
+    }
+    Ok(())
+}
+
+/// Copy output contract meta from src to dst.
+fn copy_output_contract_meta<'py>(
+    dst: &Bound<'py, PyAny>,
+    src: &Bound<'py, PyAny>,
+    copy_output_qparams: bool,
+) -> PyResult<()> {
+    let dst_meta = dst.getattr("meta")?;
+    let src_meta = src.getattr("meta")?;
+    // val
+    if let Some(val) = meta_val(&src_meta, "val") {
+        dst_meta.set_item("val", &val)?;
+    }
+    // tosa_dim_order
+    if let Some(tdo) = meta_val(&src_meta, "tosa_dim_order") {
+        let py = dst.py();
+        let builtins = py.import_bound("builtins")?;
+        let t = builtins.call_method1("tuple", (&tdo,))?;
+        dst_meta.set_item("tosa_dim_order", &t)?;
+    }
+    // output_qparams
+    if copy_output_qparams {
+        if let Some(oqp) = meta_val(&src_meta, "output_qparams") {
+            let py = dst.py();
+            let builtins = py.import_bound("builtins")?;
+            let d = builtins.call_method1("dict", (&oqp,))?;
+            dst_meta.set_item("output_qparams", &d)?;
+        }
+    }
+    Ok(())
+}
+
+/// Get all modules (parent + submodules) for iteration.
+fn get_all_modules<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let mut modules: Vec<Bound<'py, PyAny>> = vec![gm.clone()];
+    let submodules = get_cf_submodules(py, gm)?;
+    for (_name, submodule, _cf_node) in &submodules {
+        modules.push(submodule.clone());
+    }
+    Ok(modules)
+}
+
+/// Get `_actual_shape_from_meta` for a node. Returns None if not available.
+fn actual_shape_from_meta<'py>(node: &Bound<'py, PyAny>) -> PyResult<Option<Vec<i64>>> {
+    let meta = node.getattr("meta")?;
+    let fake_tensor = match meta_val(&meta, "val") {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    let shape_obj = match fake_tensor.getattr("shape") {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    let shape: Vec<i64> = match shape_obj.extract() {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+
+    let dim_order = meta_val(&meta, "tosa_dim_order");
+    if let Some(tdo) = dim_order {
+        let tdo_vec: Vec<usize> = match tdo.extract() {
+            Ok(v) => v,
+            Err(_) => return Ok(Some(shape)),
+        };
+        if tdo_vec.len() == shape.len() {
+            let identity: Vec<usize> = (0..shape.len()).collect();
+            if tdo_vec != identity {
+                let permuted: Vec<i64> = tdo_vec.iter().map(|&idx| shape[idx]).collect();
+                return Ok(Some(permuted));
+            }
+        }
+    }
+    Ok(Some(shape))
+}
+
+// ---------------------------------------------------------------------------
+// 1. _remove_control_flow_noop_passthroughs
+// ---------------------------------------------------------------------------
+
+pub(crate) fn remove_control_flow_noop_passthroughs<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let submodules = get_cf_submodules(py, gm)?;
+    let mut rewritten: u32 = 0;
+
+    let noop_markers = &[
+        "dim_order_ops._clone_dim_order",
+        "aten.clone",
+        "aten.alias_copy",
+        "aten.detach_copy",
+    ];
+
+    for (_name, submodule, _cf_node) in &submodules {
+        let graph = submodule.getattr("graph")?;
+        let mut updated = false;
+
+        // Collect nodes into a list first (we'll be modifying the graph)
+        let nodes = submodule_nodes(&submodule)?;
+
+        for node in &nodes {
+            if !is_call_function_target(node, noop_markers) {
+                continue;
+            }
+
+            let args = FxGraphModule::node_args(node)?;
+            if args.is_empty() || !FxGraphModule::is_node(&args[0]) {
+                continue;
+            }
+
+            let source = &args[0];
+
+            // Check dtype match
+            let node_meta = node.getattr("meta")?;
+            let source_meta = source.getattr("meta")?;
+            let node_val = meta_val(&node_meta, "val");
+            let source_val = meta_val(&source_meta, "val");
+
+            // dtype check
+            if let (Some(ref nv), Some(ref sv)) = (&node_val, &source_val) {
+                let nd = nv.getattr("dtype").ok();
+                let sd = sv.getattr("dtype").ok();
+                if let (Some(ref nd), Some(ref sd)) = (&nd, &sd) {
+                    if !nd.is_none() && !sd.is_none() && !nd.eq(sd).unwrap_or(true) {
+                        continue;
+                    }
+                }
+            }
+
+            // shape check
+            if let (Some(ref nv), Some(ref sv)) = (&node_val, &source_val) {
+                let ns = nv.getattr("shape").ok();
+                let ss = sv.getattr("shape").ok();
+                if let (Some(ref ns), Some(ref ss)) = (&ns, &ss) {
+                    let ns_t: Result<Vec<i64>, _> = ns.extract();
+                    let ss_t: Result<Vec<i64>, _> = ss.extract();
+                    if let (Ok(ns_t), Ok(ss_t)) = (ns_t, ss_t) {
+                        if ns_t != ss_t {
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // dim_order check
+            let node_dim_order = meta_val(&node_meta, "tosa_dim_order");
+            let source_dim_order = meta_val(&source_meta, "tosa_dim_order");
+            if let (Some(ref ndo), Some(ref sdo)) = (&node_dim_order, &source_dim_order) {
+                let ndo_v: Result<Vec<i64>, _> = ndo.extract();
+                let sdo_v: Result<Vec<i64>, _> = sdo.extract();
+                if let (Ok(ndo_v), Ok(sdo_v)) = (ndo_v, sdo_v) {
+                    if ndo_v != sdo_v {
+                        continue;
+                    }
+                }
+            }
+
+            // Propagate metadata from node to source if source is missing it
+            if meta_val(&source_meta, "tosa_dim_order").is_none() {
+                if let Some(ref ndo) = node_dim_order {
+                    let builtins = py.import_bound("builtins")?;
+                    let t = builtins.call_method1("tuple", (ndo,))?;
+                    source_meta.set_item("tosa_dim_order", &t)?;
+                }
+            }
+            if meta_val(&source_meta, "input_qparams").is_none() {
+                if let Some(iqp) = meta_val(&node_meta, "input_qparams") {
+                    if iqp.is_truthy().unwrap_or(false) {
+                        let builtins = py.import_bound("builtins")?;
+                        let d = builtins.call_method1("dict", (&iqp,))?;
+                        source_meta.set_item("input_qparams", &d)?;
+                    }
+                }
+            }
+            if meta_val(&source_meta, "output_qparams").is_none() {
+                if let Some(oqp) = meta_val(&node_meta, "output_qparams") {
+                    if oqp.is_truthy().unwrap_or(false) {
+                        let builtins = py.import_bound("builtins")?;
+                        let d = builtins.call_method1("dict", (&oqp,))?;
+                        source_meta.set_item("output_qparams", &d)?;
+                    }
+                }
+            }
+
+            // Replace all uses and erase
+            node.call_method1("replace_all_uses_with", (source,))?;
+            graph.call_method1("erase_node", (node,))?;
+            rewritten += 1;
+            updated = true;
+        }
+
+        if updated {
+            cleanup_graph(&graph)?;
+            recompile(&submodule)?;
+        }
+    }
+
+    Ok(rewritten)
+}
+
+// ---------------------------------------------------------------------------
+// 2. _prune_duplicate_terminal_rescales
+// ---------------------------------------------------------------------------
+
+pub(crate) fn prune_duplicate_terminal_rescales<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let mut pruned: u32 = 0;
+
+    // Include parent + submodules (matches Python include_parent=True)
+    let mut modules: Vec<Bound<'py, PyAny>> = vec![gm.clone()];
+    let submodules = get_cf_submodules(py, gm)?;
+    for (_name, submodule, _cf_node) in &submodules {
+        modules.push(submodule.clone());
+    }
+
+    for module in &modules {
+        let graph = module.getattr("graph")?;
+        let mut modified = false;
+
+        let nodes = submodule_nodes(module)?;
+
+        for node in &nodes {
+            if !is_tosa_rescale_node(node) {
+                continue;
+            }
+            // Check single user
+            let users = FxGraphModule::node_users(node)?;
+            if users.len() != 1 {
+                continue;
+            }
+            let user = &users[0];
+
+            if !is_tosa_rescale_node(user) {
+                continue;
+            }
+
+            // user.args[0] is node
+            let user_args = FxGraphModule::node_args(user)?;
+            if user_args.is_empty() {
+                continue;
+            }
+            let user_arg0_is_node = user_args[0].is(node);
+            if !user_arg0_is_node {
+                continue;
+            }
+
+            // Compare rescale signatures
+            let node_sig = rescale_signature(node);
+            let user_sig = rescale_signature(user);
+            match (&node_sig, &user_sig) {
+                (Some(ns), Some(us)) if ns == us => {}
+                _ => continue,
+            }
+
+            // Check qparams: first has no output_qparams, user has output_qparams
+            let node_meta = node.getattr("meta")?;
+            let user_meta = user.getattr("meta")?;
+
+            let first_output_qparam = {
+                let oqp = meta_val(&node_meta, "output_qparams");
+                match oqp {
+                    Some(ref v) => extract_single_qparam_entry(py, v),
+                    None => None,
+                }
+            };
+            let final_output_qparam = {
+                let oqp = meta_val(&user_meta, "output_qparams");
+                match oqp {
+                    Some(ref v) => extract_single_qparam_entry(py, v),
+                    None => None,
+                }
+            };
+
+            if first_output_qparam.is_some() {
+                continue;
+            }
+            if final_output_qparam.is_none() {
+                continue;
+            }
+            let final_output_qparam = final_output_qparam.unwrap();
+
+            // Rewrite: node.args = (source, user.args[1..5])
+            let node_args = FxGraphModule::node_args(node)?;
+            let source = &node_args[0];
+
+            let new_args = PyTuple::new_bound(
+                py,
+                &[
+                    source.clone(),
+                    user_args[1].clone(),
+                    user_args[2].clone(),
+                    user_args[3].clone(),
+                    user_args[4].clone(),
+                ],
+            );
+            node.setattr("args", &new_args)?;
+
+            // Copy output contract meta (without output_qparams)
+            copy_output_contract_meta(node, user, false)?;
+
+            // If node has no input_qparams, try to get from source
+            if meta_val(&node_meta, "input_qparams").is_none()
+                || !node_meta
+                    .get_item("input_qparams")
+                    .map(|v| v.is_truthy().unwrap_or(false))
+                    .unwrap_or(false)
+            {
+                let source_meta = source.getattr("meta")?;
+                if let Some(soqp) = meta_val(&source_meta, "output_qparams") {
+                    if let Some(source_qparam) = extract_single_qparam_entry(py, &soqp) {
+                        stamp_single_qparams(py, node, Some(&source_qparam), None)?;
+                    }
+                }
+            }
+
+            // Stamp output_qparam
+            stamp_single_qparams(py, node, None, Some(&final_output_qparam))?;
+
+            // Replace user with node and erase user
+            user.call_method1("replace_all_uses_with", (node,))?;
+            graph.call_method1("erase_node", (user,))?;
+            pruned += 1;
+            modified = true;
+        }
+
+        if modified {
+            cleanup_graph(&graph)?;
+            recompile(module)?;
+        }
+    }
+
+    Ok(pruned)
+}
+
+// ---------------------------------------------------------------------------
+// 3. _restore_missing_control_flow_rescale_qparams
+// ---------------------------------------------------------------------------
+
+pub(crate) fn restore_missing_control_flow_rescale_qparams<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let torch = py.import_bound("torch")?;
+    let int8 = torch.getattr("int8")?;
+    let int16 = torch.getattr("int16")?;
+    let int32 = torch.getattr("int32")?;
+    let quant_args_mod =
+        py.import_bound("executorch.backends.arm._passes.quant_args")?;
+    let quant_args_cls = quant_args_mod.getattr("QuantArgs")?;
+
+    let cf_mod = py.import_bound("retab._control_flow")?;
+    let extract_effective_fn = cf_mod.getattr("_extract_effective_node_qparam")?;
+
+    let submodules = get_cf_submodules(py, gm)?;
+    let mut restored: u32 = 0;
+
+    for (_name, submodule, _cf_node) in &submodules {
+        let graph = submodule.getattr("graph")?;
+        let mut modified = false;
+
+        for node in submodule_nodes(&submodule)? {
+            if !is_tosa_rescale_node(&node) {
+                continue;
+            }
+            let args = FxGraphModule::node_args(&node)?;
+            if args.len() < 5 {
+                continue;
+            }
+
+            let meta = node.getattr("meta")?;
+            let has_input = meta_val(&meta, "input_qparams")
+                .map(|v| v.is_truthy().unwrap_or(false))
+                .unwrap_or(false);
+            let has_output = meta_val(&meta, "output_qparams")
+                .map(|v| v.is_truthy().unwrap_or(false))
+                .unwrap_or(false);
+            if has_input && has_output {
+                continue;
+            }
+
+            // source = args[0]
+            let source = &args[0];
+            if !FxGraphModule::is_node(source) {
+                continue;
+            }
+
+            let source_qparam = extract_effective_fn.call1((source,))?;
+            if source_qparam.is_none() {
+                continue;
+            }
+
+            // output_dtype = args[1]
+            let output_dtype = &args[1];
+            let is_valid_dtype = output_dtype.eq(&int8).unwrap_or(false)
+                || output_dtype.eq(&int16).unwrap_or(false)
+                || output_dtype.eq(&int32).unwrap_or(false);
+            if !is_valid_dtype {
+                continue;
+            }
+
+            // scale_arg = args[2], must be list/tuple of length 1, non-zero
+            let scale_arg = &args[2];
+            let scale_list: Vec<f64> = match scale_arg.extract() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if scale_list.len() != 1 || scale_list[0] == 0.0 {
+                continue;
+            }
+
+            // Build output qparam
+            let source_scale = source_qparam.call_method0("get_scale_per_tensor")?;
+            let source_scale_f: f64 = match source_scale.extract() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let output_scale = source_scale_f / scale_list[0];
+
+            let zp_val: i64 = match args[4].extract() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let qinfo = torch.call_method1("iinfo", (output_dtype,))?;
+            let qmin: i64 = qinfo.getattr("min")?.extract()?;
+            let qmax: i64 = qinfo.getattr("max")?.extract()?;
+
+            let output_qparam = match quant_args_cls.call1((
+                output_scale,
+                zp_val,
+                qmin,
+                qmax,
+                output_dtype,
+            )) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if !has_input {
+                stamp_single_qparams(py, &node, Some(&source_qparam), None)?;
+            }
+            if !has_output {
+                stamp_single_qparams(py, &node, None, Some(&output_qparam))?;
+            }
+            restored += 1;
+            modified = true;
+        }
+
+        if modified {
+            recompile(&submodule)?;
+        }
+        let _ = graph;
+    }
+
+    Ok(restored)
+}
+
+// ---------------------------------------------------------------------------
+// 4. _restore_control_flow_output_dequantizes
+//    Delegates to Python because it depends on complex boundary contract infra.
+// ---------------------------------------------------------------------------
+
+fn restore_control_flow_output_dequantizes<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let cf_rewrites = py.import_bound("retab._cf_rewrites")?;
+    let func = cf_rewrites.getattr("_restore_control_flow_output_dequantizes")?;
+    func.call1((gm,))?;
+    // Python function doesn't return a count, but we can estimate from log.
+    // For simplicity, return 0 and let the Python side log.
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// 5. _restore_missing_control_flow_input_rescales
+//    Delegates to Python because it depends on complex boundary contract infra.
+// ---------------------------------------------------------------------------
+
+fn restore_missing_control_flow_input_rescales<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let cf_rewrites = py.import_bound("retab._cf_rewrites")?;
+    let func = cf_rewrites.getattr("_restore_missing_control_flow_input_rescales")?;
+    func.call1((gm,))?;
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// 6. _refresh_tosa_transpose_fake_tensors
+// ---------------------------------------------------------------------------
+
+pub(crate) fn refresh_tosa_transpose_fake_tensors<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let modules = get_all_modules(py, gm)?;
+    let mut refreshed: u32 = 0;
+
+    for module in &modules {
+        let mut updated = false;
+
+        for node in submodule_nodes(module)? {
+            if !is_tosa_transpose_node(&node) {
+                continue;
+            }
+
+            let args = FxGraphModule::node_args(&node)?;
+            if args.len() < 2 {
+                continue;
+            }
+
+            let input_node = &args[0];
+            if !FxGraphModule::is_node(input_node) {
+                continue;
+            }
+
+            let input_meta = input_node.getattr("meta")?;
+            let input_fake = match meta_val(&input_meta, "val") {
+                Some(v) => v,
+                None => continue,
+            };
+
+            if !input_fake.hasattr("new_empty")? {
+                continue;
+            }
+
+            let input_shape = match actual_shape_from_meta(input_node)? {
+                Some(s) => s,
+                None => continue,
+            };
+
+            // Parse perm from args[1]
+            let perm_obj = &args[1];
+            let perm: Vec<usize> = match perm_obj.extract() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if perm.len() != input_shape.len() {
+                continue;
+            }
+
+            // Compute new shape
+            let new_shape: Vec<i64> = perm.iter().map(|&idx| input_shape[idx]).collect();
+
+            let node_meta = node.getattr("meta")?;
+            let node_fake = meta_val(&node_meta, "val").unwrap_or(input_fake.clone());
+
+            let base_tensor = if node_fake.hasattr("new_empty")? {
+                node_fake.clone()
+            } else {
+                input_fake.clone()
+            };
+
+            // Get dtype
+            let dtype = node_fake
+                .getattr("dtype")
+                .or_else(|_| input_fake.getattr("dtype"))?;
+
+            // Create new tensor: base_tensor.new_empty(new_shape, dtype=dtype)
+            let shape_list = PyList::new_bound(py, &new_shape);
+            let kwargs = PyDict::new_bound(py);
+            kwargs.set_item("dtype", &dtype)?;
+            let new_val = base_tensor.call_method("new_empty", (&shape_list,), Some(&kwargs))?;
+
+            node_meta.set_item("val", &new_val)?;
+
+            // Set tosa_dim_order to identity
+            let identity: Vec<i64> = (0..new_shape.len() as i64).collect();
+            let identity_tuple = PyTuple::new_bound(py, &identity);
+            node_meta.set_item("tosa_dim_order", &identity_tuple)?;
+
+            updated = true;
+            refreshed += 1;
+        }
+
+        if updated {
+            recompile(module)?;
+        }
+    }
+
+    Ok(refreshed)
+}
+
+// NOTE: _refresh_tosa_dim_order_fake_tensors (item 7) is already implemented
+// above as `refresh_tosa_dim_order_fake_tensors`.
+
+// ---------------------------------------------------------------------------
+// Combined Cleanup Pass
+// ---------------------------------------------------------------------------
+
+pub struct FxControlFlowCleanupPass;
+
+impl FxPass for FxControlFlowCleanupPass {
+    fn name(&self) -> &str {
+        "FxControlFlowCleanup"
+    }
+
+    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
+        let py = gm.py();
+        let gm_ref = gm.gm_ref();
+
+        // Check if there are any cond/while_loop nodes at all.
+        let submodules = get_cf_submodules(py, gm_ref)?;
+        if submodules.is_empty() {
+            return Ok(false);
+        }
+        drop(submodules);
+
+        // 1. Remove no-op passthroughs
+        let c1 = remove_control_flow_noop_passthroughs(py, gm_ref)?;
+        if c1 > 0 {
+            log_line(format_args!(
+                "[FxControlFlowCleanup] removed {} no-op passthrough node(s)",
+                c1
+            ));
+        }
+
+        // 2. Prune duplicate terminal rescales
+        let c2 = prune_duplicate_terminal_rescales(py, gm_ref)?;
+        if c2 > 0 {
+            log_line(format_args!(
+                "[FxControlFlowCleanup] pruned {} duplicate terminal rescale node(s)",
+                c2
+            ));
+        }
+
+        // 3. Restore missing rescale qparams
+        let c3 = restore_missing_control_flow_rescale_qparams(py, gm_ref)?;
+        if c3 > 0 {
+            log_line(format_args!(
+                "[FxControlFlowCleanup] restored qparams on {} rescale node(s)",
+                c3
+            ));
+        }
+
+        // 4. Restore output dequantizes (delegates to Python)
+        restore_control_flow_output_dequantizes(py, gm_ref)?;
+
+        // 5. Restore missing input rescales (delegates to Python)
+        restore_missing_control_flow_input_rescales(py, gm_ref)?;
+
+        // 6. Refresh TOSA transpose fake tensors
+        let c6 = refresh_tosa_transpose_fake_tensors(py, gm_ref)?;
+        if c6 > 0 {
+            log_line(format_args!(
+                "[FxControlFlowCleanup] refreshed {} TOSA transpose fake tensor(s)",
+                c6
+            ));
+        }
+
+        // 7. Refresh TOSA dim_order fake tensors (reuse existing function)
+        refresh_tosa_dim_order_fake_tensors(py, gm_ref)?;
+
+        // Recompile the parent graph module -- always recompile since
+        // steps 4+5 delegate to Python and may have modified the graph.
+        gm.recompile()?;
+
+        Ok(true)
     }
 }

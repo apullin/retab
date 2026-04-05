@@ -274,6 +274,48 @@ fn stamp_control_flow_metadata(graph_module: &Bound<'_, PyAny>) -> PyResult<bool
     fx_pass::FxPass::run(&pass_, &gm)
 }
 
+/// Run control-flow cleanup (graph surgery) on the main graph.
+/// Replaces Python functions: remove_noop_passthroughs, prune_duplicate_rescales,
+/// restore_missing_rescale_qparams, restore_output_dequantizes,
+/// restore_missing_input_rescales, refresh_transpose_fake_tensors,
+/// refresh_dim_order_fake_tensors.
+#[pyfunction]
+#[pyo3(signature = (graph_module))]
+fn cleanup_control_flow_submodules(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let gm = fx_graph::FxGraphModule::new(graph_module);
+    let pass_ = fx_control_flow_metadata::FxControlFlowCleanupPass;
+    fx_pass::FxPass::run(&pass_, &gm)
+}
+
+// Individual control-flow cleanup steps (called one at a time from Python)
+#[pyfunction]
+#[pyo3(signature = (graph_module))]
+fn cf_remove_noop_passthroughs(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = graph_module.py();
+    Ok(fx_control_flow_metadata::remove_control_flow_noop_passthroughs(py, graph_module)? > 0)
+}
+
+#[pyfunction]
+#[pyo3(signature = (graph_module))]
+fn cf_prune_duplicate_terminal_rescales(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = graph_module.py();
+    Ok(fx_control_flow_metadata::prune_duplicate_terminal_rescales(py, graph_module)? > 0)
+}
+
+#[pyfunction]
+#[pyo3(signature = (graph_module))]
+fn cf_restore_missing_rescale_qparams(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = graph_module.py();
+    Ok(fx_control_flow_metadata::restore_missing_control_flow_rescale_qparams(py, graph_module)? > 0)
+}
+
+#[pyfunction]
+#[pyo3(signature = (graph_module))]
+fn cf_refresh_tosa_transpose_fake_tensors(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = graph_module.py();
+    Ok(fx_control_flow_metadata::refresh_tosa_transpose_fake_tensors(py, graph_module)? > 0)
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lower_to_tosa_v2, m)?)?;
@@ -284,6 +326,11 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_fx_submodule_passes, m)?)?;
     m.add_function(wrap_pyfunction!(run_fx_cond_passes, m)?)?;
     m.add_function(wrap_pyfunction!(stamp_control_flow_metadata, m)?)?;
+    m.add_function(wrap_pyfunction!(cleanup_control_flow_submodules, m)?)?;
+    m.add_function(wrap_pyfunction!(cf_remove_noop_passthroughs, m)?)?;
+    m.add_function(wrap_pyfunction!(cf_prune_duplicate_terminal_rescales, m)?)?;
+    m.add_function(wrap_pyfunction!(cf_restore_missing_rescale_qparams, m)?)?;
+    m.add_function(wrap_pyfunction!(cf_refresh_tosa_transpose_fake_tensors, m)?)?;
     m.add_function(wrap_pyfunction!(fx_graph_summary, m)?)?;
     Ok(())
 }
