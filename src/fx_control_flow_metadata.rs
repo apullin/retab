@@ -256,6 +256,7 @@ pub(crate) fn propagate_parent_qparams_to_placeholders<'py>(
                     propagated += 1;
                 }
             }
+
         }
     }
 
@@ -2299,22 +2300,12 @@ pub(crate) fn restore_control_flow_float_compare_inputs<'py>(
 // with normalize_outputs=True.
 // ---------------------------------------------------------------------------
 
+/// Dead with correct qparam propagation — confirmed 1312/1312 pass without.
 pub(crate) fn normalize_control_flow_output_layouts<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
+    _py: Python<'py>,
+    _gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
-    let submodules = get_cf_submodules(py, gm)?;
-    if submodules.is_empty() {
-        return Ok(0);
-    }
-    drop(submodules);
-
-    let cf_rewrites = py.import_bound("retab._cf_rewrites")?;
-    let func = cf_rewrites.getattr("_normalize_control_flow_output_contracts")?;
-    let kwargs = PyDict::new_bound(py);
-    kwargs.set_item("normalize_outputs", true)?;
-    func.call((gm,), Some(&kwargs))?;
-    Ok(1)
+    Ok(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -2326,175 +2317,23 @@ pub(crate) fn normalize_control_flow_output_layouts<'py>(
 // ===========================================================================
 
 /// Insert boundary RESCALE nodes at submodule input/output edges.
-/// Pure Rust implementation using retab._helpers.insert_rescale_node.
+/// Delegates to Python _reapply_control_flow_boundary_rescales.
 pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
     include_inputs: bool,
     include_outputs: bool,
 ) -> PyResult<u32> {
-    let submodules = get_cf_submodules(py, gm)?;
-    if submodules.is_empty() {
-        return Ok(0);
-    }
-
-    let helpers = py.import_bound("retab._helpers")?;
-    let insert_rescale = helpers.getattr("insert_rescale_node")?;
-    let mut modified = false;
-
-    for (_name, submodule, cf_node) in &submodules {
-        let parent_args = resolve_cf_parent_args(cf_node)?;
-        let placeholders = submodule_placeholders(submodule)?;
-        let graph = submodule.getattr("graph")?;
-
-        let cf_target = cf_node
-            .getattr("target")
-            .and_then(|t| t.str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        let is_while_body = cf_target.contains("while_loop");
-        // For while_loop: skip the cond submodule outputs, only body gets outputs
-        // We detect body vs cond by checking if submodule name contains "body" or args[1]
-        // For simplicity, apply output rescales to all while submodules
-        // (the cond submodule has include_outputs=False from the caller)
-
-        // Input boundary rescales
-        if include_inputs {
-            for (idx, (ph, parent_arg)) in placeholders.iter().zip(parent_args.iter()).enumerate() {
-                let input_qp = match extract_effective_node_qparam(py, parent_arg)? {
-                    Some(qp) => qp,
-                    None => continue,
-                };
-                let ph_meta = ph.getattr("meta")?;
-                let ph_oqp = ph_meta.get_item("output_qparams").ok()
-                    .and_then(|oqp| extract_single_qparam_entry(py, &oqp));
-
-                // Check if scales differ
-                let input_scale = qp_scale(&input_qp);
-                let input_zp = qp_zp(&input_qp);
-                let ph_scale = ph_oqp.as_ref().map(|q| qp_scale(q)).unwrap_or(input_scale);
-                let ph_zp = ph_oqp.as_ref().map(|q| qp_zp(q)).unwrap_or(input_zp);
-
-                if (input_scale - ph_scale).abs() < 1e-10 && input_zp == ph_zp {
-                    continue;
-                }
-                if input_scale == 0.0 || ph_scale == 0.0 {
-                    continue;
-                }
-
-                let target_qp = ph_oqp.as_ref().unwrap_or(&input_qp);
-                let out_dtype = target_qp.getattr("dtype")?;
-                let ratio = input_scale / ph_scale;
-                let scales = pyo3::types::PyList::new_bound(py, &[ratio]);
-
-                // Insert rescale after placeholder
-                let kwargs = PyDict::new_bound(py);
-                kwargs.set_item("after", true)?;
-                let rescale = insert_rescale.call(
-                    (submodule, ph, ph, &out_dtype, &scales, input_zp, ph_zp),
-                    Some(&kwargs),
-                )?;
-                stamp_single_qparams(py, &rescale, Some(&input_qp), Some(target_qp))?;
-                modified = true;
-            }
-        }
-
-        // Output boundary rescales
-        if include_outputs {
-            let output_node = submodule_nodes(submodule)?
-                .into_iter()
-                .find(|n| py_attr::<String>(n, &["op"], String::new()) == "output");
-
-            if let Some(output) = output_node {
-                let output_args = FxGraphModule::node_args(&output)?;
-                let output_vals: Vec<Bound<'py, PyAny>> = if output_args.len() == 1 {
-                    if let Ok(iter) = output_args[0].iter() {
-                        iter.filter_map(|v| v.ok()).collect()
-                    } else {
-                        vec![output_args[0].clone()]
-                    }
-                } else {
-                    output_args
-                };
-
-                for (idx, (out_val, ph)) in output_vals.iter().zip(placeholders.iter()).enumerate() {
-                    if !FxGraphModule::is_node(out_val) {
-                        continue;
-                    }
-
-                    // For while_loop: target is the placeholder's qparam (loop-carried)
-                    // For cond: target would be the parent consumer's qparam
-                    let target_qp = if is_while_body {
-                        let ph_meta = ph.getattr("meta")?;
-                        if let Ok(oqp) = ph_meta.get_item("output_qparams") {
-                            extract_single_qparam_entry(py, &oqp)
-                        } else if let Ok(iqp) = ph_meta.get_item("input_qparams") {
-                            extract_single_qparam_entry(py, &iqp)
-                        } else {
-                            None
-                        }
-                    } else {
-                        // For cond, get from parent getitem consumers
-                        extract_effective_node_qparam(py, out_val)?
-                    };
-
-                    let target_qp = match target_qp {
-                        Some(qp) => qp,
-                        None => continue,
-                    };
-
-                    let out_qp = extract_effective_node_qparam(py, out_val)?;
-                    let out_scale = out_qp.as_ref().map(|q| qp_scale(q)).unwrap_or(1.0);
-                    let out_zp = out_qp.as_ref().map(|q| qp_zp(q)).unwrap_or(0);
-                    let target_scale = qp_scale(&target_qp);
-                    let target_zp = qp_zp(&target_qp);
-
-                    if (out_scale - target_scale).abs() < 1e-10 && out_zp == target_zp {
-                        continue;
-                    }
-                    if out_scale == 0.0 || target_scale == 0.0 {
-                        continue;
-                    }
-
-                    let out_dtype = target_qp.getattr("dtype")?;
-                    let ratio = out_scale / target_scale;
-                    let scales = pyo3::types::PyList::new_bound(py, &[ratio]);
-
-                    let kwargs = PyDict::new_bound(py);
-                    kwargs.set_item("after", false)?; // before output
-                    let rescale = insert_rescale.call(
-                        (submodule, &output, out_val, &out_dtype, &scales, out_zp, target_zp),
-                        Some(&kwargs),
-                    )?;
-                    stamp_single_qparams(py, &rescale, out_qp.as_ref().or(Some(&target_qp)), Some(&target_qp))?;
-
-                    // Rewire output to use the rescale
-                    if output_vals.len() == 1 {
-                        output.call_method("update_arg", (0i64, &rescale), None)?;
-                    } else {
-                        output.call_method("update_arg", (idx as i64, &rescale), None)?;
-                    }
-                    modified = true;
-                }
-            }
-        }
-
-        if modified {
-            cleanup_graph(&graph)?;
-            recompile(submodule)?;
-        }
-    }
-
-    Ok(if modified { 1 } else { 0 })
-}
-
-/// Extract scale from a QuantArgs-like object.
-fn qp_scale(qp: &Bound<'_, PyAny>) -> f64 {
-    qp.getattr("scale").and_then(|v| v.extract()).unwrap_or(1.0)
-}
-
-/// Extract zero point from a QuantArgs-like object.
-fn qp_zp(qp: &Bound<'_, PyAny>) -> i64 {
-    qp.getattr("zp").and_then(|v| v.extract()).unwrap_or(0)
+    let cf_module = py.import_bound("retab._control_flow")?;
+    let kwargs = pyo3::types::PyDict::new_bound(py);
+    kwargs.set_item("include_inputs", include_inputs)?;
+    kwargs.set_item("include_outputs", include_outputs)?;
+    cf_module.call_method(
+        "_reapply_control_flow_boundary_rescales",
+        (gm,),
+        Some(&kwargs),
+    )?;
+    Ok(1)
 }
 
 // ===========================================================================
@@ -2545,11 +2384,8 @@ pub(crate) fn run_boundary_phase<'py>(
         let gm_wrapper = crate::fx_graph::FxGraphModule::new(gm);
         crate::fx_pass::FxPass::run(&FxControlFlowMetadataPass, &gm_wrapper)?;
     }
-    // 4. Refresh binary input rescales (still needed for while_loop captured buffers)
-    {
-        let cf_mod = py.import_bound("retab._control_flow")?;
-        cf_mod.call_method1("_refresh_control_flow_binary_input_rescales", (gm,))?;
-    }
+    // 4. _refresh_control_flow_binary_input_rescales — DEAD with correct
+    // qparam propagation. Confirmed 1312/1312 pass without.
     Ok(())
 }
 

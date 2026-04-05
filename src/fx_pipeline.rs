@@ -245,7 +245,7 @@ pub fn build_fx_submodule_pipeline() -> Vec<Box<dyn FxPass>> {
     vec![
         Box::new(fx_control_flow_metadata::FxControlFlowMetadataPass),
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
-        Box::new(fx_insert_rescale::FxInsertRescalePass::carried()),
+        Box::new(fx_insert_rescale::FxInsertRescalePass::new()),
         Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
     ]
 }

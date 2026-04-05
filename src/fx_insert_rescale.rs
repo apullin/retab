@@ -514,6 +514,19 @@ fn recover_producer_qparam<'py>(
 fn read_input_qparams(
     node: &Bound<'_, PyAny>,
 ) -> PyResult<Option<(Vec<usize>, Vec<f64>, Vec<i64>, Vec<String>)>> {
+    read_input_qparams_impl(node, false)
+}
+
+fn read_input_qparams_carried(
+    node: &Bound<'_, PyAny>,
+) -> PyResult<Option<(Vec<usize>, Vec<f64>, Vec<i64>, Vec<String>)>> {
+    read_input_qparams_impl(node, true)
+}
+
+fn read_input_qparams_impl(
+    node: &Bound<'_, PyAny>,
+    extract_from_q_literals: bool,
+) -> PyResult<Option<(Vec<usize>, Vec<f64>, Vec<i64>, Vec<String>)>> {
     let meta = node.getattr("meta")?;
     let input_qp = meta_non_empty_item(&meta, "input_qparams")?;
 
@@ -589,6 +602,36 @@ fn read_input_qparams(
                     zps.push(zp);
                     dtype_strs.push(dtype_str);
                 }
+            }
+        } else if extract_from_q_literals {
+            // Walk through DQ to find Q node with literal scale/zp args
+            let mut walk = arg.clone();
+            for _ in 0..4 {
+                let target = FxGraphModule::node_target_str(&walk).unwrap_or_default();
+                if target.contains("quantize_per_tensor") && !target.contains("dequantize") {
+                    let q_args = FxGraphModule::node_args(&walk)?;
+                    if q_args.len() >= 6 {
+                        let scale: f64 = q_args[1].extract().unwrap_or(1.0);
+                        let zp: i64 = q_args[2].extract().unwrap_or(0);
+                        let dtype_str = format!("{}", q_args[5]);
+                        if dtype_str.contains("int8") || dtype_str.contains("int16") {
+                            keys.push(idx);
+                            scales.push(scale);
+                            zps.push(zp);
+                            dtype_strs.push(dtype_str);
+                            if debug_carried {
+                                log_line(format_args!(
+                                    "[InsertRescale-fallback] arg {} Q-literal scale={} zp={}",
+                                    idx, scale, zp
+                                ));
+                            }
+                        }
+                    }
+                    break;
+                }
+                let w_args = FxGraphModule::node_args(&walk).unwrap_or_default();
+                if w_args.is_empty() || !FxGraphModule::is_node(&w_args[0]) { break; }
+                walk = w_args[0].clone();
             }
         } else if debug_carried {
             log_line(format_args!("[InsertRescale-fallback] arg {} no producer qparam found", idx));
@@ -745,7 +788,12 @@ impl FxPass for FxInsertRescalePass {
                 continue;
             };
 
-            let Some((keys, scales, zps, dtype_strs)) = read_input_qparams(node)? else {
+            let qparams_result = if self.output_qparam_source == OutputQParamSource::Carried {
+                read_input_qparams_carried(node)?
+            } else {
+                read_input_qparams(node)?
+            };
+            let Some((keys, scales, zps, dtype_strs)) = qparams_result else {
                 if self.output_qparam_source == OutputQParamSource::Carried {
                     let name = FxGraphModule::node_name(node).unwrap_or_default();
                     log_line(format_args!(
