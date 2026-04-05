@@ -563,7 +563,7 @@ fn snapshot_cf_table_qparams<'py>(
 //    Re-sync fake tensors with tosa_dim_order metadata.
 // ---------------------------------------------------------------------------
 
-fn refresh_tosa_dim_order_fake_tensors<'py>(
+pub(crate) fn refresh_tosa_dim_order_fake_tensors<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<()> {
@@ -1406,9 +1406,440 @@ pub(crate) fn refresh_tosa_transpose_fake_tensors<'py>(
 // NOTE: _refresh_tosa_dim_order_fake_tensors (item 7) is already implemented
 // above as `refresh_tosa_dim_order_fake_tensors`.
 
+/// Check if a node is a dequantize_per_tensor call_function.
+fn is_dequantize_node(node: &Bound<'_, PyAny>) -> bool {
+    is_call_function_target(node, &["dequantize_per_tensor"])
+}
+
+/// Check if a node is a compare op (eq, ge, gt, lt, le).
+fn is_compare_user(node: &Bound<'_, PyAny>) -> bool {
+    is_call_function_target(
+        node,
+        &[
+            "aten.gt.",
+            "aten.ge.",
+            "aten.lt.",
+            "aten.le.",
+            "aten.eq.",
+            "tosa.GREATER",
+            "tosa.GREATER_EQUAL",
+            "tosa.EQUAL",
+            "TosaGreater",
+            "TosaGreaterEqual",
+            "TosaEqual",
+        ],
+    )
+}
+
+// ---------------------------------------------------------------------------
+// _rewrite_control_flow_quantization_boundaries
+//
+// Iterates control-flow submodules and rewrites quantize/dequantize nodes:
+//   1. Collapse matching Q->DQ pairs (bypass to float source)
+//   2. Rewrite standalone quantize nodes into rescale or const materializations
+//   3. Rewrite standalone dequantize nodes into int32 lifts or direct edges
+//
+// The inner sub-functions rely on heavy Python infra (_ControlFlowRescaleEdit,
+// _materialize_quantized_constant_node, _same_control_flow_qparam, etc.).
+// Following the same pattern as items 4+5 in the cleanup pass, we delegate
+// the per-submodule visitor to Python helpers and orchestrate from Rust.
+// ---------------------------------------------------------------------------
+
+pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let submodules = get_cf_submodules(py, gm)?;
+    if submodules.is_empty() {
+        return Ok(0);
+    }
+
+    // Import Python helpers
+    let cf_rewrites = py.import_bound("retab._cf_rewrites")?;
+    let collapse_fn = cf_rewrites.getattr("_collapse_control_flow_qdq_pairs")?;
+    let rewrite_quant_fn = cf_rewrites.getattr("_rewrite_control_flow_quantize_nodes")?;
+    let rewrite_dequant_fn = cf_rewrites.getattr("_rewrite_control_flow_dequantize_nodes")?;
+    let cf_ctx_mod = py.import_bound("retab._cf_ctx")?;
+    let ctx_cls = cf_ctx_mod.getattr("CfSubmoduleCtx")?;
+    let cf_mod = py.import_bound("retab._control_flow")?;
+    let cleanup_fn = cf_mod.getattr("_cleanup_graph")?;
+    let quant_args_mod =
+        py.import_bound("executorch.backends.arm._passes.quant_args")?;
+    let quant_args_cls = quant_args_mod.getattr("QuantArgs")?;
+
+    let mut total_rewrites: u32 = 0;
+
+    // Build a stats dict in Python
+    let stats = PyDict::new_bound(py);
+    stats.set_item("quant", 0i64)?;
+    stats.set_item("dequant", 0i64)?;
+
+    for (_name, submodule, cf_node) in &submodules {
+        let ctx = ctx_cls.call_method1("from_submodule", (submodule, cf_node))?;
+        let graph = ctx.getattr("graph")?;
+
+        let m1: bool = collapse_fn.call1((&ctx, &stats))?.extract()?;
+        let m2: bool = rewrite_quant_fn.call1((&ctx, &stats, &quant_args_cls))?.extract()?;
+        let m3: bool = rewrite_dequant_fn.call1((&ctx, &stats))?.extract()?;
+
+        if m1 || m2 || m3 {
+            cleanup_fn.call1((&graph,))?;
+            recompile(submodule)?;
+            total_rewrites += 1;
+        }
+    }
+
+    let quant_count: i64 = stats.get_item("quant")?.map(|v| v.extract().unwrap_or(0)).unwrap_or(0);
+    let dequant_count: i64 = stats.get_item("dequant")?.map(|v| v.extract().unwrap_or(0)).unwrap_or(0);
+
+    if quant_count > 0 {
+        log_line(format_args!(
+            "[cf-rewrite-quant-boundaries] rewrote {} control-flow quantize node(s) into explicit rescale/no-op edges",
+            quant_count
+        ));
+    }
+    if dequant_count > 0 {
+        log_line(format_args!(
+            "[cf-rewrite-quant-boundaries] rewrote {} control-flow dequantize node(s) into direct quant-domain edges",
+            dequant_count
+        ));
+    }
+
+    Ok(total_rewrites + quant_count as u32 + dequant_count as u32)
+}
+
+// ---------------------------------------------------------------------------
+// _restore_control_flow_float_compare_inputs
+//
+// Finds compare ops (eq, ge, gt, lt, le) in submodules where one input is
+// quantized (int8/int16/int32) and the other is float. Inserts a
+// dequantize_per_tensor node to restore the float input for the compare.
+// ---------------------------------------------------------------------------
+
+pub(crate) fn restore_control_flow_float_compare_inputs<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let submodules = get_cf_submodules(py, gm)?;
+    if submodules.is_empty() {
+        return Ok(0);
+    }
+
+    let torch = py.import_bound("torch")?;
+    let int8 = torch.getattr("int8")?;
+    let int16 = torch.getattr("int16")?;
+    let int32 = torch.getattr("int32")?;
+    let float16 = torch.getattr("float16")?;
+    let float32 = torch.getattr("float32")?;
+    let float64 = torch.getattr("float64")?;
+
+    let arm_utils =
+        py.import_bound("executorch.backends.arm._passes.arm_pass_utils")?;
+    let create_node_fn = arm_utils.getattr("create_node")?;
+    let exir_ops = py
+        .import_bound("executorch.exir.dialects._ops")?
+        .getattr("ops")?;
+    let dq_op = exir_ops
+        .getattr("edge")?
+        .getattr("quantized_decomposed")?
+        .getattr("dequantize_per_tensor")?
+        .getattr("default")?;
+
+    let cf_mod = py.import_bound("retab._control_flow")?;
+    let extract_effective_fn = cf_mod.getattr("_extract_effective_node_qparam")?;
+    let cleanup_graph_fn = cf_mod.getattr("_cleanup_graph")?;
+
+    let compare_markers = &[
+        "aten.gt.",
+        "aten.ge.",
+        "aten.lt.",
+        "aten.le.",
+        "aten.eq.",
+    ];
+
+    let mut restored: u32 = 0;
+
+    for (_name, submodule, _cf_node) in &submodules {
+        let graph = submodule.getattr("graph")?;
+        let mut updated = false;
+
+        let nodes = submodule_nodes(&submodule)?;
+
+        for node in &nodes {
+            if !is_call_function_target(node, compare_markers) {
+                continue;
+            }
+
+            let args = FxGraphModule::node_args(node)?;
+            if args.len() != 2 {
+                continue;
+            }
+
+            // Try each arg index
+            let mut did_restore = false;
+            for idx in 0..2usize {
+                let arg = &args[idx];
+                let other = &args[1 - idx];
+
+                if !FxGraphModule::is_node(arg) || !FxGraphModule::is_node(other) {
+                    continue;
+                }
+
+                let arg_meta = arg.getattr("meta")?;
+                let other_meta = other.getattr("meta")?;
+                let arg_val = meta_val(&arg_meta, "val");
+                let other_val = meta_val(&other_meta, "val");
+
+                let arg_dtype = arg_val.as_ref().and_then(|v| v.getattr("dtype").ok());
+                let other_dtype = other_val.as_ref().and_then(|v| v.getattr("dtype").ok());
+
+                // arg must be int8/int16/int32
+                let arg_is_int = match &arg_dtype {
+                    Some(dt) => {
+                        dt.eq(&int8).unwrap_or(false)
+                            || dt.eq(&int16).unwrap_or(false)
+                            || dt.eq(&int32).unwrap_or(false)
+                    }
+                    None => false,
+                };
+
+                // other must be float
+                let other_is_float = match &other_dtype {
+                    Some(dt) => {
+                        dt.eq(&float16).unwrap_or(false)
+                            || dt.eq(&float32).unwrap_or(false)
+                            || dt.eq(&float64).unwrap_or(false)
+                    }
+                    None => false,
+                };
+
+                if !arg_is_int || !other_is_float {
+                    continue;
+                }
+
+                // Get qparam for the int arg
+                let qparam = extract_effective_fn.call1((arg,))?;
+                if qparam.is_none() {
+                    continue;
+                }
+                // Check per_channel
+                let per_channel: bool = qparam
+                    .getattr("per_channel")
+                    .and_then(|v| v.extract())
+                    .unwrap_or(false);
+                if per_channel {
+                    continue;
+                }
+
+                let scale: f64 = qparam.getattr("scale")?.extract().unwrap_or(1.0);
+                let zp: i64 = qparam.getattr("zp")?.extract().unwrap_or(0);
+                let qmin: i64 = qparam.getattr("qmin")?.extract().unwrap_or(-128);
+                let qmax: i64 = qparam.getattr("qmax")?.extract().unwrap_or(127);
+                let qparam_dtype = qparam.getattr("dtype")?;
+
+                // graph.inserting_before(node) -- use context manager
+                let inserting_ctx = graph.call_method1("inserting_before", (node,))?;
+                inserting_ctx.call_method0("__enter__")?;
+
+                // create_node(graph=ctx.graph, op_target=dq_op, args=(...), from_node=node)
+                let dq_args = PyTuple::new_bound(
+                    py,
+                    &[
+                        arg.clone(),
+                        scale.into_py(py).into_bound(py),
+                        zp.into_py(py).into_bound(py),
+                        qmin.into_py(py).into_bound(py),
+                        qmax.into_py(py).into_bound(py),
+                        qparam_dtype.clone(),
+                    ],
+                );
+                let kwargs = PyDict::new_bound(py);
+                kwargs.set_item("graph", &graph)?;
+                kwargs.set_item("op_target", &dq_op)?;
+                kwargs.set_item("args", &dq_args)?;
+                kwargs.set_item("from_node", node)?;
+                let dq = create_node_fn.call((), Some(&kwargs))?;
+
+                // Exit context manager
+                let none = py.None().into_bound(py);
+                inserting_ctx.call_method1("__exit__", (&none, &none, &none))?;
+
+                // Set meta on the dq node
+                let dq_meta = dq.getattr("meta")?;
+                if let Some(ref av) = arg_val {
+                    if av.hasattr("to").unwrap_or(false) {
+                        if let Some(ref odt) = other_dtype {
+                            let to_kwargs = PyDict::new_bound(py);
+                            to_kwargs.set_item("dtype", odt)?;
+                            let new_val = av.call_method("to", (), Some(&to_kwargs))?;
+                            dq_meta.set_item("val", &new_val)?;
+                        }
+                    }
+                }
+                // input_qparams = {0: qparam}
+                let iqp = PyDict::new_bound(py);
+                iqp.set_item(0i64, &qparam)?;
+                dq_meta.set_item("input_qparams", &iqp)?;
+                // output_qparams = {}
+                let oqp = PyDict::new_bound(py);
+                dq_meta.set_item("output_qparams", &oqp)?;
+
+                // node.update_arg(idx, dq)
+                node.call_method1("update_arg", (idx, &dq))?;
+                restored += 1;
+                updated = true;
+                did_restore = true;
+                break;
+            }
+
+            if did_restore {
+                // Only break the inner arg loop, continue to next node
+            }
+        }
+
+        if updated {
+            cleanup_graph_fn.call1((&graph,))?;
+            recompile(&submodule)?;
+        }
+    }
+
+    if restored > 0 {
+        log_line(format_args!(
+            "[cf-restore-float-compare] restored {} control-flow float-compare dequantize input(s)",
+            restored
+        ));
+    }
+
+    Ok(restored)
+}
+
+// ---------------------------------------------------------------------------
+// _normalize_control_flow_output_layouts
+//
+// Wrapper that delegates to Python _normalize_control_flow_output_contracts
+// with normalize_outputs=True.
+// ---------------------------------------------------------------------------
+
+pub(crate) fn normalize_control_flow_output_layouts<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let submodules = get_cf_submodules(py, gm)?;
+    if submodules.is_empty() {
+        return Ok(0);
+    }
+    drop(submodules);
+
+    let cf_rewrites = py.import_bound("retab._cf_rewrites")?;
+    let func = cf_rewrites.getattr("_normalize_control_flow_output_contracts")?;
+    let kwargs = PyDict::new_bound(py);
+    kwargs.set_item("normalize_outputs", true)?;
+    func.call((gm,), Some(&kwargs))?;
+    // Python side does its own logging; return 1 to signal "ran".
+    Ok(1)
+}
+
 // ---------------------------------------------------------------------------
 // Combined Cleanup Pass
 // ---------------------------------------------------------------------------
+
+// ===========================================================================
+// Additional control-flow functions (delegate to Python via PyO3)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// _reapply_control_flow_table_ops
+//
+// Re-applies TABLE lowering in control-flow submodules after earlier passes
+// have mutated the graph. Delegates to the Python implementation.
+// ---------------------------------------------------------------------------
+
+pub(crate) fn reapply_control_flow_table_ops<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+    edge_program: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let cf_module = py.import_bound("retab._control_flow")?;
+    cf_module.call_method1("_reapply_control_flow_table_ops", (gm, edge_program))?;
+    Ok(1)
+}
+
+// ---------------------------------------------------------------------------
+// _reapply_control_flow_boundary_rescales
+//
+// Inserts RESCALE nodes at submodule input/output boundaries.
+// Delegates to the Python implementation.
+// ---------------------------------------------------------------------------
+
+pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+    include_inputs: bool,
+    include_outputs: bool,
+) -> PyResult<u32> {
+    let cf_module = py.import_bound("retab._control_flow")?;
+    let kwargs = pyo3::types::PyDict::new_bound(py);
+    kwargs.set_item("include_inputs", include_inputs)?;
+    kwargs.set_item("include_outputs", include_outputs)?;
+    cf_module.call_method(
+        "_reapply_control_flow_boundary_rescales",
+        (gm,),
+        Some(&kwargs),
+    )?;
+    Ok(1)
+}
+
+// ---------------------------------------------------------------------------
+// _restore_control_flow_output_dequantizes (pub(crate) wrapper)
+//
+// Inserts dequantize nodes before submodule outputs that need them.
+// Delegates to the Python implementation.
+// ---------------------------------------------------------------------------
+
+pub(crate) fn restore_control_flow_output_dequantizes_pub<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let cf_module = py.import_bound("retab._cf_rewrites")?;
+    cf_module.call_method1("_restore_control_flow_output_dequantizes", (gm,))?;
+    Ok(1)
+}
+
+// ---------------------------------------------------------------------------
+// _restore_missing_control_flow_input_rescales (pub(crate) wrapper)
+//
+// Inserts RESCALE nodes between placeholders and binary ops.
+// Delegates to the Python implementation.
+// ---------------------------------------------------------------------------
+
+pub(crate) fn restore_missing_control_flow_input_rescales_pub<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let cf_module = py.import_bound("retab._cf_rewrites")?;
+    cf_module.call_method1("_restore_missing_control_flow_input_rescales", (gm,))?;
+    Ok(1)
+}
+
+// ---------------------------------------------------------------------------
+// _quantize_constant_only_control_flow_outputs
+//
+// Inserts quantize ops for constant-only submodule outputs.
+// Delegates to the Python implementation.
+// ---------------------------------------------------------------------------
+
+pub(crate) fn quantize_constant_only_control_flow_outputs<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let cf_module = py.import_bound("retab._control_flow")?;
+    cf_module.call_method1("_quantize_constant_only_control_flow_outputs", (gm,))?;
+    Ok(1)
+}
+
+// ===========================================================================
+// Combined Cleanup Pass
+// ===========================================================================
 
 pub struct FxControlFlowCleanupPass;
 
