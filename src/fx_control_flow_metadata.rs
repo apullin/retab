@@ -259,9 +259,66 @@ pub(crate) fn propagate_parent_qparams_to_placeholders<'py>(
         }
     }
 
+    // For while_loop bodies: stamp output node's input_qparams to match
+    // placeholder qparams (loop-carried constraint: body outputs feed back
+    // as next iteration's inputs, so output scale/zp must equal input scale/zp).
+    for (_name, submodule, cf_node) in &submodules {
+        let target_str = cf_node
+            .getattr("target")
+            .and_then(|t| t.str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        if !target_str.contains("while_loop") {
+            continue;
+        }
+        // Check if this submodule is the body (args[1]) not the cond (args[0])
+        let cf_args = FxGraphModule::node_args(cf_node)?;
+        if cf_args.len() < 2 {
+            continue;
+        }
+        let body_target = cf_args[1]
+            .getattr("target")
+            .and_then(|t| t.extract::<String>())
+            .unwrap_or_default();
+        let sub_name = _name.to_string();
+        if !sub_name.is_empty() && !body_target.is_empty() && !sub_name.contains(&body_target) {
+            continue; // This is the cond submodule, skip
+        }
+
+        let placeholders = submodule_placeholders(submodule)?;
+        let output_node = submodule_nodes(submodule)?
+            .into_iter()
+            .find(|n| py_attr::<String>(n, &["op"], String::new()) == "output");
+
+        if let Some(output) = output_node {
+            let output_meta = output.getattr("meta")?;
+            let qparams_dict = pyo3::types::PyDict::new_bound(py);
+            for (idx, ph) in placeholders.iter().enumerate() {
+                let ph_meta = ph.getattr("meta")?;
+                if let Ok(oqp) = ph_meta.get_item("output_qparams") {
+                    if let Some(qp) = extract_single_qparam_entry(py, &oqp) {
+                        qparams_dict.set_item(idx, &qp)?;
+                        propagated += 1;
+                    }
+                } else if let Ok(iqp) = ph_meta.get_item("input_qparams") {
+                    if let Some(qp) = extract_single_qparam_entry(py, &iqp) {
+                        qparams_dict.set_item(idx, &qp)?;
+                        propagated += 1;
+                    }
+                }
+            }
+            if !qparams_dict.is_empty() {
+                output_meta.set_item("input_qparams", &qparams_dict)?;
+                log_line(format_args!(
+                    "[propagate-boundary-qparams] stamped while_loop body output with {} loop-carried qparam(s)",
+                    qparams_dict.len()
+                ));
+            }
+        }
+    }
+
     if propagated > 0 {
         log_line(format_args!(
-            "[propagate-boundary-qparams] propagated {} qparam(s) from parent args to submodule placeholders",
+            "[propagate-boundary-qparams] propagated {} qparam(s) total",
             propagated
         ));
     }
