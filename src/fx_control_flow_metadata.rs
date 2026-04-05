@@ -1831,6 +1831,89 @@ fn collapse_control_flow_qdq_pairs<'py>(
     Ok(modified)
 }
 
+/// Rewrite standalone dequantize nodes in a submodule graph.
+/// Rust port with Python fallback for the int32 cluster case.
+fn rewrite_control_flow_dequantize_nodes<'py>(
+    py: Python<'py>,
+    graph: &Bound<'py, PyAny>,
+    submodule: &Bound<'py, PyAny>,
+    cf_node: &Bound<'py, PyAny>,
+    dequant_count: &mut u32,
+) -> PyResult<bool> {
+    let mut modified = false;
+    let nodes: Vec<Bound<'py, PyAny>> = graph
+        .getattr("nodes")?
+        .iter()?
+        .filter_map(|n| n.ok())
+        .collect();
+
+    for node in &nodes {
+        if !is_dequantize_node(node) {
+            continue;
+        }
+        let args = FxGraphModule::node_args(node)?;
+        if args.is_empty() || !FxGraphModule::is_node(&args[0]) {
+            continue;
+        }
+        let source_node = &args[0];
+        let users: Vec<Bound<'py, PyAny>> = node
+            .getattr("users")?
+            .iter()?
+            .filter_map(|u| u.ok())
+            .collect();
+        if users.is_empty() {
+            continue;
+        }
+
+        // Try int32 cluster rewrite for int8/int16 sources (delegate to Python)
+        if let Ok(Some(source_qp)) = extract_effective_node_qparam(py, source_node) {
+            let dtype_str = source_qp
+                .getattr("dtype")
+                .ok()
+                .map(|d| format!("{}", d))
+                .unwrap_or_default();
+            if dtype_str.contains("int8") || dtype_str.contains("int16") {
+                // Delegate the complex int32 cluster rewrite to Python
+                let cf_rewrites = py.import_bound("retab._cf_rewrites")?;
+                let try_rewrite = cf_rewrites.getattr("_try_rewrite_dequantize_to_int32_cluster")?;
+                let cf_ctx_mod = py.import_bound("retab._cf_ctx")?;
+                let ctx = cf_ctx_mod
+                    .getattr("CfSubmoduleCtx")?
+                    .call_method1("from_submodule", (submodule, cf_node))?;
+                let py_users = pyo3::types::PyList::new_bound(py, &users);
+                let stats = pyo3::types::PyDict::new_bound(py);
+                stats.set_item("dequant", 0i64)?;
+                let result: bool = try_rewrite
+                    .call1((&ctx, node, source_node, &source_qp, &py_users, &stats))?
+                    .extract()?;
+                if result {
+                    let count: i64 = stats.get_item("dequant")?
+                        .map(|v| v.extract().unwrap_or(0))
+                        .unwrap_or(0);
+                    *dequant_count += count as u32;
+                    modified = true;
+                    continue;
+                }
+            }
+        }
+
+        // Simple bypass: if all users are RESCALE or output, remove the DQ
+        let all_rescale_or_output = users.iter().all(|user| {
+            is_tosa_rescale_node(user)
+                || py_attr::<String>(user, &["op"], String::new()) == "output"
+        });
+        if !all_rescale_or_output {
+            continue;
+        }
+
+        node.call_method1("replace_all_uses_with", (source_node,))?;
+        graph.call_method1("erase_node", (node,))?;
+        *dequant_count += 1;
+        modified = true;
+    }
+    Ok(modified)
+}
+
 // ---------------------------------------------------------------------------
 // _rewrite_control_flow_quantization_boundaries
 //
@@ -1854,10 +1937,9 @@ pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
         return Ok(0);
     }
 
-    // Import Python helpers (rewrite_quant and rewrite_dequant still delegate)
+    // rewrite_quantize_nodes still delegates to Python (needs _ControlFlowRescaleEdit)
     let cf_rewrites = py.import_bound("retab._cf_rewrites")?;
     let rewrite_quant_fn = cf_rewrites.getattr("_rewrite_control_flow_quantize_nodes")?;
-    let rewrite_dequant_fn = cf_rewrites.getattr("_rewrite_control_flow_dequantize_nodes")?;
     let cf_ctx_mod = py.import_bound("retab._cf_ctx")?;
     let ctx_cls = cf_ctx_mod.getattr("CfSubmoduleCtx")?;
     let quant_args_mod =
@@ -1866,11 +1948,11 @@ pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
 
     let mut total_rewrites: u32 = 0;
     let mut quant_count: u32 = 0;
+    let mut dequant_count: u32 = 0;
 
-    // Stats dict for Python sub-functions
+    // Stats dict for the remaining Python sub-function
     let stats = PyDict::new_bound(py);
     stats.set_item("quant", 0i64)?;
-    stats.set_item("dequant", 0i64)?;
 
     for (_name, submodule, cf_node) in &submodules {
         let ctx = ctx_cls.call_method1("from_submodule", (submodule, cf_node))?;
@@ -1878,9 +1960,12 @@ pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
 
         // Step 1: Rust-native Q/DQ collapse
         let m1 = collapse_control_flow_qdq_pairs(py, &graph, &mut quant_count)?;
-        // Steps 2-3: Python delegates (rewrite lone Q and DQ nodes)
+        // Step 2: Python delegate (rewrite lone Q nodes — needs _ControlFlowRescaleEdit)
         let m2: bool = rewrite_quant_fn.call1((&ctx, &stats, &quant_args_cls))?.extract()?;
-        let m3: bool = rewrite_dequant_fn.call1((&ctx, &stats))?.extract()?;
+        // Step 3: Rust-native DQ rewrite (with Python fallback for int32 cluster)
+        let m3 = rewrite_control_flow_dequantize_nodes(
+            py, &graph, submodule, cf_node, &mut dequant_count,
+        )?;
 
         if m1 || m2 || m3 {
             cleanup_graph(&graph)?;
@@ -1891,7 +1976,6 @@ pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
 
     let py_quant_count: i64 = stats.get_item("quant")?.map(|v| v.extract().unwrap_or(0)).unwrap_or(0);
     quant_count += py_quant_count as u32;
-    let dequant_count: i64 = stats.get_item("dequant")?.map(|v| v.extract().unwrap_or(0)).unwrap_or(0);
 
     if quant_count > 0 {
         log_line(format_args!(
@@ -1906,7 +1990,7 @@ pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
         ));
     }
 
-    Ok(total_rewrites + quant_count + dequant_count as u32)
+    Ok(total_rewrites + quant_count + dequant_count)
 }
 
 // ---------------------------------------------------------------------------
