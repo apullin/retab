@@ -8,6 +8,7 @@ mod fx_annotate_output_dim_order;
 mod fx_canonicalize_gather;
 mod fx_cast_int64;
 mod fx_conv1d_unsqueeze;
+mod fx_control_flow_metadata;
 mod fx_convert_clamp;
 mod fx_convert_full_like;
 mod fx_convert_split_to_slice;
@@ -262,6 +263,17 @@ fn ingest_and_serialize(
     ))
 }
 
+/// Run control-flow metadata stamping on the main graph.
+/// Replaces 7 Python functions: regularize, annotate_dim_order, snapshot_table,
+/// restamp_placeholder_dtypes, etc.
+#[pyfunction]
+#[pyo3(signature = (graph_module))]
+fn stamp_control_flow_metadata(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let gm = fx_graph::FxGraphModule::new(graph_module);
+    let pass_ = fx_control_flow_metadata::FxControlFlowMetadataPass;
+    fx_pass::FxPass::run(&pass_, &gm)
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lower_to_tosa_v2, m)?)?;
@@ -271,6 +283,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_fx_passes, m)?)?;
     m.add_function(wrap_pyfunction!(run_fx_submodule_passes, m)?)?;
     m.add_function(wrap_pyfunction!(run_fx_cond_passes, m)?)?;
+    m.add_function(wrap_pyfunction!(stamp_control_flow_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(fx_graph_summary, m)?)?;
     Ok(())
 }

@@ -2,6 +2,7 @@ use crate::fx_annotate_output_dim_order;
 use crate::fx_canonicalize_gather;
 use crate::fx_cast_int64;
 use crate::fx_conv1d_unsqueeze;
+use crate::fx_control_flow_metadata;
 use crate::fx_convert_clamp;
 use crate::fx_convert_full_like;
 use crate::fx_convert_split_to_slice;
@@ -237,6 +238,7 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
 /// We'll expand it later as more passes are validated on branch graphs.
 pub fn build_fx_submodule_pipeline() -> Vec<Box<dyn FxPass>> {
     vec![
+        Box::new(fx_control_flow_metadata::FxControlFlowMetadataPass),
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
         Box::new(fx_insert_rescale::FxInsertRescalePass),
         Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
