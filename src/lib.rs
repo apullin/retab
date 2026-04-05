@@ -151,7 +151,7 @@ fn fold_qdq_fx(
 /// The graph must already be Q/DQ-folded (with QuantArgs in node.meta).
 #[pyfunction]
 fn insert_rescale_fx(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    run_single_fx_pass(graph_module, fx_insert_rescale::FxInsertRescalePass)
+    run_single_fx_pass(graph_module, fx_insert_rescale::FxInsertRescalePass::new())
 }
 
 /// Return a summary of the FX graph: node count plus a list of

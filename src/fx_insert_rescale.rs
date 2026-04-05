@@ -6,6 +6,7 @@ use pyo3::types::{PyDict, PyModule};
 use crate::fx_graph::{arg_extract, meta_val, FxGraphModule};
 use crate::fx_pass::FxPass;
 use crate::fx_utils;
+use crate::runner_logging::log_line;
 
 fn qp_get_value<'py>(
     qp: &Bound<'py, PyAny>,
@@ -297,9 +298,30 @@ impl<'py, 'gm> RescaleOps<'py, 'gm> {
     }
 }
 
+/// Where output rescale qparams should come from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OutputQParamSource {
+    /// Resolve from downstream consumers (default for parent graph + cond branches).
+    Consumer,
+    /// Resolve from this graph's own placeholders (while_loop body:
+    /// output[i] feeds back as placeholder[i] on the next iteration).
+    Carried,
+}
+
 /// FX-graph-direct implementation of Python's InsertRescalePass,
 /// InsertRescaleInt32Pass, and the post-conv accumulator rescale step.
-pub struct FxInsertRescalePass;
+pub struct FxInsertRescalePass {
+    pub output_qparam_source: OutputQParamSource,
+}
+
+impl FxInsertRescalePass {
+    pub fn new() -> Self {
+        Self { output_qparam_source: OutputQParamSource::Consumer }
+    }
+    pub fn carried() -> Self {
+        Self { output_qparam_source: OutputQParamSource::Carried }
+    }
+}
 
 /// Returns true for TOSA accumulator-producing ops that need INT32 -> INT8 rescale.
 fn is_tosa_accumulator_op(target: &str) -> bool {
@@ -1024,6 +1046,120 @@ impl FxPass for FxInsertRescalePass {
             rescale_ops.rewire_users(node, &rescale_node, &users)?;
 
             modified = true;
+        }
+
+        // Phase 4: loop-carried output rescaling.
+        // For while_loop bodies, ensure each output arg has the same qparams
+        // as its corresponding placeholder (output[i] feeds back as input[i]).
+        if self.output_qparam_source == OutputQParamSource::Carried {
+            let placeholders: Vec<Bound<'_, PyAny>> = gm.nodes()?
+                .into_iter()
+                .filter(|n| FxGraphModule::node_op(n).map(|s| s == "placeholder").unwrap_or(false))
+                .collect();
+
+            let output_node = gm.nodes()?
+                .into_iter()
+                .find(|n| FxGraphModule::node_op(n).map(|s| s == "output").unwrap_or(false));
+
+            if let Some(output) = output_node {
+                let output_args = FxGraphModule::node_args(&output)?;
+                // output_args[0] is either a single value or a tuple of values
+                let output_vals: Vec<Bound<'_, PyAny>> = if output_args.len() == 1 {
+                    // Could be a tuple
+                    if let Ok(iter) = output_args[0].iter() {
+                        iter.filter_map(|v| v.ok()).collect()
+                    } else {
+                        vec![output_args[0].clone()]
+                    }
+                } else {
+                    output_args
+                };
+
+                for (idx, (out_val, ph)) in output_vals.iter().zip(placeholders.iter()).enumerate() {
+                    if !FxGraphModule::is_node(out_val) {
+                        continue;
+                    }
+                    // Get placeholder's effective qparam (what the output must match)
+                    let ph_meta = ph.getattr("meta")?;
+                    let ph_qparam = if let Ok(oqp) = ph_meta.get_item("output_qparams") {
+                        first_qparam(&oqp)
+                    } else if let Ok(iqp) = ph_meta.get_item("input_qparams") {
+                        first_qparam(&iqp)
+                    } else {
+                        None
+                    };
+                    let ph_qp = match ph_qparam {
+                        Some(qp) => qp,
+                        None => continue,
+                    };
+
+                    // Get output arg's current qparam
+                    let out_meta = out_val.getattr("meta")?;
+                    let out_qparam = if let Ok(oqp) = out_meta.get_item("output_qparams") {
+                        first_qparam(&oqp)
+                    } else {
+                        None
+                    };
+
+                    // Check if they already match
+                    let already_matches = out_qparam.as_ref().map(|oqp| {
+                        let ph_s = qp_get_f64(&ph_qp, "scale", None, 1.0);
+                        let ph_z: i64 = qp_get_i64(&ph_qp, "zp", None, 0);
+                        let out_s = qp_get_f64(oqp, "scale", None, 1.0);
+                        let out_z: i64 = qp_get_i64(oqp, "zp", None, 0);
+                        (ph_s - out_s).abs() < 1e-10 && ph_z == out_z
+                    }).unwrap_or(false);
+
+                    if already_matches {
+                        continue;
+                    }
+
+                    // Insert rescale: out_val -> placeholder qparams
+                    let out_scale = out_qparam.as_ref()
+                        .map(|q| qp_get_f64(q, "scale", None, 1.0))
+                        .unwrap_or(1.0);
+                    let out_zp = out_qparam.as_ref()
+                        .map(|q| qp_get_i64(q, "zp", None, 0))
+                        .unwrap_or(0);
+                    let ph_scale = qp_get_f64(&ph_qp, "scale", None, 1.0);
+                    let ph_zp: i64 = qp_get_i64(&ph_qp, "zp", None, 0);
+                    let ph_dtype_str = ph_qp.getattr("dtype")
+                        .map(|d| format!("{}", d))
+                        .unwrap_or("torch.int8".into());
+                    let ph_dtype = quant.dtype_for_str(&ph_dtype_str);
+
+                    if out_scale == 0.0 || ph_scale == 0.0 {
+                        continue;
+                    }
+                    let rescale_ratio = out_scale / ph_scale;
+
+                    let rescale = rescale_ops.insert(
+                        out_val,
+                        out_val,
+                        ph_dtype,
+                        vec![rescale_ratio],
+                        out_zp,
+                        ph_zp,
+                        true, // after
+                    )?;
+
+                    rescale_ops.restamp_output_meta(py, out_val, &rescale, out_val, ph_dtype)?;
+
+                    // Rewire: output node should reference the rescale, not the original
+                    // We need to update the output node's args
+                    if output_vals.len() == 1 {
+                        output.call_method("update_arg", (0i64, &rescale), None)?;
+                    } else {
+                        output.call_method("update_arg", (idx as i64, &rescale), None)?;
+                    }
+
+                    log_line(format_args!(
+                        "[InsertRescale] carried output rescale at idx {}: scale {:.6} -> {:.6}",
+                        idx, out_scale, ph_scale
+                    ));
+                    modified = true;
+                }
+            }
         }
 
         if modified {

@@ -132,7 +132,7 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_fuse_duplicate_users::FxFuseDuplicateUsersPass),
         Box::new(fx_decompose_linear::FxDecomposeLinearPass),
         Box::new(fx_conv1d_unsqueeze::FxConv1dUnsqueezePass),
-        Box::new(fx_insert_rescale::FxInsertRescalePass),
+        Box::new(fx_insert_rescale::FxInsertRescalePass::new()),
         Box::new(fx_decompose_quant::FxDecomposeQuantNodesPass),
         // -- Post-fold decompositions (matches Python ordering) --
         // Convert split_with_sizes_copy → multiple slice_copy ops
@@ -225,22 +225,25 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         // to the quantized dtype.  InsertRescalePass then correctly creates
         // INT8→INT32 upscales for downstream arithmetic ops (sub, add, etc.).
         Box::new(fx_rewrite_matmul::FxRewriteMatmulRescalePass),
-        Box::new(fx_insert_rescale::FxInsertRescalePass),
+        Box::new(fx_insert_rescale::FxInsertRescalePass::new()),
         Box::new(
             fx_fuse_constant_args::FxFuseConstantArgsPass::new_zero_input_full_only(fuse_late),
         ),
     ]
 }
 
-/// Build a minimal FX pipeline for control-flow submodule graphs.
+/// Build a minimal FX pipeline for while_loop submodule graphs.
 ///
-/// This is the safe subset -- just TABLE lowering and layout annotation.
-/// We'll expand it later as more passes are validated on branch graphs.
+/// Uses Carried output qparam source: output[i] must match placeholder[i]
+/// because while_loop body outputs feed back as inputs on the next iteration.
 pub fn build_fx_submodule_pipeline() -> Vec<Box<dyn FxPass>> {
+    // TODO: OutputQParamSource::Carried should also be plumbed through
+    // FxFoldAndAnnotateQParamsPass and other passes that reason about qparams,
+    // not just FxInsertRescalePass. For now, only the rescale pass needs it.
     vec![
         Box::new(fx_control_flow_metadata::FxControlFlowMetadataPass),
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
-        Box::new(fx_insert_rescale::FxInsertRescalePass),
+        Box::new(fx_insert_rescale::FxInsertRescalePass::carried()),
         Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
     ]
 }
@@ -256,7 +259,7 @@ pub fn build_fx_cond_submodule_pipeline(
         // Q/DQ folding + rescale (the core quantization passes)
         Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(ep.fold_qdq)),
         Box::new(fx_fuse_duplicate_users::FxFuseDuplicateUsersPass),
-        Box::new(fx_insert_rescale::FxInsertRescalePass),
+        Box::new(fx_insert_rescale::FxInsertRescalePass::new()),
         // TABLE lowering for quantized math ops
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
         // Cleanup
@@ -264,12 +267,12 @@ pub fn build_fx_cond_submodule_pipeline(
         Box::new(fx_remove_noop::FxRemoveNoopPass),
         // Matmul rescale + second rescale pass
         Box::new(fx_rewrite_matmul::FxRewriteMatmulRescalePass),
-        Box::new(fx_insert_rescale::FxInsertRescalePass),
+        Box::new(fx_insert_rescale::FxInsertRescalePass::new()),
         // Layout
         Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
         // Final rescale repair: re-run after TABLE + memory format to fix
         // rescale chains that were broken by TABLE node insertion or
         // layout transposes (especially for buffer/captured args).
-        Box::new(fx_insert_rescale::FxInsertRescalePass),
+        Box::new(fx_insert_rescale::FxInsertRescalePass::new()),
     ]
 }
