@@ -1677,6 +1677,161 @@ fn is_compare_user(node: &Bound<'_, PyAny>) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Q/DQ node helpers (ported from Python)
+// ---------------------------------------------------------------------------
+
+/// Parse scale/zp/qmin/qmax/dtype from a Q or DQ node's literal args.
+/// Returns a Python QuantArgs object or None.
+fn parse_per_tensor_qparam<'py>(
+    py: Python<'py>,
+    node: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let args = FxGraphModule::node_args(node)?;
+    if args.len() < 6 {
+        return Ok(None);
+    }
+    let torch_dtype_cls = py.import_bound("torch")?.getattr("dtype")?;
+    if !args[5].is_instance(&torch_dtype_cls).unwrap_or(false) {
+        return Ok(None);
+    }
+    let quant_args_cls = py
+        .import_bound("executorch.backends.arm._passes.quant_args")?
+        .getattr("QuantArgs")?;
+    let kwargs = pyo3::types::PyDict::new_bound(py);
+    kwargs.set_item("scale", args[1].extract::<f64>().unwrap_or(1.0))?;
+    kwargs.set_item("zp", args[2].extract::<i64>().unwrap_or(0))?;
+    kwargs.set_item("qmin", args[3].extract::<i64>().unwrap_or(-128))?;
+    kwargs.set_item("qmax", args[4].extract::<i64>().unwrap_or(127))?;
+    kwargs.set_item("dtype", &args[5])?;
+    kwargs.set_item("axis", 0i64)?;
+    kwargs.set_item("per_channel", false)?;
+    Ok(Some(quant_args_cls.call((), Some(&kwargs))?))
+}
+
+/// Compare two QuantArgs for equality (scale, zp, dtype, optionally range).
+fn same_control_flow_qparam(
+    lhs: &Bound<'_, PyAny>,
+    rhs: &Bound<'_, PyAny>,
+    include_range: bool,
+) -> bool {
+    let lhs_scale: f64 = lhs.getattr("scale").and_then(|v| v.extract()).unwrap_or(1.0);
+    let rhs_scale: f64 = rhs.getattr("scale").and_then(|v| v.extract()).unwrap_or(1.0);
+    let lhs_zp: i64 = lhs.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
+    let rhs_zp: i64 = rhs.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
+    if lhs_scale != rhs_scale || lhs_zp != rhs_zp {
+        return false;
+    }
+    let lhs_dtype = lhs.getattr("dtype").ok().map(|v| format!("{}", v));
+    let rhs_dtype = rhs.getattr("dtype").ok().map(|v| format!("{}", v));
+    if lhs_dtype != rhs_dtype {
+        return false;
+    }
+    if include_range {
+        let lhs_qmin: i64 = lhs.getattr("qmin").and_then(|v| v.extract()).unwrap_or(0);
+        let rhs_qmin: i64 = rhs.getattr("qmin").and_then(|v| v.extract()).unwrap_or(0);
+        let lhs_qmax: i64 = lhs.getattr("qmax").and_then(|v| v.extract()).unwrap_or(0);
+        let rhs_qmax: i64 = rhs.getattr("qmax").and_then(|v| v.extract()).unwrap_or(0);
+        if lhs_qmin != rhs_qmin || lhs_qmax != rhs_qmax {
+            return false;
+        }
+    }
+    true
+}
+
+/// Check if a node is a zero-input constant source (get_attr or no input args).
+fn is_zero_input_const_source(node: &Bound<'_, PyAny>) -> bool {
+    let op: String = py_attr(node, &["op"], String::new());
+    if op == "get_attr" {
+        return true;
+    }
+    if op != "call_function" {
+        return false;
+    }
+    let args = FxGraphModule::node_args(node).unwrap_or_default();
+    args.iter().all(|a| !FxGraphModule::is_node(a))
+}
+
+/// Collapse matching Q->DQ pairs in a submodule graph.
+/// Rust port of Python `_collapse_control_flow_qdq_pairs`.
+fn collapse_control_flow_qdq_pairs<'py>(
+    py: Python<'py>,
+    graph: &Bound<'py, PyAny>,
+    quant_count: &mut u32,
+) -> PyResult<bool> {
+    let mut modified = false;
+    let nodes: Vec<Bound<'py, PyAny>> = graph
+        .getattr("nodes")?
+        .iter()?
+        .filter_map(|n| n.ok())
+        .collect();
+
+    for node in &nodes {
+        if !is_dequantize_node(node) {
+            continue;
+        }
+        let args = FxGraphModule::node_args(node)?;
+        if args.is_empty() || !FxGraphModule::is_node(&args[0]) {
+            continue;
+        }
+        let quant_node = &args[0];
+        if !is_quantize_node(quant_node) {
+            continue;
+        }
+        let quant_qp = match parse_per_tensor_qparam(py, quant_node)? {
+            Some(qp) => qp,
+            None => continue,
+        };
+        let dequant_qp = match parse_per_tensor_qparam(py, node)? {
+            Some(qp) => qp,
+            None => continue,
+        };
+        if !same_control_flow_qparam(&quant_qp, &dequant_qp, true) {
+            continue;
+        }
+        let q_args = FxGraphModule::node_args(quant_node)?;
+        if q_args.is_empty() || !FxGraphModule::is_node(&q_args[0]) {
+            continue;
+        }
+        let float_source = &q_args[0];
+
+        // Skip if zero-input const feeding a scalar binary
+        if is_zero_input_const_source(float_source) {
+            // Check if any user of the DQ node is a binary op (simplified check)
+            let users = node.getattr("users")?;
+            let user_count: usize = users.len().unwrap_or(0);
+            if user_count > 0 {
+                let mut feeds_binary = false;
+                for user in users.iter()? {
+                    let user = user?;
+                    let target = FxGraphModule::node_target_str(&user)?;
+                    if target.contains("add.") || target.contains("sub.")
+                        || target.contains("mul.") {
+                        feeds_binary = true;
+                        break;
+                    }
+                }
+                if feeds_binary {
+                    continue;
+                }
+            }
+        }
+
+        // Bypass: replace DQ with float source
+        node.call_method1("replace_all_uses_with", (float_source,))?;
+        graph.call_method1("erase_node", (node,))?;
+        // Erase Q if no remaining users
+        let q_users = quant_node.getattr("users")?;
+        if q_users.len().unwrap_or(1) == 0 {
+            graph.call_method1("erase_node", (quant_node,))?;
+        }
+        *quant_count += 1;
+        modified = true;
+    }
+    Ok(modified)
+}
+
+// ---------------------------------------------------------------------------
 // _rewrite_control_flow_quantization_boundaries
 //
 // Iterates control-flow submodules and rewrites quantize/dequantize nodes:
@@ -1699,22 +1854,20 @@ pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
         return Ok(0);
     }
 
-    // Import Python helpers
+    // Import Python helpers (rewrite_quant and rewrite_dequant still delegate)
     let cf_rewrites = py.import_bound("retab._cf_rewrites")?;
-    let collapse_fn = cf_rewrites.getattr("_collapse_control_flow_qdq_pairs")?;
     let rewrite_quant_fn = cf_rewrites.getattr("_rewrite_control_flow_quantize_nodes")?;
     let rewrite_dequant_fn = cf_rewrites.getattr("_rewrite_control_flow_dequantize_nodes")?;
     let cf_ctx_mod = py.import_bound("retab._cf_ctx")?;
     let ctx_cls = cf_ctx_mod.getattr("CfSubmoduleCtx")?;
-    let cf_mod = py.import_bound("retab._control_flow")?;
-    let cleanup_fn = cf_mod.getattr("_cleanup_graph")?;
     let quant_args_mod =
         py.import_bound("executorch.backends.arm._passes.quant_args")?;
     let quant_args_cls = quant_args_mod.getattr("QuantArgs")?;
 
     let mut total_rewrites: u32 = 0;
+    let mut quant_count: u32 = 0;
 
-    // Build a stats dict in Python
+    // Stats dict for Python sub-functions
     let stats = PyDict::new_bound(py);
     stats.set_item("quant", 0i64)?;
     stats.set_item("dequant", 0i64)?;
@@ -1723,34 +1876,37 @@ pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
         let ctx = ctx_cls.call_method1("from_submodule", (submodule, cf_node))?;
         let graph = ctx.getattr("graph")?;
 
-        let m1: bool = collapse_fn.call1((&ctx, &stats))?.extract()?;
+        // Step 1: Rust-native Q/DQ collapse
+        let m1 = collapse_control_flow_qdq_pairs(py, &graph, &mut quant_count)?;
+        // Steps 2-3: Python delegates (rewrite lone Q and DQ nodes)
         let m2: bool = rewrite_quant_fn.call1((&ctx, &stats, &quant_args_cls))?.extract()?;
         let m3: bool = rewrite_dequant_fn.call1((&ctx, &stats))?.extract()?;
 
         if m1 || m2 || m3 {
-            cleanup_fn.call1((&graph,))?;
+            cleanup_graph(&graph)?;
             recompile(submodule)?;
             total_rewrites += 1;
         }
     }
 
-    let quant_count: i64 = stats.get_item("quant")?.map(|v| v.extract().unwrap_or(0)).unwrap_or(0);
+    let py_quant_count: i64 = stats.get_item("quant")?.map(|v| v.extract().unwrap_or(0)).unwrap_or(0);
+    quant_count += py_quant_count as u32;
     let dequant_count: i64 = stats.get_item("dequant")?.map(|v| v.extract().unwrap_or(0)).unwrap_or(0);
 
     if quant_count > 0 {
         log_line(format_args!(
-            "[cf-rewrite-quant-boundaries] rewrote {} control-flow quantize node(s) into explicit rescale/no-op edges",
+            "[cf-rewrite-quant-boundaries] rewrote {} control-flow quantize node(s)",
             quant_count
         ));
     }
     if dequant_count > 0 {
         log_line(format_args!(
-            "[cf-rewrite-quant-boundaries] rewrote {} control-flow dequantize node(s) into direct quant-domain edges",
+            "[cf-rewrite-quant-boundaries] rewrote {} control-flow dequantize node(s)",
             dequant_count
         ));
     }
 
-    Ok(total_rewrites + quant_count as u32 + dequant_count as u32)
+    Ok(total_rewrites + quant_count + dequant_count as u32)
 }
 
 // ---------------------------------------------------------------------------
