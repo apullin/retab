@@ -2257,7 +2257,6 @@ pub(crate) fn normalize_control_flow_output_layouts<'py>(
     let kwargs = PyDict::new_bound(py);
     kwargs.set_item("normalize_outputs", true)?;
     func.call((gm,), Some(&kwargs))?;
-    // Python side does its own logging; return 1 to signal "ran".
     Ok(1)
 }
 
