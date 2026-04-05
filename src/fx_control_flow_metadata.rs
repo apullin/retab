@@ -1520,38 +1520,6 @@ pub(crate) fn restore_missing_control_flow_rescale_qparams<'py>(
 }
 
 // ---------------------------------------------------------------------------
-// 4. _restore_control_flow_output_dequantizes
-//    Delegates to Python because it depends on complex boundary contract infra.
-// ---------------------------------------------------------------------------
-
-fn restore_control_flow_output_dequantizes<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-) -> PyResult<u32> {
-    let cf_rewrites = py.import_bound("retab._cf_rewrites")?;
-    let func = cf_rewrites.getattr("_restore_control_flow_output_dequantizes")?;
-    func.call1((gm,))?;
-    // Python function doesn't return a count, but we can estimate from log.
-    // For simplicity, return 0 and let the Python side log.
-    Ok(0)
-}
-
-// ---------------------------------------------------------------------------
-// 5. _restore_missing_control_flow_input_rescales
-//    Delegates to Python because it depends on complex boundary contract infra.
-// ---------------------------------------------------------------------------
-
-fn restore_missing_control_flow_input_rescales<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-) -> PyResult<u32> {
-    let cf_rewrites = py.import_bound("retab._cf_rewrites")?;
-    let func = cf_rewrites.getattr("_restore_missing_control_flow_input_rescales")?;
-    func.call1((gm,))?;
-    Ok(0)
-}
-
-// ---------------------------------------------------------------------------
 // 6. _refresh_tosa_transpose_fake_tensors
 // ---------------------------------------------------------------------------
 
@@ -2325,30 +2293,6 @@ pub(crate) fn normalize_control_flow_output_layouts<'py>(
 // Additional control-flow functions (delegate to Python via PyO3)
 // ===========================================================================
 
-// ---------------------------------------------------------------------------
-// _reapply_control_flow_table_ops
-//
-// Re-applies TABLE lowering in control-flow submodules after earlier passes
-// have mutated the graph. Delegates to the Python implementation.
-// ---------------------------------------------------------------------------
-
-pub(crate) fn reapply_control_flow_table_ops<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-    edge_program: &Bound<'py, PyAny>,
-) -> PyResult<u32> {
-    let cf_module = py.import_bound("retab._control_flow")?;
-    cf_module.call_method1("_reapply_control_flow_table_ops", (gm, edge_program))?;
-    Ok(1)
-}
-
-// ---------------------------------------------------------------------------
-// _reapply_control_flow_boundary_rescales
-//
-// Inserts RESCALE nodes at submodule input/output boundaries.
-// Delegates to the Python implementation.
-// ---------------------------------------------------------------------------
-
 pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
@@ -2365,129 +2309,6 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
         Some(&kwargs),
     )?;
     Ok(1)
-}
-
-// ---------------------------------------------------------------------------
-// _restore_control_flow_output_dequantizes (pub(crate) wrapper)
-//
-// Inserts dequantize nodes before submodule outputs that need them.
-// Delegates to the Python implementation.
-// ---------------------------------------------------------------------------
-
-pub(crate) fn restore_control_flow_output_dequantizes_pub<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-) -> PyResult<u32> {
-    let cf_module = py.import_bound("retab._cf_rewrites")?;
-    cf_module.call_method1("_restore_control_flow_output_dequantizes", (gm,))?;
-    Ok(1)
-}
-
-// ---------------------------------------------------------------------------
-// _restore_missing_control_flow_input_rescales (pub(crate) wrapper)
-//
-// Inserts RESCALE nodes between placeholders and binary ops.
-// Delegates to the Python implementation.
-// ---------------------------------------------------------------------------
-
-pub(crate) fn restore_missing_control_flow_input_rescales_pub<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-) -> PyResult<u32> {
-    let cf_module = py.import_bound("retab._cf_rewrites")?;
-    cf_module.call_method1("_restore_missing_control_flow_input_rescales", (gm,))?;
-    Ok(1)
-}
-
-// ---------------------------------------------------------------------------
-// _quantize_constant_only_control_flow_outputs
-//
-// Inserts quantize ops for constant-only submodule outputs.
-// Delegates to the Python implementation.
-// ---------------------------------------------------------------------------
-
-pub(crate) fn quantize_constant_only_control_flow_outputs<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-) -> PyResult<u32> {
-    let cf_module = py.import_bound("retab._control_flow")?;
-    cf_module.call_method1("_quantize_constant_only_control_flow_outputs", (gm,))?;
-    Ok(1)
-}
-
-// ===========================================================================
-// Combined Cleanup Pass
-// ===========================================================================
-
-pub struct FxControlFlowCleanupPass;
-
-impl FxPass for FxControlFlowCleanupPass {
-    fn name(&self) -> &str {
-        "FxControlFlowCleanup"
-    }
-
-    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
-        let py = gm.py();
-        let gm_ref = gm.gm_ref();
-
-        // Check if there are any cond/while_loop nodes at all.
-        let submodules = get_cf_submodules(py, gm_ref)?;
-        if submodules.is_empty() {
-            return Ok(false);
-        }
-        drop(submodules);
-
-        // 1. Remove no-op passthroughs
-        let c1 = remove_control_flow_noop_passthroughs(py, gm_ref)?;
-        if c1 > 0 {
-            log_line(format_args!(
-                "[FxControlFlowCleanup] removed {} no-op passthrough node(s)",
-                c1
-            ));
-        }
-
-        // 2. Prune duplicate terminal rescales
-        let c2 = prune_duplicate_terminal_rescales(py, gm_ref)?;
-        if c2 > 0 {
-            log_line(format_args!(
-                "[FxControlFlowCleanup] pruned {} duplicate terminal rescale node(s)",
-                c2
-            ));
-        }
-
-        // 3. Restore missing rescale qparams
-        let c3 = restore_missing_control_flow_rescale_qparams(py, gm_ref)?;
-        if c3 > 0 {
-            log_line(format_args!(
-                "[FxControlFlowCleanup] restored qparams on {} rescale node(s)",
-                c3
-            ));
-        }
-
-        // 4. Restore output dequantizes (delegates to Python)
-        restore_control_flow_output_dequantizes(py, gm_ref)?;
-
-        // 5. Restore missing input rescales (delegates to Python)
-        restore_missing_control_flow_input_rescales(py, gm_ref)?;
-
-        // 6. Refresh TOSA transpose fake tensors
-        let c6 = refresh_tosa_transpose_fake_tensors(py, gm_ref)?;
-        if c6 > 0 {
-            log_line(format_args!(
-                "[FxControlFlowCleanup] refreshed {} TOSA transpose fake tensor(s)",
-                c6
-            ));
-        }
-
-        // 7. Refresh TOSA dim_order fake tensors (reuse existing function)
-        refresh_tosa_dim_order_fake_tensors(py, gm_ref)?;
-
-        // Recompile the parent graph module -- always recompile since
-        // steps 4+5 delegate to Python and may have modified the graph.
-        gm.recompile()?;
-
-        Ok(true)
-    }
 }
 
 // ===========================================================================
@@ -2547,39 +2368,3 @@ pub(crate) fn run_boundary_phase<'py>(
 }
 
 // ===========================================================================
-// Minimal Output Phase (for correct-propagation pipeline)
-// ===========================================================================
-
-/// Minimal output phase for the fixed pipeline where qparams are propagated
-/// before submodule passes. Boundary cleanup, layout normalization, and metadata.
-pub(crate) fn run_minimal_output_phase<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-) -> PyResult<()> {
-    // 1. Rewrite Q/DQ boundaries (collapse pairs, rewrite lone Q/DQ)
-    rewrite_control_flow_quantization_boundaries(py, gm)?;
-    // 2. Reapply boundary rescales (both inputs and outputs)
-    reapply_control_flow_boundary_rescales(py, gm, true, true)?;
-    // 3. Restore missing rescale qparams
-    restore_missing_control_flow_rescale_qparams(py, gm)?;
-    // 4. Quantize constant-only outputs
-    quantize_constant_only_control_flow_outputs(py, gm)?;
-    // 5. Normalize output layouts (layout bypass — still needed)
-    normalize_control_flow_output_layouts(py, gm)?;
-    // 6. Remove noop passthroughs
-    remove_control_flow_noop_passthroughs(py, gm)?;
-    // 7. Re-stamp metadata after mutations
-    {
-        let gm_wrapper = crate::fx_graph::FxGraphModule::new(gm);
-        crate::fx_pass::FxPass::run(&FxControlFlowMetadataPass, &gm_wrapper)?;
-    }
-    // 8. Refresh TOSA transpose fake tensors
-    refresh_tosa_transpose_fake_tensors(py, gm)?;
-    // 9. Refresh TOSA dim_order fake tensors
-    refresh_tosa_dim_order_fake_tensors(py, gm)?;
-    // 10. Prune duplicate terminal rescales
-    prune_duplicate_terminal_rescales(py, gm)?;
-    // 11. Restore float compare inputs
-    restore_control_flow_float_compare_inputs(py, gm)?;
-    Ok(())
-}
