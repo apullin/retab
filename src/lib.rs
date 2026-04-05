@@ -400,6 +400,14 @@ fn cf_quantize_constant_only_outputs(graph_module: &Bound<'_, PyAny>) -> PyResul
     Ok(fx_control_flow_metadata::quantize_constant_only_control_flow_outputs(py, graph_module)? > 0)
 }
 
+/// Run the full output normalize phase in one Rust call (replaces 11 Python->Rust round-trips).
+#[pyfunction]
+#[pyo3(signature = (graph_module))]
+fn cf_run_output_normalize_phase(graph_module: &Bound<'_, PyAny>) -> PyResult<()> {
+    let py = graph_module.py();
+    fx_control_flow_metadata::run_output_normalize_phase(py, graph_module)
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lower_to_tosa_v2, m)?)?;
@@ -424,6 +432,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cf_restore_output_dequantizes, m)?)?;
     m.add_function(wrap_pyfunction!(cf_restore_missing_input_rescales, m)?)?;
     m.add_function(wrap_pyfunction!(cf_quantize_constant_only_outputs, m)?)?;
+    m.add_function(wrap_pyfunction!(cf_run_output_normalize_phase, m)?)?;
     m.add_function(wrap_pyfunction!(fx_graph_summary, m)?)?;
     Ok(())
 }
