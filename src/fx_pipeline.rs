@@ -265,5 +265,9 @@ pub fn build_fx_cond_submodule_pipeline(
         Box::new(fx_insert_rescale::FxInsertRescalePass),
         // Layout
         Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
+        // Final rescale repair: re-run after TABLE + memory format to fix
+        // rescale chains that were broken by TABLE node insertion or
+        // layout transposes (especially for buffer/captured args).
+        Box::new(fx_insert_rescale::FxInsertRescalePass),
     ]
 }

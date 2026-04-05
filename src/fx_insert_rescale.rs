@@ -458,33 +458,98 @@ fn is_mul_op(target: &str) -> bool {
     target.contains("mul.Tensor")
 }
 
+/// Walk a node's producer chain to find output_qparams.
+fn recover_producer_qparam<'py>(
+    node: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let mut current = node.clone();
+    for _ in 0..8 {
+        let meta = current.getattr("meta")?;
+        if let Some(oqp) = meta_non_empty_item(&meta, "output_qparams")? {
+            return Ok(Some(oqp));
+        }
+        // Walk through rescale/layout-passthrough nodes
+        let Ok(op) = current.getattr("op").and_then(|v| v.extract::<String>()) else {
+            break;
+        };
+        if op != "call_function" && op != "placeholder" {
+            break;
+        }
+        let Ok(args) = FxGraphModule::node_args(&current) else { break };
+        let Some(first_arg) = args.first() else { break };
+        if !FxGraphModule::is_node(first_arg) {
+            break;
+        }
+        current = first_arg.clone();
+    }
+    Ok(None)
+}
+
 /// Read input_qparams from node.meta, returning (keys, scales, zps, dtype_strs).
+/// If a binary node has missing input_qparams, tries to recover them from
+/// the actual arg nodes' producer chains (handles buffer/captured args in
+/// control-flow submodules).
 fn read_input_qparams(
     node: &Bound<'_, PyAny>,
 ) -> PyResult<Option<(Vec<usize>, Vec<f64>, Vec<i64>, Vec<String>)>> {
     let meta = node.getattr("meta")?;
-    let Some(input_qp) = meta_non_empty_item(&meta, "input_qparams")? else {
-        return Ok(None);
-    };
+    let input_qp = meta_non_empty_item(&meta, "input_qparams")?;
 
-    let keys: Vec<usize> = input_qp
-        .call_method0("keys")?
-        .iter()?
-        .filter_map(|k| k.ok().and_then(|k| k.extract().ok()))
-        .collect();
+    // If input_qparams exists, use it directly
+    if let Some(ref qp_dict) = input_qp {
+        let keys: Vec<usize> = qp_dict
+            .call_method0("keys")?
+            .iter()?
+            .filter_map(|k| k.ok().and_then(|k| k.extract().ok()))
+            .collect();
 
-    let mut scales = Vec::with_capacity(keys.len());
-    let mut zps = Vec::with_capacity(keys.len());
-    let mut dtype_strs = Vec::with_capacity(keys.len());
+        let mut scales = Vec::with_capacity(keys.len());
+        let mut zps = Vec::with_capacity(keys.len());
+        let mut dtype_strs = Vec::with_capacity(keys.len());
 
-    for &idx in &keys {
-        let qp = input_qp.get_item(idx)?;
-        let (scale, zp, dtype_str) = qparam_scale_zp_dtype(&qp, 0, "torch.int8");
-        scales.push(scale);
-        zps.push(zp);
-        dtype_strs.push(dtype_str);
+        for &idx in &keys {
+            let qp = qp_dict.get_item(idx)?;
+            let (scale, zp, dtype_str) = qparam_scale_zp_dtype(&qp, 0, "torch.int8");
+            scales.push(scale);
+            zps.push(zp);
+            dtype_strs.push(dtype_str);
+        }
+
+        return Ok(Some((keys, scales, zps, dtype_strs)));
     }
 
+    // Fallback: try to build input_qparams from the actual arg nodes.
+    // This handles buffer/captured args in control-flow submodules where
+    // fold_qdq didn't annotate the binary node because a placeholder
+    // was missing qparams.
+    let Ok(args) = FxGraphModule::node_args(node) else {
+        return Ok(None);
+    };
+    let mut keys = Vec::new();
+    let mut scales = Vec::new();
+    let mut zps = Vec::new();
+    let mut dtype_strs = Vec::new();
+
+    for (idx, arg) in args.iter().enumerate().take(2) {
+        if !FxGraphModule::is_node(arg) {
+            continue;
+        }
+        if let Some(oqp) = recover_producer_qparam(arg)? {
+            if let Some(qp) = first_qparam(&oqp) {
+                let (scale, zp, dtype_str) = qparam_scale_zp_dtype(&qp, 0, "torch.int8");
+                if dtype_str.contains("int8") || dtype_str.contains("int16") {
+                    keys.push(idx);
+                    scales.push(scale);
+                    zps.push(zp);
+                    dtype_strs.push(dtype_str);
+                }
+            }
+        }
+    }
+
+    if keys.is_empty() {
+        return Ok(None);
+    }
     Ok(Some((keys, scales, zps, dtype_strs)))
 }
 
