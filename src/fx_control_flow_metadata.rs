@@ -2317,7 +2317,7 @@ pub(crate) fn normalize_control_flow_output_layouts<'py>(
 // ===========================================================================
 
 /// Insert boundary RESCALE nodes at submodule input/output edges.
-/// Delegates to Python _reapply_control_flow_boundary_rescales.
+/// Sole remaining in-the-middle Python delegate. Needed for cond output rescales.
 pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
@@ -2336,6 +2336,7 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
     Ok(1)
 }
 
+// (deleting old code — find the range)
 // ===========================================================================
 // Combined Output Normalize Phase
 // ===========================================================================
