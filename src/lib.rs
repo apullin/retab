@@ -263,17 +263,6 @@ fn ingest_and_serialize(
     ))
 }
 
-/// Run control-flow metadata stamping on the main graph.
-/// Replaces 7 Python functions: regularize, annotate_dim_order, snapshot_table,
-/// restamp_placeholder_dtypes, etc.
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn stamp_control_flow_metadata(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let gm = fx_graph::FxGraphModule::new(graph_module);
-    let pass_ = fx_control_flow_metadata::FxControlFlowMetadataPass;
-    fx_pass::FxPass::run(&pass_, &gm)
-}
-
 /// Structural-only metadata stamp (no qparam propagation). Run before parent passes.
 #[pyfunction]
 #[pyo3(signature = (graph_module))]
@@ -290,146 +279,12 @@ fn propagate_control_flow_qparams(graph_module: &Bound<'_, PyAny>) -> PyResult<b
     fx_pass::FxPass::run(&fx_control_flow_metadata::FxControlFlowQParamPropagationPass, &gm)
 }
 
-/// Run control-flow cleanup (graph surgery) on the main graph.
-/// Replaces Python functions: remove_noop_passthroughs, prune_duplicate_rescales,
-/// restore_missing_rescale_qparams, restore_output_dequantizes,
-/// restore_missing_input_rescales, refresh_transpose_fake_tensors,
-/// refresh_dim_order_fake_tensors.
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn cleanup_control_flow_submodules(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let gm = fx_graph::FxGraphModule::new(graph_module);
-    let pass_ = fx_control_flow_metadata::FxControlFlowCleanupPass;
-    fx_pass::FxPass::run(&pass_, &gm)
-}
-
-// Individual control-flow cleanup steps (called one at a time from Python)
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn cf_remove_noop_passthroughs(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let py = graph_module.py();
-    Ok(fx_control_flow_metadata::remove_control_flow_noop_passthroughs(py, graph_module)? > 0)
-}
-
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn cf_prune_duplicate_terminal_rescales(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let py = graph_module.py();
-    Ok(fx_control_flow_metadata::prune_duplicate_terminal_rescales(py, graph_module)? > 0)
-}
-
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn cf_restore_missing_rescale_qparams(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let py = graph_module.py();
-    Ok(fx_control_flow_metadata::restore_missing_control_flow_rescale_qparams(py, graph_module)? > 0)
-}
-
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn cf_refresh_tosa_transpose_fake_tensors(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let py = graph_module.py();
-    Ok(fx_control_flow_metadata::refresh_tosa_transpose_fake_tensors(py, graph_module)? > 0)
-}
-
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn cf_refresh_tosa_dim_order_fake_tensors(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let py = graph_module.py();
-    fx_control_flow_metadata::refresh_tosa_dim_order_fake_tensors(py, graph_module)?;
-    Ok(true)
-}
-
-/// Rewrite quantize/dequantize boundaries in control-flow submodules.
-/// Collapses Q->DQ pairs, rewrites standalone Q nodes into rescale edges,
-/// and rewrites standalone DQ nodes into direct quant-domain edges.
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn cf_rewrite_quantization_boundaries(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let py = graph_module.py();
-    Ok(fx_control_flow_metadata::rewrite_control_flow_quantization_boundaries(py, graph_module)? > 0)
-}
-
-/// Restore float dequantize inputs for compare ops (eq, ge, gt, lt, le) in
-/// control-flow submodules where one input is quantized int and the other is float.
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn cf_restore_float_compare_inputs(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let py = graph_module.py();
-    Ok(fx_control_flow_metadata::restore_control_flow_float_compare_inputs(py, graph_module)? > 0)
-}
-
-/// Normalize control-flow output layouts by applying output contract normalization.
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn cf_normalize_output_layouts(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let py = graph_module.py();
-    Ok(fx_control_flow_metadata::normalize_control_flow_output_layouts(py, graph_module)? > 0)
-}
-
-/// Re-apply TABLE lowering in control-flow submodules.
-#[pyfunction]
-#[pyo3(signature = (graph_module, edge_program))]
-fn cf_reapply_table_ops(
-    graph_module: &Bound<'_, PyAny>,
-    edge_program: &Bound<'_, PyAny>,
-) -> PyResult<bool> {
-    let py = graph_module.py();
-    Ok(fx_control_flow_metadata::reapply_control_flow_table_ops(py, graph_module, edge_program)? > 0)
-}
-
-/// Re-apply RESCALE nodes at control-flow submodule input/output boundaries.
-#[pyfunction]
-#[pyo3(signature = (graph_module, include_inputs, include_outputs))]
-fn cf_reapply_boundary_rescales(
-    graph_module: &Bound<'_, PyAny>,
-    include_inputs: bool,
-    include_outputs: bool,
-) -> PyResult<bool> {
-    let py = graph_module.py();
-    Ok(fx_control_flow_metadata::reapply_control_flow_boundary_rescales(
-        py, graph_module, include_inputs, include_outputs,
-    )? > 0)
-}
-
-/// Restore dequantize nodes before submodule outputs that need them.
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn cf_restore_output_dequantizes(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let py = graph_module.py();
-    Ok(fx_control_flow_metadata::restore_control_flow_output_dequantizes_pub(py, graph_module)? > 0)
-}
-
-/// Restore missing RESCALE nodes between placeholders and binary ops.
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn cf_restore_missing_input_rescales(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let py = graph_module.py();
-    Ok(fx_control_flow_metadata::restore_missing_control_flow_input_rescales_pub(py, graph_module)? > 0)
-}
-
-/// Quantize constant-only control-flow submodule outputs.
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn cf_quantize_constant_only_outputs(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let py = graph_module.py();
-    Ok(fx_control_flow_metadata::quantize_constant_only_control_flow_outputs(py, graph_module)? > 0)
-}
-
-/// Run the full output normalize phase in one Rust call (replaces 11 Python->Rust round-trips).
+/// Run the full output normalize phase in one Rust call.
 #[pyfunction]
 #[pyo3(signature = (graph_module))]
 fn cf_run_output_normalize_phase(graph_module: &Bound<'_, PyAny>) -> PyResult<()> {
     let py = graph_module.py();
     fx_control_flow_metadata::run_output_normalize_phase(py, graph_module)
-}
-
-/// Minimal output phase for the fixed pipeline (no boundary repair needed).
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn cf_run_minimal_output_phase(graph_module: &Bound<'_, PyAny>) -> PyResult<()> {
-    let py = graph_module.py();
-    fx_control_flow_metadata::run_minimal_output_phase(py, graph_module)
 }
 
 /// Run the full post-Rust boundary phase in one Rust call.
@@ -445,33 +300,20 @@ fn cf_run_boundary_phase(
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Core pipeline
     m.add_function(wrap_pyfunction!(lower_to_tosa_v2, m)?)?;
     m.add_function(wrap_pyfunction!(ingest_and_serialize, m)?)?;
-    m.add_function(wrap_pyfunction!(fold_qdq_fx, m)?)?;
-    m.add_function(wrap_pyfunction!(insert_rescale_fx, m)?)?;
     m.add_function(wrap_pyfunction!(run_fx_passes, m)?)?;
     m.add_function(wrap_pyfunction!(run_fx_submodule_passes, m)?)?;
     m.add_function(wrap_pyfunction!(run_fx_cond_passes, m)?)?;
-    m.add_function(wrap_pyfunction!(stamp_control_flow_metadata, m)?)?;
-    m.add_function(wrap_pyfunction!(cleanup_control_flow_submodules, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_remove_noop_passthroughs, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_prune_duplicate_terminal_rescales, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_restore_missing_rescale_qparams, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_refresh_tosa_transpose_fake_tensors, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_refresh_tosa_dim_order_fake_tensors, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_rewrite_quantization_boundaries, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_restore_float_compare_inputs, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_normalize_output_layouts, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_reapply_table_ops, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_reapply_boundary_rescales, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_restore_output_dequantizes, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_restore_missing_input_rescales, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_quantize_constant_only_outputs, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_run_output_normalize_phase, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_run_boundary_phase, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_run_minimal_output_phase, m)?)?;
+    // Control-flow pipeline (new ordering)
     m.add_function(wrap_pyfunction!(stamp_control_flow_structural, m)?)?;
     m.add_function(wrap_pyfunction!(propagate_control_flow_qparams, m)?)?;
+    m.add_function(wrap_pyfunction!(cf_run_boundary_phase, m)?)?;
+    m.add_function(wrap_pyfunction!(cf_run_output_normalize_phase, m)?)?;
+    // Utilities
+    m.add_function(wrap_pyfunction!(fold_qdq_fx, m)?)?;
+    m.add_function(wrap_pyfunction!(insert_rescale_fx, m)?)?;
     m.add_function(wrap_pyfunction!(fx_graph_summary, m)?)?;
     Ok(())
 }
