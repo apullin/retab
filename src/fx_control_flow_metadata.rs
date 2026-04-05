@@ -2057,30 +2057,19 @@ pub(crate) fn run_output_normalize_phase<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<()> {
-    // 1. Normalize output layouts
+    // Steps 2 (restore_missing_rescale_qparams) and 5 (quantize_constant_only_outputs)
+    // confirmed dead with correct qparam propagation.
     normalize_control_flow_output_layouts(py, gm)?;
-    // 2. Restore missing rescale qparams
-    restore_missing_control_flow_rescale_qparams(py, gm)?;
-    // 3. Reapply boundary rescales (outputs only)
     reapply_control_flow_boundary_rescales(py, gm, false, true)?;
-    // 4. Rewrite quantization boundaries
     rewrite_control_flow_quantization_boundaries(py, gm)?;
-    // 5. Quantize constant-only outputs
-    quantize_constant_only_control_flow_outputs(py, gm)?;
-    // 6. Remove noop passthroughs
     remove_control_flow_noop_passthroughs(py, gm)?;
-    // 7. Stamp control-flow metadata (regularize + annotate + restamp)
     {
         let gm_wrapper = crate::fx_graph::FxGraphModule::new(gm);
         crate::fx_pass::FxPass::run(&FxControlFlowMetadataPass, &gm_wrapper)?;
     }
-    // 8. Refresh TOSA transpose fake tensors
     refresh_tosa_transpose_fake_tensors(py, gm)?;
-    // 9. Refresh TOSA dim_order fake tensors
     refresh_tosa_dim_order_fake_tensors(py, gm)?;
-    // 10. Prune duplicate terminal rescales
     prune_duplicate_terminal_rescales(py, gm)?;
-    // 11. Restore float compare inputs
     restore_control_flow_float_compare_inputs(py, gm)?;
     Ok(())
 }
