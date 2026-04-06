@@ -9,6 +9,39 @@ use crate::fx_pass::FxPass;
 use crate::runner_logging::log_line;
 
 // ---------------------------------------------------------------------------
+// CfCtx — cached Python imports and shared context
+// ---------------------------------------------------------------------------
+
+/// Cached Python module imports for control-flow operations.
+/// Created once per pipeline invocation, passed to all CF functions.
+struct CfCtx<'py> {
+    torch: Bound<'py, PyAny>,
+    cond_op: Bound<'py, PyAny>,
+    while_op: Bound<'py, PyAny>,
+}
+
+impl<'py> CfCtx<'py> {
+    fn new(py: Python<'py>) -> PyResult<Self> {
+        let torch = py.import_bound("torch")?.into_any();
+        let ho = torch.getattr("ops")?.getattr("higher_order")?;
+        let cond_op = ho.getattr("cond")?;
+        let while_op = ho.getattr("while_loop")?;
+        Ok(Self { torch, cond_op, while_op })
+    }
+
+    fn int8(&self) -> PyResult<Bound<'py, PyAny>> { self.torch.getattr("int8") }
+    fn int16(&self) -> PyResult<Bound<'py, PyAny>> { self.torch.getattr("int16") }
+
+    fn is_cond_or_while(&self, node: &Bound<'py, PyAny>) -> PyResult<(bool, bool)> {
+        let target = node.getattr("target")?;
+        Ok((
+            target.eq(&self.cond_op).unwrap_or(false),
+            target.eq(&self.while_op).unwrap_or(false),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // QParam — Rust-native quantization parameter struct
 // ---------------------------------------------------------------------------
 
@@ -1030,10 +1063,7 @@ fn snapshot_pre_pass_cf_qparams<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
-    let torch = py.import_bound("torch")?;
-    let cond_op = torch.getattr("ops")?.getattr("higher_order")?.getattr("cond")?;
-    let while_op = torch.getattr("ops")?.getattr("higher_order")?.getattr("while_loop")?;
-
+    let ctx = CfCtx::new(py)?;
     let parent_graph = gm.getattr("graph")?;
     let nodes: Vec<Bound<'py, PyAny>> = parent_graph.getattr("nodes")?
         .iter()?.filter_map(|n| n.ok()).collect();
@@ -1042,10 +1072,8 @@ fn snapshot_pre_pass_cf_qparams<'py>(
     for node in &nodes {
         let op: String = node.getattr("op").and_then(|v| v.extract()).unwrap_or_default();
         if op != "call_function" { continue; }
-        let target = node.getattr("target")?;
-        if !target.eq(&cond_op).unwrap_or(false) && !target.eq(&while_op).unwrap_or(false) {
-            continue;
-        }
+        let (is_cond, is_while) = ctx.is_cond_or_while(node)?;
+        if !is_cond && !is_while { continue; }
 
         let parent_args = resolve_cf_parent_args(node)?;
         let qparams_dict = pyo3::types::PyDict::new_bound(py);
@@ -1816,7 +1844,7 @@ fn is_zero_input_const_source(node: &Bound<'_, PyAny>) -> bool {
 /// Collapse matching Q->DQ pairs in a submodule graph.
 /// Rust port of Python `_collapse_control_flow_qdq_pairs`.
 fn collapse_control_flow_qdq_pairs<'py>(
-    py: Python<'py>,
+    _py: Python<'py>,
     graph: &Bound<'py, PyAny>,
     quant_count: &mut u32,
 ) -> PyResult<bool> {
@@ -1895,10 +1923,10 @@ fn collapse_control_flow_qdq_pairs<'py>(
 /// Rewrite standalone dequantize nodes in a submodule graph.
 /// Rust port with Python fallback for the int32 cluster case.
 fn rewrite_control_flow_dequantize_nodes<'py>(
-    py: Python<'py>,
+    _py: Python<'py>,
     graph: &Bound<'py, PyAny>,
-    submodule: &Bound<'py, PyAny>,
-    cf_node: &Bound<'py, PyAny>,
+    _submodule: &Bound<'py, PyAny>,
+    _cf_node: &Bound<'py, PyAny>,
     dequant_count: &mut u32,
 ) -> PyResult<bool> {
     let mut modified = false;
@@ -1954,7 +1982,7 @@ fn rewrite_control_flow_quantize_nodes<'py>(
     py: Python<'py>,
     graph: &Bound<'py, PyAny>,
     submodule: &Bound<'py, PyAny>,
-    cf_node: &Bound<'py, PyAny>,
+    _cf_node: &Bound<'py, PyAny>,
     quant_count: &mut u32,
 ) -> PyResult<bool> {
     let mut modified = false;
@@ -1963,11 +1991,6 @@ fn rewrite_control_flow_quantize_nodes<'py>(
         .iter()?
         .filter_map(|n| n.ok())
         .collect();
-
-    let torch = py.import_bound("torch")?;
-    let int8 = torch.getattr("int8")?;
-    let int16 = torch.getattr("int16")?;
-    let int32 = torch.getattr("int32")?;
 
     for node in &nodes {
         if !is_quantize_node(node) {
@@ -2100,13 +2123,13 @@ pub(crate) fn restore_control_flow_float_compare_inputs<'py>(
         return Ok(0);
     }
 
-    let torch = py.import_bound("torch")?;
-    let int8 = torch.getattr("int8")?;
-    let int16 = torch.getattr("int16")?;
-    let int32 = torch.getattr("int32")?;
-    let float16 = torch.getattr("float16")?;
-    let float32 = torch.getattr("float32")?;
-    let float64 = torch.getattr("float64")?;
+    let ctx = CfCtx::new(py)?;
+    let int8 = ctx.int8()?;
+    let int16 = ctx.int16()?;
+    let int32 = ctx.torch.getattr("int32")?;
+    let float16 = ctx.torch.getattr("float16")?;
+    let float32 = ctx.torch.getattr("float32")?;
+    let float64 = ctx.torch.getattr("float64")?;
 
     let arm_utils =
         py.import_bound("executorch.backends.arm._passes.arm_pass_utils")?;
@@ -2304,12 +2327,7 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
-    let torch = py.import_bound("torch")?;
-    let while_op = torch.getattr("ops")?.getattr("higher_order")?.getattr("while_loop")?;
-    let cond_op = torch.getattr("ops")?.getattr("higher_order")?.getattr("cond")?;
-    let helpers = py.import_bound("retab._helpers")?;
-    let insert_fn = helpers.getattr("insert_rescale_node")?;
-
+    let ctx = CfCtx::new(py)?;
     let parent_graph = gm.getattr("graph")?;
     let nodes: Vec<Bound<'py, PyAny>> = parent_graph.getattr("nodes")?
         .iter()?.filter_map(|n| n.ok()).collect();
@@ -2319,9 +2337,7 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
     for node in &nodes {
         let op: String = node.getattr("op").and_then(|v| v.extract()).unwrap_or_default();
         if op != "call_function" { continue; }
-        let target = node.getattr("target")?;
-        let is_while = target.eq(&while_op).unwrap_or(false);
-        let is_cond = target.eq(&cond_op).unwrap_or(false);
+        let (is_cond, is_while) = ctx.is_cond_or_while(node)?;
         if !is_while && !is_cond { continue; }
 
         // Get external qparams from the cf node's input_qparams
@@ -2504,12 +2520,7 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
 ) -> PyResult<u32> {
     if !include_outputs { return Ok(0); }
 
-    let torch = py.import_bound("torch")?;
-    let cond_op = torch.getattr("ops")?.getattr("higher_order")?.getattr("cond")?;
-    let while_op = torch.getattr("ops")?.getattr("higher_order")?.getattr("while_loop")?;
-    let helpers = py.import_bound("retab._helpers")?;
-    let insert_fn = helpers.getattr("insert_rescale_node")?;
-
+    let ctx = CfCtx::new(py)?;
     let parent_graph = gm.getattr("graph")?;
     let nodes: Vec<Bound<'py, PyAny>> = parent_graph.getattr("nodes")?
         .iter()?.filter_map(|n| n.ok()).collect();
@@ -2519,9 +2530,7 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
     for node in &nodes {
         let op: String = node.getattr("op").and_then(|v| v.extract()).unwrap_or_default();
         if op != "call_function" { continue; }
-        let target = node.getattr("target")?;
-        let is_cond = target.eq(&cond_op).unwrap_or(false);
-        let is_while = target.eq(&while_op).unwrap_or(false);
+        let (is_cond, is_while) = ctx.is_cond_or_while(node)?;
         if !is_cond && !is_while { continue; }
 
         let args = FxGraphModule::node_args(node)?;
