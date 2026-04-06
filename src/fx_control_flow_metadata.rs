@@ -276,45 +276,28 @@ fn is_quantize_node(node: &Bound<'_, PyAny>) -> bool {
 //    Syncs placeholder fake tensors with parent args, stamps metadata.
 // ---------------------------------------------------------------------------
 
-/// Resolve parent args for a control-flow node (cond or while_loop).
+/// Collect items from a Python iterable into a Vec.
+fn py_iter_collect<'py>(obj: &Bound<'py, PyAny>) -> Vec<Bound<'py, PyAny>> {
+    obj.iter().ok()
+        .map(|it| it.filter_map(|v| v.ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Resolve data args for a control-flow node.
+/// cond(pred, if_fn, else_fn, [data_args]) → returns data_args
+/// while_loop(cond_fn, body_fn, carried_args, additional_args) → returns carried + additional
 fn resolve_cf_parent_args<'py>(
     cf_node: &Bound<'py, PyAny>,
 ) -> PyResult<Vec<Bound<'py, PyAny>>> {
-    let target_str = cf_node
-        .getattr("target")
-        .and_then(|t| t.str().map(|s| s.to_string()))
-        .unwrap_or_default();
-
+    let target_str = FxGraphModule::node_target_str(cf_node).unwrap_or_default();
     let all_args = FxGraphModule::node_args(cf_node)?;
+
     if target_str.contains("cond") {
-        // cond: last arg is the list of operands
-        if let Some(last) = all_args.last() {
-            let mut v = Vec::new();
-            if let Ok(iter) = last.iter() {
-                for item in iter {
-                    v.push(item?);
-                }
-            }
-            Ok(v)
-        } else {
-            Ok(Vec::new())
-        }
-    } else if target_str.contains("while_loop") {
-        // while_loop: args[-2] + args[-1]
-        let len = all_args.len();
-        if len >= 2 {
-            let mut v = Vec::new();
-            for list_arg in &all_args[len - 2..] {
-                if let Ok(iter) = list_arg.iter() {
-                    for item in iter {
-                        v.push(item?);
-                    }
-                }
-            }
-            Ok(v)
-        } else {
-            Ok(Vec::new())
-        }
+        Ok(all_args.last().map(|a| py_iter_collect(a)).unwrap_or_default())
+    } else if target_str.contains("while_loop") && all_args.len() >= 2 {
+        let mut v = py_iter_collect(&all_args[all_args.len() - 2]);
+        v.extend(py_iter_collect(&all_args[all_args.len() - 1]));
+        Ok(v)
     } else {
         Ok(Vec::new())
     }
@@ -1514,6 +1497,41 @@ fn actual_shape_from_meta<'py>(node: &Bound<'py, PyAny>) -> PyResult<Option<Vec<
 // 1. _remove_control_flow_noop_passthroughs
 // ---------------------------------------------------------------------------
 
+/// Check if two Python values have the same extractable value for a given attr.
+fn meta_attr_matches<T: PartialEq + for<'a> pyo3::FromPyObject<'a>>(
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    attr: &str,
+) -> bool {
+    let av = a.getattr(attr).ok().and_then(|v| v.extract::<T>().ok());
+    let bv = b.getattr(attr).ok().and_then(|v| v.extract::<T>().ok());
+    match (av, bv) {
+        (Some(a), Some(b)) => a == b,
+        _ => true, // if either is missing, don't block
+    }
+}
+
+/// Copy a metadata key from src to dst if dst doesn't have it.
+fn propagate_meta_key(
+    py: Python<'_>,
+    dst_meta: &Bound<'_, PyAny>,
+    src_meta: &Bound<'_, PyAny>,
+    key: &str,
+) -> PyResult<()> {
+    if meta_val(dst_meta, key).is_some() { return Ok(()); }
+    if let Some(val) = meta_val(src_meta, key) {
+        if !val.is_truthy().unwrap_or(false) { return Ok(()); }
+        let builtins = py.import_bound("builtins")?;
+        let copy = if key.contains("qparams") {
+            builtins.call_method1("dict", (&val,))?
+        } else {
+            builtins.call_method1("tuple", (&val,))?
+        };
+        dst_meta.set_item(key, &copy)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn remove_control_flow_noop_passthroughs<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
@@ -1531,95 +1549,33 @@ pub(crate) fn remove_control_flow_noop_passthroughs<'py>(
     for (_name, submodule, _cf_node) in &submodules {
         let graph = submodule.getattr("graph")?;
         let mut updated = false;
-
-        // Collect nodes into a list first (we'll be modifying the graph)
         let nodes = submodule_nodes(&submodule)?;
 
         for node in &nodes {
-            if !is_call_function_target(node, noop_markers) {
-                continue;
-            }
-
+            if !is_call_function_target(node, noop_markers) { continue; }
             let args = FxGraphModule::node_args(node)?;
-            if args.is_empty() || !FxGraphModule::is_node(&args[0]) {
-                continue;
-            }
-
+            if args.is_empty() || !FxGraphModule::is_node(&args[0]) { continue; }
             let source = &args[0];
 
-            // Check dtype match
             let node_meta = node.getattr("meta")?;
             let source_meta = source.getattr("meta")?;
-            let node_val = meta_val(&node_meta, "val");
-            let source_val = meta_val(&source_meta, "val");
+            let nv = meta_val(&node_meta, "val");
+            let sv = meta_val(&source_meta, "val");
 
-            // dtype check
-            if let (Some(ref nv), Some(ref sv)) = (&node_val, &source_val) {
-                let nd = nv.getattr("dtype").ok();
-                let sd = sv.getattr("dtype").ok();
-                if let (Some(ref nd), Some(ref sd)) = (&nd, &sd) {
-                    if !nd.is_none() && !sd.is_none() && !nd.eq(sd).unwrap_or(true) {
-                        continue;
-                    }
-                }
+            // Skip if dtype, shape, or dim_order mismatch
+            if let (Some(ref nv), Some(ref sv)) = (&nv, &sv) {
+                if !meta_attr_matches::<String>(nv, sv, "dtype") { continue; }
+                if !meta_attr_matches::<Vec<i64>>(nv, sv, "shape") { continue; }
+            }
+            if !meta_attr_matches::<Vec<i64>>(&node_meta, &source_meta, "tosa_dim_order") {
+                continue;
             }
 
-            // shape check
-            if let (Some(ref nv), Some(ref sv)) = (&node_val, &source_val) {
-                let ns = nv.getattr("shape").ok();
-                let ss = sv.getattr("shape").ok();
-                if let (Some(ref ns), Some(ref ss)) = (&ns, &ss) {
-                    let ns_t: Result<Vec<i64>, _> = ns.extract();
-                    let ss_t: Result<Vec<i64>, _> = ss.extract();
-                    if let (Ok(ns_t), Ok(ss_t)) = (ns_t, ss_t) {
-                        if ns_t != ss_t {
-                            continue;
-                        }
-                    }
-                }
-            }
+            // Propagate metadata from noop node to source
+            propagate_meta_key(py, &source_meta, &node_meta, "tosa_dim_order")?;
+            propagate_meta_key(py, &source_meta, &node_meta, "input_qparams")?;
+            propagate_meta_key(py, &source_meta, &node_meta, "output_qparams")?;
 
-            // dim_order check
-            let node_dim_order = meta_val(&node_meta, "tosa_dim_order");
-            let source_dim_order = meta_val(&source_meta, "tosa_dim_order");
-            if let (Some(ref ndo), Some(ref sdo)) = (&node_dim_order, &source_dim_order) {
-                let ndo_v: Result<Vec<i64>, _> = ndo.extract();
-                let sdo_v: Result<Vec<i64>, _> = sdo.extract();
-                if let (Ok(ndo_v), Ok(sdo_v)) = (ndo_v, sdo_v) {
-                    if ndo_v != sdo_v {
-                        continue;
-                    }
-                }
-            }
-
-            // Propagate metadata from node to source if source is missing it
-            if meta_val(&source_meta, "tosa_dim_order").is_none() {
-                if let Some(ref ndo) = node_dim_order {
-                    let builtins = py.import_bound("builtins")?;
-                    let t = builtins.call_method1("tuple", (ndo,))?;
-                    source_meta.set_item("tosa_dim_order", &t)?;
-                }
-            }
-            if meta_val(&source_meta, "input_qparams").is_none() {
-                if let Some(iqp) = meta_val(&node_meta, "input_qparams") {
-                    if iqp.is_truthy().unwrap_or(false) {
-                        let builtins = py.import_bound("builtins")?;
-                        let d = builtins.call_method1("dict", (&iqp,))?;
-                        source_meta.set_item("input_qparams", &d)?;
-                    }
-                }
-            }
-            if meta_val(&source_meta, "output_qparams").is_none() {
-                if let Some(oqp) = meta_val(&node_meta, "output_qparams") {
-                    if oqp.is_truthy().unwrap_or(false) {
-                        let builtins = py.import_bound("builtins")?;
-                        let d = builtins.call_method1("dict", (&oqp,))?;
-                        source_meta.set_item("output_qparams", &d)?;
-                    }
-                }
-            }
-
-            // Replace all uses and erase
             node.call_method1("replace_all_uses_with", (source,))?;
             graph.call_method1("erase_node", (node,))?;
             rewritten += 1;
@@ -2088,55 +2044,35 @@ fn rewrite_control_flow_quantize_nodes<'py>(
             continue;
         }
         let source_node = &args[0];
-
-        // Get source qparam
-        let source_qparam = extract_effective_node_qparam(py, source_node)?;
-
-        // Get output qparam from Q node's args
-        let output_qparam = parse_per_tensor_qparam(py, node)?;
-        let output_qparam = match output_qparam {
+        let target = match parse_qparam(node)? {
             Some(qp) => qp,
             None => continue,
         };
+        let source = extract_effective_node_qparam(py, source_node)?
+            .map(|q| QParam::from_py(&q));
 
-        // Check if source is quantized int
-        let source_dtype_str = source_node
-            .getattr("meta")?
-            .get_item("val")
-            .ok()
+        // Skip float sources with no qparams (unless zero-input const)
+        let source_dtype_str = source_node.getattr("meta")?
+            .get_item("val").ok()
             .and_then(|v| v.getattr("dtype").ok())
-            .map(|d| format!("{}", d))
-            .unwrap_or_default();
-        let source_is_int = source_dtype_str.contains("int8")
-            || source_dtype_str.contains("int16")
-            || source_dtype_str.contains("int32");
-
-        if !source_is_int && source_qparam.is_none() && !is_zero_input_const_source(source_node) {
+            .map(|d| format!("{d}")).unwrap_or_default();
+        let source_is_int = source_dtype_str.contains("int");
+        if !source_is_int && source.is_none() && !is_zero_input_const_source(source_node) {
             continue;
         }
 
-        // Per-channel or missing source qparam
-        let is_per_channel = |qp: &Bound<'_, PyAny>| -> bool {
-            qp.getattr("per_channel").and_then(|v| v.extract()).unwrap_or(false)
-        };
-
-        if source_qparam.is_none()
-            || source_qparam.as_ref().map(|q| is_per_channel(q)).unwrap_or(false)
-            || is_per_channel(&output_qparam)
-        {
-            if source_qparam.is_none() && is_zero_input_const_source(source_node) {
-                log_line(format_args!(
-                    "[cf-quantize-rewrite] skipping const materialization for {}",
-                    node.getattr("name").map(|n| format!("{}", n)).unwrap_or("?".into())
-                ));
-            }
+        // Skip per-channel or missing source qparam
+        let src_per_ch = source_node.getattr("meta")?.get_item("output_qparams").ok()
+            .and_then(|oqp| extract_single_qparam_entry(py, &oqp))
+            .and_then(|qp| qp.getattr("per_channel").ok()?.extract::<bool>().ok())
+            .unwrap_or(false);
+        if source.is_none() || src_per_ch {
             continue;
         }
+        let source = source.unwrap();
 
-        let source_qparam = source_qparam.unwrap();
-
-        // Case 1: same qparam → bypass
-        if QParam::from_py(&source_qparam).same_as(&QParam::from_py(&output_qparam)) {
+        // Case 1: same qparam → bypass (erase Q node)
+        if source.same_as(&target) {
             node.call_method1("replace_all_uses_with", (source_node,))?;
             graph.call_method1("erase_node", (node,))?;
             *quant_count += 1;
@@ -2145,21 +2081,8 @@ fn rewrite_control_flow_quantize_nodes<'py>(
         }
 
         // Case 3: different qparam → insert RESCALE
-        let helpers = py.import_bound("retab._helpers")?;
-        let insert_fn = helpers.getattr("insert_rescale_node")?;
-        let scale_ratio = source_qparam.getattr("scale")?.extract::<f64>().unwrap_or(1.0)
-            / output_qparam.getattr("scale")?.extract::<f64>().unwrap_or(1.0);
-        let input_zp: i64 = source_qparam.getattr("zp")?.extract().unwrap_or(0);
-        let output_zp: i64 = output_qparam.getattr("zp")?.extract().unwrap_or(0);
-        let out_dtype = output_qparam.getattr("dtype")?;
-        let scales = pyo3::types::PyList::new_bound(py, &[scale_ratio]);
-        let kwargs = PyDict::new_bound(py);
-        kwargs.set_item("after", false)?;
-        let rescale = insert_fn.call(
-            (submodule, node, source_node, &out_dtype, &scales, input_zp, output_zp),
-            Some(&kwargs),
-        )?;
-        stamp_single_qparams(py, &rescale, Some(&source_qparam), Some(&output_qparam))?;
+        let rescale = source.insert_rescale_to(&target, py, submodule, node, source_node, false)?;
+        stamp_single_qparams(py, &rescale, Some(&source.to_py(py)?), Some(&target.to_py(py)?))?;
         node.call_method1("replace_all_uses_with", (&rescale,))?;
         graph.call_method1("erase_node", (node,))?;
         *quant_count += 1;
