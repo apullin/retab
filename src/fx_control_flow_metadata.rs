@@ -273,37 +273,27 @@ fn recompile(submodule: &Bound<'_, PyAny>) -> PyResult<()> {
     Ok(())
 }
 
-/// `node.users` keys as a sorted list (matches _ordered_control_flow_users).
+/// Getitem sort key: (is_getitem=0, getitem_idx, name) for getitems,
+/// (1, 0, name) for everything else. Getitems sort first, by index.
+fn user_sort_key(user: &Bound<'_, PyAny>) -> (u8, i64, String) {
+    let target_str = FxGraphModule::node_target_str(user).unwrap_or_default();
+    let args = FxGraphModule::node_args(user).unwrap_or_default();
+    let name = FxGraphModule::node_name(user).unwrap_or_default();
+    if target_str.contains("getitem") && args.len() > 1 {
+        if let Ok(idx) = args[1].extract::<i64>() {
+            return (0, idx, name);
+        }
+    }
+    (1, 0, name)
+}
+
+/// `node.users` sorted by getitem index (getitems first, then others by name).
 fn ordered_cf_users<'py>(node: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
     let users = node.getattr("users")?;
-    let keys = users.call_method0("keys")?;
-    let mut result = Vec::new();
-    for k in keys.iter()? {
-        result.push(k?);
-    }
-    // Sort by (is_getitem, getitem_idx, name) to match Python's _ordered_control_flow_users
-    let py = node.py();
-    let builtins = py.import_bound("builtins")?;
-    let sorted_fn = builtins.getattr("sorted")?;
-    // For simplicity, just use the Python sorted with a key matching the Python code
-    let sort_key = py.eval_bound(
-        r#"lambda user: (
-            (0, user.args[1], getattr(user, 'name', ''))
-            if 'getitem' in str(getattr(user, 'target', '')) and len(getattr(user, 'args', ())) > 1 and isinstance(user.args[1], int)
-            else (1, 0, getattr(user, 'name', ''))
-        )"#,
-        None,
-        None,
-    )?;
-    let py_list = pyo3::types::PyList::new_bound(py, &result);
-    let kwargs = pyo3::types::PyDict::new_bound(py);
-    kwargs.set_item("key", &sort_key)?;
-    let sorted_list = sorted_fn.call((py_list,), Some(&kwargs))?;
-    let mut out = Vec::new();
-    for item in sorted_list.iter()? {
-        out.push(item?);
-    }
-    Ok(out)
+    let mut result: Vec<Bound<'py, PyAny>> = users.call_method0("keys")?
+        .iter()?.filter_map(|k| k.ok()).collect();
+    result.sort_by(|a, b| user_sort_key(a).cmp(&user_sort_key(b)));
+    Ok(result)
 }
 
 /// Is node a quantize_per_tensor call_function?
@@ -381,8 +371,8 @@ fn regularize_control_flow_submodules_structural<'py>(
             let parent_meta = parent_arg.getattr("meta")?;
             if meta_val(&parent_meta, "tosa_dim_order").is_some() {
                 let dim_order = parent_meta.get_item("tosa_dim_order")?;
-                let builtins = py.import_bound("builtins")?;
-                let py_tuple = builtins.call_method1("tuple", (&dim_order,))?;
+                let items: Vec<_> = dim_order.iter()?.filter_map(|v| v.ok()).collect();
+                let py_tuple = PyTuple::new_bound(py, &items);
                 meta.set_item("tosa_dim_order", &py_tuple)?;
             }
             // No qparam propagation here — that happens post-parent-passes
@@ -1383,22 +1373,19 @@ fn try_reverse_engineer_rescale_qparam(
 }
 
 /// Stamp single qparams on a node (input_qparam and/or output_qparam).
-fn stamp_single_qparams<'py>(
-    py: Python<'py>,
-    node: &Bound<'py, PyAny>,
-    input_qparam: Option<&Bound<'py, PyAny>>,
-    output_qparam: Option<&Bound<'py, PyAny>>,
+/// Stamp input/output qparams on a node's metadata from QParam values.
+fn stamp_qparams(
+    py: Python<'_>,
+    node: &Bound<'_, PyAny>,
+    input: Option<&QParam>,
+    output: Option<&QParam>,
 ) -> PyResult<()> {
     let meta = node.getattr("meta")?;
-    if let Some(iqp) = input_qparam {
-        let d = PyDict::new_bound(py);
-        d.set_item(0i64, iqp)?;
-        meta.set_item("input_qparams", &d)?;
+    if let Some(qp) = input {
+        qp.stamp_on_meta(py, &meta, "input_qparams")?;
     }
-    if let Some(oqp) = output_qparam {
-        let d = PyDict::new_bound(py);
-        d.set_item(0i64, oqp)?;
-        meta.set_item("output_qparams", &d)?;
+    if let Some(qp) = output {
+        qp.stamp_on_meta(py, &meta, "output_qparams")?;
     }
     Ok(())
 }
@@ -1418,16 +1405,13 @@ fn copy_output_contract_meta<'py>(
     // tosa_dim_order
     if let Some(tdo) = meta_val(&src_meta, "tosa_dim_order") {
         let py = dst.py();
-        let builtins = py.import_bound("builtins")?;
-        let t = builtins.call_method1("tuple", (&tdo,))?;
+        let items: Vec<_> = tdo.iter()?.filter_map(|v| v.ok()).collect();
+        let t = PyTuple::new_bound(py, &items);
         dst_meta.set_item("tosa_dim_order", &t)?;
     }
-    // output_qparams
     if copy_output_qparams {
         if let Some(oqp) = meta_val(&src_meta, "output_qparams") {
-            let py = dst.py();
-            let builtins = py.import_bound("builtins")?;
-            let d = builtins.call_method1("dict", (&oqp,))?;
+            let d = oqp.call_method0("copy")?;
             dst_meta.set_item("output_qparams", &d)?;
         }
     }
@@ -1508,12 +1492,7 @@ fn propagate_meta_key(
     if meta_val(dst_meta, key).is_some() { return Ok(()); }
     if let Some(val) = meta_val(src_meta, key) {
         if !val.is_truthy().unwrap_or(false) { return Ok(()); }
-        let builtins = py.import_bound("builtins")?;
-        let copy = if key.contains("qparams") {
-            builtins.call_method1("dict", (&val,))?
-        } else {
-            builtins.call_method1("tuple", (&val,))?
-        };
+        let copy = val.call_method0("copy")?;
         dst_meta.set_item(key, &copy)?;
     }
     Ok(())
@@ -1689,14 +1668,14 @@ pub(crate) fn prune_duplicate_terminal_rescales<'py>(
             {
                 let source_meta = source.getattr("meta")?;
                 if let Some(soqp) = meta_val(&source_meta, "output_qparams") {
-                    if let Some(source_qparam) = extract_single_qparam_entry(py, &soqp) {
-                        stamp_single_qparams(py, node, Some(&source_qparam), None)?;
+                    if let Some(qp) = extract_qparam(&soqp) {
+                        stamp_qparams(py, node, Some(&qp), None)?;
                     }
                 }
             }
 
-            // Stamp output_qparam
-            stamp_single_qparams(py, node, None, Some(&final_output_qparam))?;
+            let final_qp = QParam::from_py(&final_output_qparam);
+            stamp_qparams(py, node, None, Some(&final_qp))?;
 
             // Replace user with node and erase user
             user.call_method1("replace_all_uses_with", (node,))?;
@@ -1828,7 +1807,7 @@ fn is_dequantize_node(node: &Bound<'_, PyAny>) -> bool {
 /// Parse scale/zp/qmin/qmax/dtype from a Q or DQ node's literal args.
 /// Returns a Python QuantArgs object or None.
 /// Parse Q/DQ node literal args into a Python QuantArgs object.
-/// Kept for callers that still need the Python object (e.g., stamp_single_qparams).
+/// Returns Python QuantArgs object for callers that need to pass it to Python functions.
 fn parse_per_tensor_qparam<'py>(
     py: Python<'py>,
     node: &Bound<'py, PyAny>,
@@ -2056,7 +2035,7 @@ fn rewrite_control_flow_quantize_nodes<'py>(
 
         // Case 3: different qparam → insert RESCALE
         let rescale = source.insert_rescale_to(&target, py, submodule, node, source_node, false)?;
-        stamp_single_qparams(py, &rescale, Some(&source.to_py(py)?), Some(&target.to_py(py)?))?;
+        stamp_qparams(py, &rescale, Some(&source), Some(&target))?;
         node.call_method1("replace_all_uses_with", (&rescale,))?;
         graph.call_method1("erase_node", (node,))?;
         *quant_count += 1;
