@@ -234,19 +234,28 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
 
 /// Build the FX pipeline for while_loop submodule graphs.
 ///
-/// Uses Carried output qparam source on the final rescale: output[i] must
+/// Mirrors the cond pipeline but uses Carried rescale mode: output[i] must
 /// match placeholder[i] because while_loop body outputs feed back as inputs.
-///
-/// NOTE: This is more minimal than the cond pipeline because the full pipeline
-/// (with fold_qdq) can double-transform while_loop bodies. The while_loop
-/// repair Python functions still handle boundary rescaling until this pipeline
-/// is expanded to handle the loop-carried constraint natively.
-pub fn build_fx_submodule_pipeline() -> Vec<Box<dyn FxPass>> {
+pub fn build_fx_while_submodule_pipeline(
+    exported_program: Option<pyo3::PyObject>,
+) -> Vec<Box<dyn FxPass>> {
+    let ep = ExportedProgramClones::new(exported_program);
     vec![
-        Box::new(fx_control_flow_metadata::FxControlFlowMetadataPass),
+        // Q/DQ folding + rescale
+        Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(ep.fold_qdq)),
+        Box::new(fx_fuse_duplicate_users::FxFuseDuplicateUsersPass),
+        Box::new(fx_insert_rescale::FxInsertRescalePass::carried()),
+        // TABLE lowering for quantized math ops
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
-        Box::new(fx_insert_rescale::FxInsertRescalePass::new()),
+        // Cleanup
+        Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(ep.fuse)),
+        Box::new(fx_remove_noop::FxRemoveNoopPass),
+        // Second rescale pass
+        Box::new(fx_insert_rescale::FxInsertRescalePass::carried()),
+        // Layout
         Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
+        // Final rescale: fix chains broken by TABLE/layout transposes
+        Box::new(fx_insert_rescale::FxInsertRescalePass::carried()),
     ]
 }
 

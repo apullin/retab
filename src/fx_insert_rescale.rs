@@ -1160,7 +1160,6 @@ impl FxPass for FxInsertRescalePass {
                         continue;
                     }
 
-                    // Placeholder qparams are the target (already propagated)
                     let ph_meta = ph.getattr("meta")?;
                     let ph_qp = if let Ok(oqp) = ph_meta.get_item("output_qparams") {
                         first_qparam(&oqp)

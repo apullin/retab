@@ -189,14 +189,16 @@ fn run_fx_passes(
 
 /// Run a safe subset of FX passes on a control-flow submodule graph.
 ///
-/// This runs only TABLE lowering and layout annotation -- the minimal set
-/// validated for branch-local graphs.  Call this on each submodule returned
-/// by `get_cond_while_submodules_nested` after the main `run_fx_passes`.
+/// Run the while_loop submodule pipeline (fold_qdq + carried rescale).
 #[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn run_fx_submodule_passes(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
+#[pyo3(signature = (graph_module, exported_program=None))]
+fn run_fx_submodule_passes(
+    graph_module: &Bound<'_, PyAny>,
+    exported_program: Option<&Bound<'_, PyAny>>,
+) -> PyResult<bool> {
+    let ep = exported_program.map(|e| e.clone().unbind());
     let gm = fx_graph::FxGraphModule::new(graph_module);
-    let pipeline = fx_pipeline::build_fx_submodule_pipeline();
+    let pipeline = fx_pipeline::build_fx_while_submodule_pipeline(ep);
     fx_pass::run_boxed_fx_passes(&gm, &pipeline)
 }
 
