@@ -736,6 +736,57 @@ pub(crate) fn refresh_tosa_dim_order_fake_tensors<'py>(
 // Combined FxPass
 // ---------------------------------------------------------------------------
 
+/// Strip boundary Q nodes from while_loop placeholders before fold_qdq.
+/// Loop-carried values are already quantized in the placeholder's domain.
+/// The Q node's literal args are from calibration, not runtime truth.
+/// Removing them lets fold_qdq see the placeholder directly and use
+/// its propagated qparams for downstream annotation.
+pub struct FxWhileStripBoundaryQPass;
+
+impl FxPass for FxWhileStripBoundaryQPass {
+    fn name(&self) -> &str {
+        "FxWhileStripBoundaryQ"
+    }
+
+    fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
+        let py = gm.py();
+        let graph = gm.gm_ref().getattr("graph")?;
+        let mut modified = false;
+
+        // Strip boundary Q nodes: placeholder → Q → ops  ⟹  placeholder → ops
+        // Store Q's qparams on the placeholder's output_qparams metadata
+        // so fold_qdq sees the placeholder with correct annotations.
+        for node in gm.nodes()? {
+            let op: String = py_attr(&node, &["op"], String::new());
+            if op != "placeholder" { continue; }
+            let users: Vec<Bound<'_, PyAny>> = node.getattr("users")?
+                .iter()?.filter_map(|u| u.ok()).collect();
+            for user in &users {
+                if !is_quantize_node(user) { continue; }
+                // Always stamp Q literal qparams — these represent the
+                // body-internal quantization domain. The propagated qparams
+                // (external domain) live on the while_loop parent node and
+                // are used for boundary RESCALE scale computation.
+                if let Some(qp) = parse_per_tensor_qparam(py, user)? {
+                    let meta = node.getattr("meta")?;
+                    let dict = pyo3::types::PyDict::new_bound(py);
+                    dict.set_item(0i64, &qp)?;
+                    meta.set_item("output_qparams", &dict)?;
+                }
+                user.call_method1("replace_all_uses_with", (&node,))?;
+                graph.call_method1("erase_node", (user,))?;
+                modified = true;
+            }
+        }
+
+        if modified {
+            cleanup_graph(&graph)?;
+            gm.recompile()?;
+        }
+        Ok(modified)
+    }
+}
+
 pub struct FxControlFlowMetadataPass;
 
 impl FxPass for FxControlFlowMetadataPass {
@@ -2099,6 +2150,23 @@ fn rewrite_control_flow_quantize_nodes<'py>(
 
         // Case 1: same qparam → bypass
         if same_control_flow_qparam(&source_qparam, &output_qparam, true) {
+            node.call_method1("replace_all_uses_with", (source_node,))?;
+            graph.call_method1("erase_node", (node,))?;
+            *quant_count += 1;
+            modified = true;
+            continue;
+        }
+
+        // Case 1b: while_loop body placeholder → bypass.
+        // Loop-carried values are already in the placeholder's quantization
+        // domain from the previous iteration. The Q literal args are from
+        // calibration and don't apply at runtime. Inserting a domain-shifting
+        // RESCALE here would compound error across iterations.
+        let source_op: String = py_attr(source_node, &["op"], String::new());
+        let cf_target_str = cf_node.getattr("target")
+            .and_then(|t| t.str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        if source_op == "placeholder" && cf_target_str.contains("while_loop") {
             node.call_method1("replace_all_uses_with", (source_node,))?;
             graph.call_method1("erase_node", (node,))?;
             *quant_count += 1;

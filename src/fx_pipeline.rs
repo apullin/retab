@@ -241,6 +241,9 @@ pub fn build_fx_while_submodule_pipeline(
 ) -> Vec<Box<dyn FxPass>> {
     let ep = ExportedProgramClones::new(exported_program);
     vec![
+        // Strip boundary Q nodes from placeholders before fold_qdq.
+        // Loop-carried values are already in the placeholder's domain.
+        Box::new(fx_control_flow_metadata::FxWhileStripBoundaryQPass),
         // Q/DQ folding + rescale
         Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(ep.fold_qdq)),
         Box::new(fx_fuse_duplicate_users::FxFuseDuplicateUsersPass),
