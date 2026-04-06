@@ -245,18 +245,47 @@ pub(crate) fn propagate_parent_qparams_to_placeholders<'py>(
         let placeholders = submodule_placeholders(submodule)?;
         let parent_args = resolve_cf_parent_args(cf_node)?;
 
-        for (ph, parent_arg) in placeholders.iter().zip(parent_args.iter()) {
+        for (i, (ph, parent_arg)) in placeholders.iter().zip(parent_args.iter()).enumerate() {
             let meta = ph.getattr("meta")?;
             let parent_meta = parent_arg.getattr("meta")?;
 
+            // First try direct metadata copy
+            let mut found = false;
             for qp_key in &["input_qparams", "output_qparams"] {
                 if let Some(parent_qp) = meta_val(&parent_meta, qp_key) {
                     let copied = parent_qp.call_method0("copy").unwrap_or(parent_qp.clone());
                     meta.set_item(*qp_key, &copied)?;
                     propagated += 1;
+                    found = true;
                 }
             }
 
+            // If no metadata qparams, try the pre-pass snapshot saved
+            // before parent passes destroyed the original DQ/Q args.
+            if !found {
+                let cf_meta = cf_node.getattr("meta")?;
+                if let Ok(saved) = cf_meta.get_item("_pre_pass_arg_qparams") {
+                    if let Ok(qp) = saved.get_item(i) {
+                        let dict = pyo3::types::PyDict::new_bound(py);
+                        dict.set_item(0i64, &qp)?;
+                        meta.set_item("output_qparams", &dict)?;
+                        meta.set_item("input_qparams", &dict)?;
+                        propagated += 1;
+                        found = true;
+                    }
+                }
+            }
+
+            // Last fallback: walk the (post-pass) producer chain
+            if !found {
+                if let Some(qp) = extract_effective_node_qparam(py, parent_arg)? {
+                    let dict = pyo3::types::PyDict::new_bound(py);
+                    dict.set_item(0i64, &qp)?;
+                    meta.set_item("output_qparams", &dict)?;
+                    meta.set_item("input_qparams", &dict)?;
+                    propagated += 1;
+                }
+            }
         }
     }
 
@@ -801,6 +830,74 @@ impl FxPass for FxControlFlowMetadataPass {
 }
 
 // ===========================================================================
+// Pre-pass qparam snapshot
+// ===========================================================================
+
+/// Before parent passes run, walk DQ nodes feeding into cond/while data args
+/// and snapshot their qparams onto the cond node's metadata.  Parent passes
+/// (fold_qdq, memory format) may destroy these nodes, so we save them now.
+fn snapshot_pre_pass_cf_qparams<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let torch = py.import_bound("torch")?;
+    let cond_op = torch.getattr("ops")?.getattr("higher_order")?.getattr("cond")?;
+    let while_op = torch.getattr("ops")?.getattr("higher_order")?.getattr("while_loop")?;
+
+    let parent_graph = gm.getattr("graph")?;
+    let nodes: Vec<Bound<'py, PyAny>> = parent_graph.getattr("nodes")?
+        .iter()?.filter_map(|n| n.ok()).collect();
+
+    let mut saved = 0u32;
+    for node in &nodes {
+        let op: String = node.getattr("op").and_then(|v| v.extract()).unwrap_or_default();
+        if op != "call_function" { continue; }
+        let target = node.getattr("target")?;
+        if !target.eq(&cond_op).unwrap_or(false) && !target.eq(&while_op).unwrap_or(false) {
+            continue;
+        }
+
+        let parent_args = resolve_cf_parent_args(node)?;
+        let qparams_dict = pyo3::types::PyDict::new_bound(py);
+        for (i, arg) in parent_args.iter().enumerate() {
+            // Try metadata first
+            let meta = arg.getattr("meta")?;
+            if let Ok(oqp) = meta.get_item("output_qparams") {
+                if let Some(qp) = extract_single_qparam_entry(py, &oqp) {
+                    qparams_dict.set_item(i, &qp)?;
+                    saved += 1;
+                    continue;
+                }
+            }
+            // Walk producer chain: the arg might be a DQ node with literal qparams
+            if let Some(qp) = extract_effective_node_qparam(py, arg)? {
+                qparams_dict.set_item(i, &qp)?;
+                saved += 1;
+                continue;
+            }
+            // Last resort: if arg IS a DQ/Q call, parse its literal args
+            if is_dequantize_node(arg) || is_quantize_node(arg) {
+                if let Some(qp) = parse_per_tensor_qparam(py, arg)? {
+                    qparams_dict.set_item(i, &qp)?;
+                    saved += 1;
+                }
+            }
+        }
+        if !qparams_dict.is_empty() {
+            let cf_meta = node.getattr("meta")?;
+            cf_meta.set_item("_pre_pass_arg_qparams", &qparams_dict)?;
+        }
+    }
+    if saved > 0 {
+        log_line(format_args!(
+            "[snapshot-pre-pass-qparams] saved {} arg qparam(s)",
+            saved
+        ));
+    }
+    Ok(saved)
+}
+
+// ===========================================================================
 // Structural-only pre-pass (no qparam propagation)
 // ===========================================================================
 
@@ -824,6 +921,9 @@ impl FxPass for FxControlFlowStructuralPass {
         drop(submodules);
 
         let mut any_modified = false;
+
+        // 0. Snapshot qparams from pre-pass parent args (before fold_qdq destroys them)
+        snapshot_pre_pass_cf_qparams(py, gm_ref)?;
 
         // 1. Structural regularize (no qparams)
         let count = regularize_control_flow_submodules_structural(py, gm_ref)?;
@@ -1977,17 +2077,16 @@ fn rewrite_control_flow_quantize_nodes<'py>(
             continue;
         }
 
-        // Per-channel or missing source qparam: delegate to Python for const materialization
+        // Per-channel or missing source qparam
         let is_per_channel = |qp: &Bound<'_, PyAny>| -> bool {
             qp.getattr("per_channel").and_then(|v| v.extract()).unwrap_or(false)
         };
+
         if source_qparam.is_none()
             || source_qparam.as_ref().map(|q| is_per_channel(q)).unwrap_or(false)
             || is_per_channel(&output_qparam)
         {
             if source_qparam.is_none() && is_zero_input_const_source(source_node) {
-                // TODO: port _materialize_quantized_constant_node to Rust
-                // For now, skip this node (const materialization case)
                 log_line(format_args!(
                     "[cf-quantize-rewrite] skipping const materialization for {}",
                     node.getattr("name").map(|n| format!("{}", n)).unwrap_or("?".into())
@@ -2374,110 +2473,125 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
     _include_inputs: bool,
     include_outputs: bool,
 ) -> PyResult<u32> {
-    // Delegate to Python — last remaining in-the-middle Python function.
-    // The Rust implementation works for single-cond and while_loop but
-    // fails for multi-cond (multiple sequential cond ops in one graph).
-    let cf_module = py.import_bound("retab._control_flow")?;
-    let kwargs = pyo3::types::PyDict::new_bound(py);
-    kwargs.set_item("include_inputs", _include_inputs)?;
-    kwargs.set_item("include_outputs", include_outputs)?;
-    cf_module.call_method(
-        "_reapply_control_flow_boundary_rescales",
-        (gm,),
-        Some(&kwargs),
-    )?;
-    return Ok(1);
+    if !include_outputs { return Ok(0); }
 
-    // WIP Rust implementation below — kept for reference
-    #[allow(unreachable_code)]
-    let submodules = get_cf_submodules(py, gm)?;
-    if submodules.is_empty() { return Ok(0); }
-
+    let torch = py.import_bound("torch")?;
+    let cond_op = torch.getattr("ops")?.getattr("higher_order")?.getattr("cond")?;
+    let while_op = torch.getattr("ops")?.getattr("higher_order")?.getattr("while_loop")?;
     let helpers = py.import_bound("retab._helpers")?;
     let insert_fn = helpers.getattr("insert_rescale_node")?;
+
+    let parent_graph = gm.getattr("graph")?;
+    let nodes: Vec<Bound<'py, PyAny>> = parent_graph.getattr("nodes")?
+        .iter()?.filter_map(|n| n.ok()).collect();
+
     let mut any_modified = false;
 
-    for (_name, submodule, cf_node) in &submodules {
-        let mut modified = false;
-        let cf_target = cf_node.getattr("target")
-            .and_then(|t| t.str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        let is_while = cf_target.contains("while_loop");
+    for node in &nodes {
+        let op: String = node.getattr("op").and_then(|v| v.extract()).unwrap_or_default();
+        if op != "call_function" { continue; }
+        let target = node.getattr("target")?;
+        let is_cond = target.eq(&cond_op).unwrap_or(false);
+        let is_while = target.eq(&while_op).unwrap_or(false);
+        if !is_cond && !is_while { continue; }
 
-        // Target qparams: loop-carried (placeholders) for while, inferred for cond
+        let args = FxGraphModule::node_args(node)?;
+
+        // Get submodule(s) to process for outputs
+        let submodules_to_process: Vec<Bound<'py, PyAny>> = if is_cond {
+            if args.len() >= 3 {
+                let if_name: String = args[1].getattr("target").and_then(|t| t.extract()).unwrap_or_default();
+                let else_name: String = args[2].getattr("target").and_then(|t| t.extract()).unwrap_or_default();
+                let mut v = Vec::new();
+                if let Ok(sm) = gm.call_method1("get_submodule", (&if_name,)) { v.push(sm); }
+                if let Ok(sm) = gm.call_method1("get_submodule", (&else_name,)) { v.push(sm); }
+                v
+            } else { Vec::new() }
+        } else {
+            // while_loop: only body gets output rescales
+            if args.len() >= 2 {
+                let body_name: String = args[1].getattr("target").and_then(|t| t.extract()).unwrap_or_default();
+                if let Ok(sm) = gm.call_method1("get_submodule", (&body_name,)) { vec![sm] }
+                else { Vec::new() }
+            } else { Vec::new() }
+        };
+
+        // Target qparams
         let targets: Vec<(usize, Bound<'py, PyAny>)> = if is_while {
-            let parent_args = resolve_cf_parent_args(cf_node)?;
+            let parent_args = resolve_cf_parent_args(node)?;
             parent_args.iter().enumerate()
                 .filter_map(|(i, pa)| extract_effective_node_qparam(py, pa).ok().flatten().map(|qp| (i, qp)))
                 .collect()
         } else {
-            infer_cf_output_qparams_map(py, cf_node)?
+            infer_cf_output_qparams_map(py, node)?
         };
 
         if targets.is_empty() { continue; }
 
-        let output_node = submodule_nodes(submodule)?.into_iter()
-            .find(|n| py_attr::<String>(n, &["op"], String::new()) == "output");
-        let output = match output_node { Some(o) => o, None => continue };
-        let oargs = FxGraphModule::node_args(&output)?;
-        let ovals: Vec<Bound<'py, PyAny>> = if oargs.len() == 1 {
-            if let Ok(it) = oargs[0].iter() { it.filter_map(|v| v.ok()).collect() }
-            else { vec![oargs[0].clone()] }
-        } else { oargs };
-
-        for (idx, target_qp) in &targets {
-            let out_val = match ovals.get(*idx) {
-                Some(v) if FxGraphModule::is_node(v) => v,
-                _ => continue,
-            };
-            let cur_qp = extract_effective_node_qparam(py, out_val)?;
-            let cur_s = cur_qp.as_ref().map(|q| q.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0)).unwrap_or(1.0);
-            let cur_z: i64 = cur_qp.as_ref().map(|q| q.getattr("zp").and_then(|v| v.extract()).unwrap_or(0)).unwrap_or(0);
-            let tgt_s = target_qp.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0);
-            let tgt_z: i64 = target_qp.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
-            if (cur_s - tgt_s).abs() < 1e-10 && cur_z == tgt_z { continue; }
-            if cur_s == 0.0 || tgt_s == 0.0 { continue; }
-
-            let dtype = target_qp.getattr("dtype")?;
-            let scales = pyo3::types::PyList::new_bound(py, &[cur_s / tgt_s]);
-            let kw = PyDict::new_bound(py);
-            kw.set_item("after", false)?;
-            let rescale = insert_fn.call(
-                (submodule, &output, out_val, &dtype, &scales, cur_z, tgt_z),
-                Some(&kw),
-            )?;
-            if ovals.len() == 1 {
-                output.call_method("update_arg", (0i64, &rescale), None)?;
+        for submodule in &submodules_to_process {
+            let mut modified = false;
+            let output_node = submodule_nodes(submodule)?.into_iter()
+                .find(|n| py_attr::<String>(n, &["op"], String::new()) == "output");
+            let output = match output_node { Some(o) => o, None => continue };
+            let oargs = FxGraphModule::node_args(&output)?;
+            let was_tuple_wrapped = oargs.len() == 1 && oargs[0].iter().is_ok();
+            let mut ovals: Vec<Bound<'py, PyAny>> = if was_tuple_wrapped {
+                oargs[0].iter()?.filter_map(|v| v.ok()).collect()
+            } else if oargs.len() == 1 {
+                vec![oargs[0].clone()]
             } else {
-                output.call_method("update_arg", (*idx as i64, &rescale), None)?;
-            }
-            modified = true;
-        }
+                oargs
+            };
 
-        if modified {
-            let graph = submodule.getattr("graph")?;
-            cleanup_graph(&graph)?;
-            recompile(submodule)?;
-            any_modified = true;
+            for (idx, target_qp) in &targets {
+                let out_val = match ovals.get(*idx) {
+                    Some(v) if FxGraphModule::is_node(v) => v,
+                    _ => continue,
+                };
+                let cur_qp = extract_effective_node_qparam(py, out_val)?;
+                let cur_s = cur_qp.as_ref().map(|q| q.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0)).unwrap_or(1.0);
+                let cur_z: i64 = cur_qp.as_ref().map(|q| q.getattr("zp").and_then(|v| v.extract()).unwrap_or(0)).unwrap_or(0);
+                let tgt_s = target_qp.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0);
+                let tgt_z: i64 = target_qp.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
+                if (cur_s - tgt_s).abs() < 1e-10 && cur_z == tgt_z { continue; }
+                if cur_s == 0.0 || tgt_s == 0.0 { continue; }
+
+                let dtype = target_qp.getattr("dtype")?;
+                let scales = pyo3::types::PyList::new_bound(py, &[cur_s / tgt_s]);
+                let kw = PyDict::new_bound(py);
+                kw.set_item("after", false)?;
+                let rescale = insert_fn.call(
+                    (submodule, &output, out_val, &dtype, &scales, cur_z, tgt_z),
+                    Some(&kw),
+                )?;
+                ovals[*idx] = rescale;
+                modified = true;
+            }
+
+            if modified {
+                if was_tuple_wrapped {
+                    let new_tuple = pyo3::types::PyTuple::new_bound(py, &ovals);
+                    output.call_method("update_arg", (0i64, &new_tuple), None)?;
+                } else {
+                    for (idx, _) in &targets {
+                        output.call_method("update_arg", (*idx as i64, &ovals[*idx]), None)?;
+                    }
+                }
+                let sg = submodule.getattr("graph")?;
+                cleanup_graph(&sg)?;
+                recompile(submodule)?;
+                any_modified = true;
+            }
         }
     }
 
     if any_modified {
-        let pg = gm.getattr("graph")?;
-        cleanup_graph(&pg)?;
+        cleanup_graph(&parent_graph)?;
         gm.call_method0("recompile")?;
     }
     Ok(if any_modified { 1 } else { 0 })
 }
 
-// WIP: Pure Rust boundary rescale implementation. Works for while_loop but
-// gets cond output rescales wrong. The infer_cf_output_qparams_map function
-// correctly extracts target qparams but the rescale insertion creates nodes
-// that the TOSA reference model rejects.
-//
-// Next step: dump FX graph before/after to see exactly what nodes are wrong,
-// then fix the insertion logic to match what the Python does.
-#[allow(dead_code)]
 // Combined Output Normalize Phase
 // ===========================================================================
 
@@ -2487,8 +2601,6 @@ pub(crate) fn run_output_normalize_phase<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<()> {
-    // Steps 2 (restore_missing_rescale_qparams) and 5 (quantize_constant_only_outputs)
-    // confirmed dead with correct qparam propagation.
     normalize_control_flow_output_layouts(py, gm)?;
     reapply_control_flow_boundary_rescales(py, gm, false, true)?;
     rewrite_control_flow_quantization_boundaries(py, gm)?;
