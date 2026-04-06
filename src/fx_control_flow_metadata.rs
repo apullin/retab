@@ -2365,24 +2365,109 @@ fn infer_cf_output_qparams_map<'py>(
     Ok(result)
 }
 
-/// Insert boundary RESCALE nodes at submodule input/output edges.
-/// Sole remaining Python delegate — the Rust implementation is WIP.
+/// Insert boundary RESCALE nodes at submodule output edges.
+/// Input rescales are dead with correct qparam propagation.
+/// Output rescales use infer_cf_output_qparams_map for target qparams.
 pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
-    include_inputs: bool,
+    _include_inputs: bool,
     include_outputs: bool,
 ) -> PyResult<u32> {
+    // Delegate to Python — last remaining in-the-middle Python function.
+    // The Rust implementation works for single-cond and while_loop but
+    // fails for multi-cond (multiple sequential cond ops in one graph).
     let cf_module = py.import_bound("retab._control_flow")?;
     let kwargs = pyo3::types::PyDict::new_bound(py);
-    kwargs.set_item("include_inputs", include_inputs)?;
+    kwargs.set_item("include_inputs", _include_inputs)?;
     kwargs.set_item("include_outputs", include_outputs)?;
     cf_module.call_method(
         "_reapply_control_flow_boundary_rescales",
         (gm,),
         Some(&kwargs),
     )?;
-    Ok(1)
+    return Ok(1);
+
+    // WIP Rust implementation below — kept for reference
+    #[allow(unreachable_code)]
+    let submodules = get_cf_submodules(py, gm)?;
+    if submodules.is_empty() { return Ok(0); }
+
+    let helpers = py.import_bound("retab._helpers")?;
+    let insert_fn = helpers.getattr("insert_rescale_node")?;
+    let mut any_modified = false;
+
+    for (_name, submodule, cf_node) in &submodules {
+        let mut modified = false;
+        let cf_target = cf_node.getattr("target")
+            .and_then(|t| t.str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let is_while = cf_target.contains("while_loop");
+
+        // Target qparams: loop-carried (placeholders) for while, inferred for cond
+        let targets: Vec<(usize, Bound<'py, PyAny>)> = if is_while {
+            let parent_args = resolve_cf_parent_args(cf_node)?;
+            parent_args.iter().enumerate()
+                .filter_map(|(i, pa)| extract_effective_node_qparam(py, pa).ok().flatten().map(|qp| (i, qp)))
+                .collect()
+        } else {
+            infer_cf_output_qparams_map(py, cf_node)?
+        };
+
+        if targets.is_empty() { continue; }
+
+        let output_node = submodule_nodes(submodule)?.into_iter()
+            .find(|n| py_attr::<String>(n, &["op"], String::new()) == "output");
+        let output = match output_node { Some(o) => o, None => continue };
+        let oargs = FxGraphModule::node_args(&output)?;
+        let ovals: Vec<Bound<'py, PyAny>> = if oargs.len() == 1 {
+            if let Ok(it) = oargs[0].iter() { it.filter_map(|v| v.ok()).collect() }
+            else { vec![oargs[0].clone()] }
+        } else { oargs };
+
+        for (idx, target_qp) in &targets {
+            let out_val = match ovals.get(*idx) {
+                Some(v) if FxGraphModule::is_node(v) => v,
+                _ => continue,
+            };
+            let cur_qp = extract_effective_node_qparam(py, out_val)?;
+            let cur_s = cur_qp.as_ref().map(|q| q.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0)).unwrap_or(1.0);
+            let cur_z: i64 = cur_qp.as_ref().map(|q| q.getattr("zp").and_then(|v| v.extract()).unwrap_or(0)).unwrap_or(0);
+            let tgt_s = target_qp.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0);
+            let tgt_z: i64 = target_qp.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
+            if (cur_s - tgt_s).abs() < 1e-10 && cur_z == tgt_z { continue; }
+            if cur_s == 0.0 || tgt_s == 0.0 { continue; }
+
+            let dtype = target_qp.getattr("dtype")?;
+            let scales = pyo3::types::PyList::new_bound(py, &[cur_s / tgt_s]);
+            let kw = PyDict::new_bound(py);
+            kw.set_item("after", false)?;
+            let rescale = insert_fn.call(
+                (submodule, &output, out_val, &dtype, &scales, cur_z, tgt_z),
+                Some(&kw),
+            )?;
+            if ovals.len() == 1 {
+                output.call_method("update_arg", (0i64, &rescale), None)?;
+            } else {
+                output.call_method("update_arg", (*idx as i64, &rescale), None)?;
+            }
+            modified = true;
+        }
+
+        if modified {
+            let graph = submodule.getattr("graph")?;
+            cleanup_graph(&graph)?;
+            recompile(submodule)?;
+            any_modified = true;
+        }
+    }
+
+    if any_modified {
+        let pg = gm.getattr("graph")?;
+        cleanup_graph(&pg)?;
+        gm.call_method0("recompile")?;
+    }
+    Ok(if any_modified { 1 } else { 0 })
 }
 
 // WIP: Pure Rust boundary rescale implementation. Works for while_loop but
