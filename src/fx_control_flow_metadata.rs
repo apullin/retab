@@ -779,6 +779,33 @@ impl FxPass for FxWhileStripBoundaryQPass {
             }
         }
 
+        // Annotate boundary DQ qparams on the output node WITHOUT stripping.
+        // The DQ nodes must stay (they convert INT8→float for the parent graph).
+        // We just stamp their literal qparams on output_node.meta["input_qparams"]
+        // so insert_cf_boundary_rescales can compute the correct output RESCALE.
+        let output_node = gm.nodes()?.into_iter()
+            .find(|n| py_attr::<String>(n, &["op"], String::new()) == "output");
+        if let Some(output) = output_node {
+            let out_meta = output.getattr("meta")?;
+            if out_meta.get_item("input_qparams").is_err() {
+                out_meta.set_item("input_qparams", pyo3::types::PyDict::new_bound(py))?;
+            }
+
+            let oargs = FxGraphModule::node_args(&output)?;
+            let ovals: Vec<Bound<'_, PyAny>> = if oargs.len() == 1 {
+                if let Ok(it) = oargs[0].iter() { it.filter_map(|v| v.ok()).collect() }
+                else { vec![oargs[0].clone()] }
+            } else { oargs };
+
+            for (i, val) in ovals.iter().enumerate() {
+                if !FxGraphModule::is_node(val) || !is_dequantize_node(val) { continue; }
+                if let Some(qp) = parse_per_tensor_qparam(py, val)? {
+                    let iqp_dict = out_meta.get_item("input_qparams")?;
+                    iqp_dict.set_item(i, &qp)?;
+                }
+            }
+        }
+
         if modified {
             cleanup_graph(&graph)?;
             gm.recompile()?;
