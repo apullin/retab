@@ -158,6 +158,12 @@ impl QParam {
     }
 }
 
+impl From<&Bound<'_, PyAny>> for QParam {
+    fn from(qp: &Bound<'_, PyAny>) -> Self {
+        Self::from_py(qp)
+    }
+}
+
 /// Extract a QParam from a Python qparams dict (tries key 0, then single-value, then raw).
 fn extract_qparam(qparams: &Bound<'_, PyAny>) -> Option<QParam> {
     if qparams.is_none() || !qparams.is_truthy().unwrap_or(false) {
@@ -180,6 +186,58 @@ fn extract_qparam(qparams: &Bound<'_, PyAny>) -> Option<QParam> {
         }
     }
     Some(QParam::from_py(qparams))
+}
+
+// ---------------------------------------------------------------------------
+// NodeOp — typed FX node operations
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeOp {
+    Placeholder,
+    CallFunction,
+    GetAttr,
+    Output,
+    Other,
+}
+
+impl NodeOp {
+    fn of(node: &Bound<'_, PyAny>) -> Self {
+        match py_attr::<String>(node, &["op"], String::new()).as_str() {
+            "placeholder" => Self::Placeholder,
+            "call_function" => Self::CallFunction,
+            "get_attr" => Self::GetAttr,
+            "output" => Self::Output,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// Collect nodes from a graph, optionally filtered by op type.
+fn graph_nodes<'py>(graph_or_module: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let graph = if graph_or_module.hasattr("graph")? {
+        graph_or_module.getattr("graph")?
+    } else {
+        graph_or_module.clone()
+    };
+    graph.getattr("nodes")?.iter()?.collect()
+}
+
+fn nodes_by_op<'py>(graph_or_module: &Bound<'py, PyAny>, op: NodeOp) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    Ok(graph_nodes(graph_or_module)?.into_iter().filter(|n| NodeOp::of(n) == op).collect())
+}
+
+fn output_node<'py>(graph_or_module: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    Ok(graph_nodes(graph_or_module)?.into_iter().find(|n| NodeOp::of(n) == NodeOp::Output))
+}
+
+/// Unpack the output node's args tuple: output((val1, val2, ...),) → [val1, val2, ...]
+fn unpack_output_vals<'py>(output: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let oargs = FxGraphModule::node_args(output)?;
+    Ok(if oargs.len() == 1 {
+        if let Ok(it) = oargs[0].iter() { it.filter_map(|v| v.ok()).collect() }
+        else { vec![oargs[0].clone()] }
+    } else { oargs })
 }
 
 // ---------------------------------------------------------------------------
@@ -206,45 +264,8 @@ fn get_cf_submodules<'py>(
     Ok(out)
 }
 
-/// Get all nodes from a submodule's graph.
-fn submodule_nodes<'py>(
-    submodule: &Bound<'py, PyAny>,
-) -> PyResult<Vec<Bound<'py, PyAny>>> {
-    let graph = submodule.getattr("graph")?;
-    let nodes = graph.getattr("nodes")?;
-    let mut out = Vec::new();
-    for n in nodes.iter()? {
-        out.push(n?);
-    }
-    Ok(out)
-}
-
-/// Get placeholder nodes from a submodule.
-fn submodule_placeholders<'py>(
-    submodule: &Bound<'py, PyAny>,
-) -> PyResult<Vec<Bound<'py, PyAny>>> {
-    let mut out = Vec::new();
-    for node in submodule_nodes(submodule)? {
-        let op: String = node.getattr("op")?.extract()?;
-        if op == "placeholder" {
-            out.push(node);
-        }
-    }
-    Ok(out)
-}
-
-/// Get the output node from a submodule.
-fn submodule_output_node<'py>(
-    submodule: &Bound<'py, PyAny>,
-) -> PyResult<Option<Bound<'py, PyAny>>> {
-    for node in submodule_nodes(submodule)? {
-        let op: String = node.getattr("op")?.extract()?;
-        if op == "output" {
-            return Ok(Some(node));
-        }
-    }
-    Ok(None)
-}
+// submodule_nodes, submodule_placeholders, submodule_output_node
+// replaced by graph_nodes(), nodes_by_op(), output_node() above.
 
 /// Recompile a submodule.
 fn recompile(submodule: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -343,7 +364,7 @@ fn regularize_control_flow_submodules_structural<'py>(
     let mut regularized: u32 = 0;
 
     for (_name, submodule, cf_node) in &submodules {
-        let placeholders = submodule_placeholders(submodule)?;
+        let placeholders = nodes_by_op(submodule, NodeOp::Placeholder)?;
         for ph in &placeholders {
             let meta = ph.getattr("meta")?;
             meta.set_item("is_input", true)?;
@@ -393,7 +414,7 @@ pub(crate) fn propagate_parent_qparams_to_placeholders<'py>(
     let mut propagated: u32 = 0;
 
     for (_name, submodule, cf_node) in &submodules {
-        let placeholders = submodule_placeholders(submodule)?;
+        let placeholders = nodes_by_op(submodule, NodeOp::Placeholder)?;
         let parent_args = resolve_cf_parent_args(cf_node)?;
 
         for (i, (ph, parent_arg)) in placeholders.iter().zip(parent_args.iter()).enumerate() {
@@ -459,10 +480,8 @@ pub(crate) fn propagate_parent_qparams_to_placeholders<'py>(
             continue; // This is the cond submodule, skip
         }
 
-        let placeholders = submodule_placeholders(submodule)?;
-        let output_node = submodule_nodes(submodule)?
-            .into_iter()
-            .find(|n| py_attr::<String>(n, &["op"], String::new()) == "output");
+        let placeholders = nodes_by_op(submodule, NodeOp::Placeholder)?;
+        let output_node = output_node(submodule)?;
 
         if let Some(output) = output_node {
             let output_meta = output.getattr("meta")?;
@@ -559,7 +578,7 @@ fn annotate_cf_rank4_dim_order<'py>(
 
     for (_name, submodule, _cf_node) in &submodules {
         let mut modified = false;
-        for node in submodule_nodes(&submodule)? {
+        for node in graph_nodes(&submodule)? {
             let op: String = node.getattr("op")?.extract()?;
             if op != "call_function" {
                 continue;
@@ -605,7 +624,7 @@ fn force_cf_rank4_output_dim_order<'py>(
     let mut forced: u32 = 0;
 
     for (_name, submodule, _cf_node) in &submodules {
-        let output_node = match submodule_output_node(&submodule)? {
+        let output_node = match output_node(&submodule)? {
             Some(n) => n,
             None => continue,
         };
@@ -683,7 +702,7 @@ fn restamp_cf_placeholder_dtypes<'py>(
 
     for (_name, submodule, _cf_node) in &submodules {
         let mut updated = false;
-        let placeholders = submodule_placeholders(&submodule)?;
+        let placeholders = nodes_by_op(&submodule, NodeOp::Placeholder)?;
 
         for ph in &placeholders {
             // Skip if any user is a quantize node
@@ -784,7 +803,7 @@ fn snapshot_cf_table_qparams<'py>(
     let mut snapshotted: u32 = 0;
 
     for (_name, submodule, _cf_node) in &submodules {
-        for node in submodule_nodes(&submodule)? {
+        for node in graph_nodes(&submodule)? {
             let op: String = node.getattr("op")?.extract()?;
             if op != "call_function" {
                 continue;
@@ -857,7 +876,7 @@ pub(crate) fn refresh_tosa_dim_order_fake_tensors<'py>(
 
     for module in &modules {
         let mut updated = false;
-        for node in submodule_nodes(module)? {
+        for node in graph_nodes(module)? {
             let meta = node.getattr("meta")?;
             if meta_val(&meta, "val").is_none() {
                 continue;
@@ -928,8 +947,7 @@ impl FxPass for FxWhileStripBoundaryQPass {
         // The DQ nodes must stay (they convert INT8→float for the parent graph).
         // We just stamp their literal qparams on output_node.meta["input_qparams"]
         // so insert_cf_boundary_rescales can compute the correct output RESCALE.
-        let output_node = gm.nodes()?.into_iter()
-            .find(|n| py_attr::<String>(n, &["op"], String::new()) == "output");
+        let output_node = output_node(gm.gm_ref())?;
         if let Some(output) = output_node {
             let out_meta = output.getattr("meta")?;
             if out_meta.get_item("input_qparams").is_err() {
@@ -1518,7 +1536,7 @@ pub(crate) fn remove_control_flow_noop_passthroughs<'py>(
     for (_name, submodule, _cf_node) in &submodules {
         let graph = submodule.getattr("graph")?;
         let mut updated = false;
-        let nodes = submodule_nodes(&submodule)?;
+        let nodes = graph_nodes(&submodule)?;
 
         for node in &nodes {
             if !is_call_function_target(node, noop_markers) { continue; }
@@ -1581,7 +1599,7 @@ pub(crate) fn prune_duplicate_terminal_rescales<'py>(
         let graph = module.getattr("graph")?;
         let mut modified = false;
 
-        let nodes = submodule_nodes(module)?;
+        let nodes = graph_nodes(module)?;
 
         for node in &nodes {
             if !is_tosa_rescale_node(node) {
@@ -1710,7 +1728,7 @@ pub(crate) fn refresh_tosa_transpose_fake_tensors<'py>(
     for module in &modules {
         let mut updated = false;
 
-        for node in submodule_nodes(module)? {
+        for node in graph_nodes(module)? {
             if !is_tosa_transpose_node(&node) {
                 continue;
             }
@@ -1961,7 +1979,7 @@ fn rewrite_control_flow_dequantize_nodes<'py>(
         // Simple bypass: if all users are RESCALE or output, remove the DQ
         let all_rescale_or_output = users.iter().all(|user| {
             is_tosa_rescale_node(user)
-                || py_attr::<String>(user, &["op"], String::new()) == "output"
+                || NodeOp::of(user) == NodeOp::Output
         });
         if !all_rescale_or_output {
             continue;
@@ -2157,7 +2175,7 @@ pub(crate) fn restore_control_flow_float_compare_inputs<'py>(
         let graph = submodule.getattr("graph")?;
         let mut updated = false;
 
-        let nodes = submodule_nodes(&submodule)?;
+        let nodes = graph_nodes(&submodule)?;
 
         for node in &nodes {
             if !is_call_function_target(node, compare_markers) {
@@ -2377,7 +2395,7 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
             if let Some(ref ext) = ext_qp {
                 let placeholders: Vec<Bound<'py, PyAny>> = sg.getattr("nodes")?
                     .iter()?.filter_map(|n| n.ok())
-                    .filter(|n| py_attr::<String>(n, &["op"], String::new()) == "placeholder")
+                    .filter(|n| NodeOp::of(n) == NodeOp::Placeholder)
                     .collect();
 
                 for ph in &placeholders {
@@ -2401,15 +2419,8 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
             if (is_while && sm_idx == 1) || is_cond {
                 let output_qparams = infer_cf_output_qparams_map(py, node)?;
                 if !output_qparams.is_empty() {
-                    let output_node = sg.getattr("nodes")?.iter()?
-                        .filter_map(|n| n.ok())
-                        .find(|n| py_attr::<String>(n, &["op"], String::new()) == "output");
-                    if let Some(output) = output_node {
-                        let oargs = FxGraphModule::node_args(&output)?;
-                        let ovals: Vec<Bound<'py, PyAny>> = if oargs.len() == 1 {
-                            if let Ok(it) = oargs[0].iter() { it.filter_map(|v| v.ok()).collect() }
-                            else { vec![oargs[0].clone()] }
-                        } else { oargs };
+                    if let Some(output) = output_node(&submodule)? {
+                        let ovals = unpack_output_vals(&output)?;
 
                         let out_meta = output.getattr("meta")?;
                         let int_out_qp = out_meta.get_item("input_qparams").ok();
@@ -2569,17 +2580,11 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
 
         for submodule in &submodules_to_process {
             let mut modified = false;
-            let output_node = submodule_nodes(submodule)?.into_iter()
-                .find(|n| py_attr::<String>(n, &["op"], String::new()) == "output");
-            let output = match output_node { Some(o) => o, None => continue };
-            let oargs = FxGraphModule::node_args(&output)?;
-            let was_tuple_wrapped = oargs.len() == 1 && oargs[0].iter().is_ok();
-            let mut ovals: Vec<Bound<'py, PyAny>> = if was_tuple_wrapped {
-                oargs[0].iter()?.filter_map(|v| v.ok()).collect()
-            } else if oargs.len() == 1 {
-                vec![oargs[0].clone()]
-            } else {
-                oargs
+            let output = match output_node(submodule)? { Some(o) => o, None => continue };
+            let mut ovals = unpack_output_vals(&output)?;
+            let was_tuple_wrapped = {
+                let oargs = FxGraphModule::node_args(&output)?;
+                oargs.len() == 1 && oargs[0].iter().is_ok()
             };
 
             for (idx, tgt) in &targets {
