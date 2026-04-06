@@ -1,11 +1,5 @@
-//! FX control-flow metadata pass.
-//!
-//! Rust port of the 7 simplest metadata-stamping functions from
-//! `python/retab/_control_flow.py` and `python/retab/_cf_ctx.py`.
-//! None of these perform graph surgery -- they only read/write `node.meta`.
-//!
-//! Also contains the cleanup pass (`FxControlFlowCleanupPass`) which ports
-//! graph-surgery functions from `_cf_rewrites.py` and `_cf_ctx.py`.
+//! Control-flow metadata stamping, boundary RESCALE insertion, and Q/DQ
+//! rewriting for cond and while_loop submodules.
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
@@ -2099,10 +2093,8 @@ fn rewrite_control_flow_quantize_nodes<'py>(
 //   2. Rewrite standalone quantize nodes into rescale or const materializations
 //   3. Rewrite standalone dequantize nodes into int32 lifts or direct edges
 //
-// The inner sub-functions rely on heavy Python infra (_ControlFlowRescaleEdit,
-// _materialize_quantized_constant_node, _same_control_flow_qparam, etc.).
-// Following the same pattern as items 4+5 in the cleanup pass, we delegate
-// the per-submodule visitor to Python helpers and orchestrate from Rust.
+// Iterates control-flow submodules and rewrites Q/DQ boundary nodes
+// into RESCALE ops or bypasses.
 // ---------------------------------------------------------------------------
 
 pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
@@ -2360,7 +2352,7 @@ pub(crate) fn restore_control_flow_float_compare_inputs<'py>(
 // with normalize_outputs=True.
 // ---------------------------------------------------------------------------
 
-/// Dead with correct qparam propagation — confirmed 1312/1312 pass without.
+/// No-op — layout normalization not needed with correct qparam propagation.
 pub(crate) fn normalize_control_flow_output_layouts<'py>(
     _py: Python<'py>,
     _gm: &Bound<'py, PyAny>,
@@ -2374,7 +2366,7 @@ pub(crate) fn normalize_control_flow_output_layouts<'py>(
 
 // ===========================================================================
 // Control-flow boundary RESCALE insertion
-// Ports upstream InsertControlFlowRescalesPass algorithm:
+// Boundary RESCALE insertion (matches ET ARM InsertControlFlowRescalesPass):
 //   - Input RESCALE: external(parent) → internal(body) after placeholder
 //   - Output RESCALE: internal(body) → external(consumer) before output
 // ===========================================================================
@@ -2407,7 +2399,7 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
         if !is_while && !is_cond { continue; }
 
         // Get external qparams from the cf node's input_qparams
-        // (upstream: _get_input_qparams_map with idx=2 for while, idx=3 for cond)
+        // External qparam: while_loop carried_args at idx 2, cond data_args at idx 3
         let cf_meta = node.getattr("meta")?;
         let ext_qp_dict = cf_meta.get_item("input_qparams").ok();
         // The external qparam is at key matching the carried_args index in the node
@@ -2733,14 +2725,11 @@ pub(crate) fn run_boundary_phase<'py>(
     rewrite_control_flow_quantization_boundaries(py, gm)?;
     // 2. Reapply boundary rescales (inputs only)
     reapply_control_flow_boundary_rescales(py, gm, true, false)?;
-    // DEAD with correct propagation: InsertRescaleInt32Pass, restore_missing_input_rescales
     // 3. Stamp control-flow metadata
     {
         let gm_wrapper = crate::fx_graph::FxGraphModule::new(gm);
         crate::fx_pass::FxPass::run(&FxControlFlowMetadataPass, &gm_wrapper)?;
     }
-    // 4. _refresh_control_flow_binary_input_rescales — DEAD with correct
-    // qparam propagation. Confirmed 1312/1312 pass without.
     Ok(())
 }
 
