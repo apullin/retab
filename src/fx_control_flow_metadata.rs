@@ -393,8 +393,7 @@ pub(crate) fn propagate_parent_qparams_to_placeholders<'py>(
 
             // Last fallback: walk the (post-pass) producer chain
             if !found {
-                if let Some(qp_py) = extract_effective_node_qparam(py, parent_arg)? {
-                    let qp = QParam::from_py(&qp_py);
+                if let Some(qp) = extract_effective_qparam(parent_arg)? {
                     qp.stamp_both(py, &meta)?;
                     propagated += 1;
                 }
@@ -1061,8 +1060,8 @@ fn snapshot_pre_pass_cf_qparams<'py>(
                 }
             }
             // Walk producer chain: the arg might be a DQ node with literal qparams
-            if let Some(qp) = extract_effective_node_qparam(py, arg)? {
-                qparams_dict.set_item(i, &qp)?;
+            if let Some(qp) = extract_effective_qparam(arg)? {
+                qparams_dict.set_item(i, qp.to_py(py)?)?;
                 saved += 1;
                 continue;
             }
@@ -1277,116 +1276,64 @@ fn extract_single_qparam_entry<'py>(
 }
 
 /// Extract the effective quantization parameters for a node by walking
-/// producer edges. Pure Rust port of Python `_extract_effective_node_qparam`.
-fn extract_effective_node_qparam<'py>(
-    py: Python<'py>,
-    node: &Bound<'py, PyAny>,
-) -> PyResult<Option<Bound<'py, PyAny>>> {
+/// producer edges until a node with qparam metadata or a RESCALE is found.
+fn extract_effective_qparam(
+    node: &Bound<'_, PyAny>,
+) -> PyResult<Option<QParam>> {
     let mut current = node.clone();
     let mut seen = std::collections::HashSet::new();
 
     loop {
-        if current.getattr("op").is_err() {
-            break;
-        }
-        let node_id: usize = current
-            .call_method0("__hash__")
-            .and_then(|h| h.extract())
-            .unwrap_or(0);
-        if !seen.insert(node_id) {
-            break;
-        }
+        if current.getattr("op").is_err() { break; }
+        let node_id: usize = current.call_method0("__hash__")
+            .and_then(|h| h.extract()).unwrap_or(0);
+        if !seen.insert(node_id) { break; }
 
         let meta = current.getattr("meta")?;
-
-        // Check output_qparams first
         if let Ok(oqp) = meta.get_item("output_qparams") {
-            if let Some(qp) = extract_single_qparam_entry(py, &oqp) {
-                return Ok(Some(qp));
-            }
+            if let Some(qp) = extract_qparam(&oqp) { return Ok(Some(qp)); }
         }
-
-        // Check input_qparams (prefer_input_qparams=True)
         if let Ok(iqp) = meta.get_item("input_qparams") {
-            if let Some(qp) = extract_single_qparam_entry(py, &iqp) {
-                return Ok(Some(qp));
-            }
+            if let Some(qp) = extract_qparam(&iqp) { return Ok(Some(qp)); }
         }
 
-        // RESCALE reverse-engineering: derive qparam from source + multiplier
         let args = FxGraphModule::node_args(&current)?;
-        if let Some(qp) = try_reverse_engineer_rescale_qparam(py, &current, &args)? {
+        if let Some(qp) = try_reverse_engineer_rescale_qparam(&current, &args)? {
             return Ok(Some(qp));
         }
-
-        // Walk to producer (args[0])
-        if args.is_empty() || !FxGraphModule::is_node(&args[0]) {
-            break;
-        }
+        if args.is_empty() || !FxGraphModule::is_node(&args[0]) { break; }
         current = args[0].clone();
     }
     Ok(None)
 }
 
-/// Try to reverse-engineer a QuantArgs from a TOSA RESCALE node's args.
-fn try_reverse_engineer_rescale_qparam<'py>(
-    py: Python<'py>,
-    node: &Bound<'py, PyAny>,
-    args: &[Bound<'py, PyAny>],
-) -> PyResult<Option<Bound<'py, PyAny>>> {
-    if !is_tosa_rescale_node(node) || args.len() < 5 {
-        return Ok(None);
-    }
+/// Derive a QParam from a TOSA RESCALE node: output_scale = source_scale / multiplier.
+fn try_reverse_engineer_rescale_qparam(
+    node: &Bound<'_, PyAny>,
+    args: &[Bound<'_, PyAny>],
+) -> PyResult<Option<QParam>> {
+    if !is_tosa_rescale_node(node) || args.len() < 5 { return Ok(None); }
     let source = &args[0];
-    if source.getattr("op").is_err() {
-        return Ok(None);
-    }
-    let source_qp = match extract_effective_node_qparam(py, source)? {
+    if source.getattr("op").is_err() { return Ok(None); }
+    let source_qp = match extract_effective_qparam(source)? {
         Some(qp) => qp,
         None => return Ok(None),
     };
-    if source_qp.getattr("per_channel")?.extract::<bool>().unwrap_or(false) {
-        return Ok(None);
-    }
-    let torch_dtype_cls = py.import_bound("torch")?.getattr("dtype")?;
-    if !args[1].is_instance(&torch_dtype_cls).unwrap_or(false) {
-        return Ok(None);
-    }
-    if args[4].extract::<i64>().is_err() {
-        return Ok(None);
-    }
-
-    // Multiplier must be a single-element list/tuple with nonzero value
-    let mult_len = args[2].len().unwrap_or(0);
-    if mult_len != 1 {
-        return Ok(None);
-    }
-    let mult_val: f64 = args[2].get_item(0)?.extract().unwrap_or(0.0);
-    if mult_val == 0.0 {
-        return Ok(None);
-    }
-
-    let torch_mod = py.import_bound("torch")?;
-    let qinfo = match torch_mod.call_method1("iinfo", (&args[1],)) {
-        Ok(qi) => qi,
-        Err(_) => return Ok(None),
-    };
-
-    let source_scale: f64 = source_qp.call_method0("get_scale_per_tensor")?.extract()?;
-    let output_zp: i64 = args[4].extract()?;
-    let qmin: i64 = qinfo.getattr("min")?.extract()?;
-    let qmax: i64 = qinfo.getattr("max")?.extract()?;
-
-    let quant_args_cls = py
-        .import_bound("executorch.backends.arm._passes.quant_args")?
-        .getattr("QuantArgs")?;
-    let kwargs = pyo3::types::PyDict::new_bound(py);
-    kwargs.set_item("scale", source_scale / mult_val)?;
-    kwargs.set_item("zp", output_zp)?;
-    kwargs.set_item("qmin", qmin)?;
-    kwargs.set_item("qmax", qmax)?;
-    kwargs.set_item("dtype", &args[1])?;
-    Ok(Some(quant_args_cls.call((), Some(&kwargs))?))
+    let mult_val: f64 = args[2].get_item(0_usize)
+        .ok().and_then(|v| v.extract().ok()).unwrap_or(0.0);
+    if mult_val == 0.0 || args[2].len().unwrap_or(0) != 1 { return Ok(None); }
+    let output_zp: i64 = match args[4].extract() { Ok(v) => v, Err(_) => return Ok(None) };
+    let dtype_str = format!("{}", args[1]);
+    if !dtype_str.contains("int") { return Ok(None); }
+    let (qmin, qmax) = if dtype_str.contains("int8") { (-128i64, 127i64) }
+        else if dtype_str.contains("int16") { (-32768, 32767) }
+        else { (i32::MIN as i64, i32::MAX as i64) };
+    Ok(Some(QParam {
+        scale: source_qp.scale / mult_val,
+        zp: output_zp,
+        qmin, qmax,
+        dtype_str,
+    }))
 }
 
 /// Stamp single qparams on a node (input_qparam and/or output_qparam).
@@ -1979,15 +1926,8 @@ fn rewrite_control_flow_dequantize_nodes<'py>(
             continue;
         }
 
-        // Try int32 cluster rewrite for int8/int16 sources (delegate to Python)
-        if let Ok(Some(source_qp)) = extract_effective_node_qparam(py, source_node) {
-            let dtype_str = source_qp
-                .getattr("dtype")
-                .ok()
-                .map(|d| format!("{}", d))
-                .unwrap_or_default();
-            // Int32 cluster rewrite for int8/int16 sources skipped —
-            // dead under correct qparam propagation. Fall through to bypass check.
+        // Int32 cluster rewrite — dead under correct qparam propagation.
+        if let Ok(Some(_source_qp)) = extract_effective_qparam(source_node) {
         }
 
         // Simple bypass: if all users are RESCALE or output, remove the DQ
@@ -2042,8 +1982,7 @@ fn rewrite_control_flow_quantize_nodes<'py>(
             Some(qp) => qp,
             None => continue,
         };
-        let source = extract_effective_node_qparam(py, source_node)?
-            .map(|q| QParam::from_py(&q));
+        let source = extract_effective_qparam(source_node)?;
 
         // Skip float sources with no qparams (unless zero-input const)
         let source_dtype_str = source_node.getattr("meta")?
@@ -2249,25 +2188,12 @@ pub(crate) fn restore_control_flow_float_compare_inputs<'py>(
                     continue;
                 }
 
-                // Get qparam for the int arg
-                let qparam = match extract_effective_node_qparam(py, &arg)? {
+                let qp = match extract_effective_qparam(&arg)? {
                     Some(qp) => qp,
                     None => continue,
                 };
-                // Check per_channel
-                let per_channel: bool = qparam
-                    .getattr("per_channel")
-                    .and_then(|v| v.extract())
-                    .unwrap_or(false);
-                if per_channel {
-                    continue;
-                }
-
-                let scale: f64 = qparam.getattr("scale")?.extract().unwrap_or(1.0);
-                let zp: i64 = qparam.getattr("zp")?.extract().unwrap_or(0);
-                let qmin: i64 = qparam.getattr("qmin")?.extract().unwrap_or(-128);
-                let qmax: i64 = qparam.getattr("qmax")?.extract().unwrap_or(127);
-                let qparam_dtype = qparam.getattr("dtype")?;
+                let torch = py.import_bound("torch")?;
+                let qparam_dtype = torch.getattr(&*qp.dtype_str.replace("torch.", ""))?;
 
                 // graph.inserting_before(node) -- use context manager
                 let inserting_ctx = graph.call_method1("inserting_before", (node,))?;
@@ -2278,10 +2204,10 @@ pub(crate) fn restore_control_flow_float_compare_inputs<'py>(
                     py,
                     &[
                         arg.clone(),
-                        scale.into_py(py).into_bound(py),
-                        zp.into_py(py).into_bound(py),
-                        qmin.into_py(py).into_bound(py),
-                        qmax.into_py(py).into_bound(py),
+                        qp.scale.into_py(py).into_bound(py),
+                        qp.zp.into_py(py).into_bound(py),
+                        qp.qmin.into_py(py).into_bound(py),
+                        qp.qmax.into_py(py).into_bound(py),
                         qparam_dtype.clone(),
                     ],
                 );
@@ -2310,7 +2236,7 @@ pub(crate) fn restore_control_flow_float_compare_inputs<'py>(
                 }
                 // input_qparams = {0: qparam}
                 let iqp = PyDict::new_bound(py);
-                iqp.set_item(0i64, &qparam)?;
+                iqp.set_item(0i64, qp.to_py(py)?)?;
                 dq_meta.set_item("input_qparams", &iqp)?;
                 // output_qparams = {}
                 let oqp = PyDict::new_bound(py);
@@ -2620,13 +2546,14 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
         };
 
         // Target qparams
-        let targets: Vec<(usize, Bound<'py, PyAny>)> = if is_while {
+        let targets: Vec<(usize, QParam)> = if is_while {
             let parent_args = resolve_cf_parent_args(node)?;
             parent_args.iter().enumerate()
-                .filter_map(|(i, pa)| extract_effective_node_qparam(py, pa).ok().flatten().map(|qp| (i, qp)))
+                .filter_map(|(i, pa)| extract_effective_qparam(pa).ok().flatten().map(|qp| (i, qp)))
                 .collect()
         } else {
             infer_cf_output_qparams_map(py, node)?
+                .into_iter().map(|(i, qp)| (i, QParam::from_py(&qp))).collect()
         };
 
         if targets.is_empty() { continue; }
@@ -2646,18 +2573,16 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
                 oargs
             };
 
-            for (idx, target_qp) in &targets {
+            for (idx, tgt) in &targets {
                 let out_val = match ovals.get(*idx) {
                     Some(v) if FxGraphModule::is_node(v) => v,
                     _ => continue,
                 };
-                let cur = extract_effective_node_qparam(py, out_val)?
-                    .map(|q| QParam::from_py(&q))
+                let cur = extract_effective_qparam(out_val)?
                     .unwrap_or(QParam { scale: 1.0, zp: 0, qmin: -128, qmax: 127, dtype_str: "torch.int8".into() });
-                let tgt = QParam::from_py(target_qp);
-                if cur.same_scale_zp(&tgt) || cur.scale == 0.0 || tgt.scale == 0.0 { continue; }
+                if cur.same_scale_zp(tgt) || cur.scale == 0.0 || tgt.scale == 0.0 { continue; }
 
-                let rescale = cur.insert_rescale_to(&tgt, py, submodule, &output, out_val, false)?;
+                let rescale = cur.insert_rescale_to(tgt, py, submodule, &output, out_val, false)?;
                 ovals[*idx] = rescale;
                 modified = true;
             }
