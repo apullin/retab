@@ -297,16 +297,16 @@ fn ordered_cf_users<'py>(node: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, Py
 }
 
 /// Is node a quantize_per_tensor call_function?
+/// Check if a call_function node's target string contains a marker.
+fn target_contains(node: &Bound<'_, PyAny>, marker: &str) -> bool {
+    NodeOp::of(node) == NodeOp::CallFunction
+        && FxGraphModule::node_target_str(node)
+            .map(|t| t.contains(marker))
+            .unwrap_or(false)
+}
+
 fn is_quantize_node(node: &Bound<'_, PyAny>) -> bool {
-    let op: String = py_attr(node, &["op"], String::new());
-    if op != "call_function" {
-        return false;
-    }
-    let target = node
-        .getattr("target")
-        .and_then(|t| t.str().map(|s| s.to_string()))
-        .unwrap_or_default();
-    target.contains("quantize_per_tensor") && !target.contains("dequantize_per_tensor")
+    target_contains(node, "quantize_per_tensor") && !target_contains(node, "dequantize")
 }
 
 // ---------------------------------------------------------------------------
@@ -1223,33 +1223,12 @@ impl FxPass for FxControlFlowQParamPropagationPass {
 // Helpers for the cleanup pass
 // ---------------------------------------------------------------------------
 
-/// Check if a node is a call_function whose target string contains any of the given markers.
-fn is_call_function_target(node: &Bound<'_, PyAny>, markers: &[&str]) -> bool {
-    let op: String = py_attr(node, &["op"], String::new());
-    if op != "call_function" {
-        return false;
-    }
-    let target_str = node
-        .getattr("target")
-        .and_then(|t| t.str().map(|s| s.to_string()))
-        .unwrap_or_default();
-    markers.iter().any(|m| target_str.contains(m))
-}
-
-/// Check if a node is a TOSA RESCALE call_function.
 fn is_tosa_rescale_node(node: &Bound<'_, PyAny>) -> bool {
-    is_call_function_target(
-        node,
-        &["tosa_RESCALE", "tosa.RESCALE", "TosaRescale"],
-    )
+    target_contains(node, "RESCALE")
 }
 
-/// Check if a node is a TOSA TRANSPOSE call_function.
 fn is_tosa_transpose_node(node: &Bound<'_, PyAny>) -> bool {
-    is_call_function_target(
-        node,
-        &["tosa.TRANSPOSE", "tosa_TRANSPOSE", "TosaTranspose"],
-    )
+    target_contains(node, "TRANSPOSE")
 }
 
 /// Cleanup graph: eliminate dead code + lint.
@@ -1518,7 +1497,7 @@ pub(crate) fn remove_control_flow_noop_passthroughs<'py>(
         let nodes = graph_nodes(&submodule)?;
 
         for node in &nodes {
-            if !is_call_function_target(node, noop_markers) { continue; }
+            if !noop_markers.iter().any(|m| target_contains(node, m)) { continue; }
             let args = FxGraphModule::node_args(node)?;
             if args.is_empty() || !FxGraphModule::is_node(&args[0]) { continue; }
             let source = &args[0];
@@ -1793,15 +1772,12 @@ pub(crate) fn refresh_tosa_transpose_fake_tensors<'py>(
 // NOTE: _refresh_tosa_dim_order_fake_tensors (item 7) is already implemented
 // above as `refresh_tosa_dim_order_fake_tensors`.
 
-/// Check if a node is a dequantize_per_tensor call_function.
 fn is_dequantize_node(node: &Bound<'_, PyAny>) -> bool {
-    is_call_function_target(node, &["dequantize_per_tensor"])
+    target_contains(node, "dequantize_per_tensor")
 }
 
-/// Check if a node is a compare op (eq, ge, gt, lt, le).
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// Q/DQ node helpers (ported from Python)
+// Q/DQ node helpers
 // ---------------------------------------------------------------------------
 
 /// Parse scale/zp/qmin/qmax/dtype from a Q or DQ node's literal args.
@@ -2157,7 +2133,7 @@ pub(crate) fn restore_control_flow_float_compare_inputs<'py>(
         let nodes = graph_nodes(&submodule)?;
 
         for node in &nodes {
-            if !is_call_function_target(node, compare_markers) {
+            if !compare_markers.iter().any(|m| target_contains(node, m)) {
                 continue;
             }
 
