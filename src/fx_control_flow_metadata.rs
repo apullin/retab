@@ -15,6 +15,147 @@ use crate::fx_pass::FxPass;
 use crate::runner_logging::log_line;
 
 // ---------------------------------------------------------------------------
+// QParam — Rust-native quantization parameter struct
+// ---------------------------------------------------------------------------
+
+/// Quantization parameters extracted once from Python QuantArgs objects.
+/// Eliminates repeated getattr chains throughout the control-flow code.
+#[derive(Debug, Clone)]
+pub(crate) struct QParam {
+    pub scale: f64,
+    pub zp: i64,
+    pub qmin: i64,
+    pub qmax: i64,
+    pub dtype_str: String,
+}
+
+impl QParam {
+    /// Extract from a Python QuantArgs object (or anything with scale/zp/dtype attrs).
+    fn from_py(qp: &Bound<'_, PyAny>) -> Self {
+        Self {
+            scale: qp.getattr("scale").and_then(|v| v.extract()).unwrap_or(1.0),
+            zp: qp.getattr("zp").and_then(|v| v.extract()).unwrap_or(0),
+            qmin: qp.getattr("qmin").and_then(|v| v.extract()).unwrap_or(-128),
+            qmax: qp.getattr("qmax").and_then(|v| v.extract()).unwrap_or(127),
+            dtype_str: qp.getattr("dtype").ok().map(|d| format!("{d}")).unwrap_or_default(),
+        }
+    }
+
+    /// Parse from Q/DQ node literal args: (input, scale, zp, qmin, qmax, dtype).
+    fn from_q_node_args(args: &[Bound<'_, PyAny>]) -> Option<Self> {
+        if args.len() < 6 {
+            return None;
+        }
+        let dtype_str = format!("{}", args[5]);
+        if !dtype_str.contains("int") {
+            return None;
+        }
+        Some(Self {
+            scale: args[1].extract().unwrap_or(1.0),
+            zp: args[2].extract().unwrap_or(0),
+            qmin: args[3].extract().unwrap_or(-128),
+            qmax: args[4].extract().unwrap_or(127),
+            dtype_str,
+        })
+    }
+
+    /// Convert back to a Python QuantArgs object.
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let cls = py
+            .import_bound("executorch.backends.arm._passes.quant_args")?
+            .getattr("QuantArgs")?;
+        let torch = py.import_bound("torch")?;
+        let dtype = torch.getattr(&*self.dtype_str.replace("torch.", ""))?;
+        let kw = PyDict::new_bound(py);
+        kw.set_item("scale", self.scale)?;
+        kw.set_item("zp", self.zp)?;
+        kw.set_item("qmin", self.qmin)?;
+        kw.set_item("qmax", self.qmax)?;
+        kw.set_item("dtype", dtype)?;
+        kw.set_item("axis", 0i64)?;
+        kw.set_item("per_channel", false)?;
+        cls.call((), Some(&kw))
+    }
+
+    fn same_as(&self, other: &Self) -> bool {
+        (self.scale - other.scale).abs() < 1e-10
+            && self.zp == other.zp
+            && self.dtype_str == other.dtype_str
+            && self.qmin == other.qmin
+            && self.qmax == other.qmax
+    }
+
+    fn same_scale_zp(&self, other: &Self) -> bool {
+        (self.scale - other.scale).abs() < 1e-10 && self.zp == other.zp
+    }
+
+    /// Store as a single-entry qparam dict {0: self} on node metadata.
+    /// Store as a single-entry qparam dict {0: self} on node metadata.
+    fn stamp_on_meta<'py>(&self, py: Python<'py>, meta: &Bound<'py, PyAny>, key: &str) -> PyResult<()> {
+        let dict = PyDict::new_bound(py);
+        dict.set_item(0i64, self.to_py(py)?)?;
+        meta.set_item(key, dict)?;
+        Ok(())
+    }
+
+    /// Stamp both input_qparams and output_qparams on a node's metadata.
+    fn stamp_both<'py>(&self, py: Python<'py>, meta: &Bound<'py, PyAny>) -> PyResult<()> {
+        self.stamp_on_meta(py, meta, "output_qparams")?;
+        self.stamp_on_meta(py, meta, "input_qparams")?;
+        Ok(())
+    }
+
+    /// Insert a RESCALE node converting from `self` domain to `target` domain.
+    /// Returns the new rescale node. `after=true` inserts after `anchor`,
+    /// `after=false` inserts before `anchor`.
+    fn insert_rescale_to<'py>(
+        &self,
+        target: &QParam,
+        py: Python<'py>,
+        submodule: &Bound<'py, PyAny>,
+        anchor: &Bound<'py, PyAny>,
+        source_val: &Bound<'py, PyAny>,
+        after: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let helpers = py.import_bound("retab._helpers")?;
+        let insert_fn = helpers.getattr("insert_rescale_node")?;
+        let torch = py.import_bound("torch")?;
+        let dtype = torch.getattr(&*target.dtype_str.replace("torch.", ""))?;
+        let scales = PyList::new_bound(py, &[self.scale / target.scale]);
+        let kw = PyDict::new_bound(py);
+        kw.set_item("after", after)?;
+        insert_fn.call(
+            (submodule, anchor, source_val, &dtype, &scales, self.zp, target.zp),
+            Some(&kw),
+        )
+    }
+}
+
+/// Extract a QParam from a Python qparams dict (tries key 0, then single-value, then raw).
+fn extract_qparam(qparams: &Bound<'_, PyAny>) -> Option<QParam> {
+    if qparams.is_none() || !qparams.is_truthy().unwrap_or(false) {
+        return None;
+    }
+    if let Ok(val) = qparams.get_item(0i64) {
+        if !val.is_none() {
+            return Some(QParam::from_py(&val));
+        }
+    }
+    if let Ok(len) = qparams.len() {
+        if len == 1 {
+            if let Ok(values) = qparams.call_method0("values") {
+                if let Ok(mut iter) = values.iter() {
+                    if let Some(Ok(val)) = iter.next() {
+                        return Some(QParam::from_py(&val));
+                    }
+                }
+            }
+        }
+    }
+    Some(QParam::from_py(qparams))
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -260,16 +401,13 @@ pub(crate) fn propagate_parent_qparams_to_placeholders<'py>(
                 }
             }
 
-            // If no metadata qparams, try the pre-pass snapshot saved
-            // before parent passes destroyed the original DQ/Q args.
+            // If no metadata qparams, try the pre-pass snapshot
             if !found {
                 let cf_meta = cf_node.getattr("meta")?;
                 if let Ok(saved) = cf_meta.get_item("_pre_pass_arg_qparams") {
-                    if let Ok(qp) = saved.get_item(i) {
-                        let dict = pyo3::types::PyDict::new_bound(py);
-                        dict.set_item(0i64, &qp)?;
-                        meta.set_item("output_qparams", &dict)?;
-                        meta.set_item("input_qparams", &dict)?;
+                    if let Ok(qp_py) = saved.get_item(i) {
+                        let qp = QParam::from_py(&qp_py);
+                        qp.stamp_both(py, &meta)?;
                         propagated += 1;
                         found = true;
                     }
@@ -278,11 +416,9 @@ pub(crate) fn propagate_parent_qparams_to_placeholders<'py>(
 
             // Last fallback: walk the (post-pass) producer chain
             if !found {
-                if let Some(qp) = extract_effective_node_qparam(py, parent_arg)? {
-                    let dict = pyo3::types::PyDict::new_bound(py);
-                    dict.set_item(0i64, &qp)?;
-                    meta.set_item("output_qparams", &dict)?;
-                    meta.set_item("input_qparams", &dict)?;
+                if let Some(qp_py) = extract_effective_node_qparam(py, parent_arg)? {
+                    let qp = QParam::from_py(&qp_py);
+                    qp.stamp_both(py, &meta)?;
                     propagated += 1;
                 }
             }
@@ -1748,60 +1884,23 @@ fn is_dequantize_node(node: &Bound<'_, PyAny>) -> bool {
 
 /// Parse scale/zp/qmin/qmax/dtype from a Q or DQ node's literal args.
 /// Returns a Python QuantArgs object or None.
+/// Parse Q/DQ node literal args into a Python QuantArgs object.
+/// Kept for callers that still need the Python object (e.g., stamp_single_qparams).
 fn parse_per_tensor_qparam<'py>(
     py: Python<'py>,
     node: &Bound<'py, PyAny>,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
     let args = FxGraphModule::node_args(node)?;
-    if args.len() < 6 {
-        return Ok(None);
+    match QParam::from_q_node_args(&args) {
+        Some(qp) => Ok(Some(qp.to_py(py)?)),
+        None => Ok(None),
     }
-    let torch_dtype_cls = py.import_bound("torch")?.getattr("dtype")?;
-    if !args[5].is_instance(&torch_dtype_cls).unwrap_or(false) {
-        return Ok(None);
-    }
-    let quant_args_cls = py
-        .import_bound("executorch.backends.arm._passes.quant_args")?
-        .getattr("QuantArgs")?;
-    let kwargs = pyo3::types::PyDict::new_bound(py);
-    kwargs.set_item("scale", args[1].extract::<f64>().unwrap_or(1.0))?;
-    kwargs.set_item("zp", args[2].extract::<i64>().unwrap_or(0))?;
-    kwargs.set_item("qmin", args[3].extract::<i64>().unwrap_or(-128))?;
-    kwargs.set_item("qmax", args[4].extract::<i64>().unwrap_or(127))?;
-    kwargs.set_item("dtype", &args[5])?;
-    kwargs.set_item("axis", 0i64)?;
-    kwargs.set_item("per_channel", false)?;
-    Ok(Some(quant_args_cls.call((), Some(&kwargs))?))
 }
 
-/// Compare two QuantArgs for equality (scale, zp, dtype, optionally range).
-fn same_control_flow_qparam(
-    lhs: &Bound<'_, PyAny>,
-    rhs: &Bound<'_, PyAny>,
-    include_range: bool,
-) -> bool {
-    let lhs_scale: f64 = lhs.getattr("scale").and_then(|v| v.extract()).unwrap_or(1.0);
-    let rhs_scale: f64 = rhs.getattr("scale").and_then(|v| v.extract()).unwrap_or(1.0);
-    let lhs_zp: i64 = lhs.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
-    let rhs_zp: i64 = rhs.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
-    if lhs_scale != rhs_scale || lhs_zp != rhs_zp {
-        return false;
-    }
-    let lhs_dtype = lhs.getattr("dtype").ok().map(|v| format!("{}", v));
-    let rhs_dtype = rhs.getattr("dtype").ok().map(|v| format!("{}", v));
-    if lhs_dtype != rhs_dtype {
-        return false;
-    }
-    if include_range {
-        let lhs_qmin: i64 = lhs.getattr("qmin").and_then(|v| v.extract()).unwrap_or(0);
-        let rhs_qmin: i64 = rhs.getattr("qmin").and_then(|v| v.extract()).unwrap_or(0);
-        let lhs_qmax: i64 = lhs.getattr("qmax").and_then(|v| v.extract()).unwrap_or(0);
-        let rhs_qmax: i64 = rhs.getattr("qmax").and_then(|v| v.extract()).unwrap_or(0);
-        if lhs_qmin != rhs_qmin || lhs_qmax != rhs_qmax {
-            return false;
-        }
-    }
-    true
+/// Parse Q/DQ node literal args into a Rust QParam.
+fn parse_qparam(node: &Bound<'_, PyAny>) -> PyResult<Option<QParam>> {
+    let args = FxGraphModule::node_args(node)?;
+    Ok(QParam::from_q_node_args(&args))
 }
 
 /// Check if a node is a zero-input constant source (get_attr or no input args).
@@ -1843,15 +1942,15 @@ fn collapse_control_flow_qdq_pairs<'py>(
         if !is_quantize_node(quant_node) {
             continue;
         }
-        let quant_qp = match parse_per_tensor_qparam(py, quant_node)? {
+        let quant_qp = match parse_qparam(quant_node)? {
             Some(qp) => qp,
             None => continue,
         };
-        let dequant_qp = match parse_per_tensor_qparam(py, node)? {
+        let dequant_qp = match parse_qparam(node)? {
             Some(qp) => qp,
             None => continue,
         };
-        if !same_control_flow_qparam(&quant_qp, &dequant_qp, true) {
+        if !quant_qp.same_as(&dequant_qp) {
             continue;
         }
         let q_args = FxGraphModule::node_args(quant_node)?;
@@ -2037,7 +2136,7 @@ fn rewrite_control_flow_quantize_nodes<'py>(
         let source_qparam = source_qparam.unwrap();
 
         // Case 1: same qparam → bypass
-        if same_control_flow_qparam(&source_qparam, &output_qparam, true) {
+        if QParam::from_py(&source_qparam).same_as(&QParam::from_py(&output_qparam)) {
             node.call_method1("replace_all_uses_with", (source_node,))?;
             graph.call_method1("erase_node", (node,))?;
             *quant_count += 1;
@@ -2392,10 +2491,10 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
         let carried_idx: usize = if is_while { 2 } else { 3 };
         let ext_qp = ext_qp_dict.as_ref()
             .and_then(|d| d.get_item(carried_idx).ok())
+            .map(|v| QParam::from_py(&v))
             .or_else(|| {
-                // Fallback: try pre-pass snapshot
                 cf_meta.get_item("_pre_pass_arg_qparams").ok()
-                    .and_then(|d| extract_single_qparam_entry(py, &d))
+                    .and_then(|d| extract_qparam(&d))
             });
 
         // Get submodules
@@ -2426,32 +2525,15 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
 
                 for ph in &placeholders {
                     let ph_meta = ph.getattr("meta")?;
-                    let int_qp = ph_meta.get_item("output_qparams").ok()
-                        .and_then(|oqp| extract_single_qparam_entry(py, &oqp));
-                    let int_qp = match int_qp {
+                    let internal = match ph_meta.get_item("output_qparams").ok().and_then(|oqp| extract_qparam(&oqp)) {
                         Some(qp) => qp,
                         None => continue,
                     };
+                    if ext.same_scale_zp(&internal) || ext.scale == 0.0 || internal.scale == 0.0 { continue; }
 
-                    let ext_s = ext.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0);
-                    let ext_z: i64 = ext.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
-                    let int_s = int_qp.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0);
-                    let int_z: i64 = int_qp.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
-
-                    if (ext_s - int_s).abs() < 1e-10 && ext_z == int_z { continue; }
-                    if ext_s == 0.0 || int_s == 0.0 { continue; }
-
-                    let dtype = int_qp.getattr("dtype")?;
-                    let scales = pyo3::types::PyList::new_bound(py, &[ext_s / int_s]);
-                    let kw = PyDict::new_bound(py);
-                    kw.set_item("after", true)?;
-                    let rescale = insert_fn.call(
-                        (&submodule, ph, ph, &dtype, &scales, ext_z, int_z),
-                        Some(&kw),
-                    )?;
+                    let rescale = ext.insert_rescale_to(&internal, py, &submodule, ph, ph, true)?;
                     ph.call_method1("replace_all_uses_with", (&rescale,))?;
                     rescale.call_method("update_arg", (0i64, ph), None)?;
-                    // Remove output_qparams from placeholder (upstream line 536)
                     let _ = ph_meta.del_item("output_qparams");
                     modified = true;
                     count += 1;
@@ -2482,30 +2564,16 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
                                 Some(v) if FxGraphModule::is_node(v) => v,
                                 _ => continue,
                             };
-                            // Internal qparam from output node's input_qparams
-                            let int_qp = int_out_qp.as_ref()
-                                .and_then(|d| d.get_item(*idx).ok());
-                            let int_qp = match int_qp {
+                            let internal = match int_out_qp.as_ref()
+                                .and_then(|d| d.get_item(*idx).ok())
+                                .map(|v| QParam::from_py(&v)) {
                                 Some(qp) => qp,
                                 None => continue,
                             };
+                            let external = QParam::from_py(ext_qp);
+                            if internal.same_scale_zp(&external) || internal.scale == 0.0 || external.scale == 0.0 { continue; }
 
-                            let int_s = int_qp.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0);
-                            let int_z: i64 = int_qp.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
-                            let ext_s = ext_qp.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0);
-                            let ext_z: i64 = ext_qp.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
-
-                            if (int_s - ext_s).abs() < 1e-10 && int_z == ext_z { continue; }
-                            if int_s == 0.0 || ext_s == 0.0 { continue; }
-
-                            let dtype = ext_qp.getattr("dtype")?;
-                            let scales = pyo3::types::PyList::new_bound(py, &[int_s / ext_s]);
-                            let kw = PyDict::new_bound(py);
-                            kw.set_item("after", false)?;
-                            let rescale = insert_fn.call(
-                                (&submodule, &output, out_val, &dtype, &scales, int_z, ext_z),
-                                Some(&kw),
-                            )?;
+                            let rescale = internal.insert_rescale_to(&external, py, &submodule, &output, out_val, false)?;
                             new_vals[*idx] = rescale;
                             out_modified = true;
                             count += 1;
@@ -2668,22 +2736,13 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
                     Some(v) if FxGraphModule::is_node(v) => v,
                     _ => continue,
                 };
-                let cur_qp = extract_effective_node_qparam(py, out_val)?;
-                let cur_s = cur_qp.as_ref().map(|q| q.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0)).unwrap_or(1.0);
-                let cur_z: i64 = cur_qp.as_ref().map(|q| q.getattr("zp").and_then(|v| v.extract()).unwrap_or(0)).unwrap_or(0);
-                let tgt_s = target_qp.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0);
-                let tgt_z: i64 = target_qp.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
-                if (cur_s - tgt_s).abs() < 1e-10 && cur_z == tgt_z { continue; }
-                if cur_s == 0.0 || tgt_s == 0.0 { continue; }
+                let cur = extract_effective_node_qparam(py, out_val)?
+                    .map(|q| QParam::from_py(&q))
+                    .unwrap_or(QParam { scale: 1.0, zp: 0, qmin: -128, qmax: 127, dtype_str: "torch.int8".into() });
+                let tgt = QParam::from_py(target_qp);
+                if cur.same_scale_zp(&tgt) || cur.scale == 0.0 || tgt.scale == 0.0 { continue; }
 
-                let dtype = target_qp.getattr("dtype")?;
-                let scales = pyo3::types::PyList::new_bound(py, &[cur_s / tgt_s]);
-                let kw = PyDict::new_bound(py);
-                kw.set_item("after", false)?;
-                let rescale = insert_fn.call(
-                    (submodule, &output, out_val, &dtype, &scales, cur_z, tgt_z),
-                    Some(&kw),
-                )?;
+                let rescale = cur.insert_rescale_to(&tgt, py, submodule, &output, out_val, false)?;
                 ovals[*idx] = rescale;
                 modified = true;
             }
