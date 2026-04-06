@@ -479,12 +479,12 @@ pub(crate) fn propagate_parent_qparams_to_placeholders<'py>(
             for (idx, ph) in placeholders.iter().enumerate() {
                 let ph_meta = ph.getattr("meta")?;
                 if let Ok(oqp) = ph_meta.get_item("output_qparams") {
-                    if let Some(qp) = extract_single_qparam_entry(py, &oqp) {
+                    if let Some(qp) = extract_single_qparam_entry(&oqp) {
                         qparams_dict.set_item(idx, &qp)?;
                         propagated += 1;
                     }
                 } else if let Ok(iqp) = ph_meta.get_item("input_qparams") {
-                    if let Some(qp) = extract_single_qparam_entry(py, &iqp) {
+                    if let Some(qp) = extract_single_qparam_entry(&iqp) {
                         qparams_dict.set_item(idx, &qp)?;
                         propagated += 1;
                     }
@@ -1089,7 +1089,7 @@ fn snapshot_pre_pass_cf_qparams<'py>(
             // Try metadata first
             let meta = arg.getattr("meta")?;
             if let Ok(oqp) = meta.get_item("output_qparams") {
-                if let Some(qp) = extract_single_qparam_entry(py, &oqp) {
+                if let Some(qp) = extract_single_qparam_entry(&oqp) {
                     qparams_dict.set_item(i, &qp)?;
                     saved += 1;
                     continue;
@@ -1254,10 +1254,10 @@ fn rescale_signature<'py>(node: &Bound<'py, PyAny>) -> Option<Vec<String>> {
     Some(sig)
 }
 
-/// Extract a single qparam entry from a qparams dict.
-/// Mirrors Python `_extract_single_qparam_entry`.
+/// Extract a single Python qparam entry from a qparams dict.
+/// Returns Bound<PyAny> for callers that need to pass it back to Python.
+/// For Rust-native QParam, use extract_qparam() instead.
 fn extract_single_qparam_entry<'py>(
-    py: Python<'py>,
     qparams: &Bound<'py, PyAny>,
 ) -> Option<Bound<'py, PyAny>> {
     if qparams.is_none() {
@@ -1285,8 +1285,6 @@ fn extract_single_qparam_entry<'py>(
             }
         }
     }
-    // Return qparams itself as fallback
-    let _ = py;
     Some(qparams.clone())
 }
 
@@ -1599,14 +1597,14 @@ pub(crate) fn prune_duplicate_terminal_rescales<'py>(
             let first_output_qparam = {
                 let oqp = meta_val(&node_meta, "output_qparams");
                 match oqp {
-                    Some(ref v) => extract_single_qparam_entry(py, v),
+                    Some(ref v) => extract_single_qparam_entry(v),
                     None => None,
                 }
             };
             let final_output_qparam = {
                 let oqp = meta_val(&user_meta, "output_qparams");
                 match oqp {
-                    Some(ref v) => extract_single_qparam_entry(py, v),
+                    Some(ref v) => extract_single_qparam_entry(v),
                     None => None,
                 }
             };
@@ -1990,12 +1988,7 @@ fn rewrite_control_flow_quantize_nodes<'py>(
             continue;
         }
 
-        // Skip per-channel or missing source qparam
-        let src_per_ch = source_node.getattr("meta")?.get_item("output_qparams").ok()
-            .and_then(|oqp| extract_single_qparam_entry(py, &oqp))
-            .and_then(|qp| qp.getattr("per_channel").ok()?.extract::<bool>().ok())
-            .unwrap_or(false);
-        if source.is_none() || src_per_ch {
+        if source.is_none() {
             continue;
         }
         let source = source.unwrap();
@@ -2372,7 +2365,7 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
 
             // --- Output RESCALE: before output (while body only, or cond branches) ---
             if (is_while && sm_idx == 1) || is_cond {
-                let output_qparams = infer_cf_output_qparams_map(py, node)?;
+                let output_qparams = infer_cf_output_qparams_map(node)?;
                 if !output_qparams.is_empty() {
                     if let Some(output) = output_node(&submodule)? {
                         let ovals = unpack_output_vals(&output)?;
@@ -2393,10 +2386,9 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
                                 Some(qp) => qp,
                                 None => continue,
                             };
-                            let external = QParam::from_py(ext_qp);
-                            if internal.same_scale_zp(&external) || internal.scale == 0.0 || external.scale == 0.0 { continue; }
+                            if internal.same_scale_zp(ext_qp) || internal.scale == 0.0 || ext_qp.scale == 0.0 { continue; }
 
-                            let rescale = internal.insert_rescale_to(&external, py, &submodule, &output, out_val, false)?;
+                            let rescale = internal.insert_rescale_to(ext_qp, py, &submodule, &output, out_val, false)?;
                             new_vals[*idx] = rescale;
                             out_modified = true;
                             count += 1;
@@ -2429,31 +2421,30 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
 // ===========================================================================
 
 /// Infer output qparams from cond/while_loop getitem consumer nodes.
-fn infer_cf_output_qparams_map<'py>(
-    py: Python<'py>,
-    cf_node: &Bound<'py, PyAny>,
-) -> PyResult<Vec<(usize, Bound<'py, PyAny>)>> {
+fn infer_cf_output_qparams_map(
+    cf_node: &Bound<'_, PyAny>,
+) -> PyResult<Vec<(usize, QParam)>> {
     let users = ordered_cf_users(cf_node)?;
     let mut result = Vec::new();
     for user in &users {
         let u_args = FxGraphModule::node_args(user)?;
         if u_args.len() < 2 { continue; }
         let idx: usize = match u_args[1].extract() { Ok(i) => i, Err(_) => continue };
-        // Try output_qparams[0]
         let meta = user.getattr("meta")?;
+        // Try output_qparams
         if let Ok(oqp) = meta.get_item("output_qparams") {
-            if let Some(qp) = extract_single_qparam_entry(py, &oqp) {
+            if let Some(qp) = extract_qparam(&oqp) {
                 result.push((idx, qp));
                 continue;
             }
         }
-        // Fallback: user's input_qparams
-        let user_users: Vec<Bound<'py, PyAny>> = user.getattr("users")?
+        // Fallback: downstream user's input_qparams
+        let user_users: Vec<Bound<'_, PyAny>> = user.getattr("users")?
             .iter()?.filter_map(|u| u.ok()).collect();
         let mut found = false;
         for uu in &user_users {
             if let Ok(iqp) = uu.getattr("meta")?.get_item("input_qparams") {
-                if let Some(qp) = extract_single_qparam_entry(py, &iqp) {
+                if let Some(qp) = extract_qparam(&iqp) {
                     result.push((idx, qp));
                     found = true;
                     break;
@@ -2463,9 +2454,8 @@ fn infer_cf_output_qparams_map<'py>(
         if found { continue; }
         // Fallback: DQ literal args
         for uu in &user_users {
-            let target = FxGraphModule::node_target_str(uu).unwrap_or_default();
-            if target.contains("dequantize_per_tensor") {
-                if let Ok(Some(qp)) = parse_per_tensor_qparam(py, uu) {
+            if is_dequantize_node(uu) {
+                if let Ok(Some(qp)) = parse_qparam(uu) {
                     result.push((idx, qp));
                     break;
                 }
@@ -2527,8 +2517,7 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
                 .filter_map(|(i, pa)| extract_effective_qparam(pa).ok().flatten().map(|qp| (i, qp)))
                 .collect()
         } else {
-            infer_cf_output_qparams_map(py, node)?
-                .into_iter().map(|(i, qp)| (i, QParam::from_py(&qp))).collect()
+            infer_cf_output_qparams_map(node)?
         };
 
         if targets.is_empty() { continue; }
