@@ -281,6 +281,15 @@ fn propagate_control_flow_qparams(graph_module: &Bound<'_, PyAny>) -> PyResult<b
     fx_pass::FxPass::run(&fx_control_flow_metadata::FxControlFlowQParamPropagationPass, &gm)
 }
 
+/// Insert boundary RESCALE pairs for control-flow submodules.
+/// Ports upstream InsertControlFlowRescalesPass.
+#[pyfunction]
+#[pyo3(signature = (graph_module))]
+fn cf_insert_boundary_rescales(graph_module: &Bound<'_, PyAny>) -> PyResult<u32> {
+    let py = graph_module.py();
+    fx_control_flow_metadata::insert_cf_boundary_rescales(py, graph_module)
+}
+
 /// Run the full output normalize phase in one Rust call.
 #[pyfunction]
 #[pyo3(signature = (graph_module))]
@@ -311,6 +320,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Control-flow pipeline (new ordering)
     m.add_function(wrap_pyfunction!(stamp_control_flow_structural, m)?)?;
     m.add_function(wrap_pyfunction!(propagate_control_flow_qparams, m)?)?;
+    m.add_function(wrap_pyfunction!(cf_insert_boundary_rescales, m)?)?;
     m.add_function(wrap_pyfunction!(cf_run_boundary_phase, m)?)?;
     m.add_function(wrap_pyfunction!(cf_run_output_normalize_phase, m)?)?;
     // Utilities

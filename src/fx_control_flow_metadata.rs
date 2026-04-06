@@ -2157,23 +2157,6 @@ fn rewrite_control_flow_quantize_nodes<'py>(
             continue;
         }
 
-        // Case 1b: while_loop body placeholder → bypass.
-        // Loop-carried values are already in the placeholder's quantization
-        // domain from the previous iteration. The Q literal args are from
-        // calibration and don't apply at runtime. Inserting a domain-shifting
-        // RESCALE here would compound error across iterations.
-        let source_op: String = py_attr(source_node, &["op"], String::new());
-        let cf_target_str = cf_node.getattr("target")
-            .and_then(|t| t.str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        if source_op == "placeholder" && cf_target_str.contains("while_loop") {
-            node.call_method1("replace_all_uses_with", (source_node,))?;
-            graph.call_method1("erase_node", (node,))?;
-            *quant_count += 1;
-            modified = true;
-            continue;
-        }
-
         // Case 3: different qparam → insert RESCALE
         let helpers = py.import_bound("retab._helpers")?;
         let insert_fn = helpers.getattr("insert_rescale_node")?;
@@ -2478,6 +2461,189 @@ pub(crate) fn normalize_control_flow_output_layouts<'py>(
 // ---------------------------------------------------------------------------
 // Combined Cleanup Pass
 // ---------------------------------------------------------------------------
+
+// ===========================================================================
+// Control-flow boundary RESCALE insertion
+// Ports upstream InsertControlFlowRescalesPass algorithm:
+//   - Input RESCALE: external(parent) → internal(body) after placeholder
+//   - Output RESCALE: internal(body) → external(consumer) before output
+// ===========================================================================
+
+/// Insert boundary RESCALE pairs for while_loop submodules.
+/// Must run AFTER submodule fold_qdq (so placeholders have output_qparams
+/// from Q literals, and output node has input_qparams from DQ literals).
+pub(crate) fn insert_cf_boundary_rescales<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+) -> PyResult<u32> {
+    let torch = py.import_bound("torch")?;
+    let while_op = torch.getattr("ops")?.getattr("higher_order")?.getattr("while_loop")?;
+    let cond_op = torch.getattr("ops")?.getattr("higher_order")?.getattr("cond")?;
+    let helpers = py.import_bound("retab._helpers")?;
+    let insert_fn = helpers.getattr("insert_rescale_node")?;
+
+    let parent_graph = gm.getattr("graph")?;
+    let nodes: Vec<Bound<'py, PyAny>> = parent_graph.getattr("nodes")?
+        .iter()?.filter_map(|n| n.ok()).collect();
+
+    let mut count = 0u32;
+
+    for node in &nodes {
+        let op: String = node.getattr("op").and_then(|v| v.extract()).unwrap_or_default();
+        if op != "call_function" { continue; }
+        let target = node.getattr("target")?;
+        let is_while = target.eq(&while_op).unwrap_or(false);
+        let is_cond = target.eq(&cond_op).unwrap_or(false);
+        if !is_while && !is_cond { continue; }
+
+        // Get external qparams from the cf node's input_qparams
+        // (upstream: _get_input_qparams_map with idx=2 for while, idx=3 for cond)
+        let cf_meta = node.getattr("meta")?;
+        let ext_qp_dict = cf_meta.get_item("input_qparams").ok();
+        // The external qparam is at key matching the carried_args index in the node
+        let carried_idx: usize = if is_while { 2 } else { 3 };
+        let ext_qp = ext_qp_dict.as_ref()
+            .and_then(|d| d.get_item(carried_idx).ok())
+            .or_else(|| {
+                // Fallback: try pre-pass snapshot
+                cf_meta.get_item("_pre_pass_arg_qparams").ok()
+                    .and_then(|d| extract_single_qparam_entry(py, &d))
+            });
+
+        // Get submodules
+        let args = FxGraphModule::node_args(node)?;
+        let submodule_indices: Vec<usize> = if is_while {
+            vec![0, 1] // cond_fn, body_fn
+        } else {
+            vec![1, 2] // if_branch, else_branch
+        };
+
+        for &sm_idx in &submodule_indices {
+            if sm_idx >= args.len() { continue; }
+            let sm_name: String = args[sm_idx].getattr("target")
+                .and_then(|t| t.extract()).unwrap_or_default();
+            let submodule = match gm.call_method1("get_submodule", (&sm_name,)) {
+                Ok(sm) => sm,
+                Err(_) => continue,
+            };
+            let sg = submodule.getattr("graph")?;
+            let mut modified = false;
+
+            // --- Input RESCALE: after placeholder ---
+            if let Some(ref ext) = ext_qp {
+                let placeholders: Vec<Bound<'py, PyAny>> = sg.getattr("nodes")?
+                    .iter()?.filter_map(|n| n.ok())
+                    .filter(|n| py_attr::<String>(n, &["op"], String::new()) == "placeholder")
+                    .collect();
+
+                for ph in &placeholders {
+                    let ph_meta = ph.getattr("meta")?;
+                    let int_qp = ph_meta.get_item("output_qparams").ok()
+                        .and_then(|oqp| extract_single_qparam_entry(py, &oqp));
+                    let int_qp = match int_qp {
+                        Some(qp) => qp,
+                        None => continue,
+                    };
+
+                    let ext_s = ext.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0);
+                    let ext_z: i64 = ext.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
+                    let int_s = int_qp.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0);
+                    let int_z: i64 = int_qp.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
+
+                    if (ext_s - int_s).abs() < 1e-10 && ext_z == int_z { continue; }
+                    if ext_s == 0.0 || int_s == 0.0 { continue; }
+
+                    let dtype = int_qp.getattr("dtype")?;
+                    let scales = pyo3::types::PyList::new_bound(py, &[ext_s / int_s]);
+                    let kw = PyDict::new_bound(py);
+                    kw.set_item("after", true)?;
+                    let rescale = insert_fn.call(
+                        (&submodule, ph, ph, &dtype, &scales, ext_z, int_z),
+                        Some(&kw),
+                    )?;
+                    ph.call_method1("replace_all_uses_with", (&rescale,))?;
+                    rescale.call_method("update_arg", (0i64, ph), None)?;
+                    // Remove output_qparams from placeholder (upstream line 536)
+                    let _ = ph_meta.del_item("output_qparams");
+                    modified = true;
+                    count += 1;
+                }
+            }
+
+            // --- Output RESCALE: before output (while body only, or cond branches) ---
+            if (is_while && sm_idx == 1) || is_cond {
+                let output_qparams = infer_cf_output_qparams_map(py, node)?;
+                if !output_qparams.is_empty() {
+                    let output_node = sg.getattr("nodes")?.iter()?
+                        .filter_map(|n| n.ok())
+                        .find(|n| py_attr::<String>(n, &["op"], String::new()) == "output");
+                    if let Some(output) = output_node {
+                        let oargs = FxGraphModule::node_args(&output)?;
+                        let ovals: Vec<Bound<'py, PyAny>> = if oargs.len() == 1 {
+                            if let Ok(it) = oargs[0].iter() { it.filter_map(|v| v.ok()).collect() }
+                            else { vec![oargs[0].clone()] }
+                        } else { oargs };
+
+                        let out_meta = output.getattr("meta")?;
+                        let int_out_qp = out_meta.get_item("input_qparams").ok();
+
+                        let mut new_vals = ovals.clone();
+                        let mut out_modified = false;
+                        for (idx, ext_qp) in &output_qparams {
+                            let out_val = match ovals.get(*idx) {
+                                Some(v) if FxGraphModule::is_node(v) => v,
+                                _ => continue,
+                            };
+                            // Internal qparam from output node's input_qparams
+                            let int_qp = int_out_qp.as_ref()
+                                .and_then(|d| d.get_item(*idx).ok());
+                            let int_qp = match int_qp {
+                                Some(qp) => qp,
+                                None => continue,
+                            };
+
+                            let int_s = int_qp.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0);
+                            let int_z: i64 = int_qp.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
+                            let ext_s = ext_qp.getattr("scale").and_then(|v| v.extract::<f64>()).unwrap_or(1.0);
+                            let ext_z: i64 = ext_qp.getattr("zp").and_then(|v| v.extract()).unwrap_or(0);
+
+                            if (int_s - ext_s).abs() < 1e-10 && int_z == ext_z { continue; }
+                            if int_s == 0.0 || ext_s == 0.0 { continue; }
+
+                            let dtype = ext_qp.getattr("dtype")?;
+                            let scales = pyo3::types::PyList::new_bound(py, &[int_s / ext_s]);
+                            let kw = PyDict::new_bound(py);
+                            kw.set_item("after", false)?;
+                            let rescale = insert_fn.call(
+                                (&submodule, &output, out_val, &dtype, &scales, int_z, ext_z),
+                                Some(&kw),
+                            )?;
+                            new_vals[*idx] = rescale;
+                            out_modified = true;
+                            count += 1;
+                        }
+                        if out_modified {
+                            let new_tuple = pyo3::types::PyTuple::new_bound(py, &new_vals);
+                            output.call_method("update_arg", (0i64, &new_tuple), None)?;
+                        }
+                    }
+                }
+            }
+
+            if modified {
+                cleanup_graph(&sg)?;
+                recompile(&submodule)?;
+            }
+        }
+    }
+
+    if count > 0 {
+        log_line(format_args!(
+            "[insert-cf-boundary-rescales] inserted {} boundary RESCALE(s)", count
+        ));
+    }
+    Ok(count)
+}
 
 // ===========================================================================
 // Additional control-flow functions (delegate to Python via PyO3)
