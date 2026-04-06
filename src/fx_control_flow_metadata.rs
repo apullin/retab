@@ -524,7 +524,7 @@ fn restamp_cf_placeholder_dtypes<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
-    let cf_mod = py.import_bound("retab._control_flow")?;
+    let cf_mod = py.import_bound("retab._cf_ctx")?;
     let branch_local_fn =
         cf_mod.getattr("_branch_local_control_flow_output_qparam")?;
     let extract_fn = cf_mod.getattr("_extract_single_qparam_entry")?;
@@ -1636,126 +1636,6 @@ pub(crate) fn prune_duplicate_terminal_rescales<'py>(
 }
 
 // ---------------------------------------------------------------------------
-// 3. _restore_missing_control_flow_rescale_qparams
-// ---------------------------------------------------------------------------
-
-pub(crate) fn restore_missing_control_flow_rescale_qparams<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-) -> PyResult<u32> {
-    let torch = py.import_bound("torch")?;
-    let int8 = torch.getattr("int8")?;
-    let int16 = torch.getattr("int16")?;
-    let int32 = torch.getattr("int32")?;
-    let quant_args_mod =
-        py.import_bound("executorch.backends.arm._passes.quant_args")?;
-    let quant_args_cls = quant_args_mod.getattr("QuantArgs")?;
-
-    let submodules = get_cf_submodules(py, gm)?;
-    let mut restored: u32 = 0;
-
-    for (_name, submodule, _cf_node) in &submodules {
-        let graph = submodule.getattr("graph")?;
-        let mut modified = false;
-
-        for node in submodule_nodes(&submodule)? {
-            if !is_tosa_rescale_node(&node) {
-                continue;
-            }
-            let args = FxGraphModule::node_args(&node)?;
-            if args.len() < 5 {
-                continue;
-            }
-
-            let meta = node.getattr("meta")?;
-            let has_input = meta_val(&meta, "input_qparams")
-                .map(|v| v.is_truthy().unwrap_or(false))
-                .unwrap_or(false);
-            let has_output = meta_val(&meta, "output_qparams")
-                .map(|v| v.is_truthy().unwrap_or(false))
-                .unwrap_or(false);
-            if has_input && has_output {
-                continue;
-            }
-
-            // source = args[0]
-            let source = &args[0];
-            if !FxGraphModule::is_node(source) {
-                continue;
-            }
-
-            let source_qparam = match extract_effective_node_qparam(py, source)? {
-                Some(qp) => qp,
-                None => continue,
-            };
-
-            // output_dtype = args[1]
-            let output_dtype = &args[1];
-            let is_valid_dtype = output_dtype.eq(&int8).unwrap_or(false)
-                || output_dtype.eq(&int16).unwrap_or(false)
-                || output_dtype.eq(&int32).unwrap_or(false);
-            if !is_valid_dtype {
-                continue;
-            }
-
-            // scale_arg = args[2], must be list/tuple of length 1, non-zero
-            let scale_arg = &args[2];
-            let scale_list: Vec<f64> = match scale_arg.extract() {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if scale_list.len() != 1 || scale_list[0] == 0.0 {
-                continue;
-            }
-
-            // Build output qparam
-            let source_scale = source_qparam.call_method0("get_scale_per_tensor")?;
-            let source_scale_f: f64 = match source_scale.extract() {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let output_scale = source_scale_f / scale_list[0];
-
-            let zp_val: i64 = match args[4].extract() {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            let qinfo = torch.call_method1("iinfo", (output_dtype,))?;
-            let qmin: i64 = qinfo.getattr("min")?.extract()?;
-            let qmax: i64 = qinfo.getattr("max")?.extract()?;
-
-            let output_qparam = match quant_args_cls.call1((
-                output_scale,
-                zp_val,
-                qmin,
-                qmax,
-                output_dtype,
-            )) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            if !has_input {
-                stamp_single_qparams(py, &node, Some(&source_qparam), None)?;
-            }
-            if !has_output {
-                stamp_single_qparams(py, &node, None, Some(&output_qparam))?;
-            }
-            restored += 1;
-            modified = true;
-        }
-
-        if modified {
-            recompile(&submodule)?;
-        }
-        let _ = graph;
-    }
-
-    Ok(restored)
-}
-
-// ---------------------------------------------------------------------------
 // 6. _refresh_tosa_transpose_fake_tensors
 // ---------------------------------------------------------------------------
 
@@ -1861,25 +1741,6 @@ fn is_dequantize_node(node: &Bound<'_, PyAny>) -> bool {
 }
 
 /// Check if a node is a compare op (eq, ge, gt, lt, le).
-fn is_compare_user(node: &Bound<'_, PyAny>) -> bool {
-    is_call_function_target(
-        node,
-        &[
-            "aten.gt.",
-            "aten.ge.",
-            "aten.lt.",
-            "aten.le.",
-            "aten.eq.",
-            "tosa.GREATER",
-            "tosa.GREATER_EQUAL",
-            "tosa.EQUAL",
-            "TosaGreater",
-            "TosaGreaterEqual",
-            "TosaEqual",
-        ],
-    )
-}
-
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // Q/DQ node helpers (ported from Python)
@@ -2677,8 +2538,6 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
 // ===========================================================================
 
 /// Infer output qparams from cond/while_loop getitem consumer nodes.
-/// Used by the Rust boundary rescale implementation (WIP — not yet working for cond).
-#[allow(dead_code)]
 fn infer_cf_output_qparams_map<'py>(
     py: Python<'py>,
     cf_node: &Bound<'py, PyAny>,
