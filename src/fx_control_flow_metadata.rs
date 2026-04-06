@@ -2316,8 +2316,57 @@ pub(crate) fn normalize_control_flow_output_layouts<'py>(
 // Additional control-flow functions (delegate to Python via PyO3)
 // ===========================================================================
 
+/// Infer output qparams from cond/while_loop getitem consumer nodes.
+/// Used by the Rust boundary rescale implementation (WIP — not yet working for cond).
+#[allow(dead_code)]
+fn infer_cf_output_qparams_map<'py>(
+    py: Python<'py>,
+    cf_node: &Bound<'py, PyAny>,
+) -> PyResult<Vec<(usize, Bound<'py, PyAny>)>> {
+    let users = ordered_cf_users(cf_node)?;
+    let mut result = Vec::new();
+    for user in &users {
+        let u_args = FxGraphModule::node_args(user)?;
+        if u_args.len() < 2 { continue; }
+        let idx: usize = match u_args[1].extract() { Ok(i) => i, Err(_) => continue };
+        // Try output_qparams[0]
+        let meta = user.getattr("meta")?;
+        if let Ok(oqp) = meta.get_item("output_qparams") {
+            if let Some(qp) = extract_single_qparam_entry(py, &oqp) {
+                result.push((idx, qp));
+                continue;
+            }
+        }
+        // Fallback: user's input_qparams
+        let user_users: Vec<Bound<'py, PyAny>> = user.getattr("users")?
+            .iter()?.filter_map(|u| u.ok()).collect();
+        let mut found = false;
+        for uu in &user_users {
+            if let Ok(iqp) = uu.getattr("meta")?.get_item("input_qparams") {
+                if let Some(qp) = extract_single_qparam_entry(py, &iqp) {
+                    result.push((idx, qp));
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if found { continue; }
+        // Fallback: DQ literal args
+        for uu in &user_users {
+            let target = FxGraphModule::node_target_str(uu).unwrap_or_default();
+            if target.contains("dequantize_per_tensor") {
+                if let Ok(Some(qp)) = parse_per_tensor_qparam(py, uu) {
+                    result.push((idx, qp));
+                    break;
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// Insert boundary RESCALE nodes at submodule input/output edges.
-/// Sole remaining in-the-middle Python delegate. Needed for cond output rescales.
+/// Sole remaining Python delegate — the Rust implementation is WIP.
 pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
@@ -2336,8 +2385,14 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
     Ok(1)
 }
 
-// (deleting old code — find the range)
-// ===========================================================================
+// WIP: Pure Rust boundary rescale implementation. Works for while_loop but
+// gets cond output rescales wrong. The infer_cf_output_qparams_map function
+// correctly extracts target qparams but the rescale insertion creates nodes
+// that the TOSA reference model rejects.
+//
+// Next step: dump FX graph before/after to see exactly what nodes are wrong,
+// then fix the insertion logic to match what the Python does.
+#[allow(dead_code)]
 // Combined Output Normalize Phase
 // ===========================================================================
 
