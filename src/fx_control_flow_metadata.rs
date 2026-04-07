@@ -536,6 +536,67 @@ fn annotate_cf_parent_rank4_dim_order<'py>(
 //    Stamps dim_order on rank-4 call_function nodes in submodules.
 // ---------------------------------------------------------------------------
 
+/// Pure Rust: compare RESCALE signatures (args[1:5]) for equality.
+fn rescale_sig_matches_ir(a: &IrNode, b: &IrNode) -> bool {
+    if a.args.len() < 5 || b.args.len() < 5 { return false; }
+    // Compare dtype (arg 1), scales (arg 2), in_zp (arg 3), out_zp (arg 4)
+    format!("{:?}", &a.args[1..5]) == format!("{:?}", &b.args[1..5])
+}
+
+/// Pure Rust: prune duplicate terminal rescales.
+fn prune_duplicate_terminal_rescales_ir(graph: &mut IrGraph) -> u32 {
+    let mut pruned = 0u32;
+    let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
+    for node_id in ids {
+        if !graph.nodes[node_id].alive || !graph.nodes[node_id].is_rescale() { continue; }
+        let user_ids = graph.users(node_id).to_vec();
+        if user_ids.len() != 1 { continue; }
+        let user_id = user_ids[0];
+        if !graph.nodes[user_id].alive || !graph.nodes[user_id].is_rescale() { continue; }
+        // user.args[0] must be this node
+        match graph.nodes[user_id].args.first() {
+            Some(IrArg::Node(id)) if *id == node_id => {},
+            _ => continue,
+        }
+        // Same rescale signature
+        if !rescale_sig_matches_ir(&graph.nodes[node_id], &graph.nodes[user_id]) { continue; }
+        // node has no output_qparams, user has output_qparams
+        if graph.nodes[node_id].meta.output_qparam().is_some() { continue; }
+        let final_qp = match graph.nodes[user_id].meta.output_qparam() {
+            Some(qp) => qp.clone(),
+            None => continue,
+        };
+        // Rewrite: take user's args[1:5] (the rescale params)
+        let new_args: Vec<IrArg> = {
+            let user_args = &graph.nodes[user_id].args;
+            let mut a = vec![graph.nodes[node_id].args[0].clone()];
+            a.extend_from_slice(&user_args[1..5.min(user_args.len())]);
+            a
+        };
+        graph.nodes[node_id].args = new_args;
+        // Copy user's val metadata to node
+        let user_dtype = graph.nodes[user_id].meta.val_dtype.clone();
+        let user_shape = graph.nodes[user_id].meta.val_shape.clone();
+        let user_dim_order = graph.nodes[user_id].meta.tosa_dim_order.clone();
+        graph.nodes[node_id].meta.val_dtype = user_dtype;
+        graph.nodes[node_id].meta.val_shape = user_shape;
+        if let Some(d) = user_dim_order { graph.nodes[node_id].meta.set_tosa_dim_order(d); }
+        // Stamp input qparam from source if missing
+        if graph.nodes[node_id].meta.input_qparam().is_none() {
+            let source_qp = graph.nodes[node_id].args.first()
+                .and_then(|a| match a { IrArg::Node(id) => Some(*id), _ => None })
+                .and_then(|sid| graph.nodes[sid].meta.output_qparam().cloned());
+            if let Some(qp) = source_qp {
+                graph.nodes[node_id].meta.set_single_input_qparam(qp);
+            }
+        }
+        graph.nodes[node_id].meta.set_single_output_qparam(final_qp);
+        graph.replace_and_erase(user_id, node_id);
+        pruned += 1;
+    }
+    pruned
+}
+
 /// Pure Rust: walk producer chain to find effective qparam.
 fn extract_effective_qparam_ir(graph: &IrGraph, start: NodeId) -> Option<QParam> {
     let mut current = start;
@@ -1283,21 +1344,7 @@ fn cleanup_graph(graph: &Bound<'_, PyAny>) -> PyResult<()> {
     Ok(())
 }
 
-/// Get the rescale signature: canonicalized args[1:5].
-fn rescale_signature<'py>(node: &Bound<'py, PyAny>) -> Option<Vec<String>> {
-    if !is_tosa_rescale_node(node) {
-        return None;
-    }
-    let args = FxGraphModule::node_args(node).ok()?;
-    if args.len() < 5 {
-        return None;
-    }
-    let mut sig = Vec::new();
-    for arg in &args[1..5] {
-        sig.push(format!("{}", arg));
-    }
-    Some(sig)
-}
+// rescale_signature: DELETED — replaced by rescale_sig_matches_ir
 
 // extract_single_qparam_entry: DELETED — replaced by extract_qparam() returning QParam
 
@@ -1373,29 +1420,7 @@ fn stamp_qparams(
 }
 
 /// Copy output contract meta from src to dst.
-fn copy_output_contract_meta<'py>(
-    dst: &Bound<'py, PyAny>,
-    src: &Bound<'py, PyAny>,
-    copy_output_qparams: bool,
-) -> PyResult<()> {
-    let dst_meta = dst.getattr("meta")?;
-    let src_meta = src.getattr("meta")?;
-    if let Some(val) = meta_val(&src_meta, "val") {
-        dst_meta.set_item("val", &val)?;
-    }
-    if let Some(tdo) = meta_val(&src_meta, "tosa_dim_order") {
-        let py = dst.py();
-        let t = PyTuple::new_bound(py, &py_iter_collect(&tdo));
-        dst_meta.set_item("tosa_dim_order", &t)?;
-    }
-    if copy_output_qparams {
-        if let Some(oqp) = meta_val(&src_meta, "output_qparams") {
-            let d = oqp.call_method0("copy")?;
-            dst_meta.set_item("output_qparams", &d)?;
-        }
-    }
-    Ok(())
-}
+// copy_output_contract_meta: DELETED — logic moved into prune_duplicate_terminal_rescales_ir
 
 /// Get all modules (parent + submodules) for iteration.
 fn get_all_modules<'py>(
@@ -1509,114 +1534,22 @@ pub(crate) fn prune_duplicate_terminal_rescales<'py>(
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
     let mut pruned: u32 = 0;
-
-    // Include parent + submodules (matches Python include_parent=True)
     let mut modules: Vec<Bound<'py, PyAny>> = vec![gm.clone()];
     let submodules = get_cf_submodules(py, gm)?;
     for (_name, submodule, _cf_node) in &submodules {
         modules.push(submodule.clone());
     }
-
     for module in &modules {
-        let graph = module.getattr("graph")?;
-        let mut modified = false;
-
-        let nodes = graph_nodes(module)?;
-
-        for node in &nodes {
-            if !is_tosa_rescale_node(node) {
-                continue;
-            }
-            // Check single user
-            let users = FxGraphModule::node_users(node)?;
-            if users.len() != 1 {
-                continue;
-            }
-            let user = &users[0];
-
-            if !is_tosa_rescale_node(user) {
-                continue;
-            }
-
-            // user.args[0] is node
-            let user_args = FxGraphModule::node_args(user)?;
-            if user_args.is_empty() {
-                continue;
-            }
-            let user_arg0_is_node = user_args[0].is(node);
-            if !user_arg0_is_node {
-                continue;
-            }
-
-            // Compare rescale signatures
-            let node_sig = rescale_signature(node);
-            let user_sig = rescale_signature(user);
-            match (&node_sig, &user_sig) {
-                (Some(ns), Some(us)) if ns == us => {}
-                _ => continue,
-            }
-
-            // Check qparams: first has no output_qparams, user has output_qparams
-            let node_meta = node.getattr("meta")?;
-            let user_meta = user.getattr("meta")?;
-
-            let node_m = NodeMeta::from_fx(node)?;
-            let user_m = NodeMeta::from_fx(user)?;
-            if node_m.output_qparam().is_some() { continue; }
-            let final_qp = match user_m.output_qparam() {
-                Some(qp) => qp.clone(),
-                None => continue,
-            };
-
-            // Rewrite: node.args = (source, user.args[1..5])
-            let node_args = FxGraphModule::node_args(node)?;
-            let source = &node_args[0];
-
-            let new_args = PyTuple::new_bound(
-                py,
-                &[
-                    source.clone(),
-                    user_args[1].clone(),
-                    user_args[2].clone(),
-                    user_args[3].clone(),
-                    user_args[4].clone(),
-                ],
-            );
-            node.setattr("args", &new_args)?;
-
-            // Copy output contract meta (without output_qparams)
-            copy_output_contract_meta(node, user, false)?;
-
-            // If node has no input_qparams, try to get from source
-            if meta_val(&node_meta, "input_qparams").is_none()
-                || !node_meta
-                    .get_item("input_qparams")
-                    .map(|v| v.is_truthy().unwrap_or(false))
-                    .unwrap_or(false)
-            {
-                let source_meta = source.getattr("meta")?;
-                if let Some(soqp) = meta_val(&source_meta, "output_qparams") {
-                    if let Some(qp) = extract_qparam(&soqp) {
-                        stamp_qparams(py, node, Some(&qp), None)?;
-                    }
-                }
-            }
-
-            stamp_qparams(py, node, None, Some(&final_qp))?;
-
-            // Replace user with node and erase user
-            user.call_method1("replace_all_uses_with", (node,))?;
-            graph.call_method1("erase_node", (user,))?;
-            pruned += 1;
-            modified = true;
-        }
-
-        if modified {
+        let mut ir = IrGraph::from_fx(module)?;
+        let count = prune_duplicate_terminal_rescales_ir(&mut ir);
+        if count > 0 {
+            ir.write_back_with_surgery(py, module)?;
+            let graph = module.getattr("graph")?;
             cleanup_graph(&graph)?;
             recompile(module)?;
+            pruned += count;
         }
     }
-
     Ok(pruned)
 }
 
