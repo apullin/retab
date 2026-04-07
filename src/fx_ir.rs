@@ -25,6 +25,7 @@ pub struct IrNode {
     pub target: String,
     pub args: Vec<IrArg>,
     pub meta: NodeMeta,
+    pub alive: bool,
 }
 
 /// An argument to a node — either a reference to another node or a literal.
@@ -46,6 +47,8 @@ pub struct IrGraph {
     name_to_id: HashMap<String, NodeId>,
     /// Reverse edges: users[node_id] = list of node IDs that reference this node in their args.
     users: Vec<Vec<NodeId>>,
+    /// Replacement map: dead_id → replacement_id (recorded by replace_and_erase).
+    replacements: HashMap<NodeId, NodeId>,
 }
 
 impl IrGraph {
@@ -80,7 +83,7 @@ impl IrGraph {
                 .map(|a| resolve_arg(a, &name_to_id))
                 .collect();
 
-            nodes.push(IrNode { id: i, op, name, target, args, meta });
+            nodes.push(IrNode { id: i, op, name, target, args, meta, alive: true });
         }
 
         // Build reverse edges
@@ -100,7 +103,7 @@ impl IrGraph {
             }
         }
 
-        Ok(Self { nodes, name_to_id, users })
+        Ok(Self { nodes, name_to_id, users, replacements: HashMap::new() })
     }
 
     /// Find a node by name.
@@ -138,14 +141,108 @@ impl IrGraph {
         &self.users[id]
     }
 
-    /// Write back all dirty metadata to the Python FX graph.
+    // --- Graph surgery ---
+
+    /// Replace all references to `old_id` with `new_id` in args across the graph.
+    pub fn replace_all_uses(&mut self, old_id: NodeId, new_id: NodeId) {
+        fn replace_in_arg(arg: &mut IrArg, old: NodeId, new: NodeId) {
+            match arg {
+                IrArg::Node(id) if *id == old => *id = new,
+                IrArg::List(items) => {
+                    for item in items { replace_in_arg(item, old, new); }
+                }
+                _ => {}
+            }
+        }
+        for node in &mut self.nodes {
+            if !node.alive { continue; }
+            for arg in &mut node.args {
+                replace_in_arg(arg, old_id, new_id);
+            }
+        }
+        // Update users: move old's users to new
+        let old_users = std::mem::take(&mut self.users[old_id]);
+        for &user_id in &old_users {
+            if !self.users[new_id].contains(&user_id) {
+                self.users[new_id].push(user_id);
+            }
+        }
+    }
+
+    /// Mark a node as dead. It will be erased during write_back.
+    pub fn erase(&mut self, id: NodeId) {
+        self.nodes[id].alive = false;
+    }
+
+    /// Replace all uses of `old_id` with `new_id`, then erase `old_id`.
+    pub fn replace_and_erase(&mut self, old_id: NodeId, new_id: NodeId) {
+        self.replace_all_uses(old_id, new_id);
+        self.erase(old_id);
+        self.replacements.insert(old_id, new_id);
+    }
+
+    /// Insert a new node, returning its ID. The node is appended to the end;
+    /// ordering relative to other nodes is handled during write_back.
+    pub fn add_node(&mut self, op: NodeOp, name: String, target: String, args: Vec<IrArg>, meta: NodeMeta) -> NodeId {
+        let id = self.nodes.len();
+        // Update users for the new node's args
+        for arg in &args {
+            if let IrArg::Node(ref_id) = arg {
+                if *ref_id < self.users.len() {
+                    self.users[*ref_id].push(id);
+                }
+            }
+        }
+        self.users.push(Vec::new());
+        self.name_to_id.insert(name.clone(), id);
+        self.nodes.push(IrNode { id, op, name, target, args, meta, alive: true });
+        id
+    }
+
+    /// Write back dirty metadata to the Python FX graph (metadata only, no surgery).
     pub fn write_back(&self, py: Python<'_>, gm: &Bound<'_, PyAny>) -> PyResult<()> {
         let graph = if gm.hasattr("graph")? { gm.getattr("graph")? } else { gm.clone() };
         let py_nodes: Vec<Bound<'_, PyAny>> = graph.getattr("nodes")?
             .iter()?.filter_map(|n| n.ok()).collect();
 
         for (ir_node, py_node) in self.nodes.iter().zip(py_nodes.iter()) {
-            ir_node.meta.write_back(py, py_node)?;
+            if ir_node.alive {
+                ir_node.meta.write_back(py, py_node)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Write back metadata AND apply graph surgery to the Python FX graph.
+    /// Surgery operations (replace_all_uses, erase) are applied using the
+    /// recorded `replacements` map.
+    pub fn write_back_with_surgery(
+        &self,
+        py: Python<'_>,
+        gm: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let graph = if gm.hasattr("graph")? { gm.getattr("graph")? } else { gm.clone() };
+        let py_nodes: Vec<Bound<'_, PyAny>> = graph.getattr("nodes")?
+            .iter()?.filter_map(|n| n.ok()).collect();
+
+        // Write metadata for alive nodes
+        for (ir_node, py_node) in self.nodes.iter().zip(py_nodes.iter()) {
+            if ir_node.alive {
+                ir_node.meta.write_back(py, py_node)?;
+            }
+        }
+
+        // Apply surgery: replace_all_uses + erase for dead nodes (reverse order
+        // so dependents are erased before their sources)
+        for ir_node in self.nodes.iter().rev() {
+            if ir_node.alive || ir_node.id >= py_nodes.len() { continue; }
+            let py_node = &py_nodes[ir_node.id];
+            if let Some(&replacement_id) = self.replacements.get(&ir_node.id) {
+                if replacement_id < py_nodes.len() {
+                    py_node.call_method1("replace_all_uses_with", (&py_nodes[replacement_id],))?;
+                }
+            }
+            graph.call_method1("erase_node", (py_node,))?;
         }
         Ok(())
     }
@@ -178,6 +275,31 @@ impl IrNode {
     /// Is this a TOSA RESCALE call?
     pub fn is_rescale(&self) -> bool {
         self.target_contains("RESCALE")
+    }
+
+    /// Check if all args are non-node (literals/None) — a zero-input const source.
+    pub fn is_zero_input_const(&self) -> bool {
+        self.args.iter().all(|a| !matches!(a, IrArg::Node(_)))
+    }
+
+    /// Parse Q/DQ literal args into a QParam.
+    /// Q/DQ nodes have args: (input, scale, zp, qmin, qmax, dtype).
+    pub fn parse_qdq_qparam(&self) -> Option<QParam> {
+        if self.args.len() < 6 { return None; }
+        let scale = match &self.args[1] { IrArg::Float(v) => *v, IrArg::Int(v) => *v as f64, _ => return None };
+        let zp = match &self.args[2] { IrArg::Int(v) => *v, _ => return None };
+        let qmin = match &self.args[3] { IrArg::Int(v) => *v, _ => return None };
+        let qmax = match &self.args[4] { IrArg::Int(v) => *v, _ => return None };
+        // dtype arg may not resolve cleanly — check if it's a string or use target info
+        let dtype_str = match &self.args[5] {
+            IrArg::Str(s) => s.clone(),
+            _ => {
+                if qmin == -128 && qmax == 127 { "torch.int8".into() }
+                else if qmin == -32768 { "torch.int16".into() }
+                else { return None; }
+            }
+        };
+        Some(QParam { scale, zp, qmin, qmax, dtype_str })
     }
 }
 

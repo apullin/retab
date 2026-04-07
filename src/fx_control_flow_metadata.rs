@@ -1492,6 +1492,53 @@ fn propagate_meta_key(
     Ok(())
 }
 
+const NOOP_MARKERS: &[&str] = &[
+    "dim_order_ops._clone_dim_order",
+    "aten.clone",
+    "aten.alias_copy",
+    "aten.detach_copy",
+];
+
+/// Pure Rust: remove noop passthroughs (clone, alias_copy, detach_copy).
+fn remove_noop_passthroughs_ir(graph: &mut IrGraph) -> u32 {
+    let mut rewritten = 0u32;
+    let node_ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
+    for id in node_ids {
+        if !graph.nodes[id].alive { continue; }
+        if !NOOP_MARKERS.iter().any(|m| graph.nodes[id].target.contains(m)) { continue; }
+        let source_id = match graph.nodes[id].first_node_arg() { Some(s) => s, None => continue };
+        if !graph.nodes[source_id].alive { continue; }
+
+        let node_meta = &graph.nodes[id].meta;
+        let source_meta = &graph.nodes[source_id].meta;
+
+        // Skip if dtype or shape mismatch
+        if node_meta.val_dtype != source_meta.val_dtype && node_meta.val_dtype.is_some() && source_meta.val_dtype.is_some() {
+            continue;
+        }
+        if node_meta.val_shape != source_meta.val_shape && node_meta.val_shape.is_some() && source_meta.val_shape.is_some() {
+            continue;
+        }
+        if node_meta.tosa_dim_order != source_meta.tosa_dim_order && node_meta.tosa_dim_order.is_some() && source_meta.tosa_dim_order.is_some() {
+            continue;
+        }
+
+        // Propagate metadata from noop to source
+        let node_dim = graph.nodes[id].meta.tosa_dim_order.clone();
+        let node_iqp = graph.nodes[id].meta.input_qparams.clone();
+        let node_oqp = graph.nodes[id].meta.output_qparams.clone();
+
+        let source = &mut graph.nodes[source_id].meta;
+        if source.tosa_dim_order.is_none() { if let Some(d) = node_dim { source.set_tosa_dim_order(d); } }
+        if source.input_qparams.is_none() { if let Some(q) = node_iqp { source.set_input_qparams(q); } }
+        if source.output_qparams.is_none() { if let Some(q) = node_oqp { source.set_output_qparams(q); } }
+
+        graph.replace_and_erase(id, source_id);
+        rewritten += 1;
+    }
+    rewritten
+}
+
 pub(crate) fn remove_control_flow_noop_passthroughs<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
@@ -1499,53 +1546,17 @@ pub(crate) fn remove_control_flow_noop_passthroughs<'py>(
     let submodules = get_cf_submodules(py, gm)?;
     let mut rewritten: u32 = 0;
 
-    let noop_markers = &[
-        "dim_order_ops._clone_dim_order",
-        "aten.clone",
-        "aten.alias_copy",
-        "aten.detach_copy",
-    ];
-
     for (_name, submodule, _cf_node) in &submodules {
-        let graph = submodule.getattr("graph")?;
-        let mut updated = false;
-        let nodes = graph_nodes(&submodule)?;
-
-        for node in &nodes {
-            if !noop_markers.iter().any(|m| target_contains(node, m)) { continue; }
-            let source = match first_node_arg(node)? { Some(a) => a, None => continue };
-
-            let node_meta = node.getattr("meta")?;
-            let source_meta = source.getattr("meta")?;
-            let nv = meta_val(&node_meta, "val");
-            let sv = meta_val(&source_meta, "val");
-
-            // Skip if dtype, shape, or dim_order mismatch
-            if let (Some(ref nv), Some(ref sv)) = (&nv, &sv) {
-                if !meta_attr_matches::<String>(nv, sv, "dtype") { continue; }
-                if !meta_attr_matches::<Vec<i64>>(nv, sv, "shape") { continue; }
-            }
-            if !meta_attr_matches::<Vec<i64>>(&node_meta, &source_meta, "tosa_dim_order") {
-                continue;
-            }
-
-            // Propagate metadata from noop node to source
-            propagate_meta_key(py, &source_meta, &node_meta, "tosa_dim_order")?;
-            propagate_meta_key(py, &source_meta, &node_meta, "input_qparams")?;
-            propagate_meta_key(py, &source_meta, &node_meta, "output_qparams")?;
-
-            node.call_method1("replace_all_uses_with", (source,))?;
-            graph.call_method1("erase_node", (node,))?;
-            rewritten += 1;
-            updated = true;
-        }
-
-        if updated {
+        let mut ir = IrGraph::from_fx(&submodule)?;
+        let count = remove_noop_passthroughs_ir(&mut ir);
+        if count > 0 {
+            ir.write_back_with_surgery(py, &submodule)?;
+            let graph = submodule.getattr("graph")?;
             cleanup_graph(&graph)?;
             recompile(&submodule)?;
+            rewritten += count;
         }
     }
-
     Ok(rewritten)
 }
 
@@ -1827,8 +1838,37 @@ fn is_zero_input_const_source(node: &Bound<'_, PyAny>) -> bool {
     args.iter().all(|a| !FxGraphModule::is_node(a))
 }
 
-/// Collapse matching Q->DQ pairs in a submodule graph.
-/// Rust port of Python `_collapse_control_flow_qdq_pairs`.
+/// Pure Rust: collapse matching Q→DQ pairs.
+/// DQ(Q(x)) where Q and DQ have same qparams → bypass to x.
+fn collapse_qdq_pairs_ir(graph: &mut IrGraph) -> u32 {
+    let mut count = 0u32;
+    let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
+    for dq_id in ids {
+        if !graph.nodes[dq_id].alive || !graph.nodes[dq_id].is_dequantize() { continue; }
+        let q_id = match graph.nodes[dq_id].first_node_arg() { Some(id) => id, None => continue };
+        if !graph.nodes[q_id].alive || !graph.nodes[q_id].is_quantize() { continue; }
+        let dq_qp = match graph.nodes[dq_id].parse_qdq_qparam() { Some(qp) => qp, None => continue };
+        let q_qp = match graph.nodes[q_id].parse_qdq_qparam() { Some(qp) => qp, None => continue };
+        if !q_qp.same_as(&dq_qp) { continue; }
+        let float_source = match graph.nodes[q_id].first_node_arg() { Some(id) => id, None => continue };
+
+        // Skip zero-input const feeding binary ops
+        if graph.node(float_source).is_zero_input_const() {
+            let feeds_binary = graph.users(dq_id).iter().any(|&uid| {
+                let t = &graph.nodes[uid].target;
+                t.contains("add.") || t.contains("sub.") || t.contains("mul.")
+            });
+            if feeds_binary { continue; }
+        }
+
+        graph.replace_and_erase(dq_id, float_source);
+        if graph.users(q_id).is_empty() { graph.erase(q_id); }
+        count += 1;
+    }
+    count
+}
+
+/// Legacy wrapper for callers that still use Python graph objects.
 fn collapse_control_flow_qdq_pairs<'py>(
     _py: Python<'py>,
     graph: &Bound<'py, PyAny>,

@@ -210,17 +210,27 @@ edges (users) built during import.
 - Functions calling `QuantArgs.from_operator`, `_branch_local_control_flow_output_qparam`
 - Functions doing `erase_node`, `replace_all_uses_with`, `call_function` (Phase 3)
 
-### Phase 3: Graph surgery in IrGraph
+### Phase 3: Graph surgery in IrGraph — PARTIAL
 
-Passes that insert/remove nodes (insert_rescale, boundary rescales,
-Q/DQ rewriting) need graph mutation support in IrGraph:
-- `insert_after(anchor: NodeId, new_node: IrNode) -> NodeId`
-- `insert_before(anchor: NodeId, new_node: IrNode) -> NodeId`
-- `replace_all_uses(old: NodeId, new: NodeId)`
-- `erase(node: NodeId)`
+IrGraph now supports mutation:
+- `replace_all_uses(old_id, new_id)` — update all args referencing old→new
+- `erase(node_id)` — mark node dead
+- `replace_and_erase(old_id, new_id)` — combined
+- `add_node(...)` — append new node
+- `write_back_with_surgery()` — apply replace/erase to Python graph
 
-These map to the 8x `replace_all_uses_with` + 8x `erase_node` +
-27x `call_function` (node creation) calls across the codebase.
+**Migrated to pure Rust surgery:**
+- `remove_noop_passthroughs_ir` — detects noops, propagates metadata, replace_and_erase
+- `collapse_qdq_pairs_ir` — detects matching Q→DQ pairs, bypasses to float source (ready but not yet wired into caller)
+
+**Blocker for remaining passes:** Node creation (RESCALE insertion).
+`rewrite_control_flow_quantize_nodes` and `insert_cf_boundary_rescales`
+create new FX RESCALE nodes via `insert_rescale_node` Python helper.
+Creating FX nodes requires FakeTensor construction which needs the torch
+runtime. Options:
+1. Return "create node" instructions from `_ir` function, apply via Python wrapper
+2. Port `insert_rescale_node` to Rust (requires FakeTensor creation)
+3. Hybrid: do decision-making in Rust, node creation stays Python
 
 ### Phase 4: Remove Python from hot path
 
