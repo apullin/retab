@@ -329,6 +329,19 @@ fn py_iter_collect<'py>(obj: &Bound<'py, PyAny>) -> Vec<Bound<'py, PyAny>> {
         .unwrap_or_default()
 }
 
+/// Get the first arg of a node if it's also a node (common guard pattern).
+fn first_node_arg<'py>(node: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let args = FxGraphModule::node_args(node)?;
+    Ok(args.first()
+        .filter(|a| FxGraphModule::is_node(a))
+        .cloned())
+}
+
+/// Collect a node's users into a Vec.
+fn node_users<'py>(node: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    Ok(py_iter_collect(&node.getattr("users")?.call_method0("keys")?))
+}
+
 /// Resolve data args for a control-flow node.
 /// cond(pred, if_fn, else_fn, [data_args]) → returns data_args
 /// while_loop(cond_fn, body_fn, carried_args, additional_args) → returns carried + additional
@@ -379,8 +392,7 @@ fn regularize_control_flow_submodules_structural<'py>(
             let parent_meta = parent_arg.getattr("meta")?;
             if meta_val(&parent_meta, "tosa_dim_order").is_some() {
                 let dim_order = parent_meta.get_item("tosa_dim_order")?;
-                let items: Vec<_> = dim_order.iter()?.filter_map(|v| v.ok()).collect();
-                let py_tuple = PyTuple::new_bound(py, &items);
+                let py_tuple = PyTuple::new_bound(py, &py_iter_collect(&dim_order));
                 meta.set_item("tosa_dim_order", &py_tuple)?;
             }
             // No qparam propagation here — that happens post-parent-passes
@@ -788,7 +800,7 @@ fn snapshot_cf_table_qparams<'py>(
         py.import_bound("executorch.backends.arm._passes.insert_table_ops")?;
     let table_ops_cls = table_ops_mod.getattr("TableOps")?;
     let included_ops = table_ops_cls.call_method0("included_ops")?;
-    let table_targets: Vec<Bound<'py, PyAny>> = included_ops.iter()?.filter_map(|r| r.ok()).collect();
+    let table_targets = py_iter_collect(&included_ops);
 
     let quant_args_mod =
         py.import_bound("executorch.backends.arm._passes.quant_args")?;
@@ -913,8 +925,7 @@ impl FxPass for FxWhileStripBoundaryQPass {
         for node in gm.nodes()? {
             let op: String = py_attr(&node, &["op"], String::new());
             if op != "placeholder" { continue; }
-            let users: Vec<Bound<'_, PyAny>> = node.getattr("users")?
-                .iter()?.filter_map(|u| u.ok()).collect();
+            let users = node_users(&node)?;
             for user in &users {
                 if !is_quantize_node(user) { continue; }
                 // Always stamp Q literal qparams — these represent the
@@ -1072,9 +1083,7 @@ fn snapshot_pre_pass_cf_qparams<'py>(
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
     let ctx = CfCtx::new(py)?;
-    let parent_graph = gm.getattr("graph")?;
-    let nodes: Vec<Bound<'py, PyAny>> = parent_graph.getattr("nodes")?
-        .iter()?.filter_map(|n| n.ok()).collect();
+    let nodes = graph_nodes(gm)?;
 
     let mut saved = 0u32;
     for node in &nodes {
@@ -1312,8 +1321,7 @@ fn extract_effective_qparam(
         if let Some(qp) = try_reverse_engineer_rescale_qparam(&current, &args)? {
             return Ok(Some(qp));
         }
-        if args.is_empty() || !FxGraphModule::is_node(&args[0]) { break; }
-        current = args[0].clone();
+        current = match first_node_arg(&current)? { Some(a) => a, None => break };
     }
     Ok(None)
 }
@@ -1380,8 +1388,7 @@ fn copy_output_contract_meta<'py>(
     // tosa_dim_order
     if let Some(tdo) = meta_val(&src_meta, "tosa_dim_order") {
         let py = dst.py();
-        let items: Vec<_> = tdo.iter()?.filter_map(|v| v.ok()).collect();
-        let t = PyTuple::new_bound(py, &items);
+        let t = PyTuple::new_bound(py, &py_iter_collect(&tdo));
         dst_meta.set_item("tosa_dim_order", &t)?;
     }
     if copy_output_qparams {
@@ -1494,9 +1501,7 @@ pub(crate) fn remove_control_flow_noop_passthroughs<'py>(
 
         for node in &nodes {
             if !noop_markers.iter().any(|m| target_contains(node, m)) { continue; }
-            let args = FxGraphModule::node_args(node)?;
-            if args.is_empty() || !FxGraphModule::is_node(&args[0]) { continue; }
-            let source = &args[0];
+            let source = match first_node_arg(node)? { Some(a) => a, None => continue };
 
             let node_meta = node.getattr("meta")?;
             let source_meta = source.getattr("meta")?;
@@ -1825,18 +1830,12 @@ fn collapse_control_flow_qdq_pairs<'py>(
         .collect();
 
     for node in &nodes {
-        if !is_dequantize_node(node) {
+        if !is_dequantize_node(node) { continue; }
+        let quant_node = match first_node_arg(node)? { Some(a) => a, None => continue };
+        if !is_quantize_node(&quant_node) {
             continue;
         }
-        let args = FxGraphModule::node_args(node)?;
-        if args.is_empty() || !FxGraphModule::is_node(&args[0]) {
-            continue;
-        }
-        let quant_node = &args[0];
-        if !is_quantize_node(quant_node) {
-            continue;
-        }
-        let quant_qp = match parse_qparam(quant_node)? {
+        let quant_qp = match parse_qparam(&quant_node)? {
             Some(qp) => qp,
             None => continue,
         };
@@ -1847,14 +1846,10 @@ fn collapse_control_flow_qdq_pairs<'py>(
         if !quant_qp.same_as(&dequant_qp) {
             continue;
         }
-        let q_args = FxGraphModule::node_args(quant_node)?;
-        if q_args.is_empty() || !FxGraphModule::is_node(&q_args[0]) {
-            continue;
-        }
-        let float_source = &q_args[0];
+        let float_source = match first_node_arg(&quant_node)? { Some(a) => a, None => continue };
 
         // Skip if zero-input const feeding a scalar binary
-        if is_zero_input_const_source(float_source) {
+        if is_zero_input_const_source(&float_source) {
             // Check if any user of the DQ node is a binary op (simplified check)
             let users = node.getattr("users")?;
             let user_count: usize = users.len().unwrap_or(0);
@@ -1906,14 +1901,8 @@ fn rewrite_control_flow_dequantize_nodes<'py>(
         .collect();
 
     for node in &nodes {
-        if !is_dequantize_node(node) {
-            continue;
-        }
-        let args = FxGraphModule::node_args(node)?;
-        if args.is_empty() || !FxGraphModule::is_node(&args[0]) {
-            continue;
-        }
-        let source_node = &args[0];
+        if !is_dequantize_node(node) { continue; }
+        let source_node = match first_node_arg(node)? { Some(a) => a, None => continue };
         let users: Vec<Bound<'py, PyAny>> = node
             .getattr("users")?
             .iter()?
@@ -1924,7 +1913,7 @@ fn rewrite_control_flow_dequantize_nodes<'py>(
         }
 
         // Int32 cluster rewrite — dead under correct qparam propagation.
-        if let Ok(Some(_source_qp)) = extract_effective_qparam(source_node) {
+        if let Ok(Some(_source_qp)) = extract_effective_qparam(&source_node) {
         }
 
         // Simple bypass: if all users are RESCALE or output, remove the DQ
@@ -1962,19 +1951,13 @@ fn rewrite_control_flow_quantize_nodes<'py>(
         .collect();
 
     for node in &nodes {
-        if !is_quantize_node(node) {
-            continue;
-        }
-        let args = FxGraphModule::node_args(node)?;
-        if args.is_empty() || !FxGraphModule::is_node(&args[0]) {
-            continue;
-        }
-        let source_node = &args[0];
+        if !is_quantize_node(node) { continue; }
+        let source_node = match first_node_arg(node)? { Some(a) => a, None => continue };
         let target = match parse_qparam(node)? {
             Some(qp) => qp,
             None => continue,
         };
-        let source = extract_effective_qparam(source_node)?;
+        let source = extract_effective_qparam(&source_node)?;
 
         // Skip float sources with no qparams (unless zero-input const)
         let source_dtype_str = source_node.getattr("meta")?
@@ -1982,7 +1965,7 @@ fn rewrite_control_flow_quantize_nodes<'py>(
             .and_then(|v| v.getattr("dtype").ok())
             .map(|d| format!("{d}")).unwrap_or_default();
         let source_is_int = source_dtype_str.contains("int");
-        if !source_is_int && source.is_none() && !is_zero_input_const_source(source_node) {
+        if !source_is_int && source.is_none() && !is_zero_input_const_source(&source_node) {
             continue;
         }
 
@@ -2001,7 +1984,7 @@ fn rewrite_control_flow_quantize_nodes<'py>(
         }
 
         // Case 3: different qparam → insert RESCALE
-        let rescale = source.insert_rescale_to(&target, py, submodule, node, source_node, false)?;
+        let rescale = source.insert_rescale_to(&target, py, submodule, node, &source_node, false)?;
         stamp_qparams(py, &rescale, Some(&source), Some(&target))?;
         node.call_method1("replace_all_uses_with", (&rescale,))?;
         graph.call_method1("erase_node", (node,))?;
@@ -2292,9 +2275,7 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
     let ctx = CfCtx::new(py)?;
-    let parent_graph = gm.getattr("graph")?;
-    let nodes: Vec<Bound<'py, PyAny>> = parent_graph.getattr("nodes")?
-        .iter()?.filter_map(|n| n.ok()).collect();
+    let nodes = graph_nodes(gm)?;
 
     let mut count = 0u32;
 
@@ -2434,8 +2415,7 @@ fn infer_cf_output_qparams_map(
             }
         }
         // Fallback: downstream user's input_qparams
-        let user_users: Vec<Bound<'_, PyAny>> = user.getattr("users")?
-            .iter()?.filter_map(|u| u.ok()).collect();
+        let user_users = node_users(user)?;
         let mut found = false;
         for uu in &user_users {
             if let Ok(iqp) = uu.getattr("meta")?.get_item("input_qparams") {
@@ -2472,9 +2452,7 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
     if !include_outputs { return Ok(0); }
 
     let ctx = CfCtx::new(py)?;
-    let parent_graph = gm.getattr("graph")?;
-    let nodes: Vec<Bound<'py, PyAny>> = parent_graph.getattr("nodes")?
-        .iter()?.filter_map(|n| n.ok()).collect();
+    let nodes = graph_nodes(gm)?;
 
     let mut any_modified = false;
 
@@ -2555,7 +2533,7 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
     }
 
     if any_modified {
-        cleanup_graph(&parent_graph)?;
+        cleanup_graph(&gm.getattr("graph")?)?;
         gm.call_method0("recompile")?;
     }
     Ok(if any_modified { 1 } else { 0 })
