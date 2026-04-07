@@ -2197,48 +2197,67 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
 // Additional control-flow functions (delegate to Python via PyO3)
 // ===========================================================================
 
-/// Infer output qparams from cond/while_loop getitem consumer nodes.
+/// Wrapper: import parent IrGraph, call _ir version.
 fn infer_cf_output_qparams_map(
     cf_node: &Bound<'_, PyAny>,
 ) -> PyResult<Vec<(usize, QParam)>> {
-    let users = ordered_cf_users(cf_node)?;
+    // Get the parent graph module from the node's graph's owning module
+    let graph = cf_node.getattr("graph")?;
+    let gm = graph.getattr("owning_module")?;
+    let ir = IrGraph::from_fx(&gm)?;
+    let cf_name: String = cf_node.getattr("name").and_then(|v| v.extract()).unwrap_or_default();
+    let cf_id = match ir.by_name(&cf_name) { Some(n) => n.id, None => return Ok(Vec::new()) };
+    Ok(infer_cf_output_qparams_map_ir(&ir, cf_id))
+}
+
+/// Pure Rust: infer output qparams from getitem users of a CF node.
+fn infer_cf_output_qparams_map_ir(graph: &IrGraph, cf_id: NodeId) -> Vec<(usize, QParam)> {
+    let mut user_ids: Vec<NodeId> = graph.users(cf_id).to_vec();
+    // Sort: getitems first by index, then others
+    user_ids.sort_by(|&a, &b| {
+        let ak = graph.node(a).args.get(1).and_then(|a| match a { IrArg::Int(i) => Some(*i), _ => None });
+        let bk = graph.node(b).args.get(1).and_then(|a| match a { IrArg::Int(i) => Some(*i), _ => None });
+        match (ak, bk) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
+
     let mut result = Vec::new();
-    for user in &users {
-        let u_args = FxGraphModule::node_args(user)?;
-        if u_args.len() < 2 { continue; }
-        let idx: usize = match u_args[1].extract() { Ok(i) => i, Err(_) => continue };
-        let meta = user.getattr("meta")?;
+    for &user_id in &user_ids {
+        let user = graph.node(user_id);
+        if !user.alive { continue; }
+        let idx = match user.args.get(1) { Some(IrArg::Int(i)) => *i as usize, _ => continue };
         // Try output_qparams
-        if let Ok(oqp) = meta.get_item("output_qparams") {
-            if let Some(qp) = extract_qparam(&oqp) {
-                result.push((idx, qp));
-                continue;
-            }
+        if let Some(qp) = user.meta.output_qparam() {
+            result.push((idx, qp.clone()));
+            continue;
         }
         // Fallback: downstream user's input_qparams
-        let user_users = node_users(user)?;
         let mut found = false;
-        for uu in &user_users {
-            if let Ok(iqp) = uu.getattr("meta")?.get_item("input_qparams") {
-                if let Some(qp) = extract_qparam(&iqp) {
-                    result.push((idx, qp));
-                    found = true;
-                    break;
-                }
+        for &uu_id in graph.users(user_id) {
+            let uu = graph.node(uu_id);
+            if !uu.alive { continue; }
+            if let Some(qp) = uu.meta.input_qparam() {
+                result.push((idx, qp.clone()));
+                found = true;
+                break;
             }
         }
         if found { continue; }
         // Fallback: DQ literal args
-        for uu in &user_users {
-            if is_dequantize_node(uu) {
-                if let Ok(Some(qp)) = parse_qparam(uu) {
-                    result.push((idx, qp));
-                    break;
-                }
+        for &uu_id in graph.users(user_id) {
+            let uu = graph.node(uu_id);
+            if !uu.alive || !uu.is_dequantize() { continue; }
+            if let Some(qp) = uu.parse_qdq_qparam() {
+                result.push((idx, qp));
+                break;
             }
         }
     }
-    Ok(result)
+    result
 }
 
 /// Insert boundary RESCALE nodes at submodule output edges.
