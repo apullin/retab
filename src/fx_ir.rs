@@ -46,6 +46,63 @@ pub enum IrArg {
     None,
 }
 
+/// A hierarchical graph module: parent graph + named submodules.
+#[derive(Debug)]
+pub struct IrModule {
+    pub parent: IrGraph,
+    pub submodules: HashMap<String, IrGraph>,
+}
+
+impl IrModule {
+    /// Import parent graph and all CF submodules.
+    pub fn from_fx(py: Python<'_>, gm: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let parent = IrGraph::from_fx(gm)?;
+        let mut submodules = HashMap::new();
+        // Find submodule names from cond/while node args
+        for node in &parent.nodes {
+            if node.cf_kind.is_none() || !node.alive { continue; }
+            let sm_indices = match node.cf_kind {
+                Some(CfKind::Cond) => vec![1, 2],   // if_fn, else_fn
+                Some(CfKind::While) => vec![0, 1],   // cond_fn, body_fn
+                None => vec![],
+            };
+            for &idx in &sm_indices {
+                if let Some(IrArg::Node(sm_node_id)) = node.args.get(idx) {
+                    let sm_name = &parent.nodes[*sm_node_id].target;
+                    if !sm_name.is_empty() && !submodules.contains_key(sm_name) {
+                        if let Ok(sm) = gm.call_method1("get_submodule", (sm_name,)) {
+                            submodules.insert(sm_name.clone(), IrGraph::from_fx(&sm)?);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Self { parent, submodules })
+    }
+
+    /// Write back parent and all submodules.
+    pub fn write_back(&self, py: Python<'_>, gm: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.parent.write_back(py, gm)?;
+        for (name, ir) in &self.submodules {
+            if let Ok(sm) = gm.call_method1("get_submodule", (name.as_str(),)) {
+                ir.write_back(py, &sm)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Write back with surgery for parent and all submodules.
+    pub fn write_back_with_surgery(&self, py: Python<'_>, gm: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.parent.write_back_with_surgery(py, gm)?;
+        for (name, ir) in &self.submodules {
+            if let Ok(sm) = gm.call_method1("get_submodule", (name.as_str(),)) {
+                ir.write_back_with_surgery(py, &sm)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The full graph: ordered list of nodes + lookup by name.
 #[derive(Debug)]
 pub struct IrGraph {
@@ -367,6 +424,185 @@ pub fn build_py_node_map<'py>(gm: &Bound<'py, PyAny>) -> PyResult<HashMap<String
     Ok(map)
 }
 
+/// Instruction to create a DQ (dequantize_per_tensor) node.
+#[derive(Debug, Clone)]
+pub struct DqInsert {
+    /// Compare node to insert before (by name).
+    pub compare_node_name: String,
+    /// Arg index in the compare node to replace.
+    pub arg_idx: usize,
+    /// Int source node (by name).
+    pub source_name: String,
+    /// Qparam for the DQ node.
+    pub qp: QParam,
+    /// Target float dtype string (e.g. "torch.float32").
+    pub float_dtype: String,
+}
+
+impl DqInsert {
+    /// Apply: create DQ node via FxNodeCreator, update compare arg.
+    pub fn apply<'py>(
+        &self,
+        py: Python<'py>,
+        gm: &Bound<'py, PyAny>,
+        py_nodes_by_name: &HashMap<String, Bound<'py, PyAny>>,
+    ) -> PyResult<()> {
+        let compare = py_nodes_by_name.get(&self.compare_node_name)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(self.compare_node_name.clone()))?;
+        let source = py_nodes_by_name.get(&self.source_name)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(self.source_name.clone()))?;
+
+        let creator = FxNodeCreator::new(py)?;
+        let dq = creator.insert_dq(gm, compare, source, &self.qp, &self.float_dtype)?;
+        compare.call_method1("update_arg", (self.arg_idx, &dq))?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FxNodeCreator — create FX nodes from Rust without Python helpers
+// ---------------------------------------------------------------------------
+
+/// Creates FX nodes directly via PyO3, replacing _helpers.py functions.
+pub struct FxNodeCreator<'py> {
+    py: Python<'py>,
+    rescale_op: Bound<'py, PyAny>,
+    dq_op: Bound<'py, PyAny>,
+}
+
+impl<'py> FxNodeCreator<'py> {
+    pub fn new(py: Python<'py>) -> PyResult<Self> {
+        let exir_ops = py.import_bound("executorch.exir.dialects._ops")?.getattr("ops")?;
+        let rescale_op = exir_ops.getattr("backend")?.getattr("tosa")?.getattr("RESCALE")?.getattr("default")?;
+        let dq_op = exir_ops.getattr("edge")?.getattr("quantized_decomposed")?
+            .getattr("dequantize_per_tensor")?.getattr("default")?;
+        Ok(Self { py, rescale_op, dq_op })
+    }
+
+    /// Insert a node (call_function) before or after a reference node.
+    fn insert_node(
+        &self,
+        gm: &Bound<'py, PyAny>,
+        ref_node: &Bound<'py, PyAny>,
+        target: &Bound<'py, PyAny>,
+        args: &Bound<'py, PyAny>,
+        after: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let graph = gm.getattr("graph")?;
+        let ctx = if after {
+            graph.call_method1("inserting_after", (ref_node,))?
+        } else {
+            graph.call_method1("inserting_before", (ref_node,))?
+        };
+        ctx.call_method0("__enter__")?;
+
+        let kw = PyDict::new_bound(self.py);
+        kw.set_item("args", args)?;
+        let new_node = graph.call_method("call_function", (target,), Some(&kw))?;
+
+        // Copy meta from ref_node, clear qparams
+        let ref_meta = ref_node.getattr("meta")?;
+        let copy_mod = self.py.import_bound("copy")?;
+        let new_meta = copy_mod.call_method1("copy", (&ref_meta,))?;
+        if new_meta.contains("input_qparams")? {
+            new_meta.set_item("input_qparams", PyDict::new_bound(self.py))?;
+        }
+        if new_meta.contains("output_qparams")? {
+            new_meta.set_item("output_qparams", PyDict::new_bound(self.py))?;
+        }
+        new_node.setattr("meta", &new_meta)?;
+
+        let none = self.py.None().into_bound(self.py);
+        ctx.call_method1("__exit__", (&none, &none, &none))?;
+        Ok(new_node)
+    }
+
+    /// Insert a TOSA RESCALE node and set its FakeTensor metadata.
+    pub fn insert_rescale(
+        &self,
+        gm: &Bound<'py, PyAny>,
+        ref_node: &Bound<'py, PyAny>,
+        input_node: &Bound<'py, PyAny>,
+        from_qp: &QParam,
+        to_qp: &QParam,
+        after: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let torch = self.py.import_bound("torch")?;
+        let out_dtype = torch.getattr(&*to_qp.dtype_str.replace("torch.", ""))?;
+        let scale_ratio = from_qp.scale / to_qp.scale;
+        let scales = pyo3::types::PyList::new_bound(self.py, &[scale_ratio]);
+
+        let args = pyo3::types::PyTuple::new_bound(self.py, &[
+            input_node.clone(),
+            out_dtype.clone().into_any(),
+            scales.into_any(),
+            from_qp.zp.into_py(self.py).into_bound(self.py),
+            to_qp.zp.into_py(self.py).into_bound(self.py),
+        ]);
+
+        let rescale = self.insert_node(gm, ref_node, &self.rescale_op, &args.into_any(), after)?;
+
+        // Set FakeTensor: use input node's val as base, restamp with output dtype
+        let input_val = input_node.getattr("meta")?.get_item("val").ok();
+        if let Some(ref base) = input_val {
+            if base.hasattr("new_empty").unwrap_or(false) {
+                let shape = base.getattr("shape")?;
+                let kw = PyDict::new_bound(self.py);
+                kw.set_item("dtype", &out_dtype)?;
+                let new_val = base.call_method("new_empty", (&shape,), Some(&kw))?;
+                rescale.getattr("meta")?.set_item("val", &new_val)?;
+            }
+        }
+        // Clear special dtype marker
+        let _ = rescale.getattr("meta")?.del_item("tosa_special_dtype");
+
+        Ok(rescale)
+    }
+
+    /// Insert a dequantize_per_tensor node.
+    pub fn insert_dq(
+        &self,
+        gm: &Bound<'py, PyAny>,
+        ref_node: &Bound<'py, PyAny>,
+        input_node: &Bound<'py, PyAny>,
+        qp: &QParam,
+        float_dtype_str: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let torch = self.py.import_bound("torch")?;
+        let qp_dtype = torch.getattr(&*qp.dtype_str.replace("torch.", ""))?;
+        let float_dtype = torch.getattr(&*float_dtype_str.replace("torch.", ""))?;
+
+        let args = pyo3::types::PyTuple::new_bound(self.py, &[
+            input_node.clone(),
+            qp.scale.into_py(self.py).into_bound(self.py),
+            qp.zp.into_py(self.py).into_bound(self.py),
+            qp.qmin.into_py(self.py).into_bound(self.py),
+            qp.qmax.into_py(self.py).into_bound(self.py),
+            qp_dtype.into_any(),
+        ]);
+
+        let dq = self.insert_node(gm, ref_node, &self.dq_op, &args.into_any(), false)?;
+
+        // Set FakeTensor with float dtype
+        let input_val = input_node.getattr("meta")?.get_item("val").ok();
+        if let Some(ref base) = input_val {
+            if base.hasattr("to").unwrap_or(false) {
+                let kw = PyDict::new_bound(self.py);
+                kw.set_item("dtype", &float_dtype)?;
+                let new_val = base.call_method("to", (), Some(&kw))?;
+                dq.getattr("meta")?.set_item("val", &new_val)?;
+            }
+        }
+        // Set qparams
+        let iqp = PyDict::new_bound(self.py);
+        iqp.set_item(0i64, qp.to_py(self.py)?)?;
+        dq.getattr("meta")?.set_item("input_qparams", &iqp)?;
+        dq.getattr("meta")?.set_item("output_qparams", PyDict::new_bound(self.py))?;
+
+        Ok(dq)
+    }
+}
+
 impl IrNode {
     /// Check if target contains a marker string.
     pub fn target_contains(&self, marker: &str) -> bool {
@@ -453,21 +689,63 @@ fn resolve_arg(py_arg: &Bound<'_, PyAny>, name_to_id: &HashMap<String, NodeId>) 
 // NodeMeta — typed metadata extracted from a Python FX node
 // ---------------------------------------------------------------------------
 
+/// Rust-side representation of a FakeTensor's core metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FakeTensorMeta {
+    pub shape: Vec<i64>,
+    pub dtype: String,
+}
+
+impl FakeTensorMeta {
+    pub fn from_py(val: &Bound<'_, PyAny>) -> Option<Self> {
+        let shape = val.getattr("shape").ok()?.extract::<Vec<i64>>().ok()?;
+        let dtype = val.getattr("dtype").ok().map(|d| format!("{d}"))?;
+        Some(Self { shape, dtype })
+    }
+
+    /// Reconstruct as a Python FakeTensor using an existing FakeTensor as the base.
+    /// This preserves the FakeTensorMode so all tensors in the graph share the same mode.
+    pub fn to_py_from<'py>(&self, py: Python<'py>, base: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let torch = py.import_bound("torch")?;
+        let dtype = torch.getattr(&*self.dtype.replace("torch.", ""))?;
+        let shape = pyo3::types::PyList::new_bound(py, &self.shape);
+        let kw = PyDict::new_bound(py);
+        kw.set_item("dtype", &dtype)?;
+        base.call_method("new_empty", (&shape,), Some(&kw))
+    }
+
+    /// Reconstruct as a Python FakeTensor with a fresh FakeTensorMode.
+    /// Only use when no existing FakeTensor is available.
+    pub fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let torch = py.import_bound("torch")?;
+        let dtype = torch.getattr(&*self.dtype.replace("torch.", ""))?;
+        let shape = pyo3::types::PyTuple::new_bound(py, &self.shape);
+        let kw = PyDict::new_bound(py);
+        kw.set_item("dtype", &dtype)?;
+        let mode = py.import_bound("torch._subclasses.fake_tensor")?
+            .getattr("FakeTensorMode")?.call0()?;
+        let none = py.None().into_bound(py);
+        mode.call_method0("__enter__")?;
+        let fake = torch.call_method("empty", (&shape,), Some(&kw));
+        let _ = mode.call_method1("__exit__", (&none, &none, &none));
+        fake
+    }
+
+    pub fn rank(&self) -> usize { self.shape.len() }
+}
+
 /// Metadata fields extracted from `node.meta`. The common fields are typed;
 /// rare fields stay in the Python meta dict and are not touched.
 #[derive(Debug, Clone, Default)]
 pub struct NodeMeta {
     pub input_qparams: Option<HashMap<usize, QParam>>,
     pub output_qparams: Option<HashMap<usize, QParam>>,
-    pub val_dtype: Option<String>,
-    pub val_shape: Option<Vec<i64>>,
+    pub val: Option<FakeTensorMeta>,
     pub tosa_dim_order: Option<Vec<usize>>,
     pub tosa_spatial_rank: Option<usize>,
-
-    // Pre-pass snapshot of parent arg qparams (stored on cond/while nodes)
     pub pre_pass_arg_qparams: Option<HashMap<usize, QParam>>,
-
-    // Track which fields were modified so write_back only touches what changed
+    pub table_input_qparam: Option<QParam>,
+    pub table_output_qparam: Option<QParam>,
     pub(crate) dirty: DirtyFlags,
 }
 
@@ -477,6 +755,8 @@ pub(crate) struct DirtyFlags {
     pub(crate) output_qparams: bool,
     pub(crate) tosa_dim_order: bool,
     pub(crate) pre_pass_arg_qparams: bool,
+    pub(crate) val: bool,
+    pub(crate) table_qparams: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -531,13 +811,8 @@ impl NodeMeta {
             .ok()
             .and_then(|v| extract_qparam_dict(&v));
 
-        let val = meta.get_item("val").ok();
-        let val_dtype = val.as_ref()
-            .and_then(|v| v.getattr("dtype").ok())
-            .map(|d| format!("{d}"));
-        let val_shape = val.as_ref()
-            .and_then(|v| v.getattr("shape").ok())
-            .and_then(|s| s.extract::<Vec<i64>>().ok());
+        let val = meta.get_item("val").ok()
+            .and_then(|v| FakeTensorMeta::from_py(&v));
 
         let tosa_dim_order = meta.get_item("tosa_dim_order")
             .ok()
@@ -551,14 +826,24 @@ impl NodeMeta {
             .ok()
             .and_then(|v| extract_qparam_dict(&v));
 
+        let table_input_qparam = meta.get_item("arm_saved_table_input_qparam")
+            .ok()
+            .filter(|v| !v.is_none())
+            .map(|v| QParam::from_py(&v));
+        let table_output_qparam = meta.get_item("arm_saved_table_output_qparam")
+            .ok()
+            .filter(|v| !v.is_none())
+            .map(|v| QParam::from_py(&v));
+
         Ok(Self {
             input_qparams,
             output_qparams,
-            val_dtype,
-            val_shape,
+            val,
             tosa_dim_order,
             tosa_spatial_rank,
             pre_pass_arg_qparams,
+            table_input_qparam,
+            table_output_qparam,
             dirty: DirtyFlags::default(),
         })
     }
@@ -594,7 +879,43 @@ impl NodeMeta {
             }
         }
 
+        if self.dirty.table_qparams {
+            if let Some(ref qp) = self.table_input_qparam {
+                meta.set_item("arm_saved_table_input_qparam", qp.to_py(py)?)?;
+            }
+            if let Some(ref qp) = self.table_output_qparam {
+                meta.set_item("arm_saved_table_output_qparam", qp.to_py(py)?)?;
+            }
+        }
+
+        if self.dirty.val {
+            if let Some(ref ftm) = self.val {
+                // Use existing val as base to preserve FakeTensorMode
+                let existing = meta.get_item("val").ok();
+                let new_val = if let Some(ref base) = existing {
+                    ftm.to_py_from(py, base)?
+                } else {
+                    ftm.to_py(py)?
+                };
+                meta.set_item("val", new_val)?;
+            }
+        }
+
         Ok(())
+    }
+
+    // --- Accessors ---
+
+    pub fn val_shape(&self) -> Option<&[i64]> {
+        self.val.as_ref().map(|v| v.shape.as_slice())
+    }
+
+    pub fn val_dtype(&self) -> Option<&str> {
+        self.val.as_ref().map(|v| v.dtype.as_str())
+    }
+
+    pub fn rank(&self) -> Option<usize> {
+        self.val.as_ref().map(|v| v.rank())
     }
 
     // --- Mutation helpers that set dirty flags ---
@@ -634,6 +955,11 @@ impl NodeMeta {
     pub fn set_tosa_dim_order(&mut self, order: Vec<usize>) {
         self.tosa_dim_order = Some(order);
         self.dirty.tosa_dim_order = true;
+    }
+
+    pub fn set_val(&mut self, ftm: FakeTensorMeta) {
+        self.val = Some(ftm);
+        self.dirty.val = true;
     }
 
     /// Get the single output qparam (key 0), if present.

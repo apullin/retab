@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_graph::{meta_val, py_attr, FxGraphModule};
-use crate::fx_ir::{IrArg, IrGraph, IrNode, NodeId, NodeMeta, RescaleInsert};
+use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrModule, IrNode, NodeId, NodeMeta, RescaleInsert};
 use crate::fx_pass::FxPass;
 use crate::runner_logging::log_line;
 
@@ -133,17 +133,8 @@ impl QParam {
         source_val: &Bound<'py, PyAny>,
         after: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let helpers = py.import_bound("retab._helpers")?;
-        let insert_fn = helpers.getattr("insert_rescale_node")?;
-        let torch = py.import_bound("torch")?;
-        let dtype = torch.getattr(&*target.dtype_str.replace("torch.", ""))?;
-        let scales = PyList::new_bound(py, &[self.scale / target.scale]);
-        let kw = PyDict::new_bound(py);
-        kw.set_item("after", after)?;
-        insert_fn.call(
-            (submodule, anchor, source_val, &dtype, &scales, self.zp, target.zp),
-            Some(&kw),
-        )
+        let creator = crate::fx_ir::FxNodeCreator::new(py)?;
+        creator.insert_rescale(submodule, anchor, source_val, self, target, after)
     }
 }
 
@@ -356,34 +347,32 @@ fn regularize_control_flow_submodules_structural<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
-    let cf_ctx = py.import_bound("retab._cf_ctx")?;
-    let get_matching_fake_tensor = cf_ctx.getattr("_get_matching_fake_tensor")?;
-
     let submodules = get_cf_submodules(py, gm)?;
     let mut regularized: u32 = 0;
 
     for (_name, submodule, cf_node) in &submodules {
         let placeholders = nodes_by_op(submodule, NodeOp::Placeholder)?;
+        let parent_args = resolve_cf_parent_args(cf_node)?;
+
         for ph in &placeholders {
             let meta = ph.getattr("meta")?;
             meta.set_item("is_input", true)?;
             meta.set_item("arm_control_flow_placeholder", true)?;
         }
 
-        let parent_args = resolve_cf_parent_args(cf_node)?;
-
         for (ph, parent_arg) in placeholders.iter().zip(parent_args.iter()) {
-            let fake = get_matching_fake_tensor.call1((parent_arg,))?;
-            let meta = ph.getattr("meta")?;
-            meta.set_item("val", &fake)?;
+            let parent_m = NodeMeta::from_fx(parent_arg)?;
+            let mut ph_m = NodeMeta::from_fx(ph)?;
 
-            let parent_meta = parent_arg.getattr("meta")?;
-            if meta_val(&parent_meta, "tosa_dim_order").is_some() {
-                let dim_order = parent_meta.get_item("tosa_dim_order")?;
-                let py_tuple = PyTuple::new_bound(py, &py_iter_collect(&dim_order));
-                meta.set_item("tosa_dim_order", &py_tuple)?;
+            // Copy FakeTensor shape/dtype from parent to placeholder
+            if let Some(ref parent_val) = parent_m.val {
+                ph_m.set_val(parent_val.clone());
             }
-            // No qparam propagation here — that happens post-parent-passes
+            // Copy dim_order
+            if let Some(ref tdo) = parent_m.tosa_dim_order {
+                ph_m.set_tosa_dim_order(tdo.clone());
+            }
+            ph_m.write_back(py, ph)?;
         }
 
         regularized += 1;
@@ -520,7 +509,7 @@ fn annotate_cf_parent_rank4_dim_order<'py>(
     for (_name, _submodule, cf_node) in &submodules {
         for user in &ordered_cf_users(cf_node)? {
             let mut m = NodeMeta::from_fx(user)?;
-            if m.val_shape.as_ref().map(|s| s.len()) != Some(4) { continue; }
+            if m.rank() != Some(4) { continue; }
             user.getattr("meta")?.set_item("arm_control_flow_parent_output_user", true)?;
             if m.tosa_dim_order.as_deref() == Some(&NHWC_DIM_ORDER) { continue; }
             m.set_tosa_dim_order(NHWC_DIM_ORDER.to_vec());
@@ -575,11 +564,11 @@ fn prune_duplicate_terminal_rescales_ir(graph: &mut IrGraph) -> u32 {
         };
         graph.nodes[node_id].args = new_args;
         // Copy user's val metadata to node
-        let user_dtype = graph.nodes[user_id].meta.val_dtype.clone();
-        let user_shape = graph.nodes[user_id].meta.val_shape.clone();
+        let user_dtype = graph.nodes[user_id].meta.val_dtype().map(|s| s.to_string());
+        let user_shape = graph.nodes[user_id].meta.val_shape().map(|s| s.to_vec());
         let user_dim_order = graph.nodes[user_id].meta.tosa_dim_order.clone();
-        graph.nodes[node_id].meta.val_dtype = user_dtype;
-        graph.nodes[node_id].meta.val_shape = user_shape;
+        if let Some(d) = user_dtype { if let Some(ref mut v) = graph.nodes[node_id].meta.val { v.dtype = d; graph.nodes[node_id].meta.dirty.val = true; } };
+        if let Some(s) = user_shape { if let Some(ref mut v) = graph.nodes[node_id].meta.val { v.shape = s; graph.nodes[node_id].meta.dirty.val = true; } };
         if let Some(d) = user_dim_order { graph.nodes[node_id].meta.set_tosa_dim_order(d); }
         // Stamp input qparam from source if missing
         if graph.nodes[node_id].meta.input_qparam().is_none() {
@@ -654,7 +643,7 @@ fn annotate_rank4_dim_order_ir(graph: &mut IrGraph) -> u32 {
     for node in &mut graph.nodes {
         if node.op != NodeOp::CallFunction { continue; }
         if node.meta.tosa_dim_order.is_some() { continue; }
-        if node.meta.val_shape.as_ref().map(|s| s.len()) != Some(4) { continue; }
+        if node.meta.rank() != Some(4) { continue; }
         node.meta.set_tosa_dim_order(NHWC_DIM_ORDER.to_vec());
         count += 1;
     }
@@ -732,7 +721,7 @@ fn force_rank4_output_dim_order_ir(graph: &mut IrGraph) -> u32 {
     let mut count = 0;
     for id in out_arg_ids {
         let node = &mut graph.nodes[id];
-        if node.meta.val_shape.as_ref().map(|s| s.len()) != Some(4) { continue; }
+        if node.meta.rank() != Some(4) { continue; }
         if node.meta.tosa_dim_order.as_deref() == Some(&NHWC_DIM_ORDER) { continue; }
         node.meta.set_tosa_dim_order(NHWC_DIM_ORDER.to_vec());
         count += 1;
@@ -763,99 +752,89 @@ fn force_cf_rank4_output_dim_order<'py>(
 //    Updates placeholder val dtype to match qparam dtype.
 // ---------------------------------------------------------------------------
 
+/// Pure Rust: find the effective qparam dtype for a placeholder by walking users.
+/// Mirrors _branch_local_control_flow_output_qparam from Python.
+fn branch_local_qparam_dtype_ir(graph: &IrGraph, ph_id: NodeId) -> Option<String> {
+    let ph = graph.node(ph_id);
+    // Check saved table input qparam (stored by snapshot_cf_table_qparams)
+    // Not available in IrGraph metadata — fall through to output_qparams
+
+    // BFS: walk users looking for table qparam or output_qparams
+    let mut pending: Vec<NodeId> = graph.users(ph_id).to_vec();
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(ph_id);
+    while let Some(uid) = pending.pop() {
+        if !seen.insert(uid) { continue; }
+        let user = graph.node(uid);
+        if !user.alive { continue; }
+        // If user has output_qparams with int dtype, use that
+        if let Some(qp) = user.meta.output_qparam() {
+            if qp.dtype_str.contains("int8") || qp.dtype_str.contains("int16") {
+                return Some(qp.dtype_str.clone());
+            }
+        }
+        pending.extend_from_slice(graph.users(uid));
+    }
+    // Fallback: placeholder's own output_qparams
+    if let Some(qp) = ph.meta.output_qparam() {
+        if qp.dtype_str.contains("int8") || qp.dtype_str.contains("int16") {
+            return Some(qp.dtype_str.clone());
+        }
+    }
+    // Fallback: input_qparams
+    if let Some(qp) = ph.meta.input_qparam() {
+        if qp.dtype_str.contains("int8") || qp.dtype_str.contains("int16") {
+            return Some(qp.dtype_str.clone());
+        }
+    }
+    None
+}
+
+/// Pure Rust: restamp placeholder FakeTensor dtype to match qparam dtype.
+fn restamp_placeholder_dtypes_ir(graph: &mut IrGraph) -> u32 {
+    let ph_ids: Vec<NodeId> = graph.placeholders().map(|n| n.id).collect();
+    let mut count = 0u32;
+    for ph_id in ph_ids {
+        // Skip if any user is a quantize node
+        if graph.users(ph_id).iter().any(|&uid| graph.nodes[uid].alive && graph.nodes[uid].is_quantize()) {
+            continue;
+        }
+        let target_dtype = match branch_local_qparam_dtype_ir(graph, ph_id) {
+            Some(d) => d,
+            None => continue,
+        };
+        let current_dtype = match graph.nodes[ph_id].meta.val_dtype() {
+            Some(d) => d.to_string(),
+            None => continue,
+        };
+        if current_dtype == target_dtype { continue; }
+        // Restamp: change the FakeTensorMeta dtype
+        if let Some(ref mut ftm) = graph.nodes[ph_id].meta.val {
+            ftm.dtype = target_dtype;
+            graph.nodes[ph_id].meta.dirty.val = true;
+            count += 1;
+        }
+    }
+    count
+}
+
 fn restamp_cf_placeholder_dtypes<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
-    let cf_mod = py.import_bound("retab._cf_ctx")?;
-    let branch_local_fn =
-        cf_mod.getattr("_branch_local_control_flow_output_qparam")?;
-    let extract_fn = cf_mod.getattr("_extract_single_qparam_entry")?;
-
-    let torch = py.import_bound("torch")?;
-    let int8 = torch.getattr("int8")?;
-    let int16 = torch.getattr("int16")?;
-
     let submodules = get_cf_submodules(py, gm)?;
     let mut restamped: u32 = 0;
-
     for (_name, submodule, _cf_node) in &submodules {
-        let mut updated = false;
-        let placeholders = nodes_by_op(&submodule, NodeOp::Placeholder)?;
-
-        for ph in &placeholders {
-            // Skip if any user is a quantize node
-            let users = FxGraphModule::node_users(ph)?;
-            let has_quantize_user = users.iter().any(|u| is_quantize_node(u));
-            if has_quantize_user {
-                continue;
-            }
-
-            // Get qparam
-            let qparam = branch_local_fn.call1((ph,))?;
-
-            // Check if qparam.dtype is int8 or int16; if not, try input_qparams
-            let qparam = if qparam.is_none() {
-                py.None().into_bound(py)
-            } else {
-                let dtype = qparam.getattr("dtype");
-                let is_int8_or_int16 = match &dtype {
-                    Ok(dt) => dt.eq(&int8).unwrap_or(false) || dt.eq(&int16).unwrap_or(false),
-                    Err(_) => false,
-                };
-                if !is_int8_or_int16 {
-                    let meta = ph.getattr("meta")?;
-                    let input_qparams = meta.call_method1("get", ("input_qparams",))?;
-                    let extracted = extract_fn.call1((&input_qparams,))?;
-                    if extracted.is_none() {
-                        qparam
-                    } else {
-                        extracted
-                    }
-                } else {
-                    qparam
-                }
-            };
-
-            if qparam.is_none() {
-                continue;
-            }
-
-            let meta = ph.getattr("meta")?;
-            let fake_val = match meta_val(&meta, "val") {
-                Some(v) => v,
-                None => continue,
-            };
-            if !fake_val.hasattr("to")? {
-                continue;
-            }
-
-            // Check if dtype already matches
-            let fake_dtype = fake_val.getattr("dtype").ok();
-            let qparam_dtype = qparam.getattr("dtype").ok();
-            match (&fake_dtype, &qparam_dtype) {
-                (Some(fd), Some(qd)) if fd.eq(qd).unwrap_or(false) => continue,
-                _ => {}
-            }
-
-            // Restamp
-            if let Some(qd) = qparam_dtype {
-                let kwargs = pyo3::types::PyDict::new_bound(py);
-                kwargs.set_item("dtype", &qd)?;
-                let new_val = fake_val.call_method("to", (), Some(&kwargs))?;
-                meta.set_item("val", &new_val)?;
-                updated = true;
-                restamped += 1;
-            }
-        }
-
-        if updated {
+        let mut ir = IrGraph::from_fx(&submodule)?;
+        let count = restamp_placeholder_dtypes_ir(&mut ir);
+        if count > 0 {
+            ir.write_back(py, &submodule)?;
             let graph = submodule.getattr("graph")?;
             graph.call_method0("lint")?;
             recompile(&submodule)?;
+            restamped += count;
         }
     }
-
     Ok(restamped)
 }
 
@@ -864,68 +843,57 @@ fn restamp_cf_placeholder_dtypes<'py>(
 //    Saves qparam metadata on TABLE-eligible nodes.
 // ---------------------------------------------------------------------------
 
+/// Table-eligible op target markers (math functions that get TABLE lowering).
+const TABLE_OP_MARKERS: &[&str] = &[
+    "aten.sin.", "aten.cos.", "aten.exp.", "aten.log.", "aten.rsqrt.",
+    "aten.sigmoid.", "aten.tanh.", "aten.erf.", "aten.ceil.", "aten.floor.",
+    "aten.hardswish.", "aten.hardsigmoid.", "aten.leaky_relu.", "aten.gelu.",
+    "aten.silu.", "aten.reciprocal.",
+];
+
+/// Pure Rust: snapshot table input/output qparams.
+fn snapshot_table_qparams_ir(graph: &mut IrGraph) -> u32 {
+    let mut count = 0u32;
+    let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
+    for id in ids {
+        if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction { continue; }
+        if !TABLE_OP_MARKERS.iter().any(|m| graph.nodes[id].target.contains(m)) { continue; }
+
+        if let Some(input_id) = graph.nodes[id].first_node_arg() {
+            if let Some(qp) = graph.node(input_id).parse_qdq_qparam() {
+                graph.nodes[id].meta.table_input_qparam = Some(qp);
+                graph.nodes[id].meta.dirty.table_qparams = true;
+                count += 1;
+            }
+        }
+        let user_ids = graph.users(id).to_vec();
+        for uid in user_ids {
+            if !graph.nodes[uid].alive { continue; }
+            if let Some(qp) = graph.node(uid).parse_qdq_qparam() {
+                graph.nodes[id].meta.table_output_qparam = Some(qp);
+                graph.nodes[id].meta.dirty.table_qparams = true;
+                count += 1;
+                break;
+            }
+        }
+    }
+    count
+}
+
 fn snapshot_cf_table_qparams<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
-    let table_ops_mod =
-        py.import_bound("executorch.backends.arm._passes.insert_table_ops")?;
-    let table_ops_cls = table_ops_mod.getattr("TableOps")?;
-    let included_ops = table_ops_cls.call_method0("included_ops")?;
-    let table_targets = py_iter_collect(&included_ops);
-
-    let quant_args_mod =
-        py.import_bound("executorch.backends.arm._passes.quant_args")?;
-    let quant_args_cls = quant_args_mod.getattr("QuantArgs")?;
-
     let submodules = get_cf_submodules(py, gm)?;
     let mut snapshotted: u32 = 0;
-
     for (_name, submodule, _cf_node) in &submodules {
-        for node in graph_nodes(&submodule)? {
-            if NodeOp::of(&node) != NodeOp::CallFunction { continue; }
-            let target = node.getattr("target")?;
-            let is_table = table_targets.iter().any(|t| target.eq(t).unwrap_or(false));
-            if !is_table {
-                continue;
-            }
-
-            let meta = node.getattr("meta")?;
-            let args = FxGraphModule::node_args(&node)?;
-
-            // Input qparam: from first arg
-            if !args.is_empty() && FxGraphModule::is_node(&args[0]) {
-                let input_node = &args[0];
-                let input_target = input_node.getattr("target")?;
-                let input_args = FxGraphModule::node_args(input_node)?;
-                let input_args_tuple = PyTuple::new_bound(py, &input_args);
-                match quant_args_cls.call_method1("from_operator", (&input_target, &input_args_tuple)) {
-                    Ok(qparam) => {
-                        meta.set_item("arm_saved_table_input_qparam", &qparam)?;
-                        snapshotted += 1;
-                    }
-                    Err(_) => {}
-                }
-            }
-
-            // Output qparam: from first user
-            let users = FxGraphModule::node_users(&node)?;
-            for user in &users {
-                let user_target = user.getattr("target")?;
-                let user_args = FxGraphModule::node_args(user)?;
-                let user_args_tuple = PyTuple::new_bound(py, &user_args);
-                match quant_args_cls.call_method1("from_operator", (&user_target, &user_args_tuple)) {
-                    Ok(qparam) => {
-                        meta.set_item("arm_saved_table_output_qparam", &qparam)?;
-                        snapshotted += 1;
-                        break;
-                    }
-                    Err(_) => continue,
-                }
-            }
+        let mut ir = IrGraph::from_fx(&submodule)?;
+        let count = snapshot_table_qparams_ir(&mut ir);
+        if count > 0 {
+            ir.write_back(py, &submodule)?;
+            snapshotted += count;
         }
     }
-
     Ok(snapshotted)
 }
 
@@ -991,52 +959,11 @@ impl FxPass for FxWhileStripBoundaryQPass {
         let graph = gm.gm_ref().getattr("graph")?;
         let mut modified = false;
 
-        // Strip boundary Q nodes: placeholder → Q → ops  ⟹  placeholder → ops
-        // Store Q's qparams on the placeholder's output_qparams metadata
-        // so fold_qdq sees the placeholder with correct annotations.
-        for node in gm.nodes()? {
-            let op: String = py_attr(&node, &["op"], String::new());
-            if op != "placeholder" { continue; }
-            let users = node_users(&node)?;
-            for user in &users {
-                if !is_quantize_node(user) { continue; }
-                // Always stamp Q literal qparams — these represent the
-                // body-internal quantization domain. The propagated qparams
-                // (external domain) live on the while_loop parent node and
-                // are used for boundary RESCALE scale computation.
-                if let Some(qp) = parse_per_tensor_qparam(py, user)? {
-                    let meta = node.getattr("meta")?;
-                    let dict = pyo3::types::PyDict::new_bound(py);
-                    dict.set_item(0i64, &qp)?;
-                    meta.set_item("output_qparams", &dict)?;
-                }
-                user.call_method1("replace_all_uses_with", (&node,))?;
-                graph.call_method1("erase_node", (user,))?;
-                modified = true;
-            }
-        }
-
-        // Annotate boundary DQ qparams on the output node WITHOUT stripping.
-        // The DQ nodes must stay (they convert INT8→float for the parent graph).
-        // We just stamp their literal qparams on output_node.meta["input_qparams"]
-        // so insert_cf_boundary_rescales can compute the correct output RESCALE.
-        if let Some(output) = output_node(gm.gm_ref())? {
-            let ovals = unpack_output_vals(&output)?;
-            let mut out_m = NodeMeta::from_fx(&output)?;
-            let mut iqp_map = out_m.input_qparams.clone().unwrap_or_default();
-            for (i, val) in ovals.iter().enumerate() {
-                if !FxGraphModule::is_node(val) || !is_dequantize_node(val) { continue; }
-                if let Ok(Some(qp)) = parse_qparam(val) {
-                    iqp_map.insert(i, qp);
-                }
-            }
-            if !iqp_map.is_empty() {
-                out_m.set_input_qparams(iqp_map);
-                out_m.write_back(py, &output)?;
-            }
-        }
-
+        // Pure Rust: strip Q from placeholders, annotate DQ on output
+        let mut ir = IrGraph::from_fx(gm.gm_ref())?;
+        modified = strip_while_boundary_qdq_ir(&mut ir);
         if modified {
+            ir.write_back_with_surgery(py, gm.gm_ref())?;
             cleanup_graph(&graph)?;
             gm.recompile()?;
         }
@@ -1089,8 +1016,7 @@ impl FxPass for FxControlFlowMetadataPass {
         let count = annotate_cf_rank4_dim_order(py, gm_ref)?;
         if count > 0 {
             log_line(format_args!(
-                "[FxControlFlowMetadata] annotated NHWC dim-order on {} interior rank-4 node(s)",
-                count
+                "[FxControlFlowMetadata] annotated NHWC dim-order on {} interior rank-4 node(s)", count
             ));
             any_modified = true;
         }
@@ -1099,8 +1025,7 @@ impl FxPass for FxControlFlowMetadataPass {
         let count = force_cf_rank4_output_dim_order(py, gm_ref)?;
         if count > 0 {
             log_line(format_args!(
-                "[FxControlFlowMetadata] forced NHWC dim-order on {} rank-4 output(s)",
-                count
+                "[FxControlFlowMetadata] forced NHWC dim-order on {} rank-4 output(s)", count
             ));
             any_modified = true;
         }
@@ -1438,7 +1363,7 @@ fn get_all_modules<'py>(
 /// Get `_actual_shape_from_meta` for a node. Returns None if not available.
 fn actual_shape_from_meta<'py>(node: &Bound<'py, PyAny>) -> PyResult<Option<Vec<i64>>> {
     let m = NodeMeta::from_fx(node)?;
-    let shape = match m.val_shape { Some(s) => s, None => return Ok(None) };
+    let shape = match m.val_shape().map(|s| s.to_vec()) { Some(s) => s, None => return Ok(None) };
     // Apply dim_order permutation if present and non-identity
     if let Some(ref tdo) = m.tosa_dim_order {
         if tdo.len() == shape.len() {
@@ -1478,10 +1403,10 @@ fn remove_noop_passthroughs_ir(graph: &mut IrGraph) -> u32 {
         let source_meta = &graph.nodes[source_id].meta;
 
         // Skip if dtype or shape mismatch
-        if node_meta.val_dtype != source_meta.val_dtype && node_meta.val_dtype.is_some() && source_meta.val_dtype.is_some() {
+        if node_meta.val_dtype() != source_meta.val_dtype() && node_meta.val.is_some() && source_meta.val.is_some() {
             continue;
         }
-        if node_meta.val_shape != source_meta.val_shape && node_meta.val_shape.is_some() && source_meta.val_shape.is_some() {
+        if node_meta.val_shape() != source_meta.val_shape() && node_meta.val.is_some() && source_meta.val.is_some() {
             continue;
         }
         if node_meta.tosa_dim_order != source_meta.tosa_dim_order && node_meta.tosa_dim_order.is_some() && source_meta.tosa_dim_order.is_some() {
@@ -1557,96 +1482,61 @@ pub(crate) fn prune_duplicate_terminal_rescales<'py>(
 // 6. _refresh_tosa_transpose_fake_tensors
 // ---------------------------------------------------------------------------
 
+/// Pure Rust: refresh TRANSPOSE node FakeTensors by permuting input shape.
+fn refresh_transpose_fake_tensors_ir(graph: &mut IrGraph) -> u32 {
+    let mut count = 0u32;
+    let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
+    for id in ids {
+        if !graph.nodes[id].alive || !graph.nodes[id].target_contains("TRANSPOSE") { continue; }
+        let input_id = match graph.nodes[id].first_node_arg() { Some(i) => i, None => continue };
+        let raw_shape = match graph.nodes[input_id].meta.val_shape() {
+            Some(s) => s.to_vec(),
+            None => continue,
+        };
+        // Apply dim_order permutation (matches actual_shape_from_meta)
+        let input_shape = if let Some(ref tdo) = graph.nodes[input_id].meta.tosa_dim_order {
+            if tdo.len() == raw_shape.len() {
+                let identity: Vec<usize> = (0..raw_shape.len()).collect();
+                if tdo != &identity { tdo.iter().map(|&i| raw_shape[i]).collect() }
+                else { raw_shape }
+            } else { raw_shape }
+        } else { raw_shape };
+        let perm: Vec<usize> = match &graph.nodes[id].args.get(1) {
+            Some(IrArg::List(items)) => items.iter().filter_map(|a| match a {
+                IrArg::Int(v) => Some(*v as usize), _ => None,
+            }).collect(),
+            _ => continue,
+        };
+        if perm.len() != input_shape.len() { continue; }
+        let new_shape: Vec<i64> = perm.iter().map(|&i| input_shape[i]).collect();
+        let dtype = graph.nodes[id].meta.val_dtype()
+            .or(graph.nodes[input_id].meta.val_dtype())
+            .unwrap_or("torch.float32").to_string();
+        graph.nodes[id].meta.set_val(FakeTensorMeta { shape: new_shape.clone(), dtype });
+        graph.nodes[id].meta.set_tosa_dim_order((0..new_shape.len()).collect());
+        count += 1;
+    }
+    count
+}
+
 pub(crate) fn refresh_tosa_transpose_fake_tensors<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
-    let modules = get_all_modules(py, gm)?;
     let mut refreshed: u32 = 0;
-
+    let mut modules: Vec<Bound<'py, PyAny>> = vec![gm.clone()];
+    for (_name, submodule, _) in &get_cf_submodules(py, gm)? {
+        modules.push(submodule.clone());
+    }
     for module in &modules {
-        let mut updated = false;
-
-        for node in graph_nodes(module)? {
-            if !is_tosa_transpose_node(&node) {
-                continue;
-            }
-
-            let args = FxGraphModule::node_args(&node)?;
-            if args.len() < 2 {
-                continue;
-            }
-
-            let input_node = &args[0];
-            if !FxGraphModule::is_node(input_node) {
-                continue;
-            }
-
-            let input_meta = input_node.getattr("meta")?;
-            let input_fake = match meta_val(&input_meta, "val") {
-                Some(v) => v,
-                None => continue,
-            };
-
-            if !input_fake.hasattr("new_empty")? {
-                continue;
-            }
-
-            let input_shape = match actual_shape_from_meta(input_node)? {
-                Some(s) => s,
-                None => continue,
-            };
-
-            // Parse perm from args[1]
-            let perm_obj = &args[1];
-            let perm: Vec<usize> = match perm_obj.extract() {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            if perm.len() != input_shape.len() {
-                continue;
-            }
-
-            // Compute new shape
-            let new_shape: Vec<i64> = perm.iter().map(|&idx| input_shape[idx]).collect();
-
-            let node_meta = node.getattr("meta")?;
-            let node_fake = meta_val(&node_meta, "val").unwrap_or(input_fake.clone());
-
-            let base_tensor = if node_fake.hasattr("new_empty")? {
-                node_fake.clone()
-            } else {
-                input_fake.clone()
-            };
-
-            // Get dtype
-            let dtype = node_fake
-                .getattr("dtype")
-                .or_else(|_| input_fake.getattr("dtype"))?;
-
-            // Create new tensor: base_tensor.new_empty(new_shape, dtype=dtype)
-            let shape_list = PyList::new_bound(py, &new_shape);
-            let kwargs = PyDict::new_bound(py);
-            kwargs.set_item("dtype", &dtype)?;
-            let new_val = base_tensor.call_method("new_empty", (&shape_list,), Some(&kwargs))?;
-
-            node_meta.set_item("val", &new_val)?;
-
-            // Set tosa_dim_order to identity
-            let identity: Vec<i64> = (0..new_shape.len() as i64).collect();
-            let identity_tuple = PyTuple::new_bound(py, &identity);
-            node_meta.set_item("tosa_dim_order", &identity_tuple)?;
-
-            updated = true;
-            refreshed += 1;
-        }
-
-        if updated {
+        let mut ir = IrGraph::from_fx(module)?;
+        let count = refresh_transpose_fake_tensors_ir(&mut ir);
+        if count > 0 {
+            ir.write_back(py, module)?;
             recompile(module)?;
+            refreshed += count;
         }
     }
-
     Ok(refreshed)
 }
 
@@ -1750,7 +1640,7 @@ fn rewrite_quantize_nodes_ir(graph: &mut IrGraph) -> (u32, Vec<RescaleInsert>) {
             Some(qp) => qp,
             None => {
                 // Skip if source has no qparams and isn't int
-                let src_dtype = graph.nodes[source_id].meta.val_dtype.as_deref().unwrap_or("");
+                let src_dtype = graph.nodes[source_id].meta.val_dtype().unwrap_or("");
                 if !src_dtype.contains("int") && !graph.nodes[source_id].is_zero_input_const() {
                     continue;
                 }
@@ -1875,174 +1765,112 @@ pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
 // dequantize_per_tensor node to restore the float input for the compare.
 // ---------------------------------------------------------------------------
 
+/// Pure Rust: strip boundary Q from placeholders, annotate DQ qparams on output.
+fn strip_while_boundary_qdq_ir(graph: &mut IrGraph) -> bool {
+    let mut modified = false;
+
+    // Strip Q nodes from placeholders
+    let ph_ids: Vec<NodeId> = graph.placeholders().map(|n| n.id).collect();
+    for ph_id in ph_ids {
+        let user_ids = graph.users(ph_id).to_vec();
+        for q_id in user_ids {
+            if !graph.nodes[q_id].alive || !graph.nodes[q_id].is_quantize() { continue; }
+            // Stamp Q's qparams on placeholder
+            if let Some(qp) = graph.nodes[q_id].parse_qdq_qparam() {
+                graph.nodes[ph_id].meta.set_single_output_qparam(qp);
+            }
+            graph.replace_and_erase(q_id, ph_id);
+            modified = true;
+        }
+    }
+
+    // Annotate DQ qparams on output node (without stripping DQ)
+    if let Some(out_id) = graph.output_node().map(|n| n.id) {
+        // Get output arg node IDs
+        let out_arg_ids: Vec<NodeId> = graph.node(out_id).args.iter()
+            .flat_map(|a| match a {
+                IrArg::Node(id) => vec![*id],
+                IrArg::List(items) => items.iter()
+                    .filter_map(|i| match i { IrArg::Node(id) => Some(*id), _ => None })
+                    .collect(),
+                _ => vec![],
+            })
+            .collect();
+
+        let mut iqp_map: HashMap<usize, QParam> = graph.node(out_id).meta
+            .input_qparams.clone().unwrap_or_default();
+        for (i, &arg_id) in out_arg_ids.iter().enumerate() {
+            if !graph.nodes[arg_id].alive || !graph.nodes[arg_id].is_dequantize() { continue; }
+            if let Some(qp) = graph.nodes[arg_id].parse_qdq_qparam() {
+                iqp_map.insert(i, qp);
+            }
+        }
+        if !iqp_map.is_empty() {
+            graph.node_mut(out_id).meta.set_input_qparams(iqp_map);
+            modified = true;
+        }
+    }
+
+    modified
+}
+
+const COMPARE_MARKERS: &[&str] = &["aten.gt.", "aten.ge.", "aten.lt.", "aten.le.", "aten.eq."];
+const INT_DTYPES: &[&str] = &["int8", "int16", "int32"];
+const FLOAT_DTYPES: &[&str] = &["float16", "float32", "float64"];
+
+/// Pure Rust: find compare ops with int/float arg mismatch, emit DqInsert instructions.
+fn restore_float_compare_inputs_ir(graph: &IrGraph) -> Vec<crate::fx_ir::DqInsert> {
+    let mut inserts = Vec::new();
+    for node in &graph.nodes {
+        if !node.alive { continue; }
+        if !COMPARE_MARKERS.iter().any(|m| node.target.contains(m)) { continue; }
+        if node.args.len() != 2 { continue; }
+        for idx in 0..2 {
+            let arg_id = match &node.args[idx] { IrArg::Node(id) => *id, _ => continue };
+            let other_id = match &node.args[1 - idx] { IrArg::Node(id) => *id, _ => continue };
+            let arg_dtype = graph.node(arg_id).meta.val_dtype().unwrap_or("");
+            let other_dtype = graph.node(other_id).meta.val_dtype().unwrap_or("");
+            let arg_is_int = INT_DTYPES.iter().any(|d| arg_dtype.contains(d));
+            let other_is_float = FLOAT_DTYPES.iter().any(|d| other_dtype.contains(d));
+            if !arg_is_int || !other_is_float { continue; }
+            let qp = match extract_effective_qparam_ir(graph, arg_id) {
+                Some(qp) => qp,
+                None => continue,
+            };
+            inserts.push(crate::fx_ir::DqInsert {
+                compare_node_name: node.name.clone(),
+                arg_idx: idx,
+                source_name: graph.node(arg_id).name.clone(),
+                qp,
+                float_dtype: other_dtype.to_string(),
+            });
+            break; // one restore per compare node
+        }
+    }
+    inserts
+}
+
 pub(crate) fn restore_control_flow_float_compare_inputs<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
     let submodules = get_cf_submodules(py, gm)?;
-    if submodules.is_empty() {
-        return Ok(0);
-    }
-
-    let ctx = CfCtx::new(py)?;
-    let int8 = ctx.int8()?;
-    let int16 = ctx.int16()?;
-    let int32 = ctx.torch.getattr("int32")?;
-    let float16 = ctx.torch.getattr("float16")?;
-    let float32 = ctx.torch.getattr("float32")?;
-    let float64 = ctx.torch.getattr("float64")?;
-
-    let arm_utils =
-        py.import_bound("executorch.backends.arm._passes.arm_pass_utils")?;
-    let create_node_fn = arm_utils.getattr("create_node")?;
-    let exir_ops = py
-        .import_bound("executorch.exir.dialects._ops")?
-        .getattr("ops")?;
-    let dq_op = exir_ops
-        .getattr("edge")?
-        .getattr("quantized_decomposed")?
-        .getattr("dequantize_per_tensor")?
-        .getattr("default")?;
-
-    let compare_markers = &[
-        "aten.gt.",
-        "aten.ge.",
-        "aten.lt.",
-        "aten.le.",
-        "aten.eq.",
-    ];
+    if submodules.is_empty() { return Ok(0); }
 
     let mut restored: u32 = 0;
-
     for (_name, submodule, _cf_node) in &submodules {
+        let ir = IrGraph::from_fx(&submodule)?;
+        let dq_inserts = restore_float_compare_inputs_ir(&ir);
+        if dq_inserts.is_empty() { continue; }
+
+        let py_node_map = crate::fx_ir::build_py_node_map(&submodule)?;
+        for insert in &dq_inserts {
+            insert.apply(py, &submodule, &py_node_map)?;
+            restored += 1;
+        }
         let graph = submodule.getattr("graph")?;
-        let mut updated = false;
-
-        let nodes = graph_nodes(&submodule)?;
-
-        for node in &nodes {
-            if !compare_markers.iter().any(|m| target_contains(node, m)) {
-                continue;
-            }
-
-            let args = FxGraphModule::node_args(node)?;
-            if args.len() != 2 {
-                continue;
-            }
-
-            // Try each arg index
-            let mut did_restore = false;
-            for idx in 0..2usize {
-                let arg = &args[idx];
-                let other = &args[1 - idx];
-
-                if !FxGraphModule::is_node(arg) || !FxGraphModule::is_node(other) {
-                    continue;
-                }
-
-                let arg_meta = arg.getattr("meta")?;
-                let other_meta = other.getattr("meta")?;
-                let arg_val = meta_val(&arg_meta, "val");
-                let other_val = meta_val(&other_meta, "val");
-
-                let arg_dtype = arg_val.as_ref().and_then(|v| v.getattr("dtype").ok());
-                let other_dtype = other_val.as_ref().and_then(|v| v.getattr("dtype").ok());
-
-                // arg must be int8/int16/int32
-                let arg_is_int = match &arg_dtype {
-                    Some(dt) => {
-                        dt.eq(&int8).unwrap_or(false)
-                            || dt.eq(&int16).unwrap_or(false)
-                            || dt.eq(&int32).unwrap_or(false)
-                    }
-                    None => false,
-                };
-
-                // other must be float
-                let other_is_float = match &other_dtype {
-                    Some(dt) => {
-                        dt.eq(&float16).unwrap_or(false)
-                            || dt.eq(&float32).unwrap_or(false)
-                            || dt.eq(&float64).unwrap_or(false)
-                    }
-                    None => false,
-                };
-
-                if !arg_is_int || !other_is_float {
-                    continue;
-                }
-
-                let qp = match extract_effective_qparam(&arg)? {
-                    Some(qp) => qp,
-                    None => continue,
-                };
-                let torch = py.import_bound("torch")?;
-                let qparam_dtype = torch.getattr(&*qp.dtype_str.replace("torch.", ""))?;
-
-                // graph.inserting_before(node) -- use context manager
-                let inserting_ctx = graph.call_method1("inserting_before", (node,))?;
-                inserting_ctx.call_method0("__enter__")?;
-
-                // create_node(graph=ctx.graph, op_target=dq_op, args=(...), from_node=node)
-                let dq_args = PyTuple::new_bound(
-                    py,
-                    &[
-                        arg.clone(),
-                        qp.scale.into_py(py).into_bound(py),
-                        qp.zp.into_py(py).into_bound(py),
-                        qp.qmin.into_py(py).into_bound(py),
-                        qp.qmax.into_py(py).into_bound(py),
-                        qparam_dtype.clone(),
-                    ],
-                );
-                let kwargs = PyDict::new_bound(py);
-                kwargs.set_item("graph", &graph)?;
-                kwargs.set_item("op_target", &dq_op)?;
-                kwargs.set_item("args", &dq_args)?;
-                kwargs.set_item("from_node", node)?;
-                let dq = create_node_fn.call((), Some(&kwargs))?;
-
-                // Exit context manager
-                let none = py.None().into_bound(py);
-                inserting_ctx.call_method1("__exit__", (&none, &none, &none))?;
-
-                // Set meta on the dq node
-                let dq_meta = dq.getattr("meta")?;
-                if let Some(ref av) = arg_val {
-                    if av.hasattr("to").unwrap_or(false) {
-                        if let Some(ref odt) = other_dtype {
-                            let to_kwargs = PyDict::new_bound(py);
-                            to_kwargs.set_item("dtype", odt)?;
-                            let new_val = av.call_method("to", (), Some(&to_kwargs))?;
-                            dq_meta.set_item("val", &new_val)?;
-                        }
-                    }
-                }
-                // input_qparams = {0: qparam}
-                let iqp = PyDict::new_bound(py);
-                iqp.set_item(0i64, qp.to_py(py)?)?;
-                dq_meta.set_item("input_qparams", &iqp)?;
-                // output_qparams = {}
-                let oqp = PyDict::new_bound(py);
-                dq_meta.set_item("output_qparams", &oqp)?;
-
-                // node.update_arg(idx, dq)
-                node.call_method1("update_arg", (idx, &dq))?;
-                restored += 1;
-                updated = true;
-                did_restore = true;
-                break;
-            }
-
-            if did_restore {
-                // Only break the inner arg loop, continue to next node
-            }
-        }
-
-        if updated {
-            cleanup_graph(&graph)?;
-            recompile(&submodule)?;
-        }
+        cleanup_graph(&graph)?;
+        recompile(&submodule)?;
     }
 
     if restored > 0 {
@@ -2051,7 +1879,6 @@ pub(crate) fn restore_control_flow_float_compare_inputs<'py>(
             restored
         ));
     }
-
     Ok(restored)
 }
 
