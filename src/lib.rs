@@ -9,6 +9,7 @@ mod fx_canonicalize_gather;
 mod fx_cast_int64;
 mod fx_conv1d_unsqueeze;
 mod fx_control_flow_metadata;
+mod fx_ir;
 mod fx_convert_clamp;
 mod fx_convert_full_like;
 mod fx_convert_split_to_slice;

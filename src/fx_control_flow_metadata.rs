@@ -1,10 +1,13 @@
 //! Control-flow metadata stamping, boundary RESCALE insertion, and Q/DQ
 //! rewriting for cond and while_loop submodules.
 
+use std::collections::HashMap;
+
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_graph::{meta_get, meta_val, py_attr, FxGraphModule};
+use crate::fx_ir::NodeMeta;
 use crate::fx_pass::FxPass;
 use crate::runner_logging::log_line;
 
@@ -59,7 +62,7 @@ pub(crate) struct QParam {
 
 impl QParam {
     /// Extract from a Python QuantArgs object (or anything with scale/zp/dtype attrs).
-    fn from_py(qp: &Bound<'_, PyAny>) -> Self {
+    pub(crate) fn from_py(qp: &Bound<'_, PyAny>) -> Self {
         Self {
             scale: qp.getattr("scale").and_then(|v| v.extract()).unwrap_or(1.0),
             zp: qp.getattr("zp").and_then(|v| v.extract()).unwrap_or(0),
@@ -88,7 +91,7 @@ impl QParam {
     }
 
     /// Convert back to a Python QuantArgs object.
-    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    pub(crate) fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let cls = py
             .import_bound("executorch.backends.arm._passes.quant_args")?
             .getattr("QuantArgs")?;
@@ -426,29 +429,30 @@ pub(crate) fn propagate_parent_qparams_to_placeholders<'py>(
     for (_name, submodule, cf_node) in &submodules {
         let placeholders = nodes_by_op(submodule, NodeOp::Placeholder)?;
         let parent_args = resolve_cf_parent_args(cf_node)?;
+        let cf_meta = NodeMeta::from_fx(cf_node)?;
 
         for (i, (ph, parent_arg)) in placeholders.iter().zip(parent_args.iter()).enumerate() {
-            let meta = ph.getattr("meta")?;
-            let parent_meta = parent_arg.getattr("meta")?;
+            let parent = NodeMeta::from_fx(parent_arg)?;
+            let mut ph_meta = NodeMeta::from_fx(ph)?;
 
-            // First try direct metadata copy
+            // First try direct metadata copy from parent
             let mut found = false;
-            for qp_key in &["input_qparams", "output_qparams"] {
-                if let Some(parent_qp) = meta_val(&parent_meta, qp_key) {
-                    let copied = parent_qp.call_method0("copy").unwrap_or(parent_qp.clone());
-                    meta.set_item(*qp_key, &copied)?;
-                    propagated += 1;
-                    found = true;
-                }
+            if let Some(ref oqp) = parent.output_qparams {
+                ph_meta.set_output_qparams(oqp.clone());
+                propagated += 1;
+                found = true;
+            }
+            if let Some(ref iqp) = parent.input_qparams {
+                ph_meta.set_input_qparams(iqp.clone());
+                propagated += 1;
+                found = true;
             }
 
             // If no metadata qparams, try the pre-pass snapshot
             if !found {
-                let cf_meta = cf_node.getattr("meta")?;
-                if let Ok(saved) = cf_meta.get_item("_pre_pass_arg_qparams") {
-                    if let Ok(qp_py) = saved.get_item(i) {
-                        let qp = QParam::from_py(&qp_py);
-                        qp.stamp_both(py, &meta)?;
+                if let Some(ref saved) = cf_meta.pre_pass_arg_qparams {
+                    if let Some(qp) = saved.get(&i) {
+                        ph_meta.set_both_qparams(qp.clone());
                         propagated += 1;
                         found = true;
                     }
@@ -458,10 +462,12 @@ pub(crate) fn propagate_parent_qparams_to_placeholders<'py>(
             // Last fallback: walk the (post-pass) producer chain
             if !found {
                 if let Some(qp) = extract_effective_qparam(parent_arg)? {
-                    qp.stamp_both(py, &meta)?;
+                    ph_meta.set_both_qparams(qp);
                     propagated += 1;
                 }
             }
+
+            ph_meta.write_back(py, ph)?;
         }
     }
 
@@ -491,31 +497,23 @@ pub(crate) fn propagate_parent_qparams_to_placeholders<'py>(
         }
 
         let placeholders = nodes_by_op(submodule, NodeOp::Placeholder)?;
-        let output_node = output_node(submodule)?;
-
-        if let Some(output) = output_node {
-            let output_meta = output.getattr("meta")?;
-            let qparams_dict = pyo3::types::PyDict::new_bound(py);
+        if let Some(output) = output_node(submodule)? {
+            let mut out_meta = NodeMeta::from_fx(&output)?;
+            let mut loop_carried = HashMap::new();
             for (idx, ph) in placeholders.iter().enumerate() {
-                let ph_meta = ph.getattr("meta")?;
-                if let Ok(oqp) = ph_meta.get_item("output_qparams") {
-                    if let Some(qp) = extract_single_qparam_entry(&oqp) {
-                        qparams_dict.set_item(idx, &qp)?;
-                        propagated += 1;
-                    }
-                } else if let Ok(iqp) = ph_meta.get_item("input_qparams") {
-                    if let Some(qp) = extract_single_qparam_entry(&iqp) {
-                        qparams_dict.set_item(idx, &qp)?;
-                        propagated += 1;
-                    }
+                let ph_m = NodeMeta::from_fx(ph)?;
+                if let Some(qp) = ph_m.output_qparam().or(ph_m.input_qparam()) {
+                    loop_carried.insert(idx, qp.clone());
+                    propagated += 1;
                 }
             }
-            if !qparams_dict.is_empty() {
-                output_meta.set_item("input_qparams", &qparams_dict)?;
+            if !loop_carried.is_empty() {
                 log_line(format_args!(
                     "[propagate-boundary-qparams] stamped while_loop body output with {} loop-carried qparam(s)",
-                    qparams_dict.len()
+                    loop_carried.len()
                 ));
+                out_meta.set_input_qparams(loop_carried);
+                out_meta.write_back(py, &output)?;
             }
         }
     }
