@@ -1,15 +1,188 @@
-//! Rust-native graph IR types for FX graph metadata.
+//! Rust-native graph IR for FX graph manipulation.
 //!
-//! Phase 1: NodeMeta extraction — read metadata from Python FX nodes into
-//! typed Rust structs, operate in pure Rust, write back changed fields.
-//! The FX graph structure stays Python-managed.
+//! Phase 1: NodeMeta — typed metadata extraction (done).
+//! Phase 2: IrGraph — full node topology imported from Python FX graph.
 
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::fx_control_flow_metadata::QParam;
+use crate::fx_control_flow_metadata::{NodeOp, QParam};
+
+// ---------------------------------------------------------------------------
+// IrGraph — full graph topology
+// ---------------------------------------------------------------------------
+
+pub type NodeId = usize;
+
+/// A node in the Rust IR graph.
+#[derive(Debug, Clone)]
+pub struct IrNode {
+    pub id: NodeId,
+    pub op: NodeOp,
+    pub name: String,
+    pub target: String,
+    pub args: Vec<IrArg>,
+    pub meta: NodeMeta,
+}
+
+/// An argument to a node — either a reference to another node or a literal.
+#[derive(Debug, Clone)]
+pub enum IrArg {
+    Node(NodeId),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+    List(Vec<IrArg>),
+    None,
+}
+
+/// The full graph: ordered list of nodes + lookup by name.
+#[derive(Debug)]
+pub struct IrGraph {
+    pub nodes: Vec<IrNode>,
+    name_to_id: HashMap<String, NodeId>,
+}
+
+impl IrGraph {
+    /// Import from a Python FX GraphModule.
+    pub fn from_fx(gm: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let graph = if gm.hasattr("graph")? { gm.getattr("graph")? } else { gm.clone() };
+        let py_nodes: Vec<Bound<'_, PyAny>> = graph.getattr("nodes")?
+            .iter()?.filter_map(|n| n.ok()).collect();
+
+        // First pass: assign IDs and build name→id map
+        let mut name_to_id = HashMap::new();
+        for (i, node) in py_nodes.iter().enumerate() {
+            let name: String = node.getattr("name")
+                .and_then(|v| v.extract()).unwrap_or_default();
+            name_to_id.insert(name, i);
+        }
+
+        // Second pass: build IrNodes with resolved args
+        let mut nodes = Vec::with_capacity(py_nodes.len());
+        for (i, py_node) in py_nodes.iter().enumerate() {
+            let name: String = py_node.getattr("name")
+                .and_then(|v| v.extract()).unwrap_or_default();
+            let target: String = py_node.getattr("target")
+                .and_then(|t| t.str().map(|s| s.to_string()))
+                .unwrap_or_default();
+            let op = NodeOp::of(py_node);
+            let meta = NodeMeta::from_fx(py_node)?;
+
+            let py_args = crate::fx_graph::FxGraphModule::node_args(py_node)
+                .unwrap_or_default();
+            let args = py_args.iter()
+                .map(|a| resolve_arg(a, &name_to_id))
+                .collect();
+
+            nodes.push(IrNode { id: i, op, name, target, args, meta });
+        }
+
+        Ok(Self { nodes, name_to_id })
+    }
+
+    /// Find a node by name.
+    pub fn by_name(&self, name: &str) -> Option<&IrNode> {
+        self.name_to_id.get(name).map(|&id| &self.nodes[id])
+    }
+
+    /// Iterate placeholders.
+    pub fn placeholders(&self) -> impl Iterator<Item = &IrNode> {
+        self.nodes.iter().filter(|n| n.op == NodeOp::Placeholder)
+    }
+
+    /// Get the output node.
+    pub fn output_node(&self) -> Option<&IrNode> {
+        self.nodes.iter().find(|n| n.op == NodeOp::Output)
+    }
+
+    /// Iterate call_function nodes.
+    pub fn call_functions(&self) -> impl Iterator<Item = &IrNode> {
+        self.nodes.iter().filter(|n| n.op == NodeOp::CallFunction)
+    }
+
+    /// Get node by ID.
+    pub fn node(&self, id: NodeId) -> &IrNode {
+        &self.nodes[id]
+    }
+
+    /// Get mutable node by ID.
+    pub fn node_mut(&mut self, id: NodeId) -> &mut IrNode {
+        &mut self.nodes[id]
+    }
+
+    /// Write back all dirty metadata to the Python FX graph.
+    pub fn write_back(&self, py: Python<'_>, gm: &Bound<'_, PyAny>) -> PyResult<()> {
+        let graph = if gm.hasattr("graph")? { gm.getattr("graph")? } else { gm.clone() };
+        let py_nodes: Vec<Bound<'_, PyAny>> = graph.getattr("nodes")?
+            .iter()?.filter_map(|n| n.ok()).collect();
+
+        for (ir_node, py_node) in self.nodes.iter().zip(py_nodes.iter()) {
+            ir_node.meta.write_back(py, py_node)?;
+        }
+        Ok(())
+    }
+}
+
+impl IrNode {
+    /// Check if target contains a marker string.
+    pub fn target_contains(&self, marker: &str) -> bool {
+        self.op == NodeOp::CallFunction && self.target.contains(marker)
+    }
+
+    /// Get first arg if it's a node reference.
+    pub fn first_node_arg(&self) -> Option<NodeId> {
+        self.args.first().and_then(|a| match a {
+            IrArg::Node(id) => Some(*id),
+            _ => None,
+        })
+    }
+
+    /// Is this a quantize_per_tensor call?
+    pub fn is_quantize(&self) -> bool {
+        self.target_contains("quantize_per_tensor") && !self.target_contains("dequantize")
+    }
+
+    /// Is this a dequantize_per_tensor call?
+    pub fn is_dequantize(&self) -> bool {
+        self.target_contains("dequantize_per_tensor")
+    }
+
+    /// Is this a TOSA RESCALE call?
+    pub fn is_rescale(&self) -> bool {
+        self.target_contains("RESCALE")
+    }
+}
+
+/// Resolve a Python FX arg to an IrArg.
+fn resolve_arg(py_arg: &Bound<'_, PyAny>, name_to_id: &HashMap<String, NodeId>) -> IrArg {
+    // Check if it's a node (has .op attribute)
+    if let Ok(name) = py_arg.getattr("name").and_then(|n| n.extract::<String>()) {
+        if py_arg.getattr("op").is_ok() {
+            if let Some(&id) = name_to_id.get(&name) {
+                return IrArg::Node(id);
+            }
+        }
+    }
+    // Try literals
+    if py_arg.is_none() { return IrArg::None; }
+    if let Ok(v) = py_arg.extract::<bool>() { return IrArg::Bool(v); }
+    if let Ok(v) = py_arg.extract::<i64>() { return IrArg::Int(v); }
+    if let Ok(v) = py_arg.extract::<f64>() { return IrArg::Float(v); }
+    if let Ok(v) = py_arg.extract::<String>() { return IrArg::Str(v); }
+    // Try list/tuple
+    if let Ok(iter) = py_arg.iter() {
+        let items: Vec<IrArg> = iter
+            .filter_map(|i| i.ok())
+            .map(|i| resolve_arg(&i, name_to_id))
+            .collect();
+        if !items.is_empty() { return IrArg::List(items); }
+    }
+    IrArg::None
+}
 
 // ---------------------------------------------------------------------------
 // NodeMeta — typed metadata extracted from a Python FX node

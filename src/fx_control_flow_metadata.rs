@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_graph::{meta_get, meta_val, py_attr, FxGraphModule};
-use crate::fx_ir::NodeMeta;
+use crate::fx_ir::{IrArg, IrGraph, NodeId, NodeMeta};
 use crate::fx_pass::FxPass;
 use crate::runner_logging::log_line;
 
@@ -197,7 +197,7 @@ fn extract_qparam(qparams: &Bound<'_, PyAny>) -> Option<QParam> {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NodeOp {
+pub(crate) enum NodeOp {
     Placeholder,
     CallFunction,
     GetAttr,
@@ -206,7 +206,7 @@ enum NodeOp {
 }
 
 impl NodeOp {
-    fn of(node: &Bound<'_, PyAny>) -> Self {
+    pub(crate) fn of(node: &Bound<'_, PyAny>) -> Self {
         match py_attr::<String>(node, &["op"], String::new()).as_str() {
             "placeholder" => Self::Placeholder,
             "call_function" => Self::CallFunction,
@@ -561,6 +561,19 @@ fn annotate_cf_parent_rank4_dim_order<'py>(
 //    Stamps dim_order on rank-4 call_function nodes in submodules.
 // ---------------------------------------------------------------------------
 
+/// Pure Rust: annotate rank-4 call_function nodes with NHWC dim order.
+fn annotate_rank4_dim_order_ir(graph: &mut IrGraph) -> u32 {
+    let mut count = 0;
+    for node in &mut graph.nodes {
+        if node.op != NodeOp::CallFunction { continue; }
+        if node.meta.tosa_dim_order.is_some() { continue; }
+        if node.meta.val_shape.as_ref().map(|s| s.len()) != Some(4) { continue; }
+        node.meta.set_tosa_dim_order(NHWC_DIM_ORDER.to_vec());
+        count += 1;
+    }
+    count
+}
+
 fn annotate_cf_rank4_dim_order<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
@@ -569,18 +582,13 @@ fn annotate_cf_rank4_dim_order<'py>(
     let mut annotated: u32 = 0;
 
     for (_name, submodule, _cf_node) in &submodules {
-        let mut modified = false;
-        for node in graph_nodes(&submodule)? {
-            if NodeOp::of(&node) != NodeOp::CallFunction { continue; }
-            let mut m = NodeMeta::from_fx(&node)?;
-            if m.tosa_dim_order.is_some() { continue; }
-            if m.val_shape.as_ref().map(|s| s.len()) != Some(4) { continue; }
-            m.set_tosa_dim_order(NHWC_DIM_ORDER.to_vec());
-            m.write_back(py, &node)?;
-            annotated += 1;
-            modified = true;
+        let mut ir = IrGraph::from_fx(&submodule)?;
+        let count = annotate_rank4_dim_order_ir(&mut ir);
+        if count > 0 {
+            ir.write_back(py, &submodule)?;
+            recompile(&submodule)?;
+            annotated += count;
         }
-        if modified { recompile(&submodule)?; }
     }
     Ok(annotated)
 }
@@ -590,28 +598,51 @@ fn annotate_cf_rank4_dim_order<'py>(
 //    Stamps dim_order on output-feeding nodes with rank-4 tensors.
 // ---------------------------------------------------------------------------
 
+/// Pure Rust: stamp NHWC dim_order on rank-4 output args.
+fn force_rank4_output_dim_order_ir(graph: &mut IrGraph) -> u32 {
+    let out = match graph.output_node() { Some(n) => n.id, None => return 0 };
+    let out_arg_ids: Vec<NodeId> = graph.node(out).args.iter()
+        .filter_map(|a| match a {
+            IrArg::Node(id) => Some(*id),
+            IrArg::List(items) => None, // handled below
+            _ => None,
+        })
+        .collect();
+    // Also handle output((val1, val2, ...),) — first arg is a list
+    let out_arg_ids = if out_arg_ids.is_empty() {
+        if let Some(IrArg::List(items)) = graph.node(out).args.first() {
+            items.iter().filter_map(|a| match a {
+                IrArg::Node(id) => Some(*id),
+                _ => None,
+            }).collect()
+        } else { Vec::new() }
+    } else { out_arg_ids };
+
+    let mut count = 0;
+    for id in out_arg_ids {
+        let node = &mut graph.nodes[id];
+        if node.meta.val_shape.as_ref().map(|s| s.len()) != Some(4) { continue; }
+        if node.meta.tosa_dim_order.as_deref() == Some(&NHWC_DIM_ORDER) { continue; }
+        node.meta.set_tosa_dim_order(NHWC_DIM_ORDER.to_vec());
+        count += 1;
+    }
+    count
+}
+
 fn force_cf_rank4_output_dim_order<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
     let submodules = get_cf_submodules(py, gm)?;
     let mut forced: u32 = 0;
-
     for (_name, submodule, _cf_node) in &submodules {
-        let out = match output_node(&submodule)? { Some(n) => n, None => continue };
-        let output_args = unpack_output_vals(&out)?;
-        let mut modified = false;
-        for arg in &output_args {
-            if !FxGraphModule::is_node(arg) { continue; }
-            let mut m = NodeMeta::from_fx(arg)?;
-            if m.val_shape.as_ref().map(|s| s.len()) != Some(4) { continue; }
-            if m.tosa_dim_order.as_deref() == Some(&NHWC_DIM_ORDER) { continue; }
-            m.set_tosa_dim_order(NHWC_DIM_ORDER.to_vec());
-            m.write_back(py, arg)?;
-            forced += 1;
-            modified = true;
+        let mut ir = IrGraph::from_fx(&submodule)?;
+        let count = force_rank4_output_dim_order_ir(&mut ir);
+        if count > 0 {
+            ir.write_back(py, &submodule)?;
+            recompile(&submodule)?;
+            forced += count;
         }
-        if modified { recompile(&submodule)?; }
     }
     Ok(forced)
 }
