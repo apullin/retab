@@ -64,7 +64,7 @@ fn extract_qparam_dict(py_dict: &Bound<'_, PyAny>) -> Option<HashMap<usize, QPar
     if map.is_empty() { None } else { Some(map) }
 }
 
-fn qparam_dict_to_py<'py>(
+pub(crate) fn qparam_dict_to_py<'py>(
     py: Python<'py>,
     map: &HashMap<usize, QParam>,
 ) -> PyResult<Bound<'py, PyDict>> {

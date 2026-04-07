@@ -533,41 +533,26 @@ pub(crate) fn propagate_parent_qparams_to_placeholders<'py>(
 //    Stamps NHWC dim_order on parent CF node users (getitem nodes).
 // ---------------------------------------------------------------------------
 
+const NHWC_DIM_ORDER: [usize; 4] = [0, 2, 3, 1];
+
 fn annotate_cf_parent_rank4_dim_order<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
-    let desired = PyTuple::new_bound(py, [0i64, 2, 3, 1]);
     let submodules = get_cf_submodules(py, gm)?;
     let mut annotated: u32 = 0;
 
     for (_name, _submodule, cf_node) in &submodules {
-        let users = ordered_cf_users(cf_node)?;
-        for user in &users {
-            let meta = user.getattr("meta")?;
-            let val = match meta_val(&meta, "val") {
-                Some(v) => v,
-                None => continue,
-            };
-            let dim: i64 = match val.call_method0("dim") {
-                Ok(d) => d.extract().unwrap_or(0),
-                Err(_) => continue,
-            };
-            if dim != 4 {
-                continue;
-            }
-            meta.set_item("arm_control_flow_parent_output_user", true)?;
-
-            // Check if already correct
-            let current: Vec<i64> = meta_get(&meta, "tosa_dim_order", Vec::new());
-            if current == [0, 2, 3, 1] {
-                continue;
-            }
-            meta.set_item("tosa_dim_order", &desired)?;
+        for user in &ordered_cf_users(cf_node)? {
+            let mut m = NodeMeta::from_fx(user)?;
+            if m.val_shape.as_ref().map(|s| s.len()) != Some(4) { continue; }
+            user.getattr("meta")?.set_item("arm_control_flow_parent_output_user", true)?;
+            if m.tosa_dim_order.as_deref() == Some(&NHWC_DIM_ORDER) { continue; }
+            m.set_tosa_dim_order(NHWC_DIM_ORDER.to_vec());
+            m.write_back(py, user)?;
             annotated += 1;
         }
     }
-
     Ok(annotated)
 }
 
@@ -580,7 +565,6 @@ fn annotate_cf_rank4_dim_order<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
-    let desired = PyTuple::new_bound(py, [0i64, 2, 3, 1]);
     let submodules = get_cf_submodules(py, gm)?;
     let mut annotated: u32 = 0;
 
@@ -588,30 +572,16 @@ fn annotate_cf_rank4_dim_order<'py>(
         let mut modified = false;
         for node in graph_nodes(&submodule)? {
             if NodeOp::of(&node) != NodeOp::CallFunction { continue; }
-            let meta = node.getattr("meta")?;
-            if meta_val(&meta, "tosa_dim_order").is_some() {
-                continue;
-            }
-            let val = match meta_val(&meta, "val") {
-                Some(v) => v,
-                None => continue,
-            };
-            let dim: i64 = match val.call_method0("dim") {
-                Ok(d) => d.extract().unwrap_or(0),
-                Err(_) => continue,
-            };
-            if dim != 4 {
-                continue;
-            }
-            meta.set_item("tosa_dim_order", &desired)?;
+            let mut m = NodeMeta::from_fx(&node)?;
+            if m.tosa_dim_order.is_some() { continue; }
+            if m.val_shape.as_ref().map(|s| s.len()) != Some(4) { continue; }
+            m.set_tosa_dim_order(NHWC_DIM_ORDER.to_vec());
+            m.write_back(py, &node)?;
             annotated += 1;
             modified = true;
         }
-        if modified {
-            recompile(&submodule)?;
-        }
+        if modified { recompile(&submodule)?; }
     }
-
     Ok(annotated)
 }
 
@@ -624,63 +594,25 @@ fn force_cf_rank4_output_dim_order<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
-    let desired = PyTuple::new_bound(py, [0i64, 2, 3, 1]);
     let submodules = get_cf_submodules(py, gm)?;
     let mut forced: u32 = 0;
 
     for (_name, submodule, _cf_node) in &submodules {
-        let output_node = match output_node(&submodule)? {
-            Some(n) => n,
-            None => continue,
-        };
-        let args = FxGraphModule::node_args(&output_node)?;
-        if args.is_empty() {
-            continue;
-        }
-
-        // output_node.args[0] can be a single node or a list of nodes
-        let output_args: Vec<Bound<'py, PyAny>> = if FxGraphModule::is_node(&args[0]) {
-            vec![args[0].clone()]
-        } else if let Ok(iter) = args[0].iter() {
-            let mut v = Vec::new();
-            for item in iter {
-                v.push(item?);
-            }
-            v
-        } else {
-            continue;
-        };
-
+        let out = match output_node(&submodule)? { Some(n) => n, None => continue };
+        let output_args = unpack_output_vals(&out)?;
         let mut modified = false;
-        for output_arg in &output_args {
-            if !FxGraphModule::is_node(output_arg) {
-                continue;
-            }
-            let meta = output_arg.getattr("meta")?;
-            let val = match meta_val(&meta, "val") {
-                Some(v) => v,
-                None => continue,
-            };
-            let dim: i64 = match val.call_method0("dim") {
-                Ok(d) => d.extract().unwrap_or(0),
-                Err(_) => continue,
-            };
-            if dim != 4 {
-                continue;
-            }
-            let current: Vec<i64> = meta_get(&meta, "tosa_dim_order", Vec::new());
-            if current == [0, 2, 3, 1] {
-                continue;
-            }
-            meta.set_item("tosa_dim_order", &desired)?;
+        for arg in &output_args {
+            if !FxGraphModule::is_node(arg) { continue; }
+            let mut m = NodeMeta::from_fx(arg)?;
+            if m.val_shape.as_ref().map(|s| s.len()) != Some(4) { continue; }
+            if m.tosa_dim_order.as_deref() == Some(&NHWC_DIM_ORDER) { continue; }
+            m.set_tosa_dim_order(NHWC_DIM_ORDER.to_vec());
+            m.write_back(py, arg)?;
             forced += 1;
             modified = true;
         }
-        if modified {
-            recompile(&submodule)?;
-        }
+        if modified { recompile(&submodule)?; }
     }
-
     Ok(forced)
 }
 
@@ -1089,34 +1021,33 @@ fn snapshot_pre_pass_cf_qparams<'py>(
         let cf = match ctx.cf_kind(node)? { Some(k) => k, None => continue };
 
         let parent_args = resolve_cf_parent_args(node)?;
-        let qparams_dict = pyo3::types::PyDict::new_bound(py);
+        let mut snapshot: HashMap<usize, QParam> = HashMap::new();
         for (i, arg) in parent_args.iter().enumerate() {
-            // Try metadata first
-            let meta = arg.getattr("meta")?;
-            if let Ok(oqp) = meta.get_item("output_qparams") {
-                if let Some(qp) = extract_single_qparam_entry(&oqp) {
-                    qparams_dict.set_item(i, &qp)?;
-                    saved += 1;
-                    continue;
-                }
-            }
-            // Walk producer chain: the arg might be a DQ node with literal qparams
-            if let Some(qp) = extract_effective_qparam(arg)? {
-                qparams_dict.set_item(i, qp.to_py(py)?)?;
+            let arg_meta = NodeMeta::from_fx(arg)?;
+            // Try output_qparams from metadata
+            if let Some(qp) = arg_meta.output_qparam() {
+                snapshot.insert(i, qp.clone());
                 saved += 1;
                 continue;
             }
-            // Last resort: if arg IS a DQ/Q call, parse its literal args
+            // Walk producer chain
+            if let Some(qp) = extract_effective_qparam(arg)? {
+                snapshot.insert(i, qp);
+                saved += 1;
+                continue;
+            }
+            // Last resort: Q/DQ literal args
             if is_dequantize_node(arg) || is_quantize_node(arg) {
-                if let Some(qp) = parse_per_tensor_qparam(py, arg)? {
-                    qparams_dict.set_item(i, &qp)?;
+                if let Ok(Some(qp)) = parse_qparam(arg) {
+                    snapshot.insert(i, qp);
                     saved += 1;
                 }
             }
         }
-        if !qparams_dict.is_empty() {
+        if !snapshot.is_empty() {
             let cf_meta = node.getattr("meta")?;
-            cf_meta.set_item("_pre_pass_arg_qparams", &qparams_dict)?;
+            cf_meta.set_item("_pre_pass_arg_qparams",
+                crate::fx_ir::qparam_dict_to_py(py, &snapshot)?)?;
         }
     }
     if saved > 0 {
