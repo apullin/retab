@@ -12,8 +12,10 @@ use crate::runner_logging::log_line;
 // CfCtx — cached Python imports and shared context
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CfKind { Cond, While }
+
 /// Cached Python module imports for control-flow operations.
-/// Created once per pipeline invocation, passed to all CF functions.
 struct CfCtx<'py> {
     torch: Bound<'py, PyAny>,
     cond_op: Bound<'py, PyAny>,
@@ -32,12 +34,11 @@ impl<'py> CfCtx<'py> {
     fn int8(&self) -> PyResult<Bound<'py, PyAny>> { self.torch.getattr("int8") }
     fn int16(&self) -> PyResult<Bound<'py, PyAny>> { self.torch.getattr("int16") }
 
-    fn is_cond_or_while(&self, node: &Bound<'py, PyAny>) -> PyResult<(bool, bool)> {
+    fn cf_kind(&self, node: &Bound<'py, PyAny>) -> PyResult<Option<CfKind>> {
         let target = node.getattr("target")?;
-        Ok((
-            target.eq(&self.cond_op).unwrap_or(false),
-            target.eq(&self.while_op).unwrap_or(false),
-        ))
+        if target.eq(&self.cond_op).unwrap_or(false) { Ok(Some(CfKind::Cond)) }
+        else if target.eq(&self.while_op).unwrap_or(false) { Ok(Some(CfKind::While)) }
+        else { Ok(None) }
     }
 }
 
@@ -238,6 +239,13 @@ fn unpack_output_vals<'py>(output: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py
         if let Ok(it) = oargs[0].iter() { it.filter_map(|v| v.ok()).collect() }
         else { vec![oargs[0].clone()] }
     } else { oargs })
+}
+
+/// Rebuild the output node's args as a tuple after modifying values.
+fn repack_output_vals(py: Python<'_>, output: &Bound<'_, PyAny>, vals: &[Bound<'_, PyAny>]) -> PyResult<()> {
+    let new_tuple = PyTuple::new_bound(py, vals);
+    output.call_method("update_arg", (0i64, &new_tuple), None)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -569,10 +577,7 @@ fn annotate_cf_rank4_dim_order<'py>(
     for (_name, submodule, _cf_node) in &submodules {
         let mut modified = false;
         for node in graph_nodes(&submodule)? {
-            let op: String = node.getattr("op")?.extract()?;
-            if op != "call_function" {
-                continue;
-            }
+            if NodeOp::of(&node) != NodeOp::CallFunction { continue; }
             let meta = node.getattr("meta")?;
             if meta_val(&meta, "tosa_dim_order").is_some() {
                 continue;
@@ -794,13 +799,8 @@ fn snapshot_cf_table_qparams<'py>(
 
     for (_name, submodule, _cf_node) in &submodules {
         for node in graph_nodes(&submodule)? {
-            let op: String = node.getattr("op")?.extract()?;
-            if op != "call_function" {
-                continue;
-            }
+            if NodeOp::of(&node) != NodeOp::CallFunction { continue; }
             let target = node.getattr("target")?;
-
-            // Check if target is in table_targets
             let is_table = table_targets.iter().any(|t| target.eq(t).unwrap_or(false));
             if !is_table {
                 continue;
@@ -1078,10 +1078,8 @@ fn snapshot_pre_pass_cf_qparams<'py>(
 
     let mut saved = 0u32;
     for node in &nodes {
-        let op: String = node.getattr("op").and_then(|v| v.extract()).unwrap_or_default();
-        if op != "call_function" { continue; }
-        let (is_cond, is_while) = ctx.is_cond_or_while(node)?;
-        if !is_cond && !is_while { continue; }
+        if NodeOp::of(node) != NodeOp::CallFunction { continue; }
+        let cf = match ctx.cf_kind(node)? { Some(k) => k, None => continue };
 
         let parent_args = resolve_cf_parent_args(node)?;
         let qparams_dict = pyo3::types::PyDict::new_bound(py);
@@ -2301,17 +2299,15 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
     let mut count = 0u32;
 
     for node in &nodes {
-        let op: String = node.getattr("op").and_then(|v| v.extract()).unwrap_or_default();
-        if op != "call_function" { continue; }
-        let (is_cond, is_while) = ctx.is_cond_or_while(node)?;
-        if !is_while && !is_cond { continue; }
+        if NodeOp::of(node) != NodeOp::CallFunction { continue; }
+        let cf = match ctx.cf_kind(node)? { Some(k) => k, None => continue };
 
         // Get external qparams from the cf node's input_qparams
         // External qparam: while_loop carried_args at idx 2, cond data_args at idx 3
         let cf_meta = node.getattr("meta")?;
         let ext_qp_dict = cf_meta.get_item("input_qparams").ok();
         // The external qparam is at key matching the carried_args index in the node
-        let carried_idx: usize = if is_while { 2 } else { 3 };
+        let carried_idx: usize = if cf == CfKind::While { 2 } else { 3 };
         let ext_qp = ext_qp_dict.as_ref()
             .and_then(|d| d.get_item(carried_idx).ok())
             .map(|v| QParam::from_py(&v))
@@ -2322,7 +2318,7 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
 
         // Get submodules
         let args = FxGraphModule::node_args(node)?;
-        let submodule_indices: Vec<usize> = if is_while {
+        let submodule_indices: Vec<usize> = if cf == CfKind::While {
             vec![0, 1] // cond_fn, body_fn
         } else {
             vec![1, 2] // if_branch, else_branch
@@ -2364,7 +2360,7 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
             }
 
             // --- Output RESCALE: before output (while body only, or cond branches) ---
-            if (is_while && sm_idx == 1) || is_cond {
+            if (cf == CfKind::While && sm_idx == 1) || cf == CfKind::Cond {
                 let output_qparams = infer_cf_output_qparams_map(node)?;
                 if !output_qparams.is_empty() {
                     if let Some(output) = output_node(&submodule)? {
@@ -2394,8 +2390,7 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
                             count += 1;
                         }
                         if out_modified {
-                            let new_tuple = pyo3::types::PyTuple::new_bound(py, &new_vals);
-                            output.call_method("update_arg", (0i64, &new_tuple), None)?;
+                            repack_output_vals(py, &output, &new_vals)?;
                         }
                     }
                 }
@@ -2484,15 +2479,13 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
     let mut any_modified = false;
 
     for node in &nodes {
-        let op: String = node.getattr("op").and_then(|v| v.extract()).unwrap_or_default();
-        if op != "call_function" { continue; }
-        let (is_cond, is_while) = ctx.is_cond_or_while(node)?;
-        if !is_cond && !is_while { continue; }
+        if NodeOp::of(node) != NodeOp::CallFunction { continue; }
+        let cf = match ctx.cf_kind(node)? { Some(k) => k, None => continue };
 
         let args = FxGraphModule::node_args(node)?;
 
         // Get submodule(s) to process for outputs
-        let submodules_to_process: Vec<Bound<'py, PyAny>> = if is_cond {
+        let submodules_to_process: Vec<Bound<'py, PyAny>> = if cf == CfKind::Cond {
             if args.len() >= 3 {
                 let if_name: String = args[1].getattr("target").and_then(|t| t.extract()).unwrap_or_default();
                 let else_name: String = args[2].getattr("target").and_then(|t| t.extract()).unwrap_or_default();
@@ -2511,7 +2504,7 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
         };
 
         // Target qparams
-        let targets: Vec<(usize, QParam)> = if is_while {
+        let targets: Vec<(usize, QParam)> = if cf == CfKind::While {
             let parent_args = resolve_cf_parent_args(node)?;
             parent_args.iter().enumerate()
                 .filter_map(|(i, pa)| extract_effective_qparam(pa).ok().flatten().map(|qp| (i, qp)))
@@ -2547,8 +2540,7 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
 
             if modified {
                 if was_tuple_wrapped {
-                    let new_tuple = pyo3::types::PyTuple::new_bound(py, &ovals);
-                    output.call_method("update_arg", (0i64, &new_tuple), None)?;
+                    repack_output_vals(py, &output, &ovals)?;
                 } else {
                     for (idx, _) in &targets {
                         output.call_method("update_arg", (*idx as i64, &ovals[*idx]), None)?;
