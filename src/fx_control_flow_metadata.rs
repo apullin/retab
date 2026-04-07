@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_graph::{meta_get, meta_val, py_attr, FxGraphModule};
-use crate::fx_ir::{IrArg, IrGraph, NodeId, NodeMeta};
+use crate::fx_ir::{IrArg, IrGraph, IrNode, NodeId, NodeMeta};
 use crate::fx_pass::FxPass;
 use crate::runner_logging::log_line;
 
@@ -496,25 +496,15 @@ pub(crate) fn propagate_parent_qparams_to_placeholders<'py>(
             continue; // This is the cond submodule, skip
         }
 
-        let placeholders = nodes_by_op(submodule, NodeOp::Placeholder)?;
-        if let Some(output) = output_node(submodule)? {
-            let mut out_meta = NodeMeta::from_fx(&output)?;
-            let mut loop_carried = HashMap::new();
-            for (idx, ph) in placeholders.iter().enumerate() {
-                let ph_m = NodeMeta::from_fx(ph)?;
-                if let Some(qp) = ph_m.output_qparam().or(ph_m.input_qparam()) {
-                    loop_carried.insert(idx, qp.clone());
-                    propagated += 1;
-                }
-            }
-            if !loop_carried.is_empty() {
-                log_line(format_args!(
-                    "[propagate-boundary-qparams] stamped while_loop body output with {} loop-carried qparam(s)",
-                    loop_carried.len()
-                ));
-                out_meta.set_input_qparams(loop_carried);
-                out_meta.write_back(py, &output)?;
-            }
+        let mut ir = IrGraph::from_fx(&submodule)?;
+        let count = stamp_while_body_output_qparams_ir(&mut ir);
+        if count > 0 {
+            log_line(format_args!(
+                "[propagate-boundary-qparams] stamped while_loop body output with {} loop-carried qparam(s)",
+                count
+            ));
+            ir.write_back(py, &submodule)?;
+            propagated += count as u32;
         }
     }
 
@@ -561,6 +551,57 @@ fn annotate_cf_parent_rank4_dim_order<'py>(
 //    Stamps dim_order on rank-4 call_function nodes in submodules.
 // ---------------------------------------------------------------------------
 
+/// Pure Rust: walk producer chain to find effective qparam.
+fn extract_effective_qparam_ir(graph: &IrGraph, start: NodeId) -> Option<QParam> {
+    let mut current = start;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if !seen.insert(current) { break; }
+        let node = graph.node(current);
+        if let Some(qp) = node.meta.output_qparam() { return Some(qp.clone()); }
+        if let Some(qp) = node.meta.input_qparam() { return Some(qp.clone()); }
+        // RESCALE reverse-engineering
+        if let Some(qp) = reverse_engineer_rescale_ir(graph, node) {
+            return Some(qp);
+        }
+        current = match node.first_node_arg() { Some(id) => id, None => break };
+    }
+    None
+}
+
+/// Pure Rust: derive qparam from RESCALE args.
+fn reverse_engineer_rescale_ir(graph: &IrGraph, node: &IrNode) -> Option<QParam> {
+    if !node.is_rescale() || node.args.len() < 5 { return None; }
+    let source_id = match node.args[0] { IrArg::Node(id) => id, _ => return None };
+    let source_qp = extract_effective_qparam_ir(graph, source_id)?;
+    // args[2] = scale list, args[4] = output_zp
+    let mult_val = match &node.args[2] {
+        IrArg::List(items) if items.len() == 1 => match &items[0] {
+            IrArg::Float(v) => *v,
+            IrArg::Int(v) => *v as f64,
+            _ => return None,
+        },
+        IrArg::Float(v) => *v,
+        _ => return None,
+    };
+    if mult_val == 0.0 { return None; }
+    let output_zp = match &node.args[4] { IrArg::Int(v) => *v, _ => return None };
+    // args[1] = dtype string (stored in target or as a string arg)
+    let dtype_str = match &node.args[1] {
+        IrArg::Str(s) => s.clone(),
+        _ => {
+            // dtype might be stored as a non-string Python object — fall back to target
+            let s = format!("{:?}", node.args[1]);
+            if s.contains("int") { s } else { return None; }
+        }
+    };
+    if !dtype_str.contains("int") { return None; }
+    let (qmin, qmax) = if dtype_str.contains("int8") { (-128i64, 127i64) }
+        else if dtype_str.contains("int16") { (-32768, 32767) }
+        else { (i32::MIN as i64, i32::MAX as i64) };
+    Some(QParam { scale: source_qp.scale / mult_val, zp: output_zp, qmin, qmax, dtype_str })
+}
+
 /// Pure Rust: annotate rank-4 call_function nodes with NHWC dim order.
 fn annotate_rank4_dim_order_ir(graph: &mut IrGraph) -> u32 {
     let mut count = 0;
@@ -597,6 +638,30 @@ fn annotate_cf_rank4_dim_order<'py>(
 // 4. _force_control_flow_rank4_output_dim_order
 //    Stamps dim_order on output-feeding nodes with rank-4 tensors.
 // ---------------------------------------------------------------------------
+
+/// Pure Rust: stamp output node's input_qparams from placeholder qparams (loop-carried).
+fn stamp_while_body_output_qparams_ir(graph: &mut IrGraph) -> usize {
+    let ph_qparams: Vec<(usize, QParam)> = graph.placeholders()
+        .enumerate()
+        .filter_map(|(idx, ph)| {
+            ph.meta.output_qparam()
+                .or(ph.meta.input_qparam())
+                .cloned()
+                .map(|qp| (idx, qp))
+        })
+        .collect();
+
+    if ph_qparams.is_empty() { return 0; }
+    let count = ph_qparams.len();
+
+    let out_id = match graph.output_node() { Some(n) => n.id, None => return 0 };
+    let mut map = HashMap::new();
+    for (idx, qp) in ph_qparams {
+        map.insert(idx, qp);
+    }
+    graph.node_mut(out_id).meta.set_input_qparams(map);
+    count
+}
 
 /// Pure Rust: stamp NHWC dim_order on rank-4 output args.
 fn force_rank4_output_dim_order_ir(graph: &mut IrGraph) -> u32 {

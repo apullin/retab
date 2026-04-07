@@ -191,10 +191,24 @@ fn some_pass(py: Python, gm: &Bound<PyAny>) -> PyResult<bool> {
 
 This is incremental — each pass can be migrated independently.
 
-### Phase 2: Full IrGraph for metadata passes
+### Phase 2: Full IrGraph for metadata passes — DONE
 
-Passes that only read/write metadata (FxControlFlowMetadataPass,
-propagate_parent_qparams, etc.) can use IrGraph fully.
+IrGraph imports full node topology: IrNode with id, op, name, target,
+args (Vec<IrArg> with NodeId references), meta (NodeMeta). Reverse
+edges (users) built during import.
+
+**Pure Rust `_ir` functions (no `<'py>`, no `PyResult`):**
+- `extract_effective_qparam_ir(graph, start_id)` — producer chain walk
+- `reverse_engineer_rescale_ir(graph, node)` — derive qparam from RESCALE args
+- `annotate_rank4_dim_order_ir(graph)` — stamp NHWC on rank-4 nodes
+- `stamp_while_body_output_qparams_ir(graph)` — loop-carried output qparams
+- `force_rank4_output_dim_order_ir(graph)` — stamp NHWC on output args
+
+**Wrapper pattern:** `IrGraph::from_fx(&submodule)?` → pure Rust → `ir.write_back(py, &submodule)?`
+
+**Not migrated (need Python for FakeTensor or graph surgery):**
+- Functions calling `QuantArgs.from_operator`, `_branch_local_control_flow_output_qparam`
+- Functions doing `erase_node`, `replace_all_uses_with`, `call_function` (Phase 3)
 
 ### Phase 3: Graph surgery in IrGraph
 

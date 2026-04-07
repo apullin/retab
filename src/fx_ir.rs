@@ -44,6 +44,8 @@ pub enum IrArg {
 pub struct IrGraph {
     pub nodes: Vec<IrNode>,
     name_to_id: HashMap<String, NodeId>,
+    /// Reverse edges: users[node_id] = list of node IDs that reference this node in their args.
+    users: Vec<Vec<NodeId>>,
 }
 
 impl IrGraph {
@@ -81,7 +83,24 @@ impl IrGraph {
             nodes.push(IrNode { id: i, op, name, target, args, meta });
         }
 
-        Ok(Self { nodes, name_to_id })
+        // Build reverse edges
+        let mut users = vec![Vec::new(); nodes.len()];
+        for node in &nodes {
+            for arg in &node.args {
+                if let IrArg::Node(target_id) = arg {
+                    users[*target_id].push(node.id);
+                }
+                if let IrArg::List(items) = arg {
+                    for item in items {
+                        if let IrArg::Node(target_id) = item {
+                            users[*target_id].push(node.id);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Self { nodes, name_to_id, users })
     }
 
     /// Find a node by name.
@@ -112,6 +131,11 @@ impl IrGraph {
     /// Get mutable node by ID.
     pub fn node_mut(&mut self, id: NodeId) -> &mut IrNode {
         &mut self.nodes[id]
+    }
+
+    /// Get users (nodes that reference this node in their args).
+    pub fn users(&self, id: NodeId) -> &[NodeId] {
+        &self.users[id]
     }
 
     /// Write back all dirty metadata to the Python FX graph.
