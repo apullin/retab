@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::fx_graph::{meta_get, meta_val, py_attr, FxGraphModule};
+use crate::fx_graph::{meta_val, py_attr, FxGraphModule};
 use crate::fx_ir::{IrArg, IrGraph, IrNode, NodeId, NodeMeta, RescaleInsert};
 use crate::fx_pass::FxPass;
 use crate::runner_logging::log_line;
@@ -121,21 +121,6 @@ impl QParam {
     }
 
     /// Store as a single-entry qparam dict {0: self} on node metadata.
-    /// Store as a single-entry qparam dict {0: self} on node metadata.
-    fn stamp_on_meta<'py>(&self, py: Python<'py>, meta: &Bound<'py, PyAny>, key: &str) -> PyResult<()> {
-        let dict = PyDict::new_bound(py);
-        dict.set_item(0i64, self.to_py(py)?)?;
-        meta.set_item(key, dict)?;
-        Ok(())
-    }
-
-    /// Stamp both input_qparams and output_qparams on a node's metadata.
-    fn stamp_both<'py>(&self, py: Python<'py>, meta: &Bound<'py, PyAny>) -> PyResult<()> {
-        self.stamp_on_meta(py, meta, "output_qparams")?;
-        self.stamp_on_meta(py, meta, "input_qparams")?;
-        Ok(())
-    }
-
     /// Insert a RESCALE node converting from `self` domain to `target` domain.
     /// Returns the new rescale node. `after=true` inserts after `anchor`,
     /// `after=false` inserts before `anchor`.
@@ -1314,39 +1299,7 @@ fn rescale_signature<'py>(node: &Bound<'py, PyAny>) -> Option<Vec<String>> {
     Some(sig)
 }
 
-/// Extract a single Python qparam entry from a qparams dict.
-/// Returns Bound<PyAny> for callers that need to pass it back to Python.
-/// For Rust-native QParam, use extract_qparam() instead.
-fn extract_single_qparam_entry<'py>(
-    qparams: &Bound<'py, PyAny>,
-) -> Option<Bound<'py, PyAny>> {
-    if qparams.is_none() {
-        return None;
-    }
-    let is_truthy = qparams.is_truthy().unwrap_or(false);
-    if !is_truthy {
-        return None;
-    }
-    // Try dict with key 0
-    if let Ok(val) = qparams.get_item(0i64) {
-        if !val.is_none() {
-            return Some(val);
-        }
-    }
-    // Try dict with len==1 -> return first value
-    if let Ok(len) = qparams.len() {
-        if len == 1 {
-            if let Ok(values) = qparams.call_method0("values") {
-                if let Ok(mut iter) = values.iter() {
-                    if let Some(Ok(val)) = iter.next() {
-                        return Some(val);
-                    }
-                }
-            }
-        }
-    }
-    Some(qparams.clone())
-}
+// extract_single_qparam_entry: DELETED — replaced by extract_qparam() returning QParam
 
 /// Extract the effective quantization parameters for a node by walking
 /// producer edges until a node with qparam metadata or a RESCALE is found.
@@ -1427,11 +1380,9 @@ fn copy_output_contract_meta<'py>(
 ) -> PyResult<()> {
     let dst_meta = dst.getattr("meta")?;
     let src_meta = src.getattr("meta")?;
-    // val
     if let Some(val) = meta_val(&src_meta, "val") {
         dst_meta.set_item("val", &val)?;
     }
-    // tosa_dim_order
     if let Some(tdo) = meta_val(&src_meta, "tosa_dim_order") {
         let py = dst.py();
         let t = PyTuple::new_bound(py, &py_iter_collect(&tdo));
@@ -1461,31 +1412,14 @@ fn get_all_modules<'py>(
 
 /// Get `_actual_shape_from_meta` for a node. Returns None if not available.
 fn actual_shape_from_meta<'py>(node: &Bound<'py, PyAny>) -> PyResult<Option<Vec<i64>>> {
-    let meta = node.getattr("meta")?;
-    let fake_tensor = match meta_val(&meta, "val") {
-        Some(v) => v,
-        None => return Ok(None),
-    };
-    let shape_obj = match fake_tensor.getattr("shape") {
-        Ok(s) => s,
-        Err(_) => return Ok(None),
-    };
-    let shape: Vec<i64> = match shape_obj.extract() {
-        Ok(s) => s,
-        Err(_) => return Ok(None),
-    };
-
-    let dim_order = meta_val(&meta, "tosa_dim_order");
-    if let Some(tdo) = dim_order {
-        let tdo_vec: Vec<usize> = match tdo.extract() {
-            Ok(v) => v,
-            Err(_) => return Ok(Some(shape)),
-        };
-        if tdo_vec.len() == shape.len() {
+    let m = NodeMeta::from_fx(node)?;
+    let shape = match m.val_shape { Some(s) => s, None => return Ok(None) };
+    // Apply dim_order permutation if present and non-identity
+    if let Some(ref tdo) = m.tosa_dim_order {
+        if tdo.len() == shape.len() {
             let identity: Vec<usize> = (0..shape.len()).collect();
-            if tdo_vec != identity {
-                let permuted: Vec<i64> = tdo_vec.iter().map(|&idx| shape[idx]).collect();
-                return Ok(Some(permuted));
+            if tdo != &identity {
+                return Ok(Some(tdo.iter().map(|&idx| shape[idx]).collect()));
             }
         }
     }
@@ -1496,35 +1430,7 @@ fn actual_shape_from_meta<'py>(node: &Bound<'py, PyAny>) -> PyResult<Option<Vec<
 // 1. _remove_control_flow_noop_passthroughs
 // ---------------------------------------------------------------------------
 
-/// Check if two Python values have the same extractable value for a given attr.
-fn meta_attr_matches<T: PartialEq + for<'a> pyo3::FromPyObject<'a>>(
-    a: &Bound<'_, PyAny>,
-    b: &Bound<'_, PyAny>,
-    attr: &str,
-) -> bool {
-    let av = a.getattr(attr).ok().and_then(|v| v.extract::<T>().ok());
-    let bv = b.getattr(attr).ok().and_then(|v| v.extract::<T>().ok());
-    match (av, bv) {
-        (Some(a), Some(b)) => a == b,
-        _ => true, // if either is missing, don't block
-    }
-}
-
-/// Copy a metadata key from src to dst if dst doesn't have it.
-fn propagate_meta_key(
-    py: Python<'_>,
-    dst_meta: &Bound<'_, PyAny>,
-    src_meta: &Bound<'_, PyAny>,
-    key: &str,
-) -> PyResult<()> {
-    if meta_val(dst_meta, key).is_some() { return Ok(()); }
-    if let Some(val) = meta_val(src_meta, key) {
-        if !val.is_truthy().unwrap_or(false) { return Ok(()); }
-        let copy = val.call_method0("copy")?;
-        dst_meta.set_item(key, &copy)?;
-    }
-    Ok(())
-}
+// meta_attr_matches, propagate_meta_key: DELETED — replaced by NodeMeta in _ir functions
 
 const NOOP_MARKERS: &[&str] = &[
     "dim_order_ops._clone_dim_order",
@@ -1654,28 +1560,13 @@ pub(crate) fn prune_duplicate_terminal_rescales<'py>(
             let node_meta = node.getattr("meta")?;
             let user_meta = user.getattr("meta")?;
 
-            let first_output_qparam = {
-                let oqp = meta_val(&node_meta, "output_qparams");
-                match oqp {
-                    Some(ref v) => extract_single_qparam_entry(v),
-                    None => None,
-                }
+            let node_m = NodeMeta::from_fx(node)?;
+            let user_m = NodeMeta::from_fx(user)?;
+            if node_m.output_qparam().is_some() { continue; }
+            let final_qp = match user_m.output_qparam() {
+                Some(qp) => qp.clone(),
+                None => continue,
             };
-            let final_output_qparam = {
-                let oqp = meta_val(&user_meta, "output_qparams");
-                match oqp {
-                    Some(ref v) => extract_single_qparam_entry(v),
-                    None => None,
-                }
-            };
-
-            if first_output_qparam.is_some() {
-                continue;
-            }
-            if final_output_qparam.is_none() {
-                continue;
-            }
-            let final_output_qparam = final_output_qparam.unwrap();
 
             // Rewrite: node.args = (source, user.args[1..5])
             let node_args = FxGraphModule::node_args(node)?;
@@ -1711,7 +1602,6 @@ pub(crate) fn prune_duplicate_terminal_rescales<'py>(
                 }
             }
 
-            let final_qp = QParam::from_py(&final_output_qparam);
             stamp_qparams(py, node, None, Some(&final_qp))?;
 
             // Replace user with node and erase user
@@ -1838,10 +1728,6 @@ fn is_dequantize_node(node: &Bound<'_, PyAny>) -> bool {
 // Q/DQ node helpers
 // ---------------------------------------------------------------------------
 
-/// Parse scale/zp/qmin/qmax/dtype from a Q or DQ node's literal args.
-/// Returns a Python QuantArgs object or None.
-/// Parse Q/DQ node literal args into a Python QuantArgs object.
-/// Returns Python QuantArgs object for callers that need to pass it to Python functions.
 fn parse_per_tensor_qparam<'py>(
     py: Python<'py>,
     node: &Bound<'py, PyAny>,
@@ -1860,17 +1746,7 @@ fn parse_qparam(node: &Bound<'_, PyAny>) -> PyResult<Option<QParam>> {
 }
 
 /// Check if a node is a zero-input constant source (get_attr or no input args).
-fn is_zero_input_const_source(node: &Bound<'_, PyAny>) -> bool {
-    let op: String = py_attr(node, &["op"], String::new());
-    if op == "get_attr" {
-        return true;
-    }
-    if op != "call_function" {
-        return false;
-    }
-    let args = FxGraphModule::node_args(node).unwrap_or_default();
-    args.iter().all(|a| !FxGraphModule::is_node(a))
-}
+// is_zero_input_const_source: DELETED — replaced by IrNode::is_zero_input_const()
 
 /// Pure Rust: collapse matching Q→DQ pairs.
 /// DQ(Q(x)) where Q and DQ have same qparams → bypass to x.
@@ -1902,73 +1778,7 @@ fn collapse_qdq_pairs_ir(graph: &mut IrGraph) -> u32 {
     count
 }
 
-/// Legacy wrapper for callers that still use Python graph objects.
-fn collapse_control_flow_qdq_pairs<'py>(
-    _py: Python<'py>,
-    graph: &Bound<'py, PyAny>,
-    quant_count: &mut u32,
-) -> PyResult<bool> {
-    let mut modified = false;
-    let nodes: Vec<Bound<'py, PyAny>> = graph
-        .getattr("nodes")?
-        .iter()?
-        .filter_map(|n| n.ok())
-        .collect();
-
-    for node in &nodes {
-        if !is_dequantize_node(node) { continue; }
-        let quant_node = match first_node_arg(node)? { Some(a) => a, None => continue };
-        if !is_quantize_node(&quant_node) {
-            continue;
-        }
-        let quant_qp = match parse_qparam(&quant_node)? {
-            Some(qp) => qp,
-            None => continue,
-        };
-        let dequant_qp = match parse_qparam(node)? {
-            Some(qp) => qp,
-            None => continue,
-        };
-        if !quant_qp.same_as(&dequant_qp) {
-            continue;
-        }
-        let float_source = match first_node_arg(&quant_node)? { Some(a) => a, None => continue };
-
-        // Skip if zero-input const feeding a scalar binary
-        if is_zero_input_const_source(&float_source) {
-            // Check if any user of the DQ node is a binary op (simplified check)
-            let users = node.getattr("users")?;
-            let user_count: usize = users.len().unwrap_or(0);
-            if user_count > 0 {
-                let mut feeds_binary = false;
-                for user in users.iter()? {
-                    let user = user?;
-                    let target = FxGraphModule::node_target_str(&user)?;
-                    if target.contains("add.") || target.contains("sub.")
-                        || target.contains("mul.") {
-                        feeds_binary = true;
-                        break;
-                    }
-                }
-                if feeds_binary {
-                    continue;
-                }
-            }
-        }
-
-        // Bypass: replace DQ with float source
-        node.call_method1("replace_all_uses_with", (float_source,))?;
-        graph.call_method1("erase_node", (node,))?;
-        // Erase Q if no remaining users
-        let q_users = quant_node.getattr("users")?;
-        if q_users.len().unwrap_or(1) == 0 {
-            graph.call_method1("erase_node", (quant_node,))?;
-        }
-        *quant_count += 1;
-        modified = true;
-    }
-    Ok(modified)
-}
+// collapse_control_flow_qdq_pairs: DELETED — replaced by collapse_qdq_pairs_ir
 
 /// Pure Rust: bypass DQ nodes whose users are all RESCALE or output.
 fn rewrite_dequantize_nodes_ir(graph: &mut IrGraph) -> u32 {
@@ -1992,53 +1802,7 @@ fn rewrite_dequantize_nodes_ir(graph: &mut IrGraph) -> u32 {
     count
 }
 
-/// Legacy Python wrapper (kept for callers not yet migrated).
-fn rewrite_control_flow_dequantize_nodes<'py>(
-    _py: Python<'py>,
-    graph: &Bound<'py, PyAny>,
-    _submodule: &Bound<'py, PyAny>,
-    _cf_node: &Bound<'py, PyAny>,
-    dequant_count: &mut u32,
-) -> PyResult<bool> {
-    let mut modified = false;
-    let nodes: Vec<Bound<'py, PyAny>> = graph
-        .getattr("nodes")?
-        .iter()?
-        .filter_map(|n| n.ok())
-        .collect();
-
-    for node in &nodes {
-        if !is_dequantize_node(node) { continue; }
-        let source_node = match first_node_arg(node)? { Some(a) => a, None => continue };
-        let users: Vec<Bound<'py, PyAny>> = node
-            .getattr("users")?
-            .iter()?
-            .filter_map(|u| u.ok())
-            .collect();
-        if users.is_empty() {
-            continue;
-        }
-
-        // Int32 cluster rewrite — dead under correct qparam propagation.
-        if let Ok(Some(_source_qp)) = extract_effective_qparam(&source_node) {
-        }
-
-        // Simple bypass: if all users are RESCALE or output, remove the DQ
-        let all_rescale_or_output = users.iter().all(|user| {
-            is_tosa_rescale_node(user)
-                || NodeOp::of(user) == NodeOp::Output
-        });
-        if !all_rescale_or_output {
-            continue;
-        }
-
-        node.call_method1("replace_all_uses_with", (source_node,))?;
-        graph.call_method1("erase_node", (node,))?;
-        *dequant_count += 1;
-        modified = true;
-    }
-    Ok(modified)
-}
+// rewrite_control_flow_dequantize_nodes: DELETED — replaced by rewrite_dequantize_nodes_ir
 
 /// Pure Rust: rewrite Q nodes — bypass same-qparam, emit RescaleInsert for different.
 fn rewrite_quantize_nodes_ir(graph: &mut IrGraph) -> (u32, Vec<RescaleInsert>) {
@@ -2083,64 +1847,7 @@ fn rewrite_quantize_nodes_ir(graph: &mut IrGraph) -> (u32, Vec<RescaleInsert>) {
     (count, inserts)
 }
 
-/// Legacy Python wrapper.
-fn rewrite_control_flow_quantize_nodes<'py>(
-    py: Python<'py>,
-    graph: &Bound<'py, PyAny>,
-    submodule: &Bound<'py, PyAny>,
-    _cf_node: &Bound<'py, PyAny>,
-    quant_count: &mut u32,
-) -> PyResult<bool> {
-    let mut modified = false;
-    let nodes: Vec<Bound<'py, PyAny>> = graph
-        .getattr("nodes")?
-        .iter()?
-        .filter_map(|n| n.ok())
-        .collect();
-
-    for node in &nodes {
-        if !is_quantize_node(node) { continue; }
-        let source_node = match first_node_arg(node)? { Some(a) => a, None => continue };
-        let target = match parse_qparam(node)? {
-            Some(qp) => qp,
-            None => continue,
-        };
-        let source = extract_effective_qparam(&source_node)?;
-
-        // Skip float sources with no qparams (unless zero-input const)
-        let source_dtype_str = source_node.getattr("meta")?
-            .get_item("val").ok()
-            .and_then(|v| v.getattr("dtype").ok())
-            .map(|d| format!("{d}")).unwrap_or_default();
-        let source_is_int = source_dtype_str.contains("int");
-        if !source_is_int && source.is_none() && !is_zero_input_const_source(&source_node) {
-            continue;
-        }
-
-        if source.is_none() {
-            continue;
-        }
-        let source = source.unwrap();
-
-        // Case 1: same qparam → bypass (erase Q node)
-        if source.same_as(&target) {
-            node.call_method1("replace_all_uses_with", (source_node,))?;
-            graph.call_method1("erase_node", (node,))?;
-            *quant_count += 1;
-            modified = true;
-            continue;
-        }
-
-        // Case 3: different qparam → insert RESCALE
-        let rescale = source.insert_rescale_to(&target, py, submodule, node, &source_node, false)?;
-        stamp_qparams(py, &rescale, Some(&source), Some(&target))?;
-        node.call_method1("replace_all_uses_with", (&rescale,))?;
-        graph.call_method1("erase_node", (node,))?;
-        *quant_count += 1;
-        modified = true;
-    }
-    Ok(modified)
-}
+// rewrite_control_flow_quantize_nodes: DELETED — replaced by rewrite_quantize_nodes_ir
 
 // ---------------------------------------------------------------------------
 // _rewrite_control_flow_quantization_boundaries
@@ -2415,20 +2122,7 @@ pub(crate) fn restore_control_flow_float_compare_inputs<'py>(
     Ok(restored)
 }
 
-// ---------------------------------------------------------------------------
-// _normalize_control_flow_output_layouts
-//
-// Wrapper that delegates to Python _normalize_control_flow_output_contracts
-// with normalize_outputs=True.
-// ---------------------------------------------------------------------------
-
-/// No-op — layout normalization not needed with correct qparam propagation.
-pub(crate) fn normalize_control_flow_output_layouts<'py>(
-    _py: Python<'py>,
-    _gm: &Bound<'py, PyAny>,
-) -> PyResult<u32> {
-    Ok(0)
-}
+// normalize_control_flow_output_layouts: DELETED — was already a no-op
 
 // ---------------------------------------------------------------------------
 // Combined Cleanup Pass
@@ -2722,7 +2416,7 @@ pub(crate) fn run_output_normalize_phase<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<()> {
-    normalize_control_flow_output_layouts(py, gm)?;
+    // normalize_control_flow_output_layouts — no-op, removed
     reapply_control_flow_boundary_rescales(py, gm, false, true)?;
     rewrite_control_flow_quantization_boundaries(py, gm)?;
     remove_control_flow_noop_passthroughs(py, gm)?;
