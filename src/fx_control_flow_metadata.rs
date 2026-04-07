@@ -878,25 +878,19 @@ impl FxPass for FxWhileStripBoundaryQPass {
         // The DQ nodes must stay (they convert INT8→float for the parent graph).
         // We just stamp their literal qparams on output_node.meta["input_qparams"]
         // so insert_cf_boundary_rescales can compute the correct output RESCALE.
-        let output_node = output_node(gm.gm_ref())?;
-        if let Some(output) = output_node {
-            let out_meta = output.getattr("meta")?;
-            if out_meta.get_item("input_qparams").is_err() {
-                out_meta.set_item("input_qparams", pyo3::types::PyDict::new_bound(py))?;
-            }
-
-            let oargs = FxGraphModule::node_args(&output)?;
-            let ovals: Vec<Bound<'_, PyAny>> = if oargs.len() == 1 {
-                if let Ok(it) = oargs[0].iter() { it.filter_map(|v| v.ok()).collect() }
-                else { vec![oargs[0].clone()] }
-            } else { oargs };
-
+        if let Some(output) = output_node(gm.gm_ref())? {
+            let ovals = unpack_output_vals(&output)?;
+            let mut out_m = NodeMeta::from_fx(&output)?;
+            let mut iqp_map = out_m.input_qparams.clone().unwrap_or_default();
             for (i, val) in ovals.iter().enumerate() {
                 if !FxGraphModule::is_node(val) || !is_dequantize_node(val) { continue; }
-                if let Some(qp) = parse_per_tensor_qparam(py, val)? {
-                    let iqp_dict = out_meta.get_item("input_qparams")?;
-                    iqp_dict.set_item(i, &qp)?;
+                if let Ok(Some(qp)) = parse_qparam(val) {
+                    iqp_map.insert(i, qp);
                 }
+            }
+            if !iqp_map.is_empty() {
+                out_m.set_input_qparams(iqp_map);
+                out_m.write_back(py, &output)?;
             }
         }
 
@@ -1238,13 +1232,9 @@ fn extract_effective_qparam(
             .and_then(|h| h.extract()).unwrap_or(0);
         if !seen.insert(node_id) { break; }
 
-        let meta = current.getattr("meta")?;
-        if let Ok(oqp) = meta.get_item("output_qparams") {
-            if let Some(qp) = extract_qparam(&oqp) { return Ok(Some(qp)); }
-        }
-        if let Ok(iqp) = meta.get_item("input_qparams") {
-            if let Some(qp) = extract_qparam(&iqp) { return Ok(Some(qp)); }
-        }
+        let m = NodeMeta::from_fx(&current)?;
+        if let Some(qp) = m.output_qparam() { return Ok(Some(qp.clone())); }
+        if let Some(qp) = m.input_qparam() { return Ok(Some(qp.clone())); }
 
         let args = FxGraphModule::node_args(&current)?;
         if let Some(qp) = try_reverse_engineer_rescale_qparam(&current, &args)? {
@@ -1292,13 +1282,10 @@ fn stamp_qparams(
     input: Option<&QParam>,
     output: Option<&QParam>,
 ) -> PyResult<()> {
-    let meta = node.getattr("meta")?;
-    if let Some(qp) = input {
-        qp.stamp_on_meta(py, &meta, "input_qparams")?;
-    }
-    if let Some(qp) = output {
-        qp.stamp_on_meta(py, &meta, "output_qparams")?;
-    }
+    let mut m = NodeMeta::from_fx(node)?;
+    if let Some(qp) = input { m.set_single_input_qparam(qp.clone()); }
+    if let Some(qp) = output { m.set_single_output_qparam(qp.clone()); }
+    m.write_back(py, node)?;
     Ok(())
 }
 
@@ -2253,9 +2240,9 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
                     .collect();
 
                 for ph in &placeholders {
-                    let ph_meta = ph.getattr("meta")?;
-                    let internal = match ph_meta.get_item("output_qparams").ok().and_then(|oqp| extract_qparam(&oqp)) {
-                        Some(qp) => qp,
+                    let ph_m = NodeMeta::from_fx(ph)?;
+                    let internal = match ph_m.output_qparam() {
+                        Some(qp) => qp.clone(),
                         None => continue,
                     };
                     if ext.same_scale_zp(&internal) || ext.scale == 0.0 || internal.scale == 0.0 { continue; }
@@ -2263,7 +2250,10 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
                     let rescale = ext.insert_rescale_to(&internal, py, &submodule, ph, ph, true)?;
                     ph.call_method1("replace_all_uses_with", (&rescale,))?;
                     rescale.call_method("update_arg", (0i64, ph), None)?;
-                    let _ = ph_meta.del_item("output_qparams");
+                    // Clear output_qparams from placeholder
+                    let mut ph_m_mut = NodeMeta::from_fx(ph)?;
+                    ph_m_mut.clear_output_qparams();
+                    ph_m_mut.write_back(py, ph)?;
                     modified = true;
                     count += 1;
                 }
@@ -2275,9 +2265,7 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
                 if !output_qparams.is_empty() {
                     if let Some(output) = output_node(&submodule)? {
                         let ovals = unpack_output_vals(&output)?;
-
-                        let out_meta = output.getattr("meta")?;
-                        let int_out_qp = out_meta.get_item("input_qparams").ok();
+                        let out_m = NodeMeta::from_fx(&output)?;
 
                         let mut new_vals = ovals.clone();
                         let mut out_modified = false;
@@ -2286,10 +2274,9 @@ pub(crate) fn insert_cf_boundary_rescales<'py>(
                                 Some(v) if FxGraphModule::is_node(v) => v,
                                 _ => continue,
                             };
-                            let internal = match int_out_qp.as_ref()
-                                .and_then(|d| d.get_item(*idx).ok())
-                                .map(|v| QParam::from_py(&v)) {
-                                Some(qp) => qp,
+                            let internal = match out_m.input_qparams.as_ref()
+                                .and_then(|m| m.get(idx)) {
+                                Some(qp) => qp.clone(),
                                 None => continue,
                             };
                             if internal.same_scale_zp(ext_qp) || internal.scale == 0.0 || ext_qp.scale == 0.0 { continue; }

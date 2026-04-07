@@ -146,10 +146,26 @@ Two strategies:
 
 ## Migration path
 
-### Phase 1: NodeMeta extraction (low risk)
+### Phase 1: NodeMeta extraction (low risk) — DONE
 
 Extract metadata into `NodeMeta` structs at pass entry, operate on them,
 write back at pass exit. The FX graph structure stays Python-managed.
+
+**Migrated passes:**
+- `propagate_parent_qparams_to_placeholders` (qparam copy + while output stamp)
+- `annotate_cf_parent_rank4_dim_order`
+- `annotate_cf_rank4_dim_order`
+- `force_cf_rank4_output_dim_order`
+- `snapshot_pre_pass_cf_qparams`
+- `extract_effective_qparam` (producer chain walk)
+- `stamp_qparams`
+- `FxWhileStripBoundaryQPass` DQ annotation
+- `insert_cf_boundary_rescales` (input + output sections)
+
+**Not migrated (need FakeTensor Python calls):**
+- `restamp_cf_placeholder_dtypes` (calls `_branch_local_control_flow_output_qparam`, `fake_val.to(dtype=...)`)
+- `refresh_tosa_transpose_fake_tensors` (creates FakeTensors via `new_empty`)
+- `refresh_tosa_dim_order_fake_tensors` (calls `_get_matching_fake_tensor`)
 
 ```rust
 fn some_pass(py: Python, gm: &Bound<PyAny>) -> PyResult<bool> {
