@@ -248,6 +248,72 @@ impl IrGraph {
     }
 }
 
+// ---------------------------------------------------------------------------
+// RescaleInsert — deferred node creation instruction
+// ---------------------------------------------------------------------------
+
+/// Instruction to create a RESCALE node. Produced by pure Rust `_ir` functions,
+/// applied by the Python wrapper via `insert_rescale_node`.
+#[derive(Debug, Clone)]
+pub struct RescaleInsert {
+    /// Node to insert relative to (by name, for Python lookup).
+    pub anchor_name: String,
+    /// Input source node (by name).
+    pub source_name: String,
+    /// Source quantization domain.
+    pub from_qp: QParam,
+    /// Target quantization domain.
+    pub to_qp: QParam,
+    /// Insert after anchor (true) or before (false).
+    pub after: bool,
+    /// If set, replace all uses of this node with the new RESCALE.
+    pub replace_node_name: Option<String>,
+    /// If set, erase this node after replacement.
+    pub erase_node_name: Option<String>,
+}
+
+impl RescaleInsert {
+    /// Apply this instruction to a Python FX graph.
+    pub fn apply<'py>(
+        &self,
+        py: Python<'py>,
+        gm: &Bound<'py, PyAny>,
+        py_nodes_by_name: &HashMap<String, Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let anchor = py_nodes_by_name.get(&self.anchor_name)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(self.anchor_name.clone()))?;
+        let source = py_nodes_by_name.get(&self.source_name)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(self.source_name.clone()))?;
+
+        let rescale = self.from_qp.insert_rescale_to(&self.to_qp, py, gm, anchor, source, self.after)?;
+
+        if let Some(ref replace_name) = self.replace_node_name {
+            if let Some(old_node) = py_nodes_by_name.get(replace_name) {
+                old_node.call_method1("replace_all_uses_with", (&rescale,))?;
+            }
+        }
+        if let Some(ref erase_name) = self.erase_node_name {
+            if let Some(dead_node) = py_nodes_by_name.get(erase_name) {
+                let graph = gm.getattr("graph")?;
+                graph.call_method1("erase_node", (dead_node,))?;
+            }
+        }
+        Ok(rescale)
+    }
+}
+
+/// Build a name→Python node map for applying RescaleInserts.
+pub fn build_py_node_map<'py>(gm: &Bound<'py, PyAny>) -> PyResult<HashMap<String, Bound<'py, PyAny>>> {
+    let graph = if gm.hasattr("graph")? { gm.getattr("graph")? } else { gm.clone() };
+    let mut map = HashMap::new();
+    for node in graph.getattr("nodes")?.iter()?.filter_map(|n| n.ok()) {
+        let name: String = node.getattr("name")
+            .and_then(|v| v.extract()).unwrap_or_default();
+        map.insert(name, node);
+    }
+    Ok(map)
+}
+
 impl IrNode {
     /// Check if target contains a marker string.
     pub fn target_contains(&self, marker: &str) -> bool {

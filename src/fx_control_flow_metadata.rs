@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::fx_graph::{meta_get, meta_val, py_attr, FxGraphModule};
-use crate::fx_ir::{IrArg, IrGraph, IrNode, NodeId, NodeMeta};
+use crate::fx_ir::{IrArg, IrGraph, IrNode, NodeId, NodeMeta, RescaleInsert};
 use crate::fx_pass::FxPass;
 use crate::runner_logging::log_line;
 
@@ -139,7 +139,7 @@ impl QParam {
     /// Insert a RESCALE node converting from `self` domain to `target` domain.
     /// Returns the new rescale node. `after=true` inserts after `anchor`,
     /// `after=false` inserts before `anchor`.
-    fn insert_rescale_to<'py>(
+    pub(crate) fn insert_rescale_to<'py>(
         &self,
         target: &QParam,
         py: Python<'py>,
@@ -1936,8 +1936,29 @@ fn collapse_control_flow_qdq_pairs<'py>(
     Ok(modified)
 }
 
-/// Rewrite standalone dequantize nodes in a submodule graph.
-/// Rust port with Python fallback for the int32 cluster case.
+/// Pure Rust: bypass DQ nodes whose users are all RESCALE or output.
+fn rewrite_dequantize_nodes_ir(graph: &mut IrGraph) -> u32 {
+    let mut count = 0u32;
+    let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
+    for dq_id in ids {
+        if !graph.nodes[dq_id].alive || !graph.nodes[dq_id].is_dequantize() { continue; }
+        let source_id = match graph.nodes[dq_id].first_node_arg() { Some(id) => id, None => continue };
+        let user_ids = graph.users(dq_id).to_vec();
+        if user_ids.is_empty() { continue; }
+
+        let all_rescale_or_output = user_ids.iter().all(|&uid| {
+            let n = &graph.nodes[uid];
+            n.alive && (n.is_rescale() || n.op == NodeOp::Output)
+        });
+        if !all_rescale_or_output { continue; }
+
+        graph.replace_and_erase(dq_id, source_id);
+        count += 1;
+    }
+    count
+}
+
+/// Legacy Python wrapper (kept for callers not yet migrated).
 fn rewrite_control_flow_dequantize_nodes<'py>(
     _py: Python<'py>,
     graph: &Bound<'py, PyAny>,
@@ -1985,9 +2006,50 @@ fn rewrite_control_flow_dequantize_nodes<'py>(
     Ok(modified)
 }
 
-/// Rewrite standalone quantize nodes in a submodule graph.
-/// Cases 1 (same qparam bypass) and 3 (rescale insertion) in Rust,
-/// case 2 (const materialization) delegates to Python.
+/// Pure Rust: rewrite Q nodes — bypass same-qparam, emit RescaleInsert for different.
+fn rewrite_quantize_nodes_ir(graph: &mut IrGraph) -> (u32, Vec<RescaleInsert>) {
+    let mut count = 0u32;
+    let mut inserts = Vec::new();
+    let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
+    for q_id in ids {
+        if !graph.nodes[q_id].alive || !graph.nodes[q_id].is_quantize() { continue; }
+        let source_id = match graph.nodes[q_id].first_node_arg() { Some(id) => id, None => continue };
+        let target = match graph.nodes[q_id].parse_qdq_qparam() { Some(qp) => qp, None => continue };
+        let source_qp = match extract_effective_qparam_ir(graph, source_id) {
+            Some(qp) => qp,
+            None => {
+                // Skip if source has no qparams and isn't int
+                let src_dtype = graph.nodes[source_id].meta.val_dtype.as_deref().unwrap_or("");
+                if !src_dtype.contains("int") && !graph.nodes[source_id].is_zero_input_const() {
+                    continue;
+                }
+                continue; // No source qparam available
+            }
+        };
+
+        // Case 1: same qparam → bypass
+        if source_qp.same_as(&target) {
+            graph.replace_and_erase(q_id, source_id);
+            count += 1;
+            continue;
+        }
+
+        // Case 3: different qparam → emit RescaleInsert instruction
+        inserts.push(RescaleInsert {
+            anchor_name: graph.nodes[q_id].name.clone(),
+            source_name: graph.nodes[source_id].name.clone(),
+            from_qp: source_qp,
+            to_qp: target,
+            after: false,
+            replace_node_name: Some(graph.nodes[q_id].name.clone()),
+            erase_node_name: Some(graph.nodes[q_id].name.clone()),
+        });
+        count += 1;
+    }
+    (count, inserts)
+}
+
+/// Legacy Python wrapper.
 fn rewrite_control_flow_quantize_nodes<'py>(
     py: Python<'py>,
     graph: &Bound<'py, PyAny>,
@@ -2074,14 +2136,40 @@ pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
     for (_name, submodule, cf_node) in &submodules {
         let graph = submodule.getattr("graph")?;
 
-        let m1 = collapse_control_flow_qdq_pairs(py, &graph, &mut quant_count)?;
-        let m2 = rewrite_control_flow_quantize_nodes(
-            py, &graph, submodule, cf_node, &mut quant_count,
-        )?;
-        let m3 = rewrite_control_flow_dequantize_nodes(
-            py, &graph, submodule, cf_node, &mut dequant_count,
-        )?;
+        // Step 1: collapse Q→DQ pairs in pure Rust
+        let mut ir = IrGraph::from_fx(submodule)?;
+        let collapse_count = collapse_qdq_pairs_ir(&mut ir);
+        let m1 = collapse_count > 0;
+        if m1 {
+            ir.write_back_with_surgery(py, submodule)?;
+            quant_count += collapse_count;
+        }
 
+        // Step 2: Q rewrite — decision in Rust, RESCALE creation via Python
+        let mut ir2 = IrGraph::from_fx(submodule)?;
+        let (q_count, rescale_inserts) = rewrite_quantize_nodes_ir(&mut ir2);
+        if q_count > 0 {
+            ir2.write_back_with_surgery(py, submodule)?;
+            // Apply deferred RESCALE insertions
+            let py_node_map = crate::fx_ir::build_py_node_map(submodule)?;
+            for insert in &rescale_inserts {
+                let rescale = insert.apply(py, submodule, &py_node_map)?;
+                // Stamp qparams on the new rescale node
+                stamp_qparams(py, &rescale, Some(&insert.from_qp), Some(&insert.to_qp))?;
+            }
+            quant_count += q_count;
+        }
+
+        // Step 3: DQ rewrite in pure Rust
+        let mut ir2 = IrGraph::from_fx(submodule)?;
+        let dq_count = rewrite_dequantize_nodes_ir(&mut ir2);
+        let m3 = dq_count > 0;
+        if m3 {
+            ir2.write_back_with_surgery(py, submodule)?;
+            dequant_count += dq_count;
+        }
+
+        let m2 = q_count > 0;
         if m1 || m2 || m3 {
             cleanup_graph(&graph)?;
             recompile(submodule)?;

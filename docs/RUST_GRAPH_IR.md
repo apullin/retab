@@ -223,14 +223,19 @@ IrGraph now supports mutation:
 - `remove_noop_passthroughs_ir` — detects noops, propagates metadata, replace_and_erase
 - `collapse_qdq_pairs_ir` — detects matching Q→DQ pairs, bypasses to float source (ready but not yet wired into caller)
 
-**Blocker for remaining passes:** Node creation (RESCALE insertion).
-`rewrite_control_flow_quantize_nodes` and `insert_cf_boundary_rescales`
-create new FX RESCALE nodes via `insert_rescale_node` Python helper.
-Creating FX nodes requires FakeTensor construction which needs the torch
-runtime. Options:
-1. Return "create node" instructions from `_ir` function, apply via Python wrapper
-2. Port `insert_rescale_node` to Rust (requires FakeTensor creation)
-3. Hybrid: do decision-making in Rust, node creation stays Python
+### Phase 3.1: RescaleInsert deferred node creation — DONE
+
+`RescaleInsert` struct: decision made in pure Rust, applied via Python wrapper.
+Fields: anchor_name, source_name, from_qp, to_qp, after, replace/erase names.
+`apply()` method calls `insert_rescale_node` Python helper, then replace/erase.
+
+**Additional passes migrated:**
+- `rewrite_quantize_nodes_ir` — bypass same-qparam Q (surgery) + emit RescaleInsert for different
+- `rewrite_dequantize_nodes_ir` — bypass DQ with RESCALE/output users (surgery)
+- `collapse_qdq_pairs_ir` — wired into rewrite loop
+
+**9 pure Rust `_ir` functions total.** The entire `rewrite_control_flow_quantization_boundaries`
+loop now uses Rust for all decision-making. Python only for RESCALE FX node creation.
 
 ### Phase 4: Remove Python from hot path
 
