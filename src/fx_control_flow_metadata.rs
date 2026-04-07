@@ -1098,6 +1098,46 @@ impl FxPass for FxControlFlowMetadataPass {
 /// Before parent passes run, walk DQ nodes feeding into cond/while data args
 /// and snapshot their qparams onto the cond node's metadata.  Parent passes
 /// (fold_qdq, memory format) may destroy these nodes, so we save them now.
+/// Pure Rust: snapshot qparams from CF data args before parent passes destroy them.
+fn snapshot_pre_pass_cf_qparams_ir(graph: &mut IrGraph) -> u32 {
+    let cf_ids: Vec<NodeId> = graph.cf_nodes().map(|n| n.id).collect();
+    let mut saved = 0u32;
+    for cf_id in cf_ids {
+        let data_arg_ids = graph.cf_data_arg_ids(&graph.nodes[cf_id]);
+        let mut snapshot: HashMap<usize, QParam> = HashMap::new();
+        for (i, &arg_id) in data_arg_ids.iter().enumerate() {
+            // Try output_qparams from metadata
+            if let Some(qp) = graph.node(arg_id).meta.output_qparam() {
+                snapshot.insert(i, qp.clone());
+                saved += 1;
+                continue;
+            }
+            // Walk producer chain
+            if let Some(qp) = extract_effective_qparam_ir(graph, arg_id) {
+                snapshot.insert(i, qp);
+                saved += 1;
+                continue;
+            }
+            // Last resort: Q/DQ literal args
+            let node = graph.node(arg_id);
+            if node.is_dequantize() || node.is_quantize() {
+                if let Some(qp) = node.parse_qdq_qparam() {
+                    snapshot.insert(i, qp);
+                    saved += 1;
+                }
+            }
+        }
+        if !snapshot.is_empty() {
+            graph.node_mut(cf_id).meta.pre_pass_arg_qparams = Some(snapshot);
+            graph.node_mut(cf_id).meta.dirty.pre_pass_arg_qparams = true;
+        }
+    }
+    if saved > 0 {
+        log_line(format_args!("[snapshot-pre-pass-qparams] saved {} arg qparam(s)", saved));
+    }
+    saved
+}
+
 fn snapshot_pre_pass_cf_qparams<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
@@ -1108,25 +1148,22 @@ fn snapshot_pre_pass_cf_qparams<'py>(
     let mut saved = 0u32;
     for node in &nodes {
         if NodeOp::of(node) != NodeOp::CallFunction { continue; }
-        let cf = match ctx.cf_kind(node)? { Some(k) => k, None => continue };
+        let _cf = match ctx.cf_kind(node)? { Some(k) => k, None => continue };
 
         let parent_args = resolve_cf_parent_args(node)?;
         let mut snapshot: HashMap<usize, QParam> = HashMap::new();
         for (i, arg) in parent_args.iter().enumerate() {
             let arg_meta = NodeMeta::from_fx(arg)?;
-            // Try output_qparams from metadata
             if let Some(qp) = arg_meta.output_qparam() {
                 snapshot.insert(i, qp.clone());
                 saved += 1;
                 continue;
             }
-            // Walk producer chain
             if let Some(qp) = extract_effective_qparam(arg)? {
                 snapshot.insert(i, qp);
                 saved += 1;
                 continue;
             }
-            // Last resort: Q/DQ literal args
             if is_dequantize_node(arg) || is_quantize_node(arg) {
                 if let Ok(Some(qp)) = parse_qparam(arg) {
                     snapshot.insert(i, qp);
@@ -1141,10 +1178,7 @@ fn snapshot_pre_pass_cf_qparams<'py>(
         }
     }
     if saved > 0 {
-        log_line(format_args!(
-            "[snapshot-pre-pass-qparams] saved {} arg qparam(s)",
-            saved
-        ));
+        log_line(format_args!("[snapshot-pre-pass-qparams] saved {} arg qparam(s)", saved));
     }
     Ok(saved)
 }

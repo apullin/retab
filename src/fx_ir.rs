@@ -16,6 +16,10 @@ use crate::fx_control_flow_metadata::{NodeOp, QParam};
 
 pub type NodeId = usize;
 
+/// Control-flow kind, if this node is a cond/while_loop call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CfKind { Cond, While }
+
 /// A node in the Rust IR graph.
 #[derive(Debug, Clone)]
 pub struct IrNode {
@@ -26,6 +30,8 @@ pub struct IrNode {
     pub args: Vec<IrArg>,
     pub meta: NodeMeta,
     pub alive: bool,
+    /// Set for cond/while_loop call_function nodes.
+    pub cf_kind: Option<CfKind>,
 }
 
 /// An argument to a node — either a reference to another node or a literal.
@@ -83,7 +89,12 @@ impl IrGraph {
                 .map(|a| resolve_arg(a, &name_to_id))
                 .collect();
 
-            nodes.push(IrNode { id: i, op, name, target, args, meta, alive: true });
+            let cf_kind = if op == NodeOp::CallFunction {
+                if target.contains("cond") && target.contains("higher_order") { Some(CfKind::Cond) }
+                else if target.contains("while_loop") { Some(CfKind::While) }
+                else { None }
+            } else { None };
+            nodes.push(IrNode { id: i, op, name, target, args, meta, alive: true, cf_kind });
         }
 
         // Build reverse edges
@@ -141,6 +152,48 @@ impl IrGraph {
         &self.users[id]
     }
 
+    /// Iterate cond/while_loop nodes.
+    pub fn cf_nodes(&self) -> impl Iterator<Item = &IrNode> {
+        self.nodes.iter().filter(|n| n.alive && n.cf_kind.is_some())
+    }
+
+    /// Get data args for a cond/while node (the carried/data arg list).
+    /// cond: args[-1], while_loop: args[-2] + args[-1]
+    pub fn cf_data_arg_ids(&self, cf_node: &IrNode) -> Vec<NodeId> {
+        match cf_node.cf_kind {
+            Some(CfKind::Cond) => {
+                // Last arg is the data args list
+                cf_node.args.last()
+                    .and_then(|a| match a {
+                        IrArg::List(items) => Some(items.iter()
+                            .filter_map(|i| match i { IrArg::Node(id) => Some(*id), _ => None })
+                            .collect()),
+                        _ => None,
+                    })
+                    .unwrap_or_default()
+            }
+            Some(CfKind::While) => {
+                // args[-2] + args[-1]
+                let len = cf_node.args.len();
+                if len < 2 { return Vec::new(); }
+                let mut ids = Vec::new();
+                for arg in &cf_node.args[len-2..] {
+                    match arg {
+                        IrArg::List(items) => {
+                            for i in items {
+                                if let IrArg::Node(id) = i { ids.push(*id); }
+                            }
+                        }
+                        IrArg::Node(id) => ids.push(*id),
+                        _ => {}
+                    }
+                }
+                ids
+            }
+            None => Vec::new(),
+        }
+    }
+
     // --- Graph surgery ---
 
     /// Replace all references to `old_id` with `new_id` in args across the graph.
@@ -195,7 +248,7 @@ impl IrGraph {
         }
         self.users.push(Vec::new());
         self.name_to_id.insert(name.clone(), id);
-        self.nodes.push(IrNode { id, op, name, target, args, meta, alive: true });
+        self.nodes.push(IrNode { id, op, name, target, args, meta, alive: true, cf_kind: None });
         id
     }
 
@@ -415,14 +468,15 @@ pub struct NodeMeta {
     pub pre_pass_arg_qparams: Option<HashMap<usize, QParam>>,
 
     // Track which fields were modified so write_back only touches what changed
-    dirty: DirtyFlags,
+    pub(crate) dirty: DirtyFlags,
 }
 
 #[derive(Debug, Clone, Default)]
-struct DirtyFlags {
-    input_qparams: bool,
-    output_qparams: bool,
-    tosa_dim_order: bool,
+pub(crate) struct DirtyFlags {
+    pub(crate) input_qparams: bool,
+    pub(crate) output_qparams: bool,
+    pub(crate) tosa_dim_order: bool,
+    pub(crate) pre_pass_arg_qparams: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +585,12 @@ impl NodeMeta {
             if let Some(ref order) = self.tosa_dim_order {
                 let tuple = pyo3::types::PyTuple::new_bound(py, order);
                 meta.set_item("tosa_dim_order", tuple)?;
+            }
+        }
+
+        if self.dirty.pre_pass_arg_qparams {
+            if let Some(ref map) = self.pre_pass_arg_qparams {
+                meta.set_item("_pre_pass_arg_qparams", qparam_dict_to_py(py, map)?)?;
             }
         }
 

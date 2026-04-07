@@ -237,14 +237,32 @@ Fields: anchor_name, source_name, from_qp, to_qp, after, replace/erase names.
 **9 pure Rust `_ir` functions total.** The entire `rewrite_control_flow_quantization_boundaries`
 loop now uses Rust for all decision-making. Python only for RESCALE FX node creation.
 
-### Phase 4: Remove Python from hot path
+### Phase 4: Remove Python from hot path — PARTIAL
 
-With full IrGraph, the pipeline becomes:
-```
-Python entry → IrGraph::from_fx() → [all passes in pure Rust] → write_back_to_fx() → serialize
-```
+**Migrated:** All submodule-level passes that do metadata + surgery
+now use IrGraph internally. Parent-level passes that only read/write
+metadata use NodeMeta.
 
-The `<'py>` lifetime exists only in `from_fx` and `write_back_to_fx`.
+**Remaining Python (irreducible without torch runtime in Rust):**
+- `regularize_control_flow_submodules_structural` — calls `_cf_ctx` Python
+- `restamp_cf_placeholder_dtypes` — calls `_branch_local_control_flow_output_qparam` + `fake_val.to(dtype=...)`
+- `snapshot_cf_table_qparams` — calls `QuantArgs.from_operator` Python
+- `refresh_tosa_dim_order_fake_tensors` — calls `_get_matching_fake_tensor`
+- `refresh_tosa_transpose_fake_tensors` — creates FakeTensors via `new_empty`
+- `snapshot_pre_pass_cf_qparams` — `_ir` version exists but parent graph arg resolution for cond/while is heterogeneous; kept Python wrapper
+- `propagate_parent_qparams_to_placeholders` — uses Python `extract_effective_qparam` as fallback; inner loop already NodeMeta
+
+**Blocker for full Phase 4:** Parent graph IrGraph import doesn't handle
+cond/while heterogeneous args (submodule refs vs data arg lists).
+`cf_data_arg_ids` doesn't match `resolve_cf_parent_args` for cond.
+Need per-op-signature arg parsing in IrGraph.
+
+**Architecture at completion:**
+- 10 pure Rust `_ir` functions (no `<'py>`, no `PyResult`)
+- IrGraph with 588 lines: full topology, users, surgery, RescaleInsert
+- Submodule passes: fully Rust via IrGraph
+- Parent passes: NodeMeta extraction, Python for FakeTensor/structural ops
+- Pipeline boundary: Python only at entry (preprocess.py) and exit (serialize)
 
 ## What stays Python
 
