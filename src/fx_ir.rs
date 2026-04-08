@@ -2,6 +2,8 @@
 //!
 //! Phase 1: NodeMeta — typed metadata extraction (done).
 //! Phase 2: IrGraph — full node topology imported from Python FX graph.
+//! Phase 3: Graph surgery — replace_and_erase, write_back_with_surgery.
+//! Phase 4: IrPass trait — pure Rust passes on IrGraph.
 
 use std::collections::HashMap;
 
@@ -603,6 +605,58 @@ impl<'py> FxNodeCreator<'py> {
     }
 }
 
+impl<'py> FxNodeCreator<'py> {
+    /// Resolve an op target by dotted name (e.g. "aten.sum.dim_IntList").
+    pub fn resolve_op(&self, name: &str) -> PyResult<Bound<'py, PyAny>> {
+        // Try exir_ops first (executorch dialect)
+        let parts: Vec<&str> = name.split('.').collect();
+        let exir_ops = self.py.import_bound("executorch.exir.dialects._ops")?.getattr("ops")?;
+
+        // Try edge dialect: ops.edge.aten.X.default
+        if parts.len() >= 2 {
+            let ns = parts[0]; // e.g. "aten"
+            let op_name = parts[1]; // e.g. "sum"
+            let overload = if parts.len() >= 3 { parts[2] } else { "default" };
+
+            if let Ok(edge) = exir_ops.getattr("edge") {
+                if let Ok(ns_obj) = edge.getattr(ns) {
+                    if let Ok(op) = ns_obj.getattr(op_name) {
+                        if let Ok(overload_obj) = op.getattr(overload) {
+                            return Ok(overload_obj);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: try torch.ops directly
+        let torch_ops = self.py.import_bound("torch")?.getattr("ops")?;
+        if parts.len() >= 2 {
+            let ns_obj = torch_ops.getattr(parts[0])?;
+            let op = ns_obj.getattr(parts[1])?;
+            if parts.len() >= 3 {
+                return op.getattr(parts[2]);
+            }
+            return op.getattr("default");
+        }
+
+        Err(pyo3::exceptions::PyValueError::new_err(format!("Cannot resolve op: {name}")))
+    }
+
+    /// Insert a generic call_function node with resolved op target.
+    pub fn insert_call_function(
+        &self,
+        gm: &Bound<'py, PyAny>,
+        ref_node: &Bound<'py, PyAny>,
+        op_name: &str,
+        args: &Bound<'py, PyAny>,
+        after: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let target = self.resolve_op(op_name)?;
+        self.insert_node(gm, ref_node, &target, args, after)
+    }
+}
+
 impl IrNode {
     /// Check if target contains a marker string.
     pub fn target_contains(&self, marker: &str) -> bool {
@@ -970,5 +1024,126 @@ impl NodeMeta {
     /// Get the single input qparam (key 0), if present.
     pub fn input_qparam(&self) -> Option<&QParam> {
         self.input_qparams.as_ref()?.get(&0)
+    }
+}
+
+// ===========================================================================
+// IrPass — pure Rust pass trait for IrGraph
+// ===========================================================================
+
+/// A pure Rust compiler pass that operates on IrGraph.
+/// No <'py>, no PyResult, no PyO3 in the pass body.
+pub trait IrPass {
+    fn name(&self) -> &str;
+
+    /// Run the pass on the graph. Returns true if modified.
+    fn run(&self, graph: &mut IrGraph) -> bool;
+}
+
+/// A node creation instruction emitted by an IrPass.
+/// Applied to the Python FX graph during write_back.
+#[derive(Debug, Clone)]
+pub enum NodeInsert {
+    /// Insert a TOSA RESCALE node.
+    Rescale(RescaleInsert),
+    /// Insert a dequantize_per_tensor node.
+    Dq(DqInsert),
+    /// Insert a generic call_function node.
+    CallFunction {
+        /// Target op string (e.g. "tosa.TRANSPOSE.default")
+        target: String,
+        /// Insert before this node (by name)
+        before_node: String,
+        /// Args: node references by name, or literal values
+        args: Vec<IrArg>,
+        /// Copy metadata from this node (by name)
+        copy_meta_from: String,
+        /// If set, replace all uses of this node with the new one
+        replace_node: Option<String>,
+    },
+}
+
+/// Result of running an IrPass: metadata changes are in the IrGraph,
+/// structural changes (surgery + node creation) are returned here.
+#[derive(Default)]
+pub struct IrPassResult {
+    pub modified: bool,
+    pub inserts: Vec<NodeInsert>,
+}
+
+/// Run a sequence of IrPasses on an IrGraph imported from a Python GraphModule.
+/// Handles the full lifecycle: import → passes → write_back + apply inserts.
+pub fn run_ir_passes<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+    passes: &[&dyn IrPass],
+) -> PyResult<bool> {
+    let mut ir = IrGraph::from_fx(gm)?;
+    let mut any_modified = false;
+    let mut all_inserts: Vec<NodeInsert> = Vec::new();
+
+    for pass in passes {
+        let before = ir.nodes.iter().filter(|n| n.alive).count();
+        let modified = pass.run(&mut ir);
+        let after = ir.nodes.iter().filter(|n| n.alive).count();
+        if modified {
+            any_modified = true;
+            crate::runner_logging::log_line(format_args!(
+                "[IrPassRunner] {} — modified, nodes: {} -> {}", pass.name(), before, after
+            ));
+        }
+    }
+
+    if any_modified {
+        ir.write_back_with_surgery(py, gm)?;
+        // Apply node inserts
+        if !all_inserts.is_empty() {
+            let py_map = build_py_node_map(gm)?;
+            for insert in &all_inserts {
+                match insert {
+                    NodeInsert::Rescale(ri) => { ri.apply(py, gm, &py_map)?; },
+                    NodeInsert::Dq(di) => { di.apply(py, gm, &py_map)?; },
+                    NodeInsert::CallFunction { .. } => {
+                        // TODO: implement generic call_function creation
+                    },
+                }
+            }
+        }
+        let graph = gm.getattr("graph")?;
+        graph.call_method0("eliminate_dead_code")?;
+        graph.call_method0("lint")?;
+        gm.call_method0("recompile")?;
+    }
+
+    Ok(any_modified)
+}
+
+// ===========================================================================
+// IrArg convenience methods
+// ===========================================================================
+
+impl IrArg {
+    pub fn as_int(&self) -> Option<i64> {
+        match self { IrArg::Int(v) => Some(*v), _ => None }
+    }
+    pub fn as_float(&self) -> Option<f64> {
+        match self { IrArg::Float(v) => Some(*v), _ => None }
+    }
+    pub fn as_bool(&self) -> Option<bool> {
+        match self { IrArg::Bool(v) => Some(*v), _ => None }
+    }
+    pub fn as_str(&self) -> Option<&str> {
+        match self { IrArg::Str(s) => Some(s), _ => None }
+    }
+    pub fn as_node(&self) -> Option<NodeId> {
+        match self { IrArg::Node(id) => Some(*id), _ => None }
+    }
+    pub fn as_int_list(&self) -> Option<Vec<i64>> {
+        match self {
+            IrArg::List(items) => {
+                items.iter().map(|a| a.as_int()).collect()
+            }
+            _ => None,
+        }
     }
 }
