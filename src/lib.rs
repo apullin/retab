@@ -41,6 +41,7 @@ mod fx_decompose_masked_fill_ir;
 mod fx_decompose_maxpool_dilation;
 mod fx_decompose_maxpool_dilation_ir;
 mod fx_decompose_mean;
+mod fx_decompose_mean_ir;
 mod fx_decompose_ops;
 mod fx_decompose_ops_ir;
 mod fx_decompose_pixel_shuffle;
