@@ -59,6 +59,7 @@ mod fx_expand_where_mask_ir;
 mod fx_fold_qdq;
 mod fx_fuse_constant_args;
 mod fx_fuse_duplicate_users;
+mod fx_fuse_duplicate_users_ir;
 mod fx_fuse_equal_placeholders;
 mod fx_fuse_quant_activation;
 mod fx_graph;

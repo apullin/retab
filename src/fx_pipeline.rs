@@ -287,7 +287,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         Ir(Box::new(fx_convert_clamp_ir::IrConvertClampPass)),
         // -- Fold Q/DQ + rescale (must be FxPass — needs exported_program) --
         Fx(Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(fold_qdq))),
-        Fx(Box::new(fx_fuse_duplicate_users::FxFuseDuplicateUsersPass)),
+        Ir(Box::new(crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass)),
         Fx(Box::new(fx_decompose_linear::FxDecomposeLinearPass)),
         Fx(Box::new(fx_conv1d_unsqueeze::FxConv1dUnsqueezePass)),
         Fx(Box::new(fx_insert_rescale::FxInsertRescalePass::new())),
