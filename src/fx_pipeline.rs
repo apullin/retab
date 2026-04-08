@@ -281,7 +281,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
     vec![
         // -- Early decompositions (before fold_qdq) --
         Fx(Box::new(fx_annotate_output_dim_order::FxAnnotateOutputDimOrderPass)),
-        Fx(Box::new(fx_decompose_ops::FxDecomposeOpsPass)),
+        Ir(Box::new(crate::fx_decompose_ops_ir::IrDecomposeOpsPass)),
         // -- Pre-fold --
         Fx(Box::new(fx_fuse_quant_activation::FxFuseQuantizedActivationPass)),
         Ir(Box::new(fx_convert_clamp_ir::IrConvertClampPass)),
