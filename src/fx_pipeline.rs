@@ -144,7 +144,7 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         )),
         // Decompose masked_fill -> where(mask, quantized_full, x).  Runs after
         // fold_qdq so the fill scalar can be quantized with output qparams.
-        Box::new(fx_decompose_masked_fill::FxDecomposeMaskedFillPass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(crate::fx_decompose_masked_fill_ir::IrDecomposeMaskedFillPass)),
         // Mirror the Python Arm backend's gather canonicalization:
         // reshape/permute/cast into backend.tosa.GATHER-compatible form.
         Box::new(fx_canonicalize_gather::FxCanonicalizeGatherPass),
@@ -172,7 +172,7 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         )),
         // Mirror the Python Arm backend's tril lowering:
         // arange + view + add(diagonal) + ge + where / bitwise_and.
-        Box::new(fx_decompose_tril::FxDecomposeTrilPass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(crate::fx_decompose_tril_ir::IrDecomposeTrilPass)),
         // Decompose logit -> clamp + mul + add + reciprocal + log
         // Python runs DecomposeLogitPass post-fold (line 285 in arm_pass_manager.py)
         Box::new(crate::fx_ir::IrPassAdapter::new(
@@ -187,12 +187,12 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_decompose_cumsum::FxDecomposeCumsumPass),
         // Decompose repeat_interleave(self_int) into unsqueeze+repeat+view
         // so direct lowering reuses the same repeat grammar as the Python path.
-        Box::new(fx_decompose_repeat_interleave::FxDecomposeRepeatInterleavePass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(crate::fx_decompose_repeat_interleave_ir::IrDecomposeRepeatInterleavePass)),
         // Decompose pixel_shuffle/pixel_unshuffle into view+permute+view
-        Box::new(fx_decompose_pixel_shuffle::FxDecomposePixelShufflePass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(crate::fx_decompose_pixel_shuffle_ir::IrDecomposePixelShufflePass)),
         // Replace contiguous zero-offset as_strided_copy with view_copy,
         // matching the Python Arm pass and avoiding a raw unsupported ATen op.
-        Box::new(fx_decompose_as_strided_copy::FxDecomposeAsStridedCopyPass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(crate::fx_decompose_as_strided_copy_ir::IrDecomposeAsStridedCopyPass)),
         Box::new(fx_quantize_clamp_args::FxQuantizeClampArgsPass),
         // Convert full_like -> full with explicit shape
         // Python runs ConvertFullLikeToFullPass in scalars section (line 330)

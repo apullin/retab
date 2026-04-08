@@ -1,0 +1,171 @@
+//! Pure Rust IrPass version of FxDecomposeLinearPass.
+//!
+//! Decomposes `aten.linear.default(x, weight, bias)` into:
+//!   1. Reshape input to 4D:  [..., Ci] -> [N, Ci, 1, 1]
+//!   2. Reshape weight to 4D: [Co, Ci] -> [Co, Ci, 1, 1]
+//!   3. Conv2d with 1x1 kernel (aten.convolution.default)
+//!   4. Reshape output back:  [N, Co, 1, 1] -> [..., Co]
+
+use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::runner_logging::log_line;
+
+fn i64_list(vals: &[i64]) -> IrArg {
+    IrArg::List(vals.iter().map(|&v| IrArg::Int(v)).collect())
+}
+
+pub struct IrDecomposeLinearPass;
+
+impl IrPass for IrDecomposeLinearPass {
+    fn name(&self) -> &str {
+        "IrDecomposeLinear"
+    }
+
+    fn run(&self, graph: &mut IrGraph) -> bool {
+        let mut modified = false;
+        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
+
+        for id in ids {
+            if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
+                continue;
+            }
+            if !graph.nodes[id].target.contains("linear.default") {
+                continue;
+            }
+
+            if graph.nodes[id].args.len() < 2 {
+                continue;
+            }
+
+            let input_id = match graph.nodes[id].args[0].as_node() {
+                Some(nid) => nid,
+                None => continue,
+            };
+            let weights_id = match graph.nodes[id].args[1].as_node() {
+                Some(nid) => nid,
+                None => continue,
+            };
+            let bias_id: Option<NodeId> = if graph.nodes[id].args.len() > 2 {
+                match &graph.nodes[id].args[2] {
+                    IrArg::None => None,
+                    IrArg::Node(nid) => Some(*nid),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            let input_shape = match graph.nodes[input_id].meta.val_shape() {
+                Some(s) => s.to_vec(),
+                None => continue,
+            };
+            let weights_shape = match graph.nodes[weights_id].meta.val_shape() {
+                Some(s) => s.to_vec(),
+                None => continue,
+            };
+            let output_shape = match graph.nodes[id].meta.val_shape() {
+                Some(s) => s.to_vec(),
+                None => continue,
+            };
+            let output_dtype = graph.nodes[id]
+                .meta
+                .val_dtype()
+                .unwrap_or("torch.float32")
+                .to_string();
+
+            // Compute batch dimension: product of all dims except last.
+            let ci = input_shape[input_shape.len() - 1];
+            let batches: i64 = input_shape[..input_shape.len() - 1].iter().product();
+            let co = weights_shape[0];
+
+            let node_name = graph.nodes[id].name.clone();
+
+            // 1. Reshape input to 4D: [..., Ci] -> [batches, Ci, 1, 1]
+            let input_4d_shape = [batches, ci, 1, 1];
+            let mut input_4d_meta = graph.nodes[input_id].meta.clone();
+            input_4d_meta.set_val(FakeTensorMeta {
+                shape: input_4d_shape.to_vec(),
+                dtype: output_dtype.clone(),
+            });
+            let input_reshaped = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_input_view", node_name),
+                "aten.view_copy.default".to_string(),
+                vec![IrArg::Node(input_id), i64_list(&input_4d_shape)],
+                input_4d_meta,
+            );
+            graph.anchor_to(input_reshaped, id);
+
+            // 2. Reshape weights to 4D: [Co, Ci] -> [Co, Ci, 1, 1]
+            let weights_4d_shape = [co, weights_shape[1], 1, 1];
+            let mut weights_4d_meta = graph.nodes[weights_id].meta.clone();
+            weights_4d_meta.set_val(FakeTensorMeta {
+                shape: weights_4d_shape.to_vec(),
+                dtype: output_dtype.clone(),
+            });
+            let weights_reshaped = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_weight_view", node_name),
+                "aten.view_copy.default".to_string(),
+                vec![IrArg::Node(weights_id), i64_list(&weights_4d_shape)],
+                weights_4d_meta,
+            );
+            graph.anchor_to(weights_reshaped, id);
+
+            // 3. Conv2d with 1x1 kernel
+            //    convolution(input, weight, bias, stride, padding, dilation,
+            //                transposed, output_padding, groups)
+            let conv_out_shape = [batches, co, 1, 1];
+            let mut conv_meta = graph.nodes[id].meta.clone();
+            conv_meta.set_val(FakeTensorMeta {
+                shape: conv_out_shape.to_vec(),
+                dtype: output_dtype.clone(),
+            });
+            let bias_arg = match bias_id {
+                Some(nid) => IrArg::Node(nid),
+                None => IrArg::None,
+            };
+            let conv = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_conv", node_name),
+                "aten.convolution.default".to_string(),
+                vec![
+                    IrArg::Node(input_reshaped),
+                    IrArg::Node(weights_reshaped),
+                    bias_arg,
+                    i64_list(&[1, 1]),  // stride
+                    i64_list(&[0, 0]),  // padding
+                    i64_list(&[1, 1]),  // dilation
+                    IrArg::Bool(false), // transposed
+                    i64_list(&[0, 0]),  // output_padding
+                    IrArg::Int(1),      // groups
+                ],
+                conv_meta,
+            );
+            graph.anchor_to(conv, id);
+
+            // 4. Reshape output back to original shape
+            let mut out_meta = graph.nodes[id].meta.clone();
+            out_meta.set_val(FakeTensorMeta {
+                shape: output_shape.clone(),
+                dtype: output_dtype,
+            });
+            let output = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_output_view", node_name),
+                "aten.view_copy.default".to_string(),
+                vec![IrArg::Node(conv), i64_list(&output_shape)],
+                out_meta,
+            );
+
+            graph.replace_and_erase(id, output);
+            modified = true;
+        }
+
+        if modified {
+            log_line(format_args!(
+                "[IrDecomposeLinear] decomposed linear ops to conv2d"
+            ));
+        }
+        modified
+    }
+}
