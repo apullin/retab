@@ -722,6 +722,22 @@ impl<'py> FxNodeCreator<'py> {
             }
         }
 
+        // Try backend dialect: ops.backend.tosa.GATHER.default
+        if parts.len() >= 3 && parts[0] == "backend" {
+            if let Ok(backend) = exir_ops.getattr("backend") {
+                let mut obj = backend;
+                for part in &parts[1..] {
+                    obj = match obj.getattr(*part) {
+                        Ok(o) => o,
+                        Err(_) => break,
+                    };
+                }
+                if obj.is_callable() {
+                    return Ok(obj);
+                }
+            }
+        }
+
         // Fallback: try torch.ops directly
         let torch_ops = self.py.import_bound("torch")?.getattr("ops")?;
         if parts.len() >= 2 {
