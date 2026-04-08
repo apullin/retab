@@ -9,7 +9,7 @@ mod arithmetic;
 mod broadcast;
 mod const_utils;
 mod control_flow;
-mod dtype_quant;
+pub(crate) mod dtype_quant;
 mod elementwise;
 mod emit_result;
 mod emitter;
@@ -21,7 +21,7 @@ mod matmul;
 mod nn;
 mod op_utils;
 mod reductions;
-mod shape_utils;
+pub(crate) mod shape_utils;
 mod tensor_ops;
 
 pub use emitter::*;

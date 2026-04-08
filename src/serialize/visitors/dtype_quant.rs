@@ -1,4 +1,14 @@
 use super::*;
+use std::cell::RefCell;
+use std::collections::HashMap as StdHashMap;
+
+thread_local! {
+    static DTYPE_CACHE: RefCell<StdHashMap<String, DType>> = RefCell::new(StdHashMap::new());
+}
+
+pub(crate) fn clear_dtype_cache() {
+    DTYPE_CACHE.with(|c| c.borrow_mut().clear());
+}
 
 pub(crate) fn ir_dtype_to_tosa(dt: crate::graph::ir::DType) -> DType {
     use crate::graph::ir::DType as IrDtype;
@@ -120,6 +130,15 @@ pub(super) fn accumulator_output_dtype(node: &Node) -> DType {
 }
 
 pub(super) fn actual_tensor_dtype(graph: &Graph, node: &Node) -> DType {
+    if let Some(cached) = DTYPE_CACHE.with(|c| c.borrow().get(&node.name).cloned()) {
+        return cached;
+    }
+    let result = actual_tensor_dtype_impl(graph, node);
+    DTYPE_CACHE.with(|c| c.borrow_mut().insert(node.name.clone(), result));
+    result
+}
+
+fn actual_tensor_dtype_impl(graph: &Graph, node: &Node) -> DType {
     if matches!(node.target, OpTarget::Sum) {
         let semantic_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
         if matches!(semantic_dtype, DType::Fp32 | DType::Fp16 | DType::Bf16) {

@@ -681,10 +681,12 @@ fn collect_serialized_graph_items(
     let mut input_names: Vec<String> = Vec::new();
     let mut output_names: Vec<String> = Vec::new();
 
-    for &node_id in &sorted {
+    for (loop_idx, &node_id) in sorted.iter().enumerate() {
         let Some(node) = graph.node(node_id) else {
             continue;
         };
+        let _node_start = std::time::Instant::now();
+        // Timing logged below after match
 
         if FxGraphModule::debug() {
             eprintln!(
@@ -743,6 +745,11 @@ fn collect_serialized_graph_items(
                     }
                 }
             }
+        }
+        let _elapsed = _node_start.elapsed();
+        if _elapsed.as_millis() > 100 {
+            eprintln!("[Serialize] SLOW node {}/{} name={} target={:?} took {:?}",
+                loop_idx, sorted.len(), node.name, node.target, _elapsed);
         }
     }
 
@@ -869,7 +876,18 @@ fn finish_tosa_graph(
 }
 
 pub fn serialize_graphs_to_tosa(graphs: &[(String, Graph)], store: &TensorStore) -> Vec<u8> {
-    let mut builder = FlatBufferBuilder::with_capacity(16 * 1024 * 1024); // 16MB initial
+    // Pre-calculate buffer size to avoid quadratic reallocation.
+    // Sum all tensor data + overhead per node.
+    let tensor_bytes: usize = store.buffers.values()
+        .map(|t| t.data.len() + 256) // data + per-tensor overhead
+        .sum();
+    let node_count: usize = graphs.iter().map(|(_, g)| g.order.len()).sum();
+    let estimated = tensor_bytes + node_count * 512 + 1024 * 1024; // tensors + nodes + 1MB overhead
+    visitors::shape_utils::clear_shape_cache();
+    visitors::dtype_quant::clear_dtype_cache();
+    eprintln!("[Serialize] pre-allocating {}MB for {} tensors, {} nodes",
+        estimated / (1024*1024), store.buffers.len(), node_count);
+    let mut builder = FlatBufferBuilder::with_capacity(estimated.max(16 * 1024 * 1024));
     let regions: Vec<_> = graphs
         .iter()
         .map(|(name, graph)| build_fb_region(&mut builder, name, graph, store))

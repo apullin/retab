@@ -1,4 +1,15 @@
 use super::*;
+use std::cell::RefCell;
+use std::collections::HashMap as StdHashMap;
+
+thread_local! {
+    static SHAPE_CACHE: RefCell<StdHashMap<String, Vec<i32>>> = RefCell::new(StdHashMap::new());
+}
+
+/// Clear the shape cache (call before each graph serialization).
+pub(crate) fn clear_shape_cache() {
+    SHAPE_CACHE.with(|c| c.borrow_mut().clear());
+}
 
 pub(super) fn literal_output_shape(node: &Node) -> Option<Vec<i32>> {
     match node.args.get(1) {
@@ -385,6 +396,16 @@ fn nhwc_layout_shape(node: &Node, raw_shape: &[i32], reordered_shape: &[i32]) ->
 /// Reconstruct the concrete TOSA tensor shape once at the serializer boundary
 /// instead of re-validating dim-order and layout facts ad hoc at each emitter.
 pub(crate) fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Vec<i32> {
+    // Memoize: check cache first
+    if let Some(cached) = SHAPE_CACHE.with(|c| c.borrow().get(&node.name).cloned()) {
+        return cached;
+    }
+    let result = actual_tensor_shape_impl(graph, store, node);
+    SHAPE_CACHE.with(|c| c.borrow_mut().insert(node.name.clone(), result.clone()));
+    result
+}
+
+fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> Vec<i32> {
     if matches!(
         node.target,
         OpTarget::TosaReshape | OpTarget::Reshape | OpTarget::View
