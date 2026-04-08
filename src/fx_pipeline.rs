@@ -184,7 +184,7 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
             crate::fx_decompose_addmm_ir::IrDecomposeAddmmPass,
         )),
         // Decompose cumsum into chained slice_copy + add + cat
-        Box::new(fx_decompose_cumsum::FxDecomposeCumsumPass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(crate::fx_decompose_cumsum_ir::IrDecomposeCumsumPass)),
         // Decompose repeat_interleave(self_int) into unsqueeze+repeat+view
         // so direct lowering reuses the same repeat grammar as the Python path.
         Box::new(crate::fx_ir::IrPassAdapter::new(crate::fx_decompose_repeat_interleave_ir::IrDecomposeRepeatInterleavePass)),

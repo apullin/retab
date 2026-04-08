@@ -404,6 +404,13 @@ impl IrGraph {
                     .collect::<PyResult<_>>()?;
                 let py_tuple = pyo3::types::PyTuple::new_bound(py, &py_args);
 
+                // Resolve the anchor's Python node for meta copy (always the
+                // original dead node, not the chain-previous node).
+                let meta_src_node = anchor_id
+                    .and_then(|aid| all_py.get(aid))
+                    .and_then(|opt| opt.as_ref())
+                    .unwrap_or(&ref_node);
+
                 let target_op = creator.resolve_op(&ir_node.target)?;
                 let ctx = if insert_after {
                     graph.call_method1("inserting_after", (&ref_node,))?
@@ -414,8 +421,7 @@ impl IrGraph {
                 let kw = PyDict::new_bound(py);
                 kw.set_item("args", py_tuple)?;
                 let new_py = graph.call_method("call_function", (&target_op,), Some(&kw))?;
-                let meta_src = if insert_after { &ref_node } else { &ref_node };
-                let meta = copy_mod.call_method1("copy", (meta_src.getattr("meta")?,))?;
+                let meta = copy_mod.call_method1("copy", (meta_src_node.getattr("meta")?,))?;
                 new_py.setattr("meta", &meta)?;
                 let none = py.None().into_bound(py);
                 ctx.call_method1("__exit__", (&none, &none, &none))?;
