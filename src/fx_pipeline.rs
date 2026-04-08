@@ -42,6 +42,20 @@ use crate::fx_remove_noop;
 use crate::fx_rewrite_conv;
 use crate::fx_rewrite_index_put;
 use crate::fx_rewrite_matmul;
+use crate::fx_convert_clamp_ir;
+use crate::fx_convert_full_like_ir;
+use crate::fx_convert_split_to_slice_ir;
+use crate::fx_convert_sum_ir;
+use crate::fx_decompose_addmm_ir;
+use crate::fx_decompose_as_strided_copy_ir;
+use crate::fx_decompose_cumsum_ir;
+use crate::fx_decompose_logit_ir;
+use crate::fx_decompose_masked_fill_ir;
+use crate::fx_decompose_pixel_shuffle_ir;
+use crate::fx_decompose_repeat_interleave_ir;
+use crate::fx_decompose_tril_ir;
+use crate::fx_expand_where_mask_ir;
+use crate::fx_remove_noop_ir;
 use crate::fx_rewrite_squeeze_ir;
 use crate::fx_size_adjust_input;
 
@@ -247,6 +261,77 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(
             fx_fuse_constant_args::FxFuseConstantArgsPass::new_zero_input_full_only(fuse_late),
         ),
+    ]
+}
+
+/// Build the hybrid pipeline: IrPasses run on persistent IrGraph, FxPasses
+/// cause a flush/reimport cycle. Same pass ordering as build_fx_pipeline.
+pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<crate::fx_ir::PipelineStep> {
+    use crate::fx_ir::PipelineStep::{Ir, Fx};
+
+    let ExportedProgramClones {
+        fold_qdq,
+        fuse,
+        fuse_grouped,
+        cast,
+        fuse_placeholders,
+        fuse_late,
+    } = ExportedProgramClones::new(exported_program);
+
+    vec![
+        // -- Early decompositions (before fold_qdq) --
+        Fx(Box::new(fx_annotate_output_dim_order::FxAnnotateOutputDimOrderPass)),
+        Fx(Box::new(fx_decompose_ops::FxDecomposeOpsPass)),
+        // -- Pre-fold --
+        Fx(Box::new(fx_fuse_quant_activation::FxFuseQuantizedActivationPass)),
+        Ir(Box::new(fx_convert_clamp_ir::IrConvertClampPass)),
+        // -- Fold Q/DQ + rescale (must be FxPass — needs exported_program) --
+        Fx(Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(fold_qdq))),
+        Fx(Box::new(fx_fuse_duplicate_users::FxFuseDuplicateUsersPass)),
+        Fx(Box::new(fx_decompose_linear::FxDecomposeLinearPass)),
+        Fx(Box::new(fx_conv1d_unsqueeze::FxConv1dUnsqueezePass)),
+        Fx(Box::new(fx_insert_rescale::FxInsertRescalePass::new())),
+        Fx(Box::new(fx_decompose_quant::FxDecomposeQuantNodesPass)),
+        // -- Post-fold: long run of IrPasses (no Python roundtrip) --
+        Ir(Box::new(fx_convert_split_to_slice_ir::IrConvertSplitToSlicePass)),
+        Ir(Box::new(fx_decompose_masked_fill_ir::IrDecomposeMaskedFillPass)),
+        Fx(Box::new(fx_canonicalize_gather::FxCanonicalizeGatherPass)),
+        Fx(Box::new(fx_decompose_index_tensor::FxDecomposeIndexTensorPass)),
+        Fx(Box::new(fx_decompose_index_select::FxDecomposeIndexSelectToGatherPass)),
+        Fx(Box::new(fx_decompose_unfold::FxDecomposeUnfoldToGatherPass)),
+        Fx(Box::new(fx_decompose_select_scatter::FxDecomposeSelectScatterPass)),
+        Fx(Box::new(fx_decompose_strided_slice::FxDecomposeStridedSlicePass)),
+        Ir(Box::new(fx_expand_where_mask_ir::IrExpandWhereMaskPass)),
+        Ir(Box::new(fx_decompose_tril_ir::IrDecomposeTrilPass)),
+        Ir(Box::new(fx_decompose_logit_ir::IrDecomposeLogitPass)),
+        Ir(Box::new(fx_decompose_addmm_ir::IrDecomposeAddmmPass)),
+        Ir(Box::new(fx_decompose_cumsum_ir::IrDecomposeCumsumPass)),
+        Ir(Box::new(fx_decompose_repeat_interleave_ir::IrDecomposeRepeatInterleavePass)),
+        Ir(Box::new(fx_decompose_pixel_shuffle_ir::IrDecomposePixelShufflePass)),
+        Ir(Box::new(fx_decompose_as_strided_copy_ir::IrDecomposeAsStridedCopyPass)),
+        Fx(Box::new(fx_quantize_clamp_args::FxQuantizeClampArgsPass)),
+        Ir(Box::new(fx_convert_full_like_ir::IrConvertFullLikePass)),
+        Fx(Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(fuse))),
+        Fx(Box::new(fx_decompose_adaptive_avgpool::FxDecomposeAdaptiveAvgPoolPass)),
+        Fx(Box::new(fx_decompose_maxpool_dilation::FxDecomposeMaxPoolDilationPass)),
+        Fx(Box::new(fx_decompose_mean::FxDecomposeMeanPass)),
+        Ir(Box::new(fx_convert_sum_ir::IrConvertSumPass)),
+        Fx(Box::new(fx_insert_table_ops::FxInsertTableOpsPass)),
+        // -- ATen -> TOSA --
+        Fx(Box::new(fx_decompose_grouped_conv::FxDecomposeGroupedConvPass)),
+        Fx(Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(fuse_grouped))),
+        Fx(Box::new(fx_rewrite_conv::FxRewriteConvPass)),
+        Fx(Box::new(fx_size_adjust_input::FxSizeAdjustInputPass)),
+        Ir(Box::new(fx_rewrite_squeeze_ir::IrRewriteSqueezePass)),
+        // -- Postprocessing --
+        Fx(Box::new(fx_cast_int64::FxCastInt64ToInt32Pass::new(cast))),
+        Fx(Box::new(fx_rewrite_index_put::FxRewriteIndexPutPass)),
+        Fx(Box::new(fx_fuse_equal_placeholders::FxFuseEqualPlaceholdersPass::new(fuse_placeholders))),
+        Fx(Box::new(fx_memory_format::FxToTosaMemoryFormatPass)),
+        Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)),
+        Fx(Box::new(fx_rewrite_matmul::FxRewriteMatmulRescalePass)),
+        Fx(Box::new(fx_insert_rescale::FxInsertRescalePass::new())),
+        Fx(Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new_zero_input_full_only(fuse_late))),
     ]
 }
 

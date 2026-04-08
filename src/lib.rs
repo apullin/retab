@@ -99,9 +99,11 @@ fn run_full_fx_pipeline(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<PyObject>,
 ) -> PyResult<bool> {
-    let gm = fx_graph::FxGraphModule::new(graph_module);
-    let pipeline = fx_pipeline::build_fx_pipeline(exported_program);
-    fx_pass::run_boxed_fx_passes(&gm, &pipeline)
+    // Use hybrid pipeline: persistent IrGraph for Rust passes,
+    // flush/reimport only at FxPass boundaries.
+    let py = graph_module.py();
+    let pipeline = fx_pipeline::build_hybrid_pipeline(exported_program);
+    fx_ir::run_hybrid_pipeline(py, graph_module, &pipeline)
 }
 
 fn ingest_graph_hierarchy(

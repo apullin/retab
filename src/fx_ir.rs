@@ -1306,3 +1306,102 @@ impl<P: IrPass> crate::fx_pass::FxPass for IrPassAdapter<P> {
         run_ir_passes(gm.py(), gm.gm_ref(), &[&self.pass])
     }
 }
+
+// ===========================================================================
+// Hybrid pipeline: persistent IrGraph with FxPass escape hatches
+// ===========================================================================
+
+/// A step in the hybrid pipeline — either a pure Rust IrPass or a Python FxPass.
+pub enum PipelineStep {
+    Ir(Box<dyn IrPass>),
+    Fx(Box<dyn crate::fx_pass::FxPass>),
+}
+
+/// Flush the IrGraph back to Python: write_back_with_surgery + cleanup.
+fn flush_ir_to_python(
+    ir: &IrGraph,
+    py: Python<'_>,
+    gm: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    ir.write_back_with_surgery(py, gm)?;
+    let graph = gm.getattr("graph")?;
+    graph.call_method0("eliminate_dead_code")?;
+    graph.call_method0("lint")?;
+    gm.call_method0("recompile")?;
+    Ok(())
+}
+
+/// Run a hybrid pipeline: IrPasses mutate a persistent IrGraph in pure Rust.
+/// FxPasses cause a flush→run→reimport cycle. Minimizes Python roundtrips.
+pub fn run_hybrid_pipeline<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+    steps: &[PipelineStep],
+) -> PyResult<bool> {
+    use crate::runner_logging::{log_line, log_pass_start, log_pass_result};
+    use std::time::Instant;
+
+    let fxgm = crate::fx_graph::FxGraphModule::new(gm);
+    let mut ir: Option<IrGraph> = None;
+    let mut any_modified = false;
+    let mut ir_dirty = false;  // tracks if the IrGraph has unflushed changes
+
+    for (i, step) in steps.iter().enumerate() {
+        match step {
+            PipelineStep::Ir(pass) => {
+                // Ensure we have an IrGraph
+                if ir.is_none() {
+                    ir = Some(IrGraph::from_fx(gm)?);
+                    ir_dirty = false;
+                }
+                let graph = ir.as_mut().unwrap();
+                let before = graph.nodes.iter().filter(|n| n.alive).count();
+                log_pass_start("HybridPipeline", i, steps.len(), pass.name());
+                let modified = pass.run(graph);
+                let after = graph.nodes.iter().filter(|n| n.alive).count();
+                log_pass_result("HybridPipeline", pass.name(), modified, before, after);
+                if modified {
+                    any_modified = true;
+                    ir_dirty = true;
+                }
+            }
+            PipelineStep::Fx(pass) => {
+                // Flush IrGraph to Python if dirty
+                if ir_dirty {
+                    if let Some(ref graph) = ir {
+                        flush_ir_to_python(graph, py, gm)?;
+                    }
+                    ir = None;
+                    ir_dirty = false;
+                } else {
+                    // Drop the clean IrGraph — FxPass will read Python directly
+                    ir = None;
+                }
+                let before = fxgm.node_count()?;
+                log_pass_start("HybridPipeline", i, steps.len(), pass.name());
+                let modified = pass.run(&fxgm)?;
+                let after = fxgm.node_count()?;
+                log_pass_result("HybridPipeline", pass.name(), modified, before, after);
+                if modified {
+                    any_modified = true;
+                }
+                // Next IrPass will re-import from Python
+            }
+        }
+    }
+
+    // Final flush if IrGraph has unflushed changes
+    if ir_dirty {
+        if let Some(ref graph) = ir {
+            flush_ir_to_python(graph, py, gm)?;
+        }
+    }
+
+    // Post-pipeline cleanup (same as run_fx_passes)
+    if any_modified {
+        let helpers = py.import_bound("fx_helpers")?;
+        helpers.call_method1("refresh_safe_quantized_fake_tensors", (gm,))?;
+    }
+
+    Ok(any_modified)
+}
