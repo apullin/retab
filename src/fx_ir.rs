@@ -371,54 +371,59 @@ impl IrGraph {
         if self.nodes.len() > original_count {
             let creator = FxNodeCreator::new(py)?;
             let copy_mod = py.import_bound("copy")?;
+            // Track last node created per anchor to preserve topological order
+            // in multi-node chains (A→B→C all anchored to the same dead node).
+            let mut last_for_anchor: HashMap<NodeId, Bound<'_, PyAny>> = HashMap::new();
             for ir_node in &self.nodes[original_count..] {
                 if !ir_node.alive {
                     all_py.push(None);
                     continue;
                 }
-                // Find anchor: the dead node this one replaces, or an explicit anchor
                 let anchor_id = self.replacements.iter()
                     .find(|(_, &new_id)| new_id == ir_node.id)
                     .map(|(&old_id, _)| old_id)
                     .or_else(|| self.anchors.get(&ir_node.id).copied());
-                let anchor_py = anchor_id
-                    .and_then(|id| all_py.get(id))
-                    .and_then(|opt| opt.as_ref());
 
-                let ref_node = anchor_py.or_else(|| {
-                    all_py.iter().rev().find_map(|opt| opt.as_ref().filter(|n| {
-                        n.getattr("op")
-                            .and_then(|o| o.extract::<String>())
-                            .map(|s| s == "output")
-                            .unwrap_or(false)
-                    }))
-                });
-                let Some(ref_node) = ref_node else {
-                    all_py.push(None);
-                    continue;
+                // Decide ref_node and direction (before/after).
+                // If this anchor already has nodes, insert AFTER the last one.
+                // Otherwise insert BEFORE the anchor (or before output as fallback).
+                let (ref_node, insert_after) = if let Some(aid) = anchor_id {
+                    if let Some(prev) = last_for_anchor.get(&aid) {
+                        (prev.clone(), true)
+                    } else if let Some(Some(a)) = all_py.get(aid) {
+                        (a.clone(), false)
+                    } else {
+                        (find_output_node(&all_py), false)
+                    }
+                } else {
+                    (find_output_node(&all_py), false)
                 };
 
-                // Convert IrArgs → Python objects
                 let py_args: Vec<Bound<'_, PyAny>> = ir_node.args.iter()
                     .map(|a| ir_arg_to_py(py, a, &all_py))
                     .collect::<PyResult<_>>()?;
                 let py_tuple = pyo3::types::PyTuple::new_bound(py, &py_args);
 
-                // Create node via graph API (inserting before anchor)
                 let target_op = creator.resolve_op(&ir_node.target)?;
-                let ctx = graph.call_method1("inserting_before", (ref_node,))?;
+                let ctx = if insert_after {
+                    graph.call_method1("inserting_after", (&ref_node,))?
+                } else {
+                    graph.call_method1("inserting_before", (&ref_node,))?
+                };
                 ctx.call_method0("__enter__")?;
                 let kw = PyDict::new_bound(py);
                 kw.set_item("args", py_tuple)?;
                 let new_py = graph.call_method("call_function", (&target_op,), Some(&kw))?;
-                // Full meta copy from anchor (preserves qparams, val, everything)
-                let meta = copy_mod.call_method1("copy", (ref_node.getattr("meta")?,))?;
+                let meta_src = if insert_after { &ref_node } else { &ref_node };
+                let meta = copy_mod.call_method1("copy", (meta_src.getattr("meta")?,))?;
                 new_py.setattr("meta", &meta)?;
                 let none = py.None().into_bound(py);
                 ctx.call_method1("__exit__", (&none, &none, &none))?;
 
-                // Apply any dirty metadata from the IR node on top
                 ir_node.meta.write_back(py, &new_py)?;
+                if let Some(aid) = anchor_id {
+                    last_for_anchor.insert(aid, new_py.clone());
+                }
                 all_py.push(Some(new_py));
             }
         }
@@ -792,6 +797,19 @@ impl IrNode {
         };
         Some(QParam { scale, zp, qmin, qmax, dtype_str })
     }
+}
+
+/// Find the output node in the Python node list (for fallback insertion point).
+fn find_output_node<'py>(all_py: &[Option<Bound<'py, PyAny>>]) -> Bound<'py, PyAny> {
+    all_py.iter().rev()
+        .find_map(|opt| opt.as_ref().filter(|n| {
+            n.getattr("op")
+                .and_then(|o| o.extract::<String>())
+                .map(|s| s == "output")
+                .unwrap_or(false)
+        }))
+        .expect("graph must have an output node")
+        .clone()
 }
 
 /// Convert an IrArg back to a Python object for node creation.

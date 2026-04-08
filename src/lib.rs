@@ -34,7 +34,6 @@ mod fx_decompose_maxpool_dilation;
 mod fx_decompose_mean;
 mod fx_decompose_ops;
 mod fx_decompose_pixel_shuffle;
-mod fx_decompose_pixel_shuffle_ir;
 mod fx_decompose_quant;
 mod fx_decompose_repeat_interleave;
 mod fx_decompose_select_scatter;
