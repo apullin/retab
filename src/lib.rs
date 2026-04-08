@@ -64,6 +64,7 @@ mod fx_fuse_duplicate_users;
 mod fx_fuse_duplicate_users_ir;
 mod fx_fuse_equal_placeholders;
 mod fx_fuse_quant_activation;
+mod fx_fuse_quant_activation_ir;
 mod fx_graph;
 mod fx_insert_rescale;
 mod fx_insert_table_ops;

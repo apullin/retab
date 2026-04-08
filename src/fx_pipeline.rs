@@ -283,7 +283,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         Fx(Box::new(fx_annotate_output_dim_order::FxAnnotateOutputDimOrderPass)),
         Ir(Box::new(crate::fx_decompose_ops_ir::IrDecomposeOpsPass)),
         // -- Pre-fold --
-        Fx(Box::new(fx_fuse_quant_activation::FxFuseQuantizedActivationPass)),
+        Ir(Box::new(crate::fx_fuse_quant_activation_ir::IrFuseQuantActivationPass)),
         Ir(Box::new(fx_convert_clamp_ir::IrConvertClampPass)),
         // -- Fold Q/DQ + rescale (must be FxPass — needs exported_program) --
         Fx(Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(fold_qdq))),
