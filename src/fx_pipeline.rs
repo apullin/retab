@@ -313,7 +313,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         Ir(Box::new(fx_convert_full_like_ir::IrConvertFullLikePass)),
         Fx(Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(fuse))),
         Ir(Box::new(crate::fx_decompose_adaptive_avgpool_ir::IrDecomposeAdaptiveAvgPoolPass)),
-        Fx(Box::new(fx_decompose_maxpool_dilation::FxDecomposeMaxPoolDilationPass)),
+        Ir(Box::new(crate::fx_decompose_maxpool_dilation_ir::IrDecomposeMaxPoolDilationPass)),
         Fx(Box::new(fx_decompose_mean::FxDecomposeMeanPass)),
         Ir(Box::new(fx_convert_sum_ir::IrConvertSumPass)),
         Fx(Box::new(fx_insert_table_ops::FxInsertTableOpsPass)),

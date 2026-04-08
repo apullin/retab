@@ -1,0 +1,219 @@
+//! Pure Rust IrPass: dilated max_pool2d → pad + space-to-batch + pool + batch-to-space + slice.
+
+use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::runner_logging::log_line;
+
+fn i64_list(vals: &[i64]) -> IrArg {
+    IrArg::List(vals.iter().map(|&v| IrArg::Int(v)).collect())
+}
+
+fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
+    let mut m = base.clone();
+    m.set_val(FakeTensorMeta { shape, dtype: dtype.to_string() });
+    m
+}
+
+fn pair_arg(args: &[IrArg], idx: usize, default: (i64, i64)) -> (i64, i64) {
+    match args.get(idx) {
+        Some(IrArg::List(items)) => match items.as_slice() {
+            [IrArg::Int(a), IrArg::Int(b), ..] => (*a, *b),
+            [IrArg::Int(a)] => (*a, *a),
+            _ => default,
+        },
+        Some(IrArg::Int(v)) => (*v, *v),
+        _ => default,
+    }
+}
+
+fn pack_dimension(dil: i64, pad: i64, orig: i64, kernel: i64, stride: i64) -> (i64, i64, i64) {
+    let padded = orig + pad * 2;
+    let extra = (dil - (padded % dil)) % dil;
+    let packed = (padded + extra) / dil;
+    let eff_k = dil * (kernel - 1) + 1;
+    let out = if padded < eff_k { 0 } else { 1 + (padded - eff_k) / stride };
+    (packed, pad + extra, out)
+}
+
+fn pool_output_size(input: i64, kernel: i64, stride: i64, pad: i64, ceil_mode: bool) -> i64 {
+    if ceil_mode {
+        (input + 2 * pad - kernel + stride - 1) / stride + 1
+    } else {
+        (input + 2 * pad - kernel) / stride + 1
+    }
+}
+
+fn pad_value_for_dtype(dtype: &str) -> IrArg {
+    if dtype.contains("float") || dtype.contains("fp") || dtype.contains("bf") {
+        IrArg::Float(f64::NEG_INFINITY)
+    } else if dtype.contains("int8") {
+        IrArg::Int(-128)
+    } else if dtype.contains("int16") {
+        IrArg::Int(-32768)
+    } else {
+        IrArg::Int(i32::MIN as i64)
+    }
+}
+
+pub struct IrDecomposeMaxPoolDilationPass;
+
+impl IrPass for IrDecomposeMaxPoolDilationPass {
+    fn name(&self) -> &str { "IrDecomposeMaxPoolDilation" }
+
+    fn run(&self, graph: &mut IrGraph) -> bool {
+        let mut modified = false;
+        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
+
+        for id in ids {
+            if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
+                continue;
+            }
+            let t = &graph.nodes[id].target;
+            if !(t.contains("max_pool2d") && !t.contains("with_indices")) { continue; }
+
+            let x_id = match graph.nodes[id].args.first().and_then(|a| a.as_node()) {
+                Some(n) => n, None => continue,
+            };
+            let input_shape = match graph.nodes[x_id].meta.val_shape() {
+                Some(s) if s.len() >= 4 => s.to_vec(), _ => continue,
+            };
+            let (n, c, h, w) = (input_shape[0], input_shape[1], input_shape[2], input_shape[3]);
+            let args = &graph.nodes[id].args;
+
+            let (k_h, k_w) = pair_arg(args, 1, (1, 1));
+            let (s_h, s_w) = pair_arg(args, 2, (k_h, k_w));
+            let (pad_h, pad_w) = pair_arg(args, 3, (0, 0));
+            let (d_h, d_w) = pair_arg(args, 4, (1, 1));
+            let ceil_mode = args.get(5).and_then(|a| a.as_bool()).unwrap_or(false);
+
+            if d_h == 1 && d_w == 1 { continue; }
+
+            let (h_pack, bottom_pad, h_final) = pack_dimension(d_h, pad_h, h, k_h, s_h);
+            let (w_pack, right_pad, w_final) = pack_dimension(d_w, pad_w, w, k_w, s_w);
+
+            let node_name = graph.nodes[id].name.clone();
+            let orig_meta = graph.nodes[id].meta.clone();
+            let dtype = graph.nodes[x_id].meta.val_dtype()
+                .unwrap_or("torch.float32").to_string();
+
+            // 1. constant_pad_nd(x, [pad_w, right_pad, pad_h, bottom_pad, 0,0,0,0], pad_val)
+            let x_pad = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_pad", node_name),
+                "aten.constant_pad_nd.default".to_string(),
+                vec![
+                    IrArg::Node(x_id),
+                    i64_list(&[pad_w, right_pad, pad_h, bottom_pad, 0, 0, 0, 0]),
+                    pad_value_for_dtype(&dtype),
+                ],
+                meta_with(&orig_meta, vec![n, c, h + pad_h + bottom_pad, w + pad_w + right_pad], &dtype),
+            );
+            graph.anchor_to(x_pad, id);
+
+            // 2. view → [N, C, h_pack, d_h, w_pack, d_w]
+            let x_view = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_pack_view", node_name),
+                "aten.view_copy.default".to_string(),
+                vec![IrArg::Node(x_pad), i64_list(&[n, c, h_pack, d_h, w_pack, d_w])],
+                meta_with(&orig_meta, vec![n, c, h_pack, d_h, w_pack, d_w], &dtype),
+            );
+            graph.anchor_to(x_view, id);
+
+            // 3. permute [3,5,0,1,2,4]
+            let x_perm = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_pack_perm", node_name),
+                "aten.permute_copy.default".to_string(),
+                vec![IrArg::Node(x_view), i64_list(&[3, 5, 0, 1, 2, 4])],
+                meta_with(&orig_meta, vec![d_h, d_w, n, c, h_pack, w_pack], &dtype),
+            );
+            graph.anchor_to(x_perm, id);
+
+            // 4. view → [N*d_h*d_w, C, h_pack, w_pack]
+            let x_batch = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_batch", node_name),
+                "aten.view_copy.default".to_string(),
+                vec![IrArg::Node(x_perm), i64_list(&[n * d_h * d_w, c, h_pack, w_pack])],
+                meta_with(&orig_meta, vec![n * d_h * d_w, c, h_pack, w_pack], &dtype),
+            );
+            graph.anchor_to(x_batch, id);
+
+            // 5. max_pool2d (non-dilated, zero padding)
+            let h_out = pool_output_size(h_pack, k_h, s_h, 0, ceil_mode);
+            let w_out = pool_output_size(w_pack, k_w, s_w, 0, ceil_mode);
+            let pooled = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_pool", node_name),
+                "aten.max_pool2d.default".to_string(),
+                vec![
+                    IrArg::Node(x_batch),
+                    i64_list(&[k_h, k_w]),
+                    i64_list(&[s_h, s_w]),
+                    i64_list(&[0, 0]),
+                    IrArg::Int(1),          // dilation=1
+                    IrArg::Bool(ceil_mode),
+                ],
+                meta_with(&orig_meta, vec![n * d_h * d_w, c, h_out, w_out], &dtype),
+            );
+            graph.anchor_to(pooled, id);
+
+            // 6. view → [d_h, d_w, N, C, h_out, w_out]
+            let unpack = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_unpack", node_name),
+                "aten.view_copy.default".to_string(),
+                vec![IrArg::Node(pooled), i64_list(&[d_h, d_w, n, c, h_out, w_out])],
+                meta_with(&orig_meta, vec![d_h, d_w, n, c, h_out, w_out], &dtype),
+            );
+            graph.anchor_to(unpack, id);
+
+            // 7. permute [2,3,4,0,5,1]
+            let unperm = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_unperm", node_name),
+                "aten.permute_copy.default".to_string(),
+                vec![IrArg::Node(unpack), i64_list(&[2, 3, 4, 0, 5, 1])],
+                meta_with(&orig_meta, vec![n, c, h_out, d_h, w_out, d_w], &dtype),
+            );
+            graph.anchor_to(unperm, id);
+
+            // 8. view → [N, C, h_out*d_h, w_out*d_w]
+            let out_view = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_out_view", node_name),
+                "aten.view_copy.default".to_string(),
+                vec![IrArg::Node(unperm), i64_list(&[n, c, h_out * d_h, w_out * d_w])],
+                meta_with(&orig_meta, vec![n, c, h_out * d_h, w_out * d_w], &dtype),
+            );
+            graph.anchor_to(out_view, id);
+
+            // 9. slice H to h_final
+            let slice_h = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_slice_h", node_name),
+                "aten.slice_copy.Tensor".to_string(),
+                vec![IrArg::Node(out_view), IrArg::Int(2), IrArg::Int(0), IrArg::Int(h_final)],
+                meta_with(&orig_meta, vec![n, c, h_final, w_out * d_w], &dtype),
+            );
+            graph.anchor_to(slice_h, id);
+
+            // 10. slice W to w_final
+            let result = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_slice_w", node_name),
+                "aten.slice_copy.Tensor".to_string(),
+                vec![IrArg::Node(slice_h), IrArg::Int(3), IrArg::Int(0), IrArg::Int(w_final)],
+                meta_with(&orig_meta, vec![n, c, h_final, w_final], &dtype),
+            );
+
+            graph.replace_and_erase(id, result);
+            modified = true;
+        }
+
+        if modified {
+            log_line(format_args!("[IrDecomposeMaxPoolDilation] decomposed dilated maxpool ops"));
+        }
+        modified
+    }
+}
