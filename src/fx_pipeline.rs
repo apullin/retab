@@ -295,7 +295,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         // -- Post-fold: long run of IrPasses (no Python roundtrip) --
         Ir(Box::new(fx_convert_split_to_slice_ir::IrConvertSplitToSlicePass)),
         Ir(Box::new(fx_decompose_masked_fill_ir::IrDecomposeMaskedFillPass)),
-        Fx(Box::new(fx_canonicalize_gather::FxCanonicalizeGatherPass)),
+        Ir(Box::new(crate::fx_canonicalize_gather_ir::IrCanonicalizeGatherPass)),
         Fx(Box::new(fx_decompose_index_tensor::FxDecomposeIndexTensorPass)),
         Fx(Box::new(fx_decompose_index_select::FxDecomposeIndexSelectToGatherPass)),
         Fx(Box::new(fx_decompose_unfold::FxDecomposeUnfoldToGatherPass)),

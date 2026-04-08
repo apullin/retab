@@ -6,6 +6,7 @@ use crate::store::TensorStore;
 
 mod fx_annotate_output_dim_order;
 mod fx_canonicalize_gather;
+mod fx_canonicalize_gather_ir;
 mod fx_cast_int64;
 mod fx_conv1d_unsqueeze;
 mod fx_conv1d_unsqueeze_ir;
