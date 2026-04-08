@@ -42,7 +42,7 @@ use crate::fx_remove_noop;
 use crate::fx_rewrite_conv;
 use crate::fx_rewrite_index_put;
 use crate::fx_rewrite_matmul;
-use crate::fx_rewrite_squeeze;
+use crate::fx_rewrite_squeeze_ir;
 use crate::fx_size_adjust_input;
 
 struct ExportedProgramClones {
@@ -126,7 +126,9 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_decompose_ops::FxDecomposeOpsPass),
         // -- Pre-fold --
         Box::new(fx_fuse_quant_activation::FxFuseQuantizedActivationPass),
-        Box::new(fx_convert_clamp::FxConvertToClampPass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(
+            crate::fx_convert_clamp_ir::IrConvertClampPass,
+        )),
         // -- Fold Q/DQ + rescale --
         Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(fold_qdq)),
         Box::new(fx_fuse_duplicate_users::FxFuseDuplicateUsersPass),
@@ -137,7 +139,9 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         // -- Post-fold decompositions (matches Python ordering) --
         // Convert split_with_sizes_copy → multiple slice_copy ops
         // Python runs ConvertSplitToSlicePass post-fold (line 281)
-        Box::new(fx_convert_split_to_slice::FxConvertSplitToSlicePass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(
+            crate::fx_convert_split_to_slice_ir::IrConvertSplitToSlicePass,
+        )),
         // Decompose masked_fill -> where(mask, quantized_full, x).  Runs after
         // fold_qdq so the fill scalar can be quantized with output qparams.
         Box::new(fx_decompose_masked_fill::FxDecomposeMaskedFillPass),
@@ -163,16 +167,22 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_decompose_strided_slice::FxDecomposeStridedSlicePass),
         // Expand lower-rank where/select masks to the full data rank so the
         // direct TOSA SELECT emission sees shape-aligned inputs.
-        Box::new(fx_expand_where_mask::FxExpandWhereMaskPass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(
+            crate::fx_expand_where_mask_ir::IrExpandWhereMaskPass,
+        )),
         // Mirror the Python Arm backend's tril lowering:
         // arange + view + add(diagonal) + ge + where / bitwise_and.
         Box::new(fx_decompose_tril::FxDecomposeTrilPass),
         // Decompose logit -> clamp + mul + add + reciprocal + log
         // Python runs DecomposeLogitPass post-fold (line 285 in arm_pass_manager.py)
-        Box::new(fx_decompose_logit::FxDecomposeLogitPass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(
+            crate::fx_decompose_logit_ir::IrDecomposeLogitPass,
+        )),
         // Decompose addmm -> mm + mul + add
         // Python runs DecomposeAddmmPass post-fold (line 297 in arm_pass_manager.py)
-        Box::new(fx_decompose_addmm::FxDecomposeAddmmPass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(
+            crate::fx_decompose_addmm_ir::IrDecomposeAddmmPass,
+        )),
         // Decompose cumsum into chained slice_copy + add + cat
         Box::new(fx_decompose_cumsum::FxDecomposeCumsumPass),
         // Decompose repeat_interleave(self_int) into unsqueeze+repeat+view
@@ -186,7 +196,9 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_quantize_clamp_args::FxQuantizeClampArgsPass),
         // Convert full_like -> full with explicit shape
         // Python runs ConvertFullLikeToFullPass in scalars section (line 330)
-        Box::new(fx_convert_full_like::FxConvertFullLikeToFullPass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(
+            crate::fx_convert_full_like_ir::IrConvertFullLikePass,
+        )),
         Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(fuse)),
         // Decompose adaptive_avg_pool2d → avg_pool2d (or slice+pool+cat)
         Box::new(fx_decompose_adaptive_avgpool::FxDecomposeAdaptiveAvgPoolPass),
@@ -195,7 +207,9 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         Box::new(fx_decompose_maxpool_dilation::FxDecomposeMaxPoolDilationPass),
         // Decompose mean.dim into sum*mul with keepdim=True + reshape
         Box::new(fx_decompose_mean::FxDecomposeMeanPass),
-        Box::new(fx_convert_sum::FxConvertSumPass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(
+            crate::fx_convert_sum_ir::IrConvertSumPass,
+        )),
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
         // -- ATen -> TOSA conversion --
         // Decompose grouped convolutions (groups>1, not depthwise) into
@@ -213,13 +227,17 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
         // Rewrite squeeze/unsqueeze to view_copy with explicit shape,
         // and transpose_copy to permute_copy with full permutation.
         // Runs after conv rewriting so shapes are stable.
-        Box::new(fx_rewrite_squeeze::FxRewriteSqueezePass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(
+            fx_rewrite_squeeze_ir::IrRewriteSqueezePass,
+        )),
         // -- Postprocessing/cleanup (Python ordering) --
         Box::new(fx_cast_int64::FxCastInt64ToInt32Pass::new(cast)),
         Box::new(fx_rewrite_index_put::FxRewriteIndexPutPass),
         Box::new(fx_fuse_equal_placeholders::FxFuseEqualPlaceholdersPass::new(fuse_placeholders)),
         Box::new(fx_memory_format::FxToTosaMemoryFormatPass),
-        Box::new(fx_remove_noop::FxRemoveNoopPass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(
+            crate::fx_remove_noop_ir::IrRemoveNoopPass,
+        )),
         // Matmul rescale MUST run BEFORE InsertRescalePass: it inserts a
         // RESCALE(INT32→INT8) after bmm to bring the accumulator output back
         // to the quantized dtype.  InsertRescalePass then correctly creates
@@ -252,7 +270,9 @@ pub fn build_fx_while_submodule_pipeline(
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
         // Cleanup
         Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(ep.fuse)),
-        Box::new(fx_remove_noop::FxRemoveNoopPass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(
+            crate::fx_remove_noop_ir::IrRemoveNoopPass,
+        )),
         // Second rescale pass
         Box::new(fx_insert_rescale::FxInsertRescalePass::carried()),
         // Layout
@@ -278,7 +298,9 @@ pub fn build_fx_cond_submodule_pipeline(
         Box::new(fx_insert_table_ops::FxInsertTableOpsPass),
         // Cleanup
         Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(ep.fuse)),
-        Box::new(fx_remove_noop::FxRemoveNoopPass),
+        Box::new(crate::fx_ir::IrPassAdapter::new(
+            crate::fx_remove_noop_ir::IrRemoveNoopPass,
+        )),
         // Matmul rescale + second rescale pass
         Box::new(fx_rewrite_matmul::FxRewriteMatmulRescalePass),
         Box::new(fx_insert_rescale::FxInsertRescalePass::new()),

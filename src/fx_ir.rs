@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::fx_control_flow_metadata::{NodeOp, QParam};
+pub(crate) use crate::fx_control_flow_metadata::{NodeOp, QParam};
 
 // ---------------------------------------------------------------------------
 // IrGraph — full graph topology
@@ -114,6 +114,12 @@ pub struct IrGraph {
     users: Vec<Vec<NodeId>>,
     /// Replacement map: dead_id → replacement_id (recorded by replace_and_erase).
     replacements: HashMap<NodeId, NodeId>,
+    /// Explicit position anchors: new_node_id → original_node_id.
+    /// During write_back_with_surgery, nodes with anchors are inserted before
+    /// the original node's position (like replacements, but without implying
+    /// a use-replacement relationship).  Passes call `anchor_to` for
+    /// intermediate nodes that must appear near a specific original node.
+    anchors: HashMap<NodeId, NodeId>,
 }
 
 impl IrGraph {
@@ -173,7 +179,7 @@ impl IrGraph {
             }
         }
 
-        Ok(Self { nodes, name_to_id, users, replacements: HashMap::new() })
+        Ok(Self { nodes, name_to_id, users, replacements: HashMap::new(), anchors: HashMap::new() })
     }
 
     /// Find a node by name.
@@ -293,6 +299,15 @@ impl IrGraph {
         self.replacements.insert(old_id, new_id);
     }
 
+    /// Record a position anchor: during write_back_with_surgery, `new_id`
+    /// will be inserted before `original_id`'s position in the Python graph.
+    /// Use this for intermediate nodes that must appear near a specific
+    /// original node (e.g., view_copy/expand_copy that feed a replacement
+    /// where node).
+    pub fn anchor_to(&mut self, new_id: NodeId, original_id: NodeId) {
+        self.anchors.insert(new_id, original_id);
+    }
+
     /// Insert a new node, returning its ID. The node is appended to the end;
     /// ordering relative to other nodes is handled during write_back.
     pub fn add_node(&mut self, op: NodeOp, name: String, target: String, args: Vec<IrArg>, meta: NodeMeta) -> NodeId {
@@ -326,8 +341,10 @@ impl IrGraph {
     }
 
     /// Write back metadata AND apply graph surgery to the Python FX graph.
-    /// Surgery operations (replace_all_uses, erase) are applied using the
-    /// recorded `replacements` map.
+    /// Handles three cases:
+    /// 1. Metadata updates on alive original nodes
+    /// 2. Creation of new Python FX nodes for IrNodes added by passes
+    /// 3. replace_all_uses + erase for dead original nodes
     pub fn write_back_with_surgery(
         &self,
         py: Python<'_>,
@@ -336,22 +353,87 @@ impl IrGraph {
         let graph = if gm.hasattr("graph")? { gm.getattr("graph")? } else { gm.clone() };
         let py_nodes: Vec<Bound<'_, PyAny>> = graph.getattr("nodes")?
             .iter()?.filter_map(|n| n.ok()).collect();
+        let original_count = py_nodes.len();
 
-        // Write metadata for alive nodes
+        // Write metadata for alive original nodes
         for (ir_node, py_node) in self.nodes.iter().zip(py_nodes.iter()) {
             if ir_node.alive {
                 ir_node.meta.write_back(py, py_node)?;
             }
         }
 
-        // Apply surgery: replace_all_uses + erase for dead nodes (reverse order
-        // so dependents are erased before their sources)
-        for ir_node in self.nodes.iter().rev() {
-            if ir_node.alive || ir_node.id >= py_nodes.len() { continue; }
-            let py_node = &py_nodes[ir_node.id];
+        // Build extended lookup: original nodes + slots for new nodes
+        let mut all_py: Vec<Option<Bound<'_, PyAny>>> = py_nodes.iter()
+            .map(|n| Some(n.clone()))
+            .collect();
+
+        // Create Python FX nodes for IrNodes added by passes (id >= original_count)
+        if self.nodes.len() > original_count {
+            let creator = FxNodeCreator::new(py)?;
+            let copy_mod = py.import_bound("copy")?;
+            for ir_node in &self.nodes[original_count..] {
+                if !ir_node.alive {
+                    all_py.push(None);
+                    continue;
+                }
+                // Find anchor: the dead node this one replaces, or an explicit anchor
+                let anchor_id = self.replacements.iter()
+                    .find(|(_, &new_id)| new_id == ir_node.id)
+                    .map(|(&old_id, _)| old_id)
+                    .or_else(|| self.anchors.get(&ir_node.id).copied());
+                let anchor_py = anchor_id
+                    .and_then(|id| all_py.get(id))
+                    .and_then(|opt| opt.as_ref());
+
+                let ref_node = anchor_py.or_else(|| {
+                    all_py.iter().rev().find_map(|opt| opt.as_ref().filter(|n| {
+                        n.getattr("op")
+                            .and_then(|o| o.extract::<String>())
+                            .map(|s| s == "output")
+                            .unwrap_or(false)
+                    }))
+                });
+                let Some(ref_node) = ref_node else {
+                    all_py.push(None);
+                    continue;
+                };
+
+                // Convert IrArgs → Python objects
+                let py_args: Vec<Bound<'_, PyAny>> = ir_node.args.iter()
+                    .map(|a| ir_arg_to_py(py, a, &all_py))
+                    .collect::<PyResult<_>>()?;
+                let py_tuple = pyo3::types::PyTuple::new_bound(py, &py_args);
+
+                // Create node via graph API (inserting before anchor)
+                let target_op = creator.resolve_op(&ir_node.target)?;
+                let ctx = graph.call_method1("inserting_before", (ref_node,))?;
+                ctx.call_method0("__enter__")?;
+                let kw = PyDict::new_bound(py);
+                kw.set_item("args", py_tuple)?;
+                let new_py = graph.call_method("call_function", (&target_op,), Some(&kw))?;
+                // Full meta copy from anchor (preserves qparams, val, everything)
+                let meta = copy_mod.call_method1("copy", (ref_node.getattr("meta")?,))?;
+                new_py.setattr("meta", &meta)?;
+                let none = py.None().into_bound(py);
+                ctx.call_method1("__exit__", (&none, &none, &none))?;
+
+                // Apply any dirty metadata from the IR node on top
+                ir_node.meta.write_back(py, &new_py)?;
+                all_py.push(Some(new_py));
+            }
+        }
+
+        // Apply surgery: replace_all_uses + erase for dead original nodes
+        // (reverse order so dependents are erased before their sources)
+        for ir_node in self.nodes[..original_count].iter().rev() {
+            if ir_node.alive { continue; }
+            let py_node = match all_py.get(ir_node.id).and_then(|o| o.as_ref()) {
+                Some(n) => n,
+                None => continue,
+            };
             if let Some(&replacement_id) = self.replacements.get(&ir_node.id) {
-                if replacement_id < py_nodes.len() {
-                    py_node.call_method1("replace_all_uses_with", (&py_nodes[replacement_id],))?;
+                if let Some(Some(replacement_py)) = all_py.get(replacement_id) {
+                    py_node.call_method1("replace_all_uses_with", (replacement_py,))?;
                 }
             }
             graph.call_method1("erase_node", (py_node,))?;
@@ -709,6 +791,32 @@ impl IrNode {
             }
         };
         Some(QParam { scale, zp, qmin, qmax, dtype_str })
+    }
+}
+
+/// Convert an IrArg back to a Python object for node creation.
+fn ir_arg_to_py<'py>(
+    py: Python<'py>,
+    arg: &IrArg,
+    py_nodes: &[Option<Bound<'py, PyAny>>],
+) -> PyResult<Bound<'py, PyAny>> {
+    match arg {
+        IrArg::Node(id) => py_nodes.get(*id)
+            .and_then(|opt| opt.clone())
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(
+                format!("No Python node for IR node {id}")
+            )),
+        IrArg::Int(v) => Ok(v.into_py(py).into_bound(py)),
+        IrArg::Float(v) => Ok(v.into_py(py).into_bound(py)),
+        IrArg::Bool(v) => Ok(v.into_py(py).into_bound(py)),
+        IrArg::Str(s) => Ok(s.into_py(py).into_bound(py)),
+        IrArg::List(items) => {
+            let py_items: Vec<Bound<'py, PyAny>> = items.iter()
+                .map(|item| ir_arg_to_py(py, item, py_nodes))
+                .collect::<PyResult<_>>()?;
+            Ok(pyo3::types::PyList::new_bound(py, &py_items).into_any())
+        }
+        IrArg::None => Ok(py.None().into_bound(py)),
     }
 }
 
@@ -1145,5 +1253,32 @@ impl IrArg {
             }
             _ => None,
         }
+    }
+}
+
+// ===========================================================================
+// IrPassAdapter — bridge IrPass into the FxPass pipeline
+// ===========================================================================
+
+/// Wraps a pure Rust `IrPass` as an `FxPass`, allowing it to be used
+/// in the existing FxPass pipeline. Handles the full IrGraph lifecycle:
+/// import from Python → run pass → write back with surgery.
+pub struct IrPassAdapter<P: IrPass> {
+    pass: P,
+}
+
+impl<P: IrPass> IrPassAdapter<P> {
+    pub fn new(pass: P) -> Self {
+        Self { pass }
+    }
+}
+
+impl<P: IrPass> crate::fx_pass::FxPass for IrPassAdapter<P> {
+    fn name(&self) -> &str {
+        self.pass.name()
+    }
+
+    fn run(&self, gm: &crate::fx_graph::FxGraphModule) -> PyResult<bool> {
+        run_ir_passes(gm.py(), gm.gm_ref(), &[&self.pass])
     }
 }
