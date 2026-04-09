@@ -80,12 +80,16 @@ impl IrPass for IrDecomposeLinearPass {
             let node_name = graph.nodes[id].name.clone();
 
             // 1. Reshape input to 4D: [..., Ci] -> [batches, Ci, 1, 1]
+            //    Propagate input qparams to the reshaped node.
             let input_4d_shape = [batches, ci, 1, 1];
             let mut input_4d_meta = graph.nodes[input_id].meta.clone();
             input_4d_meta.set_val(FakeTensorMeta {
                 shape: input_4d_shape.to_vec(),
                 dtype: output_dtype.clone(),
             });
+            if let Some(oqp) = graph.nodes[input_id].meta.output_qparams.clone() {
+                input_4d_meta.set_output_qparams(oqp);
+            }
             let input_reshaped = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_input_view", node_name),
@@ -96,12 +100,20 @@ impl IrPass for IrDecomposeLinearPass {
             graph.anchor_to(input_reshaped, id);
 
             // 2. Reshape weights to 4D: [Co, Ci] -> [Co, Ci, 1, 1]
+            //    Propagate weight qparams (including per-channel) to the reshaped node.
             let weights_4d_shape = [co, weights_shape[1], 1, 1];
             let mut weights_4d_meta = graph.nodes[weights_id].meta.clone();
             weights_4d_meta.set_val(FakeTensorMeta {
                 shape: weights_4d_shape.to_vec(),
                 dtype: output_dtype.clone(),
             });
+            // Force qparam write-back so the reshaped weight carries per-channel scales
+            if let Some(oqp) = graph.nodes[weights_id].meta.output_qparams.clone() {
+                weights_4d_meta.set_output_qparams(oqp);
+            }
+            if let Some(iqp) = graph.nodes[weights_id].meta.input_qparams.clone() {
+                weights_4d_meta.set_input_qparams(iqp);
+            }
             let weights_reshaped = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_weight_view", node_name),
