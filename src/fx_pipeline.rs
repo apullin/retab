@@ -291,7 +291,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         Fx(Box::new(fx_decompose_linear::FxDecomposeLinearPass)),
         Fx(Box::new(fx_conv1d_unsqueeze::FxConv1dUnsqueezePass)),
         Fx(Box::new(fx_insert_rescale::FxInsertRescalePass::new())),
-        Fx(Box::new(fx_decompose_quant::FxDecomposeQuantNodesPass)),
+        Ir(Box::new(crate::fx_decompose_quant_ir::IrDecomposeQuantPass)),
         // -- Post-fold: long run of IrPasses (no Python roundtrip) --
         Ir(Box::new(fx_convert_split_to_slice_ir::IrConvertSplitToSlicePass)),
         Ir(Box::new(fx_decompose_masked_fill_ir::IrDecomposeMaskedFillPass)),
@@ -324,7 +324,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         Fx(Box::new(fx_decompose_grouped_conv::FxDecomposeGroupedConvPass)),
         Fx(Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(fuse_grouped))),
         Fx(Box::new(fx_rewrite_conv::FxRewriteConvPass)),
-        Fx(Box::new(fx_size_adjust_input::FxSizeAdjustInputPass)),
+        Ir(Box::new(crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass)),
         Ir(Box::new(fx_rewrite_squeeze_ir::IrRewriteSqueezePass)),
         // -- Postprocessing --
         Fx(Box::new(fx_cast_int64::FxCastInt64ToInt32Pass::new(cast))),
