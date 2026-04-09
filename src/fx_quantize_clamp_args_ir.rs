@@ -66,15 +66,8 @@ impl IrPass for IrQuantizeClampArgsPass {
             }
 
             if did_update {
-                // Create replacement node with quantized args
-                let new_id = graph.add_node(
-                    NodeOp::CallFunction,
-                    graph.nodes[id].name.clone(),
-                    graph.nodes[id].target.clone(),
-                    new_args,
-                    graph.nodes[id].meta.clone(),
-                );
-                graph.replace_and_erase(id, new_id);
+                // Update args in-place (write_back propagates to Python)
+                graph.set_args(id, new_args);
                 modified = true;
             }
         }

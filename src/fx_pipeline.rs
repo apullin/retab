@@ -297,7 +297,10 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         Ir(Box::new(fx_decompose_masked_fill_ir::IrDecomposeMaskedFillPass)),
         Ir(Box::new(crate::fx_canonicalize_gather_ir::IrCanonicalizeGatherPass)),
         Fx(Box::new(fx_decompose_index_tensor::FxDecomposeIndexTensorPass)),
+        // IrPass handles non-bool; FxPass would be needed for bool casts (rare)
         Ir(Box::new(crate::fx_decompose_index_select_ir::IrDecomposeIndexSelectPass)),
+        // Fallback for bool inputs that the IrPass skips
+        Fx(Box::new(fx_decompose_index_select::FxDecomposeIndexSelectToGatherPass)),
         Fx(Box::new(fx_decompose_unfold::FxDecomposeUnfoldToGatherPass)),
         Ir(Box::new(crate::fx_decompose_select_scatter_ir::IrDecomposeSelectScatterPass)),
         Ir(Box::new(crate::fx_decompose_strided_slice_ir::IrDecomposeStridedSlicePass)),
@@ -309,7 +312,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         Ir(Box::new(fx_decompose_repeat_interleave_ir::IrDecomposeRepeatInterleavePass)),
         Ir(Box::new(fx_decompose_pixel_shuffle_ir::IrDecomposePixelShufflePass)),
         Ir(Box::new(fx_decompose_as_strided_copy_ir::IrDecomposeAsStridedCopyPass)),
-        Fx(Box::new(fx_quantize_clamp_args::FxQuantizeClampArgsPass)),
+        Ir(Box::new(crate::fx_quantize_clamp_args_ir::IrQuantizeClampArgsPass)),
         Ir(Box::new(fx_convert_full_like_ir::IrConvertFullLikePass)),
         Fx(Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(fuse))),
         Ir(Box::new(crate::fx_decompose_adaptive_avgpool_ir::IrDecomposeAdaptiveAvgPoolPass)),

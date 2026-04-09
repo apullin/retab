@@ -74,6 +74,7 @@ mod fx_pass;
 mod fx_pipeline;
 mod fx_profile;
 mod fx_quantize_clamp_args;
+mod fx_quantize_clamp_args_ir;
 mod fx_remove_noop;
 mod fx_remove_noop_ir;
 mod fx_rewrite_conv;

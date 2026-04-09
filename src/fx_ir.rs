@@ -34,6 +34,8 @@ pub struct IrNode {
     pub alive: bool,
     /// Set for cond/while_loop call_function nodes.
     pub cf_kind: Option<CfKind>,
+    /// True if args were modified and need write-back to Python.
+    pub(crate) args_dirty: bool,
 }
 
 /// An argument to a node — either a reference to another node or a literal.
@@ -159,7 +161,7 @@ impl IrGraph {
                 else if target.contains("while_loop") { Some(CfKind::While) }
                 else { None }
             } else { None };
-            nodes.push(IrNode { id: i, op, name, target, args, meta, alive: true, cf_kind });
+            nodes.push(IrNode { id: i, op, name, target, args, meta, alive: true, cf_kind, args_dirty: false });
         }
 
         // Build reverse edges
@@ -210,6 +212,12 @@ impl IrGraph {
     /// Get mutable node by ID.
     pub fn node_mut(&mut self, id: NodeId) -> &mut IrNode {
         &mut self.nodes[id]
+    }
+
+    /// Update a node's args and mark dirty for write-back.
+    pub fn set_args(&mut self, id: NodeId, args: Vec<IrArg>) {
+        self.nodes[id].args = args;
+        self.nodes[id].args_dirty = true;
     }
 
     /// Get users (nodes that reference this node in their args).
@@ -322,7 +330,7 @@ impl IrGraph {
         }
         self.users.push(Vec::new());
         self.name_to_id.insert(name.clone(), id);
-        self.nodes.push(IrNode { id, op, name, target, args, meta, alive: true, cf_kind: None });
+        self.nodes.push(IrNode { id, op, name, target, args, meta, alive: true, cf_kind: None, args_dirty: false });
         id
     }
 
@@ -355,10 +363,20 @@ impl IrGraph {
             .iter()?.filter_map(|n| n.ok()).collect();
         let original_count = py_nodes.len();
 
-        // Write metadata for alive original nodes
+        // Write metadata + args for alive original nodes
         for (ir_node, py_node) in self.nodes.iter().zip(py_nodes.iter()) {
             if ir_node.alive {
                 ir_node.meta.write_back(py, py_node)?;
+                if ir_node.args_dirty {
+                    // Convert IrArgs to Python and update node.args
+                    let all_orig: Vec<Option<Bound<'_, PyAny>>> = py_nodes.iter()
+                        .map(|n| Some(n.clone())).collect();
+                    let py_args: Vec<Bound<'_, PyAny>> = ir_node.args.iter()
+                        .map(|a| ir_arg_to_py(py, a, &all_orig))
+                        .collect::<PyResult<_>>()?;
+                    let py_tuple = pyo3::types::PyTuple::new_bound(py, &py_args);
+                    py_node.setattr("args", py_tuple)?;
+                }
             }
         }
 
@@ -938,6 +956,14 @@ impl FakeTensorMeta {
 
 /// Metadata fields extracted from `node.meta`. The common fields are typed;
 /// rare fields stay in the Python meta dict and are not touched.
+/// Untyped meta value for passthrough of custom keys (arm_layout_neutral, etc).
+#[derive(Debug, Clone)]
+pub enum MetaValue {
+    Bool(bool),
+    Int(i64),
+    IntList(Vec<usize>),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct NodeMeta {
     pub input_qparams: Option<HashMap<usize, QParam>>,
@@ -948,6 +974,8 @@ pub struct NodeMeta {
     pub pre_pass_arg_qparams: Option<HashMap<usize, QParam>>,
     pub table_input_qparam: Option<QParam>,
     pub table_output_qparam: Option<QParam>,
+    /// Arbitrary extra meta keys for passthrough (arm_layout_neutral, skip_size_adjust, etc).
+    pub extras: HashMap<String, MetaValue>,
     pub(crate) dirty: DirtyFlags,
 }
 
@@ -959,6 +987,7 @@ pub(crate) struct DirtyFlags {
     pub(crate) pre_pass_arg_qparams: bool,
     pub(crate) val: bool,
     pub(crate) table_qparams: bool,
+    pub(crate) extras: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1037,6 +1066,19 @@ impl NodeMeta {
             .filter(|v| !v.is_none())
             .map(|v| QParam::from_py(&v));
 
+        // Import known extra meta keys
+        let mut extras = HashMap::new();
+        if let Ok(v) = meta.get_item("arm_layout_neutral") {
+            if let Ok(b) = v.extract::<bool>() {
+                extras.insert("arm_layout_neutral".into(), MetaValue::Bool(b));
+            }
+        }
+        if let Ok(v) = meta.get_item("skip_size_adjust") {
+            if let Ok(b) = v.extract::<bool>() {
+                extras.insert("skip_size_adjust".into(), MetaValue::Bool(b));
+            }
+        }
+
         Ok(Self {
             input_qparams,
             output_qparams,
@@ -1046,6 +1088,7 @@ impl NodeMeta {
             pre_pass_arg_qparams,
             table_input_qparam,
             table_output_qparam,
+            extras,
             dirty: DirtyFlags::default(),
         })
     }
@@ -1100,6 +1143,19 @@ impl NodeMeta {
                     ftm.to_py(py)?
                 };
                 meta.set_item("val", new_val)?;
+            }
+        }
+
+        if self.dirty.extras {
+            for (key, value) in &self.extras {
+                match value {
+                    MetaValue::Bool(v) => meta.set_item(key.as_str(), *v)?,
+                    MetaValue::Int(v) => meta.set_item(key.as_str(), *v)?,
+                    MetaValue::IntList(v) => {
+                        let tuple = pyo3::types::PyTuple::new_bound(py, v);
+                        meta.set_item(key.as_str(), tuple)?;
+                    }
+                }
             }
         }
 
@@ -1172,6 +1228,20 @@ impl NodeMeta {
     /// Get the single input qparam (key 0), if present.
     pub fn input_qparam(&self) -> Option<&QParam> {
         self.input_qparams.as_ref()?.get(&0)
+    }
+
+    /// Set a custom extra meta key.
+    pub fn set_extra(&mut self, key: impl Into<String>, value: MetaValue) {
+        self.extras.insert(key.into(), value);
+        self.dirty.extras = true;
+    }
+
+    /// Get a custom extra meta key.
+    pub fn extra_bool(&self, key: &str) -> Option<bool> {
+        match self.extras.get(key) {
+            Some(MetaValue::Bool(v)) => Some(*v),
+            _ => None,
+        }
     }
 }
 
