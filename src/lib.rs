@@ -48,6 +48,7 @@ mod fx_decompose_ops_ir;
 mod fx_decompose_pixel_shuffle;
 mod fx_decompose_pixel_shuffle_ir;
 mod fx_decompose_quant;
+mod fx_decompose_quant_ir;
 mod fx_decompose_repeat_interleave;
 mod fx_decompose_repeat_interleave_ir;
 mod fx_decompose_select_scatter;
