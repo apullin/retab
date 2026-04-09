@@ -46,6 +46,9 @@ pub enum IrArg {
     Float(f64),
     Bool(bool),
     Str(String),
+    /// A torch.dtype value (e.g. "torch.int8"). Resolves to the Python dtype
+    /// object during write-back, unlike Str which stays as a string.
+    Dtype(String),
     List(Vec<IrArg>),
     None,
 }
@@ -912,6 +915,10 @@ fn ir_arg_to_py<'py>(
         IrArg::Float(v) => Ok(v.into_py(py).into_bound(py)),
         IrArg::Bool(v) => Ok(v.into_py(py).into_bound(py)),
         IrArg::Str(s) => Ok(s.into_py(py).into_bound(py)),
+        IrArg::Dtype(s) => {
+            let torch = py.import_bound("torch")?;
+            Ok(torch.getattr(&*s.replace("torch.", ""))?)
+        }
         IrArg::List(items) => {
             let py_items: Vec<Bound<'py, PyAny>> = items.iter()
                 .map(|item| ir_arg_to_py(py, item, py_nodes))
@@ -938,6 +945,12 @@ fn resolve_arg(py_arg: &Bound<'_, PyAny>, name_to_id: &HashMap<String, NodeId>) 
     if let Ok(v) = py_arg.extract::<i64>() { return IrArg::Int(v); }
     if let Ok(v) = py_arg.extract::<f64>() { return IrArg::Float(v); }
     if let Ok(v) = py_arg.extract::<String>() { return IrArg::Str(v); }
+    // Check for torch.dtype objects (have is_floating_point attribute)
+    if py_arg.hasattr("is_floating_point").unwrap_or(false) {
+        if let Ok(s) = py_arg.str().map(|s| s.to_string()) {
+            return IrArg::Dtype(s);
+        }
+    }
     // Try list/tuple
     if let Ok(iter) = py_arg.iter() {
         let items: Vec<IrArg> = iter

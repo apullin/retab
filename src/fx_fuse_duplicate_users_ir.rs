@@ -28,6 +28,7 @@ fn arg_signature(arg: &IrArg) -> String {
         IrArg::Float(v) => format!("f{v}"),
         IrArg::Bool(v) => format!("b{v}"),
         IrArg::Str(s) => format!("s{s}"),
+        IrArg::Dtype(s) => format!("d{s}"),
         IrArg::List(items) => {
             let inner: Vec<String> = items.iter().map(arg_signature).collect();
             format!("[{}]", inner.join(","))
