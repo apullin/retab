@@ -297,10 +297,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         Ir(Box::new(fx_decompose_masked_fill_ir::IrDecomposeMaskedFillPass)),
         Ir(Box::new(crate::fx_canonicalize_gather_ir::IrCanonicalizeGatherPass)),
         Ir(Box::new(crate::fx_decompose_index_tensor_ir::IrDecomposeIndexTensorPass)),
-        // IrPass handles non-bool; FxPass would be needed for bool casts (rare)
         Ir(Box::new(crate::fx_decompose_index_select_ir::IrDecomposeIndexSelectPass)),
-        // Fallback for bool inputs that the IrPass skips
-        Fx(Box::new(fx_decompose_index_select::FxDecomposeIndexSelectToGatherPass)),
         Ir(Box::new(crate::fx_decompose_unfold_ir::IrDecomposeUnfoldPass)),
         Ir(Box::new(crate::fx_decompose_select_scatter_ir::IrDecomposeSelectScatterPass)),
         Ir(Box::new(crate::fx_decompose_strided_slice_ir::IrDecomposeStridedSlicePass)),

@@ -1,16 +1,13 @@
-//! First-pass scaffolding for a Rust-native fold_qdq port.
+//! Rust-native fold_qdq implementation and parity helpers.
 //!
 //! This module is intentionally narrow:
 //! - target-name matching helpers
 //! - foldable-node classification from typed `NodeMeta`
 //! - qparam resolution from literal or tensor-backed IR args
-//!
-//! It does not perform any graph mutation yet and is not wired into the
-//! pipeline in this first pass.
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{IrArg, IrGraph, IrNode, IrPass, MetaValue, NodeMeta, NodeOp, QParam};
+use crate::fx_ir::{IrArg, IrGraph, IrNode, IrPass, MetaValue, NodeId, NodeMeta, NodeOp, QParam};
 use crate::graph::ir::DType;
 use crate::store::TensorData;
 
@@ -26,6 +23,13 @@ pub(crate) enum FoldQdqQParamSource {
 pub(crate) struct ResolvedFoldQdqQParam {
     pub qparam: QParam,
     pub source: FoldQdqQParamSource,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedFoldQdqInput {
+    pub arg_index: usize,
+    pub qparam: ResolvedFoldQdqQParam,
+    pub dq_node_ids: Vec<NodeId>,
 }
 
 pub(crate) fn target_matches_any(target: &str, markers: &[&str]) -> bool {
@@ -113,12 +117,61 @@ pub(crate) fn resolve_qparam_from_arg(
 pub(crate) fn resolve_input_qparams_for_foldable_node(
     graph: &IrGraph,
     node: &IrNode,
-) -> Vec<(usize, ResolvedFoldQdqQParam)> {
+) -> Vec<ResolvedFoldQdqInput> {
     node.args
         .iter()
         .enumerate()
-        .filter_map(|(idx, arg)| resolve_qparam_from_arg(graph, arg).map(|qp| (idx, qp)))
+        .filter_map(|(idx, arg)| resolve_input_qparam_for_arg(graph, idx, arg))
         .collect()
+}
+
+pub(crate) fn resolve_input_qparam_map_for_foldable_node(
+    graph: &IrGraph,
+    node: &IrNode,
+) -> Vec<(usize, ResolvedFoldQdqQParam)> {
+    resolve_input_qparams_for_foldable_node(graph, node)
+        .into_iter()
+        .map(|resolved| (resolved.arg_index, resolved.qparam))
+        .collect()
+}
+
+fn resolve_input_qparam_for_arg(
+    graph: &IrGraph,
+    arg_index: usize,
+    arg: &IrArg,
+) -> Option<ResolvedFoldQdqInput> {
+    match arg {
+        IrArg::Node(id) => {
+            let qparam = resolve_qparam_from_arg(graph, arg)?;
+            let dq_node_ids = if is_dequantize_target(&graph.node(*id).target) {
+                vec![*id]
+            } else {
+                Vec::new()
+            };
+            Some(ResolvedFoldQdqInput { arg_index, qparam, dq_node_ids })
+        }
+        IrArg::List(items) => {
+            let mut qparam = None;
+            let mut dq_node_ids = Vec::new();
+
+            for item in items {
+                let IrArg::Node(id) = item else {
+                    return None;
+                };
+                let item_node = graph.node(*id);
+                if !is_dequantize_target(&item_node.target) {
+                    continue;
+                }
+                if let Some(resolved) = resolve_qparam_from_q_or_dq(graph, item_node) {
+                    qparam = Some(resolved);
+                    dq_node_ids.push(*id);
+                }
+            }
+
+            qparam.map(|qparam| ResolvedFoldQdqInput { arg_index, qparam, dq_node_ids })
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn resolve_qparam_from_q_or_dq_args<'a, F>(
@@ -335,7 +388,7 @@ impl IrFoldQdqPass {
         graph: &IrGraph,
         node: &IrNode,
     ) -> Vec<(usize, ResolvedFoldQdqQParam)> {
-        resolve_input_qparams_for_foldable_node(graph, node)
+        resolve_input_qparam_map_for_foldable_node(graph, node)
     }
 
     pub(crate) fn resolve_output_qparam(
@@ -363,34 +416,35 @@ impl IrPass for IrFoldQdqPass {
             let node = graph.node(node_id).clone();
             let mut input_qparams = HashMap::new();
 
-            for (idx, resolved) in self.resolve_input_qparams(graph, &node) {
+            for resolved_input in resolve_input_qparams_for_foldable_node(graph, &node) {
+                let idx = resolved_input.arg_index;
+                let resolved = resolved_input.qparam;
                 input_qparams.insert(idx, resolved.qparam.clone());
 
-                let IrArg::Node(arg_id) = node.args[idx] else {
-                    continue;
-                };
-                let arg_node = graph.node(arg_id).clone();
-                if !arg_node.alive || !is_dequantize_target(&arg_node.target) {
-                    continue;
-                }
-                let Some(IrArg::Node(source_id)) = arg_node.args.first() else {
-                    continue;
-                };
+                for arg_id in resolved_input.dq_node_ids {
+                    let arg_node = graph.node(arg_id).clone();
+                    if !arg_node.alive || !is_dequantize_target(&arg_node.target) {
+                        continue;
+                    }
+                    let Some(IrArg::Node(source_id)) = arg_node.args.first() else {
+                        continue;
+                    };
 
-                if matches!(resolved.source, FoldQdqQParamSource::TensorBackedArgs | FoldQdqQParamSource::LiteralArgs)
-                    && resolved.qparam.qmin == -7
-                    && resolved.qparam.qmax == 7
-                {
-                    graph.node_mut(*source_id).meta.set_extra(
-                        "tosa_special_dtype",
-                        MetaValue::Str("INT4".to_string()),
-                    );
-                }
+                    if matches!(resolved.source, FoldQdqQParamSource::TensorBackedArgs | FoldQdqQParamSource::LiteralArgs)
+                        && resolved.qparam.qmin == -7
+                        && resolved.qparam.qmax == 7
+                    {
+                        graph.node_mut(*source_id).meta.set_extra(
+                            "tosa_special_dtype",
+                            MetaValue::Str("INT4".to_string()),
+                        );
+                    }
 
-                modified |= graph.replace_input_use(node_id, arg_id, *source_id);
-                if !graph.has_live_users(arg_id) {
-                    graph.erase(arg_id);
-                    modified = true;
+                    modified |= graph.replace_input_use(node_id, arg_id, *source_id);
+                    if !graph.has_live_users(arg_id) {
+                        graph.erase(arg_id);
+                        modified = true;
+                    }
                 }
             }
 
@@ -658,6 +712,104 @@ mod tests {
         assert!(matches!(graph.node(add).args[0], IrArg::Node(id) if id == input));
         assert_eq!(graph.node(add).meta.input_qparam().unwrap().scale, 0.25);
         assert_eq!(graph.node(add).meta.output_qparam().unwrap().zp, 3);
+    }
+
+    #[test]
+    fn fold_qdq_pass_bypasses_dq_nodes_inside_list_arg() {
+        let mut graph = IrGraph::empty();
+        let input0 = add_node(
+            &mut graph,
+            NodeOp::Placeholder,
+            "x0",
+            "x0",
+            vec![],
+            NodeMeta::default(),
+        );
+        let input1 = add_node(
+            &mut graph,
+            NodeOp::Placeholder,
+            "x1",
+            "x1",
+            vec![],
+            NodeMeta::default(),
+        );
+        let dq0 = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "dq0",
+            "quantized_decomposed.dequantize_per_tensor.default",
+            vec![
+                IrArg::Node(input0),
+                IrArg::Float(0.25),
+                IrArg::Int(3),
+                IrArg::Int(-128),
+                IrArg::Int(127),
+                IrArg::Dtype("torch.int8".to_string()),
+            ],
+            NodeMeta::default(),
+        );
+        let dq1 = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "dq1",
+            "quantized_decomposed.dequantize_per_tensor.default",
+            vec![
+                IrArg::Node(input1),
+                IrArg::Float(0.5),
+                IrArg::Int(7),
+                IrArg::Int(-128),
+                IrArg::Int(127),
+                IrArg::Dtype("torch.int8".to_string()),
+            ],
+            NodeMeta::default(),
+        );
+
+        let mut cat_meta = NodeMeta::default();
+        cat_meta.set_extra("arm_quantized_annotation", MetaValue::Bool(true));
+        let cat = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "cat",
+            "aten.cat.default",
+            vec![IrArg::List(vec![IrArg::Node(dq0), IrArg::Node(dq1)]), IrArg::Int(0)],
+            cat_meta,
+        );
+        let q = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "q",
+            "quantized_decomposed.quantize_per_tensor.default",
+            vec![
+                IrArg::Node(cat),
+                IrArg::Float(0.5),
+                IrArg::Int(7),
+                IrArg::Int(-128),
+                IrArg::Int(127),
+                IrArg::Dtype("torch.int8".to_string()),
+            ],
+            NodeMeta::default(),
+        );
+        let _output = add_node(
+            &mut graph,
+            NodeOp::Output,
+            "output",
+            "output",
+            vec![IrArg::Node(q)],
+            NodeMeta::default(),
+        );
+
+        let pass = IrFoldQdqPass;
+        assert!(pass.run(&mut graph));
+
+        assert!(!graph.node(dq0).alive);
+        assert!(!graph.node(dq1).alive);
+        assert!(matches!(
+            graph.node(cat).args[0],
+            IrArg::List(ref items)
+                if matches!(items.as_slice(), [IrArg::Node(a), IrArg::Node(b)] if *a == input0 && *b == input1)
+        ));
+        assert_eq!(graph.node(cat).meta.input_qparam().unwrap().scale, 0.5);
+        assert_eq!(graph.node(cat).meta.output_qparam().unwrap().zp, 7);
     }
 
     #[test]

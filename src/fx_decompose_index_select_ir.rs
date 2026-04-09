@@ -1,5 +1,7 @@
 //! Pure Rust IrPass: index_select → view + unsqueeze + expand + GATHER + view.
 
+use std::collections::HashMap;
+
 use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::runner_logging::log_line;
 
@@ -61,15 +63,32 @@ impl IrPass for IrDecomposeIndexSelectPass {
             let idx_dtype = graph.nodes[index_id].meta.val_dtype()
                 .unwrap_or("torch.int64").to_string();
 
-            // Skip bool inputs (need _to_copy with dtype kwarg)
-            if x_dtype == "torch.bool" { continue; }
+            let needs_bool_cast = x_dtype == "torch.bool";
+            let gather_dtype = if needs_bool_cast { "torch.int8" } else { x_dtype.as_str() };
+
+            let x_for_gather = if needs_bool_cast {
+                let mut kwargs = HashMap::new();
+                kwargs.insert("dtype".to_string(), IrArg::Dtype("torch.int8".to_string()));
+                let cast = graph.add_node_with_kwargs(
+                    NodeOp::CallFunction,
+                    format!("{}_bool_to_i8", name),
+                    "aten._to_copy.default".to_string(),
+                    vec![IrArg::Node(x_id)],
+                    kwargs,
+                    meta_with(&orig_meta, x_shape.clone(), "torch.int8"),
+                );
+                graph.anchor_to(cast, id);
+                cast
+            } else {
+                x_id
+            };
 
             // Flatten x to (N, K, C)
             let values = graph.add_node(NodeOp::CallFunction,
                 format!("{}_values", name),
                 "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(x_id), i64_list(&[n, k, c])],
-                meta_with(&orig_meta, vec![n, k, c], &x_dtype));
+                vec![IrArg::Node(x_for_gather), i64_list(&[n, k, c])],
+                meta_with(&orig_meta, vec![n, k, c], gather_dtype));
             graph.anchor_to(values, id);
 
             // Index: unsqueeze(0) → (1, W), then expand to (N, W)
@@ -92,7 +111,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 format!("{}_gather", name),
                 "backend.tosa.GATHER.default".to_string(),
                 vec![IrArg::Node(values), IrArg::Node(idx_exp)],
-                meta_with(&orig_meta, vec![n, w, c], &x_dtype));
+                meta_with(&orig_meta, vec![n, w, c], gather_dtype));
             graph.anchor_to(gathered, id);
 
             // Reshape to (...before, W, ...after)
@@ -104,7 +123,25 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 format!("{}_out", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(gathered), i64_list(&out_shape)],
-                meta_with(&orig_meta, out_shape, &x_dtype));
+                meta_with(&orig_meta, out_shape.clone(), gather_dtype));
+            graph.anchor_to(result, id);
+
+            let result = if needs_bool_cast {
+                let mut kwargs = HashMap::new();
+                kwargs.insert("dtype".to_string(), IrArg::Dtype("torch.bool".to_string()));
+                let cast = graph.add_node_with_kwargs(
+                    NodeOp::CallFunction,
+                    format!("{}_i8_to_bool", name),
+                    "aten._to_copy.default".to_string(),
+                    vec![IrArg::Node(result)],
+                    kwargs,
+                    meta_with(&orig_meta, out_shape, "torch.bool"),
+                );
+                graph.anchor_to(cast, id);
+                cast
+            } else {
+                result
+            };
 
             graph.replace_and_erase(id, result);
             modified = true;
