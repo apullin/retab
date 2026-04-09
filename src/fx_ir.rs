@@ -1470,7 +1470,9 @@ pub struct NodeMeta {
     pub input_qparams: Option<HashMap<usize, QParam>>,
     pub output_qparams: Option<HashMap<usize, QParam>>,
     pub val: Option<FakeTensorMeta>,
+    pub val_dim_order: Option<Vec<usize>>,
     pub tosa_dim_order: Option<Vec<usize>>,
+    pub original_dim_orders: Option<Vec<Vec<usize>>>,
     pub tosa_spatial_rank: Option<usize>,
     pub pre_pass_arg_qparams: Option<HashMap<usize, QParam>>,
     pub table_input_qparam: Option<QParam>,
@@ -1485,6 +1487,7 @@ pub(crate) struct DirtyFlags {
     pub(crate) input_qparams: bool,
     pub(crate) output_qparams: bool,
     pub(crate) tosa_dim_order: bool,
+    pub(crate) original_dim_orders: bool,
     pub(crate) pre_pass_arg_qparams: bool,
     pub(crate) val: bool,
     pub(crate) table_qparams: bool,
@@ -1543,12 +1546,20 @@ impl NodeMeta {
             .ok()
             .and_then(|v| extract_qparam_dict(&v));
 
-        let val = meta.get_item("val").ok()
-            .and_then(|v| FakeTensorMeta::from_py(&v));
+        let val_obj = meta.get_item("val").ok();
+        let val = val_obj.as_ref()
+            .and_then(|v| FakeTensorMeta::from_py(v));
+        let val_dim_order = val_obj.as_ref()
+            .and_then(|v| v.call_method0("dim_order").ok())
+            .and_then(|v| v.extract::<Vec<usize>>().ok());
 
         let tosa_dim_order = meta.get_item("tosa_dim_order")
             .ok()
             .and_then(|v| v.extract::<Vec<usize>>().ok());
+
+        let original_dim_orders = meta.get_item("original_dim_orders")
+            .ok()
+            .and_then(|v| v.extract::<Vec<Vec<usize>>>().ok());
 
         let tosa_spatial_rank = meta.get_item("tosa_spatial_rank")
             .ok()
@@ -1596,7 +1607,9 @@ impl NodeMeta {
             input_qparams,
             output_qparams,
             val,
+            val_dim_order,
             tosa_dim_order,
+            original_dim_orders,
             tosa_spatial_rank,
             pre_pass_arg_qparams,
             table_input_qparam,
@@ -1628,6 +1641,16 @@ impl NodeMeta {
             if let Some(ref order) = self.tosa_dim_order {
                 let tuple = pyo3::types::PyTuple::new_bound(py, order);
                 meta.set_item("tosa_dim_order", tuple)?;
+            }
+        }
+
+        if self.dirty.original_dim_orders {
+            if let Some(ref orders) = self.original_dim_orders {
+                let py_orders = pyo3::types::PyList::empty_bound(py);
+                for order in orders {
+                    py_orders.append(order.clone())?;
+                }
+                meta.set_item("original_dim_orders", py_orders)?;
             }
         }
 
@@ -1690,6 +1713,10 @@ impl NodeMeta {
         self.val.as_ref().map(|v| v.rank())
     }
 
+    pub fn val_dim_order(&self) -> Option<&[usize]> {
+        self.val_dim_order.as_deref()
+    }
+
     // --- Mutation helpers that set dirty flags ---
 
     pub fn set_output_qparams(&mut self, map: HashMap<usize, QParam>) {
@@ -1727,6 +1754,11 @@ impl NodeMeta {
     pub fn set_tosa_dim_order(&mut self, order: Vec<usize>) {
         self.tosa_dim_order = Some(order);
         self.dirty.tosa_dim_order = true;
+    }
+
+    pub fn set_original_dim_orders(&mut self, orders: Vec<Vec<usize>>) {
+        self.original_dim_orders = Some(orders);
+        self.dirty.original_dim_orders = true;
     }
 
     pub fn set_val(&mut self, ftm: FakeTensorMeta) {
