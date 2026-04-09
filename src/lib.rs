@@ -82,6 +82,7 @@ mod fx_rewrite_index_put;
 mod fx_rewrite_matmul;
 mod fx_rewrite_squeeze_ir;
 mod fx_size_adjust_input;
+mod fx_size_adjust_input_ir;
 mod fx_utils;
 mod graph;
 mod ingest;
