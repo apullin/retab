@@ -297,7 +297,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         Ir(Box::new(fx_decompose_masked_fill_ir::IrDecomposeMaskedFillPass)),
         Ir(Box::new(crate::fx_canonicalize_gather_ir::IrCanonicalizeGatherPass)),
         Fx(Box::new(fx_decompose_index_tensor::FxDecomposeIndexTensorPass)),
-        Fx(Box::new(fx_decompose_index_select::FxDecomposeIndexSelectToGatherPass)),
+        Ir(Box::new(crate::fx_decompose_index_select_ir::IrDecomposeIndexSelectPass)),
         Fx(Box::new(fx_decompose_unfold::FxDecomposeUnfoldToGatherPass)),
         Ir(Box::new(crate::fx_decompose_select_scatter_ir::IrDecomposeSelectScatterPass)),
         Ir(Box::new(crate::fx_decompose_strided_slice_ir::IrDecomposeStridedSlicePass)),

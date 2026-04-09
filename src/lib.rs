@@ -30,6 +30,7 @@ mod fx_decompose_cumsum;
 mod fx_decompose_cumsum_ir;
 mod fx_decompose_grouped_conv;
 mod fx_decompose_index_select;
+mod fx_decompose_index_select_ir;
 mod fx_decompose_index_tensor;
 mod fx_decompose_index_tensor_ir;
 mod fx_decompose_linear;
