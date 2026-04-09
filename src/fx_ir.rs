@@ -421,26 +421,47 @@ impl IrGraph {
             .map(|n| Some(n.clone()))
             .collect();
 
-        // Create Python FX nodes for IrNodes added by passes (id >= original_count)
+        // Create Python FX nodes for IrNodes added by passes (id >= original_count).
+        // Multi-pass: cross-pass replace_all_uses can make earlier new nodes
+        // reference later new nodes. We iterate until all alive nodes are created.
         if self.nodes.len() > original_count {
             let creator = FxNodeCreator::new(py)?;
             let copy_mod = py.import_bound("copy")?;
-            // Track last node created per anchor to preserve topological order
-            // in multi-node chains (A→B→C all anchored to the same dead node).
             let mut last_for_anchor: HashMap<NodeId, Bound<'_, PyAny>> = HashMap::new();
+
+            // Pre-fill slots for all new nodes
             for ir_node in &self.nodes[original_count..] {
-                if !ir_node.alive {
-                    all_py.push(None);
-                    continue;
-                }
+                all_py.push(None);
+            }
+
+            // Iterate until no more nodes can be created
+            let mut progress = true;
+            while progress {
+                progress = false;
+                for idx in original_count..self.nodes.len() {
+                    let ir_node = &self.nodes[idx];
+                    if !ir_node.alive || all_py[idx].is_some() { continue; }
+
+                    // Check if all node-arg dependencies are resolved
+                    let deps_ready = ir_node.args.iter().all(|a| match a {
+                        IrArg::Node(dep_id) => all_py.get(*dep_id).and_then(|o| o.as_ref()).is_some(),
+                        IrArg::List(items) => items.iter().all(|item| match item {
+                            IrArg::Node(dep_id) => all_py.get(*dep_id).and_then(|o| o.as_ref()).is_some(),
+                            _ => true,
+                        }),
+                        _ => true,
+                    });
+                    if !deps_ready { continue; }
+
+                    let ir_node = &self.nodes[idx]; // reborrow
                 let anchor_id = self.replacements.iter()
                     .find(|(_, &new_id)| new_id == ir_node.id)
                     .map(|(&old_id, _)| old_id)
                     .or_else(|| self.anchors.get(&ir_node.id).copied());
 
-                // Decide ref_node and direction (before/after).
-                // If this anchor already has nodes, insert AFTER the last one.
-                // Otherwise insert BEFORE the anchor (or before output as fallback).
+                // Insert in anchor-chain order: use last_for_anchor to chain nodes
+                // sharing the same anchor. For the first node in a chain, insert
+                // before the anchor.
                 let (ref_node, insert_after) = if let Some(aid) = anchor_id {
                     if let Some(prev) = last_for_anchor.get(&aid) {
                         (prev.clone(), true)
@@ -492,7 +513,9 @@ impl IrGraph {
                 if let Some(aid) = anchor_id {
                     last_for_anchor.insert(aid, new_py.clone());
                 }
-                all_py.push(Some(new_py));
+                all_py[idx] = Some(new_py);
+                progress = true;
+                }
             }
         }
 

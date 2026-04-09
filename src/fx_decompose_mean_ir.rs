@@ -125,7 +125,9 @@ impl IrPass for IrDecomposeMeanPass {
                 "aten.mul.Tensor".to_string(),
                 vec![IrArg::Node(sum_id), IrArg::Node(count_id)],
                 meta_with(&orig_meta, sum_shape.clone(), &dtype));
-            graph.anchor_to(mul_id, id);
+            // Note: mul is NOT anchored — it depends on sum_id which may be
+            // further decomposed by convert_sum. The multi-pass write_back will
+            // place it after its dependencies via the fallback (before output).
 
             // Annotate qparams if quantized
             if let Some(input_qp) = orig_meta.input_qparam().cloned() {
