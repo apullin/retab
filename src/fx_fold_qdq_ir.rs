@@ -533,6 +533,8 @@ mod tests {
             alive: true,
             cf_kind: None,
             args_dirty: false,
+            args_rebuild_required: false,
+            meta_copy_source: None,
         };
         assert!(is_foldable_node(&annotated));
 

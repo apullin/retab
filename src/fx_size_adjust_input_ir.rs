@@ -10,6 +10,24 @@ fn i64_list(vals: &[i64]) -> IrArg {
 fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
     let mut m = base.clone();
     m.set_val(FakeTensorMeta { shape, dtype: dtype.to_string() });
+    if m.input_qparams.is_some() {
+        m.dirty.input_qparams = true;
+    }
+    if m.output_qparams.is_some() {
+        m.dirty.output_qparams = true;
+    }
+    if m.tosa_dim_order.is_some() {
+        m.dirty.tosa_dim_order = true;
+    }
+    if m.pre_pass_arg_qparams.is_some() {
+        m.dirty.pre_pass_arg_qparams = true;
+    }
+    if m.table_input_qparam.is_some() || m.table_output_qparam.is_some() {
+        m.dirty.table_qparams = true;
+    }
+    if !m.extras.is_empty() {
+        m.dirty.extras = true;
+    }
     m
 }
 
@@ -125,17 +143,18 @@ impl IrPass for IrSizeAdjustInputPass {
             // Create slice nodes and update the conv/pool's input arg
             let mut current = input_id;
             for (dim, start, end) in &slices {
-                let mut slice_shape = graph.nodes[current].meta.val_shape()
-                    .map(|s| s.to_vec()).unwrap_or(input_shape.clone());
-                slice_shape[*dim as usize] = end - start;
                 let slice_id = graph.add_node(
                     NodeOp::CallFunction,
                     format!("{}_adj_d{}", node_name, dim),
                     "aten.slice_copy.Tensor".to_string(),
                     vec![IrArg::Node(current), IrArg::Int(*dim), IrArg::Int(*start), IrArg::Int(*end)],
-                    meta_with(&graph.nodes[input_id].meta, slice_shape, &dtype),
+                    // Match the FX pass: copy the original input metadata onto
+                    // the slice node and let the final fake-tensor refresh
+                    // reconcile the exact sliced shape.
+                    meta_with(&graph.nodes[input_id].meta, input_shape.clone(), &dtype),
                 );
                 graph.anchor_to(slice_id, id);
+                graph.copy_meta_from(slice_id, input_id);
                 current = slice_id;
             }
 

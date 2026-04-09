@@ -43,6 +43,12 @@ pub struct IrNode {
     pub cf_kind: Option<CfKind>,
     /// True if args were modified and need write-back to Python.
     pub(crate) args_dirty: bool,
+    /// True when write-back must rebuild the whole args tuple because literal
+    /// values changed. Pure node-reference rewrites can use replace_input_with.
+    pub(crate) args_rebuild_required: bool,
+    /// Optional node whose Python meta dict should seed a newly-created node.
+    /// Defaults to the insertion anchor when unset.
+    pub(crate) meta_copy_source: Option<NodeId>,
 }
 
 #[derive(Debug, Clone)]
@@ -347,6 +353,8 @@ impl IrGraph {
                 alive: true,
                 cf_kind,
                 args_dirty: false,
+                args_rebuild_required: false,
+                meta_copy_source: None,
             });
         }
 
@@ -415,6 +423,7 @@ impl IrGraph {
     pub fn set_args(&mut self, id: NodeId, args: Vec<IrArg>) {
         self.nodes[id].args = args;
         self.nodes[id].args_dirty = true;
+        self.nodes[id].args_rebuild_required = true;
         self.rebuild_users();
     }
 
@@ -436,8 +445,10 @@ impl IrGraph {
     /// Update a single arg by index and mark dirty.
     pub fn set_arg(&mut self, id: NodeId, index: usize, value: IrArg) {
         if index < self.nodes[id].args.len() {
+            let rebuild_required = !matches!(value, IrArg::Node(_));
             self.nodes[id].args[index] = value;
             self.nodes[id].args_dirty = true;
+            self.nodes[id].args_rebuild_required |= rebuild_required;
             self.rebuild_users();
         }
     }
@@ -446,6 +457,7 @@ impl IrGraph {
     pub fn set_kwarg(&mut self, id: NodeId, key: impl Into<String>, value: IrArg) {
         self.nodes[id].kwargs.insert(key.into(), value);
         self.nodes[id].args_dirty = true;
+        self.nodes[id].args_rebuild_required = true;
     }
 
     /// Get users (nodes that reference this node in their args).
@@ -624,6 +636,13 @@ impl IrGraph {
         self.anchors_after.insert(new_id, original_id);
     }
 
+    /// Override the Python metadata source used when creating a new node.
+    pub fn copy_meta_from(&mut self, new_id: NodeId, source_id: NodeId) {
+        if new_id < self.nodes.len() && source_id < self.nodes.len() {
+            self.nodes[new_id].meta_copy_source = Some(source_id);
+        }
+    }
+
     /// Insert a new node, returning its ID. The node is appended to the end;
     /// ordering relative to other nodes is handled during write_back.
     pub fn add_node(&mut self, op: NodeOp, name: String, target: String, args: Vec<IrArg>, meta: NodeMeta) -> NodeId {
@@ -638,7 +657,7 @@ impl IrGraph {
         }
         self.users.push(Vec::new());
         self.name_to_id.insert(name.clone(), id);
-        self.nodes.push(IrNode { id, op, name, target, args, kwargs: HashMap::new(), meta, tensor: None, alive: true, cf_kind: None, args_dirty: false });
+        self.nodes.push(IrNode { id, op, name, target, args, kwargs: HashMap::new(), meta, tensor: None, alive: true, cf_kind: None, args_dirty: false, args_rebuild_required: false, meta_copy_source: None });
         id
     }
 
@@ -801,9 +820,11 @@ impl IrGraph {
                     .collect::<PyResult<_>>()?;
                 let py_tuple = pyo3::types::PyTuple::new_bound(py, &py_args);
 
-                // Resolve the anchor's Python node for meta copy (always the
-                // original dead node, not the chain-previous node).
-                let meta_src_node = anchor_id
+                // Resolve the Python node used for the initial meta copy. This
+                // defaults to the position anchor, but passes can override it
+                // when insertion position and metadata source differ.
+                let meta_src_node = ir_node.meta_copy_source
+                    .or(anchor_id)
                     .and_then(|aid| all_py.get(aid))
                     .and_then(|opt| opt.as_ref())
                     .unwrap_or(&ref_node);
@@ -847,21 +868,47 @@ impl IrGraph {
 
         // Write back modified args for alive original nodes
         // (after new node creation, so new node references resolve)
+        fn py_node_id(graph: &IrGraph, py_arg: &Bound<'_, PyAny>) -> Option<NodeId> {
+            let name = py_arg.getattr("name").ok()?.extract::<String>().ok()?;
+            if py_arg.getattr("op").is_err() {
+                return None;
+            }
+            graph.by_name(&name).map(|node| node.id)
+        }
+
+        fn collect_node_replacements<'py>(
+            graph: &IrGraph,
+            orig_py: &Bound<'py, PyAny>,
+            ir_arg: &IrArg,
+            replacements: &mut Vec<(Bound<'py, PyAny>, NodeId)>,
+        ) {
+            match ir_arg {
+                IrArg::Node(new_id) => {
+                    if py_node_id(graph, orig_py).is_some_and(|old_id| old_id != *new_id) {
+                        replacements.push((orig_py.clone(), *new_id));
+                    }
+                }
+                IrArg::List(items) => {
+                    if let Ok(iter) = orig_py.iter() {
+                        for (orig_item, ir_item) in iter.filter_map(|item| item.ok()).zip(items) {
+                            collect_node_replacements(graph, &orig_item, ir_item, replacements);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
         for ir_node in &self.nodes[..original_count] {
             if !ir_node.alive || !ir_node.args_dirty { continue; }
             let py_node = match all_py.get(ir_node.id).and_then(|o| o.as_ref()) {
                 Some(n) => n,
                 None => continue,
             };
-            // Check if only Node refs changed (use replace_input_with to preserve
-            // Python types on other args) vs literal changes (need full rebuild).
-            let has_literal_changes = ir_node.args.iter().enumerate().any(|(idx, ir_arg)| {
-                !matches!(ir_arg, IrArg::Node(_)) && idx < ir_node.args.len()
-            });
             let orig_args = crate::fx_graph::FxGraphModule::node_args(py_node)
                 .unwrap_or_default();
 
-            if has_literal_changes {
+            if ir_node.args_rebuild_required {
                 // Full args rebuild — needed for passes like quantize_clamp_args
                 // that change literal values (Int/Float)
                 let py_args: Vec<Bound<'_, PyAny>> = ir_node.args.iter()
@@ -871,21 +918,17 @@ impl IrGraph {
                 py_node.setattr("args", py_tuple)?;
             } else {
                 // Only Node refs changed — use replace_input_with to preserve
-                // Python types (tuples, dtype objects) on unchanged args
+                // Python container types (tuples, dtype objects) on unchanged
+                // args, including nested output/list args.
+                let mut replacements = Vec::new();
                 for (idx, ir_arg) in ir_node.args.iter().enumerate() {
-                    if let IrArg::Node(new_id) = ir_arg {
-                        let orig_is_same = orig_args.get(idx)
-                            .and_then(|a| a.getattr("name").ok())
-                            .and_then(|n| n.extract::<String>().ok())
-                            .map(|name| self.by_name(&name).map(|n| n.id) == Some(*new_id))
-                            .unwrap_or(false);
-                        if !orig_is_same {
-                            if let Some(Some(new_py)) = all_py.get(*new_id) {
-                                if let Some(old_py) = orig_args.get(idx) {
-                                    let _ = py_node.call_method1("replace_input_with", (old_py, new_py));
-                                }
-                            }
-                        }
+                    if let Some(old_py) = orig_args.get(idx) {
+                        collect_node_replacements(self, &old_py, ir_arg, &mut replacements);
+                    }
+                }
+                for (old_py, new_id) in replacements {
+                    if let Some(Some(new_py)) = all_py.get(new_id) {
+                        let _ = py_node.call_method1("replace_input_with", (&old_py, new_py));
                     }
                 }
             }
