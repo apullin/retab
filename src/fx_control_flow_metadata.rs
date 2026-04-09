@@ -58,18 +58,63 @@ pub(crate) struct QParam {
     pub qmin: i64,
     pub qmax: i64,
     pub dtype_str: String,
+    /// Per-channel scales (empty for per-tensor quantization).
+    pub per_channel_scales: Vec<f64>,
+    /// Per-channel zero points (empty for per-tensor quantization).
+    pub per_channel_zps: Vec<i64>,
+    /// Quantization axis for per-channel (default 0).
+    pub axis: i64,
 }
 
 impl QParam {
     /// Extract from a Python QuantArgs object (or anything with scale/zp/dtype attrs).
     pub(crate) fn from_py(qp: &Bound<'_, PyAny>) -> Self {
+        let per_channel = qp.getattr("per_channel").and_then(|v| v.extract::<bool>()).unwrap_or(false);
+        let (per_channel_scales, per_channel_zps) = if per_channel {
+            let scales = qp.getattr("scale")
+                .and_then(|v| v.extract::<Vec<f64>>())
+                .unwrap_or_default();
+            let zps = qp.getattr("zp")
+                .and_then(|v| v.extract::<Vec<i64>>())
+                .or_else(|_| qp.getattr("zero_point").and_then(|v| v.extract::<Vec<i64>>()))
+                .unwrap_or_default();
+            (scales, zps)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let axis = qp.getattr("axis").and_then(|v| v.extract()).unwrap_or(0);
         Self {
             scale: qp.getattr("scale").and_then(|v| v.extract()).unwrap_or(1.0),
-            zp: qp.getattr("zp").and_then(|v| v.extract()).unwrap_or(0),
+            zp: qp.getattr("zp").and_then(|v| v.extract())
+                .or_else(|_| qp.getattr("zero_point").and_then(|v| v.extract()))
+                .unwrap_or(0),
             qmin: qp.getattr("qmin").and_then(|v| v.extract()).unwrap_or(-128),
             qmax: qp.getattr("qmax").and_then(|v| v.extract()).unwrap_or(127),
             dtype_str: qp.getattr("dtype").ok().map(|d| format!("{d}")).unwrap_or_default(),
+            per_channel_scales,
+            per_channel_zps,
+            axis,
         }
+    }
+
+    /// Create a per-tensor QParam (most common case).
+    pub fn per_tensor(scale: f64, zp: i64, qmin: i64, qmax: i64, dtype_str: String) -> Self {
+        Self { scale, zp, qmin, qmax, dtype_str, per_channel_scales: Vec::new(), per_channel_zps: Vec::new(), axis: 0 }
+    }
+
+    /// Is this per-channel quantization?
+    pub fn is_per_channel(&self) -> bool {
+        !self.per_channel_scales.is_empty()
+    }
+
+    /// Slice per-channel qparams to a sub-range (for grouped conv decomposition).
+    pub fn slice_channels(&self, start: usize, end: usize) -> Self {
+        let mut sliced = self.clone();
+        if self.is_per_channel() {
+            sliced.per_channel_scales = self.per_channel_scales[start..end].to_vec();
+            sliced.per_channel_zps = self.per_channel_zps[start..end.min(self.per_channel_zps.len())].to_vec();
+        }
+        sliced
     }
 
     /// Parse from Q/DQ node literal args: (input, scale, zp, qmin, qmax, dtype).
@@ -87,6 +132,9 @@ impl QParam {
             qmin: args[3].extract().unwrap_or(-128),
             qmax: args[4].extract().unwrap_or(127),
             dtype_str,
+            per_channel_scales: Vec::new(),
+            per_channel_zps: Vec::new(),
+            axis: 0,
         })
     }
 
@@ -103,8 +151,16 @@ impl QParam {
         kw.set_item("qmin", self.qmin)?;
         kw.set_item("qmax", self.qmax)?;
         kw.set_item("dtype", dtype)?;
-        kw.set_item("axis", 0i64)?;
-        kw.set_item("per_channel", false)?;
+        kw.set_item("axis", self.axis)?;
+        if self.is_per_channel() {
+            kw.set_item("per_channel", true)?;
+            let py_scales = pyo3::types::PyList::new_bound(py, &self.per_channel_scales);
+            kw.set_item("scale", py_scales)?;
+            let py_zps = pyo3::types::PyList::new_bound(py, &self.per_channel_zps);
+            kw.set_item("zp", py_zps)?;
+        } else {
+            kw.set_item("per_channel", false)?;
+        }
         cls.call((), Some(&kw))
     }
 
@@ -634,7 +690,7 @@ fn reverse_engineer_rescale_ir(graph: &IrGraph, node: &IrNode) -> Option<QParam>
     let (qmin, qmax) = if dtype_str.contains("int8") { (-128i64, 127i64) }
         else if dtype_str.contains("int16") { (-32768, 32767) }
         else { (i32::MIN as i64, i32::MAX as i64) };
-    Some(QParam { scale: source_qp.scale / mult_val, zp: output_zp, qmin, qmax, dtype_str })
+    Some(QParam::per_tensor(source_qp.scale / mult_val, output_zp, qmin, qmax, dtype_str))
 }
 
 /// Pure Rust: annotate rank-4 call_function nodes with NHWC dim order.
@@ -1326,6 +1382,9 @@ fn try_reverse_engineer_rescale_qparam(
         zp: output_zp,
         qmin, qmax,
         dtype_str,
+        per_channel_scales: Vec::new(),
+        per_channel_zps: Vec::new(),
+        axis: 0,
     }))
 }
 
@@ -2155,7 +2214,7 @@ pub(crate) fn reapply_control_flow_boundary_rescales<'py>(
                     _ => continue,
                 };
                 let cur = extract_effective_qparam(out_val)?
-                    .unwrap_or(QParam { scale: 1.0, zp: 0, qmin: -128, qmax: 127, dtype_str: "torch.int8".into() });
+                    .unwrap_or(QParam::per_tensor(1.0, 0, -128, 127, "torch.int8".into()));
                 if cur.same_scale_zp(tgt) || cur.scale == 0.0 || tgt.scale == 0.0 { continue; }
 
                 let rescale = cur.insert_rescale_to(tgt, py, submodule, &output, out_val, false)?;

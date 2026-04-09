@@ -130,20 +130,14 @@ impl IrPass for IrDecomposeMeanPass {
             // Annotate qparams if quantized
             if let Some(input_qp) = orig_meta.input_qparam().cloned() {
                 if let Some(output_qp) = orig_meta.output_qparam().cloned() {
-                    let sum_qp = QParam {
-                        scale: input_qp.scale * count,
-                        zp: input_qp.zp,
-                        qmin: input_qp.qmin,
-                        qmax: input_qp.qmax,
-                        dtype_str: input_qp.dtype_str.clone(),
-                    };
-                    let full_qp = QParam {
-                        scale: 1.0 / (count * input_qp.qmax as f64),
-                        zp: 0,
-                        qmin: input_qp.qmin,
-                        qmax: input_qp.qmax,
-                        dtype_str: input_qp.dtype_str.clone(),
-                    };
+                    let sum_qp = QParam::per_tensor(
+                        input_qp.scale * count, input_qp.zp,
+                        input_qp.qmin, input_qp.qmax, input_qp.dtype_str.clone(),
+                    );
+                    let full_qp = QParam::per_tensor(
+                        1.0 / (count * input_qp.qmax as f64), 0,
+                        input_qp.qmin, input_qp.qmax, input_qp.dtype_str.clone(),
+                    );
                     let mut sum_iqp = HashMap::new();
                     sum_iqp.insert(0, input_qp);
                     graph.node_mut(sum_id).meta.set_input_qparams(sum_iqp);

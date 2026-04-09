@@ -131,24 +131,12 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
         if !orig_iqp.is_empty() {
             let mut conv_iqp = orig_iqp.clone();
             // Weight qparam: scale=1.0, zp=0, int8 range
-            conv_iqp.insert(1, QParam {
-                scale: 1.0,
-                zp: 0,
-                qmin: -128,
-                qmax: 127,
-                dtype_str: "torch.int8".to_string(),
-            });
+            conv_iqp.insert(1, QParam::per_tensor(1.0, 0, -128, 127, "torch.int8".into()));
             conv_meta.set_input_qparams(conv_iqp);
 
             // Set weight output qparam
             let mut weight_oqp = HashMap::new();
-            weight_oqp.insert(0, QParam {
-                scale: 1.0,
-                zp: 0,
-                qmin: -128,
-                qmax: 127,
-                dtype_str: "torch.int8".to_string(),
-            });
+            weight_oqp.insert(0, QParam::per_tensor(1.0, 0, -128, 127, "torch.int8".into()));
             graph.node_mut(weight_id).meta.set_output_qparams(weight_oqp);
         }
     }

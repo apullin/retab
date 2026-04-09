@@ -925,7 +925,7 @@ impl IrNode {
                 else { return None; }
             }
         };
-        Some(QParam { scale, zp, qmin, qmax, dtype_str })
+        Some(QParam::per_tensor(scale, zp, qmin, qmax, dtype_str))
     }
 }
 
