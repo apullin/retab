@@ -30,6 +30,8 @@ pub struct IrNode {
     pub name: String,
     pub target: String,
     pub args: Vec<IrArg>,
+    /// Keyword arguments (e.g. dtype for _to_copy). Stored separately from args.
+    pub kwargs: HashMap<String, IrArg>,
     pub meta: NodeMeta,
     pub alive: bool,
     /// Set for cond/while_loop call_function nodes.
@@ -164,7 +166,25 @@ impl IrGraph {
                 else if target.contains("while_loop") { Some(CfKind::While) }
                 else { None }
             } else { None };
-            nodes.push(IrNode { id: i, op, name, target, args, meta, alive: true, cf_kind, args_dirty: false });
+            // Import kwargs
+            let mut kwargs = HashMap::new();
+            if let Ok(py_kwargs) = crate::fx_graph::FxGraphModule::node_kwargs(py_node) {
+                if !py_kwargs.is_none() {
+                    if let Ok(items) = py_kwargs.call_method0("items") {
+                        if let Ok(iter) = items.iter() {
+                            for item in iter.filter_map(|i| i.ok()) {
+                                if let (Ok(key), Ok(val)) = (
+                                    item.get_item(0).and_then(|k| k.extract::<String>()),
+                                    item.get_item(1),
+                                ) {
+                                    kwargs.insert(key, resolve_arg(&val, &name_to_id));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            nodes.push(IrNode { id: i, op, name, target, args, kwargs, meta, alive: true, cf_kind, args_dirty: false });
         }
 
         // Build reverse edges
@@ -221,6 +241,21 @@ impl IrGraph {
     pub fn set_args(&mut self, id: NodeId, args: Vec<IrArg>) {
         self.nodes[id].args = args;
         self.nodes[id].args_dirty = true;
+    }
+
+    /// Add a node with kwargs (e.g. dtype for _to_copy).
+    pub fn add_node_with_kwargs(
+        &mut self,
+        op: NodeOp,
+        name: String,
+        target: String,
+        args: Vec<IrArg>,
+        kwargs: HashMap<String, IrArg>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.add_node(op, name, target, args, meta);
+        self.nodes[id].kwargs = kwargs;
+        id
     }
 
     /// Update a single arg by index and mark dirty.
@@ -341,7 +376,7 @@ impl IrGraph {
         }
         self.users.push(Vec::new());
         self.name_to_id.insert(name.clone(), id);
-        self.nodes.push(IrNode { id, op, name, target, args, meta, alive: true, cf_kind: None, args_dirty: false });
+        self.nodes.push(IrNode { id, op, name, target, args, kwargs: HashMap::new(), meta, alive: true, cf_kind: None, args_dirty: false });
         id
     }
 
@@ -437,9 +472,17 @@ impl IrGraph {
                     graph.call_method1("inserting_before", (&ref_node,))?
                 };
                 ctx.call_method0("__enter__")?;
-                let kw = PyDict::new_bound(py);
-                kw.set_item("args", py_tuple)?;
-                let new_py = graph.call_method("call_function", (&target_op,), Some(&kw))?;
+                let call_kw = PyDict::new_bound(py);
+                call_kw.set_item("args", py_tuple)?;
+                // Pass node kwargs if any
+                if !ir_node.kwargs.is_empty() {
+                    let py_kwargs = PyDict::new_bound(py);
+                    for (key, val) in &ir_node.kwargs {
+                        py_kwargs.set_item(key.as_str(), ir_arg_to_py(py, val, &all_py)?)?;
+                    }
+                    call_kw.set_item("kwargs", py_kwargs)?;
+                }
+                let new_py = graph.call_method("call_function", (&target_op,), Some(&call_kw))?;
                 let meta = copy_mod.call_method1("copy", (meta_src_node.getattr("meta")?,))?;
                 new_py.setattr("meta", &meta)?;
                 let none = py.None().into_bound(py);
