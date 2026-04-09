@@ -8,9 +8,24 @@
 
 use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::runner_logging::log_line;
+use std::collections::HashMap;
 
 fn i64_list(vals: &[i64]) -> IrArg {
     IrArg::List(vals.iter().map(|&v| IrArg::Int(v)).collect())
+}
+
+fn copy_qparams_from_node(graph: &IrGraph, src_id: NodeId, dst_meta: &mut NodeMeta) {
+    if let Some(iqp) = graph.nodes[src_id].meta.input_qparams.clone() {
+        dst_meta.set_input_qparams(iqp);
+    }
+    if let Some(oqp) = graph.nodes[src_id].meta.output_qparams.clone() {
+        dst_meta.set_output_qparams(oqp);
+    }
+}
+
+fn clear_qparams(meta: &mut NodeMeta) {
+    meta.set_input_qparams(HashMap::new());
+    meta.set_output_qparams(HashMap::new());
 }
 
 /// True for conv1d.default or convolution.default with 1D stride.
@@ -40,13 +55,13 @@ fn add_view_copy(
     input_id: NodeId,
     new_shape: &[i64],
     dtype: &str,
-    base_meta: &NodeMeta,
 ) -> NodeId {
-    let mut meta = base_meta.clone();
+    let mut meta = graph.nodes[input_id].meta.clone();
     meta.set_val(FakeTensorMeta {
         shape: new_shape.to_vec(),
         dtype: dtype.to_string(),
     });
+    clear_qparams(&mut meta);
     graph.add_node(
         NodeOp::CallFunction,
         format!("{}_{}", name_prefix, suffix),
@@ -149,6 +164,10 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(d) => d.to_string(),
         None => return false,
     };
+    let w_dtype = match graph.nodes[w_id].meta.val_dtype() {
+        Some(d) => d.to_string(),
+        None => return false,
+    };
     let w_shape = match graph.nodes[w_id].meta.val_shape() {
         Some(s) => s.to_vec(),
         None => return false,
@@ -164,8 +183,8 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
         x_id,
         &x_4d,
         &x_dtype,
-        &base_meta,
     );
+    graph.anchor_to(x_unsqueezed, id);
 
     // Unsqueeze weight: [..., KW] -> [..., KW, 1]
     let mut w_4d = w_shape.clone();
@@ -176,9 +195,9 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
         "weight_unsqueeze",
         w_id,
         &w_4d,
-        &x_dtype,
-        &base_meta,
+        &w_dtype,
     );
+    graph.anchor_to(w_unsqueezed, id);
 
     // Build 2D conv parameters: append trailing dimension.
     let mut stride_2d = stride;
@@ -207,6 +226,7 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
         shape: conv2d_shape.to_vec(),
         dtype: orig_out_dtype.clone(),
     });
+    copy_qparams_from_node(graph, id, &mut conv2d_meta);
 
     let conv2d = graph.add_node(
         NodeOp::CallFunction,
@@ -235,7 +255,6 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
         conv2d,
         &orig_out_shape,
         &orig_out_dtype,
-        &base_meta,
     );
 
     graph.replace_and_erase(id, squeezed);

@@ -8,9 +8,24 @@
 
 use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
+use std::collections::HashMap;
 
 fn i64_list(vals: &[i64]) -> IrArg {
     IrArg::List(vals.iter().map(|&v| IrArg::Int(v)).collect())
+}
+
+fn copy_qparams_from_node(graph: &IrGraph, src_id: NodeId, dst_meta: &mut crate::fx_ir::NodeMeta) {
+    if let Some(iqp) = graph.nodes[src_id].meta.input_qparams.clone() {
+        dst_meta.set_input_qparams(iqp);
+    }
+    if let Some(oqp) = graph.nodes[src_id].meta.output_qparams.clone() {
+        dst_meta.set_output_qparams(oqp);
+    }
+}
+
+fn clear_qparams(dst_meta: &mut crate::fx_ir::NodeMeta) {
+    dst_meta.set_input_qparams(HashMap::new());
+    dst_meta.set_output_qparams(HashMap::new());
 }
 
 pub struct IrDecomposeLinearPass;
@@ -71,6 +86,16 @@ impl IrPass for IrDecomposeLinearPass {
                 .val_dtype()
                 .unwrap_or("torch.float32")
                 .to_string();
+            let input_dtype = graph.nodes[input_id]
+                .meta
+                .val_dtype()
+                .unwrap_or("torch.float32")
+                .to_string();
+            let weight_dtype = graph.nodes[weights_id]
+                .meta
+                .val_dtype()
+                .unwrap_or("torch.float32")
+                .to_string();
 
             // Compute batch dimension: product of all dims except last.
             let ci = input_shape[input_shape.len() - 1];
@@ -85,11 +110,9 @@ impl IrPass for IrDecomposeLinearPass {
             let mut input_4d_meta = graph.nodes[input_id].meta.clone();
             input_4d_meta.set_val(FakeTensorMeta {
                 shape: input_4d_shape.to_vec(),
-                dtype: output_dtype.clone(),
+                dtype: input_dtype,
             });
-            if let Some(oqp) = graph.nodes[input_id].meta.output_qparams.clone() {
-                input_4d_meta.set_output_qparams(oqp);
-            }
+            clear_qparams(&mut input_4d_meta);
             let input_reshaped = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_input_view", node_name),
@@ -105,15 +128,9 @@ impl IrPass for IrDecomposeLinearPass {
             let mut weights_4d_meta = graph.nodes[weights_id].meta.clone();
             weights_4d_meta.set_val(FakeTensorMeta {
                 shape: weights_4d_shape.to_vec(),
-                dtype: output_dtype.clone(),
+                dtype: weight_dtype,
             });
-            // Force qparam write-back so the reshaped weight carries per-channel scales
-            if let Some(oqp) = graph.nodes[weights_id].meta.output_qparams.clone() {
-                weights_4d_meta.set_output_qparams(oqp);
-            }
-            if let Some(iqp) = graph.nodes[weights_id].meta.input_qparams.clone() {
-                weights_4d_meta.set_input_qparams(iqp);
-            }
+            clear_qparams(&mut weights_4d_meta);
             let weights_reshaped = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_weight_view", node_name),
@@ -132,6 +149,7 @@ impl IrPass for IrDecomposeLinearPass {
                 shape: conv_out_shape.to_vec(),
                 dtype: output_dtype.clone(),
             });
+            copy_qparams_from_node(graph, id, &mut conv_meta);
             let bias_arg = match bias_id {
                 Some(nid) => IrArg::Node(nid),
                 None => IrArg::None,
@@ -161,6 +179,7 @@ impl IrPass for IrDecomposeLinearPass {
                 shape: output_shape.clone(),
                 dtype: output_dtype,
             });
+            clear_qparams(&mut out_meta);
             let output = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_output_view", node_name),

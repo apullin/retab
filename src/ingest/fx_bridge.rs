@@ -658,8 +658,8 @@ fn extract_tensor_info(val: &Bound<'_, PyAny>) -> PyResult<TensorInfo> {
 fn parse_torch_dtype(dtype_str: &str) -> DType {
     match dtype_str {
         s if s.contains("float32") => DType::Float32,
-        s if s.contains("float16") => DType::Float16,
         s if s.contains("bfloat16") => DType::BFloat16,
+        s if s.contains("float16") => DType::Float16,
         s if s.contains("int8") => DType::Int8,
         s if s.contains("int16") => DType::Int16,
         s if s.contains("int32") => DType::Int32,

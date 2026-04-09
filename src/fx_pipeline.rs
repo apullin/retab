@@ -288,20 +288,20 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         // -- Fold Q/DQ + rescale (must be FxPass — needs exported_program) --
         Fx(Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(fold_qdq))),
         Ir(Box::new(crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass)),
-        Fx(Box::new(fx_decompose_linear::FxDecomposeLinearPass)),
-        Fx(Box::new(fx_conv1d_unsqueeze::FxConv1dUnsqueezePass)),
+        Ir(Box::new(crate::fx_decompose_linear_ir::IrDecomposeLinearPass)),
+        Ir(Box::new(crate::fx_conv1d_unsqueeze_ir::IrConv1dUnsqueezePass)),
         Fx(Box::new(fx_insert_rescale::FxInsertRescalePass::new())),
         Ir(Box::new(crate::fx_decompose_quant_ir::IrDecomposeQuantPass)),
         // -- Post-fold: long run of IrPasses (no Python roundtrip) --
         Ir(Box::new(fx_convert_split_to_slice_ir::IrConvertSplitToSlicePass)),
         Ir(Box::new(fx_decompose_masked_fill_ir::IrDecomposeMaskedFillPass)),
         Ir(Box::new(crate::fx_canonicalize_gather_ir::IrCanonicalizeGatherPass)),
-        Fx(Box::new(fx_decompose_index_tensor::FxDecomposeIndexTensorPass)),
+        Ir(Box::new(crate::fx_decompose_index_tensor_ir::IrDecomposeIndexTensorPass)),
         // IrPass handles non-bool; FxPass would be needed for bool casts (rare)
         Ir(Box::new(crate::fx_decompose_index_select_ir::IrDecomposeIndexSelectPass)),
         // Fallback for bool inputs that the IrPass skips
         Fx(Box::new(fx_decompose_index_select::FxDecomposeIndexSelectToGatherPass)),
-        Fx(Box::new(fx_decompose_unfold::FxDecomposeUnfoldToGatherPass)),
+        Ir(Box::new(crate::fx_decompose_unfold_ir::IrDecomposeUnfoldPass)),
         Ir(Box::new(crate::fx_decompose_select_scatter_ir::IrDecomposeSelectScatterPass)),
         Ir(Box::new(crate::fx_decompose_strided_slice_ir::IrDecomposeStridedSlicePass)),
         Ir(Box::new(fx_expand_where_mask_ir::IrExpandWhereMaskPass)),
@@ -317,7 +317,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         Fx(Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(fuse))),
         Ir(Box::new(crate::fx_decompose_adaptive_avgpool_ir::IrDecomposeAdaptiveAvgPoolPass)),
         Ir(Box::new(crate::fx_decompose_maxpool_dilation_ir::IrDecomposeMaxPoolDilationPass)),
-        Fx(Box::new(fx_decompose_mean::FxDecomposeMeanPass)),
+        Ir(Box::new(crate::fx_decompose_mean_ir::IrDecomposeMeanPass)),
         Ir(Box::new(fx_convert_sum_ir::IrConvertSumPass)),
         Fx(Box::new(fx_insert_table_ops::FxInsertTableOpsPass)),
         // -- ATen -> TOSA --
@@ -328,7 +328,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         Ir(Box::new(fx_rewrite_squeeze_ir::IrRewriteSqueezePass)),
         // -- Postprocessing --
         Fx(Box::new(fx_cast_int64::FxCastInt64ToInt32Pass::new(cast))),
-        Fx(Box::new(fx_rewrite_index_put::FxRewriteIndexPutPass)),
+        Ir(Box::new(crate::fx_rewrite_index_put_ir::IrRewriteIndexPutPass)),
         Fx(Box::new(fx_fuse_equal_placeholders::FxFuseEqualPlaceholdersPass::new(fuse_placeholders))),
         Fx(Box::new(fx_memory_format::FxToTosaMemoryFormatPass)),
         Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)),
