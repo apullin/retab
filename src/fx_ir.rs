@@ -220,6 +220,14 @@ impl IrGraph {
         self.nodes[id].args_dirty = true;
     }
 
+    /// Update a single arg by index and mark dirty.
+    pub fn set_arg(&mut self, id: NodeId, index: usize, value: IrArg) {
+        if index < self.nodes[id].args.len() {
+            self.nodes[id].args[index] = value;
+            self.nodes[id].args_dirty = true;
+        }
+    }
+
     /// Get users (nodes that reference this node in their args).
     pub fn users(&self, id: NodeId) -> &[NodeId] {
         &self.users[id]
@@ -363,20 +371,10 @@ impl IrGraph {
             .iter()?.filter_map(|n| n.ok()).collect();
         let original_count = py_nodes.len();
 
-        // Write metadata + args for alive original nodes
+        // Write metadata for alive original nodes (args deferred until after new node creation)
         for (ir_node, py_node) in self.nodes.iter().zip(py_nodes.iter()) {
             if ir_node.alive {
                 ir_node.meta.write_back(py, py_node)?;
-                if ir_node.args_dirty {
-                    // Convert IrArgs to Python and update node.args
-                    let all_orig: Vec<Option<Bound<'_, PyAny>>> = py_nodes.iter()
-                        .map(|n| Some(n.clone())).collect();
-                    let py_args: Vec<Bound<'_, PyAny>> = ir_node.args.iter()
-                        .map(|a| ir_arg_to_py(py, a, &all_orig))
-                        .collect::<PyResult<_>>()?;
-                    let py_tuple = pyo3::types::PyTuple::new_bound(py, &py_args);
-                    py_node.setattr("args", py_tuple)?;
-                }
             }
         }
 
@@ -449,6 +447,52 @@ impl IrGraph {
                     last_for_anchor.insert(aid, new_py.clone());
                 }
                 all_py.push(Some(new_py));
+            }
+        }
+
+        // Write back modified args for alive original nodes
+        // (after new node creation, so new node references resolve)
+        for ir_node in &self.nodes[..original_count] {
+            if !ir_node.alive || !ir_node.args_dirty { continue; }
+            let py_node = match all_py.get(ir_node.id).and_then(|o| o.as_ref()) {
+                Some(n) => n,
+                None => continue,
+            };
+            // Check if only Node refs changed (use replace_input_with to preserve
+            // Python types on other args) vs literal changes (need full rebuild).
+            let has_literal_changes = ir_node.args.iter().enumerate().any(|(idx, ir_arg)| {
+                !matches!(ir_arg, IrArg::Node(_)) && idx < ir_node.args.len()
+            });
+            let orig_args = crate::fx_graph::FxGraphModule::node_args(py_node)
+                .unwrap_or_default();
+
+            if has_literal_changes {
+                // Full args rebuild — needed for passes like quantize_clamp_args
+                // that change literal values (Int/Float)
+                let py_args: Vec<Bound<'_, PyAny>> = ir_node.args.iter()
+                    .map(|a| ir_arg_to_py(py, a, &all_py))
+                    .collect::<PyResult<_>>()?;
+                let py_tuple = pyo3::types::PyTuple::new_bound(py, &py_args);
+                py_node.setattr("args", py_tuple)?;
+            } else {
+                // Only Node refs changed — use replace_input_with to preserve
+                // Python types (tuples, dtype objects) on unchanged args
+                for (idx, ir_arg) in ir_node.args.iter().enumerate() {
+                    if let IrArg::Node(new_id) = ir_arg {
+                        let orig_is_same = orig_args.get(idx)
+                            .and_then(|a| a.getattr("name").ok())
+                            .and_then(|n| n.extract::<String>().ok())
+                            .map(|name| self.by_name(&name).map(|n| n.id) == Some(*new_id))
+                            .unwrap_or(false);
+                        if !orig_is_same {
+                            if let Some(Some(new_py)) = all_py.get(*new_id) {
+                                if let Some(old_py) = orig_args.get(idx) {
+                                    let _ = py_node.call_method1("replace_input_with", (old_py, new_py));
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 

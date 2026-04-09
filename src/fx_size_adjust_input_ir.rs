@@ -140,9 +140,7 @@ impl IrPass for IrSizeAdjustInputPass {
             }
 
             // Update conv/pool's first arg to point to the sliced input
-            let mut new_args = graph.nodes[id].args.clone();
-            new_args[0] = IrArg::Node(current);
-            graph.set_args(id, new_args);
+            graph.set_arg(id, 0, IrArg::Node(current));
             modified = true;
         }
 
