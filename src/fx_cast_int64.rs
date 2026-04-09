@@ -1,5 +1,9 @@
 use pyo3::prelude::*;
 
+use crate::fx_ep_effects::{
+    FxCastInt64InputToInt32Effect, FxEpApplyContext, FxEpEffect, FxEpEffectBatch,
+    FxEpInputKind,
+};
 use crate::fx_graph::{meta_val, FxGraphModule};
 use crate::fx_pass::FxPass;
 
@@ -30,7 +34,6 @@ impl FxPass for FxCastInt64ToInt32Pass {
     fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
         let py = gm.py();
         let debug = FxGraphModule::debug();
-        let mut modified = false;
 
         let ep = match &self.exported_program {
             Some(ep) => ep.bind(py).clone(),
@@ -39,14 +42,13 @@ impl FxPass for FxCastInt64ToInt32Pass {
 
         let torch = py.import_bound("torch")?;
         let int64_dtype = torch.getattr("int64")?;
-        let int32_dtype = torch.getattr("int32")?;
-
         // Access the is_buffer helper
         let is_buffer_fn = py
             .import_bound("torch._export.utils")?
             .getattr("is_buffer")?;
 
         let all_nodes = gm.nodes()?;
+        let mut effects = FxEpEffectBatch::default();
 
         for node in &all_nodes {
             // Skip nodes with no users (dead code)
@@ -75,63 +77,30 @@ impl FxPass for FxCastInt64ToInt32Pass {
             if !is_buf {
                 continue;
             }
-
-            // Get the buffer name from graph_signature.inputs_to_buffers
-            let graph_sig = ep.getattr("graph_signature")?;
-            let inputs_to_buffers = graph_sig.getattr("inputs_to_buffers")?;
             let node_name = FxGraphModule::node_name(node)?;
-            let Ok(buffer_name_obj) = inputs_to_buffers.get_item(&node_name) else {
-                continue;
-            };
-            let buffer_name: String = buffer_name_obj.extract()?;
-
-            // Get the actual buffer tensor from state_dict
-            let state_dict = ep.getattr("state_dict")?;
-            let buffer = state_dict.get_item(&buffer_name)?;
-
-            // Assert values are within int32 range
-            let min_val: i64 = torch
-                .call_method1("min", (&buffer,))?
-                .call_method0("item")?
-                .extract()?;
-            let max_val: i64 = torch
-                .call_method1("max", (&buffer,))?
-                .call_method0("item")?
-                .extract()?;
-
-            let i32_min: i64 = -2_147_483_648;
-            let i32_max: i64 = 2_147_483_647;
-
-            if min_val < i32_min {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Node {} has value < {}",
-                    node_name, i32_min
-                )));
-            }
-            if max_val > i32_max {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Node {} has value > {}",
-                    node_name, i32_max
-                )));
-            }
 
             if debug {
-                eprintln!(
-                    "[CastInt64] casting buffer '{}' from int64 to int32",
-                    node_name
-                );
+                eprintln!("[CastInt64] planning int64->int32 cast for '{}'", node_name);
             }
 
-            // Cast the FakeTensor in meta["val"] to int32
-            let new_val = val.call_method1("to", (&int32_dtype,))?;
-            meta.set_item("val", &new_val)?;
-
-            // Cast the real buffer in state_dict to int32
-            let buffer_int32 = buffer.call_method1("to", (&int32_dtype,))?;
-            state_dict.set_item(&buffer_name, &buffer_int32)?;
-
-            modified = true;
+            effects.push(FxEpEffect::CastInt64InputToInt32(
+                FxCastInt64InputToInt32Effect {
+                    placeholder_name: node_name,
+                    input_kind: FxEpInputKind::Buffer,
+                    target_name: None,
+                    allow_missing: true,
+                    update_placeholder_meta: true,
+                },
+            ));
         }
+
+        if effects.effects.is_empty() {
+            return Ok(false);
+        }
+
+        let ctx = FxEpApplyContext::new(gm.gm_ref(), &ep)?;
+        let stats = effects.apply(&ctx)?;
+        let modified = stats.applied > 0;
 
         if modified {
             gm.recompile()?;

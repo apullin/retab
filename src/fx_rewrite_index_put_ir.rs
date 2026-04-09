@@ -49,6 +49,25 @@ fn add_full_int(
     )
 }
 
+fn add_arange(
+    graph: &mut IrGraph,
+    name: String,
+    end: i64,
+    dtype: &str,
+    meta: NodeMeta,
+) -> NodeId {
+    let mut kwargs = HashMap::new();
+    kwargs.insert("dtype".to_string(), IrArg::Dtype(dtype.to_string()));
+    graph.add_node_with_kwargs(
+        NodeOp::CallFunction,
+        name,
+        "aten.arange.start_step".to_string(),
+        vec![IrArg::Int(0), IrArg::Int(end)],
+        kwargs,
+        meta,
+    )
+}
+
 fn product(s: &[i64]) -> i64 { if s.is_empty() { 1 } else { s.iter().copied().product() } }
 
 fn shape_to_stride(shape: &[i64]) -> Vec<i64> {
@@ -89,7 +108,11 @@ impl IrPass for IrRewriteIndexPutPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !graph.nodes[id].target.contains("index_put.default") { continue; }
+            if !graph.nodes[id].target.contains("index_put.default")
+                && !graph.nodes[id].target.contains("index_put_.default")
+            {
+                continue;
+            }
             if graph.nodes[id].args.len() < 3 { continue; }
 
             let source_id = match graph.nodes[id].args[0].as_node() { Some(n) => n, None => continue };
@@ -104,27 +127,56 @@ impl IrPass for IrRewriteIndexPutPass {
                 Some(s) => s.to_vec(), None => continue,
             };
             if source_shape.is_empty() { continue; }
+            let name = graph.nodes[id].name.clone();
+            let orig_meta = graph.nodes[id].meta.clone();
+            let src_dtype = graph.nodes[source_id].meta.val_dtype()
+                .unwrap_or("torch.float32").to_string();
 
-            // Collect index node IDs and shapes
+            let index_dtype = indices_list.iter().find_map(|item| match item {
+                IrArg::Node(nid) => graph.nodes[*nid].meta.val_dtype().map(str::to_string),
+                _ => None,
+            });
+            let Some(index_dtype) = index_dtype else { continue };
+
+            // Collect index node IDs and shapes, expanding None to arange
             let mut idx_ids: Vec<NodeId> = Vec::new();
             let mut idx_shapes: Vec<Vec<i64>> = Vec::new();
-            let mut has_none = false;
-            for item in &indices_list {
+            let mut invalid_indices = false;
+            for (dim_idx, item) in indices_list.iter().enumerate() {
                 match item {
                     IrArg::Node(nid) => {
-                        let Some(s) = graph.nodes[*nid].meta.val_shape() else { continue };
+                        let Some(s) = graph.nodes[*nid].meta.val_shape() else {
+                            invalid_indices = true;
+                            break;
+                        };
                         idx_ids.push(*nid);
                         idx_shapes.push(s.to_vec());
                     }
                     IrArg::None => {
-                        has_none = true;
-                        // Need arange for None indices — skip for now
+                        let Some(&dim_size) = source_shape.get(dim_idx) else {
+                            invalid_indices = true;
+                            break;
+                        };
+                        let mut arange_meta = meta_with(&orig_meta, vec![dim_size], &index_dtype);
+                        clear_qparams(&mut arange_meta);
+                        let arange = add_arange(
+                            graph,
+                            format!("{}_in{}", name, dim_idx),
+                            dim_size,
+                            &index_dtype,
+                            arange_meta,
+                        );
+                        graph.anchor_to(arange, id);
+                        idx_ids.push(arange);
+                        idx_shapes.push(vec![dim_size]);
+                    }
+                    _ => {
+                        invalid_indices = true;
                         break;
                     }
-                    _ => break,
                 }
             }
-            if has_none || idx_ids.is_empty() { continue; }
+            if invalid_indices || idx_ids.is_empty() { continue; }
 
             let Some(bcast) = broadcast_shape(&idx_shapes) else { continue };
             let num_idx = idx_ids.len();
@@ -138,10 +190,6 @@ impl IrPass for IrRewriteIndexPutPass {
             let strides = shape_to_stride(&source_shape);
             let lin_scales: Vec<i64> = strides.iter().take(num_idx).map(|s| s / c).collect();
 
-            let name = graph.nodes[id].name.clone();
-            let orig_meta = graph.nodes[id].meta.clone();
-            let src_dtype = graph.nodes[source_id].meta.val_dtype()
-                .unwrap_or("torch.float32").to_string();
             let idx_dtype = graph.nodes[idx_ids[0]].meta.val_dtype()
                 .unwrap_or("torch.int64").to_string();
 
@@ -293,5 +341,118 @@ impl IrPass for IrRewriteIndexPutPass {
             log_line(format_args!("[IrRewriteIndexPut] rewrote index_put to SCATTER"));
         }
         modified
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn graph_with_index_put_none() -> IrGraph {
+        let mut graph = IrGraph::empty();
+
+        let mut source_meta = NodeMeta::default();
+        source_meta.set_val(FakeTensorMeta {
+            shape: vec![2, 5, 4],
+            dtype: "torch.float32".to_string(),
+        });
+        let source = graph.add_node(
+            NodeOp::Placeholder,
+            "source".to_string(),
+            "source".to_string(),
+            vec![],
+            source_meta.clone(),
+        );
+
+        let mut index_meta = NodeMeta::default();
+        index_meta.set_val(FakeTensorMeta {
+            shape: vec![1],
+            dtype: "torch.int64".to_string(),
+        });
+        let index = graph.add_node(
+            NodeOp::Placeholder,
+            "index".to_string(),
+            "index".to_string(),
+            vec![],
+            index_meta,
+        );
+
+        let mut values_meta = NodeMeta::default();
+        values_meta.set_val(FakeTensorMeta {
+            shape: vec![2, 4],
+            dtype: "torch.float32".to_string(),
+        });
+        let values = graph.add_node(
+            NodeOp::Placeholder,
+            "values".to_string(),
+            "values".to_string(),
+            vec![],
+            values_meta,
+        );
+
+        let index_put = graph.add_node(
+            NodeOp::CallFunction,
+            "index_put".to_string(),
+            "index_put_.default".to_string(),
+            vec![
+                IrArg::Node(source),
+                IrArg::List(vec![IrArg::None, IrArg::Node(index)]),
+                IrArg::Node(values),
+                IrArg::Bool(false),
+            ],
+            source_meta,
+        );
+
+        graph.add_node(
+            NodeOp::Output,
+            "output".to_string(),
+            "output".to_string(),
+            vec![IrArg::Node(index_put)],
+            NodeMeta::default(),
+        );
+
+        graph
+    }
+
+    #[test]
+    fn rewrites_index_put_underscore_with_none_index() {
+        let mut graph = graph_with_index_put_none();
+
+        let modified = IrRewriteIndexPutPass.run(&mut graph);
+
+        assert!(modified);
+        assert!(!graph.nodes[3].alive);
+        assert_eq!(
+            graph.nodes.iter().filter(|node| {
+                node.alive && node.target == "aten.arange.start_step"
+            }).count(),
+            1
+        );
+        assert_eq!(
+            graph.nodes.iter().filter(|node| {
+                node.alive && node.target == "backend.tosa.SCATTER.default"
+            }).count(),
+            1
+        );
+        assert_eq!(
+            graph.output_node().and_then(|node| node.first_node_arg()),
+            graph.by_name("index_put_out").map(|node| node.id),
+        );
+        assert_eq!(
+            graph.by_name("index_put_idx").and_then(|node| node.meta.val_shape()),
+            Some(&[1, 2][..]),
+        );
+        assert_eq!(
+            graph.by_name("index_put_src").and_then(|node| node.meta.val_shape()),
+            Some(&[1, 10, 4][..]),
+        );
+        assert_eq!(
+            graph.by_name("index_put_val").and_then(|node| node.meta.val_shape()),
+            Some(&[1, 2, 4][..]),
+        );
+        assert_eq!(
+            graph.by_name("index_put_out").and_then(|node| node.meta.val_shape()),
+            Some(&[2, 5, 4][..]),
+        );
     }
 }

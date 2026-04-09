@@ -30,6 +30,12 @@ enum FuseMode {
     ZeroInputFullOnly,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ZeroInputConstantKind {
+    Full,
+    FactoryCall,
+}
+
 impl FxFuseConstantArgsPass {
     pub fn new(exported_program: Option<PyObject>) -> Self {
         Self {
@@ -55,15 +61,23 @@ fn is_skip_target(target: &str) -> bool {
         || target.contains("tosa.TRANSPOSE")
 }
 
-fn is_zero_input_full(target: &str, input_nodes: &[Bound<'_, PyAny>]) -> bool {
-    input_nodes.is_empty() && target.contains("aten.full.default")
-}
-
-fn is_zero_input_range_like(target: &str, input_nodes: &[Bound<'_, PyAny>]) -> bool {
-    // Range builders with no tensor inputs should become frozen buffers before
-    // lowering. Leaving them as runtime ops leaks unsupported ATen nodes into
-    // the TOSA graph even though their values are fully known at compile time.
-    input_nodes.is_empty() && (target.contains("arange") || target.contains("linspace"))
+pub(crate) fn zero_input_constant_kind(
+    target: &str,
+    input_nodes: &[Bound<'_, PyAny>],
+) -> Option<ZeroInputConstantKind> {
+    if !input_nodes.is_empty() {
+        return None;
+    }
+    if target.contains("aten.full.default") {
+        return Some(ZeroInputConstantKind::Full);
+    }
+    // Zero-input factory builders should become frozen buffers before lowering.
+    // Leaving them as runtime ops leaks unsupported ATen nodes into the TOSA
+    // graph even though their values are fully known at compile time.
+    if target.contains("arange") || target.contains("linspace") || target.contains("eye") {
+        return Some(ZeroInputConstantKind::FactoryCall);
+    }
+    None
 }
 
 fn materialize_zero_input_const(
@@ -241,7 +255,7 @@ fn fold_zero_input_full(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult
     materialize_zero_input_const(gm, node, &const_tensor, qparam.as_ref())
 }
 
-fn fold_zero_input_range_like(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult<bool> {
+fn fold_zero_input_factory_call(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult<bool> {
     let py = gm.py();
     let args = FxGraphModule::node_args(node)?;
     let kwargs = node.getattr("kwargs")?;
@@ -267,6 +281,17 @@ fn fold_zero_input_range_like(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> Py
     }
 
     materialize_zero_input_const(gm, node, &const_tensor, None)
+}
+
+pub(crate) fn fold_zero_input_constant(
+    gm: &FxGraphModule,
+    node: &Bound<'_, PyAny>,
+    kind: ZeroInputConstantKind,
+) -> PyResult<bool> {
+    match kind {
+        ZeroInputConstantKind::Full => fold_zero_input_full(gm, node),
+        ZeroInputConstantKind::FactoryCall => fold_zero_input_factory_call(gm, node),
+    }
 }
 
 impl FxPass for FxFuseConstantArgsPass {
@@ -322,16 +347,8 @@ impl FxPass for FxFuseConstantArgsPass {
                     .filter_map(|n| n.ok())
                     .collect();
 
-                if is_zero_input_full(&target, &input_nodes) {
-                    if fold_zero_input_full(gm, node)? {
-                        modified = true;
-                        made_progress = true;
-                    }
-                    continue;
-                }
-
-                if is_zero_input_range_like(&target, &input_nodes) {
-                    if fold_zero_input_range_like(gm, node)? {
+                if let Some(kind) = zero_input_constant_kind(&target, &input_nodes) {
+                    if fold_zero_input_constant(gm, node, kind)? {
                         modified = true;
                         made_progress = true;
                     }

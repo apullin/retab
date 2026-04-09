@@ -8,7 +8,8 @@ use crate::fx_graph::{meta_get, meta_val};
 use crate::graph::ir::*;
 use crate::graph::Graph;
 use crate::ingest::target_map::parse_op_target;
-use crate::store::{TensorData, TensorStore};
+use crate::store::TensorStore;
+use crate::tensor_data::{extract_tensor_data, parse_torch_dtype};
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -555,42 +556,6 @@ fn qualify_name(name_prefix: Option<&str>, name: &str) -> String {
     }
 }
 
-fn extract_tensor_shape(value: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
-    value
-        .getattr("shape")?
-        .iter()?
-        .map(|dim| dim.and_then(|v| v.extract::<i64>()))
-        .collect()
-}
-
-fn extract_tensor_dtype(value: &Bound<'_, PyAny>) -> DType {
-    value
-        .getattr("dtype")
-        .and_then(|dtype| dtype.str()?.extract::<String>())
-        .map(|dtype| parse_torch_dtype(&dtype))
-        .unwrap_or(DType::Float32)
-}
-
-fn extract_tensor_bytes(value: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
-    value
-        .call_method0("contiguous")?
-        .call_method0("cpu")?
-        .call_method0("numpy")?
-        .call_method0("tobytes")?
-        .extract()
-}
-
-fn extract_tensor_data(value: &Bound<'_, PyAny>) -> PyResult<TensorData> {
-    let shape = extract_tensor_shape(value)?;
-    let mut dtype = extract_tensor_dtype(value);
-    let mut data = extract_tensor_bytes(value)?;
-    if dtype == DType::Int64 {
-        data = cast_i64_bytes_to_i32(&data);
-        dtype = DType::Int32;
-    }
-    Ok(TensorData { data, shape, dtype })
-}
-
 // ---------------------------------------------------------------------------
 // Meta extraction
 // ---------------------------------------------------------------------------
@@ -653,21 +618,6 @@ fn extract_tensor_info(val: &Bound<'_, PyAny>) -> PyResult<TensorInfo> {
 // ---------------------------------------------------------------------------
 // DType mapping
 // ---------------------------------------------------------------------------
-
-/// Map a string like `"torch.float32"` to our `DType` enum.
-fn parse_torch_dtype(dtype_str: &str) -> DType {
-    match dtype_str {
-        s if s.contains("float32") => DType::Float32,
-        s if s.contains("bfloat16") => DType::BFloat16,
-        s if s.contains("float16") => DType::Float16,
-        s if s.contains("int8") => DType::Int8,
-        s if s.contains("int16") => DType::Int16,
-        s if s.contains("int32") => DType::Int32,
-        s if s.contains("int64") => DType::Int64,
-        s if s.contains("bool") => DType::Bool,
-        _ => DType::Float32, // default fallback
-    }
-}
 
 // ---------------------------------------------------------------------------
 // QParam extraction from Python meta dicts
@@ -847,22 +797,6 @@ fn extract_quantargs_from_py(py_obj: &Bound<'_, PyAny>) -> Option<QuantArgs> {
         qmin,
         qmax,
     })
-}
-
-// ---------------------------------------------------------------------------
-// Int64 -> Int32 byte casting
-// ---------------------------------------------------------------------------
-
-/// Reinterpret a byte buffer of little-endian i64 values as i32 (truncating).
-fn cast_i64_bytes_to_i32(data: &[u8]) -> Vec<u8> {
-    data.chunks_exact(8)
-        .flat_map(|chunk| {
-            let val = i64::from_le_bytes([
-                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-            ]);
-            (val as i32).to_le_bytes()
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------

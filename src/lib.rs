@@ -8,6 +8,7 @@ mod fx_annotate_output_dim_order;
 mod fx_canonicalize_gather;
 mod fx_canonicalize_gather_ir;
 mod fx_cast_int64;
+mod fx_cast_int64_ir;
 mod fx_conv1d_unsqueeze;
 mod fx_conv1d_unsqueeze_ir;
 mod fx_control_flow_metadata;
@@ -29,6 +30,7 @@ mod fx_decompose_as_strided_copy_ir;
 mod fx_decompose_cumsum;
 mod fx_decompose_cumsum_ir;
 mod fx_decompose_grouped_conv;
+mod fx_decompose_grouped_conv_ir;
 mod fx_decompose_index_select;
 mod fx_decompose_index_select_ir;
 mod fx_decompose_index_tensor;
@@ -59,15 +61,21 @@ mod fx_decompose_tril;
 mod fx_decompose_tril_ir;
 mod fx_decompose_unfold;
 mod fx_decompose_unfold_ir;
+mod fx_ep_effects;
 mod fx_expand_where_mask;
 mod fx_expand_where_mask_ir;
 mod fx_fold_qdq;
+mod fx_fold_qdq_ir;
 mod fx_fuse_constant_args;
+mod fx_fuse_constant_inputs_ir;
 mod fx_fuse_duplicate_users;
 mod fx_fuse_duplicate_users_ir;
 mod fx_fuse_equal_placeholders;
+mod fx_fuse_equal_placeholders_ir;
 mod fx_fuse_quant_activation;
 mod fx_fuse_quant_activation_ir;
+mod fx_fuse_shape_only_constants_ir;
+mod fx_fuse_zero_input_constants_ir;
 mod fx_graph;
 mod fx_insert_rescale;
 mod fx_insert_table_ops;
@@ -83,6 +91,7 @@ mod fx_rewrite_conv;
 mod fx_rewrite_index_put;
 mod fx_rewrite_index_put_ir;
 mod fx_rewrite_matmul;
+mod fx_rewrite_matmul_ir;
 mod fx_rewrite_squeeze_ir;
 mod fx_size_adjust_input;
 mod fx_size_adjust_input_ir;
@@ -92,6 +101,7 @@ mod ingest;
 mod runner_logging;
 mod serialize;
 mod store;
+mod tensor_data;
 
 type GraphHierarchy = Vec<(String, Graph)>;
 
@@ -118,8 +128,11 @@ fn run_full_fx_pipeline(
     // Use hybrid pipeline: persistent IrGraph for Rust passes,
     // flush/reimport only at FxPass boundaries.
     let py = graph_module.py();
-    let pipeline = fx_pipeline::build_hybrid_pipeline(exported_program);
-    fx_ir::run_hybrid_pipeline(py, graph_module, &pipeline)
+    let exported_program_for_pipeline =
+        exported_program.as_ref().map(|ep| ep.clone_ref(py));
+    let pipeline = fx_pipeline::build_hybrid_pipeline(exported_program_for_pipeline);
+    let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
+    fx_ir::run_hybrid_pipeline(py, graph_module, exported_program, &pipeline)
 }
 
 fn ingest_graph_hierarchy(
@@ -177,6 +190,24 @@ fn fold_qdq_fx(
     run_single_fx_pass(
         graph_module,
         fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(clone_bound_pyobject(exported_program)),
+    )
+}
+
+/// Run the Rust IR fold_qdq pass directly on a Python FX GraphModule.
+///
+/// This is a diagnostic comparison entry point for the in-progress IR port.
+/// It uses the tensor-aware IR import path when `exported_program` is supplied.
+#[pyfunction]
+#[pyo3(signature = (graph_module, exported_program=None))]
+fn fold_qdq_ir_fx(
+    graph_module: &Bound<'_, PyAny>,
+    exported_program: Option<&Bound<'_, PyAny>>,
+) -> PyResult<bool> {
+    fx_ir::run_ir_passes_with_tensors(
+        graph_module.py(),
+        graph_module,
+        exported_program,
+        &[&crate::fx_fold_qdq_ir::IrFoldQdqPass],
     )
 }
 
@@ -360,6 +391,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cf_run_output_normalize_phase, m)?)?;
     // Utilities
     m.add_function(wrap_pyfunction!(fold_qdq_fx, m)?)?;
+    m.add_function(wrap_pyfunction!(fold_qdq_ir_fx, m)?)?;
     m.add_function(wrap_pyfunction!(insert_rescale_fx, m)?)?;
     m.add_function(wrap_pyfunction!(fx_graph_summary, m)?)?;
     Ok(())

@@ -267,15 +267,15 @@ pub fn build_fx_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<Box<dy
 /// Build the hybrid pipeline: IrPasses run on persistent IrGraph, FxPasses
 /// cause a flush/reimport cycle. Same pass ordering as build_fx_pipeline.
 pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<crate::fx_ir::PipelineStep> {
-    use crate::fx_ir::PipelineStep::{Ir, Fx};
+    use crate::fx_ir::PipelineStep::{Fx, Ir, IrEp};
 
     let ExportedProgramClones {
         fold_qdq,
         fuse,
-        fuse_grouped,
-        cast,
-        fuse_placeholders,
-        fuse_late,
+        fuse_grouped: _fuse_grouped,
+        cast: _cast,
+        fuse_placeholders: _fuse_placeholders,
+        fuse_late: _fuse_late,
     } = ExportedProgramClones::new(exported_program);
 
     vec![
@@ -314,6 +314,15 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         Ir(Box::new(fx_decompose_as_strided_copy_ir::IrDecomposeAsStridedCopyPass)),
         Ir(Box::new(crate::fx_quantize_clamp_args_ir::IrQuantizeClampArgsPass)),
         Ir(Box::new(fx_convert_full_like_ir::IrConvertFullLikePass)),
+        IrEp(Box::new(
+            crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEpPass,
+        )),
+        IrEp(Box::new(
+            crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEpPass,
+        )),
+        IrEp(Box::new(
+            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEpPass::matmul_only(),
+        )),
         Fx(Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(fuse))),
         Ir(Box::new(crate::fx_decompose_adaptive_avgpool_ir::IrDecomposeAdaptiveAvgPoolPass)),
         Ir(Box::new(crate::fx_decompose_maxpool_dilation_ir::IrDecomposeMaxPoolDilationPass)),
@@ -321,20 +330,32 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         Ir(Box::new(fx_convert_sum_ir::IrConvertSumPass)),
         Fx(Box::new(fx_insert_table_ops::FxInsertTableOpsPass)),
         // -- ATen -> TOSA --
-        Fx(Box::new(fx_decompose_grouped_conv::FxDecomposeGroupedConvPass)),
-        Fx(Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(fuse_grouped))),
+        Ir(Box::new(crate::fx_decompose_grouped_conv_ir::IrDecomposeGroupedConvPass)),
+        IrEp(Box::new(
+            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEpPass::with_data_slices(),
+        )),
         Fx(Box::new(fx_rewrite_conv::FxRewriteConvPass)),
         Ir(Box::new(crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass)),
         Ir(Box::new(fx_rewrite_squeeze_ir::IrRewriteSqueezePass)),
         // -- Postprocessing --
-        Fx(Box::new(fx_cast_int64::FxCastInt64ToInt32Pass::new(cast))),
+        IrEp(Box::new(crate::fx_cast_int64_ir::IrCastInt64ToInt32EpPass)),
         Ir(Box::new(crate::fx_rewrite_index_put_ir::IrRewriteIndexPutPass)),
-        Fx(Box::new(fx_fuse_equal_placeholders::FxFuseEqualPlaceholdersPass::new(fuse_placeholders))),
+        IrEp(Box::new(
+            crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEpPass,
+        )),
         Fx(Box::new(fx_memory_format::FxToTosaMemoryFormatPass)),
         Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)),
-        Fx(Box::new(fx_rewrite_matmul::FxRewriteMatmulRescalePass)),
+        Ir(Box::new(crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass)),
         Fx(Box::new(fx_insert_rescale::FxInsertRescalePass::new())),
-        Fx(Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new_zero_input_full_only(fuse_late))),
+        IrEp(Box::new(
+            crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEpPass,
+        )),
+        IrEp(Box::new(
+            crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEpPass,
+        )),
+        IrEp(Box::new(
+            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEpPass::matmul_only(),
+        )),
     ]
 }
 
