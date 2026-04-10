@@ -270,7 +270,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
     use crate::fx_ir::PipelineStep::{Fx, Ir, IrEp};
 
     let ExportedProgramClones {
-        fold_qdq,
+        fold_qdq: _fold_qdq,
         fuse: _fuse,
         fuse_grouped: _fuse_grouped,
         cast: _cast,
@@ -285,8 +285,8 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         // -- Pre-fold --
         Ir(Box::new(crate::fx_fuse_quant_activation_ir::IrFuseQuantActivationPass)),
         Ir(Box::new(fx_convert_clamp_ir::IrConvertClampPass)),
-        // -- Fold Q/DQ + rescale (must be FxPass — needs exported_program) --
-        Fx(Box::new(fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(fold_qdq))),
+        // -- Fold Q/DQ + rescale --
+        Ir(Box::new(crate::fx_fold_qdq_ir::IrFoldQdqPass)),
         Ir(Box::new(crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass)),
         Ir(Box::new(crate::fx_decompose_linear_ir::IrDecomposeLinearPass)),
         Ir(Box::new(crate::fx_conv1d_unsqueeze_ir::IrConv1dUnsqueezePass)),
