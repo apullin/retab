@@ -342,6 +342,9 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         Fx(Box::new(fx_memory_format::FxToTosaMemoryFormatPass)),
         Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)),
         Ir(Box::new(crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass)),
+        Ir(Box::new(
+            crate::fx_insert_conv_rescale_ir::IrInsertConvAccumulatorRescalePass,
+        )),
         Fx(Box::new(fx_insert_rescale::FxInsertRescalePass::new())),
         IrEp(Box::new(
             crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEpPass,
