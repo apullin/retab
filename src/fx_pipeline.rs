@@ -291,6 +291,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         Ir(Box::new(crate::fx_decompose_linear_ir::IrDecomposeLinearPass)),
         Ir(Box::new(crate::fx_conv1d_unsqueeze_ir::IrConv1dUnsqueezePass)),
         Ir(Box::new(crate::fx_insert_qdq_rescale_ir::IrInsertQdqRescalePass)),
+        Ir(Box::new(crate::fx_insert_int32_rescale_ir::IrInsertInt32RescalePass)),
         Fx(Box::new(fx_insert_rescale::FxInsertRescalePass::new())),
         Ir(Box::new(crate::fx_decompose_quant_ir::IrDecomposeQuantPass)),
         // -- Post-fold: long run of IrPasses (no Python roundtrip) --
