@@ -8,7 +8,9 @@ use crate::store::{TensorData, TensorStore};
 
 use flatbuffers::{FlatBufferBuilder, TableFinishedWIPOffset, Vector, WIPOffset};
 use std::collections::HashMap;
-use tosa_generated::{Attribute, DType, Op, TosaOperator, TosaShape, TosaTensor, TransposeAttribute};
+use tosa_generated::{
+    Attribute, DType, Op, TosaOperator, TosaShape, TosaTensor, TransposeAttribute,
+};
 use visitors::ir_dtype_to_tosa;
 
 // ---------------------------------------------------------------------------
@@ -380,6 +382,35 @@ fn infer_depthwise_in_channels(graph: &Graph, node: &crate::graph::ir::Node, oc:
     0
 }
 
+fn arg_i64(node: &Node, idx: usize, default: i64) -> i64 {
+    match node.args.get(idx) {
+        Some(Arg::Int(v)) => *v,
+        _ => default,
+    }
+}
+
+fn aten_conv_groups(node: &Node) -> i64 {
+    let groups_arg = if node.args.len() > 8 { 8 } else { 6 };
+    arg_i64(node, groups_arg, 1)
+}
+
+fn depthwise_weight_perm(graph: &Graph, node: &Node, weight_node: &Node) -> Option<WeightPermKind> {
+    let groups = aten_conv_groups(node);
+    if groups <= 1 {
+        return None;
+    }
+
+    let weight_shape = weight_node.meta.val.shape_slice();
+    if weight_shape.len() != 4 || weight_shape.get(1).copied() != Some(1) {
+        return None;
+    }
+
+    let oc = weight_shape.first().copied().unwrap_or(0) as usize;
+    let in_channels = infer_depthwise_in_channels(graph, node, oc);
+    (in_channels > 0 && in_channels == groups as usize)
+        .then_some(WeightPermKind::DepthwiseConv2d { in_channels })
+}
+
 fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind> {
     let mut perms = HashMap::new();
     for &nid in &graph.order {
@@ -390,11 +421,13 @@ fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind>
             OpTarget::TosaConv2d => Some(WeightPermKind::Conv2d),
             OpTarget::Conv2d => match node.args.get(1) {
                 Some(Arg::Node(weight_id)) => graph.node(*weight_id).map(|weight_node| {
-                    if weight_node.meta.val.shape_len == 5 {
-                        WeightPermKind::Conv3d
-                    } else {
-                        WeightPermKind::Conv2d
-                    }
+                    depthwise_weight_perm(graph, node, weight_node).unwrap_or_else(|| {
+                        if weight_node.meta.val.shape_len == 5 {
+                            WeightPermKind::Conv3d
+                        } else {
+                            WeightPermKind::Conv2d
+                        }
+                    })
                 }),
                 _ => None,
             },
@@ -702,8 +735,12 @@ fn collect_serialized_graph_items(
                 let input_ids = Graph::collect_input_ids(node);
                 // Flat traverse: detect topological order violations.
                 for input_id in &input_ids {
-                    let Some(&input_pos) = position.get(input_id) else { continue; };
-                    if input_pos < i { continue; }
+                    let Some(&input_pos) = position.get(input_id) else {
+                        continue;
+                    };
+                    if input_pos < i {
+                        continue;
+                    }
                     if violations < 10 {
                         eprintln!(
                             "[Serialize] WARNING: '{}' at position {} depends on input at position {}",
@@ -800,8 +837,14 @@ fn collect_serialized_graph_items(
         }
         let _elapsed = _node_start.elapsed();
         if _elapsed.as_millis() > 100 {
-            eprintln!("[Serialize] SLOW node {}/{} name={} target={:?} took {:?}",
-                loop_idx, sorted.len(), node.name, node.target, _elapsed);
+            eprintln!(
+                "[Serialize] SLOW node {}/{} name={} target={:?} took {:?}",
+                loop_idx,
+                sorted.len(),
+                node.name,
+                node.target,
+                _elapsed
+            );
         }
     }
 
@@ -930,15 +973,21 @@ fn finish_tosa_graph(
 pub fn serialize_graphs_to_tosa(graphs: &[(String, Graph)], store: &TensorStore) -> Vec<u8> {
     // Pre-calculate buffer size to avoid quadratic reallocation.
     // Sum all tensor data + overhead per node.
-    let tensor_bytes: usize = store.buffers.values()
+    let tensor_bytes: usize = store
+        .buffers
+        .values()
         .map(|t| t.data.len() + 256) // data + per-tensor overhead
         .sum();
     let node_count: usize = graphs.iter().map(|(_, g)| g.order.len()).sum();
     let estimated = tensor_bytes + node_count * 512 + 1024 * 1024; // tensors + nodes + 1MB overhead
     visitors::shape_utils::clear_shape_cache();
     visitors::dtype_quant::clear_dtype_cache();
-    eprintln!("[Serialize] pre-allocating {}MB for {} tensors, {} nodes",
-        estimated / (1024*1024), store.buffers.len(), node_count);
+    eprintln!(
+        "[Serialize] pre-allocating {}MB for {} tensors, {} nodes",
+        estimated / (1024 * 1024),
+        store.buffers.len(),
+        node_count
+    );
     let mut builder = FlatBufferBuilder::with_capacity(estimated.max(16 * 1024 * 1024));
     let regions: Vec<_> = graphs
         .iter()
@@ -1341,7 +1390,10 @@ fn build_fb_attribute(
 
         Attribute::ReduceMin(a) => axis_nan_mode_attr(builder, attr, a.axis, a.nan_mode as u32),
 
-        other => unimplemented!("build_fb_attribute: unsupported attribute variant {:?}", other),
+        other => unimplemented!(
+            "build_fb_attribute: unsupported attribute variant {:?}",
+            other
+        ),
     }
 }
 

@@ -30,12 +30,7 @@ enum PoolArgSource {
 }
 
 impl ParsedPoolSpec {
-    fn parse(
-        graph: &Graph,
-        node: &Node,
-        store: &TensorStore,
-        source: PoolArgSource,
-    ) -> Self {
+    fn parse(graph: &Graph, node: &Node, store: &TensorStore, source: PoolArgSource) -> Self {
         let input_names = collect_input_names(graph, node);
 
         let (raw_kernel, raw_stride, raw_padding, ceil_mode) = match source {
@@ -95,7 +90,7 @@ fn adjusted_pool_post_pad(
     } else {
         (numer / stride) + 1
     };
-    (output_size - 1) * stride - input_size + kernel_size - pad
+    ((output_size - 1) * stride - input_size + kernel_size - pad).max(0)
 }
 
 fn adjusted_max_pool_pad(

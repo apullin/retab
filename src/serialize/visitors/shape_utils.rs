@@ -144,7 +144,12 @@ fn passthrough_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> 
     if !is_layout_passthrough_qdq(node) {
         return None;
     }
-    let input_shape = actual_tensor_shape(graph, store, first_input_node(graph, node)?);
+    let input_node = first_input_node(graph, node)?;
+    let input_shape = actual_tensor_shape(graph, store, input_node);
+    if matches!(node.target, OpTarget::TosaRescale) && input_node.target == OpTarget::TosaTable {
+        return Some(input_shape);
+    }
+
     let raw_shape = raw_i32_shape(node);
     // Pass-through q/dq/rescale chains often inherit an already-TOSA-ordered
     // shape from an upstream pass-through node. Only apply this node's own
@@ -308,6 +313,139 @@ fn broadcasted_input_tensor_shape(
     (checked_numel(&raw_shape)? == checked_numel(&candidate)?).then_some(candidate)
 }
 
+fn table_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
+    if node.target != OpTarget::TosaTable {
+        return None;
+    }
+    let input_node = first_input_node(graph, node)?;
+    Some(actual_tensor_shape(graph, store, input_node))
+}
+
+fn pool_post_pad(input_size: i32, kernel_size: i32, stride: i32, pad: i32, ceil_mode: bool) -> i32 {
+    let numer = input_size - kernel_size + 2 * pad;
+    let output_size = if ceil_mode {
+        ((numer + stride - 1) / stride) + 1
+    } else {
+        (numer / stride) + 1
+    };
+    ((output_size - 1) * stride - input_size + kernel_size - pad).max(0)
+}
+
+fn symmetric_pool_pad(padding: &[i32]) -> Vec<i32> {
+    if padding.len() >= 2 {
+        vec![padding[0], padding[0], padding[1], padding[1]]
+    } else if padding.len() == 1 {
+        vec![padding[0], padding[0], padding[0], padding[0]]
+    } else {
+        vec![0, 0, 0, 0]
+    }
+}
+
+fn max_pool_pad(
+    input_shape: &[i32],
+    kernel: &[i32],
+    stride: &[i32],
+    padding: &[i32],
+    ceil_mode: bool,
+) -> Vec<i32> {
+    if padding.len() == 4 {
+        return padding.to_vec();
+    }
+
+    let symmetric = symmetric_pool_pad(padding);
+    if input_shape.len() != 4 {
+        return symmetric;
+    }
+
+    vec![
+        symmetric[0],
+        pool_post_pad(
+            input_shape[1],
+            *kernel.first().unwrap_or(&2),
+            *stride.first().unwrap_or(&2),
+            symmetric[0],
+            ceil_mode,
+        ),
+        symmetric[2],
+        pool_post_pad(
+            input_shape[2],
+            *kernel.get(1).unwrap_or(&2),
+            *stride.get(1).unwrap_or(&2),
+            symmetric[2],
+            ceil_mode,
+        ),
+    ]
+}
+
+fn pool_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
+    let is_max_pool = matches!(node.target, OpTarget::MaxPool2d | OpTarget::TosaMaxPool2d);
+    let is_avg_pool = matches!(node.target, OpTarget::AvgPool2d | OpTarget::TosaAvgPool2d);
+    if !is_max_pool && !is_avg_pool {
+        return None;
+    }
+
+    let input_shape = actual_tensor_shape(graph, store, first_input_node(graph, node)?);
+    if input_shape.len() != 4 {
+        return None;
+    }
+
+    let kernel = {
+        let kw = kwarg_i32_list(node, "kernel");
+        let raw = if kw.is_empty() {
+            arg_i32_list(node, 1)
+        } else {
+            kw
+        };
+        if raw.is_empty() {
+            vec![2, 2]
+        } else {
+            raw
+        }
+    };
+    let stride = {
+        let kw = kwarg_i32_list(node, "stride");
+        let raw = if kw.is_empty() {
+            arg_i32_list(node, 2)
+        } else {
+            kw
+        };
+        if raw.is_empty() {
+            kernel.clone()
+        } else {
+            raw
+        }
+    };
+    let raw_padding = {
+        let kw = kwarg_i32_list(node, "pad");
+        if kw.is_empty() {
+            arg_i32_list(node, 3)
+        } else {
+            kw
+        }
+    };
+    let pad = if is_max_pool {
+        let ceil_mode = kwarg_bool(node, "ceil_mode", arg_bool(node, 5, false));
+        max_pool_pad(&input_shape, &kernel, &stride, &raw_padding, ceil_mode)
+    } else if raw_padding.len() == 4 {
+        raw_padding
+    } else {
+        symmetric_pool_pad(&raw_padding)
+    };
+
+    let n = input_shape[0];
+    let ih = input_shape[1];
+    let iw = input_shape[2];
+    let c = input_shape[3];
+    let kh = *kernel.first().unwrap_or(&2);
+    let kw = *kernel.get(1).unwrap_or(&2);
+    let sh = *stride.first().unwrap_or(&2);
+    let sw = *stride.get(1).unwrap_or(&2);
+    let oh = (ih + pad[0] + pad[1] - kh) / sh + 1;
+    let ow = (iw + pad[2] + pad[3] - kw) / sw + 1;
+
+    (oh > 0 && ow > 0).then_some(vec![n, oh, ow, c])
+}
+
 fn strided_slice_shape(
     graph: &Graph,
     node: &Node,
@@ -436,7 +574,15 @@ fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> 
         return shape;
     }
 
+    if let Some(shape) = table_tensor_shape(graph, store, node) {
+        return shape;
+    }
+
     if let Some(shape) = broadcasted_input_tensor_shape(graph, store, node) {
+        return shape;
+    }
+
+    if let Some(shape) = pool_tensor_shape(graph, store, node) {
         return shape;
     }
 

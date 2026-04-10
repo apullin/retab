@@ -31,11 +31,19 @@ struct RescaleParams {
 
 fn conv_i32_list(node: &Node, key: &str, arg_idx: usize) -> Vec<i32> {
     let kw = kwarg_i32_list(node, key);
-    if kw.is_empty() { arg_i32_list(node, arg_idx) } else { kw }
+    if kw.is_empty() {
+        arg_i32_list(node, arg_idx)
+    } else {
+        kw
+    }
 }
 
 fn defaulted(values: Vec<i32>, default: Vec<i32>) -> Vec<i32> {
-    if values.is_empty() { default } else { values }
+    if values.is_empty() {
+        default
+    } else {
+        values
+    }
 }
 
 fn symmetric_pad(padding: Vec<i32>, spatial_rank: usize) -> Vec<i32> {
@@ -65,6 +73,34 @@ fn is_rank5_conv_input(graph: &Graph, node: &Node) -> bool {
     }
 }
 
+fn aten_conv_groups(node: &Node) -> i64 {
+    let groups_arg = if node.args.len() > 8 { 8 } else { 6 };
+    arg_i64(node, groups_arg, 1)
+}
+
+fn is_depthwise_aten_conv2d(graph: &Graph, store: &TensorStore, node: &Node) -> bool {
+    let groups = aten_conv_groups(node);
+    if groups <= 1 {
+        return false;
+    }
+    let Some(weight_node) = node.args.get(1).and_then(|arg| match arg {
+        Arg::Node(id) => graph.node(*id),
+        _ => None,
+    }) else {
+        return false;
+    };
+
+    let logical_weight = weight_node.meta.val.shape_slice();
+    if logical_weight.len() >= 2 && logical_weight[1] == 1 {
+        return true;
+    }
+
+    let actual_weight = actual_tensor_shape(graph, store, weight_node);
+    actual_weight.len() == 4
+        && actual_weight.get(2).copied() == Some(groups as i32)
+        && actual_weight.get(3).copied().unwrap_or(0) > 0
+}
+
 fn rescale_input_shape(graph: &Graph, store: &TensorStore, input_node: &Node) -> Vec<i32> {
     match input_node.target {
         OpTarget::Conv2d if is_rank5_conv_input(graph, input_node) => {
@@ -75,29 +111,16 @@ fn rescale_input_shape(graph: &Graph, store: &TensorStore, input_node: &Node) ->
                 3,
             );
             let pad = adjusted_tosa_pad_for_emitted_conv3d(
-                graph,
-                store,
-                input_node,
-                &raw_pad,
-                &stride,
-                &dilation,
+                graph, store, input_node, &raw_pad, &stride, &dilation,
             );
             compute_conv3d_ndhwc_output(graph, store, input_node, &pad, &stride, &dilation).shape
         }
         OpTarget::TosaConv3d => {
             let stride = defaulted(conv_i32_list(input_node, "stride", 3), vec![1, 1, 1]);
             let dilation = defaulted(conv_i32_list(input_node, "dilation", 5), vec![1, 1, 1]);
-            let raw_pad = defaulted(
-                conv_i32_list(input_node, "pad", 4),
-                vec![0, 0, 0, 0, 0, 0],
-            );
+            let raw_pad = defaulted(conv_i32_list(input_node, "pad", 4), vec![0, 0, 0, 0, 0, 0]);
             let pad = adjusted_tosa_pad_for_emitted_conv3d(
-                graph,
-                store,
-                input_node,
-                &raw_pad,
-                &stride,
-                &dilation,
+                graph, store, input_node, &raw_pad, &stride, &dilation,
             );
             compute_conv3d_ndhwc_output(graph, store, input_node, &pad, &stride, &dilation).shape
         }
@@ -124,15 +147,29 @@ fn rescale_input_shape(graph: &Graph, store: &TensorStore, input_node: &Node) ->
                     &dilation_for_shape,
                 ),
             };
-            compute_conv2d_nhwc_output(
-                graph,
-                store,
-                input_node,
-                &pad_for_shape,
-                &stride_for_shape,
-                &dilation_for_shape,
-            )
-            .shape
+            if matches!(input_node.target, OpTarget::Conv2d)
+                && is_depthwise_aten_conv2d(graph, store, input_node)
+            {
+                compute_depthwise_conv2d_nhwc_output(
+                    graph,
+                    store,
+                    input_node,
+                    &pad_for_shape,
+                    &stride_for_shape,
+                    &dilation_for_shape,
+                )
+                .shape
+            } else {
+                compute_conv2d_nhwc_output(
+                    graph,
+                    store,
+                    input_node,
+                    &pad_for_shape,
+                    &stride_for_shape,
+                    &dilation_for_shape,
+                )
+                .shape
+            }
         }
         OpTarget::DepthwiseConv2d | OpTarget::TosaDepthwiseConv2d => {
             let stride_for_shape = defaulted(conv_i32_list(input_node, "stride", 3), vec![1, 1]);

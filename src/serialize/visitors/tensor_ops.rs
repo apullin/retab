@@ -530,11 +530,7 @@ fn maybe_insert_transpose(
         if is_non_identity && transposed_shape.len() == padded_input_shape.len() {
             let transposed_name = format!("{}_input_layout", node.name);
             result.push_output_op(
-                make_empty_tensor(
-                    transposed_name.clone(),
-                    transposed_shape.clone(),
-                    dtype,
-                ),
+                make_empty_tensor(transposed_name.clone(), transposed_shape.clone(), dtype),
                 Op::Transpose,
                 Attribute::Transpose(TransposeAttribute {
                     perms: perms.clone(),
@@ -652,7 +648,9 @@ fn emit_tile_like(
         return EmitResult::default();
     };
     let tile_rank = multiples.len();
-    emit_tile_with_multiples(graph, node, store, input_name, input_node, multiples, tile_rank)
+    emit_tile_with_multiples(
+        graph, node, store, input_name, input_node, multiples, tile_rank,
+    )
 }
 
 pub(super) fn emit_expand(ctx: &EmitContext) -> EmitResult {
@@ -709,7 +707,9 @@ pub(super) fn emit_expand(ctx: &EmitContext) -> EmitResult {
         })
         .collect();
 
-    emit_tile_with_multiples(graph, node, store, input_name, input_node, multiples, tile_rank)
+    emit_tile_with_multiples(
+        graph, node, store, input_name, input_node, multiples, tile_rank,
+    )
 }
 
 pub(super) fn emit_repeat(ctx: &EmitContext) -> EmitResult {
@@ -792,13 +792,14 @@ pub(super) fn emit_reshape(ctx: &EmitContext) -> EmitResult {
 
         if needs_avgpool_rank_drop_fix {
             let transpose_name = format!("{}_pre_reshape_nchw", node.name);
-            let transpose_shape = vec![input_shape[0], input_shape[3], input_shape[1], input_shape[2]];
+            let transpose_shape = vec![
+                input_shape[0],
+                input_shape[3],
+                input_shape[1],
+                input_shape[2],
+            ];
             result.push_output_op(
-                make_empty_tensor(
-                    transpose_name.clone(),
-                    transpose_shape,
-                    output_dtype,
-                ),
+                make_empty_tensor(transpose_name.clone(), transpose_shape, output_dtype),
                 Op::Transpose,
                 Attribute::Transpose(TransposeAttribute {
                     perms: vec![0, 3, 1, 2],

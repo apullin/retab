@@ -57,15 +57,27 @@ impl ParsedConvSpec {
         let input_names = ctx.input_names();
         let pad = {
             let kw = kwarg_i32_list(node, "pad");
-            if kw.is_empty() { arg_i32_list(node, 4) } else { kw }
+            if kw.is_empty() {
+                arg_i32_list(node, 4)
+            } else {
+                kw
+            }
         };
         let stride = {
             let kw = kwarg_i32_list(node, "stride");
-            if kw.is_empty() { arg_i32_list(node, 3) } else { kw }
+            if kw.is_empty() {
+                arg_i32_list(node, 3)
+            } else {
+                kw
+            }
         };
         let dilation = {
             let kw = kwarg_i32_list(node, "dilation");
-            if kw.is_empty() { arg_i32_list(node, 5) } else { kw }
+            if kw.is_empty() {
+                arg_i32_list(node, 5)
+            } else {
+                kw
+            }
         };
         let local_bound = kwarg_bool(node, "local_bound", false);
         let acc_type = conv_accumulator_dtype(node);
@@ -122,12 +134,7 @@ impl ParsedConvSpec {
 
     /// Create zero-point tensors and build the full conv input name list.
     /// If inputs already have 5+ entries (zp already present), returns them as-is.
-    fn prepare_inputs(
-        &self,
-        result: &mut EmitResult,
-        graph: &Graph,
-        node: &Node,
-    ) -> Vec<String> {
+    fn prepare_inputs(&self, result: &mut EmitResult, graph: &Graph, node: &Node) -> Vec<String> {
         let mut input_names = self.input_names.clone();
         if input_names.len() == 2 {
             input_names.push(push_zero_bias_tensor(result, node, self.acc_type));
@@ -142,17 +149,29 @@ impl ParsedConvSpec {
 
     /// Return stride with a default fill value when empty.
     fn stride_or(&self, default: Vec<i32>) -> Vec<i32> {
-        if self.stride.is_empty() { default } else { self.stride.clone() }
+        if self.stride.is_empty() {
+            default
+        } else {
+            self.stride.clone()
+        }
     }
 
     /// Return dilation with a default fill value when empty.
     fn dilation_or(&self, default: Vec<i32>) -> Vec<i32> {
-        if self.dilation.is_empty() { default } else { self.dilation.clone() }
+        if self.dilation.is_empty() {
+            default
+        } else {
+            self.dilation.clone()
+        }
     }
 
     /// Return pad with a default fill value when empty.
     fn pad_or(&self, default: Vec<i32>) -> Vec<i32> {
-        if self.pad.is_empty() { default } else { self.pad.clone() }
+        if self.pad.is_empty() {
+            default
+        } else {
+            self.pad.clone()
+        }
     }
 }
 
@@ -197,6 +216,41 @@ fn input_rank(graph: &Graph, node: &Node) -> usize {
             .unwrap_or(0),
         _ => 0,
     }
+}
+
+fn is_depthwise_aten_conv2d(graph: &Graph, store: &TensorStore, node: &Node, groups: i64) -> bool {
+    if let Some(conv_info_entry) = node
+        .kwargs
+        .iter()
+        .find(|(k, _)| k == "conv_info_is_depthwise")
+    {
+        return matches!(&conv_info_entry.1, Arg::Int(v) if *v != 0);
+    }
+    if groups <= 1 {
+        return false;
+    }
+
+    let Some(weight_node) = node.args.get(1).and_then(|arg| match arg {
+        Arg::Node(id) => graph.node(*id),
+        _ => None,
+    }) else {
+        return false;
+    };
+
+    let logical_weight = weight_node.meta.val.shape_slice();
+    if logical_weight.len() >= 2 && logical_weight[1] == 1 {
+        return true;
+    }
+
+    let actual_weight = actual_tensor_shape(graph, store, weight_node);
+    actual_weight.len() == 4
+        && actual_weight.get(2).copied() == Some(groups as i32)
+        && actual_weight.get(3).copied().unwrap_or(0) > 0
+}
+
+fn aten_conv_groups(node: &Node) -> i64 {
+    let groups_arg = if node.args.len() > 8 { 8 } else { 6 };
+    arg_i64(node, groups_arg, 1)
 }
 
 fn symmetric_tosa_pad(padding: &[i32], spatial_rank: usize) -> Vec<i32> {
@@ -250,34 +304,18 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> Emi
         return result;
     }
 
-    let groups = arg_i64(node, 8, 1);
+    let groups = aten_conv_groups(node);
     let pad = adjusted_tosa_pad_for_raw_aten_conv(
-        graph, store, node, &spec.pad, &spec.stride, &spec.dilation,
+        graph,
+        store,
+        node,
+        &spec.pad,
+        &spec.stride,
+        &spec.dilation,
     );
     let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
 
-    let is_depthwise = if let Some(conv_info_entry) = node
-        .kwargs
-        .iter()
-        .find(|(k, _)| k == "conv_info_is_depthwise")
-    {
-        matches!(&conv_info_entry.1, Arg::Int(v) if *v != 0)
-    } else if groups > 1 {
-        let in_channels = if let Some(Arg::Node(input_id)) = node.args.first() {
-            graph
-                .node(*input_id)
-                .map(|n| {
-                    let s = n.meta.val.shape_slice();
-                    if s.len() >= 2 { s[1] } else { 0 }
-                })
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        groups == in_channels
-    } else {
-        false
-    };
+    let is_depthwise = is_depthwise_aten_conv2d(graph, store, node, groups);
 
     let stride = spec.stride_or(vec![1, 1]);
     let dilation = spec.dilation_or(vec![1, 1]);
@@ -323,7 +361,8 @@ pub(in crate::serialize::visitors) fn emit_conv2d(ctx: &EmitContext) -> EmitResu
     let raw_pad = spec.pad_or(vec![0, 0, 0, 0]);
     let stride = spec.stride_or(vec![1, 1]);
     let dilation = spec.dilation_or(vec![1, 1]);
-    let pad = adjusted_tosa_pad_for_emitted_conv2d(graph, store, node, &raw_pad, &stride, &dilation);
+    let pad =
+        adjusted_tosa_pad_for_emitted_conv2d(graph, store, node, &raw_pad, &stride, &dilation);
     let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
 
     result.push_output_op(
@@ -351,7 +390,8 @@ pub(in crate::serialize::visitors) fn emit_conv3d(ctx: &EmitContext) -> EmitResu
     let raw_pad = spec.pad_or(vec![0, 0, 0, 0, 0, 0]);
     let stride = spec.stride_or(vec![1, 1, 1]);
     let dilation = spec.dilation_or(vec![1, 1, 1]);
-    let pad = adjusted_tosa_pad_for_emitted_conv3d(graph, store, node, &raw_pad, &stride, &dilation);
+    let pad =
+        adjusted_tosa_pad_for_emitted_conv3d(graph, store, node, &raw_pad, &stride, &dilation);
     let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
 
     result.push_output_op(
@@ -379,7 +419,8 @@ pub(in crate::serialize::visitors) fn emit_depthwise_conv2d(ctx: &EmitContext) -
     let raw_pad = spec.pad_or(vec![0, 0, 0, 0]);
     let stride = spec.stride_or(vec![1, 1]);
     let dilation = spec.dilation_or(vec![1, 1]);
-    let pad = adjusted_tosa_pad_for_emitted_conv2d(graph, store, node, &raw_pad, &stride, &dilation);
+    let pad =
+        adjusted_tosa_pad_for_emitted_conv2d(graph, store, node, &raw_pad, &stride, &dilation);
     let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
 
     result.push_output_op(

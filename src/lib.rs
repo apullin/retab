@@ -4,17 +4,16 @@ use pyo3::types::{PyBytes, PyDict};
 use crate::graph::Graph;
 use crate::store::TensorStore;
 
+mod fx_annotate_conv_bias_ir;
 mod fx_annotate_output_dim_order;
 mod fx_annotate_output_dim_order_ir;
-mod fx_annotate_conv_bias_ir;
 mod fx_canonicalize_gather;
 mod fx_canonicalize_gather_ir;
 mod fx_cast_int64;
 mod fx_cast_int64_ir;
+mod fx_control_flow_metadata;
 mod fx_conv1d_unsqueeze;
 mod fx_conv1d_unsqueeze_ir;
-mod fx_control_flow_metadata;
-mod fx_ir;
 mod fx_convert_clamp;
 mod fx_convert_clamp_ir;
 mod fx_convert_full_like;
@@ -79,13 +78,15 @@ mod fx_fuse_quant_activation_ir;
 mod fx_fuse_shape_only_constants_ir;
 mod fx_fuse_zero_input_constants_ir;
 mod fx_graph;
-mod fx_insert_rescale;
-mod fx_insert_table_ops;
 mod fx_insert_conv_rescale_ir;
 mod fx_insert_int32_rescale_ir;
 mod fx_insert_qdq_rescale_ir;
+mod fx_insert_rescale;
+mod fx_insert_table_ops;
 mod fx_insert_table_ops_ir;
+mod fx_ir;
 mod fx_memory_format;
+mod fx_memory_format_ir;
 mod fx_pass;
 mod fx_pipeline;
 mod fx_profile;
@@ -134,8 +135,7 @@ fn run_full_fx_pipeline(
     // Use hybrid pipeline: persistent IrGraph for Rust passes,
     // flush/reimport only at FxPass boundaries.
     let py = graph_module.py();
-    let exported_program_for_pipeline =
-        exported_program.as_ref().map(|ep| ep.clone_ref(py));
+    let exported_program_for_pipeline = exported_program.as_ref().map(|ep| ep.clone_ref(py));
     let pipeline = fx_pipeline::build_hybrid_pipeline(exported_program_for_pipeline);
     let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
     fx_ir::run_hybrid_pipeline(py, graph_module, exported_program, &pipeline)
@@ -350,7 +350,10 @@ fn stamp_control_flow_structural(graph_module: &Bound<'_, PyAny>) -> PyResult<bo
 #[pyo3(signature = (graph_module))]
 fn propagate_control_flow_qparams(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
     let gm = fx_graph::FxGraphModule::new(graph_module);
-    fx_pass::FxPass::run(&fx_control_flow_metadata::FxControlFlowQParamPropagationPass, &gm)
+    fx_pass::FxPass::run(
+        &fx_control_flow_metadata::FxControlFlowQParamPropagationPass,
+        &gm,
+    )
 }
 
 /// Insert boundary RESCALE pairs for control-flow submodules.

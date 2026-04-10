@@ -57,14 +57,25 @@ fn compute_conv_output_impl(
 
         // Determine output channels and kernel spatial dims.
         let (oc, kernels): (i32, Vec<i32>) = if is_depthwise {
-            let ws = weight_node.meta.val.shape_slice();
-            if ws.len() != tensor_rank {
-                return None;
+            let ic = *inp.get(1 + spatial_rank)?;
+            let actual_ws = actual_tensor_shape(graph, store, weight_node);
+            if spatial_rank == 2
+                && actual_ws.len() == tensor_rank
+                && actual_ws.get(2).copied() == Some(ic)
+            {
+                // Memory-format lowering emits depthwise weights as HWCM.
+                let multiplier = actual_ws.get(3).copied().unwrap_or(1).max(1);
+                (ic * multiplier, actual_ws[0..2].to_vec())
+            } else {
+                let ws = weight_node.meta.val.shape_slice();
+                if ws.len() != tensor_rank {
+                    return None;
+                }
+                // Logical depthwise metadata is [OC, 1, kH, kW].
+                let oc = ws[0] as i32;
+                let kernels: Vec<i32> = ws[2..2 + spatial_rank].iter().map(|&d| d as i32).collect();
+                (oc, kernels)
             }
-            // Depthwise weight layout is [OC, 1, kH, kW] (NCHW-style metadata).
-            let oc = ws[0] as i32;
-            let kernels: Vec<i32> = ws[2..2 + spatial_rank].iter().map(|&d| d as i32).collect();
-            (oc, kernels)
         } else {
             let ws = actual_tensor_shape(graph, store, weight_node);
             if ws.len() != tensor_rank {
