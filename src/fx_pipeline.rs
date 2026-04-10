@@ -271,7 +271,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
 
     let ExportedProgramClones {
         fold_qdq,
-        fuse,
+        fuse: _fuse,
         fuse_grouped: _fuse_grouped,
         cast: _cast,
         fuse_placeholders: _fuse_placeholders,
@@ -320,12 +320,11 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         IrEp(Box::new(
             crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEpPass::matmul_only(),
         )),
-        Fx(Box::new(fx_fuse_constant_args::FxFuseConstantArgsPass::new(fuse))),
         Ir(Box::new(crate::fx_decompose_adaptive_avgpool_ir::IrDecomposeAdaptiveAvgPoolPass)),
         Ir(Box::new(crate::fx_decompose_maxpool_dilation_ir::IrDecomposeMaxPoolDilationPass)),
         Ir(Box::new(crate::fx_decompose_mean_ir::IrDecomposeMeanPass)),
         Ir(Box::new(fx_convert_sum_ir::IrConvertSumPass)),
-        Fx(Box::new(fx_insert_table_ops::FxInsertTableOpsPass)),
+        IrEp(Box::new(crate::fx_insert_table_ops_ir::IrInsertTableOpsEpPass)),
         // -- ATen -> TOSA --
         Ir(Box::new(crate::fx_decompose_grouped_conv_ir::IrDecomposeGroupedConvPass)),
         IrEp(Box::new(

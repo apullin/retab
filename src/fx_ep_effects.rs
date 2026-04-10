@@ -104,7 +104,15 @@ pub struct FxFuseConstantNodeEffect {
     pub allow_missing: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct FxInsertTableOpEffect {
+    pub node_name: String,
+    pub kind: String,
+    pub scalar_arg: Option<f64>,
+    pub allow_missing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum FxEpEffect {
     DeleteConstantPlaceholder(FxDeleteConstantPlaceholderEffect),
     UpdateGraphSignatureMapping(FxGraphSignatureMappingEffect),
@@ -112,6 +120,7 @@ pub enum FxEpEffect {
     CastInt64InputToInt32(FxCastInt64InputToInt32Effect),
     MaterializeZeroInputConstant(FxMaterializeZeroInputConstantEffect),
     FuseConstantNode(FxFuseConstantNodeEffect),
+    InsertTableOp(FxInsertTableOpEffect),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -120,7 +129,7 @@ pub struct FxEpApplyStats {
     pub skipped: usize,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct FxEpEffectBatch {
     pub effects: Vec<FxEpEffect>,
 }
@@ -184,6 +193,7 @@ impl FxEpEffect {
             Self::CastInt64InputToInt32(effect) => effect.apply(ctx),
             Self::MaterializeZeroInputConstant(effect) => effect.apply(ctx),
             Self::FuseConstantNode(effect) => effect.apply(ctx),
+            Self::InsertTableOp(effect) => effect.apply(ctx),
         }
     }
 }
@@ -368,6 +378,32 @@ impl FxFuseConstantNodeEffect {
         import_fuse_constant_node_helper(ctx.exported_program.py())?
             .call1((ctx.gm().gm_ref(), ctx.exported_program(), &node))?
             .extract()
+    }
+}
+
+impl FxInsertTableOpEffect {
+    pub fn apply<'py>(&self, ctx: &FxEpApplyContext<'py>) -> PyResult<bool> {
+        let Some(node) = find_node_by_name(ctx.gm(), &self.node_name)? else {
+            return if self.allow_missing {
+                Ok(false)
+            } else {
+                Err(PyKeyError::new_err(format!(
+                    "missing table-op node '{}'",
+                    self.node_name
+                )))
+            };
+        };
+        let helpers = ctx.exported_program.py().import_bound("fx_helpers")?;
+        helpers.call_method1(
+            "insert_table_op",
+            (
+                ctx.gm().gm_ref(),
+                &node,
+                self.kind.as_str(),
+                self.scalar_arg,
+            ),
+        )?;
+        Ok(true)
     }
 }
 

@@ -80,6 +80,7 @@ mod fx_fuse_zero_input_constants_ir;
 mod fx_graph;
 mod fx_insert_rescale;
 mod fx_insert_table_ops;
+mod fx_insert_table_ops_ir;
 mod fx_memory_format;
 mod fx_pass;
 mod fx_pipeline;
