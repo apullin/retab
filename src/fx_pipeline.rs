@@ -331,7 +331,7 @@ pub fn build_hybrid_pipeline(exported_program: Option<pyo3::PyObject>) -> Vec<cr
         IrEp(Box::new(
             crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEpPass::with_data_slices(),
         )),
-        Fx(Box::new(fx_rewrite_conv::FxRewriteConvPass)),
+        Ir(Box::new(crate::fx_annotate_conv_bias_ir::IrAnnotateConvBiasDtypePass)),
         Ir(Box::new(crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass)),
         Ir(Box::new(fx_rewrite_squeeze_ir::IrRewriteSqueezePass)),
         // -- Postprocessing --

@@ -29,44 +29,83 @@ struct RescaleParams {
     output_unsigned: bool,
 }
 
+fn conv_i32_list(node: &Node, key: &str, arg_idx: usize) -> Vec<i32> {
+    let kw = kwarg_i32_list(node, key);
+    if kw.is_empty() { arg_i32_list(node, arg_idx) } else { kw }
+}
+
+fn defaulted(values: Vec<i32>, default: Vec<i32>) -> Vec<i32> {
+    if values.is_empty() { default } else { values }
+}
+
+fn symmetric_pad(padding: Vec<i32>, spatial_rank: usize) -> Vec<i32> {
+    if padding.len() == spatial_rank * 2 {
+        return padding;
+    }
+    let mut pad = Vec::with_capacity(spatial_rank * 2);
+    for axis in 0..spatial_rank {
+        let value = padding
+            .get(axis)
+            .copied()
+            .or_else(|| padding.first().copied())
+            .unwrap_or(0);
+        pad.push(value);
+        pad.push(value);
+    }
+    pad
+}
+
+fn is_rank5_conv_input(graph: &Graph, node: &Node) -> bool {
+    match node.args.first() {
+        Some(Arg::Node(input_id)) => graph
+            .node(*input_id)
+            .map(|input| input.meta.val.shape_len == 5)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
 fn rescale_input_shape(graph: &Graph, store: &TensorStore, input_node: &Node) -> Vec<i32> {
     match input_node.target {
+        OpTarget::Conv2d if is_rank5_conv_input(graph, input_node) => {
+            let stride = defaulted(conv_i32_list(input_node, "stride", 3), vec![1, 1, 1]);
+            let dilation = defaulted(conv_i32_list(input_node, "dilation", 5), vec![1, 1, 1]);
+            let raw_pad = symmetric_pad(
+                defaulted(conv_i32_list(input_node, "pad", 4), vec![0, 0, 0]),
+                3,
+            );
+            let pad = adjusted_tosa_pad_for_emitted_conv3d(
+                graph,
+                store,
+                input_node,
+                &raw_pad,
+                &stride,
+                &dilation,
+            );
+            compute_conv3d_ndhwc_output(graph, store, input_node, &pad, &stride, &dilation).shape
+        }
+        OpTarget::TosaConv3d => {
+            let stride = defaulted(conv_i32_list(input_node, "stride", 3), vec![1, 1, 1]);
+            let dilation = defaulted(conv_i32_list(input_node, "dilation", 5), vec![1, 1, 1]);
+            let raw_pad = defaulted(
+                conv_i32_list(input_node, "pad", 4),
+                vec![0, 0, 0, 0, 0, 0],
+            );
+            let pad = adjusted_tosa_pad_for_emitted_conv3d(
+                graph,
+                store,
+                input_node,
+                &raw_pad,
+                &stride,
+                &dilation,
+            );
+            compute_conv3d_ndhwc_output(graph, store, input_node, &pad, &stride, &dilation).shape
+        }
         OpTarget::Conv2d | OpTarget::TosaConv2d => {
-            let pad = {
-                let kw = kwarg_i32_list(input_node, "pad");
-                if kw.is_empty() {
-                    arg_i32_list(input_node, 4)
-                } else {
-                    kw
-                }
-            };
-            let stride = {
-                let kw = kwarg_i32_list(input_node, "stride");
-                if kw.is_empty() {
-                    arg_i32_list(input_node, 3)
-                } else {
-                    kw
-                }
-            };
-            let dilation = {
-                let kw = kwarg_i32_list(input_node, "dilation");
-                if kw.is_empty() {
-                    arg_i32_list(input_node, 5)
-                } else {
-                    kw
-                }
-            };
-            let stride_for_shape = if stride.is_empty() { vec![1, 1] } else { stride };
-            let dilation_for_shape = if dilation.is_empty() {
-                vec![1, 1]
-            } else {
-                dilation
-            };
-            let raw_pad = if pad.is_empty() {
-                vec![0, 0, 0, 0]
-            } else {
-                pad
-            };
+            let stride_for_shape = defaulted(conv_i32_list(input_node, "stride", 3), vec![1, 1]);
+            let dilation_for_shape =
+                defaulted(conv_i32_list(input_node, "dilation", 5), vec![1, 1]);
+            let raw_pad = defaulted(conv_i32_list(input_node, "pad", 4), vec![0, 0, 0, 0]);
             let pad_for_shape = match input_node.target {
                 OpTarget::Conv2d => adjusted_tosa_pad_for_raw_aten_conv(
                     graph,
@@ -96,41 +135,10 @@ fn rescale_input_shape(graph: &Graph, store: &TensorStore, input_node: &Node) ->
             .shape
         }
         OpTarget::DepthwiseConv2d | OpTarget::TosaDepthwiseConv2d => {
-            let pad = {
-                let kw = kwarg_i32_list(input_node, "pad");
-                if kw.is_empty() {
-                    arg_i32_list(input_node, 4)
-                } else {
-                    kw
-                }
-            };
-            let stride = {
-                let kw = kwarg_i32_list(input_node, "stride");
-                if kw.is_empty() {
-                    arg_i32_list(input_node, 3)
-                } else {
-                    kw
-                }
-            };
-            let dilation = {
-                let kw = kwarg_i32_list(input_node, "dilation");
-                if kw.is_empty() {
-                    arg_i32_list(input_node, 5)
-                } else {
-                    kw
-                }
-            };
-            let stride_for_shape = if stride.is_empty() { vec![1, 1] } else { stride };
-            let dilation_for_shape = if dilation.is_empty() {
-                vec![1, 1]
-            } else {
-                dilation
-            };
-            let raw_pad = if pad.is_empty() {
-                vec![0, 0, 0, 0]
-            } else {
-                pad
-            };
+            let stride_for_shape = defaulted(conv_i32_list(input_node, "stride", 3), vec![1, 1]);
+            let dilation_for_shape =
+                defaulted(conv_i32_list(input_node, "dilation", 5), vec![1, 1]);
+            let raw_pad = defaulted(conv_i32_list(input_node, "pad", 4), vec![0, 0, 0, 0]);
             let pad_for_shape = match input_node.target {
                 OpTarget::DepthwiseConv2d => adjusted_tosa_pad_for_raw_aten_conv(
                     graph,

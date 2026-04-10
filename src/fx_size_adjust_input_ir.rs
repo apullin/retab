@@ -153,13 +153,16 @@ impl IrPass for IrSizeAdjustInputPass {
                     // reconcile the exact sliced shape.
                     meta_with(&graph.nodes[input_id].meta, input_shape.clone(), &dtype),
                 );
-                graph.anchor_to(slice_id, id);
+                graph.anchor_after(slice_id, current);
                 graph.copy_meta_from(slice_id, input_id);
                 current = slice_id;
             }
 
             // Update conv/pool's first arg to point to the sliced input
             graph.set_arg(id, 0, IrArg::Node(current));
+            if graph.nodes[id].name.ends_with("_conv2d") {
+                graph.anchor_after(id, current);
+            }
             modified = true;
         }
 

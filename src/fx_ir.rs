@@ -719,13 +719,13 @@ impl IrGraph {
         fn resolve_effective_anchor(graph: &IrGraph, node_id: NodeId) -> (Option<NodeId>, bool) {
             let mut seen = std::collections::HashSet::new();
             let mut insert_after_first = false;
-            let mut current = if let Some((&old_id, _)) =
+            let mut current = if let Some(&anchor_id) = graph.anchors_after.get(&node_id) {
+                insert_after_first = true;
+                Some(anchor_id)
+            } else if let Some((&old_id, _)) =
                 graph.replacements.iter().find(|(_, &new_id)| new_id == node_id)
             {
                 Some(old_id)
-            } else if let Some(&anchor_id) = graph.anchors_after.get(&node_id) {
-                insert_after_first = true;
-                Some(anchor_id)
             } else {
                 graph.anchors.get(&node_id).copied()
             };

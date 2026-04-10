@@ -128,12 +128,16 @@ impl ParsedConvSpec {
         graph: &Graph,
         node: &Node,
     ) -> Vec<String> {
+        let mut input_names = self.input_names.clone();
+        if input_names.len() == 2 {
+            input_names.push(push_zero_bias_tensor(result, node, self.acc_type));
+        }
         if self.input_names.len() >= 5 {
-            return self.input_names.clone();
+            return input_names;
         }
         let (izp, wzp) =
             push_input_weight_zp_tensors(result, graph, node, self.input_zp, self.weight_zp);
-        extend_conv_inputs(self.input_names.clone(), izp, wzp)
+        extend_conv_inputs(input_names, izp, wzp)
     }
 
     /// Return stride with a default fill value when empty.
@@ -152,6 +156,66 @@ impl ParsedConvSpec {
     }
 }
 
+fn output_channels(node: &Node) -> i32 {
+    node.meta
+        .val
+        .shape_slice()
+        .get(1)
+        .copied()
+        .or_else(|| node.meta.val.shape_slice().first().copied())
+        .unwrap_or(0) as i32
+}
+
+fn zero_bytes(dtype: DType, len: usize) -> Vec<u8> {
+    let bytes_per_elem = match dtype {
+        DType::Bool | DType::Int4 | DType::Int8 => 1,
+        DType::Int16 | DType::Fp16 | DType::Bf16 => 2,
+        DType::Int32 | DType::Fp32 => 4,
+        DType::Int48 => 6,
+        DType::Int64 => 8,
+        DType::Shape => 8,
+        _ => 4,
+    };
+    vec![0; bytes_per_elem * len]
+}
+
+fn push_zero_bias_tensor(result: &mut EmitResult, node: &Node, dtype: DType) -> String {
+    let channels = output_channels(node).max(0) as usize;
+    result.push_const(TosaTensor::with_data(
+        &format!("{}_bias", node.name),
+        vec![channels as i32],
+        dtype,
+        zero_bytes(dtype, channels),
+    ))
+}
+
+fn input_rank(graph: &Graph, node: &Node) -> usize {
+    match node.args.first() {
+        Some(Arg::Node(id)) => graph
+            .node(*id)
+            .map(|n| n.meta.val.shape_len as usize)
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn symmetric_tosa_pad(padding: &[i32], spatial_rank: usize) -> Vec<i32> {
+    if padding.len() == spatial_rank * 2 {
+        return padding.to_vec();
+    }
+    let mut pad = Vec::with_capacity(spatial_rank * 2);
+    for axis in 0..spatial_rank {
+        let value = padding
+            .get(axis)
+            .copied()
+            .or_else(|| padding.first().copied())
+            .unwrap_or(0);
+        pad.push(value);
+        pad.push(value);
+    }
+    pad
+}
+
 // ---------------------------------------------------------------------------
 // Emitters
 // ---------------------------------------------------------------------------
@@ -163,6 +227,29 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> Emi
     let mut result = EmitResult::default();
 
     let spec = ParsedConvSpec::parse_aten(ctx);
+    if input_rank(graph, node) == 5 {
+        let raw_pad = symmetric_tosa_pad(&spec.pad, 3);
+        let stride = spec.stride_or(vec![1, 1, 1]);
+        let dilation = spec.dilation_or(vec![1, 1, 1]);
+        let pad =
+            adjusted_tosa_pad_for_emitted_conv3d(graph, store, node, &raw_pad, &stride, &dilation);
+        let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
+
+        result.push_output_op(
+            compute_conv3d_ndhwc_output(graph, store, node, &pad, &stride, &dilation),
+            Op::Conv3d,
+            Attribute::Conv3d(Conv3dAttribute {
+                pad,
+                stride,
+                dilation,
+                local_bound: false,
+                acc_type: spec.acc_type,
+            }),
+            conv_inputs,
+        );
+        return result;
+    }
+
     let groups = arg_i64(node, 8, 1);
     let pad = adjusted_tosa_pad_for_raw_aten_conv(
         graph, store, node, &spec.pad, &spec.stride, &spec.dilation,

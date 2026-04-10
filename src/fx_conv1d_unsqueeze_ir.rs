@@ -198,6 +198,7 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
         &w_dtype,
     );
     graph.anchor_to(w_unsqueezed, id);
+    graph.anchor_after(w_unsqueezed, x_unsqueezed);
 
     // Build 2D conv parameters: append trailing dimension.
     let mut stride_2d = stride;
@@ -246,6 +247,7 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
         conv2d_meta,
     );
     graph.anchor_to(conv2d, id);
+    graph.anchor_after(conv2d, w_unsqueezed);
 
     // Squeeze output: [..., W_out, 1] -> [..., W_out]
     let squeezed = add_view_copy(
@@ -257,6 +259,7 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
         &orig_out_dtype,
     );
 
+    graph.anchor_after(squeezed, conv2d);
     graph.replace_and_erase(id, squeezed);
     true
 }

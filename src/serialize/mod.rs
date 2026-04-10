@@ -387,7 +387,17 @@ fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind>
             continue;
         };
         let kind = match &node.target {
-            OpTarget::TosaConv2d | OpTarget::Conv2d => Some(WeightPermKind::Conv2d),
+            OpTarget::TosaConv2d => Some(WeightPermKind::Conv2d),
+            OpTarget::Conv2d => match node.args.get(1) {
+                Some(Arg::Node(weight_id)) => graph.node(*weight_id).map(|weight_node| {
+                    if weight_node.meta.val.shape_len == 5 {
+                        WeightPermKind::Conv3d
+                    } else {
+                        WeightPermKind::Conv2d
+                    }
+                }),
+                _ => None,
+            },
             OpTarget::TosaConv3d => Some(WeightPermKind::Conv3d),
             OpTarget::TosaDepthwiseConv2d | OpTarget::DepthwiseConv2d => {
                 let Some(Arg::Node(weight_id)) = node.args.get(1) else {
@@ -430,6 +440,45 @@ fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind>
     perms
 }
 
+fn is_conv_target(target: &OpTarget) -> bool {
+    matches!(
+        target,
+        OpTarget::Conv2d
+            | OpTarget::DepthwiseConv2d
+            | OpTarget::TosaConv2d
+            | OpTarget::TosaConv3d
+            | OpTarget::TosaDepthwiseConv2d
+    )
+}
+
+fn has_int48_conv_accumulator(node: &Node) -> bool {
+    node.meta.tosa_special_dtype == Some(crate::graph::ir::DType::Int48)
+        || node.meta.val.dtype == crate::graph::ir::DType::Int48
+        || node
+            .meta
+            .input_qparams
+            .iter()
+            .any(|(_, qp)| qp.dtype == crate::graph::ir::DType::Int16)
+}
+
+fn collect_tensor_dtype_overrides(graph: &Graph) -> HashMap<String, DType> {
+    let mut overrides = HashMap::new();
+    for &nid in &graph.order {
+        let Some(node) = graph.node(nid) else {
+            continue;
+        };
+        if !is_conv_target(&node.target) || !has_int48_conv_accumulator(node) {
+            continue;
+        }
+        if let Some(Arg::Node(bias_id)) = node.args.get(2) {
+            if let Some(bias) = graph.node(*bias_id) {
+                overrides.insert(bias.name.clone(), DType::Int48);
+            }
+        }
+    }
+    overrides
+}
+
 fn make_graph_tensor(name: String, shape: Vec<i32>, dtype: DType, data: Vec<u8>) -> TosaTensor {
     if data.is_empty() {
         TosaTensor::new(&name, shape, dtype)
@@ -456,12 +505,13 @@ fn serialize_const_placeholder(
     node: &Node,
     tensor_data: &TensorData,
     weight_perms: &HashMap<String, WeightPermKind>,
+    dtype_overrides: &HashMap<String, DType>,
 ) -> TosaTensor {
     let store_dtype = ir_dtype_to_tosa(tensor_data.dtype);
-    let tensor_dtype = node
-        .meta
-        .tosa_special_dtype
-        .map(ir_dtype_to_tosa)
+    let tensor_dtype = dtype_overrides
+        .get(&node.name)
+        .copied()
+        .or_else(|| node.meta.tosa_special_dtype.map(ir_dtype_to_tosa))
         .unwrap_or(store_dtype);
     let elem_sz = dtype_elem_size(tensor_data.dtype);
 
@@ -674,6 +724,7 @@ fn collect_serialized_graph_items(
 
     // Pre-compute which weight tensors need OIHW -> OHWI permutation
     let weight_perms = collect_weight_permutations(graph);
+    let dtype_overrides = collect_tensor_dtype_overrides(graph);
 
     let mut tensors: Vec<TosaTensor> = Vec::new();
     let mut shapes: Vec<TosaShape> = Vec::new();
@@ -705,6 +756,7 @@ fn collect_serialized_graph_items(
                         node,
                         tensor_data,
                         &weight_perms,
+                        &dtype_overrides,
                     ));
                     operators.push(TosaOperator::new(
                         tosa_generated::Op::Const,
