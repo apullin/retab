@@ -133,6 +133,9 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
             // Weight qparam: scale=1.0, zp=0, int8 range
             conv_iqp.insert(1, QParam::per_tensor(1.0, 0, -128, 127, "torch.int8".into()));
             conv_meta.set_input_qparams(conv_iqp);
+            if let Some(output_qparam) = node_meta.output_qparam().cloned() {
+                conv_meta.set_single_output_qparam(output_qparam);
+            }
 
             // Set weight output qparam
             let mut weight_oqp = HashMap::new();

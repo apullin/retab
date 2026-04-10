@@ -6,10 +6,12 @@ use crate::runner_logging::log_line;
 
 fn is_tosa_accumulator_op(target: &str) -> bool {
     let target = target.to_ascii_lowercase();
-    target.contains("tosa")
-        && (target.contains("conv2d")
+    if target.contains("tosa") {
+        return target.contains("conv2d")
             || target.contains("depthwise_conv2d")
-            || target.contains("conv3d"))
+            || target.contains("conv3d");
+    }
+    target.contains("aten.convolution") || target.contains("aten.conv2d")
 }
 
 fn is_layout_passthrough(target: &str) -> bool {
@@ -93,6 +95,31 @@ fn recover_downstream_output_qparam(graph: &IrGraph, start: NodeId) -> Option<QP
     None
 }
 
+fn arg_contains_node(arg: &IrArg, target: NodeId) -> bool {
+    match arg {
+        IrArg::Node(id) => *id == target,
+        IrArg::List(items) => items.iter().any(|item| arg_contains_node(item, target)),
+        _ => false,
+    }
+}
+
+fn recover_consumer_input_qparam(graph: &IrGraph, start: NodeId) -> Option<QParam> {
+    for user_id in graph.live_user_ids(start) {
+        let user = graph.node(user_id);
+        let Some(input_qparams) = user.meta.input_qparams.as_ref() else {
+            continue;
+        };
+        for (arg_idx, arg) in user.args.iter().enumerate() {
+            if arg_contains_node(arg, start) {
+                if let Some(qparam) = input_qparams.get(&arg_idx) {
+                    return Some(qparam.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn input_qparam(node: &crate::fx_ir::IrNode, index: usize) -> Option<&QParam> {
     node.meta.input_qparams.as_ref()?.get(&index)
 }
@@ -102,6 +129,7 @@ fn output_qparam(graph: &IrGraph, id: NodeId) -> Option<QParam> {
         .meta
         .output_qparam()
         .cloned()
+        .or_else(|| recover_consumer_input_qparam(graph, id))
         .or_else(|| recover_downstream_output_qparam(graph, id))
 }
 
@@ -141,8 +169,10 @@ fn insert_conv_rescale(graph: &mut IrGraph, conv_id: NodeId) -> bool {
     if !node.alive
         || node.op != NodeOp::CallFunction
         || !is_tosa_accumulator_op(&node.target)
-        || has_downstream_rescale(graph, conv_id)
     {
+        return false;
+    }
+    if has_downstream_rescale(graph, conv_id) {
         return false;
     }
 
@@ -322,6 +352,58 @@ mod tests {
 
         let user = graph.by_name("user").unwrap();
         assert!(matches!(user.args[0], IrArg::Node(id) if id == rescale.id));
+    }
+
+    #[test]
+    fn inserts_after_raw_conv_using_consumer_input_qparam() {
+        let mut graph = IrGraph::empty();
+        let input = graph.add_node(
+            NodeOp::Placeholder,
+            "input".to_string(),
+            "input".to_string(),
+            Vec::new(),
+            meta(&[1, 3, 8, 8], "torch.int8"),
+        );
+        let weight = graph.add_node(
+            NodeOp::Placeholder,
+            "weight".to_string(),
+            "weight".to_string(),
+            Vec::new(),
+            meta(&[4, 3, 3, 3], "torch.int8"),
+        );
+        let mut conv_meta = quantized_conv_meta();
+        conv_meta.output_qparams = None;
+        let conv = graph.add_node(
+            NodeOp::CallFunction,
+            "conv".to_string(),
+            "aten.conv2d.padding".to_string(),
+            vec![IrArg::Node(input), IrArg::Node(weight), IrArg::None],
+            conv_meta,
+        );
+        let mut table_meta = meta(&[1, 4, 8, 8], "torch.int8");
+        table_meta.set_input_qparams(HashMap::from([(0, qparam(0.125, 7, "torch.int8"))]));
+        let table = graph.add_node(
+            NodeOp::CallFunction,
+            "table".to_string(),
+            "backend.tosa.TABLE.default".to_string(),
+            vec![IrArg::Node(conv)],
+            table_meta,
+        );
+        graph.add_node(
+            NodeOp::Output,
+            "output".to_string(),
+            "output".to_string(),
+            vec![IrArg::Node(table)],
+            NodeMeta::default(),
+        );
+
+        assert!(IrInsertConvAccumulatorRescalePass.run(&mut graph));
+
+        let rescale = graph.by_name("conv_accumulator_rescale").unwrap();
+        assert!(matches!(rescale.args[0], IrArg::Node(id) if id == conv));
+        assert!(matches!(rescale.args[1], IrArg::Dtype(ref dtype) if dtype == "torch.int8"));
+        let table = graph.by_name("table").unwrap();
+        assert!(matches!(table.args[0], IrArg::Node(id) if id == rescale.id));
     }
 
     #[test]
