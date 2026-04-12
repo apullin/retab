@@ -208,8 +208,7 @@ fn emit_quant_to_float_chain(
             make_filled_const_tensor(scale_name.clone(), input_shape.to_vec(), ir_dtype, scale)
         {
             push_inline_const(result, scale_tensor);
-            let shift_name =
-                push_shift_const(result, &format!("{}_{}_input", node_name, prefix));
+            let shift_name = push_shift_const(result, &format!("{}_{}_input", node_name, prefix));
             let mul_name = format!("{}_{}_input_float", node_name, prefix);
             result.push_output_op(
                 TosaTensor::new(&mul_name, input_shape.to_vec(), target_dtype),
@@ -262,7 +261,11 @@ fn emit_multi_axis_reduce_loop(
         }
 
         let is_last = idx == axes.len() - 1;
-        let use_final = if final_on_last { is_last } else { is_last && keepdim };
+        let use_final = if final_on_last {
+            is_last
+        } else {
+            is_last && keepdim
+        };
         let out_name = if use_final {
             final_name.clone()
         } else {

@@ -74,6 +74,13 @@ pub(super) fn conv_accumulator_dtype(node: &Node) -> DType {
     match node.meta.val.dtype {
         crate::graph::ir::DType::Int32 => DType::Int32,
         crate::graph::ir::DType::Int48 => DType::Int48,
+        crate::graph::ir::DType::Float16 | crate::graph::ir::DType::BFloat16 => {
+            if node.meta.input_qparams.is_empty() {
+                DType::Fp32
+            } else {
+                ir_dtype_to_tosa(node.meta.val.dtype)
+            }
+        }
         _ => {
             if !node.meta.input_qparams.is_empty() {
                 DType::Int32
@@ -164,6 +171,7 @@ fn actual_tensor_dtype_impl(graph: &Graph, node: &Node) -> DType {
         },
         OpTarget::To => node_output_dtype(node),
         OpTarget::Conv2d
+        | OpTarget::ConvTranspose2d
         | OpTarget::DepthwiseConv2d
         | OpTarget::Linear
         | OpTarget::Addmm
@@ -332,7 +340,7 @@ fn clamp_bound_bytes_from_scalar(dtype: crate::graph::ir::DType, value: f64) -> 
             bytes[..6].to_vec()
         }
         IrDtype::Float32 => (value as f32).to_le_bytes().to_vec(),
-        IrDtype::Float16 | IrDtype::BFloat16 => return None,
+        IrDtype::Float16 | IrDtype::BFloat16 => return scalar_fill_bytes(dtype, value),
     })
 }
 
@@ -359,7 +367,9 @@ pub(super) fn clamp_bound_bytes_from_arg(
 }
 
 pub(super) fn single_qparam(node: &Node) -> Option<crate::graph::ir::QuantArgs> {
-    node.meta.output_qparams.first()
+    node.meta
+        .output_qparams
+        .first()
         .or_else(|| node.meta.input_qparams.first())
         .map(|(_, qp)| *qp)
 }

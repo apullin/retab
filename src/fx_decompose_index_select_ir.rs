@@ -11,18 +11,27 @@ fn i64_list(vals: &[i64]) -> IrArg {
 
 fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
     let mut m = base.clone();
-    m.set_val(FakeTensorMeta { shape, dtype: dtype.to_string() });
+    m.set_val(FakeTensorMeta {
+        shape,
+        dtype: dtype.to_string(),
+    });
     m
 }
 
 fn product(shape: &[i64]) -> i64 {
-    if shape.is_empty() { 1 } else { shape.iter().copied().product() }
+    if shape.is_empty() {
+        1
+    } else {
+        shape.iter().copied().product()
+    }
 }
 
 pub struct IrDecomposeIndexSelectPass;
 
 impl IrPass for IrDecomposeIndexSelectPass {
-    fn name(&self) -> &str { "IrDecomposeIndexSelect" }
+    fn name(&self) -> &str {
+        "IrDecomposeIndexSelect"
+    }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
@@ -32,20 +41,37 @@ impl IrPass for IrDecomposeIndexSelectPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !graph.nodes[id].target.contains("index_select.default") { continue; }
-            if graph.nodes[id].args.len() != 3 { continue; }
+            if !graph.nodes[id].target.contains("index_select.default") {
+                continue;
+            }
+            if graph.nodes[id].args.len() != 3 {
+                continue;
+            }
 
-            let x_id = match graph.nodes[id].args[0].as_node() { Some(n) => n, None => continue };
-            let dim = match graph.nodes[id].args[1].as_int() { Some(v) => v, None => continue };
-            let index_id = match graph.nodes[id].args[2].as_node() { Some(n) => n, None => continue };
+            let x_id = match graph.nodes[id].args[0].as_node() {
+                Some(n) => n,
+                None => continue,
+            };
+            let dim = match graph.nodes[id].args[1].as_int() {
+                Some(v) => v,
+                None => continue,
+            };
+            let index_id = match graph.nodes[id].args[2].as_node() {
+                Some(n) => n,
+                None => continue,
+            };
 
             let x_shape = match graph.nodes[x_id].meta.val_shape() {
-                Some(s) => s.to_vec(), None => continue,
+                Some(s) => s.to_vec(),
+                None => continue,
             };
             let index_shape = match graph.nodes[index_id].meta.val_shape() {
-                Some(s) => s.to_vec(), None => continue,
+                Some(s) => s.to_vec(),
+                None => continue,
             };
-            if x_shape.is_empty() || index_shape.len() != 1 { continue; }
+            if x_shape.is_empty() || index_shape.len() != 1 {
+                continue;
+            }
 
             let x_rank = x_shape.len() as i64;
             let dim_norm = dim.rem_euclid(x_rank) as usize;
@@ -58,13 +84,23 @@ impl IrPass for IrDecomposeIndexSelectPass {
 
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let x_dtype = graph.nodes[x_id].meta.val_dtype()
-                .unwrap_or("torch.float32").to_string();
-            let idx_dtype = graph.nodes[index_id].meta.val_dtype()
-                .unwrap_or("torch.int64").to_string();
+            let x_dtype = graph.nodes[x_id]
+                .meta
+                .val_dtype()
+                .unwrap_or("torch.float32")
+                .to_string();
+            let idx_dtype = graph.nodes[index_id]
+                .meta
+                .val_dtype()
+                .unwrap_or("torch.int64")
+                .to_string();
 
             let needs_bool_cast = x_dtype == "torch.bool";
-            let gather_dtype = if needs_bool_cast { "torch.int8" } else { x_dtype.as_str() };
+            let gather_dtype = if needs_bool_cast {
+                "torch.int8"
+            } else {
+                x_dtype.as_str()
+            };
 
             let x_for_gather = if needs_bool_cast {
                 let mut kwargs = HashMap::new();
@@ -84,46 +120,58 @@ impl IrPass for IrDecomposeIndexSelectPass {
             };
 
             // Flatten x to (N, K, C)
-            let values = graph.add_node(NodeOp::CallFunction,
+            let values = graph.add_node(
+                NodeOp::CallFunction,
                 format!("{}_values", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(x_for_gather), i64_list(&[n, k, c])],
-                meta_with(&orig_meta, vec![n, k, c], gather_dtype));
+                meta_with(&orig_meta, vec![n, k, c], gather_dtype),
+            );
             graph.anchor_to(values, id);
 
             // Index: unsqueeze(0) → (1, W), then expand to (N, W)
-            let idx_unsq = graph.add_node(NodeOp::CallFunction,
+            let idx_unsq = graph.add_node(
+                NodeOp::CallFunction,
                 format!("{}_idx_unsq", name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(index_id), IrArg::Int(0)],
-                meta_with(&orig_meta, vec![1, w], &idx_dtype));
+                meta_with(&orig_meta, vec![1, w], &idx_dtype),
+            );
             graph.anchor_to(idx_unsq, id);
 
-            let idx_exp = graph.add_node(NodeOp::CallFunction,
+            let idx_exp = graph.add_node(
+                NodeOp::CallFunction,
                 format!("{}_idx_exp", name),
                 "aten.expand_copy.default".to_string(),
                 vec![IrArg::Node(idx_unsq), i64_list(&[n, w])],
-                meta_with(&orig_meta, vec![n, w], &idx_dtype));
+                meta_with(&orig_meta, vec![n, w], &idx_dtype),
+            );
             graph.anchor_to(idx_exp, id);
 
             // GATHER(values, indices) → (N, W, C)
-            let gathered = graph.add_node(NodeOp::CallFunction,
+            let gathered = graph.add_node(
+                NodeOp::CallFunction,
                 format!("{}_gather", name),
                 "backend.tosa.GATHER.default".to_string(),
                 vec![IrArg::Node(values), IrArg::Node(idx_exp)],
-                meta_with(&orig_meta, vec![n, w, c], gather_dtype));
+                meta_with(&orig_meta, vec![n, w, c], gather_dtype),
+            );
             graph.anchor_to(gathered, id);
 
             // Reshape to (...before, W, ...after)
-            let out_shape: Vec<i64> = before.iter().copied()
+            let out_shape: Vec<i64> = before
+                .iter()
+                .copied()
                 .chain(std::iter::once(w))
                 .chain(after.iter().copied())
                 .collect();
-            let result = graph.add_node(NodeOp::CallFunction,
+            let result = graph.add_node(
+                NodeOp::CallFunction,
                 format!("{}_out", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(gathered), i64_list(&out_shape)],
-                meta_with(&orig_meta, out_shape.clone(), gather_dtype));
+                meta_with(&orig_meta, out_shape.clone(), gather_dtype),
+            );
             graph.anchor_to(result, id);
 
             let result = if needs_bool_cast {
@@ -148,7 +196,9 @@ impl IrPass for IrDecomposeIndexSelectPass {
         }
 
         if modified {
-            log_line(format_args!("[IrDecomposeIndexSelect] decomposed index_select ops"));
+            log_line(format_args!(
+                "[IrDecomposeIndexSelect] decomposed index_select ops"
+            ));
         }
         modified
     }

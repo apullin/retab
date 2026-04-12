@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 
-use crate::fx_ep_effects::{
-    FxDeleteConstantPlaceholderEffect, FxEpEffect, FxEpEffectBatch,
-};
+use crate::fx_ep_effects::{FxDeleteConstantPlaceholderEffect, FxEpEffect, FxEpEffectBatch};
 use crate::fx_ir::{IrEpPass, IrEpPassResult, IrGraph, IrPass, NodeId, NodeOp};
 
 pub struct IrFuseEqualPlaceholdersPass;
@@ -53,7 +51,9 @@ pub fn find_duplicate_placeholder_pairs(graph: &IrGraph) -> Vec<(NodeId, NodeId)
 }
 
 impl IrPass for IrFuseEqualPlaceholdersPass {
-    fn name(&self) -> &str { "IrFuseEqualPlaceholders" }
+    fn name(&self) -> &str {
+        "IrFuseEqualPlaceholders"
+    }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
@@ -68,7 +68,9 @@ impl IrPass for IrFuseEqualPlaceholdersPass {
 pub struct IrFuseEqualPlaceholdersEpPass;
 
 impl IrEpPass for IrFuseEqualPlaceholdersEpPass {
-    fn name(&self) -> &str { "IrFuseEqualPlaceholdersEp" }
+    fn name(&self) -> &str {
+        "IrFuseEqualPlaceholdersEp"
+    }
 
     fn run(&self, graph: &mut IrGraph) -> IrEpPassResult {
         let mut modified = false;
@@ -97,12 +99,7 @@ mod tests {
 
     use super::*;
 
-    fn add_placeholder(
-        graph: &mut IrGraph,
-        name: &str,
-        data: Vec<u8>,
-        shape: Vec<i64>,
-    ) -> NodeId {
+    fn add_placeholder(graph: &mut IrGraph, name: &str, data: Vec<u8>, shape: Vec<i64>) -> NodeId {
         let id = graph.add_node(
             NodeOp::Placeholder,
             name.to_string(),

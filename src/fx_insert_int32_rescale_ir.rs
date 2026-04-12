@@ -49,15 +49,19 @@ fn is_mul_op(target: &str) -> bool {
     target.contains("mul.Tensor")
 }
 
-fn is_quantized_dtype(dtype: &str) -> bool {
-    dtype.contains("int8") || dtype.contains("int16")
+fn is_integer_quantized_dtype(dtype: &str) -> bool {
+    dtype.contains("int8") || dtype.contains("int16") || dtype.contains("int32")
 }
 
 fn int32_qparam(scale: f64) -> QParam {
     QParam::per_tensor(scale, 0, I32_MIN, I32_MAX, "torch.int32".to_string())
 }
 
-fn compute_rescaled_input_scales(kind: Int32OpKind, scales: &[f64], dtype_strs: &[String]) -> Vec<f64> {
+fn compute_rescaled_input_scales(
+    kind: Int32OpKind,
+    scales: &[f64],
+    dtype_strs: &[String],
+) -> Vec<f64> {
     match kind {
         Int32OpKind::MinScale => {
             let min_scale = scales.iter().copied().fold(f64::INFINITY, f64::min);
@@ -65,7 +69,9 @@ fn compute_rescaled_input_scales(kind: Int32OpKind, scales: &[f64], dtype_strs: 
         }
         Int32OpKind::AddSub => {
             let max_scale = scales.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let is_int16 = dtype_strs.first().is_some_and(|dtype| dtype.contains("int16"));
+            let is_int16 = dtype_strs
+                .first()
+                .is_some_and(|dtype| dtype.contains("int16"));
             let shift_bits: u32 = if is_int16 { 12 } else { 20 };
             vec![(2.0 * max_scale) / (1u64 << shift_bits) as f64; scales.len()]
         }
@@ -95,7 +101,11 @@ fn sorted_input_qparams(meta: &NodeMeta) -> Vec<(usize, QParam)> {
     let mut qparams: Vec<_> = meta
         .input_qparams
         .as_ref()
-        .map(|map| map.iter().map(|(&idx, qparam)| (idx, qparam.clone())).collect())
+        .map(|map| {
+            map.iter()
+                .map(|(&idx, qparam)| (idx, qparam.clone()))
+                .collect()
+        })
         .unwrap_or_default();
     qparams.sort_by_key(|(idx, _)| *idx);
     qparams
@@ -112,7 +122,11 @@ fn producer_old_zero_point(graph: &IrGraph, producer_id: NodeId, fallback_zp: i6
         }
         return qparam.zp;
     }
-    if producer.meta.val_dtype().is_some_and(|dtype| dtype.contains("int32")) {
+    if producer
+        .meta
+        .val_dtype()
+        .is_some_and(|dtype| dtype.contains("int32"))
+    {
         0
     } else {
         fallback_zp
@@ -170,7 +184,7 @@ fn insert_output_rescale(
     output_int32_scale: f64,
     output_qparam: QParam,
 ) -> bool {
-    if output_qparam.scale == 0.0 || !is_quantized_dtype(&output_qparam.dtype_str) {
+    if output_qparam.scale == 0.0 || !is_integer_quantized_dtype(&output_qparam.dtype_str) {
         return false;
     }
     let users = graph.live_user_ids(source_id);
@@ -215,12 +229,15 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
     if input_qparams.is_empty()
         || !input_qparams
             .iter()
-            .any(|(_, qparam)| is_quantized_dtype(&qparam.dtype_str))
+            .any(|(_, qparam)| is_integer_quantized_dtype(&qparam.dtype_str))
     {
         return false;
     }
 
-    let scales: Vec<f64> = input_qparams.iter().map(|(_, qparam)| qparam.scale).collect();
+    let scales: Vec<f64> = input_qparams
+        .iter()
+        .map(|(_, qparam)| qparam.scale)
+        .collect();
     let zps: Vec<i64> = input_qparams.iter().map(|(_, qparam)| qparam.zp).collect();
     let dtype_strs: Vec<String> = input_qparams
         .iter()
@@ -232,7 +249,7 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
     let mut rescaled_inputs = false;
     let mut seen_sources = HashSet::new();
     for (key_idx, (pos, qparam)) in input_qparams.iter().enumerate() {
-        if !is_quantized_dtype(&qparam.dtype_str) {
+        if !is_integer_quantized_dtype(&qparam.dtype_str) {
             continue;
         }
         let Some(source_id) = node.args.get(*pos).and_then(IrArg::as_node) else {
@@ -269,7 +286,10 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
             if insert_output_rescale(graph, node_id, output_int32_scale, output_qparam) {
                 let mut output_qparams = HashMap::new();
                 output_qparams.insert(0, int32_qparam(output_int32_scale));
-                graph.node_mut(node_id).meta.set_output_qparams(output_qparams);
+                graph
+                    .node_mut(node_id)
+                    .meta
+                    .set_output_qparams(output_qparams);
                 if graph.node(node_id).kwargs.contains_key("dtype") {
                     graph.set_kwarg(node_id, "dtype", IrArg::Dtype("torch.int32".to_string()));
                 }
@@ -278,7 +298,12 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
     }
 
     if output_int32_scale.is_some() {
-        if let Some(shape) = graph.node(node_id).meta.val_shape().map(|shape| shape.to_vec()) {
+        if let Some(shape) = graph
+            .node(node_id)
+            .meta
+            .val_shape()
+            .map(|shape| shape.to_vec())
+        {
             graph.node_mut(node_id).meta.set_val(FakeTensorMeta {
                 shape,
                 dtype: "torch.int32".to_string(),
@@ -301,10 +326,7 @@ fn qparam_signature(qparam: &QParam) -> (f64, i64, i64, i64, &str) {
 
 fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
     let node = graph.node(node_id).clone();
-    if !node.alive
-        || node.op != NodeOp::CallFunction
-        || !node.target.contains("where.self")
-    {
+    if !node.alive || node.op != NodeOp::CallFunction || !node.target.contains("where.self") {
         return false;
     }
 
@@ -336,7 +358,7 @@ fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
     if then_sig == out_sig && !needs_noop_quant_boundary {
         return false;
     }
-    if !is_quantized_dtype(&output_qparam.dtype_str) {
+    if !is_integer_quantized_dtype(&output_qparam.dtype_str) {
         return false;
     }
 
@@ -344,7 +366,10 @@ fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
     branch_output_qparams.insert(0, then_qparam.clone());
 
     if needs_noop_quant_boundary {
-        graph.node_mut(node_id).meta.set_output_qparams(branch_output_qparams);
+        graph
+            .node_mut(node_id)
+            .meta
+            .set_output_qparams(branch_output_qparams);
         if let Some(shape) = node.meta.val_shape() {
             graph.node_mut(node_id).meta.set_val(FakeTensorMeta {
                 shape: shape.to_vec(),
@@ -379,7 +404,10 @@ fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
             graph.replace_input_use(user_id, node_id, rescale);
         }
     }
-    graph.node_mut(node_id).meta.set_output_qparams(branch_output_qparams);
+    graph
+        .node_mut(node_id)
+        .meta
+        .set_output_qparams(branch_output_qparams);
     true
 }
 
@@ -403,7 +431,9 @@ impl IrPass for IrInsertInt32RescalePass {
         }
 
         if modified {
-            log_line(format_args!("[IrInsertInt32Rescale] inserted INT32 rescale repairs"));
+            log_line(format_args!(
+                "[IrInsertInt32Rescale] inserted INT32 rescale repairs"
+            ));
         }
         modified
     }
@@ -479,6 +509,57 @@ mod tests {
     }
 
     #[test]
+    fn rescales_int32_add_inputs_and_output() {
+        let mut graph = IrGraph::empty();
+        let lhs = graph.add_node(
+            NodeOp::Placeholder,
+            "lhs".to_string(),
+            "lhs".to_string(),
+            Vec::new(),
+            meta(&[2], "torch.int32"),
+        );
+        let rhs = graph.add_node(
+            NodeOp::Placeholder,
+            "rhs".to_string(),
+            "rhs".to_string(),
+            Vec::new(),
+            meta(&[2], "torch.int32"),
+        );
+        let mut add_meta = meta(&[2], "torch.int32");
+        let mut input_qparams = HashMap::new();
+        input_qparams.insert(0, int32_qparam(0.25));
+        input_qparams.insert(1, int32_qparam(0.5));
+        add_meta.set_input_qparams(input_qparams);
+        add_meta.set_single_output_qparam(int32_qparam(0.125));
+        let add = graph.add_node(
+            NodeOp::CallFunction,
+            "add".to_string(),
+            "aten.add.Tensor".to_string(),
+            vec![IrArg::Node(lhs), IrArg::Node(rhs)],
+            add_meta,
+        );
+        let user = graph.add_node(
+            NodeOp::CallFunction,
+            "user".to_string(),
+            "aten.view_copy.default".to_string(),
+            vec![IrArg::Node(add)],
+            meta(&[2], "torch.int32"),
+        );
+
+        assert!(IrInsertInt32RescalePass.run(&mut graph));
+
+        let add_node = graph.node(add);
+        assert_eq!(add_node.meta.val_dtype(), Some("torch.int32"));
+        assert!(matches!(add_node.args[0], IrArg::Node(id) if graph.node(id).is_rescale()));
+        assert!(matches!(add_node.args[1], IrArg::Node(id) if graph.node(id).is_rescale()));
+
+        let output = graph.by_name("add_output_rescale").unwrap();
+        assert!(matches!(output.args[0], IrArg::Node(id) if id == add));
+        assert!(matches!(output.args[1], IrArg::Dtype(ref dtype) if dtype == "torch.int32"));
+        assert!(matches!(graph.node(user).args[0], IrArg::Node(id) if id == output.id));
+    }
+
+    #[test]
     fn where_with_mismatched_output_domain_gets_output_rescale() {
         let mut graph = IrGraph::empty();
         let cond = graph.add_node(
@@ -530,6 +611,9 @@ mod tests {
         assert!(matches!(rescale.args[3], IrArg::Int(3)));
         assert!(matches!(rescale.args[4], IrArg::Int(-7)));
         assert!(matches!(graph.node(user).args[0], IrArg::Node(id) if id == rescale.id));
-        assert_eq!(graph.node(where_id).meta.output_qparam().unwrap().scale, 0.5);
+        assert_eq!(
+            graph.node(where_id).meta.output_qparam().unwrap().scale,
+            0.5
+        );
     }
 }

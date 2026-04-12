@@ -30,9 +30,9 @@ fn emit_reduce_extrema(
     };
 
     let make_attr: Box<dyn Fn(i32) -> Attribute> = match kind {
-        ReduceExtremaKind::Any => Box::new(|tosa_axis| {
-            Attribute::ReduceAny(ReduceAnyAttribute { axis: tosa_axis })
-        }),
+        ReduceExtremaKind::Any => {
+            Box::new(|tosa_axis| Attribute::ReduceAny(ReduceAnyAttribute { axis: tosa_axis }))
+        }
         ReduceExtremaKind::Min => Box::new(|tosa_axis| {
             Attribute::ReduceMin(ReduceMinAttribute {
                 axis: tosa_axis,

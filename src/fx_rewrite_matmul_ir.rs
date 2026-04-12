@@ -78,7 +78,9 @@ fn insert_matmul_rescale(graph: &mut IrGraph, matmul_id: NodeId) -> bool {
 pub struct IrRewriteMatmulRescalePass;
 
 impl IrPass for IrRewriteMatmulRescalePass {
-    fn name(&self) -> &str { "IrRewriteMatmulRescale" }
+    fn name(&self) -> &str {
+        "IrRewriteMatmulRescale"
+    }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
@@ -87,7 +89,9 @@ impl IrPass for IrRewriteMatmulRescalePass {
             modified |= insert_matmul_rescale(graph, id);
         }
         if modified {
-            log_line(format_args!("[IrRewriteMatmulRescale] inserted matmul output rescale ops"));
+            log_line(format_args!(
+                "[IrRewriteMatmulRescale] inserted matmul output rescale ops"
+            ));
         }
         modified
     }
@@ -165,7 +169,9 @@ mod tests {
         assert_eq!(rescale.target, "backend.tosa.RESCALE.default");
         assert!(matches!(rescale.args[0], IrArg::Node(id) if id == matmul));
         assert!(matches!(rescale.args[1], IrArg::Dtype(ref dtype) if dtype == "torch.int8"));
-        assert!(matches!(rescale.args[2], IrArg::List(ref scales) if matches!(scales.as_slice(), [IrArg::Float(scale)] if (*scale - 1.0).abs() < 1e-12)));
+        assert!(
+            matches!(rescale.args[2], IrArg::List(ref scales) if matches!(scales.as_slice(), [IrArg::Float(scale)] if (*scale - 1.0).abs() < 1e-12))
+        );
         assert!(matches!(rescale.args[3], IrArg::Int(0)));
         assert!(matches!(rescale.args[4], IrArg::Int(7)));
         assert_eq!(rescale.meta.val_dtype(), Some("torch.int8"));

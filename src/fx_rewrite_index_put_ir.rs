@@ -11,7 +11,10 @@ fn i64_list(vals: &[i64]) -> IrArg {
 
 fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
     let mut m = base.clone();
-    m.set_val(FakeTensorMeta { shape, dtype: dtype.to_string() });
+    m.set_val(FakeTensorMeta {
+        shape,
+        dtype: dtype.to_string(),
+    });
     m
 }
 
@@ -49,13 +52,7 @@ fn add_full_int(
     )
 }
 
-fn add_arange(
-    graph: &mut IrGraph,
-    name: String,
-    end: i64,
-    dtype: &str,
-    meta: NodeMeta,
-) -> NodeId {
+fn add_arange(graph: &mut IrGraph, name: String, end: i64, dtype: &str, meta: NodeMeta) -> NodeId {
     let mut kwargs = HashMap::new();
     kwargs.insert("dtype".to_string(), IrArg::Dtype(dtype.to_string()));
     graph.add_node_with_kwargs(
@@ -68,12 +65,21 @@ fn add_arange(
     )
 }
 
-fn product(s: &[i64]) -> i64 { if s.is_empty() { 1 } else { s.iter().copied().product() } }
+fn product(s: &[i64]) -> i64 {
+    if s.is_empty() {
+        1
+    } else {
+        s.iter().copied().product()
+    }
+}
 
 fn shape_to_stride(shape: &[i64]) -> Vec<i64> {
     let mut strides = vec![0; shape.len()];
     let mut stride = 1i64;
-    for i in (0..shape.len()).rev() { strides[i] = stride; stride *= shape[i]; }
+    for i in (0..shape.len()).rev() {
+        strides[i] = stride;
+        stride *= shape[i];
+    }
     strides
 }
 
@@ -85,8 +91,11 @@ fn broadcast_shape(shapes: &[Vec<i64>]) -> Option<Vec<i64>> {
         for shape in shapes {
             let dim = *shape.iter().rev().nth(axis).unwrap_or(&1);
             if dim != 1 {
-                if chosen == 1 { chosen = dim; }
-                else if chosen != dim { return None; }
+                if chosen == 1 {
+                    chosen = dim;
+                } else if chosen != dim {
+                    return None;
+                }
             }
         }
         out.push(chosen);
@@ -98,7 +107,9 @@ fn broadcast_shape(shapes: &[Vec<i64>]) -> Option<Vec<i64>> {
 pub struct IrRewriteIndexPutPass;
 
 impl IrPass for IrRewriteIndexPutPass {
-    fn name(&self) -> &str { "IrRewriteIndexPut" }
+    fn name(&self) -> &str {
+        "IrRewriteIndexPut"
+    }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
@@ -113,30 +124,50 @@ impl IrPass for IrRewriteIndexPutPass {
             {
                 continue;
             }
-            if graph.nodes[id].args.len() < 3 { continue; }
+            if graph.nodes[id].args.len() < 3 {
+                continue;
+            }
 
-            let source_id = match graph.nodes[id].args[0].as_node() { Some(n) => n, None => continue };
+            let source_id = match graph.nodes[id].args[0].as_node() {
+                Some(n) => n,
+                None => continue,
+            };
             let indices_list = match &graph.nodes[id].args[1] {
                 IrArg::List(items) => items.clone(),
                 _ => continue,
             };
-            let values_id = match graph.nodes[id].args[2].as_node() { Some(n) => n, None => continue };
-            let accumulate = graph.nodes[id].args.get(3).and_then(|a| a.as_bool()).unwrap_or(false);
+            let values_id = match graph.nodes[id].args[2].as_node() {
+                Some(n) => n,
+                None => continue,
+            };
+            let accumulate = graph.nodes[id]
+                .args
+                .get(3)
+                .and_then(|a| a.as_bool())
+                .unwrap_or(false);
 
             let source_shape = match graph.nodes[source_id].meta.val_shape() {
-                Some(s) => s.to_vec(), None => continue,
+                Some(s) => s.to_vec(),
+                None => continue,
             };
-            if source_shape.is_empty() { continue; }
+            if source_shape.is_empty() {
+                continue;
+            }
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let src_dtype = graph.nodes[source_id].meta.val_dtype()
-                .unwrap_or("torch.float32").to_string();
+            let src_dtype = graph.nodes[source_id]
+                .meta
+                .val_dtype()
+                .unwrap_or("torch.float32")
+                .to_string();
 
             let index_dtype = indices_list.iter().find_map(|item| match item {
                 IrArg::Node(nid) => graph.nodes[*nid].meta.val_dtype().map(str::to_string),
                 _ => None,
             });
-            let Some(index_dtype) = index_dtype else { continue };
+            let Some(index_dtype) = index_dtype else {
+                continue;
+            };
 
             // Collect index node IDs and shapes, expanding None to arange
             let mut idx_ids: Vec<NodeId> = Vec::new();
@@ -176,22 +207,33 @@ impl IrPass for IrRewriteIndexPutPass {
                     }
                 }
             }
-            if invalid_indices || idx_ids.is_empty() { continue; }
+            if invalid_indices || idx_ids.is_empty() {
+                continue;
+            }
 
-            let Some(bcast) = broadcast_shape(&idx_shapes) else { continue };
+            let Some(bcast) = broadcast_shape(&idx_shapes) else {
+                continue;
+            };
             let num_idx = idx_ids.len();
             let w = product(&bcast).max(1);
             let mut k = 1i64;
-            for i in 0..num_idx { k *= source_shape.get(i).copied().unwrap_or(1); }
+            for i in 0..num_idx {
+                k *= source_shape.get(i).copied().unwrap_or(1);
+            }
             let total = product(&source_shape);
             let c = if k != 0 { total / k } else { 1 };
-            if !(k > 0 && w > 0 && c > 0) { continue; }
+            if !(k > 0 && w > 0 && c > 0) {
+                continue;
+            }
 
             let strides = shape_to_stride(&source_shape);
             let lin_scales: Vec<i64> = strides.iter().take(num_idx).map(|s| s / c).collect();
 
-            let idx_dtype = graph.nodes[idx_ids[0]].meta.val_dtype()
-                .unwrap_or("torch.int64").to_string();
+            let idx_dtype = graph.nodes[idx_ids[0]]
+                .meta
+                .val_dtype()
+                .unwrap_or("torch.int64")
+                .to_string();
 
             // Build flat index
             let mut lin: Option<NodeId> = None;
@@ -204,28 +246,37 @@ impl IrPass for IrRewriteIndexPutPass {
                     aligned.extend(idx_shape);
                     let mut aligned_meta = meta_with(&orig_meta, aligned.clone(), &idx_dtype);
                     clear_qparams(&mut aligned_meta);
-                    let a = graph.add_node(NodeOp::CallFunction, format!("{}_ia{}", name, i),
+                    let a = graph.add_node(
+                        NodeOp::CallFunction,
+                        format!("{}_ia{}", name, i),
                         "aten.view_copy.default".to_string(),
                         vec![IrArg::Node(current), i64_list(&aligned)],
-                        aligned_meta);
+                        aligned_meta,
+                    );
                     graph.anchor_to(a, id);
                     current = a;
                 }
 
                 let mut bcast_meta = meta_with(&orig_meta, bcast.clone(), &idx_dtype);
                 clear_qparams(&mut bcast_meta);
-                let b = graph.add_node(NodeOp::CallFunction, format!("{}_ib{}", name, i),
+                let b = graph.add_node(
+                    NodeOp::CallFunction,
+                    format!("{}_ib{}", name, i),
                     "aten.expand_copy.default".to_string(),
                     vec![IrArg::Node(current), i64_list(&bcast)],
-                    bcast_meta);
+                    bcast_meta,
+                );
                 graph.anchor_to(b, id);
 
                 let mut flat_meta = meta_with(&orig_meta, vec![w], &idx_dtype);
                 clear_qparams(&mut flat_meta);
-                let flat = graph.add_node(NodeOp::CallFunction, format!("{}_if{}", name, i),
+                let flat = graph.add_node(
+                    NodeOp::CallFunction,
+                    format!("{}_if{}", name, i),
                     "aten.view_copy.default".to_string(),
                     vec![IrArg::Node(b), i64_list(&[w])],
-                    flat_meta);
+                    flat_meta,
+                );
                 graph.anchor_to(flat, id);
 
                 let mut scale_meta = meta_with(&orig_meta, vec![1], &idx_dtype);
@@ -242,10 +293,13 @@ impl IrPass for IrRewriteIndexPutPass {
 
                 let mut scaled_meta = meta_with(&orig_meta, vec![w], &idx_dtype);
                 clear_qparams(&mut scaled_meta);
-                let scaled = graph.add_node(NodeOp::CallFunction, format!("{}_sm{}", name, i),
+                let scaled = graph.add_node(
+                    NodeOp::CallFunction,
+                    format!("{}_sm{}", name, i),
                     "aten.mul.Tensor".to_string(),
                     vec![IrArg::Node(flat), IrArg::Node(scale)],
-                    scaled_meta);
+                    scaled_meta,
+                );
                 graph.anchor_to(scaled, id);
 
                 lin = Some(match lin {
@@ -253,10 +307,13 @@ impl IrPass for IrRewriteIndexPutPass {
                     Some(prev) => {
                         let mut add_meta = meta_with(&orig_meta, vec![w], &idx_dtype);
                         clear_qparams(&mut add_meta);
-                        let add = graph.add_node(NodeOp::CallFunction, format!("{}_la{}", name, i),
+                        let add = graph.add_node(
+                            NodeOp::CallFunction,
+                            format!("{}_la{}", name, i),
                             "aten.add.Tensor".to_string(),
                             vec![IrArg::Node(prev), IrArg::Node(scaled)],
-                            add_meta);
+                            add_meta,
+                        );
                         graph.anchor_to(add, id);
                         add
                     }
@@ -267,30 +324,40 @@ impl IrPass for IrRewriteIndexPutPass {
             // Reshape: indices (1, W), source (1, K, C), values (1, W, C)
             let mut idx_meta = meta_with(&orig_meta, vec![1, w], &idx_dtype);
             clear_qparams(&mut idx_meta);
-            let idx_1w = graph.add_node(NodeOp::CallFunction, format!("{}_idx", name),
+            let idx_1w = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_idx", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(flat_idx), i64_list(&[1, w])],
-                idx_meta);
+                idx_meta,
+            );
             graph.anchor_to(idx_1w, id);
 
             let mut src_meta = meta_with(&graph.nodes[source_id].meta, vec![1, k, c], &src_dtype);
             copy_qparams_from_node(graph, source_id, &mut src_meta);
-            let src_1kc = graph.add_node(NodeOp::CallFunction, format!("{}_src", name),
+            let src_1kc = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_src", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(source_id), i64_list(&[1, k, c])],
-                src_meta);
+                src_meta,
+            );
             graph.anchor_to(src_1kc, id);
 
             let mut val_meta = meta_with(&graph.nodes[source_id].meta, vec![1, w, c], &src_dtype);
             copy_qparams_from_node(graph, source_id, &mut val_meta);
-            let val_1wc = graph.add_node(NodeOp::CallFunction, format!("{}_val", name),
+            let val_1wc = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_val", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(values_id), i64_list(&[1, w, c])],
-                val_meta);
+                val_meta,
+            );
             graph.anchor_to(val_1wc, id);
 
             let scatter_values = if accumulate {
-                let mut gathered_meta = meta_with(&graph.nodes[source_id].meta, vec![1, w, c], &src_dtype);
+                let mut gathered_meta =
+                    meta_with(&graph.nodes[source_id].meta, vec![1, w, c], &src_dtype);
                 copy_qparams_from_node(graph, source_id, &mut gathered_meta);
                 let gathered = graph.add_node(
                     NodeOp::CallFunction,
@@ -301,7 +368,8 @@ impl IrPass for IrRewriteIndexPutPass {
                 );
                 graph.anchor_to(gathered, id);
 
-                let mut added_meta = meta_with(&graph.nodes[source_id].meta, vec![1, w, c], &src_dtype);
+                let mut added_meta =
+                    meta_with(&graph.nodes[source_id].meta, vec![1, w, c], &src_dtype);
                 copy_qparams_from_node(graph, source_id, &mut added_meta);
                 let added = graph.add_node(
                     NodeOp::CallFunction,
@@ -317,28 +385,45 @@ impl IrPass for IrRewriteIndexPutPass {
             };
 
             // SCATTER(source_flat, indices_flat, values_flat)
-            let mut scattered_meta = meta_with(&graph.nodes[source_id].meta, vec![1, k, c], &src_dtype);
+            let mut scattered_meta =
+                meta_with(&graph.nodes[source_id].meta, vec![1, k, c], &src_dtype);
             copy_qparams_from_node(graph, source_id, &mut scattered_meta);
-            let scattered = graph.add_node(NodeOp::CallFunction, format!("{}_scatter", name),
+            let scattered = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_scatter", name),
                 "backend.tosa.SCATTER.default".to_string(),
-                vec![IrArg::Node(src_1kc), IrArg::Node(idx_1w), IrArg::Node(scatter_values)],
-                scattered_meta);
+                vec![
+                    IrArg::Node(src_1kc),
+                    IrArg::Node(idx_1w),
+                    IrArg::Node(scatter_values),
+                ],
+                scattered_meta,
+            );
             graph.anchor_to(scattered, id);
 
             // Reshape back
-            let mut result_meta = meta_with(&graph.nodes[source_id].meta, source_shape.clone(), &src_dtype);
+            let mut result_meta = meta_with(
+                &graph.nodes[source_id].meta,
+                source_shape.clone(),
+                &src_dtype,
+            );
             copy_qparams_from_node(graph, source_id, &mut result_meta);
-            let result = graph.add_node(NodeOp::CallFunction, format!("{}_out", name),
+            let result = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_out", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(scattered), i64_list(&source_shape)],
-                result_meta);
+                result_meta,
+            );
 
             graph.replace_and_erase(id, result);
             modified = true;
         }
 
         if modified {
-            log_line(format_args!("[IrRewriteIndexPut] rewrote index_put to SCATTER"));
+            log_line(format_args!(
+                "[IrRewriteIndexPut] rewrote index_put to SCATTER"
+            ));
         }
         modified
     }
@@ -423,15 +508,19 @@ mod tests {
         assert!(modified);
         assert!(!graph.nodes[3].alive);
         assert_eq!(
-            graph.nodes.iter().filter(|node| {
-                node.alive && node.target == "aten.arange.start_step"
-            }).count(),
+            graph
+                .nodes
+                .iter()
+                .filter(|node| { node.alive && node.target == "aten.arange.start_step" })
+                .count(),
             1
         );
         assert_eq!(
-            graph.nodes.iter().filter(|node| {
-                node.alive && node.target == "backend.tosa.SCATTER.default"
-            }).count(),
+            graph
+                .nodes
+                .iter()
+                .filter(|node| { node.alive && node.target == "backend.tosa.SCATTER.default" })
+                .count(),
             1
         );
         assert_eq!(
@@ -439,19 +528,27 @@ mod tests {
             graph.by_name("index_put_out").map(|node| node.id),
         );
         assert_eq!(
-            graph.by_name("index_put_idx").and_then(|node| node.meta.val_shape()),
+            graph
+                .by_name("index_put_idx")
+                .and_then(|node| node.meta.val_shape()),
             Some(&[1, 2][..]),
         );
         assert_eq!(
-            graph.by_name("index_put_src").and_then(|node| node.meta.val_shape()),
+            graph
+                .by_name("index_put_src")
+                .and_then(|node| node.meta.val_shape()),
             Some(&[1, 10, 4][..]),
         );
         assert_eq!(
-            graph.by_name("index_put_val").and_then(|node| node.meta.val_shape()),
+            graph
+                .by_name("index_put_val")
+                .and_then(|node| node.meta.val_shape()),
             Some(&[1, 2, 4][..]),
         );
         assert_eq!(
-            graph.by_name("index_put_out").and_then(|node| node.meta.val_shape()),
+            graph
+                .by_name("index_put_out")
+                .and_then(|node| node.meta.val_shape()),
             Some(&[2, 5, 4][..]),
         );
     }

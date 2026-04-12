@@ -119,7 +119,10 @@ impl ParsedSelectCopySpec {
             .map(|pos| pos as i32)
             .collect();
         let pre_reshape_perms = if perms.len() == input_shape.len()
-            && perms.iter().enumerate().any(|(idx, &perm)| perm != idx as i32)
+            && perms
+                .iter()
+                .enumerate()
+                .any(|(idx, &perm)| perm != idx as i32)
         {
             Some(perms)
         } else {
@@ -167,8 +170,7 @@ impl ParsedSliceSpec {
             .as_ref()
             .map(|_| map_axis_to_tosa_dim_order(graph, node, raw_dim as i32) as i64)
             .or_else(|| {
-                input_node
-                    .map(|n| map_axis_to_tosa_dim_order(graph, n, raw_dim as i32) as i64)
+                input_node.map(|n| map_axis_to_tosa_dim_order(graph, n, raw_dim as i32) as i64)
             })
             .unwrap_or(raw_dim) as usize;
         let start = arg_i64(node, 2, 0);
@@ -231,7 +233,7 @@ pub(super) fn emit_select(ctx: &EmitContext) -> EmitResult {
     let store = ctx.store;
     let mut result = EmitResult::default();
     let mut input_names = ctx.input_names();
-    maybe_materialize_select_scalar_inputs(graph, node, store, &mut result, &mut input_names);
+    maybe_normalize_select_inputs(graph, node, store, &mut result, &mut input_names);
     result.push_output_op(
         make_output_tensor(node),
         Op::Select,
@@ -241,7 +243,14 @@ pub(super) fn emit_select(ctx: &EmitContext) -> EmitResult {
     result
 }
 
-fn maybe_materialize_select_scalar_inputs(
+fn select_scalar_const_value(store: &TensorStore, node: &Node) -> Option<f64> {
+    match node.target {
+        OpTarget::ScalarTensor => node.args.first().map(Arg::as_f64),
+        _ => store.get(&node.name).and_then(|tensor| tensor.scalar_f64()),
+    }
+}
+
+fn maybe_normalize_select_inputs(
     graph: &Graph,
     node: &Node,
     store: &TensorStore,
@@ -252,45 +261,97 @@ fn maybe_materialize_select_scalar_inputs(
     if output_shape.is_empty() {
         return;
     }
+    let output_dtype = node_output_dtype(node);
+    let output_ir_dtype = node.meta.val.dtype;
 
     for (idx, arg) in node.args.iter().enumerate() {
+        if idx == 0 {
+            continue;
+        }
         let Arg::Node(input_id) = arg else {
             continue;
         };
         let Some(input_node) = graph.node(*input_id) else {
             continue;
         };
-        if !matches!(input_node.target, OpTarget::ScalarTensor) {
-            continue;
-        }
-        let scalar_shape = actual_tensor_shape(graph, store, input_node);
-        if scalar_shape != vec![1] {
+        let input_shape = actual_tensor_shape(graph, store, input_node);
+        if input_shape != output_shape {
+            let Some(raw_value) = select_scalar_const_value(store, input_node) else {
+                continue;
+            };
+            let fill_value = match (
+                input_node.meta.val.dtype,
+                input_node.meta.output_qparams.first(),
+            ) {
+                (crate::graph::ir::DType::Int8 | crate::graph::ir::DType::Int16, Some((_, qp))) => {
+                    let quantized = ((raw_value / qp.scale) + qp.zero_point as f64).round() as i64;
+                    quantized.clamp(qp.qmin, qp.qmax) as f64
+                }
+                _ => raw_value,
+            };
+
+            let const_name = format!("{}_input{}_broadcast", node.name, idx);
+            let Some(tensor) = make_filled_const_tensor(
+                const_name.clone(),
+                output_shape.clone(),
+                output_ir_dtype,
+                fill_value,
+            ) else {
+                continue;
+            };
+            push_inline_const(result, tensor);
+            input_names[idx] = const_name;
             continue;
         }
 
-        let raw_value = input_node.args.first().map_or(0.0, Arg::as_f64);
-        let fill_value = match (
-            input_node.meta.val.dtype,
-            input_node.meta.output_qparams.first(),
-        ) {
-            (crate::graph::ir::DType::Int8 | crate::graph::ir::DType::Int16, Some((_, qp))) => {
-                let quantized = ((raw_value / qp.scale) + qp.zero_point as f64).round() as i64;
-                quantized.clamp(qp.qmin, qp.qmax) as f64
+        let input_dtype = actual_tensor_dtype(graph, input_node);
+        if input_dtype != output_dtype {
+            if input_dtype == DType::Bool {
+                let true_name = format!("{}_input{}_true", node.name, idx);
+                if let Some(tensor) = make_filled_const_tensor(
+                    true_name.clone(),
+                    output_shape.clone(),
+                    output_ir_dtype,
+                    1.0,
+                ) {
+                    push_inline_const(result, tensor);
+                }
+
+                let false_name = format!("{}_input{}_false", node.name, idx);
+                if let Some(tensor) = make_filled_const_tensor(
+                    false_name.clone(),
+                    output_shape.clone(),
+                    output_ir_dtype,
+                    0.0,
+                ) {
+                    push_inline_const(result, tensor);
+                }
+
+                let select_name = format!("{}_input{}_bool_cast", node.name, idx);
+                result.push_output_op(
+                    temp_tensor(select_name.clone(), output_shape.clone(), output_dtype),
+                    Op::Select,
+                    Attribute::Select(SelectAttribute {}),
+                    vec![input_names[idx].clone(), true_name, false_name],
+                );
+                input_names[idx] = select_name;
+                continue;
             }
-            _ => raw_value,
-        };
 
-        let const_name = format!("{}_input{}_broadcast", node.name, idx);
-        let Some(tensor) = make_filled_const_tensor(
-            const_name.clone(),
-            output_shape.clone(),
-            input_node.meta.val.dtype,
-            fill_value,
-        ) else {
-            continue;
-        };
-        push_inline_const(result, tensor);
-        input_names[idx] = const_name;
+            let cast_name = format!("{}_input{}_cast", node.name, idx);
+            result.tensors.push(temp_tensor(
+                cast_name.clone(),
+                output_shape.clone(),
+                output_dtype,
+            ));
+            result.operators.push(TosaOperator::new(
+                Op::Cast,
+                Attribute::Cast(CastAttribute {}),
+                vec![input_names[idx].clone()],
+                vec![cast_name.clone()],
+            ));
+            input_names[idx] = cast_name;
+        }
     }
 }
 

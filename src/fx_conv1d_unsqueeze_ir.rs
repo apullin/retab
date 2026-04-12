@@ -102,9 +102,18 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
             Some(IrArg::Node(nid)) => IrArg::Node(*nid),
             _ => IrArg::None,
         };
-        stride = args.get(3).and_then(|a| a.as_int_list()).unwrap_or_else(|| vec![1]);
-        pad = args.get(4).and_then(|a| a.as_int_list()).unwrap_or_else(|| vec![0]);
-        dilation = args.get(5).and_then(|a| a.as_int_list()).unwrap_or_else(|| vec![1]);
+        stride = args
+            .get(3)
+            .and_then(|a| a.as_int_list())
+            .unwrap_or_else(|| vec![1]);
+        pad = args
+            .get(4)
+            .and_then(|a| a.as_int_list())
+            .unwrap_or_else(|| vec![0]);
+        dilation = args
+            .get(5)
+            .and_then(|a| a.as_int_list())
+            .unwrap_or_else(|| vec![1]);
         groups = args.get(6).and_then(|a| a.as_int()).unwrap_or(1);
         transposed = false;
         output_padding = vec![0];
@@ -176,27 +185,13 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
     // Unsqueeze input: [..., W] -> [..., W, 1]
     let mut x_4d = x_shape.clone();
     x_4d.push(1);
-    let x_unsqueezed = add_view_copy(
-        graph,
-        &node_name,
-        "input_unsqueeze",
-        x_id,
-        &x_4d,
-        &x_dtype,
-    );
+    let x_unsqueezed = add_view_copy(graph, &node_name, "input_unsqueeze", x_id, &x_4d, &x_dtype);
     graph.anchor_to(x_unsqueezed, id);
 
     // Unsqueeze weight: [..., KW] -> [..., KW, 1]
     let mut w_4d = w_shape.clone();
     w_4d.push(1);
-    let w_unsqueezed = add_view_copy(
-        graph,
-        &node_name,
-        "weight_unsqueeze",
-        w_id,
-        &w_4d,
-        &w_dtype,
-    );
+    let w_unsqueezed = add_view_copy(graph, &node_name, "weight_unsqueeze", w_id, &w_4d, &w_dtype);
     graph.anchor_to(w_unsqueezed, id);
     graph.anchor_after(w_unsqueezed, x_unsqueezed);
 
@@ -288,7 +283,9 @@ impl IrPass for IrConv1dUnsqueezePass {
         }
 
         if modified {
-            log_line(format_args!("[IrConv1dUnsqueeze] rewrote conv1d -> unsqueeze+conv2d+squeeze"));
+            log_line(format_args!(
+                "[IrConv1dUnsqueeze] rewrote conv1d -> unsqueeze+conv2d+squeeze"
+            ));
         }
         modified
     }

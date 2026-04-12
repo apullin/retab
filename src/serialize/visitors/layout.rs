@@ -31,7 +31,14 @@ fn compute_conv_output_impl(
     dilation: &[i32],
     is_depthwise: bool,
 ) -> TosaTensor {
-    let dtype = conv_accumulator_dtype(node);
+    let semantic_dtype = node_output_dtype(node);
+    let dtype = if node.meta.input_qparams.is_empty()
+        && matches!(semantic_dtype, DType::Fp32 | DType::Fp16 | DType::Bf16)
+    {
+        semantic_dtype
+    } else {
+        conv_accumulator_dtype(node)
+    };
     let spatial_rank = stride.len(); // 2 for conv2d / depthwise, 3 for conv3d
     let tensor_rank = spatial_rank + 2; // N + spatial dims + C
 
@@ -58,8 +65,21 @@ fn compute_conv_output_impl(
         // Determine output channels and kernel spatial dims.
         let (oc, kernels): (i32, Vec<i32>) = if is_depthwise {
             let ic = *inp.get(1 + spatial_rank)?;
+            let logical_ws = weight_node.meta.val.shape_slice();
             let actual_ws = actual_tensor_shape(graph, store, weight_node);
-            if spatial_rank == 2
+            if logical_ws.len() == tensor_rank && logical_ws.get(1).copied() == Some(1) {
+                // Logical depthwise metadata is still OIHW [OC, 1, KH, KW] even if
+                // `actual_tensor_shape()` has already applied dim-order reordering on a
+                // placeholder. Using the reordered placeholder shape here swaps KH/KW for
+                // cases like cumsum's synthetic kernel [1, 1, K, 1] and yields invalid
+                // depthwise output shapes.
+                let oc = logical_ws[0] as i32;
+                let kernels: Vec<i32> = logical_ws[2..2 + spatial_rank]
+                    .iter()
+                    .map(|&d| d as i32)
+                    .collect();
+                (oc, kernels)
+            } else if spatial_rank == 2
                 && actual_ws.len() == tensor_rank
                 && actual_ws.get(2).copied() == Some(ic)
             {
@@ -67,13 +87,15 @@ fn compute_conv_output_impl(
                 let multiplier = actual_ws.get(3).copied().unwrap_or(1).max(1);
                 (ic * multiplier, actual_ws[0..2].to_vec())
             } else {
-                let ws = weight_node.meta.val.shape_slice();
-                if ws.len() != tensor_rank {
+                if logical_ws.len() != tensor_rank {
                     return None;
                 }
                 // Logical depthwise metadata is [OC, 1, kH, kW].
-                let oc = ws[0] as i32;
-                let kernels: Vec<i32> = ws[2..2 + spatial_rank].iter().map(|&d| d as i32).collect();
+                let oc = logical_ws[0] as i32;
+                let kernels: Vec<i32> = logical_ws[2..2 + spatial_rank]
+                    .iter()
+                    .map(|&d| d as i32)
+                    .collect();
                 (oc, kernels)
             }
         } else {

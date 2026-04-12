@@ -1,16 +1,37 @@
 use super::*;
 
+pub(super) fn normalize_tensor_shape(shape: Vec<i32>) -> Vec<i32> {
+    if shape.is_empty() {
+        vec![1]
+    } else {
+        shape
+    }
+}
+
 pub(super) fn make_tensor(
     name: String,
     shape: Vec<i32>,
     dtype: DType,
     data: Vec<u8>,
 ) -> TosaTensor {
-    TosaTensor::with_data(&name, shape, dtype, data)
+    TosaTensor::with_data(&name, normalize_tensor_shape(shape), dtype, data)
 }
 
 pub(super) fn make_empty_tensor(name: String, shape: Vec<i32>, dtype: DType) -> TosaTensor {
-    TosaTensor::new(&name, shape, dtype)
+    TosaTensor::new(&name, normalize_tensor_shape(shape), dtype)
+}
+
+pub(super) fn make_empty_tensor_for_node(
+    node: &Node,
+    name: String,
+    shape: Vec<i32>,
+    dtype: DType,
+) -> TosaTensor {
+    if node.meta.preserve_scalar_shape && shape.is_empty() {
+        TosaTensor::new(&name, shape, dtype)
+    } else {
+        make_empty_tensor(name, shape, dtype)
+    }
 }
 
 pub(super) fn make_rank1_const_tensor(
@@ -52,17 +73,64 @@ fn shape_numel(shape: &[i32]) -> Option<usize> {
     })
 }
 
-fn scalar_fill_bytes(dtype: crate::graph::ir::DType, value: f64) -> Option<Vec<u8>> {
+fn encode_f16_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let mant = bits & 0x007f_ffff;
+
+    if exp == 0xff {
+        return if mant == 0 { sign | 0x7c00 } else { sign | 0x7e00 };
+    }
+
+    let exp16 = exp - 127 + 15;
+    if exp16 >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if exp16 <= 0 {
+        if exp16 < -10 {
+            return sign;
+        }
+        let mantissa = mant | 0x0080_0000;
+        let shift = (14 - exp16) as u32;
+        let mut half = (mantissa >> shift) as u16;
+        let round_mask = (1u32 << shift) - 1;
+        let halfway = 1u32 << (shift - 1);
+        let remainder = mantissa & round_mask;
+        if remainder > halfway || (remainder == halfway && (half & 1) != 0) {
+            half = half.wrapping_add(1);
+        }
+        return sign | half;
+    }
+
+    let mut half = ((exp16 as u16) << 10) | ((mant >> 13) as u16);
+    let remainder = mant & 0x1fff;
+    if remainder > 0x1000 || (remainder == 0x1000 && (half & 1) != 0) {
+        half = half.wrapping_add(1);
+    }
+    sign | half
+}
+
+fn encode_bf16_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let lsb = (bits >> 16) & 1;
+    let rounded = bits.wrapping_add(0x7fff + lsb);
+    (rounded >> 16) as u16
+}
+
+pub(super) fn scalar_fill_bytes(dtype: crate::graph::ir::DType, value: f64) -> Option<Vec<u8>> {
     use crate::graph::ir::DType as IrDType;
 
     Some(match dtype {
         IrDType::Float32 => (value as f32).to_le_bytes().to_vec(),
+        IrDType::Float16 => encode_f16_bits(value as f32).to_le_bytes().to_vec(),
+        IrDType::BFloat16 => encode_bf16_bits(value as f32).to_le_bytes().to_vec(),
         IrDType::Int8 => (value as i8).to_le_bytes().to_vec(),
         IrDType::Int16 => (value as i16).to_le_bytes().to_vec(),
         IrDType::Int32 => (value as i32).to_le_bytes().to_vec(),
         IrDType::Int64 => (value as i64).to_le_bytes().to_vec(),
         IrDType::Bool => vec![(value != 0.0) as u8],
-        IrDType::Float16 | IrDType::BFloat16 | IrDType::Int4 | IrDType::Int48 => return None,
+        IrDType::Int4 | IrDType::Int48 => return None,
     })
 }
 
@@ -115,8 +183,17 @@ pub(super) fn make_eye_const_tensor(
 }
 
 pub(super) fn quantize_fill_value(node: &Node, value: f64) -> f64 {
-    match (node.meta.val.dtype, node.meta.output_qparams.first()) {
-        (crate::graph::ir::DType::Int8 | crate::graph::ir::DType::Int16, Some((_, qp))) => {
+    match node.meta.output_qparams.first() {
+        Some((_, qp))
+            if matches!(
+                qp.dtype,
+                crate::graph::ir::DType::Int4
+                    | crate::graph::ir::DType::Int8
+                    | crate::graph::ir::DType::Int16
+                    | crate::graph::ir::DType::Int32
+                    | crate::graph::ir::DType::Int64
+            ) =>
+        {
             let quantized = ((value / qp.scale) + qp.zero_point as f64).round() as i64;
             quantized.clamp(qp.qmin, qp.qmax) as f64
         }
@@ -134,4 +211,42 @@ pub(super) fn make_shape_const_tensor(name: String, values: Vec<i32>) -> TosaTen
         .flat_map(|&d| (d as i64).to_le_bytes())
         .collect();
     TosaTensor::with_data(&name, vec![values.len() as i32], DType::Shape, data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scalar_fill_bytes;
+    use crate::graph::ir::DType as IrDType;
+
+    #[test]
+    fn scalar_fill_bytes_encodes_fp32_constants_as_float_bytes() {
+        assert_eq!(
+            scalar_fill_bytes(IrDType::Float32, 1.0).expect("fp32 bytes"),
+            1.0f32.to_le_bytes().to_vec()
+        );
+    }
+
+    #[test]
+    fn scalar_fill_bytes_encodes_fp16_constants() {
+        assert_eq!(
+            scalar_fill_bytes(IrDType::Float16, 1.0).expect("fp16 bytes"),
+            vec![0x00, 0x3c]
+        );
+        assert_eq!(
+            scalar_fill_bytes(IrDType::Float16, -0.5).expect("fp16 bytes"),
+            vec![0x00, 0xb8]
+        );
+    }
+
+    #[test]
+    fn scalar_fill_bytes_encodes_bf16_constants() {
+        assert_eq!(
+            scalar_fill_bytes(IrDType::BFloat16, 1.0).expect("bf16 bytes"),
+            vec![0x80, 0x3f]
+        );
+        assert_eq!(
+            scalar_fill_bytes(IrDType::BFloat16, -0.5).expect("bf16 bytes"),
+            vec![0x00, 0xbf]
+        );
+    }
 }

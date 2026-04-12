@@ -45,8 +45,7 @@ impl ParsedBinaryTensorSpec {
         node: &Node,
         result: &mut EmitResult,
     ) -> Option<Self> {
-        let mut inputs = collect_input_names(graph, node);
-        maybe_materialize_binary_broadcast(graph, store, node, result, &mut inputs);
+        let inputs = collect_binary_input_names(graph, store, node, result);
         Some(Self {
             lhs: inputs.first()?.clone(),
             rhs: inputs.get(1)?.clone(),

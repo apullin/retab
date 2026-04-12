@@ -1,8 +1,10 @@
 use pyo3::exceptions::{PyKeyError, PyRuntimeError};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 use crate::fx_fuse_constant_args::{self, ZeroInputConstantKind};
 use crate::fx_graph::{meta_val, FxGraphModule};
+use crate::graph::ir::DType;
 
 /// Rust-planned, Python-applied ExportedProgram bookkeeping effects.
 ///
@@ -105,10 +107,48 @@ pub struct FxFuseConstantNodeEffect {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct FxMaterializeConstantNodeEffect {
+    pub node_name: String,
+    pub data: Vec<u8>,
+    pub shape: Vec<i64>,
+    pub dtype: DType,
+    pub allow_missing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FxMaterializeZeroInputConstantNodeEffect {
+    pub node_name: String,
+    pub data: Vec<u8>,
+    pub shape: Vec<i64>,
+    pub dtype: DType,
+    pub allow_missing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct FxInsertTableOpEffect {
     pub node_name: String,
     pub kind: String,
     pub scalar_arg: Option<f64>,
+    pub allow_missing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FxInsertPrecomputedTableOpEffect {
+    pub node_name: String,
+    pub data: Vec<u8>,
+    pub shape: Vec<i64>,
+    pub table_dtype: DType,
+    pub input_scale: f64,
+    pub input_zp: i64,
+    pub input_qmin: i64,
+    pub input_qmax: i64,
+    pub input_dtype: DType,
+    pub output_scale: f64,
+    pub output_zp: i64,
+    pub output_qmin: i64,
+    pub output_qmax: i64,
+    pub output_dtype: DType,
+    pub rescale_lshift: i64,
     pub allow_missing: bool,
 }
 
@@ -120,7 +160,10 @@ pub enum FxEpEffect {
     CastInt64InputToInt32(FxCastInt64InputToInt32Effect),
     MaterializeZeroInputConstant(FxMaterializeZeroInputConstantEffect),
     FuseConstantNode(FxFuseConstantNodeEffect),
+    MaterializeConstantNode(FxMaterializeConstantNodeEffect),
+    MaterializeZeroInputConstantNode(FxMaterializeZeroInputConstantNodeEffect),
     InsertTableOp(FxInsertTableOpEffect),
+    InsertPrecomputedTableOp(FxInsertPrecomputedTableOpEffect),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -193,13 +236,28 @@ impl FxEpEffect {
             Self::CastInt64InputToInt32(effect) => effect.apply(ctx),
             Self::MaterializeZeroInputConstant(effect) => effect.apply(ctx),
             Self::FuseConstantNode(effect) => effect.apply(ctx),
+            Self::MaterializeConstantNode(effect) => effect.apply(ctx),
+            Self::MaterializeZeroInputConstantNode(effect) => effect.apply(ctx),
             Self::InsertTableOp(effect) => effect.apply(ctx),
+            Self::InsertPrecomputedTableOp(effect) => effect.apply(ctx),
         }
     }
 }
 
 impl FxDeleteConstantPlaceholderEffect {
     pub fn apply<'py>(&self, ctx: &FxEpApplyContext<'py>) -> PyResult<bool> {
+        if let Some(delete_by_name) =
+            import_delete_constant_placeholder_by_name(ctx.exported_program.py())?
+        {
+            return delete_by_name
+                .call1((
+                    ctx.exported_program(),
+                    self.placeholder_name.as_str(),
+                    self.allow_missing,
+                ))?
+                .extract();
+        }
+
         let Some(node) = find_node_by_name(ctx.gm(), &self.placeholder_name)? else {
             return if self.allow_missing {
                 Ok(false)
@@ -381,6 +439,65 @@ impl FxFuseConstantNodeEffect {
     }
 }
 
+impl FxMaterializeConstantNodeEffect {
+    pub fn apply<'py>(&self, ctx: &FxEpApplyContext<'py>) -> PyResult<bool> {
+        let Some(node) = find_node_by_name(ctx.gm(), &self.node_name)? else {
+            return if self.allow_missing {
+                Ok(false)
+            } else {
+                Err(PyKeyError::new_err(format!(
+                    "missing constant-materialize node '{}'",
+                    self.node_name
+                )))
+            };
+        };
+        let helpers = ctx.exported_program.py().import_bound("fx_helpers")?;
+        let py_shape = pyo3::types::PyList::new_bound(ctx.exported_program.py(), &self.shape);
+        let py_bytes = PyBytes::new_bound(ctx.exported_program.py(), &self.data);
+        helpers.call_method1(
+            "materialize_constant_node",
+            (
+                ctx.gm().gm_ref(),
+                ctx.exported_program(),
+                &node,
+                py_bytes,
+                py_shape,
+                ir_dtype_to_torch_name(self.dtype),
+            ),
+        )?;
+        Ok(true)
+    }
+}
+
+impl FxMaterializeZeroInputConstantNodeEffect {
+    pub fn apply<'py>(&self, ctx: &FxEpApplyContext<'py>) -> PyResult<bool> {
+        let Some(node) = find_node_by_name(ctx.gm(), &self.node_name)? else {
+            return if self.allow_missing {
+                Ok(false)
+            } else {
+                Err(PyKeyError::new_err(format!(
+                    "missing zero-input constant-materialize node '{}'",
+                    self.node_name
+                )))
+            };
+        };
+        let helpers = ctx.exported_program.py().import_bound("fx_helpers")?;
+        let py_shape = pyo3::types::PyList::new_bound(ctx.exported_program.py(), &self.shape);
+        let py_bytes = PyBytes::new_bound(ctx.exported_program.py(), &self.data);
+        helpers.call_method1(
+            "materialize_zero_input_constant_node",
+            (
+                ctx.gm().gm_ref(),
+                &node,
+                py_bytes,
+                py_shape,
+                ir_dtype_to_torch_name(self.dtype),
+            ),
+        )?;
+        Ok(true)
+    }
+}
+
 impl FxInsertTableOpEffect {
     pub fn apply<'py>(&self, ctx: &FxEpApplyContext<'py>) -> PyResult<bool> {
         let Some(node) = find_node_by_name(ctx.gm(), &self.node_name)? else {
@@ -407,6 +524,52 @@ impl FxInsertTableOpEffect {
     }
 }
 
+impl FxInsertPrecomputedTableOpEffect {
+    pub fn apply<'py>(&self, ctx: &FxEpApplyContext<'py>) -> PyResult<bool> {
+        let Some(node) = find_node_by_name(ctx.gm(), &self.node_name)? else {
+            return if self.allow_missing {
+                Ok(false)
+            } else {
+                Err(PyKeyError::new_err(format!(
+                    "missing precomputed table-op node '{}'",
+                    self.node_name
+                )))
+            };
+        };
+        let helpers = ctx.exported_program.py().import_bound("fx_helpers")?;
+        let py_shape = pyo3::types::PyList::new_bound(ctx.exported_program.py(), &self.shape);
+        let py_bytes = PyBytes::new_bound(ctx.exported_program.py(), &self.data);
+        let input_qspec = (
+            self.input_scale,
+            self.input_zp,
+            self.input_qmin,
+            self.input_qmax,
+            ir_dtype_to_torch_name(self.input_dtype),
+        );
+        let output_qspec = (
+            self.output_scale,
+            self.output_zp,
+            self.output_qmin,
+            self.output_qmax,
+            ir_dtype_to_torch_name(self.output_dtype),
+        );
+        helpers.call_method1(
+            "insert_precomputed_table_op",
+            (
+                ctx.gm().gm_ref(),
+                &node,
+                py_bytes,
+                py_shape,
+                ir_dtype_to_torch_name(self.table_dtype),
+                input_qspec,
+                output_qspec,
+                self.rescale_lshift,
+            ),
+        )?;
+        Ok(true)
+    }
+}
+
 fn find_node_by_name<'py>(
     gm: &FxGraphModule<'py>,
     target_name: &str,
@@ -419,6 +582,21 @@ fn find_node_by_name<'py>(
     Ok(None)
 }
 
+fn ir_dtype_to_torch_name(dtype: DType) -> &'static str {
+    match dtype {
+        DType::Float32 => "torch.float32",
+        DType::Float16 => "torch.float16",
+        DType::BFloat16 => "torch.bfloat16",
+        DType::Int8 => "torch.int8",
+        DType::Int16 => "torch.int16",
+        DType::Int32 => "torch.int32",
+        DType::Int64 => "torch.int64",
+        DType::Bool => "torch.bool",
+        DType::Int4 => "torch.int8",
+        DType::Int48 => "torch.int32",
+    }
+}
+
 fn import_delete_constant_placeholder<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
     if let Ok(helpers) = py.import_bound("fx_helpers") {
         if let Ok(helper) = helpers.getattr("delete_constant_placeholder") {
@@ -427,6 +605,17 @@ fn import_delete_constant_placeholder<'py>(py: Python<'py>) -> PyResult<Bound<'p
     }
     py.import_bound("executorch.backends.transforms.utils")?
         .getattr("delete_constant_placeholder")
+}
+
+fn import_delete_constant_placeholder_by_name<'py>(
+    py: Python<'py>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    if let Ok(helpers) = py.import_bound("fx_helpers") {
+        if let Ok(helper) = helpers.getattr("delete_constant_placeholder_by_name") {
+            return Ok(Some(helper));
+        }
+    }
+    Ok(None)
 }
 
 fn import_fuse_constant_node_helper<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {

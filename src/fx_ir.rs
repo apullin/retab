@@ -687,9 +687,23 @@ impl IrGraph {
         name: String,
         target: String,
         args: Vec<IrArg>,
-        meta: NodeMeta,
+        mut meta: NodeMeta,
     ) -> NodeId {
         let id = self.nodes.len();
+        // New Python FX nodes start life by copying some existing node's meta
+        // for FakeTensorMode compatibility. Force a full metadata write-back so
+        // the inserted node's own shape/dtype/qparam/layout facts replace any
+        // inherited anchor metadata rather than leaking it through by default.
+        meta.dirty = DirtyFlags {
+            input_qparams: true,
+            output_qparams: true,
+            tosa_dim_order: true,
+            original_dim_orders: true,
+            pre_pass_arg_qparams: true,
+            val: true,
+            table_qparams: true,
+            extras: true,
+        };
         // Update users for the new node's args
         for arg in &args {
             if let IrArg::Node(ref_id) = arg {
@@ -945,7 +959,7 @@ impl IrGraph {
                         predecessor_refs.push(ref_node.clone());
                     }
                     for dep_id in dep_ids {
-                        if dep_id >= original_count && dep_id != ir_node.id {
+                        if dep_id != ir_node.id {
                             if let Some(Some(dep_py)) = all_py.get(dep_id) {
                                 predecessor_refs.push(dep_py.clone());
                             }
@@ -1696,6 +1710,17 @@ impl FakeTensorMeta {
         let shape = pyo3::types::PyList::new_bound(py, &self.shape);
         let kw = PyDict::new_bound(py);
         kw.set_item("dtype", &dtype)?;
+        let base = if base.hasattr("new_empty")? {
+            base.clone()
+        } else if let Ok(item) = base.get_item(0) {
+            if item.hasattr("new_empty")? {
+                item
+            } else {
+                return self.to_py(py);
+            }
+        } else {
+            return self.to_py(py);
+        };
         base.call_method("new_empty", (&shape,), Some(&kw))
     }
 
@@ -2064,6 +2089,11 @@ impl NodeMeta {
     pub fn clear_output_qparams(&mut self) {
         self.output_qparams = None;
         self.dirty.output_qparams = true;
+    }
+
+    pub fn clear_input_qparams(&mut self) {
+        self.input_qparams = None;
+        self.dirty.input_qparams = true;
     }
 
     pub fn set_tosa_dim_order(&mut self, order: Vec<usize>) {

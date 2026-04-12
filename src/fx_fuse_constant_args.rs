@@ -124,6 +124,26 @@ fn materialize_zero_input_const(
     Ok(true)
 }
 
+fn reshape_like_fake_tensor<'py>(
+    data: Bound<'py, PyAny>,
+    fake_val: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    if fake_val.is_none() {
+        return Ok(data);
+    }
+    let data_shape = data.getattr("shape")?;
+    let fake_shape = fake_val.getattr("shape")?;
+    if data_shape.eq(&fake_shape)? {
+        return Ok(data);
+    }
+    let data_numel: usize = data.call_method0("numel")?.extract()?;
+    let fake_numel: usize = fake_val.call_method0("numel")?.extract()?;
+    if data_numel != fake_numel {
+        return Ok(data);
+    }
+    data.call_method1("reshape", (fake_shape,))
+}
+
 fn extract_single_qparam_entry<'py>(
     qparams: &Bound<'py, PyAny>,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
@@ -207,6 +227,17 @@ fn infer_binary_full_qparam<'py>(node: &Bound<'py, PyAny>) -> PyResult<Option<Bo
     Ok(None)
 }
 
+fn is_quant_decompose_helper_full(node: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let target = FxGraphModule::node_target_str(node)?;
+    if target != "aten.full.default" {
+        return Ok(false);
+    }
+
+    let name = FxGraphModule::node_name(node)?;
+    Ok((name.ends_with("_sc") || name.ends_with("_zp"))
+        && (name.contains("quantize_per_tensor") || name.contains("dequantize_per_tensor")))
+}
+
 fn fold_zero_input_full(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult<bool> {
     let py = gm.py();
     let torch = py.import_bound("torch")?;
@@ -225,16 +256,18 @@ fn fold_zero_input_full(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult
     // already annotated with output_qparams, compute the tensor in floating
     // point and quantize exactly once. Using the folded node's int8 dtype here
     // would truncate scalar fills like 3.14 to 3 before quantization.
+    let quant_decompose_helper = is_quant_decompose_helper_full(node)?;
     let mut qparam = None;
-    if let Some(output_qparams) = meta_val(&meta, "output_qparams") {
-        qparam = extract_single_qparam_entry(&output_qparams)?;
-    }
-    if qparam.is_none() {
-        qparam = infer_binary_full_qparam(node)?;
+    if !quant_decompose_helper {
+        if let Some(output_qparams) = meta_val(&meta, "output_qparams") {
+            qparam = extract_single_qparam_entry(&output_qparams)?;
+        }
+        if qparam.is_none() {
+            qparam = infer_binary_full_qparam(node)?;
+        }
     }
 
-    let val = meta_val(&meta, "val")
-        .unwrap_or_else(|| py.None().into_bound(py));
+    let val = meta_val(&meta, "val").unwrap_or_else(|| py.None().into_bound(py));
     // Parse, don't validate: branch-local zero-input FULL nodes may lose their
     // fake tensor metadata during control-flow rewrites. If `meta["val"]` is
     // absent, fall back to eager `torch.full` inference instead of crashing the
@@ -251,6 +284,8 @@ fn fold_zero_input_full(gm: &FxGraphModule, node: &Bound<'_, PyAny>) -> PyResult
     if let Some(qparam) = qparam.as_ref() {
         const_tensor = qparam.call_method1("quantize_value", (&const_tensor,))?;
     }
+
+    const_tensor = reshape_like_fake_tensor(const_tensor, &val)?;
 
     materialize_zero_input_const(gm, node, &const_tensor, qparam.as_ref())
 }

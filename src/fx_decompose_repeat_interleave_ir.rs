@@ -27,7 +27,10 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !graph.nodes[id].target.contains("repeat_interleave.self_int") {
+            if !graph.nodes[id]
+                .target
+                .contains("repeat_interleave.self_int")
+            {
                 continue;
             }
 
@@ -64,7 +67,9 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
                 continue;
             }
 
-            let dtype = graph.nodes[id].meta.val_dtype()
+            let dtype = graph.nodes[id]
+                .meta
+                .val_dtype()
                 .unwrap_or("torch.float32")
                 .to_string();
             let node_name = graph.nodes[id].name.clone();

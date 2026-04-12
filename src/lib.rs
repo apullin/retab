@@ -5,65 +5,41 @@ use crate::graph::Graph;
 use crate::store::TensorStore;
 
 mod fx_annotate_conv_bias_ir;
-mod fx_annotate_output_dim_order;
 mod fx_annotate_output_dim_order_ir;
-mod fx_canonicalize_gather;
 mod fx_canonicalize_gather_ir;
-mod fx_cast_int64;
 mod fx_cast_int64_ir;
+mod fx_constant_tensor_eval;
 mod fx_control_flow_metadata;
-mod fx_conv1d_unsqueeze;
 mod fx_conv1d_unsqueeze_ir;
-mod fx_convert_clamp;
 mod fx_convert_clamp_ir;
-mod fx_convert_full_like;
 mod fx_convert_full_like_ir;
-mod fx_convert_split_to_slice;
 mod fx_convert_split_to_slice_ir;
-mod fx_convert_sum;
 mod fx_convert_sum_ir;
-mod fx_decompose_adaptive_avgpool;
 mod fx_decompose_adaptive_avgpool_ir;
-mod fx_decompose_addmm;
 mod fx_decompose_addmm_ir;
-mod fx_decompose_as_strided_copy;
 mod fx_decompose_as_strided_copy_ir;
-mod fx_decompose_cumsum;
 mod fx_decompose_cumsum_ir;
-mod fx_decompose_grouped_conv;
 mod fx_decompose_grouped_conv_ir;
-mod fx_decompose_index_select;
 mod fx_decompose_index_select_ir;
-mod fx_decompose_index_tensor;
 mod fx_decompose_index_tensor_ir;
-mod fx_decompose_linear;
+mod fx_decompose_layernorm_ir;
 mod fx_decompose_linear_ir;
-mod fx_decompose_logit;
 mod fx_decompose_logit_ir;
-mod fx_decompose_masked_fill;
 mod fx_decompose_masked_fill_ir;
-mod fx_decompose_maxpool_dilation;
 mod fx_decompose_maxpool_dilation_ir;
-mod fx_decompose_mean;
 mod fx_decompose_mean_ir;
-mod fx_decompose_ops;
+mod fx_decompose_ne_ir;
 mod fx_decompose_ops_ir;
-mod fx_decompose_pixel_shuffle;
 mod fx_decompose_pixel_shuffle_ir;
-mod fx_decompose_quant;
 mod fx_decompose_quant_ir;
-mod fx_decompose_repeat_interleave;
 mod fx_decompose_repeat_interleave_ir;
-mod fx_decompose_select_scatter;
 mod fx_decompose_select_scatter_ir;
-mod fx_decompose_strided_slice;
+mod fx_decompose_slice_scatter_ir;
 mod fx_decompose_strided_slice_ir;
-mod fx_decompose_tril;
 mod fx_decompose_tril_ir;
-mod fx_decompose_unfold;
 mod fx_decompose_unfold_ir;
+mod fx_decompose_var_ir;
 mod fx_ep_effects;
-mod fx_expand_where_mask;
 mod fx_expand_where_mask_ir;
 mod fx_fold_qdq;
 mod fx_fold_qdq_ir;
@@ -71,9 +47,7 @@ mod fx_fuse_constant_args;
 mod fx_fuse_constant_inputs_ir;
 mod fx_fuse_duplicate_users;
 mod fx_fuse_duplicate_users_ir;
-mod fx_fuse_equal_placeholders;
 mod fx_fuse_equal_placeholders_ir;
-mod fx_fuse_quant_activation;
 mod fx_fuse_quant_activation_ir;
 mod fx_fuse_shape_only_constants_ir;
 mod fx_fuse_zero_input_constants_ir;
@@ -90,17 +64,14 @@ mod fx_memory_format_ir;
 mod fx_pass;
 mod fx_pipeline;
 mod fx_profile;
-mod fx_quantize_clamp_args;
 mod fx_quantize_clamp_args_ir;
-mod fx_remove_noop;
+mod fx_replace_inf_values_ir;
+mod fx_replace_scalar_with_tensor_ir;
 mod fx_remove_noop_ir;
-mod fx_rewrite_conv;
-mod fx_rewrite_index_put;
 mod fx_rewrite_index_put_ir;
 mod fx_rewrite_matmul;
 mod fx_rewrite_matmul_ir;
 mod fx_rewrite_squeeze_ir;
-mod fx_size_adjust_input;
 mod fx_size_adjust_input_ir;
 mod fx_utils;
 mod graph;
@@ -145,8 +116,14 @@ fn ingest_graph_hierarchy(
     graph_module: &Bound<'_, PyAny>,
     state_dict: &Bound<'_, PyDict>,
     graph_signature: &Bound<'_, PyAny>,
+    exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(GraphHierarchy, TensorStore)> {
-    ingest::fx_bridge::ingest_fx_graph_hierarchy(graph_module, state_dict, graph_signature)
+    ingest::fx_bridge::ingest_fx_graph_hierarchy(
+        graph_module,
+        state_dict,
+        graph_signature,
+        exported_program,
+    )
 }
 
 fn rebuild_graph_users(graphs: &mut [(String, Graph)]) {
@@ -161,8 +138,12 @@ fn lower_fx_graph_to_tosa_bytes(
     graph_signature: &Bound<'_, PyAny>,
     exported_program: Option<PyObject>,
 ) -> PyResult<Vec<u8>> {
-    run_full_fx_pipeline(graph_module, exported_program)?;
-    let (graphs, store) = ingest_graph_hierarchy(graph_module, state_dict, graph_signature)?;
+    let py = graph_module.py();
+    let pipeline_exported_program = exported_program.as_ref().map(|ep| ep.clone_ref(py));
+    run_full_fx_pipeline(graph_module, pipeline_exported_program)?;
+    let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
+    let (graphs, store) =
+        ingest_graph_hierarchy(graph_module, state_dict, graph_signature, exported_program)?;
     Ok(serialize::serialize_graphs_to_tosa(&graphs, &store))
 }
 
@@ -170,8 +151,12 @@ fn ingest_and_serialize_tosa_bytes(
     graph_module: &Bound<'_, PyAny>,
     state_dict: &Bound<'_, PyDict>,
     graph_signature: &Bound<'_, PyAny>,
+    exported_program: Option<PyObject>,
 ) -> PyResult<Vec<u8>> {
-    let (mut graphs, store) = ingest_graph_hierarchy(graph_module, state_dict, graph_signature)?;
+    let py = graph_module.py();
+    let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
+    let (mut graphs, store) =
+        ingest_graph_hierarchy(graph_module, state_dict, graph_signature, exported_program)?;
     rebuild_graph_users(&mut graphs);
     Ok(serialize::serialize_graphs_to_tosa(&graphs, &store))
 }
@@ -325,15 +310,22 @@ fn lower_to_tosa_v2(
 /// pipeline), this function only ingests the FX graph into Rust IR and
 /// serializes it -- no duplicate pass execution.
 #[pyfunction]
+#[pyo3(signature = (graph_module, state_dict, graph_signature, exported_program=None))]
 fn ingest_and_serialize(
     py: Python<'_>,
     graph_module: &Bound<'_, PyAny>,
     state_dict: &Bound<'_, PyDict>,
     graph_signature: &Bound<'_, PyAny>,
+    exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyBytes>> {
     Ok(to_py_bytes(
         py,
-        ingest_and_serialize_tosa_bytes(graph_module, state_dict, graph_signature)?,
+        ingest_and_serialize_tosa_bytes(
+            graph_module,
+            state_dict,
+            graph_signature,
+            clone_bound_pyobject(exported_program),
+        )?,
     ))
 }
 

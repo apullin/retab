@@ -369,6 +369,20 @@ fn infer_depthwise_in_channels(graph: &Graph, node: &crate::graph::ir::Node, oc:
     };
 
     let shape = input_node.meta.val.shape_slice();
+    let groups = aten_conv_groups(node);
+    if groups > 0 {
+        let groups = groups as usize;
+        for candidate in [shape.last().copied(), shape.get(1).copied()]
+            .into_iter()
+            .flatten()
+        {
+            let candidate = candidate as usize;
+            if candidate == groups && oc % candidate == 0 {
+                return candidate;
+            }
+        }
+    }
+
     for candidate in [shape.last().copied(), shape.get(1).copied()]
         .into_iter()
         .flatten()
@@ -396,7 +410,7 @@ fn aten_conv_groups(node: &Node) -> i64 {
 
 fn depthwise_weight_perm(graph: &Graph, node: &Node, weight_node: &Node) -> Option<WeightPermKind> {
     let groups = aten_conv_groups(node);
-    if groups <= 1 {
+    if groups <= 0 {
         return None;
     }
 
@@ -407,7 +421,7 @@ fn depthwise_weight_perm(graph: &Graph, node: &Node, weight_node: &Node) -> Opti
 
     let oc = weight_shape.first().copied().unwrap_or(0) as usize;
     let in_channels = infer_depthwise_in_channels(graph, node, oc);
-    (in_channels > 0 && in_channels == groups as usize)
+    (in_channels > 0 && in_channels == groups as usize && oc % in_channels == 0)
         .then_some(WeightPermKind::DepthwiseConv2d { in_channels })
 }
 
@@ -520,6 +534,14 @@ fn make_graph_tensor(name: String, shape: Vec<i32>, dtype: DType, data: Vec<u8>)
     }
 }
 
+fn normalize_placeholder_shape(node: &Node, shape: Vec<i32>) -> Vec<i32> {
+    if node.meta.preserve_scalar_shape || !shape.is_empty() {
+        shape
+    } else {
+        vec![1]
+    }
+}
+
 fn placeholder_decl(node: &Node) -> (Vec<i32>, DType) {
     let raw_shape: Vec<i32> = node
         .meta
@@ -529,7 +551,7 @@ fn placeholder_decl(node: &Node) -> (Vec<i32>, DType) {
         .map(|&d| d as i32)
         .collect();
     (
-        apply_tosa_dim_order(node, raw_shape),
+        normalize_placeholder_shape(node, apply_tosa_dim_order(node, raw_shape)),
         ir_dtype_to_tosa(node.meta.val.dtype),
     )
 }
@@ -555,7 +577,8 @@ fn serialize_const_placeholder(
     } else {
         (tensor_data.data.clone(), tensor_data.shape.clone())
     };
-    let final_shape: Vec<i32> = final_shape_i64.iter().map(|&d| d as i32).collect();
+    let final_shape: Vec<i32> =
+        normalize_placeholder_shape(node, final_shape_i64.iter().map(|&d| d as i32).collect());
     let final_data = match (tensor_dtype, store_dtype) {
         (DType::Int4, _) if store_dtype != DType::Int4 => pack_int4_data(&final_data),
         (DType::Int48, DType::Int32) => widen_int32_data_to_int48(&final_data),
@@ -583,6 +606,80 @@ fn append_output_names(graph: &Graph, arg: &Arg, output_names: &mut Vec<String>)
     }
 }
 
+fn has_non_identity_tosa_dim_order(node: &Node) -> bool {
+    node.meta
+        .tosa_dim_order
+        .as_ref()
+        .map(|order| {
+            order
+                .iter()
+                .enumerate()
+                .any(|(idx, &axis)| axis as usize != idx)
+        })
+        .unwrap_or(false)
+}
+
+fn output_layout_name(node: &Node) -> String {
+    format!("{}_output_layout", node.name)
+}
+
+fn push_output_layout_transpose(
+    tensors: &mut Vec<TosaTensor>,
+    operators: &mut Vec<TosaOperator>,
+    output_names: &mut Vec<String>,
+    node: &Node,
+    output_shape: Vec<i32>,
+    perms: Vec<i32>,
+) {
+    let output_name = output_layout_name(node);
+    tensors.push(TosaTensor::new(
+        &output_name,
+        output_shape,
+        node_tensor_dtype(node),
+    ));
+    operators.push(TosaOperator::new(
+        Op::Transpose,
+        Attribute::Transpose(TransposeAttribute { perms }),
+        vec![node.name.clone()],
+        vec![output_name.clone()],
+    ));
+    output_names.push(output_name);
+}
+
+fn control_flow_parent_output_layout(
+    node: &Node,
+    raw_shape: &[i32],
+    serialized_shape: &[i32],
+) -> Option<(Vec<i32>, Vec<i32>)> {
+    if !node.meta.arm_control_flow_parent_output_user || raw_shape.len() != 4 {
+        return None;
+    }
+    let perms = node
+        .meta
+        .tosa_dim_order
+        .as_ref()
+        .and_then(|order| inverse_tosa_dim_order(order))?;
+    let output_shape = permute_shape(serialized_shape, &perms)?;
+    Some((output_shape, perms))
+}
+
+fn normalized_output_layout_perms(
+    node: &Node,
+    raw_shape: &[i32],
+    serialized_shape: &[i32],
+    actual_shape: &[i32],
+) -> Option<Vec<i32>> {
+    node.meta
+        .tosa_dim_order
+        .as_ref()
+        .and_then(|order| {
+            (serialized_shape == actual_shape)
+                .then(|| inverse_tosa_dim_order(order))
+                .flatten()
+        })
+        .or_else(|| infer_shape_permutation(actual_shape, raw_shape))
+}
+
 fn append_normalized_output_names(
     graph: &Graph,
     store: &TensorStore,
@@ -595,42 +692,20 @@ fn append_normalized_output_names(
         let raw_shape = raw_i32_shape(node);
         let serialized_shape = apply_tosa_dim_order(node, raw_shape.clone());
         let actual_shape = visitors::actual_tensor_shape(graph, store, node);
-        let preserves_non_identity_layout = node
-            .meta
-            .tosa_dim_order
-            .as_ref()
-            .map(|order| {
-                order
-                    .iter()
-                    .enumerate()
-                    .any(|(idx, &axis)| axis as usize != idx)
-            })
-            .unwrap_or(false);
+        let preserves_non_identity_layout = has_non_identity_tosa_dim_order(node);
         let has_explicit_output_layout = matches!(node.target, OpTarget::TosaTranspose);
-        if node.meta.arm_control_flow_parent_output_user && raw_shape.len() == 4 {
-            if let Some(perms) = node
-                .meta
-                .tosa_dim_order
-                .as_ref()
-                .and_then(|order| inverse_tosa_dim_order(order))
-            {
-                if let Some(output_shape) = permute_shape(&serialized_shape, &perms) {
-                    let output_name = format!("{}_output_layout", node.name);
-                    tensors.push(TosaTensor::new(
-                        &output_name,
-                        output_shape,
-                        node_tensor_dtype(node),
-                    ));
-                    operators.push(TosaOperator::new(
-                        Op::Transpose,
-                        Attribute::Transpose(TransposeAttribute { perms }),
-                        vec![node.name.clone()],
-                        vec![output_name.clone()],
-                    ));
-                    output_names.push(output_name);
-                    return;
-                }
-            }
+        if let Some((output_shape, perms)) =
+            control_flow_parent_output_layout(node, &raw_shape, &serialized_shape)
+        {
+            push_output_layout_transpose(
+                tensors,
+                operators,
+                output_names,
+                node,
+                output_shape,
+                perms,
+            );
+            return;
         }
         // External outputs that still advertise a non-identity dim order are
         // intentionally user-visible channels-last tensors. Keep those in the
@@ -645,34 +720,21 @@ fn append_normalized_output_names(
             return;
         }
 
-        let perms = node
-            .meta
-            .tosa_dim_order
-            .as_ref()
-            .and_then(|order| {
-                (apply_tosa_dim_order(node, raw_shape.clone()) == actual_shape)
-                    .then(|| inverse_tosa_dim_order(order))
-                    .flatten()
-            })
-            .or_else(|| infer_shape_permutation(&actual_shape, &raw_shape));
+        let perms =
+            normalized_output_layout_perms(node, &raw_shape, &serialized_shape, &actual_shape);
         let Some(perms) = perms else {
             output_names.push(node.name.clone());
             return;
         };
 
-        let output_name = format!("{}_output_layout", node.name);
-        tensors.push(TosaTensor::new(
-            &output_name,
+        push_output_layout_transpose(
+            tensors,
+            operators,
+            output_names,
+            node,
             raw_shape,
-            node_tensor_dtype(node),
-        ));
-        operators.push(TosaOperator::new(
-            Op::Transpose,
-            Attribute::Transpose(TransposeAttribute { perms }),
-            vec![node.name.clone()],
-            vec![output_name.clone()],
-        ));
-        output_names.push(output_name);
+            perms,
+        );
     };
 
     match arg {
@@ -1404,6 +1466,7 @@ fn build_fb_attribute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::ir::NodeMeta;
 
     /// Test Conv2d permutation: OIHW [2, 3, 2, 2] -> OHWI [2, 2, 2, 3]
     ///
@@ -1656,5 +1719,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn scalar_placeholders_normalize_to_rank1_unless_preserved() {
+        let mut node = Node {
+            op: OpType::Placeholder,
+            target: OpTarget::Other("scalar".to_string()),
+            args: smallvec::SmallVec::new(),
+            kwargs: Vec::new(),
+            meta: NodeMeta::new(crate::graph::ir::TensorInfo::new(
+                &[],
+                crate::graph::ir::DType::Int8,
+            )),
+            users: smallvec::SmallVec::new(),
+            name: "scalar".to_string(),
+        };
+        assert_eq!(placeholder_decl(&node).0, vec![1]);
+
+        let tensor = TensorData {
+            data: vec![7u8],
+            shape: vec![],
+            dtype: crate::graph::ir::DType::Int8,
+        };
+        let serialized =
+            serialize_const_placeholder(&node, &tensor, &HashMap::new(), &HashMap::new());
+        assert_eq!(serialized.shape, vec![1]);
+
+        node.meta.preserve_scalar_shape = true;
+        assert_eq!(placeholder_decl(&node).0, Vec::<i32>::new());
+        let preserved =
+            serialize_const_placeholder(&node, &tensor, &HashMap::new(), &HashMap::new());
+        assert_eq!(preserved.shape, Vec::<i32>::new());
     }
 }

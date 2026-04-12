@@ -14,7 +14,10 @@ fn is_tril(target: &str) -> bool {
 /// Build a NodeMeta with the given shape and dtype, cloning qparams from `base`.
 fn meta_with_val(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
     let mut m = base.clone();
-    m.set_val(FakeTensorMeta { shape, dtype: dtype.to_string() });
+    m.set_val(FakeTensorMeta {
+        shape,
+        dtype: dtype.to_string(),
+    });
     m
 }
 
@@ -119,13 +122,12 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
     } else {
         // Create a scalar zero with the input dtype.
         // For quantized inputs, clamp the zero-point into [qmin, qmax].
-        let (zero_val, zero_dtype) =
-            if let Some(qp) = graph.nodes[id].meta.output_qparam() {
-                let clamped = qp.zp.max(qp.qmin).min(qp.qmax);
-                (clamped, qp.dtype_str.clone())
-            } else {
-                (0i64, input_dtype.clone())
-            };
+        let (zero_val, zero_dtype) = if let Some(qp) = graph.nodes[id].meta.output_qparam() {
+            let clamped = qp.zp.max(qp.qmin).min(qp.qmax);
+            (clamped, qp.dtype_str.clone())
+        } else {
+            (0i64, input_dtype.clone())
+        };
 
         let zero = graph.add_node(
             NodeOp::CallFunction,

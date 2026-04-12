@@ -44,8 +44,12 @@ impl FxPass for FxRewriteMatmulRescalePass {
 
             // Check if the matmul has qparams (quantized path)
             let meta = node.getattr("meta")?;
-            let Some(input_qparams) = meta_val(&meta, "input_qparams") else { continue };
-            let Some(output_qparams) = meta_val(&meta, "output_qparams") else { continue };
+            let Some(input_qparams) = meta_val(&meta, "input_qparams") else {
+                continue;
+            };
+            let Some(output_qparams) = meta_val(&meta, "output_qparams") else {
+                continue;
+            };
 
             // Get input_qparams[0] and input_qparams[1] scales
             let qp_a = match input_qparams.call_method1("get", (0,)) {

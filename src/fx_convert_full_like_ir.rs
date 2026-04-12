@@ -49,9 +49,7 @@ impl IrPass for IrConvertFullLikePass {
             };
 
             // Build args: full(shape_list, fill_value)
-            let shape_arg = IrArg::List(
-                input_shape.iter().map(|&d| IrArg::Int(d)).collect(),
-            );
+            let shape_arg = IrArg::List(input_shape.iter().map(|&d| IrArg::Int(d)).collect());
 
             let new_id = graph.add_node(
                 NodeOp::CallFunction,

@@ -8,10 +8,11 @@ pub(super) fn register(table: &mut EmitterTable) {
     ]);
 }
 
-fn pad_fill_value(node: &Node) -> i32 {
-    let kwarg_value = kwarg_i32(node, "value", i32::MIN);
-    if kwarg_value != i32::MIN {
-        return kwarg_value;
+fn pad_fill_value(node: &Node) -> f64 {
+    for (key, value) in &node.kwargs {
+        if key == "value" {
+            return value.as_f64();
+        }
     }
 
     // aten.pad.default uses positional args:
@@ -22,11 +23,11 @@ fn pad_fill_value(node: &Node) -> i32 {
         .iter()
         .skip(2)
         .find_map(|arg| match arg {
-            Arg::Int(value) => Some(*value as i32),
-            Arg::Float(value) => Some(value.round() as i32),
+            Arg::Int(value) => Some(*value as f64),
+            Arg::Float(value) => Some(*value),
             _ => None,
         })
-        .unwrap_or(0)
+        .unwrap_or(0.0)
 }
 
 pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult {
@@ -100,18 +101,26 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
     let pad_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
     let pad_value = match (pad_dtype, node.meta.output_qparams.first()) {
         (DType::Int8 | DType::Int16, Some((_, qp))) => {
-            let quantized =
-                ((raw_pad_value as f64 / qp.scale) + qp.zero_point as f64).round() as i32;
-            quantized.clamp(qp.qmin as i32, qp.qmax as i32)
+            let quantized = ((raw_pad_value / qp.scale) + qp.zero_point as f64).round() as i32;
+            quantized.clamp(qp.qmin as i32, qp.qmax as i32) as f64
         }
         _ => raw_pad_value,
     };
-    result.tensors.push(TosaTensor::with_data(
-        &pad_const_name,
+    let pad_const = make_filled_const_tensor(
+        pad_const_name.clone(),
         vec![1],
-        pad_dtype,
-        encode_zp_for_dtype(pad_value, pad_dtype),
-    ));
+        node.meta.val.dtype,
+        pad_value,
+    )
+    .unwrap_or_else(|| {
+        TosaTensor::with_data(
+            &pad_const_name,
+            vec![1],
+            pad_dtype,
+            encode_zp_for_dtype(pad_value as i32, pad_dtype),
+        )
+    });
+    result.tensors.push(pad_const);
     result.operators.push(TosaOperator::new(
         Op::Const,
         Attribute::Const(ConstAttribute {}),

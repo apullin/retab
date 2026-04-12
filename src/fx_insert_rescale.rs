@@ -87,7 +87,9 @@ fn meta_non_empty_item<'py>(
     meta: &Bound<'py, PyAny>,
     key: &str,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
-    let Some(value) = meta_val(meta, key) else { return Ok(None) };
+    let Some(value) = meta_val(meta, key) else {
+        return Ok(None);
+    };
     Ok((py_len(&value) > 0).then_some(value))
 }
 
@@ -220,8 +222,12 @@ impl<'py> QuantEnv<'py> {
 
     fn update_node_dtype_kwarg(&self, node: &Bound<'py, PyAny>) -> PyResult<()> {
         let kwargs = FxGraphModule::node_kwargs(node)?;
-        let Ok(true) = kwargs.contains("dtype") else { return Ok(()); };
-        let Ok(kwargs) = kwargs.downcast::<PyDict>() else { return Ok(()); };
+        let Ok(true) = kwargs.contains("dtype") else {
+            return Ok(());
+        };
+        let Ok(kwargs) = kwargs.downcast::<PyDict>() else {
+            return Ok(());
+        };
         kwargs.set_item("dtype", &self.int32)?;
         node.setattr("kwargs", kwargs)?;
         Ok(())
@@ -316,10 +322,14 @@ pub struct FxInsertRescalePass {
 
 impl FxInsertRescalePass {
     pub fn new() -> Self {
-        Self { output_qparam_source: OutputQParamSource::Consumer }
+        Self {
+            output_qparam_source: OutputQParamSource::Consumer,
+        }
     }
     pub fn carried() -> Self {
-        Self { output_qparam_source: OutputQParamSource::Carried }
+        Self {
+            output_qparam_source: OutputQParamSource::Carried,
+        }
     }
 }
 
@@ -403,7 +413,9 @@ fn producer_old_zero_point(arg_node: &Bound<'_, PyAny>, fallback_zp: i64) -> PyR
         }
     }
 
-    let Some(arg_fake_val) = meta_val(&meta, "val") else { return Ok(fallback_zp) };
+    let Some(arg_fake_val) = meta_val(&meta, "val") else {
+        return Ok(fallback_zp);
+    };
     let is_int32 = arg_fake_val
         .getattr("dtype")
         .ok()
@@ -481,9 +493,7 @@ fn is_mul_op(target: &str) -> bool {
 }
 
 /// Walk a node's producer chain to find output_qparams.
-fn recover_producer_qparam<'py>(
-    node: &Bound<'py, PyAny>,
-) -> PyResult<Option<Bound<'py, PyAny>>> {
+fn recover_producer_qparam<'py>(node: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
     let mut current = node.clone();
     for _ in 0..8 {
         let meta = current.getattr("meta")?;
@@ -497,7 +507,9 @@ fn recover_producer_qparam<'py>(
         if op != "call_function" && op != "placeholder" {
             break;
         }
-        let Ok(args) = FxGraphModule::node_args(&current) else { break };
+        let Ok(args) = FxGraphModule::node_args(&current) else {
+            break;
+        };
         let Some(first_arg) = args.first() else { break };
         if !FxGraphModule::is_node(first_arg) {
             break;
@@ -574,11 +586,13 @@ fn read_input_qparams_impl(
             let arg_name = FxGraphModule::node_name(arg).unwrap_or_default();
             let arg_op = FxGraphModule::node_op(arg).unwrap_or_default();
             let arg_meta = arg.getattr("meta").ok();
-            let has_oqp = arg_meta.as_ref()
+            let has_oqp = arg_meta
+                .as_ref()
                 .and_then(|m| m.get_item("output_qparams").ok())
                 .map(|v| v.is_truthy().unwrap_or(false))
                 .unwrap_or(false);
-            let has_iqp = arg_meta.as_ref()
+            let has_iqp = arg_meta
+                .as_ref()
                 .and_then(|m| m.get_item("input_qparams").ok())
                 .map(|v| v.is_truthy().unwrap_or(false))
                 .unwrap_or(false);
@@ -630,11 +644,16 @@ fn read_input_qparams_impl(
                     break;
                 }
                 let w_args = FxGraphModule::node_args(&walk).unwrap_or_default();
-                if w_args.is_empty() || !FxGraphModule::is_node(&w_args[0]) { break; }
+                if w_args.is_empty() || !FxGraphModule::is_node(&w_args[0]) {
+                    break;
+                }
                 walk = w_args[0].clone();
             }
         } else if debug_carried {
-            log_line(format_args!("[InsertRescale-fallback] arg {} no producer qparam found", idx));
+            log_line(format_args!(
+                "[InsertRescale-fallback] arg {} no producer qparam found",
+                idx
+            ));
         }
     }
 
@@ -1134,14 +1153,21 @@ impl FxPass for FxInsertRescalePass {
         // as its corresponding placeholder (output[i] feeds back as input[i]).
         // The placeholder qparams are the source of truth — no inference needed.
         if self.output_qparam_source == OutputQParamSource::Carried {
-            let placeholders: Vec<Bound<'_, PyAny>> = gm.nodes()?
+            let placeholders: Vec<Bound<'_, PyAny>> = gm
+                .nodes()?
                 .into_iter()
-                .filter(|n| FxGraphModule::node_op(n).map(|s| s == "placeholder").unwrap_or(false))
+                .filter(|n| {
+                    FxGraphModule::node_op(n)
+                        .map(|s| s == "placeholder")
+                        .unwrap_or(false)
+                })
                 .collect();
 
-            let output_node = gm.nodes()?
-                .into_iter()
-                .find(|n| FxGraphModule::node_op(n).map(|s| s == "output").unwrap_or(false));
+            let output_node = gm.nodes()?.into_iter().find(|n| {
+                FxGraphModule::node_op(n)
+                    .map(|s| s == "output")
+                    .unwrap_or(false)
+            });
 
             if let Some(output) = output_node {
                 let output_args = FxGraphModule::node_args(&output)?;
@@ -1155,7 +1181,8 @@ impl FxPass for FxInsertRescalePass {
                     output_args
                 };
 
-                for (idx, (out_val, ph)) in output_vals.iter().zip(placeholders.iter()).enumerate() {
+                for (idx, (out_val, ph)) in output_vals.iter().zip(placeholders.iter()).enumerate()
+                {
                     if !FxGraphModule::is_node(out_val) {
                         continue;
                     }
@@ -1174,7 +1201,8 @@ impl FxPass for FxInsertRescalePass {
                     };
                     let ph_scale = qp_get_f64(&ph_qp, "scale", None, 1.0);
                     let ph_zp: i64 = qp_get_i64(&ph_qp, "zp", None, 0);
-                    let ph_dtype_str = ph_qp.getattr("dtype")
+                    let ph_dtype_str = ph_qp
+                        .getattr("dtype")
                         .map(|d| format!("{}", d))
                         .unwrap_or("torch.int8".into());
                     let ph_dtype = quant.dtype_for_str(&ph_dtype_str);
@@ -1187,28 +1215,36 @@ impl FxPass for FxInsertRescalePass {
                     // RESCALE node that produced it. Walk the producer to find scale.
                     let out_scale;
                     let out_zp;
-                    let out_target = FxGraphModule::node_target_str(out_val)
-                        .unwrap_or_default();
+                    let out_target = FxGraphModule::node_target_str(out_val).unwrap_or_default();
 
                     if out_target.contains("RESCALE") || out_target.contains("rescale") {
                         // Output arg is already a RESCALE — read its output zp from args[4]
                         let r_args = FxGraphModule::node_args(out_val)?;
                         if r_args.len() >= 5 {
-                            let mult: f64 = r_args[2].get_item(0_usize)
+                            let mult: f64 = r_args[2]
+                                .get_item(0_usize)
                                 .ok()
                                 .and_then(|v| v.extract().ok())
                                 .unwrap_or(1.0);
                             // Source of the rescale
                             let source_meta = if FxGraphModule::is_node(&r_args[0]) {
                                 r_args[0].getattr("meta").ok()
-                            } else { None };
-                            let source_oqp = source_meta.as_ref()
+                            } else {
+                                None
+                            };
+                            let source_oqp = source_meta
+                                .as_ref()
                                 .and_then(|m| m.get_item("output_qparams").ok())
                                 .and_then(|oqp| first_qparam(&oqp));
-                            let source_scale = source_oqp.as_ref()
+                            let source_scale = source_oqp
+                                .as_ref()
                                 .map(|q| qp_get_f64(q, "scale", None, 1.0))
                                 .unwrap_or(1.0);
-                            out_scale = if mult != 0.0 { source_scale / mult } else { 1.0 };
+                            out_scale = if mult != 0.0 {
+                                source_scale / mult
+                            } else {
+                                1.0
+                            };
                             out_zp = r_args[4].extract::<i64>().unwrap_or(0);
                         } else {
                             out_scale = 1.0;
@@ -1217,12 +1253,16 @@ impl FxPass for FxInsertRescalePass {
                     } else {
                         // Not a RESCALE — try output_qparams metadata
                         let out_meta = out_val.getattr("meta")?;
-                        let oqp = out_meta.get_item("output_qparams").ok()
+                        let oqp = out_meta
+                            .get_item("output_qparams")
+                            .ok()
                             .and_then(|oqp| first_qparam(&oqp));
-                        out_scale = oqp.as_ref()
+                        out_scale = oqp
+                            .as_ref()
                             .map(|q| qp_get_f64(q, "scale", None, 1.0))
                             .unwrap_or(ph_scale); // default to ph_scale = no-op
-                        out_zp = oqp.as_ref()
+                        out_zp = oqp
+                            .as_ref()
                             .map(|q| qp_get_i64(q, "zp", None, 0))
                             .unwrap_or(ph_zp);
                     }
@@ -1238,8 +1278,12 @@ impl FxPass for FxInsertRescalePass {
 
                     let rescale_ratio = out_scale / ph_scale;
                     let rescale = rescale_ops.insert(
-                        out_val, out_val, ph_dtype,
-                        vec![rescale_ratio], out_zp, ph_zp,
+                        out_val,
+                        out_val,
+                        ph_dtype,
+                        vec![rescale_ratio],
+                        out_zp,
+                        ph_zp,
                         true,
                     )?;
                     rescale_ops.restamp_output_meta(py, out_val, &rescale, out_val, ph_dtype)?;

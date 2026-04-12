@@ -45,10 +45,14 @@ fn compute_unsqueeze_shape(input_shape: &[i64], dim: i64, rank: usize) -> Vec<i6
     let pos = normalized as usize;
     let mut result = Vec::with_capacity(input_shape.len() + 1);
     for (i, &dim_size) in input_shape.iter().enumerate() {
-        if i == pos { result.push(1); }
+        if i == pos {
+            result.push(1);
+        }
         result.push(dim_size);
     }
-    if pos >= input_shape.len() { result.push(1); }
+    if pos >= input_shape.len() {
+        result.push(1);
+    }
     result
 }
 
@@ -72,7 +76,9 @@ impl IrPass for IrRewriteSqueezePass {
             let is_sq = is_squeeze(target);
             let is_usq = is_unsqueeze(target);
             let is_tr = is_transpose(target);
-            if !is_sq && !is_usq && !is_tr { continue; }
+            if !is_sq && !is_usq && !is_tr {
+                continue;
+            }
 
             let input_id = match graph.nodes[id].first_node_arg() {
                 Some(id) => id,
@@ -88,9 +94,7 @@ impl IrPass for IrRewriteSqueezePass {
                 let dims: Vec<i64> = if graph.nodes[id].args.len() > 1 {
                     match &graph.nodes[id].args[1] {
                         IrArg::Int(d) => vec![*d],
-                        IrArg::List(items) => items.iter()
-                            .filter_map(|a| a.as_int())
-                            .collect(),
+                        IrArg::List(items) => items.iter().filter_map(|a| a.as_int()).collect(),
                         _ => Vec::new(),
                     }
                 } else {
@@ -111,7 +115,6 @@ impl IrPass for IrRewriteSqueezePass {
                 );
                 graph.replace_and_erase(id, new_id);
                 modified = true;
-
             } else if is_usq {
                 let dim = match graph.nodes[id].args.get(1) {
                     Some(IrArg::Int(d)) => *d,
@@ -131,11 +134,18 @@ impl IrPass for IrRewriteSqueezePass {
                 );
                 graph.replace_and_erase(id, new_id);
                 modified = true;
-
             } else if is_tr {
-                if graph.nodes[id].args.len() < 3 { continue; }
-                let dim0 = match graph.nodes[id].args[1].as_int() { Some(d) => d, None => continue };
-                let dim1 = match graph.nodes[id].args[2].as_int() { Some(d) => d, None => continue };
+                if graph.nodes[id].args.len() < 3 {
+                    continue;
+                }
+                let dim0 = match graph.nodes[id].args[1].as_int() {
+                    Some(d) => d,
+                    None => continue,
+                };
+                let dim1 = match graph.nodes[id].args[2].as_int() {
+                    Some(d) => d,
+                    None => continue,
+                };
                 let rank = input_rank as i64;
                 let d0 = (if dim0 < 0 { dim0 + rank } else { dim0 }) as usize;
                 let d1 = (if dim1 < 0 { dim1 + rank } else { dim1 }) as usize;
@@ -158,7 +168,9 @@ impl IrPass for IrRewriteSqueezePass {
         }
 
         if modified {
-            log_line(format_args!("[IrRewriteSqueeze] rewrote squeeze/unsqueeze/transpose ops"));
+            log_line(format_args!(
+                "[IrRewriteSqueeze] rewrote squeeze/unsqueeze/transpose ops"
+            ));
         }
         modified
     }

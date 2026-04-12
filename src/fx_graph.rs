@@ -15,8 +15,7 @@ pub fn arg_extract<'py, T: pyo3::FromPyObject<'py>>(
 
 /// Check if a Python object is a list or tuple (without calling isinstance).
 pub fn py_is_sequence(obj: &pyo3::Bound<'_, pyo3::PyAny>) -> bool {
-    obj.downcast::<pyo3::types::PyList>().is_ok()
-        || obj.downcast::<pyo3::types::PyTuple>().is_ok()
+    obj.downcast::<pyo3::types::PyList>().is_ok() || obj.downcast::<pyo3::types::PyTuple>().is_ok()
 }
 
 /// Extract a typed attribute from a Python object, trying multiple names.
@@ -26,7 +25,8 @@ pub fn py_attr<'py, T: pyo3::FromPyObject<'py>>(
     names: &[&str],
     default: T,
 ) -> T {
-    names.iter()
+    names
+        .iter()
         .find_map(|name| obj.getattr(*name).ok())
         .and_then(|v| v.extract().ok())
         .unwrap_or(default)

@@ -1,5 +1,66 @@
 use super::*;
 
+fn first_tensor_ir_dtype(graph: &Graph, node: &Node) -> crate::graph::ir::DType {
+    node.args
+        .iter()
+        .find_map(|arg| match arg {
+            Arg::Node(id) => graph.node(*id).map(|input| input.meta.val.dtype),
+            _ => None,
+        })
+        .unwrap_or(node.meta.val.dtype)
+}
+
+/// Collect the two logical binary operands, materializing scalar literals as
+/// TOSA CONST tensors. FX often represents predicates like `x.sum() > 0` as a
+/// tensor node plus a numeric literal; plain `collect_input_names` would drop
+/// that literal and emit an invalid unary comparison.
+pub(super) fn collect_binary_input_names(
+    graph: &Graph,
+    store: &TensorStore,
+    node: &Node,
+    result: &mut EmitResult,
+) -> Vec<String> {
+    let const_shape = binary_input_broadcast_shape(graph, store, node)
+        .unwrap_or_else(|| actual_tensor_shape(graph, store, node));
+    let const_dtype = first_tensor_ir_dtype(graph, node);
+    let mut names = Vec::with_capacity(2);
+    let mut has_literal = false;
+
+    for (idx, arg) in node.args.iter().enumerate() {
+        if names.len() >= 2 {
+            break;
+        }
+
+        match arg {
+            Arg::Node(id) => {
+                if let Some(name) = resolve_input_name_from_node_id(graph, *id) {
+                    names.push(name);
+                }
+            }
+            arg @ (Arg::Int(_) | Arg::Float(_) | Arg::Bool(_)) => {
+                let name = format!("{}_input{}_const", node.name, idx);
+                if let Some(tensor) = make_filled_const_tensor(
+                    name.clone(),
+                    const_shape.clone(),
+                    const_dtype,
+                    arg.as_f64(),
+                ) {
+                    push_inline_const(result, tensor);
+                    names.push(name);
+                    has_literal = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !has_literal {
+        maybe_materialize_binary_broadcast(graph, store, node, result, &mut names);
+    }
+
+    names
+}
+
 pub(super) fn maybe_materialize_binary_broadcast(
     graph: &Graph,
     store: &TensorStore,
@@ -32,14 +93,14 @@ pub(super) fn maybe_materialize_binary_broadcast(
         let target_shape = broadcast_shape_for_binary_inputs(
             &raw_i32_shape(input_nodes[0]),
             &raw_i32_shape(input_nodes[1]),
-            input_nodes[1],
+            node,
         );
         (0usize, target_shape)
     } else if input_shapes[1].len() < input_shapes[0].len() {
         let target_shape = broadcast_shape_for_binary_inputs(
             &raw_i32_shape(input_nodes[1]),
             &raw_i32_shape(input_nodes[0]),
-            input_nodes[0],
+            node,
         );
         (1usize, target_shape)
     } else {
@@ -139,21 +200,21 @@ pub(super) fn resolve_clamp_bound_input(
     }
 }
 
-/// Best-effort rank-4 NHWC broadcast shape for lower-rank binary operands.
+/// Best-effort broadcast reshape target for lower-rank binary operands.
 ///
-/// The direct fast lane commonly produces per-channel constants with shapes
-/// like `[C, 1, 1]` feeding rank-4 NHWC binary ops. TOSA requires equal ranks
-/// for these binary ops, so we materialize a broadcast reshape that preserves
-/// the channel value in the last dimension.
+/// The layout contract belongs to the current binary/clamp op, not
+/// necessarily to either operand. Placeholder-backed operands often still
+/// carry raw NCHW shapes while the current op emits NHWC, so the reshape
+/// target must be reordered using the current op's `tosa_dim_order`.
 pub(super) fn broadcast_shape_for_binary_inputs(
     smaller_raw: &[i32],
     larger_raw: &[i32],
-    larger_node: &Node,
+    layout_node: &Node,
 ) -> Vec<i32> {
     let mut padded_raw = vec![1; larger_raw.len().saturating_sub(smaller_raw.len())];
     padded_raw.extend_from_slice(smaller_raw);
 
-    if let Some(order) = larger_node.meta.tosa_dim_order.as_ref() {
+    if let Some(order) = layout_node.meta.tosa_dim_order.as_ref() {
         if order.len() == padded_raw.len() {
             let reordered: Vec<i32> = order
                 .iter()
@@ -165,12 +226,91 @@ pub(super) fn broadcast_shape_for_binary_inputs(
         }
     }
 
-    if larger_raw.len() == 4 && smaller_raw.len() < 4 {
-        let non_ones: Vec<i32> = smaller_raw.iter().copied().filter(|&d| d != 1).collect();
-        if non_ones.len() <= 1 {
-            return vec![1, 1, 1, non_ones.first().copied().unwrap_or(1)];
-        }
+    padded_raw
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::ir::{DType as IrDType, NodeMeta as GraphNodeMeta, OpTarget, OpType, TensorInfo};
+    use crate::graph::Graph;
+    use smallvec::{smallvec, SmallVec};
+
+    fn meta(shape: &[i64], dtype: IrDType) -> GraphNodeMeta {
+        GraphNodeMeta::new(TensorInfo::new(shape, dtype))
     }
 
-    padded_raw
+    #[test]
+    fn one_d_broadcast_preserves_trailing_axis_semantics_in_nhwc() {
+        let mut graph = Graph::new();
+        let mut larger_meta = meta(&[1, 2, 4, 4], IrDType::Int32);
+        larger_meta.tosa_dim_order = Some(SmallVec::from_slice(&[0, 2, 3, 1]));
+        let larger = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Other("larger".to_string()),
+            smallvec![],
+            Vec::new(),
+            larger_meta,
+            "larger".to_string(),
+        );
+        let larger_node = graph.node(larger).expect("larger node");
+
+        assert_eq!(
+            broadcast_shape_for_binary_inputs(&[4], &[1, 2, 4, 4], larger_node),
+            vec![1, 1, 4, 1]
+        );
+    }
+
+    #[test]
+    fn two_d_broadcast_preserves_trailing_axes_semantics_in_nhwc() {
+        let mut graph = Graph::new();
+        let mut larger_meta = meta(&[1, 1, 4, 4], IrDType::Int32);
+        larger_meta.tosa_dim_order = Some(SmallVec::from_slice(&[0, 2, 3, 1]));
+        let larger = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Other("larger".to_string()),
+            smallvec![],
+            Vec::new(),
+            larger_meta,
+            "larger".to_string(),
+        );
+        let larger_node = graph.node(larger).expect("larger node");
+
+        assert_eq!(
+            broadcast_shape_for_binary_inputs(&[4, 1], &[1, 1, 4, 4], larger_node),
+            vec![1, 4, 1, 1]
+        );
+    }
+
+    #[test]
+    fn broadcast_uses_current_binary_layout_when_operands_do_not() {
+        let mut graph = Graph::new();
+        let larger = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Other("larger".to_string()),
+            smallvec![],
+            Vec::new(),
+            meta(&[1, 10, 25, 20], IrDType::Int32),
+            "larger".to_string(),
+        );
+        let larger_node = graph.node(larger).expect("larger node");
+
+        let mut binary_meta = meta(&[1, 10, 25, 20], IrDType::Int32);
+        binary_meta.tosa_dim_order = Some(SmallVec::from_slice(&[0, 2, 3, 1]));
+        let binary = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::Mul,
+            smallvec![],
+            Vec::new(),
+            binary_meta,
+            "binary".to_string(),
+        );
+        let binary_node = graph.node(binary).expect("binary node");
+
+        assert_eq!(larger_node.meta.tosa_dim_order, None);
+        assert_eq!(
+            broadcast_shape_for_binary_inputs(&[1, 25, 20], &[1, 10, 25, 20], binary_node),
+            vec![1, 25, 20, 1]
+        );
+    }
 }

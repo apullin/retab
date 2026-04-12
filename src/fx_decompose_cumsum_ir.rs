@@ -60,7 +60,9 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
         return false;
     }
 
-    let input_dtype = graph.nodes[input_id].meta.val_dtype()
+    let input_dtype = graph.nodes[input_id]
+        .meta
+        .val_dtype()
         .unwrap_or("torch.float32")
         .to_string();
 
@@ -131,7 +133,10 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
         if !orig_iqp.is_empty() {
             let mut conv_iqp = orig_iqp.clone();
             // Weight qparam: scale=1.0, zp=0, int8 range
-            conv_iqp.insert(1, QParam::per_tensor(1.0, 0, -128, 127, "torch.int8".into()));
+            conv_iqp.insert(
+                1,
+                QParam::per_tensor(1.0, 0, -128, 127, "torch.int8".into()),
+            );
             conv_meta.set_input_qparams(conv_iqp);
             if let Some(output_qparam) = node_meta.output_qparam().cloned() {
                 conv_meta.set_single_output_qparam(output_qparam);
@@ -139,8 +144,14 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
 
             // Set weight output qparam
             let mut weight_oqp = HashMap::new();
-            weight_oqp.insert(0, QParam::per_tensor(1.0, 0, -128, 127, "torch.int8".into()));
-            graph.node_mut(weight_id).meta.set_output_qparams(weight_oqp);
+            weight_oqp.insert(
+                0,
+                QParam::per_tensor(1.0, 0, -128, 127, "torch.int8".into()),
+            );
+            graph
+                .node_mut(weight_id)
+                .meta
+                .set_output_qparams(weight_oqp);
         }
     }
 
@@ -151,13 +162,13 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
         vec![
             IrArg::Node(view1_id),
             IrArg::Node(weight_id),
-            IrArg::None,                                           // bias
-            IrArg::List(vec![IrArg::Int(1), IrArg::Int(1)]),       // stride
+            IrArg::None,                                                  // bias
+            IrArg::List(vec![IrArg::Int(1), IrArg::Int(1)]),              // stride
             IrArg::List(vec![IrArg::Int(cumsum_dim - 1), IrArg::Int(0)]), // padding
-            IrArg::List(vec![IrArg::Int(1), IrArg::Int(1)]),       // dilation
-            IrArg::Bool(false),                                     // transposed
-            IrArg::List(vec![IrArg::Int(0)]),                       // output_padding
-            IrArg::Int(1),                                          // groups
+            IrArg::List(vec![IrArg::Int(1), IrArg::Int(1)]),              // dilation
+            IrArg::Bool(false),                                           // transposed
+            IrArg::List(vec![IrArg::Int(0)]),                             // output_padding
+            IrArg::Int(1),                                                // groups
         ],
         conv_meta,
     );
@@ -172,9 +183,9 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
         "aten.slice_copy.Tensor".to_string(),
         vec![
             IrArg::Node(conv_id),
-            IrArg::Int(2),           // dim
-            IrArg::Int(0),           // start
-            IrArg::Int(cumsum_dim),  // end
+            IrArg::Int(2),          // dim
+            IrArg::Int(0),          // start
+            IrArg::Int(cumsum_dim), // end
         ],
         slice_meta,
     );

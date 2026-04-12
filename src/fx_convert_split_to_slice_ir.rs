@@ -120,9 +120,7 @@ impl IrPass for IrConvertSplitToSlicePass {
                 .nodes
                 .iter()
                 .filter(|n| {
-                    n.alive
-                        && n.target.contains("getitem")
-                        && n.first_node_arg() == Some(split_id)
+                    n.alive && n.target.contains("getitem") && n.first_node_arg() == Some(split_id)
                 })
                 .filter_map(|n| {
                     let index = n.args.get(1).and_then(|a| a.as_int()).unwrap_or(0) as usize;

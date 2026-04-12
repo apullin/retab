@@ -11,7 +11,10 @@ fn i64_list(vals: &[i64]) -> IrArg {
 
 fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
     let mut m = base.clone();
-    m.set_val(FakeTensorMeta { shape, dtype: dtype.to_string() });
+    m.set_val(FakeTensorMeta {
+        shape,
+        dtype: dtype.to_string(),
+    });
     m
 }
 
@@ -57,8 +60,11 @@ fn broadcast_shape(shapes: &[Vec<i64>]) -> Option<Vec<i64>> {
         for shape in shapes {
             let dim = *shape.iter().rev().nth(axis).unwrap_or(&1);
             if dim != 1 {
-                if chosen == 1 { chosen = dim; }
-                else if chosen != dim { return None; }
+                if chosen == 1 {
+                    chosen = dim;
+                } else if chosen != dim {
+                    return None;
+                }
             }
         }
         out.push(chosen);
@@ -80,7 +86,9 @@ fn shape_to_stride(shape: &[i64]) -> Vec<i64> {
 pub struct IrDecomposeIndexTensorPass;
 
 impl IrPass for IrDecomposeIndexTensorPass {
-    fn name(&self) -> &str { "IrDecomposeIndexTensor" }
+    fn name(&self) -> &str {
+        "IrDecomposeIndexTensor"
+    }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
@@ -90,37 +98,61 @@ impl IrPass for IrDecomposeIndexTensorPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !graph.nodes[id].target.contains("aten.index.Tensor") { continue; }
-            if graph.nodes[id].args.len() != 2 { continue; }
+            if !graph.nodes[id].target.contains("aten.index.Tensor") {
+                continue;
+            }
+            if graph.nodes[id].args.len() != 2 {
+                continue;
+            }
 
-            let x_id = match graph.nodes[id].args[0].as_node() { Some(n) => n, None => continue };
+            let x_id = match graph.nodes[id].args[0].as_node() {
+                Some(n) => n,
+                None => continue,
+            };
             let index_list = match &graph.nodes[id].args[1] {
                 IrArg::List(items) => items.clone(),
                 _ => continue,
             };
-            if index_list.is_empty() { continue; }
+            if index_list.is_empty() {
+                continue;
+            }
 
             let x_shape = match graph.nodes[x_id].meta.val_shape() {
-                Some(s) => s.to_vec(), None => continue,
+                Some(s) => s.to_vec(),
+                None => continue,
             };
-            if x_shape.is_empty() { continue; }
+            if x_shape.is_empty() {
+                continue;
+            }
 
             let m = index_list.len();
-            if m > x_shape.len() { continue; }
+            if m > x_shape.len() {
+                continue;
+            }
 
             // Collect index node IDs and shapes
             let mut idx_ids: Vec<NodeId> = Vec::new();
             let mut idx_shapes: Vec<Vec<i64>> = Vec::new();
             let mut all_valid = true;
             for item in &index_list {
-                let Some(nid) = item.as_node() else { all_valid = false; break; };
-                let Some(s) = graph.nodes[nid].meta.val_shape() else { all_valid = false; break; };
+                let Some(nid) = item.as_node() else {
+                    all_valid = false;
+                    break;
+                };
+                let Some(s) = graph.nodes[nid].meta.val_shape() else {
+                    all_valid = false;
+                    break;
+                };
                 idx_ids.push(nid);
                 idx_shapes.push(s.to_vec());
             }
-            if !all_valid { continue; }
+            if !all_valid {
+                continue;
+            }
 
-            let Some(broadcast) = broadcast_shape(&idx_shapes) else { continue };
+            let Some(broadcast) = broadcast_shape(&idx_shapes) else {
+                continue;
+            };
             let w = broadcast.iter().copied().product::<i64>().max(1);
             let leading: Vec<i64> = x_shape.iter().take(m).copied().collect();
             let trailing: Vec<i64> = x_shape.iter().skip(m).copied().collect();
@@ -131,10 +163,16 @@ impl IrPass for IrDecomposeIndexTensorPass {
 
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let x_dtype = graph.nodes[x_id].meta.val_dtype()
-                .unwrap_or("torch.float32").to_string();
-            let idx_dtype = graph.nodes[idx_ids[0]].meta.val_dtype()
-                .unwrap_or("torch.int64").to_string();
+            let x_dtype = graph.nodes[x_id]
+                .meta
+                .val_dtype()
+                .unwrap_or("torch.float32")
+                .to_string();
+            let idx_dtype = graph.nodes[idx_ids[0]]
+                .meta
+                .val_dtype()
+                .unwrap_or("torch.int64")
+                .to_string();
 
             // Flatten x to (1, K, C)
             let mut x_1kc_meta = meta_with(&graph.nodes[x_id].meta, vec![1, k, c], &x_dtype);
@@ -150,7 +188,8 @@ impl IrPass for IrDecomposeIndexTensorPass {
 
             // Build linearized flat index
             let mut lin_w: Option<NodeId> = None;
-            for (i, (&idx_id, (idx_shape, &lin_scale))) in idx_ids.iter()
+            for (i, (&idx_id, (idx_shape, &lin_scale))) in idx_ids
+                .iter()
                 .zip(idx_shapes.iter().zip(lin_scales.iter()))
                 .enumerate()
             {
@@ -283,7 +322,9 @@ impl IrPass for IrDecomposeIndexTensorPass {
         }
 
         if modified {
-            log_line(format_args!("[IrDecomposeIndexTensor] decomposed index.Tensor ops"));
+            log_line(format_args!(
+                "[IrDecomposeIndexTensor] decomposed index.Tensor ops"
+            ));
         }
         modified
     }

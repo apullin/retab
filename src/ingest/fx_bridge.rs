@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
@@ -22,7 +22,7 @@ pub fn ingest_fx_graph(
     state_dict: &Bound<'_, PyDict>,
     graph_signature: &Bound<'_, PyAny>,
 ) -> PyResult<(Graph, TensorStore)> {
-    ingest_fx_graph_with_prefix(graph_module, state_dict, graph_signature, None)
+    ingest_fx_graph_with_prefix(graph_module, state_dict, graph_signature, None, None)
 }
 
 fn ingest_fx_graph_with_prefix(
@@ -30,6 +30,7 @@ fn ingest_fx_graph_with_prefix(
     state_dict: &Bound<'_, PyDict>,
     graph_signature: &Bound<'_, PyAny>,
     name_prefix: Option<&str>,
+    exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(Graph, TensorStore)> {
     let mut graph = Graph::new();
     let mut store = TensorStore::new();
@@ -127,16 +128,14 @@ fn ingest_fx_graph_with_prefix(
         }
 
         // --- target ---
-        let op_target = if op_type == OpType::CallFunction {
-            let target_str: String = py_node
+        let target_str: String = if op_type == OpType::CallFunction {
+            py_node
                 .getattr("target")?
                 .call_method0("__str__")?
-                .extract()?;
-            parse_op_target(&target_str)
+                .extract()?
         } else {
             // placeholder and output targets are just string names
-            let target_str: String = py_node.getattr("target")?.str()?.extract()?;
-            OpTarget::Other(target_str)
+            py_node.getattr("target")?.str()?.extract()?
         };
 
         // --- args ---
@@ -165,6 +164,25 @@ fn ingest_fx_graph_with_prefix(
         let meta_dict = py_node.getattr("meta")?;
         enrich_meta_from_meta_dict(&meta_dict, &mut meta)?;
 
+        let op_target = if op_type == OpType::CallFunction {
+            let parsed = parse_op_target(&target_str);
+            match parsed {
+                // Export often lowers conv_transpose2d to aten.convolution.default
+                // with transposed=True in arg slot 6. Retag those nodes so the
+                // rest of the Rust pipeline can apply transpose-conv-specific
+                // memory-format and serializer logic.
+                OpTarget::Conv2d if target_str.contains("aten.convolution") => args
+                    .get(6)
+                    .and_then(Arg::as_bool)
+                    .filter(|v| *v)
+                    .map(|_| OpTarget::ConvTranspose2d)
+                    .unwrap_or(parsed),
+                _ => parsed,
+            }
+        } else {
+            OpTarget::Other(target_str)
+        };
+
         // --- create node ---
         let node_id = graph.create_node(op_type, op_target, args, kwargs, meta, name.clone());
 
@@ -182,44 +200,73 @@ fn ingest_fx_graph_with_prefix(
     }
 
     // -----------------------------------------------------------------
-    // 2. Ingest state_dict into TensorStore
-    // -----------------------------------------------------------------
-    for (key, value) in state_dict.iter() {
-        let tensor_name: String = key.extract()?;
-        store.insert(tensor_name, extract_tensor_data(&value)?);
-    }
-
-    // -----------------------------------------------------------------
-    // 3. Create store aliases: placeholder node name -> state_dict data
+    // 2. Create store aliases: placeholder node name -> exported tensor data
     // -----------------------------------------------------------------
     // Placeholder nodes have names like "b__frozen_param0" but state_dict
     // keys are "_frozen_param0". The graph_signature maps between them.
-    for (placeholder_name, sd_key) in &placeholder_to_sd_key {
-        if placeholder_name != sd_key {
-            if let Some(data) = store.get(sd_key).cloned() {
+    //
+    // Keep TensorStore keyed by graph-visible names only. Mixing raw
+    // state_dict keys into the same flat namespace lets a captured tensor like
+    // `input_1` collide with a real user-input placeholder also named
+    // `input_1`, which then causes placeholder serialization to emit a CONST
+    // instead of a graph input.
+    if name_prefix.is_none() {
+        for (placeholder_name, sd_key) in &placeholder_to_sd_key {
+            if let Some(data) = extract_tensor_from_state_ep_or_attr(
+                state_dict,
+                exported_program,
+                graph_module,
+                sd_key,
+            ) {
                 store.insert(placeholder_name.clone(), data);
             }
         }
-    }
 
-    // -----------------------------------------------------------------
-    // 4. Extract frozen tensor constants from graph module attributes
-    // -----------------------------------------------------------------
-    // After pt2e quantization, parameters become frozen constants stored
-    // as attributes on the graph module (e.g., graph_module._frozen_param0).
-    // These aren't in state_dict, so we extract them directly.
-    for (placeholder_name, sd_key) in &placeholder_to_sd_key {
-        if store.get(placeholder_name).is_some() {
-            continue; // Already have data from state_dict
-        }
-        // Try to get the tensor from graph_module as an attribute
-        // The sd_key typically looks like "_frozen_param0"
-        if let Ok(tensor) = graph_module.getattr(sd_key.as_str()) {
-            if let Ok(tensor_data) = extract_tensor_data(&tensor) {
+        // -----------------------------------------------------------------
+        // 3. Extract frozen tensor constants from graph module attributes
+        // -----------------------------------------------------------------
+        // After pt2e quantization, parameters become frozen constants stored
+        // as attributes on the graph module (e.g., graph_module._frozen_param0).
+        // These aren't in state_dict, so we extract them directly.
+        //
+        // Do not apply this in control-flow regions: region placeholders are
+        // function parameters carried by the parent COND_IF/WHILE_LOOP, even
+        // when the parent value is itself a CONST.
+        for (placeholder_name, sd_key) in &placeholder_to_sd_key {
+            if store.get(placeholder_name).is_some() {
+                continue; // Already have data from state_dict
+            }
+            // Try all exported tensor containers, then graph_module attributes.
+            // Non-persistent buffers and lifted tensor constants live under
+            // exported_program.constants rather than the state_dict.
+            if let Some(tensor_data) = extract_tensor_from_state_ep_or_attr(
+                state_dict,
+                exported_program,
+                graph_module,
+                sd_key,
+            ) {
                 store.insert(placeholder_name.clone(), tensor_data);
             }
         }
     }
+
+    // -----------------------------------------------------------------
+    // 3b. Recover top-level captured tensors that graph_signature did not map
+    // -----------------------------------------------------------------
+    // Some direct control-flow exports leave lifted constants as placeholders
+    // named like `c_buffer`, but omit or rename the graph_signature binding we
+    // normally use above. If left unresolved, those constants become external
+    // graph inputs and the TOSA runner rejects the serialized model. Only apply
+    // this to the parent graph: control-flow region placeholders must remain
+    // region inputs carried by COND_IF/WHILE_LOOP.
+    alias_unmapped_top_level_placeholders(
+        graph_module,
+        state_dict,
+        exported_program,
+        &graph,
+        &mut store,
+        name_prefix,
+    );
 
     // -----------------------------------------------------------------
     // 5. Fix up output shapes for decomposed-linear nodes
@@ -247,13 +294,21 @@ pub fn ingest_fx_graph_hierarchy(
     graph_module: &Bound<'_, PyAny>,
     state_dict: &Bound<'_, PyDict>,
     graph_signature: &Bound<'_, PyAny>,
+    exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(Vec<(String, Graph)>, TensorStore)> {
-    let (main_graph, mut store) = ingest_fx_graph(graph_module, state_dict, graph_signature)?;
+    let (main_graph, mut store) = ingest_fx_graph_with_prefix(
+        graph_module,
+        state_dict,
+        graph_signature,
+        None,
+        exported_program,
+    )?;
     let mut graphs = vec![(String::from("main"), main_graph)];
     collect_control_flow_subgraphs(
         graph_module,
         state_dict,
         graph_signature,
+        exported_program,
         &mut graphs,
         &mut store,
         None,
@@ -265,12 +320,15 @@ fn collect_control_flow_subgraphs(
     graph_module: &Bound<'_, PyAny>,
     state_dict: &Bound<'_, PyDict>,
     graph_signature: &Bound<'_, PyAny>,
+    exported_program: Option<&Bound<'_, PyAny>>,
     graphs: &mut Vec<(String, Graph)>,
     store: &mut TensorStore,
     name_prefix: Option<&str>,
 ) -> PyResult<()> {
     let fx_graph = graph_module.getattr("graph")?;
     let nodes = fx_graph.getattr("nodes")?;
+    let while_cond_graph_names = collect_while_cond_graph_names(graph_module, name_prefix)?;
+    let while_body_input_counts = collect_while_body_graph_input_counts(graph_module, name_prefix)?;
 
     for py_node in nodes.iter()? {
         let py_node = py_node?;
@@ -299,8 +357,19 @@ fn collect_control_flow_subgraphs(
         }
 
         let child_prefix = format!("{graph_name}::");
-        let (submodule_graph, submodule_store) =
-            ingest_fx_graph_with_prefix(&attr, state_dict, graph_signature, Some(&child_prefix))?;
+        let (mut submodule_graph, submodule_store) = ingest_fx_graph_with_prefix(
+            &attr,
+            state_dict,
+            graph_signature,
+            Some(&child_prefix),
+            exported_program,
+        )?;
+        if while_cond_graph_names.contains(&graph_name) {
+            mark_scalar_control_flow_outputs(&mut submodule_graph);
+        }
+        if let Some(counts) = while_body_input_counts.get(&graph_name) {
+            append_while_body_passthrough_outputs(&mut submodule_graph, *counts);
+        }
         for (key, value) in submodule_store.buffers {
             if store.get(&key).is_none() {
                 store.insert(key, value);
@@ -311,6 +380,7 @@ fn collect_control_flow_subgraphs(
             &attr,
             state_dict,
             graph_signature,
+            exported_program,
             graphs,
             store,
             Some(&child_prefix),
@@ -318,6 +388,206 @@ fn collect_control_flow_subgraphs(
     }
 
     Ok(())
+}
+
+fn collect_while_cond_graph_names(
+    graph_module: &Bound<'_, PyAny>,
+    name_prefix: Option<&str>,
+) -> PyResult<HashSet<String>> {
+    let mut names = HashSet::new();
+    let fx_graph = graph_module.getattr("graph")?;
+    let nodes = fx_graph.getattr("nodes")?;
+
+    for py_node in nodes.iter()? {
+        let py_node = py_node?;
+        let op_str: String = py_node.getattr("op")?.extract()?;
+        if op_str != "call_function" {
+            continue;
+        }
+
+        let target_str: String = py_node
+            .getattr("target")?
+            .call_method0("__str__")?
+            .extract()?;
+        if !target_str.contains("while_loop") {
+            continue;
+        }
+
+        let py_args = py_node.getattr("args")?;
+        let args: Vec<Bound<'_, PyAny>> =
+            if py_args.is_instance_of::<PyTuple>() || py_args.is_instance_of::<PyList>() {
+                py_args.iter()?.collect::<PyResult<Vec<_>>>()?
+            } else {
+                vec![py_args]
+            };
+        if let Some(cond_arg) = args.first() {
+            if let Some(name) = control_flow_region_arg_name(graph_module, cond_arg, name_prefix)? {
+                names.insert(name);
+            }
+        }
+    }
+
+    Ok(names)
+}
+
+#[derive(Clone, Copy)]
+struct WhileBodyInputCounts {
+    carried: usize,
+    additional: usize,
+}
+
+fn collect_while_body_graph_input_counts(
+    graph_module: &Bound<'_, PyAny>,
+    name_prefix: Option<&str>,
+) -> PyResult<HashMap<String, WhileBodyInputCounts>> {
+    let mut counts = HashMap::new();
+    let fx_graph = graph_module.getattr("graph")?;
+    let nodes = fx_graph.getattr("nodes")?;
+
+    for py_node in nodes.iter()? {
+        let py_node = py_node?;
+        let op_str: String = py_node.getattr("op")?.extract()?;
+        if op_str != "call_function" {
+            continue;
+        }
+
+        let target_str: String = py_node
+            .getattr("target")?
+            .call_method0("__str__")?
+            .extract()?;
+        if !target_str.contains("while_loop") {
+            continue;
+        }
+
+        let py_args = py_node.getattr("args")?;
+        let args: Vec<Bound<'_, PyAny>> =
+            if py_args.is_instance_of::<PyTuple>() || py_args.is_instance_of::<PyList>() {
+                py_args.iter()?.collect::<PyResult<Vec<_>>>()?
+            } else {
+                vec![py_args]
+            };
+        let Some(body_arg) = args.get(1) else {
+            continue;
+        };
+        let carried = args
+            .get(2)
+            .map(sequence_arg_len)
+            .transpose()?
+            .unwrap_or_default();
+        let additional = args
+            .get(3)
+            .map(sequence_arg_len)
+            .transpose()?
+            .unwrap_or_default();
+        if let Some(name) = control_flow_region_arg_name(graph_module, body_arg, name_prefix)? {
+            counts.insert(
+                name,
+                WhileBodyInputCounts {
+                    carried,
+                    additional,
+                },
+            );
+        }
+    }
+
+    Ok(counts)
+}
+
+fn sequence_arg_len(arg: &Bound<'_, PyAny>) -> PyResult<usize> {
+    if arg.is_none() {
+        return Ok(0);
+    }
+    if arg.is_instance_of::<PyTuple>() || arg.is_instance_of::<PyList>() {
+        return arg.len();
+    }
+    Ok(1)
+}
+
+fn control_flow_region_arg_name(
+    graph_module: &Bound<'_, PyAny>,
+    arg: &Bound<'_, PyAny>,
+    name_prefix: Option<&str>,
+) -> PyResult<Option<String>> {
+    if let (Ok(op), Ok(target)) = (arg.getattr("op"), arg.getattr("target")) {
+        let op_str: String = op.extract()?;
+        if op_str == "get_attr" {
+            let attr_name: String = target.str()?.extract()?;
+            if graph_module
+                .getattr(attr_name.as_str())
+                .and_then(|attr| attr.getattr("graph"))
+                .is_ok()
+            {
+                return Ok(Some(qualify_name(name_prefix, &attr_name)));
+            }
+        }
+    }
+
+    if let Ok(attr_name) = arg.extract::<String>() {
+        if graph_module
+            .getattr(attr_name.as_str())
+            .and_then(|attr| attr.getattr("graph"))
+            .is_ok()
+        {
+            return Ok(Some(qualify_name(name_prefix, &attr_name)));
+        }
+    }
+
+    Ok(None)
+}
+
+fn mark_scalar_control_flow_outputs(graph: &mut Graph) {
+    let Some(output_id) = graph.output else {
+        return;
+    };
+    let Some(output_node) = graph.node(output_id) else {
+        return;
+    };
+    let output_args = output_node.args.clone();
+
+    for arg in output_args {
+        for node_id in arg.node_refs() {
+            let Some(node) = graph.node_mut(node_id) else {
+                continue;
+            };
+            if node.meta.val.dtype == DType::Bool {
+                node.meta.preserve_scalar_shape = true;
+            }
+        }
+    }
+}
+
+fn append_while_body_passthrough_outputs(graph: &mut Graph, counts: WhileBodyInputCounts) {
+    let additional_inputs: Vec<NodeId> = graph
+        .inputs
+        .iter()
+        .skip(counts.carried)
+        .take(counts.additional)
+        .copied()
+        .collect();
+    if additional_inputs.is_empty() {
+        return;
+    }
+
+    let Some(output_id) = graph.output else {
+        return;
+    };
+    let Some(output_node) = graph.node_mut(output_id) else {
+        return;
+    };
+
+    match output_node.args.first_mut() {
+        Some(Arg::NodeList(ids)) => ids.extend(additional_inputs),
+        Some(Arg::Node(id)) => {
+            let mut ids = SmallVec::new();
+            ids.push(*id);
+            ids.extend(additional_inputs);
+            output_node.args[0] = Arg::NodeList(ids);
+        }
+        _ => output_node
+            .args
+            .push(Arg::NodeList(SmallVec::from_vec(additional_inputs))),
+    }
+    graph.rebuild_user_lists();
 }
 
 // ---------------------------------------------------------------------------
@@ -556,6 +826,124 @@ fn qualify_name(name_prefix: Option<&str>, name: &str) -> String {
     }
 }
 
+fn alias_unmapped_top_level_placeholders(
+    graph_module: &Bound<'_, PyAny>,
+    state_dict: &Bound<'_, PyDict>,
+    exported_program: Option<&Bound<'_, PyAny>>,
+    graph: &Graph,
+    store: &mut TensorStore,
+    name_prefix: Option<&str>,
+) {
+    if name_prefix.is_some() {
+        return;
+    }
+
+    for &input_id in &graph.inputs {
+        let Some(node) = graph.node(input_id) else {
+            continue;
+        };
+        if store.get(&node.name).is_some() || !looks_like_exported_tensor_placeholder(node) {
+            continue;
+        }
+
+        for candidate in exported_tensor_candidates(node) {
+            if let Some(tensor_data) = extract_tensor_from_state_ep_or_attr(
+                state_dict,
+                exported_program,
+                graph_module,
+                &candidate,
+            ) {
+                store.insert(node.name.clone(), tensor_data);
+                break;
+            }
+        }
+    }
+}
+
+fn looks_like_exported_tensor_placeholder(node: &Node) -> bool {
+    exported_tensor_keyish(&node.name)
+        || matches!(&node.target, OpTarget::Other(target) if exported_tensor_keyish(target))
+}
+
+fn exported_tensor_keyish(name: &str) -> bool {
+    let local = name.rsplit("::").next().unwrap_or(name);
+    local.starts_with("c_")
+        || local.starts_with("p_")
+        || local.starts_with("b_")
+        || local.starts_with("_frozen_param")
+        || local.starts_with("lifted_tensor_")
+}
+
+fn exported_tensor_candidates(node: &Node) -> Vec<String> {
+    let mut candidates = Vec::new();
+    push_unique_candidate(&mut candidates, node.name.clone());
+    push_unique_candidate(
+        &mut candidates,
+        node.name
+            .rsplit("::")
+            .next()
+            .unwrap_or(&node.name)
+            .to_string(),
+    );
+    if let OpTarget::Other(target) = &node.target {
+        push_unique_candidate(&mut candidates, target.clone());
+        push_unique_candidate(
+            &mut candidates,
+            target.rsplit("::").next().unwrap_or(target).to_string(),
+        );
+    }
+
+    let existing = candidates.clone();
+    for candidate in existing {
+        for prefix in ["c_", "p_", "b_"] {
+            if let Some(stripped) = candidate.strip_prefix(prefix) {
+                push_unique_candidate(&mut candidates, stripped.to_string());
+            }
+        }
+    }
+    candidates
+}
+
+fn push_unique_candidate(candidates: &mut Vec<String>, candidate: String) {
+    if !candidate.is_empty() && !candidates.contains(&candidate) {
+        candidates.push(candidate);
+    }
+}
+
+fn extract_tensor_from_state_ep_or_attr(
+    state_dict: &Bound<'_, PyDict>,
+    exported_program: Option<&Bound<'_, PyAny>>,
+    graph_module: &Bound<'_, PyAny>,
+    name: &str,
+) -> Option<crate::store::TensorData> {
+    if let Ok(Some(value)) = state_dict.get_item(name) {
+        if let Ok(tensor_data) = extract_tensor_data(&value) {
+            return Some(tensor_data);
+        }
+    }
+
+    if let Some(exported_program) = exported_program {
+        for attr_name in ["state_dict", "constants"] {
+            let Ok(container) = exported_program.getattr(attr_name) else {
+                continue;
+            };
+            if let Ok(value) = container.get_item(name) {
+                if let Ok(tensor_data) = extract_tensor_data(&value) {
+                    return Some(tensor_data);
+                }
+            }
+        }
+    }
+
+    let Ok(value) = graph_module.getattr(name) else {
+        return None;
+    };
+    if value.getattr("graph").is_ok() {
+        return None;
+    }
+    extract_tensor_data(&value).ok()
+}
+
 // ---------------------------------------------------------------------------
 // Meta extraction
 // ---------------------------------------------------------------------------
@@ -722,7 +1110,8 @@ fn extract_control_flow_meta(
     meta_dict: &Bound<'_, PyAny>,
     node_meta: &mut NodeMeta,
 ) -> PyResult<()> {
-    node_meta.arm_control_flow_parent_output_user = meta_get(meta_dict, "arm_control_flow_parent_output_user", false);
+    node_meta.arm_control_flow_parent_output_user =
+        meta_get(meta_dict, "arm_control_flow_parent_output_user", false);
     Ok(())
 }
 

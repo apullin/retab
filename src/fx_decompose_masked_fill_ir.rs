@@ -7,10 +7,39 @@
 //!   - The fill value scalar can be quantized to match the tensor data type.
 //!   - The created `full_like` constant is quantized at the same scale/zp as `x`.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use std::collections::HashMap;
+
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeMaskedFillPass;
+
+fn tensorized_scalar_meta(meta: &NodeMeta) -> NodeMeta {
+    let mut new_meta = meta.clone();
+    let output_qparams = meta.output_qparams.clone();
+    new_meta.set_input_qparams(HashMap::new());
+    match output_qparams {
+        Some(map) => new_meta.set_output_qparams(map),
+        None => new_meta.clear_output_qparams(),
+    }
+    new_meta
+}
+
+fn where_meta(meta: &NodeMeta) -> NodeMeta {
+    let mut new_meta = meta.clone();
+    let output_qparams = meta.output_qparams.clone();
+    let mut input_qparams = HashMap::new();
+    if let Some(qp) = meta.output_qparam().cloned() {
+        input_qparams.insert(1, qp.clone());
+        input_qparams.insert(2, qp);
+    }
+    new_meta.set_input_qparams(input_qparams);
+    match output_qparams {
+        Some(map) => new_meta.set_output_qparams(map),
+        None => new_meta.clear_output_qparams(),
+    }
+    new_meta
+}
 
 impl IrPass for IrDecomposeMaskedFillPass {
     fn name(&self) -> &str {
@@ -52,7 +81,7 @@ impl IrPass for IrDecomposeMaskedFillPass {
                 format!("{node_name}_full_like"),
                 "aten.full_like.default".to_string(),
                 vec![IrArg::Node(x_id), value_arg],
-                node_meta.clone(),
+                tensorized_scalar_meta(&node_meta),
             );
             graph.anchor_to(full_like_id, id);
 
@@ -66,7 +95,7 @@ impl IrPass for IrDecomposeMaskedFillPass {
                     IrArg::Node(full_like_id),
                     IrArg::Node(x_id),
                 ],
-                node_meta,
+                where_meta(&node_meta),
             );
 
             graph.replace_and_erase(id, where_id);

@@ -10,11 +10,62 @@ pub(super) fn register(table: &mut EmitterTable) {
         (OpTarget::Expm1, emit_aten_expm1),
         (OpTarget::Log1p, emit_aten_log1p),
         (OpTarget::FloorDivide, emit_aten_floor_divide),
+        (OpTarget::Remainder, emit_aten_remainder),
         (OpTarget::LeakyRelu, emit_aten_leaky_relu),
     ]);
 }
 
-pub(in crate::serialize::visitors) fn emit_aten_div(ctx: &EmitContext) -> EmitResult {
+fn emit_div_quotient(
+    graph: &Graph,
+    store: &TensorStore,
+    node: &Node,
+    spec: &ParsedBinaryTensorSpec,
+    result: &mut EmitResult,
+    output_name: String,
+) {
+    let recip_name = format!("{}_recip", output_name);
+    let recip_shape =
+        emitted_or_graph_tensor_shape(result, graph, store, &spec.rhs, &spec.output_shape);
+    result.push_output_op(
+        temp_tensor(recip_name.clone(), recip_shape, spec.base_dtype),
+        Op::Reciprocal,
+        Attribute::Reciprocal(ReciprocalAttribute {}),
+        vec![spec.rhs.clone()],
+    );
+
+    let shift_name = push_shift_const(result, &output_name);
+    result.push_output_op(
+        temp_tensor(output_name, spec.output_shape.clone(), spec.base_dtype),
+        Op::Mul,
+        Attribute::Mul(MulAttribute { shift: 0 }),
+        vec![spec.lhs.clone(), recip_name, shift_name],
+    );
+}
+
+fn emitted_or_graph_tensor_shape(
+    result: &EmitResult,
+    graph: &Graph,
+    store: &TensorStore,
+    name: &str,
+    fallback: &[i32],
+) -> Vec<i32> {
+    result
+        .tensors
+        .iter()
+        .rev()
+        .find(|tensor| tensor.name == name)
+        .map(|tensor| tensor.shape.clone())
+        .or_else(|| {
+            graph
+                .nodes
+                .values()
+                .find(|node| node.name == name)
+                .map(|node| actual_tensor_shape(graph, store, node))
+        })
+        .unwrap_or_else(|| fallback.to_vec())
+}
+
+fn emit_div_with_rounding(ctx: &EmitContext, rounding_mode: Option<&str>) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;
     let store = ctx.store;
@@ -27,26 +78,83 @@ pub(in crate::serialize::visitors) fn emit_aten_div(ctx: &EmitContext) -> EmitRe
             )
         });
 
-    let recip_name = format!("{}_recip", node.name);
-    result.push_output_op(
-        temp_tensor(
-            recip_name.clone(),
-            spec.output_shape.clone(),
-            spec.base_dtype,
-        ),
-        Op::Reciprocal,
-        Attribute::Reciprocal(ReciprocalAttribute {}),
-        vec![spec.rhs],
-    );
+    let output_name = primary_output_name(graph, node);
+    let quotient_name = match rounding_mode {
+        Some("floor") | Some("trunc") => format!("{}_div", node.name),
+        _ => output_name,
+    };
+    emit_div_quotient(graph, store, node, &spec, &mut result, quotient_name.clone());
 
-    let shift_name = push_shift_const(&mut result, &node.name);
-    result.push_output_op(
-        ctx.make_output(),
-        Op::Mul,
-        Attribute::Mul(MulAttribute { shift: 0 }),
-        vec![spec.lhs, recip_name, shift_name],
-    );
+    match rounding_mode {
+        None => {}
+        Some("floor") => {
+            result.push_output_op(
+                ctx.make_output(),
+                Op::Floor,
+                Attribute::Floor(FloorAttribute {}),
+                vec![quotient_name],
+            );
+        }
+        Some("trunc") => {
+            let zero_name = format!("{}_zero", node.name);
+            if let Some(tensor) = make_filled_const_tensor(
+                zero_name.clone(),
+                spec.output_shape.clone(),
+                node.meta.val.dtype,
+                0.0,
+            ) {
+                push_inline_const(&mut result, tensor);
+            }
+
+            let is_neg_name = format!("{}_is_neg", node.name);
+            result
+                .tensors
+                .push(temp_tensor(is_neg_name.clone(), spec.output_shape.clone(), DType::Bool));
+            result.push_op(
+                Op::Greater,
+                Attribute::Greater(GreaterAttribute {}),
+                vec![zero_name, quotient_name.clone()],
+                vec![is_neg_name.clone()],
+            );
+
+            let ceil_name = format!("{}_ceil", node.name);
+            result.push_output_op(
+                temp_tensor(ceil_name.clone(), spec.output_shape.clone(), spec.base_dtype),
+                Op::Ceil,
+                Attribute::Ceil(CeilAttribute {}),
+                vec![quotient_name.clone()],
+            );
+
+            let floor_name = format!("{}_floor", node.name);
+            result.push_output_op(
+                temp_tensor(floor_name.clone(), spec.output_shape.clone(), spec.base_dtype),
+                Op::Floor,
+                Attribute::Floor(FloorAttribute {}),
+                vec![quotient_name],
+            );
+
+            result.push_output_op(
+                ctx.make_output(),
+                Op::Select,
+                Attribute::Select(SelectAttribute {}),
+                vec![is_neg_name, ceil_name, floor_name],
+            );
+        }
+        Some(_) => {}
+    }
+
     result
+}
+
+pub(in crate::serialize::visitors) fn emit_aten_div(ctx: &EmitContext) -> EmitResult {
+    let rounding_mode = kwarg_string(ctx.node, "rounding_mode")
+        .or_else(|| arg_string(ctx.node, 2))
+        .unwrap_or_default();
+    if rounding_mode.is_empty() {
+        emit_div_with_rounding(ctx, None)
+    } else {
+        emit_div_with_rounding(ctx, Some(rounding_mode.as_str()))
+    }
 }
 
 pub(in crate::serialize::visitors) fn emit_aten_sqrt(ctx: &EmitContext) -> EmitResult {
@@ -91,9 +199,7 @@ pub(in crate::serialize::visitors) fn emit_full_like(ctx: &EmitContext) -> EmitR
     ) {
         push_inline_const(&mut result, tensor);
     } else {
-        result
-            .tensors
-            .push(ctx.make_output());
+        result.tensors.push(ctx.make_output());
     }
     result
 }
@@ -225,7 +331,48 @@ pub(in crate::serialize::visitors) fn emit_aten_log1p(ctx: &EmitContext) -> Emit
 }
 
 pub(in crate::serialize::visitors) fn emit_aten_floor_divide(ctx: &EmitContext) -> EmitResult {
-    emit_aten_div(ctx)
+    emit_div_with_rounding(ctx, Some("floor"))
+}
+
+pub(in crate::serialize::visitors) fn emit_aten_remainder(ctx: &EmitContext) -> EmitResult {
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let store = ctx.store;
+    let mut result = EmitResult::default();
+    let spec =
+        ParsedBinaryTensorSpec::parse(graph, store, node, &mut result).unwrap_or_else(|| {
+            panic!(
+                "emit_aten_remainder: missing binary inputs for node '{}'",
+                node.name
+            )
+        });
+
+    let floor_div_name = format!("{}_floor_div", node.name);
+    emit_div_quotient(graph, store, node, &spec, &mut result, floor_div_name.clone());
+    let floor_name = format!("{}_floor", node.name);
+    result.push_output_op(
+        temp_tensor(floor_name.clone(), spec.output_shape.clone(), spec.base_dtype),
+        Op::Floor,
+        Attribute::Floor(FloorAttribute {}),
+        vec![floor_div_name],
+    );
+
+    let prod_name = format!("{}_product", node.name);
+    let shift_name = push_shift_const(&mut result, &prod_name);
+    result.push_output_op(
+        temp_tensor(prod_name.clone(), spec.output_shape.clone(), spec.base_dtype),
+        Op::Mul,
+        Attribute::Mul(MulAttribute { shift: 0 }),
+        vec![floor_name, spec.rhs.clone(), shift_name],
+    );
+
+    result.push_output_op(
+        ctx.make_output(),
+        Op::Sub,
+        Attribute::Sub(SubAttribute {}),
+        vec![spec.lhs, prod_name],
+    );
+    result
 }
 
 pub(in crate::serialize::visitors) fn emit_aten_leaky_relu(ctx: &EmitContext) -> EmitResult {

@@ -98,8 +98,13 @@ pub(crate) fn resolve_qparam_from_q_or_dq(
     graph: &IrGraph,
     node: &IrNode,
 ) -> Option<ResolvedFoldQdqQParam> {
-    let mut tensor_lookup =
-        |id| graph.node(id).tensor.as_ref().map(|node_tensor| &node_tensor.data);
+    let mut tensor_lookup = |id| {
+        graph
+            .node(id)
+            .tensor
+            .as_ref()
+            .map(|node_tensor| &node_tensor.data)
+    };
     resolve_qparam_from_q_or_dq_args(&node.target, &node.args, &mut tensor_lookup)
 }
 
@@ -148,7 +153,11 @@ fn resolve_input_qparam_for_arg(
             } else {
                 Vec::new()
             };
-            Some(ResolvedFoldQdqInput { arg_index, qparam, dq_node_ids })
+            Some(ResolvedFoldQdqInput {
+                arg_index,
+                qparam,
+                dq_node_ids,
+            })
         }
         IrArg::List(items) => {
             let mut qparam = None;
@@ -168,7 +177,11 @@ fn resolve_input_qparam_for_arg(
                 }
             }
 
-            qparam.map(|qparam| ResolvedFoldQdqInput { arg_index, qparam, dq_node_ids })
+            qparam.map(|qparam| ResolvedFoldQdqInput {
+                arg_index,
+                qparam,
+                dq_node_ids,
+            })
         }
         _ => None,
     }
@@ -263,12 +276,8 @@ where
     })
 }
 
-fn merge_qparam_sources(
-    lhs: FoldQdqQParamSource,
-    rhs: FoldQdqQParamSource,
-) -> FoldQdqQParamSource {
-    if lhs == FoldQdqQParamSource::TensorBackedArgs
-        || rhs == FoldQdqQParamSource::TensorBackedArgs
+fn merge_qparam_sources(lhs: FoldQdqQParamSource, rhs: FoldQdqQParamSource) -> FoldQdqQParamSource {
+    if lhs == FoldQdqQParamSource::TensorBackedArgs || rhs == FoldQdqQParamSource::TensorBackedArgs
     {
         FoldQdqQParamSource::TensorBackedArgs
     } else {
@@ -324,7 +333,10 @@ where
     match arg {
         IrArg::Float(value) => Some((vec![*value], FoldQdqQParamSource::LiteralArgs)),
         IrArg::Int(value) => Some((vec![*value as f64], FoldQdqQParamSource::LiteralArgs)),
-        IrArg::Bool(value) => Some((vec![f64::from(*value as u8)], FoldQdqQParamSource::LiteralArgs)),
+        IrArg::Bool(value) => Some((
+            vec![f64::from(*value as u8)],
+            FoldQdqQParamSource::LiteralArgs,
+        )),
         IrArg::List(items) => {
             let values: Option<Vec<f64>> = items
                 .iter()
@@ -391,10 +403,7 @@ impl IrFoldQdqPass {
         resolve_input_qparam_map_for_foldable_node(graph, node)
     }
 
-    pub(crate) fn resolve_output_qparam(
-        &self,
-        node: &IrNode,
-    ) -> Option<ResolvedFoldQdqQParam> {
+    pub(crate) fn resolve_output_qparam(&self, node: &IrNode) -> Option<ResolvedFoldQdqQParam> {
         resolve_qparam_from_node_meta(node)
     }
 }
@@ -414,9 +423,30 @@ impl IrPass for IrFoldQdqPass {
             }
 
             let node = graph.node(node_id).clone();
+            let resolved_inputs = resolve_input_qparams_for_foldable_node(graph, &node);
+            let preserves_fp_int32_binary =
+                target_matches_any(&node.target, &["add.Tensor", "sub.Tensor"])
+                    && (resolved_inputs
+                        .iter()
+                        .any(|resolved| resolved.qparam.qparam.dtype_str.contains("int32"))
+                        || graph
+                            .live_user_ids(node_id)
+                            .into_iter()
+                            .filter_map(|user_id| {
+                                let user = graph.node(user_id);
+                                if !user.alive || !is_quantize_target(&user.target) {
+                                    return None;
+                                }
+                                resolve_qparam_from_q_or_dq(graph, user)
+                            })
+                            .any(|resolved| resolved.qparam.dtype_str.contains("int32")));
+            if preserves_fp_int32_binary {
+                continue;
+            }
+
             let mut input_qparams = HashMap::new();
 
-            for resolved_input in resolve_input_qparams_for_foldable_node(graph, &node) {
+            for resolved_input in resolved_inputs {
                 let idx = resolved_input.arg_index;
                 let resolved = resolved_input.qparam;
                 input_qparams.insert(idx, resolved.qparam.clone());
@@ -430,14 +460,16 @@ impl IrPass for IrFoldQdqPass {
                         continue;
                     };
 
-                    if matches!(resolved.source, FoldQdqQParamSource::TensorBackedArgs | FoldQdqQParamSource::LiteralArgs)
-                        && resolved.qparam.qmin == -7
+                    if matches!(
+                        resolved.source,
+                        FoldQdqQParamSource::TensorBackedArgs | FoldQdqQParamSource::LiteralArgs
+                    ) && resolved.qparam.qmin == -7
                         && resolved.qparam.qmax == 7
                     {
-                        graph.node_mut(*source_id).meta.set_extra(
-                            "tosa_special_dtype",
-                            MetaValue::Str("INT4".to_string()),
-                        );
+                        graph
+                            .node_mut(*source_id)
+                            .meta
+                            .set_extra("tosa_special_dtype", MetaValue::Str("INT4".to_string()));
                     }
 
                     modified |= graph.replace_input_use(node_id, arg_id, *source_id);
@@ -449,7 +481,10 @@ impl IrPass for IrFoldQdqPass {
             }
 
             if !input_qparams.is_empty() {
-                graph.node_mut(node_id).meta.set_input_qparams(input_qparams);
+                graph
+                    .node_mut(node_id)
+                    .meta
+                    .set_input_qparams(input_qparams);
                 modified = true;
             }
 
@@ -469,7 +504,10 @@ impl IrPass for IrFoldQdqPass {
             }
 
             if !output_qparams.is_empty() {
-                graph.node_mut(node_id).meta.set_output_qparams(output_qparams.clone());
+                graph
+                    .node_mut(node_id)
+                    .meta
+                    .set_output_qparams(output_qparams.clone());
                 modified = true;
 
                 if node.target.contains("sum.dim_IntList") {
@@ -773,7 +811,10 @@ mod tests {
             NodeOp::CallFunction,
             "cat",
             "aten.cat.default",
-            vec![IrArg::List(vec![IrArg::Node(dq0), IrArg::Node(dq1)]), IrArg::Int(0)],
+            vec![
+                IrArg::List(vec![IrArg::Node(dq0), IrArg::Node(dq1)]),
+                IrArg::Int(0),
+            ],
             cat_meta,
         );
         let q = add_node(
@@ -835,7 +876,8 @@ mod tests {
             vec![IrArg::Node(input)],
             sum_meta,
         );
-        graph.node_mut(sum)
+        graph
+            .node_mut(sum)
             .kwargs
             .insert("dtype".to_string(), IrArg::Dtype("torch.int32".to_string()));
         let q = add_node(
@@ -868,5 +910,75 @@ mod tests {
             graph.node(sum).kwargs.get("dtype"),
             Some(IrArg::Dtype(dtype)) if dtype == "torch.int8"
         ));
+    }
+
+    #[test]
+    fn fold_qdq_pass_preserves_fp_add_for_int32_quantized_io() {
+        let mut graph = IrGraph::empty();
+        let input = add_node(
+            &mut graph,
+            NodeOp::Placeholder,
+            "x",
+            "x",
+            vec![],
+            NodeMeta::default(),
+        );
+        let dq = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "dq",
+            "quantized_decomposed.dequantize_per_tensor.default",
+            vec![
+                IrArg::Node(input),
+                IrArg::Float(0.25),
+                IrArg::Int(0),
+                IrArg::Int(i32::MIN as i64),
+                IrArg::Int(i32::MAX as i64),
+                IrArg::Dtype("torch.int32".to_string()),
+            ],
+            NodeMeta::default(),
+        );
+
+        let mut add_meta = NodeMeta::default();
+        add_meta.set_extra("arm_quantized_annotation", MetaValue::Bool(true));
+        let add = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "add",
+            "aten.add.Tensor",
+            vec![IrArg::Node(dq), IrArg::Node(dq)],
+            add_meta,
+        );
+        let q = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "q",
+            "quantized_decomposed.quantize_per_tensor.default",
+            vec![
+                IrArg::Node(add),
+                IrArg::Float(0.25),
+                IrArg::Int(0),
+                IrArg::Int(i32::MIN as i64),
+                IrArg::Int(i32::MAX as i64),
+                IrArg::Dtype("torch.int32".to_string()),
+            ],
+            NodeMeta::default(),
+        );
+        let _output = add_node(
+            &mut graph,
+            NodeOp::Output,
+            "output",
+            "output",
+            vec![IrArg::Node(q)],
+            NodeMeta::default(),
+        );
+
+        let pass = IrFoldQdqPass;
+        assert!(!pass.run(&mut graph));
+        assert!(graph.node(dq).alive);
+        assert!(graph.node(q).alive);
+        assert!(matches!(graph.node(add).args[0], IrArg::Node(id) if id == dq));
+        assert!(graph.node(add).meta.input_qparams.is_none());
+        assert!(graph.node(add).meta.output_qparams.is_none());
     }
 }

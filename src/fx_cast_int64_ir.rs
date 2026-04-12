@@ -1,15 +1,15 @@
 use crate::fx_ep_effects::{
     FxCastInt64InputToInt32Effect, FxEpEffect, FxEpEffectBatch, FxEpInputKind,
 };
-use crate::fx_ir::{
-    FakeTensorMeta, IrEpPass, IrEpPassResult, IrGraph, NodeOp, TensorSource,
-};
+use crate::fx_ir::{FakeTensorMeta, IrEpPass, IrEpPassResult, IrGraph, NodeOp, TensorSource};
 use crate::graph::ir::DType;
 
 pub struct IrCastInt64ToInt32EpPass;
 
 impl IrEpPass for IrCastInt64ToInt32EpPass {
-    fn name(&self) -> &str { "IrCastInt64ToInt32Ep" }
+    fn name(&self) -> &str {
+        "IrCastInt64ToInt32Ep"
+    }
 
     fn run(&self, graph: &mut IrGraph) -> IrEpPassResult {
         let candidate_ids: Vec<usize> = graph
@@ -68,9 +68,7 @@ impl IrEpPass for IrCastInt64ToInt32EpPass {
 
 #[cfg(test)]
 mod tests {
-    use crate::fx_ir::{
-        IrArg, IrGraph, MetaValue, NodeMeta, NodeTensor, PlaceholderTensorBinding,
-    };
+    use crate::fx_ir::{IrArg, IrGraph, MetaValue, NodeMeta, NodeTensor, PlaceholderTensorBinding};
     use crate::store::TensorData;
 
     use super::*;
@@ -107,7 +105,8 @@ mod tests {
             vec![IrArg::Node(placeholder)],
             NodeMeta::default(),
         );
-        graph.node_mut(user)
+        graph
+            .node_mut(user)
             .meta
             .set_extra("arm_quantized_annotation", MetaValue::Bool(true));
 
@@ -115,7 +114,10 @@ mod tests {
         let result = pass.run(&mut graph);
 
         assert!(result.modified);
-        assert_eq!(graph.node(placeholder).meta.val_dtype(), Some("torch.int32"));
+        assert_eq!(
+            graph.node(placeholder).meta.val_dtype(),
+            Some("torch.int32")
+        );
         assert_eq!(result.effects.effects.len(), 1);
         let FxEpEffect::CastInt64InputToInt32(effect) = &result.effects.effects[0] else {
             panic!("expected cast effect");
@@ -158,7 +160,8 @@ mod tests {
             vec![IrArg::Node(param)],
             NodeMeta::default(),
         );
-        graph.node_mut(user)
+        graph
+            .node_mut(user)
             .meta
             .set_extra("arm_quantized_annotation", MetaValue::Bool(true));
 

@@ -160,17 +160,105 @@ pub(in crate::serialize::visitors) fn emit_round(ctx: &EmitContext) -> EmitResul
 
     // 12-op banker's-rounding decomposition using the chainable builder API.
     result
-        .unary(floor_x_name.clone(), s.clone(), d, Op::Floor, Attribute::Floor(FloorAttribute {}), spec.input_name.clone())
-        .binary(frac_name.clone(), s.clone(), d, Op::Sub, Attribute::Sub(SubAttribute {}), spec.input_name.clone(), floor_x_name.clone())
-        .binary(is_tie_name.clone(), s.clone(), DType::Bool, Op::Equal, Attribute::Equal(EqualAttribute {}), frac_name, half_name.clone())
-        .binary(plus_half_name.clone(), s.clone(), d, Op::Add, Attribute::Add(AddAttribute {}), spec.input_name.clone(), half_name.clone())
-        .unary(round_up_name.clone(), s.clone(), d, Op::Floor, Attribute::Floor(FloorAttribute {}), plus_half_name)
-        .ternary(half_floor_mul_name.clone(), s.clone(), d, Op::Mul, Attribute::Mul(MulAttribute { shift: 0 }), floor_x_name.clone(), half_name, shift_name.clone())
-        .unary(half_floor_name.clone(), s.clone(), d, Op::Floor, Attribute::Floor(FloorAttribute {}), half_floor_mul_name)
-        .ternary(even_floor_name.clone(), s.clone(), d, Op::Mul, Attribute::Mul(MulAttribute { shift: 0 }), half_floor_name, two_name, shift_name)
-        .binary(floor_is_even_name.clone(), s.clone(), DType::Bool, Op::Equal, Attribute::Equal(EqualAttribute {}), floor_x_name.clone(), even_floor_name)
-        .binary(floor_plus_one_name.clone(), s.clone(), d, Op::Add, Attribute::Add(AddAttribute {}), floor_x_name.clone(), one_name)
-        .ternary(tie_result_name.clone(), s.clone(), d, Op::Select, Attribute::Select(SelectAttribute {}), floor_is_even_name, floor_x_name, floor_plus_one_name);
+        .unary(
+            floor_x_name.clone(),
+            s.clone(),
+            d,
+            Op::Floor,
+            Attribute::Floor(FloorAttribute {}),
+            spec.input_name.clone(),
+        )
+        .binary(
+            frac_name.clone(),
+            s.clone(),
+            d,
+            Op::Sub,
+            Attribute::Sub(SubAttribute {}),
+            spec.input_name.clone(),
+            floor_x_name.clone(),
+        )
+        .binary(
+            is_tie_name.clone(),
+            s.clone(),
+            DType::Bool,
+            Op::Equal,
+            Attribute::Equal(EqualAttribute {}),
+            frac_name,
+            half_name.clone(),
+        )
+        .binary(
+            plus_half_name.clone(),
+            s.clone(),
+            d,
+            Op::Add,
+            Attribute::Add(AddAttribute {}),
+            spec.input_name.clone(),
+            half_name.clone(),
+        )
+        .unary(
+            round_up_name.clone(),
+            s.clone(),
+            d,
+            Op::Floor,
+            Attribute::Floor(FloorAttribute {}),
+            plus_half_name,
+        )
+        .ternary(
+            half_floor_mul_name.clone(),
+            s.clone(),
+            d,
+            Op::Mul,
+            Attribute::Mul(MulAttribute { shift: 0 }),
+            floor_x_name.clone(),
+            half_name,
+            shift_name.clone(),
+        )
+        .unary(
+            half_floor_name.clone(),
+            s.clone(),
+            d,
+            Op::Floor,
+            Attribute::Floor(FloorAttribute {}),
+            half_floor_mul_name,
+        )
+        .ternary(
+            even_floor_name.clone(),
+            s.clone(),
+            d,
+            Op::Mul,
+            Attribute::Mul(MulAttribute { shift: 0 }),
+            half_floor_name,
+            two_name,
+            shift_name,
+        )
+        .binary(
+            floor_is_even_name.clone(),
+            s.clone(),
+            DType::Bool,
+            Op::Equal,
+            Attribute::Equal(EqualAttribute {}),
+            floor_x_name.clone(),
+            even_floor_name,
+        )
+        .binary(
+            floor_plus_one_name.clone(),
+            s.clone(),
+            d,
+            Op::Add,
+            Attribute::Add(AddAttribute {}),
+            floor_x_name.clone(),
+            one_name,
+        )
+        .ternary(
+            tie_result_name.clone(),
+            s.clone(),
+            d,
+            Op::Select,
+            Attribute::Select(SelectAttribute {}),
+            floor_is_even_name,
+            floor_x_name,
+            floor_plus_one_name,
+        );
 
     // Final output uses the actual output tensor (not a temp), so use push_output_op directly.
     result.push_output_op(

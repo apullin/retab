@@ -50,25 +50,17 @@ def _seed_everything(seed: int) -> None:
 
 
 def prepare_quantized_ep(model_name: str, seed: int = 0):
-    from executorch.backends.arm.ethosu import EthosUCompileSpec
-    from executorch.backends.arm.quantizer import (
-        EthosUQuantizer,
-        get_symmetric_quantization_config,
-    )
+    from executorch.backends.arm.quantizer import TOSAQuantizer, get_symmetric_quantization_config
+    from executorch.backends.arm.test.common import get_tosa_compile_spec
     from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
 
     _seed_everything(seed)
     model, example_input = get_model_and_example(model_name)
     exported = torch.export.export(model, (example_input,), strict=True)
 
-    compile_spec = EthosUCompileSpec(
-        target="ethos-u55-128",
-        system_config="Ethos_U55_High_End_Embedded",
-        memory_mode="Shared_Sram",
-        extra_flags=["--output-format=raw"],
-    )
-    quantizer = EthosUQuantizer(compile_spec)
-    quantizer.set_global(get_symmetric_quantization_config())
+    compile_spec = get_tosa_compile_spec("TOSA-1.0+INT")
+    quantizer = TOSAQuantizer(compile_spec)
+    quantizer.set_global(get_symmetric_quantization_config(is_per_channel=False))
 
     qmodel = exported.module()
     qmodel = prepare_pt2e(qmodel, quantizer)
@@ -82,17 +74,33 @@ def prepare_quantized_ep(model_name: str, seed: int = 0):
 
 @contextlib.contextmanager
 def _patched_tosa_backend(mode: str | None):
+    if mode is None:
+        yield
+        return
+
+    if mode != "all_rust":
+        raise ValueError(f"Unsupported mode: {mode!r}")
+
     from fast_preprocess import patch_tosa_backend, unpatch_tosa_backend
 
     unpatch_tosa_backend()
-    if mode is not None:
-        if mode != "all_rust":
-            raise ValueError(f"Unsupported mode: {mode!r}")
-        patch_tosa_backend()
+    patch_tosa_backend()
     try:
         yield
     finally:
         unpatch_tosa_backend()
+
+
+def _collect_lowered_tosa_regions(edge) -> list[bytes]:
+    regions = []
+    ep = edge.exported_program()
+    for node in ep.graph.nodes:
+        if node.op != "get_attr" or "lowered" not in str(node.target):
+            continue
+        module = getattr(ep.graph_module, node.target, None)
+        if module is not None and hasattr(module, "processed_bytes"):
+            regions.append(bytes(module.processed_bytes))
+    return regions
 
 
 def _summarize_tosa_bytes(buf: bytes) -> dict[str, Any]:
@@ -237,7 +245,7 @@ def _summarize_tosa_bytes(buf: bytes) -> dict[str, Any]:
 
 
 def _capture_preprocess(mode: str | None, model_name: str, seed: int = 0) -> dict[str, Any]:
-    from executorch.backends.arm.ethosu import EthosUPartitioner
+    from executorch.backends.arm.tosa.partitioner import TOSAPartitioner
     from executorch.exir import EdgeCompileConfig, ExecutorchBackendConfig, to_edge_transform_and_lower
     from executorch.backends.arm.tosa.backend import TOSABackend
 
@@ -259,7 +267,7 @@ def _capture_preprocess(mode: str | None, model_name: str, seed: int = 0) -> dic
         with _patched_tosa_backend(mode):
             TOSABackend._preprocess = staticmethod(interceptor)
             try:
-                partitioner = EthosUPartitioner(compile_spec)
+                partitioner = TOSAPartitioner(compile_spec)
                 t1 = time.perf_counter()
                 edge = to_edge_transform_and_lower(
                     quantized_ep,
@@ -273,6 +281,14 @@ def _capture_preprocess(mode: str | None, model_name: str, seed: int = 0) -> dic
                 t1 = time.perf_counter()
                 et = edge.to_executorch(config=ExecutorchBackendConfig())
                 pack_s = time.perf_counter() - t1
+                if "tosa_bytes" not in captured:
+                    regions = _collect_lowered_tosa_regions(edge)
+                    if len(regions) != 1:
+                        raise RuntimeError(
+                            f"expected 1 lowered TOSA region, found {len(regions)}"
+                        )
+                    captured["tosa_bytes"] = regions[0]
+                    captured.setdefault("preprocess_s", 0.0)
             finally:
                 TOSABackend._preprocess = original
 

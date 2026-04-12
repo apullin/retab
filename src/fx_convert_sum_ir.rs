@@ -54,6 +54,11 @@ impl IrPass for IrConvertSumPass {
             if dims.is_empty() {
                 continue;
             }
+            if dims.len() <= 1 {
+                // The native serializer already handles single-axis sums.
+                // Only multi-axis reductions need explicit decomposition.
+                continue;
+            }
 
             // Normalize negative dims.
             let input_shape = match graph.nodes[input_id].meta.val_shape() {
@@ -115,13 +120,23 @@ impl IrPass for IrConvertSumPass {
                     s
                 };
 
-                // Build a fresh meta with only val + qparams set (all dirty),
-                // so that write_back overwrites whatever the anchor carried.
-                let mut step_meta = NodeMeta::default();
+                // Preserve layout metadata from the source sum node. Some
+                // upstream decompositions (for example group_norm) mark their
+                // reduction chain as layout-neutral, and rebuilding from a
+                // blank NodeMeta here silently drops that contract.
+                let mut step_meta = orig_meta.clone();
                 step_meta.set_val(FakeTensorMeta {
-                    shape: output_shape,
+                    shape: output_shape.clone(),
                     dtype: orig_dtype.clone(),
                 });
+                if step_meta
+                    .tosa_dim_order
+                    .as_ref()
+                    .is_some_and(|order| order.len() != output_shape.len())
+                {
+                    step_meta.tosa_dim_order = None;
+                    step_meta.dirty.tosa_dim_order = false;
+                }
                 if let Some(ref iqp) = current_input_qparams {
                     step_meta.set_input_qparams(iqp.clone());
                 }
@@ -158,7 +173,10 @@ impl IrPass for IrConvertSumPass {
                     graph.node_mut(final_id).meta.set_input_qparams(iqp.clone());
                 }
                 if let Some(ref oqp) = orig_meta.output_qparams {
-                    graph.node_mut(final_id).meta.set_output_qparams(oqp.clone());
+                    graph
+                        .node_mut(final_id)
+                        .meta
+                        .set_output_qparams(oqp.clone());
                 }
                 graph.replace_and_erase(id, final_id);
                 modified = true;

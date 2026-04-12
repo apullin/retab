@@ -22,19 +22,23 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
     let defer_reshape_to_rescale = promote_2d && has_only_tosa_rescale_users(graph, node);
     let a_dtype = matmul_input_dtype(graph, node, 0);
     let b_dtype = matmul_input_dtype(graph, node, 1);
-    let matmul_out_dtype = match (a_dtype, b_dtype) {
+    let float_output_cast_dtype =
+        if matches!(a_dtype, DType::Fp16 | DType::Bf16) && matches!(b_dtype, DType::Fp16 | DType::Bf16)
+        {
+            Some(a_dtype)
+        } else {
+            None
+        };
+    let needs_float_output_cast = float_output_cast_dtype.is_some();
+    let matmul_out_dtype = if needs_float_output_cast {
+        DType::Fp32
+    } else {
+        match (a_dtype, b_dtype) {
         (DType::Int16, _) | (_, DType::Int16) => DType::Int48,
         (DType::Int8, DType::Int8) => DType::Int32,
         _ => accumulator_output_dtype(node),
+        }
     };
-
-    if !promote_2d {
-        result.tensors.push(TosaTensor::new(
-            &node.name,
-            out_shape.clone(),
-            matmul_out_dtype,
-        ));
-    }
 
     let a_zp = node
         .meta
@@ -75,14 +79,6 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
         if a_shape.len() == 2 && b_shape.len() == 2 {
             let a_out_shape = vec![1, a_shape[0], a_shape[1]];
             let b_out_shape = vec![1, b_shape[0], b_shape[1]];
-            let temp_out_shape = promoted_shape
-                .clone()
-                .unwrap_or_else(|| vec![1, a_shape[0], b_shape[1]]);
-            let temp_out_name = if defer_reshape_to_rescale {
-                node.name.clone()
-            } else {
-                format!("{}_batched", node.name)
-            };
 
             push_reshape_with_shape(
                 &mut result,
@@ -100,12 +96,6 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
                 b_out_shape,
                 b_dtype,
             );
-
-            result.tensors.push(TosaTensor::new(
-                &temp_out_name,
-                temp_out_shape,
-                matmul_out_dtype,
-            ));
 
             vec![a_reshape_name, b_reshape_name]
         } else {
@@ -143,12 +133,26 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
     let matmul_output_name = if promote_2d {
         if defer_reshape_to_rescale {
             node.name.clone()
+        } else if needs_float_output_cast {
+            format!("{}_batched_matmul", node.name)
         } else {
             format!("{}_batched", node.name)
         }
+    } else if needs_float_output_cast {
+        format!("{}_matmul", node.name)
     } else {
         node.name.clone()
     };
+
+    let matmul_output_shape = if promote_2d {
+        promoted_shape.clone().unwrap_or_else(|| out_shape.clone())
+    } else {
+        out_shape.clone()
+    };
+
+    result
+        .tensors
+        .push(TosaTensor::new(&matmul_output_name, matmul_output_shape.clone(), matmul_out_dtype));
 
     result.operators.push(TosaOperator::new(
         Op::MatMul,
@@ -157,14 +161,37 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
         vec![matmul_output_name.clone()],
     ));
 
+    let mut final_input_name = matmul_output_name;
+    let mut final_input_dtype = matmul_out_dtype;
+    if needs_float_output_cast {
+        let cast_dtype = float_output_cast_dtype.expect("low-precision float cast dtype");
+        let cast_output_name = if promote_2d {
+            format!("{}_batched", node.name)
+        } else {
+            node.name.clone()
+        };
+        result.push_output_op(
+            TosaTensor::new(
+                &cast_output_name,
+                matmul_output_shape.clone(),
+                cast_dtype,
+            ),
+            Op::Cast,
+            Attribute::Cast(CastAttribute {}),
+            vec![final_input_name.clone()],
+        );
+        final_input_name = cast_output_name;
+        final_input_dtype = cast_dtype;
+    }
+
     if promote_2d && !defer_reshape_to_rescale {
         push_reshape_with_shape(
             &mut result,
-            matmul_output_name,
+            final_input_name,
             node.name.clone(),
             format!("{}_shape", node.name),
             out_shape,
-            matmul_out_dtype,
+            final_input_dtype,
         );
     }
 

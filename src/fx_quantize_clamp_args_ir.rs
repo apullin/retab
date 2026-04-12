@@ -73,7 +73,9 @@ impl IrPass for IrQuantizeClampArgsPass {
         }
 
         if modified {
-            log_line(format_args!("[IrQuantizeClampArgs] quantized clamp min/max args"));
+            log_line(format_args!(
+                "[IrQuantizeClampArgs] quantized clamp min/max args"
+            ));
         }
         modified
     }

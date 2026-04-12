@@ -15,10 +15,14 @@ fn collect_output_node_ids(arg: &IrArg, output_nodes: &mut Vec<NodeId>) {
 }
 
 impl IrPass for IrAnnotateOutputDimOrderPass {
-    fn name(&self) -> &str { "IrAnnotateOutputDimOrder" }
+    fn name(&self) -> &str {
+        "IrAnnotateOutputDimOrder"
+    }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let output_ids: Vec<NodeId> = graph.nodes.iter()
+        let output_ids: Vec<NodeId> = graph
+            .nodes
+            .iter()
             .filter(|node| node.alive && node.op == NodeOp::Output)
             .map(|node| node.id)
             .collect();
@@ -34,14 +38,22 @@ impl IrPass for IrAnnotateOutputDimOrderPass {
                 collect_output_node_ids(arg, &mut output_nodes);
             }
 
-            let output_dim_orders: Vec<Vec<usize>> = output_nodes.into_iter()
-                .filter_map(|id| graph.nodes[id].meta.val_dim_order().map(|order| order.to_vec()))
+            let output_dim_orders: Vec<Vec<usize>> = output_nodes
+                .into_iter()
+                .filter_map(|id| {
+                    graph.nodes[id]
+                        .meta
+                        .val_dim_order()
+                        .map(|order| order.to_vec())
+                })
                 .collect();
             if output_dim_orders.is_empty() {
                 continue;
             }
 
-            graph.nodes[output_id].meta.set_original_dim_orders(output_dim_orders);
+            graph.nodes[output_id]
+                .meta
+                .set_original_dim_orders(output_dim_orders);
             modified = true;
         }
 

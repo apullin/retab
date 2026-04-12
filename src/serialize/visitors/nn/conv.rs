@@ -136,10 +136,10 @@ impl ParsedConvSpec {
     /// If inputs already have 5+ entries (zp already present), returns them as-is.
     fn prepare_inputs(&self, result: &mut EmitResult, graph: &Graph, node: &Node) -> Vec<String> {
         let mut input_names = self.input_names.clone();
-        if input_names.len() == 2 {
-            input_names.push(push_zero_bias_tensor(result, node, self.acc_type));
+        if matches!(input_names.len(), 2 | 4) {
+            input_names.insert(2, push_zero_bias_tensor(result, node, synthetic_bias_dtype(node, self.acc_type)));
         }
-        if self.input_names.len() >= 5 {
+        if input_names.len() >= 5 {
             return input_names;
         }
         let (izp, wzp) =
@@ -172,6 +172,17 @@ impl ParsedConvSpec {
         } else {
             self.pad.clone()
         }
+    }
+}
+
+fn synthetic_bias_dtype(node: &Node, acc_type: DType) -> DType {
+    let semantic_dtype = node_output_dtype(node);
+    if node.meta.input_qparams.is_empty()
+        && matches!(semantic_dtype, DType::Fp32 | DType::Fp16 | DType::Bf16)
+    {
+        semantic_dtype
+    } else {
+        acc_type
     }
 }
 
@@ -218,6 +229,31 @@ fn input_rank(graph: &Graph, node: &Node) -> usize {
     }
 }
 
+fn logical_weight_shape<'a>(graph: &'a Graph, mut weight_node: &'a Node) -> &'a [i64] {
+    for _ in 0..4 {
+        let shape = weight_node.meta.val.shape_slice();
+        if shape.len() == 4 && shape.get(1).copied() == Some(1) {
+            return shape;
+        }
+        let next = match weight_node.target {
+            OpTarget::TosaTranspose
+            | OpTarget::Permute
+            | OpTarget::Reshape
+            | OpTarget::TosaReshape
+            | OpTarget::View => weight_node.args.first().and_then(|arg| match arg {
+                Arg::Node(id) => graph.node(*id),
+                _ => None,
+            }),
+            _ => None,
+        };
+        let Some(next) = next else {
+            return shape;
+        };
+        weight_node = next;
+    }
+    weight_node.meta.val.shape_slice()
+}
+
 fn is_depthwise_aten_conv2d(graph: &Graph, store: &TensorStore, node: &Node, groups: i64) -> bool {
     if let Some(conv_info_entry) = node
         .kwargs
@@ -226,7 +262,21 @@ fn is_depthwise_aten_conv2d(graph: &Graph, store: &TensorStore, node: &Node, gro
     {
         return matches!(&conv_info_entry.1, Arg::Int(v) if *v != 0);
     }
-    if groups <= 1 {
+
+    let Some(input_node) = node.args.first().and_then(|arg| match arg {
+        Arg::Node(id) => graph.node(*id),
+        _ => None,
+    }) else {
+        return false;
+    };
+
+    let input_shape = actual_tensor_shape(graph, store, input_node);
+    if input_shape.len() != 4 || groups <= 0 {
+        return false;
+    }
+
+    let in_channels = input_shape.last().copied().map(i64::from).unwrap_or(0);
+    if in_channels <= 0 || in_channels != groups {
         return false;
     }
 
@@ -237,15 +287,11 @@ fn is_depthwise_aten_conv2d(graph: &Graph, store: &TensorStore, node: &Node, gro
         return false;
     };
 
-    let logical_weight = weight_node.meta.val.shape_slice();
-    if logical_weight.len() >= 2 && logical_weight[1] == 1 {
-        return true;
-    }
-
-    let actual_weight = actual_tensor_shape(graph, store, weight_node);
-    actual_weight.len() == 4
-        && actual_weight.get(2).copied() == Some(groups as i32)
-        && actual_weight.get(3).copied().unwrap_or(0) > 0
+    let logical_weight = logical_weight_shape(graph, weight_node);
+    logical_weight.len() >= 2
+        && logical_weight[1] == 1
+        && logical_weight[0] > 0
+        && logical_weight[0] % in_channels == 0
 }
 
 fn aten_conv_groups(node: &Node) -> i64 {

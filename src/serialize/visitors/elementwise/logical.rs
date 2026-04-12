@@ -36,28 +36,52 @@ fn is_bool_output(node: &Node) -> bool {
 
 fn emit_bitwise_not(ctx: &EmitContext) -> EmitResult {
     if is_bool_output(ctx.node) {
-        return ctx.emit_unary(Op::LogicalNot, Attribute::LogicalNot(LogicalNotAttribute {}));
+        return ctx.emit_unary(
+            Op::LogicalNot,
+            Attribute::LogicalNot(LogicalNotAttribute {}),
+        );
     }
-    ctx.emit_unary(Op::BitwiseNot, Attribute::BitwiseNot(BitwiseNotAttribute {}))
+    ctx.emit_unary(
+        Op::BitwiseNot,
+        Attribute::BitwiseNot(BitwiseNotAttribute {}),
+    )
 }
 
 fn emit_bitwise_and(ctx: &EmitContext) -> EmitResult {
     if is_bool_output(ctx.node) {
-        return ctx.emit_bool_binary(Op::LogicalAnd, Attribute::LogicalAnd(LogicalAndAttribute {}), false);
+        return ctx.emit_bool_binary(
+            Op::LogicalAnd,
+            Attribute::LogicalAnd(LogicalAndAttribute {}),
+            false,
+        );
     }
-    ctx.emit_binary(Op::BitwiseAnd, Attribute::BitwiseAnd(BitwiseAndAttribute {}))
+    ctx.emit_binary(
+        Op::BitwiseAnd,
+        Attribute::BitwiseAnd(BitwiseAndAttribute {}),
+    )
 }
 
 fn emit_bitwise_or(ctx: &EmitContext) -> EmitResult {
     if is_bool_output(ctx.node) {
-        return ctx.emit_bool_binary(Op::LogicalOr, Attribute::LogicalOr(LogicalOrAttribute {}), false);
+        return ctx.emit_bool_binary(
+            Op::LogicalOr,
+            Attribute::LogicalOr(LogicalOrAttribute {}),
+            false,
+        );
     }
     ctx.emit_binary(Op::BitwiseOr, Attribute::BitwiseOr(BitwiseOrAttribute {}))
 }
 
 fn emit_bitwise_xor(ctx: &EmitContext) -> EmitResult {
     if is_bool_output(ctx.node) {
-        return ctx.emit_bool_binary(Op::LogicalXor, Attribute::LogicalXor(LogicalXorAttribute {}), false);
+        return ctx.emit_bool_binary(
+            Op::LogicalXor,
+            Attribute::LogicalXor(LogicalXorAttribute {}),
+            false,
+        );
     }
-    ctx.emit_binary(Op::BitwiseXor, Attribute::BitwiseXor(BitwiseXorAttribute {}))
+    ctx.emit_binary(
+        Op::BitwiseXor,
+        Attribute::BitwiseXor(BitwiseXorAttribute {}),
+    )
 }

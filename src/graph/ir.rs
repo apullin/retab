@@ -333,6 +333,7 @@ pub struct NodeMeta {
     pub tosa_dim_order: Option<SmallVec<[u8; 6]>>,
     pub tosa_special_dtype: Option<DType>,
     pub arm_control_flow_parent_output_user: bool,
+    pub preserve_scalar_shape: bool,
 }
 
 impl NodeMeta {
@@ -344,6 +345,7 @@ impl NodeMeta {
             tosa_dim_order: None,
             tosa_special_dtype: None,
             arm_control_flow_parent_output_user: false,
+            preserve_scalar_shape: false,
         }
     }
 }

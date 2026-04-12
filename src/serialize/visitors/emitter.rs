@@ -6,14 +6,14 @@
 
 use std::collections::HashMap;
 
-use crate::graph::ir::{Arg, Node};
 use crate::graph::ir::OpTarget;
+use crate::graph::ir::{Arg, Node};
 use crate::graph::Graph;
 use crate::store::TensorStore;
 
 use super::arg_utils::{arg_bool, arg_i32_list, kwarg_i32_list};
-use super::emit_result::EmitResult;
 use super::dtype_quant::{actual_tensor_dtype, node_output_dtype, passthrough_input_dtype};
+use super::emit_result::EmitResult;
 use super::graph_utils::{collect_input_names, primary_output_name};
 use super::op_utils::{emit_bool_binary, emit_direct_binary, emit_direct_unary, emit_identity};
 use super::shape_utils::{actual_tensor_shape, make_actual_output_tensor, make_bool_output_tensor};

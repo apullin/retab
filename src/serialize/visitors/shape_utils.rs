@@ -162,6 +162,56 @@ fn passthrough_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> 
     }
 }
 
+fn is_shape_preserving_unary(node: &Node) -> bool {
+    matches!(
+        node.target,
+        OpTarget::Relu
+            | OpTarget::Hardtanh
+            | OpTarget::Clamp
+            | OpTarget::LeakyRelu
+            | OpTarget::Sigmoid
+            | OpTarget::Tanh
+            | OpTarget::Exp
+            | OpTarget::Log
+            | OpTarget::Neg
+            | OpTarget::Reciprocal
+            | OpTarget::Rsqrt
+            | OpTarget::Abs
+            | OpTarget::Floor
+            | OpTarget::Ceil
+            | OpTarget::To
+            | OpTarget::Sqrt
+            | OpTarget::Log1p
+            | OpTarget::Expm1
+            | OpTarget::Sign
+            | OpTarget::Round
+            | OpTarget::Sin
+            | OpTarget::Cos
+            | OpTarget::TosaSigmoid
+            | OpTarget::TosaTanh
+            | OpTarget::TosaExp
+            | OpTarget::TosaLog
+            | OpTarget::TosaAbs
+            | OpTarget::TosaReciprocal
+            | OpTarget::TosaErf
+            | OpTarget::TosaCos
+            | OpTarget::TosaSin
+            | OpTarget::TosaRsqrt
+    )
+}
+
+fn shape_preserving_unary_tensor_shape(
+    graph: &Graph,
+    store: &TensorStore,
+    node: &Node,
+) -> Option<Vec<i32>> {
+    if !is_shape_preserving_unary(node) {
+        return None;
+    }
+    let input_node = first_input_node(graph, node)?;
+    Some(actual_tensor_shape(graph, store, input_node))
+}
+
 pub(super) fn transposed_tensor_shape(
     graph: &Graph,
     store: &TensorStore,
@@ -202,6 +252,10 @@ fn sliced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Optio
 fn reduced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
     if !matches!(node.target, OpTarget::Sum | OpTarget::TosaReduceSum) {
         return None;
+    }
+
+    if matches!(node.target, OpTarget::Sum) {
+        return Some(apply_tosa_dim_order(node, raw_i32_shape(node)));
     }
 
     let input_node = first_input_node(graph, node)?;
@@ -267,7 +321,7 @@ fn checked_numel(shape: &[i32]) -> Option<i64> {
     })
 }
 
-fn broadcast_two_shapes(lhs: &[i32], rhs: &[i32]) -> Option<Vec<i32>> {
+pub(super) fn broadcast_two_shapes(lhs: &[i32], rhs: &[i32]) -> Option<Vec<i32>> {
     let rank = lhs.len().max(rhs.len());
     let lhs_pad = rank.saturating_sub(lhs.len());
     let rhs_pad = rank.saturating_sub(rhs.len());
@@ -288,7 +342,7 @@ fn broadcast_two_shapes(lhs: &[i32], rhs: &[i32]) -> Option<Vec<i32>> {
     Some(out)
 }
 
-fn broadcasted_input_tensor_shape(
+pub(super) fn binary_input_broadcast_shape(
     graph: &Graph,
     store: &TensorStore,
     node: &Node,
@@ -304,6 +358,16 @@ fn broadcasted_input_tensor_shape(
     for input_shape in input_shapes {
         candidate = broadcast_two_shapes(&candidate, &input_shape)?;
     }
+
+    Some(candidate)
+}
+
+fn broadcasted_input_tensor_shape(
+    graph: &Graph,
+    store: &TensorStore,
+    node: &Node,
+) -> Option<Vec<i32>> {
+    let candidate = binary_input_broadcast_shape(graph, store, node)?;
 
     let raw_shape = raw_i32_shape(node);
     if raw_shape.len() != candidate.len() {
@@ -538,7 +602,12 @@ pub(crate) fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Nod
     if let Some(cached) = SHAPE_CACHE.with(|c| c.borrow().get(&node.name).cloned()) {
         return cached;
     }
-    let result = actual_tensor_shape_impl(graph, store, node);
+    let raw_result = actual_tensor_shape_impl(graph, store, node);
+    let result = if node.meta.preserve_scalar_shape && raw_result.is_empty() {
+        raw_result
+    } else {
+        normalize_tensor_shape(raw_result)
+    };
     SHAPE_CACHE.with(|c| c.borrow_mut().insert(node.name.clone(), result.clone()));
     result
 }
@@ -559,6 +628,10 @@ fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> 
     }
 
     if let Some(shape) = passthrough_tensor_shape(graph, store, node) {
+        return shape;
+    }
+
+    if let Some(shape) = shape_preserving_unary_tensor_shape(graph, store, node) {
         return shape;
     }
 
@@ -637,9 +710,18 @@ pub(super) fn promoted_2d_matmul_shape(
 }
 
 pub(super) fn make_output_tensor(node: &Node) -> TosaTensor {
-    let final_shape = apply_tosa_dim_order(node, raw_i32_shape(node));
+    let final_shape = logical_output_shape(node);
     let dtype = node_output_dtype(node);
-    make_empty_tensor(node.name.clone(), final_shape, dtype)
+    make_empty_tensor_for_node(node, node.name.clone(), final_shape, dtype)
+}
+
+pub(super) fn logical_output_shape(node: &Node) -> Vec<i32> {
+    let raw_result = apply_tosa_dim_order(node, raw_i32_shape(node));
+    if node.meta.preserve_scalar_shape && raw_result.is_empty() {
+        raw_result
+    } else {
+        normalize_tensor_shape(raw_result)
+    }
 }
 
 pub(super) fn make_actual_output_tensor(
@@ -647,7 +729,8 @@ pub(super) fn make_actual_output_tensor(
     store: &TensorStore,
     node: &Node,
 ) -> TosaTensor {
-    make_empty_tensor(
+    make_empty_tensor_for_node(
+        node,
         node.name.clone(),
         actual_tensor_shape(graph, store, node),
         node_output_dtype(node),
@@ -659,7 +742,8 @@ pub(super) fn make_bool_output_tensor(
     store: &TensorStore,
     node: &Node,
 ) -> TosaTensor {
-    make_empty_tensor(
+    make_empty_tensor_for_node(
+        node,
         node.name.clone(),
         actual_tensor_shape(graph, store, node),
         DType::Bool,
@@ -674,11 +758,39 @@ pub(super) fn push_reshape_with_shape(
     out_shape: Vec<i32>,
     dtype: DType,
 ) {
-    result.tensors.push(make_empty_tensor(
-        output_name.clone(),
-        out_shape.clone(),
+    push_reshape_with_shape_for_node(
+        result,
+        None,
+        input_name,
+        output_name,
+        shape_name,
+        out_shape,
         dtype,
-    ));
+    );
+}
+
+pub(super) fn push_reshape_with_shape_for_node(
+    result: &mut EmitResult,
+    node: Option<&Node>,
+    input_name: String,
+    output_name: String,
+    shape_name: String,
+    out_shape: Vec<i32>,
+    dtype: DType,
+) {
+    let out_shape = if node
+        .map(|node| node.meta.preserve_scalar_shape)
+        .unwrap_or(false)
+        && out_shape.is_empty()
+    {
+        out_shape
+    } else {
+        normalize_tensor_shape(out_shape)
+    };
+    let output_tensor = node
+        .map(|node| make_empty_tensor_for_node(node, output_name.clone(), out_shape.clone(), dtype))
+        .unwrap_or_else(|| make_empty_tensor(output_name.clone(), out_shape.clone(), dtype));
+    result.tensors.push(output_tensor);
 
     let rank = out_shape.len() as u32;
     let shape_data: Vec<u8> = out_shape
@@ -702,4 +814,47 @@ pub(super) fn push_reshape_with_shape(
         vec![input_name, shape_name],
         vec![output_name],
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::Graph;
+    use crate::graph::ir::{Arg, DType, NodeMeta, OpTarget, OpType, TensorInfo};
+    use crate::store::TensorStore;
+    use smallvec::smallvec;
+
+    fn meta(shape: &[i64], dtype: DType) -> NodeMeta {
+        NodeMeta::new(TensorInfo::new(shape, dtype))
+    }
+
+    #[test]
+    fn reciprocal_uses_input_shape_when_meta_is_stale_scalar() {
+        clear_shape_cache();
+
+        let mut graph = Graph::new();
+        let input = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Relu,
+            smallvec![],
+            Vec::new(),
+            meta(&[10, 10, 10], DType::Float32),
+            "x".to_string(),
+        );
+        let reciprocal = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::Reciprocal,
+            smallvec![Arg::Node(input)],
+            Vec::new(),
+            meta(&[], DType::Float32),
+            "x_recip".to_string(),
+        );
+
+        let store = TensorStore::default();
+        let reciprocal_node = graph.node(reciprocal).expect("reciprocal node");
+        assert_eq!(
+            actual_tensor_shape(&graph, &store, reciprocal_node),
+            vec![10, 10, 10]
+        );
+    }
 }

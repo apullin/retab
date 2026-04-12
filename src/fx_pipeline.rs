@@ -8,6 +8,7 @@ use crate::fx_decompose_as_strided_copy_ir;
 use crate::fx_decompose_cumsum_ir;
 use crate::fx_decompose_logit_ir;
 use crate::fx_decompose_masked_fill_ir;
+use crate::fx_decompose_ne_ir;
 use crate::fx_decompose_pixel_shuffle_ir;
 use crate::fx_decompose_repeat_interleave_ir;
 use crate::fx_decompose_tril_ir;
@@ -19,6 +20,8 @@ use crate::fx_insert_rescale;
 use crate::fx_insert_table_ops;
 use crate::fx_memory_format;
 use crate::fx_pass::FxPass;
+use crate::fx_replace_inf_values_ir;
+use crate::fx_replace_scalar_with_tensor_ir;
 use crate::fx_remove_noop_ir;
 use crate::fx_rewrite_matmul;
 use crate::fx_rewrite_squeeze_ir;
@@ -31,9 +34,7 @@ struct ExportedProgramClones {
 impl ExportedProgramClones {
     fn new(exported_program: Option<pyo3::PyObject>) -> Self {
         pyo3::Python::with_gil(|py| {
-            let fuse = exported_program
-                .as_ref()
-                .map(|value| value.clone_ref(py));
+            let fuse = exported_program.as_ref().map(|value| value.clone_ref(py));
             Self {
                 fold_qdq: exported_program,
                 fuse,
@@ -60,6 +61,10 @@ pub fn build_hybrid_pipeline(
             crate::fx_fuse_quant_activation_ir::IrFuseQuantActivationPass,
         )),
         Ir(Box::new(fx_convert_clamp_ir::IrConvertClampPass)),
+        Ir(Box::new(
+            crate::fx_decompose_layernorm_ir::IrDecomposeLayerNormPass,
+        )),
+        Ir(Box::new(crate::fx_decompose_var_ir::IrDecomposeVarPass)),
         // -- Fold Q/DQ + rescale --
         Ir(Box::new(crate::fx_fold_qdq_ir::IrFoldQdqPass)),
         Ir(Box::new(
@@ -83,6 +88,9 @@ pub fn build_hybrid_pipeline(
             fx_convert_split_to_slice_ir::IrConvertSplitToSlicePass,
         )),
         Ir(Box::new(
+            fx_replace_inf_values_ir::IrReplaceInfAndLimitValuesPass,
+        )),
+        Ir(Box::new(
             fx_decompose_masked_fill_ir::IrDecomposeMaskedFillPass,
         )),
         Ir(Box::new(
@@ -101,11 +109,18 @@ pub fn build_hybrid_pipeline(
             crate::fx_decompose_select_scatter_ir::IrDecomposeSelectScatterPass,
         )),
         Ir(Box::new(
+            crate::fx_decompose_slice_scatter_ir::IrDecomposeSliceScatterPass,
+        )),
+        Ir(Box::new(
             crate::fx_decompose_strided_slice_ir::IrDecomposeStridedSlicePass,
         )),
         Ir(Box::new(fx_expand_where_mask_ir::IrExpandWhereMaskPass)),
         Ir(Box::new(fx_decompose_tril_ir::IrDecomposeTrilPass)),
         Ir(Box::new(fx_decompose_logit_ir::IrDecomposeLogitPass)),
+        Ir(Box::new(fx_decompose_ne_ir::IrDecomposeNotEqualPass)),
+        Ir(Box::new(
+            fx_replace_scalar_with_tensor_ir::IrReplaceScalarWithTensorPass,
+        )),
         Ir(Box::new(fx_decompose_addmm_ir::IrDecomposeAddmmPass)),
         Ir(Box::new(fx_decompose_cumsum_ir::IrDecomposeCumsumPass)),
         Ir(Box::new(
@@ -136,6 +151,7 @@ pub fn build_hybrid_pipeline(
         Ir(Box::new(
             crate::fx_decompose_maxpool_dilation_ir::IrDecomposeMaxPoolDilationPass,
         )),
+        Ir(Box::new(crate::fx_decompose_var_ir::IrDecomposeVarPass)),
         Ir(Box::new(crate::fx_decompose_mean_ir::IrDecomposeMeanPass)),
         Ir(Box::new(fx_convert_sum_ir::IrConvertSumPass)),
         IrEp(Box::new(
@@ -162,6 +178,12 @@ pub fn build_hybrid_pipeline(
         )),
         IrEp(Box::new(
             crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEpPass,
+        )),
+        IrEp(Box::new(
+            crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEpPass,
+        )),
+        IrEp(Box::new(
+            crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEpPass,
         )),
         Ir(Box::new(
             crate::fx_memory_format_ir::IrToTosaMemoryFormatPass,

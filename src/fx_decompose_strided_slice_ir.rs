@@ -9,20 +9,29 @@ fn i64_list(vals: &[i64]) -> IrArg {
 
 fn meta_with_shape(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
     let mut m = base.clone();
-    m.set_val(FakeTensorMeta { shape, dtype: dtype.to_string() });
+    m.set_val(FakeTensorMeta {
+        shape,
+        dtype: dtype.to_string(),
+    });
     m
 }
 
 fn fixup_start(start: Option<i64>, dim_size: i64) -> i64 {
     let mut s = start.unwrap_or(0);
-    if s < 0 { s = s.rem_euclid(dim_size); }
+    if s < 0 {
+        s = s.rem_euclid(dim_size);
+    }
     s.clamp(0, dim_size)
 }
 
 fn fixup_end(end: Option<i64>, dim_size: i64) -> i64 {
     let mut e = end.unwrap_or(dim_size);
-    if e > dim_size { e = dim_size; }
-    if e < 0 { e = e.rem_euclid(dim_size); }
+    if e > dim_size {
+        e = dim_size;
+    }
+    if e < 0 {
+        e = e.rem_euclid(dim_size);
+    }
     e.clamp(0, dim_size)
 }
 
@@ -37,7 +46,9 @@ fn optional_int(arg: Option<&IrArg>) -> Option<i64> {
 pub struct IrDecomposeStridedSlicePass;
 
 impl IrPass for IrDecomposeStridedSlicePass {
-    fn name(&self) -> &str { "IrDecomposeStridedSlice" }
+    fn name(&self) -> &str {
+        "IrDecomposeStridedSlice"
+    }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
@@ -53,32 +64,55 @@ impl IrPass for IrDecomposeStridedSlicePass {
             {
                 continue;
             }
-            if graph.nodes[id].args.len() != 5 { continue; }
+            if graph.nodes[id].args.len() != 5 {
+                continue;
+            }
 
-            let input_id = match graph.nodes[id].args[0].as_node() { Some(n) => n, None => continue };
-            let input_shape = match graph.nodes[input_id].meta.val_shape() {
-                Some(s) => s.to_vec(), None => continue,
+            let input_id = match graph.nodes[id].args[0].as_node() {
+                Some(n) => n,
+                None => continue,
             };
-            if input_shape.is_empty() { continue; }
+            let input_shape = match graph.nodes[input_id].meta.val_shape() {
+                Some(s) => s.to_vec(),
+                None => continue,
+            };
+            if input_shape.is_empty() {
+                continue;
+            }
 
-            let step = match graph.nodes[id].args[4].as_int() { Some(v) => v, None => continue };
-            if step <= 1 { continue; }
+            let step = match graph.nodes[id].args[4].as_int() {
+                Some(v) => v,
+                None => continue,
+            };
+            if step <= 1 {
+                continue;
+            }
 
             let rank = input_shape.len() as i64;
-            let dim_raw = match graph.nodes[id].args[1].as_int() { Some(v) => v, None => continue };
+            let dim_raw = match graph.nodes[id].args[1].as_int() {
+                Some(v) => v,
+                None => continue,
+            };
             let dim = dim_raw.rem_euclid(rank) as usize;
             let dim_size = input_shape[dim];
-            if dim_size <= 0 { continue; }
+            if dim_size <= 0 {
+                continue;
+            }
 
             let start = fixup_start(optional_int(graph.nodes[id].args.get(2)), dim_size);
             let end = fixup_end(optional_int(graph.nodes[id].args.get(3)), dim_size);
             let span_len = end - start;
-            if span_len <= 0 { continue; }
+            if span_len <= 0 {
+                continue;
+            }
 
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let dtype = graph.nodes[input_id].meta.val_dtype()
-                .unwrap_or("torch.float32").to_string();
+            let dtype = graph.nodes[input_id]
+                .meta
+                .val_dtype()
+                .unwrap_or("torch.float32")
+                .to_string();
 
             // 1. Unit-step slice: slice_copy(input, dim, start, end, 1)
             let mut slice_shape = input_shape.clone();
@@ -104,10 +138,16 @@ impl IrPass for IrDecomposeStridedSlicePass {
 
             // 2. Optional pad: full(pad_shape, 0) + cat([slice, pad], dim)
             if pad_right > 0 {
-                let pad_shape: Vec<i64> = input_shape.iter().enumerate()
+                let pad_shape: Vec<i64> = input_shape
+                    .iter()
+                    .enumerate()
                     .map(|(i, &s)| if i == dim { pad_right } else { s })
                     .collect();
-                let fill_val = if dtype.contains("bool") { IrArg::Bool(false) } else { IrArg::Int(0) };
+                let fill_val = if dtype.contains("bool") {
+                    IrArg::Bool(false)
+                } else {
+                    IrArg::Int(0)
+                };
                 let pad_node = graph.add_node(
                     NodeOp::CallFunction,
                     format!("{}_pad", node_name),
@@ -180,7 +220,9 @@ impl IrPass for IrDecomposeStridedSlicePass {
         }
 
         if modified {
-            log_line(format_args!("[IrDecomposeStridedSlice] decomposed strided slice ops"));
+            log_line(format_args!(
+                "[IrDecomposeStridedSlice] decomposed strided slice ops"
+            ));
         }
         modified
     }

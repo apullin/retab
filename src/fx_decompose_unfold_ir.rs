@@ -11,7 +11,10 @@ fn i64_list(vals: &[i64]) -> IrArg {
 
 fn meta_neutral(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
     let mut m = base.clone();
-    m.set_val(FakeTensorMeta { shape: shape.clone(), dtype: dtype.to_string() });
+    m.set_val(FakeTensorMeta {
+        shape: shape.clone(),
+        dtype: dtype.to_string(),
+    });
     m.set_extra("arm_layout_neutral", MetaValue::Bool(true));
     m.set_extra("tosa_spatial_rank", MetaValue::Int(0));
     let order: Vec<usize> = (0..shape.len()).collect();
@@ -20,8 +23,14 @@ fn meta_neutral(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
 }
 
 fn mark_layout_neutral_in_place(graph: &mut IrGraph, id: NodeId) {
-    graph.node_mut(id).meta.set_extra("arm_layout_neutral", MetaValue::Bool(true));
-    graph.node_mut(id).meta.set_extra("tosa_spatial_rank", MetaValue::Int(0));
+    graph
+        .node_mut(id)
+        .meta
+        .set_extra("arm_layout_neutral", MetaValue::Bool(true));
+    graph
+        .node_mut(id)
+        .meta
+        .set_extra("tosa_spatial_rank", MetaValue::Int(0));
     if let Some(shape) = graph.nodes[id].meta.val_shape() {
         let order: Vec<usize> = (0..shape.len()).collect();
         graph.node_mut(id).meta.set_tosa_dim_order(order);
@@ -68,12 +77,20 @@ fn add_full_int(
     )
 }
 
-fn product(s: &[i64]) -> i64 { if s.is_empty() { 1 } else { s.iter().copied().product() } }
+fn product(s: &[i64]) -> i64 {
+    if s.is_empty() {
+        1
+    } else {
+        s.iter().copied().product()
+    }
+}
 
 pub struct IrDecomposeUnfoldPass;
 
 impl IrPass for IrDecomposeUnfoldPass {
-    fn name(&self) -> &str { "IrDecomposeUnfold" }
+    fn name(&self) -> &str {
+        "IrDecomposeUnfold"
+    }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
@@ -83,24 +100,47 @@ impl IrPass for IrDecomposeUnfoldPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !graph.nodes[id].target.contains("unfold_copy") { continue; }
-            if graph.nodes[id].args.len() != 4 { continue; }
+            if !graph.nodes[id].target.contains("unfold_copy") {
+                continue;
+            }
+            if graph.nodes[id].args.len() != 4 {
+                continue;
+            }
 
-            let x_id = match graph.nodes[id].args[0].as_node() { Some(n) => n, None => continue };
-            let dim = match graph.nodes[id].args[1].as_int() { Some(v) => v, None => continue };
-            let size = match graph.nodes[id].args[2].as_int() { Some(v) => v, None => continue };
-            let step = match graph.nodes[id].args[3].as_int() { Some(v) => v, None => continue };
-            if size <= 0 || step <= 0 { continue; }
+            let x_id = match graph.nodes[id].args[0].as_node() {
+                Some(n) => n,
+                None => continue,
+            };
+            let dim = match graph.nodes[id].args[1].as_int() {
+                Some(v) => v,
+                None => continue,
+            };
+            let size = match graph.nodes[id].args[2].as_int() {
+                Some(v) => v,
+                None => continue,
+            };
+            let step = match graph.nodes[id].args[3].as_int() {
+                Some(v) => v,
+                None => continue,
+            };
+            if size <= 0 || step <= 0 {
+                continue;
+            }
 
             let input_shape = match graph.nodes[x_id].meta.val_shape() {
-                Some(s) => s.to_vec(), None => continue,
+                Some(s) => s.to_vec(),
+                None => continue,
             };
             let rank = input_shape.len() as i64;
-            if rank < 1 { continue; }
+            if rank < 1 {
+                continue;
+            }
 
             let dim_norm = dim.rem_euclid(rank) as usize;
             let k = input_shape[dim_norm];
-            if k < size { continue; }
+            if k < size {
+                continue;
+            }
 
             let u = (k - size) / step + 1;
             let uc = u * size;
@@ -112,16 +152,25 @@ impl IrPass for IrDecomposeUnfoldPass {
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
             let original_users = graph.users(id).to_vec();
-            let x_dtype = graph.nodes[x_id].meta.val_dtype().unwrap_or("torch.float32").to_string();
+            let x_dtype = graph.nodes[x_id]
+                .meta
+                .val_dtype()
+                .unwrap_or("torch.float32")
+                .to_string();
             let needs_bool_cast = x_dtype == "torch.bool";
-            let work_dtype = if needs_bool_cast { "torch.int8" } else { x_dtype.as_str() };
+            let work_dtype = if needs_bool_cast {
+                "torch.int8"
+            } else {
+                x_dtype.as_str()
+            };
             let mut values_in = x_id;
 
             // Mark input as layout-neutral
             mark_layout_neutral_in_place(graph, x_id);
 
             if needs_bool_cast {
-                let mut cast_meta = meta_neutral(&graph.nodes[x_id].meta, input_shape.clone(), work_dtype);
+                let mut cast_meta =
+                    meta_neutral(&graph.nodes[x_id].meta, input_shape.clone(), work_dtype);
                 clear_qparams(&mut cast_meta);
                 let cast_id = graph.add_node_with_kwargs(
                     NodeOp::CallFunction,
@@ -136,26 +185,33 @@ impl IrPass for IrDecomposeUnfoldPass {
             }
 
             // Flatten x to (P, K, Q)
-            let mut values_meta = meta_neutral(&graph.nodes[values_in].meta, vec![p, k, q], work_dtype);
+            let mut values_meta =
+                meta_neutral(&graph.nodes[values_in].meta, vec![p, k, q], work_dtype);
             if !needs_bool_cast {
                 copy_qparams_from_node(graph, x_id, &mut values_meta);
             } else {
                 clear_qparams(&mut values_meta);
             }
-            let values = graph.add_node(NodeOp::CallFunction, format!("{}_flat", name),
+            let values = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_flat", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(values_in), i64_list(&[p, k, q])],
-                values_meta);
+                values_meta,
+            );
             graph.anchor_to(values, id);
 
             // Build sliding-window index: arange(0,U)*step + arange(0,size) → (U*size,)
             let mut idx_u_meta = meta_neutral(&orig_meta, vec![u], "torch.int32");
             clear_qparams(&mut idx_u_meta);
-            let idx_u = graph.add_node_with_kwargs(NodeOp::CallFunction, format!("{}_au", name),
+            let idx_u = graph.add_node_with_kwargs(
+                NodeOp::CallFunction,
+                format!("{}_au", name),
                 "aten.arange.start_step".to_string(),
                 vec![IrArg::Int(0), IrArg::Int(u)],
                 dtype_kwarg("torch.int32"),
-                idx_u_meta);
+                idx_u_meta,
+            );
             graph.anchor_to(idx_u, id);
 
             let mut step_meta = meta_neutral(&orig_meta, vec![1], "torch.int32");
@@ -172,93 +228,128 @@ impl IrPass for IrDecomposeUnfoldPass {
 
             let mut idx_scaled_meta = meta_neutral(&orig_meta, vec![u], "torch.int32");
             clear_qparams(&mut idx_scaled_meta);
-            let idx_scaled = graph.add_node(NodeOp::CallFunction, format!("{}_us", name),
+            let idx_scaled = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_us", name),
                 "aten.mul.Tensor".to_string(),
                 vec![IrArg::Node(idx_u), IrArg::Node(step_t)],
-                idx_scaled_meta);
+                idx_scaled_meta,
+            );
             graph.anchor_to(idx_scaled, id);
 
             let mut idx_u2d_meta = meta_neutral(&orig_meta, vec![u, 1], "torch.int32");
             clear_qparams(&mut idx_u2d_meta);
-            let idx_u2d = graph.add_node(NodeOp::CallFunction, format!("{}_u2d", name),
+            let idx_u2d = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_u2d", name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(idx_scaled), IrArg::Int(1)],
-                idx_u2d_meta);
+                idx_u2d_meta,
+            );
             graph.anchor_to(idx_u2d, id);
 
             let mut idx_c_meta = meta_neutral(&orig_meta, vec![size], "torch.int32");
             clear_qparams(&mut idx_c_meta);
-            let idx_c = graph.add_node_with_kwargs(NodeOp::CallFunction, format!("{}_ac", name),
+            let idx_c = graph.add_node_with_kwargs(
+                NodeOp::CallFunction,
+                format!("{}_ac", name),
                 "aten.arange.start_step".to_string(),
                 vec![IrArg::Int(0), IrArg::Int(size)],
                 dtype_kwarg("torch.int32"),
-                idx_c_meta);
+                idx_c_meta,
+            );
             graph.anchor_to(idx_c, id);
 
             let mut idx_c2d_meta = meta_neutral(&orig_meta, vec![1, size], "torch.int32");
             clear_qparams(&mut idx_c2d_meta);
-            let idx_c2d = graph.add_node(NodeOp::CallFunction, format!("{}_c2d", name),
+            let idx_c2d = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_c2d", name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(idx_c), IrArg::Int(0)],
-                idx_c2d_meta);
+                idx_c2d_meta,
+            );
             graph.anchor_to(idx_c2d, id);
 
             let mut idx2d_meta = meta_neutral(&orig_meta, vec![u, size], "torch.int32");
             clear_qparams(&mut idx2d_meta);
-            let idx2d = graph.add_node(NodeOp::CallFunction, format!("{}_i2d", name),
+            let idx2d = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_i2d", name),
                 "aten.add.Tensor".to_string(),
                 vec![IrArg::Node(idx_u2d), IrArg::Node(idx_c2d)],
-                idx2d_meta);
+                idx2d_meta,
+            );
             graph.anchor_to(idx2d, id);
 
             let mut idx1d_meta = meta_neutral(&orig_meta, vec![uc], "torch.int32");
             clear_qparams(&mut idx1d_meta);
-            let idx1d = graph.add_node(NodeOp::CallFunction, format!("{}_i1d", name),
+            let idx1d = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_i1d", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(idx2d), i64_list(&[uc])],
-                idx1d_meta);
+                idx1d_meta,
+            );
             graph.anchor_to(idx1d, id);
 
             let mut idx_unsq_meta = meta_neutral(&orig_meta, vec![1, uc], "torch.int32");
             clear_qparams(&mut idx_unsq_meta);
-            let idx_unsq = graph.add_node(NodeOp::CallFunction, format!("{}_iu", name),
+            let idx_unsq = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_iu", name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(idx1d), IrArg::Int(0)],
-                idx_unsq_meta);
+                idx_unsq_meta,
+            );
             graph.anchor_to(idx_unsq, id);
 
             let mut idx_exp_meta = meta_neutral(&orig_meta, vec![p, uc], "torch.int32");
             clear_qparams(&mut idx_exp_meta);
-            let idx_exp = graph.add_node(NodeOp::CallFunction, format!("{}_ie", name),
+            let idx_exp = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_ie", name),
                 "aten.expand_copy.default".to_string(),
                 vec![IrArg::Node(idx_unsq), i64_list(&[p, uc])],
-                idx_exp_meta);
+                idx_exp_meta,
+            );
             graph.anchor_to(idx_exp, id);
 
             // GATHER
-            let mut gathered_meta = meta_neutral(&graph.nodes[values_in].meta, vec![p, uc, q], work_dtype);
+            let mut gathered_meta =
+                meta_neutral(&graph.nodes[values_in].meta, vec![p, uc, q], work_dtype);
             if !needs_bool_cast {
                 copy_qparams_from_node(graph, x_id, &mut gathered_meta);
             } else {
                 clear_qparams(&mut gathered_meta);
             }
-            let gathered = graph.add_node(NodeOp::CallFunction, format!("{}_g", name),
+            let gathered = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_g", name),
                 "backend.tosa.GATHER.default".to_string(),
                 vec![IrArg::Node(values), IrArg::Node(idx_exp)],
-                gathered_meta);
+                gathered_meta,
+            );
             graph.anchor_to(gathered, id);
 
             // Reshape (P, U*size, Q) → (P, U, size, Q)
-            let mut r4d_meta = meta_neutral(&graph.nodes[values_in].meta, vec![p, u, size, q], work_dtype);
+            let mut r4d_meta = meta_neutral(
+                &graph.nodes[values_in].meta,
+                vec![p, u, size, q],
+                work_dtype,
+            );
             if !needs_bool_cast {
                 copy_qparams_from_node(graph, x_id, &mut r4d_meta);
             } else {
                 clear_qparams(&mut r4d_meta);
             }
-            let r4d = graph.add_node(NodeOp::CallFunction, format!("{}_r4", name),
+            let r4d = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_r4", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(gathered), i64_list(&[p, u, size, q])],
-                r4d_meta);
+                r4d_meta,
+            );
             graph.anchor_to(r4d, id);
 
             // Reshape to (...pre, U, size, ...post)
@@ -266,16 +357,20 @@ impl IrPass for IrDecomposeUnfoldPass {
             full_shape.push(u);
             full_shape.push(size);
             full_shape.extend(post.iter().copied());
-            let mut reshaped_meta = meta_neutral(&graph.nodes[values_in].meta, full_shape.clone(), work_dtype);
+            let mut reshaped_meta =
+                meta_neutral(&graph.nodes[values_in].meta, full_shape.clone(), work_dtype);
             if !needs_bool_cast {
                 copy_qparams_from_node(graph, x_id, &mut reshaped_meta);
             } else {
                 clear_qparams(&mut reshaped_meta);
             }
-            let reshaped = graph.add_node(NodeOp::CallFunction, format!("{}_rs", name),
+            let reshaped = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_rs", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(r4d), i64_list(&full_shape)],
-                reshaped_meta);
+                reshaped_meta,
+            );
             graph.anchor_to(reshaped, id);
 
             // Permute: move size dim to end
@@ -288,21 +383,35 @@ impl IrPass for IrDecomposeUnfoldPass {
                 .chain(std::iter::once(c_idx))
                 .collect();
             let mut perm_shape = Vec::new();
-            for &p in &perm { perm_shape.push(full_shape[p as usize]); }
-            let mut permuted_meta = meta_neutral(&graph.nodes[values_in].meta, perm_shape, work_dtype);
+            for &p in &perm {
+                perm_shape.push(full_shape[p as usize]);
+            }
+            let mut permuted_meta =
+                meta_neutral(&graph.nodes[values_in].meta, perm_shape, work_dtype);
             if !needs_bool_cast {
                 copy_qparams_from_node(graph, x_id, &mut permuted_meta);
             } else {
                 clear_qparams(&mut permuted_meta);
             }
-            let permuted = graph.add_node(NodeOp::CallFunction, format!("{}_pm", name),
+            let permuted = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{}_pm", name),
                 "aten.permute_copy.default".to_string(),
                 vec![IrArg::Node(reshaped), i64_list(&perm)],
-                permuted_meta);
+                permuted_meta,
+            );
             graph.anchor_to(permuted, id);
 
             let final_result = if needs_bool_cast {
-                let mut cast_back_meta = meta_neutral(&orig_meta, graph.nodes[permuted].meta.val_shape().unwrap_or(&[]).to_vec(), "torch.bool");
+                let mut cast_back_meta = meta_neutral(
+                    &orig_meta,
+                    graph.nodes[permuted]
+                        .meta
+                        .val_shape()
+                        .unwrap_or(&[])
+                        .to_vec(),
+                    "torch.bool",
+                );
                 clear_qparams(&mut cast_back_meta);
                 let cast_back = graph.add_node_with_kwargs(
                     NodeOp::CallFunction,
@@ -328,7 +437,9 @@ impl IrPass for IrDecomposeUnfoldPass {
         }
 
         if modified {
-            log_line(format_args!("[IrDecomposeUnfold] decomposed unfold_copy ops"));
+            log_line(format_args!(
+                "[IrDecomposeUnfold] decomposed unfold_copy ops"
+            ));
         }
         modified
     }

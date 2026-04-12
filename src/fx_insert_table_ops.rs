@@ -33,6 +33,17 @@ fn node_scalar_arg(node: &Bound<'_, PyAny>, idx: usize) -> PyResult<Option<f64>>
     Ok(None)
 }
 
+fn node_str_kwarg(node: &Bound<'_, PyAny>, key: &str) -> PyResult<Option<String>> {
+    let kwargs = node.getattr("kwargs")?;
+    if kwargs.is_none() {
+        return Ok(None);
+    }
+    match kwargs.get_item(key) {
+        Ok(value) => value.extract::<String>().map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Recognised targets that can be lowered to TABLE ops.
 fn table_op_spec(node: &Bound<'_, PyAny>, target: &str) -> PyResult<Option<TableOpSpec>> {
     if target.contains("rsqrt.default") {
@@ -113,8 +124,16 @@ fn table_op_spec(node: &Bound<'_, PyAny>, target: &str) -> PyResult<Option<Table
             scalar_arg: Some(scalar_arg),
         }))
     } else if target.contains("gelu.default") {
+        let kind = match node_str_kwarg(node, "approximate")?
+            .as_deref()
+            .unwrap_or("none")
+        {
+            "none" => "gelu",
+            "tanh" => "gelu_tanh",
+            _ => return Ok(None),
+        };
         Ok(Some(TableOpSpec {
-            kind: "gelu",
+            kind,
             scalar_arg: None,
         }))
     } else if target.contains("silu.default") {

@@ -62,9 +62,7 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
         current_shape,
         base_dtype,
         Op::ReduceSum,
-        |tosa_axis| {
-            Attribute::ReduceSum(ReduceSumAttribute { axis: tosa_axis })
-        },
+        |tosa_axis| Attribute::ReduceSum(ReduceSumAttribute { axis: tosa_axis }),
         "reduce_sum_axis",
         sum_name.clone(),
         true, // final_on_last: always use sum_name on last iteration
@@ -75,9 +73,12 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
     let recip_val = 1.0 / reduce_count;
     let recip_name = format!("{}_mean_recip", node.name);
     let ir_dtype = node.meta.val.dtype;
-    if let Some(recip_tensor) =
-        make_filled_const_tensor(recip_name.clone(), vec![1], ir_dtype, recip_val)
-    {
+    if let Some(recip_tensor) = make_filled_const_tensor(
+        recip_name.clone(),
+        current_shape.clone(),
+        ir_dtype,
+        recip_val,
+    ) {
         push_inline_const(&mut result, recip_tensor);
     }
 

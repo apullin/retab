@@ -237,7 +237,6 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
     result.tensors.push(compute_pool_nhwc_output(
         graph, store, node, &kernel, &stride, &pad,
     ));
-    let acc_type = DType::Int32;
     let input_zp = node_input_zero_point(graph, node, 0, "input_zp", 0);
     let output_zp = node_output_zero_point(node, "output_zp", 0);
     let input_dtype = match node.args.first() {
@@ -248,6 +247,11 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
         _ => DType::Int8,
     };
     let output_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
+    let acc_type = if matches!(input_dtype, DType::Fp32 | DType::Fp16 | DType::Bf16) {
+        DType::Fp32
+    } else {
+        DType::Int32
+    };
 
     let input_zp_name = format!("{}_input_zp", node.name);
     push_inline_const(

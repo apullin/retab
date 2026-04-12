@@ -128,6 +128,7 @@ impl IrPass for IrExpandWhereMaskPass {
                 vec![IrArg::Node(expand_id), true_arg, false_arg],
                 graph.nodes[id].meta.clone(),
             );
+            graph.anchor_to(new_where_id, id);
 
             graph.replace_and_erase(id, new_where_id);
             modified = true;

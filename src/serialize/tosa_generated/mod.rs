@@ -26,16 +26,15 @@ pub use tosa_rs::{
 // ---------------------------------------------------------------------------
 #[allow(unused_imports)]
 pub use tosa_rs::{
-    AddAttribute, SubAttribute, ReshapeAttribute, ConstAttribute, ConstShapeAttribute,
-    TableAttribute, SigmoidAttribute, TanhAttribute, ExpAttribute, LogAttribute,
-    NegateAttribute, AbsAttribute, CeilAttribute, FloorAttribute, ReciprocalAttribute,
-    ErfAttribute, CosAttribute, SinAttribute, RsqrtAttribute, MatMulAttribute,
-    PadAttribute, SliceAttribute, GatherAttribute, ScatterAttribute, SelectAttribute,
-    CastAttribute, EqualAttribute, GreaterAttribute, GreaterEqualAttribute,
-    BitwiseNotAttribute, BitwiseAndAttribute, BitwiseOrAttribute, BitwiseXorAttribute,
-    LogicalLeftShiftAttribute, LogicalRightShiftAttribute, ArithmeticRightShiftAttribute,
-    LogicalNotAttribute, LogicalAndAttribute, LogicalOrAttribute, LogicalXorAttribute,
-    PowAttribute, IntDivAttribute,
+    AbsAttribute, AddAttribute, ArithmeticRightShiftAttribute, BitwiseAndAttribute,
+    BitwiseNotAttribute, BitwiseOrAttribute, BitwiseXorAttribute, CastAttribute, CeilAttribute,
+    ConstAttribute, ConstShapeAttribute, CosAttribute, EqualAttribute, ErfAttribute, ExpAttribute,
+    FloorAttribute, GatherAttribute, GreaterAttribute, GreaterEqualAttribute, IntDivAttribute,
+    LogAttribute, LogicalAndAttribute, LogicalLeftShiftAttribute, LogicalNotAttribute,
+    LogicalOrAttribute, LogicalRightShiftAttribute, LogicalXorAttribute, MatMulAttribute,
+    NegateAttribute, PadAttribute, PowAttribute, ReciprocalAttribute, ReshapeAttribute,
+    RsqrtAttribute, ScatterAttribute, SelectAttribute, SigmoidAttribute, SinAttribute,
+    SliceAttribute, SubAttribute, TableAttribute, TanhAttribute,
 };
 
 // ---------------------------------------------------------------------------

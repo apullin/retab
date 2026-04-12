@@ -52,11 +52,7 @@ impl IrPass for IrConvertClampPass {
                     NodeOp::CallFunction,
                     format!("{}_clamp", graph.nodes[id].name),
                     "aten.clamp.default".to_string(),
-                    vec![
-                        IrArg::Node(input_id),
-                        IrArg::Float(0.0),
-                        IrArg::None,
-                    ],
+                    vec![IrArg::Node(input_id), IrArg::Float(0.0), IrArg::None],
                     graph.nodes[id].meta.clone(),
                 );
                 graph.replace_and_erase(id, new_id);

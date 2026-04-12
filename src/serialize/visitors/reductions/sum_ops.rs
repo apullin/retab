@@ -8,18 +8,41 @@ pub(super) fn register(table: &mut EmitterTable) {
     ]);
 }
 
-fn reduction_pre_reshape_perms(input_node: &Node, node: &Node, raw_axes: &[i32]) -> Option<Vec<i32>> {
+fn reduction_pre_reshape_perms(
+    graph: &Graph,
+    input_node: &Node,
+    node: &Node,
+    raw_axes: &[i32],
+) -> Option<Vec<i32>> {
     let input_rank = input_node.meta.val.shape_len as usize;
     if input_rank == 0 || raw_axes.is_empty() {
         return None;
     }
 
-    let input_order: Vec<usize> = input_node
-        .meta
-        .tosa_dim_order
-        .clone()
-        .map(|order| order.into_iter().map(|axis| axis as usize).collect())
-        .unwrap_or_else(|| (0..input_rank).collect());
+    let input_order: Vec<usize> = {
+        let mut order = vec![0usize; input_rank];
+        let mut seen = vec![false; input_rank];
+        let mut valid = true;
+        for raw_axis in 0..input_rank {
+            let pos = map_axis_to_tosa_dim_order(graph, input_node, raw_axis as i32) as usize;
+            if pos >= input_rank || seen[pos] {
+                valid = false;
+                break;
+            }
+            order[pos] = raw_axis;
+            seen[pos] = true;
+        }
+        if valid {
+            order
+        } else {
+            input_node
+                .meta
+                .tosa_dim_order
+                .clone()
+                .map(|order| order.into_iter().map(|axis| axis as usize).collect())
+                .unwrap_or_else(|| (0..input_rank).collect())
+        }
+    };
     let output_order: Vec<usize> = node
         .meta
         .tosa_dim_order
@@ -29,7 +52,13 @@ fn reduction_pre_reshape_perms(input_node: &Node, node: &Node, raw_axes: &[i32])
 
     let reduced_axes: Vec<usize> = raw_axes
         .iter()
-        .map(|&axis| if axis < 0 { axis + input_rank as i32 } else { axis })
+        .map(|&axis| {
+            if axis < 0 {
+                axis + input_rank as i32
+            } else {
+                axis
+            }
+        })
         .filter(|&axis| axis >= 0 && axis < input_rank as i32)
         .map(|axis| axis as usize)
         .collect();
@@ -52,7 +81,10 @@ fn reduction_pre_reshape_perms(input_node: &Node, node: &Node, raw_axes: &[i32])
         .map(|pos| pos as i32)
         .collect();
     if perms.len() != input_rank
-        || !perms.iter().enumerate().any(|(idx, &perm)| perm != idx as i32)
+        || !perms
+            .iter()
+            .enumerate()
+            .any(|(idx, &perm)| perm != idx as i32)
     {
         return None;
     }
@@ -123,6 +155,22 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitRe
         Some(Arg::Node(id)) => graph.node(*id),
         _ => None,
     };
+    if crate::fx_graph::FxGraphModule::debug() {
+        eprintln!(
+            "[SumDebug] node={} raw_shape={:?} actual_input_shape={:?} axes={:?} keepdim={} input_order={:?} node_order={:?} final_shape={:?}",
+            node.name,
+            raw_i32_shape(node),
+            spec.input_shape,
+            spec.axes
+                .iter()
+                .map(|axis| (axis.raw_dim, axis.tosa_axis))
+                .collect::<Vec<_>>(),
+            spec.keepdim,
+            input_node.and_then(|n| n.meta.tosa_dim_order.clone()),
+            node.meta.tosa_dim_order.clone(),
+            ctx.shape(),
+        );
+    }
     let input_dtype = input_node
         .map(|n| passthrough_input_dtype(graph, n))
         .unwrap_or_else(|| ctx.dtype());
@@ -164,9 +212,7 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitRe
         current_shape,
         base_dtype,
         Op::ReduceSum,
-        |tosa_axis| {
-            Attribute::ReduceSum(ReduceSumAttribute { axis: tosa_axis })
-        },
+        |tosa_axis| Attribute::ReduceSum(ReduceSumAttribute { axis: tosa_axis }),
         "reduce_axis",
         node.name.clone(),
         false, // final_on_last: only use node.name when keepdim
@@ -178,7 +224,7 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitRe
         let mut reshape_input = current_input;
         if let Some(input_node) = input_node {
             let raw_axes: Vec<i32> = spec.axes.iter().map(|axis| axis.raw_dim).collect();
-            if let Some(perms) = reduction_pre_reshape_perms(input_node, node, &raw_axes) {
+            if let Some(perms) = reduction_pre_reshape_perms(graph, input_node, node, &raw_axes) {
                 let transpose_name = format!("{}_layout", node.name);
                 let transpose_shape: Vec<i32> = perms
                     .iter()

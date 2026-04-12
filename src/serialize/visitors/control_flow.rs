@@ -45,18 +45,18 @@ impl WhileLoopSpec {
         let graph = ctx.graph;
         let node = ctx.node;
         let carried_input_ids = carried_input_ids(node);
-        let input_names = carried_input_ids
+        let additional_input_ids = additional_input_ids(node);
+        let loop_input_ids: Vec<NodeId> = carried_input_ids
+            .iter()
+            .chain(additional_input_ids.iter())
+            .copied()
+            .collect();
+        let input_names = loop_input_ids
             .iter()
             .filter_map(|id| resolve_input_name_from_node_id(graph, *id))
             .collect();
         let mut output_tensors = cond_output_tensors(graph, node);
-        extend_missing_while_outputs(
-            &mut output_tensors,
-            graph,
-            ctx.store,
-            node,
-            &carried_input_ids,
-        );
+        extend_missing_while_outputs(&mut output_tensors, graph, ctx.store, node, &loop_input_ids);
 
         Self {
             input_names,
@@ -107,6 +107,14 @@ fn carried_input_ids(node: &Node) -> Vec<NodeId> {
     }
 }
 
+fn additional_input_ids(node: &Node) -> Vec<NodeId> {
+    match node.args.get(3) {
+        Some(Arg::NodeList(ids)) => ids.iter().copied().collect(),
+        Some(Arg::Node(id)) => vec![*id],
+        _ => Vec::new(),
+    }
+}
+
 fn extend_missing_while_outputs(
     output_tensors: &mut Vec<TosaTensor>,
     graph: &Graph,
@@ -118,7 +126,11 @@ fn extend_missing_while_outputs(
         return;
     }
 
-    for (idx, input_id) in carried_input_ids.iter().enumerate().skip(output_tensors.len()) {
+    for (idx, input_id) in carried_input_ids
+        .iter()
+        .enumerate()
+        .skip(output_tensors.len())
+    {
         let Some(input_node) = graph.node(*input_id) else {
             continue;
         };

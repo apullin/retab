@@ -49,7 +49,6 @@ use arg_utils::*;
 use broadcast::*;
 use const_utils::*;
 pub(crate) use dtype_quant::ir_dtype_to_tosa;
-pub(crate) use shape_utils::actual_tensor_shape;
 use dtype_quant::{
     accumulator_output_dtype, actual_tensor_dtype, clamp_bound_bytes_from_arg,
     compute_multiplier_and_shift_with_width, conv_accumulator_dtype, encode_zp_for_dtype,
@@ -61,6 +60,7 @@ use emit_result::EmitResult;
 use graph_utils::*;
 use layout::*;
 use op_utils::*;
+pub(crate) use shape_utils::actual_tensor_shape;
 use shape_utils::*;
 
 fn build_emitter_table() -> EmitterTable {

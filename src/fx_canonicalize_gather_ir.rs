@@ -12,14 +12,19 @@ fn i64_list(vals: &[i64]) -> IrArg {
 
 fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
     let mut m = base.clone();
-    m.set_val(FakeTensorMeta { shape, dtype: dtype.to_string() });
+    m.set_val(FakeTensorMeta {
+        shape,
+        dtype: dtype.to_string(),
+    });
     m
 }
 
 pub struct IrCanonicalizeGatherPass;
 
 impl IrPass for IrCanonicalizeGatherPass {
-    fn name(&self) -> &str { "IrCanonicalizeGather" }
+    fn name(&self) -> &str {
+        "IrCanonicalizeGather"
+    }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
@@ -29,18 +34,33 @@ impl IrPass for IrCanonicalizeGatherPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !graph.nodes[id].target.contains("aten.gather.default") { continue; }
-            if graph.nodes[id].args.len() < 3 { continue; }
+            if !graph.nodes[id].target.contains("aten.gather.default") {
+                continue;
+            }
+            if graph.nodes[id].args.len() < 3 {
+                continue;
+            }
 
-            let x_id = match graph.nodes[id].args[0].as_node() { Some(n) => n, None => continue };
-            let dim = match graph.nodes[id].args[1].as_int() { Some(v) => v, None => continue };
-            let index_id = match graph.nodes[id].args[2].as_node() { Some(n) => n, None => continue };
+            let x_id = match graph.nodes[id].args[0].as_node() {
+                Some(n) => n,
+                None => continue,
+            };
+            let dim = match graph.nodes[id].args[1].as_int() {
+                Some(v) => v,
+                None => continue,
+            };
+            let index_id = match graph.nodes[id].args[2].as_node() {
+                Some(n) => n,
+                None => continue,
+            };
 
             let x_shape = match graph.nodes[x_id].meta.val_shape() {
-                Some(s) => s.to_vec(), None => continue,
+                Some(s) => s.to_vec(),
+                None => continue,
             };
             let index_shape = match graph.nodes[index_id].meta.val_shape() {
-                Some(s) => s.to_vec(), None => continue,
+                Some(s) => s.to_vec(),
+                None => continue,
             };
 
             // Only handle rank 2 or 3, dim must normalize to 1, batch dims must match
@@ -49,7 +69,9 @@ impl IrPass for IrCanonicalizeGatherPass {
                 continue;
             }
             let dim_norm = dim.rem_euclid(x_rank) as usize;
-            if dim_norm != 1 || index_shape.first() != x_shape.first() { continue; }
+            if dim_norm != 1 || index_shape.first() != x_shape.first() {
+                continue;
+            }
             if x_shape.len() == 3 && (index_shape.len() != 3 || index_shape[2] != x_shape[2]) {
                 continue;
             }
@@ -59,10 +81,17 @@ impl IrPass for IrCanonicalizeGatherPass {
             let w = index_shape[1];
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let x_dtype = graph.nodes[x_id].meta.val_dtype()
-                .unwrap_or("torch.float32").to_string();
+            let x_dtype = graph.nodes[x_id]
+                .meta
+                .val_dtype()
+                .unwrap_or("torch.float32")
+                .to_string();
             let needs_bool_cast = x_dtype == "torch.bool";
-            let work_dtype = if needs_bool_cast { "torch.int8" } else { &x_dtype };
+            let work_dtype = if needs_bool_cast {
+                "torch.int8"
+            } else {
+                &x_dtype
+            };
 
             let mut values_in = x_id;
 
@@ -185,9 +214,15 @@ impl IrPass for IrCanonicalizeGatherPass {
                 )
             } else {
                 let mut r_meta = orig_meta;
-                let out_shape = graph.nodes[id].meta.val_shape()
-                    .map(|s| s.to_vec()).unwrap_or_default();
-                r_meta.set_val(FakeTensorMeta { shape: out_shape, dtype: x_dtype });
+                let out_shape = graph.nodes[id]
+                    .meta
+                    .val_shape()
+                    .map(|s| s.to_vec())
+                    .unwrap_or_default();
+                r_meta.set_val(FakeTensorMeta {
+                    shape: out_shape,
+                    dtype: x_dtype,
+                });
                 // Re-set the last node's meta to match the original output
                 // (the add_node already has orig_meta, but we may need shape fix for 3D)
                 result
@@ -198,7 +233,9 @@ impl IrPass for IrCanonicalizeGatherPass {
         }
 
         if modified {
-            log_line(format_args!("[IrCanonicalizeGather] canonicalized gather ops"));
+            log_line(format_args!(
+                "[IrCanonicalizeGather] canonicalized gather ops"
+            ));
         }
         modified
     }

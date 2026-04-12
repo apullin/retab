@@ -25,7 +25,9 @@ fn decode_f16(bits: u16) -> f32 {
     f32::from_bits(f32_bits)
 }
 
-fn decode_bf16(bits: u16) -> f32 { f32::from_bits((bits as u32) << 16) }
+fn decode_bf16(bits: u16) -> f32 {
+    f32::from_bits((bits as u32) << 16)
+}
 
 pub fn extract_tensor_shape(value: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
     value
@@ -44,9 +46,16 @@ pub fn extract_tensor_dtype(value: &Bound<'_, PyAny>) -> DType {
 }
 
 pub fn extract_tensor_bytes(value: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
-    value
-        .call_method0("contiguous")?
-        .call_method0("cpu")?
+    let tensor = value.call_method0("contiguous")?.call_method0("cpu")?;
+    if extract_tensor_dtype(&tensor) == DType::BFloat16 {
+        let torch = PyModule::import_bound(tensor.py(), "torch")?;
+        return tensor
+            .call_method1("view", (torch.getattr("uint16")?,))?
+            .call_method0("numpy")?
+            .call_method0("tobytes")?
+            .extract();
+    }
+    tensor
         .call_method0("numpy")?
         .call_method0("tobytes")?
         .extract()
@@ -78,7 +87,9 @@ pub fn parse_torch_dtype(dtype_str: &str) -> DType {
 }
 
 impl TensorData {
-    pub fn element_count(&self) -> usize { self.shape.iter().product::<i64>().max(0) as usize }
+    pub fn element_count(&self) -> usize {
+        self.shape.iter().product::<i64>().max(0) as usize
+    }
 
     pub fn scalar_i64(&self) -> Option<i64> {
         if self.element_count() != 1 {
@@ -117,8 +128,8 @@ impl TensorData {
                     .chunks_exact(8)
                     .map(|chunk| {
                         i64::from_le_bytes([
-                            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5],
-                            chunk[6], chunk[7],
+                            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                            chunk[7],
                         ])
                     })
                     .collect(),
@@ -129,10 +140,9 @@ impl TensorData {
 
     pub fn vec_f64(&self) -> Option<Vec<f64>> {
         match self.dtype {
-            DType::Bool | DType::Int8 | DType::Int16 | DType::Int32 | DType::Int64 => {
-                self.vec_i64()
-                    .map(|vals| vals.into_iter().map(|v| v as f64).collect())
-            }
+            DType::Bool | DType::Int8 | DType::Int16 | DType::Int32 | DType::Int64 => self
+                .vec_i64()
+                .map(|vals| vals.into_iter().map(|v| v as f64).collect()),
             DType::Float32 => Some(
                 self.data
                     .chunks_exact(4)
@@ -202,9 +212,6 @@ mod tests {
         assert_eq!(int64_tensor.vec_i64(), Some(vec![1, 3]));
 
         let cast = cast_i64_bytes_to_i32(&int64_tensor.data);
-        assert_eq!(
-            cast,
-            [1i32.to_le_bytes(), 3i32.to_le_bytes()].concat(),
-        );
+        assert_eq!(cast, [1i32.to_le_bytes(), 3i32.to_le_bytes()].concat(),);
     }
 }

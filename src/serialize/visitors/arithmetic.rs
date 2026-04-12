@@ -45,9 +45,15 @@ pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
 
     let input_names = ctx.input_names();
     let clamp_dtype = node.meta.val.dtype;
+    let relu_min = Arg::Float(0.0);
+    let (min_arg, max_arg) = if matches!(&node.target, crate::graph::ir::OpTarget::Relu) {
+        (Some(&relu_min), None)
+    } else {
+        (node.args.get(1), node.args.get(2))
+    };
     let needs_extrema_lowering = clamp_dtype == crate::graph::ir::DType::Int32
-        || matches!(node.args.get(1), Some(Arg::Node(_)))
-        || matches!(node.args.get(2), Some(Arg::Node(_)));
+        || matches!(min_arg, Some(Arg::Node(_)))
+        || matches!(max_arg, Some(Arg::Node(_)));
 
     if needs_extrema_lowering {
         let input_name = input_names.first().cloned().unwrap_or_default();
@@ -58,7 +64,7 @@ pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
         let min_input = resolve_clamp_bound_input(
             graph,
             node,
-            node.args.get(1),
+            min_arg,
             "min",
             output_rank,
             clamp_dtype,
@@ -67,7 +73,7 @@ pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
         let max_input = resolve_clamp_bound_input(
             graph,
             node,
-            node.args.get(2),
+            max_arg,
             "max",
             output_rank,
             clamp_dtype,
@@ -143,8 +149,8 @@ pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
         return result;
     }
 
-    let min_val = clamp_bound_bytes_from_arg(clamp_dtype, node.args.get(1), true);
-    let max_val = clamp_bound_bytes_from_arg(clamp_dtype, node.args.get(2), false);
+    let min_val = clamp_bound_bytes_from_arg(clamp_dtype, min_arg, true);
+    let max_val = clamp_bound_bytes_from_arg(clamp_dtype, max_arg, false);
     result.push_output_op(
         ctx.make_output(),
         Op::Clamp,
@@ -212,8 +218,7 @@ pub(super) fn emit_mul(ctx: &EmitContext) -> EmitResult {
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let mut inputs = ctx.input_names();
-    maybe_materialize_binary_broadcast(graph, store, node, &mut result, &mut inputs);
+    let mut inputs = collect_binary_input_names(graph, store, node, &mut result);
     inputs.push(push_shift_const(&mut result, &node.name));
     result.push_output_op(
         ctx.make_output(),
@@ -232,8 +237,9 @@ pub(super) fn emit_aten_unsqueeze(ctx: &EmitContext) -> EmitResult {
             ctx.name()
         )
     });
-    push_reshape_with_shape(
+    push_reshape_with_shape_for_node(
         &mut result,
+        Some(ctx.node),
         spec.input_name,
         ctx.node.name.clone(),
         format!("{}_shape", ctx.name()),
@@ -247,8 +253,9 @@ pub(super) fn emit_aten_squeeze(ctx: &EmitContext) -> EmitResult {
     let mut result = EmitResult::default();
     let spec = ParsedReshapeEmitterSpec::parse(ctx)
         .unwrap_or_else(|| panic!("emit_aten_squeeze: missing input for node '{}'", ctx.name()));
-    push_reshape_with_shape(
+    push_reshape_with_shape_for_node(
         &mut result,
+        Some(ctx.node),
         spec.input_name,
         ctx.node.name.clone(),
         format!("{}_shape", ctx.name()),

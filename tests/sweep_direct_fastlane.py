@@ -21,9 +21,9 @@ from pathlib import Path
 from typing import Any
 
 
-ROOT = Path("/Users/andrewpullin/personal/executorch-work")
-U55_ROOT = ROOT / "u55-pipeline"
-ENGINE_ROOT = U55_ROOT / "retab"
+ENGINE_ROOT = Path(__file__).resolve().parents[1]
+U55_ROOT = ENGINE_ROOT.parent
+ROOT = U55_ROOT.parent
 ET_ROOT = ROOT / "executorch"
 
 sys.path.insert(0, str(ET_ROOT / "src"))
@@ -56,24 +56,16 @@ def _failure_signature(message: str) -> str:
 
 def prepare_quantized_ep(model_name: str):
     import torch
-    from executorch.backends.arm.ethosu import EthosUCompileSpec
-    from executorch.backends.arm.quantizer import (
-        EthosUQuantizer,
-        get_symmetric_quantization_config,
-    )
+    from executorch.backends.arm.quantizer import TOSAQuantizer, get_symmetric_quantization_config
+    from executorch.backends.arm.test.common import get_tosa_compile_spec
     from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
 
     model, example_input = get_model_and_example(model_name)
     exported = torch.export.export(model, (example_input,), strict=True)
 
-    compile_spec = EthosUCompileSpec(
-        target="ethos-u55-128",
-        system_config="Ethos_U55_High_End_Embedded",
-        memory_mode="Shared_Sram",
-        extra_flags=["--output-format=raw"],
-    )
-    quantizer = EthosUQuantizer(compile_spec)
-    quantizer.set_global(get_symmetric_quantization_config())
+    compile_spec = get_tosa_compile_spec("TOSA-1.0+INT")
+    quantizer = TOSAQuantizer(compile_spec)
+    quantizer.set_global(get_symmetric_quantization_config(is_per_channel=False))
 
     qmodel = exported.module()
     qmodel = prepare_pt2e(qmodel, quantizer)
@@ -87,8 +79,7 @@ def prepare_quantized_ep(model_name: str):
 
 
 def run_one_model(model_name: str) -> dict[str, Any]:
-    import torch
-    from executorch.backends.arm.ethosu import EthosUPartitioner
+    from executorch.backends.arm.tosa.partitioner import TOSAPartitioner
     from executorch.exir import (
         EdgeCompileConfig,
         ExecutorchBackendConfig,
@@ -118,7 +109,7 @@ def run_one_model(model_name: str) -> dict[str, Any]:
         return result
 
     patch_tosa_backend()
-    partitioner = EthosUPartitioner(compile_spec)
+    partitioner = TOSAPartitioner(compile_spec)
 
     t1 = time.perf_counter()
     try:

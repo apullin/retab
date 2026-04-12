@@ -15,6 +15,7 @@ pub fn register(table: &mut EmitterTable) {
         (OpTarget::TosaConcat, emit_concat),
         (OpTarget::Expand, emit_expand),
         (OpTarget::Repeat, emit_repeat),
+        (OpTarget::QuantizePerTensor, emit_quantize_per_tensor),
         (OpTarget::DequantizePerTensor, emit_dequantize_per_tensor),
         (OpTarget::Reshape, emit_aten_reshape),
         (OpTarget::Flatten, emit_aten_reshape),
@@ -89,6 +90,291 @@ fn parse_resize_mode(node: &Node) -> ResizeMode {
         Some("bilinear") => ResizeMode::Bilinear,
         _ => ResizeMode::Nearest,
     }
+}
+
+fn quantize_intermediate_ir_dtype(graph: &Graph, node: &Node) -> crate::graph::ir::DType {
+    use crate::graph::ir::DType as IrDType;
+
+    match first_input_node(graph, node).map(|input| input.meta.val.dtype) {
+        Some(IrDType::Float16) => IrDType::Float16,
+        Some(IrDType::BFloat16) => IrDType::BFloat16,
+        _ => IrDType::Float32,
+    }
+}
+
+fn full_quant_bounds(dtype: DType) -> Option<(i64, i64)> {
+    match dtype {
+        DType::Int8 => Some((-128, 127)),
+        DType::Int16 => Some((-32_768, 32_767)),
+        DType::Int32 => Some((-2_147_483_648, 2_147_483_647)),
+        _ => None,
+    }
+}
+
+fn emit_bankers_round_temp(
+    result: &mut EmitResult,
+    base_name: &str,
+    input_name: String,
+    shape: Vec<i32>,
+    base_dtype: DType,
+    ir_dtype: crate::graph::ir::DType,
+) -> String {
+    let half_name = format!("{base_name}_round_half");
+    let one_name = format!("{base_name}_round_one");
+    let two_name = format!("{base_name}_round_two");
+    let floor_x_name = format!("{base_name}_round_floor_x");
+    let frac_name = format!("{base_name}_round_frac");
+    let is_tie_name = format!("{base_name}_round_is_tie");
+    let plus_half_name = format!("{base_name}_round_plus_half");
+    let round_up_name = format!("{base_name}_round_up");
+    let half_floor_mul_name = format!("{base_name}_round_half_floor_mul");
+    let half_floor_name = format!("{base_name}_round_half_floor");
+    let even_floor_name = format!("{base_name}_round_even_floor");
+    let floor_is_even_name = format!("{base_name}_round_floor_is_even");
+    let floor_plus_one_name = format!("{base_name}_round_floor_plus_one");
+    let tie_result_name = format!("{base_name}_round_tie_result");
+    let output_name = format!("{base_name}_round");
+
+    for (name, value) in [
+        (half_name.clone(), 0.5),
+        (one_name.clone(), 1.0),
+        (two_name.clone(), 2.0),
+    ] {
+        let tensor = make_filled_const_tensor(name, shape.clone(), ir_dtype, value)
+            .expect("emit_bankers_round_temp: unsupported constant dtype");
+        push_inline_const(result, tensor);
+    }
+
+    let round_shift_base = format!("{base_name}_round");
+    let shift_name = push_shift_const(result, &round_shift_base);
+
+    result
+        .unary(
+            floor_x_name.clone(),
+            shape.clone(),
+            base_dtype,
+            Op::Floor,
+            Attribute::Floor(FloorAttribute {}),
+            input_name.clone(),
+        )
+        .binary(
+            frac_name.clone(),
+            shape.clone(),
+            base_dtype,
+            Op::Sub,
+            Attribute::Sub(SubAttribute {}),
+            input_name.clone(),
+            floor_x_name.clone(),
+        )
+        .binary(
+            is_tie_name.clone(),
+            shape.clone(),
+            DType::Bool,
+            Op::Equal,
+            Attribute::Equal(EqualAttribute {}),
+            frac_name,
+            half_name.clone(),
+        )
+        .binary(
+            plus_half_name.clone(),
+            shape.clone(),
+            base_dtype,
+            Op::Add,
+            Attribute::Add(AddAttribute {}),
+            input_name,
+            half_name.clone(),
+        )
+        .unary(
+            round_up_name.clone(),
+            shape.clone(),
+            base_dtype,
+            Op::Floor,
+            Attribute::Floor(FloorAttribute {}),
+            plus_half_name,
+        )
+        .ternary(
+            half_floor_mul_name.clone(),
+            shape.clone(),
+            base_dtype,
+            Op::Mul,
+            Attribute::Mul(MulAttribute { shift: 0 }),
+            floor_x_name.clone(),
+            half_name,
+            shift_name.clone(),
+        )
+        .unary(
+            half_floor_name.clone(),
+            shape.clone(),
+            base_dtype,
+            Op::Floor,
+            Attribute::Floor(FloorAttribute {}),
+            half_floor_mul_name,
+        )
+        .ternary(
+            even_floor_name.clone(),
+            shape.clone(),
+            base_dtype,
+            Op::Mul,
+            Attribute::Mul(MulAttribute { shift: 0 }),
+            half_floor_name,
+            two_name,
+            shift_name,
+        )
+        .binary(
+            floor_is_even_name.clone(),
+            shape.clone(),
+            DType::Bool,
+            Op::Equal,
+            Attribute::Equal(EqualAttribute {}),
+            floor_x_name.clone(),
+            even_floor_name,
+        )
+        .binary(
+            floor_plus_one_name.clone(),
+            shape.clone(),
+            base_dtype,
+            Op::Add,
+            Attribute::Add(AddAttribute {}),
+            floor_x_name.clone(),
+            one_name,
+        )
+        .ternary(
+            tie_result_name.clone(),
+            shape.clone(),
+            base_dtype,
+            Op::Select,
+            Attribute::Select(SelectAttribute {}),
+            floor_is_even_name,
+            floor_x_name,
+            floor_plus_one_name,
+        );
+
+    result.push_output_op(
+        make_empty_tensor(output_name.clone(), shape, base_dtype),
+        Op::Select,
+        Attribute::Select(SelectAttribute {}),
+        vec![is_tie_name, tie_result_name, round_up_name],
+    );
+
+    output_name
+}
+
+pub(super) fn emit_quantize_per_tensor(ctx: &EmitContext) -> EmitResult {
+    let node = ctx.node;
+    let graph = ctx.graph;
+    let mut result = EmitResult::default();
+    let Some(mut current_name) = ctx.input_names().first().cloned() else {
+        return result;
+    };
+
+    let output_shape = ctx.shape();
+    let output_dtype = ctx.dtype();
+    let intermediate_ir_dtype = quantize_intermediate_ir_dtype(graph, node);
+    let intermediate_dtype = ir_dtype_to_tosa(intermediate_ir_dtype);
+    let scale = node.args.get(1).map_or(1.0, Arg::as_f64);
+    if scale == 0.0 {
+        return result;
+    }
+    let zero_point = node.args.get(2).and_then(Arg::as_i64).unwrap_or(0) as f64;
+    let qmin = node.args.get(3).and_then(Arg::as_i64);
+    let qmax = node.args.get(4).and_then(Arg::as_i64);
+
+    if scale != 1.0 {
+        let scale_name = format!("{}_scale", node.name);
+        let scaled_name = format!("{}_scaled", node.name);
+        if let Some(scale_tensor) = make_filled_const_tensor(
+            scale_name.clone(),
+            output_shape.clone(),
+            intermediate_ir_dtype,
+            1.0 / scale,
+        ) {
+            push_inline_const(&mut result, scale_tensor);
+            let shift_name = push_shift_const(&mut result, &node.name);
+            result.push_output_op(
+                make_empty_tensor(
+                    scaled_name.clone(),
+                    output_shape.clone(),
+                    intermediate_dtype,
+                ),
+                Op::Mul,
+                Attribute::Mul(MulAttribute { shift: 0 }),
+                vec![current_name, scale_name, shift_name],
+            );
+            current_name = scaled_name;
+        }
+    }
+
+    current_name = emit_bankers_round_temp(
+        &mut result,
+        &node.name,
+        current_name,
+        output_shape.clone(),
+        intermediate_dtype,
+        intermediate_ir_dtype,
+    );
+
+    if zero_point != 0.0 {
+        let zp_name = format!("{}_zp", node.name);
+        let shifted_name = format!("{}_shifted", node.name);
+        if let Some(zp_tensor) = make_filled_const_tensor(
+            zp_name.clone(),
+            output_shape.clone(),
+            intermediate_ir_dtype,
+            zero_point,
+        ) {
+            push_inline_const(&mut result, zp_tensor);
+            result.push_output_op(
+                make_empty_tensor(
+                    shifted_name.clone(),
+                    output_shape.clone(),
+                    intermediate_dtype,
+                ),
+                Op::Add,
+                Attribute::Add(AddAttribute {}),
+                vec![current_name, zp_name],
+            );
+            current_name = shifted_name;
+        }
+    }
+
+    if let (Some(qmin), Some(qmax)) = (qmin, qmax) {
+        if full_quant_bounds(output_dtype) != Some((qmin, qmax)) {
+            let min_arg = Arg::Float(qmin as f64);
+            let max_arg = Arg::Float(qmax as f64);
+            let clamped_name = format!("{}_clamped", node.name);
+            result.push_output_op(
+                make_empty_tensor(
+                    clamped_name.clone(),
+                    output_shape.clone(),
+                    intermediate_dtype,
+                ),
+                Op::Clamp,
+                Attribute::Clamp(ClampAttribute {
+                    min_val: clamp_bound_bytes_from_arg(
+                        intermediate_ir_dtype,
+                        Some(&min_arg),
+                        true,
+                    ),
+                    max_val: clamp_bound_bytes_from_arg(
+                        intermediate_ir_dtype,
+                        Some(&max_arg),
+                        false,
+                    ),
+                    nan_mode: NanPropagationMode::Propagate,
+                }),
+                vec![current_name],
+            );
+            current_name = clamped_name;
+        }
+    }
+
+    result.push_output_op(
+        ctx.make_output(),
+        Op::Cast,
+        Attribute::Cast(CastAttribute {}),
+        vec![current_name],
+    );
+    result
 }
 
 pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {

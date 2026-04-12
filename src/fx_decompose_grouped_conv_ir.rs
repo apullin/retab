@@ -136,7 +136,11 @@ fn qparams_support_group_slicing(
     true
 }
 
-fn cat_meta_from_outputs(graph: &IrGraph, original_id: NodeId, output_slices: &[NodeId]) -> NodeMeta {
+fn cat_meta_from_outputs(
+    graph: &IrGraph,
+    original_id: NodeId,
+    output_slices: &[NodeId],
+) -> NodeMeta {
     let mut meta = graph.nodes[original_id].meta.clone();
     clear_qparams(&mut meta);
     for &slice_id in output_slices {
@@ -213,7 +217,12 @@ fn parse_grouped_conv(graph: &IrGraph, id: NodeId) -> Option<GroupedConvSpec> {
         _ => IrArg::None,
     };
     let transposed = !is_raw_conv2d && args[6].as_bool().unwrap_or(false);
-    let in_channels = graph.nodes[input_id].meta.val_shape()?.get(1).copied().unwrap_or(0);
+    let in_channels = graph.nodes[input_id]
+        .meta
+        .val_shape()?
+        .get(1)
+        .copied()
+        .unwrap_or(0);
     if !transposed && in_channels == groups {
         return None;
     }
@@ -241,13 +250,7 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
     } else {
         (weight_shape[1], weight_shape[0] / spec.groups)
     };
-    if !qparams_support_group_slicing(
-        graph,
-        id,
-        spec.groups,
-        output_slice_size,
-        spec.transposed,
-    ) {
+    if !qparams_support_group_slicing(graph, id, spec.groups, output_slice_size, spec.transposed) {
         return false;
     }
 
@@ -283,7 +286,8 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
         } else {
             (group * output_slice_size, (group + 1) * output_slice_size)
         };
-        let Some(weight_meta) = slice_meta(graph, spec.weight_id, 0, weight_start, weight_stop) else {
+        let Some(weight_meta) = slice_meta(graph, spec.weight_id, 0, weight_start, weight_stop)
+        else {
             return false;
         };
         let weight_slice = graph.add_node(
@@ -325,7 +329,11 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
             _ => IrArg::None,
         };
 
-        let mut conv_args = vec![IrArg::Node(input_slice), IrArg::Node(weight_slice), bias_arg];
+        let mut conv_args = vec![
+            IrArg::Node(input_slice),
+            IrArg::Node(weight_slice),
+            bias_arg,
+        ];
         if spec.is_raw_conv2d {
             for idx in 3..6 {
                 if let Some(arg) = args.get(idx) {
@@ -366,7 +374,12 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
         format!("{}_cat", node_name),
         "aten.cat.default".to_string(),
         vec![
-            IrArg::List(output_slices.iter().map(|&node_id| IrArg::Node(node_id)).collect()),
+            IrArg::List(
+                output_slices
+                    .iter()
+                    .map(|&node_id| IrArg::Node(node_id))
+                    .collect(),
+            ),
             IrArg::Int(1),
         ],
         cat_meta,
@@ -380,7 +393,9 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
 pub struct IrDecomposeGroupedConvPass;
 
 impl IrPass for IrDecomposeGroupedConvPass {
-    fn name(&self) -> &str { "IrDecomposeGroupedConv" }
+    fn name(&self) -> &str {
+        "IrDecomposeGroupedConv"
+    }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
@@ -392,7 +407,9 @@ impl IrPass for IrDecomposeGroupedConvPass {
             modified |= decompose_grouped_conv(graph, id, spec);
         }
         if modified {
-            log_line(format_args!("[IrDecomposeGroupedConv] decomposed grouped conv ops"));
+            log_line(format_args!(
+                "[IrDecomposeGroupedConv] decomposed grouped conv ops"
+            ));
         }
         modified
     }

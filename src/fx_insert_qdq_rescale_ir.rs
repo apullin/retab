@@ -11,7 +11,12 @@ fn is_quantize(target: &str) -> bool {
     target.contains("quantize_per_tensor") && !target.contains("dequantize")
 }
 
-fn rescale_meta_from(source: &NodeMeta, quantize: &NodeMeta, input_qp: QParam, output_qp: QParam) -> NodeMeta {
+fn rescale_meta_from(
+    source: &NodeMeta,
+    quantize: &NodeMeta,
+    input_qp: QParam,
+    output_qp: QParam,
+) -> NodeMeta {
     let mut meta = quantize.clone();
     let mut input_qparams = HashMap::new();
     input_qparams.insert(0, input_qp);
@@ -53,7 +58,12 @@ fn insert_qdq_rescale(graph: &mut IrGraph, dq_id: NodeId, q_id: NodeId) -> bool 
     }
 
     let scale = dq_qp.scale / q_qp.scale;
-    let meta = rescale_meta_from(&graph.node(source_id).meta, &q.meta, dq_qp.clone(), q_qp.clone());
+    let meta = rescale_meta_from(
+        &graph.node(source_id).meta,
+        &q.meta,
+        dq_qp.clone(),
+        q_qp.clone(),
+    );
     let rescale = graph.add_node(
         NodeOp::CallFunction,
         format!("{}_rescale", q.name),
@@ -88,10 +98,7 @@ impl IrPass for IrInsertQdqRescalePass {
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut pairs = Vec::new();
         for node in &graph.nodes {
-            if !node.alive
-                || node.op != NodeOp::CallFunction
-                || !is_dequantize(&node.target)
-            {
+            if !node.alive || node.op != NodeOp::CallFunction || !is_dequantize(&node.target) {
                 continue;
             }
             for user_id in graph.live_user_ids(node.id) {
@@ -107,7 +114,9 @@ impl IrPass for IrInsertQdqRescalePass {
             modified |= insert_qdq_rescale(graph, dq_id, q_id);
         }
         if modified {
-            log_line(format_args!("[IrInsertQdqRescale] folded DQ->Q pairs into RESCALE ops"));
+            log_line(format_args!(
+                "[IrInsertQdqRescale] folded DQ->Q pairs into RESCALE ops"
+            ));
         }
         modified
     }

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta, NodeOp};
 use crate::runner_logging::log_line;
 
@@ -50,6 +52,10 @@ fn memory_format_differs(shape: &[i64], rank: usize) -> bool {
     channel_dim > 1 && spatial_dims.iter().any(|&d| d > 1)
 }
 
+fn layout_shape_differs(shape: &[i64], rank: usize, spatial_rank: usize) -> bool {
+    rank >= 4 && permuted_shape(shape, &channels_last_order(rank, spatial_rank)) != shape
+}
+
 fn is_channel_reshape(input_shape: &[i64], output_shape: &[i64]) -> bool {
     let valid = [4, 5, 6];
     if !valid.contains(&input_shape.len()) || !valid.contains(&output_shape.len()) {
@@ -86,6 +92,14 @@ fn is_input_placeholder(graph: &IrGraph, id: NodeId) -> bool {
     node.tensor.is_none()
 }
 
+fn all_live_users_layout_neutral(graph: &IrGraph, id: NodeId) -> bool {
+    let users = graph.live_user_ids(id);
+    !users.is_empty()
+        && users
+            .iter()
+            .all(|&user_id| is_layout_neutral(&graph.nodes[user_id].meta))
+}
+
 fn is_control_flow_submodule(graph: &IrGraph) -> bool {
     graph.nodes.iter().any(|node| {
         node.alive
@@ -103,13 +117,79 @@ fn is_control_flow_submodule(graph: &IrGraph) -> bool {
 
 fn is_view_like(target: &str) -> bool {
     target.contains("view_copy")
+        || target.contains("flatten")
         || target.contains("reshape")
         || target.contains("aten.view.")
         || target.contains("aten._unsafe_view")
 }
 
+fn is_zero_input_constant_target(target: &str) -> bool {
+    target.contains("aten.full.default")
+        || target.contains("aten.arange")
+        || target.contains("aten.linspace")
+        || target.contains("aten.eye")
+}
+
+fn is_constant_only_shape_target(target: &str) -> bool {
+    is_view_like(target)
+        || target.contains("aten.slice_copy.Tensor")
+        || target.contains("aten.unsqueeze_copy.default")
+        || target.contains("aten.permute_copy.default")
+}
+
+fn arg_constant_subgraph(graph: &IrGraph, arg: &IrArg, memo: &mut HashMap<NodeId, bool>) -> bool {
+    match arg {
+        IrArg::Node(node_id) => is_constant_subgraph(graph, *node_id, memo),
+        IrArg::List(values) => values
+            .iter()
+            .all(|value| arg_constant_subgraph(graph, value, memo)),
+        _ => true,
+    }
+}
+
+fn is_constant_subgraph(graph: &IrGraph, id: NodeId, memo: &mut HashMap<NodeId, bool>) -> bool {
+    if let Some(&cached) = memo.get(&id) {
+        return cached;
+    }
+
+    let node = &graph.nodes[id];
+    let result = if !node.alive {
+        false
+    } else if node.op == NodeOp::Placeholder {
+        node.tensor.is_some() || node.meta.extra_bool("arm_constant_placeholder") == Some(true)
+    } else if node.op == NodeOp::CallFunction {
+        if is_zero_input_constant_target(&node.target) {
+            true
+        } else if is_constant_only_shape_target(&node.target) {
+            node.args
+                .iter()
+                .all(|arg| arg_constant_subgraph(graph, arg, memo))
+                && node
+                    .kwargs
+                    .values()
+                    .all(|arg| arg_constant_subgraph(graph, arg, memo))
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    memo.insert(id, result);
+    result
+}
+
 fn is_permute(target: &str) -> bool {
     target.contains("permute_copy") || target.contains("aten.permute.")
+}
+
+fn is_transposed_aten_convolution(node: &crate::fx_ir::IrNode) -> bool {
+    let target = node.target.to_ascii_lowercase();
+    if !(target.contains("aten.convolution") || target.contains("edge__ops_aten_convolution")) {
+        return false;
+    }
+    matches!(node.args.get(6), Some(IrArg::Bool(true)))
+        || matches!(node.kwargs.get("transposed"), Some(IrArg::Bool(true)))
 }
 
 fn is_transpose_conv2d_weight(graph: &IrGraph, id: NodeId) -> bool {
@@ -119,7 +199,10 @@ fn is_transpose_conv2d_weight(graph: &IrGraph, id: NodeId) -> bool {
             return false;
         }
         let target = user.target.to_ascii_lowercase();
-        if !(target.contains("transpose_conv2d") || target.contains("transposeconv2d")) {
+        if !(target.contains("transpose_conv2d")
+            || target.contains("transposeconv2d")
+            || is_transposed_aten_convolution(user))
+        {
             return false;
         }
         matches!(user.args.get(1), Some(IrArg::Node(weight_id)) if *weight_id == id)
@@ -363,11 +446,15 @@ impl IrToTosaMemoryFormatPass {
     fn insert_view_boundary_transposes(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
         let ids: Vec<_> = (0..graph.nodes.len()).collect();
+        let mut constant_memo = HashMap::new();
         for id in ids {
             if !graph.nodes[id].alive
                 || graph.nodes[id].op != NodeOp::CallFunction
                 || !is_view_like(&graph.nodes[id].target)
             {
+                continue;
+            }
+            if is_constant_subgraph(graph, id, &mut constant_memo) {
                 continue;
             }
 
@@ -395,8 +482,9 @@ impl IrToTosaMemoryFormatPass {
             let output_rank = output_shape.len();
             let channel_reshape = is_channel_reshape(&input_shape, &output_shape);
 
+            let input_memory_format_differs = memory_format_differs(&input_shape, input_rank);
             if (channel_reshape || (input_rank >= 4 && output_rank < 4))
-                && memory_format_differs(&input_shape, input_rank)
+                && input_memory_format_differs
             {
                 let perm =
                     channels_last_inverse_order(input_rank, spatial_rank(graph, input_id, 2));
@@ -410,8 +498,9 @@ impl IrToTosaMemoryFormatPass {
                 modified = true;
             }
 
+            let output_memory_format_differs = memory_format_differs(&output_shape, output_rank);
             if (channel_reshape || (input_rank < 4 && output_rank >= 4))
-                && memory_format_differs(&output_shape, output_rank)
+                && output_memory_format_differs
             {
                 let perm = channels_last_order(output_rank, spatial_rank(graph, id, 2));
                 insert_transpose_after(
@@ -438,6 +527,7 @@ impl IrToTosaMemoryFormatPass {
                 .extra_bool("arm_control_flow_placeholder")
                 == Some(true)
                 || is_layout_neutral(&graph.nodes[id].meta)
+                || all_live_users_layout_neutral(graph, id)
             {
                 continue;
             }

@@ -1,5 +1,49 @@
 use super::*;
 
+fn binary_output_shapes(graph: &Graph, store: &TensorStore, node: &Node) -> (Vec<i32>, Vec<i32>) {
+    let logical_shape = logical_output_shape(node);
+    let emitted_shape =
+        binary_input_broadcast_shape(graph, store, node).unwrap_or_else(|| logical_shape.clone());
+    (logical_shape, emitted_shape)
+}
+
+fn push_binary_output_with_contract(
+    result: &mut EmitResult,
+    node: &Node,
+    op: Op,
+    attribute: Attribute,
+    inputs: Vec<String>,
+    dtype: DType,
+    logical_shape: Vec<i32>,
+    emitted_shape: Vec<i32>,
+) {
+    if emitted_shape != logical_shape {
+        let temp_name = format!("{}_broadcast_output", node.name);
+        result.push_output_op(
+            make_empty_tensor_for_node(node, temp_name.clone(), emitted_shape, dtype),
+            op,
+            attribute,
+            inputs,
+        );
+        push_reshape_with_shape_for_node(
+            result,
+            Some(node),
+            temp_name,
+            node.name.clone(),
+            format!("{}_shape", node.name),
+            logical_shape,
+            dtype,
+        );
+    } else {
+        result.push_output_op(
+            make_empty_tensor_for_node(node, node.name.clone(), logical_shape, dtype),
+            op,
+            attribute,
+            inputs,
+        );
+    }
+}
+
 pub(super) fn emit_direct_unary(
     graph: &Graph,
     store: &TensorStore,
@@ -25,13 +69,18 @@ pub(super) fn emit_direct_binary(
     attribute: Attribute,
 ) -> EmitResult {
     let mut result = EmitResult::default();
-    let mut inputs = collect_input_names(graph, node);
-    maybe_materialize_binary_broadcast(graph, store, node, &mut result, &mut inputs);
-    result.push_output_op(
-        make_actual_output_tensor(graph, store, node),
+    let inputs = collect_binary_input_names(graph, store, node, &mut result);
+    let (logical_shape, emitted_shape) = binary_output_shapes(graph, store, node);
+    let output_dtype = node_output_dtype(node);
+    push_binary_output_with_contract(
+        &mut result,
+        node,
         op,
         attribute,
         inputs,
+        output_dtype,
+        logical_shape,
+        emitted_shape,
     );
     result
 }
@@ -45,9 +94,8 @@ pub(super) fn emit_bool_binary(
     swap_inputs: bool,
 ) -> EmitResult {
     let mut result = EmitResult::default();
-    let mut inputs = collect_input_names(graph, node);
-    maybe_materialize_binary_broadcast(graph, store, node, &mut result, &mut inputs);
-    let broadcast_shape = actual_tensor_shape(graph, store, node);
+    let mut inputs = collect_binary_input_names(graph, store, node, &mut result);
+    let (logical_shape, emitted_shape) = binary_output_shapes(graph, store, node);
     for (idx, arg) in node.args.iter().enumerate().take(inputs.len()) {
         let Some(input_node) = (match arg {
             Arg::Node(id) => graph.node(*id),
@@ -65,7 +113,7 @@ pub(super) fn emit_bool_binary(
         let cast_name = format!("{}_input{}_cast", node.name, idx);
         result.tensors.push(temp_tensor(
             cast_name.clone(),
-            broadcast_shape.clone(),
+            emitted_shape.clone(),
             semantic_dtype,
         ));
         result.operators.push(TosaOperator::new(
@@ -79,13 +127,80 @@ pub(super) fn emit_bool_binary(
     if swap_inputs && inputs.len() >= 2 {
         inputs.swap(0, 1);
     }
-    result.push_output_op(
-        make_bool_output_tensor(graph, store, node),
+    push_binary_output_with_contract(
+        &mut result,
+        node,
         op,
         attribute,
         inputs,
+        DType::Bool,
+        logical_shape,
+        emitted_shape,
     );
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::ir::{
+        DType as IrDType, NodeMeta as GraphNodeMeta, OpTarget, OpType, TensorInfo,
+    };
+    use crate::graph::Graph;
+    use smallvec::smallvec;
+
+    fn meta(shape: &[i64], dtype: IrDType) -> GraphNodeMeta {
+        GraphNodeMeta::new(TensorInfo::new(shape, dtype))
+    }
+
+    #[test]
+    fn binary_emit_reshapes_broadcast_rank_back_to_logical_output() {
+        let mut graph = Graph::new();
+        let x = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Other("x".to_string()),
+            smallvec![],
+            Vec::new(),
+            meta(&[1, 4, 5, 1], IrDType::Float32),
+            "x".to_string(),
+        );
+        let y = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Other("y".to_string()),
+            smallvec![],
+            Vec::new(),
+            meta(&[1, 4, 1, 1], IrDType::Float32),
+            "y".to_string(),
+        );
+        let add = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::Add,
+            smallvec![Arg::Node(x), Arg::Node(y)],
+            Vec::new(),
+            meta(&[1, 4, 5], IrDType::Float32),
+            "add".to_string(),
+        );
+        let store = TensorStore::default();
+
+        let result = emit_direct_binary(
+            &graph,
+            graph.node(add).expect("add node"),
+            &store,
+            Op::Add,
+            Attribute::Add(AddAttribute {}),
+        );
+
+        assert_eq!(result.operators.len(), 3);
+        assert_eq!(result.operators[0].op, Op::Add);
+        assert_eq!(
+            result.operators[0].outputs,
+            vec!["add_broadcast_output".to_string()]
+        );
+        assert_eq!(result.operators[2].op, Op::Reshape);
+        assert_eq!(result.operators[2].outputs, vec!["add".to_string()]);
+        assert_eq!(result.tensors[0].shape, vec![1, 4, 5, 1]);
+        assert_eq!(result.tensors[1].shape, vec![1, 4, 5]);
+    }
 }
 
 pub(super) fn emit_identity(graph: &Graph, store: &TensorStore, node: &Node) -> EmitResult {

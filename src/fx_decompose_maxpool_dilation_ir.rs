@@ -9,7 +9,10 @@ fn i64_list(vals: &[i64]) -> IrArg {
 
 fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
     let mut m = base.clone();
-    m.set_val(FakeTensorMeta { shape, dtype: dtype.to_string() });
+    m.set_val(FakeTensorMeta {
+        shape,
+        dtype: dtype.to_string(),
+    });
     m
 }
 
@@ -30,7 +33,11 @@ fn pack_dimension(dil: i64, pad: i64, orig: i64, kernel: i64, stride: i64) -> (i
     let extra = (dil - (padded % dil)) % dil;
     let packed = (padded + extra) / dil;
     let eff_k = dil * (kernel - 1) + 1;
-    let out = if padded < eff_k { 0 } else { 1 + (padded - eff_k) / stride };
+    let out = if padded < eff_k {
+        0
+    } else {
+        1 + (padded - eff_k) / stride
+    };
     (packed, pad + extra, out)
 }
 
@@ -57,7 +64,9 @@ fn pad_value_for_dtype(dtype: &str) -> IrArg {
 pub struct IrDecomposeMaxPoolDilationPass;
 
 impl IrPass for IrDecomposeMaxPoolDilationPass {
-    fn name(&self) -> &str { "IrDecomposeMaxPoolDilation" }
+    fn name(&self) -> &str {
+        "IrDecomposeMaxPoolDilation"
+    }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
@@ -68,15 +77,62 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 continue;
             }
             let t = &graph.nodes[id].target;
-            if !(t.contains("max_pool2d") && !t.contains("with_indices")) { continue; }
+            if !t.contains("max_pool2d") {
+                continue;
+            }
+            let is_with_indices = t.contains("with_indices");
+
+            let value_getitem = if is_with_indices {
+                let mut value_user = None;
+                let mut unsupported = false;
+                for &user_id in graph.users(id) {
+                    let user = &graph.nodes[user_id];
+                    if !user.alive {
+                        continue;
+                    }
+                    if !user.target.contains("getitem") {
+                        unsupported = true;
+                        break;
+                    }
+                    match user.args.get(1).and_then(|arg| arg.as_int()) {
+                        Some(0) => value_user = Some(user_id),
+                        Some(_) => {
+                            if !graph.live_user_ids(user_id).is_empty() {
+                                unsupported = true;
+                                break;
+                            }
+                        }
+                        None => {
+                            unsupported = true;
+                            break;
+                        }
+                    }
+                }
+                if unsupported {
+                    continue;
+                }
+                match value_user {
+                    Some(user_id) => Some(user_id),
+                    None => continue,
+                }
+            } else {
+                None
+            };
 
             let x_id = match graph.nodes[id].args.first().and_then(|a| a.as_node()) {
-                Some(n) => n, None => continue,
+                Some(n) => n,
+                None => continue,
             };
             let input_shape = match graph.nodes[x_id].meta.val_shape() {
-                Some(s) if s.len() >= 4 => s.to_vec(), _ => continue,
+                Some(s) if s.len() >= 4 => s.to_vec(),
+                _ => continue,
             };
-            let (n, c, h, w) = (input_shape[0], input_shape[1], input_shape[2], input_shape[3]);
+            let (n, c, h, w) = (
+                input_shape[0],
+                input_shape[1],
+                input_shape[2],
+                input_shape[3],
+            );
             let args = &graph.nodes[id].args;
 
             let (k_h, k_w) = pair_arg(args, 1, (1, 1));
@@ -85,15 +141,22 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
             let (d_h, d_w) = pair_arg(args, 4, (1, 1));
             let ceil_mode = args.get(5).and_then(|a| a.as_bool()).unwrap_or(false);
 
-            if d_h == 1 && d_w == 1 { continue; }
+            if d_h == 1 && d_w == 1 {
+                continue;
+            }
 
             let (h_pack, bottom_pad, h_final) = pack_dimension(d_h, pad_h, h, k_h, s_h);
             let (w_pack, right_pad, w_final) = pack_dimension(d_w, pad_w, w, k_w, s_w);
 
             let node_name = graph.nodes[id].name.clone();
-            let orig_meta = graph.nodes[id].meta.clone();
-            let dtype = graph.nodes[x_id].meta.val_dtype()
-                .unwrap_or("torch.float32").to_string();
+            let orig_meta = value_getitem
+                .map(|user_id| graph.nodes[user_id].meta.clone())
+                .unwrap_or_else(|| graph.nodes[id].meta.clone());
+            let dtype = graph.nodes[x_id]
+                .meta
+                .val_dtype()
+                .unwrap_or("torch.float32")
+                .to_string();
 
             // 1. constant_pad_nd(x, [pad_w, right_pad, pad_h, bottom_pad, 0,0,0,0], pad_val)
             let x_pad = graph.add_node(
@@ -105,7 +168,11 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     i64_list(&[pad_w, right_pad, pad_h, bottom_pad, 0, 0, 0, 0]),
                     pad_value_for_dtype(&dtype),
                 ],
-                meta_with(&orig_meta, vec![n, c, h + pad_h + bottom_pad, w + pad_w + right_pad], &dtype),
+                meta_with(
+                    &orig_meta,
+                    vec![n, c, h + pad_h + bottom_pad, w + pad_w + right_pad],
+                    &dtype,
+                ),
             );
             graph.anchor_to(x_pad, id);
 
@@ -114,7 +181,10 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 NodeOp::CallFunction,
                 format!("{}_pack_view", node_name),
                 "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(x_pad), i64_list(&[n, c, h_pack, d_h, w_pack, d_w])],
+                vec![
+                    IrArg::Node(x_pad),
+                    i64_list(&[n, c, h_pack, d_h, w_pack, d_w]),
+                ],
                 meta_with(&orig_meta, vec![n, c, h_pack, d_h, w_pack, d_w], &dtype),
             );
             graph.anchor_to(x_view, id);
@@ -134,7 +204,10 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 NodeOp::CallFunction,
                 format!("{}_batch", node_name),
                 "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(x_perm), i64_list(&[n * d_h * d_w, c, h_pack, w_pack])],
+                vec![
+                    IrArg::Node(x_perm),
+                    i64_list(&[n * d_h * d_w, c, h_pack, w_pack]),
+                ],
                 meta_with(&orig_meta, vec![n * d_h * d_w, c, h_pack, w_pack], &dtype),
             );
             graph.anchor_to(x_batch, id);
@@ -151,7 +224,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     i64_list(&[k_h, k_w]),
                     i64_list(&[s_h, s_w]),
                     i64_list(&[0, 0]),
-                    IrArg::Int(1),          // dilation=1
+                    IrArg::Int(1), // dilation=1
                     IrArg::Bool(ceil_mode),
                 ],
                 meta_with(&orig_meta, vec![n * d_h * d_w, c, h_out, w_out], &dtype),
@@ -163,7 +236,10 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 NodeOp::CallFunction,
                 format!("{}_unpack", node_name),
                 "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(pooled), i64_list(&[d_h, d_w, n, c, h_out, w_out])],
+                vec![
+                    IrArg::Node(pooled),
+                    i64_list(&[d_h, d_w, n, c, h_out, w_out]),
+                ],
                 meta_with(&orig_meta, vec![d_h, d_w, n, c, h_out, w_out], &dtype),
             );
             graph.anchor_to(unpack, id);
@@ -183,7 +259,10 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 NodeOp::CallFunction,
                 format!("{}_out_view", node_name),
                 "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(unperm), i64_list(&[n, c, h_out * d_h, w_out * d_w])],
+                vec![
+                    IrArg::Node(unperm),
+                    i64_list(&[n, c, h_out * d_h, w_out * d_w]),
+                ],
                 meta_with(&orig_meta, vec![n, c, h_out * d_h, w_out * d_w], &dtype),
             );
             graph.anchor_to(out_view, id);
@@ -193,7 +272,12 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 NodeOp::CallFunction,
                 format!("{}_slice_h", node_name),
                 "aten.slice_copy.Tensor".to_string(),
-                vec![IrArg::Node(out_view), IrArg::Int(2), IrArg::Int(0), IrArg::Int(h_final)],
+                vec![
+                    IrArg::Node(out_view),
+                    IrArg::Int(2),
+                    IrArg::Int(0),
+                    IrArg::Int(h_final),
+                ],
                 meta_with(&orig_meta, vec![n, c, h_final, w_out * d_w], &dtype),
             );
             graph.anchor_to(slice_h, id);
@@ -203,16 +287,41 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 NodeOp::CallFunction,
                 format!("{}_slice_w", node_name),
                 "aten.slice_copy.Tensor".to_string(),
-                vec![IrArg::Node(slice_h), IrArg::Int(3), IrArg::Int(0), IrArg::Int(w_final)],
+                vec![
+                    IrArg::Node(slice_h),
+                    IrArg::Int(3),
+                    IrArg::Int(0),
+                    IrArg::Int(w_final),
+                ],
                 meta_with(&orig_meta, vec![n, c, h_final, w_final], &dtype),
             );
 
-            graph.replace_and_erase(id, result);
+            if let Some(value_getitem) = value_getitem {
+                graph.replace_and_erase(value_getitem, result);
+                let extra_getitems: Vec<NodeId> = graph
+                    .users(id)
+                    .iter()
+                    .copied()
+                    .filter(|&user_id| {
+                        user_id != value_getitem
+                            && graph.nodes[user_id].alive
+                            && graph.nodes[user_id].target.contains("getitem")
+                    })
+                    .collect();
+                for user_id in extra_getitems {
+                    graph.erase(user_id);
+                }
+                graph.erase(id);
+            } else {
+                graph.replace_and_erase(id, result);
+            }
             modified = true;
         }
 
         if modified {
-            log_line(format_args!("[IrDecomposeMaxPoolDilation] decomposed dilated maxpool ops"));
+            log_line(format_args!(
+                "[IrDecomposeMaxPoolDilation] decomposed dilated maxpool ops"
+            ));
         }
         modified
     }

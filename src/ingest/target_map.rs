@@ -269,6 +269,9 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     if target_str.contains("aten.cat") {
         return OpTarget::Cat;
     }
+    if target_str.contains("aten.slice_scatter") {
+        return OpTarget::Other(target_str.to_string());
+    }
     if target_str.contains("aten.slice_copy") || target_str.contains("aten.slice") {
         return OpTarget::Slice;
     }
@@ -510,6 +513,9 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
     }
     if target_str.contains("aten.cumsum") {
         return OpTarget::Cumsum;
+    }
+    if target_str.contains("aten.erf.") && !target_str.contains("erfinv") {
+        return OpTarget::TosaErf;
     }
     if target_str.contains("aten.erfinv") {
         return OpTarget::Erfinv;
