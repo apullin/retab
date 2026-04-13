@@ -1,8 +1,9 @@
 //! Pure Rust IrPass: unfold_copy → GATHER-based sliding window.
 
-use std::collections::HashMap;
-
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{
+    dtype_kwarg, i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass, NodeId,
+    NodeMeta, NodeOp,
+};
 use crate::runner_logging::log_line;
 
 fn meta_neutral(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
@@ -11,39 +12,6 @@ fn meta_neutral(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
 
 fn mark_layout_neutral_in_place(graph: &mut IrGraph, id: NodeId) {
     graph.node_mut(id).meta.mark_layout_neutral();
-}
-
-fn dtype_kwarg(dtype_str: &str) -> HashMap<String, IrArg> {
-    let mut kw = HashMap::new();
-    kw.insert("dtype".into(), IrArg::Dtype(dtype_str.into()));
-    kw
-}
-
-fn add_full_int(
-    graph: &mut IrGraph,
-    name: String,
-    shape: &[i64],
-    value: i64,
-    dtype: &str,
-    meta: NodeMeta,
-) -> NodeId {
-    let mut kwargs = HashMap::new();
-    kwargs.insert("dtype".to_string(), IrArg::Dtype(dtype.to_string()));
-    graph.add_call_function_with_kwargs(
-        name,
-        "aten.full.default".to_string(),
-        vec![i64_list(shape), IrArg::Int(value)],
-        kwargs,
-        meta,
-    )
-}
-
-fn product(s: &[i64]) -> i64 {
-    if s.is_empty() {
-        1
-    } else {
-        s.iter().copied().product()
-    }
 }
 
 pub struct IrDecomposeUnfoldPass;
@@ -107,8 +75,8 @@ impl IrPass for IrDecomposeUnfoldPass {
             let uc = u * size;
             let pre: Vec<i64> = input_shape[..dim_norm].to_vec();
             let post: Vec<i64> = input_shape[dim_norm + 1..].to_vec();
-            let p = product(&pre);
-            let q = product(&post);
+            let p = shape_product(&pre);
+            let q = shape_product(&post);
 
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
@@ -162,25 +130,25 @@ impl IrPass for IrDecomposeUnfoldPass {
 
             // Build sliding-window index: arange(0,U)*step + arange(0,size) → (U*size,)
             let idx_u_meta = meta_neutral(&orig_meta, vec![u], "torch.int32").without_qparams();
-            let idx_u = graph.add_anchored_call_function_with_kwargs(
+            let idx_u = graph.add_anchored_arange(
                 id,
                 format!("{}_au", name),
-                "aten.arange.start_step".to_string(),
-                vec![IrArg::Int(0), IrArg::Int(u)],
-                dtype_kwarg("torch.int32"),
+                0,
+                u,
+                1,
+                "torch.int32",
                 idx_u_meta,
             );
 
             let step_meta = meta_neutral(&orig_meta, vec![1], "torch.int32").without_qparams();
-            let step_t = add_full_int(
-                graph,
+            let step_t = graph.add_anchored_full_int(
+                id,
                 format!("{}_step", name),
                 &[1],
                 step,
                 "torch.int32",
                 step_meta,
             );
-            graph.anchor_to(step_t, id);
 
             let idx_scaled_meta =
                 meta_neutral(&orig_meta, vec![u], "torch.int32").without_qparams();
@@ -203,12 +171,13 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
 
             let idx_c_meta = meta_neutral(&orig_meta, vec![size], "torch.int32").without_qparams();
-            let idx_c = graph.add_anchored_call_function_with_kwargs(
+            let idx_c = graph.add_anchored_arange(
                 id,
                 format!("{}_ac", name),
-                "aten.arange.start_step".to_string(),
-                vec![IrArg::Int(0), IrArg::Int(size)],
-                dtype_kwarg("torch.int32"),
+                0,
+                size,
+                1,
+                "torch.int32",
                 idx_c_meta,
             );
 

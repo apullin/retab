@@ -82,6 +82,41 @@ pub(crate) fn i64_list_arg(vals: &[i64]) -> IrArg {
     IrArg::List(vals.iter().map(|&v| IrArg::Int(v)).collect())
 }
 
+pub(crate) fn dtype_kwarg(dtype: impl Into<String>) -> HashMap<String, IrArg> {
+    let mut kwargs = HashMap::new();
+    kwargs.insert("dtype".into(), IrArg::Dtype(dtype.into()));
+    kwargs
+}
+
+pub(crate) fn shape_product(shape: &[i64]) -> i64 {
+    if shape.is_empty() {
+        1
+    } else {
+        shape.iter().copied().product()
+    }
+}
+
+pub(crate) fn broadcast_shapes(shapes: &[Vec<i64>]) -> Option<Vec<i64>> {
+    let max_rank = shapes.iter().map(|s| s.len()).max().unwrap_or(0);
+    let mut out = Vec::with_capacity(max_rank);
+    for axis in 0..max_rank {
+        let mut chosen = 1i64;
+        for shape in shapes {
+            let dim = *shape.iter().rev().nth(axis).unwrap_or(&1);
+            if dim != 1 {
+                if chosen == 1 {
+                    chosen = dim;
+                } else if chosen != dim {
+                    return None;
+                }
+            }
+        }
+        out.push(chosen);
+    }
+    out.reverse();
+    Some(out)
+}
+
 fn build_placeholder_tensor_bindings(
     exported_program: &Bound<'_, PyAny>,
 ) -> PyResult<HashMap<String, PlaceholderTensorBinding>> {
@@ -439,6 +474,74 @@ impl IrGraph {
         meta: NodeMeta,
     ) -> NodeId {
         let id = self.add_call_function_with_kwargs(name, target, args, kwargs, meta);
+        self.anchor_to(id, anchor);
+        id
+    }
+
+    pub fn add_full_int(
+        &mut self,
+        name: impl Into<String>,
+        shape: &[i64],
+        value: i64,
+        dtype: &str,
+        meta: NodeMeta,
+    ) -> NodeId {
+        self.add_call_function_with_kwargs(
+            name,
+            "aten.full.default",
+            vec![i64_list_arg(shape), IrArg::Int(value)],
+            dtype_kwarg(dtype),
+            meta,
+        )
+    }
+
+    pub fn add_anchored_full_int(
+        &mut self,
+        anchor: NodeId,
+        name: impl Into<String>,
+        shape: &[i64],
+        value: i64,
+        dtype: &str,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.add_full_int(name, shape, value, dtype, meta);
+        self.anchor_to(id, anchor);
+        id
+    }
+
+    pub fn add_arange(
+        &mut self,
+        name: impl Into<String>,
+        start: i64,
+        end: i64,
+        step: i64,
+        dtype: &str,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let mut args = vec![IrArg::Int(start), IrArg::Int(end)];
+        if step != 1 {
+            args.push(IrArg::Int(step));
+        }
+        self.add_call_function_with_kwargs(
+            name,
+            "aten.arange.start_step",
+            args,
+            dtype_kwarg(dtype),
+            meta,
+        )
+    }
+
+    pub fn add_anchored_arange(
+        &mut self,
+        anchor: NodeId,
+        name: impl Into<String>,
+        start: i64,
+        end: i64,
+        step: i64,
+        dtype: &str,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.add_arange(name, start, end, step, dtype, meta);
         self.anchor_to(id, anchor);
         id
     }

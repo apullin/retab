@@ -1,49 +1,9 @@
 //! Pure Rust IrPass: aten.index.Tensor → linearized GATHER.
 
-use std::collections::HashMap;
-
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{
+    broadcast_shapes, i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp,
+};
 use crate::runner_logging::log_line;
-
-fn add_full_int(
-    graph: &mut IrGraph,
-    name: String,
-    shape: &[i64],
-    value: i64,
-    dtype: &str,
-    meta: NodeMeta,
-) -> NodeId {
-    let mut kwargs = HashMap::new();
-    kwargs.insert("dtype".to_string(), IrArg::Dtype(dtype.to_string()));
-    graph.add_call_function_with_kwargs(
-        name,
-        "aten.full.default".to_string(),
-        vec![i64_list(shape), IrArg::Int(value)],
-        kwargs,
-        meta,
-    )
-}
-
-fn broadcast_shape(shapes: &[Vec<i64>]) -> Option<Vec<i64>> {
-    let max_rank = shapes.iter().map(|s| s.len()).max().unwrap_or(0);
-    let mut out = Vec::with_capacity(max_rank);
-    for axis in 0..max_rank {
-        let mut chosen = 1i64;
-        for shape in shapes {
-            let dim = *shape.iter().rev().nth(axis).unwrap_or(&1);
-            if dim != 1 {
-                if chosen == 1 {
-                    chosen = dim;
-                } else if chosen != dim {
-                    return None;
-                }
-            }
-        }
-        out.push(chosen);
-    }
-    out.reverse();
-    Some(out)
-}
 
 fn compute_index_output_shape(
     batch_shape: &[i64],
@@ -143,7 +103,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 continue;
             }
 
-            let Some(broadcast) = broadcast_shape(&idx_shapes) else {
+            let Some(broadcast) = broadcast_shapes(&idx_shapes) else {
                 continue;
             };
             let first_tensor_pos = idx_positions[0];
@@ -264,15 +224,14 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 let scale_meta = orig_meta
                     .cloned_with_val(vec![1], &idx_dtype)
                     .without_qparams();
-                let scale_id = add_full_int(
-                    graph,
+                let scale_id = graph.add_anchored_full_int(
+                    id,
                     format!("{}_scale{}", node_name, i),
                     &[1],
                     lin_scale,
                     &idx_dtype,
                     scale_meta,
                 );
-                graph.anchor_to(scale_id, id);
 
                 let scaled_meta = orig_meta
                     .cloned_with_val(vec![w], &idx_dtype)

@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
+    i64_list_arg as i64_list, shape_product, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId,
+    NodeMeta, NodeOp,
 };
 use crate::runner_logging::log_line;
 
@@ -14,14 +15,6 @@ fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
         dtype: dtype.to_string(),
     });
     m
-}
-
-fn product(shape: &[i64]) -> i64 {
-    if shape.is_empty() {
-        1
-    } else {
-        shape.iter().copied().product()
-    }
 }
 
 pub struct IrDecomposeIndexSelectPass;
@@ -75,9 +68,9 @@ impl IrPass for IrDecomposeIndexSelectPass {
             let dim_norm = dim.rem_euclid(x_rank) as usize;
             let before: Vec<i64> = x_shape[..dim_norm].to_vec();
             let after: Vec<i64> = x_shape[dim_norm + 1..].to_vec();
-            let n = product(&before);
+            let n = shape_product(&before);
             let k = x_shape[dim_norm];
-            let c = product(&after);
+            let c = shape_product(&after);
             let w = index_shape[0];
 
             let name = graph.nodes[id].name.clone();

@@ -5,9 +5,10 @@
 //!
 //! Skips DQ→Q pairs (handled by InsertRescalePass).
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{
+    dtype_kwarg, i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
+};
 use crate::runner_logging::log_line;
-use std::collections::HashMap;
 
 fn quant_meta(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
     base.cloned_with_val(shape, dtype).without_qparams()
@@ -18,12 +19,6 @@ fn is_q(t: &str) -> bool {
 }
 fn is_dq(t: &str) -> bool {
     t.contains("dequantize_per_tensor.default")
-}
-
-fn dtype_kwarg(dtype_str: &str) -> HashMap<String, IrArg> {
-    let mut kw = HashMap::new();
-    kw.insert("dtype".into(), IrArg::Dtype(dtype_str.into()));
-    kw
 }
 
 /// Create a _to_copy.default(x) node with dtype kwarg for casting.

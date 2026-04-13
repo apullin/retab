@@ -1,48 +1,10 @@
 //! Pure Rust IrPass: index_put → view + scatter + view for TOSA.
 
-use std::collections::HashMap;
-
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{
+    broadcast_shapes, i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass, NodeId,
+    NodeOp,
+};
 use crate::runner_logging::log_line;
-
-fn add_full_int(
-    graph: &mut IrGraph,
-    name: String,
-    shape: &[i64],
-    value: i64,
-    dtype: &str,
-    meta: NodeMeta,
-) -> NodeId {
-    let mut kwargs = HashMap::new();
-    kwargs.insert("dtype".to_string(), IrArg::Dtype(dtype.to_string()));
-    graph.add_call_function_with_kwargs(
-        name,
-        "aten.full.default".to_string(),
-        vec![i64_list(shape), IrArg::Int(value)],
-        kwargs,
-        meta,
-    )
-}
-
-fn add_arange(graph: &mut IrGraph, name: String, end: i64, dtype: &str, meta: NodeMeta) -> NodeId {
-    let mut kwargs = HashMap::new();
-    kwargs.insert("dtype".to_string(), IrArg::Dtype(dtype.to_string()));
-    graph.add_call_function_with_kwargs(
-        name,
-        "aten.arange.start_step".to_string(),
-        vec![IrArg::Int(0), IrArg::Int(end)],
-        kwargs,
-        meta,
-    )
-}
-
-fn product(s: &[i64]) -> i64 {
-    if s.is_empty() {
-        1
-    } else {
-        s.iter().copied().product()
-    }
-}
 
 fn shape_to_stride(shape: &[i64]) -> Vec<i64> {
     let mut strides = vec![0; shape.len()];
@@ -52,27 +14,6 @@ fn shape_to_stride(shape: &[i64]) -> Vec<i64> {
         stride *= shape[i];
     }
     strides
-}
-
-fn broadcast_shape(shapes: &[Vec<i64>]) -> Option<Vec<i64>> {
-    let max_rank = shapes.iter().map(|s| s.len()).max().unwrap_or(0);
-    let mut out = Vec::with_capacity(max_rank);
-    for axis in 0..max_rank {
-        let mut chosen = 1i64;
-        for shape in shapes {
-            let dim = *shape.iter().rev().nth(axis).unwrap_or(&1);
-            if dim != 1 {
-                if chosen == 1 {
-                    chosen = dim;
-                } else if chosen != dim {
-                    return None;
-                }
-            }
-        }
-        out.push(chosen);
-    }
-    out.reverse();
-    Some(out)
 }
 
 pub struct IrRewriteIndexPutPass;
@@ -162,14 +103,15 @@ impl IrPass for IrRewriteIndexPutPass {
                         let arange_meta = orig_meta
                             .cloned_with_val(vec![dim_size], &index_dtype)
                             .without_qparams();
-                        let arange = add_arange(
-                            graph,
+                        let arange = graph.add_anchored_arange(
+                            id,
                             format!("{}_in{}", name, dim_idx),
+                            0,
                             dim_size,
+                            1,
                             &index_dtype,
                             arange_meta,
                         );
-                        graph.anchor_to(arange, id);
                         idx_ids.push(arange);
                         idx_shapes.push(vec![dim_size]);
                     }
@@ -183,16 +125,16 @@ impl IrPass for IrRewriteIndexPutPass {
                 continue;
             }
 
-            let Some(bcast) = broadcast_shape(&idx_shapes) else {
+            let Some(bcast) = broadcast_shapes(&idx_shapes) else {
                 continue;
             };
             let num_idx = idx_ids.len();
-            let w = product(&bcast).max(1);
+            let w = shape_product(&bcast).max(1);
             let mut k = 1i64;
             for i in 0..num_idx {
                 k *= source_shape.get(i).copied().unwrap_or(1);
             }
-            let total = product(&source_shape);
+            let total = shape_product(&source_shape);
             let c = if k != 0 { total / k } else { 1 };
             if !(k > 0 && w > 0 && c > 0) {
                 continue;
@@ -254,15 +196,14 @@ impl IrPass for IrRewriteIndexPutPass {
                 let scale_meta = orig_meta
                     .cloned_with_val(vec![1], &idx_dtype)
                     .without_qparams();
-                let scale = add_full_int(
-                    graph,
+                let scale = graph.add_anchored_full_int(
+                    id,
                     format!("{}_sc{}", name, i),
                     &[1],
                     *lin_scale,
                     &idx_dtype,
                     scale_meta,
                 );
-                graph.anchor_to(scale, id);
 
                 let scaled_meta = orig_meta
                     .cloned_with_val(vec![w], &idx_dtype)
