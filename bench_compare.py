@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """
-Benchmark: Python pass pipeline vs Rust retab.
+Benchmark: Python/reference preprocess vs current Rust lowering APIs.
 
-Compares the inner operation (post-quantization graph → TOSA flatbuffer)
-to isolate the pass pipeline speedup from export/quantization overhead.
+This script is for local engineering diagnostics, not acceptance gating.
+It compares:
+  - the full Python/ExecuTorch lowering stage
+  - the current Rust direct TOSA path via ``lower_to_tosa_v2``
+  - the post-pass ingest+serialize-only path via ``ingest_and_serialize``
+
+The latter two are inner-pipeline timings and intentionally exclude the
+outer ExecuTorch partition/direct-lowering scaffolding.
 """
 
 import sys
@@ -71,7 +77,15 @@ def bench_python_path(quantized_ep, compile_spec, warmup=1, runs=3):
 
 
 def bench_rust_path(quantized_ep, warmup=1, runs=5):
-    """Time the Rust pass pipeline (ingest + passes + serialize)."""
+    """Time current Rust lowering APIs.
+
+    Returns:
+        total_times: ``lower_to_tosa_v2`` wall times
+        ingest_only_times: ``ingest_and_serialize`` wall times after one
+            warm full-lowering run has already materialized the transformed
+            graph/state needed for a realistic post-pass serialization timing
+        passes_only_times: approximate ``lower_to_tosa_v2 - ingest_only``
+    """
     import retab
 
     gm = quantized_ep.graph_module
@@ -79,34 +93,35 @@ def bench_rust_path(quantized_ep, warmup=1, runs=5):
     gs = quantized_ep.graph_signature
 
     times_total = []
-    times_ingest = []
-    times_lower = []
+    times_ingest_only = []
+    times_passes_serialize = []
 
     for i in range(warmup + runs):
-        # Time ingestion separately
+        # ``lower_to_tosa_v2`` is the current all-Rust inner lowering entry.
         t0 = time.perf_counter()
-        ingest_result = retab.ingest_graph(gm, sd, gs)
-        t_ingest = time.perf_counter() - t0
-
-        # Time full lower_to_tosa (includes ingest + passes + serialize)
-        t0 = time.perf_counter()
-        tosa_bytes = retab.lower_to_tosa(gm, sd, gs)
+        tosa_bytes = retab.lower_to_tosa_v2(gm, sd, gs, quantized_ep)
         t_total = time.perf_counter() - t0
 
-        t_passes_serialize = t_total - t_ingest  # approximate
+        # Measure the post-pass ingest+serialize-only slice on the already
+        # transformed graph. The FX graph is mutated by the full-lowering call.
+        t0 = time.perf_counter()
+        ingested_bytes = retab.ingest_and_serialize(gm, sd, gs, quantized_ep)
+        t_ingest_only = time.perf_counter() - t0
+
+        t_passes_serialize = t_total - t_ingest_only
 
         if i >= warmup:
             times_total.append(t_total)
-            times_ingest.append(t_ingest)
-            times_lower.append(t_passes_serialize)
+            times_ingest_only.append(t_ingest_only)
+            times_passes_serialize.append(t_passes_serialize)
             print(
                 f"  Rust run {i - warmup + 1}: "
                 f"total={t_total*1000:.1f}ms "
-                f"(ingest={t_ingest*1000:.1f}ms + passes+serialize={t_passes_serialize*1000:.1f}ms) "
-                f"output={len(tosa_bytes)} bytes"
+                f"(ingest+serialize-only={t_ingest_only*1000:.1f}ms + approx_prepass={t_passes_serialize*1000:.1f}ms) "
+                f"output={len(tosa_bytes)} bytes / ingest_only={len(ingested_bytes)} bytes"
             )
 
-    return times_total, times_ingest, times_lower
+    return times_total, times_ingest_only, times_passes_serialize
 
 
 def main():
@@ -133,15 +148,17 @@ def main():
     print(f"\n{'='*60}")
     print("RUST PATH (retab)")
     print(f"{'='*60}")
-    rust_total, rust_ingest, rust_lower = bench_rust_path(quantized_ep, warmup=1, runs=5)
+    rust_total, rust_ingest_only, rust_lower = bench_rust_path(
+        quantized_ep, warmup=1, runs=5
+    )
 
     avg_rust = sum(rust_total) / len(rust_total)
-    avg_ingest = sum(rust_ingest) / len(rust_ingest)
+    avg_ingest = sum(rust_ingest_only) / len(rust_ingest_only)
     avg_lower = sum(rust_lower) / len(rust_lower)
 
     print(f"\n  Average: {avg_rust*1000:.1f}ms total")
-    print(f"    Ingest:           {avg_ingest*1000:.1f}ms")
-    print(f"    Passes+Serialize: {avg_lower*1000:.1f}ms")
+    print(f"    Ingest+Serialize-only: {avg_ingest*1000:.1f}ms")
+    print(f"    Approx pre-pass work:  {avg_lower*1000:.1f}ms")
 
     # Python path
     if not args.skip_python:
@@ -161,7 +178,7 @@ def main():
         print(f"  Python: {avg_python:.3f}s")
         print(f"  Rust:   {avg_rust*1000:.1f}ms")
         print(f"  Ratio:  {avg_python / avg_rust:.0f}x faster")
-        print(f"  Note: Python includes Vela; Rust does not (yet)")
+        print(f"  Note: Python includes Vela; Rust inner path here does not.")
     else:
         print("\n  (Python path skipped)")
 
