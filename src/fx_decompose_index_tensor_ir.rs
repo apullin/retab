@@ -15,8 +15,7 @@ fn add_full_int(
 ) -> NodeId {
     let mut kwargs = HashMap::new();
     kwargs.insert("dtype".to_string(), IrArg::Dtype(dtype.to_string()));
-    graph.add_node_with_kwargs(
-        NodeOp::CallFunction,
+    graph.add_call_function_with_kwargs(
         name,
         "aten.full.default".to_string(),
         vec![i64_list(shape), IrArg::Int(value)],
@@ -188,14 +187,13 @@ impl IrPass for IrDecomposeIndexTensorPass {
                     .meta
                     .cloned_with_val(permuted_shape, &x_dtype)
                     .with_qparams_from(&graph.nodes[x_id].meta);
-                let perm_id = graph.add_node(
-                    NodeOp::CallFunction,
+                let perm_id = graph.add_anchored_call_function(
+                    id,
                     format!("{}_x_perm", node_name),
                     "aten.permute_copy.default".to_string(),
                     vec![IrArg::Node(values_in), i64_list(&perm)],
                     perm_meta,
                 );
-                graph.anchor_to(perm_id, id);
                 values_in = perm_id;
             }
 
@@ -204,14 +202,13 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 .meta
                 .cloned_with_val(vec![batch, k, c], &x_dtype)
                 .with_qparams_from(&graph.nodes[x_id].meta);
-            let x_bkc = graph.add_node(
-                NodeOp::CallFunction,
+            let x_bkc = graph.add_anchored_call_function(
+                id,
                 format!("{}_x_flat", node_name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(values_in), i64_list(&[batch, k, c])],
                 x_bkc_meta,
             );
-            graph.anchor_to(x_bkc, id);
 
             // Build linearized flat index
             let mut lin_w: Option<NodeId> = None;
@@ -229,14 +226,13 @@ impl IrPass for IrDecomposeIndexTensorPass {
                     let aligned_meta = orig_meta
                         .cloned_with_val(aligned.clone(), &idx_dtype)
                         .without_qparams();
-                    let aligned_id = graph.add_node(
-                        NodeOp::CallFunction,
+                    let aligned_id = graph.add_anchored_call_function(
+                        id,
                         format!("{}_idx{}_align", node_name, i),
                         "aten.view_copy.default".to_string(),
                         vec![IrArg::Node(current), i64_list(&aligned)],
                         aligned_meta,
                     );
-                    graph.anchor_to(aligned_id, id);
                     current = aligned_id;
                 }
 
@@ -244,27 +240,25 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 let bcast_meta = orig_meta
                     .cloned_with_val(broadcast.clone(), &idx_dtype)
                     .without_qparams();
-                let bcast_id = graph.add_node(
-                    NodeOp::CallFunction,
+                let bcast_id = graph.add_anchored_call_function(
+                    id,
                     format!("{}_idx{}_bcast", node_name, i),
                     "aten.expand_copy.default".to_string(),
                     vec![IrArg::Node(current), i64_list(&broadcast)],
                     bcast_meta,
                 );
-                graph.anchor_to(bcast_id, id);
 
                 // Flatten to (W,)
                 let flat_meta = orig_meta
                     .cloned_with_val(vec![w], &idx_dtype)
                     .without_qparams();
-                let flat_id = graph.add_node(
-                    NodeOp::CallFunction,
+                let flat_id = graph.add_anchored_call_function(
+                    id,
                     format!("{}_idx{}_flat", node_name, i),
                     "aten.view_copy.default".to_string(),
                     vec![IrArg::Node(bcast_id), i64_list(&[w])],
                     flat_meta,
                 );
-                graph.anchor_to(flat_id, id);
 
                 // Scale by linearized stride
                 let scale_meta = orig_meta
@@ -283,14 +277,13 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 let scaled_meta = orig_meta
                     .cloned_with_val(vec![w], &idx_dtype)
                     .without_qparams();
-                let scaled_id = graph.add_node(
-                    NodeOp::CallFunction,
+                let scaled_id = graph.add_anchored_call_function(
+                    id,
                     format!("{}_idx{}_scaled", node_name, i),
                     "aten.mul.Tensor".to_string(),
                     vec![IrArg::Node(flat_id), IrArg::Node(scale_id)],
                     scaled_meta,
                 );
-                graph.anchor_to(scaled_id, id);
 
                 lin_w = Some(match lin_w {
                     None => scaled_id,
@@ -298,14 +291,13 @@ impl IrPass for IrDecomposeIndexTensorPass {
                         let add_meta = orig_meta
                             .cloned_with_val(vec![w], &idx_dtype)
                             .without_qparams();
-                        let add_id = graph.add_node(
-                            NodeOp::CallFunction,
+                        let add_id = graph.add_anchored_call_function(
+                            id,
                             format!("{}_lin_add{}", node_name, i),
                             "aten.add.Tensor".to_string(),
                             vec![IrArg::Node(prev), IrArg::Node(scaled_id)],
                             add_meta,
                         );
-                        graph.anchor_to(add_id, id);
                         add_id
                     }
                 });
@@ -317,14 +309,13 @@ impl IrPass for IrDecomposeIndexTensorPass {
             let idx_1w_meta = orig_meta
                 .cloned_with_val(vec![1, w], &idx_dtype)
                 .without_qparams();
-            let idx_bw_seed = graph.add_node(
-                NodeOp::CallFunction,
+            let idx_bw_seed = graph.add_anchored_call_function(
+                id,
                 format!("{}_idx_1w", node_name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(lin_w_id), IrArg::Int(0)],
                 idx_1w_meta,
             );
-            graph.anchor_to(idx_bw_seed, id);
 
             let idx_bw = if batch == 1 {
                 idx_bw_seed
@@ -332,14 +323,13 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 let expand_meta = orig_meta
                     .cloned_with_val(vec![batch, w], &idx_dtype)
                     .without_qparams();
-                let expand_id = graph.add_node(
-                    NodeOp::CallFunction,
+                let expand_id = graph.add_anchored_call_function(
+                    id,
                     format!("{}_idx_bw", node_name),
                     "aten.expand_copy.default".to_string(),
                     vec![IrArg::Node(idx_bw_seed), i64_list(&[batch, w])],
                     expand_meta,
                 );
-                graph.anchor_to(expand_id, id);
                 expand_id
             };
 
@@ -348,14 +338,13 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 .meta
                 .cloned_with_val(vec![batch, w, c], &x_dtype)
                 .with_qparams_from(&graph.nodes[x_id].meta);
-            let gathered = graph.add_node(
-                NodeOp::CallFunction,
+            let gathered = graph.add_anchored_call_function(
+                id,
                 format!("{}_gather", node_name),
                 "backend.tosa.GATHER.default".to_string(),
                 vec![IrArg::Node(x_bkc), IrArg::Node(idx_bw)],
                 gathered_meta,
             );
-            graph.anchor_to(gathered, id);
 
             // Reshape to (...batch, ...broadcast, ...kept)
             let out_shape = compute_index_output_shape(&batch_shape, &broadcast, &kept_shape);
@@ -363,8 +352,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 .meta
                 .cloned_with_val(out_shape.clone(), &x_dtype)
                 .with_qparams_from(&graph.nodes[x_id].meta);
-            let result = graph.add_node(
-                NodeOp::CallFunction,
+            let result = graph.add_call_function(
                 format!("{}_out", node_name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(gathered), i64_list(&out_shape)],

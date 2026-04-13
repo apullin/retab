@@ -382,6 +382,67 @@ impl IrGraph {
         id
     }
 
+    pub fn add_call_function(
+        &mut self,
+        name: impl Into<String>,
+        target: impl Into<String>,
+        args: Vec<IrArg>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        self.add_node(
+            NodeOp::CallFunction,
+            name.into(),
+            target.into(),
+            args,
+            meta,
+        )
+    }
+
+    pub fn add_call_function_with_kwargs(
+        &mut self,
+        name: impl Into<String>,
+        target: impl Into<String>,
+        args: Vec<IrArg>,
+        kwargs: HashMap<String, IrArg>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        self.add_node_with_kwargs(
+            NodeOp::CallFunction,
+            name.into(),
+            target.into(),
+            args,
+            kwargs,
+            meta,
+        )
+    }
+
+    pub fn add_anchored_call_function(
+        &mut self,
+        anchor: NodeId,
+        name: impl Into<String>,
+        target: impl Into<String>,
+        args: Vec<IrArg>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.add_call_function(name, target, args, meta);
+        self.anchor_to(id, anchor);
+        id
+    }
+
+    pub fn add_anchored_call_function_with_kwargs(
+        &mut self,
+        anchor: NodeId,
+        name: impl Into<String>,
+        target: impl Into<String>,
+        args: Vec<IrArg>,
+        kwargs: HashMap<String, IrArg>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.add_call_function_with_kwargs(name, target, args, kwargs, meta);
+        self.anchor_to(id, anchor);
+        id
+    }
+
     /// Update a single arg by index and mark dirty.
     pub fn set_arg(&mut self, id: NodeId, index: usize, value: IrArg) {
         if index < self.nodes[id].args.len() {

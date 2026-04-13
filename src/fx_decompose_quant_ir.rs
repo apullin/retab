@@ -39,16 +39,14 @@ fn add_cast(
     if graph.node(x_id).meta.val_dtype() == Some(target_dtype) {
         return x_id;
     }
-    let id = graph.add_node_with_kwargs(
-        NodeOp::CallFunction,
+    graph.add_anchored_call_function_with_kwargs(
+        anchor,
         name.to_string(),
         "aten._to_copy.default".to_string(),
         vec![IrArg::Node(x_id)],
         dtype_kwarg(target_dtype),
         quant_meta(orig_meta, shape.to_vec(), target_dtype),
-    );
-    graph.anchor_to(id, anchor);
-    id
+    )
 }
 
 pub struct IrDecomposeQuantPass;
@@ -171,54 +169,49 @@ impl IrPass for IrDecomposeQuantPass {
 
             let result = if is_quantize {
                 // scale_const = full([1..], 1/scale)
-                let sc = graph.add_node(
-                    NodeOp::CallFunction,
+                let sc = graph.add_anchored_call_function(
+                    id,
                     format!("{}_sc", name),
                     "aten.full.default".to_string(),
                     vec![i64_list(&ones), IrArg::Float(eff_scale)],
                     quant_meta(&orig_meta, ones.clone(), &fp_dtype),
                 );
-                graph.anchor_to(sc, id);
 
                 // zp_const = full([1..], zp) as float
-                let zpc = graph.add_node(
-                    NodeOp::CallFunction,
+                let zpc = graph.add_anchored_call_function(
+                    id,
                     format!("{}_zp", name),
                     "aten.full.default".to_string(),
                     vec![i64_list(&ones), IrArg::Int(zp)],
                     quant_meta(&orig_meta, ones.clone(), &fp_dtype),
                 );
-                graph.anchor_to(zpc, id);
 
-                let scaled = graph.add_node(
-                    NodeOp::CallFunction,
+                let scaled = graph.add_anchored_call_function(
+                    id,
                     format!("{}_mul", name),
                     "aten.mul.Tensor".to_string(),
                     vec![IrArg::Node(x_id), IrArg::Node(sc)],
                     quant_meta(&orig_meta, shape.clone(), &fp_dtype),
                 );
-                graph.anchor_to(scaled, id);
 
-                let rounded = graph.add_node(
-                    NodeOp::CallFunction,
+                let rounded = graph.add_anchored_call_function(
+                    id,
                     format!("{}_round", name),
                     "aten.round.default".to_string(),
                     vec![IrArg::Node(scaled)],
                     quant_meta(&orig_meta, shape.clone(), &fp_dtype),
                 );
-                graph.anchor_to(rounded, id);
 
-                let shifted = graph.add_node(
-                    NodeOp::CallFunction,
+                let shifted = graph.add_anchored_call_function(
+                    id,
                     format!("{}_add", name),
                     "aten.add.Tensor".to_string(),
                     vec![IrArg::Node(rounded), IrArg::Node(zpc)],
                     quant_meta(&orig_meta, shape.clone(), &fp_dtype),
                 );
-                graph.anchor_to(shifted, id);
 
-                let clamped = graph.add_node(
-                    NodeOp::CallFunction,
+                let clamped = graph.add_anchored_call_function(
+                    id,
                     format!("{}_clamp", name),
                     "aten.clamp.default".to_string(),
                     vec![
@@ -228,7 +221,6 @@ impl IrPass for IrDecomposeQuantPass {
                     ],
                     quant_meta(&orig_meta, shape.clone(), &fp_dtype),
                 );
-                graph.anchor_to(clamped, id);
 
                 add_cast(
                     graph,
@@ -251,23 +243,21 @@ impl IrPass for IrDecomposeQuantPass {
                     id,
                 );
 
-                let zpc = graph.add_node(
-                    NodeOp::CallFunction,
+                let zpc = graph.add_anchored_call_function(
+                    id,
                     format!("{}_zp", name),
                     "aten.full.default".to_string(),
                     vec![i64_list(&ones), IrArg::Int(zp)],
                     quant_meta(&orig_meta, ones.clone(), "torch.int32"),
                 );
-                graph.anchor_to(zpc, id);
 
-                let shifted = graph.add_node(
-                    NodeOp::CallFunction,
+                let shifted = graph.add_anchored_call_function(
+                    id,
                     format!("{}_sub", name),
                     "aten.sub.Tensor".to_string(),
                     vec![IrArg::Node(x_i32), IrArg::Node(zpc)],
                     quant_meta(&orig_meta, shape.clone(), "torch.int32"),
                 );
-                graph.anchor_to(shifted, id);
 
                 let casted = add_cast(
                     graph,
@@ -279,17 +269,15 @@ impl IrPass for IrDecomposeQuantPass {
                     id,
                 );
 
-                let sc = graph.add_node(
-                    NodeOp::CallFunction,
+                let sc = graph.add_anchored_call_function(
+                    id,
                     format!("{}_sc", name),
                     "aten.full.default".to_string(),
                     vec![i64_list(&ones), IrArg::Float(eff_scale)],
                     quant_meta(&orig_meta, ones, &fp_dtype),
                 );
-                graph.anchor_to(sc, id);
 
-                graph.add_node(
-                    NodeOp::CallFunction,
+                graph.add_call_function(
                     format!("{}_mul", name),
                     "aten.mul.Tensor".to_string(),
                     vec![IrArg::Node(casted), IrArg::Node(sc)],

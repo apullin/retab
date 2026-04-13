@@ -29,8 +29,7 @@ fn add_full_int(
 ) -> NodeId {
     let mut kwargs = HashMap::new();
     kwargs.insert("dtype".to_string(), IrArg::Dtype(dtype.to_string()));
-    graph.add_node_with_kwargs(
-        NodeOp::CallFunction,
+    graph.add_call_function_with_kwargs(
         name,
         "aten.full.default".to_string(),
         vec![i64_list(shape), IrArg::Int(value)],
@@ -134,15 +133,14 @@ impl IrPass for IrDecomposeUnfoldPass {
                 let cast_meta =
                     meta_neutral(&graph.nodes[x_id].meta, input_shape.clone(), work_dtype)
                         .without_qparams();
-                let cast_id = graph.add_node_with_kwargs(
-                    NodeOp::CallFunction,
+                let cast_id = graph.add_anchored_call_function_with_kwargs(
+                    id,
                     format!("{}_bool_to_int8", name),
                     "aten._to_copy.default".to_string(),
                     vec![IrArg::Node(x_id)],
                     dtype_kwarg(work_dtype),
                     cast_meta,
                 );
-                graph.anchor_to(cast_id, id);
                 values_in = cast_id;
             }
 
@@ -154,26 +152,24 @@ impl IrPass for IrDecomposeUnfoldPass {
                 meta_neutral(&graph.nodes[values_in].meta, vec![p, k, q], work_dtype)
                     .with_qparams_from(&graph.nodes[x_id].meta)
             };
-            let values = graph.add_node(
-                NodeOp::CallFunction,
+            let values = graph.add_anchored_call_function(
+                id,
                 format!("{}_flat", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(values_in), i64_list(&[p, k, q])],
                 values_meta,
             );
-            graph.anchor_to(values, id);
 
             // Build sliding-window index: arange(0,U)*step + arange(0,size) → (U*size,)
             let idx_u_meta = meta_neutral(&orig_meta, vec![u], "torch.int32").without_qparams();
-            let idx_u = graph.add_node_with_kwargs(
-                NodeOp::CallFunction,
+            let idx_u = graph.add_anchored_call_function_with_kwargs(
+                id,
                 format!("{}_au", name),
                 "aten.arange.start_step".to_string(),
                 vec![IrArg::Int(0), IrArg::Int(u)],
                 dtype_kwarg("torch.int32"),
                 idx_u_meta,
             );
-            graph.anchor_to(idx_u, id);
 
             let step_meta = meta_neutral(&orig_meta, vec![1], "torch.int32").without_qparams();
             let step_t = add_full_int(
@@ -188,90 +184,82 @@ impl IrPass for IrDecomposeUnfoldPass {
 
             let idx_scaled_meta =
                 meta_neutral(&orig_meta, vec![u], "torch.int32").without_qparams();
-            let idx_scaled = graph.add_node(
-                NodeOp::CallFunction,
+            let idx_scaled = graph.add_anchored_call_function(
+                id,
                 format!("{}_us", name),
                 "aten.mul.Tensor".to_string(),
                 vec![IrArg::Node(idx_u), IrArg::Node(step_t)],
                 idx_scaled_meta,
             );
-            graph.anchor_to(idx_scaled, id);
 
             let idx_u2d_meta =
                 meta_neutral(&orig_meta, vec![u, 1], "torch.int32").without_qparams();
-            let idx_u2d = graph.add_node(
-                NodeOp::CallFunction,
+            let idx_u2d = graph.add_anchored_call_function(
+                id,
                 format!("{}_u2d", name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(idx_scaled), IrArg::Int(1)],
                 idx_u2d_meta,
             );
-            graph.anchor_to(idx_u2d, id);
 
             let idx_c_meta = meta_neutral(&orig_meta, vec![size], "torch.int32").without_qparams();
-            let idx_c = graph.add_node_with_kwargs(
-                NodeOp::CallFunction,
+            let idx_c = graph.add_anchored_call_function_with_kwargs(
+                id,
                 format!("{}_ac", name),
                 "aten.arange.start_step".to_string(),
                 vec![IrArg::Int(0), IrArg::Int(size)],
                 dtype_kwarg("torch.int32"),
                 idx_c_meta,
             );
-            graph.anchor_to(idx_c, id);
 
             let idx_c2d_meta =
                 meta_neutral(&orig_meta, vec![1, size], "torch.int32").without_qparams();
-            let idx_c2d = graph.add_node(
-                NodeOp::CallFunction,
+            let idx_c2d = graph.add_anchored_call_function(
+                id,
                 format!("{}_c2d", name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(idx_c), IrArg::Int(0)],
                 idx_c2d_meta,
             );
-            graph.anchor_to(idx_c2d, id);
 
             let idx2d_meta =
                 meta_neutral(&orig_meta, vec![u, size], "torch.int32").without_qparams();
-            let idx2d = graph.add_node(
-                NodeOp::CallFunction,
+            let idx2d = graph.add_anchored_call_function(
+                id,
                 format!("{}_i2d", name),
                 "aten.add.Tensor".to_string(),
                 vec![IrArg::Node(idx_u2d), IrArg::Node(idx_c2d)],
                 idx2d_meta,
             );
-            graph.anchor_to(idx2d, id);
 
             let idx1d_meta = meta_neutral(&orig_meta, vec![uc], "torch.int32").without_qparams();
-            let idx1d = graph.add_node(
-                NodeOp::CallFunction,
+            let idx1d = graph.add_anchored_call_function(
+                id,
                 format!("{}_i1d", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(idx2d), i64_list(&[uc])],
                 idx1d_meta,
             );
-            graph.anchor_to(idx1d, id);
 
             let idx_unsq_meta =
                 meta_neutral(&orig_meta, vec![1, uc], "torch.int32").without_qparams();
-            let idx_unsq = graph.add_node(
-                NodeOp::CallFunction,
+            let idx_unsq = graph.add_anchored_call_function(
+                id,
                 format!("{}_iu", name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(idx1d), IrArg::Int(0)],
                 idx_unsq_meta,
             );
-            graph.anchor_to(idx_unsq, id);
 
             let idx_exp_meta =
                 meta_neutral(&orig_meta, vec![p, uc], "torch.int32").without_qparams();
-            let idx_exp = graph.add_node(
-                NodeOp::CallFunction,
+            let idx_exp = graph.add_anchored_call_function(
+                id,
                 format!("{}_ie", name),
                 "aten.expand_copy.default".to_string(),
                 vec![IrArg::Node(idx_unsq), i64_list(&[p, uc])],
                 idx_exp_meta,
             );
-            graph.anchor_to(idx_exp, id);
 
             // GATHER
             let gathered_meta = if needs_bool_cast {
@@ -281,14 +269,13 @@ impl IrPass for IrDecomposeUnfoldPass {
                 meta_neutral(&graph.nodes[values_in].meta, vec![p, uc, q], work_dtype)
                     .with_qparams_from(&graph.nodes[x_id].meta)
             };
-            let gathered = graph.add_node(
-                NodeOp::CallFunction,
+            let gathered = graph.add_anchored_call_function(
+                id,
                 format!("{}_g", name),
                 "backend.tosa.GATHER.default".to_string(),
                 vec![IrArg::Node(values), IrArg::Node(idx_exp)],
                 gathered_meta,
             );
-            graph.anchor_to(gathered, id);
 
             // Reshape (P, U*size, Q) → (P, U, size, Q)
             let r4d_meta = if needs_bool_cast {
@@ -306,14 +293,13 @@ impl IrPass for IrDecomposeUnfoldPass {
                 )
                 .with_qparams_from(&graph.nodes[x_id].meta)
             };
-            let r4d = graph.add_node(
-                NodeOp::CallFunction,
+            let r4d = graph.add_anchored_call_function(
+                id,
                 format!("{}_r4", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(gathered), i64_list(&[p, u, size, q])],
                 r4d_meta,
             );
-            graph.anchor_to(r4d, id);
 
             // Reshape to (...pre, U, size, ...post)
             let mut full_shape: Vec<i64> = pre.clone();
@@ -327,14 +313,13 @@ impl IrPass for IrDecomposeUnfoldPass {
                 meta_neutral(&graph.nodes[values_in].meta, full_shape.clone(), work_dtype)
                     .with_qparams_from(&graph.nodes[x_id].meta)
             };
-            let reshaped = graph.add_node(
-                NodeOp::CallFunction,
+            let reshaped = graph.add_anchored_call_function(
+                id,
                 format!("{}_rs", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(r4d), i64_list(&full_shape)],
                 reshaped_meta,
             );
-            graph.anchor_to(reshaped, id);
 
             // Permute: move size dim to end
             let pre_len = pre.len() as i64;
@@ -355,14 +340,13 @@ impl IrPass for IrDecomposeUnfoldPass {
                 meta_neutral(&graph.nodes[values_in].meta, perm_shape, work_dtype)
                     .with_qparams_from(&graph.nodes[x_id].meta)
             };
-            let permuted = graph.add_node(
-                NodeOp::CallFunction,
+            let permuted = graph.add_anchored_call_function(
+                id,
                 format!("{}_pm", name),
                 "aten.permute_copy.default".to_string(),
                 vec![IrArg::Node(reshaped), i64_list(&perm)],
                 permuted_meta,
             );
-            graph.anchor_to(permuted, id);
 
             let final_result = if needs_bool_cast {
                 let cast_back_meta = meta_neutral(
@@ -375,15 +359,14 @@ impl IrPass for IrDecomposeUnfoldPass {
                     "torch.bool",
                 )
                 .without_qparams();
-                let cast_back = graph.add_node_with_kwargs(
-                    NodeOp::CallFunction,
+                let cast_back = graph.add_anchored_call_function_with_kwargs(
+                    id,
                     format!("{}_int8_to_bool", name),
                     "aten._to_copy.default".to_string(),
                     vec![IrArg::Node(permuted)],
                     dtype_kwarg("torch.bool"),
                     cast_back_meta,
                 );
-                graph.anchor_to(cast_back, id);
                 cast_back
             } else {
                 permuted

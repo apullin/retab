@@ -103,58 +103,53 @@ impl IrPass for IrDecomposeIndexSelectPass {
             let x_for_gather = if needs_bool_cast {
                 let mut kwargs = HashMap::new();
                 kwargs.insert("dtype".to_string(), IrArg::Dtype("torch.int8".to_string()));
-                let cast = graph.add_node_with_kwargs(
-                    NodeOp::CallFunction,
+                let cast = graph.add_anchored_call_function_with_kwargs(
+                    id,
                     format!("{}_bool_to_i8", name),
                     "aten._to_copy.default".to_string(),
                     vec![IrArg::Node(x_id)],
                     kwargs,
                     meta_with(&orig_meta, x_shape.clone(), "torch.int8"),
                 );
-                graph.anchor_to(cast, id);
                 cast
             } else {
                 x_id
             };
 
             // Flatten x to (N, K, C)
-            let values = graph.add_node(
-                NodeOp::CallFunction,
+            let values = graph.add_anchored_call_function(
+                id,
                 format!("{}_values", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(x_for_gather), i64_list(&[n, k, c])],
                 meta_with(&orig_meta, vec![n, k, c], gather_dtype),
             );
-            graph.anchor_to(values, id);
 
             // Index: unsqueeze(0) → (1, W), then expand to (N, W)
-            let idx_unsq = graph.add_node(
-                NodeOp::CallFunction,
+            let idx_unsq = graph.add_anchored_call_function(
+                id,
                 format!("{}_idx_unsq", name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(index_id), IrArg::Int(0)],
                 meta_with(&orig_meta, vec![1, w], &idx_dtype),
             );
-            graph.anchor_to(idx_unsq, id);
 
-            let idx_exp = graph.add_node(
-                NodeOp::CallFunction,
+            let idx_exp = graph.add_anchored_call_function(
+                id,
                 format!("{}_idx_exp", name),
                 "aten.expand_copy.default".to_string(),
                 vec![IrArg::Node(idx_unsq), i64_list(&[n, w])],
                 meta_with(&orig_meta, vec![n, w], &idx_dtype),
             );
-            graph.anchor_to(idx_exp, id);
 
             // GATHER(values, indices) → (N, W, C)
-            let gathered = graph.add_node(
-                NodeOp::CallFunction,
+            let gathered = graph.add_anchored_call_function(
+                id,
                 format!("{}_gather", name),
                 "backend.tosa.GATHER.default".to_string(),
                 vec![IrArg::Node(values), IrArg::Node(idx_exp)],
                 meta_with(&orig_meta, vec![n, w, c], gather_dtype),
             );
-            graph.anchor_to(gathered, id);
 
             // Reshape to (...before, W, ...after)
             let out_shape: Vec<i64> = before
@@ -163,27 +158,25 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 .chain(std::iter::once(w))
                 .chain(after.iter().copied())
                 .collect();
-            let result = graph.add_node(
-                NodeOp::CallFunction,
+            let result = graph.add_anchored_call_function(
+                id,
                 format!("{}_out", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(gathered), i64_list(&out_shape)],
                 meta_with(&orig_meta, out_shape.clone(), gather_dtype),
             );
-            graph.anchor_to(result, id);
 
             let result = if needs_bool_cast {
                 let mut kwargs = HashMap::new();
                 kwargs.insert("dtype".to_string(), IrArg::Dtype("torch.bool".to_string()));
-                let cast = graph.add_node_with_kwargs(
-                    NodeOp::CallFunction,
+                let cast = graph.add_anchored_call_function_with_kwargs(
+                    id,
                     format!("{}_i8_to_bool", name),
                     "aten._to_copy.default".to_string(),
                     vec![IrArg::Node(result)],
                     kwargs,
                     meta_with(&orig_meta, out_shape, "torch.bool"),
                 );
-                graph.anchor_to(cast, id);
                 cast
             } else {
                 result

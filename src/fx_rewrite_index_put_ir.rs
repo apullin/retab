@@ -15,8 +15,7 @@ fn add_full_int(
 ) -> NodeId {
     let mut kwargs = HashMap::new();
     kwargs.insert("dtype".to_string(), IrArg::Dtype(dtype.to_string()));
-    graph.add_node_with_kwargs(
-        NodeOp::CallFunction,
+    graph.add_call_function_with_kwargs(
         name,
         "aten.full.default".to_string(),
         vec![i64_list(shape), IrArg::Int(value)],
@@ -28,8 +27,7 @@ fn add_full_int(
 fn add_arange(graph: &mut IrGraph, name: String, end: i64, dtype: &str, meta: NodeMeta) -> NodeId {
     let mut kwargs = HashMap::new();
     kwargs.insert("dtype".to_string(), IrArg::Dtype(dtype.to_string()));
-    graph.add_node_with_kwargs(
-        NodeOp::CallFunction,
+    graph.add_call_function_with_kwargs(
         name,
         "aten.arange.start_step".to_string(),
         vec![IrArg::Int(0), IrArg::Int(end)],
@@ -221,40 +219,37 @@ impl IrPass for IrRewriteIndexPutPass {
                     let aligned_meta = orig_meta
                         .cloned_with_val(aligned.clone(), &idx_dtype)
                         .without_qparams();
-                    let a = graph.add_node(
-                        NodeOp::CallFunction,
+                    let a = graph.add_anchored_call_function(
+                        id,
                         format!("{}_ia{}", name, i),
                         "aten.view_copy.default".to_string(),
                         vec![IrArg::Node(current), i64_list(&aligned)],
                         aligned_meta,
                     );
-                    graph.anchor_to(a, id);
                     current = a;
                 }
 
                 let bcast_meta = orig_meta
                     .cloned_with_val(bcast.clone(), &idx_dtype)
                     .without_qparams();
-                let b = graph.add_node(
-                    NodeOp::CallFunction,
+                let b = graph.add_anchored_call_function(
+                    id,
                     format!("{}_ib{}", name, i),
                     "aten.expand_copy.default".to_string(),
                     vec![IrArg::Node(current), i64_list(&bcast)],
                     bcast_meta,
                 );
-                graph.anchor_to(b, id);
 
                 let flat_meta = orig_meta
                     .cloned_with_val(vec![w], &idx_dtype)
                     .without_qparams();
-                let flat = graph.add_node(
-                    NodeOp::CallFunction,
+                let flat = graph.add_anchored_call_function(
+                    id,
                     format!("{}_if{}", name, i),
                     "aten.view_copy.default".to_string(),
                     vec![IrArg::Node(b), i64_list(&[w])],
                     flat_meta,
                 );
-                graph.anchor_to(flat, id);
 
                 let scale_meta = orig_meta
                     .cloned_with_val(vec![1], &idx_dtype)
@@ -272,14 +267,13 @@ impl IrPass for IrRewriteIndexPutPass {
                 let scaled_meta = orig_meta
                     .cloned_with_val(vec![w], &idx_dtype)
                     .without_qparams();
-                let scaled = graph.add_node(
-                    NodeOp::CallFunction,
+                let scaled = graph.add_anchored_call_function(
+                    id,
                     format!("{}_sm{}", name, i),
                     "aten.mul.Tensor".to_string(),
                     vec![IrArg::Node(flat), IrArg::Node(scale)],
                     scaled_meta,
                 );
-                graph.anchor_to(scaled, id);
 
                 lin = Some(match lin {
                     None => scaled,
@@ -287,14 +281,13 @@ impl IrPass for IrRewriteIndexPutPass {
                         let add_meta = orig_meta
                             .cloned_with_val(vec![w], &idx_dtype)
                             .without_qparams();
-                        let add = graph.add_node(
-                            NodeOp::CallFunction,
+                        let add = graph.add_anchored_call_function(
+                            id,
                             format!("{}_la{}", name, i),
                             "aten.add.Tensor".to_string(),
                             vec![IrArg::Node(prev), IrArg::Node(scaled)],
                             add_meta,
                         );
-                        graph.anchor_to(add, id);
                         add
                     }
                 });
@@ -305,67 +298,62 @@ impl IrPass for IrRewriteIndexPutPass {
             let idx_meta = orig_meta
                 .cloned_with_val(vec![1, w], &idx_dtype)
                 .without_qparams();
-            let idx_1w = graph.add_node(
-                NodeOp::CallFunction,
+            let idx_1w = graph.add_anchored_call_function(
+                id,
                 format!("{}_idx", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(flat_idx), i64_list(&[1, w])],
                 idx_meta,
             );
-            graph.anchor_to(idx_1w, id);
 
             let src_meta = graph.nodes[source_id]
                 .meta
                 .cloned_with_val(vec![1, k, c], &src_dtype)
                 .with_qparams_from(&graph.nodes[source_id].meta);
-            let src_1kc = graph.add_node(
-                NodeOp::CallFunction,
+            let src_1kc = graph.add_anchored_call_function(
+                id,
                 format!("{}_src", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(source_id), i64_list(&[1, k, c])],
                 src_meta,
             );
-            graph.anchor_to(src_1kc, id);
 
             let val_meta = graph.nodes[source_id]
                 .meta
                 .cloned_with_val(vec![1, w, c], &src_dtype)
                 .with_qparams_from(&graph.nodes[source_id].meta);
-            let val_1wc = graph.add_node(
-                NodeOp::CallFunction,
+            let val_1wc = graph.add_anchored_call_function(
+                id,
                 format!("{}_val", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(values_id), i64_list(&[1, w, c])],
                 val_meta,
             );
-            graph.anchor_to(val_1wc, id);
 
             let scatter_values = if accumulate {
                 let gathered_meta = graph.nodes[source_id]
                     .meta
                     .cloned_with_val(vec![1, w, c], &src_dtype)
                     .with_qparams_from(&graph.nodes[source_id].meta);
-                let gathered = graph.add_node(
-                    NodeOp::CallFunction,
+                let gathered = graph.add_anchored_call_function(
+                    id,
                     format!("{}_gather_prev", name),
                     "backend.tosa.GATHER.default".to_string(),
                     vec![IrArg::Node(src_1kc), IrArg::Node(idx_1w)],
                     gathered_meta,
                 );
-                graph.anchor_to(gathered, id);
 
                 let added_meta = graph.nodes[source_id]
                     .meta
                     .cloned_with_val(vec![1, w, c], &src_dtype)
                     .with_qparams_from(&graph.nodes[source_id].meta);
-                let added = graph.add_node(
-                    NodeOp::CallFunction,
+                let added = graph.add_anchored_call_function(
+                    id,
                     format!("{}_accum", name),
                     "aten.add.Tensor".to_string(),
                     vec![IrArg::Node(gathered), IrArg::Node(val_1wc)],
                     added_meta,
                 );
-                graph.anchor_to(added, id);
                 added
             } else {
                 val_1wc
@@ -376,8 +364,8 @@ impl IrPass for IrRewriteIndexPutPass {
                 .meta
                 .cloned_with_val(vec![1, k, c], &src_dtype)
                 .with_qparams_from(&graph.nodes[source_id].meta);
-            let scattered = graph.add_node(
-                NodeOp::CallFunction,
+            let scattered = graph.add_anchored_call_function(
+                id,
                 format!("{}_scatter", name),
                 "backend.tosa.SCATTER.default".to_string(),
                 vec![
@@ -387,15 +375,13 @@ impl IrPass for IrRewriteIndexPutPass {
                 ],
                 scattered_meta,
             );
-            graph.anchor_to(scattered, id);
 
             // Reshape back
             let result_meta = graph.nodes[source_id]
                 .meta
                 .cloned_with_val(source_shape.clone(), &src_dtype)
                 .with_qparams_from(&graph.nodes[source_id].meta);
-            let result = graph.add_node(
-                NodeOp::CallFunction,
+            let result = graph.add_call_function(
                 format!("{}_out", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(scattered), i64_list(&source_shape)],
