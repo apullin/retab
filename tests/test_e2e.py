@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """End-to-end test: compare Rust TOSA output with Python reference."""
 import sys
-sys.path.insert(0, "/Users/andrewpullin/personal/executorch-work/u55-pipeline")
+from pathlib import Path
+
+ENGINE_ROOT = Path(__file__).resolve().parents[1]
+PIPELINE_ROOT = ENGINE_ROOT.parent
+
+sys.path.insert(0, str(PIPELINE_ROOT))
+sys.path.insert(0, str(ENGINE_ROOT))
 
 import torch
 from model import get_model
@@ -25,17 +31,19 @@ quantized_ep = torch.export.export(qmodel, (example_input,), strict=True)
 
 # Run Rust path
 import retab
-rust_tosa = retab.lower_to_tosa(
+
+rust_tosa = retab.lower_to_tosa_v2(
     quantized_ep.graph_module,
     dict(quantized_ep.state_dict),
     quantized_ep.graph_signature,
+    quantized_ep,
 )
 print(f"Rust TOSA output: {len(rust_tosa)} bytes")
 
 # Compare with reference
-ref_path = "/Users/andrewpullin/personal/executorch-work/u55-pipeline/retab/test_data/tiny_cnn_reference.tosa"
+ref_path = ENGINE_ROOT / "test_data" / "tiny_cnn_reference.tosa"
 try:
-    with open(ref_path, "rb") as f:
+    with ref_path.open("rb") as f:
         ref_tosa = f.read()
     print(f"Reference TOSA: {len(ref_tosa)} bytes")
 
@@ -51,10 +59,9 @@ try:
 except FileNotFoundError:
     print(f"Reference file not found at {ref_path}")
     print("Skipping byte comparison — writing Rust output for manual inspection.")
-    import os
-    os.makedirs(os.path.dirname(ref_path), exist_ok=True)
-    out_path = ref_path.replace("_reference.tosa", "_rust_output.tosa")
-    with open(out_path, "wb") as f:
+    ref_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path = ref_path.with_name("tiny_cnn_rust_output.tosa")
+    with out_path.open("wb") as f:
         f.write(rust_tosa)
     print(f"Wrote Rust output to {out_path}")
 

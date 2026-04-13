@@ -19,11 +19,13 @@ import argparse
 import logging
 import sys
 import time
+from pathlib import Path
 
-sys.path.insert(0, "/Users/andrewpullin/personal/executorch-work/u55-pipeline")
-sys.path.insert(
-    0, "/Users/andrewpullin/personal/executorch-work/u55-pipeline/retab"
-)
+ENGINE_ROOT = Path(__file__).resolve().parents[1]
+PIPELINE_ROOT = ENGINE_ROOT.parent
+
+sys.path.insert(0, str(PIPELINE_ROOT))
+sys.path.insert(0, str(ENGINE_ROOT))
 
 import torch
 
