@@ -1,8 +1,6 @@
 //! Pure Rust IrPass for scalar binary ops that must be rewritten to tensor form.
 
-use std::collections::HashMap;
-
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{dtype_kwarg, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::runner_logging::log_line;
 
 fn replacement_target(target: &str) -> Option<&'static str> {
@@ -71,15 +69,13 @@ impl IrPass for IrReplaceScalarWithTensorPass {
                 .unwrap_or("torch.int64")
                 .to_string();
             let shape = [1];
-            let mut full_kwargs = HashMap::new();
-            full_kwargs.insert("dtype".to_string(), IrArg::Dtype(lhs_dtype.clone()));
 
             let full = graph.add_node_with_kwargs(
                 NodeOp::CallFunction,
                 format!("{}_scalar_tensor", node_name),
                 "aten.full.default".to_string(),
                 vec![IrArg::List(vec![IrArg::Int(1)]), scalar_value],
-                full_kwargs,
+                dtype_kwarg(lhs_dtype.clone()),
                 tensor_meta(&shape, &lhs_dtype),
             );
             graph.anchor_to(full, id);
