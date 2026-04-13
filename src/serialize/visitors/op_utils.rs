@@ -1,9 +1,55 @@
 use super::*;
 
+fn emitted_binary_input_shapes(graph: &Graph, store: &TensorStore, node: &Node) -> Vec<Vec<i32>> {
+    let input_nodes: Vec<&Node> = node
+        .args
+        .iter()
+        .filter_map(|arg| match arg {
+            Arg::Node(id) => graph.node(*id),
+            _ => None,
+        })
+        .take(2)
+        .collect();
+    if input_nodes.len() < 2 {
+        return input_nodes
+            .into_iter()
+            .map(|input| actual_tensor_shape(graph, store, input))
+            .collect();
+    }
+
+    let mut shapes = vec![
+        actual_tensor_shape(graph, store, input_nodes[0]),
+        actual_tensor_shape(graph, store, input_nodes[1]),
+    ];
+
+    if shapes[0].len() != shapes[1].len() {
+        let (smaller_idx, larger_idx) = if shapes[0].len() < shapes[1].len() {
+            (0usize, 1usize)
+        } else {
+            (1usize, 0usize)
+        };
+
+        let target = broadcast_shape_for_binary_inputs(
+            &raw_i32_shape(input_nodes[smaller_idx]),
+            &raw_i32_shape(input_nodes[larger_idx]),
+            node,
+        );
+        if target.len() == shapes[larger_idx].len() {
+            shapes[smaller_idx] = target;
+        }
+    }
+
+    shapes
+}
+
 fn binary_output_shapes(graph: &Graph, store: &TensorStore, node: &Node) -> (Vec<i32>, Vec<i32>) {
     let logical_shape = logical_output_shape(node);
-    let emitted_shape =
-        binary_input_broadcast_shape(graph, store, node).unwrap_or_else(|| logical_shape.clone());
+    let emitted_shape = emitted_binary_input_shapes(graph, store, node)
+        .into_iter()
+        .reduce(|lhs, rhs| broadcast_two_shapes(&lhs, &rhs).unwrap_or(rhs))
+        .unwrap_or_else(|| {
+            binary_input_broadcast_shape(graph, store, node).unwrap_or_else(|| logical_shape.clone())
+        });
     (logical_shape, emitted_shape)
 }
 
@@ -200,6 +246,55 @@ mod tests {
         assert_eq!(result.operators[2].outputs, vec!["add".to_string()]);
         assert_eq!(result.tensors[0].shape, vec![1, 4, 5, 1]);
         assert_eq!(result.tensors[1].shape, vec![1, 4, 5]);
+    }
+
+    #[test]
+    fn binary_emit_uses_post_reshape_broadcast_shape_for_lower_rank_rhs() {
+        let mut graph = Graph::new();
+
+        let lhs = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Other("lhs".to_string()),
+            smallvec![],
+            Vec::new(),
+            meta(&[1, 1, 1024, 8], IrDType::Int32),
+            "lhs".to_string(),
+        );
+
+        let rhs = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Other("rhs".to_string()),
+            smallvec![],
+            Vec::new(),
+            meta(&[8, 1, 1], IrDType::Int32),
+            "rhs".to_string(),
+        );
+
+        let mut add_meta = meta(&[1, 1, 1024, 8], IrDType::Int32);
+        add_meta.tosa_dim_order = Some(smallvec![0, 2, 3, 1]);
+        let add = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::Add,
+            smallvec![Arg::Node(lhs), Arg::Node(rhs)],
+            Vec::new(),
+            add_meta,
+            "add".to_string(),
+        );
+
+        let store = TensorStore::default();
+        let result = emit_direct_binary(
+            &graph,
+            graph.node(add).expect("add node"),
+            &store,
+            Op::Add,
+            Attribute::Add(AddAttribute {}),
+        );
+
+        assert_eq!(result.operators[0].op, Op::Reshape);
+        assert_eq!(result.operators[1].op, Op::Add);
+        assert_eq!(result.operators[1].outputs, vec!["add".to_string()]);
+        assert_eq!(result.tensors[0].shape, vec![1, 1, 1, 8]);
+        assert_eq!(result.tensors[1].shape, vec![1, 1, 1024, 8]);
     }
 }
 

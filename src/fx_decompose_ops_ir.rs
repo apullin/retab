@@ -454,6 +454,9 @@ impl IrPass for IrDecomposeOpsPass {
                     modified = true;
                 }
             } else if is_pow_scalar(&target) {
+                if has_quantized_envelope(graph, id) {
+                    continue;
+                }
                 if decompose_pow_scalar(graph, id) {
                     modified = true;
                 }
@@ -1039,6 +1042,44 @@ mod tests {
         assert!(!IrDecomposeOpsPass.run(&mut graph));
         assert!(graph.nodes[tan].alive);
         assert_eq!(graph.nodes[tan].target, "aten.tan.default");
+        assert!(graph.nodes[q].alive);
+    }
+
+    #[test]
+    fn skips_pow_inside_quantized_envelope() {
+        let mut graph = IrGraph::empty();
+        let x = graph.add_node(
+            NodeOp::Placeholder,
+            "x".to_string(),
+            "x".to_string(),
+            vec![],
+            meta(&[1, 2, 3, 6], "torch.int8"),
+        );
+        let dq = graph.add_node(
+            NodeOp::CallFunction,
+            "x_dq".to_string(),
+            "quantized_decomposed.dequantize_per_tensor.default".to_string(),
+            vec![IrArg::Node(x)],
+            meta(&[1, 2, 3, 6], "torch.float32"),
+        );
+        let pow = graph.add_node(
+            NodeOp::CallFunction,
+            "pow".to_string(),
+            "aten.pow.Tensor_Scalar".to_string(),
+            vec![IrArg::Node(dq), IrArg::Int(3)],
+            meta(&[1, 2, 3, 6], "torch.float32"),
+        );
+        let q = graph.add_node(
+            NodeOp::CallFunction,
+            "pow_q".to_string(),
+            "quantized_decomposed.quantize_per_tensor.default".to_string(),
+            vec![IrArg::Node(pow)],
+            meta(&[1, 2, 3, 6], "torch.int8"),
+        );
+
+        assert!(!IrDecomposeOpsPass.run(&mut graph));
+        assert!(graph.nodes[pow].alive);
+        assert_eq!(graph.nodes[pow].target, "aten.pow.Tensor_Scalar");
         assert!(graph.nodes[q].alive);
     }
 

@@ -226,7 +226,18 @@ fn eval_precomputable_table(kind: &str, scalar_arg: Option<f64>, x: f64) -> Opti
             const SQRT_2_OVER_PI: f64 = 0.797_884_560_802_865_4;
             Some(0.5 * x * (1.0 + (SQRT_2_OVER_PI * (x + 0.044_715 * x.powi(3))).tanh()))
         }
-        "pow" => Some(x.powf(scalar_arg?)),
+        "pow" => {
+            let exponent = scalar_arg?;
+            let rounded = exponent.round();
+            if (exponent - rounded).abs() < 1e-12
+                && rounded >= i32::MIN as f64
+                && rounded <= i32::MAX as f64
+            {
+                Some(x.powi(rounded as i32))
+            } else {
+                Some(x.powf(exponent))
+            }
+        }
         "elu" => {
             let alpha = scalar_arg.unwrap_or(1.0);
             Some(if x >= 0.0 { x } else { alpha * x.exp_m1() })
@@ -700,5 +711,15 @@ mod tests {
             &result.effects.effects[0],
             FxEpEffect::InsertTableOp(effect) if effect.kind == "sigmoid"
         ));
+    }
+
+    #[test]
+    fn pow_table_supports_negative_base_integer_exponents() {
+        let spec = TableOpSpec {
+            kind: "pow",
+            scalar_arg: Some(3.0),
+        };
+        assert_eq!(eval_precomputable_table(spec.kind, spec.scalar_arg, -11.0), Some(-1331.0));
+        assert_eq!(eval_precomputable_table(spec.kind, spec.scalar_arg, -2.0), Some(-8.0));
     }
 }

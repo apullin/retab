@@ -83,6 +83,29 @@ fn shape_to_stride(shape: &[i64]) -> Vec<i64> {
     strides
 }
 
+fn compute_index_output_shape(batch_shape: &[i64], broadcast: &[i64], kept_shape: &[i64]) -> Vec<i64> {
+    let mut out = batch_shape.to_vec();
+    out.extend_from_slice(broadcast);
+    out.extend_from_slice(kept_shape);
+    out
+}
+
+fn is_identity_perm(perm: &[i64]) -> bool {
+    perm.iter()
+        .enumerate()
+        .all(|(i, &value)| value == i as i64)
+}
+
+fn packed_lin_scales(tensor_sizes: &[i64]) -> Vec<i64> {
+    let mut scales = vec![1; tensor_sizes.len()];
+    let mut running = 1i64;
+    for (i, size) in tensor_sizes.iter().enumerate().rev() {
+        scales[i] = running;
+        running *= *size;
+    }
+    scales
+}
+
 pub struct IrDecomposeIndexTensorPass;
 
 impl IrPass for IrDecomposeIndexTensorPass {
@@ -125,17 +148,22 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 continue;
             }
 
-            let m = index_list.len();
-            if m > x_shape.len() {
+            let prefix_len = index_list.len();
+            if prefix_len > x_shape.len() {
                 continue;
             }
 
-            // Collect index node IDs and shapes
+            // Collect tensor index node IDs/shapes; None markers preserve the
+            // corresponding prefix dimension in the output.
             let mut idx_ids: Vec<NodeId> = Vec::new();
             let mut idx_shapes: Vec<Vec<i64>> = Vec::new();
+            let mut idx_positions: Vec<usize> = Vec::new();
             let mut all_valid = true;
-            for item in &index_list {
+            for (pos, item) in index_list.iter().enumerate() {
                 let Some(nid) = item.as_node() else {
+                    if matches!(item, IrArg::None) {
+                        continue;
+                    }
                     all_valid = false;
                     break;
                 };
@@ -145,21 +173,34 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 };
                 idx_ids.push(nid);
                 idx_shapes.push(s.to_vec());
+                idx_positions.push(pos);
             }
-            if !all_valid {
+            if !all_valid || idx_ids.is_empty() {
                 continue;
             }
 
             let Some(broadcast) = broadcast_shape(&idx_shapes) else {
                 continue;
             };
+            let first_tensor_pos = idx_positions[0];
+            let batch_positions: Vec<usize> = (0..first_tensor_pos).collect();
+            let kept_positions: Vec<usize> = (first_tensor_pos..x_shape.len())
+                .filter(|pos| *pos >= prefix_len || !idx_positions.contains(pos))
+                .collect();
+            let batch_shape: Vec<i64> = batch_positions.iter().map(|&pos| x_shape[pos]).collect();
+            let tensor_sizes: Vec<i64> = idx_positions.iter().map(|&pos| x_shape[pos]).collect();
+            let kept_shape: Vec<i64> = kept_positions.iter().map(|&pos| x_shape[pos]).collect();
+            let batch = batch_shape.iter().copied().product::<i64>().max(1);
             let w = broadcast.iter().copied().product::<i64>().max(1);
-            let leading: Vec<i64> = x_shape.iter().take(m).copied().collect();
-            let trailing: Vec<i64> = x_shape.iter().skip(m).copied().collect();
-            let k = leading.iter().copied().product::<i64>().max(1);
-            let c = trailing.iter().copied().product::<i64>().max(1);
-            let strides = shape_to_stride(&x_shape);
-            let lin_scales: Vec<i64> = strides.iter().take(m).map(|s| s / c).collect();
+            let k = tensor_sizes.iter().copied().product::<i64>().max(1);
+            let c = kept_shape.iter().copied().product::<i64>().max(1);
+            let lin_scales = packed_lin_scales(&tensor_sizes);
+            let perm: Vec<i64> = batch_positions
+                .iter()
+                .chain(idx_positions.iter())
+                .chain(kept_positions.iter())
+                .map(|&pos| pos as i64)
+                .collect();
 
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
@@ -174,17 +215,33 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 .unwrap_or("torch.int64")
                 .to_string();
 
-            // Flatten x to (1, K, C)
-            let mut x_1kc_meta = meta_with(&graph.nodes[x_id].meta, vec![1, k, c], &x_dtype);
-            copy_qparams_from_node(graph, x_id, &mut x_1kc_meta);
-            let x_1kc = graph.add_node(
+            let mut values_in = x_id;
+            if !is_identity_perm(&perm) {
+                let permuted_shape: Vec<i64> = perm.iter().map(|&pos| x_shape[pos as usize]).collect();
+                let mut perm_meta = meta_with(&graph.nodes[x_id].meta, permuted_shape, &x_dtype);
+                copy_qparams_from_node(graph, x_id, &mut perm_meta);
+                let perm_id = graph.add_node(
+                    NodeOp::CallFunction,
+                    format!("{}_x_perm", node_name),
+                    "aten.permute_copy.default".to_string(),
+                    vec![IrArg::Node(values_in), i64_list(&perm)],
+                    perm_meta,
+                );
+                graph.anchor_to(perm_id, id);
+                values_in = perm_id;
+            }
+
+            // Flatten x to (B, K, C)
+            let mut x_bkc_meta = meta_with(&graph.nodes[x_id].meta, vec![batch, k, c], &x_dtype);
+            copy_qparams_from_node(graph, x_id, &mut x_bkc_meta);
+            let x_bkc = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_x_flat", node_name),
                 "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(x_id), i64_list(&[1, k, c])],
-                x_1kc_meta,
+                vec![IrArg::Node(values_in), i64_list(&[batch, k, c])],
+                x_bkc_meta,
             );
-            graph.anchor_to(x_1kc, id);
+            graph.anchor_to(x_bkc, id);
 
             // Build linearized flat index
             let mut lin_w: Option<NodeId> = None;
@@ -280,33 +337,49 @@ impl IrPass for IrDecomposeIndexTensorPass {
 
             let Some(lin_w_id) = lin_w else { continue };
 
-            // Unsqueeze to (1, W) for GATHER
+            // Unsqueeze to (1, W), then tile across batch if needed.
             let mut idx_1w_meta = meta_with(&orig_meta, vec![1, w], &idx_dtype);
             clear_qparams(&mut idx_1w_meta);
-            let idx_1w = graph.add_node(
+            let idx_bw_seed = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_idx_1w", node_name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(lin_w_id), IrArg::Int(0)],
                 idx_1w_meta,
             );
-            graph.anchor_to(idx_1w, id);
+            graph.anchor_to(idx_bw_seed, id);
 
-            // GATHER(x_1kc, idx_1w) → (1, W, C)
-            let mut gathered_meta = meta_with(&graph.nodes[x_id].meta, vec![1, w, c], &x_dtype);
+            let idx_bw = if batch == 1 {
+                idx_bw_seed
+            } else {
+                let mut expand_meta = meta_with(&orig_meta, vec![batch, w], &idx_dtype);
+                clear_qparams(&mut expand_meta);
+                let expand_id = graph.add_node(
+                    NodeOp::CallFunction,
+                    format!("{}_idx_bw", node_name),
+                    "aten.expand_copy.default".to_string(),
+                    vec![IrArg::Node(idx_bw_seed), i64_list(&[batch, w])],
+                    expand_meta,
+                );
+                graph.anchor_to(expand_id, id);
+                expand_id
+            };
+
+            // GATHER(x_bkc, idx_bw) → (B, W, C)
+            let mut gathered_meta =
+                meta_with(&graph.nodes[x_id].meta, vec![batch, w, c], &x_dtype);
             copy_qparams_from_node(graph, x_id, &mut gathered_meta);
             let gathered = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_gather", node_name),
                 "backend.tosa.GATHER.default".to_string(),
-                vec![IrArg::Node(x_1kc), IrArg::Node(idx_1w)],
+                vec![IrArg::Node(x_bkc), IrArg::Node(idx_bw)],
                 gathered_meta,
             );
             graph.anchor_to(gathered, id);
 
-            // Reshape to (...broadcast, ...trailing)
-            let mut out_shape: Vec<i64> = broadcast.clone();
-            out_shape.extend(trailing.iter().copied());
+            // Reshape to (...batch, ...broadcast, ...kept)
+            let out_shape = compute_index_output_shape(&batch_shape, &broadcast, &kept_shape);
             let mut result_meta = meta_with(&graph.nodes[x_id].meta, out_shape.clone(), &x_dtype);
             copy_qparams_from_node(graph, x_id, &mut result_meta);
             let result = graph.add_node(
