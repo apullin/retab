@@ -43,13 +43,24 @@ fn permuted_shape(shape: &[i64], perm: &[usize]) -> Vec<i64> {
         .collect()
 }
 
-fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut m = base.clone();
-    m.set_val(FakeTensorMeta {
-        shape,
-        dtype: dtype.to_string(),
-    });
-    m
+#[derive(Clone, Copy)]
+struct MetaFactory<'a> {
+    base: &'a NodeMeta,
+    dtype: &'a str,
+}
+
+impl<'a> MetaFactory<'a> {
+    fn new(base: &'a NodeMeta, dtype: &'a str) -> Self {
+        Self { base, dtype }
+    }
+
+    fn tensor(self, shape: &[i64]) -> NodeMeta {
+        self.base.cloned_with_val(shape.to_vec(), self.dtype)
+    }
+
+    fn bool(self, shape: &[i64]) -> NodeMeta {
+        self.base.cloned_with_val(shape.to_vec(), "torch.bool")
+    }
 }
 
 fn is_atanh(t: &str) -> bool {
@@ -587,12 +598,13 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
             .map(|shape| shape.to_vec())
             .unwrap_or_default();
         let dtype = meta.val_dtype().unwrap_or("torch.float32").to_string();
+        let metas = MetaFactory::new(&meta, &dtype);
         let one = graph.add_node(
             NodeOp::CallFunction,
             format!("{}_one", name),
             "aten.full.default".to_string(),
             vec![i64_list(&shape), IrArg::Float(1.0)],
-            meta_with(&meta, shape.clone(), &dtype),
+            metas.tensor(&shape),
         );
         graph.anchor_to(one, id);
         let eq = graph.add_node(
@@ -600,7 +612,7 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
             format!("{}_self_eq", name),
             "aten.eq.Tensor".to_string(),
             vec![IrArg::Node(input_id), IrArg::Node(input_id)],
-            meta_with(&meta, shape, "torch.bool"),
+            metas.bool(&shape),
         );
         graph.anchor_to(eq, id);
         let ones = graph.add_node(
@@ -1829,7 +1841,8 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         .to_string();
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
-    let bool_meta = meta_with(&meta, shape.clone(), "torch.bool");
+    let metas = MetaFactory::new(&meta, &dtype);
+    let bool_meta = metas.bool(&shape);
 
     let one = add_full_const(graph, id, &name, "one", 1.0, &shape, &dtype, &meta);
     let zero = add_full_const(graph, id, &name, "zero", 0.0, &shape, &dtype, &meta);
@@ -1845,7 +1858,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_abs", name),
         "aten.abs.default".to_string(),
         vec![IrArg::Node(x_id)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(abs_x, id);
 
@@ -1863,7 +1876,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_inv", name),
         "aten.reciprocal.default".to_string(),
         vec![IrArg::Node(abs_x)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(inv_x, id);
 
@@ -1872,7 +1885,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_z", name),
         "aten.where.self".to_string(),
         vec![IrArg::Node(mask_hi), IrArg::Node(inv_x), IrArg::Node(abs_x)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(z, id);
 
@@ -1881,7 +1894,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_z2", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(z), IrArg::Node(z)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(z2, id);
 
@@ -1890,7 +1903,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_z4", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(z2), IrArg::Node(z2)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(z4, id);
 
@@ -1899,7 +1912,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_num1", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(z2), IrArg::Node(a1)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(num1, id);
 
@@ -1908,7 +1921,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_num2", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(z4), IrArg::Node(a2)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(num2, id);
 
@@ -1917,7 +1930,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_num_base", name),
         "aten.add.Tensor".to_string(),
         vec![IrArg::Node(num1), IrArg::Node(one)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(num_base, id);
 
@@ -1926,7 +1939,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_num", name),
         "aten.add.Tensor".to_string(),
         vec![IrArg::Node(num_base), IrArg::Node(num2)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(num, id);
 
@@ -1935,7 +1948,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_den1", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(z2), IrArg::Node(b1)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(den1, id);
 
@@ -1944,7 +1957,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_den", name),
         "aten.add.Tensor".to_string(),
         vec![IrArg::Node(den1), IrArg::Node(one)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(den, id);
 
@@ -1953,7 +1966,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_inv_den", name),
         "aten.reciprocal.default".to_string(),
         vec![IrArg::Node(den)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(inv_den, id);
 
@@ -1962,7 +1975,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_prod", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(num), IrArg::Node(inv_den)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(prod, id);
 
@@ -1971,7 +1984,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_atan_z", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(z), IrArg::Node(prod)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(atan_z, id);
 
@@ -1980,7 +1993,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_diff", name),
         "aten.sub.Tensor".to_string(),
         vec![IrArg::Node(half_pi), IrArg::Node(atan_z)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(diff, id);
 
@@ -1989,7 +2002,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_atan_abs", name),
         "aten.where.self".to_string(),
         vec![IrArg::Node(mask_hi), IrArg::Node(diff), IrArg::Node(atan_z)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(atan_abs, id);
 
@@ -2007,7 +2020,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_neg", name),
         "aten.neg.default".to_string(),
         vec![IrArg::Node(atan_abs)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(neg, id);
 
@@ -2043,13 +2056,14 @@ fn decompose_sinh(graph: &mut IrGraph, id: NodeId) -> bool {
         .to_string();
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
+    let metas = MetaFactory::new(&meta, &dtype);
 
     let half = graph.add_node(
         NodeOp::CallFunction,
         format!("{}_half", name),
         "aten.full.default".to_string(),
         vec![i64_list(&shape), IrArg::Float(0.5)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(half, id);
 
@@ -2058,7 +2072,7 @@ fn decompose_sinh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_exp_pos", name),
         "aten.exp.default".to_string(),
         vec![IrArg::Node(x_id)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(exp_pos, id);
 
@@ -2067,7 +2081,7 @@ fn decompose_sinh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_neg", name),
         "aten.neg.default".to_string(),
         vec![IrArg::Node(x_id)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(neg, id);
 
@@ -2076,7 +2090,7 @@ fn decompose_sinh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_exp_neg", name),
         "aten.exp.default".to_string(),
         vec![IrArg::Node(neg)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(exp_neg, id);
 
@@ -2085,7 +2099,7 @@ fn decompose_sinh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_diff", name),
         "aten.sub.Tensor".to_string(),
         vec![IrArg::Node(exp_pos), IrArg::Node(exp_neg)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(diff, id);
 
@@ -2117,13 +2131,14 @@ fn decompose_cosh(graph: &mut IrGraph, id: NodeId) -> bool {
         .to_string();
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
+    let metas = MetaFactory::new(&meta, &dtype);
 
     let half = graph.add_node(
         NodeOp::CallFunction,
         format!("{}_half", name),
         "aten.full.default".to_string(),
         vec![i64_list(&shape), IrArg::Float(0.5)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(half, id);
 
@@ -2132,7 +2147,7 @@ fn decompose_cosh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_exp_pos", name),
         "aten.exp.default".to_string(),
         vec![IrArg::Node(x_id)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(exp_pos, id);
 
@@ -2141,7 +2156,7 @@ fn decompose_cosh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_neg", name),
         "aten.neg.default".to_string(),
         vec![IrArg::Node(x_id)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(neg, id);
 
@@ -2150,7 +2165,7 @@ fn decompose_cosh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_exp_neg", name),
         "aten.exp.default".to_string(),
         vec![IrArg::Node(neg)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(exp_neg, id);
 
@@ -2159,7 +2174,7 @@ fn decompose_cosh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_sum", name),
         "aten.add.Tensor".to_string(),
         vec![IrArg::Node(exp_pos), IrArg::Node(exp_neg)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(sum, id);
 
@@ -2191,13 +2206,14 @@ fn decompose_asinh(graph: &mut IrGraph, id: NodeId) -> bool {
         .to_string();
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
+    let metas = MetaFactory::new(&meta, &dtype);
 
     let one = graph.add_node(
         NodeOp::CallFunction,
         format!("{}_one", name),
         "aten.full.default".to_string(),
         vec![i64_list(&shape), IrArg::Float(1.0)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(one, id);
 
@@ -2206,7 +2222,7 @@ fn decompose_asinh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_square", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(x_id), IrArg::Node(x_id)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(square, id);
 
@@ -2215,7 +2231,7 @@ fn decompose_asinh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_radicand", name),
         "aten.add.Tensor".to_string(),
         vec![IrArg::Node(square), IrArg::Node(one)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(radicand, id);
 
@@ -2224,7 +2240,7 @@ fn decompose_asinh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_sqrt", name),
         "aten.sqrt.default".to_string(),
         vec![IrArg::Node(radicand)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(sqrt, id);
 
@@ -2233,7 +2249,7 @@ fn decompose_asinh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_sum", name),
         "aten.add.Tensor".to_string(),
         vec![IrArg::Node(x_id), IrArg::Node(sqrt)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(add, id);
 
@@ -2265,13 +2281,14 @@ fn decompose_acosh(graph: &mut IrGraph, id: NodeId) -> bool {
         .to_string();
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
+    let metas = MetaFactory::new(&meta, &dtype);
 
     let one = graph.add_node(
         NodeOp::CallFunction,
         format!("{}_one", name),
         "aten.full.default".to_string(),
         vec![i64_list(&shape), IrArg::Float(1.0)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(one, id);
 
@@ -2280,7 +2297,7 @@ fn decompose_acosh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_minus", name),
         "aten.sub.Tensor".to_string(),
         vec![IrArg::Node(x_id), IrArg::Node(one)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(minus, id);
 
@@ -2289,7 +2306,7 @@ fn decompose_acosh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_plus", name),
         "aten.add.Tensor".to_string(),
         vec![IrArg::Node(x_id), IrArg::Node(one)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(plus, id);
 
@@ -2298,7 +2315,7 @@ fn decompose_acosh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_radicand", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(minus), IrArg::Node(plus)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(radicand, id);
 
@@ -2307,7 +2324,7 @@ fn decompose_acosh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_sqrt", name),
         "aten.sqrt.default".to_string(),
         vec![IrArg::Node(radicand)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(sqrt, id);
 
@@ -2316,7 +2333,7 @@ fn decompose_acosh(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_sum", name),
         "aten.add.Tensor".to_string(),
         vec![IrArg::Node(x_id), IrArg::Node(sqrt)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(add, id);
 
@@ -2348,7 +2365,8 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         .to_string();
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
-    let bool_meta = meta_with(&meta, shape.clone(), "torch.bool");
+    let metas = MetaFactory::new(&meta, &dtype);
+    let bool_meta = metas.bool(&shape);
 
     let p_coefficients = [
         1.6666667163e-01,
@@ -2373,7 +2391,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_abs", name),
         "aten.abs.default".to_string(),
         vec![IrArg::Node(x_id)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(x_abs, id);
 
@@ -2382,7 +2400,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_y", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(x_abs), IrArg::Node(x_abs)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(y, id);
 
@@ -2391,7 +2409,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_x3", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(x_abs), IrArg::Node(y)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(x3, id);
 
@@ -2429,7 +2447,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_numer_small", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(x3), IrArg::Node(p_small)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(numer_small, id);
 
@@ -2438,7 +2456,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_r_small", name),
         "aten.div.Tensor".to_string(),
         vec![IrArg::Node(numer_small), IrArg::Node(q_small)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(r_small, id);
 
@@ -2447,7 +2465,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_asin_small", name),
         "aten.add.Tensor".to_string(),
         vec![IrArg::Node(x_abs), IrArg::Node(r_small)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(asin_small, id);
 
@@ -2456,7 +2474,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_tmp", name),
         "aten.sub.Tensor".to_string(),
         vec![IrArg::Node(x_abs), IrArg::Node(one)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(tmp, id);
 
@@ -2465,7 +2483,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_z", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(tmp), IrArg::Node(neg_half)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(z, id);
 
@@ -2474,7 +2492,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_s", name),
         "aten.sqrt.default".to_string(),
         vec![IrArg::Node(z)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(s, id);
 
@@ -2483,7 +2501,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_s2", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(s), IrArg::Node(s)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(s2, id);
 
@@ -2492,7 +2510,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_s3", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(s2), IrArg::Node(s)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(s3, id);
 
@@ -2530,7 +2548,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_numer_large", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(s3), IrArg::Node(pz)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(numer_large, id);
 
@@ -2539,7 +2557,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_r_large", name),
         "aten.div.Tensor".to_string(),
         vec![IrArg::Node(numer_large), IrArg::Node(qz)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(r_large, id);
 
@@ -2548,7 +2566,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_t1", name),
         "aten.add.Tensor".to_string(),
         vec![IrArg::Node(s), IrArg::Node(r_large)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(t1, id);
 
@@ -2557,7 +2575,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_t2", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(t1), IrArg::Node(two)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(t2, id);
 
@@ -2566,7 +2584,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_diff", name),
         "aten.sub.Tensor".to_string(),
         vec![IrArg::Node(t2), IrArg::Node(half_pi)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(diff, id);
 
@@ -2575,7 +2593,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_asin_large", name),
         "aten.neg.default".to_string(),
         vec![IrArg::Node(diff)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(asin_large, id);
 
@@ -2597,7 +2615,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
             IrArg::Node(asin_large),
             IrArg::Node(asin_small),
         ],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(asin_unsigned, id);
 
@@ -2606,7 +2624,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         format!("{}_negated_asin", name),
         "aten.neg.default".to_string(),
         vec![IrArg::Node(asin_unsigned)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(negated_asin, id);
 
@@ -2628,7 +2646,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
             IrArg::Node(negated_asin),
             IrArg::Node(asin_unsigned),
         ],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(asin, id);
 
@@ -2638,7 +2656,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
             format!("{}_acos_small", name),
             "aten.sub.Tensor".to_string(),
             vec![IrArg::Node(half_pi), IrArg::Node(asin)],
-            meta_with(&meta, shape.clone(), &dtype),
+            metas.tensor(&shape),
         );
         graph.anchor_to(acos_small, id);
 
@@ -2698,13 +2716,14 @@ fn decompose_elu(graph: &mut IrGraph, id: NodeId) -> bool {
     let alpha = elu_alpha(&graph.nodes[id]);
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
+    let metas = MetaFactory::new(&meta, &dtype);
 
     let zero = graph.add_node(
         NodeOp::CallFunction,
         format!("{}_zero", name),
         "aten.full.default".to_string(),
         vec![i64_list(&shape), IrArg::Float(0.0)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(zero, id);
 
@@ -2713,7 +2732,7 @@ fn decompose_elu(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_alpha", name),
         "aten.full.default".to_string(),
         vec![i64_list(&shape), IrArg::Float(alpha)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(alpha_full, id);
 
@@ -2722,7 +2741,7 @@ fn decompose_elu(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_expm1", name),
         "aten.expm1.default".to_string(),
         vec![IrArg::Node(x_id)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(expm1, id);
 
@@ -2731,7 +2750,7 @@ fn decompose_elu(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_scaled", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(expm1), IrArg::Node(alpha_full)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(scaled, id);
 
@@ -2740,7 +2759,7 @@ fn decompose_elu(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_ge", name),
         "aten.ge.Tensor".to_string(),
         vec![IrArg::Node(x_id), IrArg::Node(zero)],
-        meta_with(&meta, shape.clone(), "torch.bool"),
+        metas.bool(&shape),
     );
     graph.anchor_to(ge, id);
 
@@ -2774,6 +2793,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
     let approximate = gelu_approximate(&graph.nodes[id]).to_string();
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
+    let metas = MetaFactory::new(&meta, &dtype);
 
     let full = |graph: &mut IrGraph, suffix: &str, value: f64| {
         let node = graph.add_node(
@@ -2781,7 +2801,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
             format!("{}_{}", name, suffix),
             "aten.full.default".to_string(),
             vec![i64_list(&rank_ones), IrArg::Float(value)],
-            meta_with(&meta, rank_ones.clone(), &dtype),
+            metas.tensor(&rank_ones),
         );
         graph.anchor_to(node, id);
         node
@@ -2798,7 +2818,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_scaled", name),
                 "aten.mul.Tensor".to_string(),
                 vec![IrArg::Node(x_id), IrArg::Node(sqrt_half)],
-                meta_with(&meta, shape.clone(), &dtype),
+                metas.tensor(&shape),
             );
             graph.anchor_to(scaled, id);
 
@@ -2807,7 +2827,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_erf", name),
                 "aten.erf.default".to_string(),
                 vec![IrArg::Node(scaled)],
-                meta_with(&meta, shape.clone(), &dtype),
+                metas.tensor(&shape),
             );
             graph.anchor_to(erf, id);
 
@@ -2816,7 +2836,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_plus_one", name),
                 "aten.add.Tensor".to_string(),
                 vec![IrArg::Node(erf), IrArg::Node(one)],
-                meta_with(&meta, shape.clone(), &dtype),
+                metas.tensor(&shape),
             );
             graph.anchor_to(plus_one, id);
 
@@ -2825,7 +2845,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_weighted", name),
                 "aten.mul.Tensor".to_string(),
                 vec![IrArg::Node(plus_one), IrArg::Node(half)],
-                meta_with(&meta, shape.clone(), &dtype),
+                metas.tensor(&shape),
             );
             graph.anchor_to(weighted, id);
 
@@ -2847,7 +2867,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_sqrt_mul", name),
                 "aten.mul.Tensor".to_string(),
                 vec![IrArg::Node(sqrt_two), IrArg::Node(two_over_sqrt_pi)],
-                meta_with(&meta, rank_ones.clone(), &dtype),
+                metas.tensor(&rank_ones),
             );
             graph.anchor_to(sqrt_mul, id);
 
@@ -2856,7 +2876,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_sqrt_2_pi", name),
                 "aten.mul.Tensor".to_string(),
                 vec![IrArg::Node(sqrt_mul), IrArg::Node(half)],
-                meta_with(&meta, rank_ones.clone(), &dtype),
+                metas.tensor(&rank_ones),
             );
             graph.anchor_to(sqrt_2_pi, id);
 
@@ -2865,7 +2885,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_square", name),
                 "aten.mul.Tensor".to_string(),
                 vec![IrArg::Node(x_id), IrArg::Node(x_id)],
-                meta_with(&meta, shape.clone(), &dtype),
+                metas.tensor(&shape),
             );
             graph.anchor_to(square, id);
 
@@ -2874,7 +2894,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_cube", name),
                 "aten.mul.Tensor".to_string(),
                 vec![IrArg::Node(square), IrArg::Node(x_id)],
-                meta_with(&meta, shape.clone(), &dtype),
+                metas.tensor(&shape),
             );
             graph.anchor_to(cube, id);
 
@@ -2883,7 +2903,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_cubic_term", name),
                 "aten.mul.Tensor".to_string(),
                 vec![IrArg::Node(cube), IrArg::Node(cube_coeff)],
-                meta_with(&meta, shape.clone(), &dtype),
+                metas.tensor(&shape),
             );
             graph.anchor_to(cubic_term, id);
 
@@ -2892,7 +2912,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_inner", name),
                 "aten.add.Tensor".to_string(),
                 vec![IrArg::Node(x_id), IrArg::Node(cubic_term)],
-                meta_with(&meta, shape.clone(), &dtype),
+                metas.tensor(&shape),
             );
             graph.anchor_to(inner, id);
 
@@ -2901,7 +2921,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_scaled", name),
                 "aten.mul.Tensor".to_string(),
                 vec![IrArg::Node(inner), IrArg::Node(sqrt_2_pi)],
-                meta_with(&meta, shape.clone(), &dtype),
+                metas.tensor(&shape),
             );
             graph.anchor_to(scaled, id);
 
@@ -2910,7 +2930,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_tanh", name),
                 "aten.tanh.default".to_string(),
                 vec![IrArg::Node(scaled)],
-                meta_with(&meta, shape.clone(), &dtype),
+                metas.tensor(&shape),
             );
             graph.anchor_to(tanh, id);
 
@@ -2919,7 +2939,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_plus_one", name),
                 "aten.add.Tensor".to_string(),
                 vec![IrArg::Node(tanh), IrArg::Node(one)],
-                meta_with(&meta, shape.clone(), &dtype),
+                metas.tensor(&shape),
             );
             graph.anchor_to(plus_one, id);
 
@@ -2928,7 +2948,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_first_mul", name),
                 "aten.mul.Tensor".to_string(),
                 vec![IrArg::Node(x_id), IrArg::Node(plus_one)],
-                meta_with(&meta, shape.clone(), &dtype),
+                metas.tensor(&shape),
             );
             graph.anchor_to(first_mul, id);
 
@@ -2965,6 +2985,7 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
     let rank_ones = vec![1_i64; shape.len()];
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
+    let metas = MetaFactory::new(&meta, &dtype);
 
     let full = |graph: &mut IrGraph, suffix: &str, value: f64| {
         let node = graph.add_node(
@@ -2972,14 +2993,14 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
             format!("{}_{}", name, suffix),
             "aten.full.default".to_string(),
             vec![i64_list(&rank_ones), IrArg::Float(value)],
-            meta_with(&meta, rank_ones.clone(), &dtype),
+            metas.tensor(&rank_ones),
         );
         graph.anchor_to(node, id);
         node
     };
 
-    let bool_meta = meta_with(&meta, shape.clone(), "torch.bool");
-    let tensor_meta = meta_with(&meta, shape.clone(), &dtype);
+    let bool_meta = metas.bool(&shape);
+    let tensor_meta = metas.tensor(&shape);
 
     let central_range = full(graph, "central_range", 0.7);
     let a0 = full(graph, "a0", 0.886_226_899);
@@ -3635,6 +3656,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     let eps = batch_norm_eps(&graph.nodes[id]);
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
+    let metas = MetaFactory::new(&meta, &dtype);
 
     let view_stats = |graph: &mut IrGraph, source: NodeId, suffix: &str| {
         let node = graph.add_node(
@@ -3642,7 +3664,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             format!("{}_{}", name, suffix),
             "aten.view_copy.default".to_string(),
             vec![IrArg::Node(source), i64_list(&physical_channel_shape)],
-            meta_with(&meta, physical_channel_shape.clone(), &dtype),
+            metas.tensor(&physical_channel_shape),
         );
         graph.anchor_to(node, id);
         preserve_shape_node(graph, node);
@@ -3657,7 +3679,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_centered", name),
         "aten.sub.Tensor".to_string(),
         vec![IrArg::Node(x_id), IrArg::Node(mean_view)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(centered, id);
 
@@ -3666,7 +3688,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_eps", name),
         "aten.full.default".to_string(),
         vec![i64_list(&scalar_shape), IrArg::Float(eps)],
-        meta_with(&meta, scalar_shape, &dtype),
+        metas.tensor(&scalar_shape),
     );
     graph.anchor_to(eps_full, id);
     preserve_shape_node(graph, eps_full);
@@ -3676,7 +3698,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_var_eps", name),
         "aten.add.Tensor".to_string(),
         vec![IrArg::Node(var_view), IrArg::Node(eps_full)],
-        meta_with(&meta, physical_channel_shape.clone(), &dtype),
+        metas.tensor(&physical_channel_shape),
     );
     graph.anchor_to(var_eps, id);
     preserve_shape_node(graph, var_eps);
@@ -3686,7 +3708,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_inv_sqrt", name),
         "aten.rsqrt.default".to_string(),
         vec![IrArg::Node(var_eps)],
-        meta_with(&meta, physical_channel_shape.clone(), &dtype),
+        metas.tensor(&physical_channel_shape),
     );
     graph.anchor_to(inv_sqrt, id);
     preserve_shape_node(graph, inv_sqrt);
@@ -3696,7 +3718,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_normed", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(centered), IrArg::Node(inv_sqrt)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(normed, id);
 
@@ -3708,7 +3730,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_weight_full", name),
                 "aten.full.default".to_string(),
                 vec![i64_list(&[num_features]), IrArg::Float(1.0)],
-                meta_with(&meta, vec![num_features], &dtype),
+                metas.tensor(&[num_features]),
             );
             graph.anchor_to(weight_full, id);
             view_stats(graph, weight_full, "weight_view")
@@ -3721,7 +3743,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_weighted", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(normed), IrArg::Node(weight_view)],
-        meta_with(&meta, shape.clone(), &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(weighted, id);
 
@@ -3733,7 +3755,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_bias_full", name),
                 "aten.full.default".to_string(),
                 vec![i64_list(&[num_features]), IrArg::Float(0.0)],
-                meta_with(&meta, vec![num_features], &dtype),
+                metas.tensor(&[num_features]),
             );
             graph.anchor_to(bias_full, id);
             view_stats(graph, bias_full, "bias_view")
@@ -3746,7 +3768,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_result", name),
         "aten.add.Tensor".to_string(),
         vec![IrArg::Node(weighted), IrArg::Node(bias_view)],
-        meta_with(&meta, shape, &dtype),
+        metas.tensor(&shape),
     );
 
     let getitem_users: Vec<(NodeId, i64)> = graph
@@ -3882,6 +3904,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     let affine_shape = vec![1, group, channels_per_group, 1];
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
+    let metas = MetaFactory::new(&meta, &dtype);
     let reshape_target = if graph.nodes[id].target.contains("native_group_norm") {
         "aten.view_copy.default"
     } else {
@@ -3893,7 +3916,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_grouped", name),
         reshape_target.to_string(),
         vec![IrArg::Node(x_id), i64_list(&grouped_shape)],
-        meta_with(&meta, grouped_shape.clone(), &dtype),
+        metas.tensor(&grouped_shape),
     );
     graph.anchor_to(grouped, id);
     preserve_identity_layout(graph, grouped);
@@ -3906,7 +3929,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             i64_list(&scalar_shape),
             IrArg::Float(1.0 / ((channels_per_group * hxw) as f64)),
         ],
-        meta_with(&meta, scalar_shape.clone(), &dtype),
+        metas.tensor(&scalar_shape),
     );
     graph.anchor_to(inv_n, id);
     preserve_identity_layout(graph, inv_n);
@@ -3916,7 +3939,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_sum", name),
         "aten.sum.dim_IntList".to_string(),
         vec![IrArg::Node(grouped), reduce_dims.clone(), IrArg::Bool(true)],
-        meta_with(&meta, scalar_shape.clone(), &dtype),
+        metas.tensor(&scalar_shape),
     );
     graph.anchor_to(sum_x, id);
     preserve_identity_layout(graph, sum_x);
@@ -3926,7 +3949,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_mean", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(sum_x), IrArg::Node(inv_n)],
-        meta_with(&meta, scalar_shape.clone(), &dtype),
+        metas.tensor(&scalar_shape),
     );
     graph.anchor_to(mean, id);
     preserve_identity_layout(graph, mean);
@@ -3936,7 +3959,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_centered", name),
         "aten.sub.Tensor".to_string(),
         vec![IrArg::Node(grouped), IrArg::Node(mean)],
-        meta_with(&meta, grouped_shape.clone(), &dtype),
+        metas.tensor(&grouped_shape),
     );
     graph.anchor_to(centered, id);
     preserve_identity_layout(graph, centered);
@@ -3946,7 +3969,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_squared", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(centered), IrArg::Node(centered)],
-        meta_with(&meta, grouped_shape.clone(), &dtype),
+        metas.tensor(&grouped_shape),
     );
     graph.anchor_to(squared, id);
     preserve_identity_layout(graph, squared);
@@ -3956,7 +3979,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_sum_squared", name),
         "aten.sum.dim_IntList".to_string(),
         vec![IrArg::Node(squared), reduce_dims, IrArg::Bool(true)],
-        meta_with(&meta, scalar_shape.clone(), &dtype),
+        metas.tensor(&scalar_shape),
     );
     graph.anchor_to(sum_squared, id);
     preserve_identity_layout(graph, sum_squared);
@@ -3966,7 +3989,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_var", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(sum_squared), IrArg::Node(inv_n)],
-        meta_with(&meta, scalar_shape.clone(), &dtype),
+        metas.tensor(&scalar_shape),
     );
     graph.anchor_to(var, id);
     preserve_identity_layout(graph, var);
@@ -3976,7 +3999,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_eps", name),
         "aten.full.default".to_string(),
         vec![i64_list(&scalar_shape), IrArg::Float(eps)],
-        meta_with(&meta, scalar_shape.clone(), &dtype),
+        metas.tensor(&scalar_shape),
     );
     graph.anchor_to(eps_full, id);
     preserve_identity_layout(graph, eps_full);
@@ -3986,7 +4009,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_var_eps", name),
         "aten.add.Tensor".to_string(),
         vec![IrArg::Node(var), IrArg::Node(eps_full)],
-        meta_with(&meta, scalar_shape.clone(), &dtype),
+        metas.tensor(&scalar_shape),
     );
     graph.anchor_to(var_eps, id);
     preserve_identity_layout(graph, var_eps);
@@ -3996,7 +4019,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_rsqrt", name),
         "aten.rsqrt.default".to_string(),
         vec![IrArg::Node(var_eps)],
-        meta_with(&meta, scalar_shape.clone(), &dtype),
+        metas.tensor(&scalar_shape),
     );
     graph.anchor_to(rsqrt, id);
     preserve_identity_layout(graph, rsqrt);
@@ -4006,7 +4029,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_normalized", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(centered), IrArg::Node(rsqrt)],
-        meta_with(&meta, grouped_shape.clone(), &dtype),
+        metas.tensor(&grouped_shape),
     );
     graph.anchor_to(normalized, id);
     preserve_identity_layout(graph, normalized);
@@ -4018,7 +4041,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_weight_view", name),
                 reshape_target.to_string(),
                 vec![IrArg::Node(weight_id), i64_list(&affine_shape)],
-                meta_with(&meta, affine_shape.clone(), &dtype),
+                metas.tensor(&affine_shape),
             );
             graph.anchor_to(weight_view, id);
             preserve_identity_layout(graph, weight_view);
@@ -4028,7 +4051,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_weighted", name),
                 "aten.mul.Tensor".to_string(),
                 vec![IrArg::Node(normalized), IrArg::Node(weight_view)],
-                meta_with(&meta, grouped_shape.clone(), &dtype),
+                metas.tensor(&grouped_shape),
             );
             graph.anchor_to(weighted, id);
             preserve_identity_layout(graph, weighted);
@@ -4045,7 +4068,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_bias_view", name),
                 reshape_target.to_string(),
                 vec![IrArg::Node(bias_id), i64_list(&affine_shape)],
-                meta_with(&meta, affine_shape.clone(), &dtype),
+                metas.tensor(&affine_shape),
             );
             graph.anchor_to(bias_view, id);
             preserve_identity_layout(graph, bias_view);
@@ -4055,7 +4078,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
                 format!("{}_biased", name),
                 "aten.add.Tensor".to_string(),
                 vec![IrArg::Node(weighted), IrArg::Node(bias_view)],
-                meta_with(&meta, grouped_shape.clone(), &dtype),
+                metas.tensor(&grouped_shape),
             );
             graph.anchor_to(biased, id);
             preserve_identity_layout(graph, biased);
@@ -4070,7 +4093,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_result", name),
         reshape_target.to_string(),
         vec![IrArg::Node(biased), i64_list(&shape)],
-        meta_with(&meta, shape, &dtype),
+        metas.tensor(&shape),
     );
     graph.anchor_to(result, id);
     preserve_identity_layout(graph, result);
@@ -4136,6 +4159,7 @@ fn decompose_stack(graph: &mut IrGraph, id: NodeId) -> bool {
         .val_dtype()
         .unwrap_or("torch.float32")
         .to_string();
+    let metas = MetaFactory::new(&meta, &dtype);
 
     // Unsqueeze each tensor at dim
     let mut unsqueezed: Vec<NodeId> = Vec::new();
@@ -4158,7 +4182,7 @@ fn decompose_stack(graph: &mut IrGraph, id: NodeId) -> bool {
             format!("{}_unsq_{}", name, i),
             "aten.unsqueeze_copy.default".to_string(),
             vec![IrArg::Node(tid), IrArg::Int(dim)],
-            meta_with(&meta, u_shape, &dtype),
+            metas.tensor(&u_shape),
         );
         graph.anchor_to(unsq, id);
         unsqueezed.push(unsq);
@@ -4202,6 +4226,7 @@ fn decompose_unbind(graph: &mut IrGraph, id: NodeId) -> bool {
         .to_string();
     let name = graph.nodes[id].name.clone();
     let orig_meta = graph.nodes[id].meta.clone();
+    let metas = MetaFactory::new(&orig_meta, &dtype);
 
     // Find getitem users
     let getitem_users: Vec<(NodeId, i64)> = graph
@@ -4233,7 +4258,7 @@ fn decompose_unbind(graph: &mut IrGraph, id: NodeId) -> bool {
                 IrArg::Int(*idx),
                 IrArg::Int(idx + 1),
             ],
-            meta_with(&orig_meta, slice_shape, &dtype),
+            metas.tensor(&slice_shape),
         );
         graph.anchor_to(slice_id, id);
 
@@ -4245,7 +4270,7 @@ fn decompose_unbind(graph: &mut IrGraph, id: NodeId) -> bool {
             format!("{}_sq_{}", name, idx),
             "aten.squeeze_copy.dims".to_string(),
             vec![IrArg::Node(slice_id), i64_list(&[dim_norm as i64])],
-            meta_with(&orig_meta, sq_shape, &dtype),
+            metas.tensor(&sq_shape),
         );
 
         graph.replace_and_erase(*getitem_id, squeeze_id);
