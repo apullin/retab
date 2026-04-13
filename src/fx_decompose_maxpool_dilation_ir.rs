@@ -1,18 +1,9 @@
 //! Pure Rust IrPass: dilated max_pool2d → pad + space-to-batch + pool + batch-to-space + slice.
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
+    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp,
 };
 use crate::runner_logging::log_line;
-
-fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut m = base.clone();
-    m.set_val(FakeTensorMeta {
-        shape,
-        dtype: dtype.to_string(),
-    });
-    m
-}
 
 fn pair_arg(args: &[IrArg], idx: usize, default: (i64, i64)) -> (i64, i64) {
     match args.get(idx) {
@@ -166,8 +157,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     i64_list(&[pad_w, right_pad, pad_h, bottom_pad, 0, 0, 0, 0]),
                     pad_value_for_dtype(&dtype),
                 ],
-                meta_with(
-                    &orig_meta,
+                orig_meta.cloned_with_val(
                     vec![n, c, h + pad_h + bottom_pad, w + pad_w + right_pad],
                     &dtype,
                 ),
@@ -183,7 +173,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     IrArg::Node(x_pad),
                     i64_list(&[n, c, h_pack, d_h, w_pack, d_w]),
                 ],
-                meta_with(&orig_meta, vec![n, c, h_pack, d_h, w_pack, d_w], &dtype),
+                orig_meta.cloned_with_val(vec![n, c, h_pack, d_h, w_pack, d_w], &dtype),
             );
             graph.anchor_to(x_view, id);
 
@@ -193,7 +183,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 format!("{}_pack_perm", node_name),
                 "aten.permute_copy.default".to_string(),
                 vec![IrArg::Node(x_view), i64_list(&[3, 5, 0, 1, 2, 4])],
-                meta_with(&orig_meta, vec![d_h, d_w, n, c, h_pack, w_pack], &dtype),
+                orig_meta.cloned_with_val(vec![d_h, d_w, n, c, h_pack, w_pack], &dtype),
             );
             graph.anchor_to(x_perm, id);
 
@@ -206,7 +196,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     IrArg::Node(x_perm),
                     i64_list(&[n * d_h * d_w, c, h_pack, w_pack]),
                 ],
-                meta_with(&orig_meta, vec![n * d_h * d_w, c, h_pack, w_pack], &dtype),
+                orig_meta.cloned_with_val(vec![n * d_h * d_w, c, h_pack, w_pack], &dtype),
             );
             graph.anchor_to(x_batch, id);
 
@@ -225,7 +215,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     IrArg::Int(1), // dilation=1
                     IrArg::Bool(ceil_mode),
                 ],
-                meta_with(&orig_meta, vec![n * d_h * d_w, c, h_out, w_out], &dtype),
+                orig_meta.cloned_with_val(vec![n * d_h * d_w, c, h_out, w_out], &dtype),
             );
             graph.anchor_to(pooled, id);
 
@@ -238,7 +228,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     IrArg::Node(pooled),
                     i64_list(&[d_h, d_w, n, c, h_out, w_out]),
                 ],
-                meta_with(&orig_meta, vec![d_h, d_w, n, c, h_out, w_out], &dtype),
+                orig_meta.cloned_with_val(vec![d_h, d_w, n, c, h_out, w_out], &dtype),
             );
             graph.anchor_to(unpack, id);
 
@@ -248,7 +238,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 format!("{}_unperm", node_name),
                 "aten.permute_copy.default".to_string(),
                 vec![IrArg::Node(unpack), i64_list(&[2, 3, 4, 0, 5, 1])],
-                meta_with(&orig_meta, vec![n, c, h_out, d_h, w_out, d_w], &dtype),
+                orig_meta.cloned_with_val(vec![n, c, h_out, d_h, w_out, d_w], &dtype),
             );
             graph.anchor_to(unperm, id);
 
@@ -261,7 +251,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     IrArg::Node(unperm),
                     i64_list(&[n, c, h_out * d_h, w_out * d_w]),
                 ],
-                meta_with(&orig_meta, vec![n, c, h_out * d_h, w_out * d_w], &dtype),
+                orig_meta.cloned_with_val(vec![n, c, h_out * d_h, w_out * d_w], &dtype),
             );
             graph.anchor_to(out_view, id);
 
@@ -276,7 +266,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     IrArg::Int(0),
                     IrArg::Int(h_final),
                 ],
-                meta_with(&orig_meta, vec![n, c, h_final, w_out * d_w], &dtype),
+                orig_meta.cloned_with_val(vec![n, c, h_final, w_out * d_w], &dtype),
             );
             graph.anchor_to(slice_h, id);
 
@@ -291,7 +281,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     IrArg::Int(0),
                     IrArg::Int(w_final),
                 ],
-                meta_with(&orig_meta, vec![n, c, h_final, w_final], &dtype),
+                orig_meta.cloned_with_val(vec![n, c, h_final, w_final], &dtype),
             );
 
             if let Some(value_getitem) = value_getitem {

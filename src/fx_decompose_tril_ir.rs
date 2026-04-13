@@ -1,7 +1,7 @@
 //! Pure Rust IrPass decomposition of `aten.tril` into
 //! arange + view + add(diagonal) + ge + where / bitwise_and.
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::runner_logging::log_line;
 
 fn is_tril(target: &str) -> bool {
@@ -9,16 +9,6 @@ fn is_tril(target: &str) -> bool {
         || target.contains("aten_tril")
         || target.contains("aten.tril_copy")
         || target.contains("aten_tril_copy")
-}
-
-/// Build a NodeMeta with the given shape and dtype, cloning qparams from `base`.
-fn meta_with_val(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut m = base.clone();
-    m.set_val(FakeTensorMeta {
-        shape,
-        dtype: dtype.to_string(),
-    });
-    m
 }
 
 /// Decompose a single tril node into primitive ops on the IrGraph.
@@ -47,7 +37,7 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
         format!("{base_name}_row_arange"),
         "aten.arange.start_step".to_string(),
         vec![IrArg::Int(0), IrArg::Int(rows), IrArg::Int(1)],
-        meta_with_val(&base_meta, vec![rows], "torch.float32"),
+        base_meta.cloned_with_val(vec![rows], "torch.float32"),
     );
     graph.anchor_to(row_arange, id);
 
@@ -59,7 +49,7 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
             IrArg::Node(row_arange),
             IrArg::List(vec![IrArg::Int(rows), IrArg::Int(1)]),
         ],
-        meta_with_val(&base_meta, vec![rows, 1], "torch.float32"),
+        base_meta.cloned_with_val(vec![rows, 1], "torch.float32"),
     );
     graph.anchor_to(row_view, id);
 
@@ -70,7 +60,7 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
             format!("{base_name}_row_add_diag"),
             "aten.add.Scalar".to_string(),
             vec![IrArg::Node(row_view), IrArg::Int(diagonal)],
-            meta_with_val(&base_meta, vec![rows, 1], "torch.float32"),
+            base_meta.cloned_with_val(vec![rows, 1], "torch.float32"),
         )
     } else {
         row_view
@@ -82,7 +72,7 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
         format!("{base_name}_col_arange"),
         "aten.arange.start_step".to_string(),
         vec![IrArg::Int(0), IrArg::Int(cols), IrArg::Int(1)],
-        meta_with_val(&base_meta, vec![cols], "torch.float32"),
+        base_meta.cloned_with_val(vec![cols], "torch.float32"),
     );
     graph.anchor_to(col_arange, id);
 
@@ -94,7 +84,7 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
             IrArg::Node(col_arange),
             IrArg::List(vec![IrArg::Int(1), IrArg::Int(cols)]),
         ],
-        meta_with_val(&base_meta, vec![1, cols], "torch.float32"),
+        base_meta.cloned_with_val(vec![1, cols], "torch.float32"),
     );
     graph.anchor_to(col_view, id);
 
@@ -104,7 +94,7 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
         format!("{base_name}_ge"),
         "aten.ge.Tensor".to_string(),
         vec![IrArg::Node(row_final), IrArg::Node(col_view)],
-        meta_with_val(&base_meta, vec![rows, cols], "torch.bool"),
+        base_meta.cloned_with_val(vec![rows, cols], "torch.bool"),
     );
     graph.anchor_to(mask, id);
 
@@ -134,7 +124,7 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
             format!("{base_name}_zero"),
             "aten.scalar_tensor.default".to_string(),
             vec![IrArg::Int(zero_val)],
-            meta_with_val(&NodeMeta::default(), vec![], &zero_dtype),
+            NodeMeta::default().cloned_with_val(vec![], &zero_dtype),
         );
         graph.anchor_to(zero, id);
 

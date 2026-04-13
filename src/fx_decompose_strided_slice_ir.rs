@@ -1,18 +1,9 @@
 //! Pure Rust IrPass: strided slice_copy (step > 1) → unit slice + pad + view + slice + view.
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
+    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp,
 };
 use crate::runner_logging::log_line;
-
-fn meta_with_shape(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut m = base.clone();
-    m.set_val(FakeTensorMeta {
-        shape,
-        dtype: dtype.to_string(),
-    });
-    m
-}
 
 fn fixup_start(start: Option<i64>, dim_size: i64) -> i64 {
     let mut s = start.unwrap_or(0);
@@ -126,7 +117,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                     IrArg::Int(end),
                     IrArg::Int(1),
                 ],
-                meta_with_shape(&orig_meta, slice_shape.clone(), &dtype),
+                orig_meta.cloned_with_val(slice_shape.clone(), &dtype),
             );
             graph.anchor_to(unit_slice, id);
 
@@ -151,7 +142,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                     format!("{}_pad", node_name),
                     "aten.full.default".to_string(),
                     vec![i64_list(&pad_shape), fill_val],
-                    meta_with_shape(&orig_meta, pad_shape, &dtype),
+                    orig_meta.cloned_with_val(pad_shape, &dtype),
                 );
                 graph.anchor_to(pad_node, id);
 
@@ -165,7 +156,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                         IrArg::List(vec![IrArg::Node(y), IrArg::Node(pad_node)]),
                         IrArg::Int(dim as i64),
                     ],
-                    meta_with_shape(&orig_meta, cat_shape, &dtype),
+                    orig_meta.cloned_with_val(cat_shape, &dtype),
                 );
                 graph.anchor_to(cat_node, id);
                 y = cat_node;
@@ -180,7 +171,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 format!("{}_split_view", node_name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(y), i64_list(&split_shape)],
-                meta_with_shape(&orig_meta, split_shape.clone(), &dtype),
+                orig_meta.cloned_with_val(split_shape.clone(), &dtype),
             );
             graph.anchor_to(view1, id);
 
@@ -198,7 +189,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                     IrArg::Int(1),
                     IrArg::Int(1),
                 ],
-                meta_with_shape(&orig_meta, inner_shape, &dtype),
+                orig_meta.cloned_with_val(inner_shape, &dtype),
             );
             graph.anchor_to(inner_slice, id);
 
@@ -210,7 +201,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 format!("{}_out_view", node_name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(inner_slice), i64_list(&out_shape)],
-                meta_with_shape(&orig_meta, out_shape, &dtype),
+                orig_meta.cloned_with_val(out_shape, &dtype),
             );
 
             graph.replace_and_erase(id, result);

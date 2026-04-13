@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
+    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
 };
 use crate::runner_logging::log_line;
 
@@ -32,15 +32,6 @@ fn normalized_physical_perm(rank: usize, dims: &[i64]) -> Vec<usize> {
         .filter(|axis| dims_usize.contains(axis))
         .filter_map(|axis| dims_usize.iter().position(|&dim| dim == axis))
         .collect()
-}
-
-fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut meta = base.clone();
-    meta.set_val(FakeTensorMeta {
-        shape,
-        dtype: dtype.to_string(),
-    });
-    meta
 }
 
 fn is_layer_norm(target: &str) -> bool {
@@ -227,7 +218,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_mean", name),
         "aten.mean.dim".to_string(),
         vec![IrArg::Node(x_id), i64_list(&dims), IrArg::Bool(true)],
-        meta_with(&output_meta, stat_shape.clone(), &dtype),
+        output_meta.cloned_with_val(stat_shape.clone(), &dtype),
     );
     anchor_tensor_meta(graph, mean, id, x_id);
 
@@ -236,7 +227,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_sub", name),
         "aten.sub.Tensor".to_string(),
         vec![IrArg::Node(x_id), IrArg::Node(mean)],
-        meta_with(&output_meta, input_shape.clone(), &dtype),
+        output_meta.cloned_with_val(input_shape.clone(), &dtype),
     );
     anchor_tensor_meta(graph, numerator, id, x_id);
 
@@ -249,7 +240,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         "aten.var.correction".to_string(),
         vec![IrArg::Node(x_id), i64_list(&dims)],
         var_kwargs,
-        meta_with(&output_meta, stat_shape.clone(), &dtype),
+        output_meta.cloned_with_val(stat_shape.clone(), &dtype),
     );
     anchor_tensor_meta(graph, var, id, x_id);
 
@@ -258,7 +249,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_eps", name),
         "aten.full.default".to_string(),
         vec![i64_list(&scalar_shape), IrArg::Float(epsilon)],
-        meta_with(&output_meta, scalar_shape.clone(), &dtype),
+        output_meta.cloned_with_val(scalar_shape.clone(), &dtype),
     );
     anchor_tensor_meta(graph, eps, id, x_id);
 
@@ -267,7 +258,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_var_eps", name),
         "aten.add.Tensor".to_string(),
         vec![IrArg::Node(var), IrArg::Node(eps)],
-        meta_with(&output_meta, stat_shape.clone(), &dtype),
+        output_meta.cloned_with_val(stat_shape.clone(), &dtype),
     );
     anchor_tensor_meta(graph, variance_eps, id, x_id);
 
@@ -276,7 +267,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_rsqrt", name),
         "aten.rsqrt.default".to_string(),
         vec![IrArg::Node(variance_eps)],
-        meta_with(&output_meta, stat_shape, &dtype),
+        output_meta.cloned_with_val(stat_shape, &dtype),
     );
     anchor_tensor_meta(graph, rsqrt, id, x_id);
 
@@ -285,7 +276,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_normalized", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(numerator), IrArg::Node(rsqrt)],
-        meta_with(&output_meta, output_shape.clone(), &dtype),
+        output_meta.cloned_with_val(output_shape.clone(), &dtype),
     );
     anchor_tensor_meta(graph, normalized, id, x_id);
 
@@ -305,8 +296,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
                             .collect::<Vec<_>>(),
                     ),
                 ],
-                meta_with(
-                    &output_meta,
+                output_meta.cloned_with_val(
                     permuted_shape(&normalized_shape, &affine_perm),
                     &dtype,
                 ),
@@ -322,7 +312,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             format!("{}_weight_view", name),
             view_target.to_string(),
             vec![IrArg::Node(weight_input), i64_list(&physical_param_shape)],
-            meta_with(&output_meta, physical_param_shape.clone(), &dtype),
+            output_meta.cloned_with_val(physical_param_shape.clone(), &dtype),
         );
         anchor_tensor_meta(graph, weight_reshaped, id, x_id);
         preserve_shape_node(graph, weight_reshaped);
@@ -332,7 +322,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             format!("{}_weighted", name),
             "aten.mul.Tensor".to_string(),
             vec![IrArg::Node(output), IrArg::Node(weight_reshaped)],
-            meta_with(&output_meta, output_shape.clone(), &dtype),
+            output_meta.cloned_with_val(output_shape.clone(), &dtype),
         );
         anchor_tensor_meta(graph, output, id, x_id);
     }
@@ -352,8 +342,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
                             .collect::<Vec<_>>(),
                     ),
                 ],
-                meta_with(
-                    &output_meta,
+                output_meta.cloned_with_val(
                     permuted_shape(&normalized_shape, &affine_perm),
                     &dtype,
                 ),
@@ -369,7 +358,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             format!("{}_bias_view", name),
             view_target.to_string(),
             vec![IrArg::Node(bias_input), i64_list(&physical_param_shape)],
-            meta_with(&output_meta, physical_param_shape, &dtype),
+            output_meta.cloned_with_val(physical_param_shape, &dtype),
         );
         anchor_tensor_meta(graph, bias_reshaped, id, x_id);
         preserve_shape_node(graph, bias_reshaped);
@@ -379,7 +368,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             format!("{}_biased", name),
             "aten.add.Tensor".to_string(),
             vec![IrArg::Node(output), IrArg::Node(bias_reshaped)],
-            meta_with(&output_meta, output_shape, &dtype),
+            output_meta.cloned_with_val(output_shape, &dtype),
         );
         anchor_tensor_meta(graph, output, id, x_id);
     }

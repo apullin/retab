@@ -1,18 +1,9 @@
 //! Pure Rust IrPass: select_scatter → arange + view + full + eq + unsqueeze + expand + where.
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
+    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp,
 };
 use crate::runner_logging::log_line;
-
-fn meta_with_shape(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut m = base.clone();
-    m.set_val(FakeTensorMeta {
-        shape,
-        dtype: dtype.to_string(),
-    });
-    m
-}
 
 pub struct IrDecomposeSelectScatterPass;
 
@@ -81,7 +72,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 format!("{}_arange", node_name),
                 "aten.arange.start_step".to_string(),
                 vec![IrArg::Int(0), IrArg::Int(dim_size)],
-                meta_with_shape(&orig_meta, vec![dim_size], "torch.int32"),
+                orig_meta.cloned_with_val(vec![dim_size], "torch.int32"),
             );
             graph.anchor_to(arange_id, id);
 
@@ -93,7 +84,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 format!("{}_arange_view", node_name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(arange_id), i64_list(&mask_shape)],
-                meta_with_shape(&orig_meta, mask_shape.clone(), "torch.int32"),
+                orig_meta.cloned_with_val(mask_shape.clone(), "torch.int32"),
             );
             graph.anchor_to(viewed_arange, id);
 
@@ -103,7 +94,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 format!("{}_index_full", node_name),
                 "aten.full.default".to_string(),
                 vec![i64_list(&[1]), IrArg::Int(index)],
-                meta_with_shape(&orig_meta, vec![1], "torch.int32"),
+                orig_meta.cloned_with_val(vec![1], "torch.int32"),
             );
             graph.anchor_to(index_tensor, id);
 
@@ -113,7 +104,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 format!("{}_eq", node_name),
                 "aten.eq.Tensor".to_string(),
                 vec![IrArg::Node(viewed_arange), IrArg::Node(index_tensor)],
-                meta_with_shape(&orig_meta, mask_shape, "torch.bool"),
+                orig_meta.cloned_with_val(mask_shape, "torch.bool"),
             );
             graph.anchor_to(eq_mask, id);
 
@@ -125,32 +116,28 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 .unwrap_or_default();
             let mut unsqueezed_shape = src_shape.clone();
             unsqueezed_shape.insert(dim_norm, 1);
-            let mut unsqueeze_meta = graph.nodes[src_id].meta.clone();
-            unsqueeze_meta.set_val(FakeTensorMeta {
-                shape: unsqueezed_shape,
-                dtype: input_dtype.clone(),
-            });
             let unsqueeze_node = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_unsqueeze", node_name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(src_id), IrArg::Int(dim_norm as i64)],
-                unsqueeze_meta,
+                graph.nodes[src_id]
+                    .meta
+                    .clone()
+                    .cloned_with_val(unsqueezed_shape, input_dtype.clone()),
             );
             graph.anchor_to(unsqueeze_node, id);
 
             // 6. expand(unsqueezed, input_shape)
-            let mut expand_meta = graph.nodes[src_id].meta.clone();
-            expand_meta.set_val(FakeTensorMeta {
-                shape: input_shape.clone(),
-                dtype: input_dtype,
-            });
             let expand_node = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_expand", node_name),
                 "aten.expand_copy.default".to_string(),
                 vec![IrArg::Node(unsqueeze_node), i64_list(&input_shape)],
-                expand_meta,
+                graph.nodes[src_id]
+                    .meta
+                    .clone()
+                    .cloned_with_val(input_shape.clone(), input_dtype),
             );
             graph.anchor_to(expand_node, id);
 
