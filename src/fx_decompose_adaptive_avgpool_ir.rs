@@ -1,18 +1,9 @@
 //! Pure Rust IrPass: adaptive_avg_pool2d → slice + avg_pool2d + cat.
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
+    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp,
 };
 use crate::runner_logging::log_line;
-
-fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut m = base.clone();
-    m.set_val(FakeTensorMeta {
-        shape,
-        dtype: dtype.to_string(),
-    });
-    m
-}
 
 pub struct IrDecomposeAdaptiveAvgPoolPass;
 
@@ -97,7 +88,7 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                             IrArg::Int(start_h),
                             IrArg::Int(end_h),
                         ],
-                        meta_with(&orig_meta, vec![n_batch, c_ch, kh, input_w], &dtype),
+                        orig_meta.cloned_with_val(vec![n_batch, c_ch, kh, input_w], &dtype),
                     );
                     graph.anchor_to(slice_h, id);
 
@@ -112,7 +103,7 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                             IrArg::Int(start_w),
                             IrArg::Int(end_w),
                         ],
-                        meta_with(&orig_meta, vec![n_batch, c_ch, kh, kw], &dtype),
+                        orig_meta.cloned_with_val(vec![n_batch, c_ch, kh, kw], &dtype),
                     );
                     graph.anchor_to(slice_hw, id);
 
@@ -127,7 +118,7 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                             i64_list(&[1, 1]),   // stride
                             i64_list(&[0, 0]),   // padding
                         ],
-                        meta_with(&orig_meta, vec![n_batch, c_ch, 1, 1], &dtype),
+                        orig_meta.cloned_with_val(vec![n_batch, c_ch, 1, 1], &dtype),
                     );
                     graph.anchor_to(pooled, id);
 
@@ -144,7 +135,7 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                         format!("{}_cat_w_{}", node_name, out_i),
                         "aten.cat.default".to_string(),
                         vec![cat_args, IrArg::Int(3)],
-                        meta_with(&orig_meta, vec![n_batch, c_ch, 1, output_w], &dtype),
+                        orig_meta.cloned_with_val(vec![n_batch, c_ch, 1, output_w], &dtype),
                     );
                     graph.anchor_to(row_cat, id);
                     rows.push(row_cat);
@@ -161,7 +152,7 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                     format!("{}_cat_h", node_name),
                     "aten.cat.default".to_string(),
                     vec![cat_args, IrArg::Int(2)],
-                    meta_with(&orig_meta, vec![n_batch, c_ch, output_h, output_w], &dtype),
+                    orig_meta.cloned_with_val(vec![n_batch, c_ch, output_h, output_w], &dtype),
                 )
             };
 

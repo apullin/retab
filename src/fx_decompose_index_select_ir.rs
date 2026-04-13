@@ -3,19 +3,9 @@
 use std::collections::HashMap;
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, shape_product, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId,
-    NodeMeta, NodeOp,
+    i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass, NodeId, NodeOp,
 };
 use crate::runner_logging::log_line;
-
-fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut m = base.clone();
-    m.set_val(FakeTensorMeta {
-        shape,
-        dtype: dtype.to_string(),
-    });
-    m
-}
 
 pub struct IrDecomposeIndexSelectPass;
 
@@ -102,7 +92,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
                     "aten._to_copy.default".to_string(),
                     vec![IrArg::Node(x_id)],
                     kwargs,
-                    meta_with(&orig_meta, x_shape.clone(), "torch.int8"),
+                    orig_meta.cloned_with_val(x_shape.clone(), "torch.int8"),
                 );
                 cast
             } else {
@@ -115,7 +105,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 format!("{}_values", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(x_for_gather), i64_list(&[n, k, c])],
-                meta_with(&orig_meta, vec![n, k, c], gather_dtype),
+                orig_meta.cloned_with_val(vec![n, k, c], gather_dtype),
             );
 
             // Index: unsqueeze(0) → (1, W), then expand to (N, W)
@@ -124,7 +114,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 format!("{}_idx_unsq", name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(index_id), IrArg::Int(0)],
-                meta_with(&orig_meta, vec![1, w], &idx_dtype),
+                orig_meta.cloned_with_val(vec![1, w], &idx_dtype),
             );
 
             let idx_exp = graph.add_anchored_call_function(
@@ -132,7 +122,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 format!("{}_idx_exp", name),
                 "aten.expand_copy.default".to_string(),
                 vec![IrArg::Node(idx_unsq), i64_list(&[n, w])],
-                meta_with(&orig_meta, vec![n, w], &idx_dtype),
+                orig_meta.cloned_with_val(vec![n, w], &idx_dtype),
             );
 
             // GATHER(values, indices) → (N, W, C)
@@ -141,7 +131,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 format!("{}_gather", name),
                 "backend.tosa.GATHER.default".to_string(),
                 vec![IrArg::Node(values), IrArg::Node(idx_exp)],
-                meta_with(&orig_meta, vec![n, w, c], gather_dtype),
+                orig_meta.cloned_with_val(vec![n, w, c], gather_dtype),
             );
 
             // Reshape to (...before, W, ...after)
@@ -156,7 +146,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 format!("{}_out", name),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(gathered), i64_list(&out_shape)],
-                meta_with(&orig_meta, out_shape.clone(), gather_dtype),
+                orig_meta.cloned_with_val(out_shape.clone(), gather_dtype),
             );
 
             let result = if needs_bool_cast {
@@ -168,7 +158,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
                     "aten._to_copy.default".to_string(),
                     vec![IrArg::Node(result)],
                     kwargs,
-                    meta_with(&orig_meta, out_shape, "torch.bool"),
+                    orig_meta.cloned_with_val(out_shape, "torch.bool"),
                 );
                 cast
             } else {

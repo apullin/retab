@@ -2,18 +2,9 @@
 //! or arange+permute+index_put (step > 1).
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
+    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp,
 };
 use crate::runner_logging::log_line;
-
-fn meta_with_shape(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut meta = base.clone();
-    meta.set_val(FakeTensorMeta {
-        shape,
-        dtype: dtype.to_string(),
-    });
-    meta
-}
 
 fn permuted_shape(shape: &[i64], perm: &[i64]) -> Vec<i64> {
     perm.iter()
@@ -148,7 +139,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         IrArg::Int(start_i),
                         IrArg::Int(1),
                     ],
-                    meta_with_shape(&meta, prefix_shape, &dtype),
+                    meta.cloned_with_val(prefix_shape, &dtype),
                 );
 
                 let mut suffix_shape = input_shape.clone();
@@ -164,7 +155,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         IrArg::Int(dim_size),
                         IrArg::Int(1),
                     ],
-                    meta_with_shape(&meta, suffix_shape, &dtype),
+                    meta.cloned_with_val(suffix_shape, &dtype),
                 );
 
                 let updated = graph.add_anchored_call_function(
@@ -179,7 +170,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         ]),
                         IrArg::Int(dim_norm as i64),
                     ],
-                    meta_with_shape(&meta, input_shape.clone(), &dtype),
+                    meta.cloned_with_val(input_shape.clone(), &dtype),
                 );
                 updated
             } else {
@@ -190,7 +181,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                     end_i,
                     step,
                     "torch.int32",
-                    meta_with_shape(&meta, vec![width], "torch.int32"),
+                    meta.cloned_with_val(vec![width], "torch.int32"),
                 );
 
                 let mut input_cur = input_id;
@@ -211,7 +202,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         format!("{}_input_perm", name),
                         "aten.permute_copy.default".to_string(),
                         vec![IrArg::Node(input_id), i64_list(&perm)],
-                        meta_with_shape(&meta, permuted_shape(&input_shape, &perm), &dtype),
+                        meta.cloned_with_val(permuted_shape(&input_shape, &perm), &dtype),
                     );
                     input_cur = input_perm;
 
@@ -220,7 +211,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         format!("{}_src_perm", name),
                         "aten.permute_copy.default".to_string(),
                         vec![IrArg::Node(src_id), i64_list(&perm)],
-                        meta_with_shape(&meta, permuted_shape(&src_shape, &perm), &dtype),
+                        meta.cloned_with_val(permuted_shape(&src_shape, &perm), &dtype),
                     );
                     src_cur = src_perm;
 
@@ -234,7 +225,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                             IrArg::Node(src_cur),
                             IrArg::Bool(false),
                         ],
-                        meta_with_shape(&meta, permuted_shape(&input_shape, &perm), &dtype),
+                        meta.cloned_with_val(permuted_shape(&input_shape, &perm), &dtype),
                     );
 
                     let updated = graph.add_anchored_call_function(
@@ -242,7 +233,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         format!("{}_result_perm", name),
                         "aten.permute_copy.default".to_string(),
                         vec![IrArg::Node(updated_perm), i64_list(&inv_perm)],
-                        meta_with_shape(&meta, input_shape.clone(), &dtype),
+                        meta.cloned_with_val(input_shape.clone(), &dtype),
                     );
                     graph.replace_and_erase(id, updated);
                     modified = true;
@@ -261,7 +252,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         IrArg::Node(src_cur),
                         IrArg::Bool(false),
                     ],
-                    meta_with_shape(&meta, current_input_shape, &dtype),
+                    meta.cloned_with_val(current_input_shape, &dtype),
                 );
                 updated
             };

@@ -4,18 +4,9 @@
 //! Bool inputs are cast to int8 before GATHER, then cast back.
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
+    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp,
 };
 use crate::runner_logging::log_line;
-
-fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut m = base.clone();
-    m.set_val(FakeTensorMeta {
-        shape,
-        dtype: dtype.to_string(),
-    });
-    m
-}
 
 pub struct IrCanonicalizeGatherPass;
 
@@ -100,7 +91,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_bool_to_int8", node_name),
                     "aten._to_copy.default".to_string(),
                     vec![IrArg::Node(x_id)],
-                    meta_with(&orig_meta, x_shape.clone(), work_dtype),
+                    orig_meta.cloned_with_val(x_shape.clone(), work_dtype),
                 );
                 graph.anchor_to(cast_id, id);
                 values_in = cast_id;
@@ -113,7 +104,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_values_3d", node_name),
                     "aten.view_copy.default".to_string(),
                     vec![IrArg::Node(values_in), i64_list(&[n, k, 1])],
-                    meta_with(&orig_meta, vec![n, k, 1], work_dtype),
+                    orig_meta.cloned_with_val(vec![n, k, 1], work_dtype),
                 );
                 graph.anchor_to(v3d, id);
 
@@ -122,7 +113,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_gather", node_name),
                     "backend.tosa.GATHER.default".to_string(),
                     vec![IrArg::Node(v3d), IrArg::Node(index_id)],
-                    meta_with(&orig_meta, vec![n, w, 1], work_dtype),
+                    orig_meta.cloned_with_val(vec![n, w, 1], work_dtype),
                 );
                 graph.anchor_to(gathered, id);
 
@@ -131,7 +122,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_out_2d", node_name),
                     "aten.view_copy.default".to_string(),
                     vec![IrArg::Node(gathered), i64_list(&[n, w])],
-                    meta_with(&orig_meta, vec![n, w], work_dtype),
+                    orig_meta.cloned_with_val(vec![n, w], work_dtype),
                 )
             } else {
                 // 3D path: permute(0,2,1) → reshape(N*C,K,1) → GATHER → reshape(N,C,W) → permute(0,2,1)
@@ -142,7 +133,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_values_perm", node_name),
                     "aten.permute_copy.default".to_string(),
                     vec![IrArg::Node(values_in), i64_list(&[0, 2, 1])],
-                    meta_with(&orig_meta, vec![n, c, k], work_dtype),
+                    orig_meta.cloned_with_val(vec![n, c, k], work_dtype),
                 );
                 graph.anchor_to(vperm, id);
 
@@ -151,7 +142,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_values_flat", node_name),
                     "aten.view_copy.default".to_string(),
                     vec![IrArg::Node(vperm), i64_list(&[n * c, k, 1])],
-                    meta_with(&orig_meta, vec![n * c, k, 1], work_dtype),
+                    orig_meta.cloned_with_val(vec![n * c, k, 1], work_dtype),
                 );
                 graph.anchor_to(vresh, id);
 
@@ -160,7 +151,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_idx_perm", node_name),
                     "aten.permute_copy.default".to_string(),
                     vec![IrArg::Node(index_id), i64_list(&[0, 2, 1])],
-                    meta_with(&orig_meta, vec![n, c, w], "torch.int64"),
+                    orig_meta.cloned_with_val(vec![n, c, w], "torch.int64"),
                 );
                 graph.anchor_to(iperm, id);
 
@@ -169,7 +160,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_idx_flat", node_name),
                     "aten.view_copy.default".to_string(),
                     vec![IrArg::Node(iperm), i64_list(&[n * c, w])],
-                    meta_with(&orig_meta, vec![n * c, w], "torch.int64"),
+                    orig_meta.cloned_with_val(vec![n * c, w], "torch.int64"),
                 );
                 graph.anchor_to(iresh, id);
 
@@ -178,7 +169,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_gather", node_name),
                     "backend.tosa.GATHER.default".to_string(),
                     vec![IrArg::Node(vresh), IrArg::Node(iresh)],
-                    meta_with(&orig_meta, vec![n * c, w, 1], work_dtype),
+                    orig_meta.cloned_with_val(vec![n * c, w, 1], work_dtype),
                 );
                 graph.anchor_to(gathered, id);
 
@@ -187,7 +178,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_gather_3d", node_name),
                     "aten.view_copy.default".to_string(),
                     vec![IrArg::Node(gathered), i64_list(&[n, c, w])],
-                    meta_with(&orig_meta, vec![n, c, w], work_dtype),
+                    orig_meta.cloned_with_val(vec![n, c, w], work_dtype),
                 );
                 graph.anchor_to(gresh, id);
 
@@ -196,7 +187,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_out_perm", node_name),
                     "aten.permute_copy.default".to_string(),
                     vec![IrArg::Node(gresh), i64_list(&[0, 2, 1])],
-                    meta_with(&orig_meta, vec![n, w, c], work_dtype),
+                    orig_meta.cloned_with_val(vec![n, w, c], work_dtype),
                 )
             };
 
@@ -211,18 +202,6 @@ impl IrPass for IrCanonicalizeGatherPass {
                     orig_meta,
                 )
             } else {
-                let mut r_meta = orig_meta;
-                let out_shape = graph.nodes[id]
-                    .meta
-                    .val_shape()
-                    .map(|s| s.to_vec())
-                    .unwrap_or_default();
-                r_meta.set_val(FakeTensorMeta {
-                    shape: out_shape,
-                    dtype: x_dtype,
-                });
-                // Re-set the last node's meta to match the original output
-                // (the add_node already has orig_meta, but we may need shape fix for 3D)
                 result
             };
 

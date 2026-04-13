@@ -1,20 +1,11 @@
 //! Pure Rust IrPass: mean.dim → sum(keepdim=True) * (1/count) + view, or avg_pool2d for 4D spatial.
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
+    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp,
     QParam,
 };
 use crate::runner_logging::log_line;
 use std::collections::HashMap;
-
-fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut m = base.clone();
-    m.set_val(FakeTensorMeta {
-        shape,
-        dtype: dtype.to_string(),
-    });
-    m
-}
 
 pub struct IrDecomposeMeanPass;
 
@@ -102,7 +93,7 @@ impl IrPass for IrDecomposeMeanPass {
                         format!("{}_avgpool", name),
                         "aten.avg_pool2d.default".to_string(),
                         vec![IrArg::Node(x_id), i64_list(&kernel), i64_list(&[1, 1])],
-                        meta_with(&orig_meta, pool_shape.clone(), &dtype),
+                        orig_meta.cloned_with_val(pool_shape.clone(), &dtype),
                     );
                     graph.anchor_to(result, id);
 
@@ -112,7 +103,7 @@ impl IrPass for IrDecomposeMeanPass {
                             format!("{}_view", name),
                             "aten.view_copy.default".to_string(),
                             vec![IrArg::Node(result), i64_list(&output_shape)],
-                            meta_with(&orig_meta, output_shape.clone(), &dtype),
+                            orig_meta.cloned_with_val(output_shape.clone(), &dtype),
                         );
                     }
                     graph.replace_and_erase(id, result);
@@ -140,7 +131,7 @@ impl IrPass for IrDecomposeMeanPass {
                 format!("{}_sum", name),
                 "aten.sum.dim_IntList".to_string(),
                 vec![IrArg::Node(x_id), i64_list(&dims), IrArg::Bool(true)],
-                meta_with(&orig_meta, sum_shape.clone(), &dtype),
+                orig_meta.cloned_with_val(sum_shape.clone(), &dtype),
             );
             graph.anchor_to(sum_id, id);
 
@@ -151,7 +142,7 @@ impl IrPass for IrDecomposeMeanPass {
                 format!("{}_inv_count", name),
                 "aten.full.default".to_string(),
                 vec![i64_list(&ones_shape), IrArg::Float(1.0 / count)],
-                meta_with(&orig_meta, ones_shape, &dtype),
+                orig_meta.cloned_with_val(ones_shape, &dtype),
             );
             graph.anchor_to(count_id, id);
 
@@ -161,7 +152,7 @@ impl IrPass for IrDecomposeMeanPass {
                 format!("{}_mul", name),
                 "aten.mul.Tensor".to_string(),
                 vec![IrArg::Node(sum_id), IrArg::Node(count_id)],
-                meta_with(&orig_meta, sum_shape.clone(), &dtype),
+                orig_meta.cloned_with_val(sum_shape.clone(), &dtype),
             );
             // Note: mul is NOT anchored — it depends on sum_id which may be
             // further decomposed by convert_sum. The multi-pass write_back will
@@ -213,7 +204,7 @@ impl IrPass for IrDecomposeMeanPass {
                     format!("{}_view", name),
                     "aten.view_copy.default".to_string(),
                     vec![IrArg::Node(mul_id), i64_list(&output_shape)],
-                    meta_with(&orig_meta, output_shape.clone(), &dtype),
+                    orig_meta.cloned_with_val(output_shape.clone(), &dtype),
                 );
             }
 

@@ -3,18 +3,9 @@
 use std::collections::HashMap;
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
+    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp,
 };
 use crate::runner_logging::log_line;
-
-fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut meta = base.clone();
-    meta.set_val(FakeTensorMeta {
-        shape,
-        dtype: dtype.to_string(),
-    });
-    meta
-}
 
 fn is_var(target: &str) -> bool {
     target.contains("var.correction")
@@ -177,7 +168,7 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_mean", name),
         "aten.mean.dim".to_string(),
         vec![IrArg::Node(x_id), i64_list(&dims), IrArg::Bool(true)],
-        meta_with(&base_meta, mean_shape.clone(), &dtype),
+        base_meta.cloned_with_val(mean_shape.clone(), &dtype),
     );
     graph.anchor_to(mean, id);
 
@@ -186,7 +177,7 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_diff", name),
         "aten.sub.Tensor".to_string(),
         vec![IrArg::Node(x_id), IrArg::Node(mean)],
-        meta_with(&base_meta, input_shape.clone(), &dtype),
+        base_meta.cloned_with_val(input_shape.clone(), &dtype),
     );
     graph.anchor_to(diff, id);
 
@@ -195,7 +186,7 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_squared", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(diff), IrArg::Node(diff)],
-        meta_with(&base_meta, input_shape.clone(), &dtype),
+        base_meta.cloned_with_val(input_shape.clone(), &dtype),
     );
     graph.anchor_to(squared, id);
 
@@ -204,7 +195,7 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_sum", name),
         "aten.sum.dim_IntList".to_string(),
         vec![IrArg::Node(squared), i64_list(&dims), IrArg::Bool(keepdim)],
-        meta_with(&base_meta, output_shape.clone(), &dtype),
+        base_meta.cloned_with_val(output_shape.clone(), &dtype),
     );
     graph.anchor_to(sum, id);
 
@@ -213,7 +204,7 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_inv_count", name),
         "aten.full.default".to_string(),
         vec![i64_list(&coefficient_shape), IrArg::Float(1.0 / denom)],
-        meta_with(&base_meta, coefficient_shape, &dtype),
+        base_meta.cloned_with_val(coefficient_shape, &dtype),
     );
     graph.anchor_to(coefficient, id);
 
@@ -222,7 +213,7 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_mul", name),
         "aten.mul.Tensor".to_string(),
         vec![IrArg::Node(sum), IrArg::Node(coefficient)],
-        meta_with(&base_meta, output_shape, &dtype),
+        base_meta.cloned_with_val(output_shape, &dtype),
     );
     graph.anchor_to(result, id);
 
