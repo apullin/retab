@@ -433,6 +433,18 @@ impl IrGraph {
         )
     }
 
+    pub fn add_call_function_with_val(
+        &mut self,
+        name: impl Into<String>,
+        target: impl Into<String>,
+        args: Vec<IrArg>,
+        base_meta: &NodeMeta,
+        shape: Vec<i64>,
+        dtype: impl Into<String>,
+    ) -> NodeId {
+        self.add_call_function(name, target, args, base_meta.cloned_with_val(shape, dtype))
+    }
+
     pub fn add_call_function_with_kwargs(
         &mut self,
         name: impl Into<String>,
@@ -460,6 +472,21 @@ impl IrGraph {
         meta: NodeMeta,
     ) -> NodeId {
         let id = self.add_call_function(name, target, args, meta);
+        self.anchor_to(id, anchor);
+        id
+    }
+
+    pub fn add_anchored_call_function_with_val(
+        &mut self,
+        anchor: NodeId,
+        name: impl Into<String>,
+        target: impl Into<String>,
+        args: Vec<IrArg>,
+        base_meta: &NodeMeta,
+        shape: Vec<i64>,
+        dtype: impl Into<String>,
+    ) -> NodeId {
+        let id = self.add_call_function_with_val(name, target, args, base_meta, shape, dtype);
         self.anchor_to(id, anchor);
         id
     }
@@ -495,6 +522,23 @@ impl IrGraph {
         )
     }
 
+    pub fn add_full_float(
+        &mut self,
+        name: impl Into<String>,
+        shape: &[i64],
+        value: f64,
+        dtype: &str,
+        meta: NodeMeta,
+    ) -> NodeId {
+        self.add_call_function_with_kwargs(
+            name,
+            "aten.full.default",
+            vec![i64_list_arg(shape), IrArg::Float(value)],
+            dtype_kwarg(dtype),
+            meta,
+        )
+    }
+
     pub fn add_anchored_full_int(
         &mut self,
         anchor: NodeId,
@@ -505,6 +549,20 @@ impl IrGraph {
         meta: NodeMeta,
     ) -> NodeId {
         let id = self.add_full_int(name, shape, value, dtype, meta);
+        self.anchor_to(id, anchor);
+        id
+    }
+
+    pub fn add_anchored_full_float(
+        &mut self,
+        anchor: NodeId,
+        name: impl Into<String>,
+        shape: &[i64],
+        value: f64,
+        dtype: &str,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.add_full_float(name, shape, value, dtype, meta);
         self.anchor_to(id, anchor);
         id
     }
