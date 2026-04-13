@@ -91,6 +91,7 @@ impl TensorData {
         self.shape.iter().product::<i64>().max(0) as usize
     }
 
+    #[cfg(test)]
     pub fn scalar_i64(&self) -> Option<i64> {
         if self.element_count() != 1 {
             return None;

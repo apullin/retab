@@ -181,21 +181,6 @@ impl<'py> FxGraphModule<'py> {
         Ok(())
     }
 
-    /// Iterator over call_function nodes in the graph.
-    pub fn call_functions(&self) -> PyResult<Vec<(Bound<'py, PyAny>, String)>> {
-        let all_nodes = self.nodes()?;
-        let mut result = Vec::new();
-        for node in all_nodes {
-            let op = Self::node_op(&node)?;
-            if op != "call_function" {
-                continue;
-            }
-            let target = Self::node_target_str(&node)?;
-            result.push((node, target));
-        }
-        Ok(result)
-    }
-
     /// Return the number of nodes in the graph.
     pub fn node_count(&self) -> PyResult<usize> {
         let graph = self.gm.getattr("graph")?;

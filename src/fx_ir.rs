@@ -22,13 +22,6 @@ use crate::tensor_data::extract_tensor_data;
 
 pub type NodeId = usize;
 
-/// Control-flow kind, if this node is a cond/while_loop call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CfKind {
-    Cond,
-    While,
-}
-
 /// A node in the Rust IR graph.
 #[derive(Debug, Clone)]
 pub struct IrNode {
@@ -42,8 +35,6 @@ pub struct IrNode {
     pub meta: NodeMeta,
     pub tensor: Option<NodeTensor>,
     pub alive: bool,
-    /// Set for cond/while_loop call_function nodes.
-    pub cf_kind: Option<CfKind>,
     /// True if args were modified and need write-back to Python.
     pub(crate) args_dirty: bool,
     /// True when write-back must rebuild the whole args tuple because literal
@@ -57,8 +48,7 @@ pub struct IrNode {
 #[derive(Debug, Clone)]
 pub enum TensorSource {
     ExportedProgramInput(PlaceholderTensorBinding),
-    StateDict(String),
-    GraphModuleAttr(String),
+    GraphModuleAttr,
 }
 
 #[derive(Debug, Clone)]
@@ -90,13 +80,6 @@ pub enum IrArg {
 
 pub(crate) fn i64_list_arg(vals: &[i64]) -> IrArg {
     IrArg::List(vals.iter().map(|&v| IrArg::Int(v)).collect())
-}
-
-/// A hierarchical graph module: parent graph + named submodules.
-#[derive(Debug)]
-pub struct IrModule {
-    pub parent: IrGraph,
-    pub submodules: HashMap<String, IrGraph>,
 }
 
 fn build_placeholder_tensor_bindings(
@@ -186,63 +169,11 @@ fn extract_node_tensor(
             }
             let data = extract_tensor_data(&value).ok()?;
             Some(NodeTensor {
-                source: TensorSource::GraphModuleAttr(target.to_string()),
+                source: TensorSource::GraphModuleAttr,
                 data,
             })
         }
         _ => None,
-    }
-}
-
-impl IrModule {
-    /// Import parent graph and all CF submodules.
-    pub fn from_fx(_py: Python<'_>, gm: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let parent = IrGraph::from_fx(gm)?;
-        let mut submodules = HashMap::new();
-        // Find submodule names from cond/while node args
-        for node in &parent.nodes {
-            if node.cf_kind.is_none() || !node.alive {
-                continue;
-            }
-            let sm_indices = match node.cf_kind {
-                Some(CfKind::Cond) => vec![1, 2],  // if_fn, else_fn
-                Some(CfKind::While) => vec![0, 1], // cond_fn, body_fn
-                None => vec![],
-            };
-            for &idx in &sm_indices {
-                if let Some(IrArg::Node(sm_node_id)) = node.args.get(idx) {
-                    let sm_name = &parent.nodes[*sm_node_id].target;
-                    if !sm_name.is_empty() && !submodules.contains_key(sm_name) {
-                        if let Ok(sm) = gm.call_method1("get_submodule", (sm_name,)) {
-                            submodules.insert(sm_name.clone(), IrGraph::from_fx(&sm)?);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(Self { parent, submodules })
-    }
-
-    /// Write back parent and all submodules.
-    pub fn write_back(&self, py: Python<'_>, gm: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.parent.write_back(py, gm)?;
-        for (name, ir) in &self.submodules {
-            if let Ok(sm) = gm.call_method1("get_submodule", (name.as_str(),)) {
-                ir.write_back(py, &sm)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Write back with surgery for parent and all submodules.
-    pub fn write_back_with_surgery(&self, py: Python<'_>, gm: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.parent.write_back_with_surgery(py, gm)?;
-        for (name, ir) in &self.submodules {
-            if let Ok(sm) = gm.call_method1("get_submodule", (name.as_str(),)) {
-                ir.write_back_with_surgery(py, &sm)?;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -339,17 +270,6 @@ impl IrGraph {
                 .map(|a| resolve_arg(a, &name_to_id))
                 .collect();
 
-            let cf_kind = if op == NodeOp::CallFunction {
-                if target.contains("cond") && target.contains("higher_order") {
-                    Some(CfKind::Cond)
-                } else if target.contains("while_loop") {
-                    Some(CfKind::While)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
             let mut kwargs = HashMap::new();
             if let Ok(py_kwargs) = crate::fx_graph::FxGraphModule::node_kwargs(py_node) {
                 if !py_kwargs.is_none() {
@@ -377,7 +297,6 @@ impl IrGraph {
                 meta,
                 tensor,
                 alive: true,
-                cf_kind,
                 args_dirty: false,
                 args_rebuild_required: false,
                 meta_copy_source: None,
@@ -428,11 +347,6 @@ impl IrGraph {
     /// Get the output node.
     pub fn output_node(&self) -> Option<&IrNode> {
         self.nodes.iter().find(|n| n.op == NodeOp::Output)
-    }
-
-    /// Iterate call_function nodes.
-    pub fn call_functions(&self) -> impl Iterator<Item = &IrNode> {
-        self.nodes.iter().filter(|n| n.op == NodeOp::CallFunction)
     }
 
     /// Get node by ID.
@@ -513,60 +427,6 @@ impl IrGraph {
 
     pub fn has_live_users(&self, id: NodeId) -> bool {
         !self.live_user_ids(id).is_empty()
-    }
-
-    /// Iterate cond/while_loop nodes.
-    pub fn cf_nodes(&self) -> impl Iterator<Item = &IrNode> {
-        self.nodes.iter().filter(|n| n.alive && n.cf_kind.is_some())
-    }
-
-    /// Get data args for a cond/while node (the carried/data arg list).
-    /// cond: args[-1], while_loop: args[-2] + args[-1]
-    pub fn cf_data_arg_ids(&self, cf_node: &IrNode) -> Vec<NodeId> {
-        match cf_node.cf_kind {
-            Some(CfKind::Cond) => {
-                // Last arg is the data args list
-                cf_node
-                    .args
-                    .last()
-                    .and_then(|a| match a {
-                        IrArg::List(items) => Some(
-                            items
-                                .iter()
-                                .filter_map(|i| match i {
-                                    IrArg::Node(id) => Some(*id),
-                                    _ => None,
-                                })
-                                .collect(),
-                        ),
-                        _ => None,
-                    })
-                    .unwrap_or_default()
-            }
-            Some(CfKind::While) => {
-                // args[-2] + args[-1]
-                let len = cf_node.args.len();
-                if len < 2 {
-                    return Vec::new();
-                }
-                let mut ids = Vec::new();
-                for arg in &cf_node.args[len - 2..] {
-                    match arg {
-                        IrArg::List(items) => {
-                            for i in items {
-                                if let IrArg::Node(id) = i {
-                                    ids.push(*id);
-                                }
-                            }
-                        }
-                        IrArg::Node(id) => ids.push(*id),
-                        _ => {}
-                    }
-                }
-                ids
-            }
-            None => Vec::new(),
-        }
     }
 
     // --- Graph surgery ---
@@ -728,7 +588,6 @@ impl IrGraph {
             meta,
             tensor: None,
             alive: true,
-            cf_kind: None,
             args_dirty: false,
             args_rebuild_required: false,
             meta_copy_source: None,
@@ -1502,18 +1361,6 @@ impl<'py> FxNodeCreator<'py> {
         )))
     }
 
-    /// Insert a generic call_function node with resolved op target.
-    pub fn insert_call_function(
-        &self,
-        gm: &Bound<'py, PyAny>,
-        ref_node: &Bound<'py, PyAny>,
-        op_name: &str,
-        args: &Bound<'py, PyAny>,
-        after: bool,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let target = self.resolve_op(op_name)?;
-        self.insert_node(gm, ref_node, &target, args, after)
-    }
 }
 
 impl IrNode {
@@ -1759,7 +1606,6 @@ impl FakeTensorMeta {
 pub enum MetaValue {
     Bool(bool),
     Int(i64),
-    IntList(Vec<usize>),
     Str(String),
 }
 
@@ -2015,10 +1861,6 @@ impl NodeMeta {
                 match value {
                     MetaValue::Bool(v) => meta.set_item(key.as_str(), *v)?,
                     MetaValue::Int(v) => meta.set_item(key.as_str(), *v)?,
-                    MetaValue::IntList(v) => {
-                        let tuple = pyo3::types::PyTuple::new_bound(py, v);
-                        meta.set_item(key.as_str(), tuple)?;
-                    }
                     MetaValue::Str(v) => {
                         if key == "tosa_special_dtype" {
                             let enum_name = v.rsplit('.').next().unwrap_or(v.as_str());
@@ -2180,39 +2022,8 @@ pub trait IrEpPass {
     fn run(&self, graph: &mut IrGraph) -> IrEpPassResult;
 }
 
-/// A node creation instruction emitted by an IrPass.
-/// Applied to the Python FX graph during write_back.
-#[derive(Debug, Clone)]
-pub enum NodeInsert {
-    /// Insert a TOSA RESCALE node.
-    Rescale(RescaleInsert),
-    /// Insert a dequantize_per_tensor node.
-    Dq(DqInsert),
-    /// Insert a generic call_function node.
-    CallFunction {
-        /// Target op string (e.g. "tosa.TRANSPOSE.default")
-        target: String,
-        /// Insert before this node (by name)
-        before_node: String,
-        /// Args: node references by name, or literal values
-        args: Vec<IrArg>,
-        /// Copy metadata from this node (by name)
-        copy_meta_from: String,
-        /// If set, replace all uses of this node with the new one
-        replace_node: Option<String>,
-    },
-}
-
-/// Result of running an IrPass: metadata changes are in the IrGraph,
-/// structural changes (surgery + node creation) are returned here.
-#[derive(Default)]
-pub struct IrPassResult {
-    pub modified: bool,
-    pub inserts: Vec<NodeInsert>,
-}
-
 /// Run a sequence of IrPasses on an IrGraph imported from a Python GraphModule.
-/// Handles the full lifecycle: import → passes → write_back + apply inserts.
+/// Handles the full lifecycle: import → passes → write_back.
 pub fn run_ir_passes<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
@@ -2229,7 +2040,6 @@ pub fn run_ir_passes_with_tensors<'py>(
 ) -> PyResult<bool> {
     let mut ir = IrGraph::from_fx_with_tensors(gm, exported_program)?;
     let mut any_modified = false;
-    let all_inserts: Vec<NodeInsert> = Vec::new();
 
     for pass in passes {
         let before = ir.nodes.iter().filter(|n| n.alive).count();
@@ -2248,23 +2058,6 @@ pub fn run_ir_passes_with_tensors<'py>(
 
     if any_modified {
         ir.write_back_with_surgery(py, gm)?;
-        // Apply node inserts
-        if !all_inserts.is_empty() {
-            let py_map = build_py_node_map(gm)?;
-            for insert in &all_inserts {
-                match insert {
-                    NodeInsert::Rescale(ri) => {
-                        ri.apply(py, gm, &py_map)?;
-                    }
-                    NodeInsert::Dq(di) => {
-                        di.apply(py, gm, &py_map)?;
-                    }
-                    NodeInsert::CallFunction { .. } => {
-                        // TODO: implement generic call_function creation
-                    }
-                }
-            }
-        }
         let graph = gm.getattr("graph")?;
         graph.call_method0("eliminate_dead_code")?;
         graph.call_method0("lint")?;
@@ -2345,14 +2138,14 @@ impl<P: IrPass> crate::fx_pass::FxPass for IrPassAdapter<P> {
 }
 
 // ===========================================================================
-// Hybrid pipeline: persistent IrGraph with FxPass escape hatches
+// Hybrid pipeline: persistent IrGraph with deferred EP effects
 // ===========================================================================
 
-/// A step in the hybrid pipeline — either a pure Rust IrPass or a Python FxPass.
+/// A step in the hybrid pipeline — either a pure Rust IrPass or an IrEp pass
+/// with deferred ExportedProgram bookkeeping effects.
 pub enum PipelineStep {
     Ir(Box<dyn IrPass>),
     IrEp(Box<dyn IrEpPass>),
-    Fx(Box<dyn crate::fx_pass::FxPass>),
 }
 
 /// Flush the IrGraph back to Python: write_back_with_surgery + cleanup.
@@ -2381,8 +2174,8 @@ fn flush_ir_to_python(
     Ok(())
 }
 
-/// Run a hybrid pipeline: IrPasses mutate a persistent IrGraph in pure Rust.
-/// FxPasses cause a flush→run→reimport cycle. Minimizes Python roundtrips.
+/// Run a hybrid pipeline: IrPasses mutate a persistent IrGraph in pure Rust,
+/// and IrEp passes accumulate narrow Python bookkeeping effects until flush.
 pub fn run_hybrid_pipeline<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
@@ -2391,7 +2184,6 @@ pub fn run_hybrid_pipeline<'py>(
 ) -> PyResult<bool> {
     use crate::runner_logging::{log_pass_result, log_pass_start};
 
-    let fxgm = crate::fx_graph::FxGraphModule::new(gm);
     let mut ir: Option<IrGraph> = None;
     let mut any_modified = false;
     let mut ir_dirty = false; // tracks if the IrGraph has unflushed changes
@@ -2438,28 +2230,6 @@ pub fn run_hybrid_pipeline<'py>(
                     ir_dirty = true;
                     pending_effects.effects.extend(result.effects.effects);
                 }
-            }
-            PipelineStep::Fx(pass) => {
-                // Flush IrGraph to Python if dirty
-                if ir_dirty {
-                    if let Some(ref graph) = ir {
-                        flush_ir_to_python(graph, py, gm, exported_program, &mut pending_effects)?;
-                    }
-                    ir = None;
-                    ir_dirty = false;
-                } else {
-                    // Drop the clean IrGraph — FxPass will read Python directly
-                    ir = None;
-                }
-                let before = fxgm.node_count()?;
-                log_pass_start("HybridPipeline", i, steps.len(), pass.name());
-                let modified = pass.run(&fxgm)?;
-                let after = fxgm.node_count()?;
-                log_pass_result("HybridPipeline", pass.name(), modified, before, after);
-                if modified {
-                    any_modified = true;
-                }
-                // Next IrPass will re-import from Python
             }
         }
     }

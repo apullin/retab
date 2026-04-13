@@ -91,7 +91,7 @@ mod tests {
             NodeMeta::default(),
         );
         graph.nodes[id].tensor = Some(crate::fx_ir::NodeTensor {
-            source: crate::fx_ir::TensorSource::StateDict(name.to_string()),
+            source: crate::fx_ir::TensorSource::GraphModuleAttr,
             data: TensorData {
                 data,
                 shape,

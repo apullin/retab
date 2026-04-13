@@ -54,7 +54,11 @@ macro_rules! fx_pass {
 
                 let mut candidates: Vec<pyo3::Bound<'_, pyo3::PyAny>> = Vec::new();
 
-                for ($mnode, $target) in gm.call_functions()? {
+                for $mnode in gm.nodes()? {
+                    if $crate::fx_graph::FxGraphModule::node_op(&$mnode)? != "call_function" {
+                        continue;
+                    }
+                    let $target = $crate::fx_graph::FxGraphModule::node_target_str(&$mnode)?;
                     if $match_expr {
                         candidates.push($mnode.clone());
                     }

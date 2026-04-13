@@ -130,16 +130,6 @@ pub(crate) fn resolve_input_qparams_for_foldable_node(
         .collect()
 }
 
-pub(crate) fn resolve_input_qparam_map_for_foldable_node(
-    graph: &IrGraph,
-    node: &IrNode,
-) -> Vec<(usize, ResolvedFoldQdqQParam)> {
-    resolve_input_qparams_for_foldable_node(graph, node)
-        .into_iter()
-        .map(|resolved| (resolved.arg_index, resolved.qparam))
-        .collect()
-}
-
 fn resolve_input_qparam_for_arg(
     graph: &IrGraph,
     arg_index: usize,
@@ -394,18 +384,6 @@ impl IrFoldQdqPass {
             .map(|node| node.id)
             .collect()
     }
-
-    pub(crate) fn resolve_input_qparams(
-        &self,
-        graph: &IrGraph,
-        node: &IrNode,
-    ) -> Vec<(usize, ResolvedFoldQdqQParam)> {
-        resolve_input_qparam_map_for_foldable_node(graph, node)
-    }
-
-    pub(crate) fn resolve_output_qparam(&self, node: &IrNode) -> Option<ResolvedFoldQdqQParam> {
-        resolve_qparam_from_node_meta(node)
-    }
 }
 
 impl IrPass for IrFoldQdqPass {
@@ -569,7 +547,6 @@ mod tests {
             meta,
             tensor: None,
             alive: true,
-            cf_kind: None,
             args_dirty: false,
             args_rebuild_required: false,
             meta_copy_source: None,
