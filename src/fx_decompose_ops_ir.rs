@@ -4,8 +4,8 @@
 use std::f64::consts::FRAC_PI_2;
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, MetaValue, NodeId,
-    NodeMeta, NodeOp,
+    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta,
+    NodeOp,
 };
 use crate::runner_logging::log_line;
 
@@ -98,9 +98,7 @@ fn is_group_norm(t: &str) -> bool {
     t.contains("aten.group_norm") || t.contains("aten.native_group_norm")
 }
 fn is_softmax(t: &str) -> bool {
-    t.contains("aten.softmax.")
-        || t.contains("aten._safe_softmax.")
-        || t.contains("aten._softmax.")
+    t.contains("aten.softmax.") || t.contains("aten._safe_softmax.") || t.contains("aten._softmax.")
 }
 fn is_log_softmax(t: &str) -> bool {
     t.contains("aten.log_softmax.") || t.contains("aten._log_softmax.")
@@ -201,22 +199,13 @@ fn batch_norm_eps(node: &crate::fx_ir::IrNode) -> f64 {
 
 fn preserve_shape_node(graph: &mut IrGraph, node_id: NodeId) {
     let meta = &mut graph.node_mut(node_id).meta;
-    meta.set_extra("arm_preserve_shape_node", MetaValue::Bool(true));
-    meta.set_extra("arm_layout_neutral", MetaValue::Bool(true));
+    meta.mark_preserve_shape_node();
+    meta.mark_layout_neutral_flag();
 }
 
 fn preserve_identity_layout(graph: &mut IrGraph, node_id: NodeId) {
     preserve_shape_node(graph, node_id);
-    let rank = graph.nodes[node_id]
-        .meta
-        .val_shape()
-        .map(|shape| shape.len())
-        .unwrap_or(0);
-    if rank > 0 {
-        graph.nodes[node_id]
-            .meta
-            .set_tosa_dim_order((0..rank).collect());
-    }
+    graph.node_mut(node_id).meta.mark_identity_dim_order();
 }
 
 fn add_full_const(
@@ -589,7 +578,10 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
     let meta = graph.nodes[id].meta.clone();
 
     if pow_scalar_numeric_arg(&graph.nodes[id]).is_some_and(|exp| exp == 0.0) {
-        let shape = meta.val_shape().map(|shape| shape.to_vec()).unwrap_or_default();
+        let shape = meta
+            .val_shape()
+            .map(|shape| shape.to_vec())
+            .unwrap_or_default();
         let dtype = meta.val_dtype().unwrap_or("torch.float32").to_string();
         let one = graph.add_node(
             NodeOp::CallFunction,
@@ -781,10 +773,9 @@ mod tests {
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
         assert!(!graph.nodes[atan].alive);
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "atan_result" && node.target == "aten.where.self"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "atan_result"
+            && node.target == "aten.where.self"));
     }
 
     #[test]
@@ -807,10 +798,9 @@ mod tests {
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
         assert!(!graph.nodes[acos].alive);
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "acos_result" && node.target == "aten.where.self"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "acos_result"
+            && node.target == "aten.where.self"));
     }
 
     #[test]
@@ -833,10 +823,9 @@ mod tests {
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
         assert!(!graph.nodes[softmax].alive);
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "softmax_result" && node.target == "aten.mul.Tensor"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "softmax_result"
+            && node.target == "aten.mul.Tensor"));
     }
 
     #[test]
@@ -859,10 +848,9 @@ mod tests {
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
         assert!(!graph.nodes[log_softmax].alive);
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "log_softmax_result" && node.target == "aten.log.default"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "log_softmax_result"
+            && node.target == "aten.log.default"));
     }
 
     #[test]
@@ -1142,10 +1130,9 @@ mod tests {
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
         assert!(!graph.nodes[sinh].alive);
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "sinh_result" && node.target == "aten.mul.Tensor"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "sinh_result"
+            && node.target == "aten.mul.Tensor"));
     }
 
     #[test]
@@ -1168,10 +1155,9 @@ mod tests {
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
         assert!(!graph.nodes[cosh].alive);
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "cosh_result" && node.target == "aten.mul.Tensor"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "cosh_result"
+            && node.target == "aten.mul.Tensor"));
     }
 
     #[test]
@@ -1194,10 +1180,9 @@ mod tests {
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
         assert!(!graph.nodes[asinh].alive);
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "asinh_result" && node.target == "aten.log.default"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "asinh_result"
+            && node.target == "aten.log.default"));
     }
 
     #[test]
@@ -1220,10 +1205,9 @@ mod tests {
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
         assert!(!graph.nodes[acosh].alive);
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "acosh_result" && node.target == "aten.log.default"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "acosh_result"
+            && node.target == "aten.log.default"));
     }
 
     #[test]
@@ -1246,10 +1230,9 @@ mod tests {
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
         assert!(!graph.nodes[elu].alive);
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "elu_result" && node.target == "aten.where.self"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "elu_result"
+            && node.target == "aten.where.self"));
     }
 
     #[test]
@@ -1272,14 +1255,12 @@ mod tests {
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
         assert!(!graph.nodes[gelu].alive);
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "gelu_result" && node.target == "aten.mul.Tensor"));
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "gelu_erf" && node.target == "aten.erf.default"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "gelu_result"
+            && node.target == "aten.mul.Tensor"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "gelu_erf"
+            && node.target == "aten.erf.default"));
     }
 
     #[test]
@@ -1303,10 +1284,9 @@ mod tests {
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
         assert!(!graph.nodes[gelu].alive);
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "gelu_tanh" && node.target == "aten.tanh.default"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "gelu_tanh"
+            && node.target == "aten.tanh.default"));
     }
 
     #[test]
@@ -1367,14 +1347,12 @@ mod tests {
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
         assert!(!graph.nodes[bn].alive);
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "bn_result" && node.target == "aten.add.Tensor"));
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "bn_inv_sqrt" && node.target == "aten.rsqrt.default"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "bn_result"
+            && node.target == "aten.add.Tensor"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "bn_inv_sqrt"
+            && node.target == "aten.rsqrt.default"));
         let result = graph
             .nodes
             .iter()
@@ -1387,7 +1365,10 @@ mod tests {
             .find(|node| node.alive && node.name == "bn_mean_view")
             .expect("mean view");
         assert_eq!(mean_view.meta.val_shape().unwrap(), &[1, 5, 6, 4]);
-        assert_eq!(mean_view.meta.extra_bool("arm_preserve_shape_node"), Some(true));
+        assert_eq!(
+            mean_view.meta.extra_bool("arm_preserve_shape_node"),
+            Some(true)
+        );
         assert_eq!(mean_view.meta.extra_bool("arm_layout_neutral"), Some(true));
     }
 
@@ -1432,21 +1413,22 @@ mod tests {
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
         assert!(!graph.nodes[gn].alive);
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "gn_grouped" && node.target == "aten.reshape.default"));
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == "gn_result" && node.target == "aten.reshape.default"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "gn_grouped"
+            && node.target == "aten.reshape.default"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "gn_result"
+            && node.target == "aten.reshape.default"));
         let grouped = graph
             .nodes
             .iter()
             .find(|node| node.alive && node.name == "gn_grouped")
             .expect("grouped");
         assert_eq!(grouped.meta.val_shape().unwrap(), &[1, 2, 3, 8]);
-        assert_eq!(grouped.meta.extra_bool("arm_preserve_shape_node"), Some(true));
+        assert_eq!(
+            grouped.meta.extra_bool("arm_preserve_shape_node"),
+            Some(true)
+        );
         assert_eq!(grouped.meta.extra_bool("arm_layout_neutral"), Some(true));
     }
 }
@@ -1493,11 +1475,9 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
 
-    if graph
-        .nodes
-        .iter()
-        .any(|n| n.alive && n.id != id && !n.target.contains("getitem") && graph.users(id).contains(&n.id))
-    {
+    if graph.nodes.iter().any(|n| {
+        n.alive && n.id != id && !n.target.contains("getitem") && graph.users(id).contains(&n.id)
+    }) {
         return false;
     }
 
@@ -1540,10 +1520,18 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
         format!(
             "{}_{}",
             node_name,
-            if is_max_dim(&node_target) { "amax" } else { "amin" }
+            if is_max_dim(&node_target) {
+                "amax"
+            } else {
+                "amin"
+            }
         ),
         reduce_target.to_string(),
-        vec![IrArg::Node(input_id), IrArg::Int(dim as i64), IrArg::Bool(true)],
+        vec![
+            IrArg::Node(input_id),
+            IrArg::Int(dim as i64),
+            IrArg::Bool(true),
+        ],
         reduce_meta,
     );
     graph.anchor_to(reduce_id, id);
@@ -1633,11 +1621,7 @@ fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> 
         NodeOp::CallFunction,
         format!("{}_sum", name),
         "aten.sum.dim_IntList".to_string(),
-        vec![
-            IrArg::Node(exp),
-            i64_list(&[dim as i64]),
-            IrArg::Bool(true),
-        ],
+        vec![IrArg::Node(exp), i64_list(&[dim as i64]), IrArg::Bool(true)],
         meta_with(&meta, sum_shape.clone(), &dtype),
     );
     graph.anchor_to(sum, id);
@@ -1837,7 +1821,9 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let one = add_full_const(graph, id, &name, "one", 1.0, &shape, &dtype, &meta);
     let zero = add_full_const(graph, id, &name, "zero", 0.0, &shape, &dtype, &meta);
-    let half_pi = add_full_const(graph, id, &name, "half_pi", FRAC_PI_2, &shape, &dtype, &meta);
+    let half_pi = add_full_const(
+        graph, id, &name, "half_pi", FRAC_PI_2, &shape, &dtype, &meta,
+    );
     let a1 = add_full_const(graph, id, &name, "a1", 0.3529666667, &shape, &dtype, &meta);
     let a2 = add_full_const(graph, id, &name, "a2", -0.0287666667, &shape, &dtype, &meta);
     let b1 = add_full_const(graph, id, &name, "b1", 0.6863, &shape, &dtype, &meta);
@@ -2017,7 +2003,11 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         NodeOp::CallFunction,
         format!("{}_result", name),
         "aten.where.self".to_string(),
-        vec![IrArg::Node(mask_pos), IrArg::Node(atan_abs), IrArg::Node(neg)],
+        vec![
+            IrArg::Node(mask_pos),
+            IrArg::Node(atan_abs),
+            IrArg::Node(neg),
+        ],
         meta,
     );
     graph.replace_and_erase(id, result);
@@ -2361,7 +2351,9 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
     let half = add_full_const(graph, id, &name, "half", 0.5, &shape, &dtype, &meta);
     let neg_half = add_full_const(graph, id, &name, "neg_half", -0.5, &shape, &dtype, &meta);
     let two = add_full_const(graph, id, &name, "two", 2.0, &shape, &dtype, &meta);
-    let half_pi = add_full_const(graph, id, &name, "half_pi", FRAC_PI_2, &shape, &dtype, &meta);
+    let half_pi = add_full_const(
+        graph, id, &name, "half_pi", FRAC_PI_2, &shape, &dtype, &meta,
+    );
     let zero = add_full_const(graph, id, &name, "zero", 0.0, &shape, &dtype, &meta);
 
     let x_abs = graph.add_node(
@@ -3068,7 +3060,11 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
         NodeOp::CallFunction,
         format!("{}_a_math", name),
         "aten.where.self".to_string(),
-        vec![IrArg::Node(abs_eq1), IrArg::Node(zeros), IrArg::Node(a_math_gt)],
+        vec![
+            IrArg::Node(abs_eq1),
+            IrArg::Node(zeros),
+            IrArg::Node(a_math_gt),
+        ],
         tensor_meta.clone(),
     );
     graph.anchor_to(a_math, id);
@@ -3382,7 +3378,11 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
         NodeOp::CallFunction,
         format!("{}_y0_pre", name),
         "aten.where.self".to_string(),
-        vec![IrArg::Node(in_central), IrArg::Node(y0_central), IrArg::Node(y0_tail)],
+        vec![
+            IrArg::Node(in_central),
+            IrArg::Node(y0_central),
+            IrArg::Node(y0_tail),
+        ],
         tensor_meta.clone(),
     );
     graph.anchor_to(y0_pre, id);
@@ -3390,7 +3390,11 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
         NodeOp::CallFunction,
         format!("{}_y0_no_gt", name),
         "aten.where.self".to_string(),
-        vec![IrArg::Node(abs_gt1), IrArg::Node(zeros), IrArg::Node(y0_pre)],
+        vec![
+            IrArg::Node(abs_gt1),
+            IrArg::Node(zeros),
+            IrArg::Node(y0_pre),
+        ],
         tensor_meta.clone(),
     );
     graph.anchor_to(y0_no_gt, id);
@@ -3398,7 +3402,11 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
         NodeOp::CallFunction,
         format!("{}_y0", name),
         "aten.where.self".to_string(),
-        vec![IrArg::Node(abs_eq1), IrArg::Node(zeros), IrArg::Node(y0_no_gt)],
+        vec![
+            IrArg::Node(abs_eq1),
+            IrArg::Node(zeros),
+            IrArg::Node(y0_no_gt),
+        ],
         tensor_meta.clone(),
     );
     graph.anchor_to(y0, id);
@@ -3512,7 +3520,11 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
         NodeOp::CallFunction,
         format!("{}_y_safe", name),
         "aten.where.self".to_string(),
-        vec![IrArg::Node(corr_huge), IrArg::Node(y0), IrArg::Node(y_safe_small)],
+        vec![
+            IrArg::Node(corr_huge),
+            IrArg::Node(y0),
+            IrArg::Node(y_safe_small),
+        ],
         tensor_meta.clone(),
     );
     graph.anchor_to(y_safe, id);
@@ -3520,7 +3532,11 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
         NodeOp::CallFunction,
         format!("{}_y", name),
         "aten.where.self".to_string(),
-        vec![IrArg::Node(refine_mask), IrArg::Node(y_safe), IrArg::Node(y0)],
+        vec![
+            IrArg::Node(refine_mask),
+            IrArg::Node(y_safe),
+            IrArg::Node(y0),
+        ],
         tensor_meta.clone(),
     );
     graph.anchor_to(y, id);
@@ -3529,7 +3545,11 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
         NodeOp::CallFunction,
         format!("{}_inf_signed", name),
         "aten.where.self".to_string(),
-        vec![IrArg::Node(x_lt0), IrArg::Node(neg_inf), IrArg::Node(pos_inf)],
+        vec![
+            IrArg::Node(x_lt0),
+            IrArg::Node(neg_inf),
+            IrArg::Node(pos_inf),
+        ],
         tensor_meta.clone(),
     );
     graph.anchor_to(inf_signed, id);
@@ -3545,7 +3565,11 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
         NodeOp::CallFunction,
         format!("{}_result", name),
         "aten.where.self".to_string(),
-        vec![IrArg::Node(abs_eq1), IrArg::Node(inf_signed), IrArg::Node(out_gt1)],
+        vec![
+            IrArg::Node(abs_eq1),
+            IrArg::Node(inf_signed),
+            IrArg::Node(out_gt1),
+        ],
         meta,
     );
     graph.replace_and_erase(id, result);
@@ -3671,11 +3695,11 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
                 NodeOp::CallFunction,
                 format!("{}_weight_full", name),
                 "aten.full.default".to_string(),
-            vec![i64_list(&[num_features]), IrArg::Float(1.0)],
-            meta_with(&meta, vec![num_features], &dtype),
-        );
-        graph.anchor_to(weight_full, id);
-        view_stats(graph, weight_full, "weight_view")
+                vec![i64_list(&[num_features]), IrArg::Float(1.0)],
+                meta_with(&meta, vec![num_features], &dtype),
+            );
+            graph.anchor_to(weight_full, id);
+            view_stats(graph, weight_full, "weight_view")
         }
         _ => return false,
     };
@@ -3696,11 +3720,11 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
                 NodeOp::CallFunction,
                 format!("{}_bias_full", name),
                 "aten.full.default".to_string(),
-            vec![i64_list(&[num_features]), IrArg::Float(0.0)],
-            meta_with(&meta, vec![num_features], &dtype),
-        );
-        graph.anchor_to(bias_full, id);
-        view_stats(graph, bias_full, "bias_view")
+                vec![i64_list(&[num_features]), IrArg::Float(0.0)],
+                meta_with(&meta, vec![num_features], &dtype),
+            );
+            graph.anchor_to(bias_full, id);
+            view_stats(graph, bias_full, "bias_view")
         }
         _ => return false,
     };
@@ -3718,7 +3742,12 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         .iter()
         .filter(|node| node.alive && node.target.contains("getitem"))
         .filter(|node| node.args.first().and_then(IrArg::as_node) == Some(id))
-        .map(|node| (node.id, node.args.get(1).and_then(IrArg::as_int).unwrap_or(0)))
+        .map(|node| {
+            (
+                node.id,
+                node.args.get(1).and_then(IrArg::as_int).unwrap_or(0),
+            )
+        })
         .collect();
 
     if getitem_users.is_empty() {
@@ -3726,14 +3755,12 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         return true;
     }
 
-    if graph
-        .nodes
-        .iter()
-        .any(|node| node.alive
+    if graph.nodes.iter().any(|node| {
+        node.alive
             && node.id != id
             && !node.target.contains("getitem")
-            && node.args.iter().any(|arg| arg.as_node() == Some(id)))
-    {
+            && node.args.iter().any(|arg| arg.as_node() == Some(id))
+    }) {
         return false;
     }
 
@@ -4041,7 +4068,12 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         .iter()
         .filter(|node| node.alive && node.target.contains("getitem"))
         .filter(|node| node.args.first().and_then(IrArg::as_node) == Some(id))
-        .map(|node| (node.id, node.args.get(1).and_then(IrArg::as_int).unwrap_or(0)))
+        .map(|node| {
+            (
+                node.id,
+                node.args.get(1).and_then(IrArg::as_int).unwrap_or(0),
+            )
+        })
         .collect();
 
     if getitem_users.is_empty() {

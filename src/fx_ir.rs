@@ -1360,7 +1360,6 @@ impl<'py> FxNodeCreator<'py> {
             "Cannot resolve op: {name}"
         )))
     }
-
 }
 
 impl IrNode {
@@ -1957,6 +1956,50 @@ impl NodeMeta {
         self.dirty.val = true;
     }
 
+    pub fn cloned_with_val(&self, shape: Vec<i64>, dtype: impl Into<String>) -> Self {
+        let mut meta = self.clone();
+        meta.set_val(FakeTensorMeta {
+            shape,
+            dtype: dtype.into(),
+        });
+        meta
+    }
+
+    pub fn with_qparams_from(mut self, other: &Self) -> Self {
+        self.copy_qparams_from(other);
+        self
+    }
+
+    pub fn without_qparams(mut self) -> Self {
+        self.clear_all_qparams();
+        self
+    }
+
+    pub fn mark_preserve_shape_node(&mut self) {
+        self.set_extra("arm_preserve_shape_node", MetaValue::Bool(true));
+    }
+
+    pub fn mark_layout_neutral_flag(&mut self) {
+        self.set_extra("arm_layout_neutral", MetaValue::Bool(true));
+    }
+
+    pub fn mark_identity_dim_order(&mut self) {
+        if let Some(shape) = self.val_shape() {
+            self.set_tosa_dim_order((0..shape.len()).collect());
+        }
+    }
+
+    pub fn mark_layout_neutral(&mut self) {
+        self.mark_layout_neutral_flag();
+        self.set_extra("tosa_spatial_rank", MetaValue::Int(0));
+        self.mark_identity_dim_order();
+    }
+
+    pub fn layout_neutral(mut self) -> Self {
+        self.mark_layout_neutral();
+        self
+    }
+
     /// Get the single output qparam (key 0), if present.
     pub fn output_qparam(&self) -> Option<&QParam> {
         self.output_qparams.as_ref()?.get(&0)
@@ -1965,6 +2008,20 @@ impl NodeMeta {
     /// Get the single input qparam (key 0), if present.
     pub fn input_qparam(&self) -> Option<&QParam> {
         self.input_qparams.as_ref()?.get(&0)
+    }
+
+    pub fn copy_qparams_from(&mut self, other: &Self) {
+        if let Some(iqp) = other.input_qparams.clone() {
+            self.set_input_qparams(iqp);
+        }
+        if let Some(oqp) = other.output_qparams.clone() {
+            self.set_output_qparams(oqp);
+        }
+    }
+
+    pub fn clear_all_qparams(&mut self) {
+        self.clear_input_qparams();
+        self.clear_output_qparams();
     }
 
     /// Set a custom extra meta key.

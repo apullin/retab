@@ -3,8 +3,7 @@
 use std::collections::HashMap;
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, MetaValue, NodeId,
-    NodeMeta, NodeOp,
+    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
 };
 use crate::runner_logging::log_line;
 
@@ -107,8 +106,8 @@ fn anchor_tensor_meta(graph: &mut IrGraph, node_id: NodeId, anchor: NodeId, meta
 
 fn preserve_shape_node(graph: &mut IrGraph, node_id: NodeId) {
     let meta = &mut graph.node_mut(node_id).meta;
-    meta.set_extra("arm_preserve_shape_node", MetaValue::Bool(true));
-    meta.set_extra("arm_layout_neutral", MetaValue::Bool(true));
+    meta.mark_preserve_shape_node();
+    meta.mark_layout_neutral_flag();
 }
 
 pub struct IrDecomposeLayerNormPass;

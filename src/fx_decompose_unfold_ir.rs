@@ -2,58 +2,21 @@
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, MetaValue, NodeId,
-    NodeMeta, NodeOp,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::runner_logging::log_line;
 
 fn meta_neutral(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut m = base.clone();
-    m.set_val(FakeTensorMeta {
-        shape: shape.clone(),
-        dtype: dtype.to_string(),
-    });
-    m.set_extra("arm_layout_neutral", MetaValue::Bool(true));
-    m.set_extra("tosa_spatial_rank", MetaValue::Int(0));
-    let order: Vec<usize> = (0..shape.len()).collect();
-    m.set_tosa_dim_order(order);
-    m
+    base.cloned_with_val(shape, dtype).layout_neutral()
 }
 
 fn mark_layout_neutral_in_place(graph: &mut IrGraph, id: NodeId) {
-    graph
-        .node_mut(id)
-        .meta
-        .set_extra("arm_layout_neutral", MetaValue::Bool(true));
-    graph
-        .node_mut(id)
-        .meta
-        .set_extra("tosa_spatial_rank", MetaValue::Int(0));
-    if let Some(shape) = graph.nodes[id].meta.val_shape() {
-        let order: Vec<usize> = (0..shape.len()).collect();
-        graph.node_mut(id).meta.set_tosa_dim_order(order);
-    }
+    graph.node_mut(id).meta.mark_layout_neutral();
 }
 
 fn dtype_kwarg(dtype_str: &str) -> HashMap<String, IrArg> {
     let mut kw = HashMap::new();
     kw.insert("dtype".into(), IrArg::Dtype(dtype_str.into()));
     kw
-}
-
-fn copy_qparams_from_node(graph: &IrGraph, src_id: NodeId, dst_meta: &mut NodeMeta) {
-    if let Some(iqp) = graph.nodes[src_id].meta.input_qparams.clone() {
-        dst_meta.set_input_qparams(iqp);
-    }
-    if let Some(oqp) = graph.nodes[src_id].meta.output_qparams.clone() {
-        dst_meta.set_output_qparams(oqp);
-    }
-}
-
-fn clear_qparams(dst_meta: &mut NodeMeta) {
-    dst_meta.set_input_qparams(HashMap::new());
-    dst_meta.set_output_qparams(HashMap::new());
 }
 
 fn add_full_int(
@@ -168,9 +131,9 @@ impl IrPass for IrDecomposeUnfoldPass {
             mark_layout_neutral_in_place(graph, x_id);
 
             if needs_bool_cast {
-                let mut cast_meta =
-                    meta_neutral(&graph.nodes[x_id].meta, input_shape.clone(), work_dtype);
-                clear_qparams(&mut cast_meta);
+                let cast_meta =
+                    meta_neutral(&graph.nodes[x_id].meta, input_shape.clone(), work_dtype)
+                        .without_qparams();
                 let cast_id = graph.add_node_with_kwargs(
                     NodeOp::CallFunction,
                     format!("{}_bool_to_int8", name),
@@ -184,13 +147,13 @@ impl IrPass for IrDecomposeUnfoldPass {
             }
 
             // Flatten x to (P, K, Q)
-            let mut values_meta =
-                meta_neutral(&graph.nodes[values_in].meta, vec![p, k, q], work_dtype);
-            if !needs_bool_cast {
-                copy_qparams_from_node(graph, x_id, &mut values_meta);
+            let values_meta = if needs_bool_cast {
+                meta_neutral(&graph.nodes[values_in].meta, vec![p, k, q], work_dtype)
+                    .without_qparams()
             } else {
-                clear_qparams(&mut values_meta);
-            }
+                meta_neutral(&graph.nodes[values_in].meta, vec![p, k, q], work_dtype)
+                    .with_qparams_from(&graph.nodes[x_id].meta)
+            };
             let values = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_flat", name),
@@ -201,8 +164,7 @@ impl IrPass for IrDecomposeUnfoldPass {
             graph.anchor_to(values, id);
 
             // Build sliding-window index: arange(0,U)*step + arange(0,size) → (U*size,)
-            let mut idx_u_meta = meta_neutral(&orig_meta, vec![u], "torch.int32");
-            clear_qparams(&mut idx_u_meta);
+            let idx_u_meta = meta_neutral(&orig_meta, vec![u], "torch.int32").without_qparams();
             let idx_u = graph.add_node_with_kwargs(
                 NodeOp::CallFunction,
                 format!("{}_au", name),
@@ -213,8 +175,7 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
             graph.anchor_to(idx_u, id);
 
-            let mut step_meta = meta_neutral(&orig_meta, vec![1], "torch.int32");
-            clear_qparams(&mut step_meta);
+            let step_meta = meta_neutral(&orig_meta, vec![1], "torch.int32").without_qparams();
             let step_t = add_full_int(
                 graph,
                 format!("{}_step", name),
@@ -225,8 +186,8 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
             graph.anchor_to(step_t, id);
 
-            let mut idx_scaled_meta = meta_neutral(&orig_meta, vec![u], "torch.int32");
-            clear_qparams(&mut idx_scaled_meta);
+            let idx_scaled_meta =
+                meta_neutral(&orig_meta, vec![u], "torch.int32").without_qparams();
             let idx_scaled = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_us", name),
@@ -236,8 +197,8 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
             graph.anchor_to(idx_scaled, id);
 
-            let mut idx_u2d_meta = meta_neutral(&orig_meta, vec![u, 1], "torch.int32");
-            clear_qparams(&mut idx_u2d_meta);
+            let idx_u2d_meta =
+                meta_neutral(&orig_meta, vec![u, 1], "torch.int32").without_qparams();
             let idx_u2d = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_u2d", name),
@@ -247,8 +208,7 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
             graph.anchor_to(idx_u2d, id);
 
-            let mut idx_c_meta = meta_neutral(&orig_meta, vec![size], "torch.int32");
-            clear_qparams(&mut idx_c_meta);
+            let idx_c_meta = meta_neutral(&orig_meta, vec![size], "torch.int32").without_qparams();
             let idx_c = graph.add_node_with_kwargs(
                 NodeOp::CallFunction,
                 format!("{}_ac", name),
@@ -259,8 +219,8 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
             graph.anchor_to(idx_c, id);
 
-            let mut idx_c2d_meta = meta_neutral(&orig_meta, vec![1, size], "torch.int32");
-            clear_qparams(&mut idx_c2d_meta);
+            let idx_c2d_meta =
+                meta_neutral(&orig_meta, vec![1, size], "torch.int32").without_qparams();
             let idx_c2d = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_c2d", name),
@@ -270,8 +230,8 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
             graph.anchor_to(idx_c2d, id);
 
-            let mut idx2d_meta = meta_neutral(&orig_meta, vec![u, size], "torch.int32");
-            clear_qparams(&mut idx2d_meta);
+            let idx2d_meta =
+                meta_neutral(&orig_meta, vec![u, size], "torch.int32").without_qparams();
             let idx2d = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_i2d", name),
@@ -281,8 +241,7 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
             graph.anchor_to(idx2d, id);
 
-            let mut idx1d_meta = meta_neutral(&orig_meta, vec![uc], "torch.int32");
-            clear_qparams(&mut idx1d_meta);
+            let idx1d_meta = meta_neutral(&orig_meta, vec![uc], "torch.int32").without_qparams();
             let idx1d = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_i1d", name),
@@ -292,8 +251,8 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
             graph.anchor_to(idx1d, id);
 
-            let mut idx_unsq_meta = meta_neutral(&orig_meta, vec![1, uc], "torch.int32");
-            clear_qparams(&mut idx_unsq_meta);
+            let idx_unsq_meta =
+                meta_neutral(&orig_meta, vec![1, uc], "torch.int32").without_qparams();
             let idx_unsq = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_iu", name),
@@ -303,8 +262,8 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
             graph.anchor_to(idx_unsq, id);
 
-            let mut idx_exp_meta = meta_neutral(&orig_meta, vec![p, uc], "torch.int32");
-            clear_qparams(&mut idx_exp_meta);
+            let idx_exp_meta =
+                meta_neutral(&orig_meta, vec![p, uc], "torch.int32").without_qparams();
             let idx_exp = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_ie", name),
@@ -315,13 +274,13 @@ impl IrPass for IrDecomposeUnfoldPass {
             graph.anchor_to(idx_exp, id);
 
             // GATHER
-            let mut gathered_meta =
-                meta_neutral(&graph.nodes[values_in].meta, vec![p, uc, q], work_dtype);
-            if !needs_bool_cast {
-                copy_qparams_from_node(graph, x_id, &mut gathered_meta);
+            let gathered_meta = if needs_bool_cast {
+                meta_neutral(&graph.nodes[values_in].meta, vec![p, uc, q], work_dtype)
+                    .without_qparams()
             } else {
-                clear_qparams(&mut gathered_meta);
-            }
+                meta_neutral(&graph.nodes[values_in].meta, vec![p, uc, q], work_dtype)
+                    .with_qparams_from(&graph.nodes[x_id].meta)
+            };
             let gathered = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_g", name),
@@ -332,16 +291,21 @@ impl IrPass for IrDecomposeUnfoldPass {
             graph.anchor_to(gathered, id);
 
             // Reshape (P, U*size, Q) → (P, U, size, Q)
-            let mut r4d_meta = meta_neutral(
-                &graph.nodes[values_in].meta,
-                vec![p, u, size, q],
-                work_dtype,
-            );
-            if !needs_bool_cast {
-                copy_qparams_from_node(graph, x_id, &mut r4d_meta);
+            let r4d_meta = if needs_bool_cast {
+                meta_neutral(
+                    &graph.nodes[values_in].meta,
+                    vec![p, u, size, q],
+                    work_dtype,
+                )
+                .without_qparams()
             } else {
-                clear_qparams(&mut r4d_meta);
-            }
+                meta_neutral(
+                    &graph.nodes[values_in].meta,
+                    vec![p, u, size, q],
+                    work_dtype,
+                )
+                .with_qparams_from(&graph.nodes[x_id].meta)
+            };
             let r4d = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_r4", name),
@@ -356,13 +320,13 @@ impl IrPass for IrDecomposeUnfoldPass {
             full_shape.push(u);
             full_shape.push(size);
             full_shape.extend(post.iter().copied());
-            let mut reshaped_meta =
-                meta_neutral(&graph.nodes[values_in].meta, full_shape.clone(), work_dtype);
-            if !needs_bool_cast {
-                copy_qparams_from_node(graph, x_id, &mut reshaped_meta);
+            let reshaped_meta = if needs_bool_cast {
+                meta_neutral(&graph.nodes[values_in].meta, full_shape.clone(), work_dtype)
+                    .without_qparams()
             } else {
-                clear_qparams(&mut reshaped_meta);
-            }
+                meta_neutral(&graph.nodes[values_in].meta, full_shape.clone(), work_dtype)
+                    .with_qparams_from(&graph.nodes[x_id].meta)
+            };
             let reshaped = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_rs", name),
@@ -385,13 +349,12 @@ impl IrPass for IrDecomposeUnfoldPass {
             for &p in &perm {
                 perm_shape.push(full_shape[p as usize]);
             }
-            let mut permuted_meta =
-                meta_neutral(&graph.nodes[values_in].meta, perm_shape, work_dtype);
-            if !needs_bool_cast {
-                copy_qparams_from_node(graph, x_id, &mut permuted_meta);
+            let permuted_meta = if needs_bool_cast {
+                meta_neutral(&graph.nodes[values_in].meta, perm_shape, work_dtype).without_qparams()
             } else {
-                clear_qparams(&mut permuted_meta);
-            }
+                meta_neutral(&graph.nodes[values_in].meta, perm_shape, work_dtype)
+                    .with_qparams_from(&graph.nodes[x_id].meta)
+            };
             let permuted = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_pm", name),
@@ -402,7 +365,7 @@ impl IrPass for IrDecomposeUnfoldPass {
             graph.anchor_to(permuted, id);
 
             let final_result = if needs_bool_cast {
-                let mut cast_back_meta = meta_neutral(
+                let cast_back_meta = meta_neutral(
                     &orig_meta,
                     graph.nodes[permuted]
                         .meta
@@ -410,8 +373,8 @@ impl IrPass for IrDecomposeUnfoldPass {
                         .unwrap_or(&[])
                         .to_vec(),
                     "torch.bool",
-                );
-                clear_qparams(&mut cast_back_meta);
+                )
+                .without_qparams();
                 let cast_back = graph.add_node_with_kwargs(
                     NodeOp::CallFunction,
                     format!("{}_int8_to_bool", name),

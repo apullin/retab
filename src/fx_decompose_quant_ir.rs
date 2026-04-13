@@ -5,21 +5,12 @@
 //!
 //! Skips DQ→Q pairs (handled by InsertRescalePass).
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::runner_logging::log_line;
 use std::collections::HashMap;
 
-fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut m = base.clone();
-    m.clear_input_qparams();
-    m.clear_output_qparams();
-    m.set_val(FakeTensorMeta {
-        shape,
-        dtype: dtype.to_string(),
-    });
-    m
+fn quant_meta(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
+    base.cloned_with_val(shape, dtype).without_qparams()
 }
 
 fn is_q(t: &str) -> bool {
@@ -54,7 +45,7 @@ fn add_cast(
         "aten._to_copy.default".to_string(),
         vec![IrArg::Node(x_id)],
         dtype_kwarg(target_dtype),
-        meta_with(orig_meta, shape.to_vec(), target_dtype),
+        quant_meta(orig_meta, shape.to_vec(), target_dtype),
     );
     graph.anchor_to(id, anchor);
     id
@@ -185,7 +176,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_sc", name),
                     "aten.full.default".to_string(),
                     vec![i64_list(&ones), IrArg::Float(eff_scale)],
-                    meta_with(&orig_meta, ones.clone(), &fp_dtype),
+                    quant_meta(&orig_meta, ones.clone(), &fp_dtype),
                 );
                 graph.anchor_to(sc, id);
 
@@ -195,7 +186,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_zp", name),
                     "aten.full.default".to_string(),
                     vec![i64_list(&ones), IrArg::Int(zp)],
-                    meta_with(&orig_meta, ones.clone(), &fp_dtype),
+                    quant_meta(&orig_meta, ones.clone(), &fp_dtype),
                 );
                 graph.anchor_to(zpc, id);
 
@@ -204,7 +195,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_mul", name),
                     "aten.mul.Tensor".to_string(),
                     vec![IrArg::Node(x_id), IrArg::Node(sc)],
-                    meta_with(&orig_meta, shape.clone(), &fp_dtype),
+                    quant_meta(&orig_meta, shape.clone(), &fp_dtype),
                 );
                 graph.anchor_to(scaled, id);
 
@@ -213,7 +204,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_round", name),
                     "aten.round.default".to_string(),
                     vec![IrArg::Node(scaled)],
-                    meta_with(&orig_meta, shape.clone(), &fp_dtype),
+                    quant_meta(&orig_meta, shape.clone(), &fp_dtype),
                 );
                 graph.anchor_to(rounded, id);
 
@@ -222,7 +213,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_add", name),
                     "aten.add.Tensor".to_string(),
                     vec![IrArg::Node(rounded), IrArg::Node(zpc)],
-                    meta_with(&orig_meta, shape.clone(), &fp_dtype),
+                    quant_meta(&orig_meta, shape.clone(), &fp_dtype),
                 );
                 graph.anchor_to(shifted, id);
 
@@ -235,7 +226,7 @@ impl IrPass for IrDecomposeQuantPass {
                         IrArg::Float(qmin as f64),
                         IrArg::Float(qmax as f64),
                     ],
-                    meta_with(&orig_meta, shape.clone(), &fp_dtype),
+                    quant_meta(&orig_meta, shape.clone(), &fp_dtype),
                 );
                 graph.anchor_to(clamped, id);
 
@@ -265,7 +256,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_zp", name),
                     "aten.full.default".to_string(),
                     vec![i64_list(&ones), IrArg::Int(zp)],
-                    meta_with(&orig_meta, ones.clone(), "torch.int32"),
+                    quant_meta(&orig_meta, ones.clone(), "torch.int32"),
                 );
                 graph.anchor_to(zpc, id);
 
@@ -274,7 +265,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_sub", name),
                     "aten.sub.Tensor".to_string(),
                     vec![IrArg::Node(x_i32), IrArg::Node(zpc)],
-                    meta_with(&orig_meta, shape.clone(), "torch.int32"),
+                    quant_meta(&orig_meta, shape.clone(), "torch.int32"),
                 );
                 graph.anchor_to(shifted, id);
 
@@ -293,7 +284,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_sc", name),
                     "aten.full.default".to_string(),
                     vec![i64_list(&ones), IrArg::Float(eff_scale)],
-                    meta_with(&orig_meta, ones, &fp_dtype),
+                    quant_meta(&orig_meta, ones, &fp_dtype),
                 );
                 graph.anchor_to(sc, id);
 
@@ -302,7 +293,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_mul", name),
                     "aten.mul.Tensor".to_string(),
                     vec![IrArg::Node(casted), IrArg::Node(sc)],
-                    meta_with(&orig_meta, shape, &fp_dtype),
+                    quant_meta(&orig_meta, shape, &fp_dtype),
                 )
             };
 
@@ -326,6 +317,7 @@ impl IrPass for IrDecomposeQuantPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fx_ir::FakeTensorMeta;
 
     fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
         let mut meta = NodeMeta::default();

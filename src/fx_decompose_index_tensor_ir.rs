@@ -2,33 +2,8 @@
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::runner_logging::log_line;
-
-fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut m = base.clone();
-    m.set_val(FakeTensorMeta {
-        shape,
-        dtype: dtype.to_string(),
-    });
-    m
-}
-
-fn copy_qparams_from_node(graph: &IrGraph, src_id: NodeId, dst_meta: &mut NodeMeta) {
-    if let Some(iqp) = graph.nodes[src_id].meta.input_qparams.clone() {
-        dst_meta.set_input_qparams(iqp);
-    }
-    if let Some(oqp) = graph.nodes[src_id].meta.output_qparams.clone() {
-        dst_meta.set_output_qparams(oqp);
-    }
-}
-
-fn clear_qparams(dst_meta: &mut NodeMeta) {
-    dst_meta.set_input_qparams(HashMap::new());
-    dst_meta.set_output_qparams(HashMap::new());
-}
 
 fn add_full_int(
     graph: &mut IrGraph,
@@ -71,7 +46,11 @@ fn broadcast_shape(shapes: &[Vec<i64>]) -> Option<Vec<i64>> {
     Some(out)
 }
 
-fn compute_index_output_shape(batch_shape: &[i64], broadcast: &[i64], kept_shape: &[i64]) -> Vec<i64> {
+fn compute_index_output_shape(
+    batch_shape: &[i64],
+    broadcast: &[i64],
+    kept_shape: &[i64],
+) -> Vec<i64> {
     let mut out = batch_shape.to_vec();
     out.extend_from_slice(broadcast);
     out.extend_from_slice(kept_shape);
@@ -79,9 +58,7 @@ fn compute_index_output_shape(batch_shape: &[i64], broadcast: &[i64], kept_shape
 }
 
 fn is_identity_perm(perm: &[i64]) -> bool {
-    perm.iter()
-        .enumerate()
-        .all(|(i, &value)| value == i as i64)
+    perm.iter().enumerate().all(|(i, &value)| value == i as i64)
 }
 
 fn packed_lin_scales(tensor_sizes: &[i64]) -> Vec<i64> {
@@ -205,9 +182,12 @@ impl IrPass for IrDecomposeIndexTensorPass {
 
             let mut values_in = x_id;
             if !is_identity_perm(&perm) {
-                let permuted_shape: Vec<i64> = perm.iter().map(|&pos| x_shape[pos as usize]).collect();
-                let mut perm_meta = meta_with(&graph.nodes[x_id].meta, permuted_shape, &x_dtype);
-                copy_qparams_from_node(graph, x_id, &mut perm_meta);
+                let permuted_shape: Vec<i64> =
+                    perm.iter().map(|&pos| x_shape[pos as usize]).collect();
+                let perm_meta = graph.nodes[x_id]
+                    .meta
+                    .cloned_with_val(permuted_shape, &x_dtype)
+                    .with_qparams_from(&graph.nodes[x_id].meta);
                 let perm_id = graph.add_node(
                     NodeOp::CallFunction,
                     format!("{}_x_perm", node_name),
@@ -220,8 +200,10 @@ impl IrPass for IrDecomposeIndexTensorPass {
             }
 
             // Flatten x to (B, K, C)
-            let mut x_bkc_meta = meta_with(&graph.nodes[x_id].meta, vec![batch, k, c], &x_dtype);
-            copy_qparams_from_node(graph, x_id, &mut x_bkc_meta);
+            let x_bkc_meta = graph.nodes[x_id]
+                .meta
+                .cloned_with_val(vec![batch, k, c], &x_dtype)
+                .with_qparams_from(&graph.nodes[x_id].meta);
             let x_bkc = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_x_flat", node_name),
@@ -244,8 +226,9 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 if idx_shape.len() != broadcast.len() {
                     let mut aligned: Vec<i64> = vec![1; broadcast.len() - idx_shape.len()];
                     aligned.extend(idx_shape);
-                    let mut aligned_meta = meta_with(&orig_meta, aligned.clone(), &idx_dtype);
-                    clear_qparams(&mut aligned_meta);
+                    let aligned_meta = orig_meta
+                        .cloned_with_val(aligned.clone(), &idx_dtype)
+                        .without_qparams();
                     let aligned_id = graph.add_node(
                         NodeOp::CallFunction,
                         format!("{}_idx{}_align", node_name, i),
@@ -258,8 +241,9 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 }
 
                 // Broadcast to common shape
-                let mut bcast_meta = meta_with(&orig_meta, broadcast.clone(), &idx_dtype);
-                clear_qparams(&mut bcast_meta);
+                let bcast_meta = orig_meta
+                    .cloned_with_val(broadcast.clone(), &idx_dtype)
+                    .without_qparams();
                 let bcast_id = graph.add_node(
                     NodeOp::CallFunction,
                     format!("{}_idx{}_bcast", node_name, i),
@@ -270,8 +254,9 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 graph.anchor_to(bcast_id, id);
 
                 // Flatten to (W,)
-                let mut flat_meta = meta_with(&orig_meta, vec![w], &idx_dtype);
-                clear_qparams(&mut flat_meta);
+                let flat_meta = orig_meta
+                    .cloned_with_val(vec![w], &idx_dtype)
+                    .without_qparams();
                 let flat_id = graph.add_node(
                     NodeOp::CallFunction,
                     format!("{}_idx{}_flat", node_name, i),
@@ -282,8 +267,9 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 graph.anchor_to(flat_id, id);
 
                 // Scale by linearized stride
-                let mut scale_meta = meta_with(&orig_meta, vec![1], &idx_dtype);
-                clear_qparams(&mut scale_meta);
+                let scale_meta = orig_meta
+                    .cloned_with_val(vec![1], &idx_dtype)
+                    .without_qparams();
                 let scale_id = add_full_int(
                     graph,
                     format!("{}_scale{}", node_name, i),
@@ -294,8 +280,9 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 );
                 graph.anchor_to(scale_id, id);
 
-                let mut scaled_meta = meta_with(&orig_meta, vec![w], &idx_dtype);
-                clear_qparams(&mut scaled_meta);
+                let scaled_meta = orig_meta
+                    .cloned_with_val(vec![w], &idx_dtype)
+                    .without_qparams();
                 let scaled_id = graph.add_node(
                     NodeOp::CallFunction,
                     format!("{}_idx{}_scaled", node_name, i),
@@ -308,8 +295,9 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 lin_w = Some(match lin_w {
                     None => scaled_id,
                     Some(prev) => {
-                        let mut add_meta = meta_with(&orig_meta, vec![w], &idx_dtype);
-                        clear_qparams(&mut add_meta);
+                        let add_meta = orig_meta
+                            .cloned_with_val(vec![w], &idx_dtype)
+                            .without_qparams();
                         let add_id = graph.add_node(
                             NodeOp::CallFunction,
                             format!("{}_lin_add{}", node_name, i),
@@ -326,8 +314,9 @@ impl IrPass for IrDecomposeIndexTensorPass {
             let Some(lin_w_id) = lin_w else { continue };
 
             // Unsqueeze to (1, W), then tile across batch if needed.
-            let mut idx_1w_meta = meta_with(&orig_meta, vec![1, w], &idx_dtype);
-            clear_qparams(&mut idx_1w_meta);
+            let idx_1w_meta = orig_meta
+                .cloned_with_val(vec![1, w], &idx_dtype)
+                .without_qparams();
             let idx_bw_seed = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_idx_1w", node_name),
@@ -340,8 +329,9 @@ impl IrPass for IrDecomposeIndexTensorPass {
             let idx_bw = if batch == 1 {
                 idx_bw_seed
             } else {
-                let mut expand_meta = meta_with(&orig_meta, vec![batch, w], &idx_dtype);
-                clear_qparams(&mut expand_meta);
+                let expand_meta = orig_meta
+                    .cloned_with_val(vec![batch, w], &idx_dtype)
+                    .without_qparams();
                 let expand_id = graph.add_node(
                     NodeOp::CallFunction,
                     format!("{}_idx_bw", node_name),
@@ -354,9 +344,10 @@ impl IrPass for IrDecomposeIndexTensorPass {
             };
 
             // GATHER(x_bkc, idx_bw) → (B, W, C)
-            let mut gathered_meta =
-                meta_with(&graph.nodes[x_id].meta, vec![batch, w, c], &x_dtype);
-            copy_qparams_from_node(graph, x_id, &mut gathered_meta);
+            let gathered_meta = graph.nodes[x_id]
+                .meta
+                .cloned_with_val(vec![batch, w, c], &x_dtype)
+                .with_qparams_from(&graph.nodes[x_id].meta);
             let gathered = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_gather", node_name),
@@ -368,8 +359,10 @@ impl IrPass for IrDecomposeIndexTensorPass {
 
             // Reshape to (...batch, ...broadcast, ...kept)
             let out_shape = compute_index_output_shape(&batch_shape, &broadcast, &kept_shape);
-            let mut result_meta = meta_with(&graph.nodes[x_id].meta, out_shape.clone(), &x_dtype);
-            copy_qparams_from_node(graph, x_id, &mut result_meta);
+            let result_meta = graph.nodes[x_id]
+                .meta
+                .cloned_with_val(out_shape.clone(), &x_dtype)
+                .with_qparams_from(&graph.nodes[x_id].meta);
             let result = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_out", node_name),
