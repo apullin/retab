@@ -35,70 +35,53 @@ fn node_scalar_arg(node: &IrNode, idx: usize) -> Option<f64> {
     }
 }
 
+const SIMPLE_TABLE_TARGET_RULES: &[(&str, &str)] = &[
+    ("rsqrt.default", "rsqrt"),
+    ("ceil.default", "ceil"),
+    ("floor.default", "floor"),
+    ("round.default", "round"),
+    ("reciprocal.default", "reciprocal"),
+    ("exp.default", "exp"),
+    ("log.default", "log"),
+    ("hardsigmoid.default", "hardsigmoid"),
+    ("sigmoid.default", "sigmoid"),
+    ("atanh.default", "atanh"),
+    ("asinh.default", "asinh"),
+    ("acosh.default", "acosh"),
+    ("atan.default", "atan"),
+    ("tanh.default", "tanh"),
+    ("silu.default", "silu"),
+    ("erf.default", "erf"),
+    ("aten.sin.", "sin"),
+    ("aten.cos.", "cos"),
+    ("sinh.default", "sinh"),
+    ("cosh.default", "cosh"),
+    ("tan.default", "tan"),
+    ("acos.default", "acos"),
+    ("asin.default", "asin"),
+    ("expm1.default", "expm1"),
+    ("hardswish.default", "hardswish"),
+    ("erfinv.default", "erfinv"),
+    ("log1p.default", "log1p"),
+    ("sqrt.default", "sqrt"),
+];
+
+fn simple_table_kind(target: &str) -> Option<&'static str> {
+    SIMPLE_TABLE_TARGET_RULES
+        .iter()
+        .find_map(|(needle, kind)| target.contains(needle).then_some(*kind))
+}
+
 fn table_op_spec(node: &IrNode) -> Option<TableOpSpec> {
     let target = node.target.as_str();
-    let kind = if target.contains("rsqrt.default") {
-        "rsqrt"
-    } else if target.contains("ceil.default") {
-        "ceil"
-    } else if target.contains("floor.default") {
-        "floor"
-    } else if target.contains("round.default") {
-        "round"
-    } else if target.contains("reciprocal.default") {
-        "reciprocal"
-    } else if target.contains("exp.default") {
-        "exp"
-    } else if target.contains("log.default") {
-        "log"
-    } else if target.contains("hardsigmoid.default") {
-        "hardsigmoid"
-    } else if target.contains("sigmoid.default") {
-        "sigmoid"
-    } else if target.contains("atanh.default") {
-        "atanh"
-    } else if target.contains("asinh.default") {
-        "asinh"
-    } else if target.contains("acosh.default") {
-        "acosh"
-    } else if target.contains("atan.default") {
-        "atan"
-    } else if target.contains("tanh.default") {
-        "tanh"
-    } else if target.contains("gelu.default") {
+    let kind = if target.contains("gelu.default") {
         match node_str_kwarg(node, "approximate").unwrap_or("none") {
             "none" => "gelu",
             "tanh" => "gelu_tanh",
             _ => return None,
         }
-    } else if target.contains("silu.default") {
-        "silu"
-    } else if target.contains("erf.default") && !target.contains("erfinv") {
-        "erf"
-    } else if target.contains("aten.sin.") && !target.contains("sinh") && !target.contains("asin") {
-        "sin"
-    } else if target.contains("aten.cos.") && !target.contains("cosh") && !target.contains("acos") {
-        "cos"
-    } else if target.contains("sinh.default") {
-        "sinh"
-    } else if target.contains("cosh.default") {
-        "cosh"
-    } else if target.contains("tan.default") {
-        "tan"
-    } else if target.contains("acos.default") {
-        "acos"
-    } else if target.contains("asin.default") {
-        "asin"
-    } else if target.contains("expm1.default") {
-        "expm1"
-    } else if target.contains("hardswish.default") {
-        "hardswish"
-    } else if target.contains("erfinv.default") {
-        "erfinv"
-    } else if target.contains("log1p.default") {
-        "log1p"
-    } else if target.contains("sqrt.default") {
-        "sqrt"
+    } else if let Some(kind) = simple_table_kind(target) {
+        kind
     } else {
         return if target.contains("pow.Tensor_Scalar") {
             node_scalar_arg(node, 1).map(|scalar_arg| TableOpSpec {

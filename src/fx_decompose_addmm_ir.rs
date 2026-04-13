@@ -7,7 +7,7 @@
 //!   scaled_bias = beta != 1 ? mul(bias, full(beta)) : bias
 //!   result = add(scaled_mm, scaled_bias)
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
 
 /// Compute the output shape for mm(mat1, mat2).

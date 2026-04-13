@@ -192,7 +192,7 @@ fn extract_node_tensor(
 
 impl IrModule {
     /// Import parent graph and all CF submodules.
-    pub fn from_fx(py: Python<'_>, gm: &Bound<'_, PyAny>) -> PyResult<Self> {
+    pub fn from_fx(_py: Python<'_>, gm: &Bound<'_, PyAny>) -> PyResult<Self> {
         let parent = IrGraph::from_fx(gm)?;
         let mut submodules = HashMap::new();
         // Find submodule names from cond/while node args
@@ -895,7 +895,7 @@ impl IrGraph {
             }
 
             // Pre-fill slots for all new nodes
-            for ir_node in &self.nodes[original_count..] {
+            for _ir_node in &self.nodes[original_count..] {
                 all_py.push(None);
             }
 
@@ -2225,7 +2225,7 @@ pub fn run_ir_passes_with_tensors<'py>(
 ) -> PyResult<bool> {
     let mut ir = IrGraph::from_fx_with_tensors(gm, exported_program)?;
     let mut any_modified = false;
-    let mut all_inserts: Vec<NodeInsert> = Vec::new();
+    let all_inserts: Vec<NodeInsert> = Vec::new();
 
     for pass in passes {
         let before = ir.nodes.iter().filter(|n| n.alive).count();
@@ -2385,8 +2385,7 @@ pub fn run_hybrid_pipeline<'py>(
     exported_program: Option<&Bound<'py, PyAny>>,
     steps: &[PipelineStep],
 ) -> PyResult<bool> {
-    use crate::runner_logging::{log_line, log_pass_result, log_pass_start};
-    use std::time::Instant;
+    use crate::runner_logging::{log_pass_result, log_pass_start};
 
     let fxgm = crate::fx_graph::FxGraphModule::new(gm);
     let mut ir: Option<IrGraph> = None;

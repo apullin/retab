@@ -18,7 +18,7 @@ pub(super) fn register(table: &mut EmitterTable) {
 fn emit_div_quotient(
     graph: &Graph,
     store: &TensorStore,
-    node: &Node,
+    _node: &Node,
     spec: &ParsedBinaryTensorSpec,
     result: &mut EmitResult,
     output_name: String,

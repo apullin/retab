@@ -6,6 +6,22 @@ use std::f64::consts::FRAC_PI_2;
 use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta, NodeOp};
 use crate::runner_logging::log_line;
 
+type TargetPredicate = fn(&str) -> bool;
+type DecomposeFn = fn(&mut IrGraph, NodeId) -> bool;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecomposeMode {
+    Always,
+    SkipQuantizedEnvelope,
+}
+
+#[derive(Clone, Copy)]
+struct DecomposeRule {
+    matches: TargetPredicate,
+    mode: DecomposeMode,
+    decompose: DecomposeFn,
+}
+
 fn i64_list(vals: &[i64]) -> IrArg {
     IrArg::List(vals.iter().map(|&v| IrArg::Int(v)).collect())
 }
@@ -320,6 +336,151 @@ fn has_quantized_envelope(graph: &IrGraph, id: NodeId) -> bool {
         .any(|n| n.target.contains("quantize_per_tensor") && !n.target.contains("dequantize"))
 }
 
+fn decompose_asin(graph: &mut IrGraph, id: NodeId) -> bool {
+    decompose_asin_or_acos(graph, id, false)
+}
+
+fn decompose_acos(graph: &mut IrGraph, id: NodeId) -> bool {
+    decompose_asin_or_acos(graph, id, true)
+}
+
+fn decompose_softmax(graph: &mut IrGraph, id: NodeId) -> bool {
+    decompose_softmax_like(graph, id, false)
+}
+
+fn decompose_log_softmax_wrapper(graph: &mut IrGraph, id: NodeId) -> bool {
+    decompose_softmax_like(graph, id, true)
+}
+
+fn matching_rule(target: &str, rules: &[DecomposeRule]) -> Option<DecomposeRule> {
+    rules
+        .iter()
+        .find_map(|rule| (rule.matches)(target).then_some(*rule))
+}
+
+fn try_decompose_rule(graph: &mut IrGraph, id: NodeId, target: &str) -> bool {
+    let Some(rule) = matching_rule(target, DECOMPOSE_RULES) else {
+        return false;
+    };
+    if rule.mode == DecomposeMode::SkipQuantizedEnvelope && has_quantized_envelope(graph, id) {
+        return false;
+    }
+    (rule.decompose)(graph, id)
+}
+
+const DECOMPOSE_RULES: &[DecomposeRule] = &[
+    DecomposeRule {
+        matches: is_atanh,
+        mode: DecomposeMode::SkipQuantizedEnvelope,
+        decompose: decompose_atanh,
+    },
+    DecomposeRule {
+        matches: is_tan,
+        mode: DecomposeMode::SkipQuantizedEnvelope,
+        decompose: decompose_tan,
+    },
+    DecomposeRule {
+        matches: is_sinh,
+        mode: DecomposeMode::SkipQuantizedEnvelope,
+        decompose: decompose_sinh,
+    },
+    DecomposeRule {
+        matches: is_cosh,
+        mode: DecomposeMode::SkipQuantizedEnvelope,
+        decompose: decompose_cosh,
+    },
+    DecomposeRule {
+        matches: is_asinh,
+        mode: DecomposeMode::SkipQuantizedEnvelope,
+        decompose: decompose_asinh,
+    },
+    DecomposeRule {
+        matches: is_asin,
+        mode: DecomposeMode::SkipQuantizedEnvelope,
+        decompose: decompose_asin,
+    },
+    DecomposeRule {
+        matches: is_acos,
+        mode: DecomposeMode::SkipQuantizedEnvelope,
+        decompose: decompose_acos,
+    },
+    DecomposeRule {
+        matches: is_atan,
+        mode: DecomposeMode::SkipQuantizedEnvelope,
+        decompose: decompose_atan,
+    },
+    DecomposeRule {
+        matches: is_acosh,
+        mode: DecomposeMode::SkipQuantizedEnvelope,
+        decompose: decompose_acosh,
+    },
+    DecomposeRule {
+        matches: is_elu,
+        mode: DecomposeMode::SkipQuantizedEnvelope,
+        decompose: decompose_elu,
+    },
+    DecomposeRule {
+        matches: is_gelu,
+        mode: DecomposeMode::SkipQuantizedEnvelope,
+        decompose: decompose_gelu,
+    },
+    DecomposeRule {
+        matches: is_erfinv,
+        mode: DecomposeMode::SkipQuantizedEnvelope,
+        decompose: decompose_erfinv,
+    },
+    DecomposeRule {
+        matches: is_pow_scalar,
+        mode: DecomposeMode::SkipQuantizedEnvelope,
+        decompose: decompose_pow_scalar,
+    },
+    DecomposeRule {
+        matches: is_group_norm,
+        mode: DecomposeMode::Always,
+        decompose: decompose_group_norm,
+    },
+    DecomposeRule {
+        matches: is_batch_norm,
+        mode: DecomposeMode::Always,
+        decompose: decompose_batch_norm,
+    },
+    DecomposeRule {
+        matches: is_log_softmax,
+        mode: DecomposeMode::Always,
+        decompose: decompose_log_softmax_wrapper,
+    },
+    DecomposeRule {
+        matches: is_softmax,
+        mode: DecomposeMode::Always,
+        decompose: decompose_softmax,
+    },
+    DecomposeRule {
+        matches: is_max_dim,
+        mode: DecomposeMode::Always,
+        decompose: decompose_dim_extrema,
+    },
+    DecomposeRule {
+        matches: is_min_dim,
+        mode: DecomposeMode::Always,
+        decompose: decompose_dim_extrema,
+    },
+    DecomposeRule {
+        matches: is_stack,
+        mode: DecomposeMode::Always,
+        decompose: decompose_stack,
+    },
+    DecomposeRule {
+        matches: is_unbind,
+        mode: DecomposeMode::Always,
+        decompose: decompose_unbind,
+    },
+    DecomposeRule {
+        matches: is_add_sub_with_alpha,
+        mode: DecomposeMode::Always,
+        decompose: decompose_add_sub_alpha,
+    },
+];
+
 pub struct IrDecomposeOpsPass;
 
 impl IrPass for IrDecomposeOpsPass {
@@ -337,129 +498,8 @@ impl IrPass for IrDecomposeOpsPass {
             }
             let target = graph.nodes[id].target.clone();
 
-            if is_atanh(&target) {
-                if has_quantized_envelope(graph, id) {
-                    continue;
-                }
-                if decompose_atanh(graph, id) {
-                    modified = true;
-                }
-            } else if is_tan(&target) {
-                if has_quantized_envelope(graph, id) {
-                    continue;
-                }
-                if decompose_tan(graph, id) {
-                    modified = true;
-                }
-            } else if is_sinh(&target) {
-                if has_quantized_envelope(graph, id) {
-                    continue;
-                }
-                if decompose_sinh(graph, id) {
-                    modified = true;
-                }
-            } else if is_cosh(&target) {
-                if has_quantized_envelope(graph, id) {
-                    continue;
-                }
-                if decompose_cosh(graph, id) {
-                    modified = true;
-                }
-            } else if is_asinh(&target) {
-                if has_quantized_envelope(graph, id) {
-                    continue;
-                }
-                if decompose_asinh(graph, id) {
-                    modified = true;
-                }
-            } else if is_asin(&target) {
-                if has_quantized_envelope(graph, id) {
-                    continue;
-                }
-                if decompose_asin_or_acos(graph, id, false) {
-                    modified = true;
-                }
-            } else if is_acos(&target) {
-                if has_quantized_envelope(graph, id) {
-                    continue;
-                }
-                if decompose_asin_or_acos(graph, id, true) {
-                    modified = true;
-                }
-            } else if is_atan(&target) {
-                if has_quantized_envelope(graph, id) {
-                    continue;
-                }
-                if decompose_atan(graph, id) {
-                    modified = true;
-                }
-            } else if is_acosh(&target) {
-                if has_quantized_envelope(graph, id) {
-                    continue;
-                }
-                if decompose_acosh(graph, id) {
-                    modified = true;
-                }
-            } else if is_elu(&target) {
-                if has_quantized_envelope(graph, id) {
-                    continue;
-                }
-                if decompose_elu(graph, id) {
-                    modified = true;
-                }
-            } else if is_gelu(&target) {
-                if has_quantized_envelope(graph, id) {
-                    continue;
-                }
-                if decompose_gelu(graph, id) {
-                    modified = true;
-                }
-            } else if is_erfinv(&target) {
-                if has_quantized_envelope(graph, id) {
-                    continue;
-                }
-                if decompose_erfinv(graph, id) {
-                    modified = true;
-                }
-            } else if is_group_norm(&target) {
-                if decompose_group_norm(graph, id) {
-                    modified = true;
-                }
-            } else if is_batch_norm(&target) {
-                if decompose_batch_norm(graph, id) {
-                    modified = true;
-                }
-            } else if is_log_softmax(&target) {
-                if decompose_softmax_like(graph, id, true) {
-                    modified = true;
-                }
-            } else if is_softmax(&target) {
-                if decompose_softmax_like(graph, id, false) {
-                    modified = true;
-                }
-            } else if is_max_dim(&target) || is_min_dim(&target) {
-                if decompose_dim_extrema(graph, id) {
-                    modified = true;
-                }
-            } else if is_stack(&target) {
-                if decompose_stack(graph, id) {
-                    modified = true;
-                }
-            } else if is_unbind(&target) {
-                if decompose_unbind(graph, id) {
-                    modified = true;
-                }
-            } else if is_add_sub_with_alpha(&target) {
-                if decompose_add_sub_alpha(graph, id) {
-                    modified = true;
-                }
-            } else if is_pow_scalar(&target) {
-                if has_quantized_envelope(graph, id) {
-                    continue;
-                }
-                if decompose_pow_scalar(graph, id) {
-                    modified = true;
-                }
+            if try_decompose_rule(graph, id, &target) {
+                modified = true;
             }
         }
 

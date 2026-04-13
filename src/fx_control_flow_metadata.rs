@@ -4,11 +4,11 @@
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDict, PyTuple};
 
 use crate::fx_graph::{meta_val, py_attr, FxGraphModule};
 use crate::fx_ir::{
-    FakeTensorMeta, IrArg, IrGraph, IrModule, IrNode, NodeId, NodeMeta, RescaleInsert,
+    FakeTensorMeta, IrArg, IrGraph, IrNode, NodeId, NodeMeta, RescaleInsert,
 };
 use crate::fx_pass::FxPass;
 use crate::runner_logging::log_line;
@@ -907,7 +907,7 @@ fn force_rank4_output_dim_order_ir(graph: &mut IrGraph) -> u32 {
         .iter()
         .filter_map(|a| match a {
             IrArg::Node(id) => Some(*id),
-            IrArg::List(items) => None, // handled below
+            IrArg::List(_items) => None, // handled below
             _ => None,
         })
         .collect();
@@ -2083,7 +2083,7 @@ pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
     let mut quant_count: u32 = 0;
     let mut dequant_count: u32 = 0;
 
-    for (_name, submodule, cf_node) in &submodules {
+    for (_name, submodule, _cf_node) in &submodules {
         let graph = submodule.getattr("graph")?;
 
         // Step 1: collapse Q→DQ pairs in pure Rust
