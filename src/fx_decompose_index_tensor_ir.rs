@@ -2,12 +2,10 @@
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{
+    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
+};
 use crate::runner_logging::log_line;
-
-fn i64_list(vals: &[i64]) -> IrArg {
-    IrArg::List(vals.iter().map(|&v| IrArg::Int(v)).collect())
-}
 
 fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
     let mut m = base.clone();
@@ -71,16 +69,6 @@ fn broadcast_shape(shapes: &[Vec<i64>]) -> Option<Vec<i64>> {
     }
     out.reverse();
     Some(out)
-}
-
-fn shape_to_stride(shape: &[i64]) -> Vec<i64> {
-    let mut strides = vec![0; shape.len()];
-    let mut stride = 1i64;
-    for (i, dim) in shape.iter().enumerate().rev() {
-        strides[i] = stride;
-        stride *= *dim;
-    }
-    strides
 }
 
 fn compute_index_output_shape(batch_shape: &[i64], broadcast: &[i64], kept_shape: &[i64]) -> Vec<i64> {

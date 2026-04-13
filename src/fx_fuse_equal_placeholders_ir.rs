@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 
 use crate::fx_ep_effects::{FxDeleteConstantPlaceholderEffect, FxEpEffect, FxEpEffectBatch};
-use crate::fx_ir::{IrEpPass, IrEpPassResult, IrGraph, IrPass, NodeId, NodeOp};
-
-pub struct IrFuseEqualPlaceholdersPass;
+use crate::fx_ir::{IrEpPass, IrEpPassResult, IrGraph, NodeId, NodeOp};
 
 fn placeholder_fingerprint(
     graph: &IrGraph,
@@ -48,21 +46,6 @@ pub fn find_duplicate_placeholder_pairs(graph: &IrGraph) -> Vec<(NodeId, NodeId)
         }
     }
     pairs
-}
-
-impl IrPass for IrFuseEqualPlaceholdersPass {
-    fn name(&self) -> &str {
-        "IrFuseEqualPlaceholders"
-    }
-
-    fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for (dup, canonical) in find_duplicate_placeholder_pairs(graph) {
-            graph.replace_and_erase(dup, canonical);
-            modified = true;
-        }
-        modified
-    }
 }
 
 pub struct IrFuseEqualPlaceholdersEpPass;

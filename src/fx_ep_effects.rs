@@ -10,8 +10,8 @@ use crate::graph::ir::DType;
 ///
 /// These effects intentionally stay narrow:
 /// - constant-placeholder deletion
-/// - graph-signature mapping edits
 /// - int64 -> int32 state-tensor / FakeTensor updates
+/// - constant/table materialization
 ///
 /// The intent is to let Rust IR passes plan EP mutations without hard-wiring
 /// those passes to Python bookkeeping details.
@@ -55,24 +55,9 @@ impl FxEpTensorDType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FxEpGraphSignatureMappingUpdate {
-    UpsertTarget,
-    DropEntry,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FxDeleteConstantPlaceholderEffect {
     pub placeholder_name: String,
-    pub allow_missing: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FxGraphSignatureMappingEffect {
-    pub placeholder_name: String,
-    pub input_kind: FxEpInputKind,
-    pub update: FxEpGraphSignatureMappingUpdate,
-    pub target_name: Option<String>,
     pub allow_missing: bool,
 }
 
@@ -125,6 +110,27 @@ pub struct FxMaterializeZeroInputConstantNodeEffect {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct FxTableTensorSpec {
+    pub scale: f64,
+    pub zp: i64,
+    pub qmin: i64,
+    pub qmax: i64,
+    pub dtype: DType,
+}
+
+impl FxTableTensorSpec {
+    fn to_python_qspec(&self) -> (f64, i64, i64, i64, &'static str) {
+        (
+            self.scale,
+            self.zp,
+            self.qmin,
+            self.qmax,
+            ir_dtype_to_torch_name(self.dtype),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct FxInsertTableOpEffect {
     pub node_name: String,
     pub kind: String,
@@ -138,16 +144,8 @@ pub struct FxInsertPrecomputedTableOpEffect {
     pub data: Vec<u8>,
     pub shape: Vec<i64>,
     pub table_dtype: DType,
-    pub input_scale: f64,
-    pub input_zp: i64,
-    pub input_qmin: i64,
-    pub input_qmax: i64,
-    pub input_dtype: DType,
-    pub output_scale: f64,
-    pub output_zp: i64,
-    pub output_qmin: i64,
-    pub output_qmax: i64,
-    pub output_dtype: DType,
+    pub input: FxTableTensorSpec,
+    pub output: FxTableTensorSpec,
     pub rescale_lshift: i64,
     pub allow_missing: bool,
 }
@@ -155,8 +153,6 @@ pub struct FxInsertPrecomputedTableOpEffect {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FxEpEffect {
     DeleteConstantPlaceholder(FxDeleteConstantPlaceholderEffect),
-    UpdateGraphSignatureMapping(FxGraphSignatureMappingEffect),
-    UpdatePlaceholderTensorDtype(FxUpdatePlaceholderTensorDtypeEffect),
     CastInt64InputToInt32(FxCastInt64InputToInt32Effect),
     MaterializeZeroInputConstant(FxMaterializeZeroInputConstantEffect),
     FuseConstantNode(FxFuseConstantNodeEffect),
@@ -231,8 +227,6 @@ impl FxEpEffect {
     pub fn apply<'py>(&self, ctx: &FxEpApplyContext<'py>) -> PyResult<bool> {
         match self {
             Self::DeleteConstantPlaceholder(effect) => effect.apply(ctx),
-            Self::UpdateGraphSignatureMapping(effect) => effect.apply(ctx),
-            Self::UpdatePlaceholderTensorDtype(effect) => effect.apply(ctx),
             Self::CastInt64InputToInt32(effect) => effect.apply(ctx),
             Self::MaterializeZeroInputConstant(effect) => effect.apply(ctx),
             Self::FuseConstantNode(effect) => effect.apply(ctx),
@@ -271,46 +265,6 @@ impl FxDeleteConstantPlaceholderEffect {
         let delete_helper = import_delete_constant_placeholder(ctx.exported_program.py())?;
         delete_helper.call1((ctx.exported_program(), &node))?;
         Ok(true)
-    }
-}
-
-impl FxGraphSignatureMappingEffect {
-    pub fn apply<'py>(&self, ctx: &FxEpApplyContext<'py>) -> PyResult<bool> {
-        let py = ctx.exported_program.py();
-        let mapping = graph_signature_mapping(ctx.exported_program(), self.input_kind)?;
-        match self.update {
-            FxEpGraphSignatureMappingUpdate::DropEntry => {
-                if mapping.get_item(&self.placeholder_name).is_err() {
-                    return if self.allow_missing {
-                        Ok(false)
-                    } else {
-                        Err(PyKeyError::new_err(format!(
-                            "missing graph-signature entry '{}' in {}",
-                            self.placeholder_name,
-                            self.input_kind.graph_signature_attr()
-                        )))
-                    };
-                }
-                mapping.call_method1("pop", (&self.placeholder_name, py.None()))?;
-                Ok(true)
-            }
-            FxEpGraphSignatureMappingUpdate::UpsertTarget => {
-                let target_name = self.target_name.as_ref().ok_or_else(|| {
-                    PyRuntimeError::new_err(format!(
-                        "missing target_name for graph-signature upsert '{}'",
-                        self.placeholder_name
-                    ))
-                })?;
-                if let Ok(existing) = mapping.get_item(&self.placeholder_name) {
-                    let existing: String = existing.extract()?;
-                    if existing == *target_name {
-                        return Ok(false);
-                    }
-                }
-                mapping.set_item(&self.placeholder_name, target_name)?;
-                Ok(true)
-            }
-        }
     }
 }
 
@@ -539,20 +493,6 @@ impl FxInsertPrecomputedTableOpEffect {
         let helpers = ctx.exported_program.py().import_bound("fx_helpers")?;
         let py_shape = pyo3::types::PyList::new_bound(ctx.exported_program.py(), &self.shape);
         let py_bytes = PyBytes::new_bound(ctx.exported_program.py(), &self.data);
-        let input_qspec = (
-            self.input_scale,
-            self.input_zp,
-            self.input_qmin,
-            self.input_qmax,
-            ir_dtype_to_torch_name(self.input_dtype),
-        );
-        let output_qspec = (
-            self.output_scale,
-            self.output_zp,
-            self.output_qmin,
-            self.output_qmax,
-            ir_dtype_to_torch_name(self.output_dtype),
-        );
         helpers.call_method1(
             "insert_precomputed_table_op",
             (
@@ -561,8 +501,8 @@ impl FxInsertPrecomputedTableOpEffect {
                 py_bytes,
                 py_shape,
                 ir_dtype_to_torch_name(self.table_dtype),
-                input_qspec,
-                output_qspec,
+                self.input.to_python_qspec(),
+                self.output.to_python_qspec(),
                 self.rescale_lshift,
             ),
         )?;

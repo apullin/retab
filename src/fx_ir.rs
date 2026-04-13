@@ -88,6 +88,10 @@ pub enum IrArg {
     None,
 }
 
+pub(crate) fn i64_list_arg(vals: &[i64]) -> IrArg {
+    IrArg::List(vals.iter().map(|&v| IrArg::Int(v)).collect())
+}
+
 /// A hierarchical graph module: parent graph + named submodules.
 #[derive(Debug)]
 pub struct IrModule {

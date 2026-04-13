@@ -6,13 +6,9 @@
 //!   3. Conv2d with 1x1 kernel (aten.convolution.default)
 //!   4. Reshape output back:  [N, Co, 1, 1] -> [..., Co]
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
 use std::collections::HashMap;
-
-fn i64_list(vals: &[i64]) -> IrArg {
-    IrArg::List(vals.iter().map(|&v| IrArg::Int(v)).collect())
-}
 
 fn copy_qparams_from_node(graph: &IrGraph, src_id: NodeId, dst_meta: &mut crate::fx_ir::NodeMeta) {
     if let Some(iqp) = graph.nodes[src_id].meta.input_qparams.clone() {

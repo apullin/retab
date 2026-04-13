@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{
+    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, MetaValue, NodeId,
+    NodeMeta, NodeOp,
+};
 use crate::runner_logging::log_line;
 
 pub struct IrToTosaMemoryFormatPass;
-
-fn i64_list(vals: &[i64]) -> IrArg {
-    IrArg::List(vals.iter().map(|&v| IrArg::Int(v)).collect())
-}
 
 fn channels_last_order(rank: usize, spatial_rank: usize) -> Vec<usize> {
     if rank <= 2 {
@@ -50,10 +49,6 @@ fn memory_format_differs(shape: &[i64], rank: usize) -> bool {
     let channel_dim = shape.get(channel_idx).copied().unwrap_or(1);
     let spatial_dims = &shape[channel_idx + 1..];
     channel_dim > 1 && spatial_dims.iter().any(|&d| d > 1)
-}
-
-fn layout_shape_differs(shape: &[i64], rank: usize, spatial_rank: usize) -> bool {
-    rank >= 4 && permuted_shape(shape, &channels_last_order(rank, spatial_rank)) != shape
 }
 
 fn is_channel_reshape(input_shape: &[i64], output_shape: &[i64]) -> bool {

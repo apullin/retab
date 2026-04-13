@@ -5,12 +5,8 @@
 //!   2. repeat(unsqueezed, multiples)  — multiples[dim+1] = repeats
 //!   3. view_copy(repeated, final_shape) — final_shape[dim] *= repeats
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
-
-fn i64_list(vals: &[i64]) -> IrArg {
-    IrArg::List(vals.iter().map(|&v| IrArg::Int(v)).collect())
-}
 
 pub struct IrDecomposeRepeatInterleavePass;
 

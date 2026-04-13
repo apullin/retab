@@ -3,7 +3,10 @@
 
 use std::f64::consts::FRAC_PI_2;
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{
+    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, MetaValue, NodeId,
+    NodeMeta, NodeOp,
+};
 use crate::runner_logging::log_line;
 
 type TargetPredicate = fn(&str) -> bool;
@@ -20,10 +23,6 @@ struct DecomposeRule {
     matches: TargetPredicate,
     mode: DecomposeMode,
     decompose: DecomposeFn,
-}
-
-fn i64_list(vals: &[i64]) -> IrArg {
-    IrArg::List(vals.iter().map(|&v| IrArg::Int(v)).collect())
 }
 
 fn channels_last_order(rank: usize) -> Vec<usize> {

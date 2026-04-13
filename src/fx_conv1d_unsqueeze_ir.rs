@@ -6,13 +6,11 @@
 //!   convolution(... stride=[s,1], pad=[p,0], dilation=[d,1])
 //!   view_copy(output[..., W_out, 1] -> [..., W_out])
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{
+    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
+};
 use crate::runner_logging::log_line;
 use std::collections::HashMap;
-
-fn i64_list(vals: &[i64]) -> IrArg {
-    IrArg::List(vals.iter().map(|&v| IrArg::Int(v)).collect())
-}
 
 fn copy_qparams_from_node(graph: &IrGraph, src_id: NodeId, dst_meta: &mut NodeMeta) {
     if let Some(iqp) = graph.nodes[src_id].meta.input_qparams.clone() {

@@ -11,10 +11,6 @@ use crate::fx_control_flow_metadata::QParam;
 use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::runner_logging::log_line;
 
-fn i64_list(vals: &[i64]) -> IrArg {
-    IrArg::List(vals.iter().map(|&value| IrArg::Int(value)).collect())
-}
-
 fn clear_qparams(meta: &mut NodeMeta) {
     meta.set_input_qparams(HashMap::new());
     meta.set_output_qparams(HashMap::new());

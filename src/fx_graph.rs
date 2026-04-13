@@ -13,11 +13,6 @@ pub fn arg_extract<'py, T: pyo3::FromPyObject<'py>>(
         .unwrap_or(default)
 }
 
-/// Check if a Python object is a list or tuple (without calling isinstance).
-pub fn py_is_sequence(obj: &pyo3::Bound<'_, pyo3::PyAny>) -> bool {
-    obj.downcast::<pyo3::types::PyList>().is_ok() || obj.downcast::<pyo3::types::PyTuple>().is_ok()
-}
-
 /// Extract a typed attribute from a Python object, trying multiple names.
 /// Returns `default` if none of the names exist or extraction fails.
 pub fn py_attr<'py, T: pyo3::FromPyObject<'py>>(
@@ -150,25 +145,6 @@ impl<'py> FxGraphModule<'py> {
         let val = meta.get_item("val")?;
         let shape = val.getattr("shape")?;
         shape.extract()
-    }
-
-    /// `str(node.meta["val"].dtype)`.
-    pub fn node_dtype_str(node: &Bound<'py, PyAny>) -> PyResult<String> {
-        let meta = node.getattr("meta")?;
-        let val = meta.get_item("val")?;
-        let dtype = val.getattr("dtype")?;
-        dtype.str()?.extract()
-    }
-
-    /// Write `node.meta[key] = value`.
-    pub fn set_meta(
-        node: &Bound<'py, PyAny>,
-        key: &str,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<()> {
-        let meta = node.getattr("meta")?;
-        meta.set_item(key, value)?;
-        Ok(())
     }
 
     // ------------------------------------------------------------------

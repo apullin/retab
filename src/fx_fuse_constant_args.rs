@@ -43,13 +43,6 @@ impl FxFuseConstantArgsPass {
             mode: FuseMode::General,
         }
     }
-
-    pub fn new_zero_input_full_only(exported_program: Option<PyObject>) -> Self {
-        Self {
-            exported_program,
-            mode: FuseMode::ZeroInputFullOnly,
-        }
-    }
 }
 
 /// Targets that must not be fused (matching Python's skip list).

@@ -15,16 +15,6 @@ use crate::tensor_data::{extract_tensor_data, parse_torch_dtype};
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Convert a `torch.fx.GraphModule` + state_dict into the Rust `Graph` and
-/// `TensorStore` representations.
-pub fn ingest_fx_graph(
-    graph_module: &Bound<'_, PyAny>,
-    state_dict: &Bound<'_, PyDict>,
-    graph_signature: &Bound<'_, PyAny>,
-) -> PyResult<(Graph, TensorStore)> {
-    ingest_fx_graph_with_prefix(graph_module, state_dict, graph_signature, None, None)
-}
-
 fn ingest_fx_graph_with_prefix(
     graph_module: &Bound<'_, PyAny>,
     state_dict: &Bound<'_, PyDict>,

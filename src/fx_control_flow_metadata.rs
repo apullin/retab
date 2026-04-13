@@ -25,7 +25,6 @@ enum CfKind {
 
 /// Cached Python module imports for control-flow operations.
 struct CfCtx<'py> {
-    torch: Bound<'py, PyAny>,
     cond_op: Bound<'py, PyAny>,
     while_op: Bound<'py, PyAny>,
 }
@@ -36,18 +35,7 @@ impl<'py> CfCtx<'py> {
         let ho = torch.getattr("ops")?.getattr("higher_order")?;
         let cond_op = ho.getattr("cond")?;
         let while_op = ho.getattr("while_loop")?;
-        Ok(Self {
-            torch,
-            cond_op,
-            while_op,
-        })
-    }
-
-    fn int8(&self) -> PyResult<Bound<'py, PyAny>> {
-        self.torch.getattr("int8")
-    }
-    fn int16(&self) -> PyResult<Bound<'py, PyAny>> {
-        self.torch.getattr("int16")
+        Ok(Self { cond_op, while_op })
     }
 
     fn cf_kind(&self, node: &Bound<'py, PyAny>) -> PyResult<Option<CfKind>> {
@@ -429,13 +417,6 @@ fn py_iter_collect<'py>(obj: &Bound<'py, PyAny>) -> Vec<Bound<'py, PyAny>> {
 fn first_node_arg<'py>(node: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
     let args = FxGraphModule::node_args(node)?;
     Ok(args.first().filter(|a| FxGraphModule::is_node(a)).cloned())
-}
-
-/// Collect a node's users into a Vec.
-fn node_users<'py>(node: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
-    Ok(py_iter_collect(
-        &node.getattr("users")?.call_method0("keys")?,
-    ))
 }
 
 /// Resolve data args for a control-flow node.
@@ -1193,11 +1174,10 @@ impl FxPass for FxWhileStripBoundaryQPass {
     fn run(&self, gm: &FxGraphModule) -> PyResult<bool> {
         let py = gm.py();
         let graph = gm.gm_ref().getattr("graph")?;
-        let mut modified = false;
 
         // Pure Rust: strip Q from placeholders, annotate DQ on output
         let mut ir = IrGraph::from_fx(gm.gm_ref())?;
-        modified = strip_while_boundary_qdq_ir(&mut ir);
+        let modified = strip_while_boundary_qdq_ir(&mut ir);
         if modified {
             ir.write_back_with_surgery(py, gm.gm_ref())?;
             cleanup_graph(&graph)?;
@@ -1303,52 +1283,6 @@ impl FxPass for FxControlFlowMetadataPass {
 // ===========================================================================
 // Pre-pass qparam snapshot
 // ===========================================================================
-
-/// Before parent passes run, walk DQ nodes feeding into cond/while data args
-/// and snapshot their qparams onto the cond node's metadata.  Parent passes
-/// (fold_qdq, memory format) may destroy these nodes, so we save them now.
-/// Pure Rust: snapshot qparams from CF data args before parent passes destroy them.
-fn snapshot_pre_pass_cf_qparams_ir(graph: &mut IrGraph) -> u32 {
-    let cf_ids: Vec<NodeId> = graph.cf_nodes().map(|n| n.id).collect();
-    let mut saved = 0u32;
-    for cf_id in cf_ids {
-        let data_arg_ids = graph.cf_data_arg_ids(&graph.nodes[cf_id]);
-        let mut snapshot: HashMap<usize, QParam> = HashMap::new();
-        for (i, &arg_id) in data_arg_ids.iter().enumerate() {
-            // Try output_qparams from metadata
-            if let Some(qp) = graph.node(arg_id).meta.output_qparam() {
-                snapshot.insert(i, qp.clone());
-                saved += 1;
-                continue;
-            }
-            // Walk producer chain
-            if let Some(qp) = extract_effective_qparam_ir(graph, arg_id) {
-                snapshot.insert(i, qp);
-                saved += 1;
-                continue;
-            }
-            // Last resort: Q/DQ literal args
-            let node = graph.node(arg_id);
-            if node.is_dequantize() || node.is_quantize() {
-                if let Some(qp) = node.parse_qdq_qparam() {
-                    snapshot.insert(i, qp);
-                    saved += 1;
-                }
-            }
-        }
-        if !snapshot.is_empty() {
-            graph.node_mut(cf_id).meta.pre_pass_arg_qparams = Some(snapshot);
-            graph.node_mut(cf_id).meta.dirty.pre_pass_arg_qparams = true;
-        }
-    }
-    if saved > 0 {
-        log_line(format_args!(
-            "[snapshot-pre-pass-qparams] saved {} arg qparam(s)",
-            saved
-        ));
-    }
-    saved
-}
 
 fn snapshot_pre_pass_cf_qparams<'py>(py: Python<'py>, gm: &Bound<'py, PyAny>) -> PyResult<u32> {
     let ctx = CfCtx::new(py)?;
@@ -1506,10 +1440,6 @@ fn is_tosa_rescale_node(node: &Bound<'_, PyAny>) -> bool {
     target_contains(node, "RESCALE")
 }
 
-fn is_tosa_transpose_node(node: &Bound<'_, PyAny>) -> bool {
-    target_contains(node, "TRANSPOSE")
-}
-
 /// Cleanup graph: eliminate dead code + lint.
 fn cleanup_graph(graph: &Bound<'_, PyAny>) -> PyResult<()> {
     graph.call_method0("eliminate_dead_code")?;
@@ -1631,38 +1561,6 @@ fn stamp_qparams(
 
 /// Copy output contract meta from src to dst.
 // copy_output_contract_meta: DELETED — logic moved into prune_duplicate_terminal_rescales_ir
-
-/// Get all modules (parent + submodules) for iteration.
-fn get_all_modules<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-) -> PyResult<Vec<Bound<'py, PyAny>>> {
-    let mut modules: Vec<Bound<'py, PyAny>> = vec![gm.clone()];
-    let submodules = get_cf_submodules(py, gm)?;
-    for (_name, submodule, _cf_node) in &submodules {
-        modules.push(submodule.clone());
-    }
-    Ok(modules)
-}
-
-/// Get `_actual_shape_from_meta` for a node. Returns None if not available.
-fn actual_shape_from_meta<'py>(node: &Bound<'py, PyAny>) -> PyResult<Option<Vec<i64>>> {
-    let m = NodeMeta::from_fx(node)?;
-    let shape = match m.val_shape().map(|s| s.to_vec()) {
-        Some(s) => s,
-        None => return Ok(None),
-    };
-    // Apply dim_order permutation if present and non-identity
-    if let Some(ref tdo) = m.tosa_dim_order {
-        if tdo.len() == shape.len() {
-            let identity: Vec<usize> = (0..shape.len()).collect();
-            if tdo != &identity {
-                return Ok(Some(tdo.iter().map(|&idx| shape[idx]).collect()));
-            }
-        }
-    }
-    Ok(Some(shape))
-}
 
 // ---------------------------------------------------------------------------
 // 1. _remove_control_flow_noop_passthroughs
@@ -1897,17 +1795,6 @@ fn is_dequantize_node(node: &Bound<'_, PyAny>) -> bool {
 // ---------------------------------------------------------------------------
 // Q/DQ node helpers
 // ---------------------------------------------------------------------------
-
-fn parse_per_tensor_qparam<'py>(
-    py: Python<'py>,
-    node: &Bound<'py, PyAny>,
-) -> PyResult<Option<Bound<'py, PyAny>>> {
-    let args = FxGraphModule::node_args(node)?;
-    match QParam::from_q_node_args(&args) {
-        Some(qp) => Ok(Some(qp.to_py(py)?)),
-        None => Ok(None),
-    }
-}
 
 /// Parse Q/DQ node literal args into a Rust QParam.
 fn parse_qparam(node: &Bound<'_, PyAny>) -> PyResult<Option<QParam>> {

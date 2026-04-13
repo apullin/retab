@@ -1,6 +1,7 @@
 use crate::fx_control_flow_metadata::QParam;
 use crate::fx_ep_effects::{
     FxEpEffect, FxEpEffectBatch, FxInsertPrecomputedTableOpEffect, FxInsertTableOpEffect,
+    FxTableTensorSpec,
 };
 use crate::fx_ir::{IrArg, IrEpPass, IrEpPassResult, IrGraph, IrNode, NodeOp};
 use crate::graph::ir::DType;
@@ -16,15 +17,6 @@ struct TableOpSpec {
 
 fn node_str_kwarg<'a>(node: &'a IrNode, key: &str) -> Option<&'a str> {
     node.kwargs.get(key).and_then(IrArg::as_str)
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct TableQuantSpec {
-    scale: f64,
-    zp: i64,
-    qmin: i64,
-    qmax: i64,
-    dtype: DType,
 }
 
 fn node_scalar_arg(node: &IrNode, idx: usize) -> Option<f64> {
@@ -118,12 +110,12 @@ fn has_qparams(node: &IrNode) -> bool {
     has_input && has_output
 }
 
-fn table_quant_spec(qp: &QParam) -> Option<TableQuantSpec> {
+fn table_quant_spec(qp: &QParam) -> Option<FxTableTensorSpec> {
     if qp.is_per_channel() || qp.scale == 0.0 {
         return None;
     }
     let dtype = parse_torch_dtype(&qp.dtype_str);
-    Some(TableQuantSpec {
+    Some(FxTableTensorSpec {
         scale: qp.scale,
         zp: qp.zp,
         qmin: qp.qmin,
@@ -132,7 +124,7 @@ fn table_quant_spec(qp: &QParam) -> Option<TableQuantSpec> {
     })
 }
 
-fn quantize_to_spec(value: f64, spec: &TableQuantSpec) -> Option<i64> {
+fn quantize_to_spec(value: f64, spec: &FxTableTensorSpec) -> Option<i64> {
     if value.is_nan() {
         return None;
     }
@@ -256,16 +248,8 @@ fn plan_precomputed_int8_table(
         data,
         shape: vec![256],
         table_dtype: DType::Int8,
-        input_scale: input.scale,
-        input_zp: input.zp,
-        input_qmin: input.qmin,
-        input_qmax: input.qmax,
-        input_dtype: input.dtype,
-        output_scale: output.scale,
-        output_zp: output.zp,
-        output_qmin: output.qmin,
-        output_qmax: output.qmax,
-        output_dtype: output.dtype,
+        input,
+        output,
         rescale_lshift: 0,
         allow_missing: true,
     })
@@ -325,16 +309,8 @@ fn plan_precomputed_int16_table(
         data,
         shape: vec![513],
         table_dtype: DType::Int16,
-        input_scale: input.scale,
-        input_zp: input.zp,
-        input_qmin: input.qmin,
-        input_qmax: input.qmax,
-        input_dtype: input.dtype,
-        output_scale: output.scale,
-        output_zp: output.zp,
-        output_qmin: output.qmin,
-        output_qmax: output.qmax,
-        output_dtype: output.dtype,
+        input,
+        output,
         rescale_lshift,
         allow_missing: true,
     })
@@ -637,7 +613,7 @@ mod tests {
             FxEpEffect::InsertPrecomputedTableOp(effect) => {
                 assert_eq!(effect.shape, vec![513]);
                 assert_eq!(effect.table_dtype, DType::Int16);
-                assert_eq!(effect.output_dtype, DType::Int16);
+                assert_eq!(effect.output.dtype, DType::Int16);
                 assert_eq!(effect.rescale_lshift, -7);
             }
             other => panic!("unexpected effect: {other:?}"),
