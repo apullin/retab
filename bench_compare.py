@@ -15,11 +15,14 @@ outer ExecuTorch partition/direct-lowering scaffolding.
 import sys
 import time
 import argparse
+from pathlib import Path
 
 sys.path.insert(0, "/Users/andrewpullin/personal/executorch-work/u55-pipeline")
+ENGINE_ROOT = Path("/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine")
+sys.path.insert(0, str(ENGINE_ROOT / "tests"))
 
 import torch
-from model import get_model
+from model_corpus import all_model_specs, get_model_and_example
 
 
 def prepare_quantized_ep(model_name):
@@ -31,7 +34,7 @@ def prepare_quantized_ep(model_name):
     )
     from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
 
-    model, example_input = get_model(model_name)
+    model, example_input = get_model_and_example(model_name)
     exported = torch.export.export(model, (example_input,), strict=True)
 
     compile_spec = EthosUCompileSpec(
@@ -125,9 +128,10 @@ def bench_rust_path(quantized_ep, warmup=1, runs=5):
 
 
 def main():
+    model_names = sorted(all_model_specs())
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="cnn_layernorm4d",
-                        choices=["tiny_cnn", "cnn_layernorm4d", "cnn_raw_layernorm"])
+                        choices=model_names)
     parser.add_argument("--skip-python", action="store_true",
                         help="Skip the slow Python path")
     args = parser.parse_args()

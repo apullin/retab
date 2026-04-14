@@ -28,6 +28,7 @@ ENGINE_ROOT = REPO_ROOT / "arm-tosa-engine"
 
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(ENGINE_ROOT))
+sys.path.insert(0, str(ENGINE_ROOT / "tests"))
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.WARNING)
@@ -47,8 +48,9 @@ from executorch.exir.passes.remove_graph_asserts_pass import (
     RemoveNonCoreAtenOpGraphAssertsPass,
 )
 from executorch.exir.program import _program as program_mod
+from executorch.exir.program import _fake_program as fake_program_mod
 from fast_preprocess import patch_tosa_backend
-from model import get_model
+from model_corpus import all_model_specs, get_model_and_example
 from torch._export.passes import ReplaceViewOpsWithViewCopyOpsPass
 from torch.export.exported_program import ExportedProgram
 from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
@@ -114,7 +116,7 @@ def run_decomp_label(*_args: Any, **_kwargs: Any) -> str:
 
 
 def prepare_quantized_program(model_name: str):
-    model, example_input = get_model(model_name)
+    model, example_input = get_model_and_example(model_name)
     ep = torch.export.export(model, (example_input,), strict=True)
 
     compile_spec = EthosUCompileSpec(
@@ -138,11 +140,12 @@ def prepare_quantized_program(model_name: str):
 
 
 def main() -> None:
+    model_names = sorted(all_model_specs())
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model",
         default="cnn_layernorm4d",
-        choices=["tiny_cnn", "cnn_layernorm4d", "cnn_raw_layernorm"],
+        choices=model_names,
     )
     parser.add_argument("--top", type=int, default=20)
     args = parser.parse_args()
@@ -204,7 +207,8 @@ def main() -> None:
         "to_backend",
         name="EdgeProgramManager.to_backend",
     )
-    patch_attr(patches, timers, backend_api_mod, "get_fake_program")
+    patch_attr(patches, timers, fake_program_mod, "clone_exported_program_fast")
+    patch_attr(patches, timers, fake_program_mod, "get_fake_program_fast")
     patch_attr(
         patches,
         timers,
