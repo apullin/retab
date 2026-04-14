@@ -91,6 +91,16 @@ impl ApproxCtx {
         &self.dtype
     }
 
+    fn with_meta(&self, meta: NodeMeta) -> Self {
+        Self {
+            anchor_id: self.anchor_id,
+            name: self.name.clone(),
+            shape: self.shape.clone(),
+            dtype: self.dtype.clone(),
+            meta,
+        }
+    }
+
     fn metas(&self) -> MetaFactory<'_> {
         MetaFactory::new(&self.meta, &self.dtype)
     }
@@ -752,41 +762,21 @@ fn decompose_add_sub_alpha(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
 
-    let rhs_shape = match graph.nodes[rhs_id].meta.val_shape() {
-        Some(shape) => shape.to_vec(),
-        None => return false,
+    let Some(rhs_ctx) = ApproxCtx::from_input(graph, id, rhs_id) else {
+        return false;
     };
-    let rhs_dtype = graph.nodes[rhs_id]
-        .meta
-        .val_dtype()
-        .unwrap_or("torch.float32")
-        .to_string();
-    let name = graph.nodes[id].name.clone();
+    let rhs_ctx = rhs_ctx.with_meta(graph.nodes[rhs_id].meta.clone());
     let target = if graph.nodes[id].target.contains("sub.Tensor") {
-        "aten.sub.Tensor".to_string()
+        "aten.sub.Tensor"
     } else {
-        "aten.add.Tensor".to_string()
+        "aten.add.Tensor"
     };
-    let meta = graph.nodes[id].meta.clone();
-    let scaled_meta = graph.nodes[rhs_id]
-        .meta
-        .cloned_with_val(rhs_shape.clone(), &rhs_dtype);
-
-    let alpha_full = graph.add_anchored_full_float(
-        id,
-        format!("{}_alpha_full", name),
-        &rhs_shape,
-        alpha,
-        &rhs_dtype,
-        scaled_meta.clone(),
-    );
-
-    let scaled_rhs = graph.add_anchored_call_function(
-        id,
-        format!("{}_alpha_mul", name),
+    let alpha_full = rhs_ctx.full(graph, "alpha_full", alpha);
+    let scaled_rhs = rhs_ctx.output(
+        graph,
+        "alpha_mul",
         "aten.mul.Tensor",
         vec![IrArg::Node(rhs_id), IrArg::Node(alpha_full)],
-        scaled_meta,
     );
 
     let mut add_args = graph.nodes[id].args.clone();
@@ -797,10 +787,10 @@ fn decompose_add_sub_alpha(graph: &mut IrGraph, id: NodeId) -> bool {
     add_args.truncate(2);
     let result = graph.add_anchored_call_function(
         id,
-        format!("{}_alpha_result", name),
+        format!("{}_alpha_result", graph.nodes[id].name),
         target,
         add_args,
-        meta,
+        graph.nodes[id].meta.clone(),
     );
     graph.replace_and_erase(id, result);
     true
@@ -815,37 +805,23 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     };
 
-    let name = graph.nodes[id].name.clone();
-    let meta = graph.nodes[id].meta.clone();
+    let Some(ctx) = ApproxCtx::from_input(graph, id, input_id) else {
+        return false;
+    };
 
     if pow_scalar_numeric_arg(&graph.nodes[id]).is_some_and(|exp| exp == 0.0) {
-        let shape = meta
-            .val_shape()
-            .map(|shape| shape.to_vec())
-            .unwrap_or_default();
-        let dtype = meta.val_dtype().unwrap_or("torch.float32").to_string();
-        let metas = MetaFactory::new(&meta, &dtype);
-        let one = graph.add_anchored_full_float(
-            id,
-            format!("{}_one", name),
-            &shape,
-            1.0,
-            &dtype,
-            metas.tensor(&shape),
-        );
-        let eq = graph.add_anchored_call_function(
-            id,
-            format!("{}_self_eq", name),
+        let one = ctx.full(graph, "one", 1.0);
+        let eq = ctx.bool(
+            graph,
+            "self_eq",
             "aten.eq.Tensor",
             vec![IrArg::Node(input_id), IrArg::Node(input_id)],
-            metas.bool(&shape),
         );
-        let ones = graph.add_anchored_call_function(
-            id,
-            format!("{}_ones", name),
+        let ones = ctx.output(
+            graph,
+            "ones",
             "aten.where.self",
             vec![IrArg::Node(eq), IrArg::Node(one), IrArg::Node(one)],
-            meta,
         );
         graph.replace_and_erase(id, ones);
         return true;
@@ -857,12 +833,11 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let mut base_id = input_id;
     if exp < 0 {
-        let reciprocal = graph.add_anchored_call_function(
-            id,
-            format!("{}_reciprocal", name),
+        let reciprocal = ctx.output(
+            graph,
+            "reciprocal",
             "aten.reciprocal.default",
             vec![IrArg::Node(input_id)],
-            meta.clone(),
         );
         base_id = reciprocal;
         exp = -exp;
@@ -870,12 +845,11 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let mut result_id = base_id;
     for idx in 1..exp {
-        let mul = graph.add_anchored_call_function(
-            id,
-            format!("{}_mul{}", name, idx),
+        let mul = ctx.output(
+            graph,
+            &format!("mul{idx}"),
             "aten.mul.Tensor",
             vec![IrArg::Node(result_id), IrArg::Node(base_id)],
-            meta.clone(),
         );
         result_id = mul;
     }
