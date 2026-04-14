@@ -1648,58 +1648,38 @@ fn remove_noop_passthroughs_ir(graph: &mut IrGraph) -> u32 {
     rewritten
 }
 
-pub(crate) fn remove_control_flow_noop_passthroughs<'py>(
+fn run_output_normalize_ir_batch<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
 ) -> PyResult<u32> {
-    let submodules = get_cf_submodules(py, gm)?;
     let mut rewritten: u32 = 0;
-
-    for (_name, submodule, _cf_node) in &submodules {
-        let mut ir = IrGraph::from_fx(&submodule)?;
-        let count = remove_noop_passthroughs_ir(&mut ir);
-        if count > 0 {
-            ir.write_back_with_surgery(py, &submodule)?;
-            let graph = submodule.getattr("graph")?;
-            cleanup_graph(&graph)?;
-            recompile(&submodule)?;
-            rewritten += count;
-        }
-    }
-    Ok(rewritten)
-}
-
-// ---------------------------------------------------------------------------
-// 2. _prune_duplicate_terminal_rescales
-// ---------------------------------------------------------------------------
-
-pub(crate) fn prune_duplicate_terminal_rescales<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-) -> PyResult<u32> {
-    let mut pruned: u32 = 0;
     let mut modules: Vec<Bound<'py, PyAny>> = vec![gm.clone()];
-    let submodules = get_cf_submodules(py, gm)?;
-    for (_name, submodule, _cf_node) in &submodules {
+    for (_name, submodule, _cf_node) in &get_cf_submodules(py, gm)? {
         modules.push(submodule.clone());
     }
+
     for module in &modules {
         let mut ir = IrGraph::from_fx(module)?;
-        let count = prune_duplicate_terminal_rescales_ir(&mut ir);
-        if count > 0 {
-            ir.write_back_with_surgery(py, module)?;
-            let graph = module.getattr("graph")?;
-            cleanup_graph(&graph)?;
-            recompile(module)?;
-            pruned += count;
+        let removed = remove_noop_passthroughs_ir(&mut ir);
+        let refreshed = refresh_transpose_fake_tensors_ir(&mut ir);
+        let pruned = prune_duplicate_terminal_rescales_ir(&mut ir);
+        let changed = removed + refreshed + pruned;
+        if changed == 0 {
+            continue;
         }
-    }
-    Ok(pruned)
-}
 
-// ---------------------------------------------------------------------------
-// 6. _refresh_tosa_transpose_fake_tensors
-// ---------------------------------------------------------------------------
+        if removed > 0 || pruned > 0 {
+            ir.write_back_with_surgery(py, module)?;
+            cleanup_graph(&module.getattr("graph")?)?;
+        } else {
+            ir.write_back(py, module)?;
+        }
+        recompile(module)?;
+        rewritten += changed;
+    }
+
+    Ok(rewritten)
+}
 
 /// Pure Rust: refresh TRANSPOSE node FakeTensors by permuting input shape.
 fn refresh_transpose_fake_tensors_ir(graph: &mut IrGraph) -> u32 {
@@ -1762,27 +1742,6 @@ fn refresh_transpose_fake_tensors_ir(graph: &mut IrGraph) -> u32 {
         count += 1;
     }
     count
-}
-
-pub(crate) fn refresh_tosa_transpose_fake_tensors<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-) -> PyResult<u32> {
-    let mut refreshed: u32 = 0;
-    let mut modules: Vec<Bound<'py, PyAny>> = vec![gm.clone()];
-    for (_name, submodule, _) in &get_cf_submodules(py, gm)? {
-        modules.push(submodule.clone());
-    }
-    for module in &modules {
-        let mut ir = IrGraph::from_fx(module)?;
-        let count = refresh_transpose_fake_tensors_ir(&mut ir);
-        if count > 0 {
-            ir.write_back(py, module)?;
-            recompile(module)?;
-            refreshed += count;
-        }
-    }
-    Ok(refreshed)
 }
 
 // NOTE: _refresh_tosa_dim_order_fake_tensors (item 7) is already implemented
@@ -1973,41 +1932,38 @@ pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
     for (_name, submodule, _cf_node) in &submodules {
         let graph = submodule.getattr("graph")?;
 
-        // Step 1: collapse Q→DQ pairs in pure Rust
         let mut ir = IrGraph::from_fx(submodule)?;
         let collapse_count = collapse_qdq_pairs_ir(&mut ir);
-        let m1 = collapse_count > 0;
-        if m1 {
-            ir.write_back_with_surgery(py, submodule)?;
-            quant_count += collapse_count;
+        let (q_count, rescale_inserts) = rewrite_quantize_nodes_ir(&mut ir);
+        let mut dq_count = 0;
+
+        if rescale_inserts.is_empty() {
+            dq_count = rewrite_dequantize_nodes_ir(&mut ir);
         }
 
-        // Step 2: Q rewrite — decision in Rust, RESCALE creation via Python
-        let mut ir2 = IrGraph::from_fx(submodule)?;
-        let (q_count, rescale_inserts) = rewrite_quantize_nodes_ir(&mut ir2);
-        if q_count > 0 {
-            ir2.write_back_with_surgery(py, submodule)?;
-            // Apply deferred RESCALE insertions
+        let first_phase_changed = collapse_count > 0 || q_count > 0 || dq_count > 0;
+        if first_phase_changed {
+            ir.write_back_with_surgery(py, submodule)?;
+        }
+
+        if !rescale_inserts.is_empty() {
             let py_node_map = crate::fx_ir::build_py_node_map(submodule)?;
             for insert in &rescale_inserts {
                 let rescale = insert.apply(py, submodule, &py_node_map)?;
-                // Stamp qparams on the new rescale node
                 stamp_qparams(py, &rescale, Some(&insert.from_qp), Some(&insert.to_qp))?;
             }
-            quant_count += q_count;
+
+            let mut ir_after_rescale = IrGraph::from_fx(submodule)?;
+            dq_count = rewrite_dequantize_nodes_ir(&mut ir_after_rescale);
+            if dq_count > 0 {
+                ir_after_rescale.write_back_with_surgery(py, submodule)?;
+            }
         }
 
-        // Step 3: DQ rewrite in pure Rust
-        let mut ir2 = IrGraph::from_fx(submodule)?;
-        let dq_count = rewrite_dequantize_nodes_ir(&mut ir2);
-        let m3 = dq_count > 0;
-        if m3 {
-            ir2.write_back_with_surgery(py, submodule)?;
-            dequant_count += dq_count;
-        }
+        quant_count += collapse_count + q_count;
+        dequant_count += dq_count;
 
-        let m2 = q_count > 0;
-        if m1 || m2 || m3 {
+        if first_phase_changed || !rescale_inserts.is_empty() {
             cleanup_graph(&graph)?;
             recompile(submodule)?;
             total_rewrites += 1;
@@ -2595,14 +2551,12 @@ pub(crate) fn run_output_normalize_phase<'py>(
     // normalize_control_flow_output_layouts — no-op, removed
     reapply_control_flow_boundary_rescales(py, gm, false, true)?;
     rewrite_control_flow_quantization_boundaries(py, gm)?;
-    remove_control_flow_noop_passthroughs(py, gm)?;
+    run_output_normalize_ir_batch(py, gm)?;
     {
         let gm_wrapper = crate::fx_graph::FxGraphModule::new(gm);
         crate::fx_pass::FxPass::run(&FxControlFlowMetadataPass, &gm_wrapper)?;
     }
-    refresh_tosa_transpose_fake_tensors(py, gm)?;
     refresh_tosa_dim_order_fake_tensors(py, gm)?;
-    prune_duplicate_terminal_rescales(py, gm)?;
     restore_control_flow_float_compare_inputs(py, gm)?;
     Ok(())
 }
