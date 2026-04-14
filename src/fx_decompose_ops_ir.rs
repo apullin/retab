@@ -120,6 +120,30 @@ impl ApproxCtx {
         self.full_shape(graph, suffix, value, &shape)
     }
 
+    fn full_preserve_shape(
+        &self,
+        graph: &mut IrGraph,
+        suffix: &str,
+        value: f64,
+        shape: &[i64],
+    ) -> NodeId {
+        let node = self.full_shape(graph, suffix, value, shape);
+        preserve_shape_node(graph, node);
+        node
+    }
+
+    fn full_identity_shape(
+        &self,
+        graph: &mut IrGraph,
+        suffix: &str,
+        value: f64,
+        shape: &[i64],
+    ) -> NodeId {
+        let node = self.full_shape(graph, suffix, value, shape);
+        preserve_identity_layout(graph, node);
+        node
+    }
+
     fn full_shape(&self, graph: &mut IrGraph, suffix: &str, value: f64, shape: &[i64]) -> NodeId {
         graph.add_anchored_full_float(
             self.anchor_id,
@@ -144,6 +168,32 @@ impl ApproxCtx {
     ) -> NodeId {
         let shape = self.scalar_shape();
         self.tensor_shape(graph, suffix, target, args, &shape)
+    }
+
+    fn tensor_preserve_shape(
+        &self,
+        graph: &mut IrGraph,
+        suffix: &str,
+        target: &str,
+        args: Vec<IrArg>,
+        shape: &[i64],
+    ) -> NodeId {
+        let node = self.tensor_shape(graph, suffix, target, args, shape);
+        preserve_shape_node(graph, node);
+        node
+    }
+
+    fn tensor_identity_shape(
+        &self,
+        graph: &mut IrGraph,
+        suffix: &str,
+        target: &str,
+        args: Vec<IrArg>,
+        shape: &[i64],
+    ) -> NodeId {
+        let node = self.tensor_shape(graph, suffix, target, args, shape);
+        preserve_identity_layout(graph, node);
+        node
     }
 
     fn tensor_shape(
@@ -199,6 +249,41 @@ impl ApproxCtx {
             target,
             args,
             self.meta.clone(),
+        )
+    }
+
+    fn view_preserve_shape(
+        &self,
+        graph: &mut IrGraph,
+        suffix: &str,
+        source: NodeId,
+        shape: &[i64],
+    ) -> NodeId {
+        let node = graph.add_anchored_call_function(
+            self.anchor_id,
+            self.op_name(suffix),
+            "aten.view_copy.default",
+            vec![IrArg::Node(source), i64_list(shape)],
+            self.tensor_meta(shape),
+        );
+        preserve_shape_node(graph, node);
+        node
+    }
+
+    fn reshape_identity(
+        &self,
+        graph: &mut IrGraph,
+        suffix: &str,
+        target: &str,
+        source: NodeId,
+        shape: &[i64],
+    ) -> NodeId {
+        self.tensor_identity_shape(
+            graph,
+            suffix,
+            target,
+            vec![IrArg::Node(source), i64_list(shape)],
+            shape,
         )
     }
 
@@ -1668,8 +1753,8 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
         dtype: dtype.clone(),
     });
 
-    let reduce_id = graph.add_node(
-        NodeOp::CallFunction,
+    let reduce_id = graph.add_anchored_call_function(
+        id,
         format!(
             "{}_{}",
             node_name,
@@ -1687,17 +1772,15 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
         ],
         reduce_meta,
     );
-    graph.anchor_to(reduce_id, id);
     graph.copy_meta_from(reduce_id, value_getitem);
 
-    let squeeze_id = graph.add_node(
-        NodeOp::CallFunction,
+    let squeeze_id = graph.add_anchored_call_function(
+        reduce_id,
         format!("{}_result", node_name),
         "aten.squeeze_copy.dims".to_string(),
         vec![IrArg::Node(reduce_id), i64_list(&[dim as i64])],
         value_meta,
     );
-    graph.anchor_after(squeeze_id, reduce_id);
     graph.copy_meta_from(squeeze_id, value_getitem);
 
     graph.replace_and_erase(value_getitem, squeeze_id);
@@ -1719,11 +1802,6 @@ fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> 
         Some(shape) => shape.to_vec(),
         None => return false,
     };
-    let dtype = graph.nodes[x_id]
-        .meta
-        .val_dtype()
-        .unwrap_or("torch.float32")
-        .to_string();
     let dim = graph.nodes[id]
         .args
         .get(1)
@@ -1737,88 +1815,57 @@ fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> 
     }
     let dim = dim as usize;
 
-    let name = graph.nodes[id].name.clone();
-    let meta = graph.nodes[id].meta.clone();
+    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
+        return false;
+    };
     let mut reduced_shape = shape.clone();
     reduced_shape[dim] = 1;
     let sum_shape = reduced_shape.clone();
 
-    let reduce = graph.add_anchored_call_function_with_val(
-        id,
-        format!("{}_amax", name),
+    let reduce = ctx.tensor_shape(
+        graph,
+        "amax",
         "aten.amax.default",
         vec![IrArg::Node(x_id), IrArg::Int(dim as i64), IrArg::Bool(true)],
-        &meta,
-        reduced_shape.clone(),
-        &dtype,
+        &reduced_shape,
     );
 
-    let shifted = graph.add_anchored_call_function_with_val(
-        id,
-        format!("{}_shifted", name),
+    let shifted = ctx.tensor(
+        graph,
+        "shifted",
         "aten.sub.Tensor",
         vec![IrArg::Node(x_id), IrArg::Node(reduce)],
-        &meta,
-        shape.clone(),
-        &dtype,
     );
 
-    let exp = graph.add_anchored_call_function_with_val(
-        id,
-        format!("{}_exp", name),
-        "aten.exp.default",
-        vec![IrArg::Node(shifted)],
-        &meta,
-        shape.clone(),
-        &dtype,
-    );
+    let exp = ctx.tensor(graph, "exp", "aten.exp.default", vec![IrArg::Node(shifted)]);
 
-    let sum = graph.add_anchored_call_function_with_val(
-        id,
-        format!("{}_sum", name),
+    let sum = ctx.tensor_shape(
+        graph,
+        "sum",
         "aten.sum.dim_IntList",
         vec![IrArg::Node(exp), i64_list(&[dim as i64]), IrArg::Bool(true)],
-        &meta,
-        sum_shape.clone(),
-        &dtype,
+        &sum_shape,
     );
 
-    let recip = graph.add_anchored_call_function_with_val(
-        id,
-        format!("{}_recip", name),
+    let recip = ctx.tensor_shape(
+        graph,
+        "recip",
         "aten.reciprocal.default",
         vec![IrArg::Node(sum)],
-        &meta,
-        sum_shape,
-        &dtype,
+        &sum_shape,
     );
 
-    let softmax = graph.add_anchored_call_function_with_val(
-        id,
-        format!("{}_softmax", name),
+    let softmax = ctx.tensor(
+        graph,
+        "softmax",
         "aten.mul.Tensor",
         vec![IrArg::Node(exp), IrArg::Node(recip)],
-        &meta,
-        shape.clone(),
-        &dtype,
     );
 
     let result = if log_output {
-        graph.add_anchored_call_function(
-            id,
-            format!("{}_result", name),
-            "aten.log.default",
-            vec![IrArg::Node(softmax)],
-            meta,
-        )
+        ctx.output(graph, "result", "aten.log.default", vec![IrArg::Node(softmax)])
     } else {
-        graph.add_anchored_call_function(
-            id,
-            format!("{}_result", name),
-            "aten.clone.default",
-            vec![IrArg::Node(softmax)],
-            meta,
-        )
+        ctx.output(graph, "result", "aten.clone.default", vec![IrArg::Node(softmax)])
     };
 
     graph.replace_and_erase(id, result);
@@ -2864,18 +2911,13 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(n) => n,
         None => return false,
     };
-    let shape = match graph.nodes[x_id].meta.val_shape() {
-        Some(s) => s.to_vec(),
-        None => return false,
+    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
+        return false;
     };
+    let shape = ctx.shape.clone();
     if shape.len() < 2 {
         return false;
     }
-    let dtype = graph.nodes[x_id]
-        .meta
-        .val_dtype()
-        .unwrap_or("torch.float32")
-        .to_string();
     let channel_axis = 1_usize;
     let Some(&num_features) = shape.get(channel_axis) else {
         return false;
@@ -2887,83 +2929,36 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     } else {
         channel_shape.clone()
     };
-    let scalar_shape = vec![1_i64; shape.len()];
+    let scalar_shape = ctx.scalar_shape();
     let eps = batch_norm_eps(&graph.nodes[id]);
-    let name = graph.nodes[id].name.clone();
-    let meta = graph.nodes[id].meta.clone();
-    let metas = MetaFactory::new(&meta, &dtype);
+    let mean_view = ctx.view_preserve_shape(graph, "mean_view", running_mean, &physical_channel_shape);
+    let var_view = ctx.view_preserve_shape(graph, "var_view", running_var, &physical_channel_shape);
 
-    let tensor_op = |graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>| {
-        graph.add_anchored_call_function_with_val(
-            id,
-            format!("{}_{}", name, suffix),
-            target,
-            args,
-            &meta,
-            shape.clone(),
-            &dtype,
-        )
-    };
-    let stats_op = |graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>| {
-        let node = graph.add_anchored_call_function_with_val(
-            id,
-            format!("{}_{}", name, suffix),
-            target,
-            args,
-            &meta,
-            physical_channel_shape.clone(),
-            &dtype,
-        );
-        preserve_shape_node(graph, node);
-        node
-    };
-    let view_stats = |graph: &mut IrGraph, source: NodeId, suffix: &str| {
-        let node = graph.add_anchored_call_function(
-            id,
-            format!("{}_{}", name, suffix),
-            "aten.view_copy.default",
-            vec![IrArg::Node(source), i64_list(&physical_channel_shape)],
-            metas.tensor(&physical_channel_shape),
-        );
-        preserve_shape_node(graph, node);
-        node
-    };
-
-    let mean_view = view_stats(graph, running_mean, "mean_view");
-    let var_view = view_stats(graph, running_var, "var_view");
-
-    let centered = tensor_op(
+    let centered = ctx.tensor(
         graph,
         "centered",
         "aten.sub.Tensor",
         vec![IrArg::Node(x_id), IrArg::Node(mean_view)],
     );
+    let eps_full = ctx.full_preserve_shape(graph, "eps", eps, &scalar_shape);
 
-    let eps_full = graph.add_anchored_full_float(
-        id,
-        format!("{}_eps", name),
-        &scalar_shape,
-        eps,
-        &dtype,
-        metas.tensor(&scalar_shape),
-    );
-    preserve_shape_node(graph, eps_full);
-
-    let var_eps = stats_op(
+    let var_eps = ctx.tensor_preserve_shape(
         graph,
         "var_eps",
         "aten.add.Tensor",
         vec![IrArg::Node(var_view), IrArg::Node(eps_full)],
+        &physical_channel_shape,
     );
 
-    let inv_sqrt = stats_op(
+    let inv_sqrt = ctx.tensor_preserve_shape(
         graph,
         "inv_sqrt",
         "aten.rsqrt.default",
         vec![IrArg::Node(var_eps)],
+        &physical_channel_shape,
     );
 
-    let normed = tensor_op(
+    let normed = ctx.tensor(
         graph,
         "normed",
         "aten.mul.Tensor",
@@ -2971,22 +2966,17 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     );
 
     let weight_view = match weight_arg {
-        IrArg::Node(weight_id) => view_stats(graph, weight_id, "weight_view"),
+        IrArg::Node(weight_id) => {
+            ctx.view_preserve_shape(graph, "weight_view", weight_id, &physical_channel_shape)
+        }
         IrArg::None => {
-            let weight_full = graph.add_anchored_full_float(
-                id,
-                format!("{}_weight_full", name),
-                &[num_features],
-                1.0,
-                &dtype,
-                metas.tensor(&[num_features]),
-            );
-            view_stats(graph, weight_full, "weight_view")
+            let weight_full = ctx.full_shape(graph, "weight_full", 1.0, &[num_features]);
+            ctx.view_preserve_shape(graph, "weight_view", weight_full, &physical_channel_shape)
         }
         _ => return false,
     };
 
-    let weighted = tensor_op(
+    let weighted = ctx.tensor(
         graph,
         "weighted",
         "aten.mul.Tensor",
@@ -2994,27 +2984,21 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     );
 
     let bias_view = match bias_arg {
-        IrArg::Node(bias_id) => view_stats(graph, bias_id, "bias_view"),
+        IrArg::Node(bias_id) => {
+            ctx.view_preserve_shape(graph, "bias_view", bias_id, &physical_channel_shape)
+        }
         IrArg::None => {
-            let bias_full = graph.add_anchored_full_float(
-                id,
-                format!("{}_bias_full", name),
-                &[num_features],
-                0.0,
-                &dtype,
-                metas.tensor(&[num_features]),
-            );
-            view_stats(graph, bias_full, "bias_view")
+            let bias_full = ctx.full_shape(graph, "bias_full", 0.0, &[num_features]);
+            ctx.view_preserve_shape(graph, "bias_view", bias_full, &physical_channel_shape)
         }
         _ => return false,
     };
 
-    let result = graph.add_anchored_call_function(
-        id,
-        format!("{}_result", name),
+    let result = ctx.tensor(
+        graph,
+        "result",
         "aten.add.Tensor",
         vec![IrArg::Node(weighted), IrArg::Node(bias_view)],
-        metas.tensor(&shape),
     );
 
     let getitem_users: Vec<(NodeId, i64)> = graph
@@ -3124,18 +3108,13 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
 
-    let shape = match graph.nodes[x_id].meta.val_shape() {
-        Some(s) => s.to_vec(),
-        None => return false,
+    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
+        return false;
     };
+    let shape = ctx.shape.clone();
     if shape.len() < 2 {
         return false;
     }
-    let dtype = graph.nodes[x_id]
-        .meta
-        .val_dtype()
-        .unwrap_or("torch.float32")
-        .to_string();
     let eps = eps.unwrap_or(1.0e-5);
     let n = shape[0];
     let c = shape[1];
@@ -3148,116 +3127,76 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     let reduce_dims = i64_list(&[2, 3]);
     let scalar_shape = vec![1_i64; grouped_shape.len()];
     let affine_shape = vec![1, group, channels_per_group, 1];
-    let name = graph.nodes[id].name.clone();
-    let meta = graph.nodes[id].meta.clone();
-    let metas = MetaFactory::new(&meta, &dtype);
     let reshape_target = if graph.nodes[id].target.contains("native_group_norm") {
         "aten.view_copy.default"
     } else {
         "aten.reshape.default"
     };
-    let shaped_tensor_op =
-        |graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>, out_shape: &[i64]| {
-            let node = graph.add_anchored_call_function_with_val(
-                id,
-                format!("{}_{}", name, suffix),
-                target,
-                args,
-                &meta,
-                out_shape.to_vec(),
-                &dtype,
-            );
-            preserve_identity_layout(graph, node);
-            node
-        };
-    let reshape =
-        |graph: &mut IrGraph, suffix: &str, input: NodeId, out_shape: &[i64]| {
-            shaped_tensor_op(
-                graph,
-                suffix,
-                reshape_target,
-                vec![IrArg::Node(input), i64_list(out_shape)],
-                out_shape,
-            )
-        };
-    let full = |graph: &mut IrGraph, suffix: &str, value: f64, out_shape: &[i64]| {
-        let node = graph.add_anchored_full_float(
-            id,
-            format!("{}_{}", name, suffix),
-            out_shape,
-            value,
-            &dtype,
-            metas.tensor(out_shape),
-        );
-        preserve_identity_layout(graph, node);
-        node
-    };
-
-    let grouped = reshape(graph, "grouped", x_id, &grouped_shape);
-    let inv_n = full(
+    let grouped = ctx.reshape_identity(graph, "grouped", reshape_target, x_id, &grouped_shape);
+    let inv_n = ctx.full_identity_shape(
         graph,
         "inv_n",
         1.0 / ((channels_per_group * hxw) as f64),
         &scalar_shape,
     );
-    let sum_x = shaped_tensor_op(
+    let sum_x = ctx.tensor_identity_shape(
         graph,
         "sum",
         "aten.sum.dim_IntList",
         vec![IrArg::Node(grouped), reduce_dims.clone(), IrArg::Bool(true)],
         &scalar_shape,
     );
-    let mean = shaped_tensor_op(
+    let mean = ctx.tensor_identity_shape(
         graph,
         "mean",
         "aten.mul.Tensor",
         vec![IrArg::Node(sum_x), IrArg::Node(inv_n)],
         &scalar_shape,
     );
-    let centered = shaped_tensor_op(
+    let centered = ctx.tensor_identity_shape(
         graph,
         "centered",
         "aten.sub.Tensor",
         vec![IrArg::Node(grouped), IrArg::Node(mean)],
         &grouped_shape,
     );
-    let squared = shaped_tensor_op(
+    let squared = ctx.tensor_identity_shape(
         graph,
         "squared",
         "aten.mul.Tensor",
         vec![IrArg::Node(centered), IrArg::Node(centered)],
         &grouped_shape,
     );
-    let sum_squared = shaped_tensor_op(
+    let sum_squared = ctx.tensor_identity_shape(
         graph,
         "sum_squared",
         "aten.sum.dim_IntList",
         vec![IrArg::Node(squared), reduce_dims, IrArg::Bool(true)],
         &scalar_shape,
     );
-    let var = shaped_tensor_op(
+    let var = ctx.tensor_identity_shape(
         graph,
         "var",
         "aten.mul.Tensor",
         vec![IrArg::Node(sum_squared), IrArg::Node(inv_n)],
         &scalar_shape,
     );
-    let eps_full = full(graph, "eps", eps, &scalar_shape);
-    let var_eps = shaped_tensor_op(
+    let eps_full = ctx.full_identity_shape(graph, "eps", eps, &scalar_shape);
+    let var_eps = ctx.tensor_identity_shape(
         graph,
         "var_eps",
         "aten.add.Tensor",
         vec![IrArg::Node(var), IrArg::Node(eps_full)],
         &scalar_shape,
     );
-    let rsqrt = shaped_tensor_op(
+    let rsqrt = ctx.tensor_identity_shape(
         graph,
         "rsqrt",
         "aten.rsqrt.default",
         vec![IrArg::Node(var_eps)],
         &scalar_shape,
     );
-    let normalized = shaped_tensor_op(
+    let normalized = ctx.tensor_identity_shape(
         graph,
         "normalized",
         "aten.mul.Tensor",
@@ -3267,15 +3206,15 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let weighted = match weight_arg {
         IrArg::Node(weight_id) => {
-            let weight_view = reshape(graph, "weight_view", weight_id, &affine_shape);
-            let weighted = shaped_tensor_op(
+            let weight_view =
+                ctx.reshape_identity(graph, "weight_view", reshape_target, weight_id, &affine_shape);
+            ctx.tensor_identity_shape(
                 graph,
                 "weighted",
                 "aten.mul.Tensor",
                 vec![IrArg::Node(normalized), IrArg::Node(weight_view)],
                 &grouped_shape,
-            );
-            weighted
+            )
         }
         IrArg::None => normalized,
         _ => return false,
@@ -3283,21 +3222,21 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let biased = match bias_arg {
         IrArg::Node(bias_id) => {
-            let bias_view = reshape(graph, "bias_view", bias_id, &affine_shape);
-            let biased = shaped_tensor_op(
+            let bias_view =
+                ctx.reshape_identity(graph, "bias_view", reshape_target, bias_id, &affine_shape);
+            ctx.tensor_identity_shape(
                 graph,
                 "biased",
                 "aten.add.Tensor",
                 vec![IrArg::Node(weighted), IrArg::Node(bias_view)],
                 &grouped_shape,
-            );
-            biased
+            )
         }
         IrArg::None => weighted,
         _ => return false,
     };
 
-    let result = reshape(graph, "result", biased, &shape);
+    let result = ctx.reshape_identity(graph, "result", reshape_target, biased, &shape);
 
     let getitem_users: Vec<(NodeId, i64)> = graph
         .nodes
@@ -3378,21 +3317,20 @@ fn decompose_stack(graph: &mut IrGraph, id: NodeId) -> bool {
         };
         u_shape.insert(pos, 1);
 
-        let unsq = graph.add_node(
-            NodeOp::CallFunction,
+        let unsq = graph.add_anchored_call_function(
+            id,
             format!("{}_unsq_{}", name, i),
             "aten.unsqueeze_copy.default".to_string(),
             vec![IrArg::Node(tid), IrArg::Int(dim)],
             metas.tensor(&u_shape),
         );
-        graph.anchor_to(unsq, id);
         unsqueezed.push(unsq);
     }
 
     // Cat along dim
     let cat_args = IrArg::List(unsqueezed.iter().map(|&n| IrArg::Node(n)).collect());
-    let result = graph.add_node(
-        NodeOp::CallFunction,
+    let result = graph.add_anchored_call_function(
+        id,
         format!("{}_cat", name),
         "aten.cat.default".to_string(),
         vec![cat_args, IrArg::Int(dim)],
@@ -3449,8 +3387,8 @@ fn decompose_unbind(graph: &mut IrGraph, id: NodeId) -> bool {
         // slice(x, dim, idx, idx+1)
         let mut slice_shape = x_shape.clone();
         slice_shape[dim_norm] = 1;
-        let slice_id = graph.add_node(
-            NodeOp::CallFunction,
+        let slice_id = graph.add_anchored_call_function(
+            id,
             format!("{}_slice_{}", name, idx),
             "aten.slice_copy.Tensor".to_string(),
             vec![
@@ -3461,13 +3399,12 @@ fn decompose_unbind(graph: &mut IrGraph, id: NodeId) -> bool {
             ],
             metas.tensor(&slice_shape),
         );
-        graph.anchor_to(slice_id, id);
 
         // squeeze(slice, dim)
         let mut sq_shape = x_shape.clone();
         sq_shape.remove(dim_norm);
-        let squeeze_id = graph.add_node(
-            NodeOp::CallFunction,
+        let squeeze_id = graph.add_anchored_call_function(
+            slice_id,
             format!("{}_sq_{}", name, idx),
             "aten.squeeze_copy.dims".to_string(),
             vec![IrArg::Node(slice_id), i64_list(&[dim_norm as i64])],
