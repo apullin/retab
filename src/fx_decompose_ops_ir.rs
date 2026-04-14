@@ -1863,9 +1863,6 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
     let half_pi = add_full_const(
         graph, id, &name, "half_pi", FRAC_PI_2, &shape, &dtype, &meta,
     );
-    let a1 = add_full_const(graph, id, &name, "a1", 0.3529666667, &shape, &dtype, &meta);
-    let a2 = add_full_const(graph, id, &name, "a2", -0.0287666667, &shape, &dtype, &meta);
-    let b1 = add_full_const(graph, id, &name, "b1", 0.6863, &shape, &dtype, &meta);
 
     let abs_x = tensor_op(graph, "abs", "aten.abs.default", vec![IrArg::Node(x_id)]);
     let mask_hi = bool_op(
@@ -1892,48 +1889,34 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         "aten.mul.Tensor",
         vec![IrArg::Node(z), IrArg::Node(z)],
     );
-    let z4 = tensor_op(
+    let num = match build_polynomial(
         graph,
-        "z4",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(z2), IrArg::Node(z2)],
-    );
-    let num1 = tensor_op(
-        graph,
-        "num1",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(z2), IrArg::Node(a1)],
-    );
-    let num2 = tensor_op(
-        graph,
-        "num2",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(z4), IrArg::Node(a2)],
-    );
-    let num_base = tensor_op(
-        graph,
-        "num_base",
-        "aten.add.Tensor",
-        vec![IrArg::Node(num1), IrArg::Node(one)],
-    );
-    let num = tensor_op(
-        graph,
+        id,
+        &name,
         "num",
-        "aten.add.Tensor",
-        vec![IrArg::Node(num_base), IrArg::Node(num2)],
-    );
-    let den1 = tensor_op(
+        &[1.0, 0.3529666667, -0.0287666667],
+        z2,
+        &shape,
+        &dtype,
+        &meta,
+    ) {
+        Some(node) => node,
+        None => return false,
+    };
+    let den = match build_polynomial(
         graph,
-        "den1",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(z2), IrArg::Node(b1)],
-    );
-    let den = tensor_op(
-        graph,
+        id,
+        &name,
         "den",
-        "aten.add.Tensor",
-        vec![IrArg::Node(den1), IrArg::Node(one)],
-    );
+        &[1.0, 0.6863],
+        z2,
+        &shape,
+        &dtype,
+        &meta,
+    ) {
+        Some(node) => node,
+        None => return false,
+    };
     let inv_den = tensor_op(
         graph,
         "inv_den",
@@ -1977,10 +1960,10 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(atan_abs)],
     );
 
-    let result = graph.add_node(
-        NodeOp::CallFunction,
+    let result = graph.add_anchored_call_function(
+        id,
         format!("{}_result", name),
-        "aten.where.self".to_string(),
+        "aten.where.self",
         vec![
             IrArg::Node(mask_pos),
             IrArg::Node(atan_abs),
@@ -3337,15 +3320,38 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     let meta = graph.nodes[id].meta.clone();
     let metas = MetaFactory::new(&meta, &dtype);
 
-    let view_stats = |graph: &mut IrGraph, source: NodeId, suffix: &str| {
-        let node = graph.add_node(
-            NodeOp::CallFunction,
+    let tensor_op = |graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>| {
+        graph.add_anchored_call_function_with_val(
+            id,
             format!("{}_{}", name, suffix),
-            "aten.view_copy.default".to_string(),
+            target,
+            args,
+            &meta,
+            shape.clone(),
+            &dtype,
+        )
+    };
+    let stats_op = |graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>| {
+        let node = graph.add_anchored_call_function_with_val(
+            id,
+            format!("{}_{}", name, suffix),
+            target,
+            args,
+            &meta,
+            physical_channel_shape.clone(),
+            &dtype,
+        );
+        preserve_shape_node(graph, node);
+        node
+    };
+    let view_stats = |graph: &mut IrGraph, source: NodeId, suffix: &str| {
+        let node = graph.add_anchored_call_function(
+            id,
+            format!("{}_{}", name, suffix),
+            "aten.view_copy.default",
             vec![IrArg::Node(source), i64_list(&physical_channel_shape)],
             metas.tensor(&physical_channel_shape),
         );
-        graph.anchor_to(node, id);
         preserve_shape_node(graph, node);
         node
     };
@@ -3353,99 +3359,87 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     let mean_view = view_stats(graph, running_mean, "mean_view");
     let var_view = view_stats(graph, running_var, "var_view");
 
-    let centered = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_centered", name),
-        "aten.sub.Tensor".to_string(),
+    let centered = tensor_op(
+        graph,
+        "centered",
+        "aten.sub.Tensor",
         vec![IrArg::Node(x_id), IrArg::Node(mean_view)],
-        metas.tensor(&shape),
     );
-    graph.anchor_to(centered, id);
 
-    let eps_full = graph.add_node(
-        NodeOp::CallFunction,
+    let eps_full = graph.add_anchored_full_float(
+        id,
         format!("{}_eps", name),
-        "aten.full.default".to_string(),
-        vec![i64_list(&scalar_shape), IrArg::Float(eps)],
+        &scalar_shape,
+        eps,
+        &dtype,
         metas.tensor(&scalar_shape),
     );
-    graph.anchor_to(eps_full, id);
     preserve_shape_node(graph, eps_full);
 
-    let var_eps = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_var_eps", name),
-        "aten.add.Tensor".to_string(),
+    let var_eps = stats_op(
+        graph,
+        "var_eps",
+        "aten.add.Tensor",
         vec![IrArg::Node(var_view), IrArg::Node(eps_full)],
-        metas.tensor(&physical_channel_shape),
     );
-    graph.anchor_to(var_eps, id);
-    preserve_shape_node(graph, var_eps);
 
-    let inv_sqrt = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_inv_sqrt", name),
-        "aten.rsqrt.default".to_string(),
+    let inv_sqrt = stats_op(
+        graph,
+        "inv_sqrt",
+        "aten.rsqrt.default",
         vec![IrArg::Node(var_eps)],
-        metas.tensor(&physical_channel_shape),
     );
-    graph.anchor_to(inv_sqrt, id);
-    preserve_shape_node(graph, inv_sqrt);
 
-    let normed = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_normed", name),
-        "aten.mul.Tensor".to_string(),
+    let normed = tensor_op(
+        graph,
+        "normed",
+        "aten.mul.Tensor",
         vec![IrArg::Node(centered), IrArg::Node(inv_sqrt)],
-        metas.tensor(&shape),
     );
-    graph.anchor_to(normed, id);
 
     let weight_view = match weight_arg {
         IrArg::Node(weight_id) => view_stats(graph, weight_id, "weight_view"),
         IrArg::None => {
-            let weight_full = graph.add_node(
-                NodeOp::CallFunction,
+            let weight_full = graph.add_anchored_full_float(
+                id,
                 format!("{}_weight_full", name),
-                "aten.full.default".to_string(),
-                vec![i64_list(&[num_features]), IrArg::Float(1.0)],
+                &[num_features],
+                1.0,
+                &dtype,
                 metas.tensor(&[num_features]),
             );
-            graph.anchor_to(weight_full, id);
             view_stats(graph, weight_full, "weight_view")
         }
         _ => return false,
     };
 
-    let weighted = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_weighted", name),
-        "aten.mul.Tensor".to_string(),
+    let weighted = tensor_op(
+        graph,
+        "weighted",
+        "aten.mul.Tensor",
         vec![IrArg::Node(normed), IrArg::Node(weight_view)],
-        metas.tensor(&shape),
     );
-    graph.anchor_to(weighted, id);
 
     let bias_view = match bias_arg {
         IrArg::Node(bias_id) => view_stats(graph, bias_id, "bias_view"),
         IrArg::None => {
-            let bias_full = graph.add_node(
-                NodeOp::CallFunction,
+            let bias_full = graph.add_anchored_full_float(
+                id,
                 format!("{}_bias_full", name),
-                "aten.full.default".to_string(),
-                vec![i64_list(&[num_features]), IrArg::Float(0.0)],
+                &[num_features],
+                0.0,
+                &dtype,
                 metas.tensor(&[num_features]),
             );
-            graph.anchor_to(bias_full, id);
             view_stats(graph, bias_full, "bias_view")
         }
         _ => return false,
     };
 
-    let result = graph.add_node(
-        NodeOp::CallFunction,
+    let result = graph.add_anchored_call_function(
+        id,
         format!("{}_result", name),
-        "aten.add.Tensor".to_string(),
+        "aten.add.Tensor",
         vec![IrArg::Node(weighted), IrArg::Node(bias_view)],
         metas.tensor(&shape),
     );
@@ -3589,151 +3583,125 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     } else {
         "aten.reshape.default"
     };
+    let shaped_tensor_op =
+        |graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>, out_shape: &[i64]| {
+            let node = graph.add_anchored_call_function_with_val(
+                id,
+                format!("{}_{}", name, suffix),
+                target,
+                args,
+                &meta,
+                out_shape.to_vec(),
+                &dtype,
+            );
+            preserve_identity_layout(graph, node);
+            node
+        };
+    let reshape =
+        |graph: &mut IrGraph, suffix: &str, input: NodeId, out_shape: &[i64]| {
+            shaped_tensor_op(
+                graph,
+                suffix,
+                reshape_target,
+                vec![IrArg::Node(input), i64_list(out_shape)],
+                out_shape,
+            )
+        };
+    let full = |graph: &mut IrGraph, suffix: &str, value: f64, out_shape: &[i64]| {
+        let node = graph.add_anchored_full_float(
+            id,
+            format!("{}_{}", name, suffix),
+            out_shape,
+            value,
+            &dtype,
+            metas.tensor(out_shape),
+        );
+        preserve_identity_layout(graph, node);
+        node
+    };
 
-    let grouped = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_grouped", name),
-        reshape_target.to_string(),
-        vec![IrArg::Node(x_id), i64_list(&grouped_shape)],
-        metas.tensor(&grouped_shape),
+    let grouped = reshape(graph, "grouped", x_id, &grouped_shape);
+    let inv_n = full(
+        graph,
+        "inv_n",
+        1.0 / ((channels_per_group * hxw) as f64),
+        &scalar_shape,
     );
-    graph.anchor_to(grouped, id);
-    preserve_identity_layout(graph, grouped);
-
-    let inv_n = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_inv_n", name),
-        "aten.full.default".to_string(),
-        vec![
-            i64_list(&scalar_shape),
-            IrArg::Float(1.0 / ((channels_per_group * hxw) as f64)),
-        ],
-        metas.tensor(&scalar_shape),
-    );
-    graph.anchor_to(inv_n, id);
-    preserve_identity_layout(graph, inv_n);
-
-    let sum_x = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_sum", name),
-        "aten.sum.dim_IntList".to_string(),
+    let sum_x = shaped_tensor_op(
+        graph,
+        "sum",
+        "aten.sum.dim_IntList",
         vec![IrArg::Node(grouped), reduce_dims.clone(), IrArg::Bool(true)],
-        metas.tensor(&scalar_shape),
+        &scalar_shape,
     );
-    graph.anchor_to(sum_x, id);
-    preserve_identity_layout(graph, sum_x);
-
-    let mean = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_mean", name),
-        "aten.mul.Tensor".to_string(),
+    let mean = shaped_tensor_op(
+        graph,
+        "mean",
+        "aten.mul.Tensor",
         vec![IrArg::Node(sum_x), IrArg::Node(inv_n)],
-        metas.tensor(&scalar_shape),
+        &scalar_shape,
     );
-    graph.anchor_to(mean, id);
-    preserve_identity_layout(graph, mean);
-
-    let centered = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_centered", name),
-        "aten.sub.Tensor".to_string(),
+    let centered = shaped_tensor_op(
+        graph,
+        "centered",
+        "aten.sub.Tensor",
         vec![IrArg::Node(grouped), IrArg::Node(mean)],
-        metas.tensor(&grouped_shape),
+        &grouped_shape,
     );
-    graph.anchor_to(centered, id);
-    preserve_identity_layout(graph, centered);
-
-    let squared = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_squared", name),
-        "aten.mul.Tensor".to_string(),
+    let squared = shaped_tensor_op(
+        graph,
+        "squared",
+        "aten.mul.Tensor",
         vec![IrArg::Node(centered), IrArg::Node(centered)],
-        metas.tensor(&grouped_shape),
+        &grouped_shape,
     );
-    graph.anchor_to(squared, id);
-    preserve_identity_layout(graph, squared);
-
-    let sum_squared = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_sum_squared", name),
-        "aten.sum.dim_IntList".to_string(),
+    let sum_squared = shaped_tensor_op(
+        graph,
+        "sum_squared",
+        "aten.sum.dim_IntList",
         vec![IrArg::Node(squared), reduce_dims, IrArg::Bool(true)],
-        metas.tensor(&scalar_shape),
+        &scalar_shape,
     );
-    graph.anchor_to(sum_squared, id);
-    preserve_identity_layout(graph, sum_squared);
-
-    let var = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_var", name),
-        "aten.mul.Tensor".to_string(),
+    let var = shaped_tensor_op(
+        graph,
+        "var",
+        "aten.mul.Tensor",
         vec![IrArg::Node(sum_squared), IrArg::Node(inv_n)],
-        metas.tensor(&scalar_shape),
+        &scalar_shape,
     );
-    graph.anchor_to(var, id);
-    preserve_identity_layout(graph, var);
-
-    let eps_full = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_eps", name),
-        "aten.full.default".to_string(),
-        vec![i64_list(&scalar_shape), IrArg::Float(eps)],
-        metas.tensor(&scalar_shape),
-    );
-    graph.anchor_to(eps_full, id);
-    preserve_identity_layout(graph, eps_full);
-
-    let var_eps = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_var_eps", name),
-        "aten.add.Tensor".to_string(),
+    let eps_full = full(graph, "eps", eps, &scalar_shape);
+    let var_eps = shaped_tensor_op(
+        graph,
+        "var_eps",
+        "aten.add.Tensor",
         vec![IrArg::Node(var), IrArg::Node(eps_full)],
-        metas.tensor(&scalar_shape),
+        &scalar_shape,
     );
-    graph.anchor_to(var_eps, id);
-    preserve_identity_layout(graph, var_eps);
-
-    let rsqrt = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_rsqrt", name),
-        "aten.rsqrt.default".to_string(),
+    let rsqrt = shaped_tensor_op(
+        graph,
+        "rsqrt",
+        "aten.rsqrt.default",
         vec![IrArg::Node(var_eps)],
-        metas.tensor(&scalar_shape),
+        &scalar_shape,
     );
-    graph.anchor_to(rsqrt, id);
-    preserve_identity_layout(graph, rsqrt);
-
-    let normalized = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_normalized", name),
-        "aten.mul.Tensor".to_string(),
+    let normalized = shaped_tensor_op(
+        graph,
+        "normalized",
+        "aten.mul.Tensor",
         vec![IrArg::Node(centered), IrArg::Node(rsqrt)],
-        metas.tensor(&grouped_shape),
+        &grouped_shape,
     );
-    graph.anchor_to(normalized, id);
-    preserve_identity_layout(graph, normalized);
 
     let weighted = match weight_arg {
         IrArg::Node(weight_id) => {
-            let weight_view = graph.add_node(
-                NodeOp::CallFunction,
-                format!("{}_weight_view", name),
-                reshape_target.to_string(),
-                vec![IrArg::Node(weight_id), i64_list(&affine_shape)],
-                metas.tensor(&affine_shape),
-            );
-            graph.anchor_to(weight_view, id);
-            preserve_identity_layout(graph, weight_view);
-
-            let weighted = graph.add_node(
-                NodeOp::CallFunction,
-                format!("{}_weighted", name),
-                "aten.mul.Tensor".to_string(),
+            let weight_view = reshape(graph, "weight_view", weight_id, &affine_shape);
+            let weighted = shaped_tensor_op(
+                graph,
+                "weighted",
+                "aten.mul.Tensor",
                 vec![IrArg::Node(normalized), IrArg::Node(weight_view)],
-                metas.tensor(&grouped_shape),
+                &grouped_shape,
             );
-            graph.anchor_to(weighted, id);
-            preserve_identity_layout(graph, weighted);
             weighted
         }
         IrArg::None => normalized,
@@ -3742,40 +3710,21 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let biased = match bias_arg {
         IrArg::Node(bias_id) => {
-            let bias_view = graph.add_node(
-                NodeOp::CallFunction,
-                format!("{}_bias_view", name),
-                reshape_target.to_string(),
-                vec![IrArg::Node(bias_id), i64_list(&affine_shape)],
-                metas.tensor(&affine_shape),
-            );
-            graph.anchor_to(bias_view, id);
-            preserve_identity_layout(graph, bias_view);
-
-            let biased = graph.add_node(
-                NodeOp::CallFunction,
-                format!("{}_biased", name),
-                "aten.add.Tensor".to_string(),
+            let bias_view = reshape(graph, "bias_view", bias_id, &affine_shape);
+            let biased = shaped_tensor_op(
+                graph,
+                "biased",
+                "aten.add.Tensor",
                 vec![IrArg::Node(weighted), IrArg::Node(bias_view)],
-                metas.tensor(&grouped_shape),
+                &grouped_shape,
             );
-            graph.anchor_to(biased, id);
-            preserve_identity_layout(graph, biased);
             biased
         }
         IrArg::None => weighted,
         _ => return false,
     };
 
-    let result = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_result", name),
-        reshape_target.to_string(),
-        vec![IrArg::Node(biased), i64_list(&shape)],
-        metas.tensor(&shape),
-    );
-    graph.anchor_to(result, id);
-    preserve_identity_layout(graph, result);
+    let result = reshape(graph, "result", biased, &shape);
 
     let getitem_users: Vec<(NodeId, i64)> = graph
         .nodes
