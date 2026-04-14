@@ -544,23 +544,22 @@ fn decompose_add_sub_alpha(graph: &mut IrGraph, id: NodeId) -> bool {
         .meta
         .cloned_with_val(rhs_shape.clone(), &rhs_dtype);
 
-    let alpha_full = graph.add_node(
-        NodeOp::CallFunction,
+    let alpha_full = graph.add_anchored_full_float(
+        id,
         format!("{}_alpha_full", name),
-        "aten.full.default".to_string(),
-        vec![i64_list(&rhs_shape), IrArg::Float(alpha)],
+        &rhs_shape,
+        alpha,
+        &rhs_dtype,
         scaled_meta.clone(),
     );
-    graph.anchor_to(alpha_full, id);
 
-    let scaled_rhs = graph.add_node(
-        NodeOp::CallFunction,
+    let scaled_rhs = graph.add_anchored_call_function(
+        id,
         format!("{}_alpha_mul", name),
-        "aten.mul.Tensor".to_string(),
+        "aten.mul.Tensor",
         vec![IrArg::Node(rhs_id), IrArg::Node(alpha_full)],
         scaled_meta,
     );
-    graph.anchor_to(scaled_rhs, id);
 
     let mut add_args = graph.nodes[id].args.clone();
     if add_args.len() < 2 {
@@ -568,14 +567,13 @@ fn decompose_add_sub_alpha(graph: &mut IrGraph, id: NodeId) -> bool {
     }
     add_args[1] = IrArg::Node(scaled_rhs);
     add_args.truncate(2);
-    let result = graph.add_node(
-        NodeOp::CallFunction,
+    let result = graph.add_anchored_call_function(
+        id,
         format!("{}_alpha_result", name),
         target,
         add_args,
         meta,
     );
-    graph.anchor_to(result, id);
     graph.replace_and_erase(id, result);
     true
 }
@@ -599,30 +597,28 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
             .unwrap_or_default();
         let dtype = meta.val_dtype().unwrap_or("torch.float32").to_string();
         let metas = MetaFactory::new(&meta, &dtype);
-        let one = graph.add_node(
-            NodeOp::CallFunction,
+        let one = graph.add_anchored_full_float(
+            id,
             format!("{}_one", name),
-            "aten.full.default".to_string(),
-            vec![i64_list(&shape), IrArg::Float(1.0)],
+            &shape,
+            1.0,
+            &dtype,
             metas.tensor(&shape),
         );
-        graph.anchor_to(one, id);
-        let eq = graph.add_node(
-            NodeOp::CallFunction,
+        let eq = graph.add_anchored_call_function(
+            id,
             format!("{}_self_eq", name),
-            "aten.eq.Tensor".to_string(),
+            "aten.eq.Tensor",
             vec![IrArg::Node(input_id), IrArg::Node(input_id)],
             metas.bool(&shape),
         );
-        graph.anchor_to(eq, id);
-        let ones = graph.add_node(
-            NodeOp::CallFunction,
+        let ones = graph.add_anchored_call_function(
+            id,
             format!("{}_ones", name),
-            "aten.where.self".to_string(),
+            "aten.where.self",
             vec![IrArg::Node(eq), IrArg::Node(one), IrArg::Node(one)],
             meta,
         );
-        graph.anchor_to(ones, id);
         graph.replace_and_erase(id, ones);
         return true;
     }
@@ -633,28 +629,26 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let mut base_id = input_id;
     if exp < 0 {
-        let reciprocal = graph.add_node(
-            NodeOp::CallFunction,
+        let reciprocal = graph.add_anchored_call_function(
+            id,
             format!("{}_reciprocal", name),
-            "aten.reciprocal.default".to_string(),
+            "aten.reciprocal.default",
             vec![IrArg::Node(input_id)],
             meta.clone(),
         );
-        graph.anchor_to(reciprocal, id);
         base_id = reciprocal;
         exp = -exp;
     }
 
     let mut result_id = base_id;
     for idx in 1..exp {
-        let mul = graph.add_node(
-            NodeOp::CallFunction,
+        let mul = graph.add_anchored_call_function(
+            id,
             format!("{}_mul{}", name, idx),
-            "aten.mul.Tensor".to_string(),
+            "aten.mul.Tensor",
             vec![IrArg::Node(result_id), IrArg::Node(base_id)],
             meta.clone(),
         );
-        graph.anchor_to(mul, id);
         result_id = mul;
     }
 
@@ -2015,57 +2009,33 @@ fn decompose_sinh(graph: &mut IrGraph, id: NodeId) -> bool {
         .to_string();
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
-    let metas = MetaFactory::new(&meta, &dtype);
+    let tensor_op = |graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>| {
+        graph.add_anchored_call_function_with_val(
+            id,
+            format!("{}_{}", name, suffix),
+            target,
+            args,
+            &meta,
+            shape.clone(),
+            &dtype,
+        )
+    };
 
-    let half = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_half", name),
-        "aten.full.default".to_string(),
-        vec![i64_list(&shape), IrArg::Float(0.5)],
-        metas.tensor(&shape),
-    );
-    graph.anchor_to(half, id);
-
-    let exp_pos = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_exp_pos", name),
-        "aten.exp.default".to_string(),
-        vec![IrArg::Node(x_id)],
-        metas.tensor(&shape),
-    );
-    graph.anchor_to(exp_pos, id);
-
-    let neg = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_neg", name),
-        "aten.neg.default".to_string(),
-        vec![IrArg::Node(x_id)],
-        metas.tensor(&shape),
-    );
-    graph.anchor_to(neg, id);
-
-    let exp_neg = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_exp_neg", name),
-        "aten.exp.default".to_string(),
-        vec![IrArg::Node(neg)],
-        metas.tensor(&shape),
-    );
-    graph.anchor_to(exp_neg, id);
-
-    let diff = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_diff", name),
-        "aten.sub.Tensor".to_string(),
+    let half = add_full_const(graph, id, &name, "half", 0.5, &shape, &dtype, &meta);
+    let exp_pos = tensor_op(graph, "exp_pos", "aten.exp.default", vec![IrArg::Node(x_id)]);
+    let neg = tensor_op(graph, "neg", "aten.neg.default", vec![IrArg::Node(x_id)]);
+    let exp_neg = tensor_op(graph, "exp_neg", "aten.exp.default", vec![IrArg::Node(neg)]);
+    let diff = tensor_op(
+        graph,
+        "diff",
+        "aten.sub.Tensor",
         vec![IrArg::Node(exp_pos), IrArg::Node(exp_neg)],
-        metas.tensor(&shape),
     );
-    graph.anchor_to(diff, id);
 
-    let result = graph.add_node(
-        NodeOp::CallFunction,
+    let result = graph.add_anchored_call_function(
+        id,
         format!("{}_result", name),
-        "aten.mul.Tensor".to_string(),
+        "aten.mul.Tensor",
         vec![IrArg::Node(diff), IrArg::Node(half)],
         meta,
     );
@@ -2090,57 +2060,33 @@ fn decompose_cosh(graph: &mut IrGraph, id: NodeId) -> bool {
         .to_string();
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
-    let metas = MetaFactory::new(&meta, &dtype);
+    let tensor_op = |graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>| {
+        graph.add_anchored_call_function_with_val(
+            id,
+            format!("{}_{}", name, suffix),
+            target,
+            args,
+            &meta,
+            shape.clone(),
+            &dtype,
+        )
+    };
 
-    let half = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_half", name),
-        "aten.full.default".to_string(),
-        vec![i64_list(&shape), IrArg::Float(0.5)],
-        metas.tensor(&shape),
-    );
-    graph.anchor_to(half, id);
-
-    let exp_pos = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_exp_pos", name),
-        "aten.exp.default".to_string(),
-        vec![IrArg::Node(x_id)],
-        metas.tensor(&shape),
-    );
-    graph.anchor_to(exp_pos, id);
-
-    let neg = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_neg", name),
-        "aten.neg.default".to_string(),
-        vec![IrArg::Node(x_id)],
-        metas.tensor(&shape),
-    );
-    graph.anchor_to(neg, id);
-
-    let exp_neg = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_exp_neg", name),
-        "aten.exp.default".to_string(),
-        vec![IrArg::Node(neg)],
-        metas.tensor(&shape),
-    );
-    graph.anchor_to(exp_neg, id);
-
-    let sum = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_sum", name),
-        "aten.add.Tensor".to_string(),
+    let half = add_full_const(graph, id, &name, "half", 0.5, &shape, &dtype, &meta);
+    let exp_pos = tensor_op(graph, "exp_pos", "aten.exp.default", vec![IrArg::Node(x_id)]);
+    let neg = tensor_op(graph, "neg", "aten.neg.default", vec![IrArg::Node(x_id)]);
+    let exp_neg = tensor_op(graph, "exp_neg", "aten.exp.default", vec![IrArg::Node(neg)]);
+    let sum = tensor_op(
+        graph,
+        "sum",
+        "aten.add.Tensor",
         vec![IrArg::Node(exp_pos), IrArg::Node(exp_neg)],
-        metas.tensor(&shape),
     );
-    graph.anchor_to(sum, id);
 
-    let result = graph.add_node(
-        NodeOp::CallFunction,
+    let result = graph.add_anchored_call_function(
+        id,
         format!("{}_result", name),
-        "aten.mul.Tensor".to_string(),
+        "aten.mul.Tensor",
         vec![IrArg::Node(sum), IrArg::Node(half)],
         meta,
     );
@@ -2165,57 +2111,43 @@ fn decompose_asinh(graph: &mut IrGraph, id: NodeId) -> bool {
         .to_string();
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
-    let metas = MetaFactory::new(&meta, &dtype);
+    let tensor_op = |graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>| {
+        graph.add_anchored_call_function_with_val(
+            id,
+            format!("{}_{}", name, suffix),
+            target,
+            args,
+            &meta,
+            shape.clone(),
+            &dtype,
+        )
+    };
 
-    let one = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_one", name),
-        "aten.full.default".to_string(),
-        vec![i64_list(&shape), IrArg::Float(1.0)],
-        metas.tensor(&shape),
-    );
-    graph.anchor_to(one, id);
-
-    let square = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_square", name),
-        "aten.mul.Tensor".to_string(),
+    let one = add_full_const(graph, id, &name, "one", 1.0, &shape, &dtype, &meta);
+    let square = tensor_op(
+        graph,
+        "square",
+        "aten.mul.Tensor",
         vec![IrArg::Node(x_id), IrArg::Node(x_id)],
-        metas.tensor(&shape),
     );
-    graph.anchor_to(square, id);
-
-    let radicand = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_radicand", name),
-        "aten.add.Tensor".to_string(),
+    let radicand = tensor_op(
+        graph,
+        "radicand",
+        "aten.add.Tensor",
         vec![IrArg::Node(square), IrArg::Node(one)],
-        metas.tensor(&shape),
     );
-    graph.anchor_to(radicand, id);
-
-    let sqrt = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_sqrt", name),
-        "aten.sqrt.default".to_string(),
-        vec![IrArg::Node(radicand)],
-        metas.tensor(&shape),
-    );
-    graph.anchor_to(sqrt, id);
-
-    let add = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_sum", name),
-        "aten.add.Tensor".to_string(),
+    let sqrt = tensor_op(graph, "sqrt", "aten.sqrt.default", vec![IrArg::Node(radicand)]);
+    let add = tensor_op(
+        graph,
+        "sum",
+        "aten.add.Tensor",
         vec![IrArg::Node(x_id), IrArg::Node(sqrt)],
-        metas.tensor(&shape),
     );
-    graph.anchor_to(add, id);
 
-    let result = graph.add_node(
-        NodeOp::CallFunction,
+    let result = graph.add_anchored_call_function(
+        id,
         format!("{}_result", name),
-        "aten.log.default".to_string(),
+        "aten.log.default",
         vec![IrArg::Node(add)],
         meta,
     );
@@ -2240,66 +2172,49 @@ fn decompose_acosh(graph: &mut IrGraph, id: NodeId) -> bool {
         .to_string();
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
-    let metas = MetaFactory::new(&meta, &dtype);
+    let tensor_op = |graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>| {
+        graph.add_anchored_call_function_with_val(
+            id,
+            format!("{}_{}", name, suffix),
+            target,
+            args,
+            &meta,
+            shape.clone(),
+            &dtype,
+        )
+    };
 
-    let one = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_one", name),
-        "aten.full.default".to_string(),
-        vec![i64_list(&shape), IrArg::Float(1.0)],
-        metas.tensor(&shape),
-    );
-    graph.anchor_to(one, id);
-
-    let minus = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_minus", name),
-        "aten.sub.Tensor".to_string(),
+    let one = add_full_const(graph, id, &name, "one", 1.0, &shape, &dtype, &meta);
+    let minus = tensor_op(
+        graph,
+        "minus",
+        "aten.sub.Tensor",
         vec![IrArg::Node(x_id), IrArg::Node(one)],
-        metas.tensor(&shape),
     );
-    graph.anchor_to(minus, id);
-
-    let plus = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_plus", name),
-        "aten.add.Tensor".to_string(),
+    let plus = tensor_op(
+        graph,
+        "plus",
+        "aten.add.Tensor",
         vec![IrArg::Node(x_id), IrArg::Node(one)],
-        metas.tensor(&shape),
     );
-    graph.anchor_to(plus, id);
-
-    let radicand = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_radicand", name),
-        "aten.mul.Tensor".to_string(),
+    let radicand = tensor_op(
+        graph,
+        "radicand",
+        "aten.mul.Tensor",
         vec![IrArg::Node(minus), IrArg::Node(plus)],
-        metas.tensor(&shape),
     );
-    graph.anchor_to(radicand, id);
-
-    let sqrt = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_sqrt", name),
-        "aten.sqrt.default".to_string(),
-        vec![IrArg::Node(radicand)],
-        metas.tensor(&shape),
-    );
-    graph.anchor_to(sqrt, id);
-
-    let add = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_sum", name),
-        "aten.add.Tensor".to_string(),
+    let sqrt = tensor_op(graph, "sqrt", "aten.sqrt.default", vec![IrArg::Node(radicand)]);
+    let add = tensor_op(
+        graph,
+        "sum",
+        "aten.add.Tensor",
         vec![IrArg::Node(x_id), IrArg::Node(sqrt)],
-        metas.tensor(&shape),
     );
-    graph.anchor_to(add, id);
 
-    let result = graph.add_node(
-        NodeOp::CallFunction,
+    let result = graph.add_anchored_call_function(
+        id,
         format!("{}_result", name),
-        "aten.log.default".to_string(),
+        "aten.log.default",
         vec![IrArg::Node(add)],
         meta,
     );
