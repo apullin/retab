@@ -312,7 +312,7 @@ impl FxCastInt64InputToInt32Effect {
             )
         }) {
             Ok(name) => name,
-            Err(err) if self.allow_missing => return Ok(false),
+            Err(_err) if self.allow_missing => return Ok(false),
             Err(err) => return Err(err),
         };
 
@@ -320,7 +320,7 @@ impl FxCastInt64InputToInt32Effect {
             exported_tensor_container(ctx.exported_program(), self.input_kind, &target_name)?;
         let tensor = match container.get_item(&target_name) {
             Ok(tensor) => tensor,
-            Err(err) if self.allow_missing => return Ok(false),
+            Err(_err) if self.allow_missing => return Ok(false),
             Err(err) => return Err(err),
         };
 
