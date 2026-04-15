@@ -1,7 +1,17 @@
 use std::fmt;
 use std::io::{self, Write};
 
+fn logging_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("TOSA_ENGINE_DEBUG").is_ok() || std::env::var("TOSA_ENGINE_LOG").is_ok()
+    })
+}
+
 pub(crate) fn log_line(args: fmt::Arguments<'_>) {
+    if !logging_enabled() {
+        return;
+    }
     let mut stderr = io::stderr().lock();
     let _ = stderr.write_fmt(args);
     let _ = stderr.write_all(b"\n");

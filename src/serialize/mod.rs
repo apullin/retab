@@ -769,6 +769,7 @@ fn collect_serialized_graph_items(
     store: &TensorStore,
     normalize_outputs: bool,
 ) -> SerializedGraphItems {
+    let debug = FxGraphModule::debug();
     // Use insertion order directly instead of topological sort.
     //
     // The FX graph is topologically ordered by construction (Python FX enforces
@@ -782,10 +783,12 @@ fn collect_serialized_graph_items(
     // that causes large numbers of nodes to be flagged as "stale" and
     // appended out of order, producing malformed TOSA flatbuffers.
     let sorted = graph.all_node_ids();
-    eprintln!("[Serialize] using insertion order, {} nodes", sorted.len());
+    if debug {
+        eprintln!("[Serialize] using insertion order, {} nodes", sorted.len());
+    }
 
     // Debug-mode validation: verify insertion order is topological
-    if FxGraphModule::debug() {
+    if debug {
         let mut position: std::collections::HashMap<crate::graph::ir::NodeId, usize> =
             std::collections::HashMap::new();
         for (i, &id) in sorted.iter().enumerate() {
@@ -838,7 +841,7 @@ fn collect_serialized_graph_items(
         let _node_start = std::time::Instant::now();
         // Timing logged below after match
 
-        if FxGraphModule::debug() {
+        if debug {
             eprintln!(
                 "[Serialize] node '{}' op={:?} target={:?}",
                 node.name, node.op, node.target
@@ -898,7 +901,7 @@ fn collect_serialized_graph_items(
             }
         }
         let _elapsed = _node_start.elapsed();
-        if _elapsed.as_millis() > 100 {
+        if debug && _elapsed.as_millis() > 100 {
             eprintln!(
                 "[Serialize] SLOW node {}/{} name={} target={:?} took {:?}",
                 loop_idx,
@@ -910,12 +913,14 @@ fn collect_serialized_graph_items(
         }
     }
 
-    eprintln!(
-        "[Serialize] topo sort done, collected {} tensors, {} operators, {} shapes",
-        tensors.len(),
-        operators.len(),
-        shapes.len()
-    );
+    if debug {
+        eprintln!(
+            "[Serialize] topo sort done, collected {} tensors, {} operators, {} shapes",
+            tensors.len(),
+            operators.len(),
+            shapes.len()
+        );
+    }
 
     SerializedGraphItems {
         tensors,
@@ -941,13 +946,21 @@ fn build_fb_region<'fbb>(
 
     // Build the flatbuffer bottom-up
     // Pre-serialize all sub-tables
-    eprintln!("[Serialize] building fb tensors...");
+    if FxGraphModule::debug() {
+        eprintln!("[Serialize] building fb tensors...");
+    }
     let fb_tensors = build_fb_tensors(builder, &serialized.tensors);
-    eprintln!("[Serialize] building fb shapes...");
+    if FxGraphModule::debug() {
+        eprintln!("[Serialize] building fb shapes...");
+    }
     let fb_shapes = build_fb_shapes(builder, &serialized.shapes);
-    eprintln!("[Serialize] building fb operators...");
+    if FxGraphModule::debug() {
+        eprintln!("[Serialize] building fb operators...");
+    }
     let fb_operators = build_fb_operators(builder, &serialized.operators);
-    eprintln!("[Serialize] assembling graph...");
+    if FxGraphModule::debug() {
+        eprintln!("[Serialize] assembling graph...");
+    }
 
     // Build input/output name vectors
     let fb_input_strs: Vec<_> = serialized
@@ -1044,12 +1057,14 @@ pub fn serialize_graphs_to_tosa(graphs: &[(String, Graph)], store: &TensorStore)
     let estimated = tensor_bytes + node_count * 512 + 1024 * 1024; // tensors + nodes + 1MB overhead
     visitors::shape_utils::clear_shape_cache();
     visitors::dtype_quant::clear_dtype_cache();
-    eprintln!(
-        "[Serialize] pre-allocating {}MB for {} tensors, {} nodes",
-        estimated / (1024 * 1024),
-        store.buffers.len(),
-        node_count
-    );
+    if FxGraphModule::debug() {
+        eprintln!(
+            "[Serialize] pre-allocating {}MB for {} tensors, {} nodes",
+            estimated / (1024 * 1024),
+            store.buffers.len(),
+            node_count
+        );
+    }
     let mut builder = FlatBufferBuilder::with_capacity(estimated.max(16 * 1024 * 1024));
     let regions: Vec<_> = graphs
         .iter()
