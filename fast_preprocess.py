@@ -1,13 +1,12 @@
-"""Backward-compatibility shim.
+"""Backward-compatibility shim."""
 
-Redirects the old ``from fast_preprocess import ...`` import path to the
-new ``retab`` package.  Remove once all external callers have migrated.
-"""
-
-from retab import (  # noqa: F401
+from retab.integration.executorch_arm import (  # noqa: F401
     FastTOSABackend,
     _all_rust_preprocess,
+    activated,
     fast_preprocess,
+    install,
     patch_tosa_backend,
     unpatch_tosa_backend,
+    uninstall,
 )
