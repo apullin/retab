@@ -3,8 +3,10 @@
 A fast TOSA generator for ExecuTorch ARM backends, written in Rust.
 
 Takes a quantized FX graph from ExecuTorch's ARM partitioner and produces
-a TOSA flatbuffer — the same output as the Python `TOSABackend._preprocess`,
-but **500-1000x faster** (~56ms vs ~60s on a typical quantized CNN).
+a TOSA flatbuffer for the direct Rust/TOSA fast lane.
+
+Current local benchmarking, artifact checks, and acceptance workflow are
+documented in [docs/FASTLANE_WORKFLOW.md](docs/FASTLANE_WORKFLOW.md).
 
 ## What it replaces
 
@@ -21,10 +23,14 @@ Python orchestration layer (7k lines).
 
 ## Validation
 
-- **1,312 structured op tests**: 0 failures (ExecuTorch ARM test suite)
-- **50 random CNN architectures**: exact numerical match vs Python pipeline
-  through the TOSA reference model
-- **Fuzz testing**: 50 random seeds, both pipelines produce identical outputs
+The maintained local validation contract is:
+
+- artifact comparison against the Python reference path
+- optional semantic comparison through the TOSA reference model
+- full Docker-backed direct ARM acceptance in ExecuTorch
+
+See [docs/FASTLANE_WORKFLOW.md](docs/FASTLANE_WORKFLOW.md) for the exact
+commands and current expected acceptance result.
 
 ## Quick start
 
@@ -58,10 +64,13 @@ pip install -e .
 
 ```bash
 # From the executorch directory:
-ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH=1 \
-ARM_TOSA_ENGINE_ROOT=/path/to/retab \
-  pytest backends/arm/test/ops/ -k "tosa_INT[" -n 8
+EXECUTORCH_ARM_DOCKER_IMAGE_TAG=arm-baremetal:latest \
+SCCACHE_DISABLE=1 \
+  ./.ci/scripts/run-arm-baremetal-docker-local.sh test_pytest_ops_tosa_direct_lower
 ```
+
+For the current direct fast-lane development workflow, including model probes
+and artifact checks, see [docs/FASTLANE_WORKFLOW.md](docs/FASTLANE_WORKFLOW.md).
 
 ### Python API
 
