@@ -1,0 +1,19 @@
+[executorch]
+mode = "source-checkout"
+reason = "RETAB currently relies on seam-enabled ExecuTorch builds that are not guaranteed to exist in released pip wheels."
+default_source_hint = "../executorch"
+
+[executorch.required_seams]
+preprocess_override = "executorch.backends.arm.tosa.backend.TOSABackend.set_preprocess_override"
+edge_manager_override = "executorch.exir.program.set_edge_manager_for_partitioners_override"
+
+[python]
+requires = ">=3.10"
+tested = ["3.12"]
+
+[torch]
+tested = [
+  "torch 2.10.0",
+  "torchvision 0.25.0",
+  "torchao 0.16.0+cpu",
+]

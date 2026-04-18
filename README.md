@@ -37,27 +37,49 @@ commands and current expected acceptance result.
 ### Prerequisites
 
 - Rust toolchain (stable)
-- Python ≥ 3.10
-- [maturin](https://github.com/PyO3/maturin) (`pip install maturin`)
-- ExecuTorch with the ARM backend (see below)
+- Python >= 3.10
+- [`uv`](https://docs.astral.sh/uv/)
+- a seam-enabled ExecuTorch checkout with the required RETAB hook points
+  (see [compat/executorch.toml](compat/executorch.toml))
 
-### Install RETAB
+### Bootstrap a dedicated UV environment
+
+Use RETAB in its own virtual environment. Do not rely on the user's base
+Python install.
 
 ```bash
 git clone https://github.com/apullin/retab.git
 cd retab
-pip install -e .   # or: maturin develop --release
+./scripts/bootstrap_uv.sh --source /path/to/executorch
 ```
 
-### Set up ExecuTorch
+This will:
 
-Use the [`use-retab`](https://github.com/apullin/executorch/tree/use-retab)
-branch which adds a one-commit hook to load RETAB:
+- create `.venv/`
+- install the Torch stack into that environment
+- install ExecuTorch's Python dependencies and expose the source checkout via a
+  `.pth` overlay
+- build RETAB with `maturin develop --release`
+- run a smoke lowering pass
+
+### Build only
+
+If the environment already exists and ExecuTorch is already installed:
 
 ```bash
-git clone https://github.com/apullin/executorch.git -b use-retab
-cd executorch
-pip install -e .
+./scripts/build_retab.sh
+```
+
+### Smoke lower
+
+```bash
+./scripts/smoke_checkout_build_and_lower.sh
+```
+
+### Example lowering script
+
+```bash
+.venv/bin/python examples/lower_with_retab.py --out tmp/tiny_cnn.pte
 ```
 
 ### Run the test suite
@@ -75,16 +97,12 @@ and artifact checks, see [docs/FASTLANE_WORKFLOW.md](docs/FASTLANE_WORKFLOW.md).
 ### Python API
 
 ```python
-from retab import patch_tosa_backend, unpatch_tosa_backend
+from retab.integration.executorch_arm import activated
 
-# Monkey-patch TOSABackend._preprocess with the fast Rust path
-patch_tosa_backend()
-
-# ... run ExecuTorch ARM lowering as usual ...
-# RETAB is now active for all TOSA generation
-
-# Restore the original Python path
-unpatch_tosa_backend()
+with activated():
+    # ... run ExecuTorch ARM lowering as usual ...
+    # RETAB is now active for all TOSA generation
+    ...
 ```
 
 ## Architecture

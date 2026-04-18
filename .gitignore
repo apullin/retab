@@ -11,9 +11,11 @@ __pycache__/
 retab-*.dist-info/
 dist/
 build/
+tmp/
 tmp_*/
 tmp_*.log
 *.whl
+uv.lock
 
 # Local dev artifacts
 .claude/
