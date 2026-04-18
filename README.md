@@ -82,6 +82,22 @@ If the environment already exists and ExecuTorch is already installed:
 .venv/bin/python examples/lower_with_retab.py --out tmp/tiny_cnn.pte
 ```
 
+### Benchmark stock ExecuTorch vs RETAB
+
+```bash
+.venv/bin/python scripts/benchmark_stock_vs_retab.py --model mobilenet_v3_small
+```
+
+This runs the same prepared quantized model through:
+
+- stock ExecuTorch Arm lowering
+- RETAB-activated lowering
+
+and reports median lower time plus final `.pte` SHA-256 hashes.
+
+The stock-vs-RETAB benchmark currently expects an environment with the native
+`tosa_serializer` package available for the stock ExecuTorch Arm path.
+
 ### Run the test suite
 
 ```bash

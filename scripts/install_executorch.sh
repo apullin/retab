@@ -70,20 +70,20 @@ else:
 PY
 )"
 
-if ! "${python_bin}" -c "import tosa_serializer" >/dev/null 2>&1; then
-  serializer_python_src="${executorch_src}/examples/arm/arm-scratch/tosa-tools/serialization/python"
-  if [[ ! -d "${serializer_python_src}" ]]; then
-    echo "error: local tosa_serializer python sources not found at ${serializer_python_src}" >&2
-    echo "hint: bootstrap currently expects an ExecuTorch checkout with examples/arm/arm-scratch/tosa-tools present" >&2
-    exit 1
-  fi
+serializer_python_src="${executorch_src}/examples/arm/arm-scratch/tosa-tools/serialization/python"
+if [[ ! -d "${serializer_python_src}" ]]; then
+  echo "error: local tosa_serializer python sources not found at ${serializer_python_src}" >&2
+  echo "hint: bootstrap currently expects an ExecuTorch checkout with examples/arm/arm-scratch/tosa-tools present" >&2
+  exit 1
+fi
 
-  uv pip install --python "${python_bin}" ml-dtypes
-  printf '%s\n' "${serializer_python_src}" > "${site_packages}/tosa-serializer-source-overlay.pth"
-  cat > "${site_packages}/tosa_serializer.py" <<'PY'
+uv pip install --python "${python_bin}" ml-dtypes
+printf '%s\n' "${serializer_python_src}" > "${site_packages}/tosa-serializer-source-overlay.pth"
+cat > "${site_packages}/tosa_serializer.py" <<'PY'
 from enum import IntEnum
 
 from serializer.tosa_serializer import *  # noqa: F401,F403
+from serializer.tosa_serializer import TosaSerializer as _PurePythonTosaSerializer
 from serializer.tosa_serializer import (
     ConstMode,
     TensorDir,
@@ -118,8 +118,40 @@ RESULT = TensorDir.RESULT
 
 ShapeMap = dict
 TensorMap = dict
+
+
+class TosaSerializer(_PurePythonTosaSerializer):
+    def __init__(
+        self,
+        pathPrefix,
+        constMode=ConstMode.EMBED,
+        *,
+        targetMajor=None,
+        targetMinor=None,
+        targetPatch=None,
+        targetDraft=None,
+        tosa_version_major=None,
+        tosa_version_minor=None,
+        tosa_version_patch=None,
+        tosa_version_draft=None,
+    ):
+        super().__init__(
+            pathPrefix,
+            constMode=constMode,
+            tosa_version_major=(
+                targetMajor if targetMajor is not None else tosa_version_major
+            ),
+            tosa_version_minor=(
+                targetMinor if targetMinor is not None else tosa_version_minor
+            ),
+            tosa_version_patch=(
+                targetPatch if targetPatch is not None else tosa_version_patch
+            ),
+            tosa_version_draft=(
+                targetDraft if targetDraft is not None else tosa_version_draft
+            ),
+        )
 PY
-fi
 
 printf '%s\n' "${executorch_src}/src" > "${site_packages}/executorch-source-overlay.pth"
 
