@@ -161,13 +161,16 @@ def lower_once(
     compile_spec: EthosUCompileSpec,
     *,
     use_retab: bool,
+    parallel_backend_preprocess_workers: int | None = None,
 ) -> tuple[bytes, float]:
     ep = copy.deepcopy(quantized_ep)
     partitioner = EthosUPartitioner(compile_spec)
 
     start = time.perf_counter()
     if use_retab:
-        with activated():
+        with activated(
+            parallel_backend_preprocess_workers=parallel_backend_preprocess_workers
+        ):
             edge = to_edge_transform_and_lower(
                 ep,
                 partitioner=[partitioner],
@@ -192,11 +195,17 @@ def run_benchmark(
     use_retab: bool,
     warmup: int,
     runs: int,
+    parallel_backend_preprocess_workers: int | None = None,
 ) -> RunSummary:
     warm_hash = ""
     warm_size = 0
     for _ in range(warmup):
-        pte, _ = lower_once(quantized_ep, compile_spec, use_retab=use_retab)
+        pte, _ = lower_once(
+            quantized_ep,
+            compile_spec,
+            use_retab=use_retab,
+            parallel_backend_preprocess_workers=parallel_backend_preprocess_workers,
+        )
         warm_hash = hashlib.sha256(pte).hexdigest()
         warm_size = len(pte)
 
@@ -204,7 +213,12 @@ def run_benchmark(
     pte_hash = warm_hash
     pte_bytes = warm_size
     for _ in range(runs):
-        pte, elapsed_s = lower_once(quantized_ep, compile_spec, use_retab=use_retab)
+        pte, elapsed_s = lower_once(
+            quantized_ep,
+            compile_spec,
+            use_retab=use_retab,
+            parallel_backend_preprocess_workers=parallel_backend_preprocess_workers,
+        )
         times_s.append(elapsed_s)
         if not pte_hash:
             pte_hash = hashlib.sha256(pte).hexdigest()
@@ -229,6 +243,7 @@ def run_one_model(
     runs: int,
     calibration_runs: int,
     require_identical_artifact: bool,
+    parallel_backend_preprocess_workers: int | None,
 ) -> dict[str, object]:
     quantized_ep, compile_spec = prepare_quantized_ep(model_name, calibration_runs)
 
@@ -247,6 +262,7 @@ def run_one_model(
         use_retab=True,
         warmup=warmup,
         runs=runs,
+        parallel_backend_preprocess_workers=parallel_backend_preprocess_workers,
     )
 
     same_artifact = stock.pte_hash == fast.pte_hash and stock.pte_bytes == fast.pte_bytes
@@ -318,6 +334,15 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--calibration-runs", type=int, default=5)
     parser.add_argument("--require-identical-artifact", action="store_true")
+    parser.add_argument(
+        "--parallel-backend-preprocess-workers",
+        type=int,
+        default=None,
+        help=(
+            "Opt into RETAB's experimental multi-process backend preprocess "
+            "path for the fast side only."
+        ),
+    )
     args = parser.parse_args()
 
     require_native_stock_serializer()
@@ -332,6 +357,7 @@ def main() -> None:
             runs=args.runs,
             calibration_runs=args.calibration_runs,
             require_identical_artifact=args.require_identical_artifact,
+            parallel_backend_preprocess_workers=args.parallel_backend_preprocess_workers,
         )
         print_one(result, args.runs, args.warmup)
         return
@@ -347,6 +373,7 @@ def main() -> None:
                     runs=args.runs,
                     calibration_runs=args.calibration_runs,
                     require_identical_artifact=args.require_identical_artifact,
+                    parallel_backend_preprocess_workers=args.parallel_backend_preprocess_workers,
                 )
             )
         except Exception as exc:

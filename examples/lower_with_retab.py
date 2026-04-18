@@ -75,10 +75,14 @@ def prepare_quantized_ep(
 def lower_with_retab(
     quantized_ep: torch.export.ExportedProgram,
     compile_spec: EthosUCompileSpec,
+    *,
+    parallel_backend_preprocess_workers: int | None = None,
 ) -> tuple[bytes, float]:
     partitioner = EthosUPartitioner(compile_spec)
 
-    with activated():
+    with activated(
+        parallel_backend_preprocess_workers=parallel_backend_preprocess_workers
+    ):
         start = time.perf_counter()
         edge = to_edge_transform_and_lower(
             quantized_ep,
@@ -97,17 +101,34 @@ def main() -> None:
     parser.add_argument("--model", default="tiny_cnn", choices=["tiny_cnn"])
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--calibration-runs", type=int, default=5)
+    parser.add_argument(
+        "--parallel-backend-preprocess-workers",
+        type=int,
+        default=None,
+        help=(
+            "Opt into RETAB's experimental multi-process backend preprocess "
+            "path. Intended for highly fragmented multi-delegate lowers."
+        ),
+    )
     args = parser.parse_args()
 
     quantized_ep, compile_spec = prepare_quantized_ep(
         args.model, args.calibration_runs
     )
-    pte, lower_s = lower_with_retab(quantized_ep, compile_spec)
+    pte, lower_s = lower_with_retab(
+        quantized_ep,
+        compile_spec,
+        parallel_backend_preprocess_workers=args.parallel_backend_preprocess_workers,
+    )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_bytes(pte)
 
     print(f"model={args.model}")
+    print(
+        "parallel_backend_preprocess_workers="
+        f"{args.parallel_backend_preprocess_workers}"
+    )
     print(f"lower_s={lower_s:.3f}")
     print(f"pte_bytes={len(pte)}")
     print(f"wrote={args.out}")

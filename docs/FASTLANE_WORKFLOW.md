@@ -97,6 +97,30 @@ For a fast-lane optimization to be worth keeping:
 
 If a change wins time but fragments into multiple delegates, that is not a keep.
 
+## Experimental Parallel Backend Preprocess
+
+RETAB exposes an opt-in escape hatch for badly fragmented lowers that produce
+many delegates:
+
+```python
+from retab.integration.executorch_arm import activated
+
+with activated(parallel_backend_preprocess_workers=14):
+    ...
+```
+
+Equivalent env-var form:
+
+```bash
+ARM_TOSA_ENGINE_PARALLEL_BACKEND_PREPROCESS_WORKERS=14
+```
+
+Use it only for fragmented multi-delegate cases. It is not enabled by default
+because some cleaner single-delegate models regress or stay flat.
+
+The current implementation also falls back to serial when debug artifact dumps
+are enabled, to avoid path collisions across worker processes.
+
 ## Benchmark Discipline
 
 Use subprocess sweeps for rough triage.

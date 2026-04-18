@@ -82,10 +82,28 @@ If the environment already exists and ExecuTorch is already installed:
 .venv/bin/python examples/lower_with_retab.py --out tmp/tiny_cnn.pte
 ```
 
+For highly fragmented multi-delegate lowers, RETAB also exposes an
+experimental parallel backend-preprocess mode:
+
+```bash
+.venv/bin/python examples/lower_with_retab.py \
+  --parallel-backend-preprocess-workers 14 \
+  --out tmp/tiny_cnn.pte
+```
+
 ### Benchmark stock ExecuTorch vs RETAB
 
 ```bash
 .venv/bin/python scripts/benchmark_stock_vs_retab.py --model mobilenet_v3_small
+```
+
+To benchmark the experimental parallel backend-preprocess path on the RETAB
+side only:
+
+```bash
+.venv/bin/python scripts/benchmark_stock_vs_retab.py \
+  --model densenet121 \
+  --parallel-backend-preprocess-workers 14
 ```
 
 This runs the same prepared quantized model through:
@@ -120,6 +138,17 @@ with activated():
     # RETAB is now active for all TOSA generation
     ...
 ```
+
+The same API exposes the experimental multi-process backend-preprocess path:
+
+```python
+with activated(parallel_backend_preprocess_workers=14):
+    ...
+```
+
+Keep that opt-in. It is useful for heavily fragmented lowers with many
+delegates, but it is not a universal win on already-clean single-delegate
+graphs.
 
 ## Architecture
 
