@@ -51,6 +51,13 @@ class RunSummary:
         return statistics.median(self.times_s)
 
 
+@dataclass(frozen=True)
+class ModelEntry:
+    name: str
+    factory: callable
+    input_shape: tuple[int, ...]
+
+
 def require_native_stock_serializer() -> None:
     serializer_path = Path(ts.__file__).resolve()
     if serializer_path.name == "tosa_serializer.py":
@@ -80,20 +87,48 @@ class TinyCnn(torch.nn.Module):
         return self.classifier(x)
 
 
+MODEL_ENTRIES: dict[str, ModelEntry] = {
+    "tiny_cnn": ModelEntry("tiny_cnn", TinyCnn, (1, 1, 28, 28)),
+    "resnet18": ModelEntry("resnet18", lambda: models.resnet18(weights=None), (1, 3, 224, 224)),
+    "resnet34": ModelEntry("resnet34", lambda: models.resnet34(weights=None), (1, 3, 224, 224)),
+    "resnet50": ModelEntry("resnet50", lambda: models.resnet50(weights=None), (1, 3, 224, 224)),
+    "wide_resnet50_2": ModelEntry(
+        "wide_resnet50_2", lambda: models.wide_resnet50_2(weights=None), (1, 3, 224, 224)
+    ),
+    "mobilenet_v2": ModelEntry("mobilenet_v2", lambda: models.mobilenet_v2(weights=None), (1, 3, 224, 224)),
+    "mobilenet_v3_small": ModelEntry(
+        "mobilenet_v3_small", lambda: models.mobilenet_v3_small(weights=None), (1, 3, 232, 232)
+    ),
+    "efficientnet_b0": ModelEntry(
+        "efficientnet_b0", lambda: models.efficientnet_b0(weights=None), (1, 3, 224, 224)
+    ),
+    "convnext_tiny": ModelEntry(
+        "convnext_tiny", lambda: models.convnext_tiny(weights=None), (1, 3, 224, 224)
+    ),
+    "densenet121": ModelEntry(
+        "densenet121", lambda: models.densenet121(weights=None), (1, 3, 224, 224)
+    ),
+    "vgg16": ModelEntry("vgg16", lambda: models.vgg16(weights=None), (1, 3, 224, 224)),
+}
+
+VISION_SUITE = [
+    "resnet18",
+    "resnet34",
+    "resnet50",
+    "wide_resnet50_2",
+    "mobilenet_v2",
+    "mobilenet_v3_small",
+    "efficientnet_b0",
+    "convnext_tiny",
+    "densenet121",
+    "vgg16",
+]
+
+
 def build_model(model_name: str) -> tuple[torch.nn.Module, torch.Tensor]:
     torch.manual_seed(0)
-
-    if model_name == "tiny_cnn":
-        return TinyCnn().eval(), torch.randn(1, 1, 28, 28)
-    if model_name == "resnet18":
-        return models.resnet18(weights=None).eval(), torch.randn(1, 3, 224, 224)
-    if model_name == "mobilenet_v3_small":
-        return (
-            models.mobilenet_v3_small(weights=None).eval(),
-            torch.randn(1, 3, 232, 232),
-        )
-
-    raise ValueError(f"unsupported model {model_name!r}")
+    entry = MODEL_ENTRIES[model_name]
+    return entry.factory().eval(), torch.randn(*entry.input_shape)
 
 
 def prepare_quantized_ep(
@@ -187,50 +222,58 @@ def format_times(times_s: list[float]) -> str:
     return ", ".join(f"{t:.3f}" for t in times_s)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Compare stock ExecuTorch Arm lowering against RETAB."
-    )
-    parser.add_argument(
-        "--model",
-        default="mobilenet_v3_small",
-        choices=["tiny_cnn", "resnet18", "mobilenet_v3_small"],
-    )
-    parser.add_argument("--runs", type=int, default=5)
-    parser.add_argument("--warmup", type=int, default=1)
-    parser.add_argument("--calibration-runs", type=int, default=5)
-    parser.add_argument("--require-identical-artifact", action="store_true")
-    args = parser.parse_args()
-
-    require_native_stock_serializer()
-
-    quantized_ep, compile_spec = prepare_quantized_ep(
-        args.model, args.calibration_runs
-    )
+def run_one_model(
+    model_name: str,
+    *,
+    warmup: int,
+    runs: int,
+    calibration_runs: int,
+    require_identical_artifact: bool,
+) -> dict[str, object]:
+    quantized_ep, compile_spec = prepare_quantized_ep(model_name, calibration_runs)
 
     stock = run_benchmark(
         "stock",
         quantized_ep,
         compile_spec,
         use_retab=False,
-        warmup=args.warmup,
-        runs=args.runs,
+        warmup=warmup,
+        runs=runs,
     )
     fast = run_benchmark(
         "retab",
         quantized_ep,
         compile_spec,
         use_retab=True,
-        warmup=args.warmup,
-        runs=args.runs,
+        warmup=warmup,
+        runs=runs,
     )
 
     same_artifact = stock.pte_hash == fast.pte_hash and stock.pte_bytes == fast.pte_bytes
     speedup = stock.median_s / fast.median_s if fast.median_s > 0 else float("inf")
 
-    print(f"model={args.model}")
-    print(f"runs={args.runs}")
-    print(f"warmup={args.warmup}")
+    if require_identical_artifact and not same_artifact:
+        raise RuntimeError(f"{model_name}: stock and RETAB artifacts differ")
+
+    return {
+        "model": model_name,
+        "stock": stock,
+        "retab": fast,
+        "same_artifact": same_artifact,
+        "speedup": speedup,
+    }
+
+
+def print_one(result: dict[str, object], runs: int, warmup: int) -> None:
+    model_name = result["model"]
+    stock = result["stock"]
+    fast = result["retab"]
+    same_artifact = result["same_artifact"]
+    speedup = result["speedup"]
+
+    print(f"model={model_name}")
+    print(f"runs={runs}")
+    print(f"warmup={warmup}")
     print()
     print(f"stock_times_s={format_times(stock.times_s)}")
     print(f"stock_median_s={stock.median_s:.3f}")
@@ -245,8 +288,70 @@ def main() -> None:
     print(f"speedup_x={speedup:.2f}")
     print(f"artifact_match={'yes' if same_artifact else 'no'}")
 
-    if args.require_identical_artifact and not same_artifact:
-        raise SystemExit("error: stock and RETAB artifacts differ")
+
+def print_suite(results: list[dict[str, object]]) -> None:
+    print("model,status,stock_s,retab_s,speedup_x,artifact_match,stock_bytes,retab_bytes,error")
+    for result in results:
+        if "error" in result:
+            print(f"{result['model']},error,,,,,,{result['error']}")
+            continue
+        stock = result["stock"]
+        fast = result["retab"]
+        print(
+            f"{result['model']},ok,{stock.median_s:.3f},{fast.median_s:.3f},"
+            f"{result['speedup']:.2f},{'yes' if result['same_artifact'] else 'no'},"
+            f"{stock.pte_bytes},{fast.pte_bytes},"
+        )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Compare stock ExecuTorch Arm lowering against RETAB."
+    )
+    parser.add_argument("--model", choices=sorted(MODEL_ENTRIES))
+    parser.add_argument(
+        "--suite",
+        choices=["vision"],
+        help="Run a predefined benchmark suite and print a CSV-like summary.",
+    )
+    parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--calibration-runs", type=int, default=5)
+    parser.add_argument("--require-identical-artifact", action="store_true")
+    args = parser.parse_args()
+
+    require_native_stock_serializer()
+
+    if bool(args.model) == bool(args.suite):
+        raise SystemExit("error: pass exactly one of --model or --suite")
+
+    if args.model:
+        result = run_one_model(
+            args.model,
+            warmup=args.warmup,
+            runs=args.runs,
+            calibration_runs=args.calibration_runs,
+            require_identical_artifact=args.require_identical_artifact,
+        )
+        print_one(result, args.runs, args.warmup)
+        return
+
+    suite_models = VISION_SUITE if args.suite == "vision" else []
+    results = []
+    for model_name in suite_models:
+        try:
+            results.append(
+                run_one_model(
+                    model_name,
+                    warmup=args.warmup,
+                    runs=args.runs,
+                    calibration_runs=args.calibration_runs,
+                    require_identical_artifact=args.require_identical_artifact,
+                )
+            )
+        except Exception as exc:
+            results.append({"model": model_name, "error": f"{type(exc).__name__}: {exc}"})
+    print_suite(results)
 
 
 if __name__ == "__main__":
