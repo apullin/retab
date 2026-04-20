@@ -136,6 +136,13 @@ fn permute_weight_data(
     match kind {
         WeightPermKind::Conv2d => {
             // OIHW -> OHWI: perm [0, 2, 3, 1]
+            //
+            // For 1x1 kernels, or whenever the input-channel axis is a
+            // singleton, the physical byte order is already identical and only
+            // the logical shape changes.
+            if d1 == 1 || (d2 == 1 && d3 == 1) {
+                return (data.to_vec(), vec![shape[0], shape[2], shape[3], shape[1]]);
+            }
             let new_shape = vec![shape[0], shape[2], shape[3], shape[1]];
             let (nh, nw, ni) = (d2, d3, d1);
             let mut out = vec![0u8; data.len()];
@@ -167,6 +174,12 @@ fn permute_weight_data(
                 shape[3] as usize,
                 shape[4] as usize,
             );
+            if d1 == 1 || (d2 == 1 && d3 == 1 && d4 == 1) {
+                return (
+                    data.to_vec(),
+                    vec![shape[0], shape[2], shape[3], shape[4], shape[1]],
+                );
+            }
             let new_shape = vec![shape[0], shape[2], shape[3], shape[4], shape[1]];
             let (nd, nh, nw, ni) = (d2, d3, d4, d1);
             let mut out = vec![0u8; data.len()];
@@ -205,6 +218,18 @@ fn permute_weight_data(
             let depth_multiplier = d0 / in_channels;
             if depth_multiplier == 0 {
                 return (data.to_vec(), shape.to_vec());
+            }
+
+            if d2 == 1 && d3 == 1 {
+                return (
+                    data.to_vec(),
+                    vec![
+                        shape[2],
+                        shape[3],
+                        in_channels as i64,
+                        depth_multiplier as i64,
+                    ],
+                );
             }
 
             let new_shape = vec![
