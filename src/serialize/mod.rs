@@ -7,6 +7,8 @@ use crate::graph::Graph;
 use crate::store::{TensorData, TensorStore};
 
 use flatbuffers::{FlatBufferBuilder, TableFinishedWIPOffset, Vector, WIPOffset};
+use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use std::collections::HashMap;
 use tosa_generated::{
     Attribute, DType, Op, TosaOperator, TosaShape, TosaTensor, TransposeAttribute,
@@ -1006,10 +1008,10 @@ fn build_fb_region<'fbb>(
     region
 }
 
-fn finish_tosa_graph(
+fn finalize_tosa_graph(
     builder: &mut FlatBufferBuilder<'_>,
     regions: &[WIPOffset<TableFinishedWIPOffset>],
-) -> Vec<u8> {
+) {
     // Build software version
     let modifier_str = builder.create_string("retab");
     let sw_version = {
@@ -1042,19 +1044,29 @@ fn finish_tosa_graph(
     };
 
     builder.finish(tosa_graph, Some("TOSA"));
-    builder.finished_data().to_vec()
 }
 
-pub fn serialize_graphs_to_tosa(graphs: &[(String, Graph)], store: &TensorStore) -> Vec<u8> {
-    // Pre-calculate buffer size to avoid quadratic reallocation.
-    // Sum all tensor data + overhead per node.
+fn finish_tosa_graph_py(
+    py: Python<'_>,
+    builder: &mut FlatBufferBuilder<'_>,
+    regions: &[WIPOffset<TableFinishedWIPOffset>],
+) -> Py<PyBytes> {
+    finalize_tosa_graph(builder, regions);
+    PyBytes::new_bound(py, builder.finished_data()).unbind()
+}
+
+pub fn serialize_graphs_to_tosa_py(
+    py: Python<'_>,
+    graphs: &[(String, Graph)],
+    store: &TensorStore,
+) -> Py<PyBytes> {
     let tensor_bytes: usize = store
         .buffers
         .values()
-        .map(|t| t.data.len() + 256) // data + per-tensor overhead
+        .map(|t| t.data.len() + 256)
         .sum();
     let node_count: usize = graphs.iter().map(|(_, g)| g.order.len()).sum();
-    let estimated = tensor_bytes + node_count * 512 + 1024 * 1024; // tensors + nodes + 1MB overhead
+    let estimated = tensor_bytes + node_count * 512 + 1024 * 1024;
     visitors::shape_utils::clear_shape_cache();
     visitors::dtype_quant::clear_dtype_cache();
     if FxGraphModule::debug() {
@@ -1070,7 +1082,7 @@ pub fn serialize_graphs_to_tosa(graphs: &[(String, Graph)], store: &TensorStore)
         .iter()
         .map(|(name, graph)| build_fb_region(&mut builder, name, graph, store))
         .collect();
-    finish_tosa_graph(&mut builder, &regions)
+    finish_tosa_graph_py(py, &mut builder, &regions)
 }
 
 // ============================================================================

@@ -87,10 +87,6 @@ fn clone_bound_pyobject(exported_program: Option<&Bound<'_, PyAny>>) -> Option<P
     exported_program.map(|ep| ep.clone().unbind())
 }
 
-fn to_py_bytes(py: Python<'_>, data: Vec<u8>) -> Py<PyBytes> {
-    PyBytes::new_bound(py, &data).unbind()
-}
-
 fn run_single_fx_pass<P: fx_pass::FxPass>(
     graph_module: &Bound<'_, PyAny>,
     pass: P,
@@ -132,33 +128,33 @@ fn rebuild_graph_users(graphs: &mut [(String, Graph)]) {
     }
 }
 
-fn lower_fx_graph_to_tosa_bytes(
+fn lower_fx_graph_to_tosa_pybytes(
+    py: Python<'_>,
     graph_module: &Bound<'_, PyAny>,
     state_dict: &Bound<'_, PyDict>,
     graph_signature: &Bound<'_, PyAny>,
     exported_program: Option<PyObject>,
-) -> PyResult<Vec<u8>> {
-    let py = graph_module.py();
+) -> PyResult<Py<PyBytes>> {
     let pipeline_exported_program = exported_program.as_ref().map(|ep| ep.clone_ref(py));
     run_full_fx_pipeline(graph_module, pipeline_exported_program)?;
     let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
     let (graphs, store) =
         ingest_graph_hierarchy(graph_module, state_dict, graph_signature, exported_program)?;
-    Ok(serialize::serialize_graphs_to_tosa(&graphs, &store))
+    Ok(serialize::serialize_graphs_to_tosa_py(py, &graphs, &store))
 }
 
-fn ingest_and_serialize_tosa_bytes(
+fn ingest_and_serialize_tosa_pybytes(
+    py: Python<'_>,
     graph_module: &Bound<'_, PyAny>,
     state_dict: &Bound<'_, PyDict>,
     graph_signature: &Bound<'_, PyAny>,
     exported_program: Option<PyObject>,
-) -> PyResult<Vec<u8>> {
-    let py = graph_module.py();
+) -> PyResult<Py<PyBytes>> {
     let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
     let (mut graphs, store) =
         ingest_graph_hierarchy(graph_module, state_dict, graph_signature, exported_program)?;
     rebuild_graph_users(&mut graphs);
-    Ok(serialize::serialize_graphs_to_tosa(&graphs, &store))
+    Ok(serialize::serialize_graphs_to_tosa_py(py, &graphs, &store))
 }
 
 // ---------------------------------------------------------------------------
@@ -291,15 +287,13 @@ fn lower_to_tosa_v2(
     graph_signature: &Bound<'_, PyAny>,
     exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyBytes>> {
-    Ok(to_py_bytes(
+    lower_fx_graph_to_tosa_pybytes(
         py,
-        lower_fx_graph_to_tosa_bytes(
-            graph_module,
-            state_dict,
-            graph_signature,
-            clone_bound_pyobject(exported_program),
-        )?,
-    ))
+        graph_module,
+        state_dict,
+        graph_signature,
+        clone_bound_pyobject(exported_program),
+    )
 }
 
 /// Ingest-and-serialize only: convert an already-lowered FX graph to TOSA
@@ -318,15 +312,13 @@ fn ingest_and_serialize(
     graph_signature: &Bound<'_, PyAny>,
     exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyBytes>> {
-    Ok(to_py_bytes(
+    ingest_and_serialize_tosa_pybytes(
         py,
-        ingest_and_serialize_tosa_bytes(
-            graph_module,
-            state_dict,
-            graph_signature,
-            clone_bound_pyobject(exported_program),
-        )?,
-    ))
+        graph_module,
+        state_dict,
+        graph_signature,
+        clone_bound_pyobject(exported_program),
+    )
 }
 
 /// Structural-only metadata stamp (no qparam propagation). Run before parent passes.
