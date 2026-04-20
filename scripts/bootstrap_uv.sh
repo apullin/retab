@@ -8,6 +8,7 @@ source "${script_dir}/_common.sh"
 repo_root="$(retab_repo_root)"
 venv_arg=""
 executorch_src=""
+vela_src=""
 skip_smoke=0
 
 while [[ $# -gt 0 ]]; do
@@ -20,12 +21,16 @@ while [[ $# -gt 0 ]]; do
       executorch_src="$2"
       shift 2
       ;;
+    --vela-source)
+      vela_src="$2"
+      shift 2
+      ;;
     --skip-smoke)
       skip_smoke=1
       shift
       ;;
     *)
-      echo "usage: $0 [--venv PATH] [--source EXECUTORCH_CHECKOUT] [--skip-smoke]" >&2
+      echo "usage: $0 [--venv PATH] [--source EXECUTORCH_CHECKOUT] [--vela-source ETHOS_U_VELA_CHECKOUT] [--skip-smoke]" >&2
       exit 1
       ;;
   esac
@@ -33,10 +38,23 @@ done
 
 venv_dir="$(resolve_venv_dir "${repo_root}" "${venv_arg}")"
 ensure_venv "${venv_dir}"
+install_stock_vela_args=()
+
+if [[ -n "${vela_src}" || -n "${VELA_SRC:-}" || -d "${repo_root}/../ethos-u-vela" ]]; then
+  install_stock_vela_args+=(--skip-stock-vela)
+fi
 
 "${repo_root}/scripts/install_executorch.sh" \
   --venv "${venv_dir}" \
-  --source "$(resolve_executorch_src "${repo_root}" "${executorch_src}")"
+  --source "$(resolve_executorch_src "${repo_root}" "${executorch_src}")" \
+  "${install_stock_vela_args[@]}"
+
+if [[ -n "${vela_src}" || -n "${VELA_SRC:-}" || -d "${repo_root}/../ethos-u-vela" ]]; then
+  "${repo_root}/scripts/install_vela_from_source.sh" \
+    --venv "${venv_dir}" \
+    --source "$(resolve_vela_src "${repo_root}" "${vela_src}")"
+fi
+
 "${repo_root}/scripts/build_retab.sh" --venv "${venv_dir}"
 
 if [[ "${skip_smoke}" -eq 0 ]]; then

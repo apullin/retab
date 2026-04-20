@@ -8,6 +8,7 @@ source "${script_dir}/_common.sh"
 repo_root="$(retab_repo_root)"
 venv_arg=""
 executorch_src=""
+skip_stock_vela=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -19,8 +20,12 @@ while [[ $# -gt 0 ]]; do
       executorch_src="$2"
       shift 2
       ;;
+    --skip-stock-vela)
+      skip_stock_vela=1
+      shift
+      ;;
     *)
-      echo "usage: $0 [--venv PATH] [--source EXECUTORCH_CHECKOUT]" >&2
+      echo "usage: $0 [--venv PATH] [--source EXECUTORCH_CHECKOUT] [--skip-stock-vela]" >&2
       exit 1
       ;;
   esac
@@ -56,7 +61,9 @@ if [[ ${#executorch_deps[@]} -gt 0 ]]; then
 fi
 
 arm_extra_packages="${RETAB_ARM_EXTRA_PACKAGES:-ethos-u-vela==5.0.0}"
-uv pip install --python "${python_bin}" ${arm_extra_packages}
+if [[ "${skip_stock_vela}" -eq 0 && -n "${arm_extra_packages}" ]]; then
+  uv pip install --python "${python_bin}" ${arm_extra_packages}
+fi
 
 site_packages="$("${python_bin}" - <<'PY'
 import site
