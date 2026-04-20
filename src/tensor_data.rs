@@ -1,4 +1,6 @@
+use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
+use pyo3::types::PyMemoryView;
 
 use crate::graph::ir::DType;
 use crate::store::TensorData;
@@ -45,26 +47,26 @@ pub fn extract_tensor_dtype(value: &Bound<'_, PyAny>) -> DType {
         .unwrap_or(DType::Float32)
 }
 
-pub fn extract_tensor_bytes(value: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+pub fn extract_tensor_bytes(value: &Bound<'_, PyAny>, dtype: DType) -> PyResult<Vec<u8>> {
+    let py = value.py();
     let tensor = value.call_method0("contiguous")?.call_method0("cpu")?;
-    if extract_tensor_dtype(&tensor) == DType::BFloat16 {
-        let torch = PyModule::import_bound(tensor.py(), "torch")?;
-        return tensor
+    let array = if dtype == DType::BFloat16 {
+        let torch = PyModule::import_bound(py, "torch")?;
+        tensor
             .call_method1("view", (torch.getattr("uint16")?,))?
             .call_method0("numpy")?
-            .call_method0("tobytes")?
-            .extract();
-    }
-    tensor
-        .call_method0("numpy")?
-        .call_method0("tobytes")?
-        .extract()
+    } else {
+        tensor.call_method0("numpy")?
+    };
+    let view = PyMemoryView::from_bound(&array)?;
+    let byte_view = view.call_method1("cast", ("B",))?;
+    PyBuffer::<u8>::get_bound(&byte_view)?.to_vec(py)
 }
 
 pub fn extract_tensor_data(value: &Bound<'_, PyAny>) -> PyResult<TensorData> {
     let shape = extract_tensor_shape(value)?;
     let mut dtype = extract_tensor_dtype(value);
-    let mut data = extract_tensor_bytes(value)?;
+    let mut data = extract_tensor_bytes(value, dtype)?;
     if dtype == DType::Int64 {
         data = cast_i64_bytes_to_i32(&data);
         dtype = DType::Int32;
