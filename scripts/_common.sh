@@ -55,26 +55,3 @@ resolve_executorch_src() {
   echo "hint: current compatibility notes are in compat/executorch.toml" >&2
   exit 1
 }
-
-resolve_vela_src() {
-  local repo_root="$1"
-  local explicit="${2:-}"
-  if [[ -n "${explicit}" ]]; then
-    printf '%s\n' "${explicit}"
-    return 0
-  fi
-
-  if [[ -n "${VELA_SRC:-}" ]]; then
-    printf '%s\n' "${VELA_SRC}"
-    return 0
-  fi
-
-  if [[ -d "${repo_root}/../ethos-u-vela" ]]; then
-    printf '%s\n' "${repo_root}/../ethos-u-vela"
-    return 0
-  fi
-
-  echo "error: no ethos-u-vela checkout was provided." >&2
-  echo "hint: pass --vela-source /path/to/ethos-u-vela or set VELA_SRC" >&2
-  exit 1
-}

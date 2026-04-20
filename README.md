@@ -53,24 +53,12 @@ cd retab
 ./scripts/bootstrap_uv.sh --source /path/to/executorch
 ```
 
-If you want Regor and Vela under local source control too, clone the upstream
-Vela repo as a sibling checkout and pass `--vela-source`:
-
-```bash
-git clone https://gitlab.arm.com/artificial-intelligence/ethos-u/ethos-u-vela.git ../ethos-u-vela
-./scripts/bootstrap_uv.sh \
-  --source /path/to/executorch \
-  --vela-source ../ethos-u-vela
-```
-
 This will:
 
 - create `.venv/`
 - install the Torch stack into that environment
 - install ExecuTorch's Python dependencies and expose the source checkout via a
   `.pth` overlay
-- optionally install `ethos-u-vela` from a sibling editable source checkout,
-  including a locally built `ethosu.regor`
 - build RETAB with `maturin develop --release`
 - run a smoke lowering pass
 
