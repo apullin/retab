@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
+use std::time::Instant;
 
 use crate::graph::Graph;
 use crate::store::TensorStore;
@@ -83,6 +84,10 @@ mod tensor_data;
 
 type GraphHierarchy = Vec<(String, Graph)>;
 
+fn profile_ingest_serialize_enabled() -> bool {
+    std::env::var_os("RETAB_PROFILE_INGEST_SERIALIZE").is_some()
+}
+
 fn clone_bound_pyobject(exported_program: Option<&Bound<'_, PyAny>>) -> Option<PyObject> {
     exported_program.map(|ep| ep.clone().unbind())
 }
@@ -150,11 +155,31 @@ fn ingest_and_serialize_tosa_pybytes(
     graph_signature: &Bound<'_, PyAny>,
     exported_program: Option<PyObject>,
 ) -> PyResult<Py<PyBytes>> {
+    let profile = profile_ingest_serialize_enabled();
     let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
+    let ingest_start = Instant::now();
     let (mut graphs, store) =
         ingest_graph_hierarchy(graph_module, state_dict, graph_signature, exported_program)?;
+    let ingest_elapsed = ingest_start.elapsed();
+    let rebuild_start = Instant::now();
     rebuild_graph_users(&mut graphs);
-    Ok(serialize::serialize_graphs_to_tosa_py(py, &graphs, &store))
+    let rebuild_elapsed = rebuild_start.elapsed();
+    let serialize_start = Instant::now();
+    let py_bytes = serialize::serialize_graphs_to_tosa_py(py, &graphs, &store);
+    let serialize_elapsed = serialize_start.elapsed();
+    if profile {
+        let node_count: usize = graphs.iter().map(|(_, graph)| graph.order.len()).sum();
+        eprintln!(
+            "[RETAB][ingest_and_serialize] ingest={:.3}s rebuild={:.3}s serialize={:.3}s graphs={} nodes={} tensors={}",
+            ingest_elapsed.as_secs_f64(),
+            rebuild_elapsed.as_secs_f64(),
+            serialize_elapsed.as_secs_f64(),
+            graphs.len(),
+            node_count,
+            store.buffers.len(),
+        );
+    }
+    Ok(py_bytes)
 }
 
 // ---------------------------------------------------------------------------

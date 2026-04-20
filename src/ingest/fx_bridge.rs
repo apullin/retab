@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
@@ -22,6 +23,8 @@ fn ingest_fx_graph_with_prefix(
     name_prefix: Option<&str>,
     exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(Graph, TensorStore)> {
+    let profile = std::env::var_os("RETAB_PROFILE_INGEST_SERIALIZE").is_some();
+    let total_start = Instant::now();
     let mut graph = Graph::new();
     let mut store = TensorStore::new();
 
@@ -30,6 +33,7 @@ fn ingest_fx_graph_with_prefix(
 
     // Build placeholder-name → state-dict-key mapping from graph_signature
     let mut placeholder_to_sd_key: HashMap<String, String> = HashMap::new();
+    let signature_start = Instant::now();
     for attr_name in &[
         "inputs_to_parameters",
         "inputs_to_buffers",
@@ -57,10 +61,12 @@ fn ingest_fx_graph_with_prefix(
             }
         }
     }
+    let signature_elapsed = signature_start.elapsed();
 
     // -----------------------------------------------------------------
     // 1. Walk graph_module.graph.nodes
     // -----------------------------------------------------------------
+    let node_walk_start = Instant::now();
     let fx_graph = graph_module.getattr("graph")?;
     let nodes = fx_graph.getattr("nodes")?;
 
@@ -188,6 +194,7 @@ fn ingest_fx_graph_with_prefix(
 
         name_map.insert(original_name, node_id);
     }
+    let node_walk_elapsed = node_walk_start.elapsed();
 
     // -----------------------------------------------------------------
     // 2. Create store aliases: placeholder node name -> exported tensor data
@@ -201,6 +208,7 @@ fn ingest_fx_graph_with_prefix(
     // `input_1`, which then causes placeholder serialization to emit a CONST
     // instead of a graph input.
     if name_prefix.is_none() {
+        let placeholder_alias_start = Instant::now();
         for (placeholder_name, sd_key) in &placeholder_to_sd_key {
             if let Some(data) = extract_tensor_from_state_ep_or_attr(
                 state_dict,
@@ -211,32 +219,18 @@ fn ingest_fx_graph_with_prefix(
                 store.insert(placeholder_name.clone(), data);
             }
         }
-
-        // -----------------------------------------------------------------
-        // 3. Extract frozen tensor constants from graph module attributes
-        // -----------------------------------------------------------------
-        // After pt2e quantization, parameters become frozen constants stored
-        // as attributes on the graph module (e.g., graph_module._frozen_param0).
-        // These aren't in state_dict, so we extract them directly.
-        //
-        // Do not apply this in control-flow regions: region placeholders are
-        // function parameters carried by the parent COND_IF/WHILE_LOOP, even
-        // when the parent value is itself a CONST.
-        for (placeholder_name, sd_key) in &placeholder_to_sd_key {
-            if store.get(placeholder_name).is_some() {
-                continue; // Already have data from state_dict
-            }
-            // Try all exported tensor containers, then graph_module attributes.
-            // Non-persistent buffers and lifted tensor constants live under
-            // exported_program.constants rather than the state_dict.
-            if let Some(tensor_data) = extract_tensor_from_state_ep_or_attr(
-                state_dict,
-                exported_program,
-                graph_module,
-                sd_key,
-            ) {
-                store.insert(placeholder_name.clone(), tensor_data);
-            }
+        let placeholder_alias_elapsed = placeholder_alias_start.elapsed();
+        if profile {
+            eprintln!(
+                "[RETAB][ingest_fx_graph] prefix={} signature={:.3}s node_walk={:.3}s placeholder_alias={:.3}s placeholders={} nodes={} store={}",
+                name_prefix.unwrap_or("main"),
+                signature_elapsed.as_secs_f64(),
+                node_walk_elapsed.as_secs_f64(),
+                placeholder_alias_elapsed.as_secs_f64(),
+                placeholder_to_sd_key.len(),
+                graph.order.len(),
+                store.buffers.len(),
+            );
         }
     }
 
@@ -249,6 +243,7 @@ fn ingest_fx_graph_with_prefix(
     // graph inputs and the TOSA runner rejects the serialized model. Only apply
     // this to the parent graph: control-flow region placeholders must remain
     // region inputs carried by COND_IF/WHILE_LOOP.
+    let unmapped_start = Instant::now();
     alias_unmapped_top_level_placeholders(
         graph_module,
         state_dict,
@@ -257,6 +252,7 @@ fn ingest_fx_graph_with_prefix(
         &mut store,
         name_prefix,
     );
+    let unmapped_elapsed = unmapped_start.elapsed();
 
     // -----------------------------------------------------------------
     // 5. Fix up output shapes for decomposed-linear nodes
@@ -264,7 +260,9 @@ fn ingest_fx_graph_with_prefix(
     // _create_node in fx_helpers.py copies meta from the original linear
     // node, so the intermediate view_copy and convolution nodes have the
     // wrong output shape. Fix them by reading the actual shape from args.
+    let fixup_shapes_start = Instant::now();
     fixup_reshape_shapes(&mut graph);
+    let fixup_shapes_elapsed = fixup_shapes_start.elapsed();
 
     // -----------------------------------------------------------------
     // 6. Fix up dtypes based on quantization parameters
@@ -275,7 +273,22 @@ fn ingest_fx_graph_with_prefix(
     //   - Nodes with input_qparams or output_qparams: use the quantized dtype
     //   - Accumulator ops (Conv2d, etc.): output is Int32
     //   - Placeholder nodes with Int64: already handled above during ingestion
+    let fixup_dtypes_start = Instant::now();
     fixup_quantized_dtypes(&mut graph);
+    let fixup_dtypes_elapsed = fixup_dtypes_start.elapsed();
+
+    if profile {
+        eprintln!(
+            "[RETAB][ingest_fx_graph] prefix={} unmapped={:.3}s fixup_shapes={:.3}s fixup_dtypes={:.3}s total={:.3}s store={} nodes={}",
+            name_prefix.unwrap_or("main"),
+            unmapped_elapsed.as_secs_f64(),
+            fixup_shapes_elapsed.as_secs_f64(),
+            fixup_dtypes_elapsed.as_secs_f64(),
+            total_start.elapsed().as_secs_f64(),
+            store.buffers.len(),
+            graph.order.len(),
+        );
+    }
 
     Ok((graph, store))
 }
