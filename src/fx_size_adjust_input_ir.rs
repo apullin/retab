@@ -163,7 +163,17 @@ impl IrPass for IrSizeAdjustInputPass {
                 continue;
             }
 
-            // Create slice nodes and update the conv/pool's input arg
+            // Create slice nodes and update the conv/pool's input arg.
+            // The slice inherits meta from a (possibly layout-neutral) input node
+            // that may carry no output_qparams — which leaves it FP32 at
+            // serialization while the consumer expects int8. Stamp the consumer's
+            // input quantization onto each slice so it stays in the input domain.
+            let consumer_input_q = graph.nodes[id]
+                .meta
+                .input_qparams
+                .as_ref()
+                .and_then(|m| m.get(&0))
+                .cloned();
             let mut current = input_id;
             for (dim, start, end) in &slices {
                 let slice_id = graph.add_node(
@@ -183,6 +193,12 @@ impl IrPass for IrSizeAdjustInputPass {
                 );
                 graph.anchor_after(slice_id, current);
                 graph.copy_meta_from(slice_id, input_id);
+                if let Some(ref q) = consumer_input_q {
+                    let mut qm = std::collections::HashMap::new();
+                    qm.insert(0usize, q.clone());
+                    graph.nodes[slice_id].meta.set_input_qparams(qm.clone());
+                    graph.nodes[slice_id].meta.set_output_qparams(qm);
+                }
                 current = slice_id;
             }
 
