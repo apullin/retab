@@ -80,6 +80,11 @@ fn table_op_spec(node: &IrNode) -> Option<TableOpSpec> {
                 kind: "pow",
                 scalar_arg: Some(scalar_arg),
             })
+        } else if target.contains("remainder.Scalar") {
+            node_scalar_arg(node, 1).map(|scalar_arg| TableOpSpec {
+                kind: "remainder",
+                scalar_arg: Some(scalar_arg),
+            })
         } else if target.contains("elu.default") || target.contains("elu_") {
             Some(TableOpSpec {
                 kind: "elu",
@@ -216,6 +221,13 @@ fn eval_precomputable_table(kind: &str, scalar_arg: Option<f64>, x: f64) -> Opti
         "elu" => {
             let alpha = scalar_arg.unwrap_or(1.0);
             Some(if x >= 0.0 { x } else { alpha * x.exp_m1() })
+        }
+        "remainder" => {
+            let divisor = scalar_arg?;
+            if divisor == 0.0 {
+                return None;
+            }
+            Some(x - divisor * (x / divisor).floor())
         }
         _ => None,
     }
