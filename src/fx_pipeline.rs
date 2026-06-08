@@ -171,6 +171,7 @@ pub fn build_hybrid_pipeline(
             crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass,
         )),
         Ir(Box::new(fx_rewrite_squeeze_ir::IrRewriteSqueezePass)),
+        Ir(Box::new(crate::fx_rewrite_pad_ir::IrRewritePadPass)),
         // -- Postprocessing --
         IrEp(Box::new(crate::fx_cast_int64_ir::IrCastInt64ToInt32EpPass)),
         Ir(Box::new(

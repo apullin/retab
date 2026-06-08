@@ -8,11 +8,6 @@
 //!   circular:  left=slice@(size-left+i),right=slice@i
 //!   reflect:   left=slice@(left-i),     right=slice@(size-2-i)
 //! Constant-mode pad is left to the serializer's existing handling.
-//!
-//! PARKED: correct + unit-tested, but currently unwired — the pad-cluster gate
-//! failures are delegation-level (the reflect-pad op isn't delegated to retab), so
-//! this pass never fires on them. Re-enable once that is resolved.
-#![allow(dead_code)]
 
 use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::runner_logging::log_line;
