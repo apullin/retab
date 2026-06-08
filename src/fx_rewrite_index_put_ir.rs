@@ -259,6 +259,46 @@ impl IrPass for IrRewriteIndexPutPass {
                 src_meta,
             );
 
+            // Broadcast values to (W, *C_j) before the (1, W, C) view: a bare view
+            // is invalid when values needs broadcasting (e.g. scalar data). Rank-
+            // align with a leading-1 view first, as the index path does. Mirrors
+            // master RewriteIndexPutPass.
+            let c_j: Vec<i64> = source_shape[num_idx..].to_vec();
+            let mut bcast_val_shape: Vec<i64> = Vec::with_capacity(1 + c_j.len());
+            bcast_val_shape.push(w);
+            bcast_val_shape.extend_from_slice(&c_j);
+            let values_shape = graph.nodes[values_id]
+                .meta
+                .val_shape()
+                .map(|s| s.to_vec())
+                .unwrap_or_default();
+            let mut val_cur = values_id;
+            if values_shape.len() < bcast_val_shape.len() {
+                let mut aligned = vec![1i64; bcast_val_shape.len() - values_shape.len()];
+                aligned.extend_from_slice(&values_shape);
+                let aligned_meta = graph.nodes[source_id]
+                    .meta
+                    .cloned_with_val(aligned.clone(), &src_dtype)
+                    .with_qparams_from(&graph.nodes[source_id].meta);
+                val_cur = graph.add_anchored_call_function(
+                    id,
+                    format!("{}_vala", name),
+                    "aten.view_copy.default".to_string(),
+                    vec![IrArg::Node(val_cur), i64_list(&aligned)],
+                    aligned_meta,
+                );
+            }
+            let bcast_val_meta = graph.nodes[source_id]
+                .meta
+                .cloned_with_val(bcast_val_shape.clone(), &src_dtype)
+                .with_qparams_from(&graph.nodes[source_id].meta);
+            let val_bcast = graph.add_anchored_call_function(
+                id,
+                format!("{}_valb", name),
+                "aten.expand_copy.default".to_string(),
+                vec![IrArg::Node(val_cur), i64_list(&bcast_val_shape)],
+                bcast_val_meta,
+            );
             let val_meta = graph.nodes[source_id]
                 .meta
                 .cloned_with_val(vec![1, w, c], &src_dtype)
@@ -267,7 +307,7 @@ impl IrPass for IrRewriteIndexPutPass {
                 id,
                 format!("{}_val", name),
                 "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(values_id), i64_list(&[1, w, c])],
+                vec![IrArg::Node(val_bcast), i64_list(&[1, w, c])],
                 val_meta,
             );
 
