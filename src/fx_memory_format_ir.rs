@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::fx_ir::{
     i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, MetaValue, NodeId,
@@ -93,6 +93,29 @@ fn all_live_users_layout_neutral(graph: &IrGraph, id: NodeId) -> bool {
         && users
             .iter()
             .all(|&user_id| is_layout_neutral(&graph.nodes[user_id].meta))
+}
+
+/// Whether a node's output is consumed in physical (NHWC) layout. False (logical) when the
+/// output only reaches the graph Output through quantize/dequantize and layout-neutral ops;
+/// true once any non-transparent consumer (conv, pool, another layout op, ...) is found.
+fn output_is_physical(graph: &IrGraph, id: NodeId) -> bool {
+    let mut stack = graph.live_user_ids(id);
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    while let Some(uid) = stack.pop() {
+        if !seen.insert(uid) {
+            continue;
+        }
+        let node = &graph.nodes[uid];
+        if node.op == NodeOp::Output {
+            continue;
+        }
+        if node.target.contains("quantize") || is_layout_neutral(&node.meta) {
+            stack.extend(graph.live_user_ids(uid));
+        } else {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_control_flow_submodule(graph: &IrGraph) -> bool {
@@ -671,9 +694,15 @@ impl IrToTosaMemoryFormatPass {
 
             let f = channels_last_order(input_rank, spatial_rank(graph, input_id, 2));
             let f_inv = channels_last_inverse_order(input_rank, spatial_rank(graph, input_id, 2));
+            // Input is physically NHWC (transposed by f). Compose f on the output side only when
+            // the permute's output is itself consumed in physical layout (f_inv o user_perm o f);
+            // when the output is logical (reaches the graph boundary through only q/dq and
+            // layout-neutral ops) use f_inv o user_perm so an explicit rank-4 layout permute like
+            // [0,2,3,1] is not double-transposed.
+            let physical_output = output_is_physical(graph, id);
             let mut remapped = vec![0i64; input_rank];
             for j in 0..input_rank {
-                let nchw_axis = f[j];
+                let nchw_axis = if physical_output { f[j] } else { j };
                 let user_mapped = user_perm[nchw_axis] as usize;
                 if user_mapped >= f_inv.len() {
                     continue;
