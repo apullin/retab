@@ -175,6 +175,12 @@ pub fn build_hybrid_pipeline(
         // -- Postprocessing --
         IrEp(Box::new(crate::fx_cast_int64_ir::IrCastInt64ToInt32EpPass)),
         Ir(Box::new(
+            crate::fx_normalize_index_put_none_indices_ir::IrNormalizeIndexPutNoneIndicesPass,
+        )),
+        Ir(Box::new(
+            crate::fx_normalize_index_put_bool_mask_ir::IrNormalizeIndexPutBoolMaskPass,
+        )),
+        Ir(Box::new(
             crate::fx_rewrite_index_put_ir::IrRewriteIndexPutPass,
         )),
         IrEp(Box::new(

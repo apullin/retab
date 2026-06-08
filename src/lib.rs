@@ -62,6 +62,8 @@ mod fx_insert_table_ops_ir;
 mod fx_ir;
 mod fx_memory_format;
 mod fx_memory_format_ir;
+mod fx_normalize_index_put_bool_mask_ir;
+mod fx_normalize_index_put_none_indices_ir;
 mod fx_pass;
 mod fx_pipeline;
 mod fx_profile;
