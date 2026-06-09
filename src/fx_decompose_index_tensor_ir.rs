@@ -170,6 +170,33 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 x_bkc_meta,
             );
 
+            // TOSA GATHER does not support BOOL data; gather as INT8 and cast the
+            // result back to BOOL below.
+            let x_is_bool = x_dtype.contains("bool");
+            let gather_dtype: String = if x_is_bool {
+                "torch.int8".to_string()
+            } else {
+                x_dtype.clone()
+            };
+            let gather_x = if x_is_bool {
+                let mut kwargs = std::collections::HashMap::new();
+                kwargs.insert("dtype".to_string(), IrArg::Dtype(gather_dtype.clone()));
+                let cast_meta = graph.nodes[x_id]
+                    .meta
+                    .cloned_with_val(vec![batch, k, c], &gather_dtype)
+                    .without_qparams();
+                graph.add_anchored_call_function_with_kwargs(
+                    id,
+                    format!("{}_x_i8", node_name),
+                    "aten._to_copy.default".to_string(),
+                    vec![IrArg::Node(x_bkc)],
+                    kwargs,
+                    cast_meta,
+                )
+            } else {
+                x_bkc
+            };
+
             // Build linearized flat index
             let mut lin_w: Option<NodeId> = None;
             for (i, (&idx_id, (idx_shape, &lin_scale))) in idx_ids
@@ -295,15 +322,33 @@ impl IrPass for IrDecomposeIndexTensorPass {
             // GATHER(x_bkc, idx_bw) → (B, W, C)
             let gathered_meta = graph.nodes[x_id]
                 .meta
-                .cloned_with_val(vec![batch, w, c], &x_dtype)
+                .cloned_with_val(vec![batch, w, c], &gather_dtype)
                 .with_qparams_from(&graph.nodes[x_id].meta);
             let gathered = graph.add_anchored_call_function(
                 id,
                 format!("{}_gather", node_name),
                 "backend.tosa.GATHER.default".to_string(),
-                vec![IrArg::Node(x_bkc), IrArg::Node(idx_bw)],
+                vec![IrArg::Node(gather_x), IrArg::Node(idx_bw)],
                 gathered_meta,
             );
+            let gathered = if x_is_bool {
+                let mut kwargs = std::collections::HashMap::new();
+                kwargs.insert("dtype".to_string(), IrArg::Dtype(x_dtype.clone()));
+                let cast_meta = graph.nodes[x_id]
+                    .meta
+                    .cloned_with_val(vec![batch, w, c], &x_dtype)
+                    .without_qparams();
+                graph.add_anchored_call_function_with_kwargs(
+                    id,
+                    format!("{}_gather_bool", node_name),
+                    "aten._to_copy.default".to_string(),
+                    vec![IrArg::Node(gathered)],
+                    kwargs,
+                    cast_meta,
+                )
+            } else {
+                gathered
+            };
 
             // Reshape to (...batch, ...broadcast, ...kept)
             let out_shape = compute_index_output_shape(&batch_shape, &broadcast, &kept_shape);
