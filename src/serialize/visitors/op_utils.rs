@@ -63,7 +63,13 @@ fn push_binary_output_with_contract(
     logical_shape: Vec<i32>,
     emitted_shape: Vec<i32>,
 ) {
-    if emitted_shape != logical_shape {
+    // The temp+reshape contract is only valid for a rank/layout change (same element
+    // count). When emitted_shape is a pure broadcast of logical_shape (different element
+    // count), TOSA's native size-1 broadcasting already yields logical_shape, so emit
+    // directly rather than via an (invalid) element-count-changing reshape.
+    let emitted_elems = emitted_shape.iter().map(|&d| d as i64).product::<i64>();
+    let logical_elems = logical_shape.iter().map(|&d| d as i64).product::<i64>();
+    if emitted_shape != logical_shape && emitted_elems == logical_elems {
         let temp_name = format!("{}_broadcast_output", node.name);
         result.push_output_op(
             make_empty_tensor_for_node(node, temp_name.clone(), emitted_shape, dtype),
