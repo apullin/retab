@@ -25,24 +25,6 @@ struct DecomposeRule {
     decompose: DecomposeFn,
 }
 
-fn channels_last_order(rank: usize) -> Vec<usize> {
-    if rank <= 2 {
-        return (0..rank).collect();
-    }
-    let spatial_rank = rank.saturating_sub(2);
-    let channel_axis = rank - (spatial_rank + 1);
-    let mut order: Vec<usize> = (0..channel_axis).collect();
-    order.extend(channel_axis + 1..rank);
-    order.push(channel_axis);
-    order
-}
-
-fn permuted_shape(shape: &[i64], perm: &[usize]) -> Vec<i64> {
-    perm.iter()
-        .filter_map(|&idx| shape.get(idx).copied())
-        .collect()
-}
-
 #[derive(Clone, Copy)]
 struct MetaFactory<'a> {
     base: &'a NodeMeta,
@@ -262,6 +244,22 @@ impl ApproxCtx {
         )
     }
 
+    fn view_shape(
+        &self,
+        graph: &mut IrGraph,
+        suffix: &str,
+        source: NodeId,
+        shape: &[i64],
+    ) -> NodeId {
+        graph.add_anchored_call_function(
+            self.anchor_id,
+            self.op_name(suffix),
+            "aten.view_copy.default",
+            vec![IrArg::Node(source), i64_list(shape)],
+            self.tensor_meta(shape),
+        )
+    }
+
     fn view_preserve_shape(
         &self,
         graph: &mut IrGraph,
@@ -269,13 +267,7 @@ impl ApproxCtx {
         source: NodeId,
         shape: &[i64],
     ) -> NodeId {
-        let node = graph.add_anchored_call_function(
-            self.anchor_id,
-            self.op_name(suffix),
-            "aten.view_copy.default",
-            vec![IrArg::Node(source), i64_list(shape)],
-            self.tensor_meta(shape),
-        );
+        let node = self.view_shape(graph, suffix, source, shape);
         preserve_shape_node(graph, node);
         node
     }
@@ -2898,15 +2890,10 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     };
     let mut channel_shape = vec![1_i64; shape.len()];
     channel_shape[channel_axis] = num_features;
-    let physical_channel_shape = if shape.len() >= 4 {
-        permuted_shape(&channel_shape, &channels_last_order(shape.len()))
-    } else {
-        channel_shape.clone()
-    };
     let scalar_shape = ctx.scalar_shape();
     let eps = batch_norm_eps(&graph.nodes[id]);
-    let mean_view = ctx.view_preserve_shape(graph, "mean_view", running_mean, &physical_channel_shape);
-    let var_view = ctx.view_preserve_shape(graph, "var_view", running_var, &physical_channel_shape);
+    let mean_view = ctx.view_shape(graph, "mean_view", running_mean, &channel_shape);
+    let var_view = ctx.view_shape(graph, "var_view", running_var, &channel_shape);
 
     let centered = ctx.tensor(
         graph,
@@ -2914,22 +2901,22 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         "aten.sub.Tensor",
         vec![IrArg::Node(x_id), IrArg::Node(mean_view)],
     );
-    let eps_full = ctx.full_preserve_shape(graph, "eps", eps, &scalar_shape);
+    let eps_full = ctx.full_shape(graph, "eps", eps, &scalar_shape);
 
-    let var_eps = ctx.tensor_preserve_shape(
+    let var_eps = ctx.tensor_shape(
         graph,
         "var_eps",
         "aten.add.Tensor",
         vec![IrArg::Node(var_view), IrArg::Node(eps_full)],
-        &physical_channel_shape,
+        &channel_shape,
     );
 
-    let inv_sqrt = ctx.tensor_preserve_shape(
+    let inv_sqrt = ctx.tensor_shape(
         graph,
         "inv_sqrt",
         "aten.rsqrt.default",
         vec![IrArg::Node(var_eps)],
-        &physical_channel_shape,
+        &channel_shape,
     );
 
     let normed = ctx.tensor(
@@ -2941,11 +2928,11 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let weight_view = match weight_arg {
         IrArg::Node(weight_id) => {
-            ctx.view_preserve_shape(graph, "weight_view", weight_id, &physical_channel_shape)
+            ctx.view_shape(graph, "weight_view", weight_id, &channel_shape)
         }
         IrArg::None => {
             let weight_full = ctx.full_shape(graph, "weight_full", 1.0, &[num_features]);
-            ctx.view_preserve_shape(graph, "weight_view", weight_full, &physical_channel_shape)
+            ctx.view_shape(graph, "weight_view", weight_full, &channel_shape)
         }
         _ => return false,
     };
@@ -2959,11 +2946,11 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let bias_view = match bias_arg {
         IrArg::Node(bias_id) => {
-            ctx.view_preserve_shape(graph, "bias_view", bias_id, &physical_channel_shape)
+            ctx.view_shape(graph, "bias_view", bias_id, &channel_shape)
         }
         IrArg::None => {
             let bias_full = ctx.full_shape(graph, "bias_full", 0.0, &[num_features]);
-            ctx.view_preserve_shape(graph, "bias_view", bias_full, &physical_channel_shape)
+            ctx.view_shape(graph, "bias_view", bias_full, &channel_shape)
         }
         _ => return false,
     };
