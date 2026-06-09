@@ -1160,6 +1160,37 @@ pub(super) fn emit_concat(ctx: &EmitContext) -> EmitResult {
             .unwrap_or(raw_axis),
         _ => raw_axis,
     };
+    if std::env::var("ARM_TOSA_ENGINE_DEBUG_CAT").ok().as_deref() == Some("1") {
+        fn dbg_shape(n: &crate::graph::ir::Node) -> Vec<i64> {
+            n.meta.val.shape[..n.meta.val.shape_len as usize].to_vec()
+        }
+        eprintln!(
+            "[CatDebug] {} raw_axis={} axis={} logical={:?} dim_order={:?} emitted={:?}",
+            node.name,
+            raw_axis,
+            axis,
+            dbg_shape(node),
+            node.meta.tosa_dim_order,
+            actual_tensor_shape(graph, ctx.store, node),
+        );
+        let ids = match node.args.first() {
+            Some(Arg::Node(input_id)) => vec![*input_id],
+            Some(Arg::NodeList(list)) => list.to_vec(),
+            _ => vec![],
+        };
+        for id in ids {
+            if let Some(n) = graph.node(id) {
+                eprintln!(
+                    "[CatDebug]   in {} target={:?} logical={:?} dim_order={:?} emitted={:?}",
+                    n.name,
+                    n.target,
+                    dbg_shape(n),
+                    n.meta.tosa_dim_order,
+                    actual_tensor_shape(graph, ctx.store, n),
+                );
+            }
+        }
+    }
     result.push_output_op(
         make_output_tensor(node),
         Op::Concat,
