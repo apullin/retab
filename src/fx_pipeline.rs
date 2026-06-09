@@ -94,6 +94,9 @@ pub fn build_hybrid_pipeline(
             fx_decompose_masked_fill_ir::IrDecomposeMaskedFillPass,
         )),
         Ir(Box::new(
+            crate::fx_decompose_embedding_ir::IrDecomposeEmbeddingPass,
+        )),
+        Ir(Box::new(
             crate::fx_canonicalize_gather_ir::IrCanonicalizeGatherPass,
         )),
         Ir(Box::new(
