@@ -434,11 +434,18 @@ impl IrToTosaMemoryFormatPass {
             let dim_order = if is_layout_neutral(&graph.nodes[id].meta) {
                 (0..rank).collect::<Vec<_>>()
             } else if is_input_placeholder(graph, id) {
-                graph.nodes[id]
-                    .meta
-                    .val_dim_order()
-                    .map(|order| order.to_vec())
-                    .unwrap_or_else(|| (0..rank).collect::<Vec<_>>())
+                if rank >= 4 {
+                    graph.nodes[id]
+                        .meta
+                        .val_dim_order()
+                        .map(|order| order.to_vec())
+                        .unwrap_or_else(|| (0..rank).collect::<Vec<_>>())
+                } else {
+                    // The TOSA runner only permutes inputs for channels-last (NHWC/NNHWC) dim
+                    // orders; rank<4 inputs (e.g. a torch.t input with dim_order [1,0]) are fed in
+                    // logical layout, so serialize them logically rather than physically permuted.
+                    (0..rank).collect::<Vec<_>>()
+                }
             } else if graph.nodes[id].op == NodeOp::Output {
                 if is_control_flow_gm && rank >= 4 {
                     channels_last_order(rank, sr)
