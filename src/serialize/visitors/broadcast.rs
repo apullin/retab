@@ -108,14 +108,44 @@ pub(super) fn maybe_materialize_binary_broadcast(
     };
 
     let broadcast_name = format!("{}_input{}_broadcast", node.name, smaller_idx);
+    let broadcast_dtype = actual_tensor_dtype(graph, input_nodes[smaller_idx]);
+
+    let larger_idx = 1 - smaller_idx;
+    if let Some((padded_shape, perms)) = broadcast_transpose_for_binary_inputs(
+        &raw_i32_shape(input_nodes[smaller_idx]),
+        &raw_i32_shape(input_nodes[larger_idx]),
+        node,
+    ) {
+        let pre_name = format!("{}_pre", broadcast_name);
+        push_reshape_with_shape(
+            result,
+            input_names[smaller_idx].clone(),
+            pre_name.clone(),
+            format!("{}_shape", pre_name),
+            padded_shape,
+            broadcast_dtype,
+        );
+        result.tensors.push(TosaTensor::new(
+            &broadcast_name,
+            target_shape,
+            broadcast_dtype,
+        ));
+        result.operators.push(TosaOperator::new(
+            Op::Transpose,
+            Attribute::Transpose(TransposeAttribute { perms }),
+            vec![pre_name],
+            vec![broadcast_name.clone()],
+        ));
+        input_names[smaller_idx] = broadcast_name;
+        return;
+    }
+
     let shape_name = format!("{}_shape", broadcast_name);
     let rank = target_shape.len() as u32;
     let shape_data: Vec<u8> = target_shape
         .iter()
         .flat_map(|&d| (d as i64).to_le_bytes())
         .collect();
-
-    let broadcast_dtype = actual_tensor_dtype(graph, input_nodes[smaller_idx]);
 
     result.tensors.push(TosaTensor::new(
         &broadcast_name,
@@ -227,6 +257,42 @@ pub(super) fn broadcast_shape_for_binary_inputs(
     }
 
     padded_raw
+}
+
+/// A flat reshape into the reordered target only preserves data when the
+/// layout keeps the operand's non-unit axes in their original relative order
+/// (true for the common per-channel [1,C,1,1] -> [1,1,1,C] case). When the
+/// layout permutes non-unit axes, the operand must instead be reshaped to the
+/// rank-padded logical shape and physically transposed; returns that
+/// (padded_shape, perms) plan, or None when the plain reshape is safe.
+pub(super) fn broadcast_transpose_for_binary_inputs(
+    smaller_raw: &[i32],
+    larger_raw: &[i32],
+    layout_node: &Node,
+) -> Option<(Vec<i32>, Vec<i32>)> {
+    let mut padded_raw = vec![1; larger_raw.len().saturating_sub(smaller_raw.len())];
+    padded_raw.extend_from_slice(smaller_raw);
+
+    let order = layout_node.meta.tosa_dim_order.as_ref()?;
+    if order.len() != padded_raw.len() {
+        return None;
+    }
+    let mut last_nonunit: i64 = -1;
+    let mut permutes_nonunit = false;
+    for &axis in order.iter() {
+        if padded_raw.get(axis as usize).copied().unwrap_or(1) != 1 {
+            if (axis as i64) < last_nonunit {
+                permutes_nonunit = true;
+                break;
+            }
+            last_nonunit = axis as i64;
+        }
+    }
+    if !permutes_nonunit {
+        return None;
+    }
+    let perms: Vec<i32> = order.iter().map(|&axis| axis as i32).collect();
+    Some((padded_raw, perms))
 }
 
 #[cfg(test)]
