@@ -23,20 +23,16 @@ fn opt_int_arg(arg: Option<&IrArg>) -> Option<Option<i64>> {
 
 fn fixup_start(start: Option<i64>, dim_size: i64) -> i64 {
     let start = start.unwrap_or(0);
-    if start < 0 {
-        (start.rem_euclid(dim_size)).clamp(0, dim_size)
-    } else {
-        start.clamp(0, dim_size)
-    }
+    // PyTorch slice semantics: a negative index is shifted by dim_size ONCE then
+    // clamped (not modulo-wrapped), so start < -dim_size clamps to 0.
+    let start = if start < 0 { start + dim_size } else { start };
+    start.clamp(0, dim_size)
 }
 
 fn fixup_end(end: Option<i64>, dim_size: i64) -> i64 {
     let end = end.unwrap_or(dim_size);
-    if end < 0 {
-        (end.rem_euclid(dim_size)).clamp(0, dim_size)
-    } else {
-        end.clamp(0, dim_size)
-    }
+    let end = if end < 0 { end + dim_size } else { end };
+    end.clamp(0, dim_size)
 }
 
 pub struct IrDecomposeSliceScatterPass;
@@ -126,53 +122,63 @@ impl IrPass for IrDecomposeSliceScatterPass {
                 .to_string();
 
             let result = if step == 1 {
-                let mut prefix_shape = input_shape.clone();
-                prefix_shape[dim_norm] = start_i;
-                let prefix = graph.add_anchored_call_function(
-                    id,
-                    format!("{}_prefix", name),
-                    "aten.slice_copy.Tensor".to_string(),
-                    vec![
-                        IrArg::Node(input_id),
-                        IrArg::Int(dim_norm as i64),
-                        IrArg::Int(0),
-                        IrArg::Int(start_i),
-                        IrArg::Int(1),
-                    ],
-                    meta.cloned_with_val(prefix_shape, &dtype),
-                );
+                // Only cat non-empty slices: TOSA cannot allocate a zero-dim tensor,
+                // so an empty prefix (start_i == 0) or empty suffix (end_i == dim_size)
+                // must be omitted rather than become a degenerate slice/cat input.
+                let mut cat_inputs: Vec<IrArg> = Vec::new();
 
-                let mut suffix_shape = input_shape.clone();
-                suffix_shape[dim_norm] = dim_size - end_i;
-                let suffix = graph.add_anchored_call_function(
-                    id,
-                    format!("{}_suffix", name),
-                    "aten.slice_copy.Tensor".to_string(),
-                    vec![
-                        IrArg::Node(input_id),
-                        IrArg::Int(dim_norm as i64),
-                        IrArg::Int(end_i),
-                        IrArg::Int(dim_size),
-                        IrArg::Int(1),
-                    ],
-                    meta.cloned_with_val(suffix_shape, &dtype),
-                );
+                if start_i > 0 {
+                    let mut prefix_shape = input_shape.clone();
+                    prefix_shape[dim_norm] = start_i;
+                    let prefix = graph.add_anchored_call_function(
+                        id,
+                        format!("{}_prefix", name),
+                        "aten.slice_copy.Tensor".to_string(),
+                        vec![
+                            IrArg::Node(input_id),
+                            IrArg::Int(dim_norm as i64),
+                            IrArg::Int(0),
+                            IrArg::Int(start_i),
+                            IrArg::Int(1),
+                        ],
+                        meta.cloned_with_val(prefix_shape, &dtype),
+                    );
+                    cat_inputs.push(IrArg::Node(prefix));
+                }
 
-                let updated = graph.add_anchored_call_function(
-                    id,
-                    format!("{}_cat", name),
-                    "aten.cat.default".to_string(),
-                    vec![
-                        IrArg::List(vec![
-                            IrArg::Node(prefix),
-                            IrArg::Node(src_id),
-                            IrArg::Node(suffix),
-                        ]),
-                        IrArg::Int(dim_norm as i64),
-                    ],
-                    meta.cloned_with_val(input_shape.clone(), &dtype),
-                );
-                updated
+                cat_inputs.push(IrArg::Node(src_id));
+
+                if end_i < dim_size {
+                    let mut suffix_shape = input_shape.clone();
+                    suffix_shape[dim_norm] = dim_size - end_i;
+                    let suffix = graph.add_anchored_call_function(
+                        id,
+                        format!("{}_suffix", name),
+                        "aten.slice_copy.Tensor".to_string(),
+                        vec![
+                            IrArg::Node(input_id),
+                            IrArg::Int(dim_norm as i64),
+                            IrArg::Int(end_i),
+                            IrArg::Int(dim_size),
+                            IrArg::Int(1),
+                        ],
+                        meta.cloned_with_val(suffix_shape, &dtype),
+                    );
+                    cat_inputs.push(IrArg::Node(suffix));
+                }
+
+                if cat_inputs.len() == 1 {
+                    // Whole tensor scattered (empty prefix and suffix): result is src.
+                    src_id
+                } else {
+                    graph.add_anchored_call_function(
+                        id,
+                        format!("{}_cat", name),
+                        "aten.cat.default".to_string(),
+                        vec![IrArg::List(cat_inputs), IrArg::Int(dim_norm as i64)],
+                        meta.cloned_with_val(input_shape.clone(), &dtype),
+                    )
+                }
             } else {
                 let arange = graph.add_anchored_arange(
                     id,
