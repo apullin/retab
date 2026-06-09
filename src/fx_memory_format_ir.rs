@@ -743,6 +743,23 @@ impl IrPass for IrToTosaMemoryFormatPass {
         modified |= self.insert_output_transposes(graph, is_control_flow_gm);
         modified |= self.remap_permute_args(graph);
 
+        if std::env::var("ARM_TOSA_ENGINE_DEBUG_LAYOUT").ok().as_deref() == Some("1") {
+            for node in graph.nodes.iter().filter(|node| node.alive) {
+                let Some(val) = node.meta.val.as_ref() else {
+                    continue;
+                };
+                eprintln!(
+                    "[LayoutDebug] {} target={} shape={:?} sr={:?} dim_order={:?} neutral={}",
+                    node.name,
+                    node.target,
+                    val.shape,
+                    node.meta.tosa_spatial_rank,
+                    node.meta.tosa_dim_order,
+                    is_layout_neutral(&node.meta),
+                );
+            }
+        }
+
         if modified {
             log_line(format_args!(
                 "[IrToTosaMemoryFormat] annotated layout and inserted boundary transposes"

@@ -2205,23 +2205,6 @@ impl NodeMeta {
         self.set_extra("arm_layout_neutral", MetaValue::Bool(true));
     }
 
-    pub fn mark_identity_dim_order(&mut self) {
-        if let Some(shape) = self.val_shape() {
-            self.set_tosa_dim_order((0..shape.len()).collect());
-        }
-    }
-
-    pub fn mark_layout_neutral(&mut self) {
-        self.mark_layout_neutral_flag();
-        self.set_extra("tosa_spatial_rank", MetaValue::Int(0));
-        self.mark_identity_dim_order();
-    }
-
-    pub fn layout_neutral(mut self) -> Self {
-        self.mark_layout_neutral();
-        self
-    }
-
     /// Get the single output qparam (key 0), if present.
     pub fn output_qparam(&self) -> Option<&QParam> {
         self.output_qparams.as_ref()?.get(&0)
