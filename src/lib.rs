@@ -17,6 +17,7 @@ mod fx_convert_full_like_ir;
 mod fx_convert_split_to_slice_ir;
 mod fx_convert_sum_ir;
 mod fx_decompose_adaptive_avgpool_ir;
+mod fx_decompose_avgpool_pad_ir;
 mod fx_decompose_addmm_ir;
 mod fx_decompose_as_strided_copy_ir;
 mod fx_decompose_cumsum_ir;

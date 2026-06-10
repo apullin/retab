@@ -152,6 +152,9 @@ pub fn build_hybrid_pipeline(
             crate::fx_decompose_adaptive_avgpool_ir::IrDecomposeAdaptiveAvgPoolPass,
         )),
         Ir(Box::new(
+            crate::fx_decompose_avgpool_pad_ir::IrDecomposeAvgPoolPadPass,
+        )),
+        Ir(Box::new(
             crate::fx_decompose_maxpool_dilation_ir::IrDecomposeMaxPoolDilationPass,
         )),
         Ir(Box::new(crate::fx_decompose_var_ir::IrDecomposeVarPass)),
