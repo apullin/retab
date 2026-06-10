@@ -94,9 +94,6 @@ impl IrEpPass for IrFuseShapeOnlyConstantsEpPass {
             if !node.alive || node.op != NodeOp::CallFunction {
                 continue;
             }
-            if node.meta.extra_bool("arm_preserve_shape_node") == Some(true) {
-                continue;
-            }
             if !is_shape_only_constant_target(&node.target) {
                 continue;
             }

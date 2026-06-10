@@ -69,10 +69,6 @@ fn is_channel_reshape(input_shape: &[i64], output_shape: &[i64]) -> bool {
     n_old != n_new || c_old != c_new
 }
 
-fn is_layout_neutral(meta: &NodeMeta) -> bool {
-    meta.extra_bool("arm_layout_neutral") == Some(true)
-}
-
 fn is_input_placeholder(graph: &IrGraph, id: NodeId) -> bool {
     let node = &graph.nodes[id];
     if node.op != NodeOp::Placeholder || node.meta.val.is_none() {
@@ -85,14 +81,6 @@ fn is_input_placeholder(graph: &IrGraph, id: NodeId) -> bool {
         return false;
     }
     node.tensor.is_none()
-}
-
-fn all_live_users_layout_neutral(graph: &IrGraph, id: NodeId) -> bool {
-    let users = graph.live_user_ids(id);
-    !users.is_empty()
-        && users
-            .iter()
-            .all(|&user_id| is_layout_neutral(&graph.nodes[user_id].meta))
 }
 
 /// Whether a node's output is consumed in physical (NHWC) layout. False (logical) when the
@@ -109,7 +97,7 @@ fn output_is_physical(graph: &IrGraph, id: NodeId) -> bool {
         if node.op == NodeOp::Output {
             continue;
         }
-        if node.target.contains("quantize") || is_layout_neutral(&node.meta) {
+        if node.target.contains("quantize") {
             stack.extend(graph.live_user_ids(uid));
         } else {
             return true;
@@ -357,11 +345,7 @@ impl IrToTosaMemoryFormatPass {
             let Some(val) = graph.nodes[id].meta.val.as_ref() else {
                 continue;
             };
-            let rank = if is_layout_neutral(&graph.nodes[id].meta) {
-                0
-            } else {
-                initial_spatial_rank(val.rank())
-            };
+            let rank = initial_spatial_rank(val.rank());
             modified |= set_spatial_rank(graph, id, rank);
         }
         modified
@@ -431,9 +415,7 @@ impl IrToTosaMemoryFormatPass {
                 }
             }
 
-            let dim_order = if is_layout_neutral(&graph.nodes[id].meta) {
-                (0..rank).collect::<Vec<_>>()
-            } else if is_input_placeholder(graph, id) {
+            let dim_order = if is_input_placeholder(graph, id) {
                 if rank >= 4 {
                     graph.nodes[id]
                         .meta
@@ -486,12 +468,6 @@ impl IrToTosaMemoryFormatPass {
             let Some(input_id) = graph.nodes[id].args.first().and_then(|arg| arg.as_node()) else {
                 continue;
             };
-            if is_layout_neutral(&graph.nodes[input_id].meta)
-                || is_layout_neutral(&graph.nodes[id].meta)
-            {
-                continue;
-            }
-
             let Some(input_shape) = graph.nodes[input_id]
                 .meta
                 .val_shape()
@@ -551,8 +527,6 @@ impl IrToTosaMemoryFormatPass {
                 .meta
                 .extra_bool("arm_control_flow_placeholder")
                 == Some(true)
-                || is_layout_neutral(&graph.nodes[id].meta)
-                || all_live_users_layout_neutral(graph, id)
             {
                 continue;
             }
@@ -595,7 +569,6 @@ impl IrToTosaMemoryFormatPass {
             let original_dim_orders = graph.nodes[output_id].meta.original_dim_orders.clone();
             for (index, output_arg) in outputs.into_iter().enumerate() {
                 if !graph.nodes[output_arg].alive
-                    || is_layout_neutral(&graph.nodes[output_arg].meta)
                     || graph.nodes[output_arg]
                         .meta
                         .extra_bool("arm_control_flow_parent_output_user")
@@ -654,16 +627,12 @@ impl IrToTosaMemoryFormatPass {
             if !graph.nodes[id].alive
                 || graph.nodes[id].op != NodeOp::CallFunction
                 || !is_permute(&graph.nodes[id].target)
-                || is_layout_neutral(&graph.nodes[id].meta)
             {
                 continue;
             }
             let Some(input_id) = graph.nodes[id].args.first().and_then(|arg| arg.as_node()) else {
                 continue;
             };
-            if is_layout_neutral(&graph.nodes[input_id].meta) {
-                continue;
-            }
             let Some(input_shape) = graph.nodes[input_id].meta.val_shape() else {
                 continue;
             };
@@ -749,13 +718,12 @@ impl IrPass for IrToTosaMemoryFormatPass {
                     continue;
                 };
                 eprintln!(
-                    "[LayoutDebug] {} target={} shape={:?} sr={:?} dim_order={:?} neutral={}",
+                    "[LayoutDebug] {} target={} shape={:?} sr={:?} dim_order={:?}",
                     node.name,
                     node.target,
                     val.shape,
                     node.meta.tosa_spatial_rank,
                     node.meta.tosa_dim_order,
-                    is_layout_neutral(&node.meta),
                 );
             }
         }

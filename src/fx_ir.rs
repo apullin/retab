@@ -1827,7 +1827,7 @@ impl FakeTensorMeta {
 
 /// Metadata fields extracted from `node.meta`. The common fields are typed;
 /// rare fields stay in the Python meta dict and are not touched.
-/// Untyped meta value for passthrough of custom keys (arm_layout_neutral, etc).
+/// Untyped meta value for passthrough of custom keys (arm_constant_placeholder, etc).
 #[derive(Debug, Clone)]
 pub enum MetaValue {
     Bool(bool),
@@ -1847,7 +1847,7 @@ pub struct NodeMeta {
     pub pre_pass_arg_qparams: Option<HashMap<usize, QParam>>,
     pub table_input_qparam: Option<QParam>,
     pub table_output_qparam: Option<QParam>,
-    /// Arbitrary extra meta keys for passthrough (arm_layout_neutral, skip_size_adjust, etc).
+    /// Arbitrary extra meta keys for passthrough (skip_size_adjust, arm_constant_placeholder, etc).
     pub extras: HashMap<String, MetaValue>,
     pub(crate) dirty: DirtyFlags,
 }
@@ -1962,11 +1962,6 @@ impl NodeMeta {
 
         // Import known extra meta keys
         let mut extras = HashMap::new();
-        if let Ok(v) = meta.get_item("arm_layout_neutral") {
-            if let Ok(b) = v.extract::<bool>() {
-                extras.insert("arm_layout_neutral".into(), MetaValue::Bool(b));
-            }
-        }
         for key in [
             "arm_constant_placeholder",
             "arm_control_flow_placeholder",
@@ -2200,14 +2195,6 @@ impl NodeMeta {
     pub fn without_qparams(mut self) -> Self {
         self.clear_all_qparams();
         self
-    }
-
-    pub fn mark_preserve_shape_node(&mut self) {
-        self.set_extra("arm_preserve_shape_node", MetaValue::Bool(true));
-    }
-
-    pub fn mark_layout_neutral_flag(&mut self) {
-        self.set_extra("arm_layout_neutral", MetaValue::Bool(true));
     }
 
     /// Get the single output qparam (key 0), if present.
