@@ -56,6 +56,9 @@ pub fn build_hybrid_pipeline(
             crate::fx_annotate_output_dim_order_ir::IrAnnotateOutputDimOrderPass,
         )),
         Ir(Box::new(crate::fx_decompose_ops_ir::IrDecomposeOpsPass)),
+        Ir(Box::new(
+            crate::fx_decorate_fp_int_cast_ir::IrDecorateFpToIntCastPass,
+        )),
         // -- Pre-fold --
         Ir(Box::new(
             crate::fx_fuse_quant_activation_ir::IrFuseQuantActivationPass,
