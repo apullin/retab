@@ -7,33 +7,6 @@ use crate::fx_ir::{
 };
 use crate::runner_logging::log_line;
 
-fn channels_last_order(rank: usize) -> Vec<usize> {
-    if rank <= 2 {
-        return (0..rank).collect();
-    }
-    let spatial_rank = rank.saturating_sub(2);
-    let channel_axis = rank - (spatial_rank + 1);
-    let mut order: Vec<usize> = (0..channel_axis).collect();
-    order.extend(channel_axis + 1..rank);
-    order.push(channel_axis);
-    order
-}
-
-fn permuted_shape(shape: &[i64], perm: &[usize]) -> Vec<i64> {
-    perm.iter()
-        .filter_map(|&idx| shape.get(idx).copied())
-        .collect()
-}
-
-fn normalized_physical_perm(rank: usize, dims: &[i64]) -> Vec<usize> {
-    let dims_usize: Vec<usize> = dims.iter().map(|&dim| dim as usize).collect();
-    channels_last_order(rank)
-        .into_iter()
-        .filter(|axis| dims_usize.contains(axis))
-        .filter_map(|axis| dims_usize.iter().position(|&dim| dim == axis))
-        .collect()
-}
-
 fn is_layer_norm(target: &str) -> bool {
     target.contains("layer_norm") || target.contains("native_layer_norm")
 }
@@ -93,12 +66,6 @@ fn replace_getitem_users(graph: &mut IrGraph, id: NodeId, replacement: NodeId) {
 fn anchor_tensor_meta(graph: &mut IrGraph, node_id: NodeId, anchor: NodeId, meta_source: NodeId) {
     graph.anchor_to(node_id, anchor);
     graph.copy_meta_from(node_id, meta_source);
-}
-
-fn preserve_shape_node(graph: &mut IrGraph, node_id: NodeId) {
-    let meta = &mut graph.node_mut(node_id).meta;
-    meta.mark_preserve_shape_node();
-    meta.mark_layout_neutral_flag();
 }
 
 pub struct IrDecomposeLayerNormPass;
@@ -174,6 +141,10 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     for &dim in &dims {
         stat_shape[dim as usize] = 1;
     }
+    // Plain logical [1, ..., normalized_shape] param shape, matching upstream
+    // decompose_layernorm_pass.py (`weights_reshaped_shape`). The weight/bias
+    // views flow through normal NHWC annotation — no physical channels-last
+    // shape, no permute, no layout-neutral marks.
     let param_shape: Vec<i64> = (0..rank)
         .map(|idx| {
             if dims.contains(&(idx as i64)) {
@@ -183,17 +154,6 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             }
         })
         .collect();
-    let physical_param_shape = if rank >= 4 {
-        permuted_shape(&param_shape, &channels_last_order(rank))
-    } else {
-        param_shape.clone()
-    };
-    let affine_perm = if rank >= 4 {
-        normalized_physical_perm(rank, &dims)
-    } else {
-        (0..normalized_shape.len()).collect()
-    };
-    let affine_needs_permute = affine_perm.iter().enumerate().any(|(idx, &dim)| idx != dim);
     let scalar_shape = vec![1; rank];
 
     let weights = graph.nodes[id].args.get(2).and_then(|arg| match arg {
@@ -282,40 +242,14 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let mut output = normalized;
     if let Some(weight_id) = weights {
-        let weight_input = if affine_needs_permute {
-            let weight_permute = graph.add_node(
-                NodeOp::CallFunction,
-                format!("{}_weight_permute", name),
-                "aten.permute_copy.default".to_string(),
-                vec![
-                    IrArg::Node(weight_id),
-                    i64_list(
-                        &affine_perm
-                            .iter()
-                            .map(|&dim| dim as i64)
-                            .collect::<Vec<_>>(),
-                    ),
-                ],
-                output_meta.cloned_with_val(
-                    permuted_shape(&normalized_shape, &affine_perm),
-                    &dtype,
-                ),
-            );
-            anchor_tensor_meta(graph, weight_permute, id, x_id);
-            preserve_shape_node(graph, weight_permute);
-            weight_permute
-        } else {
-            weight_id
-        };
         let weight_reshaped = graph.add_node(
             NodeOp::CallFunction,
             format!("{}_weight_view", name),
             view_target.to_string(),
-            vec![IrArg::Node(weight_input), i64_list(&physical_param_shape)],
-            output_meta.cloned_with_val(physical_param_shape.clone(), &dtype),
+            vec![IrArg::Node(weight_id), i64_list(&param_shape)],
+            output_meta.cloned_with_val(param_shape.clone(), &dtype),
         );
         anchor_tensor_meta(graph, weight_reshaped, id, x_id);
-        preserve_shape_node(graph, weight_reshaped);
 
         output = graph.add_node(
             NodeOp::CallFunction,
@@ -328,40 +262,14 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     }
 
     if let Some(bias_id) = bias {
-        let bias_input = if affine_needs_permute {
-            let bias_permute = graph.add_node(
-                NodeOp::CallFunction,
-                format!("{}_bias_permute", name),
-                "aten.permute_copy.default".to_string(),
-                vec![
-                    IrArg::Node(bias_id),
-                    i64_list(
-                        &affine_perm
-                            .iter()
-                            .map(|&dim| dim as i64)
-                            .collect::<Vec<_>>(),
-                    ),
-                ],
-                output_meta.cloned_with_val(
-                    permuted_shape(&normalized_shape, &affine_perm),
-                    &dtype,
-                ),
-            );
-            anchor_tensor_meta(graph, bias_permute, id, x_id);
-            preserve_shape_node(graph, bias_permute);
-            bias_permute
-        } else {
-            bias_id
-        };
         let bias_reshaped = graph.add_node(
             NodeOp::CallFunction,
             format!("{}_bias_view", name),
             view_target.to_string(),
-            vec![IrArg::Node(bias_input), i64_list(&physical_param_shape)],
-            output_meta.cloned_with_val(physical_param_shape, &dtype),
+            vec![IrArg::Node(bias_id), i64_list(&param_shape)],
+            output_meta.cloned_with_val(param_shape.clone(), &dtype),
         );
         anchor_tensor_meta(graph, bias_reshaped, id, x_id);
-        preserve_shape_node(graph, bias_reshaped);
 
         output = graph.add_node(
             NodeOp::CallFunction,
