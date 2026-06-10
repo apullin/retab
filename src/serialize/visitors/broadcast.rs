@@ -359,8 +359,6 @@ mod tests {
             meta(&[1, 10, 25, 20], IrDType::Int32),
             "larger".to_string(),
         );
-        let larger_node = graph.node(larger).expect("larger node");
-
         let mut binary_meta = meta(&[1, 10, 25, 20], IrDType::Int32);
         binary_meta.tosa_dim_order = Some(SmallVec::from_slice(&[0, 2, 3, 1]));
         let binary = graph.create_node(
@@ -372,6 +370,7 @@ mod tests {
             "binary".to_string(),
         );
         let binary_node = graph.node(binary).expect("binary node");
+        let larger_node = graph.node(larger).expect("larger node");
 
         assert_eq!(larger_node.meta.tosa_dim_order, None);
         assert_eq!(

@@ -414,6 +414,7 @@ impl IrPass for IrDecomposeGroupedConvPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fx_ir::i64_list_arg as i64_list;
 
     fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
         let mut meta = NodeMeta::default();

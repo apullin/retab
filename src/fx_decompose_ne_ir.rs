@@ -131,7 +131,7 @@ mod tests {
         let not = graph.by_name("ne_logical_not").unwrap();
         assert_eq!(not.target, "aten.logical_not.default");
         assert_eq!(not.args[0].as_node(), Some(eq.id));
-        assert_eq!(graph.replacements.get(&ne), Some(&not.id));
+        assert_eq!(graph.replacement_of(ne), Some(not.id));
     }
 
     #[test]

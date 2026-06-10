@@ -385,6 +385,7 @@ impl IrPass for IrRewriteIndexPutPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fx_ir::{FakeTensorMeta, NodeMeta};
 
     fn graph_with_index_put_none() -> IrGraph {
         let mut graph = IrGraph::empty();

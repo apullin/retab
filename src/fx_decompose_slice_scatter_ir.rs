@@ -279,6 +279,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fx_ir::{FakeTensorMeta, NodeMeta};
 
     fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
         let mut meta = NodeMeta::default();

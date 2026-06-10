@@ -77,7 +77,7 @@ impl IrEpPass for IrFuseEqualPlaceholdersEpPass {
 
 #[cfg(test)]
 mod tests {
-    use crate::fx_ir::{IrArg, IrGraph, IrNode, MetaValue, NodeMeta};
+    use crate::fx_ir::{IrArg, IrGraph, MetaValue, NodeMeta};
     use crate::store::TensorData;
 
     use super::*;

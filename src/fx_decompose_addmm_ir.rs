@@ -184,6 +184,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::fx_ir::NodeMeta;
 
     fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
         let mut meta = NodeMeta::default();

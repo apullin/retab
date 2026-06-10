@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn clamps_inf_literals_in_args_and_kwargs_for_quantized_nodes() {
-        let mut graph = IrGraph::new();
+        let mut graph = IrGraph::empty();
         let mut meta = NodeMeta::default();
         meta.set_single_output_qparam(QParam::per_tensor(
             1.0,
@@ -133,10 +133,13 @@ mod tests {
 
         assert!(modified);
         assert_eq!(graph.nodes[id].args[2].as_float(), Some(255.0));
-        assert_eq!(
-            graph.nodes[id].args[3],
-            IrArg::List(vec![IrArg::Float(-255.0)])
-        );
+        match &graph.nodes[id].args[3] {
+            IrArg::List(items) => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].as_float(), Some(-255.0));
+            }
+            other => panic!("expected List arg, got {other:?}"),
+        }
         assert_eq!(
             graph.nodes[id].kwargs.get("max_value").and_then(IrArg::as_float),
             Some(255.0)
@@ -149,7 +152,7 @@ mod tests {
 
     #[test]
     fn preserves_inf_literals_for_unquantized_nodes() {
-        let mut graph = IrGraph::new();
+        let mut graph = IrGraph::empty();
         let id = graph.add_node(
             NodeOp::CallFunction,
             "masked_fill".into(),

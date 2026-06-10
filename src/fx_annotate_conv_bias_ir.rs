@@ -97,7 +97,7 @@ impl IrPass for IrAnnotateConvBiasDtypePass {
 mod tests {
     use super::*;
     use crate::fx_control_flow_metadata::QParam;
-    use crate::fx_ir::{FakeTensorMeta, NodeMeta};
+    use crate::fx_ir::{i64_list_arg, FakeTensorMeta, NodeMeta};
     use std::collections::HashMap;
 
     fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
@@ -195,11 +195,11 @@ mod tests {
                 IrArg::Node(input),
                 IrArg::Node(weight),
                 IrArg::Node(bias),
-                IrArg::IntList(vec![2, 2]),
-                IrArg::IntList(vec![1, 1]),
-                IrArg::IntList(vec![1, 1]),
+                i64_list_arg(&[2, 2]),
+                i64_list_arg(&[1, 1]),
+                i64_list_arg(&[1, 1]),
                 IrArg::Bool(true),
-                IrArg::IntList(vec![0, 0]),
+                i64_list_arg(&[0, 0]),
                 IrArg::Int(1),
             ],
             conv_meta,

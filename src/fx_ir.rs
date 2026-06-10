@@ -245,6 +245,11 @@ impl IrGraph {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn replacement_of(&self, id: NodeId) -> Option<NodeId> {
+        self.replacements.get(&id).copied()
+    }
+
     pub fn from_fx_with_tensors(
         gm: &Bound<'_, PyAny>,
         exported_program: Option<&Bound<'_, PyAny>>,
