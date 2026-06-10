@@ -227,10 +227,16 @@ mod tests {
         assert!(!graph.nodes[addmm].alive);
 
         let mm = graph.by_name("addmm_mm").unwrap();
+        let alpha_full = graph.by_name("addmm_alpha_full").unwrap();
+        let alpha_mul = graph.by_name("addmm_alpha_mul").unwrap();
         let add = graph.by_name("addmm_add").unwrap();
-        assert_eq!(add.args[0].as_node(), Some(mm.id));
+        // alpha=0.0 (!= the default 1.0) is read from kwargs, so mm is scaled by full(alpha)
+        assert_eq!(alpha_full.args[1].as_float(), Some(0.0));
+        assert_eq!(alpha_mul.args[0].as_node(), Some(mm.id));
+        assert_eq!(alpha_mul.args[1].as_node(), Some(alpha_full.id));
+        assert_eq!(add.args[0].as_node(), Some(alpha_mul.id));
         assert_eq!(add.args[1].as_node(), Some(bias));
-        assert!(graph.by_name("addmm_alpha_mul").is_none());
+        // beta=1.0 is the default, so the bias is not scaled
         assert!(graph.by_name("addmm_beta_mul").is_none());
     }
 }

@@ -296,9 +296,22 @@ mod tests {
             Attribute::Add(AddAttribute {}),
         );
 
-        assert_eq!(result.operators[0].op, Op::Reshape);
-        assert_eq!(result.operators[1].op, Op::Add);
-        assert_eq!(result.operators[1].outputs, vec!["add".to_string()]);
+        // The lower-rank rhs is reshaped up to the broadcast rank before the add
+        // (ConstShape + Reshape -> add_input1_broadcast), then the result is reshaped
+        // back to the logical output shape.
+        assert_eq!(result.operators[0].op, Op::ConstShape);
+        assert_eq!(result.operators[1].op, Op::Reshape);
+        assert_eq!(
+            result.operators[1].outputs,
+            vec!["add_input1_broadcast".to_string()]
+        );
+        assert_eq!(result.operators[2].op, Op::Add);
+        assert_eq!(
+            result.operators[2].outputs,
+            vec!["add_broadcast_output".to_string()]
+        );
+        assert_eq!(result.operators[4].op, Op::Reshape);
+        assert_eq!(result.operators[4].outputs, vec!["add".to_string()]);
         assert_eq!(result.tensors[0].shape, vec![1, 1, 1, 8]);
         assert_eq!(result.tensors[1].shape, vec![1, 1, 1024, 8]);
     }

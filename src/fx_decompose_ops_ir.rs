@@ -958,8 +958,21 @@ mod tests {
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
         assert!(!graph.nodes[softmax].alive);
+        // softmax decomposes to amax -> sub -> exp -> sum -> reciprocal -> mul (-> clone)
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|n| n.alive && n.target == "aten.amax.default"));
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|n| n.alive && n.target == "aten.exp.default"));
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|n| n.alive && n.target == "aten.reciprocal.default"));
         assert!(graph.nodes.iter().any(|node| node.alive
-            && node.name == "softmax_result"
+            && node.name == "softmax_softmax"
             && node.target == "aten.mul.Tensor"));
     }
 
