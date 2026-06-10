@@ -93,6 +93,17 @@ pub fn emit_node(
     node: &Node,
     store: &TensorStore,
 ) -> Option<EmitResult> {
+    if let Ok(probe) = std::env::var("ARM_TOSA_ENGINE_DEBUG_NODE") {
+        if node.name.contains(&probe) {
+            eprintln!(
+                "[NodeProbe] serialize {} target={:?} raw_shape={:?} dim_order={:?}",
+                node.name,
+                node.target,
+                &node.meta.val.shape[..node.meta.val.shape_len as usize],
+                node.meta.tosa_dim_order,
+            );
+        }
+    }
     // Handle the `getitem` special case first (dynamic Other variant).
     if let OpTarget::Other(target) = &node.target {
         if target.contains("getitem") {
