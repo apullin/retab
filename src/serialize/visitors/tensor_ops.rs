@@ -1148,18 +1148,10 @@ pub(super) fn emit_concat(ctx: &EmitContext) -> EmitResult {
         Some(Arg::Int(axis)) => *axis as i32,
         _ => kwarg_i32(node, "axis", 0),
     };
-    let axis = match node.args.first() {
-        Some(Arg::Node(input_id)) => graph
-            .node(*input_id)
-            .map(|input_node| map_axis_to_tosa_dim_order(graph, input_node, raw_axis))
-            .unwrap_or(raw_axis),
-        Some(Arg::NodeList(ids)) => ids
-            .first()
-            .and_then(|input_id| graph.node(*input_id))
-            .map(|input_node| map_axis_to_tosa_dim_order(graph, input_node, raw_axis))
-            .unwrap_or(raw_axis),
-        _ => raw_axis,
-    };
+    // Map the cat axis through the OUTPUT node's dim_order, matching upstream
+    // op_cat.py (`dim = output.dim_order.index(dim)`). Equivalent when operand
+    // layouts are uniform (the norm), but the output is the canonical reference.
+    let axis = map_axis_to_tosa_dim_order(graph, node, raw_axis);
     if std::env::var("ARM_TOSA_ENGINE_DEBUG_CAT").ok().as_deref() == Some("1") {
         fn dbg_shape(n: &crate::graph::ir::Node) -> Vec<i64> {
             n.meta.val.shape[..n.meta.val.shape_len as usize].to_vec()
