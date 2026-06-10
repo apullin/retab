@@ -3012,6 +3012,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     let grouped_shape = vec![n, group, channels_per_group, hxw];
     let reduce_dims = i64_list(&[2, 3]);
     let scalar_shape = vec![1_i64; grouped_shape.len()];
+    let stat_shape = vec![n, group, 1, 1];
     let affine_shape = vec![1, group, channels_per_group, 1];
     let reshape_target = if graph.nodes[id].target.contains("native_group_norm") {
         "aten.view_copy.default"
@@ -3030,14 +3031,14 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         "sum",
         "aten.sum.dim_IntList",
         vec![IrArg::Node(grouped), reduce_dims.clone(), IrArg::Bool(true)],
-        &scalar_shape,
+        &stat_shape,
     );
     let mean = ctx.tensor_shape(
         graph,
         "mean",
         "aten.mul.Tensor",
         vec![IrArg::Node(sum_x), IrArg::Node(inv_n)],
-        &scalar_shape,
+        &stat_shape,
     );
     let centered = ctx.tensor_shape(
         graph,
@@ -3058,14 +3059,14 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         "sum_squared",
         "aten.sum.dim_IntList",
         vec![IrArg::Node(squared), reduce_dims, IrArg::Bool(true)],
-        &scalar_shape,
+        &stat_shape,
     );
     let var = ctx.tensor_shape(
         graph,
         "var",
         "aten.mul.Tensor",
         vec![IrArg::Node(sum_squared), IrArg::Node(inv_n)],
-        &scalar_shape,
+        &stat_shape,
     );
     let eps_full = ctx.full_shape(graph, "eps", eps, &scalar_shape);
     let var_eps = ctx.tensor_shape(
@@ -3073,14 +3074,14 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         "var_eps",
         "aten.add.Tensor",
         vec![IrArg::Node(var), IrArg::Node(eps_full)],
-        &scalar_shape,
+        &stat_shape,
     );
     let rsqrt = ctx.tensor_shape(
         graph,
         "rsqrt",
         "aten.rsqrt.default",
         vec![IrArg::Node(var_eps)],
-        &scalar_shape,
+        &stat_shape,
     );
     let normalized = ctx.tensor_shape(
         graph,

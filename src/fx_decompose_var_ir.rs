@@ -156,7 +156,7 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         .val_shape()
         .map(|shape| shape.to_vec())
         .unwrap_or_else(|| reduced_shape(&input_shape, &dims, keepdim));
-    let coefficient_shape = vec![1; rank];
+    let coefficient_shape = vec![1; output_shape.len().max(1)];
     let count: i64 = dims
         .iter()
         .map(|&dim| input_shape[dim as usize].max(1))
