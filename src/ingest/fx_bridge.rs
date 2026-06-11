@@ -1418,6 +1418,37 @@ fn is_accumulator_op(target: &OpTarget) -> bool {
 ///   3. Casts placeholder nodes with Int64 dtype to Int32
 ///   4. Infers placeholder dtypes from consumer node qparams
 fn fixup_quantized_dtypes(graph: &mut Graph) {
+    // Iterate the per-op dtype fixes to convergence. A single pass is
+    // order-dependent: e.g. the TOSA TABLE rule reads its input node's dtype,
+    // but that input may be a dtype-preserving op (a view) that the propagation
+    // step only repairs later in the same pass — so the table captures a stale
+    // FP32 and the serialized TOSA graph is rejected ("Invalid TOSA graph").
+    // Re-running until dtypes stop changing makes the result independent of node
+    // ordering. This is the Rust-native equivalent of the (removed) Python bulk
+    // refresh, which achieved the same by re-executing ops. Fixes are monotonic
+    // (FP32 -> quantized), so this converges in a couple of passes; the cap is a
+    // safety backstop.
+    for _outer in 0..8 {
+        let before: Vec<DType> = graph
+            .all_node_ids()
+            .iter()
+            .filter_map(|id| graph.node(*id))
+            .map(|n| n.meta.val.dtype)
+            .collect();
+        fixup_quantized_dtypes_once(graph);
+        let after: Vec<DType> = graph
+            .all_node_ids()
+            .iter()
+            .filter_map(|id| graph.node(*id))
+            .map(|n| n.meta.val.dtype)
+            .collect();
+        if before == after {
+            break;
+        }
+    }
+}
+
+fn fixup_quantized_dtypes_once(graph: &mut Graph) {
     let all_ids = graph.all_node_ids();
     for node_id in all_ids {
         let (
@@ -1584,13 +1615,18 @@ fn fixup_quantized_dtypes(graph: &mut Graph) {
         }
     }
 
-    // Fix 4: Propagate dtype through reshape-like ops.
-    // Reshape, View, Flatten, Squeeze, Unsqueeze do not change dtype —
-    // they should inherit it from their first (input) argument. After
-    // FX-direct passes, these ops may retain the original FP32 dtype
-    // from meta["val"] because the passes don't update FakeTensor dtypes.
-    // Run multiple iterations to handle chains (e.g. view -> view -> conv).
-    for _iter in 0..3 {
+    // Fix 4: Propagate dtype through dtype-preserving ops.
+    // Reshape/View/Flatten/Squeeze/Unsqueeze/Permute/Transpose and the pooling
+    // ops (avg_pool2d/max_pool2d) do not change dtype — they inherit it from
+    // their first (input) argument. After FX-direct passes, these ops may retain
+    // the original FP32 dtype from meta["val"] because the passes don't update
+    // FakeTensor dtypes. Pooling in particular sits at the head of quantized
+    // chains (e.g. SE-block global avg_pool -> view -> TABLE -> RESCALE); if it
+    // stays FP32 the whole chain cascades stale and the TOSA graph is rejected.
+    // This is the Rust-native replacement for the Python bulk refresh, which
+    // re-executed these same ops to repair their dtypes. Run multiple iterations
+    // (break on convergence) to handle long chains regardless of node ordering.
+    for _iter in 0..10 {
         let all_ids4 = graph.all_node_ids();
         let mut changed = false;
         for node_id in &all_ids4 {
@@ -1611,6 +1647,11 @@ fn fixup_quantized_dtypes(graph: &mut Graph) {
                         | OpTarget::TosaReshape
                         | OpTarget::Permute
                         | OpTarget::TosaTranspose
+                        | OpTarget::AvgPool2d
+                        | OpTarget::MaxPool2d
+                        | OpTarget::AdaptiveAvgPool2d
+                        | OpTarget::TosaAvgPool2d
+                        | OpTarget::TosaMaxPool2d
                 );
                 if !is_reshape {
                     continue;

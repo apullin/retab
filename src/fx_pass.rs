@@ -131,21 +131,9 @@ pub fn run_fx_passes(gm: &FxGraphModule, passes: &[&dyn FxPass]) -> PyResult<boo
         }
     }
 
-    if any_modified {
-        let t_refresh = if profile_enabled {
-            Some(Instant::now())
-        } else {
-            None
-        };
-        let helpers = gm.py().import_bound("fx_helpers")?;
-        helpers.call_method1("refresh_safe_quantized_fake_tensors", (gm.gm_ref(),))?;
-        if let Some(t_refresh) = t_refresh {
-            log_line(format_args!(
-                "[FxPassProfile] refresh_safe_quantized_fake_tensors elapsed={:.3}ms",
-                t_refresh.elapsed().as_secs_f64() * 1000.0,
-            ));
-        }
-    }
+    // FakeTensor dtype fixup after the FX passes is now done Rust-natively at
+    // ingest (ingest::fx_bridge::fixup_quantized_dtypes), so there is no longer
+    // a Python bulk-refresh call here.
 
     if profile_enabled {
         let total_elapsed = t_total.elapsed();

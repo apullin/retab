@@ -2495,11 +2495,9 @@ pub fn run_hybrid_pipeline<'py>(
         }
     }
 
-    // Post-pipeline cleanup (same as run_fx_passes)
-    if any_modified {
-        let helpers = py.import_bound("fx_helpers")?;
-        helpers.call_method1("refresh_safe_quantized_fake_tensors", (gm,))?;
-    }
+    // Post-pipeline FakeTensor dtype fixup is now done Rust-natively at ingest
+    // (ingest::fx_bridge::fixup_quantized_dtypes, iterated to convergence), so
+    // there is no longer a Python bulk-refresh call here.
 
     Ok(any_modified)
 }
