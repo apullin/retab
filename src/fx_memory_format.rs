@@ -146,22 +146,6 @@ fn is_control_flow_submodule(gm: &FxGraphModule) -> PyResult<bool> {
     Ok(false)
 }
 
-fn all_live_users_layout_neutral(node: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let users = node.getattr("users")?;
-    let iter = users.call_method0("keys")?.iter()?;
-    let mut saw_user = false;
-    for user in iter {
-        let user = user?;
-        saw_user = true;
-        let meta = user.getattr("meta")?;
-        let is_layout_neutral: bool = meta_get(&meta, "arm_layout_neutral", false);
-        if !is_layout_neutral {
-            return Ok(false);
-        }
-    }
-    Ok(saw_user)
-}
-
 /// Check whether a rank-4 tensor is consumed as the weight input to a
 /// TRANSPOSE_CONV2D op. Python annotates these with a dedicated HWIO-like
 /// order instead of generic channels-last.
@@ -247,11 +231,6 @@ impl FxPass for FxToTosaMemoryFormatPass {
         // Phase 1: Annotate tosa_spatial_rank on every node that has a val in meta.
         for node in &all_nodes {
             let meta = node.getattr("meta")?;
-            let is_layout_neutral: bool = meta_get(&meta, "arm_layout_neutral", false);
-            if is_layout_neutral {
-                meta.set_item("tosa_spatial_rank", 0)?;
-                continue;
-            }
 
             // Skip nodes without a "val" tensor in meta
             let Some(val) = meta_val(&meta, "val") else {
@@ -334,7 +313,6 @@ impl FxPass for FxToTosaMemoryFormatPass {
             let spatial_rank: usize = meta_get(&meta, "tosa_spatial_rank", 0usize);
 
             let op = FxGraphModule::node_op(node)?;
-            let is_layout_neutral: bool = meta_get(&meta, "arm_layout_neutral", false);
 
             if op == "output" && !is_control_flow_gm {
                 if meta_val(&meta, "original_dim_orders").is_none() {
@@ -356,9 +334,7 @@ impl FxPass for FxToTosaMemoryFormatPass {
                 }
             }
 
-            let dim_order = if is_layout_neutral {
-                (0..rank).collect::<Vec<_>>()
-            } else if is_input_placeholder(node)? {
+            let dim_order = if is_input_placeholder(node)? {
                 extract_output_dim_order(node)?.unwrap_or_else(|| (0..rank).collect::<Vec<_>>())
             } else if op == "output" {
                 if is_control_flow_gm && rank >= 4 {
@@ -428,7 +404,6 @@ impl FxPass for FxToTosaMemoryFormatPass {
 
             // Get input rank
             let input_meta = input_node.getattr("meta")?;
-            let input_layout_neutral: bool = meta_get(&input_meta, "arm_layout_neutral", false);
             let Some(input_val) = meta_val(&input_meta, "val") else {
                 continue;
             };
@@ -443,10 +418,6 @@ impl FxPass for FxToTosaMemoryFormatPass {
 
             // Get output rank
             let node_meta = node.getattr("meta")?;
-            let node_layout_neutral: bool = meta_get(&node_meta, "arm_layout_neutral", false);
-            if input_layout_neutral || node_layout_neutral {
-                continue;
-            }
             let Some(output_val) = meta_val(&node_meta, "val") else {
                 continue;
             };
@@ -540,13 +511,6 @@ impl FxPass for FxToTosaMemoryFormatPass {
             if is_cf_placeholder {
                 continue;
             }
-            let is_layout_neutral: bool = meta_get(&meta, "arm_layout_neutral", false);
-            if is_layout_neutral {
-                continue;
-            }
-            if all_live_users_layout_neutral(node)? {
-                continue;
-            }
             let Some(val) = meta_val(&meta, "val") else {
                 continue;
             };
@@ -609,10 +573,6 @@ impl FxPass for FxToTosaMemoryFormatPass {
 
                 for (index, output_arg) in output_nodes.iter().enumerate() {
                     let arg_meta = output_arg.getattr("meta")?;
-                    let is_layout_neutral: bool = meta_get(&arg_meta, "arm_layout_neutral", false);
-                    if is_layout_neutral {
-                        continue;
-                    }
                     let is_control_flow_parent_output_user: bool =
                         meta_get(&arg_meta, "arm_control_flow_parent_output_user", false);
                     if is_control_flow_parent_output_user {
@@ -703,19 +663,9 @@ impl FxPass for FxToTosaMemoryFormatPass {
             if !FxGraphModule::is_node(input_node) {
                 continue;
             }
-            let node_meta = node.getattr("meta")?;
-            let node_layout_neutral: bool = meta_get(&node_meta, "arm_layout_neutral", false);
-            if node_layout_neutral {
-                continue;
-            }
-
             // Get the input rank from FakeTensor metadata
             let input_rank: usize = {
                 let input_meta = input_node.getattr("meta")?;
-                let input_layout_neutral: bool = meta_get(&input_meta, "arm_layout_neutral", false);
-                if input_layout_neutral {
-                    continue;
-                }
                 let Some(input_val) = meta_val(&input_meta, "val") else {
                     continue;
                 };

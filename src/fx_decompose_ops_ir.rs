@@ -1513,8 +1513,6 @@ mod tests {
             .find(|node| node.alive && node.name == "bn_mean_view")
             .expect("mean view");
         assert_eq!(mean_view.meta.val_shape().unwrap(), &[1, 4, 1, 1]);
-        assert_eq!(mean_view.meta.extra_bool("arm_preserve_shape_node"), None);
-        assert_eq!(mean_view.meta.extra_bool("arm_layout_neutral"), None);
     }
 
     #[test]
@@ -1570,8 +1568,6 @@ mod tests {
             .find(|node| node.alive && node.name == "gn_grouped")
             .expect("grouped");
         assert_eq!(grouped.meta.val_shape().unwrap(), &[1, 2, 3, 8]);
-        assert_eq!(grouped.meta.extra_bool("arm_preserve_shape_node"), None);
-        assert_eq!(grouped.meta.extra_bool("arm_layout_neutral"), None);
     }
 }
 
