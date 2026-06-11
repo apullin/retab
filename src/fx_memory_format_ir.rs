@@ -583,12 +583,19 @@ impl IrToTosaMemoryFormatPass {
                 if rank < 4 {
                     continue;
                 }
-                let is_channels_first_output = original_dim_orders
+                // Insert the NHWC->logical output transpose unless the model's
+                // original output was genuinely channels-last. The previous test
+                // (orig == identity) skipped the transpose for ANY non-contiguous
+                // original layout — e.g. a permuted output whose meta carries the
+                // permute's dim_order in the quantized lane — leaving the output
+                // physically NHWC and scrambled.
+                let channels_last = channels_last_order(rank, spatial_rank(graph, output_arg, 2));
+                let is_originally_channels_last = original_dim_orders
                     .as_ref()
                     .and_then(|orders| orders.get(index))
-                    .map(|order| *order == (0..rank).collect::<Vec<_>>())
-                    .unwrap_or(true);
-                if !is_channels_first_output {
+                    .map(|order| *order == channels_last)
+                    .unwrap_or(false);
+                if is_originally_channels_last {
                     continue;
                 }
                 let perm = channels_last_inverse_order(rank, spatial_rank(graph, output_arg, 2));
