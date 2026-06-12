@@ -404,7 +404,7 @@ fn run_fx_submodule_passes(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<bool> {
-    if std::env::var("ARM_CF_IR").as_deref() == Ok("1") {
+    if std::env::var("ARM_CF_IR").as_deref() != Ok("0") {
         let pipeline = fx_pipeline::build_ir_while_submodule_pipeline();
         let (modified, _ir, _effects) = fx_ir::run_hybrid_pipeline_ext(
             graph_module.py(),
@@ -428,7 +428,7 @@ fn run_fx_cond_passes(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<bool> {
-    if std::env::var("ARM_CF_IR").as_deref() == Ok("1") {
+    if std::env::var("ARM_CF_IR").as_deref() != Ok("0") {
         let pipeline = fx_pipeline::build_ir_cond_submodule_pipeline();
         let (modified, _ir, _effects) = fx_ir::run_hybrid_pipeline_ext(
             graph_module.py(),
