@@ -519,6 +519,35 @@ fn materialize_const(
     true
 }
 
+/// Prefix every node name and store key of a converted submodule graph with
+/// `{region}::` (matching ingest's qualify_name), so control-flow submodule graphs
+/// don't collide with the parent or each other in the shared TensorStore. The
+/// serializer keys a placeholder's constant data by node.name, so names and store
+/// keys must move together. Intra-graph references are by NodeId, so renaming is
+/// safe. Building block for the round-trip Phase 4c converter hierarchy assembly.
+pub fn prefix_graph(graph: &mut Graph, store: &mut TensorStore, prefix: &str) {
+    if prefix.is_empty() {
+        return;
+    }
+    let mut keys_to_move: Vec<String> = Vec::new();
+    for &nid in &graph.order {
+        if let Some(n) = graph.nodes.get_mut(nid) {
+            if store.buffers.contains_key(&n.name) {
+                keys_to_move.push(n.name.clone());
+            }
+            n.name = format!("{prefix}{}", n.name);
+        }
+    }
+    for (_, name) in graph.node_names.iter_mut() {
+        *name = format!("{prefix}{name}");
+    }
+    for key in keys_to_move {
+        if let Some(data) = store.buffers.remove(&key) {
+            store.buffers.insert(format!("{prefix}{key}"), data);
+        }
+    }
+}
+
 /// Diagnostic (ARM_FOLD_FALLBACK_FILE): report constant placeholder nodes that the
 /// serializer will emit as CONST but whose data is absent from the store -- i.e.
 /// the IR-derived store is missing a constant the Python re-ingest would have had.
