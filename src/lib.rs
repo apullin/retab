@@ -182,7 +182,7 @@ fn ingest_and_serialize_tosa_pybytes(
     let profile = profile_ingest_serialize_enabled();
     let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
     let ingest_start = Instant::now();
-    let (mut graphs, store) =
+    let (mut graphs, mut store) =
         ingest_graph_hierarchy(graph_module, state_dict, graph_signature, exported_program)?;
     if std::env::var("ARM_SERIALIZE_FROM_IR").ok().as_deref() == Some("1") {
         // Round-trip elimination bring-up: replace the main graph (built by the
@@ -192,7 +192,7 @@ fn ingest_and_serialize_tosa_pybytes(
         // the Python graph after the pipeline, so the stashed IrGraph is the
         // final state only for graphs without control flow.
         if let Some(ir) = take_stashed_ir() {
-            let mut converted = ingest::from_ir::graph_from_ir(&ir);
+            let mut converted = ingest::from_ir::graph_from_ir(&ir, &mut store);
             ingest::fx_bridge::finalize_converted_graph(&mut converted);
             if std::env::var("ARM_FROM_IR_DEBUG").ok().as_deref() == Some("1") {
                 if let Some((_, ing)) = graphs.first() {

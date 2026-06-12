@@ -23,17 +23,44 @@ use crate::fx_ir::{IrArg, IrGraph, MetaValue, NodeId as IrNodeId, NodeMeta as Ir
 use crate::graph::ir::{Arg, DType, Node, NodeId, NodeMeta, OpTarget, OpType, QuantArgs, TensorInfo};
 use crate::graph::Graph;
 use crate::ingest::target_map::parse_op_target;
+use crate::store::TensorStore;
 use crate::tensor_data::parse_torch_dtype;
 
-/// Build a serialize `Graph` from a post-pass `IrGraph`. Handles one flat graph;
-/// the control-flow submodule hierarchy is assembled by the caller (Phase 3).
-pub fn graph_from_ir(ir: &IrGraph) -> Graph {
+/// Build a serialize `Graph` from a post-pass `IrGraph`, inserting the graph's
+/// constant tensor data into `store`. Handles one flat graph; the control-flow
+/// submodule hierarchy is assembled by the caller (Phase 3).
+pub fn graph_from_ir(ir: &IrGraph, store: &mut TensorStore) -> Graph {
+    // Node-ids referenced by any alive node. The EP-effect constant folding runs
+    // at flush time on the Python graph and removes now-dead constant/param
+    // placeholders (per-channel scale/zp, pre-fold weights) -- the IrGraph still
+    // carries them. Drop the unreferenced ones here, matching ingest's
+    // dead-placeholder skip, so the converted graph has no dangling inputs.
+    let mut referenced: std::collections::HashSet<IrNodeId> = std::collections::HashSet::new();
+    for n in ir.nodes.iter().filter(|n| n.alive) {
+        for a in &n.args {
+            collect_ir_refs(a, &mut referenced);
+        }
+        for v in n.kwargs.values() {
+            collect_ir_refs(v, &mut referenced);
+        }
+    }
+
     let mut graph = Graph::new();
     let mut idmap: HashMap<IrNodeId, NodeId> = HashMap::new();
 
     // Pass 1: allocate serialize nodes (args resolved in pass 2) and build the
     // IrNodeId -> serialize-NodeId map.
     for ir_node in ir.nodes.iter().filter(|n| n.alive) {
+        let placeholder_like = matches!(ir_node.op, NodeOp::Placeholder | NodeOp::GetAttr);
+        if placeholder_like && !referenced.contains(&ir_node.id) {
+            continue; // dead constant/param placeholder
+        }
+        // Phase 2: the TensorStore is populated from the IrGraph's own NodeTensor
+        // data, not a re-read of the Python graph -- so the unfolded constants the
+        // converted graph references (e.g. raw `b__frozen_param0` weights) resolve.
+        if let Some(t) = &ir_node.tensor {
+            store.insert(ir_node.name.clone(), t.data.clone());
+        }
         let op = map_op(ir_node.op);
         let target = if op == OpType::CallFunction {
             parse_op_target(&ir_node.target)
@@ -54,10 +81,10 @@ pub fn graph_from_ir(ir: &IrGraph) -> Graph {
         graph.order.push(nid);
         graph.node_names.push((nid, ir_node.name.clone()));
         // Classify by the ORIGINAL NodeOp: only true placeholders are runtime
-        // graph inputs. GetAttr nodes map to OpType::Placeholder too, but they
-        // are CONSTANTS (their data lives in the TensorStore by name) and must
-        // NOT join `inputs`, or the serializer emits them as runtime inputs and
-        // the input binding misaligns (-> ref-model segfault).
+        // graph inputs. GetAttr nodes map to OpType::Placeholder too but are
+        // CONSTANTS (data in the TensorStore by name), so they must NOT join
+        // `inputs`, or the serializer emits them as runtime inputs and the input
+        // binding misaligns.
         match ir_node.op {
             NodeOp::Placeholder => graph.inputs.push(nid),
             NodeOp::Output => graph.output = Some(nid),
@@ -81,6 +108,15 @@ pub fn graph_from_ir(ir: &IrGraph) -> Graph {
             node.kwargs = kwargs;
         }
     }
+
+    // Fold constant-fed pure reshapes into materialized constants. Ingest does
+    // this via the FuseConstantNode EP-effect; without it the converted graph
+    // keeps a RESHAPE on a constant weight, which TOSA rejects for sub-byte INT4
+    // ("could not allocate op RESHAPE input=(INT4 ...)").
+    fold_constant_reshapes(&mut graph, store);
+    // Folding leaves the original constants (e.g. the pre-reshape weight) with no
+    // users -- drop them so we don't emit duplicate CONST tensors.
+    remove_dead_constants(&mut graph);
 
     // The IrGraph's node Vec is in pass-INSERTION order: passes append new nodes
     // (transposes, rescales) at the end rather than at their topological
@@ -121,6 +157,118 @@ fn topo_order(graph: &Graph) -> Vec<NodeId> {
         }
     }
     result
+}
+
+/// Pure (numel-preserving, no data reorder) reshape-like ops -- safe to fold a
+/// constant input through by reinterpreting the same bytes at a new shape.
+fn is_pure_reshape_target(t: &OpTarget) -> bool {
+    matches!(
+        t,
+        OpTarget::View
+            | OpTarget::Reshape
+            | OpTarget::TosaReshape
+            | OpTarget::Squeeze
+            | OpTarget::Unsqueeze
+            | OpTarget::Flatten
+    )
+}
+
+/// Replace each pure reshape-like node whose single input is a constant (data in
+/// `store`) with a materialized constant placeholder of the reshaped data,
+/// dropping the RESHAPE op. Iterates to fold constant chains.
+fn fold_constant_reshapes(graph: &mut Graph, store: &mut TensorStore) {
+    for _ in 0..4 {
+        let mut changed = false;
+        for nid in graph.order.clone() {
+            let (input_id, out_shape, name) = {
+                let Some(n) = graph.nodes.get(nid) else {
+                    continue;
+                };
+                if !is_pure_reshape_target(&n.target) {
+                    continue;
+                }
+                let Some(Arg::Node(input_id)) = n.args.first() else {
+                    continue;
+                };
+                (*input_id, n.meta.val.shape_slice().to_vec(), n.name.clone())
+            };
+            let Some(input_name) = graph.nodes.get(input_id).map(|n| n.name.clone()) else {
+                continue;
+            };
+            let Some(src) = store.get(&input_name) else {
+                continue; // input is not a constant
+            };
+            let src_numel: i64 = src.shape.iter().product();
+            let out_numel: i64 = out_shape.iter().product();
+            if out_shape.is_empty() || src_numel != out_numel {
+                continue; // not a pure (numel-preserving) reshape
+            }
+            store.insert(
+                name.clone(),
+                crate::store::TensorData {
+                    data: src.data.clone(),
+                    shape: out_shape,
+                    dtype: src.dtype,
+                },
+            );
+            if let Some(n) = graph.nodes.get_mut(nid) {
+                n.op = OpType::Placeholder; // now a constant (data in store)
+                n.target = OpTarget::Other(name);
+                n.args = SmallVec::new();
+            }
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// Remove unreferenced placeholder/constant nodes (e.g. constants left dead by
+/// fold_constant_reshapes), so we don't emit duplicate CONST tensors.
+fn remove_dead_constants(graph: &mut Graph) {
+    let mut referenced: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    for &nid in &graph.order {
+        if let Some(n) = graph.nodes.get(nid) {
+            for id in Graph::collect_input_ids(n) {
+                referenced.insert(id);
+            }
+        }
+    }
+    if let Some(out) = graph.output {
+        referenced.insert(out);
+    }
+    let dead: Vec<NodeId> = graph
+        .order
+        .iter()
+        .copied()
+        .filter(|&nid| {
+            graph
+                .nodes
+                .get(nid)
+                .is_some_and(|n| n.op == OpType::Placeholder && !referenced.contains(&nid))
+        })
+        .collect();
+    for nid in dead {
+        graph.nodes.remove(nid);
+        graph.order.retain(|&x| x != nid);
+        graph.inputs.retain(|&x| x != nid);
+        graph.node_names.retain(|&(x, _)| x != nid);
+    }
+}
+
+fn collect_ir_refs(a: &IrArg, out: &mut std::collections::HashSet<IrNodeId>) {
+    match a {
+        IrArg::Node(id) => {
+            out.insert(*id);
+        }
+        IrArg::List(items) => {
+            for it in items {
+                collect_ir_refs(it, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Env-gated structural dump for comparing a converted graph against the
