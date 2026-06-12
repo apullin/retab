@@ -258,6 +258,77 @@ pub fn build_fx_while_submodule_pipeline(
 /// Extended submodule pipeline for cond branches.
 /// Includes fold_qdq + the core passes. Decomposition passes are excluded
 /// because they create new ops that break submodule boundary contracts.
+/// IR-native control-flow submodule pipelines (round-trip elimination Phase 4c):
+/// the same transforms as build_fx_*_submodule_pipeline, but as IrPasses on a
+/// persistent submodule IrGraph instead of Python FxPasses. FxInsertRescale maps
+/// to IrInsertQdqRescale + IrInsertInt32Rescale; the loop-carried variant prepends
+/// IrStampWhileBodyOutputQParams. Used via run_hybrid_pipeline_ext under ARM_CF_IR.
+fn rescale_steps() -> Vec<crate::fx_ir::PipelineStep> {
+    use crate::fx_ir::PipelineStep::Ir;
+    vec![
+        Ir(Box::new(crate::fx_insert_qdq_rescale_ir::IrInsertQdqRescalePass)),
+        Ir(Box::new(crate::fx_insert_int32_rescale_ir::IrInsertInt32RescalePass)),
+    ]
+}
+
+fn submodule_fold_and_fuse() -> Vec<crate::fx_ir::PipelineStep> {
+    use crate::fx_ir::PipelineStep::{Ir, IrEp};
+    vec![
+        IrEp(Box::new(crate::fx_insert_table_ops_ir::IrInsertTableOpsEpPass)),
+        IrEp(Box::new(
+            crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEpPass,
+        )),
+        IrEp(Box::new(
+            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEpPass::matmul_only(),
+        )),
+        Ir(Box::new(crate::fx_remove_noop_ir::IrRemoveNoopPass)),
+    ]
+}
+
+pub fn build_ir_while_submodule_pipeline() -> Vec<crate::fx_ir::PipelineStep> {
+    use crate::fx_ir::PipelineStep::Ir;
+    // Mirror the main hybrid pipeline ordering: rescale once (after fold), before
+    // table/layout. The IR rescale passes are not idempotent, so they run once.
+    let mut steps: Vec<crate::fx_ir::PipelineStep> = vec![
+        Ir(Box::new(
+            crate::fx_control_flow_metadata::IrStripWhileBoundaryQPass,
+        )),
+        Ir(Box::new(crate::fx_fold_qdq_ir::IrFoldQdqPass)),
+        Ir(Box::new(
+            crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass,
+        )),
+    ];
+    steps.extend(rescale_steps());
+    steps.extend(submodule_fold_and_fuse());
+    steps.push(Ir(Box::new(
+        crate::fx_memory_format_ir::IrToTosaMemoryFormatPass,
+    )));
+    // Loop-carried output alignment runs last, once the producer scales are final.
+    steps.push(Ir(Box::new(
+        crate::fx_control_flow_metadata::IrInsertCarriedOutputRescalePass,
+    )));
+    steps
+}
+
+pub fn build_ir_cond_submodule_pipeline() -> Vec<crate::fx_ir::PipelineStep> {
+    use crate::fx_ir::PipelineStep::Ir;
+    let mut steps: Vec<crate::fx_ir::PipelineStep> = vec![
+        Ir(Box::new(crate::fx_fold_qdq_ir::IrFoldQdqPass)),
+        Ir(Box::new(
+            crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass,
+        )),
+    ];
+    steps.extend(rescale_steps());
+    steps.extend(submodule_fold_and_fuse());
+    steps.push(Ir(Box::new(
+        crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass,
+    )));
+    steps.push(Ir(Box::new(
+        crate::fx_memory_format_ir::IrToTosaMemoryFormatPass,
+    )));
+    steps
+}
+
 pub fn build_fx_cond_submodule_pipeline(
     exported_program: Option<pyo3::PyObject>,
 ) -> Vec<Box<dyn FxPass>> {

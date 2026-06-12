@@ -404,6 +404,17 @@ fn run_fx_submodule_passes(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<bool> {
+    if std::env::var("ARM_CF_IR").as_deref() == Ok("1") {
+        let pipeline = fx_pipeline::build_ir_while_submodule_pipeline();
+        let (modified, _ir, _effects) = fx_ir::run_hybrid_pipeline_ext(
+            graph_module.py(),
+            graph_module,
+            exported_program,
+            &pipeline,
+            false,
+        )?;
+        return Ok(modified);
+    }
     let ep = exported_program.map(|e| e.clone().unbind());
     let gm = fx_graph::FxGraphModule::new(graph_module);
     let pipeline = fx_pipeline::build_fx_while_submodule_pipeline(ep);
@@ -417,6 +428,17 @@ fn run_fx_cond_passes(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<bool> {
+    if std::env::var("ARM_CF_IR").as_deref() == Ok("1") {
+        let pipeline = fx_pipeline::build_ir_cond_submodule_pipeline();
+        let (modified, _ir, _effects) = fx_ir::run_hybrid_pipeline_ext(
+            graph_module.py(),
+            graph_module,
+            exported_program,
+            &pipeline,
+            false,
+        )?;
+        return Ok(modified);
+    }
     let ep = exported_program.map(|e| e.clone().unbind());
     let gm = fx_graph::FxGraphModule::new(graph_module);
     let pipeline = fx_pipeline::build_fx_cond_submodule_pipeline(ep);

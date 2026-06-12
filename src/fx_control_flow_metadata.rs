@@ -8,10 +8,142 @@ use pyo3::types::{PyDict, PyTuple};
 
 use crate::fx_graph::{meta_val, py_attr, FxGraphModule};
 use crate::fx_ir::{
-    FakeTensorMeta, IrArg, IrGraph, IrNode, NodeId, NodeMeta, RescaleInsert,
+    FakeTensorMeta, IrArg, IrGraph, IrNode, IrPass, NodeId, NodeMeta, RescaleInsert,
 };
 use crate::fx_pass::FxPass;
 use crate::runner_logging::log_line;
+
+/// IrPass wrapper for the while-loop boundary Q/DQ strip (submodule IR pipeline).
+pub struct IrStripWhileBoundaryQPass;
+impl IrPass for IrStripWhileBoundaryQPass {
+    fn name(&self) -> &str {
+        "IrStripWhileBoundaryQ"
+    }
+    fn run(&self, graph: &mut IrGraph) -> bool {
+        strip_while_boundary_qdq_ir(graph)
+    }
+}
+
+/// IrPass wrapper that stamps while_loop body output qparams to match the
+/// placeholders (loop-carried constraint), for the submodule IR pipeline.
+pub struct IrStampWhileBodyOutputQParamsPass;
+impl IrPass for IrStampWhileBodyOutputQParamsPass {
+    fn name(&self) -> &str {
+        "IrStampWhileBodyOutputQParams"
+    }
+    fn run(&self, graph: &mut IrGraph) -> bool {
+        stamp_while_body_output_qparams_ir(graph) > 0
+    }
+}
+
+/// IrPass: align each while_loop body output to its corresponding placeholder's
+/// quantization domain by inserting a RESCALE (output[i] feeds back as input[i],
+/// so their scale/zp must match). The IR analogue of FxInsertRescalePass::carried.
+pub struct IrInsertCarriedOutputRescalePass;
+impl IrPass for IrInsertCarriedOutputRescalePass {
+    fn name(&self) -> &str {
+        "IrInsertCarriedOutputRescale"
+    }
+    fn run(&self, graph: &mut IrGraph) -> bool {
+        let ph_qps: Vec<Option<QParam>> = graph
+            .placeholders()
+            .map(|ph| {
+                ph.meta
+                    .output_qparam()
+                    .or(ph.meta.input_qparam())
+                    .cloned()
+            })
+            .collect();
+        if ph_qps.iter().all(Option::is_none) {
+            return false;
+        }
+        let Some(out_id) = graph.output_node().map(|n| n.id) else {
+            return false;
+        };
+        let out_args = graph.node(out_id).args.clone();
+        let val_ids: Vec<Option<NodeId>> = match out_args.first() {
+            Some(IrArg::List(items)) => items
+                .iter()
+                .map(|a| match a {
+                    IrArg::Node(id) => Some(*id),
+                    _ => None,
+                })
+                .collect(),
+            _ => out_args
+                .iter()
+                .map(|a| match a {
+                    IrArg::Node(id) => Some(*id),
+                    _ => None,
+                })
+                .collect(),
+        };
+
+        let mut modified = false;
+        for (idx, ph_qp) in ph_qps.iter().enumerate() {
+            let Some(ph_qp) = ph_qp else { continue };
+            let Some(Some(src_id)) = val_ids.get(idx).copied() else {
+                continue;
+            };
+            let Some(cur) = extract_effective_qparam_ir(graph, src_id) else {
+                continue;
+            };
+            if cur.same_scale_zp(ph_qp) || cur.scale == 0.0 || ph_qp.scale == 0.0 {
+                continue;
+            }
+
+            let mut meta = graph.node(src_id).meta.clone();
+            meta.set_input_qparams(HashMap::new());
+            meta.set_single_output_qparam(ph_qp.clone());
+            meta.extras.remove("tosa_special_dtype");
+            if let Some(shape) = graph.node(src_id).meta.val_shape() {
+                meta.set_val(FakeTensorMeta {
+                    shape: shape.to_vec(),
+                    dtype: ph_qp.dtype_str.clone(),
+                });
+            }
+            let src_name = graph.node(src_id).name.clone();
+            let rescale = graph.add_node(
+                NodeOp::CallFunction,
+                format!("{src_name}_carried_rescale"),
+                "backend.tosa.RESCALE.default".to_string(),
+                vec![
+                    IrArg::Node(src_id),
+                    IrArg::Dtype(ph_qp.dtype_str.clone()),
+                    IrArg::List(vec![IrArg::Float(cur.scale / ph_qp.scale)]),
+                    IrArg::Int(cur.zp),
+                    IrArg::Int(ph_qp.zp),
+                ],
+                meta,
+            );
+            graph.anchor_after(rescale, src_id);
+            graph.copy_meta_from(rescale, src_id);
+            replace_output_arg_use(graph, out_id, src_id, rescale);
+            modified = true;
+        }
+        modified
+    }
+}
+
+/// Replace a use of `old` with `new` in the output node's args (handles the
+/// `output((v0, v1, ...),)` tuple-wrapped form).
+fn replace_output_arg_use(graph: &mut IrGraph, out_id: NodeId, old: NodeId, new: NodeId) {
+    let node = graph.node_mut(out_id);
+    for arg in node.args.iter_mut() {
+        match arg {
+            IrArg::Node(id) if *id == old => *id = new,
+            IrArg::List(items) => {
+                for it in items.iter_mut() {
+                    if let IrArg::Node(id) = it {
+                        if *id == old {
+                            *id = new;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // CfCtx — cached Python imports and shared context
@@ -846,7 +978,7 @@ fn annotate_cf_rank4_dim_order<'py>(py: Python<'py>, gm: &Bound<'py, PyAny>) -> 
 // ---------------------------------------------------------------------------
 
 /// Pure Rust: stamp output node's input_qparams from placeholder qparams (loop-carried).
-fn stamp_while_body_output_qparams_ir(graph: &mut IrGraph) -> usize {
+pub(crate) fn stamp_while_body_output_qparams_ir(graph: &mut IrGraph) -> usize {
     let ph_qparams: Vec<(usize, QParam)> = graph
         .placeholders()
         .enumerate()
@@ -1995,7 +2127,7 @@ pub(crate) fn rewrite_control_flow_quantization_boundaries<'py>(
 // ---------------------------------------------------------------------------
 
 /// Pure Rust: strip boundary Q from placeholders, annotate DQ qparams on output.
-fn strip_while_boundary_qdq_ir(graph: &mut IrGraph) -> bool {
+pub(crate) fn strip_while_boundary_qdq_ir(graph: &mut IrGraph) -> bool {
     let mut modified = false;
 
     // Strip Q nodes from placeholders

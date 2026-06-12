@@ -2452,6 +2452,19 @@ pub fn run_hybrid_pipeline<'py>(
     exported_program: Option<&Bound<'py, PyAny>>,
     steps: &[PipelineStep],
 ) -> PyResult<(bool, Option<IrGraph>, FxEpEffectBatch)> {
+    run_hybrid_pipeline_ext(py, gm, exported_program, steps, true)
+}
+
+/// `run_hybrid_pipeline` with control over the non-control-flow flush skip.
+/// Control-flow submodules pass `allow_flush_skip = false` so they always flush
+/// back to Python (their transformed graph is still ingested from the gm).
+pub fn run_hybrid_pipeline_ext<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+    exported_program: Option<&Bound<'py, PyAny>>,
+    steps: &[PipelineStep],
+    allow_flush_skip: bool,
+) -> PyResult<(bool, Option<IrGraph>, FxEpEffectBatch)> {
     use crate::runner_logging::{log_pass_result, log_pass_start};
 
     let mut ir: Option<IrGraph> = None;
@@ -2526,7 +2539,7 @@ pub fn run_hybrid_pipeline<'py>(
                 .any(|n| n.alive && (n.target.contains("while_loop") || n.target.contains("cond")))
         })
         .unwrap_or(false);
-    let skip_flush = from_ir_default && !has_control_flow;
+    let skip_flush = allow_flush_skip && from_ir_default && !has_control_flow;
     if ir_dirty && !skip_flush {
         if let Some(ref graph) = ir {
             flush_ir_to_python(graph, py, gm, exported_program, &mut pending_effects)?;
