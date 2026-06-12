@@ -319,7 +319,7 @@ pub fn ingest_fx_graph_hierarchy(
     Ok((graphs, store))
 }
 
-fn collect_control_flow_subgraphs(
+pub(crate) fn collect_control_flow_subgraphs(
     graph_module: &Bound<'_, PyAny>,
     state_dict: &Bound<'_, PyDict>,
     graph_signature: &Bound<'_, PyAny>,

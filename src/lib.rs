@@ -225,27 +225,39 @@ fn ingest_and_serialize_tosa_pybytes(
     // (their submodules + cf boundary phases are not yet captured in the IrGraph).
     if from_ir && skip_ingest {
         if let Some((ir, effects)) = take_stashed_ir() {
+            // Build the main graph + its constants entirely from the stashed
+            // IrGraph -- no Python re-ingest of the main graph. For control-flow
+            // graphs the submodule hierarchy is still ingested from Python and
+            // appended; only the parent avoids the round-trip (the submodule
+            // FxPass pipelines are not yet ported to IR).
+            let mut store = crate::store::TensorStore::new();
+            let mut converted = ingest::from_ir::graph_from_ir(&ir, &mut store);
+            ingest::from_ir::apply_effects(&mut converted, &mut store, &effects);
+            ingest::fx_bridge::finalize_converted_graph(&mut converted);
+            ingest::from_ir::report_missing_consts(&converted, &store);
+            let mut graphs = vec![(String::from("main"), converted)];
             if ir_has_control_flow(&ir) {
-                // Re-stash so the ingest path below can consume it.
-                stash_ir(Some((ir, effects)));
-            } else {
-                let mut store = crate::store::TensorStore::new();
-                let mut converted = ingest::from_ir::graph_from_ir(&ir, &mut store);
-                ingest::from_ir::apply_effects(&mut converted, &mut store, &effects);
-                ingest::fx_bridge::finalize_converted_graph(&mut converted);
-                ingest::from_ir::report_missing_consts(&converted, &store);
-                let mut graphs = vec![(String::from("main"), converted)];
-                rebuild_graph_users(&mut graphs);
-                let py_bytes = serialize::serialize_graphs_to_tosa_py(py, &graphs, &store);
-                if profile {
-                    eprintln!(
-                        "[RETAB][ingest_and_serialize] FROM_IR no-ingest path: nodes={} tensors={}",
-                        graphs[0].1.order.len(),
-                        store.buffers.len(),
-                    );
-                }
-                return Ok(py_bytes);
+                ingest::fx_bridge::collect_control_flow_subgraphs(
+                    graph_module,
+                    state_dict,
+                    graph_signature,
+                    exported_program,
+                    &mut graphs,
+                    &mut store,
+                    None,
+                )?;
             }
+            rebuild_graph_users(&mut graphs);
+            let py_bytes = serialize::serialize_graphs_to_tosa_py(py, &graphs, &store);
+            if profile {
+                eprintln!(
+                    "[RETAB][ingest_and_serialize] FROM_IR no-ingest path: graphs={} nodes={} tensors={}",
+                    graphs.len(),
+                    graphs.iter().map(|(_, g)| g.order.len()).sum::<usize>(),
+                    store.buffers.len(),
+                );
+            }
+            return Ok(py_bytes);
         }
     }
 
