@@ -131,7 +131,12 @@ fn table_quant_spec(qp: &QParam) -> Option<FxTableTensorSpec> {
 
 fn quantize_to_spec(value: f64, spec: &FxTableTensorSpec) -> Option<i64> {
     if value.is_nan() {
-        return None;
+        // Domain-restricted ops (acosh for x<1, logit outside (0,1), rsqrt for
+        // x<=0) yield NaN for out-of-domain dequantized inputs. torch casts
+        // NaN->int as 0, and those table entries are never hit at runtime, so
+        // emit 0 rather than aborting the whole precompute (which would force
+        // the compute-in-Python InsertTableOp path).
+        return Some(0);
     }
     if value.is_infinite() {
         return Some(if value.is_sign_positive() {
