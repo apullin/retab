@@ -46,12 +46,50 @@ pub fn graph_from_ir(ir: &IrGraph, store: &mut TensorStore) -> Graph {
         }
     }
 
+    // Control-flow submodule references: a GetAttr to a region (no tensor data)
+    // is serialized as a named region string (Arg::String), not a graph node --
+    // matching ingest, which skips these get_attr nodes and turns their uses into
+    // the branch/body name on the COND_IF / WHILE_LOOP op.
+    let mut submodule_map: HashMap<IrNodeId, String> = HashMap::new();
+    let cf_dbg = std::env::var("ARM_FROM_IR_DEBUG").is_ok();
+    for n in ir.nodes.iter().filter(|n| n.alive) {
+        if cf_dbg && n.name.contains("submodule") {
+            eprintln!(
+                "[SUBMOD] {} op={:?} target={} tensor={}",
+                n.name,
+                n.op,
+                n.target,
+                n.tensor.is_some()
+            );
+        }
+        if !matches!(
+            parse_op_target(&n.target),
+            OpTarget::CondIf | OpTarget::WhileLoop
+        ) {
+            continue;
+        }
+        // The branch/region args of a control-flow op reference region get_attr
+        // nodes; emit them as String region names, not graph nodes.
+        for a in &n.args {
+            if let IrArg::Node(id) = a {
+                if let Some(m) = ir.nodes.iter().find(|x| x.id == *id) {
+                    if matches!(m.op, NodeOp::GetAttr) || m.name.contains("submodule") {
+                        submodule_map.insert(*id, m.name.clone());
+                    }
+                }
+            }
+        }
+    }
+
     let mut graph = Graph::new();
     let mut idmap: HashMap<IrNodeId, NodeId> = HashMap::new();
 
     // Pass 1: allocate serialize nodes (args resolved in pass 2) and build the
     // IrNodeId -> serialize-NodeId map.
     for ir_node in ir.nodes.iter().filter(|n| n.alive) {
+        if submodule_map.contains_key(&ir_node.id) {
+            continue; // emitted as a String region reference, not a node
+        }
         let placeholder_like = matches!(ir_node.op, NodeOp::Placeholder | NodeOp::GetAttr);
         if placeholder_like && !referenced.contains(&ir_node.id) {
             continue; // dead constant/param placeholder
@@ -108,11 +146,15 @@ pub fn graph_from_ir(ir: &IrGraph, store: &mut TensorStore) -> Graph {
         let Some(&nid) = idmap.get(&ir_node.id) else {
             continue;
         };
-        let args: SmallVec<[Arg; 4]> = ir_node.args.iter().map(|a| map_arg(a, &idmap)).collect();
+        let args: SmallVec<[Arg; 4]> = ir_node
+            .args
+            .iter()
+            .map(|a| map_arg(a, &idmap, &submodule_map))
+            .collect();
         let kwargs: Vec<(String, Arg)> = ir_node
             .kwargs
             .iter()
-            .map(|(k, v)| (k.clone(), map_arg(v, &idmap)))
+            .map(|(k, v)| (k.clone(), map_arg(v, &idmap, &submodule_map)))
             .collect();
         if let Some(node) = graph.nodes.get_mut(nid) {
             node.args = args;
@@ -548,22 +590,36 @@ fn map_op(op: NodeOp) -> OpType {
     }
 }
 
-fn map_arg(a: &IrArg, idmap: &HashMap<IrNodeId, NodeId>) -> Arg {
+fn map_arg(
+    a: &IrArg,
+    idmap: &HashMap<IrNodeId, NodeId>,
+    submodule_map: &HashMap<IrNodeId, String>,
+) -> Arg {
     match a {
-        IrArg::Node(id) => idmap.get(id).map(|&n| Arg::Node(n)).unwrap_or(Arg::None),
+        IrArg::Node(id) => {
+            if let Some(name) = submodule_map.get(id) {
+                Arg::String(name.clone())
+            } else {
+                idmap.get(id).map(|&n| Arg::Node(n)).unwrap_or(Arg::None)
+            }
+        }
         IrArg::Int(v) => Arg::Int(*v),
         IrArg::Float(v) => Arg::Float(*v),
         IrArg::Bool(v) => Arg::Bool(*v),
         IrArg::Str(s) => Arg::String(s.clone()),
         IrArg::Dtype(s) => Arg::Dtype(parse_torch_dtype(s)),
         IrArg::None => Arg::None,
-        IrArg::List(items) => map_list(items, idmap),
+        IrArg::List(items) => map_list(items, idmap, submodule_map),
     }
 }
 
 /// serialize `Arg` lists are typed (`NodeList`/`IntList`/`FloatList`), unlike the
 /// general `IrArg::List`. Classify by element type.
-fn map_list(items: &[IrArg], idmap: &HashMap<IrNodeId, NodeId>) -> Arg {
+fn map_list(
+    items: &[IrArg],
+    idmap: &HashMap<IrNodeId, NodeId>,
+    _submodule_map: &HashMap<IrNodeId, String>,
+) -> Arg {
     if items.is_empty() {
         return Arg::IntList(SmallVec::new());
     }

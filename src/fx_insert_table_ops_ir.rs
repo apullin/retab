@@ -177,11 +177,46 @@ fn erf_approx(x: f64) -> f64 {
     sign * (1.0 - poly * (-ax * ax).exp())
 }
 
+/// Inverse error function (Giles, 2010 -- single-precision accurate, ~1e-7,
+/// well within INT8/INT16 quantization tolerance). NaN out of [-1, 1].
+fn erfinv_approx(x: f64) -> f64 {
+    if x <= -1.0 || x >= 1.0 {
+        return f64::NAN;
+    }
+    let mut w = -((1.0 - x) * (1.0 + x)).ln();
+    let mut p;
+    if w < 5.0 {
+        w -= 2.5;
+        p = 2.810_226_36e-08;
+        p = 3.432_739_39e-07 + p * w;
+        p = -3.523_387_7e-06 + p * w;
+        p = -4.391_506_54e-06 + p * w;
+        p = 0.000_218_580_87 + p * w;
+        p = -0.001_253_725_03 + p * w;
+        p = -0.004_177_681_64 + p * w;
+        p = 0.246_640_727 + p * w;
+        p = 1.501_409_41 + p * w;
+    } else {
+        w = w.sqrt() - 3.0;
+        p = -0.000_200_214_257;
+        p = 0.000_100_950_558 + p * w;
+        p = 0.001_349_343_22 + p * w;
+        p = -0.003_673_428_44 + p * w;
+        p = 0.005_739_507_73 + p * w;
+        p = -0.007_622_461_3 + p * w;
+        p = 0.009_438_870_47 + p * w;
+        p = 1.001_674_06 + p * w;
+        p = 2.832_976_82 + p * w;
+    }
+    p * x
+}
+
 fn eval_precomputable_table(kind: &str, scalar_arg: Option<f64>, x: f64) -> Option<f64> {
     match kind {
         "rsqrt" => Some(x.sqrt().recip()),
         "ceil" => Some(x.ceil()),
         "erf" => Some(erf_approx(x)),
+        "erfinv" => Some(erfinv_approx(x)),
         "floor" => Some(x.floor()),
         "round" => Some(x.round_ties_even()),
         "reciprocal" => Some(x.recip()),
