@@ -620,7 +620,9 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_for_nan_domain_sensitive_table_values() {
+    fn precomputes_nan_domain_table_values() {
+        // log1p is precomputable in Rust (NaN samples quantize to 0), so it takes
+        // the precomputed-table lane rather than the Python InsertTableOp fallback.
         let mut graph = IrGraph::empty();
         let mut meta = NodeMeta::default();
         let qparams = HashMap::from([(
@@ -642,12 +644,14 @@ mod tests {
         assert!(result.modified);
         assert!(matches!(
             &result.effects.effects[0],
-            FxEpEffect::InsertTableOp(effect) if effect.kind == "log1p"
+            FxEpEffect::InsertPrecomputedTableOp(_)
         ));
     }
 
     #[test]
-    fn falls_back_for_erfinv() {
+    fn precomputes_erfinv() {
+        // erfinv is precomputable in Rust (Giles approximation), so it takes the
+        // precomputed-table lane rather than the Python InsertTableOp fallback.
         let mut graph = IrGraph::empty();
         table_node(&mut graph, "erfinv", "aten.erfinv.default", Vec::new());
 
@@ -656,7 +660,7 @@ mod tests {
         assert!(result.modified);
         assert!(matches!(
             &result.effects.effects[0],
-            FxEpEffect::InsertTableOp(effect) if effect.kind == "erfinv"
+            FxEpEffect::InsertPrecomputedTableOp(_)
         ));
     }
 

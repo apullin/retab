@@ -147,7 +147,15 @@ fn encode_tensor_values(values: &[f64], shape: Vec<i64>, dtype: DType) -> Option
             .flat_map(|value| (*value as i64).to_le_bytes())
             .collect(),
         DType::Bool => values.iter().map(|value| u8::from(*value != 0.0)).collect(),
-        DType::Float16 | DType::BFloat16 | DType::Int48 => return None,
+        DType::Float16 => values
+            .iter()
+            .flat_map(|value| crate::tensor_data::encode_f16(*value as f32).to_le_bytes())
+            .collect(),
+        DType::BFloat16 => values
+            .iter()
+            .flat_map(|value| crate::tensor_data::encode_bf16(*value as f32).to_le_bytes())
+            .collect(),
+        DType::Int48 => return None,
     };
     Some(TensorData { data, shape, dtype })
 }

@@ -202,6 +202,7 @@ impl IrEpPass for IrFuseConstantInputsEpPass {
                     continue;
                 }
             }
+            crate::fold_fallback_log(&format!("FuseConstantNode target={}", node.target));
             effects.push(FxEpEffect::FuseConstantNode(FxFuseConstantNodeEffect {
                 node_name: node.name.clone(),
                 allow_missing: true,

@@ -171,6 +171,7 @@ fn extract_node_tensor(
     name: &str,
     target: &str,
     state_dict: Option<&Bound<'_, PyAny>>,
+    constants: Option<&Bound<'_, PyAny>>,
     placeholder_bindings: &HashMap<String, PlaceholderTensorBinding>,
 ) -> Option<NodeTensor> {
     let op: String = py_node.getattr("op").ok()?.extract().ok()?;
@@ -179,6 +180,18 @@ fn extract_node_tensor(
             let binding = placeholder_bindings.get(name)?;
             if let Some(state_dict) = state_dict {
                 if let Ok(value) = state_dict.get_item(binding.target_name.as_str()) {
+                    if let Ok(data) = extract_tensor_data(&value) {
+                        return Some(NodeTensor {
+                            source: TensorSource::ExportedProgramInput(binding.clone()),
+                            data,
+                        });
+                    }
+                }
+            }
+            // Lifted tensor constants are not in state_dict; they live in
+            // ep.constants keyed by target_name.
+            if let Some(constants) = constants {
+                if let Ok(value) = constants.get_item(binding.target_name.as_str()) {
                     if let Ok(data) = extract_tensor_data(&value) {
                         return Some(NodeTensor {
                             source: TensorSource::ExportedProgramInput(binding.clone()),
@@ -265,13 +278,15 @@ impl IrGraph {
             .filter_map(|n| n.ok())
             .collect();
 
-        let (placeholder_bindings, state_dict) = if let Some(ep) = exported_program {
+        let (placeholder_bindings, state_dict, constants) = if let Some(ep) = exported_program {
             (
                 build_placeholder_tensor_bindings(ep)?,
                 ep.getattr("state_dict").ok(),
+                // Lifted tensor constants live in `ep.constants`, NOT `state_dict`.
+                ep.getattr("constants").ok(),
             )
         } else {
-            (HashMap::new(), None)
+            (HashMap::new(), None, None)
         };
 
         let mut name_to_id = HashMap::new();
@@ -301,6 +316,7 @@ impl IrGraph {
                 &name,
                 &target,
                 state_dict.as_ref(),
+                constants.as_ref(),
                 &placeholder_bindings,
             );
 

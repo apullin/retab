@@ -325,7 +325,12 @@ pub fn apply_effects(graph: &mut Graph, store: &mut TensorStore, effects: &FxEpE
             FxEpEffect::MaterializeZeroInputConstant(e) => {
                 applied |= retarget_to_fused_const(graph, store, &name_map, &e.node_name);
             }
-            _ => {}
+            FxEpEffect::CastInt64InputToInt32(e) => {
+                applied |= cast_buffer_int64_to_int32(store, &e.placeholder_name);
+            }
+            FxEpEffect::InsertTableOp(e) => {
+                crate::fold_fallback_log(&format!("InsertTableOp node={}", e.node_name));
+            }
         }
     }
     if applied {
@@ -514,6 +519,49 @@ fn materialize_const(
     true
 }
 
+/// Diagnostic (ARM_FOLD_FALLBACK_FILE): report constant placeholder nodes that the
+/// serializer will emit as CONST but whose data is absent from the store -- i.e.
+/// the IR-derived store is missing a constant the Python re-ingest would have had.
+pub fn report_missing_consts(graph: &Graph, store: &TensorStore) {
+    let inputs: std::collections::HashSet<NodeId> = graph.inputs.iter().copied().collect();
+    for &nid in &graph.order {
+        let Some(n) = graph.nodes.get(nid) else { continue };
+        if n.op != OpType::Placeholder || inputs.contains(&nid) {
+            continue;
+        }
+        if !store.buffers.contains_key(&n.name) {
+            crate::fold_fallback_log(&format!(
+                "MISSING_CONST name={} target={:?} dtype={:?} shape={:?}",
+                n.name, n.target, n.meta.val.dtype, n.meta.val.shape
+            ));
+        }
+    }
+}
+
+/// Apply a CastInt64InputToInt32 effect to the store: the IrPass already set the
+/// placeholder's meta dtype to int32, but `graph_from_ir` copied the raw int64
+/// buffer bytes. Re-encode them as int32 so the store matches the node dtype.
+fn cast_buffer_int64_to_int32(store: &mut TensorStore, name: &str) -> bool {
+    let Some(data) = store.get(name).cloned() else {
+        return false;
+    };
+    if data.dtype != DType::Int64 {
+        return false;
+    }
+    let Some(narrowed) = downcast_int64_le_to_int32(&data.data) else {
+        return false;
+    };
+    store.insert(
+        name.to_string(),
+        crate::store::TensorData {
+            data: narrowed,
+            shape: data.shape,
+            dtype: DType::Int32,
+        },
+    );
+    true
+}
+
 /// Re-encode little-endian int64 bytes as little-endian int32, or `None` if any
 /// value exceeds the int32 range (matching ConvertInt64ConstOpsToInt32Pass, which
 /// leaves out-of-range constants as int64).
@@ -542,6 +590,10 @@ fn retarget_to_fused_const(
     node_name: &str,
 ) -> bool {
     let folded_name = format!("{node_name}_fused_const");
+    let found = store.get(&folded_name).is_some();
+    crate::fold_fallback_log(&format!(
+        "retarget_to_fused_const found_python_data={found}"
+    ));
     let Some(data) = store.get(&folded_name).cloned() else {
         return false;
     };

@@ -46,12 +46,18 @@ fn tensor_numel(shape: &[i64]) -> Option<usize> {
 fn scalar_fill_bytes(dtype: DType, value: f64) -> Option<Vec<u8>> {
     Some(match dtype {
         DType::Float32 => (value as f32).to_le_bytes().to_vec(),
+        DType::Float16 => {
+            crate::tensor_data::encode_f16(value as f32).to_le_bytes().to_vec()
+        }
+        DType::BFloat16 => {
+            crate::tensor_data::encode_bf16(value as f32).to_le_bytes().to_vec()
+        }
         DType::Int8 | DType::Int4 => (value as i8).to_le_bytes().to_vec(),
         DType::Int16 => (value as i16).to_le_bytes().to_vec(),
         DType::Int32 => (value as i32).to_le_bytes().to_vec(),
         DType::Int64 => (value as i64).to_le_bytes().to_vec(),
         DType::Bool => vec![(value != 0.0) as u8],
-        DType::Float16 | DType::BFloat16 | DType::Int48 => return None,
+        DType::Int48 => return None,
     })
 }
 
@@ -299,6 +305,89 @@ fn plan_zero_input_linspace(node: &IrNode) -> Option<FxMaterializeZeroInputConst
     })
 }
 
+fn full_bail_reason(graph: &IrGraph, node: &IrNode) -> &'static str {
+    let shape = match node.args.first() {
+        Some(arg) => arg_int_list(arg).or_else(|| node.meta.val_shape().map(|s| s.to_vec())),
+        None => node.meta.val_shape().map(|s| s.to_vec()),
+    };
+    if shape.is_none() {
+        return "no_shape";
+    }
+    if full_fill_value(node).is_none() {
+        return "no_fill_value";
+    }
+    let qparam = if is_quant_decompose_helper_full(node) {
+        None
+    } else {
+        int_qparam(node).or_else(|| infer_binary_full_qparam(graph, node.id))
+    };
+    if let Some(qp) = qparam {
+        if qp.is_per_channel() {
+            return "qparam_per_channel";
+        }
+        if quantized_scalar_bytes(&qp, full_fill_value(node).unwrap()).is_none() {
+            return "quantized_scalar_none";
+        }
+    } else if explicit_zero_input_dtype(node).is_none() {
+        return "no_explicit_dtype";
+    } else if scalar_fill_bytes(explicit_zero_input_dtype(node).unwrap(), full_fill_value(node).unwrap()).is_none() {
+        return "scalar_fill_none";
+    }
+    "ok_but_planned_none"
+}
+
+fn plan_zero_input_eye(node: &IrNode) -> Option<FxMaterializeZeroInputConstantNodeEffect> {
+    let n = match node.args.first()? {
+        IrArg::Int(value) => usize::try_from(*value).ok()?,
+        _ => return None,
+    };
+    // aten.eye.m takes a second dim; aten.eye.default is square.
+    let m = match node.args.get(1) {
+        Some(IrArg::Int(value)) => usize::try_from(*value).ok()?,
+        _ => n,
+    };
+    let shape = node
+        .meta
+        .val_shape()
+        .map(|shape| shape.to_vec())
+        .unwrap_or_else(|| vec![n as i64, m as i64]);
+
+    let qparam = node
+        .meta
+        .output_qparam()
+        .cloned()
+        .filter(|qp| qp.dtype_str.contains("int"));
+    let dtype = qparam
+        .as_ref()
+        .map(|qp| parse_torch_dtype(&qp.dtype_str))
+        .or_else(|| explicit_zero_input_dtype(node))?;
+
+    let mut data = Vec::new();
+    for row in 0..n {
+        for col in 0..m {
+            let value = if row == col { 1.0 } else { 0.0 };
+            let scalar = if let Some(qp) = qparam.as_ref() {
+                let (qp_dtype, scalar) = quantized_scalar_bytes(qp, value)?;
+                if qp_dtype != dtype {
+                    return None;
+                }
+                scalar
+            } else {
+                scalar_fill_bytes(dtype, value)?
+            };
+            data.extend_from_slice(&scalar);
+        }
+    }
+
+    Some(FxMaterializeZeroInputConstantNodeEffect {
+        node_name: node.name.clone(),
+        data,
+        shape,
+        dtype,
+        allow_missing: true,
+    })
+}
+
 fn plan_zero_input_full(
     graph: &IrGraph,
     node: &IrNode,
@@ -376,7 +465,21 @@ impl IrEpPass for IrFuseZeroInputConstantsEpPass {
                     effects.push(FxEpEffect::MaterializeZeroInputConstantNode(effect));
                     continue;
                 }
+            } else if node.target.contains("aten.eye") {
+                if let Some(effect) = plan_zero_input_eye(node) {
+                    effects.push(FxEpEffect::MaterializeZeroInputConstantNode(effect));
+                    continue;
+                }
             }
+            let why = if kind == ZeroInputConstantKind::Full {
+                full_bail_reason(graph, node)
+            } else {
+                "n/a"
+            };
+            crate::fold_fallback_log(&format!(
+                "MaterializeZeroInputConstant target={} kind={:?} why={}",
+                node.target, kind, why
+            ));
             effects.push(FxEpEffect::MaterializeZeroInputConstant(
                 FxMaterializeZeroInputConstantEffect {
                     node_name: node.name.clone(),
@@ -652,6 +755,35 @@ mod tests {
                         ]
                         .concat()
         ));
+    }
+
+    #[test]
+    fn materializes_identity_eye_from_rust() {
+        let mut graph = IrGraph::empty();
+        let eye = add_call(&mut graph, "eye", "aten.eye.default", vec![IrArg::Int(3)]);
+        graph
+            .node_mut(eye)
+            .kwargs
+            .insert("dtype".to_string(), IrArg::Dtype("torch.float32".to_string()));
+
+        let pass = IrFuseZeroInputConstantsEpPass;
+        let result = pass.run(&mut graph);
+
+        let effect = match &result.effects.effects[0] {
+            FxEpEffect::MaterializeZeroInputConstantNode(effect) => effect,
+            other => panic!("unexpected effect kind: {other:?}"),
+        };
+        assert_eq!(effect.node_name, "eye");
+        assert_eq!(effect.shape, vec![3, 3]);
+        let values = effect
+            .data
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        );
     }
 
     #[test]

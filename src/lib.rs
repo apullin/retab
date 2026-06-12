@@ -109,6 +109,31 @@ fn run_single_fx_pass<P: fx_pass::FxPass>(
 /// The post-pipeline IrGraph plus the EP-effects accumulated during it.
 type StashedPipeline = (fx_ir::IrGraph, fx_ep_effects::FxEpEffectBatch);
 
+/// Append a Python-deferred constant-fold fallback record to the file named by
+/// `ARM_FOLD_FALLBACK_FILE` (no-op when unset). Used to sweep the battery for any
+/// remaining round-trip dependency on Python computation (round-trip Phase 4).
+/// True if the stashed IrGraph contains a control-flow op (cond / while_loop).
+/// Such graphs still need the Python ingest path: their submodule hierarchy and
+/// cf boundary phases are not yet captured in the IrGraph (round-trip Phase 4c).
+fn ir_has_control_flow(ir: &fx_ir::IrGraph) -> bool {
+    use crate::graph::ir::OpTarget;
+    ir.nodes.iter().filter(|n| n.alive).any(|n| {
+        matches!(
+            crate::ingest::target_map::parse_op_target(&n.target),
+            OpTarget::CondIf | OpTarget::WhileLoop
+        )
+    })
+}
+
+pub(crate) fn fold_fallback_log(msg: &str) {
+    use std::io::Write;
+    if let Ok(path) = std::env::var("ARM_FOLD_FALLBACK_FILE") {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{msg}");
+        }
+    }
+}
+
 thread_local! {
     /// Stash for the final post-pipeline IrGraph + EP-effects, set by
     /// `run_fx_passes` and consumed by serialization under ARM_SERIALIZE_FROM_IR.
@@ -182,11 +207,46 @@ fn ingest_and_serialize_tosa_pybytes(
     exported_program: Option<PyObject>,
 ) -> PyResult<Py<PyBytes>> {
     let profile = profile_ingest_serialize_enabled();
+    let from_ir = std::env::var("ARM_SERIALIZE_FROM_IR").ok().as_deref() == Some("1");
+    let skip_ingest = std::env::var("ARM_FROM_IR_SKIP_INGEST").ok().as_deref() == Some("1");
     let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
     let ingest_start = Instant::now();
+
+    // Round-trip elimination (Phase 4): for graphs without control flow, build the
+    // serialize Graph AND TensorStore entirely from the stashed post-pipeline
+    // IrGraph -- no Python re-ingest. Requires that every constant be materializable
+    // in Rust (no FuseConstantNode / zero-input Python fallbacks); the battery is
+    // the completeness check. Control-flow graphs still take the ingest path below
+    // (their submodules + cf boundary phases are not yet captured in the IrGraph).
+    if from_ir && skip_ingest {
+        if let Some((ir, effects)) = take_stashed_ir() {
+            if ir_has_control_flow(&ir) {
+                // Re-stash so the ingest path below can consume it.
+                stash_ir(Some((ir, effects)));
+            } else {
+                let mut store = crate::store::TensorStore::new();
+                let mut converted = ingest::from_ir::graph_from_ir(&ir, &mut store);
+                ingest::from_ir::apply_effects(&mut converted, &mut store, &effects);
+                ingest::fx_bridge::finalize_converted_graph(&mut converted);
+                ingest::from_ir::report_missing_consts(&converted, &store);
+                let mut graphs = vec![(String::from("main"), converted)];
+                rebuild_graph_users(&mut graphs);
+                let py_bytes = serialize::serialize_graphs_to_tosa_py(py, &graphs, &store);
+                if profile {
+                    eprintln!(
+                        "[RETAB][ingest_and_serialize] FROM_IR no-ingest path: nodes={} tensors={}",
+                        graphs[0].1.order.len(),
+                        store.buffers.len(),
+                    );
+                }
+                return Ok(py_bytes);
+            }
+        }
+    }
+
     let (mut graphs, mut store) =
         ingest_graph_hierarchy(graph_module, state_dict, graph_signature, exported_program)?;
-    if std::env::var("ARM_SERIALIZE_FROM_IR").ok().as_deref() == Some("1") {
+    if from_ir {
         // Round-trip elimination bring-up: replace the main graph (built by the
         // Python re-ingest above) with one converted directly from the stashed
         // post-pipeline IrGraph. Submodules + TensorStore still come from ingest
