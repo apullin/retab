@@ -184,6 +184,29 @@ fn ingest_and_serialize_tosa_pybytes(
     let ingest_start = Instant::now();
     let (mut graphs, store) =
         ingest_graph_hierarchy(graph_module, state_dict, graph_signature, exported_program)?;
+    if std::env::var("ARM_SERIALIZE_FROM_IR").ok().as_deref() == Some("1") {
+        // Round-trip elimination bring-up: replace the main graph (built by the
+        // Python re-ingest above) with one converted directly from the stashed
+        // post-pipeline IrGraph. Submodules + TensorStore still come from ingest
+        // (Phases 2-3). Non-control-flow only -- the cf_* boundary phases run on
+        // the Python graph after the pipeline, so the stashed IrGraph is the
+        // final state only for graphs without control flow.
+        if let Some(ir) = take_stashed_ir() {
+            let mut converted = ingest::from_ir::graph_from_ir(&ir);
+            ingest::fx_bridge::finalize_converted_graph(&mut converted);
+            if std::env::var("ARM_FROM_IR_DEBUG").ok().as_deref() == Some("1") {
+                if let Some((_, ing)) = graphs.first() {
+                    ingest::from_ir::debug_dump(ing, "INGESTED");
+                }
+                ingest::from_ir::debug_dump(&converted, "CONVERTED");
+            }
+            if let Some(first) = graphs.first_mut() {
+                first.1 = converted;
+            }
+        }
+    } else {
+        let _ = take_stashed_ir();
+    }
     let ingest_elapsed = ingest_start.elapsed();
     let rebuild_start = Instant::now();
     rebuild_graph_users(&mut graphs);

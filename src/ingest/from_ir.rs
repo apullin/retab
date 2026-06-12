@@ -53,10 +53,15 @@ pub fn graph_from_ir(ir: &IrGraph) -> Graph {
         idmap.insert(ir_node.id, nid);
         graph.order.push(nid);
         graph.node_names.push((nid, ir_node.name.clone()));
-        match op {
-            OpType::Placeholder => graph.inputs.push(nid),
-            OpType::Output => graph.output = Some(nid),
-            OpType::CallFunction => {}
+        // Classify by the ORIGINAL NodeOp: only true placeholders are runtime
+        // graph inputs. GetAttr nodes map to OpType::Placeholder too, but they
+        // are CONSTANTS (their data lives in the TensorStore by name) and must
+        // NOT join `inputs`, or the serializer emits them as runtime inputs and
+        // the input binding misaligns (-> ref-model segfault).
+        match ir_node.op {
+            NodeOp::Placeholder => graph.inputs.push(nid),
+            NodeOp::Output => graph.output = Some(nid),
+            _ => {}
         }
     }
 
@@ -77,8 +82,71 @@ pub fn graph_from_ir(ir: &IrGraph) -> Graph {
         }
     }
 
+    // The IrGraph's node Vec is in pass-INSERTION order: passes append new nodes
+    // (transposes, rescales) at the end rather than at their topological
+    // position, so the Vec is not topologically ordered. The serializer (and the
+    // ref model) require topological order, so re-sort `order` by def-use.
+    graph.order = topo_order(&graph);
     graph.rebuild_user_lists();
     graph
+}
+
+/// Topological order of the graph's nodes by def-use (each node after the nodes
+/// its args reference). Iterative DFS post-order -- no recursion, so it cannot
+/// itself stack-overflow on deep graphs.
+fn topo_order(graph: &Graph) -> Vec<NodeId> {
+    let mut visited: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    let mut result = Vec::with_capacity(graph.order.len());
+    for &start in &graph.order {
+        if visited.contains(&start) {
+            continue;
+        }
+        let mut stack: Vec<(NodeId, bool)> = vec![(start, false)];
+        while let Some((nid, post)) = stack.pop() {
+            if post {
+                result.push(nid);
+                continue;
+            }
+            if !visited.insert(nid) {
+                continue;
+            }
+            stack.push((nid, true));
+            if let Some(n) = graph.nodes.get(nid) {
+                for dep in Graph::collect_input_ids(n) {
+                    if !visited.contains(&dep) {
+                        stack.push((dep, false));
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Env-gated structural dump for comparing a converted graph against the
+/// Python-ingested one (ARM_FROM_IR_DEBUG=1).
+pub fn debug_dump(graph: &Graph, label: &str) {
+    eprintln!(
+        "=== {label}: {} nodes inputs={:?} output={:?} ===",
+        graph.order.len(),
+        graph.inputs,
+        graph.output,
+    );
+    for &nid in &graph.order {
+        if let Some(n) = graph.nodes.get(nid) {
+            eprintln!(
+                "  {:?} {} op={:?} target={:?} args={:?} val={:?}:{:?} dimorder={:?}",
+                nid,
+                n.name,
+                n.op,
+                n.target,
+                n.args,
+                n.meta.val.shape_slice(),
+                n.meta.val.dtype,
+                n.meta.tosa_dim_order,
+            );
+        }
+    }
 }
 
 fn map_op(op: NodeOp) -> OpType {
