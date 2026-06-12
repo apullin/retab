@@ -297,11 +297,6 @@ impl<'py, 'gm> RescaleOps<'py, 'gm> {
         Ok(())
     }
 
-    fn refresh_fake_tensor(&self, node: &Bound<'py, PyAny>) -> PyResult<()> {
-        self.helpers
-            .call_method1("refresh_node_fake_tensor", (node,))?;
-        Ok(())
-    }
 }
 
 /// Where output rescale qparams should come from.
@@ -935,8 +930,6 @@ impl FxPass for FxInsertRescalePass {
                     quant.update_node_dtype_kwarg(node)?;
                 }
             }
-
-            rescale_ops.refresh_fake_tensor(node)?;
         }
 
         // Phase 2b: insert output rescales after quantized `where` nodes when
@@ -1026,7 +1019,6 @@ impl FxPass for FxInsertRescalePass {
             rescale_ops.rewire_users(node, &rescale_out, &users)?;
 
             meta.set_item("output_qparams", &branch_output_qparams)?;
-            rescale_ops.refresh_fake_tensor(node)?;
             modified = true;
         }
 
@@ -1043,7 +1035,6 @@ impl FxPass for FxInsertRescalePass {
             if !is_tosa_accumulator_op(&target) {
                 continue;
             }
-            rescale_ops.refresh_fake_tensor(node)?;
             let node_name = if debug {
                 Some(FxGraphModule::node_name(node)?)
             } else {
