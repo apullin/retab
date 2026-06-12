@@ -64,7 +64,17 @@ pub fn graph_from_ir(ir: &IrGraph, store: &mut TensorStore) -> Graph {
         }
         let op = map_op(ir_node.op);
         let target = if op == OpType::CallFunction {
-            parse_op_target(&ir_node.target)
+            let parsed = parse_op_target(&ir_node.target);
+            // Mirror ingest: aten.convolution with transposed=True (arg 6) is a
+            // transpose-conv, not a plain conv2d.
+            if matches!(parsed, OpTarget::Conv2d)
+                && ir_node.target.contains("aten.convolution")
+                && matches!(ir_node.args.get(6), Some(IrArg::Bool(true)))
+            {
+                OpTarget::ConvTranspose2d
+            } else {
+                parsed
+            }
         } else {
             OpTarget::Other(ir_node.target.clone())
         };
@@ -344,12 +354,75 @@ fn apply_precomputed_table(
         n.target = OpTarget::TosaTable;
         n.args = table_args;
         n.meta.val = table_val;
-        n.meta.tosa_dim_order = dim_order;
+        n.meta.tosa_dim_order = dim_order.clone();
     }
-    // NOTE: INT16 tables also need a trailing rescale of 2^rescale_lshift; added
-    // when the INT16/a16w8 surface is brought up.
-    let _ = e.rescale_lshift;
+
+    // INT16 TABLE produces INT32; a trailing rescale by 2^rescale_lshift aligns
+    // it (staying INT32 -- the eventual INT16 quantization is done by a
+    // downstream rescale, matching the Python _apply_table_op path). Insert it
+    // after the table and rewire the table's users.
+    if e.input.dtype == DType::Int16 {
+        let scale = 2.0_f64.powi(e.rescale_lshift as i32);
+        let rescale_name = format!("{}_table_rescale", e.node_name);
+        let mut r_args: SmallVec<[Arg; 4]> = SmallVec::new();
+        r_args.push(Arg::Node(nid));
+        r_args.push(Arg::Dtype(DType::Int32));
+        let mut scales: SmallVec<[f64; 4]> = SmallVec::new();
+        scales.push(scale);
+        r_args.push(Arg::FloatList(scales));
+        r_args.push(Arg::Int(0));
+        r_args.push(Arg::Int(0));
+        let mut r_val = out_shape;
+        r_val.dtype = DType::Int32;
+        let mut r_meta = NodeMeta::new(r_val);
+        r_meta.tosa_dim_order = dim_order;
+        let r_node = Node {
+            op: OpType::CallFunction,
+            target: OpTarget::TosaRescale,
+            args: r_args,
+            kwargs: Vec::new(),
+            meta: r_meta,
+            users: SmallVec::new(),
+            name: rescale_name.clone(),
+        };
+        let r_nid = graph.nodes.insert(r_node);
+        graph.order.push(r_nid);
+        graph.node_names.push((r_nid, rescale_name));
+        rewire_node_uses(graph, nid, r_nid);
+    }
     true
+}
+
+/// Redirect every consumer of `old` to `new` (used after inserting a node in the
+/// middle of a def-use chain). Skips `new` itself so its own input is kept.
+fn rewire_node_uses(graph: &mut Graph, old: NodeId, new: NodeId) {
+    for nid in graph.order.clone() {
+        if nid == new {
+            continue;
+        }
+        if let Some(n) = graph.nodes.get_mut(nid) {
+            for a in n.args.iter_mut() {
+                replace_arg_node(a, old, new);
+            }
+            for (_, a) in n.kwargs.iter_mut() {
+                replace_arg_node(a, old, new);
+            }
+        }
+    }
+}
+
+fn replace_arg_node(a: &mut Arg, old: NodeId, new: NodeId) {
+    match a {
+        Arg::Node(id) if *id == old => *id = new,
+        Arg::NodeList(ids) => {
+            for id in ids.iter_mut() {
+                if *id == old {
+                    *id = new;
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Replace a computed node with its precomputed constant: data -> store, node

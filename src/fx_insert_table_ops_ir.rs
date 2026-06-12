@@ -180,6 +180,8 @@ fn eval_precomputable_table(kind: &str, scalar_arg: Option<f64>, x: f64) -> Opti
         "floor" => Some(x.floor()),
         "round" => Some(x.round_ties_even()),
         "reciprocal" => Some(x.recip()),
+        "rsqrt" => Some(x.sqrt().recip()),
+        "logit" => Some((x / (1.0 - x)).ln()),
         "exp" => Some(x.exp()),
         "log" => Some(x.ln()),
         "sigmoid" => Some(sigmoid(x)),
