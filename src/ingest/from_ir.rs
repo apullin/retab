@@ -364,16 +364,19 @@ fn apply_precomputed_table(
     if e.input.dtype == DType::Int16 {
         let scale = 2.0_f64.powi(e.rescale_lshift as i32);
         let rescale_name = format!("{}_table_rescale", e.node_name);
+        // The rescale's destination dtype is the effect's carried output dtype
+        // (INT32 for the 32-bit table variant, INT16 for 16a8w).
+        let out_dtype = e.output.dtype;
         let mut r_args: SmallVec<[Arg; 4]> = SmallVec::new();
         r_args.push(Arg::Node(nid));
-        r_args.push(Arg::Dtype(DType::Int32));
+        r_args.push(Arg::Dtype(out_dtype));
         let mut scales: SmallVec<[f64; 4]> = SmallVec::new();
         scales.push(scale);
         r_args.push(Arg::FloatList(scales));
         r_args.push(Arg::Int(0));
         r_args.push(Arg::Int(0));
         let mut r_val = out_shape;
-        r_val.dtype = DType::Int32;
+        r_val.dtype = out_dtype;
         let mut r_meta = NodeMeta::new(r_val);
         r_meta.tosa_dim_order = dim_order;
         let r_node = Node {
