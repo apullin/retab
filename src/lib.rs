@@ -207,8 +207,13 @@ fn ingest_and_serialize_tosa_pybytes(
     exported_program: Option<PyObject>,
 ) -> PyResult<Py<PyBytes>> {
     let profile = profile_ingest_serialize_enabled();
-    let from_ir = std::env::var("ARM_SERIALIZE_FROM_IR").ok().as_deref() == Some("1");
-    let skip_ingest = std::env::var("ARM_FROM_IR_SKIP_INGEST").ok().as_deref() == Some("1");
+    // Phase 4d: the IrGraph-sourced serialization is now the default. Set
+    // ARM_SERIALIZE_FROM_IR=0 to fall back to the legacy Python re-ingest, and
+    // ARM_FROM_IR_SKIP_INGEST=0 to keep the re-ingest while still converting the
+    // main graph from IR (the hybrid bring-up path).
+    let from_ir = std::env::var("ARM_SERIALIZE_FROM_IR").ok().as_deref() != Some("0");
+    let skip_ingest =
+        from_ir && std::env::var("ARM_FROM_IR_SKIP_INGEST").ok().as_deref() != Some("0");
     let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
     let ingest_start = Instant::now();
 
