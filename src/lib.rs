@@ -182,7 +182,7 @@ fn take_stashed_hierarchy() -> StashedPipelineHierarchy {
 }
 
 fn cf_boundary_ir_enabled() -> bool {
-    std::env::var("ARM_CF_BOUNDARY_IR").ok().as_deref() == Some("1")
+    std::env::var("ARM_CF_BOUNDARY_IR").ok().as_deref() != Some("0")
 }
 
 fn run_full_fx_pipeline(
@@ -1081,7 +1081,7 @@ fn append_control_flow_subgraphs_from_ir(
         }
         let Some((ir, effects)) = submodules.get(&region) else {
             return Err(PyRuntimeError::new_err(format!(
-                "ARM_CF_BOUNDARY_IR=1 missing stashed IrGraph for control-flow region '{region}'"
+                "ARM_CF_BOUNDARY_IR missing stashed IrGraph for control-flow region '{region}'"
             )));
         };
 
