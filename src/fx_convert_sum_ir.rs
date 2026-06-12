@@ -156,8 +156,7 @@ impl IrPass for IrConvertSumPass {
                     ],
                     step_meta,
                 );
-                // Anchor intermediate nodes to the original sum node so
-                // write_back_with_surgery places them in the right position.
+                // Anchor intermediate nodes near the original sum for stable IR ordering.
                 graph.anchor_to(reduce_id, id);
 
                 current_input = reduce_id;

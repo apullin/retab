@@ -1,18 +1,7 @@
-//! `IrGraph` -> serialize `Graph` converter (round-trip elimination, Phase 1).
+//! `IrGraph` -> serialize `Graph` converter.
 //!
-//! Builds the serialize `Graph` directly from the post-pass `IrGraph`, mirroring
-//! the Python-sourced node loop in `ingest_fx_graph_with_prefix` but reading
-//! `IrNode` fields instead of Python attributes -- so serialization can skip the
-//! flush-to-Python + re-ingest round-trip entirely. Gated behind
-//! `ARM_SERIALIZE_FROM_IR` during bring-up and validated by running the full test
-//! battery with the flag on (the battery is the equality check -- no separate
-//! harness).
-//!
-//! NOT yet handled here (see round-trip Phase 2/3 tasks): TensorStore population
-//! from `IrNode.tensor`, and the control-flow submodule hierarchy. The
-//! post-conversion fixups (`fixup_reshape_shapes` / `fixup_quantized_dtypes` /
-//! `preserve_scalar_shape` marking) still run after this, exactly as after ingest.
-#![allow(dead_code)] // Phase 1: not yet wired into the active serialize path.
+//! Builds the serialize `Graph` directly from the post-pass `IrGraph`; control-flow
+//! submodule graphs are assembled from their own stashed IRs by the caller.
 
 use std::collections::HashMap;
 

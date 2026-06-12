@@ -2,17 +2,16 @@
 //!
 //! Phase 1: NodeMeta — typed metadata extraction (done).
 //! Phase 2: IrGraph — full node topology imported from Python FX graph.
-//! Phase 3: Graph surgery — replace_and_erase, write_back_with_surgery.
+//! Phase 3: Graph surgery — replace_and_erase in Rust IR.
 //! Phase 4: IrPass trait — pure Rust passes on IrGraph.
 
 use std::collections::HashMap;
 
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 pub(crate) use crate::fx_control_flow_metadata::{NodeOp, QParam};
-use crate::fx_ep_effects::{FxEpApplyContext, FxEpEffectBatch, FxEpInputKind};
+use crate::fx_ep_effects::{FxEpEffectBatch, FxEpInputKind};
 use crate::store::TensorData;
 use crate::tensor_data::extract_tensor_data;
 
@@ -234,11 +233,7 @@ pub struct IrGraph {
     users: Vec<Vec<NodeId>>,
     /// Replacement map: dead_id → replacement_id (recorded by replace_and_erase).
     replacements: HashMap<NodeId, NodeId>,
-    /// Explicit position anchors: new_node_id → original_node_id.
-    /// During write_back_with_surgery, nodes with anchors are inserted before
-    /// the original node's position (like replacements, but without implying
-    /// a use-replacement relationship).  Passes call `anchor_to` for
-    /// intermediate nodes that must appear near a specific original node.
+    /// Explicit position anchors retained for IR ordering and serialization hints.
     anchors: HashMap<NodeId, NodeId>,
     /// Explicit after-anchors for nodes that must be defined after a live
     /// producer while still preceding rewired consumers.
@@ -759,11 +754,7 @@ impl IrGraph {
         self.replacements.insert(old_id, new_id);
     }
 
-    /// Record a position anchor: during write_back_with_surgery, `new_id`
-    /// will be inserted before `original_id`'s position in the Python graph.
-    /// Use this for intermediate nodes that must appear near a specific
-    /// original node (e.g., view_copy/expand_copy that feed a replacement
-    /// where node).
+    /// Record a position anchor for IR-inserted nodes.
     pub fn anchor_to(&mut self, new_id: NodeId, original_id: NodeId) {
         self.anchors.insert(new_id, original_id);
     }
@@ -879,385 +870,6 @@ impl IrGraph {
         for (ir_node, py_node) in self.nodes.iter().zip(py_nodes.iter()) {
             if ir_node.alive {
                 ir_node.meta.write_back(py, py_node)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Write back metadata AND apply graph surgery to the Python FX graph.
-    /// Handles three cases:
-    /// 1. Metadata updates on alive original nodes
-    /// 2. Creation of new Python FX nodes for IrNodes added by passes
-    /// 3. replace_all_uses + erase for dead original nodes
-    pub fn write_back_with_surgery(&self, py: Python<'_>, gm: &Bound<'_, PyAny>) -> PyResult<()> {
-        fn resolve_effective_anchor(graph: &IrGraph, node_id: NodeId) -> (Option<NodeId>, bool) {
-            let mut seen = std::collections::HashSet::new();
-            let mut insert_after_first = false;
-            let mut current = if let Some(&anchor_id) = graph.anchors_after.get(&node_id) {
-                insert_after_first = true;
-                Some(anchor_id)
-            } else if let Some((&old_id, _)) = graph
-                .replacements
-                .iter()
-                .find(|(_, &new_id)| new_id == node_id)
-            {
-                Some(old_id)
-            } else {
-                graph.anchors.get(&node_id).copied()
-            };
-
-            while let Some(anchor_id) = current {
-                if !seen.insert(anchor_id) {
-                    return (Some(anchor_id), insert_after_first);
-                }
-                current = graph
-                    .replacements
-                    .iter()
-                    .find(|(_, &new_id)| new_id == anchor_id)
-                    .map(|(&old_id, _)| old_id)
-                    .or_else(|| graph.anchors_after.get(&anchor_id).copied())
-                    .or_else(|| graph.anchors.get(&anchor_id).copied());
-                if current.is_none() {
-                    return (Some(anchor_id), insert_after_first);
-                }
-            }
-
-            (None, false)
-        }
-
-        let graph = if gm.hasattr("graph")? {
-            gm.getattr("graph")?
-        } else {
-            gm.clone()
-        };
-        let py_nodes: Vec<Bound<'_, PyAny>> = graph
-            .getattr("nodes")?
-            .iter()?
-            .filter_map(|n| n.ok())
-            .collect();
-        let original_count = py_nodes.len();
-
-        // Write metadata for alive original nodes (args deferred until after new node creation)
-        for (ir_node, py_node) in self.nodes.iter().zip(py_nodes.iter()) {
-            if ir_node.alive {
-                ir_node.meta.write_back(py, py_node)?;
-            }
-        }
-
-        // Build extended lookup: original nodes + slots for new nodes
-        let mut all_py: Vec<Option<Bound<'_, PyAny>>> =
-            py_nodes.iter().map(|n| Some(n.clone())).collect();
-
-        // Create Python FX nodes for IrNodes added by passes (id >= original_count).
-        // Multi-pass: cross-pass replace_all_uses can make earlier new nodes
-        // reference later new nodes. We iterate until all alive nodes are created.
-        if self.nodes.len() > original_count {
-            let creator = FxNodeCreator::new(py)?;
-            let copy_mod = py.import_bound("copy")?;
-            let mut last_for_anchor: HashMap<(NodeId, bool), Bound<'_, PyAny>> = HashMap::new();
-
-            fn collect_arg_node_ids(arg: &IrArg, ids: &mut Vec<NodeId>) {
-                match arg {
-                    IrArg::Node(id) => ids.push(*id),
-                    IrArg::List(items) => {
-                        for item in items {
-                            collect_arg_node_ids(item, ids);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            fn py_node_positions(graph: &Bound<'_, PyAny>) -> PyResult<HashMap<String, usize>> {
-                let mut positions = HashMap::new();
-                for (idx, node) in graph
-                    .getattr("nodes")?
-                    .iter()?
-                    .filter_map(|n| n.ok())
-                    .enumerate()
-                {
-                    if let Ok(name) = node.getattr("name").and_then(|v| v.extract::<String>()) {
-                        positions.insert(name, idx);
-                    }
-                }
-                Ok(positions)
-            }
-
-            fn py_node_position(
-                node: &Bound<'_, PyAny>,
-                positions: &HashMap<String, usize>,
-            ) -> usize {
-                node.getattr("name")
-                    .and_then(|v| v.extract::<String>())
-                    .ok()
-                    .and_then(|name| positions.get(&name).copied())
-                    .unwrap_or(0)
-            }
-
-            // Pre-fill slots for all new nodes
-            for _ir_node in &self.nodes[original_count..] {
-                all_py.push(None);
-            }
-
-            // Iterate until no more nodes can be created
-            let mut progress = true;
-            while progress {
-                progress = false;
-                for idx in original_count..self.nodes.len() {
-                    let ir_node = &self.nodes[idx];
-                    if !ir_node.alive || all_py[idx].is_some() {
-                        continue;
-                    }
-
-                    // Check if all node-arg dependencies are resolved
-                    let deps_ready = ir_node.args.iter().all(|a| match a {
-                        IrArg::Node(dep_id) => {
-                            all_py.get(*dep_id).and_then(|o| o.as_ref()).is_some()
-                        }
-                        IrArg::List(items) => items.iter().all(|item| match item {
-                            IrArg::Node(dep_id) => {
-                                all_py.get(*dep_id).and_then(|o| o.as_ref()).is_some()
-                            }
-                            _ => true,
-                        }),
-                        _ => true,
-                    });
-                    if !deps_ready {
-                        continue;
-                    }
-
-                    let ir_node = &self.nodes[idx]; // reborrow
-                    let (anchor_id, insert_after_first) =
-                        resolve_effective_anchor(self, ir_node.id);
-
-                    // Insert in anchor-chain order: use last_for_anchor to chain nodes
-                    // sharing the same anchor and placement side. For the first node
-                    // in a chain, insert before or after the anchor as requested.
-                    let (mut ref_node, mut insert_after) = if let Some(aid) = anchor_id {
-                        let anchor_key = (aid, insert_after_first);
-                        if let Some(prev) = last_for_anchor.get(&anchor_key) {
-                            (prev.clone(), true)
-                        } else if let Some(Some(a)) = all_py.get(aid) {
-                            (a.clone(), insert_after_first)
-                        } else {
-                            (find_output_node(&all_py), false)
-                        }
-                    } else {
-                        (find_output_node(&all_py), false)
-                    };
-
-                    let mut dep_ids = Vec::new();
-                    for arg in &ir_node.args {
-                        collect_arg_node_ids(arg, &mut dep_ids);
-                    }
-                    for arg in ir_node.kwargs.values() {
-                        collect_arg_node_ids(arg, &mut dep_ids);
-                    }
-
-                    let mut predecessor_refs: Vec<Bound<'_, PyAny>> = Vec::new();
-                    if insert_after {
-                        predecessor_refs.push(ref_node.clone());
-                    }
-                    for dep_id in dep_ids {
-                        if dep_id != ir_node.id {
-                            if let Some(Some(dep_py)) = all_py.get(dep_id) {
-                                predecessor_refs.push(dep_py.clone());
-                            }
-                        }
-                    }
-                    if !predecessor_refs.is_empty() {
-                        let positions = py_node_positions(&graph)?;
-                        if let Some(latest) = predecessor_refs
-                            .into_iter()
-                            .max_by_key(|node| py_node_position(node, &positions))
-                        {
-                            ref_node = latest;
-                            insert_after = true;
-                        }
-                    }
-
-                    let py_args: Vec<Bound<'_, PyAny>> = ir_node
-                        .args
-                        .iter()
-                        .map(|a| ir_arg_to_py(py, a, &all_py))
-                        .collect::<PyResult<_>>()?;
-                    let py_tuple = pyo3::types::PyTuple::new_bound(py, &py_args);
-
-                    // Resolve the Python node used for the initial meta copy. This
-                    // defaults to the position anchor, but passes can override it
-                    // when insertion position and metadata source differ.
-                    let meta_src_node = ir_node
-                        .meta_copy_source
-                        .or(anchor_id)
-                        .and_then(|aid| all_py.get(aid))
-                        .and_then(|opt| opt.as_ref())
-                        .unwrap_or(&ref_node);
-
-                    let target_op = creator.resolve_op(&ir_node.target)?;
-                    let ctx = if insert_after {
-                        graph.call_method1("inserting_after", (&ref_node,))?
-                    } else {
-                        graph.call_method1("inserting_before", (&ref_node,))?
-                    };
-                    ctx.call_method0("__enter__")?;
-                    let call_kw = PyDict::new_bound(py);
-                    call_kw.set_item("args", py_tuple)?;
-                    // Pass node kwargs if any
-                    if !ir_node.kwargs.is_empty() {
-                        let py_kwargs = PyDict::new_bound(py);
-                        for (key, val) in &ir_node.kwargs {
-                            py_kwargs.set_item(key.as_str(), ir_arg_to_py(py, val, &all_py)?)?;
-                        }
-                        call_kw.set_item("kwargs", py_kwargs)?;
-                    }
-                    let new_py =
-                        graph.call_method("call_function", (&target_op,), Some(&call_kw))?;
-                    // FX auto-names new call_function nodes from the operator target.
-                    // Preserve the IR name so later effect batches can address
-                    // freshly-created nodes by the same stable key.
-                    new_py.setattr("name", ir_node.name.as_str())?;
-                    let meta = copy_mod.call_method1("copy", (meta_src_node.getattr("meta")?,))?;
-                    new_py.setattr("meta", &meta)?;
-                    let none = py.None().into_bound(py);
-                    ctx.call_method1("__exit__", (&none, &none, &none))?;
-
-                    ir_node.meta.write_back(py, &new_py)?;
-                    if let Some(aid) = anchor_id {
-                        last_for_anchor.insert((aid, insert_after_first), new_py.clone());
-                    }
-                    all_py[idx] = Some(new_py);
-                    progress = true;
-                }
-            }
-        }
-
-        // Write back modified args for alive original nodes
-        // (after new node creation, so new node references resolve)
-        fn py_node_id(graph: &IrGraph, py_arg: &Bound<'_, PyAny>) -> Option<NodeId> {
-            let name = py_arg.getattr("name").ok()?.extract::<String>().ok()?;
-            if py_arg.getattr("op").is_err() {
-                return None;
-            }
-            graph.by_name(&name).map(|node| node.id)
-        }
-
-        fn collect_node_replacements<'py>(
-            graph: &IrGraph,
-            orig_py: &Bound<'py, PyAny>,
-            ir_arg: &IrArg,
-            replacements: &mut Vec<(Bound<'py, PyAny>, NodeId)>,
-        ) {
-            match ir_arg {
-                IrArg::Node(new_id) => {
-                    if py_node_id(graph, orig_py).is_some_and(|old_id| old_id != *new_id) {
-                        replacements.push((orig_py.clone(), *new_id));
-                    }
-                }
-                IrArg::List(items) => {
-                    if let Ok(iter) = orig_py.iter() {
-                        for (orig_item, ir_item) in iter.filter_map(|item| item.ok()).zip(items) {
-                            collect_node_replacements(graph, &orig_item, ir_item, replacements);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        fn ir_arg_to_py_output<'py>(
-            py: Python<'py>,
-            arg: &IrArg,
-            py_nodes: &[Option<Bound<'py, PyAny>>],
-        ) -> PyResult<Bound<'py, PyAny>> {
-            match arg {
-                IrArg::List(items) => {
-                    let py_items: Vec<Bound<'py, PyAny>> = items
-                        .iter()
-                        .map(|item| ir_arg_to_py_output(py, item, py_nodes))
-                        .collect::<PyResult<_>>()?;
-                    Ok(pyo3::types::PyTuple::new_bound(py, &py_items).into_any())
-                }
-                _ => ir_arg_to_py(py, arg, py_nodes),
-            }
-        }
-
-        for ir_node in &self.nodes[..original_count] {
-            if !ir_node.alive || !ir_node.args_dirty {
-                continue;
-            }
-            let py_node = match all_py.get(ir_node.id).and_then(|o| o.as_ref()) {
-                Some(n) => n,
-                None => continue,
-            };
-            let orig_args = crate::fx_graph::FxGraphModule::node_args(py_node).unwrap_or_default();
-
-            if ir_node.args_rebuild_required || ir_node.op == NodeOp::Output {
-                // Full args rebuild — needed for passes like quantize_clamp_args
-                // that change literal values (Int/Float). Output nodes also
-                // need this because replace_input_with is unreliable for the
-                // nested output tuple after IR-inserted boundary transposes.
-                let py_args: Vec<Bound<'_, PyAny>> = ir_node
-                    .args
-                    .iter()
-                    .map(|a| {
-                        if ir_node.op == NodeOp::Output {
-                            ir_arg_to_py_output(py, a, &all_py)
-                        } else {
-                            ir_arg_to_py(py, a, &all_py)
-                        }
-                    })
-                    .collect::<PyResult<_>>()?;
-                let py_tuple = pyo3::types::PyTuple::new_bound(py, &py_args);
-                py_node.setattr("args", py_tuple)?;
-            } else {
-                // Only Node refs changed — use replace_input_with to preserve
-                // Python container types (tuples, dtype objects) on unchanged
-                // args, including nested output/list args.
-                let mut replacements = Vec::new();
-                for (idx, ir_arg) in ir_node.args.iter().enumerate() {
-                    if let Some(old_py) = orig_args.get(idx) {
-                        collect_node_replacements(self, &old_py, ir_arg, &mut replacements);
-                    }
-                }
-                for (old_py, new_id) in replacements {
-                    if let Some(Some(new_py)) = all_py.get(new_id) {
-                        let _ = py_node.call_method1("replace_input_with", (&old_py, new_py));
-                    }
-                }
-            }
-
-            if !ir_node.kwargs.is_empty() {
-                let py_kwargs = PyDict::new_bound(py);
-                for (key, val) in &ir_node.kwargs {
-                    py_kwargs.set_item(key.as_str(), ir_arg_to_py(py, val, &all_py)?)?;
-                }
-                py_node.setattr("kwargs", py_kwargs)?;
-            }
-        }
-
-        // Apply surgery: replace_all_uses + erase for dead original nodes
-        // (reverse order so dependents are erased before their sources)
-        for ir_node in self.nodes[..original_count].iter().rev() {
-            if ir_node.alive {
-                continue;
-            }
-            let py_node = match all_py.get(ir_node.id).and_then(|o| o.as_ref()) {
-                Some(n) => n,
-                None => continue,
-            };
-            if let Some(&replacement_id) = self.replacements.get(&ir_node.id) {
-                if let Some(Some(replacement_py)) = all_py.get(replacement_id) {
-                    py_node.call_method1("replace_all_uses_with", (replacement_py,))?;
-                }
-            }
-            graph.call_method1("erase_node", (py_node,))?;
-        }
-
-        // Inserted nodes are placed by FX anchor position; chained insertions can
-        // leave a node before its definition. Reorder to a valid topological order.
-        if let Ok(helpers) = py.import_bound("fx_helpers") {
-            if let Ok(toposort) = helpers.getattr("topological_sort_fx_graph") {
-                let _ = toposort.call1((gm,));
             }
         }
         Ok(())
@@ -2294,51 +1906,6 @@ pub trait IrEpPass {
     fn run(&self, graph: &mut IrGraph) -> IrEpPassResult;
 }
 
-/// Run a sequence of IrPasses on an IrGraph imported from a Python GraphModule.
-/// Handles the full lifecycle: import → passes → write_back.
-pub fn run_ir_passes<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-    passes: &[&dyn IrPass],
-) -> PyResult<bool> {
-    run_ir_passes_with_tensors(py, gm, None, passes)
-}
-
-pub fn run_ir_passes_with_tensors<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-    exported_program: Option<&Bound<'py, PyAny>>,
-    passes: &[&dyn IrPass],
-) -> PyResult<bool> {
-    let mut ir = IrGraph::from_fx_with_tensors(gm, exported_program)?;
-    let mut any_modified = false;
-
-    for pass in passes {
-        let before = ir.nodes.iter().filter(|n| n.alive).count();
-        let modified = pass.run(&mut ir);
-        let after = ir.nodes.iter().filter(|n| n.alive).count();
-        if modified {
-            any_modified = true;
-            crate::runner_logging::log_line(format_args!(
-                "[IrPassRunner] {} — modified, nodes: {} -> {}",
-                pass.name(),
-                before,
-                after
-            ));
-        }
-    }
-
-    if any_modified {
-        ir.write_back_with_surgery(py, gm)?;
-        let graph = gm.getattr("graph")?;
-        graph.call_method0("eliminate_dead_code")?;
-        graph.call_method0("lint")?;
-        gm.call_method0("recompile")?;
-    }
-
-    Ok(any_modified)
-}
-
 // ===========================================================================
 // IrArg convenience methods
 // ===========================================================================
@@ -2383,33 +1950,6 @@ impl IrArg {
 }
 
 // ===========================================================================
-// IrPassAdapter — bridge IrPass into the FxPass pipeline
-// ===========================================================================
-
-/// Wraps a pure Rust `IrPass` as an `FxPass`, allowing it to be used
-/// in the existing FxPass pipeline. Handles the full IrGraph lifecycle:
-/// import from Python → run pass → write back with surgery.
-pub struct IrPassAdapter<P: IrPass> {
-    pass: P,
-}
-
-impl<P: IrPass> IrPassAdapter<P> {
-    pub fn new(pass: P) -> Self {
-        Self { pass }
-    }
-}
-
-impl<P: IrPass> crate::fx_pass::FxPass for IrPassAdapter<P> {
-    fn name(&self) -> &str {
-        self.pass.name()
-    }
-
-    fn run(&self, gm: &crate::fx_graph::FxGraphModule) -> PyResult<bool> {
-        run_ir_passes(gm.py(), gm.gm_ref(), &[&self.pass])
-    }
-}
-
-// ===========================================================================
 // Hybrid pipeline: persistent IrGraph with deferred EP effects
 // ===========================================================================
 
@@ -2420,44 +1960,18 @@ pub enum PipelineStep {
     IrEp(Box<dyn IrEpPass>),
 }
 
-/// Flush the IrGraph back to Python: write_back_with_surgery + cleanup.
-fn flush_ir_to_python(
-    ir: &IrGraph,
-    py: Python<'_>,
-    gm: &Bound<'_, PyAny>,
-    exported_program: Option<&Bound<'_, PyAny>>,
-    pending_effects: &mut FxEpEffectBatch,
-) -> PyResult<()> {
-    ir.write_back_with_surgery(py, gm)?;
-    if !pending_effects.effects.is_empty() {
-        let exported_program = exported_program.ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "effectful Ir pipeline step requires an ExportedProgram at flush time",
-            )
-        })?;
-        let ctx = FxEpApplyContext::new(gm, exported_program)?;
-        let _ = pending_effects.apply(&ctx)?;
-        pending_effects.effects.clear();
-    }
-    let graph = gm.getattr("graph")?;
-    graph.call_method0("eliminate_dead_code")?;
-    graph.call_method0("lint")?;
-    gm.call_method0("recompile")?;
-    Ok(())
-}
-
 /// Run a hybrid pipeline: IrPasses mutate a persistent IrGraph in pure Rust,
-/// and IrEp passes accumulate narrow Python bookkeeping effects until flush.
+/// and IrEp passes accumulate narrow Python bookkeeping effects for serialization.
 pub fn run_hybrid_pipeline<'py>(
-    py: Python<'py>,
+    _py: Python<'py>,
     gm: &Bound<'py, PyAny>,
     exported_program: Option<&Bound<'py, PyAny>>,
     steps: &[PipelineStep],
 ) -> PyResult<(bool, Option<IrGraph>, FxEpEffectBatch)> {
-    run_hybrid_pipeline_ext(py, gm, exported_program, steps, true)
+    run_hybrid_pipeline_ext(_py, gm, exported_program, steps, true)
 }
 
-/// `run_hybrid_pipeline` with control over whether the final Python FX write-back is skipped.
+/// `run_hybrid_pipeline` with the historical skip parameter retained for callers.
 pub fn run_hybrid_pipeline_ext<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
@@ -2469,19 +1983,18 @@ pub fn run_hybrid_pipeline_ext<'py>(
 }
 
 pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
-    py: Python<'py>,
+    _py: Python<'py>,
     gm: &Bound<'py, PyAny>,
     exported_program: Option<&Bound<'py, PyAny>>,
     steps: &[PipelineStep],
-    allow_flush_skip: bool,
+    _allow_flush_skip: bool,
     initial_ir: Option<IrGraph>,
 ) -> PyResult<(bool, Option<IrGraph>, FxEpEffectBatch)> {
     use crate::runner_logging::{log_pass_result, log_pass_start};
 
     let mut ir = initial_ir;
     let mut any_modified = false;
-    let mut ir_dirty = ir.is_some(); // tracks if the IrGraph has unflushed changes
-    let mut pending_effects = FxEpEffectBatch::default();
+    let mut effects = FxEpEffectBatch::default();
 
     for (i, step) in steps.iter().enumerate() {
         match step {
@@ -2489,7 +2002,6 @@ pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
                 // Ensure we have an IrGraph
                 if ir.is_none() {
                     ir = Some(IrGraph::from_fx_with_tensors(gm, exported_program)?);
-                    ir_dirty = false;
                 }
                 let graph = ir.as_mut().unwrap();
                 let before = graph.nodes.iter().filter(|n| n.alive).count();
@@ -2499,13 +2011,11 @@ pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
                 log_pass_result("HybridPipeline", pass.name(), modified, before, after);
                 if modified {
                     any_modified = true;
-                    ir_dirty = true;
                 }
             }
             PipelineStep::IrEp(pass) => {
                 if ir.is_none() {
                     ir = Some(IrGraph::from_fx_with_tensors(gm, exported_program)?);
-                    ir_dirty = false;
                 }
                 let graph = ir.as_mut().unwrap();
                 let before = graph.nodes.iter().filter(|n| n.alive).count();
@@ -2521,29 +2031,11 @@ pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
                 );
                 if result.changed() {
                     any_modified = true;
-                    ir_dirty = true;
-                    pending_effects.effects.extend(result.effects.effects);
+                    effects.effects.extend(result.effects.effects);
                 }
             }
         }
     }
 
-    // Capture the EP-effects before any legacy flush could consume them, so
-    // serialization can apply them Rust-natively to the converted graph.
-    let stashed_effects = pending_effects.clone();
-
-    // Final flush is retained only for legacy callers that explicitly disallow
-    // skipping it; the production preprocess path serializes from the returned IR.
-    let skip_flush = allow_flush_skip;
-    if ir_dirty && !skip_flush {
-        if let Some(ref graph) = ir {
-            flush_ir_to_python(graph, py, gm, exported_program, &mut pending_effects)?;
-        }
-    }
-
-    // Post-pipeline FakeTensor dtype fixup is now done Rust-natively at ingest
-    // (ingest::fx_bridge::fixup_quantized_dtypes, iterated to convergence), so
-    // there is no longer a Python bulk-refresh call here.
-
-    Ok((any_modified, ir, stashed_effects))
+    Ok((any_modified, ir, effects))
 }

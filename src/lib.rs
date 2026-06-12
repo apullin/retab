@@ -1349,13 +1349,7 @@ fn run_fx_cond_passes(
     Ok(modified || propagation_changed > 0)
 }
 
-/// Ingest-and-serialize only: convert an already-lowered FX graph to TOSA
-/// flatbuffer without running any IR passes.
-///
-/// Use this after `run_fx_passes()` has already transformed the graph on the
-/// Python side.  Unlike `lower_to_tosa` (which runs the full phase-2 IR
-/// pipeline), this function only ingests the FX graph into Rust IR and
-/// serializes it -- no duplicate pass execution.
+/// Serialize the lowered stashed IR hierarchy to a TOSA flatbuffer.
 #[pyfunction]
 #[pyo3(signature = (graph_module, state_dict, graph_signature, exported_program=None))]
 fn ingest_and_serialize(
