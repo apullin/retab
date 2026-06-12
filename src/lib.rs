@@ -607,6 +607,96 @@ fn apply_ir_boundary_contract_to_submodule(
     changed
 }
 
+fn apply_ir_qparam_contract_to_submodule(
+    graph: &mut fx_ir::IrGraph,
+    contract: &IrCfBoundaryContract,
+) -> u32 {
+    let placeholder_ids: Vec<fx_ir::NodeId> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.alive && node.op == fx_control_flow_metadata::NodeOp::Placeholder)
+        .map(|node| node.id)
+        .collect();
+
+    let mut changed = 0u32;
+    for (ph_id, input) in placeholder_ids.iter().copied().zip(contract.inputs.iter()) {
+        let ph_meta = &mut graph.nodes[ph_id].meta;
+        ph_meta.set_extra("arm_control_flow_placeholder", fx_ir::MetaValue::Bool(true));
+        changed += 1;
+
+        let mut found_qparam = false;
+        if let Some(output_qparams) = input.meta.output_qparams.clone() {
+            ph_meta.set_output_qparams(output_qparams);
+            found_qparam = true;
+            changed += 1;
+        }
+        if let Some(input_qparams) = input.meta.input_qparams.clone() {
+            ph_meta.set_input_qparams(input_qparams);
+            found_qparam = true;
+            changed += 1;
+        }
+        if !found_qparam {
+            if let Some(qparam) = input.fallback_qparam.clone() {
+                ph_meta.set_both_qparams(qparam);
+                changed += 1;
+            }
+        }
+    }
+
+    changed
+}
+
+fn find_ir_boundary_contract_for_region(region_name: &str) -> Option<(IrCfBoundaryContract, bool)> {
+    STASHED_IR.with(|stash| {
+        let stash = stash.borrow();
+        let mut contracts = Vec::new();
+        let mut while_body_regions = BTreeSet::new();
+
+        if let Some((parent_ir, _)) = &stash.parent {
+            collect_ir_boundary_contracts_for_graph(
+                parent_ir,
+                None,
+                &mut contracts,
+                &mut while_body_regions,
+            );
+        }
+        for (region, (ir, _)) in stash.submodules.iter() {
+            collect_ir_boundary_contracts_for_graph(
+                ir,
+                Some(region.as_str()),
+                &mut contracts,
+                &mut while_body_regions,
+            );
+        }
+
+        contracts
+            .into_iter()
+            .find(|contract| contract.region == region_name)
+            .map(|contract| {
+                let is_while_body = while_body_regions.contains(region_name);
+                (contract, is_while_body)
+            })
+    })
+}
+
+fn apply_pre_submodule_qparam_propagation_ir(
+    region_name: Option<&str>,
+    graph: &mut fx_ir::IrGraph,
+) -> u32 {
+    let Some(region_name) = region_name else {
+        return 0;
+    };
+    let Some((contract, is_while_body)) = find_ir_boundary_contract_for_region(region_name) else {
+        return 0;
+    };
+
+    let mut changed = apply_ir_qparam_contract_to_submodule(graph, &contract);
+    if is_while_body {
+        changed += fx_control_flow_metadata::stamp_while_body_output_qparams_ir(graph) as u32;
+    }
+    changed
+}
+
 fn rewrite_output_dequantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
     let mut rewritten = 0u32;
     let ids: Vec<fx_ir::NodeId> = (0..graph.nodes.len()).collect();
@@ -1361,17 +1451,21 @@ fn run_fx_submodule_passes(
 ) -> PyResult<bool> {
     if std::env::var("ARM_CF_IR").as_deref() != Ok("0") {
         let pipeline = fx_pipeline::build_ir_while_submodule_pipeline();
-        let (modified, ir, effects) = fx_ir::run_hybrid_pipeline_ext(
+        let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
+        let propagation_changed =
+            apply_pre_submodule_qparam_propagation_ir(region_name.as_deref(), &mut initial_ir);
+        let (modified, ir, effects) = fx_ir::run_hybrid_pipeline_ext_with_initial_ir(
             graph_module.py(),
             graph_module,
             exported_program,
             &pipeline,
-            false,
+            true,
+            Some(initial_ir),
         )?;
         if cf_boundary_ir_enabled() {
             stash_submodule_ir(region_name, ir.map(|g| (g, effects)));
         }
-        return Ok(modified);
+        return Ok(modified || propagation_changed > 0);
     }
     let ep = exported_program.map(|e| e.clone().unbind());
     let gm = fx_graph::FxGraphModule::new(graph_module);
@@ -1389,17 +1483,21 @@ fn run_fx_cond_passes(
 ) -> PyResult<bool> {
     if std::env::var("ARM_CF_IR").as_deref() != Ok("0") {
         let pipeline = fx_pipeline::build_ir_cond_submodule_pipeline();
-        let (modified, ir, effects) = fx_ir::run_hybrid_pipeline_ext(
+        let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
+        let propagation_changed =
+            apply_pre_submodule_qparam_propagation_ir(region_name.as_deref(), &mut initial_ir);
+        let (modified, ir, effects) = fx_ir::run_hybrid_pipeline_ext_with_initial_ir(
             graph_module.py(),
             graph_module,
             exported_program,
             &pipeline,
-            false,
+            true,
+            Some(initial_ir),
         )?;
         if cf_boundary_ir_enabled() {
             stash_submodule_ir(region_name, ir.map(|g| (g, effects)));
         }
-        return Ok(modified);
+        return Ok(modified || propagation_changed > 0);
     }
     let ep = exported_program.map(|e| e.clone().unbind());
     let gm = fx_graph::FxGraphModule::new(graph_module);

@@ -2467,11 +2467,22 @@ pub fn run_hybrid_pipeline_ext<'py>(
     steps: &[PipelineStep],
     allow_flush_skip: bool,
 ) -> PyResult<(bool, Option<IrGraph>, FxEpEffectBatch)> {
+    run_hybrid_pipeline_ext_with_initial_ir(py, gm, exported_program, steps, allow_flush_skip, None)
+}
+
+pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
+    py: Python<'py>,
+    gm: &Bound<'py, PyAny>,
+    exported_program: Option<&Bound<'py, PyAny>>,
+    steps: &[PipelineStep],
+    allow_flush_skip: bool,
+    initial_ir: Option<IrGraph>,
+) -> PyResult<(bool, Option<IrGraph>, FxEpEffectBatch)> {
     use crate::runner_logging::{log_pass_result, log_pass_start};
 
-    let mut ir: Option<IrGraph> = None;
+    let mut ir = initial_ir;
     let mut any_modified = false;
-    let mut ir_dirty = false; // tracks if the IrGraph has unflushed changes
+    let mut ir_dirty = ir.is_some(); // tracks if the IrGraph has unflushed changes
     let mut pending_effects = FxEpEffectBatch::default();
 
     for (i, step) in steps.iter().enumerate() {
@@ -2525,23 +2536,11 @@ pub fn run_hybrid_pipeline_ext<'py>(
     let stashed_effects = pending_effects.clone();
 
     // Final flush of the IrGraph back to Python. In the from-IR default path the
-    // flushed Python graph is no longer read for serialization (the converter
-    // sources the main graph from the stashed IrGraph), so for non-control-flow
-    // graphs the flush -- including the expensive whole-graph write_back -- is
-    // skipped entirely. Validated at full battery parity. Control-flow graphs
-    // still flush because their submodules are ingested from the Python graph.
-    // ARM_SERIALIZE_FROM_IR=0 / ARM_FROM_IR_SKIP_INGEST=0 restore the flush.
+    // flushed Python graph is no longer read for serialization, so the expensive
+    // whole-graph write_back is skipped entirely.
     let from_ir_default = std::env::var("ARM_SERIALIZE_FROM_IR").as_deref() != Ok("0")
         && std::env::var("ARM_FROM_IR_SKIP_INGEST").as_deref() != Ok("0");
-    let has_control_flow = ir
-        .as_ref()
-        .map(|g| {
-            g.nodes
-                .iter()
-                .any(|n| n.alive && (n.target.contains("while_loop") || n.target.contains("cond")))
-        })
-        .unwrap_or(false);
-    let skip_flush = allow_flush_skip && from_ir_default && !has_control_flow;
+    let skip_flush = allow_flush_skip && from_ir_default;
     if ir_dirty && !skip_flush {
         if let Some(ref graph) = ir {
             flush_ir_to_python(graph, py, gm, exported_program, &mut pending_effects)?;
