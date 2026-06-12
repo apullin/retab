@@ -2509,8 +2509,25 @@ pub fn run_hybrid_pipeline<'py>(
     // graph (the IrGraph is pre-effects; flush applies them to the Python EP).
     let stashed_effects = pending_effects.clone();
 
-    // Final flush if IrGraph has unflushed changes
-    if ir_dirty {
+    // Final flush of the IrGraph back to Python. In the from-IR default path the
+    // flushed Python graph is no longer read for serialization (the converter
+    // sources the main graph from the stashed IrGraph), so for non-control-flow
+    // graphs the flush -- including the expensive whole-graph write_back -- is
+    // skipped entirely. Validated at full battery parity. Control-flow graphs
+    // still flush because their submodules are ingested from the Python graph.
+    // ARM_SERIALIZE_FROM_IR=0 / ARM_FROM_IR_SKIP_INGEST=0 restore the flush.
+    let from_ir_default = std::env::var("ARM_SERIALIZE_FROM_IR").as_deref() != Ok("0")
+        && std::env::var("ARM_FROM_IR_SKIP_INGEST").as_deref() != Ok("0");
+    let has_control_flow = ir
+        .as_ref()
+        .map(|g| {
+            g.nodes
+                .iter()
+                .any(|n| n.alive && (n.target.contains("while_loop") || n.target.contains("cond")))
+        })
+        .unwrap_or(false);
+    let skip_flush = from_ir_default && !has_control_flow;
+    if ir_dirty && !skip_flush {
         if let Some(ref graph) = ir {
             flush_ir_to_python(graph, py, gm, exported_program, &mut pending_effects)?;
         }
