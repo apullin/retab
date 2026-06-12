@@ -264,13 +264,92 @@ pub fn apply_effects(graph: &mut Graph, store: &mut TensorStore, effects: &FxEpE
                     applied = true;
                 }
             }
+            FxEpEffect::InsertPrecomputedTableOp(e) => {
+                applied |= apply_precomputed_table(graph, store, &name_map, e);
+            }
             _ => {}
         }
     }
     if applied {
         remove_dead_constants(graph);
+        graph.order = topo_order(graph);
         graph.rebuild_user_lists();
     }
+}
+
+/// Replace a unary math node (e.g. `tan`, `sigmoid`) with a TOSA TABLE op fed by
+/// the precomputed table constant. Mirrors the Python `_apply_table_op` for the
+/// precomputed path. INT8 table -> INT8 output; INT16 -> INT32 output with a
+/// trailing rescale of 2^rescale_lshift.
+fn apply_precomputed_table(
+    graph: &mut Graph,
+    store: &mut TensorStore,
+    name_map: &HashMap<String, NodeId>,
+    e: &crate::fx_ep_effects::FxInsertPrecomputedTableOpEffect,
+) -> bool {
+    let Some(&nid) = name_map.get(&e.node_name) else {
+        return false;
+    };
+    let (input_arg, out_shape, dim_order) = {
+        let Some(n) = graph.nodes.get(nid) else {
+            return false;
+        };
+        let Some(input_arg) = n.args.first().cloned() else {
+            return false;
+        };
+        (
+            input_arg,
+            n.meta.val,
+            n.meta.tosa_dim_order.clone(),
+        )
+    };
+
+    // Table constant node.
+    let table_name = format!("{}_table", e.node_name);
+    store.insert(
+        table_name.clone(),
+        crate::store::TensorData {
+            data: e.data.clone(),
+            shape: e.shape.clone(),
+            dtype: e.table_dtype,
+        },
+    );
+    let table_meta = NodeMeta::new(TensorInfo::new(&e.shape, e.table_dtype));
+    let table_node = Node {
+        op: OpType::Placeholder,
+        target: OpTarget::Other(table_name.clone()),
+        args: SmallVec::new(),
+        kwargs: Vec::new(),
+        meta: table_meta,
+        users: SmallVec::new(),
+        name: table_name.clone(),
+    };
+    let table_nid = graph.nodes.insert(table_node);
+    graph.order.push(table_nid);
+    graph.node_names.push((table_nid, table_name));
+
+    // INT8 TABLE returns INT8; INT16 TABLE returns INT32.
+    let table_out_dtype = if e.input.dtype == DType::Int16 {
+        DType::Int32
+    } else {
+        e.input.dtype
+    };
+    let mut table_val = out_shape;
+    table_val.dtype = table_out_dtype;
+
+    let mut table_args: SmallVec<[Arg; 4]> = SmallVec::new();
+    table_args.push(input_arg);
+    table_args.push(Arg::Node(table_nid));
+    if let Some(n) = graph.nodes.get_mut(nid) {
+        n.target = OpTarget::TosaTable;
+        n.args = table_args;
+        n.meta.val = table_val;
+        n.meta.tosa_dim_order = dim_order;
+    }
+    // NOTE: INT16 tables also need a trailing rescale of 2^rescale_lshift; added
+    // when the INT16/a16w8 surface is brought up.
+    let _ = e.rescale_lshift;
+    true
 }
 
 /// Replace a computed node with its precomputed constant: data -> store, node
