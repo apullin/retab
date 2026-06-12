@@ -2,7 +2,6 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Instant;
 
 use crate::graph::ir::{Arg, DType, NodeId};
 use crate::graph::Graph;
@@ -91,8 +90,6 @@ mod serialize;
 mod store;
 mod tensor_data;
 
-type GraphHierarchy = Vec<(String, Graph)>;
-
 fn profile_ingest_serialize_enabled() -> bool {
     std::env::var_os("RETAB_PROFILE_INGEST_SERIALIZE").is_some()
 }
@@ -148,10 +145,8 @@ pub(crate) fn fold_fallback_log(msg: &str) {
 }
 
 thread_local! {
-    /// Stash for the final post-pipeline IrGraph + EP-effects, set by
-    /// `run_fx_passes` and consumed by serialization under ARM_SERIALIZE_FROM_IR.
-    /// Lets the IrGraph survive between the two separate Python->Rust calls of
-    /// the active path without re-reading the Python graph.
+    /// Stash for the final post-pipeline IrGraph + EP-effects, set by the pass
+    /// entry points and consumed by serialization without re-reading the Python graph.
     static STASHED_IR: std::cell::RefCell<StashedPipelineHierarchy> =
         std::cell::RefCell::new(StashedPipelineHierarchy::default());
 }
@@ -173,16 +168,8 @@ fn stash_submodule_ir(region_name: Option<String>, stashed: Option<StashedPipeli
     });
 }
 
-pub(crate) fn take_stashed_ir() -> Option<StashedPipeline> {
-    STASHED_IR.with(|s| s.borrow_mut().parent.take())
-}
-
 fn take_stashed_hierarchy() -> StashedPipelineHierarchy {
     STASHED_IR.with(|s| std::mem::take(&mut *s.borrow_mut()))
-}
-
-fn cf_boundary_ir_enabled() -> bool {
-    std::env::var("ARM_CF_BOUNDARY_IR").ok().as_deref() != Some("0")
 }
 
 fn run_full_fx_pipeline(
@@ -196,20 +183,6 @@ fn run_full_fx_pipeline(
     let pipeline = fx_pipeline::build_hybrid_pipeline(exported_program_for_pipeline);
     let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
     fx_ir::run_hybrid_pipeline(py, graph_module, exported_program, &pipeline)
-}
-
-fn ingest_graph_hierarchy(
-    graph_module: &Bound<'_, PyAny>,
-    state_dict: &Bound<'_, PyDict>,
-    graph_signature: &Bound<'_, PyAny>,
-    exported_program: Option<&Bound<'_, PyAny>>,
-) -> PyResult<(GraphHierarchy, TensorStore)> {
-    ingest::fx_bridge::ingest_fx_graph_hierarchy(
-        graph_module,
-        state_dict,
-        graph_signature,
-        exported_program,
-    )
 }
 
 fn rebuild_graph_users(graphs: &mut [(String, Graph)]) {
@@ -1171,7 +1144,7 @@ fn append_control_flow_subgraphs_from_ir(
         }
         let Some((ir, effects)) = submodules.get(&region) else {
             return Err(PyRuntimeError::new_err(format!(
-                "ARM_CF_BOUNDARY_IR missing stashed IrGraph for control-flow region '{region}'"
+                "missing stashed IrGraph for control-flow region '{region}'"
             )));
         };
 
@@ -1206,147 +1179,52 @@ fn append_control_flow_subgraphs_from_ir(
     Ok(())
 }
 
-fn lower_fx_graph_to_tosa_pybytes(
-    py: Python<'_>,
-    graph_module: &Bound<'_, PyAny>,
-    state_dict: &Bound<'_, PyDict>,
-    graph_signature: &Bound<'_, PyAny>,
-    exported_program: Option<PyObject>,
-) -> PyResult<Py<PyBytes>> {
-    let pipeline_exported_program = exported_program.as_ref().map(|ep| ep.clone_ref(py));
-    let _ = run_full_fx_pipeline(graph_module, pipeline_exported_program)?;
-    let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
-    let (graphs, store) =
-        ingest_graph_hierarchy(graph_module, state_dict, graph_signature, exported_program)?;
-    Ok(serialize::serialize_graphs_to_tosa_py(py, &graphs, &store))
-}
-
 fn ingest_and_serialize_tosa_pybytes(
     py: Python<'_>,
-    graph_module: &Bound<'_, PyAny>,
-    state_dict: &Bound<'_, PyDict>,
-    graph_signature: &Bound<'_, PyAny>,
-    exported_program: Option<PyObject>,
+    _graph_module: &Bound<'_, PyAny>,
+    _state_dict: &Bound<'_, PyDict>,
+    _graph_signature: &Bound<'_, PyAny>,
+    _exported_program: Option<PyObject>,
 ) -> PyResult<Py<PyBytes>> {
     let profile = profile_ingest_serialize_enabled();
-    // Phase 4d: the IrGraph-sourced serialization is now the default. Set
-    // ARM_SERIALIZE_FROM_IR=0 to fall back to the legacy Python re-ingest, and
-    // ARM_FROM_IR_SKIP_INGEST=0 to keep the re-ingest while still converting the
-    // main graph from IR (the hybrid bring-up path).
-    let from_ir = std::env::var("ARM_SERIALIZE_FROM_IR").ok().as_deref() != Some("0");
-    let skip_ingest =
-        from_ir && std::env::var("ARM_FROM_IR_SKIP_INGEST").ok().as_deref() != Some("0");
-    let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
-    let ingest_start = Instant::now();
+    let mut stashed = take_stashed_hierarchy();
+    let Some((mut ir, effects)) = stashed.parent.take() else {
+        return Err(PyRuntimeError::new_err(
+            "missing stashed IrGraph for serialization",
+        ));
+    };
 
-    // Round-trip elimination (Phase 4): for graphs without control flow, build the
-    // serialize Graph AND TensorStore entirely from the stashed post-pipeline
-    // IrGraph -- no Python re-ingest. Requires that every constant be materializable
-    // in Rust (no FuseConstantNode / zero-input Python fallbacks); the battery is
-    // the completeness check. Control-flow graphs still take the ingest path below
-    // (their submodules + cf boundary phases are not yet captured in the IrGraph).
-    if from_ir && skip_ingest {
-        let mut stashed = take_stashed_hierarchy();
-        if let Some((mut ir, effects)) = stashed.parent.take() {
-            // Build the main graph + its constants entirely from the stashed
-            // IrGraph -- no Python re-ingest of the main graph. For control-flow
-            // graphs the submodule hierarchy is still ingested from Python and
-            // appended; only the parent avoids the round-trip (the submodule
-            // FxPass pipelines are not yet ported to IR).
-            if ir_has_control_flow(&ir) && cf_boundary_ir_enabled() {
-                let changed =
-                    apply_ir_control_flow_boundary_contracts(&mut ir, &mut stashed.submodules);
-                if std::env::var("ARM_FROM_IR_DEBUG").ok().as_deref() == Some("1") && changed > 0 {
-                    eprintln!(
-                        "[RETAB][cf-boundary-ir] applied {changed} parent/submodule boundary metadata update(s)"
-                    );
-                }
-            }
-            let mut store = crate::store::TensorStore::new();
-            let mut converted = ingest::from_ir::graph_from_ir(&ir, &mut store);
-            ingest::from_ir::apply_effects(&mut converted, &mut store, &effects);
-            ingest::fx_bridge::finalize_converted_graph(&mut converted);
-            if std::env::var("ARM_FROM_IR_DEBUG").ok().as_deref() == Some("1") {
-                ingest::from_ir::debug_dump(&converted, "MAIN FROM IR");
-            }
-            ingest::from_ir::report_missing_consts(&converted, &store);
-            let mut graphs = vec![(String::from("main"), converted)];
-            if ir_has_control_flow(&ir) {
-                if cf_boundary_ir_enabled() {
-                    append_control_flow_subgraphs_from_ir(
-                        &mut graphs,
-                        &mut store,
-                        &ir,
-                        &stashed.submodules,
-                    )?;
-                } else {
-                    ingest::fx_bridge::collect_control_flow_subgraphs(
-                        graph_module,
-                        state_dict,
-                        graph_signature,
-                        exported_program,
-                        &mut graphs,
-                        &mut store,
-                        None,
-                    )?;
-                }
-            }
-            rebuild_graph_users(&mut graphs);
-            let py_bytes = serialize::serialize_graphs_to_tosa_py(py, &graphs, &store);
-            if profile {
-                eprintln!(
-                    "[RETAB][ingest_and_serialize] FROM_IR no-ingest path: graphs={} nodes={} tensors={}",
-                    graphs.len(),
-                    graphs.iter().map(|(_, g)| g.order.len()).sum::<usize>(),
-                    store.buffers.len(),
-                );
-            }
-            return Ok(py_bytes);
+    let has_control_flow = ir_has_control_flow(&ir);
+    if has_control_flow {
+        let changed = apply_ir_control_flow_boundary_contracts(&mut ir, &mut stashed.submodules);
+        if std::env::var("ARM_FROM_IR_DEBUG").ok().as_deref() == Some("1") && changed > 0 {
+            eprintln!(
+                "[RETAB][cf-boundary-ir] applied {changed} parent/submodule boundary metadata update(s)"
+            );
         }
     }
 
-    let (mut graphs, mut store) =
-        ingest_graph_hierarchy(graph_module, state_dict, graph_signature, exported_program)?;
-    if from_ir {
-        // Round-trip elimination bring-up: replace the main graph (built by the
-        // Python re-ingest above) with one converted directly from the stashed
-        // post-pipeline IrGraph. Submodules + TensorStore still come from ingest
-        // (Phases 2-3). Non-control-flow only -- the cf_* boundary phases run on
-        // the Python graph after the pipeline, so the stashed IrGraph is the
-        // final state only for graphs without control flow.
-        if let Some((ir, effects)) = take_stashed_ir() {
-            let mut converted = ingest::from_ir::graph_from_ir(&ir, &mut store);
-            ingest::from_ir::apply_effects(&mut converted, &mut store, &effects);
-            ingest::fx_bridge::finalize_converted_graph(&mut converted);
-            if std::env::var("ARM_FROM_IR_DEBUG").ok().as_deref() == Some("1") {
-                if let Some((_, ing)) = graphs.first() {
-                    ingest::from_ir::debug_dump(ing, "INGESTED");
-                }
-                ingest::from_ir::debug_dump(&converted, "CONVERTED");
-            }
-            if let Some(first) = graphs.first_mut() {
-                first.1 = converted;
-            }
-        }
-    } else {
-        let _ = take_stashed_ir();
+    let mut store = crate::store::TensorStore::new();
+    let mut converted = ingest::from_ir::graph_from_ir(&ir, &mut store);
+    ingest::from_ir::apply_effects(&mut converted, &mut store, &effects);
+    ingest::fx_bridge::finalize_converted_graph(&mut converted);
+    if std::env::var("ARM_FROM_IR_DEBUG").ok().as_deref() == Some("1") {
+        ingest::from_ir::debug_dump(&converted, "MAIN FROM IR");
     }
-    let ingest_elapsed = ingest_start.elapsed();
-    let rebuild_start = Instant::now();
+    ingest::from_ir::report_missing_consts(&converted, &store);
+
+    let mut graphs = vec![(String::from("main"), converted)];
+    if has_control_flow {
+        append_control_flow_subgraphs_from_ir(&mut graphs, &mut store, &ir, &stashed.submodules)?;
+    }
+
     rebuild_graph_users(&mut graphs);
-    let rebuild_elapsed = rebuild_start.elapsed();
-    let serialize_start = Instant::now();
     let py_bytes = serialize::serialize_graphs_to_tosa_py(py, &graphs, &store);
-    let serialize_elapsed = serialize_start.elapsed();
     if profile {
-        let node_count: usize = graphs.iter().map(|(_, graph)| graph.order.len()).sum();
         eprintln!(
-            "[RETAB][ingest_and_serialize] ingest={:.3}s rebuild={:.3}s serialize={:.3}s graphs={} nodes={} tensors={}",
-            ingest_elapsed.as_secs_f64(),
-            rebuild_elapsed.as_secs_f64(),
-            serialize_elapsed.as_secs_f64(),
+            "[RETAB][ingest_and_serialize] from-ir graphs={} nodes={} tensors={}",
             graphs.len(),
-            node_count,
+            graphs.iter().map(|(_, g)| g.order.len()).sum::<usize>(),
             store.buffers.len(),
         );
     }
@@ -1373,24 +1251,6 @@ fn fold_qdq_fx(
     run_single_fx_pass(
         graph_module,
         fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(clone_bound_pyobject(exported_program)),
-    )
-}
-
-/// Run the Rust IR fold_qdq pass directly on a Python FX GraphModule.
-///
-/// This is a diagnostic comparison entry point for the in-progress IR port.
-/// It uses the tensor-aware IR import path when `exported_program` is supplied.
-#[pyfunction]
-#[pyo3(signature = (graph_module, exported_program=None))]
-fn fold_qdq_ir_fx(
-    graph_module: &Bound<'_, PyAny>,
-    exported_program: Option<&Bound<'_, PyAny>>,
-) -> PyResult<bool> {
-    fx_ir::run_ir_passes_with_tensors(
-        graph_module.py(),
-        graph_module,
-        exported_program,
-        &[&crate::fx_fold_qdq_ir::IrFoldQdqPass],
     )
 }
 
@@ -1449,28 +1309,20 @@ fn run_fx_submodule_passes(
     exported_program: Option<&Bound<'_, PyAny>>,
     region_name: Option<String>,
 ) -> PyResult<bool> {
-    if std::env::var("ARM_CF_IR").as_deref() != Ok("0") {
-        let pipeline = fx_pipeline::build_ir_while_submodule_pipeline();
-        let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
-        let propagation_changed =
-            apply_pre_submodule_qparam_propagation_ir(region_name.as_deref(), &mut initial_ir);
-        let (modified, ir, effects) = fx_ir::run_hybrid_pipeline_ext_with_initial_ir(
-            graph_module.py(),
-            graph_module,
-            exported_program,
-            &pipeline,
-            true,
-            Some(initial_ir),
-        )?;
-        if cf_boundary_ir_enabled() {
-            stash_submodule_ir(region_name, ir.map(|g| (g, effects)));
-        }
-        return Ok(modified || propagation_changed > 0);
-    }
-    let ep = exported_program.map(|e| e.clone().unbind());
-    let gm = fx_graph::FxGraphModule::new(graph_module);
-    let pipeline = fx_pipeline::build_fx_while_submodule_pipeline(ep);
-    fx_pass::run_boxed_fx_passes(&gm, &pipeline)
+    let pipeline = fx_pipeline::build_ir_while_submodule_pipeline();
+    let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
+    let propagation_changed =
+        apply_pre_submodule_qparam_propagation_ir(region_name.as_deref(), &mut initial_ir);
+    let (modified, ir, effects) = fx_ir::run_hybrid_pipeline_ext_with_initial_ir(
+        graph_module.py(),
+        graph_module,
+        exported_program,
+        &pipeline,
+        true,
+        Some(initial_ir),
+    )?;
+    stash_submodule_ir(region_name, ir.map(|g| (g, effects)));
+    Ok(modified || propagation_changed > 0)
 }
 
 /// Extended submodule passes for cond branches (includes fold_qdq).
@@ -1481,56 +1333,20 @@ fn run_fx_cond_passes(
     exported_program: Option<&Bound<'_, PyAny>>,
     region_name: Option<String>,
 ) -> PyResult<bool> {
-    if std::env::var("ARM_CF_IR").as_deref() != Ok("0") {
-        let pipeline = fx_pipeline::build_ir_cond_submodule_pipeline();
-        let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
-        let propagation_changed =
-            apply_pre_submodule_qparam_propagation_ir(region_name.as_deref(), &mut initial_ir);
-        let (modified, ir, effects) = fx_ir::run_hybrid_pipeline_ext_with_initial_ir(
-            graph_module.py(),
-            graph_module,
-            exported_program,
-            &pipeline,
-            true,
-            Some(initial_ir),
-        )?;
-        if cf_boundary_ir_enabled() {
-            stash_submodule_ir(region_name, ir.map(|g| (g, effects)));
-        }
-        return Ok(modified || propagation_changed > 0);
-    }
-    let ep = exported_program.map(|e| e.clone().unbind());
-    let gm = fx_graph::FxGraphModule::new(graph_module);
-    let pipeline = fx_pipeline::build_fx_cond_submodule_pipeline(ep);
-    fx_pass::run_boxed_fx_passes(&gm, &pipeline)
-}
-
-/// Hybrid pipeline: FX-direct passes (correct graph mutations via Python FX)
-/// followed by Rust ingestion + TOSA serialization (fast).
-///
-/// This is the recommended entry point. It combines:
-/// 1. FX-direct passes on the live Python graph (correct by construction)
-/// 2. Ingest the post-pass graph into Rust IR (one-time, no mutations needed)
-/// 3. Serialize to TOSA flatbuffer in Rust (fast)
-///
-/// The optional `exported_program` is forwarded to Python's
-/// `FoldAndAnnotateQParamsPass` for resolving parameter tensor nodes.
-#[pyfunction]
-#[pyo3(signature = (graph_module, state_dict, graph_signature, exported_program=None))]
-fn lower_to_tosa_v2(
-    py: Python<'_>,
-    graph_module: &Bound<'_, PyAny>,
-    state_dict: &Bound<'_, PyDict>,
-    graph_signature: &Bound<'_, PyAny>,
-    exported_program: Option<&Bound<'_, PyAny>>,
-) -> PyResult<Py<PyBytes>> {
-    lower_fx_graph_to_tosa_pybytes(
-        py,
+    let pipeline = fx_pipeline::build_ir_cond_submodule_pipeline();
+    let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
+    let propagation_changed =
+        apply_pre_submodule_qparam_propagation_ir(region_name.as_deref(), &mut initial_ir);
+    let (modified, ir, effects) = fx_ir::run_hybrid_pipeline_ext_with_initial_ir(
+        graph_module.py(),
         graph_module,
-        state_dict,
-        graph_signature,
-        clone_bound_pyobject(exported_program),
-    )
+        exported_program,
+        &pipeline,
+        true,
+        Some(initial_ir),
+    )?;
+    stash_submodule_ir(region_name, ir.map(|g| (g, effects)));
+    Ok(modified || propagation_changed > 0)
 }
 
 /// Ingest-and-serialize only: convert an already-lowered FX graph to TOSA
@@ -1566,62 +1382,17 @@ fn stamp_control_flow_structural(graph_module: &Bound<'_, PyAny>) -> PyResult<bo
     fx_pass::FxPass::run(&fx_control_flow_metadata::FxControlFlowStructuralPass, &gm)
 }
 
-/// Propagate parent post-pass qparams to submodule placeholders. Run after parent passes.
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn propagate_control_flow_qparams(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let gm = fx_graph::FxGraphModule::new(graph_module);
-    fx_pass::FxPass::run(
-        &fx_control_flow_metadata::FxControlFlowQParamPropagationPass,
-        &gm,
-    )
-}
-
-/// Insert boundary RESCALE pairs for control-flow submodules.
-/// Ports upstream InsertControlFlowRescalesPass.
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn cf_insert_boundary_rescales(graph_module: &Bound<'_, PyAny>) -> PyResult<u32> {
-    let py = graph_module.py();
-    fx_control_flow_metadata::insert_cf_boundary_rescales(py, graph_module)
-}
-
-/// Run the full output normalize phase in one Rust call.
-#[pyfunction]
-#[pyo3(signature = (graph_module))]
-fn cf_run_output_normalize_phase(graph_module: &Bound<'_, PyAny>) -> PyResult<()> {
-    let py = graph_module.py();
-    fx_control_flow_metadata::run_output_normalize_phase(py, graph_module)
-}
-
-/// Run the full post-Rust boundary phase in one Rust call.
-#[pyfunction]
-#[pyo3(signature = (graph_module, tosa_spec))]
-fn cf_run_boundary_phase(
-    graph_module: &Bound<'_, PyAny>,
-    tosa_spec: &Bound<'_, PyAny>,
-) -> PyResult<()> {
-    let py = graph_module.py();
-    fx_control_flow_metadata::run_boundary_phase(py, graph_module, tosa_spec)
-}
-
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Core pipeline
-    m.add_function(wrap_pyfunction!(lower_to_tosa_v2, m)?)?;
     m.add_function(wrap_pyfunction!(ingest_and_serialize, m)?)?;
     m.add_function(wrap_pyfunction!(run_fx_passes, m)?)?;
     m.add_function(wrap_pyfunction!(run_fx_submodule_passes, m)?)?;
     m.add_function(wrap_pyfunction!(run_fx_cond_passes, m)?)?;
     // Control-flow pipeline (new ordering)
     m.add_function(wrap_pyfunction!(stamp_control_flow_structural, m)?)?;
-    m.add_function(wrap_pyfunction!(propagate_control_flow_qparams, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_insert_boundary_rescales, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_run_boundary_phase, m)?)?;
-    m.add_function(wrap_pyfunction!(cf_run_output_normalize_phase, m)?)?;
     // Utilities
     m.add_function(wrap_pyfunction!(fold_qdq_fx, m)?)?;
-    m.add_function(wrap_pyfunction!(fold_qdq_ir_fx, m)?)?;
     m.add_function(wrap_pyfunction!(insert_rescale_fx, m)?)?;
     m.add_function(wrap_pyfunction!(fx_graph_summary, m)?)?;
     Ok(())

@@ -2457,9 +2457,7 @@ pub fn run_hybrid_pipeline<'py>(
     run_hybrid_pipeline_ext(py, gm, exported_program, steps, true)
 }
 
-/// `run_hybrid_pipeline` with control over the non-control-flow flush skip.
-/// Control-flow submodules pass `allow_flush_skip = false` so they always flush
-/// back to Python (their transformed graph is still ingested from the gm).
+/// `run_hybrid_pipeline` with control over whether the final Python FX write-back is skipped.
 pub fn run_hybrid_pipeline_ext<'py>(
     py: Python<'py>,
     gm: &Bound<'py, PyAny>,
@@ -2530,17 +2528,13 @@ pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
         }
     }
 
-    // Capture the EP-effects before flush consumes them, so the
-    // ARM_SERIALIZE_FROM_IR path can apply them Rust-natively to the converted
-    // graph (the IrGraph is pre-effects; flush applies them to the Python EP).
+    // Capture the EP-effects before any legacy flush could consume them, so
+    // serialization can apply them Rust-natively to the converted graph.
     let stashed_effects = pending_effects.clone();
 
-    // Final flush of the IrGraph back to Python. In the from-IR default path the
-    // flushed Python graph is no longer read for serialization, so the expensive
-    // whole-graph write_back is skipped entirely.
-    let from_ir_default = std::env::var("ARM_SERIALIZE_FROM_IR").as_deref() != Ok("0")
-        && std::env::var("ARM_FROM_IR_SKIP_INGEST").as_deref() != Ok("0");
-    let skip_flush = allow_flush_skip && from_ir_default;
+    // Final flush is retained only for legacy callers that explicitly disallow
+    // skipping it; the production preprocess path serializes from the returned IR.
+    let skip_flush = allow_flush_skip;
     if ir_dirty && !skip_flush {
         if let Some(ref graph) = ir {
             flush_ir_to_python(graph, py, gm, exported_program, &mut pending_effects)?;
