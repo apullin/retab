@@ -281,15 +281,44 @@ fn plan_precomputed_int16_table(
     node: &IrNode,
     spec: &TableOpSpec,
 ) -> Option<FxInsertPrecomputedTableOpEffect> {
-    let input = table_quant_spec(node.meta.input_qparam()?)?;
-    let output = table_quant_spec(node.meta.output_qparam()?)?;
+    let dbg = std::env::var("ARM_TABLE_DEBUG").is_ok();
+    let input = match node.meta.input_qparam().and_then(table_quant_spec) {
+        Some(s) => s,
+        None => {
+            if dbg {
+                eprintln!("[T16-bail] {} no/invalid input_qparam", spec.kind);
+            }
+            return None;
+        }
+    };
+    let output = match node.meta.output_qparam().and_then(table_quant_spec) {
+        Some(s) => s,
+        None => {
+            if dbg {
+                eprintln!("[T16-bail] {} no/invalid output_qparam", spec.kind);
+            }
+            return None;
+        }
+    };
     if input.dtype != DType::Int16 {
+        if dbg {
+            eprintln!("[T16-bail] {} input.dtype={:?}", spec.kind, input.dtype);
+        }
         return None;
     }
     if !matches!(output.dtype, DType::Int16 | DType::Int32) {
+        if dbg {
+            eprintln!("[T16-bail] {} output.dtype={:?}", spec.kind, output.dtype);
+        }
         return None;
     }
-    if input.qmax - input.qmin != 65_535 {
+    // Full INT16 range: 65535 (asymmetric, qmin=-32768) or 65534 (symmetric,
+    // qmin=-32767, used by 16a8w). The 513-entry / 128-stride table covers both
+    // (the clamp handles the top edge).
+    if !matches!(input.qmax - input.qmin, 65_534 | 65_535) {
+        if dbg {
+            eprintln!("[T16-bail] {} qrange={}", spec.kind, input.qmax - input.qmin);
+        }
         return None;
     }
 
@@ -310,6 +339,13 @@ fn plan_precomputed_int16_table(
         .unwrap_or(0);
     let rshift = ceil_log2_u64(max_abs) + 1 - 16;
     if rshift < 0 {
+        if std::env::var("ARM_TABLE_DEBUG").is_ok() {
+            eprintln!(
+                "[TABLE16-None] kind={} max_abs={} rshift={} in(scale={},zp={},qmin={},qmax={}) out(scale={},zp={},dtype={:?})",
+                spec.kind, max_abs, rshift, input.scale, input.zp, input.qmin, input.qmax,
+                output.scale, output.zp, output.dtype,
+            );
+        }
         return None;
     }
     let rescale_lshift = rshift - 7;
