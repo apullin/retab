@@ -106,10 +106,28 @@ fn run_single_fx_pass<P: fx_pass::FxPass>(
     fx_pass::FxPass::run(&pass, &gm)
 }
 
+thread_local! {
+    /// Stash for the final post-pipeline IrGraph, set by `run_fx_passes` and
+    /// consumed by serialization under ARM_SERIALIZE_FROM_IR (round-trip
+    /// elimination bring-up). Lets the IrGraph survive between the two separate
+    /// Python->Rust calls of the active path without re-reading the Python graph.
+    static STASHED_IR: std::cell::RefCell<Option<fx_ir::IrGraph>> =
+        std::cell::RefCell::new(None);
+}
+
+fn stash_ir(ir: Option<fx_ir::IrGraph>) {
+    STASHED_IR.with(|s| *s.borrow_mut() = ir);
+}
+
+#[allow(dead_code)]
+pub(crate) fn take_stashed_ir() -> Option<fx_ir::IrGraph> {
+    STASHED_IR.with(|s| s.borrow_mut().take())
+}
+
 fn run_full_fx_pipeline(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<PyObject>,
-) -> PyResult<bool> {
+) -> PyResult<(bool, Option<fx_ir::IrGraph>)> {
     // Use hybrid pipeline: persistent IrGraph for Rust passes,
     // flush/reimport only at FxPass boundaries.
     let py = graph_module.py();
@@ -147,7 +165,7 @@ fn lower_fx_graph_to_tosa_pybytes(
     exported_program: Option<PyObject>,
 ) -> PyResult<Py<PyBytes>> {
     let pipeline_exported_program = exported_program.as_ref().map(|ep| ep.clone_ref(py));
-    run_full_fx_pipeline(graph_module, pipeline_exported_program)?;
+    let _ = run_full_fx_pipeline(graph_module, pipeline_exported_program)?;
     let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
     let (graphs, store) =
         ingest_graph_hierarchy(graph_module, state_dict, graph_signature, exported_program)?;
@@ -268,7 +286,10 @@ fn run_fx_passes(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<bool> {
-    run_full_fx_pipeline(graph_module, clone_bound_pyobject(exported_program))
+    let (modified, ir) =
+        run_full_fx_pipeline(graph_module, clone_bound_pyobject(exported_program))?;
+    stash_ir(ir);
+    Ok(modified)
 }
 
 /// Run a safe subset of FX passes on a control-flow submodule graph.

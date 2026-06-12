@@ -2435,7 +2435,7 @@ pub fn run_hybrid_pipeline<'py>(
     gm: &Bound<'py, PyAny>,
     exported_program: Option<&Bound<'py, PyAny>>,
     steps: &[PipelineStep],
-) -> PyResult<bool> {
+) -> PyResult<(bool, Option<IrGraph>)> {
     use crate::runner_logging::{log_pass_result, log_pass_start};
 
     let mut ir: Option<IrGraph> = None;
@@ -2499,5 +2499,5 @@ pub fn run_hybrid_pipeline<'py>(
     // (ingest::fx_bridge::fixup_quantized_dtypes, iterated to convergence), so
     // there is no longer a Python bulk-refresh call here.
 
-    Ok(any_modified)
+    Ok((any_modified, ir))
 }
