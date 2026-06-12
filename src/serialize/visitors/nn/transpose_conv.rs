@@ -140,15 +140,19 @@ pub(in crate::serialize::visitors) fn emit_transpose_conv2d(ctx: &EmitContext) -
     let output_shape = apply_tosa_dim_order(node, raw_i32_shape(node));
     let acc_type = conv_accumulator_dtype(node);
     let output_dtype = if node.meta.input_qparams.is_empty()
-        && matches!(node_output_dtype(node), DType::Fp32 | DType::Fp16 | DType::Bf16)
-    {
+        && matches!(
+            node_output_dtype(node),
+            DType::Fp32 | DType::Fp16 | DType::Bf16
+        ) {
         node_output_dtype(node)
     } else {
         acc_type
     };
-    result
-        .tensors
-        .push(make_empty_tensor(node.name.clone(), output_shape, output_dtype));
+    result.tensors.push(make_empty_tensor(
+        node.name.clone(),
+        output_shape,
+        output_dtype,
+    ));
 
     let out_pad = transpose_conv_out_pad(node);
     let stride = transpose_conv_stride(node);

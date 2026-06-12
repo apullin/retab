@@ -141,11 +141,17 @@ mod tests {
             other => panic!("expected List arg, got {other:?}"),
         }
         assert_eq!(
-            graph.nodes[id].kwargs.get("max_value").and_then(IrArg::as_float),
+            graph.nodes[id]
+                .kwargs
+                .get("max_value")
+                .and_then(IrArg::as_float),
             Some(255.0)
         );
         assert_eq!(
-            graph.nodes[id].kwargs.get("min_value").and_then(IrArg::as_float),
+            graph.nodes[id]
+                .kwargs
+                .get("min_value")
+                .and_then(IrArg::as_float),
             Some(-255.0)
         );
     }

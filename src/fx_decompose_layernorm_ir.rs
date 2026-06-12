@@ -2,9 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::runner_logging::log_line;
 
 fn is_layer_norm(target: &str) -> bool {

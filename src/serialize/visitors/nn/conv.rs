@@ -137,7 +137,10 @@ impl ParsedConvSpec {
     fn prepare_inputs(&self, result: &mut EmitResult, graph: &Graph, node: &Node) -> Vec<String> {
         let mut input_names = self.input_names.clone();
         if matches!(input_names.len(), 2 | 4) {
-            input_names.insert(2, push_zero_bias_tensor(result, node, synthetic_bias_dtype(node, self.acc_type)));
+            input_names.insert(
+                2,
+                push_zero_bias_tensor(result, node, synthetic_bias_dtype(node, self.acc_type)),
+            );
         }
         if input_names.len() >= 5 {
             return input_names;

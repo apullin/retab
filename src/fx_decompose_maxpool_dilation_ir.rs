@@ -1,8 +1,6 @@
 //! Pure Rust IrPass: dilated max_pool2d → pad + space-to-batch + pool + batch-to-space + slice.
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
 
 fn pair_arg(args: &[IrArg], idx: usize, default: (i64, i64)) -> (i64, i64) {

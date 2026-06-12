@@ -210,8 +210,19 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
         let (left, right) = (chunk[0], chunk[1]);
         let dim = rank - 1 - pair_idx;
         let (nid, nshape) = pad_along_dim(
-            graph, id, &orig_meta, &dtype, &node_name, &mut counter, cur_id, &cur_shape, dim,
-            left, right, &mode, &mut prev,
+            graph,
+            id,
+            &orig_meta,
+            &dtype,
+            &node_name,
+            &mut counter,
+            cur_id,
+            &cur_shape,
+            dim,
+            left,
+            right,
+            &mode,
+            &mut prev,
         );
         cur_id = nid;
         cur_shape = nshape;

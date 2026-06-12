@@ -754,14 +754,7 @@ fn append_normalized_output_names(
             return;
         };
 
-        push_output_layout_transpose(
-            tensors,
-            operators,
-            output_names,
-            node,
-            raw_shape,
-            perms,
-        );
+        push_output_layout_transpose(tensors, operators, output_names, node, raw_shape, perms);
     };
 
     match arg {
@@ -1085,11 +1078,7 @@ pub fn serialize_graphs_to_tosa_py(
     graphs: &[(String, Graph)],
     store: &TensorStore,
 ) -> Py<PyBytes> {
-    let tensor_bytes: usize = store
-        .buffers
-        .values()
-        .map(|t| t.data.len() + 256)
-        .sum();
+    let tensor_bytes: usize = store.buffers.values().map(|t| t.data.len() + 256).sum();
     let node_count: usize = graphs.iter().map(|(_, g)| g.order.len()).sum();
     let estimated = tensor_bytes + node_count * 512 + 1024 * 1024;
     visitors::shape_utils::clear_shape_cache();

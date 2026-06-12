@@ -1,8 +1,8 @@
 //! Pure Rust IrPass: unfold_copy → GATHER-based sliding window.
 
 use crate::fx_ir::{
-    dtype_kwarg, i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass, NodeId,
-    NodeMeta, NodeOp,
+    dtype_kwarg, i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass, NodeId, NodeMeta,
+    NodeOp,
 };
 use crate::runner_logging::log_line;
 
@@ -142,8 +142,7 @@ impl IrPass for IrDecomposeUnfoldPass {
                 step_meta,
             );
 
-            let idx_scaled_meta =
-                meta_plain(&orig_meta, vec![u], "torch.int32").without_qparams();
+            let idx_scaled_meta = meta_plain(&orig_meta, vec![u], "torch.int32").without_qparams();
             let idx_scaled = graph.add_anchored_call_function(
                 id,
                 format!("{}_us", name),
@@ -152,8 +151,7 @@ impl IrPass for IrDecomposeUnfoldPass {
                 idx_scaled_meta,
             );
 
-            let idx_u2d_meta =
-                meta_plain(&orig_meta, vec![u, 1], "torch.int32").without_qparams();
+            let idx_u2d_meta = meta_plain(&orig_meta, vec![u, 1], "torch.int32").without_qparams();
             let idx_u2d = graph.add_anchored_call_function(
                 id,
                 format!("{}_u2d", name),
@@ -183,8 +181,7 @@ impl IrPass for IrDecomposeUnfoldPass {
                 idx_c2d_meta,
             );
 
-            let idx2d_meta =
-                meta_plain(&orig_meta, vec![u, size], "torch.int32").without_qparams();
+            let idx2d_meta = meta_plain(&orig_meta, vec![u, size], "torch.int32").without_qparams();
             let idx2d = graph.add_anchored_call_function(
                 id,
                 format!("{}_i2d", name),
@@ -212,8 +209,7 @@ impl IrPass for IrDecomposeUnfoldPass {
                 idx_unsq_meta,
             );
 
-            let idx_exp_meta =
-                meta_plain(&orig_meta, vec![p, uc], "torch.int32").without_qparams();
+            let idx_exp_meta = meta_plain(&orig_meta, vec![p, uc], "torch.int32").without_qparams();
             let idx_exp = graph.add_anchored_call_function(
                 id,
                 format!("{}_ie", name),

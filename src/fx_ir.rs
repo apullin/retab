@@ -445,13 +445,7 @@ impl IrGraph {
         args: Vec<IrArg>,
         meta: NodeMeta,
     ) -> NodeId {
-        self.add_node(
-            NodeOp::CallFunction,
-            name.into(),
-            target.into(),
-            args,
-            meta,
-        )
+        self.add_node(NodeOp::CallFunction, name.into(), target.into(), args, meta)
     }
 
     pub fn add_call_function_with_val(

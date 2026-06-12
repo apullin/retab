@@ -55,8 +55,7 @@ impl WhileLoopSpec {
             .iter()
             .filter_map(|id| resolve_input_name_from_node_id(graph, *id))
             .collect();
-        let mut output_tensors = cond_output_tensors(graph, node);
-        extend_missing_while_outputs(&mut output_tensors, graph, ctx.store, node, &loop_input_ids);
+        let output_tensors = while_output_tensors(graph, ctx.store, node, &loop_input_ids);
 
         Self {
             input_names,
@@ -76,7 +75,16 @@ fn resolve_region_name(graph: &Graph, arg: Option<&Arg>) -> String {
 }
 
 fn cond_output_tensors(graph: &Graph, node: &Node) -> Vec<TosaTensor> {
-    let mut outputs: Vec<(i64, TosaTensor)> = Vec::new();
+    let outputs = indexed_output_tensors(graph, node);
+    if outputs.is_empty() {
+        vec![make_output_tensor(node)]
+    } else {
+        outputs.into_iter().map(|(_, tensor)| tensor).collect()
+    }
+}
+
+fn indexed_output_tensors(graph: &Graph, node: &Node) -> Vec<(usize, TosaTensor)> {
+    let mut outputs: Vec<(usize, TosaTensor)> = Vec::new();
     for user_id in &node.users {
         let Some(user) = graph.node(*user_id) else {
             continue;
@@ -85,18 +93,14 @@ fn cond_output_tensors(graph: &Graph, node: &Node) -> Vec<TosaTensor> {
             continue;
         }
         let output_idx = match user.args.get(1) {
-            Some(Arg::Int(idx)) => *idx,
+            Some(Arg::Int(idx)) if *idx >= 0 => *idx as usize,
             _ => 0,
         };
         outputs.push((output_idx, make_output_tensor(user)));
     }
 
     outputs.sort_by_key(|(idx, _)| *idx);
-    if outputs.is_empty() {
-        vec![make_output_tensor(node)]
-    } else {
-        outputs.into_iter().map(|(_, tensor)| tensor).collect()
-    }
+    outputs
 }
 
 fn carried_input_ids(node: &Node) -> Vec<NodeId> {
@@ -115,32 +119,53 @@ fn additional_input_ids(node: &Node) -> Vec<NodeId> {
     }
 }
 
-fn extend_missing_while_outputs(
-    output_tensors: &mut Vec<TosaTensor>,
+fn while_output_tensors(
     graph: &Graph,
     store: &TensorStore,
     node: &Node,
     carried_input_ids: &[NodeId],
-) {
-    if output_tensors.len() >= carried_input_ids.len() {
-        return;
+) -> Vec<TosaTensor> {
+    let indexed_outputs = indexed_output_tensors(graph, node);
+    let slot_count = carried_input_ids.len().max(
+        indexed_outputs
+            .iter()
+            .map(|(idx, _)| idx + 1)
+            .max()
+            .unwrap_or(0),
+    );
+    if slot_count == 0 {
+        return vec![make_output_tensor(node)];
     }
 
-    for (idx, input_id) in carried_input_ids
-        .iter()
-        .enumerate()
-        .skip(output_tensors.len())
-    {
-        let Some(input_node) = graph.node(*input_id) else {
-            continue;
-        };
-        let name = format!("{}_dummy_{}", node.name, idx);
-        output_tensors.push(TosaTensor::new(
-            &name,
-            actual_tensor_shape(graph, store, input_node),
-            actual_tensor_dtype(graph, input_node),
-        ));
+    let mut slots: Vec<Option<TosaTensor>> =
+        std::iter::repeat_with(|| None).take(slot_count).collect();
+    for (idx, tensor) in indexed_outputs {
+        if idx < slots.len() {
+            slots[idx] = Some(tensor);
+        }
     }
+
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(idx, tensor)| {
+            if let Some(tensor) = tensor {
+                return tensor;
+            }
+            let Some(input_node) = carried_input_ids
+                .get(idx)
+                .and_then(|input_id| graph.node(*input_id))
+            else {
+                return make_output_tensor(node);
+            };
+            let name = format!("{}_dummy_{}", node.name, idx);
+            TosaTensor::new(
+                &name,
+                actual_tensor_shape(graph, store, input_node),
+                actual_tensor_dtype(graph, input_node),
+            )
+        })
+        .collect()
 }
 
 pub(super) fn emit_cond_if(ctx: &EmitContext) -> EmitResult {

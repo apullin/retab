@@ -6,7 +6,9 @@
 //!   3. Conv2d with 1x1 kernel (aten.convolution.default)
 //!   4. Reshape output back:  [N, Co, 1, 1] -> [..., Co]
 
-use crate::fx_ir::{i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{
+    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp,
+};
 use crate::runner_logging::log_line;
 use std::collections::HashMap;
 

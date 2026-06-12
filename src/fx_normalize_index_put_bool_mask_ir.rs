@@ -97,7 +97,11 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     if data_shape.iter().product::<i64>() != 1 {
         return false;
     }
-    let data_dtype = graph.nodes[data].meta.val_dtype().unwrap_or("torch.int8").to_string();
+    let data_dtype = graph.nodes[data]
+        .meta
+        .val_dtype()
+        .unwrap_or("torch.int8")
+        .to_string();
     let dest_rank = dest_shape.len();
 
     let mut prev: Option<NodeId> = None;
@@ -273,8 +277,7 @@ mod tests {
     #[test]
     fn rewrites_bool_mask_scalar_to_where() {
         // dest [4,3], same-rank bool mask, scalar data [1] -> data reshaped to [1,1].
-        let (mut graph, dest, mask, ip) =
-            graph_for(&[4, 3], &[4, 3], &[1], "torch.bool", false);
+        let (mut graph, dest, mask, ip) = graph_for(&[4, 3], &[4, 3], &[1], "torch.bool", false);
         assert!(IrNormalizeIndexPutBoolMaskPass.run(&mut graph));
         assert!(!graph.nodes[ip].alive);
 
@@ -293,10 +296,15 @@ mod tests {
     #[test]
     fn pads_lower_rank_mask() {
         // dest [4,3], mask [4] (rank 1) -> reshaped to [4,1].
-        let (mut graph, _dest, _mask, _ip) =
-            graph_for(&[4, 3], &[4], &[1], "torch.bool", false);
+        let (mut graph, _dest, _mask, _ip) = graph_for(&[4, 3], &[4], &[1], "torch.bool", false);
         assert!(IrNormalizeIndexPutBoolMaskPass.run(&mut graph));
-        assert_eq!(named(&graph, "idxput_mask_reshape").meta.val_shape().unwrap(), &[4, 1]);
+        assert_eq!(
+            named(&graph, "idxput_mask_reshape")
+                .meta
+                .val_shape()
+                .unwrap(),
+            &[4, 1]
+        );
     }
 
     #[test]

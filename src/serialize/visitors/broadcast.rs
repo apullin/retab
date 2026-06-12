@@ -298,7 +298,9 @@ pub(super) fn broadcast_transpose_for_binary_inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::ir::{DType as IrDType, NodeMeta as GraphNodeMeta, OpTarget, OpType, TensorInfo};
+    use crate::graph::ir::{
+        DType as IrDType, NodeMeta as GraphNodeMeta, OpTarget, OpType, TensorInfo,
+    };
     use crate::graph::Graph;
     use smallvec::{smallvec, SmallVec};
 

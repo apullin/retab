@@ -47,12 +47,7 @@ impl IrPass for IrInsertCarriedOutputRescalePass {
     fn run(&self, graph: &mut IrGraph) -> bool {
         let ph_qps: Vec<Option<QParam>> = graph
             .placeholders()
-            .map(|ph| {
-                ph.meta
-                    .output_qparam()
-                    .or(ph.meta.input_qparam())
-                    .cloned()
-            })
+            .map(|ph| ph.meta.output_qparam().or(ph.meta.input_qparam()).cloned())
             .collect();
         if ph_qps.iter().all(Option::is_none) {
             return false;
@@ -852,7 +847,7 @@ fn prune_duplicate_terminal_rescales_ir(graph: &mut IrGraph) -> u32 {
 }
 
 /// Pure Rust: walk producer chain to find effective qparam.
-fn extract_effective_qparam_ir(graph: &IrGraph, start: NodeId) -> Option<QParam> {
+pub(crate) fn extract_effective_qparam_ir(graph: &IrGraph, start: NodeId) -> Option<QParam> {
     let mut current = start;
     let mut seen = std::collections::HashSet::new();
     loop {
@@ -879,7 +874,7 @@ fn extract_effective_qparam_ir(graph: &IrGraph, start: NodeId) -> Option<QParam>
 }
 
 /// Pure Rust: derive qparam from RESCALE args.
-fn reverse_engineer_rescale_ir(graph: &IrGraph, node: &IrNode) -> Option<QParam> {
+pub(crate) fn reverse_engineer_rescale_ir(graph: &IrGraph, node: &IrNode) -> Option<QParam> {
     if !node.is_rescale() || node.args.len() < 5 {
         return None;
     }
@@ -1780,10 +1775,7 @@ fn remove_noop_passthroughs_ir(graph: &mut IrGraph) -> u32 {
     rewritten
 }
 
-fn run_output_normalize_ir_batch<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-) -> PyResult<u32> {
+fn run_output_normalize_ir_batch<'py>(py: Python<'py>, gm: &Bound<'py, PyAny>) -> PyResult<u32> {
     let mut rewritten: u32 = 0;
     let mut modules: Vec<Bound<'py, PyAny>> = vec![gm.clone()];
     for (_name, submodule, _cf_node) in &get_cf_submodules(py, gm)? {

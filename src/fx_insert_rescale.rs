@@ -296,7 +296,6 @@ impl<'py, 'gm> RescaleOps<'py, 'gm> {
         }
         Ok(())
     }
-
 }
 
 /// Where output rescale qparams should come from.

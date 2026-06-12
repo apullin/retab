@@ -20,9 +20,9 @@ use crate::fx_insert_rescale;
 use crate::fx_insert_table_ops;
 use crate::fx_memory_format;
 use crate::fx_pass::FxPass;
+use crate::fx_remove_noop_ir;
 use crate::fx_replace_inf_values_ir;
 use crate::fx_replace_scalar_with_tensor_ir;
-use crate::fx_remove_noop_ir;
 use crate::fx_rewrite_matmul;
 use crate::fx_rewrite_squeeze_ir;
 
@@ -266,15 +266,21 @@ pub fn build_fx_while_submodule_pipeline(
 fn rescale_steps() -> Vec<crate::fx_ir::PipelineStep> {
     use crate::fx_ir::PipelineStep::Ir;
     vec![
-        Ir(Box::new(crate::fx_insert_qdq_rescale_ir::IrInsertQdqRescalePass)),
-        Ir(Box::new(crate::fx_insert_int32_rescale_ir::IrInsertInt32RescalePass)),
+        Ir(Box::new(
+            crate::fx_insert_qdq_rescale_ir::IrInsertQdqRescalePass,
+        )),
+        Ir(Box::new(
+            crate::fx_insert_int32_rescale_ir::IrInsertInt32RescalePass,
+        )),
     ]
 }
 
 fn submodule_fold_and_fuse() -> Vec<crate::fx_ir::PipelineStep> {
     use crate::fx_ir::PipelineStep::{Ir, IrEp};
     vec![
-        IrEp(Box::new(crate::fx_insert_table_ops_ir::IrInsertTableOpsEpPass)),
+        IrEp(Box::new(
+            crate::fx_insert_table_ops_ir::IrInsertTableOpsEpPass,
+        )),
         IrEp(Box::new(
             crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEpPass,
         )),

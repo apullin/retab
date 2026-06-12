@@ -32,7 +32,10 @@ fn add_permute(
     prev: &mut Option<NodeId>,
 ) -> (NodeId, Vec<i64>) {
     let out_shape = permute_shape(input_shape, order);
-    let dtype = input_meta.val_dtype().unwrap_or("torch.float32").to_string();
+    let dtype = input_meta
+        .val_dtype()
+        .unwrap_or("torch.float32")
+        .to_string();
     let meta = input_meta.cloned_with_val(out_shape.clone(), &dtype);
     let order_arg = IrArg::List(order.iter().map(|&d| IrArg::Int(d as i64)).collect());
     let n = graph.add_node(
@@ -134,8 +137,14 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     // permute destination
     let (dest_use, _dest_use_shape) = if needs_dest_permute {
         add_permute(
-            graph, id, dest_id, &dest_shape, &dest_meta, &destination_dim_order,
-            format!("{}_destperm", name), &mut prev,
+            graph,
+            id,
+            dest_id,
+            &dest_shape,
+            &dest_meta,
+            &destination_dim_order,
+            format!("{}_destperm", name),
+            &mut prev,
         )
     } else {
         (dest_id, dest_shape.clone())
@@ -169,8 +178,14 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
             (data_id, data_shape.clone())
         };
         let (p, _) = add_permute(
-            graph, id, reshaped_id, &reshaped_shape, &data_meta, &ddo,
-            format!("{}_dataperm", name), &mut prev,
+            graph,
+            id,
+            reshaped_id,
+            &reshaped_shape,
+            &data_meta,
+            &ddo,
+            format!("{}_dataperm", name),
+            &mut prev,
         );
         p
     } else {
@@ -218,8 +233,14 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
             inv[orig_dim] = new_dim;
         }
         let (p, _) = add_permute(
-            graph, id, new_put, &put_shape, &orig_meta, &inv,
-            format!("{}_invperm", name), &mut prev,
+            graph,
+            id,
+            new_put,
+            &put_shape,
+            &orig_meta,
+            &inv,
+            format!("{}_invperm", name),
+            &mut prev,
         );
         p
     } else {
@@ -273,30 +294,64 @@ mod tests {
 
     /// Build index_put(dest, indices, data) where indices is given as a list of
     /// Option<NodeId> (None -> IrArg::None).
-    fn build(dest_shape: &[i64], indices: &[Option<&[i64]>], data_shape: &[i64]) -> (IrGraph, NodeId) {
+    fn build(
+        dest_shape: &[i64],
+        indices: &[Option<&[i64]>],
+        data_shape: &[i64],
+    ) -> (IrGraph, NodeId) {
         let mut g = IrGraph::empty();
-        let dest = g.add_node(NodeOp::Placeholder, "dest".into(), "dest".into(), vec![], meta(dest_shape));
+        let dest = g.add_node(
+            NodeOp::Placeholder,
+            "dest".into(),
+            "dest".into(),
+            vec![],
+            meta(dest_shape),
+        );
         let mut idx_args = vec![];
         for (i, idx) in indices.iter().enumerate() {
             match idx {
                 Some(s) => {
-                    let n = g.add_node(NodeOp::Placeholder, format!("idx{i}"), format!("idx{i}"), vec![], meta(s));
+                    let n = g.add_node(
+                        NodeOp::Placeholder,
+                        format!("idx{i}"),
+                        format!("idx{i}"),
+                        vec![],
+                        meta(s),
+                    );
                     idx_args.push(IrArg::Node(n));
                 }
                 None => idx_args.push(IrArg::None),
             }
         }
-        let data = g.add_node(NodeOp::Placeholder, "data".into(), "data".into(), vec![], meta(data_shape));
-        let put = g.add_node(
-            NodeOp::CallFunction, "ip".into(), "aten.index_put.default".into(),
-            vec![IrArg::Node(dest), IrArg::List(idx_args), IrArg::Node(data)], meta(dest_shape),
+        let data = g.add_node(
+            NodeOp::Placeholder,
+            "data".into(),
+            "data".into(),
+            vec![],
+            meta(data_shape),
         );
-        g.add_node(NodeOp::Output, "output".into(), "output".into(), vec![IrArg::Node(put)], NodeMeta::default());
+        let put = g.add_node(
+            NodeOp::CallFunction,
+            "ip".into(),
+            "aten.index_put.default".into(),
+            vec![IrArg::Node(dest), IrArg::List(idx_args), IrArg::Node(data)],
+            meta(dest_shape),
+        );
+        g.add_node(
+            NodeOp::Output,
+            "output".into(),
+            "output".into(),
+            vec![IrArg::Node(put)],
+            NodeMeta::default(),
+        );
         (g, put)
     }
 
     fn live_with_target<'a>(g: &'a IrGraph, t: &str) -> Vec<&'a crate::fx_ir::IrNode> {
-        g.nodes.iter().filter(|n| n.alive && n.target == t).collect()
+        g.nodes
+            .iter()
+            .filter(|n| n.alive && n.target == t)
+            .collect()
     }
 
     #[test]

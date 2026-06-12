@@ -1,8 +1,6 @@
 //! Pure Rust IrPass: strided slice_copy (step > 1) → unit slice + pad + view + slice + view.
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
 
 fn fixup_start(start: Option<i64>, dim_size: i64) -> i64 {

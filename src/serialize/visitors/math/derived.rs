@@ -83,7 +83,14 @@ fn emit_div_with_rounding(ctx: &EmitContext, rounding_mode: Option<&str>) -> Emi
         Some("floor") | Some("trunc") => format!("{}_div", node.name),
         _ => output_name,
     };
-    emit_div_quotient(graph, store, node, &spec, &mut result, quotient_name.clone());
+    emit_div_quotient(
+        graph,
+        store,
+        node,
+        &spec,
+        &mut result,
+        quotient_name.clone(),
+    );
 
     match rounding_mode {
         None => {}
@@ -107,9 +114,11 @@ fn emit_div_with_rounding(ctx: &EmitContext, rounding_mode: Option<&str>) -> Emi
             }
 
             let is_neg_name = format!("{}_is_neg", node.name);
-            result
-                .tensors
-                .push(temp_tensor(is_neg_name.clone(), spec.output_shape.clone(), DType::Bool));
+            result.tensors.push(temp_tensor(
+                is_neg_name.clone(),
+                spec.output_shape.clone(),
+                DType::Bool,
+            ));
             result.push_op(
                 Op::Greater,
                 Attribute::Greater(GreaterAttribute {}),
@@ -119,7 +128,11 @@ fn emit_div_with_rounding(ctx: &EmitContext, rounding_mode: Option<&str>) -> Emi
 
             let ceil_name = format!("{}_ceil", node.name);
             result.push_output_op(
-                temp_tensor(ceil_name.clone(), spec.output_shape.clone(), spec.base_dtype),
+                temp_tensor(
+                    ceil_name.clone(),
+                    spec.output_shape.clone(),
+                    spec.base_dtype,
+                ),
                 Op::Ceil,
                 Attribute::Ceil(CeilAttribute {}),
                 vec![quotient_name.clone()],
@@ -127,7 +140,11 @@ fn emit_div_with_rounding(ctx: &EmitContext, rounding_mode: Option<&str>) -> Emi
 
             let floor_name = format!("{}_floor", node.name);
             result.push_output_op(
-                temp_tensor(floor_name.clone(), spec.output_shape.clone(), spec.base_dtype),
+                temp_tensor(
+                    floor_name.clone(),
+                    spec.output_shape.clone(),
+                    spec.base_dtype,
+                ),
                 Op::Floor,
                 Attribute::Floor(FloorAttribute {}),
                 vec![quotient_name],
@@ -348,10 +365,21 @@ pub(in crate::serialize::visitors) fn emit_aten_remainder(ctx: &EmitContext) -> 
         });
 
     let floor_div_name = format!("{}_floor_div", node.name);
-    emit_div_quotient(graph, store, node, &spec, &mut result, floor_div_name.clone());
+    emit_div_quotient(
+        graph,
+        store,
+        node,
+        &spec,
+        &mut result,
+        floor_div_name.clone(),
+    );
     let floor_name = format!("{}_floor", node.name);
     result.push_output_op(
-        temp_tensor(floor_name.clone(), spec.output_shape.clone(), spec.base_dtype),
+        temp_tensor(
+            floor_name.clone(),
+            spec.output_shape.clone(),
+            spec.base_dtype,
+        ),
         Op::Floor,
         Attribute::Floor(FloorAttribute {}),
         vec![floor_div_name],
@@ -360,7 +388,11 @@ pub(in crate::serialize::visitors) fn emit_aten_remainder(ctx: &EmitContext) -> 
     let prod_name = format!("{}_product", node.name);
     let shift_name = push_shift_const(&mut result, &prod_name);
     result.push_output_op(
-        temp_tensor(prod_name.clone(), spec.output_shape.clone(), spec.base_dtype),
+        temp_tensor(
+            prod_name.clone(),
+            spec.output_shape.clone(),
+            spec.base_dtype,
+        ),
         Op::Mul,
         Attribute::Mul(MulAttribute { shift: 0 }),
         vec![floor_name, spec.rhs.clone(), shift_name],

@@ -1,9 +1,7 @@
 //! Pure Rust IrPass: slice_scatter -> slice+cat (step == 1)
 //! or arange+permute+index_put (step > 1).
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
 
 fn permuted_shape(shape: &[i64], perm: &[i64]) -> Vec<i64> {
@@ -85,7 +83,8 @@ impl IrPass for IrDecomposeSliceScatterPass {
                 continue;
             }
 
-            let Some(input_shape) = graph.nodes[input_id].meta.val_shape().map(|s| s.to_vec()) else {
+            let Some(input_shape) = graph.nodes[input_id].meta.val_shape().map(|s| s.to_vec())
+            else {
                 continue;
             };
             let Some(src_shape) = graph.nodes[src_id].meta.val_shape().map(|s| s.to_vec()) else {
@@ -194,9 +193,10 @@ impl IrPass for IrDecomposeSliceScatterPass {
                 let mut src_cur = src_id;
                 let current_input_shape = if dim_norm != 0 {
                     let perm: Vec<i64> = std::iter::once(dim_norm as i64)
-                        .chain((0..input_shape.len()).filter_map(|idx| {
-                            (idx != dim_norm).then_some(idx as i64)
-                        }))
+                        .chain(
+                            (0..input_shape.len())
+                                .filter_map(|idx| (idx != dim_norm).then_some(idx as i64)),
+                        )
                         .collect();
                     let mut inv_perm = vec![0i64; input_shape.len()];
                     for (idx, &axis) in perm.iter().enumerate() {

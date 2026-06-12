@@ -22,7 +22,11 @@ fn mm_output_shape(mat1_shape: &[i64], mat2_shape: &[i64]) -> Vec<i64> {
 }
 
 fn arg_scalar(arg: Option<&IrArg>) -> Option<f64> {
-    arg.and_then(|value| value.as_float().or_else(|| value.as_int().map(|i| i as f64)))
+    arg.and_then(|value| {
+        value
+            .as_float()
+            .or_else(|| value.as_int().map(|i| i as f64))
+    })
 }
 
 pub struct IrDecomposeAddmmPass;

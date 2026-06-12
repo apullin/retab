@@ -819,8 +819,8 @@ pub(super) fn push_reshape_with_shape_for_node(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::Graph;
     use crate::graph::ir::{Arg, DType, NodeMeta, OpTarget, OpType, TensorInfo};
+    use crate::graph::Graph;
     use crate::store::TensorStore;
     use smallvec::smallvec;
 

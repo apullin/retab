@@ -2,9 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
 
 fn is_var(target: &str) -> bool {

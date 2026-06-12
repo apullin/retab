@@ -131,7 +131,9 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                     &[n, c, h, pad_w],
                     0.0,
                     &dtype,
-                    x_meta.cloned_with_val(vec![n, c, h, pad_w], &dtype).without_qparams(),
+                    x_meta
+                        .cloned_with_val(vec![n, c, h, pad_w], &dtype)
+                        .without_qparams(),
                 );
                 let mut cat_inputs = vec![IrArg::Node(pre), IrArg::Node(pooled_in)];
                 if post_pad_w > 0 {

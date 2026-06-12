@@ -1,8 +1,6 @@
 //! Pure Rust IrPass: adaptive_avg_pool2d → slice + avg_pool2d + cat.
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeAdaptiveAvgPoolPass;

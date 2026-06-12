@@ -356,7 +356,11 @@ fn plan_precomputed_int16_table(
     // (the clamp handles the top edge).
     if !matches!(input.qmax - input.qmin, 65_534 | 65_535) {
         if dbg {
-            eprintln!("[T16-bail] {} qrange={}", spec.kind, input.qmax - input.qmin);
+            eprintln!(
+                "[T16-bail] {} qrange={}",
+                spec.kind,
+                input.qmax - input.qmin
+            );
         }
         return None;
     }
@@ -771,7 +775,13 @@ mod tests {
             kind: "pow",
             scalar_arg: Some(3.0),
         };
-        assert_eq!(eval_precomputable_table(spec.kind, spec.scalar_arg, -11.0), Some(-1331.0));
-        assert_eq!(eval_precomputable_table(spec.kind, spec.scalar_arg, -2.0), Some(-8.0));
+        assert_eq!(
+            eval_precomputable_table(spec.kind, spec.scalar_arg, -11.0),
+            Some(-1331.0)
+        );
+        assert_eq!(
+            eval_precomputable_table(spec.kind, spec.scalar_arg, -2.0),
+            Some(-8.0)
+        );
     }
 }

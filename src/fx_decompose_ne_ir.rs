@@ -67,9 +67,7 @@ impl IrPass for IrDecomposeNotEqualPass {
         }
 
         if modified {
-            log_line(format_args!(
-                "[IrDecomposeNotEqual] decomposed aten.ne ops"
-            ));
+            log_line(format_args!("[IrDecomposeNotEqual] decomposed aten.ne ops"));
         }
         modified
     }

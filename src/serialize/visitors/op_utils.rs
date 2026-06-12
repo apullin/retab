@@ -48,7 +48,8 @@ fn binary_output_shapes(graph: &Graph, store: &TensorStore, node: &Node) -> (Vec
         .into_iter()
         .reduce(|lhs, rhs| broadcast_two_shapes(&lhs, &rhs).unwrap_or(rhs))
         .unwrap_or_else(|| {
-            binary_input_broadcast_shape(graph, store, node).unwrap_or_else(|| logical_shape.clone())
+            binary_input_broadcast_shape(graph, store, node)
+                .unwrap_or_else(|| logical_shape.clone())
         });
     (logical_shape, emitted_shape)
 }

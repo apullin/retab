@@ -281,11 +281,19 @@ mod tests {
         let f = if exp == 0 {
             (mant as f32) * 2.0_f32.powi(-24)
         } else if exp == 0x1f {
-            if mant == 0 { f32::INFINITY } else { f32::NAN }
+            if mant == 0 {
+                f32::INFINITY
+            } else {
+                f32::NAN
+            }
         } else {
             (1.0 + (mant as f32) / 1024.0) * 2.0_f32.powi(exp as i32 - 15)
         };
-        if sign == 1 { -f } else { f }
+        if sign == 1 {
+            -f
+        } else {
+            f
+        }
     }
 
     #[test]

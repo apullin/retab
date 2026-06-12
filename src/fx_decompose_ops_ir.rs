@@ -112,7 +112,6 @@ impl ApproxCtx {
         self.full_shape(graph, suffix, value, &shape)
     }
 
-
     fn full_shape(&self, graph: &mut IrGraph, suffix: &str, value: f64, shape: &[i64]) -> NodeId {
         graph.add_anchored_full_float(
             self.anchor_id,
@@ -138,7 +137,6 @@ impl ApproxCtx {
         let shape = self.scalar_shape();
         self.tensor_shape(graph, suffix, target, args, &shape)
     }
-
 
     fn tensor_shape(
         &self,
@@ -180,13 +178,7 @@ impl ApproxCtx {
         )
     }
 
-    fn output(
-        &self,
-        graph: &mut IrGraph,
-        suffix: &str,
-        target: &str,
-        args: Vec<IrArg>,
-    ) -> NodeId {
+    fn output(&self, graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>) -> NodeId {
         graph.add_anchored_call_function(
             self.anchor_id,
             self.op_name(suffix),
@@ -211,7 +203,6 @@ impl ApproxCtx {
             self.tensor_meta(shape),
         )
     }
-
 
     fn reshape_shape(
         &self,
@@ -470,7 +461,6 @@ fn batch_norm_eps(node: &crate::fx_ir::IrNode) -> f64 {
         })
         .unwrap_or(1.0e-5)
 }
-
 
 /// Check if input is DQ and at least one user is Q (quantized envelope → skip atanh).
 fn has_quantized_envelope(graph: &IrGraph, id: NodeId) -> bool {
@@ -1763,9 +1753,19 @@ fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> 
     );
 
     let result = if log_output {
-        ctx.output(graph, "result", "aten.log.default", vec![IrArg::Node(softmax)])
+        ctx.output(
+            graph,
+            "result",
+            "aten.log.default",
+            vec![IrArg::Node(softmax)],
+        )
     } else {
-        ctx.output(graph, "result", "aten.clone.default", vec![IrArg::Node(softmax)])
+        ctx.output(
+            graph,
+            "result",
+            "aten.clone.default",
+            vec![IrArg::Node(softmax)],
+        )
     };
 
     graph.replace_and_erase(id, result);
@@ -1949,7 +1949,12 @@ fn decompose_sinh(graph: &mut IrGraph, id: NodeId) -> bool {
     };
 
     let half = ctx.full(graph, "half", 0.5);
-    let exp_pos = ctx.tensor(graph, "exp_pos", "aten.exp.default", vec![IrArg::Node(x_id)]);
+    let exp_pos = ctx.tensor(
+        graph,
+        "exp_pos",
+        "aten.exp.default",
+        vec![IrArg::Node(x_id)],
+    );
     let neg = ctx.tensor(graph, "neg", "aten.neg.default", vec![IrArg::Node(x_id)]);
     let exp_neg = ctx.tensor(graph, "exp_neg", "aten.exp.default", vec![IrArg::Node(neg)]);
     let diff = ctx.tensor(
@@ -1979,7 +1984,12 @@ fn decompose_cosh(graph: &mut IrGraph, id: NodeId) -> bool {
     };
 
     let half = ctx.full(graph, "half", 0.5);
-    let exp_pos = ctx.tensor(graph, "exp_pos", "aten.exp.default", vec![IrArg::Node(x_id)]);
+    let exp_pos = ctx.tensor(
+        graph,
+        "exp_pos",
+        "aten.exp.default",
+        vec![IrArg::Node(x_id)],
+    );
     let neg = ctx.tensor(graph, "neg", "aten.neg.default", vec![IrArg::Node(x_id)]);
     let exp_neg = ctx.tensor(graph, "exp_neg", "aten.exp.default", vec![IrArg::Node(neg)]);
     let sum = ctx.tensor(
@@ -2021,7 +2031,12 @@ fn decompose_asinh(graph: &mut IrGraph, id: NodeId) -> bool {
         "aten.add.Tensor",
         vec![IrArg::Node(square), IrArg::Node(one)],
     );
-    let sqrt = ctx.tensor(graph, "sqrt", "aten.sqrt.default", vec![IrArg::Node(radicand)]);
+    let sqrt = ctx.tensor(
+        graph,
+        "sqrt",
+        "aten.sqrt.default",
+        vec![IrArg::Node(radicand)],
+    );
     let add = ctx.tensor(
         graph,
         "sum",
@@ -2062,7 +2077,12 @@ fn decompose_acosh(graph: &mut IrGraph, id: NodeId) -> bool {
         "aten.mul.Tensor",
         vec![IrArg::Node(minus), IrArg::Node(plus)],
     );
-    let sqrt = ctx.tensor(graph, "sqrt", "aten.sqrt.default", vec![IrArg::Node(radicand)]);
+    let sqrt = ctx.tensor(
+        graph,
+        "sqrt",
+        "aten.sqrt.default",
+        vec![IrArg::Node(radicand)],
+    );
     let add = ctx.tensor(
         graph,
         "sum",
@@ -2275,7 +2295,12 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
             ],
         )
     } else {
-        ctx.output(graph, "result", "aten.clone.default", vec![IrArg::Node(asin)])
+        ctx.output(
+            graph,
+            "result",
+            "aten.clone.default",
+            vec![IrArg::Node(asin)],
+        )
     };
 
     graph.replace_and_erase(id, result);
@@ -2295,7 +2320,12 @@ fn decompose_elu(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let zero = ctx.full(graph, "zero", 0.0);
     let alpha_full = ctx.full(graph, "alpha", alpha);
-    let expm1 = ctx.tensor(graph, "expm1", "aten.expm1.default", vec![IrArg::Node(x_id)]);
+    let expm1 = ctx.tensor(
+        graph,
+        "expm1",
+        "aten.expm1.default",
+        vec![IrArg::Node(x_id)],
+    );
     let scaled = ctx.tensor(
         graph,
         "scaled",
@@ -2408,7 +2438,12 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 "aten.mul.Tensor",
                 vec![IrArg::Node(inner), IrArg::Node(sqrt_2_pi)],
             );
-            let tanh = ctx.tensor(graph, "tanh", "aten.tanh.default", vec![IrArg::Node(scaled)]);
+            let tanh = ctx.tensor(
+                graph,
+                "tanh",
+                "aten.tanh.default",
+                vec![IrArg::Node(scaled)],
+            );
             let plus_one = ctx.tensor(
                 graph,
                 "plus_one",
@@ -2492,12 +2527,7 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(x_lt0), IrArg::Node(neg_ones), IrArg::Node(one)],
     );
 
-    let a = ctx.tensor(
-        graph,
-        "abs",
-        "aten.abs.default",
-        vec![IrArg::Node(x_id)],
-    );
+    let a = ctx.tensor(graph, "abs", "aten.abs.default", vec![IrArg::Node(x_id)]);
 
     let abs_gt1 = ctx.bool(
         graph,
@@ -2668,12 +2698,7 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(a), IrArg::Node(refine_max_abs)],
     );
 
-    let erf_y = ctx.tensor(
-        graph,
-        "erf_y",
-        "aten.erf.default",
-        vec![IrArg::Node(y0)],
-    );
+    let erf_y = ctx.tensor(graph, "erf_y", "aten.erf.default", vec![IrArg::Node(y0)]);
     let err = ctx.tensor(
         graph,
         "err",
@@ -2861,9 +2886,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     );
 
     let weight_view = match weight_arg {
-        IrArg::Node(weight_id) => {
-            ctx.view_shape(graph, "weight_view", weight_id, &channel_shape)
-        }
+        IrArg::Node(weight_id) => ctx.view_shape(graph, "weight_view", weight_id, &channel_shape),
         IrArg::None => {
             let weight_full = ctx.full_shape(graph, "weight_full", 1.0, &[num_features]);
             ctx.view_shape(graph, "weight_view", weight_full, &channel_shape)
@@ -2879,9 +2902,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     );
 
     let bias_view = match bias_arg {
-        IrArg::Node(bias_id) => {
-            ctx.view_shape(graph, "bias_view", bias_id, &channel_shape)
-        }
+        IrArg::Node(bias_id) => ctx.view_shape(graph, "bias_view", bias_id, &channel_shape),
         IrArg::None => {
             let bias_full = ctx.full_shape(graph, "bias_full", 0.0, &[num_features]);
             ctx.view_shape(graph, "bias_view", bias_full, &channel_shape)
@@ -3102,8 +3123,13 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let weighted = match weight_arg {
         IrArg::Node(weight_id) => {
-            let weight_view =
-                ctx.reshape_shape(graph, "weight_view", reshape_target, weight_id, &affine_shape);
+            let weight_view = ctx.reshape_shape(
+                graph,
+                "weight_view",
+                reshape_target,
+                weight_id,
+                &affine_shape,
+            );
             ctx.tensor_shape(
                 graph,
                 "weighted",

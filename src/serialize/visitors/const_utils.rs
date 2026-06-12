@@ -80,7 +80,11 @@ fn encode_f16_bits(value: f32) -> u16 {
     let mant = bits & 0x007f_ffff;
 
     if exp == 0xff {
-        return if mant == 0 { sign | 0x7c00 } else { sign | 0x7e00 };
+        return if mant == 0 {
+            sign | 0x7c00
+        } else {
+            sign | 0x7e00
+        };
     }
 
     let exp16 = exp - 127 + 15;

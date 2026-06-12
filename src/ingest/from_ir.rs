@@ -21,7 +21,9 @@ use smallvec::SmallVec;
 use crate::fx_control_flow_metadata::{NodeOp, QParam};
 use crate::fx_ep_effects::{FxEpEffect, FxEpEffectBatch};
 use crate::fx_ir::{IrArg, IrGraph, MetaValue, NodeId as IrNodeId, NodeMeta as IrNodeMeta};
-use crate::graph::ir::{Arg, DType, Node, NodeId, NodeMeta, OpTarget, OpType, QuantArgs, TensorInfo};
+use crate::graph::ir::{
+    Arg, DType, Node, NodeId, NodeMeta, OpTarget, OpType, QuantArgs, TensorInfo,
+};
 use crate::graph::Graph;
 use crate::ingest::target_map::parse_op_target;
 use crate::store::TensorStore;
@@ -31,6 +33,21 @@ use crate::tensor_data::parse_torch_dtype;
 /// constant tensor data into `store`. Handles one flat graph; the control-flow
 /// submodule hierarchy is assembled by the caller (Phase 3).
 pub fn graph_from_ir(ir: &IrGraph, store: &mut TensorStore) -> Graph {
+    graph_from_ir_ext(ir, store, false)
+}
+
+/// Convert a control-flow region from IR while preserving unused runtime
+/// placeholders. A while-cond block may not read every loop-carried tensor, but
+/// its TOSA block signature still has to match the WHILE_LOOP input list.
+pub fn graph_from_ir_preserve_placeholders(ir: &IrGraph, store: &mut TensorStore) -> Graph {
+    graph_from_ir_ext(ir, store, true)
+}
+
+fn graph_from_ir_ext(
+    ir: &IrGraph,
+    store: &mut TensorStore,
+    preserve_dead_placeholders: bool,
+) -> Graph {
     // Node-ids referenced by any alive node. The EP-effect constant folding runs
     // at flush time on the Python graph and removes now-dead constant/param
     // placeholders (per-channel scale/zp, pre-fold weights) -- the IrGraph still
@@ -91,7 +108,9 @@ pub fn graph_from_ir(ir: &IrGraph, store: &mut TensorStore) -> Graph {
             continue; // emitted as a String region reference, not a node
         }
         let placeholder_like = matches!(ir_node.op, NodeOp::Placeholder | NodeOp::GetAttr);
-        if placeholder_like && !referenced.contains(&ir_node.id) {
+        let preserve_placeholder =
+            preserve_dead_placeholders && matches!(ir_node.op, NodeOp::Placeholder);
+        if placeholder_like && !preserve_placeholder && !referenced.contains(&ir_node.id) {
             continue; // dead constant/param placeholder
         }
         // Phase 2: the TensorStore is populated from the IrGraph's own NodeTensor
@@ -169,7 +188,7 @@ pub fn graph_from_ir(ir: &IrGraph, store: &mut TensorStore) -> Graph {
     fold_constant_reshapes(&mut graph, store);
     // Folding leaves the original constants (e.g. the pre-reshape weight) with no
     // users -- drop them so we don't emit duplicate CONST tensors.
-    remove_dead_constants(&mut graph);
+    remove_dead_constants(&mut graph, preserve_dead_placeholders);
 
     // The IrGraph's node Vec is in pass-INSERTION order: passes append new nodes
     // (transposes, rescales) at the end rather than at their topological
@@ -288,6 +307,23 @@ fn fold_constant_reshapes(graph: &mut Graph, store: &mut TensorStore) {
 /// DeleteConstantPlaceholder. The remaining variants (table-op insertion, the
 /// compute-in-Python FuseConstantNode/InsertTableOp) are added incrementally.
 pub fn apply_effects(graph: &mut Graph, store: &mut TensorStore, effects: &FxEpEffectBatch) {
+    apply_effects_ext(graph, store, effects, false);
+}
+
+pub fn apply_effects_preserve_placeholders(
+    graph: &mut Graph,
+    store: &mut TensorStore,
+    effects: &FxEpEffectBatch,
+) {
+    apply_effects_ext(graph, store, effects, true);
+}
+
+fn apply_effects_ext(
+    graph: &mut Graph,
+    store: &mut TensorStore,
+    effects: &FxEpEffectBatch,
+    preserve_graph_inputs: bool,
+) {
     if effects.effects.is_empty() {
         return;
     }
@@ -301,12 +337,24 @@ pub fn apply_effects(graph: &mut Graph, store: &mut TensorStore, effects: &FxEpE
         match effect {
             FxEpEffect::MaterializeConstantNode(e) => {
                 applied |= materialize_const(
-                    graph, store, &name_map, &e.node_name, &e.data, &e.shape, e.dtype,
+                    graph,
+                    store,
+                    &name_map,
+                    &e.node_name,
+                    &e.data,
+                    &e.shape,
+                    e.dtype,
                 );
             }
             FxEpEffect::MaterializeZeroInputConstantNode(e) => {
                 applied |= materialize_const(
-                    graph, store, &name_map, &e.node_name, &e.data, &e.shape, e.dtype,
+                    graph,
+                    store,
+                    &name_map,
+                    &e.node_name,
+                    &e.data,
+                    &e.shape,
+                    e.dtype,
                 );
             }
             FxEpEffect::DeleteConstantPlaceholder(e) => {
@@ -334,7 +382,7 @@ pub fn apply_effects(graph: &mut Graph, store: &mut TensorStore, effects: &FxEpE
         }
     }
     if applied {
-        remove_dead_constants(graph);
+        remove_dead_constants(graph, preserve_graph_inputs);
         graph.order = topo_order(graph);
         graph.rebuild_user_lists();
     }
@@ -360,11 +408,7 @@ fn apply_precomputed_table(
         let Some(input_arg) = n.args.first().cloned() else {
             return false;
         };
-        (
-            input_arg,
-            n.meta.val,
-            n.meta.tosa_dim_order.clone(),
-        )
+        (input_arg, n.meta.val, n.meta.tosa_dim_order.clone())
     };
 
     // Table constant node.
@@ -535,6 +579,12 @@ pub fn prefix_graph(graph: &mut Graph, store: &mut TensorStore, prefix: &str) {
             if store.buffers.contains_key(&n.name) {
                 keys_to_move.push(n.name.clone());
             }
+            for arg in n.args.iter_mut() {
+                prefix_region_arg(arg, prefix);
+            }
+            for (_, arg) in n.kwargs.iter_mut() {
+                prefix_region_arg(arg, prefix);
+            }
             n.name = format!("{prefix}{}", n.name);
         }
     }
@@ -548,13 +598,24 @@ pub fn prefix_graph(graph: &mut Graph, store: &mut TensorStore, prefix: &str) {
     }
 }
 
+fn prefix_region_arg(arg: &mut Arg, prefix: &str) {
+    match arg {
+        Arg::String(name) if !name.contains("::") => {
+            *name = format!("{prefix}{name}");
+        }
+        _ => {}
+    }
+}
+
 /// Diagnostic (ARM_FOLD_FALLBACK_FILE): report constant placeholder nodes that the
 /// serializer will emit as CONST but whose data is absent from the store -- i.e.
 /// the IR-derived store is missing a constant the Python re-ingest would have had.
 pub fn report_missing_consts(graph: &Graph, store: &TensorStore) {
     let inputs: std::collections::HashSet<NodeId> = graph.inputs.iter().copied().collect();
     for &nid in &graph.order {
-        let Some(n) = graph.nodes.get(nid) else { continue };
+        let Some(n) = graph.nodes.get(nid) else {
+            continue;
+        };
         if n.op != OpType::Placeholder || inputs.contains(&nid) {
             continue;
         }
@@ -648,7 +709,7 @@ fn remove_node(graph: &mut Graph, nid: NodeId) {
 
 /// Remove unreferenced placeholder/constant nodes (e.g. constants left dead by
 /// fold_constant_reshapes), so we don't emit duplicate CONST tensors.
-fn remove_dead_constants(graph: &mut Graph) {
+fn remove_dead_constants(graph: &mut Graph, preserve_graph_inputs: bool) {
     let mut referenced: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
     for &nid in &graph.order {
         if let Some(n) = graph.nodes.get(nid) {
@@ -665,6 +726,9 @@ fn remove_dead_constants(graph: &mut Graph) {
         .iter()
         .copied()
         .filter(|&nid| {
+            if preserve_graph_inputs && graph.inputs.contains(&nid) {
+                return false;
+            }
             graph
                 .nodes
                 .get(nid)
@@ -770,7 +834,10 @@ fn map_list(
             .collect();
         return Arg::NodeList(ids);
     }
-    if items.iter().all(|x| matches!(x, IrArg::Int(_) | IrArg::Bool(_))) {
+    if items
+        .iter()
+        .all(|x| matches!(x, IrArg::Int(_) | IrArg::Bool(_)))
+    {
         let v = items
             .iter()
             .map(|x| match x {
@@ -781,7 +848,10 @@ fn map_list(
             .collect();
         return Arg::IntList(v);
     }
-    if items.iter().all(|x| matches!(x, IrArg::Float(_) | IrArg::Int(_))) {
+    if items
+        .iter()
+        .all(|x| matches!(x, IrArg::Float(_) | IrArg::Int(_)))
+    {
         let v = items
             .iter()
             .map(|x| match x {

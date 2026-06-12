@@ -324,13 +324,7 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         "aten.view_copy.default".to_string(),
         vec![
             IrArg::Node(*bias_id),
-            IrArg::List(
-                bias_view_shape
-                    .iter()
-                    .copied()
-                    .map(IrArg::Int)
-                    .collect(),
-            ),
+            IrArg::List(bias_view_shape.iter().copied().map(IrArg::Int).collect()),
         ],
         bias_view_meta,
     );
@@ -807,7 +801,10 @@ mod tests {
         conv_meta.set_input_qparams(HashMap::from([
             (0, qparam(0.5, 0, "torch.int16")),
             (1, per_channel_qparam(&[0.25, 0.5, 0.75, 1.0], "torch.int8")),
-            (2, per_channel_qparam(&[0.125, 0.25, 0.375, 0.5], "torch.int32")),
+            (
+                2,
+                per_channel_qparam(&[0.125, 0.25, 0.375, 0.5], "torch.int32"),
+            ),
         ]));
         conv_meta.set_output_qparams(HashMap::from([(0, qparam(0.0625, 7, "torch.int16"))]));
         let conv = graph.add_node(
