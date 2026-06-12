@@ -1448,6 +1448,15 @@ fn fixup_quantized_dtypes(graph: &mut Graph) {
     }
 }
 
+/// Run the post-ingest graph fixups (shape + dtype) on a Graph built by the
+/// IrGraph converter (`from_ir::graph_from_ir`) instead of the Python walk, so
+/// it gets the same finalization as an ingested graph. Used under
+/// ARM_SERIALIZE_FROM_IR (round-trip elimination bring-up).
+pub(crate) fn finalize_converted_graph(graph: &mut Graph) {
+    fixup_reshape_shapes(graph);
+    fixup_quantized_dtypes(graph);
+}
+
 fn fixup_quantized_dtypes_once(graph: &mut Graph) {
     let all_ids = graph.all_node_ids();
     for node_id in all_ids {
