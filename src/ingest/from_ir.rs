@@ -319,6 +319,12 @@ pub fn apply_effects(graph: &mut Graph, store: &mut TensorStore, effects: &FxEpE
             FxEpEffect::InsertPrecomputedTableOp(e) => {
                 applied |= apply_precomputed_table(graph, store, &name_map, e);
             }
+            FxEpEffect::FuseConstantNode(e) => {
+                applied |= retarget_to_fused_const(graph, store, &name_map, &e.node_name);
+            }
+            FxEpEffect::MaterializeZeroInputConstant(e) => {
+                applied |= retarget_to_fused_const(graph, store, &name_map, &e.node_name);
+            }
             _ => {}
         }
     }
@@ -485,10 +491,16 @@ fn materialize_const(
     let Some(&nid) = name_map.get(name) else {
         return false;
     };
+    // TOSA has no int64; mirror ConvertInt64ConstOpsToInt32Pass by downcasting an
+    // int64 const to int32 when every value fits the int32 range.
+    let (data, dtype) = match (dtype, downcast_int64_le_to_int32(data)) {
+        (DType::Int64, Some(narrowed)) => (narrowed, DType::Int32),
+        _ => (data.to_vec(), dtype),
+    };
     store.insert(
         name.to_string(),
         crate::store::TensorData {
-            data: data.to_vec(),
+            data: data.clone(),
             shape: shape.to_vec(),
             dtype,
         },
@@ -498,6 +510,50 @@ fn materialize_const(
         n.target = OpTarget::Other(name.to_string());
         n.args = SmallVec::new();
         n.meta.val = TensorInfo::new(shape, dtype);
+    }
+    true
+}
+
+/// Re-encode little-endian int64 bytes as little-endian int32, or `None` if any
+/// value exceeds the int32 range (matching ConvertInt64ConstOpsToInt32Pass, which
+/// leaves out-of-range constants as int64).
+fn downcast_int64_le_to_int32(data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() % 8 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(data.len() / 2);
+    for chunk in data.chunks_exact(8) {
+        let v = i64::from_le_bytes(chunk.try_into().ok()?);
+        let narrowed = i32::try_from(v).ok()?;
+        out.extend_from_slice(&narrowed.to_le_bytes());
+    }
+    Some(out)
+}
+
+/// FuseConstantNode / MaterializeZeroInputConstant compute their result in
+/// Python at flush time and materialize it as a `{node}_fused_const` buffer. The
+/// reused ingest store already holds that data, so retarget the node to it (copy
+/// the data under the node's own name) instead of recomputing. (For a future
+/// store-from-IrGraph-only Phase 4, the computation would be ported to Rust.)
+fn retarget_to_fused_const(
+    graph: &mut Graph,
+    store: &mut TensorStore,
+    name_map: &HashMap<String, NodeId>,
+    node_name: &str,
+) -> bool {
+    let folded_name = format!("{node_name}_fused_const");
+    let Some(data) = store.get(&folded_name).cloned() else {
+        return false;
+    };
+    let Some(&nid) = name_map.get(node_name) else {
+        return false;
+    };
+    store.insert(node_name.to_string(), data.clone());
+    if let Some(n) = graph.nodes.get_mut(nid) {
+        n.op = OpType::Placeholder;
+        n.target = OpTarget::Other(node_name.to_string());
+        n.args = SmallVec::new();
+        n.meta.val = TensorInfo::new(&data.shape, data.dtype);
     }
     true
 }
