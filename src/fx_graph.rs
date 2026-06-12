@@ -1,17 +1,4 @@
 use pyo3::prelude::*;
-use std::time::Instant;
-
-/// Extract a typed value from a positional arg list.
-/// Returns `default` if the index is out of bounds or extraction fails.
-pub fn arg_extract<'py, T: pyo3::FromPyObject<'py>>(
-    args: &[pyo3::Bound<'py, pyo3::PyAny>],
-    idx: usize,
-    default: T,
-) -> T {
-    args.get(idx)
-        .and_then(|a| a.extract().ok())
-        .unwrap_or(default)
-}
 
 /// Extract a typed attribute from a Python object, trying multiple names.
 /// Returns `default` if none of the names exist or extraction fails.
@@ -23,20 +10,6 @@ pub fn py_attr<'py, T: pyo3::FromPyObject<'py>>(
     names
         .iter()
         .find_map(|name| obj.getattr(*name).ok())
-        .and_then(|v| v.extract().ok())
-        .unwrap_or(default)
-}
-
-/// Extract a typed value from a Python dict via `.get(key)`.
-/// Returns `default` if the key doesn't exist, is None, or extraction fails.
-pub fn meta_get<'py, T: pyo3::FromPyObject<'py>>(
-    dict: &pyo3::Bound<'py, pyo3::PyAny>,
-    key: &str,
-    default: T,
-) -> T {
-    dict.call_method1("get", (key,))
-        .ok()
-        .filter(|v| !v.is_none())
         .and_then(|v| v.extract().ok())
         .unwrap_or(default)
 }
@@ -77,26 +50,6 @@ impl<'py> FxGraphModule<'py> {
         &self.gm
     }
 
-    // ------------------------------------------------------------------
-    // Read helpers
-    // ------------------------------------------------------------------
-
-    /// All nodes in topological order (Python node objects).
-    pub fn nodes(&self) -> PyResult<Vec<Bound<'py, PyAny>>> {
-        let graph = self.gm.getattr("graph")?;
-        let nodes = graph.getattr("nodes")?;
-        let mut result = Vec::new();
-        for node in nodes.iter()? {
-            result.push(node?);
-        }
-        Ok(result)
-    }
-
-    /// `node.op` as a Rust string.
-    pub fn node_op(node: &Bound<'py, PyAny>) -> PyResult<String> {
-        node.getattr("op")?.extract()
-    }
-
     /// `str(node.target)`.
     pub fn node_target_str(node: &Bound<'py, PyAny>) -> PyResult<String> {
         let target = node.getattr("target")?;
@@ -123,75 +76,14 @@ impl<'py> FxGraphModule<'py> {
         node.getattr("kwargs")
     }
 
-    /// `node.users` keys (i.e. the consumer nodes).
-    pub fn node_users(node: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
-        let users = node.getattr("users")?;
-        let keys = users.call_method0("keys")?;
-        let mut result = Vec::new();
-        for k in keys.iter()? {
-            result.push(k?);
-        }
-        Ok(result)
-    }
-
     /// Returns `true` when `obj` looks like an FX `Node` (duck-typed).
     pub fn is_node(obj: &Bound<'py, PyAny>) -> bool {
         obj.getattr("op").is_ok() && obj.getattr("target").is_ok()
     }
 
-    /// `node.meta["val"].shape` as `Vec<i64>`.
-    pub fn node_shape(node: &Bound<'py, PyAny>) -> PyResult<Vec<i64>> {
-        let meta = node.getattr("meta")?;
-        let val = meta.get_item("val")?;
-        let shape = val.getattr("shape")?;
-        shape.extract()
-    }
-
-    // ------------------------------------------------------------------
-    // Mutation helpers (delegate to Python FX graph APIs)
-    // ------------------------------------------------------------------
-
-    /// `node.replace_all_uses_with(new_node)`.
-    pub fn replace_all_uses_with(
-        node: &Bound<'py, PyAny>,
-        new_node: &Bound<'py, PyAny>,
-    ) -> PyResult<()> {
-        node.call_method1("replace_all_uses_with", (new_node,))?;
-        Ok(())
-    }
-
-    /// `graph.erase_node(node)`.
-    pub fn erase_node(&self, node: &Bound<'py, PyAny>) -> PyResult<()> {
-        let graph = self.gm.getattr("graph")?;
-        graph.call_method1("erase_node", (node,))?;
-        Ok(())
-    }
-
     /// `graph_module.recompile()`.
     pub fn recompile(&self) -> PyResult<()> {
-        let t0 = if crate::fx_profile::enabled() {
-            Some(Instant::now())
-        } else {
-            None
-        };
         self.gm.call_method0("recompile")?;
-        if let Some(t0) = t0 {
-            crate::fx_profile::record_recompile(t0.elapsed());
-        }
         Ok(())
-    }
-
-    /// Return the number of nodes in the graph.
-    pub fn node_count(&self) -> PyResult<usize> {
-        let graph = self.gm.getattr("graph")?;
-        let nodes = graph.getattr("nodes")?;
-        // torch.fx.Graph.nodes supports len()
-        let len = self
-            .gm
-            .py()
-            .import_bound("builtins")?
-            .call_method1("len", (&nodes,))?
-            .extract::<usize>()?;
-        Ok(len)
     }
 }

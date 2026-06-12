@@ -47,11 +47,9 @@ mod fx_decompose_var_ir;
 mod fx_decorate_fp_int_cast_ir;
 mod fx_ep_effects;
 mod fx_expand_where_mask_ir;
-mod fx_fold_qdq;
 mod fx_fold_qdq_ir;
 mod fx_fuse_constant_args;
 mod fx_fuse_constant_inputs_ir;
-mod fx_fuse_duplicate_users;
 mod fx_fuse_duplicate_users_ir;
 mod fx_fuse_equal_placeholders_ir;
 mod fx_fuse_quant_activation_ir;
@@ -61,28 +59,22 @@ mod fx_graph;
 mod fx_insert_conv_rescale_ir;
 mod fx_insert_int32_rescale_ir;
 mod fx_insert_qdq_rescale_ir;
-mod fx_insert_rescale;
-mod fx_insert_table_ops;
 mod fx_insert_table_ops_ir;
 mod fx_ir;
-mod fx_memory_format;
 mod fx_memory_format_ir;
 mod fx_normalize_index_put_bool_mask_ir;
 mod fx_normalize_index_put_none_indices_ir;
 mod fx_pass;
 mod fx_pipeline;
-mod fx_profile;
 mod fx_quantize_clamp_args_ir;
 mod fx_remove_noop_ir;
 mod fx_replace_inf_values_ir;
 mod fx_replace_scalar_with_tensor_ir;
 mod fx_rewrite_index_put_ir;
-mod fx_rewrite_matmul;
 mod fx_rewrite_matmul_ir;
 mod fx_rewrite_pad_ir;
 mod fx_rewrite_squeeze_ir;
 mod fx_size_adjust_input_ir;
-mod fx_utils;
 mod graph;
 mod ingest;
 mod runner_logging;
@@ -96,14 +88,6 @@ fn profile_ingest_serialize_enabled() -> bool {
 
 fn clone_bound_pyobject(exported_program: Option<&Bound<'_, PyAny>>) -> Option<PyObject> {
     exported_program.map(|ep| ep.clone().unbind())
-}
-
-fn run_single_fx_pass<P: fx_pass::FxPass>(
-    graph_module: &Bound<'_, PyAny>,
-    pass: P,
-) -> PyResult<bool> {
-    let gm = fx_graph::FxGraphModule::new(graph_module);
-    fx_pass::FxPass::run(&pass, &gm)
 }
 
 /// The post-pipeline IrGraph plus the EP-effects accumulated during it.
@@ -1231,62 +1215,7 @@ fn ingest_and_serialize_tosa_pybytes(
     Ok(py_bytes)
 }
 
-// ---------------------------------------------------------------------------
-// FX-graph-direct: fold Q/DQ pass operating on live Python FX graph
-// ---------------------------------------------------------------------------
-
-/// Run the FoldAndAnnotateQParams pass directly on a Python FX GraphModule.
-///
-/// This mutates the graph in-place (removes Q/DQ nodes, annotates qparams
-/// in node.meta) and returns True if any modifications were made.
-///
-/// The optional `exported_program` is needed to resolve parameter tensor
-/// nodes (per-channel scales/zero-points stored as graph parameters).
-#[pyfunction]
-#[pyo3(signature = (graph_module, exported_program=None))]
-fn fold_qdq_fx(
-    graph_module: &Bound<'_, PyAny>,
-    exported_program: Option<&Bound<'_, PyAny>>,
-) -> PyResult<bool> {
-    run_single_fx_pass(
-        graph_module,
-        fx_fold_qdq::FxFoldAndAnnotateQParamsPass::new(clone_bound_pyobject(exported_program)),
-    )
-}
-
-/// Run only the Rust InsertRescale pass on a Python FX GraphModule.
-///
-/// This is for diagnostic comparison against the Python InsertRescale passes.
-/// The graph must already be Q/DQ-folded (with QuantArgs in node.meta).
-#[pyfunction]
-fn insert_rescale_fx(graph_module: &Bound<'_, PyAny>) -> PyResult<bool> {
-    run_single_fx_pass(graph_module, fx_insert_rescale::FxInsertRescalePass::new())
-}
-
-/// Return a summary of the FX graph: node count plus a list of
-/// (name, op, target_str) triples.  Useful for quick sanity checks.
-#[pyfunction]
-fn fx_graph_summary(graph_module: &Bound<'_, PyAny>) -> PyResult<Vec<(String, String, String)>> {
-    let gm = fx_graph::FxGraphModule::new(graph_module);
-    let nodes = gm.nodes()?;
-    let mut result = Vec::with_capacity(nodes.len());
-    for node in &nodes {
-        let name = fx_graph::FxGraphModule::node_name(node)?;
-        let op = fx_graph::FxGraphModule::node_op(node)?;
-        let target = fx_graph::FxGraphModule::node_target_str(node)?;
-        result.push((name, op, target));
-    }
-    Ok(result)
-}
-
-/// Run the full FX-direct lowering pipeline on a Python FX GraphModule.
-///
-/// This executes all passes in order: fuse activations, Rust fold Q/DQ,
-/// Rust insert rescales, insert table ops, convert to clamp, rewrite conv,
-/// annotate memory format. Returns True if any pass modified the graph.
-///
-/// The optional `exported_program` is forwarded to the Rust fold pass
-/// so it can resolve parameter tensor nodes (per-channel scales/zps).
+/// Run the parent lowering pipeline and stash the resulting IrGraph.
 #[pyfunction]
 #[pyo3(signature = (graph_module, exported_program=None))]
 fn run_fx_passes(
@@ -1299,9 +1228,7 @@ fn run_fx_passes(
     Ok(modified)
 }
 
-/// Run a safe subset of FX passes on a control-flow submodule graph.
-///
-/// Run the while_loop submodule pipeline (fold_qdq + carried rescale).
+/// Run the while_loop submodule IR pipeline and stash the resulting IrGraph.
 #[pyfunction]
 #[pyo3(signature = (graph_module, exported_program=None, region_name=None))]
 fn run_fx_submodule_passes(
@@ -1325,7 +1252,7 @@ fn run_fx_submodule_passes(
     Ok(modified || propagation_changed > 0)
 }
 
-/// Extended submodule passes for cond branches (includes fold_qdq).
+/// Run the cond branch submodule IR pipeline and stash the resulting IrGraph.
 #[pyfunction]
 #[pyo3(signature = (graph_module, exported_program=None, region_name=None))]
 fn run_fx_cond_passes(
@@ -1385,9 +1312,5 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_fx_cond_passes, m)?)?;
     // Control-flow pipeline (new ordering)
     m.add_function(wrap_pyfunction!(stamp_control_flow_structural, m)?)?;
-    // Utilities
-    m.add_function(wrap_pyfunction!(fold_qdq_fx, m)?)?;
-    m.add_function(wrap_pyfunction!(insert_rescale_fx, m)?)?;
-    m.add_function(wrap_pyfunction!(fx_graph_summary, m)?)?;
     Ok(())
 }

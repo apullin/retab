@@ -1,5 +1,6 @@
 use super::Graph;
 use crate::graph::ir::*;
+#[cfg(test)]
 use smallvec::SmallVec;
 
 impl Graph {
@@ -8,6 +9,7 @@ impl Graph {
     // -----------------------------------------------------------------------
 
     /// Create a new node and append it to the end of the graph order.
+    #[cfg(test)]
     pub fn create_node(
         &mut self,
         op: OpType,
