@@ -1258,6 +1258,14 @@ impl IrGraph {
             }
             graph.call_method1("erase_node", (py_node,))?;
         }
+
+        // Inserted nodes are placed by FX anchor position; chained insertions can
+        // leave a node before its definition. Reorder to a valid topological order.
+        if let Ok(helpers) = py.import_bound("fx_helpers") {
+            if let Ok(toposort) = helpers.getattr("topological_sort_fx_graph") {
+                let _ = toposort.call1((gm,));
+            }
+        }
         Ok(())
     }
 }
