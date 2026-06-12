@@ -2435,7 +2435,7 @@ pub fn run_hybrid_pipeline<'py>(
     gm: &Bound<'py, PyAny>,
     exported_program: Option<&Bound<'py, PyAny>>,
     steps: &[PipelineStep],
-) -> PyResult<(bool, Option<IrGraph>)> {
+) -> PyResult<(bool, Option<IrGraph>, FxEpEffectBatch)> {
     use crate::runner_logging::{log_pass_result, log_pass_start};
 
     let mut ir: Option<IrGraph> = None;
@@ -2488,6 +2488,11 @@ pub fn run_hybrid_pipeline<'py>(
         }
     }
 
+    // Capture the EP-effects before flush consumes them, so the
+    // ARM_SERIALIZE_FROM_IR path can apply them Rust-natively to the converted
+    // graph (the IrGraph is pre-effects; flush applies them to the Python EP).
+    let stashed_effects = pending_effects.clone();
+
     // Final flush if IrGraph has unflushed changes
     if ir_dirty {
         if let Some(ref graph) = ir {
@@ -2499,5 +2504,5 @@ pub fn run_hybrid_pipeline<'py>(
     // (ingest::fx_bridge::fixup_quantized_dtypes, iterated to convergence), so
     // there is no longer a Python bulk-refresh call here.
 
-    Ok((any_modified, ir))
+    Ok((any_modified, ir, stashed_effects))
 }

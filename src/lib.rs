@@ -106,28 +106,30 @@ fn run_single_fx_pass<P: fx_pass::FxPass>(
     fx_pass::FxPass::run(&pass, &gm)
 }
 
+/// The post-pipeline IrGraph plus the EP-effects accumulated during it.
+type StashedPipeline = (fx_ir::IrGraph, fx_ep_effects::FxEpEffectBatch);
+
 thread_local! {
-    /// Stash for the final post-pipeline IrGraph, set by `run_fx_passes` and
-    /// consumed by serialization under ARM_SERIALIZE_FROM_IR (round-trip
-    /// elimination bring-up). Lets the IrGraph survive between the two separate
-    /// Python->Rust calls of the active path without re-reading the Python graph.
-    static STASHED_IR: std::cell::RefCell<Option<fx_ir::IrGraph>> =
+    /// Stash for the final post-pipeline IrGraph + EP-effects, set by
+    /// `run_fx_passes` and consumed by serialization under ARM_SERIALIZE_FROM_IR.
+    /// Lets the IrGraph survive between the two separate Python->Rust calls of
+    /// the active path without re-reading the Python graph.
+    static STASHED_IR: std::cell::RefCell<Option<StashedPipeline>> =
         std::cell::RefCell::new(None);
 }
 
-fn stash_ir(ir: Option<fx_ir::IrGraph>) {
-    STASHED_IR.with(|s| *s.borrow_mut() = ir);
+fn stash_ir(stashed: Option<StashedPipeline>) {
+    STASHED_IR.with(|s| *s.borrow_mut() = stashed);
 }
 
-#[allow(dead_code)]
-pub(crate) fn take_stashed_ir() -> Option<fx_ir::IrGraph> {
+pub(crate) fn take_stashed_ir() -> Option<StashedPipeline> {
     STASHED_IR.with(|s| s.borrow_mut().take())
 }
 
 fn run_full_fx_pipeline(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<PyObject>,
-) -> PyResult<(bool, Option<fx_ir::IrGraph>)> {
+) -> PyResult<(bool, Option<fx_ir::IrGraph>, fx_ep_effects::FxEpEffectBatch)> {
     // Use hybrid pipeline: persistent IrGraph for Rust passes,
     // flush/reimport only at FxPass boundaries.
     let py = graph_module.py();
@@ -191,8 +193,9 @@ fn ingest_and_serialize_tosa_pybytes(
         // (Phases 2-3). Non-control-flow only -- the cf_* boundary phases run on
         // the Python graph after the pipeline, so the stashed IrGraph is the
         // final state only for graphs without control flow.
-        if let Some(ir) = take_stashed_ir() {
+        if let Some((ir, effects)) = take_stashed_ir() {
             let mut converted = ingest::from_ir::graph_from_ir(&ir, &mut store);
+            ingest::from_ir::apply_effects(&mut converted, &mut store, &effects);
             ingest::fx_bridge::finalize_converted_graph(&mut converted);
             if std::env::var("ARM_FROM_IR_DEBUG").ok().as_deref() == Some("1") {
                 if let Some((_, ing)) = graphs.first() {
@@ -309,9 +312,9 @@ fn run_fx_passes(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<bool> {
-    let (modified, ir) =
+    let (modified, ir, effects) =
         run_full_fx_pipeline(graph_module, clone_bound_pyobject(exported_program))?;
-    stash_ir(ir);
+    stash_ir(ir.map(|g| (g, effects)));
     Ok(modified)
 }
 

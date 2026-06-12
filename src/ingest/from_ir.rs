@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use smallvec::SmallVec;
 
 use crate::fx_control_flow_metadata::{NodeOp, QParam};
+use crate::fx_ep_effects::{FxEpEffect, FxEpEffectBatch};
 use crate::fx_ir::{IrArg, IrGraph, MetaValue, NodeId as IrNodeId, NodeMeta as IrNodeMeta};
 use crate::graph::ir::{Arg, DType, Node, NodeId, NodeMeta, OpTarget, OpType, QuantArgs, TensorInfo};
 use crate::graph::Graph;
@@ -222,6 +223,93 @@ fn fold_constant_reshapes(graph: &mut Graph, store: &mut TensorStore) {
             break;
         }
     }
+}
+
+/// Apply the pipeline's accumulated EP-effects to the converted graph + store,
+/// Rust-natively. The IrGraph is captured PRE-effects (the effects are otherwise
+/// applied to the Python EP at flush time); this reproduces them so the graph
+/// matches the final lowered form. Most effects carry their precomputed data, so
+/// no Python computation is needed.
+///
+/// Handled here: MaterializeConstantNode / MaterializeZeroInputConstantNode
+/// (replace a computed node with its precomputed constant) and
+/// DeleteConstantPlaceholder. The remaining variants (table-op insertion, the
+/// compute-in-Python FuseConstantNode/InsertTableOp) are added incrementally.
+pub fn apply_effects(graph: &mut Graph, store: &mut TensorStore, effects: &FxEpEffectBatch) {
+    if effects.effects.is_empty() {
+        return;
+    }
+    let name_map: HashMap<String, NodeId> = graph
+        .order
+        .iter()
+        .filter_map(|&nid| graph.nodes.get(nid).map(|n| (n.name.clone(), nid)))
+        .collect();
+    let mut applied = false;
+    for effect in &effects.effects {
+        match effect {
+            FxEpEffect::MaterializeConstantNode(e) => {
+                applied |= materialize_const(
+                    graph, store, &name_map, &e.node_name, &e.data, &e.shape, e.dtype,
+                );
+            }
+            FxEpEffect::MaterializeZeroInputConstantNode(e) => {
+                applied |= materialize_const(
+                    graph, store, &name_map, &e.node_name, &e.data, &e.shape, e.dtype,
+                );
+            }
+            FxEpEffect::DeleteConstantPlaceholder(e) => {
+                if let Some(&nid) = name_map.get(&e.placeholder_name) {
+                    store.buffers.remove(&e.placeholder_name);
+                    remove_node(graph, nid);
+                    applied = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if applied {
+        remove_dead_constants(graph);
+        graph.rebuild_user_lists();
+    }
+}
+
+/// Replace a computed node with its precomputed constant: data -> store, node
+/// -> constant placeholder (no args). Its now-dead inputs are dropped later by
+/// remove_dead_constants.
+fn materialize_const(
+    graph: &mut Graph,
+    store: &mut TensorStore,
+    name_map: &HashMap<String, NodeId>,
+    name: &str,
+    data: &[u8],
+    shape: &[i64],
+    dtype: DType,
+) -> bool {
+    let Some(&nid) = name_map.get(name) else {
+        return false;
+    };
+    store.insert(
+        name.to_string(),
+        crate::store::TensorData {
+            data: data.to_vec(),
+            shape: shape.to_vec(),
+            dtype,
+        },
+    );
+    if let Some(n) = graph.nodes.get_mut(nid) {
+        n.op = OpType::Placeholder;
+        n.target = OpTarget::Other(name.to_string());
+        n.args = SmallVec::new();
+        n.meta.val = TensorInfo::new(shape, dtype);
+    }
+    true
+}
+
+fn remove_node(graph: &mut Graph, nid: NodeId) {
+    graph.nodes.remove(nid);
+    graph.order.retain(|&x| x != nid);
+    graph.inputs.retain(|&x| x != nid);
+    graph.node_names.retain(|&(x, _)| x != nid);
 }
 
 /// Remove unreferenced placeholder/constant nodes (e.g. constants left dead by
