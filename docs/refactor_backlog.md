@@ -772,6 +772,14 @@ Deleted: the only non-generated `#[allow(dead_code)]` in active Rust source and 
 Added: `QParam::supports_axis0_channel_slice` and `QParam::slice_axis0_channels`, making grouped-conv's output-channel slicing assumption explicit and checked
 Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib fx_decompose_grouped_conv_ir`; `cargo test --lib fx_fold_qdq_ir`; source dead-code suppression audit
 Note: targeted Rust tests passed `2 passed` for grouped-conv decomposition and `8 passed` for folded Q/DQ metadata. Only generated TOSA bindings retain `#[allow(dead_code)]`.
+
+2026-06-13, pass-local metadata wrapper cleanup slice
+Rust LOC: 37,441
+Movement: -12 Rust LOC from previous checkpoint
+Deleted: a one-line size-adjust metadata wrapper and redundant masked-fill output-qparam clone/reapply blocks
+Added: direct use of `NodeMeta::cloned_with_val`; masked-fill metadata now relies on clone-preserved output qparams while only restamping input qparams
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over conv2d, conv3d, avg_pool2d, max_pool, and masked_fill
+Note: Rust tests passed `130 passed`. Focused Python smoke passed `386 passed, 1 expected xfail, 1023 deselected`.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

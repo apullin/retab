@@ -16,28 +16,18 @@ pub struct IrDecomposeMaskedFillPass;
 
 fn tensorized_scalar_meta(meta: &NodeMeta) -> NodeMeta {
     let mut new_meta = meta.clone();
-    let output_qparams = meta.output_qparams.clone();
     new_meta.set_input_qparams(HashMap::new());
-    match output_qparams {
-        Some(map) => new_meta.set_output_qparams(map),
-        None => new_meta.clear_output_qparams(),
-    }
     new_meta
 }
 
 fn where_meta(meta: &NodeMeta) -> NodeMeta {
     let mut new_meta = meta.clone();
-    let output_qparams = meta.output_qparams.clone();
     let mut input_qparams = HashMap::new();
     if let Some(qp) = meta.output_qparam().cloned() {
         input_qparams.insert(1, qp.clone());
         input_qparams.insert(2, qp);
     }
     new_meta.set_input_qparams(input_qparams);
-    match output_qparams {
-        Some(map) => new_meta.set_output_qparams(map),
-        None => new_meta.clear_output_qparams(),
-    }
     new_meta
 }
 
