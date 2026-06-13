@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam, RescaleRewrite};
 use crate::fx_target::{
     is_conv_accumulator_target, is_layout_passthrough_target, is_rank_changing_layout_target,
     is_raw_aten_convolution_target,
@@ -212,20 +212,18 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         conv.args[2] = IrArg::None;
     }
 
-    let int32_rescale = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_bias_int32_rescale", node.name),
-        "backend.tosa.RESCALE.default".to_string(),
-        vec![
-            IrArg::Node(conv_id),
-            IrArg::Dtype("torch.int32".to_string()),
-            IrArg::List(vec![IrArg::Float(1.0); bias_scales.len()]),
-            IrArg::Int(0),
-            IrArg::Int(0),
-        ],
-        plain_tensor_meta_from(&node.meta, &conv_shape, "torch.int32"),
+    let int32_rescale = graph.add_after_rescale(
+        conv_id,
+        RescaleRewrite::new(
+            format!("{}_bias_int32_rescale", node.name),
+            conv_id,
+            "torch.int32",
+            vec![1.0; bias_scales.len()],
+            0,
+            0,
+            plain_tensor_meta_from(&node.meta, &conv_shape, "torch.int32"),
+        ),
     );
-    graph.anchor_after(int32_rescale, conv_id);
 
     let mut bias_view_meta = plain_tensor_meta_from(&node.meta, &bias_view_shape, "torch.int32");
     if let Some(order) = node.meta.tosa_dim_order.clone() {
@@ -259,36 +257,23 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
     );
     graph.anchor_after(bias_add, bias_view);
 
-    let output_rescale = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_bias_output_rescale", node.name),
-        "backend.tosa.RESCALE.default".to_string(),
-        vec![
-            IrArg::Node(bias_add),
-            IrArg::Dtype(output_qp.dtype_str.clone()),
-            IrArg::List(
-                bias_scales
-                    .into_iter()
-                    .map(|scale| IrArg::Float(scale / output_qp.scale))
-                    .collect(),
-            ),
-            IrArg::Int(0),
-            IrArg::Int(output_qp.zp),
-        ],
-        node.meta.rescale_output_meta(output_qp),
+    let output_rescale = graph.add_after_rescale(
+        bias_add,
+        RescaleRewrite::new(
+            format!("{}_bias_output_rescale", node.name),
+            bias_add,
+            output_qp.dtype_str.clone(),
+            bias_scales
+                .into_iter()
+                .map(|scale| scale / output_qp.scale)
+                .collect(),
+            0,
+            output_qp.zp,
+            node.meta.rescale_output_meta(output_qp),
+        ),
     );
-    graph.anchor_after(output_rescale, bias_add);
 
-    let users = graph.live_user_ids(conv_id);
-    let mut rewired = false;
-    for user_id in users {
-        if user_id == int32_rescale {
-            continue;
-        }
-        rewired |= graph.replace_input_use(user_id, conv_id, output_rescale);
-    }
-
-    rewired
+    graph.replace_live_uses_except(conv_id, output_rescale, int32_rescale)
 }
 
 fn insert_conv_rescale(graph: &mut IrGraph, conv_id: NodeId) -> bool {
@@ -316,9 +301,9 @@ fn insert_conv_rescale(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         return false;
     }
 
-    let scales: Vec<IrArg> = weight_scales(weight_qp)
+    let scales: Vec<f64> = weight_scales(weight_qp)
         .into_iter()
-        .map(|weight_scale| IrArg::Float((input_qp.scale * weight_scale) / output_qp.scale))
+        .map(|weight_scale| (input_qp.scale * weight_scale) / output_qp.scale)
         .collect();
     if scales.is_empty() {
         return false;
@@ -329,31 +314,20 @@ fn insert_conv_rescale(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         return false;
     }
 
-    let rescale_meta = node.meta.rescale_output_meta(output_qp.clone());
-    let rescale = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_accumulator_rescale", node.name),
-        "backend.tosa.RESCALE.default".to_string(),
-        vec![
-            IrArg::Node(conv_id),
-            IrArg::Dtype(output_qp.dtype_str.clone()),
-            IrArg::List(scales),
-            IrArg::Int(0),
-            IrArg::Int(output_qp.zp),
-        ],
-        rescale_meta,
+    let rescale = graph.add_after_rescale(
+        conv_id,
+        RescaleRewrite::new(
+            format!("{}_accumulator_rescale", node.name),
+            conv_id,
+            output_qp.dtype_str.clone(),
+            scales,
+            0,
+            output_qp.zp,
+            node.meta.rescale_output_meta(output_qp.clone()),
+        ),
     );
-    graph.anchor_after(rescale, conv_id);
 
-    let mut rewired = false;
-    for user_id in users {
-        if user_id == rescale {
-            continue;
-        }
-        rewired |= graph.replace_input_use(user_id, conv_id, rescale);
-    }
-
-    rewired
+    graph.replace_live_uses_except(conv_id, rescale, rescale)
 }
 
 pub struct IrInsertConvAccumulatorRescalePass;

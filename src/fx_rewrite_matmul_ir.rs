@@ -1,4 +1,4 @@
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrGraph, IrPass, NodeId, NodeOp, RescaleRewrite};
 use crate::runner_logging::log_line;
 
 fn insert_matmul_rescale(graph: &mut IrGraph, matmul_id: NodeId) -> bool {
@@ -19,31 +19,19 @@ fn insert_matmul_rescale(graph: &mut IrGraph, matmul_id: NodeId) -> bool {
 
     let rescale_scale = (qp_a.scale * qp_b.scale) / out_qp.scale;
     let rescale_meta = node.meta.rescale_output_meta(out_qp.clone());
-    let rescale = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_output_rescale", node.name),
-        "backend.tosa.RESCALE.default".to_string(),
-        vec![
-            IrArg::Node(matmul_id),
-            IrArg::Dtype(out_qp.dtype_str.clone()),
-            IrArg::List(vec![IrArg::Float(rescale_scale)]),
-            IrArg::Int(0),
-            IrArg::Int(out_qp.zp),
-        ],
-        rescale_meta,
+    let rescale = graph.add_after_rescale(
+        matmul_id,
+        RescaleRewrite::new(
+            format!("{}_output_rescale", node.name),
+            matmul_id,
+            out_qp.dtype_str.clone(),
+            vec![rescale_scale],
+            0,
+            out_qp.zp,
+            rescale_meta,
+        ),
     );
-    graph.anchor_after(rescale, matmul_id);
-
-    let users = graph.live_user_ids(matmul_id);
-    let mut rewired = false;
-    for user_id in users {
-        if user_id == rescale {
-            continue;
-        }
-        rewired |= graph.replace_input_use(user_id, matmul_id, rescale);
-    }
-
-    rewired
+    graph.replace_live_uses_except(matmul_id, rescale, rescale)
 }
 
 pub struct IrRewriteMatmulRescalePass;

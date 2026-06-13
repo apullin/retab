@@ -270,6 +270,38 @@ pub struct IrGraph {
     anchors_after: HashMap<NodeId, NodeId>,
 }
 
+pub(crate) struct RescaleRewrite {
+    name: String,
+    source: NodeId,
+    output_dtype: String,
+    scales: Vec<f64>,
+    input_zp: i64,
+    output_zp: i64,
+    meta: NodeMeta,
+}
+
+impl RescaleRewrite {
+    pub(crate) fn new(
+        name: impl Into<String>,
+        source: NodeId,
+        output_dtype: impl Into<String>,
+        scales: Vec<f64>,
+        input_zp: i64,
+        output_zp: i64,
+        meta: NodeMeta,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            source,
+            output_dtype: output_dtype.into(),
+            scales,
+            input_zp,
+            output_zp,
+            meta,
+        }
+    }
+}
+
 impl IrGraph {
     #[cfg(test)]
     pub(crate) fn empty() -> Self {
@@ -521,6 +553,43 @@ impl IrGraph {
         id
     }
 
+    pub(crate) fn add_rescale(&mut self, spec: RescaleRewrite) -> NodeId {
+        let RescaleRewrite {
+            name,
+            source,
+            output_dtype,
+            scales,
+            input_zp,
+            output_zp,
+            meta,
+        } = spec;
+        self.add_node(
+            NodeOp::CallFunction,
+            name,
+            "backend.tosa.RESCALE.default".to_string(),
+            vec![
+                IrArg::Node(source),
+                IrArg::Dtype(output_dtype),
+                IrArg::List(scales.into_iter().map(IrArg::Float).collect()),
+                IrArg::Int(input_zp),
+                IrArg::Int(output_zp),
+            ],
+            meta,
+        )
+    }
+
+    pub(crate) fn add_anchored_rescale(&mut self, anchor: NodeId, spec: RescaleRewrite) -> NodeId {
+        let id = self.add_rescale(spec);
+        self.anchor_to(id, anchor);
+        id
+    }
+
+    pub(crate) fn add_after_rescale(&mut self, anchor: NodeId, spec: RescaleRewrite) -> NodeId {
+        let id = self.add_rescale(spec);
+        self.anchor_after(id, anchor);
+        id
+    }
+
     pub fn add_full_int(
         &mut self,
         name: impl Into<String>,
@@ -757,6 +826,23 @@ impl IrGraph {
             self.rebuild_users();
         }
         changed
+    }
+
+    pub(crate) fn replace_live_uses_except(
+        &mut self,
+        old_id: NodeId,
+        new_id: NodeId,
+        excluded_user: NodeId,
+    ) -> bool {
+        let users = self.live_user_ids(old_id);
+        let mut rewired = false;
+        for user_id in users {
+            if user_id == excluded_user {
+                continue;
+            }
+            rewired |= self.replace_input_use(user_id, old_id, new_id);
+        }
+        rewired
     }
 
     /// Mark a node as dead. Conversion and structural rebuilds skip dead nodes.

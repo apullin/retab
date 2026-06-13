@@ -1,4 +1,4 @@
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp, RescaleRewrite};
 use crate::runner_logging::log_line;
 
 fn insert_qdq_rescale(graph: &mut IrGraph, dq_id: NodeId, q_id: NodeId) -> bool {
@@ -33,20 +33,18 @@ fn insert_qdq_rescale(graph: &mut IrGraph, dq_id: NodeId, q_id: NodeId) -> bool 
         dq_qp.clone(),
         q_qp.clone(),
     );
-    let rescale = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_rescale", q.name),
-        "backend.tosa.RESCALE.default".to_string(),
-        vec![
-            IrArg::Node(source_id),
-            IrArg::Dtype(q_qp.dtype_str.clone()),
-            IrArg::List(vec![IrArg::Float(scale)]),
-            IrArg::Int(dq_qp.zp),
-            IrArg::Int(q_qp.zp),
-        ],
-        meta,
+    let rescale = graph.add_anchored_rescale(
+        dq_id,
+        RescaleRewrite::new(
+            format!("{}_rescale", q.name),
+            source_id,
+            q_qp.dtype_str.clone(),
+            vec![scale],
+            dq_qp.zp,
+            q_qp.zp,
+            meta,
+        ),
     );
-    graph.anchor_to(rescale, dq_id);
 
     graph.replace_and_erase(q_id, rescale);
     if !graph.has_live_users(dq_id) {

@@ -804,6 +804,14 @@ Deleted: monolithic `src/serialize/mod.rs` ownership of tensor materialization, 
 Added: `src/serialize/collection.rs`, `src/serialize/tensor_layout.rs`, `src/serialize/output_layout.rs`, `src/serialize/flatbuffer.rs`, and `src/serialize/attribute_flatbuffer.rs`; `src/serialize/mod.rs` is now the 35-line public orchestration entry point
 Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused serializer-sensitive Python smoke via `/tmp/et.sh` over conv2d, conv3d, transpose_conv2d, avg_pool2d, max_pool, permute, view, cond, and while
 Note: Rust tests passed `130 passed`. Focused Python smoke passed `526 passed, 3 expected xfails, 1306 deselected`. This is mostly an ownership/grammar split, not a behavior change: semantic region collection, physical tensor declarations, external output layout normalization, flatbuffer tables, and attribute unions now have separate modules.
+
+2026-06-13, IR RESCALE rewrite helper slice
+Rust LOC: 37,420
+Movement: +32 Rust LOC from previous checkpoint
+Deleted: manual RESCALE op construction and user-rewire loops in q/dq folding, matmul output rescale, INT32 input/output/where rescale, and conv accumulator/int16-bias rescale paths
+Added: `RescaleRewrite`, `IrGraph::add_rescale`, `IrGraph::add_anchored_rescale`, `IrGraph::add_after_rescale`, and `IrGraph::replace_live_uses_except`
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib rescale`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over mm, bmm, addmm, conv2d, conv3d, transpose_conv2d, add, mul, where, cond, and while; Rust LOC check
+Note: Rust tests passed `130 passed`. Focused Python smoke passed `444 passed, 3 expected xfails, 1115 deselected`. This is a setup-positive grammar slice that centralizes canonical RESCALE construction across eight insertion sites while intentionally leaving control-flow boundary RESCALEs for a control-flow-specific follow-up.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp, QParam};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp, QParam, RescaleRewrite};
 use crate::fx_target::is_where_target;
 use crate::runner_logging::log_line;
 
@@ -135,20 +135,18 @@ fn insert_input_rescale(
         .meta
         .rescale_output_meta(output_qparam);
     let consumer_name = graph.node(consumer_id).name.clone();
-    let rescale = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{consumer_name}_arg{arg_pos}_int32_rescale"),
-        "backend.tosa.RESCALE.default".to_string(),
-        vec![
-            IrArg::Node(source_id),
-            IrArg::Dtype("torch.int32".to_string()),
-            IrArg::List(vec![IrArg::Float(old_scale / new_scale)]),
-            IrArg::Int(old_zp),
-            IrArg::Int(0),
-        ],
-        meta,
+    let rescale = graph.add_after_rescale(
+        source_id,
+        RescaleRewrite::new(
+            format!("{consumer_name}_arg{arg_pos}_int32_rescale"),
+            source_id,
+            "torch.int32",
+            vec![old_scale / new_scale],
+            old_zp,
+            0,
+            meta,
+        ),
     );
-    graph.anchor_after(rescale, source_id);
     graph.replace_input_use(consumer_id, source_id, rescale);
     rescale
 }
@@ -171,25 +169,19 @@ fn insert_output_rescale(
         .node(source_id)
         .meta
         .rescale_output_meta(output_qparam.clone());
-    let rescale = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_output_rescale", graph.node(source_id).name),
-        "backend.tosa.RESCALE.default".to_string(),
-        vec![
-            IrArg::Node(source_id),
-            IrArg::Dtype(output_qparam.dtype_str.clone()),
-            IrArg::List(vec![IrArg::Float(output_int32_scale / output_qparam.scale)]),
-            IrArg::Int(0),
-            IrArg::Int(output_qparam.zp),
-        ],
-        meta,
+    let rescale = graph.add_after_rescale(
+        source_id,
+        RescaleRewrite::new(
+            format!("{}_output_rescale", graph.node(source_id).name),
+            source_id,
+            output_qparam.dtype_str.clone(),
+            vec![output_int32_scale / output_qparam.scale],
+            0,
+            output_qparam.zp,
+            meta,
+        ),
     );
-    graph.anchor_after(rescale, source_id);
-    for user_id in users {
-        if user_id != rescale {
-            graph.replace_input_use(user_id, source_id, rescale);
-        }
-    }
+    graph.replace_live_uses_except(source_id, rescale, rescale);
     true
 }
 
@@ -352,25 +344,19 @@ fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
         return false;
     }
     let meta = node.meta.rescale_output_meta(output_qparam.clone());
-    let rescale = graph.add_node(
-        NodeOp::CallFunction,
-        format!("{}_output_rescale", node.name),
-        "backend.tosa.RESCALE.default".to_string(),
-        vec![
-            IrArg::Node(node_id),
-            IrArg::Dtype(output_qparam.dtype_str.clone()),
-            IrArg::List(vec![IrArg::Float(then_qparam.scale / output_qparam.scale)]),
-            IrArg::Int(then_qparam.zp),
-            IrArg::Int(output_qparam.zp),
-        ],
-        meta,
+    let rescale = graph.add_after_rescale(
+        node_id,
+        RescaleRewrite::new(
+            format!("{}_output_rescale", node.name),
+            node_id,
+            output_qparam.dtype_str.clone(),
+            vec![then_qparam.scale / output_qparam.scale],
+            then_qparam.zp,
+            output_qparam.zp,
+            meta,
+        ),
     );
-    graph.anchor_after(rescale, node_id);
-    for user_id in users {
-        if user_id != rescale {
-            graph.replace_input_use(user_id, node_id, rescale);
-        }
-    }
+    graph.replace_live_uses_except(node_id, rescale, rescale);
     graph
         .node_mut(node_id)
         .meta
