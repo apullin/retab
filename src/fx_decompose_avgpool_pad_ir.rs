@@ -11,21 +11,6 @@ use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, Nod
 use crate::fx_target::is_plain_avg_pool2d_target;
 use crate::runner_logging::log_line;
 
-fn arg_i64_pair(arg: Option<&IrArg>) -> Option<(i64, i64)> {
-    match arg {
-        Some(IrArg::List(items)) => {
-            let vals: Vec<i64> = items.iter().filter_map(IrArg::as_int).collect();
-            match vals.as_slice() {
-                [v] => Some((*v, *v)),
-                [a, b, ..] => Some((*a, *b)),
-                _ => None,
-            }
-        }
-        Some(IrArg::Int(v)) => Some((*v, *v)),
-        _ => None,
-    }
-}
-
 /// Post padding needed so TOSA's explicit pre/post padding reproduces aten's
 /// symmetric pad + ceil/floor output-size rounding.
 fn adjust_pooling_pad_if_needed(
@@ -67,12 +52,17 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                 Some(n) => n,
                 None => continue,
             };
-            let Some((kernel_h, kernel_w)) = arg_i64_pair(graph.nodes[id].args.get(1)) else {
+            let pair_arg = |idx| {
+                graph.nodes[id]
+                    .args
+                    .get(idx)
+                    .and_then(IrArg::as_int_pair_or_scalar)
+            };
+            let Some((kernel_h, kernel_w)) = pair_arg(1) else {
                 continue;
             };
-            let (stride_h, stride_w) =
-                arg_i64_pair(graph.nodes[id].args.get(2)).unwrap_or((kernel_h, kernel_w));
-            let (pad_h, pad_w) = arg_i64_pair(graph.nodes[id].args.get(3)).unwrap_or((0, 0));
+            let (stride_h, stride_w) = pair_arg(2).unwrap_or((kernel_h, kernel_w));
+            let (pad_h, pad_w) = pair_arg(3).unwrap_or((0, 0));
             let ceil_mode = matches!(graph.nodes[id].args.get(4), Some(IrArg::Bool(true)));
             let mut count_include_pad = match graph.nodes[id].args.get(5) {
                 Some(IrArg::Bool(v)) => *v,

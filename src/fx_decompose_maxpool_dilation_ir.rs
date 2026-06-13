@@ -3,18 +3,6 @@
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
 
-fn pair_arg(args: &[IrArg], idx: usize, default: (i64, i64)) -> (i64, i64) {
-    match args.get(idx) {
-        Some(IrArg::List(items)) => match items.as_slice() {
-            [IrArg::Int(a), IrArg::Int(b), ..] => (*a, *b),
-            [IrArg::Int(a)] => (*a, *a),
-            _ => default,
-        },
-        Some(IrArg::Int(v)) => (*v, *v),
-        _ => default,
-    }
-}
-
 fn pack_dimension(dil: i64, pad: i64, orig: i64, kernel: i64, stride: i64) -> (i64, i64, i64) {
     let padded = orig + pad * 2;
     let extra = (dil - (padded % dil)) % dil;
@@ -121,11 +109,12 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 input_shape[3],
             );
             let args = &graph.nodes[id].args;
+            let pair_arg = |idx| args.get(idx).and_then(IrArg::as_int_pair_or_scalar);
 
-            let (k_h, k_w) = pair_arg(args, 1, (1, 1));
-            let (s_h, s_w) = pair_arg(args, 2, (k_h, k_w));
-            let (pad_h, pad_w) = pair_arg(args, 3, (0, 0));
-            let (d_h, d_w) = pair_arg(args, 4, (1, 1));
+            let (k_h, k_w) = pair_arg(1).unwrap_or((1, 1));
+            let (s_h, s_w) = pair_arg(2).unwrap_or((k_h, k_w));
+            let (pad_h, pad_w) = pair_arg(3).unwrap_or((0, 0));
+            let (d_h, d_w) = pair_arg(4).unwrap_or((1, 1));
             let ceil_mode = args.get(5).and_then(|a| a.as_bool()).unwrap_or(false);
 
             if d_h == 1 && d_w == 1 {

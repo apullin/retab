@@ -780,6 +780,14 @@ Deleted: a one-line size-adjust metadata wrapper and redundant masked-fill outpu
 Added: direct use of `NodeMeta::cloned_with_val`; masked-fill metadata now relies on clone-preserved output qparams while only restamping input qparams
 Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over conv2d, conv3d, avg_pool2d, max_pool, and masked_fill
 Note: Rust tests passed `130 passed`. Focused Python smoke passed `386 passed, 1 expected xfail, 1023 deselected`.
+
+2026-06-13, pooling pair-argument parser cleanup slice
+Rust LOC: 37,429
+Movement: -12 Rust LOC from previous checkpoint
+Deleted: duplicate scalar-or-pair argument parsers in avg-pool pad decomposition and max-pool dilation decomposition
+Added: `IrArg::as_int_pair_or_scalar`, keeping `(scalar | [x] | [h, w, ...]) -> (h, w)` parsing on the IR argument type
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over conv2d, conv3d, avg_pool2d, max_pool, and masked_fill
+Note: Rust tests passed `130 passed`. Focused Python smoke passed `386 passed, 1 expected xfail, 1023 deselected`.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

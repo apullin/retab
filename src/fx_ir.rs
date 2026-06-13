@@ -1510,6 +1510,15 @@ impl IrArg {
             _ => None,
         }
     }
+
+    pub fn as_int_pair_or_scalar(&self) -> Option<(i64, i64)> {
+        let values = self.as_int_list_or_scalar()?;
+        match values.as_slice() {
+            [v] => Some((*v, *v)),
+            [a, b, ..] => Some((*a, *b)),
+            _ => None,
+        }
+    }
 }
 
 // ===========================================================================
