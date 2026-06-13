@@ -79,12 +79,18 @@ fn configure_conv_qparams(
             if transposed {
                 return false;
             }
-            *weight_qparam = weight_qparam.slice_channels(start, end);
+            let Some(sliced) = weight_qparam.slice_axis0_channels(start, end) else {
+                return false;
+            };
+            *weight_qparam = sliced;
         }
     }
     if let Some(bias_qparam) = input_qparams.get_mut(&2) {
         if bias_qparam.is_per_channel() {
-            *bias_qparam = bias_qparam.slice_channels(start, end);
+            let Some(sliced) = bias_qparam.slice_axis0_channels(start, end) else {
+                return false;
+            };
+            *bias_qparam = sliced;
         }
     }
 
@@ -110,10 +116,7 @@ fn qparams_support_group_slicing(
         if *index == 1 && transposed {
             return false;
         }
-        if (*index == 1 || *index == 2)
-            && (qparam.per_channel_scales.len() < end
-                || (!qparam.per_channel_zps.is_empty() && qparam.per_channel_zps.len() < end))
-        {
+        if (*index == 1 || *index == 2) && !qparam.supports_axis0_channel_slice(end) {
             return false;
         }
     }

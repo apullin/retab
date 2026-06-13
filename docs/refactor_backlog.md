@@ -764,6 +764,14 @@ Deleted: the `effects.effects` field-access stutter from active source and tests
 Added: `LoweringEffectBatch::items` as the neutral vector field while keeping outer pass results named `effects`
 Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh`; stutter/stale-name grep; `git diff --check`
 Note: Rust tests passed `130 passed`, and focused Python smoke passed `268 passed, 1 expected xfail, 671 deselected`. This is a readability cleanup on top of Refactor 6; behavior and effect ordering are unchanged.
+
+2026-06-13, per-channel qparam axis-slice grammar
+Rust LOC: 37,453
+Movement: +15 Rust LOC from previous checkpoint
+Deleted: the only non-generated `#[allow(dead_code)]` in active Rust source and the grouped-conv pass's raw per-channel vector bounds checks
+Added: `QParam::supports_axis0_channel_slice` and `QParam::slice_axis0_channels`, making grouped-conv's output-channel slicing assumption explicit and checked
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib fx_decompose_grouped_conv_ir`; `cargo test --lib fx_fold_qdq_ir`; source dead-code suppression audit
+Note: targeted Rust tests passed `2 passed` for grouped-conv decomposition and `8 passed` for folded Q/DQ metadata. Only generated TOSA bindings retain `#[allow(dead_code)]`.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

@@ -15,7 +15,6 @@ pub(crate) struct QParam {
     /// Per-channel zero points (empty for per-tensor quantization).
     pub per_channel_zps: Vec<i64>,
     /// Quantization axis for per-channel (default 0).
-    #[allow(dead_code)]
     pub axis: i64,
 }
 
@@ -63,15 +62,28 @@ impl QParam {
         !self.per_channel_scales.is_empty()
     }
 
-    /// Slice per-channel qparams to a sub-range (for grouped conv decomposition).
-    pub fn slice_channels(&self, start: usize, end: usize) -> Self {
+    pub fn supports_axis0_channel_slice(&self, end: usize) -> bool {
+        !self.is_per_channel()
+            || (self.axis == 0
+                && self.per_channel_scales.len() >= end
+                && (self.per_channel_zps.is_empty() || self.per_channel_zps.len() >= end))
+    }
+
+    /// Slice output-channel qparams for grouped conv decomposition.
+    pub fn slice_axis0_channels(&self, start: usize, end: usize) -> Option<Self> {
+        if start > end || !self.supports_axis0_channel_slice(end) {
+            return None;
+        }
         let mut sliced = self.clone();
         if self.is_per_channel() {
             sliced.per_channel_scales = self.per_channel_scales[start..end].to_vec();
-            sliced.per_channel_zps =
-                self.per_channel_zps[start..end.min(self.per_channel_zps.len())].to_vec();
+            sliced.per_channel_zps = if self.per_channel_zps.is_empty() {
+                Vec::new()
+            } else {
+                self.per_channel_zps[start..end].to_vec()
+            };
         }
-        sliced
+        Some(sliced)
     }
 
     pub(crate) fn same_scale_zp(&self, other: &Self) -> bool {
