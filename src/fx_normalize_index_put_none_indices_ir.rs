@@ -9,6 +9,7 @@
 //! Runs before IrRewriteIndexPut, which then handles the None-free index_put.
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_target::is_index_put_default_target;
 use crate::runner_logging::log_line;
 
 fn permute_shape(shape: &[i64], order: &[usize]) -> Vec<i64> {
@@ -67,7 +68,7 @@ fn data_dim_order(explicit_dims: &[usize], destination_dim_order: &[usize]) -> V
 
 fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     let target = graph.nodes[id].target.clone();
-    if !target.contains("index_put.default") && !target.contains("index_put_.default") {
+    if !is_index_put_default_target(&target) {
         return false;
     }
     if graph.nodes[id].args.len() < 3 {
@@ -281,16 +282,6 @@ impl IrPass for IrNormalizeIndexPutNoneIndicesPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::FakeTensorMeta;
-
-    fn meta(shape: &[i64]) -> NodeMeta {
-        let mut m = NodeMeta::default();
-        m.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: "torch.int8".to_string(),
-        });
-        m
-    }
 
     /// Build index_put(dest, indices, data) where indices is given as a list of
     /// Option<NodeId> (None -> IrArg::None).
@@ -305,7 +296,7 @@ mod tests {
             "dest".into(),
             "dest".into(),
             vec![],
-            meta(dest_shape),
+            NodeMeta::tensor(dest_shape, "torch.int8"),
         );
         let mut idx_args = vec![];
         for (i, idx) in indices.iter().enumerate() {
@@ -316,7 +307,7 @@ mod tests {
                         format!("idx{i}"),
                         format!("idx{i}"),
                         vec![],
-                        meta(s),
+                        NodeMeta::tensor(*s, "torch.int8"),
                     );
                     idx_args.push(IrArg::Node(n));
                 }
@@ -328,14 +319,14 @@ mod tests {
             "data".into(),
             "data".into(),
             vec![],
-            meta(data_shape),
+            NodeMeta::tensor(data_shape, "torch.int8"),
         );
         let put = g.add_node(
             NodeOp::CallFunction,
             "ip".into(),
             "aten.index_put.default".into(),
             vec![IrArg::Node(dest), IrArg::List(idx_args), IrArg::Node(data)],
-            meta(dest_shape),
+            NodeMeta::tensor(dest_shape, "torch.int8"),
         );
         g.add_node(
             NodeOp::Output,

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp, QParam};
+use crate::fx_target::is_where_target;
 use crate::runner_logging::log_line;
 
 const I32_MIN: i64 = -2_147_483_648;
@@ -97,20 +98,6 @@ fn compute_output_int32_scale(target: &str, rescaled_input_scales: &[f64]) -> Op
     rescaled_input_scales.first().copied()
 }
 
-fn sorted_input_qparams(meta: &NodeMeta) -> Vec<(usize, QParam)> {
-    let mut qparams: Vec<_> = meta
-        .input_qparams
-        .as_ref()
-        .map(|map| {
-            map.iter()
-                .map(|(&idx, qparam)| (idx, qparam.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
-    qparams.sort_by_key(|(idx, _)| *idx);
-    qparams
-}
-
 fn producer_old_zero_point(graph: &IrGraph, producer_id: NodeId, fallback_zp: i64) -> i64 {
     let producer = graph.node(producer_id);
     if producer.op == NodeOp::CallFunction && classify_int32_op(&producer.target).is_some() {
@@ -133,20 +120,6 @@ fn producer_old_zero_point(graph: &IrGraph, producer_id: NodeId, fallback_zp: i6
     }
 }
 
-fn rescale_meta(source: &NodeMeta, output_qparam: QParam) -> NodeMeta {
-    let mut meta = source.clone();
-    meta.set_input_qparams(HashMap::new());
-    meta.set_single_output_qparam(output_qparam.clone());
-    meta.extras.remove("tosa_special_dtype");
-    if let Some(shape) = source.val_shape() {
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: output_qparam.dtype_str,
-        });
-    }
-    meta
-}
-
 fn insert_input_rescale(
     graph: &mut IrGraph,
     consumer_id: NodeId,
@@ -157,7 +130,10 @@ fn insert_input_rescale(
     new_scale: f64,
 ) -> NodeId {
     let output_qparam = int32_qparam(new_scale);
-    let meta = rescale_meta(&graph.node(source_id).meta, output_qparam);
+    let meta = graph
+        .node(source_id)
+        .meta
+        .rescale_output_meta(output_qparam);
     let consumer_name = graph.node(consumer_id).name.clone();
     let rescale = graph.add_node(
         NodeOp::CallFunction,
@@ -173,7 +149,6 @@ fn insert_input_rescale(
         meta,
     );
     graph.anchor_after(rescale, source_id);
-    graph.copy_meta_from(rescale, source_id);
     graph.replace_input_use(consumer_id, source_id, rescale);
     rescale
 }
@@ -192,7 +167,10 @@ fn insert_output_rescale(
         return false;
     }
 
-    let meta = rescale_meta(&graph.node(source_id).meta, output_qparam.clone());
+    let meta = graph
+        .node(source_id)
+        .meta
+        .rescale_output_meta(output_qparam.clone());
     let rescale = graph.add_node(
         NodeOp::CallFunction,
         format!("{}_output_rescale", graph.node(source_id).name),
@@ -207,7 +185,6 @@ fn insert_output_rescale(
         meta,
     );
     graph.anchor_after(rescale, source_id);
-    graph.copy_meta_from(rescale, source_id);
     for user_id in users {
         if user_id != rescale {
             graph.replace_input_use(user_id, source_id, rescale);
@@ -225,7 +202,7 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
         return false;
     };
 
-    let input_qparams = sorted_input_qparams(&node.meta);
+    let input_qparams = node.meta.sorted_input_qparams();
     if input_qparams.is_empty()
         || !input_qparams
             .iter()
@@ -298,17 +275,10 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
     }
 
     if output_int32_scale.is_some() {
-        if let Some(shape) = graph
-            .node(node_id)
+        graph
+            .node_mut(node_id)
             .meta
-            .val_shape()
-            .map(|shape| shape.to_vec())
-        {
-            graph.node_mut(node_id).meta.set_val(FakeTensorMeta {
-                shape,
-                dtype: "torch.int32".to_string(),
-            });
-        }
+            .set_val_dtype_for_existing_shape("torch.int32");
     }
 
     true
@@ -326,7 +296,7 @@ fn qparam_signature(qparam: &QParam) -> (f64, i64, i64, i64, &str) {
 
 fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
     let node = graph.node(node_id).clone();
-    if !node.alive || node.op != NodeOp::CallFunction || !node.target.contains("where.self") {
+    if !node.alive || node.op != NodeOp::CallFunction || !is_where_target(&node.target) {
         return false;
     }
 
@@ -370,12 +340,10 @@ fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
             .node_mut(node_id)
             .meta
             .set_output_qparams(branch_output_qparams);
-        if let Some(shape) = node.meta.val_shape() {
-            graph.node_mut(node_id).meta.set_val(FakeTensorMeta {
-                shape: shape.to_vec(),
-                dtype: output_qparam.dtype_str,
-            });
-        }
+        graph
+            .node_mut(node_id)
+            .meta
+            .set_val_dtype_for_existing_shape(output_qparam.dtype_str);
         return true;
     }
 
@@ -383,7 +351,7 @@ fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
     if users.is_empty() {
         return false;
     }
-    let meta = rescale_meta(&node.meta, output_qparam.clone());
+    let meta = node.meta.rescale_output_meta(output_qparam.clone());
     let rescale = graph.add_node(
         NodeOp::CallFunction,
         format!("{}_output_rescale", node.name),
@@ -398,7 +366,6 @@ fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
         meta,
     );
     graph.anchor_after(rescale, node_id);
-    graph.copy_meta_from(rescale, node_id);
     for user_id in users {
         if user_id != rescale {
             graph.replace_input_use(user_id, node_id, rescale);
@@ -442,18 +409,10 @@ impl IrPass for IrInsertInt32RescalePass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fx_ir::NodeMeta;
 
     fn qparam(scale: f64, zp: i64, dtype: &str) -> QParam {
         QParam::per_tensor(scale, zp, -128, 127, dtype.to_string())
-    }
-
-    fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
-        let mut meta = NodeMeta::default();
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: dtype.to_string(),
-        });
-        meta
     }
 
     #[test]
@@ -464,16 +423,16 @@ mod tests {
             "lhs".to_string(),
             "lhs".to_string(),
             Vec::new(),
-            meta(&[2], "torch.int8"),
+            NodeMeta::tensor(&[2], "torch.int8"),
         );
         let rhs = graph.add_node(
             NodeOp::Placeholder,
             "rhs".to_string(),
             "rhs".to_string(),
             Vec::new(),
-            meta(&[2], "torch.int8"),
+            NodeMeta::tensor(&[2], "torch.int8"),
         );
-        let mut add_meta = meta(&[2], "torch.int8");
+        let mut add_meta = NodeMeta::tensor(&[2], "torch.int8");
         let mut input_qparams = HashMap::new();
         input_qparams.insert(0, qparam(0.25, 3, "torch.int8"));
         input_qparams.insert(1, qparam(0.5, -4, "torch.int8"));
@@ -491,7 +450,7 @@ mod tests {
             "user".to_string(),
             "aten.view_copy.default".to_string(),
             vec![IrArg::Node(add)],
-            meta(&[2], "torch.int8"),
+            NodeMeta::tensor(&[2], "torch.int8"),
         );
 
         assert!(IrInsertInt32RescalePass.run(&mut graph));
@@ -516,16 +475,16 @@ mod tests {
             "lhs".to_string(),
             "lhs".to_string(),
             Vec::new(),
-            meta(&[2], "torch.int32"),
+            NodeMeta::tensor(&[2], "torch.int32"),
         );
         let rhs = graph.add_node(
             NodeOp::Placeholder,
             "rhs".to_string(),
             "rhs".to_string(),
             Vec::new(),
-            meta(&[2], "torch.int32"),
+            NodeMeta::tensor(&[2], "torch.int32"),
         );
-        let mut add_meta = meta(&[2], "torch.int32");
+        let mut add_meta = NodeMeta::tensor(&[2], "torch.int32");
         let mut input_qparams = HashMap::new();
         input_qparams.insert(0, int32_qparam(0.25));
         input_qparams.insert(1, int32_qparam(0.5));
@@ -543,7 +502,7 @@ mod tests {
             "user".to_string(),
             "aten.view_copy.default".to_string(),
             vec![IrArg::Node(add)],
-            meta(&[2], "torch.int32"),
+            NodeMeta::tensor(&[2], "torch.int32"),
         );
 
         assert!(IrInsertInt32RescalePass.run(&mut graph));
@@ -567,23 +526,23 @@ mod tests {
             "cond".to_string(),
             "cond".to_string(),
             Vec::new(),
-            meta(&[2], "torch.bool"),
+            NodeMeta::tensor(&[2], "torch.bool"),
         );
         let lhs = graph.add_node(
             NodeOp::Placeholder,
             "lhs".to_string(),
             "lhs".to_string(),
             Vec::new(),
-            meta(&[2], "torch.int8"),
+            NodeMeta::tensor(&[2], "torch.int8"),
         );
         let rhs = graph.add_node(
             NodeOp::Placeholder,
             "rhs".to_string(),
             "rhs".to_string(),
             Vec::new(),
-            meta(&[2], "torch.int8"),
+            NodeMeta::tensor(&[2], "torch.int8"),
         );
-        let mut where_meta = meta(&[2], "torch.int8");
+        let mut where_meta = NodeMeta::tensor(&[2], "torch.int8");
         let mut input_qparams = HashMap::new();
         input_qparams.insert(1, qparam(0.5, 3, "torch.int8"));
         input_qparams.insert(2, qparam(0.5, 3, "torch.int8"));
@@ -601,7 +560,7 @@ mod tests {
             "user".to_string(),
             "aten.view_copy.default".to_string(),
             vec![IrArg::Node(where_id)],
-            meta(&[2], "torch.int8"),
+            NodeMeta::tensor(&[2], "torch.int8"),
         );
 
         assert!(IrInsertInt32RescalePass.run(&mut graph));

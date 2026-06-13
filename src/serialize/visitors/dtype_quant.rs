@@ -59,6 +59,32 @@ pub(super) fn node_output_dtype(node: &Node) -> DType {
     ir_dtype_to_tosa(node.meta.val.dtype)
 }
 
+pub(super) fn input_qparam_zero_point(node: &Node, pos: usize) -> Option<i32> {
+    let pos_u32 = pos as u32;
+    node.meta
+        .input_qparams
+        .iter()
+        .find(|(qp_pos, _)| *qp_pos == pos_u32)
+        .map(|(_, qp)| qp.zero_point as i32)
+}
+
+pub(super) fn input_qparam_zero_point_or_kwarg(
+    node: &Node,
+    pos: usize,
+    kwarg_name: &str,
+    default: i32,
+) -> i32 {
+    input_qparam_zero_point(node, pos).unwrap_or_else(|| kwarg_i32(node, kwarg_name, default))
+}
+
+pub(super) fn output_qparam_zero_point(node: &Node) -> Option<i32> {
+    node.meta
+        .output_qparams
+        .iter()
+        .find(|(pos, _)| *pos == 0)
+        .map(|(_, qp)| qp.zero_point as i32)
+}
+
 pub(super) fn conv_accumulator_dtype(node: &Node) -> DType {
     if let Some(dt) = node.meta.tosa_special_dtype {
         return ir_dtype_to_tosa(dt);
@@ -225,25 +251,13 @@ pub(super) fn node_input_zero_point(
     kwarg_name: &str,
     default: i32,
 ) -> i32 {
-    let pos_u32 = pos as u32;
     producer_output_zero_point(graph, node, pos)
-        .or_else(|| {
-            node.meta
-                .input_qparams
-                .iter()
-                .find(|(qp_pos, _)| *qp_pos == pos_u32)
-                .map(|(_, qp)| qp.zero_point as i32)
-        })
+        .or_else(|| input_qparam_zero_point(node, pos))
         .unwrap_or_else(|| kwarg_i32(node, kwarg_name, default))
 }
 
 pub(super) fn node_output_zero_point(node: &Node, kwarg_name: &str, default: i32) -> i32 {
-    node.meta
-        .output_qparams
-        .iter()
-        .find(|(pos, _)| *pos == 0)
-        .map(|(_, qp)| qp.zero_point as i32)
-        .unwrap_or_else(|| kwarg_i32(node, kwarg_name, default))
+    output_qparam_zero_point(node).unwrap_or_else(|| kwarg_i32(node, kwarg_name, default))
 }
 
 pub(super) fn matmul_input_dtype(graph: &Graph, node: &Node, index: usize) -> DType {

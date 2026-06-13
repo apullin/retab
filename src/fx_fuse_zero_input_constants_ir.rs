@@ -1,47 +1,18 @@
 use std::collections::HashSet;
 
-use crate::fx_ep_effects::{
-    FxEpEffect, FxEpEffectBatch, FxMaterializeZeroInputConstantEffect,
-    FxMaterializeZeroInputConstantNodeEffect,
-};
+use crate::fx_constant_tensor_eval::{node_has_tensor_inputs, tensor_numel};
 use crate::fx_fuse_constant_args::ZeroInputConstantKind;
-use crate::fx_ir::{IrArg, IrEpPass, IrEpPassResult, IrGraph, IrNode, NodeOp, QParam};
+use crate::fx_ir::{
+    EffectfulIrPass, EffectfulIrPassResult, IrArg, IrGraph, IrNode, NodeOp, QParam,
+};
 use crate::graph::ir::DType;
+use crate::lowering_effects::{
+    LoweringEffect, LoweringEffectBatch, MaterializeZeroInputConstantEffect,
+    MaterializeZeroInputConstantNodeEffect,
+};
 use crate::tensor_data::parse_torch_dtype;
 
-pub struct IrFuseZeroInputConstantsEpPass;
-
-fn arg_has_node(arg: &IrArg) -> bool {
-    match arg {
-        IrArg::Node(_) => true,
-        IrArg::List(values) => values.iter().any(arg_has_node),
-        _ => false,
-    }
-}
-
-fn has_tensor_inputs(node: &IrNode) -> bool {
-    node.args.iter().any(arg_has_node) || node.kwargs.values().any(arg_has_node)
-}
-
-fn arg_int_list(arg: &IrArg) -> Option<Vec<i64>> {
-    match arg {
-        IrArg::List(values) => values
-            .iter()
-            .map(|value| match value {
-                IrArg::Int(value) => Some(*value),
-                _ => None,
-            })
-            .collect(),
-        _ => None,
-    }
-}
-
-fn tensor_numel(shape: &[i64]) -> Option<usize> {
-    shape.iter().try_fold(1usize, |acc, &dim| {
-        let dim = usize::try_from(dim).ok()?;
-        acc.checked_mul(dim)
-    })
-}
+pub struct IrFuseZeroInputConstantsEffectPass;
 
 fn scalar_fill_bytes(dtype: DType, value: f64) -> Option<Vec<u8>> {
     Some(match dtype {
@@ -79,21 +50,7 @@ fn parse_dtype_arg(arg: &IrArg) -> Option<DType> {
 }
 
 fn full_fill_value(node: &IrNode) -> Option<f64> {
-    match node.args.get(1)? {
-        IrArg::Int(value) => Some(*value as f64),
-        IrArg::Float(value) => Some(*value),
-        IrArg::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
-        _ => None,
-    }
-}
-
-fn arg_as_f64(arg: &IrArg) -> Option<f64> {
-    match arg {
-        IrArg::Int(value) => Some(*value as f64),
-        IrArg::Float(value) => Some(*value),
-        IrArg::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
-        _ => None,
-    }
+    node.args.get(1)?.as_scalar_literal_f64()
 }
 
 fn int_qparam(node: &IrNode) -> Option<QParam> {
@@ -178,22 +135,47 @@ fn quantized_scalar_bytes(qp: &QParam, value: f64) -> Option<(DType, Vec<u8>)> {
     Some((dtype, scalar_fill_bytes(dtype, quantized)?))
 }
 
+fn output_int_qparam_and_dtype(node: &IrNode) -> Option<(Option<QParam>, DType)> {
+    let qparam = node
+        .meta
+        .output_qparam()
+        .cloned()
+        .filter(|qp| qp.dtype_str.contains("int"));
+    let dtype = qparam
+        .as_ref()
+        .map(|qp| parse_torch_dtype(&qp.dtype_str))
+        .or_else(|| explicit_zero_input_dtype(node))?;
+    Some((qparam, dtype))
+}
+
+fn scalar_bytes_in_domain(dtype: DType, qparam: Option<&QParam>, value: f64) -> Option<Vec<u8>> {
+    if let Some(qp) = qparam {
+        let (qp_dtype, scalar) = quantized_scalar_bytes(qp, value)?;
+        return (qp_dtype == dtype).then_some(scalar);
+    }
+    scalar_fill_bytes(dtype, value)
+}
+
 fn arange_spec(node: &IrNode) -> Option<(f64, f64, f64)> {
     if node.target.contains("aten.arange.start_step") {
-        let start = arg_as_f64(node.args.first()?)?;
-        let end = arg_as_f64(node.args.get(1)?)?;
-        let step = node.args.get(2).and_then(arg_as_f64).unwrap_or(1.0);
+        let start = node.args.first()?.as_scalar_literal_f64()?;
+        let end = node.args.get(1)?.as_scalar_literal_f64()?;
+        let step = node
+            .args
+            .get(2)
+            .and_then(IrArg::as_scalar_literal_f64)
+            .unwrap_or(1.0);
         return Some((start, end, step));
     }
     if node.target.contains("aten.arange.start") {
         if node.args.len() >= 2 {
             return Some((
-                arg_as_f64(node.args.first()?)?,
-                arg_as_f64(node.args.get(1)?)?,
+                node.args.first()?.as_scalar_literal_f64()?,
+                node.args.get(1)?.as_scalar_literal_f64()?,
                 1.0,
             ));
         }
-        return Some((0.0, arg_as_f64(node.args.first()?)?, 1.0));
+        return Some((0.0, node.args.first()?.as_scalar_literal_f64()?, 1.0));
     }
     None
 }
@@ -210,37 +192,21 @@ fn arange_output_shape(node: &IrNode, start: f64, end: f64, step: f64) -> Option
     Some(vec![len])
 }
 
-fn plan_zero_input_arange(node: &IrNode) -> Option<FxMaterializeZeroInputConstantNodeEffect> {
+fn plan_zero_input_arange(node: &IrNode) -> Option<MaterializeZeroInputConstantNodeEffect> {
     let (start, end, step) = arange_spec(node)?;
     let shape = arange_output_shape(node, start, end, step)?;
     let numel = tensor_numel(&shape)?;
 
-    let qparam = node
-        .meta
-        .output_qparam()
-        .cloned()
-        .filter(|qp| qp.dtype_str.contains("int"));
-    let dtype = qparam
-        .as_ref()
-        .map(|qp| parse_torch_dtype(&qp.dtype_str))
-        .or_else(|| explicit_zero_input_dtype(node))?;
+    let (qparam, dtype) = output_int_qparam_and_dtype(node)?;
 
     let mut data = Vec::new();
     for idx in 0..numel {
         let value = start + (idx as f64 * step);
-        let scalar = if let Some(qp) = qparam.as_ref() {
-            let (qp_dtype, scalar) = quantized_scalar_bytes(qp, value)?;
-            if qp_dtype != dtype {
-                return None;
-            }
-            scalar
-        } else {
-            scalar_fill_bytes(dtype, value)?
-        };
+        let scalar = scalar_bytes_in_domain(dtype, qparam.as_ref(), value)?;
         data.extend_from_slice(&scalar);
     }
 
-    Some(FxMaterializeZeroInputConstantNodeEffect {
+    Some(MaterializeZeroInputConstantNodeEffect {
         node_name: node.name.clone(),
         data,
         shape,
@@ -249,13 +215,13 @@ fn plan_zero_input_arange(node: &IrNode) -> Option<FxMaterializeZeroInputConstan
     })
 }
 
-fn plan_zero_input_linspace(node: &IrNode) -> Option<FxMaterializeZeroInputConstantNodeEffect> {
+fn plan_zero_input_linspace(node: &IrNode) -> Option<MaterializeZeroInputConstantNodeEffect> {
     if !node.target.contains("aten.linspace.default") {
         return None;
     }
 
-    let start = arg_as_f64(node.args.first()?)?;
-    let end = arg_as_f64(node.args.get(1)?)?;
+    let start = node.args.first()?.as_scalar_literal_f64()?;
+    let end = node.args.get(1)?.as_scalar_literal_f64()?;
     let steps = match node.args.get(2)? {
         IrArg::Int(value) => usize::try_from(*value).ok()?,
         _ => return None,
@@ -267,15 +233,7 @@ fn plan_zero_input_linspace(node: &IrNode) -> Option<FxMaterializeZeroInputConst
         .map(|shape| shape.to_vec())
         .unwrap_or_else(|| vec![steps as i64]);
 
-    let qparam = node
-        .meta
-        .output_qparam()
-        .cloned()
-        .filter(|qp| qp.dtype_str.contains("int"));
-    let dtype = qparam
-        .as_ref()
-        .map(|qp| parse_torch_dtype(&qp.dtype_str))
-        .or_else(|| explicit_zero_input_dtype(node))?;
+    let (qparam, dtype) = output_int_qparam_and_dtype(node)?;
 
     let mut data = Vec::new();
     for idx in 0..steps {
@@ -284,19 +242,11 @@ fn plan_zero_input_linspace(node: &IrNode) -> Option<FxMaterializeZeroInputConst
         } else {
             start + (idx as f64 * (end - start) / (steps - 1) as f64)
         };
-        let scalar = if let Some(qp) = qparam.as_ref() {
-            let (qp_dtype, scalar) = quantized_scalar_bytes(qp, value)?;
-            if qp_dtype != dtype {
-                return None;
-            }
-            scalar
-        } else {
-            scalar_fill_bytes(dtype, value)?
-        };
+        let scalar = scalar_bytes_in_domain(dtype, qparam.as_ref(), value)?;
         data.extend_from_slice(&scalar);
     }
 
-    Some(FxMaterializeZeroInputConstantNodeEffect {
+    Some(MaterializeZeroInputConstantNodeEffect {
         node_name: node.name.clone(),
         data,
         shape,
@@ -307,7 +257,9 @@ fn plan_zero_input_linspace(node: &IrNode) -> Option<FxMaterializeZeroInputConst
 
 fn full_bail_reason(graph: &IrGraph, node: &IrNode) -> &'static str {
     let shape = match node.args.first() {
-        Some(arg) => arg_int_list(arg).or_else(|| node.meta.val_shape().map(|s| s.to_vec())),
+        Some(arg) => arg
+            .as_int_list()
+            .or_else(|| node.meta.val_shape().map(|s| s.to_vec())),
         None => node.meta.val_shape().map(|s| s.to_vec()),
     };
     if shape.is_none() {
@@ -341,7 +293,7 @@ fn full_bail_reason(graph: &IrGraph, node: &IrNode) -> &'static str {
     "ok_but_planned_none"
 }
 
-fn plan_zero_input_eye(node: &IrNode) -> Option<FxMaterializeZeroInputConstantNodeEffect> {
+fn plan_zero_input_eye(node: &IrNode) -> Option<MaterializeZeroInputConstantNodeEffect> {
     let n = match node.args.first()? {
         IrArg::Int(value) => usize::try_from(*value).ok()?,
         _ => return None,
@@ -357,34 +309,18 @@ fn plan_zero_input_eye(node: &IrNode) -> Option<FxMaterializeZeroInputConstantNo
         .map(|shape| shape.to_vec())
         .unwrap_or_else(|| vec![n as i64, m as i64]);
 
-    let qparam = node
-        .meta
-        .output_qparam()
-        .cloned()
-        .filter(|qp| qp.dtype_str.contains("int"));
-    let dtype = qparam
-        .as_ref()
-        .map(|qp| parse_torch_dtype(&qp.dtype_str))
-        .or_else(|| explicit_zero_input_dtype(node))?;
+    let (qparam, dtype) = output_int_qparam_and_dtype(node)?;
 
     let mut data = Vec::new();
     for row in 0..n {
         for col in 0..m {
             let value = if row == col { 1.0 } else { 0.0 };
-            let scalar = if let Some(qp) = qparam.as_ref() {
-                let (qp_dtype, scalar) = quantized_scalar_bytes(qp, value)?;
-                if qp_dtype != dtype {
-                    return None;
-                }
-                scalar
-            } else {
-                scalar_fill_bytes(dtype, value)?
-            };
+            let scalar = scalar_bytes_in_domain(dtype, qparam.as_ref(), value)?;
             data.extend_from_slice(&scalar);
         }
     }
 
-    Some(FxMaterializeZeroInputConstantNodeEffect {
+    Some(MaterializeZeroInputConstantNodeEffect {
         node_name: node.name.clone(),
         data,
         shape,
@@ -396,11 +332,11 @@ fn plan_zero_input_eye(node: &IrNode) -> Option<FxMaterializeZeroInputConstantNo
 fn plan_zero_input_full(
     graph: &IrGraph,
     node: &IrNode,
-) -> Option<FxMaterializeZeroInputConstantNodeEffect> {
+) -> Option<MaterializeZeroInputConstantNodeEffect> {
     let shape = match node.args.first() {
-        Some(arg) => {
-            arg_int_list(arg).or_else(|| node.meta.val_shape().map(|shape| shape.to_vec()))
-        }
+        Some(arg) => arg
+            .as_int_list()
+            .or_else(|| node.meta.val_shape().map(|shape| shape.to_vec())),
         None => node.meta.val_shape().map(|shape| shape.to_vec()),
     }?;
     let fill_value = full_fill_value(node)?;
@@ -418,7 +354,7 @@ fn plan_zero_input_full(
         (dtype, scalar_fill_bytes(dtype, fill_value)?)
     };
 
-    Some(FxMaterializeZeroInputConstantNodeEffect {
+    Some(MaterializeZeroInputConstantNodeEffect {
         node_name: node.name.clone(),
         data: repeated_scalar_bytes(&shape, &scalar)?,
         shape,
@@ -428,7 +364,7 @@ fn plan_zero_input_full(
 }
 
 fn planned_zero_input_constant_kind(node: &IrNode) -> Option<ZeroInputConstantKind> {
-    if !node.alive || node.op != NodeOp::CallFunction || has_tensor_inputs(node) {
+    if !node.alive || node.op != NodeOp::CallFunction || node_has_tensor_inputs(node) {
         return None;
     }
     if node.target.contains("aten.full.default") {
@@ -443,12 +379,12 @@ fn planned_zero_input_constant_kind(node: &IrNode) -> Option<ZeroInputConstantKi
     None
 }
 
-impl IrEpPass for IrFuseZeroInputConstantsEpPass {
+impl EffectfulIrPass for IrFuseZeroInputConstantsEffectPass {
     fn name(&self) -> &str {
         "IrFuseZeroInputConstantsEp"
     }
 
-    fn run(&self, graph: &mut IrGraph) -> IrEpPassResult {
+    fn run(&self, graph: &mut IrGraph) -> EffectfulIrPassResult {
         let mut effects = Vec::new();
         for node in &graph.nodes {
             let Some(kind) = planned_zero_input_constant_kind(node) else {
@@ -456,22 +392,22 @@ impl IrEpPass for IrFuseZeroInputConstantsEpPass {
             };
             if kind == ZeroInputConstantKind::Full {
                 if let Some(effect) = plan_zero_input_full(graph, node) {
-                    effects.push(FxEpEffect::MaterializeZeroInputConstantNode(effect));
+                    effects.push(LoweringEffect::MaterializeZeroInputConstantNode(effect));
                     continue;
                 }
             } else if node.target.contains("aten.arange") {
                 if let Some(effect) = plan_zero_input_arange(node) {
-                    effects.push(FxEpEffect::MaterializeZeroInputConstantNode(effect));
+                    effects.push(LoweringEffect::MaterializeZeroInputConstantNode(effect));
                     continue;
                 }
             } else if node.target.contains("aten.linspace.default") {
                 if let Some(effect) = plan_zero_input_linspace(node) {
-                    effects.push(FxEpEffect::MaterializeZeroInputConstantNode(effect));
+                    effects.push(LoweringEffect::MaterializeZeroInputConstantNode(effect));
                     continue;
                 }
             } else if node.target.contains("aten.eye") {
                 if let Some(effect) = plan_zero_input_eye(node) {
-                    effects.push(FxEpEffect::MaterializeZeroInputConstantNode(effect));
+                    effects.push(LoweringEffect::MaterializeZeroInputConstantNode(effect));
                     continue;
                 }
             }
@@ -484,8 +420,8 @@ impl IrEpPass for IrFuseZeroInputConstantsEpPass {
                 "MaterializeZeroInputConstant target={} kind={:?} why={}",
                 node.target, kind, why
             ));
-            effects.push(FxEpEffect::MaterializeZeroInputConstant(
-                FxMaterializeZeroInputConstantEffect {
+            effects.push(LoweringEffect::MaterializeZeroInputConstant(
+                MaterializeZeroInputConstantEffect {
                     node_name: node.name.clone(),
                     kind,
                     allow_missing: true,
@@ -493,9 +429,9 @@ impl IrEpPass for IrFuseZeroInputConstantsEpPass {
             ));
         }
         let modified = !effects.is_empty();
-        IrEpPassResult {
+        EffectfulIrPassResult {
             modified,
-            effects: FxEpEffectBatch { effects },
+            effects: LoweringEffectBatch { items: effects },
         }
     }
 }
@@ -543,22 +479,22 @@ mod tests {
         );
         add_call(&mut graph, "eye", "aten.eye.default", vec![IrArg::Int(4)]);
 
-        let pass = IrFuseZeroInputConstantsEpPass;
+        let pass = IrFuseZeroInputConstantsEffectPass;
         let result = pass.run(&mut graph);
 
         assert!(result.modified);
-        assert_eq!(result.effects.effects.len(), 4);
+        assert_eq!(result.effects.items.len(), 4);
         assert!(matches!(
-            &result.effects.effects[0],
-            FxEpEffect::MaterializeZeroInputConstantNode(effect)
+            &result.effects.items[0],
+            LoweringEffect::MaterializeZeroInputConstantNode(effect)
                 if effect.node_name == "full"
                     && effect.dtype == DType::Float32
                     && effect.shape == vec![2]
                     && effect.data == [3.0f32.to_le_bytes(), 3.0f32.to_le_bytes()].concat()
         ));
         assert!(matches!(
-            &result.effects.effects[1],
-            FxEpEffect::MaterializeZeroInputConstant(effect)
+            &result.effects.items[1],
+            LoweringEffect::MaterializeZeroInputConstant(effect)
                 if effect.kind == ZeroInputConstantKind::FactoryCall
         ));
     }
@@ -596,12 +532,12 @@ mod tests {
             vec![IrArg::Node(full), IrArg::Node(other)],
         );
 
-        let pass = IrFuseZeroInputConstantsEpPass;
+        let pass = IrFuseZeroInputConstantsEffectPass;
         let result = pass.run(&mut graph);
 
         assert!(matches!(
-            &result.effects.effects[0],
-            FxEpEffect::MaterializeZeroInputConstantNode(effect)
+            &result.effects.items[0],
+            LoweringEffect::MaterializeZeroInputConstantNode(effect)
                 if effect.node_name == "full"
                     && effect.dtype == DType::Int8
                     && effect.shape == vec![2]
@@ -649,12 +585,12 @@ mod tests {
             vec![IrArg::Node(other), IrArg::Node(scale)],
         );
 
-        let pass = IrFuseZeroInputConstantsEpPass;
+        let pass = IrFuseZeroInputConstantsEffectPass;
         let result = pass.run(&mut graph);
 
         assert!(matches!(
-            &result.effects.effects[0],
-            FxEpEffect::MaterializeZeroInputConstantNode(effect)
+            &result.effects.items[0],
+            LoweringEffect::MaterializeZeroInputConstantNode(effect)
                 if effect.node_name == "quantize_per_tensor_3_sc"
                     && effect.dtype == DType::Float32
                     && effect.shape == vec![1, 1, 1]
@@ -676,12 +612,12 @@ mod tests {
             IrArg::Dtype("torch.float32".to_string()),
         );
 
-        let pass = IrFuseZeroInputConstantsEpPass;
+        let pass = IrFuseZeroInputConstantsEffectPass;
         let result = pass.run(&mut graph);
 
         assert!(matches!(
-            &result.effects.effects[0],
-            FxEpEffect::MaterializeZeroInputConstantNode(effect)
+            &result.effects.items[0],
+            LoweringEffect::MaterializeZeroInputConstantNode(effect)
                 if effect.node_name == "arange"
                     && effect.dtype == DType::Float32
                     && effect.shape == vec![4]
@@ -716,12 +652,12 @@ mod tests {
                 "torch.int8".to_string(),
             ));
 
-        let pass = IrFuseZeroInputConstantsEpPass;
+        let pass = IrFuseZeroInputConstantsEffectPass;
         let result = pass.run(&mut graph);
 
         assert!(matches!(
-            &result.effects.effects[0],
-            FxEpEffect::MaterializeZeroInputConstantNode(effect)
+            &result.effects.items[0],
+            LoweringEffect::MaterializeZeroInputConstantNode(effect)
                 if effect.node_name == "arange"
                     && effect.dtype == DType::Int8
                     && effect.shape == vec![4]
@@ -743,12 +679,12 @@ mod tests {
             IrArg::Dtype("torch.float32".to_string()),
         );
 
-        let pass = IrFuseZeroInputConstantsEpPass;
+        let pass = IrFuseZeroInputConstantsEffectPass;
         let result = pass.run(&mut graph);
 
         assert!(matches!(
-            &result.effects.effects[0],
-            FxEpEffect::MaterializeZeroInputConstantNode(effect)
+            &result.effects.items[0],
+            LoweringEffect::MaterializeZeroInputConstantNode(effect)
                 if effect.node_name == "linspace"
                     && effect.dtype == DType::Float32
                     && effect.shape == vec![5]
@@ -773,11 +709,11 @@ mod tests {
             IrArg::Dtype("torch.float32".to_string()),
         );
 
-        let pass = IrFuseZeroInputConstantsEpPass;
+        let pass = IrFuseZeroInputConstantsEffectPass;
         let result = pass.run(&mut graph);
 
-        let effect = match &result.effects.effects[0] {
-            FxEpEffect::MaterializeZeroInputConstantNode(effect) => effect,
+        let effect = match &result.effects.items[0] {
+            LoweringEffect::MaterializeZeroInputConstantNode(effect) => effect,
             other => panic!("unexpected effect kind: {other:?}"),
         };
         assert_eq!(effect.node_name, "eye");
@@ -810,12 +746,12 @@ mod tests {
                 "torch.int8".to_string(),
             ));
 
-        let pass = IrFuseZeroInputConstantsEpPass;
+        let pass = IrFuseZeroInputConstantsEffectPass;
         let result = pass.run(&mut graph);
 
         assert!(matches!(
-            &result.effects.effects[0],
-            FxEpEffect::MaterializeZeroInputConstantNode(effect)
+            &result.effects.items[0],
+            LoweringEffect::MaterializeZeroInputConstantNode(effect)
                 if effect.node_name == "linspace"
                     && effect.dtype == DType::Int8
                     && effect.shape == vec![5]
@@ -840,10 +776,10 @@ mod tests {
             vec![IrArg::Node(placeholder), IrArg::Int(3)],
         );
 
-        let pass = IrFuseZeroInputConstantsEpPass;
+        let pass = IrFuseZeroInputConstantsEffectPass;
         let result = pass.run(&mut graph);
 
         assert!(!result.modified);
-        assert!(result.effects.effects.is_empty());
+        assert!(result.effects.items.is_empty());
     }
 }

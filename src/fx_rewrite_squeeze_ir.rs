@@ -4,23 +4,8 @@
 //! transpose_copy → permute_copy.
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_target::{is_dim_transpose_target, is_squeeze_target, is_unsqueeze_target};
 use crate::runner_logging::log_line;
-
-fn is_squeeze(target: &str) -> bool {
-    !target.contains("unsqueeze")
-        && (target.contains("squeeze_copy")
-            || target.contains("squeeze.dim")
-            || target.contains("squeeze.default")
-            || target.contains("squeeze.dims"))
-}
-
-fn is_unsqueeze(target: &str) -> bool {
-    target.contains("unsqueeze_copy") || target.contains("unsqueeze.default")
-}
-
-fn is_transpose(target: &str) -> bool {
-    target.contains("transpose_copy") || target.contains("transpose.int")
-}
 
 fn compute_squeeze_shape(input_shape: &[i64], dims: &[i64], rank: usize) -> Vec<i64> {
     if dims.is_empty() {
@@ -73,9 +58,9 @@ impl IrPass for IrRewriteSqueezePass {
             }
 
             let target = &graph.nodes[id].target;
-            let is_sq = is_squeeze(target);
-            let is_usq = is_unsqueeze(target);
-            let is_tr = is_transpose(target);
+            let is_sq = is_squeeze_target(target);
+            let is_usq = is_unsqueeze_target(target);
+            let is_tr = is_dim_transpose_target(target);
             if !is_sq && !is_usq && !is_tr {
                 continue;
             }

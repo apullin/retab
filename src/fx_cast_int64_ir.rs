@@ -1,17 +1,17 @@
-use crate::fx_ep_effects::{
-    FxCastInt64InputToInt32Effect, FxEpEffect, FxEpEffectBatch, FxEpInputKind,
-};
-use crate::fx_ir::{FakeTensorMeta, IrEpPass, IrEpPassResult, IrGraph, NodeOp, TensorSource};
+use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, NodeOp, TensorSource};
 use crate::graph::ir::DType;
+use crate::lowering_effects::{
+    CastInt64InputToInt32Effect, LoweringEffect, LoweringEffectBatch, LoweringInputKind,
+};
 
-pub struct IrCastInt64ToInt32EpPass;
+pub struct IrCastInt64ToInt32EffectPass;
 
-impl IrEpPass for IrCastInt64ToInt32EpPass {
+impl EffectfulIrPass for IrCastInt64ToInt32EffectPass {
     fn name(&self) -> &str {
         "IrCastInt64ToInt32Ep"
     }
 
-    fn run(&self, graph: &mut IrGraph) -> IrEpPassResult {
+    fn run(&self, graph: &mut IrGraph) -> EffectfulIrPassResult {
         let candidate_ids: Vec<usize> = graph
             .nodes
             .iter()
@@ -22,14 +22,14 @@ impl IrEpPass for IrCastInt64ToInt32EpPass {
                 matches!(
                     node.tensor.as_ref().map(|tensor| &tensor.source),
                     Some(TensorSource::ExportedProgramInput(binding))
-                        if binding.input_kind == FxEpInputKind::Buffer
+                        if binding.input_kind == LoweringInputKind::Buffer
                 )
             })
             .map(|node| node.id)
             .collect();
 
         let mut modified = false;
-        let mut effects = FxEpEffectBatch::default();
+        let mut effects = LoweringEffectBatch::default();
 
         for node_id in candidate_ids {
             let node = graph.node(node_id).clone();
@@ -39,19 +39,20 @@ impl IrEpPass for IrCastInt64ToInt32EpPass {
             let TensorSource::ExportedProgramInput(binding) = &tensor.source else {
                 continue;
             };
-            if binding.input_kind != FxEpInputKind::Buffer || tensor.data.dtype != DType::Int64 {
+            if binding.input_kind != LoweringInputKind::Buffer || tensor.data.dtype != DType::Int64
+            {
                 continue;
             }
-            let Some(shape) = node.meta.val_shape() else {
+            if node.meta.val_shape().is_none() {
                 continue;
-            };
+            }
 
-            graph.node_mut(node_id).meta.set_val(FakeTensorMeta {
-                shape: shape.to_vec(),
-                dtype: "torch.int32".to_string(),
-            });
-            effects.push(FxEpEffect::CastInt64InputToInt32(
-                FxCastInt64InputToInt32Effect {
+            graph
+                .node_mut(node_id)
+                .meta
+                .set_val_dtype_for_existing_shape("torch.int32");
+            effects.push(LoweringEffect::CastInt64InputToInt32(
+                CastInt64InputToInt32Effect {
                     placeholder_name: node.name.clone(),
                     input_kind: binding.input_kind,
                     target_name: Some(binding.target_name.clone()),
@@ -62,7 +63,7 @@ impl IrEpPass for IrCastInt64ToInt32EpPass {
             modified = true;
         }
 
-        IrEpPassResult { modified, effects }
+        EffectfulIrPassResult { modified, effects }
     }
 }
 
@@ -83,13 +84,10 @@ mod tests {
             Vec::<IrArg>::new(),
             NodeMeta::default(),
         );
-        graph.node_mut(placeholder).meta.set_val(FakeTensorMeta {
-            shape: vec![2],
-            dtype: "torch.int64".to_string(),
-        });
+        graph.node_mut(placeholder).meta = NodeMeta::tensor([2], "torch.int64");
         graph.node_mut(placeholder).tensor = Some(NodeTensor {
             source: TensorSource::ExportedProgramInput(PlaceholderTensorBinding {
-                input_kind: FxEpInputKind::Buffer,
+                input_kind: LoweringInputKind::Buffer,
                 target_name: "state.buf".to_string(),
             }),
             data: TensorData {
@@ -110,7 +108,7 @@ mod tests {
             .meta
             .set_extra("arm_quantized_annotation", MetaValue::Bool(true));
 
-        let pass = IrCastInt64ToInt32EpPass;
+        let pass = IrCastInt64ToInt32EffectPass;
         let result = pass.run(&mut graph);
 
         assert!(result.modified);
@@ -118,12 +116,12 @@ mod tests {
             graph.node(placeholder).meta.val_dtype(),
             Some("torch.int32")
         );
-        assert_eq!(result.effects.effects.len(), 1);
-        let FxEpEffect::CastInt64InputToInt32(effect) = &result.effects.effects[0] else {
+        assert_eq!(result.effects.items.len(), 1);
+        let LoweringEffect::CastInt64InputToInt32(effect) = &result.effects.items[0] else {
             panic!("expected cast effect");
         };
         assert_eq!(effect.placeholder_name, "buf");
-        assert_eq!(effect.input_kind, FxEpInputKind::Buffer);
+        assert_eq!(effect.input_kind, LoweringInputKind::Buffer);
         assert_eq!(effect.target_name.as_deref(), Some("state.buf"));
         assert!(!effect.update_placeholder_meta);
     }
@@ -138,13 +136,10 @@ mod tests {
             Vec::<IrArg>::new(),
             NodeMeta::default(),
         );
-        graph.node_mut(param).meta.set_val(FakeTensorMeta {
-            shape: vec![1],
-            dtype: "torch.int64".to_string(),
-        });
+        graph.node_mut(param).meta = NodeMeta::tensor([1], "torch.int64");
         graph.node_mut(param).tensor = Some(NodeTensor {
             source: TensorSource::ExportedProgramInput(PlaceholderTensorBinding {
-                input_kind: FxEpInputKind::Parameter,
+                input_kind: LoweringInputKind::Parameter,
                 target_name: "state.weight".to_string(),
             }),
             data: TensorData {
@@ -165,11 +160,11 @@ mod tests {
             .meta
             .set_extra("arm_quantized_annotation", MetaValue::Bool(true));
 
-        let pass = IrCastInt64ToInt32EpPass;
+        let pass = IrCastInt64ToInt32EffectPass;
         let result = pass.run(&mut graph);
 
         assert!(!result.modified);
-        assert!(result.effects.effects.is_empty());
+        assert!(result.effects.items.is_empty());
         assert_eq!(graph.node(param).meta.val_dtype(), Some("torch.int64"));
     }
 }

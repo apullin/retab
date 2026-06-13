@@ -178,7 +178,7 @@ pub(super) fn emit_cond_if(ctx: &EmitContext) -> EmitResult {
 
     let mut result = EmitResult::default();
     result.tensors.extend(spec.output_tensors);
-    result.operators.push(TosaOperator::new(
+    result.push_op(
         Op::CondIf,
         Attribute::CondIf(CondIfAttribute {
             then_graph: spec.then_graph,
@@ -186,7 +186,7 @@ pub(super) fn emit_cond_if(ctx: &EmitContext) -> EmitResult {
         }),
         spec.input_names,
         output_names,
-    ));
+    );
     result
 }
 
@@ -200,7 +200,7 @@ pub(super) fn emit_while_loop(ctx: &EmitContext) -> EmitResult {
 
     let mut result = EmitResult::default();
     result.tensors.extend(spec.output_tensors);
-    result.operators.push(TosaOperator::new(
+    result.push_op(
         Op::WhileLoop,
         Attribute::WhileLoop(WhileLoopAttribute {
             cond_branch: spec.cond_graph,
@@ -208,6 +208,6 @@ pub(super) fn emit_while_loop(ctx: &EmitContext) -> EmitResult {
         }),
         spec.input_names,
         output_names,
-    ));
+    );
     result
 }

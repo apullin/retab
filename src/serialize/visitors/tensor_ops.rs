@@ -501,20 +501,8 @@ fn emit_direct_rescale_params(
         vec![shift as u8],
         1,
     );
-    push_rank1_const(
-        result,
-        input_zp_name.clone(),
-        input_dtype,
-        encode_zp_for_dtype(0, input_dtype),
-        1,
-    );
-    push_rank1_const(
-        result,
-        output_zp_name.clone(),
-        output_dtype,
-        encode_zp_for_dtype(0, output_dtype),
-        1,
-    );
+    push_zero_point_const(result, input_zp_name.clone(), input_dtype, 0);
+    push_zero_point_const(result, output_zp_name.clone(), output_dtype, 0);
 
     (
         multiplier_name,
@@ -1105,37 +1093,16 @@ pub(super) fn emit_reshape(ctx: &EmitContext) -> EmitResult {
         }
     }
 
-    result.tensors.push(make_empty_tensor(
-        output_name.clone(),
-        out_shape.clone(),
-        output_dtype,
-    ));
-
     let shape_name = format!("{}_shape", node.name);
-    let shape_data: Vec<u8> = out_shape
-        .iter()
-        .flat_map(|&d| (d as i64).to_le_bytes())
-        .collect();
-    result.shapes.push(TosaShape {
-        name: shape_name.clone(),
-        rank: out_shape.len() as u32,
-        data: shape_data,
-    });
-    result.operators.push(TosaOperator::new(
-        Op::ConstShape,
-        Attribute::ConstShape(ConstShapeAttribute {}),
-        vec![],
-        vec![shape_name.clone()],
-    ));
-
+    push_const_shape(&mut result, shape_name.clone(), out_shape.clone());
     let mut reshape_inputs = input_names;
-    reshape_inputs.push(shape_name);
-    result.operators.push(TosaOperator::new(
+    reshape_inputs.push(shape_name.clone());
+    result.push_output_op(
+        make_empty_tensor(output_name.clone(), out_shape.clone(), output_dtype),
         Op::Reshape,
         Attribute::Reshape(ReshapeAttribute {}),
         reshape_inputs,
-        vec![output_name],
-    ));
+    );
     result
 }
 
@@ -1152,7 +1119,7 @@ pub(super) fn emit_concat(ctx: &EmitContext) -> EmitResult {
     // op_cat.py (`dim = output.dim_order.index(dim)`). Equivalent when operand
     // layouts are uniform (the norm), but the output is the canonical reference.
     let axis = map_axis_to_tosa_dim_order(graph, node, raw_axis);
-    if std::env::var("ARM_TOSA_ENGINE_DEBUG_CAT").ok().as_deref() == Some("1") {
+    if crate::config::debug_cat_enabled() {
         fn dbg_shape(n: &crate::graph::ir::Node) -> Vec<i64> {
             n.meta.val.shape[..n.meta.val.shape_len as usize].to_vec()
         }

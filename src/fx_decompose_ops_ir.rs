@@ -4,13 +4,32 @@
 use std::f64::consts::FRAC_PI_2;
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta,
-    NodeOp,
+    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta, NodeOp,
 };
 use crate::runner_logging::log_line;
 
-type TargetPredicate = fn(&str) -> bool;
 type DecomposeFn = fn(&mut IrGraph, NodeId) -> bool;
+
+#[derive(Clone, Copy)]
+struct TargetMatcher {
+    any: &'static [&'static str],
+    none: &'static [&'static str],
+}
+
+impl TargetMatcher {
+    const fn any(any: &'static [&'static str]) -> Self {
+        Self { any, none: &[] }
+    }
+
+    const fn any_except(any: &'static [&'static str], none: &'static [&'static str]) -> Self {
+        Self { any, none }
+    }
+
+    fn matches(self, target: &str) -> bool {
+        self.any.iter().any(|marker| target.contains(marker))
+            && !self.none.iter().any(|marker| target.contains(marker))
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DecomposeMode {
@@ -20,7 +39,7 @@ enum DecomposeMode {
 
 #[derive(Clone, Copy)]
 struct DecomposeRule {
-    matches: TargetPredicate,
+    matcher: TargetMatcher,
     mode: DecomposeMode,
     decompose: DecomposeFn,
 }
@@ -317,77 +336,8 @@ impl ApproxCtx {
     }
 }
 
-fn is_atanh(t: &str) -> bool {
-    t.contains("atanh")
-}
-fn is_tan(t: &str) -> bool {
-    t.contains("aten.tan.")
-}
-fn is_sinh(t: &str) -> bool {
-    t.contains("aten.sinh.")
-}
-fn is_cosh(t: &str) -> bool {
-    t.contains("aten.cosh.")
-}
-fn is_asinh(t: &str) -> bool {
-    t.contains("aten.asinh.")
-}
-fn is_asin(t: &str) -> bool {
-    t.contains("aten.asin.")
-}
-fn is_acos(t: &str) -> bool {
-    t.contains("aten.acos.")
-}
-fn is_atan(t: &str) -> bool {
-    t.contains("aten.atan.")
-}
-fn is_acosh(t: &str) -> bool {
-    t.contains("aten.acosh.")
-}
-fn is_elu(t: &str) -> bool {
-    t.contains("aten.elu.")
-}
-fn is_gelu(t: &str) -> bool {
-    t.contains("aten.gelu.")
-}
-fn is_erfinv(t: &str) -> bool {
-    t.contains("aten.erfinv.")
-}
-fn is_batch_norm(t: &str) -> bool {
-    t.contains("aten.batch_norm")
-        || t.contains("aten.native_batch_norm")
-        || t.contains("aten._native_batch_norm_legit_no_training")
-        || t.contains("aten._native_batch_norm_legit.no_stats")
-}
-fn is_group_norm(t: &str) -> bool {
-    t.contains("aten.group_norm") || t.contains("aten.native_group_norm")
-}
-fn is_softmax(t: &str) -> bool {
-    t.contains("aten.softmax.") || t.contains("aten._safe_softmax.") || t.contains("aten._softmax.")
-}
-fn is_log_softmax(t: &str) -> bool {
-    t.contains("aten.log_softmax.") || t.contains("aten._log_softmax.")
-}
-fn is_max_dim(t: &str) -> bool {
-    t.contains("aten.max.dim")
-}
-fn is_min_dim(t: &str) -> bool {
-    t.contains("aten.min.dim")
-}
-fn is_stack(t: &str) -> bool {
-    t.contains("stack") && !t.contains("unstack")
-}
-fn is_unbind(t: &str) -> bool {
-    t.contains("unbind")
-}
-
-fn is_add_sub_with_alpha(t: &str) -> bool {
-    t.contains("add.Tensor") || t.contains("sub.Tensor")
-}
-
-fn is_pow_scalar(t: &str) -> bool {
-    t.contains("pow.Tensor_Scalar")
-}
+const MAX_DIM_MATCHER: TargetMatcher = TargetMatcher::any(&["aten.max.dim"]);
+const MIN_DIM_MATCHER: TargetMatcher = TargetMatcher::any(&["aten.min.dim"]);
 
 fn has_quantized_meta(node: &crate::fx_ir::IrNode) -> bool {
     node.meta
@@ -401,10 +351,17 @@ fn has_quantized_meta(node: &crate::fx_ir::IrNode) -> bool {
             .is_some_and(|qparams| !qparams.is_empty())
 }
 
+fn has_direct_non_getitem_user(graph: &IrGraph, id: NodeId) -> bool {
+    graph.nodes.iter().any(|node| {
+        node.alive
+            && node.id != id
+            && !node.is_getitem()
+            && node.args.iter().any(|arg| arg.as_node() == Some(id))
+    })
+}
+
 fn pow_scalar_numeric_arg(node: &crate::fx_ir::IrNode) -> Option<f64> {
-    node.args
-        .get(1)
-        .and_then(|arg| arg.as_float().or_else(|| arg.as_int().map(|v| v as f64)))
+    node.args.get(1).and_then(IrArg::as_numeric_f64)
 }
 
 fn pow_scalar_int_arg(node: &crate::fx_ir::IrNode) -> Option<i64> {
@@ -414,23 +371,15 @@ fn pow_scalar_int_arg(node: &crate::fx_ir::IrNode) -> Option<i64> {
 fn alpha_value(node: &crate::fx_ir::IrNode) -> Option<f64> {
     node.args
         .get(2)
-        .and_then(|arg| arg.as_float().or_else(|| arg.as_int().map(|v| v as f64)))
-        .or_else(|| {
-            node.kwargs
-                .get("alpha")
-                .and_then(|arg| arg.as_float().or_else(|| arg.as_int().map(|v| v as f64)))
-        })
+        .and_then(IrArg::as_numeric_f64)
+        .or_else(|| node.kwargs.get("alpha").and_then(IrArg::as_numeric_f64))
 }
 
 fn elu_alpha(node: &crate::fx_ir::IrNode) -> f64 {
     node.args
         .get(1)
-        .and_then(|arg| arg.as_float().or_else(|| arg.as_int().map(|v| v as f64)))
-        .or_else(|| {
-            node.kwargs
-                .get("alpha")
-                .and_then(|arg| arg.as_float().or_else(|| arg.as_int().map(|v| v as f64)))
-        })
+        .and_then(IrArg::as_numeric_f64)
+        .or_else(|| node.kwargs.get("alpha").and_then(IrArg::as_numeric_f64))
         .unwrap_or(1.0)
 }
 
@@ -452,13 +401,8 @@ fn batch_norm_training(node: &crate::fx_ir::IrNode) -> bool {
 fn batch_norm_eps(node: &crate::fx_ir::IrNode) -> f64 {
     node.kwargs
         .get("eps")
-        .and_then(|arg| arg.as_float().or_else(|| arg.as_int().map(|v| v as f64)))
-        .or_else(|| {
-            node.args
-                .iter()
-                .rev()
-                .find_map(|arg| arg.as_float().or_else(|| arg.as_int().map(|v| v as f64)))
-        })
+        .and_then(IrArg::as_numeric_f64)
+        .or_else(|| node.args.iter().rev().find_map(IrArg::as_numeric_f64))
         .unwrap_or(1.0e-5)
 }
 
@@ -469,10 +413,7 @@ fn has_quantized_envelope(graph: &IrGraph, id: NodeId) -> bool {
         Some(n) => n,
         None => return false,
     };
-    if !graph.nodes[input_id]
-        .target
-        .contains("dequantize_per_tensor")
-    {
+    if !graph.nodes[input_id].is_dequantize() {
         return false;
     }
     // At least one user must be quantize
@@ -485,7 +426,7 @@ fn has_quantized_envelope(graph: &IrGraph, id: NodeId) -> bool {
                 .iter()
                 .any(|a| matches!(a, IrArg::Node(nid) if *nid == id))
         })
-        .any(|n| n.target.contains("quantize_per_tensor") && !n.target.contains("dequantize"))
+        .any(|n| n.is_quantize())
 }
 
 fn decompose_asin(graph: &mut IrGraph, id: NodeId) -> bool {
@@ -507,7 +448,7 @@ fn decompose_log_softmax_wrapper(graph: &mut IrGraph, id: NodeId) -> bool {
 fn matching_rule(target: &str, rules: &[DecomposeRule]) -> Option<DecomposeRule> {
     rules
         .iter()
-        .find_map(|rule| (rule.matches)(target).then_some(*rule))
+        .find_map(|rule| rule.matcher.matches(target).then_some(*rule))
 }
 
 fn try_decompose_rule(graph: &mut IrGraph, id: NodeId, target: &str) -> bool {
@@ -522,112 +463,117 @@ fn try_decompose_rule(graph: &mut IrGraph, id: NodeId, target: &str) -> bool {
 
 const DECOMPOSE_RULES: &[DecomposeRule] = &[
     DecomposeRule {
-        matches: is_atanh,
+        matcher: TargetMatcher::any(&["atanh"]),
         mode: DecomposeMode::SkipQuantizedEnvelope,
         decompose: decompose_atanh,
     },
     DecomposeRule {
-        matches: is_tan,
+        matcher: TargetMatcher::any(&["aten.tan."]),
         mode: DecomposeMode::SkipQuantizedEnvelope,
         decompose: decompose_tan,
     },
     DecomposeRule {
-        matches: is_sinh,
+        matcher: TargetMatcher::any(&["aten.sinh."]),
         mode: DecomposeMode::SkipQuantizedEnvelope,
         decompose: decompose_sinh,
     },
     DecomposeRule {
-        matches: is_cosh,
+        matcher: TargetMatcher::any(&["aten.cosh."]),
         mode: DecomposeMode::SkipQuantizedEnvelope,
         decompose: decompose_cosh,
     },
     DecomposeRule {
-        matches: is_asinh,
+        matcher: TargetMatcher::any(&["aten.asinh."]),
         mode: DecomposeMode::SkipQuantizedEnvelope,
         decompose: decompose_asinh,
     },
     DecomposeRule {
-        matches: is_asin,
+        matcher: TargetMatcher::any(&["aten.asin."]),
         mode: DecomposeMode::SkipQuantizedEnvelope,
         decompose: decompose_asin,
     },
     DecomposeRule {
-        matches: is_acos,
+        matcher: TargetMatcher::any(&["aten.acos."]),
         mode: DecomposeMode::SkipQuantizedEnvelope,
         decompose: decompose_acos,
     },
     DecomposeRule {
-        matches: is_atan,
+        matcher: TargetMatcher::any(&["aten.atan."]),
         mode: DecomposeMode::SkipQuantizedEnvelope,
         decompose: decompose_atan,
     },
     DecomposeRule {
-        matches: is_acosh,
+        matcher: TargetMatcher::any(&["aten.acosh."]),
         mode: DecomposeMode::SkipQuantizedEnvelope,
         decompose: decompose_acosh,
     },
     DecomposeRule {
-        matches: is_elu,
+        matcher: TargetMatcher::any(&["aten.elu."]),
         mode: DecomposeMode::SkipQuantizedEnvelope,
         decompose: decompose_elu,
     },
     DecomposeRule {
-        matches: is_gelu,
+        matcher: TargetMatcher::any(&["aten.gelu."]),
         mode: DecomposeMode::SkipQuantizedEnvelope,
         decompose: decompose_gelu,
     },
     DecomposeRule {
-        matches: is_erfinv,
+        matcher: TargetMatcher::any(&["aten.erfinv."]),
         mode: DecomposeMode::SkipQuantizedEnvelope,
         decompose: decompose_erfinv,
     },
     DecomposeRule {
-        matches: is_pow_scalar,
+        matcher: TargetMatcher::any(&["pow.Tensor_Scalar"]),
         mode: DecomposeMode::SkipQuantizedEnvelope,
         decompose: decompose_pow_scalar,
     },
     DecomposeRule {
-        matches: is_group_norm,
+        matcher: TargetMatcher::any(&["aten.group_norm", "aten.native_group_norm"]),
         mode: DecomposeMode::Always,
         decompose: decompose_group_norm,
     },
     DecomposeRule {
-        matches: is_batch_norm,
+        matcher: TargetMatcher::any(&[
+            "aten.batch_norm",
+            "aten.native_batch_norm",
+            "aten._native_batch_norm_legit_no_training",
+            "aten._native_batch_norm_legit.no_stats",
+        ]),
         mode: DecomposeMode::Always,
         decompose: decompose_batch_norm,
     },
     DecomposeRule {
-        matches: is_log_softmax,
+        matcher: TargetMatcher::any(&["aten.log_softmax.", "aten._log_softmax."]),
         mode: DecomposeMode::Always,
         decompose: decompose_log_softmax_wrapper,
     },
     DecomposeRule {
-        matches: is_softmax,
+        matcher: TargetMatcher::any(&["aten.softmax.", "aten._safe_softmax.", "aten._softmax."]),
         mode: DecomposeMode::Always,
         decompose: decompose_softmax,
     },
     DecomposeRule {
-        matches: is_max_dim,
+        matcher: MAX_DIM_MATCHER,
         mode: DecomposeMode::Always,
         decompose: decompose_dim_extrema,
     },
     DecomposeRule {
-        matches: is_min_dim,
+        matcher: MIN_DIM_MATCHER,
         mode: DecomposeMode::Always,
         decompose: decompose_dim_extrema,
     },
     DecomposeRule {
-        matches: is_stack,
+        matcher: TargetMatcher::any_except(&["stack"], &["unstack"]),
         mode: DecomposeMode::Always,
         decompose: decompose_stack,
     },
     DecomposeRule {
-        matches: is_unbind,
+        matcher: TargetMatcher::any(&["unbind"]),
         mode: DecomposeMode::Always,
         decompose: decompose_unbind,
     },
     DecomposeRule {
-        matches: is_add_sub_with_alpha,
+        matcher: TargetMatcher::any(&["add.Tensor", "sub.Tensor"]),
         mode: DecomposeMode::Always,
         decompose: decompose_add_sub_alpha,
     },
@@ -775,15 +721,6 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
 mod tests {
     use super::*;
 
-    fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
-        let mut meta = NodeMeta::default();
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: dtype.to_string(),
-        });
-        meta
-    }
-
     #[test]
     fn decompose_max_dim_rewrites_to_amax_and_squeeze() {
         let mut graph = IrGraph::empty();
@@ -792,7 +729,7 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 3, 4], "torch.float32"),
+            NodeMeta::tensor(&[2, 3, 4], "torch.float32"),
         );
         let max = graph.add_node(
             NodeOp::CallFunction,
@@ -806,7 +743,7 @@ mod tests {
             "getitem".to_string(),
             "getitem".to_string(),
             vec![IrArg::Node(max), IrArg::Int(0)],
-            meta(&[2, 4], "torch.float32"),
+            NodeMeta::tensor(&[2, 4], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -842,7 +779,7 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 3, 4], "torch.float32"),
+            NodeMeta::tensor(&[2, 3, 4], "torch.float32"),
         );
         let max = graph.add_node(
             NodeOp::CallFunction,
@@ -856,21 +793,21 @@ mod tests {
             "getitem".to_string(),
             "getitem".to_string(),
             vec![IrArg::Node(max), IrArg::Int(0)],
-            meta(&[2, 4], "torch.float32"),
+            NodeMeta::tensor(&[2, 4], "torch.float32"),
         );
         let indices = graph.add_node(
             NodeOp::CallFunction,
             "getitem_1".to_string(),
             "getitem".to_string(),
             vec![IrArg::Node(max), IrArg::Int(1)],
-            meta(&[2, 4], "torch.int64"),
+            NodeMeta::tensor(&[2, 4], "torch.int64"),
         );
         let _use_indices = graph.add_node(
             NodeOp::CallFunction,
             "use_indices".to_string(),
             "aten.add.Tensor".to_string(),
             vec![IrArg::Node(indices), IrArg::Node(indices)],
-            meta(&[2, 4], "torch.int64"),
+            NodeMeta::tensor(&[2, 4], "torch.int64"),
         );
 
         assert!(!IrDecomposeOpsPass.run(&mut graph));
@@ -886,14 +823,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
         let atan = graph.add_node(
             NodeOp::CallFunction,
             "atan".to_string(),
             "aten.atan.default".to_string(),
             vec![IrArg::Node(x)],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -911,14 +848,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
         let acos = graph.add_node(
             NodeOp::CallFunction,
             "acos".to_string(),
             "aten.acos.default".to_string(),
             vec![IrArg::Node(x)],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -936,14 +873,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 3, 4], "torch.float32"),
+            NodeMeta::tensor(&[2, 3, 4], "torch.float32"),
         );
         let softmax = graph.add_node(
             NodeOp::CallFunction,
             "softmax".to_string(),
             "aten._softmax.default".to_string(),
             vec![IrArg::Node(x), IrArg::Int(1)],
-            meta(&[2, 3, 4], "torch.float32"),
+            NodeMeta::tensor(&[2, 3, 4], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -974,14 +911,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 3, 4], "torch.float32"),
+            NodeMeta::tensor(&[2, 3, 4], "torch.float32"),
         );
         let log_softmax = graph.add_node(
             NodeOp::CallFunction,
             "log_softmax".to_string(),
             "aten._log_softmax.default".to_string(),
             vec![IrArg::Node(x), IrArg::Int(1)],
-            meta(&[2, 3, 4], "torch.float32"),
+            NodeMeta::tensor(&[2, 3, 4], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -999,21 +936,21 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[1, 4, 5], "torch.float32"),
+            NodeMeta::tensor(&[1, 4, 5], "torch.float32"),
         );
         let y = graph.add_node(
             NodeOp::Placeholder,
             "y".to_string(),
             "y".to_string(),
             vec![],
-            meta(&[4, 1], "torch.float32"),
+            NodeMeta::tensor(&[4, 1], "torch.float32"),
         );
         let add = graph.add_node(
             NodeOp::CallFunction,
             "add".to_string(),
             "aten.add.Tensor".to_string(),
             vec![IrArg::Node(x), IrArg::Node(y), IrArg::Float(1.5)],
-            meta(&[1, 4, 5], "torch.float32"),
+            NodeMeta::tensor(&[1, 4, 5], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -1045,14 +982,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
         let tan = graph.add_node(
             NodeOp::CallFunction,
             "tan".to_string(),
             "aten.tan.default".to_string(),
             vec![IrArg::Node(x)],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -1092,14 +1029,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[1, 2, 3, 7], "torch.float32"),
+            NodeMeta::tensor(&[1, 2, 3, 7], "torch.float32"),
         );
         let pow = graph.add_node(
             NodeOp::CallFunction,
             "pow".to_string(),
             "aten.pow.Tensor_Scalar".to_string(),
             vec![IrArg::Node(x), IrArg::Float(0.0)],
-            meta(&[1, 2, 3, 7], "torch.float32"),
+            NodeMeta::tensor(&[1, 2, 3, 7], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -1140,14 +1077,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[1, 2, 3, 6], "torch.float32"),
+            NodeMeta::tensor(&[1, 2, 3, 6], "torch.float32"),
         );
         let pow = graph.add_node(
             NodeOp::CallFunction,
             "pow".to_string(),
             "aten.pow.Tensor_Scalar".to_string(),
             vec![IrArg::Node(x), IrArg::Int(3)],
-            meta(&[1, 2, 3, 6], "torch.float32"),
+            NodeMeta::tensor(&[1, 2, 3, 6], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -1180,28 +1117,28 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 3], "torch.int8"),
+            NodeMeta::tensor(&[2, 3], "torch.int8"),
         );
         let dq = graph.add_node(
             NodeOp::CallFunction,
             "x_dq".to_string(),
             "quantized_decomposed.dequantize_per_tensor.default".to_string(),
             vec![IrArg::Node(x)],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
         let tan = graph.add_node(
             NodeOp::CallFunction,
             "tan".to_string(),
             "aten.tan.default".to_string(),
             vec![IrArg::Node(dq)],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
         let q = graph.add_node(
             NodeOp::CallFunction,
             "tan_q".to_string(),
             "quantized_decomposed.quantize_per_tensor.default".to_string(),
             vec![IrArg::Node(tan)],
-            meta(&[2, 3], "torch.int8"),
+            NodeMeta::tensor(&[2, 3], "torch.int8"),
         );
 
         assert!(!IrDecomposeOpsPass.run(&mut graph));
@@ -1218,28 +1155,28 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[1, 2, 3, 6], "torch.int8"),
+            NodeMeta::tensor(&[1, 2, 3, 6], "torch.int8"),
         );
         let dq = graph.add_node(
             NodeOp::CallFunction,
             "x_dq".to_string(),
             "quantized_decomposed.dequantize_per_tensor.default".to_string(),
             vec![IrArg::Node(x)],
-            meta(&[1, 2, 3, 6], "torch.float32"),
+            NodeMeta::tensor(&[1, 2, 3, 6], "torch.float32"),
         );
         let pow = graph.add_node(
             NodeOp::CallFunction,
             "pow".to_string(),
             "aten.pow.Tensor_Scalar".to_string(),
             vec![IrArg::Node(dq), IrArg::Int(3)],
-            meta(&[1, 2, 3, 6], "torch.float32"),
+            NodeMeta::tensor(&[1, 2, 3, 6], "torch.float32"),
         );
         let q = graph.add_node(
             NodeOp::CallFunction,
             "pow_q".to_string(),
             "quantized_decomposed.quantize_per_tensor.default".to_string(),
             vec![IrArg::Node(pow)],
-            meta(&[1, 2, 3, 6], "torch.int8"),
+            NodeMeta::tensor(&[1, 2, 3, 6], "torch.int8"),
         );
 
         assert!(!IrDecomposeOpsPass.run(&mut graph));
@@ -1256,14 +1193,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
         let sinh = graph.add_node(
             NodeOp::CallFunction,
             "sinh".to_string(),
             "aten.sinh.default".to_string(),
             vec![IrArg::Node(x)],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -1281,14 +1218,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
         let cosh = graph.add_node(
             NodeOp::CallFunction,
             "cosh".to_string(),
             "aten.cosh.default".to_string(),
             vec![IrArg::Node(x)],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -1306,14 +1243,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
         let asinh = graph.add_node(
             NodeOp::CallFunction,
             "asinh".to_string(),
             "aten.asinh.default".to_string(),
             vec![IrArg::Node(x)],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -1331,14 +1268,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
         let acosh = graph.add_node(
             NodeOp::CallFunction,
             "acosh".to_string(),
             "aten.acosh.default".to_string(),
             vec![IrArg::Node(x)],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -1356,14 +1293,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
         let elu = graph.add_node(
             NodeOp::CallFunction,
             "elu".to_string(),
             "aten.elu.default".to_string(),
             vec![IrArg::Node(x), IrArg::Float(2.0)],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -1381,14 +1318,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
         let gelu = graph.add_node(
             NodeOp::CallFunction,
             "gelu".to_string(),
             "aten.gelu.default".to_string(),
             vec![IrArg::Node(x)],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -1409,14 +1346,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
         let gelu = graph.add_node(
             NodeOp::CallFunction,
             "gelu".to_string(),
             "aten.gelu.default".to_string(),
             vec![IrArg::Node(x)],
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor(&[2, 3], "torch.float32"),
         );
         graph.set_kwarg(gelu, "approximate", IrArg::Str("tanh".to_string()));
 
@@ -1435,35 +1372,35 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[1, 4, 5, 6], "torch.float32"),
+            NodeMeta::tensor(&[1, 4, 5, 6], "torch.float32"),
         );
         let weight = graph.add_node(
             NodeOp::Placeholder,
             "weight".to_string(),
             "weight".to_string(),
             vec![],
-            meta(&[4], "torch.float32"),
+            NodeMeta::tensor(&[4], "torch.float32"),
         );
         let bias = graph.add_node(
             NodeOp::Placeholder,
             "bias".to_string(),
             "bias".to_string(),
             vec![],
-            meta(&[4], "torch.float32"),
+            NodeMeta::tensor(&[4], "torch.float32"),
         );
         let mean = graph.add_node(
             NodeOp::Placeholder,
             "mean".to_string(),
             "mean".to_string(),
             vec![],
-            meta(&[4], "torch.float32"),
+            NodeMeta::tensor(&[4], "torch.float32"),
         );
         let var = graph.add_node(
             NodeOp::Placeholder,
             "var".to_string(),
             "var".to_string(),
             vec![],
-            meta(&[4], "torch.float32"),
+            NodeMeta::tensor(&[4], "torch.float32"),
         );
         let bn = graph.add_node(
             NodeOp::CallFunction,
@@ -1480,7 +1417,7 @@ mod tests {
                 IrArg::Float(1.0e-5),
                 IrArg::Bool(false),
             ],
-            meta(&[1, 4, 5, 6], "torch.float32"),
+            NodeMeta::tensor(&[1, 4, 5, 6], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -1513,21 +1450,21 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[1, 6, 8], "torch.float32"),
+            NodeMeta::tensor(&[1, 6, 8], "torch.float32"),
         );
         let weight = graph.add_node(
             NodeOp::Placeholder,
             "weight".to_string(),
             "weight".to_string(),
             vec![],
-            meta(&[6], "torch.float32"),
+            NodeMeta::tensor(&[6], "torch.float32"),
         );
         let bias = graph.add_node(
             NodeOp::Placeholder,
             "bias".to_string(),
             "bias".to_string(),
             vec![],
-            meta(&[6], "torch.float32"),
+            NodeMeta::tensor(&[6], "torch.float32"),
         );
         let gn = graph.add_node(
             NodeOp::CallFunction,
@@ -1541,7 +1478,7 @@ mod tests {
                 IrArg::Float(1.0e-5),
                 IrArg::Bool(true),
             ],
-            meta(&[1, 6, 8], "torch.float32"),
+            NodeMeta::tensor(&[1, 6, 8], "torch.float32"),
         );
 
         assert!(IrDecomposeOpsPass.run(&mut graph));
@@ -1564,9 +1501,9 @@ mod tests {
 fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
     let node_target = graph.nodes[id].target.clone();
     let node_name = graph.nodes[id].name.clone();
-    let reduce_target = if is_max_dim(&node_target) {
+    let reduce_target = if MAX_DIM_MATCHER.matches(&node_target) {
         "aten.amax.default"
-    } else if is_min_dim(&node_target) {
+    } else if MIN_DIM_MATCHER.matches(&node_target) {
         "aten.amin.default"
     } else {
         return false;
@@ -1591,21 +1528,17 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
     }
     let dim = dim as usize;
 
-    let getitem_users: Vec<(NodeId, i64)> = graph
-        .nodes
-        .iter()
-        .filter(|n| n.alive && n.target.contains("getitem"))
-        .filter(|n| n.args.first().and_then(IrArg::as_node) == Some(id))
-        .map(|n| (n.id, n.args.get(1).and_then(IrArg::as_int).unwrap_or(0)))
-        .collect();
+    let getitem_users = graph.live_getitem_users(id);
 
     if getitem_users.is_empty() {
         return false;
     }
 
-    if graph.nodes.iter().any(|n| {
-        n.alive && n.id != id && !n.target.contains("getitem") && graph.users(id).contains(&n.id)
-    }) {
+    if graph
+        .nodes
+        .iter()
+        .any(|n| n.alive && n.id != id && !n.is_getitem() && graph.users(id).contains(&n.id))
+    {
         return false;
     }
 
@@ -1634,21 +1567,17 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
     let mut keepdim_shape = input_shape;
     keepdim_shape[dim] = 1;
 
-    let mut reduce_meta = value_meta.clone();
+    let mut reduce_meta = value_meta.cloned_with_val(keepdim_shape, &dtype);
     reduce_meta.val_dim_order = input_meta.val_dim_order.clone();
     reduce_meta.tosa_dim_order = input_meta.tosa_dim_order.clone();
     reduce_meta.original_dim_orders = input_meta.original_dim_orders.clone();
-    reduce_meta.set_val(FakeTensorMeta {
-        shape: keepdim_shape,
-        dtype: dtype.clone(),
-    });
 
     let reduce_id = graph.add_anchored_call_function(
         id,
         format!(
             "{}_{}",
             node_name,
-            if is_max_dim(&node_target) {
+            if MAX_DIM_MATCHER.matches(&node_target) {
                 "amax"
             } else {
                 "amin"
@@ -1662,7 +1591,6 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
         ],
         reduce_meta,
     );
-    graph.copy_meta_from(reduce_id, value_getitem);
 
     let squeeze_id = graph.add_anchored_call_function(
         reduce_id,
@@ -1671,7 +1599,6 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(reduce_id), i64_list(&[dim as i64])],
         value_meta,
     );
-    graph.copy_meta_from(squeeze_id, value_getitem);
 
     graph.replace_and_erase(value_getitem, squeeze_id);
     for (user_id, idx) in getitem_users {
@@ -2917,30 +2844,14 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(weighted), IrArg::Node(bias_view)],
     );
 
-    let getitem_users: Vec<(NodeId, i64)> = graph
-        .nodes
-        .iter()
-        .filter(|node| node.alive && node.target.contains("getitem"))
-        .filter(|node| node.args.first().and_then(IrArg::as_node) == Some(id))
-        .map(|node| {
-            (
-                node.id,
-                node.args.get(1).and_then(IrArg::as_int).unwrap_or(0),
-            )
-        })
-        .collect();
+    let getitem_users = graph.live_getitem_users(id);
 
     if getitem_users.is_empty() {
         graph.replace_and_erase(id, result);
         return true;
     }
 
-    if graph.nodes.iter().any(|node| {
-        node.alive
-            && node.id != id
-            && !node.target.contains("getitem")
-            && node.args.iter().any(|arg| arg.as_node() == Some(id))
-    }) {
+    if has_direct_non_getitem_user(graph, id) {
         return false;
     }
 
@@ -2966,22 +2877,19 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             args.get(1).cloned().unwrap_or(IrArg::None),
             args.get(2).cloned().unwrap_or(IrArg::None),
             args.get(6).and_then(IrArg::as_int),
-            args.get(7)
-                .and_then(|arg| arg.as_float().or_else(|| arg.as_int().map(|v| v as f64))),
+            args.get(7).and_then(IrArg::as_numeric_f64),
         ),
         6 => (
             args.get(2).cloned().unwrap_or(IrArg::None),
             args.get(3).cloned().unwrap_or(IrArg::None),
             args.get(1).and_then(IrArg::as_int),
-            args.get(4)
-                .and_then(|arg| arg.as_float().or_else(|| arg.as_int().map(|v| v as f64))),
+            args.get(4).and_then(IrArg::as_numeric_f64),
         ),
         5 => (
             args.get(2).cloned().unwrap_or(IrArg::None),
             args.get(3).cloned().unwrap_or(IrArg::None),
             args.get(1).and_then(IrArg::as_int),
-            args.get(4)
-                .and_then(|arg| arg.as_float().or_else(|| arg.as_int().map(|v| v as f64))),
+            args.get(4).and_then(IrArg::as_numeric_f64),
         ),
         4 => (
             args.get(2).cloned().unwrap_or(IrArg::None),
@@ -3014,7 +2922,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             graph.nodes[id]
                 .kwargs
                 .get("eps")
-                .and_then(|arg| arg.as_float().or_else(|| arg.as_int().map(|v| v as f64))),
+                .and_then(IrArg::as_numeric_f64),
         ),
     };
     let Some(group) = group else {
@@ -3160,30 +3068,14 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let result = ctx.reshape_shape(graph, "result", reshape_target, biased, &shape);
 
-    let getitem_users: Vec<(NodeId, i64)> = graph
-        .nodes
-        .iter()
-        .filter(|node| node.alive && node.target.contains("getitem"))
-        .filter(|node| node.args.first().and_then(IrArg::as_node) == Some(id))
-        .map(|node| {
-            (
-                node.id,
-                node.args.get(1).and_then(IrArg::as_int).unwrap_or(0),
-            )
-        })
-        .collect();
+    let getitem_users = graph.live_getitem_users(id);
 
     if getitem_users.is_empty() {
         graph.replace_and_erase(id, result);
         return true;
     }
 
-    if graph.nodes.iter().any(|node| {
-        node.alive
-            && node.id != id
-            && !node.target.contains("getitem")
-            && node.args.iter().any(|arg| arg.as_node() == Some(id))
-    }) {
+    if has_direct_non_getitem_user(graph, id) {
         return false;
     }
 
@@ -3289,17 +3181,7 @@ fn decompose_unbind(graph: &mut IrGraph, id: NodeId) -> bool {
     let orig_meta = graph.nodes[id].meta.clone();
     let metas = MetaFactory::new(&orig_meta, &dtype);
 
-    // Find getitem users
-    let getitem_users: Vec<(NodeId, i64)> = graph
-        .nodes
-        .iter()
-        .filter(|n| n.alive && n.target.contains("getitem"))
-        .filter(|n| n.args.first().and_then(|a| a.as_node()) == Some(id))
-        .map(|n| {
-            let idx = n.args.get(1).and_then(|a| a.as_int()).unwrap_or(0);
-            (n.id, idx)
-        })
-        .collect();
+    let getitem_users = graph.live_getitem_users(id);
 
     if getitem_users.is_empty() {
         return false;

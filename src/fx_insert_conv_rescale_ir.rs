@@ -1,43 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::fx_control_flow_metadata::QParam;
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam};
+use crate::fx_target::{
+    is_conv_accumulator_target, is_layout_passthrough_target, is_rank_changing_layout_target,
+    is_raw_aten_convolution_target,
+};
 use crate::runner_logging::log_line;
 
-fn is_tosa_accumulator_op(target: &str) -> bool {
-    let target = target.to_ascii_lowercase();
-    if target.contains("tosa") {
-        return target.contains("conv2d")
-            || target.contains("depthwise_conv2d")
-            || target.contains("conv3d");
-    }
-    target.contains("aten.convolution") || target.contains("aten.conv2d")
-}
-
-fn is_raw_aten_convolution(target: &str) -> bool {
-    target.to_ascii_lowercase().contains("aten.convolution")
-}
-
-fn is_layout_passthrough(target: &str) -> bool {
-    let target = target.to_ascii_lowercase();
-    target.contains("view")
-        || target.contains("reshape")
-        || target.contains("transpose")
-        || target.contains("permute")
-        || target.contains("squeeze")
-        || target.contains("unsqueeze")
-        || target.contains("flatten")
-        || target.contains("contiguous")
-}
-
 fn changes_rank_across_layout_chain(graph: &IrGraph, current: NodeId, user: NodeId) -> bool {
-    let target = graph.nodes[user].target.to_ascii_lowercase();
-    if !(target.contains("view")
-        || target.contains("reshape")
-        || target.contains("flatten")
-        || target.contains("squeeze")
-        || target.contains("unsqueeze"))
-    {
+    if !is_rank_changing_layout_target(&graph.nodes[user].target) {
         return false;
     }
 
@@ -47,14 +18,6 @@ fn changes_rank_across_layout_chain(graph: &IrGraph, current: NodeId, user: Node
         .zip(graph.nodes[user].meta.rank())
         .map(|(before, after)| before != after)
         .unwrap_or(false)
-}
-
-fn single_live_user(graph: &IrGraph, id: NodeId) -> Option<NodeId> {
-    let users = graph.live_user_ids(id);
-    match users.as_slice() {
-        [user] => Some(*user),
-        _ => None,
-    }
 }
 
 fn is_int32_rescale(node: &crate::fx_ir::IrNode) -> bool {
@@ -80,7 +43,7 @@ fn has_downstream_output_rescale(graph: &IrGraph, start: NodeId) -> bool {
     let mut visited = HashSet::new();
 
     while visited.insert(current) {
-        let Some(user) = single_live_user(graph, current) else {
+        let Some(user) = graph.single_live_user(current) else {
             return false;
         };
         let user_node = &graph.nodes[user];
@@ -90,7 +53,7 @@ fn has_downstream_output_rescale(graph: &IrGraph, start: NodeId) -> bool {
             }
             return true;
         }
-        if !is_layout_passthrough(&user_node.target)
+        if !is_layout_passthrough_target(&user_node.target)
             || changes_rank_across_layout_chain(graph, current, user)
         {
             return false;
@@ -106,26 +69,18 @@ fn recover_downstream_output_qparam(graph: &IrGraph, start: NodeId) -> Option<QP
     let mut visited = HashSet::new();
 
     while visited.insert(current) {
-        let user = single_live_user(graph, current)?;
+        let user = graph.single_live_user(current)?;
         let user_node = &graph.nodes[user];
         if let Some(qparam) = user_node.meta.output_qparam() {
             return Some(qparam.clone());
         }
-        if !is_layout_passthrough(&user_node.target) {
+        if !is_layout_passthrough_target(&user_node.target) {
             return None;
         }
         current = user;
     }
 
     None
-}
-
-fn arg_contains_node(arg: &IrArg, target: NodeId) -> bool {
-    match arg {
-        IrArg::Node(id) => *id == target,
-        IrArg::List(items) => items.iter().any(|item| arg_contains_node(item, target)),
-        _ => false,
-    }
 }
 
 fn recover_consumer_input_qparam(graph: &IrGraph, start: NodeId) -> Option<QParam> {
@@ -135,7 +90,7 @@ fn recover_consumer_input_qparam(graph: &IrGraph, start: NodeId) -> Option<QPara
             continue;
         };
         for (arg_idx, arg) in user.args.iter().enumerate() {
-            if arg_contains_node(arg, start) {
+            if arg.contains_node(start) {
                 if let Some(qparam) = input_qparams.get(&arg_idx) {
                     return Some(qparam.clone());
                 }
@@ -143,10 +98,6 @@ fn recover_consumer_input_qparam(graph: &IrGraph, start: NodeId) -> Option<QPara
         }
     }
     None
-}
-
-fn input_qparam(node: &crate::fx_ir::IrNode, index: usize) -> Option<&QParam> {
-    node.meta.input_qparams.as_ref()?.get(&index)
 }
 
 fn output_qparam(graph: &IrGraph, id: NodeId) -> Option<QParam> {
@@ -166,38 +117,11 @@ fn weight_scales(qparam: &QParam) -> Vec<f64> {
     }
 }
 
-fn rescale_meta_from(conv_meta: &NodeMeta, output_qparam: QParam) -> NodeMeta {
-    let mut meta = conv_meta.clone();
-    meta.set_input_qparams(HashMap::new());
-    meta.set_single_output_qparam(output_qparam.clone());
-    if let Some(order) = meta.tosa_dim_order.clone() {
-        meta.set_tosa_dim_order(order);
-    }
-    if let Some(orders) = meta.original_dim_orders.clone() {
-        meta.set_original_dim_orders(orders);
-    }
-    if let Some(rank) = meta.tosa_spatial_rank {
-        meta.set_extra("tosa_spatial_rank", MetaValue::Int(rank as i64));
-    }
-    meta.extras.remove("tosa_special_dtype");
-    if let Some(shape) = conv_meta.val_shape() {
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: output_qparam.dtype_str,
-        });
-    }
-    meta
-}
-
 fn plain_tensor_meta_from(source_meta: &NodeMeta, shape: &[i64], dtype: &str) -> NodeMeta {
-    let mut meta = source_meta.clone();
+    let mut meta = source_meta.cloned_with_val(shape.to_vec(), dtype);
     meta.set_input_qparams(HashMap::new());
     meta.clear_output_qparams();
     meta.extras.remove("tosa_special_dtype");
-    meta.set_val(FakeTensorMeta {
-        shape: shape.to_vec(),
-        dtype: dtype.to_string(),
-    });
     meta
 }
 
@@ -212,7 +136,7 @@ fn needs_int16_bias_decomposition(graph: &IrGraph, conv_id: NodeId) -> bool {
     let node = graph.node(conv_id);
     if !node.alive
         || node.op != NodeOp::CallFunction
-        || !is_raw_aten_convolution(&node.target)
+        || !is_raw_aten_convolution_target(&node.target)
         || !matches!(node.args.get(2), Some(IrArg::Node(_)))
     {
         return false;
@@ -220,10 +144,10 @@ fn needs_int16_bias_decomposition(graph: &IrGraph, conv_id: NodeId) -> bool {
     if matches!(node.args.get(6), Some(IrArg::Bool(true))) {
         return false;
     }
-    let Some(input_qp) = input_qparam(node, 0) else {
+    let Some(input_qp) = node.meta.input_qparam_at(0) else {
         return false;
     };
-    let Some(bias_qp) = input_qparam(node, 2) else {
+    let Some(bias_qp) = node.meta.input_qparam_at(2) else {
         return false;
     };
     let Some(output_qp) = output_qparam(graph, conv_id) else {
@@ -250,7 +174,7 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
     if output_qp.scale == 0.0 {
         return false;
     }
-    let Some(bias_qp) = input_qparam(&node, 2).cloned() else {
+    let Some(bias_qp) = node.meta.input_qparam_at(2).cloned() else {
         return false;
     };
     let Some(rank) = activation_rank(graph, &node) else {
@@ -286,8 +210,6 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
     {
         let conv = graph.node_mut(conv_id);
         conv.args[2] = IrArg::None;
-        conv.args_dirty = true;
-        conv.args_rebuild_required = true;
     }
 
     let int32_rescale = graph.add_node(
@@ -304,7 +226,6 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         plain_tensor_meta_from(&node.meta, &conv_shape, "torch.int32"),
     );
     graph.anchor_after(int32_rescale, conv_id);
-    graph.copy_meta_from(int32_rescale, conv_id);
 
     let mut bias_view_meta = plain_tensor_meta_from(&node.meta, &bias_view_shape, "torch.int32");
     if let Some(order) = node.meta.tosa_dim_order.clone() {
@@ -315,7 +236,6 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
     }
     if let Some(rank) = node.meta.tosa_spatial_rank {
         bias_view_meta.tosa_spatial_rank = Some(rank);
-        bias_view_meta.set_extra("tosa_spatial_rank", MetaValue::Int(rank as i64));
     }
 
     let bias_view = graph.add_node(
@@ -329,7 +249,6 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         bias_view_meta,
     );
     graph.anchor_after(bias_view, int32_rescale);
-    graph.copy_meta_from(bias_view, conv_id);
 
     let bias_add = graph.add_node(
         NodeOp::CallFunction,
@@ -339,7 +258,6 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         plain_tensor_meta_from(&node.meta, &conv_shape, "torch.int32"),
     );
     graph.anchor_after(bias_add, bias_view);
-    graph.copy_meta_from(bias_add, conv_id);
 
     let output_rescale = graph.add_node(
         NodeOp::CallFunction,
@@ -357,10 +275,9 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
             IrArg::Int(0),
             IrArg::Int(output_qp.zp),
         ],
-        rescale_meta_from(&node.meta, output_qp),
+        node.meta.rescale_output_meta(output_qp),
     );
     graph.anchor_after(output_rescale, bias_add);
-    graph.copy_meta_from(output_rescale, conv_id);
 
     let users = graph.live_user_ids(conv_id);
     let mut rewired = false;
@@ -379,17 +296,17 @@ fn insert_conv_rescale(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         return true;
     }
     let node = &graph.nodes[conv_id];
-    if !node.alive || node.op != NodeOp::CallFunction || !is_tosa_accumulator_op(&node.target) {
+    if !node.alive || node.op != NodeOp::CallFunction || !is_conv_accumulator_target(&node.target) {
         return false;
     }
     if has_downstream_output_rescale(graph, conv_id) {
         return false;
     }
 
-    let Some(input_qp) = input_qparam(node, 0) else {
+    let Some(input_qp) = node.meta.input_qparam_at(0) else {
         return false;
     };
-    let Some(weight_qp) = input_qparam(node, 1) else {
+    let Some(weight_qp) = node.meta.input_qparam_at(1) else {
         return false;
     };
     let Some(output_qp) = output_qparam(graph, conv_id) else {
@@ -412,8 +329,7 @@ fn insert_conv_rescale(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         return false;
     }
 
-    let copy_source_id = node.first_node_arg().unwrap_or(conv_id);
-    let rescale_meta = rescale_meta_from(&node.meta, output_qp.clone());
+    let rescale_meta = node.meta.rescale_output_meta(output_qp.clone());
     let rescale = graph.add_node(
         NodeOp::CallFunction,
         format!("{}_accumulator_rescale", node.name),
@@ -428,7 +344,6 @@ fn insert_conv_rescale(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         rescale_meta,
     );
     graph.anchor_after(rescale, conv_id);
-    graph.copy_meta_from(rescale, copy_source_id);
 
     let mut rewired = false;
     for user_id in users {
@@ -477,17 +392,8 @@ mod tests {
         qparam
     }
 
-    fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
-        let mut meta = NodeMeta::default();
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: dtype.to_string(),
-        });
-        meta
-    }
-
     fn quantized_conv_meta() -> NodeMeta {
-        let mut meta = meta(&[1, 4, 8, 8], "torch.int32");
+        let mut meta = NodeMeta::tensor([1, 4, 8, 8], "torch.int32");
         let mut input_qparams = HashMap::new();
         input_qparams.insert(0, qparam(0.5, 1, "torch.int8"));
         input_qparams.insert(1, per_channel_qparam(&[0.25, 0.5, 0.75, 1.0], "torch.int8"));
@@ -506,14 +412,14 @@ mod tests {
             "input".to_string(),
             "input".to_string(),
             Vec::new(),
-            meta(&[1, 3, 8, 8], "torch.int8"),
+            NodeMeta::tensor(&[1, 3, 8, 8], "torch.int8"),
         );
         let weight = graph.add_node(
             NodeOp::Placeholder,
             "weight".to_string(),
             "weight".to_string(),
             Vec::new(),
-            meta(&[4, 3, 3, 3], "torch.int8"),
+            NodeMeta::tensor(&[4, 3, 3, 3], "torch.int8"),
         );
         let conv = graph.add_node(
             NodeOp::CallFunction,
@@ -527,7 +433,7 @@ mod tests {
             "user".to_string(),
             "aten.view_copy.default".to_string(),
             vec![IrArg::Node(conv)],
-            meta(&[1, 4, 8, 8], "torch.int8"),
+            NodeMeta::tensor(&[1, 4, 8, 8], "torch.int8"),
         );
         graph.add_node(
             NodeOp::Output,
@@ -572,14 +478,14 @@ mod tests {
             "input".to_string(),
             "input".to_string(),
             Vec::new(),
-            meta(&[1, 3, 8, 8], "torch.int8"),
+            NodeMeta::tensor(&[1, 3, 8, 8], "torch.int8"),
         );
         let weight = graph.add_node(
             NodeOp::Placeholder,
             "weight".to_string(),
             "weight".to_string(),
             Vec::new(),
-            meta(&[4, 3, 3, 3], "torch.int8"),
+            NodeMeta::tensor(&[4, 3, 3, 3], "torch.int8"),
         );
         let mut conv_meta = quantized_conv_meta();
         conv_meta.output_qparams = None;
@@ -590,7 +496,7 @@ mod tests {
             vec![IrArg::Node(input), IrArg::Node(weight), IrArg::None],
             conv_meta,
         );
-        let mut table_meta = meta(&[1, 4, 8, 8], "torch.int8");
+        let mut table_meta = NodeMeta::tensor(&[1, 4, 8, 8], "torch.int8");
         table_meta.set_input_qparams(HashMap::from([(0, qparam(0.125, 7, "torch.int8"))]));
         let table = graph.add_node(
             NodeOp::CallFunction,
@@ -624,14 +530,14 @@ mod tests {
             "input".to_string(),
             "input".to_string(),
             Vec::new(),
-            meta(&[1, 3, 8, 8], "torch.int8"),
+            NodeMeta::tensor(&[1, 3, 8, 8], "torch.int8"),
         );
         let weight = graph.add_node(
             NodeOp::Placeholder,
             "weight".to_string(),
             "weight".to_string(),
             Vec::new(),
-            meta(&[4, 3, 3, 3], "torch.int8"),
+            NodeMeta::tensor(&[4, 3, 3, 3], "torch.int8"),
         );
         let mut conv_meta = quantized_conv_meta();
         conv_meta.output_qparams = None;
@@ -642,7 +548,7 @@ mod tests {
             vec![IrArg::Node(input), IrArg::Node(weight), IrArg::None],
             conv_meta,
         );
-        let mut transpose_meta = meta(&[1, 4, 8, 8], "torch.int8");
+        let mut transpose_meta = NodeMeta::tensor(&[1, 4, 8, 8], "torch.int8");
         transpose_meta.set_input_qparams(HashMap::from([(0, qparam(0.125, 7, "torch.int8"))]));
         let transpose = graph.add_node(
             NodeOp::CallFunction,
@@ -651,7 +557,7 @@ mod tests {
             vec![IrArg::Node(conv)],
             transpose_meta,
         );
-        let mut clamp_meta = meta(&[1, 4, 8, 8], "torch.int8");
+        let mut clamp_meta = NodeMeta::tensor(&[1, 4, 8, 8], "torch.int8");
         clamp_meta.set_input_qparams(HashMap::from([(0, qparam(0.125, 7, "torch.int8"))]));
         clamp_meta.set_output_qparams(HashMap::from([(0, qparam(0.25, -128, "torch.int8"))]));
         let clamp = graph.add_node(
@@ -697,14 +603,14 @@ mod tests {
             "input".to_string(),
             "input".to_string(),
             Vec::new(),
-            meta(&[1, 3, 8, 8], "torch.int8"),
+            NodeMeta::tensor(&[1, 3, 8, 8], "torch.int8"),
         );
         let weight = graph.add_node(
             NodeOp::Placeholder,
             "weight".to_string(),
             "weight".to_string(),
             Vec::new(),
-            meta(&[4, 3, 3, 3], "torch.int8"),
+            NodeMeta::tensor(&[4, 3, 3, 3], "torch.int8"),
         );
         let conv = graph.add_node(
             NodeOp::CallFunction,
@@ -718,7 +624,7 @@ mod tests {
             "existing_rescale".to_string(),
             "backend.tosa.RESCALE.default".to_string(),
             vec![IrArg::Node(conv)],
-            meta(&[1, 4, 8, 8], "torch.int8"),
+            NodeMeta::tensor(&[1, 4, 8, 8], "torch.int8"),
         );
 
         assert!(!IrInsertConvAccumulatorRescalePass.run(&mut graph));
@@ -732,14 +638,14 @@ mod tests {
             "input".to_string(),
             "input".to_string(),
             Vec::new(),
-            meta(&[1, 3, 8, 8], "torch.int8"),
+            NodeMeta::tensor(&[1, 3, 8, 8], "torch.int8"),
         );
         let weight = graph.add_node(
             NodeOp::Placeholder,
             "weight".to_string(),
             "weight".to_string(),
             Vec::new(),
-            meta(&[4, 3, 3, 3], "torch.int8"),
+            NodeMeta::tensor(&[4, 3, 3, 3], "torch.int8"),
         );
         let conv = graph.add_node(
             NodeOp::CallFunction,
@@ -759,7 +665,7 @@ mod tests {
                 IrArg::Int(7),
                 IrArg::Int(0),
             ],
-            meta(&[1, 4, 8, 8], "torch.int32"),
+            NodeMeta::tensor(&[1, 4, 8, 8], "torch.int32"),
         );
 
         assert!(IrInsertConvAccumulatorRescalePass.run(&mut graph));
@@ -781,23 +687,23 @@ mod tests {
             "input".to_string(),
             "input".to_string(),
             Vec::new(),
-            meta(&[1, 3, 8, 8], "torch.int16"),
+            NodeMeta::tensor(&[1, 3, 8, 8], "torch.int16"),
         );
         let weight = graph.add_node(
             NodeOp::Placeholder,
             "weight".to_string(),
             "weight".to_string(),
             Vec::new(),
-            meta(&[4, 3, 3, 3], "torch.int8"),
+            NodeMeta::tensor(&[4, 3, 3, 3], "torch.int8"),
         );
         let bias = graph.add_node(
             NodeOp::Placeholder,
             "bias".to_string(),
             "bias".to_string(),
             Vec::new(),
-            meta(&[4], "torch.int32"),
+            NodeMeta::tensor(&[4], "torch.int32"),
         );
-        let mut conv_meta = meta(&[1, 4, 8, 8], "torch.int16");
+        let mut conv_meta = NodeMeta::tensor(&[1, 4, 8, 8], "torch.int16");
         conv_meta.set_input_qparams(HashMap::from([
             (0, qparam(0.5, 0, "torch.int16")),
             (1, per_channel_qparam(&[0.25, 0.5, 0.75, 1.0], "torch.int8")),
@@ -819,7 +725,7 @@ mod tests {
             "user".to_string(),
             "aten.view_copy.default".to_string(),
             vec![IrArg::Node(conv)],
-            meta(&[1, 4, 8, 8], "torch.int16"),
+            NodeMeta::tensor(&[1, 4, 8, 8], "torch.int16"),
         );
         graph.add_node(
             NodeOp::Output,

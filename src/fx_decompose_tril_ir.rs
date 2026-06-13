@@ -2,14 +2,8 @@
 //! arange + view + add(diagonal) + ge + where / bitwise_and.
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_target::is_tril_target;
 use crate::runner_logging::log_line;
-
-fn is_tril(target: &str) -> bool {
-    target.contains("aten.tril")
-        || target.contains("aten_tril")
-        || target.contains("aten.tril_copy")
-        || target.contains("aten_tril_copy")
-}
 
 /// Decompose a single tril node into primitive ops on the IrGraph.
 /// Returns the final replacement NodeId, or None if the node cannot be decomposed.
@@ -155,7 +149,7 @@ impl IrPass for IrDecomposeTrilPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !is_tril(&graph.nodes[id].target) {
+            if !is_tril_target(&graph.nodes[id].target) {
                 continue;
             }
 

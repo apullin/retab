@@ -5,12 +5,9 @@
 //! downstream TOSA SELECT emission (which is stricter than PyTorch broadcasting)
 //! gets identically-shaped operands.
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_target::is_where_target;
 use crate::runner_logging::log_line;
-
-fn is_where(target: &str) -> bool {
-    target.contains("where.self") || target.contains("aten_where")
-}
 
 pub struct IrExpandWhereMaskPass;
 
@@ -27,7 +24,7 @@ impl IrPass for IrExpandWhereMaskPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !is_where(&graph.nodes[id].target) {
+            if !is_where_target(&graph.nodes[id].target) {
                 continue;
             }
             if graph.nodes[id].args.len() < 3 {
@@ -75,11 +72,9 @@ impl IrPass for IrExpandWhereMaskPass {
                 .val_dtype()
                 .unwrap_or("torch.bool")
                 .to_string();
-            let mut view_meta = graph.nodes[mask_id].meta.clone();
-            view_meta.set_val(FakeTensorMeta {
-                shape: padded_mask_shape.clone(),
-                dtype: mask_dtype.clone(),
-            });
+            let view_meta = graph.nodes[mask_id]
+                .meta
+                .cloned_with_val(padded_mask_shape.clone(), &mask_dtype);
 
             // Insert view_copy: reshape mask to padded shape
             let view_id = graph.add_node(
@@ -96,11 +91,9 @@ impl IrPass for IrExpandWhereMaskPass {
             graph.anchor_to(view_id, id);
 
             // Build meta for the expand_copy node (full output shape, same dtype)
-            let mut expand_meta = graph.nodes[mask_id].meta.clone();
-            expand_meta.set_val(FakeTensorMeta {
-                shape: output_shape.clone(),
-                dtype: mask_dtype,
-            });
+            let expand_meta = graph.nodes[mask_id]
+                .meta
+                .cloned_with_val(output_shape.clone(), mask_dtype);
 
             // Insert expand_copy: broadcast to full output shape
             let expand_id = graph.add_node(

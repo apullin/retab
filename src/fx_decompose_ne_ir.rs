@@ -4,7 +4,7 @@ use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
 
 #[cfg(test)]
-use crate::fx_ir::{FakeTensorMeta, NodeMeta};
+use crate::fx_ir::NodeMeta;
 
 fn eq_target_for(ne_target: &str) -> Option<&'static str> {
     if ne_target.contains("aten.ne.Scalar") {
@@ -77,22 +77,13 @@ impl IrPass for IrDecomposeNotEqualPass {
 mod tests {
     use super::*;
 
-    fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
-        let mut meta = NodeMeta::default();
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: dtype.to_string(),
-        });
-        meta
-    }
-
     fn placeholder(graph: &mut IrGraph, name: &str, shape: &[i64], dtype: &str) -> NodeId {
         graph.add_node(
             NodeOp::Placeholder,
             name.to_string(),
             name.to_string(),
             Vec::new(),
-            meta(shape, dtype),
+            NodeMeta::tensor(shape, dtype),
         )
     }
 
@@ -106,7 +97,7 @@ mod tests {
             "ne".to_string(),
             "aten.ne.Tensor".to_string(),
             vec![IrArg::Node(lhs), IrArg::Node(rhs)],
-            meta(&[2, 3], "torch.bool"),
+            NodeMeta::tensor([2, 3], "torch.bool"),
         );
         graph.add_node(
             NodeOp::Output,
@@ -141,7 +132,7 @@ mod tests {
             "ne_scalar".to_string(),
             "aten.ne.Scalar".to_string(),
             vec![IrArg::Node(lhs), IrArg::Float(1.0)],
-            meta(&[4], "torch.bool"),
+            NodeMeta::tensor([4], "torch.bool"),
         );
 
         assert!(IrDecomposeNotEqualPass.run(&mut graph));

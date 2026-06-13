@@ -1,22 +1,23 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::fx_constant_tensor_eval::{
-    plan_constant_matmul_tensor as shared_plan_constant_matmul_tensor,
+    constant_input_seeds, first_constant_input_tensor, node_has_tensor_inputs,
+    node_inputs_are_constant, plan_constant_matmul_tensor,
     plan_constant_slice_tensor as shared_plan_constant_slice_tensor,
     plan_shape_only_tensor as shared_plan_shape_only_tensor,
 };
-use crate::fx_ep_effects::{
-    FxEpEffect, FxEpEffectBatch, FxEpInputKind, FxFuseConstantNodeEffect,
-    FxMaterializeConstantNodeEffect,
+use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, NodeOp};
+use crate::fx_target::{is_shape_only_constant_target, is_zero_input_constant_target};
+use crate::lowering_effects::{
+    FuseConstantNodeEffect, LoweringEffect, LoweringEffectBatch, MaterializeConstantNodeEffect,
 };
-use crate::fx_ir::{IrArg, IrEpPass, IrEpPassResult, IrGraph, IrNode, NodeOp, TensorSource};
 use crate::store::TensorData;
 
-pub struct IrFuseConstantInputsEpPass {
+pub struct IrFuseConstantInputsEffectPass {
     include_data_slices: bool,
 }
 
-impl IrFuseConstantInputsEpPass {
+impl IrFuseConstantInputsEffectPass {
     pub const fn matmul_only() -> Self {
         Self {
             include_data_slices: false,
@@ -30,49 +31,11 @@ impl IrFuseConstantInputsEpPass {
     }
 }
 
-fn arg_has_node(arg: &IrArg) -> bool {
-    match arg {
-        IrArg::Node(_) => true,
-        IrArg::List(values) => values.iter().any(arg_has_node),
-        _ => false,
-    }
-}
-
-fn arg_nodes_are_constant(arg: &IrArg, constant_nodes: &HashSet<usize>) -> bool {
-    match arg {
-        IrArg::Node(node_id) => constant_nodes.contains(node_id),
-        IrArg::List(values) => values
-            .iter()
-            .all(|value| arg_nodes_are_constant(value, constant_nodes)),
-        _ => true,
-    }
-}
-
-fn node_inputs_are_constant(node: &IrNode, constant_nodes: &HashSet<usize>) -> bool {
-    node.args
-        .iter()
-        .all(|arg| arg_nodes_are_constant(arg, constant_nodes))
-        && node
-            .kwargs
-            .values()
-            .all(|arg| arg_nodes_are_constant(arg, constant_nodes))
-}
-
-fn input_constant_tensor<'a>(
-    node: &IrNode,
-    constant_tensors: &'a HashMap<usize, TensorData>,
-) -> Option<&'a TensorData> {
-    match node.args.first()? {
-        IrArg::Node(node_id) => constant_tensors.get(node_id),
-        _ => None,
-    }
-}
-
 fn plan_shape_only_tensor(
     node: &IrNode,
     constant_tensors: &HashMap<usize, TensorData>,
 ) -> Option<TensorData> {
-    input_constant_tensor(node, constant_tensors)
+    first_constant_input_tensor(node, constant_tensors)
         .and_then(|input| shared_plan_shape_only_tensor(node, input))
 }
 
@@ -80,81 +43,31 @@ fn plan_constant_slice_tensor(
     node: &IrNode,
     constant_tensors: &HashMap<usize, TensorData>,
 ) -> Option<TensorData> {
-    input_constant_tensor(node, constant_tensors)
+    first_constant_input_tensor(node, constant_tensors)
         .and_then(|input| shared_plan_constant_slice_tensor(node, input))
 }
 
-fn plan_constant_matmul_tensor(
-    node: &IrNode,
-    constant_tensors: &HashMap<usize, TensorData>,
-) -> Option<TensorData> {
-    shared_plan_constant_matmul_tensor(node, constant_tensors)
+fn is_safe_constant_input_target(node: &IrNode, include_data_slices: bool) -> bool {
+    node.is_addmm()
+        || node.is_mm()
+        || node.is_bmm()
+        || (include_data_slices && node.target.contains("aten.slice_copy.Tensor"))
 }
 
-fn placeholder_is_constant_input(node: &IrNode) -> bool {
-    if !node.alive || node.op != NodeOp::Placeholder {
-        return false;
-    }
-    matches!(
-        node.tensor.as_ref().map(|tensor| &tensor.source),
-        Some(TensorSource::ExportedProgramInput(binding))
-            if matches!(
-                binding.input_kind,
-                FxEpInputKind::Parameter
-                    | FxEpInputKind::Buffer
-                    | FxEpInputKind::LiftedTensorConstant
-            )
-    )
-}
-
-fn is_zero_input_constant_target(target: &str) -> bool {
-    target.contains("aten.full.default")
-        || target.contains("aten.arange")
-        || target.contains("aten.linspace")
-        || target.contains("aten.eye")
-}
-
-fn is_shape_only_constant_target(target: &str) -> bool {
-    target.contains("aten.reshape.default")
-        || target.contains("aten.view_copy.default")
-        || target.contains("aten.unsqueeze_copy.default")
-        || target.contains("aten.permute_copy.default")
-}
-
-fn is_safe_constant_input_target(target: &str, include_data_slices: bool) -> bool {
-    target.contains("aten.addmm.default")
-        || target.contains("aten.mm.default")
-        || target.contains("aten.bmm.default")
-        || (include_data_slices && target.contains("aten.slice_copy.Tensor"))
-}
-
-impl IrEpPass for IrFuseConstantInputsEpPass {
+impl EffectfulIrPass for IrFuseConstantInputsEffectPass {
     fn name(&self) -> &str {
         "IrFuseConstantInputsEp"
     }
 
-    fn run(&self, graph: &mut IrGraph) -> IrEpPassResult {
-        let mut constant_nodes: HashSet<usize> = graph
-            .nodes
-            .iter()
-            .filter(|node| placeholder_is_constant_input(node))
-            .map(|node| node.id)
-            .collect();
-        let mut constant_tensors: HashMap<usize, TensorData> = graph
-            .nodes
-            .iter()
-            .filter(|node| placeholder_is_constant_input(node))
-            .filter_map(|node| Some((node.id, node.tensor.as_ref()?.data.clone())))
-            .collect();
+    fn run(&self, graph: &mut IrGraph) -> EffectfulIrPassResult {
+        let (mut constant_nodes, mut constant_tensors) = constant_input_seeds(graph);
 
         let mut effects = Vec::new();
         for node in &graph.nodes {
             if !node.alive || node.op != NodeOp::CallFunction {
                 continue;
             }
-            let has_tensor_inputs =
-                node.args.iter().any(arg_has_node) || node.kwargs.values().any(arg_has_node);
-            if !has_tensor_inputs {
+            if !node_has_tensor_inputs(node) {
                 if is_zero_input_constant_target(&node.target) {
                     constant_nodes.insert(node.id);
                 }
@@ -170,14 +83,14 @@ impl IrEpPass for IrFuseConstantInputsEpPass {
                 }
                 continue;
             }
-            if !is_safe_constant_input_target(&node.target, self.include_data_slices) {
+            if !is_safe_constant_input_target(node, self.include_data_slices) {
                 continue;
             }
             constant_nodes.insert(node.id);
             if let Some(tensor) = plan_constant_matmul_tensor(node, &constant_tensors) {
                 constant_tensors.insert(node.id, tensor.clone());
-                effects.push(FxEpEffect::MaterializeConstantNode(
-                    FxMaterializeConstantNodeEffect {
+                effects.push(LoweringEffect::MaterializeConstantNode(
+                    MaterializeConstantNodeEffect {
                         node_name: node.name.clone(),
                         data: tensor.data,
                         shape: tensor.shape,
@@ -190,8 +103,8 @@ impl IrEpPass for IrFuseConstantInputsEpPass {
             if self.include_data_slices && node.target.contains("aten.slice_copy.Tensor") {
                 if let Some(tensor) = plan_constant_slice_tensor(node, &constant_tensors) {
                     constant_tensors.insert(node.id, tensor.clone());
-                    effects.push(FxEpEffect::MaterializeConstantNode(
-                        FxMaterializeConstantNodeEffect {
+                    effects.push(LoweringEffect::MaterializeConstantNode(
+                        MaterializeConstantNodeEffect {
                             node_name: node.name.clone(),
                             data: tensor.data,
                             shape: tensor.shape,
@@ -203,24 +116,27 @@ impl IrEpPass for IrFuseConstantInputsEpPass {
                 }
             }
             crate::fold_fallback_log(&format!("FuseConstantNode target={}", node.target));
-            effects.push(FxEpEffect::FuseConstantNode(FxFuseConstantNodeEffect {
+            effects.push(LoweringEffect::FuseConstantNode(FuseConstantNodeEffect {
                 node_name: node.name.clone(),
                 allow_missing: true,
             }));
         }
 
         let modified = !effects.is_empty();
-        IrEpPassResult {
+        EffectfulIrPassResult {
             modified,
-            effects: FxEpEffectBatch { effects },
+            effects: LoweringEffectBatch { items: effects },
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::fx_ir::{IrGraph, NodeMeta, NodeTensor, PlaceholderTensorBinding, QParam};
+    use crate::fx_ir::{
+        IrArg, IrGraph, NodeMeta, NodeTensor, PlaceholderTensorBinding, QParam, TensorSource,
+    };
     use crate::graph::ir::DType;
+    use crate::lowering_effects::LoweringInputKind;
     use crate::store::TensorData;
 
     use super::*;
@@ -235,7 +151,7 @@ mod tests {
         );
         graph.node_mut(node_id).tensor = Some(NodeTensor {
             source: TensorSource::ExportedProgramInput(PlaceholderTensorBinding {
-                input_kind: FxEpInputKind::Parameter,
+                input_kind: LoweringInputKind::Parameter,
                 target_name: format!("state.{name}"),
             }),
             data,
@@ -303,16 +219,16 @@ mod tests {
             NodeMeta::default(),
         );
 
-        let pass = IrFuseConstantInputsEpPass::matmul_only();
+        let pass = IrFuseConstantInputsEffectPass::matmul_only();
         let result = pass.run(&mut graph);
 
         assert!(result.modified);
         let names = result
             .effects
-            .effects
+            .items
             .iter()
             .map(|effect| match effect {
-                FxEpEffect::FuseConstantNode(effect) => effect.node_name.as_str(),
+                LoweringEffect::FuseConstantNode(effect) => effect.node_name.as_str(),
                 _ => panic!("unexpected effect kind"),
             })
             .collect::<Vec<_>>();
@@ -357,11 +273,11 @@ mod tests {
             NodeMeta::default(),
         );
 
-        let pass = IrFuseConstantInputsEpPass::matmul_only();
+        let pass = IrFuseConstantInputsEffectPass::matmul_only();
         let result = pass.run(&mut graph);
 
         assert!(!result.modified);
-        assert!(result.effects.effects.is_empty());
+        assert!(result.effects.items.is_empty());
     }
 
     #[test]
@@ -389,14 +305,14 @@ mod tests {
             NodeMeta::default(),
         );
 
-        let disabled = IrFuseConstantInputsEpPass::matmul_only().run(&mut graph);
+        let disabled = IrFuseConstantInputsEffectPass::matmul_only().run(&mut graph);
         assert!(!disabled.modified);
 
-        let enabled = IrFuseConstantInputsEpPass::with_data_slices().run(&mut graph);
+        let enabled = IrFuseConstantInputsEffectPass::with_data_slices().run(&mut graph);
         assert!(enabled.modified);
-        assert_eq!(enabled.effects.effects.len(), 1);
-        match &enabled.effects.effects[0] {
-            FxEpEffect::MaterializeConstantNode(effect) => {
+        assert_eq!(enabled.effects.items.len(), 1);
+        match &enabled.effects.items[0] {
+            LoweringEffect::MaterializeConstantNode(effect) => {
                 assert_eq!(effect.node_name, "weight_slice");
                 assert_eq!(effect.shape, vec![4]);
             }
@@ -442,10 +358,10 @@ mod tests {
             NodeMeta::default(),
         );
 
-        let result = IrFuseConstantInputsEpPass::with_data_slices().run(&mut graph);
+        let result = IrFuseConstantInputsEffectPass::with_data_slices().run(&mut graph);
         assert!(result.modified);
-        let effect = match &result.effects.effects[0] {
-            FxEpEffect::MaterializeConstantNode(effect) => effect,
+        let effect = match &result.effects.items[0] {
+            LoweringEffect::MaterializeConstantNode(effect) => effect,
             other => panic!("unexpected effect kind: {other:?}"),
         };
         assert_eq!(effect.node_name, "view_slice");
@@ -499,12 +415,12 @@ mod tests {
             NodeMeta::default(),
         );
 
-        let result = IrFuseConstantInputsEpPass::matmul_only().run(&mut graph);
+        let result = IrFuseConstantInputsEffectPass::matmul_only().run(&mut graph);
         assert!(result.modified);
 
         let mut seen = HashMap::new();
-        for effect in &result.effects.effects {
-            let FxEpEffect::MaterializeConstantNode(effect) = effect else {
+        for effect in &result.effects.items {
+            let LoweringEffect::MaterializeConstantNode(effect) = effect else {
                 continue;
             };
             seen.insert(effect.node_name.clone(), effect.clone());
@@ -564,10 +480,10 @@ mod tests {
             meta,
         );
 
-        let result = IrFuseConstantInputsEpPass::matmul_only().run(&mut graph);
+        let result = IrFuseConstantInputsEffectPass::matmul_only().run(&mut graph);
         assert!(result.modified);
-        let effect = match &result.effects.effects[0] {
-            FxEpEffect::MaterializeConstantNode(effect) => effect,
+        let effect = match &result.effects.items[0] {
+            LoweringEffect::MaterializeConstantNode(effect) => effect,
             other => panic!("unexpected effect kind: {other:?}"),
         };
         assert_eq!(effect.node_name, "qmm");

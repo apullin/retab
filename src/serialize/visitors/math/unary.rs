@@ -36,20 +36,10 @@ pub(in crate::serialize::visitors) fn emit_negate(ctx: &EmitContext) -> EmitResu
     result.tensors.push(ctx.make_output());
 
     let (input_zp, output_zp) = if input_dtype == DType::Int8 {
-        let input_zp = node
-            .meta
-            .input_qparams
-            .iter()
-            .find(|(pos, _)| *pos == 0)
-            .map(|(_, qp)| qp.zero_point as i32)
-            .unwrap_or(0);
-        let output_zp = node
-            .meta
-            .output_qparams
-            .first()
-            .map(|(_, qp)| qp.zero_point as i32)
-            .unwrap_or(0);
-        (input_zp, output_zp)
+        (
+            input_qparam_zero_point(node, 0).unwrap_or(0),
+            output_qparam_zero_point(node).unwrap_or(0),
+        )
     } else {
         (0, 0)
     };
@@ -60,29 +50,18 @@ pub(in crate::serialize::visitors) fn emit_negate(ctx: &EmitContext) -> EmitResu
         (input_zp_name.clone(), input_zp),
         (output_zp_name.clone(), output_zp),
     ] {
-        result.tensors.push(TosaTensor::with_data(
-            &name,
-            vec![1],
-            input_dtype,
-            encode_zp_for_dtype(value, input_dtype),
-        ));
-        result.operators.push(TosaOperator::new(
-            Op::Const,
-            Attribute::Const(ConstAttribute {}),
-            vec![],
-            vec![name],
-        ));
+        push_zero_point_const(&mut result, name, input_dtype, value);
     }
 
     let mut negate_inputs = input_names;
     negate_inputs.push(input_zp_name);
     negate_inputs.push(output_zp_name);
-    result.operators.push(TosaOperator::new(
+    result.push_op(
         Op::Negate,
         Attribute::Negate(NegateAttribute {}),
         negate_inputs,
         vec![node.name.clone()],
-    ));
+    );
     result
 }
 

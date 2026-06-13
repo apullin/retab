@@ -4,13 +4,9 @@
 //! Each getitem user of the split node is replaced with a slice_copy that
 //! extracts the corresponding chunk along the split dimension.
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_target::is_split_target;
 use crate::runner_logging::log_line;
-
-/// Determine whether a target string represents a split op we handle.
-fn is_split(target: &str) -> bool {
-    target.contains("split_with_sizes_copy") || target.contains("split_copy")
-}
 
 /// Compute the per-chunk split lengths from the second arg of the split node.
 ///
@@ -55,7 +51,7 @@ impl IrPass for IrConvertSplitToSlicePass {
             if !graph.nodes[split_id].alive || graph.nodes[split_id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !is_split(&graph.nodes[split_id].target) {
+            if !is_split_target(&graph.nodes[split_id].target) {
                 continue;
             }
 
@@ -117,15 +113,9 @@ impl IrPass for IrConvertSplitToSlicePass {
             // nodes for those whose first arg is this split node and whose
             // target contains "getitem".
             let getitem_users: Vec<(NodeId, usize)> = graph
-                .nodes
-                .iter()
-                .filter(|n| {
-                    n.alive && n.target.contains("getitem") && n.first_node_arg() == Some(split_id)
-                })
-                .filter_map(|n| {
-                    let index = n.args.get(1).and_then(|a| a.as_int()).unwrap_or(0) as usize;
-                    Some((n.id, index))
-                })
+                .live_getitem_users(split_id)
+                .into_iter()
+                .map(|(node_id, index)| (node_id, index as usize))
                 .collect();
 
             let mut replaced_any = false;
@@ -143,11 +133,9 @@ impl IrPass for IrConvertSplitToSlicePass {
 
                 // Build meta for the slice_copy node.
                 // Inherit output_qparams from the getitem user (not the split).
-                let mut slice_meta = graph.nodes[split_id].meta.clone();
-                slice_meta.set_val(FakeTensorMeta {
-                    shape: out_shape,
-                    dtype: dtype.clone(),
-                });
+                let mut slice_meta = graph.nodes[split_id]
+                    .meta
+                    .cloned_with_val(out_shape, &dtype);
                 if let Some(oqp) = graph.nodes[*user_id].meta.output_qparams.clone() {
                     slice_meta.set_output_qparams(oqp);
                 }

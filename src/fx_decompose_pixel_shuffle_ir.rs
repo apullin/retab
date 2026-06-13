@@ -15,16 +15,9 @@
 //!   -> permute_copy(0, 1, 3, 5, 2, 4)
 //!   -> view_copy(N, C*r*r, H//r, W//r)
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_target::{is_pixel_shuffle_target, is_pixel_unshuffle_target};
 use crate::runner_logging::log_line;
-
-fn is_pixel_shuffle(target: &str) -> bool {
-    target.contains("pixel_shuffle") && !target.contains("pixel_unshuffle")
-}
-
-fn is_pixel_unshuffle(target: &str) -> bool {
-    target.contains("pixel_unshuffle")
-}
 
 /// Helper: create a view_copy node with the given output shape.
 fn add_view_copy(
@@ -35,11 +28,6 @@ fn add_view_copy(
     base_meta: &NodeMeta,
     dtype: &str,
 ) -> NodeId {
-    let mut meta = base_meta.clone();
-    meta.set_val(FakeTensorMeta {
-        shape: shape.to_vec(),
-        dtype: dtype.to_string(),
-    });
     graph.add_node(
         NodeOp::CallFunction,
         name,
@@ -48,7 +36,7 @@ fn add_view_copy(
             IrArg::Node(input_id),
             IrArg::List(shape.iter().map(|&d| IrArg::Int(d)).collect()),
         ],
-        meta,
+        base_meta.cloned_with_val(shape.to_vec(), dtype),
     )
 }
 
@@ -63,11 +51,6 @@ fn add_permute_copy(
     dtype: &str,
 ) -> NodeId {
     let permuted_shape: Vec<i64> = perm.iter().map(|&p| input_shape[p]).collect();
-    let mut meta = base_meta.clone();
-    meta.set_val(FakeTensorMeta {
-        shape: permuted_shape,
-        dtype: dtype.to_string(),
-    });
     graph.add_node(
         NodeOp::CallFunction,
         name,
@@ -76,7 +59,7 @@ fn add_permute_copy(
             IrArg::Node(input_id),
             IrArg::List(perm.iter().map(|&p| IrArg::Int(p as i64)).collect()),
         ],
-        meta,
+        base_meta.cloned_with_val(permuted_shape, dtype),
     )
 }
 
@@ -97,8 +80,8 @@ impl IrPass for IrDecomposePixelShufflePass {
             }
 
             let target = &graph.nodes[id].target;
-            let is_ps = is_pixel_shuffle(target);
-            let is_pus = is_pixel_unshuffle(target);
+            let is_ps = is_pixel_shuffle_target(target);
+            let is_pus = is_pixel_unshuffle_target(target);
             if !is_ps && !is_pus {
                 continue;
             }

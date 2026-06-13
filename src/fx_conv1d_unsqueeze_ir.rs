@@ -6,25 +6,8 @@
 //!   convolution(... stride=[s,1], pad=[p,0], dilation=[d,1])
 //!   view_copy(output[..., W_out, 1] -> [..., W_out])
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
-use std::collections::HashMap;
-
-fn copy_qparams_from_node(graph: &IrGraph, src_id: NodeId, dst_meta: &mut NodeMeta) {
-    if let Some(iqp) = graph.nodes[src_id].meta.input_qparams.clone() {
-        dst_meta.set_input_qparams(iqp);
-    }
-    if let Some(oqp) = graph.nodes[src_id].meta.output_qparams.clone() {
-        dst_meta.set_output_qparams(oqp);
-    }
-}
-
-fn clear_qparams(meta: &mut NodeMeta) {
-    meta.set_input_qparams(HashMap::new());
-    meta.set_output_qparams(HashMap::new());
-}
 
 /// True for conv1d.default or convolution.default with 1D stride.
 fn is_conv1d(graph: &IrGraph, id: NodeId) -> bool {
@@ -54,12 +37,10 @@ fn add_view_copy(
     new_shape: &[i64],
     dtype: &str,
 ) -> NodeId {
-    let mut meta = graph.nodes[input_id].meta.clone();
-    meta.set_val(FakeTensorMeta {
-        shape: new_shape.to_vec(),
-        dtype: dtype.to_string(),
-    });
-    clear_qparams(&mut meta);
+    let mut meta = graph.nodes[input_id]
+        .meta
+        .cloned_with_val(new_shape.to_vec(), dtype);
+    meta.set_empty_qparam_maps();
     graph.add_node(
         NodeOp::CallFunction,
         format!("{}_{}", name_prefix, suffix),
@@ -215,12 +196,8 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
     let mut conv2d_shape = orig_out_shape.clone();
     conv2d_shape.push(1);
 
-    let mut conv2d_meta = base_meta.clone();
-    conv2d_meta.set_val(FakeTensorMeta {
-        shape: conv2d_shape.to_vec(),
-        dtype: orig_out_dtype.clone(),
-    });
-    copy_qparams_from_node(graph, id, &mut conv2d_meta);
+    let mut conv2d_meta = base_meta.cloned_with_val(conv2d_shape.to_vec(), &orig_out_dtype);
+    conv2d_meta.copy_qparams_from(&graph.nodes[id].meta);
 
     let conv2d = graph.add_node(
         NodeOp::CallFunction,

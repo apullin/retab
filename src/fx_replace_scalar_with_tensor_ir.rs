@@ -1,6 +1,6 @@
 //! Pure Rust IrPass for scalar binary ops that must be rewritten to tensor form.
 
-use crate::fx_ir::{dtype_kwarg, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{dtype_kwarg, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::runner_logging::log_line;
 
 fn replacement_target(target: &str) -> Option<&'static str> {
@@ -19,15 +19,6 @@ fn scalar_arg(arg: &IrArg) -> Option<IrArg> {
     } else {
         arg.as_float().map(IrArg::Float)
     }
-}
-
-fn tensor_meta(shape: &[i64], dtype: &str) -> NodeMeta {
-    let mut meta = NodeMeta::default();
-    meta.set_val(FakeTensorMeta {
-        shape: shape.to_vec(),
-        dtype: dtype.to_string(),
-    });
-    meta
 }
 
 pub struct IrReplaceScalarWithTensorPass;
@@ -76,7 +67,7 @@ impl IrPass for IrReplaceScalarWithTensorPass {
                 "aten.full.default".to_string(),
                 vec![IrArg::List(vec![IrArg::Int(1)]), scalar_value],
                 dtype_kwarg(lhs_dtype.clone()),
-                tensor_meta(&shape, &lhs_dtype),
+                NodeMeta::tensor(shape, &lhs_dtype),
             );
             graph.anchor_to(full, id);
 
@@ -106,22 +97,13 @@ impl IrPass for IrReplaceScalarWithTensorPass {
 mod tests {
     use super::*;
 
-    fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
-        let mut meta = NodeMeta::default();
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: dtype.to_string(),
-        });
-        meta
-    }
-
     fn placeholder(graph: &mut IrGraph, name: &str, shape: &[i64], dtype: &str) -> NodeId {
         graph.add_node(
             NodeOp::Placeholder,
             name.to_string(),
             name.to_string(),
             Vec::new(),
-            meta(shape, dtype),
+            NodeMeta::tensor(shape, dtype),
         )
     }
 
@@ -134,7 +116,7 @@ mod tests {
             "lshift".to_string(),
             "aten.__lshift__.Scalar".to_string(),
             vec![IrArg::Node(x), IrArg::Int(3)],
-            meta(&[2, 3], "torch.int16"),
+            NodeMeta::tensor([2, 3], "torch.int16"),
         );
 
         assert!(IrReplaceScalarWithTensorPass.run(&mut graph));

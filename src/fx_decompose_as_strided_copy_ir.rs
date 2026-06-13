@@ -3,12 +3,9 @@
 //! Rewrites as_strided_copy → view_copy when the stride is contiguous
 //! and storage_offset is zero.
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_target::is_as_strided_copy_target;
 use crate::runner_logging::log_line;
-
-fn is_as_strided_copy(target: &str) -> bool {
-    target.contains("as_strided_copy.default")
-}
 
 /// Compute contiguous (row-major) strides for the given shape.
 fn contiguous_strides(shape: &[i64]) -> Vec<i64> {
@@ -61,7 +58,7 @@ impl IrPass for IrDecomposeAsStridedCopyPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !is_as_strided_copy(&graph.nodes[id].target) {
+            if !is_as_strided_copy_target(&graph.nodes[id].target) {
                 continue;
             }
 
@@ -103,19 +100,12 @@ impl IrPass for IrDecomposeAsStridedCopyPass {
             }
 
             // Build output meta: shape from size, dtype from input
-            let out_meta = {
-                let mut meta = graph.nodes[id].meta.clone();
-                let dtype = graph.nodes[input_id]
-                    .meta
-                    .val_dtype()
-                    .unwrap_or("torch.float32")
-                    .to_string();
-                meta.set_val(FakeTensorMeta {
-                    shape: size.clone(),
-                    dtype,
-                });
-                meta
-            };
+            let dtype = graph.nodes[input_id]
+                .meta
+                .val_dtype()
+                .unwrap_or("torch.float32")
+                .to_string();
+            let out_meta = graph.nodes[id].meta.cloned_with_val(size.clone(), dtype);
 
             // Replace as_strided_copy with view_copy(input, size)
             let new_id = graph.add_node(

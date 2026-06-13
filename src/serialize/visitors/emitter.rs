@@ -6,17 +6,17 @@
 
 use std::collections::HashMap;
 
+use crate::graph::ir::Node;
 use crate::graph::ir::OpTarget;
-use crate::graph::ir::{Arg, Node};
 use crate::graph::Graph;
 use crate::store::TensorStore;
 
-use super::arg_utils::{arg_bool, arg_i32_list, kwarg_i32_list};
+use super::arg_utils::arg_i32_list;
 use super::dtype_quant::{actual_tensor_dtype, node_output_dtype, passthrough_input_dtype};
 use super::emit_result::EmitResult;
 use super::graph_utils::{collect_input_names, primary_output_name};
 use super::op_utils::{emit_bool_binary, emit_direct_binary, emit_direct_unary, emit_identity};
-use super::shape_utils::{actual_tensor_shape, make_actual_output_tensor, make_bool_output_tensor};
+use super::shape_utils::{actual_tensor_shape, make_actual_output_tensor};
 use crate::serialize::tosa_generated::{Attribute, DType, Op, TosaTensor};
 
 /// Everything an emitter needs to produce TOSA operators + tensors for one node.
@@ -26,16 +26,10 @@ pub struct EmitContext<'a> {
     pub store: &'a TensorStore,
 }
 
-#[allow(dead_code)]
 impl<'a> EmitContext<'a> {
     /// Collect input tensor names from node args.
     pub fn input_names(&self) -> Vec<String> {
         collect_input_names(self.graph, self.node)
-    }
-
-    /// Create the output tensor with actual shape/dtype.
-    pub fn output_tensor(&self) -> TosaTensor {
-        make_actual_output_tensor(self.graph, self.store, self.node)
     }
 
     /// Emit a single unary op (1 input -> 1 output, same shape/dtype).
@@ -87,11 +81,6 @@ impl<'a> EmitContext<'a> {
         &self.node.name
     }
 
-    /// Node positional args.
-    pub fn args(&self) -> &[Arg] {
-        &self.node.args
-    }
-
     /// Primary output name (follows getitem convention).
     pub fn primary_output_name(&self) -> String {
         primary_output_name(self.graph, self.node)
@@ -103,24 +92,11 @@ impl<'a> EmitContext<'a> {
         arg_i32_list(self.node, idx)
     }
 
-    pub fn arg_bool(&self, idx: usize, default: bool) -> bool {
-        arg_bool(self.node, idx, default)
-    }
-
-    pub fn kwarg_i32_list(&self, key: &str) -> Vec<i32> {
-        kwarg_i32_list(self.node, key)
-    }
-
     // ---- Tensor creation shortcuts ----
 
     /// Create the output tensor using actual shape and dtype.
     pub fn make_output(&self) -> TosaTensor {
         make_actual_output_tensor(self.graph, self.store, self.node)
-    }
-
-    /// Create a bool-typed output tensor using actual shape.
-    pub fn make_bool_output(&self) -> TosaTensor {
-        make_bool_output_tensor(self.graph, self.store, self.node)
     }
 }
 

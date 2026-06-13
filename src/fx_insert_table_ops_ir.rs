@@ -1,13 +1,14 @@
-use crate::fx_control_flow_metadata::QParam;
-use crate::fx_ep_effects::{
-    FxEpEffect, FxEpEffectBatch, FxInsertPrecomputedTableOpEffect, FxInsertTableOpEffect,
-    FxTableTensorSpec,
+use crate::fx_ir::{
+    EffectfulIrPass, EffectfulIrPassResult, IrArg, IrGraph, IrNode, NodeOp, QParam,
 };
-use crate::fx_ir::{IrArg, IrEpPass, IrEpPassResult, IrGraph, IrNode, NodeOp};
 use crate::graph::ir::DType;
+use crate::lowering_effects::{
+    InsertPrecomputedTableOpEffect, InsertTableOpEffect, LoweringEffect, LoweringEffectBatch,
+    TableTensorSpec,
+};
 use crate::tensor_data::parse_torch_dtype;
 
-pub struct IrInsertTableOpsEpPass;
+pub struct IrInsertTableOpsEffectPass;
 
 #[derive(Clone, Debug, PartialEq)]
 struct TableOpSpec {
@@ -20,11 +21,7 @@ fn node_str_kwarg<'a>(node: &'a IrNode, key: &str) -> Option<&'a str> {
 }
 
 fn node_scalar_arg(node: &IrNode, idx: usize) -> Option<f64> {
-    match node.args.get(idx) {
-        Some(IrArg::Float(value)) => Some(*value),
-        Some(IrArg::Int(value)) => Some(*value as f64),
-        _ => None,
-    }
+    node.args.get(idx).and_then(IrArg::as_numeric_f64)
 }
 
 const SIMPLE_TABLE_TARGET_RULES: &[(&str, &str)] = &[
@@ -115,12 +112,12 @@ fn has_qparams(node: &IrNode) -> bool {
     has_input && has_output
 }
 
-fn table_quant_spec(qp: &QParam) -> Option<FxTableTensorSpec> {
+fn table_quant_spec(qp: &QParam) -> Option<TableTensorSpec> {
     if qp.is_per_channel() || qp.scale == 0.0 {
         return None;
     }
     let dtype = parse_torch_dtype(&qp.dtype_str);
-    Some(FxTableTensorSpec {
+    Some(TableTensorSpec {
         scale: qp.scale,
         zp: qp.zp,
         qmin: qp.qmin,
@@ -129,7 +126,7 @@ fn table_quant_spec(qp: &QParam) -> Option<FxTableTensorSpec> {
     })
 }
 
-fn quantize_to_spec(value: f64, spec: &FxTableTensorSpec) -> Option<i64> {
+fn quantize_to_spec(value: f64, spec: &TableTensorSpec) -> Option<i64> {
     if value.is_nan() {
         // Domain-restricted ops (acosh for x<1, logit outside (0,1), rsqrt for
         // x<=0) yield NaN for out-of-domain dequantized inputs. torch casts
@@ -277,7 +274,7 @@ fn eval_precomputable_table(kind: &str, scalar_arg: Option<f64>, x: f64) -> Opti
 fn plan_precomputed_int8_table(
     node: &IrNode,
     spec: &TableOpSpec,
-) -> Option<FxInsertPrecomputedTableOpEffect> {
+) -> Option<InsertPrecomputedTableOpEffect> {
     let input = table_quant_spec(node.meta.input_qparam()?)?;
     let output = table_quant_spec(node.meta.output_qparam()?)?;
     if input.dtype != DType::Int8 || output.dtype != DType::Int8 {
@@ -296,7 +293,7 @@ fn plan_precomputed_int8_table(
         data.push(q_i8 as u8);
     }
 
-    Some(FxInsertPrecomputedTableOpEffect {
+    Some(InsertPrecomputedTableOpEffect {
         node_name: node.name.clone(),
         data,
         shape: vec![256],
@@ -319,8 +316,8 @@ fn ceil_log2_u64(value: u64) -> i64 {
 fn plan_precomputed_int16_table(
     node: &IrNode,
     spec: &TableOpSpec,
-) -> Option<FxInsertPrecomputedTableOpEffect> {
-    let dbg = std::env::var("ARM_TABLE_DEBUG").is_ok();
+) -> Option<InsertPrecomputedTableOpEffect> {
+    let dbg = crate::config::table_debug_enabled();
     let input = match node.meta.input_qparam().and_then(table_quant_spec) {
         Some(s) => s,
         None => {
@@ -382,7 +379,7 @@ fn plan_precomputed_int16_table(
         .unwrap_or(0);
     let rshift = ceil_log2_u64(max_abs) + 1 - 16;
     if rshift < 0 {
-        if std::env::var("ARM_TABLE_DEBUG").is_ok() {
+        if crate::config::table_debug_enabled() {
             eprintln!(
                 "[TABLE16-None] kind={} max_abs={} rshift={} in(scale={},zp={},qmin={},qmax={}) out(scale={},zp={},dtype={:?})",
                 spec.kind, max_abs, rshift, input.scale, input.zp, input.qmin, input.qmax,
@@ -397,7 +394,7 @@ fn plan_precomputed_int16_table(
         .flat_map(|value| ((value >> rshift) as i16).to_le_bytes())
         .collect();
 
-    Some(FxInsertPrecomputedTableOpEffect {
+    Some(InsertPrecomputedTableOpEffect {
         node_name: node.name.clone(),
         data,
         shape: vec![513],
@@ -412,16 +409,16 @@ fn plan_precomputed_int16_table(
 fn plan_precomputed_table(
     node: &IrNode,
     spec: &TableOpSpec,
-) -> Option<FxInsertPrecomputedTableOpEffect> {
+) -> Option<InsertPrecomputedTableOpEffect> {
     plan_precomputed_int8_table(node, spec).or_else(|| plan_precomputed_int16_table(node, spec))
 }
 
-impl IrEpPass for IrInsertTableOpsEpPass {
+impl EffectfulIrPass for IrInsertTableOpsEffectPass {
     fn name(&self) -> &str {
         "IrInsertTableOpsEp"
     }
 
-    fn run(&self, graph: &mut IrGraph) -> IrEpPassResult {
+    fn run(&self, graph: &mut IrGraph) -> EffectfulIrPassResult {
         let effects = graph
             .nodes
             .iter()
@@ -429,9 +426,9 @@ impl IrEpPass for IrInsertTableOpsEpPass {
             .filter_map(|node| {
                 let spec = table_op_spec(node)?;
                 if let Some(effect) = plan_precomputed_table(node, &spec) {
-                    return Some(FxEpEffect::InsertPrecomputedTableOp(effect));
+                    return Some(LoweringEffect::InsertPrecomputedTableOp(effect));
                 }
-                Some(FxEpEffect::InsertTableOp(FxInsertTableOpEffect {
+                Some(LoweringEffect::InsertTableOp(InsertTableOpEffect {
                     node_name: node.name.clone(),
                     kind: spec.kind.to_string(),
                     scalar_arg: spec.scalar_arg,
@@ -440,9 +437,9 @@ impl IrEpPass for IrInsertTableOpsEpPass {
             })
             .collect::<Vec<_>>();
 
-        IrEpPassResult {
+        EffectfulIrPassResult {
             modified: !effects.is_empty(),
-            effects: FxEpEffectBatch { effects },
+            effects: LoweringEffectBatch { items: effects },
         }
     }
 }
@@ -451,8 +448,7 @@ impl IrEpPass for IrInsertTableOpsEpPass {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::fx_control_flow_metadata::QParam;
-    use crate::fx_ir::{IrGraph, NodeMeta};
+    use crate::fx_ir::{IrGraph, NodeMeta, QParam};
 
     use super::*;
 
@@ -539,18 +535,18 @@ mod tests {
         );
         graph.set_kwarg(gelu_tanh, "approximate", IrArg::Str("tanh".to_string()));
 
-        let result = IrInsertTableOpsEpPass.run(&mut graph);
+        let result = IrInsertTableOpsEffectPass.run(&mut graph);
 
         assert!(result.modified);
         let effects = result
             .effects
-            .effects
+            .items
             .iter()
             .map(|effect| match effect {
-                FxEpEffect::InsertPrecomputedTableOp(effect) => {
+                LoweringEffect::InsertPrecomputedTableOp(effect) => {
                     (effect.node_name.as_str(), "precomputed", None)
                 }
-                FxEpEffect::InsertTableOp(effect) => (
+                LoweringEffect::InsertTableOp(effect) => (
                     effect.node_name.as_str(),
                     effect.kind.as_str(),
                     effect.scalar_arg,
@@ -606,13 +602,13 @@ mod tests {
         );
         table_node(&mut graph, "expm1", "aten.expm1.default", Vec::new());
 
-        let result = IrInsertTableOpsEpPass.run(&mut graph);
+        let result = IrInsertTableOpsEffectPass.run(&mut graph);
 
         assert!(result.modified);
-        assert_eq!(result.effects.effects.len(), 6);
-        for effect in &result.effects.effects {
+        assert_eq!(result.effects.items.len(), 6);
+        for effect in &result.effects.items {
             match effect {
-                FxEpEffect::InsertPrecomputedTableOp(effect) => {
+                LoweringEffect::InsertPrecomputedTableOp(effect) => {
                     assert!(matches!(
                         effect.node_name.as_str(),
                         "reciprocal" | "log" | "sqrt" | "tan" | "asin" | "expm1"
@@ -643,12 +639,12 @@ mod tests {
             meta,
         );
 
-        let result = IrInsertTableOpsEpPass.run(&mut graph);
+        let result = IrInsertTableOpsEffectPass.run(&mut graph);
 
         assert!(result.modified);
         assert!(matches!(
-            &result.effects.effects[0],
-            FxEpEffect::InsertPrecomputedTableOp(_)
+            &result.effects.items[0],
+            LoweringEffect::InsertPrecomputedTableOp(_)
         ));
     }
 
@@ -659,12 +655,12 @@ mod tests {
         let mut graph = IrGraph::empty();
         table_node(&mut graph, "erfinv", "aten.erfinv.default", Vec::new());
 
-        let result = IrInsertTableOpsEpPass.run(&mut graph);
+        let result = IrInsertTableOpsEffectPass.run(&mut graph);
 
         assert!(result.modified);
         assert!(matches!(
-            &result.effects.effects[0],
-            FxEpEffect::InsertPrecomputedTableOp(_)
+            &result.effects.items[0],
+            LoweringEffect::InsertPrecomputedTableOp(_)
         ));
     }
 
@@ -680,10 +676,10 @@ mod tests {
         );
         table_node(&mut graph, "add", "aten.add.Tensor", Vec::new());
 
-        let result = IrInsertTableOpsEpPass.run(&mut graph);
+        let result = IrInsertTableOpsEffectPass.run(&mut graph);
 
         assert!(!result.modified);
-        assert!(result.effects.effects.is_empty());
+        assert!(result.effects.items.is_empty());
     }
 
     #[test]
@@ -704,10 +700,10 @@ mod tests {
             meta,
         );
 
-        let result = IrInsertTableOpsEpPass.run(&mut graph);
+        let result = IrInsertTableOpsEffectPass.run(&mut graph);
         assert!(result.modified);
-        match &result.effects.effects[0] {
-            FxEpEffect::InsertPrecomputedTableOp(effect) => {
+        match &result.effects.items[0] {
+            LoweringEffect::InsertPrecomputedTableOp(effect) => {
                 assert_eq!(effect.shape, vec![513]);
                 assert_eq!(effect.table_dtype, DType::Int16);
                 assert_eq!(effect.output.dtype, DType::Int16);
@@ -735,11 +731,11 @@ mod tests {
             meta,
         );
 
-        let result = IrInsertTableOpsEpPass.run(&mut graph);
+        let result = IrInsertTableOpsEffectPass.run(&mut graph);
         assert!(result.modified);
         assert!(matches!(
-            &result.effects.effects[0],
-            FxEpEffect::InsertTableOp(effect) if effect.kind == "sigmoid"
+            &result.effects.items[0],
+            LoweringEffect::InsertTableOp(effect) if effect.kind == "sigmoid"
         ));
     }
 
@@ -761,11 +757,11 @@ mod tests {
             meta,
         );
 
-        let result = IrInsertTableOpsEpPass.run(&mut graph);
+        let result = IrInsertTableOpsEffectPass.run(&mut graph);
         assert!(result.modified);
         assert!(matches!(
-            &result.effects.effects[0],
-            FxEpEffect::InsertTableOp(effect) if effect.kind == "sigmoid"
+            &result.effects.items[0],
+            LoweringEffect::InsertTableOp(effect) if effect.kind == "sigmoid"
         ));
     }
 

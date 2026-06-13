@@ -152,7 +152,7 @@ fn compute_conv_output_impl(
         }
     };
 
-    if std::env::var("ARM_TOSA_ENGINE_DEBUG_SLICE").ok().as_deref() == Some("1") {
+    if crate::config::debug_slice_enabled() {
         eprintln!(
             "[ConvShapeDebug] node={} computed={:?} fallback={:?}",
             node.name, computed, fallback_shape

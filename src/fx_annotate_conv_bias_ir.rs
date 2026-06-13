@@ -1,19 +1,8 @@
 use crate::fx_ir::{IrArg, IrGraph, IrPass, MetaValue, NodeMeta, NodeOp};
+use crate::fx_target::is_conv_bias_annotation_target;
 use crate::runner_logging::log_line;
 
 pub struct IrAnnotateConvBiasDtypePass;
-
-fn is_conv_target(target: &str) -> bool {
-    target.contains("convolution.default")
-        || target.contains("conv2d.default")
-        || target.contains("conv3d.default")
-        || target.contains("conv_transpose2d")
-        || target.contains("transpose_conv2d")
-        || target.contains("transposeconv2d")
-        || target.contains("backend.tosa.CONV")
-        || target.contains("backend.tosa.DEPTHWISE_CONV")
-        || target.contains("backend.tosa.TRANSPOSE_CONV2D")
-}
 
 fn needs_int16_activation_bias_decomposition(node: &crate::fx_ir::IrNode) -> bool {
     if !node.target.contains("aten.convolution.default") {
@@ -63,7 +52,7 @@ impl IrPass for IrAnnotateConvBiasDtypePass {
             .filter_map(|(id, node)| {
                 (node.alive
                     && node.op == NodeOp::CallFunction
-                    && is_conv_target(&node.target)
+                    && is_conv_bias_annotation_target(&node.target)
                     && !needs_int16_activation_bias_decomposition(node)
                     && needs_int48_bias(&node.meta))
                 .then_some(id)
@@ -96,18 +85,8 @@ impl IrPass for IrAnnotateConvBiasDtypePass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_control_flow_metadata::QParam;
-    use crate::fx_ir::{i64_list_arg, FakeTensorMeta, NodeMeta};
+    use crate::fx_ir::{i64_list_arg, NodeMeta, QParam};
     use std::collections::HashMap;
-
-    fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
-        let mut meta = NodeMeta::default();
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: dtype.to_string(),
-        });
-        meta
-    }
 
     fn qparam(scale: f64, zp: i64, dtype: &str) -> QParam {
         QParam::per_tensor(scale, zp, -32767, 32767, dtype.to_string())
@@ -121,23 +100,23 @@ mod tests {
             "input".to_string(),
             "input".to_string(),
             Vec::new(),
-            meta(&[1, 3, 8, 8], "torch.int16"),
+            NodeMeta::tensor([1, 3, 8, 8], "torch.int16"),
         );
         let weight = graph.add_node(
             NodeOp::Placeholder,
             "weight".to_string(),
             "weight".to_string(),
             Vec::new(),
-            meta(&[4, 3, 3, 3], "torch.int8"),
+            NodeMeta::tensor([4, 3, 3, 3], "torch.int8"),
         );
         let bias = graph.add_node(
             NodeOp::Placeholder,
             "bias".to_string(),
             "bias".to_string(),
             Vec::new(),
-            meta(&[4], "torch.int32"),
+            NodeMeta::tensor([4], "torch.int32"),
         );
-        let mut conv_meta = meta(&[1, 4, 8, 8], "torch.int16");
+        let mut conv_meta = NodeMeta::tensor([1, 4, 8, 8], "torch.int16");
         conv_meta.set_input_qparams(HashMap::from([
             (0, qparam(0.5, 0, "torch.int16")),
             (1, qparam(0.25, 0, "torch.int8")),
@@ -164,23 +143,23 @@ mod tests {
             "input".to_string(),
             "input".to_string(),
             Vec::new(),
-            meta(&[1, 3, 8, 8], "torch.int16"),
+            NodeMeta::tensor([1, 3, 8, 8], "torch.int16"),
         );
         let weight = graph.add_node(
             NodeOp::Placeholder,
             "weight".to_string(),
             "weight".to_string(),
             Vec::new(),
-            meta(&[3, 4, 3, 3], "torch.int8"),
+            NodeMeta::tensor([3, 4, 3, 3], "torch.int8"),
         );
         let bias = graph.add_node(
             NodeOp::Placeholder,
             "bias".to_string(),
             "bias".to_string(),
             Vec::new(),
-            meta(&[4], "torch.int32"),
+            NodeMeta::tensor([4], "torch.int32"),
         );
-        let mut conv_meta = meta(&[1, 4, 16, 16], "torch.int32");
+        let mut conv_meta = NodeMeta::tensor([1, 4, 16, 16], "torch.int32");
         conv_meta.set_input_qparams(HashMap::from([
             (0, qparam(0.5, 0, "torch.int16")),
             (1, qparam(0.25, 0, "torch.int8")),

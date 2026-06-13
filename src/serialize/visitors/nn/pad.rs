@@ -101,8 +101,7 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
     let pad_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
     let pad_value = match (pad_dtype, node.meta.output_qparams.first()) {
         (DType::Int8 | DType::Int16, Some((_, qp))) => {
-            let quantized = ((raw_pad_value / qp.scale) + qp.zero_point as f64).round() as i32;
-            quantized.clamp(qp.qmin as i32, qp.qmax as i32) as f64
+            quantize_scalar_with_qparam(raw_pad_value, *qp)
         }
         _ => raw_pad_value,
     };
@@ -113,22 +112,16 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
         pad_value,
     )
     .unwrap_or_else(|| {
-        TosaTensor::with_data(
-            &pad_const_name,
-            vec![1],
+        make_rank1_const_tensor(
+            pad_const_name.clone(),
             pad_dtype,
             encode_zp_for_dtype(pad_value as i32, pad_dtype),
+            1,
         )
     });
-    result.tensors.push(pad_const);
-    result.operators.push(TosaOperator::new(
-        Op::Const,
-        Attribute::Const(ConstAttribute {}),
-        vec![],
-        vec![pad_const_name.clone()],
-    ));
+    push_inline_const(&mut result, pad_const);
 
-    result.operators.push(TosaOperator::new(
+    result.push_op(
         Op::Pad,
         Attribute::Pad(PadAttribute {}),
         vec![
@@ -137,6 +130,6 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
             pad_const_name,
         ],
         vec![node.name.clone()],
-    ));
+    );
     result
 }

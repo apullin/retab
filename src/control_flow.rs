@@ -1,0 +1,1025 @@
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::fx_control_flow_metadata;
+use crate::fx_ir;
+use crate::graph::ir::{Arg, DType, NodeId};
+use crate::graph::Graph;
+use crate::store::TensorStore;
+use crate::StashedPipeline;
+
+#[derive(Clone, Copy)]
+pub(crate) struct WhileBodyInputCounts {
+    carried: usize,
+    additional: usize,
+}
+
+fn qualify_region(parent_region: Option<&str>, local_name: &str) -> String {
+    match parent_region {
+        Some(prefix) if !local_name.contains("::") => format!("{prefix}::{local_name}"),
+        _ => local_name.to_string(),
+    }
+}
+
+pub(crate) fn region_name_from_ir_arg(
+    ir: &fx_ir::IrGraph,
+    arg: Option<&fx_ir::IrArg>,
+    parent_region: Option<&str>,
+) -> Option<String> {
+    match arg {
+        Some(fx_ir::IrArg::Str(name)) => Some(qualify_region(parent_region, name)),
+        Some(fx_ir::IrArg::Node(id)) => ir
+            .nodes
+            .iter()
+            .find(|node| node.id == *id)
+            .map(|node| qualify_region(parent_region, &node.name)),
+        _ => None,
+    }
+}
+
+fn sequence_arg_len_ir(arg: Option<&fx_ir::IrArg>) -> usize {
+    match arg {
+        Some(fx_ir::IrArg::List(items)) => items.len(),
+        Some(fx_ir::IrArg::None) | None => 0,
+        Some(_) => 1,
+    }
+}
+
+pub(crate) fn collect_region_metadata(
+    parent_ir: &fx_ir::IrGraph,
+    submodules: &BTreeMap<String, StashedPipeline>,
+) -> (BTreeSet<String>, BTreeMap<String, WhileBodyInputCounts>) {
+    let mut while_cond_graph_names = BTreeSet::new();
+    let mut while_body_input_counts = BTreeMap::new();
+
+    for (parent_region, ir) in std::iter::once((None, parent_ir)).chain(
+        submodules
+            .iter()
+            .map(|(name, (ir, _))| (Some(name.as_str()), ir)),
+    ) {
+        for node in ir.nodes.iter().filter(|node| node.alive) {
+            if !node.is_while_loop() {
+                continue;
+            }
+
+            if let Some(cond_name) = region_name_from_ir_arg(ir, node.args.first(), parent_region) {
+                while_cond_graph_names.insert(cond_name);
+            }
+            if let Some(body_name) = region_name_from_ir_arg(ir, node.args.get(1), parent_region) {
+                while_body_input_counts.insert(
+                    body_name,
+                    WhileBodyInputCounts {
+                        carried: sequence_arg_len_ir(node.args.get(2)),
+                        additional: sequence_arg_len_ir(node.args.get(3)),
+                    },
+                );
+            }
+        }
+    }
+
+    (while_cond_graph_names, while_body_input_counts)
+}
+
+#[derive(Clone)]
+struct BoundaryInputMeta {
+    meta: fx_ir::NodeMeta,
+    boundary_dim_order: Option<Vec<usize>>,
+    fallback_qparam: Option<fx_ir::QParam>,
+}
+
+#[derive(Clone)]
+struct BoundaryContract {
+    region: String,
+    inputs: Vec<BoundaryInputMeta>,
+}
+
+#[derive(Clone)]
+struct OutputContract {
+    region: String,
+    targets: Vec<(usize, fx_ir::QParam)>,
+}
+
+fn boundary_rescale_args(
+    source_id: fx_ir::NodeId,
+    source_qp: &fx_ir::QParam,
+    target_qp: &fx_ir::QParam,
+) -> Vec<fx_ir::IrArg> {
+    vec![
+        fx_ir::IrArg::Node(source_id),
+        fx_ir::IrArg::Dtype(target_qp.dtype_str.clone()),
+        fx_ir::IrArg::List(vec![fx_ir::IrArg::Float(source_qp.scale / target_qp.scale)]),
+        fx_ir::IrArg::Int(source_qp.zp),
+        fx_ir::IrArg::Int(target_qp.zp),
+    ]
+}
+
+fn boundary_rescale_meta(
+    base_meta: &fx_ir::NodeMeta,
+    source_meta: &fx_ir::NodeMeta,
+    source_qp: &fx_ir::QParam,
+    target_qp: &fx_ir::QParam,
+) -> fx_ir::NodeMeta {
+    let mut meta =
+        base_meta.rescale_meta_with_input_qparam(source_meta, source_qp.clone(), target_qp.clone());
+    if let Some(dim_order) = source_meta.tosa_dim_order.clone() {
+        meta.set_tosa_dim_order(dim_order);
+    }
+    meta
+}
+
+fn add_boundary_rescale(
+    graph: &mut fx_ir::IrGraph,
+    name: String,
+    source_id: fx_ir::NodeId,
+    base_meta_id: fx_ir::NodeId,
+    source_qp: &fx_ir::QParam,
+    target_qp: &fx_ir::QParam,
+) -> (fx_ir::NodeId, Vec<fx_ir::IrArg>) {
+    let args = boundary_rescale_args(source_id, source_qp, target_qp);
+    let meta = boundary_rescale_meta(
+        &graph.nodes[base_meta_id].meta,
+        &graph.nodes[source_id].meta,
+        source_qp,
+        target_qp,
+    );
+    let rescale = graph.add_node(
+        fx_control_flow_metadata::NodeOp::CallFunction,
+        name,
+        "backend.tosa.RESCALE.default".to_string(),
+        args.clone(),
+        meta,
+    );
+    (rescale, args)
+}
+
+fn boundary_placeholder_ids(graph: &fx_ir::IrGraph) -> Vec<fx_ir::NodeId> {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| node.alive && node.op == fx_control_flow_metadata::NodeOp::Placeholder)
+        .map(|node| node.id)
+        .collect()
+}
+
+fn boundary_external_qparam(input: &BoundaryInputMeta) -> Option<fx_ir::QParam> {
+    input
+        .meta
+        .output_qparam()
+        .or(input.meta.input_qparam())
+        .cloned()
+        .or_else(|| input.fallback_qparam.clone())
+}
+
+fn stamp_boundary_placeholder_meta(
+    ph_meta: &mut fx_ir::NodeMeta,
+    input: &BoundaryInputMeta,
+    count_marker_write: bool,
+) -> u32 {
+    let mut changed = 0u32;
+    ph_meta.set_extra("arm_control_flow_placeholder", fx_ir::MetaValue::Bool(true));
+    if count_marker_write {
+        changed += 1;
+    }
+    if let Some(val) = input.meta.val.clone() {
+        ph_meta.set_val(val);
+        changed += 1;
+    }
+    if let Some(dim_order) = input.boundary_dim_order.clone() {
+        ph_meta.set_val_dim_order(dim_order.clone());
+        ph_meta.set_tosa_dim_order(dim_order);
+        changed += 1;
+    }
+
+    let mut found_qparam = false;
+    if let Some(output_qparams) = input.meta.output_qparams.clone() {
+        ph_meta.set_output_qparams(output_qparams);
+        found_qparam = true;
+        changed += 1;
+    }
+    if let Some(input_qparams) = input.meta.input_qparams.clone() {
+        ph_meta.set_input_qparams(input_qparams);
+        found_qparam = true;
+        changed += 1;
+    }
+    if !found_qparam {
+        if let Some(qparam) = input.fallback_qparam.clone() {
+            ph_meta.set_both_qparams(qparam);
+            changed += 1;
+        }
+    }
+
+    changed
+}
+
+fn node_ids_from_ir_arg(arg: Option<&fx_ir::IrArg>) -> Vec<fx_ir::NodeId> {
+    fn collect(arg: &fx_ir::IrArg, out: &mut Vec<fx_ir::NodeId>) {
+        match arg {
+            fx_ir::IrArg::Node(id) => out.push(*id),
+            fx_ir::IrArg::List(items) => {
+                for item in items {
+                    collect(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut ids = Vec::new();
+    if let Some(arg) = arg {
+        collect(arg, &mut ids);
+    }
+    ids
+}
+
+fn resolve_parent_arg_ids_ir(node: &fx_ir::IrNode) -> Vec<fx_ir::NodeId> {
+    if node.is_cond() {
+        return node_ids_from_ir_arg(node.args.last());
+    }
+    if node.is_while_loop() && node.args.len() >= 2 {
+        let mut ids = node_ids_from_ir_arg(node.args.get(node.args.len() - 2));
+        ids.extend(node_ids_from_ir_arg(node.args.last()));
+        return ids;
+    }
+    Vec::new()
+}
+
+fn boundary_placeholder_dim_order(parent_arg: &fx_ir::IrNode) -> Option<Vec<usize>> {
+    let rank = parent_arg.meta.rank()?;
+    if parent_arg.name.ends_with("_input_layout") || parent_arg.target.contains("TRANSPOSE") {
+        return Some((0..rank).collect());
+    }
+    parent_arg.meta.tosa_dim_order.clone()
+}
+
+fn collect_boundary_contracts_for_graph(
+    ir: &fx_ir::IrGraph,
+    parent_region: Option<&str>,
+    contracts: &mut Vec<BoundaryContract>,
+    while_body_regions: &mut BTreeSet<String>,
+) {
+    for node in ir.nodes.iter().filter(|node| node.alive) {
+        let is_cond = node.is_cond();
+        let is_while = node.is_while_loop();
+        if !is_cond && !is_while {
+            continue;
+        }
+
+        let parent_arg_ids = resolve_parent_arg_ids_ir(node);
+        if parent_arg_ids.is_empty() {
+            continue;
+        }
+
+        let inputs: Vec<BoundaryInputMeta> = parent_arg_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, &arg_id)| {
+                let arg_node = ir.nodes.get(arg_id)?;
+                let fallback_qparam = node
+                    .meta
+                    .pre_pass_arg_qparams
+                    .as_ref()
+                    .and_then(|saved| saved.get(&idx).cloned())
+                    .or_else(|| fx_control_flow_metadata::extract_effective_qparam_ir(ir, arg_id));
+                Some(BoundaryInputMeta {
+                    meta: arg_node.meta.clone(),
+                    boundary_dim_order: boundary_placeholder_dim_order(arg_node),
+                    fallback_qparam,
+                })
+            })
+            .collect();
+        if inputs.is_empty() {
+            continue;
+        }
+
+        let region_indices: &[(usize, bool)] = if is_while {
+            &[(0, false), (1, true)]
+        } else {
+            &[(1, false), (2, false)]
+        };
+        for &(arg_idx, is_while_body) in region_indices {
+            let Some(region) = region_name_from_ir_arg(ir, node.args.get(arg_idx), parent_region)
+            else {
+                continue;
+            };
+            if is_while_body {
+                while_body_regions.insert(region.clone());
+            }
+            contracts.push(BoundaryContract {
+                region,
+                inputs: inputs.clone(),
+            });
+        }
+    }
+}
+
+fn infer_output_qparams_map_ir(
+    graph: &fx_ir::IrGraph,
+    cf_id: fx_ir::NodeId,
+) -> Vec<(usize, fx_ir::QParam)> {
+    let mut user_ids: Vec<fx_ir::NodeId> = graph.users(cf_id).to_vec();
+    user_ids.sort_by(|&a, &b| {
+        let ak = graph.node(a).args.get(1).and_then(|arg| match arg {
+            fx_ir::IrArg::Int(i) => Some(*i),
+            _ => None,
+        });
+        let bk = graph.node(b).args.get(1).and_then(|arg| match arg {
+            fx_ir::IrArg::Int(i) => Some(*i),
+            _ => None,
+        });
+        match (ak, bk) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
+
+    let mut result = Vec::new();
+    for user_id in user_ids {
+        let user = graph.node(user_id);
+        if !user.alive {
+            continue;
+        }
+        let idx = match user.args.get(1) {
+            Some(fx_ir::IrArg::Int(i)) => *i as usize,
+            _ => continue,
+        };
+        if let Some(qparam) = user.meta.output_qparam() {
+            result.push((idx, qparam.clone()));
+            continue;
+        }
+        let mut found = false;
+        for &consumer_id in graph.users(user_id) {
+            let consumer = graph.node(consumer_id);
+            if !consumer.alive {
+                continue;
+            }
+            if let Some(qparam) = consumer.meta.input_qparam() {
+                result.push((idx, qparam.clone()));
+                found = true;
+                break;
+            }
+        }
+        if found {
+            continue;
+        }
+        for &consumer_id in graph.users(user_id) {
+            let consumer = graph.node(consumer_id);
+            if !consumer.alive || !consumer.is_dequantize() {
+                continue;
+            }
+            if let Some(qparam) = consumer.parse_qdq_qparam() {
+                result.push((idx, qparam));
+                break;
+            }
+        }
+    }
+    result
+}
+
+fn collect_output_contracts_for_graph(
+    ir: &fx_ir::IrGraph,
+    parent_region: Option<&str>,
+    contracts: &mut Vec<OutputContract>,
+) {
+    for node in ir.nodes.iter().filter(|node| node.alive) {
+        let is_cond = node.is_cond();
+        let is_while = node.is_while_loop();
+        if !is_cond && !is_while {
+            continue;
+        }
+        let targets = infer_output_qparams_map_ir(ir, node.id);
+        if targets.is_empty() {
+            continue;
+        }
+        let region_indices: &[usize] = if is_while {
+            &[1usize]
+        } else {
+            &[1usize, 2usize]
+        };
+        for &arg_idx in region_indices {
+            let Some(region) = region_name_from_ir_arg(ir, node.args.get(arg_idx), parent_region)
+            else {
+                continue;
+            };
+            contracts.push(OutputContract {
+                region,
+                targets: targets.clone(),
+            });
+        }
+    }
+}
+
+pub(crate) fn snapshot_pre_pass_qparams_ir(graph: &mut fx_ir::IrGraph) -> u32 {
+    let cf_ids: Vec<fx_ir::NodeId> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.alive && node.is_control_flow())
+        .map(|node| node.id)
+        .collect();
+
+    let mut saved = 0u32;
+    for cf_id in cf_ids {
+        let parent_arg_ids = resolve_parent_arg_ids_ir(graph.node(cf_id));
+        let mut snapshot = std::collections::HashMap::new();
+
+        for (idx, arg_id) in parent_arg_ids.into_iter().enumerate() {
+            let arg = graph.node(arg_id);
+            let qparam = arg
+                .meta
+                .output_qparam()
+                .cloned()
+                .or_else(|| fx_control_flow_metadata::extract_effective_qparam_ir(graph, arg_id))
+                .or_else(|| {
+                    if arg.is_q_or_dq() {
+                        arg.parse_qdq_qparam()
+                    } else {
+                        None
+                    }
+                });
+            if let Some(qparam) = qparam {
+                snapshot.insert(idx, qparam);
+                saved += 1;
+            }
+        }
+
+        if !snapshot.is_empty() {
+            graph
+                .node_mut(cf_id)
+                .meta
+                .set_pre_pass_arg_qparams(snapshot);
+        }
+    }
+
+    saved
+}
+
+fn annotate_parent_rank4_dim_order_ir(graph: &mut fx_ir::IrGraph) -> u32 {
+    const NHWC_DIM_ORDER: [usize; 4] = [0, 2, 3, 1];
+
+    let cf_ids: Vec<fx_ir::NodeId> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.alive)
+        .filter(|node| node.is_control_flow())
+        .map(|node| node.id)
+        .collect();
+
+    let mut annotated = 0u32;
+    for cf_id in cf_ids {
+        let user_ids = graph.users(cf_id).to_vec();
+        for user_id in user_ids {
+            if !graph.nodes[user_id].alive || graph.nodes[user_id].meta.rank() != Some(4) {
+                continue;
+            }
+            graph.nodes[user_id].meta.set_extra(
+                "arm_control_flow_parent_output_user",
+                fx_ir::MetaValue::Bool(true),
+            );
+            if graph.nodes[user_id].meta.tosa_dim_order.as_deref() != Some(&NHWC_DIM_ORDER) {
+                graph.nodes[user_id]
+                    .meta
+                    .set_tosa_dim_order(NHWC_DIM_ORDER.to_vec());
+                annotated += 1;
+            }
+        }
+    }
+    annotated
+}
+
+fn apply_boundary_contract_to_submodule(
+    graph: &mut fx_ir::IrGraph,
+    contract: &BoundaryContract,
+) -> u32 {
+    let placeholder_ids = boundary_placeholder_ids(graph);
+
+    let mut changed = 0u32;
+    for (ph_id, input) in placeholder_ids.iter().copied().zip(contract.inputs.iter()) {
+        let internal_qparam = graph.nodes[ph_id].meta.output_qparam().cloned();
+        let external_qparam = boundary_external_qparam(input);
+        changed += stamp_boundary_placeholder_meta(&mut graph.nodes[ph_id].meta, input, false);
+
+        let Some(external_qp) = external_qparam else {
+            continue;
+        };
+        let Some(internal_qp) = internal_qparam else {
+            continue;
+        };
+        if (external_qp.scale - internal_qp.scale).abs() < 1e-10 && external_qp.zp == internal_qp.zp
+        {
+            continue;
+        }
+        if external_qp.scale == 0.0 || internal_qp.scale == 0.0 {
+            continue;
+        }
+
+        let ph_name = graph.nodes[ph_id].name.clone();
+        let (rescale, rescale_args) = add_boundary_rescale(
+            graph,
+            format!("{ph_name}_cf_input_rescale"),
+            ph_id,
+            ph_id,
+            &external_qp,
+            &internal_qp,
+        );
+        graph.anchor_after(rescale, ph_id);
+        graph.replace_all_uses(ph_id, rescale);
+        graph.set_args(rescale, rescale_args);
+        graph.nodes[ph_id].meta.clear_output_qparams();
+        changed += 1;
+    }
+
+    changed
+}
+
+fn apply_qparam_contract_to_submodule(
+    graph: &mut fx_ir::IrGraph,
+    contract: &BoundaryContract,
+) -> u32 {
+    let placeholder_ids = boundary_placeholder_ids(graph);
+
+    let mut changed = 0u32;
+    for (ph_id, input) in placeholder_ids.iter().copied().zip(contract.inputs.iter()) {
+        changed += stamp_boundary_placeholder_meta(&mut graph.nodes[ph_id].meta, input, true);
+    }
+
+    changed
+}
+
+fn find_boundary_contract_for_region(
+    region_name: &str,
+    parent: Option<&StashedPipeline>,
+    submodules: &BTreeMap<String, StashedPipeline>,
+) -> Option<(BoundaryContract, bool)> {
+    let mut contracts = Vec::new();
+    let mut while_body_regions = BTreeSet::new();
+
+    if let Some((parent_ir, _)) = parent {
+        collect_boundary_contracts_for_graph(
+            parent_ir,
+            None,
+            &mut contracts,
+            &mut while_body_regions,
+        );
+    }
+    for (region, (ir, _)) in submodules.iter() {
+        collect_boundary_contracts_for_graph(
+            ir,
+            Some(region.as_str()),
+            &mut contracts,
+            &mut while_body_regions,
+        );
+    }
+
+    contracts
+        .into_iter()
+        .find(|contract| contract.region == region_name)
+        .map(|contract| {
+            let is_while_body = while_body_regions.contains(region_name);
+            (contract, is_while_body)
+        })
+}
+
+pub(crate) fn apply_pre_submodule_qparam_propagation_ir(
+    region_name: Option<&str>,
+    graph: &mut fx_ir::IrGraph,
+    parent: Option<&StashedPipeline>,
+    submodules: &BTreeMap<String, StashedPipeline>,
+) -> u32 {
+    let Some(region_name) = region_name else {
+        return 0;
+    };
+    let Some((contract, is_while_body)) =
+        find_boundary_contract_for_region(region_name, parent, submodules)
+    else {
+        return 0;
+    };
+
+    let mut changed = apply_qparam_contract_to_submodule(graph, &contract);
+    if is_while_body {
+        changed += fx_control_flow_metadata::stamp_while_body_output_qparams_ir(graph) as u32;
+    }
+    changed
+}
+
+fn rewrite_output_dequantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
+    let mut rewritten = 0u32;
+    let ids: Vec<fx_ir::NodeId> = (0..graph.nodes.len()).collect();
+    for dq_id in ids {
+        if !graph.nodes[dq_id].alive || !graph.nodes[dq_id].is_dequantize() {
+            continue;
+        }
+        let Some(source_id) = graph.nodes[dq_id].first_node_arg() else {
+            continue;
+        };
+        let user_ids = graph.users(dq_id).to_vec();
+        if user_ids.is_empty() {
+            continue;
+        }
+        let all_rescale_or_output = user_ids.iter().all(|&uid| {
+            let user = &graph.nodes[uid];
+            user.alive && (user.is_rescale() || user.op == fx_control_flow_metadata::NodeOp::Output)
+        });
+        if !all_rescale_or_output {
+            continue;
+        }
+        graph.replace_and_erase(dq_id, source_id);
+        rewritten += 1;
+    }
+    rewritten
+}
+
+fn rewrite_quantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
+    let mut rewritten = 0u32;
+    let ids: Vec<fx_ir::NodeId> = (0..graph.nodes.len()).collect();
+    for q_id in ids {
+        if !graph.nodes[q_id].alive || !graph.nodes[q_id].is_quantize() {
+            continue;
+        }
+        let Some(source_id) = graph.nodes[q_id].first_node_arg() else {
+            continue;
+        };
+        let Some(target_qp) = graph.nodes[q_id].parse_qdq_qparam() else {
+            continue;
+        };
+        let Some(source_qp) =
+            fx_control_flow_metadata::extract_effective_qparam_ir(graph, source_id)
+        else {
+            continue;
+        };
+
+        if source_qp.scale == target_qp.scale && source_qp.zp == target_qp.zp {
+            graph.replace_and_erase(q_id, source_id);
+            rewritten += 1;
+            continue;
+        }
+        if source_qp.scale == 0.0 || target_qp.scale == 0.0 {
+            continue;
+        }
+
+        let q_name = graph.nodes[q_id].name.clone();
+        let (rescale, _) = add_boundary_rescale(
+            graph,
+            format!("{q_name}_boundary_rescale"),
+            source_id,
+            q_id,
+            &source_qp,
+            &target_qp,
+        );
+        graph.anchor_to(rescale, q_id);
+        graph.replace_and_erase(q_id, rescale);
+        rewritten += 1;
+    }
+    rewritten
+}
+
+fn output_arg_node_ids_ir(graph: &fx_ir::IrGraph, out_id: fx_ir::NodeId) -> Vec<fx_ir::NodeId> {
+    let output = graph.node(out_id);
+    if output.args.len() == 1 {
+        if let Some(fx_ir::IrArg::List(items)) = output.args.first() {
+            return items
+                .iter()
+                .filter_map(|item| match item {
+                    fx_ir::IrArg::Node(id) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+        }
+    }
+    output
+        .args
+        .iter()
+        .filter_map(|arg| match arg {
+            fx_ir::IrArg::Node(id) => Some(*id),
+            _ => None,
+        })
+        .collect()
+}
+
+fn replace_output_arg_at_index_ir(
+    graph: &mut fx_ir::IrGraph,
+    out_id: fx_ir::NodeId,
+    index: usize,
+    new_id: fx_ir::NodeId,
+) -> bool {
+    let mut args = graph.node(out_id).args.clone();
+    if args.len() == 1 {
+        if let Some(fx_ir::IrArg::List(items)) = args.first_mut() {
+            let Some(fx_ir::IrArg::Node(slot)) = items.get_mut(index) else {
+                return false;
+            };
+            *slot = new_id;
+            graph.set_args(out_id, args);
+            return true;
+        }
+    }
+    let Some(fx_ir::IrArg::Node(slot)) = args.get_mut(index) else {
+        return false;
+    };
+    *slot = new_id;
+    graph.set_args(out_id, args);
+    true
+}
+
+fn apply_output_rescale_contract_ir(graph: &mut fx_ir::IrGraph, contract: &OutputContract) -> u32 {
+    let Some(out_id) = graph.output_node().map(|node| node.id) else {
+        return 0;
+    };
+    let output_arg_ids = output_arg_node_ids_ir(graph, out_id);
+    let mut inserted = 0u32;
+    let mut targets = contract.targets.clone();
+    targets.sort_by_key(|(idx, _)| *idx);
+    for (idx, target_qp) in targets {
+        let Some(&initial_src_id) = output_arg_ids.get(idx) else {
+            continue;
+        };
+        let mut src_id = initial_src_id;
+        let mut carried_rescale_id = None;
+        if graph.nodes[initial_src_id]
+            .name
+            .contains("_carried_rescale")
+        {
+            if let Some(carried_source_id) = graph.nodes[initial_src_id].first_node_arg() {
+                src_id = carried_source_id;
+                carried_rescale_id = Some(initial_src_id);
+            }
+        }
+        let source_from_rescale = if graph.nodes[src_id].is_rescale() {
+            fx_control_flow_metadata::reverse_engineer_rescale_ir(graph, graph.node(src_id))
+        } else {
+            None
+        };
+        let Some(source_qp) = source_from_rescale
+            .or_else(|| {
+                graph.nodes[out_id]
+                    .meta
+                    .input_qparams
+                    .as_ref()
+                    .and_then(|map| map.get(&idx).cloned())
+            })
+            .or_else(|| fx_control_flow_metadata::extract_effective_qparam_ir(graph, src_id))
+        else {
+            continue;
+        };
+        if source_qp.scale == target_qp.scale && source_qp.zp == target_qp.zp {
+            if let Some(dead_id) = carried_rescale_id {
+                if replace_output_arg_at_index_ir(graph, out_id, idx, src_id) {
+                    graph.erase(dead_id);
+                    inserted += 1;
+                }
+            }
+            continue;
+        }
+        if source_qp.scale == 0.0 || target_qp.scale == 0.0 {
+            continue;
+        }
+
+        let src_name = graph.nodes[src_id].name.clone();
+        let (rescale, _) = add_boundary_rescale(
+            graph,
+            format!("{src_name}_cf_output_rescale"),
+            src_id,
+            src_id,
+            &source_qp,
+            &target_qp,
+        );
+        graph.anchor_after(rescale, src_id);
+        if replace_output_arg_at_index_ir(graph, out_id, idx, rescale) {
+            if let Some(dead_id) = carried_rescale_id {
+                graph.erase(dead_id);
+            }
+            inserted += 1;
+        }
+    }
+    inserted
+}
+
+fn strip_while_cond_output_rescales_ir(graph: &mut fx_ir::IrGraph) -> u32 {
+    let Some(out_id) = graph.output_node().map(|node| node.id) else {
+        return 0;
+    };
+    let output_arg_ids = output_arg_node_ids_ir(graph, out_id);
+    let mut stripped = 0u32;
+    for rescale_id in output_arg_ids {
+        if !graph.nodes[rescale_id].alive || !graph.nodes[rescale_id].is_rescale() {
+            continue;
+        }
+        let Some(src_id) = graph.nodes[rescale_id].first_node_arg() else {
+            continue;
+        };
+        let source_is_bool = graph.nodes[src_id]
+            .meta
+            .val_dtype()
+            .is_some_and(|dtype| dtype.contains("bool"));
+        if !source_is_bool && !graph.nodes[rescale_id].name.contains("_carried_rescale") {
+            continue;
+        }
+        graph.replace_and_erase(rescale_id, src_id);
+        stripped += 1;
+    }
+    stripped
+}
+
+pub(crate) fn apply_boundary_contracts(
+    parent_ir: &mut fx_ir::IrGraph,
+    submodules: &mut BTreeMap<String, StashedPipeline>,
+) -> u32 {
+    let mut contracts = Vec::new();
+    let mut output_contracts = Vec::new();
+    let mut while_body_regions = BTreeSet::new();
+    let (while_cond_regions, _) = collect_region_metadata(parent_ir, submodules);
+    collect_boundary_contracts_for_graph(parent_ir, None, &mut contracts, &mut while_body_regions);
+    collect_output_contracts_for_graph(parent_ir, None, &mut output_contracts);
+    for (region, (ir, _)) in submodules.iter() {
+        collect_boundary_contracts_for_graph(
+            ir,
+            Some(region.as_str()),
+            &mut contracts,
+            &mut while_body_regions,
+        );
+        collect_output_contracts_for_graph(ir, Some(region.as_str()), &mut output_contracts);
+    }
+    contracts.sort_by(|a, b| a.region.cmp(&b.region));
+    output_contracts.sort_by(|a, b| a.region.cmp(&b.region));
+
+    let mut changed = annotate_parent_rank4_dim_order_ir(parent_ir);
+    let cf_debug = crate::config::from_ir_debug_enabled();
+    for (region, (ir, _)) in submodules.iter_mut() {
+        if while_cond_regions.contains(region) {
+            let stripped = strip_while_cond_output_rescales_ir(ir);
+            if stripped > 0 && cf_debug {
+                eprintln!(
+                    "[RETAB][cf-boundary-ir] stripped {stripped} while-cond output RESCALE node(s) in {region}"
+                );
+            }
+            changed += stripped;
+        }
+        let rewrites = rewrite_output_dequantize_boundaries_ir(ir);
+        if rewrites > 0 && cf_debug {
+            eprintln!(
+                "[RETAB][cf-boundary-ir] rewrote {rewrites} output DQ boundary node(s) in {region}"
+            );
+        }
+        changed += rewrites;
+    }
+    for contract in &contracts {
+        let Some((ir, _)) = submodules.get_mut(&contract.region) else {
+            continue;
+        };
+        changed += apply_boundary_contract_to_submodule(ir, contract);
+        if while_body_regions.contains(&contract.region) {
+            changed += fx_control_flow_metadata::stamp_while_body_output_qparams_ir(ir) as u32;
+        }
+    }
+    for (region, (ir, _)) in submodules.iter_mut() {
+        let rewrites = rewrite_quantize_boundaries_ir(ir);
+        if rewrites > 0 && cf_debug {
+            eprintln!(
+                "[RETAB][cf-boundary-ir] rewrote {rewrites} quantize boundary node(s) in {region}"
+            );
+        }
+        changed += rewrites;
+    }
+    for contract in &output_contracts {
+        let Some((ir, _)) = submodules.get_mut(&contract.region) else {
+            continue;
+        };
+        let inserts = apply_output_rescale_contract_ir(ir, contract);
+        if inserts > 0 && cf_debug {
+            eprintln!(
+                "[RETAB][cf-boundary-ir] inserted {inserts} output RESCALE boundary node(s) in {}",
+                contract.region
+            );
+        }
+        changed += inserts;
+    }
+    changed
+}
+
+fn mark_scalar_outputs(graph: &mut Graph) {
+    let Some(output_id) = graph.output else {
+        return;
+    };
+    let Some(output_node) = graph.node(output_id) else {
+        return;
+    };
+    let output_args = output_node.args.clone();
+
+    for arg in output_args {
+        for node_id in arg.node_refs() {
+            let Some(node) = graph.node_mut(node_id) else {
+                continue;
+            };
+            if node.meta.val.dtype == DType::Bool {
+                node.meta.preserve_scalar_shape = true;
+            }
+        }
+    }
+}
+
+fn append_while_body_passthrough_outputs(graph: &mut Graph, counts: WhileBodyInputCounts) {
+    let additional_inputs: Vec<NodeId> = graph
+        .inputs
+        .iter()
+        .skip(counts.carried)
+        .take(counts.additional)
+        .copied()
+        .collect();
+    if additional_inputs.is_empty() {
+        return;
+    }
+
+    let Some(output_id) = graph.output else {
+        return;
+    };
+    let Some(output_node) = graph.node_mut(output_id) else {
+        return;
+    };
+
+    match output_node.args.first_mut() {
+        Some(Arg::NodeList(ids)) => ids.extend(additional_inputs),
+        Some(Arg::Node(id)) => {
+            let mut ids = smallvec::SmallVec::new();
+            ids.push(*id);
+            ids.extend(additional_inputs);
+            output_node.args[0] = Arg::NodeList(ids);
+        }
+        _ => output_node
+            .args
+            .push(Arg::NodeList(smallvec::SmallVec::from_vec(
+                additional_inputs,
+            ))),
+    }
+    graph.rebuild_user_lists();
+}
+
+fn drop_subgraph_input_store_entries(graph: &Graph, store: &mut TensorStore) {
+    for &input_id in &graph.inputs {
+        let Some(node) = graph.node(input_id) else {
+            continue;
+        };
+        store.buffers.remove(&node.name);
+    }
+}
+
+pub(crate) fn append_subgraphs_from_ir(
+    graphs: &mut Vec<(String, Graph)>,
+    store: &mut TensorStore,
+    parent_ir: &fx_ir::IrGraph,
+    submodules: &BTreeMap<String, StashedPipeline>,
+) -> PyResult<()> {
+    let (while_cond_graph_names, while_body_input_counts) =
+        collect_region_metadata(parent_ir, submodules);
+
+    let referenced_regions: BTreeSet<String> = while_cond_graph_names
+        .iter()
+        .cloned()
+        .chain(while_body_input_counts.keys().cloned())
+        .chain(submodules.keys().cloned())
+        .collect();
+
+    for region in referenced_regions {
+        if graphs.iter().any(|(name, _)| name == &region) {
+            continue;
+        }
+        let Some((ir, effects)) = submodules.get(&region) else {
+            return Err(PyRuntimeError::new_err(format!(
+                "missing stashed IrGraph for control-flow region '{region}'"
+            )));
+        };
+
+        let mut sub_store = TensorStore::new();
+        let mut sub_graph =
+            crate::ingest::from_ir::graph_from_ir_preserve_placeholders(ir, &mut sub_store);
+        crate::ingest::from_ir::apply_effects_preserve_placeholders(
+            &mut sub_graph,
+            &mut sub_store,
+            effects,
+        );
+        crate::ingest::fx_bridge::finalize_converted_graph(&mut sub_graph);
+        if while_cond_graph_names.contains(&region) {
+            mark_scalar_outputs(&mut sub_graph);
+        }
+        if let Some(counts) = while_body_input_counts.get(&region).copied() {
+            append_while_body_passthrough_outputs(&mut sub_graph, counts);
+        }
+        drop_subgraph_input_store_entries(&sub_graph, &mut sub_store);
+        if crate::config::from_ir_debug_enabled() {
+            crate::ingest::from_ir::debug_dump(&sub_graph, &format!("CF SUBGRAPH {region}"));
+        }
+        crate::ingest::from_ir::prefix_graph(
+            &mut sub_graph,
+            &mut sub_store,
+            &format!("{region}::"),
+        );
+        for (key, value) in sub_store.buffers {
+            if store.get(&key).is_none() {
+                store.insert(key, value);
+            }
+        }
+        graphs.push((region, sub_graph));
+    }
+
+    Ok(())
+}

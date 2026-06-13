@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
-use crate::fx_ep_effects::{FxDeleteConstantPlaceholderEffect, FxEpEffect, FxEpEffectBatch};
-use crate::fx_ir::{IrEpPass, IrEpPassResult, IrGraph, NodeId, NodeOp};
+use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, NodeId, NodeOp};
+use crate::lowering_effects::{
+    DeleteConstantPlaceholderEffect, LoweringEffect, LoweringEffectBatch,
+};
 
 fn placeholder_fingerprint(
     graph: &IrGraph,
@@ -48,22 +50,22 @@ pub fn find_duplicate_placeholder_pairs(graph: &IrGraph) -> Vec<(NodeId, NodeId)
     pairs
 }
 
-pub struct IrFuseEqualPlaceholdersEpPass;
+pub struct IrFuseEqualPlaceholdersEffectPass;
 
-impl IrEpPass for IrFuseEqualPlaceholdersEpPass {
+impl EffectfulIrPass for IrFuseEqualPlaceholdersEffectPass {
     fn name(&self) -> &str {
         "IrFuseEqualPlaceholdersEp"
     }
 
-    fn run(&self, graph: &mut IrGraph) -> IrEpPassResult {
+    fn run(&self, graph: &mut IrGraph) -> EffectfulIrPassResult {
         let mut modified = false;
-        let mut effects = FxEpEffectBatch::default();
+        let mut effects = LoweringEffectBatch::default();
 
         for (dup, canonical) in find_duplicate_placeholder_pairs(graph) {
             let placeholder_name = graph.node(dup).name.clone();
             graph.replace_and_erase(dup, canonical);
-            effects.push(FxEpEffect::DeleteConstantPlaceholder(
-                FxDeleteConstantPlaceholderEffect {
+            effects.push(LoweringEffect::DeleteConstantPlaceholder(
+                DeleteConstantPlaceholderEffect {
                     placeholder_name,
                     allow_missing: true,
                 },
@@ -71,7 +73,7 @@ impl IrEpPass for IrFuseEqualPlaceholdersEpPass {
             modified = true;
         }
 
-        IrEpPassResult { modified, effects }
+        EffectfulIrPassResult { modified, effects }
     }
 }
 
@@ -128,14 +130,14 @@ mod tests {
             NodeMeta::default(),
         );
 
-        let pass = IrFuseEqualPlaceholdersEpPass;
+        let pass = IrFuseEqualPlaceholdersEffectPass;
         let result = pass.run(&mut graph);
 
         assert!(result.modified);
         assert_eq!(graph.node(user).args[0].as_node(), Some(canonical));
         assert!(!graph.node(duplicate).alive);
-        assert_eq!(result.effects.effects.len(), 1);
-        let FxEpEffect::DeleteConstantPlaceholder(effect) = &result.effects.effects[0] else {
+        assert_eq!(result.effects.items.len(), 1);
+        let LoweringEffect::DeleteConstantPlaceholder(effect) = &result.effects.items[0] else {
             panic!("expected delete effect");
         };
         assert_eq!(effect.placeholder_name, "b");

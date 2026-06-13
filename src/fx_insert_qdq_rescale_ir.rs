@@ -1,35 +1,5 @@
-use std::collections::HashMap;
-
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
-
-fn is_dequantize(target: &str) -> bool {
-    target.contains("dequantize_per_tensor")
-}
-
-fn is_quantize(target: &str) -> bool {
-    target.contains("quantize_per_tensor") && !target.contains("dequantize")
-}
-
-fn rescale_meta_from(
-    source: &NodeMeta,
-    quantize: &NodeMeta,
-    input_qp: QParam,
-    output_qp: QParam,
-) -> NodeMeta {
-    let mut meta = quantize.clone();
-    let mut input_qparams = HashMap::new();
-    input_qparams.insert(0, input_qp);
-    meta.set_input_qparams(input_qparams);
-    meta.set_single_output_qparam(output_qp.clone());
-    if let Some(shape) = source.val_shape() {
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: output_qp.dtype_str,
-        });
-    }
-    meta
-}
 
 fn insert_qdq_rescale(graph: &mut IrGraph, dq_id: NodeId, q_id: NodeId) -> bool {
     let dq = graph.node(dq_id);
@@ -38,8 +8,8 @@ fn insert_qdq_rescale(graph: &mut IrGraph, dq_id: NodeId, q_id: NodeId) -> bool 
         || !q.alive
         || dq.op != NodeOp::CallFunction
         || q.op != NodeOp::CallFunction
-        || !is_dequantize(&dq.target)
-        || !is_quantize(&q.target)
+        || !dq.is_dequantize()
+        || !q.is_quantize()
     {
         return false;
     }
@@ -58,9 +28,8 @@ fn insert_qdq_rescale(graph: &mut IrGraph, dq_id: NodeId, q_id: NodeId) -> bool 
     }
 
     let scale = dq_qp.scale / q_qp.scale;
-    let meta = rescale_meta_from(
+    let meta = q.meta.rescale_meta_with_input_qparam(
         &graph.node(source_id).meta,
-        &q.meta,
         dq_qp.clone(),
         q_qp.clone(),
     );
@@ -78,7 +47,6 @@ fn insert_qdq_rescale(graph: &mut IrGraph, dq_id: NodeId, q_id: NodeId) -> bool 
         meta,
     );
     graph.anchor_to(rescale, dq_id);
-    graph.copy_meta_from(rescale, source_id);
 
     graph.replace_and_erase(q_id, rescale);
     if !graph.has_live_users(dq_id) {
@@ -98,12 +66,12 @@ impl IrPass for IrInsertQdqRescalePass {
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut pairs = Vec::new();
         for node in &graph.nodes {
-            if !node.alive || node.op != NodeOp::CallFunction || !is_dequantize(&node.target) {
+            if !node.alive || node.op != NodeOp::CallFunction || !node.is_dequantize() {
                 continue;
             }
             for user_id in graph.live_user_ids(node.id) {
                 let user = graph.node(user_id);
-                if user.alive && user.op == NodeOp::CallFunction && is_quantize(&user.target) {
+                if user.alive && user.op == NodeOp::CallFunction && user.is_quantize() {
                     pairs.push((node.id, user_id));
                 }
             }
@@ -125,15 +93,7 @@ impl IrPass for IrInsertQdqRescalePass {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
-        let mut meta = NodeMeta::default();
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: dtype.to_string(),
-        });
-        meta
-    }
+    use crate::fx_ir::NodeMeta;
 
     #[test]
     fn folds_dq_q_pair_into_rescale() {
@@ -143,7 +103,7 @@ mod tests {
             "input".to_string(),
             "input".to_string(),
             Vec::new(),
-            meta(&[1, 3, 4, 4], "torch.int8"),
+            NodeMeta::tensor([1, 3, 4, 4], "torch.int8"),
         );
         let dq = graph.add_node(
             NodeOp::CallFunction,
@@ -157,7 +117,7 @@ mod tests {
                 IrArg::Int(127),
                 IrArg::Dtype("torch.int8".to_string()),
             ],
-            meta(&[1, 3, 4, 4], "torch.float32"),
+            NodeMeta::tensor([1, 3, 4, 4], "torch.float32"),
         );
         let q = graph.add_node(
             NodeOp::CallFunction,
@@ -171,14 +131,14 @@ mod tests {
                 IrArg::Int(127),
                 IrArg::Dtype("torch.int8".to_string()),
             ],
-            meta(&[1, 3, 4, 4], "torch.int8"),
+            NodeMeta::tensor([1, 3, 4, 4], "torch.int8"),
         );
         let user = graph.add_node(
             NodeOp::CallFunction,
             "user".to_string(),
             "aten.view_copy.default".to_string(),
             vec![IrArg::Node(q)],
-            meta(&[1, 48], "torch.int8"),
+            NodeMeta::tensor([1, 48], "torch.int8"),
         );
 
         assert!(IrInsertQdqRescalePass.run(&mut graph));
@@ -211,7 +171,7 @@ mod tests {
             "input".to_string(),
             "input".to_string(),
             Vec::new(),
-            meta(&[1], "torch.int8"),
+            NodeMeta::tensor([1], "torch.int8"),
         );
         let dq = graph.add_node(
             NodeOp::CallFunction,
@@ -225,14 +185,14 @@ mod tests {
                 IrArg::Int(127),
                 IrArg::Dtype("torch.int8".to_string()),
             ],
-            meta(&[1], "torch.float32"),
+            NodeMeta::tensor([1], "torch.float32"),
         );
         graph.add_node(
             NodeOp::CallFunction,
             "user".to_string(),
             "aten.relu.default".to_string(),
             vec![IrArg::Node(dq)],
-            meta(&[1], "torch.float32"),
+            NodeMeta::tensor([1], "torch.float32"),
         );
 
         assert!(!IrInsertQdqRescalePass.run(&mut graph));

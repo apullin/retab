@@ -9,9 +9,8 @@
 //!   out  = where(mask, data, destination)
 //! Runs before IrRewriteIndexPut so the general SCATTER path only sees int indices.
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_target::is_index_put_family_target;
 use crate::runner_logging::log_line;
 
 fn view_copy(
@@ -22,11 +21,7 @@ fn view_copy(
     shape: &[i64],
     dtype: &str,
 ) -> NodeId {
-    let mut meta = base_meta.clone();
-    meta.set_val(FakeTensorMeta {
-        shape: shape.to_vec(),
-        dtype: dtype.to_string(),
-    });
+    let meta = base_meta.cloned_with_val(shape.to_vec(), dtype);
     graph.add_node(
         NodeOp::CallFunction,
         name,
@@ -38,7 +33,7 @@ fn view_copy(
 
 fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     let node = &graph.nodes[id];
-    if !node.target.contains("index_put") || node.args.len() < 3 {
+    if !is_index_put_family_target(&node.target) || node.args.len() < 3 {
         return false;
     }
     let node_name = node.name.clone();
@@ -202,15 +197,6 @@ impl IrPass for IrNormalizeIndexPutBoolMaskPass {
 mod tests {
     use super::*;
 
-    fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
-        let mut meta = NodeMeta::default();
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: dtype.to_string(),
-        });
-        meta
-    }
-
     fn named<'a>(graph: &'a IrGraph, name: &str) -> &'a crate::fx_ir::IrNode {
         graph
             .nodes
@@ -233,21 +219,21 @@ mod tests {
             "dest".into(),
             "dest".into(),
             vec![],
-            meta(dest_shape, "torch.int8"),
+            NodeMeta::tensor(dest_shape, "torch.int8"),
         );
         let mask = graph.add_node(
             NodeOp::Placeholder,
             "mask".into(),
             "mask".into(),
             vec![],
-            meta(mask_shape, mask_dtype),
+            NodeMeta::tensor(mask_shape, mask_dtype),
         );
         let data = graph.add_node(
             NodeOp::Placeholder,
             "data".into(),
             "data".into(),
             vec![],
-            meta(data_shape, "torch.int8"),
+            NodeMeta::tensor(data_shape, "torch.int8"),
         );
         let mut args = vec![
             IrArg::Node(dest),
@@ -262,7 +248,7 @@ mod tests {
             "idxput".into(),
             "aten.index_put.default".into(),
             args,
-            meta(dest_shape, "torch.int8"),
+            NodeMeta::tensor(dest_shape, "torch.int8"),
         );
         graph.add_node(
             NodeOp::Output,

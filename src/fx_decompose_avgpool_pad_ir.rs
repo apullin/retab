@@ -8,11 +8,8 @@
 //! multiply by kernel_size / divisor.
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_target::is_plain_avg_pool2d_target;
 use crate::runner_logging::log_line;
-
-fn is_plain_avg_pool2d(target: &str) -> bool {
-    target.contains("avg_pool2d") && !target.contains("adaptive")
-}
 
 fn arg_i64_pair(arg: Option<&IrArg>) -> Option<(i64, i64)> {
     match arg {
@@ -62,7 +59,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !is_plain_avg_pool2d(&graph.nodes[id].target) {
+            if !is_plain_avg_pool2d_target(&graph.nodes[id].target) {
                 continue;
             }
 
@@ -131,9 +128,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                     &[n, c, h, pad_w],
                     0.0,
                     &dtype,
-                    x_meta
-                        .cloned_with_val(vec![n, c, h, pad_w], &dtype)
-                        .without_qparams(),
+                    x_meta.cloned_without_qparams(vec![n, c, h, pad_w], &dtype),
                 );
                 let mut cat_inputs = vec![IrArg::Node(pre), IrArg::Node(pooled_in)];
                 if post_pad_w > 0 {
@@ -143,9 +138,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                         &[n, c, h, post_pad_w],
                         0.0,
                         &dtype,
-                        x_meta
-                            .cloned_with_val(vec![n, c, h, post_pad_w], &dtype)
-                            .without_qparams(),
+                        x_meta.cloned_without_qparams(vec![n, c, h, post_pad_w], &dtype),
                     );
                     cat_inputs.push(IrArg::Node(post));
                 }
@@ -173,9 +166,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                     &[n, c, pad_h, cur_w],
                     0.0,
                     &dtype,
-                    x_meta
-                        .cloned_with_val(vec![n, c, pad_h, cur_w], &dtype)
-                        .without_qparams(),
+                    x_meta.cloned_without_qparams(vec![n, c, pad_h, cur_w], &dtype),
                 );
                 let mut cat_inputs = vec![IrArg::Node(pre), IrArg::Node(pooled_in)];
                 if post_pad_h > 0 {
@@ -185,9 +176,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                         &[n, c, post_pad_h, cur_w],
                         0.0,
                         &dtype,
-                        x_meta
-                            .cloned_with_val(vec![n, c, post_pad_h, cur_w], &dtype)
-                            .without_qparams(),
+                        x_meta.cloned_without_qparams(vec![n, c, post_pad_h, cur_w], &dtype),
                     );
                     cat_inputs.push(IrArg::Node(post));
                 }
@@ -225,9 +214,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                     &[1, 1, 1, 1],
                     (kernel_h * kernel_w) as f64 / divisor as f64,
                     &dtype,
-                    orig_meta
-                        .cloned_with_val(vec![1, 1, 1, 1], &dtype)
-                        .without_qparams(),
+                    orig_meta.cloned_without_qparams(vec![1, 1, 1, 1], &dtype),
                 );
                 graph.add_anchored_call_function(
                     id,

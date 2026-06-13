@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::fx_ir::{IrArg, IrNode, QParam};
+use crate::fx_ir::{IrArg, IrGraph, IrNode, NodeOp, QParam, TensorSource};
 use crate::graph::ir::DType;
+use crate::lowering_effects::LoweringInputKind;
 use crate::store::TensorData;
 use crate::tensor_data::parse_torch_dtype;
 
@@ -12,17 +13,78 @@ pub fn tensor_numel(shape: &[i64]) -> Option<usize> {
     })
 }
 
-pub fn arg_int_list(arg: &IrArg) -> Option<Vec<i64>> {
+pub fn arg_has_node(arg: &IrArg) -> bool {
     match arg {
-        IrArg::List(items) => items
-            .iter()
-            .map(|item| match item {
-                IrArg::Int(value) => Some(*value),
-                _ => None,
-            })
-            .collect(),
-        _ => None,
+        IrArg::Node(_) => true,
+        IrArg::List(values) => values.iter().any(arg_has_node),
+        _ => false,
     }
+}
+
+pub fn node_has_tensor_inputs(node: &IrNode) -> bool {
+    node.args.iter().any(arg_has_node) || node.kwargs.values().any(arg_has_node)
+}
+
+pub fn arg_nodes_are_constant(arg: &IrArg, constant_nodes: &HashSet<usize>) -> bool {
+    match arg {
+        IrArg::Node(node_id) => constant_nodes.contains(node_id),
+        IrArg::List(values) => values
+            .iter()
+            .all(|value| arg_nodes_are_constant(value, constant_nodes)),
+        _ => true,
+    }
+}
+
+pub fn node_inputs_are_constant(node: &IrNode, constant_nodes: &HashSet<usize>) -> bool {
+    node.args
+        .iter()
+        .all(|arg| arg_nodes_are_constant(arg, constant_nodes))
+        && node
+            .kwargs
+            .values()
+            .all(|arg| arg_nodes_are_constant(arg, constant_nodes))
+}
+
+pub fn placeholder_is_constant_input(node: &IrNode) -> bool {
+    if !node.alive || node.op != NodeOp::Placeholder {
+        return false;
+    }
+    matches!(
+        node.tensor.as_ref().map(|tensor| &tensor.source),
+        Some(TensorSource::ExportedProgramInput(binding))
+            if matches!(
+                binding.input_kind,
+                LoweringInputKind::Parameter
+                    | LoweringInputKind::Buffer
+                    | LoweringInputKind::LiftedTensorConstant
+            )
+    )
+}
+
+pub fn constant_input_seeds(graph: &IrGraph) -> (HashSet<usize>, HashMap<usize, TensorData>) {
+    let mut constant_nodes = HashSet::new();
+    let mut constant_tensors = HashMap::new();
+    for node in graph
+        .nodes
+        .iter()
+        .filter(|node| placeholder_is_constant_input(node))
+    {
+        constant_nodes.insert(node.id);
+        if let Some(tensor) = node.tensor.as_ref() {
+            constant_tensors.insert(node.id, tensor.data.clone());
+        }
+    }
+    (constant_nodes, constant_tensors)
+}
+
+pub fn first_constant_input_tensor<'a>(
+    node: &IrNode,
+    constant_tensors: &'a HashMap<usize, TensorData>,
+) -> Option<&'a TensorData> {
+    node.args.iter().find_map(|arg| match arg {
+        IrArg::Node(node_id) => constant_tensors.get(node_id),
+        _ => None,
+    })
 }
 
 pub fn normalize_dim(dim: i64, rank: usize, allow_end: bool) -> Option<usize> {
@@ -40,7 +102,7 @@ pub fn normalize_dim(dim: i64, rank: usize, allow_end: bool) -> Option<usize> {
 }
 
 pub fn reshape_target_shape(input_shape: &[i64], node: &IrNode) -> Option<Vec<i64>> {
-    let spec = arg_int_list(node.args.get(1)?)?;
+    let spec = node.args.get(1)?.as_int_list()?;
     let input_numel = tensor_numel(input_shape)?;
     let mut target = spec.clone();
     let mut inferred = None;
@@ -84,7 +146,9 @@ pub fn unsqueeze_target_shape(input_shape: &[i64], node: &IrNode) -> Option<Vec<
 }
 
 pub fn permute_order(node: &IrNode, rank: usize) -> Option<Vec<usize>> {
-    arg_int_list(node.args.get(1)?)?
+    node.args
+        .get(1)?
+        .as_int_list()?
         .into_iter()
         .map(|dim| normalize_dim(dim, rank, false))
         .collect()
@@ -113,15 +177,6 @@ fn contiguous_strides(shape: &[i64]) -> Option<Vec<usize>> {
         strides[idx] = strides[idx + 1].checked_mul(shape_usize[idx + 1])?;
     }
     Some(strides)
-}
-
-fn arg_scalar(arg: Option<&IrArg>) -> Option<f64> {
-    match arg? {
-        IrArg::Float(value) => Some(*value),
-        IrArg::Int(value) => Some(*value as f64),
-        IrArg::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
-        _ => None,
-    }
 }
 
 fn encode_tensor_values(values: &[f64], shape: Vec<i64>, dtype: DType) -> Option<TensorData> {
@@ -370,11 +425,17 @@ fn constant_input_tensor<'a>(
 }
 
 fn resolve_alpha_beta(node: &IrNode) -> (f64, f64) {
-    let beta = arg_scalar(node.args.get(3))
-        .or_else(|| arg_scalar(node.kwargs.get("beta")))
+    let beta = node
+        .args
+        .get(3)
+        .or_else(|| node.kwargs.get("beta"))
+        .and_then(IrArg::as_scalar_literal_f64)
         .unwrap_or(1.0);
-    let alpha = arg_scalar(node.args.get(4))
-        .or_else(|| arg_scalar(node.kwargs.get("alpha")))
+    let alpha = node
+        .args
+        .get(4)
+        .or_else(|| node.kwargs.get("alpha"))
+        .and_then(IrArg::as_scalar_literal_f64)
         .unwrap_or(1.0);
     (alpha, beta)
 }
@@ -383,41 +444,26 @@ pub fn plan_constant_matmul_tensor(
     node: &IrNode,
     constant_tensors: &HashMap<usize, TensorData>,
 ) -> Option<TensorData> {
-    let lhs = constant_input_tensor(
-        node,
-        usize::from(node.target.contains("addmm")),
-        constant_tensors,
-    )?;
-    let rhs = constant_input_tensor(
-        node,
-        usize::from(node.target.contains("addmm")) + 1,
-        constant_tensors,
-    )?;
-    let lhs_qparam = node
-        .meta
-        .input_qparams
-        .as_ref()
-        .and_then(|qps| qps.get(&usize::from(node.target.contains("addmm"))));
-    let rhs_qparam = node
-        .meta
-        .input_qparams
-        .as_ref()
-        .and_then(|qps| qps.get(&(usize::from(node.target.contains("addmm")) + 1)));
+    let lhs_arg = usize::from(node.is_addmm());
+    let rhs_arg = lhs_arg + 1;
+    let lhs = constant_input_tensor(node, lhs_arg, constant_tensors)?;
+    let rhs = constant_input_tensor(node, rhs_arg, constant_tensors)?;
+    let lhs_qparam = node.meta.input_qparam_at(lhs_arg);
+    let rhs_qparam = node.meta.input_qparam_at(rhs_arg);
     let lhs_values = decode_tensor_values(lhs, lhs_qparam)?;
     let rhs_values = decode_tensor_values(rhs, rhs_qparam)?;
 
-    let mut output =
-        if node.target.contains("aten.mm.default") || node.target.contains("aten.addmm.default") {
-            matmul_2d(&lhs_values, &lhs.shape, &rhs_values, &rhs.shape)?
-        } else if node.target.contains("aten.bmm.default") {
-            batched_matmul_3d(&lhs_values, &lhs.shape, &rhs_values, &rhs.shape)?
-        } else {
-            return None;
-        };
+    let mut output = if node.is_mm() || node.is_addmm() {
+        matmul_2d(&lhs_values, &lhs.shape, &rhs_values, &rhs.shape)?
+    } else if node.is_bmm() {
+        batched_matmul_3d(&lhs_values, &lhs.shape, &rhs_values, &rhs.shape)?
+    } else {
+        return None;
+    };
 
-    if node.target.contains("aten.addmm.default") {
+    if node.is_addmm() {
         let bias = constant_input_tensor(node, 0, constant_tensors)?;
-        let bias_qparam = node.meta.input_qparams.as_ref().and_then(|qps| qps.get(&0));
+        let bias_qparam = node.meta.input_qparam();
         let bias_values = decode_tensor_values(bias, bias_qparam)?;
         let (alpha, beta) = resolve_alpha_beta(node);
         let mut values = output.vec_f64()?;

@@ -21,7 +21,7 @@ use crate::fx_rewrite_squeeze_ir;
 pub fn build_hybrid_pipeline(
     _exported_program: Option<pyo3::PyObject>,
 ) -> Vec<crate::fx_ir::PipelineStep> {
-    use crate::fx_ir::PipelineStep::{Ir, IrEp};
+    use crate::fx_ir::PipelineStep::{Effectful, Ir};
 
     vec![
         // -- Early decompositions (before fold_qdq) --
@@ -115,14 +115,14 @@ pub fn build_hybrid_pipeline(
             crate::fx_quantize_clamp_args_ir::IrQuantizeClampArgsPass,
         )),
         Ir(Box::new(fx_convert_full_like_ir::IrConvertFullLikePass)),
-        IrEp(Box::new(
-            crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEpPass,
+        Effectful(Box::new(
+            crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass,
         )),
-        IrEp(Box::new(
-            crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEpPass,
+        Effectful(Box::new(
+            crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEffectPass,
         )),
-        IrEp(Box::new(
-            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEpPass::matmul_only(),
+        Effectful(Box::new(
+            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEffectPass::matmul_only(),
         )),
         Ir(Box::new(
             crate::fx_decompose_adaptive_avgpool_ir::IrDecomposeAdaptiveAvgPoolPass,
@@ -136,15 +136,15 @@ pub fn build_hybrid_pipeline(
         Ir(Box::new(crate::fx_decompose_var_ir::IrDecomposeVarPass)),
         Ir(Box::new(crate::fx_decompose_mean_ir::IrDecomposeMeanPass)),
         Ir(Box::new(fx_convert_sum_ir::IrConvertSumPass)),
-        IrEp(Box::new(
-            crate::fx_insert_table_ops_ir::IrInsertTableOpsEpPass,
+        Effectful(Box::new(
+            crate::fx_insert_table_ops_ir::IrInsertTableOpsEffectPass,
         )),
         // -- ATen -> TOSA --
         Ir(Box::new(
             crate::fx_decompose_grouped_conv_ir::IrDecomposeGroupedConvPass,
         )),
-        IrEp(Box::new(
-            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEpPass::with_data_slices(),
+        Effectful(Box::new(
+            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEffectPass::with_data_slices(),
         )),
         Ir(Box::new(
             crate::fx_annotate_conv_bias_ir::IrAnnotateConvBiasDtypePass,
@@ -155,7 +155,9 @@ pub fn build_hybrid_pipeline(
         Ir(Box::new(fx_rewrite_squeeze_ir::IrRewriteSqueezePass)),
         Ir(Box::new(crate::fx_rewrite_pad_ir::IrRewritePadPass)),
         // -- Postprocessing --
-        IrEp(Box::new(crate::fx_cast_int64_ir::IrCastInt64ToInt32EpPass)),
+        Effectful(Box::new(
+            crate::fx_cast_int64_ir::IrCastInt64ToInt32EffectPass,
+        )),
         Ir(Box::new(
             crate::fx_normalize_index_put_none_indices_ir::IrNormalizeIndexPutNoneIndicesPass,
         )),
@@ -165,14 +167,14 @@ pub fn build_hybrid_pipeline(
         Ir(Box::new(
             crate::fx_rewrite_index_put_ir::IrRewriteIndexPutPass,
         )),
-        IrEp(Box::new(
-            crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEpPass,
+        Effectful(Box::new(
+            crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEffectPass,
         )),
-        IrEp(Box::new(
-            crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEpPass,
+        Effectful(Box::new(
+            crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass,
         )),
-        IrEp(Box::new(
-            crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEpPass,
+        Effectful(Box::new(
+            crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEffectPass,
         )),
         Ir(Box::new(
             crate::fx_memory_format_ir::IrToTosaMemoryFormatPass,
@@ -184,21 +186,20 @@ pub fn build_hybrid_pipeline(
         Ir(Box::new(
             crate::fx_insert_conv_rescale_ir::IrInsertConvAccumulatorRescalePass,
         )),
-        IrEp(Box::new(
-            crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEpPass,
+        Effectful(Box::new(
+            crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass,
         )),
-        IrEp(Box::new(
-            crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEpPass,
+        Effectful(Box::new(
+            crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEffectPass,
         )),
-        IrEp(Box::new(
-            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEpPass::matmul_only(),
+        Effectful(Box::new(
+            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEffectPass::matmul_only(),
         )),
     ]
 }
 
-/// IR-native control-flow submodule pipelines (round-trip elimination Phase 4c):
-/// transforms run as IrPasses on a persistent submodule IrGraph instead of
-/// Python FxPasses.
+/// IR-native control-flow submodule pipelines: transforms run as IrPasses on a
+/// persistent submodule IrGraph instead of Python FxPasses.
 fn rescale_steps() -> Vec<crate::fx_ir::PipelineStep> {
     use crate::fx_ir::PipelineStep::Ir;
     vec![
@@ -212,16 +213,16 @@ fn rescale_steps() -> Vec<crate::fx_ir::PipelineStep> {
 }
 
 fn submodule_fold_and_fuse() -> Vec<crate::fx_ir::PipelineStep> {
-    use crate::fx_ir::PipelineStep::{Ir, IrEp};
+    use crate::fx_ir::PipelineStep::{Effectful, Ir};
     vec![
-        IrEp(Box::new(
-            crate::fx_insert_table_ops_ir::IrInsertTableOpsEpPass,
+        Effectful(Box::new(
+            crate::fx_insert_table_ops_ir::IrInsertTableOpsEffectPass,
         )),
-        IrEp(Box::new(
-            crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEpPass,
+        Effectful(Box::new(
+            crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass,
         )),
-        IrEp(Box::new(
-            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEpPass::matmul_only(),
+        Effectful(Box::new(
+            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEffectPass::matmul_only(),
         )),
         Ir(Box::new(crate::fx_remove_noop_ir::IrRemoveNoopPass)),
     ]

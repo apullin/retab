@@ -1,6 +1,9 @@
 //! Pure Rust IrPass: mean.dim → sum(keepdim=True) * (1/count) + view, or avg_pool2d for 4D spatial.
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp, QParam};
+use crate::fx_ir::{
+    i64_list_arg as i64_list, normalized_reduction_dims, reduced_shape, IrArg, IrGraph, IrPass,
+    NodeId, NodeOp, QParam,
+};
 use crate::runner_logging::log_line;
 use std::collections::HashMap;
 
@@ -33,31 +36,17 @@ impl IrPass for IrDecomposeMeanPass {
                 Some(s) => s.to_vec(),
                 None => continue,
             };
-            let input_rank = input_shape.len() as i64;
-            let output_shape = graph.nodes[id]
-                .meta
-                .val_shape()
-                .map(|s| s.to_vec())
-                .unwrap_or_else(|| vec![1]);
-
-            // Extract dims
-            let dims: Vec<i64> = match graph.nodes[id].args.get(1) {
-                Some(IrArg::List(items)) => items.iter().filter_map(|a| a.as_int()).collect(),
-                Some(IrArg::Int(d)) => vec![*d],
-                Some(IrArg::None) | None => (0..input_rank).collect(),
-                _ => (0..input_rank).collect(),
-            };
-            let dims: Vec<i64> = dims
-                .into_iter()
-                .map(|d| if d < 0 { d + input_rank } else { d })
-                .filter(|&d| input_shape.get(d as usize).copied().unwrap_or(1) != 1)
-                .collect();
-
             let keepdim = graph.nodes[id]
                 .args
                 .get(2)
                 .and_then(|a| a.as_bool())
                 .unwrap_or(false);
+            let dims = normalized_reduction_dims(graph.nodes[id].args.get(1), &input_shape, true);
+            let output_shape = graph.nodes[id]
+                .meta
+                .val_shape()
+                .map(|s| s.to_vec())
+                .unwrap_or_else(|| reduced_shape(&input_shape, &dims, keepdim));
 
             if dims.is_empty() {
                 graph.replace_and_erase(id, x_id);
@@ -119,10 +108,7 @@ impl IrPass for IrDecomposeMeanPass {
             }
 
             // sum(x, dims, keepdim=True)
-            let mut sum_shape = input_shape.clone();
-            for &d in &dims {
-                sum_shape[d as usize] = 1;
-            }
+            let sum_shape = reduced_shape(&input_shape, &dims, true);
             let sum_id = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_sum", name),
@@ -152,8 +138,8 @@ impl IrPass for IrDecomposeMeanPass {
                 orig_meta.cloned_with_val(sum_shape.clone(), &dtype),
             );
             // Note: mul is NOT anchored — it depends on sum_id which may be
-            // further decomposed by convert_sum. The multi-pass write_back will
-            // place it after its dependencies via the fallback (before output).
+            // further decomposed by convert_sum. Conversion re-sorts by def-use,
+            // so it will still land after its dependencies.
 
             // Annotate qparams if quantized
             if let Some(input_qp) = orig_meta.input_qparam().cloned() {

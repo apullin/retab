@@ -6,25 +6,8 @@
 //!   3. Conv2d with 1x1 kernel (aten.convolution.default)
 //!   4. Reshape output back:  [N, Co, 1, 1] -> [..., Co]
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
-use std::collections::HashMap;
-
-fn copy_qparams_from_node(graph: &IrGraph, src_id: NodeId, dst_meta: &mut crate::fx_ir::NodeMeta) {
-    if let Some(iqp) = graph.nodes[src_id].meta.input_qparams.clone() {
-        dst_meta.set_input_qparams(iqp);
-    }
-    if let Some(oqp) = graph.nodes[src_id].meta.output_qparams.clone() {
-        dst_meta.set_output_qparams(oqp);
-    }
-}
-
-fn clear_qparams(dst_meta: &mut crate::fx_ir::NodeMeta) {
-    dst_meta.set_input_qparams(HashMap::new());
-    dst_meta.set_output_qparams(HashMap::new());
-}
 
 pub struct IrDecomposeLinearPass;
 
@@ -41,7 +24,7 @@ impl IrPass for IrDecomposeLinearPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !graph.nodes[id].target.contains("linear.default") {
+            if !graph.nodes[id].is_linear() {
                 continue;
             }
 
@@ -105,12 +88,10 @@ impl IrPass for IrDecomposeLinearPass {
             // 1. Reshape input to 4D: [..., Ci] -> [batches, Ci, 1, 1]
             //    Propagate input qparams to the reshaped node.
             let input_4d_shape = [batches, ci, 1, 1];
-            let mut input_4d_meta = graph.nodes[input_id].meta.clone();
-            input_4d_meta.set_val(FakeTensorMeta {
-                shape: input_4d_shape.to_vec(),
-                dtype: input_dtype,
-            });
-            clear_qparams(&mut input_4d_meta);
+            let mut input_4d_meta = graph.nodes[input_id]
+                .meta
+                .cloned_with_val(input_4d_shape.to_vec(), input_dtype);
+            input_4d_meta.set_empty_qparam_maps();
             let input_reshaped = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_input_view", node_name),
@@ -123,12 +104,10 @@ impl IrPass for IrDecomposeLinearPass {
             // 2. Reshape weights to 4D: [Co, Ci] -> [Co, Ci, 1, 1]
             //    Propagate weight qparams (including per-channel) to the reshaped node.
             let weights_4d_shape = [co, weights_shape[1], 1, 1];
-            let mut weights_4d_meta = graph.nodes[weights_id].meta.clone();
-            weights_4d_meta.set_val(FakeTensorMeta {
-                shape: weights_4d_shape.to_vec(),
-                dtype: weight_dtype,
-            });
-            clear_qparams(&mut weights_4d_meta);
+            let mut weights_4d_meta = graph.nodes[weights_id]
+                .meta
+                .cloned_with_val(weights_4d_shape.to_vec(), weight_dtype);
+            weights_4d_meta.set_empty_qparam_maps();
             let weights_reshaped = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_weight_view", node_name),
@@ -142,12 +121,10 @@ impl IrPass for IrDecomposeLinearPass {
             //    convolution(input, weight, bias, stride, padding, dilation,
             //                transposed, output_padding, groups)
             let conv_out_shape = [batches, co, 1, 1];
-            let mut conv_meta = graph.nodes[id].meta.clone();
-            conv_meta.set_val(FakeTensorMeta {
-                shape: conv_out_shape.to_vec(),
-                dtype: output_dtype.clone(),
-            });
-            copy_qparams_from_node(graph, id, &mut conv_meta);
+            let mut conv_meta = graph.nodes[id]
+                .meta
+                .cloned_with_val(conv_out_shape.to_vec(), &output_dtype);
+            conv_meta.copy_qparams_from(&graph.nodes[id].meta);
             let bias_arg = match bias_id {
                 Some(nid) => IrArg::Node(nid),
                 None => IrArg::None,
@@ -172,12 +149,10 @@ impl IrPass for IrDecomposeLinearPass {
             graph.anchor_to(conv, id);
 
             // 4. Reshape output back to original shape
-            let mut out_meta = graph.nodes[id].meta.clone();
-            out_meta.set_val(FakeTensorMeta {
-                shape: output_shape.clone(),
-                dtype: output_dtype,
-            });
-            clear_qparams(&mut out_meta);
+            let mut out_meta = graph.nodes[id]
+                .meta
+                .cloned_with_val(output_shape.clone(), output_dtype);
+            out_meta.set_empty_qparam_maps();
             let output = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_output_view", node_name),

@@ -1,17 +1,17 @@
 //! Rust-native graph IR for FX graph manipulation.
 //!
-//! Phase 1: NodeMeta — typed metadata extraction (done).
-//! Phase 2: IrGraph — full node topology imported from Python FX graph.
-//! Phase 3: Graph surgery — replace_and_erase in Rust IR.
-//! Phase 4: IrPass trait — pure Rust passes on IrGraph.
+//! Defines typed FX metadata, imported graph topology, graph-surgery helpers,
+//! and the pass traits used by the Rust lowering pipeline.
 
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
 
-pub(crate) use crate::fx_control_flow_metadata::{NodeOp, QParam};
-use crate::fx_ep_effects::{FxEpEffectBatch, FxEpInputKind};
+pub(crate) use crate::fx_control_flow_metadata::NodeOp;
+use crate::fx_py_attr::{attrs, items, meta as meta_view};
+pub(crate) use crate::fx_quant::QParam;
+use crate::fx_target::{classify_ir_target, IrTargetKind};
+use crate::lowering_effects::{LoweringEffectBatch, LoweringInputKind};
 use crate::store::TensorData;
 use crate::tensor_data::extract_tensor_data;
 
@@ -34,14 +34,6 @@ pub struct IrNode {
     pub meta: NodeMeta,
     pub tensor: Option<NodeTensor>,
     pub alive: bool,
-    /// True if args were modified and need write-back to Python.
-    pub(crate) args_dirty: bool,
-    /// True when write-back must rebuild the whole args tuple because literal
-    /// values changed. Pure node-reference rewrites can use replace_input_with.
-    pub(crate) args_rebuild_required: bool,
-    /// Optional node whose Python meta dict should seed a newly-created node.
-    /// Defaults to the insertion anchor when unset.
-    pub(crate) meta_copy_source: Option<NodeId>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +50,7 @@ pub struct NodeTensor {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaceholderTensorBinding {
-    pub input_kind: FxEpInputKind,
+    pub input_kind: LoweringInputKind,
     pub target_name: String,
 }
 
@@ -70,8 +62,7 @@ pub enum IrArg {
     Float(f64),
     Bool(bool),
     Str(String),
-    /// A torch.dtype value (e.g. "torch.int8"). Resolves to the Python dtype
-    /// object during write-back, unlike Str which stays as a string.
+    /// A torch.dtype value (e.g. "torch.int8"), distinct from an ordinary string.
     Dtype(String),
     List(Vec<IrArg>),
     None,
@@ -116,47 +107,86 @@ pub(crate) fn broadcast_shapes(shapes: &[Vec<i64>]) -> Option<Vec<i64>> {
     Some(out)
 }
 
+pub(crate) fn normalized_reduction_dims(
+    dim_arg: Option<&IrArg>,
+    input_shape: &[i64],
+    skip_unit_dims: bool,
+) -> Vec<i64> {
+    let rank_i64 = input_shape.len() as i64;
+    let dims = dim_arg
+        .and_then(IrArg::as_int_list_or_scalar)
+        .unwrap_or_else(|| (0..rank_i64).collect());
+    let mut normalized = Vec::new();
+
+    for dim in dims {
+        let dim = if dim < 0 { dim + rank_i64 } else { dim };
+        if dim < 0 || dim >= rank_i64 {
+            continue;
+        }
+        if skip_unit_dims && input_shape[dim as usize] == 1 {
+            continue;
+        }
+        if !normalized.contains(&dim) {
+            normalized.push(dim);
+        }
+    }
+
+    normalized.sort_unstable();
+    normalized
+}
+
+pub(crate) fn reduced_shape(input_shape: &[i64], dims: &[i64], keepdim: bool) -> Vec<i64> {
+    if keepdim {
+        let mut shape = input_shape.to_vec();
+        for &dim in dims {
+            shape[dim as usize] = 1;
+        }
+        return shape;
+    }
+
+    let mut shape: Vec<i64> = input_shape
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &extent)| {
+            if dims.contains(&(idx as i64)) {
+                None
+            } else {
+                Some(extent)
+            }
+        })
+        .collect();
+    if shape.is_empty() {
+        shape.push(1);
+    }
+    shape
+}
+
 fn build_placeholder_tensor_bindings(
     exported_program: &Bound<'_, PyAny>,
 ) -> PyResult<HashMap<String, PlaceholderTensorBinding>> {
     let mut placeholder_bindings = HashMap::new();
-    let graph_signature = exported_program.getattr("graph_signature")?;
+    let graph_signature = attrs(exported_program).object("graph_signature")?;
     for (attr_name, input_kind) in [
-        ("inputs_to_parameters", FxEpInputKind::Parameter),
-        ("inputs_to_buffers", FxEpInputKind::Buffer),
+        ("inputs_to_parameters", LoweringInputKind::Parameter),
+        ("inputs_to_buffers", LoweringInputKind::Buffer),
         (
             "inputs_to_lifted_tensor_constants",
-            FxEpInputKind::LiftedTensorConstant,
+            LoweringInputKind::LiftedTensorConstant,
         ),
     ] {
-        if let Ok(mapping) = graph_signature.getattr(attr_name) {
-            if let Ok(dict) = mapping.downcast::<PyDict>() {
-                for (k, v) in dict.iter() {
-                    if let (Ok(placeholder_name), Ok(target_name)) =
-                        (k.extract::<String>(), v.extract::<String>())
-                    {
-                        placeholder_bindings.insert(
-                            placeholder_name,
-                            PlaceholderTensorBinding {
-                                input_kind,
-                                target_name,
-                            },
-                        );
-                    }
-                }
-            } else if let Ok(items) = mapping.call_method0("items") {
-                for item in items.iter()? {
-                    let item = item?;
-                    if let Ok((placeholder_name, target_name)) = item.extract::<(String, String)>()
-                    {
-                        placeholder_bindings.insert(
-                            placeholder_name,
-                            PlaceholderTensorBinding {
-                                input_kind,
-                                target_name,
-                            },
-                        );
-                    }
+        if let Ok(mapping) = attrs(&graph_signature).object(attr_name) {
+            for (placeholder_name, target_name) in items(&mapping).pairs() {
+                if let (Ok(placeholder_name), Ok(target_name)) = (
+                    placeholder_name.extract::<String>(),
+                    target_name.extract::<String>(),
+                ) {
+                    placeholder_bindings.insert(
+                        placeholder_name,
+                        PlaceholderTensorBinding {
+                            input_kind,
+                            target_name,
+                        },
+                    );
                 }
             }
         }
@@ -173,12 +203,12 @@ fn extract_node_tensor(
     constants: Option<&Bound<'_, PyAny>>,
     placeholder_bindings: &HashMap<String, PlaceholderTensorBinding>,
 ) -> Option<NodeTensor> {
-    let op: String = py_node.getattr("op").ok()?.extract().ok()?;
+    let op: String = attrs(py_node).optional("op")?;
     match op.as_str() {
         "placeholder" => {
             let binding = placeholder_bindings.get(name)?;
             if let Some(state_dict) = state_dict {
-                if let Ok(value) = state_dict.get_item(binding.target_name.as_str()) {
+                if let Some(value) = items(state_dict).key(binding.target_name.as_str()) {
                     if let Ok(data) = extract_tensor_data(&value) {
                         return Some(NodeTensor {
                             source: TensorSource::ExportedProgramInput(binding.clone()),
@@ -190,7 +220,7 @@ fn extract_node_tensor(
             // Lifted tensor constants are not in state_dict; they live in
             // ep.constants keyed by target_name.
             if let Some(constants) = constants {
-                if let Ok(value) = constants.get_item(binding.target_name.as_str()) {
+                if let Some(value) = items(constants).key(binding.target_name.as_str()) {
                     if let Ok(data) = extract_tensor_data(&value) {
                         return Some(NodeTensor {
                             source: TensorSource::ExportedProgramInput(binding.clone()),
@@ -199,7 +229,7 @@ fn extract_node_tensor(
                     }
                 }
             }
-            if let Ok(value) = gm.getattr(binding.target_name.as_str()) {
+            if let Ok(value) = attrs(gm).object(binding.target_name.as_str()) {
                 if let Ok(data) = extract_tensor_data(&value) {
                     return Some(NodeTensor {
                         source: TensorSource::ExportedProgramInput(binding.clone()),
@@ -210,8 +240,8 @@ fn extract_node_tensor(
             None
         }
         "get_attr" => {
-            let value = gm.getattr(target).ok()?;
-            if value.getattr("graph").is_ok() {
+            let value = attrs(gm).object(target).ok()?;
+            if attrs(&value).has("graph") {
                 return None;
             }
             let data = extract_tensor_data(&value).ok()?;
@@ -258,17 +288,23 @@ impl IrGraph {
         self.replacements.get(&id).copied()
     }
 
+    #[cfg(test)]
+    pub(crate) fn by_name(&self, name: &str) -> Option<&IrNode> {
+        self.name_to_id.get(name).and_then(|id| self.nodes.get(*id))
+    }
+
     pub fn from_fx_with_tensors(
         gm: &Bound<'_, PyAny>,
         exported_program: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let graph = if gm.hasattr("graph")? {
-            gm.getattr("graph")?
+        let gm_attrs = attrs(gm);
+        let graph = if gm_attrs.try_has("graph")? {
+            gm_attrs.object("graph")?
         } else {
             gm.clone()
         };
-        let py_nodes: Vec<Bound<'_, PyAny>> = graph
-            .getattr("nodes")?
+        let py_nodes: Vec<Bound<'_, PyAny>> = attrs(&graph)
+            .object("nodes")?
             .iter()?
             .filter_map(|n| n.ok())
             .collect();
@@ -276,9 +312,9 @@ impl IrGraph {
         let (placeholder_bindings, state_dict, constants) = if let Some(ep) = exported_program {
             (
                 build_placeholder_tensor_bindings(ep)?,
-                ep.getattr("state_dict").ok(),
+                attrs(ep).object("state_dict").ok(),
                 // Lifted tensor constants live in `ep.constants`, NOT `state_dict`.
-                ep.getattr("constants").ok(),
+                attrs(ep).object("constants").ok(),
             )
         } else {
             (HashMap::new(), None, None)
@@ -286,23 +322,15 @@ impl IrGraph {
 
         let mut name_to_id = HashMap::new();
         for (i, node) in py_nodes.iter().enumerate() {
-            let name: String = node
-                .getattr("name")
-                .and_then(|v| v.extract())
-                .unwrap_or_default();
+            let name = attrs(node).or_value("name", String::new());
             name_to_id.insert(name, i);
         }
 
         let mut nodes = Vec::with_capacity(py_nodes.len());
         for (i, py_node) in py_nodes.iter().enumerate() {
-            let name: String = py_node
-                .getattr("name")
-                .and_then(|v| v.extract())
-                .unwrap_or_default();
-            let target: String = py_node
-                .getattr("target")
-                .and_then(|t| t.str().map(|s| s.to_string()))
-                .unwrap_or_default();
+            let py_node_attrs = attrs(py_node);
+            let name = py_node_attrs.or_value("name", String::new());
+            let target = py_node_attrs.required_str("target").unwrap_or_default();
             let op = NodeOp::of(py_node);
             let meta = NodeMeta::from_fx(py_node)?;
             let tensor = extract_node_tensor(
@@ -315,25 +343,18 @@ impl IrGraph {
                 &placeholder_bindings,
             );
 
-            let py_args = crate::fx_graph::FxGraphModule::node_args(py_node).unwrap_or_default();
+            let py_args = crate::fx_graph::node_args(py_node).unwrap_or_default();
             let args = py_args
                 .iter()
                 .map(|a| resolve_arg(a, &name_to_id))
                 .collect();
 
             let mut kwargs = HashMap::new();
-            if let Ok(py_kwargs) = crate::fx_graph::FxGraphModule::node_kwargs(py_node) {
+            if let Ok(py_kwargs) = crate::fx_graph::node_kwargs(py_node) {
                 if !py_kwargs.is_none() {
-                    if let Ok(items) = py_kwargs.call_method0("items") {
-                        if let Ok(iter) = items.iter() {
-                            for item in iter.filter_map(|i| i.ok()) {
-                                if let (Ok(key), Ok(val)) = (
-                                    item.get_item(0).and_then(|k| k.extract::<String>()),
-                                    item.get_item(1),
-                                ) {
-                                    kwargs.insert(key, resolve_arg(&val, &name_to_id));
-                                }
-                            }
+                    for (key, val) in items(&py_kwargs).pairs() {
+                        if let Ok(key) = key.extract::<String>() {
+                            kwargs.insert(key, resolve_arg(&val, &name_to_id));
                         }
                     }
                 }
@@ -348,9 +369,6 @@ impl IrGraph {
                 meta,
                 tensor,
                 alive: true,
-                args_dirty: false,
-                args_rebuild_required: false,
-                meta_copy_source: None,
             });
         }
 
@@ -380,11 +398,6 @@ impl IrGraph {
         })
     }
 
-    /// Import from a Python FX GraphModule.
-    pub fn from_fx(gm: &Bound<'_, PyAny>) -> PyResult<Self> {
-        Self::from_fx_with_tensors(gm, None)
-    }
-
     /// Iterate placeholders.
     pub fn placeholders(&self) -> impl Iterator<Item = &IrNode> {
         self.nodes.iter().filter(|n| n.op == NodeOp::Placeholder)
@@ -405,11 +418,9 @@ impl IrGraph {
         &mut self.nodes[id]
     }
 
-    /// Update a node's args and mark dirty for write-back.
+    /// Update a node's args and rebuild reverse-use lists.
     pub fn set_args(&mut self, id: NodeId, args: Vec<IrArg>) {
         self.nodes[id].args = args;
-        self.nodes[id].args_dirty = true;
-        self.nodes[id].args_rebuild_required = true;
         self.rebuild_users();
     }
 
@@ -612,19 +623,14 @@ impl IrGraph {
     /// Update a single arg by index and mark dirty.
     pub fn set_arg(&mut self, id: NodeId, index: usize, value: IrArg) {
         if index < self.nodes[id].args.len() {
-            let rebuild_required = !matches!(value, IrArg::Node(_));
             self.nodes[id].args[index] = value;
-            self.nodes[id].args_dirty = true;
-            self.nodes[id].args_rebuild_required |= rebuild_required;
             self.rebuild_users();
         }
     }
 
-    /// Update a kwarg and mark dirty for write-back.
+    /// Update a kwarg.
     pub fn set_kwarg(&mut self, id: NodeId, key: impl Into<String>, value: IrArg) {
         self.nodes[id].kwargs.insert(key.into(), value);
-        self.nodes[id].args_dirty = true;
-        self.nodes[id].args_rebuild_required = true;
     }
 
     /// Get users (nodes that reference this node in their args).
@@ -633,20 +639,12 @@ impl IrGraph {
     }
 
     pub fn live_user_ids(&self, id: NodeId) -> Vec<NodeId> {
-        fn arg_contains_node(arg: &IrArg, target: NodeId) -> bool {
-            match arg {
-                IrArg::Node(id) => *id == target,
-                IrArg::List(items) => items.iter().any(|item| arg_contains_node(item, target)),
-                _ => false,
-            }
-        }
-
         self.nodes
             .iter()
             .filter(|node| node.alive)
             .filter(|node| {
-                node.args.iter().any(|arg| arg_contains_node(arg, id))
-                    || node.kwargs.values().any(|arg| arg_contains_node(arg, id))
+                node.args.iter().any(|arg| arg.contains_node(id))
+                    || node.kwargs.values().any(|arg| arg.contains_node(id))
             })
             .map(|node| node.id)
             .collect()
@@ -654,6 +652,37 @@ impl IrGraph {
 
     pub fn has_live_users(&self, id: NodeId) -> bool {
         !self.live_user_ids(id).is_empty()
+    }
+
+    pub fn single_live_user(&self, id: NodeId) -> Option<NodeId> {
+        let users = self.live_user_ids(id);
+        (users.len() == 1).then(|| users[0])
+    }
+
+    pub fn live_call_function_users(&self, id: NodeId) -> Vec<NodeId> {
+        self.live_user_ids(id)
+            .into_iter()
+            .filter(|&user_id| self.nodes[user_id].op == NodeOp::CallFunction)
+            .collect()
+    }
+
+    pub fn single_live_call_function_user(&self, id: NodeId) -> Option<NodeId> {
+        let users = self.live_call_function_users(id);
+        (users.len() == 1).then(|| users[0])
+    }
+
+    pub fn live_getitem_users(&self, id: NodeId) -> Vec<(NodeId, i64)> {
+        self.nodes
+            .iter()
+            .filter(|node| node.alive && node.is_getitem())
+            .filter(|node| node.args.first().and_then(IrArg::as_node) == Some(id))
+            .map(|node| {
+                (
+                    node.id,
+                    node.args.get(1).and_then(IrArg::as_int).unwrap_or(0),
+                )
+            })
+            .collect()
     }
 
     // --- Graph surgery ---
@@ -680,12 +709,8 @@ impl IrGraph {
             if !node.alive {
                 continue;
             }
-            let mut changed = false;
             for arg in &mut node.args {
-                changed |= replace_in_arg(arg, old_id, new_id);
-            }
-            if changed {
-                node.args_dirty = true;
+                replace_in_arg(arg, old_id, new_id);
             }
         }
         // Update users: move old's users to new
@@ -727,9 +752,6 @@ impl IrGraph {
             for arg in node.kwargs.values_mut() {
                 changed |= replace_in_arg(arg, old_id, new_id);
             }
-            if changed {
-                node.args_dirty = true;
-            }
         }
         if changed {
             self.rebuild_users();
@@ -737,7 +759,7 @@ impl IrGraph {
         changed
     }
 
-    /// Mark a node as dead. It will be erased during write_back.
+    /// Mark a node as dead. Conversion and structural rebuilds skip dead nodes.
     pub fn erase(&mut self, id: NodeId) {
         self.nodes[id].alive = false;
     }
@@ -759,38 +781,17 @@ impl IrGraph {
         self.anchors_after.insert(new_id, original_id);
     }
 
-    /// Override the Python metadata source used when creating a new node.
-    pub fn copy_meta_from(&mut self, new_id: NodeId, source_id: NodeId) {
-        if new_id < self.nodes.len() && source_id < self.nodes.len() {
-            self.nodes[new_id].meta_copy_source = Some(source_id);
-        }
-    }
-
     /// Insert a new node, returning its ID. The node is appended to the end;
-    /// ordering relative to other nodes is handled during write_back.
+    /// ordering relative to other nodes is handled by anchors and conversion.
     pub fn add_node(
         &mut self,
         op: NodeOp,
         name: String,
         target: String,
         args: Vec<IrArg>,
-        mut meta: NodeMeta,
+        meta: NodeMeta,
     ) -> NodeId {
         let id = self.nodes.len();
-        // New Python FX nodes start life by copying some existing node's meta
-        // for FakeTensorMode compatibility. Force a full metadata write-back so
-        // the inserted node's own shape/dtype/qparam/layout facts replace any
-        // inherited anchor metadata rather than leaking it through by default.
-        meta.dirty = DirtyFlags {
-            input_qparams: true,
-            output_qparams: true,
-            tosa_dim_order: true,
-            original_dim_orders: true,
-            pre_pass_arg_qparams: true,
-            val: true,
-            table_qparams: true,
-            extras: true,
-        };
         // Update users for the new node's args
         for arg in &args {
             if let IrArg::Node(ref_id) = arg {
@@ -811,9 +812,6 @@ impl IrGraph {
             meta,
             tensor: None,
             alive: true,
-            args_dirty: false,
-            args_rebuild_required: false,
-            meta_copy_source: None,
         });
         id
     }
@@ -848,33 +846,15 @@ impl IrGraph {
             }
         }
     }
-
-    /// Write back dirty metadata to the Python FX graph (metadata only, no surgery).
-    pub fn write_back(&self, py: Python<'_>, gm: &Bound<'_, PyAny>) -> PyResult<()> {
-        let graph = if gm.hasattr("graph")? {
-            gm.getattr("graph")?
-        } else {
-            gm.clone()
-        };
-        let py_nodes: Vec<Bound<'_, PyAny>> = graph
-            .getattr("nodes")?
-            .iter()?
-            .filter_map(|n| n.ok())
-            .collect();
-
-        for (ir_node, py_node) in self.nodes.iter().zip(py_nodes.iter()) {
-            if ir_node.alive {
-                ir_node.meta.write_back(py, py_node)?;
-            }
-        }
-        Ok(())
-    }
 }
 
 impl IrNode {
-    /// Check if target contains a marker string.
-    pub fn target_contains(&self, marker: &str) -> bool {
-        self.op == NodeOp::CallFunction && self.target.contains(marker)
+    pub(crate) fn target_kind(&self) -> IrTargetKind {
+        classify_ir_target(&self.target)
+    }
+
+    pub(crate) fn is_call_target_kind(&self, kind: IrTargetKind) -> bool {
+        self.op == NodeOp::CallFunction && self.target_kind() == kind
     }
 
     /// Get first arg if it's a node reference.
@@ -887,17 +867,94 @@ impl IrNode {
 
     /// Is this a quantize_per_tensor call?
     pub fn is_quantize(&self) -> bool {
-        self.target_contains("quantize_per_tensor") && !self.target_contains("dequantize")
+        self.is_call_target_kind(IrTargetKind::QuantizePerTensor)
     }
 
     /// Is this a dequantize_per_tensor call?
     pub fn is_dequantize(&self) -> bool {
-        self.target_contains("dequantize_per_tensor")
+        self.is_call_target_kind(IrTargetKind::DequantizePerTensor)
+    }
+
+    pub(crate) fn is_quantize_any(&self) -> bool {
+        self.op == NodeOp::CallFunction
+            && matches!(
+                self.target_kind(),
+                IrTargetKind::QuantizePerTensor | IrTargetKind::QuantizePerChannel
+            )
+    }
+
+    pub(crate) fn is_dequantize_any(&self) -> bool {
+        self.op == NodeOp::CallFunction
+            && matches!(
+                self.target_kind(),
+                IrTargetKind::DequantizePerTensor | IrTargetKind::DequantizePerChannel
+            )
+    }
+
+    pub(crate) fn is_q_or_dq(&self) -> bool {
+        self.is_quantize_any() || self.is_dequantize_any()
+    }
+
+    pub(crate) fn is_relu(&self) -> bool {
+        self.is_call_target_kind(IrTargetKind::AtenRelu)
+    }
+
+    pub(crate) fn is_hardtanh(&self) -> bool {
+        self.is_call_target_kind(IrTargetKind::AtenHardtanh)
+    }
+
+    pub(crate) fn is_conv_or_linear(&self) -> bool {
+        self.op == NodeOp::CallFunction
+            && matches!(
+                self.target_kind(),
+                IrTargetKind::AtenConv | IrTargetKind::AtenLinear
+            )
+    }
+
+    pub(crate) fn is_linear(&self) -> bool {
+        self.is_call_target_kind(IrTargetKind::AtenLinear)
+    }
+
+    pub(crate) fn is_convolution(&self) -> bool {
+        self.is_call_target_kind(IrTargetKind::AtenConv)
+    }
+
+    pub(crate) fn is_cond(&self) -> bool {
+        self.is_call_target_kind(IrTargetKind::Cond)
+    }
+
+    pub(crate) fn is_while_loop(&self) -> bool {
+        self.is_call_target_kind(IrTargetKind::WhileLoop)
+    }
+
+    pub(crate) fn is_control_flow(&self) -> bool {
+        self.is_cond() || self.is_while_loop()
+    }
+
+    pub(crate) fn is_getitem(&self) -> bool {
+        self.is_call_target_kind(IrTargetKind::GetItem)
     }
 
     /// Is this a TOSA RESCALE call?
     pub fn is_rescale(&self) -> bool {
-        self.target_contains("RESCALE")
+        self.is_call_target_kind(IrTargetKind::TosaRescale)
+    }
+
+    /// Is this an ATen mm/bmm call that produces an accumulator needing rescale?
+    pub(crate) fn is_mm_or_bmm(&self) -> bool {
+        self.is_mm() || self.is_bmm()
+    }
+
+    pub(crate) fn is_mm(&self) -> bool {
+        self.is_call_target_kind(IrTargetKind::AtenMm)
+    }
+
+    pub(crate) fn is_bmm(&self) -> bool {
+        self.is_call_target_kind(IrTargetKind::AtenBmm)
+    }
+
+    pub(crate) fn is_addmm(&self) -> bool {
+        self.is_call_target_kind(IrTargetKind::AtenAddmm)
     }
 
     /// Parse Q/DQ literal args into a QParam.
@@ -942,9 +999,10 @@ impl IrNode {
 
 /// Resolve a Python FX arg to an IrArg.
 fn resolve_arg(py_arg: &Bound<'_, PyAny>, name_to_id: &HashMap<String, NodeId>) -> IrArg {
+    let py_arg_attrs = attrs(py_arg);
     // Check if it's a node (has .op attribute)
-    if let Ok(name) = py_arg.getattr("name").and_then(|n| n.extract::<String>()) {
-        if py_arg.getattr("op").is_ok() {
+    if let Some(name) = py_arg_attrs.optional::<String>("name") {
+        if py_arg_attrs.has("op") {
             if let Some(&id) = name_to_id.get(&name) {
                 return IrArg::Node(id);
             }
@@ -967,7 +1025,7 @@ fn resolve_arg(py_arg: &Bound<'_, PyAny>, name_to_id: &HashMap<String, NodeId>) 
         return IrArg::Str(v);
     }
     // Check for torch.dtype objects (have is_floating_point attribute)
-    if py_arg.hasattr("is_floating_point").unwrap_or(false) {
+    if py_arg_attrs.has("is_floating_point") {
         if let Ok(s) = py_arg.str().map(|s| s.to_string()) {
             return IrArg::Dtype(s);
         }
@@ -998,54 +1056,10 @@ pub struct FakeTensorMeta {
 
 impl FakeTensorMeta {
     pub fn from_py(val: &Bound<'_, PyAny>) -> Option<Self> {
-        let shape = val.getattr("shape").ok()?.extract::<Vec<i64>>().ok()?;
-        let dtype = val.getattr("dtype").ok().map(|d| format!("{d}"))?;
+        let val_attrs = attrs(val);
+        let shape = val_attrs.optional("shape")?;
+        let dtype = val_attrs.display_optional("dtype")?;
         Some(Self { shape, dtype })
-    }
-
-    /// Reconstruct as a Python FakeTensor using an existing FakeTensor as the base.
-    /// This preserves the FakeTensorMode so all tensors in the graph share the same mode.
-    pub fn to_py_from<'py>(
-        &self,
-        py: Python<'py>,
-        base: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let torch = py.import_bound("torch")?;
-        let dtype = torch.getattr(&*self.dtype.replace("torch.", ""))?;
-        let shape = pyo3::types::PyList::new_bound(py, &self.shape);
-        let kw = PyDict::new_bound(py);
-        kw.set_item("dtype", &dtype)?;
-        let base = if base.hasattr("new_empty")? {
-            base.clone()
-        } else if let Ok(item) = base.get_item(0) {
-            if item.hasattr("new_empty")? {
-                item
-            } else {
-                return self.to_py(py);
-            }
-        } else {
-            return self.to_py(py);
-        };
-        base.call_method("new_empty", (&shape,), Some(&kw))
-    }
-
-    /// Reconstruct as a Python FakeTensor with a fresh FakeTensorMode.
-    /// Only use when no existing FakeTensor is available.
-    pub fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let torch = py.import_bound("torch")?;
-        let dtype = torch.getattr(&*self.dtype.replace("torch.", ""))?;
-        let shape = pyo3::types::PyTuple::new_bound(py, &self.shape);
-        let kw = PyDict::new_bound(py);
-        kw.set_item("dtype", &dtype)?;
-        let mode = py
-            .import_bound("torch._subclasses.fake_tensor")?
-            .getattr("FakeTensorMode")?
-            .call0()?;
-        let none = py.None().into_bound(py);
-        mode.call_method0("__enter__")?;
-        let fake = torch.call_method("empty", (&shape,), Some(&kw));
-        let _ = mode.call_method1("__exit__", (&none, &none, &none));
-        fake
     }
 
     pub fn rank(&self) -> usize {
@@ -1059,7 +1073,6 @@ impl FakeTensorMeta {
 #[derive(Debug, Clone)]
 pub enum MetaValue {
     Bool(bool),
-    Int(i64),
     Str(String),
 }
 
@@ -1073,23 +1086,8 @@ pub struct NodeMeta {
     pub original_dim_orders: Option<Vec<Vec<usize>>>,
     pub tosa_spatial_rank: Option<usize>,
     pub pre_pass_arg_qparams: Option<HashMap<usize, QParam>>,
-    pub table_input_qparam: Option<QParam>,
-    pub table_output_qparam: Option<QParam>,
     /// Arbitrary extra meta keys for passthrough (skip_size_adjust, arm_constant_placeholder, etc).
     pub extras: HashMap<String, MetaValue>,
-    pub(crate) dirty: DirtyFlags,
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct DirtyFlags {
-    pub(crate) input_qparams: bool,
-    pub(crate) output_qparams: bool,
-    pub(crate) tosa_dim_order: bool,
-    pub(crate) original_dim_orders: bool,
-    pub(crate) pre_pass_arg_qparams: bool,
-    pub(crate) val: bool,
-    pub(crate) table_qparams: bool,
-    pub(crate) extras: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1101,16 +1099,9 @@ fn extract_qparam_dict(py_dict: &Bound<'_, PyAny>) -> Option<HashMap<usize, QPar
         return None;
     }
     let mut map = HashMap::new();
-    if let Ok(items) = py_dict.call_method0("items") {
-        if let Ok(iter) = items.iter() {
-            for item in iter.filter_map(|i| i.ok()) {
-                if let (Ok(key), Ok(val)) = (
-                    item.get_item(0).and_then(|k| k.extract::<usize>()),
-                    item.get_item(1),
-                ) {
-                    map.insert(key, QParam::from_py(&val));
-                }
-            }
+    for (key, val) in items(py_dict).pairs() {
+        if let Ok(key) = key.extract::<usize>() {
+            map.insert(key, QParam::from_py(&val));
         }
     }
     if map.is_empty() {
@@ -1120,73 +1111,49 @@ fn extract_qparam_dict(py_dict: &Bound<'_, PyAny>) -> Option<HashMap<usize, QPar
     }
 }
 
-pub(crate) fn qparam_dict_to_py<'py>(
-    py: Python<'py>,
-    map: &HashMap<usize, QParam>,
-) -> PyResult<Bound<'py, PyDict>> {
-    let dict = PyDict::new_bound(py);
-    for (&idx, qp) in map {
-        dict.set_item(idx, qp.to_py(py)?)?;
-    }
-    Ok(dict)
-}
-
 // ---------------------------------------------------------------------------
 // NodeMeta import / export
 // ---------------------------------------------------------------------------
 
 impl NodeMeta {
+    pub fn tensor(shape: impl Into<Vec<i64>>, dtype: impl Into<String>) -> Self {
+        let mut meta = Self::default();
+        meta.set_val(FakeTensorMeta {
+            shape: shape.into(),
+            dtype: dtype.into(),
+        });
+        meta
+    }
+
     /// Extract typed metadata from a Python FX node.
     pub fn from_fx(node: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let meta = node.getattr("meta")?;
+        let meta = attrs(node).object("meta")?;
+        let meta_attrs = meta_view(&meta);
 
-        let input_qparams = meta
-            .get_item("input_qparams")
-            .ok()
+        let input_qparams = meta_attrs
+            .value("input_qparams")
             .and_then(|v| extract_qparam_dict(&v));
 
-        let output_qparams = meta
-            .get_item("output_qparams")
-            .ok()
+        let output_qparams = meta_attrs
+            .value("output_qparams")
             .and_then(|v| extract_qparam_dict(&v));
 
-        let val_obj = meta.get_item("val").ok();
+        let val_obj = meta_attrs.value("val");
         let val = val_obj.as_ref().and_then(|v| FakeTensorMeta::from_py(v));
         let val_dim_order = val_obj
             .as_ref()
             .and_then(|v| v.call_method0("dim_order").ok())
             .and_then(|v| v.extract::<Vec<usize>>().ok());
 
-        let tosa_dim_order = meta
-            .get_item("tosa_dim_order")
-            .ok()
-            .and_then(|v| v.extract::<Vec<usize>>().ok());
+        let tosa_dim_order = meta_attrs.optional("tosa_dim_order");
 
-        let original_dim_orders = meta
-            .get_item("original_dim_orders")
-            .ok()
-            .and_then(|v| v.extract::<Vec<Vec<usize>>>().ok());
+        let original_dim_orders = meta_attrs.optional("original_dim_orders");
 
-        let tosa_spatial_rank = meta
-            .get_item("tosa_spatial_rank")
-            .ok()
-            .and_then(|v| v.extract::<usize>().ok());
+        let tosa_spatial_rank = meta_attrs.optional("tosa_spatial_rank");
 
-        let pre_pass_arg_qparams = meta
-            .get_item("_pre_pass_arg_qparams")
-            .ok()
+        let pre_pass_arg_qparams = meta_attrs
+            .value("_pre_pass_arg_qparams")
             .and_then(|v| extract_qparam_dict(&v));
-
-        let table_input_qparam = meta
-            .get_item("arm_saved_table_input_qparam")
-            .ok()
-            .filter(|v| !v.is_none())
-            .map(|v| QParam::from_py(&v));
-        let table_output_qparam = meta
-            .get_item("arm_saved_table_output_qparam")
-            .ok()
-            .filter(|v| !v.is_none())
-            .map(|v| QParam::from_py(&v));
 
         // Import known extra meta keys
         let mut extras = HashMap::new();
@@ -1195,28 +1162,21 @@ impl NodeMeta {
             "arm_control_flow_placeholder",
             "arm_control_flow_parent_output_user",
         ] {
-            if let Ok(v) = meta.get_item(key) {
-                if let Ok(b) = v.extract::<bool>() {
-                    extras.insert(key.into(), MetaValue::Bool(b));
-                }
+            if let Some(b) = meta_attrs.optional::<bool>(key) {
+                extras.insert(key.into(), MetaValue::Bool(b));
             }
         }
-        if let Ok(v) = meta.get_item("skip_size_adjust") {
-            if let Ok(b) = v.extract::<bool>() {
-                extras.insert("skip_size_adjust".into(), MetaValue::Bool(b));
-            }
+        if let Some(b) = meta_attrs.optional::<bool>("skip_size_adjust") {
+            extras.insert("skip_size_adjust".into(), MetaValue::Bool(b));
         }
-        if let Ok(custom) = meta.get_item("custom") {
-            if let Ok(ann_info) = custom.get_item("_arm_annotation_info") {
-                if let Ok(b) = ann_info
-                    .get_item("quantized")
-                    .and_then(|v| v.extract::<bool>())
-                {
+        if let Some(custom) = meta_attrs.value("custom") {
+            if let Some(ann_info) = items(&custom).key("_arm_annotation_info") {
+                if let Some(b) = items(&ann_info).optional_key::<bool>("quantized") {
                     extras.insert("arm_quantized_annotation".into(), MetaValue::Bool(b));
                 }
             }
         }
-        if let Ok(v) = meta.get_item("tosa_special_dtype") {
+        if let Some(v) = meta_attrs.value("tosa_special_dtype") {
             if let Ok(s) = v.str().and_then(|s| s.extract::<String>()) {
                 extras.insert("tosa_special_dtype".into(), MetaValue::Str(s));
             }
@@ -1231,107 +1191,8 @@ impl NodeMeta {
             original_dim_orders,
             tosa_spatial_rank,
             pre_pass_arg_qparams,
-            table_input_qparam,
-            table_output_qparam,
             extras,
-            dirty: DirtyFlags::default(),
         })
-    }
-
-    /// Write back only the changed metadata fields to a Python FX node.
-    pub fn write_back(&self, py: Python<'_>, node: &Bound<'_, PyAny>) -> PyResult<()> {
-        let meta = node.getattr("meta")?;
-
-        if self.dirty.output_qparams {
-            match &self.output_qparams {
-                Some(map) => meta.set_item("output_qparams", qparam_dict_to_py(py, map)?)?,
-                None => {
-                    let _ = meta.del_item("output_qparams");
-                }
-            }
-        }
-
-        if self.dirty.input_qparams {
-            match &self.input_qparams {
-                Some(map) => meta.set_item("input_qparams", qparam_dict_to_py(py, map)?)?,
-                None => {
-                    let _ = meta.del_item("input_qparams");
-                }
-            }
-        }
-
-        if self.dirty.tosa_dim_order {
-            if let Some(ref order) = self.tosa_dim_order {
-                let tuple = pyo3::types::PyTuple::new_bound(py, order);
-                meta.set_item("tosa_dim_order", tuple)?;
-            }
-        }
-
-        if self.dirty.original_dim_orders {
-            if let Some(ref orders) = self.original_dim_orders {
-                let py_orders = pyo3::types::PyList::empty_bound(py);
-                for order in orders {
-                    py_orders.append(order.clone())?;
-                }
-                meta.set_item("original_dim_orders", py_orders)?;
-            }
-        }
-
-        if self.dirty.pre_pass_arg_qparams {
-            if let Some(ref map) = self.pre_pass_arg_qparams {
-                meta.set_item("_pre_pass_arg_qparams", qparam_dict_to_py(py, map)?)?;
-            }
-        }
-
-        if self.dirty.table_qparams {
-            if let Some(ref qp) = self.table_input_qparam {
-                meta.set_item("arm_saved_table_input_qparam", qp.to_py(py)?)?;
-            }
-            if let Some(ref qp) = self.table_output_qparam {
-                meta.set_item("arm_saved_table_output_qparam", qp.to_py(py)?)?;
-            }
-        }
-
-        if self.dirty.val {
-            if let Some(ref ftm) = self.val {
-                // Use existing val as base to preserve FakeTensorMode
-                let existing = meta.get_item("val").ok();
-                let new_val = if let Some(ref base) = existing {
-                    ftm.to_py_from(py, base)?
-                } else {
-                    ftm.to_py(py)?
-                };
-                meta.set_item("val", new_val)?;
-            }
-        }
-
-        if self.dirty.extras {
-            for (key, value) in &self.extras {
-                match value {
-                    MetaValue::Bool(v) => meta.set_item(key.as_str(), *v)?,
-                    MetaValue::Int(v) => meta.set_item(key.as_str(), *v)?,
-                    MetaValue::Str(v) => {
-                        if key == "tosa_special_dtype" {
-                            let enum_name = v.rsplit('.').next().unwrap_or(v.as_str());
-                            if let Ok(mapping) =
-                                py.import_bound("executorch.backends.arm.tosa.mapping")
-                            {
-                                if let Ok(tosa_special_dtype) = mapping.getattr("TosaSpecialDtype")
-                                {
-                                    if let Ok(enum_value) = tosa_special_dtype.getattr(enum_name) {
-                                        meta.set_item(key.as_str(), enum_value)?;
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                        meta.set_item(key.as_str(), v.as_str())?
-                    }
-                }
-            }
-        }
-
-        Ok(())
     }
 
     // --- Accessors ---
@@ -1352,16 +1213,14 @@ impl NodeMeta {
         self.val_dim_order.as_deref()
     }
 
-    // --- Mutation helpers that set dirty flags ---
+    // --- Mutation helpers ---
 
     pub fn set_output_qparams(&mut self, map: HashMap<usize, QParam>) {
         self.output_qparams = Some(map);
-        self.dirty.output_qparams = true;
     }
 
     pub fn set_input_qparams(&mut self, map: HashMap<usize, QParam>) {
         self.input_qparams = Some(map);
-        self.dirty.input_qparams = true;
     }
 
     pub fn set_single_output_qparam(&mut self, qp: QParam) {
@@ -1381,29 +1240,43 @@ impl NodeMeta {
         self.set_single_input_qparam(qp);
     }
 
+    pub fn set_pre_pass_arg_qparams(&mut self, map: HashMap<usize, QParam>) {
+        self.pre_pass_arg_qparams = Some(map);
+    }
+
     pub fn clear_output_qparams(&mut self) {
         self.output_qparams = None;
-        self.dirty.output_qparams = true;
     }
 
     pub fn clear_input_qparams(&mut self) {
         self.input_qparams = None;
-        self.dirty.input_qparams = true;
     }
 
     pub fn set_tosa_dim_order(&mut self, order: Vec<usize>) {
         self.tosa_dim_order = Some(order);
-        self.dirty.tosa_dim_order = true;
+    }
+
+    pub fn set_val_dim_order(&mut self, order: Vec<usize>) {
+        self.val_dim_order = Some(order);
     }
 
     pub fn set_original_dim_orders(&mut self, orders: Vec<Vec<usize>>) {
         self.original_dim_orders = Some(orders);
-        self.dirty.original_dim_orders = true;
     }
 
     pub fn set_val(&mut self, ftm: FakeTensorMeta) {
         self.val = Some(ftm);
-        self.dirty.val = true;
+    }
+
+    pub fn set_val_dtype_for_existing_shape(&mut self, dtype: impl Into<String>) -> bool {
+        let Some(shape) = self.val_shape().map(|shape| shape.to_vec()) else {
+            return false;
+        };
+        self.set_val(FakeTensorMeta {
+            shape,
+            dtype: dtype.into(),
+        });
+        true
     }
 
     pub fn cloned_with_val(&self, shape: Vec<i64>, dtype: impl Into<String>) -> Self {
@@ -1413,6 +1286,10 @@ impl NodeMeta {
             dtype: dtype.into(),
         });
         meta
+    }
+
+    pub fn cloned_without_qparams(&self, shape: Vec<i64>, dtype: impl Into<String>) -> Self {
+        self.cloned_with_val(shape, dtype).without_qparams()
     }
 
     pub fn with_qparams_from(mut self, other: &Self) -> Self {
@@ -1432,7 +1309,26 @@ impl NodeMeta {
 
     /// Get the single input qparam (key 0), if present.
     pub fn input_qparam(&self) -> Option<&QParam> {
-        self.input_qparams.as_ref()?.get(&0)
+        self.input_qparam_at(0)
+    }
+
+    /// Get an input qparam by positional argument index, if present.
+    pub fn input_qparam_at(&self, index: usize) -> Option<&QParam> {
+        self.input_qparams.as_ref()?.get(&index)
+    }
+
+    pub fn sorted_input_qparams(&self) -> Vec<(usize, QParam)> {
+        let mut qparams: Vec<_> = self
+            .input_qparams
+            .as_ref()
+            .map(|map| {
+                map.iter()
+                    .map(|(&index, qparam)| (index, qparam.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        qparams.sort_by_key(|(index, _)| *index);
+        qparams
     }
 
     pub fn copy_qparams_from(&mut self, other: &Self) {
@@ -1449,10 +1345,53 @@ impl NodeMeta {
         self.clear_output_qparams();
     }
 
+    pub fn set_empty_qparam_maps(&mut self) {
+        self.set_input_qparams(HashMap::new());
+        self.set_output_qparams(HashMap::new());
+    }
+
+    pub fn rescale_output_meta(&self, output_qparam: QParam) -> Self {
+        self.rescale_output_meta_with_shape(self, output_qparam)
+    }
+
+    pub fn rescale_output_meta_with_shape(
+        &self,
+        shape_source: &Self,
+        output_qparam: QParam,
+    ) -> Self {
+        let mut meta = self.clone();
+        meta.set_input_qparams(HashMap::new());
+        meta.set_single_output_qparam(output_qparam.clone());
+        if let Some(order) = meta.tosa_dim_order.clone() {
+            meta.set_tosa_dim_order(order);
+        }
+        if let Some(orders) = meta.original_dim_orders.clone() {
+            meta.set_original_dim_orders(orders);
+        }
+        meta.extras.remove("tosa_special_dtype");
+        if let Some(shape) = shape_source.val_shape() {
+            meta.set_val(FakeTensorMeta {
+                shape: shape.to_vec(),
+                dtype: output_qparam.dtype_str,
+            });
+        }
+        meta
+    }
+
+    pub fn rescale_meta_with_input_qparam(
+        &self,
+        shape_source: &Self,
+        input_qparam: QParam,
+        output_qparam: QParam,
+    ) -> Self {
+        let mut meta = self.rescale_output_meta_with_shape(shape_source, output_qparam);
+        meta.set_single_input_qparam(input_qparam);
+        meta
+    }
+
     /// Set a custom extra meta key.
     pub fn set_extra(&mut self, key: impl Into<String>, value: MetaValue) {
         self.extras.insert(key.into(), value);
-        self.dirty.extras = true;
     }
 
     /// Get a custom extra meta key.
@@ -1485,23 +1424,23 @@ pub trait IrPass {
 }
 
 #[derive(Debug, Default)]
-pub struct IrEpPassResult {
+pub struct EffectfulIrPassResult {
     pub modified: bool,
-    pub effects: FxEpEffectBatch,
+    pub effects: LoweringEffectBatch,
 }
 
-impl IrEpPassResult {
+impl EffectfulIrPassResult {
     pub fn changed(&self) -> bool {
-        self.modified || !self.effects.effects.is_empty()
+        self.modified || !self.effects.items.is_empty()
     }
 }
 
-/// A Rust compiler pass that mutates `IrGraph` and may also need to apply
-/// ExportedProgram bookkeeping effects when the graph is flushed back to Python.
-pub trait IrEpPass {
+/// A Rust compiler pass that mutates `IrGraph` and may also record deferred
+/// lowering effects applied during IR-to-serialize conversion.
+pub trait EffectfulIrPass {
     fn name(&self) -> &str;
 
-    fn run(&self, graph: &mut IrGraph) -> IrEpPassResult;
+    fn run(&self, graph: &mut IrGraph) -> EffectfulIrPassResult;
 }
 
 // ===========================================================================
@@ -1521,6 +1460,17 @@ impl IrArg {
             _ => None,
         }
     }
+    pub fn as_numeric_f64(&self) -> Option<f64> {
+        match self {
+            IrArg::Float(v) => Some(*v),
+            IrArg::Int(v) => Some(*v as f64),
+            _ => None,
+        }
+    }
+    pub fn as_scalar_literal_f64(&self) -> Option<f64> {
+        self.as_numeric_f64()
+            .or_else(|| self.as_bool().map(|value| if value { 1.0 } else { 0.0 }))
+    }
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             IrArg::Bool(v) => Some(*v),
@@ -1539,45 +1489,38 @@ impl IrArg {
             _ => None,
         }
     }
+    pub fn contains_node(&self, target: NodeId) -> bool {
+        match self {
+            IrArg::Node(id) => *id == target,
+            IrArg::List(items) => items.iter().any(|item| item.contains_node(target)),
+            _ => false,
+        }
+    }
     pub fn as_int_list(&self) -> Option<Vec<i64>> {
         match self {
             IrArg::List(items) => items.iter().map(|a| a.as_int()).collect(),
             _ => None,
         }
     }
+
+    pub fn as_int_list_or_scalar(&self) -> Option<Vec<i64>> {
+        match self {
+            IrArg::Int(v) => Some(vec![*v]),
+            IrArg::List(_) => self.as_int_list(),
+            _ => None,
+        }
+    }
 }
 
 // ===========================================================================
-// Hybrid pipeline: persistent IrGraph with deferred EP effects
+// Hybrid pipeline: persistent IrGraph with deferred lowering effects
 // ===========================================================================
 
-/// A step in the hybrid pipeline — either a pure Rust IrPass or an IrEp pass
-/// with deferred ExportedProgram bookkeeping effects.
+/// A step in the hybrid pipeline: either a pure Rust `IrPass` or an `EffectfulIrPass`
+/// with deferred lowering effects.
 pub enum PipelineStep {
     Ir(Box<dyn IrPass>),
-    IrEp(Box<dyn IrEpPass>),
-}
-
-/// Run a hybrid pipeline: IrPasses mutate a persistent IrGraph in pure Rust,
-/// and IrEp passes accumulate narrow Python bookkeeping effects for serialization.
-pub fn run_hybrid_pipeline<'py>(
-    _py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-    exported_program: Option<&Bound<'py, PyAny>>,
-    steps: &[PipelineStep],
-) -> PyResult<(bool, Option<IrGraph>, FxEpEffectBatch)> {
-    run_hybrid_pipeline_ext(_py, gm, exported_program, steps, true)
-}
-
-/// `run_hybrid_pipeline` with the historical skip parameter retained for callers.
-pub fn run_hybrid_pipeline_ext<'py>(
-    py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-    exported_program: Option<&Bound<'py, PyAny>>,
-    steps: &[PipelineStep],
-    allow_flush_skip: bool,
-) -> PyResult<(bool, Option<IrGraph>, FxEpEffectBatch)> {
-    run_hybrid_pipeline_ext_with_initial_ir(py, gm, exported_program, steps, allow_flush_skip, None)
+    Effectful(Box<dyn EffectfulIrPass>),
 }
 
 pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
@@ -1585,14 +1528,13 @@ pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
     gm: &Bound<'py, PyAny>,
     exported_program: Option<&Bound<'py, PyAny>>,
     steps: &[PipelineStep],
-    _allow_flush_skip: bool,
     initial_ir: Option<IrGraph>,
-) -> PyResult<(bool, Option<IrGraph>, FxEpEffectBatch)> {
+) -> PyResult<(bool, Option<IrGraph>, LoweringEffectBatch)> {
     use crate::runner_logging::{log_pass_result, log_pass_start};
 
     let mut ir = initial_ir;
     let mut any_modified = false;
-    let mut effects = FxEpEffectBatch::default();
+    let mut effects = LoweringEffectBatch::default();
 
     for (i, step) in steps.iter().enumerate() {
         match step {
@@ -1611,7 +1553,7 @@ pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
                     any_modified = true;
                 }
             }
-            PipelineStep::IrEp(pass) => {
+            PipelineStep::Effectful(pass) => {
                 if ir.is_none() {
                     ir = Some(IrGraph::from_fx_with_tensors(gm, exported_program)?);
                 }
@@ -1629,7 +1571,7 @@ pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
                 );
                 if result.changed() {
                     any_modified = true;
-                    effects.effects.extend(result.effects.effects);
+                    effects.items.extend(result.effects.items);
                 }
             }
         }

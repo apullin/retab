@@ -8,39 +8,6 @@
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
 
-fn is_relu(target: &str) -> bool {
-    target.contains("relu.default")
-}
-fn is_hardtanh(target: &str) -> bool {
-    target.contains("hardtanh.default")
-}
-fn is_quantize(target: &str) -> bool {
-    target.contains("quantize_per_tensor")
-}
-fn is_dequantize(target: &str) -> bool {
-    target.contains("dequantize_per_tensor") || target.contains("dequantize_per_channel")
-}
-fn is_conv_or_linear(target: &str) -> bool {
-    target.contains("convolution.default")
-        || target.contains("conv2d.default")
-        || target.contains("linear.default")
-}
-
-/// Find all alive call_function users of `producer_id`.
-fn call_function_users(graph: &IrGraph, producer_id: NodeId) -> Vec<NodeId> {
-    graph
-        .nodes
-        .iter()
-        .filter(|n| n.alive && n.op == NodeOp::CallFunction)
-        .filter(|n| {
-            n.args
-                .iter()
-                .any(|a| matches!(a, IrArg::Node(id) if *id == producer_id))
-        })
-        .map(|n| n.id)
-        .collect()
-}
-
 pub struct IrFuseQuantActivationPass;
 
 impl IrPass for IrFuseQuantActivationPass {
@@ -56,19 +23,15 @@ impl IrPass for IrFuseQuantActivationPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            let is_relu_node = is_relu(&graph.nodes[id].target);
-            let is_hardtanh_node = is_hardtanh(&graph.nodes[id].target);
+            let is_relu_node = graph.nodes[id].is_relu();
+            let is_hardtanh_node = graph.nodes[id].is_hardtanh();
             if !is_relu_node && !is_hardtanh_node {
                 continue;
             }
 
             // For hardtanh, check min_val == 0
             if is_hardtanh_node {
-                let min_val = graph.nodes[id].args.get(1).and_then(|a| match a {
-                    IrArg::Float(v) => Some(*v),
-                    IrArg::Int(v) => Some(*v as f64),
-                    _ => None,
-                });
+                let min_val = graph.nodes[id].args.get(1).and_then(IrArg::as_numeric_f64);
                 if min_val != Some(0.0) {
                     continue;
                 }
@@ -81,12 +44,10 @@ impl IrPass for IrFuseQuantActivationPass {
             };
 
             // Single user must be quantize_per_tensor
-            let users = call_function_users(graph, id);
-            if users.len() != 1 {
+            let Some(q_id) = graph.single_live_call_function_user(id) else {
                 continue;
-            }
-            let q_id = users[0];
-            if !is_quantize(&graph.nodes[q_id].target) {
+            };
+            if !graph.nodes[q_id].is_quantize() {
                 continue;
             }
 
@@ -111,8 +72,7 @@ impl IrPass for IrFuseQuantActivationPass {
                 if !graph.nodes[current].alive || graph.nodes[current].op != NodeOp::CallFunction {
                     break;
                 }
-                let t = &graph.nodes[current].target;
-                if is_dequantize(t) || is_quantize(t) {
+                if graph.nodes[current].is_dequantize_any() || graph.nodes[current].is_quantize() {
                     match graph.nodes[current].first_node_arg() {
                         Some(nid) => current = nid,
                         None => break,
@@ -125,12 +85,11 @@ impl IrPass for IrFuseQuantActivationPass {
             // Producer must be conv/linear with a single user
             if !graph.nodes[current].alive
                 || graph.nodes[current].op != NodeOp::CallFunction
-                || !is_conv_or_linear(&graph.nodes[current].target)
+                || !graph.nodes[current].is_conv_or_linear()
             {
                 continue;
             }
-            let producer_users = call_function_users(graph, current);
-            if producer_users.len() != 1 {
+            if graph.single_live_call_function_user(current).is_none() {
                 continue;
             }
 

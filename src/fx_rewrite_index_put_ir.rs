@@ -4,6 +4,7 @@ use crate::fx_ir::{
     broadcast_shapes, i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass, NodeId,
     NodeOp,
 };
+use crate::fx_target::is_index_put_default_target;
 use crate::runner_logging::log_line;
 
 fn shape_to_stride(shape: &[i64]) -> Vec<i64> {
@@ -31,9 +32,7 @@ impl IrPass for IrRewriteIndexPutPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !graph.nodes[id].target.contains("index_put.default")
-                && !graph.nodes[id].target.contains("index_put_.default")
-            {
+            if !is_index_put_default_target(&graph.nodes[id].target) {
                 continue;
             }
             if graph.nodes[id].args.len() < 3 {
@@ -100,9 +99,8 @@ impl IrPass for IrRewriteIndexPutPass {
                             invalid_indices = true;
                             break;
                         };
-                        let arange_meta = orig_meta
-                            .cloned_with_val(vec![dim_size], &index_dtype)
-                            .without_qparams();
+                        let arange_meta =
+                            orig_meta.cloned_without_qparams(vec![dim_size], &index_dtype);
                         let arange = graph.add_anchored_arange(
                             id,
                             format!("{}_in{}", name, dim_idx),
@@ -158,9 +156,8 @@ impl IrPass for IrRewriteIndexPutPass {
                 if idx_shape.len() != bcast.len() {
                     let mut aligned: Vec<i64> = vec![1; bcast.len() - idx_shape.len()];
                     aligned.extend(idx_shape);
-                    let aligned_meta = orig_meta
-                        .cloned_with_val(aligned.clone(), &idx_dtype)
-                        .without_qparams();
+                    let aligned_meta =
+                        orig_meta.cloned_without_qparams(aligned.clone(), &idx_dtype);
                     let a = graph.add_anchored_call_function(
                         id,
                         format!("{}_ia{}", name, i),
@@ -171,9 +168,7 @@ impl IrPass for IrRewriteIndexPutPass {
                     current = a;
                 }
 
-                let bcast_meta = orig_meta
-                    .cloned_with_val(bcast.clone(), &idx_dtype)
-                    .without_qparams();
+                let bcast_meta = orig_meta.cloned_without_qparams(bcast.clone(), &idx_dtype);
                 let b = graph.add_anchored_call_function(
                     id,
                     format!("{}_ib{}", name, i),
@@ -182,9 +177,7 @@ impl IrPass for IrRewriteIndexPutPass {
                     bcast_meta,
                 );
 
-                let flat_meta = orig_meta
-                    .cloned_with_val(vec![w], &idx_dtype)
-                    .without_qparams();
+                let flat_meta = orig_meta.cloned_without_qparams(vec![w], &idx_dtype);
                 let flat = graph.add_anchored_call_function(
                     id,
                     format!("{}_if{}", name, i),
@@ -193,9 +186,7 @@ impl IrPass for IrRewriteIndexPutPass {
                     flat_meta,
                 );
 
-                let scale_meta = orig_meta
-                    .cloned_with_val(vec![1], &idx_dtype)
-                    .without_qparams();
+                let scale_meta = orig_meta.cloned_without_qparams(vec![1], &idx_dtype);
                 let scale = graph.add_anchored_full_int(
                     id,
                     format!("{}_sc{}", name, i),
@@ -205,9 +196,7 @@ impl IrPass for IrRewriteIndexPutPass {
                     scale_meta,
                 );
 
-                let scaled_meta = orig_meta
-                    .cloned_with_val(vec![w], &idx_dtype)
-                    .without_qparams();
+                let scaled_meta = orig_meta.cloned_without_qparams(vec![w], &idx_dtype);
                 let scaled = graph.add_anchored_call_function(
                     id,
                     format!("{}_sm{}", name, i),
@@ -219,9 +208,7 @@ impl IrPass for IrRewriteIndexPutPass {
                 lin = Some(match lin {
                     None => scaled,
                     Some(prev) => {
-                        let add_meta = orig_meta
-                            .cloned_with_val(vec![w], &idx_dtype)
-                            .without_qparams();
+                        let add_meta = orig_meta.cloned_without_qparams(vec![w], &idx_dtype);
                         let add = graph.add_anchored_call_function(
                             id,
                             format!("{}_la{}", name, i),
@@ -236,9 +223,7 @@ impl IrPass for IrRewriteIndexPutPass {
             let Some(flat_idx) = lin else { continue };
 
             // Reshape: indices (1, W), source (1, K, C), values (1, W, C)
-            let idx_meta = orig_meta
-                .cloned_with_val(vec![1, w], &idx_dtype)
-                .without_qparams();
+            let idx_meta = orig_meta.cloned_without_qparams(vec![1, w], &idx_dtype);
             let idx_1w = graph.add_anchored_call_function(
                 id,
                 format!("{}_idx", name),
@@ -385,16 +370,12 @@ impl IrPass for IrRewriteIndexPutPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::{FakeTensorMeta, NodeMeta};
+    use crate::fx_ir::NodeMeta;
 
     fn graph_with_index_put_none() -> IrGraph {
         let mut graph = IrGraph::empty();
 
-        let mut source_meta = NodeMeta::default();
-        source_meta.set_val(FakeTensorMeta {
-            shape: vec![2, 5, 4],
-            dtype: "torch.float32".to_string(),
-        });
+        let source_meta = NodeMeta::tensor([2, 5, 4], "torch.float32");
         let source = graph.add_node(
             NodeOp::Placeholder,
             "source".to_string(),
@@ -403,11 +384,7 @@ mod tests {
             source_meta.clone(),
         );
 
-        let mut index_meta = NodeMeta::default();
-        index_meta.set_val(FakeTensorMeta {
-            shape: vec![1],
-            dtype: "torch.int64".to_string(),
-        });
+        let index_meta = NodeMeta::tensor([1], "torch.int64");
         let index = graph.add_node(
             NodeOp::Placeholder,
             "index".to_string(),
@@ -416,11 +393,7 @@ mod tests {
             index_meta,
         );
 
-        let mut values_meta = NodeMeta::default();
-        values_meta.set_val(FakeTensorMeta {
-            shape: vec![2, 4],
-            dtype: "torch.float32".to_string(),
-        });
+        let values_meta = NodeMeta::tensor([2, 4], "torch.float32");
         let values = graph.add_node(
             NodeOp::Placeholder,
             "values".to_string(),

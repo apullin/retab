@@ -54,12 +54,12 @@ pub(super) fn push_const_shape(result: &mut EmitResult, shape_name: String, valu
         rank,
         data,
     });
-    result.operators.push(TosaOperator::new(
+    result.push_op(
         Op::ConstShape,
         Attribute::ConstShape(ConstShapeAttribute {}),
         vec![],
         vec![shape_name],
-    ));
+    );
 }
 
 fn shape_numel(shape: &[i32]) -> Option<usize> {
@@ -198,11 +198,15 @@ pub(super) fn quantize_fill_value(node: &Node, value: f64) -> f64 {
                     | crate::graph::ir::DType::Int64
             ) =>
         {
-            let quantized = ((value / qp.scale) + qp.zero_point as f64).round() as i64;
-            quantized.clamp(qp.qmin, qp.qmax) as f64
+            quantize_scalar_with_qparam(value, *qp)
         }
         _ => value,
     }
+}
+
+pub(super) fn quantize_scalar_with_qparam(value: f64, qp: crate::graph::ir::QuantArgs) -> f64 {
+    let quantized = ((value / qp.scale) + qp.zero_point as f64).round() as i64;
+    quantized.clamp(qp.qmin, qp.qmax) as f64
 }
 
 pub(super) fn push_inline_const(result: &mut EmitResult, tensor: TosaTensor) {

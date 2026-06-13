@@ -52,8 +52,9 @@ pub(crate) use dtype_quant::ir_dtype_to_tosa;
 use dtype_quant::{
     accumulator_output_dtype, actual_tensor_dtype, clamp_bound_bytes_from_arg,
     compute_multiplier_and_shift_with_width, conv_accumulator_dtype, encode_zp_for_dtype,
-    has_only_tosa_rescale_users, is_float_dtype, matmul_input_dtype, node_input_zero_point,
-    node_output_dtype, node_output_zero_point, node_tensor_dtype, normalize_rescale_zp,
+    has_only_tosa_rescale_users, input_qparam_zero_point, input_qparam_zero_point_or_kwarg,
+    is_float_dtype, matmul_input_dtype, node_input_zero_point, node_output_dtype,
+    node_output_zero_point, node_tensor_dtype, normalize_rescale_zp, output_qparam_zero_point,
     passthrough_input_dtype, single_qparam,
 };
 use emit_result::EmitResult;
@@ -93,7 +94,7 @@ pub fn emit_node(
     node: &Node,
     store: &TensorStore,
 ) -> Option<EmitResult> {
-    if let Ok(probe) = std::env::var("ARM_TOSA_ENGINE_DEBUG_NODE") {
+    if let Some(probe) = crate::config::debug_node_probe() {
         if node.name.contains(&probe) {
             eprintln!(
                 "[NodeProbe] serialize {} target={:?} raw_shape={:?} dim_order={:?}",
@@ -116,7 +117,7 @@ pub fn emit_node(
             let ctx = EmitContext { graph, node, store };
             Some(emitter(&ctx))
         } else {
-            if crate::fx_graph::FxGraphModule::debug() {
+            if crate::fx_graph::debug() {
                 eprintln!(
                     "[emit_node] SKIPPED unhandled target: {:?} (node '{}')",
                     node.target, node.name

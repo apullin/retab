@@ -7,18 +7,8 @@
 
 use std::collections::HashMap;
 
-use crate::fx_control_flow_metadata::QParam;
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam};
 use crate::runner_logging::log_line;
-
-fn clear_qparams(meta: &mut NodeMeta) {
-    meta.set_input_qparams(HashMap::new());
-    meta.set_output_qparams(HashMap::new());
-}
-
-fn is_convolution(target: &str) -> bool {
-    target.contains("convolution.default") || target.contains("conv2d.default")
-}
 
 fn is_boundary_rescale(target: &str) -> bool {
     let lower = target.to_ascii_lowercase();
@@ -38,20 +28,18 @@ fn single_output_qparam(graph: &IrGraph, id: NodeId) -> Option<QParam> {
 }
 
 fn slice_meta(graph: &IrGraph, id: NodeId, dim: usize, start: i64, stop: i64) -> Option<NodeMeta> {
-    let mut meta = graph.nodes[id].meta.clone();
     let mut shape = graph.nodes[id].meta.val_shape()?.to_vec();
     if dim >= shape.len() {
         return None;
     }
     shape[dim] = (stop - start).max(0);
     let dtype = graph.nodes[id].meta.val_dtype()?.to_string();
-    meta.set_val(FakeTensorMeta { shape, dtype });
-    clear_qparams(&mut meta);
+    let mut meta = graph.nodes[id].meta.cloned_with_val(shape, dtype);
+    meta.set_empty_qparam_maps();
     Some(meta)
 }
 
 fn conv_slice_output_meta(graph: &IrGraph, id: NodeId, output_slice_size: i64) -> NodeMeta {
-    let mut meta = graph.nodes[id].meta.clone();
     if let Some(shape) = graph.nodes[id].meta.val_shape() {
         let mut shape = shape.to_vec();
         if shape.len() >= 2 {
@@ -62,9 +50,9 @@ fn conv_slice_output_meta(graph: &IrGraph, id: NodeId, output_slice_size: i64) -
             .val_dtype()
             .unwrap_or("torch.float32")
             .to_string();
-        meta.set_val(FakeTensorMeta { shape, dtype });
+        return graph.nodes[id].meta.cloned_with_val(shape, dtype);
     }
-    meta
+    graph.nodes[id].meta.clone()
 }
 
 fn configure_conv_qparams(
@@ -138,7 +126,7 @@ fn cat_meta_from_outputs(
     output_slices: &[NodeId],
 ) -> NodeMeta {
     let mut meta = graph.nodes[original_id].meta.clone();
-    clear_qparams(&mut meta);
+    meta.set_empty_qparam_maps();
     for &slice_id in output_slices {
         if let Some(qparam) = graph.nodes[slice_id].meta.output_qparam().cloned() {
             let mut output_qparams = HashMap::new();
@@ -187,7 +175,7 @@ struct GroupedConvSpec {
 
 fn parse_grouped_conv(graph: &IrGraph, id: NodeId) -> Option<GroupedConvSpec> {
     let node = &graph.nodes[id];
-    if !node.alive || node.op != NodeOp::CallFunction || !is_convolution(&node.target) {
+    if !node.alive || node.op != NodeOp::CallFunction || !node.is_convolution() {
         return None;
     }
 
@@ -416,22 +404,13 @@ mod tests {
     use super::*;
     use crate::fx_ir::i64_list_arg as i64_list;
 
-    fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
-        let mut meta = NodeMeta::default();
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: dtype.to_string(),
-        });
-        meta
-    }
-
     fn placeholder(graph: &mut IrGraph, name: &str, shape: &[i64]) -> NodeId {
         graph.add_node(
             NodeOp::Placeholder,
             name.to_string(),
             name.to_string(),
             Vec::new(),
-            meta(shape, "torch.int8"),
+            NodeMeta::tensor(shape, "torch.int8"),
         )
     }
 
@@ -458,7 +437,7 @@ mod tests {
         let input = placeholder(&mut graph, "input", &[1, 6, 8, 8]);
         let weight = placeholder(&mut graph, "weight", &[12, 2, 3, 3]);
         let bias = placeholder(&mut graph, "bias", &[12]);
-        let mut conv_meta = meta(&[1, 12, 6, 6], "torch.int8");
+        let mut conv_meta = NodeMeta::tensor([1, 12, 6, 6], "torch.int8");
         let mut input_qparams = HashMap::new();
         input_qparams.insert(0, per_tensor_qparam(0.25));
         input_qparams.insert(
@@ -532,7 +511,7 @@ mod tests {
                 i64_list(&[0, 0]),
                 IrArg::Int(4),
             ],
-            meta(&[1, 4, 6, 6], "torch.int8"),
+            NodeMeta::tensor([1, 4, 6, 6], "torch.int8"),
         );
 
         assert!(!IrDecomposeGroupedConvPass.run(&mut graph));

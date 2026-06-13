@@ -3,8 +3,9 @@
 ## Goal
 
 Replace PyO3 `Bound<'py, PyAny>` manipulation of Python FX graphs with a
-Rust-native graph IR. Import once from Python at the boundary, run all passes
-in pure Rust, export back to Python for serialization.
+Rust-native graph IR. Import once from Python at the boundary, run all lowering
+passes in Rust IR, then serialize TOSA from Rust-owned graph data. There is no
+intended Rust-IR-to-Python-FX write-back step.
 
 This eliminates `<'py>` lifetimes from all internal code, removes 40+ 
 `.getattr("meta")` calls, 8+ `replace_all_uses_with` calls, and the
@@ -12,7 +13,12 @@ entire PyO3 ceremony from graph manipulation.
 
 ## Current state
 
-Every pass operates on Python FX graph objects via PyO3:
+The Python-FX mutation path described below is historical context. Active
+lowering imports FX into `IrGraph`, runs Rust `IrPass`/`EffectfulIrPass` pipelines,
+stashes parent and control-flow submodule IRs, converts those IRs into the
+serializer graph model, and emits TOSA directly from Rust.
+
+Old Python-facing passes looked like this:
 ```rust
 fn some_pass<'py>(py: Python<'py>, gm: &Bound<'py, PyAny>) -> PyResult<bool> {
     for node in graph_nodes(gm)? {           // Python iter
@@ -148,8 +154,10 @@ Two strategies:
 
 ### Phase 1: NodeMeta extraction (low risk) — DONE
 
-Extract metadata into `NodeMeta` structs at pass entry, operate on them,
-write back at pass exit. The FX graph structure stays Python-managed.
+Extracting metadata into `NodeMeta` structs at pass entry and writing them back
+to Python was an intermediate migration step. That write-back stack has been
+deleted from active source. Keep this section only as historical context for
+why `NodeMeta` exists.
 
 **Migrated passes:**
 - `propagate_parent_qparams_to_placeholders` (qparam copy + while output stamp)
@@ -162,34 +170,10 @@ write back at pass exit. The FX graph structure stays Python-managed.
 - `FxWhileStripBoundaryQPass` DQ annotation
 - `insert_cf_boundary_rescales` (input + output sections)
 
-**Not migrated (need FakeTensor Python calls):**
-- `restamp_cf_placeholder_dtypes` (calls `_branch_local_control_flow_output_qparam`, `fake_val.to(dtype=...)`)
-- `refresh_tosa_transpose_fake_tensors` (creates FakeTensors via `new_empty`)
-- `refresh_tosa_dim_order_fake_tensors` (calls `_get_matching_fake_tensor`)
-
-```rust
-fn some_pass(py: Python, gm: &Bound<PyAny>) -> PyResult<bool> {
-    let mut metas: Vec<(Bound<PyAny>, NodeMeta)> = graph_nodes(gm)?
-        .into_iter()
-        .map(|n| {
-            let meta = NodeMeta::from_fx(&n)?;
-            Ok((n, meta))
-        })
-        .collect::<PyResult<_>>()?;
-    
-    // Pure Rust manipulation of metas — no <'py>
-    for (_, meta) in &mut metas {
-        if let Some(ref mut oqp) = meta.output_qparams { ... }
-    }
-    
-    // Write back
-    for (node, meta) in &metas {
-        meta.write_back(&node)?;
-    }
-}
-```
-
-This is incremental — each pass can be migrated independently.
+The old FakeTensor refresh responsibilities were replaced by Rust-side tensor
+metadata and layout contracts. Control-flow placeholder layout is propagated
+before submodule IR passes, and layout-preserving Q/DQ/RESCALE shape planning
+uses the input tensor shape directly.
 
 ### Phase 2: Full IrGraph for metadata passes — DONE
 
@@ -204,11 +188,13 @@ edges (users) built during import.
 - `stamp_while_body_output_qparams_ir(graph)` — loop-carried output qparams
 - `force_rank4_output_dim_order_ir(graph)` — stamp NHWC on output args
 
-**Wrapper pattern:** `IrGraph::from_fx(&submodule)?` → pure Rust → `ir.write_back(py, &submodule)?`
+**Current pattern:** `IrGraph::from_fx_with_tensors(...)` → pure Rust passes →
+stash IR/effects → `ingest::from_ir` conversion → TOSA serialization.
 
 **Not migrated (need Python for FakeTensor or graph surgery):**
 - Functions calling `QuantArgs.from_operator`, `_branch_local_control_flow_output_qparam`
-- Functions doing `erase_node`, `replace_all_uses_with`, `call_function` (Phase 3)
+- Legacy Python graph-surgery functions are not part of the active lowering
+  path.
 
 ### Phase 3: Graph surgery in IrGraph — PARTIAL
 
@@ -217,7 +203,8 @@ IrGraph now supports mutation:
 - `erase(node_id)` — mark node dead
 - `replace_and_erase(old_id, new_id)` — combined
 - `add_node(...)` — append new node
-- `write_back_with_surgery()` — apply replace/erase to Python graph
+- IR-to-serializer conversion orders inserted nodes directly; no Python graph
+  surgery/write-back is expected.
 
 **Migrated to pure Rust surgery:**
 - `remove_noop_passthroughs_ir` — detects noops, propagates metadata, replace_and_erase

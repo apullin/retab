@@ -1,53 +1,24 @@
-use std::collections::HashMap;
-
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
-
-fn is_matmul(target: &str) -> bool {
-    target.contains("aten.mm.") || target.contains("aten.bmm.")
-}
-
-fn qparam_at(meta: &NodeMeta, index: usize) -> Option<&crate::fx_control_flow_metadata::QParam> {
-    meta.input_qparams.as_ref()?.get(&index)
-}
-
-fn output_qparam(meta: &NodeMeta) -> Option<&crate::fx_control_flow_metadata::QParam> {
-    meta.output_qparams.as_ref()?.get(&0)
-}
-
-fn rescale_meta_from(matmul_meta: &NodeMeta, output_dtype: &str) -> NodeMeta {
-    let mut meta = matmul_meta.clone();
-    meta.set_input_qparams(HashMap::new());
-    if let Some(output_qparams) = matmul_meta.output_qparams.clone() {
-        meta.set_output_qparams(output_qparams);
-    }
-    if let Some(shape) = matmul_meta.val_shape() {
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: output_dtype.to_string(),
-        });
-    }
-    meta
-}
 
 fn insert_matmul_rescale(graph: &mut IrGraph, matmul_id: NodeId) -> bool {
     let node = &graph.nodes[matmul_id];
-    if !node.alive || node.op != NodeOp::CallFunction || !is_matmul(&node.target) {
+    if !node.alive || node.op != NodeOp::CallFunction || !node.is_mm_or_bmm() {
         return false;
     }
 
-    let Some(qp_a) = qparam_at(&node.meta, 0) else {
+    let Some(qp_a) = node.meta.input_qparam_at(0) else {
         return false;
     };
-    let Some(qp_b) = qparam_at(&node.meta, 1) else {
+    let Some(qp_b) = node.meta.input_qparam_at(1) else {
         return false;
     };
-    let Some(out_qp) = output_qparam(&node.meta) else {
+    let Some(out_qp) = node.meta.output_qparam() else {
         return false;
     };
 
     let rescale_scale = (qp_a.scale * qp_b.scale) / out_qp.scale;
-    let rescale_meta = rescale_meta_from(&node.meta, &out_qp.dtype_str);
+    let rescale_meta = node.meta.rescale_output_meta(out_qp.clone());
     let rescale = graph.add_node(
         NodeOp::CallFunction,
         format!("{}_output_rescale", node.name),
@@ -99,19 +70,10 @@ impl IrPass for IrRewriteMatmulRescalePass {
 
 #[cfg(test)]
 mod tests {
-    use crate::fx_control_flow_metadata::QParam;
-    use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, NodeMeta, NodeOp};
+    use crate::fx_ir::{IrArg, IrGraph, NodeMeta, NodeOp, QParam};
+    use std::collections::HashMap;
 
     use super::*;
-
-    fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
-        let mut meta = NodeMeta::default();
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: dtype.to_string(),
-        });
-        meta
-    }
 
     fn qparam(scale: f64, zp: i64, dtype: &str) -> QParam {
         QParam::per_tensor(scale, zp, -128, 127, dtype.to_string())
@@ -125,16 +87,16 @@ mod tests {
             "lhs".to_string(),
             "lhs".to_string(),
             Vec::new(),
-            meta(&[2, 3], "torch.int8"),
+            NodeMeta::tensor([2, 3], "torch.int8"),
         );
         let rhs = graph.add_node(
             NodeOp::Placeholder,
             "rhs".to_string(),
             "rhs".to_string(),
             Vec::new(),
-            meta(&[3, 4], "torch.int8"),
+            NodeMeta::tensor([3, 4], "torch.int8"),
         );
-        let mut matmul_meta = meta(&[2, 4], "torch.int32");
+        let mut matmul_meta = NodeMeta::tensor([2, 4], "torch.int32");
         let mut input_qparams = HashMap::new();
         input_qparams.insert(0, qparam(0.5, 3, "torch.int8"));
         input_qparams.insert(1, qparam(0.25, -4, "torch.int8"));
@@ -154,7 +116,7 @@ mod tests {
             "consumer".to_string(),
             "aten.add.Tensor".to_string(),
             vec![IrArg::Node(matmul), IrArg::Node(matmul)],
-            meta(&[2, 4], "torch.int8"),
+            NodeMeta::tensor([2, 4], "torch.int8"),
         );
         graph.add_node(
             NodeOp::Output,
@@ -190,21 +152,21 @@ mod tests {
             "lhs".to_string(),
             "lhs".to_string(),
             Vec::new(),
-            meta(&[2, 3], "torch.float32"),
+            NodeMeta::tensor([2, 3], "torch.float32"),
         );
         let rhs = graph.add_node(
             NodeOp::Placeholder,
             "rhs".to_string(),
             "rhs".to_string(),
             Vec::new(),
-            meta(&[3, 4], "torch.float32"),
+            NodeMeta::tensor([3, 4], "torch.float32"),
         );
         graph.add_node(
             NodeOp::CallFunction,
             "mm".to_string(),
             "aten.mm.default".to_string(),
             vec![IrArg::Node(lhs), IrArg::Node(rhs)],
-            meta(&[2, 4], "torch.float32"),
+            NodeMeta::tensor([2, 4], "torch.float32"),
         );
 
         assert!(!IrRewriteMatmulRescalePass.run(&mut graph));

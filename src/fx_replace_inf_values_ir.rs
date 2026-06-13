@@ -82,8 +82,6 @@ impl IrPass for IrReplaceInfAndLimitValuesPass {
                 node_changed |= sanitize_arg(arg);
             }
             if node_changed {
-                node.args_dirty = true;
-                node.args_rebuild_required = true;
                 modified = true;
             }
         }
@@ -100,8 +98,7 @@ impl IrPass for IrReplaceInfAndLimitValuesPass {
 #[cfg(test)]
 mod tests {
     use super::IrReplaceInfAndLimitValuesPass;
-    use crate::fx_control_flow_metadata::QParam;
-    use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeMeta, NodeOp};
+    use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeMeta, NodeOp, QParam};
 
     #[test]
     fn clamps_inf_literals_in_args_and_kwargs_for_quantized_nodes() {

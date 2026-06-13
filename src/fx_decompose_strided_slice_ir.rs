@@ -22,14 +22,6 @@ fn fixup_end(end: Option<i64>, dim_size: i64) -> i64 {
     e.clamp(0, dim_size)
 }
 
-fn optional_int(arg: Option<&IrArg>) -> Option<i64> {
-    match arg {
-        Some(IrArg::Int(v)) => Some(*v),
-        Some(IrArg::None) | None => None,
-        _ => None,
-    }
-}
-
 pub struct IrDecomposeStridedSlicePass;
 
 impl IrPass for IrDecomposeStridedSlicePass {
@@ -86,8 +78,14 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 continue;
             }
 
-            let start = fixup_start(optional_int(graph.nodes[id].args.get(2)), dim_size);
-            let end = fixup_end(optional_int(graph.nodes[id].args.get(3)), dim_size);
+            let start = fixup_start(
+                graph.nodes[id].args.get(2).and_then(IrArg::as_int),
+                dim_size,
+            );
+            let end = fixup_end(
+                graph.nodes[id].args.get(3).and_then(IrArg::as_int),
+                dim_size,
+            );
             let span_len = end - start;
             if span_len <= 0 {
                 continue;

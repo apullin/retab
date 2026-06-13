@@ -40,20 +40,8 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
         }
     };
 
-    let a_zp = node
-        .meta
-        .input_qparams
-        .iter()
-        .find(|(pos, _)| *pos == 0)
-        .map(|(_, qp)| qp.zero_point as i32)
-        .unwrap_or_else(|| kwarg_i32(node, "A_zp", 0));
-    let b_zp = node
-        .meta
-        .input_qparams
-        .iter()
-        .find(|(pos, _)| *pos == 1)
-        .map(|(_, qp)| qp.zero_point as i32)
-        .unwrap_or_else(|| kwarg_i32(node, "B_zp", 0));
+    let a_zp = input_qparam_zero_point_or_kwarg(node, 0, "A_zp", 0);
+    let b_zp = input_qparam_zero_point_or_kwarg(node, 1, "B_zp", 0);
 
     let mut matmul_inputs = if promote_2d {
         let (a_shape, b_shape) = match (node.args.first(), node.args.get(1)) {
@@ -106,26 +94,10 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
     };
 
     let a_zp_name = format!("{}_A_zp", node.name);
-    push_inline_const(
-        &mut result,
-        TosaTensor::with_data(
-            &a_zp_name,
-            vec![1],
-            a_dtype,
-            encode_zp_for_dtype(a_zp, a_dtype),
-        ),
-    );
+    push_zero_point_const(&mut result, a_zp_name.clone(), a_dtype, a_zp);
 
     let b_zp_name = format!("{}_B_zp", node.name);
-    push_inline_const(
-        &mut result,
-        TosaTensor::with_data(
-            &b_zp_name,
-            vec![1],
-            b_dtype,
-            encode_zp_for_dtype(b_zp, b_dtype),
-        ),
-    );
+    push_zero_point_const(&mut result, b_zp_name.clone(), b_dtype, b_zp);
 
     matmul_inputs.push(a_zp_name);
     matmul_inputs.push(b_zp_name);
@@ -150,18 +122,16 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
         out_shape.clone()
     };
 
-    result.tensors.push(TosaTensor::new(
-        &matmul_output_name,
-        matmul_output_shape.clone(),
-        matmul_out_dtype,
-    ));
-
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        TosaTensor::new(
+            &matmul_output_name,
+            matmul_output_shape.clone(),
+            matmul_out_dtype,
+        ),
         Op::MatMul,
         Attribute::MatMul(MatMulAttribute {}),
         matmul_inputs,
-        vec![matmul_output_name.clone()],
-    ));
+    );
 
     let mut final_input_name = matmul_output_name;
     let mut final_input_dtype = matmul_out_dtype;

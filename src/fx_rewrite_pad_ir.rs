@@ -9,29 +9,9 @@
 //!   reflect:   left=slice@(left-i),     right=slice@(size-2-i)
 //! Constant-mode pad is left to the serializer's existing handling.
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_target::is_pad_target;
 use crate::runner_logging::log_line;
-
-fn is_pad(target: &str) -> bool {
-    target.contains("aten.pad.default")
-}
-
-/// Clone the pad node's meta (preserving qparams, as upstream reuses `meta`) with a
-/// new val shape.
-fn meta_with_shape(base: &NodeMeta, shape: &[i64], dtype: &str) -> NodeMeta {
-    let mut m = base.clone();
-    m.set_val(FakeTensorMeta {
-        shape: shape.to_vec(),
-        dtype: dtype.to_string(),
-    });
-    if let Some(iqp) = base.input_qparams.clone() {
-        m.set_input_qparams(iqp);
-    }
-    if let Some(oqp) = base.output_qparams.clone() {
-        m.set_output_qparams(oqp);
-    }
-    m
-}
 
 #[allow(clippy::too_many_arguments)]
 fn add_slice(
@@ -59,7 +39,7 @@ fn add_slice(
             IrArg::Int(idx),
             IrArg::Int(idx + 1),
         ],
-        meta_with_shape(base_meta, &out_shape, dtype),
+        base_meta.cloned_with_val(out_shape, dtype),
     );
     graph.anchor_to(n, id);
     if let Some(p) = *prev {
@@ -143,7 +123,7 @@ fn pad_along_dim(
         format!("{}_cat{}", name_prefix, *counter),
         "aten.cat.default".to_string(),
         vec![IrArg::List(members), IrArg::Int(dim as i64)],
-        meta_with_shape(base_meta, &out_shape, dtype),
+        base_meta.cloned_with_val(out_shape.clone(), dtype),
     );
     *counter += 1;
     graph.anchor_to(cat, id);
@@ -156,7 +136,7 @@ fn pad_along_dim(
 
 fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     let node = &graph.nodes[id];
-    if !is_pad(&node.target) || node.args.len() < 2 {
+    if !is_pad_target(&node.target) || node.args.len() < 2 {
         return false;
     }
     // args: (input, pad_list, mode, value) — mode may be positional OR a kwarg.
@@ -266,15 +246,6 @@ impl IrPass for IrRewritePadPass {
 mod tests {
     use super::*;
 
-    fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
-        let mut meta = NodeMeta::default();
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: dtype.to_string(),
-        });
-        meta
-    }
-
     fn named<'a>(graph: &'a IrGraph, name: &str) -> &'a crate::fx_ir::IrNode {
         graph
             .nodes
@@ -290,7 +261,7 @@ mod tests {
             "x".into(),
             "x".into(),
             vec![],
-            meta(in_shape, "torch.int8"),
+            NodeMeta::tensor(in_shape, "torch.int8"),
         );
         // output shape: last dim grows by pad[0]+pad[1] (single-dim pad)
         let mut out = in_shape.to_vec();
@@ -305,7 +276,7 @@ mod tests {
             "pad".into(),
             "aten.pad.default".into(),
             pad_args,
-            meta(&out, "torch.int8"),
+            NodeMeta::tensor(out.as_slice(), "torch.int8"),
         );
         graph.add_node(
             NodeOp::Output,

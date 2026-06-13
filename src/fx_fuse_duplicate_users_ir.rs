@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId};
 use crate::runner_logging::log_line;
 
 /// Build a signature string for a node based on its target and args.
@@ -39,21 +39,6 @@ fn arg_signature(arg: &IrArg) -> String {
     }
 }
 
-/// Find all alive users of a node (nodes that reference it in their args).
-fn find_users(graph: &IrGraph, producer_id: NodeId) -> Vec<NodeId> {
-    graph
-        .nodes
-        .iter()
-        .filter(|n| n.alive && n.op == NodeOp::CallFunction)
-        .filter(|n| {
-            n.args
-                .iter()
-                .any(|a| matches!(a, IrArg::Node(id) if *id == producer_id))
-        })
-        .map(|n| n.id)
-        .collect()
-}
-
 pub struct IrFuseDuplicateUsersPass;
 
 impl IrPass for IrFuseDuplicateUsersPass {
@@ -71,7 +56,7 @@ impl IrPass for IrFuseDuplicateUsersPass {
                 .collect();
 
             for &producer_id in &ids {
-                let users = find_users(graph, producer_id);
+                let users = graph.live_call_function_users(producer_id);
                 if users.len() < 2 {
                     continue;
                 }

@@ -5,9 +5,7 @@
 //!   2. repeat(unsqueezed, multiples)  — multiples[dim+1] = repeats
 //!   3. view_copy(repeated, final_shape) — final_shape[dim] *= repeats
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeRepeatInterleavePass;
@@ -85,11 +83,9 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
                 unsqueeze_shape.push(1);
             }
 
-            let mut unsqueeze_meta = graph.nodes[id].meta.clone();
-            unsqueeze_meta.set_val(FakeTensorMeta {
-                shape: unsqueeze_shape.clone(),
-                dtype: dtype.clone(),
-            });
+            let unsqueeze_meta = graph.nodes[id]
+                .meta
+                .cloned_with_val(unsqueeze_shape.clone(), &dtype);
             let unsqueezed = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_unsqueeze", node_name),
@@ -107,11 +103,7 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
             let mut repeated_shape = unsqueeze_shape;
             repeated_shape[unsqueeze_dim as usize] = repeats;
 
-            let mut repeat_meta = graph.nodes[id].meta.clone();
-            repeat_meta.set_val(FakeTensorMeta {
-                shape: repeated_shape,
-                dtype: dtype.clone(),
-            });
+            let repeat_meta = graph.nodes[id].meta.cloned_with_val(repeated_shape, &dtype);
             let repeated = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_repeat", node_name),
@@ -125,11 +117,9 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
             let mut final_shape = input_shape;
             final_shape[dim as usize] *= repeats;
 
-            let mut view_meta = graph.nodes[id].meta.clone();
-            view_meta.set_val(FakeTensorMeta {
-                shape: final_shape.clone(),
-                dtype,
-            });
+            let view_meta = graph.nodes[id]
+                .meta
+                .cloned_with_val(final_shape.clone(), dtype);
             let result = graph.add_node(
                 NodeOp::CallFunction,
                 format!("{}_view", node_name),

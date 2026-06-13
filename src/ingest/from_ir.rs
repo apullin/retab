@@ -7,14 +7,14 @@ use std::collections::HashMap;
 
 use smallvec::SmallVec;
 
-use crate::fx_control_flow_metadata::{NodeOp, QParam};
-use crate::fx_ep_effects::{FxEpEffect, FxEpEffectBatch};
-use crate::fx_ir::{IrArg, IrGraph, MetaValue, NodeId as IrNodeId, NodeMeta as IrNodeMeta};
+use crate::fx_control_flow_metadata::NodeOp;
+use crate::fx_ir::{IrArg, IrGraph, MetaValue, NodeId as IrNodeId, NodeMeta as IrNodeMeta, QParam};
 use crate::graph::ir::{
     Arg, DType, Node, NodeId, NodeMeta, OpTarget, OpType, QuantArgs, TensorInfo,
 };
 use crate::graph::Graph;
 use crate::ingest::target_map::parse_op_target;
+use crate::lowering_effects::{LoweringEffect, LoweringEffectBatch};
 use crate::store::TensorStore;
 use crate::tensor_data::parse_torch_dtype;
 
@@ -37,11 +37,10 @@ fn graph_from_ir_ext(
     store: &mut TensorStore,
     preserve_dead_placeholders: bool,
 ) -> Graph {
-    // Node-ids referenced by any alive node. The EP-effect constant folding runs
-    // at flush time on the Python graph and removes now-dead constant/param
-    // placeholders (per-channel scale/zp, pre-fold weights) -- the IrGraph still
-    // carries them. Drop the unreferenced ones here, matching ingest's
-    // dead-placeholder skip, so the converted graph has no dangling inputs.
+    // Node-ids referenced by any alive node. Lowering-effect constant folding removes
+    // now-dead constant/param placeholders (per-channel scale/zp, pre-fold
+    // weights), but the IrGraph may still carry them. Drop unreferenced ones here
+    // so the converted graph has no dangling inputs.
     let mut referenced: std::collections::HashSet<IrNodeId> = std::collections::HashSet::new();
     for n in ir.nodes.iter().filter(|n| n.alive) {
         for a in &n.args {
@@ -57,7 +56,7 @@ fn graph_from_ir_ext(
     // matching ingest, which skips these get_attr nodes and turns their uses into
     // the branch/body name on the COND_IF / WHILE_LOOP op.
     let mut submodule_map: HashMap<IrNodeId, String> = HashMap::new();
-    let cf_dbg = std::env::var("ARM_FROM_IR_DEBUG").is_ok();
+    let cf_dbg = crate::config::from_ir_debug_is_set();
     for n in ir.nodes.iter().filter(|n| n.alive) {
         if cf_dbg && n.name.contains("submodule") {
             eprintln!(
@@ -171,7 +170,7 @@ fn graph_from_ir_ext(
     }
 
     // Fold constant-fed pure reshapes into materialized constants. Ingest does
-    // this via the FuseConstantNode EP-effect; without it the converted graph
+    // this via the FuseConstantNode lowering effect; without it the converted graph
     // keeps a RESHAPE on a constant weight, which TOSA rejects for sub-byte INT4
     // ("could not allocate op RESHAPE input=(INT4 ...)").
     fold_constant_reshapes(&mut graph, store);
@@ -285,24 +284,23 @@ fn fold_constant_reshapes(graph: &mut Graph, store: &mut TensorStore) {
     }
 }
 
-/// Apply the pipeline's accumulated EP-effects to the converted graph + store,
-/// Rust-natively. The IrGraph is captured PRE-effects (the effects are otherwise
-/// applied to the Python EP at flush time); this reproduces them so the graph
-/// matches the final lowered form. Most effects carry their precomputed data, so
-/// no Python computation is needed.
+/// Apply the pipeline's accumulated lowering effects to the converted graph + store.
+/// The IrGraph is captured before those effects are applied; this reproduces
+/// them so the graph matches the final lowered form. Most effects carry their
+/// precomputed data, so no Python computation is needed.
 ///
 /// Handled here: MaterializeConstantNode / MaterializeZeroInputConstantNode
 /// (replace a computed node with its precomputed constant) and
-/// DeleteConstantPlaceholder. The remaining variants (table-op insertion, the
-/// compute-in-Python FuseConstantNode/InsertTableOp) are added incrementally.
-pub fn apply_effects(graph: &mut Graph, store: &mut TensorStore, effects: &FxEpEffectBatch) {
+/// DeleteConstantPlaceholder. Table-op insertion and legacy fused-constant
+/// retargeting are handled incrementally below.
+pub fn apply_effects(graph: &mut Graph, store: &mut TensorStore, effects: &LoweringEffectBatch) {
     apply_effects_ext(graph, store, effects, false);
 }
 
 pub fn apply_effects_preserve_placeholders(
     graph: &mut Graph,
     store: &mut TensorStore,
-    effects: &FxEpEffectBatch,
+    effects: &LoweringEffectBatch,
 ) {
     apply_effects_ext(graph, store, effects, true);
 }
@@ -310,10 +308,10 @@ pub fn apply_effects_preserve_placeholders(
 fn apply_effects_ext(
     graph: &mut Graph,
     store: &mut TensorStore,
-    effects: &FxEpEffectBatch,
+    effects: &LoweringEffectBatch,
     preserve_graph_inputs: bool,
 ) {
-    if effects.effects.is_empty() {
+    if effects.items.is_empty() {
         return;
     }
     let name_map: HashMap<String, NodeId> = graph
@@ -322,9 +320,9 @@ fn apply_effects_ext(
         .filter_map(|&nid| graph.nodes.get(nid).map(|n| (n.name.clone(), nid)))
         .collect();
     let mut applied = false;
-    for effect in &effects.effects {
+    for effect in &effects.items {
         match effect {
-            FxEpEffect::MaterializeConstantNode(e) => {
+            LoweringEffect::MaterializeConstantNode(e) => {
                 applied |= materialize_const(
                     graph,
                     store,
@@ -335,7 +333,7 @@ fn apply_effects_ext(
                     e.dtype,
                 );
             }
-            FxEpEffect::MaterializeZeroInputConstantNode(e) => {
+            LoweringEffect::MaterializeZeroInputConstantNode(e) => {
                 applied |= materialize_const(
                     graph,
                     store,
@@ -346,26 +344,26 @@ fn apply_effects_ext(
                     e.dtype,
                 );
             }
-            FxEpEffect::DeleteConstantPlaceholder(e) => {
+            LoweringEffect::DeleteConstantPlaceholder(e) => {
                 if let Some(&nid) = name_map.get(&e.placeholder_name) {
                     store.buffers.remove(&e.placeholder_name);
                     remove_node(graph, nid);
                     applied = true;
                 }
             }
-            FxEpEffect::InsertPrecomputedTableOp(e) => {
+            LoweringEffect::InsertPrecomputedTableOp(e) => {
                 applied |= apply_precomputed_table(graph, store, &name_map, e);
             }
-            FxEpEffect::FuseConstantNode(e) => {
+            LoweringEffect::FuseConstantNode(e) => {
                 applied |= retarget_to_fused_const(graph, store, &name_map, &e.node_name);
             }
-            FxEpEffect::MaterializeZeroInputConstant(e) => {
+            LoweringEffect::MaterializeZeroInputConstant(e) => {
                 applied |= retarget_to_fused_const(graph, store, &name_map, &e.node_name);
             }
-            FxEpEffect::CastInt64InputToInt32(e) => {
+            LoweringEffect::CastInt64InputToInt32(e) => {
                 applied |= cast_buffer_int64_to_int32(store, &e.placeholder_name);
             }
-            FxEpEffect::InsertTableOp(e) => {
+            LoweringEffect::InsertTableOp(e) => {
                 crate::fold_fallback_log(&format!("InsertTableOp node={}", e.node_name));
             }
         }
@@ -385,7 +383,7 @@ fn apply_precomputed_table(
     graph: &mut Graph,
     store: &mut TensorStore,
     name_map: &HashMap<String, NodeId>,
-    e: &crate::fx_ep_effects::FxInsertPrecomputedTableOpEffect,
+    e: &crate::lowering_effects::InsertPrecomputedTableOpEffect,
 ) -> bool {
     let Some(&nid) = name_map.get(&e.node_name) else {
         return false;
@@ -557,7 +555,7 @@ fn materialize_const(
 /// don't collide with the parent or each other in the shared TensorStore. The
 /// serializer keys a placeholder's constant data by node.name, so names and store
 /// keys must move together. Intra-graph references are by NodeId, so renaming is
-/// safe. Building block for the round-trip Phase 4c converter hierarchy assembly.
+/// safe. Building block for IR-native control-flow hierarchy assembly.
 pub fn prefix_graph(graph: &mut Graph, store: &mut TensorStore, prefix: &str) {
     if prefix.is_empty() {
         return;
@@ -597,8 +595,8 @@ fn prefix_region_arg(arg: &mut Arg, prefix: &str) {
 }
 
 /// Diagnostic (ARM_FOLD_FALLBACK_FILE): report constant placeholder nodes that the
-/// serializer will emit as CONST but whose data is absent from the store -- i.e.
-/// the IR-derived store is missing a constant the Python re-ingest would have had.
+/// serializer will emit as CONST but whose data is absent from the IR-derived
+/// store.
 pub fn report_missing_consts(graph: &Graph, store: &TensorStore) {
     let inputs: std::collections::HashSet<NodeId> = graph.inputs.iter().copied().collect();
     for &nid in &graph.order {
@@ -657,11 +655,10 @@ fn downcast_int64_le_to_int32(data: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// FuseConstantNode / MaterializeZeroInputConstant compute their result in
-/// Python at flush time and materialize it as a `{node}_fused_const` buffer. The
-/// reused ingest store already holds that data, so retarget the node to it (copy
-/// the data under the node's own name) instead of recomputing. (For a future
-/// store-from-IrGraph-only Phase 4, the computation would be ported to Rust.)
+/// FuseConstantNode / MaterializeZeroInputConstant effects may materialize a
+/// `{node}_fused_const` buffer. If the store already holds that data, retarget
+/// the node to it by copying the data under the node's own name instead of
+/// recomputing.
 fn retarget_to_fused_const(
     graph: &mut Graph,
     store: &mut TensorStore,
@@ -746,8 +743,8 @@ fn collect_ir_refs(a: &IrArg, out: &mut std::collections::HashSet<IrNodeId>) {
     }
 }
 
-/// Env-gated structural dump for comparing a converted graph against the
-/// Python-ingested one (ARM_FROM_IR_DEBUG=1).
+/// Env-gated structural dump for inspecting an IR-converted graph
+/// (ARM_FROM_IR_DEBUG=1).
 pub fn debug_dump(graph: &Graph, label: &str) {
     eprintln!(
         "=== {label}: {} nodes inputs={:?} output={:?} ===",
@@ -769,6 +766,160 @@ pub fn debug_dump(graph: &Graph, label: &str) {
                 n.meta.tosa_dim_order,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fx_control_flow_metadata::NodeOp;
+    use crate::fx_ir::{IrArg, IrGraph, NodeMeta as IrNodeMeta};
+    use crate::graph::ir::{
+        Arg, DType, Node, NodeMeta as GraphNodeMeta, OpTarget, OpType, TensorInfo,
+    };
+    use crate::store::TensorData;
+    use smallvec::smallvec;
+
+    fn ir_meta() -> IrNodeMeta {
+        IrNodeMeta::tensor([1], "torch.float32")
+    }
+
+    fn graph_node(
+        name: &str,
+        op: OpType,
+        target: OpTarget,
+        args: smallvec::SmallVec<[Arg; 4]>,
+    ) -> Node {
+        Node {
+            op,
+            target,
+            args,
+            kwargs: Vec::new(),
+            meta: GraphNodeMeta::new(TensorInfo::new(&[1], DType::Int8)),
+            users: smallvec::SmallVec::new(),
+            name: name.to_string(),
+        }
+    }
+
+    fn node_id_by_name(graph: &Graph, name: &str) -> NodeId {
+        graph
+            .node_names
+            .iter()
+            .find_map(|(id, node_name)| (node_name == name).then_some(*id))
+            .unwrap_or_else(|| panic!("missing graph node {name}"))
+    }
+
+    fn order_position(graph: &Graph, name: &str) -> usize {
+        let id = node_id_by_name(graph, name);
+        graph
+            .order
+            .iter()
+            .position(|ordered| *ordered == id)
+            .unwrap_or_else(|| panic!("missing graph order entry for {name}"))
+    }
+
+    #[test]
+    fn prefix_graph_moves_node_names_and_store_keys_together() {
+        let mut graph = Graph::new();
+        let weight = graph.nodes.insert(graph_node(
+            "weight",
+            OpType::Placeholder,
+            OpTarget::Other("weight".to_string()),
+            smallvec![],
+        ));
+        let consumer = graph.nodes.insert(graph_node(
+            "consumer",
+            OpType::CallFunction,
+            OpTarget::Other("backend.tosa.COND_IF.default".to_string()),
+            smallvec![
+                Arg::Node(weight),
+                Arg::String("nested_region".to_string()),
+                Arg::String("already::qualified".to_string())
+            ],
+        ));
+        graph.order.extend([weight, consumer]);
+        graph.node_names.extend([
+            (weight, "weight".to_string()),
+            (consumer, "consumer".to_string()),
+        ]);
+
+        let mut store = TensorStore::new();
+        store.insert(
+            "weight".to_string(),
+            TensorData {
+                data: vec![7],
+                shape: vec![1],
+                dtype: DType::Int8,
+            },
+        );
+
+        prefix_graph(&mut graph, &mut store, "then_branch::");
+
+        assert!(store.get("weight").is_none());
+        assert!(store.get("then_branch::weight").is_some());
+        assert_eq!(graph.nodes[weight].name, "then_branch::weight");
+        assert_eq!(graph.nodes[consumer].name, "then_branch::consumer");
+        assert!(graph
+            .node_names
+            .iter()
+            .any(|(_, name)| name == "then_branch::weight"));
+        assert!(graph
+            .node_names
+            .iter()
+            .any(|(_, name)| name == "then_branch::consumer"));
+        assert_eq!(
+            graph.nodes[consumer].args[1],
+            Arg::String("then_branch::nested_region".to_string())
+        );
+        assert_eq!(
+            graph.nodes[consumer].args[2],
+            Arg::String("already::qualified".to_string())
+        );
+    }
+
+    #[test]
+    fn graph_from_ir_orders_inserted_nodes_before_rewired_users() {
+        let mut ir = IrGraph::empty();
+        let input = ir.add_node(
+            NodeOp::Placeholder,
+            "x".to_string(),
+            "x".to_string(),
+            vec![],
+            ir_meta(),
+        );
+        let user = ir.add_node(
+            NodeOp::CallFunction,
+            "user".to_string(),
+            "aten.add.Tensor".to_string(),
+            vec![IrArg::Node(input), IrArg::Node(input)],
+            ir_meta(),
+        );
+        let rescale = ir.add_node(
+            NodeOp::CallFunction,
+            "late_rescale".to_string(),
+            "backend.tosa.RESCALE.default".to_string(),
+            vec![IrArg::Node(input)],
+            ir_meta(),
+        );
+        ir.set_args(user, vec![IrArg::Node(rescale), IrArg::Node(input)]);
+        ir.add_node(
+            NodeOp::Output,
+            "output".to_string(),
+            "output".to_string(),
+            vec![IrArg::Node(user)],
+            ir_meta(),
+        );
+
+        let mut store = TensorStore::new();
+        let graph = graph_from_ir(&ir, &mut store);
+
+        assert!(order_position(&graph, "x") < order_position(&graph, "late_rescale"));
+        assert!(order_position(&graph, "late_rescale") < order_position(&graph, "user"));
+        assert!(order_position(&graph, "user") < order_position(&graph, "output"));
+
+        let rescale_id = node_id_by_name(&graph, "late_rescale");
+        let user_id = node_id_by_name(&graph, "user");
+        assert!(graph.nodes[rescale_id].users.contains(&user_id));
     }
 }
 

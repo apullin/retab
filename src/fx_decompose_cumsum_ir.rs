@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam};
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeCumsumPass;
@@ -94,7 +94,7 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
     let weight_shape = vec![1_i64, 1, cumsum_dim, 1];
 
     // 1. view_copy(input, conv_shape) — reshape to 4D
-    let view1_meta = make_meta(&conv_shape, &input_dtype);
+    let view1_meta = NodeMeta::tensor(conv_shape.as_slice(), &input_dtype);
     let view1_id = graph.add_node(
         NodeOp::CallFunction,
         format!("{}_view_pre", node_name),
@@ -108,7 +108,7 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
     graph.anchor_to(view1_id, node_id);
 
     // 2. full(weight_shape, 1.0) — all-ones convolution kernel
-    let weight_meta = make_meta(&weight_shape, &input_dtype);
+    let weight_meta = NodeMeta::tensor(weight_shape.as_slice(), &input_dtype);
     let weight_id = graph.add_node(
         NodeOp::CallFunction,
         format!("{}_weight", node_name),
@@ -126,7 +126,7 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
     //    Output shape: [pre, 1, cumsum_dim + (cumsum_dim-1), post] = [pre, 1, 2*cumsum_dim-1, post]
     let conv_out_h = cumsum_dim + (cumsum_dim - 1); // padded dim
     let conv_out_shape = vec![pre_cumsum_dim, 1, conv_out_h, post_cumsum_dim];
-    let mut conv_meta = make_meta(&conv_out_shape, &input_dtype);
+    let mut conv_meta = NodeMeta::tensor(conv_out_shape.as_slice(), &input_dtype);
 
     // Quantization fixup: propagate input qparams, add weight qparam at index 1
     if let Some(ref orig_iqp) = node_meta.input_qparams {
@@ -176,7 +176,7 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
 
     // 4. slice_copy(conv, dim=2, start=0, end=cumsum_dim) — trim padding
     let slice_shape = vec![pre_cumsum_dim, 1, cumsum_dim, post_cumsum_dim];
-    let slice_meta = make_meta(&slice_shape, &input_dtype);
+    let slice_meta = NodeMeta::tensor(slice_shape.as_slice(), &input_dtype);
     let slice_id = graph.add_node(
         NodeOp::CallFunction,
         format!("{}_slice", node_name),
@@ -192,11 +192,7 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
     graph.anchor_to(slice_id, node_id);
 
     // 5. view_copy(slice, original_shape) — reshape back
-    let mut view2_meta = node_meta;
-    view2_meta.set_val(FakeTensorMeta {
-        shape: original_shape.clone(),
-        dtype: input_dtype,
-    });
+    let view2_meta = node_meta.cloned_with_val(original_shape.clone(), input_dtype);
     let view2_id = graph.add_node(
         NodeOp::CallFunction,
         format!("{}_view_post", node_name),
@@ -210,14 +206,4 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
 
     graph.replace_and_erase(node_id, view2_id);
     true
-}
-
-/// Build a minimal NodeMeta with shape and dtype set.
-fn make_meta(shape: &[i64], dtype: &str) -> NodeMeta {
-    let mut meta = NodeMeta::default();
-    meta.set_val(FakeTensorMeta {
-        shape: shape.to_vec(),
-        dtype: dtype.to_string(),
-    });
-    meta
 }

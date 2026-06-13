@@ -57,18 +57,14 @@ impl IrPass for IrDecorateFpToIntCastPass {
                 &scalar_shape,
                 0.0,
                 "torch.float32",
-                x_meta
-                    .cloned_with_val(scalar_shape.clone(), "torch.float32")
-                    .without_qparams(),
+                x_meta.cloned_without_qparams(scalar_shape.clone(), "torch.float32"),
             );
             let is_non_negative = graph.add_anchored_call_function(
                 id,
                 format!("{}_trunc_ge", name),
                 "aten.ge.Tensor".to_string(),
                 vec![IrArg::Node(x_id), IrArg::Node(zero)],
-                x_meta
-                    .cloned_with_val(input_shape.clone(), "torch.bool")
-                    .without_qparams(),
+                x_meta.cloned_without_qparams(input_shape.clone(), "torch.bool"),
             );
             let floor_x = graph.add_anchored_call_function(
                 id,

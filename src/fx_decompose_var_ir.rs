@@ -2,27 +2,12 @@
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{
+    i64_list_arg as i64_list, normalized_reduction_dims, reduced_shape, IrArg, IrGraph, IrPass,
+    NodeId, NodeOp,
+};
+use crate::fx_target::{is_var_dim_target, is_var_target};
 use crate::runner_logging::log_line;
-
-fn is_var(target: &str) -> bool {
-    target.contains("var.correction")
-        || target.contains("var_correction")
-        || target.contains("var.dim")
-        || target.contains("var_dim")
-}
-
-fn list_i64(arg: Option<&IrArg>) -> Option<Vec<i64>> {
-    match arg {
-        Some(IrArg::List(items)) => {
-            let dims: Vec<i64> = items.iter().filter_map(IrArg::as_int).collect();
-            Some(dims)
-        }
-        Some(IrArg::Int(dim)) => Some(vec![*dim]),
-        Some(IrArg::None) | None => None,
-        _ => None,
-    }
-}
 
 fn bool_arg(arg: Option<&IrArg>, default: bool) -> bool {
     arg.and_then(IrArg::as_bool).unwrap_or(default)
@@ -40,47 +25,6 @@ fn kw_int(kwargs: &HashMap<String, IrArg>, key: &str, default: i64) -> i64 {
     kwargs.get(key).and_then(IrArg::as_int).unwrap_or(default)
 }
 
-fn normalize_dims(dims: Option<Vec<i64>>, rank: usize) -> Vec<i64> {
-    let rank_i64 = rank as i64;
-    let mut dims = dims.unwrap_or_else(|| (0..rank_i64).collect());
-    for dim in &mut dims {
-        if *dim < 0 {
-            *dim += rank_i64;
-        }
-    }
-    dims.sort_unstable();
-    dims.dedup();
-    dims.into_iter()
-        .filter(|&dim| dim >= 0 && (dim as usize) < rank)
-        .collect()
-}
-
-fn reduced_shape(input_shape: &[i64], dims: &[i64], keepdim: bool) -> Vec<i64> {
-    if keepdim {
-        let mut shape = input_shape.to_vec();
-        for &dim in dims {
-            shape[dim as usize] = 1;
-        }
-        return shape;
-    }
-
-    let mut shape: Vec<i64> = input_shape
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, &extent)| {
-            if dims.contains(&(idx as i64)) {
-                None
-            } else {
-                Some(extent)
-            }
-        })
-        .collect();
-    if shape.is_empty() {
-        shape.push(1);
-    }
-    shape
-}
-
 pub struct IrDecomposeVarPass;
 
 impl IrPass for IrDecomposeVarPass {
@@ -95,7 +39,7 @@ impl IrPass for IrDecomposeVarPass {
         for id in ids {
             if !graph.nodes[id].alive
                 || graph.nodes[id].op != NodeOp::CallFunction
-                || !is_var(&graph.nodes[id].target)
+                || !is_var_target(&graph.nodes[id].target)
             {
                 continue;
             }
@@ -120,7 +64,6 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(shape) => shape.to_vec(),
         None => return false,
     };
-    let rank = input_shape.len();
     let dtype = graph.nodes[x_id]
         .meta
         .val_dtype()
@@ -130,13 +73,13 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
     let name = graph.nodes[id].name.clone();
     let base_meta = graph.nodes[id].meta.clone();
 
-    let dims = normalize_dims(list_i64(graph.nodes[id].args.get(1)), rank);
+    let dims = normalized_reduction_dims(graph.nodes[id].args.get(1), &input_shape, false);
     if dims.is_empty() {
         graph.replace_and_erase(id, x_id);
         return true;
     }
 
-    let (keepdim, correction) = if target.contains("var.dim") {
+    let (keepdim, correction) = if is_var_dim_target(&target) {
         (
             bool_arg(graph.nodes[id].args.get(3), false),
             int_arg(graph.nodes[id].args.get(2), 1),

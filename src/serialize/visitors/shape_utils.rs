@@ -115,12 +115,7 @@ pub(super) fn first_input_node<'a>(graph: &'a Graph, node: &Node) -> Option<&'a 
 }
 
 pub(super) fn transpose_perms(node: &Node) -> Vec<i32> {
-    let perms = arg_i32_list(node, 1);
-    if perms.is_empty() {
-        kwarg_i32_list(node, "perms")
-    } else {
-        perms
-    }
+    arg_or_kwarg_i32_list(node, 1, "perms")
 }
 
 fn is_layout_passthrough_qdq(node: &Node) -> bool {
@@ -150,16 +145,7 @@ fn passthrough_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> 
         return Some(input_shape);
     }
 
-    let raw_shape = raw_i32_shape(node);
-    // Pass-through q/dq/rescale chains often inherit an already-TOSA-ordered
-    // shape from an upstream pass-through node. Only apply this node's own
-    // dim-order when the inherited shape still matches the node's raw logical
-    // shape; otherwise we would reorder the same tensor multiple times.
-    if input_shape == raw_shape {
-        Some(apply_tosa_dim_order(node, input_shape))
-    } else {
-        Some(input_shape)
-    }
+    Some(input_shape)
 }
 
 fn is_shape_preserving_unary(node: &Node) -> bool {
@@ -385,7 +371,13 @@ fn table_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option
     Some(actual_tensor_shape(graph, store, input_node))
 }
 
-fn pool_post_pad(input_size: i32, kernel_size: i32, stride: i32, pad: i32, ceil_mode: bool) -> i32 {
+pub(super) fn pool_post_pad(
+    input_size: i32,
+    kernel_size: i32,
+    stride: i32,
+    pad: i32,
+    ceil_mode: bool,
+) -> i32 {
     let numer = input_size - kernel_size + 2 * pad;
     let output_size = if ceil_mode {
         ((numer + stride - 1) / stride) + 1
@@ -395,7 +387,7 @@ fn pool_post_pad(input_size: i32, kernel_size: i32, stride: i32, pad: i32, ceil_
     ((output_size - 1) * stride - input_size + kernel_size - pad).max(0)
 }
 
-fn symmetric_pool_pad(padding: &[i32]) -> Vec<i32> {
+pub(super) fn symmetric_pool_pad(padding: &[i32]) -> Vec<i32> {
     if padding.len() >= 2 {
         vec![padding[0], padding[0], padding[1], padding[1]]
     } else if padding.len() == 1 {
@@ -453,40 +445,9 @@ fn pool_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<
         return None;
     }
 
-    let kernel = {
-        let kw = kwarg_i32_list(node, "kernel");
-        let raw = if kw.is_empty() {
-            arg_i32_list(node, 1)
-        } else {
-            kw
-        };
-        if raw.is_empty() {
-            vec![2, 2]
-        } else {
-            raw
-        }
-    };
-    let stride = {
-        let kw = kwarg_i32_list(node, "stride");
-        let raw = if kw.is_empty() {
-            arg_i32_list(node, 2)
-        } else {
-            kw
-        };
-        if raw.is_empty() {
-            kernel.clone()
-        } else {
-            raw
-        }
-    };
-    let raw_padding = {
-        let kw = kwarg_i32_list(node, "pad");
-        if kw.is_empty() {
-            arg_i32_list(node, 3)
-        } else {
-            kw
-        }
-    };
+    let kernel = i32_list_or(kwarg_or_arg_i32_list(node, "kernel", 1), vec![2, 2]);
+    let stride = i32_list_or(kwarg_or_arg_i32_list(node, "stride", 2), kernel.clone());
+    let raw_padding = kwarg_or_arg_i32_list(node, "pad", 3);
     let pad = if is_max_pool {
         let ceil_mode = kwarg_bool(node, "ceil_mode", arg_bool(node, 5, false));
         max_pool_pad(&input_shape, &kernel, &stride, &raw_padding, ceil_mode)
@@ -737,19 +698,6 @@ pub(super) fn make_actual_output_tensor(
     )
 }
 
-pub(super) fn make_bool_output_tensor(
-    graph: &Graph,
-    store: &TensorStore,
-    node: &Node,
-) -> TosaTensor {
-    make_empty_tensor_for_node(
-        node,
-        node.name.clone(),
-        actual_tensor_shape(graph, store, node),
-        DType::Bool,
-    )
-}
-
 pub(super) fn push_reshape_with_shape(
     result: &mut EmitResult,
     input_name: String,
@@ -790,30 +738,13 @@ pub(super) fn push_reshape_with_shape_for_node(
     let output_tensor = node
         .map(|node| make_empty_tensor_for_node(node, output_name.clone(), out_shape.clone(), dtype))
         .unwrap_or_else(|| make_empty_tensor(output_name.clone(), out_shape.clone(), dtype));
-    result.tensors.push(output_tensor);
-
-    let rank = out_shape.len() as u32;
-    let shape_data: Vec<u8> = out_shape
-        .iter()
-        .flat_map(|&d| (d as i64).to_le_bytes())
-        .collect();
-    result.shapes.push(TosaShape {
-        name: shape_name.clone(),
-        rank,
-        data: shape_data,
-    });
-    result.operators.push(TosaOperator::new(
-        Op::ConstShape,
-        Attribute::ConstShape(ConstShapeAttribute {}),
-        vec![],
-        vec![shape_name.clone()],
-    ));
-    result.operators.push(TosaOperator::new(
+    push_const_shape(result, shape_name.clone(), out_shape);
+    result.push_output_op(
+        output_tensor,
         Op::Reshape,
         Attribute::Reshape(ReshapeAttribute {}),
         vec![input_name, shape_name],
-        vec![output_name],
-    ));
+    );
 }
 
 #[cfg(test)]

@@ -1,93 +1,31 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use crate::fx_constant_tensor_eval::plan_shape_only_tensor as shared_plan_shape_only_tensor;
-use crate::fx_ep_effects::{
-    FxEpEffect, FxEpEffectBatch, FxEpInputKind, FxMaterializeConstantNodeEffect,
+use crate::fx_constant_tensor_eval::{
+    constant_input_seeds, first_constant_input_tensor, node_inputs_are_constant,
+    plan_shape_only_tensor as shared_plan_shape_only_tensor,
 };
-use crate::fx_ir::{IrArg, IrEpPass, IrEpPassResult, IrGraph, IrNode, NodeOp, TensorSource};
+use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, NodeOp};
+use crate::fx_target::is_shape_only_constant_target;
+use crate::lowering_effects::{LoweringEffect, LoweringEffectBatch, MaterializeConstantNodeEffect};
 use crate::store::TensorData;
 
-pub struct IrFuseShapeOnlyConstantsEpPass;
-
-fn arg_nodes_are_constant(arg: &IrArg, constant_nodes: &HashSet<usize>) -> bool {
-    match arg {
-        IrArg::Node(node_id) => constant_nodes.contains(node_id),
-        IrArg::List(values) => values
-            .iter()
-            .all(|value| arg_nodes_are_constant(value, constant_nodes)),
-        _ => true,
-    }
-}
-
-fn placeholder_is_constant_input(node: &IrNode) -> bool {
-    if !node.alive || node.op != NodeOp::Placeholder {
-        return false;
-    }
-    matches!(
-        node.tensor.as_ref().map(|tensor| &tensor.source),
-        Some(TensorSource::ExportedProgramInput(binding))
-            if matches!(
-                binding.input_kind,
-                FxEpInputKind::Parameter
-                    | FxEpInputKind::Buffer
-                    | FxEpInputKind::LiftedTensorConstant
-            )
-    )
-}
-
-fn is_shape_only_constant_target(target: &str) -> bool {
-    target.contains("aten.reshape.default")
-        || target.contains("aten.view_copy.default")
-        || target.contains("aten.unsqueeze_copy.default")
-        || target.contains("aten.permute_copy.default")
-}
-
-fn node_inputs_are_constant(node: &IrNode, constant_nodes: &HashSet<usize>) -> bool {
-    node.args
-        .iter()
-        .all(|arg| arg_nodes_are_constant(arg, constant_nodes))
-        && node
-            .kwargs
-            .values()
-            .all(|arg| arg_nodes_are_constant(arg, constant_nodes))
-}
-
-fn first_constant_tensor<'a>(
-    node: &IrNode,
-    constant_tensors: &'a HashMap<usize, TensorData>,
-) -> Option<&'a TensorData> {
-    node.args.iter().find_map(|arg| match arg {
-        IrArg::Node(node_id) => constant_tensors.get(node_id),
-        _ => None,
-    })
-}
+pub struct IrFuseShapeOnlyConstantsEffectPass;
 
 fn plan_shape_only_tensor(
     node: &IrNode,
     constant_tensors: &HashMap<usize, TensorData>,
 ) -> Option<TensorData> {
-    first_constant_tensor(node, constant_tensors)
+    first_constant_input_tensor(node, constant_tensors)
         .and_then(|input| shared_plan_shape_only_tensor(node, input))
 }
 
-impl IrEpPass for IrFuseShapeOnlyConstantsEpPass {
+impl EffectfulIrPass for IrFuseShapeOnlyConstantsEffectPass {
     fn name(&self) -> &str {
         "IrFuseShapeOnlyConstantsEp"
     }
 
-    fn run(&self, graph: &mut IrGraph) -> IrEpPassResult {
-        let mut constant_nodes: HashSet<usize> = graph
-            .nodes
-            .iter()
-            .filter(|node| placeholder_is_constant_input(node))
-            .map(|node| node.id)
-            .collect();
-        let mut constant_tensors: HashMap<usize, TensorData> = graph
-            .nodes
-            .iter()
-            .filter(|node| placeholder_is_constant_input(node))
-            .filter_map(|node| Some((node.id, node.tensor.as_ref()?.data.clone())))
-            .collect();
+    fn run(&self, graph: &mut IrGraph) -> EffectfulIrPassResult {
+        let (mut constant_nodes, mut constant_tensors) = constant_input_seeds(graph);
 
         let mut effects = Vec::new();
         for node in &graph.nodes {
@@ -106,8 +44,8 @@ impl IrEpPass for IrFuseShapeOnlyConstantsEpPass {
             };
             constant_nodes.insert(node.id);
             constant_tensors.insert(node.id, tensor.clone());
-            effects.push(FxEpEffect::MaterializeConstantNode(
-                FxMaterializeConstantNodeEffect {
+            effects.push(LoweringEffect::MaterializeConstantNode(
+                MaterializeConstantNodeEffect {
                     node_name: node.name.clone(),
                     data: tensor.data,
                     shape: tensor.shape,
@@ -118,17 +56,20 @@ impl IrEpPass for IrFuseShapeOnlyConstantsEpPass {
         }
 
         let modified = !effects.is_empty();
-        IrEpPassResult {
+        EffectfulIrPassResult {
             modified,
-            effects: FxEpEffectBatch { effects },
+            effects: LoweringEffectBatch { items: effects },
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::fx_ir::{IrGraph, NodeMeta, NodeTensor, PlaceholderTensorBinding};
+    use crate::fx_ir::{
+        IrArg, IrGraph, NodeMeta, NodeTensor, PlaceholderTensorBinding, TensorSource,
+    };
     use crate::graph::ir::DType;
+    use crate::lowering_effects::LoweringInputKind;
 
     use super::*;
 
@@ -142,7 +83,7 @@ mod tests {
         );
         graph.node_mut(node_id).tensor = Some(NodeTensor {
             source: TensorSource::ExportedProgramInput(PlaceholderTensorBinding {
-                input_kind: FxEpInputKind::Buffer,
+                input_kind: LoweringInputKind::Buffer,
                 target_name: format!("state.{name}"),
             }),
             data,
@@ -193,17 +134,17 @@ mod tests {
             NodeMeta::default(),
         );
 
-        let pass = IrFuseShapeOnlyConstantsEpPass;
+        let pass = IrFuseShapeOnlyConstantsEffectPass;
         let result = pass.run(&mut graph);
 
         assert!(result.modified);
-        assert_eq!(result.effects.effects.len(), 3);
+        assert_eq!(result.effects.items.len(), 3);
         let effects = result
             .effects
-            .effects
+            .items
             .iter()
             .map(|effect| match effect {
-                FxEpEffect::MaterializeConstantNode(effect) => effect.clone(),
+                LoweringEffect::MaterializeConstantNode(effect) => effect.clone(),
                 _ => panic!("unexpected effect kind"),
             })
             .collect::<Vec<_>>();
@@ -269,10 +210,10 @@ mod tests {
             NodeMeta::default(),
         );
 
-        let pass = IrFuseShapeOnlyConstantsEpPass;
+        let pass = IrFuseShapeOnlyConstantsEffectPass;
         let result = pass.run(&mut graph);
 
         assert!(!result.modified);
-        assert!(result.effects.effects.is_empty());
+        assert!(result.effects.items.is_empty());
     }
 }

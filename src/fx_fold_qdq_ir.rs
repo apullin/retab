@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use crate::fx_ir::{IrArg, IrGraph, IrNode, IrPass, MetaValue, NodeId, NodeMeta, NodeOp, QParam};
+use crate::fx_target::{classify_ir_target, IrTargetKind};
 use crate::graph::ir::DType;
 use crate::store::TensorData;
 
@@ -36,18 +37,6 @@ pub(crate) fn target_matches_any(target: &str, markers: &[&str]) -> bool {
     markers.iter().any(|marker| target.contains(marker))
 }
 
-pub(crate) fn is_quantize_target(target: &str) -> bool {
-    target_matches_any(target, &["quantize_per_tensor", "quantize_per_channel"])
-}
-
-pub(crate) fn is_dequantize_target(target: &str) -> bool {
-    target_matches_any(target, &["dequantize_per_tensor", "dequantize_per_channel"])
-}
-
-pub(crate) fn is_q_or_dq_target(target: &str) -> bool {
-    is_quantize_target(target) || is_dequantize_target(target)
-}
-
 pub(crate) fn is_constant_op_target(target: &str) -> bool {
     target_matches_any(
         target,
@@ -68,7 +57,7 @@ pub(crate) fn has_arm_quantized_annotation(meta: &NodeMeta) -> bool {
 
 pub(crate) fn is_foldable_node(node: &IrNode) -> bool {
     node.op == NodeOp::CallFunction
-        && !is_q_or_dq_target(&node.target)
+        && !node.is_q_or_dq()
         && (is_constant_op_target(&node.target) || has_arm_quantized_annotation(&node.meta))
 }
 
@@ -138,7 +127,7 @@ fn resolve_input_qparam_for_arg(
     match arg {
         IrArg::Node(id) => {
             let qparam = resolve_qparam_from_arg(graph, arg)?;
-            let dq_node_ids = if is_dequantize_target(&graph.node(*id).target) {
+            let dq_node_ids = if graph.node(*id).is_dequantize_any() {
                 vec![*id]
             } else {
                 Vec::new()
@@ -158,7 +147,7 @@ fn resolve_input_qparam_for_arg(
                     return None;
                 };
                 let item_node = graph.node(*id);
-                if !is_dequantize_target(&item_node.target) {
+                if !item_node.is_dequantize_any() {
                     continue;
                 }
                 if let Some(resolved) = resolve_qparam_from_q_or_dq(graph, item_node) {
@@ -185,11 +174,21 @@ pub(crate) fn resolve_qparam_from_q_or_dq_args<'a, F>(
 where
     F: FnMut(usize) -> Option<&'a TensorData>,
 {
-    if !is_q_or_dq_target(target) {
+    let target_kind = classify_ir_target(target);
+    if !matches!(
+        target_kind,
+        IrTargetKind::QuantizePerTensor
+            | IrTargetKind::QuantizePerChannel
+            | IrTargetKind::DequantizePerTensor
+            | IrTargetKind::DequantizePerChannel
+    ) {
         return None;
     }
 
-    if target.contains("per_channel") {
+    if matches!(
+        target_kind,
+        IrTargetKind::QuantizePerChannel | IrTargetKind::DequantizePerChannel
+    ) {
         resolve_per_channel_qparam(args, tensor_lookup)
     } else {
         resolve_per_tensor_qparam(args, tensor_lookup)
@@ -412,7 +411,7 @@ impl IrPass for IrFoldQdqPass {
                             .into_iter()
                             .filter_map(|user_id| {
                                 let user = graph.node(user_id);
-                                if !user.alive || !is_quantize_target(&user.target) {
+                                if !user.alive || !user.is_quantize_any() {
                                     return None;
                                 }
                                 resolve_qparam_from_q_or_dq(graph, user)
@@ -431,7 +430,7 @@ impl IrPass for IrFoldQdqPass {
 
                 for arg_id in resolved_input.dq_node_ids {
                     let arg_node = graph.node(arg_id).clone();
-                    if !arg_node.alive || !is_dequantize_target(&arg_node.target) {
+                    if !arg_node.alive || !arg_node.is_dequantize_any() {
                         continue;
                     }
                     let Some(IrArg::Node(source_id)) = arg_node.args.first() else {
@@ -470,7 +469,7 @@ impl IrPass for IrFoldQdqPass {
             let mut output_qparams = HashMap::new();
             for (idx, user_id) in snapshot_users.into_iter().enumerate() {
                 let user = graph.node(user_id).clone();
-                if !user.alive || !is_quantize_target(&user.target) {
+                if !user.alive || !user.is_quantize_any() {
                     continue;
                 }
                 let Some(resolved) = resolve_qparam_from_q_or_dq(graph, &user) else {
@@ -547,9 +546,6 @@ mod tests {
             meta,
             tensor: None,
             alive: true,
-            args_dirty: false,
-            args_rebuild_required: false,
-            meta_copy_source: None,
         };
         assert!(is_foldable_node(&annotated));
 

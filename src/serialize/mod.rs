@@ -1,7 +1,6 @@
 pub mod tosa_generated;
 pub mod visitors;
 
-use crate::fx_graph::FxGraphModule;
 use crate::graph::ir::{Arg, Node, OpTarget, OpType};
 use crate::graph::Graph;
 use crate::store::{TensorData, TensorStore};
@@ -789,7 +788,7 @@ fn collect_serialized_graph_items(
     store: &TensorStore,
     normalize_outputs: bool,
 ) -> SerializedGraphItems {
-    let debug = FxGraphModule::debug();
+    let debug = crate::fx_graph::debug();
     // Use insertion order directly instead of topological sort.
     //
     // The FX graph is topologically ordered by construction (Python FX enforces
@@ -966,19 +965,19 @@ fn build_fb_region<'fbb>(
 
     // Build the flatbuffer bottom-up
     // Pre-serialize all sub-tables
-    if FxGraphModule::debug() {
+    if crate::fx_graph::debug() {
         eprintln!("[Serialize] building fb tensors...");
     }
     let fb_tensors = build_fb_tensors(builder, &serialized.tensors);
-    if FxGraphModule::debug() {
+    if crate::fx_graph::debug() {
         eprintln!("[Serialize] building fb shapes...");
     }
     let fb_shapes = build_fb_shapes(builder, &serialized.shapes);
-    if FxGraphModule::debug() {
+    if crate::fx_graph::debug() {
         eprintln!("[Serialize] building fb operators...");
     }
     let fb_operators = build_fb_operators(builder, &serialized.operators);
-    if FxGraphModule::debug() {
+    if crate::fx_graph::debug() {
         eprintln!("[Serialize] assembling graph...");
     }
 
@@ -1083,7 +1082,7 @@ pub fn serialize_graphs_to_tosa_py(
     let estimated = tensor_bytes + node_count * 512 + 1024 * 1024;
     visitors::shape_utils::clear_shape_cache();
     visitors::dtype_quant::clear_dtype_cache();
-    if FxGraphModule::debug() {
+    if crate::fx_graph::debug() {
         eprintln!(
             "[Serialize] pre-allocating {}MB for {} tensors, {} nodes",
             estimated / (1024 * 1024),

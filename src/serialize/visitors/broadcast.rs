@@ -125,50 +125,24 @@ pub(super) fn maybe_materialize_binary_broadcast(
             padded_shape,
             broadcast_dtype,
         );
-        result.tensors.push(TosaTensor::new(
-            &broadcast_name,
-            target_shape,
-            broadcast_dtype,
-        ));
-        result.operators.push(TosaOperator::new(
+        result.push_output_op(
+            TosaTensor::new(&broadcast_name, target_shape, broadcast_dtype),
             Op::Transpose,
             Attribute::Transpose(TransposeAttribute { perms }),
             vec![pre_name],
-            vec![broadcast_name.clone()],
-        ));
+        );
         input_names[smaller_idx] = broadcast_name;
         return;
     }
 
     let shape_name = format!("{}_shape", broadcast_name);
-    let rank = target_shape.len() as u32;
-    let shape_data: Vec<u8> = target_shape
-        .iter()
-        .flat_map(|&d| (d as i64).to_le_bytes())
-        .collect();
-
-    result.tensors.push(TosaTensor::new(
-        &broadcast_name,
-        target_shape,
-        broadcast_dtype,
-    ));
-    result.shapes.push(TosaShape {
-        name: shape_name.clone(),
-        rank,
-        data: shape_data,
-    });
-    result.operators.push(TosaOperator::new(
-        Op::ConstShape,
-        Attribute::ConstShape(ConstShapeAttribute {}),
-        vec![],
-        vec![shape_name.clone()],
-    ));
-    result.operators.push(TosaOperator::new(
+    push_const_shape(result, shape_name.clone(), target_shape.clone());
+    result.push_output_op(
+        TosaTensor::new(&broadcast_name, target_shape.clone(), broadcast_dtype),
         Op::Reshape,
         Attribute::Reshape(ReshapeAttribute {}),
         vec![input_names[smaller_idx].clone(), shape_name],
-        vec![broadcast_name.clone()],
-    ));
+    );
     input_names[smaller_idx] = broadcast_name;
 }
 

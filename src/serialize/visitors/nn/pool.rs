@@ -48,16 +48,8 @@ impl ParsedPoolSpec {
             ),
         };
 
-        let kernel = if raw_kernel.is_empty() {
-            vec![2, 2]
-        } else {
-            raw_kernel
-        };
-        let stride = if raw_stride.is_empty() {
-            kernel.clone()
-        } else {
-            raw_stride
-        };
+        let kernel = i32_list_or(raw_kernel, vec![2, 2]);
+        let stride = i32_list_or(raw_stride, kernel.clone());
         let pad = adjusted_max_pool_pad(
             graph,
             store,
@@ -77,22 +69,6 @@ impl ParsedPoolSpec {
     }
 }
 
-fn adjusted_pool_post_pad(
-    input_size: i32,
-    kernel_size: i32,
-    stride: i32,
-    pad: i32,
-    ceil_mode: bool,
-) -> i32 {
-    let numer = input_size - kernel_size + 2 * pad;
-    let output_size = if ceil_mode {
-        ((numer + stride - 1) / stride) + 1
-    } else {
-        (numer / stride) + 1
-    };
-    ((output_size - 1) * stride - input_size + kernel_size - pad).max(0)
-}
-
 fn adjusted_max_pool_pad(
     graph: &Graph,
     store: &TensorStore,
@@ -106,55 +82,34 @@ fn adjusted_max_pool_pad(
         return padding.to_vec();
     }
 
-    let symmetric_pad = if padding.len() >= 2 {
-        vec![padding[0], padding[1]]
-    } else if padding.len() == 1 {
-        vec![padding[0], padding[0]]
-    } else {
-        vec![0, 0]
-    };
+    let symmetric_pad = symmetric_pool_pad(padding);
 
     let Some(Arg::Node(input_id)) = node.args.first() else {
-        return vec![
-            symmetric_pad[0],
-            symmetric_pad[0],
-            symmetric_pad[1],
-            symmetric_pad[1],
-        ];
+        return symmetric_pad;
     };
     let Some(input_node) = graph.node(*input_id) else {
-        return vec![
-            symmetric_pad[0],
-            symmetric_pad[0],
-            symmetric_pad[1],
-            symmetric_pad[1],
-        ];
+        return symmetric_pad;
     };
     let input_shape = actual_tensor_shape(graph, store, input_node);
     if input_shape.len() != 4 {
-        return vec![
-            symmetric_pad[0],
-            symmetric_pad[0],
-            symmetric_pad[1],
-            symmetric_pad[1],
-        ];
+        return symmetric_pad;
     }
 
-    let post_pad_h = adjusted_pool_post_pad(
+    let post_pad_h = pool_post_pad(
         input_shape[1],
         *kernel.first().unwrap_or(&2),
         *stride.first().unwrap_or(&2),
         symmetric_pad[0],
         ceil_mode,
     );
-    let post_pad_w = adjusted_pool_post_pad(
+    let post_pad_w = pool_post_pad(
         input_shape[2],
         *kernel.get(1).unwrap_or(&2),
         *stride.get(1).unwrap_or(&2),
-        symmetric_pad[1],
+        symmetric_pad[2],
         ceil_mode,
     );
-    vec![symmetric_pad[0], post_pad_h, symmetric_pad[1], post_pad_w]
+    vec![symmetric_pad[0], post_pad_h, symmetric_pad[2], post_pad_w]
 }
 
 pub(in crate::serialize::visitors) fn emit_aten_max_pool2d(ctx: &EmitContext) -> EmitResult {
@@ -199,44 +154,19 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
     let store = ctx.store;
     let mut result = EmitResult::default();
     let input_names = ctx.input_names();
-    let kernel = {
-        let kw = kwarg_i32_list(node, "kernel");
-        if kw.is_empty() {
-            arg_i32_list(node, 1)
-        } else {
-            kw
-        }
-    };
-    let mut stride = {
-        let kw = kwarg_i32_list(node, "stride");
-        if kw.is_empty() {
-            arg_i32_list(node, 2)
-        } else {
-            kw
-        }
-    };
+    let kernel = kwarg_or_arg_i32_list(node, "kernel", 1);
+    let stride = kwarg_or_arg_i32_list(node, "stride", 2);
     let pad = {
         let kw = kwarg_i32_list(node, "pad");
         if !kw.is_empty() {
             kw
         } else {
-            let padding = arg_i32_list(node, 3);
-            if padding.len() >= 2 {
-                vec![padding[0], padding[0], padding[1], padding[1]]
-            } else if padding.len() == 1 {
-                vec![padding[0], padding[0], padding[0], padding[0]]
-            } else {
-                vec![0, 0, 0, 0]
-            }
+            symmetric_pool_pad(&arg_i32_list(node, 3))
         }
     };
-    if stride.is_empty() {
-        stride = kernel.clone();
-    }
+    let stride = i32_list_or(stride, kernel.clone());
 
-    result.tensors.push(compute_pool_nhwc_output(
-        graph, store, node, &kernel, &stride, &pad,
-    ));
+    let output_tensor = compute_pool_nhwc_output(graph, store, node, &kernel, &stride, &pad);
     let input_zp = node_input_zero_point(graph, node, 0, "input_zp", 0);
     let output_zp = node_output_zero_point(node, "output_zp", 0);
     let input_dtype = match node.args.first() {
@@ -254,31 +184,16 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
     };
 
     let input_zp_name = format!("{}_input_zp", node.name);
-    push_inline_const(
-        &mut result,
-        TosaTensor::with_data(
-            &input_zp_name,
-            vec![1],
-            input_dtype,
-            encode_zp_for_dtype(input_zp, input_dtype),
-        ),
-    );
+    push_zero_point_const(&mut result, input_zp_name.clone(), input_dtype, input_zp);
 
     let output_zp_name = format!("{}_output_zp", node.name);
-    push_inline_const(
-        &mut result,
-        TosaTensor::with_data(
-            &output_zp_name,
-            vec![1],
-            output_dtype,
-            encode_zp_for_dtype(output_zp, output_dtype),
-        ),
-    );
+    push_zero_point_const(&mut result, output_zp_name.clone(), output_dtype, output_zp);
 
     let mut pool_inputs = input_names;
     pool_inputs.push(input_zp_name);
     pool_inputs.push(output_zp_name);
-    result.operators.push(TosaOperator::new(
+    result.push_output_op(
+        output_tensor,
         Op::AvgPool2d,
         Attribute::AvgPool2d(AvgPool2dAttribute {
             kernel,
@@ -287,7 +202,6 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
             acc_type,
         }),
         pool_inputs,
-        vec![node.name.clone()],
-    ));
+    );
     result
 }

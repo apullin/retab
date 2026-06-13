@@ -17,6 +17,7 @@ Options:
   --venv PATH            Python venv. Defaults to ../../.venv from this repo layout.
   --out PATH             Coverage output dir. Defaults to target/coverage/arm-tests.
   --jobs N|auto          pytest-xdist worker count. Defaults to auto.
+  --model-jobs N         pytest-xdist worker count for model lanes. Defaults to 4; max 4.
   --lane NAME            Run one lane. Can be passed more than once.
                          Valid: ops-int, ops-fp, models-int, models-fp.
   --strict-tests         Exit nonzero if any pytest lane exits nonzero.
@@ -82,12 +83,19 @@ valid_lane() {
 
 lane_pytest_args() {
   local lane="$1"
+  local lane_jobs="${jobs}"
+
+  case "${lane}" in
+    models-int | models-fp)
+      lane_jobs="${model_jobs}"
+      ;;
+  esac
 
   case "${lane}" in
     ops-int)
       printf '%s\0' \
         -q \
-        "--numprocesses=${jobs}" \
+        "--numprocesses=${lane_jobs}" \
         backends/arm/test/ \
         --ignore=backends/arm/test/models \
         -k \
@@ -96,7 +104,7 @@ lane_pytest_args() {
     ops-fp)
       printf '%s\0' \
         -q \
-        "--numprocesses=${jobs}" \
+        "--numprocesses=${lane_jobs}" \
         backends/arm/test/ \
         --ignore=backends/arm/test/models \
         -k \
@@ -105,7 +113,7 @@ lane_pytest_args() {
     models-int)
       printf '%s\0' \
         -q \
-        "--numprocesses=${jobs}" \
+        "--numprocesses=${lane_jobs}" \
         backends/arm/test/models \
         -k \
         "tosa and INT"
@@ -113,7 +121,7 @@ lane_pytest_args() {
     models-fp)
       printf '%s\0' \
         -q \
-        "--numprocesses=${jobs}" \
+        "--numprocesses=${lane_jobs}" \
         backends/arm/test/models \
         -k \
         "tosa and FP"
@@ -159,6 +167,7 @@ venv_arg=""
 executorch_arg=""
 out_dir="${repo_root}/target/coverage/arm-tests"
 jobs="auto"
+model_jobs="4"
 strict_tests=0
 keep_instrumented=0
 llvm_profdata_arg="${LLVM_PROFDATA:-}"
@@ -181,6 +190,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --jobs)
       jobs="$2"
+      shift 2
+      ;;
+    --model-jobs)
+      model_jobs="$2"
       shift 2
       ;;
     --lane)
@@ -220,6 +233,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "${model_jobs}" in
+  1 | 2 | 3 | 4) ;;
+  *)
+    echo "error: --model-jobs must be 1, 2, 3, or 4; got ${model_jobs}" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
+
 if [[ "${#lanes[@]}" -eq 0 ]]; then
   lanes=(ops-int ops-fp models-int models-fp)
 fi
@@ -248,6 +270,14 @@ fi
 python_bin="${venv_dir}/bin/python"
 target_triple="$(rustc -vV | awk '/^host:/ { print $2 }')"
 target_rustflags_env="CARGO_TARGET_$(printf '%s' "${target_triple}" | tr '[:lower:]-' '[:upper:]_')_RUSTFLAGS"
+
+flatc_tool_path="/opt/homebrew/bin:/opt/homebrew/opt/flatbuffers/bin:/usr/local/bin"
+while IFS= read -r flatc_candidate; do
+  if [[ -x "${flatc_candidate}" ]] && "${flatc_candidate}" --version 2>/dev/null | grep -q ' 24\.'; then
+    flatc_tool_path="$(dirname "${flatc_candidate}"):${flatc_tool_path}"
+    break
+  fi
+done < <(find "${executorch_src}/pip-out" -path '*/flatc_ep/bin/flatc' -type f 2>/dev/null | sort)
 
 profraw_dir="${out_dir}/profraw"
 build_profraw_dir="${out_dir}/build-profraw"
@@ -284,7 +314,7 @@ echo "==> building instrumented retab"
   existing_target_rustflags="$(printenv "${target_rustflags_env}" || true)"
   coverage_rustflags="${RUSTFLAGS:-}"
   export VIRTUAL_ENV="${venv_dir}"
-  export PATH="${HOME}/.cargo/bin:${venv_dir}/bin:${PATH}"
+  export PATH="${HOME}/.cargo/bin:${flatc_tool_path}:${venv_dir}/bin:${PATH}"
   export CARGO_INCREMENTAL=0
   export CARGO_TARGET_DIR="${cargo_target_dir}"
   export "${target_rustflags_env}=${existing_target_rustflags:+${existing_target_rustflags} }${coverage_rustflags:+${coverage_rustflags} }-Cinstrument-coverage"
@@ -358,7 +388,7 @@ if [[ "${keep_instrumented}" -eq 0 ]]; then
   (
     cd "${repo_root}"
     export VIRTUAL_ENV="${venv_dir}"
-    export PATH="${HOME}/.cargo/bin:${venv_dir}/bin:${PATH}"
+    export PATH="${HOME}/.cargo/bin:${flatc_tool_path}:${venv_dir}/bin:${PATH}"
     export UV_CACHE_DIR="${uv_cache_dir}"
     unset CARGO_TARGET_DIR RUSTFLAGS "${target_rustflags_env}" LLVM_PROFILE_FILE CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER
     "${venv_dir}/bin/maturin" develop --release --skip-install

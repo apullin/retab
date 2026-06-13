@@ -77,7 +77,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     if !user.alive {
                         continue;
                     }
-                    if !user.target.contains("getitem") {
+                    if !user.is_getitem() {
                         unsupported = true;
                         break;
                     }
@@ -291,7 +291,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     .filter(|&user_id| {
                         user_id != value_getitem
                             && graph.nodes[user_id].alive
-                            && graph.nodes[user_id].target.contains("getitem")
+                            && graph.nodes[user_id].is_getitem()
                     })
                     .collect();
                 for user_id in extra_getitems {

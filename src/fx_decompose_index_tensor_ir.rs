@@ -183,8 +183,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 kwargs.insert("dtype".to_string(), IrArg::Dtype(gather_dtype.clone()));
                 let cast_meta = graph.nodes[x_id]
                     .meta
-                    .cloned_with_val(vec![batch, k, c], &gather_dtype)
-                    .without_qparams();
+                    .cloned_without_qparams(vec![batch, k, c], &gather_dtype);
                 graph.add_anchored_call_function_with_kwargs(
                     id,
                     format!("{}_x_i8", node_name),
@@ -210,9 +209,8 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 if idx_shape.len() != broadcast.len() {
                     let mut aligned: Vec<i64> = vec![1; broadcast.len() - idx_shape.len()];
                     aligned.extend(idx_shape);
-                    let aligned_meta = orig_meta
-                        .cloned_with_val(aligned.clone(), &idx_dtype)
-                        .without_qparams();
+                    let aligned_meta =
+                        orig_meta.cloned_without_qparams(aligned.clone(), &idx_dtype);
                     let aligned_id = graph.add_anchored_call_function(
                         id,
                         format!("{}_idx{}_align", node_name, i),
@@ -224,9 +222,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 }
 
                 // Broadcast to common shape
-                let bcast_meta = orig_meta
-                    .cloned_with_val(broadcast.clone(), &idx_dtype)
-                    .without_qparams();
+                let bcast_meta = orig_meta.cloned_without_qparams(broadcast.clone(), &idx_dtype);
                 let bcast_id = graph.add_anchored_call_function(
                     id,
                     format!("{}_idx{}_bcast", node_name, i),
@@ -236,9 +232,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 );
 
                 // Flatten to (W,)
-                let flat_meta = orig_meta
-                    .cloned_with_val(vec![w], &idx_dtype)
-                    .without_qparams();
+                let flat_meta = orig_meta.cloned_without_qparams(vec![w], &idx_dtype);
                 let flat_id = graph.add_anchored_call_function(
                     id,
                     format!("{}_idx{}_flat", node_name, i),
@@ -248,9 +242,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 );
 
                 // Scale by linearized stride
-                let scale_meta = orig_meta
-                    .cloned_with_val(vec![1], &idx_dtype)
-                    .without_qparams();
+                let scale_meta = orig_meta.cloned_without_qparams(vec![1], &idx_dtype);
                 let scale_id = graph.add_anchored_full_int(
                     id,
                     format!("{}_scale{}", node_name, i),
@@ -260,9 +252,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
                     scale_meta,
                 );
 
-                let scaled_meta = orig_meta
-                    .cloned_with_val(vec![w], &idx_dtype)
-                    .without_qparams();
+                let scaled_meta = orig_meta.cloned_without_qparams(vec![w], &idx_dtype);
                 let scaled_id = graph.add_anchored_call_function(
                     id,
                     format!("{}_idx{}_scaled", node_name, i),
@@ -274,9 +264,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 lin_w = Some(match lin_w {
                     None => scaled_id,
                     Some(prev) => {
-                        let add_meta = orig_meta
-                            .cloned_with_val(vec![w], &idx_dtype)
-                            .without_qparams();
+                        let add_meta = orig_meta.cloned_without_qparams(vec![w], &idx_dtype);
                         let add_id = graph.add_anchored_call_function(
                             id,
                             format!("{}_lin_add{}", node_name, i),
@@ -292,9 +280,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
             let Some(lin_w_id) = lin_w else { continue };
 
             // Unsqueeze to (1, W), then tile across batch if needed.
-            let idx_1w_meta = orig_meta
-                .cloned_with_val(vec![1, w], &idx_dtype)
-                .without_qparams();
+            let idx_1w_meta = orig_meta.cloned_without_qparams(vec![1, w], &idx_dtype);
             let idx_bw_seed = graph.add_anchored_call_function(
                 id,
                 format!("{}_idx_1w", node_name),
@@ -306,9 +292,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
             let idx_bw = if batch == 1 {
                 idx_bw_seed
             } else {
-                let expand_meta = orig_meta
-                    .cloned_with_val(vec![batch, w], &idx_dtype)
-                    .without_qparams();
+                let expand_meta = orig_meta.cloned_without_qparams(vec![batch, w], &idx_dtype);
                 let expand_id = graph.add_anchored_call_function(
                     id,
                     format!("{}_idx_bw", node_name),
@@ -336,8 +320,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 kwargs.insert("dtype".to_string(), IrArg::Dtype(x_dtype.clone()));
                 let cast_meta = graph.nodes[x_id]
                     .meta
-                    .cloned_with_val(vec![batch, w, c], &x_dtype)
-                    .without_qparams();
+                    .cloned_without_qparams(vec![batch, w, c], &x_dtype);
                 graph.add_anchored_call_function_with_kwargs(
                     id,
                     format!("{}_gather_bool", node_name),

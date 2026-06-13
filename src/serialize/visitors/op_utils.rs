@@ -164,17 +164,12 @@ pub(super) fn emit_bool_binary(
             continue;
         }
         let cast_name = format!("{}_input{}_cast", node.name, idx);
-        result.tensors.push(temp_tensor(
-            cast_name.clone(),
-            emitted_shape.clone(),
-            semantic_dtype,
-        ));
-        result.operators.push(TosaOperator::new(
+        result.push_output_op(
+            temp_tensor(cast_name.clone(), emitted_shape.clone(), semantic_dtype),
             Op::Cast,
             Attribute::Cast(CastAttribute {}),
             vec![inputs[idx].clone()],
-            vec![cast_name.clone()],
-        ));
+        );
         inputs[idx] = cast_name;
     }
     if swap_inputs && inputs.len() >= 2 {
@@ -349,6 +344,15 @@ pub(super) fn push_rank1_const(
         make_rank1_const_tensor(name.clone(), dtype, data, len),
     );
     name
+}
+
+pub(super) fn push_zero_point_const(
+    result: &mut EmitResult,
+    name: String,
+    dtype: DType,
+    value: i32,
+) -> String {
+    push_rank1_const(result, name, dtype, encode_zp_for_dtype(value, dtype), 1)
 }
 
 pub(super) fn temp_tensor(name: String, shape: Vec<i32>, dtype: DType) -> TosaTensor {

@@ -4,19 +4,12 @@
 //! the min/max scalar arguments to match the output quantization scale.
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp, QParam};
+use crate::fx_target::is_clamp_target;
 use crate::runner_logging::log_line;
 
 fn quantize_value(qp: &QParam, value: f64) -> i64 {
     let q = (value / qp.scale + qp.zp as f64).round() as i64;
     q.max(qp.qmin).min(qp.qmax)
-}
-
-fn arg_as_f64(arg: &IrArg) -> Option<f64> {
-    match arg {
-        IrArg::Float(v) => Some(*v),
-        IrArg::Int(v) => Some(*v as f64),
-        _ => None,
-    }
 }
 
 pub struct IrQuantizeClampArgsPass;
@@ -34,7 +27,7 @@ impl IrPass for IrQuantizeClampArgsPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !graph.nodes[id].target.contains("clamp.default") {
+            if !is_clamp_target(&graph.nodes[id].target) {
                 continue;
             }
 
@@ -54,19 +47,19 @@ impl IrPass for IrQuantizeClampArgsPass {
             let mut did_update = false;
 
             // Quantize min_val (args[1]) if present and not None
-            if let Some(min_val) = args.get(1).and_then(|a| arg_as_f64(a)) {
+            if let Some(min_val) = args.get(1).and_then(IrArg::as_numeric_f64) {
                 new_args[1] = IrArg::Int(quantize_value(&qp, min_val));
                 did_update = true;
             }
 
             // Quantize max_val (args[2]) if present and not None
-            if let Some(max_val) = args.get(2).and_then(|a| arg_as_f64(a)) {
+            if let Some(max_val) = args.get(2).and_then(IrArg::as_numeric_f64) {
                 new_args[2] = IrArg::Int(quantize_value(&qp, max_val));
                 did_update = true;
             }
 
             if did_update {
-                // Update args in-place (write_back propagates to Python)
+                // Update args in-place so conversion sees the quantized bounds.
                 graph.set_args(id, new_args);
                 modified = true;
             }

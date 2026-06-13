@@ -284,8 +284,7 @@ fn maybe_normalize_select_inputs(
                 input_node.meta.output_qparams.first(),
             ) {
                 (crate::graph::ir::DType::Int8 | crate::graph::ir::DType::Int16, Some((_, qp))) => {
-                    let quantized = ((raw_value / qp.scale) + qp.zero_point as f64).round() as i64;
-                    quantized.clamp(qp.qmin, qp.qmax) as f64
+                    quantize_scalar_with_qparam(raw_value, *qp)
                 }
                 _ => raw_value,
             };
@@ -339,17 +338,12 @@ fn maybe_normalize_select_inputs(
             }
 
             let cast_name = format!("{}_input{}_cast", node.name, idx);
-            result.tensors.push(temp_tensor(
-                cast_name.clone(),
-                output_shape.clone(),
-                output_dtype,
-            ));
-            result.operators.push(TosaOperator::new(
+            result.push_output_op(
+                temp_tensor(cast_name.clone(), output_shape.clone(), output_dtype),
                 Op::Cast,
                 Attribute::Cast(CastAttribute {}),
                 vec![input_names[idx].clone()],
-                vec![cast_name.clone()],
-            ));
+            );
             input_names[idx] = cast_name;
         }
     }
@@ -466,7 +460,7 @@ pub(super) fn emit_slice(ctx: &EmitContext) -> EmitResult {
     let spec = ParsedSliceSpec::parse(ctx.graph, node, ctx.store);
     let mut result = EmitResult::default();
 
-    if std::env::var("ARM_TOSA_ENGINE_DEBUG_SLICE").ok().as_deref() == Some("1") {
+    if crate::config::debug_slice_enabled() {
         eprintln!(
             "[SliceDebug] node={} input_target={} input_order={} input_shape={:?} raw_dim={} mapped_dim={} start={} end={} step={} start_shape={:?} size_shape={:?}",
             node.name,

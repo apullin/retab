@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, FakeTensorMeta, IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta,
-    NodeOp,
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_target::{
+    is_permute_target, is_transpose_conv2d_target, is_view_like_target,
+    is_zero_input_constant_target,
 };
 use crate::runner_logging::log_line;
 
@@ -97,7 +98,7 @@ fn output_is_physical(graph: &IrGraph, id: NodeId) -> bool {
         if node.op == NodeOp::Output {
             continue;
         }
-        if node.target.contains("quantize") {
+        if node.is_q_or_dq() {
             stack.extend(graph.live_user_ids(uid));
         } else {
             return true;
@@ -121,23 +122,8 @@ fn is_control_flow_submodule(graph: &IrGraph) -> bool {
     })
 }
 
-fn is_view_like(target: &str) -> bool {
-    target.contains("view_copy")
-        || target.contains("flatten")
-        || target.contains("reshape")
-        || target.contains("aten.view.")
-        || target.contains("aten._unsafe_view")
-}
-
-fn is_zero_input_constant_target(target: &str) -> bool {
-    target.contains("aten.full.default")
-        || target.contains("aten.arange")
-        || target.contains("aten.linspace")
-        || target.contains("aten.eye")
-}
-
 fn is_constant_only_shape_target(target: &str) -> bool {
-    is_view_like(target)
+    is_view_like_target(target)
         || target.contains("aten.slice_copy.Tensor")
         || target.contains("aten.unsqueeze_copy.default")
         || target.contains("aten.permute_copy.default")
@@ -185,10 +171,6 @@ fn is_constant_subgraph(graph: &IrGraph, id: NodeId, memo: &mut HashMap<NodeId, 
     result
 }
 
-fn is_permute(target: &str) -> bool {
-    target.contains("permute_copy") || target.contains("aten.permute.")
-}
-
 fn is_transposed_aten_convolution(node: &crate::fx_ir::IrNode) -> bool {
     let target = node.target.to_ascii_lowercase();
     if !(target.contains("aten.convolution") || target.contains("edge__ops_aten_convolution")) {
@@ -205,10 +187,7 @@ fn is_transpose_conv2d_weight(graph: &IrGraph, id: NodeId) -> bool {
             return false;
         }
         let target = user.target.to_ascii_lowercase();
-        if !(target.contains("transpose_conv2d")
-            || target.contains("transposeconv2d")
-            || is_transposed_aten_convolution(user))
-        {
+        if !(is_transpose_conv2d_target(&target) || is_transposed_aten_convolution(user)) {
             return false;
         }
         matches!(user.args.get(1), Some(IrArg::Node(weight_id)) if *weight_id == id)
@@ -256,13 +235,11 @@ fn unique_name(graph: &IrGraph, base: &str) -> String {
 }
 
 fn transpose_meta(input_meta: &NodeMeta, perm: &[usize]) -> NodeMeta {
-    let mut meta = input_meta.clone();
-    if let Some(val) = input_meta.val.as_ref() {
-        meta.set_val(FakeTensorMeta {
-            shape: permuted_shape(&val.shape, perm),
-            dtype: val.dtype.clone(),
-        });
-    }
+    let mut meta = input_meta
+        .val
+        .as_ref()
+        .map(|val| input_meta.cloned_with_val(permuted_shape(&val.shape, perm), val.dtype.clone()))
+        .unwrap_or_else(|| input_meta.clone());
     meta.set_tosa_dim_order((0..perm.len()).collect());
     meta
 }
@@ -325,9 +302,6 @@ fn set_spatial_rank(graph: &mut IrGraph, id: NodeId, rank: usize) -> bool {
         return false;
     }
     graph.nodes[id].meta.tosa_spatial_rank = Some(rank);
-    graph.nodes[id]
-        .meta
-        .set_extra("tosa_spatial_rank", MetaValue::Int(rank as i64));
     true
 }
 
@@ -457,7 +431,7 @@ impl IrToTosaMemoryFormatPass {
         for id in ids {
             if !graph.nodes[id].alive
                 || graph.nodes[id].op != NodeOp::CallFunction
-                || !is_view_like(&graph.nodes[id].target)
+                || !is_view_like_target(&graph.nodes[id].target)
             {
                 continue;
             }
@@ -633,7 +607,7 @@ impl IrToTosaMemoryFormatPass {
         for id in ids {
             if !graph.nodes[id].alive
                 || graph.nodes[id].op != NodeOp::CallFunction
-                || !is_permute(&graph.nodes[id].target)
+                || !is_permute_target(&graph.nodes[id].target)
             {
                 continue;
             }
@@ -719,11 +693,7 @@ impl IrPass for IrToTosaMemoryFormatPass {
         modified |= self.insert_output_transposes(graph, is_control_flow_gm);
         modified |= self.remap_permute_args(graph);
 
-        if std::env::var("ARM_TOSA_ENGINE_DEBUG_LAYOUT")
-            .ok()
-            .as_deref()
-            == Some("1")
-        {
+        if crate::config::debug_layout_enabled() {
             for node in graph.nodes.iter().filter(|node| node.alive) {
                 let Some(val) = node.meta.val.as_ref() else {
                     continue;

@@ -7,7 +7,7 @@
 //!   scaled_bias = beta != 1 ? mul(bias, full(beta)) : bias
 //!   result = add(scaled_mm, scaled_bias)
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
 
 /// Compute the output shape for mm(mat1, mat2).
@@ -19,14 +19,6 @@ fn mm_output_shape(mat1_shape: &[i64], mat2_shape: &[i64]) -> Vec<i64> {
         // Fallback: return empty (caller should skip if shapes unavailable)
         Vec::new()
     }
-}
-
-fn arg_scalar(arg: Option<&IrArg>) -> Option<f64> {
-    arg.and_then(|value| {
-        value
-            .as_float()
-            .or_else(|| value.as_int().map(|i| i as f64))
-    })
 }
 
 pub struct IrDecomposeAddmmPass;
@@ -44,7 +36,7 @@ impl IrPass for IrDecomposeAddmmPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !graph.nodes[id].target.contains("addmm") {
+            if !graph.nodes[id].is_addmm() {
                 continue;
             }
 
@@ -66,11 +58,17 @@ impl IrPass for IrDecomposeAddmmPass {
                 None => continue,
             };
 
-            let beta: f64 = arg_scalar(graph.nodes[id].args.get(3))
-                .or_else(|| arg_scalar(graph.nodes[id].kwargs.get("beta")))
+            let beta: f64 = graph.nodes[id]
+                .args
+                .get(3)
+                .or_else(|| graph.nodes[id].kwargs.get("beta"))
+                .and_then(IrArg::as_numeric_f64)
                 .unwrap_or(1.0);
-            let alpha: f64 = arg_scalar(graph.nodes[id].args.get(4))
-                .or_else(|| arg_scalar(graph.nodes[id].kwargs.get("alpha")))
+            let alpha: f64 = graph.nodes[id]
+                .args
+                .get(4)
+                .or_else(|| graph.nodes[id].kwargs.get("alpha"))
+                .and_then(IrArg::as_numeric_f64)
                 .unwrap_or(1.0);
 
             let node_name = graph.nodes[id].name.clone();
@@ -91,12 +89,7 @@ impl IrPass for IrDecomposeAddmmPass {
                     if shape.is_empty() {
                         orig_meta.clone()
                     } else {
-                        let mut m = orig_meta.clone();
-                        m.set_val(FakeTensorMeta {
-                            shape,
-                            dtype: orig_dtype.clone(),
-                        });
-                        m
+                        orig_meta.cloned_with_val(shape, &orig_dtype)
                     }
                 }
                 _ => orig_meta.clone(),
@@ -190,22 +183,13 @@ mod tests {
     use super::*;
     use crate::fx_ir::NodeMeta;
 
-    fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
-        let mut meta = NodeMeta::default();
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: dtype.to_string(),
-        });
-        meta
-    }
-
     fn placeholder(graph: &mut IrGraph, name: &str, shape: &[i64]) -> NodeId {
         graph.add_node(
             NodeOp::Placeholder,
             name.to_string(),
             name.to_string(),
             Vec::new(),
-            meta(shape, "torch.float32"),
+            NodeMeta::tensor(shape, "torch.float32"),
         )
     }
 
@@ -224,7 +208,7 @@ mod tests {
             "aten.addmm.default".to_string(),
             vec![IrArg::Node(bias), IrArg::Node(mat1), IrArg::Node(mat2)],
             kwargs,
-            meta(&[2, 2], "torch.float32"),
+            NodeMeta::tensor([2, 2], "torch.float32"),
         );
 
         assert!(IrDecomposeAddmmPass.run(&mut graph));

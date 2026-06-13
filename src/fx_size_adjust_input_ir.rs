@@ -1,45 +1,11 @@
 //! Pure Rust IrPass: adjust conv/pool input sizes to yield exact integer outputs.
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_target::is_size_adjust_target;
 use crate::runner_logging::log_line;
 
 fn meta_with(base: &NodeMeta, shape: Vec<i64>, dtype: &str) -> NodeMeta {
-    let mut m = base.clone();
-    m.set_val(FakeTensorMeta {
-        shape,
-        dtype: dtype.to_string(),
-    });
-    if m.input_qparams.is_some() {
-        m.dirty.input_qparams = true;
-    }
-    if m.output_qparams.is_some() {
-        m.dirty.output_qparams = true;
-    }
-    if m.tosa_dim_order.is_some() {
-        m.dirty.tosa_dim_order = true;
-    }
-    if m.pre_pass_arg_qparams.is_some() {
-        m.dirty.pre_pass_arg_qparams = true;
-    }
-    if m.table_input_qparam.is_some() || m.table_output_qparam.is_some() {
-        m.dirty.table_qparams = true;
-    }
-    if !m.extras.is_empty() {
-        m.dirty.extras = true;
-    }
-    m
-}
-
-fn is_target(target: &str) -> bool {
-    let t = target.to_ascii_lowercase();
-    if t.contains("transpose_conv2d") || t.contains("transposeconv2d") {
-        return false;
-    }
-    t.contains("convolution.default")
-        || t.contains("conv2d")
-        || t.contains("conv3d")
-        || t.contains("max_pool2d")
-        || t.contains("avg_pool2d")
+    base.cloned_with_val(shape, dtype)
 }
 
 fn pair_arg(args: &[IrArg], idx: usize, default: Vec<i64>) -> Vec<i64> {
@@ -69,7 +35,7 @@ impl IrPass for IrSizeAdjustInputPass {
             if graph.nodes[id].meta.extra_bool("skip_size_adjust") == Some(true) {
                 continue;
             }
-            if !is_target(&graph.nodes[id].target) {
+            if !is_size_adjust_target(&graph.nodes[id].target) {
                 continue;
             }
 
@@ -192,7 +158,6 @@ impl IrPass for IrSizeAdjustInputPass {
                     meta_with(&graph.nodes[input_id].meta, input_shape.clone(), &dtype),
                 );
                 graph.anchor_after(slice_id, current);
-                graph.copy_meta_from(slice_id, input_id);
                 if let Some(ref q) = consumer_input_q {
                     let mut qm = std::collections::HashMap::new();
                     qm.insert(0usize, q.clone());

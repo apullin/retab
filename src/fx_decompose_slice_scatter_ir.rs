@@ -10,15 +10,6 @@ fn permuted_shape(shape: &[i64], perm: &[i64]) -> Vec<i64> {
         .collect()
 }
 
-fn opt_int_arg(arg: Option<&IrArg>) -> Option<Option<i64>> {
-    match arg {
-        None => Some(None),
-        Some(IrArg::None) => Some(None),
-        Some(IrArg::Int(v)) => Some(Some(*v)),
-        _ => None,
-    }
-}
-
 fn fixup_start(start: Option<i64>, dim_size: i64) -> i64 {
     let start = start.unwrap_or(0);
     // PyTorch slice semantics: a negative index is shifted by dim_size ONCE then
@@ -64,11 +55,13 @@ impl IrPass for IrDecomposeSliceScatterPass {
                 .get(2)
                 .and_then(IrArg::as_int)
                 .or_else(|| kwargs.get("dim").and_then(IrArg::as_int));
-            let start = opt_int_arg(args.get(3))
-                .flatten()
+            let start = args
+                .get(3)
+                .and_then(IrArg::as_int)
                 .or_else(|| kwargs.get("start").and_then(IrArg::as_int));
-            let end = opt_int_arg(args.get(4))
-                .flatten()
+            let end = args
+                .get(4)
+                .and_then(IrArg::as_int)
                 .or_else(|| kwargs.get("end").and_then(IrArg::as_int));
             let step = args
                 .get(5)
@@ -279,16 +272,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::{FakeTensorMeta, NodeMeta};
-
-    fn meta(shape: &[i64], dtype: &str) -> NodeMeta {
-        let mut meta = NodeMeta::default();
-        meta.set_val(FakeTensorMeta {
-            shape: shape.to_vec(),
-            dtype: dtype.to_string(),
-        });
-        meta
-    }
+    use crate::fx_ir::NodeMeta;
 
     #[test]
     fn decompose_slice_scatter_step1_rewrites_to_cat() {
@@ -298,14 +282,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[5, 9], "torch.float32"),
+            NodeMeta::tensor([5, 9], "torch.float32"),
         );
         let src = graph.add_node(
             NodeOp::Placeholder,
             "src".to_string(),
             "src".to_string(),
             vec![],
-            meta(&[5, 5], "torch.float32"),
+            NodeMeta::tensor([5, 5], "torch.float32"),
         );
         let node = graph.add_node(
             NodeOp::CallFunction,
@@ -319,7 +303,7 @@ mod tests {
                 IrArg::Int(7),
                 IrArg::Int(1),
             ],
-            meta(&[5, 9], "torch.float32"),
+            NodeMeta::tensor([5, 9], "torch.float32"),
         );
 
         assert!(IrDecomposeSliceScatterPass.run(&mut graph));
@@ -338,14 +322,14 @@ mod tests {
             "x".to_string(),
             "x".to_string(),
             vec![],
-            meta(&[2, 4, 6], "torch.float32"),
+            NodeMeta::tensor([2, 4, 6], "torch.float32"),
         );
         let src = graph.add_node(
             NodeOp::Placeholder,
             "src".to_string(),
             "src".to_string(),
             vec![],
-            meta(&[2, 4, 2], "torch.float32"),
+            NodeMeta::tensor([2, 4, 2], "torch.float32"),
         );
         let node = graph.add_node(
             NodeOp::CallFunction,
@@ -359,7 +343,7 @@ mod tests {
                 IrArg::Int(5),
                 IrArg::Int(2),
             ],
-            meta(&[2, 4, 6], "torch.float32"),
+            NodeMeta::tensor([2, 4, 6], "torch.float32"),
         );
 
         assert!(IrDecomposeSliceScatterPass.run(&mut graph));

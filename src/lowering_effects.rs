@@ -2,51 +2,42 @@ use crate::fx_fuse_constant_args::ZeroInputConstantKind;
 use crate::graph::ir::DType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FxEpInputKind {
+pub enum LoweringInputKind {
     Parameter,
     Buffer,
     LiftedTensorConstant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FxDeleteConstantPlaceholderEffect {
+pub struct DeleteConstantPlaceholderEffect {
     pub placeholder_name: String,
     pub allow_missing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FxCastInt64InputToInt32Effect {
+pub struct CastInt64InputToInt32Effect {
     pub placeholder_name: String,
-    pub input_kind: FxEpInputKind,
+    pub input_kind: LoweringInputKind,
     pub target_name: Option<String>,
     pub allow_missing: bool,
     pub update_placeholder_meta: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FxMaterializeZeroInputConstantEffect {
+pub struct MaterializeZeroInputConstantEffect {
     pub node_name: String,
     pub kind: ZeroInputConstantKind,
     pub allow_missing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FxFuseConstantNodeEffect {
+pub struct FuseConstantNodeEffect {
     pub node_name: String,
     pub allow_missing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FxMaterializeConstantNodeEffect {
-    pub node_name: String,
-    pub data: Vec<u8>,
-    pub shape: Vec<i64>,
-    pub dtype: DType,
-    pub allow_missing: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FxMaterializeZeroInputConstantNodeEffect {
+pub struct MaterializeConstantNodeEffect {
     pub node_name: String,
     pub data: Vec<u8>,
     pub shape: Vec<i64>,
@@ -55,7 +46,16 @@ pub struct FxMaterializeZeroInputConstantNodeEffect {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FxTableTensorSpec {
+pub struct MaterializeZeroInputConstantNodeEffect {
+    pub node_name: String,
+    pub data: Vec<u8>,
+    pub shape: Vec<i64>,
+    pub dtype: DType,
+    pub allow_missing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableTensorSpec {
     pub scale: f64,
     pub zp: i64,
     pub qmin: i64,
@@ -64,7 +64,7 @@ pub struct FxTableTensorSpec {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FxInsertTableOpEffect {
+pub struct InsertTableOpEffect {
     pub node_name: String,
     pub kind: String,
     pub scalar_arg: Option<f64>,
@@ -72,36 +72,36 @@ pub struct FxInsertTableOpEffect {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FxInsertPrecomputedTableOpEffect {
+pub struct InsertPrecomputedTableOpEffect {
     pub node_name: String,
     pub data: Vec<u8>,
     pub shape: Vec<i64>,
     pub table_dtype: DType,
-    pub input: FxTableTensorSpec,
-    pub output: FxTableTensorSpec,
+    pub input: TableTensorSpec,
+    pub output: TableTensorSpec,
     pub rescale_lshift: i64,
     pub allow_missing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum FxEpEffect {
-    DeleteConstantPlaceholder(FxDeleteConstantPlaceholderEffect),
-    CastInt64InputToInt32(FxCastInt64InputToInt32Effect),
-    MaterializeZeroInputConstant(FxMaterializeZeroInputConstantEffect),
-    FuseConstantNode(FxFuseConstantNodeEffect),
-    MaterializeConstantNode(FxMaterializeConstantNodeEffect),
-    MaterializeZeroInputConstantNode(FxMaterializeZeroInputConstantNodeEffect),
-    InsertTableOp(FxInsertTableOpEffect),
-    InsertPrecomputedTableOp(FxInsertPrecomputedTableOpEffect),
+pub enum LoweringEffect {
+    DeleteConstantPlaceholder(DeleteConstantPlaceholderEffect),
+    CastInt64InputToInt32(CastInt64InputToInt32Effect),
+    MaterializeZeroInputConstant(MaterializeZeroInputConstantEffect),
+    FuseConstantNode(FuseConstantNodeEffect),
+    MaterializeConstantNode(MaterializeConstantNodeEffect),
+    MaterializeZeroInputConstantNode(MaterializeZeroInputConstantNodeEffect),
+    InsertTableOp(InsertTableOpEffect),
+    InsertPrecomputedTableOp(InsertPrecomputedTableOpEffect),
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct FxEpEffectBatch {
-    pub effects: Vec<FxEpEffect>,
+pub struct LoweringEffectBatch {
+    pub items: Vec<LoweringEffect>,
 }
 
-impl FxEpEffectBatch {
-    pub fn push(&mut self, effect: FxEpEffect) {
-        self.effects.push(effect);
+impl LoweringEffectBatch {
+    pub fn push(&mut self, effect: LoweringEffect) {
+        self.items.push(effect);
     }
 }

@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{FakeTensorMeta, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::runner_logging::log_line;
 
 pub struct IrConvertSumPass;
@@ -40,16 +40,9 @@ impl IrPass for IrConvertSumPass {
                 None => continue,
             };
 
-            // Extract dims: may be List([Int, ...]) or a single Int.
-            let dims: Vec<i64> = match &graph.nodes[id].args[1] {
-                IrArg::List(items) => {
-                    match items.iter().map(|a| a.as_int()).collect::<Option<Vec<_>>>() {
-                        Some(v) => v,
-                        None => continue,
-                    }
-                }
-                IrArg::Int(d) => vec![*d],
-                _ => continue,
+            let dims = match graph.nodes[id].args[1].as_int_list_or_scalar() {
+                Some(dims) => dims,
+                None => continue,
             };
             if dims.is_empty() {
                 continue;
@@ -124,18 +117,13 @@ impl IrPass for IrConvertSumPass {
                 // upstream decompositions (for example group_norm) mark their
                 // reduction chain as layout-neutral, and rebuilding from a
                 // blank NodeMeta here silently drops that contract.
-                let mut step_meta = orig_meta.clone();
-                step_meta.set_val(FakeTensorMeta {
-                    shape: output_shape.clone(),
-                    dtype: orig_dtype.clone(),
-                });
+                let mut step_meta = orig_meta.cloned_with_val(output_shape.clone(), &orig_dtype);
                 if step_meta
                     .tosa_dim_order
                     .as_ref()
                     .is_some_and(|order| order.len() != output_shape.len())
                 {
                     step_meta.tosa_dim_order = None;
-                    step_meta.dirty.tosa_dim_order = false;
                 }
                 if let Some(ref iqp) = current_input_qparams {
                     step_meta.set_input_qparams(iqp.clone());
