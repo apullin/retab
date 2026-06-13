@@ -796,6 +796,14 @@ Deleted: local layernorm float-arg helper, local layernorm anchor wrapper, and l
 Added: direct use of `IrArg::as_numeric_f64`, `IrArg::as_bool`, `IrArg::as_int`, and `IrGraph::anchor_to`
 Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; helper-name audit; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over layer_norm and var
 Note: Rust tests passed `130 passed`. Focused Python smoke passed `42 passed, 82 deselected`.
+
+2026-06-13, serializer infrastructure split
+Rust LOC: 37,388
+Movement: -31 Rust LOC from previous checkpoint
+Deleted: monolithic `src/serialize/mod.rs` ownership of tensor materialization, output layout normalization, region collection, flatbuffer graph/table emission, and attribute-union table emission
+Added: `src/serialize/collection.rs`, `src/serialize/tensor_layout.rs`, `src/serialize/output_layout.rs`, `src/serialize/flatbuffer.rs`, and `src/serialize/attribute_flatbuffer.rs`; `src/serialize/mod.rs` is now the 35-line public orchestration entry point
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused serializer-sensitive Python smoke via `/tmp/et.sh` over conv2d, conv3d, transpose_conv2d, avg_pool2d, max_pool, permute, view, cond, and while
+Note: Rust tests passed `130 passed`. Focused Python smoke passed `526 passed, 3 expected xfails, 1306 deselected`. This is mostly an ownership/grammar split, not a behavior change: semantic region collection, physical tensor declarations, external output layout normalization, flatbuffer tables, and attribute unions now have separate modules.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1325,6 +1333,15 @@ tables, and materialization are heavily exercised there. Run FP/models after
 the rename if any application logic changes.
 
 ## Refactor 7: Split Serializer Infrastructure From Visitor Emission
+
+Status:
+
+Complete for central serializer infrastructure. `src/serialize/mod.rs` now only
+computes cache/preallocation state and calls region collection plus flatbuffer
+emission. Region collection, physical tensor layout/materialization, root-output
+layout normalization, flatbuffer region/tensor/operator table writing, and
+attribute-union table writing are split into focused modules. Visitor emission
+remains under `src/serialize/visitors/*`.
 
 Problem:
 
