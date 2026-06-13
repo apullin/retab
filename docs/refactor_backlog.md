@@ -788,6 +788,14 @@ Deleted: duplicate scalar-or-pair argument parsers in avg-pool pad decomposition
 Added: `IrArg::as_int_pair_or_scalar`, keeping `(scalar | [x] | [h, w, ...]) -> (h, w)` parsing on the IR argument type
 Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over conv2d, conv3d, avg_pool2d, max_pool, and masked_fill
 Note: Rust tests passed `130 passed`. Focused Python smoke passed `386 passed, 1 expected xfail, 1023 deselected`.
+
+2026-06-13, normalization helper cleanup slice
+Rust LOC: 37,419
+Movement: -10 Rust LOC from previous checkpoint
+Deleted: local layernorm float-arg helper, local layernorm anchor wrapper, and local var positional/kwarg scalar default helpers
+Added: direct use of `IrArg::as_numeric_f64`, `IrArg::as_bool`, `IrArg::as_int`, and `IrGraph::anchor_to`
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; helper-name audit; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over layer_norm and var
+Note: Rust tests passed `130 passed`. Focused Python smoke passed `42 passed, 82 deselected`.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

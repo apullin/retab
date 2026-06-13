@@ -6,14 +6,6 @@ use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, Nod
 use crate::fx_target::is_layer_norm_target;
 use crate::runner_logging::log_line;
 
-fn float_arg(arg: Option<&IrArg>, default: f64) -> f64 {
-    match arg {
-        Some(IrArg::Float(v)) => *v,
-        Some(IrArg::Int(v)) => *v as f64,
-        _ => default,
-    }
-}
-
 fn first_output_user_meta(graph: &IrGraph, id: NodeId) -> Option<NodeMeta> {
     graph
         .live_getitem_users(id)
@@ -36,10 +28,6 @@ fn replace_getitem_users(graph: &mut IrGraph, id: NodeId, replacement: NodeId) {
             graph.replace_and_erase(user, replacement);
         }
     }
-}
-
-fn anchor_tensor_meta(graph: &mut IrGraph, node_id: NodeId, anchor: NodeId) {
-    graph.anchor_to(node_id, anchor);
 }
 
 pub struct IrDecomposeLayerNormPass;
@@ -142,7 +130,11 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         IrArg::Node(node_id) => Some(*node_id),
         _ => None,
     });
-    let epsilon = float_arg(graph.nodes[id].args.get(4), f32::EPSILON as f64);
+    let epsilon = graph.nodes[id]
+        .args
+        .get(4)
+        .and_then(IrArg::as_numeric_f64)
+        .unwrap_or(f32::EPSILON as f64);
     let name = graph.nodes[id].name.clone();
     let target = graph.nodes[id].target.clone();
     let view_target = if target.contains("layer_norm.default") && !target.contains("native") {
@@ -158,7 +150,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(x_id), i64_list(&dims), IrArg::Bool(true)],
         output_meta.cloned_with_val(stat_shape.clone(), &dtype),
     );
-    anchor_tensor_meta(graph, mean, id);
+    graph.anchor_to(mean, id);
 
     let numerator = graph.add_node(
         NodeOp::CallFunction,
@@ -167,7 +159,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(x_id), IrArg::Node(mean)],
         output_meta.cloned_with_val(input_shape.clone(), &dtype),
     );
-    anchor_tensor_meta(graph, numerator, id);
+    graph.anchor_to(numerator, id);
 
     let mut var_kwargs = HashMap::new();
     var_kwargs.insert("correction".to_string(), IrArg::Int(0));
@@ -180,7 +172,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         var_kwargs,
         output_meta.cloned_with_val(stat_shape.clone(), &dtype),
     );
-    anchor_tensor_meta(graph, var, id);
+    graph.anchor_to(var, id);
 
     let eps = graph.add_node(
         NodeOp::CallFunction,
@@ -189,7 +181,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![i64_list(&scalar_shape), IrArg::Float(epsilon)],
         output_meta.cloned_with_val(scalar_shape.clone(), &dtype),
     );
-    anchor_tensor_meta(graph, eps, id);
+    graph.anchor_to(eps, id);
 
     let variance_eps = graph.add_node(
         NodeOp::CallFunction,
@@ -198,7 +190,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(var), IrArg::Node(eps)],
         output_meta.cloned_with_val(stat_shape.clone(), &dtype),
     );
-    anchor_tensor_meta(graph, variance_eps, id);
+    graph.anchor_to(variance_eps, id);
 
     let rsqrt = graph.add_node(
         NodeOp::CallFunction,
@@ -207,7 +199,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(variance_eps)],
         output_meta.cloned_with_val(stat_shape, &dtype),
     );
-    anchor_tensor_meta(graph, rsqrt, id);
+    graph.anchor_to(rsqrt, id);
 
     let normalized = graph.add_node(
         NodeOp::CallFunction,
@@ -216,7 +208,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(numerator), IrArg::Node(rsqrt)],
         output_meta.cloned_with_val(output_shape.clone(), &dtype),
     );
-    anchor_tensor_meta(graph, normalized, id);
+    graph.anchor_to(normalized, id);
 
     let mut output = normalized;
     if let Some(weight_id) = weights {
@@ -227,7 +219,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             vec![IrArg::Node(weight_id), i64_list(&param_shape)],
             output_meta.cloned_with_val(param_shape.clone(), &dtype),
         );
-        anchor_tensor_meta(graph, weight_reshaped, id);
+        graph.anchor_to(weight_reshaped, id);
 
         output = graph.add_node(
             NodeOp::CallFunction,
@@ -236,7 +228,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             vec![IrArg::Node(output), IrArg::Node(weight_reshaped)],
             output_meta.cloned_with_val(output_shape.clone(), &dtype),
         );
-        anchor_tensor_meta(graph, output, id);
+        graph.anchor_to(output, id);
     }
 
     if let Some(bias_id) = bias {
@@ -247,7 +239,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             vec![IrArg::Node(bias_id), i64_list(&param_shape)],
             output_meta.cloned_with_val(param_shape.clone(), &dtype),
         );
-        anchor_tensor_meta(graph, bias_reshaped, id);
+        graph.anchor_to(bias_reshaped, id);
 
         output = graph.add_node(
             NodeOp::CallFunction,
@@ -256,7 +248,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             vec![IrArg::Node(output), IrArg::Node(bias_reshaped)],
             output_meta.cloned_with_val(output_shape, &dtype),
         );
-        anchor_tensor_meta(graph, output, id);
+        graph.anchor_to(output, id);
     }
 
     replace_getitem_users(graph, id, output);

@@ -1,29 +1,11 @@
 //! Pure Rust IrPass: var.correction / var.dim decomposition.
 
-use std::collections::HashMap;
-
 use crate::fx_ir::{
     i64_list_arg as i64_list, normalized_reduction_dims, reduced_shape, IrArg, IrGraph, IrPass,
     NodeId, NodeOp,
 };
 use crate::fx_target::{is_var_dim_target, is_var_target};
 use crate::runner_logging::log_line;
-
-fn bool_arg(arg: Option<&IrArg>, default: bool) -> bool {
-    arg.and_then(IrArg::as_bool).unwrap_or(default)
-}
-
-fn int_arg(arg: Option<&IrArg>, default: i64) -> i64 {
-    arg.and_then(IrArg::as_int).unwrap_or(default)
-}
-
-fn kw_bool(kwargs: &HashMap<String, IrArg>, key: &str, default: bool) -> bool {
-    kwargs.get(key).and_then(IrArg::as_bool).unwrap_or(default)
-}
-
-fn kw_int(kwargs: &HashMap<String, IrArg>, key: &str, default: i64) -> i64 {
-    kwargs.get(key).and_then(IrArg::as_int).unwrap_or(default)
-}
 
 pub struct IrDecomposeVarPass;
 
@@ -81,13 +63,29 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let (keepdim, correction) = if is_var_dim_target(&target) {
         (
-            bool_arg(graph.nodes[id].args.get(3), false),
-            int_arg(graph.nodes[id].args.get(2), 1),
+            graph.nodes[id]
+                .args
+                .get(3)
+                .and_then(IrArg::as_bool)
+                .unwrap_or(false),
+            graph.nodes[id]
+                .args
+                .get(2)
+                .and_then(IrArg::as_int)
+                .unwrap_or(1),
         )
     } else {
         (
-            kw_bool(&graph.nodes[id].kwargs, "keepdim", false),
-            kw_int(&graph.nodes[id].kwargs, "correction", 1),
+            graph.nodes[id]
+                .kwargs
+                .get("keepdim")
+                .and_then(IrArg::as_bool)
+                .unwrap_or(false),
+            graph.nodes[id]
+                .kwargs
+                .get("correction")
+                .and_then(IrArg::as_int)
+                .unwrap_or(1),
         )
     };
 
