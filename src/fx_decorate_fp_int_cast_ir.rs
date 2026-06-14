@@ -6,10 +6,11 @@
 //! the cast input to where(x >= 0, floor(x), ceil(x)) first.
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass};
+use crate::fx_target::{noop_target, NoopTarget};
 use crate::runner_logging::log_line;
 
 fn is_fp_to_int_cast_target(target: &str) -> bool {
-    target.contains("_to_dim_order_copy") || target.contains("aten._to_copy")
+    noop_target(target) == Some(NoopTarget::DtypeCheckedPassthrough)
 }
 
 pub struct IrDecorateFpToIntCastPass;

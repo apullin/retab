@@ -1039,6 +1039,14 @@ Deleted: raw conv1d.default, conv2d.default, and convolution.default target chec
 Added: shared `fx_target` helpers for exact conv1d, conv2d, and ATen convolution default spellings, plus classifier tests and reuse inside the target classifier itself
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_target`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv1d, conv2d, conv3d, and transpose_conv2d; Rust LOC check
 Note: Full Rust tests passed `134 passed`; focused Python smoke passed `285 passed, 2 expected xfails, 920 deselected`. No model lane was run. This is setup-positive but reduces repeated exact convolution spelling in pass bodies.
+
+2026-06-14, fp-to-int cast target grammar reuse slice
+Rust LOC: 37,170 -> 37,171
+Movement: +1 Rust LOC
+Deleted: pass-local `_to_dim_order_copy` / `aten._to_copy` target spelling from fp-to-int cast decoration
+Added: no new classifier API; `IrDecorateFpToIntCastPass` now reuses `NoopTarget::DtypeCheckedPassthrough`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over clamp, to_copy, and int64; Rust LOC check
+Note: Full Rust tests passed `134 passed`; focused Python smoke passed `94 passed, 2 expected xfails, 99 deselected`. No model lane was run. This is a tiny semantic-collapse slice that gives the `_to_copy` target family one owner.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1063,7 +1071,8 @@ and rewrite passes now also use shared `fx_target` helpers for split, tril,
 layernorm, var, avg_pool2d padding, as_strided_copy, pad, pixel shuffle,
 squeeze/unsqueeze, dim-transpose, index_put, where, and clamp target families.
 Addmm decomposition now uses the classifier-backed node predicate instead of a
-raw substring check. Noop removal now uses a typed `NoopTarget` classifier.
+raw substring check. Noop removal and fp-to-int cast decoration now use the
+typed `NoopTarget` classifier.
 Constant materialization and memory-format planning now use shared target
 grammar for constant-only shape transforms, TOSA transpose targets, and Edge
 convolution spellings. Indexing/scatter passes now also share target grammar
