@@ -1542,6 +1542,14 @@ Deleted: production raw `aten.permute_copy.default` target/argument construction
 Added: `IrGraph::add_permute_copy(...)`, `IrGraph::add_anchored_permute_copy(...)`, and `IrGraph::replace_with_permute_copy(...)`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over gather, index_tensor, index_put, max_pool, pixel_shuffling, slice_scatter, squeeze, transpose_copy, and unfold_copy; Rust LOC check
 Note: Full Rust tests passed `141 passed`; focused Python smoke passed `258 passed, 20 expected xfails`. Remaining raw `permute_copy` strings are test fixtures/assertions, not active production construction. This is setup-positive and should be paid down only if new production permute sites appear or if test fixture builders get a shared graph-fixture grammar.
+
+2026-06-14, tensor metadata grammar slice
+Rust LOC: 36,290 -> 36,302
+Movement: +12 Rust LOC
+Deleted: local plain-intermediate metadata construction from conv accumulator bias decomposition; redundant layout/spatial metadata restamping from the same source metadata; open-coded carried-output RESCALE metadata stamping; local TOSA dim-order rank mismatch clearing; memory-format direct spatial-rank mutation
+Added: `NodeMeta::cloned_plain_tensor(...)`, `NodeMeta::clear_tosa_special_dtype(...)`, `NodeMeta::clear_tosa_dim_order_if_rank_mismatch(...)`, `NodeMeta::set_tosa_spatial_rank(...)`, and `NodeMeta::tosa_spatial_rank_or(...)`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over conv2d, conv3d, sum, and while; Rust LOC check
+Note: Full Rust tests passed `141 passed`; focused Python smoke passed `258 passed, 2 expected xfails`. This is a setup-positive Refactor 2 slice, but migrated production sites are deletion-heavy and the new helper grammar directly names plain tensor intermediates, rank-invalid layout metadata, special dtype clearing, and spatial-rank ownership.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1727,7 +1735,11 @@ Qparam map borrowing/cloning is now also named by `NodeMeta::input_qparams`,
 `cloned_input_qparams`, `cloned_output_qparams`, and `copy_qparams_from`, so
 grouped-conv decomposition, cumsum decomposition, sum conversion, and conv
 rescale recovery no longer reach directly into qparam-map fields for production
-logic.
+logic. Plain non-quantized intermediate metadata, special-dtype clearing,
+rank-invalid TOSA dim-order clearing, and TOSA spatial-rank mutation are now
+also named on `NodeMeta`, covering conv accumulator bias decomposition,
+carried-output RESCALE insertion, sum decomposition, and memory-format spatial
+rank propagation.
 
 2026-06-14, qparam map accessor slice
 

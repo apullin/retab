@@ -67,11 +67,7 @@ impl IrPass for IrInsertCarriedOutputRescalePass {
                 continue;
             }
 
-            let mut meta = graph.node(src_id).meta.clone();
-            meta.set_empty_input_qparams();
-            meta.set_single_output_qparam(ph_qp.clone());
-            meta.extras.remove("tosa_special_dtype");
-            meta.set_val_dtype_for_existing_shape(ph_qp.dtype_str.clone());
+            let meta = graph.node(src_id).meta.rescale_output_meta(ph_qp.clone());
             let src_name = graph.node(src_id).name.clone();
             let rescale = graph.add_after_rescale(
                 src_id,

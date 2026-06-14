@@ -1741,6 +1741,18 @@ impl NodeMeta {
         self.original_dim_orders = Some(orders);
     }
 
+    pub fn set_tosa_spatial_rank(&mut self, rank: usize) -> bool {
+        if self.tosa_spatial_rank == Some(rank) {
+            return false;
+        }
+        self.tosa_spatial_rank = Some(rank);
+        true
+    }
+
+    pub fn tosa_spatial_rank_or(&self, default: usize) -> usize {
+        self.tosa_spatial_rank.unwrap_or(default)
+    }
+
     pub fn set_val(&mut self, ftm: FakeTensorMeta) {
         self.val = Some(ftm);
     }
@@ -1771,6 +1783,18 @@ impl NodeMeta {
         dtype: impl Into<String>,
     ) -> Self {
         self.cloned_with_val(shape, dtype).without_qparams()
+    }
+
+    pub fn cloned_plain_tensor(
+        &self,
+        shape: impl Into<Vec<i64>>,
+        dtype: impl Into<String>,
+    ) -> Self {
+        let mut meta = self.cloned_with_val(shape, dtype);
+        meta.set_empty_input_qparams();
+        meta.clear_output_qparams();
+        meta.clear_tosa_special_dtype();
+        meta
     }
 
     pub fn cloned_with_empty_qparam_maps(
@@ -1879,6 +1903,23 @@ impl NodeMeta {
         self.clear_output_qparams();
     }
 
+    pub fn clear_tosa_special_dtype(&mut self) -> bool {
+        self.extras.remove("tosa_special_dtype").is_some()
+    }
+
+    pub fn clear_tosa_dim_order_if_rank_mismatch(&mut self, rank: usize) -> bool {
+        if self
+            .tosa_dim_order
+            .as_ref()
+            .is_some_and(|order| order.len() != rank)
+        {
+            self.tosa_dim_order = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn set_empty_qparam_maps(&mut self) {
         self.set_input_qparams(HashMap::new());
         self.set_output_qparams(HashMap::new());
@@ -1902,7 +1943,7 @@ impl NodeMeta {
         if let Some(orders) = meta.original_dim_orders.clone() {
             meta.set_original_dim_orders(orders);
         }
-        meta.extras.remove("tosa_special_dtype");
+        meta.clear_tosa_special_dtype();
         if let Some(shape) = shape_source.val_shape() {
             meta.set_val(FakeTensorMeta {
                 shape: shape.to_vec(),

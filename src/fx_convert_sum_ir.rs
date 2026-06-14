@@ -106,13 +106,7 @@ impl IrPass for IrConvertSumPass {
                 // reduction chain as layout-neutral, and rebuilding from a
                 // blank NodeMeta here silently drops that contract.
                 let mut step_meta = orig_meta.cloned_with_val(output_shape.clone(), &orig_dtype);
-                if step_meta
-                    .tosa_dim_order
-                    .as_ref()
-                    .is_some_and(|order| order.len() != output_shape.len())
-                {
-                    step_meta.tosa_dim_order = None;
-                }
+                step_meta.clear_tosa_dim_order_if_rank_mismatch(output_shape.len());
                 if let Some(ref iqp) = current_input_qparams {
                     step_meta.set_input_qparams(iqp.clone());
                 }

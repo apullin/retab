@@ -290,15 +290,11 @@ fn insert_transpose_after(
 }
 
 fn set_spatial_rank(graph: &mut IrGraph, id: NodeId, rank: usize) -> bool {
-    if graph.nodes[id].meta.tosa_spatial_rank == Some(rank) {
-        return false;
-    }
-    graph.nodes[id].meta.tosa_spatial_rank = Some(rank);
-    true
+    graph.nodes[id].meta.set_tosa_spatial_rank(rank)
 }
 
 fn spatial_rank(graph: &IrGraph, id: NodeId, default: usize) -> usize {
-    graph.nodes[id].meta.tosa_spatial_rank.unwrap_or(default)
+    graph.nodes[id].meta.tosa_spatial_rank_or(default)
 }
 
 impl IrToTosaMemoryFormatPass {

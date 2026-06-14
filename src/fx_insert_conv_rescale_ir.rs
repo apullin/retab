@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam, RescaleRewrite};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp, QParam, RescaleRewrite};
 use crate::fx_target::{
     is_conv_accumulator_target, is_layout_passthrough_target, is_rank_changing_layout_target,
     is_raw_aten_convolution_target,
@@ -118,14 +118,6 @@ fn weight_scales(qparam: &QParam) -> Vec<f64> {
     }
 }
 
-fn plain_tensor_meta_from(source_meta: &NodeMeta, shape: &[i64], dtype: &str) -> NodeMeta {
-    let mut meta = source_meta.cloned_with_val(shape.to_vec(), dtype);
-    meta.set_empty_input_qparams();
-    meta.clear_output_qparams();
-    meta.extras.remove("tosa_special_dtype");
-    meta
-}
-
 fn activation_rank(graph: &IrGraph, node: &crate::fx_ir::IrNode) -> Option<usize> {
     match node.args.first() {
         Some(IrArg::Node(input_id)) => graph.node(*input_id).meta.rank(),
@@ -217,27 +209,18 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
             vec![1.0; bias_scales.len()],
             0,
             0,
-            plain_tensor_meta_from(&node.meta, &conv_shape, "torch.int32"),
+            node.meta
+                .cloned_plain_tensor(conv_shape.clone(), "torch.int32"),
         ),
     );
-
-    let mut bias_view_meta = plain_tensor_meta_from(&node.meta, &bias_view_shape, "torch.int32");
-    if let Some(order) = node.meta.tosa_dim_order.clone() {
-        bias_view_meta.set_tosa_dim_order(order);
-    }
-    if let Some(orders) = node.meta.original_dim_orders.clone() {
-        bias_view_meta.set_original_dim_orders(orders);
-    }
-    if let Some(rank) = node.meta.tosa_spatial_rank {
-        bias_view_meta.tosa_spatial_rank = Some(rank);
-    }
 
     let bias_view = graph.add_after_view_copy(
         int32_rescale,
         format!("{}_bias_view", node.name),
         *bias_id,
         &bias_view_shape,
-        bias_view_meta,
+        node.meta
+            .cloned_plain_tensor(bias_view_shape.clone(), "torch.int32"),
     );
 
     let bias_add = graph.add_after_call_function(
@@ -245,7 +228,7 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         format!("{}_bias_add", node.name),
         "aten.add.Tensor",
         vec![IrArg::Node(int32_rescale), IrArg::Node(bias_view)],
-        plain_tensor_meta_from(&node.meta, &conv_shape, "torch.int32"),
+        node.meta.cloned_plain_tensor(conv_shape, "torch.int32"),
     );
 
     let output_rescale = graph.add_after_rescale(
@@ -341,6 +324,8 @@ impl IrPass for IrInsertConvAccumulatorRescalePass {
 
 #[cfg(test)]
 mod tests {
+    use crate::fx_ir::NodeMeta;
+
     use super::*;
 
     fn qparam(scale: f64, zp: i64, dtype: &str) -> QParam {
