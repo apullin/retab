@@ -5,12 +5,14 @@ use crate::StashedPipeline;
 
 mod assembly;
 mod contracts;
+mod metadata;
 
 pub(crate) use assembly::append_subgraphs_from_ir;
 pub(crate) use contracts::{
     apply_boundary_contracts, apply_pre_submodule_qparam_propagation_ir,
     snapshot_pre_pass_qparams_ir,
 };
+pub(crate) use metadata::{IrInsertCarriedOutputRescalePass, IrStripWhileBoundaryQPass};
 
 #[derive(Clone, Copy)]
 pub(crate) struct WhileBodyInputCounts {

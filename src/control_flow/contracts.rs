@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::fx_control_flow_metadata;
 use crate::fx_ir;
 use crate::StashedPipeline;
 
-use super::{collect_region_metadata, region_name_from_ir_arg};
+use super::{collect_region_metadata, metadata, region_name_from_ir_arg};
 
 #[derive(Clone)]
 struct BoundaryInputMeta {
@@ -191,7 +190,7 @@ fn collect_boundary_contracts_for_graph(
                     .pre_pass_arg_qparams
                     .as_ref()
                     .and_then(|saved| saved.get(&idx).cloned())
-                    .or_else(|| fx_control_flow_metadata::extract_effective_qparam_ir(ir, arg_id));
+                    .or_else(|| metadata::extract_effective_qparam_ir(ir, arg_id));
                 Some(BoundaryInputMeta {
                     meta: arg_node.meta.clone(),
                     boundary_dim_order: boundary_placeholder_dim_order(arg_node),
@@ -341,7 +340,7 @@ pub(crate) fn snapshot_pre_pass_qparams_ir(graph: &mut fx_ir::IrGraph) -> u32 {
                 .meta
                 .output_qparam()
                 .cloned()
-                .or_else(|| fx_control_flow_metadata::extract_effective_qparam_ir(graph, arg_id))
+                .or_else(|| metadata::extract_effective_qparam_ir(graph, arg_id))
                 .or_else(|| {
                     if arg.is_q_or_dq() {
                         arg.parse_qdq_qparam()
@@ -509,7 +508,7 @@ pub(crate) fn apply_pre_submodule_qparam_propagation_ir(
 
     let mut changed = apply_qparam_contract_to_submodule(graph, &contract);
     if is_while_body {
-        changed += fx_control_flow_metadata::stamp_while_body_output_qparams_ir(graph) as u32;
+        changed += metadata::stamp_while_body_output_qparams_ir(graph) as u32;
     }
     changed
 }
@@ -554,9 +553,7 @@ fn rewrite_quantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
         let Some(target_qp) = graph.nodes[q_id].parse_qdq_qparam() else {
             continue;
         };
-        let Some(source_qp) =
-            fx_control_flow_metadata::extract_effective_qparam_ir(graph, source_id)
-        else {
+        let Some(source_qp) = metadata::extract_effective_qparam_ir(graph, source_id) else {
             continue;
         };
 
@@ -657,7 +654,7 @@ fn apply_output_rescale_contract_ir(graph: &mut fx_ir::IrGraph, contract: &Outpu
             }
         }
         let source_from_rescale = if graph.nodes[src_id].is_rescale() {
-            fx_control_flow_metadata::reverse_engineer_rescale_ir(graph, graph.node(src_id))
+            metadata::reverse_engineer_rescale_ir(graph, graph.node(src_id))
         } else {
             None
         };
@@ -669,7 +666,7 @@ fn apply_output_rescale_contract_ir(graph: &mut fx_ir::IrGraph, contract: &Outpu
                     .as_ref()
                     .and_then(|map| map.get(&idx).cloned())
             })
-            .or_else(|| fx_control_flow_metadata::extract_effective_qparam_ir(graph, src_id))
+            .or_else(|| metadata::extract_effective_qparam_ir(graph, src_id))
         else {
             continue;
         };
@@ -780,7 +777,7 @@ pub(crate) fn apply_boundary_contracts(
         };
         changed += apply_boundary_contract_to_submodule(ir, contract);
         if while_body_regions.contains(&contract.region) {
-            changed += fx_control_flow_metadata::stamp_while_body_output_qparams_ir(ir) as u32;
+            changed += metadata::stamp_while_body_output_qparams_ir(ir) as u32;
         }
     }
     for (region, (ir, _)) in submodules.iter_mut() {

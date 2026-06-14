@@ -233,9 +233,7 @@ pub fn build_ir_while_submodule_pipeline() -> Vec<crate::fx_ir::PipelineStep> {
     // Mirror the main hybrid pipeline ordering: rescale once (after fold), before
     // table/layout. The IR rescale passes are not idempotent, so they run once.
     let mut steps: Vec<crate::fx_ir::PipelineStep> = vec![
-        Ir(Box::new(
-            crate::fx_control_flow_metadata::IrStripWhileBoundaryQPass,
-        )),
+        Ir(Box::new(crate::control_flow::IrStripWhileBoundaryQPass)),
         Ir(Box::new(crate::fx_fold_qdq_ir::IrFoldQdqPass)),
         Ir(Box::new(
             crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass,
@@ -248,7 +246,7 @@ pub fn build_ir_while_submodule_pipeline() -> Vec<crate::fx_ir::PipelineStep> {
     )));
     // Loop-carried output alignment runs last, once the producer scales are final.
     steps.push(Ir(Box::new(
-        crate::fx_control_flow_metadata::IrInsertCarriedOutputRescalePass,
+        crate::control_flow::IrInsertCarriedOutputRescalePass,
     )));
     steps
 }

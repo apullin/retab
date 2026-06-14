@@ -927,6 +927,14 @@ Deleted: boundary contract machinery from the `src/control_flow.rs` module root,
 Added: `src/control_flow/contracts.rs` as the owner for IR control-flow boundary contracts; `src/control_flow.rs` now owns only region metadata plus re-exports for the contracts and assembly modules
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused control-flow smoke via `/tmp/et.sh` twice over cond/while with U55/U85 excluded; Rust LOC check
 Note: Rust tests passed `131 passed`; both control-flow smokes passed `29 passed, 1 expected xfail, 60 deselected`. No model lane was run. This is another LOC-positive module-boundary slice, but it cuts the control-flow module root from roughly 880 lines to roughly 80 lines and leaves each CF responsibility with a clearer owner.
+
+2026-06-13, control-flow metadata namespace slice
+Rust LOC: 37,103 -> 37,098
+Movement: -5 Rust LOC
+Deleted: stale top-level `src/fx_control_flow_metadata.rs` module name and direct `crate::fx_control_flow_metadata` references
+Added: `src/control_flow/metadata.rs` under the control-flow domain module, with crate-visible re-exports for the while submodule pipeline passes and sibling-module use from boundary contracts
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused control-flow smoke via `/tmp/et.sh` twice over cond/while with U55/U85 excluded; Rust LOC check
+Note: Rust tests passed `131 passed`; both control-flow smokes passed `29 passed, 1 expected xfail, 60 deselected`. No model lane was run. This finishes the Refactor 5 naming/module split: active control-flow lowering code now sits under `src/control_flow/` instead of a legacy `fx_*` metadata module.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

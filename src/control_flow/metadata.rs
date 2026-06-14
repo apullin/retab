@@ -1,5 +1,4 @@
-//! Control-flow metadata stamping, boundary RESCALE insertion, and Q/DQ
-//! rewriting for cond and while_loop submodules.
+//! Control-flow IR metadata stamping and submodule boundary passes.
 
 use std::collections::HashMap;
 

@@ -13,7 +13,6 @@ mod fx_annotate_output_dim_order_ir;
 mod fx_canonicalize_gather_ir;
 mod fx_cast_int64_ir;
 mod fx_constant_tensor_eval;
-mod fx_control_flow_metadata;
 mod fx_conv1d_unsqueeze_ir;
 mod fx_convert_clamp_ir;
 mod fx_convert_full_like_ir;
