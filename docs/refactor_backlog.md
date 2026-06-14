@@ -1079,6 +1079,14 @@ Deleted: active direct `nodes.iter().filter(|n| n.alive)` and `0..nodes.len()` l
 Added: `IrGraph::live_nodes()`, `IrGraph::live_node_count()`, and `IrGraph::node_opt(id)` as shared graph-query/access helpers
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over cond, while, add, view, permute, conv2d, mm, and bmm; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `321 passed, 1 expected xfail, 769 deselected`. No model lane was run. This is a small LOC slice, but it removes more direct liveness traversal from central conversion/control-flow code and makes live-node traversal a graph API concept.
+
+2026-06-14, zero-input scalar materialization helper slice
+Rust LOC: 36,925 -> 36,923
+Movement: -2 Rust LOC
+Deleted: repeated scalar-value-to-domain-byte loops from arange, linspace, and eye materialization; duplicate full-shape extraction and repeated full-fill/dtype unwraps in full bailout diagnostics
+Added: `scalar_sequence_bytes(...)` and `full_shape(...)` helpers inside zero-input constant planning
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_fuse_zero_input_constants_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over full, arange, and eye; Rust LOC check
+Note: Focused zero-input Rust tests passed `9 passed`; full Rust tests passed `137 passed`; focused Python smoke passed `39 passed, 7 skipped, 50 deselected`. No model lane was run. This is a small local semantic-collapse slice: the planning code now names scalar sequence materialization rather than spelling byte extension loops per factory op.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

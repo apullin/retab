@@ -23,6 +23,13 @@ fn full_fill_value(node: &IrNode) -> Option<f64> {
     node.args.get(1)?.as_scalar_literal_f64()
 }
 
+fn full_shape(node: &IrNode) -> Option<Vec<i64>> {
+    node.args
+        .first()
+        .and_then(IrArg::as_int_list)
+        .or_else(|| node.meta.val_shape().map(|shape| shape.to_vec()))
+}
+
 fn int_qparam(node: &IrNode) -> Option<QParam> {
     node.meta
         .output_qparam()
@@ -123,6 +130,16 @@ fn scalar_bytes_in_domain(dtype: DType, qparam: Option<&QParam>, value: f64) -> 
     scalar_storage_bytes(dtype, value)
 }
 
+fn scalar_sequence_bytes<I>(dtype: DType, qparam: Option<&QParam>, values: I) -> Option<Vec<u8>>
+where
+    I: IntoIterator<Item = f64>,
+{
+    values.into_iter().try_fold(Vec::new(), |mut data, value| {
+        data.extend_from_slice(&scalar_bytes_in_domain(dtype, qparam, value)?);
+        Some(data)
+    })
+}
+
 fn arange_spec(node: &IrNode) -> Option<(f64, f64, f64)> {
     if node.target.contains("aten.arange.start_step") {
         let start = node.args.first()?.as_scalar_literal_f64()?;
@@ -165,13 +182,11 @@ fn plan_zero_input_arange(node: &IrNode) -> Option<MaterializeTensorNodeEffect> 
     let numel = tensor_numel(&shape)?;
 
     let (qparam, dtype) = output_int_qparam_and_dtype(node)?;
-
-    let mut data = Vec::new();
-    for idx in 0..numel {
-        let value = start + (idx as f64 * step);
-        let scalar = scalar_bytes_in_domain(dtype, qparam.as_ref(), value)?;
-        data.extend_from_slice(&scalar);
-    }
+    let data = scalar_sequence_bytes(
+        dtype,
+        qparam.as_ref(),
+        (0..numel).map(|idx| start + (idx as f64 * step)),
+    )?;
 
     Some(MaterializeTensorNodeEffect {
         node_name: node.name.clone(),
@@ -197,17 +212,17 @@ fn plan_zero_input_linspace(node: &IrNode) -> Option<MaterializeTensorNodeEffect
         .unwrap_or_else(|| vec![steps as i64]);
 
     let (qparam, dtype) = output_int_qparam_and_dtype(node)?;
-
-    let mut data = Vec::new();
-    for idx in 0..steps {
-        let value = if steps <= 1 {
-            start
-        } else {
-            start + (idx as f64 * (end - start) / (steps - 1) as f64)
-        };
-        let scalar = scalar_bytes_in_domain(dtype, qparam.as_ref(), value)?;
-        data.extend_from_slice(&scalar);
-    }
+    let data = scalar_sequence_bytes(
+        dtype,
+        qparam.as_ref(),
+        (0..steps).map(|idx| {
+            if steps <= 1 {
+                start
+            } else {
+                start + (idx as f64 * (end - start) / (steps - 1) as f64)
+            }
+        }),
+    )?;
 
     Some(MaterializeTensorNodeEffect {
         node_name: node.name.clone(),
@@ -219,18 +234,12 @@ fn plan_zero_input_linspace(node: &IrNode) -> Option<MaterializeTensorNodeEffect
 }
 
 fn full_bail_reason(graph: &IrGraph, node: &IrNode) -> &'static str {
-    let shape = match node.args.first() {
-        Some(arg) => arg
-            .as_int_list()
-            .or_else(|| node.meta.val_shape().map(|s| s.to_vec())),
-        None => node.meta.val_shape().map(|s| s.to_vec()),
-    };
-    if shape.is_none() {
+    if full_shape(node).is_none() {
         return "no_shape";
     }
-    if full_fill_value(node).is_none() {
+    let Some(fill_value) = full_fill_value(node) else {
         return "no_fill_value";
-    }
+    };
     let qparam = if is_quant_decompose_helper_full(node) {
         None
     } else {
@@ -240,18 +249,16 @@ fn full_bail_reason(graph: &IrGraph, node: &IrNode) -> &'static str {
         if qp.is_per_channel() {
             return "qparam_per_channel";
         }
-        if quantized_scalar_bytes(&qp, full_fill_value(node).unwrap()).is_none() {
+        if quantized_scalar_bytes(&qp, fill_value).is_none() {
             return "quantized_scalar_none";
         }
-    } else if explicit_zero_input_dtype(node).is_none() {
-        return "no_explicit_dtype";
-    } else if scalar_storage_bytes(
-        explicit_zero_input_dtype(node).unwrap(),
-        full_fill_value(node).unwrap(),
-    )
-    .is_none()
-    {
-        return "scalar_fill_none";
+    } else {
+        let Some(dtype) = explicit_zero_input_dtype(node) else {
+            return "no_explicit_dtype";
+        };
+        if scalar_storage_bytes(dtype, fill_value).is_none() {
+            return "scalar_fill_none";
+        }
     }
     "ok_but_planned_none"
 }
@@ -273,15 +280,11 @@ fn plan_zero_input_eye(node: &IrNode) -> Option<MaterializeTensorNodeEffect> {
         .unwrap_or_else(|| vec![n as i64, m as i64]);
 
     let (qparam, dtype) = output_int_qparam_and_dtype(node)?;
-
-    let mut data = Vec::new();
-    for row in 0..n {
-        for col in 0..m {
-            let value = if row == col { 1.0 } else { 0.0 };
-            let scalar = scalar_bytes_in_domain(dtype, qparam.as_ref(), value)?;
-            data.extend_from_slice(&scalar);
-        }
-    }
+    let data = scalar_sequence_bytes(
+        dtype,
+        qparam.as_ref(),
+        (0..n).flat_map(|row| (0..m).map(move |col| if row == col { 1.0 } else { 0.0 })),
+    )?;
 
     Some(MaterializeTensorNodeEffect {
         node_name: node.name.clone(),
@@ -293,12 +296,7 @@ fn plan_zero_input_eye(node: &IrNode) -> Option<MaterializeTensorNodeEffect> {
 }
 
 fn plan_zero_input_full(graph: &IrGraph, node: &IrNode) -> Option<MaterializeTensorNodeEffect> {
-    let shape = match node.args.first() {
-        Some(arg) => arg
-            .as_int_list()
-            .or_else(|| node.meta.val_shape().map(|shape| shape.to_vec())),
-        None => node.meta.val_shape().map(|shape| shape.to_vec()),
-    }?;
+    let shape = full_shape(node)?;
     let fill_value = full_fill_value(node)?;
 
     let qparam = if is_quant_decompose_helper_full(node) {
