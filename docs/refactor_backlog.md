@@ -1447,6 +1447,22 @@ Deleted: repeated first-input plus `ApproxCtx::from_input(...)` precondition sca
 Added: `ApproxCtx::from_first_input(...)`, naming the common decompose-op grammar for unary-ish rewrites that derive their shape/dtype/meta context from the first input
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over pow, tan, atanh, atan, sinh, cosh, asinh, acosh, asin, acos, elu, gelu, erfinv excluding known baseline `neg_one`/`pos_one`, softmax, logsoftmax, batch_norm, group_norm, and conv2d; Rust LOC check
 Note: Full Rust tests passed `139 passed`; focused Python smoke passed `483 passed, 1 skipped, 3 expected xfails`. This is a Refactor 3 local rewrite-grammar cleanup inside the largest remaining Rust file.
+
+2026-06-14, serializer bankers-rounding helper slice
+Rust LOC: 36,719 -> 36,601
+Movement: -118 Rust LOC
+Deleted: duplicate 12-op bankers-rounding decomposition in `serialize/visitors/math/unary.rs` and `serialize/visitors/tensor_ops.rs`
+Added: `serialize::visitors::rounding::emit_bankers_round_with_fill`, a single serializer grammar for the Floor/Sub/Equal/Add/Select rounding subgraph while preserving old output tensor and shift-constant naming
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over `test_round.py`; Rust LOC check
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `13 passed`. This is a Refactor 7 serializer-infrastructure cleanup: rounding semantics now live in one helper instead of two copied operator chains.
+
+2026-06-14, ApproxCtx formula-helper sweep
+Rust LOC: 36,601 -> 36,105
+Movement: -496 Rust LOC
+Deleted: most raw `ctx.tensor(...)` / `ctx.bool(...)` / `ctx.replace_output(...)` formula scaffolding from softmax, atan, sinh/cosh, asinh/acosh, elu/gelu, batch/group norm, asin/acos, scalar pow/add-sub-alpha, and erfinv decompositions
+Added: `ApproxCtx` formula helpers for node-only tensor calls, shape-aware node calls, output-meta preserving node calls, common arithmetic/unary/bool ops, and `where_self`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smokes via `/tmp/et.sh` over migrated math ops, batch/group norm, asin/acos, add/sub/pow, and erfinv excluding known baseline `neg_one`/`pos_one`; Rust LOC check
+Note: Full Rust tests passed `139 passed` after each slice; focused Python smokes passed `242 passed`, `43 passed, 1 skipped`, `36 passed`, `119 passed, 3 expected xfails`, and `16 passed`. This is a larger Refactor 3 grammar payoff: formula decompositions now read as operations over `ApproxCtx` instead of open-coded target strings and `IrArg::Node` vectors.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
