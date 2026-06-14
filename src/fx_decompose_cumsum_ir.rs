@@ -56,8 +56,7 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
 
     let input_dtype = graph.nodes[input_id]
         .meta
-        .val_dtype()
-        .unwrap_or("torch.float32")
+        .val_dtype_or_float32()
         .to_string();
 
     let rank = original_shape.len() as i64;

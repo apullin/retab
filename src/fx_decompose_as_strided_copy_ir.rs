@@ -97,8 +97,7 @@ impl IrPass for IrDecomposeAsStridedCopyPass {
             // Build output meta: shape from size, dtype from input
             let dtype = graph.nodes[input_id]
                 .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
+                .val_dtype_or_float32()
                 .to_string();
             let out_meta = graph.nodes[id].meta.cloned_with_val(size.clone(), dtype);
 

@@ -45,8 +45,7 @@ impl IrPass for IrSizeAdjustInputPass {
             let node_name = graph.nodes[id].name.clone();
             let dtype = graph.nodes[input_id]
                 .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
+                .val_dtype_or_float32()
                 .to_string();
 
             let slices = if is_conv {

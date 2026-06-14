@@ -573,6 +573,23 @@ impl IrGraph {
         id
     }
 
+    pub fn replace_with_call_function_with_val(
+        &mut self,
+        old_id: NodeId,
+        name: impl Into<String>,
+        target: impl Into<String>,
+        args: Vec<IrArg>,
+        base_meta: &NodeMeta,
+        shape: Vec<i64>,
+        dtype: impl Into<String>,
+    ) -> NodeId {
+        let id = self.add_anchored_call_function_with_val(
+            old_id, name, target, args, base_meta, shape, dtype,
+        );
+        self.replace_and_erase(old_id, id);
+        id
+    }
+
     pub fn replace_with_call_function_with_kwargs(
         &mut self,
         old_id: NodeId,
@@ -1385,6 +1402,14 @@ impl NodeMeta {
 
     pub fn val_dtype(&self) -> Option<&str> {
         self.val.as_ref().map(|v| v.dtype.as_str())
+    }
+
+    pub fn val_dtype_or<'a>(&'a self, default: &'a str) -> &'a str {
+        self.val_dtype().unwrap_or(default)
+    }
+
+    pub fn val_dtype_or_float32(&self) -> &str {
+        self.val_dtype_or("torch.float32")
     }
 
     pub fn rank(&self) -> Option<usize> {

@@ -56,8 +56,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
             let orig_meta = graph.nodes[id].meta.clone();
             let input_dtype = graph.nodes[input_id]
                 .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
+                .val_dtype_or_float32()
                 .to_string();
 
             // 1. arange(0, dim_size) → shape [dim_size], dtype int32

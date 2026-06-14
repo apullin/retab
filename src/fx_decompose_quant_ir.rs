@@ -129,17 +129,9 @@ impl IrPass for IrDecomposeQuantPass {
             let ones: Vec<i64> = vec![1; rank];
 
             let fp_dtype = if is_quantize {
-                graph.nodes[x_id]
-                    .meta
-                    .val_dtype()
-                    .unwrap_or("torch.float32")
-                    .to_string()
+                graph.nodes[x_id].meta.val_dtype_or_float32().to_string()
             } else {
-                graph.nodes[id]
-                    .meta
-                    .val_dtype()
-                    .unwrap_or("torch.float32")
-                    .to_string()
+                graph.nodes[id].meta.val_dtype_or_float32().to_string()
             };
 
             let eff_scale = if is_quantize { 1.0 / scale } else { scale };

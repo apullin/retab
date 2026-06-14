@@ -58,11 +58,7 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
                 continue;
             }
 
-            let dtype = graph.nodes[id]
-                .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
-                .to_string();
+            let dtype = graph.nodes[id].meta.val_dtype_or_float32().to_string();
             let node_name = graph.nodes[id].name.clone();
 
             // 1. unsqueeze_copy(x, dim + 1)

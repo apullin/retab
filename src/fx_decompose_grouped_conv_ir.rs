@@ -44,11 +44,7 @@ fn conv_slice_output_meta(graph: &IrGraph, id: NodeId, output_slice_size: i64) -
         if shape.len() >= 2 {
             shape[1] = output_slice_size;
         }
-        let dtype = graph.nodes[id]
-            .meta
-            .val_dtype()
-            .unwrap_or("torch.float32")
-            .to_string();
+        let dtype = graph.nodes[id].meta.val_dtype_or_float32().to_string();
         return graph.nodes[id].meta.cloned_with_val(shape, dtype);
     }
     graph.nodes[id].meta.clone()

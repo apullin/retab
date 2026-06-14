@@ -74,8 +74,7 @@ impl IrPass for IrConvertSumPass {
             let orig_meta = graph.nodes[id].meta.clone();
             let orig_dtype = graph.nodes[input_id]
                 .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
+                .val_dtype_or_float32()
                 .to_string();
 
             // Track qparams for chaining: first reduce inherits the original

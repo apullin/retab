@@ -88,11 +88,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                 input_shape[2],
                 input_shape[3],
             );
-            let dtype = graph.nodes[x_id]
-                .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
-                .to_string();
+            let dtype = graph.nodes[x_id].meta.val_dtype_or_float32().to_string();
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
             let x_meta = graph.nodes[x_id].meta.clone();

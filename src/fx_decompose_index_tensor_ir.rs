@@ -122,11 +122,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
 
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let x_dtype = graph.nodes[x_id]
-                .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
-                .to_string();
+            let x_dtype = graph.nodes[x_id].meta.val_dtype_or_float32().to_string();
             let idx_dtype = graph.nodes[idx_ids[0]]
                 .meta
                 .val_dtype()

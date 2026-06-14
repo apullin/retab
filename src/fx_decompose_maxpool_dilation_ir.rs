@@ -123,11 +123,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
             let orig_meta = value_getitem
                 .map(|user_id| graph.nodes[user_id].meta.clone())
                 .unwrap_or_else(|| graph.nodes[id].meta.clone());
-            let dtype = graph.nodes[x_id]
-                .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
-                .to_string();
+            let dtype = graph.nodes[x_id].meta.val_dtype_or_float32().to_string();
 
             // 1. constant_pad_nd(x, [pad_w, right_pad, pad_h, bottom_pad, 0,0,0,0], pad_val)
             let x_pad = graph.add_anchored_call_function(

@@ -62,8 +62,7 @@ impl IrPass for IrRewriteIndexPutPass {
             let orig_meta = graph.nodes[id].meta.clone();
             let src_dtype = graph.nodes[source_id]
                 .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
+                .val_dtype_or_float32()
                 .to_string();
 
             let index_dtype = indices_list.iter().find_map(|item| match item {

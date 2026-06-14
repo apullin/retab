@@ -105,8 +105,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
             let meta = graph.nodes[id].meta.clone();
             let dtype = graph.nodes[input_id]
                 .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
+                .val_dtype_or_float32()
                 .to_string();
 
             let result = if step == 1 {

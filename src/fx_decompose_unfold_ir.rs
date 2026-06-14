@@ -65,11 +65,7 @@ impl IrPass for IrDecomposeUnfoldPass {
 
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let x_dtype = graph.nodes[x_id]
-                .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
-                .to_string();
+            let x_dtype = graph.nodes[x_id].meta.val_dtype_or_float32().to_string();
             let needs_bool_cast = x_dtype == "torch.bool";
             let work_dtype = if needs_bool_cast {
                 "torch.int8"

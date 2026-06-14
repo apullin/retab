@@ -89,8 +89,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
             let orig_meta = graph.nodes[id].meta.clone();
             let dtype = graph.nodes[input_id]
                 .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
+                .val_dtype_or_float32()
                 .to_string();
 
             // 1. Unit-step slice: slice_copy(input, dim, start, end, 1)

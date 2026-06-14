@@ -96,8 +96,7 @@ impl IrPass for IrConvertSplitToSlicePass {
             // Grab the dtype from the input for building output metas
             let dtype = graph.nodes[input_id]
                 .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
+                .val_dtype_or_float32()
                 .to_string();
 
             let split_name = graph.nodes[split_id].name.clone();

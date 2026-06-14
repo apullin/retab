@@ -98,11 +98,7 @@ impl IrPass for IrDecomposePixelShufflePass {
                 None => continue,
             };
 
-            let orig_dtype = graph.nodes[id]
-                .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
-                .to_string();
+            let orig_dtype = graph.nodes[id].meta.val_dtype_or_float32().to_string();
             let node_name = graph.nodes[id].name.clone();
             let base_meta = graph.nodes[id].meta.clone();
 

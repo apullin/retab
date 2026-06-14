@@ -33,10 +33,7 @@ fn add_permute(
     prev: &mut Option<NodeId>,
 ) -> (NodeId, Vec<i64>) {
     let out_shape = permute_shape(input_shape, order);
-    let dtype = input_meta
-        .val_dtype()
-        .unwrap_or("torch.float32")
-        .to_string();
+    let dtype = input_meta.val_dtype_or_float32().to_string();
     let meta = input_meta.cloned_with_val(out_shape.clone(), &dtype);
     let order_arg = IrArg::List(order.iter().map(|&d| IrArg::Int(d as i64)).collect());
     let n = graph.add_anchored_call_function(
@@ -158,7 +155,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
         let (reshaped_id, reshaped_shape) = if data_shape.len() < aligned_rank {
             let mut padded = vec![1i64; aligned_rank - data_shape.len()];
             padded.extend_from_slice(&data_shape);
-            let dtype = data_meta.val_dtype().unwrap_or("torch.float32").to_string();
+            let dtype = data_meta.val_dtype_or_float32().to_string();
             let meta = data_meta.cloned_with_val(padded.clone(), &dtype);
             let shape_arg = IrArg::List(padded.iter().map(|&v| IrArg::Int(v)).collect());
             let n = graph.add_anchored_call_function(
@@ -206,7 +203,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     new_args.extend(rest_args);
     // result meta = permuted dest meta if permuted, else original
     let put_shape = permute_shape(&dest_shape, &destination_dim_order);
-    let put_dtype = orig_meta.val_dtype().unwrap_or("torch.float32").to_string();
+    let put_dtype = orig_meta.val_dtype_or_float32().to_string();
     let put_meta = if needs_dest_permute {
         orig_meta.cloned_with_val(put_shape.clone(), &put_dtype)
     } else {

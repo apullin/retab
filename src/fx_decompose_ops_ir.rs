@@ -81,8 +81,7 @@ impl ApproxCtx {
             shape: graph.nodes[input_id].meta.val_shape()?.to_vec(),
             dtype: graph.nodes[input_id]
                 .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
+                .val_dtype_or_float32()
                 .to_string(),
             meta: graph.nodes[anchor_id].meta.clone(),
         })
@@ -1570,8 +1569,7 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
     let value_meta = graph.nodes[value_getitem].meta.clone();
     let dtype = value_meta
         .val_dtype()
-        .or_else(|| input_meta.val_dtype())
-        .unwrap_or("torch.float32")
+        .unwrap_or_else(|| input_meta.val_dtype_or_float32())
         .to_string();
 
     let mut keepdim_shape = input_shape;
@@ -3105,8 +3103,7 @@ fn decompose_stack(graph: &mut IrGraph, id: NodeId) -> bool {
     let meta = graph.nodes[id].meta.clone();
     let dtype = graph.nodes[tensor_ids[0]]
         .meta
-        .val_dtype()
-        .unwrap_or("torch.float32")
+        .val_dtype_or_float32()
         .to_string();
     let metas = MetaFactory::new(&meta, &dtype);
 
@@ -3166,11 +3163,7 @@ fn decompose_unbind(graph: &mut IrGraph, id: NodeId) -> bool {
     };
     let rank = x_shape.len() as i64;
     let dim_norm = dim.rem_euclid(rank) as usize;
-    let dtype = graph.nodes[x_id]
-        .meta
-        .val_dtype()
-        .unwrap_or("torch.float32")
-        .to_string();
+    let dtype = graph.nodes[x_id].meta.val_dtype_or_float32().to_string();
     let name = graph.nodes[id].name.clone();
     let orig_meta = graph.nodes[id].meta.clone();
     let metas = MetaFactory::new(&orig_meta, &dtype);

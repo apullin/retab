@@ -57,20 +57,14 @@ impl IrPass for IrDecomposeLinearPass {
                 Some(s) => s.to_vec(),
                 None => continue,
             };
-            let output_dtype = graph.nodes[id]
-                .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
-                .to_string();
+            let output_dtype = graph.nodes[id].meta.val_dtype_or_float32().to_string();
             let input_dtype = graph.nodes[input_id]
                 .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
+                .val_dtype_or_float32()
                 .to_string();
             let weight_dtype = graph.nodes[weights_id]
                 .meta
-                .val_dtype()
-                .unwrap_or("torch.float32")
+                .val_dtype_or_float32()
                 .to_string();
 
             // Compute batch dimension: product of all dims except last.

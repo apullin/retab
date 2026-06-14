@@ -1047,6 +1047,14 @@ Deleted: pass-local `_to_dim_order_copy` / `aten._to_copy` target spelling from 
 Added: no new classifier API; `IrDecorateFpToIntCastPass` now reuses `NoopTarget::DtypeCheckedPassthrough`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over clamp, to_copy, and int64; Rust LOC check
 Note: Full Rust tests passed `134 passed`; focused Python smoke passed `94 passed, 2 expected xfails, 99 deselected`. No model lane was run. This is a tiny semantic-collapse slice that gives the `_to_copy` target family one owner.
+
+2026-06-14, defaulted tensor dtype grammar slice
+Rust LOC: 37,171 -> 37,144
+Movement: -27 Rust LOC
+Deleted: repeated `val_dtype().unwrap_or("torch.float32")` spelling from decomposition, indexing, pooling, sum, quant, and size-adjust passes; direct `NodeMeta::default().cloned_with_val(vec![], dtype)` scalar metadata construction from tril decomposition
+Added: `NodeMeta::val_dtype_or(default)`, `NodeMeta::val_dtype_or_float32()`, and `IrGraph::replace_with_call_function_with_val()`; reduction decompositions now reuse the existing anchored-with-value builder grammar
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over mean_dim, var, tril, cumsum, sum, addmm, linear, split, slice, slice_scatter, index_select, index_tensor, index_put, unfold_copy, as_strided_copy, repeat, pixel_shuffling, avg_pool2d, adaptive_avg_pool2d, and max_pool; Rust LOC check
+Note: Full Rust tests passed `134 passed`; focused Python smoke passed `754 passed, 20 expected xfails, 1420 deselected`. No model lane was run. The lone remaining direct float32 dtype fallback is layernorm's multi-source `output_meta -> input_meta -> float32` rule, which remains explicit because it encodes a different fallback chain.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1182,6 +1190,9 @@ that preserve existing tensor shape now use
 construction in `NodeMeta` internals rather than production pass restamp code.
 Indexed qparam slot stamping now also lives on `NodeMeta`, so simple single-slot
 input/output qparam assignment no longer requires ad hoc `HashMap` construction.
+Defaulted tensor dtype reads now also live on `NodeMeta` via
+`val_dtype_or(default)` and `val_dtype_or_float32()`, removing the repeated
+decomposition-pass spelling for "missing tensor dtype means float32".
 
 Problem:
 
@@ -1247,7 +1258,9 @@ plus alive/op guard. Mixed traversal now has explicit graph-query siblings:
 output-dim annotation, and int64-buffer cast planning use those helpers instead
 of local mixed-node snapshots. Control-flow metadata/contracts, duplicate
 placeholder fusion, fold-q/dq candidate collection, and table-op precompute
-candidate collection also reuse the shared graph queries. Remaining work should keep adding small builder/query
+candidate collection also reuse the shared graph queries. `IrGraph` also has
+value-metadata builder siblings for add, anchored add, and replacement
+call-function rewrites. Remaining work should keep adding small builder/query
 operations only when they replace repeated rewrite structure across several
 passes.
 
