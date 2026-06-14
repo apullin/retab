@@ -64,12 +64,7 @@ fn add_boundary_rescale(
 }
 
 fn boundary_placeholder_ids(graph: &fx_ir::IrGraph) -> Vec<fx_ir::NodeId> {
-    graph
-        .nodes
-        .iter()
-        .filter(|node| node.alive && node.op == fx_ir::NodeOp::Placeholder)
-        .map(|node| node.id)
-        .collect()
+    graph.live_placeholder_ids()
 }
 
 fn boundary_external_qparam(input: &BoundaryInputMeta) -> Option<fx_ir::QParam> {
@@ -168,7 +163,8 @@ fn collect_boundary_contracts_for_graph(
     contracts: &mut Vec<BoundaryContract>,
     while_body_regions: &mut BTreeSet<String>,
 ) {
-    for node in ir.nodes.iter().filter(|node| node.alive) {
+    for node_id in ir.live_node_ids() {
+        let node = ir.node(node_id);
         let is_cond = node.is_cond();
         let is_while = node.is_while_loop();
         if !is_cond && !is_while {
@@ -293,7 +289,8 @@ fn collect_output_contracts_for_graph(
     parent_region: Option<&str>,
     contracts: &mut Vec<OutputContract>,
 ) {
-    for node in ir.nodes.iter().filter(|node| node.alive) {
+    for node_id in ir.live_node_ids() {
+        let node = ir.node(node_id);
         let is_cond = node.is_cond();
         let is_while = node.is_while_loop();
         if !is_cond && !is_while {

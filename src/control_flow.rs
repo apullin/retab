@@ -63,7 +63,8 @@ pub(crate) fn collect_region_metadata(
             .iter()
             .map(|(name, (ir, _))| (Some(name.as_str()), ir)),
     ) {
-        for node in ir.nodes.iter().filter(|node| node.alive) {
+        for node_id in ir.live_node_ids() {
+            let node = ir.node(node_id);
             if !node.is_while_loop() {
                 continue;
             }

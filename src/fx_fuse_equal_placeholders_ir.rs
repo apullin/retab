@@ -10,7 +10,7 @@ fn placeholder_fingerprint(
     id: NodeId,
 ) -> Option<(String, crate::graph::ir::DType, Vec<i64>, Vec<u8>)> {
     let node = &graph.nodes[id];
-    if !node.alive || !matches!(node.op, NodeOp::Placeholder | NodeOp::GetAttr) {
+    if !matches!(node.op, NodeOp::Placeholder | NodeOp::GetAttr) {
         return None;
     }
     let tensor = node.tensor.as_ref()?;
@@ -31,7 +31,7 @@ pub fn find_duplicate_placeholder_pairs(graph: &IrGraph) -> Vec<(NodeId, NodeId)
     let mut buckets: HashMap<(String, crate::graph::ir::DType, Vec<i64>, Vec<u8>), Vec<NodeId>> =
         HashMap::new();
 
-    for id in 0..graph.nodes.len() {
+    for id in graph.live_node_ids() {
         let Some(key) = placeholder_fingerprint(graph, id) else {
             continue;
         };

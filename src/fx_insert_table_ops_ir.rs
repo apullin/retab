@@ -1,6 +1,4 @@
-use crate::fx_ir::{
-    EffectfulIrPass, EffectfulIrPassResult, IrArg, IrGraph, IrNode, NodeOp, QParam,
-};
+use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrArg, IrGraph, IrNode, QParam};
 use crate::graph::ir::DType;
 use crate::lowering_effects::{
     InsertPrecomputedTableOpEffect, LoweringEffect, LoweringEffectBatch, TableTensorSpec,
@@ -418,10 +416,13 @@ impl EffectfulIrPass for IrInsertTableOpsEffectPass {
 
     fn run(&self, graph: &mut IrGraph) -> EffectfulIrPassResult {
         let effects = graph
-            .nodes
-            .iter()
-            .filter(|node| node.alive && node.op == NodeOp::CallFunction && has_qparams(node))
-            .filter_map(|node| {
+            .live_call_function_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let node = graph.node(id);
+                if !has_qparams(node) {
+                    return None;
+                }
                 let spec = table_op_spec(node)?;
                 if let Some(effect) = plan_precomputed_table(node, &spec) {
                     return Some(LoweringEffect::InsertPrecomputedTableOp(effect));
@@ -443,7 +444,7 @@ impl EffectfulIrPass for IrInsertTableOpsEffectPass {
 
 #[cfg(test)]
 mod tests {
-    use crate::fx_ir::{IrGraph, NodeMeta, QParam};
+    use crate::fx_ir::{IrGraph, NodeMeta, NodeOp, QParam};
 
     use super::*;
 

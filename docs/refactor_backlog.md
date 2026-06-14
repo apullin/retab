@@ -1023,6 +1023,14 @@ Deleted: local mixed-node live traversal snapshots from memory-format rank/dim-o
 Added: `IrGraph::live_node_ids()`, `IrGraph::live_placeholder_ids()`, and `IrGraph::live_output_ids()` as graph-query siblings to `live_call_function_ids()`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over clamp, clone, conv2d, permute, to_copy, transpose_conv2d, view, dim_order, and int64; Rust LOC check
 Note: Full Rust tests passed `134 passed`; focused Python smoke passed `355 passed, 3 expected xfails, 809 deselected`. No model lane was run. This pays down the previous graph-query setup in memory-format without changing traversal order; reverse propagation still uses the live-node snapshot in reverse.
+
+2026-06-14, live-node query reuse slice
+Rust LOC: 37,153 -> 37,151
+Movement: -2 Rust LOC
+Deleted: remaining targeted local alive-node iteration from control-flow region metadata collection, control-flow boundary contract collection, duplicate-placeholder fusion, fold-q/dq candidate collection, and table-op precompute candidate collection
+Added: no new API; this reuses `IrGraph::live_node_ids()`, `live_placeholder_ids()`, and `live_call_function_ids()`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over add, cond, conv2d, gelu, linear, pow, sigmoid, tan, and while; Rust LOC check
+Note: Full Rust tests passed `134 passed`; focused Python smoke passed `370 passed, 4 expected xfails, 951 deselected`. No model lane was run. This is a small consistency slice, not a major LOC reduction.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1218,7 +1226,9 @@ and 46 pass loops use it instead of spelling a local `0..nodes.len()` snapshot
 plus alive/op guard. Mixed traversal now has explicit graph-query siblings:
 `live_node_ids`, `live_placeholder_ids`, and `live_output_ids`. Memory-format,
 output-dim annotation, and int64-buffer cast planning use those helpers instead
-of local mixed-node snapshots. Remaining work should keep adding small builder/query
+of local mixed-node snapshots. Control-flow metadata/contracts, duplicate
+placeholder fusion, fold-q/dq candidate collection, and table-op precompute
+candidate collection also reuse the shared graph queries. Remaining work should keep adding small builder/query
 operations only when they replace repeated rewrite structure across several
 passes.
 

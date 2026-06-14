@@ -374,10 +374,9 @@ pub struct IrFoldQdqPass;
 impl IrFoldQdqPass {
     pub(crate) fn candidate_node_ids(&self, graph: &IrGraph) -> Vec<usize> {
         graph
-            .nodes
-            .iter()
-            .filter(|node| node.alive && is_foldable_node(node))
-            .map(|node| node.id)
+            .live_node_ids()
+            .into_iter()
+            .filter(|&id| is_foldable_node(graph.node(id)))
             .collect()
     }
 }
