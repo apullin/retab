@@ -10,6 +10,29 @@ small batches with full validation.
 
 ## Tracking Policy
 
+## Current Burn-Down Queue
+
+As of 2026-06-14, the original architecture backlog is mostly closed. The
+remaining work should be treated as a small burn-down queue, not permission for
+a broad rewrite.
+
+Recommended order:
+
+1. Tensor metadata grammar. Highest remaining simplification potential. Continue
+   collapsing direct shape, dtype, qparam, layout, and table-fact manipulation
+   behind `NodeMeta` helpers or a future `TensorFacts` layer only where it
+   deletes repeated production code.
+2. IR rewrite builders. Keep extracting graph-surgery helpers when the same
+   add/copy/anchor/replace/erase pattern appears in multiple passes.
+3. Target grammar. Migrate raw target-string predicates only by domain and only
+   when the helper replaces multiple call sites or removes a risky substring
+   rule.
+4. Python boundary grammar. The inlet is already much cleaner; remaining work
+   is lower priority and should focus on Python import/object construction or
+   new dynamic `GraphModule` reads.
+5. Bookkeeping. Keep this file current by marking large items substantially
+   complete once only opportunistic follow-through remains.
+
 Track every refactor slice with both validation evidence and LOC movement.
 LOC is not the only objective, but it is a useful proxy for whether a refactor
 is actually collapsing duplicated structure rather than just moving it around.
@@ -1525,7 +1548,7 @@ Note: Full Rust tests passed `141 passed`; focused Python smoke passed `258 pass
 
 Status:
 
-Initial slice started. `src/fx_target.rs` owns the first rewrite-IR target
+Substantially complete. `src/fx_target.rs` owns the first rewrite-IR target
 classifier, and `IrNode` exposes classifier-backed predicates for Q/DQ,
 TOSA RESCALE, and ATen mm/bmm accumulator cases. The Q/DQ rescale pass and
 mm/bmm rescale pass have been migrated to those predicates. Fold-q/dq now uses
@@ -1655,7 +1678,8 @@ Add focused Rust tests or Python smoke tests for ambiguous target strings.
 
 Status:
 
-Initial slice started. `NodeMeta::set_empty_qparam_maps` names the common
+Substantially complete as helper grammar; full `TensorFacts` remains a separate
+design decision. `NodeMeta::set_empty_qparam_maps` names the common
 "present but empty" qparam-map operation, and `NodeMeta::tensor(shape, dtype)`
 now names fresh tensor-valued metadata construction. This is deliberately
 smaller than a full `TensorFacts` abstraction because qparam propagation and
@@ -1774,7 +1798,8 @@ metadata behavior changes.
 
 Status:
 
-Initial graph-query slice started. `IrGraph::live_call_function_ids()` now
+Substantially complete as a graph-query and small-builder grammar; continue only
+with deletion-backed helper slices. `IrGraph::live_call_function_ids()` now
 owns the common "snapshot live call_function nodes before mutating" traversal,
 and 46 pass loops use it instead of spelling a local `0..nodes.len()` snapshot
 plus alive/op guard. Mixed traversal now has explicit graph-query siblings:
@@ -1991,8 +2016,9 @@ Any remaining hits should be intentional and documented.
 
 Status:
 
-Initial slices complete. `src/fx_py_attr.rs` now owns `AttrView` and
-`MetaView`, the first typed wrapper API for Python boundary reads.
+Substantially complete for Python boundary reads. `src/fx_py_attr.rs` now owns
+`AttrView` and `MetaView`, the first typed wrapper API for Python boundary
+reads.
 `AttrView` covers both required/error-propagating attrs and lossy/defaulting
 attrs. `MetaView` covers metadata-dict reads. `ItemView` now covers keyed and
 indexed Python item access plus lossy typed and untyped pair iteration for
