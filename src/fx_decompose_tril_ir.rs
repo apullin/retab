@@ -3,6 +3,7 @@
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::fx_target::is_tril_target;
+use crate::graph::ir::DType;
 use crate::runner_logging::log_line;
 
 /// Decompose a single tril node into primitive ops on the IrGraph.
@@ -95,7 +96,7 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
     );
 
     // --- result: bool input -> bitwise_and, else -> where(mask, input, zero) ---
-    let is_bool = input_dtype.contains("bool");
+    let is_bool = graph.nodes[input_id].meta.val_dtype_is(DType::Bool);
 
     let result = if is_bool {
         graph.add_node(

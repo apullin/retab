@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::fx_ir;
 use crate::fx_target::is_tosa_transpose_target;
+use crate::graph::ir::DType;
 use crate::StashedPipeline;
 
 use super::{collect_region_metadata, metadata, region_name_from_ir_arg};
@@ -709,10 +710,7 @@ fn strip_while_cond_output_rescales_ir(graph: &mut fx_ir::IrGraph) -> u32 {
         let Some(src_id) = graph.nodes[rescale_id].first_node_arg() else {
             continue;
         };
-        let source_is_bool = graph.nodes[src_id]
-            .meta
-            .val_dtype()
-            .is_some_and(|dtype| dtype.contains("bool"));
+        let source_is_bool = graph.nodes[src_id].meta.val_dtype_is(DType::Bool);
         if !source_is_bool && !graph.nodes[rescale_id].name.contains("_carried_rescale") {
             continue;
         }

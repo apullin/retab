@@ -1311,6 +1311,14 @@ Deleted: repeated `val_dtype().map(DType::from_torch_str)` spellings from zero-i
 Added: `NodeMeta::val_dtype_kind()`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_fuse_zero_input_constants_ir::tests`; `cargo test --lib fx_insert_conv_rescale_ir::tests`; `cargo test --lib fx_insert_int32_rescale_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over abs, add, arange, conv2d, conv3d, eye, full, linear, mul, ones, sum, where, and zeros; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `508 passed, 7 skipped, 1 expected xfail, 1220 deselected`. No model lane was run. This is setup-positive, but it moves typed tensor-metadata dtype parsing behind `NodeMeta` instead of making passes parse dtype strings themselves.
+
+2026-06-14, bool dtype predicate cleanup slice
+Rust LOC: 36,831 -> 36,837
+Movement: +6 Rust LOC
+Deleted: raw bool dtype substring checks from index-tensor decomposition, strided-slice decomposition, tril decomposition, and control-flow while-cond output rescale stripping
+Added: `NodeMeta::val_dtype_is(...)`
+Validation: `cargo fmt --check`; `cargo check --lib`; focused Rust filters for index tensor, strided slice, tril, and control flow; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over index tensor, slice, tril, cond, and while; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `121 passed, 19 expected xfails, 163 deselected`. No model lane was run. This is setup-positive by LOC, but it collapses the bool dtype grammar behind the metadata accessor and leaves only two intentional raw dtype-range parsing sites for a later dtype-domain helper.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1469,8 +1477,9 @@ real pass-specific invariant. `DType` now owns torch dtype-string parsing via
 `DType::from_torch_str`, and `QParam` exposes typed dtype access via
 `QParam::dtype()`/`is_integer_dtype()` so constant and serializer conversion
 paths no longer treat `tensor_data` as the dtype grammar owner. Tensor metadata
-also exposes `NodeMeta::val_dtype_kind()`, so passes that need typed dtype
-logic should not parse `val_dtype()` strings directly.
+also exposes `NodeMeta::val_dtype_kind()` and `NodeMeta::val_dtype_is(...)`, so
+passes that need typed dtype logic should not parse `val_dtype()` strings
+directly.
 
 Problem:
 

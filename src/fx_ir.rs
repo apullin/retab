@@ -1492,6 +1492,10 @@ impl NodeMeta {
         self.val_dtype().map(DType::from_torch_str)
     }
 
+    pub fn val_dtype_is(&self, dtype: DType) -> bool {
+        self.val_dtype_kind() == Some(dtype)
+    }
+
     pub fn val_dtype_or<'a>(&'a self, default: &'a str) -> &'a str {
         self.val_dtype().unwrap_or(default)
     }

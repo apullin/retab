@@ -3,6 +3,7 @@
 use crate::fx_index_linear::{build_linear_index, packed_linear_scales, LinearIndexSpec};
 use crate::fx_ir::{broadcast_shapes, i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId};
 use crate::fx_target::is_index_tensor_target;
+use crate::graph::ir::DType;
 use crate::runner_logging::log_line;
 
 fn compute_index_output_shape(
@@ -153,7 +154,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
 
             // TOSA GATHER does not support BOOL data; gather as INT8 and cast the
             // result back to BOOL below.
-            let x_is_bool = x_dtype.contains("bool");
+            let x_is_bool = graph.nodes[x_id].meta.val_dtype_is(DType::Bool);
             let gather_dtype: String = if x_is_bool {
                 "torch.int8".to_string()
             } else {

@@ -2,6 +2,7 @@
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_slice_tensor_target;
+use crate::graph::ir::DType;
 use crate::runner_logging::log_line;
 
 fn fixup_start(start: Option<i64>, dim_size: i64) -> i64 {
@@ -81,6 +82,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
 
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
+            let is_bool_dtype = graph.nodes[input_id].meta.val_dtype_is(DType::Bool);
             let dtype = graph.nodes[input_id]
                 .meta
                 .val_dtype_or_float32()
@@ -114,7 +116,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                     .enumerate()
                     .map(|(i, &s)| if i == dim { pad_right } else { s })
                     .collect();
-                let fill_val = if dtype.contains("bool") {
+                let fill_val = if is_bool_dtype {
                     IrArg::Bool(false)
                 } else {
                     IrArg::Int(0)
