@@ -348,44 +348,78 @@ mod tests {
         meta
     }
 
-    #[test]
-    fn inserts_per_channel_rescale_after_tosa_conv() {
-        let mut graph = IrGraph::empty();
-        let input = graph.add_node(
+    fn tensor_meta(shape: &[i64], dtype: &str) -> NodeMeta {
+        NodeMeta::tensor(shape, dtype)
+    }
+
+    fn int8_activation_meta() -> NodeMeta {
+        tensor_meta(&[1, 4, 8, 8], "torch.int8")
+    }
+
+    fn placeholder(graph: &mut IrGraph, name: &str, shape: &[i64], dtype: &str) -> NodeId {
+        graph.add_node(
             NodeOp::Placeholder,
-            "input".to_string(),
-            "input".to_string(),
+            name.to_string(),
+            name.to_string(),
             Vec::new(),
-            NodeMeta::tensor(&[1, 3, 8, 8], "torch.int8"),
-        );
-        let weight = graph.add_node(
-            NodeOp::Placeholder,
-            "weight".to_string(),
-            "weight".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[4, 3, 3, 3], "torch.int8"),
-        );
-        let conv = graph.add_node(
+            tensor_meta(shape, dtype),
+        )
+    }
+
+    fn call(
+        graph: &mut IrGraph,
+        name: &str,
+        target: &str,
+        args: Vec<IrArg>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        graph.add_node(
             NodeOp::CallFunction,
-            "conv".to_string(),
-            "backend.tosa.CONV2D.default".to_string(),
-            vec![IrArg::Node(input), IrArg::Node(weight), IrArg::None],
-            quantized_conv_meta(),
-        );
-        let user = graph.add_node(
-            NodeOp::CallFunction,
-            "user".to_string(),
-            "aten.view_copy.default".to_string(),
-            vec![IrArg::Node(conv)],
-            NodeMeta::tensor(&[1, 4, 8, 8], "torch.int8"),
-        );
+            name.to_string(),
+            target.to_string(),
+            args,
+            meta,
+        )
+    }
+
+    fn output(graph: &mut IrGraph, input: NodeId) -> NodeId {
         graph.add_node(
             NodeOp::Output,
             "output".to_string(),
             "output".to_string(),
-            vec![IrArg::Node(user)],
+            vec![IrArg::Node(input)],
             NodeMeta::default(),
+        )
+    }
+
+    fn int8_conv(graph: &mut IrGraph, target: &str, meta: NodeMeta) -> NodeId {
+        let input = placeholder(graph, "input", &[1, 3, 8, 8], "torch.int8");
+        let weight = placeholder(graph, "weight", &[4, 3, 3, 3], "torch.int8");
+        call(
+            graph,
+            "conv",
+            target,
+            vec![IrArg::Node(input), IrArg::Node(weight), IrArg::None],
+            meta,
+        )
+    }
+
+    #[test]
+    fn inserts_per_channel_rescale_after_tosa_conv() {
+        let mut graph = IrGraph::empty();
+        let conv = int8_conv(
+            &mut graph,
+            "backend.tosa.CONV2D.default",
+            quantized_conv_meta(),
         );
+        let user = call(
+            &mut graph,
+            "user",
+            "aten.view_copy.default",
+            vec![IrArg::Node(conv)],
+            int8_activation_meta(),
+        );
+        output(&mut graph, user);
 
         assert!(IrInsertConvAccumulatorRescalePass.run(&mut graph));
 
@@ -417,45 +451,19 @@ mod tests {
     #[test]
     fn inserts_after_raw_conv_using_consumer_input_qparam() {
         let mut graph = IrGraph::empty();
-        let input = graph.add_node(
-            NodeOp::Placeholder,
-            "input".to_string(),
-            "input".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[1, 3, 8, 8], "torch.int8"),
-        );
-        let weight = graph.add_node(
-            NodeOp::Placeholder,
-            "weight".to_string(),
-            "weight".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[4, 3, 3, 3], "torch.int8"),
-        );
         let mut conv_meta = quantized_conv_meta();
         conv_meta.output_qparams = None;
-        let conv = graph.add_node(
-            NodeOp::CallFunction,
-            "conv".to_string(),
-            "aten.conv2d.padding".to_string(),
-            vec![IrArg::Node(input), IrArg::Node(weight), IrArg::None],
-            conv_meta,
-        );
-        let mut table_meta = NodeMeta::tensor(&[1, 4, 8, 8], "torch.int8");
+        let conv = int8_conv(&mut graph, "aten.conv2d.padding", conv_meta);
+        let mut table_meta = int8_activation_meta();
         table_meta.set_single_input_qparam(qparam(0.125, 7, "torch.int8"));
-        let table = graph.add_node(
-            NodeOp::CallFunction,
-            "table".to_string(),
-            "backend.tosa.TABLE.default".to_string(),
+        let table = call(
+            &mut graph,
+            "table",
+            "backend.tosa.TABLE.default",
             vec![IrArg::Node(conv)],
             table_meta,
         );
-        graph.add_node(
-            NodeOp::Output,
-            "output".to_string(),
-            "output".to_string(),
-            vec![IrArg::Node(table)],
-            NodeMeta::default(),
-        );
+        output(&mut graph, table);
 
         assert!(IrInsertConvAccumulatorRescalePass.run(&mut graph));
 
@@ -469,55 +477,29 @@ mod tests {
     #[test]
     fn prefers_downstream_activation_output_qparam_over_layout_input_qparam() {
         let mut graph = IrGraph::empty();
-        let input = graph.add_node(
-            NodeOp::Placeholder,
-            "input".to_string(),
-            "input".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[1, 3, 8, 8], "torch.int8"),
-        );
-        let weight = graph.add_node(
-            NodeOp::Placeholder,
-            "weight".to_string(),
-            "weight".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[4, 3, 3, 3], "torch.int8"),
-        );
         let mut conv_meta = quantized_conv_meta();
         conv_meta.output_qparams = None;
-        let conv = graph.add_node(
-            NodeOp::CallFunction,
-            "conv".to_string(),
-            "backend.tosa.CONV2D.default".to_string(),
-            vec![IrArg::Node(input), IrArg::Node(weight), IrArg::None],
-            conv_meta,
-        );
-        let mut transpose_meta = NodeMeta::tensor(&[1, 4, 8, 8], "torch.int8");
+        let conv = int8_conv(&mut graph, "backend.tosa.CONV2D.default", conv_meta);
+        let mut transpose_meta = int8_activation_meta();
         transpose_meta.set_single_input_qparam(qparam(0.125, 7, "torch.int8"));
-        let transpose = graph.add_node(
-            NodeOp::CallFunction,
-            "transpose".to_string(),
-            "aten.permute_copy.default".to_string(),
+        let transpose = call(
+            &mut graph,
+            "transpose",
+            "aten.permute_copy.default",
             vec![IrArg::Node(conv)],
             transpose_meta,
         );
-        let mut clamp_meta = NodeMeta::tensor(&[1, 4, 8, 8], "torch.int8");
+        let mut clamp_meta = int8_activation_meta();
         clamp_meta.set_single_input_qparam(qparam(0.125, 7, "torch.int8"));
         clamp_meta.set_single_output_qparam(qparam(0.25, -128, "torch.int8"));
-        let clamp = graph.add_node(
-            NodeOp::CallFunction,
-            "clamp".to_string(),
-            "aten.clamp.default".to_string(),
+        let clamp = call(
+            &mut graph,
+            "clamp",
+            "aten.clamp.default",
             vec![IrArg::Node(transpose), IrArg::Int(0), IrArg::None],
             clamp_meta,
         );
-        graph.add_node(
-            NodeOp::Output,
-            "output".to_string(),
-            "output".to_string(),
-            vec![IrArg::Node(clamp)],
-            NodeMeta::default(),
-        );
+        output(&mut graph, clamp);
 
         assert!(IrInsertConvAccumulatorRescalePass.run(&mut graph));
 
@@ -542,33 +524,17 @@ mod tests {
     #[test]
     fn skips_when_downstream_rescale_already_exists() {
         let mut graph = IrGraph::empty();
-        let input = graph.add_node(
-            NodeOp::Placeholder,
-            "input".to_string(),
-            "input".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[1, 3, 8, 8], "torch.int8"),
-        );
-        let weight = graph.add_node(
-            NodeOp::Placeholder,
-            "weight".to_string(),
-            "weight".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[4, 3, 3, 3], "torch.int8"),
-        );
-        let conv = graph.add_node(
-            NodeOp::CallFunction,
-            "conv".to_string(),
-            "backend.tosa.CONV2D.default".to_string(),
-            vec![IrArg::Node(input), IrArg::Node(weight), IrArg::None],
+        let conv = int8_conv(
+            &mut graph,
+            "backend.tosa.CONV2D.default",
             quantized_conv_meta(),
         );
-        graph.add_node(
-            NodeOp::CallFunction,
-            "existing_rescale".to_string(),
-            "backend.tosa.RESCALE.default".to_string(),
+        call(
+            &mut graph,
+            "existing_rescale",
+            "backend.tosa.RESCALE.default",
             vec![IrArg::Node(conv)],
-            NodeMeta::tensor(&[1, 4, 8, 8], "torch.int8"),
+            int8_activation_meta(),
         );
 
         assert!(!IrInsertConvAccumulatorRescalePass.run(&mut graph));
@@ -577,31 +543,15 @@ mod tests {
     #[test]
     fn inserts_before_downstream_int32_rescale() {
         let mut graph = IrGraph::empty();
-        let input = graph.add_node(
-            NodeOp::Placeholder,
-            "input".to_string(),
-            "input".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[1, 3, 8, 8], "torch.int8"),
-        );
-        let weight = graph.add_node(
-            NodeOp::Placeholder,
-            "weight".to_string(),
-            "weight".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[4, 3, 3, 3], "torch.int8"),
-        );
-        let conv = graph.add_node(
-            NodeOp::CallFunction,
-            "conv".to_string(),
-            "backend.tosa.CONV2D.default".to_string(),
-            vec![IrArg::Node(input), IrArg::Node(weight), IrArg::None],
+        let conv = int8_conv(
+            &mut graph,
+            "backend.tosa.CONV2D.default",
             quantized_conv_meta(),
         );
-        graph.add_node(
-            NodeOp::CallFunction,
-            "add_arg1_int32_rescale".to_string(),
-            "backend.tosa.RESCALE.default".to_string(),
+        call(
+            &mut graph,
+            "add_arg1_int32_rescale",
+            "backend.tosa.RESCALE.default",
             vec![
                 IrArg::Node(conv),
                 IrArg::Dtype("torch.int32".to_string()),
@@ -609,7 +559,7 @@ mod tests {
                 IrArg::Int(7),
                 IrArg::Int(0),
             ],
-            NodeMeta::tensor(&[1, 4, 8, 8], "torch.int32"),
+            tensor_meta(&[1, 4, 8, 8], "torch.int32"),
         );
 
         assert!(IrInsertConvAccumulatorRescalePass.run(&mut graph));

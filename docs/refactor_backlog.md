@@ -1593,12 +1593,20 @@ Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`
 Note: Full Rust tests passed `141 passed`. This slice changes only Rust test scaffolding, so no Python lane was required. The helpers are local to the large decompose-op test module and deliberately avoid a cross-module test framework.
 
 2026-06-14, LoC-first fold-q/dq fixture cleanup slice
-Rust LOC: 36,138 -> 36,069
-Movement: -69 Rust LOC
+Rust LOC: 36,138 -> 36,064
+Movement: -74 Rust LOC
 Deleted: repeated fold-q/dq test qparam argument vectors, placeholder setup, output setup, and annotated metadata construction
 Added: local fold-q/dq test helpers for annotated metadata, int8/int32 q/dq argument vectors, placeholders, q/dq call nodes, and outputs
 Validation: `cargo fmt`; `cargo test --lib fx_fold_qdq_ir::tests`; `cargo check --lib`
 Note: Focused fold-q/dq Rust tests passed `8 passed`. This remains a local test-fixture cleanup and does not add a shared testing framework.
+
+2026-06-14, LoC-first conv-rescale fixture cleanup slice
+Rust LOC: 36,064 -> 36,014
+Movement: -50 Rust LOC
+Deleted: repeated int8 conv-rescale test setup for input placeholders, weight placeholders, conv calls, output nodes, and shared activation metadata
+Added: local conv-rescale test helpers for tensor metadata, placeholders, calls, outputs, and the common int8 conv fixture
+Validation: `cargo fmt`; `cargo test --lib fx_insert_conv_rescale_ir::tests`; `cargo check --lib`
+Note: Focused conv-rescale Rust tests passed `6 passed`. The int16 bias-convolution test remains explicit because its fixture carries distinct bias and qparam semantics.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
