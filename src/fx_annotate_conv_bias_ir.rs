@@ -14,10 +14,7 @@ fn needs_int16_activation_bias_decomposition(node: &crate::fx_ir::IrNode) -> boo
     if !matches!(node.args.get(2), Some(IrArg::Node(_))) {
         return false;
     }
-    let Some(input_qparams) = node.meta.input_qparams.as_ref() else {
-        return false;
-    };
-    let Some(input_qp) = input_qparams.get(&0) else {
+    let Some(input_qp) = node.meta.input_qparam_at(0) else {
         return false;
     };
     let Some(output_qp) = node.meta.output_qparam() else {

@@ -1255,6 +1255,14 @@ Deleted: pass-local `single_output_qparam(...)` wrapper in grouped-conv decompos
 Added: no new helper surface; grouped-conv redundant-boundary cleanup now uses `NodeMeta::output_qparam()` directly
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_decompose_grouped_conv_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv_constant_pad_nd, conv1d, conv2d, conv3d, depthwise_conv, linear, and transpose_conv2d; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `419 passed, 2 expected xfails, 1341 deselected`. No model lane was run. This is a deletion-only Tensor Facts cleanup: a one-line local alias was weaker than the shared metadata vocabulary and did not deserve promotion.
+
+2026-06-14, exact-slot input qparam cleanup slice
+Rust LOC: 36,817 -> 36,811
+Movement: -6 Rust LOC
+Deleted: direct `input_qparams.as_ref().get(...)` slot reads in conv-bias annotation and int32 where-output rescale insertion
+Added: no new helper surface; these passes now use the existing `NodeMeta::input_qparam_at(...)` grammar
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_annotate_conv_bias_ir::tests`; `cargo test --lib fx_insert_int32_rescale_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over abs, add, conv2d, conv3d, linear, mul, sum, and where; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `445 passed, 1 expected xfail, 1146 deselected`. No model lane was run. This is a deletion-only Tensor Facts cleanup that keeps exact-slot qparam reads out of production pass field access.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

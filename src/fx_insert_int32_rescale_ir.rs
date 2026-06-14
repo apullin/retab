@@ -270,13 +270,10 @@ fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
         return false;
     }
 
-    let Some(input_qparams) = node.meta.input_qparams.as_ref() else {
+    let Some(then_qparam) = node.meta.input_qparam_at(1).cloned() else {
         return false;
     };
-    let Some(then_qparam) = input_qparams.get(&1).cloned() else {
-        return false;
-    };
-    let Some(else_qparam) = input_qparams.get(&2) else {
+    let Some(else_qparam) = node.meta.input_qparam_at(2) else {
         return false;
     };
     let Some(output_qparam) = node.meta.output_qparam().cloned() else {
