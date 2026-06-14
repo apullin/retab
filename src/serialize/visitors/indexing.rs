@@ -46,10 +46,11 @@ impl ParsedSelectCopySpec {
     fn parse(graph: &Graph, node: &Node, store: &TensorStore) -> Self {
         let input_names = collect_input_names(graph, node);
         let input_name = input_names.first().cloned().unwrap_or_default();
-        let input_node = match node.args.first() {
-            Some(Arg::Node(id)) => graph.node(*id),
-            _ => None,
-        };
+        let input_node = node
+            .args
+            .first()
+            .and_then(Arg::as_node)
+            .and_then(|id| graph.node(id));
         let input_shape = input_node
             .map(|n| actual_tensor_shape(graph, store, n))
             .unwrap_or_else(|| raw_i32_shape(node));
@@ -152,10 +153,11 @@ impl ParsedSliceSpec {
     fn parse(graph: &Graph, node: &Node, store: &TensorStore) -> Self {
         let input_names = collect_input_names(graph, node);
         let input_name = input_names.first().cloned().unwrap_or_default();
-        let input_node = match node.args.first() {
-            Some(Arg::Node(id)) => graph.node(*id),
-            _ => None,
-        };
+        let input_node = node
+            .args
+            .first()
+            .and_then(Arg::as_node)
+            .and_then(|id| graph.node(id));
         let input_shape = input_node
             .map(|n| actual_tensor_shape(graph, store, n))
             .unwrap_or_else(|| raw_i32_shape(node));

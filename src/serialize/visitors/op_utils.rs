@@ -4,10 +4,7 @@ fn emitted_binary_input_shapes(graph: &Graph, store: &TensorStore, node: &Node) 
     let input_nodes: Vec<&Node> = node
         .args
         .iter()
-        .filter_map(|arg| match arg {
-            Arg::Node(id) => graph.node(*id),
-            _ => None,
-        })
+        .filter_map(|arg| graph.node(arg.as_node()?))
         .take(2)
         .collect();
     if input_nodes.len() < 2 {
@@ -150,10 +147,7 @@ pub(super) fn emit_bool_binary(
     let mut inputs = collect_binary_input_names(graph, store, node, &mut result);
     let (logical_shape, emitted_shape) = binary_output_shapes(graph, store, node);
     for (idx, arg) in node.args.iter().enumerate().take(inputs.len()) {
-        let Some(input_node) = (match arg {
-            Arg::Node(id) => graph.node(*id),
-            _ => None,
-        }) else {
+        let Some(input_node) = arg.as_node().and_then(|id| graph.node(id)) else {
             continue;
         };
         let semantic_dtype = node_output_dtype(input_node);

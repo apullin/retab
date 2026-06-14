@@ -39,10 +39,8 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
     let input_shape = node
         .args
         .first()
-        .and_then(|arg| match arg {
-            Arg::Node(id) => graph.node(*id),
-            _ => None,
-        })
+        .and_then(Arg::as_node)
+        .and_then(|id| graph.node(id))
         .map(|input_node| actual_tensor_shape(graph, store, input_node))
         .unwrap_or_else(|| raw_i32_shape(node));
     let pad = arg_i32_list(node, 1);

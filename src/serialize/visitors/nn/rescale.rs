@@ -34,10 +34,12 @@ fn is_depthwise_aten_conv2d(graph: &Graph, store: &TensorStore, node: &Node) -> 
     if groups <= 1 {
         return false;
     }
-    let Some(weight_node) = node.args.get(1).and_then(|arg| match arg {
-        Arg::Node(id) => graph.node(*id),
-        _ => None,
-    }) else {
+    let Some(weight_node) = node
+        .args
+        .get(1)
+        .and_then(Arg::as_node)
+        .and_then(|id| graph.node(id))
+    else {
         return false;
     };
 

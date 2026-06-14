@@ -3,10 +3,7 @@ use super::*;
 fn first_tensor_ir_dtype(graph: &Graph, node: &Node) -> crate::graph::ir::DType {
     node.args
         .iter()
-        .find_map(|arg| match arg {
-            Arg::Node(id) => graph.node(*id).map(|input| input.meta.val.dtype),
-            _ => None,
-        })
+        .find_map(|arg| graph.node(arg.as_node()?).map(|input| input.meta.val.dtype))
         .unwrap_or(node.meta.val.dtype)
 }
 
@@ -75,10 +72,7 @@ pub(super) fn maybe_materialize_binary_broadcast(
     let input_nodes: Vec<&Node> = node
         .args
         .iter()
-        .filter_map(|arg| match arg {
-            Arg::Node(id) => graph.node(*id),
-            _ => None,
-        })
+        .filter_map(|arg| graph.node(arg.as_node()?))
         .collect();
     if input_nodes.len() < 2 {
         return;

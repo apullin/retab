@@ -99,10 +99,11 @@ fn logical_weight_shape<'a>(graph: &'a Graph, mut weight_node: &'a Node) -> &'a 
             | OpTarget::Permute
             | OpTarget::Reshape
             | OpTarget::TosaReshape
-            | OpTarget::View => weight_node.args.first().and_then(|arg| match arg {
-                Arg::Node(id) => graph.node(*id),
-                _ => None,
-            }),
+            | OpTarget::View => weight_node
+                .args
+                .first()
+                .and_then(Arg::as_node)
+                .and_then(|id| graph.node(id)),
             _ => None,
         };
         let Some(next) = next else {
@@ -122,10 +123,12 @@ fn is_depthwise_aten_conv2d(graph: &Graph, store: &TensorStore, node: &Node, gro
         return matches!(&conv_info_entry.1, Arg::Int(v) if *v != 0);
     }
 
-    let Some(input_node) = node.args.first().and_then(|arg| match arg {
-        Arg::Node(id) => graph.node(*id),
-        _ => None,
-    }) else {
+    let Some(input_node) = node
+        .args
+        .first()
+        .and_then(Arg::as_node)
+        .and_then(|id| graph.node(id))
+    else {
         return false;
     };
 
@@ -139,10 +142,12 @@ fn is_depthwise_aten_conv2d(graph: &Graph, store: &TensorStore, node: &Node, gro
         return false;
     }
 
-    let Some(weight_node) = node.args.get(1).and_then(|arg| match arg {
-        Arg::Node(id) => graph.node(*id),
-        _ => None,
-    }) else {
+    let Some(weight_node) = node
+        .args
+        .get(1)
+        .and_then(Arg::as_node)
+        .and_then(|id| graph.node(id))
+    else {
         return false;
     };
 

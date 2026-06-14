@@ -314,6 +314,13 @@ impl Arg {
         }
     }
 
+    pub fn as_node(&self) -> Option<NodeId> {
+        match self {
+            Arg::Node(id) => Some(*id),
+            _ => None,
+        }
+    }
+
     pub fn as_int_list(&self) -> Option<&[i64]> {
         match self {
             Arg::IntList(values) => Some(values.as_slice()),

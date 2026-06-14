@@ -48,10 +48,11 @@ impl ParsedReduceSpec {
             .first()
             .cloned()
             .unwrap_or_default();
-        let input_node = match node.args.first() {
-            Some(Arg::Node(id)) => graph.node(*id),
-            _ => None,
-        };
+        let input_node = node
+            .args
+            .first()
+            .and_then(Arg::as_node)
+            .and_then(|id| graph.node(id));
         let input_shape = input_node
             .map(|n| actual_tensor_shape(graph, store, n))
             .unwrap_or_default();

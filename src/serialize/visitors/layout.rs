@@ -270,6 +270,35 @@ fn conv_tosa_pad_remainder(
     (input_len + pad_before + pad_after - dilation * (kernel - 1) - 1) % stride
 }
 
+fn conv_spatial_inputs_and_kernels(
+    graph: &Graph,
+    store: &TensorStore,
+    node: &Node,
+    spatial_rank: usize,
+) -> Option<(Vec<i32>, Vec<i32>)> {
+    let tensor_rank = spatial_rank + 2;
+    let input_node = graph.node(node.args.first()?.as_node()?)?;
+    let weight_node = graph.node(node.args.get(1)?.as_node()?)?;
+
+    let input_shape = actual_tensor_shape(graph, store, input_node);
+    let weight_shape = actual_tensor_shape(graph, store, weight_node);
+    if input_shape.len() != tensor_rank || weight_shape.len() != tensor_rank {
+        return None;
+    }
+
+    let input_channels = *input_shape.get(spatial_rank + 1)?;
+    let kernel_start = if weight_shape.get(spatial_rank + 1).copied() == Some(input_channels) {
+        1
+    } else {
+        2
+    };
+    let input_dims = input_shape.get(1..1 + spatial_rank)?.to_vec();
+    let kernels = weight_shape
+        .get(kernel_start..kernel_start + spatial_rank)?
+        .to_vec();
+    Some((input_dims, kernels))
+}
+
 fn same_padding_pair(input_len: i32, kernel: i32, stride: i32, dilation: i32) -> (i32, i32) {
     let out_len = (input_len + stride - 1) / stride;
     let needed = ((out_len - 1) * stride + dilation * (kernel - 1) + 1 - input_len).max(0);
@@ -294,40 +323,15 @@ pub(super) fn adjusted_tosa_pad_for_raw_aten_conv(
         vec![0, 0, 0, 0]
     };
 
-    let Some(input_id) = node.args.first().and_then(|arg| match arg {
-        Arg::Node(id) => Some(*id),
-        _ => None,
-    }) else {
-        return symmetric_pad;
-    };
-    let Some(weight_id) = node.args.get(1).and_then(|arg| match arg {
-        Arg::Node(id) => Some(*id),
-        _ => None,
-    }) else {
-        return symmetric_pad;
-    };
-    let Some(input_node) = graph.node(input_id) else {
-        return symmetric_pad;
-    };
-    let Some(weight_node) = graph.node(weight_id) else {
+    let Some((input_dims, kernel_dims)) = conv_spatial_inputs_and_kernels(graph, store, node, 2)
+    else {
         return symmetric_pad;
     };
 
-    let input_shape = actual_tensor_shape(graph, store, input_node);
-    let weight_shape = actual_tensor_shape(graph, store, weight_node);
-    if input_shape.len() != 4 || weight_shape.len() != 4 {
-        return symmetric_pad;
-    }
-
-    let input_channels = *input_shape.get(3).unwrap_or(&0);
-    let (kernel_h, kernel_w) = if weight_shape.get(3).copied().unwrap_or(0) == input_channels {
-        (weight_shape[1], weight_shape[2])
-    } else {
-        (weight_shape[2], weight_shape[3])
-    };
-
-    let input_h = input_shape[1];
-    let input_w = input_shape[2];
+    let input_h = input_dims[0];
+    let input_w = input_dims[1];
+    let kernel_h = kernel_dims[0];
+    let kernel_w = kernel_dims[1];
     let stride_h = *stride.first().unwrap_or(&1);
     let stride_w = *stride.get(1).unwrap_or(&stride_h);
     let dilation_h = *dilation.first().unwrap_or(&1);
@@ -363,6 +367,45 @@ pub(super) fn adjusted_tosa_pad_for_raw_aten_conv(
     vec![pad_h, pad_bottom, pad_w, pad_right]
 }
 
+fn adjusted_tosa_pad_for_emitted_conv_spatial(
+    graph: &Graph,
+    store: &TensorStore,
+    node: &Node,
+    pad: &[i32],
+    stride: &[i32],
+    dilation: &[i32],
+    spatial_rank: usize,
+) -> Vec<i32> {
+    if pad.len() != spatial_rank * 2 {
+        return pad.to_vec();
+    }
+
+    let Some((input_dims, kernel_dims)) =
+        conv_spatial_inputs_and_kernels(graph, store, node, spatial_rank)
+    else {
+        return pad.to_vec();
+    };
+
+    let mut adjusted = pad.to_vec();
+    for axis in 0..spatial_rank {
+        let pad_before = adjusted[axis * 2];
+        let pad_after = adjusted[axis * 2 + 1];
+        let remainder = conv_tosa_pad_remainder(
+            input_dims[axis],
+            pad_before,
+            pad_after,
+            *dilation.get(axis).unwrap_or(&1),
+            kernel_dims[axis],
+            *stride.get(axis).unwrap_or(&1),
+        );
+        if remainder <= pad_after {
+            adjusted[axis * 2 + 1] = pad_after - remainder;
+        }
+    }
+
+    adjusted
+}
+
 pub(super) fn adjusted_tosa_pad_for_emitted_conv2d(
     graph: &Graph,
     store: &TensorStore,
@@ -371,68 +414,7 @@ pub(super) fn adjusted_tosa_pad_for_emitted_conv2d(
     stride: &[i32],
     dilation: &[i32],
 ) -> Vec<i32> {
-    if pad.len() != 4 {
-        return pad.to_vec();
-    }
-
-    let Some(input_id) = node.args.first().and_then(|arg| match arg {
-        Arg::Node(id) => Some(*id),
-        _ => None,
-    }) else {
-        return pad.to_vec();
-    };
-    let Some(weight_id) = node.args.get(1).and_then(|arg| match arg {
-        Arg::Node(id) => Some(*id),
-        _ => None,
-    }) else {
-        return pad.to_vec();
-    };
-    let Some(input_node) = graph.node(input_id) else {
-        return pad.to_vec();
-    };
-    let Some(weight_node) = graph.node(weight_id) else {
-        return pad.to_vec();
-    };
-
-    let input_shape = actual_tensor_shape(graph, store, input_node);
-    let weight_shape = actual_tensor_shape(graph, store, weight_node);
-    if input_shape.len() != 4 || weight_shape.len() != 4 {
-        return pad.to_vec();
-    }
-
-    let input_channels = *input_shape.get(3).unwrap_or(&0);
-    let (kernel_h, kernel_w) = if weight_shape.get(3).copied().unwrap_or(0) == input_channels {
-        (weight_shape[1], weight_shape[2])
-    } else {
-        (weight_shape[2], weight_shape[3])
-    };
-
-    let input_dims = [input_shape[1], input_shape[2]];
-    let kernel_dims = [kernel_h, kernel_w];
-    let stride_dims = [*stride.first().unwrap_or(&1), *stride.get(1).unwrap_or(&1)];
-    let dilation_dims = [
-        *dilation.first().unwrap_or(&1),
-        *dilation.get(1).unwrap_or(&1),
-    ];
-
-    let mut adjusted = pad.to_vec();
-    for axis in 0..2 {
-        let pad_before = adjusted[axis * 2];
-        let pad_after = adjusted[axis * 2 + 1];
-        let remainder = conv_tosa_pad_remainder(
-            input_dims[axis],
-            pad_before,
-            pad_after,
-            dilation_dims[axis],
-            kernel_dims[axis],
-            stride_dims[axis],
-        );
-        if remainder <= pad_after {
-            adjusted[axis * 2 + 1] = pad_after - remainder;
-        }
-    }
-
-    adjusted
+    adjusted_tosa_pad_for_emitted_conv_spatial(graph, store, node, pad, stride, dilation, 2)
 }
 
 pub(super) fn adjusted_tosa_pad_for_emitted_conv3d(
@@ -443,72 +425,5 @@ pub(super) fn adjusted_tosa_pad_for_emitted_conv3d(
     stride: &[i32],
     dilation: &[i32],
 ) -> Vec<i32> {
-    if pad.len() != 6 {
-        return pad.to_vec();
-    }
-
-    let Some(input_id) = node.args.first().and_then(|arg| match arg {
-        Arg::Node(id) => Some(*id),
-        _ => None,
-    }) else {
-        return pad.to_vec();
-    };
-    let Some(weight_id) = node.args.get(1).and_then(|arg| match arg {
-        Arg::Node(id) => Some(*id),
-        _ => None,
-    }) else {
-        return pad.to_vec();
-    };
-    let Some(input_node) = graph.node(input_id) else {
-        return pad.to_vec();
-    };
-    let Some(weight_node) = graph.node(weight_id) else {
-        return pad.to_vec();
-    };
-
-    let input_shape = actual_tensor_shape(graph, store, input_node);
-    let weight_shape = actual_tensor_shape(graph, store, weight_node);
-    if input_shape.len() != 5 || weight_shape.len() != 5 {
-        return pad.to_vec();
-    }
-
-    let input_channels = *input_shape.get(4).unwrap_or(&0);
-    let (kernel_d, kernel_h, kernel_w) =
-        if weight_shape.get(4).copied().unwrap_or(0) == input_channels {
-            (weight_shape[1], weight_shape[2], weight_shape[3])
-        } else {
-            (weight_shape[2], weight_shape[3], weight_shape[4])
-        };
-
-    let input_dims = [input_shape[1], input_shape[2], input_shape[3]];
-    let kernel_dims = [kernel_d, kernel_h, kernel_w];
-    let stride_dims = [
-        *stride.first().unwrap_or(&1),
-        *stride.get(1).unwrap_or(&1),
-        *stride.get(2).unwrap_or(&1),
-    ];
-    let dilation_dims = [
-        *dilation.first().unwrap_or(&1),
-        *dilation.get(1).unwrap_or(&1),
-        *dilation.get(2).unwrap_or(&1),
-    ];
-
-    let mut adjusted = pad.to_vec();
-    for axis in 0..3 {
-        let pad_before = adjusted[axis * 2];
-        let pad_after = adjusted[axis * 2 + 1];
-        let remainder = conv_tosa_pad_remainder(
-            input_dims[axis],
-            pad_before,
-            pad_after,
-            dilation_dims[axis],
-            kernel_dims[axis],
-            stride_dims[axis],
-        );
-        if remainder <= pad_after {
-            adjusted[axis * 2 + 1] = pad_after - remainder;
-        }
-    }
-
-    adjusted
+    adjusted_tosa_pad_for_emitted_conv_spatial(graph, store, node, pad, stride, dilation, 3)
 }

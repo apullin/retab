@@ -1095,6 +1095,14 @@ Deleted: repeated target-marker OR chains across `fx_target` helper predicates
 Added: local `contains_any!` marker macro with comma form for short marker sets and pipe form for longer readable sets
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_target::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over view, permute, squeeze, unsqueeze, conv2d, max_pool, avg_pool2d, split, slice, tril, layer_norm, var, where, eq, ge, and gt; Rust LOC check
 Note: Target-family Rust tests passed `12 passed`; full Rust tests passed `137 passed`; focused Python smoke passed `643 passed, 1330 deselected`. No model lane was run. This keeps target matching behavior unchanged while giving the shared target grammar a named "contains any marker" operation.
+
+2026-06-14, serializer conv spatial helper and graph-arg node lookup slice
+Rust LOC: 36,913 -> 36,835
+Movement: -78 Rust LOC
+Deleted: duplicate conv2d/conv3d emitted-pad adjustment algorithms, duplicate raw ATen conv kernel-layout inference, and repeated serializer single-node `Arg::Node` graph lookup adapters
+Added: `graph::ir::Arg::as_node()`, `conv_spatial_inputs_and_kernels(...)`, and a shared `adjusted_tosa_pad_for_emitted_conv_spatial(...)` helper behind the existing conv2d/conv3d public wrappers
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv2d, conv3d, transpose_conv2d, max_pool, avg_pool2d, mean_dim, sum, add, sub, mul, div, floor_div, index_tensor, index_put, index_select, index_copy, constant_pad_nd, conv_constant_pad_nd, cond, and while; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `894 passed, 24 expected xfails, 1780 deselected`. No model lane was run. This slice keeps serializer behavior unchanged while giving conv spatial shape/pad inference and graph-arg node extraction one shared grammar.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

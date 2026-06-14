@@ -69,7 +69,11 @@ impl WhileLoopSpec {
 fn resolve_region_name(graph: &Graph, arg: Option<&Arg>) -> String {
     match arg {
         Some(Arg::String(name)) => name.clone(),
-        Some(Arg::Node(id)) => graph.node(*id).map(|n| n.name.clone()).unwrap_or_default(),
+        Some(arg) => arg
+            .as_node()
+            .and_then(|id| graph.node(id))
+            .map(|n| n.name.clone())
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }

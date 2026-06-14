@@ -19,10 +19,11 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
         }
     }
 
-    let input_node = match node.args.first() {
-        Some(Arg::Node(id)) => graph.node(*id),
-        _ => None,
-    };
+    let input_node = node
+        .args
+        .first()
+        .and_then(Arg::as_node)
+        .and_then(|id| graph.node(id));
     let input_dtype = input_node
         .map(|n| passthrough_input_dtype(graph, n))
         .unwrap_or_else(|| node_output_dtype(node));

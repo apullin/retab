@@ -3,9 +3,8 @@ use super::*;
 pub(super) fn resolve_input_name_from_node_id(graph: &Graph, id: NodeId) -> Option<String> {
     let node = graph.node(id)?;
     if is_getitem_node(node) {
-        let source_id = match node.args.first() {
-            Some(Arg::Node(source_id)) => *source_id,
-            _ => return Some(node.name.clone()),
+        let Some(source_id) = node.args.first().and_then(Arg::as_node) else {
+            return Some(node.name.clone());
         };
         let source = graph.node(source_id)?;
         let output_idx = match node.args.get(1) {

@@ -333,11 +333,10 @@ pub(super) fn binary_input_broadcast_shape(
     store: &TensorStore,
     node: &Node,
 ) -> Option<Vec<i32>> {
-    let mut input_shapes = node.args.iter().filter_map(|arg| match arg {
-        Arg::Node(id) => graph
-            .node(*id)
-            .map(|input_node| actual_tensor_shape(graph, store, input_node)),
-        _ => None,
+    let mut input_shapes = node.args.iter().filter_map(|arg| {
+        graph
+            .node(arg.as_node()?)
+            .map(|input_node| actual_tensor_shape(graph, store, input_node))
     });
 
     let mut candidate = input_shapes.next()?;
