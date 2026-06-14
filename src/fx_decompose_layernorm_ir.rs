@@ -11,7 +11,7 @@ fn first_output_user_meta(graph: &IrGraph, id: NodeId) -> Option<NodeMeta> {
         .live_getitem_users(id)
         .into_iter()
         .find_map(|(node_id, idx)| {
-            (idx == 0 && graph.nodes[node_id].meta.val_shape().is_some())
+            (idx == 0 && graph.node_shape(node_id).is_some())
                 .then(|| graph.nodes[node_id].meta.clone())
         })
 }
@@ -56,12 +56,12 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(node_id) => node_id,
         None => return false,
     };
-    let input_shape = match graph.nodes[x_id].meta.val_shape() {
-        Some(shape) => shape.to_vec(),
+    let input_shape = match graph.node_shape_vec(x_id) {
+        Some(shape) => shape,
         None => return false,
     };
     let rank = input_shape.len();
-    let output_meta = if graph.nodes[id].meta.val_shape().is_some() {
+    let output_meta = if graph.node_shape(id).is_some() {
         graph.nodes[id].meta.clone()
     } else {
         match first_output_user_meta(graph, id) {
@@ -75,7 +75,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     };
     let dtype = output_meta
         .val_dtype()
-        .or_else(|| graph.nodes[x_id].meta.val_dtype())
+        .or_else(|| graph.node_dtype(x_id))
         .unwrap_or("torch.float32")
         .to_string();
 

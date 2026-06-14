@@ -118,20 +118,16 @@ impl IrPass for IrDecomposeQuantPass {
                 }
             };
 
-            let shape = graph.nodes[x_id]
-                .meta
-                .val_shape()
-                .map(|s| s.to_vec())
-                .unwrap_or_else(|| vec![1]);
+            let shape = graph.node_shape_vec(x_id).unwrap_or_else(|| vec![1]);
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
             let rank = shape.len();
             let ones: Vec<i64> = vec![1; rank];
 
             let fp_dtype = if is_quantize {
-                graph.nodes[x_id].meta.val_dtype_or_float32().to_string()
+                graph.node_dtype_or_float32(x_id).to_string()
             } else {
-                graph.nodes[id].meta.val_dtype_or_float32().to_string()
+                graph.node_dtype_or_float32(id).to_string()
             };
 
             let eff_scale = if is_quantize { 1.0 / scale } else { scale };

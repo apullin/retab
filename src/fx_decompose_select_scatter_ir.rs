@@ -38,8 +38,8 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 None => continue,
             };
 
-            let input_shape = match graph.nodes[input_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let input_shape = match graph.node_shape_vec(input_id) {
+                Some(s) => s,
                 None => continue,
             };
             if input_shape.is_empty() {
@@ -54,10 +54,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
 
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let input_dtype = graph.nodes[input_id]
-                .meta
-                .val_dtype_or_float32()
-                .to_string();
+            let input_dtype = graph.node_dtype_or_float32(input_id).to_string();
 
             // 1. arange(0, dim_size) → shape [dim_size], dtype int32
             let arange_id = graph.add_anchored_call_function(

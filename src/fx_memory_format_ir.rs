@@ -423,15 +423,10 @@ impl IrToTosaMemoryFormatPass {
             let Some(input_id) = graph.nodes[id].first_node_arg() else {
                 continue;
             };
-            let Some(input_shape) = graph.nodes[input_id]
-                .meta
-                .val_shape()
-                .map(|shape| shape.to_vec())
-            else {
+            let Some(input_shape) = graph.node_shape_vec(input_id) else {
                 continue;
             };
-            let Some(output_shape) = graph.nodes[id].meta.val_shape().map(|shape| shape.to_vec())
-            else {
+            let Some(output_shape) = graph.node_shape_vec(id) else {
                 continue;
             };
             let input_rank = input_shape.len();
@@ -484,7 +479,7 @@ impl IrToTosaMemoryFormatPass {
             {
                 continue;
             }
-            let Some(shape) = graph.nodes[id].meta.val_shape() else {
+            let Some(shape) = graph.node_shape(id) else {
                 continue;
             };
             let rank = shape.len();
@@ -523,7 +518,7 @@ impl IrToTosaMemoryFormatPass {
                 {
                     continue;
                 }
-                let Some(shape) = graph.nodes[output_arg].meta.val_shape() else {
+                let Some(shape) = graph.node_shape(output_arg) else {
                     continue;
                 };
                 let rank = shape.len();
@@ -583,7 +578,7 @@ impl IrToTosaMemoryFormatPass {
             let Some(input_id) = graph.nodes[id].first_node_arg() else {
                 continue;
             };
-            let Some(input_shape) = graph.nodes[input_id].meta.val_shape() else {
+            let Some(input_shape) = graph.node_shape(input_id) else {
                 continue;
             };
             let input_rank = input_shape.len();

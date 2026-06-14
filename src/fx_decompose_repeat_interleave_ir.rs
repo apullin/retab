@@ -41,8 +41,8 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
                 _ => return false,
             };
 
-            let input_shape = match graph.nodes[input_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let input_shape = match graph.node_shape_vec(input_id) {
+                Some(s) => s,
                 None => return false,
             };
             let rank = input_shape.len() as i64;
@@ -55,7 +55,7 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
                 return false;
             }
 
-            let dtype = graph.nodes[id].meta.val_dtype_or_float32().to_string();
+            let dtype = graph.node_dtype_or_float32(id).to_string();
             let node_name = graph.nodes[id].name.clone();
 
             // 1. unsqueeze_copy(x, dim + 1)

@@ -78,11 +78,8 @@ impl ApproxCtx {
         Some(Self {
             anchor_id,
             name: graph.nodes[anchor_id].name.clone(),
-            shape: graph.nodes[input_id].meta.val_shape()?.to_vec(),
-            dtype: graph.nodes[input_id]
-                .meta
-                .val_dtype_or_float32()
-                .to_string(),
+            shape: graph.node_shape_vec(input_id)?,
+            dtype: graph.node_dtype_or_float32(input_id).to_string(),
             meta: graph.nodes[anchor_id].meta.clone(),
         })
     }
@@ -1516,8 +1513,8 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(dim) => dim,
         None => return false,
     };
-    let input_shape = match graph.nodes[input_id].meta.val_shape() {
-        Some(shape) => shape.to_vec(),
+    let input_shape = match graph.node_shape_vec(input_id) {
+        Some(shape) => shape,
         None => return false,
     };
     let rank = input_shape.len() as i64;
@@ -1613,8 +1610,8 @@ fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> 
         Some(x_id) => x_id,
         None => return false,
     };
-    let shape = match graph.nodes[x_id].meta.val_shape() {
-        Some(shape) => shape.to_vec(),
+    let shape = match graph.node_shape_vec(x_id) {
+        Some(shape) => shape,
         None => return false,
     };
     let dim = graph.nodes[id].arg_or_kwarg_int(1, "dim").unwrap_or(-1);
@@ -3091,13 +3088,13 @@ fn decompose_unbind(graph: &mut IrGraph, id: NodeId) -> bool {
         .and_then(|a| a.as_int())
         .unwrap_or(0);
 
-    let x_shape = match graph.nodes[x_id].meta.val_shape() {
-        Some(s) => s.to_vec(),
+    let x_shape = match graph.node_shape_vec(x_id) {
+        Some(s) => s,
         None => return false,
     };
     let rank = x_shape.len() as i64;
     let dim_norm = dim.rem_euclid(rank) as usize;
-    let dtype = graph.nodes[x_id].meta.val_dtype_or_float32().to_string();
+    let dtype = graph.node_dtype_or_float32(x_id).to_string();
     let name = graph.nodes[id].name.clone();
     let orig_meta = graph.nodes[id].meta.clone();
     let metas = MetaFactory::new(&orig_meta, &dtype);

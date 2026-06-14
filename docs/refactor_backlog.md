@@ -1431,6 +1431,14 @@ Deleted: repeated `graph.nodes[id].meta.val_shape()` / dtype fallback spellings 
 Added: `IrGraph::node_shape`, `IrGraph::node_shape_vec`, `IrGraph::node_dtype`, and `IrGraph::node_dtype_or_float32` as the graph-level grammar for reading node tensor facts
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over mean_dim, var, sum, avg_pool2d, max_pool, full, logit, squeeze, unsqueeze, transpose_copy, split, slice, slice_scatter, linear, conv1d, gather, index_select, index_tensor, index_put, cumsum, unfold_copy, pixel_shuffling, addmm, tril, to_copy, where, and constant_pad_nd; Rust LOC check
 Note: Full Rust tests passed `139 passed`; focused Python smoke passed `864 passed, 2 skipped, 21 expected xfails`. No model lane was run. This is a Refactor 2 Tensor Facts cleanup: passes now ask the graph for tensor facts instead of reaching through the raw node/meta layout.
+
+2026-06-14, graph tensor-fact accessor follow-through slice
+Rust LOC: 36,801 -> 36,781
+Movement: -20 Rust LOC
+Deleted: remaining raw shape/dtype reads from `src/fx_*_ir.rs`, including grouped-conv, layernorm, select-scatter, repeat-interleave, quant decomposition, decompose-op helpers, and memory-format passes
+Added: no new helper surface; this completes migration to the `IrGraph` tensor-fact accessor grammar for the audited raw metadata pattern
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv2d, depthwise_conv, conv_combos, layer_norm, repeat, select_scatter, softmax, logsoftmax, amax, amin, unbind, view, permute, where, index_put, slice_scatter, batch_norm, group_norm, and quant_custom_meta; Rust LOC check; raw metadata-access audit
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `596 passed, 1 skipped, 4 expected xfails`. `rg` now reports no raw `graph.nodes[id].meta.val_shape()/val_dtype()` access pattern in `src/fx_*_ir.rs`.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

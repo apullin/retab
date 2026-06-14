@@ -18,12 +18,12 @@ fn same_per_tensor_qparam(lhs: &QParam, rhs: &QParam) -> bool {
 }
 
 fn slice_meta(graph: &IrGraph, id: NodeId, dim: usize, start: i64, stop: i64) -> Option<NodeMeta> {
-    let mut shape = graph.nodes[id].meta.val_shape()?.to_vec();
+    let mut shape = graph.node_shape_vec(id)?;
     if dim >= shape.len() {
         return None;
     }
     shape[dim] = (stop - start).max(0);
-    let dtype = graph.nodes[id].meta.val_dtype()?.to_string();
+    let dtype = graph.node_dtype(id)?.to_string();
     Some(
         graph.nodes[id]
             .meta
@@ -32,12 +32,12 @@ fn slice_meta(graph: &IrGraph, id: NodeId, dim: usize, start: i64, stop: i64) ->
 }
 
 fn conv_slice_output_meta(graph: &IrGraph, id: NodeId, output_slice_size: i64) -> NodeMeta {
-    if let Some(shape) = graph.nodes[id].meta.val_shape() {
+    if let Some(shape) = graph.node_shape(id) {
         let mut shape = shape.to_vec();
         if shape.len() >= 2 {
             shape[1] = output_slice_size;
         }
-        let dtype = graph.nodes[id].meta.val_dtype_or_float32().to_string();
+        let dtype = graph.node_dtype_or_float32(id).to_string();
         return graph.nodes[id].meta.cloned_with_val(shape, dtype);
     }
     graph.nodes[id].meta.clone()
@@ -188,12 +188,7 @@ fn parse_grouped_conv(graph: &IrGraph, id: NodeId) -> Option<GroupedConvSpec> {
         _ => IrArg::None,
     };
     let transposed = !is_raw_conv2d && args[6].as_bool().unwrap_or(false);
-    let in_channels = graph.nodes[input_id]
-        .meta
-        .val_shape()?
-        .get(1)
-        .copied()
-        .unwrap_or(0);
+    let in_channels = graph.node_shape(input_id)?.get(1).copied().unwrap_or(0);
     if !transposed && in_channels == groups {
         return None;
     }
@@ -211,7 +206,7 @@ fn parse_grouped_conv(graph: &IrGraph, id: NodeId) -> Option<GroupedConvSpec> {
 fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec) -> bool {
     let node_name = graph.nodes[id].name.clone();
     let args = graph.nodes[id].args.clone();
-    let weight_shape = match graph.nodes[spec.weight_id].meta.val_shape() {
+    let weight_shape = match graph.node_shape(spec.weight_id) {
         Some(shape) if shape.len() >= 2 => shape.to_vec(),
         _ => return false,
     };
