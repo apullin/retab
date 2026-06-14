@@ -887,6 +887,14 @@ Deleted: local final-node `add_node` plus `replace_and_erase` sequences in logit
 Added: no new API; this expands use of `IrGraph::add_anchored_call_function` and `IrGraph::replace_with_call_function`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over logit, addmm, mm, bmm, cumsum, and mean_dim; Rust LOC check
 Note: Rust tests passed `130 passed`. Focused Python smoke passed `171 passed, 331 deselected`. This is a small LOC reduction but a useful grammar migration: these decomposition passes now express helper insertion and final replacement through shared `IrGraph` rewrite primitives instead of pass-local boilerplate.
+
+2026-06-13, replacement-finalizer grammar slice
+Rust LOC: 37,059 -> 37,068
+Movement: +9 Rust LOC
+Deleted: direct final-node add/replace pairs in var, strided-slice, index-select, index-tensor, linear, select-scatter, unfold, index-put, and selected decompose-ops approximation paths; unanchored final view creation in index-tensor/index-put/linear
+Added: `IrGraph::replace_with_call_function_with_kwargs` for kwargs-bearing final replacements and `ApproxCtx::replace_output` for approximation-pass final outputs
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over var, slice, unfold_copy, index_select, index_tensor, index_put, linear, select_scatter, softmax, logsoftmax, tan, atan, atanh, sinh, cosh, asinh, acosh, elu, gelu, and erfinv excluding known erfinv infinities; Rust LOC check
+Note: Rust tests passed `130 passed`. Focused Python smoke passed `537 passed, 20 xfailed, 1115 deselected`. This is a deliberate LOC-positive grammar slice: it fills the kwargs final-replacement gap and gives approximation decompositions a shared final-output spelling, reducing ownership ambiguity around "create final op, then replace original".
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

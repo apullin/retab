@@ -150,15 +150,13 @@ impl IrPass for IrDecomposeLinearPass {
                 .meta
                 .cloned_with_val(output_shape.clone(), output_dtype);
             out_meta.set_empty_qparam_maps();
-            let output = graph.add_node(
-                NodeOp::CallFunction,
+            graph.replace_with_call_function(
+                id,
                 format!("{}_output_view", node_name),
-                "aten.view_copy.default".to_string(),
+                "aten.view_copy.default",
                 vec![IrArg::Node(conv), i64_list(&output_shape)],
                 out_meta,
             );
-
-            graph.replace_and_erase(id, output);
             modified = true;
         }
 

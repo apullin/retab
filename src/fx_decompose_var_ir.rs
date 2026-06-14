@@ -142,14 +142,12 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         base_meta.cloned_with_val(coefficient_shape, &dtype),
     );
 
-    let result = graph.add_anchored_call_function(
+    graph.replace_with_call_function(
         id,
         format!("{}_mul", name),
         "aten.mul.Tensor",
         vec![IrArg::Node(sum), IrArg::Node(coefficient)],
         base_meta.cloned_with_val(output_shape, &dtype),
     );
-
-    graph.replace_and_erase(id, result);
     true
 }

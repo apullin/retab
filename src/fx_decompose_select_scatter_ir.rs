@@ -134,7 +134,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
             );
 
             // 7. where(mask, expanded_src, input) → result
-            let where_node = graph.add_anchored_call_function(
+            graph.replace_with_call_function(
                 id,
                 format!("{}_where", node_name),
                 "aten.where.self",
@@ -145,8 +145,6 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 ],
                 orig_meta,
             );
-
-            graph.replace_and_erase(id, where_node);
             modified = true;
         }
 

@@ -347,14 +347,13 @@ impl IrPass for IrRewriteIndexPutPass {
                 .meta
                 .cloned_with_val(source_shape.clone(), &src_dtype)
                 .with_qparams_from(&graph.nodes[source_id].meta);
-            let result = graph.add_call_function(
+            graph.replace_with_call_function(
+                id,
                 format!("{}_out", name),
-                "aten.view_copy.default".to_string(),
+                "aten.view_copy.default",
                 vec![IrArg::Node(scattered), i64_list(&source_shape)],
                 result_meta,
             );
-
-            graph.replace_and_erase(id, result);
             modified = true;
         }
 

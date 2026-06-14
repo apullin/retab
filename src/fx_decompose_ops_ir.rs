@@ -207,6 +207,22 @@ impl ApproxCtx {
         )
     }
 
+    fn replace_output(
+        &self,
+        graph: &mut IrGraph,
+        suffix: &str,
+        target: &str,
+        args: Vec<IrArg>,
+    ) -> NodeId {
+        graph.replace_with_call_function(
+            self.anchor_id,
+            self.op_name(suffix),
+            target,
+            args,
+            self.meta.clone(),
+        )
+    }
+
     fn view_shape(
         &self,
         graph: &mut IrGraph,
@@ -644,14 +660,13 @@ fn decompose_add_sub_alpha(graph: &mut IrGraph, id: NodeId) -> bool {
     }
     add_args[1] = IrArg::Node(scaled_rhs);
     add_args.truncate(2);
-    let result = graph.add_anchored_call_function(
+    graph.replace_with_call_function(
         id,
         format!("{}_alpha_result", graph.nodes[id].name),
         target,
         add_args,
         graph.nodes[id].meta.clone(),
     );
-    graph.replace_and_erase(id, result);
     true
 }
 
@@ -1730,13 +1745,12 @@ fn decompose_atanh(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(one_plus), IrArg::Node(one_minus)],
     );
     let log_r = ctx.tensor(graph, "log", "aten.log.default", vec![IrArg::Node(ratio)]);
-    let result = ctx.output(
+    ctx.replace_output(
         graph,
         "result",
         "aten.mul.Tensor",
         vec![IrArg::Node(half), IrArg::Node(log_r)],
     );
-    graph.replace_and_erase(id, result);
     true
 }
 
@@ -1752,13 +1766,12 @@ fn decompose_tan(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let sin = ctx.tensor(graph, "sin", "aten.sin.default", vec![IrArg::Node(x_id)]);
     let cos = ctx.tensor(graph, "cos", "aten.cos.default", vec![IrArg::Node(x_id)]);
-    let result = ctx.output(
+    ctx.replace_output(
         graph,
         "result",
         "aten.div.Tensor",
         vec![IrArg::Node(sin), IrArg::Node(cos)],
     );
-    graph.replace_and_erase(id, result);
     true
 }
 
@@ -1851,7 +1864,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         "aten.neg.default",
         vec![IrArg::Node(atan_abs)],
     );
-    let result = ctx.output(
+    ctx.replace_output(
         graph,
         "result",
         "aten.where.self",
@@ -1861,7 +1874,6 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
             IrArg::Node(neg),
         ],
     );
-    graph.replace_and_erase(id, result);
     true
 }
 
@@ -1890,13 +1902,12 @@ fn decompose_sinh(graph: &mut IrGraph, id: NodeId) -> bool {
         "aten.sub.Tensor",
         vec![IrArg::Node(exp_pos), IrArg::Node(exp_neg)],
     );
-    let result = ctx.output(
+    ctx.replace_output(
         graph,
         "result",
         "aten.mul.Tensor",
         vec![IrArg::Node(diff), IrArg::Node(half)],
     );
-    graph.replace_and_erase(id, result);
     true
 }
 
@@ -1925,13 +1936,12 @@ fn decompose_cosh(graph: &mut IrGraph, id: NodeId) -> bool {
         "aten.add.Tensor",
         vec![IrArg::Node(exp_pos), IrArg::Node(exp_neg)],
     );
-    let result = ctx.output(
+    ctx.replace_output(
         graph,
         "result",
         "aten.mul.Tensor",
         vec![IrArg::Node(sum), IrArg::Node(half)],
     );
-    graph.replace_and_erase(id, result);
     true
 }
 
@@ -1970,8 +1980,7 @@ fn decompose_asinh(graph: &mut IrGraph, id: NodeId) -> bool {
         "aten.add.Tensor",
         vec![IrArg::Node(x_id), IrArg::Node(sqrt)],
     );
-    let result = ctx.output(graph, "result", "aten.log.default", vec![IrArg::Node(add)]);
-    graph.replace_and_erase(id, result);
+    ctx.replace_output(graph, "result", "aten.log.default", vec![IrArg::Node(add)]);
     true
 }
 
@@ -2016,8 +2025,7 @@ fn decompose_acosh(graph: &mut IrGraph, id: NodeId) -> bool {
         "aten.add.Tensor",
         vec![IrArg::Node(x_id), IrArg::Node(sqrt)],
     );
-    let result = ctx.output(graph, "result", "aten.log.default", vec![IrArg::Node(add)]);
-    graph.replace_and_erase(id, result);
+    ctx.replace_output(graph, "result", "aten.log.default", vec![IrArg::Node(add)]);
     true
 }
 
@@ -2265,13 +2273,12 @@ fn decompose_elu(graph: &mut IrGraph, id: NodeId) -> bool {
         "aten.ge.Tensor",
         vec![IrArg::Node(x_id), IrArg::Node(zero)],
     );
-    let result = ctx.output(
+    ctx.replace_output(
         graph,
         "result",
         "aten.where.self",
         vec![IrArg::Node(ge), IrArg::Node(x_id), IrArg::Node(scaled)],
     );
-    graph.replace_and_erase(id, result);
     true
 }
 
@@ -2729,7 +2736,7 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
         "aten.where.self",
         vec![IrArg::Node(abs_gt1), IrArg::Node(nan), IrArg::Node(y)],
     );
-    let result = ctx.output(
+    ctx.replace_output(
         graph,
         "result",
         "aten.where.self",
@@ -2739,7 +2746,6 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
             IrArg::Node(out_gt1),
         ],
     );
-    graph.replace_and_erase(id, result);
     true
 }
 
@@ -3143,14 +3149,13 @@ fn decompose_stack(graph: &mut IrGraph, id: NodeId) -> bool {
 
     // Cat along dim
     let cat_args = IrArg::List(unsqueezed.iter().map(|&n| IrArg::Node(n)).collect());
-    let result = graph.add_anchored_call_function(
+    graph.replace_with_call_function(
         id,
         format!("{}_cat", name),
-        "aten.cat.default".to_string(),
+        "aten.cat.default",
         vec![cat_args, IrArg::Int(dim)],
         meta,
     );
-    graph.replace_and_erase(id, result);
     true
 }
 

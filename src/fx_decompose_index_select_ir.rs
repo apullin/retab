@@ -137,16 +137,15 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 .chain(std::iter::once(w))
                 .chain(after.iter().copied())
                 .collect();
-            let result = graph.add_anchored_call_function(
-                id,
-                format!("{}_out", name),
-                "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(gathered), i64_list(&out_shape)],
-                orig_meta.cloned_with_val(out_shape.clone(), gather_dtype),
-            );
-
-            let result = if needs_bool_cast {
-                let cast = graph.add_anchored_call_function_with_kwargs(
+            if needs_bool_cast {
+                let result = graph.add_anchored_call_function(
+                    id,
+                    format!("{}_out", name),
+                    "aten.view_copy.default".to_string(),
+                    vec![IrArg::Node(gathered), i64_list(&out_shape)],
+                    orig_meta.cloned_with_val(out_shape.clone(), gather_dtype),
+                );
+                graph.replace_with_call_function_with_kwargs(
                     id,
                     format!("{}_i8_to_bool", name),
                     "aten._to_copy.default".to_string(),
@@ -154,12 +153,15 @@ impl IrPass for IrDecomposeIndexSelectPass {
                     dtype_kwarg("torch.bool"),
                     orig_meta.cloned_with_val(out_shape, "torch.bool"),
                 );
-                cast
             } else {
-                result
-            };
-
-            graph.replace_and_erase(id, result);
+                graph.replace_with_call_function(
+                    id,
+                    format!("{}_out", name),
+                    "aten.view_copy.default",
+                    vec![IrArg::Node(gathered), i64_list(&out_shape)],
+                    orig_meta.cloned_with_val(out_shape, gather_dtype),
+                );
+            }
             modified = true;
         }
 

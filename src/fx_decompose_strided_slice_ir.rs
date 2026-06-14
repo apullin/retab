@@ -187,15 +187,13 @@ impl IrPass for IrDecomposeStridedSlicePass {
             // 5. View: reshape back to output shape [..., u, ...]
             let mut out_shape = input_shape.clone();
             out_shape[dim] = u;
-            let result = graph.add_node(
-                NodeOp::CallFunction,
+            graph.replace_with_call_function(
+                id,
                 format!("{}_out_view", node_name),
-                "aten.view_copy.default".to_string(),
+                "aten.view_copy.default",
                 vec![IrArg::Node(inner_slice), i64_list(&out_shape)],
                 orig_meta.cloned_with_val(out_shape, &dtype),
             );
-
-            graph.replace_and_erase(id, result);
             modified = true;
         }
 

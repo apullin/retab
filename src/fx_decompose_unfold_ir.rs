@@ -306,7 +306,7 @@ impl IrPass for IrDecomposeUnfoldPass {
                 permuted_meta,
             );
 
-            let final_result = if needs_bool_cast {
+            if needs_bool_cast {
                 let cast_back_meta = orig_meta.cloned_without_qparams(
                     graph.nodes[permuted]
                         .meta
@@ -315,7 +315,7 @@ impl IrPass for IrDecomposeUnfoldPass {
                         .to_vec(),
                     "torch.bool",
                 );
-                let cast_back = graph.add_anchored_call_function_with_kwargs(
+                graph.replace_with_call_function_with_kwargs(
                     id,
                     format!("{}_int8_to_bool", name),
                     "aten._to_copy.default".to_string(),
@@ -323,12 +323,9 @@ impl IrPass for IrDecomposeUnfoldPass {
                     dtype_kwarg("torch.bool"),
                     cast_back_meta,
                 );
-                cast_back
             } else {
-                permuted
-            };
-
-            graph.replace_and_erase(id, final_result);
+                graph.replace_and_erase(id, permuted);
+            }
             modified = true;
         }
 

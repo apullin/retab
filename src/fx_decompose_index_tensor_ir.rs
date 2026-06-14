@@ -339,14 +339,13 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 .meta
                 .cloned_with_val(out_shape.clone(), &x_dtype)
                 .with_qparams_from(&graph.nodes[x_id].meta);
-            let result = graph.add_call_function(
+            graph.replace_with_call_function(
+                id,
                 format!("{}_out", node_name),
-                "aten.view_copy.default".to_string(),
+                "aten.view_copy.default",
                 vec![IrArg::Node(gathered), i64_list(&out_shape)],
                 result_meta,
             );
-
-            graph.replace_and_erase(id, result);
             modified = true;
         }
 
