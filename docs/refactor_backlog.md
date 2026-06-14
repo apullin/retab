@@ -919,6 +919,14 @@ Deleted: serialize-Graph assembly responsibilities from the parent `src/control_
 Added: `src/control_flow/assembly.rs` as the owner for converting stashed control-flow submodule IR into prefixed serializer graphs, re-exported through `src/control_flow.rs`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused control-flow smoke via `/tmp/et.sh` twice over cond/while with U55/U85 excluded; Rust LOC check
 Note: Rust tests passed `131 passed`; both control-flow smokes passed `29 passed, 1 expected xfail, 60 deselected`. No model lane was run. This is LOC-positive because the child module boundary adds imports and a re-export, but it narrows `control_flow.rs` to contract/orchestration logic and gives serialize-Graph assembly a dedicated owner.
+
+2026-06-13, control-flow contract child-module split
+Rust LOC: 37,091 -> 37,103
+Movement: +12 Rust LOC
+Deleted: boundary contract machinery from the `src/control_flow.rs` module root, including boundary input/output contract collection, pre-submodule qparam propagation, parent rank-4 annotation, quantize/dequantize boundary rewrites, while-cond output RESCALE stripping, and output RESCALE normalization
+Added: `src/control_flow/contracts.rs` as the owner for IR control-flow boundary contracts; `src/control_flow.rs` now owns only region metadata plus re-exports for the contracts and assembly modules
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused control-flow smoke via `/tmp/et.sh` twice over cond/while with U55/U85 excluded; Rust LOC check
+Note: Rust tests passed `131 passed`; both control-flow smokes passed `29 passed, 1 expected xfail, 60 deselected`. No model lane was run. This is another LOC-positive module-boundary slice, but it cuts the control-flow module root from roughly 880 lines to roughly 80 lines and leaves each CF responsibility with a clearer owner.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
