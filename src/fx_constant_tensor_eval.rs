@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::constant_materialization::scalar_storage_bytes;
 use crate::fx_ir::{IrArg, IrGraph, IrNode, NodeOp, QParam, TensorSource};
 use crate::graph::ir::DType;
 use crate::lowering_effects::LoweringInputKind;
@@ -180,38 +181,10 @@ fn contiguous_strides(shape: &[i64]) -> Option<Vec<usize>> {
 }
 
 fn encode_tensor_values(values: &[f64], shape: Vec<i64>, dtype: DType) -> Option<TensorData> {
-    let data = match dtype {
-        DType::Float32 => values
-            .iter()
-            .flat_map(|value| (*value as f32).to_le_bytes())
-            .collect(),
-        DType::Int8 | DType::Int4 => values
-            .iter()
-            .flat_map(|value| (*value as i8).to_le_bytes())
-            .collect(),
-        DType::Int16 => values
-            .iter()
-            .flat_map(|value| (*value as i16).to_le_bytes())
-            .collect(),
-        DType::Int32 => values
-            .iter()
-            .flat_map(|value| (*value as i32).to_le_bytes())
-            .collect(),
-        DType::Int64 => values
-            .iter()
-            .flat_map(|value| (*value as i64).to_le_bytes())
-            .collect(),
-        DType::Bool => values.iter().map(|value| u8::from(*value != 0.0)).collect(),
-        DType::Float16 => values
-            .iter()
-            .flat_map(|value| crate::tensor_data::encode_f16(*value as f32).to_le_bytes())
-            .collect(),
-        DType::BFloat16 => values
-            .iter()
-            .flat_map(|value| crate::tensor_data::encode_bf16(*value as f32).to_le_bytes())
-            .collect(),
-        DType::Int48 => return None,
-    };
+    let mut data = Vec::new();
+    for &value in values {
+        data.extend_from_slice(&scalar_storage_bytes(dtype, value)?);
+    }
     Some(TensorData { data, shape, dtype })
 }
 
@@ -333,14 +306,7 @@ fn matmul_2d(lhs: &[f64], lhs_shape: &[i64], rhs: &[f64], rhs_shape: &[i64]) -> 
             values[row * n + col] = acc;
         }
     }
-    Some(
-        TensorData {
-            data: Vec::new(),
-            shape: vec![m as i64, n as i64],
-            dtype: DType::Float32,
-        }
-        .with_values(values),
-    )
+    encode_tensor_values(&values, vec![m as i64, n as i64], DType::Float32)
 }
 
 fn batched_matmul_3d(
@@ -381,28 +347,11 @@ fn batched_matmul_3d(
             }
         }
     }
-    Some(
-        TensorData {
-            data: Vec::new(),
-            shape: vec![batch as i64, m as i64, n as i64],
-            dtype: DType::Float32,
-        }
-        .with_values(values),
+    encode_tensor_values(
+        &values,
+        vec![batch as i64, m as i64, n as i64],
+        DType::Float32,
     )
-}
-
-trait TensorValuesExt {
-    fn with_values(self, values: Vec<f64>) -> Self;
-}
-
-impl TensorValuesExt for TensorData {
-    fn with_values(mut self, values: Vec<f64>) -> Self {
-        self.data = values
-            .into_iter()
-            .flat_map(|value| (value as f32).to_le_bytes())
-            .collect();
-        self
-    }
 }
 
 fn output_numel_allowed(node: &IrNode, shape: &[i64]) -> Option<bool> {
@@ -473,10 +422,7 @@ pub fn plan_constant_matmul_tensor(
             }
         }
         add_broadcasted_bias(&mut values, &output.shape, &bias_values, &bias.shape, beta)?;
-        output.data = values
-            .into_iter()
-            .flat_map(|value| (value as f32).to_le_bytes())
-            .collect();
+        output = encode_tensor_values(&values, output.shape, DType::Float32)?;
     }
 
     if !output_numel_allowed(node, &output.shape)? {

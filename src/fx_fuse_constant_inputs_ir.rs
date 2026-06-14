@@ -9,7 +9,7 @@ use crate::fx_constant_tensor_eval::{
 use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, NodeOp};
 use crate::fx_target::{is_shape_only_constant_target, is_zero_input_constant_target};
 use crate::lowering_effects::{
-    FuseConstantNodeEffect, LoweringEffect, LoweringEffectBatch, MaterializeConstantNodeEffect,
+    FuseConstantNodeEffect, LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect,
 };
 use crate::store::TensorData;
 
@@ -89,28 +89,16 @@ impl EffectfulIrPass for IrFuseConstantInputsEffectPass {
             constant_nodes.insert(node.id);
             if let Some(tensor) = plan_constant_matmul_tensor(node, &constant_tensors) {
                 constant_tensors.insert(node.id, tensor.clone());
-                effects.push(LoweringEffect::MaterializeConstantNode(
-                    MaterializeConstantNodeEffect {
-                        node_name: node.name.clone(),
-                        data: tensor.data,
-                        shape: tensor.shape,
-                        dtype: tensor.dtype,
-                        allow_missing: true,
-                    },
+                effects.push(LoweringEffect::MaterializeTensorNode(
+                    MaterializeTensorNodeEffect::from_tensor(node.name.clone(), tensor, true),
                 ));
                 continue;
             }
             if self.include_data_slices && node.target.contains("aten.slice_copy.Tensor") {
                 if let Some(tensor) = plan_constant_slice_tensor(node, &constant_tensors) {
                     constant_tensors.insert(node.id, tensor.clone());
-                    effects.push(LoweringEffect::MaterializeConstantNode(
-                        MaterializeConstantNodeEffect {
-                            node_name: node.name.clone(),
-                            data: tensor.data,
-                            shape: tensor.shape,
-                            dtype: tensor.dtype,
-                            allow_missing: true,
-                        },
+                    effects.push(LoweringEffect::MaterializeTensorNode(
+                        MaterializeTensorNodeEffect::from_tensor(node.name.clone(), tensor, true),
                     ));
                     continue;
                 }
@@ -312,7 +300,7 @@ mod tests {
         assert!(enabled.modified);
         assert_eq!(enabled.effects.items.len(), 1);
         match &enabled.effects.items[0] {
-            LoweringEffect::MaterializeConstantNode(effect) => {
+            LoweringEffect::MaterializeTensorNode(effect) => {
                 assert_eq!(effect.node_name, "weight_slice");
                 assert_eq!(effect.shape, vec![4]);
             }
@@ -361,7 +349,7 @@ mod tests {
         let result = IrFuseConstantInputsEffectPass::with_data_slices().run(&mut graph);
         assert!(result.modified);
         let effect = match &result.effects.items[0] {
-            LoweringEffect::MaterializeConstantNode(effect) => effect,
+            LoweringEffect::MaterializeTensorNode(effect) => effect,
             other => panic!("unexpected effect kind: {other:?}"),
         };
         assert_eq!(effect.node_name, "view_slice");
@@ -420,7 +408,7 @@ mod tests {
 
         let mut seen = HashMap::new();
         for effect in &result.effects.items {
-            let LoweringEffect::MaterializeConstantNode(effect) = effect else {
+            let LoweringEffect::MaterializeTensorNode(effect) = effect else {
                 continue;
             };
             seen.insert(effect.node_name.clone(), effect.clone());
@@ -483,7 +471,7 @@ mod tests {
         let result = IrFuseConstantInputsEffectPass::matmul_only().run(&mut graph);
         assert!(result.modified);
         let effect = match &result.effects.items[0] {
-            LoweringEffect::MaterializeConstantNode(effect) => effect,
+            LoweringEffect::MaterializeTensorNode(effect) => effect,
             other => panic!("unexpected effect kind: {other:?}"),
         };
         assert_eq!(effect.node_name, "qmm");

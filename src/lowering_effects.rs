@@ -1,5 +1,6 @@
 use crate::fx_fuse_constant_args::ZeroInputConstantKind;
 use crate::graph::ir::DType;
+use crate::store::TensorData;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoweringInputKind {
@@ -37,7 +38,7 @@ pub struct FuseConstantNodeEffect {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct MaterializeConstantNodeEffect {
+pub struct MaterializeTensorNodeEffect {
     pub node_name: String,
     pub data: Vec<u8>,
     pub shape: Vec<i64>,
@@ -45,13 +46,16 @@ pub struct MaterializeConstantNodeEffect {
     pub allow_missing: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct MaterializeZeroInputConstantNodeEffect {
-    pub node_name: String,
-    pub data: Vec<u8>,
-    pub shape: Vec<i64>,
-    pub dtype: DType,
-    pub allow_missing: bool,
+impl MaterializeTensorNodeEffect {
+    pub fn from_tensor(node_name: String, tensor: TensorData, allow_missing: bool) -> Self {
+        Self {
+            node_name,
+            data: tensor.data,
+            shape: tensor.shape,
+            dtype: tensor.dtype,
+            allow_missing,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -89,8 +93,7 @@ pub enum LoweringEffect {
     CastInt64InputToInt32(CastInt64InputToInt32Effect),
     MaterializeZeroInputConstant(MaterializeZeroInputConstantEffect),
     FuseConstantNode(FuseConstantNodeEffect),
-    MaterializeConstantNode(MaterializeConstantNodeEffect),
-    MaterializeZeroInputConstantNode(MaterializeZeroInputConstantNodeEffect),
+    MaterializeTensorNode(MaterializeTensorNodeEffect),
     InsertTableOp(InsertTableOpEffect),
     InsertPrecomputedTableOp(InsertPrecomputedTableOpEffect),
 }

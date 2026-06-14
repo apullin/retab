@@ -6,7 +6,7 @@ use crate::fx_constant_tensor_eval::{
 };
 use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, NodeOp};
 use crate::fx_target::is_shape_only_constant_target;
-use crate::lowering_effects::{LoweringEffect, LoweringEffectBatch, MaterializeConstantNodeEffect};
+use crate::lowering_effects::{LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect};
 use crate::store::TensorData;
 
 pub struct IrFuseShapeOnlyConstantsEffectPass;
@@ -44,14 +44,8 @@ impl EffectfulIrPass for IrFuseShapeOnlyConstantsEffectPass {
             };
             constant_nodes.insert(node.id);
             constant_tensors.insert(node.id, tensor.clone());
-            effects.push(LoweringEffect::MaterializeConstantNode(
-                MaterializeConstantNodeEffect {
-                    node_name: node.name.clone(),
-                    data: tensor.data,
-                    shape: tensor.shape,
-                    dtype: tensor.dtype,
-                    allow_missing: true,
-                },
+            effects.push(LoweringEffect::MaterializeTensorNode(
+                MaterializeTensorNodeEffect::from_tensor(node.name.clone(), tensor, true),
             ));
         }
 
@@ -144,7 +138,7 @@ mod tests {
             .items
             .iter()
             .map(|effect| match effect {
-                LoweringEffect::MaterializeConstantNode(effect) => effect.clone(),
+                LoweringEffect::MaterializeTensorNode(effect) => effect.clone(),
                 _ => panic!("unexpected effect kind"),
             })
             .collect::<Vec<_>>();

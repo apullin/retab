@@ -1,4 +1,7 @@
 use super::*;
+use crate::constant_materialization::{
+    repeated_scalar_bytes_i32, scalar_bytes as constant_scalar_bytes,
+};
 
 pub(super) fn normalize_tensor_shape(shape: Vec<i32>) -> Vec<i32> {
     if shape.is_empty() {
@@ -62,80 +65,8 @@ pub(super) fn push_const_shape(result: &mut EmitResult, shape_name: String, valu
     );
 }
 
-fn shape_numel(shape: &[i32]) -> Option<usize> {
-    if shape.is_empty() {
-        return Some(1);
-    }
-
-    shape.iter().try_fold(1usize, |acc, &dim| {
-        let dim = usize::try_from(dim).ok()?;
-        acc.checked_mul(dim)
-    })
-}
-
-fn encode_f16_bits(value: f32) -> u16 {
-    let bits = value.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exp = ((bits >> 23) & 0xff) as i32;
-    let mant = bits & 0x007f_ffff;
-
-    if exp == 0xff {
-        return if mant == 0 {
-            sign | 0x7c00
-        } else {
-            sign | 0x7e00
-        };
-    }
-
-    let exp16 = exp - 127 + 15;
-    if exp16 >= 0x1f {
-        return sign | 0x7c00;
-    }
-    if exp16 <= 0 {
-        if exp16 < -10 {
-            return sign;
-        }
-        let mantissa = mant | 0x0080_0000;
-        let shift = (14 - exp16) as u32;
-        let mut half = (mantissa >> shift) as u16;
-        let round_mask = (1u32 << shift) - 1;
-        let halfway = 1u32 << (shift - 1);
-        let remainder = mantissa & round_mask;
-        if remainder > halfway || (remainder == halfway && (half & 1) != 0) {
-            half = half.wrapping_add(1);
-        }
-        return sign | half;
-    }
-
-    let mut half = ((exp16 as u16) << 10) | ((mant >> 13) as u16);
-    let remainder = mant & 0x1fff;
-    if remainder > 0x1000 || (remainder == 0x1000 && (half & 1) != 0) {
-        half = half.wrapping_add(1);
-    }
-    sign | half
-}
-
-fn encode_bf16_bits(value: f32) -> u16 {
-    let bits = value.to_bits();
-    let lsb = (bits >> 16) & 1;
-    let rounded = bits.wrapping_add(0x7fff + lsb);
-    (rounded >> 16) as u16
-}
-
 pub(super) fn scalar_fill_bytes(dtype: crate::graph::ir::DType, value: f64) -> Option<Vec<u8>> {
-    use crate::graph::ir::DType as IrDType;
-
-    Some(match dtype {
-        IrDType::Float32 => (value as f32).to_le_bytes().to_vec(),
-        IrDType::Float16 => encode_f16_bits(value as f32).to_le_bytes().to_vec(),
-        IrDType::BFloat16 => encode_bf16_bits(value as f32).to_le_bytes().to_vec(),
-        IrDType::Int8 => (value as i8).to_le_bytes().to_vec(),
-        IrDType::Int16 => (value as i16).to_le_bytes().to_vec(),
-        IrDType::Int32 => (value as i32).to_le_bytes().to_vec(),
-        IrDType::Int64 => (value as i64).to_le_bytes().to_vec(),
-        IrDType::Bool => vec![(value != 0.0) as u8],
-        IrDType::Int4 | IrDType::Int48 => return None,
-    })
+    constant_scalar_bytes(dtype, value)
 }
 
 fn append_scalar_fill_bytes(
@@ -154,12 +85,7 @@ pub(super) fn make_filled_const_tensor(
     value: f64,
 ) -> Option<TosaTensor> {
     let scalar = scalar_fill_bytes(dtype, value)?;
-    let numel = shape_numel(&shape)?;
-    let mut data = Vec::with_capacity(scalar.len().saturating_mul(numel));
-    for _ in 0..numel {
-        data.extend_from_slice(&scalar);
-    }
-
+    let data = repeated_scalar_bytes_i32(&shape, &scalar)?;
     Some(make_tensor(name, shape, ir_dtype_to_tosa(dtype), data))
 }
 

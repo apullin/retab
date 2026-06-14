@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use crate::graph::Graph;
 
 mod config;
+mod constant_materialization;
 mod control_flow;
 mod fx_annotate_conv_bias_ir;
 mod fx_annotate_output_dim_order_ir;

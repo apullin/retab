@@ -290,10 +290,9 @@ fn fold_constant_reshapes(graph: &mut Graph, store: &mut TensorStore) {
 /// them so the graph matches the final lowered form. Most effects carry their
 /// precomputed data, so no Python computation is needed.
 ///
-/// Handled here: MaterializeConstantNode / MaterializeZeroInputConstantNode
-/// (replace a computed node with its precomputed constant) and
-/// DeleteConstantPlaceholder. Table-op insertion and legacy fused-constant
-/// retargeting are handled incrementally below.
+/// Handled here: MaterializeTensorNode (replace a computed node with its
+/// precomputed constant) and DeleteConstantPlaceholder. Table-op insertion and
+/// legacy fused-constant retargeting are handled incrementally below.
 pub fn apply_effects(graph: &mut Graph, store: &mut TensorStore, effects: &LoweringEffectBatch) {
     apply_effects_ext(graph, store, effects, false);
 }
@@ -323,18 +322,7 @@ fn apply_effects_ext(
     let mut applied = false;
     for effect in &effects.items {
         match effect {
-            LoweringEffect::MaterializeConstantNode(e) => {
-                applied |= materialize_const(
-                    graph,
-                    store,
-                    &name_map,
-                    &e.node_name,
-                    &e.data,
-                    &e.shape,
-                    e.dtype,
-                );
-            }
-            LoweringEffect::MaterializeZeroInputConstantNode(e) => {
+            LoweringEffect::MaterializeTensorNode(e) => {
                 applied |= materialize_const(
                     graph,
                     store,

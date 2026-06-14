@@ -820,6 +820,14 @@ Deleted: the control-flow-owned `NodeOp` definition, remaining control-flow RESC
 Added: `fx_ir::NodeOp` ownership, `IrGraph::add_after_call_function`, and broader use of `add_anchored_call_function`, `add_anchored_call_function_with_kwargs`, `add_after_call_function`, and `RescaleRewrite`
 Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over layer_norm, var, mean_dim, repeat, ne, where, linear, conv1d, conv2d, cumsum, slice, select_scatter, tril, masked_fill, constant_pad_nd, max_pool, adaptive_avg_pool2d, gather, index_select, embedding, index_put, cond, and while; targeted source-pattern audits; Rust LOC check
 Note: Rust tests passed `130 passed`. Focused Python smoke passed `820 passed, 6 skipped, 3 expected xfails, 1810 deselected`. This applies the RESCALE trial's semantic-collapse pattern more broadly: core IR node kind ownership now lives in `fx_ir`, CF boundary RESCALEs share the canonical RESCALE builder, and common call-function insertion with anchoring now has one graph API spelling instead of pass-local boilerplate.
+
+2026-06-13, constant materialization grammar slice
+Rust LOC: 37,196
+Movement: -125 Rust LOC from previous checkpoint
+Deleted: duplicate `MaterializeConstantNodeEffect` vs `MaterializeZeroInputConstantNodeEffect` payloads, duplicate ingest materialization match arms, local scalar/f16/bf16 byte encoders in serializer const utilities, local scalar/repeated-byte helpers in zero-input constant folding, and the float-value-to-tensor mini-trait in constant tensor evaluation
+Added: `src/constant_materialization.rs`, unified `MaterializeTensorNodeEffect`, shared scalar byte encoding with explicit storage-vs-serializer `Int4` behavior, shared repeated scalar fill helpers, and `MaterializeTensorNodeEffect::from_tensor`
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over full, zeros, ones, arange, eye, view, permute, unsqueeze, mm, bmm, matmul, and addmm; `git diff --check`; Rust LOC check
+Note: Rust tests passed `130 passed`. Focused Python smoke passed `307 passed, 7 skipped, 10 expected xfails, 553 deselected`. This is the first constant-materialization semantic collapse: precomputed tensor nodes now have one lowering effect, and scalar/fill byte construction has one Rust owner while preserving zero-input `Int4` storage behavior separately from serializer-supported inline constants.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

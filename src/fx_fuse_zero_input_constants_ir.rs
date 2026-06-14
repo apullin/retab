@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::constant_materialization::{repeated_scalar_bytes, scalar_storage_bytes};
 use crate::fx_constant_tensor_eval::{node_has_tensor_inputs, tensor_numel};
 use crate::fx_fuse_constant_args::ZeroInputConstantKind;
 use crate::fx_ir::{
@@ -7,40 +8,12 @@ use crate::fx_ir::{
 };
 use crate::graph::ir::DType;
 use crate::lowering_effects::{
-    LoweringEffect, LoweringEffectBatch, MaterializeZeroInputConstantEffect,
-    MaterializeZeroInputConstantNodeEffect,
+    LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect,
+    MaterializeZeroInputConstantEffect,
 };
 use crate::tensor_data::parse_torch_dtype;
 
 pub struct IrFuseZeroInputConstantsEffectPass;
-
-fn scalar_fill_bytes(dtype: DType, value: f64) -> Option<Vec<u8>> {
-    Some(match dtype {
-        DType::Float32 => (value as f32).to_le_bytes().to_vec(),
-        DType::Float16 => crate::tensor_data::encode_f16(value as f32)
-            .to_le_bytes()
-            .to_vec(),
-        DType::BFloat16 => crate::tensor_data::encode_bf16(value as f32)
-            .to_le_bytes()
-            .to_vec(),
-        DType::Int8 | DType::Int4 => (value as i8).to_le_bytes().to_vec(),
-        DType::Int16 => (value as i16).to_le_bytes().to_vec(),
-        DType::Int32 => (value as i32).to_le_bytes().to_vec(),
-        DType::Int64 => (value as i64).to_le_bytes().to_vec(),
-        DType::Bool => vec![(value != 0.0) as u8],
-        DType::Int48 => return None,
-    })
-}
-
-fn repeated_scalar_bytes(shape: &[i64], scalar: &[u8]) -> Option<Vec<u8>> {
-    let numel = tensor_numel(shape)?;
-    let capacity = scalar.len().checked_mul(numel)?;
-    let mut data = Vec::with_capacity(capacity);
-    for _ in 0..numel {
-        data.extend_from_slice(scalar);
-    }
-    Some(data)
-}
 
 fn parse_dtype_arg(arg: &IrArg) -> Option<DType> {
     match arg {
@@ -132,7 +105,7 @@ fn quantized_scalar_bytes(qp: &QParam, value: f64) -> Option<(DType, Vec<u8>)> {
     let quantized = (value / qp.scale + qp.zp as f64)
         .round()
         .clamp(qp.qmin as f64, qp.qmax as f64);
-    Some((dtype, scalar_fill_bytes(dtype, quantized)?))
+    Some((dtype, scalar_storage_bytes(dtype, quantized)?))
 }
 
 fn output_int_qparam_and_dtype(node: &IrNode) -> Option<(Option<QParam>, DType)> {
@@ -153,7 +126,7 @@ fn scalar_bytes_in_domain(dtype: DType, qparam: Option<&QParam>, value: f64) -> 
         let (qp_dtype, scalar) = quantized_scalar_bytes(qp, value)?;
         return (qp_dtype == dtype).then_some(scalar);
     }
-    scalar_fill_bytes(dtype, value)
+    scalar_storage_bytes(dtype, value)
 }
 
 fn arange_spec(node: &IrNode) -> Option<(f64, f64, f64)> {
@@ -192,7 +165,7 @@ fn arange_output_shape(node: &IrNode, start: f64, end: f64, step: f64) -> Option
     Some(vec![len])
 }
 
-fn plan_zero_input_arange(node: &IrNode) -> Option<MaterializeZeroInputConstantNodeEffect> {
+fn plan_zero_input_arange(node: &IrNode) -> Option<MaterializeTensorNodeEffect> {
     let (start, end, step) = arange_spec(node)?;
     let shape = arange_output_shape(node, start, end, step)?;
     let numel = tensor_numel(&shape)?;
@@ -206,7 +179,7 @@ fn plan_zero_input_arange(node: &IrNode) -> Option<MaterializeZeroInputConstantN
         data.extend_from_slice(&scalar);
     }
 
-    Some(MaterializeZeroInputConstantNodeEffect {
+    Some(MaterializeTensorNodeEffect {
         node_name: node.name.clone(),
         data,
         shape,
@@ -215,7 +188,7 @@ fn plan_zero_input_arange(node: &IrNode) -> Option<MaterializeZeroInputConstantN
     })
 }
 
-fn plan_zero_input_linspace(node: &IrNode) -> Option<MaterializeZeroInputConstantNodeEffect> {
+fn plan_zero_input_linspace(node: &IrNode) -> Option<MaterializeTensorNodeEffect> {
     if !node.target.contains("aten.linspace.default") {
         return None;
     }
@@ -246,7 +219,7 @@ fn plan_zero_input_linspace(node: &IrNode) -> Option<MaterializeZeroInputConstan
         data.extend_from_slice(&scalar);
     }
 
-    Some(MaterializeZeroInputConstantNodeEffect {
+    Some(MaterializeTensorNodeEffect {
         node_name: node.name.clone(),
         data,
         shape,
@@ -282,7 +255,7 @@ fn full_bail_reason(graph: &IrGraph, node: &IrNode) -> &'static str {
         }
     } else if explicit_zero_input_dtype(node).is_none() {
         return "no_explicit_dtype";
-    } else if scalar_fill_bytes(
+    } else if scalar_storage_bytes(
         explicit_zero_input_dtype(node).unwrap(),
         full_fill_value(node).unwrap(),
     )
@@ -293,7 +266,7 @@ fn full_bail_reason(graph: &IrGraph, node: &IrNode) -> &'static str {
     "ok_but_planned_none"
 }
 
-fn plan_zero_input_eye(node: &IrNode) -> Option<MaterializeZeroInputConstantNodeEffect> {
+fn plan_zero_input_eye(node: &IrNode) -> Option<MaterializeTensorNodeEffect> {
     let n = match node.args.first()? {
         IrArg::Int(value) => usize::try_from(*value).ok()?,
         _ => return None,
@@ -320,7 +293,7 @@ fn plan_zero_input_eye(node: &IrNode) -> Option<MaterializeZeroInputConstantNode
         }
     }
 
-    Some(MaterializeZeroInputConstantNodeEffect {
+    Some(MaterializeTensorNodeEffect {
         node_name: node.name.clone(),
         data,
         shape,
@@ -329,10 +302,7 @@ fn plan_zero_input_eye(node: &IrNode) -> Option<MaterializeZeroInputConstantNode
     })
 }
 
-fn plan_zero_input_full(
-    graph: &IrGraph,
-    node: &IrNode,
-) -> Option<MaterializeZeroInputConstantNodeEffect> {
+fn plan_zero_input_full(graph: &IrGraph, node: &IrNode) -> Option<MaterializeTensorNodeEffect> {
     let shape = match node.args.first() {
         Some(arg) => arg
             .as_int_list()
@@ -351,10 +321,10 @@ fn plan_zero_input_full(
         quantized_scalar_bytes(&qp, fill_value)?
     } else {
         let dtype = explicit_zero_input_dtype(node)?;
-        (dtype, scalar_fill_bytes(dtype, fill_value)?)
+        (dtype, scalar_storage_bytes(dtype, fill_value)?)
     };
 
-    Some(MaterializeZeroInputConstantNodeEffect {
+    Some(MaterializeTensorNodeEffect {
         node_name: node.name.clone(),
         data: repeated_scalar_bytes(&shape, &scalar)?,
         shape,
@@ -392,22 +362,22 @@ impl EffectfulIrPass for IrFuseZeroInputConstantsEffectPass {
             };
             if kind == ZeroInputConstantKind::Full {
                 if let Some(effect) = plan_zero_input_full(graph, node) {
-                    effects.push(LoweringEffect::MaterializeZeroInputConstantNode(effect));
+                    effects.push(LoweringEffect::MaterializeTensorNode(effect));
                     continue;
                 }
             } else if node.target.contains("aten.arange") {
                 if let Some(effect) = plan_zero_input_arange(node) {
-                    effects.push(LoweringEffect::MaterializeZeroInputConstantNode(effect));
+                    effects.push(LoweringEffect::MaterializeTensorNode(effect));
                     continue;
                 }
             } else if node.target.contains("aten.linspace.default") {
                 if let Some(effect) = plan_zero_input_linspace(node) {
-                    effects.push(LoweringEffect::MaterializeZeroInputConstantNode(effect));
+                    effects.push(LoweringEffect::MaterializeTensorNode(effect));
                     continue;
                 }
             } else if node.target.contains("aten.eye") {
                 if let Some(effect) = plan_zero_input_eye(node) {
-                    effects.push(LoweringEffect::MaterializeZeroInputConstantNode(effect));
+                    effects.push(LoweringEffect::MaterializeTensorNode(effect));
                     continue;
                 }
             }
@@ -486,7 +456,7 @@ mod tests {
         assert_eq!(result.effects.items.len(), 4);
         assert!(matches!(
             &result.effects.items[0],
-            LoweringEffect::MaterializeZeroInputConstantNode(effect)
+            LoweringEffect::MaterializeTensorNode(effect)
                 if effect.node_name == "full"
                     && effect.dtype == DType::Float32
                     && effect.shape == vec![2]
@@ -537,7 +507,7 @@ mod tests {
 
         assert!(matches!(
             &result.effects.items[0],
-            LoweringEffect::MaterializeZeroInputConstantNode(effect)
+            LoweringEffect::MaterializeTensorNode(effect)
                 if effect.node_name == "full"
                     && effect.dtype == DType::Int8
                     && effect.shape == vec![2]
@@ -590,7 +560,7 @@ mod tests {
 
         assert!(matches!(
             &result.effects.items[0],
-            LoweringEffect::MaterializeZeroInputConstantNode(effect)
+            LoweringEffect::MaterializeTensorNode(effect)
                 if effect.node_name == "quantize_per_tensor_3_sc"
                     && effect.dtype == DType::Float32
                     && effect.shape == vec![1, 1, 1]
@@ -617,7 +587,7 @@ mod tests {
 
         assert!(matches!(
             &result.effects.items[0],
-            LoweringEffect::MaterializeZeroInputConstantNode(effect)
+            LoweringEffect::MaterializeTensorNode(effect)
                 if effect.node_name == "arange"
                     && effect.dtype == DType::Float32
                     && effect.shape == vec![4]
@@ -657,7 +627,7 @@ mod tests {
 
         assert!(matches!(
             &result.effects.items[0],
-            LoweringEffect::MaterializeZeroInputConstantNode(effect)
+            LoweringEffect::MaterializeTensorNode(effect)
                 if effect.node_name == "arange"
                     && effect.dtype == DType::Int8
                     && effect.shape == vec![4]
@@ -684,7 +654,7 @@ mod tests {
 
         assert!(matches!(
             &result.effects.items[0],
-            LoweringEffect::MaterializeZeroInputConstantNode(effect)
+            LoweringEffect::MaterializeTensorNode(effect)
                 if effect.node_name == "linspace"
                     && effect.dtype == DType::Float32
                     && effect.shape == vec![5]
@@ -713,7 +683,7 @@ mod tests {
         let result = pass.run(&mut graph);
 
         let effect = match &result.effects.items[0] {
-            LoweringEffect::MaterializeZeroInputConstantNode(effect) => effect,
+            LoweringEffect::MaterializeTensorNode(effect) => effect,
             other => panic!("unexpected effect kind: {other:?}"),
         };
         assert_eq!(effect.node_name, "eye");
@@ -751,7 +721,7 @@ mod tests {
 
         assert!(matches!(
             &result.effects.items[0],
-            LoweringEffect::MaterializeZeroInputConstantNode(effect)
+            LoweringEffect::MaterializeTensorNode(effect)
                 if effect.node_name == "linspace"
                     && effect.dtype == DType::Int8
                     && effect.shape == vec![5]
