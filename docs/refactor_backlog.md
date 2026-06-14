@@ -1031,6 +1031,14 @@ Deleted: remaining targeted local alive-node iteration from control-flow region 
 Added: no new API; this reuses `IrGraph::live_node_ids()`, `live_placeholder_ids()`, and `live_call_function_ids()`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over add, cond, conv2d, gelu, linear, pow, sigmoid, tan, and while; Rust LOC check
 Note: Full Rust tests passed `134 passed`; focused Python smoke passed `370 passed, 4 expected xfails, 951 deselected`. No model lane was run. This is a small consistency slice, not a major LOC reduction.
+
+2026-06-14, conv target spelling grammar slice
+Rust LOC: 37,151 -> 37,170
+Movement: +19 Rust LOC
+Deleted: raw conv1d.default, conv2d.default, and convolution.default target checks from conv1d unsqueeze, grouped-conv decomposition, and conv-bias annotation
+Added: shared `fx_target` helpers for exact conv1d, conv2d, and ATen convolution default spellings, plus classifier tests and reuse inside the target classifier itself
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_target`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv1d, conv2d, conv3d, and transpose_conv2d; Rust LOC check
+Note: Full Rust tests passed `134 passed`; focused Python smoke passed `285 passed, 2 expected xfails, 920 deselected`. No model lane was run. This is setup-positive but reduces repeated exact convolution spelling in pass bodies.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1062,7 +1070,9 @@ convolution spellings. Indexing/scatter passes now also share target grammar
 for slice-copy, broad slice tensor, slice-scatter, unfold-copy, and gather
 families. Single-op decomposition gates for embedding, logit, index_select,
 index.Tensor, cumsum, sum, mean, adaptive_avg_pool2d, masked_fill,
-select_scatter, and full_like now also live in the shared target grammar.
+select_scatter, and full_like now also live in the shared target grammar. Exact
+conv1d, conv2d, and ATen convolution default spellings now also have shared
+target helpers.
 
 Remaining work:
 

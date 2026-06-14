@@ -7,6 +7,7 @@
 //!   view_copy(output[..., W_out, 1] -> [..., W_out])
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_target::{is_aten_convolution_default_target, is_conv1d_default_target};
 use crate::runner_logging::log_line;
 
 /// True for conv1d.default or convolution.default with 1D stride.
@@ -14,11 +15,11 @@ fn is_conv1d(graph: &IrGraph, id: NodeId) -> bool {
     let node = &graph.nodes[id];
     let target = &node.target;
 
-    if target.contains("conv1d.default") {
+    if is_conv1d_default_target(target) {
         return true;
     }
 
-    if target.contains("convolution.default") {
+    if is_aten_convolution_default_target(target) {
         // Check stride arg (index 3): if it's a list of length 1, it's 1D.
         if let Some(IrArg::List(items)) = node.args.get(3) {
             return items.len() == 1;
@@ -58,7 +59,7 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
     let args = node.args.clone();
     let base_meta = node.meta.clone();
 
-    let is_conv1d_default = target.contains("conv1d.default");
+    let is_conv1d_default = is_conv1d_default_target(&target);
 
     // Parse arguments depending on variant.
     let (x_id, w_id, bias_arg, stride, pad, dilation, transposed, output_padding, groups);

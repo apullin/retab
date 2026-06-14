@@ -1,11 +1,11 @@
 use crate::fx_ir::{IrArg, IrGraph, IrPass, MetaValue, NodeMeta, NodeOp};
-use crate::fx_target::is_conv_bias_annotation_target;
+use crate::fx_target::{is_aten_convolution_default_target, is_conv_bias_annotation_target};
 use crate::runner_logging::log_line;
 
 pub struct IrAnnotateConvBiasDtypePass;
 
 fn needs_int16_activation_bias_decomposition(node: &crate::fx_ir::IrNode) -> bool {
-    if !node.target.contains("aten.convolution.default") {
+    if !is_aten_convolution_default_target(&node.target) {
         return false;
     }
     if matches!(node.args.get(6), Some(IrArg::Bool(true))) {

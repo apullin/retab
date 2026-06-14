@@ -6,6 +6,7 @@
 //!   cat(outputs, dim=1)
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam};
+use crate::fx_target::is_conv2d_default_target;
 use crate::runner_logging::log_line;
 
 fn is_boundary_rescale(target: &str) -> bool {
@@ -178,7 +179,7 @@ fn parse_grouped_conv(graph: &IrGraph, id: NodeId) -> Option<GroupedConvSpec> {
         return None;
     }
 
-    let is_raw_conv2d = node.target.contains("conv2d.default");
+    let is_raw_conv2d = is_conv2d_default_target(&node.target);
     let args = &node.args;
     if (is_raw_conv2d && args.len() < 2) || (!is_raw_conv2d && args.len() < 9) {
         return None;

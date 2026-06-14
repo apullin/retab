@@ -83,7 +83,7 @@ pub(crate) fn classify_ir_target(target: &str) -> IrTargetKind {
         return IrTargetKind::TosaRescale;
     }
 
-    if target.contains("convolution.default") || target.contains("conv2d.default") {
+    if is_aten_convolution_default_target(target) || is_conv2d_default_target(target) {
         return IrTargetKind::AtenConv;
     }
     if target.contains("linear.default") {
@@ -214,9 +214,21 @@ pub(crate) fn is_transpose_conv2d_target(target: &str) -> bool {
     target.contains("transpose_conv2d") || target.contains("transposeconv2d")
 }
 
-pub(crate) fn is_conv_bias_annotation_target(target: &str) -> bool {
+pub(crate) fn is_conv1d_default_target(target: &str) -> bool {
+    target.contains("conv1d.default")
+}
+
+pub(crate) fn is_conv2d_default_target(target: &str) -> bool {
+    target.contains("conv2d.default")
+}
+
+pub(crate) fn is_aten_convolution_default_target(target: &str) -> bool {
     target.contains("convolution.default")
-        || target.contains("conv2d.default")
+}
+
+pub(crate) fn is_conv_bias_annotation_target(target: &str) -> bool {
+    is_aten_convolution_default_target(target)
+        || is_conv2d_default_target(target)
         || target.contains("conv3d.default")
         || target.contains("conv_transpose2d")
         || target.contains("transpose_conv2d")
@@ -610,6 +622,11 @@ mod tests {
         assert!(is_raw_aten_convolution_target(
             "edge__ops_aten_convolution.default"
         ));
+        assert!(is_aten_convolution_default_target(
+            "aten.convolution.default"
+        ));
+        assert!(is_conv1d_default_target("aten.conv1d.default"));
+        assert!(is_conv2d_default_target("aten.conv2d.default"));
         assert!(is_conv_accumulator_target("backend.tosa.CONV2D.default"));
         assert!(is_conv_accumulator_target(
             "backend.tosa.DEPTHWISE_CONV2D.default"
