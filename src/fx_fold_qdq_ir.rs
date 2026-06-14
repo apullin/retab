@@ -5,8 +5,6 @@
 //! - foldable-node classification from typed `NodeMeta`
 //! - qparam resolution from literal or tensor-backed IR args
 
-use std::collections::HashMap;
-
 use crate::fx_ir::{IrArg, IrGraph, IrNode, IrPass, MetaValue, NodeId, NodeMeta, NodeOp, QParam};
 use crate::fx_target::{
     classify_ir_target, is_add_sub_target, is_sum_dim_int_list_target, IrTargetKind,
@@ -416,12 +414,12 @@ impl IrPass for IrFoldQdqPass {
                 continue;
             }
 
-            let mut input_qparams = HashMap::new();
+            let mut input_qparams = Vec::new();
 
             for resolved_input in resolved_inputs {
                 let idx = resolved_input.arg_index;
                 let resolved = resolved_input.qparam;
-                input_qparams.insert(idx, resolved.qparam.clone());
+                input_qparams.push((idx, resolved.qparam.clone()));
 
                 for arg_id in resolved_input.dq_node_ids {
                     let arg_node = graph.node(arg_id).clone();
@@ -456,12 +454,12 @@ impl IrPass for IrFoldQdqPass {
                 graph
                     .node_mut(node_id)
                     .meta
-                    .set_input_qparams(input_qparams);
+                    .set_input_qparams_from(input_qparams);
                 modified = true;
             }
 
             let snapshot_users = graph.live_user_ids(node_id);
-            let mut output_qparams = HashMap::new();
+            let mut output_qparams = Vec::new();
             for (idx, user_id) in snapshot_users.into_iter().enumerate() {
                 let user = graph.node(user_id).clone();
                 if !user.alive || !user.is_quantize_any() {
@@ -470,7 +468,7 @@ impl IrPass for IrFoldQdqPass {
                 let Some(resolved) = resolve_qparam_from_q_or_dq(graph, &user) else {
                     continue;
                 };
-                output_qparams.insert(idx, resolved.qparam.clone());
+                output_qparams.push((idx, resolved.qparam.clone()));
                 graph.replace_and_erase(user_id, node_id);
                 modified = true;
             }
@@ -479,11 +477,13 @@ impl IrPass for IrFoldQdqPass {
                 graph
                     .node_mut(node_id)
                     .meta
-                    .set_output_qparams(output_qparams.clone());
+                    .set_output_qparams_from(output_qparams.iter().cloned());
                 modified = true;
 
                 if is_sum_dim_int_list_target(&node.target) {
-                    if let Some(output_qparam) = output_qparams.get(&0) {
+                    if let Some((_, output_qparam)) =
+                        output_qparams.iter().find(|(index, _)| *index == 0)
+                    {
                         graph.set_kwarg(
                             node_id,
                             "dtype",
@@ -501,6 +501,8 @@ impl IrPass for IrFoldQdqPass {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use crate::fx_ir::{IrNode, MetaValue};
 
     use super::*;

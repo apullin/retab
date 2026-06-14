@@ -130,9 +130,7 @@ impl IrPass for IrConvertSplitToSlicePass {
                 let mut slice_meta = graph.nodes[split_id]
                     .meta
                     .cloned_with_val(out_shape, &dtype);
-                if let Some(oqp) = graph.nodes[*user_id].meta.output_qparams.clone() {
-                    slice_meta.set_output_qparams(oqp);
-                }
+                slice_meta.copy_output_qparams_from(&graph.nodes[*user_id].meta);
 
                 // slice_copy.Tensor(input, dim, start, end)
                 let new_id = graph.add_node(

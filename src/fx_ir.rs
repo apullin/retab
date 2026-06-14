@@ -1513,6 +1513,10 @@ impl NodeMeta {
         self.input_qparams = Some(map);
     }
 
+    pub fn set_output_qparams_from(&mut self, pairs: impl IntoIterator<Item = (usize, QParam)>) {
+        self.set_output_qparams(pairs.into_iter().collect());
+    }
+
     pub fn set_input_qparams_from(&mut self, pairs: impl IntoIterator<Item = (usize, QParam)>) {
         self.set_input_qparams(pairs.into_iter().collect());
     }
@@ -1651,13 +1655,25 @@ impl NodeMeta {
         qparams
     }
 
+    pub fn copy_input_qparams_from(&mut self, other: &Self) -> bool {
+        let Some(iqp) = other.input_qparams.clone() else {
+            return false;
+        };
+        self.set_input_qparams(iqp);
+        true
+    }
+
+    pub fn copy_output_qparams_from(&mut self, other: &Self) -> bool {
+        let Some(oqp) = other.output_qparams.clone() else {
+            return false;
+        };
+        self.set_output_qparams(oqp);
+        true
+    }
+
     fn copy_qparams_from(&mut self, other: &Self) {
-        if let Some(iqp) = other.input_qparams.clone() {
-            self.set_input_qparams(iqp);
-        }
-        if let Some(oqp) = other.output_qparams.clone() {
-            self.set_output_qparams(oqp);
-        }
+        self.copy_input_qparams_from(other);
+        self.copy_output_qparams_from(other);
     }
 
     pub fn clear_all_qparams(&mut self) {

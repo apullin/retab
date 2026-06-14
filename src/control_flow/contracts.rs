@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::fx_ir;
+use crate::fx_target::is_tosa_transpose_target;
 use crate::StashedPipeline;
 
 use super::{collect_region_metadata, metadata, region_name_from_ir_arg};
@@ -97,13 +98,11 @@ fn stamp_boundary_placeholder_meta(
     }
 
     let mut found_qparam = false;
-    if let Some(output_qparams) = input.meta.output_qparams.clone() {
-        ph_meta.set_output_qparams(output_qparams);
+    if ph_meta.copy_output_qparams_from(&input.meta) {
         found_qparam = true;
         changed += 1;
     }
-    if let Some(input_qparams) = input.meta.input_qparams.clone() {
-        ph_meta.set_input_qparams(input_qparams);
+    if ph_meta.copy_input_qparams_from(&input.meta) {
         found_qparam = true;
         changed += 1;
     }
@@ -151,7 +150,7 @@ fn resolve_parent_arg_ids_ir(node: &fx_ir::IrNode) -> Vec<fx_ir::NodeId> {
 
 fn boundary_placeholder_dim_order(parent_arg: &fx_ir::IrNode) -> Option<Vec<usize>> {
     let rank = parent_arg.meta.rank()?;
-    if parent_arg.name.ends_with("_input_layout") || parent_arg.target.contains("TRANSPOSE") {
+    if parent_arg.name.ends_with("_input_layout") || is_tosa_transpose_target(&parent_arg.target) {
         return Some((0..rank).collect());
     }
     parent_arg.meta.tosa_dim_order.clone()

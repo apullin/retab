@@ -6,13 +6,8 @@
 //!   cat(outputs, dim=1)
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam};
-use crate::fx_target::is_conv2d_default_target;
+use crate::fx_target::{is_boundary_rescale_target, is_conv2d_default_target};
 use crate::runner_logging::log_line;
-
-fn is_boundary_rescale(target: &str) -> bool {
-    let lower = target.to_ascii_lowercase();
-    lower.contains("rescale") || lower.contains("quantize_per_tensor.default")
-}
 
 fn same_per_tensor_qparam(lhs: &QParam, rhs: &QParam) -> bool {
     !lhs.is_per_channel()
@@ -60,9 +55,7 @@ fn configure_conv_qparams(
     transposed: bool,
     conv_meta: &mut NodeMeta,
 ) -> bool {
-    if let Some(output_qparams) = graph.nodes[original_id].meta.output_qparams.clone() {
-        conv_meta.set_output_qparams(output_qparams);
-    }
+    conv_meta.copy_output_qparams_from(&graph.nodes[original_id].meta);
 
     let Some(mut input_qparams) = graph.nodes[original_id].meta.input_qparams.clone() else {
         return true;
@@ -144,7 +137,7 @@ fn bypass_redundant_output_boundaries(graph: &mut IrGraph, original_id: NodeId, 
     for user_id in users {
         if !graph.nodes[user_id].alive
             || graph.nodes[user_id].op != NodeOp::CallFunction
-            || !is_boundary_rescale(&graph.nodes[user_id].target)
+            || !is_boundary_rescale_target(&graph.nodes[user_id].target)
         {
             continue;
         }

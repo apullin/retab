@@ -151,15 +151,9 @@ impl IrPass for IrConvertSumPass {
             // Replace original node with the final chained reduce.
             if let Some(final_id) = last_reduce {
                 // Restore original node's qparams on the final reduce.
-                if let Some(ref iqp) = orig_meta.input_qparams {
-                    graph.node_mut(final_id).meta.set_input_qparams(iqp.clone());
-                }
-                if let Some(ref oqp) = orig_meta.output_qparams {
-                    graph
-                        .node_mut(final_id)
-                        .meta
-                        .set_output_qparams(oqp.clone());
-                }
+                let final_meta = &mut graph.node_mut(final_id).meta;
+                final_meta.copy_input_qparams_from(&orig_meta);
+                final_meta.copy_output_qparams_from(&orig_meta);
                 graph.replace_and_erase(id, final_id);
                 modified = true;
             }

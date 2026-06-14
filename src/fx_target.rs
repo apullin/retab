@@ -215,6 +215,13 @@ pub(crate) fn is_tosa_transpose_target(target: &str) -> bool {
     target.contains("tosa") && target.contains("transpose")
 }
 
+pub(crate) fn is_boundary_rescale_target(target: &str) -> bool {
+    matches!(
+        classify_ir_target(target),
+        IrTargetKind::TosaRescale | IrTargetKind::QuantizePerTensor
+    )
+}
+
 pub(crate) fn is_layout_passthrough_target(target: &str) -> bool {
     let target = target.to_ascii_lowercase();
     contains_any!(

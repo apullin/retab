@@ -1191,6 +1191,14 @@ Deleted: pass-local layer_norm.default-vs-native view-target selection and size-
 Added: `LayerNormTargetKind`, `SizeAdjustTargetKind`, `layer_norm_param_view_target(...)`, and typed target tests for layernorm and size-adjust semantics
 Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_target::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over layer_norm, conv2d, conv3d, depthwise_conv, max_pool, and avg_pool2d; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `432 passed, 1 expected xfail, 1202 deselected`. No model lane was run. This is setup-positive in LOC because the target grammar gained explicit typed tests, but it removes two remaining local target-string dialects from production passes.
+
+2026-06-14, qparam copy and boundary target cleanup slice
+Rust LOC: 36,829 -> 36,838
+Movement: +9 Rust LOC
+Deleted: local grouped-conv boundary-rescale target predicate; direct whole-map qparam clone-and-set blocks in split-to-slice conversion, sum conversion, grouped-conv decomposition, and control-flow boundary placeholder stamping
+Added: `NodeMeta::set_output_qparams_from`, `NodeMeta::copy_input_qparams_from`, `NodeMeta::copy_output_qparams_from`, and shared `is_boundary_rescale_target(...)`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_fold_qdq_ir::tests`; `cargo test --lib fx_target::tests`; `cargo test --lib fx_decompose_grouped_conv_ir::tests`; `cargo test --lib control_flow::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over cond, while, conv2d, conv3d, sum, split, add, and mul; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `399 passed, 2 expected xfails, 975 deselected`. No model lane was run. This is a small setup-positive Tensor Facts/target grammar slice; it names qparam fact copying and removes several field-level clone/set idioms from production passes.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1229,7 +1237,8 @@ families. Single-op decomposition gates for embedding, logit, index_select,
 index.Tensor, cumsum, sum, mean, adaptive_avg_pool2d, masked_fill,
 select_scatter, and full_like now also live in the shared target grammar. Exact
 conv1d, conv2d, and ATen convolution default spellings now also have shared
-target helpers.
+target helpers. Grouped-conv redundant-boundary cleanup now also uses shared
+boundary-rescale target grammar instead of a pass-local substring predicate.
 
 Remaining work:
 
@@ -1337,7 +1346,10 @@ clones that should preserve the fact that qparam maps are present but empty now
 use `NodeMeta::cloned_with_empty_qparam_maps`, distinct from
 `cloned_without_qparams`. Present input-qparam maps with multiple slots now use
 `NodeMeta::set_input_qparams_from`, and present-but-empty input maps use
-`NodeMeta::set_empty_input_qparams`.
+`NodeMeta::set_empty_input_qparams`. Present output-qparam maps now also have
+the symmetric `NodeMeta::set_output_qparams_from`, and whole-map qparam copying
+from one metadata object to another is named by `copy_input_qparams_from` and
+`copy_output_qparams_from`.
 
 Problem:
 
