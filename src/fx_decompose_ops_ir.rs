@@ -193,6 +193,23 @@ impl ApproxCtx {
         )
     }
 
+    fn tensor_nodes_shape(
+        &self,
+        graph: &mut IrGraph,
+        suffix: &str,
+        target: &str,
+        nodes: &[NodeId],
+        shape: &[i64],
+    ) -> NodeId {
+        self.tensor_shape(
+            graph,
+            suffix,
+            target,
+            nodes.iter().copied().map(IrArg::Node).collect(),
+            shape,
+        )
+    }
+
     fn bool(&self, graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>) -> NodeId {
         self.bool_shape(graph, suffix, target, args, &self.shape)
     }
@@ -2560,36 +2577,26 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     let mean_view = ctx.view_shape(graph, "mean_view", running_mean, &channel_shape);
     let var_view = ctx.view_shape(graph, "var_view", running_var, &channel_shape);
 
-    let centered = ctx.tensor(
-        graph,
-        "centered",
-        "aten.sub.Tensor",
-        vec![IrArg::Node(x_id), IrArg::Node(mean_view)],
-    );
+    let centered = ctx.sub(graph, "centered", x_id, mean_view);
     let eps_full = ctx.full_shape(graph, "eps", eps, &scalar_shape);
 
-    let var_eps = ctx.tensor_shape(
+    let var_eps = ctx.tensor_nodes_shape(
         graph,
         "var_eps",
         "aten.add.Tensor",
-        vec![IrArg::Node(var_view), IrArg::Node(eps_full)],
+        &[var_view, eps_full],
         &channel_shape,
     );
 
-    let inv_sqrt = ctx.tensor_shape(
+    let inv_sqrt = ctx.tensor_nodes_shape(
         graph,
         "inv_sqrt",
         "aten.rsqrt.default",
-        vec![IrArg::Node(var_eps)],
+        &[var_eps],
         &channel_shape,
     );
 
-    let normed = ctx.tensor(
-        graph,
-        "normed",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(centered), IrArg::Node(inv_sqrt)],
-    );
+    let normed = ctx.mul(graph, "normed", centered, inv_sqrt);
 
     let weight_view = match weight_arg {
         IrArg::Node(weight_id) => ctx.view_shape(graph, "weight_view", weight_id, &channel_shape),
@@ -2600,12 +2607,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         _ => return false,
     };
 
-    let weighted = ctx.tensor(
-        graph,
-        "weighted",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(normed), IrArg::Node(weight_view)],
-    );
+    let weighted = ctx.mul(graph, "weighted", normed, weight_view);
 
     let bias_view = match bias_arg {
         IrArg::Node(bias_id) => ctx.view_shape(graph, "bias_view", bias_id, &channel_shape),
@@ -2616,12 +2618,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         _ => return false,
     };
 
-    let result = ctx.tensor(
-        graph,
-        "result",
-        "aten.add.Tensor",
-        vec![IrArg::Node(weighted), IrArg::Node(bias_view)],
-    );
+    let result = ctx.add(graph, "result", weighted, bias_view);
     replace_primary_result_users(graph, id, result)
 }
 
@@ -2714,25 +2711,25 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(grouped), reduce_dims.clone(), IrArg::Bool(true)],
         &stat_shape,
     );
-    let mean = ctx.tensor_shape(
+    let mean = ctx.tensor_nodes_shape(
         graph,
         "mean",
         "aten.mul.Tensor",
-        vec![IrArg::Node(sum_x), IrArg::Node(inv_n)],
+        &[sum_x, inv_n],
         &stat_shape,
     );
-    let centered = ctx.tensor_shape(
+    let centered = ctx.tensor_nodes_shape(
         graph,
         "centered",
         "aten.sub.Tensor",
-        vec![IrArg::Node(grouped), IrArg::Node(mean)],
+        &[grouped, mean],
         &grouped_shape,
     );
-    let squared = ctx.tensor_shape(
+    let squared = ctx.tensor_nodes_shape(
         graph,
         "squared",
         "aten.mul.Tensor",
-        vec![IrArg::Node(centered), IrArg::Node(centered)],
+        &[centered, centered],
         &grouped_shape,
     );
     let sum_squared = ctx.tensor_shape(
@@ -2742,33 +2739,33 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(squared), reduce_dims, IrArg::Bool(true)],
         &stat_shape,
     );
-    let var = ctx.tensor_shape(
+    let var = ctx.tensor_nodes_shape(
         graph,
         "var",
         "aten.mul.Tensor",
-        vec![IrArg::Node(sum_squared), IrArg::Node(inv_n)],
+        &[sum_squared, inv_n],
         &stat_shape,
     );
     let eps_full = ctx.full_shape(graph, "eps", eps, &scalar_shape);
-    let var_eps = ctx.tensor_shape(
+    let var_eps = ctx.tensor_nodes_shape(
         graph,
         "var_eps",
         "aten.add.Tensor",
-        vec![IrArg::Node(var), IrArg::Node(eps_full)],
+        &[var, eps_full],
         &stat_shape,
     );
-    let rsqrt = ctx.tensor_shape(
+    let rsqrt = ctx.tensor_nodes_shape(
         graph,
         "rsqrt",
         "aten.rsqrt.default",
-        vec![IrArg::Node(var_eps)],
+        &[var_eps],
         &stat_shape,
     );
-    let normalized = ctx.tensor_shape(
+    let normalized = ctx.tensor_nodes_shape(
         graph,
         "normalized",
         "aten.mul.Tensor",
-        vec![IrArg::Node(centered), IrArg::Node(rsqrt)],
+        &[centered, rsqrt],
         &grouped_shape,
     );
 
@@ -2781,11 +2778,11 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
                 weight_id,
                 &affine_shape,
             );
-            ctx.tensor_shape(
+            ctx.tensor_nodes_shape(
                 graph,
                 "weighted",
                 "aten.mul.Tensor",
-                vec![IrArg::Node(normalized), IrArg::Node(weight_view)],
+                &[normalized, weight_view],
                 &grouped_shape,
             )
         }
@@ -2797,11 +2794,11 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         IrArg::Node(bias_id) => {
             let bias_view =
                 ctx.reshape_shape(graph, "bias_view", reshape_target, bias_id, &affine_shape);
-            ctx.tensor_shape(
+            ctx.tensor_nodes_shape(
                 graph,
                 "biased",
                 "aten.add.Tensor",
-                vec![IrArg::Node(weighted), IrArg::Node(bias_view)],
+                &[weighted, bias_view],
                 &grouped_shape,
             )
         }
