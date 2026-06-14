@@ -45,12 +45,12 @@ impl IrPass for IrRemoveNoopPass {
             };
 
             // Check dtype match: input dtype must equal output dtype.
-            let input_dtype = graph.nodes[input_id].meta.val_dtype();
+            let input_dtype = graph.node_dtype(input_id);
             if input_dtype.is_none() {
                 return false;
             }
             if noop == NoopTarget::DtypeCheckedPassthrough {
-                let output_dtype = graph.nodes[id].meta.val_dtype();
+                let output_dtype = graph.node_dtype(id);
                 if input_dtype != output_dtype {
                     return false;
                 }

@@ -93,7 +93,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 Some(n) => n,
                 None => continue,
             };
-            let input_shape = match graph.nodes[x_id].meta.val_shape() {
+            let input_shape = match graph.node_shape(x_id) {
                 Some(s) if s.len() >= 4 => s.to_vec(),
                 _ => continue,
             };
@@ -122,7 +122,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
             let orig_meta = value_getitem
                 .map(|user_id| graph.nodes[user_id].meta.clone())
                 .unwrap_or_else(|| graph.nodes[id].meta.clone());
-            let dtype = graph.nodes[x_id].meta.val_dtype_or_float32().to_string();
+            let dtype = graph.node_dtype_or_float32(x_id).to_string();
 
             // 1. constant_pad_nd(x, [pad_w, right_pad, pad_h, bottom_pad, 0,0,0,0], pad_val)
             let x_pad = graph.add_anchored_call_function(

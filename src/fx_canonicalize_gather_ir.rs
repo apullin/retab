@@ -37,12 +37,12 @@ impl IrPass for IrCanonicalizeGatherPass {
                 None => continue,
             };
 
-            let x_shape = match graph.nodes[x_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let x_shape = match graph.node_shape_vec(x_id) {
+                Some(s) => s,
                 None => continue,
             };
-            let index_shape = match graph.nodes[index_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let index_shape = match graph.node_shape_vec(index_id) {
+                Some(s) => s,
                 None => continue,
             };
 
@@ -64,7 +64,7 @@ impl IrPass for IrCanonicalizeGatherPass {
             let w = index_shape[1];
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let x_dtype = graph.nodes[x_id].meta.val_dtype_or_float32().to_string();
+            let x_dtype = graph.node_dtype_or_float32(x_id).to_string();
             let needs_bool_cast = x_dtype == "torch.bool";
             let work_dtype = if needs_bool_cast {
                 "torch.int8"

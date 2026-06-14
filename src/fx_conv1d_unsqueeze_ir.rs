@@ -135,20 +135,20 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
     }
 
     // Get input and weight shapes.
-    let x_shape = match graph.nodes[x_id].meta.val_shape() {
-        Some(s) => s.to_vec(),
+    let x_shape = match graph.node_shape_vec(x_id) {
+        Some(s) => s,
         None => return false,
     };
-    let x_dtype = match graph.nodes[x_id].meta.val_dtype() {
+    let x_dtype = match graph.node_dtype(x_id) {
         Some(d) => d.to_string(),
         None => return false,
     };
-    let w_dtype = match graph.nodes[w_id].meta.val_dtype() {
+    let w_dtype = match graph.node_dtype(w_id) {
         Some(d) => d.to_string(),
         None => return false,
     };
-    let w_shape = match graph.nodes[w_id].meta.val_shape() {
-        Some(s) => s.to_vec(),
+    let w_shape = match graph.node_shape_vec(w_id) {
+        Some(s) => s,
         None => return false,
     };
 
@@ -176,11 +176,11 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
     output_padding_2d.push(0);
 
     // Compute conv2d output shape: take the original output shape and insert a trailing 1.
-    let orig_out_shape = match graph.nodes[id].meta.val_shape() {
-        Some(s) => s.to_vec(),
+    let orig_out_shape = match graph.node_shape_vec(id) {
+        Some(s) => s,
         None => return false,
     };
-    let orig_out_dtype = match graph.nodes[id].meta.val_dtype() {
+    let orig_out_dtype = match graph.node_dtype(id) {
         Some(d) => d.to_string(),
         None => return false,
     };

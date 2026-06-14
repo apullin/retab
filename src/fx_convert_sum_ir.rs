@@ -50,8 +50,8 @@ impl IrPass for IrConvertSumPass {
             }
 
             // Normalize negative dims.
-            let input_shape = match graph.nodes[input_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let input_shape = match graph.node_shape_vec(input_id) {
+                Some(s) => s,
                 None => continue,
             };
             let input_rank = input_shape.len() as i64;
@@ -72,10 +72,7 @@ impl IrPass for IrConvertSumPass {
 
             let orig_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let orig_dtype = graph.nodes[input_id]
-                .meta
-                .val_dtype_or_float32()
-                .to_string();
+            let orig_dtype = graph.node_dtype_or_float32(input_id).to_string();
 
             // Track qparams for chaining: first reduce inherits the original
             // node's input_qparams; subsequent reduces use the previous
@@ -90,8 +87,8 @@ impl IrPass for IrConvertSumPass {
 
             for &dim in &dims {
                 // Get current input shape for computing output shape.
-                let cur_shape = match graph.nodes[current_input].meta.val_shape() {
-                    Some(s) => s.to_vec(),
+                let cur_shape = match graph.node_shape_vec(current_input) {
+                    Some(s) => s,
                     None => continue,
                 };
                 let rank = cur_shape.len();

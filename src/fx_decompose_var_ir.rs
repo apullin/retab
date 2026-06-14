@@ -31,11 +31,11 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(node_id) => node_id,
         None => return false,
     };
-    let input_shape = match graph.nodes[x_id].meta.val_shape() {
-        Some(shape) => shape.to_vec(),
+    let input_shape = match graph.node_shape_vec(x_id) {
+        Some(shape) => shape,
         None => return false,
     };
-    let dtype = graph.nodes[x_id].meta.val_dtype_or_float32().to_string();
+    let dtype = graph.node_dtype_or_float32(x_id).to_string();
     let target = graph.nodes[id].target.clone();
     let name = graph.nodes[id].name.clone();
     let base_meta = graph.nodes[id].meta.clone();

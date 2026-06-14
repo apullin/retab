@@ -869,6 +869,22 @@ impl IrGraph {
             .collect()
     }
 
+    pub(crate) fn node_shape(&self, id: NodeId) -> Option<&[i64]> {
+        self.nodes[id].meta.val_shape()
+    }
+
+    pub(crate) fn node_shape_vec(&self, id: NodeId) -> Option<Vec<i64>> {
+        self.node_shape(id).map(|shape| shape.to_vec())
+    }
+
+    pub(crate) fn node_dtype(&self, id: NodeId) -> Option<&str> {
+        self.nodes[id].meta.val_dtype()
+    }
+
+    pub(crate) fn node_dtype_or_float32(&self, id: NodeId) -> &str {
+        self.nodes[id].meta.val_dtype_or_float32()
+    }
+
     // --- Graph surgery ---
 
     /// Replace all references to `old_id` with `new_id` in args across the graph.

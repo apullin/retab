@@ -74,29 +74,25 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     let accumulate = node.arg_bool_or(3, false);
 
     // Only the supported simple case: single bool mask, no accumulate, scalar data.
-    if accumulate || graph.nodes[mask].meta.val_dtype() != Some("torch.bool") {
+    if accumulate || graph.node_dtype(mask) != Some("torch.bool") {
         return false;
     }
-    let dest_shape = match graph.nodes[dest].meta.val_shape() {
-        Some(s) => s.to_vec(),
+    let dest_shape = match graph.node_shape_vec(dest) {
+        Some(s) => s,
         None => return false,
     };
-    let mask_shape = match graph.nodes[mask].meta.val_shape() {
-        Some(s) => s.to_vec(),
+    let mask_shape = match graph.node_shape_vec(mask) {
+        Some(s) => s,
         None => return false,
     };
-    let data_shape = match graph.nodes[data].meta.val_shape() {
-        Some(s) => s.to_vec(),
+    let data_shape = match graph.node_shape_vec(data) {
+        Some(s) => s,
         None => return false,
     };
     if data_shape.iter().product::<i64>() != 1 {
         return false;
     }
-    let data_dtype = graph.nodes[data]
-        .meta
-        .val_dtype()
-        .unwrap_or("torch.int8")
-        .to_string();
+    let data_dtype = graph.node_dtype(data).unwrap_or("torch.int8").to_string();
     let dest_rank = dest_shape.len();
 
     let mut prev: Option<NodeId> = None;

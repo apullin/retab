@@ -88,14 +88,14 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     };
     let rest_args: Vec<IrArg> = graph.nodes[id].args[3..].to_vec();
 
-    let dest_shape = match graph.nodes[dest_id].meta.val_shape() {
-        Some(s) => s.to_vec(),
+    let dest_shape = match graph.node_shape_vec(dest_id) {
+        Some(s) => s,
         None => return false,
     };
     let dest_rank = dest_shape.len();
     let dest_meta = graph.nodes[dest_id].meta.clone();
-    let data_shape = match graph.nodes[data_id].meta.val_shape() {
-        Some(s) => s.to_vec(),
+    let data_shape = match graph.node_shape_vec(data_id) {
+        Some(s) => s,
         None => return false,
     };
     let data_meta = graph.nodes[data_id].meta.clone();

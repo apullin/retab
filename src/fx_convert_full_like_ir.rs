@@ -37,8 +37,8 @@ impl IrPass for IrConvertFullLikePass {
             let fill_value = graph.nodes[id].args[1].clone();
 
             // Get input shape from the input node's meta
-            let input_shape = match graph.nodes[input_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let input_shape = match graph.node_shape_vec(input_id) {
+                Some(s) => s,
                 None => return false,
             };
 

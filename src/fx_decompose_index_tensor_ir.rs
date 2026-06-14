@@ -50,8 +50,8 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 continue;
             }
 
-            let x_shape = match graph.nodes[x_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let x_shape = match graph.node_shape_vec(x_id) {
+                Some(s) => s,
                 None => continue,
             };
             if x_shape.is_empty() {
@@ -77,7 +77,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
                     all_valid = false;
                     break;
                 };
-                let Some(s) = graph.nodes[nid].meta.val_shape() else {
+                let Some(s) = graph.node_shape(nid) else {
                     all_valid = false;
                     break;
                 };
@@ -114,10 +114,9 @@ impl IrPass for IrDecomposeIndexTensorPass {
 
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let x_dtype = graph.nodes[x_id].meta.val_dtype_or_float32().to_string();
-            let idx_dtype = graph.nodes[idx_ids[0]]
-                .meta
-                .val_dtype()
+            let x_dtype = graph.node_dtype_or_float32(x_id).to_string();
+            let idx_dtype = graph
+                .node_dtype(idx_ids[0])
                 .unwrap_or("torch.int64")
                 .to_string();
 

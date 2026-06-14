@@ -42,8 +42,8 @@ impl IrPass for IrRewriteIndexPutPass {
                 .and_then(|a| a.as_bool())
                 .unwrap_or(false);
 
-            let source_shape = match graph.nodes[source_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let source_shape = match graph.node_shape_vec(source_id) {
+                Some(s) => s,
                 None => continue,
             };
             if source_shape.is_empty() {
@@ -51,13 +51,10 @@ impl IrPass for IrRewriteIndexPutPass {
             }
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let src_dtype = graph.nodes[source_id]
-                .meta
-                .val_dtype_or_float32()
-                .to_string();
+            let src_dtype = graph.node_dtype_or_float32(source_id).to_string();
 
             let index_dtype = indices_list.iter().find_map(|item| match item {
-                IrArg::Node(nid) => graph.nodes[*nid].meta.val_dtype().map(str::to_string),
+                IrArg::Node(nid) => graph.node_dtype(*nid).map(str::to_string),
                 _ => None,
             });
             let Some(index_dtype) = index_dtype else {
@@ -71,7 +68,7 @@ impl IrPass for IrRewriteIndexPutPass {
             for (dim_idx, item) in indices_list.iter().enumerate() {
                 match item {
                     IrArg::Node(nid) => {
-                        let Some(s) = graph.nodes[*nid].meta.val_shape() else {
+                        let Some(s) = graph.node_shape(*nid) else {
                             invalid_indices = true;
                             break;
                         };

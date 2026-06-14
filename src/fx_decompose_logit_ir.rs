@@ -31,8 +31,8 @@ impl IrPass for IrDecomposeLogitPass {
                 Some(id) => id,
                 None => return false,
             };
-            let input_shape = match graph.nodes[input_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let input_shape = match graph.node_shape_vec(input_id) {
+                Some(s) => s,
                 None => vec![1],
             };
             let rank = input_shape.len();

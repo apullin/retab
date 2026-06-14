@@ -1423,6 +1423,14 @@ Deleted: same-source `.cloned_with_val(...).with_qparams_from(...)` chains and t
 Added: no replacement helper; `cloned_with_val(...)` already preserves qparam metadata from the cloned base
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over index_tensor, index_put, unfold_copy, conv1d, and linear; Rust LOC check
 Note: Full Rust tests passed `139 passed`; focused Python smoke passed `221 passed, 20 expected xfails, 503 deselected`. No model lane was run. This is a Refactor 2 metadata grammar cleanup: pass code no longer re-states a qparam copy that already follows from the `NodeMeta` cloning contract.
+
+2026-06-14, graph tensor-fact accessor migration slice
+Rust LOC: 36,820 -> 36,801
+Movement: -19 Rust LOC
+Deleted: repeated `graph.nodes[id].meta.val_shape()` / dtype fallback spellings across shape-heavy decomposition, index, pool, no-op, and pad passes
+Added: `IrGraph::node_shape`, `IrGraph::node_shape_vec`, `IrGraph::node_dtype`, and `IrGraph::node_dtype_or_float32` as the graph-level grammar for reading node tensor facts
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over mean_dim, var, sum, avg_pool2d, max_pool, full, logit, squeeze, unsqueeze, transpose_copy, split, slice, slice_scatter, linear, conv1d, gather, index_select, index_tensor, index_put, cumsum, unfold_copy, pixel_shuffling, addmm, tril, to_copy, where, and constant_pad_nd; Rust LOC check
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `864 passed, 2 skipped, 21 expected xfails`. No model lane was run. This is a Refactor 2 Tensor Facts cleanup: passes now ask the graph for tensor facts instead of reaching through the raw node/meta layout.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

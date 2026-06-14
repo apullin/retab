@@ -31,12 +31,12 @@ impl IrPass for IrExpandWhereMaskPass {
                 None => return false,
             };
 
-            let output_shape = match graph.nodes[id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let output_shape = match graph.node_shape_vec(id) {
+                Some(s) => s,
                 None => return false,
             };
-            let mask_shape = match graph.nodes[mask_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let mask_shape = match graph.node_shape_vec(mask_id) {
+                Some(s) => s,
                 None => return false,
             };
 
@@ -61,9 +61,8 @@ impl IrPass for IrExpandWhereMaskPass {
             }
 
             // Build meta for the view_copy node (padded mask shape, same dtype as mask)
-            let mask_dtype = graph.nodes[mask_id]
-                .meta
-                .val_dtype()
+            let mask_dtype = graph
+                .node_dtype(mask_id)
                 .unwrap_or("torch.bool")
                 .to_string();
             let view_meta = graph.nodes[mask_id]

@@ -39,18 +39,15 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
         _ => return false,
     };
 
-    let original_shape = match graph.nodes[input_id].meta.val_shape() {
-        Some(s) => s.to_vec(),
+    let original_shape = match graph.node_shape_vec(input_id) {
+        Some(s) => s,
         None => return false,
     };
     if original_shape.is_empty() {
         return false;
     }
 
-    let input_dtype = graph.nodes[input_id]
-        .meta
-        .val_dtype_or_float32()
-        .to_string();
+    let input_dtype = graph.node_dtype_or_float32(input_id).to_string();
 
     let rank = original_shape.len() as i64;
     let dim = dim_raw.rem_euclid(rank) as usize;

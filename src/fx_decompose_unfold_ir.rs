@@ -41,8 +41,8 @@ impl IrPass for IrDecomposeUnfoldPass {
                 continue;
             }
 
-            let input_shape = match graph.nodes[x_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let input_shape = match graph.node_shape_vec(x_id) {
+                Some(s) => s,
                 None => continue,
             };
             let rank = input_shape.len() as i64;
@@ -65,7 +65,7 @@ impl IrPass for IrDecomposeUnfoldPass {
 
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let x_dtype = graph.nodes[x_id].meta.val_dtype_or_float32().to_string();
+            let x_dtype = graph.node_dtype_or_float32(x_id).to_string();
             let needs_bool_cast = x_dtype == "torch.bool";
             let work_dtype = if needs_bool_cast {
                 "torch.int8"

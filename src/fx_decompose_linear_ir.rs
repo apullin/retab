@@ -45,27 +45,21 @@ impl IrPass for IrDecomposeLinearPass {
                 None
             };
 
-            let input_shape = match graph.nodes[input_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let input_shape = match graph.node_shape_vec(input_id) {
+                Some(s) => s,
                 None => continue,
             };
-            let weights_shape = match graph.nodes[weights_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let weights_shape = match graph.node_shape_vec(weights_id) {
+                Some(s) => s,
                 None => continue,
             };
-            let output_shape = match graph.nodes[id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let output_shape = match graph.node_shape_vec(id) {
+                Some(s) => s,
                 None => continue,
             };
-            let output_dtype = graph.nodes[id].meta.val_dtype_or_float32().to_string();
-            let input_dtype = graph.nodes[input_id]
-                .meta
-                .val_dtype_or_float32()
-                .to_string();
-            let weight_dtype = graph.nodes[weights_id]
-                .meta
-                .val_dtype_or_float32()
-                .to_string();
+            let output_dtype = graph.node_dtype_or_float32(id).to_string();
+            let input_dtype = graph.node_dtype_or_float32(input_id).to_string();
+            let weight_dtype = graph.node_dtype_or_float32(weights_id).to_string();
 
             // Compute batch dimension: product of all dims except last.
             let ci = input_shape[input_shape.len() - 1];

@@ -69,7 +69,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                 continue;
             }
 
-            let input_shape = match graph.nodes[x_id].meta.val_shape() {
+            let input_shape = match graph.node_shape(x_id) {
                 Some(shape) if shape.len() == 4 => shape.to_vec(),
                 _ => continue,
             };
@@ -79,7 +79,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                 input_shape[2],
                 input_shape[3],
             );
-            let dtype = graph.nodes[x_id].meta.val_dtype_or_float32().to_string();
+            let dtype = graph.node_dtype_or_float32(x_id).to_string();
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
             let x_meta = graph.nodes[x_id].meta.clone();

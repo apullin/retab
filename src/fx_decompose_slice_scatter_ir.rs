@@ -58,11 +58,10 @@ impl IrPass for IrDecomposeSliceScatterPass {
                 continue;
             }
 
-            let Some(input_shape) = graph.nodes[input_id].meta.val_shape().map(|s| s.to_vec())
-            else {
+            let Some(input_shape) = graph.node_shape_vec(input_id) else {
                 continue;
             };
-            let Some(src_shape) = graph.nodes[src_id].meta.val_shape().map(|s| s.to_vec()) else {
+            let Some(src_shape) = graph.node_shape_vec(src_id) else {
                 continue;
             };
             if input_shape.is_empty() {
@@ -89,10 +88,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
 
             let name = graph.nodes[id].name.clone();
             let meta = graph.nodes[id].meta.clone();
-            let dtype = graph.nodes[input_id]
-                .meta
-                .val_dtype_or_float32()
-                .to_string();
+            let dtype = graph.node_dtype_or_float32(input_id).to_string();
 
             let result = if step == 1 {
                 // Only cat non-empty slices: TOSA cannot allocate a zero-dim tensor,

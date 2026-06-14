@@ -34,16 +34,13 @@ impl IrPass for IrSizeAdjustInputPass {
                 Some(n) => n,
                 None => continue,
             };
-            let input_shape = match graph.nodes[input_id].meta.val_shape() {
+            let input_shape = match graph.node_shape(input_id) {
                 Some(s) if s.len() >= 4 => s.to_vec(),
                 _ => continue,
             };
 
             let node_name = graph.nodes[id].name.clone();
-            let dtype = graph.nodes[input_id]
-                .meta
-                .val_dtype_or_float32()
-                .to_string();
+            let dtype = graph.node_dtype_or_float32(input_id).to_string();
 
             let slices = match target_kind {
                 SizeAdjustTargetKind::Conv => {
@@ -51,7 +48,7 @@ impl IrPass for IrSizeAdjustInputPass {
                         .args
                         .get(1)
                         .and_then(|a| a.as_node())
-                        .and_then(|wid| graph.nodes[wid].meta.val_shape())
+                        .and_then(|wid| graph.node_shape(wid))
                         .map(|s| s.to_vec())
                         .unwrap_or_default();
                     if weight_shape.len() < input_shape.len() {

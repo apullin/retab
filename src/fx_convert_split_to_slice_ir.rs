@@ -56,8 +56,8 @@ impl IrPass for IrConvertSplitToSlicePass {
                 Some(id) => id,
                 None => continue,
             };
-            let input_shape = match graph.nodes[input_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let input_shape = match graph.node_shape_vec(input_id) {
+                Some(s) => s,
                 None => continue,
             };
             let rank = input_shape.len() as i64;
@@ -94,10 +94,7 @@ impl IrPass for IrConvertSplitToSlicePass {
             }
 
             // Grab the dtype from the input for building output metas
-            let dtype = graph.nodes[input_id]
-                .meta
-                .val_dtype_or_float32()
-                .to_string();
+            let dtype = graph.node_dtype_or_float32(input_id).to_string();
 
             let split_name = graph.nodes[split_id].name.clone();
 

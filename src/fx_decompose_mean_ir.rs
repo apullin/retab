@@ -25,8 +25,8 @@ impl IrPass for IrDecomposeMeanPass {
                 Some(n) => n,
                 None => continue,
             };
-            let input_shape = match graph.nodes[x_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let input_shape = match graph.node_shape_vec(x_id) {
+                Some(s) => s,
                 None => continue,
             };
             let keepdim = graph.nodes[id]
@@ -49,7 +49,7 @@ impl IrPass for IrDecomposeMeanPass {
 
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let dtype = graph.nodes[x_id].meta.val_dtype_or_float32().to_string();
+            let dtype = graph.node_dtype_or_float32(x_id).to_string();
 
             // 4D spatial reduction → avg_pool2d path
             if input_shape.len() == 4 && dims.iter().all(|&d| d == 2 || d == 3) {

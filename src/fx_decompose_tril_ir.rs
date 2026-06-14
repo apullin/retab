@@ -13,13 +13,13 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
 
     let diagonal = graph.nodes[id].arg_int_or(1, 0);
 
-    let input_shape = graph.nodes[input_id].meta.val_shape()?.to_vec();
+    let input_shape = graph.node_shape_vec(input_id)?;
     if input_shape.len() < 2 {
         return None;
     }
     let rows = input_shape[input_shape.len() - 2];
     let cols = input_shape[input_shape.len() - 1];
-    let input_dtype = graph.nodes[input_id].meta.val_dtype()?.to_string();
+    let input_dtype = graph.node_dtype(input_id)?.to_string();
     let base_name = graph.nodes[id].name.clone();
     let base_meta = graph.nodes[id].meta.clone();
 

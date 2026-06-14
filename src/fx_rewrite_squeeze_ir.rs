@@ -63,8 +63,8 @@ impl IrPass for IrRewriteSqueezePass {
                 Some(id) => id,
                 None => continue,
             };
-            let input_shape = match graph.nodes[input_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let input_shape = match graph.node_shape_vec(input_id) {
+                Some(s) => s,
                 None => continue,
             };
             let input_rank = input_shape.len();

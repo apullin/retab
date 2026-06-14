@@ -46,8 +46,8 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 Some(n) => n,
                 None => continue,
             };
-            let input_shape = match graph.nodes[input_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let input_shape = match graph.node_shape_vec(input_id) {
+                Some(s) => s,
                 None => continue,
             };
             if input_shape.is_empty() {
@@ -83,10 +83,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
             let is_bool_dtype = graph.nodes[input_id].meta.val_dtype_is(DType::Bool);
-            let dtype = graph.nodes[input_id]
-                .meta
-                .val_dtype_or_float32()
-                .to_string();
+            let dtype = graph.node_dtype_or_float32(input_id).to_string();
 
             // 1. Unit-step slice: slice_copy(input, dim, start, end, 1)
             let mut slice_shape = input_shape.clone();

@@ -29,16 +29,16 @@ impl IrPass for IrDecorateFpToIntCastPass {
                 Some(n) => n,
                 None => return false,
             };
-            if graph.nodes[x_id].meta.val_dtype() != Some("torch.float32")
-                || graph.nodes[id].meta.val_dtype() != Some("torch.int32")
+            if graph.node_dtype(x_id) != Some("torch.float32")
+                || graph.node_dtype(id) != Some("torch.int32")
             {
                 return false;
             }
             if graph.nodes[x_id].meta.output_qparam().is_some() {
                 return false;
             }
-            let input_shape = match graph.nodes[x_id].meta.val_shape() {
-                Some(shape) => shape.to_vec(),
+            let input_shape = match graph.node_shape_vec(x_id) {
+                Some(shape) => shape,
                 None => return false,
             };
 

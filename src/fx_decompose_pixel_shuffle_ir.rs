@@ -83,8 +83,8 @@ impl IrPass for IrDecomposePixelShufflePass {
                 Some(nid) => nid,
                 None => return false,
             };
-            let input_shape = match graph.nodes[input_id].meta.val_shape() {
-                Some(s) => s.to_vec(),
+            let input_shape = match graph.node_shape_vec(input_id) {
+                Some(s) => s,
                 None => return false,
             };
             if input_shape.len() != 4 {
@@ -97,7 +97,7 @@ impl IrPass for IrDecomposePixelShufflePass {
                 None => return false,
             };
 
-            let orig_dtype = graph.nodes[id].meta.val_dtype_or_float32().to_string();
+            let orig_dtype = graph.node_dtype_or_float32(id).to_string();
             let node_name = graph.nodes[id].name.clone();
             let base_meta = graph.nodes[id].meta.clone();
 
