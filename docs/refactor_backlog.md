@@ -1922,6 +1922,19 @@ That wrapper could eventually absorb the current free functions in
 `src/fx_py_attr.rs`, but it should not collapse required/error-propagating reads
 into lossy/defaulting reads.
 
+2026-06-14, FX tensor import context slice
+
+Deleted: repeated placeholder/get_attr "lookup Python value, extract tensor,
+wrap TensorSource" blocks from `src/fx_ir.rs`
+
+Added: `FxTensorImportContext` now owns tensor-bearing FX node import policy,
+including placeholder tensor lookup order through `state_dict`, lifted
+`ep.constants`, then GraphModule attrs
+
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`;
+focused Python smoke via `/tmp/et.sh` over addmm, bmm, conv2d, embedding,
+full, linear, matmul, mm, ones, view, and zeros
+
 Problem:
 
 Rust-side Python ingestion still spells the same semantic action many times:

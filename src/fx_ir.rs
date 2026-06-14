@@ -213,64 +213,68 @@ fn build_placeholder_tensor_bindings(
     Ok(placeholder_bindings)
 }
 
-fn extract_node_tensor(
-    gm: &Bound<'_, PyAny>,
-    py_node: &Bound<'_, PyAny>,
-    name: &str,
-    target: &str,
-    state_dict: Option<&Bound<'_, PyAny>>,
-    constants: Option<&Bound<'_, PyAny>>,
-    placeholder_bindings: &HashMap<String, PlaceholderTensorBinding>,
-) -> Option<NodeTensor> {
-    let op: String = attrs(py_node).optional("op")?;
-    match op.as_str() {
-        "placeholder" => {
-            let binding = placeholder_bindings.get(name)?;
-            if let Some(state_dict) = state_dict {
-                if let Some(value) = items(state_dict).key(binding.target_name.as_str()) {
-                    if let Ok(data) = extract_tensor_data(&value) {
-                        return Some(NodeTensor {
-                            source: TensorSource::ExportedProgramInput(binding.clone()),
-                            data,
-                        });
-                    }
-                }
-            }
+struct FxTensorImportContext<'a, 'py> {
+    gm: &'a Bound<'py, PyAny>,
+    state_dict: Option<&'a Bound<'py, PyAny>>,
+    constants: Option<&'a Bound<'py, PyAny>>,
+    placeholder_bindings: &'a HashMap<String, PlaceholderTensorBinding>,
+}
+
+impl<'a, 'py> FxTensorImportContext<'a, 'py> {
+    fn tensor_for_node(
+        &self,
+        py_node: &Bound<'py, PyAny>,
+        name: &str,
+        target: &str,
+    ) -> Option<NodeTensor> {
+        let op: String = attrs(py_node).optional("op")?;
+        match op.as_str() {
+            "placeholder" => self.placeholder_tensor(name),
+            "get_attr" => self.graph_attr_tensor(target),
+            _ => None,
+        }
+    }
+
+    fn placeholder_tensor(&self, name: &str) -> Option<NodeTensor> {
+        let binding = self.placeholder_bindings.get(name)?;
+        self.placeholder_tensor_from_mapping(self.state_dict, binding)
             // Lifted tensor constants are not in state_dict; they live in
             // ep.constants keyed by target_name.
-            if let Some(constants) = constants {
-                if let Some(value) = items(constants).key(binding.target_name.as_str()) {
-                    if let Ok(data) = extract_tensor_data(&value) {
-                        return Some(NodeTensor {
-                            source: TensorSource::ExportedProgramInput(binding.clone()),
-                            data,
-                        });
-                    }
-                }
-            }
-            if let Ok(value) = attrs(gm).object(binding.target_name.as_str()) {
-                if let Ok(data) = extract_tensor_data(&value) {
-                    return Some(NodeTensor {
-                        source: TensorSource::ExportedProgramInput(binding.clone()),
-                        data,
-                    });
-                }
-            }
-            None
-        }
-        "get_attr" => {
-            let value = attrs(gm).object(target).ok()?;
-            if attrs(&value).has("graph") {
-                return None;
-            }
-            let data = extract_tensor_data(&value).ok()?;
-            Some(NodeTensor {
-                source: TensorSource::GraphModuleAttr,
-                data,
-            })
-        }
-        _ => None,
+            .or_else(|| self.placeholder_tensor_from_mapping(self.constants, binding))
+            .or_else(|| self.placeholder_tensor_from_gm_attr(binding))
     }
+
+    fn placeholder_tensor_from_mapping(
+        &self,
+        mapping: Option<&Bound<'py, PyAny>>,
+        binding: &PlaceholderTensorBinding,
+    ) -> Option<NodeTensor> {
+        let value = items(mapping?).key(binding.target_name.as_str())?;
+        tensor_from_py_value(&value, TensorSource::ExportedProgramInput(binding.clone()))
+    }
+
+    fn placeholder_tensor_from_gm_attr(
+        &self,
+        binding: &PlaceholderTensorBinding,
+    ) -> Option<NodeTensor> {
+        let value = attrs(self.gm).object(binding.target_name.as_str()).ok()?;
+        tensor_from_py_value(&value, TensorSource::ExportedProgramInput(binding.clone()))
+    }
+
+    fn graph_attr_tensor(&self, target: &str) -> Option<NodeTensor> {
+        let value = attrs(self.gm).object(target).ok()?;
+        if attrs(&value).has("graph") {
+            return None;
+        }
+        tensor_from_py_value(&value, TensorSource::GraphModuleAttr)
+    }
+}
+
+fn tensor_from_py_value(value: &Bound<'_, PyAny>, source: TensorSource) -> Option<NodeTensor> {
+    Some(NodeTensor {
+        source,
+        data: extract_tensor_data(value).ok()?,
+    })
 }
 
 /// The full graph: ordered list of nodes + lookup by name.
@@ -370,6 +374,12 @@ impl IrGraph {
         } else {
             (HashMap::new(), None, None)
         };
+        let tensor_import = FxTensorImportContext {
+            gm,
+            state_dict: state_dict.as_ref(),
+            constants: constants.as_ref(),
+            placeholder_bindings: &placeholder_bindings,
+        };
 
         let mut name_to_id = HashMap::new();
         for (i, node) in py_nodes.iter().enumerate() {
@@ -384,15 +394,7 @@ impl IrGraph {
             let target = py_node_attrs.required_str("target").unwrap_or_default();
             let op = NodeOp::of(py_node);
             let meta = NodeMeta::from_fx(py_node)?;
-            let tensor = extract_node_tensor(
-                gm,
-                py_node,
-                &name,
-                &target,
-                state_dict.as_ref(),
-                constants.as_ref(),
-                &placeholder_bindings,
-            );
+            let tensor = tensor_import.tensor_for_node(py_node, &name, &target);
 
             let py_args = crate::fx_graph::node_args(py_node).unwrap_or_default();
             let args = py_args
