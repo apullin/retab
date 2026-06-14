@@ -95,6 +95,24 @@ impl<'a, 'py> ItemView<'a, 'py> {
         })
         .collect()
     }
+
+    pub(crate) fn typed_key_pairs<K: FromPyObject<'py>>(&self) -> Vec<(K, Bound<'py, PyAny>)> {
+        self.pairs()
+            .into_iter()
+            .filter_map(|(key, value)| Some((key.extract().ok()?, value)))
+            .collect()
+    }
+
+    pub(crate) fn typed_pairs<K, V>(&self) -> Vec<(K, V)>
+    where
+        K: FromPyObject<'py>,
+        V: FromPyObject<'py>,
+    {
+        self.pairs()
+            .into_iter()
+            .filter_map(|(key, value)| Some((key.extract().ok()?, value.extract().ok()?)))
+            .collect()
+    }
 }
 
 pub(crate) fn items<'a, 'py>(obj: &'a Bound<'py, PyAny>) -> ItemView<'a, 'py> {

@@ -1359,6 +1359,14 @@ Deleted: repeated `kwarg_or_arg_i32_list(...)` plus `i32_list_or(...)`/`i32_list
 Added: `kwarg_or_arg_i32_list_or(...)` and `kwarg_or_arg_i32_list_or_repeat(...)`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib i32_sequence_defaults_preserve_pair_semantics`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over avg-pool2d, max-pool, conv2d, and conv3d; Rust LOC check
 Note: Full Rust tests passed `139 passed`; focused Python smoke passed `370 passed, 1 expected xfail, 991 deselected`. No model lane was run. This is setup-positive, but it gives the serializer one spelling for kwargs-first i32-list defaulting instead of open-coded two-step composition.
+
+2026-06-14, Python-boundary typed item-pair helper slice
+Rust LOC: 36,923 -> 36,932
+Movement: +9 Rust LOC
+Deleted: manual key/value extraction loops from graph-signature tensor binding import, FX kwargs import, and qparam metadata dict import
+Added: `ItemView::typed_key_pairs(...)` and `ItemView::typed_pairs(...)`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over add, conv2d, linear, cond, and while; Rust LOC check
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `263 passed, 1 expected xfail, 757 deselected`. No model lane was run. This is a small setup-positive attr-boundary slice, but it centralizes lossy typed item extraction instead of repeating `pairs()` plus `extract()` filters at ingestion sites.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1785,7 +1793,8 @@ Initial slices complete. `src/fx_py_attr.rs` now owns `AttrView` and
 `MetaView`, the first typed wrapper API for Python boundary reads.
 `AttrView` covers both required/error-propagating attrs and lossy/defaulting
 attrs. `MetaView` covers metadata-dict reads. `ItemView` now covers keyed and
-indexed Python item access plus lossy pair iteration for dict-like objects.
+indexed Python item access plus lossy typed and untyped pair iteration for
+dict-like objects.
 `QParam::from_py`, `NodeMeta::from_fx`, graph-signature ingestion, kwargs
 import, qparam dict extraction, FakeTensor base recovery, tensor-data
 shape/dtype extraction, and legacy structural control-flow inlet code all use

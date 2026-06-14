@@ -199,19 +199,14 @@ fn build_placeholder_tensor_bindings(
         ),
     ] {
         if let Ok(mapping) = attrs(&graph_signature).object(attr_name) {
-            for (placeholder_name, target_name) in items(&mapping).pairs() {
-                if let (Ok(placeholder_name), Ok(target_name)) = (
-                    placeholder_name.extract::<String>(),
-                    target_name.extract::<String>(),
-                ) {
-                    placeholder_bindings.insert(
-                        placeholder_name,
-                        PlaceholderTensorBinding {
-                            input_kind,
-                            target_name,
-                        },
-                    );
-                }
+            for (placeholder_name, target_name) in items(&mapping).typed_pairs::<String, String>() {
+                placeholder_bindings.insert(
+                    placeholder_name,
+                    PlaceholderTensorBinding {
+                        input_kind,
+                        target_name,
+                    },
+                );
             }
         }
     }
@@ -408,10 +403,8 @@ impl IrGraph {
             let mut kwargs = HashMap::new();
             if let Ok(py_kwargs) = crate::fx_graph::node_kwargs(py_node) {
                 if !py_kwargs.is_none() {
-                    for (key, val) in items(&py_kwargs).pairs() {
-                        if let Ok(key) = key.extract::<String>() {
-                            kwargs.insert(key, resolve_arg(&val, &name_to_id));
-                        }
+                    for (key, val) in items(&py_kwargs).typed_key_pairs::<String>() {
+                        kwargs.insert(key, resolve_arg(&val, &name_to_id));
                     }
                 }
             }
@@ -1382,10 +1375,8 @@ fn extract_qparam_dict(py_dict: &Bound<'_, PyAny>) -> Option<HashMap<usize, QPar
         return None;
     }
     let mut map = HashMap::new();
-    for (key, val) in items(py_dict).pairs() {
-        if let Ok(key) = key.extract::<usize>() {
-            map.insert(key, QParam::from_py(&val));
-        }
+    for (key, val) in items(py_dict).typed_key_pairs::<usize>() {
+        map.insert(key, QParam::from_py(&val));
     }
     if map.is_empty() {
         None
