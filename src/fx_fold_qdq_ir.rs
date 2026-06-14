@@ -398,7 +398,7 @@ impl IrPass for IrFoldQdqPass {
             let preserves_fp_int32_binary = is_add_sub_target(&node.target)
                 && (resolved_inputs
                     .iter()
-                    .any(|resolved| resolved.qparam.qparam.dtype_str.contains("int32"))
+                    .any(|resolved| resolved.qparam.qparam.dtype() == DType::Int32)
                     || graph
                         .live_user_ids(node_id)
                         .into_iter()
@@ -409,7 +409,7 @@ impl IrPass for IrFoldQdqPass {
                             }
                             resolve_qparam_from_q_or_dq(graph, user)
                         })
-                        .any(|resolved| resolved.qparam.dtype_str.contains("int32")));
+                        .any(|resolved| resolved.qparam.dtype() == DType::Int32));
             if preserves_fp_int32_binary {
                 continue;
             }

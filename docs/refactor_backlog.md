@@ -1295,6 +1295,14 @@ Deleted: pass-local `is_integer_quantized_dtype(...)`, cloned dtype-string propa
 Added: `DType::is_quantized_integer` and `QParam::is_quantized_integer_dtype`
 Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_insert_int32_rescale_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over abs, add, conv2d, conv3d, linear, mul, sum, and where; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `445 passed, 1 expected xfail, 1146 deselected`. No model lane was run. This pays down the dtype owner setup by removing the int32-rescale pass's local quantized-integer dtype dialect.
+
+2026-06-14, fold-qdq dtype predicate cleanup slice
+Rust LOC: 36,826 -> 36,826
+Movement: 0 Rust LOC
+Deleted: raw `int32` qparam dtype substring checks in Fold-QDQ's FP+INT32 preservation rule
+Added: no new helper surface; Fold-QDQ now uses `QParam::dtype() == DType::Int32`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_fold_qdq_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over abs, add, conv2d, conv3d, linear, mul, sum, and where; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `445 passed, 1 expected xfail, 1146 deselected`. No model lane was run. This is another follow-through slice after moving dtype parsing to `DType`, keeping qparam dtype tests typed in a numerically sensitive fold pass.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
