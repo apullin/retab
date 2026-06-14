@@ -1615,6 +1615,14 @@ Deleted: repeated zero-input factory dtype/qparam/pass setup and table-op quanti
 Added: local test helpers for f32 zero-input calls, qparam placeholders, table nodes, GELU approximation kwargs, and int16 table domains
 Validation: `cargo fmt --check`; `cargo test --lib fx_fuse_zero_input_constants_ir::tests`; `cargo test --lib fx_insert_table_ops_ir::tests`; `cargo check --lib`
 Note: Focused zero-input and table-op Rust tests passed `9 passed` each. This is still test-local grammar, not a shared framework; production lowering code is unchanged.
+
+2026-06-14, LoC-first qparam fixture cleanup slice
+Rust LOC: 35,938 -> 35,892
+Movement: -46 Rust LOC
+Deleted: repeated conv-bias, grouped-conv, and int32-rescale Rust test placeholder/call/qparam setup
+Added: local test helpers for typed placeholders, shared int16 convolution qparam metadata, grouped convolution calls, and int32-rescale view users
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_annotate_conv_bias_ir::tests`; `cargo test --lib fx_decompose_grouped_conv_ir::tests`; `cargo test --lib fx_insert_int32_rescale_ir::tests`; `cargo test --lib`; `git diff --check`
+Note: Full Rust tests passed `141 passed`. A broader view-copy builder experiment was reverted because it reduced grammar duplication but did not pay for its added API surface in LOC.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

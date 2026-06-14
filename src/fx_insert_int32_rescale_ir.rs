@@ -345,43 +345,61 @@ mod tests {
         QParam::per_tensor(scale, zp, -128, 127, dtype.to_string())
     }
 
+    fn placeholder(graph: &mut IrGraph, name: &str, dtype: &str) -> NodeId {
+        graph.add_node(
+            NodeOp::Placeholder,
+            name.to_string(),
+            name.to_string(),
+            Vec::new(),
+            NodeMeta::tensor(&[2], dtype),
+        )
+    }
+
+    fn call(
+        graph: &mut IrGraph,
+        name: &str,
+        target: &str,
+        args: Vec<IrArg>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        graph.add_node(
+            NodeOp::CallFunction,
+            name.to_string(),
+            target.to_string(),
+            args,
+            meta,
+        )
+    }
+
+    fn view_user(graph: &mut IrGraph, input: NodeId, dtype: &str) -> NodeId {
+        call(
+            graph,
+            "user",
+            "aten.view_copy.default",
+            vec![IrArg::Node(input)],
+            NodeMeta::tensor(&[2], dtype),
+        )
+    }
+
     #[test]
     fn rescales_add_inputs_and_output() {
         let mut graph = IrGraph::empty();
-        let lhs = graph.add_node(
-            NodeOp::Placeholder,
-            "lhs".to_string(),
-            "lhs".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[2], "torch.int8"),
-        );
-        let rhs = graph.add_node(
-            NodeOp::Placeholder,
-            "rhs".to_string(),
-            "rhs".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[2], "torch.int8"),
-        );
+        let lhs = placeholder(&mut graph, "lhs", "torch.int8");
+        let rhs = placeholder(&mut graph, "rhs", "torch.int8");
         let mut add_meta = NodeMeta::tensor(&[2], "torch.int8");
         add_meta.set_input_qparams_from([
             (0, qparam(0.25, 3, "torch.int8")),
             (1, qparam(0.5, -4, "torch.int8")),
         ]);
         add_meta.set_single_output_qparam(qparam(0.125, 7, "torch.int8"));
-        let add = graph.add_node(
-            NodeOp::CallFunction,
-            "add".to_string(),
-            "aten.add.Tensor".to_string(),
+        let add = call(
+            &mut graph,
+            "add",
+            "aten.add.Tensor",
             vec![IrArg::Node(lhs), IrArg::Node(rhs)],
             add_meta,
         );
-        let user = graph.add_node(
-            NodeOp::CallFunction,
-            "user".to_string(),
-            "aten.view_copy.default".to_string(),
-            vec![IrArg::Node(add)],
-            NodeMeta::tensor(&[2], "torch.int8"),
-        );
+        let user = view_user(&mut graph, add, "torch.int8");
 
         assert!(IrInsertInt32RescalePass.run(&mut graph));
 
@@ -400,37 +418,19 @@ mod tests {
     #[test]
     fn rescales_int32_add_inputs_and_output() {
         let mut graph = IrGraph::empty();
-        let lhs = graph.add_node(
-            NodeOp::Placeholder,
-            "lhs".to_string(),
-            "lhs".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[2], "torch.int32"),
-        );
-        let rhs = graph.add_node(
-            NodeOp::Placeholder,
-            "rhs".to_string(),
-            "rhs".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[2], "torch.int32"),
-        );
+        let lhs = placeholder(&mut graph, "lhs", "torch.int32");
+        let rhs = placeholder(&mut graph, "rhs", "torch.int32");
         let mut add_meta = NodeMeta::tensor(&[2], "torch.int32");
         add_meta.set_input_qparams_from([(0, int32_qparam(0.25)), (1, int32_qparam(0.5))]);
         add_meta.set_single_output_qparam(int32_qparam(0.125));
-        let add = graph.add_node(
-            NodeOp::CallFunction,
-            "add".to_string(),
-            "aten.add.Tensor".to_string(),
+        let add = call(
+            &mut graph,
+            "add",
+            "aten.add.Tensor",
             vec![IrArg::Node(lhs), IrArg::Node(rhs)],
             add_meta,
         );
-        let user = graph.add_node(
-            NodeOp::CallFunction,
-            "user".to_string(),
-            "aten.view_copy.default".to_string(),
-            vec![IrArg::Node(add)],
-            NodeMeta::tensor(&[2], "torch.int32"),
-        );
+        let user = view_user(&mut graph, add, "torch.int32");
 
         assert!(IrInsertInt32RescalePass.run(&mut graph));
 
@@ -448,47 +448,23 @@ mod tests {
     #[test]
     fn where_with_mismatched_output_domain_gets_output_rescale() {
         let mut graph = IrGraph::empty();
-        let cond = graph.add_node(
-            NodeOp::Placeholder,
-            "cond".to_string(),
-            "cond".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[2], "torch.bool"),
-        );
-        let lhs = graph.add_node(
-            NodeOp::Placeholder,
-            "lhs".to_string(),
-            "lhs".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[2], "torch.int8"),
-        );
-        let rhs = graph.add_node(
-            NodeOp::Placeholder,
-            "rhs".to_string(),
-            "rhs".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[2], "torch.int8"),
-        );
+        let cond = placeholder(&mut graph, "cond", "torch.bool");
+        let lhs = placeholder(&mut graph, "lhs", "torch.int8");
+        let rhs = placeholder(&mut graph, "rhs", "torch.int8");
         let mut where_meta = NodeMeta::tensor(&[2], "torch.int8");
         where_meta.set_input_qparams_from([
             (1, qparam(0.5, 3, "torch.int8")),
             (2, qparam(0.5, 3, "torch.int8")),
         ]);
         where_meta.set_single_output_qparam(qparam(0.25, -7, "torch.int8"));
-        let where_id = graph.add_node(
-            NodeOp::CallFunction,
-            "where".to_string(),
-            "aten.where.self".to_string(),
+        let where_id = call(
+            &mut graph,
+            "where",
+            "aten.where.self",
             vec![IrArg::Node(cond), IrArg::Node(lhs), IrArg::Node(rhs)],
             where_meta,
         );
-        let user = graph.add_node(
-            NodeOp::CallFunction,
-            "user".to_string(),
-            "aten.view_copy.default".to_string(),
-            vec![IrArg::Node(where_id)],
-            NodeMeta::tensor(&[2], "torch.int8"),
-        );
+        let user = view_user(&mut graph, where_id, "torch.int8");
 
         assert!(IrInsertInt32RescalePass.run(&mut graph));
 

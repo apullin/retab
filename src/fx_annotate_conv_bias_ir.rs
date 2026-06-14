@@ -83,49 +83,50 @@ impl IrPass for IrAnnotateConvBiasDtypePass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::{i64_list_arg, NodeMeta, QParam};
+    use crate::fx_ir::{i64_list_arg, NodeId, NodeMeta, QParam};
 
     fn qparam(scale: f64, zp: i64, dtype: &str) -> QParam {
         QParam::per_tensor(scale, zp, -32767, 32767, dtype.to_string())
     }
 
-    #[test]
-    fn skips_bias_annotation_for_int16_bias_decomposition_case() {
-        let mut graph = IrGraph::empty();
-        let input = graph.add_node(
+    fn placeholder(
+        graph: &mut IrGraph,
+        name: &str,
+        shape: impl Into<Vec<i64>>,
+        dtype: &str,
+    ) -> NodeId {
+        graph.add_node(
             NodeOp::Placeholder,
-            "input".to_string(),
-            "input".to_string(),
+            name.to_string(),
+            name.to_string(),
             Vec::new(),
-            NodeMeta::tensor([1, 3, 8, 8], "torch.int16"),
-        );
-        let weight = graph.add_node(
-            NodeOp::Placeholder,
-            "weight".to_string(),
-            "weight".to_string(),
-            Vec::new(),
-            NodeMeta::tensor([4, 3, 3, 3], "torch.int8"),
-        );
-        let bias = graph.add_node(
-            NodeOp::Placeholder,
-            "bias".to_string(),
-            "bias".to_string(),
-            Vec::new(),
-            NodeMeta::tensor([4], "torch.int32"),
-        );
-        let mut conv_meta = NodeMeta::tensor([1, 4, 8, 8], "torch.int16");
-        conv_meta.set_input_qparams_from([
+            NodeMeta::tensor(shape, dtype),
+        )
+    }
+
+    fn int16_conv_meta(shape: impl Into<Vec<i64>>, dtype: &str) -> NodeMeta {
+        let mut meta = NodeMeta::tensor(shape, dtype);
+        meta.set_input_qparams_from([
             (0, qparam(0.5, 0, "torch.int16")),
             (1, qparam(0.25, 0, "torch.int8")),
             (2, qparam(0.125, 0, "torch.int32")),
         ]);
-        conv_meta.set_single_output_qparam(qparam(0.0625, 0, "torch.int16"));
+        meta.set_single_output_qparam(qparam(0.0625, 0, "torch.int16"));
+        meta
+    }
+
+    #[test]
+    fn skips_bias_annotation_for_int16_bias_decomposition_case() {
+        let mut graph = IrGraph::empty();
+        let input = placeholder(&mut graph, "input", [1, 3, 8, 8], "torch.int16");
+        let weight = placeholder(&mut graph, "weight", [4, 3, 3, 3], "torch.int8");
+        let bias = placeholder(&mut graph, "bias", [4], "torch.int32");
         graph.add_node(
             NodeOp::CallFunction,
             "conv".to_string(),
             "aten.convolution.default".to_string(),
             vec![IrArg::Node(input), IrArg::Node(weight), IrArg::Node(bias)],
-            conv_meta,
+            int16_conv_meta([1, 4, 8, 8], "torch.int16"),
         );
 
         assert!(!IrAnnotateConvBiasDtypePass.run(&mut graph));
@@ -135,34 +136,9 @@ mod tests {
     #[test]
     fn marks_transpose_conv_bias_as_int48_for_int16_path() {
         let mut graph = IrGraph::empty();
-        let input = graph.add_node(
-            NodeOp::Placeholder,
-            "input".to_string(),
-            "input".to_string(),
-            Vec::new(),
-            NodeMeta::tensor([1, 3, 8, 8], "torch.int16"),
-        );
-        let weight = graph.add_node(
-            NodeOp::Placeholder,
-            "weight".to_string(),
-            "weight".to_string(),
-            Vec::new(),
-            NodeMeta::tensor([3, 4, 3, 3], "torch.int8"),
-        );
-        let bias = graph.add_node(
-            NodeOp::Placeholder,
-            "bias".to_string(),
-            "bias".to_string(),
-            Vec::new(),
-            NodeMeta::tensor([4], "torch.int32"),
-        );
-        let mut conv_meta = NodeMeta::tensor([1, 4, 16, 16], "torch.int32");
-        conv_meta.set_input_qparams_from([
-            (0, qparam(0.5, 0, "torch.int16")),
-            (1, qparam(0.25, 0, "torch.int8")),
-            (2, qparam(0.125, 0, "torch.int32")),
-        ]);
-        conv_meta.set_single_output_qparam(qparam(0.0625, 0, "torch.int16"));
+        let input = placeholder(&mut graph, "input", [1, 3, 8, 8], "torch.int16");
+        let weight = placeholder(&mut graph, "weight", [3, 4, 3, 3], "torch.int8");
+        let bias = placeholder(&mut graph, "bias", [4], "torch.int32");
         graph.add_node(
             NodeOp::CallFunction,
             "deconv".to_string(),
@@ -178,7 +154,7 @@ mod tests {
                 i64_list_arg(&[0, 0]),
                 IrArg::Int(1),
             ],
-            conv_meta,
+            int16_conv_meta([1, 4, 16, 16], "torch.int32"),
         );
 
         assert!(IrAnnotateConvBiasDtypePass.run(&mut graph));

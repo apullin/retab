@@ -392,6 +392,33 @@ mod tests {
         QParam::per_tensor(scale, 0, -128, 127, "torch.int8".to_string())
     }
 
+    fn conv_call(
+        graph: &mut IrGraph,
+        input: NodeId,
+        weight: NodeId,
+        bias: Option<NodeId>,
+        groups: i64,
+        meta: NodeMeta,
+    ) -> NodeId {
+        graph.add_node(
+            NodeOp::CallFunction,
+            "conv".to_string(),
+            "aten.convolution.default".to_string(),
+            vec![
+                IrArg::Node(input),
+                IrArg::Node(weight),
+                bias.map(IrArg::Node).unwrap_or(IrArg::None),
+                i64_list(&[1, 1]),
+                i64_list(&[0, 0]),
+                i64_list(&[1, 1]),
+                IrArg::Bool(false),
+                i64_list(&[0, 0]),
+                IrArg::Int(groups),
+            ],
+            meta,
+        )
+    }
+
     #[test]
     fn decomposes_grouped_conv_and_slices_per_channel_qparams() {
         let mut graph = IrGraph::empty();
@@ -412,23 +439,7 @@ mod tests {
         ]);
         conv_meta.set_single_output_qparam(per_tensor_qparam(0.5));
 
-        let conv = graph.add_node(
-            NodeOp::CallFunction,
-            "conv".to_string(),
-            "aten.convolution.default".to_string(),
-            vec![
-                IrArg::Node(input),
-                IrArg::Node(weight),
-                IrArg::Node(bias),
-                i64_list(&[1, 1]),
-                i64_list(&[0, 0]),
-                i64_list(&[1, 1]),
-                IrArg::Bool(false),
-                i64_list(&[0, 0]),
-                IrArg::Int(3),
-            ],
-            conv_meta,
-        );
+        let conv = conv_call(&mut graph, input, weight, Some(bias), 3, conv_meta);
         graph.add_node(
             NodeOp::Output,
             "output".to_string(),
@@ -455,21 +466,12 @@ mod tests {
         let mut graph = IrGraph::empty();
         let input = placeholder(&mut graph, "input", &[1, 4, 8, 8]);
         let weight = placeholder(&mut graph, "weight", &[4, 1, 3, 3]);
-        graph.add_node(
-            NodeOp::CallFunction,
-            "conv".to_string(),
-            "aten.convolution.default".to_string(),
-            vec![
-                IrArg::Node(input),
-                IrArg::Node(weight),
-                IrArg::None,
-                i64_list(&[1, 1]),
-                i64_list(&[0, 0]),
-                i64_list(&[1, 1]),
-                IrArg::Bool(false),
-                i64_list(&[0, 0]),
-                IrArg::Int(4),
-            ],
+        conv_call(
+            &mut graph,
+            input,
+            weight,
+            None,
+            4,
             NodeMeta::tensor([1, 4, 6, 6], "torch.int8"),
         );
 
