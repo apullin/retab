@@ -5,6 +5,7 @@ use crate::fx_target::{
     is_conv_accumulator_target, is_layout_passthrough_target, is_rank_changing_layout_target,
     is_raw_aten_convolution_target,
 };
+use crate::graph::ir::DType;
 use crate::runner_logging::log_line;
 
 fn changes_rank_across_layout_chain(graph: &IrGraph, current: NodeId, user: NodeId) -> bool {
@@ -27,15 +28,15 @@ fn is_int32_rescale(node: &crate::fx_ir::IrNode) -> bool {
             IrArg::Dtype(dtype) => Some(dtype.as_str()),
             _ => None,
         })
-        .is_some_and(|dtype| dtype.contains("int32"))
+        .is_some_and(|dtype| DType::from_torch_str(dtype) == DType::Int32)
         || node
             .meta
             .output_qparam()
-            .is_some_and(|qparam| qparam.dtype_str.contains("int32"))
+            .is_some_and(|qparam| qparam.dtype() == DType::Int32)
         || node
             .meta
             .val_dtype()
-            .is_some_and(|dtype| dtype.contains("int32"))
+            .is_some_and(|dtype| DType::from_torch_str(dtype) == DType::Int32)
 }
 
 fn has_downstream_output_rescale(graph: &IrGraph, start: NodeId) -> bool {
@@ -154,9 +155,9 @@ fn needs_int16_bias_decomposition(graph: &IrGraph, conv_id: NodeId) -> bool {
         return false;
     };
     matches!(activation_rank(graph, node), Some(4 | 5))
-        && input_qp.dtype_str.contains("int16")
-        && bias_qp.dtype_str.contains("int32")
-        && output_qp.dtype_str.contains("int16")
+        && input_qp.dtype() == DType::Int16
+        && bias_qp.dtype() == DType::Int32
+        && output_qp.dtype() == DType::Int16
 }
 
 fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {

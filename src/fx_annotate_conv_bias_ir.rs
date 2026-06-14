@@ -1,5 +1,6 @@
 use crate::fx_ir::{IrArg, IrGraph, IrPass, MetaValue, NodeMeta, NodeOp};
 use crate::fx_target::{is_aten_convolution_default_target, is_conv_bias_annotation_target};
+use crate::graph::ir::DType;
 use crate::runner_logging::log_line;
 
 pub struct IrAnnotateConvBiasDtypePass;
@@ -21,8 +22,8 @@ fn needs_int16_activation_bias_decomposition(node: &crate::fx_ir::IrNode) -> boo
         return false;
     };
     matches!(node.meta.rank(), Some(4 | 5))
-        && input_qp.dtype_str.contains("int16")
-        && output_qp.dtype_str.contains("int16")
+        && input_qp.dtype() == DType::Int16
+        && output_qp.dtype() == DType::Int16
 }
 
 fn needs_int48_bias(meta: &NodeMeta) -> bool {
@@ -32,7 +33,7 @@ fn needs_int48_bias(meta: &NodeMeta) -> bool {
         || meta
             .input_qparams
             .as_ref()
-            .map(|qparams| qparams.values().any(|qp| qp.dtype_str.contains("int16")))
+            .map(|qparams| qparams.values().any(|qp| qp.dtype() == DType::Int16))
             .unwrap_or(false)
 }
 

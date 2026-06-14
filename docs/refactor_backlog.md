@@ -1279,6 +1279,14 @@ Deleted: `tensor_data::parse_torch_dtype` as the semantic owner for dtype-string
 Added: `DType::from_torch_str`, `DType::is_integer`, `QParam::dtype`, and `QParam::is_integer_dtype`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib tensor_data::tests`; `cargo test --lib fx_constant_tensor_eval::tests`; `cargo test --lib fx_fuse_zero_input_constants_ir::tests`; `cargo test --lib fx_insert_table_ops_ir::tests`; `cargo test --lib ingest::from_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over addmm, arange, bmm, constant_pad_nd, conv_constant_pad_nd, embedding, eye, full, matmul, mm, ones, and zeros; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `269 passed, 13 skipped, 10 expected xfails, 411 deselected`. No model lane was run. This is setup-positive in LOC, but it moves dtype-string semantics to the graph dtype type and gives qparam consumers a typed accessor instead of reaching into `dtype_str`.
+
+2026-06-14, conv dtype predicate cleanup slice
+Rust LOC: 36,825 -> 36,827
+Movement: +2 Rust LOC
+Deleted: raw `int16`/`int32` qparam and tensor dtype substring checks from conv-bias annotation and conv-rescale insertion
+Added: no new helper surface; those paths now use `DType::from_torch_str` and `QParam::dtype`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_annotate_conv_bias_ir::tests`; `cargo test --lib fx_insert_conv_rescale_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over constant_pad_nd, conv_constant_pad_nd, conv1d, conv2d, conv3d, depthwise_conv, linear, and transpose_conv2d; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `468 passed, 2 expected xfails, 1373 deselected`. No model lane was run. This is the first follow-through slice after moving dtype parsing to `DType`, removing stringly dtype predicates from fragile quantized conv paths.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
