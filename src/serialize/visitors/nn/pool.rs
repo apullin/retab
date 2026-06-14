@@ -107,7 +107,7 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
     let mut result = EmitResult::default();
     let input_names = ctx.input_names();
     let kernel = kwarg_or_arg_i32_list(node, "kernel", 1);
-    let stride = kwarg_or_arg_i32_list(node, "stride", 2);
+    let stride = kwarg_or_arg_i32_list_or(node, "stride", 2, kernel.clone());
     let pad = {
         let kw = kwarg_i32_list(node, "pad");
         if !kw.is_empty() {
@@ -116,8 +116,6 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
             symmetric_pool_pad(&arg_i32_list(node, 3))
         }
     };
-    let stride = i32_list_or(stride, kernel.clone());
-
     let output_tensor = compute_pool_nhwc_output(graph, store, node, &kernel, &stride, &pad);
     let input_zp = node_input_zero_point(graph, node, 0, "input_zp", 0);
     let output_zp = node_output_zero_point(node, "output_zp", 0);

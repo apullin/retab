@@ -63,15 +63,15 @@ fn input_rank(graph: &Graph, node: &Node) -> usize {
 }
 
 fn conv_stride_arg(node: &Node, spatial_rank: usize) -> Vec<i32> {
-    i32_list_or_repeat(kwarg_or_arg_i32_list(node, "stride", 3), spatial_rank, 1)
+    kwarg_or_arg_i32_list_or_repeat(node, "stride", 3, spatial_rank, 1)
 }
 
 fn conv_dilation_arg(node: &Node, spatial_rank: usize) -> Vec<i32> {
-    i32_list_or_repeat(kwarg_or_arg_i32_list(node, "dilation", 5), spatial_rank, 1)
+    kwarg_or_arg_i32_list_or_repeat(node, "dilation", 5, spatial_rank, 1)
 }
 
 fn conv_pad_arg(node: &Node, pad_len: usize) -> Vec<i32> {
-    i32_list_or_repeat(kwarg_or_arg_i32_list(node, "pad", 4), pad_len, 0)
+    kwarg_or_arg_i32_list_or_repeat(node, "pad", 4, pad_len, 0)
 }
 
 fn extend_conv_inputs(

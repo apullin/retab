@@ -1351,6 +1351,14 @@ Deleted: repeated `temp_tensor(...)` plus ad hoc input-vector construction from 
 Added: no new production helper surface; `emit_aten_div`, `sqrt`, `sign`, `expm1`, `log1p`, `remainder`, and `leaky_relu` now reuse `EmitResult::unary/binary/ternary` for temp one-output emissions
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over div, div tensor mode, sqrt, sign, expm1, log1p, floor-div, remainder, and leaky-relu; Rust LOC check
 Note: Full Rust tests passed `139 passed`; focused Python smoke passed `108 passed, 4 expected xfails, 218 deselected`. No model lane was run. This is LOC-positive due to Rust formatting, but it reduces serializer emission dialect count by using the existing arity-aware builder for derived math temp nodes.
+
+2026-06-14, serializer combined i32 list-default helper slice
+Rust LOC: 36,906 -> 36,923
+Movement: +17 Rust LOC
+Deleted: repeated `kwarg_or_arg_i32_list(...)` plus `i32_list_or(...)`/`i32_list_or_repeat(...)` composition from conv and pool serializer paths
+Added: `kwarg_or_arg_i32_list_or(...)` and `kwarg_or_arg_i32_list_or_repeat(...)`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib i32_sequence_defaults_preserve_pair_semantics`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over avg-pool2d, max-pool, conv2d, and conv3d; Rust LOC check
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `370 passed, 1 expected xfail, 991 deselected`. No model lane was run. This is setup-positive, but it gives the serializer one spelling for kwargs-first i32-list defaulting instead of open-coded two-step composition.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

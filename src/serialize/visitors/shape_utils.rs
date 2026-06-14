@@ -453,8 +453,8 @@ fn pool_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<
         return None;
     }
 
-    let kernel = i32_list_or(kwarg_or_arg_i32_list(node, "kernel", 1), vec![2, 2]);
-    let stride = i32_list_or(kwarg_or_arg_i32_list(node, "stride", 2), kernel.clone());
+    let kernel = kwarg_or_arg_i32_list_or(node, "kernel", 1, vec![2, 2]);
+    let stride = kwarg_or_arg_i32_list_or(node, "stride", 2, kernel.clone());
     let raw_padding = kwarg_or_arg_i32_list(node, "pad", 3);
     let pad = if is_max_pool {
         let ceil_mode = kwarg_bool(node, "ceil_mode", arg_bool(node, 5, false));
