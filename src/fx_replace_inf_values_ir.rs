@@ -47,7 +47,7 @@ fn sanitize_arg(arg: &mut IrArg) -> bool {
 }
 
 fn should_sanitize_node(node: &crate::fx_ir::IrNode) -> bool {
-    node.meta.input_qparams.is_some() || node.meta.output_qparams.is_some()
+    node.meta.has_qparam_metadata()
 }
 
 pub struct IrReplaceInfAndLimitValuesPass;

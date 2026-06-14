@@ -1641,6 +1641,20 @@ impl NodeMeta {
         self.input_qparams.as_ref()?.get(&index)
     }
 
+    pub fn has_qparam_metadata(&self) -> bool {
+        self.input_qparams.is_some() || self.output_qparams.is_some()
+    }
+
+    pub fn has_nonempty_input_and_output_qparams(&self) -> bool {
+        self.input_qparams
+            .as_ref()
+            .is_some_and(|qparams| !qparams.is_empty())
+            && self
+                .output_qparams
+                .as_ref()
+                .is_some_and(|qparams| !qparams.is_empty())
+    }
+
     pub fn sorted_input_qparams(&self) -> Vec<(usize, QParam)> {
         let mut qparams: Vec<_> = self
             .input_qparams

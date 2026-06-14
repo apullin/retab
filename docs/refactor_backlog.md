@@ -1223,6 +1223,14 @@ Deleted: pass-local constant-slice planner wrapper in constant-input fusion
 Added: `fx_constant_tensor_eval::plan_constant_slice_tensor_from_constants(...)`, naming the shared composition of first-constant-input lookup plus slice tensor planning
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_fuse_constant_inputs_ir::tests`; `cargo test --lib fx_constant_tensor_eval::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over full, arange, eye, view, permute, unsqueeze, mm, bmm, matmul, and addmm; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `283 passed, 7 skipped, 10 expected xfails, 529 deselected`. No model lane was run. This keeps constant-slice planning in the shared constant evaluator instead of duplicating wrapper logic in effectful passes.
+
+2026-06-14, qparam metadata predicate slice
+Rust LOC: 36,820 -> 36,820
+Movement: 0 Rust LOC
+Deleted: table-op local input/output qparam presence helper and direct qparam-field presence check in inf-literal replacement
+Added: `NodeMeta::has_qparam_metadata()` and `NodeMeta::has_nonempty_input_and_output_qparams()`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_insert_table_ops_ir::tests`; `cargo test --lib fx_replace_inf_values_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over pow, remainder, elu, gelu, sigmoid, exp, log, sqrt, rsqrt, and masked_fill; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `216 passed, 6 expected xfails, 403 deselected`. No model lane was run. This names the important Tensor Facts distinction between qparam metadata being present at all and both input/output qparam maps being non-empty.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1373,7 +1381,9 @@ use `NodeMeta::cloned_with_empty_qparam_maps`, distinct from
 `NodeMeta::set_empty_input_qparams`. Present output-qparam maps now also have
 the symmetric `NodeMeta::set_output_qparams_from`, and whole-map qparam copying
 from one metadata object to another is named by `copy_input_qparams_from` and
-`copy_output_qparams_from`.
+`copy_output_qparams_from`. Qparam fact predicates now also live on `NodeMeta`,
+including the distinction between "any qparam metadata is present" and "both
+input/output qparam maps are non-empty".
 
 Problem:
 

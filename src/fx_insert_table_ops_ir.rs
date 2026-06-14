@@ -87,20 +87,6 @@ fn table_op_spec(node: &IrNode) -> Option<TableOpSpec> {
     })
 }
 
-fn has_qparams(node: &IrNode) -> bool {
-    let has_input = node
-        .meta
-        .input_qparams
-        .as_ref()
-        .is_some_and(|qparams| !qparams.is_empty());
-    let has_output = node
-        .meta
-        .output_qparams
-        .as_ref()
-        .is_some_and(|qparams| !qparams.is_empty());
-    has_input && has_output
-}
-
 fn table_quant_spec(qp: &QParam) -> Option<TableTensorSpec> {
     if qp.is_per_channel() || qp.scale == 0.0 {
         return None;
@@ -412,7 +398,7 @@ impl EffectfulIrPass for IrInsertTableOpsEffectPass {
             .into_iter()
             .filter_map(|id| {
                 let node = graph.node(id);
-                if !has_qparams(node) {
+                if !node.meta.has_nonempty_input_and_output_qparams() {
                     return None;
                 }
                 let spec = table_op_spec(node)?;
