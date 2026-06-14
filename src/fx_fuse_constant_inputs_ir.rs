@@ -1,9 +1,6 @@
-use std::collections::HashMap;
-
 use crate::fx_constant_tensor_eval::{
-    constant_input_seeds, first_constant_input_tensor, node_has_tensor_inputs,
-    node_inputs_are_constant, plan_constant_matmul_tensor,
-    plan_constant_slice_tensor as shared_plan_constant_slice_tensor,
+    constant_input_seeds, node_has_tensor_inputs, node_inputs_are_constant,
+    plan_constant_matmul_tensor, plan_constant_slice_tensor_from_constants,
     plan_shape_only_tensor_from_constants,
 };
 use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, NodeOp};
@@ -11,7 +8,6 @@ use crate::fx_target::{
     is_shape_only_constant_target, is_slice_copy_tensor_target, is_zero_input_constant_target,
 };
 use crate::lowering_effects::{LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect};
-use crate::store::TensorData;
 
 pub struct IrFuseConstantInputsEffectPass {
     include_data_slices: bool,
@@ -29,14 +25,6 @@ impl IrFuseConstantInputsEffectPass {
             include_data_slices: true,
         }
     }
-}
-
-fn plan_constant_slice_tensor(
-    node: &IrNode,
-    constant_tensors: &HashMap<usize, TensorData>,
-) -> Option<TensorData> {
-    first_constant_input_tensor(node, constant_tensors)
-        .and_then(|input| shared_plan_constant_slice_tensor(node, input))
 }
 
 fn is_safe_constant_input_target(node: &IrNode, include_data_slices: bool) -> bool {
@@ -88,7 +76,9 @@ impl EffectfulIrPass for IrFuseConstantInputsEffectPass {
                 continue;
             }
             if self.include_data_slices && is_slice_copy_tensor_target(&node.target) {
-                if let Some(tensor) = plan_constant_slice_tensor(node, &constant_tensors) {
+                if let Some(tensor) =
+                    plan_constant_slice_tensor_from_constants(node, &constant_tensors)
+                {
                     constant_tensors.insert(node.id, tensor.clone());
                     effects.push(LoweringEffect::MaterializeTensorNode(
                         MaterializeTensorNodeEffect::from_tensor(node.name.clone(), tensor, true),
@@ -112,6 +102,8 @@ impl EffectfulIrPass for IrFuseConstantInputsEffectPass {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use crate::fx_ir::{
         IrArg, IrGraph, NodeMeta, NodeTensor, PlaceholderTensorBinding, QParam, TensorSource,
     };

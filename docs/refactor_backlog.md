@@ -1215,6 +1215,14 @@ Deleted: duplicate pass-local shape-only constant planner wrappers in constant-i
 Added: `fx_constant_tensor_eval::plan_shape_only_tensor_from_constants(...)`, naming the shared composition of first-constant-input lookup plus shape-only tensor planning
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_fuse_shape_only_constants_ir::tests`; `cargo test --lib fx_fuse_constant_inputs_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over full, arange, eye, view, permute, unsqueeze, mm, bmm, matmul, and addmm; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `283 passed, 7 skipped, 10 expected xfails, 529 deselected`. No model lane was run. This keeps shape-only constant-chain planning in the shared constant evaluator instead of duplicating wrapper logic in effectful passes.
+
+2026-06-14, constant slice planner cleanup slice
+Rust LOC: 36,820 -> 36,820
+Movement: 0 Rust LOC
+Deleted: pass-local constant-slice planner wrapper in constant-input fusion
+Added: `fx_constant_tensor_eval::plan_constant_slice_tensor_from_constants(...)`, naming the shared composition of first-constant-input lookup plus slice tensor planning
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_fuse_constant_inputs_ir::tests`; `cargo test --lib fx_constant_tensor_eval::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over full, arange, eye, view, permute, unsqueeze, mm, bmm, matmul, and addmm; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `283 passed, 7 skipped, 10 expected xfails, 529 deselected`. No model lane was run. This keeps constant-slice planning in the shared constant evaluator instead of duplicating wrapper logic in effectful passes.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1442,8 +1450,8 @@ indexing family now also shares `fx_index_linear::build_linear_index`, which
 owns the broadcast-align, expand, flatten, stride-scale, and sum rewrite chain
 used by index.Tensor and index_put; the same module owns contiguous stride
 calculation for indexing and as_strided_copy. Constant-effect passes now share
-shape-only constant-chain planning through `fx_constant_tensor_eval` instead of
-wrapping first-constant-input lookup locally.
+shape-only and slice constant-chain planning through `fx_constant_tensor_eval`
+instead of wrapping first-constant-input lookup locally.
 Remaining work should keep adding small builder/query operations only when
 they replace repeated rewrite structure across several passes.
 
