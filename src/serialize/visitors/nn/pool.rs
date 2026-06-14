@@ -50,11 +50,7 @@ impl ParsedPoolSpec {
 
         let kernel = i32_list_or(raw_kernel, vec![2, 2]);
         let stride = i32_list_or(raw_stride, kernel.clone());
-        let input_shape = node
-            .args
-            .first()
-            .and_then(Arg::as_node)
-            .and_then(|id| graph.node(id))
+        let input_shape = first_input_node(graph, node)
             .map(|input_node| actual_tensor_shape(graph, store, input_node))
             .unwrap_or_default();
         let pad = adjusted_max_pool_pad(&input_shape, &kernel, &stride, &raw_padding, ceil_mode);
@@ -125,12 +121,8 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
     let output_tensor = compute_pool_nhwc_output(graph, store, node, &kernel, &stride, &pad);
     let input_zp = node_input_zero_point(graph, node, 0, "input_zp", 0);
     let output_zp = node_output_zero_point(node, "output_zp", 0);
-    let input_dtype = node
-        .args
-        .first()
-        .and_then(Arg::as_node)
-        .and_then(|input_id| graph.node(input_id))
-        .map(|n| ir_dtype_to_tosa(n.meta.val.dtype))
+    let input_dtype = first_input_node(graph, node)
+        .map(|input_node| ir_dtype_to_tosa(input_node.meta.val.dtype))
         .unwrap_or(DType::Int8);
     let output_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
     let acc_type = if matches!(input_dtype, DType::Fp32 | DType::Fp16 | DType::Bf16) {

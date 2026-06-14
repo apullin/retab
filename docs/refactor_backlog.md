@@ -1335,6 +1335,14 @@ Deleted: repeated `first/get/unwrap_or` pair and quad default spellings from ser
 Added: `i32_pair_or_default(...)`, `i32_pair_or_first(...)`, `i32_quad_or_default(...)`, and focused helper tests
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib i32_sequence_defaults_preserve_pair_semantics`; `cargo test --lib serialize::visitors::shape_utils`; `cargo test --lib serialize::tensor_layout`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over avg-pool2d, max-pool, and conv2d; Rust LOC check
 Note: Full Rust tests passed `139 passed`; focused Python smoke passed `269 passed, 700 deselected`. No model lane was run. This is test-positive by LOC but reduces serializer shape/layout indexing noise and preserves the important distinction between "second value defaults to literal" and "second value defaults to first".
+
+2026-06-14, serializer input/list helper reuse slice
+Rust LOC: 36,894 -> 36,888
+Movement: -6 Rust LOC
+Deleted: NN-local `i32_list_or_repeat(...)` helper and two pool-local first-input graph lookup chains
+Added: no new production helper surface; `arg_utils` now owns the repeat-list default helper and the existing `first_input_node(...)` grammar is reused in pool parsing
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib i32_sequence_defaults_preserve_pair_semantics`; `cargo test --lib serialize::visitors::shape_utils`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over avg-pool2d, max-pool, and conv2d; Rust LOC check
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `269 passed, 700 deselected`. No model lane was run. This is a small cleanup, but it keeps serializer argument defaults in one helper module and removes duplicated first-input traversal from pool emission.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

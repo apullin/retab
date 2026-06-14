@@ -48,6 +48,10 @@ pub(super) fn i32_list_or(values: Vec<i32>, default: Vec<i32>) -> Vec<i32> {
     }
 }
 
+pub(super) fn i32_list_or_repeat(values: Vec<i32>, len: usize, default: i32) -> Vec<i32> {
+    i32_list_or(values, vec![default; len])
+}
+
 pub(super) fn i32_pair_or_default(values: &[i32], default: i32) -> (i32, i32) {
     (
         values.first().copied().unwrap_or(default),
@@ -121,10 +125,12 @@ pub(super) fn arg_bool(node: &Node, idx: usize, default: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{i32_pair_or_default, i32_pair_or_first, i32_quad_or_default};
+    use super::{i32_list_or_repeat, i32_pair_or_default, i32_pair_or_first, i32_quad_or_default};
 
     #[test]
     fn i32_sequence_defaults_preserve_pair_semantics() {
+        assert_eq!(i32_list_or_repeat(Vec::new(), 3, 1), vec![1, 1, 1]);
+        assert_eq!(i32_list_or_repeat(vec![2, 3], 3, 1), vec![2, 3]);
         assert_eq!(i32_pair_or_default(&[3], 2), (3, 2));
         assert_eq!(i32_pair_or_first(&[3], 2), (3, 3));
         assert_eq!(i32_pair_or_first(&[], 2), (2, 2));

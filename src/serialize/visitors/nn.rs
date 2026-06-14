@@ -62,10 +62,6 @@ fn input_rank(graph: &Graph, node: &Node) -> usize {
     }
 }
 
-fn i32_list_or_repeat(values: Vec<i32>, len: usize, default: i32) -> Vec<i32> {
-    i32_list_or(values, vec![default; len])
-}
-
 fn conv_stride_arg(node: &Node, spatial_rank: usize) -> Vec<i32> {
     i32_list_or_repeat(kwarg_or_arg_i32_list(node, "stride", 3), spatial_rank, 1)
 }
