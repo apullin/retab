@@ -33,9 +33,11 @@ fn slice_meta(graph: &IrGraph, id: NodeId, dim: usize, start: i64, stop: i64) ->
     }
     shape[dim] = (stop - start).max(0);
     let dtype = graph.nodes[id].meta.val_dtype()?.to_string();
-    let mut meta = graph.nodes[id].meta.cloned_with_val(shape, dtype);
-    meta.set_empty_qparam_maps();
-    Some(meta)
+    Some(
+        graph.nodes[id]
+            .meta
+            .cloned_with_empty_qparam_maps(shape, dtype),
+    )
 }
 
 fn conv_slice_output_meta(graph: &IrGraph, id: NodeId, output_slice_size: i64) -> NodeMeta {

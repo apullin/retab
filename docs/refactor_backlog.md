@@ -1055,6 +1055,14 @@ Deleted: repeated `val_dtype().unwrap_or("torch.float32")` spelling from decompo
 Added: `NodeMeta::val_dtype_or(default)`, `NodeMeta::val_dtype_or_float32()`, and `IrGraph::replace_with_call_function_with_val()`; reduction decompositions now reuse the existing anchored-with-value builder grammar
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over mean_dim, var, tril, cumsum, sum, addmm, linear, split, slice, slice_scatter, index_select, index_tensor, index_put, unfold_copy, as_strided_copy, repeat, pixel_shuffling, avg_pool2d, adaptive_avg_pool2d, and max_pool; Rust LOC check
 Note: Full Rust tests passed `134 passed`; focused Python smoke passed `754 passed, 20 expected xfails, 1420 deselected`. No model lane was run. The lone remaining direct float32 dtype fallback is layernorm's multi-source `output_meta -> input_meta -> float32` rule, which remains explicit because it encodes a different fallback chain.
+
+2026-06-14, empty qparam map metadata grammar slice
+Rust LOC: 37,144 -> 37,156
+Movement: +12 Rust LOC
+Deleted: remaining `cloned_with_val(...); set_empty_qparam_maps()` two-step spellings from conv1d unsqueeze, linear decomposition, and grouped-conv slice metadata
+Added: `NodeMeta::cloned_with_empty_qparam_maps(shape, dtype)` and generalized `NodeMeta::{cloned_with_val,cloned_without_qparams}` shape inputs to accept `Into<Vec<i64>>`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv1d, conv2d, conv3d, and linear; Rust LOC check
+Note: Full Rust tests passed `134 passed`; focused Python smoke passed `332 passed, 1 expected xfail, 1077 deselected`. No model lane was run. This is a setup-positive grammar slice: it preserves the distinction between qparam fields cleared and qparam maps present-but-empty, but only five current production call sites use it.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1192,7 +1200,10 @@ Indexed qparam slot stamping now also lives on `NodeMeta`, so simple single-slot
 input/output qparam assignment no longer requires ad hoc `HashMap` construction.
 Defaulted tensor dtype reads now also live on `NodeMeta` via
 `val_dtype_or(default)` and `val_dtype_or_float32()`, removing the repeated
-decomposition-pass spelling for "missing tensor dtype means float32".
+decomposition-pass spelling for "missing tensor dtype means float32". Metadata
+clones that should preserve the fact that qparam maps are present but empty now
+use `NodeMeta::cloned_with_empty_qparam_maps`, distinct from
+`cloned_without_qparams`.
 
 Problem:
 

@@ -1494,17 +1494,31 @@ impl NodeMeta {
         true
     }
 
-    pub fn cloned_with_val(&self, shape: Vec<i64>, dtype: impl Into<String>) -> Self {
+    pub fn cloned_with_val(&self, shape: impl Into<Vec<i64>>, dtype: impl Into<String>) -> Self {
         let mut meta = self.clone();
         meta.set_val(FakeTensorMeta {
-            shape,
+            shape: shape.into(),
             dtype: dtype.into(),
         });
         meta
     }
 
-    pub fn cloned_without_qparams(&self, shape: Vec<i64>, dtype: impl Into<String>) -> Self {
+    pub fn cloned_without_qparams(
+        &self,
+        shape: impl Into<Vec<i64>>,
+        dtype: impl Into<String>,
+    ) -> Self {
         self.cloned_with_val(shape, dtype).without_qparams()
+    }
+
+    pub fn cloned_with_empty_qparam_maps(
+        &self,
+        shape: impl Into<Vec<i64>>,
+        dtype: impl Into<String>,
+    ) -> Self {
+        let mut meta = self.cloned_with_val(shape, dtype);
+        meta.set_empty_qparam_maps();
+        meta
     }
 
     pub fn with_qparams_from(mut self, other: &Self) -> Self {

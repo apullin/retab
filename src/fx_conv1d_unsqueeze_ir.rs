@@ -38,10 +38,9 @@ fn add_view_copy(
     new_shape: &[i64],
     dtype: &str,
 ) -> NodeId {
-    let mut meta = graph.nodes[input_id]
+    let meta = graph.nodes[input_id]
         .meta
-        .cloned_with_val(new_shape.to_vec(), dtype);
-    meta.set_empty_qparam_maps();
+        .cloned_with_empty_qparam_maps(new_shape.to_vec(), dtype);
     graph.add_node(
         NodeOp::CallFunction,
         format!("{}_{}", name_prefix, suffix),

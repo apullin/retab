@@ -77,10 +77,9 @@ impl IrPass for IrDecomposeLinearPass {
             // 1. Reshape input to 4D: [..., Ci] -> [batches, Ci, 1, 1]
             //    Propagate input qparams to the reshaped node.
             let input_4d_shape = [batches, ci, 1, 1];
-            let mut input_4d_meta = graph.nodes[input_id]
+            let input_4d_meta = graph.nodes[input_id]
                 .meta
-                .cloned_with_val(input_4d_shape.to_vec(), input_dtype);
-            input_4d_meta.set_empty_qparam_maps();
+                .cloned_with_empty_qparam_maps(input_4d_shape, input_dtype);
             let input_reshaped = graph.add_anchored_call_function(
                 id,
                 format!("{}_input_view", node_name),
@@ -92,10 +91,9 @@ impl IrPass for IrDecomposeLinearPass {
             // 2. Reshape weights to 4D: [Co, Ci] -> [Co, Ci, 1, 1]
             //    Propagate weight qparams (including per-channel) to the reshaped node.
             let weights_4d_shape = [co, weights_shape[1], 1, 1];
-            let mut weights_4d_meta = graph.nodes[weights_id]
+            let weights_4d_meta = graph.nodes[weights_id]
                 .meta
-                .cloned_with_val(weights_4d_shape.to_vec(), weight_dtype);
-            weights_4d_meta.set_empty_qparam_maps();
+                .cloned_with_empty_qparam_maps(weights_4d_shape, weight_dtype);
             let weights_reshaped = graph.add_anchored_call_function(
                 id,
                 format!("{}_weight_view", node_name),
@@ -110,7 +108,7 @@ impl IrPass for IrDecomposeLinearPass {
             let conv_out_shape = [batches, co, 1, 1];
             let conv_meta = graph.nodes[id]
                 .meta
-                .cloned_with_val(conv_out_shape.to_vec(), &output_dtype)
+                .cloned_with_val(conv_out_shape, &output_dtype)
                 .with_qparams_from(&graph.nodes[id].meta);
             let bias_arg = match bias_id {
                 Some(nid) => IrArg::Node(nid),
@@ -135,10 +133,9 @@ impl IrPass for IrDecomposeLinearPass {
             );
 
             // 4. Reshape output back to original shape
-            let mut out_meta = graph.nodes[id]
+            let out_meta = graph.nodes[id]
                 .meta
-                .cloned_with_val(output_shape.clone(), output_dtype);
-            out_meta.set_empty_qparam_maps();
+                .cloned_with_empty_qparam_maps(output_shape.clone(), output_dtype);
             graph.replace_with_call_function(
                 id,
                 format!("{}_output_view", node_name),
