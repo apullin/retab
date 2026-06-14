@@ -17,9 +17,9 @@ pub fn register(table: &mut EmitterTable) {
         (OpTarget::Repeat, emit_repeat),
         (OpTarget::QuantizePerTensor, emit_quantize_per_tensor),
         (OpTarget::DequantizePerTensor, emit_dequantize_per_tensor),
-        (OpTarget::Reshape, emit_aten_reshape),
-        (OpTarget::Flatten, emit_aten_reshape),
-        (OpTarget::View, emit_aten_reshape),
+        (OpTarget::Reshape, emit_reshape),
+        (OpTarget::Flatten, emit_reshape),
+        (OpTarget::View, emit_reshape),
         (OpTarget::Permute, emit_aten_permute),
         (OpTarget::UpsampleNearest2d, emit_resize),
         (OpTarget::UpsampleBilinear2d, emit_resize),
@@ -621,10 +621,6 @@ pub(super) fn emit_resize(ctx: &EmitContext) -> EmitResult {
         ],
     );
     result
-}
-
-pub(super) fn emit_aten_reshape(ctx: &EmitContext) -> EmitResult {
-    emit_reshape(ctx)
 }
 
 pub(super) fn emit_aten_permute(ctx: &EmitContext) -> EmitResult {

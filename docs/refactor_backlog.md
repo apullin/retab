@@ -1575,6 +1575,14 @@ Deleted: local fold-QDQ constant target helper, local add/sub-alpha result-targe
 Added: shared `fx_target` helpers for fold-QDQ constant targets, add/sub-alpha canonical result targets, and group-norm reshape target selection
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over add, arange, conv2d, eye, full, group_norm, sub, and transpose_conv2d; Rust LOC check
 Note: Full Rust tests passed `141 passed`; focused Python smoke passed `293 passed, 7 skipped, 1 xfailed`. The slice is setup-positive because the target grammar gained tests and named helpers, but the remaining production matches are now either centralized in `fx_target`, already covered by local rule-table grammar, or not worth migrating without a future deletion-backed domain slice. This closes the original target-grammar backlog for active production source.
+
+2026-06-14, LoC-first deletion slice 1
+Rust LOC: 36,320 -> 36,248
+Movement: -72 Rust LOC
+Deleted: repeated decompose-rule struct literals, pure serializer alias wrappers for ATen add/sub/mul/reshape, and duplicate squeeze/unsqueeze reshape emitter bodies
+Added: small const decompose-rule constructors and a single shape-reshape serializer emitter for squeeze/unsqueeze
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over add, batch_norm, clamp, exp, gelu, group_norm, pow, relu, softmax, squeeze, sub, tan, unsqueeze, and view
+Note: Full Rust tests passed `141 passed`; focused Python smoke passed `412 passed, 1 skipped, 3 xfailed`. This is the first aggressive LoC-reduction pass after closing the original backlog. It avoided test-fixture churn and kept one-use IR graph-builder helpers because those still encode useful graph-surgery grammar.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

@@ -619,6 +619,42 @@ fn decompose_log_softmax_wrapper(graph: &mut IrGraph, id: NodeId) -> bool {
     decompose_softmax_like(graph, id, true)
 }
 
+const fn skip_quantized(any: &'static [&'static str], decompose: DecomposeFn) -> DecomposeRule {
+    DecomposeRule {
+        matcher: TargetMatcher::any(any),
+        mode: DecomposeMode::SkipQuantizedEnvelope,
+        decompose,
+    }
+}
+
+const fn always(any: &'static [&'static str], decompose: DecomposeFn) -> DecomposeRule {
+    DecomposeRule {
+        matcher: TargetMatcher::any(any),
+        mode: DecomposeMode::Always,
+        decompose,
+    }
+}
+
+const fn always_except(
+    any: &'static [&'static str],
+    none: &'static [&'static str],
+    decompose: DecomposeFn,
+) -> DecomposeRule {
+    DecomposeRule {
+        matcher: TargetMatcher::any_except(any, none),
+        mode: DecomposeMode::Always,
+        decompose,
+    }
+}
+
+const fn always_matcher(matcher: TargetMatcher, decompose: DecomposeFn) -> DecomposeRule {
+    DecomposeRule {
+        matcher,
+        mode: DecomposeMode::Always,
+        decompose,
+    }
+}
+
 fn matching_rule(target: &str, rules: &[DecomposeRule]) -> Option<DecomposeRule> {
     rules
         .iter()
@@ -636,121 +672,45 @@ fn try_decompose_rule(graph: &mut IrGraph, id: NodeId, target: &str) -> bool {
 }
 
 const DECOMPOSE_RULES: &[DecomposeRule] = &[
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["atanh"]),
-        mode: DecomposeMode::SkipQuantizedEnvelope,
-        decompose: decompose_atanh,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["aten.tan."]),
-        mode: DecomposeMode::SkipQuantizedEnvelope,
-        decompose: decompose_tan,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["aten.sinh."]),
-        mode: DecomposeMode::SkipQuantizedEnvelope,
-        decompose: decompose_sinh,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["aten.cosh."]),
-        mode: DecomposeMode::SkipQuantizedEnvelope,
-        decompose: decompose_cosh,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["aten.asinh."]),
-        mode: DecomposeMode::SkipQuantizedEnvelope,
-        decompose: decompose_asinh,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["aten.asin."]),
-        mode: DecomposeMode::SkipQuantizedEnvelope,
-        decompose: decompose_asin,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["aten.acos."]),
-        mode: DecomposeMode::SkipQuantizedEnvelope,
-        decompose: decompose_acos,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["aten.atan."]),
-        mode: DecomposeMode::SkipQuantizedEnvelope,
-        decompose: decompose_atan,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["aten.acosh."]),
-        mode: DecomposeMode::SkipQuantizedEnvelope,
-        decompose: decompose_acosh,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["aten.elu."]),
-        mode: DecomposeMode::SkipQuantizedEnvelope,
-        decompose: decompose_elu,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["aten.gelu."]),
-        mode: DecomposeMode::SkipQuantizedEnvelope,
-        decompose: decompose_gelu,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["aten.erfinv."]),
-        mode: DecomposeMode::SkipQuantizedEnvelope,
-        decompose: decompose_erfinv,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["pow.Tensor_Scalar"]),
-        mode: DecomposeMode::SkipQuantizedEnvelope,
-        decompose: decompose_pow_scalar,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["aten.group_norm", "aten.native_group_norm"]),
-        mode: DecomposeMode::Always,
-        decompose: decompose_group_norm,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&[
+    skip_quantized(&["atanh"], decompose_atanh),
+    skip_quantized(&["aten.tan."], decompose_tan),
+    skip_quantized(&["aten.sinh."], decompose_sinh),
+    skip_quantized(&["aten.cosh."], decompose_cosh),
+    skip_quantized(&["aten.asinh."], decompose_asinh),
+    skip_quantized(&["aten.asin."], decompose_asin),
+    skip_quantized(&["aten.acos."], decompose_acos),
+    skip_quantized(&["aten.atan."], decompose_atan),
+    skip_quantized(&["aten.acosh."], decompose_acosh),
+    skip_quantized(&["aten.elu."], decompose_elu),
+    skip_quantized(&["aten.gelu."], decompose_gelu),
+    skip_quantized(&["aten.erfinv."], decompose_erfinv),
+    skip_quantized(&["pow.Tensor_Scalar"], decompose_pow_scalar),
+    always(
+        &["aten.group_norm", "aten.native_group_norm"],
+        decompose_group_norm,
+    ),
+    always(
+        &[
             "aten.batch_norm",
             "aten.native_batch_norm",
             "aten._native_batch_norm_legit_no_training",
             "aten._native_batch_norm_legit.no_stats",
-        ]),
-        mode: DecomposeMode::Always,
-        decompose: decompose_batch_norm,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["aten.log_softmax.", "aten._log_softmax."]),
-        mode: DecomposeMode::Always,
-        decompose: decompose_log_softmax_wrapper,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["aten.softmax.", "aten._safe_softmax.", "aten._softmax."]),
-        mode: DecomposeMode::Always,
-        decompose: decompose_softmax,
-    },
-    DecomposeRule {
-        matcher: MAX_DIM_MATCHER,
-        mode: DecomposeMode::Always,
-        decompose: decompose_dim_extrema,
-    },
-    DecomposeRule {
-        matcher: MIN_DIM_MATCHER,
-        mode: DecomposeMode::Always,
-        decompose: decompose_dim_extrema,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any_except(&["stack"], &["unstack"]),
-        mode: DecomposeMode::Always,
-        decompose: decompose_stack,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["unbind"]),
-        mode: DecomposeMode::Always,
-        decompose: decompose_unbind,
-    },
-    DecomposeRule {
-        matcher: TargetMatcher::any(&["add.Tensor", "sub.Tensor"]),
-        mode: DecomposeMode::Always,
-        decompose: decompose_add_sub_alpha,
-    },
+        ],
+        decompose_batch_norm,
+    ),
+    always(
+        &["aten.log_softmax.", "aten._log_softmax."],
+        decompose_log_softmax_wrapper,
+    ),
+    always(
+        &["aten.softmax.", "aten._safe_softmax.", "aten._softmax."],
+        decompose_softmax,
+    ),
+    always_matcher(MAX_DIM_MATCHER, decompose_dim_extrema),
+    always_matcher(MIN_DIM_MATCHER, decompose_dim_extrema),
+    always_except(&["stack"], &["unstack"], decompose_stack),
+    always(&["unbind"], decompose_unbind),
+    always(&["add.Tensor", "sub.Tensor"], decompose_add_sub_alpha),
 ];
 
 pub struct IrDecomposeOpsPass;

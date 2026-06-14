@@ -8,14 +8,14 @@ pub fn register(table: &mut EmitterTable) {
         (OpTarget::TosaSub, emit_sub),
         (OpTarget::TosaMul, emit_mul),
         (OpTarget::TosaClamp, emit_clamp),
-        (OpTarget::Add, emit_aten_add),
-        (OpTarget::Sub, emit_aten_sub),
-        (OpTarget::Mul, emit_aten_mul),
+        (OpTarget::Add, emit_add),
+        (OpTarget::Sub, emit_sub),
+        (OpTarget::Mul, emit_mul),
         (OpTarget::Clamp, emit_aten_clamp),
         (OpTarget::Hardtanh, emit_aten_clamp),
         (OpTarget::Relu, emit_aten_clamp),
-        (OpTarget::Unsqueeze, emit_aten_unsqueeze),
-        (OpTarget::Squeeze, emit_aten_squeeze),
+        (OpTarget::Unsqueeze, emit_aten_shape_reshape),
+        (OpTarget::Squeeze, emit_aten_shape_reshape),
     ]);
 }
 
@@ -164,18 +164,6 @@ pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
     result
 }
 
-pub(super) fn emit_aten_add(ctx: &EmitContext) -> EmitResult {
-    emit_add(ctx)
-}
-
-pub(super) fn emit_aten_sub(ctx: &EmitContext) -> EmitResult {
-    emit_sub(ctx)
-}
-
-pub(super) fn emit_aten_mul(ctx: &EmitContext) -> EmitResult {
-    emit_mul(ctx)
-}
-
 pub(super) fn emit_clamp(ctx: &EmitContext) -> EmitResult {
     let node = ctx.node;
     let mut result = EmitResult::default();
@@ -229,30 +217,14 @@ pub(super) fn emit_mul(ctx: &EmitContext) -> EmitResult {
     result
 }
 
-pub(super) fn emit_aten_unsqueeze(ctx: &EmitContext) -> EmitResult {
+pub(super) fn emit_aten_shape_reshape(ctx: &EmitContext) -> EmitResult {
     let mut result = EmitResult::default();
     let spec = ParsedReshapeEmitterSpec::parse(ctx).unwrap_or_else(|| {
         panic!(
-            "emit_aten_unsqueeze: missing input for node '{}'",
+            "emit_aten_shape_reshape: missing input for node '{}'",
             ctx.name()
         )
     });
-    push_reshape_with_shape_for_node(
-        &mut result,
-        Some(ctx.node),
-        spec.input_name,
-        ctx.node.name.clone(),
-        format!("{}_shape", ctx.name()),
-        spec.output_shape,
-        spec.output_dtype,
-    );
-    result
-}
-
-pub(super) fn emit_aten_squeeze(ctx: &EmitContext) -> EmitResult {
-    let mut result = EmitResult::default();
-    let spec = ParsedReshapeEmitterSpec::parse(ctx)
-        .unwrap_or_else(|| panic!("emit_aten_squeeze: missing input for node '{}'", ctx.name()));
     push_reshape_with_shape_for_node(
         &mut result,
         Some(ctx.node),
