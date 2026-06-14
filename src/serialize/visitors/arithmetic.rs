@@ -30,7 +30,7 @@ impl ParsedReshapeEmitterSpec {
     // typed spec instead of repeatedly open-coding "first input + meta shape".
     fn parse(ctx: &EmitContext) -> Option<Self> {
         Some(Self {
-            input_name: ctx.input_names().first()?.clone(),
+            input_name: ctx.input_name(0)?,
             output_shape: ctx.shape(),
             output_dtype: ctx.dtype(),
         })
@@ -43,7 +43,6 @@ pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
     let store = ctx.store;
     let mut result = EmitResult::default();
 
-    let input_names = ctx.input_names();
     let clamp_dtype = node.meta.val.dtype;
     let relu_min = Arg::Float(0.0);
     let (min_arg, max_arg) = if matches!(&node.target, crate::graph::ir::OpTarget::Relu) {
@@ -56,7 +55,7 @@ pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
         || matches!(max_arg, Some(Arg::Node(_)));
 
     if needs_extrema_lowering {
-        let input_name = input_names.first().cloned().unwrap_or_default();
+        let input_name = ctx.input_name(0).unwrap_or_default();
         let output_shape = ctx.shape();
         let output_dtype = ir_dtype_to_tosa(clamp_dtype);
         let output_rank = output_shape.len();
@@ -151,6 +150,7 @@ pub(super) fn emit_aten_clamp(ctx: &EmitContext) -> EmitResult {
 
     let min_val = clamp_bound_bytes_from_arg(clamp_dtype, min_arg, true);
     let max_val = clamp_bound_bytes_from_arg(clamp_dtype, max_arg, false);
+    let input_names = ctx.input_names();
     result.push_output_op(
         ctx.make_output(),
         Op::Clamp,

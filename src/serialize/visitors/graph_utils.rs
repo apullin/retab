@@ -40,6 +40,10 @@ pub(super) fn collect_input_names(graph: &Graph, node: &Node) -> Vec<String> {
     names
 }
 
+pub(super) fn input_name(graph: &Graph, node: &Node, index: usize) -> Option<String> {
+    collect_input_names(graph, node).into_iter().nth(index)
+}
+
 pub(super) fn is_getitem_node(node: &Node) -> bool {
     matches!(&node.target, OpTarget::Other(target) if target.contains("getitem"))
 }

@@ -15,7 +15,6 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = ctx.input_names();
     let out_shape = ctx.shape();
     let promoted_shape = promoted_2d_matmul_shape(graph, store, node);
     let promote_2d = promoted_shape.is_some();
@@ -59,8 +58,8 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
             _ => (Vec::new(), Vec::new()),
         };
 
-        let a_name = input_names.first().cloned().unwrap_or_default();
-        let b_name = input_names.get(1).cloned().unwrap_or_default();
+        let a_name = ctx.input_name(0).unwrap_or_default();
+        let b_name = ctx.input_name(1).unwrap_or_default();
         let a_reshape_name = format!("{}_A_reshape", node.name);
         let b_reshape_name = format!("{}_B_reshape", node.name);
 
@@ -90,7 +89,7 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
             vec![]
         }
     } else {
-        input_names
+        ctx.input_names()
     };
 
     let a_zp_name = format!("{}_A_zp", node.name);

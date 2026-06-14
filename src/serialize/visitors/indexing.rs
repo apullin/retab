@@ -44,8 +44,7 @@ struct ParsedSliceSpec {
 
 impl ParsedSelectCopySpec {
     fn parse(graph: &Graph, node: &Node, store: &TensorStore) -> Self {
-        let input_names = collect_input_names(graph, node);
-        let input_name = input_names.first().cloned().unwrap_or_default();
+        let input_name = input_name(graph, node, 0).unwrap_or_default();
         let input_node = node
             .args
             .first()
@@ -151,8 +150,7 @@ impl ParsedSelectCopySpec {
 
 impl ParsedSliceSpec {
     fn parse(graph: &Graph, node: &Node, store: &TensorStore) -> Self {
-        let input_names = collect_input_names(graph, node);
-        let input_name = input_names.first().cloned().unwrap_or_default();
+        let input_name = input_name(graph, node, 0).unwrap_or_default();
         let input_node = node
             .args
             .first()

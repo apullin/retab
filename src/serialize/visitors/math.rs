@@ -21,7 +21,7 @@ impl ParsedUnaryTensorSpec {
     // Parse once at the module boundary, then emit from a typed view instead
     // of repeatedly fishing shape/dtype/name facts out of raw node args.
     fn parse(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Self> {
-        let input_name = collect_input_names(graph, node).first().cloned()?;
+        let input_name = input_name(graph, node, 0)?;
         Some(Self {
             input_name,
             output_shape: actual_tensor_shape(graph, store, node),

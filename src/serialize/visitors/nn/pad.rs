@@ -35,7 +35,6 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_names = ctx.input_names();
     let input_shape = node
         .args
         .first()
@@ -123,7 +122,7 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
         Op::Pad,
         Attribute::Pad(PadAttribute {}),
         vec![
-            input_names.first().cloned().unwrap_or_default(),
+            ctx.input_name(0).unwrap_or_default(),
             format!("{}_pad_shape", node.name),
             pad_const_name,
         ],

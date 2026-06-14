@@ -385,7 +385,7 @@ pub(in crate::serialize::visitors) fn emit_rescale(ctx: &EmitContext) -> EmitRes
             output_unsigned: params.output_unsigned,
         }),
         vec![
-            input_names.first().cloned().unwrap_or_default(),
+            ctx.input_name(0).unwrap_or_default(),
             params.multiplier_name,
             params.shift_name,
             input_zp_name,

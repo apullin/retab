@@ -1239,6 +1239,14 @@ Deleted: local quantized-metadata helper in derived op decomposition
 Added: `NodeMeta::has_nonempty_qparam_metadata()`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_decompose_ops_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over pow, remainder, elu, gelu, sigmoid, exp, log, sqrt, rsqrt, and masked_fill; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `216 passed, 6 expected xfails, 403 deselected`. No model lane was run. This keeps quantized-envelope detection in the metadata grammar instead of a decomposition-pass-local map scan.
+
+2026-06-14, serializer input-name grammar slice
+Rust LOC: 36,818 -> 36,821
+Movement: +3 Rust LOC
+Deleted: repeated serializer `input_names.first().cloned()` and `collect_input_names(...).first()` spellings from math, arithmetic, indexing, matmul, pad, rescale, and tensor-op visitors
+Added: `graph_utils::input_name(...)` and `EmitContext::input_name(...)` as the shared grammar for resolving one serializer input name
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib serialize::visitors`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over add, clamp, index_tensor, index_put, slice, mm, bmm, matmul, constant_pad_nd, conv_constant_pad_nd, expand, repeat, upsample_nearest2d, and upsample_bilinear2d; Rust LOC check
+Note: Serializer Rust tests passed `10 passed`; full Rust tests passed `137 passed`; focused Python smoke passed `656 passed, 30 expected xfails, 831 deselected`. No model lane was run. This is a small setup-positive serializer grammar slice that gives single-input emitters the same input-name vocabulary as multi-input emitters.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1820,7 +1828,8 @@ computes cache/preallocation state and calls region collection plus flatbuffer
 emission. Region collection, physical tensor layout/materialization, root-output
 layout normalization, flatbuffer region/tensor/operator table writing, and
 attribute-union table writing are split into focused modules. Visitor emission
-remains under `src/serialize/visitors/*`.
+remains under `src/serialize/visitors/*`. Visitor-side input-name lookup now
+has a shared single-slot helper beside full input-name collection.
 
 Problem:
 

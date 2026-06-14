@@ -264,7 +264,7 @@ pub(super) fn emit_quantize_per_tensor(ctx: &EmitContext) -> EmitResult {
     let node = ctx.node;
     let graph = ctx.graph;
     let mut result = EmitResult::default();
-    let Some(mut current_name) = ctx.input_names().first().cloned() else {
+    let Some(mut current_name) = ctx.input_name(0) else {
         return result;
     };
 
@@ -381,7 +381,7 @@ pub(super) fn emit_quantize_per_tensor(ctx: &EmitContext) -> EmitResult {
 pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
     let node = ctx.node;
     let mut result = EmitResult::default();
-    let Some(input_name) = ctx.input_names().first().cloned() else {
+    let Some(input_name) = ctx.input_name(0) else {
         return result;
     };
 
@@ -516,7 +516,7 @@ fn emit_direct_rescale_params(
 
 impl ParsedResizeSpec {
     fn parse(graph: &Graph, node: &Node, store: &TensorStore) -> Option<Self> {
-        let input_name = collect_input_names(graph, node).first()?.clone();
+        let input_name = input_name(graph, node, 0)?;
         let input_node = first_input_node(graph, node)?;
         let input_shape = actual_tensor_shape(graph, store, input_node);
         let output_shape = actual_tensor_shape(graph, store, node);
@@ -916,8 +916,7 @@ fn emit_tile_like(
     store: &TensorStore,
     multiples: Vec<i32>,
 ) -> EmitResult {
-    let input_names = collect_input_names(graph, node);
-    let Some(input_name) = input_names.first().cloned() else {
+    let Some(input_name) = input_name(graph, node, 0) else {
         return EmitResult::default();
     };
     let Some(Arg::Node(input_id)) = node.args.first() else {
@@ -936,8 +935,7 @@ pub(super) fn emit_expand(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;
     let store = ctx.store;
-    let input_names = ctx.input_names();
-    let Some(input_name) = input_names.first().cloned() else {
+    let Some(input_name) = ctx.input_name(0) else {
         return EmitResult::default();
     };
     let Some(Arg::Node(input_id)) = node.args.first() else {
