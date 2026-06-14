@@ -836,6 +836,14 @@ Deleted: `MaterializeZeroInputConstantEffect`, `FuseConstantNodeEffect`, the `fx
 Added: no new production API; unsupported constant-fold opportunities now only emit `fold_fallback_log` diagnostics instead of deferred no-op lowering effects
 Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over full, zeros, ones, arange, eye, view, permute, unsqueeze, mm, bmm, matmul, and addmm; `git diff --check`; Rust LOC check
 Note: Rust tests passed `130 passed`. Focused Python smoke passed `307 passed, 7 skipped, 10 expected xfails, 553 deselected`. This removes the remaining constant-fold effect vocabulary that only made sense when Python helper code could materialize `{node}_fused_const` buffers during the deleted round-trip.
+
+2026-06-13, dead fused-const Python helper deletion
+Python helper LOC: `python/retab/_helpers.py` 1,221 -> 991
+Movement: -230 Python LOC
+Deleted: unreferenced Python fused-constant materialization helpers (`materialize_constant_node`, `materialize_zero_input_constant_node`, `fuse_constant_node`, `_get_param_tensor`, `_materialize_constant_placeholder`, and `_materialize_tensor_like_node`)
+Added: no new production API; `_torch_dtype_from_name` and `_tensor_from_bytes` remain because precomputed TABLE insertion still uses them
+Validation: `python3 -m py_compile python/retab/_helpers.py`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over full, zeros, ones, arange, eye, view, permute, unsqueeze, mm, bmm, matmul, and addmm; `git diff --check`; fused-const helper reference audit
+Note: Focused Python smoke passed `307 passed, 7 skipped, 10 expected xfails, 553 deselected`. This removes the Python half of the legacy fused-constant fallback path after the Rust effect model stopped referencing it.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
