@@ -1207,6 +1207,14 @@ Deleted: pass-local `node_str_kwarg` and `node_scalar_arg` wrappers in table-op 
 Added: no new helper surface; table-op parsing now calls the existing `IrNode` arg/kwarg grammar directly
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_insert_table_ops_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over pow, remainder, elu, gelu, sigmoid, exp, log, and sqrt; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `186 passed, 6 expected xfails, 346 deselected`. No model lane was run. This is a deletion-only cleanup in the table-op precompute path.
+
+2026-06-14, shape-only constant planner cleanup slice
+Rust LOC: 36,830 -> 36,820
+Movement: -10 Rust LOC
+Deleted: duplicate pass-local shape-only constant planner wrappers in constant-input fusion and shape-only constant fusion
+Added: `fx_constant_tensor_eval::plan_shape_only_tensor_from_constants(...)`, naming the shared composition of first-constant-input lookup plus shape-only tensor planning
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_fuse_shape_only_constants_ir::tests`; `cargo test --lib fx_fuse_constant_inputs_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over full, arange, eye, view, permute, unsqueeze, mm, bmm, matmul, and addmm; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `283 passed, 7 skipped, 10 expected xfails, 529 deselected`. No model lane was run. This keeps shape-only constant-chain planning in the shared constant evaluator instead of duplicating wrapper logic in effectful passes.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1433,7 +1441,9 @@ instead of carrying pass-local wrapper aliases. The
 indexing family now also shares `fx_index_linear::build_linear_index`, which
 owns the broadcast-align, expand, flatten, stride-scale, and sum rewrite chain
 used by index.Tensor and index_put; the same module owns contiguous stride
-calculation for indexing and as_strided_copy.
+calculation for indexing and as_strided_copy. Constant-effect passes now share
+shape-only constant-chain planning through `fx_constant_tensor_eval` instead of
+wrapping first-constant-input lookup locally.
 Remaining work should keep adding small builder/query operations only when
 they replace repeated rewrite structure across several passes.
 

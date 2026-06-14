@@ -4,7 +4,7 @@ use crate::fx_constant_tensor_eval::{
     constant_input_seeds, first_constant_input_tensor, node_has_tensor_inputs,
     node_inputs_are_constant, plan_constant_matmul_tensor,
     plan_constant_slice_tensor as shared_plan_constant_slice_tensor,
-    plan_shape_only_tensor as shared_plan_shape_only_tensor,
+    plan_shape_only_tensor_from_constants,
 };
 use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, NodeOp};
 use crate::fx_target::{
@@ -29,14 +29,6 @@ impl IrFuseConstantInputsEffectPass {
             include_data_slices: true,
         }
     }
-}
-
-fn plan_shape_only_tensor(
-    node: &IrNode,
-    constant_tensors: &HashMap<usize, TensorData>,
-) -> Option<TensorData> {
-    first_constant_input_tensor(node, constant_tensors)
-        .and_then(|input| shared_plan_shape_only_tensor(node, input))
 }
 
 fn plan_constant_slice_tensor(
@@ -78,7 +70,8 @@ impl EffectfulIrPass for IrFuseConstantInputsEffectPass {
             }
             if is_shape_only_constant_target(&node.target) {
                 constant_nodes.insert(node.id);
-                if let Some(tensor) = plan_shape_only_tensor(node, &constant_tensors) {
+                if let Some(tensor) = plan_shape_only_tensor_from_constants(node, &constant_tensors)
+                {
                     constant_tensors.insert(node.id, tensor);
                 }
                 continue;

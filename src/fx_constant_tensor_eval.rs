@@ -89,6 +89,14 @@ pub fn first_constant_input_tensor<'a>(
     })
 }
 
+pub fn plan_shape_only_tensor_from_constants(
+    node: &IrNode,
+    constant_tensors: &HashMap<usize, TensorData>,
+) -> Option<TensorData> {
+    first_constant_input_tensor(node, constant_tensors)
+        .and_then(|input| plan_shape_only_tensor(node, input))
+}
+
 pub fn normalize_dim(dim: i64, rank: usize, allow_end: bool) -> Option<usize> {
     let rank_i64 = i64::try_from(rank).ok()?;
     let max = if allow_end { rank_i64 } else { rank_i64 - 1 };

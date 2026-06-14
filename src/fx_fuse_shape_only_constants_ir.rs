@@ -1,23 +1,11 @@
-use std::collections::HashMap;
-
 use crate::fx_constant_tensor_eval::{
-    constant_input_seeds, first_constant_input_tensor, node_inputs_are_constant,
-    plan_shape_only_tensor as shared_plan_shape_only_tensor,
+    constant_input_seeds, node_inputs_are_constant, plan_shape_only_tensor_from_constants,
 };
-use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, NodeOp};
+use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, NodeOp};
 use crate::fx_target::is_shape_only_constant_target;
 use crate::lowering_effects::{LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect};
-use crate::store::TensorData;
 
 pub struct IrFuseShapeOnlyConstantsEffectPass;
-
-fn plan_shape_only_tensor(
-    node: &IrNode,
-    constant_tensors: &HashMap<usize, TensorData>,
-) -> Option<TensorData> {
-    first_constant_input_tensor(node, constant_tensors)
-        .and_then(|input| shared_plan_shape_only_tensor(node, input))
-}
 
 impl EffectfulIrPass for IrFuseShapeOnlyConstantsEffectPass {
     fn name(&self) -> &str {
@@ -38,7 +26,7 @@ impl EffectfulIrPass for IrFuseShapeOnlyConstantsEffectPass {
             if !node_inputs_are_constant(node, &constant_nodes) {
                 continue;
             }
-            let tensor = match plan_shape_only_tensor(node, &constant_tensors) {
+            let tensor = match plan_shape_only_tensor_from_constants(node, &constant_tensors) {
                 Some(tensor) => tensor,
                 None => continue,
             };
@@ -64,6 +52,7 @@ mod tests {
     };
     use crate::graph::ir::DType;
     use crate::lowering_effects::LoweringInputKind;
+    use crate::store::TensorData;
 
     use super::*;
 
