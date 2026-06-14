@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam, RescaleRewrite};
 use crate::fx_target::{
@@ -119,7 +119,7 @@ fn weight_scales(qparam: &QParam) -> Vec<f64> {
 
 fn plain_tensor_meta_from(source_meta: &NodeMeta, shape: &[i64], dtype: &str) -> NodeMeta {
     let mut meta = source_meta.cloned_with_val(shape.to_vec(), dtype);
-    meta.set_input_qparams(HashMap::new());
+    meta.set_empty_input_qparams();
     meta.clear_output_qparams();
     meta.extras.remove("tosa_special_dtype");
     meta
@@ -352,6 +352,7 @@ impl IrPass for IrInsertConvAccumulatorRescalePass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn qparam(scale: f64, zp: i64, dtype: &str) -> QParam {
         QParam::per_tensor(scale, zp, -128, 127, dtype.to_string())

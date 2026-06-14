@@ -1159,6 +1159,14 @@ Deleted: stale `ingest::fx_bridge` module name, redundant finalizer guard boolea
 Added: `ingest::finalize` as the owner of post-conversion serialize-graph finalization, plus direct reuse of `Arg::as_node` and `Arg::as_int_list`
 Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over cond, while, conv2d, transpose_conv2d, addmm, batch_norm, gelu, elu, pow, stack, logsoftmax, softmax, rsqrt, floor, ceil, round, erf, constant_pad_nd, conv_constant_pad_nd, and slice_scatter; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `547 passed, 1 skipped, 5 expected xfails, 1220 deselected`. No model lane was run. This is a Refactor 9 cleanup: the active ingest path no longer contains a bridge-named module now that Python re-ingest is gone.
+
+2026-06-14, qparam input-map grammar slice
+Rust LOC: 36,812 -> 36,817
+Movement: +5 Rust LOC
+Deleted: mutable input-qparam map construction from masked_fill where metadata, mean decomposition multiply metadata, int32 rescale input metadata, while-body output qparam stamping, carried-output rescale metadata, and conv-rescale plain tensor metadata
+Added: `NodeMeta::set_input_qparams_from(...)` and `NodeMeta::set_empty_input_qparams()` for named construction of present input-qparam maps
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over cond, while, masked_fill, mean_dim, sum, add, sub, mul, where, pow, cumsum, conv2d, conv3d, and transpose_conv2d; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `580 passed, 6 expected xfails, 1321 deselected`. No model lane was run. This is setup-positive in LOC but moves input-qparam map construction into `NodeMeta`, preserving the distinction between absent qparams and present-but-empty maps.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1299,7 +1307,9 @@ Defaulted tensor dtype reads now also live on `NodeMeta` via
 decomposition-pass spelling for "missing tensor dtype means float32". Metadata
 clones that should preserve the fact that qparam maps are present but empty now
 use `NodeMeta::cloned_with_empty_qparam_maps`, distinct from
-`cloned_without_qparams`.
+`cloned_without_qparams`. Present input-qparam maps with multiple slots now use
+`NodeMeta::set_input_qparams_from`, and present-but-empty input maps use
+`NodeMeta::set_empty_input_qparams`.
 
 Problem:
 

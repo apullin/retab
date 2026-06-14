@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp, QParam, RescaleRewrite};
 use crate::fx_target::{
@@ -223,11 +223,12 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
         return false;
     }
 
-    let mut int32_inputs = HashMap::new();
-    for (key_idx, (pos, _)) in input_qparams.iter().enumerate() {
-        int32_inputs.insert(*pos, int32_qparam(rescaled_scales[key_idx]));
-    }
-    graph.node_mut(node_id).meta.set_input_qparams(int32_inputs);
+    graph.node_mut(node_id).meta.set_input_qparams_from(
+        input_qparams
+            .iter()
+            .enumerate()
+            .map(|(key_idx, (pos, _))| (*pos, int32_qparam(rescaled_scales[key_idx]))),
+    );
 
     if let Some(output_int32_scale) = output_int32_scale {
         if let Some(output_qparam) = node.meta.output_qparam().cloned() {
@@ -368,6 +369,7 @@ impl IrPass for IrInsertInt32RescalePass {
 mod tests {
     use super::*;
     use crate::fx_ir::NodeMeta;
+    use std::collections::HashMap;
 
     fn qparam(scale: f64, zp: i64, dtype: &str) -> QParam {
         QParam::per_tensor(scale, zp, -128, 127, dtype.to_string())

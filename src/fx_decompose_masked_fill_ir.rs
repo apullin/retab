@@ -7,8 +7,6 @@
 //!   - The fill value scalar can be quantized to match the tensor data type.
 //!   - The created `full_like` constant is quantized at the same scale/zp as `x`.
 
-use std::collections::HashMap;
-
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeMeta};
 use crate::fx_target::is_masked_fill_target;
 use crate::runner_logging::log_line;
@@ -17,18 +15,16 @@ pub struct IrDecomposeMaskedFillPass;
 
 fn tensorized_scalar_meta(meta: &NodeMeta) -> NodeMeta {
     let mut new_meta = meta.clone();
-    new_meta.set_input_qparams(HashMap::new());
+    new_meta.set_empty_input_qparams();
     new_meta
 }
 
 fn where_meta(meta: &NodeMeta) -> NodeMeta {
     let mut new_meta = meta.clone();
-    let mut input_qparams = HashMap::new();
-    if let Some(qp) = meta.output_qparam().cloned() {
-        input_qparams.insert(1, qp.clone());
-        input_qparams.insert(2, qp);
+    match meta.output_qparam().cloned() {
+        Some(qp) => new_meta.set_input_qparams_from([(1, qp.clone()), (2, qp)]),
+        None => new_meta.set_empty_input_qparams(),
     }
-    new_meta.set_input_qparams(input_qparams);
     new_meta
 }
 

@@ -1513,6 +1513,14 @@ impl NodeMeta {
         self.input_qparams = Some(map);
     }
 
+    pub fn set_input_qparams_from(&mut self, pairs: impl IntoIterator<Item = (usize, QParam)>) {
+        self.set_input_qparams(pairs.into_iter().collect());
+    }
+
+    pub fn set_empty_input_qparams(&mut self) {
+        self.set_input_qparams(HashMap::new());
+    }
+
     pub fn set_single_output_qparam(&mut self, qp: QParam) {
         self.set_output_qparam_at(0, qp);
     }
@@ -1672,7 +1680,7 @@ impl NodeMeta {
         output_qparam: QParam,
     ) -> Self {
         let mut meta = self.clone();
-        meta.set_input_qparams(HashMap::new());
+        meta.set_empty_input_qparams();
         meta.set_single_output_qparam(output_qparam.clone());
         if let Some(order) = meta.tosa_dim_order.clone() {
             meta.set_tosa_dim_order(order);

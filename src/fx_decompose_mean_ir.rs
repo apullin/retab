@@ -6,7 +6,6 @@ use crate::fx_ir::{
 };
 use crate::fx_target::is_mean_target;
 use crate::runner_logging::log_line;
-use std::collections::HashMap;
 
 pub struct IrDecomposeMeanPass;
 
@@ -170,10 +169,10 @@ impl IrPass for IrDecomposeMeanPass {
                         .meta
                         .set_single_output_qparam(full_qp.clone());
 
-                    let mut mul_iqp = HashMap::new();
-                    mul_iqp.insert(0, sum_qp);
-                    mul_iqp.insert(1, full_qp);
-                    graph.node_mut(mul_id).meta.set_input_qparams(mul_iqp);
+                    graph
+                        .node_mut(mul_id)
+                        .meta
+                        .set_input_qparams_from([(0, sum_qp), (1, full_qp)]);
                     graph
                         .node_mut(mul_id)
                         .meta

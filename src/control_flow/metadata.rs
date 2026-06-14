@@ -67,7 +67,7 @@ impl IrPass for IrInsertCarriedOutputRescalePass {
             }
 
             let mut meta = graph.node(src_id).meta.clone();
-            meta.set_input_qparams(HashMap::new());
+            meta.set_empty_input_qparams();
             meta.set_single_output_qparam(ph_qp.clone());
             meta.extras.remove("tosa_special_dtype");
             meta.set_val_dtype_for_existing_shape(ph_qp.dtype_str.clone());
@@ -221,11 +221,10 @@ pub(crate) fn stamp_while_body_output_qparams_ir(graph: &mut IrGraph) -> usize {
         Some(n) => n.id,
         None => return 0,
     };
-    let mut map = HashMap::new();
-    for (idx, qp) in ph_qparams {
-        map.insert(idx, qp);
-    }
-    graph.node_mut(out_id).meta.set_input_qparams(map);
+    graph
+        .node_mut(out_id)
+        .meta
+        .set_input_qparams_from(ph_qparams);
     count
 }
 
