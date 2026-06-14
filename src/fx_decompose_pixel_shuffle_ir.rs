@@ -28,16 +28,11 @@ fn add_view_copy(
     base_meta: &NodeMeta,
     dtype: &str,
 ) -> NodeId {
-    graph.add_call_function_with_val(
+    graph.add_view_copy(
         name,
-        "aten.view_copy.default",
-        vec![
-            IrArg::Node(input_id),
-            IrArg::List(shape.iter().map(|&d| IrArg::Int(d)).collect()),
-        ],
-        base_meta,
-        shape.to_vec(),
-        dtype,
+        input_id,
+        shape,
+        base_meta.cloned_with_val(shape.to_vec(), dtype),
     )
 }
 

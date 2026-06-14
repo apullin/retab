@@ -6,7 +6,7 @@
 //!   convolution(... stride=[s,1], pad=[p,0], dilation=[d,1])
 //!   view_copy(output[..., W_out, 1] -> [..., W_out])
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId};
 use crate::fx_target::{is_aten_convolution_default_target, is_conv1d_default_target};
 use crate::runner_logging::log_line;
 
@@ -41,11 +41,10 @@ fn add_view_copy(
     let meta = graph.nodes[input_id]
         .meta
         .cloned_with_empty_qparam_maps(new_shape.to_vec(), dtype);
-    graph.add_node(
-        NodeOp::CallFunction,
+    graph.add_view_copy(
         format!("{}_{}", name_prefix, suffix),
-        "aten.view_copy.default".to_string(),
-        vec![IrArg::Node(input_id), i64_list(new_shape)],
+        input_id,
+        new_shape,
         meta,
     )
 }

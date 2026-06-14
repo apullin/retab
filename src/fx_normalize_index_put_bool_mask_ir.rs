@@ -9,7 +9,7 @@
 //!   out  = where(mask, data, destination)
 //! Runs before IrRewriteIndexPut so the general SCATTER path only sees int indices.
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::fx_target::is_index_put_family_target;
 use crate::runner_logging::log_line;
 
@@ -22,13 +22,7 @@ fn view_copy(
     dtype: &str,
 ) -> NodeId {
     let meta = base_meta.cloned_with_val(shape.to_vec(), dtype);
-    graph.add_node(
-        NodeOp::CallFunction,
-        name,
-        "aten.view_copy.default".to_string(),
-        vec![IrArg::Node(input_id), i64_list(shape)],
-        meta,
-    )
+    graph.add_view_copy(name, input_id, shape, meta)
 }
 
 fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {

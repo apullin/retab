@@ -712,6 +712,21 @@ impl IrGraph {
         id
     }
 
+    pub(crate) fn add_view_copy(
+        &mut self,
+        name: impl Into<String>,
+        source: NodeId,
+        shape: &[i64],
+        meta: NodeMeta,
+    ) -> NodeId {
+        self.add_call_function(
+            name,
+            "aten.view_copy.default",
+            vec![IrArg::Node(source), i64_list_arg(shape)],
+            meta,
+        )
+    }
+
     pub(crate) fn add_anchored_view_copy(
         &mut self,
         anchor: NodeId,
@@ -720,13 +735,9 @@ impl IrGraph {
         shape: &[i64],
         meta: NodeMeta,
     ) -> NodeId {
-        self.add_anchored_call_function(
-            anchor,
-            name,
-            "aten.view_copy.default",
-            vec![IrArg::Node(source), i64_list_arg(shape)],
-            meta,
-        )
+        let id = self.add_view_copy(name, source, shape, meta);
+        self.anchor_to(id, anchor);
+        id
     }
 
     pub(crate) fn replace_with_view_copy(

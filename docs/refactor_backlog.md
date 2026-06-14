@@ -1495,6 +1495,14 @@ Deleted: raw `aten.view_copy.default` target/argument construction from as_strid
 Added: no new helper surface; reused `IrGraph::add_anchored_view_copy(...)` and `IrGraph::replace_with_view_copy(...)`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over as_strided_copy, cumsum, index_put, max_pool, mean_dim, repeat, select_scatter, slice, squeeze, tril, unsqueeze, and where; Rust LOC check
 Note: Full Rust tests passed `141 passed`; focused Python smoke passed `364 passed, 2 expected xfails`. Raw `view_copy` target spellings in active rewrite/control-flow code dropped from 21 to 16 in this tranche, and the two view-copy slices are now net-negative overall.
+
+2026-06-14, graph unanchored view-copy helper slice
+Rust LOC: 36,255 -> 36,254
+Movement: -1 Rust LOC
+Deleted: raw local `view_copy` helper construction from conv1d unsqueeze, pixel shuffle/unshuffle, and bool-mask index_put normalization
+Added: `IrGraph::add_view_copy(...)`; the anchored/replacement view-copy builders now delegate to it
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv1d, index_put, and pixel_shuffling; Rust LOC check
+Note: Full Rust tests passed `141 passed`; focused Python smoke passed `100 passed, 2 expected xfails`. This removes raw production view-copy construction from local helper wrappers without changing their unanchored insertion behavior.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
