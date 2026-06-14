@@ -862,6 +862,15 @@ Deleted: unreferenced Python `delete_constant_placeholder` and `delete_constant_
 Added: no new production API; constant-fold fallback diagnostics now use skip-oriented names instead of deleted effect names
 Validation: `python3 -m py_compile python/retab/_helpers.py`; `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over sigmoid, hardsigmoid, hardswish, silu, tanh, tan, sin, cos, sinh, cosh, asin, acos, atan, asinh, acosh, atanh, exp, expm1, log, log1p, sqrt, rsqrt, reciprocal, erf, erfinv, pow, elu, and gelu; helper/effect-vocabulary reference audit
 Note: This continues the Python helper export audit. The only references to the deleted helpers were their own definitions and internal fallback call, so the deletion narrows `_helpers.py` to the still-called FX insertion and metadata utilities.
+
+2026-06-13, Python helper module deletion
+Python helper LOC: `python/retab/_helpers.py` 716 -> deleted
+Python package LOC: 2,354 -> 1,663
+Movement: -691 Python LOC
+Deleted: the remaining `_helpers.py` module, including historical FX node insertion, RESCALE/TRANSPOSE restamping, and Python TABLE application helpers that had no active Rust/PyO3 callers
+Added: the one live graph-signature ordering helper is now local to `python/retab/preprocess.py`, and stale helper-path docs/comments were removed
+Validation: `python3 -m compileall -q python/retab`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over sigmoid, hardsigmoid, hardswish, silu, tanh, tan, sin, cos, sinh, cosh, asin, acos, atan, asinh, acosh, atanh, exp, expm1, log, log1p, sqrt, rsqrt, reciprocal, erf, erfinv, pow, elu, and gelu; helper-symbol reference audit
+Note: This completes the helper-export audit: Python remains the ExecuTorch boundary seam, but no standalone `_helpers.py` graph-surgery module is left for future passes to call back into.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

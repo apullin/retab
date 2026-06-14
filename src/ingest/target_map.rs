@@ -23,7 +23,7 @@ pub fn parse_op_target(target_str: &str) -> OpTarget {
 
     // ---------------------------------------------------------------
     // TOSA ops — check first so they don't get caught by ATen matches.
-    // FX-direct passes (fx_helpers.py) create nodes with targets like
+    // Migration-era FX helpers created nodes with targets like
     // "tosa.RESCALE.default", "tosa.rescale.default", or "tosa::rescale".
     // The ExecuTorch exir_ops variant uses "backend.tosa.RESCALE.default".
     // We match case-insensitively on the substring after "tosa".

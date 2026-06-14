@@ -210,54 +210,33 @@ IrGraph now supports mutation:
 - `remove_noop_passthroughs_ir` — detects noops, propagates metadata, replace_and_erase
 - `collapse_qdq_pairs_ir` — detects matching Q→DQ pairs, bypasses to float source (ready but not yet wired into caller)
 
-### Phase 3.1: RescaleInsert deferred node creation — DONE
+### Phase 3.1: Rescale and TABLE node creation — DONE
 
-`RescaleInsert` struct: decision made in pure Rust, applied via Python wrapper.
-Fields: anchor_name, source_name, from_qp, to_qp, after, replace/erase names.
-`apply()` method calls `insert_rescale_node` Python helper, then replace/erase.
+The migration-era `RescaleInsert` deferred-node path and Python helper-created
+FX nodes are gone from active source. RESCALE, TRANSPOSE, TABLE, and constant
+materialization are represented in Rust IR/effect data and then assembled into
+the serializer graph from `ingest/from_ir.rs`.
 
 **Additional passes migrated:**
-- `rewrite_quantize_nodes_ir` — bypass same-qparam Q (surgery) + emit RescaleInsert for different
-- `rewrite_dequantize_nodes_ir` — bypass DQ with RESCALE/output users (surgery)
-- `collapse_qdq_pairs_ir` — wired into rewrite loop
+- `rewrite_quantize_nodes_ir` — bypass same-qparam Q and emit RESCALE nodes directly
+- `rewrite_dequantize_nodes_ir` — bypass DQ with RESCALE/output users
+- `collapse_qdq_pairs_ir` — wired into the rewrite loop
+- TABLE precomputation — carried as Rust effect data and applied without Python callbacks
 
-**9 pure Rust `_ir` functions total.** The entire `rewrite_control_flow_quantization_boundaries`
-loop now uses Rust for all decision-making. Python only for RESCALE FX node creation.
+### Phase 4: Remove Python from hot path — DONE FOR LOWERING
 
-### Phase 4: Remove Python from hot path — PARTIAL
-
-**Migrated:** All submodule-level passes that do metadata + surgery
-now use IrGraph internally. Parent-level passes that only read/write
-metadata use NodeMeta.
-
-**Remaining Python (irreducible without torch runtime in Rust):**
-- `regularize_control_flow_submodules_structural` — calls `_cf_ctx` Python
-- `restamp_cf_placeholder_dtypes` — calls `_branch_local_control_flow_output_qparam` + `fake_val.to(dtype=...)`
-- `snapshot_cf_table_qparams` — calls `QuantArgs.from_operator` Python
-- `refresh_tosa_dim_order_fake_tensors` — calls `_get_matching_fake_tensor`
-- `refresh_tosa_transpose_fake_tensors` — creates FakeTensors via `new_empty`
-- `snapshot_pre_pass_cf_qparams` — `_ir` version exists but parent graph arg resolution for cond/while is heterogeneous; kept Python wrapper
-- `propagate_parent_qparams_to_placeholders` — uses Python `extract_effective_qparam` as fallback; inner loop already NodeMeta
-
-**Blocker for full Phase 4:** Parent graph IrGraph import doesn't handle
-cond/while heterogeneous args (submodule refs vs data arg lists).
-`cf_data_arg_ids` doesn't match `resolve_cf_parent_args` for cond.
-Need per-op-signature arg parsing in IrGraph.
-
-**Architecture at completion:**
-- 10 pure Rust `_ir` functions (no `<'py>`, no `PyResult`)
-- IrGraph with 588 lines: full topology, users, surgery, RescaleInsert
-- Submodule passes: fully Rust via IrGraph
-- Parent passes: NodeMeta extraction, Python for FakeTensor/structural ops
-- Pipeline boundary: Python only at entry (preprocess.py) and exit (serialize)
+All graph lowering, control-flow boundary contracts, constant/materialization
+effects, serializer graph assembly, and TOSA emission are Rust-owned. The
+Python code that remains is the boundary seam around ExecuTorch/PyTorch objects:
+backend patching, decomposition monkey-patches, input `ExportedProgram`
+orchestration, optional artifact dumping, and delegate metadata collection.
 
 ## What stays Python
 
-- `FakeTensor` creation (requires torch runtime)
-- `insert_rescale_node` in `_helpers.py` (creates FX nodes with correct
-  meta["val"] FakeTensors) — until Phase 3 handles node creation
-- `_decomp_hooks.py` (monkey-patching, not in hot path)
-- `preprocess.py` entry point (thin orchestration layer)
+- `preprocess.py` entry point and backend integration glue.
+- `_decomp_hooks.py` decomposition monkey-patches around ExecuTorch/PyTorch APIs.
+- `_cf_ctx.py` delegate metadata extraction after serialization.
+- Optional TOSA artifact dumping through ExecuTorch debug utilities.
 
 ## Risk
 
@@ -276,5 +255,5 @@ Need per-op-signature arg parsing in IrGraph.
 
 - Phase 1: At least one pass (e.g., FxControlFlowMetadataPass) runs with
   NodeMeta extraction, zero test regressions
-- Full: All 2589 lines of fx_control_flow_metadata.rs have zero `<'py>`
-  in pass logic (only in from_fx/write_back)
+- Full: active graph lowering and serialization do not call back into Python
+  helper graph surgery or re-ingest paths.

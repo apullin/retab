@@ -354,9 +354,8 @@ fn apply_effects_ext(
 }
 
 /// Replace a unary math node (e.g. `tan`, `sigmoid`) with a TOSA TABLE op fed by
-/// the precomputed table constant. Mirrors the Python `_apply_table_op` for the
-/// precomputed path. INT8 table -> INT8 output; INT16 -> INT32 output with a
-/// trailing rescale of 2^rescale_lshift.
+/// the precomputed table constant. INT8 table -> INT8 output; INT16 -> INT32
+/// output with a trailing rescale of 2^rescale_lshift.
 fn apply_precomputed_table(
     graph: &mut Graph,
     store: &mut TensorStore,
@@ -420,9 +419,8 @@ fn apply_precomputed_table(
     }
 
     // INT16 TABLE produces INT32; a trailing rescale by 2^rescale_lshift aligns
-    // it (staying INT32 -- the eventual INT16 quantization is done by a
-    // downstream rescale, matching the Python _apply_table_op path). Insert it
-    // after the table and rewire the table's users.
+    // it while staying INT32. The eventual INT16 quantization is done by a
+    // downstream rescale.
     if e.input.dtype == DType::Int16 {
         let scale = 2.0_f64.powi(e.rescale_lshift as i32);
         let rescale_name = format!("{}_table_rescale", e.node_name);
