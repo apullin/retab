@@ -158,17 +158,14 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 x_dtype.clone()
             };
             let gather_x = if x_is_bool {
-                let mut kwargs = std::collections::HashMap::new();
-                kwargs.insert("dtype".to_string(), IrArg::Dtype(gather_dtype.clone()));
                 let cast_meta = graph.nodes[x_id]
                     .meta
                     .cloned_without_qparams(vec![batch, k, c], &gather_dtype);
-                graph.add_anchored_call_function_with_kwargs(
+                graph.add_anchored_dtype_cast(
                     id,
                     format!("{}_x_i8", node_name),
-                    "aten._to_copy.default".to_string(),
-                    vec![IrArg::Node(x_bkc)],
-                    kwargs,
+                    x_bkc,
+                    gather_dtype.clone(),
                     cast_meta,
                 )
             } else {
@@ -228,17 +225,14 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 gathered_meta,
             );
             let gathered = if x_is_bool {
-                let mut kwargs = std::collections::HashMap::new();
-                kwargs.insert("dtype".to_string(), IrArg::Dtype(x_dtype.clone()));
                 let cast_meta = graph.nodes[x_id]
                     .meta
                     .cloned_without_qparams(vec![batch, w, c], &x_dtype);
-                graph.add_anchored_call_function_with_kwargs(
+                graph.add_anchored_dtype_cast(
                     id,
                     format!("{}_gather_bool", node_name),
-                    "aten._to_copy.default".to_string(),
-                    vec![IrArg::Node(gathered)],
-                    kwargs,
+                    gathered,
+                    x_dtype.clone(),
                     cast_meta,
                 )
             } else {

@@ -1,6 +1,6 @@
 //! Pure Rust IrPass: unfold_copy → GATHER-based sliding window.
 
-use crate::fx_ir::{dtype_kwarg, i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass};
+use crate::fx_ir::{i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_unfold_copy_target;
 use crate::runner_logging::log_line;
 
@@ -78,12 +78,11 @@ impl IrPass for IrDecomposeUnfoldPass {
                 let cast_meta = graph.nodes[x_id]
                     .meta
                     .cloned_without_qparams(input_shape.clone(), work_dtype);
-                let cast_id = graph.add_anchored_call_function_with_kwargs(
+                let cast_id = graph.add_anchored_dtype_cast(
                     id,
                     format!("{}_bool_to_int8", name),
-                    "aten._to_copy.default".to_string(),
-                    vec![IrArg::Node(x_id)],
-                    dtype_kwarg(work_dtype),
+                    x_id,
+                    work_dtype,
                     cast_meta,
                 );
                 values_in = cast_id;
@@ -300,12 +299,11 @@ impl IrPass for IrDecomposeUnfoldPass {
                         .to_vec(),
                     "torch.bool",
                 );
-                graph.replace_with_call_function_with_kwargs(
+                graph.replace_with_dtype_cast(
                     id,
                     format!("{}_int8_to_bool", name),
-                    "aten._to_copy.default".to_string(),
-                    vec![IrArg::Node(permuted)],
-                    dtype_kwarg("torch.bool"),
+                    permuted,
+                    "torch.bool",
                     cast_back_meta,
                 );
             } else {

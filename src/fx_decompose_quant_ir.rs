@@ -5,9 +5,7 @@
 //!
 //! Skips DQ→Q pairs (handled by InsertRescalePass).
 
-use crate::fx_ir::{
-    dtype_kwarg, i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta};
 use crate::runner_logging::log_line;
 
 /// Create a _to_copy.default(x) node with dtype kwarg for casting.
@@ -23,12 +21,11 @@ fn add_cast(
     if graph.node(x_id).meta.val_dtype() == Some(target_dtype) {
         return x_id;
     }
-    graph.add_anchored_call_function_with_kwargs(
+    graph.add_anchored_dtype_cast(
         anchor,
         name.to_string(),
-        "aten._to_copy.default".to_string(),
-        vec![IrArg::Node(x_id)],
-        dtype_kwarg(target_dtype),
+        x_id,
+        target_dtype,
         orig_meta.cloned_without_qparams(shape.to_vec(), target_dtype),
     )
 }

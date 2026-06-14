@@ -652,21 +652,6 @@ impl IrGraph {
         id
     }
 
-    pub fn replace_with_call_function_with_kwargs(
-        &mut self,
-        old_id: NodeId,
-        name: impl Into<String>,
-        target: impl Into<String>,
-        args: Vec<IrArg>,
-        kwargs: HashMap<String, IrArg>,
-        meta: NodeMeta,
-    ) -> NodeId {
-        let id =
-            self.add_anchored_call_function_with_kwargs(old_id, name, target, args, kwargs, meta);
-        self.replace_and_erase(old_id, id);
-        id
-    }
-
     pub fn add_anchored_call_function_with_val(
         &mut self,
         anchor: NodeId,
@@ -693,6 +678,37 @@ impl IrGraph {
     ) -> NodeId {
         let id = self.add_call_function_with_kwargs(name, target, args, kwargs, meta);
         self.anchor_to(id, anchor);
+        id
+    }
+
+    pub(crate) fn add_anchored_dtype_cast(
+        &mut self,
+        anchor: NodeId,
+        name: impl Into<String>,
+        source: NodeId,
+        dtype: impl Into<String>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        self.add_anchored_call_function_with_kwargs(
+            anchor,
+            name,
+            "aten._to_copy.default",
+            vec![IrArg::Node(source)],
+            dtype_kwarg(dtype),
+            meta,
+        )
+    }
+
+    pub(crate) fn replace_with_dtype_cast(
+        &mut self,
+        old_id: NodeId,
+        name: impl Into<String>,
+        source: NodeId,
+        dtype: impl Into<String>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.add_anchored_dtype_cast(old_id, name, source, dtype, meta);
+        self.replace_and_erase(old_id, id);
         id
     }
 

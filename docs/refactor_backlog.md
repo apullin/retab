@@ -1471,6 +1471,14 @@ Deleted: raw `dim_order()` method invocation and `tosa_special_dtype` string ext
 Added: `AttrView::call_optional(...)`, `AttrView::display(...)`, and `MetaView::display_optional(...)` in `fx_py_attr`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over addmm, conv2d, cumsum, pixel_shuffling, and sum; Rust LOC check
 Note: Full Rust tests passed `141 passed`; focused Python smoke passed `211 passed`. This is a small setup-positive Refactor 5A slice: `NodeMeta::from_fx` now names Python-boundary semantics instead of carrying PyO3 call/string mechanics inline.
+
+2026-06-14, graph dtype-cast builder slice
+Rust LOC: 36,273 -> 36,274
+Movement: +1 Rust LOC
+Deleted: pass-local `_to_copy.default` plus dtype-kwarg construction from quant decomposition and GATHER-family index/unfold passes; deleted now-dead generic `replace_with_call_function_with_kwargs`
+Added: `IrGraph::add_anchored_dtype_cast(...)` and `IrGraph::replace_with_dtype_cast(...)`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over gather, index_select, index_tensor, unfold_copy, and embedding; Rust LOC check
+Note: Full Rust tests passed `141 passed`; focused Python smoke passed `91 passed, 6 skipped, 18 expected xfails`. This is LOC-neutral but lowers rewrite dialect count: dtype casts are now one graph operation instead of each pass spelling target, args, kwargs, and anchoring directly.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

@@ -76,11 +76,11 @@ impl IrPass for IrCanonicalizeGatherPass {
 
             // Optional bool→int8 cast
             if needs_bool_cast {
-                let cast_id = graph.add_anchored_call_function(
+                let cast_id = graph.add_anchored_dtype_cast(
                     id,
                     format!("{}_bool_to_int8", node_name),
-                    "aten._to_copy.default",
-                    vec![IrArg::Node(x_id)],
+                    x_id,
+                    work_dtype,
                     orig_meta.cloned_with_val(x_shape.clone(), work_dtype),
                 );
                 values_in = cast_id;
@@ -174,12 +174,11 @@ impl IrPass for IrCanonicalizeGatherPass {
 
             // Optional int8→bool cast back
             let final_result = if needs_bool_cast {
-                graph.anchor_to(result, id);
-                graph.add_node(
-                    NodeOp::CallFunction,
+                graph.add_anchored_dtype_cast(
+                    id,
                     format!("{}_int8_to_bool", node_name),
-                    "aten._to_copy.default".to_string(),
-                    vec![IrArg::Node(result)],
+                    result,
+                    "torch.bool",
                     orig_meta,
                 )
             } else {

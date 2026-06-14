@@ -1,6 +1,6 @@
 //! Pure Rust IrPass: index_select → view + unsqueeze + expand + GATHER + view.
 
-use crate::fx_ir::{dtype_kwarg, i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass};
+use crate::fx_ir::{i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_index_select_target;
 use crate::runner_logging::log_line;
 
@@ -71,15 +71,13 @@ impl IrPass for IrDecomposeIndexSelectPass {
             };
 
             let x_for_gather = if needs_bool_cast {
-                let cast = graph.add_anchored_call_function_with_kwargs(
+                graph.add_anchored_dtype_cast(
                     id,
                     format!("{}_bool_to_i8", name),
-                    "aten._to_copy.default".to_string(),
-                    vec![IrArg::Node(x_id)],
-                    dtype_kwarg("torch.int8"),
+                    x_id,
+                    "torch.int8",
                     orig_meta.cloned_with_val(x_shape.clone(), "torch.int8"),
-                );
-                cast
+                )
             } else {
                 x_id
             };
@@ -134,12 +132,11 @@ impl IrPass for IrDecomposeIndexSelectPass {
                     vec![IrArg::Node(gathered), i64_list(&out_shape)],
                     orig_meta.cloned_with_val(out_shape.clone(), gather_dtype),
                 );
-                graph.replace_with_call_function_with_kwargs(
+                graph.replace_with_dtype_cast(
                     id,
                     format!("{}_i8_to_bool", name),
-                    "aten._to_copy.default".to_string(),
-                    vec![IrArg::Node(result)],
-                    dtype_kwarg("torch.bool"),
+                    result,
+                    "torch.bool",
                     orig_meta.cloned_with_val(out_shape, "torch.bool"),
                 );
             } else {
