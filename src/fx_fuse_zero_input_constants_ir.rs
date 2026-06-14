@@ -386,18 +386,44 @@ mod tests {
         )
     }
 
+    fn add_f32_call(graph: &mut IrGraph, name: &str, target: &str, args: Vec<IrArg>) -> usize {
+        let id = add_call(graph, name, target, args);
+        graph.set_kwarg(id, "dtype", IrArg::Dtype("torch.float32".to_string()));
+        id
+    }
+
+    fn placeholder(graph: &mut IrGraph, name: &str) -> usize {
+        graph.add_node(
+            NodeOp::Placeholder,
+            name.to_string(),
+            name.to_string(),
+            Vec::new(),
+            NodeMeta::default(),
+        )
+    }
+
+    fn placeholder_with_qparam(graph: &mut IrGraph, name: &str, qparam: QParam) -> usize {
+        let id = placeholder(graph, name);
+        graph.node_mut(id).meta.set_single_output_qparam(qparam);
+        id
+    }
+
+    fn int8_qparam(scale: f64) -> QParam {
+        QParam::per_tensor(scale, 0, -128, 127, "torch.int8".to_string())
+    }
+
+    fn run_pass(graph: &mut IrGraph) -> EffectfulIrPassResult {
+        IrFuseZeroInputConstantsEffectPass.run(graph)
+    }
+
     #[test]
     fn plans_zero_input_factory_constants() {
         let mut graph = IrGraph::empty();
-        let full = add_call(
+        add_f32_call(
             &mut graph,
             "full",
             "aten.full.default",
             vec![IrArg::List(vec![IrArg::Int(2)]), IrArg::Float(3.0)],
-        );
-        graph.node_mut(full).kwargs.insert(
-            "dtype".to_string(),
-            IrArg::Dtype("torch.float32".to_string()),
         );
         add_call(
             &mut graph,
@@ -413,8 +439,7 @@ mod tests {
         );
         add_call(&mut graph, "eye", "aten.eye.default", vec![IrArg::Int(4)]);
 
-        let pass = IrFuseZeroInputConstantsEffectPass;
-        let result = pass.run(&mut graph);
+        let result = run_pass(&mut graph);
 
         assert!(result.modified);
         assert_eq!(result.effects.items.len(), 1);
@@ -437,23 +462,7 @@ mod tests {
             "aten.full.default",
             vec![IrArg::List(vec![IrArg::Int(2)]), IrArg::Float(3.0)],
         );
-        let other = graph.add_node(
-            NodeOp::Placeholder,
-            "other".to_string(),
-            "other".to_string(),
-            Vec::new(),
-            NodeMeta::default(),
-        );
-        graph
-            .node_mut(other)
-            .meta
-            .set_single_output_qparam(QParam::per_tensor(
-                0.25,
-                0,
-                -128,
-                127,
-                "torch.int8".to_string(),
-            ));
+        let other = placeholder_with_qparam(&mut graph, "other", int8_qparam(0.25));
         add_call(
             &mut graph,
             "add",
@@ -461,8 +470,7 @@ mod tests {
             vec![IrArg::Node(full), IrArg::Node(other)],
         );
 
-        let pass = IrFuseZeroInputConstantsEffectPass;
-        let result = pass.run(&mut graph);
+        let result = run_pass(&mut graph);
 
         assert!(matches!(
             &result.effects.items[0],
@@ -477,7 +485,7 @@ mod tests {
     #[test]
     fn keeps_quant_decompose_helper_full_in_explicit_float_dtype() {
         let mut graph = IrGraph::empty();
-        let scale = add_call(
+        let scale = add_f32_call(
             &mut graph,
             "quantize_per_tensor_3_sc",
             "aten.full.default",
@@ -486,27 +494,17 @@ mod tests {
                 IrArg::Float(4.0),
             ],
         );
-        graph.node_mut(scale).kwargs.insert(
-            "dtype".to_string(),
-            IrArg::Dtype("torch.float32".to_string()),
-        );
-        let other = graph.add_node(
-            NodeOp::Placeholder,
-            "other".to_string(),
-            "other".to_string(),
-            Vec::new(),
-            NodeMeta::default(),
-        );
-        graph
-            .node_mut(other)
-            .meta
-            .set_single_output_qparam(QParam::per_tensor(
+        let other = placeholder_with_qparam(
+            &mut graph,
+            "other",
+            QParam::per_tensor(
                 0.25,
                 0,
                 i32::MIN as i64,
                 i32::MAX as i64,
                 "torch.int32".to_string(),
-            ));
+            ),
+        );
         add_call(
             &mut graph,
             "quantize_per_tensor_3_mul",
@@ -514,8 +512,7 @@ mod tests {
             vec![IrArg::Node(other), IrArg::Node(scale)],
         );
 
-        let pass = IrFuseZeroInputConstantsEffectPass;
-        let result = pass.run(&mut graph);
+        let result = run_pass(&mut graph);
 
         assert!(matches!(
             &result.effects.items[0],
@@ -530,19 +527,14 @@ mod tests {
     #[test]
     fn materializes_arange_start_step_from_rust() {
         let mut graph = IrGraph::empty();
-        let arange = add_call(
+        add_f32_call(
             &mut graph,
             "arange",
             "aten.arange.start_step",
             vec![IrArg::Float(0.0), IrArg::Float(1.0), IrArg::Float(0.25)],
         );
-        graph.node_mut(arange).kwargs.insert(
-            "dtype".to_string(),
-            IrArg::Dtype("torch.float32".to_string()),
-        );
 
-        let pass = IrFuseZeroInputConstantsEffectPass;
-        let result = pass.run(&mut graph);
+        let result = run_pass(&mut graph);
 
         assert!(matches!(
             &result.effects.items[0],
@@ -573,16 +565,9 @@ mod tests {
         graph
             .node_mut(arange)
             .meta
-            .set_single_output_qparam(QParam::per_tensor(
-                0.5,
-                0,
-                -128,
-                127,
-                "torch.int8".to_string(),
-            ));
+            .set_single_output_qparam(int8_qparam(0.5));
 
-        let pass = IrFuseZeroInputConstantsEffectPass;
-        let result = pass.run(&mut graph);
+        let result = run_pass(&mut graph);
 
         assert!(matches!(
             &result.effects.items[0],
@@ -597,19 +582,14 @@ mod tests {
     #[test]
     fn materializes_linspace_from_rust() {
         let mut graph = IrGraph::empty();
-        let linspace = add_call(
+        add_f32_call(
             &mut graph,
             "linspace",
             "aten.linspace.default",
             vec![IrArg::Float(0.0), IrArg::Float(1.0), IrArg::Int(5)],
         );
-        graph.node_mut(linspace).kwargs.insert(
-            "dtype".to_string(),
-            IrArg::Dtype("torch.float32".to_string()),
-        );
 
-        let pass = IrFuseZeroInputConstantsEffectPass;
-        let result = pass.run(&mut graph);
+        let result = run_pass(&mut graph);
 
         assert!(matches!(
             &result.effects.items[0],
@@ -632,14 +612,9 @@ mod tests {
     #[test]
     fn materializes_identity_eye_from_rust() {
         let mut graph = IrGraph::empty();
-        let eye = add_call(&mut graph, "eye", "aten.eye.default", vec![IrArg::Int(3)]);
-        graph.node_mut(eye).kwargs.insert(
-            "dtype".to_string(),
-            IrArg::Dtype("torch.float32".to_string()),
-        );
+        add_f32_call(&mut graph, "eye", "aten.eye.default", vec![IrArg::Int(3)]);
 
-        let pass = IrFuseZeroInputConstantsEffectPass;
-        let result = pass.run(&mut graph);
+        let result = run_pass(&mut graph);
 
         let effect = match &result.effects.items[0] {
             LoweringEffect::MaterializeTensorNode(effect) => effect,
@@ -667,16 +642,9 @@ mod tests {
         graph
             .node_mut(linspace)
             .meta
-            .set_single_output_qparam(QParam::per_tensor(
-                0.25,
-                0,
-                -128,
-                127,
-                "torch.int8".to_string(),
-            ));
+            .set_single_output_qparam(int8_qparam(0.25));
 
-        let pass = IrFuseZeroInputConstantsEffectPass;
-        let result = pass.run(&mut graph);
+        let result = run_pass(&mut graph);
 
         assert!(matches!(
             &result.effects.items[0],
@@ -691,13 +659,7 @@ mod tests {
     #[test]
     fn skips_nodes_with_tensor_inputs() {
         let mut graph = IrGraph::empty();
-        let placeholder = graph.add_node(
-            NodeOp::Placeholder,
-            "x".to_string(),
-            "x".to_string(),
-            Vec::new(),
-            NodeMeta::default(),
-        );
+        let placeholder = placeholder(&mut graph, "x");
         add_call(
             &mut graph,
             "not_zero_input",
@@ -705,8 +667,7 @@ mod tests {
             vec![IrArg::Node(placeholder), IrArg::Int(3)],
         );
 
-        let pass = IrFuseZeroInputConstantsEffectPass;
-        let result = pass.run(&mut graph);
+        let result = run_pass(&mut graph);
 
         assert!(!result.modified);
         assert!(result.effects.items.is_empty());

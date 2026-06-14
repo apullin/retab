@@ -1607,6 +1607,14 @@ Deleted: repeated int8 conv-rescale test setup for input placeholders, weight pl
 Added: local conv-rescale test helpers for tensor metadata, placeholders, calls, outputs, and the common int8 conv fixture
 Validation: `cargo fmt`; `cargo test --lib fx_insert_conv_rescale_ir::tests`; `cargo check --lib`
 Note: Focused conv-rescale Rust tests passed `6 passed`. The int16 bias-convolution test remains explicit because its fixture carries distinct bias and qparam semantics.
+
+2026-06-14, LoC-first factory/table fixture cleanup slice
+Rust LOC: 36,014 -> 35,938
+Movement: -76 Rust LOC
+Deleted: repeated zero-input factory dtype/qparam/pass setup and table-op quantized/GELU/int16 node fixtures
+Added: local test helpers for f32 zero-input calls, qparam placeholders, table nodes, GELU approximation kwargs, and int16 table domains
+Validation: `cargo fmt --check`; `cargo test --lib fx_fuse_zero_input_constants_ir::tests`; `cargo test --lib fx_insert_table_ops_ir::tests`; `cargo check --lib`
+Note: Focused zero-input and table-op Rust tests passed `9 passed` each. This is still test-local grammar, not a shared framework; production lowering code is unchanged.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

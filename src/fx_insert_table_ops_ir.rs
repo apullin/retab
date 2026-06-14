@@ -398,14 +398,14 @@ mod tests {
         meta
     }
 
-    fn table_node(graph: &mut IrGraph, name: &str, target: &str, args: Vec<IrArg>) {
+    fn table_node(graph: &mut IrGraph, name: &str, target: &str, args: Vec<IrArg>) -> usize {
         graph.add_node(
             NodeOp::CallFunction,
             name.to_string(),
             target.to_string(),
             args,
             table_meta(qparam()),
-        );
+        )
     }
 
     fn table_node_with_qparam(
@@ -414,13 +414,32 @@ mod tests {
         target: &str,
         args: Vec<IrArg>,
         qparam: QParam,
-    ) {
+    ) -> usize {
         graph.add_node(
             NodeOp::CallFunction,
             name.to_string(),
             target.to_string(),
             args,
             table_meta(qparam),
+        )
+    }
+
+    fn table_node_with_approximate(graph: &mut IrGraph, name: &str, approximate: &str) {
+        let id = table_node(graph, name, "aten.gelu.default", Vec::new());
+        graph.set_kwarg(id, "approximate", IrArg::Str(approximate.to_string()));
+    }
+
+    fn int16_qparam(scale: f64, qmin: i64, qmax: i64) -> QParam {
+        QParam::per_tensor(scale, 0, qmin, qmax, "torch.int16".to_string())
+    }
+
+    fn int16_table_node(graph: &mut IrGraph, name: &str, scale: f64, qmin: i64, qmax: i64) {
+        table_node_with_qparam(
+            graph,
+            name,
+            "aten.sigmoid.default",
+            Vec::new(),
+            int16_qparam(scale, qmin, qmax),
         );
     }
 
@@ -440,22 +459,8 @@ mod tests {
             "aten.elu.default",
             vec![IrArg::Int(0), IrArg::Float(0.25)],
         );
-        let gelu_none = graph.add_node(
-            NodeOp::CallFunction,
-            "gelu_none".to_string(),
-            "aten.gelu.default".to_string(),
-            Vec::new(),
-            table_meta(qparam()),
-        );
-        graph.set_kwarg(gelu_none, "approximate", IrArg::Str("none".to_string()));
-        let gelu_tanh = graph.add_node(
-            NodeOp::CallFunction,
-            "gelu_tanh".to_string(),
-            "aten.gelu.default".to_string(),
-            Vec::new(),
-            table_meta(qparam()),
-        );
-        graph.set_kwarg(gelu_tanh, "approximate", IrArg::Str("tanh".to_string()));
+        table_node_with_approximate(&mut graph, "gelu_none", "none");
+        table_node_with_approximate(&mut graph, "gelu_tanh", "tanh");
 
         let result = IrInsertTableOpsEffectPass.run(&mut graph);
 
@@ -533,13 +538,7 @@ mod tests {
         // log1p is precomputable in Rust (NaN samples quantize to 0), so it takes
         // the precomputed-table lane.
         let mut graph = IrGraph::empty();
-        graph.add_node(
-            NodeOp::CallFunction,
-            "log1p_nan".to_string(),
-            "aten.log1p.default".to_string(),
-            Vec::new(),
-            table_meta(qparam()),
-        );
+        table_node(&mut graph, "log1p_nan", "aten.log1p.default", Vec::new());
 
         let result = IrInsertTableOpsEffectPass.run(&mut graph);
 
@@ -587,19 +586,7 @@ mod tests {
     #[test]
     fn plans_precomputed_int16_table_lane() {
         let mut graph = IrGraph::empty();
-        graph.add_node(
-            NodeOp::CallFunction,
-            "sigmoid16".to_string(),
-            "aten.sigmoid.default".to_string(),
-            Vec::new(),
-            table_meta(QParam::per_tensor(
-                1.0 / 32768.0,
-                0,
-                -32768,
-                32767,
-                "torch.int16".to_string(),
-            )),
-        );
+        int16_table_node(&mut graph, "sigmoid16", 1.0 / 32768.0, -32768, 32767);
 
         let result = IrInsertTableOpsEffectPass.run(&mut graph);
         assert!(result.modified);
@@ -617,19 +604,7 @@ mod tests {
     #[test]
     fn falls_back_for_narrow_int16_range() {
         let mut graph = IrGraph::empty();
-        graph.add_node(
-            NodeOp::CallFunction,
-            "sigmoid16_narrow".to_string(),
-            "aten.sigmoid.default".to_string(),
-            Vec::new(),
-            table_meta(QParam::per_tensor(
-                0.25,
-                0,
-                -1024,
-                1023,
-                "torch.int16".to_string(),
-            )),
-        );
+        int16_table_node(&mut graph, "sigmoid16_narrow", 0.25, -1024, 1023);
 
         let result = IrInsertTableOpsEffectPass.run(&mut graph);
         assert!(!result.modified);
@@ -639,19 +614,7 @@ mod tests {
     #[test]
     fn falls_back_when_int16_table_requires_negative_shift() {
         let mut graph = IrGraph::empty();
-        graph.add_node(
-            NodeOp::CallFunction,
-            "sigmoid16_neg_shift".to_string(),
-            "aten.sigmoid.default".to_string(),
-            Vec::new(),
-            table_meta(QParam::per_tensor(
-                0.25,
-                0,
-                -32768,
-                32767,
-                "torch.int16".to_string(),
-            )),
-        );
+        int16_table_node(&mut graph, "sigmoid16_neg_shift", 0.25, -32768, 32767);
 
         let result = IrInsertTableOpsEffectPass.run(&mut graph);
         assert!(!result.modified);
