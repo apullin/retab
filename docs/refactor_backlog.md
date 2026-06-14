@@ -1949,6 +1949,19 @@ Validation: `cargo fmt --check`; `cargo check --lib`; focused
 `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over addmm, bmm,
 conv2d, embedding, full, linear, matmul, mm, ones, view, and zeros
 
+2026-06-14, FX node import orchestration slice
+
+Deleted: line-by-line FX node field parsing from `IrGraph::from_fx_with_tensors`
+
+Added: small import helpers for FX node collection, name-index construction,
+node import, positional-arg resolution, and kwarg resolution; the graph
+constructor now reads as orchestration over those steps plus tensor import and
+user-edge construction
+
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`;
+focused Python smoke via `/tmp/et.sh` over addmm, bmm, conv2d, embedding,
+full, linear, matmul, mm, ones, view, and zeros
+
 Problem:
 
 Rust-side Python ingestion still spells the same semantic action many times:

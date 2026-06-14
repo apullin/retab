@@ -277,6 +277,76 @@ fn tensor_from_py_value(value: &Bound<'_, PyAny>, source: TensorSource) -> Optio
     })
 }
 
+fn collect_fx_nodes<'py>(graph: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let nodes = attrs(graph)
+        .object("nodes")?
+        .iter()?
+        .filter_map(|node| node.ok())
+        .collect();
+    Ok(nodes)
+}
+
+fn build_name_to_id(py_nodes: &[Bound<'_, PyAny>]) -> HashMap<String, NodeId> {
+    py_nodes
+        .iter()
+        .enumerate()
+        .map(|(id, node)| (attrs(node).or_value("name", String::new()), id))
+        .collect()
+}
+
+fn import_fx_node<'py>(
+    id: NodeId,
+    py_node: &Bound<'py, PyAny>,
+    name_to_id: &HashMap<String, NodeId>,
+    tensor_import: &FxTensorImportContext<'_, 'py>,
+) -> PyResult<IrNode> {
+    let py_node_attrs = attrs(py_node);
+    let name = py_node_attrs.or_value("name", String::new());
+    let target = py_node_attrs.required_str("target").unwrap_or_default();
+    let op = NodeOp::of(py_node);
+    let meta = NodeMeta::from_fx(py_node)?;
+    let tensor = tensor_import.tensor_for_node(py_node, &name, &target);
+    let args = resolve_fx_args(py_node, name_to_id);
+    let kwargs = resolve_fx_kwargs(py_node, name_to_id);
+
+    Ok(IrNode {
+        id,
+        op,
+        name,
+        target,
+        args,
+        kwargs,
+        meta,
+        tensor,
+        alive: true,
+    })
+}
+
+fn resolve_fx_args(py_node: &Bound<'_, PyAny>, name_to_id: &HashMap<String, NodeId>) -> Vec<IrArg> {
+    crate::fx_graph::node_args(py_node)
+        .unwrap_or_default()
+        .iter()
+        .map(|arg| resolve_arg(arg, name_to_id))
+        .collect()
+}
+
+fn resolve_fx_kwargs(
+    py_node: &Bound<'_, PyAny>,
+    name_to_id: &HashMap<String, NodeId>,
+) -> HashMap<String, IrArg> {
+    let Ok(py_kwargs) = crate::fx_graph::node_kwargs(py_node) else {
+        return HashMap::new();
+    };
+    if py_kwargs.is_none() {
+        return HashMap::new();
+    }
+    items(&py_kwargs)
+        .typed_key_pairs::<String>()
+        .into_iter()
+        .map(|(key, val)| (key, resolve_arg(&val, name_to_id)))
+        .collect()
+}
+
 fn collect_users_from_arg(arg: &IrArg, user_id: NodeId, users: &mut [Vec<NodeId>]) {
     match arg {
         IrArg::Node(id) => {
@@ -390,11 +460,7 @@ impl IrGraph {
         } else {
             gm.clone()
         };
-        let py_nodes: Vec<Bound<'_, PyAny>> = attrs(&graph)
-            .object("nodes")?
-            .iter()?
-            .filter_map(|n| n.ok())
-            .collect();
+        let py_nodes = collect_fx_nodes(&graph)?;
 
         let (placeholder_bindings, state_dict, constants) = if let Some(ep) = exported_program {
             (
@@ -413,47 +479,12 @@ impl IrGraph {
             placeholder_bindings: &placeholder_bindings,
         };
 
-        let mut name_to_id = HashMap::new();
-        for (i, node) in py_nodes.iter().enumerate() {
-            let name = attrs(node).or_value("name", String::new());
-            name_to_id.insert(name, i);
-        }
-
-        let mut nodes = Vec::with_capacity(py_nodes.len());
-        for (i, py_node) in py_nodes.iter().enumerate() {
-            let py_node_attrs = attrs(py_node);
-            let name = py_node_attrs.or_value("name", String::new());
-            let target = py_node_attrs.required_str("target").unwrap_or_default();
-            let op = NodeOp::of(py_node);
-            let meta = NodeMeta::from_fx(py_node)?;
-            let tensor = tensor_import.tensor_for_node(py_node, &name, &target);
-
-            let py_args = crate::fx_graph::node_args(py_node).unwrap_or_default();
-            let args = py_args
-                .iter()
-                .map(|a| resolve_arg(a, &name_to_id))
-                .collect();
-
-            let mut kwargs = HashMap::new();
-            if let Ok(py_kwargs) = crate::fx_graph::node_kwargs(py_node) {
-                if !py_kwargs.is_none() {
-                    for (key, val) in items(&py_kwargs).typed_key_pairs::<String>() {
-                        kwargs.insert(key, resolve_arg(&val, &name_to_id));
-                    }
-                }
-            }
-            nodes.push(IrNode {
-                id: i,
-                op,
-                name,
-                target,
-                args,
-                kwargs,
-                meta,
-                tensor,
-                alive: true,
-            });
-        }
+        let name_to_id = build_name_to_id(&py_nodes);
+        let nodes = py_nodes
+            .iter()
+            .enumerate()
+            .map(|(id, py_node)| import_fx_node(id, py_node, &name_to_id, &tensor_import))
+            .collect::<PyResult<Vec<_>>>()?;
 
         let users = build_user_edges(&nodes);
 
