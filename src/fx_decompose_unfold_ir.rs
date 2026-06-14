@@ -98,11 +98,11 @@ impl IrPass for IrDecomposeUnfoldPass {
                     .meta
                     .cloned_with_val(vec![p, k, q], work_dtype)
             };
-            let values = graph.add_anchored_call_function(
+            let values = graph.add_anchored_view_copy(
                 id,
                 format!("{}_flat", name),
-                "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(values_in), i64_list(&[p, k, q])],
+                values_in,
+                &[p, k, q],
                 values_meta,
             );
 
@@ -176,13 +176,8 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
 
             let idx1d_meta = orig_meta.cloned_without_qparams(vec![uc], "torch.int32");
-            let idx1d = graph.add_anchored_call_function(
-                id,
-                format!("{}_i1d", name),
-                "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(idx2d), i64_list(&[uc])],
-                idx1d_meta,
-            );
+            let idx1d =
+                graph.add_anchored_view_copy(id, format!("{}_i1d", name), idx2d, &[uc], idx1d_meta);
 
             let idx_unsq_meta = orig_meta.cloned_without_qparams(vec![1, uc], "torch.int32");
             let idx_unsq = graph.add_anchored_call_function(
@@ -230,11 +225,11 @@ impl IrPass for IrDecomposeUnfoldPass {
                     .meta
                     .cloned_with_val(vec![p, u, size, q], work_dtype)
             };
-            let r4d = graph.add_anchored_call_function(
+            let r4d = graph.add_anchored_view_copy(
                 id,
                 format!("{}_r4", name),
-                "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(gathered), i64_list(&[p, u, size, q])],
+                gathered,
+                &[p, u, size, q],
                 r4d_meta,
             );
 
@@ -252,11 +247,11 @@ impl IrPass for IrDecomposeUnfoldPass {
                     .meta
                     .cloned_with_val(full_shape.clone(), work_dtype)
             };
-            let reshaped = graph.add_anchored_call_function(
+            let reshaped = graph.add_anchored_view_copy(
                 id,
                 format!("{}_rs", name),
-                "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(r4d), i64_list(&full_shape)],
+                r4d,
+                &full_shape,
                 reshaped_meta,
             );
 

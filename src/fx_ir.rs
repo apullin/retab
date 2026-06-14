@@ -712,6 +712,36 @@ impl IrGraph {
         id
     }
 
+    pub(crate) fn add_anchored_view_copy(
+        &mut self,
+        anchor: NodeId,
+        name: impl Into<String>,
+        source: NodeId,
+        shape: &[i64],
+        meta: NodeMeta,
+    ) -> NodeId {
+        self.add_anchored_call_function(
+            anchor,
+            name,
+            "aten.view_copy.default",
+            vec![IrArg::Node(source), i64_list_arg(shape)],
+            meta,
+        )
+    }
+
+    pub(crate) fn replace_with_view_copy(
+        &mut self,
+        old_id: NodeId,
+        name: impl Into<String>,
+        source: NodeId,
+        shape: &[i64],
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.add_anchored_view_copy(old_id, name, source, shape, meta);
+        self.replace_and_erase(old_id, id);
+        id
+    }
+
     pub(crate) fn add_rescale(&mut self, spec: RescaleRewrite) -> NodeId {
         let RescaleRewrite {
             name,

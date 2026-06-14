@@ -74,11 +74,11 @@ impl IrPass for IrDecomposeLinearPass {
             let input_4d_meta = graph.nodes[input_id]
                 .meta
                 .cloned_with_empty_qparam_maps(input_4d_shape, input_dtype);
-            let input_reshaped = graph.add_anchored_call_function(
+            let input_reshaped = graph.add_anchored_view_copy(
                 id,
                 format!("{}_input_view", node_name),
-                "aten.view_copy.default",
-                vec![IrArg::Node(input_id), i64_list(&input_4d_shape)],
+                input_id,
+                &input_4d_shape,
                 input_4d_meta,
             );
 
@@ -88,11 +88,11 @@ impl IrPass for IrDecomposeLinearPass {
             let weights_4d_meta = graph.nodes[weights_id]
                 .meta
                 .cloned_with_empty_qparam_maps(weights_4d_shape, weight_dtype);
-            let weights_reshaped = graph.add_anchored_call_function(
+            let weights_reshaped = graph.add_anchored_view_copy(
                 id,
                 format!("{}_weight_view", node_name),
-                "aten.view_copy.default",
-                vec![IrArg::Node(weights_id), i64_list(&weights_4d_shape)],
+                weights_id,
+                &weights_4d_shape,
                 weights_4d_meta,
             );
 
@@ -129,11 +129,11 @@ impl IrPass for IrDecomposeLinearPass {
             let out_meta = graph.nodes[id]
                 .meta
                 .cloned_with_empty_qparam_maps(output_shape.clone(), output_dtype);
-            graph.replace_with_call_function(
+            graph.replace_with_view_copy(
                 id,
                 format!("{}_output_view", node_name),
-                "aten.view_copy.default",
-                vec![IrArg::Node(conv), i64_list(&output_shape)],
+                conv,
+                &output_shape,
                 out_meta,
             );
             modified = true;

@@ -141,11 +141,11 @@ impl IrPass for IrDecomposeIndexTensorPass {
             let x_bkc_meta = graph.nodes[x_id]
                 .meta
                 .cloned_with_val(vec![batch, k, c], &x_dtype);
-            let x_bkc = graph.add_anchored_call_function(
+            let x_bkc = graph.add_anchored_view_copy(
                 id,
                 format!("{}_x_flat", node_name),
-                "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(values_in), i64_list(&[batch, k, c])],
+                values_in,
+                &[batch, k, c],
                 x_bkc_meta,
             );
 
@@ -244,11 +244,11 @@ impl IrPass for IrDecomposeIndexTensorPass {
             let result_meta = graph.nodes[x_id]
                 .meta
                 .cloned_with_val(out_shape.clone(), &x_dtype);
-            graph.replace_with_call_function(
+            graph.replace_with_view_copy(
                 id,
                 format!("{}_out", node_name),
-                "aten.view_copy.default",
-                vec![IrArg::Node(gathered), i64_list(&out_shape)],
+                gathered,
+                &out_shape,
                 result_meta,
             );
             modified = true;

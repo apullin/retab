@@ -88,11 +88,11 @@ impl IrPass for IrCanonicalizeGatherPass {
 
             let result = if x_shape.len() == 2 {
                 // 2D path: view to 3D → GATHER → view back to 2D
-                let v3d = graph.add_anchored_call_function(
+                let v3d = graph.add_anchored_view_copy(
                     id,
                     format!("{}_values_3d", node_name),
-                    "aten.view_copy.default",
-                    vec![IrArg::Node(values_in), i64_list(&[n, k, 1])],
+                    values_in,
+                    &[n, k, 1],
                     orig_meta.cloned_with_val(vec![n, k, 1], work_dtype),
                 );
 
@@ -104,11 +104,11 @@ impl IrPass for IrCanonicalizeGatherPass {
                     orig_meta.cloned_with_val(vec![n, w, 1], work_dtype),
                 );
 
-                graph.add_node(
-                    NodeOp::CallFunction,
+                graph.add_anchored_view_copy(
+                    id,
                     format!("{}_out_2d", node_name),
-                    "aten.view_copy.default".to_string(),
-                    vec![IrArg::Node(gathered), i64_list(&[n, w])],
+                    gathered,
+                    &[n, w],
                     orig_meta.cloned_with_val(vec![n, w], work_dtype),
                 )
             } else {
@@ -123,11 +123,11 @@ impl IrPass for IrCanonicalizeGatherPass {
                     orig_meta.cloned_with_val(vec![n, c, k], work_dtype),
                 );
 
-                let vresh = graph.add_anchored_call_function(
+                let vresh = graph.add_anchored_view_copy(
                     id,
                     format!("{}_values_flat", node_name),
-                    "aten.view_copy.default",
-                    vec![IrArg::Node(vperm), i64_list(&[n * c, k, 1])],
+                    vperm,
+                    &[n * c, k, 1],
                     orig_meta.cloned_with_val(vec![n * c, k, 1], work_dtype),
                 );
 
@@ -139,11 +139,11 @@ impl IrPass for IrCanonicalizeGatherPass {
                     orig_meta.cloned_with_val(vec![n, c, w], "torch.int64"),
                 );
 
-                let iresh = graph.add_anchored_call_function(
+                let iresh = graph.add_anchored_view_copy(
                     id,
                     format!("{}_idx_flat", node_name),
-                    "aten.view_copy.default",
-                    vec![IrArg::Node(iperm), i64_list(&[n * c, w])],
+                    iperm,
+                    &[n * c, w],
                     orig_meta.cloned_with_val(vec![n * c, w], "torch.int64"),
                 );
 
@@ -155,11 +155,11 @@ impl IrPass for IrCanonicalizeGatherPass {
                     orig_meta.cloned_with_val(vec![n * c, w, 1], work_dtype),
                 );
 
-                let gresh = graph.add_anchored_call_function(
+                let gresh = graph.add_anchored_view_copy(
                     id,
                     format!("{}_gather_3d", node_name),
-                    "aten.view_copy.default",
-                    vec![IrArg::Node(gathered), i64_list(&[n, c, w])],
+                    gathered,
+                    &[n, c, w],
                     orig_meta.cloned_with_val(vec![n, c, w], work_dtype),
                 );
 

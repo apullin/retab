@@ -83,11 +83,11 @@ impl IrPass for IrDecomposeIndexSelectPass {
             };
 
             // Flatten x to (N, K, C)
-            let values = graph.add_anchored_call_function(
+            let values = graph.add_anchored_view_copy(
                 id,
                 format!("{}_values", name),
-                "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(x_for_gather), i64_list(&[n, k, c])],
+                x_for_gather,
+                &[n, k, c],
                 orig_meta.cloned_with_val(vec![n, k, c], gather_dtype),
             );
 
@@ -125,11 +125,11 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 .chain(after.iter().copied())
                 .collect();
             if needs_bool_cast {
-                let result = graph.add_anchored_call_function(
+                let result = graph.add_anchored_view_copy(
                     id,
                     format!("{}_out", name),
-                    "aten.view_copy.default".to_string(),
-                    vec![IrArg::Node(gathered), i64_list(&out_shape)],
+                    gathered,
+                    &out_shape,
                     orig_meta.cloned_with_val(out_shape.clone(), gather_dtype),
                 );
                 graph.replace_with_dtype_cast(
@@ -140,12 +140,12 @@ impl IrPass for IrDecomposeIndexSelectPass {
                     orig_meta.cloned_with_val(out_shape, "torch.bool"),
                 );
             } else {
-                graph.replace_with_call_function(
+                graph.replace_with_view_copy(
                     id,
                     format!("{}_out", name),
-                    "aten.view_copy.default",
-                    vec![IrArg::Node(gathered), i64_list(&out_shape)],
-                    orig_meta.cloned_with_val(out_shape, gather_dtype),
+                    gathered,
+                    &out_shape,
+                    orig_meta.cloned_with_val(out_shape.clone(), gather_dtype),
                 );
             }
             modified = true;

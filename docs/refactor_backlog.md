@@ -1479,6 +1479,14 @@ Deleted: pass-local `_to_copy.default` plus dtype-kwarg construction from quant 
 Added: `IrGraph::add_anchored_dtype_cast(...)` and `IrGraph::replace_with_dtype_cast(...)`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over gather, index_select, index_tensor, unfold_copy, and embedding; Rust LOC check
 Note: Full Rust tests passed `141 passed`; focused Python smoke passed `91 passed, 6 skipped, 18 expected xfails`. This is LOC-neutral but lowers rewrite dialect count: dtype casts are now one graph operation instead of each pass spelling target, args, kwargs, and anchoring directly.
+
+2026-06-14, graph view-copy builder slice 1
+Rust LOC: 36,274 -> 36,299
+Movement: +25 Rust LOC
+Deleted: raw `aten.view_copy.default` target/argument construction from gather, index_select, index_tensor, unfold_copy, and linear decomposition reshape nodes
+Added: `IrGraph::add_anchored_view_copy(...)` and `IrGraph::replace_with_view_copy(...)`
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over gather, index_select, index_tensor, unfold_copy, embedding, and linear; Rust LOC check
+Note: Full Rust tests passed `141 passed`; focused Python smoke passed `163 passed, 6 skipped, 18 expected xfails`. This is setup-positive because the builder is new, but it establishes one rewrite spelling for view-copy shape changes and leaves a visible follow-through target: migrate the remaining raw `view_copy` call sites to pay down the helper cost.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
