@@ -72,12 +72,15 @@ impl IrPass for IrDecomposeUnfoldPass {
             } else {
                 x_dtype.as_str()
             };
+            let index_meta = orig_meta.tensor_stamp("torch.int32");
+            let bool_meta = orig_meta.tensor_stamp("torch.bool");
             let mut values_in = x_id;
 
             if needs_bool_cast {
-                let cast_meta = graph.nodes[x_id]
-                    .meta
-                    .cloned_without_qparams(input_shape.clone(), work_dtype);
+                let x_meta = graph.nodes[x_id].meta.clone();
+                let cast_meta = x_meta
+                    .tensor_stamp(work_dtype)
+                    .drop_qparams(input_shape.clone());
                 let cast_id = graph.add_anchored_dtype_cast(
                     id,
                     format!("{}_bool_to_int8", name),
@@ -88,15 +91,14 @@ impl IrPass for IrDecomposeUnfoldPass {
                 values_in = cast_id;
             }
 
+            let values_base_meta = graph.nodes[values_in].meta.clone();
+            let work_meta = values_base_meta.tensor_stamp(work_dtype);
+
             // Flatten x to (P, K, Q)
             let values_meta = if needs_bool_cast {
-                graph.nodes[values_in]
-                    .meta
-                    .cloned_without_qparams(vec![p, k, q], work_dtype)
+                work_meta.drop_qparams(vec![p, k, q])
             } else {
-                graph.nodes[values_in]
-                    .meta
-                    .cloned_with_val(vec![p, k, q], work_dtype)
+                work_meta.preserve_qparams(vec![p, k, q])
             };
             let values = graph.add_anchored_view_copy(
                 id,
@@ -107,7 +109,7 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
 
             // Build sliding-window index: arange(0,U)*step + arange(0,size) → (U*size,)
-            let idx_u_meta = orig_meta.cloned_without_qparams(vec![u], "torch.int32");
+            let idx_u_meta = index_meta.drop_qparams(vec![u]);
             let idx_u = graph.add_anchored_arange(
                 id,
                 format!("{}_au", name),
@@ -118,7 +120,7 @@ impl IrPass for IrDecomposeUnfoldPass {
                 idx_u_meta,
             );
 
-            let step_meta = orig_meta.cloned_without_qparams(vec![1], "torch.int32");
+            let step_meta = index_meta.drop_qparams(vec![1]);
             let step_t = graph.add_anchored_full_int(
                 id,
                 format!("{}_step", name),
@@ -128,7 +130,7 @@ impl IrPass for IrDecomposeUnfoldPass {
                 step_meta,
             );
 
-            let idx_scaled_meta = orig_meta.cloned_without_qparams(vec![u], "torch.int32");
+            let idx_scaled_meta = index_meta.drop_qparams(vec![u]);
             let idx_scaled = graph.add_anchored_call_function(
                 id,
                 format!("{}_us", name),
@@ -137,7 +139,7 @@ impl IrPass for IrDecomposeUnfoldPass {
                 idx_scaled_meta,
             );
 
-            let idx_u2d_meta = orig_meta.cloned_without_qparams(vec![u, 1], "torch.int32");
+            let idx_u2d_meta = index_meta.drop_qparams(vec![u, 1]);
             let idx_u2d = graph.add_anchored_call_function(
                 id,
                 format!("{}_u2d", name),
@@ -146,7 +148,7 @@ impl IrPass for IrDecomposeUnfoldPass {
                 idx_u2d_meta,
             );
 
-            let idx_c_meta = orig_meta.cloned_without_qparams(vec![size], "torch.int32");
+            let idx_c_meta = index_meta.drop_qparams(vec![size]);
             let idx_c = graph.add_anchored_arange(
                 id,
                 format!("{}_ac", name),
@@ -157,7 +159,7 @@ impl IrPass for IrDecomposeUnfoldPass {
                 idx_c_meta,
             );
 
-            let idx_c2d_meta = orig_meta.cloned_without_qparams(vec![1, size], "torch.int32");
+            let idx_c2d_meta = index_meta.drop_qparams(vec![1, size]);
             let idx_c2d = graph.add_anchored_call_function(
                 id,
                 format!("{}_c2d", name),
@@ -166,7 +168,7 @@ impl IrPass for IrDecomposeUnfoldPass {
                 idx_c2d_meta,
             );
 
-            let idx2d_meta = orig_meta.cloned_without_qparams(vec![u, size], "torch.int32");
+            let idx2d_meta = index_meta.drop_qparams(vec![u, size]);
             let idx2d = graph.add_anchored_call_function(
                 id,
                 format!("{}_i2d", name),
@@ -175,11 +177,11 @@ impl IrPass for IrDecomposeUnfoldPass {
                 idx2d_meta,
             );
 
-            let idx1d_meta = orig_meta.cloned_without_qparams(vec![uc], "torch.int32");
+            let idx1d_meta = index_meta.drop_qparams(vec![uc]);
             let idx1d =
                 graph.add_anchored_view_copy(id, format!("{}_i1d", name), idx2d, &[uc], idx1d_meta);
 
-            let idx_unsq_meta = orig_meta.cloned_without_qparams(vec![1, uc], "torch.int32");
+            let idx_unsq_meta = index_meta.drop_qparams(vec![1, uc]);
             let idx_unsq = graph.add_anchored_call_function(
                 id,
                 format!("{}_iu", name),
@@ -188,7 +190,7 @@ impl IrPass for IrDecomposeUnfoldPass {
                 idx_unsq_meta,
             );
 
-            let idx_exp_meta = orig_meta.cloned_without_qparams(vec![p, uc], "torch.int32");
+            let idx_exp_meta = index_meta.drop_qparams(vec![p, uc]);
             let idx_exp = graph.add_anchored_call_function(
                 id,
                 format!("{}_ie", name),
@@ -199,13 +201,9 @@ impl IrPass for IrDecomposeUnfoldPass {
 
             // GATHER
             let gathered_meta = if needs_bool_cast {
-                graph.nodes[values_in]
-                    .meta
-                    .cloned_without_qparams(vec![p, uc, q], work_dtype)
+                work_meta.drop_qparams(vec![p, uc, q])
             } else {
-                graph.nodes[values_in]
-                    .meta
-                    .cloned_with_val(vec![p, uc, q], work_dtype)
+                work_meta.preserve_qparams(vec![p, uc, q])
             };
             let gathered = graph.add_anchored_call_function(
                 id,
@@ -217,13 +215,9 @@ impl IrPass for IrDecomposeUnfoldPass {
 
             // Reshape (P, U*size, Q) → (P, U, size, Q)
             let r4d_meta = if needs_bool_cast {
-                graph.nodes[values_in]
-                    .meta
-                    .cloned_without_qparams(vec![p, u, size, q], work_dtype)
+                work_meta.drop_qparams(vec![p, u, size, q])
             } else {
-                graph.nodes[values_in]
-                    .meta
-                    .cloned_with_val(vec![p, u, size, q], work_dtype)
+                work_meta.preserve_qparams(vec![p, u, size, q])
             };
             let r4d = graph.add_anchored_view_copy(
                 id,
@@ -239,13 +233,9 @@ impl IrPass for IrDecomposeUnfoldPass {
             full_shape.push(size);
             full_shape.extend(post.iter().copied());
             let reshaped_meta = if needs_bool_cast {
-                graph.nodes[values_in]
-                    .meta
-                    .cloned_without_qparams(full_shape.clone(), work_dtype)
+                work_meta.drop_qparams(full_shape.clone())
             } else {
-                graph.nodes[values_in]
-                    .meta
-                    .cloned_with_val(full_shape.clone(), work_dtype)
+                work_meta.preserve_qparams(full_shape.clone())
             };
             let reshaped = graph.add_anchored_view_copy(
                 id,
@@ -269,13 +259,9 @@ impl IrPass for IrDecomposeUnfoldPass {
                 perm_shape.push(full_shape[p as usize]);
             }
             let permuted_meta = if needs_bool_cast {
-                graph.nodes[values_in]
-                    .meta
-                    .cloned_without_qparams(perm_shape, work_dtype)
+                work_meta.drop_qparams(perm_shape)
             } else {
-                graph.nodes[values_in]
-                    .meta
-                    .cloned_with_val(perm_shape, work_dtype)
+                work_meta.preserve_qparams(perm_shape)
             };
             let permuted = graph.add_anchored_permute_copy(
                 id,
@@ -286,14 +272,12 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
 
             if needs_bool_cast {
-                let cast_back_meta = orig_meta.cloned_without_qparams(
-                    graph.nodes[permuted]
-                        .meta
-                        .val_shape()
-                        .unwrap_or(&[])
-                        .to_vec(),
-                    "torch.bool",
-                );
+                let cast_back_shape = graph.nodes[permuted]
+                    .meta
+                    .val_shape()
+                    .unwrap_or(&[])
+                    .to_vec();
+                let cast_back_meta = bool_meta.drop_qparams(cast_back_shape);
                 graph.replace_with_dtype_cast(
                     id,
                     format!("{}_int8_to_bool", name),

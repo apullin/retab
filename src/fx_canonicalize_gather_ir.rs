@@ -71,6 +71,8 @@ impl IrPass for IrCanonicalizeGatherPass {
             } else {
                 &x_dtype
             };
+            let work_meta = orig_meta.tensor_stamp(work_dtype);
+            let index_meta = orig_meta.tensor_stamp("torch.int64");
 
             let mut values_in = x_id;
 
@@ -81,7 +83,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_bool_to_int8", node_name),
                     x_id,
                     work_dtype,
-                    orig_meta.cloned_with_val(x_shape.clone(), work_dtype),
+                    work_meta.preserve_qparams(x_shape.clone()),
                 );
                 values_in = cast_id;
             }
@@ -93,7 +95,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_values_3d", node_name),
                     values_in,
                     &[n, k, 1],
-                    orig_meta.cloned_with_val(vec![n, k, 1], work_dtype),
+                    work_meta.preserve_qparams(vec![n, k, 1]),
                 );
 
                 let gathered = graph.add_anchored_call_function(
@@ -101,7 +103,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_gather", node_name),
                     "backend.tosa.GATHER.default",
                     vec![IrArg::Node(v3d), IrArg::Node(index_id)],
-                    orig_meta.cloned_with_val(vec![n, w, 1], work_dtype),
+                    work_meta.preserve_qparams(vec![n, w, 1]),
                 );
 
                 graph.add_anchored_view_copy(
@@ -109,7 +111,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_out_2d", node_name),
                     gathered,
                     &[n, w],
-                    orig_meta.cloned_with_val(vec![n, w], work_dtype),
+                    work_meta.preserve_qparams(vec![n, w]),
                 )
             } else {
                 // 3D path: permute(0,2,1) → reshape(N*C,K,1) → GATHER → reshape(N,C,W) → permute(0,2,1)
@@ -120,7 +122,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_values_perm", node_name),
                     values_in,
                     &[0, 2, 1],
-                    orig_meta.cloned_with_val(vec![n, c, k], work_dtype),
+                    work_meta.preserve_qparams(vec![n, c, k]),
                 );
 
                 let vresh = graph.add_anchored_view_copy(
@@ -128,7 +130,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_values_flat", node_name),
                     vperm,
                     &[n * c, k, 1],
-                    orig_meta.cloned_with_val(vec![n * c, k, 1], work_dtype),
+                    work_meta.preserve_qparams(vec![n * c, k, 1]),
                 );
 
                 let iperm = graph.add_anchored_permute_copy(
@@ -136,7 +138,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_idx_perm", node_name),
                     index_id,
                     &[0, 2, 1],
-                    orig_meta.cloned_with_val(vec![n, c, w], "torch.int64"),
+                    index_meta.preserve_qparams(vec![n, c, w]),
                 );
 
                 let iresh = graph.add_anchored_view_copy(
@@ -144,7 +146,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_idx_flat", node_name),
                     iperm,
                     &[n * c, w],
-                    orig_meta.cloned_with_val(vec![n * c, w], "torch.int64"),
+                    index_meta.preserve_qparams(vec![n * c, w]),
                 );
 
                 let gathered = graph.add_anchored_call_function(
@@ -152,7 +154,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_gather", node_name),
                     "backend.tosa.GATHER.default",
                     vec![IrArg::Node(vresh), IrArg::Node(iresh)],
-                    orig_meta.cloned_with_val(vec![n * c, w, 1], work_dtype),
+                    work_meta.preserve_qparams(vec![n * c, w, 1]),
                 );
 
                 let gresh = graph.add_anchored_view_copy(
@@ -160,14 +162,14 @@ impl IrPass for IrCanonicalizeGatherPass {
                     format!("{}_gather_3d", node_name),
                     gathered,
                     &[n, c, w],
-                    orig_meta.cloned_with_val(vec![n, c, w], work_dtype),
+                    work_meta.preserve_qparams(vec![n, c, w]),
                 );
 
                 graph.add_permute_copy(
                     format!("{}_out_perm", node_name),
                     gresh,
                     &[0, 2, 1],
-                    orig_meta.cloned_with_val(vec![n, w, c], work_dtype),
+                    work_meta.preserve_qparams(vec![n, w, c]),
                 )
             };
 

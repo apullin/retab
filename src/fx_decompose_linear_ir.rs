@@ -71,9 +71,10 @@ impl IrPass for IrDecomposeLinearPass {
             // 1. Reshape input to 4D: [..., Ci] -> [batches, Ci, 1, 1]
             //    Propagate input qparams to the reshaped node.
             let input_4d_shape = [batches, ci, 1, 1];
-            let input_4d_meta = graph.nodes[input_id]
-                .meta
-                .cloned_with_empty_qparam_maps(input_4d_shape, input_dtype);
+            let input_base_meta = graph.nodes[input_id].meta.clone();
+            let input_4d_meta = input_base_meta
+                .tensor_stamp(&input_dtype)
+                .empty_qparam_maps(input_4d_shape);
             let input_reshaped = graph.add_anchored_view_copy(
                 id,
                 format!("{}_input_view", node_name),
@@ -85,9 +86,10 @@ impl IrPass for IrDecomposeLinearPass {
             // 2. Reshape weights to 4D: [Co, Ci] -> [Co, Ci, 1, 1]
             //    Propagate weight qparams (including per-channel) to the reshaped node.
             let weights_4d_shape = [co, weights_shape[1], 1, 1];
-            let weights_4d_meta = graph.nodes[weights_id]
-                .meta
-                .cloned_with_empty_qparam_maps(weights_4d_shape, weight_dtype);
+            let weights_base_meta = graph.nodes[weights_id].meta.clone();
+            let weights_4d_meta = weights_base_meta
+                .tensor_stamp(&weight_dtype)
+                .empty_qparam_maps(weights_4d_shape);
             let weights_reshaped = graph.add_anchored_view_copy(
                 id,
                 format!("{}_weight_view", node_name),
@@ -100,9 +102,9 @@ impl IrPass for IrDecomposeLinearPass {
             //    convolution(input, weight, bias, stride, padding, dilation,
             //                transposed, output_padding, groups)
             let conv_out_shape = [batches, co, 1, 1];
-            let conv_meta = graph.nodes[id]
-                .meta
-                .cloned_with_val(conv_out_shape, &output_dtype);
+            let output_base_meta = graph.nodes[id].meta.clone();
+            let output_meta = output_base_meta.tensor_stamp(&output_dtype);
+            let conv_meta = output_meta.preserve_qparams(conv_out_shape);
             let bias_arg = match bias_id {
                 Some(nid) => IrArg::Node(nid),
                 None => IrArg::None,
@@ -126,9 +128,7 @@ impl IrPass for IrDecomposeLinearPass {
             );
 
             // 4. Reshape output back to original shape
-            let out_meta = graph.nodes[id]
-                .meta
-                .cloned_with_empty_qparam_maps(output_shape.clone(), output_dtype);
+            let out_meta = output_meta.empty_qparam_maps(output_shape.clone());
             graph.replace_with_view_copy(
                 id,
                 format!("{}_output_view", node_name),

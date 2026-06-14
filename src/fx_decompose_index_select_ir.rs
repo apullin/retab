@@ -69,6 +69,9 @@ impl IrPass for IrDecomposeIndexSelectPass {
             } else {
                 x_dtype.as_str()
             };
+            let gather_meta = orig_meta.tensor_stamp(gather_dtype);
+            let index_meta = orig_meta.tensor_stamp(&idx_dtype);
+            let bool_meta = orig_meta.tensor_stamp("torch.bool");
 
             let x_for_gather = if needs_bool_cast {
                 graph.add_anchored_dtype_cast(
@@ -76,7 +79,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
                     format!("{}_bool_to_i8", name),
                     x_id,
                     "torch.int8",
-                    orig_meta.cloned_with_val(x_shape.clone(), "torch.int8"),
+                    gather_meta.preserve_qparams(x_shape.clone()),
                 )
             } else {
                 x_id
@@ -88,7 +91,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 format!("{}_values", name),
                 x_for_gather,
                 &[n, k, c],
-                orig_meta.cloned_with_val(vec![n, k, c], gather_dtype),
+                gather_meta.preserve_qparams(vec![n, k, c]),
             );
 
             // Index: unsqueeze(0) → (1, W), then expand to (N, W)
@@ -97,7 +100,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 format!("{}_idx_unsq", name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(index_id), IrArg::Int(0)],
-                orig_meta.cloned_with_val(vec![1, w], &idx_dtype),
+                index_meta.preserve_qparams(vec![1, w]),
             );
 
             let idx_exp = graph.add_anchored_call_function(
@@ -105,7 +108,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 format!("{}_idx_exp", name),
                 "aten.expand_copy.default".to_string(),
                 vec![IrArg::Node(idx_unsq), i64_list(&[n, w])],
-                orig_meta.cloned_with_val(vec![n, w], &idx_dtype),
+                index_meta.preserve_qparams(vec![n, w]),
             );
 
             // GATHER(values, indices) → (N, W, C)
@@ -114,7 +117,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 format!("{}_gather", name),
                 "backend.tosa.GATHER.default".to_string(),
                 vec![IrArg::Node(values), IrArg::Node(idx_exp)],
-                orig_meta.cloned_with_val(vec![n, w, c], gather_dtype),
+                gather_meta.preserve_qparams(vec![n, w, c]),
             );
 
             // Reshape to (...before, W, ...after)
@@ -130,14 +133,14 @@ impl IrPass for IrDecomposeIndexSelectPass {
                     format!("{}_out", name),
                     gathered,
                     &out_shape,
-                    orig_meta.cloned_with_val(out_shape.clone(), gather_dtype),
+                    gather_meta.preserve_qparams(out_shape.clone()),
                 );
                 graph.replace_with_dtype_cast(
                     id,
                     format!("{}_i8_to_bool", name),
                     result,
                     "torch.bool",
-                    orig_meta.cloned_with_val(out_shape, "torch.bool"),
+                    bool_meta.preserve_qparams(out_shape),
                 );
             } else {
                 graph.replace_with_view_copy(
@@ -145,7 +148,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
                     format!("{}_out", name),
                     gathered,
                     &out_shape,
-                    orig_meta.cloned_with_val(out_shape.clone(), gather_dtype),
+                    gather_meta.preserve_qparams(out_shape.clone()),
                 );
             }
             modified = true;

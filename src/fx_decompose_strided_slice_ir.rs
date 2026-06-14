@@ -84,6 +84,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
             let orig_meta = graph.nodes[id].meta.clone();
             let is_bool_dtype = graph.nodes[input_id].meta.val_dtype_is(DType::Bool);
             let dtype = graph.node_dtype_or_float32(input_id).to_string();
+            let meta = orig_meta.tensor_stamp(&dtype);
 
             // 1. Unit-step slice: slice_copy(input, dim, start, end, 1)
             let mut slice_shape = input_shape.clone();
@@ -96,7 +97,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 start,
                 end,
                 Some(1),
-                orig_meta.cloned_with_val(slice_shape.clone(), &dtype),
+                meta.preserve_qparams(slice_shape.clone()),
             );
 
             let u = (span_len + step - 1) / step;
@@ -120,7 +121,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                     format!("{}_pad", node_name),
                     "aten.full.default",
                     vec![i64_list(&pad_shape), fill_val],
-                    orig_meta.cloned_with_val(pad_shape, &dtype),
+                    meta.preserve_qparams(pad_shape),
                 );
 
                 let mut cat_shape = slice_shape.clone();
@@ -133,7 +134,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                         IrArg::List(vec![IrArg::Node(y), IrArg::Node(pad_node)]),
                         IrArg::Int(dim as i64),
                     ],
-                    orig_meta.cloned_with_val(cat_shape, &dtype),
+                    meta.preserve_qparams(cat_shape),
                 );
                 y = cat_node;
             }
@@ -147,7 +148,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 format!("{}_split_view", node_name),
                 y,
                 &split_shape,
-                orig_meta.cloned_with_val(split_shape.clone(), &dtype),
+                meta.preserve_qparams(split_shape.clone()),
             );
 
             // 4. Inner slice: slice_copy(view1, dim+1, 0, 1, 1) — take first element
@@ -161,7 +162,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 0,
                 1,
                 Some(1),
-                orig_meta.cloned_with_val(inner_shape, &dtype),
+                meta.preserve_qparams(inner_shape),
             );
 
             // 5. View: reshape back to output shape [..., u, ...]
@@ -172,7 +173,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 format!("{}_out_view", node_name),
                 inner_slice,
                 &out_shape,
-                orig_meta.cloned_with_val(out_shape.clone(), &dtype),
+                meta.preserve_qparams(out_shape.clone()),
             );
             modified = true;
         }

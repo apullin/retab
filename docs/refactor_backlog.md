@@ -1623,6 +1623,29 @@ Deleted: repeated conv-bias, grouped-conv, and int32-rescale Rust test placehold
 Added: local test helpers for typed placeholders, shared int16 convolution qparam metadata, grouped convolution calls, and int32-rescale view users
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_annotate_conv_bias_ir::tests`; `cargo test --lib fx_decompose_grouped_conv_ir::tests`; `cargo test --lib fx_insert_int32_rescale_ir::tests`; `cargo test --lib`; `git diff --check`
 Note: Full Rust tests passed `141 passed`. A broader view-copy builder experiment was reverted because it reduced grammar duplication but did not pay for its added API surface in LOC.
+
+2026-06-14, TensorFacts metadata-stamp slice
+Rust LOC: 35,892 -> 35,902
+Movement: +10 Rust LOC
+Deleted: the old production metadata helpers for `cloned_without_qparams`,
+`cloned_with_empty_qparam_maps`, and `cloned_plain_tensor`; repeated direct
+shape/dtype/qparam restamp spellings across layernorm, quant decomposition,
+unfold, gather/index lowering, pooling, conv/linear reshapes, slice/scatter, and
+conv-bias int32 rescale insertion
+Added: `TensorFacts` as the named FX-side tensor value-fact domain and
+`NodeMeta::tensor_stamp(dtype)` / `TensorMetaStamp` as the common grammar for
+restamping tensor facts while preserving qparams, dropping qparams, materializing
+present-empty qparam maps, or creating a plain tensor domain
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`;
+`cargo test --lib`; `git diff --check`; `maturin develop --release`; focused
+Python smoke via `/tmp/et.sh` over adaptive_avg_pool2d, avg_pool2d, conv1d,
+conv2d, gather, group_norm, index_put, index_select, index_tensor, layer_norm,
+linear, max_pool, slice, slice_scatter, unfold_copy, and view
+Note: Full Rust tests passed `141 passed`; focused Python smoke passed
+`743 passed, 20 xfailed`. This is not a LOC-reduction slice. It is a
+metadata-grammar consolidation slice: qparam-policy-bearing tensor restamps now
+use one domain model, while simple one-off `cloned_with_val` calls remain as the
+low-friction spelling for preserve-only metadata.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

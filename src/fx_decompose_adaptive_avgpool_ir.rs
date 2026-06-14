@@ -45,6 +45,7 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
             let dtype = graph.node_dtype_or_float32(x_id).to_string();
+            let meta = orig_meta.tensor_stamp(&dtype);
 
             let mut rows: Vec<NodeId> = Vec::new();
             for out_i in 0..output_h {
@@ -76,7 +77,7 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                         start_h,
                         end_h,
                         None,
-                        orig_meta.cloned_with_val(vec![n_batch, c_ch, kh, input_w], &dtype),
+                        meta.preserve_qparams(vec![n_batch, c_ch, kh, input_w]),
                     );
 
                     // slice_copy(slice_h, dim=3, start_w, end_w)
@@ -88,7 +89,7 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                         start_w,
                         end_w,
                         None,
-                        orig_meta.cloned_with_val(vec![n_batch, c_ch, kh, kw], &dtype),
+                        meta.preserve_qparams(vec![n_batch, c_ch, kh, kw]),
                     );
 
                     // avg_pool2d(slice_hw, [kh,kw], [1,1], [0,0])
@@ -102,7 +103,7 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                             i64_list(&[1, 1]),   // stride
                             i64_list(&[0, 0]),   // padding
                         ],
-                        orig_meta.cloned_with_val(vec![n_batch, c_ch, 1, 1], &dtype),
+                        meta.preserve_qparams(vec![n_batch, c_ch, 1, 1]),
                     );
 
                     row.push(pooled);
@@ -118,7 +119,7 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                         format!("{}_cat_w_{}", node_name, out_i),
                         "aten.cat.default",
                         vec![cat_args, IrArg::Int(3)],
-                        orig_meta.cloned_with_val(vec![n_batch, c_ch, 1, output_w], &dtype),
+                        meta.preserve_qparams(vec![n_batch, c_ch, 1, output_w]),
                     );
                     rows.push(row_cat);
                 }
@@ -134,7 +135,7 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                     format!("{}_cat_h", node_name),
                     "aten.cat.default".to_string(),
                     vec![cat_args, IrArg::Int(2)],
-                    orig_meta.cloned_with_val(vec![n_batch, c_ch, output_h, output_w], &dtype),
+                    meta.preserve_qparams(vec![n_batch, c_ch, output_h, output_w]),
                 )
             };
 

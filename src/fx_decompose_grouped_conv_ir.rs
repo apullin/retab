@@ -19,7 +19,8 @@ fn slice_meta(graph: &IrGraph, id: NodeId, dim: usize, start: i64, stop: i64) ->
     Some(
         graph.nodes[id]
             .meta
-            .cloned_with_empty_qparam_maps(shape, dtype),
+            .tensor_stamp(&dtype)
+            .empty_qparam_maps(shape),
     )
 }
 

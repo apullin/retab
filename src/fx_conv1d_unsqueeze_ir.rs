@@ -40,7 +40,8 @@ fn add_view_copy(
 ) -> NodeId {
     let meta = graph.nodes[input_id]
         .meta
-        .cloned_with_empty_qparam_maps(new_shape.to_vec(), dtype);
+        .tensor_stamp(dtype)
+        .empty_qparam_maps(new_shape.to_vec());
     graph.add_view_copy(
         format!("{}_{}", name_prefix, suffix),
         input_id,

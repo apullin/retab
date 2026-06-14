@@ -44,6 +44,8 @@ impl IrPass for IrDecorateFpToIntCastPass {
 
             let name = graph.nodes[id].name.clone();
             let x_meta = graph.nodes[x_id].meta.clone();
+            let fp_meta = x_meta.tensor_stamp("torch.float32");
+            let bool_meta = x_meta.tensor_stamp("torch.bool");
             let scalar_shape = vec![1_i64; input_shape.len().max(1)];
 
             let zero = graph.add_anchored_full_float(
@@ -52,28 +54,28 @@ impl IrPass for IrDecorateFpToIntCastPass {
                 &scalar_shape,
                 0.0,
                 "torch.float32",
-                x_meta.cloned_without_qparams(scalar_shape.clone(), "torch.float32"),
+                fp_meta.drop_qparams(scalar_shape.clone()),
             );
             let is_non_negative = graph.add_anchored_call_function(
                 id,
                 format!("{}_trunc_ge", name),
                 "aten.ge.Tensor".to_string(),
                 vec![IrArg::Node(x_id), IrArg::Node(zero)],
-                x_meta.cloned_without_qparams(input_shape.clone(), "torch.bool"),
+                bool_meta.drop_qparams(input_shape.clone()),
             );
             let floor_x = graph.add_anchored_call_function(
                 id,
                 format!("{}_trunc_floor", name),
                 "aten.floor.default".to_string(),
                 vec![IrArg::Node(x_id)],
-                x_meta.cloned_with_val(input_shape.clone(), "torch.float32"),
+                fp_meta.preserve_qparams(input_shape.clone()),
             );
             let ceil_x = graph.add_anchored_call_function(
                 id,
                 format!("{}_trunc_ceil", name),
                 "aten.ceil.default".to_string(),
                 vec![IrArg::Node(x_id)],
-                x_meta.cloned_with_val(input_shape.clone(), "torch.float32"),
+                fp_meta.preserve_qparams(input_shape.clone()),
             );
             let truncated = graph.add_anchored_call_function(
                 id,
@@ -84,7 +86,7 @@ impl IrPass for IrDecorateFpToIntCastPass {
                     IrArg::Node(floor_x),
                     IrArg::Node(ceil_x),
                 ],
-                x_meta.cloned_with_val(input_shape, "torch.float32"),
+                fp_meta.preserve_qparams(input_shape),
             );
             graph.set_arg(id, 0, IrArg::Node(truncated));
             true

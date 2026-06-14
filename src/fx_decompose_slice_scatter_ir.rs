@@ -89,6 +89,8 @@ impl IrPass for IrDecomposeSliceScatterPass {
             let name = graph.nodes[id].name.clone();
             let meta = graph.nodes[id].meta.clone();
             let dtype = graph.node_dtype_or_float32(input_id).to_string();
+            let value_meta = meta.tensor_stamp(&dtype);
+            let index_meta = meta.tensor_stamp("torch.int32");
 
             let result = if step == 1 {
                 // Only cat non-empty slices: TOSA cannot allocate a zero-dim tensor,
@@ -107,7 +109,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         0,
                         start_i,
                         Some(1),
-                        meta.cloned_with_val(prefix_shape, &dtype),
+                        value_meta.preserve_qparams(prefix_shape),
                     );
                     cat_inputs.push(IrArg::Node(prefix));
                 }
@@ -125,7 +127,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         end_i,
                         dim_size,
                         Some(1),
-                        meta.cloned_with_val(suffix_shape, &dtype),
+                        value_meta.preserve_qparams(suffix_shape),
                     );
                     cat_inputs.push(IrArg::Node(suffix));
                 }
@@ -139,7 +141,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         format!("{}_cat", name),
                         "aten.cat.default".to_string(),
                         vec![IrArg::List(cat_inputs), IrArg::Int(dim_norm as i64)],
-                        meta.cloned_with_val(input_shape.clone(), &dtype),
+                        value_meta.preserve_qparams(input_shape.clone()),
                     )
                 }
             } else {
@@ -150,7 +152,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                     end_i,
                     step,
                     "torch.int32",
-                    meta.cloned_with_val(vec![width], "torch.int32"),
+                    index_meta.preserve_qparams(vec![width]),
                 );
 
                 let mut input_cur = input_id;
@@ -172,7 +174,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         format!("{}_input_perm", name),
                         input_id,
                         &perm,
-                        meta.cloned_with_val(permuted_shape(&input_shape, &perm), &dtype),
+                        value_meta.preserve_qparams(permuted_shape(&input_shape, &perm)),
                     );
                     input_cur = input_perm;
 
@@ -181,7 +183,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         format!("{}_src_perm", name),
                         src_id,
                         &perm,
-                        meta.cloned_with_val(permuted_shape(&src_shape, &perm), &dtype),
+                        value_meta.preserve_qparams(permuted_shape(&src_shape, &perm)),
                     );
                     src_cur = src_perm;
 
@@ -195,7 +197,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                             IrArg::Node(src_cur),
                             IrArg::Bool(false),
                         ],
-                        meta.cloned_with_val(permuted_shape(&input_shape, &perm), &dtype),
+                        value_meta.preserve_qparams(permuted_shape(&input_shape, &perm)),
                     );
 
                     let updated = graph.add_anchored_permute_copy(
@@ -203,7 +205,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         format!("{}_result_perm", name),
                         updated_perm,
                         &inv_perm,
-                        meta.cloned_with_val(input_shape.clone(), &dtype),
+                        value_meta.preserve_qparams(input_shape.clone()),
                     );
                     graph.replace_and_erase(id, updated);
                     modified = true;
@@ -222,7 +224,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         IrArg::Node(src_cur),
                         IrArg::Bool(false),
                     ],
-                    meta.cloned_with_val(current_input_shape, &dtype),
+                    value_meta.preserve_qparams(current_input_shape),
                 );
                 updated
             };

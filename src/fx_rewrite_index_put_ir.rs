@@ -52,6 +52,8 @@ impl IrPass for IrRewriteIndexPutPass {
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
             let src_dtype = graph.node_dtype_or_float32(source_id).to_string();
+            let source_base_meta = graph.nodes[source_id].meta.clone();
+            let source_meta = source_base_meta.tensor_stamp(&src_dtype);
 
             let index_dtype = indices_list.iter().find_map(|item| match item {
                 IrArg::Node(nid) => graph.node_dtype(*nid).map(str::to_string),
@@ -60,6 +62,7 @@ impl IrPass for IrRewriteIndexPutPass {
             let Some(index_dtype) = index_dtype else {
                 continue;
             };
+            let index_meta = orig_meta.tensor_stamp(&index_dtype);
 
             // Collect index node IDs and shapes, expanding None to arange
             let mut idx_ids: Vec<NodeId> = Vec::new();
@@ -80,8 +83,7 @@ impl IrPass for IrRewriteIndexPutPass {
                             invalid_indices = true;
                             break;
                         };
-                        let arange_meta =
-                            orig_meta.cloned_without_qparams(vec![dim_size], &index_dtype);
+                        let arange_meta = index_meta.drop_qparams(vec![dim_size]);
                         let arange = graph.add_anchored_arange(
                             id,
                             format!("{}_in{}", name, dim_idx),
@@ -146,7 +148,7 @@ impl IrPass for IrRewriteIndexPutPass {
             };
 
             // Reshape: indices (1, W), source (1, K, C), values (1, W, C)
-            let idx_meta = orig_meta.cloned_without_qparams(vec![1, w], &idx_dtype);
+            let idx_meta = index_meta.drop_qparams(vec![1, w]);
             let idx_1w = graph.add_anchored_view_copy(
                 id,
                 format!("{}_idx", name),
@@ -155,9 +157,7 @@ impl IrPass for IrRewriteIndexPutPass {
                 idx_meta,
             );
 
-            let src_meta = graph.nodes[source_id]
-                .meta
-                .cloned_with_val(vec![1, k, c], &src_dtype);
+            let src_meta = source_meta.preserve_qparams(vec![1, k, c]);
             let src_1kc = graph.add_anchored_view_copy(
                 id,
                 format!("{}_src", name),
@@ -183,9 +183,7 @@ impl IrPass for IrRewriteIndexPutPass {
             if values_shape.len() < bcast_val_shape.len() {
                 let mut aligned = vec![1i64; bcast_val_shape.len() - values_shape.len()];
                 aligned.extend_from_slice(&values_shape);
-                let aligned_meta = graph.nodes[source_id]
-                    .meta
-                    .cloned_with_val(aligned.clone(), &src_dtype);
+                let aligned_meta = source_meta.preserve_qparams(aligned.clone());
                 val_cur = graph.add_anchored_view_copy(
                     id,
                     format!("{}_vala", name),
@@ -194,9 +192,7 @@ impl IrPass for IrRewriteIndexPutPass {
                     aligned_meta,
                 );
             }
-            let bcast_val_meta = graph.nodes[source_id]
-                .meta
-                .cloned_with_val(bcast_val_shape.clone(), &src_dtype);
+            let bcast_val_meta = source_meta.preserve_qparams(bcast_val_shape.clone());
             let val_bcast = graph.add_anchored_call_function(
                 id,
                 format!("{}_valb", name),
@@ -204,9 +200,7 @@ impl IrPass for IrRewriteIndexPutPass {
                 vec![IrArg::Node(val_cur), i64_list(&bcast_val_shape)],
                 bcast_val_meta,
             );
-            let val_meta = graph.nodes[source_id]
-                .meta
-                .cloned_with_val(vec![1, w, c], &src_dtype);
+            let val_meta = source_meta.preserve_qparams(vec![1, w, c]);
             let val_1wc = graph.add_anchored_view_copy(
                 id,
                 format!("{}_val", name),
@@ -216,9 +210,7 @@ impl IrPass for IrRewriteIndexPutPass {
             );
 
             let scatter_values = if accumulate {
-                let gathered_meta = graph.nodes[source_id]
-                    .meta
-                    .cloned_with_val(vec![1, w, c], &src_dtype);
+                let gathered_meta = source_meta.preserve_qparams(vec![1, w, c]);
                 let gathered = graph.add_anchored_call_function(
                     id,
                     format!("{}_gather_prev", name),
@@ -227,9 +219,7 @@ impl IrPass for IrRewriteIndexPutPass {
                     gathered_meta,
                 );
 
-                let added_meta = graph.nodes[source_id]
-                    .meta
-                    .cloned_with_val(vec![1, w, c], &src_dtype);
+                let added_meta = source_meta.preserve_qparams(vec![1, w, c]);
                 let added = graph.add_anchored_call_function(
                     id,
                     format!("{}_accum", name),
@@ -243,9 +233,7 @@ impl IrPass for IrRewriteIndexPutPass {
             };
 
             // SCATTER(source_flat, indices_flat, values_flat)
-            let scattered_meta = graph.nodes[source_id]
-                .meta
-                .cloned_with_val(vec![1, k, c], &src_dtype);
+            let scattered_meta = source_meta.preserve_qparams(vec![1, k, c]);
             let scattered = graph.add_anchored_call_function(
                 id,
                 format!("{}_scatter", name),
@@ -259,9 +247,7 @@ impl IrPass for IrRewriteIndexPutPass {
             );
 
             // Reshape back
-            let result_meta = graph.nodes[source_id]
-                .meta
-                .cloned_with_val(source_shape.clone(), &src_dtype);
+            let result_meta = source_meta.preserve_qparams(source_shape.clone());
             graph.replace_with_view_copy(
                 id,
                 format!("{}_out", name),

@@ -200,6 +200,8 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         conv.args[2] = IrArg::None;
     }
 
+    let int32_meta = node.meta.tensor_stamp("torch.int32");
+
     let int32_rescale = graph.add_after_rescale(
         conv_id,
         RescaleRewrite::new(
@@ -209,8 +211,7 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
             vec![1.0; bias_scales.len()],
             0,
             0,
-            node.meta
-                .cloned_plain_tensor(conv_shape.clone(), "torch.int32"),
+            int32_meta.plain_tensor(conv_shape.clone()),
         ),
     );
 
@@ -219,8 +220,7 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         format!("{}_bias_view", node.name),
         *bias_id,
         &bias_view_shape,
-        node.meta
-            .cloned_plain_tensor(bias_view_shape.clone(), "torch.int32"),
+        int32_meta.plain_tensor(bias_view_shape.clone()),
     );
 
     let bias_add = graph.add_after_call_function(
@@ -228,7 +228,7 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         format!("{}_bias_add", node.name),
         "aten.add.Tensor",
         vec![IrArg::Node(int32_rescale), IrArg::Node(bias_view)],
-        node.meta.cloned_plain_tensor(conv_shape, "torch.int32"),
+        int32_meta.plain_tensor(conv_shape),
     );
 
     let output_rescale = graph.add_after_rescale(

@@ -26,7 +26,9 @@ fn add_cast(
         name.to_string(),
         x_id,
         target_dtype,
-        orig_meta.cloned_without_qparams(shape.to_vec(), target_dtype),
+        orig_meta
+            .tensor_stamp(target_dtype)
+            .drop_qparams(shape.to_vec()),
     )
 }
 
@@ -128,6 +130,8 @@ impl IrPass for IrDecomposeQuantPass {
             };
 
             let eff_scale = if is_quantize { 1.0 / scale } else { scale };
+            let fp_meta = orig_meta.tensor_stamp(&fp_dtype);
+            let int32_meta = orig_meta.tensor_stamp("torch.int32");
 
             let result = if is_quantize {
                 // scale_const = full([1..], 1/scale)
@@ -136,7 +140,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_sc", name),
                     "aten.full.default".to_string(),
                     vec![i64_list(&ones), IrArg::Float(eff_scale)],
-                    orig_meta.cloned_without_qparams(ones.clone(), &fp_dtype),
+                    fp_meta.drop_qparams(ones.clone()),
                 );
 
                 // zp_const = full([1..], zp) as float
@@ -145,7 +149,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_zp", name),
                     "aten.full.default".to_string(),
                     vec![i64_list(&ones), IrArg::Int(zp)],
-                    orig_meta.cloned_without_qparams(ones.clone(), &fp_dtype),
+                    fp_meta.drop_qparams(ones.clone()),
                 );
 
                 let scaled = graph.add_anchored_call_function(
@@ -153,7 +157,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_mul", name),
                     "aten.mul.Tensor".to_string(),
                     vec![IrArg::Node(x_id), IrArg::Node(sc)],
-                    orig_meta.cloned_without_qparams(shape.clone(), &fp_dtype),
+                    fp_meta.drop_qparams(shape.clone()),
                 );
 
                 let rounded = graph.add_anchored_call_function(
@@ -161,7 +165,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_round", name),
                     "aten.round.default".to_string(),
                     vec![IrArg::Node(scaled)],
-                    orig_meta.cloned_without_qparams(shape.clone(), &fp_dtype),
+                    fp_meta.drop_qparams(shape.clone()),
                 );
 
                 let shifted = graph.add_anchored_call_function(
@@ -169,7 +173,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_add", name),
                     "aten.add.Tensor".to_string(),
                     vec![IrArg::Node(rounded), IrArg::Node(zpc)],
-                    orig_meta.cloned_without_qparams(shape.clone(), &fp_dtype),
+                    fp_meta.drop_qparams(shape.clone()),
                 );
 
                 let clamped = graph.add_anchored_call_function(
@@ -181,7 +185,7 @@ impl IrPass for IrDecomposeQuantPass {
                         IrArg::Float(qmin as f64),
                         IrArg::Float(qmax as f64),
                     ],
-                    orig_meta.cloned_without_qparams(shape.clone(), &fp_dtype),
+                    fp_meta.drop_qparams(shape.clone()),
                 );
 
                 add_cast(
@@ -210,7 +214,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_zp", name),
                     "aten.full.default".to_string(),
                     vec![i64_list(&ones), IrArg::Int(zp)],
-                    orig_meta.cloned_without_qparams(ones.clone(), "torch.int32"),
+                    int32_meta.drop_qparams(ones.clone()),
                 );
 
                 let shifted = graph.add_anchored_call_function(
@@ -218,7 +222,7 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_sub", name),
                     "aten.sub.Tensor".to_string(),
                     vec![IrArg::Node(x_i32), IrArg::Node(zpc)],
-                    orig_meta.cloned_without_qparams(shape.clone(), "torch.int32"),
+                    int32_meta.drop_qparams(shape.clone()),
                 );
 
                 let casted = add_cast(
@@ -236,14 +240,14 @@ impl IrPass for IrDecomposeQuantPass {
                     format!("{}_sc", name),
                     "aten.full.default".to_string(),
                     vec![i64_list(&ones), IrArg::Float(eff_scale)],
-                    orig_meta.cloned_without_qparams(ones, &fp_dtype),
+                    fp_meta.drop_qparams(ones),
                 );
 
                 graph.add_call_function(
                     format!("{}_mul", name),
                     "aten.mul.Tensor".to_string(),
                     vec![IrArg::Node(casted), IrArg::Node(sc)],
-                    orig_meta.cloned_without_qparams(shape, &fp_dtype),
+                    fp_meta.drop_qparams(shape),
                 )
             };
 

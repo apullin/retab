@@ -123,6 +123,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 .map(|user_id| graph.nodes[user_id].meta.clone())
                 .unwrap_or_else(|| graph.nodes[id].meta.clone());
             let dtype = graph.node_dtype_or_float32(x_id).to_string();
+            let meta = orig_meta.tensor_stamp(&dtype);
 
             // 1. constant_pad_nd(x, [pad_w, right_pad, pad_h, bottom_pad, 0,0,0,0], pad_val)
             let x_pad = graph.add_anchored_call_function(
@@ -134,10 +135,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     i64_list(&[pad_w, right_pad, pad_h, bottom_pad, 0, 0, 0, 0]),
                     pad_value_for_dtype(&dtype),
                 ],
-                orig_meta.cloned_with_val(
-                    vec![n, c, h + pad_h + bottom_pad, w + pad_w + right_pad],
-                    &dtype,
-                ),
+                meta.preserve_qparams(vec![n, c, h + pad_h + bottom_pad, w + pad_w + right_pad]),
             );
 
             // 2. view → [N, C, h_pack, d_h, w_pack, d_w]
@@ -146,7 +144,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 format!("{}_pack_view", node_name),
                 x_pad,
                 &[n, c, h_pack, d_h, w_pack, d_w],
-                orig_meta.cloned_with_val(vec![n, c, h_pack, d_h, w_pack, d_w], &dtype),
+                meta.preserve_qparams(vec![n, c, h_pack, d_h, w_pack, d_w]),
             );
 
             // 3. permute [3,5,0,1,2,4]
@@ -155,7 +153,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 format!("{}_pack_perm", node_name),
                 x_view,
                 &[3, 5, 0, 1, 2, 4],
-                orig_meta.cloned_with_val(vec![d_h, d_w, n, c, h_pack, w_pack], &dtype),
+                meta.preserve_qparams(vec![d_h, d_w, n, c, h_pack, w_pack]),
             );
 
             // 4. view → [N*d_h*d_w, C, h_pack, w_pack]
@@ -164,7 +162,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 format!("{}_batch", node_name),
                 x_perm,
                 &[n * d_h * d_w, c, h_pack, w_pack],
-                orig_meta.cloned_with_val(vec![n * d_h * d_w, c, h_pack, w_pack], &dtype),
+                meta.preserve_qparams(vec![n * d_h * d_w, c, h_pack, w_pack]),
             );
 
             // 5. max_pool2d (non-dilated, zero padding)
@@ -182,7 +180,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     IrArg::Int(1), // dilation=1
                     IrArg::Bool(ceil_mode),
                 ],
-                orig_meta.cloned_with_val(vec![n * d_h * d_w, c, h_out, w_out], &dtype),
+                meta.preserve_qparams(vec![n * d_h * d_w, c, h_out, w_out]),
             );
 
             // 6. view → [d_h, d_w, N, C, h_out, w_out]
@@ -191,7 +189,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 format!("{}_unpack", node_name),
                 pooled,
                 &[d_h, d_w, n, c, h_out, w_out],
-                orig_meta.cloned_with_val(vec![d_h, d_w, n, c, h_out, w_out], &dtype),
+                meta.preserve_qparams(vec![d_h, d_w, n, c, h_out, w_out]),
             );
 
             // 7. permute [2,3,4,0,5,1]
@@ -200,7 +198,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 format!("{}_unperm", node_name),
                 unpack,
                 &[2, 3, 4, 0, 5, 1],
-                orig_meta.cloned_with_val(vec![n, c, h_out, d_h, w_out, d_w], &dtype),
+                meta.preserve_qparams(vec![n, c, h_out, d_h, w_out, d_w]),
             );
 
             // 8. view → [N, C, h_out*d_h, w_out*d_w]
@@ -209,7 +207,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 format!("{}_out_view", node_name),
                 unperm,
                 &[n, c, h_out * d_h, w_out * d_w],
-                orig_meta.cloned_with_val(vec![n, c, h_out * d_h, w_out * d_w], &dtype),
+                meta.preserve_qparams(vec![n, c, h_out * d_h, w_out * d_w]),
             );
 
             // 9. slice H to h_final
@@ -221,7 +219,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 0,
                 h_final,
                 None,
-                orig_meta.cloned_with_val(vec![n, c, h_final, w_out * d_w], &dtype),
+                meta.preserve_qparams(vec![n, c, h_final, w_out * d_w]),
             );
 
             // 10. slice W to w_final
@@ -232,7 +230,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 0,
                 w_final,
                 None,
-                orig_meta.cloned_with_val(vec![n, c, h_final, w_final], &dtype),
+                meta.preserve_qparams(vec![n, c, h_final, w_final]),
             );
 
             if let Some(value_getitem) = value_getitem {

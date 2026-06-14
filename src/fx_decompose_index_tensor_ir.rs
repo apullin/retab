@@ -119,14 +119,15 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 .node_dtype(idx_ids[0])
                 .unwrap_or("torch.int64")
                 .to_string();
+            let x_base_meta = graph.nodes[x_id].meta.clone();
+            let x_meta = x_base_meta.tensor_stamp(&x_dtype);
+            let index_meta = orig_meta.tensor_stamp(&idx_dtype);
 
             let mut values_in = x_id;
             if !is_identity_perm(&perm) {
                 let permuted_shape: Vec<i64> =
                     perm.iter().map(|&pos| x_shape[pos as usize]).collect();
-                let perm_meta = graph.nodes[x_id]
-                    .meta
-                    .cloned_with_val(permuted_shape, &x_dtype);
+                let perm_meta = x_meta.preserve_qparams(permuted_shape);
                 let perm_id = graph.add_anchored_permute_copy(
                     id,
                     format!("{}_x_perm", node_name),
@@ -138,9 +139,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
             }
 
             // Flatten x to (B, K, C)
-            let x_bkc_meta = graph.nodes[x_id]
-                .meta
-                .cloned_with_val(vec![batch, k, c], &x_dtype);
+            let x_bkc_meta = x_meta.preserve_qparams(vec![batch, k, c]);
             let x_bkc = graph.add_anchored_view_copy(
                 id,
                 format!("{}_x_flat", node_name),
@@ -157,10 +156,9 @@ impl IrPass for IrDecomposeIndexTensorPass {
             } else {
                 x_dtype.clone()
             };
+            let gather_meta = x_base_meta.tensor_stamp(&gather_dtype);
             let gather_x = if x_is_bool {
-                let cast_meta = graph.nodes[x_id]
-                    .meta
-                    .cloned_without_qparams(vec![batch, k, c], &gather_dtype);
+                let cast_meta = gather_meta.drop_qparams(vec![batch, k, c]);
                 graph.add_anchored_dtype_cast(
                     id,
                     format!("{}_x_i8", node_name),
@@ -190,7 +188,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
             };
 
             // Unsqueeze to (1, W), then tile across batch if needed.
-            let idx_1w_meta = orig_meta.cloned_without_qparams(vec![1, w], &idx_dtype);
+            let idx_1w_meta = index_meta.drop_qparams(vec![1, w]);
             let idx_bw_seed = graph.add_anchored_call_function(
                 id,
                 format!("{}_idx_1w", node_name),
@@ -202,7 +200,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
             let idx_bw = if batch == 1 {
                 idx_bw_seed
             } else {
-                let expand_meta = orig_meta.cloned_without_qparams(vec![batch, w], &idx_dtype);
+                let expand_meta = index_meta.drop_qparams(vec![batch, w]);
                 let expand_id = graph.add_anchored_call_function(
                     id,
                     format!("{}_idx_bw", node_name),
@@ -214,9 +212,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
             };
 
             // GATHER(x_bkc, idx_bw) → (B, W, C)
-            let gathered_meta = graph.nodes[x_id]
-                .meta
-                .cloned_with_val(vec![batch, w, c], &gather_dtype);
+            let gathered_meta = gather_meta.preserve_qparams(vec![batch, w, c]);
             let gathered = graph.add_anchored_call_function(
                 id,
                 format!("{}_gather", node_name),
@@ -225,9 +221,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 gathered_meta,
             );
             let gathered = if x_is_bool {
-                let cast_meta = graph.nodes[x_id]
-                    .meta
-                    .cloned_without_qparams(vec![batch, w, c], &x_dtype);
+                let cast_meta = x_meta.drop_qparams(vec![batch, w, c]);
                 graph.add_anchored_dtype_cast(
                     id,
                     format!("{}_gather_bool", node_name),
@@ -241,9 +235,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
 
             // Reshape to (...batch, ...broadcast, ...kept)
             let out_shape = compute_index_output_shape(&batch_shape, &broadcast, &kept_shape);
-            let result_meta = graph.nodes[x_id]
-                .meta
-                .cloned_with_val(out_shape.clone(), &x_dtype);
+            let result_meta = x_meta.preserve_qparams(out_shape.clone());
             graph.replace_with_view_copy(
                 id,
                 format!("{}_out", node_name),

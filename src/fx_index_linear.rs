@@ -33,6 +33,7 @@ pub(crate) fn build_linear_index(graph: &mut IrGraph, spec: LinearIndexSpec<'_>)
         return None;
     }
 
+    let index_meta = spec.meta.tensor_stamp(spec.index_dtype);
     let mut linear_index = None;
     for (i, (&index_id, (index_shape, &linear_scale))) in spec
         .index_ids
@@ -53,7 +54,7 @@ pub(crate) fn build_linear_index(graph: &mut IrGraph, spec: LinearIndexSpec<'_>)
                 format!("{}_idx{}_align", spec.name, i),
                 "aten.view_copy.default".to_string(),
                 vec![IrArg::Node(current), i64_list(&aligned)],
-                spec.meta.cloned_without_qparams(aligned, spec.index_dtype),
+                index_meta.drop_qparams(aligned),
             );
             current = aligned_id;
         }
@@ -63,8 +64,7 @@ pub(crate) fn build_linear_index(graph: &mut IrGraph, spec: LinearIndexSpec<'_>)
             format!("{}_idx{}_bcast", spec.name, i),
             "aten.expand_copy.default".to_string(),
             vec![IrArg::Node(current), i64_list(spec.broadcast_shape)],
-            spec.meta
-                .cloned_without_qparams(spec.broadcast_shape.to_vec(), spec.index_dtype),
+            index_meta.drop_qparams(spec.broadcast_shape.to_vec()),
         );
 
         let flat_id = graph.add_anchored_call_function(
@@ -72,8 +72,7 @@ pub(crate) fn build_linear_index(graph: &mut IrGraph, spec: LinearIndexSpec<'_>)
             format!("{}_idx{}_flat", spec.name, i),
             "aten.view_copy.default".to_string(),
             vec![IrArg::Node(broadcast_id), i64_list(&[spec.flat_len])],
-            spec.meta
-                .cloned_without_qparams(vec![spec.flat_len], spec.index_dtype),
+            index_meta.drop_qparams(vec![spec.flat_len]),
         );
 
         let scale_id = graph.add_anchored_full_int(
@@ -82,7 +81,7 @@ pub(crate) fn build_linear_index(graph: &mut IrGraph, spec: LinearIndexSpec<'_>)
             &[1],
             linear_scale,
             spec.index_dtype,
-            spec.meta.cloned_without_qparams(vec![1], spec.index_dtype),
+            index_meta.drop_qparams(vec![1]),
         );
 
         let scaled_id = graph.add_anchored_call_function(
@@ -90,8 +89,7 @@ pub(crate) fn build_linear_index(graph: &mut IrGraph, spec: LinearIndexSpec<'_>)
             format!("{}_idx{}_scaled", spec.name, i),
             "aten.mul.Tensor".to_string(),
             vec![IrArg::Node(flat_id), IrArg::Node(scale_id)],
-            spec.meta
-                .cloned_without_qparams(vec![spec.flat_len], spec.index_dtype),
+            index_meta.drop_qparams(vec![spec.flat_len]),
         );
 
         linear_index = Some(match linear_index {
@@ -101,8 +99,7 @@ pub(crate) fn build_linear_index(graph: &mut IrGraph, spec: LinearIndexSpec<'_>)
                 format!("{}_idx{}_add", spec.name, i),
                 "aten.add.Tensor".to_string(),
                 vec![IrArg::Node(prev), IrArg::Node(scaled_id)],
-                spec.meta
-                    .cloned_without_qparams(vec![spec.flat_len], spec.index_dtype),
+                index_meta.drop_qparams(vec![spec.flat_len]),
             ),
         });
     }

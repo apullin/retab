@@ -3,6 +3,7 @@
 //! Defines typed FX metadata, imported graph topology, graph-surgery helpers,
 //! and the pass traits used by the Rust lowering pipeline.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
@@ -1531,23 +1532,39 @@ fn resolve_arg(py_arg: &Bound<'_, PyAny>, name_to_id: &HashMap<String, NodeId>) 
 // NodeMeta — typed metadata extracted from a Python FX node
 // ---------------------------------------------------------------------------
 
-/// Rust-side representation of a FakeTensor's core metadata.
+/// Lossless tensor value facts imported from FX metadata.
+///
+/// The dtype stays in torch spelling so the FX-side IR can round-trip boundary
+/// data exactly; typed decisions should use `dtype_kind`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FakeTensorMeta {
+pub struct TensorFacts {
     pub shape: Vec<i64>,
     pub dtype: String,
 }
 
-impl FakeTensorMeta {
+pub type FakeTensorMeta = TensorFacts;
+
+impl TensorFacts {
+    pub fn new(shape: impl Into<Vec<i64>>, dtype: impl Into<String>) -> Self {
+        Self {
+            shape: shape.into(),
+            dtype: dtype.into(),
+        }
+    }
+
     pub fn from_py(val: &Bound<'_, PyAny>) -> Option<Self> {
         let val_attrs = attrs(val);
-        let shape = val_attrs.optional("shape")?;
+        let shape: Vec<i64> = val_attrs.optional("shape")?;
         let dtype = val_attrs.display_optional("dtype")?;
-        Some(Self { shape, dtype })
+        Some(Self::new(shape, dtype))
     }
 
     pub fn rank(&self) -> usize {
         self.shape.len()
+    }
+
+    pub fn dtype_kind(&self) -> DType {
+        DType::from_torch_str(&self.dtype)
     }
 }
 
@@ -1600,11 +1617,15 @@ fn extract_qparam_dict(py_dict: &Bound<'_, PyAny>) -> Option<HashMap<usize, QPar
 impl NodeMeta {
     pub fn tensor(shape: impl Into<Vec<i64>>, dtype: impl Into<String>) -> Self {
         let mut meta = Self::default();
-        meta.set_val(FakeTensorMeta {
-            shape: shape.into(),
-            dtype: dtype.into(),
-        });
+        meta.set_tensor_facts(TensorFacts::new(shape, dtype));
         meta
+    }
+
+    pub fn tensor_stamp<'a>(&'a self, dtype: impl Into<Cow<'a, str>>) -> TensorMetaStamp<'a> {
+        TensorMetaStamp {
+            base: self,
+            dtype: dtype.into(),
+        }
     }
 
     /// Extract typed metadata from a Python FX node.
@@ -1621,7 +1642,7 @@ impl NodeMeta {
             .and_then(|v| extract_qparam_dict(&v));
 
         let val_obj = meta_attrs.value("val");
-        let val = val_obj.as_ref().and_then(|v| FakeTensorMeta::from_py(v));
+        let val = val_obj.as_ref().and_then(|v| TensorFacts::from_py(v));
         let val_dim_order = val_obj
             .as_ref()
             .and_then(|v| attrs(v).call_optional("dim_order"));
@@ -1677,15 +1698,15 @@ impl NodeMeta {
     // --- Accessors ---
 
     pub fn val_shape(&self) -> Option<&[i64]> {
-        self.val.as_ref().map(|v| v.shape.as_slice())
+        self.tensor_facts().map(|v| v.shape.as_slice())
     }
 
     pub fn val_dtype(&self) -> Option<&str> {
-        self.val.as_ref().map(|v| v.dtype.as_str())
+        self.tensor_facts().map(|v| v.dtype.as_str())
     }
 
     pub fn val_dtype_kind(&self) -> Option<DType> {
-        self.val_dtype().map(DType::from_torch_str)
+        self.tensor_facts().map(TensorFacts::dtype_kind)
     }
 
     pub fn val_dtype_is(&self, dtype: DType) -> bool {
@@ -1791,58 +1812,38 @@ impl NodeMeta {
         self.tosa_spatial_rank.unwrap_or(default)
     }
 
-    pub fn set_val(&mut self, ftm: FakeTensorMeta) {
-        self.val = Some(ftm);
+    pub fn tensor_facts(&self) -> Option<&TensorFacts> {
+        self.val.as_ref()
     }
 
-    pub fn set_val_dtype_for_existing_shape(&mut self, dtype: impl Into<String>) -> bool {
+    pub fn set_tensor_facts(&mut self, facts: TensorFacts) {
+        self.val = Some(facts);
+    }
+
+    pub fn set_val(&mut self, ftm: FakeTensorMeta) {
+        self.set_tensor_facts(ftm);
+    }
+
+    pub fn set_tensor_facts_for_existing_shape(&mut self, dtype: impl Into<String>) -> bool {
         let Some(shape) = self.val_shape().map(|shape| shape.to_vec()) else {
             return false;
         };
-        self.set_val(FakeTensorMeta {
-            shape,
-            dtype: dtype.into(),
-        });
+        self.set_tensor_facts(TensorFacts::new(shape, dtype));
         true
     }
 
-    pub fn cloned_with_val(&self, shape: impl Into<Vec<i64>>, dtype: impl Into<String>) -> Self {
+    pub fn set_val_dtype_for_existing_shape(&mut self, dtype: impl Into<String>) -> bool {
+        self.set_tensor_facts_for_existing_shape(dtype)
+    }
+
+    pub fn cloned_with_tensor_facts(&self, facts: TensorFacts) -> Self {
         let mut meta = self.clone();
-        meta.set_val(FakeTensorMeta {
-            shape: shape.into(),
-            dtype: dtype.into(),
-        });
+        meta.set_tensor_facts(facts);
         meta
     }
 
-    pub fn cloned_without_qparams(
-        &self,
-        shape: impl Into<Vec<i64>>,
-        dtype: impl Into<String>,
-    ) -> Self {
-        self.cloned_with_val(shape, dtype).without_qparams()
-    }
-
-    pub fn cloned_plain_tensor(
-        &self,
-        shape: impl Into<Vec<i64>>,
-        dtype: impl Into<String>,
-    ) -> Self {
-        let mut meta = self.cloned_with_val(shape, dtype);
-        meta.set_empty_input_qparams();
-        meta.clear_output_qparams();
-        meta.clear_tosa_special_dtype();
-        meta
-    }
-
-    pub fn cloned_with_empty_qparam_maps(
-        &self,
-        shape: impl Into<Vec<i64>>,
-        dtype: impl Into<String>,
-    ) -> Self {
-        let mut meta = self.cloned_with_val(shape, dtype);
-        meta.set_empty_qparam_maps();
-        meta
+    pub fn cloned_with_val(&self, shape: impl Into<Vec<i64>>, dtype: impl Into<String>) -> Self {
+        self.cloned_with_tensor_facts(TensorFacts::new(shape, dtype))
     }
 
     pub fn without_qparams(mut self) -> Self {
@@ -1977,10 +1978,7 @@ impl NodeMeta {
         meta.set_single_output_qparam(output_qparam.clone());
         meta.clear_tosa_special_dtype();
         if let Some(shape) = shape_source.val_shape() {
-            meta.set_val(FakeTensorMeta {
-                shape: shape.to_vec(),
-                dtype: output_qparam.dtype_str,
-            });
+            meta.set_tensor_facts(TensorFacts::new(shape.to_vec(), output_qparam.dtype_str));
         }
         meta
     }
@@ -2014,6 +2012,41 @@ impl NodeMeta {
             Some(MetaValue::Str(v)) => Some(v.as_str()),
             _ => None,
         }
+    }
+}
+
+pub struct TensorMetaStamp<'a> {
+    base: &'a NodeMeta,
+    dtype: Cow<'a, str>,
+}
+
+impl TensorMetaStamp<'_> {
+    fn facts(&self, shape: impl Into<Vec<i64>>) -> TensorFacts {
+        TensorFacts::new(shape, self.dtype.as_ref())
+    }
+
+    pub fn preserve_qparams(&self, shape: impl Into<Vec<i64>>) -> NodeMeta {
+        self.base.cloned_with_tensor_facts(self.facts(shape))
+    }
+
+    pub fn drop_qparams(&self, shape: impl Into<Vec<i64>>) -> NodeMeta {
+        self.base
+            .cloned_with_tensor_facts(self.facts(shape))
+            .without_qparams()
+    }
+
+    pub fn empty_qparam_maps(&self, shape: impl Into<Vec<i64>>) -> NodeMeta {
+        let mut meta = self.base.cloned_with_tensor_facts(self.facts(shape));
+        meta.set_empty_qparam_maps();
+        meta
+    }
+
+    pub fn plain_tensor(&self, shape: impl Into<Vec<i64>>) -> NodeMeta {
+        let mut meta = self.base.cloned_with_tensor_facts(self.facts(shape));
+        meta.set_empty_input_qparams();
+        meta.clear_output_qparams();
+        meta.clear_tosa_special_dtype();
+        meta
     }
 }
 
