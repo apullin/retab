@@ -1231,6 +1231,14 @@ Deleted: table-op local input/output qparam presence helper and direct qparam-fi
 Added: `NodeMeta::has_qparam_metadata()` and `NodeMeta::has_nonempty_input_and_output_qparams()`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_insert_table_ops_ir::tests`; `cargo test --lib fx_replace_inf_values_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over pow, remainder, elu, gelu, sigmoid, exp, log, sqrt, rsqrt, and masked_fill; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `216 passed, 6 expected xfails, 403 deselected`. No model lane was run. This names the important Tensor Facts distinction between qparam metadata being present at all and both input/output qparam maps being non-empty.
+
+2026-06-14, nonempty qparam metadata predicate slice
+Rust LOC: 36,820 -> 36,818
+Movement: -2 Rust LOC
+Deleted: local quantized-metadata helper in derived op decomposition
+Added: `NodeMeta::has_nonempty_qparam_metadata()`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_decompose_ops_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over pow, remainder, elu, gelu, sigmoid, exp, log, sqrt, rsqrt, and masked_fill; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `216 passed, 6 expected xfails, 403 deselected`. No model lane was run. This keeps quantized-envelope detection in the metadata grammar instead of a decomposition-pass-local map scan.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1382,8 +1390,8 @@ use `NodeMeta::cloned_with_empty_qparam_maps`, distinct from
 the symmetric `NodeMeta::set_output_qparams_from`, and whole-map qparam copying
 from one metadata object to another is named by `copy_input_qparams_from` and
 `copy_output_qparams_from`. Qparam fact predicates now also live on `NodeMeta`,
-including the distinction between "any qparam metadata is present" and "both
-input/output qparam maps are non-empty".
+including the distinction between "any qparam metadata is present", "any qparam
+map is non-empty", and "both input/output qparam maps are non-empty".
 
 Problem:
 

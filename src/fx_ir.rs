@@ -1645,6 +1645,16 @@ impl NodeMeta {
         self.input_qparams.is_some() || self.output_qparams.is_some()
     }
 
+    pub fn has_nonempty_qparam_metadata(&self) -> bool {
+        self.input_qparams
+            .as_ref()
+            .is_some_and(|qparams| !qparams.is_empty())
+            || self
+                .output_qparams
+                .as_ref()
+                .is_some_and(|qparams| !qparams.is_empty())
+    }
+
     pub fn has_nonempty_input_and_output_qparams(&self) -> bool {
         self.input_qparams
             .as_ref()

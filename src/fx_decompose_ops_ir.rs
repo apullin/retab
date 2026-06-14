@@ -354,18 +354,6 @@ impl ApproxCtx {
 const MAX_DIM_MATCHER: TargetMatcher = TargetMatcher::any(&["aten.max.dim"]);
 const MIN_DIM_MATCHER: TargetMatcher = TargetMatcher::any(&["aten.min.dim"]);
 
-fn has_quantized_meta(node: &crate::fx_ir::IrNode) -> bool {
-    node.meta
-        .input_qparams
-        .as_ref()
-        .is_some_and(|qparams| !qparams.is_empty())
-        || node
-            .meta
-            .output_qparams
-            .as_ref()
-            .is_some_and(|qparams| !qparams.is_empty())
-}
-
 fn has_direct_non_getitem_user(graph: &IrGraph, id: NodeId) -> bool {
     graph.nodes.iter().any(|node| {
         node.alive
@@ -649,7 +637,7 @@ fn decompose_add_sub_alpha(graph: &mut IrGraph, id: NodeId) -> bool {
 }
 
 fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
-    if has_quantized_meta(&graph.nodes[id]) {
+    if graph.nodes[id].meta.has_nonempty_qparam_metadata() {
         return false;
     }
 
