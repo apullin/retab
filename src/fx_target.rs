@@ -41,6 +41,18 @@ pub(crate) enum NoopTarget {
     DtypeCheckedPassthrough,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SizeAdjustTargetKind {
+    Conv,
+    Pool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LayerNormTargetKind {
+    Plain,
+    NativeOrOther,
+}
+
 macro_rules! contains_any {
     ($target:expr, $($marker:literal),+ $(,)?) => {
         false $(|| $target.contains($marker))+
@@ -255,15 +267,18 @@ pub(crate) fn is_conv_accumulator_target(target: &str) -> bool {
     contains_any!(&target, "aten.convolution", "aten.conv2d")
 }
 
-pub(crate) fn is_size_adjust_target(target: &str) -> bool {
+pub(crate) fn size_adjust_target_kind(target: &str) -> Option<SizeAdjustTargetKind> {
     let target = target.to_ascii_lowercase();
     if is_transpose_conv2d_target(&target) {
-        return false;
+        return None;
     }
-    contains_any!(
-        &target;
-        "convolution.default" | "conv2d" | "conv3d" | "max_pool2d" | "avg_pool2d"
-    )
+    if contains_any!(&target; "convolution.default" | "conv2d" | "conv3d") {
+        return Some(SizeAdjustTargetKind::Conv);
+    }
+    if contains_any!(&target; "max_pool2d" | "avg_pool2d") {
+        return Some(SizeAdjustTargetKind::Pool);
+    }
+    None
 }
 
 pub(crate) fn is_split_target(target: &str) -> bool {
@@ -320,7 +335,26 @@ pub(crate) fn is_cumsum_target(target: &str) -> bool {
 }
 
 pub(crate) fn is_layer_norm_target(target: &str) -> bool {
-    contains_any!(target, "layer_norm", "native_layer_norm")
+    layer_norm_target_kind(target).is_some()
+}
+
+pub(crate) fn layer_norm_target_kind(target: &str) -> Option<LayerNormTargetKind> {
+    if target.contains("native_layer_norm") {
+        return Some(LayerNormTargetKind::NativeOrOther);
+    }
+    if target.contains("layer_norm.default") {
+        return Some(LayerNormTargetKind::Plain);
+    }
+    target
+        .contains("layer_norm")
+        .then_some(LayerNormTargetKind::NativeOrOther)
+}
+
+pub(crate) fn layer_norm_param_view_target(target: &str) -> Option<&'static str> {
+    match layer_norm_target_kind(target)? {
+        LayerNormTargetKind::Plain => Some("aten.reshape.default"),
+        LayerNormTargetKind::NativeOrOther => Some("aten.view_copy.default"),
+    }
 }
 
 pub(crate) fn is_var_target(target: &str) -> bool {
@@ -654,8 +688,15 @@ mod tests {
             "backend.tosa.DEPTHWISE_CONV2D.default"
         ));
         assert!(is_conv_accumulator_target("aten.conv2d.padding"));
-        assert!(is_size_adjust_target("aten.avg_pool2d.default"));
-        assert!(!is_size_adjust_target("aten.transpose_conv2d.input"));
+        assert_eq!(
+            size_adjust_target_kind("aten.conv2d.default"),
+            Some(SizeAdjustTargetKind::Conv)
+        );
+        assert_eq!(
+            size_adjust_target_kind("aten.avg_pool2d.default"),
+            Some(SizeAdjustTargetKind::Pool)
+        );
+        assert_eq!(size_adjust_target_kind("aten.transpose_conv2d.input"), None);
     }
 
     #[test]
@@ -677,6 +718,22 @@ mod tests {
         assert!(is_index_tensor_target("aten.index.Tensor"));
         assert!(is_cumsum_target("aten.cumsum.default"));
         assert!(is_layer_norm_target("aten.native_layer_norm.default"));
+        assert_eq!(
+            layer_norm_target_kind("aten.layer_norm.default"),
+            Some(LayerNormTargetKind::Plain)
+        );
+        assert_eq!(
+            layer_norm_target_kind("aten.native_layer_norm.default"),
+            Some(LayerNormTargetKind::NativeOrOther)
+        );
+        assert_eq!(
+            layer_norm_param_view_target("aten.layer_norm.default"),
+            Some("aten.reshape.default")
+        );
+        assert_eq!(
+            layer_norm_param_view_target("aten.native_layer_norm.default"),
+            Some("aten.view_copy.default")
+        );
         assert!(is_var_target("aten.var.correction"));
         assert!(is_var_dim_target("aten.var.dim"));
         assert!(is_plain_avg_pool2d_target("aten.avg_pool2d.default"));

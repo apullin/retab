@@ -1183,6 +1183,14 @@ Deleted: duplicate contiguous-stride calculation from as_strided_copy decomposit
 Added: no new API beyond reuse of `fx_index_linear::contiguous_strides`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over index_tensor, index_put, index_select, index_copy, gather, unfold_copy, and as_strided_copy; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `161 passed, 20 expected xfails, 260 deselected`. No model lane was run. This keeps contiguous stride semantics in one helper while preserving as_strided_copy's relaxed last-dimension stride check.
+
+2026-06-14, typed target-kind cleanup slice
+Rust LOC: 36,777 -> 36,829
+Movement: +52 Rust LOC
+Deleted: pass-local layer_norm.default-vs-native view-target selection and size-adjust conv-vs-pool substring classification
+Added: `LayerNormTargetKind`, `SizeAdjustTargetKind`, `layer_norm_param_view_target(...)`, and typed target tests for layernorm and size-adjust semantics
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_target::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over layer_norm, conv2d, conv3d, depthwise_conv, max_pool, and avg_pool2d; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `432 passed, 1 expected xfail, 1202 deselected`. No model lane was run. This is setup-positive in LOC because the target grammar gained explicit typed tests, but it removes two remaining local target-string dialects from production passes.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1199,13 +1207,17 @@ conv/linear producer predicates. Grouped-conv and quant decomposition also use
 the shared convolution and per-tensor Q/DQ predicates. Linear decomposition now
 uses the shared linear predicate. IR-native control-flow boundary and region
 metadata collection now use shared cond/while predicates. Conv bias
-annotation, conv accumulator rescale insertion, size-adjust input filtering,
-and transpose-conv2d weight detection now share named target-family helpers.
+annotation, conv accumulator rescale insertion, typed size-adjust conv/pool
+classification, and transpose-conv2d weight detection now share named
+target-family helpers.
 The large decompose-op pass now uses a local `TargetMatcher` grammar in its
 rule table instead of many one-line predicate wrappers. Smaller decomposition
 and rewrite passes now also use shared `fx_target` helpers for split, tril,
 layernorm, var, avg_pool2d padding, as_strided_copy, pad, pixel shuffle,
 squeeze/unsqueeze, dim-transpose, index_put, where, and clamp target families.
+Layernorm parameter view target selection now also lives in `fx_target`, so
+plain and native layernorm decomposition no longer spell local target-string
+rules.
 Addmm decomposition now uses the classifier-backed node predicate instead of a
 raw substring check. Noop removal and fp-to-int cast decoration now use the
 typed `NoopTarget` classifier.

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta};
-use crate::fx_target::is_layer_norm_target;
+use crate::fx_target::{is_layer_norm_target, layer_norm_param_view_target};
 use crate::runner_logging::log_line;
 
 fn first_output_user_meta(graph: &IrGraph, id: NodeId) -> Option<NodeMeta> {
@@ -123,11 +123,8 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         .arg_numeric_f64(4)
         .unwrap_or(f32::EPSILON as f64);
     let name = graph.nodes[id].name.clone();
-    let target = graph.nodes[id].target.clone();
-    let view_target = if target.contains("layer_norm.default") && !target.contains("native") {
-        "aten.reshape.default"
-    } else {
-        "aten.view_copy.default"
+    let Some(view_target) = layer_norm_param_view_target(&graph.nodes[id].target) else {
+        return false;
     };
 
     let mean = graph.add_anchored_call_function(
