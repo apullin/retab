@@ -100,20 +100,6 @@ struct OutputContract {
     targets: Vec<(usize, fx_ir::QParam)>,
 }
 
-fn boundary_rescale_args(
-    source_id: fx_ir::NodeId,
-    source_qp: &fx_ir::QParam,
-    target_qp: &fx_ir::QParam,
-) -> Vec<fx_ir::IrArg> {
-    vec![
-        fx_ir::IrArg::Node(source_id),
-        fx_ir::IrArg::Dtype(target_qp.dtype_str.clone()),
-        fx_ir::IrArg::List(vec![fx_ir::IrArg::Float(source_qp.scale / target_qp.scale)]),
-        fx_ir::IrArg::Int(source_qp.zp),
-        fx_ir::IrArg::Int(target_qp.zp),
-    ]
-}
-
 fn boundary_rescale_meta(
     base_meta: &fx_ir::NodeMeta,
     source_meta: &fx_ir::NodeMeta,
@@ -135,29 +121,29 @@ fn add_boundary_rescale(
     base_meta_id: fx_ir::NodeId,
     source_qp: &fx_ir::QParam,
     target_qp: &fx_ir::QParam,
-) -> (fx_ir::NodeId, Vec<fx_ir::IrArg>) {
-    let args = boundary_rescale_args(source_id, source_qp, target_qp);
+) -> fx_ir::NodeId {
     let meta = boundary_rescale_meta(
         &graph.nodes[base_meta_id].meta,
         &graph.nodes[source_id].meta,
         source_qp,
         target_qp,
     );
-    let rescale = graph.add_node(
-        fx_control_flow_metadata::NodeOp::CallFunction,
+    graph.add_rescale(fx_ir::RescaleRewrite::new(
         name,
-        "backend.tosa.RESCALE.default".to_string(),
-        args.clone(),
+        source_id,
+        target_qp.dtype_str.clone(),
+        vec![source_qp.scale / target_qp.scale],
+        source_qp.zp,
+        target_qp.zp,
         meta,
-    );
-    (rescale, args)
+    ))
 }
 
 fn boundary_placeholder_ids(graph: &fx_ir::IrGraph) -> Vec<fx_ir::NodeId> {
     graph
         .nodes
         .iter()
-        .filter(|node| node.alive && node.op == fx_control_flow_metadata::NodeOp::Placeholder)
+        .filter(|node| node.alive && node.op == fx_ir::NodeOp::Placeholder)
         .map(|node| node.id)
         .collect()
 }
@@ -515,7 +501,7 @@ fn apply_boundary_contract_to_submodule(
         }
 
         let ph_name = graph.nodes[ph_id].name.clone();
-        let (rescale, rescale_args) = add_boundary_rescale(
+        let rescale = add_boundary_rescale(
             graph,
             format!("{ph_name}_cf_input_rescale"),
             ph_id,
@@ -525,7 +511,7 @@ fn apply_boundary_contract_to_submodule(
         );
         graph.anchor_after(rescale, ph_id);
         graph.replace_all_uses(ph_id, rescale);
-        graph.set_args(rescale, rescale_args);
+        graph.set_arg(rescale, 0, fx_ir::IrArg::Node(ph_id));
         graph.nodes[ph_id].meta.clear_output_qparams();
         changed += 1;
     }
@@ -619,7 +605,7 @@ fn rewrite_output_dequantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
         }
         let all_rescale_or_output = user_ids.iter().all(|&uid| {
             let user = &graph.nodes[uid];
-            user.alive && (user.is_rescale() || user.op == fx_control_flow_metadata::NodeOp::Output)
+            user.alive && (user.is_rescale() || user.op == fx_ir::NodeOp::Output)
         });
         if !all_rescale_or_output {
             continue;
@@ -659,7 +645,7 @@ fn rewrite_quantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
         }
 
         let q_name = graph.nodes[q_id].name.clone();
-        let (rescale, _) = add_boundary_rescale(
+        let rescale = add_boundary_rescale(
             graph,
             format!("{q_name}_boundary_rescale"),
             source_id,
@@ -776,7 +762,7 @@ fn apply_output_rescale_contract_ir(graph: &mut fx_ir::IrGraph, contract: &Outpu
         }
 
         let src_name = graph.nodes[src_id].name.clone();
-        let (rescale, _) = add_boundary_rescale(
+        let rescale = add_boundary_rescale(
             graph,
             format!("{src_name}_cf_output_rescale"),
             src_id,

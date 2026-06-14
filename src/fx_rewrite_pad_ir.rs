@@ -29,10 +29,10 @@ fn add_slice(
     let mut out_shape = x_shape.to_vec();
     out_shape[dim] = 1;
     // slice_copy.Tensor(x, dim, idx, idx+1) — width-1 slice keeping the dim.
-    let n = graph.add_node(
-        NodeOp::CallFunction,
+    let n = graph.add_anchored_call_function(
+        id,
         name,
-        "aten.slice_copy.Tensor".to_string(),
+        "aten.slice_copy.Tensor",
         vec![
             IrArg::Node(x_id),
             IrArg::Int(dim as i64),
@@ -41,7 +41,6 @@ fn add_slice(
         ],
         base_meta.cloned_with_val(out_shape, dtype),
     );
-    graph.anchor_to(n, id);
     if let Some(p) = *prev {
         graph.anchor_after(n, p);
     }
@@ -118,15 +117,14 @@ fn pad_along_dim(
 
     let mut out_shape = x_shape.to_vec();
     out_shape[dim] = size + left + right;
-    let cat = graph.add_node(
-        NodeOp::CallFunction,
+    let cat = graph.add_anchored_call_function(
+        id,
         format!("{}_cat{}", name_prefix, *counter),
-        "aten.cat.default".to_string(),
+        "aten.cat.default",
         vec![IrArg::List(members), IrArg::Int(dim as i64)],
         base_meta.cloned_with_val(out_shape.clone(), dtype),
     );
     *counter += 1;
-    graph.anchor_to(cat, id);
     if let Some(p) = *prev {
         graph.anchor_after(cat, p);
     }

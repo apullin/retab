@@ -84,36 +84,33 @@ impl IrPass for IrCanonicalizeGatherPass {
 
             // Optional bool→int8 cast
             if needs_bool_cast {
-                let cast_id = graph.add_node(
-                    NodeOp::CallFunction,
+                let cast_id = graph.add_anchored_call_function(
+                    id,
                     format!("{}_bool_to_int8", node_name),
-                    "aten._to_copy.default".to_string(),
+                    "aten._to_copy.default",
                     vec![IrArg::Node(x_id)],
                     orig_meta.cloned_with_val(x_shape.clone(), work_dtype),
                 );
-                graph.anchor_to(cast_id, id);
                 values_in = cast_id;
             }
 
             let result = if x_shape.len() == 2 {
                 // 2D path: view to 3D → GATHER → view back to 2D
-                let v3d = graph.add_node(
-                    NodeOp::CallFunction,
+                let v3d = graph.add_anchored_call_function(
+                    id,
                     format!("{}_values_3d", node_name),
-                    "aten.view_copy.default".to_string(),
+                    "aten.view_copy.default",
                     vec![IrArg::Node(values_in), i64_list(&[n, k, 1])],
                     orig_meta.cloned_with_val(vec![n, k, 1], work_dtype),
                 );
-                graph.anchor_to(v3d, id);
 
-                let gathered = graph.add_node(
-                    NodeOp::CallFunction,
+                let gathered = graph.add_anchored_call_function(
+                    id,
                     format!("{}_gather", node_name),
-                    "backend.tosa.GATHER.default".to_string(),
+                    "backend.tosa.GATHER.default",
                     vec![IrArg::Node(v3d), IrArg::Node(index_id)],
                     orig_meta.cloned_with_val(vec![n, w, 1], work_dtype),
                 );
-                graph.anchor_to(gathered, id);
 
                 graph.add_node(
                     NodeOp::CallFunction,
@@ -126,59 +123,53 @@ impl IrPass for IrCanonicalizeGatherPass {
                 // 3D path: permute(0,2,1) → reshape(N*C,K,1) → GATHER → reshape(N,C,W) → permute(0,2,1)
                 let c = x_shape[2];
 
-                let vperm = graph.add_node(
-                    NodeOp::CallFunction,
+                let vperm = graph.add_anchored_call_function(
+                    id,
                     format!("{}_values_perm", node_name),
-                    "aten.permute_copy.default".to_string(),
+                    "aten.permute_copy.default",
                     vec![IrArg::Node(values_in), i64_list(&[0, 2, 1])],
                     orig_meta.cloned_with_val(vec![n, c, k], work_dtype),
                 );
-                graph.anchor_to(vperm, id);
 
-                let vresh = graph.add_node(
-                    NodeOp::CallFunction,
+                let vresh = graph.add_anchored_call_function(
+                    id,
                     format!("{}_values_flat", node_name),
-                    "aten.view_copy.default".to_string(),
+                    "aten.view_copy.default",
                     vec![IrArg::Node(vperm), i64_list(&[n * c, k, 1])],
                     orig_meta.cloned_with_val(vec![n * c, k, 1], work_dtype),
                 );
-                graph.anchor_to(vresh, id);
 
-                let iperm = graph.add_node(
-                    NodeOp::CallFunction,
+                let iperm = graph.add_anchored_call_function(
+                    id,
                     format!("{}_idx_perm", node_name),
-                    "aten.permute_copy.default".to_string(),
+                    "aten.permute_copy.default",
                     vec![IrArg::Node(index_id), i64_list(&[0, 2, 1])],
                     orig_meta.cloned_with_val(vec![n, c, w], "torch.int64"),
                 );
-                graph.anchor_to(iperm, id);
 
-                let iresh = graph.add_node(
-                    NodeOp::CallFunction,
+                let iresh = graph.add_anchored_call_function(
+                    id,
                     format!("{}_idx_flat", node_name),
-                    "aten.view_copy.default".to_string(),
+                    "aten.view_copy.default",
                     vec![IrArg::Node(iperm), i64_list(&[n * c, w])],
                     orig_meta.cloned_with_val(vec![n * c, w], "torch.int64"),
                 );
-                graph.anchor_to(iresh, id);
 
-                let gathered = graph.add_node(
-                    NodeOp::CallFunction,
+                let gathered = graph.add_anchored_call_function(
+                    id,
                     format!("{}_gather", node_name),
-                    "backend.tosa.GATHER.default".to_string(),
+                    "backend.tosa.GATHER.default",
                     vec![IrArg::Node(vresh), IrArg::Node(iresh)],
                     orig_meta.cloned_with_val(vec![n * c, w, 1], work_dtype),
                 );
-                graph.anchor_to(gathered, id);
 
-                let gresh = graph.add_node(
-                    NodeOp::CallFunction,
+                let gresh = graph.add_anchored_call_function(
+                    id,
                     format!("{}_gather_3d", node_name),
-                    "aten.view_copy.default".to_string(),
+                    "aten.view_copy.default",
                     vec![IrArg::Node(gathered), i64_list(&[n, c, w])],
                     orig_meta.cloned_with_val(vec![n, c, w], work_dtype),
                 );
-                graph.anchor_to(gresh, id);
 
                 graph.add_node(
                     NodeOp::CallFunction,

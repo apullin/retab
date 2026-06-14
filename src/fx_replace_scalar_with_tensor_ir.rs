@@ -61,24 +61,22 @@ impl IrPass for IrReplaceScalarWithTensorPass {
                 .to_string();
             let shape = [1];
 
-            let full = graph.add_node_with_kwargs(
-                NodeOp::CallFunction,
+            let full = graph.add_anchored_call_function_with_kwargs(
+                id,
                 format!("{}_scalar_tensor", node_name),
-                "aten.full.default".to_string(),
+                "aten.full.default",
                 vec![IrArg::List(vec![IrArg::Int(1)]), scalar_value],
                 dtype_kwarg(lhs_dtype.clone()),
                 NodeMeta::tensor(shape, &lhs_dtype),
             );
-            graph.anchor_to(full, id);
 
-            let replacement = graph.add_node(
-                NodeOp::CallFunction,
+            let replacement = graph.add_anchored_call_function(
+                id,
                 format!("{}_tensor", node_name),
-                new_target.to_string(),
+                new_target,
                 vec![IrArg::Node(lhs_id), IrArg::Node(full)],
                 output_meta,
             );
-            graph.anchor_to(replacement, id);
 
             graph.replace_and_erase(id, replacement);
             modified = true;

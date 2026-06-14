@@ -199,10 +199,10 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
     let mut conv2d_meta = base_meta.cloned_with_val(conv2d_shape.to_vec(), &orig_out_dtype);
     conv2d_meta.copy_qparams_from(&graph.nodes[id].meta);
 
-    let conv2d = graph.add_node(
-        NodeOp::CallFunction,
+    let conv2d = graph.add_anchored_call_function(
+        id,
         format!("{}_conv2d", node_name),
-        "aten.convolution.default".to_string(),
+        "aten.convolution.default",
         vec![
             IrArg::Node(x_unsqueezed),
             IrArg::Node(w_unsqueezed),
@@ -216,7 +216,6 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
         ],
         conv2d_meta,
     );
-    graph.anchor_to(conv2d, id);
     graph.anchor_after(conv2d, w_unsqueezed);
 
     // Squeeze output: [..., W_out, 1] -> [..., W_out]

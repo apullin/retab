@@ -39,14 +39,13 @@ fn add_permute(
         .to_string();
     let meta = input_meta.cloned_with_val(out_shape.clone(), &dtype);
     let order_arg = IrArg::List(order.iter().map(|&d| IrArg::Int(d as i64)).collect());
-    let n = graph.add_node(
-        NodeOp::CallFunction,
+    let n = graph.add_anchored_call_function(
+        anchor,
         name,
-        "aten.permute_copy.default".to_string(),
+        "aten.permute_copy.default",
         vec![IrArg::Node(input_id), order_arg],
         meta,
     );
-    graph.anchor_to(n, anchor);
     if let Some(p) = *prev {
         graph.anchor_after(n, p);
     }
@@ -162,14 +161,13 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
             let dtype = data_meta.val_dtype().unwrap_or("torch.float32").to_string();
             let meta = data_meta.cloned_with_val(padded.clone(), &dtype);
             let shape_arg = IrArg::List(padded.iter().map(|&v| IrArg::Int(v)).collect());
-            let n = graph.add_node(
-                NodeOp::CallFunction,
+            let n = graph.add_anchored_call_function(
+                id,
                 format!("{}_datareshape", name),
-                "aten.view_copy.default".to_string(),
+                "aten.view_copy.default",
                 vec![IrArg::Node(data_id), shape_arg],
                 meta,
             );
-            graph.anchor_to(n, id);
             if let Some(p) = prev {
                 graph.anchor_after(n, p);
             }
@@ -214,14 +212,13 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     } else {
         orig_meta.clone()
     };
-    let new_put = graph.add_node(
-        NodeOp::CallFunction,
+    let new_put = graph.add_anchored_call_function(
+        id,
         format!("{}_norm", name),
-        "aten.index_put.default".to_string(),
+        "aten.index_put.default",
         new_args,
         put_meta,
     );
-    graph.anchor_to(new_put, id);
     if let Some(p) = prev {
         graph.anchor_after(new_put, p);
     }

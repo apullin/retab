@@ -7,8 +7,9 @@ use std::collections::HashMap;
 
 use smallvec::SmallVec;
 
-use crate::fx_control_flow_metadata::NodeOp;
-use crate::fx_ir::{IrArg, IrGraph, MetaValue, NodeId as IrNodeId, NodeMeta as IrNodeMeta, QParam};
+use crate::fx_ir::{
+    IrArg, IrGraph, MetaValue, NodeId as IrNodeId, NodeMeta as IrNodeMeta, NodeOp, QParam,
+};
 use crate::graph::ir::{
     Arg, DType, Node, NodeId, NodeMeta, OpTarget, OpType, QuantArgs, TensorInfo,
 };
@@ -772,8 +773,7 @@ pub fn debug_dump(graph: &Graph, label: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_control_flow_metadata::NodeOp;
-    use crate::fx_ir::{IrArg, IrGraph, NodeMeta as IrNodeMeta};
+    use crate::fx_ir::{IrArg, IrGraph, NodeMeta as IrNodeMeta, NodeOp};
     use crate::graph::ir::{
         Arg, DType, Node, NodeMeta as GraphNodeMeta, OpTarget, OpType, TensorInfo,
     };

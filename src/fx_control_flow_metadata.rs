@@ -3,10 +3,7 @@
 
 use std::collections::HashMap;
 
-use pyo3::prelude::*;
-
-use crate::fx_ir::{IrArg, IrGraph, IrNode, IrPass, NodeId};
-use crate::fx_py_attr::attrs;
+use crate::fx_ir::{IrArg, IrGraph, IrNode, IrPass, NodeId, RescaleRewrite};
 use crate::fx_quant::QParam;
 
 /// IrPass wrapper for the while-loop boundary Q/DQ strip (submodule IR pipeline).
@@ -76,20 +73,18 @@ impl IrPass for IrInsertCarriedOutputRescalePass {
             meta.extras.remove("tosa_special_dtype");
             meta.set_val_dtype_for_existing_shape(ph_qp.dtype_str.clone());
             let src_name = graph.node(src_id).name.clone();
-            let rescale = graph.add_node(
-                NodeOp::CallFunction,
-                format!("{src_name}_carried_rescale"),
-                "backend.tosa.RESCALE.default".to_string(),
-                vec![
-                    IrArg::Node(src_id),
-                    IrArg::Dtype(ph_qp.dtype_str.clone()),
-                    IrArg::List(vec![IrArg::Float(cur.scale / ph_qp.scale)]),
-                    IrArg::Int(cur.zp),
-                    IrArg::Int(ph_qp.zp),
-                ],
-                meta,
+            let rescale = graph.add_after_rescale(
+                src_id,
+                RescaleRewrite::new(
+                    format!("{src_name}_carried_rescale"),
+                    src_id,
+                    ph_qp.dtype_str.clone(),
+                    vec![cur.scale / ph_qp.scale],
+                    cur.zp,
+                    ph_qp.zp,
+                    meta,
+                ),
             );
-            graph.anchor_after(rescale, src_id);
             replace_output_arg_use(graph, out_id, src_id, rescale);
             modified = true;
         }
@@ -114,30 +109,6 @@ fn replace_output_arg_use(graph: &mut IrGraph, out_id: NodeId, old: NodeId, new:
                 }
             }
             _ => {}
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NodeOp {
-    Placeholder,
-    CallFunction,
-    GetAttr,
-    Output,
-    Other,
-}
-
-impl NodeOp {
-    pub(crate) fn of(node: &Bound<'_, PyAny>) -> Self {
-        match attrs(node)
-            .first_or::<String>(&["op"], String::new())
-            .as_str()
-        {
-            "placeholder" => Self::Placeholder,
-            "call_function" => Self::CallFunction,
-            "get_attr" => Self::GetAttr,
-            "output" => Self::Output,
-            _ => Self::Other,
         }
     }
 }

@@ -7,13 +7,36 @@ use std::collections::HashMap;
 
 use pyo3::prelude::*;
 
-pub(crate) use crate::fx_control_flow_metadata::NodeOp;
 use crate::fx_py_attr::{attrs, items, meta as meta_view};
 pub(crate) use crate::fx_quant::QParam;
 use crate::fx_target::{classify_ir_target, IrTargetKind};
 use crate::lowering_effects::{LoweringEffectBatch, LoweringInputKind};
 use crate::store::TensorData;
 use crate::tensor_data::extract_tensor_data;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeOp {
+    Placeholder,
+    CallFunction,
+    GetAttr,
+    Output,
+    Other,
+}
+
+impl NodeOp {
+    pub(crate) fn of(node: &Bound<'_, PyAny>) -> Self {
+        match attrs(node)
+            .first_or::<String>(&["op"], String::new())
+            .as_str()
+        {
+            "placeholder" => Self::Placeholder,
+            "call_function" => Self::CallFunction,
+            "get_attr" => Self::GetAttr,
+            "output" => Self::Output,
+            _ => Self::Other,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // IrGraph — full graph topology
@@ -521,6 +544,19 @@ impl IrGraph {
     ) -> NodeId {
         let id = self.add_call_function(name, target, args, meta);
         self.anchor_to(id, anchor);
+        id
+    }
+
+    pub fn add_after_call_function(
+        &mut self,
+        anchor: NodeId,
+        name: impl Into<String>,
+        target: impl Into<String>,
+        args: Vec<IrArg>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.add_call_function(name, target, args, meta);
+        self.anchor_after(id, anchor);
         id
     }
 

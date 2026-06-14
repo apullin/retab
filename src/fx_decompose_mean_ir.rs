@@ -74,14 +74,13 @@ impl IrPass for IrDecomposeMeanPass {
                     let pool_h = 1i64.max(input_shape[2] / kernel[0].max(1));
                     let pool_w = 1i64.max(input_shape[3] / kernel[1].max(1));
                     let pool_shape = vec![input_shape[0], input_shape[1], pool_h, pool_w];
-                    let mut result = graph.add_node(
-                        NodeOp::CallFunction,
+                    let mut result = graph.add_anchored_call_function(
+                        id,
                         format!("{}_avgpool", name),
-                        "aten.avg_pool2d.default".to_string(),
+                        "aten.avg_pool2d.default",
                         vec![IrArg::Node(x_id), i64_list(&kernel), i64_list(&[1, 1])],
                         orig_meta.cloned_with_val(pool_shape.clone(), &dtype),
                     );
-                    graph.anchor_to(result, id);
 
                     if !keepdim {
                         result = graph.add_node(
@@ -109,25 +108,23 @@ impl IrPass for IrDecomposeMeanPass {
 
             // sum(x, dims, keepdim=True)
             let sum_shape = reduced_shape(&input_shape, &dims, true);
-            let sum_id = graph.add_node(
-                NodeOp::CallFunction,
+            let sum_id = graph.add_anchored_call_function(
+                id,
                 format!("{}_sum", name),
-                "aten.sum.dim_IntList".to_string(),
+                "aten.sum.dim_IntList",
                 vec![IrArg::Node(x_id), i64_list(&dims), IrArg::Bool(true)],
                 orig_meta.cloned_with_val(sum_shape.clone(), &dtype),
             );
-            graph.anchor_to(sum_id, id);
 
             // full([1]*rank, 1/count)
             let ones_shape: Vec<i64> = vec![1; input_shape.len()];
-            let count_id = graph.add_node(
-                NodeOp::CallFunction,
+            let count_id = graph.add_anchored_call_function(
+                id,
                 format!("{}_inv_count", name),
-                "aten.full.default".to_string(),
+                "aten.full.default",
                 vec![i64_list(&ones_shape), IrArg::Float(1.0 / count)],
                 orig_meta.cloned_with_val(ones_shape, &dtype),
             );
-            graph.anchor_to(count_id, id);
 
             // mul(sum, 1/count)
             let mul_id = graph.add_node(

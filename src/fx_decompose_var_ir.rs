@@ -102,59 +102,53 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         .product();
     let denom = (count - correction).max(1) as f64;
 
-    let mean = graph.add_node(
-        NodeOp::CallFunction,
+    let mean = graph.add_anchored_call_function(
+        id,
         format!("{}_mean", name),
-        "aten.mean.dim".to_string(),
+        "aten.mean.dim",
         vec![IrArg::Node(x_id), i64_list(&dims), IrArg::Bool(true)],
         base_meta.cloned_with_val(mean_shape.clone(), &dtype),
     );
-    graph.anchor_to(mean, id);
 
-    let diff = graph.add_node(
-        NodeOp::CallFunction,
+    let diff = graph.add_anchored_call_function(
+        id,
         format!("{}_diff", name),
-        "aten.sub.Tensor".to_string(),
+        "aten.sub.Tensor",
         vec![IrArg::Node(x_id), IrArg::Node(mean)],
         base_meta.cloned_with_val(input_shape.clone(), &dtype),
     );
-    graph.anchor_to(diff, id);
 
-    let squared = graph.add_node(
-        NodeOp::CallFunction,
+    let squared = graph.add_anchored_call_function(
+        id,
         format!("{}_squared", name),
-        "aten.mul.Tensor".to_string(),
+        "aten.mul.Tensor",
         vec![IrArg::Node(diff), IrArg::Node(diff)],
         base_meta.cloned_with_val(input_shape.clone(), &dtype),
     );
-    graph.anchor_to(squared, id);
 
-    let sum = graph.add_node(
-        NodeOp::CallFunction,
+    let sum = graph.add_anchored_call_function(
+        id,
         format!("{}_sum", name),
-        "aten.sum.dim_IntList".to_string(),
+        "aten.sum.dim_IntList",
         vec![IrArg::Node(squared), i64_list(&dims), IrArg::Bool(keepdim)],
         base_meta.cloned_with_val(output_shape.clone(), &dtype),
     );
-    graph.anchor_to(sum, id);
 
-    let coefficient = graph.add_node(
-        NodeOp::CallFunction,
+    let coefficient = graph.add_anchored_call_function(
+        id,
         format!("{}_inv_count", name),
-        "aten.full.default".to_string(),
+        "aten.full.default",
         vec![i64_list(&coefficient_shape), IrArg::Float(1.0 / denom)],
         base_meta.cloned_with_val(coefficient_shape, &dtype),
     );
-    graph.anchor_to(coefficient, id);
 
-    let result = graph.add_node(
-        NodeOp::CallFunction,
+    let result = graph.add_anchored_call_function(
+        id,
         format!("{}_mul", name),
-        "aten.mul.Tensor".to_string(),
+        "aten.mul.Tensor",
         vec![IrArg::Node(sum), IrArg::Node(coefficient)],
         base_meta.cloned_with_val(output_shape, &dtype),
     );
-    graph.anchor_to(result, id);
 
     graph.replace_and_erase(id, result);
     true

@@ -236,26 +236,24 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         bias_view_meta.tosa_spatial_rank = Some(rank);
     }
 
-    let bias_view = graph.add_node(
-        NodeOp::CallFunction,
+    let bias_view = graph.add_after_call_function(
+        int32_rescale,
         format!("{}_bias_view", node.name),
-        "aten.view_copy.default".to_string(),
+        "aten.view_copy.default",
         vec![
             IrArg::Node(*bias_id),
             IrArg::List(bias_view_shape.iter().copied().map(IrArg::Int).collect()),
         ],
         bias_view_meta,
     );
-    graph.anchor_after(bias_view, int32_rescale);
 
-    let bias_add = graph.add_node(
-        NodeOp::CallFunction,
+    let bias_add = graph.add_after_call_function(
+        bias_view,
         format!("{}_bias_add", node.name),
-        "aten.add.Tensor".to_string(),
+        "aten.add.Tensor",
         vec![IrArg::Node(int32_rescale), IrArg::Node(bias_view)],
         plain_tensor_meta_from(&node.meta, &conv_shape, "torch.int32"),
     );
-    graph.anchor_after(bias_add, bias_view);
 
     let output_rescale = graph.add_after_rescale(
         bias_add,

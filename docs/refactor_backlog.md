@@ -812,6 +812,14 @@ Deleted: manual RESCALE op construction and user-rewire loops in q/dq folding, m
 Added: `RescaleRewrite`, `IrGraph::add_rescale`, `IrGraph::add_anchored_rescale`, `IrGraph::add_after_rescale`, and `IrGraph::replace_live_uses_except`
 Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib rescale`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over mm, bmm, addmm, conv2d, conv3d, transpose_conv2d, add, mul, where, cond, and while; Rust LOC check
 Note: Rust tests passed `130 passed`. Focused Python smoke passed `444 passed, 3 expected xfails, 1115 deselected`. This is a setup-positive grammar slice that centralizes canonical RESCALE construction across eight insertion sites while intentionally leaving control-flow boundary RESCALEs for a control-flow-specific follow-up.
+
+2026-06-13, IR graph insertion grammar migration slice
+Rust LOC: 37,321
+Movement: -99 Rust LOC from previous checkpoint
+Deleted: the control-flow-owned `NodeOp` definition, remaining control-flow RESCALE arg construction helpers, and production `add_node(NodeOp::CallFunction, ...)` followed by immediate `anchor_to`/`anchor_after` spelling in the audited rewrite/decomposition paths
+Added: `fx_ir::NodeOp` ownership, `IrGraph::add_after_call_function`, and broader use of `add_anchored_call_function`, `add_anchored_call_function_with_kwargs`, `add_after_call_function`, and `RescaleRewrite`
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over layer_norm, var, mean_dim, repeat, ne, where, linear, conv1d, conv2d, cumsum, slice, select_scatter, tril, masked_fill, constant_pad_nd, max_pool, adaptive_avg_pool2d, gather, index_select, embedding, index_put, cond, and while; targeted source-pattern audits; Rust LOC check
+Note: Rust tests passed `130 passed`. Focused Python smoke passed `820 passed, 6 skipped, 3 expected xfails, 1810 deselected`. This applies the RESCALE trial's semantic-collapse pattern more broadly: core IR node kind ownership now lives in `fx_ir`, CF boundary RESCALEs share the canonical RESCALE builder, and common call-function insertion with anchoring now has one graph API spelling instead of pass-local boilerplate.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

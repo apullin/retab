@@ -135,10 +135,10 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 .to_string();
 
             // 1. constant_pad_nd(x, [pad_w, right_pad, pad_h, bottom_pad, 0,0,0,0], pad_val)
-            let x_pad = graph.add_node(
-                NodeOp::CallFunction,
+            let x_pad = graph.add_anchored_call_function(
+                id,
                 format!("{}_pad", node_name),
-                "aten.constant_pad_nd.default".to_string(),
+                "aten.constant_pad_nd.default",
                 vec![
                     IrArg::Node(x_id),
                     i64_list(&[pad_w, right_pad, pad_h, bottom_pad, 0, 0, 0, 0]),
@@ -149,51 +149,47 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     &dtype,
                 ),
             );
-            graph.anchor_to(x_pad, id);
 
             // 2. view → [N, C, h_pack, d_h, w_pack, d_w]
-            let x_view = graph.add_node(
-                NodeOp::CallFunction,
+            let x_view = graph.add_anchored_call_function(
+                id,
                 format!("{}_pack_view", node_name),
-                "aten.view_copy.default".to_string(),
+                "aten.view_copy.default",
                 vec![
                     IrArg::Node(x_pad),
                     i64_list(&[n, c, h_pack, d_h, w_pack, d_w]),
                 ],
                 orig_meta.cloned_with_val(vec![n, c, h_pack, d_h, w_pack, d_w], &dtype),
             );
-            graph.anchor_to(x_view, id);
 
             // 3. permute [3,5,0,1,2,4]
-            let x_perm = graph.add_node(
-                NodeOp::CallFunction,
+            let x_perm = graph.add_anchored_call_function(
+                id,
                 format!("{}_pack_perm", node_name),
-                "aten.permute_copy.default".to_string(),
+                "aten.permute_copy.default",
                 vec![IrArg::Node(x_view), i64_list(&[3, 5, 0, 1, 2, 4])],
                 orig_meta.cloned_with_val(vec![d_h, d_w, n, c, h_pack, w_pack], &dtype),
             );
-            graph.anchor_to(x_perm, id);
 
             // 4. view → [N*d_h*d_w, C, h_pack, w_pack]
-            let x_batch = graph.add_node(
-                NodeOp::CallFunction,
+            let x_batch = graph.add_anchored_call_function(
+                id,
                 format!("{}_batch", node_name),
-                "aten.view_copy.default".to_string(),
+                "aten.view_copy.default",
                 vec![
                     IrArg::Node(x_perm),
                     i64_list(&[n * d_h * d_w, c, h_pack, w_pack]),
                 ],
                 orig_meta.cloned_with_val(vec![n * d_h * d_w, c, h_pack, w_pack], &dtype),
             );
-            graph.anchor_to(x_batch, id);
 
             // 5. max_pool2d (non-dilated, zero padding)
             let h_out = pool_output_size(h_pack, k_h, s_h, 0, ceil_mode);
             let w_out = pool_output_size(w_pack, k_w, s_w, 0, ceil_mode);
-            let pooled = graph.add_node(
-                NodeOp::CallFunction,
+            let pooled = graph.add_anchored_call_function(
+                id,
                 format!("{}_pool", node_name),
-                "aten.max_pool2d.default".to_string(),
+                "aten.max_pool2d.default",
                 vec![
                     IrArg::Node(x_batch),
                     i64_list(&[k_h, k_w]),
@@ -204,49 +200,45 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 ],
                 orig_meta.cloned_with_val(vec![n * d_h * d_w, c, h_out, w_out], &dtype),
             );
-            graph.anchor_to(pooled, id);
 
             // 6. view → [d_h, d_w, N, C, h_out, w_out]
-            let unpack = graph.add_node(
-                NodeOp::CallFunction,
+            let unpack = graph.add_anchored_call_function(
+                id,
                 format!("{}_unpack", node_name),
-                "aten.view_copy.default".to_string(),
+                "aten.view_copy.default",
                 vec![
                     IrArg::Node(pooled),
                     i64_list(&[d_h, d_w, n, c, h_out, w_out]),
                 ],
                 orig_meta.cloned_with_val(vec![d_h, d_w, n, c, h_out, w_out], &dtype),
             );
-            graph.anchor_to(unpack, id);
 
             // 7. permute [2,3,4,0,5,1]
-            let unperm = graph.add_node(
-                NodeOp::CallFunction,
+            let unperm = graph.add_anchored_call_function(
+                id,
                 format!("{}_unperm", node_name),
-                "aten.permute_copy.default".to_string(),
+                "aten.permute_copy.default",
                 vec![IrArg::Node(unpack), i64_list(&[2, 3, 4, 0, 5, 1])],
                 orig_meta.cloned_with_val(vec![n, c, h_out, d_h, w_out, d_w], &dtype),
             );
-            graph.anchor_to(unperm, id);
 
             // 8. view → [N, C, h_out*d_h, w_out*d_w]
-            let out_view = graph.add_node(
-                NodeOp::CallFunction,
+            let out_view = graph.add_anchored_call_function(
+                id,
                 format!("{}_out_view", node_name),
-                "aten.view_copy.default".to_string(),
+                "aten.view_copy.default",
                 vec![
                     IrArg::Node(unperm),
                     i64_list(&[n, c, h_out * d_h, w_out * d_w]),
                 ],
                 orig_meta.cloned_with_val(vec![n, c, h_out * d_h, w_out * d_w], &dtype),
             );
-            graph.anchor_to(out_view, id);
 
             // 9. slice H to h_final
-            let slice_h = graph.add_node(
-                NodeOp::CallFunction,
+            let slice_h = graph.add_anchored_call_function(
+                id,
                 format!("{}_slice_h", node_name),
-                "aten.slice_copy.Tensor".to_string(),
+                "aten.slice_copy.Tensor",
                 vec![
                     IrArg::Node(out_view),
                     IrArg::Int(2),
@@ -255,7 +247,6 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 ],
                 orig_meta.cloned_with_val(vec![n, c, h_final, w_out * d_w], &dtype),
             );
-            graph.anchor_to(slice_h, id);
 
             // 10. slice W to w_final
             let result = graph.add_node(

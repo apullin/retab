@@ -95,31 +95,29 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
 
     // 1. view_copy(input, conv_shape) — reshape to 4D
     let view1_meta = NodeMeta::tensor(conv_shape.as_slice(), &input_dtype);
-    let view1_id = graph.add_node(
-        NodeOp::CallFunction,
+    let view1_id = graph.add_anchored_call_function(
+        node_id,
         format!("{}_view_pre", node_name),
-        "aten.view_copy.default".to_string(),
+        "aten.view_copy.default",
         vec![
             IrArg::Node(input_id),
             IrArg::List(conv_shape.iter().map(|&d| IrArg::Int(d)).collect()),
         ],
         view1_meta,
     );
-    graph.anchor_to(view1_id, node_id);
 
     // 2. full(weight_shape, 1.0) — all-ones convolution kernel
     let weight_meta = NodeMeta::tensor(weight_shape.as_slice(), &input_dtype);
-    let weight_id = graph.add_node(
-        NodeOp::CallFunction,
+    let weight_id = graph.add_anchored_call_function(
+        node_id,
         format!("{}_weight", node_name),
-        "aten.full.default".to_string(),
+        "aten.full.default",
         vec![
             IrArg::List(weight_shape.iter().map(|&d| IrArg::Int(d)).collect()),
             IrArg::Float(1.0),
         ],
         weight_meta,
     );
-    graph.anchor_to(weight_id, node_id);
 
     // 3. convolution(view1, weight, None, [1,1], [cumsum_dim-1, 0], [1,1], false, [0], 1)
     //    The padding on dim 2 causes the conv to compute prefix sums.
@@ -155,10 +153,10 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
         }
     }
 
-    let conv_id = graph.add_node(
-        NodeOp::CallFunction,
+    let conv_id = graph.add_anchored_call_function(
+        node_id,
         format!("{}_conv", node_name),
-        "aten.convolution.default".to_string(),
+        "aten.convolution.default",
         vec![
             IrArg::Node(view1_id),
             IrArg::Node(weight_id),
@@ -172,15 +170,14 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
         ],
         conv_meta,
     );
-    graph.anchor_to(conv_id, node_id);
 
     // 4. slice_copy(conv, dim=2, start=0, end=cumsum_dim) — trim padding
     let slice_shape = vec![pre_cumsum_dim, 1, cumsum_dim, post_cumsum_dim];
     let slice_meta = NodeMeta::tensor(slice_shape.as_slice(), &input_dtype);
-    let slice_id = graph.add_node(
-        NodeOp::CallFunction,
+    let slice_id = graph.add_anchored_call_function(
+        node_id,
         format!("{}_slice", node_name),
-        "aten.slice_copy.Tensor".to_string(),
+        "aten.slice_copy.Tensor",
         vec![
             IrArg::Node(conv_id),
             IrArg::Int(2),          // dim
@@ -189,7 +186,6 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
         ],
         slice_meta,
     );
-    graph.anchor_to(slice_id, node_id);
 
     // 5. view_copy(slice, original_shape) — reshape back
     let view2_meta = node_meta.cloned_with_val(original_shape.clone(), input_dtype);

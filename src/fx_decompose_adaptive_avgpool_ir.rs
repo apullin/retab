@@ -76,10 +76,10 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                     let kw = end_w - start_w;
 
                     // slice_copy(x, dim=2, start_h, end_h)
-                    let slice_h = graph.add_node(
-                        NodeOp::CallFunction,
+                    let slice_h = graph.add_anchored_call_function(
+                        id,
                         format!("{}_sh_{}_{}", node_name, out_i, out_j),
-                        "aten.slice_copy.Tensor".to_string(),
+                        "aten.slice_copy.Tensor",
                         vec![
                             IrArg::Node(x_id),
                             IrArg::Int(2),
@@ -88,13 +88,12 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                         ],
                         orig_meta.cloned_with_val(vec![n_batch, c_ch, kh, input_w], &dtype),
                     );
-                    graph.anchor_to(slice_h, id);
 
                     // slice_copy(slice_h, dim=3, start_w, end_w)
-                    let slice_hw = graph.add_node(
-                        NodeOp::CallFunction,
+                    let slice_hw = graph.add_anchored_call_function(
+                        id,
                         format!("{}_sw_{}_{}", node_name, out_i, out_j),
-                        "aten.slice_copy.Tensor".to_string(),
+                        "aten.slice_copy.Tensor",
                         vec![
                             IrArg::Node(slice_h),
                             IrArg::Int(3),
@@ -103,13 +102,12 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                         ],
                         orig_meta.cloned_with_val(vec![n_batch, c_ch, kh, kw], &dtype),
                     );
-                    graph.anchor_to(slice_hw, id);
 
                     // avg_pool2d(slice_hw, [kh,kw], [1,1], [0,0])
-                    let pooled = graph.add_node(
-                        NodeOp::CallFunction,
+                    let pooled = graph.add_anchored_call_function(
+                        id,
                         format!("{}_pool_{}_{}", node_name, out_i, out_j),
-                        "aten.avg_pool2d.default".to_string(),
+                        "aten.avg_pool2d.default",
                         vec![
                             IrArg::Node(slice_hw),
                             i64_list(&[kh, kw]), // kernel
@@ -118,7 +116,6 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                         ],
                         orig_meta.cloned_with_val(vec![n_batch, c_ch, 1, 1], &dtype),
                     );
-                    graph.anchor_to(pooled, id);
 
                     row.push(pooled);
                 }
@@ -128,14 +125,13 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                     rows.push(row[0]);
                 } else {
                     let cat_args = IrArg::List(row.iter().map(|&n| IrArg::Node(n)).collect());
-                    let row_cat = graph.add_node(
-                        NodeOp::CallFunction,
+                    let row_cat = graph.add_anchored_call_function(
+                        id,
                         format!("{}_cat_w_{}", node_name, out_i),
-                        "aten.cat.default".to_string(),
+                        "aten.cat.default",
                         vec![cat_args, IrArg::Int(3)],
                         orig_meta.cloned_with_val(vec![n_batch, c_ch, 1, output_w], &dtype),
                     );
-                    graph.anchor_to(row_cat, id);
                     rows.push(row_cat);
                 }
             }

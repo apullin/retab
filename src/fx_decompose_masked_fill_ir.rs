@@ -66,14 +66,13 @@ impl IrPass for IrDecomposeMaskedFillPass {
             let node_meta = graph.nodes[id].meta.clone();
 
             // Create full_like(x, value) — fills a tensor shaped like x with the scalar value
-            let full_like_id = graph.add_node(
-                NodeOp::CallFunction,
+            let full_like_id = graph.add_anchored_call_function(
+                id,
                 format!("{node_name}_full_like"),
-                "aten.full_like.default".to_string(),
+                "aten.full_like.default",
                 vec![IrArg::Node(x_id), value_arg],
                 tensorized_scalar_meta(&node_meta),
             );
-            graph.anchor_to(full_like_id, id);
 
             // Create where(mask, fill, x) — True positions get fill_value, False keep x
             let where_id = graph.add_node(

@@ -26,26 +26,24 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
     let base_meta = graph.nodes[id].meta.clone();
 
     // --- row indices: arange(0, rows) -> [rows], then view to [rows, 1] ---
-    let row_arange = graph.add_node(
-        NodeOp::CallFunction,
+    let row_arange = graph.add_anchored_call_function(
+        id,
         format!("{base_name}_row_arange"),
-        "aten.arange.start_step".to_string(),
+        "aten.arange.start_step",
         vec![IrArg::Int(0), IrArg::Int(rows), IrArg::Int(1)],
         base_meta.cloned_with_val(vec![rows], "torch.float32"),
     );
-    graph.anchor_to(row_arange, id);
 
-    let row_view = graph.add_node(
-        NodeOp::CallFunction,
+    let row_view = graph.add_anchored_call_function(
+        id,
         format!("{base_name}_row_view"),
-        "aten.view_copy.default".to_string(),
+        "aten.view_copy.default",
         vec![
             IrArg::Node(row_arange),
             IrArg::List(vec![IrArg::Int(rows), IrArg::Int(1)]),
         ],
         base_meta.cloned_with_val(vec![rows, 1], "torch.float32"),
     );
-    graph.anchor_to(row_view, id);
 
     // If diagonal != 0, add the offset
     let row_final = if diagonal != 0 {
@@ -61,36 +59,33 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
     };
 
     // --- col indices: arange(0, cols) -> [cols], then view to [1, cols] ---
-    let col_arange = graph.add_node(
-        NodeOp::CallFunction,
+    let col_arange = graph.add_anchored_call_function(
+        id,
         format!("{base_name}_col_arange"),
-        "aten.arange.start_step".to_string(),
+        "aten.arange.start_step",
         vec![IrArg::Int(0), IrArg::Int(cols), IrArg::Int(1)],
         base_meta.cloned_with_val(vec![cols], "torch.float32"),
     );
-    graph.anchor_to(col_arange, id);
 
-    let col_view = graph.add_node(
-        NodeOp::CallFunction,
+    let col_view = graph.add_anchored_call_function(
+        id,
         format!("{base_name}_col_view"),
-        "aten.view_copy.default".to_string(),
+        "aten.view_copy.default",
         vec![
             IrArg::Node(col_arange),
             IrArg::List(vec![IrArg::Int(1), IrArg::Int(cols)]),
         ],
         base_meta.cloned_with_val(vec![1, cols], "torch.float32"),
     );
-    graph.anchor_to(col_view, id);
 
     // --- mask: row >= col -> bool [rows, cols] ---
-    let mask = graph.add_node(
-        NodeOp::CallFunction,
+    let mask = graph.add_anchored_call_function(
+        id,
         format!("{base_name}_ge"),
-        "aten.ge.Tensor".to_string(),
+        "aten.ge.Tensor",
         vec![IrArg::Node(row_final), IrArg::Node(col_view)],
         base_meta.cloned_with_val(vec![rows, cols], "torch.bool"),
     );
-    graph.anchor_to(mask, id);
 
     // --- result: bool input -> bitwise_and, else -> where(mask, input, zero) ---
     let is_bool = input_dtype.contains("bool");
@@ -113,14 +108,13 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
             (0i64, input_dtype.clone())
         };
 
-        let zero = graph.add_node(
-            NodeOp::CallFunction,
+        let zero = graph.add_anchored_call_function(
+            id,
             format!("{base_name}_zero"),
-            "aten.scalar_tensor.default".to_string(),
+            "aten.scalar_tensor.default",
             vec![IrArg::Int(zero_val)],
             NodeMeta::default().cloned_with_val(vec![], &zero_dtype),
         );
-        graph.anchor_to(zero, id);
 
         graph.add_node(
             NodeOp::CallFunction,

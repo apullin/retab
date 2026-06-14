@@ -102,10 +102,10 @@ impl IrPass for IrDecomposeStridedSlicePass {
             // 1. Unit-step slice: slice_copy(input, dim, start, end, 1)
             let mut slice_shape = input_shape.clone();
             slice_shape[dim] = span_len;
-            let unit_slice = graph.add_node(
-                NodeOp::CallFunction,
+            let unit_slice = graph.add_anchored_call_function(
+                id,
                 format!("{}_unit_slice", node_name),
-                "aten.slice_copy.Tensor".to_string(),
+                "aten.slice_copy.Tensor",
                 vec![
                     IrArg::Node(input_id),
                     IrArg::Int(dim as i64),
@@ -115,7 +115,6 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 ],
                 orig_meta.cloned_with_val(slice_shape.clone(), &dtype),
             );
-            graph.anchor_to(unit_slice, id);
 
             let u = (span_len + step - 1) / step;
             let pad_right = u * step - span_len;
@@ -133,28 +132,26 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 } else {
                     IrArg::Int(0)
                 };
-                let pad_node = graph.add_node(
-                    NodeOp::CallFunction,
+                let pad_node = graph.add_anchored_call_function(
+                    id,
                     format!("{}_pad", node_name),
-                    "aten.full.default".to_string(),
+                    "aten.full.default",
                     vec![i64_list(&pad_shape), fill_val],
                     orig_meta.cloned_with_val(pad_shape, &dtype),
                 );
-                graph.anchor_to(pad_node, id);
 
                 let mut cat_shape = slice_shape.clone();
                 cat_shape[dim] = span_len + pad_right;
-                let cat_node = graph.add_node(
-                    NodeOp::CallFunction,
+                let cat_node = graph.add_anchored_call_function(
+                    id,
                     format!("{}_cat", node_name),
-                    "aten.cat.default".to_string(),
+                    "aten.cat.default",
                     vec![
                         IrArg::List(vec![IrArg::Node(y), IrArg::Node(pad_node)]),
                         IrArg::Int(dim as i64),
                     ],
                     orig_meta.cloned_with_val(cat_shape, &dtype),
                 );
-                graph.anchor_to(cat_node, id);
                 y = cat_node;
             }
 
@@ -162,22 +159,21 @@ impl IrPass for IrDecomposeStridedSlicePass {
             let mut split_shape = input_shape.clone();
             split_shape[dim] = u;
             split_shape.insert(dim + 1, step);
-            let view1 = graph.add_node(
-                NodeOp::CallFunction,
+            let view1 = graph.add_anchored_call_function(
+                id,
                 format!("{}_split_view", node_name),
-                "aten.view_copy.default".to_string(),
+                "aten.view_copy.default",
                 vec![IrArg::Node(y), i64_list(&split_shape)],
                 orig_meta.cloned_with_val(split_shape.clone(), &dtype),
             );
-            graph.anchor_to(view1, id);
 
             // 4. Inner slice: slice_copy(view1, dim+1, 0, 1, 1) — take first element
             let mut inner_shape = split_shape.clone();
             inner_shape[dim + 1] = 1;
-            let inner_slice = graph.add_node(
-                NodeOp::CallFunction,
+            let inner_slice = graph.add_anchored_call_function(
+                id,
                 format!("{}_inner_slice", node_name),
-                "aten.slice_copy.Tensor".to_string(),
+                "aten.slice_copy.Tensor",
                 vec![
                     IrArg::Node(view1),
                     IrArg::Int((dim + 1) as i64),
@@ -187,7 +183,6 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 ],
                 orig_meta.cloned_with_val(inner_shape, &dtype),
             );
-            graph.anchor_to(inner_slice, id);
 
             // 5. View: reshape back to output shape [..., u, ...]
             let mut out_shape = input_shape.clone();

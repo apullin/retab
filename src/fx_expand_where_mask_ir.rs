@@ -77,18 +77,16 @@ impl IrPass for IrExpandWhereMaskPass {
                 .cloned_with_val(padded_mask_shape.clone(), &mask_dtype);
 
             // Insert view_copy: reshape mask to padded shape
-            let view_id = graph.add_node(
-                NodeOp::CallFunction,
+            let view_id = graph.add_anchored_call_function(
+                id,
                 format!("{}_view_copy", graph.nodes[id].name),
-                "aten.view_copy.default".to_string(),
+                "aten.view_copy.default",
                 vec![
                     IrArg::Node(mask_id),
                     IrArg::List(padded_mask_shape.iter().map(|&d| IrArg::Int(d)).collect()),
                 ],
                 view_meta,
             );
-            // Anchor before the original where node so topological order is preserved
-            graph.anchor_to(view_id, id);
 
             // Build meta for the expand_copy node (full output shape, same dtype)
             let expand_meta = graph.nodes[mask_id]
@@ -96,32 +94,29 @@ impl IrPass for IrExpandWhereMaskPass {
                 .cloned_with_val(output_shape.clone(), mask_dtype);
 
             // Insert expand_copy: broadcast to full output shape
-            let expand_id = graph.add_node(
-                NodeOp::CallFunction,
+            let expand_id = graph.add_anchored_call_function(
+                id,
                 format!("{}_expand_copy", graph.nodes[id].name),
-                "aten.expand_copy.default".to_string(),
+                "aten.expand_copy.default",
                 vec![
                     IrArg::Node(view_id),
                     IrArg::List(output_shape.iter().map(|&d| IrArg::Int(d)).collect()),
                 ],
                 expand_meta,
             );
-            // Anchor before the original where node so topological order is preserved
-            graph.anchor_to(expand_id, id);
 
             // Clone the remaining args (true_val, false_val) from the original where node
             let true_arg = graph.nodes[id].args[1].clone();
             let false_arg = graph.nodes[id].args[2].clone();
 
             // Insert new where.self with the expanded mask
-            let new_where_id = graph.add_node(
-                NodeOp::CallFunction,
+            let new_where_id = graph.add_anchored_call_function(
+                id,
                 format!("{}_where", graph.nodes[id].name),
-                "aten.where.self".to_string(),
+                "aten.where.self",
                 vec![IrArg::Node(expand_id), true_arg, false_arg],
                 graph.nodes[id].meta.clone(),
             );
-            graph.anchor_to(new_where_id, id);
 
             graph.replace_and_erase(id, new_where_id);
             modified = true;

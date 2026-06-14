@@ -86,14 +86,13 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
             let unsqueeze_meta = graph.nodes[id]
                 .meta
                 .cloned_with_val(unsqueeze_shape.clone(), &dtype);
-            let unsqueezed = graph.add_node(
-                NodeOp::CallFunction,
+            let unsqueezed = graph.add_anchored_call_function(
+                id,
                 format!("{}_unsqueeze", node_name),
-                "aten.unsqueeze_copy.default".to_string(),
+                "aten.unsqueeze_copy.default",
                 vec![IrArg::Node(input_id), IrArg::Int(unsqueeze_dim)],
                 unsqueeze_meta,
             );
-            graph.anchor_to(unsqueezed, id);
 
             // 2. repeat(unsqueezed, multiples) — multiples[unsqueeze_dim] = repeats
             let repeat_rank = (rank + 1) as usize;
@@ -104,14 +103,13 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
             repeated_shape[unsqueeze_dim as usize] = repeats;
 
             let repeat_meta = graph.nodes[id].meta.cloned_with_val(repeated_shape, &dtype);
-            let repeated = graph.add_node(
-                NodeOp::CallFunction,
+            let repeated = graph.add_anchored_call_function(
+                id,
                 format!("{}_repeat", node_name),
-                "aten.repeat.default".to_string(),
+                "aten.repeat.default",
                 vec![IrArg::Node(unsqueezed), i64_list(&multiples)],
                 repeat_meta,
             );
-            graph.anchor_to(repeated, id);
 
             // 3. view_copy(repeated, final_shape) — final_shape[dim] *= repeats
             let mut final_shape = input_shape;
