@@ -2,7 +2,6 @@
 
 use crate::fx_ir::{
     broadcast_shapes, i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass, NodeId,
-    NodeOp,
 };
 use crate::fx_target::is_index_put_default_target;
 use crate::runner_logging::log_line;
@@ -26,12 +25,7 @@ impl IrPass for IrRewriteIndexPutPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
-        for id in ids {
-            if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
-                continue;
-            }
+        for id in graph.live_call_function_ids() {
             if !is_index_put_default_target(&graph.nodes[id].target) {
                 continue;
             }
@@ -369,7 +363,7 @@ impl IrPass for IrRewriteIndexPutPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::NodeMeta;
+    use crate::fx_ir::{NodeMeta, NodeOp};
 
     fn graph_with_index_put_none() -> IrGraph {
         let mut graph = IrGraph::empty();

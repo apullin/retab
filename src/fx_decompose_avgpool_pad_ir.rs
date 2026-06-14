@@ -7,7 +7,7 @@
 //! elements, then pool without padding; a divisor_override becomes a constant
 //! multiply by kernel_size / divisor.
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_plain_avg_pool2d_target;
 use crate::runner_logging::log_line;
 
@@ -38,12 +38,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
-        for id in ids {
-            if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
-                continue;
-            }
+        for id in graph.live_call_function_ids() {
             if !is_plain_avg_pool2d_target(&graph.nodes[id].target) {
                 continue;
             }

@@ -6,7 +6,7 @@
 //!   3. Conv2d with 1x1 kernel (aten.convolution.default)
 //!   4. Reshape output back:  [N, Co, 1, 1] -> [..., Co]
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId};
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeLinearPass;
@@ -18,12 +18,7 @@ impl IrPass for IrDecomposeLinearPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
-        for id in ids {
-            if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
-                continue;
-            }
+        for id in graph.live_call_function_ids() {
             if !graph.nodes[id].is_linear() {
                 continue;
             }

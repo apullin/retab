@@ -8,7 +8,7 @@
 //! The meta (including FakeTensorMeta with shape/dtype) is cloned from the
 //! original node, which preserves dtype information through the graph.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass};
 use crate::runner_logging::log_line;
 
 pub struct IrConvertFullLikePass;
@@ -20,13 +20,7 @@ impl IrPass for IrConvertFullLikePass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
-        for id in ids {
-            if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
-                continue;
-            }
-
+        for id in graph.live_call_function_ids() {
             if !graph.nodes[id].target.contains("full_like") {
                 continue;
             }

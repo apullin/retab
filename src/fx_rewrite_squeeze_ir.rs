@@ -3,7 +3,7 @@
 //! Rewrites squeeze_copy/unsqueeze_copy → view_copy,
 //! transpose_copy → permute_copy.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass};
 use crate::fx_target::{is_dim_transpose_target, is_squeeze_target, is_unsqueeze_target};
 use crate::runner_logging::log_line;
 
@@ -50,13 +50,7 @@ impl IrPass for IrRewriteSqueezePass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
-        for id in ids {
-            if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
-                continue;
-            }
-
+        for id in graph.live_call_function_ids() {
             let target = &graph.nodes[id].target;
             let is_sq = is_squeeze_target(target);
             let is_usq = is_unsqueeze_target(target);

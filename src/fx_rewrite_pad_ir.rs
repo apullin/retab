@@ -9,7 +9,7 @@
 //!   reflect:   left=slice@(left-i),     right=slice@(size-2-i)
 //! Constant-mode pad is left to the serializer's existing handling.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta};
 use crate::fx_target::is_pad_target;
 use crate::runner_logging::log_line;
 
@@ -222,11 +222,7 @@ impl IrPass for IrRewritePadPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-        for id in ids {
-            if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
-                continue;
-            }
+        for id in graph.live_call_function_ids() {
             if rewrite_one(graph, id) {
                 modified = true;
             }
@@ -243,6 +239,7 @@ impl IrPass for IrRewritePadPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fx_ir::NodeOp;
     use crate::fx_target::{is_cat_target, is_slice_copy_tensor_target};
 
     fn named<'a>(graph: &'a IrGraph, name: &str) -> &'a crate::fx_ir::IrNode {

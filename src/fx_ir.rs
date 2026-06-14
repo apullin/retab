@@ -783,6 +783,14 @@ impl IrGraph {
             .collect()
     }
 
+    pub fn live_call_function_ids(&self) -> Vec<NodeId> {
+        self.nodes
+            .iter()
+            .filter(|node| node.alive && node.op == NodeOp::CallFunction)
+            .map(|node| node.id)
+            .collect()
+    }
+
     pub fn has_live_users(&self, id: NodeId) -> bool {
         !self.live_user_ids(id).is_empty()
     }

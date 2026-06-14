@@ -2,7 +2,7 @@
 
 use crate::fx_ir::{
     i64_list_arg as i64_list, normalized_reduction_dims, reduced_shape, IrArg, IrGraph, IrPass,
-    NodeId, NodeOp, QParam,
+    NodeOp, QParam,
 };
 use crate::runner_logging::log_line;
 use std::collections::HashMap;
@@ -16,12 +16,7 @@ impl IrPass for IrDecomposeMeanPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
-        for id in ids {
-            if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
-                continue;
-            }
+        for id in graph.live_call_function_ids() {
             if !graph.nodes[id].target.contains("mean.dim")
                 && !graph.nodes[id].target.contains("mean.default")
             {

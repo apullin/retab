@@ -983,6 +983,14 @@ Deleted: active raw target checks for gather, unfold_copy, slice_scatter, stride
 Added: shared `fx_target` predicates for slice-copy, slice tensor, slice-scatter, unfold-copy, gather, and test-only cat target checks, with overload tests that keep slice-scatter out of the broader slice-tensor family
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over slice, slice_scatter, gather, index_put, unfold_copy, and constant_pad_nd; Rust LOC check
 Note: Full Rust tests passed `134 passed`; focused Python smoke passed `171 passed, 2 expected xfails, 279 deselected`. No model lane was run. This is setup-positive because the shared grammar tests add lines, but it removes another cluster of indexing/scatter target spellings from pass bodies.
+
+2026-06-13, live call-function traversal query slice
+Rust LOC: 37,340 -> 37,209
+Movement: -131 Rust LOC
+Deleted: repeated `0..graph.nodes.len()` snapshots plus alive/call-function guards from 27 pass loops
+Added: `IrGraph::live_call_function_ids()` as the shared graph query for passes that snapshot live call-function nodes before mutating the graph
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; broad focused Python smoke via `/tmp/et.sh` over as_strided_copy, avg_pool2d, clamp, constant_pad_nd, cumsum, full, gather, index_put, index_select, linear, logit, masked_fill, mean_dim, pixel_shuffling, repeat, slice, slice_scatter, squeeze, sum, to_copy, tril, unfold_copy, and where; Rust LOC check
+Note: Full Rust tests passed `134 passed`; broad focused Python smoke passed `685 passed, 2 skipped, 3 expected xfails, 1254 deselected`. No model lane was run. This is the first Refactor 3 graph-query payoff: it does not build new rewrites yet, but it gives traversal a shared grammar and removes the dominant boilerplate in many simple passes.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1165,6 +1173,15 @@ reruns for conv, linear, layernorm, table ops, and while-loop INT whenever
 metadata behavior changes.
 
 ## Refactor 3: Add An IR Rewrite Builder
+
+Status:
+
+Initial graph-query slice started. `IrGraph::live_call_function_ids()` now
+owns the common "snapshot live call_function nodes before mutating" traversal,
+and 27 pass loops use it instead of spelling a local `0..nodes.len()` snapshot
+plus alive/op guard. Remaining work should keep adding small builder/query
+operations only when they replace repeated rewrite structure across several
+passes.
 
 Problem:
 

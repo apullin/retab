@@ -1,7 +1,7 @@
 //! Pure Rust IrPass: slice_scatter -> slice+cat (step == 1)
 //! or arange+permute+index_put (step > 1).
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_slice_scatter_target;
 use crate::runner_logging::log_line;
 
@@ -34,12 +34,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
-        for id in ids {
-            if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
-                continue;
-            }
+        for id in graph.live_call_function_ids() {
             if !is_slice_scatter_target(&graph.nodes[id].target) {
                 continue;
             }
@@ -273,7 +268,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::NodeMeta;
+    use crate::fx_ir::{NodeMeta, NodeOp};
     use crate::fx_target::{is_cat_target, is_index_put_default_target};
 
     #[test]

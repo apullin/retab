@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, QParam};
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeCumsumPass;
@@ -18,12 +18,7 @@ impl IrPass for IrDecomposeCumsumPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
-        for id in ids {
-            if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
-                continue;
-            }
+        for id in graph.live_call_function_ids() {
             if !graph.nodes[id].target.contains("cumsum") {
                 continue;
             }
