@@ -1087,6 +1087,14 @@ Deleted: repeated scalar-value-to-domain-byte loops from arange, linspace, and e
 Added: `scalar_sequence_bytes(...)` and `full_shape(...)` helpers inside zero-input constant planning
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_fuse_zero_input_constants_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over full, arange, and eye; Rust LOC check
 Note: Focused zero-input Rust tests passed `9 passed`; full Rust tests passed `137 passed`; focused Python smoke passed `39 passed, 7 skipped, 50 deselected`. No model lane was run. This is a small local semantic-collapse slice: the planning code now names scalar sequence materialization rather than spelling byte extension loops per factory op.
+
+2026-06-14, target marker grammar helper slice
+Rust LOC: 36,923 -> 36,913
+Movement: -10 Rust LOC
+Deleted: repeated target-marker OR chains across `fx_target` helper predicates
+Added: local `contains_any!` marker macro with comma form for short marker sets and pipe form for longer readable sets
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_target::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over view, permute, squeeze, unsqueeze, conv2d, max_pool, avg_pool2d, split, slice, tril, layer_norm, var, where, eq, ge, and gt; Rust LOC check
+Note: Target-family Rust tests passed `12 passed`; full Rust tests passed `137 passed`; focused Python smoke passed `643 passed, 1330 deselected`. No model lane was run. This keeps target matching behavior unchanged while giving the shared target grammar a named "contains any marker" operation.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

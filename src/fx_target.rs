@@ -41,6 +41,15 @@ pub(crate) enum NoopTarget {
     DtypeCheckedPassthrough,
 }
 
+macro_rules! contains_any {
+    ($target:expr, $($marker:literal),+ $(,)?) => {
+        false $(|| $target.contains($marker))+
+    };
+    ($target:expr; $($marker:literal)|+ $(,)?) => {
+        false $(|| $target.contains($marker))+
+    };
+}
+
 pub(crate) fn classify_ir_target(target: &str) -> IrTargetKind {
     if matches!(
         target,
@@ -58,14 +67,18 @@ pub(crate) fn classify_ir_target(target: &str) -> IrTargetKind {
         return IrTargetKind::GetItem;
     }
 
-    if target.contains("quantized_decomposed.dequantize_per_channel")
-        || target.contains("dequantize_per_channel")
-    {
+    if contains_any!(
+        target,
+        "quantized_decomposed.dequantize_per_channel",
+        "dequantize_per_channel"
+    ) {
         return IrTargetKind::DequantizePerChannel;
     }
-    if target.contains("quantized_decomposed.dequantize_per_tensor")
-        || target.contains("dequantize_per_tensor")
-    {
+    if contains_any!(
+        target,
+        "quantized_decomposed.dequantize_per_tensor",
+        "dequantize_per_tensor"
+    ) {
         return IrTargetKind::DequantizePerTensor;
     }
     if target.contains("quantized_decomposed.quantize_per_channel")
@@ -132,7 +145,7 @@ pub(crate) fn is_zero_input_constant_target(target: &str) -> bool {
 }
 
 pub(crate) fn shape_only_constant_target(target: &str) -> Option<ShapeOnlyConstantTarget> {
-    if target.contains("aten.reshape.default") || target.contains("aten.view_copy.default") {
+    if contains_any!(target, "aten.reshape.default", "aten.view_copy.default") {
         return Some(ShapeOnlyConstantTarget::Reshape);
     }
     if target.contains("aten.unsqueeze_copy.default") {
@@ -158,29 +171,31 @@ pub(crate) fn noop_target(target: &str) -> Option<NoopTarget> {
     if target.contains("aten.copy.default") {
         return Some(NoopTarget::CopySourceArg);
     }
-    if target.contains("_to_dim_order_copy.default") || target.contains("aten._to_copy.default") {
+    if contains_any!(
+        target,
+        "_to_dim_order_copy.default",
+        "aten._to_copy.default"
+    ) {
         return Some(NoopTarget::DtypeCheckedPassthrough);
     }
-    if target.contains("aten.clone.default")
-        || target.contains("_clone_dim_order.default")
-        || target.contains("alias_copy.default")
-        || target.contains("detach_copy.default")
-    {
+    if contains_any!(
+        target;
+        "aten.clone.default" | "_clone_dim_order.default" | "alias_copy.default" | "detach_copy.default"
+    ) {
         return Some(NoopTarget::PassthroughFirstArg);
     }
     None
 }
 
 pub(crate) fn is_view_like_target(target: &str) -> bool {
-    target.contains("view_copy")
-        || target.contains("flatten")
-        || target.contains("reshape")
-        || target.contains("aten.view.")
-        || target.contains("aten._unsafe_view")
+    contains_any!(
+        target;
+        "view_copy" | "flatten" | "reshape" | "aten.view." | "aten._unsafe_view"
+    )
 }
 
 pub(crate) fn is_permute_target(target: &str) -> bool {
-    target.contains("permute_copy") || target.contains("aten.permute.")
+    contains_any!(target, "permute_copy", "aten.permute.")
 }
 
 pub(crate) fn is_tosa_transpose_target(target: &str) -> bool {
@@ -190,28 +205,20 @@ pub(crate) fn is_tosa_transpose_target(target: &str) -> bool {
 
 pub(crate) fn is_layout_passthrough_target(target: &str) -> bool {
     let target = target.to_ascii_lowercase();
-    target.contains("view")
-        || target.contains("reshape")
-        || target.contains("transpose")
-        || target.contains("permute")
-        || target.contains("squeeze")
-        || target.contains("unsqueeze")
-        || target.contains("flatten")
-        || target.contains("contiguous")
+    contains_any!(
+        &target;
+        "view" | "reshape" | "transpose" | "permute" | "squeeze" | "unsqueeze" | "flatten" | "contiguous"
+    )
 }
 
 pub(crate) fn is_rank_changing_layout_target(target: &str) -> bool {
     let target = target.to_ascii_lowercase();
-    target.contains("view")
-        || target.contains("reshape")
-        || target.contains("flatten")
-        || target.contains("squeeze")
-        || target.contains("unsqueeze")
+    contains_any!(&target; "view" | "reshape" | "flatten" | "squeeze" | "unsqueeze")
 }
 
 pub(crate) fn is_transpose_conv2d_target(target: &str) -> bool {
     let target = target.to_ascii_lowercase();
-    target.contains("transpose_conv2d") || target.contains("transposeconv2d")
+    contains_any!(&target, "transpose_conv2d", "transposeconv2d")
 }
 
 pub(crate) fn is_conv1d_default_target(target: &str) -> bool {
@@ -229,28 +236,23 @@ pub(crate) fn is_aten_convolution_default_target(target: &str) -> bool {
 pub(crate) fn is_conv_bias_annotation_target(target: &str) -> bool {
     is_aten_convolution_default_target(target)
         || is_conv2d_default_target(target)
-        || target.contains("conv3d.default")
-        || target.contains("conv_transpose2d")
-        || target.contains("transpose_conv2d")
-        || target.contains("transposeconv2d")
-        || target.contains("backend.tosa.CONV")
-        || target.contains("backend.tosa.DEPTHWISE_CONV")
-        || target.contains("backend.tosa.TRANSPOSE_CONV2D")
+        || contains_any!(
+            target;
+            "conv3d.default" | "conv_transpose2d" | "transpose_conv2d" | "transposeconv2d" | "backend.tosa.CONV" | "backend.tosa.DEPTHWISE_CONV" | "backend.tosa.TRANSPOSE_CONV2D"
+        )
 }
 
 pub(crate) fn is_raw_aten_convolution_target(target: &str) -> bool {
     let target = target.to_ascii_lowercase();
-    target.contains("aten.convolution") || target.contains("edge__ops_aten_convolution")
+    contains_any!(&target, "aten.convolution", "edge__ops_aten_convolution")
 }
 
 pub(crate) fn is_conv_accumulator_target(target: &str) -> bool {
     let target = target.to_ascii_lowercase();
     if target.contains("tosa") {
-        return target.contains("conv2d")
-            || target.contains("depthwise_conv2d")
-            || target.contains("conv3d");
+        return contains_any!(&target, "conv2d", "depthwise_conv2d", "conv3d");
     }
-    target.contains("aten.convolution") || target.contains("aten.conv2d")
+    contains_any!(&target, "aten.convolution", "aten.conv2d")
 }
 
 pub(crate) fn is_size_adjust_target(target: &str) -> bool {
@@ -258,15 +260,14 @@ pub(crate) fn is_size_adjust_target(target: &str) -> bool {
     if is_transpose_conv2d_target(&target) {
         return false;
     }
-    target.contains("convolution.default")
-        || target.contains("conv2d")
-        || target.contains("conv3d")
-        || target.contains("max_pool2d")
-        || target.contains("avg_pool2d")
+    contains_any!(
+        &target;
+        "convolution.default" | "conv2d" | "conv3d" | "max_pool2d" | "avg_pool2d"
+    )
 }
 
 pub(crate) fn is_split_target(target: &str) -> bool {
-    target.contains("split_with_sizes_copy") || target.contains("split_copy")
+    contains_any!(target, "split_with_sizes_copy", "split_copy")
 }
 
 pub(crate) fn is_slice_copy_tensor_target(target: &str) -> bool {
@@ -274,8 +275,7 @@ pub(crate) fn is_slice_copy_tensor_target(target: &str) -> bool {
 }
 
 pub(crate) fn is_slice_tensor_target(target: &str) -> bool {
-    (target.contains("slice_copy.Tensor") || target.contains("slice.Tensor"))
-        && !target.contains("slice_scatter")
+    contains_any!(target, "slice_copy.Tensor", "slice.Tensor") && !target.contains("slice_scatter")
 }
 
 pub(crate) fn is_slice_scatter_target(target: &str) -> bool {
@@ -296,10 +296,7 @@ pub(crate) fn is_gather_target(target: &str) -> bool {
 }
 
 pub(crate) fn is_tril_target(target: &str) -> bool {
-    target.contains("aten.tril")
-        || target.contains("aten_tril")
-        || target.contains("aten.tril_copy")
-        || target.contains("aten_tril_copy")
+    contains_any!(target; "aten.tril" | "aten_tril" | "aten.tril_copy" | "aten_tril_copy")
 }
 
 pub(crate) fn is_embedding_target(target: &str) -> bool {
@@ -323,14 +320,11 @@ pub(crate) fn is_cumsum_target(target: &str) -> bool {
 }
 
 pub(crate) fn is_layer_norm_target(target: &str) -> bool {
-    target.contains("layer_norm") || target.contains("native_layer_norm")
+    contains_any!(target, "layer_norm", "native_layer_norm")
 }
 
 pub(crate) fn is_var_target(target: &str) -> bool {
-    target.contains("var.correction")
-        || target.contains("var_correction")
-        || target.contains("var.dim")
-        || target.contains("var_dim")
+    contains_any!(target; "var.correction" | "var_correction" | "var.dim" | "var_dim")
 }
 
 pub(crate) fn is_var_dim_target(target: &str) -> bool {
@@ -363,18 +357,18 @@ pub(crate) fn is_pixel_unshuffle_target(target: &str) -> bool {
 
 pub(crate) fn is_squeeze_target(target: &str) -> bool {
     !target.contains("unsqueeze")
-        && (target.contains("squeeze_copy")
-            || target.contains("squeeze.dim")
-            || target.contains("squeeze.default")
-            || target.contains("squeeze.dims"))
+        && contains_any!(
+            target;
+            "squeeze_copy" | "squeeze.dim" | "squeeze.default" | "squeeze.dims"
+        )
 }
 
 pub(crate) fn is_unsqueeze_target(target: &str) -> bool {
-    target.contains("unsqueeze_copy") || target.contains("unsqueeze.default")
+    contains_any!(target, "unsqueeze_copy", "unsqueeze.default")
 }
 
 pub(crate) fn is_dim_transpose_target(target: &str) -> bool {
-    target.contains("transpose_copy") || target.contains("transpose.int")
+    contains_any!(target, "transpose_copy", "transpose.int")
 }
 
 pub(crate) fn is_index_put_family_target(target: &str) -> bool {
@@ -382,11 +376,11 @@ pub(crate) fn is_index_put_family_target(target: &str) -> bool {
 }
 
 pub(crate) fn is_index_put_default_target(target: &str) -> bool {
-    target.contains("index_put.default") || target.contains("index_put_.default")
+    contains_any!(target, "index_put.default", "index_put_.default")
 }
 
 pub(crate) fn is_where_target(target: &str) -> bool {
-    target.contains("where.self") || target.contains("aten_where")
+    contains_any!(target, "where.self", "aten_where")
 }
 
 pub(crate) fn is_masked_fill_target(target: &str) -> bool {
@@ -406,19 +400,15 @@ pub(crate) fn is_abs_target(target: &str) -> bool {
 }
 
 pub(crate) fn is_comparison_target(target: &str) -> bool {
-    target.contains("eq.Tensor")
-        || target.contains("ge.Tensor")
-        || target.contains("gt.Tensor")
-        || target.contains("le.Tensor")
-        || target.contains("lt.Tensor")
+    contains_any!(target; "eq.Tensor" | "ge.Tensor" | "gt.Tensor" | "le.Tensor" | "lt.Tensor")
 }
 
 pub(crate) fn is_minmax_target(target: &str) -> bool {
-    target.contains("maximum.default") || target.contains("minimum.default")
+    contains_any!(target, "maximum.default", "minimum.default")
 }
 
 pub(crate) fn is_add_sub_target(target: &str) -> bool {
-    target.contains("add.Tensor") || target.contains("sub.Tensor")
+    contains_any!(target, "add.Tensor", "sub.Tensor")
 }
 
 pub(crate) fn is_mul_target(target: &str) -> bool {
@@ -430,7 +420,7 @@ pub(crate) fn is_sum_dim_int_list_target(target: &str) -> bool {
 }
 
 pub(crate) fn is_mean_target(target: &str) -> bool {
-    target.contains("mean.dim") || target.contains("mean.default")
+    contains_any!(target, "mean.dim", "mean.default")
 }
 
 pub(crate) fn is_full_like_target(target: &str) -> bool {
