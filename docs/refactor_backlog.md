@@ -1391,6 +1391,14 @@ Deleted: remaining local snapshot-loop scaffolding from scalar-shift tensorizati
 Added: no new helper surface; these passes now reuse `IrGraph::rewrite_live_call_functions(...)`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over where, masked_fill, tril, lshift, and pixel_shuffling; Rust LOC check
 Note: Full Rust tests passed `139 passed`; focused Python smoke passed `71 passed, 127 deselected`. No model lane was run. This is intentionally a small follow-through tranche: it converts compact loop bodies without forcing the larger decomposition passes into a noisy closure rewrite.
+
+2026-06-14, dispatcher live call rewrite follow-through slice
+Rust LOC: 36,867 -> 36,862
+Movement: -5 Rust LOC
+Deleted: local snapshot-loop scaffolding from grouped-conv decomposition and the large decompose-ops dispatch table
+Added: no new helper surface; both dispatchers now reuse `IrGraph::rewrite_live_call_functions(...)`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv2d, depthwise_conv, conv_combos, pow, tan, sinh, cosh, asinh, acosh, elu, gelu, batch_norm, stack, unbind, add, and sub; Rust LOC check
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `552 passed, 1 skipped, 3 expected xfails, 1335 deselected`. No model lane was run. This keeps traversal policy centralized without changing grouped-conv or decompose-op rewrite algorithms.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
