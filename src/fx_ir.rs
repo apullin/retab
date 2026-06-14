@@ -1475,8 +1475,7 @@ impl NodeMeta {
         let val = val_obj.as_ref().and_then(|v| FakeTensorMeta::from_py(v));
         let val_dim_order = val_obj
             .as_ref()
-            .and_then(|v| v.call_method0("dim_order").ok())
-            .and_then(|v| v.extract::<Vec<usize>>().ok());
+            .and_then(|v| attrs(v).call_optional("dim_order"));
 
         let tosa_dim_order = meta_attrs.optional("tosa_dim_order");
 
@@ -1509,10 +1508,8 @@ impl NodeMeta {
                 }
             }
         }
-        if let Some(v) = meta_attrs.value("tosa_special_dtype") {
-            if let Ok(s) = v.str().and_then(|s| s.extract::<String>()) {
-                extras.insert("tosa_special_dtype".into(), MetaValue::Str(s));
-            }
+        if let Some(s) = meta_attrs.display_optional("tosa_special_dtype") {
+            extras.insert("tosa_special_dtype".into(), MetaValue::Str(s));
         }
 
         Ok(Self {

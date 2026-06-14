@@ -1463,6 +1463,14 @@ Deleted: most raw `ctx.tensor(...)` / `ctx.bool(...)` / `ctx.replace_output(...)
 Added: `ApproxCtx` formula helpers for node-only tensor calls, shape-aware node calls, output-meta preserving node calls, common arithmetic/unary/bool ops, and `where_self`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smokes via `/tmp/et.sh` over migrated math ops, batch/group norm, asin/acos, add/sub/pow, and erfinv excluding known baseline `neg_one`/`pos_one`; Rust LOC check
 Note: Full Rust tests passed `139 passed` after each slice; focused Python smokes passed `242 passed`, `43 passed, 1 skipped`, `36 passed`, `119 passed, 3 expected xfails`, and `16 passed`. This is a larger Refactor 3 grammar payoff: formula decompositions now read as operations over `ApproxCtx` instead of open-coded target strings and `IrArg::Node` vectors.
+
+2026-06-14, Python meta method/display helper slice
+Rust LOC: 36,258 -> 36,273
+Movement: +15 Rust LOC
+Deleted: raw `dim_order()` method invocation and `tosa_special_dtype` string extraction from `NodeMeta::from_fx`
+Added: `AttrView::call_optional(...)`, `AttrView::display(...)`, and `MetaView::display_optional(...)` in `fx_py_attr`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over addmm, conv2d, cumsum, pixel_shuffling, and sum; Rust LOC check
+Note: Full Rust tests passed `141 passed`; focused Python smoke passed `211 passed`. This is a small setup-positive Refactor 5A slice: `NodeMeta::from_fx` now names Python-boundary semantics instead of carrying PyO3 call/string mechanics inline.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

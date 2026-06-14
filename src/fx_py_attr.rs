@@ -13,12 +13,23 @@ impl<'a, 'py> AttrView<'a, 'py> {
         self.object(name)?.str()?.extract()
     }
 
+    pub(crate) fn display(&self) -> PyResult<String> {
+        self.obj.str()?.extract()
+    }
+
     pub(crate) fn try_has(&self, name: &str) -> PyResult<bool> {
         self.obj.hasattr(name)
     }
 
     pub(crate) fn optional<T: FromPyObject<'py>>(&self, name: &str) -> Option<T> {
         self.obj.getattr(name).ok().and_then(|v| v.extract().ok())
+    }
+
+    pub(crate) fn call_optional<T: FromPyObject<'py>>(&self, name: &str) -> Option<T> {
+        self.obj
+            .call_method0(name)
+            .ok()
+            .and_then(|v| v.extract().ok())
     }
 
     pub(crate) fn or_value<T: FromPyObject<'py>>(&self, name: &str, default: T) -> T {
@@ -34,7 +45,10 @@ impl<'a, 'py> AttrView<'a, 'py> {
     }
 
     pub(crate) fn display_optional(&self, name: &str) -> Option<String> {
-        self.obj.getattr(name).ok().map(|v| format!("{v}"))
+        self.obj
+            .getattr(name)
+            .ok()
+            .and_then(|v| attrs(&v).display().ok())
     }
 
     pub(crate) fn has(&self, name: &str) -> bool {
@@ -60,6 +74,10 @@ impl<'a, 'py> MetaView<'a, 'py> {
 
     pub(crate) fn optional<T: FromPyObject<'py>>(&self, key: &str) -> Option<T> {
         self.value(key).and_then(|v| v.extract().ok())
+    }
+
+    pub(crate) fn display_optional(&self, key: &str) -> Option<String> {
+        self.value(key).and_then(|v| attrs(&v).display().ok())
     }
 }
 
