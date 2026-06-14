@@ -1383,6 +1383,14 @@ Deleted: repeated snapshot-loop/modified-flag scaffolding from 21 IR passes, inc
 Added: `IrGraph::rewrite_live_call_functions(...)`, preserving the existing snapshot-before-mutate traversal semantics
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over add, mm, bmm, matmul, conv1d, conv2d, clamp, relu, hardtanh, cumsum, layer_norm, logit, var, repeat, squeeze, index_put, and constant_pad_nd; Rust LOC check
 Note: Full Rust tests passed `139 passed`; focused Python smoke passed `604 passed, 12 expected xfails, 1294 deselected`. No model lane was run. This is a Refactor 3 graph traversal grammar slice: passes now name the common "snapshot live call-functions and OR rewrite results" operation instead of carrying local loop scaffolding.
+
+2026-06-14, compact live call rewrite follow-through slice
+Rust LOC: 36,871 -> 36,867
+Movement: -4 Rust LOC
+Deleted: remaining local snapshot-loop scaffolding from scalar-shift tensorization, where-mask expansion, masked_fill decomposition, tril decomposition, and pixel shuffle/unshuffle decomposition
+Added: no new helper surface; these passes now reuse `IrGraph::rewrite_live_call_functions(...)`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over where, masked_fill, tril, lshift, and pixel_shuffling; Rust LOC check
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `71 passed, 127 deselected`. No model lane was run. This is intentionally a small follow-through tranche: it converts compact loop bodies without forcing the larger decomposition passes into a noisy closure rewrite.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

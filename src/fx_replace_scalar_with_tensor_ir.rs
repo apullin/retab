@@ -20,25 +20,24 @@ impl IrPass for IrReplaceScalarWithTensorPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
             let target = graph.nodes[id].target.clone();
             let Some(new_target) = scalar_shift_replacement_target(&target) else {
-                continue;
+                return false;
             };
             if graph.nodes[id].args.len() != 2 {
-                continue;
+                return false;
             }
             let node_name = graph.nodes[id].name.clone();
             let output_meta = graph.nodes[id].meta.clone();
 
             let lhs_id = match graph.nodes[id].args[0].as_node() {
                 Some(value) => value,
-                None => continue,
+                None => return false,
             };
             let scalar_value = match scalar_arg(&graph.nodes[id].args[1]) {
                 Some(value) => value,
-                None => continue,
+                None => return false,
             };
             let lhs_dtype = graph.nodes[lhs_id]
                 .meta
@@ -63,8 +62,8 @@ impl IrPass for IrReplaceScalarWithTensorPass {
                 vec![IrArg::Node(lhs_id), IrArg::Node(full)],
                 output_meta,
             );
-            modified = true;
-        }
+            true
+        });
 
         if modified {
             log_line(format_args!(

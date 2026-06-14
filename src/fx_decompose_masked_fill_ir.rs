@@ -34,23 +34,22 @@ impl IrPass for IrDecomposeMaskedFillPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
             if !is_masked_fill_target(&graph.nodes[id].target) {
-                continue;
+                return false;
             }
             if graph.nodes[id].args.len() < 3 {
-                continue;
+                return false;
             }
 
             // Extract args: x (input tensor), mask, value (scalar)
             let x_id = match &graph.nodes[id].args[0] {
                 IrArg::Node(nid) => *nid,
-                _ => continue,
+                _ => return false,
             };
             let mask_id = match &graph.nodes[id].args[1] {
                 IrArg::Node(nid) => *nid,
-                _ => continue,
+                _ => return false,
             };
             let value_arg = graph.nodes[id].args[2].clone();
 
@@ -78,8 +77,8 @@ impl IrPass for IrDecomposeMaskedFillPass {
                 ],
                 where_meta(&node_meta),
             );
-            modified = true;
-        }
+            true
+        });
 
         if modified {
             log_line(format_args!(

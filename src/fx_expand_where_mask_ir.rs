@@ -17,35 +17,34 @@ impl IrPass for IrExpandWhereMaskPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
             if !is_where_target(&graph.nodes[id].target) {
-                continue;
+                return false;
             }
             if graph.nodes[id].args.len() < 3 {
-                continue;
+                return false;
             }
 
             // arg[0] = mask, arg[1] = true_val, arg[2] = false_val
             let mask_id = match graph.nodes[id].args[0].as_node() {
                 Some(mid) => mid,
-                None => continue,
+                None => return false,
             };
 
             let output_shape = match graph.nodes[id].meta.val_shape() {
                 Some(s) => s.to_vec(),
-                None => continue,
+                None => return false,
             };
             let mask_shape = match graph.nodes[mask_id].meta.val_shape() {
                 Some(s) => s.to_vec(),
-                None => continue,
+                None => return false,
             };
 
             if output_shape.is_empty() || mask_shape.is_empty() {
-                continue;
+                return false;
             }
             if mask_shape.len() > output_shape.len() {
-                continue;
+                return false;
             }
 
             // Pad mask shape with leading 1s to match output rank
@@ -58,7 +57,7 @@ impl IrPass for IrExpandWhereMaskPass {
                 .zip(output_shape.iter())
                 .all(|(mask_dim, out_dim)| *mask_dim == 1 || *mask_dim == *out_dim);
             if !broadcastable || padded_mask_shape == output_shape {
-                continue;
+                return false;
             }
 
             // Build meta for the view_copy node (padded mask shape, same dtype as mask)
@@ -114,8 +113,8 @@ impl IrPass for IrExpandWhereMaskPass {
             );
 
             graph.replace_and_erase(id, new_where_id);
-            modified = true;
-        }
+            true
+        });
 
         if modified {
             log_line(format_args!(

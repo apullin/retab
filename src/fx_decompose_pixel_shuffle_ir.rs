@@ -71,31 +71,30 @@ impl IrPass for IrDecomposePixelShufflePass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
             let target = &graph.nodes[id].target;
             let is_ps = is_pixel_shuffle_target(target);
             let is_pus = is_pixel_unshuffle_target(target);
             if !is_ps && !is_pus {
-                continue;
+                return false;
             }
 
             let input_id = match graph.nodes[id].first_node_arg() {
                 Some(nid) => nid,
-                None => continue,
+                None => return false,
             };
             let input_shape = match graph.nodes[input_id].meta.val_shape() {
                 Some(s) => s.to_vec(),
-                None => continue,
+                None => return false,
             };
             if input_shape.len() != 4 {
-                continue;
+                return false;
             }
 
             // Extract upscale_factor (second arg)
             let r = match graph.nodes[id].arg_int(1) {
                 Some(v) => v,
-                None => continue,
+                None => return false,
             };
 
             let orig_dtype = graph.nodes[id].meta.val_dtype_or_float32().to_string();
@@ -144,7 +143,7 @@ impl IrPass for IrDecomposePixelShufflePass {
                 );
 
                 graph.replace_and_erase(id, result_id);
-                modified = true;
+                true
             } else {
                 // pixel_unshuffle
                 let n = input_shape[0];
@@ -189,9 +188,9 @@ impl IrPass for IrDecomposePixelShufflePass {
                 );
 
                 graph.replace_and_erase(id, result_id);
-                modified = true;
+                true
             }
-        }
+        });
 
         if modified {
             log_line(format_args!(

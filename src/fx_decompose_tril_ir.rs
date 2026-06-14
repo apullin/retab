@@ -144,17 +144,17 @@ impl IrPass for IrDecomposeTrilPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
             if !is_tril_target(&graph.nodes[id].target) {
-                continue;
+                return false;
             }
 
             if let Some(new_id) = decompose_one(graph, id) {
                 graph.replace_and_erase(id, new_id);
-                modified = true;
+                return true;
             }
-        }
+            false
+        });
 
         if modified {
             log_line(format_args!("[IrDecomposeTril] decomposed tril ops"));
