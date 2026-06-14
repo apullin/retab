@@ -3,8 +3,7 @@ use crate::fx_ir::{
 };
 use crate::graph::ir::DType;
 use crate::lowering_effects::{
-    InsertPrecomputedTableOpEffect, InsertTableOpEffect, LoweringEffect, LoweringEffectBatch,
-    TableTensorSpec,
+    InsertPrecomputedTableOpEffect, LoweringEffect, LoweringEffectBatch, TableTensorSpec,
 };
 use crate::tensor_data::parse_torch_dtype;
 
@@ -131,8 +130,7 @@ fn quantize_to_spec(value: f64, spec: &TableTensorSpec) -> Option<i64> {
         // Domain-restricted ops (acosh for x<1, logit outside (0,1), rsqrt for
         // x<=0) yield NaN for out-of-domain dequantized inputs. torch casts
         // NaN->int as 0, and those table entries are never hit at runtime, so
-        // emit 0 rather than aborting the whole precompute (which would force
-        // the compute-in-Python InsertTableOp path).
+        // emit 0 rather than aborting the whole precompute.
         return Some(0);
     }
     if value.is_infinite() {
@@ -428,12 +426,11 @@ impl EffectfulIrPass for IrInsertTableOpsEffectPass {
                 if let Some(effect) = plan_precomputed_table(node, &spec) {
                     return Some(LoweringEffect::InsertPrecomputedTableOp(effect));
                 }
-                Some(LoweringEffect::InsertTableOp(InsertTableOpEffect {
-                    node_name: node.name.clone(),
-                    kind: spec.kind.to_string(),
-                    scalar_arg: spec.scalar_arg,
-                    allow_missing: true,
-                }))
+                crate::fold_fallback_log(&format!(
+                    "TablePrecomputeSkipped target={} kind={} node={}",
+                    node.target, spec.kind, node.name
+                ));
+                None
             })
             .collect::<Vec<_>>();
 
@@ -543,26 +540,13 @@ mod tests {
             .items
             .iter()
             .map(|effect| match effect {
-                LoweringEffect::InsertPrecomputedTableOp(effect) => {
-                    (effect.node_name.as_str(), "precomputed", None)
-                }
-                LoweringEffect::InsertTableOp(effect) => (
-                    effect.node_name.as_str(),
-                    effect.kind.as_str(),
-                    effect.scalar_arg,
-                ),
+                LoweringEffect::InsertPrecomputedTableOp(effect) => effect.node_name.as_str(),
                 _ => panic!("unexpected effect"),
             })
             .collect::<Vec<_>>();
         assert_eq!(
             effects,
-            vec![
-                ("sigmoid", "precomputed", None),
-                ("pow", "precomputed", None),
-                ("elu", "precomputed", None),
-                ("gelu_none", "precomputed", None),
-                ("gelu_tanh", "precomputed", None),
-            ]
+            vec!["sigmoid", "pow", "elu", "gelu_none", "gelu_tanh"]
         );
     }
 
@@ -622,7 +606,7 @@ mod tests {
     #[test]
     fn precomputes_nan_domain_table_values() {
         // log1p is precomputable in Rust (NaN samples quantize to 0), so it takes
-        // the precomputed-table lane rather than the Python InsertTableOp fallback.
+        // the precomputed-table lane.
         let mut graph = IrGraph::empty();
         let mut meta = NodeMeta::default();
         let qparams = HashMap::from([(
@@ -651,7 +635,7 @@ mod tests {
     #[test]
     fn precomputes_erfinv() {
         // erfinv is precomputable in Rust (Giles approximation), so it takes the
-        // precomputed-table lane rather than the Python InsertTableOp fallback.
+        // precomputed-table lane.
         let mut graph = IrGraph::empty();
         table_node(&mut graph, "erfinv", "aten.erfinv.default", Vec::new());
 
@@ -732,11 +716,8 @@ mod tests {
         );
 
         let result = IrInsertTableOpsEffectPass.run(&mut graph);
-        assert!(result.modified);
-        assert!(matches!(
-            &result.effects.items[0],
-            LoweringEffect::InsertTableOp(effect) if effect.kind == "sigmoid"
-        ));
+        assert!(!result.modified);
+        assert!(result.effects.items.is_empty());
     }
 
     #[test]
@@ -758,11 +739,8 @@ mod tests {
         );
 
         let result = IrInsertTableOpsEffectPass.run(&mut graph);
-        assert!(result.modified);
-        assert!(matches!(
-            &result.effects.items[0],
-            LoweringEffect::InsertTableOp(effect) if effect.kind == "sigmoid"
-        ));
+        assert!(!result.modified);
+        assert!(result.effects.items.is_empty());
     }
 
     #[test]

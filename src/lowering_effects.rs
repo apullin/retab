@@ -54,14 +54,6 @@ pub struct TableTensorSpec {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct InsertTableOpEffect {
-    pub node_name: String,
-    pub kind: String,
-    pub scalar_arg: Option<f64>,
-    pub allow_missing: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct InsertPrecomputedTableOpEffect {
     pub node_name: String,
     pub data: Vec<u8>,
@@ -78,7 +70,6 @@ pub enum LoweringEffect {
     DeleteConstantPlaceholder(DeleteConstantPlaceholderEffect),
     CastInt64InputToInt32(CastInt64InputToInt32Effect),
     MaterializeTensorNode(MaterializeTensorNodeEffect),
-    InsertTableOp(InsertTableOpEffect),
     InsertPrecomputedTableOp(InsertPrecomputedTableOpEffect),
 }
 

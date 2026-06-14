@@ -844,6 +844,15 @@ Deleted: unreferenced Python fused-constant materialization helpers (`materializ
 Added: no new production API; `_torch_dtype_from_name` and `_tensor_from_bytes` remain because precomputed TABLE insertion still uses them
 Validation: `python3 -m py_compile python/retab/_helpers.py`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over full, zeros, ones, arange, eye, view, permute, unsqueeze, mm, bmm, matmul, and addmm; `git diff --check`; fused-const helper reference audit
 Note: Focused Python smoke passed `307 passed, 7 skipped, 10 expected xfails, 553 deselected`. This removes the Python half of the legacy fused-constant fallback path after the Rust effect model stopped referencing it.
+
+2026-06-13, legacy TABLE fallback deletion
+Rust LOC: 37,077
+Python helper LOC: `python/retab/_helpers.py` 991 -> 788
+Movement: -34 Rust LOC and -203 Python LOC
+Deleted: no-op `InsertTableOpEffect`, the from-IR `InsertTableOp` logging arm, the Python `insert_table_op` fallback, Python-side TABLE computation helpers (`QuantSpec`, `_TABLE_TORCH_FNS`, `_table_torch_fn`, `_compute_table`), and stale compute-in-Python table comments
+Added: no new production API; non-precomputable TABLE candidates now only emit `fold_fallback_log` diagnostics while the active path remains `InsertPrecomputedTableOpEffect`
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `python3 -m py_compile python/retab/_helpers.py`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over sigmoid, hardsigmoid, hardswish, silu, tanh, tan, sin, cos, sinh, cosh, asin, acos, atan, asinh, acosh, atanh, exp, expm1, log, log1p, sqrt, rsqrt, reciprocal, erf, erfinv, pow, elu, and gelu; `git diff --check`; TABLE fallback helper reference audit
+Note: Rust tests passed `130 passed`. Focused Python smoke passed `543 passed, 3 expected xfails, 1056 deselected`. This removes the final Python-computed TABLE fallback now that Rust precomputes active TABLE data directly.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

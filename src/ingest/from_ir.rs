@@ -345,9 +345,6 @@ fn apply_effects_ext(
             LoweringEffect::CastInt64InputToInt32(e) => {
                 applied |= cast_buffer_int64_to_int32(store, &e.placeholder_name);
             }
-            LoweringEffect::InsertTableOp(e) => {
-                crate::fold_fallback_log(&format!("InsertTableOp node={}", e.node_name));
-            }
         }
     }
     if applied {
