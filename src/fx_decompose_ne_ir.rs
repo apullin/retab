@@ -52,15 +52,13 @@ impl IrPass for IrDecomposeNotEqualPass {
                 meta.clone(),
             );
 
-            let not = graph.add_anchored_call_function(
+            graph.replace_with_call_function(
                 id,
                 format!("{name}_logical_not"),
                 "aten.logical_not.default",
                 vec![IrArg::Node(eq)],
                 meta,
             );
-
-            graph.replace_and_erase(id, not);
             modified = true;
         }
 

@@ -70,15 +70,13 @@ impl IrPass for IrReplaceScalarWithTensorPass {
                 NodeMeta::tensor(shape, &lhs_dtype),
             );
 
-            let replacement = graph.add_anchored_call_function(
+            graph.replace_with_call_function(
                 id,
                 format!("{}_tensor", node_name),
                 new_target,
                 vec![IrArg::Node(lhs_id), IrArg::Node(full)],
                 output_meta,
             );
-
-            graph.replace_and_erase(id, replacement);
             modified = true;
         }
 

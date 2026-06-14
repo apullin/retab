@@ -75,8 +75,8 @@ impl IrPass for IrDecomposeMaskedFillPass {
             );
 
             // Create where(mask, fill, x) — True positions get fill_value, False keep x
-            let where_id = graph.add_node(
-                NodeOp::CallFunction,
+            graph.replace_with_call_function(
+                id,
                 format!("{node_name}_where"),
                 "aten.where.self".to_string(),
                 vec![
@@ -86,8 +86,6 @@ impl IrPass for IrDecomposeMaskedFillPass {
                 ],
                 where_meta(&node_meta),
             );
-
-            graph.replace_and_erase(id, where_id);
             modified = true;
         }
 

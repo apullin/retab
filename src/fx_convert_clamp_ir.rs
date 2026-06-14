@@ -29,14 +29,13 @@ impl IrPass for IrConvertClampPass {
                     None => continue,
                 };
 
-                let new_id = graph.add_node(
-                    NodeOp::CallFunction,
+                graph.replace_with_call_function(
+                    id,
                     format!("{}_clamp", graph.nodes[id].name),
                     "aten.clamp.default".to_string(),
                     vec![IrArg::Node(input_id), IrArg::Float(0.0), IrArg::None],
                     graph.nodes[id].meta.clone(),
                 );
-                graph.replace_and_erase(id, new_id);
                 modified = true;
             } else if graph.nodes[id].is_hardtanh() {
                 // hardtanh(x, min_val, max_val) -> clamp(x, min_val, max_val)
@@ -56,8 +55,8 @@ impl IrPass for IrConvertClampPass {
                     .and_then(IrArg::as_numeric_f64)
                     .unwrap_or(1.0);
 
-                let new_id = graph.add_node(
-                    NodeOp::CallFunction,
+                graph.replace_with_call_function(
+                    id,
                     format!("{}_clamp", graph.nodes[id].name),
                     "aten.clamp.default".to_string(),
                     vec![
@@ -67,7 +66,6 @@ impl IrPass for IrConvertClampPass {
                     ],
                     graph.nodes[id].meta.clone(),
                 );
-                graph.replace_and_erase(id, new_id);
                 modified = true;
             }
         }

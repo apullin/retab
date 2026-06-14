@@ -88,8 +88,8 @@ impl IrPass for IrRewriteSqueezePass {
                 let output_shape = compute_squeeze_shape(&input_shape, &dims, input_rank);
 
                 // Create view_copy: replace squeeze with view_copy(input, output_shape)
-                let new_id = graph.add_node(
-                    NodeOp::CallFunction,
+                graph.replace_with_call_function(
+                    id,
                     format!("{}_view_copy", graph.nodes[id].name),
                     "aten.view_copy.default".to_string(),
                     vec![
@@ -98,7 +98,6 @@ impl IrPass for IrRewriteSqueezePass {
                     ],
                     graph.nodes[id].meta.clone(),
                 );
-                graph.replace_and_erase(id, new_id);
                 modified = true;
             } else if is_usq {
                 let dim = match graph.nodes[id].args.get(1) {
@@ -107,8 +106,8 @@ impl IrPass for IrRewriteSqueezePass {
                 };
                 let output_shape = compute_unsqueeze_shape(&input_shape, dim, input_rank);
 
-                let new_id = graph.add_node(
-                    NodeOp::CallFunction,
+                graph.replace_with_call_function(
+                    id,
                     format!("{}_view_copy", graph.nodes[id].name),
                     "aten.view_copy.default".to_string(),
                     vec![
@@ -117,7 +116,6 @@ impl IrPass for IrRewriteSqueezePass {
                     ],
                     graph.nodes[id].meta.clone(),
                 );
-                graph.replace_and_erase(id, new_id);
                 modified = true;
             } else if is_tr {
                 if graph.nodes[id].args.len() < 3 {
@@ -137,8 +135,8 @@ impl IrPass for IrRewriteSqueezePass {
                 let mut perm: Vec<i64> = (0..input_rank as i64).collect();
                 perm.swap(d0, d1);
 
-                let new_id = graph.add_node(
-                    NodeOp::CallFunction,
+                graph.replace_with_call_function(
+                    id,
                     format!("{}_permute_copy", graph.nodes[id].name),
                     "aten.permute_copy.default".to_string(),
                     vec![
@@ -147,7 +145,6 @@ impl IrPass for IrRewriteSqueezePass {
                     ],
                     graph.nodes[id].meta.clone(),
                 );
-                graph.replace_and_erase(id, new_id);
                 modified = true;
             }
         }

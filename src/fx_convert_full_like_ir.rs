@@ -51,14 +51,13 @@ impl IrPass for IrConvertFullLikePass {
             // Build args: full(shape_list, fill_value)
             let shape_arg = IrArg::List(input_shape.iter().map(|&d| IrArg::Int(d)).collect());
 
-            let new_id = graph.add_node(
-                NodeOp::CallFunction,
+            graph.replace_with_call_function(
+                id,
                 format!("{}_full", graph.nodes[id].name),
                 "aten.full.default".to_string(),
                 vec![shape_arg, fill_value],
                 graph.nodes[id].meta.clone(),
             );
-            graph.replace_and_erase(id, new_id);
             modified = true;
         }
 

@@ -871,6 +871,14 @@ Deleted: the remaining `_helpers.py` module, including historical FX node insert
 Added: the one live graph-signature ordering helper is now local to `python/retab/preprocess.py`, and stale helper-path docs/comments were removed
 Validation: `python3 -m compileall -q python/retab`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over sigmoid, hardsigmoid, hardswish, silu, tanh, tan, sin, cos, sinh, cosh, asin, acos, atan, asinh, acosh, atanh, exp, expm1, log, log1p, sqrt, rsqrt, reciprocal, erf, erfinv, pow, elu, and gelu; helper-symbol reference audit
 Note: This completes the helper-export audit: Python remains the ExecuTorch boundary seam, but no standalone `_helpers.py` graph-surgery module is left for future passes to call back into.
+
+2026-06-13, queued cleanup/builder/tensor-facts slice
+Rust LOC: 37,077 -> 37,063
+Movement: -14 Rust LOC
+Deleted: stale `src/graph/builder.rs` extension module whose remaining behavior was only `Graph::all_node_ids` plus a test-only node constructor; the misleading graph-builder file boundary and remaining production `copy_qparams_from` call sites
+Added: `IrGraph::replace_with_call_function`, a small rewrite-builder primitive for one-node replacement rewrites; the `Graph` helpers now live with `Graph`; qparam copying now flows through `NodeMeta::with_qparams_from`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over as_strided_copy, clamp, conv1d, embedding, full/full_like, linear, masked_fill, ne, permute, relu, repeat_interleave, squeeze, transpose_copy, and unsqueeze; `git diff --check`; Rust LOC check
+Note: Rust tests passed `130 passed`. Focused Python smoke passed `367 passed, 8 skipped, 782 deselected`. This executed the requested 1/2/3 queue: a small dead-surface deletion, a bounded IR rewrite-builder migration, and a conservative tensor-facts cleanup that makes mutable qparam copying private to `NodeMeta`.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

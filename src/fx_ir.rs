@@ -560,6 +560,19 @@ impl IrGraph {
         id
     }
 
+    pub fn replace_with_call_function(
+        &mut self,
+        old_id: NodeId,
+        name: impl Into<String>,
+        target: impl Into<String>,
+        args: Vec<IrArg>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.add_anchored_call_function(old_id, name, target, args, meta);
+        self.replace_and_erase(old_id, id);
+        id
+    }
+
     pub fn add_anchored_call_function_with_val(
         &mut self,
         anchor: NodeId,
@@ -1453,7 +1466,7 @@ impl NodeMeta {
         qparams
     }
 
-    pub fn copy_qparams_from(&mut self, other: &Self) {
+    fn copy_qparams_from(&mut self, other: &Self) {
         if let Some(iqp) = other.input_qparams.clone() {
             self.set_input_qparams(iqp);
         }

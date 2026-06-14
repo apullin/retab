@@ -32,7 +32,7 @@ impl IrPass for IrDecomposeEmbeddingPass {
             // (indices.shape + weight.shape[1:]) is exactly the embedding output, so reuse it.
             let name = graph.nodes[id].name.clone();
             let meta = graph.nodes[id].meta.clone();
-            let index = graph.add_anchored_call_function(
+            graph.replace_with_call_function(
                 id,
                 format!("{}_as_index", name),
                 "aten.index.Tensor".to_string(),
@@ -42,7 +42,6 @@ impl IrPass for IrDecomposeEmbeddingPass {
                 ],
                 meta,
             );
-            graph.replace_and_erase(id, index);
             modified = true;
         }
         modified

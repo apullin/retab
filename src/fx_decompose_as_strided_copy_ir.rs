@@ -108,8 +108,8 @@ impl IrPass for IrDecomposeAsStridedCopyPass {
             let out_meta = graph.nodes[id].meta.cloned_with_val(size.clone(), dtype);
 
             // Replace as_strided_copy with view_copy(input, size)
-            let new_id = graph.add_node(
-                NodeOp::CallFunction,
+            graph.replace_with_call_function(
+                id,
                 format!("{}_view_copy", graph.nodes[id].name),
                 "aten.view_copy.default".to_string(),
                 vec![
@@ -118,7 +118,6 @@ impl IrPass for IrDecomposeAsStridedCopyPass {
                 ],
                 out_meta,
             );
-            graph.replace_and_erase(id, new_id);
             modified = true;
         }
 

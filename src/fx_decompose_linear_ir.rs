@@ -119,10 +119,10 @@ impl IrPass for IrDecomposeLinearPass {
             //    convolution(input, weight, bias, stride, padding, dilation,
             //                transposed, output_padding, groups)
             let conv_out_shape = [batches, co, 1, 1];
-            let mut conv_meta = graph.nodes[id]
+            let conv_meta = graph.nodes[id]
                 .meta
-                .cloned_with_val(conv_out_shape.to_vec(), &output_dtype);
-            conv_meta.copy_qparams_from(&graph.nodes[id].meta);
+                .cloned_with_val(conv_out_shape.to_vec(), &output_dtype)
+                .with_qparams_from(&graph.nodes[id].meta);
             let bias_arg = match bias_id {
                 Some(nid) => IrArg::Node(nid),
                 None => IrArg::None,

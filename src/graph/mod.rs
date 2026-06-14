@@ -1,8 +1,8 @@
-pub mod builder;
 pub mod ir;
 
 use ir::{Node, NodeId};
 use slotmap::SlotMap;
+#[cfg(test)]
 use smallvec::SmallVec;
 
 /// The core graph IR. Nodes live in a SlotMap arena and are referenced by
@@ -11,7 +11,7 @@ use smallvec::SmallVec;
 #[derive(Debug, Clone)]
 pub struct Graph {
     pub nodes: SlotMap<NodeId, Node>,
-    /// Insertion-order list of all node IDs (maintained by builder methods).
+    /// Insertion-order list of all node IDs.
     pub order: Vec<NodeId>,
     /// Placeholder node IDs that represent graph inputs.
     pub inputs: Vec<NodeId>,
@@ -42,9 +42,49 @@ impl Graph {
         self.nodes.get_mut(id)
     }
 
+    /// Return all node IDs in insertion order.
+    pub fn all_node_ids(&self) -> Vec<NodeId> {
+        self.order.clone()
+    }
+
+    /// Create a new node and append it to the end of the graph order.
+    #[cfg(test)]
+    pub fn create_node(
+        &mut self,
+        op: ir::OpType,
+        target: ir::OpTarget,
+        args: SmallVec<[ir::Arg; 4]>,
+        kwargs: Vec<(String, ir::Arg)>,
+        meta: ir::NodeMeta,
+        name: String,
+    ) -> NodeId {
+        let node = Node {
+            op,
+            target,
+            args,
+            kwargs,
+            meta,
+            users: SmallVec::new(),
+            name: name.clone(),
+        };
+        let id = self.nodes.insert(node);
+        self.order.push(id);
+        self.node_names.push((id, name));
+
+        for input_id in Self::collect_input_ids(&self.nodes[id]) {
+            if let Some(input_node) = self.nodes.get_mut(input_id) {
+                if !input_node.users.contains(&id) {
+                    input_node.users.push(id);
+                }
+            }
+        }
+
+        id
+    }
+
     /// Collect all NodeId references from a node's args and kwargs.
-    pub fn collect_input_ids(node: &Node) -> SmallVec<[NodeId; 8]> {
-        let mut ids = SmallVec::new();
+    pub fn collect_input_ids(node: &Node) -> smallvec::SmallVec<[NodeId; 8]> {
+        let mut ids = smallvec::SmallVec::new();
         for arg in &node.args {
             ids.extend(arg.node_refs());
         }
@@ -65,7 +105,7 @@ impl Graph {
         // Rebuild by walking all args
         let all_ids: Vec<NodeId> = self.order.clone();
         for &node_id in &all_ids {
-            let input_ids: SmallVec<[NodeId; 8]> = {
+            let input_ids: smallvec::SmallVec<[NodeId; 8]> = {
                 let Some(node) = self.nodes.get(node_id) else {
                     continue;
                 };
