@@ -1,6 +1,6 @@
 //! Pure Rust IrPass: `aten.ne.*` -> `aten.eq.*` + `aten.logical_not.default`.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass};
 use crate::runner_logging::log_line;
 
 #[cfg(test)]
@@ -25,14 +25,8 @@ impl IrPass for IrDecomposeNotEqualPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
-        for id in ids {
+        for id in graph.live_call_function_ids() {
             let node = &graph.nodes[id];
-            if !node.alive || node.op != NodeOp::CallFunction {
-                continue;
-            }
-
             let Some(eq_target) = eq_target_for(&node.target) else {
                 continue;
             };
@@ -72,6 +66,7 @@ impl IrPass for IrDecomposeNotEqualPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fx_ir::{NodeId, NodeOp};
 
     fn placeholder(graph: &mut IrGraph, name: &str, shape: &[i64], dtype: &str) -> NodeId {
         graph.add_node(

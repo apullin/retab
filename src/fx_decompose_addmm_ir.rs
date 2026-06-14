@@ -7,7 +7,7 @@
 //!   scaled_bias = beta != 1 ? mul(bias, full(beta)) : bias
 //!   result = add(scaled_mm, scaled_bias)
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass};
 use crate::runner_logging::log_line;
 
 /// Compute the output shape for mm(mat1, mat2).
@@ -30,12 +30,7 @@ impl IrPass for IrDecomposeAddmmPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
-        for id in ids {
-            if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
-                continue;
-            }
+        for id in graph.live_call_function_ids() {
             if !graph.nodes[id].is_addmm() {
                 continue;
             }
@@ -178,7 +173,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::fx_ir::NodeMeta;
+    use crate::fx_ir::{NodeId, NodeMeta, NodeOp};
 
     fn placeholder(graph: &mut IrGraph, name: &str, shape: &[i64]) -> NodeId {
         graph.add_node(

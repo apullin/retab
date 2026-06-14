@@ -2,7 +2,7 @@
 
 use crate::fx_ir::{
     i64_list_arg as i64_list, normalized_reduction_dims, reduced_shape, IrArg, IrGraph, IrPass,
-    NodeId, NodeOp,
+    NodeId,
 };
 use crate::fx_target::{is_var_dim_target, is_var_target};
 use crate::runner_logging::log_line;
@@ -16,13 +16,8 @@ impl IrPass for IrDecomposeVarPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
-        for id in ids {
-            if !graph.nodes[id].alive
-                || graph.nodes[id].op != NodeOp::CallFunction
-                || !is_var_target(&graph.nodes[id].target)
-            {
+        for id in graph.live_call_function_ids() {
+            if !is_var_target(&graph.nodes[id].target) {
                 continue;
             }
             if decompose_var(graph, id) {

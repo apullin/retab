@@ -45,12 +45,7 @@ impl IrPass for IrConvertSplitToSlicePass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
-        for split_id in ids {
-            if !graph.nodes[split_id].alive || graph.nodes[split_id].op != NodeOp::CallFunction {
-                continue;
-            }
+        for split_id in graph.live_call_function_ids() {
             if !is_split_target(&graph.nodes[split_id].target) {
                 continue;
             }

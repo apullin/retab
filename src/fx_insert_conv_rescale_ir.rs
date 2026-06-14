@@ -336,9 +336,8 @@ impl IrPass for IrInsertConvAccumulatorRescalePass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
         let mut modified = false;
-        for id in ids {
+        for id in graph.live_call_function_ids() {
             modified |= insert_conv_rescale(graph, id);
         }
         if modified {

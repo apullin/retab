@@ -5,7 +5,7 @@
 //!   2. The input traces back through Q/DQ to a conv/linear producer
 //! Runs BEFORE fold_qdq, so Q/DQ nodes are still present.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeOp};
 use crate::runner_logging::log_line;
 
 pub struct IrFuseQuantActivationPass;
@@ -17,12 +17,7 @@ impl IrPass for IrFuseQuantActivationPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
-        for id in ids {
-            if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
-                continue;
-            }
+        for id in graph.live_call_function_ids() {
             let is_relu_node = graph.nodes[id].is_relu();
             let is_hardtanh_node = graph.nodes[id].is_hardtanh();
             if !is_relu_node && !is_hardtanh_node {

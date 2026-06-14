@@ -3,7 +3,7 @@
 //! Rewrites `relu.default` → `clamp(x, min=0.0, max=None)`
 //! and `hardtanh.default` → `clamp(x, min_val, max_val)`.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass};
 use crate::runner_logging::log_line;
 
 pub struct IrConvertClampPass;
@@ -15,13 +15,7 @@ impl IrPass for IrConvertClampPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<usize> = (0..graph.nodes.len()).collect();
-
-        for id in ids {
-            if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
-                continue;
-            }
-
+        for id in graph.live_call_function_ids() {
             if graph.nodes[id].is_relu() {
                 // relu(x) -> clamp(x, min=0.0, max=None)
                 let input_id = match graph.nodes[id].first_node_arg() {

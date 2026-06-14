@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta};
 use crate::fx_target::is_layer_norm_target;
 use crate::runner_logging::log_line;
 
@@ -39,13 +39,8 @@ impl IrPass for IrDecomposeLayerNormPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
-        for id in ids {
-            if !graph.nodes[id].alive
-                || graph.nodes[id].op != NodeOp::CallFunction
-                || !is_layer_norm_target(&graph.nodes[id].target)
-            {
+        for id in graph.live_call_function_ids() {
+            if !is_layer_norm_target(&graph.nodes[id].target) {
                 continue;
             }
             if decompose_layer_norm(graph, id) {

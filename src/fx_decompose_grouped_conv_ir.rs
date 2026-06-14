@@ -380,9 +380,8 @@ impl IrPass for IrDecomposeGroupedConvPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
         let mut modified = false;
-        for id in ids {
+        for id in graph.live_call_function_ids() {
             let Some(spec) = parse_grouped_conv(graph, id) else {
                 continue;
             };

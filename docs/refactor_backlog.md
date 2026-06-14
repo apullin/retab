@@ -991,6 +991,14 @@ Deleted: repeated `0..graph.nodes.len()` snapshots plus alive/call-function guar
 Added: `IrGraph::live_call_function_ids()` as the shared graph query for passes that snapshot live call-function nodes before mutating the graph
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; broad focused Python smoke via `/tmp/et.sh` over as_strided_copy, avg_pool2d, clamp, constant_pad_nd, cumsum, full, gather, index_put, index_select, linear, logit, masked_fill, mean_dim, pixel_shuffling, repeat, slice, slice_scatter, squeeze, sum, to_copy, tril, unfold_copy, and where; Rust LOC check
 Note: Full Rust tests passed `134 passed`; broad focused Python smoke passed `685 passed, 2 skipped, 3 expected xfails, 1254 deselected`. No model lane was run. This is the first Refactor 3 graph-query payoff: it does not build new rewrites yet, but it gives traversal a shared grammar and removes the dominant boilerplate in many simple passes.
+
+2026-06-13, live call-function traversal query slice 2
+Rust LOC: 37,209 -> 37,128
+Movement: -81 Rust LOC
+Deleted: remaining straightforward local live-call traversal snapshots from 19 additional pass loops, leaving memory-format's mixed placeholder/output traversal for a separate query design
+Added: no new API; this pays down the existing `IrGraph::live_call_function_ids()` helper across conv1d, clamp, split, adaptive avg-pool, addmm, grouped conv, index tensor, layernorm, maxpool dilation, not-equal, decompose-ops, quant decomposition, var, quant activation fusion, conv/int32 rescale insertion, scalar replacement, matmul rescale, and size-adjust input passes
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over adaptive_avg_pool2d, addmm, amax, amin, batch_norm, conv1d, conv2d, conv3d, eq, gelu, group_norm, hardtanh, layer_norm, max_pool, ne, pow, relu, softmax, tan, var, and conv_relu_residual_add; Rust LOC check
+Note: Full Rust tests passed `134 passed`; focused Python smoke passed `787 passed, 1 skipped, 6 expected xfails, 1789 deselected`. No model lane was run. Together with slice 1, 46 pass loops now share the same live-call traversal grammar.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1178,8 +1186,11 @@ Status:
 
 Initial graph-query slice started. `IrGraph::live_call_function_ids()` now
 owns the common "snapshot live call_function nodes before mutating" traversal,
-and 27 pass loops use it instead of spelling a local `0..nodes.len()` snapshot
-plus alive/op guard. Remaining work should keep adding small builder/query
+and 46 pass loops use it instead of spelling a local `0..nodes.len()` snapshot
+plus alive/op guard. The remaining traversal loops are mostly memory-format
+passes that mix call-function, placeholder, and output node handling, so they
+need a separate query shape rather than forcing everything through the live-call
+helper. Remaining work should keep adding small builder/query
 operations only when they replace repeated rewrite structure across several
 passes.
 

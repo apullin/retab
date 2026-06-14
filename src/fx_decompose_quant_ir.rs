@@ -6,7 +6,7 @@
 //! Skips DQ→Q pairs (handled by InsertRescalePass).
 
 use crate::fx_ir::{
-    dtype_kwarg, i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp,
+    dtype_kwarg, i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta,
 };
 use crate::runner_logging::log_line;
 
@@ -42,14 +42,9 @@ impl IrPass for IrDecomposeQuantPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<NodeId> = (0..graph.nodes.len()).collect();
-
         // Collect candidates (skip DQ→Q pairs)
         let mut candidates: Vec<(NodeId, bool)> = Vec::new(); // (id, is_quantize)
-        for &id in &ids {
-            if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
-                continue;
-            }
+        for id in graph.live_call_function_ids() {
             if graph.nodes[id].is_dequantize() {
                 // Skip if all users are Q nodes (DQ→Q pair)
                 let all_users_q = graph
@@ -287,6 +282,7 @@ impl IrPass for IrDecomposeQuantPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fx_ir::NodeOp;
 
     #[test]
     fn decompose_quant_skips_identity_int32_input_casts() {
