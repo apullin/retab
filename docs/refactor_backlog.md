@@ -999,6 +999,14 @@ Deleted: remaining straightforward local live-call traversal snapshots from 19 a
 Added: no new API; this pays down the existing `IrGraph::live_call_function_ids()` helper across conv1d, clamp, split, adaptive avg-pool, addmm, grouped conv, index tensor, layernorm, maxpool dilation, not-equal, decompose-ops, quant decomposition, var, quant activation fusion, conv/int32 rescale insertion, scalar replacement, matmul rescale, and size-adjust input passes
 Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over adaptive_avg_pool2d, addmm, amax, amin, batch_norm, conv1d, conv2d, conv3d, eq, gelu, group_norm, hardtanh, layer_norm, max_pool, ne, pow, relu, softmax, tan, var, and conv_relu_residual_add; Rust LOC check
 Note: Full Rust tests passed `134 passed`; focused Python smoke passed `787 passed, 1 skipped, 6 expected xfails, 1789 deselected`. No model lane was run. Together with slice 1, 46 pass loops now share the same live-call traversal grammar.
+
+2026-06-13, qparam slot-stamping helper slice
+Rust LOC: 37,128 -> 37,096
+Movement: -32 Rust LOC
+Deleted: manual one-entry input/output qparam map construction from mean decomposition, cumsum decomposition, grouped-conv decomposition, conv/int32/matmul rescale fixtures, size-adjust input metadata, and table-op test fixtures
+Added: `NodeMeta::set_input_qparam_at(index, qp)` and `NodeMeta::set_output_qparam_at(index, qp)`, with the existing single-slot helpers expressed through them
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over add, addmm, conv1d, conv2d, conv3d, cumsum, gelu, max_pool, mean_dim, pow, sigmoid, tan, where, and conv_relu_residual_add; Rust LOC check
+Note: Full Rust tests passed `134 passed`; focused Python smoke passed `642 passed, 4 expected xfails, 1487 deselected`. No model lane was run. Dynamic and multi-input qparam maps remain explicit; this slice only names indexed single-slot stamping.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1127,6 +1135,8 @@ passes now also use `NodeMeta::cloned_with_val` directly instead of hand-written
 that preserve existing tensor shape now use
 `NodeMeta::set_val_dtype_for_existing_shape`, leaving direct `FakeTensorMeta`
 construction in `NodeMeta` internals rather than production pass restamp code.
+Indexed qparam slot stamping now also lives on `NodeMeta`, so simple single-slot
+input/output qparam assignment no longer requires ad hoc `HashMap` construction.
 
 Problem:
 

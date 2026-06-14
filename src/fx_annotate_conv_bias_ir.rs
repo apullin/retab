@@ -122,7 +122,7 @@ mod tests {
             (1, qparam(0.25, 0, "torch.int8")),
             (2, qparam(0.125, 0, "torch.int32")),
         ]));
-        conv_meta.set_output_qparams(HashMap::from([(0, qparam(0.0625, 0, "torch.int16"))]));
+        conv_meta.set_single_output_qparam(qparam(0.0625, 0, "torch.int16"));
         graph.add_node(
             NodeOp::CallFunction,
             "conv".to_string(),
@@ -165,7 +165,7 @@ mod tests {
             (1, qparam(0.25, 0, "torch.int8")),
             (2, qparam(0.125, 0, "torch.int32")),
         ]));
-        conv_meta.set_output_qparams(HashMap::from([(0, qparam(0.0625, 0, "torch.int16"))]));
+        conv_meta.set_single_output_qparam(qparam(0.0625, 0, "torch.int16"));
         graph.add_node(
             NodeOp::CallFunction,
             "deconv".to_string(),

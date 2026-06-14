@@ -232,12 +232,10 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
     if let Some(output_int32_scale) = output_int32_scale {
         if let Some(output_qparam) = node.meta.output_qparam().cloned() {
             if insert_output_rescale(graph, node_id, output_int32_scale, output_qparam) {
-                let mut output_qparams = HashMap::new();
-                output_qparams.insert(0, int32_qparam(output_int32_scale));
                 graph
                     .node_mut(node_id)
                     .meta
-                    .set_output_qparams(output_qparams);
+                    .set_single_output_qparam(int32_qparam(output_int32_scale));
                 if graph.node(node_id).kwargs.contains_key("dtype") {
                     graph.set_kwarg(node_id, "dtype", IrArg::Dtype("torch.int32".to_string()));
                 }
@@ -303,14 +301,11 @@ fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
         return false;
     }
 
-    let mut branch_output_qparams = HashMap::new();
-    branch_output_qparams.insert(0, then_qparam.clone());
-
     if needs_noop_quant_boundary {
         graph
             .node_mut(node_id)
             .meta
-            .set_output_qparams(branch_output_qparams);
+            .set_single_output_qparam(then_qparam.clone());
         graph
             .node_mut(node_id)
             .meta
@@ -339,7 +334,7 @@ fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
     graph
         .node_mut(node_id)
         .meta
-        .set_output_qparams(branch_output_qparams);
+        .set_single_output_qparam(then_qparam);
     true
 }
 

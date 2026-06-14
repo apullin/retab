@@ -4,8 +4,6 @@
 //! This mirrors the Arm backend's cumsum lowering: reshape to 4D, convolve with
 //! an all-ones kernel (cumulative sum via convolution), slice off padding, reshape back.
 
-use std::collections::HashMap;
-
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, QParam};
 use crate::runner_logging::log_line;
 
@@ -135,16 +133,16 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
                 conv_meta.set_single_output_qparam(output_qparam);
             }
 
-            // Set weight output qparam
-            let mut weight_oqp = HashMap::new();
-            weight_oqp.insert(
-                0,
-                QParam::per_tensor(1.0, 0, -128, 127, "torch.int8".into()),
-            );
             graph
                 .node_mut(weight_id)
                 .meta
-                .set_output_qparams(weight_oqp);
+                .set_single_output_qparam(QParam::per_tensor(
+                    1.0,
+                    0,
+                    -128,
+                    127,
+                    "torch.int8".into(),
+                ));
         }
     }
 

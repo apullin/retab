@@ -5,8 +5,6 @@
 //!   convolution/conv2d(groups=1) per group
 //!   cat(outputs, dim=1)
 
-use std::collections::HashMap;
-
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam};
 use crate::runner_logging::log_line;
 
@@ -132,9 +130,7 @@ fn cat_meta_from_outputs(
     meta.set_empty_qparam_maps();
     for &slice_id in output_slices {
         if let Some(qparam) = graph.nodes[slice_id].meta.output_qparam().cloned() {
-            let mut output_qparams = HashMap::new();
-            output_qparams.insert(0, qparam);
-            meta.set_output_qparams(output_qparams);
+            meta.set_single_output_qparam(qparam);
             break;
         }
     }
@@ -398,6 +394,8 @@ impl IrPass for IrDecomposeGroupedConvPass {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::fx_ir::i64_list_arg as i64_list;
 
@@ -446,9 +444,7 @@ mod tests {
             per_channel_qparam(&[1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 2.1, 2.2]),
         );
         conv_meta.set_input_qparams(input_qparams);
-        let mut output_qparams = HashMap::new();
-        output_qparams.insert(0, per_tensor_qparam(0.5));
-        conv_meta.set_output_qparams(output_qparams);
+        conv_meta.set_single_output_qparam(per_tensor_qparam(0.5));
 
         let conv = graph.add_node(
             NodeOp::CallFunction,

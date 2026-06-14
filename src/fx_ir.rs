@@ -1382,14 +1382,22 @@ impl NodeMeta {
     }
 
     pub fn set_single_output_qparam(&mut self, qp: QParam) {
+        self.set_output_qparam_at(0, qp);
+    }
+
+    pub fn set_output_qparam_at(&mut self, index: usize, qp: QParam) {
         let mut map = HashMap::new();
-        map.insert(0, qp);
+        map.insert(index, qp);
         self.set_output_qparams(map);
     }
 
     pub fn set_single_input_qparam(&mut self, qp: QParam) {
+        self.set_input_qparam_at(0, qp);
+    }
+
+    pub fn set_input_qparam_at(&mut self, index: usize, qp: QParam) {
         let mut map = HashMap::new();
-        map.insert(0, qp);
+        map.insert(index, qp);
         self.set_input_qparams(map);
     }
 

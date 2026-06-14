@@ -369,9 +369,7 @@ mod tests {
         input_qparams.insert(0, qparam(0.5, 1, "torch.int8"));
         input_qparams.insert(1, per_channel_qparam(&[0.25, 0.5, 0.75, 1.0], "torch.int8"));
         meta.set_input_qparams(input_qparams);
-        let mut output_qparams = HashMap::new();
-        output_qparams.insert(0, qparam(0.125, 7, "torch.int8"));
-        meta.set_output_qparams(output_qparams);
+        meta.set_single_output_qparam(qparam(0.125, 7, "torch.int8"));
         meta
     }
 
@@ -468,7 +466,7 @@ mod tests {
             conv_meta,
         );
         let mut table_meta = NodeMeta::tensor(&[1, 4, 8, 8], "torch.int8");
-        table_meta.set_input_qparams(HashMap::from([(0, qparam(0.125, 7, "torch.int8"))]));
+        table_meta.set_single_input_qparam(qparam(0.125, 7, "torch.int8"));
         let table = graph.add_node(
             NodeOp::CallFunction,
             "table".to_string(),
@@ -520,7 +518,7 @@ mod tests {
             conv_meta,
         );
         let mut transpose_meta = NodeMeta::tensor(&[1, 4, 8, 8], "torch.int8");
-        transpose_meta.set_input_qparams(HashMap::from([(0, qparam(0.125, 7, "torch.int8"))]));
+        transpose_meta.set_single_input_qparam(qparam(0.125, 7, "torch.int8"));
         let transpose = graph.add_node(
             NodeOp::CallFunction,
             "transpose".to_string(),
@@ -529,8 +527,8 @@ mod tests {
             transpose_meta,
         );
         let mut clamp_meta = NodeMeta::tensor(&[1, 4, 8, 8], "torch.int8");
-        clamp_meta.set_input_qparams(HashMap::from([(0, qparam(0.125, 7, "torch.int8"))]));
-        clamp_meta.set_output_qparams(HashMap::from([(0, qparam(0.25, -128, "torch.int8"))]));
+        clamp_meta.set_single_input_qparam(qparam(0.125, 7, "torch.int8"));
+        clamp_meta.set_single_output_qparam(qparam(0.25, -128, "torch.int8"));
         let clamp = graph.add_node(
             NodeOp::CallFunction,
             "clamp".to_string(),
@@ -683,7 +681,7 @@ mod tests {
                 per_channel_qparam(&[0.125, 0.25, 0.375, 0.5], "torch.int32"),
             ),
         ]));
-        conv_meta.set_output_qparams(HashMap::from([(0, qparam(0.0625, 7, "torch.int16"))]));
+        conv_meta.set_single_output_qparam(qparam(0.0625, 7, "torch.int16"));
         let conv = graph.add_node(
             NodeOp::CallFunction,
             "conv".to_string(),

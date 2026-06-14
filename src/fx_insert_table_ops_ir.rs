@@ -443,29 +443,27 @@ impl EffectfulIrPass for IrInsertTableOpsEffectPass {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use crate::fx_ir::{IrGraph, NodeMeta, QParam};
 
     use super::*;
 
-    fn qparams() -> HashMap<usize, QParam> {
-        HashMap::from([(
-            0,
-            QParam::per_tensor(0.5, 0, -128, 127, "torch.int8".to_string()),
-        )])
+    fn qparam() -> QParam {
+        QParam::per_tensor(0.5, 0, -128, 127, "torch.int8".to_string())
+    }
+
+    fn table_meta(qparam: QParam) -> NodeMeta {
+        let mut meta = NodeMeta::default();
+        meta.set_both_qparams(qparam);
+        meta
     }
 
     fn table_node(graph: &mut IrGraph, name: &str, target: &str, args: Vec<IrArg>) {
-        let mut meta = NodeMeta::default();
-        meta.input_qparams = Some(qparams());
-        meta.output_qparams = Some(qparams());
         graph.add_node(
             NodeOp::CallFunction,
             name.to_string(),
             target.to_string(),
             args,
-            meta,
+            table_meta(qparam()),
         );
     }
 
@@ -476,16 +474,12 @@ mod tests {
         args: Vec<IrArg>,
         qparam: QParam,
     ) {
-        let mut meta = NodeMeta::default();
-        let qparams = HashMap::from([(0, qparam)]);
-        meta.input_qparams = Some(qparams.clone());
-        meta.output_qparams = Some(qparams);
         graph.add_node(
             NodeOp::CallFunction,
             name.to_string(),
             target.to_string(),
             args,
-            meta,
+            table_meta(qparam),
         );
     }
 
@@ -510,12 +504,7 @@ mod tests {
             "gelu_none".to_string(),
             "aten.gelu.default".to_string(),
             Vec::new(),
-            {
-                let mut meta = NodeMeta::default();
-                meta.input_qparams = Some(qparams());
-                meta.output_qparams = Some(qparams());
-                meta
-            },
+            table_meta(qparam()),
         );
         graph.set_kwarg(gelu_none, "approximate", IrArg::Str("none".to_string()));
         let gelu_tanh = graph.add_node(
@@ -523,12 +512,7 @@ mod tests {
             "gelu_tanh".to_string(),
             "aten.gelu.default".to_string(),
             Vec::new(),
-            {
-                let mut meta = NodeMeta::default();
-                meta.input_qparams = Some(qparams());
-                meta.output_qparams = Some(qparams());
-                meta
-            },
+            table_meta(qparam()),
         );
         graph.set_kwarg(gelu_tanh, "approximate", IrArg::Str("tanh".to_string()));
 
@@ -608,19 +592,12 @@ mod tests {
         // log1p is precomputable in Rust (NaN samples quantize to 0), so it takes
         // the precomputed-table lane.
         let mut graph = IrGraph::empty();
-        let mut meta = NodeMeta::default();
-        let qparams = HashMap::from([(
-            0,
-            QParam::per_tensor(0.5, 0, -128, 127, "torch.int8".to_string()),
-        )]);
-        meta.input_qparams = Some(qparams.clone());
-        meta.output_qparams = Some(qparams);
         graph.add_node(
             NodeOp::CallFunction,
             "log1p_nan".to_string(),
             "aten.log1p.default".to_string(),
             Vec::new(),
-            meta,
+            table_meta(qparam()),
         );
 
         let result = IrInsertTableOpsEffectPass.run(&mut graph);
@@ -669,19 +646,18 @@ mod tests {
     #[test]
     fn plans_precomputed_int16_table_lane() {
         let mut graph = IrGraph::empty();
-        let mut meta = NodeMeta::default();
-        let qparams = HashMap::from([(
-            0,
-            QParam::per_tensor(1.0 / 32768.0, 0, -32768, 32767, "torch.int16".to_string()),
-        )]);
-        meta.input_qparams = Some(qparams.clone());
-        meta.output_qparams = Some(qparams);
         graph.add_node(
             NodeOp::CallFunction,
             "sigmoid16".to_string(),
             "aten.sigmoid.default".to_string(),
             Vec::new(),
-            meta,
+            table_meta(QParam::per_tensor(
+                1.0 / 32768.0,
+                0,
+                -32768,
+                32767,
+                "torch.int16".to_string(),
+            )),
         );
 
         let result = IrInsertTableOpsEffectPass.run(&mut graph);
@@ -700,19 +676,18 @@ mod tests {
     #[test]
     fn falls_back_for_narrow_int16_range() {
         let mut graph = IrGraph::empty();
-        let mut meta = NodeMeta::default();
-        let qparams = HashMap::from([(
-            0,
-            QParam::per_tensor(0.25, 0, -1024, 1023, "torch.int16".to_string()),
-        )]);
-        meta.input_qparams = Some(qparams.clone());
-        meta.output_qparams = Some(qparams);
         graph.add_node(
             NodeOp::CallFunction,
             "sigmoid16_narrow".to_string(),
             "aten.sigmoid.default".to_string(),
             Vec::new(),
-            meta,
+            table_meta(QParam::per_tensor(
+                0.25,
+                0,
+                -1024,
+                1023,
+                "torch.int16".to_string(),
+            )),
         );
 
         let result = IrInsertTableOpsEffectPass.run(&mut graph);
@@ -723,19 +698,18 @@ mod tests {
     #[test]
     fn falls_back_when_int16_table_requires_negative_shift() {
         let mut graph = IrGraph::empty();
-        let mut meta = NodeMeta::default();
-        let qparams = HashMap::from([(
-            0,
-            QParam::per_tensor(0.25, 0, -32768, 32767, "torch.int16".to_string()),
-        )]);
-        meta.input_qparams = Some(qparams.clone());
-        meta.output_qparams = Some(qparams);
         graph.add_node(
             NodeOp::CallFunction,
             "sigmoid16_neg_shift".to_string(),
             "aten.sigmoid.default".to_string(),
             Vec::new(),
-            meta,
+            table_meta(QParam::per_tensor(
+                0.25,
+                0,
+                -32768,
+                32767,
+                "torch.int16".to_string(),
+            )),
         );
 
         let result = IrInsertTableOpsEffectPass.run(&mut graph);

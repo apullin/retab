@@ -152,10 +152,7 @@ impl IrPass for IrSizeAdjustInputPass {
                 );
                 graph.anchor_after(slice_id, current);
                 if let Some(ref q) = consumer_input_q {
-                    let mut qm = std::collections::HashMap::new();
-                    qm.insert(0usize, q.clone());
-                    graph.nodes[slice_id].meta.set_input_qparams(qm.clone());
-                    graph.nodes[slice_id].meta.set_output_qparams(qm);
+                    graph.nodes[slice_id].meta.set_both_qparams(q.clone());
                 }
                 current = slice_id;
             }

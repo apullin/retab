@@ -88,9 +88,7 @@ mod tests {
         input_qparams.insert(0, qparam(0.5, 3, "torch.int8"));
         input_qparams.insert(1, qparam(0.25, -4, "torch.int8"));
         matmul_meta.set_input_qparams(input_qparams);
-        let mut output_qparams = HashMap::new();
-        output_qparams.insert(0, qparam(0.125, 7, "torch.int8"));
-        matmul_meta.set_output_qparams(output_qparams);
+        matmul_meta.set_single_output_qparam(qparam(0.125, 7, "torch.int8"));
         let matmul = graph.add_node(
             NodeOp::CallFunction,
             "mm".to_string(),

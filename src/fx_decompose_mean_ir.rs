@@ -152,24 +152,28 @@ impl IrPass for IrDecomposeMeanPass {
                         input_qp.qmax,
                         input_qp.dtype_str.clone(),
                     );
-                    let mut sum_iqp = HashMap::new();
-                    sum_iqp.insert(0, input_qp);
-                    graph.node_mut(sum_id).meta.set_input_qparams(sum_iqp);
-                    let mut sum_oqp = HashMap::new();
-                    sum_oqp.insert(0, sum_qp.clone());
-                    graph.node_mut(sum_id).meta.set_output_qparams(sum_oqp);
+                    graph
+                        .node_mut(sum_id)
+                        .meta
+                        .set_single_input_qparam(input_qp);
+                    graph
+                        .node_mut(sum_id)
+                        .meta
+                        .set_single_output_qparam(sum_qp.clone());
 
-                    let mut full_oqp = HashMap::new();
-                    full_oqp.insert(0, full_qp.clone());
-                    graph.node_mut(count_id).meta.set_output_qparams(full_oqp);
+                    graph
+                        .node_mut(count_id)
+                        .meta
+                        .set_single_output_qparam(full_qp.clone());
 
                     let mut mul_iqp = HashMap::new();
                     mul_iqp.insert(0, sum_qp);
                     mul_iqp.insert(1, full_qp);
                     graph.node_mut(mul_id).meta.set_input_qparams(mul_iqp);
-                    let mut mul_oqp = HashMap::new();
-                    mul_oqp.insert(0, output_qp);
-                    graph.node_mut(mul_id).meta.set_output_qparams(mul_oqp);
+                    graph
+                        .node_mut(mul_id)
+                        .meta
+                        .set_single_output_qparam(output_qp);
                 }
             }
 
