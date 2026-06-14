@@ -110,7 +110,7 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
     let mut conv_meta = NodeMeta::tensor(conv_out_shape.as_slice(), &input_dtype);
 
     // Quantization fixup: propagate input qparams, add weight qparam at index 1
-    if let Some(ref orig_iqp) = node_meta.input_qparams {
+    if let Some(orig_iqp) = node_meta.input_qparams() {
         if !orig_iqp.is_empty() {
             let mut conv_iqp = orig_iqp.clone();
             // Weight qparam: scale=1.0, zp=0, int8 range

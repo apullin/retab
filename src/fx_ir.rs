@@ -1695,6 +1695,18 @@ impl NodeMeta {
         self.input_qparams.as_ref()?.get(&index)
     }
 
+    pub fn input_qparams(&self) -> Option<&HashMap<usize, QParam>> {
+        self.input_qparams.as_ref()
+    }
+
+    pub fn cloned_input_qparams(&self) -> Option<HashMap<usize, QParam>> {
+        self.input_qparams.clone()
+    }
+
+    pub fn cloned_output_qparams(&self) -> Option<HashMap<usize, QParam>> {
+        self.output_qparams.clone()
+    }
+
     pub fn has_qparam_metadata(&self) -> bool {
         self.input_qparams.is_some() || self.output_qparams.is_some()
     }
@@ -1747,6 +1759,11 @@ impl NodeMeta {
         };
         self.set_output_qparams(oqp);
         true
+    }
+
+    pub fn copy_qparams_from(&mut self, other: &Self) {
+        self.copy_input_qparams_from(other);
+        self.copy_output_qparams_from(other);
     }
 
     pub fn clear_all_qparams(&mut self) {

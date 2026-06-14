@@ -7,8 +7,6 @@
 //! For multi-axis reductions the dims are processed in descending order
 //! so that earlier reductions don't shift the indices of later ones.
 
-use std::collections::HashMap;
-
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::fx_target::is_sum_dim_int_list_target;
 use crate::runner_logging::log_line;
@@ -77,10 +75,8 @@ impl IrPass for IrConvertSumPass {
             // Track qparams for chaining: first reduce inherits the original
             // node's input_qparams; subsequent reduces use the previous
             // output_qparams as their input_qparams.  (Mirrors the FxPass.)
-            let mut current_input_qparams: Option<HashMap<usize, _>> =
-                orig_meta.input_qparams.clone();
-            let current_output_qparams: Option<HashMap<usize, _>> =
-                orig_meta.output_qparams.clone();
+            let mut current_input_qparams = orig_meta.cloned_input_qparams();
+            let current_output_qparams = orig_meta.cloned_output_qparams();
 
             let mut current_input = input_id;
             let mut last_reduce: Option<NodeId> = None;
@@ -149,8 +145,7 @@ impl IrPass for IrConvertSumPass {
             if let Some(final_id) = last_reduce {
                 // Restore original node's qparams on the final reduce.
                 let final_meta = &mut graph.node_mut(final_id).meta;
-                final_meta.copy_input_qparams_from(&orig_meta);
-                final_meta.copy_output_qparams_from(&orig_meta);
+                final_meta.copy_qparams_from(&orig_meta);
                 graph.replace_and_erase(id, final_id);
                 modified = true;
             }

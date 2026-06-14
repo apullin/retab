@@ -53,7 +53,7 @@ fn configure_conv_qparams(
 ) -> bool {
     conv_meta.copy_output_qparams_from(&graph.nodes[original_id].meta);
 
-    let Some(mut input_qparams) = graph.nodes[original_id].meta.input_qparams.clone() else {
+    let Some(mut input_qparams) = graph.nodes[original_id].meta.cloned_input_qparams() else {
         return true;
     };
 
@@ -91,7 +91,7 @@ fn qparams_support_group_slicing(
     output_slice_size: i64,
     transposed: bool,
 ) -> bool {
-    let Some(input_qparams) = graph.nodes[original_id].meta.input_qparams.as_ref() else {
+    let Some(input_qparams) = graph.nodes[original_id].meta.input_qparams() else {
         return true;
     };
     let end = (groups * output_slice_size).max(0) as usize;
@@ -459,7 +459,7 @@ mod tests {
 
         let first_group = graph.by_name("conv_group_conv_0").unwrap();
         assert!(matches!(first_group.args.last(), Some(IrArg::Int(1))));
-        let qparams = first_group.meta.input_qparams.as_ref().unwrap();
+        let qparams = first_group.meta.input_qparams().unwrap();
         assert_eq!(qparams[&1].per_channel_scales, vec![0.1, 0.2, 0.3, 0.4]);
         assert_eq!(qparams[&2].per_channel_scales, vec![1.1, 1.2, 1.3, 1.4]);
     }

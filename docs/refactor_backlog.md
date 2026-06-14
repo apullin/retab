@@ -1643,6 +1643,24 @@ passes that need typed dtype logic should not parse `val_dtype()` strings
 directly. Dtype string-domain parsing for float-like and quantized-integer
 range semantics now also lives on `DType`, so pass code should not grow local
 `contains("int8")`/`contains("float")` trees for qmin/qmax or sentinel values.
+Qparam map borrowing/cloning is now also named by `NodeMeta::input_qparams`,
+`cloned_input_qparams`, `cloned_output_qparams`, and `copy_qparams_from`, so
+grouped-conv decomposition, cumsum decomposition, sum conversion, and conv
+rescale recovery no longer reach directly into qparam-map fields for production
+logic.
+
+2026-06-14, qparam map accessor slice
+
+Deleted: direct production access to `NodeMeta.input_qparams`/`output_qparams`
+from grouped-conv qparam slicing, cumsum convolution qparam propagation, sum
+reduction-chain qparam restoration, and conv-rescale consumer-qparam recovery
+
+Added: map-level qparam access/copy helpers on `NodeMeta` for borrowing,
+cloning, and whole-map copy restoration
+
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`;
+focused Python smoke via `/tmp/et.sh` over addmm, conv2d, conv3d, cumsum,
+linear, sum, and transpose_conv2d.
 
 Problem:
 

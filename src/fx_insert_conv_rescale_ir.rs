@@ -87,7 +87,7 @@ fn recover_downstream_output_qparam(graph: &IrGraph, start: NodeId) -> Option<QP
 fn recover_consumer_input_qparam(graph: &IrGraph, start: NodeId) -> Option<QParam> {
     for user_id in graph.live_user_ids(start) {
         let user = graph.node(user_id);
-        let Some(input_qparams) = user.meta.input_qparams.as_ref() else {
+        let Some(input_qparams) = user.meta.input_qparams() else {
             continue;
         };
         for (arg_idx, arg) in user.args.iter().enumerate() {
