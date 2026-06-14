@@ -1303,6 +1303,14 @@ Deleted: raw `int32` qparam dtype substring checks in Fold-QDQ's FP+INT32 preser
 Added: no new helper surface; Fold-QDQ now uses `QParam::dtype() == DType::Int32`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_fold_qdq_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over abs, add, conv2d, conv3d, linear, mul, sum, and where; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `445 passed, 1 expected xfail, 1146 deselected`. No model lane was run. This is another follow-through slice after moving dtype parsing to `DType`, keeping qparam dtype tests typed in a numerically sensitive fold pass.
+
+2026-06-14, metadata dtype-kind accessor slice
+Rust LOC: 36,826 -> 36,831
+Movement: +5 Rust LOC
+Deleted: repeated `val_dtype().map(DType::from_torch_str)` spellings from zero-input constant fusion, conv-rescale insertion, and int32-rescale insertion
+Added: `NodeMeta::val_dtype_kind()`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_fuse_zero_input_constants_ir::tests`; `cargo test --lib fx_insert_conv_rescale_ir::tests`; `cargo test --lib fx_insert_int32_rescale_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over abs, add, arange, conv2d, conv3d, eye, full, linear, mul, ones, sum, where, and zeros; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `508 passed, 7 skipped, 1 expected xfail, 1220 deselected`. No model lane was run. This is setup-positive, but it moves typed tensor-metadata dtype parsing behind `NodeMeta` instead of making passes parse dtype strings themselves.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1460,7 +1468,9 @@ pass-local wrappers around these accessors should be inlined unless they name a
 real pass-specific invariant. `DType` now owns torch dtype-string parsing via
 `DType::from_torch_str`, and `QParam` exposes typed dtype access via
 `QParam::dtype()`/`is_integer_dtype()` so constant and serializer conversion
-paths no longer treat `tensor_data` as the dtype grammar owner.
+paths no longer treat `tensor_data` as the dtype grammar owner. Tensor metadata
+also exposes `NodeMeta::val_dtype_kind()`, so passes that need typed dtype
+logic should not parse `val_dtype()` strings directly.
 
 Problem:
 

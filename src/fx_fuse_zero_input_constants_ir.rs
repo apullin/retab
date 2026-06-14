@@ -94,7 +94,7 @@ fn explicit_zero_input_dtype(node: &IrNode) -> Option<DType> {
     node.kwargs
         .get("dtype")
         .and_then(parse_dtype_arg)
-        .or_else(|| node.meta.val_dtype().map(DType::from_torch_str))
+        .or_else(|| node.meta.val_dtype_kind())
 }
 
 fn quantized_scalar_bytes(qp: &QParam, value: f64) -> Option<(DType, Vec<u8>)> {

@@ -81,8 +81,8 @@ fn producer_old_zero_point(graph: &IrGraph, producer_id: NodeId, fallback_zp: i6
     }
     if producer
         .meta
-        .val_dtype()
-        .is_some_and(|dtype| DType::from_torch_str(dtype) == DType::Int32)
+        .val_dtype_kind()
+        .is_some_and(|dtype| dtype == DType::Int32)
     {
         0
     } else {

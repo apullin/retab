@@ -35,8 +35,8 @@ fn is_int32_rescale(node: &crate::fx_ir::IrNode) -> bool {
             .is_some_and(|qparam| qparam.dtype() == DType::Int32)
         || node
             .meta
-            .val_dtype()
-            .is_some_and(|dtype| DType::from_torch_str(dtype) == DType::Int32)
+            .val_dtype_kind()
+            .is_some_and(|dtype| dtype == DType::Int32)
 }
 
 fn has_downstream_output_rescale(graph: &IrGraph, start: NodeId) -> bool {

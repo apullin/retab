@@ -10,6 +10,7 @@ use pyo3::prelude::*;
 use crate::fx_py_attr::{attrs, items, meta as meta_view};
 pub(crate) use crate::fx_quant::QParam;
 use crate::fx_target::{classify_ir_target, IrTargetKind};
+use crate::graph::ir::DType;
 use crate::lowering_effects::{LoweringEffectBatch, LoweringInputKind};
 use crate::store::TensorData;
 use crate::tensor_data::extract_tensor_data;
@@ -1485,6 +1486,10 @@ impl NodeMeta {
 
     pub fn val_dtype(&self) -> Option<&str> {
         self.val.as_ref().map(|v| v.dtype.as_str())
+    }
+
+    pub fn val_dtype_kind(&self) -> Option<DType> {
+        self.val_dtype().map(DType::from_torch_str)
     }
 
     pub fn val_dtype_or<'a>(&'a self, default: &'a str) -> &'a str {
