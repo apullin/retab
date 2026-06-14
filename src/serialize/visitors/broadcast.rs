@@ -36,13 +36,13 @@ pub(super) fn collect_binary_input_names(
             }
             arg @ (Arg::Int(_) | Arg::Float(_) | Arg::Bool(_)) => {
                 let name = format!("{}_input{}_const", node.name, idx);
-                if let Some(tensor) = make_filled_const_tensor(
+                if push_filled_const_if_supported(
+                    result,
                     name.clone(),
                     const_shape.clone(),
                     const_dtype,
                     arg.as_f64(),
                 ) {
-                    push_inline_const(result, tensor);
                     names.push(name);
                     has_literal = true;
                 }
@@ -190,9 +190,8 @@ pub(super) fn resolve_clamp_bound_input(
         }
         Some(arg @ (Arg::Int(_) | Arg::Float(_) | Arg::Bool(_))) => {
             let name = format!("{}_{}_const", node.name, suffix);
-            let tensor = make_filled_const_tensor(name.clone(), shape, dtype, arg.as_f64())?;
-            push_inline_const(result, tensor);
-            Some((name, None))
+            push_filled_const_if_supported(result, name.clone(), shape, dtype, arg.as_f64())
+                .then_some((name, None))
         }
         _ => None,
     }

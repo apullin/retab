@@ -140,9 +140,10 @@ fn emit_bankers_round_temp(
         (one_name.clone(), 1.0),
         (two_name.clone(), 2.0),
     ] {
-        let tensor = make_filled_const_tensor(name, shape.clone(), ir_dtype, value)
-            .expect("emit_bankers_round_temp: unsupported constant dtype");
-        push_inline_const(result, tensor);
+        assert!(
+            push_filled_const_if_supported(result, name, shape.clone(), ir_dtype, value),
+            "emit_bankers_round_temp: unsupported constant dtype"
+        );
     }
 
     let round_shift_base = format!("{base_name}_round");
@@ -282,13 +283,13 @@ pub(super) fn emit_quantize_per_tensor(ctx: &EmitContext) -> EmitResult {
     if scale != 1.0 {
         let scale_name = format!("{}_scale", node.name);
         let scaled_name = format!("{}_scaled", node.name);
-        if let Some(scale_tensor) = make_filled_const_tensor(
+        if push_filled_const_if_supported(
+            &mut result,
             scale_name.clone(),
             output_shape.clone(),
             intermediate_ir_dtype,
             1.0 / scale,
         ) {
-            push_inline_const(&mut result, scale_tensor);
             let shift_name = push_shift_const(&mut result, &node.name);
             result.push_output_op(
                 make_empty_tensor(
@@ -316,13 +317,13 @@ pub(super) fn emit_quantize_per_tensor(ctx: &EmitContext) -> EmitResult {
     if zero_point != 0.0 {
         let zp_name = format!("{}_zp", node.name);
         let shifted_name = format!("{}_shifted", node.name);
-        if let Some(zp_tensor) = make_filled_const_tensor(
+        if push_filled_const_if_supported(
+            &mut result,
             zp_name.clone(),
             output_shape.clone(),
             intermediate_ir_dtype,
             zero_point,
         ) {
-            push_inline_const(&mut result, zp_tensor);
             result.push_output_op(
                 make_empty_tensor(
                     shifted_name.clone(),
@@ -410,7 +411,8 @@ pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
     let mut current_name = cast_output_name;
     if zero_point != 0.0 {
         let zp_name = format!("{}_zp", node.name);
-        if let Some(zp_tensor) = make_filled_const_tensor(
+        if push_filled_const_if_supported(
+            &mut result,
             zp_name.clone(),
             output_shape.clone(),
             match output_dtype {
@@ -420,7 +422,6 @@ pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
             },
             zero_point,
         ) {
-            push_inline_const(&mut result, zp_tensor);
             let sub_output_name = if scale == 1.0 {
                 node.name.clone()
             } else {
@@ -438,7 +439,8 @@ pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
 
     if scale != 1.0 {
         let scale_name = format!("{}_scale", node.name);
-        if let Some(scale_tensor) = make_filled_const_tensor(
+        if push_filled_const_if_supported(
+            &mut result,
             scale_name.clone(),
             output_shape.clone(),
             match output_dtype {
@@ -448,7 +450,6 @@ pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
             },
             scale,
         ) {
-            push_inline_const(&mut result, scale_tensor);
             let shift_name = push_shift_const(&mut result, &node.name);
             result.push_output_op(
                 make_output_tensor(node),
@@ -597,15 +598,19 @@ fn emit_filled_const(
 ) -> EmitResult {
     let dtype = node.meta.val.dtype;
     let fill_value = quantize_fill_value(node, fill_value);
-    let tensor = make_filled_const_tensor(node.name.clone(), output_shape, dtype, fill_value)
-        .unwrap_or_else(|| {
-            panic!(
-                "{context}: unsupported dtype {:?} for node '{}'",
-                dtype, node.name
-            )
-        });
     let mut result = EmitResult::default();
-    push_inline_const(&mut result, tensor);
+    assert!(
+        push_filled_const_if_supported(
+            &mut result,
+            node.name.clone(),
+            output_shape,
+            dtype,
+            fill_value,
+        ),
+        "{context}: unsupported dtype {:?} for node '{}'",
+        dtype,
+        node.name
+    );
     result
 }
 

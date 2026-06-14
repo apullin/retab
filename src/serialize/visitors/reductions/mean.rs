@@ -74,14 +74,13 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
     let recip_val = 1.0 / reduce_count;
     let recip_name = format!("{}_mean_recip", node.name);
     let ir_dtype = node.meta.val.dtype;
-    if let Some(recip_tensor) = make_filled_const_tensor(
+    push_filled_const_if_supported(
+        &mut result,
         recip_name.clone(),
         current_shape.clone(),
         ir_dtype,
         recip_val,
-    ) {
-        push_inline_const(&mut result, recip_tensor);
-    }
+    );
 
     let final_name = if spec.keepdim {
         node.name.clone()

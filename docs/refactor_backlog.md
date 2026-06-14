@@ -1119,6 +1119,14 @@ Deleted: duplicate NHWC pool output-shape arithmetic from emitted tensor plannin
 Added: shared `pool_nhwc_shape(...)` helper used by both actual-shape inference and emitted pool output tensors
 Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over max_pool, avg_pool2d, and conv2d; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `269 passed, 700 deselected`. No model lane was run. This is a small LOC movement but removes one more independent pool shape formula.
+
+2026-06-14, serializer filled-const emission helper slice
+Rust LOC: 36,787 -> 36,808
+Movement: +21 Rust LOC
+Deleted: repeated `make_filled_const_tensor(...)` plus `push_inline_const(...)` guard blocks from derived math, reductions, binary literal broadcasting, indexing bool constants, and quant/dequant serializer paths
+Added: `push_filled_const_if_supported(...)` as the shared serializer helper for optional scalar-filled CONST emission
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over round, div, floor_div, remainder, sqrt, full, sign, expm1, log1p, leaky_relu, mean_dim, sum, add, sub, mul, index_tensor, index_put, index_select, and index_copy; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `501 passed, 2 skipped, 24 expected xfails, 784 deselected`. No model lane was run. This is intentionally setup-positive: direct filled-const construction is now isolated to the helper itself and the `nn/pad` fallback case.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

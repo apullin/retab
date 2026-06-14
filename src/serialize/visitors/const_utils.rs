@@ -139,6 +139,20 @@ pub(super) fn push_inline_const(result: &mut EmitResult, tensor: TosaTensor) {
     result.push_const(tensor);
 }
 
+pub(super) fn push_filled_const_if_supported(
+    result: &mut EmitResult,
+    name: String,
+    shape: Vec<i32>,
+    dtype: crate::graph::ir::DType,
+    value: f64,
+) -> bool {
+    let Some(tensor) = make_filled_const_tensor(name, shape, dtype, value) else {
+        return false;
+    };
+    push_inline_const(result, tensor);
+    true
+}
+
 pub(super) fn make_shape_const_tensor(name: String, values: Vec<i32>) -> TosaTensor {
     let data: Vec<u8> = values
         .iter()

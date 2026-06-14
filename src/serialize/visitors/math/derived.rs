@@ -104,14 +104,13 @@ fn emit_div_with_rounding(ctx: &EmitContext, rounding_mode: Option<&str>) -> Emi
         }
         Some("trunc") => {
             let zero_name = format!("{}_zero", node.name);
-            if let Some(tensor) = make_filled_const_tensor(
+            push_filled_const_if_supported(
+                &mut result,
                 zero_name.clone(),
                 spec.output_shape.clone(),
                 node.meta.val.dtype,
                 0.0,
-            ) {
-                push_inline_const(&mut result, tensor);
-            }
+            );
 
             let is_neg_name = format!("{}_is_neg", node.name);
             result.tensors.push(temp_tensor(
@@ -208,13 +207,13 @@ pub(in crate::serialize::visitors) fn emit_full_like(ctx: &EmitContext) -> EmitR
     };
     let fill_val = quantize_fill_value(node, fill_val);
 
-    if let Some(tensor) = make_filled_const_tensor(
+    if push_filled_const_if_supported(
+        &mut result,
         node.name.clone(),
         output_shape,
         node.meta.val.dtype,
         fill_val,
     ) {
-        push_inline_const(&mut result, tensor);
     } else {
         result.tensors.push(ctx.make_output());
     }
@@ -238,11 +237,13 @@ pub(in crate::serialize::visitors) fn emit_aten_sign(ctx: &EmitContext) -> EmitR
         (neg_one_name.clone(), -1.0),
     ] {
         let fill_value = quantize_fill_value(node, value);
-        if let Some(t) =
-            make_filled_const_tensor(name, spec.output_shape.clone(), spec.ir_dtype, fill_value)
-        {
-            push_inline_const(&mut result, t);
-        }
+        push_filled_const_if_supported(
+            &mut result,
+            name,
+            spec.output_shape.clone(),
+            spec.ir_dtype,
+            fill_value,
+        );
     }
 
     let gt_name = format!("{}_sign_gt", node.name);
@@ -299,11 +300,13 @@ pub(in crate::serialize::visitors) fn emit_aten_expm1(ctx: &EmitContext) -> Emit
     );
 
     let one_name = format!("{}_one", node.name);
-    if let Some(t) =
-        make_filled_const_tensor(one_name.clone(), spec.output_shape, spec.ir_dtype, 1.0)
-    {
-        push_inline_const(&mut result, t);
-    }
+    push_filled_const_if_supported(
+        &mut result,
+        one_name.clone(),
+        spec.output_shape,
+        spec.ir_dtype,
+        1.0,
+    );
     result.push_output_op(
         ctx.make_output(),
         Op::Sub,
@@ -322,14 +325,13 @@ pub(in crate::serialize::visitors) fn emit_aten_log1p(ctx: &EmitContext) -> Emit
         .unwrap_or_else(|| panic!("emit_aten_log1p: missing input for node '{}'", node.name));
 
     let one_name = format!("{}_one", node.name);
-    if let Some(t) = make_filled_const_tensor(
+    push_filled_const_if_supported(
+        &mut result,
         one_name.clone(),
         spec.output_shape.clone(),
         spec.ir_dtype,
         1.0,
-    ) {
-        push_inline_const(&mut result, t);
-    }
+    );
 
     let add_name = format!("{}_add_one", node.name);
     result.push_output_op(
@@ -424,14 +426,13 @@ pub(in crate::serialize::visitors) fn emit_aten_leaky_relu(ctx: &EmitContext) ->
     };
 
     let zero_name = format!("{}_zero", node.name);
-    if let Some(t) = make_filled_const_tensor(
+    push_filled_const_if_supported(
+        &mut result,
         zero_name.clone(),
         spec.output_shape.clone(),
         spec.ir_dtype,
         0.0,
-    ) {
-        push_inline_const(&mut result, t);
-    }
+    );
 
     let ge_name = format!("{}_ge", node.name);
     result.push_output_op(
@@ -442,14 +443,13 @@ pub(in crate::serialize::visitors) fn emit_aten_leaky_relu(ctx: &EmitContext) ->
     );
 
     let alpha_name = format!("{}_alpha", node.name);
-    if let Some(t) = make_filled_const_tensor(
+    push_filled_const_if_supported(
+        &mut result,
         alpha_name.clone(),
         spec.output_shape.clone(),
         spec.ir_dtype,
         alpha,
-    ) {
-        push_inline_const(&mut result, t);
-    }
+    );
 
     let scaled_name = format!("{}_scaled", node.name);
     let shift_name = push_shift_const(&mut result, &node.name);

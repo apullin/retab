@@ -118,19 +118,19 @@ pub(in crate::serialize::visitors) fn emit_round(ctx: &EmitContext) -> EmitResul
         (one_name.clone(), 1.0, "one"),
         (two_name.clone(), 2.0, "two"),
     ] {
-        let tensor = make_filled_const_tensor(
-            name,
-            spec.output_shape.clone(),
+        assert!(
+            push_filled_const_if_supported(
+                &mut result,
+                name,
+                spec.output_shape.clone(),
+                spec.ir_dtype,
+                quantize_fill_value(node, value),
+            ),
+            "emit_round: unsupported {}-fill dtype {:?} for node '{}'",
+            label,
             spec.ir_dtype,
-            quantize_fill_value(node, value),
-        )
-        .unwrap_or_else(|| {
-            panic!(
-                "emit_round: unsupported {}-fill dtype {:?} for node '{}'",
-                label, spec.ir_dtype, node.name
-            )
-        });
-        push_inline_const(&mut result, tensor);
+            node.name
+        );
     }
 
     let s = spec.output_shape.clone();

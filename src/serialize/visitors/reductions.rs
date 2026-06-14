@@ -187,10 +187,13 @@ fn emit_quant_to_float_chain(
     // 2. Sub zero-point (when non-zero)
     if zero_point != 0.0 {
         let zp_name = format!("{}_{}_input_zp", node_name, prefix);
-        if let Some(zp_tensor) =
-            make_filled_const_tensor(zp_name.clone(), input_shape.to_vec(), ir_dtype, zero_point)
-        {
-            push_inline_const(result, zp_tensor);
+        if push_filled_const_if_supported(
+            result,
+            zp_name.clone(),
+            input_shape.to_vec(),
+            ir_dtype,
+            zero_point,
+        ) {
             let sub_name = format!("{}_{}_input_sub", node_name, prefix);
             result.push_output_op(
                 TosaTensor::new(&sub_name, input_shape.to_vec(), target_dtype),
@@ -205,10 +208,13 @@ fn emit_quant_to_float_chain(
     // 3. Mul scale (when != 1.0)
     if (scale - 1.0).abs() > f64::EPSILON {
         let scale_name = format!("{}_{}_input_scale", node_name, prefix);
-        if let Some(scale_tensor) =
-            make_filled_const_tensor(scale_name.clone(), input_shape.to_vec(), ir_dtype, scale)
-        {
-            push_inline_const(result, scale_tensor);
+        if push_filled_const_if_supported(
+            result,
+            scale_name.clone(),
+            input_shape.to_vec(),
+            ir_dtype,
+            scale,
+        ) {
             let shift_name = push_shift_const(result, &format!("{}_{}_input", node_name, prefix));
             let mul_name = format!("{}_{}_input_float", node_name, prefix);
             result.push_output_op(

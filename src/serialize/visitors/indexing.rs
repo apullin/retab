@@ -292,15 +292,15 @@ fn maybe_normalize_select_inputs(
             };
 
             let const_name = format!("{}_input{}_broadcast", node.name, idx);
-            let Some(tensor) = make_filled_const_tensor(
+            if !push_filled_const_if_supported(
+                result,
                 const_name.clone(),
                 output_shape.clone(),
                 output_ir_dtype,
                 fill_value,
-            ) else {
+            ) {
                 continue;
-            };
-            push_inline_const(result, tensor);
+            }
             input_names[idx] = const_name;
             continue;
         }
@@ -309,24 +309,22 @@ fn maybe_normalize_select_inputs(
         if input_dtype != output_dtype {
             if input_dtype == DType::Bool {
                 let true_name = format!("{}_input{}_true", node.name, idx);
-                if let Some(tensor) = make_filled_const_tensor(
+                push_filled_const_if_supported(
+                    result,
                     true_name.clone(),
                     output_shape.clone(),
                     output_ir_dtype,
                     1.0,
-                ) {
-                    push_inline_const(result, tensor);
-                }
+                );
 
                 let false_name = format!("{}_input{}_false", node.name, idx);
-                if let Some(tensor) = make_filled_const_tensor(
+                push_filled_const_if_supported(
+                    result,
                     false_name.clone(),
                     output_shape.clone(),
                     output_ir_dtype,
                     0.0,
-                ) {
-                    push_inline_const(result, tensor);
-                }
+                );
 
                 let select_name = format!("{}_input{}_bool_cast", node.name, idx);
                 result.push_output_op(
