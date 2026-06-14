@@ -96,10 +96,10 @@ impl IrPass for IrDecomposeAddmmPass {
             };
 
             // Step 1: mm(mat1, mat2)
-            let mm_id = graph.add_node(
-                NodeOp::CallFunction,
+            let mm_id = graph.add_anchored_call_function(
+                id,
                 format!("{}_mm", node_name),
-                "aten.mm.default".to_string(),
+                "aten.mm.default",
                 vec![IrArg::Node(mat1_id), IrArg::Node(mat2_id)],
                 mm_meta.clone(),
             );
@@ -108,17 +108,17 @@ impl IrPass for IrDecomposeAddmmPass {
             let scaled_mm_id = if (alpha - 1.0).abs() > 1e-10 {
                 let rank = mm_meta.val_shape().map(|s| s.len()).unwrap_or(1);
                 let full_shape: Vec<IrArg> = vec![IrArg::Int(1); rank];
-                let full_id = graph.add_node(
-                    NodeOp::CallFunction,
+                let full_id = graph.add_anchored_call_function(
+                    id,
                     format!("{}_alpha_full", node_name),
-                    "aten.full.default".to_string(),
+                    "aten.full.default",
                     vec![IrArg::List(full_shape), IrArg::Float(alpha)],
                     mm_meta.clone(),
                 );
-                graph.add_node(
-                    NodeOp::CallFunction,
+                graph.add_anchored_call_function(
+                    id,
                     format!("{}_alpha_mul", node_name),
-                    "aten.mul.Tensor".to_string(),
+                    "aten.mul.Tensor",
                     vec![IrArg::Node(mm_id), IrArg::Node(full_id)],
                     mm_meta.clone(),
                 )
@@ -135,17 +135,17 @@ impl IrPass for IrDecomposeAddmmPass {
                     .unwrap_or(1);
                 let full_shape: Vec<IrArg> = vec![IrArg::Int(1); rank];
                 let bias_meta = graph.nodes[bias_id].meta.clone();
-                let full_id = graph.add_node(
-                    NodeOp::CallFunction,
+                let full_id = graph.add_anchored_call_function(
+                    id,
                     format!("{}_beta_full", node_name),
-                    "aten.full.default".to_string(),
+                    "aten.full.default",
                     vec![IrArg::List(full_shape), IrArg::Float(beta)],
                     bias_meta.clone(),
                 );
-                graph.add_node(
-                    NodeOp::CallFunction,
+                graph.add_anchored_call_function(
+                    id,
                     format!("{}_beta_mul", node_name),
-                    "aten.mul.Tensor".to_string(),
+                    "aten.mul.Tensor",
                     vec![IrArg::Node(bias_id), IrArg::Node(full_id)],
                     bias_meta,
                 )
@@ -154,16 +154,13 @@ impl IrPass for IrDecomposeAddmmPass {
             };
 
             // Step 4: add(scaled_mm, scaled_bias)
-            let add_id = graph.add_node(
-                NodeOp::CallFunction,
+            graph.replace_with_call_function(
+                id,
                 format!("{}_add", node_name),
-                "aten.add.Tensor".to_string(),
+                "aten.add.Tensor",
                 vec![IrArg::Node(scaled_mm_id), IrArg::Node(scaled_bias_id)],
                 orig_meta,
             );
-
-            // Replace original addmm with the final add
-            graph.replace_and_erase(id, add_id);
             modified = true;
 
             log_line(format_args!(

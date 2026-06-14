@@ -189,17 +189,15 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
 
     // 5. view_copy(slice, original_shape) — reshape back
     let view2_meta = node_meta.cloned_with_val(original_shape.clone(), input_dtype);
-    let view2_id = graph.add_node(
-        NodeOp::CallFunction,
+    graph.replace_with_call_function(
+        node_id,
         format!("{}_view_post", node_name),
-        "aten.view_copy.default".to_string(),
+        "aten.view_copy.default",
         vec![
             IrArg::Node(slice_id),
             IrArg::List(original_shape.iter().map(|&d| IrArg::Int(d)).collect()),
         ],
         view2_meta,
     );
-
-    graph.replace_and_erase(node_id, view2_id);
     true
 }

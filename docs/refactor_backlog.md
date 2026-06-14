@@ -879,6 +879,14 @@ Deleted: stale `src/graph/builder.rs` extension module whose remaining behavior 
 Added: `IrGraph::replace_with_call_function`, a small rewrite-builder primitive for one-node replacement rewrites; the `Graph` helpers now live with `Graph`; qparam copying now flows through `NodeMeta::with_qparams_from`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over as_strided_copy, clamp, conv1d, embedding, full/full_like, linear, masked_fill, ne, permute, relu, repeat_interleave, squeeze, transpose_copy, and unsqueeze; `git diff --check`; Rust LOC check
 Note: Rust tests passed `130 passed`. Focused Python smoke passed `367 passed, 8 skipped, 782 deselected`. This executed the requested 1/2/3 queue: a small dead-surface deletion, a bounded IR rewrite-builder migration, and a conservative tensor-facts cleanup that makes mutable qparam copying private to `NodeMeta`.
+
+2026-06-13, rewrite-builder expansion slice
+Rust LOC: 37,063 -> 37,059
+Movement: -4 Rust LOC
+Deleted: local final-node `add_node` plus `replace_and_erase` sequences in logit, addmm, cumsum, and mean decomposition paths; several temporary-helper `add_node` spellings in logit and addmm now use the anchored insertion grammar directly
+Added: no new API; this expands use of `IrGraph::add_anchored_call_function` and `IrGraph::replace_with_call_function`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over logit, addmm, mm, bmm, cumsum, and mean_dim; Rust LOC check
+Note: Rust tests passed `130 passed`. Focused Python smoke passed `171 passed, 331 deselected`. This is a small LOC reduction but a useful grammar migration: these decomposition passes now express helper insertion and final replacement through shared `IrGraph` rewrite primitives instead of pass-local boilerplate.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

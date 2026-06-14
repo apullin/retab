@@ -74,7 +74,7 @@ impl IrPass for IrDecomposeMeanPass {
                     let pool_h = 1i64.max(input_shape[2] / kernel[0].max(1));
                     let pool_w = 1i64.max(input_shape[3] / kernel[1].max(1));
                     let pool_shape = vec![input_shape[0], input_shape[1], pool_h, pool_w];
-                    let mut result = graph.add_anchored_call_function(
+                    let result = graph.add_anchored_call_function(
                         id,
                         format!("{}_avgpool", name),
                         "aten.avg_pool2d.default",
@@ -83,13 +83,15 @@ impl IrPass for IrDecomposeMeanPass {
                     );
 
                     if !keepdim {
-                        result = graph.add_node(
-                            NodeOp::CallFunction,
+                        graph.replace_with_call_function(
+                            id,
                             format!("{}_view", name),
-                            "aten.view_copy.default".to_string(),
+                            "aten.view_copy.default",
                             vec![IrArg::Node(result), i64_list(&output_shape)],
                             orig_meta.cloned_with_val(output_shape.clone(), &dtype),
                         );
+                        modified = true;
+                        continue;
                     }
                     graph.replace_and_erase(id, result);
                     modified = true;
@@ -177,18 +179,19 @@ impl IrPass for IrDecomposeMeanPass {
             }
 
             // Optional view if keepdim=False
-            let mut result = mul_id;
             if !keepdim {
-                result = graph.add_node(
-                    NodeOp::CallFunction,
+                graph.replace_with_call_function(
+                    id,
                     format!("{}_view", name),
-                    "aten.view_copy.default".to_string(),
+                    "aten.view_copy.default",
                     vec![IrArg::Node(mul_id), i64_list(&output_shape)],
                     orig_meta.cloned_with_val(output_shape.clone(), &dtype),
                 );
+                modified = true;
+                continue;
             }
 
-            graph.replace_and_erase(id, result);
+            graph.replace_and_erase(id, mul_id);
             modified = true;
         }
 

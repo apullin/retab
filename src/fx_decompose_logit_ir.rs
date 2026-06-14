@@ -56,10 +56,10 @@ impl IrPass for IrDecomposeLogitPass {
 
             // If eps is not None: x = clamp(x, eps, 1 - eps)
             if let Some(eps_val) = eps {
-                x = graph.add_node(
-                    NodeOp::CallFunction,
+                x = graph.add_anchored_call_function(
+                    id,
                     format!("{base_name}_clamp"),
-                    "aten.clamp.default".to_string(),
+                    "aten.clamp.default",
                     vec![
                         IrArg::Node(x),
                         IrArg::Float(eps_val),
@@ -71,69 +71,67 @@ impl IrPass for IrDecomposeLogitPass {
 
             // full(-1.0) with broadcast shape [1; rank]
             let shape_ones: Vec<IrArg> = vec![IrArg::Int(1); rank];
-            let neg_one = graph.add_node(
-                NodeOp::CallFunction,
+            let neg_one = graph.add_anchored_call_function(
+                id,
                 format!("{base_name}_full_neg1"),
-                "aten.full.default".to_string(),
+                "aten.full.default",
                 vec![IrArg::List(shape_ones.clone()), IrArg::Float(-1.0)],
                 meta.clone(),
             );
 
             // neg_x = mul(x, -1.0)
-            let neg_x = graph.add_node(
-                NodeOp::CallFunction,
+            let neg_x = graph.add_anchored_call_function(
+                id,
                 format!("{base_name}_neg_x"),
-                "aten.mul.Tensor".to_string(),
+                "aten.mul.Tensor",
                 vec![IrArg::Node(x), IrArg::Node(neg_one)],
                 meta.clone(),
             );
 
             // full(1.0) with broadcast shape [1; rank]
-            let one = graph.add_node(
-                NodeOp::CallFunction,
+            let one = graph.add_anchored_call_function(
+                id,
                 format!("{base_name}_full_one"),
-                "aten.full.default".to_string(),
+                "aten.full.default",
                 vec![IrArg::List(shape_ones), IrArg::Float(1.0)],
                 meta.clone(),
             );
 
             // denom = add(neg_x, 1.0) => (1 - x)
-            let denom = graph.add_node(
-                NodeOp::CallFunction,
+            let denom = graph.add_anchored_call_function(
+                id,
                 format!("{base_name}_denom"),
-                "aten.add.Tensor".to_string(),
+                "aten.add.Tensor",
                 vec![IrArg::Node(neg_x), IrArg::Node(one)],
                 meta.clone(),
             );
 
             // frac = reciprocal(denom) => 1 / (1 - x)
-            let frac = graph.add_node(
-                NodeOp::CallFunction,
+            let frac = graph.add_anchored_call_function(
+                id,
                 format!("{base_name}_frac"),
-                "aten.reciprocal.default".to_string(),
+                "aten.reciprocal.default",
                 vec![IrArg::Node(denom)],
                 meta.clone(),
             );
 
             // log_input = mul(x, frac) => x / (1 - x)
-            let log_input = graph.add_node(
-                NodeOp::CallFunction,
+            let log_input = graph.add_anchored_call_function(
+                id,
                 format!("{base_name}_log_input"),
-                "aten.mul.Tensor".to_string(),
+                "aten.mul.Tensor",
                 vec![IrArg::Node(x), IrArg::Node(frac)],
                 meta.clone(),
             );
 
             // result = log(log_input)
-            let result = graph.add_node(
-                NodeOp::CallFunction,
+            graph.replace_with_call_function(
+                id,
                 format!("{base_name}_log"),
-                "aten.log.default".to_string(),
+                "aten.log.default",
                 vec![IrArg::Node(log_input)],
                 meta,
             );
-
-            graph.replace_and_erase(id, result);
             modified = true;
         }
 
