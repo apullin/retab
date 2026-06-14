@@ -3,20 +3,10 @@
 //! Rewrites as_strided_copy → view_copy when the stride is contiguous
 //! and storage_offset is zero.
 
+use crate::fx_index_linear::contiguous_strides;
 use crate::fx_ir::{IrArg, IrGraph, IrPass};
 use crate::fx_target::is_as_strided_copy_target;
 use crate::runner_logging::log_line;
-
-/// Compute contiguous (row-major) strides for the given shape.
-fn contiguous_strides(shape: &[i64]) -> Vec<i64> {
-    let mut strides = vec![1; shape.len()];
-    let mut running = 1;
-    for (idx, dim) in shape.iter().enumerate().rev() {
-        strides[idx] = running;
-        running *= *dim;
-    }
-    strides
-}
 
 /// Check whether the given stride matches contiguous layout for the shape.
 fn stride_matches(shape: &[i64], stride: &[i64]) -> bool {

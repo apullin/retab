@@ -1175,6 +1175,14 @@ Deleted: duplicate broadcast-align, expand, flatten, stride-scale, and sum rewri
 Added: `src/fx_index_linear.rs` as the shared owner for contiguous index strides, packed linear scales, and generated flat-index IR construction
 Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over index_tensor, index_put, index_select, index_copy, gather, and unfold_copy; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `155 passed, 20 expected xfails, 252 deselected`. No model lane was run. This is a Refactor 3 payoff slice: two indexing passes now share the same linear-index rewrite grammar instead of carrying independent copies of the algorithm.
+
+2026-06-14, contiguous stride helper reuse slice
+Rust LOC: 36,787 -> 36,777
+Movement: -10 Rust LOC
+Deleted: duplicate contiguous-stride calculation from as_strided_copy decomposition
+Added: no new API beyond reuse of `fx_index_linear::contiguous_strides`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over index_tensor, index_put, index_select, index_copy, gather, unfold_copy, and as_strided_copy; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `161 passed, 20 expected xfails, 260 deselected`. No model lane was run. This keeps contiguous stride semantics in one helper while preserving as_strided_copy's relaxed last-dimension stride check.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1390,7 +1398,8 @@ node, integer, numeric, boolean, list, pair-or-scalar, and cloned-or-None args,
 plus keyword and arg-or-keyword reads for mixed Python-style schemas. The
 indexing family now also shares `fx_index_linear::build_linear_index`, which
 owns the broadcast-align, expand, flatten, stride-scale, and sum rewrite chain
-used by index.Tensor and index_put.
+used by index.Tensor and index_put; the same module owns contiguous stride
+calculation for indexing and as_strided_copy.
 Remaining work should keep adding small builder/query operations only when
 they replace repeated rewrite structure across several passes.
 
