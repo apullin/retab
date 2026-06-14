@@ -2,6 +2,7 @@ use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
 use pyo3::types::PyMemoryView;
 
+use crate::fx_py_attr::attrs;
 use crate::graph::ir::DType;
 use crate::store::TensorData;
 
@@ -84,17 +85,16 @@ pub fn encode_f16(value: f32) -> u16 {
 }
 
 pub fn extract_tensor_shape(value: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
-    value
-        .getattr("shape")?
+    attrs(value)
+        .object("shape")?
         .iter()?
         .map(|dim| dim.and_then(|v| v.extract::<i64>()))
         .collect()
 }
 
 pub fn extract_tensor_dtype(value: &Bound<'_, PyAny>) -> DType {
-    value
-        .getattr("dtype")
-        .and_then(|dtype| dtype.str()?.extract::<String>())
+    attrs(value)
+        .display_optional("dtype")
         .map(|dtype| parse_torch_dtype(&dtype))
         .unwrap_or(DType::Float32)
 }

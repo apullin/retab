@@ -1263,6 +1263,14 @@ Deleted: direct `input_qparams.as_ref().get(...)` slot reads in conv-bias annota
 Added: no new helper surface; these passes now use the existing `NodeMeta::input_qparam_at(...)` grammar
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_annotate_conv_bias_ir::tests`; `cargo test --lib fx_insert_int32_rescale_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over abs, add, conv2d, conv3d, linear, mul, sum, and where; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `445 passed, 1 expected xfail, 1146 deselected`. No model lane was run. This is a deletion-only Tensor Facts cleanup that keeps exact-slot qparam reads out of production pass field access.
+
+2026-06-14, tensor-data attr-boundary cleanup slice
+Rust LOC: 36,811 -> 36,811
+Movement: 0 Rust LOC
+Deleted: raw tensor `shape`/`dtype` attr reads from tensor-data extraction
+Added: no new helper surface; tensor-data extraction now uses `AttrView::object` and `AttrView::display_optional`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib tensor_data::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over addmm, arange, bmm, constant_pad_nd, conv_constant_pad_nd, embedding, eye, full, matmul, mm, ones, and zeros; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `269 passed, 13 skipped, 10 expected xfails, 411 deselected`. No model lane was run. This keeps dynamic Python attr reads isolated in `fx_py_attr.rs`; the remaining raw `getattr` outside that module is the intentional `torch.getattr("uint16")` API lookup for BF16 byte extraction.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1683,12 +1691,12 @@ Initial slices complete. `src/fx_py_attr.rs` now owns `AttrView` and
 attrs. `MetaView` covers metadata-dict reads. `ItemView` now covers keyed and
 indexed Python item access plus lossy pair iteration for dict-like objects.
 `QParam::from_py`, `NodeMeta::from_fx`, graph-signature ingestion, kwargs
-import, qparam dict extraction, FakeTensor base recovery, and the structural
-control-flow helper all use this grammar. The old `fx_graph::py_attr`/
-`meta_val` helpers and the temporary free-function attr API have been removed.
-The larger opportunity is still open in dynamic GraphModule attr reads, Python
-import/object construction, and the remaining structural control-flow Python
-helper.
+import, qparam dict extraction, FakeTensor base recovery, tensor-data
+shape/dtype extraction, and legacy structural control-flow inlet code all use
+this grammar or have been deleted. The old `fx_graph::py_attr`/`meta_val`
+helpers and the temporary free-function attr API have been removed. The larger
+opportunity is still open in Python import/object construction and any future
+dynamic GraphModule attr reads that cross the inlet boundary.
 
 Design note:
 
