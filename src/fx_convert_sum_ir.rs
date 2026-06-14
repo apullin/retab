@@ -7,7 +7,7 @@
 //! For multi-axis reductions the dims are processed in descending order
 //! so that earlier reductions don't shift the indices of later ones.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId};
 use crate::fx_target::is_sum_dim_int_list_target;
 use crate::runner_logging::log_line;
 
@@ -121,10 +121,10 @@ impl IrPass for IrConvertSumPass {
                 }
 
                 // Build args: (current_input, [dim], keepdim)
-                let reduce_id = graph.add_node(
-                    NodeOp::CallFunction,
+                let reduce_id = graph.add_anchored_call_function(
+                    id,
                     format!("{}_reduce_dim{}", orig_name, dim),
-                    "aten.sum.dim_IntList".to_string(),
+                    "aten.sum.dim_IntList",
                     vec![
                         IrArg::Node(current_input),
                         IrArg::List(vec![IrArg::Int(dim)]),
@@ -132,8 +132,6 @@ impl IrPass for IrConvertSumPass {
                     ],
                     step_meta,
                 );
-                // Anchor intermediate nodes near the original sum for stable IR ordering.
-                graph.anchor_to(reduce_id, id);
 
                 current_input = reduce_id;
                 // Chain qparams: next reduce's input_qparams = current output_qparams

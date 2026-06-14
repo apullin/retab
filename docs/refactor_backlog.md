@@ -1738,7 +1738,22 @@ owns the broadcast-align, expand, flatten, stride-scale, and sum rewrite chain
 used by index.Tensor and index_put; the same module owns contiguous stride
 calculation for indexing and as_strided_copy. Constant-effect passes now share
 shape-only and slice constant-chain planning through `fx_constant_tensor_eval`
-instead of wrapping first-constant-input lookup locally.
+instead of wrapping first-constant-input lookup locally. Sum reduction-chain
+insertion and pixel-shuffle view/permute decomposition now use existing
+call-function builder helpers instead of open-coding `NodeOp::CallFunction`
+construction plus manual anchoring/metadata cloning.
+
+2026-06-14, call-function builder reuse slice
+
+Deleted: raw production `graph.add_node(NodeOp::CallFunction, ...)` construction
+from sum chained-reduce insertion and pixel-shuffle view/permute helper nodes
+
+Added: direct reuse of `add_anchored_call_function` and
+`add_call_function_with_val` at those rewrite sites
+
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`;
+focused Python smoke via `/tmp/et.sh` over sum and pixel_shuffling.
+
 Remaining work should keep adding small builder/query operations only when
 they replace repeated rewrite structure across several passes.
 
