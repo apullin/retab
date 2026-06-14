@@ -148,6 +148,21 @@ impl ApproxCtx {
         self.tensor_shape(graph, suffix, target, args, &self.shape)
     }
 
+    fn tensor_nodes(
+        &self,
+        graph: &mut IrGraph,
+        suffix: &str,
+        target: &str,
+        nodes: &[NodeId],
+    ) -> NodeId {
+        self.tensor(
+            graph,
+            suffix,
+            target,
+            nodes.iter().copied().map(IrArg::Node).collect(),
+        )
+    }
+
     fn tensor_scalar(
         &self,
         graph: &mut IrGraph,
@@ -180,6 +195,21 @@ impl ApproxCtx {
 
     fn bool(&self, graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>) -> NodeId {
         self.bool_shape(graph, suffix, target, args, &self.shape)
+    }
+
+    fn bool_nodes(
+        &self,
+        graph: &mut IrGraph,
+        suffix: &str,
+        target: &str,
+        nodes: &[NodeId],
+    ) -> NodeId {
+        self.bool(
+            graph,
+            suffix,
+            target,
+            nodes.iter().copied().map(IrArg::Node).collect(),
+        )
     }
 
     fn bool_shape(
@@ -225,6 +255,21 @@ impl ApproxCtx {
         )
     }
 
+    fn replace_nodes(
+        &self,
+        graph: &mut IrGraph,
+        suffix: &str,
+        target: &str,
+        nodes: &[NodeId],
+    ) -> NodeId {
+        self.replace_output(
+            graph,
+            suffix,
+            target,
+            nodes.iter().copied().map(IrArg::Node).collect(),
+        )
+    }
+
     fn view_shape(
         &self,
         graph: &mut IrGraph,
@@ -255,6 +300,82 @@ impl ApproxCtx {
             target,
             vec![IrArg::Node(source), i64_list(shape)],
             shape,
+        )
+    }
+
+    fn add(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
+        self.tensor_nodes(graph, suffix, "aten.add.Tensor", &[lhs, rhs])
+    }
+
+    fn sub(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
+        self.tensor_nodes(graph, suffix, "aten.sub.Tensor", &[lhs, rhs])
+    }
+
+    fn mul(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
+        self.tensor_nodes(graph, suffix, "aten.mul.Tensor", &[lhs, rhs])
+    }
+
+    fn div(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
+        self.tensor_nodes(graph, suffix, "aten.div.Tensor", &[lhs, rhs])
+    }
+
+    fn unary(&self, graph: &mut IrGraph, suffix: &str, target: &str, input: NodeId) -> NodeId {
+        self.tensor_nodes(graph, suffix, target, &[input])
+    }
+
+    fn neg(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(graph, suffix, "aten.neg.default", input)
+    }
+
+    fn exp(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(graph, suffix, "aten.exp.default", input)
+    }
+
+    fn sqrt(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(graph, suffix, "aten.sqrt.default", input)
+    }
+
+    fn log(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(graph, suffix, "aten.log.default", input)
+    }
+
+    fn abs(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(graph, suffix, "aten.abs.default", input)
+    }
+
+    fn reciprocal(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(graph, suffix, "aten.reciprocal.default", input)
+    }
+
+    fn tanh(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(graph, suffix, "aten.tanh.default", input)
+    }
+
+    fn erf(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(graph, suffix, "aten.erf.default", input)
+    }
+
+    fn ge(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
+        self.bool_nodes(graph, suffix, "aten.ge.Tensor", &[lhs, rhs])
+    }
+
+    fn gt(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
+        self.bool_nodes(graph, suffix, "aten.gt.Tensor", &[lhs, rhs])
+    }
+
+    fn where_self(
+        &self,
+        graph: &mut IrGraph,
+        suffix: &str,
+        condition: NodeId,
+        when_true: NodeId,
+        when_false: NodeId,
+    ) -> NodeId {
+        self.tensor_nodes(
+            graph,
+            suffix,
+            "aten.where.self",
+            &[condition, when_true, when_false],
         )
     }
 
@@ -1632,14 +1753,9 @@ fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> 
         &reduced_shape,
     );
 
-    let shifted = ctx.tensor(
-        graph,
-        "shifted",
-        "aten.sub.Tensor",
-        vec![IrArg::Node(x_id), IrArg::Node(reduce)],
-    );
+    let shifted = ctx.sub(graph, "shifted", x_id, reduce);
 
-    let exp = ctx.tensor(graph, "exp", "aten.exp.default", vec![IrArg::Node(shifted)]);
+    let exp = ctx.exp(graph, "exp", shifted);
 
     let sum = ctx.tensor_shape(
         graph,
@@ -1657,27 +1773,12 @@ fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> 
         &sum_shape,
     );
 
-    let softmax = ctx.tensor(
-        graph,
-        "softmax",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(exp), IrArg::Node(recip)],
-    );
+    let softmax = ctx.mul(graph, "softmax", exp, recip);
 
     if log_output {
-        ctx.replace_output(
-            graph,
-            "result",
-            "aten.log.default",
-            vec![IrArg::Node(softmax)],
-        );
+        ctx.replace_nodes(graph, "result", "aten.log.default", &[softmax]);
     } else {
-        ctx.replace_output(
-            graph,
-            "result",
-            "aten.clone.default",
-            vec![IrArg::Node(softmax)],
-        );
+        ctx.replace_nodes(graph, "result", "aten.clone.default", &[softmax]);
     }
     true
 }
@@ -1690,31 +1791,11 @@ fn decompose_atanh(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let one = ctx.full(graph, "one", 1.0);
     let half = ctx.full(graph, "half", 0.5);
-    let one_plus = ctx.tensor(
-        graph,
-        "1px",
-        "aten.add.Tensor",
-        vec![IrArg::Node(one), IrArg::Node(x_id)],
-    );
-    let one_minus = ctx.tensor(
-        graph,
-        "1mx",
-        "aten.sub.Tensor",
-        vec![IrArg::Node(one), IrArg::Node(x_id)],
-    );
-    let ratio = ctx.tensor(
-        graph,
-        "ratio",
-        "aten.div.Tensor",
-        vec![IrArg::Node(one_plus), IrArg::Node(one_minus)],
-    );
-    let log_r = ctx.tensor(graph, "log", "aten.log.default", vec![IrArg::Node(ratio)]);
-    ctx.replace_output(
-        graph,
-        "result",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(half), IrArg::Node(log_r)],
-    );
+    let one_plus = ctx.add(graph, "1px", one, x_id);
+    let one_minus = ctx.sub(graph, "1mx", one, x_id);
+    let ratio = ctx.div(graph, "ratio", one_plus, one_minus);
+    let log_r = ctx.log(graph, "log", ratio);
+    ctx.replace_nodes(graph, "result", "aten.mul.Tensor", &[half, log_r]);
     true
 }
 
@@ -1724,14 +1805,9 @@ fn decompose_tan(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     };
 
-    let sin = ctx.tensor(graph, "sin", "aten.sin.default", vec![IrArg::Node(x_id)]);
-    let cos = ctx.tensor(graph, "cos", "aten.cos.default", vec![IrArg::Node(x_id)]);
-    ctx.replace_output(
-        graph,
-        "result",
-        "aten.div.Tensor",
-        vec![IrArg::Node(sin), IrArg::Node(cos)],
-    );
+    let sin = ctx.unary(graph, "sin", "aten.sin.default", x_id);
+    let cos = ctx.unary(graph, "cos", "aten.cos.default", x_id);
+    ctx.replace_nodes(graph, "result", "aten.div.Tensor", &[sin, cos]);
     true
 }
 
@@ -1745,31 +1821,11 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
     let zero = ctx.full(graph, "zero", 0.0);
     let half_pi = ctx.full(graph, "half_pi", FRAC_PI_2);
 
-    let abs_x = ctx.tensor(graph, "abs", "aten.abs.default", vec![IrArg::Node(x_id)]);
-    let mask_hi = ctx.bool(
-        graph,
-        "mask_hi",
-        "aten.gt.Tensor",
-        vec![IrArg::Node(abs_x), IrArg::Node(one)],
-    );
-    let inv_x = ctx.tensor(
-        graph,
-        "inv",
-        "aten.reciprocal.default",
-        vec![IrArg::Node(abs_x)],
-    );
-    let z = ctx.tensor(
-        graph,
-        "z",
-        "aten.where.self",
-        vec![IrArg::Node(mask_hi), IrArg::Node(inv_x), IrArg::Node(abs_x)],
-    );
-    let z2 = ctx.tensor(
-        graph,
-        "z2",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(z), IrArg::Node(z)],
-    );
+    let abs_x = ctx.abs(graph, "abs", x_id);
+    let mask_hi = ctx.gt(graph, "mask_hi", abs_x, one);
+    let inv_x = ctx.reciprocal(graph, "inv", abs_x);
+    let z = ctx.where_self(graph, "z", mask_hi, inv_x, abs_x);
+    let z2 = ctx.mul(graph, "z2", z, z);
     let num = match ctx.poly(graph, "num", &[1.0, 0.3529666667, -0.0287666667], z2) {
         Some(node) => node,
         None => return false,
@@ -1778,57 +1834,18 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(node) => node,
         None => return false,
     };
-    let inv_den = ctx.tensor(
-        graph,
-        "inv_den",
-        "aten.reciprocal.default",
-        vec![IrArg::Node(den)],
-    );
-    let prod = ctx.tensor(
-        graph,
-        "prod",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(num), IrArg::Node(inv_den)],
-    );
-    let atan_z = ctx.tensor(
-        graph,
-        "atan_z",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(z), IrArg::Node(prod)],
-    );
-    let diff = ctx.tensor(
-        graph,
-        "diff",
-        "aten.sub.Tensor",
-        vec![IrArg::Node(half_pi), IrArg::Node(atan_z)],
-    );
-    let atan_abs = ctx.tensor(
-        graph,
-        "atan_abs",
-        "aten.where.self",
-        vec![IrArg::Node(mask_hi), IrArg::Node(diff), IrArg::Node(atan_z)],
-    );
-    let mask_pos = ctx.bool(
-        graph,
-        "mask_pos",
-        "aten.gt.Tensor",
-        vec![IrArg::Node(x_id), IrArg::Node(zero)],
-    );
-    let neg = ctx.tensor(
-        graph,
-        "neg",
-        "aten.neg.default",
-        vec![IrArg::Node(atan_abs)],
-    );
-    ctx.replace_output(
+    let inv_den = ctx.reciprocal(graph, "inv_den", den);
+    let prod = ctx.mul(graph, "prod", num, inv_den);
+    let atan_z = ctx.mul(graph, "atan_z", z, prod);
+    let diff = ctx.sub(graph, "diff", half_pi, atan_z);
+    let atan_abs = ctx.where_self(graph, "atan_abs", mask_hi, diff, atan_z);
+    let mask_pos = ctx.gt(graph, "mask_pos", x_id, zero);
+    let neg = ctx.neg(graph, "neg", atan_abs);
+    ctx.replace_nodes(
         graph,
         "result",
         "aten.where.self",
-        vec![
-            IrArg::Node(mask_pos),
-            IrArg::Node(atan_abs),
-            IrArg::Node(neg),
-        ],
+        &[mask_pos, atan_abs, neg],
     );
     true
 }
@@ -1840,26 +1857,11 @@ fn decompose_sinh(graph: &mut IrGraph, id: NodeId) -> bool {
     };
 
     let half = ctx.full(graph, "half", 0.5);
-    let exp_pos = ctx.tensor(
-        graph,
-        "exp_pos",
-        "aten.exp.default",
-        vec![IrArg::Node(x_id)],
-    );
-    let neg = ctx.tensor(graph, "neg", "aten.neg.default", vec![IrArg::Node(x_id)]);
-    let exp_neg = ctx.tensor(graph, "exp_neg", "aten.exp.default", vec![IrArg::Node(neg)]);
-    let diff = ctx.tensor(
-        graph,
-        "diff",
-        "aten.sub.Tensor",
-        vec![IrArg::Node(exp_pos), IrArg::Node(exp_neg)],
-    );
-    ctx.replace_output(
-        graph,
-        "result",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(diff), IrArg::Node(half)],
-    );
+    let exp_pos = ctx.exp(graph, "exp_pos", x_id);
+    let neg = ctx.neg(graph, "neg", x_id);
+    let exp_neg = ctx.exp(graph, "exp_neg", neg);
+    let diff = ctx.sub(graph, "diff", exp_pos, exp_neg);
+    ctx.replace_nodes(graph, "result", "aten.mul.Tensor", &[diff, half]);
     true
 }
 
@@ -1870,26 +1872,11 @@ fn decompose_cosh(graph: &mut IrGraph, id: NodeId) -> bool {
     };
 
     let half = ctx.full(graph, "half", 0.5);
-    let exp_pos = ctx.tensor(
-        graph,
-        "exp_pos",
-        "aten.exp.default",
-        vec![IrArg::Node(x_id)],
-    );
-    let neg = ctx.tensor(graph, "neg", "aten.neg.default", vec![IrArg::Node(x_id)]);
-    let exp_neg = ctx.tensor(graph, "exp_neg", "aten.exp.default", vec![IrArg::Node(neg)]);
-    let sum = ctx.tensor(
-        graph,
-        "sum",
-        "aten.add.Tensor",
-        vec![IrArg::Node(exp_pos), IrArg::Node(exp_neg)],
-    );
-    ctx.replace_output(
-        graph,
-        "result",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(sum), IrArg::Node(half)],
-    );
+    let exp_pos = ctx.exp(graph, "exp_pos", x_id);
+    let neg = ctx.neg(graph, "neg", x_id);
+    let exp_neg = ctx.exp(graph, "exp_neg", neg);
+    let sum = ctx.add(graph, "sum", exp_pos, exp_neg);
+    ctx.replace_nodes(graph, "result", "aten.mul.Tensor", &[sum, half]);
     true
 }
 
@@ -1900,31 +1887,11 @@ fn decompose_asinh(graph: &mut IrGraph, id: NodeId) -> bool {
     };
 
     let one = ctx.full(graph, "one", 1.0);
-    let square = ctx.tensor(
-        graph,
-        "square",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(x_id), IrArg::Node(x_id)],
-    );
-    let radicand = ctx.tensor(
-        graph,
-        "radicand",
-        "aten.add.Tensor",
-        vec![IrArg::Node(square), IrArg::Node(one)],
-    );
-    let sqrt = ctx.tensor(
-        graph,
-        "sqrt",
-        "aten.sqrt.default",
-        vec![IrArg::Node(radicand)],
-    );
-    let add = ctx.tensor(
-        graph,
-        "sum",
-        "aten.add.Tensor",
-        vec![IrArg::Node(x_id), IrArg::Node(sqrt)],
-    );
-    ctx.replace_output(graph, "result", "aten.log.default", vec![IrArg::Node(add)]);
+    let square = ctx.mul(graph, "square", x_id, x_id);
+    let radicand = ctx.add(graph, "radicand", square, one);
+    let sqrt = ctx.sqrt(graph, "sqrt", radicand);
+    let add = ctx.add(graph, "sum", x_id, sqrt);
+    ctx.replace_nodes(graph, "result", "aten.log.default", &[add]);
     true
 }
 
@@ -1935,37 +1902,12 @@ fn decompose_acosh(graph: &mut IrGraph, id: NodeId) -> bool {
     };
 
     let one = ctx.full(graph, "one", 1.0);
-    let minus = ctx.tensor(
-        graph,
-        "minus",
-        "aten.sub.Tensor",
-        vec![IrArg::Node(x_id), IrArg::Node(one)],
-    );
-    let plus = ctx.tensor(
-        graph,
-        "plus",
-        "aten.add.Tensor",
-        vec![IrArg::Node(x_id), IrArg::Node(one)],
-    );
-    let radicand = ctx.tensor(
-        graph,
-        "radicand",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(minus), IrArg::Node(plus)],
-    );
-    let sqrt = ctx.tensor(
-        graph,
-        "sqrt",
-        "aten.sqrt.default",
-        vec![IrArg::Node(radicand)],
-    );
-    let add = ctx.tensor(
-        graph,
-        "sum",
-        "aten.add.Tensor",
-        vec![IrArg::Node(x_id), IrArg::Node(sqrt)],
-    );
-    ctx.replace_output(graph, "result", "aten.log.default", vec![IrArg::Node(add)]);
+    let minus = ctx.sub(graph, "minus", x_id, one);
+    let plus = ctx.add(graph, "plus", x_id, one);
+    let radicand = ctx.mul(graph, "radicand", minus, plus);
+    let sqrt = ctx.sqrt(graph, "sqrt", radicand);
+    let add = ctx.add(graph, "sum", x_id, sqrt);
+    ctx.replace_nodes(graph, "result", "aten.log.default", &[add]);
     true
 }
 
@@ -2185,30 +2127,10 @@ fn decompose_elu(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let zero = ctx.full(graph, "zero", 0.0);
     let alpha_full = ctx.full(graph, "alpha", alpha);
-    let expm1 = ctx.tensor(
-        graph,
-        "expm1",
-        "aten.expm1.default",
-        vec![IrArg::Node(x_id)],
-    );
-    let scaled = ctx.tensor(
-        graph,
-        "scaled",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(expm1), IrArg::Node(alpha_full)],
-    );
-    let ge = ctx.bool(
-        graph,
-        "ge",
-        "aten.ge.Tensor",
-        vec![IrArg::Node(x_id), IrArg::Node(zero)],
-    );
-    ctx.replace_output(
-        graph,
-        "result",
-        "aten.where.self",
-        vec![IrArg::Node(ge), IrArg::Node(x_id), IrArg::Node(scaled)],
-    );
+    let expm1 = ctx.unary(graph, "expm1", "aten.expm1.default", x_id);
+    let scaled = ctx.mul(graph, "scaled", expm1, alpha_full);
+    let ge = ctx.ge(graph, "ge", x_id, zero);
+    ctx.replace_nodes(graph, "result", "aten.where.self", &[ge, x_id, scaled]);
     true
 }
 
@@ -2224,31 +2146,11 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
     match approximate.as_str() {
         "none" => {
             let sqrt_half = ctx.full_scalar(graph, "sqrt_half", std::f64::consts::FRAC_1_SQRT_2);
-            let scaled = ctx.tensor(
-                graph,
-                "scaled",
-                "aten.mul.Tensor",
-                vec![IrArg::Node(x_id), IrArg::Node(sqrt_half)],
-            );
-            let erf = ctx.tensor(graph, "erf", "aten.erf.default", vec![IrArg::Node(scaled)]);
-            let plus_one = ctx.tensor(
-                graph,
-                "plus_one",
-                "aten.add.Tensor",
-                vec![IrArg::Node(erf), IrArg::Node(one)],
-            );
-            let weighted = ctx.tensor(
-                graph,
-                "weighted",
-                "aten.mul.Tensor",
-                vec![IrArg::Node(plus_one), IrArg::Node(half)],
-            );
-            ctx.replace_output(
-                graph,
-                "result",
-                "aten.mul.Tensor",
-                vec![IrArg::Node(x_id), IrArg::Node(weighted)],
-            );
+            let scaled = ctx.mul(graph, "scaled", x_id, sqrt_half);
+            let erf = ctx.erf(graph, "erf", scaled);
+            let plus_one = ctx.add(graph, "plus_one", erf, one);
+            let weighted = ctx.mul(graph, "weighted", plus_one, half);
+            ctx.replace_nodes(graph, "result", "aten.mul.Tensor", &[x_id, weighted]);
         }
         "tanh" => {
             let sqrt_two = ctx.full_scalar(graph, "sqrt_two", std::f64::consts::SQRT_2);
@@ -2268,60 +2170,15 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 "aten.mul.Tensor",
                 vec![IrArg::Node(sqrt_mul), IrArg::Node(half)],
             );
-            let square = ctx.tensor(
-                graph,
-                "square",
-                "aten.mul.Tensor",
-                vec![IrArg::Node(x_id), IrArg::Node(x_id)],
-            );
-            let cube = ctx.tensor(
-                graph,
-                "cube",
-                "aten.mul.Tensor",
-                vec![IrArg::Node(square), IrArg::Node(x_id)],
-            );
-            let cubic_term = ctx.tensor(
-                graph,
-                "cubic_term",
-                "aten.mul.Tensor",
-                vec![IrArg::Node(cube), IrArg::Node(cube_coeff)],
-            );
-            let inner = ctx.tensor(
-                graph,
-                "inner",
-                "aten.add.Tensor",
-                vec![IrArg::Node(x_id), IrArg::Node(cubic_term)],
-            );
-            let scaled = ctx.tensor(
-                graph,
-                "scaled",
-                "aten.mul.Tensor",
-                vec![IrArg::Node(inner), IrArg::Node(sqrt_2_pi)],
-            );
-            let tanh = ctx.tensor(
-                graph,
-                "tanh",
-                "aten.tanh.default",
-                vec![IrArg::Node(scaled)],
-            );
-            let plus_one = ctx.tensor(
-                graph,
-                "plus_one",
-                "aten.add.Tensor",
-                vec![IrArg::Node(tanh), IrArg::Node(one)],
-            );
-            let first_mul = ctx.tensor(
-                graph,
-                "first_mul",
-                "aten.mul.Tensor",
-                vec![IrArg::Node(x_id), IrArg::Node(plus_one)],
-            );
-            ctx.replace_output(
-                graph,
-                "result",
-                "aten.mul.Tensor",
-                vec![IrArg::Node(first_mul), IrArg::Node(half)],
-            );
+            let square = ctx.mul(graph, "square", x_id, x_id);
+            let cube = ctx.mul(graph, "cube", square, x_id);
+            let cubic_term = ctx.mul(graph, "cubic_term", cube, cube_coeff);
+            let inner = ctx.add(graph, "inner", x_id, cubic_term);
+            let scaled = ctx.mul(graph, "scaled", inner, sqrt_2_pi);
+            let tanh = ctx.tanh(graph, "tanh", scaled);
+            let plus_one = ctx.add(graph, "plus_one", tanh, one);
+            let first_mul = ctx.mul(graph, "first_mul", x_id, plus_one);
+            ctx.replace_nodes(graph, "result", "aten.mul.Tensor", &[first_mul, half]);
         }
         _ => return false,
     }
