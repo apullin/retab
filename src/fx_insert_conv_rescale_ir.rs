@@ -232,14 +232,11 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         bias_view_meta.tosa_spatial_rank = Some(rank);
     }
 
-    let bias_view = graph.add_after_call_function(
+    let bias_view = graph.add_after_view_copy(
         int32_rescale,
         format!("{}_bias_view", node.name),
-        "aten.view_copy.default",
-        vec![
-            IrArg::Node(*bias_id),
-            IrArg::List(bias_view_shape.iter().copied().map(IrArg::Int).collect()),
-        ],
+        *bias_id,
+        &bias_view_shape,
         bias_view_meta,
     );
 

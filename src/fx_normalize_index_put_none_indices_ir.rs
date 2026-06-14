@@ -157,12 +157,11 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
             padded.extend_from_slice(&data_shape);
             let dtype = data_meta.val_dtype_or_float32().to_string();
             let meta = data_meta.cloned_with_val(padded.clone(), &dtype);
-            let shape_arg = IrArg::List(padded.iter().map(|&v| IrArg::Int(v)).collect());
-            let n = graph.add_anchored_call_function(
+            let n = graph.add_anchored_view_copy(
                 id,
                 format!("{}_datareshape", name),
-                "aten.view_copy.default",
-                vec![IrArg::Node(data_id), shape_arg],
+                data_id,
+                &padded,
                 meta,
             );
             if let Some(p) = prev {

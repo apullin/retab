@@ -740,6 +740,19 @@ impl IrGraph {
         id
     }
 
+    pub(crate) fn add_after_view_copy(
+        &mut self,
+        anchor: NodeId,
+        name: impl Into<String>,
+        source: NodeId,
+        shape: &[i64],
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.add_view_copy(name, source, shape, meta);
+        self.anchor_after(id, anchor);
+        id
+    }
+
     pub(crate) fn replace_with_view_copy(
         &mut self,
         old_id: NodeId,

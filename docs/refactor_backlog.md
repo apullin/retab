@@ -1503,6 +1503,14 @@ Deleted: raw local `view_copy` helper construction from conv1d unsqueeze, pixel 
 Added: `IrGraph::add_view_copy(...)`; the anchored/replacement view-copy builders now delegate to it
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv1d, index_put, and pixel_shuffling; Rust LOC check
 Note: Full Rust tests passed `141 passed`; focused Python smoke passed `100 passed, 2 expected xfails`. This removes raw production view-copy construction from local helper wrappers without changing their unanchored insertion behavior.
+
+2026-06-14, graph view-copy builder final production slice
+Rust LOC: 36,254 -> 36,263
+Movement: +9 Rust LOC
+Deleted: remaining straightforward production raw `view_copy` construction in conv accumulator bias reshape, `ApproxCtx::view_shape`, and none-index index_put data reshape
+Added: `IrGraph::add_after_view_copy(...)` for the bias-rescale `anchor_after` case
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv2d, group_norm, and index_put; Rust LOC check
+Note: Full Rust tests passed `141 passed`; focused Python smoke passed `175 passed, 2 expected xfails`. Remaining raw `view_copy` strings are test fixtures/assertions or dynamic target selection where group_norm chooses between `view_copy` and `reshape`.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

@@ -309,11 +309,11 @@ impl ApproxCtx {
         source: NodeId,
         shape: &[i64],
     ) -> NodeId {
-        graph.add_anchored_call_function(
+        graph.add_anchored_view_copy(
             self.anchor_id,
             self.op_name(suffix),
-            "aten.view_copy.default",
-            vec![IrArg::Node(source), i64_list(shape)],
+            source,
+            shape,
             self.tensor_meta(shape),
         )
     }
