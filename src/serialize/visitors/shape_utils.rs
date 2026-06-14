@@ -396,7 +396,7 @@ pub(super) fn symmetric_pool_pad(padding: &[i32]) -> Vec<i32> {
     }
 }
 
-fn max_pool_pad(
+pub(super) fn adjusted_max_pool_pad(
     input_shape: &[i32],
     kernel: &[i32],
     stride: &[i32],
@@ -449,7 +449,7 @@ fn pool_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<
     let raw_padding = kwarg_or_arg_i32_list(node, "pad", 3);
     let pad = if is_max_pool {
         let ceil_mode = kwarg_bool(node, "ceil_mode", arg_bool(node, 5, false));
-        max_pool_pad(&input_shape, &kernel, &stride, &raw_padding, ceil_mode)
+        adjusted_max_pool_pad(&input_shape, &kernel, &stride, &raw_padding, ceil_mode)
     } else if raw_padding.len() == 4 {
         raw_padding
     } else {

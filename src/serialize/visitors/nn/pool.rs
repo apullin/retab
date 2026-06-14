@@ -50,15 +50,14 @@ impl ParsedPoolSpec {
 
         let kernel = i32_list_or(raw_kernel, vec![2, 2]);
         let stride = i32_list_or(raw_stride, kernel.clone());
-        let pad = adjusted_max_pool_pad(
-            graph,
-            store,
-            node,
-            &kernel,
-            &stride,
-            &raw_padding,
-            ceil_mode,
-        );
+        let input_shape = node
+            .args
+            .first()
+            .and_then(Arg::as_node)
+            .and_then(|id| graph.node(id))
+            .map(|input_node| actual_tensor_shape(graph, store, input_node))
+            .unwrap_or_default();
+        let pad = adjusted_max_pool_pad(&input_shape, &kernel, &stride, &raw_padding, ceil_mode);
 
         Self {
             input_names,
@@ -67,49 +66,6 @@ impl ParsedPoolSpec {
             pad,
         }
     }
-}
-
-fn adjusted_max_pool_pad(
-    graph: &Graph,
-    store: &TensorStore,
-    node: &Node,
-    kernel: &[i32],
-    stride: &[i32],
-    padding: &[i32],
-    ceil_mode: bool,
-) -> Vec<i32> {
-    if padding.len() == 4 {
-        return padding.to_vec();
-    }
-
-    let symmetric_pad = symmetric_pool_pad(padding);
-
-    let Some(Arg::Node(input_id)) = node.args.first() else {
-        return symmetric_pad;
-    };
-    let Some(input_node) = graph.node(*input_id) else {
-        return symmetric_pad;
-    };
-    let input_shape = actual_tensor_shape(graph, store, input_node);
-    if input_shape.len() != 4 {
-        return symmetric_pad;
-    }
-
-    let post_pad_h = pool_post_pad(
-        input_shape[1],
-        *kernel.first().unwrap_or(&2),
-        *stride.first().unwrap_or(&2),
-        symmetric_pad[0],
-        ceil_mode,
-    );
-    let post_pad_w = pool_post_pad(
-        input_shape[2],
-        *kernel.get(1).unwrap_or(&2),
-        *stride.get(1).unwrap_or(&2),
-        symmetric_pad[2],
-        ceil_mode,
-    );
-    vec![symmetric_pad[0], post_pad_h, symmetric_pad[2], post_pad_w]
 }
 
 pub(in crate::serialize::visitors) fn emit_aten_max_pool2d(ctx: &EmitContext) -> EmitResult {
@@ -169,13 +125,13 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
     let output_tensor = compute_pool_nhwc_output(graph, store, node, &kernel, &stride, &pad);
     let input_zp = node_input_zero_point(graph, node, 0, "input_zp", 0);
     let output_zp = node_output_zero_point(node, "output_zp", 0);
-    let input_dtype = match node.args.first() {
-        Some(Arg::Node(input_id)) => graph
-            .node(*input_id)
-            .map(|n| ir_dtype_to_tosa(n.meta.val.dtype))
-            .unwrap_or(DType::Int8),
-        _ => DType::Int8,
-    };
+    let input_dtype = node
+        .args
+        .first()
+        .and_then(Arg::as_node)
+        .and_then(|input_id| graph.node(input_id))
+        .map(|n| ir_dtype_to_tosa(n.meta.val.dtype))
+        .unwrap_or(DType::Int8);
     let output_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
     let acc_type = if matches!(input_dtype, DType::Fp32 | DType::Fp16 | DType::Bf16) {
         DType::Fp32

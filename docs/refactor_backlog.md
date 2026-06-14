@@ -1103,6 +1103,14 @@ Deleted: duplicate conv2d/conv3d emitted-pad adjustment algorithms, duplicate ra
 Added: `graph::ir::Arg::as_node()`, `conv_spatial_inputs_and_kernels(...)`, and a shared `adjusted_tosa_pad_for_emitted_conv_spatial(...)` helper behind the existing conv2d/conv3d public wrappers
 Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv2d, conv3d, transpose_conv2d, max_pool, avg_pool2d, mean_dim, sum, add, sub, mul, div, floor_div, index_tensor, index_put, index_select, index_copy, constant_pad_nd, conv_constant_pad_nd, cond, and while; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `894 passed, 24 expected xfails, 1780 deselected`. No model lane was run. This slice keeps serializer behavior unchanged while giving conv spatial shape/pad inference and graph-arg node extraction one shared grammar.
+
+2026-06-14, max-pool serializer pad helper reuse slice
+Rust LOC: 36,835 -> 36,791
+Movement: -44 Rust LOC
+Deleted: duplicate max-pool symmetric-pad plus ceil-mode post-pad helper from NN pool emission, and one raw avg-pool input-node dtype match
+Added: wider reuse of `adjusted_max_pool_pad(...)` from serializer shape inference in max-pool emission
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over max_pool, avg_pool2d, and conv2d; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `269 passed, 700 deselected`. No model lane was run. Shape inference and emission now share one max-pool pad-adjustment rule.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
