@@ -13,14 +13,6 @@ struct TableOpSpec {
     scalar_arg: Option<f64>,
 }
 
-fn node_str_kwarg<'a>(node: &'a IrNode, key: &str) -> Option<&'a str> {
-    node.kwarg_str(key)
-}
-
-fn node_scalar_arg(node: &IrNode, idx: usize) -> Option<f64> {
-    node.arg_numeric_f64(idx)
-}
-
 const SIMPLE_TABLE_TARGET_RULES: &[(&str, &str)] = &[
     ("rsqrt.default", "rsqrt"),
     ("ceil.default", "ceil"),
@@ -61,7 +53,7 @@ fn simple_table_kind(target: &str) -> Option<&'static str> {
 fn table_op_spec(node: &IrNode) -> Option<TableOpSpec> {
     let target = node.target.as_str();
     let kind = if target.contains("gelu.default") {
-        match node_str_kwarg(node, "approximate").unwrap_or("none") {
+        match node.kwarg_str("approximate").unwrap_or("none") {
             "none" => "gelu",
             "tanh" => "gelu_tanh",
             _ => return None,
@@ -70,19 +62,19 @@ fn table_op_spec(node: &IrNode) -> Option<TableOpSpec> {
         kind
     } else {
         return if target.contains("pow.Tensor_Scalar") {
-            node_scalar_arg(node, 1).map(|scalar_arg| TableOpSpec {
+            node.arg_numeric_f64(1).map(|scalar_arg| TableOpSpec {
                 kind: "pow",
                 scalar_arg: Some(scalar_arg),
             })
         } else if target.contains("remainder.Scalar") {
-            node_scalar_arg(node, 1).map(|scalar_arg| TableOpSpec {
+            node.arg_numeric_f64(1).map(|scalar_arg| TableOpSpec {
                 kind: "remainder",
                 scalar_arg: Some(scalar_arg),
             })
         } else if target.contains("elu.default") || target.contains("elu_") {
             Some(TableOpSpec {
                 kind: "elu",
-                scalar_arg: Some(node_scalar_arg(node, 1).unwrap_or(1.0)),
+                scalar_arg: Some(node.arg_numeric_f64(1).unwrap_or(1.0)),
             })
         } else {
             None

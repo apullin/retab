@@ -1199,6 +1199,14 @@ Deleted: local grouped-conv boundary-rescale target predicate; direct whole-map 
 Added: `NodeMeta::set_output_qparams_from`, `NodeMeta::copy_input_qparams_from`, `NodeMeta::copy_output_qparams_from`, and shared `is_boundary_rescale_target(...)`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_fold_qdq_ir::tests`; `cargo test --lib fx_target::tests`; `cargo test --lib fx_decompose_grouped_conv_ir::tests`; `cargo test --lib control_flow::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over cond, while, conv2d, conv3d, sum, split, add, and mul; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `399 passed, 2 expected xfails, 975 deselected`. No model lane was run. This is a small setup-positive Tensor Facts/target grammar slice; it names qparam fact copying and removes several field-level clone/set idioms from production passes.
+
+2026-06-14, table-op arg wrapper cleanup slice
+Rust LOC: 36,838 -> 36,830
+Movement: -8 Rust LOC
+Deleted: pass-local `node_str_kwarg` and `node_scalar_arg` wrappers in table-op insertion
+Added: no new helper surface; table-op parsing now calls the existing `IrNode` arg/kwarg grammar directly
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_insert_table_ops_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over pow, remainder, elu, gelu, sigmoid, exp, log, and sqrt; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `186 passed, 6 expected xfails, 346 deselected`. No model lane was run. This is a deletion-only cleanup in the table-op precompute path.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1420,6 +1428,8 @@ value-metadata builder siblings for add, anchored add, and replacement
 call-function rewrites. `IrNode` now owns common positional-argument reads for
 node, integer, numeric, boolean, list, pair-or-scalar, and cloned-or-None args,
 plus keyword and arg-or-keyword reads for mixed Python-style schemas. The
+table-op insertion pass now calls that `IrNode` arg/kwarg grammar directly
+instead of carrying pass-local wrapper aliases. The
 indexing family now also shares `fx_index_linear::build_linear_index`, which
 owns the broadcast-align, expand, flatten, stride-scale, and sum rewrite chain
 used by index.Tensor and index_put; the same module owns contiguous stride
