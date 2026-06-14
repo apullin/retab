@@ -1487,6 +1487,14 @@ Deleted: raw `aten.view_copy.default` target/argument construction from gather, 
 Added: `IrGraph::add_anchored_view_copy(...)` and `IrGraph::replace_with_view_copy(...)`
 Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over gather, index_select, index_tensor, unfold_copy, embedding, and linear; Rust LOC check
 Note: Full Rust tests passed `141 passed`; focused Python smoke passed `163 passed, 6 skipped, 18 expected xfails`. This is setup-positive because the builder is new, but it establishes one rewrite spelling for view-copy shape changes and leaves a visible follow-through target: migrate the remaining raw `view_copy` call sites to pay down the helper cost.
+
+2026-06-14, graph view-copy builder slice 2
+Rust LOC: 36,299 -> 36,255
+Movement: -44 Rust LOC
+Deleted: raw `aten.view_copy.default` target/argument construction from as_strided, cumsum, dilated maxpool, mean, repeat_interleave, select_scatter, strided_slice, tril, where-mask expansion, index_put, and squeeze/unsqueeze rewrites
+Added: no new helper surface; reused `IrGraph::add_anchored_view_copy(...)` and `IrGraph::replace_with_view_copy(...)`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over as_strided_copy, cumsum, index_put, max_pool, mean_dim, repeat, select_scatter, slice, squeeze, tril, unsqueeze, and where; Rust LOC check
+Note: Full Rust tests passed `141 passed`; focused Python smoke passed `364 passed, 2 expected xfails`. Raw `view_copy` target spellings in active rewrite/control-flow code dropped from 21 to 16 in this tranche, and the two view-copy slices are now net-negative overall.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

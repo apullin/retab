@@ -78,14 +78,11 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
 
     // 1. view_copy(input, conv_shape) — reshape to 4D
     let view1_meta = NodeMeta::tensor(conv_shape.as_slice(), &input_dtype);
-    let view1_id = graph.add_anchored_call_function(
+    let view1_id = graph.add_anchored_view_copy(
         node_id,
         format!("{}_view_pre", node_name),
-        "aten.view_copy.default",
-        vec![
-            IrArg::Node(input_id),
-            IrArg::List(conv_shape.iter().map(|&d| IrArg::Int(d)).collect()),
-        ],
+        input_id,
+        &conv_shape,
         view1_meta,
     );
 
@@ -172,14 +169,11 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
 
     // 5. view_copy(slice, original_shape) — reshape back
     let view2_meta = node_meta.cloned_with_val(original_shape.clone(), input_dtype);
-    graph.replace_with_call_function(
+    graph.replace_with_view_copy(
         node_id,
         format!("{}_view_post", node_name),
-        "aten.view_copy.default",
-        vec![
-            IrArg::Node(slice_id),
-            IrArg::List(original_shape.iter().map(|&d| IrArg::Int(d)).collect()),
-        ],
+        slice_id,
+        &original_shape,
         view2_meta,
     );
     true

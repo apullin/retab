@@ -106,11 +106,11 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
             let view_meta = graph.nodes[id]
                 .meta
                 .cloned_with_val(final_shape.clone(), dtype);
-            graph.replace_with_call_function(
+            graph.replace_with_view_copy(
                 id,
                 format!("{}_view", node_name),
-                "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(repeated), i64_list(&final_shape)],
+                repeated,
+                &final_shape,
                 view_meta,
             );
             true

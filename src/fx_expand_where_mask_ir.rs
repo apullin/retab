@@ -70,14 +70,11 @@ impl IrPass for IrExpandWhereMaskPass {
                 .cloned_with_val(padded_mask_shape.clone(), &mask_dtype);
 
             // Insert view_copy: reshape mask to padded shape
-            let view_id = graph.add_anchored_call_function(
+            let view_id = graph.add_anchored_view_copy(
                 id,
                 format!("{}_view_copy", graph.nodes[id].name),
-                "aten.view_copy.default",
-                vec![
-                    IrArg::Node(mask_id),
-                    IrArg::List(padded_mask_shape.iter().map(|&d| IrArg::Int(d)).collect()),
-                ],
+                mask_id,
+                &padded_mask_shape,
                 view_meta,
             );
 

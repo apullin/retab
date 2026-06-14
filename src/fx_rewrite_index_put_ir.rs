@@ -147,22 +147,22 @@ impl IrPass for IrRewriteIndexPutPass {
 
             // Reshape: indices (1, W), source (1, K, C), values (1, W, C)
             let idx_meta = orig_meta.cloned_without_qparams(vec![1, w], &idx_dtype);
-            let idx_1w = graph.add_anchored_call_function(
+            let idx_1w = graph.add_anchored_view_copy(
                 id,
                 format!("{}_idx", name),
-                "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(flat_idx), i64_list(&[1, w])],
+                flat_idx,
+                &[1, w],
                 idx_meta,
             );
 
             let src_meta = graph.nodes[source_id]
                 .meta
                 .cloned_with_val(vec![1, k, c], &src_dtype);
-            let src_1kc = graph.add_anchored_call_function(
+            let src_1kc = graph.add_anchored_view_copy(
                 id,
                 format!("{}_src", name),
-                "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(source_id), i64_list(&[1, k, c])],
+                source_id,
+                &[1, k, c],
                 src_meta,
             );
 
@@ -186,11 +186,11 @@ impl IrPass for IrRewriteIndexPutPass {
                 let aligned_meta = graph.nodes[source_id]
                     .meta
                     .cloned_with_val(aligned.clone(), &src_dtype);
-                val_cur = graph.add_anchored_call_function(
+                val_cur = graph.add_anchored_view_copy(
                     id,
                     format!("{}_vala", name),
-                    "aten.view_copy.default".to_string(),
-                    vec![IrArg::Node(val_cur), i64_list(&aligned)],
+                    val_cur,
+                    &aligned,
                     aligned_meta,
                 );
             }
@@ -207,11 +207,11 @@ impl IrPass for IrRewriteIndexPutPass {
             let val_meta = graph.nodes[source_id]
                 .meta
                 .cloned_with_val(vec![1, w, c], &src_dtype);
-            let val_1wc = graph.add_anchored_call_function(
+            let val_1wc = graph.add_anchored_view_copy(
                 id,
                 format!("{}_val", name),
-                "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(val_bcast), i64_list(&[1, w, c])],
+                val_bcast,
+                &[1, w, c],
                 val_meta,
             );
 
@@ -262,11 +262,11 @@ impl IrPass for IrRewriteIndexPutPass {
             let result_meta = graph.nodes[source_id]
                 .meta
                 .cloned_with_val(source_shape.clone(), &src_dtype);
-            graph.replace_with_call_function(
+            graph.replace_with_view_copy(
                 id,
                 format!("{}_out", name),
-                "aten.view_copy.default",
-                vec![IrArg::Node(scattered), i64_list(&source_shape)],
+                scattered,
+                &source_shape,
                 result_meta,
             );
             modified = true;

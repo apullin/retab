@@ -82,14 +82,11 @@ impl IrPass for IrRewriteSqueezePass {
                 let output_shape = compute_squeeze_shape(&input_shape, &dims, input_rank);
 
                 // Create view_copy: replace squeeze with view_copy(input, output_shape)
-                graph.replace_with_call_function(
+                graph.replace_with_view_copy(
                     id,
                     format!("{}_view_copy", graph.nodes[id].name),
-                    "aten.view_copy.default".to_string(),
-                    vec![
-                        IrArg::Node(input_id),
-                        IrArg::List(output_shape.iter().map(|&d| IrArg::Int(d)).collect()),
-                    ],
+                    input_id,
+                    &output_shape,
                     graph.nodes[id].meta.clone(),
                 );
                 modified = true;
@@ -100,14 +97,11 @@ impl IrPass for IrRewriteSqueezePass {
                 };
                 let output_shape = compute_unsqueeze_shape(&input_shape, dim, input_rank);
 
-                graph.replace_with_call_function(
+                graph.replace_with_view_copy(
                     id,
                     format!("{}_view_copy", graph.nodes[id].name),
-                    "aten.view_copy.default".to_string(),
-                    vec![
-                        IrArg::Node(input_id),
-                        IrArg::List(output_shape.iter().map(|&d| IrArg::Int(d)).collect()),
-                    ],
+                    input_id,
+                    &output_shape,
                     graph.nodes[id].meta.clone(),
                 );
                 modified = true;

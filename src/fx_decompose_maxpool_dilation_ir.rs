@@ -141,14 +141,11 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
             );
 
             // 2. view → [N, C, h_pack, d_h, w_pack, d_w]
-            let x_view = graph.add_anchored_call_function(
+            let x_view = graph.add_anchored_view_copy(
                 id,
                 format!("{}_pack_view", node_name),
-                "aten.view_copy.default",
-                vec![
-                    IrArg::Node(x_pad),
-                    i64_list(&[n, c, h_pack, d_h, w_pack, d_w]),
-                ],
+                x_pad,
+                &[n, c, h_pack, d_h, w_pack, d_w],
                 orig_meta.cloned_with_val(vec![n, c, h_pack, d_h, w_pack, d_w], &dtype),
             );
 
@@ -162,14 +159,11 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
             );
 
             // 4. view → [N*d_h*d_w, C, h_pack, w_pack]
-            let x_batch = graph.add_anchored_call_function(
+            let x_batch = graph.add_anchored_view_copy(
                 id,
                 format!("{}_batch", node_name),
-                "aten.view_copy.default",
-                vec![
-                    IrArg::Node(x_perm),
-                    i64_list(&[n * d_h * d_w, c, h_pack, w_pack]),
-                ],
+                x_perm,
+                &[n * d_h * d_w, c, h_pack, w_pack],
                 orig_meta.cloned_with_val(vec![n * d_h * d_w, c, h_pack, w_pack], &dtype),
             );
 
@@ -192,14 +186,11 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
             );
 
             // 6. view → [d_h, d_w, N, C, h_out, w_out]
-            let unpack = graph.add_anchored_call_function(
+            let unpack = graph.add_anchored_view_copy(
                 id,
                 format!("{}_unpack", node_name),
-                "aten.view_copy.default",
-                vec![
-                    IrArg::Node(pooled),
-                    i64_list(&[d_h, d_w, n, c, h_out, w_out]),
-                ],
+                pooled,
+                &[d_h, d_w, n, c, h_out, w_out],
                 orig_meta.cloned_with_val(vec![d_h, d_w, n, c, h_out, w_out], &dtype),
             );
 
@@ -213,14 +204,11 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
             );
 
             // 8. view → [N, C, h_out*d_h, w_out*d_w]
-            let out_view = graph.add_anchored_call_function(
+            let out_view = graph.add_anchored_view_copy(
                 id,
                 format!("{}_out_view", node_name),
-                "aten.view_copy.default",
-                vec![
-                    IrArg::Node(unperm),
-                    i64_list(&[n, c, h_out * d_h, w_out * d_w]),
-                ],
+                unperm,
+                &[n, c, h_out * d_h, w_out * d_w],
                 orig_meta.cloned_with_val(vec![n, c, h_out * d_h, w_out * d_w], &dtype),
             );
 

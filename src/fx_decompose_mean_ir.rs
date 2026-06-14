@@ -74,14 +74,12 @@ impl IrPass for IrDecomposeMeanPass {
                     );
 
                     if !keepdim {
-                        graph.replace_with_call_function_with_val(
+                        graph.replace_with_view_copy(
                             id,
                             format!("{}_view", name),
-                            "aten.view_copy.default",
-                            vec![IrArg::Node(result), i64_list(&output_shape)],
-                            &orig_meta,
-                            output_shape.clone(),
-                            &dtype,
+                            result,
+                            &output_shape,
+                            orig_meta.cloned_with_val(output_shape.clone(), &dtype),
                         );
                         modified = true;
                         continue;
@@ -182,14 +180,12 @@ impl IrPass for IrDecomposeMeanPass {
 
             // Optional view if keepdim=False
             if !keepdim {
-                graph.replace_with_call_function_with_val(
+                graph.replace_with_view_copy(
                     id,
                     format!("{}_view", name),
-                    "aten.view_copy.default",
-                    vec![IrArg::Node(mul_id), i64_list(&output_shape)],
-                    &orig_meta,
-                    output_shape.clone(),
-                    &dtype,
+                    mul_id,
+                    &output_shape,
+                    orig_meta.cloned_with_val(output_shape.clone(), &dtype),
                 );
                 modified = true;
                 continue;

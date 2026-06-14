@@ -68,11 +68,11 @@ impl IrPass for IrDecomposeSelectScatterPass {
             // 2. view(arange, [1, ..., dim_size, ..., 1])
             let mut mask_shape = vec![1i64; rank as usize];
             mask_shape[dim_norm] = dim_size;
-            let viewed_arange = graph.add_anchored_call_function(
+            let viewed_arange = graph.add_anchored_view_copy(
                 id,
                 format!("{}_arange_view", node_name),
-                "aten.view_copy.default",
-                vec![IrArg::Node(arange_id), i64_list(&mask_shape)],
+                arange_id,
+                &mask_shape,
                 orig_meta.cloned_with_val(mask_shape.clone(), "torch.int32"),
             );
 

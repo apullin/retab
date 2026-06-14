@@ -4,7 +4,7 @@
 //! and storage_offset is zero.
 
 use crate::fx_index_linear::contiguous_strides;
-use crate::fx_ir::{IrArg, IrGraph, IrPass};
+use crate::fx_ir::{IrGraph, IrPass};
 use crate::fx_target::is_as_strided_copy_target;
 use crate::runner_logging::log_line;
 
@@ -91,14 +91,11 @@ impl IrPass for IrDecomposeAsStridedCopyPass {
             let out_meta = graph.nodes[id].meta.cloned_with_val(size.clone(), dtype);
 
             // Replace as_strided_copy with view_copy(input, size)
-            graph.replace_with_call_function(
+            graph.replace_with_view_copy(
                 id,
                 format!("{}_view_copy", graph.nodes[id].name),
-                "aten.view_copy.default".to_string(),
-                vec![
-                    IrArg::Node(input_id),
-                    IrArg::List(size.iter().map(|&d| IrArg::Int(d)).collect()),
-                ],
+                input_id,
+                &size,
                 out_meta,
             );
             true

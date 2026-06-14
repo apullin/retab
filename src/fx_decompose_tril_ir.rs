@@ -34,17 +34,12 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
         "torch.float32",
     );
 
-    let row_view = graph.add_anchored_call_function_with_val(
+    let row_view = graph.add_anchored_view_copy(
         id,
         format!("{base_name}_row_view"),
-        "aten.view_copy.default",
-        vec![
-            IrArg::Node(row_arange),
-            IrArg::List(vec![IrArg::Int(rows), IrArg::Int(1)]),
-        ],
-        &base_meta,
-        vec![rows, 1],
-        "torch.float32",
+        row_arange,
+        &[rows, 1],
+        base_meta.cloned_with_val(vec![rows, 1], "torch.float32"),
     );
 
     // If diagonal != 0, add the offset
@@ -71,17 +66,12 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
         "torch.float32",
     );
 
-    let col_view = graph.add_anchored_call_function_with_val(
+    let col_view = graph.add_anchored_view_copy(
         id,
         format!("{base_name}_col_view"),
-        "aten.view_copy.default",
-        vec![
-            IrArg::Node(col_arange),
-            IrArg::List(vec![IrArg::Int(1), IrArg::Int(cols)]),
-        ],
-        &base_meta,
-        vec![1, cols],
-        "torch.float32",
+        col_arange,
+        &[1, cols],
+        base_meta.cloned_with_val(vec![1, cols], "torch.float32"),
     );
 
     // --- mask: row >= col -> bool [rows, cols] ---
