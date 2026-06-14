@@ -1319,6 +1319,14 @@ Deleted: raw bool dtype substring checks from index-tensor decomposition, stride
 Added: `NodeMeta::val_dtype_is(...)`
 Validation: `cargo fmt --check`; `cargo check --lib`; focused Rust filters for index tensor, strided slice, tril, and control flow; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over index tensor, slice, tril, cond, and while; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `121 passed, 19 expected xfails, 163 deselected`. No model lane was run. This is setup-positive by LOC, but it collapses the bool dtype grammar behind the metadata accessor and leaves only two intentional raw dtype-range parsing sites for a later dtype-domain helper.
+
+2026-06-14, dtype-domain range helper slice
+Rust LOC: 36,837 -> 36,878
+Movement: +41 Rust LOC
+Deleted: pass-local dtype substring parsing for maxpool pad sentinels and control-flow reverse-engineered RESCALE qparam bounds
+Added: `DType::torch_str_is_float_like(...)`, `DType::quantized_integer_bounds(...)`, `DType::quantized_integer_bounds_from_torch_str(...)`, and focused dtype-domain tests
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib dtype_helpers_preserve_torch_string_domains`; `cargo test --lib fx_decompose_maxpool_dilation_ir`; `cargo test --lib control_flow`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over maxpool, cond, and while; Rust LOC check
+Note: Full Rust tests passed `138 passed`; focused Python smoke passed `111 passed, 1 expected xfail, 192 deselected`. No model lane was run. This is setup-positive, but the raw dtype `contains(...)` grammar is now owned by `DType` instead of individual passes in the scanned IR/control-flow area.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1479,7 +1487,9 @@ real pass-specific invariant. `DType` now owns torch dtype-string parsing via
 paths no longer treat `tensor_data` as the dtype grammar owner. Tensor metadata
 also exposes `NodeMeta::val_dtype_kind()` and `NodeMeta::val_dtype_is(...)`, so
 passes that need typed dtype logic should not parse `val_dtype()` strings
-directly.
+directly. Dtype string-domain parsing for float-like and quantized-integer
+range semantics now also lives on `DType`, so pass code should not grow local
+`contains("int8")`/`contains("float")` trees for qmin/qmax or sentinel values.
 
 Problem:
 

@@ -2,6 +2,7 @@
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::fx_target::{is_max_pool2d_target, is_max_pool2d_with_indices_target};
+use crate::graph::ir::DType;
 use crate::runner_logging::log_line;
 
 fn pack_dimension(dil: i64, pad: i64, orig: i64, kernel: i64, stride: i64) -> (i64, i64, i64) {
@@ -26,12 +27,10 @@ fn pool_output_size(input: i64, kernel: i64, stride: i64, pad: i64, ceil_mode: b
 }
 
 fn pad_value_for_dtype(dtype: &str) -> IrArg {
-    if dtype.contains("float") || dtype.contains("fp") || dtype.contains("bf") {
+    if DType::torch_str_is_float_like(dtype) {
         IrArg::Float(f64::NEG_INFINITY)
-    } else if dtype.contains("int8") {
-        IrArg::Int(-128)
-    } else if dtype.contains("int16") {
-        IrArg::Int(-32768)
+    } else if let Some((qmin, _)) = DType::quantized_integer_bounds_from_torch_str(dtype) {
+        IrArg::Int(qmin)
     } else {
         IrArg::Int(i32::MIN as i64)
     }

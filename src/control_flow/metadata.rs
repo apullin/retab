@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use crate::fx_ir::{IrArg, IrGraph, IrNode, IrPass, NodeId, RescaleRewrite};
 use crate::fx_quant::QParam;
+use crate::graph::ir::DType;
 
 /// IrPass wrapper for the while-loop boundary Q/DQ strip (submodule IR pipeline).
 pub struct IrStripWhileBoundaryQPass;
@@ -179,16 +180,7 @@ pub(crate) fn reverse_engineer_rescale_ir(graph: &IrGraph, node: &IrNode) -> Opt
             }
         }
     };
-    if !dtype_str.contains("int") {
-        return None;
-    }
-    let (qmin, qmax) = if dtype_str.contains("int8") {
-        (-128i64, 127i64)
-    } else if dtype_str.contains("int16") {
-        (-32768, 32767)
-    } else {
-        (i32::MIN as i64, i32::MAX as i64)
-    };
+    let (qmin, qmax) = DType::quantized_integer_bounds_from_torch_str(&dtype_str)?;
     Some(QParam::per_tensor(
         source_qp.scale / mult_val,
         output_zp,

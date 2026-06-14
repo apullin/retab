@@ -240,6 +240,11 @@ impl DType {
         }
     }
 
+    pub fn torch_str_is_float_like(dtype_str: &str) -> bool {
+        let dtype_str = dtype_str.to_ascii_lowercase();
+        dtype_str.contains("float") || dtype_str.contains("fp") || dtype_str.contains("bf")
+    }
+
     pub fn is_integer(self) -> bool {
         matches!(
             self,
@@ -249,6 +254,51 @@ impl DType {
 
     pub fn is_quantized_integer(self) -> bool {
         matches!(self, DType::Int8 | DType::Int16 | DType::Int32)
+    }
+
+    pub fn quantized_integer_bounds(self) -> Option<(i64, i64)> {
+        match self {
+            DType::Int8 => Some((-128, 127)),
+            DType::Int16 => Some((-32768, 32767)),
+            DType::Int32 => Some((i32::MIN as i64, i32::MAX as i64)),
+            _ => None,
+        }
+    }
+
+    pub fn quantized_integer_bounds_from_torch_str(dtype_str: &str) -> Option<(i64, i64)> {
+        let dtype_str = dtype_str.to_ascii_lowercase();
+        if !dtype_str.contains("int") {
+            return None;
+        }
+        DType::from_torch_str(&dtype_str)
+            .quantized_integer_bounds()
+            .or(Some((i32::MIN as i64, i32::MAX as i64)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DType;
+
+    #[test]
+    fn dtype_helpers_preserve_torch_string_domains() {
+        assert!(DType::torch_str_is_float_like("torch.float16"));
+        assert!(DType::torch_str_is_float_like("torch.bf16"));
+        assert!(!DType::torch_str_is_float_like("torch.int8"));
+
+        assert_eq!(DType::Int8.quantized_integer_bounds(), Some((-128, 127)));
+        assert_eq!(
+            DType::quantized_integer_bounds_from_torch_str("torch.int16"),
+            Some((-32768, 32767))
+        );
+        assert_eq!(
+            DType::quantized_integer_bounds_from_torch_str("torch.int4"),
+            Some((i32::MIN as i64, i32::MAX as i64))
+        );
+        assert_eq!(
+            DType::quantized_integer_bounds_from_torch_str("torch.float32"),
+            None
+        );
     }
 }
 
