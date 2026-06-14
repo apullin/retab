@@ -117,7 +117,7 @@ pub fn emit_node(
             let ctx = EmitContext { graph, node, store };
             Some(emitter(&ctx))
         } else {
-            if crate::fx_graph::debug() {
+            if crate::config::tosa_engine_debug_enabled() {
                 eprintln!(
                     "[emit_node] SKIPPED unhandled target: {:?} (node '{}')",
                     node.target, node.name

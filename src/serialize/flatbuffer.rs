@@ -23,19 +23,19 @@ fn build_region<'fbb>(
     builder: &mut FlatBufferBuilder<'fbb>,
     region: &SerializedRegion,
 ) -> WIPOffset<TableFinishedWIPOffset> {
-    if crate::fx_graph::debug() {
+    if crate::config::tosa_engine_debug_enabled() {
         eprintln!("[Serialize] building fb tensors...");
     }
     let fb_tensors = build_tensors(builder, &region.items.tensors);
-    if crate::fx_graph::debug() {
+    if crate::config::tosa_engine_debug_enabled() {
         eprintln!("[Serialize] building fb shapes...");
     }
     let fb_shapes = build_shapes(builder, &region.items.shapes);
-    if crate::fx_graph::debug() {
+    if crate::config::tosa_engine_debug_enabled() {
         eprintln!("[Serialize] building fb operators...");
     }
     let fb_operators = build_operators(builder, &region.items.operators);
-    if crate::fx_graph::debug() {
+    if crate::config::tosa_engine_debug_enabled() {
         eprintln!("[Serialize] assembling graph...");
     }
 

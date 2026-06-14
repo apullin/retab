@@ -943,6 +943,14 @@ Deleted: local zero-input constant dispatch over `full`/`arange`/`linspace`/`eye
 Added: typed `ZeroInputConstantTarget` and `ShapeOnlyConstantTarget` classifiers in `fx_target`, with zero-input constant materialization and shape-only tensor evaluation using the shared target grammar
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over full, arange, eye, view, permute, and unsqueeze; Rust LOC check
 Note: Rust tests passed `131 passed`; focused Python smoke passed `151 passed, 7 skipped, 254 deselected`. No model lane was run. This is setup-positive because the central enum/tests add lines, but it removes another local target-classification dialect from constant materialization.
+
+2026-06-13, serializer debug config decoupling slice
+Rust LOC: 37,126 -> 37,122
+Movement: -4 Rust LOC
+Deleted: `fx_graph::debug()` as a serializer debug-config wrapper and the remaining serializer dependency on the Python graph helper module for debug checks
+Added: cached `config::tosa_engine_debug_enabled()` as the direct owner for `TOSA_ENGINE_DEBUG`, with serializer modules reading debug config through `config`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; debug-enabled Python smoke via `/tmp/et.sh` over `test_full_tosa_FP_only` with `TOSA_ENGINE_DEBUG=1`; focused control-flow smoke via `/tmp/et.sh`; Rust LOC check; grep for removed `fx_graph::debug`
+Note: Rust tests passed `131 passed`; debug-enabled smoke passed `1 passed, 37 deselected`; control-flow smoke passed `29 passed, 1 expected xfail, 60 deselected`. No model lane was run. This completes the Rust-side Refactor 8 coupling cleanup; Python env parsing remains intentionally separate from Rust lowering config.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1529,17 +1537,17 @@ Treat any new failure outside the known baseline set as a regression.
 
 Status:
 
-Initial Rust slice complete. `src/config.rs` owns Rust env flag names for
+Complete for active Rust source. `src/config.rs` owns Rust env flag names for
 from-IR debug, runner logging, fold fallback logging, table debug, memory
-layout/slice/cat probes, serializer node probes, and ingest/serialize
-profiling. Python env parsing remains separate because it configures Python
-integration and process orchestration rather than Rust lowering behavior.
+layout/slice/cat probes, serializer node probes, ingest/serialize profiling,
+and serializer debug checks. Python env parsing remains separate because it
+configures Python integration and process orchestration rather than Rust
+lowering behavior.
 
 Problem:
 
-Debug and behavior env vars are parsed in multiple modules. Some serializer
-code still reaches through `FxGraphModule::debug()`, which couples serializer
-debugging to the Python graph wrapper.
+Debug and behavior env vars were parsed in multiple modules. Serializer code no
+longer reaches through the Python graph wrapper for debug checks.
 
 Proposal:
 
@@ -1550,13 +1558,7 @@ src/config.rs
 src/debug_config.rs
 ```
 
-Candidates to centralize:
-
-- `ARM_FROM_IR_DEBUG`
-- `RETAB_PROFILE_INGEST_SERIALIZE`
-- `ARM_FOLD_FALLBACK_FILE`
-- `TOSA_ENGINE_DEBUG`
-- `ARM_TOSA_ENGINE_DEBUG_NODE`
+Candidates to centralize are complete for tracked Rust source.
 
 Expected payoff:
 

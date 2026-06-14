@@ -45,7 +45,7 @@ fn collect_graph_items(
     store: &TensorStore,
     normalize_outputs: bool,
 ) -> SerializedGraphItems {
-    let debug = crate::fx_graph::debug();
+    let debug = crate::config::tosa_engine_debug_enabled();
     let sorted = graph.all_node_ids();
     if debug {
         eprintln!("[Serialize] using insertion order, {} nodes", sorted.len());

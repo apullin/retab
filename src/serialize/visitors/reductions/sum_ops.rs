@@ -155,7 +155,7 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitRe
         Some(Arg::Node(id)) => graph.node(*id),
         _ => None,
     };
-    if crate::fx_graph::debug() {
+    if crate::config::tosa_engine_debug_enabled() {
         eprintln!(
             "[SumDebug] node={} raw_shape={:?} actual_input_shape={:?} axes={:?} keepdim={} input_order={:?} node_order={:?} final_shape={:?}",
             node.name,

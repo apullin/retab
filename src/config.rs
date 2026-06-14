@@ -27,7 +27,8 @@ pub(crate) fn runner_logging_enabled() -> bool {
 }
 
 pub(crate) fn tosa_engine_debug_enabled() -> bool {
-    env_is_set("TOSA_ENGINE_DEBUG")
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| env_is_set("TOSA_ENGINE_DEBUG"))
 }
 
 pub(crate) fn table_debug_enabled() -> bool {
