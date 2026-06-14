@@ -14,13 +14,12 @@ impl IrPass for IrConvertClampPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
             if graph.nodes[id].is_relu() {
                 // relu(x) -> clamp(x, min=0.0, max=None)
                 let input_id = match graph.nodes[id].first_node_arg() {
                     Some(id) => id,
-                    None => continue,
+                    None => return false,
                 };
 
                 graph.replace_with_call_function(
@@ -30,12 +29,12 @@ impl IrPass for IrConvertClampPass {
                     vec![IrArg::Node(input_id), IrArg::Float(0.0), IrArg::None],
                     graph.nodes[id].meta.clone(),
                 );
-                modified = true;
+                return true;
             } else if graph.nodes[id].is_hardtanh() {
                 // hardtanh(x, min_val, max_val) -> clamp(x, min_val, max_val)
                 let input_id = match graph.nodes[id].first_node_arg() {
                     Some(id) => id,
-                    None => continue,
+                    None => return false,
                 };
 
                 let min_val = graph.nodes[id]
@@ -60,9 +59,10 @@ impl IrPass for IrConvertClampPass {
                     ],
                     graph.nodes[id].meta.clone(),
                 );
-                modified = true;
+                return true;
             }
-        }
+            false
+        });
 
         if modified {
             log_line(format_args!(

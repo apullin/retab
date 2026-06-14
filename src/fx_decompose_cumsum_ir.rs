@@ -16,16 +16,9 @@ impl IrPass for IrDecomposeCumsumPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
-            if !is_cumsum_target(&graph.nodes[id].target) {
-                continue;
-            }
-
-            if decompose_cumsum(graph, id) {
-                modified = true;
-            }
-        }
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
+            is_cumsum_target(&graph.nodes[id].target) && decompose_cumsum(graph, id)
+        });
 
         if modified {
             log_line(format_args!("[IrDecomposeCumsum] decomposed cumsum ops"));

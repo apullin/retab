@@ -16,34 +16,33 @@ impl IrPass for IrFuseQuantActivationPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
             let is_relu_node = graph.nodes[id].is_relu();
             let is_hardtanh_node = graph.nodes[id].is_hardtanh();
             if !is_relu_node && !is_hardtanh_node {
-                continue;
+                return false;
             }
 
             // For hardtanh, check min_val == 0
             if is_hardtanh_node {
                 let min_val = graph.nodes[id].arg_numeric_f64(1);
                 if min_val != Some(0.0) {
-                    continue;
+                    return false;
                 }
             }
 
             // Get relu/hardtanh's input
             let input_id = match graph.nodes[id].first_node_arg() {
                 Some(nid) => nid,
-                None => continue,
+                None => return false,
             };
 
             // Single user must be quantize_per_tensor
             let Some(q_id) = graph.single_live_call_function_user(id) else {
-                continue;
+                return false;
             };
             if !graph.nodes[q_id].is_quantize() {
-                continue;
+                return false;
             }
 
             // Check zp == qmin on the Q node: args [input, scale, zp, qmin, qmax, dtype]
@@ -58,7 +57,7 @@ impl IrPass for IrFuseQuantActivationPass {
                 .and_then(|a| a.as_int())
                 .unwrap_or(-128);
             if zp != qmin {
-                continue;
+                return false;
             }
 
             // Trace back through Q/DQ chain to find conv/linear producer
@@ -82,16 +81,16 @@ impl IrPass for IrFuseQuantActivationPass {
                 || graph.nodes[current].op != NodeOp::CallFunction
                 || !graph.nodes[current].is_conv_or_linear()
             {
-                continue;
+                return false;
             }
             if graph.single_live_call_function_user(current).is_none() {
-                continue;
+                return false;
             }
 
             // Bypass: replace relu/hardtanh with its input
             graph.replace_and_erase(id, input_id);
-            modified = true;
-        }
+            true
+        });
 
         if modified {
             log_line(format_args!(

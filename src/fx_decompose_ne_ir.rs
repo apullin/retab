@@ -15,14 +15,13 @@ impl IrPass for IrDecomposeNotEqualPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
             let node = &graph.nodes[id];
             let Some(eq_target) = not_equal_replacement_target(&node.target) else {
-                continue;
+                return false;
             };
             if node.args.len() < 2 {
-                continue;
+                return false;
             }
 
             let name = node.name.clone();
@@ -44,8 +43,8 @@ impl IrPass for IrDecomposeNotEqualPass {
                 vec![IrArg::Node(eq)],
                 meta,
             );
-            modified = true;
-        }
+            true
+        });
 
         if modified {
             log_line(format_args!("[IrDecomposeNotEqual] decomposed aten.ne ops"));

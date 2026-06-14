@@ -41,32 +41,31 @@ impl IrPass for IrDecomposeAsStridedCopyPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
             if !is_as_strided_copy_target(&graph.nodes[id].target) {
-                continue;
+                return false;
             }
 
             // args: [input, size, stride, storage_offset?]
             // Need at least 3 args: input, size, stride
             if graph.nodes[id].args.len() < 3 {
-                continue;
+                return false;
             }
             let input_id = match graph.nodes[id].args[0].as_node() {
                 Some(nid) => nid,
-                None => continue,
+                None => return false,
             };
 
             // Extract size (args[1]) as int list
             let size = match graph.nodes[id].args[1].as_int_list() {
                 Some(v) => v,
-                None => continue,
+                None => return false,
             };
 
             // Extract stride (args[2]) as int list
             let stride = match graph.nodes[id].args[2].as_int_list() {
                 Some(v) => v,
-                None => continue,
+                None => return false,
             };
 
             // Extract storage_offset (args[3] if present, else 0)
@@ -81,7 +80,7 @@ impl IrPass for IrDecomposeAsStridedCopyPass {
 
             // Only decompose when offset is zero and strides are contiguous
             if storage_offset != 0 || !stride_matches(&size, &stride) {
-                continue;
+                return false;
             }
 
             // Build output meta: shape from size, dtype from input
@@ -102,8 +101,8 @@ impl IrPass for IrDecomposeAsStridedCopyPass {
                 ],
                 out_meta,
             );
-            modified = true;
-        }
+            true
+        });
 
         if modified {
             log_line(format_args!(

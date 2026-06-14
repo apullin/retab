@@ -1375,6 +1375,14 @@ Deleted: fixture-local `HashMap` imports and mutable input-qparam map constructi
 Added: no new helper surface; tests now reuse `NodeMeta::set_input_qparams_from(...)`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over add, mm, bmm, matmul, conv2d, conv3d, and sum; Rust LOC check
 Note: Full Rust tests passed `139 passed`; focused Python smoke passed `388 passed, 11 expected xfails, 995 deselected`. No model lane was run. This is a small Tensor Facts follow-through slice: it removes incidental qparam-map construction ceremony where the operation is just keyed metadata stamping, while leaving production map mutation explicit where the algorithm actually edits qparam slots.
+
+2026-06-14, live call-function rewrite traversal slice
+Rust LOC: 36,923 -> 36,871
+Movement: -52 Rust LOC
+Deleted: repeated snapshot-loop/modified-flag scaffolding from 21 IR passes, including clamp, noop removal, qparam rescale insertion, conv1d unsqueeze, cumsum, layernorm, logit, var, repeat_interleave, as_strided_copy, index_put normalization, pad rewrite, embedding, not-equal, and quantized activation fusion
+Added: `IrGraph::rewrite_live_call_functions(...)`, preserving the existing snapshot-before-mutate traversal semantics
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over add, mm, bmm, matmul, conv1d, conv2d, clamp, relu, hardtanh, cumsum, layer_norm, logit, var, repeat, squeeze, index_put, and constant_pad_nd; Rust LOC check
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `604 passed, 12 expected xfails, 1294 deselected`. No model lane was run. This is a Refactor 3 graph traversal grammar slice: passes now name the common "snapshot live call-functions and OR rewrite results" operation instead of carrying local loop scaffolding.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

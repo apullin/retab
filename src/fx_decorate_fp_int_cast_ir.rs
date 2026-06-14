@@ -21,26 +21,25 @@ impl IrPass for IrDecorateFpToIntCastPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
             if !is_fp_to_int_cast_target(&graph.nodes[id].target) {
-                continue;
+                return false;
             }
             let x_id = match graph.nodes[id].first_node_arg() {
                 Some(n) => n,
-                None => continue,
+                None => return false,
             };
             if graph.nodes[x_id].meta.val_dtype() != Some("torch.float32")
                 || graph.nodes[id].meta.val_dtype() != Some("torch.int32")
             {
-                continue;
+                return false;
             }
             if graph.nodes[x_id].meta.output_qparam().is_some() {
-                continue;
+                return false;
             }
             let input_shape = match graph.nodes[x_id].meta.val_shape() {
                 Some(shape) => shape.to_vec(),
-                None => continue,
+                None => return false,
             };
 
             let name = graph.nodes[id].name.clone();
@@ -88,8 +87,8 @@ impl IrPass for IrDecorateFpToIntCastPass {
                 x_meta.cloned_with_val(input_shape, "torch.float32"),
             );
             graph.set_arg(id, 0, IrArg::Node(truncated));
-            modified = true;
-        }
+            true
+        });
 
         if modified {
             log_line(format_args!(

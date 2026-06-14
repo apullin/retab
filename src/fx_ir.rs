@@ -815,6 +815,17 @@ impl IrGraph {
             .collect()
     }
 
+    pub fn rewrite_live_call_functions(
+        &mut self,
+        mut rewrite: impl FnMut(&mut Self, NodeId) -> bool,
+    ) -> bool {
+        let mut modified = false;
+        for id in self.live_call_function_ids() {
+            modified |= rewrite(self, id);
+        }
+        modified
+    }
+
     pub fn live_placeholder_ids(&self) -> Vec<NodeId> {
         self.live_nodes()
             .filter(|node| node.op == NodeOp::Placeholder)

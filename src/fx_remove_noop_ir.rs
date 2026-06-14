@@ -20,27 +20,26 @@ impl IrPass for IrRemoveNoopPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
             let Some(noop) = noop_target(&graph.nodes[id].target) else {
-                continue;
+                return false;
             };
 
             if graph.nodes[id].args.is_empty() {
-                continue;
+                return false;
             }
 
             // The input node is always args[0] (used for dtype check).
             let input_id: NodeId = match graph.nodes[id].args[0].as_node() {
                 Some(nid) => nid,
-                None => continue,
+                None => return false,
             };
 
             // Determine the replacement: copy uses args[1] (src), others use args[0]
             let replacement_id: NodeId = match noop {
                 NoopTarget::CopySourceArg => match graph.nodes[id].arg_node(1) {
                     Some(nid) => nid,
-                    None => continue,
+                    None => return false,
                 },
                 NoopTarget::PassthroughFirstArg | NoopTarget::DtypeCheckedPassthrough => input_id,
             };
@@ -48,12 +47,12 @@ impl IrPass for IrRemoveNoopPass {
             // Check dtype match: input dtype must equal output dtype.
             let input_dtype = graph.nodes[input_id].meta.val_dtype();
             if input_dtype.is_none() {
-                continue;
+                return false;
             }
             if noop == NoopTarget::DtypeCheckedPassthrough {
                 let output_dtype = graph.nodes[id].meta.val_dtype();
                 if input_dtype != output_dtype {
-                    continue;
+                    return false;
                 }
             }
 
@@ -63,8 +62,8 @@ impl IrPass for IrRemoveNoopPass {
             ));
 
             graph.replace_and_erase(id, replacement_id);
-            modified = true;
-        }
+            true
+        });
 
         if modified {
             log_line(format_args!("[IrRemoveNoop] removed noop identity nodes"));

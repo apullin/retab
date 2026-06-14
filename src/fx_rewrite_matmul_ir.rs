@@ -42,10 +42,7 @@ impl IrPass for IrRewriteMatmulRescalePass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
-            modified |= insert_matmul_rescale(graph, id);
-        }
+        let modified = graph.rewrite_live_call_functions(insert_matmul_rescale);
         if modified {
             log_line(format_args!(
                 "[IrRewriteMatmulRescale] inserted matmul output rescale ops"

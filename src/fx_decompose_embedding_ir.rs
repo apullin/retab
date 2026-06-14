@@ -16,16 +16,15 @@ impl IrPass for IrDecomposeEmbeddingPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        graph.rewrite_live_call_functions(|graph, id| {
             if !is_embedding_target(&graph.nodes[id].target) {
-                continue;
+                return false;
             }
             let Some(weight_id) = graph.nodes[id].arg_node(0) else {
-                continue;
+                return false;
             };
             let Some(indices_id) = graph.nodes[id].arg_node(1) else {
-                continue;
+                return false;
             };
 
             // weight[indices]: index dim 0 with the (possibly N-d) indices tensor. The output meta
@@ -42,8 +41,7 @@ impl IrPass for IrDecomposeEmbeddingPass {
                 ],
                 meta,
             );
-            modified = true;
-        }
-        modified
+            true
+        })
     }
 }

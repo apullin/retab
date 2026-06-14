@@ -20,27 +20,26 @@ impl IrPass for IrConvertFullLikePass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
             if !is_full_like_target(&graph.nodes[id].target) {
-                continue;
+                return false;
             }
 
             if graph.nodes[id].args.len() < 2 {
-                continue;
+                return false;
             }
 
             // Extract input node ID and fill value from args
             let input_id = match graph.nodes[id].args[0].as_node() {
                 Some(nid) => nid,
-                None => continue,
+                None => return false,
             };
             let fill_value = graph.nodes[id].args[1].clone();
 
             // Get input shape from the input node's meta
             let input_shape = match graph.nodes[input_id].meta.val_shape() {
                 Some(s) => s.to_vec(),
-                None => continue,
+                None => return false,
             };
 
             // Build args: full(shape_list, fill_value)
@@ -53,8 +52,8 @@ impl IrPass for IrConvertFullLikePass {
                 vec![shape_arg, fill_value],
                 graph.nodes[id].meta.clone(),
             );
-            modified = true;
-        }
+            true
+        });
 
         if modified {
             log_line(format_args!(

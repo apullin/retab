@@ -15,15 +15,9 @@ impl IrPass for IrDecomposeVarPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
-            if !is_var_target(&graph.nodes[id].target) {
-                continue;
-            }
-            if decompose_var(graph, id) {
-                modified = true;
-            }
-        }
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
+            is_var_target(&graph.nodes[id].target) && decompose_var(graph, id)
+        });
 
         if modified {
             log_line(format_args!("[IrDecomposeVar] decomposed var ops"));

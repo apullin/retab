@@ -20,23 +20,22 @@ impl IrPass for IrQuantizeClampArgsPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
             if !is_clamp_target(&graph.nodes[id].target) {
-                continue;
+                return false;
             }
 
             // Need output_qparams to quantize
             let qp = match graph.nodes[id].meta.output_qparam() {
                 Some(qp) => qp.clone(),
-                None => continue,
+                None => return false,
             };
 
             // args: [input, min_val, max_val]
             let node = &graph.nodes[id];
             let args = &node.args;
             if args.is_empty() {
-                continue;
+                return false;
             }
 
             let mut new_args = args.clone();
@@ -57,9 +56,9 @@ impl IrPass for IrQuantizeClampArgsPass {
             if did_update {
                 // Update args in-place so conversion sees the quantized bounds.
                 graph.set_args(id, new_args);
-                modified = true;
             }
-        }
+            did_update
+        });
 
         if modified {
             log_line(format_args!(

@@ -174,12 +174,7 @@ impl IrPass for IrNormalizeIndexPutBoolMaskPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
-            if rewrite_one(graph, id) {
-                modified = true;
-            }
-        }
+        let modified = graph.rewrite_live_call_functions(rewrite_one);
         if modified {
             log_line(format_args!(
                 "[IrNormalizeIndexPutBoolMask] rewrote bool-mask index_put to where"

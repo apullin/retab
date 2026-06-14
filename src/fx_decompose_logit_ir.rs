@@ -22,15 +22,14 @@ impl IrPass for IrDecomposeLogitPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
             if !is_logit_target(&graph.nodes[id].target) {
-                continue;
+                return false;
             }
 
             let input_id = match graph.nodes[id].first_node_arg() {
                 Some(id) => id,
-                None => continue,
+                None => return false,
             };
             let input_shape = match graph.nodes[input_id].meta.val_shape() {
                 Some(s) => s.to_vec(),
@@ -125,8 +124,8 @@ impl IrPass for IrDecomposeLogitPass {
                 vec![IrArg::Node(log_input)],
                 meta,
             );
-            modified = true;
-        }
+            true
+        });
 
         if modified {
             log_line(format_args!("[IrDecomposeLogit] decomposed logit ops"));

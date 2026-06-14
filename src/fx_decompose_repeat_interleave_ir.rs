@@ -17,43 +17,42 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
+        let modified = graph.rewrite_live_call_functions(|graph, id| {
             if !is_repeat_interleave_self_int_target(&graph.nodes[id].target) {
-                continue;
+                return false;
             }
 
             // args: (x, repeats, dim)
             if graph.nodes[id].args.len() < 3 {
-                continue;
+                return false;
             }
 
             let input_id = match graph.nodes[id].args[0].as_node() {
                 Some(nid) => nid,
-                None => continue,
+                None => return false,
             };
             let repeats = match graph.nodes[id].args[1].as_int() {
                 Some(r) if r >= 0 => r,
-                _ => continue,
+                _ => return false,
             };
             let dim_raw = match &graph.nodes[id].args[2] {
-                IrArg::None => continue,
+                IrArg::None => return false,
                 IrArg::Int(d) => *d,
-                _ => continue,
+                _ => return false,
             };
 
             let input_shape = match graph.nodes[input_id].meta.val_shape() {
                 Some(s) => s.to_vec(),
-                None => continue,
+                None => return false,
             };
             let rank = input_shape.len() as i64;
             if rank == 0 {
-                continue;
+                return false;
             }
 
             let dim = if dim_raw < 0 { dim_raw + rank } else { dim_raw };
             if !(0..rank).contains(&dim) {
-                continue;
+                return false;
             }
 
             let dtype = graph.nodes[id].meta.val_dtype_or_float32().to_string();
@@ -114,8 +113,8 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
                 vec![IrArg::Node(repeated), i64_list(&final_shape)],
                 view_meta,
             );
-            modified = true;
-        }
+            true
+        });
 
         if modified {
             log_line(format_args!(
