@@ -9,30 +9,8 @@
 //! pass-through value.
 
 use crate::fx_ir::{IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_target::{noop_target, NoopTarget};
 use crate::runner_logging::log_line;
-
-/// Target strings that are candidates for noop removal.
-const NOOP_TARGETS: &[&str] = &[
-    "aten.clone.default",
-    "_clone_dim_order.default",
-    "_to_dim_order_copy.default",
-    "aten._to_copy.default",
-    "alias_copy.default",
-    "copy.default",
-    "detach_copy.default",
-];
-
-fn is_noop_target(target: &str) -> bool {
-    NOOP_TARGETS.iter().any(|t| target.contains(t))
-}
-
-fn is_copy_target(target: &str) -> bool {
-    // Specifically aten.copy.default (not alias_copy or detach_copy)
-    target.contains("copy.default")
-        && !target.contains("alias_copy")
-        && !target.contains("detach_copy")
-        && !target.contains("dim_order_copy")
-}
 
 pub struct IrRemoveNoopPass;
 
@@ -50,10 +28,9 @@ impl IrPass for IrRemoveNoopPass {
                 continue;
             }
 
-            let target = &graph.nodes[id].target;
-            if !is_noop_target(target) {
+            let Some(noop) = noop_target(&graph.nodes[id].target) else {
                 continue;
-            }
+            };
 
             if graph.nodes[id].args.is_empty() {
                 continue;
@@ -66,13 +43,14 @@ impl IrPass for IrRemoveNoopPass {
             };
 
             // Determine the replacement: copy uses args[1] (src), others use args[0]
-            let replacement_id: NodeId = if is_copy_target(&graph.nodes[id].target) {
-                match graph.nodes[id].args.get(1).and_then(|a| a.as_node()) {
-                    Some(nid) => nid,
-                    None => continue,
+            let replacement_id: NodeId = match noop {
+                NoopTarget::CopySourceArg => {
+                    match graph.nodes[id].args.get(1).and_then(|a| a.as_node()) {
+                        Some(nid) => nid,
+                        None => continue,
+                    }
                 }
-            } else {
-                input_id
+                NoopTarget::PassthroughFirstArg | NoopTarget::DtypeCheckedPassthrough => input_id,
             };
 
             // Check dtype match: input dtype must equal output dtype.
@@ -80,9 +58,7 @@ impl IrPass for IrRemoveNoopPass {
             if input_dtype.is_none() {
                 continue;
             }
-            if graph.nodes[id].target.contains("_to_dim_order_copy")
-                || graph.nodes[id].target.contains("aten._to_copy")
-            {
+            if noop == NoopTarget::DtypeCheckedPassthrough {
                 let output_dtype = graph.nodes[id].meta.val_dtype();
                 if input_dtype != output_dtype {
                     continue;

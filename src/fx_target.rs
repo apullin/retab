@@ -34,6 +34,13 @@ pub(crate) enum ShapeOnlyConstantTarget {
     Permute,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoopTarget {
+    PassthroughFirstArg,
+    CopySourceArg,
+    DtypeCheckedPassthrough,
+}
+
 pub(crate) fn classify_ir_target(target: &str) -> IrTargetKind {
     if matches!(
         target,
@@ -139,6 +146,23 @@ pub(crate) fn shape_only_constant_target(target: &str) -> Option<ShapeOnlyConsta
 
 pub(crate) fn is_shape_only_constant_target(target: &str) -> bool {
     shape_only_constant_target(target).is_some()
+}
+
+pub(crate) fn noop_target(target: &str) -> Option<NoopTarget> {
+    if target.contains("aten.copy.default") {
+        return Some(NoopTarget::CopySourceArg);
+    }
+    if target.contains("_to_dim_order_copy.default") || target.contains("aten._to_copy.default") {
+        return Some(NoopTarget::DtypeCheckedPassthrough);
+    }
+    if target.contains("aten.clone.default")
+        || target.contains("_clone_dim_order.default")
+        || target.contains("alias_copy.default")
+        || target.contains("detach_copy.default")
+    {
+        return Some(NoopTarget::PassthroughFirstArg);
+    }
+    None
 }
 
 pub(crate) fn is_view_like_target(target: &str) -> bool {
@@ -448,6 +472,39 @@ mod tests {
         assert!(is_view_like_target("aten._unsafe_view.default"));
         assert!(is_permute_target("aten.permute.default"));
         assert!(!is_shape_only_constant_target("aten.slice_copy.Tensor"));
+    }
+
+    #[test]
+    fn recognizes_noop_target_families() {
+        assert_eq!(
+            noop_target("aten.clone.default"),
+            Some(NoopTarget::PassthroughFirstArg)
+        );
+        assert_eq!(
+            noop_target("_clone_dim_order.default"),
+            Some(NoopTarget::PassthroughFirstArg)
+        );
+        assert_eq!(
+            noop_target("alias_copy.default"),
+            Some(NoopTarget::PassthroughFirstArg)
+        );
+        assert_eq!(
+            noop_target("detach_copy.default"),
+            Some(NoopTarget::PassthroughFirstArg)
+        );
+        assert_eq!(
+            noop_target("aten.copy.default"),
+            Some(NoopTarget::CopySourceArg)
+        );
+        assert_eq!(
+            noop_target("_to_dim_order_copy.default"),
+            Some(NoopTarget::DtypeCheckedPassthrough)
+        );
+        assert_eq!(
+            noop_target("aten._to_copy.default"),
+            Some(NoopTarget::DtypeCheckedPassthrough)
+        );
+        assert_eq!(noop_target("aten.as_strided_copy.default"), None);
     }
 
     #[test]

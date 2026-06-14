@@ -959,6 +959,14 @@ Deleted: no production code
 Added: Rust invariant tests for deterministic nested while-loop region metadata qualification/sorting and for absence of deleted Python boundary/round-trip symbols in active Rust/Python source
 Validation: `cargo fmt --check`; `cargo check --lib`; focused `cargo test --lib control_flow::tests`; `cargo test --lib`; focused control-flow smoke via `/tmp/et.sh`; Rust LOC check
 Note: Focused invariant tests passed `2 passed`; full Rust tests passed `133 passed`; control-flow smoke passed `29 passed, 1 expected xfail, 60 deselected`. No model lane was run. This is intentionally LOC-positive test coverage and completes the remaining Refactor 10 invariant targets.
+
+2026-06-13, noop target grammar slice
+Rust LOC: 37,256 -> 37,289
+Movement: +33 Rust LOC
+Deleted: local noop target list, copy-target discriminator, and dtype-check target substring checks from `fx_remove_noop_ir`
+Added: typed `NoopTarget` classifier in `fx_target` with direct target tests; `IrRemoveNoopPass` now dispatches through the shared target grammar for replacement source and dtype-check semantics
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib fx_target::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over copy, to_copy, clone, detach_copy, and alias_copy; Rust LOC check
+Note: Target Rust tests passed `12 passed`; full Rust tests passed `134 passed`; focused Python smoke passed `68 passed, 1 expected xfail, 80 deselected`. No model lane was run. This is setup-positive because central classifier tests add lines, but it removes a local target-classification dialect from the noop rewrite pass.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1260,39 +1268,27 @@ assembly path changes. Run full INT/FP/models if any contract behavior changes.
 
 Status:
 
-Complete for the Python-seam goal. The temporary
+Complete. The temporary
 `src/fx_control_flow_structural.rs` inlet module was deleted after its
 load-bearing behavior moved into Rust IR import/pre-submodule contracts:
 pre-pass qparam snapshots are stored on CF nodes, parent boundary layout facts
 are propagated into submodule placeholders before submodule IR passes, and
-Q/DQ/RESCALE shape planning now preserves input layout. `src/fx_control_flow_metadata.rs`
-no longer owns live-FX traversal or structural write-back wrappers; it is
-reduced to IR-oriented control-flow metadata helpers and submodule IR passes.
-Remaining work, if desired, is a naming/module split of the IR control-flow
-helpers, not a Python structural seam.
+Q/DQ/RESCALE shape planning now preserves input layout. Active control-flow
+lowering code now lives under `src/control_flow/`: region metadata in the
+module root, boundary contracts in `contracts.rs`, subgraph assembly in
+`assembly.rs`, and while-submodule metadata passes in `metadata.rs`.
 
 Problem:
 
 Before the initial split, `src/fx_control_flow_metadata.rs` mixed
-Python-facing structural metadata logic with IR metadata helpers. The first
-slice removed the live-Python structural inlet from that file, but the remaining
-control-flow area still has two naming issues: the inlet module is intentionally
-Python-facing, while the metadata module name is broad and still owns several
-different IR helper concepts.
+Python-facing structural metadata logic with IR metadata helpers. That module
+is now gone from active source, and the control-flow code is split by
+responsibility under `src/control_flow/`.
 
 Proposal:
 
-If further cleanup is useful, split the Rust control-flow modules by
-responsibility:
-
-```text
-src/control_flow/metadata_ir.rs
-src/control_flow/contracts.rs
-src/control_flow/subgraph_assembly.rs
-```
-
-Keep PyO3 orchestration in `src/lib.rs`. Move active IR helpers into the IR
-metadata, contracts, or subgraph-assembly module.
+Completed by the control-flow assembly, contracts, and metadata namespace
+slices.
 
 Expected payoff:
 
