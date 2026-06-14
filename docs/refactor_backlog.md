@@ -1327,6 +1327,14 @@ Deleted: pass-local dtype substring parsing for maxpool pad sentinels and contro
 Added: `DType::torch_str_is_float_like(...)`, `DType::quantized_integer_bounds(...)`, `DType::quantized_integer_bounds_from_torch_str(...)`, and focused dtype-domain tests
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib dtype_helpers_preserve_torch_string_domains`; `cargo test --lib fx_decompose_maxpool_dilation_ir`; `cargo test --lib control_flow`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over maxpool, cond, and while; Rust LOC check
 Note: Full Rust tests passed `138 passed`; focused Python smoke passed `111 passed, 1 expected xfail, 192 deselected`. No model lane was run. This is setup-positive, but the raw dtype `contains(...)` grammar is now owned by `DType` instead of individual passes in the scanned IR/control-flow area.
+
+2026-06-14, serializer i32 sequence-default helper slice
+Rust LOC: 36,878 -> 36,894
+Movement: +16 Rust LOC
+Deleted: repeated `first/get/unwrap_or` pair and quad default spellings from serializer layout and shape helpers
+Added: `i32_pair_or_default(...)`, `i32_pair_or_first(...)`, `i32_quad_or_default(...)`, and focused helper tests
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib i32_sequence_defaults_preserve_pair_semantics`; `cargo test --lib serialize::visitors::shape_utils`; `cargo test --lib serialize::tensor_layout`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over avg-pool2d, max-pool, and conv2d; Rust LOC check
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `269 passed, 700 deselected`. No model lane was run. This is test-positive by LOC but reduces serializer shape/layout indexing noise and preserves the important distinction between "second value defaults to literal" and "second value defaults to first".
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

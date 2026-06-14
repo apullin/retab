@@ -412,23 +412,13 @@ pub(super) fn adjusted_max_pool_pad(
         return symmetric;
     }
 
+    let (kernel_h, kernel_w) = i32_pair_or_default(kernel, 2);
+    let (stride_h, stride_w) = i32_pair_or_default(stride, 2);
     vec![
         symmetric[0],
-        pool_post_pad(
-            input_shape[1],
-            *kernel.first().unwrap_or(&2),
-            *stride.first().unwrap_or(&2),
-            symmetric[0],
-            ceil_mode,
-        ),
+        pool_post_pad(input_shape[1], kernel_h, stride_h, symmetric[0], ceil_mode),
         symmetric[2],
-        pool_post_pad(
-            input_shape[2],
-            *kernel.get(1).unwrap_or(&2),
-            *stride.get(1).unwrap_or(&2),
-            symmetric[2],
-            ceil_mode,
-        ),
+        pool_post_pad(input_shape[2], kernel_w, stride_w, symmetric[2], ceil_mode),
     ]
 }
 
@@ -442,14 +432,9 @@ pub(super) fn pool_nhwc_shape(
         return None;
     }
 
-    let kh = *kernel.first().unwrap_or(&2);
-    let kw = *kernel.get(1).unwrap_or(&2);
-    let sh = *stride.first().unwrap_or(&2);
-    let sw = *stride.get(1).unwrap_or(&2);
-    let pad_top = *pad.first().unwrap_or(&0);
-    let pad_bottom = *pad.get(1).unwrap_or(&0);
-    let pad_left = *pad.get(2).unwrap_or(&0);
-    let pad_right = *pad.get(3).unwrap_or(&0);
+    let (kh, kw) = i32_pair_or_default(kernel, 2);
+    let (sh, sw) = i32_pair_or_default(stride, 2);
+    let (pad_top, pad_bottom, pad_left, pad_right) = i32_quad_or_default(pad, 0);
     let oh = (input_shape[1] + pad_top + pad_bottom - kh) / sh + 1;
     let ow = (input_shape[2] + pad_left + pad_right - kw) / sw + 1;
 

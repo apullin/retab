@@ -315,10 +315,8 @@ pub(super) fn adjusted_tosa_pad_for_raw_aten_conv(
     let input_w = input_dims[1];
     let kernel_h = kernel_dims[0];
     let kernel_w = kernel_dims[1];
-    let stride_h = *stride.first().unwrap_or(&1);
-    let stride_w = *stride.get(1).unwrap_or(&stride_h);
-    let dilation_h = *dilation.first().unwrap_or(&1);
-    let dilation_w = *dilation.get(1).unwrap_or(&dilation_h);
+    let (stride_h, stride_w) = i32_pair_or_first(stride, 1);
+    let (dilation_h, dilation_w) = i32_pair_or_first(dilation, 1);
 
     let padding_mode = arg_string(node, 4).or_else(|| kwarg_string(node, "padding"));
     if matches!(padding_mode.as_deref(), Some("same")) {
@@ -327,8 +325,7 @@ pub(super) fn adjusted_tosa_pad_for_raw_aten_conv(
         return vec![pad_top, pad_bottom, pad_left, pad_right];
     }
 
-    let pad_h = *padding.first().unwrap_or(&0);
-    let pad_w = *padding.get(1).unwrap_or(&pad_h);
+    let (pad_h, pad_w) = i32_pair_or_first(padding, 0);
 
     let pad_bottom = {
         let remainder = conv_pad_remainder(input_h, pad_h, dilation_h, kernel_h, stride_h);

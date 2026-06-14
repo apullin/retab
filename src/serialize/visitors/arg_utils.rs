@@ -48,6 +48,27 @@ pub(super) fn i32_list_or(values: Vec<i32>, default: Vec<i32>) -> Vec<i32> {
     }
 }
 
+pub(super) fn i32_pair_or_default(values: &[i32], default: i32) -> (i32, i32) {
+    (
+        values.first().copied().unwrap_or(default),
+        values.get(1).copied().unwrap_or(default),
+    )
+}
+
+pub(super) fn i32_pair_or_first(values: &[i32], default: i32) -> (i32, i32) {
+    let first = values.first().copied().unwrap_or(default);
+    (first, values.get(1).copied().unwrap_or(first))
+}
+
+pub(super) fn i32_quad_or_default(values: &[i32], default: i32) -> (i32, i32, i32, i32) {
+    (
+        values.first().copied().unwrap_or(default),
+        values.get(1).copied().unwrap_or(default),
+        values.get(2).copied().unwrap_or(default),
+        values.get(3).copied().unwrap_or(default),
+    )
+}
+
 pub(super) fn kwarg_i32(node: &Node, name: &str, default: i32) -> i32 {
     for (k, v) in &node.kwargs {
         if k == name {
@@ -95,5 +116,18 @@ pub(super) fn arg_bool(node: &Node, idx: usize, default: bool) -> bool {
     match node.args.get(idx) {
         Some(arg) => arg.as_bool().unwrap_or(default),
         _ => default,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{i32_pair_or_default, i32_pair_or_first, i32_quad_or_default};
+
+    #[test]
+    fn i32_sequence_defaults_preserve_pair_semantics() {
+        assert_eq!(i32_pair_or_default(&[3], 2), (3, 2));
+        assert_eq!(i32_pair_or_first(&[3], 2), (3, 3));
+        assert_eq!(i32_pair_or_first(&[], 2), (2, 2));
+        assert_eq!(i32_quad_or_default(&[1, 2], 0), (1, 2, 0, 0));
     }
 }
