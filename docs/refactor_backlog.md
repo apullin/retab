@@ -828,6 +828,14 @@ Deleted: duplicate `MaterializeConstantNodeEffect` vs `MaterializeZeroInputConst
 Added: `src/constant_materialization.rs`, unified `MaterializeTensorNodeEffect`, shared scalar byte encoding with explicit storage-vs-serializer `Int4` behavior, shared repeated scalar fill helpers, and `MaterializeTensorNodeEffect::from_tensor`
 Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over full, zeros, ones, arange, eye, view, permute, unsqueeze, mm, bmm, matmul, and addmm; `git diff --check`; Rust LOC check
 Note: Rust tests passed `130 passed`. Focused Python smoke passed `307 passed, 7 skipped, 10 expected xfails, 553 deselected`. This is the first constant-materialization semantic collapse: precomputed tensor nodes now have one lowering effect, and scalar/fill byte construction has one Rust owner while preserving zero-input `Int4` storage behavior separately from serializer-supported inline constants.
+
+2026-06-13, legacy constant fallback effect deletion
+Rust LOC: 37,111
+Movement: -85 Rust LOC from previous checkpoint
+Deleted: `MaterializeZeroInputConstantEffect`, `FuseConstantNodeEffect`, the `fx_fuse_constant_args` module, `retarget_to_fused_const`, and the ingest match arms that looked for Python-created `{node}_fused_const` buffers
+Added: no new production API; unsupported constant-fold opportunities now only emit `fold_fallback_log` diagnostics instead of deferred no-op lowering effects
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over full, zeros, ones, arange, eye, view, permute, unsqueeze, mm, bmm, matmul, and addmm; `git diff --check`; Rust LOC check
+Note: Rust tests passed `130 passed`. Focused Python smoke passed `307 passed, 7 skipped, 10 expected xfails, 553 deselected`. This removes the remaining constant-fold effect vocabulary that only made sense when Python helper code could materialize `{node}_fused_const` buffers during the deleted round-trip.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

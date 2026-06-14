@@ -48,7 +48,6 @@ mod fx_decompose_var_ir;
 mod fx_decorate_fp_int_cast_ir;
 mod fx_expand_where_mask_ir;
 mod fx_fold_qdq_ir;
-mod fx_fuse_constant_args;
 mod fx_fuse_constant_inputs_ir;
 mod fx_fuse_duplicate_users_ir;
 mod fx_fuse_equal_placeholders_ir;

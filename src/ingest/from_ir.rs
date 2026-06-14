@@ -170,10 +170,9 @@ fn graph_from_ir_ext(
         }
     }
 
-    // Fold constant-fed pure reshapes into materialized constants. Ingest does
-    // this via the FuseConstantNode lowering effect; without it the converted graph
-    // keeps a RESHAPE on a constant weight, which TOSA rejects for sub-byte INT4
-    // ("could not allocate op RESHAPE input=(INT4 ...)").
+    // Fold constant-fed pure reshapes into materialized constants. Without this
+    // the converted graph keeps a RESHAPE on a constant weight, which TOSA rejects
+    // for sub-byte INT4 ("could not allocate op RESHAPE input=(INT4 ...)").
     fold_constant_reshapes(&mut graph, store);
     // Folding leaves the original constants (e.g. the pre-reshape weight) with no
     // users -- drop them so we don't emit duplicate CONST tensors.
@@ -342,12 +341,6 @@ fn apply_effects_ext(
             }
             LoweringEffect::InsertPrecomputedTableOp(e) => {
                 applied |= apply_precomputed_table(graph, store, &name_map, e);
-            }
-            LoweringEffect::FuseConstantNode(e) => {
-                applied |= retarget_to_fused_const(graph, store, &name_map, &e.node_name);
-            }
-            LoweringEffect::MaterializeZeroInputConstant(e) => {
-                applied |= retarget_to_fused_const(graph, store, &name_map, &e.node_name);
             }
             LoweringEffect::CastInt64InputToInt32(e) => {
                 applied |= cast_buffer_int64_to_int32(store, &e.placeholder_name);
@@ -642,37 +635,6 @@ fn downcast_int64_le_to_int32(data: &[u8]) -> Option<Vec<u8>> {
         out.extend_from_slice(&narrowed.to_le_bytes());
     }
     Some(out)
-}
-
-/// FuseConstantNode / MaterializeZeroInputConstant effects may materialize a
-/// `{node}_fused_const` buffer. If the store already holds that data, retarget
-/// the node to it by copying the data under the node's own name instead of
-/// recomputing.
-fn retarget_to_fused_const(
-    graph: &mut Graph,
-    store: &mut TensorStore,
-    name_map: &HashMap<String, NodeId>,
-    node_name: &str,
-) -> bool {
-    let folded_name = format!("{node_name}_fused_const");
-    let found = store.get(&folded_name).is_some();
-    crate::fold_fallback_log(&format!(
-        "retarget_to_fused_const found_python_data={found}"
-    ));
-    let Some(data) = store.get(&folded_name).cloned() else {
-        return false;
-    };
-    let Some(&nid) = name_map.get(node_name) else {
-        return false;
-    };
-    store.insert(node_name.to_string(), data.clone());
-    if let Some(n) = graph.nodes.get_mut(nid) {
-        n.op = OpType::Placeholder;
-        n.target = OpTarget::Other(node_name.to_string());
-        n.args = SmallVec::new();
-        n.meta.val = TensorInfo::new(&data.shape, data.dtype);
-    }
-    true
 }
 
 fn remove_node(graph: &mut Graph, nid: NodeId) {

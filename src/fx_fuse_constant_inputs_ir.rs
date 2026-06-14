@@ -8,9 +8,7 @@ use crate::fx_constant_tensor_eval::{
 };
 use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, NodeOp};
 use crate::fx_target::{is_shape_only_constant_target, is_zero_input_constant_target};
-use crate::lowering_effects::{
-    FuseConstantNodeEffect, LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect,
-};
+use crate::lowering_effects::{LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect};
 use crate::store::TensorData;
 
 pub struct IrFuseConstantInputsEffectPass {
@@ -104,10 +102,6 @@ impl EffectfulIrPass for IrFuseConstantInputsEffectPass {
                 }
             }
             crate::fold_fallback_log(&format!("FuseConstantNode target={}", node.target));
-            effects.push(LoweringEffect::FuseConstantNode(FuseConstantNodeEffect {
-                node_name: node.name.clone(),
-                allow_missing: true,
-            }));
         }
 
         let modified = !effects.is_empty();
@@ -210,17 +204,8 @@ mod tests {
         let pass = IrFuseConstantInputsEffectPass::matmul_only();
         let result = pass.run(&mut graph);
 
-        assert!(result.modified);
-        let names = result
-            .effects
-            .items
-            .iter()
-            .map(|effect| match effect {
-                LoweringEffect::FuseConstantNode(effect) => effect.node_name.as_str(),
-                _ => panic!("unexpected effect kind"),
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(names, vec!["addmm", "mm", "bmm"]);
+        assert!(!result.modified);
+        assert!(result.effects.items.is_empty());
     }
 
     #[test]

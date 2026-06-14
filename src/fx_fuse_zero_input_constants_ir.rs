@@ -2,18 +2,20 @@ use std::collections::HashSet;
 
 use crate::constant_materialization::{repeated_scalar_bytes, scalar_storage_bytes};
 use crate::fx_constant_tensor_eval::{node_has_tensor_inputs, tensor_numel};
-use crate::fx_fuse_constant_args::ZeroInputConstantKind;
 use crate::fx_ir::{
     EffectfulIrPass, EffectfulIrPassResult, IrArg, IrGraph, IrNode, NodeOp, QParam,
 };
 use crate::graph::ir::DType;
-use crate::lowering_effects::{
-    LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect,
-    MaterializeZeroInputConstantEffect,
-};
+use crate::lowering_effects::{LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect};
 use crate::tensor_data::parse_torch_dtype;
 
 pub struct IrFuseZeroInputConstantsEffectPass;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ZeroInputConstantKind {
+    Full,
+    FactoryCall,
+}
 
 fn parse_dtype_arg(arg: &IrArg) -> Option<DType> {
     match arg {
@@ -390,13 +392,6 @@ impl EffectfulIrPass for IrFuseZeroInputConstantsEffectPass {
                 "MaterializeZeroInputConstant target={} kind={:?} why={}",
                 node.target, kind, why
             ));
-            effects.push(LoweringEffect::MaterializeZeroInputConstant(
-                MaterializeZeroInputConstantEffect {
-                    node_name: node.name.clone(),
-                    kind,
-                    allow_missing: true,
-                },
-            ));
         }
         let modified = !effects.is_empty();
         EffectfulIrPassResult {
@@ -453,7 +448,7 @@ mod tests {
         let result = pass.run(&mut graph);
 
         assert!(result.modified);
-        assert_eq!(result.effects.items.len(), 4);
+        assert_eq!(result.effects.items.len(), 1);
         assert!(matches!(
             &result.effects.items[0],
             LoweringEffect::MaterializeTensorNode(effect)
@@ -461,11 +456,6 @@ mod tests {
                     && effect.dtype == DType::Float32
                     && effect.shape == vec![2]
                     && effect.data == [3.0f32.to_le_bytes(), 3.0f32.to_le_bytes()].concat()
-        ));
-        assert!(matches!(
-            &result.effects.items[1],
-            LoweringEffect::MaterializeZeroInputConstant(effect)
-                if effect.kind == ZeroInputConstantKind::FactoryCall
         ));
     }
 

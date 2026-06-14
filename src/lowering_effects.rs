@@ -1,4 +1,3 @@
-use crate::fx_fuse_constant_args::ZeroInputConstantKind;
 use crate::graph::ir::DType;
 use crate::store::TensorData;
 
@@ -22,19 +21,6 @@ pub struct CastInt64InputToInt32Effect {
     pub target_name: Option<String>,
     pub allow_missing: bool,
     pub update_placeholder_meta: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MaterializeZeroInputConstantEffect {
-    pub node_name: String,
-    pub kind: ZeroInputConstantKind,
-    pub allow_missing: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FuseConstantNodeEffect {
-    pub node_name: String,
-    pub allow_missing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,8 +77,6 @@ pub struct InsertPrecomputedTableOpEffect {
 pub enum LoweringEffect {
     DeleteConstantPlaceholder(DeleteConstantPlaceholderEffect),
     CastInt64InputToInt32(CastInt64InputToInt32Effect),
-    MaterializeZeroInputConstant(MaterializeZeroInputConstantEffect),
-    FuseConstantNode(FuseConstantNodeEffect),
     MaterializeTensorNode(MaterializeTensorNodeEffect),
     InsertTableOp(InsertTableOpEffect),
     InsertPrecomputedTableOp(InsertPrecomputedTableOpEffect),
