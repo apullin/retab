@@ -17,7 +17,6 @@ use crate::graph::Graph;
 use crate::ingest::target_map::parse_op_target;
 use crate::lowering_effects::{LoweringEffect, LoweringEffectBatch};
 use crate::store::TensorStore;
-use crate::tensor_data::parse_torch_dtype;
 
 /// Build a serialize `Graph` from a post-pass `IrGraph`, inserting the graph's
 /// constant tensor data into `store`. Handles one flat graph; the control-flow
@@ -892,7 +891,7 @@ fn map_arg(
         IrArg::Float(v) => Arg::Float(*v),
         IrArg::Bool(v) => Arg::Bool(*v),
         IrArg::Str(s) => Arg::String(s.clone()),
-        IrArg::Dtype(s) => Arg::Dtype(parse_torch_dtype(s)),
+        IrArg::Dtype(s) => Arg::Dtype(DType::from_torch_str(s)),
         IrArg::None => Arg::None,
         IrArg::List(items) => map_list(items, idmap, submodule_map),
     }
@@ -953,7 +952,7 @@ fn map_list(
 
 fn map_meta(m: &IrNodeMeta) -> NodeMeta {
     let val = match &m.val {
-        Some(ft) => TensorInfo::new(&ft.shape, parse_torch_dtype(&ft.dtype)),
+        Some(ft) => TensorInfo::new(&ft.shape, DType::from_torch_str(&ft.dtype)),
         None => TensorInfo::new(&[], DType::Float32),
     };
     let mut meta = NodeMeta::new(val);
@@ -990,7 +989,7 @@ fn qparam_to_quantargs(qp: &QParam) -> QuantArgs {
     QuantArgs {
         scale: qp.scale,
         zero_point: qp.zp,
-        dtype: parse_torch_dtype(&qp.dtype_str),
+        dtype: qp.dtype(),
         qmin: qp.qmin,
         qmax: qp.qmax,
     }

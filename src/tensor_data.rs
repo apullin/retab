@@ -95,7 +95,7 @@ pub fn extract_tensor_shape(value: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
 pub fn extract_tensor_dtype(value: &Bound<'_, PyAny>) -> DType {
     attrs(value)
         .display_optional("dtype")
-        .map(|dtype| parse_torch_dtype(&dtype))
+        .map(|dtype| DType::from_torch_str(&dtype))
         .unwrap_or(DType::Float32)
 }
 
@@ -124,20 +124,6 @@ pub fn extract_tensor_data(value: &Bound<'_, PyAny>) -> PyResult<TensorData> {
         dtype = DType::Int32;
     }
     Ok(TensorData { data, shape, dtype })
-}
-
-pub fn parse_torch_dtype(dtype_str: &str) -> DType {
-    match dtype_str {
-        s if s.contains("float32") => DType::Float32,
-        s if s.contains("bfloat16") => DType::BFloat16,
-        s if s.contains("float16") => DType::Float16,
-        s if s.contains("int8") => DType::Int8,
-        s if s.contains("int16") => DType::Int16,
-        s if s.contains("int32") => DType::Int32,
-        s if s.contains("int64") => DType::Int64,
-        s if s.contains("bool") => DType::Bool,
-        _ => DType::Float32,
-    }
 }
 
 impl TensorData {

@@ -3,7 +3,6 @@ use crate::graph::ir::DType;
 use crate::lowering_effects::{
     InsertPrecomputedTableOpEffect, LoweringEffect, LoweringEffectBatch, TableTensorSpec,
 };
-use crate::tensor_data::parse_torch_dtype;
 
 pub struct IrInsertTableOpsEffectPass;
 
@@ -91,7 +90,7 @@ fn table_quant_spec(qp: &QParam) -> Option<TableTensorSpec> {
     if qp.is_per_channel() || qp.scale == 0.0 {
         return None;
     }
-    let dtype = parse_torch_dtype(&qp.dtype_str);
+    let dtype = qp.dtype();
     Some(TableTensorSpec {
         scale: qp.scale,
         zp: qp.zp,

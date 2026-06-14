@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 
 use crate::fx_py_attr::attrs;
+use crate::graph::ir::DType;
 
 /// Quantization parameters extracted once from Python QuantArgs objects.
 #[derive(Debug, Clone)]
@@ -60,6 +61,14 @@ impl QParam {
     /// Is this per-channel quantization?
     pub fn is_per_channel(&self) -> bool {
         !self.per_channel_scales.is_empty()
+    }
+
+    pub fn dtype(&self) -> DType {
+        DType::from_torch_str(&self.dtype_str)
+    }
+
+    pub fn is_integer_dtype(&self) -> bool {
+        self.dtype().is_integer()
     }
 
     pub fn supports_axis0_channel_slice(&self, end: usize) -> bool {

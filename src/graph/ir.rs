@@ -225,6 +225,29 @@ pub enum DType {
     Int48,
 }
 
+impl DType {
+    pub fn from_torch_str(dtype_str: &str) -> Self {
+        match dtype_str {
+            s if s.contains("float32") => DType::Float32,
+            s if s.contains("bfloat16") => DType::BFloat16,
+            s if s.contains("float16") => DType::Float16,
+            s if s.contains("int8") => DType::Int8,
+            s if s.contains("int16") => DType::Int16,
+            s if s.contains("int32") => DType::Int32,
+            s if s.contains("int64") => DType::Int64,
+            s if s.contains("bool") => DType::Bool,
+            _ => DType::Float32,
+        }
+    }
+
+    pub fn is_integer(self) -> bool {
+        matches!(
+            self,
+            DType::Int4 | DType::Int8 | DType::Int16 | DType::Int32 | DType::Int48 | DType::Int64
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TensorInfo — lightweight tensor metadata (Copy)
 // ---------------------------------------------------------------------------

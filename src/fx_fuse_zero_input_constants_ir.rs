@@ -8,13 +8,12 @@ use crate::fx_ir::{
 use crate::fx_target::{is_add_sub_target, zero_input_constant_target, ZeroInputConstantTarget};
 use crate::graph::ir::DType;
 use crate::lowering_effects::{LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect};
-use crate::tensor_data::parse_torch_dtype;
 
 pub struct IrFuseZeroInputConstantsEffectPass;
 
 fn parse_dtype_arg(arg: &IrArg) -> Option<DType> {
     match arg {
-        IrArg::Dtype(name) | IrArg::Str(name) => Some(parse_torch_dtype(name)),
+        IrArg::Dtype(name) | IrArg::Str(name) => Some(DType::from_torch_str(name)),
         _ => None,
     }
 }
@@ -35,7 +34,7 @@ fn int_qparam(node: &IrNode) -> Option<QParam> {
         .output_qparam()
         .or_else(|| node.meta.input_qparam())
         .cloned()
-        .filter(|qp| qp.dtype_str.contains("int"))
+        .filter(QParam::is_integer_dtype)
 }
 
 fn effective_int_qparam(graph: &IrGraph, start: usize) -> Option<QParam> {
@@ -95,14 +94,14 @@ fn explicit_zero_input_dtype(node: &IrNode) -> Option<DType> {
     node.kwargs
         .get("dtype")
         .and_then(parse_dtype_arg)
-        .or_else(|| node.meta.val_dtype().map(parse_torch_dtype))
+        .or_else(|| node.meta.val_dtype().map(DType::from_torch_str))
 }
 
 fn quantized_scalar_bytes(qp: &QParam, value: f64) -> Option<(DType, Vec<u8>)> {
     if qp.is_per_channel() {
         return None;
     }
-    let dtype = parse_torch_dtype(&qp.dtype_str);
+    let dtype = qp.dtype();
     let quantized = (value / qp.scale + qp.zp as f64)
         .round()
         .clamp(qp.qmin as f64, qp.qmax as f64);
@@ -114,10 +113,10 @@ fn output_int_qparam_and_dtype(node: &IrNode) -> Option<(Option<QParam>, DType)>
         .meta
         .output_qparam()
         .cloned()
-        .filter(|qp| qp.dtype_str.contains("int"));
+        .filter(QParam::is_integer_dtype);
     let dtype = qparam
         .as_ref()
-        .map(|qp| parse_torch_dtype(&qp.dtype_str))
+        .map(QParam::dtype)
         .or_else(|| explicit_zero_input_dtype(node))?;
     Some((qparam, dtype))
 }

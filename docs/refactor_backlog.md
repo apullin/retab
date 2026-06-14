@@ -1271,6 +1271,14 @@ Deleted: raw tensor `shape`/`dtype` attr reads from tensor-data extraction
 Added: no new helper surface; tensor-data extraction now uses `AttrView::object` and `AttrView::display_optional`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib tensor_data::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over addmm, arange, bmm, constant_pad_nd, conv_constant_pad_nd, embedding, eye, full, matmul, mm, ones, and zeros; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `269 passed, 13 skipped, 10 expected xfails, 411 deselected`. No model lane was run. This keeps dynamic Python attr reads isolated in `fx_py_attr.rs`; the remaining raw `getattr` outside that module is the intentional `torch.getattr("uint16")` API lookup for BF16 byte extraction.
+
+2026-06-14, dtype owner grammar slice
+Rust LOC: 36,811 -> 36,825
+Movement: +14 Rust LOC
+Deleted: `tensor_data::parse_torch_dtype` as the semantic owner for dtype-string parsing; ad hoc qparam dtype-string parsing in constant tensor evaluation, zero-input constant materialization, table planning, and from-IR ingestion
+Added: `DType::from_torch_str`, `DType::is_integer`, `QParam::dtype`, and `QParam::is_integer_dtype`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib tensor_data::tests`; `cargo test --lib fx_constant_tensor_eval::tests`; `cargo test --lib fx_fuse_zero_input_constants_ir::tests`; `cargo test --lib fx_insert_table_ops_ir::tests`; `cargo test --lib ingest::from_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over addmm, arange, bmm, constant_pad_nd, conv_constant_pad_nd, embedding, eye, full, matmul, mm, ones, and zeros; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `269 passed, 13 skipped, 10 expected xfails, 411 deselected`. No model lane was run. This is setup-positive in LOC, but it moves dtype-string semantics to the graph dtype type and gives qparam consumers a typed accessor instead of reaching into `dtype_str`.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1425,7 +1433,10 @@ from one metadata object to another is named by `copy_input_qparams_from` and
 including the distinction between "any qparam metadata is present", "any qparam
 map is non-empty", and "both input/output qparam maps are non-empty". One-line
 pass-local wrappers around these accessors should be inlined unless they name a
-real pass-specific invariant.
+real pass-specific invariant. `DType` now owns torch dtype-string parsing via
+`DType::from_torch_str`, and `QParam` exposes typed dtype access via
+`QParam::dtype()`/`is_integer_dtype()` so constant and serializer conversion
+paths no longer treat `tensor_data` as the dtype grammar owner.
 
 Problem:
 

@@ -6,7 +6,6 @@ use crate::fx_target::{shape_only_constant_target, ShapeOnlyConstantTarget};
 use crate::graph::ir::DType;
 use crate::lowering_effects::LoweringInputKind;
 use crate::store::TensorData;
-use crate::tensor_data::parse_torch_dtype;
 
 pub fn tensor_numel(shape: &[i64]) -> Option<usize> {
     shape.iter().try_fold(1usize, |acc, &dim| {
@@ -442,14 +441,14 @@ pub fn plan_constant_matmul_tensor(
 
     if let Some(output_qparam) = node.meta.output_qparam() {
         let output_values = quantize_values(&output.vec_f64()?, output_qparam)?;
-        let output_dtype = parse_torch_dtype(&output_qparam.dtype_str);
+        let output_dtype = output_qparam.dtype();
         return encode_tensor_values(&output_values, output.shape, output_dtype);
     }
 
     let output_dtype = node
         .meta
         .val_dtype()
-        .map(parse_torch_dtype)
+        .map(DType::from_torch_str)
         .unwrap_or(lhs.dtype);
     if output_dtype != DType::Float32 {
         return None;
