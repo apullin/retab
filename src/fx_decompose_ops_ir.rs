@@ -2119,60 +2119,15 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
         .meta
         .set_extra("arm_preserve_inf_literal", MetaValue::Bool(true));
 
-    let x_lt0 = ctx.bool(
-        graph,
-        "x_lt0",
-        "aten.lt.Tensor",
-        vec![IrArg::Node(x_id), IrArg::Node(zeros)],
-    );
+    let x_lt0 = ctx.lt(graph, "x_lt0", x_id, zeros);
+    let s = ctx.where_self(graph, "sign", x_lt0, neg_ones, one);
+    let a = ctx.abs(graph, "abs", x_id);
+    let abs_gt1 = ctx.gt(graph, "abs_gt1", a, one);
+    let abs_eq1 = ctx.eq(graph, "abs_eq1", a, one);
+    let a_math_gt = ctx.where_self(graph, "a_math_gt", abs_gt1, zeros, a);
+    let a_math = ctx.where_self(graph, "a_math", abs_eq1, zeros, a_math_gt);
 
-    let s = ctx.tensor(
-        graph,
-        "sign",
-        "aten.where.self",
-        vec![IrArg::Node(x_lt0), IrArg::Node(neg_ones), IrArg::Node(one)],
-    );
-
-    let a = ctx.tensor(graph, "abs", "aten.abs.default", vec![IrArg::Node(x_id)]);
-
-    let abs_gt1 = ctx.bool(
-        graph,
-        "abs_gt1",
-        "aten.gt.Tensor",
-        vec![IrArg::Node(a), IrArg::Node(one)],
-    );
-
-    let abs_eq1 = ctx.bool(
-        graph,
-        "abs_eq1",
-        "aten.eq.Tensor",
-        vec![IrArg::Node(a), IrArg::Node(one)],
-    );
-
-    let a_math_gt = ctx.tensor(
-        graph,
-        "a_math_gt",
-        "aten.where.self",
-        vec![IrArg::Node(abs_gt1), IrArg::Node(zeros), IrArg::Node(a)],
-    );
-
-    let a_math = ctx.tensor(
-        graph,
-        "a_math",
-        "aten.where.self",
-        vec![
-            IrArg::Node(abs_eq1),
-            IrArg::Node(zeros),
-            IrArg::Node(a_math_gt),
-        ],
-    );
-
-    let z = ctx.tensor(
-        graph,
-        "z",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(x_id), IrArg::Node(x_id)],
-    );
+    let z = ctx.mul(graph, "z", x_id, x_id);
     let p = match ctx.horner_nodes(graph, "p", z, &[a0, a1, a2, a3]) {
         Some(node) => node,
         None => return false,
@@ -2182,55 +2137,15 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
         None => return false,
     };
 
-    let xp = ctx.tensor(
-        graph,
-        "xp",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(x_id), IrArg::Node(p)],
-    );
-    let y0_central = ctx.tensor(
-        graph,
-        "y0_central",
-        "aten.div.Tensor",
-        vec![IrArg::Node(xp), IrArg::Node(q)],
-    );
+    let xp = ctx.mul(graph, "xp", x_id, p);
+    let y0_central = ctx.div(graph, "y0_central", xp, q);
 
-    let one_minus_a = ctx.tensor(
-        graph,
-        "one_minus_a",
-        "aten.sub.Tensor",
-        vec![IrArg::Node(one), IrArg::Node(a_math)],
-    );
-    let u = ctx.tensor(
-        graph,
-        "u",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(one_minus_a), IrArg::Node(half)],
-    );
-    let u_safe = ctx.tensor(
-        graph,
-        "u_safe",
-        "aten.where.self",
-        vec![IrArg::Node(abs_eq1), IrArg::Node(one), IrArg::Node(u)],
-    );
-    let log_u = ctx.tensor(
-        graph,
-        "log_u",
-        "aten.log.default",
-        vec![IrArg::Node(u_safe)],
-    );
-    let neg_log_u = ctx.tensor(
-        graph,
-        "neg_log_u",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(log_u), IrArg::Node(neg_ones)],
-    );
-    let t = ctx.tensor(
-        graph,
-        "t",
-        "aten.sqrt.default",
-        vec![IrArg::Node(neg_log_u)],
-    );
+    let one_minus_a = ctx.sub(graph, "one_minus_a", one, a_math);
+    let u = ctx.mul(graph, "u", one_minus_a, half);
+    let u_safe = ctx.where_self(graph, "u_safe", abs_eq1, one, u);
+    let log_u = ctx.log(graph, "log_u", u_safe);
+    let neg_log_u = ctx.mul(graph, "neg_log_u", log_u, neg_ones);
+    let t = ctx.sqrt(graph, "t", neg_log_u);
     let r = match ctx.horner_nodes(graph, "r", t, &[c0, c1, c2, c3]) {
         Some(node) => node,
         None => return false,
@@ -2240,183 +2155,40 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
         None => return false,
     };
 
-    let frac = ctx.tensor(
-        graph,
-        "frac",
-        "aten.div.Tensor",
-        vec![IrArg::Node(r), IrArg::Node(s_den)],
-    );
-    let frac_abs = ctx.tensor(
-        graph,
-        "frac_abs",
-        "aten.abs.default",
-        vec![IrArg::Node(frac)],
-    );
-    let y0_tail = ctx.tensor(
-        graph,
-        "y0_tail",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(s), IrArg::Node(frac_abs)],
-    );
+    let frac = ctx.div(graph, "frac", r, s_den);
+    let frac_abs = ctx.abs(graph, "frac_abs", frac);
+    let y0_tail = ctx.mul(graph, "y0_tail", s, frac_abs);
 
-    let in_central = ctx.bool(
-        graph,
-        "in_central",
-        "aten.lt.Tensor",
-        vec![IrArg::Node(a), IrArg::Node(central_range)],
-    );
+    let in_central = ctx.lt(graph, "in_central", a, central_range);
 
-    let y0_pre = ctx.tensor(
-        graph,
-        "y0_pre",
-        "aten.where.self",
-        vec![
-            IrArg::Node(in_central),
-            IrArg::Node(y0_central),
-            IrArg::Node(y0_tail),
-        ],
-    );
-    let y0_no_gt = ctx.tensor(
-        graph,
-        "y0_no_gt",
-        "aten.where.self",
-        vec![
-            IrArg::Node(abs_gt1),
-            IrArg::Node(zeros),
-            IrArg::Node(y0_pre),
-        ],
-    );
-    let y0 = ctx.tensor(
-        graph,
-        "y0",
-        "aten.where.self",
-        vec![
-            IrArg::Node(abs_eq1),
-            IrArg::Node(zeros),
-            IrArg::Node(y0_no_gt),
-        ],
-    );
+    let y0_pre = ctx.where_self(graph, "y0_pre", in_central, y0_central, y0_tail);
+    let y0_no_gt = ctx.where_self(graph, "y0_no_gt", abs_gt1, zeros, y0_pre);
+    let y0 = ctx.where_self(graph, "y0", abs_eq1, zeros, y0_no_gt);
 
-    let refine_mask = ctx.bool(
-        graph,
-        "refine_mask",
-        "aten.lt.Tensor",
-        vec![IrArg::Node(a), IrArg::Node(refine_max_abs)],
-    );
+    let refine_mask = ctx.lt(graph, "refine_mask", a, refine_max_abs);
 
-    let erf_y = ctx.tensor(graph, "erf_y", "aten.erf.default", vec![IrArg::Node(y0)]);
-    let err = ctx.tensor(
-        graph,
-        "err",
-        "aten.sub.Tensor",
-        vec![IrArg::Node(erf_y), IrArg::Node(x_id)],
-    );
-    let y_sq = ctx.tensor(
-        graph,
-        "y_sq",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(y0), IrArg::Node(y0)],
-    );
-    let neg_y_sq = ctx.tensor(
-        graph,
-        "neg_y_sq",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(y_sq), IrArg::Node(neg_ones)],
-    );
-    let exp_term = ctx.tensor(
-        graph,
-        "exp_term",
-        "aten.exp.default",
-        vec![IrArg::Node(neg_y_sq)],
-    );
-    let deriv = ctx.tensor(
-        graph,
-        "deriv",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(exp_term), IrArg::Node(two_over_sqrt_pi)],
-    );
-    let deriv_tiny = ctx.bool(
-        graph,
-        "deriv_tiny",
-        "aten.lt.Tensor",
-        vec![IrArg::Node(deriv), IrArg::Node(deriv_eps)],
-    );
-    let corr = ctx.tensor(
-        graph,
-        "corr",
-        "aten.div.Tensor",
-        vec![IrArg::Node(err), IrArg::Node(deriv)],
-    );
-    let corr_abs = ctx.tensor(
-        graph,
-        "corr_abs",
-        "aten.abs.default",
-        vec![IrArg::Node(corr)],
-    );
-    let corr_huge = ctx.bool(
-        graph,
-        "corr_huge",
-        "aten.gt.Tensor",
-        vec![IrArg::Node(corr_abs), IrArg::Node(corr_max)],
-    );
-    let y1 = ctx.tensor(
-        graph,
-        "y1",
-        "aten.sub.Tensor",
-        vec![IrArg::Node(y0), IrArg::Node(corr)],
-    );
-    let y_safe_small = ctx.tensor(
-        graph,
-        "y_safe_small",
-        "aten.where.self",
-        vec![IrArg::Node(deriv_tiny), IrArg::Node(y0), IrArg::Node(y1)],
-    );
-    let y_safe = ctx.tensor(
-        graph,
-        "y_safe",
-        "aten.where.self",
-        vec![
-            IrArg::Node(corr_huge),
-            IrArg::Node(y0),
-            IrArg::Node(y_safe_small),
-        ],
-    );
-    let y = ctx.tensor(
-        graph,
-        "y",
-        "aten.where.self",
-        vec![
-            IrArg::Node(refine_mask),
-            IrArg::Node(y_safe),
-            IrArg::Node(y0),
-        ],
-    );
+    let erf_y = ctx.erf(graph, "erf_y", y0);
+    let err = ctx.sub(graph, "err", erf_y, x_id);
+    let y_sq = ctx.mul(graph, "y_sq", y0, y0);
+    let neg_y_sq = ctx.mul(graph, "neg_y_sq", y_sq, neg_ones);
+    let exp_term = ctx.exp(graph, "exp_term", neg_y_sq);
+    let deriv = ctx.mul(graph, "deriv", exp_term, two_over_sqrt_pi);
+    let deriv_tiny = ctx.lt(graph, "deriv_tiny", deriv, deriv_eps);
+    let corr = ctx.div(graph, "corr", err, deriv);
+    let corr_abs = ctx.abs(graph, "corr_abs", corr);
+    let corr_huge = ctx.gt(graph, "corr_huge", corr_abs, corr_max);
+    let y1 = ctx.sub(graph, "y1", y0, corr);
+    let y_safe_small = ctx.where_self(graph, "y_safe_small", deriv_tiny, y0, y1);
+    let y_safe = ctx.where_self(graph, "y_safe", corr_huge, y0, y_safe_small);
+    let y = ctx.where_self(graph, "y", refine_mask, y_safe, y0);
 
-    let inf_signed = ctx.tensor(
-        graph,
-        "inf_signed",
-        "aten.where.self",
-        vec![
-            IrArg::Node(x_lt0),
-            IrArg::Node(neg_inf),
-            IrArg::Node(pos_inf),
-        ],
-    );
-    let out_gt1 = ctx.tensor(
-        graph,
-        "out_gt1",
-        "aten.where.self",
-        vec![IrArg::Node(abs_gt1), IrArg::Node(nan), IrArg::Node(y)],
-    );
-    ctx.replace_output(
+    let inf_signed = ctx.where_self(graph, "inf_signed", x_lt0, neg_inf, pos_inf);
+    let out_gt1 = ctx.where_self(graph, "out_gt1", abs_gt1, nan, y);
+    ctx.replace_nodes(
         graph,
         "result",
         "aten.where.self",
-        vec![
-            IrArg::Node(abs_eq1),
-            IrArg::Node(inf_signed),
-            IrArg::Node(out_gt1),
-        ],
+        &[abs_eq1, inf_signed, out_gt1],
     );
     true
 }
