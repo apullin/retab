@@ -1,4 +1,4 @@
-use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, NodeOp, TensorSource};
+use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, TensorSource};
 use crate::graph::ir::DType;
 use crate::lowering_effects::{
     CastInt64InputToInt32Effect, LoweringEffect, LoweringEffectBatch, LoweringInputKind,
@@ -13,19 +13,17 @@ impl EffectfulIrPass for IrCastInt64ToInt32EffectPass {
 
     fn run(&self, graph: &mut IrGraph) -> EffectfulIrPassResult {
         let candidate_ids: Vec<usize> = graph
-            .nodes
-            .iter()
-            .filter(|node| node.alive && node.op == NodeOp::Placeholder)
-            .filter(|node| graph.has_live_users(node.id))
-            .filter(|node| node.meta.val_dtype() == Some("torch.int64"))
-            .filter(|node| {
+            .live_placeholder_ids()
+            .into_iter()
+            .filter(|&id| graph.has_live_users(id))
+            .filter(|&id| graph.node(id).meta.val_dtype() == Some("torch.int64"))
+            .filter(|&id| {
                 matches!(
-                    node.tensor.as_ref().map(|tensor| &tensor.source),
+                    graph.node(id).tensor.as_ref().map(|tensor| &tensor.source),
                     Some(TensorSource::ExportedProgramInput(binding))
                         if binding.input_kind == LoweringInputKind::Buffer
                 )
             })
-            .map(|node| node.id)
             .collect();
 
         let mut modified = false;
@@ -69,7 +67,9 @@ impl EffectfulIrPass for IrCastInt64ToInt32EffectPass {
 
 #[cfg(test)]
 mod tests {
-    use crate::fx_ir::{IrArg, IrGraph, MetaValue, NodeMeta, NodeTensor, PlaceholderTensorBinding};
+    use crate::fx_ir::{
+        IrArg, IrGraph, MetaValue, NodeMeta, NodeOp, NodeTensor, PlaceholderTensorBinding,
+    };
     use crate::store::TensorData;
 
     use super::*;

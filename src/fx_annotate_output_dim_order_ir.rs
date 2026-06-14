@@ -1,4 +1,4 @@
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId};
 
 pub struct IrAnnotateOutputDimOrderPass;
 
@@ -20,15 +20,8 @@ impl IrPass for IrAnnotateOutputDimOrderPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let output_ids: Vec<NodeId> = graph
-            .nodes
-            .iter()
-            .filter(|node| node.alive && node.op == NodeOp::Output)
-            .map(|node| node.id)
-            .collect();
-
         let mut modified = false;
-        for output_id in output_ids {
+        for output_id in graph.live_output_ids() {
             if graph.nodes[output_id].meta.original_dim_orders.is_some() {
                 continue;
             }

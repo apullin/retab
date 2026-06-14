@@ -305,10 +305,7 @@ fn spatial_rank(graph: &IrGraph, id: NodeId, default: usize) -> usize {
 impl IrToTosaMemoryFormatPass {
     fn annotate_spatial_ranks(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        for id in 0..graph.nodes.len() {
-            if !graph.nodes[id].alive {
-                continue;
-            }
+        for id in graph.live_node_ids() {
             let Some(val) = graph.nodes[id].meta.val.as_ref() else {
                 continue;
             };
@@ -323,8 +320,8 @@ impl IrToTosaMemoryFormatPass {
         let mut changed = true;
         while changed {
             changed = false;
-            for id in (0..graph.nodes.len()).rev() {
-                if !graph.nodes[id].alive || graph.nodes[id].meta.val.is_none() {
+            for id in graph.live_node_ids().into_iter().rev() {
+                if graph.nodes[id].meta.val.is_none() {
                     continue;
                 }
                 let rank = graph.nodes[id]
@@ -352,11 +349,7 @@ impl IrToTosaMemoryFormatPass {
 
     fn annotate_dim_orders(&self, graph: &mut IrGraph, is_control_flow_gm: bool) -> bool {
         let mut modified = false;
-        let ids: Vec<_> = (0..graph.nodes.len()).collect();
-        for id in ids {
-            if !graph.nodes[id].alive {
-                continue;
-            }
+        for id in graph.live_node_ids() {
             let Some(val) = graph.nodes[id].meta.val.as_ref() else {
                 continue;
             };
@@ -419,13 +412,9 @@ impl IrToTosaMemoryFormatPass {
 
     fn insert_view_boundary_transposes(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<_> = (0..graph.nodes.len()).collect();
         let mut constant_memo = HashMap::new();
-        for id in ids {
-            if !graph.nodes[id].alive
-                || graph.nodes[id].op != NodeOp::CallFunction
-                || !is_view_like_target(&graph.nodes[id].target)
-            {
+        for id in graph.live_call_function_ids() {
+            if !is_view_like_target(&graph.nodes[id].target) {
                 continue;
             }
             if is_constant_subgraph(graph, id, &mut constant_memo) {
@@ -485,9 +474,8 @@ impl IrToTosaMemoryFormatPass {
 
     fn insert_input_transposes(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<_> = (0..graph.nodes.len()).collect();
-        for id in ids {
-            if !graph.nodes[id].alive || !is_input_placeholder(graph, id) {
+        for id in graph.live_node_ids() {
+            if !is_input_placeholder(graph, id) {
                 continue;
             }
             if graph.nodes[id]
@@ -524,14 +512,7 @@ impl IrToTosaMemoryFormatPass {
             return false;
         }
         let mut modified = false;
-        let output_ids: Vec<_> = graph
-            .nodes
-            .iter()
-            .filter(|node| node.alive && node.op == NodeOp::Output)
-            .map(|node| node.id)
-            .collect();
-
-        for output_id in output_ids {
+        for output_id in graph.live_output_ids() {
             let outputs = output_node_ids(graph, output_id);
             let original_dim_orders = graph.nodes[output_id].meta.original_dim_orders.clone();
             for (index, output_arg) in outputs.into_iter().enumerate() {
@@ -596,12 +577,8 @@ impl IrToTosaMemoryFormatPass {
 
     fn remap_permute_args(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        let ids: Vec<_> = (0..graph.nodes.len()).collect();
-        for id in ids {
-            if !graph.nodes[id].alive
-                || graph.nodes[id].op != NodeOp::CallFunction
-                || !is_permute_target(&graph.nodes[id].target)
-            {
+        for id in graph.live_call_function_ids() {
+            if !is_permute_target(&graph.nodes[id].target) {
                 continue;
             }
             let Some(input_id) = graph.nodes[id].args.first().and_then(|arg| arg.as_node()) else {
@@ -683,7 +660,8 @@ impl IrPass for IrToTosaMemoryFormatPass {
         modified |= self.remap_permute_args(graph);
 
         if crate::config::debug_layout_enabled() {
-            for node in graph.nodes.iter().filter(|node| node.alive) {
+            for id in graph.live_node_ids() {
+                let node = &graph.nodes[id];
                 let Some(val) = node.meta.val.as_ref() else {
                     continue;
                 };

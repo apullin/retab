@@ -1015,6 +1015,14 @@ Deleted: raw target gates from embedding, logit, index_select, index.Tensor, cum
 Added: shared `fx_target` predicates and classifier tests for those single-op decomposition target families
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_target`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over adaptive_avg_pool2d, cumsum, embedding, full, index_select, index_tensor, logit, masked_fill, mean_dim, select_scatter, and sum; Rust LOC check
 Note: Full Rust tests passed `134 passed`; focused Python smoke passed `335 passed, 8 skipped, 18 expected xfails, 537 deselected`. No model lane was run. This is setup-positive; the next target-grammar slice should pay it down by migrating adjacent raw target checks without adding many new predicates.
+
+2026-06-14, mixed live-node graph query slice
+Rust LOC: 37,158 -> 37,153
+Movement: -5 Rust LOC
+Deleted: local mixed-node live traversal snapshots from memory-format rank/dim-order annotation, boundary transpose insertion, output transpose insertion, permute-arg remapping, debug layout logging, output-dim annotation, and int64-buffer cast planning
+Added: `IrGraph::live_node_ids()`, `IrGraph::live_placeholder_ids()`, and `IrGraph::live_output_ids()` as graph-query siblings to `live_call_function_ids()`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over clamp, clone, conv2d, permute, to_copy, transpose_conv2d, view, dim_order, and int64; Rust LOC check
+Note: Full Rust tests passed `134 passed`; focused Python smoke passed `355 passed, 3 expected xfails, 809 deselected`. No model lane was run. This pays down the previous graph-query setup in memory-format without changing traversal order; reverse propagation still uses the live-node snapshot in reverse.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1207,10 +1215,10 @@ Status:
 Initial graph-query slice started. `IrGraph::live_call_function_ids()` now
 owns the common "snapshot live call_function nodes before mutating" traversal,
 and 46 pass loops use it instead of spelling a local `0..nodes.len()` snapshot
-plus alive/op guard. The remaining traversal loops are mostly memory-format
-passes that mix call-function, placeholder, and output node handling, so they
-need a separate query shape rather than forcing everything through the live-call
-helper. Remaining work should keep adding small builder/query
+plus alive/op guard. Mixed traversal now has explicit graph-query siblings:
+`live_node_ids`, `live_placeholder_ids`, and `live_output_ids`. Memory-format,
+output-dim annotation, and int64-buffer cast planning use those helpers instead
+of local mixed-node snapshots. Remaining work should keep adding small builder/query
 operations only when they replace repeated rewrite structure across several
 passes.
 

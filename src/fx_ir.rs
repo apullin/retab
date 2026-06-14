@@ -783,10 +783,34 @@ impl IrGraph {
             .collect()
     }
 
+    pub fn live_node_ids(&self) -> Vec<NodeId> {
+        self.nodes
+            .iter()
+            .filter(|node| node.alive)
+            .map(|node| node.id)
+            .collect()
+    }
+
     pub fn live_call_function_ids(&self) -> Vec<NodeId> {
         self.nodes
             .iter()
             .filter(|node| node.alive && node.op == NodeOp::CallFunction)
+            .map(|node| node.id)
+            .collect()
+    }
+
+    pub fn live_placeholder_ids(&self) -> Vec<NodeId> {
+        self.nodes
+            .iter()
+            .filter(|node| node.alive && node.op == NodeOp::Placeholder)
+            .map(|node| node.id)
+            .collect()
+    }
+
+    pub fn live_output_ids(&self) -> Vec<NodeId> {
+        self.nodes
+            .iter()
+            .filter(|node| node.alive && node.op == NodeOp::Output)
             .map(|node| node.id)
             .collect()
     }
