@@ -61,13 +61,9 @@ impl IrPass for IrExpandWhereMaskPass {
             }
 
             // Build meta for the view_copy node (padded mask shape, same dtype as mask)
-            let mask_dtype = graph
-                .node_dtype(mask_id)
-                .unwrap_or("torch.bool")
-                .to_string();
             let view_meta = graph.nodes[mask_id]
                 .meta
-                .cloned_with_val(padded_mask_shape.clone(), &mask_dtype);
+                .cloned_with_same_dtype_or(padded_mask_shape.clone(), "torch.bool");
 
             // Insert view_copy: reshape mask to padded shape
             let view_id = graph.add_anchored_view_copy(
@@ -81,7 +77,7 @@ impl IrPass for IrExpandWhereMaskPass {
             // Build meta for the expand_copy node (full output shape, same dtype)
             let expand_meta = graph.nodes[mask_id]
                 .meta
-                .cloned_with_val(output_shape.clone(), mask_dtype);
+                .cloned_with_same_dtype_or(output_shape.clone(), "torch.bool");
 
             // Insert expand_copy: broadcast to full output shape
             let expand_id = graph.add_anchored_call_function(

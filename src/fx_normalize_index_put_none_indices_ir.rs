@@ -33,8 +33,7 @@ fn add_permute(
     prev: &mut Option<NodeId>,
 ) -> (NodeId, Vec<i64>) {
     let out_shape = permute_shape(input_shape, order);
-    let dtype = input_meta.val_dtype_or_float32().to_string();
-    let meta = input_meta.cloned_with_val(out_shape.clone(), &dtype);
+    let meta = input_meta.cloned_with_same_dtype_or_float32(out_shape.clone());
     let perm: Vec<i64> = order.iter().map(|&d| d as i64).collect();
     let n = graph.add_anchored_permute_copy(anchor, name, input_id, &perm, meta);
     if let Some(p) = *prev {
@@ -149,8 +148,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
         let (reshaped_id, reshaped_shape) = if data_shape.len() < aligned_rank {
             let mut padded = vec![1i64; aligned_rank - data_shape.len()];
             padded.extend_from_slice(&data_shape);
-            let dtype = data_meta.val_dtype_or_float32().to_string();
-            let meta = data_meta.cloned_with_val(padded.clone(), &dtype);
+            let meta = data_meta.cloned_with_same_dtype_or_float32(padded.clone());
             let n = graph.add_anchored_view_copy(
                 id,
                 format!("{}_datareshape", name),
@@ -196,9 +194,8 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     new_args.extend(rest_args);
     // result meta = permuted dest meta if permuted, else original
     let put_shape = permute_shape(&dest_shape, &destination_dim_order);
-    let put_dtype = orig_meta.val_dtype_or_float32().to_string();
     let put_meta = if needs_dest_permute {
-        orig_meta.cloned_with_val(put_shape.clone(), &put_dtype)
+        orig_meta.cloned_with_same_dtype_or_float32(put_shape.clone())
     } else {
         orig_meta.clone()
     };

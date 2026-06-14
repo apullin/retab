@@ -34,7 +34,7 @@ fn boundary_rescale_meta(
 ) -> fx_ir::NodeMeta {
     let mut meta =
         base_meta.rescale_meta_with_input_qparam(source_meta, source_qp.clone(), target_qp.clone());
-    if let Some(dim_order) = source_meta.tosa_dim_order.clone() {
+    if let Some(dim_order) = source_meta.cloned_tosa_dim_order() {
         meta.set_tosa_dim_order(dim_order);
     }
     meta
@@ -88,7 +88,7 @@ fn stamp_boundary_placeholder_meta(
     if count_marker_write {
         changed += 1;
     }
-    if let Some(val) = input.meta.val.clone() {
+    if let Some(val) = input.meta.tensor_facts().cloned() {
         ph_meta.set_val(val);
         changed += 1;
     }
@@ -154,7 +154,7 @@ fn boundary_placeholder_dim_order(parent_arg: &fx_ir::IrNode) -> Option<Vec<usiz
     if parent_arg.name.ends_with("_input_layout") || is_tosa_transpose_target(&parent_arg.target) {
         return Some((0..rank).collect());
     }
-    parent_arg.meta.tosa_dim_order.clone()
+    parent_arg.meta.cloned_tosa_dim_order()
 }
 
 fn collect_boundary_contracts_for_graph(
@@ -183,8 +183,7 @@ fn collect_boundary_contracts_for_graph(
                 let arg_node = ir.nodes.get(arg_id)?;
                 let fallback_qparam = node
                     .meta
-                    .pre_pass_arg_qparams
-                    .as_ref()
+                    .pre_pass_arg_qparams()
                     .and_then(|saved| saved.get(&idx).cloned())
                     .or_else(|| metadata::extract_effective_qparam_ir(ir, arg_id));
                 Some(BoundaryInputMeta {
@@ -381,7 +380,7 @@ fn annotate_parent_rank4_dim_order_ir(graph: &mut fx_ir::IrGraph) -> u32 {
                 "arm_control_flow_parent_output_user",
                 fx_ir::MetaValue::Bool(true),
             );
-            if graph.nodes[user_id].meta.tosa_dim_order.as_deref() != Some(&NHWC_DIM_ORDER) {
+            if graph.nodes[user_id].meta.tosa_dim_order() != Some(&NHWC_DIM_ORDER) {
                 graph.nodes[user_id]
                     .meta
                     .set_tosa_dim_order(NHWC_DIM_ORDER.to_vec());

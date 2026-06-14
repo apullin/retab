@@ -31,8 +31,7 @@ fn needs_int48_bias(meta: &NodeMeta) -> bool {
         .map(|value| value.contains("INT48"))
         .unwrap_or(false)
         || meta
-            .input_qparams
-            .as_ref()
+            .input_qparams()
             .map(|qparams| qparams.values().any(|qp| qp.dtype() == DType::Int16))
             .unwrap_or(false)
 }

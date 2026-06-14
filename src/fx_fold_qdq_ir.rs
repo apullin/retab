@@ -862,7 +862,7 @@ mod tests {
         assert!(graph.node(dq).alive);
         assert!(graph.node(q).alive);
         assert!(matches!(graph.node(add).args[0], IrArg::Node(id) if id == dq));
-        assert!(graph.node(add).meta.input_qparams.is_none());
-        assert!(graph.node(add).meta.output_qparams.is_none());
+        assert!(graph.node(add).meta.input_qparams().is_none());
+        assert!(graph.node(add).meta.output_qparams().is_none());
     }
 }

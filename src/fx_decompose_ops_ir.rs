@@ -1557,9 +1557,7 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
     keepdim_shape[dim] = 1;
 
     let mut reduce_meta = value_meta.cloned_with_val(keepdim_shape, &dtype);
-    reduce_meta.val_dim_order = input_meta.val_dim_order.clone();
-    reduce_meta.tosa_dim_order = input_meta.tosa_dim_order.clone();
-    reduce_meta.original_dim_orders = input_meta.original_dim_orders.clone();
+    reduce_meta.copy_dim_order_facts_from(&input_meta);
 
     let reduce_id = graph.add_anchored_call_function(
         id,

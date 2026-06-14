@@ -22,7 +22,7 @@ impl IrPass for IrAnnotateOutputDimOrderPass {
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
         for output_id in graph.live_output_ids() {
-            if graph.nodes[output_id].meta.original_dim_orders.is_some() {
+            if graph.nodes[output_id].meta.original_dim_orders().is_some() {
                 continue;
             }
 

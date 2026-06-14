@@ -405,7 +405,7 @@ mod tests {
 
         let add_node = graph.node(add);
         assert_eq!(add_node.meta.val_dtype(), Some("torch.int32"));
-        assert_eq!(add_node.meta.input_qparams.as_ref().unwrap().len(), 2);
+        assert_eq!(add_node.meta.input_qparams().unwrap().len(), 2);
         assert!(matches!(add_node.args[0], IrArg::Node(id) if graph.node(id).is_rescale()));
         assert!(matches!(add_node.args[1], IrArg::Node(id) if graph.node(id).is_rescale()));
 

@@ -73,7 +73,7 @@ fn is_channel_reshape(input_shape: &[i64], output_shape: &[i64]) -> bool {
 
 fn is_input_placeholder(graph: &IrGraph, id: NodeId) -> bool {
     let node = &graph.nodes[id];
-    if node.op != NodeOp::Placeholder || node.meta.val.is_none() {
+    if node.op != NodeOp::Placeholder || node.meta.tensor_facts().is_none() {
         return false;
     }
     if node.meta.extra_bool("arm_constant_placeholder") == Some(true) {
@@ -227,8 +227,7 @@ fn unique_name(graph: &IrGraph, base: &str) -> String {
 
 fn transpose_meta(input_meta: &NodeMeta, perm: &[usize]) -> NodeMeta {
     let mut meta = input_meta
-        .val
-        .as_ref()
+        .tensor_facts()
         .map(|val| input_meta.cloned_with_val(permuted_shape(&val.shape, perm), val.dtype.clone()))
         .unwrap_or_else(|| input_meta.clone());
     meta.set_tosa_dim_order((0..perm.len()).collect());
@@ -300,7 +299,7 @@ impl IrToTosaMemoryFormatPass {
     fn annotate_spatial_ranks(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
         for id in graph.live_node_ids() {
-            let Some(val) = graph.nodes[id].meta.val.as_ref() else {
+            let Some(val) = graph.nodes[id].meta.tensor_facts() else {
                 continue;
             };
             let rank = initial_spatial_rank(val.rank());
@@ -315,13 +314,12 @@ impl IrToTosaMemoryFormatPass {
         while changed {
             changed = false;
             for id in graph.live_node_ids().into_iter().rev() {
-                if graph.nodes[id].meta.val.is_none() {
+                if graph.nodes[id].meta.tensor_facts().is_none() {
                     continue;
                 }
                 let rank = graph.nodes[id]
                     .meta
-                    .val
-                    .as_ref()
+                    .tensor_facts()
                     .map(|val| val.rank())
                     .unwrap_or(0);
                 let limit = rank.saturating_sub(2);
@@ -344,7 +342,7 @@ impl IrToTosaMemoryFormatPass {
     fn annotate_dim_orders(&self, graph: &mut IrGraph, is_control_flow_gm: bool) -> bool {
         let mut modified = false;
         for id in graph.live_node_ids() {
-            let Some(val) = graph.nodes[id].meta.val.as_ref() else {
+            let Some(val) = graph.nodes[id].meta.tensor_facts() else {
                 continue;
             };
             let rank = val.rank();
@@ -352,7 +350,7 @@ impl IrToTosaMemoryFormatPass {
 
             if graph.nodes[id].op == NodeOp::Output
                 && !is_control_flow_gm
-                && graph.nodes[id].meta.original_dim_orders.is_none()
+                && graph.nodes[id].meta.original_dim_orders().is_none()
             {
                 let orders: Vec<Vec<usize>> = output_node_ids(graph, id)
                     .into_iter()
@@ -396,7 +394,7 @@ impl IrToTosaMemoryFormatPass {
                 (0..rank).collect::<Vec<_>>()
             };
 
-            if graph.nodes[id].meta.tosa_dim_order.as_deref() != Some(dim_order.as_slice()) {
+            if graph.nodes[id].meta.tosa_dim_order() != Some(dim_order.as_slice()) {
                 graph.nodes[id].meta.set_tosa_dim_order(dim_order);
                 modified = true;
             }
@@ -482,7 +480,7 @@ impl IrToTosaMemoryFormatPass {
                 continue;
             }
             let perm = channels_last_order(rank, spatial_rank(graph, id, 2));
-            if graph.nodes[id].meta.tosa_dim_order.as_deref() == Some(perm.as_slice()) {
+            if graph.nodes[id].meta.tosa_dim_order() == Some(perm.as_slice()) {
                 continue;
             }
             insert_transpose_after(
@@ -503,7 +501,10 @@ impl IrToTosaMemoryFormatPass {
         let mut modified = false;
         for output_id in graph.live_output_ids() {
             let outputs = output_node_ids(graph, output_id);
-            let original_dim_orders = graph.nodes[output_id].meta.original_dim_orders.clone();
+            let original_dim_orders = graph.nodes[output_id]
+                .meta
+                .original_dim_orders()
+                .map(|orders| orders.to_vec());
             for (index, output_arg) in outputs.into_iter().enumerate() {
                 if !graph.nodes[output_arg].alive
                     || graph.nodes[output_arg]
@@ -536,18 +537,22 @@ impl IrToTosaMemoryFormatPass {
                     continue;
                 }
                 let perm = channels_last_inverse_order(rank, spatial_rank(graph, output_arg, 2));
-                let logical_val = graph.nodes[output_arg].meta.val.clone().map(|mut val| {
-                    let identity = (0..rank).collect::<Vec<_>>();
-                    if graph.nodes[output_arg]
+                let logical_val =
+                    graph.nodes[output_arg]
                         .meta
-                        .tosa_dim_order
-                        .as_ref()
-                        .is_some_and(|order| order != &identity)
-                    {
-                        val.shape = permuted_shape(&val.shape, &perm);
-                    }
-                    val
-                });
+                        .tensor_facts()
+                        .cloned()
+                        .map(|mut val| {
+                            let identity = (0..rank).collect::<Vec<_>>();
+                            if graph.nodes[output_arg]
+                                .meta
+                                .tosa_dim_order()
+                                .is_some_and(|order| order != identity.as_slice())
+                            {
+                                val.shape = permuted_shape(&val.shape, &perm);
+                            }
+                            val
+                        });
                 let transpose_id = insert_transpose_before(
                     graph,
                     output_id,
@@ -584,8 +589,7 @@ impl IrToTosaMemoryFormatPass {
             let expected_cl = channels_last_order(input_rank, spatial_rank(graph, input_id, 2));
             let input_is_nhwc = graph.nodes[input_id]
                 .meta
-                .tosa_dim_order
-                .as_deref()
+                .tosa_dim_order()
                 .map(|order| order == expected_cl.as_slice())
                 .unwrap_or(false)
                 || is_tosa_transpose_target(&graph.nodes[input_id].target);
@@ -651,7 +655,7 @@ impl IrPass for IrToTosaMemoryFormatPass {
         if crate::config::debug_layout_enabled() {
             for id in graph.live_node_ids() {
                 let node = &graph.nodes[id];
-                let Some(val) = node.meta.val.as_ref() else {
+                let Some(val) = node.meta.tensor_facts() else {
                     continue;
                 };
                 eprintln!(
@@ -659,8 +663,8 @@ impl IrPass for IrToTosaMemoryFormatPass {
                     node.name,
                     node.target,
                     val.shape,
-                    node.meta.tosa_spatial_rank,
-                    node.meta.tosa_dim_order,
+                    node.meta.tosa_spatial_rank(),
+                    node.meta.cloned_tosa_dim_order(),
                 );
             }
         }

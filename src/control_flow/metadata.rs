@@ -260,8 +260,7 @@ pub(crate) fn strip_while_boundary_qdq_ir(graph: &mut IrGraph) -> bool {
         let mut iqp_map: HashMap<usize, QParam> = graph
             .node(out_id)
             .meta
-            .input_qparams
-            .clone()
+            .cloned_input_qparams()
             .unwrap_or_default();
         for (i, &arg_id) in out_arg_ids.iter().enumerate() {
             if !graph.nodes[arg_id].alive || !graph.nodes[arg_id].is_dequantize() {

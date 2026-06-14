@@ -121,8 +121,7 @@ impl IrPass for IrSizeAdjustInputPass {
             // input quantization onto each slice so it stays in the input domain.
             let consumer_input_q = graph.nodes[id]
                 .meta
-                .input_qparams
-                .as_ref()
+                .input_qparams()
                 .and_then(|m| m.get(&0))
                 .cloned();
             let mut current = input_id;

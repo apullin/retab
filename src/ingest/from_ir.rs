@@ -952,16 +952,15 @@ fn map_list(
 }
 
 fn map_meta(m: &IrNodeMeta) -> NodeMeta {
-    let val = match &m.val {
+    let val = match m.tensor_facts() {
         Some(ft) => TensorInfo::new(&ft.shape, DType::from_torch_str(&ft.dtype)),
         None => TensorInfo::new(&[], DType::Float32),
     };
     let mut meta = NodeMeta::new(val);
-    meta.input_qparams = qparam_entries(&m.input_qparams);
-    meta.output_qparams = qparam_entries(&m.output_qparams);
+    meta.input_qparams = qparam_entries(m.input_qparams());
+    meta.output_qparams = qparam_entries(m.output_qparams());
     meta.tosa_dim_order = m
-        .tosa_dim_order
-        .as_ref()
+        .tosa_dim_order()
         .map(|v| v.iter().map(|&x| x as u8).collect());
     meta.tosa_special_dtype = special_dtype_from_extras(m);
     meta.arm_control_flow_parent_output_user = matches!(
@@ -971,7 +970,7 @@ fn map_meta(m: &IrNodeMeta) -> NodeMeta {
     meta
 }
 
-fn qparam_entries<A>(m: &Option<HashMap<usize, QParam>>) -> SmallVec<A>
+fn qparam_entries<A>(m: Option<&HashMap<usize, QParam>>) -> SmallVec<A>
 where
     A: smallvec::Array<Item = (u32, QuantArgs)>,
 {

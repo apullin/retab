@@ -1840,7 +1840,12 @@ also named on `NodeMeta`, covering conv accumulator bias decomposition,
 carried-output RESCALE insertion, sum decomposition, and memory-format spatial
 rank propagation. Qparam-domain equality now lives on `QParam`, making
 control-flow boundary checks, grouped-conv boundary cleanup, and int32 WHERE
-rescale normalization state their intended equality domain explicitly.
+rescale normalization state their intended equality domain explicitly. FX-side
+`NodeMeta` storage is now split into private tensor, quant, and layout domains,
+so production passes use named metadata operations rather than reaching into the
+storage layout. Shape-only metadata restamps that preserve the source dtype now
+use `NodeMeta::cloned_with_same_dtype_or*`, covering repeat-interleave,
+pixel-shuffle, where-mask expansion, and index-put None normalization.
 
 2026-06-14, qparam map accessor slice
 
@@ -1854,6 +1859,29 @@ cloning, and whole-map copy restoration
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`;
 focused Python smoke via `/tmp/et.sh` over addmm, conv2d, conv3d, cumsum,
 linear, sum, and transpose_conv2d.
+
+2026-06-14, TensorFacts storage-domain slice
+
+Rust LOC: 35,938
+
+Movement: +36 Rust LOC from the previous committed checkpoint, -2 from the
+intermediate uncommitted storage-split checkpoint.
+
+Deleted: public FX-side `NodeMeta` field access for tensor/qparam/layout storage,
+remaining test-only direct qparam field assertions, local same-dtype string
+plumbing in repeat-interleave, pixel-shuffle, where-mask expansion, and
+index-put None normalization.
+
+Added: private `TensorFacts`/`QuantFacts`/`LayoutFacts` storage under
+`NodeMeta`, `NodeMeta::copy_dim_order_facts_from`,
+`NodeMeta::tosa_spatial_rank`, and `NodeMeta::cloned_with_same_dtype_or*`.
+
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; rebuild via
+`/tmp/et.sh` with `maturin develop --release` printing
+`Installed retab-0.1.0`; focused Python smoke over adaptive avg-pool,
+avg-pool, cond, conv1d, conv2d, gather, group-norm, index-put, index-select,
+index-tensor, layer-norm, linear, max-pool, pixel-shuffling, repeat, slice,
+slice-scatter, unfold, view, where, and while: 834 passed, 21 xfailed.
 
 Problem:
 

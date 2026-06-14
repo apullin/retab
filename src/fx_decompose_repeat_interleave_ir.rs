@@ -55,8 +55,8 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
                 return false;
             }
 
-            let dtype = graph.node_dtype_or_float32(id).to_string();
             let node_name = graph.nodes[id].name.clone();
+            let base_meta = graph.nodes[id].meta.clone();
 
             // 1. unsqueeze_copy(x, dim + 1)
             let unsqueeze_dim = dim + 1;
@@ -71,9 +71,8 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
                 unsqueeze_shape.push(1);
             }
 
-            let unsqueeze_meta = graph.nodes[id]
-                .meta
-                .cloned_with_val(unsqueeze_shape.clone(), &dtype);
+            let unsqueeze_meta =
+                base_meta.cloned_with_same_dtype_or_float32(unsqueeze_shape.clone());
             let unsqueezed = graph.add_anchored_call_function(
                 id,
                 format!("{}_unsqueeze", node_name),
@@ -90,7 +89,7 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
             let mut repeated_shape = unsqueeze_shape;
             repeated_shape[unsqueeze_dim as usize] = repeats;
 
-            let repeat_meta = graph.nodes[id].meta.cloned_with_val(repeated_shape, &dtype);
+            let repeat_meta = base_meta.cloned_with_same_dtype_or_float32(repeated_shape);
             let repeated = graph.add_anchored_call_function(
                 id,
                 format!("{}_repeat", node_name),
@@ -103,9 +102,7 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
             let mut final_shape = input_shape;
             final_shape[dim as usize] *= repeats;
 
-            let view_meta = graph.nodes[id]
-                .meta
-                .cloned_with_val(final_shape.clone(), dtype);
+            let view_meta = base_meta.cloned_with_same_dtype_or_float32(final_shape.clone());
             graph.replace_with_view_copy(
                 id,
                 format!("{}_view", node_name),

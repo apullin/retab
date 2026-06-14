@@ -452,7 +452,7 @@ mod tests {
     fn inserts_after_raw_conv_using_consumer_input_qparam() {
         let mut graph = IrGraph::empty();
         let mut conv_meta = quantized_conv_meta();
-        conv_meta.output_qparams = None;
+        conv_meta.clear_output_qparams();
         let conv = int8_conv(&mut graph, "aten.conv2d.padding", conv_meta);
         let mut table_meta = int8_activation_meta();
         table_meta.set_single_input_qparam(qparam(0.125, 7, "torch.int8"));
@@ -478,7 +478,7 @@ mod tests {
     fn prefers_downstream_activation_output_qparam_over_layout_input_qparam() {
         let mut graph = IrGraph::empty();
         let mut conv_meta = quantized_conv_meta();
-        conv_meta.output_qparams = None;
+        conv_meta.clear_output_qparams();
         let conv = int8_conv(&mut graph, "backend.tosa.CONV2D.default", conv_meta);
         let mut transpose_meta = int8_activation_meta();
         transpose_meta.set_single_input_qparam(qparam(0.125, 7, "torch.int8"));

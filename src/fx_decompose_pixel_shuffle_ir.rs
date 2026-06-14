@@ -26,13 +26,12 @@ fn add_view_copy(
     shape: &[i64],
     name: String,
     base_meta: &NodeMeta,
-    dtype: &str,
 ) -> NodeId {
     graph.add_view_copy(
         name,
         input_id,
         shape,
-        base_meta.cloned_with_val(shape.to_vec(), dtype),
+        base_meta.cloned_with_same_dtype_or_float32(shape.to_vec()),
     )
 }
 
@@ -44,7 +43,6 @@ fn add_permute_copy(
     perm: &[usize],
     name: String,
     base_meta: &NodeMeta,
-    dtype: &str,
 ) -> NodeId {
     let permuted_shape: Vec<i64> = perm.iter().map(|&p| input_shape[p]).collect();
     let perm: Vec<i64> = perm.iter().map(|&p| p as i64).collect();
@@ -52,7 +50,7 @@ fn add_permute_copy(
         name,
         input_id,
         &perm,
-        base_meta.cloned_with_val(permuted_shape, dtype),
+        base_meta.cloned_with_same_dtype_or_float32(permuted_shape),
     )
 }
 
@@ -90,7 +88,6 @@ impl IrPass for IrDecomposePixelShufflePass {
                 None => return false,
             };
 
-            let orig_dtype = graph.node_dtype_or_float32(id).to_string();
             let node_name = graph.nodes[id].name.clone();
             let base_meta = graph.nodes[id].meta.clone();
 
@@ -109,7 +106,6 @@ impl IrPass for IrDecomposePixelShufflePass {
                     &view1_shape,
                     format!("{}_view1", node_name),
                     &base_meta,
-                    &orig_dtype,
                 );
 
                 // Step 2: permute_copy(0,1,4,2,5,3) -> (N, C, H, r, W, r)
@@ -121,7 +117,6 @@ impl IrPass for IrDecomposePixelShufflePass {
                     &perm,
                     format!("{}_permute", node_name),
                     &base_meta,
-                    &orig_dtype,
                 );
 
                 // Step 3: view_copy -> (N, C, H*r, W*r)
@@ -132,7 +127,6 @@ impl IrPass for IrDecomposePixelShufflePass {
                     &final_shape,
                     format!("{}_view2", node_name),
                     &base_meta,
-                    &orig_dtype,
                 );
 
                 graph.replace_and_erase(id, result_id);
@@ -154,7 +148,6 @@ impl IrPass for IrDecomposePixelShufflePass {
                     &view1_shape,
                     format!("{}_view1", node_name),
                     &base_meta,
-                    &orig_dtype,
                 );
 
                 // Step 2: permute_copy(0,1,3,5,2,4) -> (N, C, r, r, H//r, W//r)
@@ -166,7 +159,6 @@ impl IrPass for IrDecomposePixelShufflePass {
                     &perm,
                     format!("{}_permute", node_name),
                     &base_meta,
-                    &orig_dtype,
                 );
 
                 // Step 3: view_copy -> (N, C*r*r, H//r, W//r)
@@ -177,7 +169,6 @@ impl IrPass for IrDecomposePixelShufflePass {
                     &final_shape,
                     format!("{}_view2", node_name),
                     &base_meta,
-                    &orig_dtype,
                 );
 
                 graph.replace_and_erase(id, result_id);

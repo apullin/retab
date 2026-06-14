@@ -1578,15 +1578,25 @@ pub enum MetaValue {
 }
 
 #[derive(Debug, Clone, Default)]
+struct QuantFacts {
+    input_qparams: Option<HashMap<usize, QParam>>,
+    output_qparams: Option<HashMap<usize, QParam>>,
+    pre_pass_arg_qparams: Option<HashMap<usize, QParam>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LayoutFacts {
+    val_dim_order: Option<Vec<usize>>,
+    tosa_dim_order: Option<Vec<usize>>,
+    original_dim_orders: Option<Vec<Vec<usize>>>,
+    tosa_spatial_rank: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct NodeMeta {
-    pub input_qparams: Option<HashMap<usize, QParam>>,
-    pub output_qparams: Option<HashMap<usize, QParam>>,
-    pub val: Option<FakeTensorMeta>,
-    pub val_dim_order: Option<Vec<usize>>,
-    pub tosa_dim_order: Option<Vec<usize>>,
-    pub original_dim_orders: Option<Vec<Vec<usize>>>,
-    pub tosa_spatial_rank: Option<usize>,
-    pub pre_pass_arg_qparams: Option<HashMap<usize, QParam>>,
+    tensor: Option<TensorFacts>,
+    quant: QuantFacts,
+    layout: LayoutFacts,
     /// Arbitrary extra meta keys for passthrough (skip_size_adjust, arm_constant_placeholder, etc).
     pub extras: HashMap<String, MetaValue>,
 }
@@ -1642,7 +1652,7 @@ impl NodeMeta {
             .and_then(|v| extract_qparam_dict(&v));
 
         let val_obj = meta_attrs.value("val");
-        let val = val_obj.as_ref().and_then(|v| TensorFacts::from_py(v));
+        let tensor = val_obj.as_ref().and_then(|v| TensorFacts::from_py(v));
         let val_dim_order = val_obj
             .as_ref()
             .and_then(|v| attrs(v).call_optional("dim_order"));
@@ -1683,14 +1693,18 @@ impl NodeMeta {
         }
 
         Ok(Self {
-            input_qparams,
-            output_qparams,
-            val,
-            val_dim_order,
-            tosa_dim_order,
-            original_dim_orders,
-            tosa_spatial_rank,
-            pre_pass_arg_qparams,
+            tensor,
+            quant: QuantFacts {
+                input_qparams,
+                output_qparams,
+                pre_pass_arg_qparams,
+            },
+            layout: LayoutFacts {
+                val_dim_order,
+                tosa_dim_order,
+                original_dim_orders,
+                tosa_spatial_rank,
+            },
             extras,
         })
     }
@@ -1722,21 +1736,33 @@ impl NodeMeta {
     }
 
     pub fn rank(&self) -> Option<usize> {
-        self.val.as_ref().map(|v| v.rank())
+        self.tensor.as_ref().map(|v| v.rank())
     }
 
     pub fn val_dim_order(&self) -> Option<&[usize]> {
-        self.val_dim_order.as_deref()
+        self.layout.val_dim_order.as_deref()
+    }
+
+    pub fn tosa_dim_order(&self) -> Option<&[usize]> {
+        self.layout.tosa_dim_order.as_deref()
+    }
+
+    pub fn cloned_tosa_dim_order(&self) -> Option<Vec<usize>> {
+        self.layout.tosa_dim_order.clone()
+    }
+
+    pub fn original_dim_orders(&self) -> Option<&[Vec<usize>]> {
+        self.layout.original_dim_orders.as_deref()
     }
 
     // --- Mutation helpers ---
 
     pub fn set_output_qparams(&mut self, map: HashMap<usize, QParam>) {
-        self.output_qparams = Some(map);
+        self.quant.output_qparams = Some(map);
     }
 
     pub fn set_input_qparams(&mut self, map: HashMap<usize, QParam>) {
-        self.input_qparams = Some(map);
+        self.quant.input_qparams = Some(map);
     }
 
     pub fn set_output_qparams_from(&mut self, pairs: impl IntoIterator<Item = (usize, QParam)>) {
@@ -1777,47 +1803,57 @@ impl NodeMeta {
     }
 
     pub fn set_pre_pass_arg_qparams(&mut self, map: HashMap<usize, QParam>) {
-        self.pre_pass_arg_qparams = Some(map);
+        self.quant.pre_pass_arg_qparams = Some(map);
     }
 
     pub fn clear_output_qparams(&mut self) {
-        self.output_qparams = None;
+        self.quant.output_qparams = None;
     }
 
     pub fn clear_input_qparams(&mut self) {
-        self.input_qparams = None;
+        self.quant.input_qparams = None;
     }
 
     pub fn set_tosa_dim_order(&mut self, order: Vec<usize>) {
-        self.tosa_dim_order = Some(order);
+        self.layout.tosa_dim_order = Some(order);
     }
 
     pub fn set_val_dim_order(&mut self, order: Vec<usize>) {
-        self.val_dim_order = Some(order);
+        self.layout.val_dim_order = Some(order);
     }
 
     pub fn set_original_dim_orders(&mut self, orders: Vec<Vec<usize>>) {
-        self.original_dim_orders = Some(orders);
+        self.layout.original_dim_orders = Some(orders);
     }
 
     pub fn set_tosa_spatial_rank(&mut self, rank: usize) -> bool {
-        if self.tosa_spatial_rank == Some(rank) {
+        if self.layout.tosa_spatial_rank == Some(rank) {
             return false;
         }
-        self.tosa_spatial_rank = Some(rank);
+        self.layout.tosa_spatial_rank = Some(rank);
         true
     }
 
     pub fn tosa_spatial_rank_or(&self, default: usize) -> usize {
-        self.tosa_spatial_rank.unwrap_or(default)
+        self.layout.tosa_spatial_rank.unwrap_or(default)
+    }
+
+    pub fn tosa_spatial_rank(&self) -> Option<usize> {
+        self.layout.tosa_spatial_rank
+    }
+
+    pub fn copy_dim_order_facts_from(&mut self, other: &Self) {
+        self.layout.val_dim_order = other.layout.val_dim_order.clone();
+        self.layout.tosa_dim_order = other.layout.tosa_dim_order.clone();
+        self.layout.original_dim_orders = other.layout.original_dim_orders.clone();
     }
 
     pub fn tensor_facts(&self) -> Option<&TensorFacts> {
-        self.val.as_ref()
+        self.tensor.as_ref()
     }
 
     pub fn set_tensor_facts(&mut self, facts: TensorFacts) {
-        self.val = Some(facts);
+        self.tensor = Some(facts);
     }
 
     pub fn set_val(&mut self, ftm: FakeTensorMeta) {
@@ -1846,6 +1882,14 @@ impl NodeMeta {
         self.cloned_with_tensor_facts(TensorFacts::new(shape, dtype))
     }
 
+    pub fn cloned_with_same_dtype_or(&self, shape: impl Into<Vec<i64>>, default: &str) -> Self {
+        self.cloned_with_val(shape, self.val_dtype_or(default))
+    }
+
+    pub fn cloned_with_same_dtype_or_float32(&self, shape: impl Into<Vec<i64>>) -> Self {
+        self.cloned_with_same_dtype_or(shape, "torch.float32")
+    }
+
     pub fn without_qparams(mut self) -> Self {
         self.clear_all_qparams();
         self
@@ -1853,7 +1897,7 @@ impl NodeMeta {
 
     /// Get the single output qparam (key 0), if present.
     pub fn output_qparam(&self) -> Option<&QParam> {
-        self.output_qparams.as_ref()?.get(&0)
+        self.quant.output_qparams.as_ref()?.get(&0)
     }
 
     /// Get the single input qparam (key 0), if present.
@@ -1863,40 +1907,52 @@ impl NodeMeta {
 
     /// Get an input qparam by positional argument index, if present.
     pub fn input_qparam_at(&self, index: usize) -> Option<&QParam> {
-        self.input_qparams.as_ref()?.get(&index)
+        self.quant.input_qparams.as_ref()?.get(&index)
     }
 
     pub fn input_qparams(&self) -> Option<&HashMap<usize, QParam>> {
-        self.input_qparams.as_ref()
+        self.quant.input_qparams.as_ref()
+    }
+
+    pub fn output_qparams(&self) -> Option<&HashMap<usize, QParam>> {
+        self.quant.output_qparams.as_ref()
+    }
+
+    pub fn pre_pass_arg_qparams(&self) -> Option<&HashMap<usize, QParam>> {
+        self.quant.pre_pass_arg_qparams.as_ref()
     }
 
     pub fn cloned_input_qparams(&self) -> Option<HashMap<usize, QParam>> {
-        self.input_qparams.clone()
+        self.quant.input_qparams.clone()
     }
 
     pub fn cloned_output_qparams(&self) -> Option<HashMap<usize, QParam>> {
-        self.output_qparams.clone()
+        self.quant.output_qparams.clone()
     }
 
     pub fn has_qparam_metadata(&self) -> bool {
-        self.input_qparams.is_some() || self.output_qparams.is_some()
+        self.quant.input_qparams.is_some() || self.quant.output_qparams.is_some()
     }
 
     pub fn has_nonempty_qparam_metadata(&self) -> bool {
-        self.input_qparams
+        self.quant
+            .input_qparams
             .as_ref()
             .is_some_and(|qparams| !qparams.is_empty())
             || self
+                .quant
                 .output_qparams
                 .as_ref()
                 .is_some_and(|qparams| !qparams.is_empty())
     }
 
     pub fn has_nonempty_input_and_output_qparams(&self) -> bool {
-        self.input_qparams
+        self.quant
+            .input_qparams
             .as_ref()
             .is_some_and(|qparams| !qparams.is_empty())
             && self
+                .quant
                 .output_qparams
                 .as_ref()
                 .is_some_and(|qparams| !qparams.is_empty())
@@ -1904,6 +1960,7 @@ impl NodeMeta {
 
     pub fn sorted_input_qparams(&self) -> Vec<(usize, QParam)> {
         let mut qparams: Vec<_> = self
+            .quant
             .input_qparams
             .as_ref()
             .map(|map| {
@@ -1917,7 +1974,7 @@ impl NodeMeta {
     }
 
     pub fn copy_input_qparams_from(&mut self, other: &Self) -> bool {
-        let Some(iqp) = other.input_qparams.clone() else {
+        let Some(iqp) = other.quant.input_qparams.clone() else {
             return false;
         };
         self.set_input_qparams(iqp);
@@ -1925,7 +1982,7 @@ impl NodeMeta {
     }
 
     pub fn copy_output_qparams_from(&mut self, other: &Self) -> bool {
-        let Some(oqp) = other.output_qparams.clone() else {
+        let Some(oqp) = other.quant.output_qparams.clone() else {
             return false;
         };
         self.set_output_qparams(oqp);
@@ -1948,11 +2005,12 @@ impl NodeMeta {
 
     pub fn clear_tosa_dim_order_if_rank_mismatch(&mut self, rank: usize) -> bool {
         if self
+            .layout
             .tosa_dim_order
             .as_ref()
             .is_some_and(|order| order.len() != rank)
         {
-            self.tosa_dim_order = None;
+            self.layout.tosa_dim_order = None;
             true
         } else {
             false
