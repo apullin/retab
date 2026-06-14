@@ -148,6 +148,12 @@ pub(crate) fn is_shape_only_constant_target(target: &str) -> bool {
     shape_only_constant_target(target).is_some()
 }
 
+pub(crate) fn is_constant_only_shape_transform_target(target: &str) -> bool {
+    is_view_like_target(target)
+        || shape_only_constant_target(target).is_some()
+        || target.contains("aten.slice_copy.Tensor")
+}
+
 pub(crate) fn noop_target(target: &str) -> Option<NoopTarget> {
     if target.contains("aten.copy.default") {
         return Some(NoopTarget::CopySourceArg);
@@ -175,6 +181,11 @@ pub(crate) fn is_view_like_target(target: &str) -> bool {
 
 pub(crate) fn is_permute_target(target: &str) -> bool {
     target.contains("permute_copy") || target.contains("aten.permute.")
+}
+
+pub(crate) fn is_tosa_transpose_target(target: &str) -> bool {
+    let target = target.to_ascii_lowercase();
+    target.contains("tosa") && target.contains("transpose")
 }
 
 pub(crate) fn is_layout_passthrough_target(target: &str) -> bool {
@@ -216,7 +227,8 @@ pub(crate) fn is_conv_bias_annotation_target(target: &str) -> bool {
 }
 
 pub(crate) fn is_raw_aten_convolution_target(target: &str) -> bool {
-    target.to_ascii_lowercase().contains("aten.convolution")
+    let target = target.to_ascii_lowercase();
+    target.contains("aten.convolution") || target.contains("edge__ops_aten_convolution")
 }
 
 pub(crate) fn is_conv_accumulator_target(target: &str) -> bool {
@@ -469,6 +481,12 @@ mod tests {
         );
         assert!(is_zero_input_constant_target("aten.eye.default"));
         assert!(is_shape_only_constant_target("aten.permute_copy.default"));
+        assert!(is_constant_only_shape_transform_target(
+            "aten.slice_copy.Tensor"
+        ));
+        assert!(is_constant_only_shape_transform_target(
+            "aten.flatten.using_ints"
+        ));
         assert!(is_view_like_target("aten._unsafe_view.default"));
         assert!(is_permute_target("aten.permute.default"));
         assert!(!is_shape_only_constant_target("aten.slice_copy.Tensor"));
@@ -510,6 +528,7 @@ mod tests {
     #[test]
     fn recognizes_layout_target_families() {
         assert!(is_layout_passthrough_target("aten.transpose.int"));
+        assert!(is_tosa_transpose_target("backend.tosa.TRANSPOSE.default"));
         assert!(is_layout_passthrough_target("aten.contiguous.default"));
         assert!(is_rank_changing_layout_target("aten.flatten.using_ints"));
         assert!(!is_rank_changing_layout_target("aten.transpose.int"));
@@ -522,6 +541,9 @@ mod tests {
             "backend.tosa.TRANSPOSE_CONV2D.default"
         ));
         assert!(is_raw_aten_convolution_target("aten.convolution.default"));
+        assert!(is_raw_aten_convolution_target(
+            "edge__ops_aten_convolution.default"
+        ));
         assert!(is_conv_accumulator_target("backend.tosa.CONV2D.default"));
         assert!(is_conv_accumulator_target(
             "backend.tosa.DEPTHWISE_CONV2D.default"

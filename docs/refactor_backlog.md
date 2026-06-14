@@ -967,6 +967,14 @@ Deleted: local noop target list, copy-target discriminator, and dtype-check targ
 Added: typed `NoopTarget` classifier in `fx_target` with direct target tests; `IrRemoveNoopPass` now dispatches through the shared target grammar for replacement source and dtype-check semantics
 Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib fx_target::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over copy, to_copy, clone, detach_copy, and alias_copy; Rust LOC check
 Note: Target Rust tests passed `12 passed`; full Rust tests passed `134 passed`; focused Python smoke passed `68 passed, 1 expected xfail, 80 deselected`. No model lane was run. This is setup-positive because central classifier tests add lines, but it removes a local target-classification dialect from the noop rewrite pass.
+
+2026-06-13, memory-format target grammar slice
+Rust LOC: 37,289 -> 37,300
+Movement: +11 Rust LOC
+Deleted: local constant-only shape-transform classifier, local raw ATen/Edge convolution target check, and local TOSA-transpose target check from `fx_memory_format_ir`
+Added: shared `fx_target` helpers for constant-only shape transforms and TOSA transpose targets; `is_raw_aten_convolution_target` now also recognizes the Edge convolution spelling used by memory-format planning
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over view, permute, unsqueeze, slice, and transpose_conv2d; Rust LOC check
+Note: Full Rust tests passed `134 passed`; focused Python smoke passed `178 passed, 7 expected xfails, 326 deselected`. No model lane was run. This is setup-positive but leaves `fx_memory_format_ir` with no direct `target.contains` calls.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -991,7 +999,10 @@ and rewrite passes now also use shared `fx_target` helpers for split, tril,
 layernorm, var, avg_pool2d padding, as_strided_copy, pad, pixel shuffle,
 squeeze/unsqueeze, dim-transpose, index_put, where, and clamp target families.
 Addmm decomposition now uses the classifier-backed node predicate instead of a
-raw substring check.
+raw substring check. Noop removal now uses a typed `NoopTarget` classifier.
+Constant materialization and memory-format planning now use shared target
+grammar for constant-only shape transforms, TOSA transpose targets, and Edge
+convolution spellings.
 
 Remaining work:
 

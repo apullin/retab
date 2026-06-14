@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::fx_target::{
-    is_permute_target, is_transpose_conv2d_target, is_view_like_target,
+    is_constant_only_shape_transform_target, is_permute_target, is_raw_aten_convolution_target,
+    is_tosa_transpose_target, is_transpose_conv2d_target, is_view_like_target,
     is_zero_input_constant_target,
 };
 use crate::runner_logging::log_line;
@@ -122,13 +123,6 @@ fn is_control_flow_submodule(graph: &IrGraph) -> bool {
     })
 }
 
-fn is_constant_only_shape_target(target: &str) -> bool {
-    is_view_like_target(target)
-        || target.contains("aten.slice_copy.Tensor")
-        || target.contains("aten.unsqueeze_copy.default")
-        || target.contains("aten.permute_copy.default")
-}
-
 fn arg_constant_subgraph(graph: &IrGraph, arg: &IrArg, memo: &mut HashMap<NodeId, bool>) -> bool {
     match arg {
         IrArg::Node(node_id) => is_constant_subgraph(graph, *node_id, memo),
@@ -152,7 +146,7 @@ fn is_constant_subgraph(graph: &IrGraph, id: NodeId, memo: &mut HashMap<NodeId, 
     } else if node.op == NodeOp::CallFunction {
         if is_zero_input_constant_target(&node.target) {
             true
-        } else if is_constant_only_shape_target(&node.target) {
+        } else if is_constant_only_shape_transform_target(&node.target) {
             node.args
                 .iter()
                 .all(|arg| arg_constant_subgraph(graph, arg, memo))
@@ -172,8 +166,7 @@ fn is_constant_subgraph(graph: &IrGraph, id: NodeId, memo: &mut HashMap<NodeId, 
 }
 
 fn is_transposed_aten_convolution(node: &crate::fx_ir::IrNode) -> bool {
-    let target = node.target.to_ascii_lowercase();
-    if !(target.contains("aten.convolution") || target.contains("edge__ops_aten_convolution")) {
+    if !is_raw_aten_convolution_target(&node.target) {
         return false;
     }
     matches!(node.args.get(6), Some(IrArg::Bool(true)))
@@ -629,11 +622,7 @@ impl IrToTosaMemoryFormatPass {
                 .as_deref()
                 .map(|order| order == expected_cl.as_slice())
                 .unwrap_or(false)
-                || (graph.nodes[input_id].target.contains("tosa")
-                    && graph.nodes[input_id]
-                        .target
-                        .to_ascii_lowercase()
-                        .contains("transpose"));
+                || is_tosa_transpose_target(&graph.nodes[input_id].target);
             if !input_is_nhwc {
                 continue;
             }
