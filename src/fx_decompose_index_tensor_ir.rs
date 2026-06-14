@@ -1,5 +1,6 @@
 //! Pure Rust IrPass: aten.index.Tensor → linearized GATHER.
 
+use crate::fx_index_linear::{build_linear_index, packed_linear_scales, LinearIndexSpec};
 use crate::fx_ir::{broadcast_shapes, i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId};
 use crate::fx_target::is_index_tensor_target;
 use crate::runner_logging::log_line;
@@ -17,16 +18,6 @@ fn compute_index_output_shape(
 
 fn is_identity_perm(perm: &[i64]) -> bool {
     perm.iter().enumerate().all(|(i, &value)| value == i as i64)
-}
-
-fn packed_lin_scales(tensor_sizes: &[i64]) -> Vec<i64> {
-    let mut scales = vec![1; tensor_sizes.len()];
-    let mut running = 1i64;
-    for (i, size) in tensor_sizes.iter().enumerate().rev() {
-        scales[i] = running;
-        running *= *size;
-    }
-    scales
 }
 
 pub struct IrDecomposeIndexTensorPass;
@@ -112,7 +103,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
             let w = broadcast.iter().copied().product::<i64>().max(1);
             let k = tensor_sizes.iter().copied().product::<i64>().max(1);
             let c = kept_shape.iter().copied().product::<i64>().max(1);
-            let lin_scales = packed_lin_scales(&tensor_sizes);
+            let lin_scales = packed_linear_scales(&tensor_sizes);
             let perm: Vec<i64> = batch_positions
                 .iter()
                 .chain(idx_positions.iter())
@@ -186,88 +177,22 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 x_bkc
             };
 
-            // Build linearized flat index
-            let mut lin_w: Option<NodeId> = None;
-            for (i, (&idx_id, (idx_shape, &lin_scale))) in idx_ids
-                .iter()
-                .zip(idx_shapes.iter().zip(lin_scales.iter()))
-                .enumerate()
-            {
-                let mut current = idx_id;
-
-                // Align rank if needed
-                if idx_shape.len() != broadcast.len() {
-                    let mut aligned: Vec<i64> = vec![1; broadcast.len() - idx_shape.len()];
-                    aligned.extend(idx_shape);
-                    let aligned_meta =
-                        orig_meta.cloned_without_qparams(aligned.clone(), &idx_dtype);
-                    let aligned_id = graph.add_anchored_call_function(
-                        id,
-                        format!("{}_idx{}_align", node_name, i),
-                        "aten.view_copy.default".to_string(),
-                        vec![IrArg::Node(current), i64_list(&aligned)],
-                        aligned_meta,
-                    );
-                    current = aligned_id;
-                }
-
-                // Broadcast to common shape
-                let bcast_meta = orig_meta.cloned_without_qparams(broadcast.clone(), &idx_dtype);
-                let bcast_id = graph.add_anchored_call_function(
-                    id,
-                    format!("{}_idx{}_bcast", node_name, i),
-                    "aten.expand_copy.default".to_string(),
-                    vec![IrArg::Node(current), i64_list(&broadcast)],
-                    bcast_meta,
-                );
-
-                // Flatten to (W,)
-                let flat_meta = orig_meta.cloned_without_qparams(vec![w], &idx_dtype);
-                let flat_id = graph.add_anchored_call_function(
-                    id,
-                    format!("{}_idx{}_flat", node_name, i),
-                    "aten.view_copy.default".to_string(),
-                    vec![IrArg::Node(bcast_id), i64_list(&[w])],
-                    flat_meta,
-                );
-
-                // Scale by linearized stride
-                let scale_meta = orig_meta.cloned_without_qparams(vec![1], &idx_dtype);
-                let scale_id = graph.add_anchored_full_int(
-                    id,
-                    format!("{}_scale{}", node_name, i),
-                    &[1],
-                    lin_scale,
-                    &idx_dtype,
-                    scale_meta,
-                );
-
-                let scaled_meta = orig_meta.cloned_without_qparams(vec![w], &idx_dtype);
-                let scaled_id = graph.add_anchored_call_function(
-                    id,
-                    format!("{}_idx{}_scaled", node_name, i),
-                    "aten.mul.Tensor".to_string(),
-                    vec![IrArg::Node(flat_id), IrArg::Node(scale_id)],
-                    scaled_meta,
-                );
-
-                lin_w = Some(match lin_w {
-                    None => scaled_id,
-                    Some(prev) => {
-                        let add_meta = orig_meta.cloned_without_qparams(vec![w], &idx_dtype);
-                        let add_id = graph.add_anchored_call_function(
-                            id,
-                            format!("{}_lin_add{}", node_name, i),
-                            "aten.add.Tensor".to_string(),
-                            vec![IrArg::Node(prev), IrArg::Node(scaled_id)],
-                            add_meta,
-                        );
-                        add_id
-                    }
-                });
-            }
-
-            let Some(lin_w_id) = lin_w else { continue };
+            let Some(lin_w_id) = build_linear_index(
+                graph,
+                LinearIndexSpec {
+                    anchor: id,
+                    name: &node_name,
+                    meta: &orig_meta,
+                    index_ids: &idx_ids,
+                    index_shapes: &idx_shapes,
+                    broadcast_shape: &broadcast,
+                    linear_scales: &lin_scales,
+                    index_dtype: &idx_dtype,
+                    flat_len: w,
+                },
+            ) else {
+                continue;
+            };
 
             // Unsqueeze to (1, W), then tile across batch if needed.
             let idx_1w_meta = orig_meta.cloned_without_qparams(vec![1, w], &idx_dtype);

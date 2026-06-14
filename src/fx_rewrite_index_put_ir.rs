@@ -1,20 +1,11 @@
 //! Pure Rust IrPass: index_put → view + scatter + view for TOSA.
 
+use crate::fx_index_linear::{build_linear_index, contiguous_strides, LinearIndexSpec};
 use crate::fx_ir::{
     broadcast_shapes, i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass, NodeId,
 };
 use crate::fx_target::is_index_put_default_target;
 use crate::runner_logging::log_line;
-
-fn shape_to_stride(shape: &[i64]) -> Vec<i64> {
-    let mut strides = vec![0; shape.len()];
-    let mut stride = 1i64;
-    for i in (0..shape.len()).rev() {
-        strides[i] = stride;
-        stride *= shape[i];
-    }
-    strides
-}
 
 pub struct IrRewriteIndexPutPass;
 
@@ -131,7 +122,7 @@ impl IrPass for IrRewriteIndexPutPass {
                 continue;
             }
 
-            let strides = shape_to_stride(&source_shape);
+            let strides = contiguous_strides(&source_shape);
             let lin_scales: Vec<i64> = strides.iter().take(num_idx).map(|s| s / c).collect();
 
             let idx_dtype = graph.nodes[idx_ids[0]]
@@ -140,80 +131,22 @@ impl IrPass for IrRewriteIndexPutPass {
                 .unwrap_or("torch.int64")
                 .to_string();
 
-            // Build flat index
-            let mut lin: Option<NodeId> = None;
-            for (i, (&idx_id, lin_scale)) in idx_ids.iter().zip(lin_scales.iter()).enumerate() {
-                let idx_shape = &idx_shapes[i];
-                let mut current = idx_id;
-
-                if idx_shape.len() != bcast.len() {
-                    let mut aligned: Vec<i64> = vec![1; bcast.len() - idx_shape.len()];
-                    aligned.extend(idx_shape);
-                    let aligned_meta =
-                        orig_meta.cloned_without_qparams(aligned.clone(), &idx_dtype);
-                    let a = graph.add_anchored_call_function(
-                        id,
-                        format!("{}_ia{}", name, i),
-                        "aten.view_copy.default".to_string(),
-                        vec![IrArg::Node(current), i64_list(&aligned)],
-                        aligned_meta,
-                    );
-                    current = a;
-                }
-
-                let bcast_meta = orig_meta.cloned_without_qparams(bcast.clone(), &idx_dtype);
-                let b = graph.add_anchored_call_function(
-                    id,
-                    format!("{}_ib{}", name, i),
-                    "aten.expand_copy.default".to_string(),
-                    vec![IrArg::Node(current), i64_list(&bcast)],
-                    bcast_meta,
-                );
-
-                let flat_meta = orig_meta.cloned_without_qparams(vec![w], &idx_dtype);
-                let flat = graph.add_anchored_call_function(
-                    id,
-                    format!("{}_if{}", name, i),
-                    "aten.view_copy.default".to_string(),
-                    vec![IrArg::Node(b), i64_list(&[w])],
-                    flat_meta,
-                );
-
-                let scale_meta = orig_meta.cloned_without_qparams(vec![1], &idx_dtype);
-                let scale = graph.add_anchored_full_int(
-                    id,
-                    format!("{}_sc{}", name, i),
-                    &[1],
-                    *lin_scale,
-                    &idx_dtype,
-                    scale_meta,
-                );
-
-                let scaled_meta = orig_meta.cloned_without_qparams(vec![w], &idx_dtype);
-                let scaled = graph.add_anchored_call_function(
-                    id,
-                    format!("{}_sm{}", name, i),
-                    "aten.mul.Tensor".to_string(),
-                    vec![IrArg::Node(flat), IrArg::Node(scale)],
-                    scaled_meta,
-                );
-
-                lin = Some(match lin {
-                    None => scaled,
-                    Some(prev) => {
-                        let add_meta = orig_meta.cloned_without_qparams(vec![w], &idx_dtype);
-                        let add = graph.add_anchored_call_function(
-                            id,
-                            format!("{}_la{}", name, i),
-                            "aten.add.Tensor".to_string(),
-                            vec![IrArg::Node(prev), IrArg::Node(scaled)],
-                            add_meta,
-                        );
-                        add
-                    }
-                });
-            }
-            let Some(flat_idx) = lin else { continue };
+            let Some(flat_idx) = build_linear_index(
+                graph,
+                LinearIndexSpec {
+                    anchor: id,
+                    name: &name,
+                    meta: &orig_meta,
+                    index_ids: &idx_ids,
+                    index_shapes: &idx_shapes,
+                    broadcast_shape: &bcast,
+                    linear_scales: &lin_scales,
+                    index_dtype: &idx_dtype,
+                    flat_len: w,
+                },
+            ) else {
+                continue;
+            };
 
             // Reshape: indices (1, W), source (1, K, C), values (1, W, C)
             let idx_meta = orig_meta.cloned_without_qparams(vec![1, w], &idx_dtype);

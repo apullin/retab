@@ -1167,6 +1167,14 @@ Deleted: mutable input-qparam map construction from masked_fill where metadata, 
 Added: `NodeMeta::set_input_qparams_from(...)` and `NodeMeta::set_empty_input_qparams()` for named construction of present input-qparam maps
 Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over cond, while, masked_fill, mean_dim, sum, add, sub, mul, where, pow, cumsum, conv2d, conv3d, and transpose_conv2d; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `580 passed, 6 expected xfails, 1321 deselected`. No model lane was run. This is setup-positive in LOC but moves input-qparam map construction into `NodeMeta`, preserving the distinction between absent qparams and present-but-empty maps.
+
+2026-06-14, index linearization rewrite-builder slice
+Rust LOC: 36,817 -> 36,787
+Movement: -30 Rust LOC
+Deleted: duplicate broadcast-align, expand, flatten, stride-scale, and sum rewrite chains from index.Tensor decomposition and index_put rewrite
+Added: `src/fx_index_linear.rs` as the shared owner for contiguous index strides, packed linear scales, and generated flat-index IR construction
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over index_tensor, index_put, index_select, index_copy, gather, and unfold_copy; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `155 passed, 20 expected xfails, 252 deselected`. No model lane was run. This is a Refactor 3 payoff slice: two indexing passes now share the same linear-index rewrite grammar instead of carrying independent copies of the algorithm.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1379,7 +1387,10 @@ candidate collection also reuse the shared graph queries. `IrGraph` also has
 value-metadata builder siblings for add, anchored add, and replacement
 call-function rewrites. `IrNode` now owns common positional-argument reads for
 node, integer, numeric, boolean, list, pair-or-scalar, and cloned-or-None args,
-plus keyword and arg-or-keyword reads for mixed Python-style schemas.
+plus keyword and arg-or-keyword reads for mixed Python-style schemas. The
+indexing family now also shares `fx_index_linear::build_linear_index`, which
+owns the broadcast-align, expand, flatten, stride-scale, and sum rewrite chain
+used by index.Tensor and index_put.
 Remaining work should keep adding small builder/query operations only when
 they replace repeated rewrite structure across several passes.
 
