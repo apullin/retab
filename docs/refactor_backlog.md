@@ -903,6 +903,14 @@ Deleted: local int32-rescale comparison/minmax/mul target helpers, repeated raw 
 Added: shared `fx_target` helpers for abs, tensor comparisons, min/max, add/sub, mul, and sum.dim_IntList target families, with direct classifier tests
 Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over abs, add, sub, mul, sum, eq, ge, gt, le, lt, maximum, minimum, and where; Rust LOC check
 Note: Rust tests passed `131 passed`. Focused Python smoke passed `393 passed, 562 deselected`. This is setup-positive because it adds central tests, but it moves arithmetic qparam-domain decisions out of local string predicates and into the shared target grammar.
+
+2026-06-13, approximation finalizer cleanup slice
+Rust LOC: 37,088 -> 37,082
+Movement: -6 Rust LOC
+Deleted: remaining conditional `ApproxCtx::output` plus common `replace_and_erase` finalization patterns in softmax/logsoftmax, asin/acos, and gelu decomposition
+Added: no new API; this pays down the earlier `ApproxCtx::replace_output` helper by making conditional approximation decompositions use the same direct final-output grammar as the simple paths
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_decompose_ops_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over softmax, logsoftmax, asin, acos, and gelu; Rust LOC check
+Note: Focused Rust decompose-op tests passed `21 passed`; full Rust tests passed `131 passed`; focused Python smoke passed `94 passed, 192 deselected`.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

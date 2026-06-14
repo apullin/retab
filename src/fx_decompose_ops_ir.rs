@@ -1694,23 +1694,21 @@ fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> 
         vec![IrArg::Node(exp), IrArg::Node(recip)],
     );
 
-    let result = if log_output {
-        ctx.output(
+    if log_output {
+        ctx.replace_output(
             graph,
             "result",
             "aten.log.default",
             vec![IrArg::Node(softmax)],
-        )
+        );
     } else {
-        ctx.output(
+        ctx.replace_output(
             graph,
             "result",
             "aten.clone.default",
             vec![IrArg::Node(softmax)],
-        )
-    };
-
-    graph.replace_and_erase(id, result);
+        );
+    }
     true
 }
 
@@ -2206,7 +2204,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         ],
     );
 
-    let result = if is_acos_op {
+    if is_acos_op {
         let acos_small = ctx.tensor(
             graph,
             "acos_small",
@@ -2219,7 +2217,7 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
             "aten.gt.Tensor",
             vec![IrArg::Node(x_id), IrArg::Node(half)],
         );
-        ctx.output(
+        ctx.replace_output(
             graph,
             "result",
             "aten.where.self",
@@ -2228,17 +2226,15 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
                 IrArg::Node(t2),
                 IrArg::Node(acos_small),
             ],
-        )
+        );
     } else {
-        ctx.output(
+        ctx.replace_output(
             graph,
             "result",
             "aten.clone.default",
             vec![IrArg::Node(asin)],
-        )
-    };
-
-    graph.replace_and_erase(id, result);
+        );
+    }
     true
 }
 
@@ -2295,7 +2291,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
     let half = ctx.full_scalar(graph, "half", 0.5);
     let one = ctx.full_scalar(graph, "one", 1.0);
 
-    let result = match approximate.as_str() {
+    match approximate.as_str() {
         "none" => {
             let sqrt_half = ctx.full_scalar(graph, "sqrt_half", std::f64::consts::FRAC_1_SQRT_2);
             let scaled = ctx.tensor(
@@ -2317,12 +2313,12 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 "aten.mul.Tensor",
                 vec![IrArg::Node(plus_one), IrArg::Node(half)],
             );
-            ctx.output(
+            ctx.replace_output(
                 graph,
                 "result",
                 "aten.mul.Tensor",
                 vec![IrArg::Node(x_id), IrArg::Node(weighted)],
-            )
+            );
         }
         "tanh" => {
             let sqrt_two = ctx.full_scalar(graph, "sqrt_two", std::f64::consts::SQRT_2);
@@ -2390,17 +2386,15 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
                 "aten.mul.Tensor",
                 vec![IrArg::Node(x_id), IrArg::Node(plus_one)],
             );
-            ctx.output(
+            ctx.replace_output(
                 graph,
                 "result",
                 "aten.mul.Tensor",
                 vec![IrArg::Node(first_mul), IrArg::Node(half)],
-            )
+            );
         }
         _ => return false,
-    };
-
-    graph.replace_and_erase(id, result);
+    }
     true
 }
 
