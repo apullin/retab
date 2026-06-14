@@ -26,19 +26,25 @@ fn emit_div_quotient(
     let recip_name = format!("{}_recip", output_name);
     let recip_shape =
         emitted_or_graph_tensor_shape(result, graph, store, &spec.rhs, &spec.output_shape);
-    result.push_output_op(
-        temp_tensor(recip_name.clone(), recip_shape, spec.base_dtype),
+    result.unary(
+        recip_name.clone(),
+        recip_shape,
+        spec.base_dtype,
         Op::Reciprocal,
         Attribute::Reciprocal(ReciprocalAttribute {}),
-        vec![spec.rhs.clone()],
+        spec.rhs.clone(),
     );
 
     let shift_name = push_shift_const(result, &output_name);
-    result.push_output_op(
-        temp_tensor(output_name, spec.output_shape.clone(), spec.base_dtype),
+    result.ternary(
+        output_name,
+        spec.output_shape.clone(),
+        spec.base_dtype,
         Op::Mul,
         Attribute::Mul(MulAttribute { shift: 0 }),
-        vec![spec.lhs.clone(), recip_name, shift_name],
+        spec.lhs.clone(),
+        recip_name,
+        shift_name,
     );
 }
 
@@ -126,27 +132,23 @@ fn emit_div_with_rounding(ctx: &EmitContext, rounding_mode: Option<&str>) -> Emi
             );
 
             let ceil_name = format!("{}_ceil", node.name);
-            result.push_output_op(
-                temp_tensor(
-                    ceil_name.clone(),
-                    spec.output_shape.clone(),
-                    spec.base_dtype,
-                ),
+            result.unary(
+                ceil_name.clone(),
+                spec.output_shape.clone(),
+                spec.base_dtype,
                 Op::Ceil,
                 Attribute::Ceil(CeilAttribute {}),
-                vec![quotient_name.clone()],
+                quotient_name.clone(),
             );
 
             let floor_name = format!("{}_floor", node.name);
-            result.push_output_op(
-                temp_tensor(
-                    floor_name.clone(),
-                    spec.output_shape.clone(),
-                    spec.base_dtype,
-                ),
+            result.unary(
+                floor_name.clone(),
+                spec.output_shape.clone(),
+                spec.base_dtype,
                 Op::Floor,
                 Attribute::Floor(FloorAttribute {}),
-                vec![quotient_name],
+                quotient_name,
             );
 
             result.push_output_op(
@@ -181,11 +183,13 @@ pub(in crate::serialize::visitors) fn emit_aten_sqrt(ctx: &EmitContext) -> EmitR
     let spec = ParsedUnaryTensorSpec::parse(graph, store, node)
         .unwrap_or_else(|| panic!("emit_aten_sqrt: missing input for node '{}'", node.name));
     let rsqrt_name = format!("{}_rsqrt", node.name);
-    result.push_output_op(
-        temp_tensor(rsqrt_name.clone(), spec.output_shape, spec.base_dtype),
+    result.unary(
+        rsqrt_name.clone(),
+        spec.output_shape,
+        spec.base_dtype,
         Op::Rsqrt,
         Attribute::Rsqrt(RsqrtAttribute {}),
-        vec![spec.input_name],
+        spec.input_name,
     );
     result.push_output_op(
         ctx.make_output(),
@@ -268,11 +272,15 @@ pub(in crate::serialize::visitors) fn emit_aten_sign(ctx: &EmitContext) -> EmitR
     );
 
     let inner_name = format!("{}_sign_inner", node.name);
-    result.push_output_op(
-        temp_tensor(inner_name.clone(), spec.output_shape, spec.base_dtype),
+    result.ternary(
+        inner_name.clone(),
+        spec.output_shape,
+        spec.base_dtype,
         Op::Select,
         Attribute::Select(SelectAttribute {}),
-        vec![gt_name, one_name, zero_name],
+        gt_name,
+        one_name,
+        zero_name,
     );
     result.push_output_op(
         ctx.make_output(),
@@ -292,11 +300,13 @@ pub(in crate::serialize::visitors) fn emit_aten_expm1(ctx: &EmitContext) -> Emit
         .unwrap_or_else(|| panic!("emit_aten_expm1: missing input for node '{}'", node.name));
 
     let exp_name = format!("{}_exp", node.name);
-    result.push_output_op(
-        temp_tensor(exp_name.clone(), spec.output_shape.clone(), spec.base_dtype),
+    result.unary(
+        exp_name.clone(),
+        spec.output_shape.clone(),
+        spec.base_dtype,
         Op::Exp,
         Attribute::Exp(ExpAttribute {}),
-        vec![spec.input_name],
+        spec.input_name,
     );
 
     let one_name = format!("{}_one", node.name);
@@ -334,11 +344,14 @@ pub(in crate::serialize::visitors) fn emit_aten_log1p(ctx: &EmitContext) -> Emit
     );
 
     let add_name = format!("{}_add_one", node.name);
-    result.push_output_op(
-        temp_tensor(add_name.clone(), spec.output_shape, spec.base_dtype),
+    result.binary(
+        add_name.clone(),
+        spec.output_shape,
+        spec.base_dtype,
         Op::Add,
         Attribute::Add(AddAttribute {}),
-        vec![spec.input_name, one_name],
+        spec.input_name,
+        one_name,
     );
     result.push_output_op(
         ctx.make_output(),
@@ -376,28 +389,26 @@ pub(in crate::serialize::visitors) fn emit_aten_remainder(ctx: &EmitContext) -> 
         floor_div_name.clone(),
     );
     let floor_name = format!("{}_floor", node.name);
-    result.push_output_op(
-        temp_tensor(
-            floor_name.clone(),
-            spec.output_shape.clone(),
-            spec.base_dtype,
-        ),
+    result.unary(
+        floor_name.clone(),
+        spec.output_shape.clone(),
+        spec.base_dtype,
         Op::Floor,
         Attribute::Floor(FloorAttribute {}),
-        vec![floor_div_name],
+        floor_div_name,
     );
 
     let prod_name = format!("{}_product", node.name);
     let shift_name = push_shift_const(&mut result, &prod_name);
-    result.push_output_op(
-        temp_tensor(
-            prod_name.clone(),
-            spec.output_shape.clone(),
-            spec.base_dtype,
-        ),
+    result.ternary(
+        prod_name.clone(),
+        spec.output_shape.clone(),
+        spec.base_dtype,
         Op::Mul,
         Attribute::Mul(MulAttribute { shift: 0 }),
-        vec![floor_name, spec.rhs.clone(), shift_name],
+        floor_name,
+        spec.rhs.clone(),
+        shift_name,
     );
 
     result.push_output_op(
@@ -435,11 +446,14 @@ pub(in crate::serialize::visitors) fn emit_aten_leaky_relu(ctx: &EmitContext) ->
     );
 
     let ge_name = format!("{}_ge", node.name);
-    result.push_output_op(
-        temp_tensor(ge_name.clone(), spec.output_shape.clone(), DType::Bool),
+    result.binary(
+        ge_name.clone(),
+        spec.output_shape.clone(),
+        DType::Bool,
         Op::GreaterEqual,
         Attribute::GreaterEqual(GreaterEqualAttribute {}),
-        vec![spec.input_name.clone(), zero_name],
+        spec.input_name.clone(),
+        zero_name,
     );
 
     let alpha_name = format!("{}_alpha", node.name);
@@ -453,11 +467,15 @@ pub(in crate::serialize::visitors) fn emit_aten_leaky_relu(ctx: &EmitContext) ->
 
     let scaled_name = format!("{}_scaled", node.name);
     let shift_name = push_shift_const(&mut result, &node.name);
-    result.push_output_op(
-        temp_tensor(scaled_name.clone(), spec.output_shape, spec.base_dtype),
+    result.ternary(
+        scaled_name.clone(),
+        spec.output_shape,
+        spec.base_dtype,
         Op::Mul,
         Attribute::Mul(MulAttribute { shift: 0 }),
-        vec![spec.input_name.clone(), alpha_name, shift_name],
+        spec.input_name.clone(),
+        alpha_name,
+        shift_name,
     );
 
     result.push_output_op(

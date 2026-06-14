@@ -1343,6 +1343,14 @@ Deleted: NN-local `i32_list_or_repeat(...)` helper and two pool-local first-inpu
 Added: no new production helper surface; `arg_utils` now owns the repeat-list default helper and the existing `first_input_node(...)` grammar is reused in pool parsing
 Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib i32_sequence_defaults_preserve_pair_semantics`; `cargo test --lib serialize::visitors::shape_utils`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over avg-pool2d, max-pool, and conv2d; Rust LOC check
 Note: Full Rust tests passed `139 passed`; focused Python smoke passed `269 passed, 700 deselected`. No model lane was run. This is a small cleanup, but it keeps serializer argument defaults in one helper module and removes duplicated first-input traversal from pool emission.
+
+2026-06-14, derived-math emit-builder reuse slice
+Rust LOC: 36,888 -> 36,906
+Movement: +18 Rust LOC
+Deleted: repeated `temp_tensor(...)` plus ad hoc input-vector construction from derived math temp emissions
+Added: no new production helper surface; `emit_aten_div`, `sqrt`, `sign`, `expm1`, `log1p`, `remainder`, and `leaky_relu` now reuse `EmitResult::unary/binary/ternary` for temp one-output emissions
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over div, div tensor mode, sqrt, sign, expm1, log1p, floor-div, remainder, and leaky-relu; Rust LOC check
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `108 passed, 4 expected xfails, 218 deselected`. No model lane was run. This is LOC-positive due to Rust formatting, but it reduces serializer emission dialect count by using the existing arity-aware builder for derived math temp nodes.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
