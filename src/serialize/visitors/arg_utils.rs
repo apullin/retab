@@ -128,6 +128,10 @@ pub(super) fn arg_i64(node: &Node, idx: usize, default: i64) -> i64 {
     }
 }
 
+pub(super) fn arg_f64(node: &Node, idx: usize, default: f64) -> f64 {
+    node.args.get(idx).map_or(default, Arg::as_f64)
+}
+
 pub(super) fn arg_string(node: &Node, idx: usize) -> Option<String> {
     match node.args.get(idx) {
         Some(Arg::String(value)) => Some(value.clone()),

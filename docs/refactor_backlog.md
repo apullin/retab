@@ -1407,6 +1407,14 @@ Deleted: duplicated batch_norm/group_norm logic for native tuple-output rewrites
 Added: `replace_primary_result_users(...)`, naming the invariant that a decomposition may replace the source op directly or replace only primary-result getitem users
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over batch_norm and group_norm; Rust LOC check
 Note: Full Rust tests passed `139 passed`; focused Python smoke passed `43 passed, 1 skipped, 98 deselected`. No model lane was run. This is a small Refactor 3 grammar slice inside the largest remaining file: the tuple-output user contract is now centralized instead of repeated in each decomposition.
+
+2026-06-14, serializer scalar-arg helper slice
+Rust LOC: 36,846 -> 36,850
+Movement: +4 Rust LOC
+Deleted: repeated direct scalar-f64 and zero-point i64 argument reads from tensor-op serializer visitors
+Added: `arg_f64(...)` alongside the existing serializer `arg_i64(...)`, so quantize/dequantize/factory emitters use the same argument grammar
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib serialize::visitors::arg_utils`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over full, zeros, ones, scalar_tensor, add, mul, and to_copy; Rust LOC check
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `167 passed, 2 skipped, 1 expected xfail, 175 deselected`. No model lane was run. This is a small Refactor 7/3 readability slice, not a LOC-reduction slice.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

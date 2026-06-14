@@ -272,11 +272,11 @@ pub(super) fn emit_quantize_per_tensor(ctx: &EmitContext) -> EmitResult {
     let output_dtype = ctx.dtype();
     let intermediate_ir_dtype = quantize_intermediate_ir_dtype(graph, node);
     let intermediate_dtype = ir_dtype_to_tosa(intermediate_ir_dtype);
-    let scale = node.args.get(1).map_or(1.0, Arg::as_f64);
+    let scale = arg_f64(node, 1, 1.0);
     if scale == 0.0 {
         return result;
     }
-    let zero_point = node.args.get(2).and_then(Arg::as_i64).unwrap_or(0) as f64;
+    let zero_point = arg_i64(node, 2, 0) as f64;
     let qmin = node.args.get(3).and_then(Arg::as_i64);
     let qmax = node.args.get(4).and_then(Arg::as_i64);
 
@@ -393,8 +393,8 @@ pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
         crate::graph::ir::DType::Float32 => DType::Fp32,
         _ => DType::Fp32,
     };
-    let scale = node.args.get(1).map_or(1.0, Arg::as_f64);
-    let zero_point = node.args.get(2).and_then(Arg::as_i64).unwrap_or(0) as f64;
+    let scale = arg_f64(node, 1, 1.0);
+    let zero_point = arg_i64(node, 2, 0) as f64;
 
     let cast_output_name = if zero_point == 0.0 && scale == 1.0 {
         node.name.clone()
@@ -632,7 +632,7 @@ fn emit_shape_transform(
 pub(super) fn emit_full(ctx: &EmitContext) -> EmitResult {
     let node = ctx.node;
     let output_shape = ctx.shape();
-    let fill_value = node.args.get(1).map_or(0.0, Arg::as_f64);
+    let fill_value = arg_f64(node, 1, 0.0);
     emit_filled_const(node, output_shape, fill_value, "emit_full")
 }
 
@@ -681,7 +681,7 @@ pub(super) fn emit_scalar_tensor(ctx: &EmitContext) -> EmitResult {
     if output_shape.is_empty() {
         output_shape.push(1);
     }
-    let fill_value = node.args.first().map_or(0.0, Arg::as_f64);
+    let fill_value = arg_f64(node, 0, 0.0);
     emit_filled_const(node, output_shape, fill_value, "emit_scalar_tensor")
 }
 
