@@ -84,6 +84,12 @@ impl ApproxCtx {
         })
     }
 
+    fn from_first_input(graph: &IrGraph, anchor_id: NodeId) -> Option<(NodeId, Self)> {
+        let input_id = graph.nodes[anchor_id].first_node_arg()?;
+        let ctx = Self::from_input(graph, anchor_id, input_id)?;
+        Some((input_id, ctx))
+    }
+
     fn dtype(&self) -> &str {
         &self.dtype
     }
@@ -656,11 +662,7 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
 
-    let Some(input_id) = graph.nodes[id].first_node_arg() else {
-        return false;
-    };
-
-    let Some(ctx) = ApproxCtx::from_input(graph, id, input_id) else {
+    let Some((input_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
 
@@ -1606,14 +1608,10 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
 }
 
 fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> bool {
-    let x_id = match graph.nodes[id].first_node_arg() {
-        Some(x_id) => x_id,
-        None => return false,
+    let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
+        return false;
     };
-    let shape = match graph.node_shape_vec(x_id) {
-        Some(shape) => shape,
-        None => return false,
-    };
+    let shape = ctx.shape.clone();
     let dim = graph.nodes[id].arg_or_kwarg_int(1, "dim").unwrap_or(-1);
     let rank = shape.len() as i64;
     let dim = if dim < 0 { dim + rank } else { dim };
@@ -1622,9 +1620,6 @@ fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> 
     }
     let dim = dim as usize;
 
-    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
-        return false;
-    };
     let mut reduced_shape = shape.clone();
     reduced_shape[dim] = 1;
     let sum_shape = reduced_shape.clone();
@@ -1689,11 +1684,7 @@ fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> 
 
 /// atanh(x) = 0.5 * log((1+x) / (1-x))
 fn decompose_atanh(graph: &mut IrGraph, id: NodeId) -> bool {
-    let x_id = match graph.nodes[id].first_node_arg() {
-        Some(n) => n,
-        None => return false,
-    };
-    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
+    let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
 
@@ -1729,11 +1720,7 @@ fn decompose_atanh(graph: &mut IrGraph, id: NodeId) -> bool {
 
 /// tan(x) = sin(x) / cos(x)
 fn decompose_tan(graph: &mut IrGraph, id: NodeId) -> bool {
-    let x_id = match graph.nodes[id].first_node_arg() {
-        Some(n) => n,
-        None => return false,
-    };
-    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
+    let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
 
@@ -1750,11 +1737,7 @@ fn decompose_tan(graph: &mut IrGraph, id: NodeId) -> bool {
 
 /// atan(x) via the same Padé approximation used in the Python pass.
 fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
-    let x_id = match graph.nodes[id].first_node_arg() {
-        Some(n) => n,
-        None => return false,
-    };
-    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
+    let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
 
@@ -1852,11 +1835,7 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
 
 /// sinh(x) = 0.5 * (exp(x) - exp(-x))
 fn decompose_sinh(graph: &mut IrGraph, id: NodeId) -> bool {
-    let x_id = match graph.nodes[id].first_node_arg() {
-        Some(n) => n,
-        None => return false,
-    };
-    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
+    let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
 
@@ -1886,11 +1865,7 @@ fn decompose_sinh(graph: &mut IrGraph, id: NodeId) -> bool {
 
 /// cosh(x) = 0.5 * (exp(x) + exp(-x))
 fn decompose_cosh(graph: &mut IrGraph, id: NodeId) -> bool {
-    let x_id = match graph.nodes[id].first_node_arg() {
-        Some(n) => n,
-        None => return false,
-    };
-    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
+    let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
 
@@ -1920,11 +1895,7 @@ fn decompose_cosh(graph: &mut IrGraph, id: NodeId) -> bool {
 
 /// asinh(x) = log(x + sqrt(x^2 + 1))
 fn decompose_asinh(graph: &mut IrGraph, id: NodeId) -> bool {
-    let x_id = match graph.nodes[id].first_node_arg() {
-        Some(n) => n,
-        None => return false,
-    };
-    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
+    let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
 
@@ -1959,11 +1930,7 @@ fn decompose_asinh(graph: &mut IrGraph, id: NodeId) -> bool {
 
 /// acosh(x) = log(x + sqrt((x - 1) * (x + 1)))
 fn decompose_acosh(graph: &mut IrGraph, id: NodeId) -> bool {
-    let x_id = match graph.nodes[id].first_node_arg() {
-        Some(n) => n,
-        None => return false,
-    };
-    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
+    let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
 
@@ -2004,11 +1971,7 @@ fn decompose_acosh(graph: &mut IrGraph, id: NodeId) -> bool {
 
 /// asin/acos decomposition matching the Python piecewise rational approximation.
 fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> bool {
-    let x_id = match graph.nodes[id].first_node_arg() {
-        Some(n) => n,
-        None => return false,
-    };
-    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
+    let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
 
@@ -2215,14 +2178,10 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
 
 /// elu(x, alpha) = where(x >= 0, x, alpha * expm1(x))
 fn decompose_elu(graph: &mut IrGraph, id: NodeId) -> bool {
-    let x_id = match graph.nodes[id].first_node_arg() {
-        Some(n) => n,
-        None => return false,
-    };
-    let alpha = elu_alpha(&graph.nodes[id]);
-    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
+    let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
+    let alpha = elu_alpha(&graph.nodes[id]);
 
     let zero = ctx.full(graph, "zero", 0.0);
     let alpha_full = ctx.full(graph, "alpha", alpha);
@@ -2255,14 +2214,10 @@ fn decompose_elu(graph: &mut IrGraph, id: NodeId) -> bool {
 
 /// gelu(x) decomposition matching the Python pass for approximate="none"/"tanh".
 fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
-    let x_id = match graph.nodes[id].first_node_arg() {
-        Some(n) => n,
-        None => return false,
-    };
-    let approximate = gelu_approximate(&graph.nodes[id]).to_string();
-    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
+    let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
+    let approximate = gelu_approximate(&graph.nodes[id]).to_string();
     let half = ctx.full_scalar(graph, "half", 0.5);
     let one = ctx.full_scalar(graph, "one", 1.0);
 
@@ -2375,11 +2330,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
 
 /// erfinv(x) decomposition matching the Python pass.
 fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
-    let x_id = match graph.nodes[id].first_node_arg() {
-        Some(n) => n,
-        None => return false,
-    };
-    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
+    let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
 
@@ -2724,9 +2675,8 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
 
-    let x_id = match graph.nodes[id].first_node_arg() {
-        Some(n) => n,
-        None => return false,
+    let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
+        return false;
     };
     let weight_arg = graph.nodes[id].arg_clone_or_none(1);
     let bias_arg = graph.nodes[id].arg_clone_or_none(2);
@@ -2737,9 +2687,6 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     let running_var = match graph.nodes[id].arg_node(4) {
         Some(n) => n,
         None => return false,
-    };
-    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
-        return false;
     };
     let shape = ctx.shape.clone();
     if shape.len() < 2 {
@@ -2823,9 +2770,8 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
 
 fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     let args = graph.nodes[id].args.clone();
-    let x_id = match graph.nodes[id].first_node_arg() {
-        Some(n) => n,
-        None => return false,
+    let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
+        return false;
     };
 
     let (weight_arg, bias_arg, group, eps) = match args.len() {
@@ -2875,9 +2821,6 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
 
-    let Some(ctx) = ApproxCtx::from_input(graph, id, x_id) else {
-        return false;
-    };
     let shape = ctx.shape.clone();
     if shape.len() < 2 {
         return false;

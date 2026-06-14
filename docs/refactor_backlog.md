@@ -1439,6 +1439,14 @@ Deleted: remaining raw shape/dtype reads from `src/fx_*_ir.rs`, including groupe
 Added: no new helper surface; this completes migration to the `IrGraph` tensor-fact accessor grammar for the audited raw metadata pattern
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv2d, depthwise_conv, conv_combos, layer_norm, repeat, select_scatter, softmax, logsoftmax, amax, amin, unbind, view, permute, where, index_put, slice_scatter, batch_norm, group_norm, and quant_custom_meta; Rust LOC check; raw metadata-access audit
 Note: Full Rust tests passed `139 passed`; focused Python smoke passed `596 passed, 1 skipped, 4 expected xfails`. `rg` now reports no raw `graph.nodes[id].meta.val_shape()/val_dtype()` access pattern in `src/fx_*_ir.rs`.
+
+2026-06-14, ApproxCtx first-input helper slice
+Rust LOC: 36,781 -> 36,719
+Movement: -62 Rust LOC
+Deleted: repeated first-input plus `ApproxCtx::from_input(...)` precondition scaffolding in the large decompose-op implementations, plus a small conv-rescale shape read that now uses graph tensor-fact accessors
+Added: `ApproxCtx::from_first_input(...)`, naming the common decompose-op grammar for unary-ish rewrites that derive their shape/dtype/meta context from the first input
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over pow, tan, atanh, atan, sinh, cosh, asinh, acosh, asin, acos, elu, gelu, erfinv excluding known baseline `neg_one`/`pos_one`, softmax, logsoftmax, batch_norm, group_norm, and conv2d; Rust LOC check
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `483 passed, 1 skipped, 3 expected xfails`. This is a Refactor 3 local rewrite-grammar cleanup inside the largest remaining Rust file.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

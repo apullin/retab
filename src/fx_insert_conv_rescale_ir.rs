@@ -181,15 +181,10 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
     let Some(rank) = activation_rank(graph, &node) else {
         return false;
     };
-    let Some(conv_shape) = node.meta.val_shape().map(|shape| shape.to_vec()) else {
+    let Some(conv_shape) = graph.node_shape_vec(conv_id) else {
         return false;
     };
-    let Some(&channels) = graph
-        .node(*bias_id)
-        .meta
-        .val_shape()
-        .and_then(|shape| shape.first())
-    else {
+    let Some(&channels) = graph.node_shape(*bias_id).and_then(|shape| shape.first()) else {
         return false;
     };
 
