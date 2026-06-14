@@ -951,6 +951,14 @@ Deleted: `fx_graph::debug()` as a serializer debug-config wrapper and the remain
 Added: cached `config::tosa_engine_debug_enabled()` as the direct owner for `TOSA_ENGINE_DEBUG`, with serializer modules reading debug config through `config`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; debug-enabled Python smoke via `/tmp/et.sh` over `test_full_tosa_FP_only` with `TOSA_ENGINE_DEBUG=1`; focused control-flow smoke via `/tmp/et.sh`; Rust LOC check; grep for removed `fx_graph::debug`
 Note: Rust tests passed `131 passed`; debug-enabled smoke passed `1 passed, 37 deselected`; control-flow smoke passed `29 passed, 1 expected xfail, 60 deselected`. No model lane was run. This completes the Rust-side Refactor 8 coupling cleanup; Python env parsing remains intentionally separate from Rust lowering config.
+
+2026-06-13, architecture invariant completion slice
+Rust LOC: 37,122 -> 37,256
+Movement: +134 Rust LOC
+Deleted: no production code
+Added: Rust invariant tests for deterministic nested while-loop region metadata qualification/sorting and for absence of deleted Python boundary/round-trip symbols in active Rust/Python source
+Validation: `cargo fmt --check`; `cargo check --lib`; focused `cargo test --lib control_flow::tests`; `cargo test --lib`; focused control-flow smoke via `/tmp/et.sh`; Rust LOC check
+Note: Focused invariant tests passed `2 passed`; full Rust tests passed `133 passed`; control-flow smoke passed `29 passed, 1 expected xfail, 60 deselected`. No model lane was run. This is intentionally LOC-positive test coverage and completes the remaining Refactor 10 invariant targets.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1641,12 +1649,12 @@ Run control-flow smoke tests after deleting any code.
 
 Status:
 
-Initial invariant slice complete in `src/ingest/from_ir.rs`. The tests now
-guard two prior failure modes directly: prefixed control-flow subgraph node
-names must move with TensorStore keys, and IR-inserted nodes that are appended
-late must be topologically ordered before rewired users after conversion.
-Remaining useful invariant targets are no-default-Python-reingest source checks
-and deterministic nested control-flow region naming.
+Complete for the listed architecture invariants. `src/ingest/from_ir.rs`
+guards prefixed control-flow subgraph node/store-key movement and topological
+ordering of late IR insertions before rewired users. `src/control_flow.rs`
+guards deterministic nested while-loop region qualification/sorting and checks
+active Rust/Python source for deleted Python boundary/round-trip symbols.
+Target-classification invariants live in `src/fx_target.rs`.
 
 Problem:
 

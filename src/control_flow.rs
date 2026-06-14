@@ -85,3 +85,137 @@ pub(crate) fn collect_region_metadata(
 
     (while_cond_graph_names, while_body_input_counts)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use crate::fx_ir::{IrArg, IrGraph, NodeMeta, NodeOp};
+    use crate::lowering_effects::LoweringEffectBatch;
+
+    use super::*;
+
+    fn add_while(
+        graph: &mut IrGraph,
+        name: &str,
+        cond: &str,
+        body: &str,
+        carried: Vec<IrArg>,
+        additional: Vec<IrArg>,
+    ) {
+        graph.add_node(
+            NodeOp::CallFunction,
+            name.to_string(),
+            "while_loop".to_string(),
+            vec![
+                IrArg::Str(cond.to_string()),
+                IrArg::Str(body.to_string()),
+                IrArg::List(carried),
+                IrArg::List(additional),
+            ],
+            NodeMeta::default(),
+        );
+    }
+
+    #[test]
+    fn nested_while_region_metadata_is_qualified_and_sorted() {
+        let mut parent = IrGraph::empty();
+        add_while(
+            &mut parent,
+            "outer_while",
+            "z_parent_cond",
+            "outer_body",
+            vec![IrArg::Int(1)],
+            vec![IrArg::Int(2), IrArg::Int(3)],
+        );
+
+        let mut inner = IrGraph::empty();
+        add_while(
+            &mut inner,
+            "inner_while",
+            "z_inner_cond",
+            "a_inner_body",
+            vec![IrArg::Int(4), IrArg::Int(5)],
+            vec![IrArg::Int(6)],
+        );
+
+        let mut submodules = BTreeMap::new();
+        submodules.insert(
+            "outer_body".to_string(),
+            (inner, LoweringEffectBatch::default()),
+        );
+
+        let (cond_regions, body_counts) = collect_region_metadata(&parent, &submodules);
+
+        assert_eq!(
+            cond_regions.into_iter().collect::<Vec<_>>(),
+            vec![
+                "outer_body::z_inner_cond".to_string(),
+                "z_parent_cond".to_string(),
+            ]
+        );
+        assert_eq!(
+            body_counts.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                "outer_body".to_string(),
+                "outer_body::a_inner_body".to_string(),
+            ]
+        );
+        let outer = body_counts.get("outer_body").unwrap();
+        assert_eq!((outer.carried, outer.additional), (1, 2));
+        let inner = body_counts.get("outer_body::a_inner_body").unwrap();
+        assert_eq!((inner.carried, inner.additional), (2, 1));
+    }
+
+    fn active_source_files(root: &Path) -> Vec<PathBuf> {
+        fn visit(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(&path, out);
+                    continue;
+                }
+                let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+                    continue;
+                };
+                if matches!(ext, "rs" | "py") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        visit(&root.join("src"), &mut out);
+        visit(&root.join("python/retab"), &mut out);
+        out
+    }
+
+    #[test]
+    fn active_source_has_no_legacy_python_boundary_symbols() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let forbidden = [
+            concat!("flush_", "ir"),
+            concat!("write_", "back"),
+            concat!("ingest_", "fx_graph_hierarchy"),
+            concat!("collect_", "control_flow_subgraphs"),
+            concat!("re-", "ingest"),
+        ];
+
+        let mut violations = Vec::new();
+        for path in active_source_files(root) {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for needle in forbidden {
+                if text.contains(needle) {
+                    violations.push(format!("{} contains {needle}", path.display()));
+                }
+            }
+        }
+
+        assert!(violations.is_empty(), "{}", violations.join("\n"));
+    }
+}
