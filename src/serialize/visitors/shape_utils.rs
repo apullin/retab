@@ -432,6 +432,30 @@ pub(super) fn adjusted_max_pool_pad(
     ]
 }
 
+pub(super) fn pool_nhwc_shape(
+    input_shape: &[i32],
+    kernel: &[i32],
+    stride: &[i32],
+    pad: &[i32],
+) -> Option<Vec<i32>> {
+    if input_shape.len() != 4 {
+        return None;
+    }
+
+    let kh = *kernel.first().unwrap_or(&2);
+    let kw = *kernel.get(1).unwrap_or(&2);
+    let sh = *stride.first().unwrap_or(&2);
+    let sw = *stride.get(1).unwrap_or(&2);
+    let pad_top = *pad.first().unwrap_or(&0);
+    let pad_bottom = *pad.get(1).unwrap_or(&0);
+    let pad_left = *pad.get(2).unwrap_or(&0);
+    let pad_right = *pad.get(3).unwrap_or(&0);
+    let oh = (input_shape[1] + pad_top + pad_bottom - kh) / sh + 1;
+    let ow = (input_shape[2] + pad_left + pad_right - kw) / sw + 1;
+
+    (oh > 0 && ow > 0).then_some(vec![input_shape[0], oh, ow, input_shape[3]])
+}
+
 fn pool_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
     let is_max_pool = matches!(node.target, OpTarget::MaxPool2d | OpTarget::TosaMaxPool2d);
     let is_avg_pool = matches!(node.target, OpTarget::AvgPool2d | OpTarget::TosaAvgPool2d);
@@ -456,18 +480,7 @@ fn pool_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<
         symmetric_pool_pad(&raw_padding)
     };
 
-    let n = input_shape[0];
-    let ih = input_shape[1];
-    let iw = input_shape[2];
-    let c = input_shape[3];
-    let kh = *kernel.first().unwrap_or(&2);
-    let kw = *kernel.get(1).unwrap_or(&2);
-    let sh = *stride.first().unwrap_or(&2);
-    let sw = *stride.get(1).unwrap_or(&2);
-    let oh = (ih + pad[0] + pad[1] - kh) / sh + 1;
-    let ow = (iw + pad[2] + pad[3] - kw) / sw + 1;
-
-    (oh > 0 && ow > 0).then_some(vec![n, oh, ow, c])
+    pool_nhwc_shape(&input_shape, &kernel, &stride, &pad)
 }
 
 fn strided_slice_shape(

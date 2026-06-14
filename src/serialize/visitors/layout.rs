@@ -217,25 +217,8 @@ pub(super) fn compute_pool_nhwc_output(
         };
         let input_node = graph.node(input_id)?;
 
-        let inp = actual_tensor_shape(graph, store, input_node);
-        if inp.len() != 4 {
-            return None;
-        }
-        let (n, ih, iw, c) = (inp[0], inp[1], inp[2], inp[3]);
-
-        let kh = *kernel.first().unwrap_or(&2);
-        let kw = *kernel.get(1).unwrap_or(&2);
-        let pad_top = *pad.first().unwrap_or(&0);
-        let pad_bottom = *pad.get(1).unwrap_or(&0);
-        let pad_left = *pad.get(2).unwrap_or(&0);
-        let pad_right = *pad.get(3).unwrap_or(&0);
-        let stride_h = *stride.first().unwrap_or(&2);
-        let stride_w = *stride.get(1).unwrap_or(&2);
-
-        let oh = (ih + pad_top + pad_bottom - kh) / stride_h + 1;
-        let ow = (iw + pad_left + pad_right - kw) / stride_w + 1;
-
-        Some(vec![n, oh, ow, c])
+        let input_shape = actual_tensor_shape(graph, store, input_node);
+        pool_nhwc_shape(&input_shape, kernel, stride, pad)
     })();
 
     let fallback_shape = {

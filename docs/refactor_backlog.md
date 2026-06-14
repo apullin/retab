@@ -1111,6 +1111,14 @@ Deleted: duplicate max-pool symmetric-pad plus ceil-mode post-pad helper from NN
 Added: wider reuse of `adjusted_max_pool_pad(...)` from serializer shape inference in max-pool emission
 Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over max_pool, avg_pool2d, and conv2d; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `269 passed, 700 deselected`. No model lane was run. Shape inference and emission now share one max-pool pad-adjustment rule.
+
+2026-06-14, pool output-shape formula helper slice
+Rust LOC: 36,791 -> 36,787
+Movement: -4 Rust LOC
+Deleted: duplicate NHWC pool output-shape arithmetic from emitted tensor planning and serializer shape inference
+Added: shared `pool_nhwc_shape(...)` helper used by both actual-shape inference and emitted pool output tensors
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over max_pool, avg_pool2d, and conv2d; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `269 passed, 700 deselected`. No model lane was run. This is a small LOC movement but removes one more independent pool shape formula.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
