@@ -17,10 +17,6 @@ fn same_per_tensor_qparam(lhs: &QParam, rhs: &QParam) -> bool {
         && lhs.dtype_str == rhs.dtype_str
 }
 
-fn single_output_qparam(graph: &IrGraph, id: NodeId) -> Option<QParam> {
-    graph.nodes[id].meta.output_qparam().cloned()
-}
-
 fn slice_meta(graph: &IrGraph, id: NodeId, dim: usize, start: i64, stop: i64) -> Option<NodeMeta> {
     let mut shape = graph.nodes[id].meta.val_shape()?.to_vec();
     if dim >= shape.len() {
@@ -130,7 +126,7 @@ fn cat_meta_from_outputs(
 }
 
 fn bypass_redundant_output_boundaries(graph: &mut IrGraph, original_id: NodeId, cat_id: NodeId) {
-    let Some(cat_qparam) = single_output_qparam(graph, cat_id) else {
+    let Some(cat_qparam) = graph.nodes[cat_id].meta.output_qparam().cloned() else {
         return;
     };
     let users = graph.live_user_ids(original_id);
@@ -145,7 +141,7 @@ fn bypass_redundant_output_boundaries(graph: &mut IrGraph, original_id: NodeId, 
         {
             continue;
         }
-        let Some(user_qparam) = single_output_qparam(graph, user_id) else {
+        let Some(user_qparam) = graph.nodes[user_id].meta.output_qparam().cloned() else {
             continue;
         };
         if !same_per_tensor_qparam(&cat_qparam, &user_qparam) {

@@ -1247,6 +1247,14 @@ Deleted: repeated serializer `input_names.first().cloned()` and `collect_input_n
 Added: `graph_utils::input_name(...)` and `EmitContext::input_name(...)` as the shared grammar for resolving one serializer input name
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib serialize::visitors`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over add, clamp, index_tensor, index_put, slice, mm, bmm, matmul, constant_pad_nd, conv_constant_pad_nd, expand, repeat, upsample_nearest2d, and upsample_bilinear2d; Rust LOC check
 Note: Serializer Rust tests passed `10 passed`; full Rust tests passed `137 passed`; focused Python smoke passed `656 passed, 30 expected xfails, 831 deselected`. No model lane was run. This is a small setup-positive serializer grammar slice that gives single-input emitters the same input-name vocabulary as multi-input emitters.
+
+2026-06-14, grouped-conv qparam lookup cleanup slice
+Rust LOC: 36,821 -> 36,817
+Movement: -4 Rust LOC
+Deleted: pass-local `single_output_qparam(...)` wrapper in grouped-conv decomposition
+Added: no new helper surface; grouped-conv redundant-boundary cleanup now uses `NodeMeta::output_qparam()` directly
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_decompose_grouped_conv_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv_constant_pad_nd, conv1d, conv2d, conv3d, depthwise_conv, linear, and transpose_conv2d; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `419 passed, 2 expected xfails, 1341 deselected`. No model lane was run. This is a deletion-only Tensor Facts cleanup: a one-line local alias was weaker than the shared metadata vocabulary and did not deserve promotion.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1399,7 +1407,9 @@ the symmetric `NodeMeta::set_output_qparams_from`, and whole-map qparam copying
 from one metadata object to another is named by `copy_input_qparams_from` and
 `copy_output_qparams_from`. Qparam fact predicates now also live on `NodeMeta`,
 including the distinction between "any qparam metadata is present", "any qparam
-map is non-empty", and "both input/output qparam maps are non-empty".
+map is non-empty", and "both input/output qparam maps are non-empty". One-line
+pass-local wrappers around these accessors should be inlined unless they name a
+real pass-specific invariant.
 
 Problem:
 
