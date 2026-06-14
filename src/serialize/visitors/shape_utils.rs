@@ -114,6 +114,26 @@ pub(super) fn first_input_node<'a>(graph: &'a Graph, node: &Node) -> Option<&'a 
     graph.node(*input_id)
 }
 
+fn first_input_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
+    Some(actual_tensor_shape(
+        graph,
+        store,
+        first_input_node(graph, node)?,
+    ))
+}
+
+fn normalize_shape_for_node(node: Option<&Node>, shape: Vec<i32>) -> Vec<i32> {
+    if node
+        .map(|node| node.meta.preserve_scalar_shape)
+        .unwrap_or(false)
+        && shape.is_empty()
+    {
+        shape
+    } else {
+        normalize_tensor_shape(shape)
+    }
+}
+
 pub(super) fn transpose_perms(node: &Node) -> Vec<i32> {
     arg_or_kwarg_i32_list(node, 1, "perms")
 }
@@ -194,8 +214,7 @@ fn shape_preserving_unary_tensor_shape(
     if !is_shape_preserving_unary(node) {
         return None;
     }
-    let input_node = first_input_node(graph, node)?;
-    Some(actual_tensor_shape(graph, store, input_node))
+    first_input_shape(graph, store, node)
 }
 
 pub(super) fn transposed_tensor_shape(
@@ -207,7 +226,7 @@ pub(super) fn transposed_tensor_shape(
         return None;
     }
 
-    let input_shape = actual_tensor_shape(graph, store, first_input_node(graph, node)?);
+    let input_shape = first_input_shape(graph, store, node)?;
     let perms = transpose_perms(node);
     if input_shape.len() != perms.len() {
         return None;
@@ -366,8 +385,7 @@ fn table_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option
     if node.target != OpTarget::TosaTable {
         return None;
     }
-    let input_node = first_input_node(graph, node)?;
-    Some(actual_tensor_shape(graph, store, input_node))
+    first_input_shape(graph, store, node)
 }
 
 pub(super) fn pool_post_pad(
@@ -448,7 +466,7 @@ fn pool_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<
         return None;
     }
 
-    let input_shape = actual_tensor_shape(graph, store, first_input_node(graph, node)?);
+    let input_shape = first_input_shape(graph, store, node)?;
     if input_shape.len() != 4 {
         return None;
     }
@@ -561,11 +579,7 @@ pub(crate) fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Nod
         return cached;
     }
     let raw_result = actual_tensor_shape_impl(graph, store, node);
-    let result = if node.meta.preserve_scalar_shape && raw_result.is_empty() {
-        raw_result
-    } else {
-        normalize_tensor_shape(raw_result)
-    };
+    let result = normalize_shape_for_node(Some(node), raw_result);
     SHAPE_CACHE.with(|c| c.borrow_mut().insert(node.name.clone(), result.clone()));
     result
 }
@@ -675,11 +689,7 @@ pub(super) fn make_output_tensor(node: &Node) -> TosaTensor {
 
 pub(super) fn logical_output_shape(node: &Node) -> Vec<i32> {
     let raw_result = apply_tosa_dim_order(node, raw_i32_shape(node));
-    if node.meta.preserve_scalar_shape && raw_result.is_empty() {
-        raw_result
-    } else {
-        normalize_tensor_shape(raw_result)
-    }
+    normalize_shape_for_node(Some(node), raw_result)
 }
 
 pub(super) fn make_actual_output_tensor(
@@ -723,15 +733,7 @@ pub(super) fn push_reshape_with_shape_for_node(
     out_shape: Vec<i32>,
     dtype: DType,
 ) {
-    let out_shape = if node
-        .map(|node| node.meta.preserve_scalar_shape)
-        .unwrap_or(false)
-        && out_shape.is_empty()
-    {
-        out_shape
-    } else {
-        normalize_tensor_shape(out_shape)
-    };
+    let out_shape = normalize_shape_for_node(node, out_shape);
     let output_tensor = node
         .map(|node| make_empty_tensor_for_node(node, output_name.clone(), out_shape.clone(), dtype))
         .unwrap_or_else(|| make_empty_tensor(output_name.clone(), out_shape.clone(), dtype));
