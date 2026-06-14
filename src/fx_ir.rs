@@ -323,7 +323,7 @@ fn import_fx_node<'py>(
 }
 
 fn resolve_fx_args(py_node: &Bound<'_, PyAny>, name_to_id: &HashMap<String, NodeId>) -> Vec<IrArg> {
-    crate::fx_graph::node_args(py_node)
+    fx_node_args(py_node)
         .unwrap_or_default()
         .iter()
         .map(|arg| resolve_arg(arg, name_to_id))
@@ -334,7 +334,7 @@ fn resolve_fx_kwargs(
     py_node: &Bound<'_, PyAny>,
     name_to_id: &HashMap<String, NodeId>,
 ) -> HashMap<String, IrArg> {
-    let Ok(py_kwargs) = crate::fx_graph::node_kwargs(py_node) else {
+    let Ok(py_kwargs) = fx_node_kwargs(py_node) else {
         return HashMap::new();
     };
     if py_kwargs.is_none() {
@@ -345,6 +345,19 @@ fn resolve_fx_kwargs(
         .into_iter()
         .map(|(key, val)| (key, resolve_arg(&val, name_to_id)))
         .collect()
+}
+
+fn fx_node_args<'py>(node: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let args = attrs(node).object("args")?;
+    let mut result = Vec::new();
+    for arg in args.iter()? {
+        result.push(arg?);
+    }
+    Ok(result)
+}
+
+fn fx_node_kwargs<'py>(node: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    attrs(node).object("kwargs")
 }
 
 fn collect_users_from_arg(arg: &IrArg, user_id: NodeId, users: &mut [Vec<NodeId>]) {

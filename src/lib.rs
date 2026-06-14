@@ -53,7 +53,6 @@ mod fx_fuse_equal_placeholders_ir;
 mod fx_fuse_quant_activation_ir;
 mod fx_fuse_shape_only_constants_ir;
 mod fx_fuse_zero_input_constants_ir;
-mod fx_graph;
 mod fx_index_linear;
 mod fx_insert_conv_rescale_ir;
 mod fx_insert_int32_rescale_ir;

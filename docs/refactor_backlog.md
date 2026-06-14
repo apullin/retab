@@ -1962,6 +1962,18 @@ Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`;
 focused Python smoke via `/tmp/et.sh` over addmm, bmm, conv2d, embedding,
 full, linear, matmul, mm, ones, view, and zeros
 
+2026-06-14, FX graph shim deletion slice
+
+Deleted: `src/fx_graph.rs`, whose remaining two accessors were only used by
+`src/fx_ir.rs`
+
+Added: local FX node args/kwargs readers beside the FX node import helpers, so
+the Python inlet no longer has a separate stale FX-graph shim module
+
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`;
+focused Python smoke via `/tmp/et.sh` over addmm, bmm, conv2d, embedding,
+full, linear, matmul, mm, ones, view, and zeros
+
 Problem:
 
 Rust-side Python ingestion still spells the same semantic action many times:
