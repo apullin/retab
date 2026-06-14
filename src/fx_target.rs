@@ -427,6 +427,38 @@ pub(crate) fn is_full_like_target(target: &str) -> bool {
     target.contains("full_like")
 }
 
+pub(crate) fn not_equal_replacement_target(target: &str) -> Option<&'static str> {
+    if target.contains("aten.ne.Scalar") {
+        Some("aten.eq.Scalar")
+    } else if contains_any!(target, "aten.ne.Tensor", "aten.ne_.Tensor") {
+        Some("aten.eq.Tensor")
+    } else {
+        None
+    }
+}
+
+pub(crate) fn scalar_shift_replacement_target(target: &str) -> Option<&'static str> {
+    if target.contains("aten.__lshift__.Scalar") {
+        Some("aten.bitwise_left_shift.Tensor")
+    } else if target.contains("aten.__rshift__.Scalar") {
+        Some("aten.bitwise_right_shift.Tensor")
+    } else {
+        None
+    }
+}
+
+pub(crate) fn is_repeat_interleave_self_int_target(target: &str) -> bool {
+    target.contains("repeat_interleave.self_int")
+}
+
+pub(crate) fn is_max_pool2d_target(target: &str) -> bool {
+    target.contains("max_pool2d")
+}
+
+pub(crate) fn is_max_pool2d_with_indices_target(target: &str) -> bool {
+    target.contains("max_pool2d") && target.contains("with_indices")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,5 +729,35 @@ mod tests {
         assert!(is_mean_target("aten.mean.default"));
         assert!(is_full_like_target("aten.full_like.default"));
         assert!(!is_add_sub_target("aten.add.Scalar"));
+        assert_eq!(
+            not_equal_replacement_target("aten.ne.Scalar"),
+            Some("aten.eq.Scalar")
+        );
+        assert_eq!(
+            not_equal_replacement_target("aten.ne.Tensor"),
+            Some("aten.eq.Tensor")
+        );
+        assert_eq!(
+            not_equal_replacement_target("aten.ne_.Tensor"),
+            Some("aten.eq.Tensor")
+        );
+        assert_eq!(
+            scalar_shift_replacement_target("aten.__lshift__.Scalar"),
+            Some("aten.bitwise_left_shift.Tensor")
+        );
+        assert_eq!(
+            scalar_shift_replacement_target("aten.__rshift__.Scalar"),
+            Some("aten.bitwise_right_shift.Tensor")
+        );
+        assert!(is_repeat_interleave_self_int_target(
+            "aten.repeat_interleave.self_int"
+        ));
+        assert!(is_max_pool2d_target("aten.max_pool2d.default"));
+        assert!(is_max_pool2d_with_indices_target(
+            "aten.max_pool2d_with_indices.default"
+        ));
+        assert!(!is_max_pool2d_with_indices_target(
+            "aten.max_pool2d.default"
+        ));
     }
 }

@@ -1,17 +1,8 @@
 //! Pure Rust IrPass for scalar binary ops that must be rewritten to tensor form.
 
 use crate::fx_ir::{dtype_kwarg, IrArg, IrGraph, IrPass, NodeMeta};
+use crate::fx_target::scalar_shift_replacement_target;
 use crate::runner_logging::log_line;
-
-fn replacement_target(target: &str) -> Option<&'static str> {
-    if target.contains("aten.__lshift__.Scalar") {
-        Some("aten.bitwise_left_shift.Tensor")
-    } else if target.contains("aten.__rshift__.Scalar") {
-        Some("aten.bitwise_right_shift.Tensor")
-    } else {
-        None
-    }
-}
 
 fn scalar_arg(arg: &IrArg) -> Option<IrArg> {
     if let Some(value) = arg.as_int() {
@@ -32,7 +23,7 @@ impl IrPass for IrReplaceScalarWithTensorPass {
         let mut modified = false;
         for id in graph.live_call_function_ids() {
             let target = graph.nodes[id].target.clone();
-            let Some(new_target) = replacement_target(&target) else {
+            let Some(new_target) = scalar_shift_replacement_target(&target) else {
                 continue;
             };
             if graph.nodes[id].args.len() != 2 {

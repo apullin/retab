@@ -1127,6 +1127,14 @@ Deleted: repeated `make_filled_const_tensor(...)` plus `push_inline_const(...)` 
 Added: `push_filled_const_if_supported(...)` as the shared serializer helper for optional scalar-filled CONST emission
 Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over round, div, floor_div, remainder, sqrt, full, sign, expm1, log1p, leaky_relu, mean_dim, sum, add, sub, mul, index_tensor, index_put, index_select, and index_copy; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `501 passed, 2 skipped, 24 expected xfails, 784 deselected`. No model lane was run. This is intentionally setup-positive: direct filled-const construction is now isolated to the helper itself and the `nn/pad` fallback case.
+
+2026-06-14, late target-grammar cleanup slice
+Rust LOC: 36,808 -> 36,851
+Movement: +43 Rust LOC
+Deleted: pass-local target predicate/replacement helpers for not-equal decomposition, scalar-shift tensor replacement, repeat_interleave.self_int decomposition, and max_pool2d dilation decomposition
+Added: shared `fx_target` helpers for not-equal replacement target selection, scalar-shift replacement target selection, repeat_interleave.self_int matching, max_pool2d matching, and max_pool2d-with-indices matching
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_target::tests`; `cargo test --lib fx_decompose_ne_ir::tests`; `cargo test --lib fx_replace_scalar_with_tensor_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over ne, lshift, rshift, repeat, and max_pool; Rust LOC check
+Note: Target-family Rust tests passed `12 passed`; touched pass tests passed `3 passed`; full Rust tests passed `137 passed`; focused Python smoke passed `155 passed, 271 deselected`. No model lane was run. This is setup-positive because the classifier tests are larger than the pass-local deletions, but four more operator-identity rules now have one owner.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

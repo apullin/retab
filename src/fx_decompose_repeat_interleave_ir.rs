@@ -6,6 +6,7 @@
 //!   3. view_copy(repeated, final_shape) — final_shape[dim] *= repeats
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass};
+use crate::fx_target::is_repeat_interleave_self_int_target;
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeRepeatInterleavePass;
@@ -18,10 +19,7 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
         for id in graph.live_call_function_ids() {
-            if !graph.nodes[id]
-                .target
-                .contains("repeat_interleave.self_int")
-            {
+            if !is_repeat_interleave_self_int_target(&graph.nodes[id].target) {
                 continue;
             }
 

@@ -1,20 +1,11 @@
 //! Pure Rust IrPass: `aten.ne.*` -> `aten.eq.*` + `aten.logical_not.default`.
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass};
+use crate::fx_target::not_equal_replacement_target;
 use crate::runner_logging::log_line;
 
 #[cfg(test)]
 use crate::fx_ir::NodeMeta;
-
-fn eq_target_for(ne_target: &str) -> Option<&'static str> {
-    if ne_target.contains("aten.ne.Scalar") {
-        Some("aten.eq.Scalar")
-    } else if ne_target.contains("aten.ne.Tensor") || ne_target.contains("aten.ne_.Tensor") {
-        Some("aten.eq.Tensor")
-    } else {
-        None
-    }
-}
 
 pub struct IrDecomposeNotEqualPass;
 
@@ -27,7 +18,7 @@ impl IrPass for IrDecomposeNotEqualPass {
         let mut modified = false;
         for id in graph.live_call_function_ids() {
             let node = &graph.nodes[id];
-            let Some(eq_target) = eq_target_for(&node.target) else {
+            let Some(eq_target) = not_equal_replacement_target(&node.target) else {
                 continue;
             };
             if node.args.len() < 2 {

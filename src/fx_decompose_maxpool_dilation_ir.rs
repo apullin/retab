@@ -1,6 +1,7 @@
 //! Pure Rust IrPass: dilated max_pool2d → pad + space-to-batch + pool + batch-to-space + slice.
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_target::{is_max_pool2d_target, is_max_pool2d_with_indices_target};
 use crate::runner_logging::log_line;
 
 fn pack_dimension(dil: i64, pad: i64, orig: i64, kernel: i64, stride: i64) -> (i64, i64, i64) {
@@ -47,10 +48,10 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
         let mut modified = false;
         for id in graph.live_call_function_ids() {
             let t = &graph.nodes[id].target;
-            if !t.contains("max_pool2d") {
+            if !is_max_pool2d_target(t) {
                 continue;
             }
-            let is_with_indices = t.contains("with_indices");
+            let is_with_indices = is_max_pool2d_with_indices_target(t);
 
             let value_getitem = if is_with_indices {
                 let mut value_user = None;
