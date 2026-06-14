@@ -1063,6 +1063,14 @@ Deleted: remaining `cloned_with_val(...); set_empty_qparam_maps()` two-step spel
 Added: `NodeMeta::cloned_with_empty_qparam_maps(shape, dtype)` and generalized `NodeMeta::{cloned_with_val,cloned_without_qparams}` shape inputs to accept `Into<Vec<i64>>`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv1d, conv2d, conv3d, and linear; Rust LOC check
 Note: Full Rust tests passed `134 passed`; focused Python smoke passed `332 passed, 1 expected xfail, 1077 deselected`. No model lane was run. This is a setup-positive grammar slice: it preserves the distinction between qparam fields cleared and qparam maps present-but-empty, but only five current production call sites use it.
+
+2026-06-14, serializer target-map grammar slice
+Rust LOC: 37,156 -> 36,928
+Movement: -228 Rust LOC
+Deleted: monolithic `parse_op_target` ladder of repeated `target.contains(...)` returns
+Added: ordered control-flow, TOSA, quantized-decomposed, and ATen target rule tables plus target-map unit tests for ordering-sensitive cases
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib ingest::target_map`; `cargo test --lib`; broad focused Python serializer smoke via `/tmp/et.sh`; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `1213 passed, 8 skipped, 1 expected xfail, 2321 deselected`. No model lane was run. The table conversion also fixed an existing TOSA ordering bug where `GREATER_EQUAL` was classified as `TosaEqual` because `equal` was matched first.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

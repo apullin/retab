@@ -1,539 +1,311 @@
 use crate::graph::ir::OpTarget;
 
+type TargetRule = (&'static [&'static str], OpTarget);
+
+const CONTROL_FLOW_RULES: &[(&str, OpTarget)] = &[
+    ("cond", OpTarget::CondIf),
+    ("higher_order.cond", OpTarget::CondIf),
+    ("torch.ops.higher_order.cond", OpTarget::CondIf),
+    ("while_loop", OpTarget::WhileLoop),
+    ("higher_order.while_loop", OpTarget::WhileLoop),
+    ("torch.ops.higher_order.while_loop", OpTarget::WhileLoop),
+];
+
+const TOSA_RULES: &[TargetRule] = &[
+    (&["rescale"], OpTarget::TosaRescale),
+    (&["resize"], OpTarget::TosaResize),
+    (&["depthwise_conv2d"], OpTarget::TosaDepthwiseConv2d),
+    (
+        &["transpose_conv2d", "transposeconv2d"],
+        OpTarget::TosaTransposeConv2d,
+    ),
+    (&["conv2d"], OpTarget::TosaConv2d),
+    (&["conv3d"], OpTarget::TosaConv3d),
+    (&["transpose"], OpTarget::TosaTranspose),
+    (&["max_pool2d", "maxpool2d"], OpTarget::TosaMaxPool2d),
+    (&["avg_pool2d", "avgpool2d"], OpTarget::TosaAvgPool2d),
+    (&["reshape"], OpTarget::TosaReshape),
+    (&["clamp"], OpTarget::TosaClamp),
+    (&["matmul"], OpTarget::TosaMatmul),
+    (
+        &["fully_connected", "fullyconnected"],
+        OpTarget::TosaFullyConnected,
+    ),
+    (&["reduce_sum", "reducesum"], OpTarget::TosaReduceSum),
+    (&["reduce_max", "reducemax"], OpTarget::TosaReduceMax),
+    (&["reduce_min", "reducemin"], OpTarget::TosaReduceMin),
+    (&["concat"], OpTarget::TosaConcat),
+    (&["slice"], OpTarget::TosaSlice),
+    (&["table"], OpTarget::TosaTable),
+    (&["pad"], OpTarget::TosaPad),
+    (&["gather"], OpTarget::TosaGather),
+    (&["scatter"], OpTarget::TosaScatter),
+    (&["select"], OpTarget::TosaSelect),
+    (&["cast"], OpTarget::TosaCast),
+    (
+        &["greater_equal", "greaterequal"],
+        OpTarget::TosaGreaterEqual,
+    ),
+    (&["greater"], OpTarget::TosaGreater),
+    (&["equal"], OpTarget::TosaEqual),
+    (&["sigmoid"], OpTarget::TosaSigmoid),
+    (&["tanh"], OpTarget::TosaTanh),
+    (&["exp"], OpTarget::TosaExp),
+    (&["log"], OpTarget::TosaLog),
+    (&["negate", "neg"], OpTarget::TosaNegate),
+    (&["abs"], OpTarget::TosaAbs),
+    (&["ceil"], OpTarget::TosaCeil),
+    (&["floor"], OpTarget::TosaFloor),
+    (&["reciprocal"], OpTarget::TosaReciprocal),
+    (&["erf"], OpTarget::TosaErf),
+    (&["rsqrt"], OpTarget::TosaRsqrt),
+    (&["cos"], OpTarget::TosaCos),
+    (&["sin"], OpTarget::TosaSin),
+    (&["add"], OpTarget::TosaAdd),
+    (&["sub"], OpTarget::TosaSub),
+    (&["mul"], OpTarget::TosaMul),
+    (&["const"], OpTarget::TosaConst),
+];
+
+const QUANTIZED_DECOMPOSED_RULES: &[TargetRule] = &[
+    (
+        &["quantized_decomposed.quantize_per_tensor"],
+        OpTarget::QuantizePerTensor,
+    ),
+    (
+        &["quantized_decomposed.dequantize_per_tensor"],
+        OpTarget::DequantizePerTensor,
+    ),
+    (
+        &["quantized_decomposed.dequantize_per_channel"],
+        OpTarget::DequantizePerChannel,
+    ),
+];
+
+const ATEN_RULES: &[TargetRule] = &[
+    (&["aten.conv_transpose2d"], OpTarget::ConvTranspose2d),
+    (&["aten.conv2d", "aten.convolution"], OpTarget::Conv2d),
+    (&["aten.relu"], OpTarget::Relu),
+    (&["aten.add."], OpTarget::Add),
+    (&["aten.sub."], OpTarget::Sub),
+    (&["aten.mul."], OpTarget::Mul),
+    (&["aten.div."], OpTarget::Div),
+    (&["aten.permute"], OpTarget::Permute),
+    (&["aten.reshape"], OpTarget::Reshape),
+    (&["aten.full."], OpTarget::Full),
+    (&["aten.avg_pool2d"], OpTarget::AvgPool2d),
+    (&["aten.max_pool2d"], OpTarget::MaxPool2d),
+    (&["aten.sum."], OpTarget::Sum),
+    (&["aten.rsqrt"], OpTarget::Rsqrt),
+    (&["aten.layer_norm"], OpTarget::LayerNorm),
+    (
+        &["aten.batch_norm", "aten._native_batch_norm"],
+        OpTarget::BatchNorm,
+    ),
+    (&["aten.linear"], OpTarget::Linear),
+    (&["aten.matmul", "aten.mm."], OpTarget::Matmul),
+    (&["aten.bmm"], OpTarget::Bmm),
+    (&["aten.addmm"], OpTarget::Addmm),
+    (&["aten.softmax", "aten._softmax"], OpTarget::Softmax),
+    (&["aten.gelu"], OpTarget::Gelu),
+    (&["aten.sigmoid"], OpTarget::Sigmoid),
+    (&["aten.tanh"], OpTarget::Tanh),
+    (&["aten.maximum"], OpTarget::TosaMaximum),
+    (&["aten.minimum"], OpTarget::TosaMinimum),
+    (&["aten.clamp"], OpTarget::Clamp),
+    (&["aten.hardtanh"], OpTarget::Hardtanh),
+    (&["aten.mean"], OpTarget::Mean),
+    (&["aten.cat"], OpTarget::Cat),
+    (&["aten.slice_copy", "aten.slice"], OpTarget::Slice),
+    (&["aten.index_select"], OpTarget::IndexSelect),
+    (&["aten.select_copy", "aten.select"], OpTarget::SelectCopy),
+    (&["aten.unsqueeze"], OpTarget::Unsqueeze),
+    (&["aten.squeeze"], OpTarget::Squeeze),
+    (&["aten.flatten"], OpTarget::Flatten),
+    (&["aten.constant_pad_nd", "aten.pad"], OpTarget::Pad),
+    (&["aten.embedding"], OpTarget::Embedding),
+    (&["aten.exp.", "aten.exp2"], OpTarget::Exp),
+    (&["aten.log.", "aten.log2"], OpTarget::Log),
+    (&["aten.neg."], OpTarget::Neg),
+    (&["aten.reciprocal"], OpTarget::Reciprocal),
+    (&["aten.abs."], OpTarget::Abs),
+    (&["aten.pow."], OpTarget::Pow),
+    (&["aten.floor."], OpTarget::Floor),
+    (&["aten.ceil."], OpTarget::Ceil),
+    (&["aten.expand"], OpTarget::Expand),
+    (&["aten.contiguous"], OpTarget::Contiguous),
+    (&["aten.view", "aten._unsafe_view"], OpTarget::View),
+    (
+        &[
+            "aten.to.",
+            "aten._to_copy",
+            "aten.clone",
+            "dim_order_ops._to_dim_order_copy",
+            "dim_order_ops._clone_dim_order",
+        ],
+        OpTarget::To,
+    ),
+    (&["aten.group_norm"], OpTarget::GroupNorm),
+    (&["aten.amax"], OpTarget::Amax),
+    (&["aten.amin"], OpTarget::Amin),
+    (&["aten.var."], OpTarget::Var),
+    (&["aten.fill_"], OpTarget::FullLike),
+    (&["aten.copy_"], OpTarget::Copy),
+    (&["aten.eye"], OpTarget::Eye),
+    (&["aten.full_like"], OpTarget::FullLike),
+    (&["aten.where"], OpTarget::Where),
+    (&["aten.floor_divide"], OpTarget::FloorDivide),
+    (&["aten.gather"], OpTarget::TosaGather),
+    (&["aten.arange"], OpTarget::Arange),
+    (&["aten.leaky_relu"], OpTarget::LeakyRelu),
+    (&["aten.sqrt"], OpTarget::Sqrt),
+    (&["aten.log1p"], OpTarget::Log1p),
+    (&["aten.expm1"], OpTarget::Expm1),
+    (&["aten.remainder"], OpTarget::Remainder),
+    (&["aten.sign"], OpTarget::Sign),
+    (&["aten.round"], OpTarget::Round),
+    (&["aten.bitwise_not"], OpTarget::BitwiseNot),
+    (&["aten.bitwise_and"], OpTarget::BitwiseAnd),
+    (&["aten.bitwise_or"], OpTarget::BitwiseOr),
+    (&["aten.bitwise_xor"], OpTarget::BitwiseXor),
+    (&["aten.bitwise_left_shift"], OpTarget::BitwiseLeftShift),
+    (&["aten.bitwise_right_shift"], OpTarget::BitwiseRightShift),
+    (&["aten.logical_not"], OpTarget::LogicalNot),
+    (&["aten.logical_and"], OpTarget::LogicalAnd),
+    (&["aten.logical_or"], OpTarget::LogicalOr),
+    (&["aten.logical_xor"], OpTarget::LogicalXor),
+    (&["aten.gt.", "aten.gt_"], OpTarget::Gt),
+    (&["aten.ge.", "aten.ge_"], OpTarget::Ge),
+    (&["aten.lt.", "aten.lt_"], OpTarget::Lt),
+    (&["aten.le.", "aten.le_"], OpTarget::Le),
+    (&["aten.eq.", "aten.eq_"], OpTarget::Eq),
+    (&["aten.sin."], OpTarget::Sin),
+    (&["aten.cos."], OpTarget::Cos),
+    (&["aten.tan."], OpTarget::Tan),
+    (&["aten.asin."], OpTarget::Asin),
+    (&["aten.acos."], OpTarget::Acos),
+    (&["aten.atan."], OpTarget::Atan),
+    (&["aten.sinh."], OpTarget::Sinh),
+    (&["aten.cosh."], OpTarget::Cosh),
+    (&["aten.asinh."], OpTarget::Asinh),
+    (&["aten.acosh."], OpTarget::Acosh),
+    (&["aten.elu.", "aten.elu_"], OpTarget::Elu),
+    (&["aten.hardswish"], OpTarget::Hardswish),
+    (&["aten.silu"], OpTarget::Silu),
+    (
+        &["aten._adaptive_avg_pool2d", "aten.adaptive_avg_pool2d"],
+        OpTarget::AdaptiveAvgPool2d,
+    ),
+    (&["aten.upsample_nearest2d"], OpTarget::UpsampleNearest2d),
+    (&["aten.upsample_bilinear2d"], OpTarget::UpsampleBilinear2d),
+    (&["aten.conv1d"], OpTarget::Conv1d),
+    (&["aten.scalar_tensor"], OpTarget::ScalarTensor),
+    (&["aten.zeros."], OpTarget::Zeros),
+    (&["aten.repeat."], OpTarget::Repeat),
+    (&["aten.cumsum"], OpTarget::Cumsum),
+    (&["aten.erfinv"], OpTarget::Erfinv),
+    (&["aten.unfold_copy", "aten.unfold."], OpTarget::UnfoldCopy),
+    (
+        &["aten.split_with_sizes_copy", "aten.split_with_sizes."],
+        OpTarget::SplitWithSizesCopy,
+    ),
+    (&["aten.index.Tensor"], OpTarget::IndexTensor),
+    (&["aten.any.", "aten.any_"], OpTarget::Any),
+];
+
 /// Map a Python target string (from `str(node.target)`) to an `OpTarget` variant.
 ///
 /// ATen targets look like `"aten.conv2d.default"`, quantized decomposed targets
 /// look like `"quantized_decomposed.quantize_per_tensor.default"`. We match on
 /// substrings so we tolerate different overload suffixes.
 pub fn parse_op_target(target_str: &str) -> OpTarget {
-    // Control-flow ops can arrive either with the full higher_order target name
-    // or as the short symbol name after lowering/export rewrites.
-    if matches!(
-        target_str,
-        "cond" | "higher_order.cond" | "torch.ops.higher_order.cond"
-    ) {
-        return OpTarget::CondIf;
-    }
-    if matches!(
-        target_str,
-        "while_loop" | "higher_order.while_loop" | "torch.ops.higher_order.while_loop"
-    ) {
-        return OpTarget::WhileLoop;
+    if let Some(target) = exact_match(target_str, CONTROL_FLOW_RULES) {
+        return target;
     }
 
-    // ---------------------------------------------------------------
-    // TOSA ops — check first so they don't get caught by ATen matches.
-    // Migration-era FX helpers created nodes with targets like
-    // "tosa.RESCALE.default", "tosa.rescale.default", or "tosa::rescale".
-    // The ExecuTorch exir_ops variant uses "backend.tosa.RESCALE.default".
-    // We match case-insensitively on the substring after "tosa".
-    // ---------------------------------------------------------------
+    // TOSA ops must be checked first so they do not get caught by ATen matches.
     if target_str.contains("tosa") {
-        let lower = target_str.to_ascii_lowercase();
-        if lower.contains("rescale") {
-            return OpTarget::TosaRescale;
-        }
-        if lower.contains("resize") {
-            return OpTarget::TosaResize;
-        }
-        if lower.contains("depthwise_conv2d") {
-            return OpTarget::TosaDepthwiseConv2d;
-        }
-        if lower.contains("transpose_conv2d") || lower.contains("transposeconv2d") {
-            return OpTarget::TosaTransposeConv2d;
-        }
-        if lower.contains("conv2d") {
-            return OpTarget::TosaConv2d;
-        }
-        if lower.contains("conv3d") {
-            return OpTarget::TosaConv3d;
-        }
-        if lower.contains("transpose") {
-            return OpTarget::TosaTranspose;
-        }
-        if lower.contains("max_pool2d") || lower.contains("maxpool2d") {
-            return OpTarget::TosaMaxPool2d;
-        }
-        if lower.contains("avg_pool2d") || lower.contains("avgpool2d") {
-            return OpTarget::TosaAvgPool2d;
-        }
-        if lower.contains("reshape") {
-            return OpTarget::TosaReshape;
-        }
-        if lower.contains("clamp") {
-            return OpTarget::TosaClamp;
-        }
-        if lower.contains("matmul") {
-            return OpTarget::TosaMatmul;
-        }
-        if lower.contains("fully_connected") || lower.contains("fullyconnected") {
-            return OpTarget::TosaFullyConnected;
-        }
-        if lower.contains("reduce_sum") || lower.contains("reducesum") {
-            return OpTarget::TosaReduceSum;
-        }
-        if lower.contains("reduce_max") || lower.contains("reducemax") {
-            return OpTarget::TosaReduceMax;
-        }
-        if lower.contains("reduce_min") || lower.contains("reducemin") {
-            return OpTarget::TosaReduceMin;
-        }
-        if lower.contains("concat") {
-            return OpTarget::TosaConcat;
-        }
-        if lower.contains("slice") {
-            return OpTarget::TosaSlice;
-        }
-        if lower.contains("table") {
-            return OpTarget::TosaTable;
-        }
-        if lower.contains("pad") {
-            return OpTarget::TosaPad;
-        }
-        if lower.contains("gather") {
-            return OpTarget::TosaGather;
-        }
-        if lower.contains("scatter") {
-            return OpTarget::TosaScatter;
-        }
-        if lower.contains("select") {
-            return OpTarget::TosaSelect;
-        }
-        if lower.contains("cast") {
-            return OpTarget::TosaCast;
-        }
-        if lower.contains("equal") {
-            return OpTarget::TosaEqual;
-        }
-        if lower.contains("greater_equal") || lower.contains("greaterequal") {
-            return OpTarget::TosaGreaterEqual;
-        }
-        if lower.contains("greater") {
-            return OpTarget::TosaGreater;
-        }
-        if lower.contains("sigmoid") {
-            return OpTarget::TosaSigmoid;
-        }
-        if lower.contains("tanh") {
-            return OpTarget::TosaTanh;
-        }
-        if lower.contains("exp") {
-            return OpTarget::TosaExp;
-        }
-        if lower.contains("log") {
-            return OpTarget::TosaLog;
-        }
-        if lower.contains("negate") || lower.contains("neg") {
-            return OpTarget::TosaNegate;
-        }
-        if lower.contains("abs") {
-            return OpTarget::TosaAbs;
-        }
-        if lower.contains("ceil") {
-            return OpTarget::TosaCeil;
-        }
-        if lower.contains("floor") {
-            return OpTarget::TosaFloor;
-        }
-        if lower.contains("reciprocal") {
-            return OpTarget::TosaReciprocal;
-        }
-        if lower.contains("erf") {
-            return OpTarget::TosaErf;
-        }
-        if lower.contains("rsqrt") {
-            return OpTarget::TosaRsqrt;
-        }
-        if lower.contains("cos") {
-            return OpTarget::TosaCos;
-        }
-        if lower.contains("sin") {
-            return OpTarget::TosaSin;
-        }
-        if lower.contains("add") {
-            return OpTarget::TosaAdd;
-        }
-        if lower.contains("sub") {
-            return OpTarget::TosaSub;
-        }
-        if lower.contains("mul") {
-            return OpTarget::TosaMul;
-        }
-        if lower.contains("const") {
-            return OpTarget::TosaConst;
-        }
-        // Unknown TOSA op — still tag it as Other but with the tosa prefix
-        return OpTarget::Other(target_str.to_string());
+        return parse_tosa_target(target_str);
     }
 
-    // Quantized decomposed ops — check before aten to avoid false positives
-    if target_str.contains("quantized_decomposed.quantize_per_tensor") {
-        return OpTarget::QuantizePerTensor;
-    }
-    if target_str.contains("quantized_decomposed.dequantize_per_tensor") {
-        return OpTarget::DequantizePerTensor;
-    }
-    if target_str.contains("quantized_decomposed.dequantize_per_channel") {
-        return OpTarget::DequantizePerChannel;
+    if let Some(target) = match_rules(target_str, QUANTIZED_DECOMPOSED_RULES) {
+        return target;
     }
 
-    // ATen ops — order matters for ops whose names are substrings of others
-    // (e.g. "conv2d" vs "conv_transpose2d")
-    if target_str.contains("aten.conv_transpose2d") {
-        return OpTarget::ConvTranspose2d;
-    }
-    if target_str.contains("aten.conv2d") || target_str.contains("aten.convolution") {
-        return OpTarget::Conv2d;
-    }
-    if target_str.contains("aten.relu") {
-        return OpTarget::Relu;
-    }
-    if target_str.contains("aten.add.") {
-        return OpTarget::Add;
-    }
-    if target_str.contains("aten.sub.") {
-        return OpTarget::Sub;
-    }
-    if target_str.contains("aten.mul.") {
-        return OpTarget::Mul;
-    }
-    if target_str.contains("aten.div.") {
-        return OpTarget::Div;
-    }
-    if target_str.contains("aten.permute") {
-        return OpTarget::Permute;
-    }
-    if target_str.contains("aten.reshape") {
-        return OpTarget::Reshape;
-    }
-    if target_str.contains("aten.full.") {
-        return OpTarget::Full;
-    }
-    if target_str.contains("aten.avg_pool2d") {
-        return OpTarget::AvgPool2d;
-    }
-    if target_str.contains("aten.max_pool2d") {
-        return OpTarget::MaxPool2d;
-    }
-    if target_str.contains("aten.sum.") {
-        return OpTarget::Sum;
-    }
-    if target_str.contains("aten.rsqrt") {
-        return OpTarget::Rsqrt;
-    }
-    if target_str.contains("aten.layer_norm") {
-        return OpTarget::LayerNorm;
-    }
-    if target_str.contains("aten.batch_norm") || target_str.contains("aten._native_batch_norm") {
-        return OpTarget::BatchNorm;
-    }
-    if target_str.contains("aten.linear") {
-        return OpTarget::Linear;
-    }
-    if target_str.contains("aten.matmul") || target_str.contains("aten.mm.") {
-        return OpTarget::Matmul;
-    }
-    if target_str.contains("aten.bmm") {
-        return OpTarget::Bmm;
-    }
-    if target_str.contains("aten.addmm") {
-        return OpTarget::Addmm;
-    }
-    if target_str.contains("aten.softmax") || target_str.contains("aten._softmax") {
-        return OpTarget::Softmax;
-    }
-    if target_str.contains("aten.gelu") {
-        return OpTarget::Gelu;
-    }
-    if target_str.contains("aten.sigmoid") {
-        return OpTarget::Sigmoid;
-    }
-    if target_str.contains("aten.tanh") {
-        return OpTarget::Tanh;
-    }
-    if target_str.contains("aten.maximum") {
-        return OpTarget::TosaMaximum;
-    }
-    if target_str.contains("aten.minimum") {
-        return OpTarget::TosaMinimum;
-    }
-    if target_str.contains("aten.clamp") {
-        return OpTarget::Clamp;
-    }
-    if target_str.contains("aten.hardtanh") {
-        return OpTarget::Hardtanh;
-    }
-    if target_str.contains("aten.mean") {
-        return OpTarget::Mean;
-    }
-    if target_str.contains("aten.cat") {
-        return OpTarget::Cat;
-    }
+    // slice_scatter is not serializable by the generic slice visitor.
     if target_str.contains("aten.slice_scatter") {
         return OpTarget::Other(target_str.to_string());
     }
-    if target_str.contains("aten.slice_copy") || target_str.contains("aten.slice") {
-        return OpTarget::Slice;
-    }
-    if target_str.contains("aten.index_select") {
-        return OpTarget::IndexSelect;
-    }
-    if target_str.contains("aten.select_copy") || target_str.contains("aten.select") {
-        return OpTarget::SelectCopy;
-    }
-    if target_str.contains("aten.unsqueeze") {
-        return OpTarget::Unsqueeze;
-    }
-    if target_str.contains("aten.squeeze") {
-        return OpTarget::Squeeze;
-    }
-    if target_str.contains("aten.flatten") {
-        return OpTarget::Flatten;
-    }
-    if target_str.contains("aten.constant_pad_nd") || target_str.contains("aten.pad") {
-        return OpTarget::Pad;
-    }
-    if target_str.contains("aten.embedding") {
-        return OpTarget::Embedding;
-    }
-    if target_str.contains("aten.exp.") || target_str.contains("aten.exp2") {
-        return OpTarget::Exp;
-    }
-    if target_str.contains("aten.log.") || target_str.contains("aten.log2") {
-        return OpTarget::Log;
-    }
-    if target_str.contains("aten.neg.") {
-        return OpTarget::Neg;
-    }
-    if target_str.contains("aten.reciprocal") {
-        return OpTarget::Reciprocal;
-    }
-    if target_str.contains("aten.abs.") {
-        return OpTarget::Abs;
-    }
-    if target_str.contains("aten.pow.") {
-        return OpTarget::Pow;
-    }
-    if target_str.contains("aten.floor.") {
-        return OpTarget::Floor;
-    }
-    if target_str.contains("aten.ceil.") {
-        return OpTarget::Ceil;
-    }
-    if target_str.contains("aten.expand") {
-        return OpTarget::Expand;
-    }
-    if target_str.contains("aten.contiguous") {
-        return OpTarget::Contiguous;
-    }
-    if target_str.contains("aten.view") || target_str.contains("aten._unsafe_view") {
-        return OpTarget::View;
-    }
-    if target_str.contains("aten.to.")
-        || target_str.contains("aten._to_copy")
-        || target_str.contains("aten.clone")
-        || target_str.contains("dim_order_ops._to_dim_order_copy")
-        || target_str.contains("dim_order_ops._clone_dim_order")
-    {
-        return OpTarget::To;
-    }
-    if target_str.contains("aten.group_norm") {
-        return OpTarget::GroupNorm;
-    }
-    if target_str.contains("aten.amax") {
-        return OpTarget::Amax;
-    }
-    if target_str.contains("aten.amin") {
-        return OpTarget::Amin;
-    }
-    if target_str.contains("aten.var.") {
-        return OpTarget::Var;
-    }
-    if target_str.contains("aten.fill_") {
-        return OpTarget::FullLike;
-    }
-    if target_str.contains("aten.copy_") {
-        return OpTarget::Copy;
-    }
-    if target_str.contains("aten.eye") {
-        return OpTarget::Eye;
-    }
-    if target_str.contains("aten.full_like") {
-        return OpTarget::FullLike;
-    }
-    if target_str.contains("aten.where") {
-        return OpTarget::Where;
-    }
-    if target_str.contains("aten.floor_divide") {
-        return OpTarget::FloorDivide;
-    }
-    if target_str.contains("aten.gather") {
-        return OpTarget::TosaGather;
-    }
-    if target_str.contains("aten.arange") {
-        return OpTarget::Arange;
-    }
-    if target_str.contains("aten.leaky_relu") {
-        return OpTarget::LeakyRelu;
-    }
-    if target_str.contains("aten.sqrt") {
-        return OpTarget::Sqrt;
-    }
-    if target_str.contains("aten.log1p") {
-        return OpTarget::Log1p;
-    }
-    if target_str.contains("aten.expm1") {
-        return OpTarget::Expm1;
-    }
-    if target_str.contains("aten.remainder") {
-        return OpTarget::Remainder;
-    }
-    if target_str.contains("aten.sign") {
-        return OpTarget::Sign;
-    }
-    if target_str.contains("aten.round") {
-        return OpTarget::Round;
-    }
 
-    // Bitwise ops
-    if target_str.contains("aten.bitwise_not") {
-        return OpTarget::BitwiseNot;
-    }
-    if target_str.contains("aten.bitwise_and") {
-        return OpTarget::BitwiseAnd;
-    }
-    if target_str.contains("aten.bitwise_or") {
-        return OpTarget::BitwiseOr;
-    }
-    if target_str.contains("aten.bitwise_xor") {
-        return OpTarget::BitwiseXor;
-    }
-    if target_str.contains("aten.bitwise_left_shift") {
-        return OpTarget::BitwiseLeftShift;
-    }
-    if target_str.contains("aten.bitwise_right_shift") {
-        return OpTarget::BitwiseRightShift;
-    }
-
-    // Logical ops
-    if target_str.contains("aten.logical_not") {
-        return OpTarget::LogicalNot;
-    }
-    if target_str.contains("aten.logical_and") {
-        return OpTarget::LogicalAnd;
-    }
-    if target_str.contains("aten.logical_or") {
-        return OpTarget::LogicalOr;
-    }
-    if target_str.contains("aten.logical_xor") {
-        return OpTarget::LogicalXor;
-    }
-
-    // Comparison ops — order matters: gt before ge to avoid aten.gt matching aten.ge
-    if target_str.contains("aten.gt.") || target_str.contains("aten.gt_") {
-        return OpTarget::Gt;
-    }
-    if target_str.contains("aten.ge.") || target_str.contains("aten.ge_") {
-        return OpTarget::Ge;
-    }
-    if target_str.contains("aten.lt.") || target_str.contains("aten.lt_") {
-        return OpTarget::Lt;
-    }
-    if target_str.contains("aten.le.") || target_str.contains("aten.le_") {
-        return OpTarget::Le;
-    }
-    if target_str.contains("aten.eq.") || target_str.contains("aten.eq_") {
-        return OpTarget::Eq;
-    }
-
-    // Trig / math ops
-    if target_str.contains("aten.sin.") {
-        return OpTarget::Sin;
-    }
-    if target_str.contains("aten.cos.") {
-        return OpTarget::Cos;
-    }
-    if target_str.contains("aten.tan.") {
-        return OpTarget::Tan;
-    }
-    if target_str.contains("aten.asin.") {
-        return OpTarget::Asin;
-    }
-    if target_str.contains("aten.acos.") {
-        return OpTarget::Acos;
-    }
-    if target_str.contains("aten.atan.") {
-        return OpTarget::Atan;
-    }
-    if target_str.contains("aten.sinh.") {
-        return OpTarget::Sinh;
-    }
-    if target_str.contains("aten.cosh.") {
-        return OpTarget::Cosh;
-    }
-    if target_str.contains("aten.asinh.") {
-        return OpTarget::Asinh;
-    }
-    if target_str.contains("aten.acosh.") {
-        return OpTarget::Acosh;
-    }
-    if target_str.contains("aten.elu.") || target_str.contains("aten.elu_") {
-        return OpTarget::Elu;
-    }
-    if target_str.contains("aten.hardswish") {
-        return OpTarget::Hardswish;
-    }
-    if target_str.contains("aten.silu") {
-        return OpTarget::Silu;
-    }
-
-    // Additional ops
-    if target_str.contains("aten._adaptive_avg_pool2d")
-        || target_str.contains("aten.adaptive_avg_pool2d")
-    {
-        return OpTarget::AdaptiveAvgPool2d;
-    }
-    if target_str.contains("aten.upsample_nearest2d") {
-        return OpTarget::UpsampleNearest2d;
-    }
-    if target_str.contains("aten.upsample_bilinear2d") {
-        return OpTarget::UpsampleBilinear2d;
-    }
-    if target_str.contains("aten.conv1d") {
-        return OpTarget::Conv1d;
-    }
-    if target_str.contains("aten.scalar_tensor") {
-        return OpTarget::ScalarTensor;
-    }
-    if target_str.contains("aten.zeros.") {
-        return OpTarget::Zeros;
-    }
-    if target_str.contains("aten.repeat.") {
-        return OpTarget::Repeat;
-    }
-    if target_str.contains("aten.cumsum") {
-        return OpTarget::Cumsum;
-    }
+    // Keep erf separate from erfinv; both lower through different visitors.
     if target_str.contains("aten.erf.") && !target_str.contains("erfinv") {
         return OpTarget::TosaErf;
     }
-    if target_str.contains("aten.erfinv") {
-        return OpTarget::Erfinv;
-    }
-    if target_str.contains("aten.unfold_copy") || target_str.contains("aten.unfold.") {
-        return OpTarget::UnfoldCopy;
-    }
-    if target_str.contains("aten.split_with_sizes_copy")
-        || target_str.contains("aten.split_with_sizes.")
-    {
-        return OpTarget::SplitWithSizesCopy;
-    }
-    if target_str.contains("aten.index.Tensor") {
-        return OpTarget::IndexTensor;
-    }
-    if target_str.contains("aten.any.") || target_str.contains("aten.any_") {
-        return OpTarget::Any;
+
+    match_rules(target_str, ATEN_RULES).unwrap_or_else(|| OpTarget::Other(target_str.to_string()))
+}
+
+fn parse_tosa_target(target_str: &str) -> OpTarget {
+    let lower = target_str.to_ascii_lowercase();
+    match_rules(&lower, TOSA_RULES).unwrap_or_else(|| OpTarget::Other(target_str.to_string()))
+}
+
+fn exact_match(target_str: &str, rules: &[(&str, OpTarget)]) -> Option<OpTarget> {
+    rules
+        .iter()
+        .find_map(|(needle, target)| (*needle == target_str).then(|| target.clone()))
+}
+
+fn match_rules(target_str: &str, rules: &[TargetRule]) -> Option<OpTarget> {
+    rules
+        .iter()
+        .find_map(|(needles, target)| contains_any(target_str, needles).then(|| target.clone()))
+}
+
+fn contains_any(target_str: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| target_str.contains(needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_order_sensitive_tosa_targets() {
+        assert_eq!(
+            parse_op_target("backend.tosa.GREATER_EQUAL.default"),
+            OpTarget::TosaGreaterEqual
+        );
+        assert_eq!(
+            parse_op_target("backend.tosa.TRANSPOSE_CONV2D.default"),
+            OpTarget::TosaTransposeConv2d
+        );
     }
 
-    OpTarget::Other(target_str.to_string())
+    #[test]
+    fn parses_order_sensitive_aten_targets() {
+        assert_eq!(
+            parse_op_target("aten.conv_transpose2d.input"),
+            OpTarget::ConvTranspose2d
+        );
+        assert_eq!(
+            parse_op_target("aten.slice_scatter.default"),
+            OpTarget::Other("aten.slice_scatter.default".to_string())
+        );
+        assert_eq!(parse_op_target("aten.erf.default"), OpTarget::TosaErf);
+        assert_eq!(parse_op_target("aten.erfinv.default"), OpTarget::Erfinv);
+    }
+
+    #[test]
+    fn parses_control_flow_by_exact_symbol() {
+        assert_eq!(parse_op_target("cond"), OpTarget::CondIf);
+        assert_eq!(
+            parse_op_target("torch.ops.higher_order.while_loop"),
+            OpTarget::WhileLoop
+        );
+        assert_eq!(
+            parse_op_target("some.wrapper.cond"),
+            OpTarget::Other("some.wrapper.cond".to_string())
+        );
+    }
 }
