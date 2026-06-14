@@ -10,6 +10,7 @@ use smallvec::SmallVec;
 use crate::fx_ir::{
     IrArg, IrGraph, MetaValue, NodeId as IrNodeId, NodeMeta as IrNodeMeta, NodeOp, QParam,
 };
+use crate::fx_target::is_raw_aten_convolution_target;
 use crate::graph::ir::{
     Arg, DType, Node, NodeId, NodeMeta, OpTarget, OpType, QuantArgs, TensorInfo,
 };
@@ -113,7 +114,7 @@ fn graph_from_ir_ext(
             // Mirror ingest: aten.convolution with transposed=True (arg 6) is a
             // transpose-conv, not a plain conv2d.
             if matches!(parsed, OpTarget::Conv2d)
-                && ir_node.target.contains("aten.convolution")
+                && is_raw_aten_convolution_target(&ir_node.target)
                 && matches!(ir_node.args.get(6), Some(IrArg::Bool(true)))
             {
                 OpTarget::ConvTranspose2d

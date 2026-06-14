@@ -1503,6 +1503,23 @@ select_scatter, and full_like now also live in the shared target grammar. Exact
 conv1d, conv2d, and ATen convolution default spellings now also have shared
 target helpers. Grouped-conv redundant-boundary cleanup now also uses shared
 boundary-rescale target grammar instead of a pass-local substring predicate.
+Table-op target classification and arange overload classification now also live
+in `fx_target`, so table precompute and zero-input arange materialization no
+longer own pass-local target substring grammars.
+
+2026-06-14, table and arange target grammar slice
+
+Deleted: pass-local table-op target rule table from `fx_insert_table_ops_ir`
+and raw arange overload target matching from `fx_fuse_zero_input_constants_ir`
+
+Added: `TableOpTargetKind`, `table_op_target_kind`, `ArangeTargetKind`, and
+`arange_target_kind` in `fx_target`; `ingest/from_ir` now also uses the shared
+raw-ATen-convolution target helper when detecting transposed convolution
+
+Validation: `cargo fmt --check`; `cargo check --lib`; focused
+`cargo test --lib fx_target::tests`; `cargo test --lib`; focused Python smoke
+via `/tmp/et.sh` over arange, table-backed unary/scalar ops, and full/factory
+constant paths.
 
 Remaining work:
 

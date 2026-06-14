@@ -5,7 +5,10 @@ use crate::fx_constant_tensor_eval::{node_has_tensor_inputs, tensor_numel};
 use crate::fx_ir::{
     EffectfulIrPass, EffectfulIrPassResult, IrArg, IrGraph, IrNode, NodeOp, QParam,
 };
-use crate::fx_target::{is_add_sub_target, zero_input_constant_target, ZeroInputConstantTarget};
+use crate::fx_target::{
+    arange_target_kind, is_add_sub_target, zero_input_constant_target, ArangeTargetKind,
+    ZeroInputConstantTarget,
+};
 use crate::graph::ir::DType;
 use crate::lowering_effects::{LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect};
 
@@ -140,27 +143,28 @@ where
 }
 
 fn arange_spec(node: &IrNode) -> Option<(f64, f64, f64)> {
-    if node.target.contains("aten.arange.start_step") {
-        let start = node.args.first()?.as_scalar_literal_f64()?;
-        let end = node.args.get(1)?.as_scalar_literal_f64()?;
-        let step = node
-            .args
-            .get(2)
-            .and_then(IrArg::as_scalar_literal_f64)
-            .unwrap_or(1.0);
-        return Some((start, end, step));
-    }
-    if node.target.contains("aten.arange.start") {
-        if node.args.len() >= 2 {
-            return Some((
-                node.args.first()?.as_scalar_literal_f64()?,
-                node.args.get(1)?.as_scalar_literal_f64()?,
-                1.0,
-            ));
+    match arange_target_kind(&node.target)? {
+        ArangeTargetKind::StartStep => {
+            let start = node.args.first()?.as_scalar_literal_f64()?;
+            let end = node.args.get(1)?.as_scalar_literal_f64()?;
+            let step = node
+                .args
+                .get(2)
+                .and_then(IrArg::as_scalar_literal_f64)
+                .unwrap_or(1.0);
+            Some((start, end, step))
         }
-        return Some((0.0, node.args.first()?.as_scalar_literal_f64()?, 1.0));
+        ArangeTargetKind::Start => {
+            if node.args.len() >= 2 {
+                return Some((
+                    node.args.first()?.as_scalar_literal_f64()?,
+                    node.args.get(1)?.as_scalar_literal_f64()?,
+                    1.0,
+                ));
+            }
+            Some((0.0, node.args.first()?.as_scalar_literal_f64()?, 1.0))
+        }
     }
-    None
 }
 
 fn arange_output_shape(node: &IrNode, start: f64, end: f64, step: f64) -> Option<Vec<i64>> {

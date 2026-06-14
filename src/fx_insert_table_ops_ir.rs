@@ -1,4 +1,5 @@
 use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, QParam};
+use crate::fx_target::{table_op_target_kind, TableOpTargetKind};
 use crate::graph::ir::DType;
 use crate::lowering_effects::{
     InsertPrecomputedTableOpEffect, LoweringEffect, LoweringEffectBatch, TableTensorSpec,
@@ -12,78 +13,40 @@ struct TableOpSpec {
     scalar_arg: Option<f64>,
 }
 
-const SIMPLE_TABLE_TARGET_RULES: &[(&str, &str)] = &[
-    ("rsqrt.default", "rsqrt"),
-    ("ceil.default", "ceil"),
-    ("floor.default", "floor"),
-    ("round.default", "round"),
-    ("reciprocal.default", "reciprocal"),
-    ("exp.default", "exp"),
-    ("log.default", "log"),
-    ("hardsigmoid.default", "hardsigmoid"),
-    ("sigmoid.default", "sigmoid"),
-    ("atanh.default", "atanh"),
-    ("asinh.default", "asinh"),
-    ("acosh.default", "acosh"),
-    ("atan.default", "atan"),
-    ("tanh.default", "tanh"),
-    ("silu.default", "silu"),
-    ("erf.default", "erf"),
-    ("aten.sin.", "sin"),
-    ("aten.cos.", "cos"),
-    ("sinh.default", "sinh"),
-    ("cosh.default", "cosh"),
-    ("tan.default", "tan"),
-    ("acos.default", "acos"),
-    ("asin.default", "asin"),
-    ("expm1.default", "expm1"),
-    ("hardswish.default", "hardswish"),
-    ("erfinv.default", "erfinv"),
-    ("log1p.default", "log1p"),
-    ("sqrt.default", "sqrt"),
-];
-
-fn simple_table_kind(target: &str) -> Option<&'static str> {
-    SIMPLE_TABLE_TARGET_RULES
-        .iter()
-        .find_map(|(needle, kind)| target.contains(needle).then_some(*kind))
-}
-
 fn table_op_spec(node: &IrNode) -> Option<TableOpSpec> {
-    let target = node.target.as_str();
-    let kind = if target.contains("gelu.default") {
-        match node.kwarg_str("approximate").unwrap_or("none") {
-            "none" => "gelu",
-            "tanh" => "gelu_tanh",
-            _ => return None,
-        }
-    } else if let Some(kind) = simple_table_kind(target) {
-        kind
-    } else {
-        return if target.contains("pow.Tensor_Scalar") {
+    match table_op_target_kind(&node.target)? {
+        TableOpTargetKind::Unary(kind) => Some(TableOpSpec {
+            kind,
+            scalar_arg: None,
+        }),
+        TableOpTargetKind::Gelu => match node.kwarg_str("approximate").unwrap_or("none") {
+            "none" => Some(TableOpSpec {
+                kind: "gelu",
+                scalar_arg: None,
+            }),
+            "tanh" => Some(TableOpSpec {
+                kind: "gelu_tanh",
+                scalar_arg: None,
+            }),
+            _ => None,
+        },
+        TableOpTargetKind::PowTensorScalar => {
             node.arg_numeric_f64(1).map(|scalar_arg| TableOpSpec {
                 kind: "pow",
                 scalar_arg: Some(scalar_arg),
             })
-        } else if target.contains("remainder.Scalar") {
+        }
+        TableOpTargetKind::RemainderScalar => {
             node.arg_numeric_f64(1).map(|scalar_arg| TableOpSpec {
                 kind: "remainder",
                 scalar_arg: Some(scalar_arg),
             })
-        } else if target.contains("elu.default") || target.contains("elu_") {
-            Some(TableOpSpec {
-                kind: "elu",
-                scalar_arg: Some(node.arg_numeric_f64(1).unwrap_or(1.0)),
-            })
-        } else {
-            None
-        };
-    };
-
-    Some(TableOpSpec {
-        kind,
-        scalar_arg: None,
-    })
+        }
+        TableOpTargetKind::Elu => Some(TableOpSpec {
+            kind: "elu",
+            scalar_arg: Some(node.arg_numeric_f64(1).unwrap_or(1.0)),
+        }),
+    }
 }
 
 fn table_quant_spec(qp: &QParam) -> Option<TableTensorSpec> {

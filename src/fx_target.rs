@@ -28,6 +28,21 @@ pub(crate) enum ZeroInputConstantTarget {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArangeTargetKind {
+    Start,
+    StartStep,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TableOpTargetKind {
+    Unary(&'static str),
+    Gelu,
+    PowTensorScalar,
+    RemainderScalar,
+    Elu,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShapeOnlyConstantTarget {
     Reshape,
     Unsqueeze,
@@ -154,6 +169,69 @@ pub(crate) fn zero_input_constant_target(target: &str) -> Option<ZeroInputConsta
 
 pub(crate) fn is_zero_input_constant_target(target: &str) -> bool {
     zero_input_constant_target(target).is_some()
+}
+
+pub(crate) fn arange_target_kind(target: &str) -> Option<ArangeTargetKind> {
+    if target.contains("aten.arange.start_step") {
+        return Some(ArangeTargetKind::StartStep);
+    }
+    if target.contains("aten.arange.start") {
+        return Some(ArangeTargetKind::Start);
+    }
+    None
+}
+
+const SIMPLE_TABLE_TARGET_RULES: &[(&str, &str)] = &[
+    ("rsqrt.default", "rsqrt"),
+    ("ceil.default", "ceil"),
+    ("floor.default", "floor"),
+    ("round.default", "round"),
+    ("reciprocal.default", "reciprocal"),
+    ("exp.default", "exp"),
+    ("log.default", "log"),
+    ("hardsigmoid.default", "hardsigmoid"),
+    ("sigmoid.default", "sigmoid"),
+    ("atanh.default", "atanh"),
+    ("asinh.default", "asinh"),
+    ("acosh.default", "acosh"),
+    ("atan.default", "atan"),
+    ("tanh.default", "tanh"),
+    ("silu.default", "silu"),
+    ("erf.default", "erf"),
+    ("aten.sin.", "sin"),
+    ("aten.cos.", "cos"),
+    ("sinh.default", "sinh"),
+    ("cosh.default", "cosh"),
+    ("tan.default", "tan"),
+    ("acos.default", "acos"),
+    ("asin.default", "asin"),
+    ("expm1.default", "expm1"),
+    ("hardswish.default", "hardswish"),
+    ("erfinv.default", "erfinv"),
+    ("log1p.default", "log1p"),
+    ("sqrt.default", "sqrt"),
+];
+
+pub(crate) fn table_op_target_kind(target: &str) -> Option<TableOpTargetKind> {
+    if target.contains("gelu.default") {
+        return Some(TableOpTargetKind::Gelu);
+    }
+    if let Some((_, kind)) = SIMPLE_TABLE_TARGET_RULES
+        .iter()
+        .find(|(needle, _)| target.contains(needle))
+    {
+        return Some(TableOpTargetKind::Unary(kind));
+    }
+    if target.contains("pow.Tensor_Scalar") {
+        return Some(TableOpTargetKind::PowTensorScalar);
+    }
+    if target.contains("remainder.Scalar") {
+        return Some(TableOpTargetKind::RemainderScalar);
+    }
+    if target.contains("elu.default") || target.contains("elu_") {
+        return Some(TableOpTargetKind::Elu);
+    }
+    None
 }
 
 pub(crate) fn shape_only_constant_target(target: &str) -> Option<ShapeOnlyConstantTarget> {
@@ -597,6 +675,14 @@ mod tests {
             Some(ZeroInputConstantTarget::Arange)
         );
         assert_eq!(
+            arange_target_kind("aten.arange.start"),
+            Some(ArangeTargetKind::Start)
+        );
+        assert_eq!(
+            arange_target_kind("aten.arange.start_step"),
+            Some(ArangeTargetKind::StartStep)
+        );
+        assert_eq!(
             zero_input_constant_target("aten.linspace.default"),
             Some(ZeroInputConstantTarget::Linspace)
         );
@@ -631,6 +717,35 @@ mod tests {
         assert!(is_view_like_target("aten._unsafe_view.default"));
         assert!(is_permute_target("aten.permute.default"));
         assert!(!is_shape_only_constant_target("aten.slice_copy.Tensor"));
+    }
+
+    #[test]
+    fn recognizes_table_op_target_families() {
+        assert_eq!(
+            table_op_target_kind("aten.exp.default"),
+            Some(TableOpTargetKind::Unary("exp"))
+        );
+        assert_eq!(
+            table_op_target_kind("aten.sin.default"),
+            Some(TableOpTargetKind::Unary("sin"))
+        );
+        assert_eq!(
+            table_op_target_kind("aten.gelu.default"),
+            Some(TableOpTargetKind::Gelu)
+        );
+        assert_eq!(
+            table_op_target_kind("aten.pow.Tensor_Scalar"),
+            Some(TableOpTargetKind::PowTensorScalar)
+        );
+        assert_eq!(
+            table_op_target_kind("aten.remainder.Scalar"),
+            Some(TableOpTargetKind::RemainderScalar)
+        );
+        assert_eq!(
+            table_op_target_kind("aten.elu.default"),
+            Some(TableOpTargetKind::Elu)
+        );
+        assert_eq!(table_op_target_kind("aten.add.Tensor"), None);
     }
 
     #[test]
