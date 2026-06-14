@@ -1583,6 +1583,14 @@ Deleted: repeated decompose-rule struct literals, pure serializer alias wrappers
 Added: small const decompose-rule constructors and a single shape-reshape serializer emitter for squeeze/unsqueeze
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over add, batch_norm, clamp, exp, gelu, group_norm, pow, relu, softmax, squeeze, sub, tan, unsqueeze, and view
 Note: Full Rust tests passed `141 passed`; focused Python smoke passed `412 passed, 1 skipped, 3 xfailed`. This is the first aggressive LoC-reduction pass after closing the original backlog. It avoided test-fixture churn and kept one-use IR graph-builder helpers because those still encode useful graph-surgery grammar.
+
+2026-06-14, LoC-first test-fixture cleanup slice 1
+Rust LOC: 36,248 -> 36,138
+Movement: -110 Rust LOC
+Deleted: repeated `fx_decompose_ops_ir` test graph setup for simple f32 placeholders/calls, repeated live-node searches, and repeated live target assertions
+Added: local test helpers for f32 metadata, placeholders, calls, live-node lookup, and live target checks
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`
+Note: Full Rust tests passed `141 passed`. This slice changes only Rust test scaffolding, so no Python lane was required. The helpers are local to the large decompose-op test module and deliberately avoid a cross-module test framework.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
