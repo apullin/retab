@@ -21,6 +21,7 @@ mod matmul;
 mod nn;
 mod op_utils;
 mod reductions;
+mod rounding;
 pub(crate) mod shape_utils;
 mod tensor_ops;
 
@@ -61,6 +62,7 @@ use emit_result::EmitResult;
 use graph_utils::*;
 use layout::*;
 use op_utils::*;
+use rounding::*;
 pub(crate) use shape_utils::actual_tensor_shape;
 use shape_utils::*;
 

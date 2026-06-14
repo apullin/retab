@@ -111,155 +111,6 @@ fn full_quant_bounds(dtype: DType) -> Option<(i64, i64)> {
     }
 }
 
-fn emit_bankers_round_temp(
-    result: &mut EmitResult,
-    base_name: &str,
-    input_name: String,
-    shape: Vec<i32>,
-    base_dtype: DType,
-    ir_dtype: crate::graph::ir::DType,
-) -> String {
-    let half_name = format!("{base_name}_round_half");
-    let one_name = format!("{base_name}_round_one");
-    let two_name = format!("{base_name}_round_two");
-    let floor_x_name = format!("{base_name}_round_floor_x");
-    let frac_name = format!("{base_name}_round_frac");
-    let is_tie_name = format!("{base_name}_round_is_tie");
-    let plus_half_name = format!("{base_name}_round_plus_half");
-    let round_up_name = format!("{base_name}_round_up");
-    let half_floor_mul_name = format!("{base_name}_round_half_floor_mul");
-    let half_floor_name = format!("{base_name}_round_half_floor");
-    let even_floor_name = format!("{base_name}_round_even_floor");
-    let floor_is_even_name = format!("{base_name}_round_floor_is_even");
-    let floor_plus_one_name = format!("{base_name}_round_floor_plus_one");
-    let tie_result_name = format!("{base_name}_round_tie_result");
-    let output_name = format!("{base_name}_round");
-
-    for (name, value) in [
-        (half_name.clone(), 0.5),
-        (one_name.clone(), 1.0),
-        (two_name.clone(), 2.0),
-    ] {
-        assert!(
-            push_filled_const_if_supported(result, name, shape.clone(), ir_dtype, value),
-            "emit_bankers_round_temp: unsupported constant dtype"
-        );
-    }
-
-    let round_shift_base = format!("{base_name}_round");
-    let shift_name = push_shift_const(result, &round_shift_base);
-
-    result
-        .unary(
-            floor_x_name.clone(),
-            shape.clone(),
-            base_dtype,
-            Op::Floor,
-            Attribute::Floor(FloorAttribute {}),
-            input_name.clone(),
-        )
-        .binary(
-            frac_name.clone(),
-            shape.clone(),
-            base_dtype,
-            Op::Sub,
-            Attribute::Sub(SubAttribute {}),
-            input_name.clone(),
-            floor_x_name.clone(),
-        )
-        .binary(
-            is_tie_name.clone(),
-            shape.clone(),
-            DType::Bool,
-            Op::Equal,
-            Attribute::Equal(EqualAttribute {}),
-            frac_name,
-            half_name.clone(),
-        )
-        .binary(
-            plus_half_name.clone(),
-            shape.clone(),
-            base_dtype,
-            Op::Add,
-            Attribute::Add(AddAttribute {}),
-            input_name,
-            half_name.clone(),
-        )
-        .unary(
-            round_up_name.clone(),
-            shape.clone(),
-            base_dtype,
-            Op::Floor,
-            Attribute::Floor(FloorAttribute {}),
-            plus_half_name,
-        )
-        .ternary(
-            half_floor_mul_name.clone(),
-            shape.clone(),
-            base_dtype,
-            Op::Mul,
-            Attribute::Mul(MulAttribute { shift: 0 }),
-            floor_x_name.clone(),
-            half_name,
-            shift_name.clone(),
-        )
-        .unary(
-            half_floor_name.clone(),
-            shape.clone(),
-            base_dtype,
-            Op::Floor,
-            Attribute::Floor(FloorAttribute {}),
-            half_floor_mul_name,
-        )
-        .ternary(
-            even_floor_name.clone(),
-            shape.clone(),
-            base_dtype,
-            Op::Mul,
-            Attribute::Mul(MulAttribute { shift: 0 }),
-            half_floor_name,
-            two_name,
-            shift_name,
-        )
-        .binary(
-            floor_is_even_name.clone(),
-            shape.clone(),
-            DType::Bool,
-            Op::Equal,
-            Attribute::Equal(EqualAttribute {}),
-            floor_x_name.clone(),
-            even_floor_name,
-        )
-        .binary(
-            floor_plus_one_name.clone(),
-            shape.clone(),
-            base_dtype,
-            Op::Add,
-            Attribute::Add(AddAttribute {}),
-            floor_x_name.clone(),
-            one_name,
-        )
-        .ternary(
-            tie_result_name.clone(),
-            shape.clone(),
-            base_dtype,
-            Op::Select,
-            Attribute::Select(SelectAttribute {}),
-            floor_is_even_name,
-            floor_x_name,
-            floor_plus_one_name,
-        );
-
-    result.push_output_op(
-        make_empty_tensor(output_name.clone(), shape, base_dtype),
-        Op::Select,
-        Attribute::Select(SelectAttribute {}),
-        vec![is_tie_name, tie_result_name, round_up_name],
-    );
-
-    output_name
-}
-
 pub(super) fn emit_quantize_per_tensor(ctx: &EmitContext) -> EmitResult {
     let node = ctx.node;
     let graph = ctx.graph;
@@ -305,13 +156,18 @@ pub(super) fn emit_quantize_per_tensor(ctx: &EmitContext) -> EmitResult {
         }
     }
 
-    current_name = emit_bankers_round_temp(
+    let round_name = format!("{}_round", node.name);
+    current_name = emit_bankers_round_with_fill(
         &mut result,
         &node.name,
+        &round_name,
         current_name,
         output_shape.clone(),
         intermediate_dtype,
         intermediate_ir_dtype,
+        make_empty_tensor(round_name.clone(), output_shape.clone(), intermediate_dtype),
+        |value| value,
+        "emit_quantize_per_tensor",
     );
 
     if zero_point != 0.0 {

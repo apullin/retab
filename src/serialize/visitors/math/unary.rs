@@ -98,153 +98,17 @@ pub(in crate::serialize::visitors) fn emit_round(ctx: &EmitContext) -> EmitResul
     let spec = ParsedUnaryTensorSpec::parse(graph, store, node)
         .unwrap_or_else(|| panic!("emit_round: missing input for node '{}'", node.name));
 
-    let half_name = format!("{}_round_half", node.name);
-    let one_name = format!("{}_round_one", node.name);
-    let two_name = format!("{}_round_two", node.name);
-    let floor_x_name = format!("{}_round_floor_x", node.name);
-    let frac_name = format!("{}_round_frac", node.name);
-    let is_tie_name = format!("{}_round_is_tie", node.name);
-    let plus_half_name = format!("{}_round_plus_half", node.name);
-    let round_up_name = format!("{}_round_up", node.name);
-    let half_floor_mul_name = format!("{}_round_half_floor_mul", node.name);
-    let half_floor_name = format!("{}_round_half_floor", node.name);
-    let even_floor_name = format!("{}_round_even_floor", node.name);
-    let floor_is_even_name = format!("{}_round_floor_is_even", node.name);
-    let floor_plus_one_name = format!("{}_round_floor_plus_one", node.name);
-    let tie_result_name = format!("{}_round_tie_result", node.name);
-
-    for (name, value, label) in [
-        (half_name.clone(), 0.5, "half"),
-        (one_name.clone(), 1.0, "one"),
-        (two_name.clone(), 2.0, "two"),
-    ] {
-        assert!(
-            push_filled_const_if_supported(
-                &mut result,
-                name,
-                spec.output_shape.clone(),
-                spec.ir_dtype,
-                quantize_fill_value(node, value),
-            ),
-            "emit_round: unsupported {}-fill dtype {:?} for node '{}'",
-            label,
-            spec.ir_dtype,
-            node.name
-        );
-    }
-
-    let s = spec.output_shape.clone();
-    let d = spec.base_dtype;
-    let shift_name = push_shift_const(&mut result, &node.name);
-
-    // 12-op banker's-rounding decomposition using the chainable builder API.
-    result
-        .unary(
-            floor_x_name.clone(),
-            s.clone(),
-            d,
-            Op::Floor,
-            Attribute::Floor(FloorAttribute {}),
-            spec.input_name.clone(),
-        )
-        .binary(
-            frac_name.clone(),
-            s.clone(),
-            d,
-            Op::Sub,
-            Attribute::Sub(SubAttribute {}),
-            spec.input_name.clone(),
-            floor_x_name.clone(),
-        )
-        .binary(
-            is_tie_name.clone(),
-            s.clone(),
-            DType::Bool,
-            Op::Equal,
-            Attribute::Equal(EqualAttribute {}),
-            frac_name,
-            half_name.clone(),
-        )
-        .binary(
-            plus_half_name.clone(),
-            s.clone(),
-            d,
-            Op::Add,
-            Attribute::Add(AddAttribute {}),
-            spec.input_name.clone(),
-            half_name.clone(),
-        )
-        .unary(
-            round_up_name.clone(),
-            s.clone(),
-            d,
-            Op::Floor,
-            Attribute::Floor(FloorAttribute {}),
-            plus_half_name,
-        )
-        .ternary(
-            half_floor_mul_name.clone(),
-            s.clone(),
-            d,
-            Op::Mul,
-            Attribute::Mul(MulAttribute { shift: 0 }),
-            floor_x_name.clone(),
-            half_name,
-            shift_name.clone(),
-        )
-        .unary(
-            half_floor_name.clone(),
-            s.clone(),
-            d,
-            Op::Floor,
-            Attribute::Floor(FloorAttribute {}),
-            half_floor_mul_name,
-        )
-        .ternary(
-            even_floor_name.clone(),
-            s.clone(),
-            d,
-            Op::Mul,
-            Attribute::Mul(MulAttribute { shift: 0 }),
-            half_floor_name,
-            two_name,
-            shift_name,
-        )
-        .binary(
-            floor_is_even_name.clone(),
-            s.clone(),
-            DType::Bool,
-            Op::Equal,
-            Attribute::Equal(EqualAttribute {}),
-            floor_x_name.clone(),
-            even_floor_name,
-        )
-        .binary(
-            floor_plus_one_name.clone(),
-            s.clone(),
-            d,
-            Op::Add,
-            Attribute::Add(AddAttribute {}),
-            floor_x_name.clone(),
-            one_name,
-        )
-        .ternary(
-            tie_result_name.clone(),
-            s.clone(),
-            d,
-            Op::Select,
-            Attribute::Select(SelectAttribute {}),
-            floor_is_even_name,
-            floor_x_name,
-            floor_plus_one_name,
-        );
-
-    // Final output uses the actual output tensor (not a temp), so use push_output_op directly.
-    result.push_output_op(
+    emit_bankers_round_with_fill(
+        &mut result,
+        &node.name,
+        &node.name,
+        spec.input_name,
+        spec.output_shape,
+        spec.base_dtype,
+        spec.ir_dtype,
         ctx.make_output(),
-        Op::Select,
-        Attribute::Select(SelectAttribute {}),
-        vec![is_tie_name, tie_result_name, round_up_name],
+        |value| quantize_fill_value(node, value),
+        "emit_round",
     );
     result
 }
