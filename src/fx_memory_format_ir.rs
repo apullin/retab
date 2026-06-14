@@ -178,8 +178,7 @@ fn is_transpose_conv2d_weight(graph: &IrGraph, id: NodeId) -> bool {
         if user.op != NodeOp::CallFunction {
             return false;
         }
-        let target = user.target.to_ascii_lowercase();
-        if !(is_transpose_conv2d_target(&target) || is_transposed_aten_convolution(user)) {
+        if !(is_transpose_conv2d_target(&user.target) || is_transposed_aten_convolution(user)) {
             return false;
         }
         matches!(user.args.get(1), Some(IrArg::Node(weight_id)) if *weight_id == id)

@@ -171,6 +171,18 @@ pub(crate) fn is_zero_input_constant_target(target: &str) -> bool {
     zero_input_constant_target(target).is_some()
 }
 
+pub(crate) fn is_fold_qdq_constant_target(target: &str) -> bool {
+    contains_any!(
+        target,
+        "full_like.default",
+        "full.default",
+        "arange.start_step",
+        "eye.default",
+        "linspace.default",
+        "scalar_tensor.default"
+    )
+}
+
 pub(crate) fn arange_target_kind(target: &str) -> Option<ArangeTargetKind> {
     if target.contains("aten.arange.start_step") {
         return Some(ArangeTargetKind::StartStep);
@@ -530,6 +542,16 @@ pub(crate) fn is_add_sub_target(target: &str) -> bool {
     contains_any!(target, "add.Tensor", "sub.Tensor")
 }
 
+pub(crate) fn add_sub_alpha_result_target(target: &str) -> Option<&'static str> {
+    if target.contains("sub.Tensor") {
+        Some("aten.sub.Tensor")
+    } else if target.contains("add.Tensor") {
+        Some("aten.add.Tensor")
+    } else {
+        None
+    }
+}
+
 pub(crate) fn is_mul_target(target: &str) -> bool {
     target.contains("mul.Tensor")
 }
@@ -576,6 +598,16 @@ pub(crate) fn is_max_pool2d_target(target: &str) -> bool {
 
 pub(crate) fn is_max_pool2d_with_indices_target(target: &str) -> bool {
     target.contains("max_pool2d") && target.contains("with_indices")
+}
+
+pub(crate) fn group_norm_reshape_target(target: &str) -> Option<&'static str> {
+    if target.contains("native_group_norm") {
+        Some("aten.view_copy.default")
+    } else if contains_any!(target, "aten.group_norm", "aten.native_group_norm") {
+        Some("aten.reshape.default")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -707,6 +739,9 @@ mod tests {
             Some(ShapeOnlyConstantTarget::Permute)
         );
         assert!(is_zero_input_constant_target("aten.eye.default"));
+        assert!(is_fold_qdq_constant_target("aten.scalar_tensor.default"));
+        assert!(is_fold_qdq_constant_target("aten.full_like.default"));
+        assert!(!is_fold_qdq_constant_target("aten.reshape.default"));
         assert!(is_shape_only_constant_target("aten.permute_copy.default"));
         assert!(is_constant_only_shape_transform_target(
             "aten.slice_copy.Tensor"
@@ -902,6 +937,14 @@ mod tests {
         assert!(is_minmax_target("aten.minimum.default"));
         assert!(is_add_sub_target("aten.add.Tensor"));
         assert!(is_add_sub_target("aten.sub.Tensor"));
+        assert_eq!(
+            add_sub_alpha_result_target("aten.add.Tensor"),
+            Some("aten.add.Tensor")
+        );
+        assert_eq!(
+            add_sub_alpha_result_target("aten.sub.Tensor"),
+            Some("aten.sub.Tensor")
+        );
         assert!(is_mul_target("aten.mul.Tensor"));
         assert!(is_sum_dim_int_list_target("aten.sum.dim_IntList"));
         assert!(is_mean_target("aten.mean.dim"));
@@ -935,6 +978,14 @@ mod tests {
         assert!(is_max_pool2d_with_indices_target(
             "aten.max_pool2d_with_indices.default"
         ));
+        assert_eq!(
+            group_norm_reshape_target("aten.group_norm.default"),
+            Some("aten.reshape.default")
+        );
+        assert_eq!(
+            group_norm_reshape_target("aten.native_group_norm.default"),
+            Some("aten.view_copy.default")
+        );
         assert!(!is_max_pool2d_with_indices_target(
             "aten.max_pool2d.default"
         ));

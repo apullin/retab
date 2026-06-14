@@ -10,11 +10,12 @@ small batches with full validation.
 
 ## Tracking Policy
 
-## Current Burn-Down Queue
+## Current Follow-Through Queue
 
-As of 2026-06-14, the original architecture backlog is mostly closed. The
-remaining work should be treated as a small burn-down queue, not permission for
-a broad rewrite.
+As of 2026-06-14, the original architecture backlog is closed for active
+production source. The remaining work should be treated as opportunistic
+follow-through, not a required burn-down queue and not permission for a broad
+rewrite.
 
 Recommended order:
 
@@ -1566,6 +1567,14 @@ Deleted: raw production `aten.slice_copy.Tensor` target and positional-argument 
 Added: `IrGraph::add_slice_copy(...)` and `IrGraph::add_anchored_slice_copy(...)`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over adaptive avgpool, avgpool, conv2d, cumsum, maxpool, slice, slice_scatter, split, and constant_pad_nd; Rust LOC check
 Note: Full Rust tests passed `141 passed`; focused Python smoke passed `501 passed`. Remaining raw `slice_copy` strings are test fixtures/assertions, the builder itself, or target grammar tests. This is a Refactor 3 slice: slice-copy construction now has one graph-rewrite spelling.
+
+2026-06-14, final target-grammar closure slice
+Rust LOC: 36,285 -> 36,320
+Movement: +35 Rust LOC
+Deleted: local fold-QDQ constant target helper, local add/sub-alpha result-target selection, local group-norm reshape target selection, raw downstream RESCALE substring detection in conv accumulator rescale insertion, and one redundant transpose-conv lowercasing site
+Added: shared `fx_target` helpers for fold-QDQ constant targets, add/sub-alpha canonical result targets, and group-norm reshape target selection
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over add, arange, conv2d, eye, full, group_norm, sub, and transpose_conv2d; Rust LOC check
+Note: Full Rust tests passed `141 passed`; focused Python smoke passed `293 passed, 7 skipped, 1 xfailed`. The slice is setup-positive because the target grammar gained tests and named helpers, but the remaining production matches are now either centralized in `fx_target`, already covered by local rule-table grammar, or not worth migrating without a future deletion-backed domain slice. This closes the original target-grammar backlog for active production source.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1606,9 +1615,12 @@ select_scatter, and full_like now also live in the shared target grammar. Exact
 conv1d, conv2d, and ATen convolution default spellings now also have shared
 target helpers. Grouped-conv redundant-boundary cleanup now also uses shared
 boundary-rescale target grammar instead of a pass-local substring predicate.
-Table-op target classification and arange overload classification now also live
-in `fx_target`, so table precompute and zero-input arange materialization no
-longer own pass-local target substring grammars.
+Table-op target classification, arange overload classification, fold-QDQ
+constant target classification, add/sub-alpha canonical result target
+selection, and group-norm reshape target selection now also live in
+`fx_target`, so table precompute, zero-input arange materialization, fold-QDQ,
+add/sub alpha decomposition, and group-norm decomposition no longer own
+pass-local target substring grammars.
 
 2026-06-14, table and arange target grammar slice
 
@@ -1626,10 +1638,10 @@ constant paths.
 
 Remaining work:
 
-Migrate target-string helpers in small batches by domain when the helper will
-replace multiple call sites or clarify a risky substring match. Avoid further
-setup-only classifier growth until a deletion-heavy slice has paid down the
-latest helper expansion.
+No required production cleanup remains from the original backlog item. Future
+target-string migrations should be opportunistic and domain-scoped: only move a
+predicate when it replaces multiple active call sites, clarifies a risky
+substring rule, or removes a local rule table that has outgrown its pass.
 
 Problem:
 

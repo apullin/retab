@@ -6,6 +6,7 @@ use std::f64::consts::FRAC_PI_2;
 use crate::fx_ir::{
     i64_list_arg as i64_list, IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta, NodeOp,
 };
+use crate::fx_target::{add_sub_alpha_result_target, group_norm_reshape_target};
 use crate::runner_logging::log_line;
 
 type DecomposeFn = fn(&mut IrGraph, NodeId) -> bool;
@@ -789,10 +790,8 @@ fn decompose_add_sub_alpha(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     };
     let rhs_ctx = rhs_ctx.with_meta(graph.nodes[rhs_id].meta.clone());
-    let target = if graph.nodes[id].target.contains("sub.Tensor") {
-        "aten.sub.Tensor"
-    } else {
-        "aten.add.Tensor"
+    let Some(target) = add_sub_alpha_result_target(&graph.nodes[id].target) else {
+        return false;
     };
     let alpha_full = rhs_ctx.full(graph, "alpha_full", alpha);
     let scaled_rhs =
@@ -2342,10 +2341,8 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     let scalar_shape = vec![1_i64; grouped_shape.len()];
     let stat_shape = vec![n, group, 1, 1];
     let affine_shape = vec![1, group, channels_per_group, 1];
-    let reshape_target = if graph.nodes[id].target.contains("native_group_norm") {
-        "aten.view_copy.default"
-    } else {
-        "aten.reshape.default"
+    let Some(reshape_target) = group_norm_reshape_target(&graph.nodes[id].target) else {
+        return false;
     };
     let grouped = ctx.reshape_shape(graph, "grouped", reshape_target, x_id, &grouped_shape);
     let inv_n = ctx.full_shape(

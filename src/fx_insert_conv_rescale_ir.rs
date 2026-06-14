@@ -48,7 +48,7 @@ fn has_downstream_output_rescale(graph: &IrGraph, start: NodeId) -> bool {
             return false;
         };
         let user_node = &graph.nodes[user];
-        if user_node.target.to_ascii_lowercase().contains("rescale") {
+        if user_node.is_rescale() {
             if is_int32_rescale(user_node) {
                 return false;
             }

@@ -7,7 +7,8 @@
 
 use crate::fx_ir::{IrArg, IrGraph, IrNode, IrPass, MetaValue, NodeId, NodeMeta, NodeOp, QParam};
 use crate::fx_target::{
-    classify_ir_target, is_add_sub_target, is_sum_dim_int_list_target, IrTargetKind,
+    classify_ir_target, is_add_sub_target, is_fold_qdq_constant_target, is_sum_dim_int_list_target,
+    IrTargetKind,
 };
 use crate::graph::ir::DType;
 use crate::store::TensorData;
@@ -33,19 +34,6 @@ pub(crate) struct ResolvedFoldQdqInput {
     pub dq_node_ids: Vec<NodeId>,
 }
 
-pub(crate) fn is_constant_op_target(target: &str) -> bool {
-    [
-        "full_like.default",
-        "full.default",
-        "arange.start_step",
-        "eye.default",
-        "linspace.default",
-        "scalar_tensor.default",
-    ]
-    .iter()
-    .any(|marker| target.contains(marker))
-}
-
 pub(crate) fn has_arm_quantized_annotation(meta: &NodeMeta) -> bool {
     meta.extra_bool("arm_quantized_annotation") == Some(true)
 }
@@ -53,7 +41,7 @@ pub(crate) fn has_arm_quantized_annotation(meta: &NodeMeta) -> bool {
 pub(crate) fn is_foldable_node(node: &IrNode) -> bool {
     node.op == NodeOp::CallFunction
         && !node.is_q_or_dq()
-        && (is_constant_op_target(&node.target) || has_arm_quantized_annotation(&node.meta))
+        && (is_fold_qdq_constant_target(&node.target) || has_arm_quantized_annotation(&node.meta))
 }
 
 pub(crate) fn resolve_input_qparam_from_meta(meta: &NodeMeta) -> Option<ResolvedFoldQdqQParam> {
