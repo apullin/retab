@@ -71,6 +71,10 @@ impl QParam {
         self.dtype().is_integer()
     }
 
+    pub fn is_quantized_integer_dtype(&self) -> bool {
+        self.dtype().is_quantized_integer()
+    }
+
     pub fn supports_axis0_channel_slice(&self, end: usize) -> bool {
         !self.is_per_channel()
             || (self.axis == 0

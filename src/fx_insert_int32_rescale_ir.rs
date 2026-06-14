@@ -5,6 +5,7 @@ use crate::fx_target::{
     is_abs_target, is_add_sub_target, is_comparison_target, is_minmax_target, is_mul_target,
     is_sum_dim_int_list_target, is_where_target,
 };
+use crate::graph::ir::DType;
 use crate::runner_logging::log_line;
 
 const I32_MIN: i64 = -2_147_483_648;
@@ -29,19 +30,11 @@ fn classify_int32_op(target: &str) -> Option<Int32OpKind> {
     }
 }
 
-fn is_integer_quantized_dtype(dtype: &str) -> bool {
-    dtype.contains("int8") || dtype.contains("int16") || dtype.contains("int32")
-}
-
 fn int32_qparam(scale: f64) -> QParam {
     QParam::per_tensor(scale, 0, I32_MIN, I32_MAX, "torch.int32".to_string())
 }
 
-fn compute_rescaled_input_scales(
-    kind: Int32OpKind,
-    scales: &[f64],
-    dtype_strs: &[String],
-) -> Vec<f64> {
+fn compute_rescaled_input_scales(kind: Int32OpKind, scales: &[f64], dtypes: &[DType]) -> Vec<f64> {
     match kind {
         Int32OpKind::MinScale => {
             let min_scale = scales.iter().copied().fold(f64::INFINITY, f64::min);
@@ -49,9 +42,7 @@ fn compute_rescaled_input_scales(
         }
         Int32OpKind::AddSub => {
             let max_scale = scales.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let is_int16 = dtype_strs
-                .first()
-                .is_some_and(|dtype| dtype.contains("int16"));
+            let is_int16 = dtypes.first() == Some(&DType::Int16);
             let shift_bits: u32 = if is_int16 { 12 } else { 20 };
             vec![(2.0 * max_scale) / (1u64 << shift_bits) as f64; scales.len()]
         }
@@ -83,7 +74,7 @@ fn producer_old_zero_point(graph: &IrGraph, producer_id: NodeId, fallback_zp: i6
         return 0;
     }
     if let Some(qparam) = producer.meta.output_qparam() {
-        if qparam.dtype_str.contains("int32") {
+        if qparam.dtype() == DType::Int32 {
             return 0;
         }
         return qparam.zp;
@@ -91,7 +82,7 @@ fn producer_old_zero_point(graph: &IrGraph, producer_id: NodeId, fallback_zp: i6
     if producer
         .meta
         .val_dtype()
-        .is_some_and(|dtype| dtype.contains("int32"))
+        .is_some_and(|dtype| DType::from_torch_str(dtype) == DType::Int32)
     {
         0
     } else {
@@ -136,7 +127,7 @@ fn insert_output_rescale(
     output_int32_scale: f64,
     output_qparam: QParam,
 ) -> bool {
-    if output_qparam.scale == 0.0 || !is_integer_quantized_dtype(&output_qparam.dtype_str) {
+    if output_qparam.scale == 0.0 || !output_qparam.is_quantized_integer_dtype() {
         return false;
     }
     let users = graph.live_user_ids(source_id);
@@ -177,7 +168,7 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
     if input_qparams.is_empty()
         || !input_qparams
             .iter()
-            .any(|(_, qparam)| is_integer_quantized_dtype(&qparam.dtype_str))
+            .any(|(_, qparam)| qparam.is_quantized_integer_dtype())
     {
         return false;
     }
@@ -187,17 +178,17 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
         .map(|(_, qparam)| qparam.scale)
         .collect();
     let zps: Vec<i64> = input_qparams.iter().map(|(_, qparam)| qparam.zp).collect();
-    let dtype_strs: Vec<String> = input_qparams
+    let dtypes: Vec<DType> = input_qparams
         .iter()
-        .map(|(_, qparam)| qparam.dtype_str.clone())
+        .map(|(_, qparam)| qparam.dtype())
         .collect();
-    let rescaled_scales = compute_rescaled_input_scales(kind, &scales, &dtype_strs);
+    let rescaled_scales = compute_rescaled_input_scales(kind, &scales, &dtypes);
     let output_int32_scale = compute_output_int32_scale(&node.target, &rescaled_scales);
 
     let mut rescaled_inputs = false;
     let mut seen_sources = HashSet::new();
     for (key_idx, (pos, qparam)) in input_qparams.iter().enumerate() {
-        if !is_integer_quantized_dtype(&qparam.dtype_str) {
+        if !qparam.is_quantized_integer_dtype() {
             continue;
         }
         let Some(source_id) = node.args.get(*pos).and_then(IrArg::as_node) else {
@@ -295,7 +286,7 @@ fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
     if then_sig == out_sig && !needs_noop_quant_boundary {
         return false;
     }
-    if !is_integer_quantized_dtype(&output_qparam.dtype_str) {
+    if !output_qparam.is_quantized_integer_dtype() {
         return false;
     }
 

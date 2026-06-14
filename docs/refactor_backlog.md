@@ -1287,6 +1287,14 @@ Deleted: raw `int16`/`int32` qparam and tensor dtype substring checks from conv-
 Added: no new helper surface; those paths now use `DType::from_torch_str` and `QParam::dtype`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_annotate_conv_bias_ir::tests`; `cargo test --lib fx_insert_conv_rescale_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over constant_pad_nd, conv_constant_pad_nd, conv1d, conv2d, conv3d, depthwise_conv, linear, and transpose_conv2d; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `468 passed, 2 expected xfails, 1373 deselected`. No model lane was run. This is the first follow-through slice after moving dtype parsing to `DType`, removing stringly dtype predicates from fragile quantized conv paths.
+
+2026-06-14, int32-rescale dtype predicate cleanup slice
+Rust LOC: 36,827 -> 36,826
+Movement: -1 Rust LOC
+Deleted: pass-local `is_integer_quantized_dtype(...)`, cloned dtype-string propagation through int32 rescale scale computation, and raw `int16`/`int32` substring checks in int32 rescale insertion
+Added: `DType::is_quantized_integer` and `QParam::is_quantized_integer_dtype`
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_insert_int32_rescale_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over abs, add, conv2d, conv3d, linear, mul, sum, and where; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `445 passed, 1 expected xfail, 1146 deselected`. No model lane was run. This pays down the dtype owner setup by removing the int32-rescale pass's local quantized-integer dtype dialect.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

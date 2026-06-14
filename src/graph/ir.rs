@@ -246,6 +246,10 @@ impl DType {
             DType::Int4 | DType::Int8 | DType::Int16 | DType::Int32 | DType::Int48 | DType::Int64
         )
     }
+
+    pub fn is_quantized_integer(self) -> bool {
+        matches!(self, DType::Int8 | DType::Int16 | DType::Int32)
+    }
 }
 
 // ---------------------------------------------------------------------------
