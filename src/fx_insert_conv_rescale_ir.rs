@@ -353,7 +353,6 @@ impl IrPass for IrInsertConvAccumulatorRescalePass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     fn qparam(scale: f64, zp: i64, dtype: &str) -> QParam {
         QParam::per_tensor(scale, zp, -128, 127, dtype.to_string())
@@ -367,10 +366,10 @@ mod tests {
 
     fn quantized_conv_meta() -> NodeMeta {
         let mut meta = NodeMeta::tensor([1, 4, 8, 8], "torch.int32");
-        let mut input_qparams = HashMap::new();
-        input_qparams.insert(0, qparam(0.5, 1, "torch.int8"));
-        input_qparams.insert(1, per_channel_qparam(&[0.25, 0.5, 0.75, 1.0], "torch.int8"));
-        meta.set_input_qparams(input_qparams);
+        meta.set_input_qparams_from([
+            (0, qparam(0.5, 1, "torch.int8")),
+            (1, per_channel_qparam(&[0.25, 0.5, 0.75, 1.0], "torch.int8")),
+        ]);
         meta.set_single_output_qparam(qparam(0.125, 7, "torch.int8"));
         meta
     }
@@ -675,14 +674,14 @@ mod tests {
             NodeMeta::tensor(&[4], "torch.int32"),
         );
         let mut conv_meta = NodeMeta::tensor(&[1, 4, 8, 8], "torch.int16");
-        conv_meta.set_input_qparams(HashMap::from([
+        conv_meta.set_input_qparams_from([
             (0, qparam(0.5, 0, "torch.int16")),
             (1, per_channel_qparam(&[0.25, 0.5, 0.75, 1.0], "torch.int8")),
             (
                 2,
                 per_channel_qparam(&[0.125, 0.25, 0.375, 0.5], "torch.int32"),
             ),
-        ]));
+        ]);
         conv_meta.set_single_output_qparam(qparam(0.0625, 7, "torch.int16"));
         let conv = graph.add_node(
             NodeOp::CallFunction,

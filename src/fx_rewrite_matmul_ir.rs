@@ -58,7 +58,6 @@ impl IrPass for IrRewriteMatmulRescalePass {
 #[cfg(test)]
 mod tests {
     use crate::fx_ir::{IrArg, IrGraph, NodeMeta, NodeOp, QParam};
-    use std::collections::HashMap;
 
     use super::*;
 
@@ -84,10 +83,10 @@ mod tests {
             NodeMeta::tensor([3, 4], "torch.int8"),
         );
         let mut matmul_meta = NodeMeta::tensor([2, 4], "torch.int32");
-        let mut input_qparams = HashMap::new();
-        input_qparams.insert(0, qparam(0.5, 3, "torch.int8"));
-        input_qparams.insert(1, qparam(0.25, -4, "torch.int8"));
-        matmul_meta.set_input_qparams(input_qparams);
+        matmul_meta.set_input_qparams_from([
+            (0, qparam(0.5, 3, "torch.int8")),
+            (1, qparam(0.25, -4, "torch.int8")),
+        ]);
         matmul_meta.set_single_output_qparam(qparam(0.125, 7, "torch.int8"));
         let matmul = graph.add_node(
             NodeOp::CallFunction,

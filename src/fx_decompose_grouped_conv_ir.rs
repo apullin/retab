@@ -382,8 +382,6 @@ impl IrPass for IrDecomposeGroupedConvPass {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
     use crate::fx_ir::i64_list_arg as i64_list;
 
@@ -421,17 +419,17 @@ mod tests {
         let weight = placeholder(&mut graph, "weight", &[12, 2, 3, 3]);
         let bias = placeholder(&mut graph, "bias", &[12]);
         let mut conv_meta = NodeMeta::tensor([1, 12, 6, 6], "torch.int8");
-        let mut input_qparams = HashMap::new();
-        input_qparams.insert(0, per_tensor_qparam(0.25));
-        input_qparams.insert(
-            1,
-            per_channel_qparam(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]),
-        );
-        input_qparams.insert(
-            2,
-            per_channel_qparam(&[1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 2.1, 2.2]),
-        );
-        conv_meta.set_input_qparams(input_qparams);
+        conv_meta.set_input_qparams_from([
+            (0, per_tensor_qparam(0.25)),
+            (
+                1,
+                per_channel_qparam(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]),
+            ),
+            (
+                2,
+                per_channel_qparam(&[1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 2.1, 2.2]),
+            ),
+        ]);
         conv_meta.set_single_output_qparam(per_tensor_qparam(0.5));
 
         let conv = graph.add_node(

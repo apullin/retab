@@ -84,7 +84,6 @@ impl IrPass for IrAnnotateConvBiasDtypePass {
 mod tests {
     use super::*;
     use crate::fx_ir::{i64_list_arg, NodeMeta, QParam};
-    use std::collections::HashMap;
 
     fn qparam(scale: f64, zp: i64, dtype: &str) -> QParam {
         QParam::per_tensor(scale, zp, -32767, 32767, dtype.to_string())
@@ -115,11 +114,11 @@ mod tests {
             NodeMeta::tensor([4], "torch.int32"),
         );
         let mut conv_meta = NodeMeta::tensor([1, 4, 8, 8], "torch.int16");
-        conv_meta.set_input_qparams(HashMap::from([
+        conv_meta.set_input_qparams_from([
             (0, qparam(0.5, 0, "torch.int16")),
             (1, qparam(0.25, 0, "torch.int8")),
             (2, qparam(0.125, 0, "torch.int32")),
-        ]));
+        ]);
         conv_meta.set_single_output_qparam(qparam(0.0625, 0, "torch.int16"));
         graph.add_node(
             NodeOp::CallFunction,
@@ -158,11 +157,11 @@ mod tests {
             NodeMeta::tensor([4], "torch.int32"),
         );
         let mut conv_meta = NodeMeta::tensor([1, 4, 16, 16], "torch.int32");
-        conv_meta.set_input_qparams(HashMap::from([
+        conv_meta.set_input_qparams_from([
             (0, qparam(0.5, 0, "torch.int16")),
             (1, qparam(0.25, 0, "torch.int8")),
             (2, qparam(0.125, 0, "torch.int32")),
-        ]));
+        ]);
         conv_meta.set_single_output_qparam(qparam(0.0625, 0, "torch.int16"));
         graph.add_node(
             NodeOp::CallFunction,

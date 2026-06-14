@@ -357,7 +357,6 @@ impl IrPass for IrInsertInt32RescalePass {
 mod tests {
     use super::*;
     use crate::fx_ir::NodeMeta;
-    use std::collections::HashMap;
 
     fn qparam(scale: f64, zp: i64, dtype: &str) -> QParam {
         QParam::per_tensor(scale, zp, -128, 127, dtype.to_string())
@@ -381,10 +380,10 @@ mod tests {
             NodeMeta::tensor(&[2], "torch.int8"),
         );
         let mut add_meta = NodeMeta::tensor(&[2], "torch.int8");
-        let mut input_qparams = HashMap::new();
-        input_qparams.insert(0, qparam(0.25, 3, "torch.int8"));
-        input_qparams.insert(1, qparam(0.5, -4, "torch.int8"));
-        add_meta.set_input_qparams(input_qparams);
+        add_meta.set_input_qparams_from([
+            (0, qparam(0.25, 3, "torch.int8")),
+            (1, qparam(0.5, -4, "torch.int8")),
+        ]);
         add_meta.set_single_output_qparam(qparam(0.125, 7, "torch.int8"));
         let add = graph.add_node(
             NodeOp::CallFunction,
@@ -433,10 +432,7 @@ mod tests {
             NodeMeta::tensor(&[2], "torch.int32"),
         );
         let mut add_meta = NodeMeta::tensor(&[2], "torch.int32");
-        let mut input_qparams = HashMap::new();
-        input_qparams.insert(0, int32_qparam(0.25));
-        input_qparams.insert(1, int32_qparam(0.5));
-        add_meta.set_input_qparams(input_qparams);
+        add_meta.set_input_qparams_from([(0, int32_qparam(0.25)), (1, int32_qparam(0.5))]);
         add_meta.set_single_output_qparam(int32_qparam(0.125));
         let add = graph.add_node(
             NodeOp::CallFunction,
@@ -491,10 +487,10 @@ mod tests {
             NodeMeta::tensor(&[2], "torch.int8"),
         );
         let mut where_meta = NodeMeta::tensor(&[2], "torch.int8");
-        let mut input_qparams = HashMap::new();
-        input_qparams.insert(1, qparam(0.5, 3, "torch.int8"));
-        input_qparams.insert(2, qparam(0.5, 3, "torch.int8"));
-        where_meta.set_input_qparams(input_qparams);
+        where_meta.set_input_qparams_from([
+            (1, qparam(0.5, 3, "torch.int8")),
+            (2, qparam(0.5, 3, "torch.int8")),
+        ]);
         where_meta.set_single_output_qparam(qparam(0.25, -7, "torch.int8"));
         let where_id = graph.add_node(
             NodeOp::CallFunction,

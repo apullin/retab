@@ -1367,6 +1367,14 @@ Deleted: manual key/value extraction loops from graph-signature tensor binding i
 Added: `ItemView::typed_key_pairs(...)` and `ItemView::typed_pairs(...)`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over add, conv2d, linear, cond, and while; Rust LOC check
 Note: Full Rust tests passed `139 passed`; focused Python smoke passed `263 passed, 1 expected xfail, 757 deselected`. No model lane was run. This is a small setup-positive attr-boundary slice, but it centralizes lossy typed item extraction instead of repeating `pairs()` plus `extract()` filters at ingestion sites.
+
+2026-06-14, qparam fixture construction cleanup slice
+Rust LOC: 36,932 -> 36,923
+Movement: -9 Rust LOC
+Deleted: fixture-local `HashMap` imports and mutable input-qparam map construction in conv-bias, grouped-conv, constant-input fusion, conv-rescale, int32-rescale, and matmul-rescale tests
+Added: no new helper surface; tests now reuse `NodeMeta::set_input_qparams_from(...)`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over add, mm, bmm, matmul, conv2d, conv3d, and sum; Rust LOC check
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `388 passed, 11 expected xfails, 995 deselected`. No model lane was run. This is a small Tensor Facts follow-through slice: it removes incidental qparam-map construction ceremony where the operation is just keyed metadata stamping, while leaving production map mutation explicit where the algorithm actually edits qparam slots.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
