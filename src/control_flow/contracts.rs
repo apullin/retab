@@ -320,9 +320,8 @@ fn collect_output_contracts_for_graph(
 
 pub(crate) fn snapshot_pre_pass_qparams_ir(graph: &mut fx_ir::IrGraph) -> u32 {
     let cf_ids: Vec<fx_ir::NodeId> = graph
-        .nodes
-        .iter()
-        .filter(|node| node.alive && node.is_control_flow())
+        .live_nodes()
+        .filter(|node| node.is_control_flow())
         .map(|node| node.id)
         .collect();
 
@@ -366,9 +365,7 @@ fn annotate_parent_rank4_dim_order_ir(graph: &mut fx_ir::IrGraph) -> u32 {
     const NHWC_DIM_ORDER: [usize; 4] = [0, 2, 3, 1];
 
     let cf_ids: Vec<fx_ir::NodeId> = graph
-        .nodes
-        .iter()
-        .filter(|node| node.alive)
+        .live_nodes()
         .filter(|node| node.is_control_flow())
         .map(|node| node.id)
         .collect();
@@ -512,9 +509,9 @@ pub(crate) fn apply_pre_submodule_qparam_propagation_ir(
 
 fn rewrite_output_dequantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
     let mut rewritten = 0u32;
-    let ids: Vec<fx_ir::NodeId> = (0..graph.nodes.len()).collect();
+    let ids = graph.live_node_ids();
     for dq_id in ids {
-        if !graph.nodes[dq_id].alive || !graph.nodes[dq_id].is_dequantize() {
+        if !graph.nodes[dq_id].is_dequantize() {
             continue;
         }
         let Some(source_id) = graph.nodes[dq_id].first_node_arg() else {
@@ -539,9 +536,9 @@ fn rewrite_output_dequantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
 
 fn rewrite_quantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
     let mut rewritten = 0u32;
-    let ids: Vec<fx_ir::NodeId> = (0..graph.nodes.len()).collect();
+    let ids = graph.live_node_ids();
     for q_id in ids {
-        if !graph.nodes[q_id].alive || !graph.nodes[q_id].is_quantize() {
+        if !graph.nodes[q_id].is_quantize() {
             continue;
         }
         let Some(source_id) = graph.nodes[q_id].first_node_arg() else {

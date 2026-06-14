@@ -43,7 +43,7 @@ fn graph_from_ir_ext(
     // weights), but the IrGraph may still carry them. Drop unreferenced ones here
     // so the converted graph has no dangling inputs.
     let mut referenced: std::collections::HashSet<IrNodeId> = std::collections::HashSet::new();
-    for n in ir.nodes.iter().filter(|n| n.alive) {
+    for n in ir.live_nodes() {
         for a in &n.args {
             collect_ir_refs(a, &mut referenced);
         }
@@ -58,7 +58,7 @@ fn graph_from_ir_ext(
     // the branch/body name on the COND_IF / WHILE_LOOP op.
     let mut submodule_map: HashMap<IrNodeId, String> = HashMap::new();
     let cf_dbg = crate::config::from_ir_debug_is_set();
-    for n in ir.nodes.iter().filter(|n| n.alive) {
+    for n in ir.live_nodes() {
         if cf_dbg && n.name.contains("submodule") {
             eprintln!(
                 "[SUBMOD] {} op={:?} target={} tensor={}",
@@ -78,7 +78,7 @@ fn graph_from_ir_ext(
         // nodes; emit them as String region names, not graph nodes.
         for a in &n.args {
             if let IrArg::Node(id) = a {
-                if let Some(m) = ir.nodes.iter().find(|x| x.id == *id) {
+                if let Some(m) = ir.node_opt(*id) {
                     if matches!(m.op, NodeOp::GetAttr) || m.name.contains("submodule") {
                         submodule_map.insert(*id, m.name.clone());
                     }
@@ -92,7 +92,7 @@ fn graph_from_ir_ext(
 
     // Pass 1: allocate serialize nodes (args resolved in pass 2) and build the
     // IrNodeId -> serialize-NodeId map.
-    for ir_node in ir.nodes.iter().filter(|n| n.alive) {
+    for ir_node in ir.live_nodes() {
         if submodule_map.contains_key(&ir_node.id) {
             continue; // emitted as a String region reference, not a node
         }
@@ -150,7 +150,7 @@ fn graph_from_ir_ext(
     }
 
     // Pass 2: resolve args/kwargs through the id map.
-    for ir_node in ir.nodes.iter().filter(|n| n.alive) {
+    for ir_node in ir.live_nodes() {
         let Some(&nid) = idmap.get(&ir_node.id) else {
             continue;
         };

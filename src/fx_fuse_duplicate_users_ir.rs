@@ -51,9 +51,7 @@ impl IrPass for IrFuseDuplicateUsersPass {
         // May need multiple iterations since fusing can expose more duplicates
         loop {
             let mut changed_this_round = false;
-            let ids: Vec<NodeId> = (0..graph.nodes.len())
-                .filter(|&id| graph.nodes[id].alive)
-                .collect();
+            let ids = graph.live_node_ids();
 
             for &producer_id in &ids {
                 let users = graph.live_call_function_users(producer_id);

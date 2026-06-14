@@ -463,6 +463,10 @@ impl IrGraph {
         self.nodes.iter().find(|n| n.op == NodeOp::Output)
     }
 
+    pub fn node_opt(&self, id: NodeId) -> Option<&IrNode> {
+        self.nodes.get(id)
+    }
+
     /// Get node by ID.
     pub fn node(&self, id: NodeId) -> &IrNode {
         &self.nodes[id]
@@ -788,10 +792,16 @@ impl IrGraph {
         &self.users[id]
     }
 
+    pub fn live_nodes(&self) -> impl Iterator<Item = &IrNode> {
+        self.nodes.iter().filter(|node| node.alive)
+    }
+
+    pub fn live_node_count(&self) -> usize {
+        self.live_nodes().count()
+    }
+
     pub fn live_user_ids(&self, id: NodeId) -> Vec<NodeId> {
-        self.nodes
-            .iter()
-            .filter(|node| node.alive)
+        self.live_nodes()
             .filter(|node| {
                 node.args.iter().any(|arg| arg.contains_node(id))
                     || node.kwargs.values().any(|arg| arg.contains_node(id))
@@ -801,33 +811,26 @@ impl IrGraph {
     }
 
     pub fn live_node_ids(&self) -> Vec<NodeId> {
-        self.nodes
-            .iter()
-            .filter(|node| node.alive)
-            .map(|node| node.id)
-            .collect()
+        self.live_nodes().map(|node| node.id).collect()
     }
 
     pub fn live_call_function_ids(&self) -> Vec<NodeId> {
-        self.nodes
-            .iter()
-            .filter(|node| node.alive && node.op == NodeOp::CallFunction)
+        self.live_nodes()
+            .filter(|node| node.op == NodeOp::CallFunction)
             .map(|node| node.id)
             .collect()
     }
 
     pub fn live_placeholder_ids(&self) -> Vec<NodeId> {
-        self.nodes
-            .iter()
-            .filter(|node| node.alive && node.op == NodeOp::Placeholder)
+        self.live_nodes()
+            .filter(|node| node.op == NodeOp::Placeholder)
             .map(|node| node.id)
             .collect()
     }
 
     pub fn live_output_ids(&self) -> Vec<NodeId> {
-        self.nodes
-            .iter()
-            .filter(|node| node.alive && node.op == NodeOp::Output)
+        self.live_nodes()
+            .filter(|node| node.op == NodeOp::Output)
             .map(|node| node.id)
             .collect()
     }
@@ -854,9 +857,8 @@ impl IrGraph {
     }
 
     pub fn live_getitem_users(&self, id: NodeId) -> Vec<(NodeId, i64)> {
-        self.nodes
-            .iter()
-            .filter(|node| node.alive && node.is_getitem())
+        self.live_nodes()
+            .filter(|node| node.is_getitem())
             .filter(|node| node.args.first().and_then(IrArg::as_node) == Some(id))
             .map(|node| {
                 (
@@ -1782,10 +1784,10 @@ pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
                     ir = Some(IrGraph::from_fx_with_tensors(gm, exported_program)?);
                 }
                 let graph = ir.as_mut().unwrap();
-                let before = graph.nodes.iter().filter(|n| n.alive).count();
+                let before = graph.live_node_count();
                 log_pass_start("HybridPipeline", i, steps.len(), pass.name());
                 let modified = pass.run(graph);
-                let after = graph.nodes.iter().filter(|n| n.alive).count();
+                let after = graph.live_node_count();
                 log_pass_result("HybridPipeline", pass.name(), modified, before, after);
                 if modified {
                     any_modified = true;
@@ -1796,10 +1798,10 @@ pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
                     ir = Some(IrGraph::from_fx_with_tensors(gm, exported_program)?);
                 }
                 let graph = ir.as_mut().unwrap();
-                let before = graph.nodes.iter().filter(|n| n.alive).count();
+                let before = graph.live_node_count();
                 log_pass_start("HybridPipeline", i, steps.len(), pass.name());
                 let result = pass.run(graph);
-                let after = graph.nodes.iter().filter(|n| n.alive).count();
+                let after = graph.live_node_count();
                 log_pass_result(
                     "HybridPipeline",
                     pass.name(),

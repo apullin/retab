@@ -1071,6 +1071,14 @@ Deleted: monolithic `parse_op_target` ladder of repeated `target.contains(...)` 
 Added: ordered control-flow, TOSA, quantized-decomposed, and ATen target rule tables plus target-map unit tests for ordering-sensitive cases
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib ingest::target_map`; `cargo test --lib`; broad focused Python serializer smoke via `/tmp/et.sh`; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `1213 passed, 8 skipped, 1 expected xfail, 2321 deselected`. No model lane was run. The table conversion also fixed an existing TOSA ordering bug where `GREATER_EQUAL` was classified as `TosaEqual` because `equal` was matched first.
+
+2026-06-14, live-node iterator graph-query slice
+Rust LOC: 36,928 -> 36,925
+Movement: -3 Rust LOC
+Deleted: active direct `nodes.iter().filter(|n| n.alive)` and `0..nodes.len()` live-node scans from from-IR conversion, control-flow contracts, duplicate-user fusion, pipeline node-count logging, and `lib.rs` control-flow detection
+Added: `IrGraph::live_nodes()`, `IrGraph::live_node_count()`, and `IrGraph::node_opt(id)` as shared graph-query/access helpers
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over cond, while, add, view, permute, conv2d, mm, and bmm; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `321 passed, 1 expected xfail, 769 deselected`. No model lane was run. This is a small LOC slice, but it removes more direct liveness traversal from central conversion/control-flow code and makes live-node traversal a graph API concept.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

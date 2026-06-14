@@ -101,7 +101,7 @@ struct StashedPipelineHierarchy {
 /// submodule IRs before serialization.
 fn ir_has_control_flow(ir: &fx_ir::IrGraph) -> bool {
     use crate::graph::ir::OpTarget;
-    ir.nodes.iter().filter(|n| n.alive).any(|n| {
+    ir.live_nodes().any(|n| {
         matches!(
             crate::ingest::target_map::parse_op_target(&n.target),
             OpTarget::CondIf | OpTarget::WhileLoop
