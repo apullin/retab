@@ -277,6 +277,38 @@ fn tensor_from_py_value(value: &Bound<'_, PyAny>, source: TensorSource) -> Optio
     })
 }
 
+fn collect_users_from_arg(arg: &IrArg, user_id: NodeId, users: &mut [Vec<NodeId>]) {
+    match arg {
+        IrArg::Node(id) => {
+            if *id < users.len() && !users[*id].contains(&user_id) {
+                users[*id].push(user_id);
+            }
+        }
+        IrArg::List(items) => {
+            for item in items {
+                collect_users_from_arg(item, user_id, users);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn build_user_edges(nodes: &[IrNode]) -> Vec<Vec<NodeId>> {
+    let mut users = vec![Vec::new(); nodes.len()];
+    for node in nodes {
+        if !node.alive {
+            continue;
+        }
+        for arg in &node.args {
+            collect_users_from_arg(arg, node.id, &mut users);
+        }
+        for arg in node.kwargs.values() {
+            collect_users_from_arg(arg, node.id, &mut users);
+        }
+    }
+    users
+}
+
 /// The full graph: ordered list of nodes + lookup by name.
 #[derive(Debug)]
 pub struct IrGraph {
@@ -423,21 +455,7 @@ impl IrGraph {
             });
         }
 
-        let mut users = vec![Vec::new(); nodes.len()];
-        for node in &nodes {
-            for arg in &node.args {
-                if let IrArg::Node(target_id) = arg {
-                    users[*target_id].push(node.id);
-                }
-                if let IrArg::List(items) = arg {
-                    for item in items {
-                        if let IrArg::Node(target_id) = item {
-                            users[*target_id].push(node.id);
-                        }
-                    }
-                }
-            }
-        }
+        let users = build_user_edges(&nodes);
 
         Ok(Self {
             nodes,
@@ -1011,13 +1029,8 @@ impl IrGraph {
         meta: NodeMeta,
     ) -> NodeId {
         let id = self.nodes.len();
-        // Update users for the new node's args
         for arg in &args {
-            if let IrArg::Node(ref_id) = arg {
-                if *ref_id < self.users.len() {
-                    self.users[*ref_id].push(id);
-                }
-            }
+            collect_users_from_arg(arg, id, &mut self.users);
         }
         self.users.push(Vec::new());
         self.name_to_id.insert(name.clone(), id);
@@ -1036,34 +1049,7 @@ impl IrGraph {
     }
 
     fn rebuild_users(&mut self) {
-        fn collect_users_from_arg(arg: &IrArg, user_id: NodeId, users: &mut [Vec<NodeId>]) {
-            match arg {
-                IrArg::Node(id) => {
-                    if *id < users.len() && !users[*id].contains(&user_id) {
-                        users[*id].push(user_id);
-                    }
-                }
-                IrArg::List(items) => {
-                    for item in items {
-                        collect_users_from_arg(item, user_id, users);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        self.users = vec![Vec::new(); self.nodes.len()];
-        for node in &self.nodes {
-            if !node.alive {
-                continue;
-            }
-            for arg in &node.args {
-                collect_users_from_arg(arg, node.id, &mut self.users);
-            }
-            for arg in node.kwargs.values() {
-                collect_users_from_arg(arg, node.id, &mut self.users);
-            }
-        }
+        self.users = build_user_edges(&self.nodes);
     }
 }
 
@@ -1897,6 +1883,49 @@ impl IrArg {
             [a, b, ..] => Some((*a, *b)),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_node(id: NodeId, args: Vec<IrArg>, kwargs: HashMap<String, IrArg>) -> IrNode {
+        IrNode {
+            id,
+            op: NodeOp::Other,
+            name: format!("n{id}"),
+            target: String::new(),
+            args,
+            kwargs,
+            meta: NodeMeta::default(),
+            tensor: None,
+            alive: true,
+        }
+    }
+
+    #[test]
+    fn build_user_edges_includes_nested_args_and_kwargs() {
+        let mut kwargs = HashMap::new();
+        kwargs.insert("other".into(), IrArg::Node(0));
+        let nodes = vec![
+            test_node(0, vec![], HashMap::new()),
+            test_node(1, vec![], HashMap::new()),
+            test_node(
+                2,
+                vec![IrArg::List(vec![
+                    IrArg::List(vec![IrArg::Node(0)]),
+                    IrArg::Node(1),
+                ])],
+                kwargs,
+            ),
+        ];
+
+        let users = build_user_edges(&nodes);
+
+        assert_eq!(users[0], vec![2]);
+        assert_eq!(users[1], vec![2]);
+        assert!(users[2].is_empty());
     }
 }
 

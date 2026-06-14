@@ -1935,6 +1935,20 @@ Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`;
 focused Python smoke via `/tmp/et.sh` over addmm, bmm, conv2d, embedding,
 full, linear, matmul, mm, ones, view, and zeros
 
+2026-06-14, FX user-edge grammar slice
+
+Deleted: separate shallow user-edge construction during FX import and separate
+direct-node-only user-edge update in `IrGraph::add_node`
+
+Added: shared recursive user-edge construction for imported graphs, rebuilt
+graphs, and newly inserted nodes; added a Rust invariant test covering nested
+list args, kwargs, and duplicate user de-duping
+
+Validation: `cargo fmt --check`; `cargo check --lib`; focused
+`cargo test --lib fx_ir::tests::build_user_edges_includes_nested_args_and_kwargs`;
+`cargo test --lib`; focused Python smoke via `/tmp/et.sh` over addmm, bmm,
+conv2d, embedding, full, linear, matmul, mm, ones, view, and zeros
+
 Problem:
 
 Rust-side Python ingestion still spells the same semantic action many times:
