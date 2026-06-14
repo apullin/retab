@@ -2,6 +2,7 @@
 //! or arange+permute+index_put (step > 1).
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_target::is_slice_scatter_target;
 use crate::runner_logging::log_line;
 
 fn permuted_shape(shape: &[i64], perm: &[i64]) -> Vec<i64> {
@@ -39,7 +40,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !graph.nodes[id].target.contains("slice_scatter.default") {
+            if !is_slice_scatter_target(&graph.nodes[id].target) {
                 continue;
             }
 
@@ -273,6 +274,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
 mod tests {
     use super::*;
     use crate::fx_ir::NodeMeta;
+    use crate::fx_target::{is_cat_target, is_index_put_default_target};
 
     #[test]
     fn decompose_slice_scatter_step1_rewrites_to_cat() {
@@ -311,7 +313,7 @@ mod tests {
         assert!(graph
             .nodes
             .iter()
-            .any(|n| n.alive && n.target == "aten.cat.default"));
+            .any(|n| n.alive && is_cat_target(&n.target)));
     }
 
     #[test]
@@ -351,6 +353,6 @@ mod tests {
         assert!(graph
             .nodes
             .iter()
-            .any(|n| n.alive && n.target == "aten.index_put.default"));
+            .any(|n| n.alive && is_index_put_default_target(&n.target)));
     }
 }

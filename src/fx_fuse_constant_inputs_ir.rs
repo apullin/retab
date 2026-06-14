@@ -7,7 +7,9 @@ use crate::fx_constant_tensor_eval::{
     plan_shape_only_tensor as shared_plan_shape_only_tensor,
 };
 use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, NodeOp};
-use crate::fx_target::{is_shape_only_constant_target, is_zero_input_constant_target};
+use crate::fx_target::{
+    is_shape_only_constant_target, is_slice_copy_tensor_target, is_zero_input_constant_target,
+};
 use crate::lowering_effects::{LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect};
 use crate::store::TensorData;
 
@@ -49,7 +51,7 @@ fn is_safe_constant_input_target(node: &IrNode, include_data_slices: bool) -> bo
     node.is_addmm()
         || node.is_mm()
         || node.is_bmm()
-        || (include_data_slices && node.target.contains("aten.slice_copy.Tensor"))
+        || (include_data_slices && is_slice_copy_tensor_target(&node.target))
 }
 
 impl EffectfulIrPass for IrFuseConstantInputsEffectPass {
@@ -92,7 +94,7 @@ impl EffectfulIrPass for IrFuseConstantInputsEffectPass {
                 ));
                 continue;
             }
-            if self.include_data_slices && node.target.contains("aten.slice_copy.Tensor") {
+            if self.include_data_slices && is_slice_copy_tensor_target(&node.target) {
                 if let Some(tensor) = plan_constant_slice_tensor(node, &constant_tensors) {
                     constant_tensors.insert(node.id, tensor.clone());
                     effects.push(LoweringEffect::MaterializeTensorNode(

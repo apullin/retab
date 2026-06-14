@@ -1,6 +1,7 @@
 //! Pure Rust IrPass: strided slice_copy (step > 1) → unit slice + pad + view + slice + view.
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_target::is_slice_tensor_target;
 use crate::runner_logging::log_line;
 
 fn fixup_start(start: Option<i64>, dim_size: i64) -> i64 {
@@ -38,9 +39,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 continue;
             }
             let t = &graph.nodes[id].target;
-            if !((t.contains("slice_copy.Tensor") || t.contains("slice.Tensor"))
-                && !t.contains("slice_scatter"))
-            {
+            if !is_slice_tensor_target(t) {
                 continue;
             }
             if graph.nodes[id].args.len() != 5 {

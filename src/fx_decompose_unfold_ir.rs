@@ -3,6 +3,7 @@
 use crate::fx_ir::{
     dtype_kwarg, i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass, NodeId, NodeOp,
 };
+use crate::fx_target::is_unfold_copy_target;
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeUnfoldPass;
@@ -20,7 +21,7 @@ impl IrPass for IrDecomposeUnfoldPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !graph.nodes[id].target.contains("unfold_copy") {
+            if !is_unfold_copy_target(&graph.nodes[id].target) {
                 continue;
             }
             if graph.nodes[id].args.len() != 4 {

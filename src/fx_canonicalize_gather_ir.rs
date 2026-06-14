@@ -4,6 +4,7 @@
 //! Bool inputs are cast to int8 before GATHER, then cast back.
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_target::is_gather_target;
 use crate::runner_logging::log_line;
 
 pub struct IrCanonicalizeGatherPass;
@@ -21,7 +22,7 @@ impl IrPass for IrCanonicalizeGatherPass {
             if !graph.nodes[id].alive || graph.nodes[id].op != NodeOp::CallFunction {
                 continue;
             }
-            if !graph.nodes[id].target.contains("aten.gather.default") {
+            if !is_gather_target(&graph.nodes[id].target) {
                 continue;
             }
             if graph.nodes[id].args.len() < 3 {

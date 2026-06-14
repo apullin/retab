@@ -243,6 +243,7 @@ impl IrPass for IrRewritePadPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fx_target::{is_cat_target, is_slice_copy_tensor_target};
 
     fn named<'a>(graph: &'a IrGraph, name: &str) -> &'a crate::fx_ir::IrNode {
         graph
@@ -296,12 +297,12 @@ mod tests {
         let slices: Vec<_> = graph
             .nodes
             .iter()
-            .filter(|n| n.alive && n.target == "aten.slice_copy.Tensor")
+            .filter(|n| n.alive && is_slice_copy_tensor_target(&n.target))
             .collect();
         assert_eq!(slices.len(), 4);
         // reflect left indices: left-i for i in 0..2 -> [2,1]; right: size-2-i -> [2,3].
         let cat = named(&graph, "pad_cat4");
-        assert_eq!(cat.target, "aten.cat.default");
+        assert!(is_cat_target(&cat.target));
         assert_eq!(cat.meta.val_shape().unwrap(), &[1, 8]);
         // cat list has 5 members (2 left + x + 2 right)
         if let IrArg::List(items) = &cat.args[0] {
@@ -320,7 +321,7 @@ mod tests {
         let slices: Vec<_> = graph
             .nodes
             .iter()
-            .filter(|n| n.alive && n.target == "aten.slice_copy.Tensor")
+            .filter(|n| n.alive && is_slice_copy_tensor_target(&n.target))
             .collect();
         assert_eq!(slices.len(), 2);
     }

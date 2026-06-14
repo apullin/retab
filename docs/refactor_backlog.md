@@ -975,6 +975,14 @@ Deleted: local constant-only shape-transform classifier, local raw ATen/Edge con
 Added: shared `fx_target` helpers for constant-only shape transforms and TOSA transpose targets; `is_raw_aten_convolution_target` now also recognizes the Edge convolution spelling used by memory-format planning
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over view, permute, unsqueeze, slice, and transpose_conv2d; Rust LOC check
 Note: Full Rust tests passed `134 passed`; focused Python smoke passed `178 passed, 7 expected xfails, 326 deselected`. No model lane was run. This is setup-positive but leaves `fx_memory_format_ir` with no direct `target.contains` calls.
+
+2026-06-13, indexing/scatter target grammar slice
+Rust LOC: 37,300 -> 37,340
+Movement: +40 Rust LOC
+Deleted: active raw target checks for gather, unfold_copy, slice_scatter, strided slice/slice_copy, and constant-input slice folding across six passes
+Added: shared `fx_target` predicates for slice-copy, slice tensor, slice-scatter, unfold-copy, gather, and test-only cat target checks, with overload tests that keep slice-scatter out of the broader slice-tensor family
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over slice, slice_scatter, gather, index_put, unfold_copy, and constant_pad_nd; Rust LOC check
+Note: Full Rust tests passed `134 passed`; focused Python smoke passed `171 passed, 2 expected xfails, 279 deselected`. No model lane was run. This is setup-positive because the shared grammar tests add lines, but it removes another cluster of indexing/scatter target spellings from pass bodies.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1002,7 +1010,9 @@ Addmm decomposition now uses the classifier-backed node predicate instead of a
 raw substring check. Noop removal now uses a typed `NoopTarget` classifier.
 Constant materialization and memory-format planning now use shared target
 grammar for constant-only shape transforms, TOSA transpose targets, and Edge
-convolution spellings.
+convolution spellings. Indexing/scatter passes now also share target grammar
+for slice-copy, broad slice tensor, slice-scatter, unfold-copy, and gather
+families.
 
 Remaining work:
 

@@ -151,7 +151,7 @@ pub(crate) fn is_shape_only_constant_target(target: &str) -> bool {
 pub(crate) fn is_constant_only_shape_transform_target(target: &str) -> bool {
     is_view_like_target(target)
         || shape_only_constant_target(target).is_some()
-        || target.contains("aten.slice_copy.Tensor")
+        || is_slice_copy_tensor_target(target)
 }
 
 pub(crate) fn noop_target(target: &str) -> Option<NoopTarget> {
@@ -255,6 +255,32 @@ pub(crate) fn is_size_adjust_target(target: &str) -> bool {
 
 pub(crate) fn is_split_target(target: &str) -> bool {
     target.contains("split_with_sizes_copy") || target.contains("split_copy")
+}
+
+pub(crate) fn is_slice_copy_tensor_target(target: &str) -> bool {
+    target.contains("aten.slice_copy.Tensor")
+}
+
+pub(crate) fn is_slice_tensor_target(target: &str) -> bool {
+    (target.contains("slice_copy.Tensor") || target.contains("slice.Tensor"))
+        && !target.contains("slice_scatter")
+}
+
+pub(crate) fn is_slice_scatter_target(target: &str) -> bool {
+    target.contains("slice_scatter.default")
+}
+
+#[cfg(test)]
+pub(crate) fn is_cat_target(target: &str) -> bool {
+    target.contains("aten.cat.default")
+}
+
+pub(crate) fn is_unfold_copy_target(target: &str) -> bool {
+    target.contains("unfold_copy")
+}
+
+pub(crate) fn is_gather_target(target: &str) -> bool {
+    target.contains("aten.gather.default")
 }
 
 pub(crate) fn is_tril_target(target: &str) -> bool {
@@ -557,6 +583,14 @@ mod tests {
     fn recognizes_decomposition_target_families() {
         assert!(is_split_target("aten.split_with_sizes_copy.default"));
         assert!(is_split_target("aten.split_copy.Tensor"));
+        assert!(is_slice_copy_tensor_target("aten.slice_copy.Tensor"));
+        assert!(is_slice_tensor_target("aten.slice_copy.Tensor"));
+        assert!(is_slice_tensor_target("aten.slice.Tensor"));
+        assert!(!is_slice_tensor_target("aten.slice_scatter.default"));
+        assert!(is_slice_scatter_target("aten.slice_scatter.default"));
+        assert!(is_cat_target("aten.cat.default"));
+        assert!(is_unfold_copy_target("aten.unfold_copy.default"));
+        assert!(is_gather_target("aten.gather.default"));
         assert!(is_tril_target("aten.tril_copy.default"));
         assert!(is_layer_norm_target("aten.native_layer_norm.default"));
         assert!(is_var_target("aten.var.correction"));
