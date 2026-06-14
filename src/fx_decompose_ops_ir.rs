@@ -256,6 +256,21 @@ impl ApproxCtx {
         )
     }
 
+    fn output_nodes(
+        &self,
+        graph: &mut IrGraph,
+        suffix: &str,
+        target: &str,
+        nodes: &[NodeId],
+    ) -> NodeId {
+        self.output(
+            graph,
+            suffix,
+            target,
+            nodes.iter().copied().map(IrArg::Node).collect(),
+        )
+    }
+
     fn replace_output(
         &self,
         graph: &mut IrGraph,
@@ -382,6 +397,10 @@ impl ApproxCtx {
 
     fn lt(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
         self.bool_nodes(graph, suffix, "aten.lt.Tensor", &[lhs, rhs])
+    }
+
+    fn eq(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
+        self.bool_nodes(graph, suffix, "aten.eq.Tensor", &[lhs, rhs])
     }
 
     fn where_self(
@@ -776,12 +795,8 @@ fn decompose_add_sub_alpha(graph: &mut IrGraph, id: NodeId) -> bool {
         "aten.add.Tensor"
     };
     let alpha_full = rhs_ctx.full(graph, "alpha_full", alpha);
-    let scaled_rhs = rhs_ctx.output(
-        graph,
-        "alpha_mul",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(rhs_id), IrArg::Node(alpha_full)],
-    );
+    let scaled_rhs =
+        rhs_ctx.output_nodes(graph, "alpha_mul", "aten.mul.Tensor", &[rhs_id, alpha_full]);
 
     let mut add_args = graph.nodes[id].args.clone();
     if add_args.len() < 2 {
@@ -810,18 +825,8 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
 
     if pow_scalar_numeric_arg(&graph.nodes[id]).is_some_and(|exp| exp == 0.0) {
         let one = ctx.full(graph, "one", 1.0);
-        let eq = ctx.bool(
-            graph,
-            "self_eq",
-            "aten.eq.Tensor",
-            vec![IrArg::Node(input_id), IrArg::Node(input_id)],
-        );
-        let ones = ctx.output(
-            graph,
-            "ones",
-            "aten.where.self",
-            vec![IrArg::Node(eq), IrArg::Node(one), IrArg::Node(one)],
-        );
+        let eq = ctx.eq(graph, "self_eq", input_id, input_id);
+        let ones = ctx.output_nodes(graph, "ones", "aten.where.self", &[eq, one, one]);
         graph.replace_and_erase(id, ones);
         return true;
     }
@@ -832,23 +837,19 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let mut base_id = input_id;
     if exp < 0 {
-        let reciprocal = ctx.output(
-            graph,
-            "reciprocal",
-            "aten.reciprocal.default",
-            vec![IrArg::Node(input_id)],
-        );
+        let reciprocal =
+            ctx.output_nodes(graph, "reciprocal", "aten.reciprocal.default", &[input_id]);
         base_id = reciprocal;
         exp = -exp;
     }
 
     let mut result_id = base_id;
     for idx in 1..exp {
-        let mul = ctx.output(
+        let mul = ctx.output_nodes(
             graph,
             &format!("mul{idx}"),
             "aten.mul.Tensor",
-            vec![IrArg::Node(result_id), IrArg::Node(base_id)],
+            &[result_id, base_id],
         );
         result_id = mul;
     }
