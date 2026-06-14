@@ -1415,6 +1415,14 @@ Deleted: repeated direct scalar-f64 and zero-point i64 argument reads from tenso
 Added: `arg_f64(...)` alongside the existing serializer `arg_i64(...)`, so quantize/dequantize/factory emitters use the same argument grammar
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib serialize::visitors::arg_utils`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over full, zeros, ones, scalar_tensor, add, mul, and to_copy; Rust LOC check
 Note: Full Rust tests passed `139 passed`; focused Python smoke passed `167 passed, 2 skipped, 1 expected xfail, 175 deselected`. No model lane was run. This is a small Refactor 7/3 readability slice, not a LOC-reduction slice.
+
+2026-06-14, redundant qparam clone cleanup slice
+Rust LOC: 36,850 -> 36,820
+Movement: -30 Rust LOC
+Deleted: same-source `.cloned_with_val(...).with_qparams_from(...)` chains and the now-dead `NodeMeta::with_qparams_from` / aggregate `copy_qparams_from` helpers
+Added: no replacement helper; `cloned_with_val(...)` already preserves qparam metadata from the cloned base
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over index_tensor, index_put, unfold_copy, conv1d, and linear; Rust LOC check
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `221 passed, 20 expected xfails, 503 deselected`. No model lane was run. This is a Refactor 2 metadata grammar cleanup: pass code no longer re-states a qparam copy that already follows from the `NodeMeta` cloning contract.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

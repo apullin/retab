@@ -187,9 +187,7 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
     let mut conv2d_shape = orig_out_shape.clone();
     conv2d_shape.push(1);
 
-    let conv2d_meta = base_meta
-        .cloned_with_val(conv2d_shape.to_vec(), &orig_out_dtype)
-        .with_qparams_from(&graph.nodes[id].meta);
+    let conv2d_meta = base_meta.cloned_with_val(conv2d_shape.to_vec(), &orig_out_dtype);
 
     let conv2d = graph.add_anchored_call_function(
         id,

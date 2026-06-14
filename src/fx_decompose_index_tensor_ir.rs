@@ -127,8 +127,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
                     perm.iter().map(|&pos| x_shape[pos as usize]).collect();
                 let perm_meta = graph.nodes[x_id]
                     .meta
-                    .cloned_with_val(permuted_shape, &x_dtype)
-                    .with_qparams_from(&graph.nodes[x_id].meta);
+                    .cloned_with_val(permuted_shape, &x_dtype);
                 let perm_id = graph.add_anchored_call_function(
                     id,
                     format!("{}_x_perm", node_name),
@@ -142,8 +141,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
             // Flatten x to (B, K, C)
             let x_bkc_meta = graph.nodes[x_id]
                 .meta
-                .cloned_with_val(vec![batch, k, c], &x_dtype)
-                .with_qparams_from(&graph.nodes[x_id].meta);
+                .cloned_with_val(vec![batch, k, c], &x_dtype);
             let x_bkc = graph.add_anchored_call_function(
                 id,
                 format!("{}_x_flat", node_name),
@@ -222,8 +220,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
             // GATHER(x_bkc, idx_bw) → (B, W, C)
             let gathered_meta = graph.nodes[x_id]
                 .meta
-                .cloned_with_val(vec![batch, w, c], &gather_dtype)
-                .with_qparams_from(&graph.nodes[x_id].meta);
+                .cloned_with_val(vec![batch, w, c], &gather_dtype);
             let gathered = graph.add_anchored_call_function(
                 id,
                 format!("{}_gather", node_name),
@@ -253,8 +250,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
             let out_shape = compute_index_output_shape(&batch_shape, &broadcast, &kept_shape);
             let result_meta = graph.nodes[x_id]
                 .meta
-                .cloned_with_val(out_shape.clone(), &x_dtype)
-                .with_qparams_from(&graph.nodes[x_id].meta);
+                .cloned_with_val(out_shape.clone(), &x_dtype);
             graph.replace_with_call_function(
                 id,
                 format!("{}_out", node_name),

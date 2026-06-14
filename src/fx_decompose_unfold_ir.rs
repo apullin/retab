@@ -98,7 +98,6 @@ impl IrPass for IrDecomposeUnfoldPass {
                 graph.nodes[values_in]
                     .meta
                     .cloned_with_val(vec![p, k, q], work_dtype)
-                    .with_qparams_from(&graph.nodes[x_id].meta)
             };
             let values = graph.add_anchored_call_function(
                 id,
@@ -213,7 +212,6 @@ impl IrPass for IrDecomposeUnfoldPass {
                 graph.nodes[values_in]
                     .meta
                     .cloned_with_val(vec![p, uc, q], work_dtype)
-                    .with_qparams_from(&graph.nodes[x_id].meta)
             };
             let gathered = graph.add_anchored_call_function(
                 id,
@@ -232,7 +230,6 @@ impl IrPass for IrDecomposeUnfoldPass {
                 graph.nodes[values_in]
                     .meta
                     .cloned_with_val(vec![p, u, size, q], work_dtype)
-                    .with_qparams_from(&graph.nodes[x_id].meta)
             };
             let r4d = graph.add_anchored_call_function(
                 id,
@@ -255,7 +252,6 @@ impl IrPass for IrDecomposeUnfoldPass {
                 graph.nodes[values_in]
                     .meta
                     .cloned_with_val(full_shape.clone(), work_dtype)
-                    .with_qparams_from(&graph.nodes[x_id].meta)
             };
             let reshaped = graph.add_anchored_call_function(
                 id,
@@ -286,7 +282,6 @@ impl IrPass for IrDecomposeUnfoldPass {
                 graph.nodes[values_in]
                     .meta
                     .cloned_with_val(perm_shape, work_dtype)
-                    .with_qparams_from(&graph.nodes[x_id].meta)
             };
             let permuted = graph.add_anchored_call_function(
                 id,

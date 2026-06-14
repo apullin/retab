@@ -1627,11 +1627,6 @@ impl NodeMeta {
         meta
     }
 
-    pub fn with_qparams_from(mut self, other: &Self) -> Self {
-        self.copy_qparams_from(other);
-        self
-    }
-
     pub fn without_qparams(mut self) -> Self {
         self.clear_all_qparams();
         self
@@ -1704,11 +1699,6 @@ impl NodeMeta {
         };
         self.set_output_qparams(oqp);
         true
-    }
-
-    fn copy_qparams_from(&mut self, other: &Self) {
-        self.copy_input_qparams_from(other);
-        self.copy_output_qparams_from(other);
     }
 
     pub fn clear_all_qparams(&mut self) {
