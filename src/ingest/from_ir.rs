@@ -290,8 +290,7 @@ fn fold_constant_reshapes(graph: &mut Graph, store: &mut TensorStore) {
 /// precomputed data, so no Python computation is needed.
 ///
 /// Handled here: MaterializeTensorNode (replace a computed node with its
-/// precomputed constant) and DeleteConstantPlaceholder. Table-op insertion and
-/// legacy fused-constant retargeting are handled incrementally below.
+/// precomputed constant), plus the other store-backed effects below.
 pub fn apply_effects(graph: &mut Graph, store: &mut TensorStore, effects: &LoweringEffectBatch) {
     apply_effects_ext(graph, store, effects, false);
 }

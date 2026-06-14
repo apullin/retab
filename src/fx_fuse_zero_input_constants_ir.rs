@@ -389,7 +389,7 @@ impl EffectfulIrPass for IrFuseZeroInputConstantsEffectPass {
                 "n/a"
             };
             crate::fold_fallback_log(&format!(
-                "MaterializeZeroInputConstant target={} kind={:?} why={}",
+                "ZeroInputConstantPrecomputeSkipped target={} kind={:?} why={}",
                 node.target, kind, why
             ));
         }

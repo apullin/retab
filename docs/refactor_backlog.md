@@ -853,6 +853,15 @@ Deleted: no-op `InsertTableOpEffect`, the from-IR `InsertTableOp` logging arm, t
 Added: no new production API; non-precomputable TABLE candidates now only emit `fold_fallback_log` diagnostics while the active path remains `InsertPrecomputedTableOpEffect`
 Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `python3 -m py_compile python/retab/_helpers.py`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over sigmoid, hardsigmoid, hardswish, silu, tanh, tan, sin, cos, sinh, cosh, asin, acos, atan, asinh, acosh, atanh, exp, expm1, log, log1p, sqrt, rsqrt, reciprocal, erf, erfinv, pow, elu, and gelu; `git diff --check`; TABLE fallback helper reference audit
 Note: Rust tests passed `130 passed`. Focused Python smoke passed `543 passed, 3 expected xfails, 1056 deselected`. This removes the final Python-computed TABLE fallback now that Rust precomputes active TABLE data directly.
+
+2026-06-13, dead placeholder-deletion helper cleanup
+Rust LOC: 37,077 -> 37,079
+Python helper LOC: `python/retab/_helpers.py` 788 -> 716
+Movement: +2 Rust LOC and -72 Python LOC
+Deleted: unreferenced Python `delete_constant_placeholder` and `delete_constant_placeholder_by_name` helpers from the old EP-effect/write-back era
+Added: no new production API; constant-fold fallback diagnostics now use skip-oriented names instead of deleted effect names
+Validation: `python3 -m py_compile python/retab/_helpers.py`; `cargo fmt`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over sigmoid, hardsigmoid, hardswish, silu, tanh, tan, sin, cos, sinh, cosh, asin, acos, atan, asinh, acosh, atanh, exp, expm1, log, log1p, sqrt, rsqrt, reciprocal, erf, erfinv, pow, elu, and gelu; helper/effect-vocabulary reference audit
+Note: This continues the Python helper export audit. The only references to the deleted helpers were their own definitions and internal fallback call, so the deletion narrows `_helpers.py` to the still-called FX insertion and metadata utilities.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

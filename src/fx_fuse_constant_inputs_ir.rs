@@ -101,7 +101,10 @@ impl EffectfulIrPass for IrFuseConstantInputsEffectPass {
                     continue;
                 }
             }
-            crate::fold_fallback_log(&format!("FuseConstantNode target={}", node.target));
+            crate::fold_fallback_log(&format!(
+                "ConstantInputPrecomputeSkipped target={}",
+                node.target
+            ));
         }
 
         let modified = !effects.is_empty();
