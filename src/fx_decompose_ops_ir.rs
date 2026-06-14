@@ -2556,16 +2556,14 @@ fn decompose_unbind(graph: &mut IrGraph, id: NodeId) -> bool {
         // slice(x, dim, idx, idx+1)
         let mut slice_shape = x_shape.clone();
         slice_shape[dim_norm] = 1;
-        let slice_id = graph.add_anchored_call_function(
+        let slice_id = graph.add_anchored_slice_copy(
             id,
             format!("{}_slice_{}", name, idx),
-            "aten.slice_copy.Tensor".to_string(),
-            vec![
-                IrArg::Node(x_id),
-                IrArg::Int(dim_norm as i64),
-                IrArg::Int(*idx),
-                IrArg::Int(idx + 1),
-            ],
+            x_id,
+            dim_norm as i64,
+            *idx,
+            idx + 1,
+            None,
             metas.tensor(&slice_shape),
         );
 

@@ -1,6 +1,6 @@
 //! Pure Rust IrPass: adjust conv/pool input sizes to yield exact integer outputs.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass};
 use crate::fx_target::{size_adjust_target_kind, SizeAdjustTargetKind};
 use crate::runner_logging::log_line;
 
@@ -127,16 +127,13 @@ impl IrPass for IrSizeAdjustInputPass {
                 .cloned();
             let mut current = input_id;
             for (dim, start, end) in &slices {
-                let slice_id = graph.add_node(
-                    NodeOp::CallFunction,
+                let slice_id = graph.add_slice_copy(
                     format!("{}_adj_d{}", node_name, dim),
-                    "aten.slice_copy.Tensor".to_string(),
-                    vec![
-                        IrArg::Node(current),
-                        IrArg::Int(*dim),
-                        IrArg::Int(*start),
-                        IrArg::Int(*end),
-                    ],
+                    current,
+                    *dim,
+                    *start,
+                    *end,
+                    None,
                     // Match the FX pass: copy the original input metadata onto
                     // the slice node and let the final fake-tensor refresh
                     // reconcile the exact sliced shape.

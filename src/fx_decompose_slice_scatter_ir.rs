@@ -99,17 +99,14 @@ impl IrPass for IrDecomposeSliceScatterPass {
                 if start_i > 0 {
                     let mut prefix_shape = input_shape.clone();
                     prefix_shape[dim_norm] = start_i;
-                    let prefix = graph.add_anchored_call_function(
+                    let prefix = graph.add_anchored_slice_copy(
                         id,
                         format!("{}_prefix", name),
-                        "aten.slice_copy.Tensor".to_string(),
-                        vec![
-                            IrArg::Node(input_id),
-                            IrArg::Int(dim_norm as i64),
-                            IrArg::Int(0),
-                            IrArg::Int(start_i),
-                            IrArg::Int(1),
-                        ],
+                        input_id,
+                        dim_norm as i64,
+                        0,
+                        start_i,
+                        Some(1),
                         meta.cloned_with_val(prefix_shape, &dtype),
                     );
                     cat_inputs.push(IrArg::Node(prefix));
@@ -120,17 +117,14 @@ impl IrPass for IrDecomposeSliceScatterPass {
                 if end_i < dim_size {
                     let mut suffix_shape = input_shape.clone();
                     suffix_shape[dim_norm] = dim_size - end_i;
-                    let suffix = graph.add_anchored_call_function(
+                    let suffix = graph.add_anchored_slice_copy(
                         id,
                         format!("{}_suffix", name),
-                        "aten.slice_copy.Tensor".to_string(),
-                        vec![
-                            IrArg::Node(input_id),
-                            IrArg::Int(dim_norm as i64),
-                            IrArg::Int(end_i),
-                            IrArg::Int(dim_size),
-                            IrArg::Int(1),
-                        ],
+                        input_id,
+                        dim_norm as i64,
+                        end_i,
+                        dim_size,
+                        Some(1),
                         meta.cloned_with_val(suffix_shape, &dtype),
                     );
                     cat_inputs.push(IrArg::Node(suffix));

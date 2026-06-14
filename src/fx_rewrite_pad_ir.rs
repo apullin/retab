@@ -29,16 +29,14 @@ fn add_slice(
     let mut out_shape = x_shape.to_vec();
     out_shape[dim] = 1;
     // slice_copy.Tensor(x, dim, idx, idx+1) — width-1 slice keeping the dim.
-    let n = graph.add_anchored_call_function(
+    let n = graph.add_anchored_slice_copy(
         id,
         name,
-        "aten.slice_copy.Tensor",
-        vec![
-            IrArg::Node(x_id),
-            IrArg::Int(dim as i64),
-            IrArg::Int(idx),
-            IrArg::Int(idx + 1),
-        ],
+        x_id,
+        dim as i64,
+        idx,
+        idx + 1,
+        None,
         base_meta.cloned_with_val(out_shape, dtype),
     );
     if let Some(p) = *prev {

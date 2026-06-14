@@ -1,6 +1,6 @@
 //! Pure Rust IrPass: dilated max_pool2d → pad + space-to-batch + pool + batch-to-space + slice.
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId};
 use crate::fx_target::{is_max_pool2d_target, is_max_pool2d_with_indices_target};
 use crate::graph::ir::DType;
 use crate::runner_logging::log_line;
@@ -213,30 +213,25 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
             );
 
             // 9. slice H to h_final
-            let slice_h = graph.add_anchored_call_function(
+            let slice_h = graph.add_anchored_slice_copy(
                 id,
                 format!("{}_slice_h", node_name),
-                "aten.slice_copy.Tensor",
-                vec![
-                    IrArg::Node(out_view),
-                    IrArg::Int(2),
-                    IrArg::Int(0),
-                    IrArg::Int(h_final),
-                ],
+                out_view,
+                2,
+                0,
+                h_final,
+                None,
                 orig_meta.cloned_with_val(vec![n, c, h_final, w_out * d_w], &dtype),
             );
 
             // 10. slice W to w_final
-            let result = graph.add_node(
-                NodeOp::CallFunction,
+            let result = graph.add_slice_copy(
                 format!("{}_slice_w", node_name),
-                "aten.slice_copy.Tensor".to_string(),
-                vec![
-                    IrArg::Node(slice_h),
-                    IrArg::Int(3),
-                    IrArg::Int(0),
-                    IrArg::Int(w_final),
-                ],
+                slice_h,
+                3,
+                0,
+                w_final,
+                None,
                 orig_meta.cloned_with_val(vec![n, c, h_final, w_final], &dtype),
             );
 

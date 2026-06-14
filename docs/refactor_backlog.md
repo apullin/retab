@@ -1558,6 +1558,14 @@ Deleted: pass-local grouped-conv per-tensor qparam equality helper, int32 WHERE 
 Added: `QParam::same_exact_scale_zp(...)`, `same_exact_affine_dtype(...)`, `same_per_tensor_exact_affine_dtype(...)`, and `same_exact_affine_qrange_dtype(...)`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over add, sub, conv2d, cond, while, and where; Rust LOC check
 Note: Full Rust tests passed `141 passed`; focused Python smoke passed `259 passed, 1 expected xfail`. This is a deletion-backed Refactor 2 slice: qparam-domain comparisons now name whether they are tolerant scale/zp, exact affine, per-tensor affine, or qrange-aware affine comparisons.
+
+2026-06-14, graph slice-copy builder slice
+Rust LOC: 36,286 -> 36,285
+Movement: -1 Rust LOC
+Deleted: raw production `aten.slice_copy.Tensor` target and positional-argument construction from adaptive avgpool, split-to-slice, cumsum, grouped conv, dilated maxpool, unbind decomposition, slice-scatter, strided-slice, pad rewrite, and size-adjust input slicing
+Added: `IrGraph::add_slice_copy(...)` and `IrGraph::add_anchored_slice_copy(...)`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over adaptive avgpool, avgpool, conv2d, cumsum, maxpool, slice, slice_scatter, split, and constant_pad_nd; Rust LOC check
+Note: Full Rust tests passed `141 passed`; focused Python smoke passed `501 passed`. Remaining raw `slice_copy` strings are test fixtures/assertions, the builder itself, or target grammar tests. This is a Refactor 3 slice: slice-copy construction now has one graph-rewrite spelling.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1856,6 +1864,10 @@ Added: direct reuse of `add_anchored_call_function` and
 
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`;
 focused Python smoke via `/tmp/et.sh` over sum and pixel_shuffling.
+
+The slice-copy builder slice later removed raw production
+`aten.slice_copy.Tensor` construction from decomposition and rewrite passes,
+leaving target strings in tests, target grammar, and the builder itself.
 
 Remaining work should keep adding small builder/query operations only when
 they replace repeated rewrite structure across several passes.

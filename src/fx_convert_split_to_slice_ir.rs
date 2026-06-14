@@ -4,7 +4,7 @@
 //! Each getitem user of the split node is replaced with a slice_copy that
 //! extracts the corresponding chunk along the split dimension.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId};
 use crate::fx_target::is_split_target;
 use crate::runner_logging::log_line;
 
@@ -130,16 +130,13 @@ impl IrPass for IrConvertSplitToSlicePass {
                 slice_meta.copy_output_qparams_from(&graph.nodes[*user_id].meta);
 
                 // slice_copy.Tensor(input, dim, start, end)
-                let new_id = graph.add_node(
-                    NodeOp::CallFunction,
+                let new_id = graph.add_slice_copy(
                     format!("{}_slice_{}", split_name, index),
-                    "aten.slice_copy.Tensor".to_string(),
-                    vec![
-                        IrArg::Node(input_id),
-                        IrArg::Int(dim),
-                        IrArg::Int(starts[index]),
-                        IrArg::Int(ends[index]),
-                    ],
+                    input_id,
+                    dim,
+                    starts[index],
+                    ends[index],
+                    None,
                     slice_meta,
                 );
 

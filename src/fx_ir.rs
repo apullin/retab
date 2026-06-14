@@ -807,6 +807,44 @@ impl IrGraph {
         id
     }
 
+    pub(crate) fn add_slice_copy(
+        &mut self,
+        name: impl Into<String>,
+        source: NodeId,
+        dim: i64,
+        start: i64,
+        end: i64,
+        step: Option<i64>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let mut args = vec![
+            IrArg::Node(source),
+            IrArg::Int(dim),
+            IrArg::Int(start),
+            IrArg::Int(end),
+        ];
+        if let Some(step) = step {
+            args.push(IrArg::Int(step));
+        }
+        self.add_call_function(name, "aten.slice_copy.Tensor", args, meta)
+    }
+
+    pub(crate) fn add_anchored_slice_copy(
+        &mut self,
+        anchor: NodeId,
+        name: impl Into<String>,
+        source: NodeId,
+        dim: i64,
+        start: i64,
+        end: i64,
+        step: Option<i64>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.add_slice_copy(name, source, dim, start, end, step, meta);
+        self.anchor_to(id, anchor);
+        id
+    }
+
     pub(crate) fn add_rescale(&mut self, spec: RescaleRewrite) -> NodeId {
         let RescaleRewrite {
             name,

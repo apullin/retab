@@ -225,16 +225,14 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
         let Some(input_meta) = slice_meta(graph, spec.input_id, 1, input_start, input_stop) else {
             return false;
         };
-        let input_slice = graph.add_anchored_call_function(
+        let input_slice = graph.add_anchored_slice_copy(
             id,
             format!("{}_input_slice_{}", node_name, group),
-            "aten.slice_copy.Tensor",
-            vec![
-                IrArg::Node(spec.input_id),
-                IrArg::Int(1),
-                IrArg::Int(input_start),
-                IrArg::Int(input_stop),
-            ],
+            spec.input_id,
+            1,
+            input_start,
+            input_stop,
+            None,
             input_meta,
         );
 
@@ -247,16 +245,14 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
         else {
             return false;
         };
-        let weight_slice = graph.add_anchored_call_function(
+        let weight_slice = graph.add_anchored_slice_copy(
             id,
             format!("{}_weight_slice_{}", node_name, group),
-            "aten.slice_copy.Tensor",
-            vec![
-                IrArg::Node(spec.weight_id),
-                IrArg::Int(0),
-                IrArg::Int(weight_start),
-                IrArg::Int(weight_stop),
-            ],
+            spec.weight_id,
+            0,
+            weight_start,
+            weight_stop,
+            None,
             weight_meta,
         );
 
@@ -267,16 +263,14 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
                 let Some(bias_meta) = slice_meta(graph, bias_id, 0, bias_start, bias_stop) else {
                     return false;
                 };
-                let bias_slice = graph.add_anchored_call_function(
+                let bias_slice = graph.add_anchored_slice_copy(
                     id,
                     format!("{}_bias_slice_{}", node_name, group),
-                    "aten.slice_copy.Tensor",
-                    vec![
-                        IrArg::Node(bias_id),
-                        IrArg::Int(0),
-                        IrArg::Int(bias_start),
-                        IrArg::Int(bias_stop),
-                    ],
+                    bias_id,
+                    0,
+                    bias_start,
+                    bias_stop,
+                    None,
                     bias_meta,
                 );
                 IrArg::Node(bias_slice)

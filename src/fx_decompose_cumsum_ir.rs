@@ -154,16 +154,14 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
     // 4. slice_copy(conv, dim=2, start=0, end=cumsum_dim) — trim padding
     let slice_shape = vec![pre_cumsum_dim, 1, cumsum_dim, post_cumsum_dim];
     let slice_meta = NodeMeta::tensor(slice_shape.as_slice(), &input_dtype);
-    let slice_id = graph.add_anchored_call_function(
+    let slice_id = graph.add_anchored_slice_copy(
         node_id,
         format!("{}_slice", node_name),
-        "aten.slice_copy.Tensor",
-        vec![
-            IrArg::Node(conv_id),
-            IrArg::Int(2),          // dim
-            IrArg::Int(0),          // start
-            IrArg::Int(cumsum_dim), // end
-        ],
+        conv_id,
+        2,
+        0,
+        cumsum_dim,
+        None,
         slice_meta,
     );
 

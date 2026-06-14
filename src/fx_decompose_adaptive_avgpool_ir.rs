@@ -68,30 +68,26 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                     let kw = end_w - start_w;
 
                     // slice_copy(x, dim=2, start_h, end_h)
-                    let slice_h = graph.add_anchored_call_function(
+                    let slice_h = graph.add_anchored_slice_copy(
                         id,
                         format!("{}_sh_{}_{}", node_name, out_i, out_j),
-                        "aten.slice_copy.Tensor",
-                        vec![
-                            IrArg::Node(x_id),
-                            IrArg::Int(2),
-                            IrArg::Int(start_h),
-                            IrArg::Int(end_h),
-                        ],
+                        x_id,
+                        2,
+                        start_h,
+                        end_h,
+                        None,
                         orig_meta.cloned_with_val(vec![n_batch, c_ch, kh, input_w], &dtype),
                     );
 
                     // slice_copy(slice_h, dim=3, start_w, end_w)
-                    let slice_hw = graph.add_anchored_call_function(
+                    let slice_hw = graph.add_anchored_slice_copy(
                         id,
                         format!("{}_sw_{}_{}", node_name, out_i, out_j),
-                        "aten.slice_copy.Tensor",
-                        vec![
-                            IrArg::Node(slice_h),
-                            IrArg::Int(3),
-                            IrArg::Int(start_w),
-                            IrArg::Int(end_w),
-                        ],
+                        slice_h,
+                        3,
+                        start_w,
+                        end_w,
+                        None,
                         orig_meta.cloned_with_val(vec![n_batch, c_ch, kh, kw], &dtype),
                     );
 
