@@ -43,30 +43,21 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                 continue;
             }
 
-            let x_id = match graph.nodes[id].args.first().and_then(IrArg::as_node) {
+            let x_id = match graph.nodes[id].first_node_arg() {
                 Some(n) => n,
                 None => continue,
             };
-            let pair_arg = |idx| {
-                graph.nodes[id]
-                    .args
-                    .get(idx)
-                    .and_then(IrArg::as_int_pair_or_scalar)
-            };
-            let Some((kernel_h, kernel_w)) = pair_arg(1) else {
+            let node = &graph.nodes[id];
+            let Some((kernel_h, kernel_w)) = node.arg_int_pair_or_scalar(1) else {
                 continue;
             };
-            let (stride_h, stride_w) = pair_arg(2).unwrap_or((kernel_h, kernel_w));
-            let (pad_h, pad_w) = pair_arg(3).unwrap_or((0, 0));
-            let ceil_mode = matches!(graph.nodes[id].args.get(4), Some(IrArg::Bool(true)));
-            let mut count_include_pad = match graph.nodes[id].args.get(5) {
-                Some(IrArg::Bool(v)) => *v,
-                _ => true,
-            };
-            let divisor_override = match graph.nodes[id].args.get(6) {
-                Some(IrArg::Int(v)) => Some(*v),
-                _ => None,
-            };
+            let (stride_h, stride_w) = node
+                .arg_int_pair_or_scalar(2)
+                .unwrap_or((kernel_h, kernel_w));
+            let (pad_h, pad_w) = node.arg_int_pair_or_scalar(3).unwrap_or((0, 0));
+            let ceil_mode = node.arg_bool_or(4, false);
+            let mut count_include_pad = node.arg_bool_or(5, true);
+            let divisor_override = node.arg_int(6);
 
             if divisor_override.is_some() {
                 count_include_pad = true;

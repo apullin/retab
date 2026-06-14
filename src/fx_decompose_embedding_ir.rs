@@ -21,11 +21,10 @@ impl IrPass for IrDecomposeEmbeddingPass {
             if !is_embedding_target(&graph.nodes[id].target) {
                 continue;
             }
-            let args = graph.nodes[id].args.clone();
-            let Some(weight_id) = args.first().and_then(IrArg::as_node) else {
+            let Some(weight_id) = graph.nodes[id].arg_node(0) else {
                 continue;
             };
-            let Some(indices_id) = args.get(1).and_then(IrArg::as_node) else {
+            let Some(indices_id) = graph.nodes[id].arg_node(1) else {
                 continue;
             };
 

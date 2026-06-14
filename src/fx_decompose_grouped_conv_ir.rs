@@ -184,7 +184,7 @@ fn parse_grouped_conv(graph: &IrGraph, id: NodeId) -> Option<GroupedConvSpec> {
     }
 
     let groups = if is_raw_conv2d {
-        args.get(6).and_then(IrArg::as_int).unwrap_or(1)
+        node.arg_int_or(6, 1)
     } else {
         args[8].as_int().unwrap_or(1)
     };

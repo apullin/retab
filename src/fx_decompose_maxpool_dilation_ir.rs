@@ -90,7 +90,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 None
             };
 
-            let x_id = match graph.nodes[id].args.first().and_then(|a| a.as_node()) {
+            let x_id = match graph.nodes[id].first_node_arg() {
                 Some(n) => n,
                 None => continue,
             };
@@ -104,14 +104,13 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 input_shape[2],
                 input_shape[3],
             );
-            let args = &graph.nodes[id].args;
-            let pair_arg = |idx| args.get(idx).and_then(IrArg::as_int_pair_or_scalar);
+            let node = &graph.nodes[id];
 
-            let (k_h, k_w) = pair_arg(1).unwrap_or((1, 1));
-            let (s_h, s_w) = pair_arg(2).unwrap_or((k_h, k_w));
-            let (pad_h, pad_w) = pair_arg(3).unwrap_or((0, 0));
-            let (d_h, d_w) = pair_arg(4).unwrap_or((1, 1));
-            let ceil_mode = args.get(5).and_then(|a| a.as_bool()).unwrap_or(false);
+            let (k_h, k_w) = node.arg_int_pair_or_scalar(1).unwrap_or((1, 1));
+            let (s_h, s_w) = node.arg_int_pair_or_scalar(2).unwrap_or((k_h, k_w));
+            let (pad_h, pad_w) = node.arg_int_pair_or_scalar(3).unwrap_or((0, 0));
+            let (d_h, d_w) = node.arg_int_pair_or_scalar(4).unwrap_or((1, 1));
+            let ceil_mode = node.arg_bool_or(5, false);
 
             if d_h == 1 && d_w == 1 {
                 continue;

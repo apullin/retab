@@ -18,7 +18,7 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
                 continue;
             }
 
-            let x_id = match graph.nodes[id].args.first().and_then(|a| a.as_node()) {
+            let x_id = match graph.nodes[id].first_node_arg() {
                 Some(n) => n,
                 None => continue,
             };

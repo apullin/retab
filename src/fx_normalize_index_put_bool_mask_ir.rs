@@ -67,11 +67,11 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     {
         return false;
     }
-    let data = match node.args[2].as_node() {
+    let data = match node.arg_node(2) {
         Some(n) => n,
         None => return false,
     };
-    let accumulate = node.args.get(3).and_then(IrArg::as_bool).unwrap_or(false);
+    let accumulate = node.arg_bool_or(3, false);
 
     // Only the supported simple case: single bool mask, no accumulate, scalar data.
     if accumulate || graph.nodes[mask].meta.val_dtype() != Some("torch.bool") {

@@ -26,7 +26,7 @@ impl IrPass for IrDecorateFpToIntCastPass {
             if !is_fp_to_int_cast_target(&graph.nodes[id].target) {
                 continue;
             }
-            let x_id = match graph.nodes[id].args.first().and_then(IrArg::as_node) {
+            let x_id = match graph.nodes[id].first_node_arg() {
                 Some(n) => n,
                 None => continue,
             };

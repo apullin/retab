@@ -33,7 +33,8 @@ impl IrPass for IrQuantizeClampArgsPass {
             };
 
             // args: [input, min_val, max_val]
-            let args = &graph.nodes[id].args;
+            let node = &graph.nodes[id];
+            let args = &node.args;
             if args.is_empty() {
                 continue;
             }
@@ -42,13 +43,13 @@ impl IrPass for IrQuantizeClampArgsPass {
             let mut did_update = false;
 
             // Quantize min_val (args[1]) if present and not None
-            if let Some(min_val) = args.get(1).and_then(IrArg::as_numeric_f64) {
+            if let Some(min_val) = node.arg_numeric_f64(1) {
                 new_args[1] = IrArg::Int(quantize_value(&qp, min_val));
                 did_update = true;
             }
 
             // Quantize max_val (args[2]) if present and not None
-            if let Some(max_val) = args.get(2).and_then(IrArg::as_numeric_f64) {
+            if let Some(max_val) = node.arg_numeric_f64(2) {
                 new_args[2] = IrArg::Int(quantize_value(&qp, max_val));
                 did_update = true;
             }

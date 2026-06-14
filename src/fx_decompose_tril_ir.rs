@@ -10,10 +10,7 @@ use crate::runner_logging::log_line;
 fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
     let input_id = graph.nodes[id].first_node_arg()?;
 
-    let diagonal: i64 = match graph.nodes[id].args.get(1) {
-        Some(IrArg::Int(d)) => *d,
-        _ => 0,
-    };
+    let diagonal = graph.nodes[id].arg_int_or(1, 0);
 
     let input_shape = graph.nodes[input_id].meta.val_shape()?.to_vec();
     if input_shape.len() < 2 {

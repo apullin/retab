@@ -1,4 +1,4 @@
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp, RescaleRewrite};
+use crate::fx_ir::{IrGraph, IrPass, NodeId, NodeOp, RescaleRewrite};
 use crate::runner_logging::log_line;
 
 fn insert_qdq_rescale(graph: &mut IrGraph, dq_id: NodeId, q_id: NodeId) -> bool {
@@ -14,7 +14,7 @@ fn insert_qdq_rescale(graph: &mut IrGraph, dq_id: NodeId, q_id: NodeId) -> bool 
         return false;
     }
 
-    let Some(source_id) = dq.args.first().and_then(IrArg::as_node) else {
+    let Some(source_id) = dq.first_node_arg() else {
         return false;
     };
     let Some(dq_qp) = dq.parse_qdq_qparam() else {
@@ -91,6 +91,7 @@ impl IrPass for IrInsertQdqRescalePass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fx_ir::IrArg;
     use crate::fx_ir::NodeMeta;
 
     #[test]

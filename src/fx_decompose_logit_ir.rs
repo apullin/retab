@@ -39,10 +39,7 @@ impl IrPass for IrDecomposeLogitPass {
             let rank = input_shape.len();
 
             // Extract eps: args[1] if present, otherwise None
-            let eps: Option<f64> = graph.nodes[id].args.get(1).and_then(|a| match a {
-                IrArg::None => None,
-                other => other.as_float(),
-            });
+            let eps: Option<f64> = graph.nodes[id].arg(1).and_then(IrArg::as_float);
 
             let meta = graph.nodes[id].meta.clone();
             let base_name = graph.nodes[id].name.clone();

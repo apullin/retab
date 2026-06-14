@@ -421,7 +421,7 @@ impl IrToTosaMemoryFormatPass {
                 continue;
             }
 
-            let Some(input_id) = graph.nodes[id].args.first().and_then(|arg| arg.as_node()) else {
+            let Some(input_id) = graph.nodes[id].first_node_arg() else {
                 continue;
             };
             let Some(input_shape) = graph.nodes[input_id]
@@ -581,7 +581,7 @@ impl IrToTosaMemoryFormatPass {
             if !is_permute_target(&graph.nodes[id].target) {
                 continue;
             }
-            let Some(input_id) = graph.nodes[id].args.first().and_then(|arg| arg.as_node()) else {
+            let Some(input_id) = graph.nodes[id].first_node_arg() else {
                 continue;
             };
             let Some(input_shape) = graph.nodes[input_id].meta.val_shape() else {

@@ -376,24 +376,20 @@ fn has_direct_non_getitem_user(graph: &IrGraph, id: NodeId) -> bool {
 }
 
 fn pow_scalar_numeric_arg(node: &crate::fx_ir::IrNode) -> Option<f64> {
-    node.args.get(1).and_then(IrArg::as_numeric_f64)
+    node.arg_numeric_f64(1)
 }
 
 fn pow_scalar_int_arg(node: &crate::fx_ir::IrNode) -> Option<i64> {
-    node.args.get(1).and_then(IrArg::as_int)
+    node.arg_int(1)
 }
 
 fn alpha_value(node: &crate::fx_ir::IrNode) -> Option<f64> {
-    node.args
-        .get(2)
-        .and_then(IrArg::as_numeric_f64)
+    node.arg_numeric_f64(2)
         .or_else(|| node.kwargs.get("alpha").and_then(IrArg::as_numeric_f64))
 }
 
 fn elu_alpha(node: &crate::fx_ir::IrNode) -> f64 {
-    node.args
-        .get(1)
-        .and_then(IrArg::as_numeric_f64)
+    node.arg_numeric_f64(1)
         .or_else(|| node.kwargs.get("alpha").and_then(IrArg::as_numeric_f64))
         .unwrap_or(1.0)
 }
@@ -409,7 +405,7 @@ fn batch_norm_training(node: &crate::fx_ir::IrNode) -> bool {
     node.kwargs
         .get("training")
         .and_then(IrArg::as_bool)
-        .or_else(|| node.args.get(5).and_then(IrArg::as_bool))
+        .or_else(|| node.arg_bool(5))
         .unwrap_or(false)
 }
 
@@ -621,7 +617,7 @@ impl IrPass for IrDecomposeOpsPass {
 }
 
 fn decompose_add_sub_alpha(graph: &mut IrGraph, id: NodeId) -> bool {
-    let Some(rhs_id) = graph.nodes[id].args.get(1).and_then(|arg| arg.as_node()) else {
+    let Some(rhs_id) = graph.nodes[id].arg_node(1) else {
         return false;
     };
     let Some(alpha) = alpha_value(&graph.nodes[id]) else {
@@ -669,7 +665,7 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
 
-    let Some(input_id) = graph.nodes[id].args.first().and_then(IrArg::as_node) else {
+    let Some(input_id) = graph.nodes[id].first_node_arg() else {
         return false;
     };
 
@@ -1522,7 +1518,7 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(input_id) => input_id,
         None => return false,
     };
-    let dim = match graph.nodes[id].args.get(1).and_then(IrArg::as_int) {
+    let dim = match graph.nodes[id].arg_int(1) {
         Some(dim) => dim,
         None => return false,
     };
@@ -2742,17 +2738,17 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
 
-    let x_id = match graph.nodes[id].args.first().and_then(IrArg::as_node) {
+    let x_id = match graph.nodes[id].first_node_arg() {
         Some(n) => n,
         None => return false,
     };
-    let weight_arg = graph.nodes[id].args.get(1).cloned().unwrap_or(IrArg::None);
-    let bias_arg = graph.nodes[id].args.get(2).cloned().unwrap_or(IrArg::None);
-    let running_mean = match graph.nodes[id].args.get(3).and_then(IrArg::as_node) {
+    let weight_arg = graph.nodes[id].arg_clone_or_none(1);
+    let bias_arg = graph.nodes[id].arg_clone_or_none(2);
+    let running_mean = match graph.nodes[id].arg_node(3) {
         Some(n) => n,
         None => return false,
     };
-    let running_var = match graph.nodes[id].args.get(4).and_then(IrArg::as_node) {
+    let running_var = match graph.nodes[id].arg_node(4) {
         Some(n) => n,
         None => return false,
     };
@@ -2860,7 +2856,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
 
 fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     let args = graph.nodes[id].args.clone();
-    let x_id = match args.first().and_then(IrArg::as_node) {
+    let x_id = match graph.nodes[id].first_node_arg() {
         Some(n) => n,
         None => return false,
     };

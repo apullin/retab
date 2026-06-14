@@ -81,19 +81,10 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
             Some(IrArg::Node(nid)) => IrArg::Node(*nid),
             _ => IrArg::None,
         };
-        stride = args
-            .get(3)
-            .and_then(|a| a.as_int_list())
-            .unwrap_or_else(|| vec![1]);
-        pad = args
-            .get(4)
-            .and_then(|a| a.as_int_list())
-            .unwrap_or_else(|| vec![0]);
-        dilation = args
-            .get(5)
-            .and_then(|a| a.as_int_list())
-            .unwrap_or_else(|| vec![1]);
-        groups = args.get(6).and_then(|a| a.as_int()).unwrap_or(1);
+        stride = node.arg_int_list(3).unwrap_or_else(|| vec![1]);
+        pad = node.arg_int_list(4).unwrap_or_else(|| vec![0]);
+        dilation = node.arg_int_list(5).unwrap_or_else(|| vec![1]);
+        groups = node.arg_int_or(6, 1);
         transposed = false;
         output_padding = vec![0];
     } else {

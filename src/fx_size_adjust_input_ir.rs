@@ -30,7 +30,7 @@ impl IrPass for IrSizeAdjustInputPass {
                 continue;
             }
 
-            let input_id = match graph.nodes[id].args.first().and_then(|a| a.as_node()) {
+            let input_id = match graph.nodes[id].first_node_arg() {
                 Some(n) => n,
                 None => continue,
             };

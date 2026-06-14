@@ -117,18 +117,10 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         .collect();
     let scalar_shape = vec![1; rank];
 
-    let weights = graph.nodes[id].args.get(2).and_then(|arg| match arg {
-        IrArg::Node(node_id) => Some(*node_id),
-        _ => None,
-    });
-    let bias = graph.nodes[id].args.get(3).and_then(|arg| match arg {
-        IrArg::Node(node_id) => Some(*node_id),
-        _ => None,
-    });
+    let weights = graph.nodes[id].arg_node(2);
+    let bias = graph.nodes[id].arg_node(3);
     let epsilon = graph.nodes[id]
-        .args
-        .get(4)
-        .and_then(IrArg::as_numeric_f64)
+        .arg_numeric_f64(4)
         .unwrap_or(f32::EPSILON as f64);
     let name = graph.nodes[id].name.clone();
     let target = graph.nodes[id].target.clone();

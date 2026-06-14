@@ -72,14 +72,8 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 continue;
             }
 
-            let start = fixup_start(
-                graph.nodes[id].args.get(2).and_then(IrArg::as_int),
-                dim_size,
-            );
-            let end = fixup_end(
-                graph.nodes[id].args.get(3).and_then(IrArg::as_int),
-                dim_size,
-            );
+            let start = fixup_start(graph.nodes[id].arg_int(2), dim_size);
+            let end = fixup_end(graph.nodes[id].arg_int(3), dim_size);
             let span_len = end - start;
             if span_len <= 0 {
                 continue;

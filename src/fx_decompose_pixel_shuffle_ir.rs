@@ -93,7 +93,7 @@ impl IrPass for IrDecomposePixelShufflePass {
             }
 
             // Extract upscale_factor (second arg)
-            let r = match graph.nodes[id].args.get(1).and_then(|a| a.as_int()) {
+            let r = match graph.nodes[id].arg_int(1) {
                 Some(v) => v,
                 None => continue,
             };

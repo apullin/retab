@@ -38,12 +38,10 @@ impl IrPass for IrRemoveNoopPass {
 
             // Determine the replacement: copy uses args[1] (src), others use args[0]
             let replacement_id: NodeId = match noop {
-                NoopTarget::CopySourceArg => {
-                    match graph.nodes[id].args.get(1).and_then(|a| a.as_node()) {
-                        Some(nid) => nid,
-                        None => continue,
-                    }
-                }
+                NoopTarget::CopySourceArg => match graph.nodes[id].arg_node(1) {
+                    Some(nid) => nid,
+                    None => continue,
+                },
                 NoopTarget::PassthroughFirstArg | NoopTarget::DtypeCheckedPassthrough => input_id,
             };
 

@@ -859,13 +859,8 @@ impl IrGraph {
     pub fn live_getitem_users(&self, id: NodeId) -> Vec<(NodeId, i64)> {
         self.live_nodes()
             .filter(|node| node.is_getitem())
-            .filter(|node| node.args.first().and_then(IrArg::as_node) == Some(id))
-            .map(|node| {
-                (
-                    node.id,
-                    node.args.get(1).and_then(IrArg::as_int).unwrap_or(0),
-                )
-            })
+            .filter(|node| node.first_node_arg() == Some(id))
+            .map(|node| (node.id, node.arg_int_or(1, 0)))
             .collect()
     }
 
@@ -1058,12 +1053,49 @@ impl IrNode {
         self.op == NodeOp::CallFunction && self.target_kind() == kind
     }
 
+    pub(crate) fn arg(&self, index: usize) -> Option<&IrArg> {
+        self.args.get(index)
+    }
+
+    pub(crate) fn arg_clone_or_none(&self, index: usize) -> IrArg {
+        self.arg(index).cloned().unwrap_or(IrArg::None)
+    }
+
+    pub(crate) fn arg_node(&self, index: usize) -> Option<NodeId> {
+        self.arg(index).and_then(IrArg::as_node)
+    }
+
+    pub(crate) fn arg_int(&self, index: usize) -> Option<i64> {
+        self.arg(index).and_then(IrArg::as_int)
+    }
+
+    pub(crate) fn arg_int_or(&self, index: usize, default: i64) -> i64 {
+        self.arg_int(index).unwrap_or(default)
+    }
+
+    pub(crate) fn arg_numeric_f64(&self, index: usize) -> Option<f64> {
+        self.arg(index).and_then(IrArg::as_numeric_f64)
+    }
+
+    pub(crate) fn arg_bool(&self, index: usize) -> Option<bool> {
+        self.arg(index).and_then(IrArg::as_bool)
+    }
+
+    pub(crate) fn arg_bool_or(&self, index: usize, default: bool) -> bool {
+        self.arg_bool(index).unwrap_or(default)
+    }
+
+    pub(crate) fn arg_int_list(&self, index: usize) -> Option<Vec<i64>> {
+        self.arg(index).and_then(IrArg::as_int_list)
+    }
+
+    pub(crate) fn arg_int_pair_or_scalar(&self, index: usize) -> Option<(i64, i64)> {
+        self.arg(index).and_then(IrArg::as_int_pair_or_scalar)
+    }
+
     /// Get first arg if it's a node reference.
     pub fn first_node_arg(&self) -> Option<NodeId> {
-        self.args.first().and_then(|a| match a {
-            IrArg::Node(id) => Some(*id),
-            _ => None,
-        })
+        self.arg_node(0)
     }
 
     /// Is this a quantize_per_tensor call?

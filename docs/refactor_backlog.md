@@ -1135,6 +1135,14 @@ Deleted: pass-local target predicate/replacement helpers for not-equal decomposi
 Added: shared `fx_target` helpers for not-equal replacement target selection, scalar-shift replacement target selection, repeat_interleave.self_int matching, max_pool2d matching, and max_pool2d-with-indices matching
 Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_target::tests`; `cargo test --lib fx_decompose_ne_ir::tests`; `cargo test --lib fx_replace_scalar_with_tensor_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over ne, lshift, rshift, repeat, and max_pool; Rust LOC check
 Note: Target-family Rust tests passed `12 passed`; touched pass tests passed `3 passed`; full Rust tests passed `137 passed`; focused Python smoke passed `155 passed, 271 deselected`. No model lane was run. This is setup-positive because the classifier tests are larger than the pass-local deletions, but four more operator-identity rules now have one owner.
+
+2026-06-14, IR positional-argument grammar slice
+Rust LOC: 36,851 -> 36,840
+Movement: -11 Rust LOC
+Deleted: repeated `args.get(index).and_then(...).unwrap_or(default)` and first-arg node-read spellings across decomposition, pooling, slicing, cast-decoration, q/dq, memory-format, and noop-removal passes
+Added: `IrNode` positional argument helpers for optional args, cloned-or-None args, node args, integer args, defaulted integer args, numeric-f64 args, boolean args, defaulted boolean args, int-list args, and int-pair-or-scalar args
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv1d, conv2d, depthwise_conv, avg_pool2d, adaptive_avg_pool2d, max_pool, embedding, layer_norm, logit, tril, pixel_shuffling, slice, slice_scatter, index_put, relu, hardtanh, and clamp; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `686 passed, 6 skipped, 2 expected xfails, 1609 deselected`. No model lane was run. This is a Refactor 3 grammar slice: graph rewrites now name common positional-argument reads rather than open-coding heterogeneous `IrArg` access in each pass.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1343,9 +1351,10 @@ of local mixed-node snapshots. Control-flow metadata/contracts, duplicate
 placeholder fusion, fold-q/dq candidate collection, and table-op precompute
 candidate collection also reuse the shared graph queries. `IrGraph` also has
 value-metadata builder siblings for add, anchored add, and replacement
-call-function rewrites. Remaining work should keep adding small builder/query
-operations only when they replace repeated rewrite structure across several
-passes.
+call-function rewrites. `IrNode` now owns common positional-argument reads for
+node, integer, numeric, boolean, list, pair-or-scalar, and cloned-or-None args.
+Remaining work should keep adding small builder/query operations only when
+they replace repeated rewrite structure across several passes.
 
 Problem:
 
