@@ -110,7 +110,7 @@ pub(crate) fn append_subgraphs_from_ir(
             &mut sub_store,
             effects,
         );
-        crate::ingest::fx_bridge::finalize_converted_graph(&mut sub_graph);
+        crate::ingest::finalize::finalize_converted_graph(&mut sub_graph);
         if while_cond_graph_names.contains(&region) {
             mark_scalar_outputs(&mut sub_graph);
         }

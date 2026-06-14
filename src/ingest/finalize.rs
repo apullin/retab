@@ -1,3 +1,5 @@
+//! Post-conversion graph finalization for serialize graphs produced from Rust IR.
+
 use crate::graph::ir::*;
 use crate::graph::Graph;
 
@@ -64,17 +66,8 @@ fn fixup_reshape_shapes(graph: &mut Graph) {
             if !is_reshape {
                 continue;
             }
-            let shape = match node.args.get(1) {
-                Some(Arg::IntList(list)) => {
-                    let v: Vec<i64> = list.iter().copied().collect();
-                    Some(v)
-                }
-                _ => None,
-            };
-            let input_id = match node.args.first() {
-                Some(Arg::Node(id)) => Some(*id),
-                _ => None,
-            };
+            let shape = node.args.get(1).and_then(Arg::as_int_list).map(Vec::from);
+            let input_id = node.args.first().and_then(Arg::as_node);
             (shape, input_id)
         };
 
@@ -103,29 +96,24 @@ fn fixup_reshape_shapes(graph: &mut Graph) {
     // Also fix Conv2d nodes whose output shape doesn't match their inputs.
     let all_ids2 = graph.all_node_ids();
     for node_id in &all_ids2 {
-        let (is_conv, input_id, weight_id, current_shape_len) = {
+        let (input_id, weight_id, current_shape_len) = {
             let Some(node) = graph.node(*node_id) else {
                 continue;
             };
             if node.op != OpType::CallFunction {
                 continue;
             }
-            let is_conv = matches!(node.target, OpTarget::Conv2d);
-            if !is_conv {
+            if !matches!(node.target, OpTarget::Conv2d) {
                 continue;
             }
-            let input_id = match node.args.first() {
-                Some(Arg::Node(id)) => Some(*id),
-                _ => None,
-            };
-            let weight_id = match node.args.get(1) {
-                Some(Arg::Node(id)) => Some(*id),
-                _ => None,
-            };
-            (true, input_id, weight_id, node.meta.val.shape_len)
+            (
+                node.args.first().and_then(Arg::as_node),
+                node.args.get(1).and_then(Arg::as_node),
+                node.meta.val.shape_len,
+            )
         };
 
-        if !is_conv || current_shape_len == 4 {
+        if current_shape_len == 4 {
             continue;
         }
 
@@ -142,18 +130,24 @@ fn fixup_reshape_shapes(graph: &mut Graph) {
             if let (Some(ishape), Some(wshape)) = (input_shape, weight_shape) {
                 if ishape.len() == 4 && wshape.len() == 4 {
                     let node = graph.node(*node_id).unwrap();
-                    let stride = match node.args.get(3) {
-                        Some(Arg::IntList(l)) => l.iter().copied().collect::<Vec<_>>(),
-                        _ => vec![1, 1],
-                    };
-                    let padding = match node.args.get(4) {
-                        Some(Arg::IntList(l)) => l.iter().copied().collect::<Vec<_>>(),
-                        _ => vec![0, 0],
-                    };
-                    let dilation = match node.args.get(5) {
-                        Some(Arg::IntList(l)) => l.iter().copied().collect::<Vec<_>>(),
-                        _ => vec![1, 1],
-                    };
+                    let stride = node
+                        .args
+                        .get(3)
+                        .and_then(Arg::as_int_list)
+                        .map(Vec::from)
+                        .unwrap_or_else(|| vec![1, 1]);
+                    let padding = node
+                        .args
+                        .get(4)
+                        .and_then(Arg::as_int_list)
+                        .map(Vec::from)
+                        .unwrap_or_else(|| vec![0, 0]);
+                    let dilation = node
+                        .args
+                        .get(5)
+                        .and_then(Arg::as_int_list)
+                        .map(Vec::from)
+                        .unwrap_or_else(|| vec![1, 1]);
 
                     let batch = ishape[0];
                     let ih = ishape[1];
@@ -320,7 +314,7 @@ fn fixup_quantized_dtypes_once(graph: &mut Graph) {
 
     let all_ids2 = graph.all_node_ids();
     for node_id in &all_ids2 {
-        let (is_placeholder, current_dt, users) = {
+        let (current_dt, users) = {
             let Some(node) = graph.node(*node_id) else {
                 continue;
             };
@@ -330,12 +324,8 @@ fn fixup_quantized_dtypes_once(graph: &mut Graph) {
             if node.meta.val.dtype != DType::Float32 {
                 continue;
             }
-            (true, node.meta.val.dtype, node.users.to_vec())
+            (node.meta.val.dtype, node.users.to_vec())
         };
-
-        if !is_placeholder {
-            continue;
-        }
 
         for user_id in &users {
             let inferred_dtype = {
@@ -371,14 +361,14 @@ fn fixup_quantized_dtypes_once(graph: &mut Graph) {
         let all_ids4 = graph.all_node_ids();
         let mut changed = false;
         for node_id in &all_ids4 {
-            let (is_reshape, current_dt, input_id) = {
+            let (current_dt, input_id) = {
                 let Some(node) = graph.node(*node_id) else {
                     continue;
                 };
                 if node.op != OpType::CallFunction {
                     continue;
                 }
-                let is_reshape = matches!(
+                if !matches!(
                     node.target,
                     OpTarget::Reshape
                         | OpTarget::View
@@ -393,23 +383,17 @@ fn fixup_quantized_dtypes_once(graph: &mut Graph) {
                         | OpTarget::AdaptiveAvgPool2d
                         | OpTarget::TosaAvgPool2d
                         | OpTarget::TosaMaxPool2d
-                );
-                if !is_reshape {
+                ) {
                     continue;
                 }
                 if node.meta.val.dtype != DType::Float32 {
                     continue;
                 }
-                let input_id = match node.args.first() {
-                    Some(Arg::Node(id)) => Some(*id),
-                    _ => None,
-                };
-                (true, node.meta.val.dtype, input_id)
+                (
+                    node.meta.val.dtype,
+                    node.args.first().and_then(Arg::as_node),
+                )
             };
-
-            if !is_reshape {
-                continue;
-            }
 
             if let Some(input_id) = input_id {
                 let input_dt = graph.node(input_id).map(|n| n.meta.val.dtype);

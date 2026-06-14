@@ -226,7 +226,7 @@ fn ingest_and_serialize_tosa_pybytes(
     let mut store = crate::store::TensorStore::new();
     let mut converted = ingest::from_ir::graph_from_ir(&ir, &mut store);
     ingest::from_ir::apply_effects(&mut converted, &mut store, &effects);
-    ingest::fx_bridge::finalize_converted_graph(&mut converted);
+    ingest::finalize::finalize_converted_graph(&mut converted);
     if crate::config::from_ir_debug_enabled() {
         ingest::from_ir::debug_dump(&converted, "MAIN FROM IR");
     }

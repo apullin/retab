@@ -1151,6 +1151,14 @@ Deleted: repeated positional-or-keyword `IrArg` reads for addmm alpha/beta, cons
 Added: `IrNode` keyword and arg-or-keyword helpers for cloned-or-None, integer, numeric-f64, scalar-literal-f64, boolean, string, and raw `IrArg` reads
 Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv2d, transpose_conv2d, addmm, batch_norm, gelu, elu, pow, stack, logsoftmax, softmax, rsqrt, floor, ceil, round, erf, constant_pad_nd, conv_constant_pad_nd, and slice_scatter; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `518 passed, 1 skipped, 4 expected xfails, 1160 deselected`. No model lane was run. This finishes the initial IR argument grammar pair: positional and keyword/defaulting behavior are now named on `IrNode` instead of open-coded in passes.
+
+2026-06-14, ingest finalization naming cleanup slice
+Rust LOC: 36,828 -> 36,812
+Movement: -16 Rust LOC
+Deleted: stale `ingest::fx_bridge` module name, redundant finalizer guard booleans, and repeated serialize-graph `Arg` match blocks inside post-conversion shape/dtype fixups
+Added: `ingest::finalize` as the owner of post-conversion serialize-graph finalization, plus direct reuse of `Arg::as_node` and `Arg::as_int_list`
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over cond, while, conv2d, transpose_conv2d, addmm, batch_norm, gelu, elu, pow, stack, logsoftmax, softmax, rsqrt, floor, ceil, round, erf, constant_pad_nd, conv_constant_pad_nd, and slice_scatter; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `547 passed, 1 skipped, 5 expected xfails, 1220 deselected`. No model lane was run. This is a Refactor 9 cleanup: the active ingest path no longer contains a bridge-named module now that Python re-ingest is gone.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1816,10 +1824,12 @@ deleted `flush_ir*`, `ingest_fx_graph_hierarchy`,
 `collect_control_flow_subgraphs`, or Python write-back architecture. The
 structural compatibility helpers that kept `write_back` alive were replaced by
 IR import/pre-submodule contracts, and the Python write-back conversion stack
-was deleted. The numeric round-trip comments in `src/tensor_data.rs` are
-unrelated encode/decode tests. Untracked `python/retab/libretab.dylib.dSYM/`
-may still contain old linker symbol names and should be treated as build-artifact
-noise unless explicitly cleaning artifacts.
+was deleted. The remaining serialize-graph finalization code now lives under
+`src/ingest/finalize.rs`, not the stale `fx_bridge` module name. The numeric
+round-trip comments in `src/tensor_data.rs` are unrelated encode/decode tests.
+Untracked `python/retab/libretab.dylib.dSYM/` may still contain old linker
+symbol names and should be treated as build-artifact noise unless explicitly
+cleaning artifacts.
 
 Problem:
 
