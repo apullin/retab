@@ -516,11 +516,80 @@ mod tests {
         graph.add_node(op, name.to_string(), target.to_string(), args, meta)
     }
 
-    #[test]
-    fn foldable_node_requires_annotation_or_constant_target() {
+    fn annotated_meta() -> NodeMeta {
         let mut meta = NodeMeta::default();
         meta.set_extra("arm_quantized_annotation", MetaValue::Bool(true));
+        meta
+    }
 
+    fn per_tensor_args(
+        input: NodeId,
+        scale: f64,
+        zp: i64,
+        qmin: i64,
+        qmax: i64,
+        dtype: &str,
+    ) -> Vec<IrArg> {
+        vec![
+            IrArg::Node(input),
+            IrArg::Float(scale),
+            IrArg::Int(zp),
+            IrArg::Int(qmin),
+            IrArg::Int(qmax),
+            IrArg::Dtype(dtype.to_string()),
+        ]
+    }
+
+    fn int8_qdq_args(input: NodeId, scale: f64, zp: i64) -> Vec<IrArg> {
+        per_tensor_args(input, scale, zp, -128, 127, "torch.int8")
+    }
+
+    fn int32_qdq_args(input: NodeId, scale: f64) -> Vec<IrArg> {
+        per_tensor_args(
+            input,
+            scale,
+            0,
+            i32::MIN as i64,
+            i32::MAX as i64,
+            "torch.int32",
+        )
+    }
+
+    fn placeholder(graph: &mut IrGraph, name: &str) -> NodeId {
+        add_node(
+            graph,
+            NodeOp::Placeholder,
+            name,
+            name,
+            vec![],
+            NodeMeta::default(),
+        )
+    }
+
+    fn output(graph: &mut IrGraph, input: NodeId) -> NodeId {
+        add_node(
+            graph,
+            NodeOp::Output,
+            "output",
+            "output",
+            vec![IrArg::Node(input)],
+            NodeMeta::default(),
+        )
+    }
+
+    fn qdq_node(graph: &mut IrGraph, name: &str, target: &str, args: Vec<IrArg>) -> NodeId {
+        add_node(
+            graph,
+            NodeOp::CallFunction,
+            name,
+            target,
+            args,
+            NodeMeta::default(),
+        )
+    }
+
+    #[test]
+    fn foldable_node_requires_annotation_or_constant_target() {
         let annotated = IrNode {
             id: 0,
             op: NodeOp::CallFunction,
@@ -528,7 +597,7 @@ mod tests {
             target: "aten.add.Tensor".to_string(),
             args: Vec::new(),
             kwargs: HashMap::new(),
-            meta,
+            meta: annotated_meta(),
             tensor: None,
             alive: true,
         };
@@ -644,63 +713,29 @@ mod tests {
     #[test]
     fn fold_qdq_pass_bypasses_simple_dq_q_chain_and_annotates_qparams() {
         let mut graph = IrGraph::empty();
-        let input = add_node(
+        let input = placeholder(&mut graph, "x");
+        let dq = qdq_node(
             &mut graph,
-            NodeOp::Placeholder,
-            "x",
-            "x",
-            vec![],
-            NodeMeta::default(),
-        );
-        let dq = add_node(
-            &mut graph,
-            NodeOp::CallFunction,
             "dq",
             "quantized_decomposed.dequantize_per_tensor.default",
-            vec![
-                IrArg::Node(input),
-                IrArg::Float(0.25),
-                IrArg::Int(3),
-                IrArg::Int(-128),
-                IrArg::Int(127),
-                IrArg::Dtype("torch.int8".to_string()),
-            ],
-            NodeMeta::default(),
+            int8_qdq_args(input, 0.25, 3),
         );
 
-        let mut add_meta = NodeMeta::default();
-        add_meta.set_extra("arm_quantized_annotation", MetaValue::Bool(true));
         let add = add_node(
             &mut graph,
             NodeOp::CallFunction,
             "add",
             "aten.add.Tensor",
             vec![IrArg::Node(dq), IrArg::Int(1)],
-            add_meta,
+            annotated_meta(),
         );
-        let q = add_node(
+        let q = qdq_node(
             &mut graph,
-            NodeOp::CallFunction,
             "q",
             "quantized_decomposed.quantize_per_tensor.default",
-            vec![
-                IrArg::Node(add),
-                IrArg::Float(0.25),
-                IrArg::Int(3),
-                IrArg::Int(-128),
-                IrArg::Int(127),
-                IrArg::Dtype("torch.int8".to_string()),
-            ],
-            NodeMeta::default(),
+            int8_qdq_args(add, 0.25, 3),
         );
-        let _output = add_node(
-            &mut graph,
-            NodeOp::Output,
-            "output",
-            "output",
-            vec![IrArg::Node(q)],
-            NodeMeta::default(),
-        );
+        let _output = output(&mut graph, q);
 
         let pass = IrFoldQdqPass;
         assert!(pass.run(&mut graph));
@@ -715,55 +750,21 @@ mod tests {
     #[test]
     fn fold_qdq_pass_bypasses_dq_nodes_inside_list_arg() {
         let mut graph = IrGraph::empty();
-        let input0 = add_node(
+        let input0 = placeholder(&mut graph, "x0");
+        let input1 = placeholder(&mut graph, "x1");
+        let dq0 = qdq_node(
             &mut graph,
-            NodeOp::Placeholder,
-            "x0",
-            "x0",
-            vec![],
-            NodeMeta::default(),
-        );
-        let input1 = add_node(
-            &mut graph,
-            NodeOp::Placeholder,
-            "x1",
-            "x1",
-            vec![],
-            NodeMeta::default(),
-        );
-        let dq0 = add_node(
-            &mut graph,
-            NodeOp::CallFunction,
             "dq0",
             "quantized_decomposed.dequantize_per_tensor.default",
-            vec![
-                IrArg::Node(input0),
-                IrArg::Float(0.25),
-                IrArg::Int(3),
-                IrArg::Int(-128),
-                IrArg::Int(127),
-                IrArg::Dtype("torch.int8".to_string()),
-            ],
-            NodeMeta::default(),
+            int8_qdq_args(input0, 0.25, 3),
         );
-        let dq1 = add_node(
+        let dq1 = qdq_node(
             &mut graph,
-            NodeOp::CallFunction,
             "dq1",
             "quantized_decomposed.dequantize_per_tensor.default",
-            vec![
-                IrArg::Node(input1),
-                IrArg::Float(0.5),
-                IrArg::Int(7),
-                IrArg::Int(-128),
-                IrArg::Int(127),
-                IrArg::Dtype("torch.int8".to_string()),
-            ],
-            NodeMeta::default(),
+            int8_qdq_args(input1, 0.5, 7),
         );
 
-        let mut cat_meta = NodeMeta::default();
-        cat_meta.set_extra("arm_quantized_annotation", MetaValue::Bool(true));
         let cat = add_node(
             &mut graph,
             NodeOp::CallFunction,
@@ -773,31 +774,15 @@ mod tests {
                 IrArg::List(vec![IrArg::Node(dq0), IrArg::Node(dq1)]),
                 IrArg::Int(0),
             ],
-            cat_meta,
+            annotated_meta(),
         );
-        let q = add_node(
+        let q = qdq_node(
             &mut graph,
-            NodeOp::CallFunction,
             "q",
             "quantized_decomposed.quantize_per_tensor.default",
-            vec![
-                IrArg::Node(cat),
-                IrArg::Float(0.5),
-                IrArg::Int(7),
-                IrArg::Int(-128),
-                IrArg::Int(127),
-                IrArg::Dtype("torch.int8".to_string()),
-            ],
-            NodeMeta::default(),
+            int8_qdq_args(cat, 0.5, 7),
         );
-        let _output = add_node(
-            &mut graph,
-            NodeOp::Output,
-            "output",
-            "output",
-            vec![IrArg::Node(q)],
-            NodeMeta::default(),
-        );
+        let _output = output(&mut graph, q);
 
         let pass = IrFoldQdqPass;
         assert!(pass.run(&mut graph));
@@ -816,51 +801,26 @@ mod tests {
     #[test]
     fn fold_qdq_pass_updates_sum_dtype_kwarg() {
         let mut graph = IrGraph::empty();
-        let input = add_node(
-            &mut graph,
-            NodeOp::Placeholder,
-            "x",
-            "x",
-            vec![],
-            NodeMeta::default(),
-        );
-        let mut sum_meta = NodeMeta::default();
-        sum_meta.set_extra("arm_quantized_annotation", MetaValue::Bool(true));
+        let input = placeholder(&mut graph, "x");
         let sum = add_node(
             &mut graph,
             NodeOp::CallFunction,
             "sum",
             "aten.sum.dim_IntList",
             vec![IrArg::Node(input)],
-            sum_meta,
+            annotated_meta(),
         );
         graph
             .node_mut(sum)
             .kwargs
             .insert("dtype".to_string(), IrArg::Dtype("torch.int32".to_string()));
-        let q = add_node(
+        let q = qdq_node(
             &mut graph,
-            NodeOp::CallFunction,
             "q",
             "quantized_decomposed.quantize_per_tensor.default",
-            vec![
-                IrArg::Node(sum),
-                IrArg::Float(0.5),
-                IrArg::Int(5),
-                IrArg::Int(-128),
-                IrArg::Int(127),
-                IrArg::Dtype("torch.int8".to_string()),
-            ],
-            NodeMeta::default(),
+            int8_qdq_args(sum, 0.5, 5),
         );
-        let _output = add_node(
-            &mut graph,
-            NodeOp::Output,
-            "output",
-            "output",
-            vec![IrArg::Node(q)],
-            NodeMeta::default(),
-        );
+        let _output = output(&mut graph, q);
 
         let pass = IrFoldQdqPass;
         assert!(pass.run(&mut graph));
@@ -873,63 +833,29 @@ mod tests {
     #[test]
     fn fold_qdq_pass_preserves_fp_add_for_int32_quantized_io() {
         let mut graph = IrGraph::empty();
-        let input = add_node(
+        let input = placeholder(&mut graph, "x");
+        let dq = qdq_node(
             &mut graph,
-            NodeOp::Placeholder,
-            "x",
-            "x",
-            vec![],
-            NodeMeta::default(),
-        );
-        let dq = add_node(
-            &mut graph,
-            NodeOp::CallFunction,
             "dq",
             "quantized_decomposed.dequantize_per_tensor.default",
-            vec![
-                IrArg::Node(input),
-                IrArg::Float(0.25),
-                IrArg::Int(0),
-                IrArg::Int(i32::MIN as i64),
-                IrArg::Int(i32::MAX as i64),
-                IrArg::Dtype("torch.int32".to_string()),
-            ],
-            NodeMeta::default(),
+            int32_qdq_args(input, 0.25),
         );
 
-        let mut add_meta = NodeMeta::default();
-        add_meta.set_extra("arm_quantized_annotation", MetaValue::Bool(true));
         let add = add_node(
             &mut graph,
             NodeOp::CallFunction,
             "add",
             "aten.add.Tensor",
             vec![IrArg::Node(dq), IrArg::Node(dq)],
-            add_meta,
+            annotated_meta(),
         );
-        let q = add_node(
+        let q = qdq_node(
             &mut graph,
-            NodeOp::CallFunction,
             "q",
             "quantized_decomposed.quantize_per_tensor.default",
-            vec![
-                IrArg::Node(add),
-                IrArg::Float(0.25),
-                IrArg::Int(0),
-                IrArg::Int(i32::MIN as i64),
-                IrArg::Int(i32::MAX as i64),
-                IrArg::Dtype("torch.int32".to_string()),
-            ],
-            NodeMeta::default(),
+            int32_qdq_args(add, 0.25),
         );
-        let _output = add_node(
-            &mut graph,
-            NodeOp::Output,
-            "output",
-            "output",
-            vec![IrArg::Node(q)],
-            NodeMeta::default(),
-        );
+        let _output = output(&mut graph, q);
 
         let pass = IrFoldQdqPass;
         assert!(!pass.run(&mut graph));

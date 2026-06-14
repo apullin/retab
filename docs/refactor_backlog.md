@@ -1591,6 +1591,14 @@ Deleted: repeated `fx_decompose_ops_ir` test graph setup for simple f32 placehol
 Added: local test helpers for f32 metadata, placeholders, calls, live-node lookup, and live target checks
 Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`
 Note: Full Rust tests passed `141 passed`. This slice changes only Rust test scaffolding, so no Python lane was required. The helpers are local to the large decompose-op test module and deliberately avoid a cross-module test framework.
+
+2026-06-14, LoC-first fold-q/dq fixture cleanup slice
+Rust LOC: 36,138 -> 36,069
+Movement: -69 Rust LOC
+Deleted: repeated fold-q/dq test qparam argument vectors, placeholder setup, output setup, and annotated metadata construction
+Added: local fold-q/dq test helpers for annotated metadata, int8/int32 q/dq argument vectors, placeholders, q/dq call nodes, and outputs
+Validation: `cargo fmt`; `cargo test --lib fx_fold_qdq_ir::tests`; `cargo check --lib`
+Note: Focused fold-q/dq Rust tests passed `8 passed`. This remains a local test-fixture cleanup and does not add a shared testing framework.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
