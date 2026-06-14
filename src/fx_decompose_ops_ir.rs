@@ -380,6 +380,10 @@ impl ApproxCtx {
         self.bool_nodes(graph, suffix, "aten.gt.Tensor", &[lhs, rhs])
     }
 
+    fn lt(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
+        self.bool_nodes(graph, suffix, "aten.lt.Tensor", &[lhs, rhs])
+    }
+
     fn where_self(
         &self,
         graph: &mut IrGraph,
@@ -1950,19 +1954,9 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
     let half_pi = ctx.full(graph, "half_pi", FRAC_PI_2);
     let zero = ctx.full(graph, "zero", 0.0);
 
-    let x_abs = ctx.tensor(graph, "abs", "aten.abs.default", vec![IrArg::Node(x_id)]);
-    let y = ctx.tensor(
-        graph,
-        "y",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(x_abs), IrArg::Node(x_abs)],
-    );
-    let x3 = ctx.tensor(
-        graph,
-        "x3",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(x_abs), IrArg::Node(y)],
-    );
+    let x_abs = ctx.abs(graph, "abs", x_id);
+    let y = ctx.mul(graph, "y", x_abs, x_abs);
+    let x3 = ctx.mul(graph, "x3", x_abs, y);
 
     let p_small = match ctx.poly(graph, "p_small", &p_coefficients, x_abs) {
         Some(node_id) => node_id,
@@ -1973,49 +1967,14 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         None => return false,
     };
 
-    let numer_small = ctx.tensor(
-        graph,
-        "numer_small",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(x3), IrArg::Node(p_small)],
-    );
-    let r_small = ctx.tensor(
-        graph,
-        "r_small",
-        "aten.div.Tensor",
-        vec![IrArg::Node(numer_small), IrArg::Node(q_small)],
-    );
-    let asin_small = ctx.tensor(
-        graph,
-        "asin_small",
-        "aten.add.Tensor",
-        vec![IrArg::Node(x_abs), IrArg::Node(r_small)],
-    );
-    let tmp = ctx.tensor(
-        graph,
-        "tmp",
-        "aten.sub.Tensor",
-        vec![IrArg::Node(x_abs), IrArg::Node(one)],
-    );
-    let z = ctx.tensor(
-        graph,
-        "z",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(tmp), IrArg::Node(neg_half)],
-    );
-    let s = ctx.tensor(graph, "s", "aten.sqrt.default", vec![IrArg::Node(z)]);
-    let s2 = ctx.tensor(
-        graph,
-        "s2",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(s), IrArg::Node(s)],
-    );
-    let s3 = ctx.tensor(
-        graph,
-        "s3",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(s2), IrArg::Node(s)],
-    );
+    let numer_small = ctx.mul(graph, "numer_small", x3, p_small);
+    let r_small = ctx.div(graph, "r_small", numer_small, q_small);
+    let asin_small = ctx.add(graph, "asin_small", x_abs, r_small);
+    let tmp = ctx.sub(graph, "tmp", x_abs, one);
+    let z = ctx.mul(graph, "z", tmp, neg_half);
+    let s = ctx.sqrt(graph, "s", z);
+    let s2 = ctx.mul(graph, "s2", s, s);
+    let s3 = ctx.mul(graph, "s3", s2, s);
 
     let pz = match ctx.poly(graph, "p_large", &p_coefficients, z) {
         Some(node_id) => node_id,
@@ -2026,111 +1985,29 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
         None => return false,
     };
 
-    let numer_large = ctx.tensor(
-        graph,
-        "numer_large",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(s3), IrArg::Node(pz)],
-    );
-    let r_large = ctx.tensor(
-        graph,
-        "r_large",
-        "aten.div.Tensor",
-        vec![IrArg::Node(numer_large), IrArg::Node(qz)],
-    );
-    let t1 = ctx.tensor(
-        graph,
-        "t1",
-        "aten.add.Tensor",
-        vec![IrArg::Node(s), IrArg::Node(r_large)],
-    );
-    let t2 = ctx.tensor(
-        graph,
-        "t2",
-        "aten.mul.Tensor",
-        vec![IrArg::Node(t1), IrArg::Node(two)],
-    );
-    let diff = ctx.tensor(
-        graph,
-        "diff",
-        "aten.sub.Tensor",
-        vec![IrArg::Node(t2), IrArg::Node(half_pi)],
-    );
-    let asin_large = ctx.tensor(
-        graph,
-        "asin_large",
-        "aten.neg.default",
-        vec![IrArg::Node(diff)],
-    );
-    let mask_large = ctx.bool(
-        graph,
-        "mask_large",
-        "aten.gt.Tensor",
-        vec![IrArg::Node(x_abs), IrArg::Node(half)],
-    );
-    let asin_unsigned = ctx.tensor(
-        graph,
-        "asin_unsigned",
-        "aten.where.self",
-        vec![
-            IrArg::Node(mask_large),
-            IrArg::Node(asin_large),
-            IrArg::Node(asin_small),
-        ],
-    );
-    let negated_asin = ctx.tensor(
-        graph,
-        "negated_asin",
-        "aten.neg.default",
-        vec![IrArg::Node(asin_unsigned)],
-    );
-    let mask_neg = ctx.bool(
-        graph,
-        "mask_neg",
-        "aten.lt.Tensor",
-        vec![IrArg::Node(x_id), IrArg::Node(zero)],
-    );
-    let asin = ctx.tensor(
-        graph,
-        "asin",
-        "aten.where.self",
-        vec![
-            IrArg::Node(mask_neg),
-            IrArg::Node(negated_asin),
-            IrArg::Node(asin_unsigned),
-        ],
-    );
+    let numer_large = ctx.mul(graph, "numer_large", s3, pz);
+    let r_large = ctx.div(graph, "r_large", numer_large, qz);
+    let t1 = ctx.add(graph, "t1", s, r_large);
+    let t2 = ctx.mul(graph, "t2", t1, two);
+    let diff = ctx.sub(graph, "diff", t2, half_pi);
+    let asin_large = ctx.neg(graph, "asin_large", diff);
+    let mask_large = ctx.gt(graph, "mask_large", x_abs, half);
+    let asin_unsigned = ctx.where_self(graph, "asin_unsigned", mask_large, asin_large, asin_small);
+    let negated_asin = ctx.neg(graph, "negated_asin", asin_unsigned);
+    let mask_neg = ctx.lt(graph, "mask_neg", x_id, zero);
+    let asin = ctx.where_self(graph, "asin", mask_neg, negated_asin, asin_unsigned);
 
     if is_acos_op {
-        let acos_small = ctx.tensor(
-            graph,
-            "acos_small",
-            "aten.sub.Tensor",
-            vec![IrArg::Node(half_pi), IrArg::Node(asin)],
-        );
-        let mask_gt_half = ctx.bool(
-            graph,
-            "mask_gt_half",
-            "aten.gt.Tensor",
-            vec![IrArg::Node(x_id), IrArg::Node(half)],
-        );
-        ctx.replace_output(
+        let acos_small = ctx.sub(graph, "acos_small", half_pi, asin);
+        let mask_gt_half = ctx.gt(graph, "mask_gt_half", x_id, half);
+        ctx.replace_nodes(
             graph,
             "result",
             "aten.where.self",
-            vec![
-                IrArg::Node(mask_gt_half),
-                IrArg::Node(t2),
-                IrArg::Node(acos_small),
-            ],
+            &[mask_gt_half, t2, acos_small],
         );
     } else {
-        ctx.replace_output(
-            graph,
-            "result",
-            "aten.clone.default",
-            vec![IrArg::Node(asin)],
-        );
+        ctx.replace_nodes(graph, "result", "aten.clone.default", &[asin]);
     }
     true
 }
