@@ -5,17 +5,9 @@
 //!   convolution/conv2d(groups=1) per group
 //!   cat(outputs, dim=1)
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::fx_target::{is_boundary_rescale_target, is_conv2d_default_target};
 use crate::runner_logging::log_line;
-
-fn same_per_tensor_qparam(lhs: &QParam, rhs: &QParam) -> bool {
-    !lhs.is_per_channel()
-        && !rhs.is_per_channel()
-        && lhs.scale == rhs.scale
-        && lhs.zp == rhs.zp
-        && lhs.dtype_str == rhs.dtype_str
-}
 
 fn slice_meta(graph: &IrGraph, id: NodeId, dim: usize, start: i64, stop: i64) -> Option<NodeMeta> {
     let mut shape = graph.node_shape_vec(id)?;
@@ -144,7 +136,7 @@ fn bypass_redundant_output_boundaries(graph: &mut IrGraph, original_id: NodeId, 
         let Some(user_qparam) = graph.nodes[user_id].meta.output_qparam().cloned() else {
             continue;
         };
-        if !same_per_tensor_qparam(&cat_qparam, &user_qparam) {
+        if !cat_qparam.same_per_tensor_exact_affine_dtype(&user_qparam) {
             continue;
         }
         graph.replace_and_erase(user_id, cat_id);
@@ -377,7 +369,7 @@ impl IrPass for IrDecomposeGroupedConvPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::i64_list_arg as i64_list;
+    use crate::fx_ir::{i64_list_arg as i64_list, QParam};
 
     fn placeholder(graph: &mut IrGraph, name: &str, shape: &[i64]) -> NodeId {
         graph.add_node(

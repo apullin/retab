@@ -410,8 +410,7 @@ fn apply_boundary_contract_to_submodule(
         let Some(internal_qp) = internal_qparam else {
             continue;
         };
-        if (external_qp.scale - internal_qp.scale).abs() < 1e-10 && external_qp.zp == internal_qp.zp
-        {
+        if external_qp.same_scale_zp(&internal_qp) {
             continue;
         }
         if external_qp.scale == 0.0 || internal_qp.scale == 0.0 {
@@ -551,7 +550,7 @@ fn rewrite_quantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
             continue;
         };
 
-        if source_qp.scale == target_qp.scale && source_qp.zp == target_qp.zp {
+        if source_qp.same_exact_scale_zp(&target_qp) {
             graph.replace_and_erase(q_id, source_id);
             rewritten += 1;
             continue;
@@ -653,18 +652,12 @@ fn apply_output_rescale_contract_ir(graph: &mut fx_ir::IrGraph, contract: &Outpu
             None
         };
         let Some(source_qp) = source_from_rescale
-            .or_else(|| {
-                graph.nodes[out_id]
-                    .meta
-                    .input_qparams
-                    .as_ref()
-                    .and_then(|map| map.get(&idx).cloned())
-            })
+            .or_else(|| graph.nodes[out_id].meta.input_qparam_at(idx).cloned())
             .or_else(|| metadata::extract_effective_qparam_ir(graph, src_id))
         else {
             continue;
         };
-        if source_qp.scale == target_qp.scale && source_qp.zp == target_qp.zp {
+        if source_qp.same_exact_scale_zp(&target_qp) {
             if let Some(dead_id) = carried_rescale_id {
                 if replace_output_arg_at_index_ir(graph, out_id, idx, src_id) {
                     graph.erase(dead_id);

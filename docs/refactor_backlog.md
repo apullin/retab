@@ -1550,6 +1550,14 @@ Deleted: local plain-intermediate metadata construction from conv accumulator bi
 Added: `NodeMeta::cloned_plain_tensor(...)`, `NodeMeta::clear_tosa_special_dtype(...)`, `NodeMeta::clear_tosa_dim_order_if_rank_mismatch(...)`, `NodeMeta::set_tosa_spatial_rank(...)`, and `NodeMeta::tosa_spatial_rank_or(...)`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over conv2d, conv3d, sum, and while; Rust LOC check
 Note: Full Rust tests passed `141 passed`; focused Python smoke passed `258 passed, 2 expected xfails`. This is a setup-positive Refactor 2 slice, but migrated production sites are deletion-heavy and the new helper grammar directly names plain tensor intermediates, rank-invalid layout metadata, special dtype clearing, and spatial-rank ownership.
+
+2026-06-14, qparam equality grammar slice
+Rust LOC: 36,302 -> 36,286
+Movement: -16 Rust LOC
+Deleted: pass-local grouped-conv per-tensor qparam equality helper, int32 WHERE qparam signature helper, open-coded control-flow scale/zp equality checks, direct output input-qparam map read, and redundant RESCALE metadata layout restamping
+Added: `QParam::same_exact_scale_zp(...)`, `same_exact_affine_dtype(...)`, `same_per_tensor_exact_affine_dtype(...)`, and `same_exact_affine_qrange_dtype(...)`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; `maturin develop --release`; focused Python smoke via `/tmp/et.sh` over add, sub, conv2d, cond, while, and where; Rust LOC check
+Note: Full Rust tests passed `141 passed`; focused Python smoke passed `259 passed, 1 expected xfail`. This is a deletion-backed Refactor 2 slice: qparam-domain comparisons now name whether they are tolerant scale/zp, exact affine, per-tensor affine, or qrange-aware affine comparisons.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1739,7 +1747,9 @@ logic. Plain non-quantized intermediate metadata, special-dtype clearing,
 rank-invalid TOSA dim-order clearing, and TOSA spatial-rank mutation are now
 also named on `NodeMeta`, covering conv accumulator bias decomposition,
 carried-output RESCALE insertion, sum decomposition, and memory-format spatial
-rank propagation.
+rank propagation. Qparam-domain equality now lives on `QParam`, making
+control-flow boundary checks, grouped-conv boundary cleanup, and int32 WHERE
+rescale normalization state their intended equality domain explicitly.
 
 2026-06-14, qparam map accessor slice
 

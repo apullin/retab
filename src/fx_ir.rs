@@ -1937,12 +1937,6 @@ impl NodeMeta {
         let mut meta = self.clone();
         meta.set_empty_input_qparams();
         meta.set_single_output_qparam(output_qparam.clone());
-        if let Some(order) = meta.tosa_dim_order.clone() {
-            meta.set_tosa_dim_order(order);
-        }
-        if let Some(orders) = meta.original_dim_orders.clone() {
-            meta.set_original_dim_orders(orders);
-        }
         meta.clear_tosa_special_dtype();
         if let Some(shape) = shape_source.val_shape() {
             meta.set_val(FakeTensorMeta {

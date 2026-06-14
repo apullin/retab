@@ -245,16 +245,6 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
     true
 }
 
-fn qparam_signature(qparam: &QParam) -> (f64, i64, i64, i64, &str) {
-    (
-        qparam.scale,
-        qparam.zp,
-        qparam.qmin,
-        qparam.qmax,
-        qparam.dtype_str.as_str(),
-    )
-}
-
 fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
     let node = graph.node(node_id).clone();
     if !node.alive || node.op != NodeOp::CallFunction || !is_where_target(&node.target) {
@@ -270,7 +260,7 @@ fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
     let Some(output_qparam) = node.meta.output_qparam().cloned() else {
         return false;
     };
-    if qparam_signature(&then_qparam) != qparam_signature(else_qparam) {
+    if !then_qparam.same_exact_affine_qrange_dtype(else_qparam) {
         return false;
     }
 
@@ -279,11 +269,10 @@ fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
         .val_dtype()
         .unwrap_or(then_qparam.dtype_str.as_str())
         .to_string();
-    let then_sig = qparam_signature(&then_qparam);
-    let out_sig = qparam_signature(&output_qparam);
-    let needs_noop_quant_boundary = then_sig == out_sig && output_dtype != output_qparam.dtype_str;
+    let same_output_qparams = then_qparam.same_exact_affine_qrange_dtype(&output_qparam);
+    let needs_noop_quant_boundary = same_output_qparams && output_dtype != output_qparam.dtype_str;
 
-    if then_sig == out_sig && !needs_noop_quant_boundary {
+    if same_output_qparams && !needs_noop_quant_boundary {
         return false;
     }
     if !output_qparam.is_quantized_integer_dtype() {

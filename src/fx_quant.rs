@@ -102,6 +102,22 @@ impl QParam {
     pub(crate) fn same_scale_zp(&self, other: &Self) -> bool {
         (self.scale - other.scale).abs() < 1e-10 && self.zp == other.zp
     }
+
+    pub(crate) fn same_exact_scale_zp(&self, other: &Self) -> bool {
+        self.scale == other.scale && self.zp == other.zp
+    }
+
+    pub(crate) fn same_exact_affine_dtype(&self, other: &Self) -> bool {
+        self.same_exact_scale_zp(other) && self.dtype_str == other.dtype_str
+    }
+
+    pub(crate) fn same_per_tensor_exact_affine_dtype(&self, other: &Self) -> bool {
+        !self.is_per_channel() && !other.is_per_channel() && self.same_exact_affine_dtype(other)
+    }
+
+    pub(crate) fn same_exact_affine_qrange_dtype(&self, other: &Self) -> bool {
+        self.same_exact_affine_dtype(other) && self.qmin == other.qmin && self.qmax == other.qmax
+    }
 }
 
 impl From<&Bound<'_, PyAny>> for QParam {
