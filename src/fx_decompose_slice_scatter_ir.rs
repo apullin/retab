@@ -1,7 +1,7 @@
 //! Pure Rust IrPass: slice_scatter -> slice+cat (step == 1)
 //! or arange+permute+index_put (step > 1).
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass};
+use crate::fx_ir::{IrArg, IrGraph, IrPass};
 use crate::fx_target::is_slice_scatter_target;
 use crate::runner_logging::log_line;
 
@@ -173,20 +173,20 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         inv_perm[axis as usize] = idx as i64;
                     }
 
-                    let input_perm = graph.add_anchored_call_function(
+                    let input_perm = graph.add_anchored_permute_copy(
                         id,
                         format!("{}_input_perm", name),
-                        "aten.permute_copy.default".to_string(),
-                        vec![IrArg::Node(input_id), i64_list(&perm)],
+                        input_id,
+                        &perm,
                         meta.cloned_with_val(permuted_shape(&input_shape, &perm), &dtype),
                     );
                     input_cur = input_perm;
 
-                    let src_perm = graph.add_anchored_call_function(
+                    let src_perm = graph.add_anchored_permute_copy(
                         id,
                         format!("{}_src_perm", name),
-                        "aten.permute_copy.default".to_string(),
-                        vec![IrArg::Node(src_id), i64_list(&perm)],
+                        src_id,
+                        &perm,
                         meta.cloned_with_val(permuted_shape(&src_shape, &perm), &dtype),
                     );
                     src_cur = src_perm;
@@ -204,11 +204,11 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         meta.cloned_with_val(permuted_shape(&input_shape, &perm), &dtype),
                     );
 
-                    let updated = graph.add_anchored_call_function(
+                    let updated = graph.add_anchored_permute_copy(
                         id,
                         format!("{}_result_perm", name),
-                        "aten.permute_copy.default".to_string(),
-                        vec![IrArg::Node(updated_perm), i64_list(&inv_perm)],
+                        updated_perm,
+                        &inv_perm,
                         meta.cloned_with_val(input_shape.clone(), &dtype),
                     );
                     graph.replace_and_erase(id, updated);

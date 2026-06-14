@@ -1511,6 +1511,14 @@ Deleted: remaining straightforward production raw `view_copy` construction in co
 Added: `IrGraph::add_after_view_copy(...)` for the bias-rescale `anchor_after` case
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv2d, group_norm, and index_put; Rust LOC check
 Note: Full Rust tests passed `141 passed`; focused Python smoke passed `175 passed, 2 expected xfails`. Remaining raw `view_copy` strings are test fixtures/assertions or dynamic target selection where group_norm chooses between `view_copy` and `reshape`.
+
+2026-06-14, graph permute-copy builder slice
+Rust LOC: 36,263 -> 36,290
+Movement: +27 Rust LOC
+Deleted: production raw `aten.permute_copy.default` target/argument construction from gather, index_tensor, dilated maxpool, pixel shuffle/unshuffle, slice_scatter, unfold_copy, squeeze/transpose, and none-index index_put normalization
+Added: `IrGraph::add_permute_copy(...)`, `IrGraph::add_anchored_permute_copy(...)`, and `IrGraph::replace_with_permute_copy(...)`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over gather, index_tensor, index_put, max_pool, pixel_shuffling, slice_scatter, squeeze, transpose_copy, and unfold_copy; Rust LOC check
+Note: Full Rust tests passed `141 passed`; focused Python smoke passed `258 passed, 20 expected xfails`. Remaining raw `permute_copy` strings are test fixtures/assertions, not active production construction. This is setup-positive and should be paid down only if new production permute sites appear or if test fixture builders get a shared graph-fixture grammar.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

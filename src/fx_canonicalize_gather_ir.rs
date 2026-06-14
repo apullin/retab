@@ -3,7 +3,7 @@
 //! Handles 2D (N,K → GATHER → N,W) and 3D (N,K,C → permute+reshape → GATHER → reshape+permute).
 //! Bool inputs are cast to int8 before GATHER, then cast back.
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass};
 use crate::fx_target::is_gather_target;
 use crate::runner_logging::log_line;
 
@@ -115,11 +115,11 @@ impl IrPass for IrCanonicalizeGatherPass {
                 // 3D path: permute(0,2,1) → reshape(N*C,K,1) → GATHER → reshape(N,C,W) → permute(0,2,1)
                 let c = x_shape[2];
 
-                let vperm = graph.add_anchored_call_function(
+                let vperm = graph.add_anchored_permute_copy(
                     id,
                     format!("{}_values_perm", node_name),
-                    "aten.permute_copy.default",
-                    vec![IrArg::Node(values_in), i64_list(&[0, 2, 1])],
+                    values_in,
+                    &[0, 2, 1],
                     orig_meta.cloned_with_val(vec![n, c, k], work_dtype),
                 );
 
@@ -131,11 +131,11 @@ impl IrPass for IrCanonicalizeGatherPass {
                     orig_meta.cloned_with_val(vec![n * c, k, 1], work_dtype),
                 );
 
-                let iperm = graph.add_anchored_call_function(
+                let iperm = graph.add_anchored_permute_copy(
                     id,
                     format!("{}_idx_perm", node_name),
-                    "aten.permute_copy.default",
-                    vec![IrArg::Node(index_id), i64_list(&[0, 2, 1])],
+                    index_id,
+                    &[0, 2, 1],
                     orig_meta.cloned_with_val(vec![n, c, w], "torch.int64"),
                 );
 
@@ -163,11 +163,10 @@ impl IrPass for IrCanonicalizeGatherPass {
                     orig_meta.cloned_with_val(vec![n, c, w], work_dtype),
                 );
 
-                graph.add_node(
-                    NodeOp::CallFunction,
+                graph.add_permute_copy(
                     format!("{}_out_perm", node_name),
-                    "aten.permute_copy.default".to_string(),
-                    vec![IrArg::Node(gresh), i64_list(&[0, 2, 1])],
+                    gresh,
+                    &[0, 2, 1],
                     orig_meta.cloned_with_val(vec![n, w, c], work_dtype),
                 )
             };

@@ -150,11 +150,11 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
             );
 
             // 3. permute [3,5,0,1,2,4]
-            let x_perm = graph.add_anchored_call_function(
+            let x_perm = graph.add_anchored_permute_copy(
                 id,
                 format!("{}_pack_perm", node_name),
-                "aten.permute_copy.default",
-                vec![IrArg::Node(x_view), i64_list(&[3, 5, 0, 1, 2, 4])],
+                x_view,
+                &[3, 5, 0, 1, 2, 4],
                 orig_meta.cloned_with_val(vec![d_h, d_w, n, c, h_pack, w_pack], &dtype),
             );
 
@@ -195,11 +195,11 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
             );
 
             // 7. permute [2,3,4,0,5,1]
-            let unperm = graph.add_anchored_call_function(
+            let unperm = graph.add_anchored_permute_copy(
                 id,
                 format!("{}_unperm", node_name),
-                "aten.permute_copy.default",
-                vec![IrArg::Node(unpack), i64_list(&[2, 3, 4, 0, 5, 1])],
+                unpack,
+                &[2, 3, 4, 0, 5, 1],
                 orig_meta.cloned_with_val(vec![n, c, h_out, d_h, w_out, d_w], &dtype),
             );
 

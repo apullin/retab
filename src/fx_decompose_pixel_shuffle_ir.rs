@@ -15,7 +15,7 @@
 //!   -> permute_copy(0, 1, 3, 5, 2, 4)
 //!   -> view_copy(N, C*r*r, H//r, W//r)
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta};
+use crate::fx_ir::{IrGraph, IrPass, NodeId, NodeMeta};
 use crate::fx_target::{is_pixel_shuffle_target, is_pixel_unshuffle_target};
 use crate::runner_logging::log_line;
 
@@ -47,16 +47,12 @@ fn add_permute_copy(
     dtype: &str,
 ) -> NodeId {
     let permuted_shape: Vec<i64> = perm.iter().map(|&p| input_shape[p]).collect();
-    graph.add_call_function_with_val(
+    let perm: Vec<i64> = perm.iter().map(|&p| p as i64).collect();
+    graph.add_permute_copy(
         name,
-        "aten.permute_copy.default",
-        vec![
-            IrArg::Node(input_id),
-            IrArg::List(perm.iter().map(|&p| IrArg::Int(p as i64)).collect()),
-        ],
-        base_meta,
-        permuted_shape,
-        dtype,
+        input_id,
+        &perm,
+        base_meta.cloned_with_val(permuted_shape, dtype),
     )
 }
 

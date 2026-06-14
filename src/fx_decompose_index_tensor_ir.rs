@@ -127,11 +127,11 @@ impl IrPass for IrDecomposeIndexTensorPass {
                 let perm_meta = graph.nodes[x_id]
                     .meta
                     .cloned_with_val(permuted_shape, &x_dtype);
-                let perm_id = graph.add_anchored_call_function(
+                let perm_id = graph.add_anchored_permute_copy(
                     id,
                     format!("{}_x_perm", node_name),
-                    "aten.permute_copy.default".to_string(),
-                    vec![IrArg::Node(values_in), i64_list(&perm)],
+                    values_in,
+                    &perm,
                     perm_meta,
                 );
                 values_in = perm_id;

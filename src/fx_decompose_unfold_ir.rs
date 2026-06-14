@@ -277,11 +277,11 @@ impl IrPass for IrDecomposeUnfoldPass {
                     .meta
                     .cloned_with_val(perm_shape, work_dtype)
             };
-            let permuted = graph.add_anchored_call_function(
+            let permuted = graph.add_anchored_permute_copy(
                 id,
                 format!("{}_pm", name),
-                "aten.permute_copy.default".to_string(),
-                vec![IrArg::Node(reshaped), i64_list(&perm)],
+                reshaped,
+                &perm,
                 permuted_meta,
             );
 

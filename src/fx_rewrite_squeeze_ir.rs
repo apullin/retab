@@ -123,14 +123,11 @@ impl IrPass for IrRewriteSqueezePass {
                 let mut perm: Vec<i64> = (0..input_rank as i64).collect();
                 perm.swap(d0, d1);
 
-                graph.replace_with_call_function(
+                graph.replace_with_permute_copy(
                     id,
                     format!("{}_permute_copy", graph.nodes[id].name),
-                    "aten.permute_copy.default".to_string(),
-                    vec![
-                        IrArg::Node(input_id),
-                        IrArg::List(perm.iter().map(|&d| IrArg::Int(d)).collect()),
-                    ],
+                    input_id,
+                    &perm,
                     graph.nodes[id].meta.clone(),
                 );
                 modified = true;

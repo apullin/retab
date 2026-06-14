@@ -35,14 +35,8 @@ fn add_permute(
     let out_shape = permute_shape(input_shape, order);
     let dtype = input_meta.val_dtype_or_float32().to_string();
     let meta = input_meta.cloned_with_val(out_shape.clone(), &dtype);
-    let order_arg = IrArg::List(order.iter().map(|&d| IrArg::Int(d as i64)).collect());
-    let n = graph.add_anchored_call_function(
-        anchor,
-        name,
-        "aten.permute_copy.default",
-        vec![IrArg::Node(input_id), order_arg],
-        meta,
-    );
+    let perm: Vec<i64> = order.iter().map(|&d| d as i64).collect();
+    let n = graph.add_anchored_permute_copy(anchor, name, input_id, &perm, meta);
     if let Some(p) = *prev {
         graph.anchor_after(n, p);
     }
