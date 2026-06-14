@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::constant_materialization::scalar_storage_bytes;
 use crate::fx_ir::{IrArg, IrGraph, IrNode, NodeOp, QParam, TensorSource};
+use crate::fx_target::{shape_only_constant_target, ShapeOnlyConstantTarget};
 use crate::graph::ir::DType;
 use crate::lowering_effects::LoweringInputKind;
 use crate::store::TensorData;
@@ -523,26 +524,21 @@ pub fn permute_tensor_data(input: &TensorData, order: &[usize]) -> Option<Tensor
 }
 
 pub fn plan_shape_only_tensor(node: &IrNode, input: &TensorData) -> Option<TensorData> {
-    if node.target.contains("aten.reshape.default")
-        || node.target.contains("aten.view_copy.default")
-    {
-        return Some(TensorData {
+    match shape_only_constant_target(&node.target)? {
+        ShapeOnlyConstantTarget::Reshape => Some(TensorData {
             data: input.data.clone(),
             shape: reshape_target_shape(&input.shape, node)?,
             dtype: input.dtype,
-        });
-    }
-    if node.target.contains("aten.unsqueeze_copy.default") {
-        return Some(TensorData {
+        }),
+        ShapeOnlyConstantTarget::Unsqueeze => Some(TensorData {
             data: input.data.clone(),
             shape: unsqueeze_target_shape(&input.shape, node)?,
             dtype: input.dtype,
-        });
+        }),
+        ShapeOnlyConstantTarget::Permute => {
+            permute_tensor_data(input, &permute_order(node, input.shape.len())?)
+        }
     }
-    if node.target.contains("aten.permute_copy.default") {
-        return permute_tensor_data(input, &permute_order(node, input.shape.len())?);
-    }
-    None
 }
 
 fn normalize_slice_bound(index: Option<i64>, dim_size: i64, default: i64) -> i64 {

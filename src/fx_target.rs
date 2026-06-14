@@ -19,6 +19,21 @@ pub(crate) enum IrTargetKind {
     Other,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ZeroInputConstantTarget {
+    Full,
+    Arange,
+    Linspace,
+    Eye,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShapeOnlyConstantTarget {
+    Reshape,
+    Unsqueeze,
+    Permute,
+}
+
 pub(crate) fn classify_ir_target(target: &str) -> IrTargetKind {
     if matches!(
         target,
@@ -89,18 +104,41 @@ pub(crate) fn classify_ir_target(target: &str) -> IrTargetKind {
     IrTargetKind::Other
 }
 
+pub(crate) fn zero_input_constant_target(target: &str) -> Option<ZeroInputConstantTarget> {
+    if target.contains("aten.full.default") {
+        return Some(ZeroInputConstantTarget::Full);
+    }
+    if target.contains("aten.arange") {
+        return Some(ZeroInputConstantTarget::Arange);
+    }
+    if target.contains("aten.linspace") {
+        return Some(ZeroInputConstantTarget::Linspace);
+    }
+    if target.contains("aten.eye") {
+        return Some(ZeroInputConstantTarget::Eye);
+    }
+    None
+}
+
 pub(crate) fn is_zero_input_constant_target(target: &str) -> bool {
-    target.contains("aten.full.default")
-        || target.contains("aten.arange")
-        || target.contains("aten.linspace")
-        || target.contains("aten.eye")
+    zero_input_constant_target(target).is_some()
+}
+
+pub(crate) fn shape_only_constant_target(target: &str) -> Option<ShapeOnlyConstantTarget> {
+    if target.contains("aten.reshape.default") || target.contains("aten.view_copy.default") {
+        return Some(ShapeOnlyConstantTarget::Reshape);
+    }
+    if target.contains("aten.unsqueeze_copy.default") {
+        return Some(ShapeOnlyConstantTarget::Unsqueeze);
+    }
+    if target.contains("aten.permute_copy.default") {
+        return Some(ShapeOnlyConstantTarget::Permute);
+    }
+    None
 }
 
 pub(crate) fn is_shape_only_constant_target(target: &str) -> bool {
-    target.contains("aten.reshape.default")
-        || target.contains("aten.view_copy.default")
-        || target.contains("aten.unsqueeze_copy.default")
-        || target.contains("aten.permute_copy.default")
+    shape_only_constant_target(target).is_some()
 }
 
 pub(crate) fn is_view_like_target(target: &str) -> bool {
@@ -373,13 +411,39 @@ mod tests {
 
     #[test]
     fn recognizes_constant_target_families() {
-        assert!(is_zero_input_constant_target("aten.full.default"));
-        assert!(is_zero_input_constant_target("aten.arange.start"));
-        assert!(is_zero_input_constant_target("aten.linspace.default"));
+        assert_eq!(
+            zero_input_constant_target("aten.full.default"),
+            Some(ZeroInputConstantTarget::Full)
+        );
+        assert_eq!(
+            zero_input_constant_target("aten.arange.start"),
+            Some(ZeroInputConstantTarget::Arange)
+        );
+        assert_eq!(
+            zero_input_constant_target("aten.linspace.default"),
+            Some(ZeroInputConstantTarget::Linspace)
+        );
+        assert_eq!(
+            zero_input_constant_target("aten.eye.default"),
+            Some(ZeroInputConstantTarget::Eye)
+        );
+        assert_eq!(
+            shape_only_constant_target("aten.reshape.default"),
+            Some(ShapeOnlyConstantTarget::Reshape)
+        );
+        assert_eq!(
+            shape_only_constant_target("aten.view_copy.default"),
+            Some(ShapeOnlyConstantTarget::Reshape)
+        );
+        assert_eq!(
+            shape_only_constant_target("aten.unsqueeze_copy.default"),
+            Some(ShapeOnlyConstantTarget::Unsqueeze)
+        );
+        assert_eq!(
+            shape_only_constant_target("aten.permute_copy.default"),
+            Some(ShapeOnlyConstantTarget::Permute)
+        );
         assert!(is_zero_input_constant_target("aten.eye.default"));
-        assert!(is_shape_only_constant_target("aten.reshape.default"));
-        assert!(is_shape_only_constant_target("aten.view_copy.default"));
-        assert!(is_shape_only_constant_target("aten.unsqueeze_copy.default"));
         assert!(is_shape_only_constant_target("aten.permute_copy.default"));
         assert!(is_view_like_target("aten._unsafe_view.default"));
         assert!(is_permute_target("aten.permute.default"));

@@ -935,6 +935,14 @@ Deleted: stale top-level `src/fx_control_flow_metadata.rs` module name and direc
 Added: `src/control_flow/metadata.rs` under the control-flow domain module, with crate-visible re-exports for the while submodule pipeline passes and sibling-module use from boundary contracts
 Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused control-flow smoke via `/tmp/et.sh` twice over cond/while with U55/U85 excluded; Rust LOC check
 Note: Rust tests passed `131 passed`; both control-flow smokes passed `29 passed, 1 expected xfail, 60 deselected`. No model lane was run. This finishes the Refactor 5 naming/module split: active control-flow lowering code now sits under `src/control_flow/` instead of a legacy `fx_*` metadata module.
+
+2026-06-13, constant-materialization target grammar slice
+Rust LOC: 37,098 -> 37,126
+Movement: +28 Rust LOC
+Deleted: local zero-input constant dispatch over `full`/`arange`/`linspace`/`eye`, local shape-only tensor dispatch over `reshape`/`view`/`unsqueeze`/`permute`, and one local add/sub user-domain substring check
+Added: typed `ZeroInputConstantTarget` and `ShapeOnlyConstantTarget` classifiers in `fx_target`, with zero-input constant materialization and shape-only tensor evaluation using the shared target grammar
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over full, arange, eye, view, permute, and unsqueeze; Rust LOC check
+Note: Rust tests passed `131 passed`; focused Python smoke passed `151 passed, 7 skipped, 254 deselected`. No model lane was run. This is setup-positive because the central enum/tests add lines, but it removes another local target-classification dialect from constant materialization.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

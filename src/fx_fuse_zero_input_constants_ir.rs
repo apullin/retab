@@ -5,17 +5,12 @@ use crate::fx_constant_tensor_eval::{node_has_tensor_inputs, tensor_numel};
 use crate::fx_ir::{
     EffectfulIrPass, EffectfulIrPassResult, IrArg, IrGraph, IrNode, NodeOp, QParam,
 };
+use crate::fx_target::{is_add_sub_target, zero_input_constant_target, ZeroInputConstantTarget};
 use crate::graph::ir::DType;
 use crate::lowering_effects::{LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect};
 use crate::tensor_data::parse_torch_dtype;
 
 pub struct IrFuseZeroInputConstantsEffectPass;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ZeroInputConstantKind {
-    Full,
-    FactoryCall,
-}
 
 fn parse_dtype_arg(arg: &IrArg) -> Option<DType> {
     match arg {
@@ -64,10 +59,7 @@ fn infer_binary_full_qparam(graph: &IrGraph, full_id: usize) -> Option<QParam> {
         if let Some(qp) = effective_int_qparam(graph, user_id) {
             return Some(qp);
         }
-        if user.op != NodeOp::CallFunction
-            || (!user.target.contains("aten.add.Tensor")
-                && !user.target.contains("aten.sub.Tensor"))
-        {
+        if user.op != NodeOp::CallFunction || !is_add_sub_target(&user.target) {
             continue;
         }
         for arg in user.args.iter().take(2) {
@@ -86,7 +78,7 @@ fn infer_binary_full_qparam(graph: &IrGraph, full_id: usize) -> Option<QParam> {
 }
 
 fn is_quant_decompose_helper_full(node: &IrNode) -> bool {
-    node.target.contains("aten.full.default")
+    zero_input_constant_target(&node.target) == Some(ZeroInputConstantTarget::Full)
         && (node.name.ends_with("_sc") || node.name.ends_with("_zp"))
         && (node.name.contains("quantize_per_tensor")
             || node.name.contains("dequantize_per_tensor"))
@@ -191,10 +183,6 @@ fn plan_zero_input_arange(node: &IrNode) -> Option<MaterializeTensorNodeEffect> 
 }
 
 fn plan_zero_input_linspace(node: &IrNode) -> Option<MaterializeTensorNodeEffect> {
-    if !node.target.contains("aten.linspace.default") {
-        return None;
-    }
-
     let start = node.args.first()?.as_scalar_literal_f64()?;
     let end = node.args.get(1)?.as_scalar_literal_f64()?;
     let steps = match node.args.get(2)? {
@@ -335,20 +323,11 @@ fn plan_zero_input_full(graph: &IrGraph, node: &IrNode) -> Option<MaterializeTen
     })
 }
 
-fn planned_zero_input_constant_kind(node: &IrNode) -> Option<ZeroInputConstantKind> {
+fn planned_zero_input_constant_target(node: &IrNode) -> Option<ZeroInputConstantTarget> {
     if !node.alive || node.op != NodeOp::CallFunction || node_has_tensor_inputs(node) {
         return None;
     }
-    if node.target.contains("aten.full.default") {
-        return Some(ZeroInputConstantKind::Full);
-    }
-    if node.target.contains("arange")
-        || node.target.contains("linspace")
-        || node.target.contains("eye")
-    {
-        return Some(ZeroInputConstantKind::FactoryCall);
-    }
-    None
+    zero_input_constant_target(&node.target)
 }
 
 impl EffectfulIrPass for IrFuseZeroInputConstantsEffectPass {
@@ -359,38 +338,27 @@ impl EffectfulIrPass for IrFuseZeroInputConstantsEffectPass {
     fn run(&self, graph: &mut IrGraph) -> EffectfulIrPassResult {
         let mut effects = Vec::new();
         for node in &graph.nodes {
-            let Some(kind) = planned_zero_input_constant_kind(node) else {
+            let Some(target) = planned_zero_input_constant_target(node) else {
                 continue;
             };
-            if kind == ZeroInputConstantKind::Full {
-                if let Some(effect) = plan_zero_input_full(graph, node) {
-                    effects.push(LoweringEffect::MaterializeTensorNode(effect));
-                    continue;
-                }
-            } else if node.target.contains("aten.arange") {
-                if let Some(effect) = plan_zero_input_arange(node) {
-                    effects.push(LoweringEffect::MaterializeTensorNode(effect));
-                    continue;
-                }
-            } else if node.target.contains("aten.linspace.default") {
-                if let Some(effect) = plan_zero_input_linspace(node) {
-                    effects.push(LoweringEffect::MaterializeTensorNode(effect));
-                    continue;
-                }
-            } else if node.target.contains("aten.eye") {
-                if let Some(effect) = plan_zero_input_eye(node) {
-                    effects.push(LoweringEffect::MaterializeTensorNode(effect));
-                    continue;
-                }
+            let effect = match target {
+                ZeroInputConstantTarget::Full => plan_zero_input_full(graph, node),
+                ZeroInputConstantTarget::Arange => plan_zero_input_arange(node),
+                ZeroInputConstantTarget::Linspace => plan_zero_input_linspace(node),
+                ZeroInputConstantTarget::Eye => plan_zero_input_eye(node),
+            };
+            if let Some(effect) = effect {
+                effects.push(LoweringEffect::MaterializeTensorNode(effect));
+                continue;
             }
-            let why = if kind == ZeroInputConstantKind::Full {
+            let why = if target == ZeroInputConstantTarget::Full {
                 full_bail_reason(graph, node)
             } else {
                 "n/a"
             };
             crate::fold_fallback_log(&format!(
                 "ZeroInputConstantPrecomputeSkipped target={} kind={:?} why={}",
-                node.target, kind, why
+                node.target, target, why
             ));
         }
         let modified = !effects.is_empty();
