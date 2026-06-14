@@ -1399,6 +1399,14 @@ Deleted: local snapshot-loop scaffolding from grouped-conv decomposition and the
 Added: no new helper surface; both dispatchers now reuse `IrGraph::rewrite_live_call_functions(...)`
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv2d, depthwise_conv, conv_combos, pow, tan, sinh, cosh, asinh, acosh, elu, gelu, batch_norm, stack, unbind, add, and sub; Rust LOC check
 Note: Full Rust tests passed `139 passed`; focused Python smoke passed `552 passed, 1 skipped, 3 expected xfails, 1335 deselected`. No model lane was run. This keeps traversal policy centralized without changing grouped-conv or decompose-op rewrite algorithms.
+
+2026-06-14, decompose primary-result user helper slice
+Rust LOC: 36,862 -> 36,846
+Movement: -16 Rust LOC
+Deleted: duplicated batch_norm/group_norm logic for native tuple-output rewrites through `getitem[0]`
+Added: `replace_primary_result_users(...)`, naming the invariant that a decomposition may replace the source op directly or replace only primary-result getitem users
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over batch_norm and group_norm; Rust LOC check
+Note: Full Rust tests passed `139 passed`; focused Python smoke passed `43 passed, 1 skipped, 98 deselected`. No model lane was run. This is a small Refactor 3 grammar slice inside the largest remaining file: the tuple-output user contract is now centralized instead of repeated in each decomposition.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

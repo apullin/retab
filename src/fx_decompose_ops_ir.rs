@@ -363,6 +363,28 @@ fn has_direct_non_getitem_user(graph: &IrGraph, id: NodeId) -> bool {
     })
 }
 
+fn replace_primary_result_users(graph: &mut IrGraph, id: NodeId, result: NodeId) -> bool {
+    let getitem_users = graph.live_getitem_users(id);
+
+    if getitem_users.is_empty() {
+        graph.replace_and_erase(id, result);
+        return true;
+    }
+
+    if has_direct_non_getitem_user(graph, id) {
+        return false;
+    }
+
+    for (getitem_id, idx) in getitem_users {
+        if idx != 0 {
+            return false;
+        }
+        graph.replace_and_erase(getitem_id, result);
+    }
+    graph.erase(id);
+    true
+}
+
 fn pow_scalar_numeric_arg(node: &crate::fx_ir::IrNode) -> Option<f64> {
     node.arg_numeric_f64(1)
 }
@@ -2799,26 +2821,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         "aten.add.Tensor",
         vec![IrArg::Node(weighted), IrArg::Node(bias_view)],
     );
-
-    let getitem_users = graph.live_getitem_users(id);
-
-    if getitem_users.is_empty() {
-        graph.replace_and_erase(id, result);
-        return true;
-    }
-
-    if has_direct_non_getitem_user(graph, id) {
-        return false;
-    }
-
-    for (getitem_id, idx) in getitem_users {
-        if idx != 0 {
-            return false;
-        }
-        graph.replace_and_erase(getitem_id, result);
-    }
-    graph.erase(id);
-    true
+    replace_primary_result_users(graph, id, result)
 }
 
 fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
@@ -3010,26 +3013,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     };
 
     let result = ctx.reshape_shape(graph, "result", reshape_target, biased, &shape);
-
-    let getitem_users = graph.live_getitem_users(id);
-
-    if getitem_users.is_empty() {
-        graph.replace_and_erase(id, result);
-        return true;
-    }
-
-    if has_direct_non_getitem_user(graph, id) {
-        return false;
-    }
-
-    for (getitem_id, idx) in getitem_users {
-        if idx != 0 {
-            return false;
-        }
-        graph.replace_and_erase(getitem_id, result);
-    }
-    graph.erase(id);
-    true
+    replace_primary_result_users(graph, id, result)
 }
 
 /// stack(tensors, dim) → unsqueeze each + cat
