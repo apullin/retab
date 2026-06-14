@@ -84,11 +84,9 @@ impl IrPass for IrDecomposeAsStridedCopyPass {
             }
 
             // Build output meta: shape from size, dtype from input
-            let dtype = graph.nodes[input_id]
+            let out_meta = graph.nodes[id]
                 .meta
-                .val_dtype_or_float32()
-                .to_string();
-            let out_meta = graph.nodes[id].meta.cloned_with_val(size.clone(), dtype);
+                .cloned_with_dtype_of_or_float32(size.clone(), &graph.nodes[input_id].meta);
 
             // Replace as_strided_copy with view_copy(input, size)
             graph.replace_with_view_copy(

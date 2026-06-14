@@ -51,9 +51,8 @@ impl IrPass for IrRewriteIndexPutPass {
             }
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let src_dtype = graph.node_dtype_or_float32(source_id).to_string();
             let source_base_meta = graph.nodes[source_id].meta.clone();
-            let source_meta = source_base_meta.tensor_stamp(&src_dtype);
+            let source_meta = source_base_meta.tensor_stamp_same_dtype_or_float32();
 
             let index_dtype = indices_list.iter().find_map(|item| match item {
                 IrArg::Node(nid) => graph.node_dtype(*nid).map(str::to_string),

@@ -44,8 +44,8 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
 
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let dtype = graph.node_dtype_or_float32(x_id).to_string();
-            let meta = orig_meta.tensor_stamp(&dtype);
+            let x_meta = graph.nodes[x_id].meta.clone();
+            let meta = orig_meta.tensor_stamp_with_dtype_of_or_float32(&x_meta);
 
             let mut rows: Vec<NodeId> = Vec::new();
             for out_i in 0..output_h {

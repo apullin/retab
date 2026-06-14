@@ -1638,6 +1638,25 @@ impl NodeMeta {
         }
     }
 
+    pub fn tensor_stamp_with_dtype_of_or<'a>(
+        &'a self,
+        dtype_source: &'a Self,
+        default: &'a str,
+    ) -> TensorMetaStamp<'a> {
+        self.tensor_stamp(dtype_source.val_dtype_or(default))
+    }
+
+    pub fn tensor_stamp_with_dtype_of_or_float32<'a>(
+        &'a self,
+        dtype_source: &'a Self,
+    ) -> TensorMetaStamp<'a> {
+        self.tensor_stamp_with_dtype_of_or(dtype_source, "torch.float32")
+    }
+
+    pub fn tensor_stamp_same_dtype_or_float32(&self) -> TensorMetaStamp<'_> {
+        self.tensor_stamp_with_dtype_of_or_float32(self)
+    }
+
     /// Extract typed metadata from a Python FX node.
     pub fn from_fx(node: &Bound<'_, PyAny>) -> PyResult<Self> {
         let meta = attrs(node).object("meta")?;
@@ -1888,6 +1907,23 @@ impl NodeMeta {
 
     pub fn cloned_with_same_dtype_or_float32(&self, shape: impl Into<Vec<i64>>) -> Self {
         self.cloned_with_same_dtype_or(shape, "torch.float32")
+    }
+
+    pub fn cloned_with_dtype_of_or(
+        &self,
+        shape: impl Into<Vec<i64>>,
+        dtype_source: &Self,
+        default: &str,
+    ) -> Self {
+        self.cloned_with_val(shape, dtype_source.val_dtype_or(default))
+    }
+
+    pub fn cloned_with_dtype_of_or_float32(
+        &self,
+        shape: impl Into<Vec<i64>>,
+        dtype_source: &Self,
+    ) -> Self {
+        self.cloned_with_dtype_of_or(shape, dtype_source, "torch.float32")
     }
 
     pub fn without_qparams(mut self) -> Self {

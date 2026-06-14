@@ -66,7 +66,6 @@ impl IrPass for IrDecomposeAddmmPass {
             // Compute mm output shape from mat1 and mat2 shapes
             let mat1_shape = graph.node_shape_vec(mat1_id);
             let mat2_shape = graph.node_shape_vec(mat2_id);
-            let orig_dtype = graph.node_dtype_or_float32(id).to_string();
 
             let mm_meta = match (&mat1_shape, &mat2_shape) {
                 (Some(s1), Some(s2)) => {
@@ -74,7 +73,7 @@ impl IrPass for IrDecomposeAddmmPass {
                     if shape.is_empty() {
                         orig_meta.clone()
                     } else {
-                        orig_meta.cloned_with_val(shape, &orig_dtype)
+                        orig_meta.cloned_with_same_dtype_or_float32(shape)
                     }
                 }
                 _ => orig_meta.clone(),

@@ -70,7 +70,7 @@ impl IrPass for IrConvertSumPass {
 
             let orig_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let orig_dtype = graph.node_dtype_or_float32(input_id).to_string();
+            let input_meta = graph.nodes[input_id].meta.clone();
 
             // Track qparams for chaining: first reduce inherits the original
             // node's input_qparams; subsequent reduces use the previous
@@ -105,7 +105,8 @@ impl IrPass for IrConvertSumPass {
                 // upstream decompositions (for example group_norm) mark their
                 // reduction chain as layout-neutral, and rebuilding from a
                 // blank NodeMeta here silently drops that contract.
-                let mut step_meta = orig_meta.cloned_with_val(output_shape.clone(), &orig_dtype);
+                let mut step_meta =
+                    orig_meta.cloned_with_dtype_of_or_float32(output_shape.clone(), &input_meta);
                 step_meta.clear_tosa_dim_order_if_rank_mismatch(output_shape.len());
                 if let Some(ref iqp) = current_input_qparams {
                     step_meta.set_input_qparams(iqp.clone());

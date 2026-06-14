@@ -1883,6 +1883,29 @@ avg-pool, cond, conv1d, conv2d, gather, group-norm, index-put, index-select,
 index-tensor, layer-norm, linear, max-pool, pixel-shuffling, repeat, slice,
 slice-scatter, unfold, view, where, and while: 834 passed, 21 xfailed.
 
+2026-06-14, TensorFacts dtype-source slice
+
+Rust LOC: 35,971
+
+Movement: +33 Rust LOC from the previous committed checkpoint.
+
+Deleted: repeated local `graph.node_dtype_or_float32(...).to_string()` plumbing
+where metadata construction semantically means "preserve this metadata policy
+but take dtype from that source node", plus redundant same-node dtype extraction
+in addmm and grouped-conv decomposition.
+
+Added: `NodeMeta::cloned_with_dtype_of_or*`,
+`NodeMeta::tensor_stamp_with_dtype_of_or*`, and
+`NodeMeta::tensor_stamp_same_dtype_or_float32`.
+
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; rebuild via
+`/tmp/et.sh` with `maturin develop --release` printing
+`Installed retab-0.1.0`; expanded focused Python smoke over addmm, adaptive
+avg-pool, as-strided-copy, avg-pool, cond, conv1d, conv2d, gather, group-norm,
+index-put, index-select, index-tensor, layer-norm, linear, max-pool,
+pixel-shuffling, repeat, select, select-scatter, slice, slice-scatter, split,
+sum, unfold, view, where, and while: 1003 passed, 21 xfailed.
+
 Problem:
 
 Shape, dtype, qparams, dim order, spatial rank, table qparams, and extras are

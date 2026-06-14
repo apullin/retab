@@ -82,9 +82,9 @@ impl IrPass for IrDecomposeStridedSlicePass {
 
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
+            let input_meta = graph.nodes[input_id].meta.clone();
             let is_bool_dtype = graph.nodes[input_id].meta.val_dtype_is(DType::Bool);
-            let dtype = graph.node_dtype_or_float32(input_id).to_string();
-            let meta = orig_meta.tensor_stamp(&dtype);
+            let meta = orig_meta.tensor_stamp_with_dtype_of_or_float32(&input_meta);
 
             // 1. Unit-step slice: slice_copy(input, dim, start, end, 1)
             let mut slice_shape = input_shape.clone();

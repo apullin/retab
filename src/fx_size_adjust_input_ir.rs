@@ -40,7 +40,6 @@ impl IrPass for IrSizeAdjustInputPass {
             };
 
             let node_name = graph.nodes[id].name.clone();
-            let dtype = graph.node_dtype_or_float32(input_id).to_string();
 
             let slices = match target_kind {
                 SizeAdjustTargetKind::Conv => {
@@ -138,7 +137,7 @@ impl IrPass for IrSizeAdjustInputPass {
                     // reconcile the exact sliced shape.
                     graph.nodes[input_id]
                         .meta
-                        .cloned_with_val(input_shape.clone(), &dtype),
+                        .cloned_with_same_dtype_or_float32(input_shape.clone()),
                 );
                 graph.anchor_after(slice_id, current);
                 if let Some(ref q) = consumer_input_q {

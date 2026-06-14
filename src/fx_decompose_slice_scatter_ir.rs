@@ -88,8 +88,8 @@ impl IrPass for IrDecomposeSliceScatterPass {
 
             let name = graph.nodes[id].name.clone();
             let meta = graph.nodes[id].meta.clone();
-            let dtype = graph.node_dtype_or_float32(input_id).to_string();
-            let value_meta = meta.tensor_stamp(&dtype);
+            let input_meta = graph.nodes[input_id].meta.clone();
+            let value_meta = meta.tensor_stamp_with_dtype_of_or_float32(&input_meta);
             let index_meta = meta.tensor_stamp("torch.int32");
 
             let result = if step == 1 {

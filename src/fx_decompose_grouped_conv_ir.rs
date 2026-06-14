@@ -30,8 +30,9 @@ fn conv_slice_output_meta(graph: &IrGraph, id: NodeId, output_slice_size: i64) -
         if shape.len() >= 2 {
             shape[1] = output_slice_size;
         }
-        let dtype = graph.node_dtype_or_float32(id).to_string();
-        return graph.nodes[id].meta.cloned_with_val(shape, dtype);
+        return graph.nodes[id]
+            .meta
+            .cloned_with_same_dtype_or_float32(shape);
     }
     graph.nodes[id].meta.clone()
 }

@@ -94,7 +94,7 @@ impl IrPass for IrConvertSplitToSlicePass {
             }
 
             // Grab the dtype from the input for building output metas
-            let dtype = graph.node_dtype_or_float32(input_id).to_string();
+            let input_meta = graph.nodes[input_id].meta.clone();
 
             let split_name = graph.nodes[split_id].name.clone();
 
@@ -126,7 +126,7 @@ impl IrPass for IrConvertSplitToSlicePass {
                 // Inherit output_qparams from the getitem user (not the split).
                 let mut slice_meta = graph.nodes[split_id]
                     .meta
-                    .cloned_with_val(out_shape, &dtype);
+                    .cloned_with_dtype_of_or_float32(out_shape, &input_meta);
                 slice_meta.copy_output_qparams_from(&graph.nodes[*user_id].meta);
 
                 // slice_copy.Tensor(input, dim, start, end)
