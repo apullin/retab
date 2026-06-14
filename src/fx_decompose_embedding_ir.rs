@@ -6,6 +6,7 @@
 //! (the ref-model "(!found)" failure that broke the text-encoder transformer models).
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass};
+use crate::fx_target::is_embedding_target;
 
 pub struct IrDecomposeEmbeddingPass;
 
@@ -16,8 +17,8 @@ impl IrPass for IrDecomposeEmbeddingPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
-        for id in 0..graph.nodes.len() {
-            if !graph.nodes[id].alive || !graph.nodes[id].target.contains("aten.embedding") {
+        for id in graph.live_call_function_ids() {
+            if !is_embedding_target(&graph.nodes[id].target) {
                 continue;
             }
             let args = graph.nodes[id].args.clone();

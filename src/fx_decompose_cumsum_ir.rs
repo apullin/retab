@@ -5,6 +5,7 @@
 //! an all-ones kernel (cumulative sum via convolution), slice off padding, reshape back.
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, QParam};
+use crate::fx_target::is_cumsum_target;
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeCumsumPass;
@@ -17,7 +18,7 @@ impl IrPass for IrDecomposeCumsumPass {
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
         for id in graph.live_call_function_ids() {
-            if !graph.nodes[id].target.contains("cumsum") {
+            if !is_cumsum_target(&graph.nodes[id].target) {
                 continue;
             }
 

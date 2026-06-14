@@ -9,6 +9,7 @@
 //! original node, which preserves dtype information through the graph.
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass};
+use crate::fx_target::is_full_like_target;
 use crate::runner_logging::log_line;
 
 pub struct IrConvertFullLikePass;
@@ -21,7 +22,7 @@ impl IrPass for IrConvertFullLikePass {
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
         for id in graph.live_call_function_ids() {
-            if !graph.nodes[id].target.contains("full_like") {
+            if !is_full_like_target(&graph.nodes[id].target) {
                 continue;
             }
 

@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeMeta};
+use crate::fx_target::is_masked_fill_target;
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeMaskedFillPass;
@@ -39,7 +40,7 @@ impl IrPass for IrDecomposeMaskedFillPass {
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
         for id in graph.live_call_function_ids() {
-            if !graph.nodes[id].target.contains("masked_fill") {
+            if !is_masked_fill_target(&graph.nodes[id].target) {
                 continue;
             }
             if graph.nodes[id].args.len() < 3 {

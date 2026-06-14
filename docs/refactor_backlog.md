@@ -1007,6 +1007,14 @@ Deleted: manual one-entry input/output qparam map construction from mean decompo
 Added: `NodeMeta::set_input_qparam_at(index, qp)` and `NodeMeta::set_output_qparam_at(index, qp)`, with the existing single-slot helpers expressed through them
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over add, addmm, conv1d, conv2d, conv3d, cumsum, gelu, max_pool, mean_dim, pow, sigmoid, tan, where, and conv_relu_residual_add; Rust LOC check
 Note: Full Rust tests passed `134 passed`; focused Python smoke passed `642 passed, 4 expected xfails, 1487 deselected`. No model lane was run. Dynamic and multi-input qparam maps remain explicit; this slice only names indexed single-slot stamping.
+
+2026-06-13, single-op decomposition target grammar slice
+Rust LOC: 37,096 -> 37,158
+Movement: +62 Rust LOC
+Deleted: raw target gates from embedding, logit, index_select, index.Tensor, cumsum, sum, mean, adaptive_avg_pool2d, masked_fill, select_scatter, and full_like pass bodies; one remaining local node-length traversal in embedding decomposition
+Added: shared `fx_target` predicates and classifier tests for those single-op decomposition target families
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_target`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over adaptive_avg_pool2d, cumsum, embedding, full, index_select, index_tensor, logit, masked_fill, mean_dim, select_scatter, and sum; Rust LOC check
+Note: Full Rust tests passed `134 passed`; focused Python smoke passed `335 passed, 8 skipped, 18 expected xfails, 537 deselected`. No model lane was run. This is setup-positive; the next target-grammar slice should pay it down by migrating adjacent raw target checks without adding many new predicates.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1036,7 +1044,9 @@ Constant materialization and memory-format planning now use shared target
 grammar for constant-only shape transforms, TOSA transpose targets, and Edge
 convolution spellings. Indexing/scatter passes now also share target grammar
 for slice-copy, broad slice tensor, slice-scatter, unfold-copy, and gather
-families.
+families. Single-op decomposition gates for embedding, logit, index_select,
+index.Tensor, cumsum, sum, mean, adaptive_avg_pool2d, masked_fill,
+select_scatter, and full_like now also live in the shared target grammar.
 
 Remaining work:
 

@@ -1,6 +1,7 @@
 //! Pure Rust IrPass: select_scatter → arange + view + full + eq + unsqueeze + expand + where.
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass};
+use crate::fx_target::is_select_scatter_target;
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeSelectScatterPass;
@@ -13,7 +14,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
         for id in graph.live_call_function_ids() {
-            if !graph.nodes[id].target.contains("select_scatter.default") {
+            if !is_select_scatter_target(&graph.nodes[id].target) {
                 continue;
             }
             if graph.nodes[id].args.len() != 4 {

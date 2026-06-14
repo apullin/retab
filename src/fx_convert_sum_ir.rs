@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_target::is_sum_dim_int_list_target;
 use crate::runner_logging::log_line;
 
 pub struct IrConvertSumPass;
@@ -22,7 +23,7 @@ impl IrPass for IrConvertSumPass {
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
         for id in graph.live_call_function_ids() {
-            if !graph.nodes[id].target.contains("sum.dim_IntList") {
+            if !is_sum_dim_int_list_target(&graph.nodes[id].target) {
                 continue;
             }
 

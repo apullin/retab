@@ -1,6 +1,7 @@
 //! Pure Rust IrPass: aten.index.Tensor → linearized GATHER.
 
 use crate::fx_ir::{broadcast_shapes, i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId};
+use crate::fx_target::is_index_tensor_target;
 use crate::runner_logging::log_line;
 
 fn compute_index_output_shape(
@@ -38,7 +39,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
         for id in graph.live_call_function_ids() {
-            if !graph.nodes[id].target.contains("aten.index.Tensor") {
+            if !is_index_tensor_target(&graph.nodes[id].target) {
                 continue;
             }
             if graph.nodes[id].args.len() != 2 {

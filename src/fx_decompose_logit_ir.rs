@@ -11,6 +11,7 @@
 //!     result = log(log_input)
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass};
+use crate::fx_target::is_logit_target;
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeLogitPass;
@@ -23,7 +24,7 @@ impl IrPass for IrDecomposeLogitPass {
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
         for id in graph.live_call_function_ids() {
-            if !graph.nodes[id].target.contains("logit") {
+            if !is_logit_target(&graph.nodes[id].target) {
                 continue;
             }
 

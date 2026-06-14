@@ -290,6 +290,26 @@ pub(crate) fn is_tril_target(target: &str) -> bool {
         || target.contains("aten_tril_copy")
 }
 
+pub(crate) fn is_embedding_target(target: &str) -> bool {
+    target.contains("aten.embedding")
+}
+
+pub(crate) fn is_logit_target(target: &str) -> bool {
+    target.contains("logit")
+}
+
+pub(crate) fn is_index_select_target(target: &str) -> bool {
+    target.contains("index_select.default")
+}
+
+pub(crate) fn is_index_tensor_target(target: &str) -> bool {
+    target.contains("aten.index.Tensor")
+}
+
+pub(crate) fn is_cumsum_target(target: &str) -> bool {
+    target.contains("cumsum")
+}
+
 pub(crate) fn is_layer_norm_target(target: &str) -> bool {
     target.contains("layer_norm") || target.contains("native_layer_norm")
 }
@@ -307,6 +327,10 @@ pub(crate) fn is_var_dim_target(target: &str) -> bool {
 
 pub(crate) fn is_plain_avg_pool2d_target(target: &str) -> bool {
     target.contains("avg_pool2d") && !target.contains("adaptive")
+}
+
+pub(crate) fn is_adaptive_avg_pool2d_target(target: &str) -> bool {
+    target.contains("adaptive_avg_pool2d")
 }
 
 pub(crate) fn is_as_strided_copy_target(target: &str) -> bool {
@@ -353,6 +377,14 @@ pub(crate) fn is_where_target(target: &str) -> bool {
     target.contains("where.self") || target.contains("aten_where")
 }
 
+pub(crate) fn is_masked_fill_target(target: &str) -> bool {
+    target.contains("masked_fill")
+}
+
+pub(crate) fn is_select_scatter_target(target: &str) -> bool {
+    target.contains("select_scatter.default")
+}
+
 pub(crate) fn is_clamp_target(target: &str) -> bool {
     target.contains("clamp.default")
 }
@@ -383,6 +415,14 @@ pub(crate) fn is_mul_target(target: &str) -> bool {
 
 pub(crate) fn is_sum_dim_int_list_target(target: &str) -> bool {
     target.contains("sum.dim_IntList")
+}
+
+pub(crate) fn is_mean_target(target: &str) -> bool {
+    target.contains("mean.dim") || target.contains("mean.default")
+}
+
+pub(crate) fn is_full_like_target(target: &str) -> bool {
+    target.contains("full_like")
 }
 
 #[cfg(test)]
@@ -592,11 +632,19 @@ mod tests {
         assert!(is_unfold_copy_target("aten.unfold_copy.default"));
         assert!(is_gather_target("aten.gather.default"));
         assert!(is_tril_target("aten.tril_copy.default"));
+        assert!(is_embedding_target("aten.embedding.default"));
+        assert!(is_logit_target("aten.logit.default"));
+        assert!(is_index_select_target("aten.index_select.default"));
+        assert!(is_index_tensor_target("aten.index.Tensor"));
+        assert!(is_cumsum_target("aten.cumsum.default"));
         assert!(is_layer_norm_target("aten.native_layer_norm.default"));
         assert!(is_var_target("aten.var.correction"));
         assert!(is_var_dim_target("aten.var.dim"));
         assert!(is_plain_avg_pool2d_target("aten.avg_pool2d.default"));
         assert!(!is_plain_avg_pool2d_target(
+            "aten.adaptive_avg_pool2d.default"
+        ));
+        assert!(is_adaptive_avg_pool2d_target(
             "aten.adaptive_avg_pool2d.default"
         ));
         assert!(is_as_strided_copy_target("aten.as_strided_copy.default"));
@@ -618,6 +666,8 @@ mod tests {
         assert!(!is_index_put_default_target("aten.index.Tensor"));
         assert!(is_where_target("aten.where.self"));
         assert!(is_where_target("aten_where.self"));
+        assert!(is_masked_fill_target("aten.masked_fill.Scalar"));
+        assert!(is_select_scatter_target("aten.select_scatter.default"));
         assert!(is_clamp_target("aten.clamp.default"));
         assert!(!is_clamp_target("aten.clamp.Tensor"));
     }
@@ -636,6 +686,9 @@ mod tests {
         assert!(is_add_sub_target("aten.sub.Tensor"));
         assert!(is_mul_target("aten.mul.Tensor"));
         assert!(is_sum_dim_int_list_target("aten.sum.dim_IntList"));
+        assert!(is_mean_target("aten.mean.dim"));
+        assert!(is_mean_target("aten.mean.default"));
+        assert!(is_full_like_target("aten.full_like.default"));
         assert!(!is_add_sub_target("aten.add.Scalar"));
     }
 }

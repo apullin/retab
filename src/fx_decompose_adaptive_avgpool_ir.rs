@@ -1,6 +1,7 @@
 //! Pure Rust IrPass: adaptive_avg_pool2d → slice + avg_pool2d + cat.
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_target::is_adaptive_avg_pool2d_target;
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeAdaptiveAvgPoolPass;
@@ -13,7 +14,7 @@ impl IrPass for IrDecomposeAdaptiveAvgPoolPass {
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
         for id in graph.live_call_function_ids() {
-            if !graph.nodes[id].target.contains("adaptive_avg_pool2d") {
+            if !is_adaptive_avg_pool2d_target(&graph.nodes[id].target) {
                 continue;
             }
 

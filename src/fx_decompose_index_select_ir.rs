@@ -1,6 +1,7 @@
 //! Pure Rust IrPass: index_select → view + unsqueeze + expand + GATHER + view.
 
 use crate::fx_ir::{dtype_kwarg, i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass};
+use crate::fx_target::is_index_select_target;
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeIndexSelectPass;
@@ -13,7 +14,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
     fn run(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
         for id in graph.live_call_function_ids() {
-            if !graph.nodes[id].target.contains("index_select.default") {
+            if !is_index_select_target(&graph.nodes[id].target) {
                 continue;
             }
             if graph.nodes[id].args.len() != 3 {
