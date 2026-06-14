@@ -911,6 +911,14 @@ Deleted: remaining conditional `ApproxCtx::output` plus common `replace_and_eras
 Added: no new API; this pays down the earlier `ApproxCtx::replace_output` helper by making conditional approximation decompositions use the same direct final-output grammar as the simple paths
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib fx_decompose_ops_ir::tests`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over softmax, logsoftmax, asin, acos, and gelu; Rust LOC check
 Note: Focused Rust decompose-op tests passed `21 passed`; full Rust tests passed `131 passed`; focused Python smoke passed `94 passed, 192 deselected`.
+
+2026-06-13, control-flow assembly child-module split
+Rust LOC: 37,082 -> 37,091
+Movement: +9 Rust LOC
+Deleted: serialize-Graph assembly responsibilities from the parent `src/control_flow.rs`, including scalar-output marking, while-body passthrough output appending, subgraph input-store cleanup, and the subgraph assembly loop
+Added: `src/control_flow/assembly.rs` as the owner for converting stashed control-flow submodule IR into prefixed serializer graphs, re-exported through `src/control_flow.rs`
+Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused control-flow smoke via `/tmp/et.sh` twice over cond/while with U55/U85 excluded; Rust LOC check
+Note: Rust tests passed `131 passed`; both control-flow smokes passed `29 passed, 1 expected xfail, 60 deselected`. No model lane was run. This is LOC-positive because the child module boundary adds imports and a re-export, but it narrows `control_flow.rs` to contract/orchestration logic and gives serialize-Graph assembly a dedicated owner.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
