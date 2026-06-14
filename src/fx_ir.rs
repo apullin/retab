@@ -1057,8 +1057,16 @@ impl IrNode {
         self.args.get(index)
     }
 
+    pub(crate) fn kwarg(&self, key: &str) -> Option<&IrArg> {
+        self.kwargs.get(key)
+    }
+
     pub(crate) fn arg_clone_or_none(&self, index: usize) -> IrArg {
         self.arg(index).cloned().unwrap_or(IrArg::None)
+    }
+
+    pub(crate) fn kwarg_clone_or_none(&self, key: &str) -> IrArg {
+        self.kwarg(key).cloned().unwrap_or(IrArg::None)
     }
 
     pub(crate) fn arg_node(&self, index: usize) -> Option<NodeId> {
@@ -1069,6 +1077,14 @@ impl IrNode {
         self.arg(index).and_then(IrArg::as_int)
     }
 
+    pub(crate) fn kwarg_int(&self, key: &str) -> Option<i64> {
+        self.kwarg(key).and_then(IrArg::as_int)
+    }
+
+    pub(crate) fn arg_or_kwarg_int(&self, index: usize, key: &str) -> Option<i64> {
+        self.arg_int(index).or_else(|| self.kwarg_int(key))
+    }
+
     pub(crate) fn arg_int_or(&self, index: usize, default: i64) -> i64 {
         self.arg_int(index).unwrap_or(default)
     }
@@ -1077,12 +1093,45 @@ impl IrNode {
         self.arg(index).and_then(IrArg::as_numeric_f64)
     }
 
+    pub(crate) fn kwarg_numeric_f64(&self, key: &str) -> Option<f64> {
+        self.kwarg(key).and_then(IrArg::as_numeric_f64)
+    }
+
+    pub(crate) fn arg_or_kwarg_numeric_f64(&self, index: usize, key: &str) -> Option<f64> {
+        self.arg_numeric_f64(index)
+            .or_else(|| self.kwarg_numeric_f64(key))
+    }
+
+    pub(crate) fn arg_or_kwarg_scalar_literal_f64(&self, index: usize, key: &str) -> Option<f64> {
+        self.arg(index)
+            .and_then(IrArg::as_scalar_literal_f64)
+            .or_else(|| self.kwarg(key).and_then(IrArg::as_scalar_literal_f64))
+    }
+
     pub(crate) fn arg_bool(&self, index: usize) -> Option<bool> {
         self.arg(index).and_then(IrArg::as_bool)
     }
 
+    pub(crate) fn kwarg_bool(&self, key: &str) -> Option<bool> {
+        self.kwarg(key).and_then(IrArg::as_bool)
+    }
+
+    pub(crate) fn arg_or_kwarg_bool(&self, index: usize, key: &str) -> Option<bool> {
+        self.arg_bool(index).or_else(|| self.kwarg_bool(key))
+    }
+
     pub(crate) fn arg_bool_or(&self, index: usize, default: bool) -> bool {
         self.arg_bool(index).unwrap_or(default)
+    }
+
+    pub(crate) fn kwarg_str(&self, key: &str) -> Option<&str> {
+        self.kwarg(key).and_then(IrArg::as_str)
+    }
+
+    pub(crate) fn arg_or_kwarg_str(&self, index: usize, key: &str) -> Option<&str> {
+        self.arg(index)
+            .and_then(IrArg::as_str)
+            .or_else(|| self.kwarg_str(key))
     }
 
     pub(crate) fn arg_int_list(&self, index: usize) -> Option<Vec<i64>> {

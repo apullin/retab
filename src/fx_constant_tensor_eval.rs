@@ -376,16 +376,10 @@ fn constant_input_tensor<'a>(
 
 fn resolve_alpha_beta(node: &IrNode) -> (f64, f64) {
     let beta = node
-        .args
-        .get(3)
-        .or_else(|| node.kwargs.get("beta"))
-        .and_then(IrArg::as_scalar_literal_f64)
+        .arg_or_kwarg_scalar_literal_f64(3, "beta")
         .unwrap_or(1.0);
     let alpha = node
-        .args
-        .get(4)
-        .or_else(|| node.kwargs.get("alpha"))
-        .and_then(IrArg::as_scalar_literal_f64)
+        .arg_or_kwarg_scalar_literal_f64(4, "alpha")
         .unwrap_or(1.0);
     (alpha, beta)
 }

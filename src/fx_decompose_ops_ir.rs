@@ -384,35 +384,23 @@ fn pow_scalar_int_arg(node: &crate::fx_ir::IrNode) -> Option<i64> {
 }
 
 fn alpha_value(node: &crate::fx_ir::IrNode) -> Option<f64> {
-    node.arg_numeric_f64(2)
-        .or_else(|| node.kwargs.get("alpha").and_then(IrArg::as_numeric_f64))
+    node.arg_or_kwarg_numeric_f64(2, "alpha")
 }
 
 fn elu_alpha(node: &crate::fx_ir::IrNode) -> f64 {
-    node.arg_numeric_f64(1)
-        .or_else(|| node.kwargs.get("alpha").and_then(IrArg::as_numeric_f64))
-        .unwrap_or(1.0)
+    node.arg_or_kwarg_numeric_f64(1, "alpha").unwrap_or(1.0)
 }
 
 fn gelu_approximate(node: &crate::fx_ir::IrNode) -> &str {
-    node.kwargs
-        .get("approximate")
-        .and_then(IrArg::as_str)
-        .unwrap_or("none")
+    node.kwarg_str("approximate").unwrap_or("none")
 }
 
 fn batch_norm_training(node: &crate::fx_ir::IrNode) -> bool {
-    node.kwargs
-        .get("training")
-        .and_then(IrArg::as_bool)
-        .or_else(|| node.arg_bool(5))
-        .unwrap_or(false)
+    node.arg_or_kwarg_bool(5, "training").unwrap_or(false)
 }
 
 fn batch_norm_eps(node: &crate::fx_ir::IrNode) -> f64 {
-    node.kwargs
-        .get("eps")
-        .and_then(IrArg::as_numeric_f64)
+    node.kwarg_numeric_f64("eps")
         .or_else(|| node.args.iter().rev().find_map(IrArg::as_numeric_f64))
         .unwrap_or(1.0e-5)
 }
@@ -1623,12 +1611,7 @@ fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> 
         Some(shape) => shape.to_vec(),
         None => return false,
     };
-    let dim = graph.nodes[id]
-        .args
-        .get(1)
-        .and_then(IrArg::as_int)
-        .or_else(|| graph.nodes[id].kwargs.get("dim").and_then(IrArg::as_int))
-        .unwrap_or(-1);
+    let dim = graph.nodes[id].arg_or_kwarg_int(1, "dim").unwrap_or(-1);
     let rank = shape.len() as i64;
     let dim = if dim < 0 { dim + rank } else { dim };
     if dim < 0 || dim >= rank {
@@ -2893,25 +2876,12 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             None,
         ),
         _ => (
+            graph.nodes[id].kwarg_clone_or_none("weight"),
+            graph.nodes[id].kwarg_clone_or_none("bias"),
             graph.nodes[id]
-                .kwargs
-                .get("weight")
-                .cloned()
-                .unwrap_or(IrArg::None),
-            graph.nodes[id]
-                .kwargs
-                .get("bias")
-                .cloned()
-                .unwrap_or(IrArg::None),
-            graph.nodes[id]
-                .kwargs
-                .get("num_groups")
-                .and_then(IrArg::as_int)
-                .or_else(|| graph.nodes[id].kwargs.get("group").and_then(IrArg::as_int)),
-            graph.nodes[id]
-                .kwargs
-                .get("eps")
-                .and_then(IrArg::as_numeric_f64),
+                .kwarg_int("num_groups")
+                .or_else(|| graph.nodes[id].kwarg_int("group")),
+            graph.nodes[id].kwarg_numeric_f64("eps"),
         ),
     };
     let Some(group) = group else {
@@ -3093,7 +3063,7 @@ fn decompose_stack(graph: &mut IrGraph, id: NodeId) -> bool {
     if tensor_ids.is_empty() {
         return false;
     }
-    let dim = args.get(1).and_then(|a| a.as_int()).unwrap_or(0);
+    let dim = graph.nodes[id].arg_int_or(1, 0);
 
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();

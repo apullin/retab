@@ -169,8 +169,7 @@ fn is_transposed_aten_convolution(node: &crate::fx_ir::IrNode) -> bool {
     if !is_raw_aten_convolution_target(&node.target) {
         return false;
     }
-    matches!(node.args.get(6), Some(IrArg::Bool(true)))
-        || matches!(node.kwargs.get("transposed"), Some(IrArg::Bool(true)))
+    node.arg_or_kwarg_bool(6, "transposed") == Some(true)
 }
 
 fn is_transpose_conv2d_weight(graph: &IrGraph, id: NodeId) -> bool {

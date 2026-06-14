@@ -138,13 +138,10 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
     // args: (input, pad_list, mode, value) — mode may be positional OR a kwarg.
-    let mode = match node.args.get(2) {
-        Some(IrArg::Str(s)) => s.clone(),
-        _ => match node.kwargs.get("mode") {
-            Some(IrArg::Str(s)) => s.clone(),
-            _ => "constant".to_string(),
-        },
-    };
+    let mode = node
+        .arg_or_kwarg_str(2, "mode")
+        .unwrap_or("constant")
+        .to_string();
     if !matches!(mode.as_str(), "reflect" | "replicate" | "circular") {
         return false; // constant handled by the serializer
     }

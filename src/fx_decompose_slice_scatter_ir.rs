@@ -40,31 +40,16 @@ impl IrPass for IrDecomposeSliceScatterPass {
             }
 
             let node = &graph.nodes[id];
-            let args = node.args.clone();
-            let kwargs = node.kwargs.clone();
             let Some(input_id) = node.arg_node(0) else {
                 continue;
             };
             let Some(src_id) = node.arg_node(1) else {
                 continue;
             };
-            let dim = args
-                .get(2)
-                .and_then(IrArg::as_int)
-                .or_else(|| kwargs.get("dim").and_then(IrArg::as_int));
-            let start = args
-                .get(3)
-                .and_then(IrArg::as_int)
-                .or_else(|| kwargs.get("start").and_then(IrArg::as_int));
-            let end = args
-                .get(4)
-                .and_then(IrArg::as_int)
-                .or_else(|| kwargs.get("end").and_then(IrArg::as_int));
-            let step = args
-                .get(5)
-                .and_then(IrArg::as_int)
-                .or_else(|| kwargs.get("step").and_then(IrArg::as_int))
-                .unwrap_or(1);
+            let dim = node.arg_or_kwarg_int(2, "dim");
+            let start = node.arg_or_kwarg_int(3, "start");
+            let end = node.arg_or_kwarg_int(4, "end");
+            let step = node.arg_or_kwarg_int(5, "step").unwrap_or(1);
 
             let Some(dim) = dim else {
                 continue;

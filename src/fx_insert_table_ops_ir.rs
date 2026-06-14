@@ -1,4 +1,4 @@
-use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrArg, IrGraph, IrNode, QParam};
+use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, QParam};
 use crate::graph::ir::DType;
 use crate::lowering_effects::{
     InsertPrecomputedTableOpEffect, LoweringEffect, LoweringEffectBatch, TableTensorSpec,
@@ -14,11 +14,11 @@ struct TableOpSpec {
 }
 
 fn node_str_kwarg<'a>(node: &'a IrNode, key: &str) -> Option<&'a str> {
-    node.kwargs.get(key).and_then(IrArg::as_str)
+    node.kwarg_str(key)
 }
 
 fn node_scalar_arg(node: &IrNode, idx: usize) -> Option<f64> {
-    node.args.get(idx).and_then(IrArg::as_numeric_f64)
+    node.arg_numeric_f64(idx)
 }
 
 const SIMPLE_TABLE_TARGET_RULES: &[(&str, &str)] = &[
@@ -444,7 +444,7 @@ impl EffectfulIrPass for IrInsertTableOpsEffectPass {
 
 #[cfg(test)]
 mod tests {
-    use crate::fx_ir::{IrGraph, NodeMeta, NodeOp, QParam};
+    use crate::fx_ir::{IrArg, IrGraph, NodeMeta, NodeOp, QParam};
 
     use super::*;
 

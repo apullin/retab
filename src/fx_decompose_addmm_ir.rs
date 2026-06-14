@@ -53,17 +53,11 @@ impl IrPass for IrDecomposeAddmmPass {
                 None => continue,
             };
 
-            let beta: f64 = graph.nodes[id]
-                .args
-                .get(3)
-                .or_else(|| graph.nodes[id].kwargs.get("beta"))
-                .and_then(IrArg::as_numeric_f64)
+            let beta = graph.nodes[id]
+                .arg_or_kwarg_numeric_f64(3, "beta")
                 .unwrap_or(1.0);
-            let alpha: f64 = graph.nodes[id]
-                .args
-                .get(4)
-                .or_else(|| graph.nodes[id].kwargs.get("alpha"))
-                .and_then(IrArg::as_numeric_f64)
+            let alpha = graph.nodes[id]
+                .arg_or_kwarg_numeric_f64(4, "alpha")
                 .unwrap_or(1.0);
 
             let node_name = graph.nodes[id].name.clone();

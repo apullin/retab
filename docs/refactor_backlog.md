@@ -1143,6 +1143,14 @@ Deleted: repeated `args.get(index).and_then(...).unwrap_or(default)` and first-a
 Added: `IrNode` positional argument helpers for optional args, cloned-or-None args, node args, integer args, defaulted integer args, numeric-f64 args, boolean args, defaulted boolean args, int-list args, and int-pair-or-scalar args
 Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv1d, conv2d, depthwise_conv, avg_pool2d, adaptive_avg_pool2d, max_pool, embedding, layer_norm, logit, tril, pixel_shuffling, slice, slice_scatter, index_put, relu, hardtanh, and clamp; Rust LOC check
 Note: Full Rust tests passed `137 passed`; focused Python smoke passed `686 passed, 6 skipped, 2 expected xfails, 1609 deselected`. No model lane was run. This is a Refactor 3 grammar slice: graph rewrites now name common positional-argument reads rather than open-coding heterogeneous `IrArg` access in each pass.
+
+2026-06-14, IR keyword-argument grammar slice
+Rust LOC: 36,840 -> 36,828
+Movement: -12 Rust LOC
+Deleted: repeated positional-or-keyword `IrArg` reads for addmm alpha/beta, constant-fold alpha/beta, add/sub alpha, ELU alpha, batch-norm training/eps, max/stack dimensions, group-norm kwargs, slice-scatter bounds, pad mode, convolution transposed flag, and table-op string/scalar kwargs
+Added: `IrNode` keyword and arg-or-keyword helpers for cloned-or-None, integer, numeric-f64, scalar-literal-f64, boolean, string, and raw `IrArg` reads
+Validation: `cargo fmt`; `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over conv2d, transpose_conv2d, addmm, batch_norm, gelu, elu, pow, stack, logsoftmax, softmax, rsqrt, floor, ceil, round, erf, constant_pad_nd, conv_constant_pad_nd, and slice_scatter; Rust LOC check
+Note: Full Rust tests passed `137 passed`; focused Python smoke passed `518 passed, 1 skipped, 4 expected xfails, 1160 deselected`. No model lane was run. This finishes the initial IR argument grammar pair: positional and keyword/defaulting behavior are now named on `IrNode` instead of open-coded in passes.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
@@ -1352,7 +1360,8 @@ placeholder fusion, fold-q/dq candidate collection, and table-op precompute
 candidate collection also reuse the shared graph queries. `IrGraph` also has
 value-metadata builder siblings for add, anchored add, and replacement
 call-function rewrites. `IrNode` now owns common positional-argument reads for
-node, integer, numeric, boolean, list, pair-or-scalar, and cloned-or-None args.
+node, integer, numeric, boolean, list, pair-or-scalar, and cloned-or-None args,
+plus keyword and arg-or-keyword reads for mixed Python-style schemas.
 Remaining work should keep adding small builder/query operations only when
 they replace repeated rewrite structure across several passes.
 
