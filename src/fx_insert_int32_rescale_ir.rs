@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp, QParam, RescaleRewrite};
-use crate::fx_target::is_where_target;
+use crate::fx_target::{
+    is_abs_target, is_add_sub_target, is_comparison_target, is_minmax_target, is_mul_target,
+    is_sum_dim_int_list_target, is_where_target,
+};
 use crate::runner_logging::log_line;
 
 const I32_MIN: i64 = -2_147_483_648;
@@ -15,39 +18,15 @@ enum Int32OpKind {
 }
 
 fn classify_int32_op(target: &str) -> Option<Int32OpKind> {
-    if target.contains("abs.default")
-        || target.contains("eq.Tensor")
-        || target.contains("ge.Tensor")
-        || target.contains("gt.Tensor")
-        || target.contains("le.Tensor")
-        || target.contains("lt.Tensor")
-        || target.contains("maximum.default")
-        || target.contains("minimum.default")
-    {
+    if is_abs_target(target) || is_comparison_target(target) || is_minmax_target(target) {
         Some(Int32OpKind::MinScale)
-    } else if target.contains("add.Tensor") || target.contains("sub.Tensor") {
+    } else if is_add_sub_target(target) {
         Some(Int32OpKind::AddSub)
-    } else if target.contains("mul.Tensor") || target.contains("sum.dim_IntList") {
+    } else if is_mul_target(target) || is_sum_dim_int_list_target(target) {
         Some(Int32OpKind::Passthrough)
     } else {
         None
     }
-}
-
-fn is_comparison_op(target: &str) -> bool {
-    target.contains("eq.Tensor")
-        || target.contains("ge.Tensor")
-        || target.contains("gt.Tensor")
-        || target.contains("le.Tensor")
-        || target.contains("lt.Tensor")
-}
-
-fn is_minmax_op(target: &str) -> bool {
-    target.contains("maximum.default") || target.contains("minimum.default")
-}
-
-fn is_mul_op(target: &str) -> bool {
-    target.contains("mul.Tensor")
 }
 
 fn is_integer_quantized_dtype(dtype: &str) -> bool {
@@ -81,10 +60,10 @@ fn compute_rescaled_input_scales(
 }
 
 fn compute_output_int32_scale(target: &str, rescaled_input_scales: &[f64]) -> Option<f64> {
-    if is_comparison_op(target) {
+    if is_comparison_target(target) {
         return None;
     }
-    if is_minmax_op(target) {
+    if is_minmax_target(target) {
         return Some(
             rescaled_input_scales
                 .iter()
@@ -92,7 +71,7 @@ fn compute_output_int32_scale(target: &str, rescaled_input_scales: &[f64]) -> Op
                 .fold(f64::INFINITY, f64::min),
         );
     }
-    if is_mul_op(target) {
+    if is_mul_target(target) {
         return Some(rescaled_input_scales.iter().product());
     }
     rescaled_input_scales.first().copied()

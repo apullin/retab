@@ -8,7 +8,9 @@
 use std::collections::HashMap;
 
 use crate::fx_ir::{IrArg, IrGraph, IrNode, IrPass, MetaValue, NodeId, NodeMeta, NodeOp, QParam};
-use crate::fx_target::{classify_ir_target, IrTargetKind};
+use crate::fx_target::{
+    classify_ir_target, is_add_sub_target, is_sum_dim_int_list_target, IrTargetKind,
+};
 use crate::graph::ir::DType;
 use crate::store::TensorData;
 
@@ -33,22 +35,17 @@ pub(crate) struct ResolvedFoldQdqInput {
     pub dq_node_ids: Vec<NodeId>,
 }
 
-pub(crate) fn target_matches_any(target: &str, markers: &[&str]) -> bool {
-    markers.iter().any(|marker| target.contains(marker))
-}
-
 pub(crate) fn is_constant_op_target(target: &str) -> bool {
-    target_matches_any(
-        target,
-        &[
-            "full_like.default",
-            "full.default",
-            "arange.start_step",
-            "eye.default",
-            "linspace.default",
-            "scalar_tensor.default",
-        ],
-    )
+    [
+        "full_like.default",
+        "full.default",
+        "arange.start_step",
+        "eye.default",
+        "linspace.default",
+        "scalar_tensor.default",
+    ]
+    .iter()
+    .any(|marker| target.contains(marker))
 }
 
 pub(crate) fn has_arm_quantized_annotation(meta: &NodeMeta) -> bool {
@@ -401,22 +398,21 @@ impl IrPass for IrFoldQdqPass {
 
             let node = graph.node(node_id).clone();
             let resolved_inputs = resolve_input_qparams_for_foldable_node(graph, &node);
-            let preserves_fp_int32_binary =
-                target_matches_any(&node.target, &["add.Tensor", "sub.Tensor"])
-                    && (resolved_inputs
-                        .iter()
-                        .any(|resolved| resolved.qparam.qparam.dtype_str.contains("int32"))
-                        || graph
-                            .live_user_ids(node_id)
-                            .into_iter()
-                            .filter_map(|user_id| {
-                                let user = graph.node(user_id);
-                                if !user.alive || !user.is_quantize_any() {
-                                    return None;
-                                }
-                                resolve_qparam_from_q_or_dq(graph, user)
-                            })
-                            .any(|resolved| resolved.qparam.dtype_str.contains("int32")));
+            let preserves_fp_int32_binary = is_add_sub_target(&node.target)
+                && (resolved_inputs
+                    .iter()
+                    .any(|resolved| resolved.qparam.qparam.dtype_str.contains("int32"))
+                    || graph
+                        .live_user_ids(node_id)
+                        .into_iter()
+                        .filter_map(|user_id| {
+                            let user = graph.node(user_id);
+                            if !user.alive || !user.is_quantize_any() {
+                                return None;
+                            }
+                            resolve_qparam_from_q_or_dq(graph, user)
+                        })
+                        .any(|resolved| resolved.qparam.dtype_str.contains("int32")));
             if preserves_fp_int32_binary {
                 continue;
             }
@@ -487,7 +483,7 @@ impl IrPass for IrFoldQdqPass {
                     .set_output_qparams(output_qparams.clone());
                 modified = true;
 
-                if node.target.contains("sum.dim_IntList") {
+                if is_sum_dim_int_list_target(&node.target) {
                     if let Some(output_qparam) = output_qparams.get(&0) {
                         graph.set_kwarg(
                             node_id,

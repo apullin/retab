@@ -895,6 +895,14 @@ Deleted: direct final-node add/replace pairs in var, strided-slice, index-select
 Added: `IrGraph::replace_with_call_function_with_kwargs` for kwargs-bearing final replacements and `ApproxCtx::replace_output` for approximation-pass final outputs
 Validation: `cargo fmt --check`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over var, slice, unfold_copy, index_select, index_tensor, index_put, linear, select_scatter, softmax, logsoftmax, tan, atan, atanh, sinh, cosh, asinh, acosh, elu, gelu, and erfinv excluding known erfinv infinities; Rust LOC check
 Note: Rust tests passed `130 passed`. Focused Python smoke passed `537 passed, 20 xfailed, 1115 deselected`. This is a deliberate LOC-positive grammar slice: it fills the kwargs final-replacement gap and gives approximation decompositions a shared final-output spelling, reducing ownership ambiguity around "create final op, then replace original".
+
+2026-06-13, arithmetic target-family grammar slice
+Rust LOC: 37,068 -> 37,088
+Movement: +20 Rust LOC
+Deleted: local int32-rescale comparison/minmax/mul target helpers, repeated raw add/sub/sum target checks in fold-q/dq, and the now-single-use local `target_matches_any` helper
+Added: shared `fx_target` helpers for abs, tensor comparisons, min/max, add/sub, mul, and sum.dim_IntList target families, with direct classifier tests
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; focused Python smoke via `/tmp/et.sh` over abs, add, sub, mul, sum, eq, ge, gt, le, lt, maximum, minimum, and where; Rust LOC check
+Note: Rust tests passed `131 passed`. Focused Python smoke passed `393 passed, 562 deselected`. This is setup-positive because it adds central tests, but it moves arithmetic qparam-domain decisions out of local string predicates and into the shared target grammar.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

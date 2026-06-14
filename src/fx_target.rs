@@ -257,6 +257,34 @@ pub(crate) fn is_clamp_target(target: &str) -> bool {
     target.contains("clamp.default")
 }
 
+pub(crate) fn is_abs_target(target: &str) -> bool {
+    target.contains("abs.default")
+}
+
+pub(crate) fn is_comparison_target(target: &str) -> bool {
+    target.contains("eq.Tensor")
+        || target.contains("ge.Tensor")
+        || target.contains("gt.Tensor")
+        || target.contains("le.Tensor")
+        || target.contains("lt.Tensor")
+}
+
+pub(crate) fn is_minmax_target(target: &str) -> bool {
+    target.contains("maximum.default") || target.contains("minimum.default")
+}
+
+pub(crate) fn is_add_sub_target(target: &str) -> bool {
+    target.contains("add.Tensor") || target.contains("sub.Tensor")
+}
+
+pub(crate) fn is_mul_target(target: &str) -> bool {
+    target.contains("mul.Tensor")
+}
+
+pub(crate) fn is_sum_dim_int_list_target(target: &str) -> bool {
+    target.contains("sum.dim_IntList")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +443,22 @@ mod tests {
         assert!(is_where_target("aten_where.self"));
         assert!(is_clamp_target("aten.clamp.default"));
         assert!(!is_clamp_target("aten.clamp.Tensor"));
+    }
+
+    #[test]
+    fn recognizes_arithmetic_target_families() {
+        assert!(is_abs_target("aten.abs.default"));
+        assert!(is_comparison_target("aten.eq.Tensor"));
+        assert!(is_comparison_target("aten.ge.Tensor"));
+        assert!(is_comparison_target("aten.gt.Tensor"));
+        assert!(is_comparison_target("aten.le.Tensor"));
+        assert!(is_comparison_target("aten.lt.Tensor"));
+        assert!(is_minmax_target("aten.maximum.default"));
+        assert!(is_minmax_target("aten.minimum.default"));
+        assert!(is_add_sub_target("aten.add.Tensor"));
+        assert!(is_add_sub_target("aten.sub.Tensor"));
+        assert!(is_mul_target("aten.mul.Tensor"));
+        assert!(is_sum_dim_int_list_target("aten.sum.dim_IntList"));
+        assert!(!is_add_sub_target("aten.add.Scalar"));
     }
 }
