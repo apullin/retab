@@ -33,8 +33,25 @@ Repeat with `--model mobilenet_v3_small` for the real-model stress check.
 
 Log path: `target/perf-check-20260614-224136`.
 
+These numbers are end-to-end ARM lowering checks. They include ExecuTorch
+orchestration, backend partitioning, Vela compilation, and PTE packing. They are
+not isolated measurements of the Rust serializer/preprocess core.
+
+For a TOSA-only direct fast-lane phase split on `mobilenet_v3_small`:
+
+| Phase | Time |
+| --- | ---: |
+| Quant/export prepare | `5.959s` |
+| Lower | `5.605s` |
+| Pack | `0.291s` |
+
+Command:
+
+```bash
+python tests/sweep_direct_fastlane.py --model mobilenet_v3_small --json-only
+```
+
 The MobileNet artifact mismatch is not treated as a regression by itself here:
 the full correctness matrix passes on the Rust serializer path. If a future
 performance change also changes artifacts, run the artifact and semantic
 comparisons from `FASTLANE_WORKFLOW.md` before accepting it.
-
