@@ -41,14 +41,17 @@ impl IrPass for IrConvertFullLikePass {
                 Some(s) => s,
                 None => return false,
             };
+            let node_name = graph.nodes[id].name.clone();
+            let node_meta = graph.nodes[id].meta.clone();
 
-            graph.replace_with_call_function(
-                id,
-                format!("{}_full", graph.nodes[id].name),
+            let mut cursor = graph.rewrite_cursor(id);
+            let full_id = cursor.call_function(
+                format!("{}_full", node_name),
                 "aten.full.default".to_string(),
                 vec![i64_list_arg(&input_shape), fill_value],
-                graph.nodes[id].meta.clone(),
+                node_meta,
             );
+            cursor.replace_anchor_with(full_id);
             true
         });
 

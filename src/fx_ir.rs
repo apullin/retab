@@ -625,19 +625,6 @@ impl IrGraph {
         id
     }
 
-    pub fn replace_with_call_function(
-        &mut self,
-        old_id: NodeId,
-        name: impl Into<String>,
-        target: impl Into<String>,
-        args: Vec<IrArg>,
-        meta: NodeMeta,
-    ) -> NodeId {
-        let id = self.add_anchored_call_function(old_id, name, target, args, meta);
-        self.replace_and_erase(old_id, id);
-        id
-    }
-
     pub(crate) fn add_view_copy(
         &mut self,
         name: impl Into<String>,

@@ -402,6 +402,22 @@ Note: view and permute rewrites now use the same cursor replacement primitive
   as larger decomposition chains, leaving fewer graph-edit helper families to
   choose from.
 
+2026-06-15, IR rewrite cursor slice 21
+Rust LOC: 35,754 -> 35,751
+Movement: -3 Rust LOC
+Deleted/collapsed: remaining replace_with_call_function usage in clamp,
+  full_like, embedding, and ApproxCtx output replacement, plus the now-dead
+  replace_with_call_function helper
+Validation: cargo fmt; cargo fmt --check; cargo check --lib; cargo test --lib;
+  maturin develop --release; broad focused Python smoke over relu, hardtanh,
+  clamp, full, embedding, add/sub-alpha, pow, tan/sinh/cosh/asinh/acosh, elu,
+  gelu, softmax/logsoftmax, batch_norm, and group_norm: 478 passed, 9 skipped,
+  3 xfailed
+Note: call-function replacement now has one grammar: create a cursor at the
+  anchor, emit the replacement node, and replace the anchor. ApproxCtx still
+  owns its math-expression builder API, but no longer depends on a parallel
+  graph-level replacement helper.
+
 Slice log:
 
 ```text

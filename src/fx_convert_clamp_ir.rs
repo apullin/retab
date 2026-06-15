@@ -22,13 +22,16 @@ impl IrPass for IrConvertClampPass {
                     None => return false,
                 };
 
-                graph.replace_with_call_function(
-                    id,
-                    format!("{}_clamp", graph.nodes[id].name),
+                let node_name = graph.nodes[id].name.clone();
+                let node_meta = graph.nodes[id].meta.clone();
+                let mut cursor = graph.rewrite_cursor(id);
+                let clamp_id = cursor.call_function(
+                    format!("{}_clamp", node_name),
                     "aten.clamp.default".to_string(),
                     vec![IrArg::Node(input_id), IrArg::Float(0.0), IrArg::None],
-                    graph.nodes[id].meta.clone(),
+                    node_meta,
                 );
+                cursor.replace_anchor_with(clamp_id);
                 return true;
             } else if graph.nodes[id].is_hardtanh() {
                 // hardtanh(x, min_val, max_val) -> clamp(x, min_val, max_val)
@@ -48,17 +51,20 @@ impl IrPass for IrConvertClampPass {
                     .and_then(IrArg::as_numeric_f64)
                     .unwrap_or(1.0);
 
-                graph.replace_with_call_function(
-                    id,
-                    format!("{}_clamp", graph.nodes[id].name),
+                let node_name = graph.nodes[id].name.clone();
+                let node_meta = graph.nodes[id].meta.clone();
+                let mut cursor = graph.rewrite_cursor(id);
+                let clamp_id = cursor.call_function(
+                    format!("{}_clamp", node_name),
                     "aten.clamp.default".to_string(),
                     vec![
                         IrArg::Node(input_id),
                         IrArg::Float(min_val),
                         IrArg::Float(max_val),
                     ],
-                    graph.nodes[id].meta.clone(),
+                    node_meta,
                 );
+                cursor.replace_anchor_with(clamp_id);
                 return true;
             }
             false

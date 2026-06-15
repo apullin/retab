@@ -287,13 +287,10 @@ impl ApproxCtx {
         target: &str,
         args: Vec<IrArg>,
     ) -> NodeId {
-        graph.replace_with_call_function(
-            self.anchor_id,
-            self.op_name(suffix),
-            target,
-            args,
-            self.meta.clone(),
-        )
+        let mut cursor = graph.rewrite_cursor(self.anchor_id);
+        let replacement =
+            cursor.call_function(self.op_name(suffix), target, args, self.meta.clone());
+        cursor.replace_anchor_with(replacement)
     }
 
     fn replace_nodes(
@@ -762,13 +759,16 @@ fn decompose_add_sub_alpha(graph: &mut IrGraph, id: NodeId) -> bool {
     }
     add_args[1] = IrArg::Node(scaled_rhs);
     add_args.truncate(2);
-    graph.replace_with_call_function(
-        id,
-        format!("{}_alpha_result", graph.nodes[id].name),
+    let node_name = graph.nodes[id].name.clone();
+    let node_meta = graph.nodes[id].meta.clone();
+    let mut cursor = graph.rewrite_cursor(id);
+    let result = cursor.call_function(
+        format!("{}_alpha_result", node_name),
         target,
         add_args,
-        graph.nodes[id].meta.clone(),
+        node_meta,
     );
+    cursor.replace_anchor_with(result);
     true
 }
 
