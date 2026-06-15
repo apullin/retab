@@ -105,9 +105,9 @@ fn insert_input_rescale(
         .meta
         .rescale_output_meta(output_qparam);
     let consumer_name = graph.node(consumer_id).name.clone();
-    let rescale = graph.add_after_rescale(
-        source_id,
-        RescaleRewrite::new(
+    let rescale = {
+        let mut cursor = graph.rewrite_cursor_after(consumer_id, source_id);
+        cursor.rescale(RescaleRewrite::new(
             format!("{consumer_name}_arg{arg_pos}_int32_rescale"),
             source_id,
             "torch.int32",
@@ -115,8 +115,8 @@ fn insert_input_rescale(
             old_zp,
             0,
             meta,
-        ),
-    );
+        ))
+    };
     graph.replace_input_use(consumer_id, source_id, rescale);
     rescale
 }
@@ -139,18 +139,21 @@ fn insert_output_rescale(
         .node(source_id)
         .meta
         .rescale_output_meta(output_qparam.clone());
-    let rescale = graph.add_after_rescale(
-        source_id,
-        RescaleRewrite::new(
-            format!("{}_output_rescale", graph.node(source_id).name),
+    let rescale_name = format!("{}_output_rescale", graph.node(source_id).name);
+    let output_dtype = output_qparam.dtype_str.clone();
+    let output_zp = output_qparam.zp;
+    let rescale = {
+        let mut cursor = graph.rewrite_cursor_after(source_id, source_id);
+        cursor.rescale(RescaleRewrite::new(
+            rescale_name,
             source_id,
-            output_qparam.dtype_str.clone(),
+            output_dtype,
             vec![output_int32_scale / output_qparam.scale],
             0,
-            output_qparam.zp,
+            output_zp,
             meta,
-        ),
-    );
+        ))
+    };
     graph.replace_live_uses_except(source_id, rescale, rescale);
     true
 }
@@ -296,9 +299,9 @@ fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
         return false;
     }
     let meta = node.meta.rescale_output_meta(output_qparam.clone());
-    let rescale = graph.add_after_rescale(
-        node_id,
-        RescaleRewrite::new(
+    let rescale = {
+        let mut cursor = graph.rewrite_cursor_after(node_id, node_id);
+        cursor.rescale(RescaleRewrite::new(
             format!("{}_output_rescale", node.name),
             node_id,
             output_qparam.dtype_str.clone(),
@@ -306,8 +309,8 @@ fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
             then_qparam.zp,
             output_qparam.zp,
             meta,
-        ),
-    );
+        ))
+    };
     graph.replace_live_uses_except(node_id, rescale, rescale);
     graph
         .node_mut(node_id)

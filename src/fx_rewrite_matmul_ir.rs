@@ -19,18 +19,21 @@ fn insert_matmul_rescale(graph: &mut IrGraph, matmul_id: NodeId) -> bool {
 
     let rescale_scale = (qp_a.scale * qp_b.scale) / out_qp.scale;
     let rescale_meta = node.meta.rescale_output_meta(out_qp.clone());
-    let rescale = graph.add_after_rescale(
-        matmul_id,
-        RescaleRewrite::new(
-            format!("{}_output_rescale", node.name),
+    let rescale_name = format!("{}_output_rescale", node.name);
+    let output_dtype = out_qp.dtype_str.clone();
+    let output_zp = out_qp.zp;
+    let rescale = {
+        let mut cursor = graph.rewrite_cursor_after(matmul_id, matmul_id);
+        cursor.rescale(RescaleRewrite::new(
+            rescale_name,
             matmul_id,
-            out_qp.dtype_str.clone(),
+            output_dtype,
             vec![rescale_scale],
             0,
-            out_qp.zp,
+            output_zp,
             rescale_meta,
-        ),
-    );
+        ))
+    };
     graph.replace_live_uses_except(matmul_id, rescale, rescale)
 }
 

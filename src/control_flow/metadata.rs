@@ -69,9 +69,9 @@ impl IrPass for IrInsertCarriedOutputRescalePass {
 
             let meta = graph.node(src_id).meta.rescale_output_meta(ph_qp.clone());
             let src_name = graph.node(src_id).name.clone();
-            let rescale = graph.add_after_rescale(
-                src_id,
-                RescaleRewrite::new(
+            let rescale = {
+                let mut cursor = graph.rewrite_cursor_after(out_id, src_id);
+                cursor.rescale(RescaleRewrite::new(
                     format!("{src_name}_carried_rescale"),
                     src_id,
                     ph_qp.dtype_str.clone(),
@@ -79,8 +79,8 @@ impl IrPass for IrInsertCarriedOutputRescalePass {
                     cur.zp,
                     ph_qp.zp,
                     meta,
-                ),
-            );
+                ))
+            };
             replace_output_arg_use(graph, out_id, src_id, rescale);
             modified = true;
         }

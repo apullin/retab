@@ -599,19 +599,6 @@ impl IrGraph {
         )
     }
 
-    pub fn add_after_call_function(
-        &mut self,
-        anchor: NodeId,
-        name: impl Into<String>,
-        target: impl Into<String>,
-        args: Vec<IrArg>,
-        meta: NodeMeta,
-    ) -> NodeId {
-        let id = self.add_call_function(name, target, args, meta);
-        self.anchor_after(id, anchor);
-        id
-    }
-
     pub(crate) fn add_view_copy(
         &mut self,
         name: impl Into<String>,
@@ -625,19 +612,6 @@ impl IrGraph {
             vec![IrArg::Node(source), i64_list_arg(shape)],
             meta,
         )
-    }
-
-    pub(crate) fn add_after_view_copy(
-        &mut self,
-        anchor: NodeId,
-        name: impl Into<String>,
-        source: NodeId,
-        shape: &[i64],
-        meta: NodeMeta,
-    ) -> NodeId {
-        let id = self.add_view_copy(name, source, shape, meta);
-        self.anchor_after(id, anchor);
-        id
     }
 
     pub(crate) fn add_permute_copy(
@@ -700,12 +674,6 @@ impl IrGraph {
             ],
             meta,
         )
-    }
-
-    pub(crate) fn add_after_rescale(&mut self, anchor: NodeId, spec: RescaleRewrite) -> NodeId {
-        let id = self.add_rescale(spec);
-        self.anchor_after(id, anchor);
-        id
     }
 
     pub fn add_full_int(

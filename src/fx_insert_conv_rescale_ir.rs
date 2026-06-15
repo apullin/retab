@@ -202,9 +202,9 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
 
     let int32_meta = node.meta.tensor_stamp("torch.int32");
 
-    let int32_rescale = graph.add_after_rescale(
-        conv_id,
-        RescaleRewrite::new(
+    let (int32_rescale, output_rescale) = {
+        let mut cursor = graph.rewrite_cursor_after(conv_id, conv_id);
+        let int32_rescale = cursor.rescale(RescaleRewrite::new(
             format!("{}_bias_int32_rescale", node.name),
             conv_id,
             "torch.int32",
@@ -212,28 +212,23 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
             0,
             0,
             int32_meta.plain_tensor(conv_shape.clone()),
-        ),
-    );
+        ));
 
-    let bias_view = graph.add_after_view_copy(
-        int32_rescale,
-        format!("{}_bias_view", node.name),
-        *bias_id,
-        &bias_view_shape,
-        int32_meta.plain_tensor(bias_view_shape.clone()),
-    );
+        let bias_view = cursor.view_copy(
+            format!("{}_bias_view", node.name),
+            *bias_id,
+            &bias_view_shape,
+            int32_meta.plain_tensor(bias_view_shape.clone()),
+        );
 
-    let bias_add = graph.add_after_call_function(
-        bias_view,
-        format!("{}_bias_add", node.name),
-        "aten.add.Tensor",
-        vec![IrArg::Node(int32_rescale), IrArg::Node(bias_view)],
-        int32_meta.plain_tensor(conv_shape),
-    );
+        let bias_add = cursor.call_function(
+            format!("{}_bias_add", node.name),
+            "aten.add.Tensor",
+            vec![IrArg::Node(int32_rescale), IrArg::Node(bias_view)],
+            int32_meta.plain_tensor(conv_shape),
+        );
 
-    let output_rescale = graph.add_after_rescale(
-        bias_add,
-        RescaleRewrite::new(
+        let output_rescale = cursor.rescale(RescaleRewrite::new(
             format!("{}_bias_output_rescale", node.name),
             bias_add,
             output_qp.dtype_str.clone(),
@@ -244,8 +239,9 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
             0,
             output_qp.zp,
             node.meta.rescale_output_meta(output_qp),
-        ),
-    );
+        ));
+        (int32_rescale, output_rescale)
+    };
 
     graph.replace_live_uses_except(conv_id, output_rescale, int32_rescale)
 }
@@ -288,18 +284,22 @@ fn insert_conv_rescale(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         return false;
     }
 
-    let rescale = graph.add_after_rescale(
-        conv_id,
-        RescaleRewrite::new(
-            format!("{}_accumulator_rescale", node.name),
+    let rescale_name = format!("{}_accumulator_rescale", node.name);
+    let output_dtype = output_qp.dtype_str.clone();
+    let output_zp = output_qp.zp;
+    let output_meta = node.meta.rescale_output_meta(output_qp.clone());
+    let rescale = {
+        let mut cursor = graph.rewrite_cursor_after(conv_id, conv_id);
+        cursor.rescale(RescaleRewrite::new(
+            rescale_name,
             conv_id,
-            output_qp.dtype_str.clone(),
+            output_dtype,
             scales,
             0,
-            output_qp.zp,
-            node.meta.rescale_output_meta(output_qp.clone()),
-        ),
-    );
+            output_zp,
+            output_meta,
+        ))
+    };
 
     graph.replace_live_uses_except(conv_id, rescale, rescale)
 }

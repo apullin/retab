@@ -3246,3 +3246,44 @@ Validation:
 Metric:
 
 Rust source LOC decreased from `35,816` to `35,805`.
+
+## Completed: Remove Producer-Placement Helper Family
+
+Status:
+
+Complete for active Rust source.
+
+Change:
+
+The remaining `IrGraph::add_after_*` helpers were replaced with
+`IrRewriteCursor::rewrite_cursor_after(...)` emission. Producer-placement chains
+now use the same cursor append grammar as anchor replacement chains, with
+`previous` carrying the insertion point.
+
+Deleted:
+
+- `IrGraph::add_after_call_function`
+- `IrGraph::add_after_view_copy`
+- `IrGraph::add_after_rescale`
+
+Payoff:
+
+- Leaves `IrRewriteCursor` as the single graph-insertion grammar for generated
+  rewrite chains.
+- Makes multi-node producer-placement chains, especially int16-bias conv
+  decomposition, read as one ordered cursor block.
+- Removes another raw helper family from `IrGraph`.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo check --lib`
+- `cargo test --lib fx_insert_conv_rescale_ir::tests`
+- `cargo test --lib fx_insert_int32_rescale_ir::tests`
+- `cargo test --lib fx_rewrite_matmul_ir::tests`
+- `cargo test --lib`
+- `/tmp/et.sh`: `518 passed, 1714 deselected, 8 xfailed`
+
+Metric:
+
+Rust source LOC decreased from `35,805` to `35,779`.
