@@ -77,28 +77,19 @@ impl IrPass for IrReplaceScalarWithTensorPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::{NodeId, NodeOp};
-
-    fn placeholder(graph: &mut IrGraph, name: &str, shape: &[i64], dtype: &str) -> NodeId {
-        graph.add_node(
-            NodeOp::Placeholder,
-            name.to_string(),
-            name.to_string(),
-            Vec::new(),
-            NodeMeta::tensor(shape, dtype),
-        )
-    }
+    use crate::test_ir::{call, placeholder};
 
     #[test]
     fn rewrites_left_shift_scalar_to_tensor_form() {
         let mut graph = IrGraph::empty();
         let x = placeholder(&mut graph, "x", &[2, 3], "torch.int16");
-        let shift = graph.add_node(
-            NodeOp::CallFunction,
-            "lshift".to_string(),
-            "aten.__lshift__.Scalar".to_string(),
+        let shift = call(
+            &mut graph,
+            "lshift",
+            "aten.__lshift__.Scalar",
             vec![IrArg::Node(x), IrArg::Int(3)],
-            NodeMeta::tensor([2, 3], "torch.int16"),
+            [2, 3],
+            "torch.int16",
         );
 
         assert!(IrReplaceScalarWithTensorPass.run(&mut graph));

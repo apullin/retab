@@ -82,6 +82,8 @@ mod runner_logging;
 mod serialize;
 mod store;
 mod tensor_data;
+#[cfg(test)]
+mod test_ir;
 
 fn clone_bound_pyobject(exported_program: Option<&Bound<'_, PyAny>>) -> Option<PyObject> {
     exported_program.map(|ep| ep.clone().unbind())

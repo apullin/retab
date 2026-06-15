@@ -82,25 +82,11 @@ impl IrPass for IrAnnotateConvBiasDtypePass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::{i64_list_arg, NodeId, NodeMeta, QParam};
+    use crate::fx_ir::{i64_list_arg, NodeMeta, QParam};
+    use crate::test_ir::{call_with_meta, placeholder};
 
     fn qparam(scale: f64, zp: i64, dtype: &str) -> QParam {
         QParam::per_tensor(scale, zp, -32767, 32767, dtype.to_string())
-    }
-
-    fn placeholder(
-        graph: &mut IrGraph,
-        name: &str,
-        shape: impl Into<Vec<i64>>,
-        dtype: &str,
-    ) -> NodeId {
-        graph.add_node(
-            NodeOp::Placeholder,
-            name.to_string(),
-            name.to_string(),
-            Vec::new(),
-            NodeMeta::tensor(shape, dtype),
-        )
     }
 
     fn int16_conv_meta(shape: impl Into<Vec<i64>>, dtype: &str) -> NodeMeta {
@@ -120,10 +106,10 @@ mod tests {
         let input = placeholder(&mut graph, "input", [1, 3, 8, 8], "torch.int16");
         let weight = placeholder(&mut graph, "weight", [4, 3, 3, 3], "torch.int8");
         let bias = placeholder(&mut graph, "bias", [4], "torch.int32");
-        graph.add_node(
-            NodeOp::CallFunction,
-            "conv".to_string(),
-            "aten.convolution.default".to_string(),
+        call_with_meta(
+            &mut graph,
+            "conv",
+            "aten.convolution.default",
             vec![IrArg::Node(input), IrArg::Node(weight), IrArg::Node(bias)],
             int16_conv_meta([1, 4, 8, 8], "torch.int16"),
         );
@@ -138,10 +124,10 @@ mod tests {
         let input = placeholder(&mut graph, "input", [1, 3, 8, 8], "torch.int16");
         let weight = placeholder(&mut graph, "weight", [3, 4, 3, 3], "torch.int8");
         let bias = placeholder(&mut graph, "bias", [4], "torch.int32");
-        graph.add_node(
-            NodeOp::CallFunction,
-            "deconv".to_string(),
-            "aten.convolution.default".to_string(),
+        call_with_meta(
+            &mut graph,
+            "deconv",
+            "aten.convolution.default",
             vec![
                 IrArg::Node(input),
                 IrArg::Node(weight),

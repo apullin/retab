@@ -325,6 +325,7 @@ impl IrPass for IrInsertConvAccumulatorRescalePass {
 #[cfg(test)]
 mod tests {
     use crate::fx_ir::NodeMeta;
+    use crate::test_ir::{call_with_meta as call, meta as tensor_meta, output, placeholder};
 
     use super::*;
 
@@ -348,48 +349,8 @@ mod tests {
         meta
     }
 
-    fn tensor_meta(shape: &[i64], dtype: &str) -> NodeMeta {
-        NodeMeta::tensor(shape, dtype)
-    }
-
     fn int8_activation_meta() -> NodeMeta {
         tensor_meta(&[1, 4, 8, 8], "torch.int8")
-    }
-
-    fn placeholder(graph: &mut IrGraph, name: &str, shape: &[i64], dtype: &str) -> NodeId {
-        graph.add_node(
-            NodeOp::Placeholder,
-            name.to_string(),
-            name.to_string(),
-            Vec::new(),
-            tensor_meta(shape, dtype),
-        )
-    }
-
-    fn call(
-        graph: &mut IrGraph,
-        name: &str,
-        target: &str,
-        args: Vec<IrArg>,
-        meta: NodeMeta,
-    ) -> NodeId {
-        graph.add_node(
-            NodeOp::CallFunction,
-            name.to_string(),
-            target.to_string(),
-            args,
-            meta,
-        )
-    }
-
-    fn output(graph: &mut IrGraph, input: NodeId) -> NodeId {
-        graph.add_node(
-            NodeOp::Output,
-            "output".to_string(),
-            "output".to_string(),
-            vec![IrArg::Node(input)],
-            NodeMeta::default(),
-        )
     }
 
     fn int8_conv(graph: &mut IrGraph, target: &str, meta: NodeMeta) -> NodeId {
@@ -576,27 +537,9 @@ mod tests {
     #[test]
     fn decomposes_int16_bias_convolution_into_add_chain() {
         let mut graph = IrGraph::empty();
-        let input = graph.add_node(
-            NodeOp::Placeholder,
-            "input".to_string(),
-            "input".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[1, 3, 8, 8], "torch.int16"),
-        );
-        let weight = graph.add_node(
-            NodeOp::Placeholder,
-            "weight".to_string(),
-            "weight".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[4, 3, 3, 3], "torch.int8"),
-        );
-        let bias = graph.add_node(
-            NodeOp::Placeholder,
-            "bias".to_string(),
-            "bias".to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[4], "torch.int32"),
-        );
+        let input = placeholder(&mut graph, "input", &[1, 3, 8, 8], "torch.int16");
+        let weight = placeholder(&mut graph, "weight", &[4, 3, 3, 3], "torch.int8");
+        let bias = placeholder(&mut graph, "bias", &[4], "torch.int32");
         let mut conv_meta = NodeMeta::tensor(&[1, 4, 8, 8], "torch.int16");
         conv_meta.set_input_qparams_from([
             (0, qparam(0.5, 0, "torch.int16")),
@@ -607,27 +550,21 @@ mod tests {
             ),
         ]);
         conv_meta.set_single_output_qparam(qparam(0.0625, 7, "torch.int16"));
-        let conv = graph.add_node(
-            NodeOp::CallFunction,
-            "conv".to_string(),
-            "aten.convolution.default".to_string(),
+        let conv = call(
+            &mut graph,
+            "conv",
+            "aten.convolution.default",
             vec![IrArg::Node(input), IrArg::Node(weight), IrArg::Node(bias)],
             conv_meta,
         );
-        let user = graph.add_node(
-            NodeOp::CallFunction,
-            "user".to_string(),
-            "aten.view_copy.default".to_string(),
+        let user = call(
+            &mut graph,
+            "user",
+            "aten.view_copy.default",
             vec![IrArg::Node(conv)],
-            NodeMeta::tensor(&[1, 4, 8, 8], "torch.int16"),
+            tensor_meta(&[1, 4, 8, 8], "torch.int16"),
         );
-        graph.add_node(
-            NodeOp::Output,
-            "output".to_string(),
-            "output".to_string(),
-            vec![IrArg::Node(user)],
-            NodeMeta::default(),
-        );
+        output(&mut graph, user);
 
         assert!(IrInsertConvAccumulatorRescalePass.run(&mut graph));
 

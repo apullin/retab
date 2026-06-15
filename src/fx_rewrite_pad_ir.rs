@@ -9,8 +9,6 @@
 //!   reflect:   left=slice@(left-i),     right=slice@(size-2-i)
 //! Constant-mode pad is left to the serializer's existing handling.
 
-#[cfg(test)]
-use crate::fx_ir::NodeMeta;
 use crate::fx_ir::{IrArg, IrGraph, IrPass, IrRewriteCursor, NodeId, TensorMetaStamp};
 use crate::fx_target::is_pad_target;
 use crate::runner_logging::log_line;
@@ -205,26 +203,12 @@ impl IrPass for IrRewritePadPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::NodeOp;
     use crate::fx_target::{is_cat_target, is_slice_copy_tensor_target};
-
-    fn named<'a>(graph: &'a IrGraph, name: &str) -> &'a crate::fx_ir::IrNode {
-        graph
-            .nodes
-            .iter()
-            .find(|n| n.alive && n.name == name)
-            .unwrap_or_else(|| panic!("missing node {name}"))
-    }
+    use crate::test_ir::{call, live_node as named, output, placeholder};
 
     fn pad_graph(in_shape: &[i64], pad: &[i64], mode: &str) -> (IrGraph, NodeId) {
         let mut graph = IrGraph::empty();
-        let x = graph.add_node(
-            NodeOp::Placeholder,
-            "x".into(),
-            "x".into(),
-            vec![],
-            NodeMeta::tensor(in_shape, "torch.int8"),
-        );
+        let x = placeholder(&mut graph, "x", in_shape, "torch.int8");
         // output shape: last dim grows by pad[0]+pad[1] (single-dim pad)
         let mut out = in_shape.to_vec();
         *out.last_mut().unwrap() += pad[0] + pad[1];
@@ -233,20 +217,15 @@ mod tests {
             IrArg::List(pad.iter().map(|&v| IrArg::Int(v)).collect()),
             IrArg::Str(mode.into()),
         ];
-        let p = graph.add_node(
-            NodeOp::CallFunction,
-            "pad".into(),
-            "aten.pad.default".into(),
+        let p = call(
+            &mut graph,
+            "pad",
+            "aten.pad.default",
             pad_args,
-            NodeMeta::tensor(out.as_slice(), "torch.int8"),
+            out.as_slice(),
+            "torch.int8",
         );
-        graph.add_node(
-            NodeOp::Output,
-            "output".into(),
-            "output".into(),
-            vec![IrArg::Node(p)],
-            NodeMeta::default(),
-        );
+        output(&mut graph, p);
         (graph, p)
     }
 

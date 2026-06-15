@@ -230,7 +230,7 @@ impl IrPass for IrNormalizeIndexPutNoneIndicesPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::NodeOp;
+    use crate::test_ir::{call, output, placeholder};
 
     /// Build index_put(dest, indices, data) where indices is given as a list of
     /// Option<NodeId> (None -> IrArg::None).
@@ -240,50 +240,27 @@ mod tests {
         data_shape: &[i64],
     ) -> (IrGraph, NodeId) {
         let mut g = IrGraph::empty();
-        let dest = g.add_node(
-            NodeOp::Placeholder,
-            "dest".into(),
-            "dest".into(),
-            vec![],
-            NodeMeta::tensor(dest_shape, "torch.int8"),
-        );
+        let dest = placeholder(&mut g, "dest", dest_shape, "torch.int8");
         let mut idx_args = vec![];
         for (i, idx) in indices.iter().enumerate() {
             match idx {
                 Some(s) => {
-                    let n = g.add_node(
-                        NodeOp::Placeholder,
-                        format!("idx{i}"),
-                        format!("idx{i}"),
-                        vec![],
-                        NodeMeta::tensor(*s, "torch.int8"),
-                    );
+                    let n = placeholder(&mut g, format!("idx{i}"), *s, "torch.int8");
                     idx_args.push(IrArg::Node(n));
                 }
                 None => idx_args.push(IrArg::None),
             }
         }
-        let data = g.add_node(
-            NodeOp::Placeholder,
-            "data".into(),
-            "data".into(),
-            vec![],
-            NodeMeta::tensor(data_shape, "torch.int8"),
-        );
-        let put = g.add_node(
-            NodeOp::CallFunction,
-            "ip".into(),
-            "aten.index_put.default".into(),
+        let data = placeholder(&mut g, "data", data_shape, "torch.int8");
+        let put = call(
+            &mut g,
+            "ip",
+            "aten.index_put.default",
             vec![IrArg::Node(dest), IrArg::List(idx_args), IrArg::Node(data)],
-            NodeMeta::tensor(dest_shape, "torch.int8"),
+            dest_shape,
+            "torch.int8",
         );
-        g.add_node(
-            NodeOp::Output,
-            "output".into(),
-            "output".into(),
-            vec![IrArg::Node(put)],
-            NodeMeta::default(),
-        );
+        output(&mut g, put);
         (g, put)
     }
 

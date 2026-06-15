@@ -67,41 +67,30 @@ impl EffectfulIrPass for IrCastInt64ToInt32EffectPass {
 
 #[cfg(test)]
 mod tests {
-    use crate::fx_ir::{
-        IrArg, IrGraph, MetaValue, NodeMeta, NodeOp, NodeTensor, PlaceholderTensorBinding,
-    };
+    use crate::fx_ir::{IrArg, IrGraph, MetaValue, NodeMeta};
     use crate::store::TensorData;
+    use crate::test_ir::{buffer, call_default, parameter};
 
     use super::*;
 
     #[test]
     fn effectful_cast_plans_buffer_cast_and_updates_meta() {
         let mut graph = IrGraph::empty();
-        let placeholder = graph.add_node(
-            NodeOp::Placeholder,
-            "buf".to_string(),
-            "buf".to_string(),
-            Vec::<IrArg>::new(),
-            NodeMeta::default(),
-        );
-        graph.node_mut(placeholder).meta = NodeMeta::tensor([2], "torch.int64");
-        graph.node_mut(placeholder).tensor = Some(NodeTensor {
-            source: TensorSource::ExportedProgramInput(PlaceholderTensorBinding {
-                input_kind: LoweringInputKind::Buffer,
-                target_name: "state.buf".to_string(),
-            }),
-            data: TensorData {
+        let placeholder = buffer(
+            &mut graph,
+            "buf",
+            TensorData {
                 data: [1i64.to_le_bytes(), 2i64.to_le_bytes()].concat(),
                 shape: vec![2],
                 dtype: DType::Int64,
             },
-        });
-        let user = graph.add_node(
-            NodeOp::CallFunction,
-            "use_buf".to_string(),
-            "aten.add.Tensor".to_string(),
+        );
+        graph.node_mut(placeholder).meta = NodeMeta::tensor([2], "torch.int64");
+        let user = call_default(
+            &mut graph,
+            "use_buf",
+            "aten.add.Tensor",
             vec![IrArg::Node(placeholder)],
-            NodeMeta::default(),
         );
         graph
             .node_mut(user)
@@ -129,31 +118,21 @@ mod tests {
     #[test]
     fn skips_non_buffer_or_non_int64_placeholders() {
         let mut graph = IrGraph::empty();
-        let param = graph.add_node(
-            NodeOp::Placeholder,
-            "weight".to_string(),
-            "weight".to_string(),
-            Vec::<IrArg>::new(),
-            NodeMeta::default(),
-        );
-        graph.node_mut(param).meta = NodeMeta::tensor([1], "torch.int64");
-        graph.node_mut(param).tensor = Some(NodeTensor {
-            source: TensorSource::ExportedProgramInput(PlaceholderTensorBinding {
-                input_kind: LoweringInputKind::Parameter,
-                target_name: "state.weight".to_string(),
-            }),
-            data: TensorData {
+        let param = parameter(
+            &mut graph,
+            "weight",
+            TensorData {
                 data: 1i64.to_le_bytes().to_vec(),
                 shape: vec![1],
                 dtype: DType::Int64,
             },
-        });
-        let user = graph.add_node(
-            NodeOp::CallFunction,
-            "use_weight".to_string(),
-            "aten.add.Tensor".to_string(),
+        );
+        graph.node_mut(param).meta = NodeMeta::tensor([1], "torch.int64");
+        let user = call_default(
+            &mut graph,
+            "use_weight",
+            "aten.add.Tensor",
             vec![IrArg::Node(param)],
-            NodeMeta::default(),
         );
         graph
             .node_mut(user)

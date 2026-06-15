@@ -54,7 +54,8 @@ impl IrPass for IrRewriteMatmulRescalePass {
 
 #[cfg(test)]
 mod tests {
-    use crate::fx_ir::{IrArg, IrGraph, NodeMeta, NodeOp, QParam};
+    use crate::fx_ir::{IrArg, IrGraph, NodeMeta, QParam};
+    use crate::test_ir::{call, call_with_meta, f32_call, f32_placeholder, output, placeholder};
 
     use super::*;
 
@@ -65,47 +66,30 @@ mod tests {
     #[test]
     fn inserts_output_rescale_and_rewires_existing_users() {
         let mut graph = IrGraph::empty();
-        let lhs = graph.add_node(
-            NodeOp::Placeholder,
-            "lhs".to_string(),
-            "lhs".to_string(),
-            Vec::new(),
-            NodeMeta::tensor([2, 3], "torch.int8"),
-        );
-        let rhs = graph.add_node(
-            NodeOp::Placeholder,
-            "rhs".to_string(),
-            "rhs".to_string(),
-            Vec::new(),
-            NodeMeta::tensor([3, 4], "torch.int8"),
-        );
+        let lhs = placeholder(&mut graph, "lhs", [2, 3], "torch.int8");
+        let rhs = placeholder(&mut graph, "rhs", [3, 4], "torch.int8");
         let mut matmul_meta = NodeMeta::tensor([2, 4], "torch.int32");
         matmul_meta.set_input_qparams_from([
             (0, qparam(0.5, 3, "torch.int8")),
             (1, qparam(0.25, -4, "torch.int8")),
         ]);
         matmul_meta.set_single_output_qparam(qparam(0.125, 7, "torch.int8"));
-        let matmul = graph.add_node(
-            NodeOp::CallFunction,
-            "mm".to_string(),
-            "aten.mm.default".to_string(),
+        let matmul = call_with_meta(
+            &mut graph,
+            "mm",
+            "aten.mm.default",
             vec![IrArg::Node(lhs), IrArg::Node(rhs)],
             matmul_meta,
         );
-        let user = graph.add_node(
-            NodeOp::CallFunction,
-            "consumer".to_string(),
-            "aten.add.Tensor".to_string(),
+        let user = call(
+            &mut graph,
+            "consumer",
+            "aten.add.Tensor",
             vec![IrArg::Node(matmul), IrArg::Node(matmul)],
-            NodeMeta::tensor([2, 4], "torch.int8"),
+            [2, 4],
+            "torch.int8",
         );
-        graph.add_node(
-            NodeOp::Output,
-            "output".to_string(),
-            "output".to_string(),
-            vec![IrArg::Node(user)],
-            NodeMeta::default(),
-        );
+        output(&mut graph, user);
 
         assert!(IrRewriteMatmulRescalePass.run(&mut graph));
         let rescale = graph.by_name("mm_output_rescale").unwrap();
@@ -128,26 +112,14 @@ mod tests {
     #[test]
     fn skips_matmul_without_quantization_metadata() {
         let mut graph = IrGraph::empty();
-        let lhs = graph.add_node(
-            NodeOp::Placeholder,
-            "lhs".to_string(),
-            "lhs".to_string(),
-            Vec::new(),
-            NodeMeta::tensor([2, 3], "torch.float32"),
-        );
-        let rhs = graph.add_node(
-            NodeOp::Placeholder,
-            "rhs".to_string(),
-            "rhs".to_string(),
-            Vec::new(),
-            NodeMeta::tensor([3, 4], "torch.float32"),
-        );
-        graph.add_node(
-            NodeOp::CallFunction,
-            "mm".to_string(),
-            "aten.mm.default".to_string(),
+        let lhs = f32_placeholder(&mut graph, "lhs", [2, 3]);
+        let rhs = f32_placeholder(&mut graph, "rhs", [3, 4]);
+        f32_call(
+            &mut graph,
+            "mm",
+            "aten.mm.default",
             vec![IrArg::Node(lhs), IrArg::Node(rhs)],
-            NodeMeta::tensor([2, 4], "torch.float32"),
+            [2, 4],
         );
 
         assert!(!IrRewriteMatmulRescalePass.run(&mut graph));

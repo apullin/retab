@@ -272,22 +272,16 @@ impl IrPass for IrDecomposeQuantPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::NodeOp;
+    use crate::test_ir::{call, output, placeholder};
 
     #[test]
     fn decompose_quant_skips_identity_int32_input_casts() {
         let mut graph = IrGraph::empty();
-        let input = graph.add_node(
-            NodeOp::Placeholder,
-            "x".to_string(),
-            "x".to_string(),
-            vec![],
-            NodeMeta::tensor([2], "torch.int32"),
-        );
-        let dq = graph.add_node(
-            NodeOp::CallFunction,
-            "dq".to_string(),
-            "quantized_decomposed.dequantize_per_tensor.default".to_string(),
+        let input = placeholder(&mut graph, "x", [2], "torch.int32");
+        let dq = call(
+            &mut graph,
+            "dq",
+            "quantized_decomposed.dequantize_per_tensor.default",
             vec![
                 IrArg::Node(input),
                 IrArg::Float(0.25),
@@ -296,15 +290,10 @@ mod tests {
                 IrArg::Int(i32::MAX as i64),
                 IrArg::Dtype("torch.int32".to_string()),
             ],
-            NodeMeta::tensor([2], "torch.float32"),
+            [2],
+            "torch.float32",
         );
-        let _output = graph.add_node(
-            NodeOp::Output,
-            "output".to_string(),
-            "output".to_string(),
-            vec![IrArg::Node(dq)],
-            NodeMeta::tensor([2], "torch.float32"),
-        );
+        output(&mut graph, dq);
 
         assert!(IrDecomposeQuantPass.run(&mut graph));
         assert!(graph.by_name("dq_to_i32").is_none());

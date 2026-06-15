@@ -92,22 +92,16 @@ impl IrPass for IrInsertQdqRescalePass {
 mod tests {
     use super::*;
     use crate::fx_ir::IrArg;
-    use crate::fx_ir::NodeMeta;
+    use crate::test_ir::{call, f32_call, placeholder};
 
     #[test]
     fn folds_dq_q_pair_into_rescale() {
         let mut graph = IrGraph::empty();
-        let source = graph.add_node(
-            NodeOp::Placeholder,
-            "input".to_string(),
-            "input".to_string(),
-            Vec::new(),
-            NodeMeta::tensor([1, 3, 4, 4], "torch.int8"),
-        );
-        let dq = graph.add_node(
-            NodeOp::CallFunction,
-            "dq".to_string(),
-            "quantized_decomposed.dequantize_per_tensor.default".to_string(),
+        let source = placeholder(&mut graph, "input", [1, 3, 4, 4], "torch.int8");
+        let dq = f32_call(
+            &mut graph,
+            "dq",
+            "quantized_decomposed.dequantize_per_tensor.default",
             vec![
                 IrArg::Node(source),
                 IrArg::Float(0.5),
@@ -116,12 +110,12 @@ mod tests {
                 IrArg::Int(127),
                 IrArg::Dtype("torch.int8".to_string()),
             ],
-            NodeMeta::tensor([1, 3, 4, 4], "torch.float32"),
+            [1, 3, 4, 4],
         );
-        let q = graph.add_node(
-            NodeOp::CallFunction,
-            "q".to_string(),
-            "quantized_decomposed.quantize_per_tensor.default".to_string(),
+        let q = call(
+            &mut graph,
+            "q",
+            "quantized_decomposed.quantize_per_tensor.default",
             vec![
                 IrArg::Node(dq),
                 IrArg::Float(0.25),
@@ -130,14 +124,16 @@ mod tests {
                 IrArg::Int(127),
                 IrArg::Dtype("torch.int8".to_string()),
             ],
-            NodeMeta::tensor([1, 3, 4, 4], "torch.int8"),
+            [1, 3, 4, 4],
+            "torch.int8",
         );
-        let user = graph.add_node(
-            NodeOp::CallFunction,
-            "user".to_string(),
-            "aten.view_copy.default".to_string(),
+        let user = call(
+            &mut graph,
+            "user",
+            "aten.view_copy.default",
             vec![IrArg::Node(q)],
-            NodeMeta::tensor([1, 48], "torch.int8"),
+            [1, 48],
+            "torch.int8",
         );
 
         assert!(IrInsertQdqRescalePass.run(&mut graph));
@@ -165,17 +161,11 @@ mod tests {
     #[test]
     fn skips_non_q_user() {
         let mut graph = IrGraph::empty();
-        let source = graph.add_node(
-            NodeOp::Placeholder,
-            "input".to_string(),
-            "input".to_string(),
-            Vec::new(),
-            NodeMeta::tensor([1], "torch.int8"),
-        );
-        let dq = graph.add_node(
-            NodeOp::CallFunction,
-            "dq".to_string(),
-            "quantized_decomposed.dequantize_per_tensor.default".to_string(),
+        let source = placeholder(&mut graph, "input", [1], "torch.int8");
+        let dq = f32_call(
+            &mut graph,
+            "dq",
+            "quantized_decomposed.dequantize_per_tensor.default",
             vec![
                 IrArg::Node(source),
                 IrArg::Float(0.5),
@@ -184,14 +174,14 @@ mod tests {
                 IrArg::Int(127),
                 IrArg::Dtype("torch.int8".to_string()),
             ],
-            NodeMeta::tensor([1], "torch.float32"),
+            [1],
         );
-        graph.add_node(
-            NodeOp::CallFunction,
-            "user".to_string(),
-            "aten.relu.default".to_string(),
+        f32_call(
+            &mut graph,
+            "user",
+            "aten.relu.default",
             vec![IrArg::Node(dq)],
-            NodeMeta::tensor([1], "torch.float32"),
+            [1],
         );
 
         assert!(!IrInsertQdqRescalePass.run(&mut graph));

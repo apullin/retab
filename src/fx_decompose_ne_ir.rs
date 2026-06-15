@@ -4,9 +4,6 @@ use crate::fx_ir::{IrArg, IrGraph, IrPass};
 use crate::fx_target::not_equal_replacement_target;
 use crate::runner_logging::log_line;
 
-#[cfg(test)]
-use crate::fx_ir::NodeMeta;
-
 pub struct IrDecomposeNotEqualPass;
 
 impl IrPass for IrDecomposeNotEqualPass {
@@ -56,37 +53,22 @@ impl IrPass for IrDecomposeNotEqualPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::{NodeId, NodeOp};
-
-    fn placeholder(graph: &mut IrGraph, name: &str, shape: &[i64], dtype: &str) -> NodeId {
-        graph.add_node(
-            NodeOp::Placeholder,
-            name.to_string(),
-            name.to_string(),
-            Vec::new(),
-            NodeMeta::tensor(shape, dtype),
-        )
-    }
+    use crate::test_ir::{call, output, placeholder};
 
     #[test]
     fn decomposes_ne_tensor_to_eq_then_logical_not() {
         let mut graph = IrGraph::empty();
         let lhs = placeholder(&mut graph, "lhs", &[2, 3], "torch.float32");
         let rhs = placeholder(&mut graph, "rhs", &[2, 3], "torch.float32");
-        let ne = graph.add_node(
-            NodeOp::CallFunction,
-            "ne".to_string(),
-            "aten.ne.Tensor".to_string(),
+        let ne = call(
+            &mut graph,
+            "ne",
+            "aten.ne.Tensor",
             vec![IrArg::Node(lhs), IrArg::Node(rhs)],
-            NodeMeta::tensor([2, 3], "torch.bool"),
+            [2, 3],
+            "torch.bool",
         );
-        graph.add_node(
-            NodeOp::Output,
-            "output".to_string(),
-            "output".to_string(),
-            vec![IrArg::Node(ne)],
-            NodeMeta::default(),
-        );
+        output(&mut graph, ne);
 
         assert!(IrDecomposeNotEqualPass.run(&mut graph));
         assert!(!graph.nodes[ne].alive);
@@ -108,12 +90,13 @@ mod tests {
     fn decomposes_ne_scalar_to_eq_scalar_then_logical_not() {
         let mut graph = IrGraph::empty();
         let lhs = placeholder(&mut graph, "lhs", &[4], "torch.float32");
-        let ne = graph.add_node(
-            NodeOp::CallFunction,
-            "ne_scalar".to_string(),
-            "aten.ne.Scalar".to_string(),
+        let ne = call(
+            &mut graph,
+            "ne_scalar",
+            "aten.ne.Scalar",
             vec![IrArg::Node(lhs), IrArg::Float(1.0)],
-            NodeMeta::tensor([4], "torch.bool"),
+            [4],
+            "torch.bool",
         );
 
         assert!(IrDecomposeNotEqualPass.run(&mut graph));

@@ -47,32 +47,12 @@ impl EffectfulIrPass for IrFuseShapeOnlyConstantsEffectPass {
 
 #[cfg(test)]
 mod tests {
-    use crate::fx_ir::{
-        IrArg, IrGraph, NodeMeta, NodeTensor, PlaceholderTensorBinding, TensorSource,
-    };
+    use crate::fx_ir::{IrArg, IrGraph, NodeMeta, NodeOp};
     use crate::graph::ir::DType;
-    use crate::lowering_effects::LoweringInputKind;
     use crate::store::TensorData;
+    use crate::test_ir::buffer as constant_placeholder;
 
     use super::*;
-
-    fn constant_placeholder(graph: &mut IrGraph, name: &str, data: TensorData) -> usize {
-        let node_id = graph.add_node(
-            NodeOp::Placeholder,
-            name.to_string(),
-            name.to_string(),
-            Vec::new(),
-            NodeMeta::default(),
-        );
-        graph.node_mut(node_id).tensor = Some(NodeTensor {
-            source: TensorSource::ExportedProgramInput(PlaceholderTensorBinding {
-                input_kind: LoweringInputKind::Buffer,
-                target_name: format!("state.{name}"),
-            }),
-            data,
-        });
-        node_id
-    }
 
     #[test]
     fn plans_shape_only_constant_chain() {

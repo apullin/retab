@@ -104,32 +104,12 @@ impl EffectfulIrPass for IrFuseConstantInputsEffectPass {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::fx_ir::{
-        IrArg, IrGraph, NodeMeta, NodeTensor, PlaceholderTensorBinding, QParam, TensorSource,
-    };
+    use crate::fx_ir::{IrArg, IrGraph, NodeMeta, NodeOp, QParam};
     use crate::graph::ir::DType;
-    use crate::lowering_effects::LoweringInputKind;
     use crate::store::TensorData;
+    use crate::test_ir::{f32_tensor as float32_tensor, parameter as constant_placeholder};
 
     use super::*;
-
-    fn constant_placeholder(graph: &mut IrGraph, name: &str, data: TensorData) -> usize {
-        let node_id = graph.add_node(
-            NodeOp::Placeholder,
-            name.to_string(),
-            name.to_string(),
-            Vec::new(),
-            NodeMeta::default(),
-        );
-        graph.node_mut(node_id).tensor = Some(NodeTensor {
-            source: TensorSource::ExportedProgramInput(PlaceholderTensorBinding {
-                input_kind: LoweringInputKind::Parameter,
-                target_name: format!("state.{name}"),
-            }),
-            data,
-        });
-        node_id
-    }
 
     #[test]
     fn plans_matmul_ops_after_zero_input_and_shape_only_constant_chain() {
@@ -335,17 +315,6 @@ mod tests {
             .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
             .collect::<Vec<_>>();
         assert_eq!(values, vec![3, 4]);
-    }
-
-    fn float32_tensor(shape: Vec<i64>, values: &[f32]) -> TensorData {
-        TensorData {
-            data: values
-                .iter()
-                .flat_map(|value| value.to_le_bytes())
-                .collect(),
-            shape,
-            dtype: DType::Float32,
-        }
     }
 
     #[test]

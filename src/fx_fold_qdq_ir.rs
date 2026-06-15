@@ -492,6 +492,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::fx_ir::{IrNode, MetaValue};
+    use crate::test_ir::{call_default as qdq_node, output, placeholder_default as placeholder};
 
     use super::*;
 
@@ -552,39 +553,6 @@ mod tests {
             i32::MIN as i64,
             i32::MAX as i64,
             "torch.int32",
-        )
-    }
-
-    fn placeholder(graph: &mut IrGraph, name: &str) -> NodeId {
-        add_node(
-            graph,
-            NodeOp::Placeholder,
-            name,
-            name,
-            vec![],
-            NodeMeta::default(),
-        )
-    }
-
-    fn output(graph: &mut IrGraph, input: NodeId) -> NodeId {
-        add_node(
-            graph,
-            NodeOp::Output,
-            "output",
-            "output",
-            vec![IrArg::Node(input)],
-            NodeMeta::default(),
-        )
-    }
-
-    fn qdq_node(graph: &mut IrGraph, name: &str, target: &str, args: Vec<IrArg>) -> NodeId {
-        add_node(
-            graph,
-            NodeOp::CallFunction,
-            name,
-            target,
-            args,
-            NodeMeta::default(),
         )
     }
 

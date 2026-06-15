@@ -827,71 +827,12 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_ir::{
+        call, f32_call, f32_meta, f32_placeholder, has_live_target, live_node, meta as tensor_meta,
+        placeholder,
+    };
+
     use super::*;
-
-    fn tensor_meta(shape: &[i64], dtype: &str) -> NodeMeta {
-        NodeMeta::tensor(shape, dtype)
-    }
-
-    fn f32_meta(shape: &[i64]) -> NodeMeta {
-        tensor_meta(shape, "torch.float32")
-    }
-
-    fn placeholder(graph: &mut IrGraph, name: &str, shape: &[i64], dtype: &str) -> NodeId {
-        graph.add_node(
-            NodeOp::Placeholder,
-            name.to_string(),
-            name.to_string(),
-            vec![],
-            tensor_meta(shape, dtype),
-        )
-    }
-
-    fn f32_placeholder(graph: &mut IrGraph, name: &str, shape: &[i64]) -> NodeId {
-        placeholder(graph, name, shape, "torch.float32")
-    }
-
-    fn call(
-        graph: &mut IrGraph,
-        name: &str,
-        target: &str,
-        args: Vec<IrArg>,
-        shape: &[i64],
-        dtype: &str,
-    ) -> NodeId {
-        graph.add_node(
-            NodeOp::CallFunction,
-            name.to_string(),
-            target.to_string(),
-            args,
-            tensor_meta(shape, dtype),
-        )
-    }
-
-    fn f32_call(
-        graph: &mut IrGraph,
-        name: &str,
-        target: &str,
-        args: Vec<IrArg>,
-        shape: &[i64],
-    ) -> NodeId {
-        call(graph, name, target, args, shape, "torch.float32")
-    }
-
-    fn live_node<'a>(graph: &'a IrGraph, name: &str) -> &'a crate::fx_ir::IrNode {
-        graph
-            .nodes
-            .iter()
-            .find(|node| node.alive && node.name == name)
-            .unwrap_or_else(|| panic!("missing live node {name}"))
-    }
-
-    fn has_live_target(graph: &IrGraph, name: &str, target: &str) -> bool {
-        graph
-            .nodes
-            .iter()
-            .any(|node| node.alive && node.name == name && node.target == target)
-    }
 
     #[test]
     fn decompose_max_dim_rewrites_to_amax_and_squeeze() {

@@ -372,34 +372,15 @@ impl EffectfulIrPass for IrFuseZeroInputConstantsEffectPass {
 
 #[cfg(test)]
 mod tests {
-    use crate::fx_ir::{IrGraph, NodeMeta};
+    use crate::fx_ir::IrGraph;
+    use crate::test_ir::{call_default as add_call, placeholder_default as placeholder};
 
     use super::*;
-
-    fn add_call(graph: &mut IrGraph, name: &str, target: &str, args: Vec<IrArg>) -> usize {
-        graph.add_node(
-            NodeOp::CallFunction,
-            name.to_string(),
-            target.to_string(),
-            args,
-            NodeMeta::default(),
-        )
-    }
 
     fn add_f32_call(graph: &mut IrGraph, name: &str, target: &str, args: Vec<IrArg>) -> usize {
         let id = add_call(graph, name, target, args);
         graph.set_kwarg(id, "dtype", IrArg::Dtype("torch.float32".to_string()));
         id
-    }
-
-    fn placeholder(graph: &mut IrGraph, name: &str) -> usize {
-        graph.add_node(
-            NodeOp::Placeholder,
-            name.to_string(),
-            name.to_string(),
-            Vec::new(),
-            NodeMeta::default(),
-        )
     }
 
     fn placeholder_with_qparam(graph: &mut IrGraph, name: &str, qparam: QParam) -> usize {

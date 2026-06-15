@@ -384,7 +384,8 @@ impl EffectfulIrPass for IrInsertTableOpsEffectPass {
 
 #[cfg(test)]
 mod tests {
-    use crate::fx_ir::{IrArg, IrGraph, NodeMeta, NodeOp, QParam};
+    use crate::fx_ir::{IrArg, IrGraph, NodeMeta, QParam};
+    use crate::test_ir::{call_default, call_with_meta};
 
     use super::*;
 
@@ -399,13 +400,7 @@ mod tests {
     }
 
     fn table_node(graph: &mut IrGraph, name: &str, target: &str, args: Vec<IrArg>) -> usize {
-        graph.add_node(
-            NodeOp::CallFunction,
-            name.to_string(),
-            target.to_string(),
-            args,
-            table_meta(qparam()),
-        )
+        call_with_meta(graph, name, target, args, table_meta(qparam()))
     }
 
     fn table_node_with_qparam(
@@ -415,13 +410,7 @@ mod tests {
         args: Vec<IrArg>,
         qparam: QParam,
     ) -> usize {
-        graph.add_node(
-            NodeOp::CallFunction,
-            name.to_string(),
-            target.to_string(),
-            args,
-            table_meta(qparam),
-        )
+        call_with_meta(graph, name, target, args, table_meta(qparam))
     }
 
     fn table_node_with_approximate(graph: &mut IrGraph, name: &str, approximate: &str) {
@@ -568,13 +557,7 @@ mod tests {
     #[test]
     fn skips_unquantized_or_unsupported_nodes() {
         let mut graph = IrGraph::empty();
-        graph.add_node(
-            NodeOp::CallFunction,
-            "sigmoid".to_string(),
-            "aten.sigmoid.default".to_string(),
-            Vec::new(),
-            NodeMeta::default(),
-        );
+        call_default(&mut graph, "sigmoid", "aten.sigmoid.default", Vec::new());
         table_node(&mut graph, "add", "aten.add.Tensor", Vec::new());
 
         let result = IrInsertTableOpsEffectPass.run(&mut graph);

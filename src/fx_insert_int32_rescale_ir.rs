@@ -340,35 +340,10 @@ impl IrPass for IrInsertInt32RescalePass {
 mod tests {
     use super::*;
     use crate::fx_ir::NodeMeta;
+    use crate::test_ir::{call_with_meta as call, placeholder};
 
     fn qparam(scale: f64, zp: i64, dtype: &str) -> QParam {
         QParam::per_tensor(scale, zp, -128, 127, dtype.to_string())
-    }
-
-    fn placeholder(graph: &mut IrGraph, name: &str, dtype: &str) -> NodeId {
-        graph.add_node(
-            NodeOp::Placeholder,
-            name.to_string(),
-            name.to_string(),
-            Vec::new(),
-            NodeMeta::tensor(&[2], dtype),
-        )
-    }
-
-    fn call(
-        graph: &mut IrGraph,
-        name: &str,
-        target: &str,
-        args: Vec<IrArg>,
-        meta: NodeMeta,
-    ) -> NodeId {
-        graph.add_node(
-            NodeOp::CallFunction,
-            name.to_string(),
-            target.to_string(),
-            args,
-            meta,
-        )
     }
 
     fn view_user(graph: &mut IrGraph, input: NodeId, dtype: &str) -> NodeId {
@@ -384,8 +359,8 @@ mod tests {
     #[test]
     fn rescales_add_inputs_and_output() {
         let mut graph = IrGraph::empty();
-        let lhs = placeholder(&mut graph, "lhs", "torch.int8");
-        let rhs = placeholder(&mut graph, "rhs", "torch.int8");
+        let lhs = placeholder(&mut graph, "lhs", [2], "torch.int8");
+        let rhs = placeholder(&mut graph, "rhs", [2], "torch.int8");
         let mut add_meta = NodeMeta::tensor(&[2], "torch.int8");
         add_meta.set_input_qparams_from([
             (0, qparam(0.25, 3, "torch.int8")),
@@ -418,8 +393,8 @@ mod tests {
     #[test]
     fn rescales_int32_add_inputs_and_output() {
         let mut graph = IrGraph::empty();
-        let lhs = placeholder(&mut graph, "lhs", "torch.int32");
-        let rhs = placeholder(&mut graph, "rhs", "torch.int32");
+        let lhs = placeholder(&mut graph, "lhs", [2], "torch.int32");
+        let rhs = placeholder(&mut graph, "rhs", [2], "torch.int32");
         let mut add_meta = NodeMeta::tensor(&[2], "torch.int32");
         add_meta.set_input_qparams_from([(0, int32_qparam(0.25)), (1, int32_qparam(0.5))]);
         add_meta.set_single_output_qparam(int32_qparam(0.125));
@@ -448,9 +423,9 @@ mod tests {
     #[test]
     fn where_with_mismatched_output_domain_gets_output_rescale() {
         let mut graph = IrGraph::empty();
-        let cond = placeholder(&mut graph, "cond", "torch.bool");
-        let lhs = placeholder(&mut graph, "lhs", "torch.int8");
-        let rhs = placeholder(&mut graph, "rhs", "torch.int8");
+        let cond = placeholder(&mut graph, "cond", [2], "torch.bool");
+        let lhs = placeholder(&mut graph, "lhs", [2], "torch.int8");
+        let rhs = placeholder(&mut graph, "rhs", [2], "torch.int8");
         let mut where_meta = NodeMeta::tensor(&[2], "torch.int8");
         where_meta.set_input_qparams_from([
             (1, qparam(0.5, 3, "torch.int8")),

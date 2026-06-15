@@ -245,30 +245,18 @@ impl IrPass for IrDecomposeSliceScatterPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::{NodeMeta, NodeOp};
     use crate::fx_target::{is_cat_target, is_index_put_default_target};
+    use crate::test_ir::{f32_call, f32_placeholder};
 
     #[test]
     fn decompose_slice_scatter_step1_rewrites_to_cat() {
         let mut graph = IrGraph::empty();
-        let x = graph.add_node(
-            NodeOp::Placeholder,
-            "x".to_string(),
-            "x".to_string(),
-            vec![],
-            NodeMeta::tensor([5, 9], "torch.float32"),
-        );
-        let src = graph.add_node(
-            NodeOp::Placeholder,
-            "src".to_string(),
-            "src".to_string(),
-            vec![],
-            NodeMeta::tensor([5, 5], "torch.float32"),
-        );
-        let node = graph.add_node(
-            NodeOp::CallFunction,
-            "slice_scatter".to_string(),
-            "aten.slice_scatter.default".to_string(),
+        let x = f32_placeholder(&mut graph, "x", [5, 9]);
+        let src = f32_placeholder(&mut graph, "src", [5, 5]);
+        let node = f32_call(
+            &mut graph,
+            "slice_scatter",
+            "aten.slice_scatter.default",
             vec![
                 IrArg::Node(x),
                 IrArg::Node(src),
@@ -277,7 +265,7 @@ mod tests {
                 IrArg::Int(7),
                 IrArg::Int(1),
             ],
-            NodeMeta::tensor([5, 9], "torch.float32"),
+            [5, 9],
         );
 
         assert!(IrDecomposeSliceScatterPass.run(&mut graph));
@@ -291,24 +279,12 @@ mod tests {
     #[test]
     fn decompose_slice_scatter_stepn_rewrites_to_index_put() {
         let mut graph = IrGraph::empty();
-        let x = graph.add_node(
-            NodeOp::Placeholder,
-            "x".to_string(),
-            "x".to_string(),
-            vec![],
-            NodeMeta::tensor([2, 4, 6], "torch.float32"),
-        );
-        let src = graph.add_node(
-            NodeOp::Placeholder,
-            "src".to_string(),
-            "src".to_string(),
-            vec![],
-            NodeMeta::tensor([2, 4, 2], "torch.float32"),
-        );
-        let node = graph.add_node(
-            NodeOp::CallFunction,
-            "slice_scatter".to_string(),
-            "aten.slice_scatter.default".to_string(),
+        let x = f32_placeholder(&mut graph, "x", [2, 4, 6]);
+        let src = f32_placeholder(&mut graph, "src", [2, 4, 2]);
+        let node = f32_call(
+            &mut graph,
+            "slice_scatter",
+            "aten.slice_scatter.default",
             vec![
                 IrArg::Node(x),
                 IrArg::Node(src),
@@ -317,7 +293,7 @@ mod tests {
                 IrArg::Int(5),
                 IrArg::Int(2),
             ],
-            NodeMeta::tensor([2, 4, 6], "torch.float32"),
+            [2, 4, 6],
         );
 
         assert!(IrDecomposeSliceScatterPass.run(&mut graph));

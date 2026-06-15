@@ -366,16 +366,7 @@ impl IrPass for IrDecomposeGroupedConvPass {
 mod tests {
     use super::*;
     use crate::fx_ir::{i64_list_arg as i64_list, QParam};
-
-    fn placeholder(graph: &mut IrGraph, name: &str, shape: &[i64]) -> NodeId {
-        graph.add_node(
-            NodeOp::Placeholder,
-            name.to_string(),
-            name.to_string(),
-            Vec::new(),
-            NodeMeta::tensor(shape, "torch.int8"),
-        )
-    }
+    use crate::test_ir::{call_with_meta, output, placeholder};
 
     fn per_channel_qparam(scales: &[f64]) -> QParam {
         QParam {
@@ -402,10 +393,10 @@ mod tests {
         groups: i64,
         meta: NodeMeta,
     ) -> NodeId {
-        graph.add_node(
-            NodeOp::CallFunction,
-            "conv".to_string(),
-            "aten.convolution.default".to_string(),
+        call_with_meta(
+            graph,
+            "conv",
+            "aten.convolution.default",
             vec![
                 IrArg::Node(input),
                 IrArg::Node(weight),
@@ -424,9 +415,9 @@ mod tests {
     #[test]
     fn decomposes_grouped_conv_and_slices_per_channel_qparams() {
         let mut graph = IrGraph::empty();
-        let input = placeholder(&mut graph, "input", &[1, 6, 8, 8]);
-        let weight = placeholder(&mut graph, "weight", &[12, 2, 3, 3]);
-        let bias = placeholder(&mut graph, "bias", &[12]);
+        let input = placeholder(&mut graph, "input", [1, 6, 8, 8], "torch.int8");
+        let weight = placeholder(&mut graph, "weight", [12, 2, 3, 3], "torch.int8");
+        let bias = placeholder(&mut graph, "bias", [12], "torch.int8");
         let mut conv_meta = NodeMeta::tensor([1, 12, 6, 6], "torch.int8");
         conv_meta.set_input_qparams_from([
             (0, per_tensor_qparam(0.25)),
@@ -442,13 +433,7 @@ mod tests {
         conv_meta.set_single_output_qparam(per_tensor_qparam(0.5));
 
         let conv = conv_call(&mut graph, input, weight, Some(bias), 3, conv_meta);
-        graph.add_node(
-            NodeOp::Output,
-            "output".to_string(),
-            "output".to_string(),
-            vec![IrArg::Node(conv)],
-            NodeMeta::default(),
-        );
+        output(&mut graph, conv);
 
         assert!(IrDecomposeGroupedConvPass.run(&mut graph));
         assert!(!graph.nodes[conv].alive);
@@ -466,8 +451,8 @@ mod tests {
     #[test]
     fn skips_depthwise_conv() {
         let mut graph = IrGraph::empty();
-        let input = placeholder(&mut graph, "input", &[1, 4, 8, 8]);
-        let weight = placeholder(&mut graph, "weight", &[4, 1, 3, 3]);
+        let input = placeholder(&mut graph, "input", [1, 4, 8, 8], "torch.int8");
+        let weight = placeholder(&mut graph, "weight", [4, 1, 3, 3], "torch.int8");
         conv_call(
             &mut graph,
             input,

@@ -614,380 +614,415 @@ pub(crate) fn group_norm_reshape_target(target: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
+    fn assert_cases<T>(classify: impl Fn(&str) -> T, cases: &[(&str, T)])
+    where
+        T: Clone + std::fmt::Debug + PartialEq,
+    {
+        for (target, expected) in cases {
+            assert_eq!(classify(target), expected.clone(), "{target}");
+        }
+    }
+
+    fn assert_true(predicate: impl Fn(&str) -> bool, cases: &[&str]) {
+        for target in cases {
+            assert!(predicate(target), "{target}");
+        }
+    }
+
+    fn assert_false(predicate: impl Fn(&str) -> bool, cases: &[&str]) {
+        for target in cases {
+            assert!(!predicate(target), "{target}");
+        }
+    }
+
     #[test]
     fn separates_quantize_from_dequantize() {
-        assert_eq!(
-            classify_ir_target("quantized_decomposed.quantize_per_tensor.default"),
-            IrTargetKind::QuantizePerTensor
-        );
-        assert_eq!(
-            classify_ir_target("quantized_decomposed.quantize_per_channel.default"),
-            IrTargetKind::QuantizePerChannel
-        );
-        assert_eq!(
-            classify_ir_target("quantized_decomposed.dequantize_per_tensor.default"),
-            IrTargetKind::DequantizePerTensor
-        );
-        assert_eq!(
-            classify_ir_target("quantized_decomposed.dequantize_per_channel.default"),
-            IrTargetKind::DequantizePerChannel
+        assert_cases(
+            classify_ir_target,
+            &[
+                (
+                    "quantized_decomposed.quantize_per_tensor.default",
+                    IrTargetKind::QuantizePerTensor,
+                ),
+                (
+                    "quantized_decomposed.quantize_per_channel.default",
+                    IrTargetKind::QuantizePerChannel,
+                ),
+                (
+                    "quantized_decomposed.dequantize_per_tensor.default",
+                    IrTargetKind::DequantizePerTensor,
+                ),
+                (
+                    "quantized_decomposed.dequantize_per_channel.default",
+                    IrTargetKind::DequantizePerChannel,
+                ),
+            ],
         );
     }
 
     #[test]
     fn recognizes_tosa_rescale_case_insensitively() {
-        assert_eq!(
-            classify_ir_target("backend.tosa.RESCALE.default"),
-            IrTargetKind::TosaRescale
-        );
-        assert_eq!(
-            classify_ir_target("tosa.rescale.default"),
-            IrTargetKind::TosaRescale
+        assert_cases(
+            classify_ir_target,
+            &[
+                ("backend.tosa.RESCALE.default", IrTargetKind::TosaRescale),
+                ("tosa.rescale.default", IrTargetKind::TosaRescale),
+            ],
         );
     }
 
     #[test]
     fn recognizes_activation_and_producer_targets() {
-        assert_eq!(
-            classify_ir_target("aten.relu.default"),
-            IrTargetKind::AtenRelu
-        );
-        assert_eq!(
-            classify_ir_target("aten.hardtanh.default"),
-            IrTargetKind::AtenHardtanh
-        );
-        assert_eq!(
-            classify_ir_target("aten.convolution.default"),
-            IrTargetKind::AtenConv
-        );
-        assert_eq!(
-            classify_ir_target("aten.linear.default"),
-            IrTargetKind::AtenLinear
+        assert_cases(
+            classify_ir_target,
+            &[
+                ("aten.relu.default", IrTargetKind::AtenRelu),
+                ("aten.hardtanh.default", IrTargetKind::AtenHardtanh),
+                ("aten.convolution.default", IrTargetKind::AtenConv),
+                ("aten.linear.default", IrTargetKind::AtenLinear),
+            ],
         );
     }
 
     #[test]
     fn distinguishes_matmul_overloads() {
-        assert_eq!(
-            classify_ir_target("aten.matmul.default"),
-            IrTargetKind::AtenMatmul
-        );
-        assert_eq!(classify_ir_target("aten.mm.default"), IrTargetKind::AtenMm);
-        assert_eq!(
-            classify_ir_target("aten.bmm.default"),
-            IrTargetKind::AtenBmm
-        );
-        assert_eq!(
-            classify_ir_target("aten.addmm.default"),
-            IrTargetKind::AtenAddmm
+        assert_cases(
+            classify_ir_target,
+            &[
+                ("aten.matmul.default", IrTargetKind::AtenMatmul),
+                ("aten.mm.default", IrTargetKind::AtenMm),
+                ("aten.bmm.default", IrTargetKind::AtenBmm),
+                ("aten.addmm.default", IrTargetKind::AtenAddmm),
+            ],
         );
     }
 
     #[test]
     fn recognizes_exact_control_flow_symbols() {
-        assert_eq!(classify_ir_target("cond"), IrTargetKind::Cond);
-        assert_eq!(
-            classify_ir_target("torch.ops.higher_order.while_loop"),
-            IrTargetKind::WhileLoop
-        );
-        assert_eq!(
-            classify_ir_target("operator.getitem"),
-            IrTargetKind::GetItem
+        assert_cases(
+            classify_ir_target,
+            &[
+                ("cond", IrTargetKind::Cond),
+                ("torch.ops.higher_order.while_loop", IrTargetKind::WhileLoop),
+                ("operator.getitem", IrTargetKind::GetItem),
+            ],
         );
     }
 
     #[test]
     fn recognizes_constant_target_families() {
-        assert_eq!(
-            zero_input_constant_target("aten.full.default"),
-            Some(ZeroInputConstantTarget::Full)
+        assert_cases(
+            zero_input_constant_target,
+            &[
+                ("aten.full.default", Some(ZeroInputConstantTarget::Full)),
+                ("aten.arange.start", Some(ZeroInputConstantTarget::Arange)),
+                (
+                    "aten.linspace.default",
+                    Some(ZeroInputConstantTarget::Linspace),
+                ),
+                ("aten.eye.default", Some(ZeroInputConstantTarget::Eye)),
+            ],
         );
-        assert_eq!(
-            zero_input_constant_target("aten.arange.start"),
-            Some(ZeroInputConstantTarget::Arange)
+        assert_cases(
+            arange_target_kind,
+            &[
+                ("aten.arange.start", Some(ArangeTargetKind::Start)),
+                ("aten.arange.start_step", Some(ArangeTargetKind::StartStep)),
+            ],
         );
-        assert_eq!(
-            arange_target_kind("aten.arange.start"),
-            Some(ArangeTargetKind::Start)
-        );
-        assert_eq!(
-            arange_target_kind("aten.arange.start_step"),
-            Some(ArangeTargetKind::StartStep)
-        );
-        assert_eq!(
-            zero_input_constant_target("aten.linspace.default"),
-            Some(ZeroInputConstantTarget::Linspace)
-        );
-        assert_eq!(
-            zero_input_constant_target("aten.eye.default"),
-            Some(ZeroInputConstantTarget::Eye)
-        );
-        assert_eq!(
-            shape_only_constant_target("aten.reshape.default"),
-            Some(ShapeOnlyConstantTarget::Reshape)
-        );
-        assert_eq!(
-            shape_only_constant_target("aten.view_copy.default"),
-            Some(ShapeOnlyConstantTarget::Reshape)
-        );
-        assert_eq!(
-            shape_only_constant_target("aten.unsqueeze_copy.default"),
-            Some(ShapeOnlyConstantTarget::Unsqueeze)
-        );
-        assert_eq!(
-            shape_only_constant_target("aten.permute_copy.default"),
-            Some(ShapeOnlyConstantTarget::Permute)
+        assert_cases(
+            shape_only_constant_target,
+            &[
+                (
+                    "aten.reshape.default",
+                    Some(ShapeOnlyConstantTarget::Reshape),
+                ),
+                (
+                    "aten.view_copy.default",
+                    Some(ShapeOnlyConstantTarget::Reshape),
+                ),
+                (
+                    "aten.unsqueeze_copy.default",
+                    Some(ShapeOnlyConstantTarget::Unsqueeze),
+                ),
+                (
+                    "aten.permute_copy.default",
+                    Some(ShapeOnlyConstantTarget::Permute),
+                ),
+                ("aten.slice_copy.Tensor", None),
+            ],
         );
         assert!(is_zero_input_constant_target("aten.eye.default"));
-        assert!(is_fold_qdq_constant_target("aten.scalar_tensor.default"));
-        assert!(is_fold_qdq_constant_target("aten.full_like.default"));
-        assert!(!is_fold_qdq_constant_target("aten.reshape.default"));
+        assert_true(
+            is_fold_qdq_constant_target,
+            &["aten.scalar_tensor.default", "aten.full_like.default"],
+        );
+        assert_false(is_fold_qdq_constant_target, &["aten.reshape.default"]);
         assert!(is_shape_only_constant_target("aten.permute_copy.default"));
-        assert!(is_constant_only_shape_transform_target(
-            "aten.slice_copy.Tensor"
-        ));
-        assert!(is_constant_only_shape_transform_target(
-            "aten.flatten.using_ints"
-        ));
+        assert_true(
+            is_constant_only_shape_transform_target,
+            &["aten.slice_copy.Tensor", "aten.flatten.using_ints"],
+        );
         assert!(is_view_like_target("aten._unsafe_view.default"));
         assert!(is_permute_target("aten.permute.default"));
-        assert!(!is_shape_only_constant_target("aten.slice_copy.Tensor"));
     }
 
     #[test]
     fn recognizes_table_op_target_families() {
-        assert_eq!(
-            table_op_target_kind("aten.exp.default"),
-            Some(TableOpTargetKind::Unary("exp"))
+        assert_cases(
+            table_op_target_kind,
+            &[
+                ("aten.exp.default", Some(TableOpTargetKind::Unary("exp"))),
+                ("aten.sin.default", Some(TableOpTargetKind::Unary("sin"))),
+                ("aten.gelu.default", Some(TableOpTargetKind::Gelu)),
+                (
+                    "aten.pow.Tensor_Scalar",
+                    Some(TableOpTargetKind::PowTensorScalar),
+                ),
+                (
+                    "aten.remainder.Scalar",
+                    Some(TableOpTargetKind::RemainderScalar),
+                ),
+                ("aten.elu.default", Some(TableOpTargetKind::Elu)),
+                ("aten.add.Tensor", None),
+            ],
         );
-        assert_eq!(
-            table_op_target_kind("aten.sin.default"),
-            Some(TableOpTargetKind::Unary("sin"))
-        );
-        assert_eq!(
-            table_op_target_kind("aten.gelu.default"),
-            Some(TableOpTargetKind::Gelu)
-        );
-        assert_eq!(
-            table_op_target_kind("aten.pow.Tensor_Scalar"),
-            Some(TableOpTargetKind::PowTensorScalar)
-        );
-        assert_eq!(
-            table_op_target_kind("aten.remainder.Scalar"),
-            Some(TableOpTargetKind::RemainderScalar)
-        );
-        assert_eq!(
-            table_op_target_kind("aten.elu.default"),
-            Some(TableOpTargetKind::Elu)
-        );
-        assert_eq!(table_op_target_kind("aten.add.Tensor"), None);
     }
 
     #[test]
     fn recognizes_noop_target_families() {
-        assert_eq!(
-            noop_target("aten.clone.default"),
-            Some(NoopTarget::PassthroughFirstArg)
+        assert_cases(
+            noop_target,
+            &[
+                ("aten.clone.default", Some(NoopTarget::PassthroughFirstArg)),
+                (
+                    "_clone_dim_order.default",
+                    Some(NoopTarget::PassthroughFirstArg),
+                ),
+                ("alias_copy.default", Some(NoopTarget::PassthroughFirstArg)),
+                ("detach_copy.default", Some(NoopTarget::PassthroughFirstArg)),
+                ("aten.copy.default", Some(NoopTarget::CopySourceArg)),
+                (
+                    "_to_dim_order_copy.default",
+                    Some(NoopTarget::DtypeCheckedPassthrough),
+                ),
+                (
+                    "aten._to_copy.default",
+                    Some(NoopTarget::DtypeCheckedPassthrough),
+                ),
+                ("aten.as_strided_copy.default", None),
+            ],
         );
-        assert_eq!(
-            noop_target("_clone_dim_order.default"),
-            Some(NoopTarget::PassthroughFirstArg)
-        );
-        assert_eq!(
-            noop_target("alias_copy.default"),
-            Some(NoopTarget::PassthroughFirstArg)
-        );
-        assert_eq!(
-            noop_target("detach_copy.default"),
-            Some(NoopTarget::PassthroughFirstArg)
-        );
-        assert_eq!(
-            noop_target("aten.copy.default"),
-            Some(NoopTarget::CopySourceArg)
-        );
-        assert_eq!(
-            noop_target("_to_dim_order_copy.default"),
-            Some(NoopTarget::DtypeCheckedPassthrough)
-        );
-        assert_eq!(
-            noop_target("aten._to_copy.default"),
-            Some(NoopTarget::DtypeCheckedPassthrough)
-        );
-        assert_eq!(noop_target("aten.as_strided_copy.default"), None);
     }
 
     #[test]
     fn recognizes_layout_target_families() {
-        assert!(is_layout_passthrough_target("aten.transpose.int"));
+        assert_true(
+            is_layout_passthrough_target,
+            &["aten.transpose.int", "aten.contiguous.default"],
+        );
         assert!(is_tosa_transpose_target("backend.tosa.TRANSPOSE.default"));
-        assert!(is_layout_passthrough_target("aten.contiguous.default"));
         assert!(is_rank_changing_layout_target("aten.flatten.using_ints"));
-        assert!(!is_rank_changing_layout_target("aten.transpose.int"));
+        assert_false(is_rank_changing_layout_target, &["aten.transpose.int"]);
     }
 
     #[test]
     fn recognizes_convolution_target_families() {
-        assert!(is_conv_bias_annotation_target("aten.conv3d.default"));
-        assert!(is_conv_bias_annotation_target(
-            "backend.tosa.TRANSPOSE_CONV2D.default"
-        ));
-        assert!(is_raw_aten_convolution_target("aten.convolution.default"));
-        assert!(is_raw_aten_convolution_target(
-            "edge__ops_aten_convolution.default"
-        ));
+        assert_true(
+            is_conv_bias_annotation_target,
+            &[
+                "aten.conv3d.default",
+                "backend.tosa.TRANSPOSE_CONV2D.default",
+            ],
+        );
+        assert_true(
+            is_raw_aten_convolution_target,
+            &[
+                "aten.convolution.default",
+                "edge__ops_aten_convolution.default",
+            ],
+        );
         assert!(is_aten_convolution_default_target(
             "aten.convolution.default"
         ));
         assert!(is_conv1d_default_target("aten.conv1d.default"));
         assert!(is_conv2d_default_target("aten.conv2d.default"));
-        assert!(is_conv_accumulator_target("backend.tosa.CONV2D.default"));
-        assert!(is_conv_accumulator_target(
-            "backend.tosa.DEPTHWISE_CONV2D.default"
-        ));
-        assert!(is_conv_accumulator_target("aten.conv2d.padding"));
-        assert_eq!(
-            size_adjust_target_kind("aten.conv2d.default"),
-            Some(SizeAdjustTargetKind::Conv)
+        assert_true(
+            is_conv_accumulator_target,
+            &[
+                "backend.tosa.CONV2D.default",
+                "backend.tosa.DEPTHWISE_CONV2D.default",
+                "aten.conv2d.padding",
+            ],
         );
-        assert_eq!(
-            size_adjust_target_kind("aten.avg_pool2d.default"),
-            Some(SizeAdjustTargetKind::Pool)
+        assert_cases(
+            size_adjust_target_kind,
+            &[
+                ("aten.conv2d.default", Some(SizeAdjustTargetKind::Conv)),
+                ("aten.avg_pool2d.default", Some(SizeAdjustTargetKind::Pool)),
+                ("aten.transpose_conv2d.input", None),
+            ],
         );
-        assert_eq!(size_adjust_target_kind("aten.transpose_conv2d.input"), None);
     }
 
     #[test]
     fn recognizes_decomposition_target_families() {
-        assert!(is_split_target("aten.split_with_sizes_copy.default"));
-        assert!(is_split_target("aten.split_copy.Tensor"));
+        assert_true(
+            is_split_target,
+            &[
+                "aten.split_with_sizes_copy.default",
+                "aten.split_copy.Tensor",
+            ],
+        );
         assert!(is_slice_copy_tensor_target("aten.slice_copy.Tensor"));
-        assert!(is_slice_tensor_target("aten.slice_copy.Tensor"));
-        assert!(is_slice_tensor_target("aten.slice.Tensor"));
-        assert!(!is_slice_tensor_target("aten.slice_scatter.default"));
+        assert_true(
+            is_slice_tensor_target,
+            &["aten.slice_copy.Tensor", "aten.slice.Tensor"],
+        );
+        assert_false(is_slice_tensor_target, &["aten.slice_scatter.default"]);
         assert!(is_slice_scatter_target("aten.slice_scatter.default"));
-        assert!(is_cat_target("aten.cat.default"));
-        assert!(is_unfold_copy_target("aten.unfold_copy.default"));
-        assert!(is_gather_target("aten.gather.default"));
-        assert!(is_tril_target("aten.tril_copy.default"));
-        assert!(is_embedding_target("aten.embedding.default"));
-        assert!(is_logit_target("aten.logit.default"));
-        assert!(is_index_select_target("aten.index_select.default"));
-        assert!(is_index_tensor_target("aten.index.Tensor"));
-        assert!(is_cumsum_target("aten.cumsum.default"));
+        assert_true(is_cat_target, &["aten.cat.default"]);
+        assert_true(is_unfold_copy_target, &["aten.unfold_copy.default"]);
+        assert_true(is_gather_target, &["aten.gather.default"]);
+        assert_true(is_tril_target, &["aten.tril_copy.default"]);
+        assert_true(is_embedding_target, &["aten.embedding.default"]);
+        assert_true(is_logit_target, &["aten.logit.default"]);
+        assert_true(is_index_select_target, &["aten.index_select.default"]);
+        assert_true(is_index_tensor_target, &["aten.index.Tensor"]);
+        assert_true(is_cumsum_target, &["aten.cumsum.default"]);
         assert!(is_layer_norm_target("aten.native_layer_norm.default"));
-        assert_eq!(
-            layer_norm_target_kind("aten.layer_norm.default"),
-            Some(LayerNormTargetKind::Plain)
+        assert_cases(
+            layer_norm_target_kind,
+            &[
+                ("aten.layer_norm.default", Some(LayerNormTargetKind::Plain)),
+                (
+                    "aten.native_layer_norm.default",
+                    Some(LayerNormTargetKind::NativeOrOther),
+                ),
+            ],
         );
-        assert_eq!(
-            layer_norm_target_kind("aten.native_layer_norm.default"),
-            Some(LayerNormTargetKind::NativeOrOther)
+        assert_cases(
+            layer_norm_param_view_target,
+            &[
+                ("aten.layer_norm.default", Some("aten.reshape.default")),
+                (
+                    "aten.native_layer_norm.default",
+                    Some("aten.view_copy.default"),
+                ),
+            ],
         );
-        assert_eq!(
-            layer_norm_param_view_target("aten.layer_norm.default"),
-            Some("aten.reshape.default")
-        );
-        assert_eq!(
-            layer_norm_param_view_target("aten.native_layer_norm.default"),
-            Some("aten.view_copy.default")
-        );
-        assert!(is_var_target("aten.var.correction"));
-        assert!(is_var_dim_target("aten.var.dim"));
+        assert_true(is_var_target, &["aten.var.correction"]);
+        assert_true(is_var_dim_target, &["aten.var.dim"]);
         assert!(is_plain_avg_pool2d_target("aten.avg_pool2d.default"));
-        assert!(!is_plain_avg_pool2d_target(
-            "aten.adaptive_avg_pool2d.default"
-        ));
-        assert!(is_adaptive_avg_pool2d_target(
-            "aten.adaptive_avg_pool2d.default"
-        ));
-        assert!(is_as_strided_copy_target("aten.as_strided_copy.default"));
-        assert!(is_pad_target("aten.pad.default"));
+        assert_false(
+            is_plain_avg_pool2d_target,
+            &["aten.adaptive_avg_pool2d.default"],
+        );
+        assert_true(
+            is_adaptive_avg_pool2d_target,
+            &["aten.adaptive_avg_pool2d.default"],
+        );
+        assert_true(is_as_strided_copy_target, &["aten.as_strided_copy.default"]);
+        assert_true(is_pad_target, &["aten.pad.default"]);
         assert!(is_pixel_shuffle_target("aten.pixel_shuffle.default"));
-        assert!(!is_pixel_shuffle_target("aten.pixel_unshuffle.default"));
+        assert_false(is_pixel_shuffle_target, &["aten.pixel_unshuffle.default"]);
         assert!(is_pixel_unshuffle_target("aten.pixel_unshuffle.default"));
-        assert!(is_squeeze_target("aten.squeeze.dim"));
-        assert!(is_unsqueeze_target("aten.unsqueeze.default"));
-        assert!(is_dim_transpose_target("aten.transpose.int"));
+        assert_true(is_squeeze_target, &["aten.squeeze.dim"]);
+        assert_true(is_unsqueeze_target, &["aten.unsqueeze.default"]);
+        assert_true(is_dim_transpose_target, &["aten.transpose.int"]);
     }
 
     #[test]
     fn recognizes_index_mask_and_clamp_targets() {
-        assert!(is_index_put_family_target("aten.index_put.default"));
-        assert!(is_index_put_family_target("aten.index_put_.default"));
-        assert!(is_index_put_default_target("aten.index_put.default"));
-        assert!(is_index_put_default_target("aten.index_put_.default"));
-        assert!(!is_index_put_default_target("aten.index.Tensor"));
-        assert!(is_where_target("aten.where.self"));
-        assert!(is_where_target("aten_where.self"));
-        assert!(is_masked_fill_target("aten.masked_fill.Scalar"));
-        assert!(is_select_scatter_target("aten.select_scatter.default"));
-        assert!(is_clamp_target("aten.clamp.default"));
-        assert!(!is_clamp_target("aten.clamp.Tensor"));
+        assert_true(
+            is_index_put_family_target,
+            &["aten.index_put.default", "aten.index_put_.default"],
+        );
+        assert_true(
+            is_index_put_default_target,
+            &["aten.index_put.default", "aten.index_put_.default"],
+        );
+        assert_false(is_index_put_default_target, &["aten.index.Tensor"]);
+        assert_true(is_where_target, &["aten.where.self", "aten_where.self"]);
+        assert_true(is_masked_fill_target, &["aten.masked_fill.Scalar"]);
+        assert_true(is_select_scatter_target, &["aten.select_scatter.default"]);
+        assert_true(is_clamp_target, &["aten.clamp.default"]);
+        assert_false(is_clamp_target, &["aten.clamp.Tensor"]);
     }
 
     #[test]
     fn recognizes_arithmetic_target_families() {
         assert!(is_abs_target("aten.abs.default"));
-        assert!(is_comparison_target("aten.eq.Tensor"));
-        assert!(is_comparison_target("aten.ge.Tensor"));
-        assert!(is_comparison_target("aten.gt.Tensor"));
-        assert!(is_comparison_target("aten.le.Tensor"));
-        assert!(is_comparison_target("aten.lt.Tensor"));
-        assert!(is_minmax_target("aten.maximum.default"));
-        assert!(is_minmax_target("aten.minimum.default"));
-        assert!(is_add_sub_target("aten.add.Tensor"));
-        assert!(is_add_sub_target("aten.sub.Tensor"));
-        assert_eq!(
-            add_sub_alpha_result_target("aten.add.Tensor"),
-            Some("aten.add.Tensor")
+        assert_true(
+            is_comparison_target,
+            &[
+                "aten.eq.Tensor",
+                "aten.ge.Tensor",
+                "aten.gt.Tensor",
+                "aten.le.Tensor",
+                "aten.lt.Tensor",
+            ],
         );
-        assert_eq!(
-            add_sub_alpha_result_target("aten.sub.Tensor"),
-            Some("aten.sub.Tensor")
+        assert_true(
+            is_minmax_target,
+            &["aten.maximum.default", "aten.minimum.default"],
         );
-        assert!(is_mul_target("aten.mul.Tensor"));
-        assert!(is_sum_dim_int_list_target("aten.sum.dim_IntList"));
-        assert!(is_mean_target("aten.mean.dim"));
-        assert!(is_mean_target("aten.mean.default"));
-        assert!(is_full_like_target("aten.full_like.default"));
-        assert!(!is_add_sub_target("aten.add.Scalar"));
-        assert_eq!(
-            not_equal_replacement_target("aten.ne.Scalar"),
-            Some("aten.eq.Scalar")
+        assert_true(is_add_sub_target, &["aten.add.Tensor", "aten.sub.Tensor"]);
+        assert_cases(
+            add_sub_alpha_result_target,
+            &[
+                ("aten.add.Tensor", Some("aten.add.Tensor")),
+                ("aten.sub.Tensor", Some("aten.sub.Tensor")),
+            ],
         );
-        assert_eq!(
-            not_equal_replacement_target("aten.ne.Tensor"),
-            Some("aten.eq.Tensor")
+        assert_true(is_mul_target, &["aten.mul.Tensor"]);
+        assert_true(is_sum_dim_int_list_target, &["aten.sum.dim_IntList"]);
+        assert_true(is_mean_target, &["aten.mean.dim", "aten.mean.default"]);
+        assert_true(is_full_like_target, &["aten.full_like.default"]);
+        assert_false(is_add_sub_target, &["aten.add.Scalar"]);
+        assert_cases(
+            not_equal_replacement_target,
+            &[
+                ("aten.ne.Scalar", Some("aten.eq.Scalar")),
+                ("aten.ne.Tensor", Some("aten.eq.Tensor")),
+                ("aten.ne_.Tensor", Some("aten.eq.Tensor")),
+            ],
         );
-        assert_eq!(
-            not_equal_replacement_target("aten.ne_.Tensor"),
-            Some("aten.eq.Tensor")
+        assert_cases(
+            scalar_shift_replacement_target,
+            &[
+                (
+                    "aten.__lshift__.Scalar",
+                    Some("aten.bitwise_left_shift.Tensor"),
+                ),
+                (
+                    "aten.__rshift__.Scalar",
+                    Some("aten.bitwise_right_shift.Tensor"),
+                ),
+            ],
         );
-        assert_eq!(
-            scalar_shift_replacement_target("aten.__lshift__.Scalar"),
-            Some("aten.bitwise_left_shift.Tensor")
+        assert_true(
+            is_repeat_interleave_self_int_target,
+            &["aten.repeat_interleave.self_int"],
         );
-        assert_eq!(
-            scalar_shift_replacement_target("aten.__rshift__.Scalar"),
-            Some("aten.bitwise_right_shift.Tensor")
+        assert_true(is_max_pool2d_target, &["aten.max_pool2d.default"]);
+        assert_true(
+            is_max_pool2d_with_indices_target,
+            &["aten.max_pool2d_with_indices.default"],
         );
-        assert!(is_repeat_interleave_self_int_target(
-            "aten.repeat_interleave.self_int"
-        ));
-        assert!(is_max_pool2d_target("aten.max_pool2d.default"));
-        assert!(is_max_pool2d_with_indices_target(
-            "aten.max_pool2d_with_indices.default"
-        ));
-        assert_eq!(
-            group_norm_reshape_target("aten.group_norm.default"),
-            Some("aten.reshape.default")
+        assert_cases(
+            group_norm_reshape_target,
+            &[
+                ("aten.group_norm.default", Some("aten.reshape.default")),
+                (
+                    "aten.native_group_norm.default",
+                    Some("aten.view_copy.default"),
+                ),
+            ],
         );
-        assert_eq!(
-            group_norm_reshape_target("aten.native_group_norm.default"),
-            Some("aten.view_copy.default")
+        assert_false(
+            is_max_pool2d_with_indices_target,
+            &["aten.max_pool2d.default"],
         );
-        assert!(!is_max_pool2d_with_indices_target(
-            "aten.max_pool2d.default"
-        ));
     }
 }

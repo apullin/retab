@@ -10,8 +10,6 @@
 //! Runs before IrRewriteIndexPut so the general SCATTER path only sees int indices.
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId};
-#[cfg(test)]
-use crate::fx_ir::{NodeMeta, NodeOp};
 use crate::fx_target::is_index_put_family_target;
 use crate::runner_logging::log_line;
 
@@ -152,14 +150,7 @@ impl IrPass for IrNormalizeIndexPutBoolMaskPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn named<'a>(graph: &'a IrGraph, name: &str) -> &'a crate::fx_ir::IrNode {
-        graph
-            .nodes
-            .iter()
-            .find(|n| n.alive && n.name == name)
-            .unwrap_or_else(|| panic!("missing node {name}"))
-    }
+    use crate::test_ir::{call, live_node as named, output, placeholder};
 
     /// dest(dest_shape,int8) + mask(mask_shape,bool) + data(data_shape) index_put.
     fn graph_for(
@@ -170,27 +161,9 @@ mod tests {
         accumulate: bool,
     ) -> (IrGraph, NodeId, NodeId, NodeId) {
         let mut graph = IrGraph::empty();
-        let dest = graph.add_node(
-            NodeOp::Placeholder,
-            "dest".into(),
-            "dest".into(),
-            vec![],
-            NodeMeta::tensor(dest_shape, "torch.int8"),
-        );
-        let mask = graph.add_node(
-            NodeOp::Placeholder,
-            "mask".into(),
-            "mask".into(),
-            vec![],
-            NodeMeta::tensor(mask_shape, mask_dtype),
-        );
-        let data = graph.add_node(
-            NodeOp::Placeholder,
-            "data".into(),
-            "data".into(),
-            vec![],
-            NodeMeta::tensor(data_shape, "torch.int8"),
-        );
+        let dest = placeholder(&mut graph, "dest", dest_shape, "torch.int8");
+        let mask = placeholder(&mut graph, "mask", mask_shape, mask_dtype);
+        let data = placeholder(&mut graph, "data", data_shape, "torch.int8");
         let mut args = vec![
             IrArg::Node(dest),
             IrArg::List(vec![IrArg::Node(mask)]),
@@ -199,20 +172,15 @@ mod tests {
         if accumulate {
             args.push(IrArg::Bool(true));
         }
-        let ip = graph.add_node(
-            NodeOp::CallFunction,
-            "idxput".into(),
-            "aten.index_put.default".into(),
+        let ip = call(
+            &mut graph,
+            "idxput",
+            "aten.index_put.default",
             args,
-            NodeMeta::tensor(dest_shape, "torch.int8"),
+            dest_shape,
+            "torch.int8",
         );
-        graph.add_node(
-            NodeOp::Output,
-            "output".into(),
-            "output".into(),
-            vec![IrArg::Node(ip)],
-            NodeMeta::default(),
-        );
+        output(&mut graph, ip);
         (graph, dest, mask, ip)
     }
 

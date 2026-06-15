@@ -162,17 +162,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::fx_ir::{NodeId, NodeMeta, NodeOp};
-
-    fn placeholder(graph: &mut IrGraph, name: &str, shape: &[i64]) -> NodeId {
-        graph.add_node(
-            NodeOp::Placeholder,
-            name.to_string(),
-            name.to_string(),
-            Vec::new(),
-            NodeMeta::tensor(shape, "torch.float32"),
-        )
-    }
+    use crate::fx_ir::{NodeMeta, NodeOp};
+    use crate::test_ir::f32_placeholder as placeholder;
 
     #[test]
     fn decompose_addmm_reads_alpha_beta_from_kwargs() {

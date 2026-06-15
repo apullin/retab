@@ -98,7 +98,8 @@ impl IrPass for IrReplaceInfAndLimitValuesPass {
 #[cfg(test)]
 mod tests {
     use super::IrReplaceInfAndLimitValuesPass;
-    use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeMeta, NodeOp, QParam};
+    use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeMeta, QParam};
+    use crate::test_ir::{call_default, call_with_meta};
 
     #[test]
     fn clamps_inf_literals_in_args_and_kwargs_for_quantized_nodes() {
@@ -111,10 +112,10 @@ mod tests {
             127,
             "torch.int8".to_string(),
         ));
-        let id = graph.add_node(
-            NodeOp::CallFunction,
-            "masked_fill".into(),
-            "aten.masked_fill.Scalar".into(),
+        let id = call_with_meta(
+            &mut graph,
+            "masked_fill",
+            "aten.masked_fill.Scalar",
             vec![
                 IrArg::Int(0),
                 IrArg::Bool(true),
@@ -156,12 +157,11 @@ mod tests {
     #[test]
     fn preserves_inf_literals_for_unquantized_nodes() {
         let mut graph = IrGraph::empty();
-        let id = graph.add_node(
-            NodeOp::CallFunction,
-            "masked_fill".into(),
-            "aten.masked_fill.Scalar".into(),
+        let id = call_default(
+            &mut graph,
+            "masked_fill",
+            "aten.masked_fill.Scalar",
             vec![IrArg::Float(f64::INFINITY)],
-            NodeMeta::default(),
         );
 
         let modified = IrReplaceInfAndLimitValuesPass.run(&mut graph);

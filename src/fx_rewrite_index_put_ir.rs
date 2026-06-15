@@ -269,42 +269,19 @@ impl IrPass for IrRewriteIndexPutPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::{NodeMeta, NodeOp};
+    use crate::test_ir::{call_with_meta, f32_meta, f32_placeholder, output, placeholder};
 
     fn graph_with_index_put_none() -> IrGraph {
         let mut graph = IrGraph::empty();
 
-        let source_meta = NodeMeta::tensor([2, 5, 4], "torch.float32");
-        let source = graph.add_node(
-            NodeOp::Placeholder,
-            "source".to_string(),
-            "source".to_string(),
-            vec![],
-            source_meta.clone(),
-        );
-
-        let index_meta = NodeMeta::tensor([1], "torch.int64");
-        let index = graph.add_node(
-            NodeOp::Placeholder,
-            "index".to_string(),
-            "index".to_string(),
-            vec![],
-            index_meta,
-        );
-
-        let values_meta = NodeMeta::tensor([2, 4], "torch.float32");
-        let values = graph.add_node(
-            NodeOp::Placeholder,
-            "values".to_string(),
-            "values".to_string(),
-            vec![],
-            values_meta,
-        );
-
-        let index_put = graph.add_node(
-            NodeOp::CallFunction,
-            "index_put".to_string(),
-            "index_put_.default".to_string(),
+        let source_meta = f32_meta([2, 5, 4]);
+        let source = f32_placeholder(&mut graph, "source", [2, 5, 4]);
+        let index = placeholder(&mut graph, "index", [1], "torch.int64");
+        let values = f32_placeholder(&mut graph, "values", [2, 4]);
+        let index_put = call_with_meta(
+            &mut graph,
+            "index_put",
+            "index_put_.default",
             vec![
                 IrArg::Node(source),
                 IrArg::List(vec![IrArg::None, IrArg::Node(index)]),
@@ -314,13 +291,7 @@ mod tests {
             source_meta,
         );
 
-        graph.add_node(
-            NodeOp::Output,
-            "output".to_string(),
-            "output".to_string(),
-            vec![IrArg::Node(index_put)],
-            NodeMeta::default(),
-        );
+        output(&mut graph, index_put);
 
         graph
     }
