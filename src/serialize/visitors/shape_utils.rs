@@ -1,3 +1,4 @@
+use super::op_semantics;
 use super::*;
 use crate::serialize::tensor_layout::apply_tosa_dim_order;
 use std::cell::RefCell;
@@ -154,50 +155,12 @@ fn passthrough_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> 
     Some(input_shape)
 }
 
-fn is_shape_preserving_unary(node: &Node) -> bool {
-    matches!(
-        node.target,
-        OpTarget::Relu
-            | OpTarget::Hardtanh
-            | OpTarget::Clamp
-            | OpTarget::LeakyRelu
-            | OpTarget::Sigmoid
-            | OpTarget::Tanh
-            | OpTarget::Exp
-            | OpTarget::Log
-            | OpTarget::Neg
-            | OpTarget::Reciprocal
-            | OpTarget::Rsqrt
-            | OpTarget::Abs
-            | OpTarget::Floor
-            | OpTarget::Ceil
-            | OpTarget::To
-            | OpTarget::Sqrt
-            | OpTarget::Log1p
-            | OpTarget::Expm1
-            | OpTarget::Sign
-            | OpTarget::Round
-            | OpTarget::Sin
-            | OpTarget::Cos
-            | OpTarget::TosaSigmoid
-            | OpTarget::TosaTanh
-            | OpTarget::TosaExp
-            | OpTarget::TosaLog
-            | OpTarget::TosaAbs
-            | OpTarget::TosaReciprocal
-            | OpTarget::TosaErf
-            | OpTarget::TosaCos
-            | OpTarget::TosaSin
-            | OpTarget::TosaRsqrt
-    )
-}
-
 fn shape_preserving_unary_tensor_shape(
     graph: &Graph,
     store: &TensorStore,
     node: &Node,
 ) -> Option<Vec<i32>> {
-    if !is_shape_preserving_unary(node) {
+    if !op_semantics::is_shape_preserving_unary(&node.target) {
         return None;
     }
     first_input_shape(graph, store, node)

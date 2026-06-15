@@ -1,3 +1,4 @@
+use super::op_semantics;
 use super::*;
 use std::cell::RefCell;
 use std::collections::HashMap as StdHashMap;
@@ -33,21 +34,7 @@ pub(super) fn node_output_dtype(node: &Node) -> DType {
     if node.target == OpTarget::TosaTable {
         return ir_dtype_to_tosa(node.meta.val.dtype);
     }
-    if matches!(
-        node.target,
-        OpTarget::Eq
-            | OpTarget::Gt
-            | OpTarget::Ge
-            | OpTarget::Lt
-            | OpTarget::Le
-            | OpTarget::TosaEqual
-            | OpTarget::TosaGreater
-            | OpTarget::TosaGreaterEqual
-            | OpTarget::LogicalNot
-            | OpTarget::LogicalAnd
-            | OpTarget::LogicalOr
-            | OpTarget::LogicalXor
-    ) {
+    if op_semantics::has_bool_output(&node.target) {
         return DType::Bool;
     }
     if node.op == OpType::Placeholder {
@@ -179,35 +166,17 @@ fn actual_tensor_dtype_impl(graph: &Graph, node: &Node) -> DType {
         }
     }
     match node.target {
-        OpTarget::Reshape
-        | OpTarget::View
-        | OpTarget::Permute
-        | OpTarget::Flatten
-        | OpTarget::Squeeze
-        | OpTarget::Unsqueeze
-        | OpTarget::Expand
-        | OpTarget::Contiguous
-        | OpTarget::TosaReshape
-        | OpTarget::TosaTranspose => match node.args.first() {
-            Some(Arg::Node(id)) => graph
-                .node(*id)
-                .map(|input| actual_tensor_dtype(graph, input))
-                .unwrap_or_else(|| node_output_dtype(node)),
-            _ => node_output_dtype(node),
-        },
+        ref target if op_semantics::is_layout_dtype_passthrough(target) => {
+            match node.args.first() {
+                Some(Arg::Node(id)) => graph
+                    .node(*id)
+                    .map(|input| actual_tensor_dtype(graph, input))
+                    .unwrap_or_else(|| node_output_dtype(node)),
+                _ => node_output_dtype(node),
+            }
+        }
         OpTarget::To => node_output_dtype(node),
-        OpTarget::Conv2d
-        | OpTarget::ConvTranspose2d
-        | OpTarget::DepthwiseConv2d
-        | OpTarget::Linear
-        | OpTarget::Addmm
-        | OpTarget::Matmul
-        | OpTarget::Bmm
-        | OpTarget::TosaConv2d
-        | OpTarget::TosaDepthwiseConv2d
-        | OpTarget::TosaTransposeConv2d
-        | OpTarget::TosaFullyConnected
-        | OpTarget::TosaMatmul => accumulator_output_dtype(node),
+        ref target if op_semantics::is_accumulator_output(target) => accumulator_output_dtype(node),
         OpTarget::Sum => {
             let semantic_dtype = node_output_dtype(node);
             if is_float_dtype(semantic_dtype) {

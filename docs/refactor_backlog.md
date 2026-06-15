@@ -100,6 +100,22 @@ Validation:
   - cargo test --lib: 147 passed
 ```
 
+2026-06-15, serializer OpSemantics slice 1
+Rust LOC: 35,988 -> 36,012
+Movement: +24 Rust LOC
+Deleted/collapsed: duplicate target-family policy lists from dtype_quant.rs and
+  shape_utils.rs for bool outputs, layout dtype passthrough, accumulator outputs,
+  and shape-preserving unary shape propagation
+Added: src/serialize/visitors/op_semantics.rs as the shared serializer operation
+  semantics grammar
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib
+  serialize::visitors; cargo test --lib; maturin develop --release; focused
+  serializer-policy Python smoke over relu, sigmoid, eq, logical, view, permute,
+  conv2d, and mm: 333 passed
+Note: setup-positive slice. It simplified existing usage sites by 67 net lines
+  before adding the shared module, and it creates the place to collapse visitor
+  registration, dtype policy, and shape policy further.
+
 Slice log:
 
 ```text

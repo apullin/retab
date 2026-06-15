@@ -19,6 +19,7 @@ mod layout;
 mod math;
 mod matmul;
 mod nn;
+mod op_semantics;
 mod op_utils;
 mod reductions;
 mod rounding;
