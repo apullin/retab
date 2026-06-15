@@ -4,7 +4,7 @@ This records the latest local stock-vs-RETAB lowering sanity check. It is not a
 full benchmark suite; it is a guardrail that catches obvious performance loss
 after correctness and refactor work.
 
-Last run: 2026-06-14 on commit `6f254ec`.
+Last updated: 2026-06-15.
 
 ## Command Shape
 
@@ -53,7 +53,8 @@ Command:
 python tests/sweep_direct_fastlane.py --model mobilenet_v3_small --json-only
 ```
 
-The CPU phase profiler gives the sharper breakdown for the same model:
+Before the direct-lower size guard, the CPU phase profiler gave this sharper
+breakdown for the same model:
 
 | Measured scope | Time |
 | --- | ---: |
@@ -64,9 +65,37 @@ The CPU phase profiler gives the sharper breakdown for the same model:
 | `retab_native.run_fx_passes` total, 23 calls | `0.066s` |
 | `retab_native.ingest_and_serialize` total, 23 calls | `0.059s` |
 
-So the current MobileNet direct path is not spending seconds in Rust RETAB.
-The remaining multi-second cost is mostly ExecuTorch/Torch graph machinery
-outside the backend preprocess slice.
+That pre-guard MobileNet path was not spending seconds in Rust RETAB. The
+remaining multi-second cost was mostly ExecuTorch/Torch graph machinery outside
+the backend preprocess slice.
+
+## Direct-Lower Size Guard
+
+Direct lowering is excellent for small graphs, but on larger graphs it can
+speculatively preprocess many fragments before falling back to a one-delegate
+standard result. The integration now skips direct lowering above
+`ARM_TOSA_ENGINE_DIRECT_LOWER_NODE_LIMIT`, default `128` graph nodes.
+
+Single-run local timings after the guard:
+
+| Model | Nodes | Direct enabled | Direct disabled | Notes |
+| --- | ---: | ---: | ---: | --- |
+| `tiny_cnn` | `36` | `0.100s` | `0.394s` | direct path retained |
+| `resnet18` | `231` | `2.121s` | `2.091s` | guarded path avoids 11 speculative preprocess calls |
+| `mobilenet_v3_small` | `636` | `4.942s` | `5.009s` | guarded path avoids 23 speculative preprocess calls |
+
+Focused model validation after the guard:
+
+```bash
+python -m pytest -q --numprocesses=4 \
+  backends/arm/test/models/test_resnet18.py \
+  backends/arm/test/models/test_mobilenet_v3_arm.py \
+  -k tosa
+```
+
+Result: `7 passed`.
+
+Full models validation after the guard: `152 passed, 3 skipped, 9 xfailed`.
 
 The MobileNet artifact mismatch is not treated as a regression by itself here:
 the full correctness matrix passes on the Rust serializer path. If a future
