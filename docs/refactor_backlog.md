@@ -306,6 +306,18 @@ Note: adaptive_avg_pool2d now emits each output-cell slice/pool and row/height
   concat through one cursor over the nested decomposition, so it shares the
   same rewrite-chain grammar as the other slice/cat decompositions.
 
+2026-06-15, IR rewrite cursor slice 14
+Rust LOC: 35,819 -> 35,811
+Movement: -8 Rust LOC
+Deleted/collapsed: manual anchored view/full/convolution/slice/view
+  construction in cumsum lowering
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib; maturin
+  develop --release; focused Python smoke over cumsum FP/INT TOSA cases:
+  14 passed
+Note: cumsum now separates metadata preparation from mutation: qparams and
+  shapes are computed first, then the whole decomposition is emitted as one
+  cursor-owned prefix-sum convolution chain.
+
 Slice log:
 
 ```text
