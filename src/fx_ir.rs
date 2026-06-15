@@ -599,19 +599,6 @@ impl IrGraph {
         )
     }
 
-    pub fn add_anchored_call_function(
-        &mut self,
-        anchor: NodeId,
-        name: impl Into<String>,
-        target: impl Into<String>,
-        args: Vec<IrArg>,
-        meta: NodeMeta,
-    ) -> NodeId {
-        let id = self.add_call_function(name, target, args, meta);
-        self.anchor_to(id, anchor);
-        id
-    }
-
     pub fn add_after_call_function(
         &mut self,
         anchor: NodeId,
@@ -638,19 +625,6 @@ impl IrGraph {
             vec![IrArg::Node(source), i64_list_arg(shape)],
             meta,
         )
-    }
-
-    pub(crate) fn add_anchored_view_copy(
-        &mut self,
-        anchor: NodeId,
-        name: impl Into<String>,
-        source: NodeId,
-        shape: &[i64],
-        meta: NodeMeta,
-    ) -> NodeId {
-        let id = self.add_view_copy(name, source, shape, meta);
-        self.anchor_to(id, anchor);
-        id
     }
 
     pub(crate) fn add_after_view_copy(
@@ -772,20 +746,6 @@ impl IrGraph {
             dtype_kwarg(dtype),
             meta,
         )
-    }
-
-    pub fn add_anchored_full_float(
-        &mut self,
-        anchor: NodeId,
-        name: impl Into<String>,
-        shape: &[i64],
-        value: f64,
-        dtype: &str,
-        meta: NodeMeta,
-    ) -> NodeId {
-        let id = self.add_full_float(name, shape, value, dtype, meta);
-        self.anchor_to(id, anchor);
-        id
     }
 
     pub fn add_arange(
@@ -1363,6 +1323,10 @@ impl IrRewriteCursor<'_> {
         self.graph
     }
 
+    pub(crate) fn graph_mut(&mut self) -> &mut IrGraph {
+        self.graph
+    }
+
     pub(crate) fn append_existing(&mut self, id: NodeId) -> NodeId {
         if let Some(previous) = self.previous {
             self.graph.anchor_after(id, previous);
@@ -1503,7 +1467,7 @@ impl IrRewriteCursor<'_> {
         self.append_existing(id)
     }
 
-    pub(crate) fn replace_anchor_with(self, replacement: NodeId) -> NodeId {
+    pub(crate) fn replace_anchor_with(&mut self, replacement: NodeId) -> NodeId {
         self.graph.replace_and_erase(self.anchor, replacement);
         replacement
     }

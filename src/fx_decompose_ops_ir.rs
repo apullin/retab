@@ -4,8 +4,8 @@
 use std::f64::consts::FRAC_PI_2;
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, normalize_dim, wrap_dim, IrArg, IrGraph, IrPass, MetaValue, NodeId,
-    NodeMeta, TensorMetaStamp,
+    i64_list_arg as i64_list, normalize_dim, wrap_dim, IrArg, IrGraph, IrPass, IrRewriteCursor,
+    MetaValue, NodeId, NodeMeta, TensorMetaStamp,
 };
 use crate::fx_target::{add_sub_alpha_result_target, group_norm_reshape_target};
 use crate::runner_logging::log_line;
@@ -131,22 +131,27 @@ impl ApproxCtx {
         format!("{}_{}", self.name, suffix)
     }
 
-    fn full(&self, graph: &mut IrGraph, suffix: &str, value: f64) -> NodeId {
-        self.full_shape(graph, suffix, value, &self.shape)
+    fn full(&self, cursor: &mut IrRewriteCursor<'_>, suffix: &str, value: f64) -> NodeId {
+        self.full_shape(cursor, suffix, value, &self.shape)
     }
 
     fn scalar_shape(&self) -> Vec<i64> {
         vec![1; self.shape.len()]
     }
 
-    fn full_scalar(&self, graph: &mut IrGraph, suffix: &str, value: f64) -> NodeId {
+    fn full_scalar(&self, cursor: &mut IrRewriteCursor<'_>, suffix: &str, value: f64) -> NodeId {
         let shape = self.scalar_shape();
-        self.full_shape(graph, suffix, value, &shape)
+        self.full_shape(cursor, suffix, value, &shape)
     }
 
-    fn full_shape(&self, graph: &mut IrGraph, suffix: &str, value: f64, shape: &[i64]) -> NodeId {
-        graph.add_anchored_full_float(
-            self.anchor_id,
+    fn full_shape(
+        &self,
+        cursor: &mut IrRewriteCursor<'_>,
+        suffix: &str,
+        value: f64,
+        shape: &[i64],
+    ) -> NodeId {
+        cursor.full_float(
             self.op_name(suffix),
             shape,
             value,
@@ -155,19 +160,25 @@ impl ApproxCtx {
         )
     }
 
-    fn tensor(&self, graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>) -> NodeId {
-        self.tensor_shape(graph, suffix, target, args, &self.shape)
+    fn tensor(
+        &self,
+        cursor: &mut IrRewriteCursor<'_>,
+        suffix: &str,
+        target: &str,
+        args: Vec<IrArg>,
+    ) -> NodeId {
+        self.tensor_shape(cursor, suffix, target, args, &self.shape)
     }
 
     fn tensor_nodes(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         suffix: &str,
         target: &str,
         nodes: &[NodeId],
     ) -> NodeId {
         self.tensor(
-            graph,
+            cursor,
             suffix,
             target,
             nodes.iter().copied().map(IrArg::Node).collect(),
@@ -176,42 +187,36 @@ impl ApproxCtx {
 
     fn tensor_scalar(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         suffix: &str,
         target: &str,
         args: Vec<IrArg>,
     ) -> NodeId {
         let shape = self.scalar_shape();
-        self.tensor_shape(graph, suffix, target, args, &shape)
+        self.tensor_shape(cursor, suffix, target, args, &shape)
     }
 
     fn tensor_shape(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         suffix: &str,
         target: &str,
         args: Vec<IrArg>,
         shape: &[i64],
     ) -> NodeId {
-        graph.add_anchored_call_function(
-            self.anchor_id,
-            self.op_name(suffix),
-            target,
-            args,
-            self.tensor_meta(shape),
-        )
+        cursor.call_function(self.op_name(suffix), target, args, self.tensor_meta(shape))
     }
 
     fn tensor_nodes_shape(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         suffix: &str,
         target: &str,
         nodes: &[NodeId],
         shape: &[i64],
     ) -> NodeId {
         self.tensor_shape(
-            graph,
+            cursor,
             suffix,
             target,
             nodes.iter().copied().map(IrArg::Node).collect(),
@@ -219,19 +224,25 @@ impl ApproxCtx {
         )
     }
 
-    fn bool(&self, graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>) -> NodeId {
-        self.bool_shape(graph, suffix, target, args, &self.shape)
+    fn bool(
+        &self,
+        cursor: &mut IrRewriteCursor<'_>,
+        suffix: &str,
+        target: &str,
+        args: Vec<IrArg>,
+    ) -> NodeId {
+        self.bool_shape(cursor, suffix, target, args, &self.shape)
     }
 
     fn bool_nodes(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         suffix: &str,
         target: &str,
         nodes: &[NodeId],
     ) -> NodeId {
         self.bool(
-            graph,
+            cursor,
             suffix,
             target,
             nodes.iter().copied().map(IrArg::Node).collect(),
@@ -240,40 +251,34 @@ impl ApproxCtx {
 
     fn bool_shape(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         suffix: &str,
         target: &str,
         args: Vec<IrArg>,
         shape: &[i64],
     ) -> NodeId {
-        graph.add_anchored_call_function(
-            self.anchor_id,
-            self.op_name(suffix),
-            target,
-            args,
-            self.bool_meta(shape),
-        )
+        cursor.call_function(self.op_name(suffix), target, args, self.bool_meta(shape))
     }
 
-    fn output(&self, graph: &mut IrGraph, suffix: &str, target: &str, args: Vec<IrArg>) -> NodeId {
-        graph.add_anchored_call_function(
-            self.anchor_id,
-            self.op_name(suffix),
-            target,
-            args,
-            self.meta.clone(),
-        )
+    fn output(
+        &self,
+        cursor: &mut IrRewriteCursor<'_>,
+        suffix: &str,
+        target: &str,
+        args: Vec<IrArg>,
+    ) -> NodeId {
+        cursor.call_function(self.op_name(suffix), target, args, self.meta.clone())
     }
 
     fn output_nodes(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         suffix: &str,
         target: &str,
         nodes: &[NodeId],
     ) -> NodeId {
         self.output(
-            graph,
+            cursor,
             suffix,
             target,
             nodes.iter().copied().map(IrArg::Node).collect(),
@@ -282,26 +287,24 @@ impl ApproxCtx {
 
     fn replace_output(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         suffix: &str,
         target: &str,
         args: Vec<IrArg>,
     ) -> NodeId {
-        let mut cursor = graph.rewrite_cursor(self.anchor_id);
-        let replacement =
-            cursor.call_function(self.op_name(suffix), target, args, self.meta.clone());
+        let replacement = self.output(cursor, suffix, target, args);
         cursor.replace_anchor_with(replacement)
     }
 
     fn replace_nodes(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         suffix: &str,
         target: &str,
         nodes: &[NodeId],
     ) -> NodeId {
         self.replace_output(
-            graph,
+            cursor,
             suffix,
             target,
             nodes.iter().copied().map(IrArg::Node).collect(),
@@ -310,30 +313,24 @@ impl ApproxCtx {
 
     fn view_shape(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         suffix: &str,
         source: NodeId,
         shape: &[i64],
     ) -> NodeId {
-        graph.add_anchored_view_copy(
-            self.anchor_id,
-            self.op_name(suffix),
-            source,
-            shape,
-            self.tensor_meta(shape),
-        )
+        cursor.view_copy(self.op_name(suffix), source, shape, self.tensor_meta(shape))
     }
 
     fn reshape_shape(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         suffix: &str,
         target: &str,
         source: NodeId,
         shape: &[i64],
     ) -> NodeId {
         self.tensor_shape(
-            graph,
+            cursor,
             suffix,
             target,
             vec![IrArg::Node(source), i64_list(shape)],
@@ -341,84 +338,138 @@ impl ApproxCtx {
         )
     }
 
-    fn add(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
-        self.tensor_nodes(graph, suffix, "aten.add.Tensor", &[lhs, rhs])
+    fn add(
+        &self,
+        cursor: &mut IrRewriteCursor<'_>,
+        suffix: &str,
+        lhs: NodeId,
+        rhs: NodeId,
+    ) -> NodeId {
+        self.tensor_nodes(cursor, suffix, "aten.add.Tensor", &[lhs, rhs])
     }
 
-    fn sub(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
-        self.tensor_nodes(graph, suffix, "aten.sub.Tensor", &[lhs, rhs])
+    fn sub(
+        &self,
+        cursor: &mut IrRewriteCursor<'_>,
+        suffix: &str,
+        lhs: NodeId,
+        rhs: NodeId,
+    ) -> NodeId {
+        self.tensor_nodes(cursor, suffix, "aten.sub.Tensor", &[lhs, rhs])
     }
 
-    fn mul(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
-        self.tensor_nodes(graph, suffix, "aten.mul.Tensor", &[lhs, rhs])
+    fn mul(
+        &self,
+        cursor: &mut IrRewriteCursor<'_>,
+        suffix: &str,
+        lhs: NodeId,
+        rhs: NodeId,
+    ) -> NodeId {
+        self.tensor_nodes(cursor, suffix, "aten.mul.Tensor", &[lhs, rhs])
     }
 
-    fn div(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
-        self.tensor_nodes(graph, suffix, "aten.div.Tensor", &[lhs, rhs])
+    fn div(
+        &self,
+        cursor: &mut IrRewriteCursor<'_>,
+        suffix: &str,
+        lhs: NodeId,
+        rhs: NodeId,
+    ) -> NodeId {
+        self.tensor_nodes(cursor, suffix, "aten.div.Tensor", &[lhs, rhs])
     }
 
-    fn unary(&self, graph: &mut IrGraph, suffix: &str, target: &str, input: NodeId) -> NodeId {
-        self.tensor_nodes(graph, suffix, target, &[input])
+    fn unary(
+        &self,
+        cursor: &mut IrRewriteCursor<'_>,
+        suffix: &str,
+        target: &str,
+        input: NodeId,
+    ) -> NodeId {
+        self.tensor_nodes(cursor, suffix, target, &[input])
     }
 
-    fn neg(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
-        self.unary(graph, suffix, "aten.neg.default", input)
+    fn neg(&self, cursor: &mut IrRewriteCursor<'_>, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(cursor, suffix, "aten.neg.default", input)
     }
 
-    fn exp(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
-        self.unary(graph, suffix, "aten.exp.default", input)
+    fn exp(&self, cursor: &mut IrRewriteCursor<'_>, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(cursor, suffix, "aten.exp.default", input)
     }
 
-    fn sqrt(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
-        self.unary(graph, suffix, "aten.sqrt.default", input)
+    fn sqrt(&self, cursor: &mut IrRewriteCursor<'_>, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(cursor, suffix, "aten.sqrt.default", input)
     }
 
-    fn log(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
-        self.unary(graph, suffix, "aten.log.default", input)
+    fn log(&self, cursor: &mut IrRewriteCursor<'_>, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(cursor, suffix, "aten.log.default", input)
     }
 
-    fn abs(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
-        self.unary(graph, suffix, "aten.abs.default", input)
+    fn abs(&self, cursor: &mut IrRewriteCursor<'_>, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(cursor, suffix, "aten.abs.default", input)
     }
 
-    fn reciprocal(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
-        self.unary(graph, suffix, "aten.reciprocal.default", input)
+    fn reciprocal(&self, cursor: &mut IrRewriteCursor<'_>, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(cursor, suffix, "aten.reciprocal.default", input)
     }
 
-    fn tanh(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
-        self.unary(graph, suffix, "aten.tanh.default", input)
+    fn tanh(&self, cursor: &mut IrRewriteCursor<'_>, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(cursor, suffix, "aten.tanh.default", input)
     }
 
-    fn erf(&self, graph: &mut IrGraph, suffix: &str, input: NodeId) -> NodeId {
-        self.unary(graph, suffix, "aten.erf.default", input)
+    fn erf(&self, cursor: &mut IrRewriteCursor<'_>, suffix: &str, input: NodeId) -> NodeId {
+        self.unary(cursor, suffix, "aten.erf.default", input)
     }
 
-    fn ge(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
-        self.bool_nodes(graph, suffix, "aten.ge.Tensor", &[lhs, rhs])
+    fn ge(
+        &self,
+        cursor: &mut IrRewriteCursor<'_>,
+        suffix: &str,
+        lhs: NodeId,
+        rhs: NodeId,
+    ) -> NodeId {
+        self.bool_nodes(cursor, suffix, "aten.ge.Tensor", &[lhs, rhs])
     }
 
-    fn gt(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
-        self.bool_nodes(graph, suffix, "aten.gt.Tensor", &[lhs, rhs])
+    fn gt(
+        &self,
+        cursor: &mut IrRewriteCursor<'_>,
+        suffix: &str,
+        lhs: NodeId,
+        rhs: NodeId,
+    ) -> NodeId {
+        self.bool_nodes(cursor, suffix, "aten.gt.Tensor", &[lhs, rhs])
     }
 
-    fn lt(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
-        self.bool_nodes(graph, suffix, "aten.lt.Tensor", &[lhs, rhs])
+    fn lt(
+        &self,
+        cursor: &mut IrRewriteCursor<'_>,
+        suffix: &str,
+        lhs: NodeId,
+        rhs: NodeId,
+    ) -> NodeId {
+        self.bool_nodes(cursor, suffix, "aten.lt.Tensor", &[lhs, rhs])
     }
 
-    fn eq(&self, graph: &mut IrGraph, suffix: &str, lhs: NodeId, rhs: NodeId) -> NodeId {
-        self.bool_nodes(graph, suffix, "aten.eq.Tensor", &[lhs, rhs])
+    fn eq(
+        &self,
+        cursor: &mut IrRewriteCursor<'_>,
+        suffix: &str,
+        lhs: NodeId,
+        rhs: NodeId,
+    ) -> NodeId {
+        self.bool_nodes(cursor, suffix, "aten.eq.Tensor", &[lhs, rhs])
     }
 
     fn where_self(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         suffix: &str,
         condition: NodeId,
         when_true: NodeId,
         when_false: NodeId,
     ) -> NodeId {
         self.tensor_nodes(
-            graph,
+            cursor,
             suffix,
             "aten.where.self",
             &[condition, when_true, when_false],
@@ -427,37 +478,37 @@ impl ApproxCtx {
 
     fn poly(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         prefix: &str,
         coefficients: &[f64],
         variable_id: NodeId,
     ) -> Option<NodeId> {
-        self.poly_shape(graph, prefix, coefficients, variable_id, &self.shape)
+        self.poly_shape(cursor, prefix, coefficients, variable_id, &self.shape)
     }
 
     fn poly_shape(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         prefix: &str,
         coefficients: &[f64],
         variable_id: NodeId,
         shape: &[i64],
     ) -> Option<NodeId> {
         let first = *coefficients.first()?;
-        let mut result = self.full_shape(graph, &format!("{prefix}_c0"), first, shape);
+        let mut result = self.full_shape(cursor, &format!("{prefix}_c0"), first, shape);
         let mut current_var = variable_id;
 
         for (idx, coeff) in coefficients.iter().enumerate().skip(1) {
-            let coeff_id = self.full_shape(graph, &format!("{prefix}_c{idx}"), *coeff, shape);
+            let coeff_id = self.full_shape(cursor, &format!("{prefix}_c{idx}"), *coeff, shape);
             let term = self.tensor_shape(
-                graph,
+                cursor,
                 &format!("{prefix}_term{idx}"),
                 "aten.mul.Tensor",
                 vec![IrArg::Node(current_var), IrArg::Node(coeff_id)],
                 shape,
             );
             let sum = self.tensor_shape(
-                graph,
+                cursor,
                 &format!("{prefix}_sum{idx}"),
                 "aten.add.Tensor",
                 vec![IrArg::Node(result), IrArg::Node(term)],
@@ -467,7 +518,7 @@ impl ApproxCtx {
 
             if idx + 1 < coefficients.len() {
                 current_var = self.tensor_shape(
-                    graph,
+                    cursor,
                     &format!("{prefix}_pow{idx}"),
                     "aten.mul.Tensor",
                     vec![IrArg::Node(current_var), IrArg::Node(current_var)],
@@ -481,17 +532,17 @@ impl ApproxCtx {
 
     fn horner_nodes(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         prefix: &str,
         variable_id: NodeId,
         coefficients: &[NodeId],
     ) -> Option<NodeId> {
-        self.horner_nodes_shape(graph, prefix, variable_id, coefficients, &self.shape)
+        self.horner_nodes_shape(cursor, prefix, variable_id, coefficients, &self.shape)
     }
 
     fn horner_nodes_shape(
         &self,
-        graph: &mut IrGraph,
+        cursor: &mut IrRewriteCursor<'_>,
         prefix: &str,
         variable_id: NodeId,
         coefficients: &[NodeId],
@@ -502,14 +553,14 @@ impl ApproxCtx {
 
         for (step, coeff_id) in rest.iter().rev().enumerate() {
             let mul = self.tensor_shape(
-                graph,
+                cursor,
                 &format!("{prefix}_mul{step}"),
                 "aten.mul.Tensor",
                 vec![IrArg::Node(acc), IrArg::Node(variable_id)],
                 shape,
             );
             acc = self.tensor_shape(
-                graph,
+                cursor,
                 &format!("{prefix}_add{step}"),
                 "aten.add.Tensor",
                 vec![IrArg::Node(mul), IrArg::Node(*coeff_id)],
@@ -749,19 +800,22 @@ fn decompose_add_sub_alpha(graph: &mut IrGraph, id: NodeId) -> bool {
     let Some(target) = add_sub_alpha_result_target(&graph.nodes[id].target) else {
         return false;
     };
-    let alpha_full = rhs_ctx.full(graph, "alpha_full", alpha);
-    let scaled_rhs =
-        rhs_ctx.output_nodes(graph, "alpha_mul", "aten.mul.Tensor", &[rhs_id, alpha_full]);
-
     let mut add_args = graph.nodes[id].args.clone();
     if add_args.len() < 2 {
         return false;
     }
-    add_args[1] = IrArg::Node(scaled_rhs);
     add_args.truncate(2);
     let node_name = graph.nodes[id].name.clone();
     let node_meta = graph.nodes[id].meta.clone();
     let mut cursor = graph.rewrite_cursor(id);
+    let alpha_full = rhs_ctx.full(&mut cursor, "alpha_full", alpha);
+    let scaled_rhs = rhs_ctx.output_nodes(
+        &mut cursor,
+        "alpha_mul",
+        "aten.mul.Tensor",
+        &[rhs_id, alpha_full],
+    );
+    add_args[1] = IrArg::Node(scaled_rhs);
     let result = cursor.call_function(
         format!("{}_alpha_result", node_name),
         target,
@@ -782,10 +836,11 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
     };
 
     if pow_scalar_numeric_arg(&graph.nodes[id]).is_some_and(|exp| exp == 0.0) {
-        let one = ctx.full(graph, "one", 1.0);
-        let eq = ctx.eq(graph, "self_eq", input_id, input_id);
-        let ones = ctx.output_nodes(graph, "ones", "aten.where.self", &[eq, one, one]);
-        graph.replace_and_erase(id, ones);
+        let mut cursor = graph.rewrite_cursor(id);
+        let one = ctx.full(&mut cursor, "one", 1.0);
+        let eq = ctx.eq(&mut cursor, "self_eq", input_id, input_id);
+        let ones = ctx.output_nodes(&mut cursor, "ones", "aten.where.self", &[eq, one, one]);
+        cursor.replace_anchor_with(ones);
         return true;
     }
 
@@ -794,9 +849,14 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
     };
 
     let mut base_id = input_id;
+    let mut cursor = graph.rewrite_cursor(id);
     if exp < 0 {
-        let reciprocal =
-            ctx.output_nodes(graph, "reciprocal", "aten.reciprocal.default", &[input_id]);
+        let reciprocal = ctx.output_nodes(
+            &mut cursor,
+            "reciprocal",
+            "aten.reciprocal.default",
+            &[input_id],
+        );
         base_id = reciprocal;
         exp = -exp;
     }
@@ -804,7 +864,7 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
     let mut result_id = base_id;
     for idx in 1..exp {
         let mul = ctx.output_nodes(
-            graph,
+            &mut cursor,
             &format!("mul{idx}"),
             "aten.mul.Tensor",
             &[result_id, base_id],
@@ -812,7 +872,7 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
         result_id = mul;
     }
 
-    graph.replace_and_erase(id, result_id);
+    cursor.replace_anchor_with(result_id);
     true
 }
 
@@ -1545,20 +1605,21 @@ fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> 
     reduced_shape[dim] = 1;
     let sum_shape = reduced_shape.clone();
 
+    let mut cursor = graph.rewrite_cursor(id);
     let reduce = ctx.tensor_shape(
-        graph,
+        &mut cursor,
         "amax",
         "aten.amax.default",
         vec![IrArg::Node(x_id), IrArg::Int(dim as i64), IrArg::Bool(true)],
         &reduced_shape,
     );
 
-    let shifted = ctx.sub(graph, "shifted", x_id, reduce);
+    let shifted = ctx.sub(&mut cursor, "shifted", x_id, reduce);
 
-    let exp = ctx.exp(graph, "exp", shifted);
+    let exp = ctx.exp(&mut cursor, "exp", shifted);
 
     let sum = ctx.tensor_shape(
-        graph,
+        &mut cursor,
         "sum",
         "aten.sum.dim_IntList",
         vec![IrArg::Node(exp), i64_list(&[dim as i64]), IrArg::Bool(true)],
@@ -1566,19 +1627,19 @@ fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> 
     );
 
     let recip = ctx.tensor_shape(
-        graph,
+        &mut cursor,
         "recip",
         "aten.reciprocal.default",
         vec![IrArg::Node(sum)],
         &sum_shape,
     );
 
-    let softmax = ctx.mul(graph, "softmax", exp, recip);
+    let softmax = ctx.mul(&mut cursor, "softmax", exp, recip);
 
     if log_output {
-        ctx.replace_nodes(graph, "result", "aten.log.default", &[softmax]);
+        ctx.replace_nodes(&mut cursor, "result", "aten.log.default", &[softmax]);
     } else {
-        ctx.replace_nodes(graph, "result", "aten.clone.default", &[softmax]);
+        ctx.replace_nodes(&mut cursor, "result", "aten.clone.default", &[softmax]);
     }
     true
 }
@@ -1589,13 +1650,14 @@ fn decompose_atanh(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     };
 
-    let one = ctx.full(graph, "one", 1.0);
-    let half = ctx.full(graph, "half", 0.5);
-    let one_plus = ctx.add(graph, "1px", one, x_id);
-    let one_minus = ctx.sub(graph, "1mx", one, x_id);
-    let ratio = ctx.div(graph, "ratio", one_plus, one_minus);
-    let log_r = ctx.log(graph, "log", ratio);
-    ctx.replace_nodes(graph, "result", "aten.mul.Tensor", &[half, log_r]);
+    let mut cursor = graph.rewrite_cursor(id);
+    let one = ctx.full(&mut cursor, "one", 1.0);
+    let half = ctx.full(&mut cursor, "half", 0.5);
+    let one_plus = ctx.add(&mut cursor, "1px", one, x_id);
+    let one_minus = ctx.sub(&mut cursor, "1mx", one, x_id);
+    let ratio = ctx.div(&mut cursor, "ratio", one_plus, one_minus);
+    let log_r = ctx.log(&mut cursor, "log", ratio);
+    ctx.replace_nodes(&mut cursor, "result", "aten.mul.Tensor", &[half, log_r]);
     true
 }
 
@@ -1605,9 +1667,10 @@ fn decompose_tan(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     };
 
-    let sin = ctx.unary(graph, "sin", "aten.sin.default", x_id);
-    let cos = ctx.unary(graph, "cos", "aten.cos.default", x_id);
-    ctx.replace_nodes(graph, "result", "aten.div.Tensor", &[sin, cos]);
+    let mut cursor = graph.rewrite_cursor(id);
+    let sin = ctx.unary(&mut cursor, "sin", "aten.sin.default", x_id);
+    let cos = ctx.unary(&mut cursor, "cos", "aten.cos.default", x_id);
+    ctx.replace_nodes(&mut cursor, "result", "aten.div.Tensor", &[sin, cos]);
     true
 }
 
@@ -1617,32 +1680,33 @@ fn decompose_atan(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     };
 
-    let one = ctx.full(graph, "one", 1.0);
-    let zero = ctx.full(graph, "zero", 0.0);
-    let half_pi = ctx.full(graph, "half_pi", FRAC_PI_2);
+    let mut cursor = graph.rewrite_cursor(id);
+    let one = ctx.full(&mut cursor, "one", 1.0);
+    let zero = ctx.full(&mut cursor, "zero", 0.0);
+    let half_pi = ctx.full(&mut cursor, "half_pi", FRAC_PI_2);
 
-    let abs_x = ctx.abs(graph, "abs", x_id);
-    let mask_hi = ctx.gt(graph, "mask_hi", abs_x, one);
-    let inv_x = ctx.reciprocal(graph, "inv", abs_x);
-    let z = ctx.where_self(graph, "z", mask_hi, inv_x, abs_x);
-    let z2 = ctx.mul(graph, "z2", z, z);
-    let num = match ctx.poly(graph, "num", &[1.0, 0.3529666667, -0.0287666667], z2) {
+    let abs_x = ctx.abs(&mut cursor, "abs", x_id);
+    let mask_hi = ctx.gt(&mut cursor, "mask_hi", abs_x, one);
+    let inv_x = ctx.reciprocal(&mut cursor, "inv", abs_x);
+    let z = ctx.where_self(&mut cursor, "z", mask_hi, inv_x, abs_x);
+    let z2 = ctx.mul(&mut cursor, "z2", z, z);
+    let num = match ctx.poly(&mut cursor, "num", &[1.0, 0.3529666667, -0.0287666667], z2) {
         Some(node) => node,
         None => return false,
     };
-    let den = match ctx.poly(graph, "den", &[1.0, 0.6863], z2) {
+    let den = match ctx.poly(&mut cursor, "den", &[1.0, 0.6863], z2) {
         Some(node) => node,
         None => return false,
     };
-    let inv_den = ctx.reciprocal(graph, "inv_den", den);
-    let prod = ctx.mul(graph, "prod", num, inv_den);
-    let atan_z = ctx.mul(graph, "atan_z", z, prod);
-    let diff = ctx.sub(graph, "diff", half_pi, atan_z);
-    let atan_abs = ctx.where_self(graph, "atan_abs", mask_hi, diff, atan_z);
-    let mask_pos = ctx.gt(graph, "mask_pos", x_id, zero);
-    let neg = ctx.neg(graph, "neg", atan_abs);
+    let inv_den = ctx.reciprocal(&mut cursor, "inv_den", den);
+    let prod = ctx.mul(&mut cursor, "prod", num, inv_den);
+    let atan_z = ctx.mul(&mut cursor, "atan_z", z, prod);
+    let diff = ctx.sub(&mut cursor, "diff", half_pi, atan_z);
+    let atan_abs = ctx.where_self(&mut cursor, "atan_abs", mask_hi, diff, atan_z);
+    let mask_pos = ctx.gt(&mut cursor, "mask_pos", x_id, zero);
+    let neg = ctx.neg(&mut cursor, "neg", atan_abs);
     ctx.replace_nodes(
-        graph,
+        &mut cursor,
         "result",
         "aten.where.self",
         &[mask_pos, atan_abs, neg],
@@ -1656,12 +1720,13 @@ fn decompose_sinh(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     };
 
-    let half = ctx.full(graph, "half", 0.5);
-    let exp_pos = ctx.exp(graph, "exp_pos", x_id);
-    let neg = ctx.neg(graph, "neg", x_id);
-    let exp_neg = ctx.exp(graph, "exp_neg", neg);
-    let diff = ctx.sub(graph, "diff", exp_pos, exp_neg);
-    ctx.replace_nodes(graph, "result", "aten.mul.Tensor", &[diff, half]);
+    let mut cursor = graph.rewrite_cursor(id);
+    let half = ctx.full(&mut cursor, "half", 0.5);
+    let exp_pos = ctx.exp(&mut cursor, "exp_pos", x_id);
+    let neg = ctx.neg(&mut cursor, "neg", x_id);
+    let exp_neg = ctx.exp(&mut cursor, "exp_neg", neg);
+    let diff = ctx.sub(&mut cursor, "diff", exp_pos, exp_neg);
+    ctx.replace_nodes(&mut cursor, "result", "aten.mul.Tensor", &[diff, half]);
     true
 }
 
@@ -1671,12 +1736,13 @@ fn decompose_cosh(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     };
 
-    let half = ctx.full(graph, "half", 0.5);
-    let exp_pos = ctx.exp(graph, "exp_pos", x_id);
-    let neg = ctx.neg(graph, "neg", x_id);
-    let exp_neg = ctx.exp(graph, "exp_neg", neg);
-    let sum = ctx.add(graph, "sum", exp_pos, exp_neg);
-    ctx.replace_nodes(graph, "result", "aten.mul.Tensor", &[sum, half]);
+    let mut cursor = graph.rewrite_cursor(id);
+    let half = ctx.full(&mut cursor, "half", 0.5);
+    let exp_pos = ctx.exp(&mut cursor, "exp_pos", x_id);
+    let neg = ctx.neg(&mut cursor, "neg", x_id);
+    let exp_neg = ctx.exp(&mut cursor, "exp_neg", neg);
+    let sum = ctx.add(&mut cursor, "sum", exp_pos, exp_neg);
+    ctx.replace_nodes(&mut cursor, "result", "aten.mul.Tensor", &[sum, half]);
     true
 }
 
@@ -1686,12 +1752,13 @@ fn decompose_asinh(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     };
 
-    let one = ctx.full(graph, "one", 1.0);
-    let square = ctx.mul(graph, "square", x_id, x_id);
-    let radicand = ctx.add(graph, "radicand", square, one);
-    let sqrt = ctx.sqrt(graph, "sqrt", radicand);
-    let add = ctx.add(graph, "sum", x_id, sqrt);
-    ctx.replace_nodes(graph, "result", "aten.log.default", &[add]);
+    let mut cursor = graph.rewrite_cursor(id);
+    let one = ctx.full(&mut cursor, "one", 1.0);
+    let square = ctx.mul(&mut cursor, "square", x_id, x_id);
+    let radicand = ctx.add(&mut cursor, "radicand", square, one);
+    let sqrt = ctx.sqrt(&mut cursor, "sqrt", radicand);
+    let add = ctx.add(&mut cursor, "sum", x_id, sqrt);
+    ctx.replace_nodes(&mut cursor, "result", "aten.log.default", &[add]);
     true
 }
 
@@ -1701,13 +1768,14 @@ fn decompose_acosh(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     };
 
-    let one = ctx.full(graph, "one", 1.0);
-    let minus = ctx.sub(graph, "minus", x_id, one);
-    let plus = ctx.add(graph, "plus", x_id, one);
-    let radicand = ctx.mul(graph, "radicand", minus, plus);
-    let sqrt = ctx.sqrt(graph, "sqrt", radicand);
-    let add = ctx.add(graph, "sum", x_id, sqrt);
-    ctx.replace_nodes(graph, "result", "aten.log.default", &[add]);
+    let mut cursor = graph.rewrite_cursor(id);
+    let one = ctx.full(&mut cursor, "one", 1.0);
+    let minus = ctx.sub(&mut cursor, "minus", x_id, one);
+    let plus = ctx.add(&mut cursor, "plus", x_id, one);
+    let radicand = ctx.mul(&mut cursor, "radicand", minus, plus);
+    let sqrt = ctx.sqrt(&mut cursor, "sqrt", radicand);
+    let add = ctx.add(&mut cursor, "sum", x_id, sqrt);
+    ctx.replace_nodes(&mut cursor, "result", "aten.log.default", &[add]);
     true
 }
 
@@ -1726,67 +1794,74 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
     ];
     let q_coefficients = [1.0, -2.4033949375e00, 2.0209457874e00, -6.8828397989e-01];
 
-    let one = ctx.full(graph, "one", 1.0);
-    let half = ctx.full(graph, "half", 0.5);
-    let neg_half = ctx.full(graph, "neg_half", -0.5);
-    let two = ctx.full(graph, "two", 2.0);
-    let half_pi = ctx.full(graph, "half_pi", FRAC_PI_2);
-    let zero = ctx.full(graph, "zero", 0.0);
+    let mut cursor = graph.rewrite_cursor(id);
+    let one = ctx.full(&mut cursor, "one", 1.0);
+    let half = ctx.full(&mut cursor, "half", 0.5);
+    let neg_half = ctx.full(&mut cursor, "neg_half", -0.5);
+    let two = ctx.full(&mut cursor, "two", 2.0);
+    let half_pi = ctx.full(&mut cursor, "half_pi", FRAC_PI_2);
+    let zero = ctx.full(&mut cursor, "zero", 0.0);
 
-    let x_abs = ctx.abs(graph, "abs", x_id);
-    let y = ctx.mul(graph, "y", x_abs, x_abs);
-    let x3 = ctx.mul(graph, "x3", x_abs, y);
+    let x_abs = ctx.abs(&mut cursor, "abs", x_id);
+    let y = ctx.mul(&mut cursor, "y", x_abs, x_abs);
+    let x3 = ctx.mul(&mut cursor, "x3", x_abs, y);
 
-    let p_small = match ctx.poly(graph, "p_small", &p_coefficients, x_abs) {
+    let p_small = match ctx.poly(&mut cursor, "p_small", &p_coefficients, x_abs) {
         Some(node_id) => node_id,
         None => return false,
     };
-    let q_small = match ctx.poly(graph, "q_small", &q_coefficients, x_abs) {
-        Some(node_id) => node_id,
-        None => return false,
-    };
-
-    let numer_small = ctx.mul(graph, "numer_small", x3, p_small);
-    let r_small = ctx.div(graph, "r_small", numer_small, q_small);
-    let asin_small = ctx.add(graph, "asin_small", x_abs, r_small);
-    let tmp = ctx.sub(graph, "tmp", x_abs, one);
-    let z = ctx.mul(graph, "z", tmp, neg_half);
-    let s = ctx.sqrt(graph, "s", z);
-    let s2 = ctx.mul(graph, "s2", s, s);
-    let s3 = ctx.mul(graph, "s3", s2, s);
-
-    let pz = match ctx.poly(graph, "p_large", &p_coefficients, z) {
-        Some(node_id) => node_id,
-        None => return false,
-    };
-    let qz = match ctx.poly(graph, "q_large", &q_coefficients, z) {
+    let q_small = match ctx.poly(&mut cursor, "q_small", &q_coefficients, x_abs) {
         Some(node_id) => node_id,
         None => return false,
     };
 
-    let numer_large = ctx.mul(graph, "numer_large", s3, pz);
-    let r_large = ctx.div(graph, "r_large", numer_large, qz);
-    let t1 = ctx.add(graph, "t1", s, r_large);
-    let t2 = ctx.mul(graph, "t2", t1, two);
-    let diff = ctx.sub(graph, "diff", t2, half_pi);
-    let asin_large = ctx.neg(graph, "asin_large", diff);
-    let mask_large = ctx.gt(graph, "mask_large", x_abs, half);
-    let asin_unsigned = ctx.where_self(graph, "asin_unsigned", mask_large, asin_large, asin_small);
-    let negated_asin = ctx.neg(graph, "negated_asin", asin_unsigned);
-    let mask_neg = ctx.lt(graph, "mask_neg", x_id, zero);
-    let asin = ctx.where_self(graph, "asin", mask_neg, negated_asin, asin_unsigned);
+    let numer_small = ctx.mul(&mut cursor, "numer_small", x3, p_small);
+    let r_small = ctx.div(&mut cursor, "r_small", numer_small, q_small);
+    let asin_small = ctx.add(&mut cursor, "asin_small", x_abs, r_small);
+    let tmp = ctx.sub(&mut cursor, "tmp", x_abs, one);
+    let z = ctx.mul(&mut cursor, "z", tmp, neg_half);
+    let s = ctx.sqrt(&mut cursor, "s", z);
+    let s2 = ctx.mul(&mut cursor, "s2", s, s);
+    let s3 = ctx.mul(&mut cursor, "s3", s2, s);
+
+    let pz = match ctx.poly(&mut cursor, "p_large", &p_coefficients, z) {
+        Some(node_id) => node_id,
+        None => return false,
+    };
+    let qz = match ctx.poly(&mut cursor, "q_large", &q_coefficients, z) {
+        Some(node_id) => node_id,
+        None => return false,
+    };
+
+    let numer_large = ctx.mul(&mut cursor, "numer_large", s3, pz);
+    let r_large = ctx.div(&mut cursor, "r_large", numer_large, qz);
+    let t1 = ctx.add(&mut cursor, "t1", s, r_large);
+    let t2 = ctx.mul(&mut cursor, "t2", t1, two);
+    let diff = ctx.sub(&mut cursor, "diff", t2, half_pi);
+    let asin_large = ctx.neg(&mut cursor, "asin_large", diff);
+    let mask_large = ctx.gt(&mut cursor, "mask_large", x_abs, half);
+    let asin_unsigned = ctx.where_self(
+        &mut cursor,
+        "asin_unsigned",
+        mask_large,
+        asin_large,
+        asin_small,
+    );
+    let negated_asin = ctx.neg(&mut cursor, "negated_asin", asin_unsigned);
+    let mask_neg = ctx.lt(&mut cursor, "mask_neg", x_id, zero);
+    let asin = ctx.where_self(&mut cursor, "asin", mask_neg, negated_asin, asin_unsigned);
 
     if is_acos_op {
-        let acos_small = ctx.sub(graph, "acos_small", half_pi, asin);
-        let mask_gt_half = ctx.gt(graph, "mask_gt_half", x_id, half);
+        let acos_small = ctx.sub(&mut cursor, "acos_small", half_pi, asin);
+        let mask_gt_half = ctx.gt(&mut cursor, "mask_gt_half", x_id, half);
         ctx.replace_nodes(
-            graph,
+            &mut cursor,
             "result",
             "aten.where.self",
             &[mask_gt_half, t2, acos_small],
         );
     } else {
-        ctx.replace_nodes(graph, "result", "aten.clone.default", &[asin]);
+        ctx.replace_nodes(&mut cursor, "result", "aten.clone.default", &[asin]);
     }
     true
 }
@@ -1798,12 +1873,18 @@ fn decompose_elu(graph: &mut IrGraph, id: NodeId) -> bool {
     };
     let alpha = elu_alpha(&graph.nodes[id]);
 
-    let zero = ctx.full(graph, "zero", 0.0);
-    let alpha_full = ctx.full(graph, "alpha", alpha);
-    let expm1 = ctx.unary(graph, "expm1", "aten.expm1.default", x_id);
-    let scaled = ctx.mul(graph, "scaled", expm1, alpha_full);
-    let ge = ctx.ge(graph, "ge", x_id, zero);
-    ctx.replace_nodes(graph, "result", "aten.where.self", &[ge, x_id, scaled]);
+    let mut cursor = graph.rewrite_cursor(id);
+    let zero = ctx.full(&mut cursor, "zero", 0.0);
+    let alpha_full = ctx.full(&mut cursor, "alpha", alpha);
+    let expm1 = ctx.unary(&mut cursor, "expm1", "aten.expm1.default", x_id);
+    let scaled = ctx.mul(&mut cursor, "scaled", expm1, alpha_full);
+    let ge = ctx.ge(&mut cursor, "ge", x_id, zero);
+    ctx.replace_nodes(
+        &mut cursor,
+        "result",
+        "aten.where.self",
+        &[ge, x_id, scaled],
+    );
     true
 }
 
@@ -1813,45 +1894,47 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     };
     let approximate = gelu_approximate(&graph.nodes[id]).to_string();
-    let half = ctx.full_scalar(graph, "half", 0.5);
-    let one = ctx.full_scalar(graph, "one", 1.0);
+    let mut cursor = graph.rewrite_cursor(id);
+    let half = ctx.full_scalar(&mut cursor, "half", 0.5);
+    let one = ctx.full_scalar(&mut cursor, "one", 1.0);
 
     match approximate.as_str() {
         "none" => {
-            let sqrt_half = ctx.full_scalar(graph, "sqrt_half", std::f64::consts::FRAC_1_SQRT_2);
-            let scaled = ctx.mul(graph, "scaled", x_id, sqrt_half);
-            let erf = ctx.erf(graph, "erf", scaled);
-            let plus_one = ctx.add(graph, "plus_one", erf, one);
-            let weighted = ctx.mul(graph, "weighted", plus_one, half);
-            ctx.replace_nodes(graph, "result", "aten.mul.Tensor", &[x_id, weighted]);
+            let sqrt_half =
+                ctx.full_scalar(&mut cursor, "sqrt_half", std::f64::consts::FRAC_1_SQRT_2);
+            let scaled = ctx.mul(&mut cursor, "scaled", x_id, sqrt_half);
+            let erf = ctx.erf(&mut cursor, "erf", scaled);
+            let plus_one = ctx.add(&mut cursor, "plus_one", erf, one);
+            let weighted = ctx.mul(&mut cursor, "weighted", plus_one, half);
+            ctx.replace_nodes(&mut cursor, "result", "aten.mul.Tensor", &[x_id, weighted]);
         }
         "tanh" => {
-            let sqrt_two = ctx.full_scalar(graph, "sqrt_two", std::f64::consts::SQRT_2);
+            let sqrt_two = ctx.full_scalar(&mut cursor, "sqrt_two", std::f64::consts::SQRT_2);
             let two_over_sqrt_pi =
-                ctx.full_scalar(graph, "two_over_sqrt_pi", 1.128_379_167_095_512_6);
-            let cube_coeff = ctx.full_scalar(graph, "cube_coeff", 0.044_715);
+                ctx.full_scalar(&mut cursor, "two_over_sqrt_pi", 1.128_379_167_095_512_6);
+            let cube_coeff = ctx.full_scalar(&mut cursor, "cube_coeff", 0.044_715);
 
             let sqrt_mul = ctx.tensor_scalar(
-                graph,
+                &mut cursor,
                 "sqrt_mul",
                 "aten.mul.Tensor",
                 vec![IrArg::Node(sqrt_two), IrArg::Node(two_over_sqrt_pi)],
             );
             let sqrt_2_pi = ctx.tensor_scalar(
-                graph,
+                &mut cursor,
                 "sqrt_2_pi",
                 "aten.mul.Tensor",
                 vec![IrArg::Node(sqrt_mul), IrArg::Node(half)],
             );
-            let square = ctx.mul(graph, "square", x_id, x_id);
-            let cube = ctx.mul(graph, "cube", square, x_id);
-            let cubic_term = ctx.mul(graph, "cubic_term", cube, cube_coeff);
-            let inner = ctx.add(graph, "inner", x_id, cubic_term);
-            let scaled = ctx.mul(graph, "scaled", inner, sqrt_2_pi);
-            let tanh = ctx.tanh(graph, "tanh", scaled);
-            let plus_one = ctx.add(graph, "plus_one", tanh, one);
-            let first_mul = ctx.mul(graph, "first_mul", x_id, plus_one);
-            ctx.replace_nodes(graph, "result", "aten.mul.Tensor", &[first_mul, half]);
+            let square = ctx.mul(&mut cursor, "square", x_id, x_id);
+            let cube = ctx.mul(&mut cursor, "cube", square, x_id);
+            let cubic_term = ctx.mul(&mut cursor, "cubic_term", cube, cube_coeff);
+            let inner = ctx.add(&mut cursor, "inner", x_id, cubic_term);
+            let scaled = ctx.mul(&mut cursor, "scaled", inner, sqrt_2_pi);
+            let tanh = ctx.tanh(&mut cursor, "tanh", scaled);
+            let plus_one = ctx.add(&mut cursor, "plus_one", tanh, one);
+            let first_mul = ctx.mul(&mut cursor, "first_mul", x_id, plus_one);
+            ctx.replace_nodes(&mut cursor, "result", "aten.mul.Tensor", &[first_mul, half]);
         }
         _ => return false,
     }
@@ -1864,106 +1947,108 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     };
 
-    let central_range = ctx.full_scalar(graph, "central_range", 0.7);
-    let a0 = ctx.full_scalar(graph, "a0", 0.886_226_899);
-    let a1 = ctx.full_scalar(graph, "a1", -1.645_349_621);
-    let a2 = ctx.full_scalar(graph, "a2", 0.914_624_893);
-    let a3 = ctx.full_scalar(graph, "a3", -0.140_543_331);
-    let b0 = ctx.full_scalar(graph, "b0", -2.118_377_725);
-    let b1 = ctx.full_scalar(graph, "b1", 1.442_710_462);
-    let b2 = ctx.full_scalar(graph, "b2", -0.329_097_515);
-    let b3 = ctx.full_scalar(graph, "b3", 0.012_229_801);
-    let c0 = ctx.full_scalar(graph, "c0", -1.970_840_454);
-    let c1 = ctx.full_scalar(graph, "c1", -1.624_906_493);
-    let c2 = ctx.full_scalar(graph, "c2", 3.429_567_803);
-    let c3 = ctx.full_scalar(graph, "c3", 1.641_345_311);
-    let d0 = ctx.full_scalar(graph, "d0", 3.543_889_2);
-    let d1 = ctx.full_scalar(graph, "d1", 1.637_067_8);
-    let half = ctx.full_scalar(graph, "half", 0.5);
-    let one = ctx.full_scalar(graph, "one", 1.0);
-    let zeros = ctx.full_scalar(graph, "zeros", 0.0);
-    let neg_ones = ctx.full_scalar(graph, "neg_ones", -1.0);
-    let refine_max_abs = ctx.full_scalar(graph, "refine_max_abs", 0.95);
-    let deriv_eps = ctx.full_scalar(graph, "deriv_eps", 1.0e-3);
-    let corr_max = ctx.full_scalar(graph, "corr_max", 0.5);
-    let two_over_sqrt_pi = ctx.full_scalar(graph, "two_over_sqrt_pi", 1.128_379_167_095_512_6);
-    let nan = ctx.full_scalar(graph, "nan", f64::NAN);
-    let pos_inf = ctx.full_scalar(graph, "pos_inf", f64::INFINITY);
-    let neg_inf = ctx.full_scalar(graph, "neg_inf", f64::NEG_INFINITY);
-    graph.nodes[pos_inf]
+    let mut cursor = graph.rewrite_cursor(id);
+    let central_range = ctx.full_scalar(&mut cursor, "central_range", 0.7);
+    let a0 = ctx.full_scalar(&mut cursor, "a0", 0.886_226_899);
+    let a1 = ctx.full_scalar(&mut cursor, "a1", -1.645_349_621);
+    let a2 = ctx.full_scalar(&mut cursor, "a2", 0.914_624_893);
+    let a3 = ctx.full_scalar(&mut cursor, "a3", -0.140_543_331);
+    let b0 = ctx.full_scalar(&mut cursor, "b0", -2.118_377_725);
+    let b1 = ctx.full_scalar(&mut cursor, "b1", 1.442_710_462);
+    let b2 = ctx.full_scalar(&mut cursor, "b2", -0.329_097_515);
+    let b3 = ctx.full_scalar(&mut cursor, "b3", 0.012_229_801);
+    let c0 = ctx.full_scalar(&mut cursor, "c0", -1.970_840_454);
+    let c1 = ctx.full_scalar(&mut cursor, "c1", -1.624_906_493);
+    let c2 = ctx.full_scalar(&mut cursor, "c2", 3.429_567_803);
+    let c3 = ctx.full_scalar(&mut cursor, "c3", 1.641_345_311);
+    let d0 = ctx.full_scalar(&mut cursor, "d0", 3.543_889_2);
+    let d1 = ctx.full_scalar(&mut cursor, "d1", 1.637_067_8);
+    let half = ctx.full_scalar(&mut cursor, "half", 0.5);
+    let one = ctx.full_scalar(&mut cursor, "one", 1.0);
+    let zeros = ctx.full_scalar(&mut cursor, "zeros", 0.0);
+    let neg_ones = ctx.full_scalar(&mut cursor, "neg_ones", -1.0);
+    let refine_max_abs = ctx.full_scalar(&mut cursor, "refine_max_abs", 0.95);
+    let deriv_eps = ctx.full_scalar(&mut cursor, "deriv_eps", 1.0e-3);
+    let corr_max = ctx.full_scalar(&mut cursor, "corr_max", 0.5);
+    let two_over_sqrt_pi =
+        ctx.full_scalar(&mut cursor, "two_over_sqrt_pi", 1.128_379_167_095_512_6);
+    let nan = ctx.full_scalar(&mut cursor, "nan", f64::NAN);
+    let pos_inf = ctx.full_scalar(&mut cursor, "pos_inf", f64::INFINITY);
+    let neg_inf = ctx.full_scalar(&mut cursor, "neg_inf", f64::NEG_INFINITY);
+    cursor.graph_mut().nodes[pos_inf]
         .meta
         .set_extra("arm_preserve_inf_literal", MetaValue::Bool(true));
-    graph.nodes[neg_inf]
+    cursor.graph_mut().nodes[neg_inf]
         .meta
         .set_extra("arm_preserve_inf_literal", MetaValue::Bool(true));
 
-    let x_lt0 = ctx.lt(graph, "x_lt0", x_id, zeros);
-    let s = ctx.where_self(graph, "sign", x_lt0, neg_ones, one);
-    let a = ctx.abs(graph, "abs", x_id);
-    let abs_gt1 = ctx.gt(graph, "abs_gt1", a, one);
-    let abs_eq1 = ctx.eq(graph, "abs_eq1", a, one);
-    let a_math_gt = ctx.where_self(graph, "a_math_gt", abs_gt1, zeros, a);
-    let a_math = ctx.where_self(graph, "a_math", abs_eq1, zeros, a_math_gt);
+    let x_lt0 = ctx.lt(&mut cursor, "x_lt0", x_id, zeros);
+    let s = ctx.where_self(&mut cursor, "sign", x_lt0, neg_ones, one);
+    let a = ctx.abs(&mut cursor, "abs", x_id);
+    let abs_gt1 = ctx.gt(&mut cursor, "abs_gt1", a, one);
+    let abs_eq1 = ctx.eq(&mut cursor, "abs_eq1", a, one);
+    let a_math_gt = ctx.where_self(&mut cursor, "a_math_gt", abs_gt1, zeros, a);
+    let a_math = ctx.where_self(&mut cursor, "a_math", abs_eq1, zeros, a_math_gt);
 
-    let z = ctx.mul(graph, "z", x_id, x_id);
-    let p = match ctx.horner_nodes(graph, "p", z, &[a0, a1, a2, a3]) {
+    let z = ctx.mul(&mut cursor, "z", x_id, x_id);
+    let p = match ctx.horner_nodes(&mut cursor, "p", z, &[a0, a1, a2, a3]) {
         Some(node) => node,
         None => return false,
     };
-    let q = match ctx.horner_nodes(graph, "q", z, &[one, b0, b1, b2, b3]) {
-        Some(node) => node,
-        None => return false,
-    };
-
-    let xp = ctx.mul(graph, "xp", x_id, p);
-    let y0_central = ctx.div(graph, "y0_central", xp, q);
-
-    let one_minus_a = ctx.sub(graph, "one_minus_a", one, a_math);
-    let u = ctx.mul(graph, "u", one_minus_a, half);
-    let u_safe = ctx.where_self(graph, "u_safe", abs_eq1, one, u);
-    let log_u = ctx.log(graph, "log_u", u_safe);
-    let neg_log_u = ctx.mul(graph, "neg_log_u", log_u, neg_ones);
-    let t = ctx.sqrt(graph, "t", neg_log_u);
-    let r = match ctx.horner_nodes(graph, "r", t, &[c0, c1, c2, c3]) {
-        Some(node) => node,
-        None => return false,
-    };
-    let s_den = match ctx.horner_nodes(graph, "s_den", t, &[one, d0, d1]) {
+    let q = match ctx.horner_nodes(&mut cursor, "q", z, &[one, b0, b1, b2, b3]) {
         Some(node) => node,
         None => return false,
     };
 
-    let frac = ctx.div(graph, "frac", r, s_den);
-    let frac_abs = ctx.abs(graph, "frac_abs", frac);
-    let y0_tail = ctx.mul(graph, "y0_tail", s, frac_abs);
+    let xp = ctx.mul(&mut cursor, "xp", x_id, p);
+    let y0_central = ctx.div(&mut cursor, "y0_central", xp, q);
 
-    let in_central = ctx.lt(graph, "in_central", a, central_range);
+    let one_minus_a = ctx.sub(&mut cursor, "one_minus_a", one, a_math);
+    let u = ctx.mul(&mut cursor, "u", one_minus_a, half);
+    let u_safe = ctx.where_self(&mut cursor, "u_safe", abs_eq1, one, u);
+    let log_u = ctx.log(&mut cursor, "log_u", u_safe);
+    let neg_log_u = ctx.mul(&mut cursor, "neg_log_u", log_u, neg_ones);
+    let t = ctx.sqrt(&mut cursor, "t", neg_log_u);
+    let r = match ctx.horner_nodes(&mut cursor, "r", t, &[c0, c1, c2, c3]) {
+        Some(node) => node,
+        None => return false,
+    };
+    let s_den = match ctx.horner_nodes(&mut cursor, "s_den", t, &[one, d0, d1]) {
+        Some(node) => node,
+        None => return false,
+    };
 
-    let y0_pre = ctx.where_self(graph, "y0_pre", in_central, y0_central, y0_tail);
-    let y0_no_gt = ctx.where_self(graph, "y0_no_gt", abs_gt1, zeros, y0_pre);
-    let y0 = ctx.where_self(graph, "y0", abs_eq1, zeros, y0_no_gt);
+    let frac = ctx.div(&mut cursor, "frac", r, s_den);
+    let frac_abs = ctx.abs(&mut cursor, "frac_abs", frac);
+    let y0_tail = ctx.mul(&mut cursor, "y0_tail", s, frac_abs);
 
-    let refine_mask = ctx.lt(graph, "refine_mask", a, refine_max_abs);
+    let in_central = ctx.lt(&mut cursor, "in_central", a, central_range);
 
-    let erf_y = ctx.erf(graph, "erf_y", y0);
-    let err = ctx.sub(graph, "err", erf_y, x_id);
-    let y_sq = ctx.mul(graph, "y_sq", y0, y0);
-    let neg_y_sq = ctx.mul(graph, "neg_y_sq", y_sq, neg_ones);
-    let exp_term = ctx.exp(graph, "exp_term", neg_y_sq);
-    let deriv = ctx.mul(graph, "deriv", exp_term, two_over_sqrt_pi);
-    let deriv_tiny = ctx.lt(graph, "deriv_tiny", deriv, deriv_eps);
-    let corr = ctx.div(graph, "corr", err, deriv);
-    let corr_abs = ctx.abs(graph, "corr_abs", corr);
-    let corr_huge = ctx.gt(graph, "corr_huge", corr_abs, corr_max);
-    let y1 = ctx.sub(graph, "y1", y0, corr);
-    let y_safe_small = ctx.where_self(graph, "y_safe_small", deriv_tiny, y0, y1);
-    let y_safe = ctx.where_self(graph, "y_safe", corr_huge, y0, y_safe_small);
-    let y = ctx.where_self(graph, "y", refine_mask, y_safe, y0);
+    let y0_pre = ctx.where_self(&mut cursor, "y0_pre", in_central, y0_central, y0_tail);
+    let y0_no_gt = ctx.where_self(&mut cursor, "y0_no_gt", abs_gt1, zeros, y0_pre);
+    let y0 = ctx.where_self(&mut cursor, "y0", abs_eq1, zeros, y0_no_gt);
 
-    let inf_signed = ctx.where_self(graph, "inf_signed", x_lt0, neg_inf, pos_inf);
-    let out_gt1 = ctx.where_self(graph, "out_gt1", abs_gt1, nan, y);
+    let refine_mask = ctx.lt(&mut cursor, "refine_mask", a, refine_max_abs);
+
+    let erf_y = ctx.erf(&mut cursor, "erf_y", y0);
+    let err = ctx.sub(&mut cursor, "err", erf_y, x_id);
+    let y_sq = ctx.mul(&mut cursor, "y_sq", y0, y0);
+    let neg_y_sq = ctx.mul(&mut cursor, "neg_y_sq", y_sq, neg_ones);
+    let exp_term = ctx.exp(&mut cursor, "exp_term", neg_y_sq);
+    let deriv = ctx.mul(&mut cursor, "deriv", exp_term, two_over_sqrt_pi);
+    let deriv_tiny = ctx.lt(&mut cursor, "deriv_tiny", deriv, deriv_eps);
+    let corr = ctx.div(&mut cursor, "corr", err, deriv);
+    let corr_abs = ctx.abs(&mut cursor, "corr_abs", corr);
+    let corr_huge = ctx.gt(&mut cursor, "corr_huge", corr_abs, corr_max);
+    let y1 = ctx.sub(&mut cursor, "y1", y0, corr);
+    let y_safe_small = ctx.where_self(&mut cursor, "y_safe_small", deriv_tiny, y0, y1);
+    let y_safe = ctx.where_self(&mut cursor, "y_safe", corr_huge, y0, y_safe_small);
+    let y = ctx.where_self(&mut cursor, "y", refine_mask, y_safe, y0);
+
+    let inf_signed = ctx.where_self(&mut cursor, "inf_signed", x_lt0, neg_inf, pos_inf);
+    let out_gt1 = ctx.where_self(&mut cursor, "out_gt1", abs_gt1, nan, y);
     ctx.replace_nodes(
-        graph,
+        &mut cursor,
         "result",
         "aten.where.self",
         &[abs_eq1, inf_signed, out_gt1],
@@ -2002,51 +2087,58 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     channel_shape[channel_axis] = num_features;
     let scalar_shape = ctx.scalar_shape();
     let eps = batch_norm_eps(&graph.nodes[id]);
-    let mean_view = ctx.view_shape(graph, "mean_view", running_mean, &channel_shape);
-    let var_view = ctx.view_shape(graph, "var_view", running_var, &channel_shape);
+    let result = {
+        let mut cursor = graph.rewrite_cursor(id);
+        let mean_view = ctx.view_shape(&mut cursor, "mean_view", running_mean, &channel_shape);
+        let var_view = ctx.view_shape(&mut cursor, "var_view", running_var, &channel_shape);
 
-    let centered = ctx.sub(graph, "centered", x_id, mean_view);
-    let eps_full = ctx.full_shape(graph, "eps", eps, &scalar_shape);
+        let centered = ctx.sub(&mut cursor, "centered", x_id, mean_view);
+        let eps_full = ctx.full_shape(&mut cursor, "eps", eps, &scalar_shape);
 
-    let var_eps = ctx.tensor_nodes_shape(
-        graph,
-        "var_eps",
-        "aten.add.Tensor",
-        &[var_view, eps_full],
-        &channel_shape,
-    );
+        let var_eps = ctx.tensor_nodes_shape(
+            &mut cursor,
+            "var_eps",
+            "aten.add.Tensor",
+            &[var_view, eps_full],
+            &channel_shape,
+        );
 
-    let inv_sqrt = ctx.tensor_nodes_shape(
-        graph,
-        "inv_sqrt",
-        "aten.rsqrt.default",
-        &[var_eps],
-        &channel_shape,
-    );
+        let inv_sqrt = ctx.tensor_nodes_shape(
+            &mut cursor,
+            "inv_sqrt",
+            "aten.rsqrt.default",
+            &[var_eps],
+            &channel_shape,
+        );
 
-    let normed = ctx.mul(graph, "normed", centered, inv_sqrt);
+        let normed = ctx.mul(&mut cursor, "normed", centered, inv_sqrt);
 
-    let weight_view = match weight_arg {
-        IrArg::Node(weight_id) => ctx.view_shape(graph, "weight_view", weight_id, &channel_shape),
-        IrArg::None => {
-            let weight_full = ctx.full_shape(graph, "weight_full", 1.0, &[num_features]);
-            ctx.view_shape(graph, "weight_view", weight_full, &channel_shape)
-        }
-        _ => return false,
+        let weight_view = match weight_arg {
+            IrArg::Node(weight_id) => {
+                ctx.view_shape(&mut cursor, "weight_view", weight_id, &channel_shape)
+            }
+            IrArg::None => {
+                let weight_full = ctx.full_shape(&mut cursor, "weight_full", 1.0, &[num_features]);
+                ctx.view_shape(&mut cursor, "weight_view", weight_full, &channel_shape)
+            }
+            _ => return false,
+        };
+
+        let weighted = ctx.mul(&mut cursor, "weighted", normed, weight_view);
+
+        let bias_view = match bias_arg {
+            IrArg::Node(bias_id) => {
+                ctx.view_shape(&mut cursor, "bias_view", bias_id, &channel_shape)
+            }
+            IrArg::None => {
+                let bias_full = ctx.full_shape(&mut cursor, "bias_full", 0.0, &[num_features]);
+                ctx.view_shape(&mut cursor, "bias_view", bias_full, &channel_shape)
+            }
+            _ => return false,
+        };
+
+        ctx.add(&mut cursor, "result", weighted, bias_view)
     };
-
-    let weighted = ctx.mul(graph, "weighted", normed, weight_view);
-
-    let bias_view = match bias_arg {
-        IrArg::Node(bias_id) => ctx.view_shape(graph, "bias_view", bias_id, &channel_shape),
-        IrArg::None => {
-            let bias_full = ctx.full_shape(graph, "bias_full", 0.0, &[num_features]);
-            ctx.view_shape(graph, "bias_view", bias_full, &channel_shape)
-        }
-        _ => return false,
-    };
-
-    let result = ctx.add(graph, "result", weighted, bias_view);
     replace_primary_result_users(graph, id, result)
 }
 
@@ -2123,116 +2215,125 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     let Some(reshape_target) = group_norm_reshape_target(&graph.nodes[id].target) else {
         return false;
     };
-    let grouped = ctx.reshape_shape(graph, "grouped", reshape_target, x_id, &grouped_shape);
-    let inv_n = ctx.full_shape(
-        graph,
-        "inv_n",
-        1.0 / ((channels_per_group * hxw) as f64),
-        &scalar_shape,
-    );
-    let sum_x = ctx.tensor_shape(
-        graph,
-        "sum",
-        "aten.sum.dim_IntList",
-        vec![IrArg::Node(grouped), reduce_dims.clone(), IrArg::Bool(true)],
-        &stat_shape,
-    );
-    let mean = ctx.tensor_nodes_shape(
-        graph,
-        "mean",
-        "aten.mul.Tensor",
-        &[sum_x, inv_n],
-        &stat_shape,
-    );
-    let centered = ctx.tensor_nodes_shape(
-        graph,
-        "centered",
-        "aten.sub.Tensor",
-        &[grouped, mean],
-        &grouped_shape,
-    );
-    let squared = ctx.tensor_nodes_shape(
-        graph,
-        "squared",
-        "aten.mul.Tensor",
-        &[centered, centered],
-        &grouped_shape,
-    );
-    let sum_squared = ctx.tensor_shape(
-        graph,
-        "sum_squared",
-        "aten.sum.dim_IntList",
-        vec![IrArg::Node(squared), reduce_dims, IrArg::Bool(true)],
-        &stat_shape,
-    );
-    let var = ctx.tensor_nodes_shape(
-        graph,
-        "var",
-        "aten.mul.Tensor",
-        &[sum_squared, inv_n],
-        &stat_shape,
-    );
-    let eps_full = ctx.full_shape(graph, "eps", eps, &scalar_shape);
-    let var_eps = ctx.tensor_nodes_shape(
-        graph,
-        "var_eps",
-        "aten.add.Tensor",
-        &[var, eps_full],
-        &stat_shape,
-    );
-    let rsqrt = ctx.tensor_nodes_shape(
-        graph,
-        "rsqrt",
-        "aten.rsqrt.default",
-        &[var_eps],
-        &stat_shape,
-    );
-    let normalized = ctx.tensor_nodes_shape(
-        graph,
-        "normalized",
-        "aten.mul.Tensor",
-        &[centered, rsqrt],
-        &grouped_shape,
-    );
+    let result = {
+        let mut cursor = graph.rewrite_cursor(id);
+        let grouped =
+            ctx.reshape_shape(&mut cursor, "grouped", reshape_target, x_id, &grouped_shape);
+        let inv_n = ctx.full_shape(
+            &mut cursor,
+            "inv_n",
+            1.0 / ((channels_per_group * hxw) as f64),
+            &scalar_shape,
+        );
+        let sum_x = ctx.tensor_shape(
+            &mut cursor,
+            "sum",
+            "aten.sum.dim_IntList",
+            vec![IrArg::Node(grouped), reduce_dims.clone(), IrArg::Bool(true)],
+            &stat_shape,
+        );
+        let mean = ctx.tensor_nodes_shape(
+            &mut cursor,
+            "mean",
+            "aten.mul.Tensor",
+            &[sum_x, inv_n],
+            &stat_shape,
+        );
+        let centered = ctx.tensor_nodes_shape(
+            &mut cursor,
+            "centered",
+            "aten.sub.Tensor",
+            &[grouped, mean],
+            &grouped_shape,
+        );
+        let squared = ctx.tensor_nodes_shape(
+            &mut cursor,
+            "squared",
+            "aten.mul.Tensor",
+            &[centered, centered],
+            &grouped_shape,
+        );
+        let sum_squared = ctx.tensor_shape(
+            &mut cursor,
+            "sum_squared",
+            "aten.sum.dim_IntList",
+            vec![IrArg::Node(squared), reduce_dims, IrArg::Bool(true)],
+            &stat_shape,
+        );
+        let var = ctx.tensor_nodes_shape(
+            &mut cursor,
+            "var",
+            "aten.mul.Tensor",
+            &[sum_squared, inv_n],
+            &stat_shape,
+        );
+        let eps_full = ctx.full_shape(&mut cursor, "eps", eps, &scalar_shape);
+        let var_eps = ctx.tensor_nodes_shape(
+            &mut cursor,
+            "var_eps",
+            "aten.add.Tensor",
+            &[var, eps_full],
+            &stat_shape,
+        );
+        let rsqrt = ctx.tensor_nodes_shape(
+            &mut cursor,
+            "rsqrt",
+            "aten.rsqrt.default",
+            &[var_eps],
+            &stat_shape,
+        );
+        let normalized = ctx.tensor_nodes_shape(
+            &mut cursor,
+            "normalized",
+            "aten.mul.Tensor",
+            &[centered, rsqrt],
+            &grouped_shape,
+        );
 
-    let weighted = match weight_arg {
-        IrArg::Node(weight_id) => {
-            let weight_view = ctx.reshape_shape(
-                graph,
-                "weight_view",
-                reshape_target,
-                weight_id,
-                &affine_shape,
-            );
-            ctx.tensor_nodes_shape(
-                graph,
-                "weighted",
-                "aten.mul.Tensor",
-                &[normalized, weight_view],
-                &grouped_shape,
-            )
-        }
-        IrArg::None => normalized,
-        _ => return false,
+        let weighted = match weight_arg {
+            IrArg::Node(weight_id) => {
+                let weight_view = ctx.reshape_shape(
+                    &mut cursor,
+                    "weight_view",
+                    reshape_target,
+                    weight_id,
+                    &affine_shape,
+                );
+                ctx.tensor_nodes_shape(
+                    &mut cursor,
+                    "weighted",
+                    "aten.mul.Tensor",
+                    &[normalized, weight_view],
+                    &grouped_shape,
+                )
+            }
+            IrArg::None => normalized,
+            _ => return false,
+        };
+
+        let biased = match bias_arg {
+            IrArg::Node(bias_id) => {
+                let bias_view = ctx.reshape_shape(
+                    &mut cursor,
+                    "bias_view",
+                    reshape_target,
+                    bias_id,
+                    &affine_shape,
+                );
+                ctx.tensor_nodes_shape(
+                    &mut cursor,
+                    "biased",
+                    "aten.add.Tensor",
+                    &[weighted, bias_view],
+                    &grouped_shape,
+                )
+            }
+            IrArg::None => weighted,
+            _ => return false,
+        };
+
+        ctx.reshape_shape(&mut cursor, "result", reshape_target, biased, &shape)
     };
-
-    let biased = match bias_arg {
-        IrArg::Node(bias_id) => {
-            let bias_view =
-                ctx.reshape_shape(graph, "bias_view", reshape_target, bias_id, &affine_shape);
-            ctx.tensor_nodes_shape(
-                graph,
-                "biased",
-                "aten.add.Tensor",
-                &[weighted, bias_view],
-                &grouped_shape,
-            )
-        }
-        IrArg::None => weighted,
-        _ => return false,
-    };
-
-    let result = ctx.reshape_shape(graph, "result", reshape_target, biased, &shape);
     replace_primary_result_users(graph, id, result)
 }
 

@@ -3163,3 +3163,50 @@ The safest order is:
 The goal is not to minimize file count. The goal is to establish one common
 grammar for targets, one common grammar for tensor metadata, and one common
 grammar for graph rewrites.
+
+## Completed: ApproxCtx Cursor Collapse
+
+Status:
+
+Complete for `src/fx_decompose_ops_ir.rs`.
+
+Change:
+
+The approximation decomposition helper now emits through `IrRewriteCursor`
+instead of calling a parallel `IrGraph::add_anchored_*` mini-builder. The
+remaining approximation formulas keep their existing names, targets, metadata,
+and replacement semantics, but inserted chains now use the same cursor grammar
+as the rest of the IR rewrite passes.
+
+Deleted:
+
+- `IrGraph::add_anchored_call_function`
+- `IrGraph::add_anchored_view_copy`
+- `IrGraph::add_anchored_full_float`
+
+Payoff:
+
+- Removes a second graph-editing dialect from the largest math decomposition
+  pass.
+- Makes topological sequencing explicit through cursor append order instead of
+  repeated anchor-to-original behavior.
+- Shrinks the live helper surface to cursor-based rewrites plus the producer-
+  anchored `add_after_*` helpers that still represent a different placement
+  contract.
+
+Risk:
+
+Low-medium. The decomposition formulas are unchanged, but insertion order is now
+strictly chain-ordered instead of repeatedly anchored to the original node.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo check --lib`
+- `cargo test --lib`
+- `/tmp/et.sh`: `478 passed, 9 skipped, 903 deselected, 3 xfailed`
+
+Metric:
+
+Rust source LOC increased from `35,751` to `35,816`. This was accepted as a
+semantic-collapse slice rather than a deletion slice.
