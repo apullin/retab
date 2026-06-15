@@ -68,10 +68,10 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 orig_meta.tensor_stamp_bool_as_int8_work_dtype_of_or_float32(&x_meta);
             let index_meta = orig_meta.tensor_stamp(&idx_dtype);
             let bool_meta = orig_meta.tensor_stamp("torch.bool");
+            let mut cursor = graph.rewrite_cursor(id);
 
             let x_for_gather = if needs_bool_cast {
-                graph.add_anchored_dtype_cast(
-                    id,
+                cursor.dtype_cast(
                     format!("{}_bool_to_i8", name),
                     x_id,
                     gather_meta.dtype(),
@@ -82,34 +82,30 @@ impl IrPass for IrDecomposeIndexSelectPass {
             };
 
             // Flatten x to (N, K, C)
-            let values = graph.add_anchored_view_copy(
-                id,
+            let values = cursor.view_copy(
                 format!("{}_values", name),
                 x_for_gather,
                 &[n, k, c],
                 gather_meta.preserve_qparams(vec![n, k, c]),
             );
 
-            // Index: unsqueeze(0) → (1, W), then expand to (N, W)
-            let idx_unsq = graph.add_anchored_call_function(
-                id,
+            // Index: unsqueeze(0) -> (1, W), then expand to (N, W)
+            let idx_unsq = cursor.call_function(
                 format!("{}_idx_unsq", name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(index_id), IrArg::Int(0)],
                 index_meta.preserve_qparams(vec![1, w]),
             );
 
-            let idx_exp = graph.add_anchored_call_function(
-                id,
+            let idx_exp = cursor.call_function(
                 format!("{}_idx_exp", name),
                 "aten.expand_copy.default".to_string(),
                 vec![IrArg::Node(idx_unsq), i64_list(&[n, w])],
                 index_meta.preserve_qparams(vec![n, w]),
             );
 
-            // GATHER(values, indices) → (N, W, C)
-            let gathered = graph.add_anchored_call_function(
-                id,
+            // GATHER(values, indices) -> (N, W, C)
+            let gathered = cursor.call_function(
                 format!("{}_gather", name),
                 "backend.tosa.GATHER.default".to_string(),
                 vec![IrArg::Node(values), IrArg::Node(idx_exp)],
@@ -124,28 +120,27 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 .chain(after.iter().copied())
                 .collect();
             if needs_bool_cast {
-                let result = graph.add_anchored_view_copy(
-                    id,
+                let result = cursor.view_copy(
                     format!("{}_out", name),
                     gathered,
                     &out_shape,
                     gather_meta.preserve_qparams(out_shape.clone()),
                 );
-                graph.replace_with_dtype_cast(
-                    id,
+                let final_result = cursor.dtype_cast(
                     format!("{}_i8_to_bool", name),
                     result,
                     "torch.bool",
                     bool_meta.preserve_qparams(out_shape),
                 );
+                cursor.replace_anchor_with(final_result);
             } else {
-                graph.replace_with_view_copy(
-                    id,
+                let result = cursor.view_copy(
                     format!("{}_out", name),
                     gathered,
                     &out_shape,
                     gather_meta.preserve_qparams(out_shape.clone()),
                 );
+                cursor.replace_anchor_with(result);
             }
             modified = true;
         }

@@ -71,11 +71,11 @@ impl IrPass for IrCanonicalizeGatherPass {
             let index_meta = orig_meta.tensor_stamp("torch.int64");
 
             let mut values_in = x_id;
+            let mut cursor = graph.rewrite_cursor(id);
 
-            // Optional bool→int8 cast
+            // Optional bool -> int8 cast
             if needs_bool_cast {
-                let cast_id = graph.add_anchored_dtype_cast(
-                    id,
+                let cast_id = cursor.dtype_cast(
                     format!("{}_bool_to_int8", node_name),
                     x_id,
                     work_meta.dtype(),
@@ -85,83 +85,74 @@ impl IrPass for IrCanonicalizeGatherPass {
             }
 
             let result = if x_shape.len() == 2 {
-                // 2D path: view to 3D → GATHER → view back to 2D
-                let v3d = graph.add_anchored_view_copy(
-                    id,
+                // 2D path: view to 3D -> GATHER -> view back to 2D
+                let v3d = cursor.view_copy(
                     format!("{}_values_3d", node_name),
                     values_in,
                     &[n, k, 1],
                     work_meta.preserve_qparams(vec![n, k, 1]),
                 );
 
-                let gathered = graph.add_anchored_call_function(
-                    id,
+                let gathered = cursor.call_function(
                     format!("{}_gather", node_name),
                     "backend.tosa.GATHER.default",
                     vec![IrArg::Node(v3d), IrArg::Node(index_id)],
                     work_meta.preserve_qparams(vec![n, w, 1]),
                 );
 
-                graph.add_anchored_view_copy(
-                    id,
+                cursor.view_copy(
                     format!("{}_out_2d", node_name),
                     gathered,
                     &[n, w],
                     work_meta.preserve_qparams(vec![n, w]),
                 )
             } else {
-                // 3D path: permute(0,2,1) → reshape(N*C,K,1) → GATHER → reshape(N,C,W) → permute(0,2,1)
+                // 3D path: permute(0,2,1) -> reshape(N*C,K,1) -> GATHER -> reshape(N,C,W) -> permute(0,2,1)
                 let c = x_shape[2];
 
-                let vperm = graph.add_anchored_permute_copy(
-                    id,
+                let vperm = cursor.permute_copy(
                     format!("{}_values_perm", node_name),
                     values_in,
                     &[0, 2, 1],
                     work_meta.preserve_qparams(vec![n, c, k]),
                 );
 
-                let vresh = graph.add_anchored_view_copy(
-                    id,
+                let vresh = cursor.view_copy(
                     format!("{}_values_flat", node_name),
                     vperm,
                     &[n * c, k, 1],
                     work_meta.preserve_qparams(vec![n * c, k, 1]),
                 );
 
-                let iperm = graph.add_anchored_permute_copy(
-                    id,
+                let iperm = cursor.permute_copy(
                     format!("{}_idx_perm", node_name),
                     index_id,
                     &[0, 2, 1],
                     index_meta.preserve_qparams(vec![n, c, w]),
                 );
 
-                let iresh = graph.add_anchored_view_copy(
-                    id,
+                let iresh = cursor.view_copy(
                     format!("{}_idx_flat", node_name),
                     iperm,
                     &[n * c, w],
                     index_meta.preserve_qparams(vec![n * c, w]),
                 );
 
-                let gathered = graph.add_anchored_call_function(
-                    id,
+                let gathered = cursor.call_function(
                     format!("{}_gather", node_name),
                     "backend.tosa.GATHER.default",
                     vec![IrArg::Node(vresh), IrArg::Node(iresh)],
                     work_meta.preserve_qparams(vec![n * c, w, 1]),
                 );
 
-                let gresh = graph.add_anchored_view_copy(
-                    id,
+                let gresh = cursor.view_copy(
                     format!("{}_gather_3d", node_name),
                     gathered,
                     &[n, c, w],
                     work_meta.preserve_qparams(vec![n, c, w]),
                 );
 
-                graph.add_permute_copy(
+                cursor.permute_copy(
                     format!("{}_out_perm", node_name),
                     gresh,
                     &[0, 2, 1],
@@ -169,10 +160,9 @@ impl IrPass for IrCanonicalizeGatherPass {
                 )
             };
 
-            // Optional int8→bool cast back
+            // Optional int8 -> bool cast back
             let final_result = if needs_bool_cast {
-                graph.add_anchored_dtype_cast(
-                    id,
+                cursor.dtype_cast(
                     format!("{}_int8_to_bool", node_name),
                     result,
                     "torch.bool",
@@ -182,7 +172,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                 result
             };
 
-            graph.replace_and_erase(id, final_result);
+            cursor.replace_anchor_with(final_result);
             modified = true;
         }
 

@@ -714,19 +714,6 @@ impl IrGraph {
         )
     }
 
-    pub(crate) fn replace_with_dtype_cast(
-        &mut self,
-        old_id: NodeId,
-        name: impl Into<String>,
-        source: NodeId,
-        dtype: impl Into<String>,
-        meta: NodeMeta,
-    ) -> NodeId {
-        let id = self.add_anchored_dtype_cast(old_id, name, source, dtype, meta);
-        self.replace_and_erase(old_id, id);
-        id
-    }
-
     pub(crate) fn add_view_copy(
         &mut self,
         name: impl Into<String>,

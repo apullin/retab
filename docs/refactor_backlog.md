@@ -147,6 +147,18 @@ Note: this is the first slice of the larger rewrite-chain cleanup. The important
   complexity reduction is that these passes now state a single ordered rewrite
   chain instead of anchoring every new node manually.
 
+2026-06-15, IR rewrite cursor slice 2
+Rust LOC: 36,051 -> 36,025
+Movement: -26 Rust LOC
+Deleted/collapsed: repeated anchored-node insertion in gather, index_select,
+  and linear decompositions, plus the now-unused replace_with_dtype_cast helper
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib; maturin
+  develop --release; focused Python smoke over gather, index_select, and
+  non-a8w4 linear: 59 passed
+Note: this slice continues moving decomposition passes toward an explicit
+  ordered rewrite-chain grammar and removed a dead convenience helper exposed by
+  the conversion.
+
 Slice log:
 
 ```text

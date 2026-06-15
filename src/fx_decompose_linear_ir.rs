@@ -71,13 +71,6 @@ impl IrPass for IrDecomposeLinearPass {
             let input_4d_meta = input_base_meta
                 .tensor_stamp_same_dtype_or_float32()
                 .empty_qparam_maps(input_4d_shape);
-            let input_reshaped = graph.add_anchored_view_copy(
-                id,
-                format!("{}_input_view", node_name),
-                input_id,
-                &input_4d_shape,
-                input_4d_meta,
-            );
 
             // 2. Reshape weights to 4D: [Co, Ci] -> [Co, Ci, 1, 1]
             //    Propagate weight qparams (including per-channel) to the reshaped node.
@@ -86,13 +79,6 @@ impl IrPass for IrDecomposeLinearPass {
             let weights_4d_meta = weights_base_meta
                 .tensor_stamp_same_dtype_or_float32()
                 .empty_qparam_maps(weights_4d_shape);
-            let weights_reshaped = graph.add_anchored_view_copy(
-                id,
-                format!("{}_weight_view", node_name),
-                weights_id,
-                &weights_4d_shape,
-                weights_4d_meta,
-            );
 
             // 3. Conv2d with 1x1 kernel
             //    convolution(input, weight, bias, stride, padding, dilation,
@@ -105,8 +91,24 @@ impl IrPass for IrDecomposeLinearPass {
                 Some(nid) => IrArg::Node(nid),
                 None => IrArg::None,
             };
-            let conv = graph.add_anchored_call_function(
-                id,
+
+            let mut cursor = graph.rewrite_cursor(id);
+
+            let input_reshaped = cursor.view_copy(
+                format!("{}_input_view", node_name),
+                input_id,
+                &input_4d_shape,
+                input_4d_meta,
+            );
+
+            let weights_reshaped = cursor.view_copy(
+                format!("{}_weight_view", node_name),
+                weights_id,
+                &weights_4d_shape,
+                weights_4d_meta,
+            );
+
+            let conv = cursor.call_function(
                 format!("{}_conv", node_name),
                 "aten.convolution.default",
                 vec![
@@ -125,13 +127,13 @@ impl IrPass for IrDecomposeLinearPass {
 
             // 4. Reshape output back to original shape
             let out_meta = output_meta.empty_qparam_maps(output_shape.clone());
-            graph.replace_with_view_copy(
-                id,
+            let result = cursor.view_copy(
                 format!("{}_output_view", node_name),
                 conv,
                 &output_shape,
                 out_meta,
             );
+            cursor.replace_anchor_with(result);
             modified = true;
         }
 
