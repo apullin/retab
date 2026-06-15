@@ -283,6 +283,17 @@ Note: select_scatter now reads as one seven-step rewrite chain ending in
   replace_anchor_with, matching the cursor grammar used by slice_scatter and
   index_put.
 
+2026-06-15, IR rewrite cursor slice 12
+Rust LOC: 35,830 -> 35,823
+Movement: -7 Rust LOC
+Deleted/collapsed: manual anchored mm/full/mul/add construction in addmm
+  lowering
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib
+  fx_decompose_addmm_ir::tests; cargo test --lib; maturin develop --release;
+  focused Python smoke over addmm, mm, and matmul: 83 passed, 5 xfailed
+Note: addmm now reads as one ordered expression rewrite: mm, optional alpha
+  scaling, optional beta scaling, then add.
+
 Slice log:
 
 ```text

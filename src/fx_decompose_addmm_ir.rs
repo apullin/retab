@@ -79,9 +79,11 @@ impl IrPass for IrDecomposeAddmmPass {
                 _ => orig_meta.clone(),
             };
 
+            let bias_meta = graph.nodes[bias_id].meta.clone();
+            let mut cursor = graph.rewrite_cursor(id);
+
             // Step 1: mm(mat1, mat2)
-            let mm_id = graph.add_anchored_call_function(
-                id,
+            let mm_id = cursor.call_function(
                 format!("{}_mm", node_name),
                 "aten.mm.default",
                 vec![IrArg::Node(mat1_id), IrArg::Node(mat2_id)],
@@ -92,15 +94,13 @@ impl IrPass for IrDecomposeAddmmPass {
             let scaled_mm_id = if (alpha - 1.0).abs() > 1e-10 {
                 let rank = mm_meta.val_shape().map(|s| s.len()).unwrap_or(1);
                 let full_shape: Vec<IrArg> = vec![IrArg::Int(1); rank];
-                let full_id = graph.add_anchored_call_function(
-                    id,
+                let full_id = cursor.call_function(
                     format!("{}_alpha_full", node_name),
                     "aten.full.default",
                     vec![IrArg::List(full_shape), IrArg::Float(alpha)],
                     mm_meta.clone(),
                 );
-                graph.add_anchored_call_function(
-                    id,
+                cursor.call_function(
                     format!("{}_alpha_mul", node_name),
                     "aten.mul.Tensor",
                     vec![IrArg::Node(mm_id), IrArg::Node(full_id)],
@@ -112,22 +112,15 @@ impl IrPass for IrDecomposeAddmmPass {
 
             // Step 3: optionally scale bias by beta
             let scaled_bias_id = if (beta - 1.0).abs() > 1e-10 {
-                let rank = graph.nodes[bias_id]
-                    .meta
-                    .val_shape()
-                    .map(|s| s.len())
-                    .unwrap_or(1);
+                let rank = bias_meta.val_shape().map(|s| s.len()).unwrap_or(1);
                 let full_shape: Vec<IrArg> = vec![IrArg::Int(1); rank];
-                let bias_meta = graph.nodes[bias_id].meta.clone();
-                let full_id = graph.add_anchored_call_function(
-                    id,
+                let full_id = cursor.call_function(
                     format!("{}_beta_full", node_name),
                     "aten.full.default",
                     vec![IrArg::List(full_shape), IrArg::Float(beta)],
                     bias_meta.clone(),
                 );
-                graph.add_anchored_call_function(
-                    id,
+                cursor.call_function(
                     format!("{}_beta_mul", node_name),
                     "aten.mul.Tensor",
                     vec![IrArg::Node(bias_id), IrArg::Node(full_id)],
@@ -138,13 +131,13 @@ impl IrPass for IrDecomposeAddmmPass {
             };
 
             // Step 4: add(scaled_mm, scaled_bias)
-            graph.replace_with_call_function(
-                id,
+            let result = cursor.call_function(
                 format!("{}_add", node_name),
                 "aten.add.Tensor",
                 vec![IrArg::Node(scaled_mm_id), IrArg::Node(scaled_bias_id)],
                 orig_meta,
             );
+            cursor.replace_anchor_with(result);
             modified = true;
 
             log_line(format_args!(
