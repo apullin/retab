@@ -45,9 +45,9 @@ impl IrPass for IrReplaceScalarWithTensorPass {
                 .unwrap_or("torch.int64")
                 .to_string();
             let shape = [1];
+            let mut cursor = graph.rewrite_cursor(id);
 
-            let full = graph.add_anchored_call_function_with_kwargs(
-                id,
+            let full = cursor.call_function_with_kwargs(
                 format!("{}_scalar_tensor", node_name),
                 "aten.full.default",
                 vec![IrArg::List(vec![IrArg::Int(1)]), scalar_value],
@@ -55,13 +55,13 @@ impl IrPass for IrReplaceScalarWithTensorPass {
                 NodeMeta::tensor(shape, &lhs_dtype),
             );
 
-            graph.replace_with_call_function(
-                id,
+            let replacement = cursor.call_function(
                 format!("{}_tensor", node_name),
                 new_target,
                 vec![IrArg::Node(lhs_id), IrArg::Node(full)],
                 output_meta,
             );
+            cursor.replace_anchor_with(replacement);
             true
         });
 

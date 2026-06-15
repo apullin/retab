@@ -346,6 +346,20 @@ Note: grouped-conv now emits the whole split-conv-concat chain through one
   users of the new cat, which matches the new ownership model because the cat
   is freshly created and receives the original conv users.
 
+2026-06-15, IR rewrite cursor slice 17
+Rust LOC: 35,808 -> 35,794
+Movement: -14 Rust LOC
+Deleted/collapsed: manual anchored full-with-kwargs plus replacement call in
+  scalar shift rewriting, and the now-unused
+  add_anchored_call_function_with_kwargs helper
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib
+  fx_replace_scalar_with_tensor_ir::tests; cargo test --lib; maturin
+  develop --release; focused Python smoke over left/right shift scalar and
+  tensor TOSA cases: 24 passed
+Note: scalar shift rewriting now uses the same two-node cursor chain as other
+  scalar-to-tensor decompositions: materialize scalar tensor, emit tensor op,
+  replace the anchor.
+
 Slice log:
 
 ```text

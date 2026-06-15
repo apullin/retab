@@ -638,20 +638,6 @@ impl IrGraph {
         id
     }
 
-    pub fn add_anchored_call_function_with_kwargs(
-        &mut self,
-        anchor: NodeId,
-        name: impl Into<String>,
-        target: impl Into<String>,
-        args: Vec<IrArg>,
-        kwargs: HashMap<String, IrArg>,
-        meta: NodeMeta,
-    ) -> NodeId {
-        let id = self.add_call_function_with_kwargs(name, target, args, kwargs, meta);
-        self.anchor_to(id, anchor);
-        id
-    }
-
     pub(crate) fn add_view_copy(
         &mut self,
         name: impl Into<String>,
