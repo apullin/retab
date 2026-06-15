@@ -158,11 +158,7 @@ impl IrPass for IrDecomposeMeanPass {
                     graph
                         .node_mut(sum_id)
                         .meta
-                        .set_single_input_qparam(input_qp);
-                    graph
-                        .node_mut(sum_id)
-                        .meta
-                        .set_single_output_qparam(sum_qp.clone());
+                        .set_unary_input_output_qparams(input_qp, sum_qp.clone());
 
                     graph
                         .node_mut(count_id)
@@ -172,11 +168,7 @@ impl IrPass for IrDecomposeMeanPass {
                     graph
                         .node_mut(mul_id)
                         .meta
-                        .set_input_qparams_from([(0, sum_qp), (1, full_qp)]);
-                    graph
-                        .node_mut(mul_id)
-                        .meta
-                        .set_single_output_qparam(output_qp);
+                        .set_binary_input_output_qparams(sum_qp, full_qp, output_qp);
                 }
             }
 

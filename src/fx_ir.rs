@@ -2013,6 +2013,21 @@ impl NodeMeta {
         self.set_single_input_qparam(qp);
     }
 
+    pub fn set_unary_input_output_qparams(&mut self, input_qparam: QParam, output_qparam: QParam) {
+        self.set_single_input_qparam(input_qparam);
+        self.set_single_output_qparam(output_qparam);
+    }
+
+    pub fn set_binary_input_output_qparams(
+        &mut self,
+        lhs_qparam: QParam,
+        rhs_qparam: QParam,
+        output_qparam: QParam,
+    ) {
+        self.set_input_qparams_from([(0, lhs_qparam), (1, rhs_qparam)]);
+        self.set_single_output_qparam(output_qparam);
+    }
+
     pub fn set_pre_pass_arg_qparams(&mut self, map: HashMap<usize, QParam>) {
         self.quant.pre_pass_arg_qparams = Some(map);
     }
@@ -2152,6 +2167,18 @@ impl NodeMeta {
 
     pub fn cloned_input_qparams(&self) -> Option<HashMap<usize, QParam>> {
         self.quant.input_qparams.clone()
+    }
+
+    pub fn cloned_nonempty_input_qparams_with(
+        &self,
+        extra_qparams: impl IntoIterator<Item = (usize, QParam)>,
+    ) -> Option<HashMap<usize, QParam>> {
+        let mut qparams = self.cloned_input_qparams()?;
+        if qparams.is_empty() {
+            return None;
+        }
+        qparams.extend(extra_qparams);
+        Some(qparams)
     }
 
     pub fn cloned_output_qparams(&self) -> Option<HashMap<usize, QParam>> {

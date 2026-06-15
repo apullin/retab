@@ -69,11 +69,11 @@ mod tests {
         let lhs = placeholder(&mut graph, "lhs", [2, 3], "torch.int8");
         let rhs = placeholder(&mut graph, "rhs", [3, 4], "torch.int8");
         let mut matmul_meta = NodeMeta::tensor([2, 4], "torch.int32");
-        matmul_meta.set_input_qparams_from([
-            (0, qparam(0.5, 3, "torch.int8")),
-            (1, qparam(0.25, -4, "torch.int8")),
-        ]);
-        matmul_meta.set_single_output_qparam(qparam(0.125, 7, "torch.int8"));
+        matmul_meta.set_binary_input_output_qparams(
+            qparam(0.5, 3, "torch.int8"),
+            qparam(0.25, -4, "torch.int8"),
+            qparam(0.125, 7, "torch.int8"),
+        );
         let matmul = call_with_meta(
             &mut graph,
             "mm",

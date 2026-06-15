@@ -105,31 +105,19 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
     let conv_out_shape = vec![pre_cumsum_dim, 1, conv_out_h, post_cumsum_dim];
     let mut conv_meta = input_stamp.fresh_tensor(conv_out_shape.as_slice());
 
-    // Quantization fixup: propagate input qparams, add weight qparam at index 1
-    if let Some(orig_iqp) = node_meta.input_qparams() {
-        if !orig_iqp.is_empty() {
-            let mut conv_iqp = orig_iqp.clone();
-            // Weight qparam: scale=1.0, zp=0, int8 range
-            conv_iqp.insert(
-                1,
-                QParam::per_tensor(1.0, 0, -128, 127, "torch.int8".into()),
-            );
-            conv_meta.set_input_qparams(conv_iqp);
-            if let Some(output_qparam) = node_meta.output_qparam().cloned() {
-                conv_meta.set_single_output_qparam(output_qparam);
-            }
-
-            graph
-                .node_mut(weight_id)
-                .meta
-                .set_single_output_qparam(QParam::per_tensor(
-                    1.0,
-                    0,
-                    -128,
-                    127,
-                    "torch.int8".into(),
-                ));
+    let weight_qparam = QParam::per_tensor(1.0, 0, -128, 127, "torch.int8".into());
+    if let Some(conv_iqp) =
+        node_meta.cloned_nonempty_input_qparams_with([(1, weight_qparam.clone())])
+    {
+        conv_meta.set_input_qparams(conv_iqp);
+        if let Some(output_qparam) = node_meta.output_qparam().cloned() {
+            conv_meta.set_single_output_qparam(output_qparam);
         }
+
+        graph
+            .node_mut(weight_id)
+            .meta
+            .set_single_output_qparam(weight_qparam);
     }
 
     let conv_id = graph.add_anchored_call_function(

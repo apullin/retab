@@ -362,11 +362,11 @@ mod tests {
         let lhs = placeholder(&mut graph, "lhs", [2], "torch.int8");
         let rhs = placeholder(&mut graph, "rhs", [2], "torch.int8");
         let mut add_meta = NodeMeta::tensor(&[2], "torch.int8");
-        add_meta.set_input_qparams_from([
-            (0, qparam(0.25, 3, "torch.int8")),
-            (1, qparam(0.5, -4, "torch.int8")),
-        ]);
-        add_meta.set_single_output_qparam(qparam(0.125, 7, "torch.int8"));
+        add_meta.set_binary_input_output_qparams(
+            qparam(0.25, 3, "torch.int8"),
+            qparam(0.5, -4, "torch.int8"),
+            qparam(0.125, 7, "torch.int8"),
+        );
         let add = call(
             &mut graph,
             "add",
@@ -396,8 +396,11 @@ mod tests {
         let lhs = placeholder(&mut graph, "lhs", [2], "torch.int32");
         let rhs = placeholder(&mut graph, "rhs", [2], "torch.int32");
         let mut add_meta = NodeMeta::tensor(&[2], "torch.int32");
-        add_meta.set_input_qparams_from([(0, int32_qparam(0.25)), (1, int32_qparam(0.5))]);
-        add_meta.set_single_output_qparam(int32_qparam(0.125));
+        add_meta.set_binary_input_output_qparams(
+            int32_qparam(0.25),
+            int32_qparam(0.5),
+            int32_qparam(0.125),
+        );
         let add = call(
             &mut graph,
             "add",

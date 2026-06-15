@@ -657,20 +657,10 @@ mod tests {
     #[test]
     fn resolves_qparam_from_node_meta_with_output_preferred() {
         let mut meta = NodeMeta::default();
-        meta.set_single_input_qparam(QParam::per_tensor(
-            0.125,
-            2,
-            -128,
-            127,
-            "torch.int8".to_string(),
-        ));
-        meta.set_single_output_qparam(QParam::per_tensor(
-            0.25,
-            4,
-            -127,
-            127,
-            "torch.int8".to_string(),
-        ));
+        meta.set_unary_input_output_qparams(
+            QParam::per_tensor(0.125, 2, -128, 127, "torch.int8".to_string()),
+            QParam::per_tensor(0.25, 4, -127, 127, "torch.int8".to_string()),
+        );
 
         let resolved = resolve_qparam_from_meta(&meta).expect("expected node-meta qparam");
         assert_eq!(resolved.source, FoldQdqQParamSource::OutputNodeMeta);

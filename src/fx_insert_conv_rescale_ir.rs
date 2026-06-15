@@ -341,11 +341,11 @@ mod tests {
 
     fn quantized_conv_meta() -> NodeMeta {
         let mut meta = NodeMeta::tensor([1, 4, 8, 8], "torch.int32");
-        meta.set_input_qparams_from([
-            (0, qparam(0.5, 1, "torch.int8")),
-            (1, per_channel_qparam(&[0.25, 0.5, 0.75, 1.0], "torch.int8")),
-        ]);
-        meta.set_single_output_qparam(qparam(0.125, 7, "torch.int8"));
+        meta.set_binary_input_output_qparams(
+            qparam(0.5, 1, "torch.int8"),
+            per_channel_qparam(&[0.25, 0.5, 0.75, 1.0], "torch.int8"),
+            qparam(0.125, 7, "torch.int8"),
+        );
         meta
     }
 
@@ -451,8 +451,10 @@ mod tests {
             transpose_meta,
         );
         let mut clamp_meta = int8_activation_meta();
-        clamp_meta.set_single_input_qparam(qparam(0.125, 7, "torch.int8"));
-        clamp_meta.set_single_output_qparam(qparam(0.25, -128, "torch.int8"));
+        clamp_meta.set_unary_input_output_qparams(
+            qparam(0.125, 7, "torch.int8"),
+            qparam(0.25, -128, "torch.int8"),
+        );
         let clamp = call(
             &mut graph,
             "clamp",

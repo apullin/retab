@@ -402,8 +402,7 @@ mod tests {
         let mut meta = NodeMeta::default();
         let in_qp = QParam::per_tensor(0.5, 0, -128, 127, "torch.int8".to_string());
         let out_qp = QParam::per_tensor(0.25, 0, -128, 127, "torch.int8".to_string());
-        meta.set_input_qparams_from([(0, in_qp.clone()), (1, in_qp)]);
-        meta.set_single_output_qparam(out_qp);
+        meta.set_binary_input_output_qparams(in_qp.clone(), in_qp, out_qp);
         graph.add_node(
             NodeOp::CallFunction,
             "qmm".to_string(),
