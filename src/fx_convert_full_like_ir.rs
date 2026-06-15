@@ -8,7 +8,7 @@
 //! The meta (including TensorFacts with shape/dtype) is cloned from the
 //! original node, which preserves dtype information through the graph.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass};
+use crate::fx_ir::{i64_list_arg, IrGraph, IrPass};
 use crate::fx_target::is_full_like_target;
 use crate::runner_logging::log_line;
 
@@ -42,14 +42,11 @@ impl IrPass for IrConvertFullLikePass {
                 None => return false,
             };
 
-            // Build args: full(shape_list, fill_value)
-            let shape_arg = IrArg::List(input_shape.iter().map(|&d| IrArg::Int(d)).collect());
-
             graph.replace_with_call_function(
                 id,
                 format!("{}_full", graph.nodes[id].name),
                 "aten.full.default".to_string(),
-                vec![shape_arg, fill_value],
+                vec![i64_list_arg(&input_shape), fill_value],
                 graph.nodes[id].meta.clone(),
             );
             true

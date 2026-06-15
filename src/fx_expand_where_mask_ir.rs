@@ -5,7 +5,7 @@
 //! downstream TOSA SELECT emission (which is stricter than PyTorch broadcasting)
 //! gets identically-shaped operands.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass};
+use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_where_target;
 use crate::runner_logging::log_line;
 
@@ -84,10 +84,7 @@ impl IrPass for IrExpandWhereMaskPass {
                 id,
                 format!("{}_expand_copy", graph.nodes[id].name),
                 "aten.expand_copy.default",
-                vec![
-                    IrArg::Node(view_id),
-                    IrArg::List(output_shape.iter().map(|&d| IrArg::Int(d)).collect()),
-                ],
+                vec![IrArg::Node(view_id), i64_list_arg(&output_shape)],
                 expand_meta,
             );
 

@@ -1720,6 +1720,23 @@ avg_pool2d, bmm, conv2d, depthwise_conv, div, linear, matmul, max_pool, mul,
 and sub with known a8w4/U55/U85/VGF/FVP lanes excluded
 Note: Full Rust tests passed `144 passed`; focused Python smoke passed
 `626 passed, 10 xfailed`. This is a consistency cleanup, not a major LOC win.
+
+2026-06-14, IR i64 list-argument helper slice
+Rust LOC: 35,665 -> 35,653
+Movement: -12 Rust LOC
+Deleted: repeated direct `IrArg::List(shape.iter().map(|&d| IrArg::Int(d)))`
+construction in full_like conversion, cumsum decomposition, where-mask
+expansion, and a pad rewrite test helper
+Added: reuse of existing `i64_list_arg` for shape/list arguments
+Validation: `cargo fmt`; `cargo check --lib`; grep for remaining direct
+`IrArg::Int` list construction; `cargo test --lib fx_rewrite_pad_ir::tests`;
+pass-name cargo test filters for full_like, cumsum, and where-mask expansion
+(no dedicated tests); `cargo test --lib`; `maturin develop --release`;
+focused Python smoke via `/tmp/et.sh` over constant_pad_nd,
+conv_constant_pad_nd, cumsum, full, and where
+Note: Full Rust tests passed `144 passed`; focused Python smoke passed
+`118 passed, 2 skipped`. Remaining direct `IrArg::List` builders are node-list
+construction or list parsing, not i64 shape/list construction.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

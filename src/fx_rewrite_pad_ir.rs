@@ -203,6 +203,7 @@ impl IrPass for IrRewritePadPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fx_ir::i64_list_arg;
     use crate::fx_target::{is_cat_target, is_slice_copy_tensor_target};
     use crate::test_ir::{call, live_node as named, output, placeholder};
 
@@ -212,11 +213,7 @@ mod tests {
         // output shape: last dim grows by pad[0]+pad[1] (single-dim pad)
         let mut out = in_shape.to_vec();
         *out.last_mut().unwrap() += pad[0] + pad[1];
-        let pad_args = vec![
-            IrArg::Node(x),
-            IrArg::List(pad.iter().map(|&v| IrArg::Int(v)).collect()),
-            IrArg::Str(mode.into()),
-        ];
+        let pad_args = vec![IrArg::Node(x), i64_list_arg(pad), IrArg::Str(mode.into())];
         let p = call(
             &mut graph,
             "pad",

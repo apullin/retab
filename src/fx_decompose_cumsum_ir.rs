@@ -4,7 +4,7 @@
 //! This mirrors the Arm backend's cumsum lowering: reshape to 4D, convolve with
 //! an all-ones kernel (cumulative sum via convolution), slice off padding, reshape back.
 
-use crate::fx_ir::{wrap_dim, IrArg, IrGraph, IrPass, NodeId, QParam};
+use crate::fx_ir::{i64_list_arg, wrap_dim, IrArg, IrGraph, IrPass, NodeId, QParam};
 use crate::fx_target::is_cumsum_target;
 use crate::runner_logging::log_line;
 
@@ -94,10 +94,7 @@ fn decompose_cumsum(graph: &mut IrGraph, node_id: NodeId) -> bool {
         node_id,
         format!("{}_weight", node_name),
         "aten.full.default",
-        vec![
-            IrArg::List(weight_shape.iter().map(|&d| IrArg::Int(d)).collect()),
-            IrArg::Float(1.0),
-        ],
+        vec![i64_list_arg(&weight_shape), IrArg::Float(1.0)],
         weight_meta,
     );
 
