@@ -3,7 +3,7 @@
 //! Handles 2D (N,K → GATHER → N,W) and 3D (N,K,C → permute+reshape → GATHER → reshape+permute).
 //! Bool inputs are cast to int8 before GATHER, then cast back.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass};
+use crate::fx_ir::{wrap_dim, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_gather_target;
 use crate::runner_logging::log_line;
 
@@ -47,11 +47,12 @@ impl IrPass for IrCanonicalizeGatherPass {
             };
 
             // Only handle rank 2 or 3, dim must normalize to 1, batch dims must match
-            let x_rank = x_shape.len() as i64;
             if !matches!(x_shape.len(), 2 | 3) || !matches!(index_shape.len(), 2 | 3) {
                 continue;
             }
-            let dim_norm = dim.rem_euclid(x_rank) as usize;
+            let Some(dim_norm) = wrap_dim(dim, x_shape.len()) else {
+                continue;
+            };
             if dim_norm != 1 || index_shape.first() != x_shape.first() {
                 continue;
             }

@@ -1,7 +1,7 @@
 //! Pure Rust IrPass: slice_scatter -> slice+cat (step == 1)
 //! or arange+permute+index_put (step > 1).
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass};
+use crate::fx_ir::{wrap_dim, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_slice_scatter_target;
 use crate::runner_logging::log_line;
 
@@ -68,8 +68,9 @@ impl IrPass for IrDecomposeSliceScatterPass {
                 continue;
             }
 
-            let rank = input_shape.len() as i64;
-            let dim_norm = dim.rem_euclid(rank) as usize;
+            let Some(dim_norm) = wrap_dim(dim, input_shape.len()) else {
+                continue;
+            };
             let dim_size = input_shape[dim_norm];
             let start_i = fixup_start(start, dim_size);
             let end_i = fixup_end(end, dim_size);

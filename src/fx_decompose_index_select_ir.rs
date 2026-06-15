@@ -1,6 +1,6 @@
 //! Pure Rust IrPass: index_select → view + unsqueeze + expand + GATHER + view.
 
-use crate::fx_ir::{i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass};
+use crate::fx_ir::{i64_list_arg as i64_list, shape_product, wrap_dim, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_index_select_target;
 use crate::runner_logging::log_line;
 
@@ -46,8 +46,9 @@ impl IrPass for IrDecomposeIndexSelectPass {
                 continue;
             }
 
-            let x_rank = x_shape.len() as i64;
-            let dim_norm = dim.rem_euclid(x_rank) as usize;
+            let Some(dim_norm) = wrap_dim(dim, x_shape.len()) else {
+                continue;
+            };
             let before: Vec<i64> = x_shape[..dim_norm].to_vec();
             let after: Vec<i64> = x_shape[dim_norm + 1..].to_vec();
             let n = shape_product(&before);

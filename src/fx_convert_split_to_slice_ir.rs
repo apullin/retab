@@ -4,7 +4,7 @@
 //! Each getitem user of the split node is replaced with a slice_copy that
 //! extracts the corresponding chunk along the split dimension.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId};
+use crate::fx_ir::{wrap_dim, IrArg, IrGraph, IrPass, NodeId};
 use crate::fx_target::is_split_target;
 use crate::runner_logging::log_line;
 
@@ -60,19 +60,16 @@ impl IrPass for IrConvertSplitToSlicePass {
                 Some(s) => s,
                 None => continue,
             };
-            let rank = input_shape.len() as i64;
-            if rank == 0 {
-                continue;
-            }
-
             // args[2] = dim (default 0)
             let dim_raw: i64 = graph.nodes[split_id]
                 .args
                 .get(2)
                 .and_then(|a| a.as_int())
                 .unwrap_or(0);
-            let dim = ((dim_raw % rank) + rank) % rank;
-            let dim_size = input_shape[dim as usize];
+            let Some(dim) = wrap_dim(dim_raw, input_shape.len()) else {
+                continue;
+            };
+            let dim_size = input_shape[dim];
 
             // args[1] = split_lengths (list) or chunk_size (int)
             let split_lengths = match graph.nodes[split_id].args.get(1) {
@@ -120,7 +117,7 @@ impl IrPass for IrConvertSplitToSlicePass {
                 // Build output shape: same as input but with the split dim
                 // narrowed to the chunk length.
                 let mut out_shape = input_shape.clone();
-                out_shape[dim as usize] = split_lengths[index];
+                out_shape[dim] = split_lengths[index];
 
                 // Build meta for the slice_copy node.
                 // Inherit output_qparams from the getitem user (not the split).
@@ -133,7 +130,7 @@ impl IrPass for IrConvertSplitToSlicePass {
                 let new_id = graph.add_slice_copy(
                     format!("{}_slice_{}", split_name, index),
                     input_id,
-                    dim,
+                    dim as i64,
                     starts[index],
                     ends[index],
                     None,

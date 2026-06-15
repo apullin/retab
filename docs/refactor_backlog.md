@@ -1646,6 +1646,24 @@ Note: Full Rust tests passed `141 passed`; focused Python smoke passed
 metadata-grammar consolidation slice: qparam-policy-bearing tensor restamps now
 use one domain model, while simple one-off `cloned_with_val` calls remain as the
 low-friction spelling for preserve-only metadata.
+
+2026-06-14, dim normalization grammar slice
+Rust LOC: 35,810 -> 35,802
+Movement: -8 Rust LOC
+Deleted: repeated local negative-dim normalization, modulo-wrapped dim
+normalization, direct non-getitem user scans, and direct quantized-envelope user
+scans from shape/dim decomposition passes
+Added: shared `fx_ir::normalize_dim` and `fx_ir::wrap_dim` helpers; decompose
+passes now use the graph live-user query grammar for non-getitem and Q/DQ user
+checks
+Validation: `cargo fmt`; `cargo check --lib`;
+`cargo test --lib fx_decompose`; `cargo test --lib`; `maturin develop
+--release`; focused Python smoke via `/tmp/et.sh` over amax, amin, cumsum,
+gather, index_select, select_scatter, slice_scatter, softmax, split, and
+unfold_copy
+Note: Full Rust tests passed `144 passed`; focused Python smoke passed
+`207 passed, 2 xfailed`. This is a follow-through grammar cleanup, not a major
+LOC-reduction slice.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

@@ -5,7 +5,7 @@
 //!   2. repeat(unsqueezed, multiples)  — multiples[dim+1] = repeats
 //!   3. view_copy(repeated, final_shape) — final_shape[dim] *= repeats
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass};
+use crate::fx_ir::{i64_list_arg as i64_list, normalize_dim, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_repeat_interleave_self_int_target;
 use crate::runner_logging::log_line;
 
@@ -45,15 +45,9 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
                 Some(s) => s,
                 None => return false,
             };
-            let rank = input_shape.len() as i64;
-            if rank == 0 {
+            let Some(dim) = normalize_dim(dim_raw, input_shape.len()) else {
                 return false;
-            }
-
-            let dim = if dim_raw < 0 { dim_raw + rank } else { dim_raw };
-            if !(0..rank).contains(&dim) {
-                return false;
-            }
+            };
 
             let node_name = graph.nodes[id].name.clone();
             let base_meta = graph.nodes[id].meta.clone();
@@ -62,12 +56,12 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
             let unsqueeze_dim = dim + 1;
             let mut unsqueeze_shape = Vec::with_capacity(input_shape.len() + 1);
             for (i, &d) in input_shape.iter().enumerate() {
-                if i as i64 == unsqueeze_dim {
+                if i == unsqueeze_dim {
                     unsqueeze_shape.push(1);
                 }
                 unsqueeze_shape.push(d);
             }
-            if unsqueeze_dim as usize >= input_shape.len() {
+            if unsqueeze_dim >= input_shape.len() {
                 unsqueeze_shape.push(1);
             }
 
@@ -77,17 +71,17 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
                 id,
                 format!("{}_unsqueeze", node_name),
                 "aten.unsqueeze_copy.default",
-                vec![IrArg::Node(input_id), IrArg::Int(unsqueeze_dim)],
+                vec![IrArg::Node(input_id), IrArg::Int(unsqueeze_dim as i64)],
                 unsqueeze_meta,
             );
 
             // 2. repeat(unsqueezed, multiples) — multiples[unsqueeze_dim] = repeats
-            let repeat_rank = (rank + 1) as usize;
+            let repeat_rank = input_shape.len() + 1;
             let mut multiples = vec![1i64; repeat_rank];
-            multiples[unsqueeze_dim as usize] = repeats;
+            multiples[unsqueeze_dim] = repeats;
 
             let mut repeated_shape = unsqueeze_shape;
-            repeated_shape[unsqueeze_dim as usize] = repeats;
+            repeated_shape[unsqueeze_dim] = repeats;
 
             let repeat_meta = base_meta.cloned_with_same_dtype_or_float32(repeated_shape);
             let repeated = graph.add_anchored_call_function(
@@ -100,7 +94,7 @@ impl IrPass for IrDecomposeRepeatInterleavePass {
 
             // 3. view_copy(repeated, final_shape) — final_shape[dim] *= repeats
             let mut final_shape = input_shape;
-            final_shape[dim as usize] *= repeats;
+            final_shape[dim] *= repeats;
 
             let view_meta = base_meta.cloned_with_same_dtype_or_float32(final_shape.clone());
             graph.replace_with_view_copy(

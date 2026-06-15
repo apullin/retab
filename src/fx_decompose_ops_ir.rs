@@ -4,8 +4,8 @@
 use std::f64::consts::FRAC_PI_2;
 
 use crate::fx_ir::{
-    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta, NodeOp,
-    TensorMetaStamp,
+    i64_list_arg as i64_list, normalize_dim, wrap_dim, IrArg, IrGraph, IrPass, MetaValue, NodeId,
+    NodeMeta, TensorMetaStamp,
 };
 use crate::fx_target::{add_sub_alpha_result_target, group_norm_reshape_target};
 use crate::runner_logging::log_line;
@@ -528,12 +528,10 @@ const MAX_DIM_MATCHER: TargetMatcher = TargetMatcher::any(&["aten.max.dim"]);
 const MIN_DIM_MATCHER: TargetMatcher = TargetMatcher::any(&["aten.min.dim"]);
 
 fn has_direct_non_getitem_user(graph: &IrGraph, id: NodeId) -> bool {
-    graph.nodes.iter().any(|node| {
-        node.alive
-            && node.id != id
-            && !node.is_getitem()
-            && node.args.iter().any(|arg| arg.as_node() == Some(id))
-    })
+    graph
+        .live_user_ids(id)
+        .into_iter()
+        .any(|user_id| user_id != id && !graph.nodes[user_id].is_getitem())
 }
 
 fn replace_primary_result_users(graph: &mut IrGraph, id: NodeId, result: NodeId) -> bool {
@@ -590,7 +588,6 @@ fn batch_norm_eps(node: &crate::fx_ir::IrNode) -> f64 {
 
 /// Check if input is DQ and at least one user is Q (quantized envelope → skip atanh).
 fn has_quantized_envelope(graph: &IrGraph, id: NodeId) -> bool {
-    // Input must be dequantize
     let input_id = match graph.nodes[id].first_node_arg() {
         Some(n) => n,
         None => return false,
@@ -598,17 +595,11 @@ fn has_quantized_envelope(graph: &IrGraph, id: NodeId) -> bool {
     if !graph.nodes[input_id].is_dequantize() {
         return false;
     }
-    // At least one user must be quantize
+
     graph
-        .nodes
-        .iter()
-        .filter(|n| n.alive && n.op == NodeOp::CallFunction)
-        .filter(|n| {
-            n.args
-                .iter()
-                .any(|a| matches!(a, IrArg::Node(nid) if *nid == id))
-        })
-        .any(|n| n.is_quantize())
+        .live_call_function_users(id)
+        .into_iter()
+        .any(|user_id| graph.nodes[user_id].is_quantize())
 }
 
 fn decompose_asin(graph: &mut IrGraph, id: NodeId) -> bool {
@@ -827,6 +818,7 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::fx_ir::NodeOp;
     use crate::test_ir::{
         call, f32_call, f32_meta, f32_placeholder, has_live_target, live_node, meta as tensor_meta,
         placeholder,
@@ -1460,12 +1452,10 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(shape) => shape,
         None => return false,
     };
-    let rank = input_shape.len() as i64;
-    let dim = if dim < 0 { dim + rank } else { dim };
-    if dim < 0 || dim >= rank {
-        return false;
-    }
-    let dim = dim as usize;
+    let dim = match normalize_dim(dim, input_shape.len()) {
+        Some(dim) => dim,
+        None => return false,
+    };
 
     let getitem_users = graph.live_getitem_users(id);
 
@@ -1473,11 +1463,7 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
 
-    if graph
-        .nodes
-        .iter()
-        .any(|n| n.alive && n.id != id && !n.is_getitem() && graph.users(id).contains(&n.id))
-    {
+    if has_direct_non_getitem_user(graph, id) {
         return false;
     }
 
@@ -1550,12 +1536,9 @@ fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> 
     };
     let shape = ctx.shape.clone();
     let dim = graph.nodes[id].arg_or_kwarg_int(1, "dim").unwrap_or(-1);
-    let rank = shape.len() as i64;
-    let dim = if dim < 0 { dim + rank } else { dim };
-    if dim < 0 || dim >= rank {
+    let Some(dim) = normalize_dim(dim, shape.len()) else {
         return false;
-    }
-    let dim = dim as usize;
+    };
 
     let mut reduced_shape = shape.clone();
     reduced_shape[dim] = 1;
@@ -2329,8 +2312,9 @@ fn decompose_unbind(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(s) => s,
         None => return false,
     };
-    let rank = x_shape.len() as i64;
-    let dim_norm = dim.rem_euclid(rank) as usize;
+    let Some(dim_norm) = wrap_dim(dim, x_shape.len()) else {
+        return false;
+    };
     let name = graph.nodes[id].name.clone();
     let orig_meta = graph.nodes[id].meta.clone();
     let input_meta = graph.nodes[x_id].meta.clone();

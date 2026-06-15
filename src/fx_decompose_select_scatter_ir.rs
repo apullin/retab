@@ -1,6 +1,6 @@
 //! Pure Rust IrPass: select_scatter → arange + view + full + eq + unsqueeze + expand + where.
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass};
+use crate::fx_ir::{i64_list_arg as i64_list, wrap_dim, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_select_scatter_target;
 use crate::runner_logging::log_line;
 
@@ -45,8 +45,9 @@ impl IrPass for IrDecomposeSelectScatterPass {
             if input_shape.is_empty() {
                 continue;
             }
-            let rank = input_shape.len() as i64;
-            let dim_norm = dim.rem_euclid(rank) as usize;
+            let Some(dim_norm) = wrap_dim(dim, input_shape.len()) else {
+                continue;
+            };
             let dim_size = input_shape[dim_norm];
             if index < 0 {
                 index += dim_size;
@@ -68,7 +69,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
             );
 
             // 2. view(arange, [1, ..., dim_size, ..., 1])
-            let mut mask_shape = vec![1i64; rank as usize];
+            let mut mask_shape = vec![1i64; input_shape.len()];
             mask_shape[dim_norm] = dim_size;
             let viewed_arange = graph.add_anchored_view_copy(
                 id,

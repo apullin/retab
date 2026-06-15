@@ -1,6 +1,6 @@
 //! Pure Rust IrPass: unfold_copy → GATHER-based sliding window.
 
-use crate::fx_ir::{i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass};
+use crate::fx_ir::{i64_list_arg as i64_list, shape_product, wrap_dim, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_unfold_copy_target;
 use crate::runner_logging::log_line;
 
@@ -45,12 +45,9 @@ impl IrPass for IrDecomposeUnfoldPass {
                 Some(s) => s,
                 None => continue,
             };
-            let rank = input_shape.len() as i64;
-            if rank < 1 {
+            let Some(dim_norm) = wrap_dim(dim, input_shape.len()) else {
                 continue;
-            }
-
-            let dim_norm = dim.rem_euclid(rank) as usize;
+            };
             let k = input_shape[dim_norm];
             if k < size {
                 continue;

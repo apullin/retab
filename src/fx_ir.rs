@@ -132,6 +132,20 @@ pub(crate) fn broadcast_shapes(shapes: &[Vec<i64>]) -> Option<Vec<i64>> {
     Some(out)
 }
 
+pub(crate) fn normalize_dim(dim: i64, rank: usize) -> Option<usize> {
+    let rank = rank as i64;
+    if rank == 0 {
+        return None;
+    }
+    let dim = if dim < 0 { dim + rank } else { dim };
+    (0..rank).contains(&dim).then_some(dim as usize)
+}
+
+pub(crate) fn wrap_dim(dim: i64, rank: usize) -> Option<usize> {
+    let rank = rank as i64;
+    (rank > 0).then_some(dim.rem_euclid(rank) as usize)
+}
+
 pub(crate) fn normalized_reduction_dims(
     dim_arg: Option<&IrArg>,
     input_shape: &[i64],
@@ -144,15 +158,15 @@ pub(crate) fn normalized_reduction_dims(
     let mut normalized = Vec::new();
 
     for dim in dims {
-        let dim = if dim < 0 { dim + rank_i64 } else { dim };
-        if dim < 0 || dim >= rank_i64 {
+        let Some(dim) = normalize_dim(dim, input_shape.len()) else {
+            continue;
+        };
+        if skip_unit_dims && input_shape[dim] == 1 {
             continue;
         }
-        if skip_unit_dims && input_shape[dim as usize] == 1 {
-            continue;
-        }
-        if !normalized.contains(&dim) {
-            normalized.push(dim);
+        let dim_i64 = dim as i64;
+        if !normalized.contains(&dim_i64) {
+            normalized.push(dim_i64);
         }
     }
 
