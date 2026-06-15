@@ -111,9 +111,15 @@ fn erf_approx(x: f64) -> f64 {
 }
 
 /// Inverse error function (Giles, 2010 -- single-precision accurate, ~1e-7,
-/// well within INT8/INT16 quantization tolerance). NaN out of [-1, 1].
+/// well within INT8/INT16 quantization tolerance). Saturates domain edges.
 fn erfinv_approx(x: f64) -> f64 {
-    if x <= -1.0 || x >= 1.0 {
+    if x <= -1.0 {
+        return f64::NEG_INFINITY;
+    }
+    if x >= 1.0 {
+        return f64::INFINITY;
+    }
+    if x.is_nan() {
         return f64::NAN;
     }
     let mut w = -((1.0 - x) * (1.0 + x)).ln();
@@ -552,6 +558,33 @@ mod tests {
             &result.effects.items[0],
             LoweringEffect::InsertPrecomputedTableOp(_)
         ));
+    }
+
+    #[test]
+    fn erfinv_table_saturates_exact_domain_edges() {
+        let qparam = QParam::per_tensor(0.5, 0, -128, 127, "torch.int8".to_string());
+        let mut graph = IrGraph::empty();
+        table_node_with_qparam(
+            &mut graph,
+            "erfinv",
+            "aten.erfinv.default",
+            Vec::new(),
+            qparam,
+        );
+
+        let result = IrInsertTableOpsEffectPass.run(&mut graph);
+
+        match &result.effects.items[0] {
+            LoweringEffect::InsertPrecomputedTableOp(effect) => {
+                let neg_one_index = (-2 - effect.input.qmin) as usize;
+                let pos_one_index = (2 - effect.input.qmin) as usize;
+                assert_eq!(effect.data[neg_one_index] as i8, -128);
+                assert_eq!(effect.data[pos_one_index] as i8, 127);
+                assert_eq!(effect.data[0] as i8, -128);
+                assert_eq!(effect.data[255] as i8, 127);
+            }
+            other => panic!("expected precomputed table effect, got {other:?}"),
+        }
     }
 
     #[test]
