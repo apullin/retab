@@ -87,15 +87,17 @@ impl IrPass for IrDecomposeAsStridedCopyPass {
             let out_meta = graph.nodes[id]
                 .meta
                 .cloned_with_dtype_of_or_float32(size.clone(), &graph.nodes[input_id].meta);
+            let node_name = graph.nodes[id].name.clone();
 
             // Replace as_strided_copy with view_copy(input, size)
-            graph.replace_with_view_copy(
-                id,
-                format!("{}_view_copy", graph.nodes[id].name),
+            let mut cursor = graph.rewrite_cursor(id);
+            let view_id = cursor.view_copy(
+                format!("{}_view_copy", node_name),
                 input_id,
                 &size,
                 out_meta,
             );
+            cursor.replace_anchor_with(view_id);
             true
         });
 

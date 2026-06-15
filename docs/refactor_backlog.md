@@ -388,6 +388,20 @@ Note: tuple-like decompositions now emit their replacement nodes through
   This keeps cursor ownership for node creation without hiding getitem-user
   handling.
 
+2026-06-15, IR rewrite cursor slice 20
+Rust LOC: 35,782 -> 35,754
+Movement: -28 Rust LOC
+Deleted/collapsed: view/permute one-node replacement helper usage in
+  as_strided_copy and squeeze/unsqueeze/transpose rewrites, plus the now-dead
+  replace_with_view_copy, replace_with_permute_copy, and
+  add_anchored_permute_copy helpers
+Validation: cargo fmt; cargo fmt --check; cargo check --lib; cargo test --lib;
+  maturin develop --release; focused Python smoke over as_strided_copy,
+  squeeze, unsqueeze, and transpose_copy TOSA cases: 48 passed
+Note: view and permute rewrites now use the same cursor replacement primitive
+  as larger decomposition chains, leaving fewer graph-edit helper families to
+  choose from.
+
 Slice log:
 
 ```text

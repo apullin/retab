@@ -694,45 +694,6 @@ impl IrGraph {
         )
     }
 
-    pub(crate) fn add_anchored_permute_copy(
-        &mut self,
-        anchor: NodeId,
-        name: impl Into<String>,
-        source: NodeId,
-        perm: &[i64],
-        meta: NodeMeta,
-    ) -> NodeId {
-        let id = self.add_permute_copy(name, source, perm, meta);
-        self.anchor_to(id, anchor);
-        id
-    }
-
-    pub(crate) fn replace_with_permute_copy(
-        &mut self,
-        old_id: NodeId,
-        name: impl Into<String>,
-        source: NodeId,
-        perm: &[i64],
-        meta: NodeMeta,
-    ) -> NodeId {
-        let id = self.add_anchored_permute_copy(old_id, name, source, perm, meta);
-        self.replace_and_erase(old_id, id);
-        id
-    }
-
-    pub(crate) fn replace_with_view_copy(
-        &mut self,
-        old_id: NodeId,
-        name: impl Into<String>,
-        source: NodeId,
-        shape: &[i64],
-        meta: NodeMeta,
-    ) -> NodeId {
-        let id = self.add_anchored_view_copy(old_id, name, source, shape, meta);
-        self.replace_and_erase(old_id, id);
-        id
-    }
-
     pub(crate) fn add_slice_copy(
         &mut self,
         name: impl Into<String>,

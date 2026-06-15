@@ -80,15 +80,18 @@ impl IrPass for IrRewriteSqueezePass {
                     Vec::new()
                 };
                 let output_shape = compute_squeeze_shape(&input_shape, &dims, input_rank);
+                let node_name = graph.nodes[id].name.clone();
+                let node_meta = graph.nodes[id].meta.clone();
 
                 // Create view_copy: replace squeeze with view_copy(input, output_shape)
-                graph.replace_with_view_copy(
-                    id,
-                    format!("{}_view_copy", graph.nodes[id].name),
+                let mut cursor = graph.rewrite_cursor(id);
+                let view_id = cursor.view_copy(
+                    format!("{}_view_copy", node_name),
                     input_id,
                     &output_shape,
-                    graph.nodes[id].meta.clone(),
+                    node_meta,
                 );
+                cursor.replace_anchor_with(view_id);
                 modified = true;
             } else if is_usq {
                 let dim = match graph.nodes[id].args.get(1) {
@@ -96,14 +99,17 @@ impl IrPass for IrRewriteSqueezePass {
                     _ => continue,
                 };
                 let output_shape = compute_unsqueeze_shape(&input_shape, dim, input_rank);
+                let node_name = graph.nodes[id].name.clone();
+                let node_meta = graph.nodes[id].meta.clone();
 
-                graph.replace_with_view_copy(
-                    id,
-                    format!("{}_view_copy", graph.nodes[id].name),
+                let mut cursor = graph.rewrite_cursor(id);
+                let view_id = cursor.view_copy(
+                    format!("{}_view_copy", node_name),
                     input_id,
                     &output_shape,
-                    graph.nodes[id].meta.clone(),
+                    node_meta,
                 );
+                cursor.replace_anchor_with(view_id);
                 modified = true;
             } else if is_tr {
                 if graph.nodes[id].args.len() < 3 {
@@ -122,14 +128,17 @@ impl IrPass for IrRewriteSqueezePass {
                 let d1 = (if dim1 < 0 { dim1 + rank } else { dim1 }) as usize;
                 let mut perm: Vec<i64> = (0..input_rank as i64).collect();
                 perm.swap(d0, d1);
+                let node_name = graph.nodes[id].name.clone();
+                let node_meta = graph.nodes[id].meta.clone();
 
-                graph.replace_with_permute_copy(
-                    id,
-                    format!("{}_permute_copy", graph.nodes[id].name),
+                let mut cursor = graph.rewrite_cursor(id);
+                let permute_id = cursor.permute_copy(
+                    format!("{}_permute_copy", node_name),
                     input_id,
                     &perm,
-                    graph.nodes[id].meta.clone(),
+                    node_meta,
                 );
+                cursor.replace_anchor_with(permute_id);
                 modified = true;
             }
         }
