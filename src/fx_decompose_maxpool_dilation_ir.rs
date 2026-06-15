@@ -126,113 +126,113 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
             let meta = orig_meta.tensor_stamp_with_dtype_of_or_float32(&x_meta);
             let dtype = meta.dtype();
 
-            // 1. constant_pad_nd(x, [pad_w, right_pad, pad_h, bottom_pad, 0,0,0,0], pad_val)
-            let x_pad = graph.add_anchored_call_function(
-                id,
-                format!("{}_pad", node_name),
-                "aten.constant_pad_nd.default",
-                vec![
-                    IrArg::Node(x_id),
-                    i64_list(&[pad_w, right_pad, pad_h, bottom_pad, 0, 0, 0, 0]),
-                    pad_value_for_dtype(dtype),
-                ],
-                meta.preserve_qparams(vec![n, c, h + pad_h + bottom_pad, w + pad_w + right_pad]),
-            );
+            let result = {
+                let mut cursor = graph.rewrite_cursor(id);
 
-            // 2. view → [N, C, h_pack, d_h, w_pack, d_w]
-            let x_view = graph.add_anchored_view_copy(
-                id,
-                format!("{}_pack_view", node_name),
-                x_pad,
-                &[n, c, h_pack, d_h, w_pack, d_w],
-                meta.preserve_qparams(vec![n, c, h_pack, d_h, w_pack, d_w]),
-            );
+                // 1. constant_pad_nd(x, [pad_w, right_pad, pad_h, bottom_pad, 0,0,0,0], pad_val)
+                let x_pad = cursor.call_function(
+                    format!("{}_pad", node_name),
+                    "aten.constant_pad_nd.default",
+                    vec![
+                        IrArg::Node(x_id),
+                        i64_list(&[pad_w, right_pad, pad_h, bottom_pad, 0, 0, 0, 0]),
+                        pad_value_for_dtype(dtype),
+                    ],
+                    meta.preserve_qparams(vec![
+                        n,
+                        c,
+                        h + pad_h + bottom_pad,
+                        w + pad_w + right_pad,
+                    ]),
+                );
 
-            // 3. permute [3,5,0,1,2,4]
-            let x_perm = graph.add_anchored_permute_copy(
-                id,
-                format!("{}_pack_perm", node_name),
-                x_view,
-                &[3, 5, 0, 1, 2, 4],
-                meta.preserve_qparams(vec![d_h, d_w, n, c, h_pack, w_pack]),
-            );
+                // 2. view -> [N, C, h_pack, d_h, w_pack, d_w]
+                let x_view = cursor.view_copy(
+                    format!("{}_pack_view", node_name),
+                    x_pad,
+                    &[n, c, h_pack, d_h, w_pack, d_w],
+                    meta.preserve_qparams(vec![n, c, h_pack, d_h, w_pack, d_w]),
+                );
 
-            // 4. view → [N*d_h*d_w, C, h_pack, w_pack]
-            let x_batch = graph.add_anchored_view_copy(
-                id,
-                format!("{}_batch", node_name),
-                x_perm,
-                &[n * d_h * d_w, c, h_pack, w_pack],
-                meta.preserve_qparams(vec![n * d_h * d_w, c, h_pack, w_pack]),
-            );
+                // 3. permute [3,5,0,1,2,4]
+                let x_perm = cursor.permute_copy(
+                    format!("{}_pack_perm", node_name),
+                    x_view,
+                    &[3, 5, 0, 1, 2, 4],
+                    meta.preserve_qparams(vec![d_h, d_w, n, c, h_pack, w_pack]),
+                );
 
-            // 5. max_pool2d (non-dilated, zero padding)
-            let h_out = pool_output_size(h_pack, k_h, s_h, 0, ceil_mode);
-            let w_out = pool_output_size(w_pack, k_w, s_w, 0, ceil_mode);
-            let pooled = graph.add_anchored_call_function(
-                id,
-                format!("{}_pool", node_name),
-                "aten.max_pool2d.default",
-                vec![
-                    IrArg::Node(x_batch),
-                    i64_list(&[k_h, k_w]),
-                    i64_list(&[s_h, s_w]),
-                    i64_list(&[0, 0]),
-                    IrArg::Int(1), // dilation=1
-                    IrArg::Bool(ceil_mode),
-                ],
-                meta.preserve_qparams(vec![n * d_h * d_w, c, h_out, w_out]),
-            );
+                // 4. view -> [N*d_h*d_w, C, h_pack, w_pack]
+                let x_batch = cursor.view_copy(
+                    format!("{}_batch", node_name),
+                    x_perm,
+                    &[n * d_h * d_w, c, h_pack, w_pack],
+                    meta.preserve_qparams(vec![n * d_h * d_w, c, h_pack, w_pack]),
+                );
 
-            // 6. view → [d_h, d_w, N, C, h_out, w_out]
-            let unpack = graph.add_anchored_view_copy(
-                id,
-                format!("{}_unpack", node_name),
-                pooled,
-                &[d_h, d_w, n, c, h_out, w_out],
-                meta.preserve_qparams(vec![d_h, d_w, n, c, h_out, w_out]),
-            );
+                // 5. max_pool2d (non-dilated, zero padding)
+                let h_out = pool_output_size(h_pack, k_h, s_h, 0, ceil_mode);
+                let w_out = pool_output_size(w_pack, k_w, s_w, 0, ceil_mode);
+                let pooled = cursor.call_function(
+                    format!("{}_pool", node_name),
+                    "aten.max_pool2d.default",
+                    vec![
+                        IrArg::Node(x_batch),
+                        i64_list(&[k_h, k_w]),
+                        i64_list(&[s_h, s_w]),
+                        i64_list(&[0, 0]),
+                        IrArg::Int(1), // dilation=1
+                        IrArg::Bool(ceil_mode),
+                    ],
+                    meta.preserve_qparams(vec![n * d_h * d_w, c, h_out, w_out]),
+                );
 
-            // 7. permute [2,3,4,0,5,1]
-            let unperm = graph.add_anchored_permute_copy(
-                id,
-                format!("{}_unperm", node_name),
-                unpack,
-                &[2, 3, 4, 0, 5, 1],
-                meta.preserve_qparams(vec![n, c, h_out, d_h, w_out, d_w]),
-            );
+                // 6. view -> [d_h, d_w, N, C, h_out, w_out]
+                let unpack = cursor.view_copy(
+                    format!("{}_unpack", node_name),
+                    pooled,
+                    &[d_h, d_w, n, c, h_out, w_out],
+                    meta.preserve_qparams(vec![d_h, d_w, n, c, h_out, w_out]),
+                );
 
-            // 8. view → [N, C, h_out*d_h, w_out*d_w]
-            let out_view = graph.add_anchored_view_copy(
-                id,
-                format!("{}_out_view", node_name),
-                unperm,
-                &[n, c, h_out * d_h, w_out * d_w],
-                meta.preserve_qparams(vec![n, c, h_out * d_h, w_out * d_w]),
-            );
+                // 7. permute [2,3,4,0,5,1]
+                let unperm = cursor.permute_copy(
+                    format!("{}_unperm", node_name),
+                    unpack,
+                    &[2, 3, 4, 0, 5, 1],
+                    meta.preserve_qparams(vec![n, c, h_out, d_h, w_out, d_w]),
+                );
 
-            // 9. slice H to h_final
-            let slice_h = graph.add_anchored_slice_copy(
-                id,
-                format!("{}_slice_h", node_name),
-                out_view,
-                2,
-                0,
-                h_final,
-                None,
-                meta.preserve_qparams(vec![n, c, h_final, w_out * d_w]),
-            );
+                // 8. view -> [N, C, h_out*d_h, w_out*d_w]
+                let out_view = cursor.view_copy(
+                    format!("{}_out_view", node_name),
+                    unperm,
+                    &[n, c, h_out * d_h, w_out * d_w],
+                    meta.preserve_qparams(vec![n, c, h_out * d_h, w_out * d_w]),
+                );
 
-            // 10. slice W to w_final
-            let result = graph.add_slice_copy(
-                format!("{}_slice_w", node_name),
-                slice_h,
-                3,
-                0,
-                w_final,
-                None,
-                meta.preserve_qparams(vec![n, c, h_final, w_final]),
-            );
+                // 9. slice H to h_final
+                let slice_h = cursor.slice_copy(
+                    format!("{}_slice_h", node_name),
+                    out_view,
+                    2,
+                    0,
+                    h_final,
+                    None,
+                    meta.preserve_qparams(vec![n, c, h_final, w_out * d_w]),
+                );
+
+                // 10. slice W to w_final
+                cursor.slice_copy(
+                    format!("{}_slice_w", node_name),
+                    slice_h,
+                    3,
+                    0,
+                    w_final,
+                    None,
+                    meta.preserve_qparams(vec![n, c, h_final, w_final]),
+                )
+            };
 
             if let Some(value_getitem) = value_getitem {
                 graph.replace_and_erase(value_getitem, result);

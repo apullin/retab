@@ -87,11 +87,12 @@ impl IrPass for IrDecomposeStridedSlicePass {
             let is_bool_dtype = graph.nodes[input_id].meta.val_dtype_is(DType::Bool);
             let meta = orig_meta.tensor_stamp_with_dtype_of_or_float32(&input_meta);
 
+            let mut cursor = graph.rewrite_cursor(id);
+
             // 1. Unit-step slice: slice_copy(input, dim, start, end, 1)
             let mut slice_shape = input_shape.clone();
             slice_shape[dim] = span_len;
-            let unit_slice = graph.add_anchored_slice_copy(
-                id,
+            let unit_slice = cursor.slice_copy(
                 format!("{}_unit_slice", node_name),
                 input_id,
                 dim as i64,
@@ -117,8 +118,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 } else {
                     IrArg::Int(0)
                 };
-                let pad_node = graph.add_anchored_call_function(
-                    id,
+                let pad_node = cursor.call_function(
                     format!("{}_pad", node_name),
                     "aten.full.default",
                     vec![i64_list(&pad_shape), fill_val],
@@ -127,8 +127,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
 
                 let mut cat_shape = slice_shape.clone();
                 cat_shape[dim] = span_len + pad_right;
-                let cat_node = graph.add_anchored_call_function(
-                    id,
+                let cat_node = cursor.call_function(
                     format!("{}_cat", node_name),
                     "aten.cat.default",
                     vec![
@@ -144,8 +143,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
             let mut split_shape = input_shape.clone();
             split_shape[dim] = u;
             split_shape.insert(dim + 1, step);
-            let view1 = graph.add_anchored_view_copy(
-                id,
+            let view1 = cursor.view_copy(
                 format!("{}_split_view", node_name),
                 y,
                 &split_shape,
@@ -155,8 +153,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
             // 4. Inner slice: slice_copy(view1, dim+1, 0, 1, 1) — take first element
             let mut inner_shape = split_shape.clone();
             inner_shape[dim + 1] = 1;
-            let inner_slice = graph.add_anchored_slice_copy(
-                id,
+            let inner_slice = cursor.slice_copy(
                 format!("{}_inner_slice", node_name),
                 view1,
                 (dim + 1) as i64,
@@ -169,13 +166,13 @@ impl IrPass for IrDecomposeStridedSlicePass {
             // 5. View: reshape back to output shape [..., u, ...]
             let mut out_shape = input_shape.clone();
             out_shape[dim] = u;
-            graph.replace_with_view_copy(
-                id,
+            let result = cursor.view_copy(
                 format!("{}_out_view", node_name),
                 inner_slice,
                 &out_shape,
                 meta.preserve_qparams(out_shape.clone()),
             );
+            cursor.replace_anchor_with(result);
             modified = true;
         }
 

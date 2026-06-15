@@ -118,102 +118,96 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     };
 
-    let mean = graph.add_anchored_call_function(
-        id,
-        format!("{}_mean", name),
-        "aten.mean.dim",
-        vec![IrArg::Node(x_id), i64_list(&dims), IrArg::Bool(true)],
-        meta.preserve_qparams(stat_shape.clone()),
-    );
+    let output = {
+        let mut cursor = graph.rewrite_cursor(id);
 
-    let numerator = graph.add_anchored_call_function(
-        id,
-        format!("{}_sub", name),
-        "aten.sub.Tensor",
-        vec![IrArg::Node(x_id), IrArg::Node(mean)],
-        meta.preserve_qparams(input_shape.clone()),
-    );
-
-    let mut var_kwargs = HashMap::new();
-    var_kwargs.insert("correction".to_string(), IrArg::Int(0));
-    var_kwargs.insert("keepdim".to_string(), IrArg::Bool(true));
-    let var = graph.add_anchored_call_function_with_kwargs(
-        id,
-        format!("{}_var", name),
-        "aten.var.correction",
-        vec![IrArg::Node(x_id), i64_list(&dims)],
-        var_kwargs,
-        meta.preserve_qparams(stat_shape.clone()),
-    );
-
-    let eps = graph.add_anchored_call_function(
-        id,
-        format!("{}_eps", name),
-        "aten.full.default",
-        vec![i64_list(&scalar_shape), IrArg::Float(epsilon)],
-        meta.preserve_qparams(scalar_shape.clone()),
-    );
-
-    let variance_eps = graph.add_anchored_call_function(
-        id,
-        format!("{}_var_eps", name),
-        "aten.add.Tensor",
-        vec![IrArg::Node(var), IrArg::Node(eps)],
-        meta.preserve_qparams(stat_shape.clone()),
-    );
-
-    let rsqrt = graph.add_anchored_call_function(
-        id,
-        format!("{}_rsqrt", name),
-        "aten.rsqrt.default",
-        vec![IrArg::Node(variance_eps)],
-        meta.preserve_qparams(stat_shape),
-    );
-
-    let normalized = graph.add_anchored_call_function(
-        id,
-        format!("{}_normalized", name),
-        "aten.mul.Tensor",
-        vec![IrArg::Node(numerator), IrArg::Node(rsqrt)],
-        meta.preserve_qparams(output_shape.clone()),
-    );
-
-    let mut output = normalized;
-    if let Some(weight_id) = weights {
-        let weight_reshaped = graph.add_anchored_call_function(
-            id,
-            format!("{}_weight_view", name),
-            view_target,
-            vec![IrArg::Node(weight_id), i64_list(&param_shape)],
-            meta.preserve_qparams(param_shape.clone()),
+        let mean = cursor.call_function(
+            format!("{}_mean", name),
+            "aten.mean.dim",
+            vec![IrArg::Node(x_id), i64_list(&dims), IrArg::Bool(true)],
+            meta.preserve_qparams(stat_shape.clone()),
         );
 
-        output = graph.add_anchored_call_function(
-            id,
-            format!("{}_weighted", name),
+        let numerator = cursor.call_function(
+            format!("{}_sub", name),
+            "aten.sub.Tensor",
+            vec![IrArg::Node(x_id), IrArg::Node(mean)],
+            meta.preserve_qparams(input_shape.clone()),
+        );
+
+        let mut var_kwargs = HashMap::new();
+        var_kwargs.insert("correction".to_string(), IrArg::Int(0));
+        var_kwargs.insert("keepdim".to_string(), IrArg::Bool(true));
+        let var = cursor.call_function_with_kwargs(
+            format!("{}_var", name),
+            "aten.var.correction",
+            vec![IrArg::Node(x_id), i64_list(&dims)],
+            var_kwargs,
+            meta.preserve_qparams(stat_shape.clone()),
+        );
+
+        let eps = cursor.call_function(
+            format!("{}_eps", name),
+            "aten.full.default",
+            vec![i64_list(&scalar_shape), IrArg::Float(epsilon)],
+            meta.preserve_qparams(scalar_shape.clone()),
+        );
+
+        let variance_eps = cursor.call_function(
+            format!("{}_var_eps", name),
+            "aten.add.Tensor",
+            vec![IrArg::Node(var), IrArg::Node(eps)],
+            meta.preserve_qparams(stat_shape.clone()),
+        );
+
+        let rsqrt = cursor.call_function(
+            format!("{}_rsqrt", name),
+            "aten.rsqrt.default",
+            vec![IrArg::Node(variance_eps)],
+            meta.preserve_qparams(stat_shape),
+        );
+
+        let normalized = cursor.call_function(
+            format!("{}_normalized", name),
             "aten.mul.Tensor",
-            vec![IrArg::Node(output), IrArg::Node(weight_reshaped)],
+            vec![IrArg::Node(numerator), IrArg::Node(rsqrt)],
             meta.preserve_qparams(output_shape.clone()),
         );
-    }
 
-    if let Some(bias_id) = bias {
-        let bias_reshaped = graph.add_anchored_call_function(
-            id,
-            format!("{}_bias_view", name),
-            view_target,
-            vec![IrArg::Node(bias_id), i64_list(&param_shape)],
-            meta.preserve_qparams(param_shape.clone()),
-        );
+        let mut output = normalized;
+        if let Some(weight_id) = weights {
+            let weight_reshaped = cursor.call_function(
+                format!("{}_weight_view", name),
+                view_target,
+                vec![IrArg::Node(weight_id), i64_list(&param_shape)],
+                meta.preserve_qparams(param_shape.clone()),
+            );
 
-        output = graph.add_anchored_call_function(
-            id,
-            format!("{}_biased", name),
-            "aten.add.Tensor",
-            vec![IrArg::Node(output), IrArg::Node(bias_reshaped)],
-            meta.preserve_qparams(output_shape),
-        );
-    }
+            output = cursor.call_function(
+                format!("{}_weighted", name),
+                "aten.mul.Tensor",
+                vec![IrArg::Node(output), IrArg::Node(weight_reshaped)],
+                meta.preserve_qparams(output_shape.clone()),
+            );
+        }
+
+        if let Some(bias_id) = bias {
+            let bias_reshaped = cursor.call_function(
+                format!("{}_bias_view", name),
+                view_target,
+                vec![IrArg::Node(bias_id), i64_list(&param_shape)],
+                meta.preserve_qparams(param_shape.clone()),
+            );
+
+            output = cursor.call_function(
+                format!("{}_biased", name),
+                "aten.add.Tensor",
+                vec![IrArg::Node(output), IrArg::Node(bias_reshaped)],
+                meta.preserve_qparams(output_shape),
+            );
+        }
+        output
+    };
 
     replace_getitem_users(graph, id, output);
     graph.replace_and_erase(id, output);

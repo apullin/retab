@@ -134,6 +134,19 @@ Note: setup-positive slice. The payoff is architectural: serializer target
   families now have a shared domain module instead of living as local matches
   in each consumer.
 
+2026-06-15, IR rewrite cursor slice 1
+Rust LOC: 36,060 -> 36,051
+Movement: -9 Rust LOC
+Deleted/collapsed: repeated anchored-node insertion in layer norm, max-pool
+  dilation, and stepped-slice decompositions
+Added: no new infrastructure; reused the existing IrRewriteCursor grammar
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib; maturin
+  develop --release; focused Python smoke over native layer norm, max-pool
+  dilation, and stepped slice: 57 passed
+Note: this is the first slice of the larger rewrite-chain cleanup. The important
+  complexity reduction is that these passes now state a single ordered rewrite
+  chain instead of anchoring every new node manually.
+
 Slice log:
 
 ```text
