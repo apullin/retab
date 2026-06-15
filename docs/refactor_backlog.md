@@ -373,6 +373,21 @@ Note: sum conversion now prepares final-step qparams before insertion and emits
   each reduce through one cursor, making the qparam contract explicit instead
   of patching the final reduce node afterward.
 
+2026-06-15, IR rewrite cursor slice 19
+Rust LOC: 35,794 -> 35,782
+Movement: -12 Rust LOC
+Deleted/collapsed: manual anchored reduce/squeeze emission for max/min.dim,
+  stack unsqueeze/cat emission, unbind slice/squeeze emission, and the now-dead
+  add_anchored_slice_copy helper
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib
+  fx_decompose_ops_ir::tests; cargo test --lib; maturin develop --release;
+  focused Python smoke over max/min.dim-to-amax/amin, stack, and unbind TOSA
+  cases: 42 passed
+Note: tuple-like decompositions now emit their replacement nodes through
+  IrRewriteCursor while preserving their multi-output user rewrites separately.
+  This keeps cursor ownership for node creation without hiding getitem-user
+  handling.
+
 Slice log:
 
 ```text

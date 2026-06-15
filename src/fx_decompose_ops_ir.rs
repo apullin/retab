@@ -1492,33 +1492,34 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
         .preserve_qparams(keepdim_shape);
     reduce_meta.copy_dim_order_facts_from(&input_meta);
 
-    let reduce_id = graph.add_anchored_call_function(
-        id,
-        format!(
-            "{}_{}",
-            node_name,
-            if MAX_DIM_MATCHER.matches(&node_target) {
-                "amax"
-            } else {
-                "amin"
-            }
-        ),
-        reduce_target.to_string(),
-        vec![
-            IrArg::Node(input_id),
-            IrArg::Int(dim as i64),
-            IrArg::Bool(true),
-        ],
-        reduce_meta,
-    );
+    let squeeze_id = {
+        let mut cursor = graph.rewrite_cursor(id);
+        let reduce_id = cursor.call_function(
+            format!(
+                "{}_{}",
+                node_name,
+                if MAX_DIM_MATCHER.matches(&node_target) {
+                    "amax"
+                } else {
+                    "amin"
+                }
+            ),
+            reduce_target,
+            vec![
+                IrArg::Node(input_id),
+                IrArg::Int(dim as i64),
+                IrArg::Bool(true),
+            ],
+            reduce_meta,
+        );
 
-    let squeeze_id = graph.add_anchored_call_function(
-        reduce_id,
-        format!("{}_result", node_name),
-        "aten.squeeze_copy.dims".to_string(),
-        vec![IrArg::Node(reduce_id), i64_list(&[dim as i64])],
-        value_meta,
-    );
+        cursor.call_function(
+            format!("{}_result", node_name),
+            "aten.squeeze_copy.dims",
+            vec![IrArg::Node(reduce_id), i64_list(&[dim as i64])],
+            value_meta,
+        )
+    };
 
     graph.replace_and_erase(value_getitem, squeeze_id);
     for (user_id, idx) in getitem_users {
@@ -2258,10 +2259,10 @@ fn decompose_stack(graph: &mut IrGraph, id: NodeId) -> bool {
     let metas =
         MetaFactory::from_tensor_stamp(meta.tensor_stamp_with_dtype_of_or_float32(&first_meta));
 
-    // Unsqueeze each tensor at dim
     let mut unsqueezed: Vec<NodeId> = Vec::new();
+    let mut cursor = graph.rewrite_cursor(id);
     for (i, &tid) in tensor_ids.iter().enumerate() {
-        let t_shape = graph.nodes[tid]
+        let t_shape = cursor.graph().nodes[tid]
             .meta
             .val_shape()
             .map(|s| s.to_vec())
@@ -2274,25 +2275,23 @@ fn decompose_stack(graph: &mut IrGraph, id: NodeId) -> bool {
         };
         u_shape.insert(pos, 1);
 
-        let unsq = graph.add_anchored_call_function(
-            id,
+        let unsq = cursor.call_function(
             format!("{}_unsq_{}", name, i),
-            "aten.unsqueeze_copy.default".to_string(),
+            "aten.unsqueeze_copy.default",
             vec![IrArg::Node(tid), IrArg::Int(dim)],
             metas.tensor(&u_shape),
         );
         unsqueezed.push(unsq);
     }
 
-    // Cat along dim
     let cat_args = IrArg::List(unsqueezed.iter().map(|&n| IrArg::Node(n)).collect());
-    graph.replace_with_call_function(
-        id,
+    let cat_id = cursor.call_function(
         format!("{}_cat", name),
         "aten.cat.default",
         vec![cat_args, IrArg::Int(dim)],
         meta,
     );
+    cursor.replace_anchor_with(cat_id);
     true
 }
 
@@ -2328,33 +2327,38 @@ fn decompose_unbind(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
 
-    for (getitem_id, idx) in &getitem_users {
-        // slice(x, dim, idx, idx+1)
-        let mut slice_shape = x_shape.clone();
-        slice_shape[dim_norm] = 1;
-        let slice_id = graph.add_anchored_slice_copy(
-            id,
-            format!("{}_slice_{}", name, idx),
-            x_id,
-            dim_norm as i64,
-            *idx,
-            idx + 1,
-            None,
-            metas.tensor(&slice_shape),
-        );
+    let replacements: Vec<(NodeId, NodeId)> = {
+        let mut cursor = graph.rewrite_cursor(id);
+        getitem_users
+            .iter()
+            .map(|(getitem_id, idx)| {
+                let mut slice_shape = x_shape.clone();
+                slice_shape[dim_norm] = 1;
+                let slice_id = cursor.slice_copy(
+                    format!("{}_slice_{}", name, idx),
+                    x_id,
+                    dim_norm as i64,
+                    *idx,
+                    idx + 1,
+                    None,
+                    metas.tensor(&slice_shape),
+                );
 
-        // squeeze(slice, dim)
-        let mut sq_shape = x_shape.clone();
-        sq_shape.remove(dim_norm);
-        let squeeze_id = graph.add_anchored_call_function(
-            slice_id,
-            format!("{}_sq_{}", name, idx),
-            "aten.squeeze_copy.dims".to_string(),
-            vec![IrArg::Node(slice_id), i64_list(&[dim_norm as i64])],
-            metas.tensor(&sq_shape),
-        );
+                let mut sq_shape = x_shape.clone();
+                sq_shape.remove(dim_norm);
+                let squeeze_id = cursor.call_function(
+                    format!("{}_sq_{}", name, idx),
+                    "aten.squeeze_copy.dims",
+                    vec![IrArg::Node(slice_id), i64_list(&[dim_norm as i64])],
+                    metas.tensor(&sq_shape),
+                );
+                (*getitem_id, squeeze_id)
+            })
+            .collect()
+    };
 
-        graph.replace_and_erase(*getitem_id, squeeze_id);
+    for (getitem_id, squeeze_id) in replacements {
+        graph.replace_and_erase(getitem_id, squeeze_id);
     }
 
     // Erase the unbind node itself (now has no users)
