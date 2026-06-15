@@ -94,6 +94,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
             let index_meta = meta.tensor_stamp("torch.int32");
 
             let result = if step == 1 {
+                let mut cursor = graph.rewrite_cursor(id);
                 // Only cat non-empty slices: TOSA cannot allocate a zero-dim tensor,
                 // so an empty prefix (start_i == 0) or empty suffix (end_i == dim_size)
                 // must be omitted rather than become a degenerate slice/cat input.
@@ -102,15 +103,15 @@ impl IrPass for IrDecomposeSliceScatterPass {
                 if start_i > 0 {
                     let mut prefix_shape = input_shape.clone();
                     prefix_shape[dim_norm] = start_i;
-                    let prefix = graph.add_anchored_slice_copy(
-                        id,
+                    let prefix_meta = value_meta.preserve_qparams(prefix_shape.clone());
+                    let prefix = cursor.slice_copy(
                         format!("{}_prefix", name),
                         input_id,
                         dim_norm as i64,
                         0,
                         start_i,
                         Some(1),
-                        value_meta.preserve_qparams(prefix_shape),
+                        prefix_meta,
                     );
                     cat_inputs.push(IrArg::Node(prefix));
                 }
@@ -120,15 +121,15 @@ impl IrPass for IrDecomposeSliceScatterPass {
                 if end_i < dim_size {
                     let mut suffix_shape = input_shape.clone();
                     suffix_shape[dim_norm] = dim_size - end_i;
-                    let suffix = graph.add_anchored_slice_copy(
-                        id,
+                    let suffix_meta = value_meta.preserve_qparams(suffix_shape.clone());
+                    let suffix = cursor.slice_copy(
                         format!("{}_suffix", name),
                         input_id,
                         dim_norm as i64,
                         end_i,
                         dim_size,
                         Some(1),
-                        value_meta.preserve_qparams(suffix_shape),
+                        suffix_meta,
                     );
                     cat_inputs.push(IrArg::Node(suffix));
                 }
@@ -137,17 +138,16 @@ impl IrPass for IrDecomposeSliceScatterPass {
                     // Whole tensor scattered (empty prefix and suffix): result is src.
                     src_id
                 } else {
-                    graph.add_anchored_call_function(
-                        id,
+                    cursor.call_function(
                         format!("{}_cat", name),
-                        "aten.cat.default".to_string(),
+                        "aten.cat.default",
                         vec![IrArg::List(cat_inputs), IrArg::Int(dim_norm as i64)],
                         value_meta.preserve_qparams(input_shape.clone()),
                     )
                 }
             } else {
-                let arange = graph.add_anchored_arange(
-                    id,
+                let mut cursor = graph.rewrite_cursor(id);
+                let arange = cursor.arange(
                     format!("{}_indices", name),
                     start_i,
                     end_i,
@@ -156,9 +156,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                     index_meta.preserve_qparams(vec![width]),
                 );
 
-                let mut input_cur = input_id;
-                let mut src_cur = src_id;
-                let current_input_shape = if dim_norm != 0 {
+                if dim_norm != 0 {
                     let perm: Vec<i64> = std::iter::once(dim_norm as i64)
                         .chain(
                             (0..input_shape.len())
@@ -170,28 +168,23 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         inv_perm[axis as usize] = idx as i64;
                     }
 
-                    let input_perm = graph.add_anchored_permute_copy(
-                        id,
+                    let input_cur = cursor.permute_copy(
                         format!("{}_input_perm", name),
                         input_id,
                         &perm,
                         value_meta.preserve_qparams(permuted_shape(&input_shape, &perm)),
                     );
-                    input_cur = input_perm;
 
-                    let src_perm = graph.add_anchored_permute_copy(
-                        id,
+                    let src_cur = cursor.permute_copy(
                         format!("{}_src_perm", name),
                         src_id,
                         &perm,
                         value_meta.preserve_qparams(permuted_shape(&src_shape, &perm)),
                     );
-                    src_cur = src_perm;
 
-                    let updated_perm = graph.add_anchored_call_function(
-                        id,
+                    let updated_perm = cursor.call_function(
                         format!("{}_index_put", name),
-                        "aten.index_put.default".to_string(),
+                        "aten.index_put.default",
                         vec![
                             IrArg::Node(input_cur),
                             IrArg::List(vec![IrArg::Node(arange)]),
@@ -201,33 +194,25 @@ impl IrPass for IrDecomposeSliceScatterPass {
                         value_meta.preserve_qparams(permuted_shape(&input_shape, &perm)),
                     );
 
-                    let updated = graph.add_anchored_permute_copy(
-                        id,
+                    cursor.permute_copy(
                         format!("{}_result_perm", name),
                         updated_perm,
                         &inv_perm,
                         value_meta.preserve_qparams(input_shape.clone()),
-                    );
-                    graph.replace_and_erase(id, updated);
-                    modified = true;
-                    continue;
+                    )
                 } else {
-                    input_shape.clone()
-                };
-
-                let updated = graph.add_anchored_call_function(
-                    id,
-                    format!("{}_index_put", name),
-                    "aten.index_put.default".to_string(),
-                    vec![
-                        IrArg::Node(input_cur),
-                        IrArg::List(vec![IrArg::Node(arange)]),
-                        IrArg::Node(src_cur),
-                        IrArg::Bool(false),
-                    ],
-                    value_meta.preserve_qparams(current_input_shape),
-                );
-                updated
+                    cursor.call_function(
+                        format!("{}_index_put", name),
+                        "aten.index_put.default",
+                        vec![
+                            IrArg::Node(input_id),
+                            IrArg::List(vec![IrArg::Node(arange)]),
+                            IrArg::Node(src_id),
+                            IrArg::Bool(false),
+                        ],
+                        value_meta.preserve_qparams(input_shape.clone()),
+                    )
+                }
             };
 
             graph.replace_and_erase(id, result);

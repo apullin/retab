@@ -258,6 +258,19 @@ Note: this finishes the low-risk half of index_put. After linear-index creation,
   The remaining anchored arange for None indices is tied to index collection and
   should be handled in a separate structural pass if it proves worthwhile.
 
+2026-06-15, IR rewrite cursor slice 10
+Rust LOC: 35,851 -> 35,836
+Movement: -15 Rust LOC
+Deleted/collapsed: manual anchored slice/cat and arange/permute/index_put
+  construction in slice_scatter lowering
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib
+  fx_decompose_slice_scatter_ir::tests; cargo test --lib; maturin
+  develop --release; focused Python smoke over slice_scatter and index_put:
+  54 passed, 2 xfailed
+Note: both slice_scatter branches now share the same grammar. The step-1 path
+  is an ordered slice/cat chain, while the step-N path is an ordered
+  arange/optional-permute/index_put/optional-unpermute chain.
+
 Slice log:
 
 ```text
