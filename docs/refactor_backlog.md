@@ -214,6 +214,18 @@ Note: setup-positive but semantically useful. The decorator now reads as a
   single truncation rewrite chain, and future full-float rewrite sites can
   migrate without pass-local anchoring.
 
+2026-06-15, IR rewrite cursor slice 7
+Rust LOC: 35,917 -> 35,912
+Movement: -5 Rust LOC
+Deleted/collapsed: manual anchored full/cat/avg_pool/mul construction in the
+  avg_pool2d count_include_pad/divisor_override decomposition
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib; maturin
+  develop --release; focused Python smoke over avg_pool2d,
+  adaptive_avg_pool2d, and mean_dim: 114 passed
+Note: the payoff is readability more than deletion. The pass now describes a
+  single ordered chain: materialize explicit pad tensors, concatenate padded
+  input, run unpadded avg_pool2d, and optionally apply divisor correction.
+
 Slice log:
 
 ```text
