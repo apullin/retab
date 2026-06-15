@@ -64,14 +64,9 @@ impl IrPass for IrCanonicalizeGatherPass {
             let w = index_shape[1];
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let x_dtype = graph.node_dtype_or_float32(x_id).to_string();
-            let needs_bool_cast = x_dtype == "torch.bool";
-            let work_dtype = if needs_bool_cast {
-                "torch.int8"
-            } else {
-                &x_dtype
-            };
-            let work_meta = orig_meta.tensor_stamp(work_dtype);
+            let x_meta = graph.nodes[x_id].meta.clone();
+            let (work_meta, needs_bool_cast) =
+                orig_meta.tensor_stamp_bool_as_int8_work_dtype_of_or_float32(&x_meta);
             let index_meta = orig_meta.tensor_stamp("torch.int64");
 
             let mut values_in = x_id;
@@ -82,7 +77,7 @@ impl IrPass for IrCanonicalizeGatherPass {
                     id,
                     format!("{}_bool_to_int8", node_name),
                     x_id,
-                    work_dtype,
+                    work_meta.dtype(),
                     work_meta.preserve_qparams(x_shape.clone()),
                 );
                 values_in = cast_id;

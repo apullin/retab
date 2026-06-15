@@ -1906,6 +1906,28 @@ index-put, index-select, index-tensor, layer-norm, linear, max-pool,
 pixel-shuffling, repeat, select, select-scatter, slice, slice-scatter, split,
 sum, unfold, view, where, and while: 1003 passed, 21 xfailed.
 
+2026-06-14, TensorFacts bool work-dtype slice
+
+Rust LOC: 35,966
+
+Movement: -5 Rust LOC from the previous committed checkpoint.
+
+Deleted: repeated local `torch.bool` to `torch.int8` work-dtype branching in
+TOSA GATHER-style rewrites and the now-stale `DType` import in advanced index
+decomposition.
+
+Added: `NodeMeta::tensor_stamp_bool_as_int8_work_dtype_of_or_float32`,
+`NodeMeta::tensor_stamp_bool_as_int8_work_or_float32`, and
+`TensorMetaStamp::dtype`, making the bool-payload work-domain rule explicit.
+
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib`; rebuild via
+`/tmp/et.sh` with `maturin develop --release` printing
+`Installed retab-0.1.0`; focused Python smoke over addmm, adaptive avg-pool,
+as-strided-copy, avg-pool, cond, conv1d, conv2d, gather, group-norm, index-put,
+index-select, index-tensor, layer-norm, linear, max-pool, pixel-shuffling,
+repeat, select, select-scatter, slice, slice-scatter, split, sum, unfold, view,
+where, and while: 1003 passed, 21 xfailed.
+
 Problem:
 
 Shape, dtype, qparams, dim order, spatial rank, table qparams, and extras are

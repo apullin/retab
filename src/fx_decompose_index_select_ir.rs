@@ -57,19 +57,14 @@ impl IrPass for IrDecomposeIndexSelectPass {
 
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let x_dtype = graph.node_dtype_or_float32(x_id).to_string();
             let idx_dtype = graph
                 .node_dtype(index_id)
                 .unwrap_or("torch.int64")
                 .to_string();
 
-            let needs_bool_cast = x_dtype == "torch.bool";
-            let gather_dtype = if needs_bool_cast {
-                "torch.int8"
-            } else {
-                x_dtype.as_str()
-            };
-            let gather_meta = orig_meta.tensor_stamp(gather_dtype);
+            let x_meta = graph.nodes[x_id].meta.clone();
+            let (gather_meta, needs_bool_cast) =
+                orig_meta.tensor_stamp_bool_as_int8_work_dtype_of_or_float32(&x_meta);
             let index_meta = orig_meta.tensor_stamp(&idx_dtype);
             let bool_meta = orig_meta.tensor_stamp("torch.bool");
 
@@ -78,7 +73,7 @@ impl IrPass for IrDecomposeIndexSelectPass {
                     id,
                     format!("{}_bool_to_i8", name),
                     x_id,
-                    "torch.int8",
+                    gather_meta.dtype(),
                     gather_meta.preserve_qparams(x_shape.clone()),
                 )
             } else {

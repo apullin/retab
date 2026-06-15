@@ -65,34 +65,27 @@ impl IrPass for IrDecomposeUnfoldPass {
 
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let x_dtype = graph.node_dtype_or_float32(x_id).to_string();
-            let needs_bool_cast = x_dtype == "torch.bool";
-            let work_dtype = if needs_bool_cast {
-                "torch.int8"
-            } else {
-                x_dtype.as_str()
-            };
+            let x_meta = graph.nodes[x_id].meta.clone();
+            let (work_meta_seed, needs_bool_cast) =
+                x_meta.tensor_stamp_bool_as_int8_work_or_float32();
             let index_meta = orig_meta.tensor_stamp("torch.int32");
             let bool_meta = orig_meta.tensor_stamp("torch.bool");
             let mut values_in = x_id;
 
             if needs_bool_cast {
-                let x_meta = graph.nodes[x_id].meta.clone();
-                let cast_meta = x_meta
-                    .tensor_stamp(work_dtype)
-                    .drop_qparams(input_shape.clone());
+                let cast_meta = work_meta_seed.drop_qparams(input_shape.clone());
                 let cast_id = graph.add_anchored_dtype_cast(
                     id,
                     format!("{}_bool_to_int8", name),
                     x_id,
-                    work_dtype,
+                    work_meta_seed.dtype(),
                     cast_meta,
                 );
                 values_in = cast_id;
             }
 
             let values_base_meta = graph.nodes[values_in].meta.clone();
-            let work_meta = values_base_meta.tensor_stamp(work_dtype);
+            let work_meta = values_base_meta.tensor_stamp(work_meta_seed.dtype());
 
             // Flatten x to (P, K, Q)
             let values_meta = if needs_bool_cast {

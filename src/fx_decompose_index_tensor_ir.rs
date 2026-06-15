@@ -3,7 +3,6 @@
 use crate::fx_index_linear::{build_linear_index, packed_linear_scales, LinearIndexSpec};
 use crate::fx_ir::{broadcast_shapes, i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId};
 use crate::fx_target::is_index_tensor_target;
-use crate::graph::ir::DType;
 use crate::runner_logging::log_line;
 
 fn compute_index_output_shape(
@@ -114,13 +113,12 @@ impl IrPass for IrDecomposeIndexTensorPass {
 
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let x_dtype = graph.node_dtype_or_float32(x_id).to_string();
             let idx_dtype = graph
                 .node_dtype(idx_ids[0])
                 .unwrap_or("torch.int64")
                 .to_string();
             let x_base_meta = graph.nodes[x_id].meta.clone();
-            let x_meta = x_base_meta.tensor_stamp(&x_dtype);
+            let x_meta = x_base_meta.tensor_stamp_same_dtype_or_float32();
             let index_meta = orig_meta.tensor_stamp(&idx_dtype);
 
             let mut values_in = x_id;
@@ -150,20 +148,14 @@ impl IrPass for IrDecomposeIndexTensorPass {
 
             // TOSA GATHER does not support BOOL data; gather as INT8 and cast the
             // result back to BOOL below.
-            let x_is_bool = graph.nodes[x_id].meta.val_dtype_is(DType::Bool);
-            let gather_dtype: String = if x_is_bool {
-                "torch.int8".to_string()
-            } else {
-                x_dtype.clone()
-            };
-            let gather_meta = x_base_meta.tensor_stamp(&gather_dtype);
+            let (gather_meta, x_is_bool) = x_base_meta.tensor_stamp_bool_as_int8_work_or_float32();
             let gather_x = if x_is_bool {
                 let cast_meta = gather_meta.drop_qparams(vec![batch, k, c]);
                 graph.add_anchored_dtype_cast(
                     id,
                     format!("{}_x_i8", node_name),
                     x_bkc,
-                    gather_dtype.clone(),
+                    gather_meta.dtype(),
                     cast_meta,
                 )
             } else {
@@ -226,7 +218,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
                     id,
                     format!("{}_gather_bool", node_name),
                     gathered,
-                    x_dtype.clone(),
+                    "torch.bool",
                     cast_meta,
                 )
             } else {
