@@ -20,3 +20,6 @@ uv.lock
 # Local dev artifacts
 .claude/
 *.md.bak
+*.profraw
+*.profdata
+*.dSYM/

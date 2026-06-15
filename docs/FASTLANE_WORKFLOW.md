@@ -6,6 +6,12 @@ direct Rust/TOSA fast lane.
 It is intentionally operational, not aspirational. Use these commands and
 expectations when changing the fast path.
 
+For the current local green matrix and exact pytest lane shapes, see
+[`VALIDATION_MATRIX.md`](VALIDATION_MATRIX.md).
+
+For the latest local stock-vs-RETAB lowering speed snapshot, see
+[`PERFORMANCE_SNAPSHOT.md`](PERFORMANCE_SNAPSHOT.md).
+
 ## Acceptance Gate
 
 The full direct ARM acceptance target is the Docker-backed ExecuTorch suite:
