@@ -294,6 +294,18 @@ Validation: cargo fmt --check; cargo check --lib; cargo test --lib
 Note: addmm now reads as one ordered expression rewrite: mm, optional alpha
   scaling, optional beta scaling, then add.
 
+2026-06-15, IR rewrite cursor slice 13
+Rust LOC: 35,823 -> 35,819
+Movement: -4 Rust LOC
+Deleted/collapsed: manual anchored slice/avg_pool/cat construction in
+  adaptive_avg_pool2d lowering
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib; maturin
+  develop --release; focused Python smoke over adaptive_avg_pool2d and
+  mean_dim adaptive cases: 62 passed
+Note: adaptive_avg_pool2d now emits each output-cell slice/pool and row/height
+  concat through one cursor over the nested decomposition, so it shares the
+  same rewrite-chain grammar as the other slice/cat decompositions.
+
 Slice log:
 
 ```text
