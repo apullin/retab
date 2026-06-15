@@ -1,5 +1,6 @@
 use super::emitter::EmitContext;
 use super::*;
+use crate::serialize::op_semantics;
 
 pub fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
@@ -910,10 +911,7 @@ pub(super) fn emit_reshape(ctx: &EmitContext) -> EmitResult {
         let needs_avgpool_rank_drop_fix = out_shape.len() == 3
             && input_shape.len() == 4
             && (input_shape.get(1) == Some(&1) || input_shape.get(2) == Some(&1))
-            && matches!(
-                input_node.target,
-                crate::graph::ir::OpTarget::AvgPool2d | crate::graph::ir::OpTarget::TosaAvgPool2d
-            );
+            && op_semantics::is_avg_pool(&input_node.target);
 
         if needs_avgpool_rank_drop_fix {
             let transpose_name = format!("{}_pre_reshape_nchw", node.name);

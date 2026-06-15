@@ -1,7 +1,8 @@
-use crate::graph::ir::{Arg, Node, OpTarget};
+use crate::graph::ir::{Arg, Node};
 use crate::graph::Graph;
 use crate::store::TensorStore;
 
+use super::op_semantics;
 use super::tensor_layout::{
     apply_tosa_dim_order, infer_shape_permutation, inverse_tosa_dim_order, node_tensor_dtype,
     permute_shape, raw_i32_shape,
@@ -40,7 +41,7 @@ pub(super) fn append_normalized_output_names(
         let serialized_shape = apply_tosa_dim_order(node, raw_shape.clone());
         let actual_shape = visitors::actual_tensor_shape(graph, store, node);
         let preserves_non_identity_layout = has_non_identity_tosa_dim_order(node);
-        let has_explicit_output_layout = matches!(node.target, OpTarget::TosaTranspose);
+        let has_explicit_output_layout = op_semantics::is_tosa_transpose(&node.target);
         if let Some((output_shape, perms)) =
             control_flow_parent_output_layout(node, &raw_shape, &serialized_shape)
         {

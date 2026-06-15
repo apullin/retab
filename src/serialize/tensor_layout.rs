@@ -4,6 +4,7 @@ use crate::graph::ir::{Arg, Node, OpTarget};
 use crate::graph::Graph;
 use crate::store::TensorData;
 
+use super::op_semantics;
 use super::tosa_generated::{DType, TosaTensor};
 use super::visitors::ir_dtype_to_tosa;
 
@@ -401,17 +402,6 @@ fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind>
     perms
 }
 
-fn is_conv_target(target: &OpTarget) -> bool {
-    matches!(
-        target,
-        OpTarget::Conv2d
-            | OpTarget::DepthwiseConv2d
-            | OpTarget::TosaConv2d
-            | OpTarget::TosaConv3d
-            | OpTarget::TosaDepthwiseConv2d
-    )
-}
-
 fn has_int48_conv_accumulator(node: &Node) -> bool {
     node.meta.tosa_special_dtype == Some(crate::graph::ir::DType::Int48)
         || node.meta.val.dtype == crate::graph::ir::DType::Int48
@@ -428,7 +418,7 @@ fn collect_tensor_dtype_overrides(graph: &Graph) -> HashMap<String, DType> {
         let Some(node) = graph.node(nid) else {
             continue;
         };
-        if !is_conv_target(&node.target) || !has_int48_conv_accumulator(node) {
+        if !op_semantics::is_conv_weight_source(&node.target) || !has_int48_conv_accumulator(node) {
             continue;
         }
         if let Some(Arg::Node(bias_id)) = node.args.get(2) {

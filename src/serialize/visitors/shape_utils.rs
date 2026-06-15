@@ -1,5 +1,5 @@
-use super::op_semantics;
 use super::*;
+use crate::serialize::op_semantics;
 use crate::serialize::tensor_layout::apply_tosa_dim_order;
 use std::cell::RefCell;
 use std::collections::HashMap as StdHashMap;
@@ -125,25 +125,8 @@ pub(super) fn transpose_perms(node: &Node) -> Vec<i32> {
     arg_or_kwarg_i32_list(node, 1, "perms")
 }
 
-fn is_layout_passthrough_qdq(node: &Node) -> bool {
-    match &node.target {
-        OpTarget::Other(name) => {
-            name.contains("quantize_per_tensor")
-                || name.contains("dequantize_per_tensor")
-                || name.contains("dequantize_per_channel")
-        }
-        _ => matches!(
-            node.target,
-            OpTarget::TosaRescale
-                | OpTarget::QuantizePerTensor
-                | OpTarget::DequantizePerTensor
-                | OpTarget::DequantizePerChannel
-        ),
-    }
-}
-
 fn passthrough_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
-    if !is_layout_passthrough_qdq(node) {
+    if !op_semantics::is_qdq_shape_passthrough(&node.target) {
         return None;
     }
     let input_node = first_input_node(graph, node)?;
@@ -171,7 +154,7 @@ pub(super) fn transposed_tensor_shape(
     store: &TensorStore,
     node: &Node,
 ) -> Option<Vec<i32>> {
-    if !matches!(node.target, OpTarget::TosaTranspose | OpTarget::Permute) {
+    if !op_semantics::is_transpose_shape_op(&node.target) {
         return None;
     }
 
@@ -185,7 +168,7 @@ pub(super) fn transposed_tensor_shape(
 }
 
 fn sliced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
-    if !matches!(node.target, OpTarget::Slice | OpTarget::TosaSlice) {
+    if !op_semantics::is_slice_shape_op(&node.target) {
         return None;
     }
 
@@ -200,11 +183,11 @@ fn sliced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Optio
 }
 
 fn reduced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
-    if !matches!(node.target, OpTarget::Sum | OpTarget::TosaReduceSum) {
+    if !op_semantics::is_sum_reduction(&node.target) {
         return None;
     }
 
-    if matches!(node.target, OpTarget::Sum) {
+    if op_semantics::is_aten_sum(&node.target) {
         return Some(apply_tosa_dim_order(node, raw_i32_shape(node)));
     }
 
@@ -405,8 +388,8 @@ pub(super) fn pool_nhwc_shape(
 }
 
 fn pool_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
-    let is_max_pool = matches!(node.target, OpTarget::MaxPool2d | OpTarget::TosaMaxPool2d);
-    let is_avg_pool = matches!(node.target, OpTarget::AvgPool2d | OpTarget::TosaAvgPool2d);
+    let is_max_pool = op_semantics::is_max_pool(&node.target);
+    let is_avg_pool = op_semantics::is_avg_pool(&node.target);
     if !is_max_pool && !is_avg_pool {
         return None;
     }
@@ -498,18 +481,7 @@ fn explicit_slice_size_shape(node: &Node, input_shape: &[i32]) -> Option<Vec<i32
 
 fn nhwc_layout_shape(node: &Node, raw_shape: &[i32], reordered_shape: &[i32]) -> Option<Vec<i32>> {
     let logical_nhwc = raw_shape.len() == 4
-        && (is_getitem_node(node)
-            || matches!(
-                node.target,
-                OpTarget::Conv2d
-                    | OpTarget::DepthwiseConv2d
-                    | OpTarget::TosaConv2d
-                    | OpTarget::TosaDepthwiseConv2d
-                    | OpTarget::MaxPool2d
-                    | OpTarget::AvgPool2d
-                    | OpTarget::TosaMaxPool2d
-                    | OpTarget::TosaAvgPool2d
-            ));
+        && (is_getitem_node(node) || op_semantics::uses_nhwc_layout_shape(&node.target));
     if !logical_nhwc || reordered_shape != raw_shape {
         return None;
     }
@@ -530,10 +502,7 @@ pub(crate) fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Nod
 }
 
 fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> Vec<i32> {
-    if matches!(
-        node.target,
-        OpTarget::TosaReshape | OpTarget::Reshape | OpTarget::View
-    ) {
+    if op_semantics::is_shape_literal_reshape(&node.target) {
         if let Some(shape) = literal_output_shape(node) {
             let input_shape = first_input_node(graph, node)
                 .map(|input| actual_tensor_shape(graph, store, input))
@@ -599,10 +568,7 @@ pub(super) fn promoted_2d_matmul_shape(
     store: &TensorStore,
     node: &Node,
 ) -> Option<Vec<i32>> {
-    if !matches!(
-        node.target,
-        OpTarget::Matmul | OpTarget::Bmm | OpTarget::TosaMatmul
-    ) {
+    if !op_semantics::is_matmul_shape_op(&node.target) {
         return None;
     }
 

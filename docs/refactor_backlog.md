@@ -116,6 +116,24 @@ Note: setup-positive slice. It simplified existing usage sites by 67 net lines
   before adding the shared module, and it creates the place to collapse visitor
   registration, dtype policy, and shape policy further.
 
+2026-06-15, serializer OpSemantics slice 2
+Rust LOC: 36,012 -> 36,060
+Movement: +48 Rust LOC
+Deleted/collapsed: local target-family predicates from shape_utils.rs,
+  tensor_layout.rs, output_layout.rs, nn/conv.rs, and tensor_ops.rs for Q/DQ
+  shape passthrough, transpose/slice/reduction/pool/matmul shape behavior,
+  NHWC layout-shape cases, conv weight-source detection, and weight-layout
+  passthrough
+Added: moved the semantics grammar to src/serialize/op_semantics.rs so tensor
+  declaration/layout code and visitors consume the same operation families
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib
+  serialize::visitors; cargo test --lib; maturin develop --release; focused
+  serializer-policy Python smoke over relu, sigmoid, eq, logical, view, permute,
+  conv2d, and mm: 333 passed
+Note: setup-positive slice. The payoff is architectural: serializer target
+  families now have a shared domain module instead of living as local matches
+  in each consumer.
+
 Slice log:
 
 ```text

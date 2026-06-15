@@ -1,4 +1,5 @@
 use super::*;
+use crate::serialize::op_semantics;
 
 pub(super) fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
@@ -94,18 +95,15 @@ fn logical_weight_shape<'a>(graph: &'a Graph, mut weight_node: &'a Node) -> &'a 
         if shape.len() == 4 && shape.get(1).copied() == Some(1) {
             return shape;
         }
-        let next = match weight_node.target {
-            OpTarget::TosaTranspose
-            | OpTarget::Permute
-            | OpTarget::Reshape
-            | OpTarget::TosaReshape
-            | OpTarget::View => weight_node
-                .args
-                .first()
-                .and_then(Arg::as_node)
-                .and_then(|id| graph.node(id)),
-            _ => None,
-        };
+        let next = op_semantics::is_weight_layout_passthrough(&weight_node.target)
+            .then(|| {
+                weight_node
+                    .args
+                    .first()
+                    .and_then(Arg::as_node)
+                    .and_then(|id| graph.node(id))
+            })
+            .flatten();
         let Some(next) = next else {
             return shape;
         };

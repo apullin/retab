@@ -4,6 +4,7 @@ pub mod visitors;
 mod attribute_flatbuffer;
 mod collection;
 mod flatbuffer;
+pub(crate) mod op_semantics;
 mod output_layout;
 mod tensor_layout;
 
