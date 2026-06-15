@@ -1441,6 +1441,10 @@ impl IrGraph {
 }
 
 impl IrRewriteCursor<'_> {
+    pub(crate) fn graph(&self) -> &IrGraph {
+        self.graph
+    }
+
     pub(crate) fn append_existing(&mut self, id: NodeId) -> NodeId {
         if let Some(previous) = self.previous {
             self.graph.anchor_after(id, previous);

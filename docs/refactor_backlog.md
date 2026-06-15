@@ -330,6 +330,22 @@ Note: both passes now follow the same shape as the larger decompositions:
   collect original args/meta, emit the replacement chain with one cursor, then
   replace the anchor.
 
+2026-06-15, IR rewrite cursor slice 16
+Rust LOC: 35,805 -> 35,808
+Movement: +3 Rust LOC
+Deleted/collapsed: manual anchored group input/weight/bias slice insertion,
+  per-group conv insertion, and final cat insertion in grouped-conv lowering
+Added: read-only IrRewriteCursor::graph accessor so cursor-driven rewrites can
+  inspect metadata without giving up insertion-order ownership
+Validation: cargo fmt; cargo fmt --check; cargo check --lib; cargo test --lib
+  fx_decompose_grouped_conv_ir::tests; cargo test --lib; maturin
+  develop --release; focused Python smoke over grouped conv2d and depthwise
+  skip-path TOSA cases: 38 passed
+Note: grouped-conv now emits the whole split-conv-concat chain through one
+  cursor. The redundant output-boundary bypass now runs after replacement on
+  users of the new cat, which matches the new ownership model because the cat
+  is freshly created and receives the original conv users.
+
 Slice log:
 
 ```text

@@ -119,11 +119,11 @@ fn cat_meta_from_outputs(
     meta
 }
 
-fn bypass_redundant_output_boundaries(graph: &mut IrGraph, original_id: NodeId, cat_id: NodeId) {
+fn bypass_redundant_output_boundaries(graph: &mut IrGraph, cat_id: NodeId) {
     let Some(cat_qparam) = graph.nodes[cat_id].meta.output_qparam().cloned() else {
         return;
     };
-    let users = graph.live_user_ids(original_id);
+    let users = graph.live_user_ids(cat_id);
     for user_id in users {
         if !graph.nodes[user_id].alive
             || graph.nodes[user_id].op != NodeOp::CallFunction
@@ -131,8 +131,7 @@ fn bypass_redundant_output_boundaries(graph: &mut IrGraph, original_id: NodeId, 
         {
             continue;
         }
-        if !matches!(graph.nodes[user_id].args.first(), Some(IrArg::Node(id)) if *id == original_id)
-        {
+        if !matches!(graph.nodes[user_id].args.first(), Some(IrArg::Node(id)) if *id == cat_id) {
             continue;
         }
         let Some(user_qparam) = graph.nodes[user_id].meta.output_qparam().cloned() else {
@@ -220,15 +219,17 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
         "aten.convolution.default"
     };
     let mut output_slices = Vec::new();
+    let mut cursor = graph.rewrite_cursor(id);
 
     for group in 0..spec.groups {
         let input_start = group * input_slice_size;
         let input_stop = (group + 1) * input_slice_size;
-        let Some(input_meta) = slice_meta(graph, spec.input_id, 1, input_start, input_stop) else {
+        let Some(input_meta) =
+            slice_meta(cursor.graph(), spec.input_id, 1, input_start, input_stop)
+        else {
             return false;
         };
-        let input_slice = graph.add_anchored_slice_copy(
-            id,
+        let input_slice = cursor.slice_copy(
             format!("{}_input_slice_{}", node_name, group),
             spec.input_id,
             1,
@@ -243,12 +244,12 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
         } else {
             (group * output_slice_size, (group + 1) * output_slice_size)
         };
-        let Some(weight_meta) = slice_meta(graph, spec.weight_id, 0, weight_start, weight_stop)
+        let Some(weight_meta) =
+            slice_meta(cursor.graph(), spec.weight_id, 0, weight_start, weight_stop)
         else {
             return false;
         };
-        let weight_slice = graph.add_anchored_slice_copy(
-            id,
+        let weight_slice = cursor.slice_copy(
             format!("{}_weight_slice_{}", node_name, group),
             spec.weight_id,
             0,
@@ -262,11 +263,11 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
             IrArg::Node(bias_id) => {
                 let bias_start = group * output_slice_size;
                 let bias_stop = (group + 1) * output_slice_size;
-                let Some(bias_meta) = slice_meta(graph, bias_id, 0, bias_start, bias_stop) else {
+                let Some(bias_meta) = slice_meta(cursor.graph(), bias_id, 0, bias_start, bias_stop)
+                else {
                     return false;
                 };
-                let bias_slice = graph.add_anchored_slice_copy(
-                    id,
+                let bias_slice = cursor.slice_copy(
                     format!("{}_bias_slice_{}", node_name, group),
                     bias_id,
                     0,
@@ -297,9 +298,9 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
             conv_args.push(IrArg::Int(1));
         }
 
-        let mut conv_meta = conv_slice_output_meta(graph, id, output_slice_size);
+        let mut conv_meta = conv_slice_output_meta(cursor.graph(), id, output_slice_size);
         if !configure_conv_qparams(
-            graph,
+            cursor.graph(),
             id,
             group,
             output_slice_size,
@@ -308,8 +309,7 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
         ) {
             return false;
         }
-        let conv = graph.add_anchored_call_function(
-            id,
+        let conv = cursor.call_function(
             format!("{}_group_conv_{}", node_name, group),
             conv_target,
             conv_args,
@@ -318,9 +318,8 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
         output_slices.push(conv);
     }
 
-    let cat_meta = cat_meta_from_outputs(graph, id, &output_slices);
-    let cat = graph.add_anchored_call_function(
-        id,
+    let cat_meta = cat_meta_from_outputs(cursor.graph(), id, &output_slices);
+    let cat = cursor.call_function(
         format!("{}_cat", node_name),
         "aten.cat.default",
         vec![
@@ -334,8 +333,8 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
         ],
         cat_meta,
     );
-    bypass_redundant_output_boundaries(graph, id, cat);
-    graph.replace_and_erase(id, cat);
+    cursor.replace_anchor_with(cat);
+    bypass_redundant_output_boundaries(graph, cat);
     true
 }
 
