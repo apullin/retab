@@ -64,44 +64,38 @@ impl IrPass for IrExpandWhereMaskPass {
             let view_meta = graph.nodes[mask_id]
                 .meta
                 .cloned_with_same_dtype_or(padded_mask_shape.clone(), "torch.bool");
+            let expand_meta = graph.nodes[mask_id]
+                .meta
+                .cloned_with_same_dtype_or(output_shape.clone(), "torch.bool");
+            let true_arg = graph.nodes[id].args[1].clone();
+            let false_arg = graph.nodes[id].args[2].clone();
+            let node_name = graph.nodes[id].name.clone();
+            let node_meta = graph.nodes[id].meta.clone();
 
-            // Insert view_copy: reshape mask to padded shape
-            let view_id = graph.add_anchored_view_copy(
-                id,
-                format!("{}_view_copy", graph.nodes[id].name),
+            let mut cursor = graph.rewrite_cursor(id);
+
+            let view_id = cursor.view_copy(
+                format!("{}_view_copy", node_name),
                 mask_id,
                 &padded_mask_shape,
                 view_meta,
             );
 
-            // Build meta for the expand_copy node (full output shape, same dtype)
-            let expand_meta = graph.nodes[mask_id]
-                .meta
-                .cloned_with_same_dtype_or(output_shape.clone(), "torch.bool");
-
-            // Insert expand_copy: broadcast to full output shape
-            let expand_id = graph.add_anchored_call_function(
-                id,
-                format!("{}_expand_copy", graph.nodes[id].name),
+            let expand_id = cursor.call_function(
+                format!("{}_expand_copy", node_name),
                 "aten.expand_copy.default",
                 vec![IrArg::Node(view_id), i64_list_arg(&output_shape)],
                 expand_meta,
             );
 
-            // Clone the remaining args (true_val, false_val) from the original where node
-            let true_arg = graph.nodes[id].args[1].clone();
-            let false_arg = graph.nodes[id].args[2].clone();
-
-            // Insert new where.self with the expanded mask
-            let new_where_id = graph.add_anchored_call_function(
-                id,
-                format!("{}_where", graph.nodes[id].name),
+            let new_where_id = cursor.call_function(
+                format!("{}_where", node_name),
                 "aten.where.self",
                 vec![IrArg::Node(expand_id), true_arg, false_arg],
-                graph.nodes[id].meta.clone(),
+                node_meta,
             );
 
-            graph.replace_and_erase(id, new_where_id);
+            cursor.replace_anchor_with(new_where_id);
             true
         });
 

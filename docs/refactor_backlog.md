@@ -318,6 +318,18 @@ Note: cumsum now separates metadata preparation from mutation: qparams and
   shapes are computed first, then the whole decomposition is emitted as one
   cursor-owned prefix-sum convolution chain.
 
+2026-06-15, IR rewrite cursor slice 15
+Rust LOC: 35,811 -> 35,805
+Movement: -6 Rust LOC
+Deleted/collapsed: manual anchored view/expand/where construction in where-mask
+  expansion and manual anchored full_like/where construction in masked_fill
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib; maturin
+  develop --release; focused Python smoke over where and masked_fill FP/INT
+  TOSA cases: 33 passed
+Note: both passes now follow the same shape as the larger decompositions:
+  collect original args/meta, emit the replacement chain with one cursor, then
+  replace the anchor.
+
 Slice log:
 
 ```text
