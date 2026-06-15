@@ -172,6 +172,19 @@ Note: this slice turned another group of decompositions into a single
   cursor-driven rewrite chain. The payoff is both smaller code and less
   hand-managed anchor/copy/replace sequencing.
 
+2026-06-15, IR rewrite cursor slice 4
+Rust LOC: 35,980 -> 35,928
+Movement: -52 Rust LOC
+Deleted/collapsed: repeated anchored value-stamped call-function construction in
+  mean and tril decompositions, plus the now-unused
+  add_call_function_with_val and add_anchored_call_function_with_val helpers
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib; maturin
+  develop --release; focused Python smoke over adaptive_avg_pool2d, mean_dim,
+  mean, and tril: 78 passed
+Note: this completes the specific value-stamped call-function cleanup: the
+  passes now spell rewrite order through IrRewriteCursor instead of a second
+  anchored helper family.
+
 Slice log:
 
 ```text

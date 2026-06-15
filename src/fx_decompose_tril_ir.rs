@@ -1,7 +1,7 @@
 //! Pure Rust IrPass decomposition of `aten.tril` into
 //! arange + view + add(diagonal) + ge + where / bitwise_and.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta};
 use crate::fx_target::is_tril_target;
 use crate::graph::ir::DType;
 use crate::runner_logging::log_line;
@@ -23,30 +23,38 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
     let base_name = graph.nodes[id].name.clone();
     let base_meta = graph.nodes[id].meta.clone();
     let float_meta = base_meta.tensor_stamp("torch.float32");
+    let is_bool = graph.nodes[input_id].meta.val_dtype_is(DType::Bool);
+    let zero_spec = if is_bool {
+        None
+    } else if let Some(qp) = graph.nodes[id].meta.output_qparam() {
+        let clamped = qp.zp.max(qp.qmin).min(qp.qmax);
+        Some((clamped, qp.dtype_str.clone()))
+    } else {
+        Some((0i64, input_dtype.clone()))
+    };
+
+    let mut cursor = graph.rewrite_cursor(id);
 
     // --- row indices: arange(0, rows) -> [rows], then view to [rows, 1] ---
-    let row_arange = graph.add_anchored_call_function(
-        id,
+    let row_arange = cursor.call_function(
         format!("{base_name}_row_arange"),
         "aten.arange.start_step",
         vec![IrArg::Int(0), IrArg::Int(rows), IrArg::Int(1)],
         float_meta.preserve_qparams(vec![rows]),
     );
 
-    let row_view = graph.add_anchored_view_copy(
-        id,
+    let row_view = cursor.view_copy(
         format!("{base_name}_row_view"),
         row_arange,
         &[rows, 1],
         float_meta.preserve_qparams(vec![rows, 1]),
     );
 
-    // If diagonal != 0, add the offset
+    // If diagonal != 0, add the offset.
     let row_final = if diagonal != 0 {
-        graph.add_node(
-            NodeOp::CallFunction,
+        cursor.call_function(
             format!("{base_name}_row_add_diag"),
-            "aten.add.Scalar".to_string(),
+            "aten.add.Scalar",
             vec![IrArg::Node(row_view), IrArg::Int(diagonal)],
             float_meta.preserve_qparams(vec![rows, 1]),
         )
@@ -55,16 +63,14 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
     };
 
     // --- col indices: arange(0, cols) -> [cols], then view to [1, cols] ---
-    let col_arange = graph.add_anchored_call_function(
-        id,
+    let col_arange = cursor.call_function(
         format!("{base_name}_col_arange"),
         "aten.arange.start_step",
         vec![IrArg::Int(0), IrArg::Int(cols), IrArg::Int(1)],
         float_meta.preserve_qparams(vec![cols]),
     );
 
-    let col_view = graph.add_anchored_view_copy(
-        id,
+    let col_view = cursor.view_copy(
         format!("{base_name}_col_view"),
         col_arange,
         &[1, cols],
@@ -72,55 +78,37 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
     );
 
     // --- mask: row >= col -> bool [rows, cols] ---
-    let mask = graph.add_anchored_call_function_with_val(
-        id,
+    let mask = cursor.call_function(
         format!("{base_name}_ge"),
         "aten.ge.Tensor",
         vec![IrArg::Node(row_final), IrArg::Node(col_view)],
-        &base_meta,
-        vec![rows, cols],
-        "torch.bool",
+        base_meta.cloned_with_val(vec![rows, cols], "torch.bool"),
     );
 
     // --- result: bool input -> bitwise_and, else -> where(mask, input, zero) ---
-    let is_bool = graph.nodes[input_id].meta.val_dtype_is(DType::Bool);
-
-    let result = if is_bool {
-        graph.add_node(
-            NodeOp::CallFunction,
+    if is_bool {
+        Some(cursor.call_function(
             format!("{base_name}_bitwise_and"),
-            "aten.bitwise_and.Tensor".to_string(),
+            "aten.bitwise_and.Tensor",
             vec![IrArg::Node(input_id), IrArg::Node(mask)],
             base_meta,
-        )
+        ))
     } else {
-        // Create a scalar zero with the input dtype.
-        // For quantized inputs, clamp the zero-point into [qmin, qmax].
-        let (zero_val, zero_dtype) = if let Some(qp) = graph.nodes[id].meta.output_qparam() {
-            let clamped = qp.zp.max(qp.qmin).min(qp.qmax);
-            (clamped, qp.dtype_str.clone())
-        } else {
-            (0i64, input_dtype.clone())
-        };
-
-        let zero = graph.add_anchored_call_function(
-            id,
+        let (zero_val, zero_dtype) = zero_spec?;
+        let zero = cursor.call_function(
             format!("{base_name}_zero"),
             "aten.scalar_tensor.default",
             vec![IrArg::Int(zero_val)],
             NodeMeta::tensor(Vec::<i64>::new(), &zero_dtype),
         );
 
-        graph.add_node(
-            NodeOp::CallFunction,
+        Some(cursor.call_function(
             format!("{base_name}_where"),
-            "aten.where.self".to_string(),
+            "aten.where.self",
             vec![IrArg::Node(mask), IrArg::Node(input_id), IrArg::Node(zero)],
             base_meta,
-        )
-    };
-
-    Some(result)
+        ))
+    }
 }
 
 pub struct IrDecomposeTrilPass;

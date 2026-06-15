@@ -581,18 +581,6 @@ impl IrGraph {
         self.add_node(NodeOp::CallFunction, name.into(), target.into(), args, meta)
     }
 
-    pub fn add_call_function_with_val(
-        &mut self,
-        name: impl Into<String>,
-        target: impl Into<String>,
-        args: Vec<IrArg>,
-        base_meta: &NodeMeta,
-        shape: Vec<i64>,
-        dtype: impl Into<String>,
-    ) -> NodeId {
-        self.add_call_function(name, target, args, base_meta.cloned_with_val(shape, dtype))
-    }
-
     pub fn add_call_function_with_kwargs(
         &mut self,
         name: impl Into<String>,
@@ -647,21 +635,6 @@ impl IrGraph {
     ) -> NodeId {
         let id = self.add_anchored_call_function(old_id, name, target, args, meta);
         self.replace_and_erase(old_id, id);
-        id
-    }
-
-    pub fn add_anchored_call_function_with_val(
-        &mut self,
-        anchor: NodeId,
-        name: impl Into<String>,
-        target: impl Into<String>,
-        args: Vec<IrArg>,
-        base_meta: &NodeMeta,
-        shape: Vec<i64>,
-        dtype: impl Into<String>,
-    ) -> NodeId {
-        let id = self.add_call_function_with_val(name, target, args, base_meta, shape, dtype);
-        self.anchor_to(id, anchor);
         id
     }
 

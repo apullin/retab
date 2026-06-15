@@ -65,27 +65,25 @@ impl IrPass for IrDecomposeMeanPass {
                     let pool_h = 1i64.max(input_shape[2] / kernel[0].max(1));
                     let pool_w = 1i64.max(input_shape[3] / kernel[1].max(1));
                     let pool_shape = vec![input_shape[0], input_shape[1], pool_h, pool_w];
-                    let result = graph.add_anchored_call_function_with_val(
-                        id,
-                        format!("{}_avgpool", name),
-                        "aten.avg_pool2d.default",
-                        vec![IrArg::Node(x_id), i64_list(&kernel), i64_list(&[1, 1])],
-                        &orig_meta,
-                        pool_shape.clone(),
-                        dtype,
-                    );
-
-                    if !keepdim {
-                        graph.replace_with_view_copy(
-                            id,
-                            format!("{}_view", name),
-                            result,
-                            &output_shape,
-                            meta.preserve_qparams(output_shape.clone()),
+                    let result = {
+                        let mut cursor = graph.rewrite_cursor(id);
+                        let pool = cursor.call_function(
+                            format!("{}_avgpool", name),
+                            "aten.avg_pool2d.default",
+                            vec![IrArg::Node(x_id), i64_list(&kernel), i64_list(&[1, 1])],
+                            orig_meta.cloned_with_val(pool_shape.clone(), dtype),
                         );
-                        modified = true;
-                        continue;
-                    }
+                        if keepdim {
+                            pool
+                        } else {
+                            cursor.view_copy(
+                                format!("{}_view", name),
+                                pool,
+                                &output_shape,
+                                meta.preserve_qparams(output_shape.clone()),
+                            )
+                        }
+                    };
                     graph.replace_and_erase(id, result);
                     modified = true;
                     continue;
@@ -103,40 +101,31 @@ impl IrPass for IrDecomposeMeanPass {
 
             // sum(x, dims, keepdim=True)
             let sum_shape = reduced_shape(&input_shape, &dims, true);
-            let sum_id = graph.add_anchored_call_function_with_val(
-                id,
-                format!("{}_sum", name),
-                "aten.sum.dim_IntList",
-                vec![IrArg::Node(x_id), i64_list(&dims), IrArg::Bool(true)],
-                &orig_meta,
-                sum_shape.clone(),
-                dtype,
-            );
 
             // full([1]*rank, 1/count)
             let ones_shape: Vec<i64> = vec![1; input_shape.len()];
-            let count_id = graph.add_anchored_call_function_with_val(
-                id,
-                format!("{}_inv_count", name),
-                "aten.full.default",
-                vec![i64_list(&ones_shape), IrArg::Float(1.0 / count)],
-                &orig_meta,
-                ones_shape,
-                dtype,
-            );
-
-            // mul(sum, 1/count)
-            let mul_id = graph.add_call_function_with_val(
-                format!("{}_mul", name),
-                "aten.mul.Tensor",
-                vec![IrArg::Node(sum_id), IrArg::Node(count_id)],
-                &orig_meta,
-                sum_shape.clone(),
-                dtype,
-            );
-            // Note: mul is NOT anchored — it depends on sum_id which may be
-            // further decomposed by convert_sum. Conversion re-sorts by def-use,
-            // so it will still land after its dependencies.
+            let (sum_id, count_id, mul_id) = {
+                let mut cursor = graph.rewrite_cursor(id);
+                let sum = cursor.call_function(
+                    format!("{}_sum", name),
+                    "aten.sum.dim_IntList",
+                    vec![IrArg::Node(x_id), i64_list(&dims), IrArg::Bool(true)],
+                    orig_meta.cloned_with_val(sum_shape.clone(), dtype),
+                );
+                let count_node = cursor.call_function(
+                    format!("{}_inv_count", name),
+                    "aten.full.default",
+                    vec![i64_list(&ones_shape), IrArg::Float(1.0 / count)],
+                    orig_meta.cloned_with_val(ones_shape, dtype),
+                );
+                let mul = cursor.call_function(
+                    format!("{}_mul", name),
+                    "aten.mul.Tensor",
+                    vec![IrArg::Node(sum), IrArg::Node(count_node)],
+                    orig_meta.cloned_with_val(sum_shape.clone(), dtype),
+                );
+                (sum, count_node, mul)
+            };
 
             // Annotate qparams if quantized
             if let Some(input_qp) = orig_meta.input_qparam().cloned() {
@@ -173,19 +162,17 @@ impl IrPass for IrDecomposeMeanPass {
             }
 
             // Optional view if keepdim=False
-            if !keepdim {
-                graph.replace_with_view_copy(
-                    id,
+            let result = if keepdim {
+                mul_id
+            } else {
+                graph.rewrite_cursor_after(id, mul_id).view_copy(
                     format!("{}_view", name),
                     mul_id,
                     &output_shape,
                     meta.preserve_qparams(output_shape.clone()),
-                );
-                modified = true;
-                continue;
-            }
-
-            graph.replace_and_erase(id, mul_id);
+                )
+            };
+            graph.replace_and_erase(id, result);
             modified = true;
         }
 
