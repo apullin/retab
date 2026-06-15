@@ -652,24 +652,6 @@ impl IrGraph {
         id
     }
 
-    pub(crate) fn add_anchored_dtype_cast(
-        &mut self,
-        anchor: NodeId,
-        name: impl Into<String>,
-        source: NodeId,
-        dtype: impl Into<String>,
-        meta: NodeMeta,
-    ) -> NodeId {
-        self.add_anchored_call_function_with_kwargs(
-            anchor,
-            name,
-            "aten._to_copy.default",
-            vec![IrArg::Node(source)],
-            dtype_kwarg(dtype),
-            meta,
-        )
-    }
-
     pub(crate) fn add_view_copy(
         &mut self,
         name: impl Into<String>,
@@ -872,20 +854,6 @@ impl IrGraph {
             dtype_kwarg(dtype),
             meta,
         )
-    }
-
-    pub fn add_anchored_full_int(
-        &mut self,
-        anchor: NodeId,
-        name: impl Into<String>,
-        shape: &[i64],
-        value: i64,
-        dtype: &str,
-        meta: NodeMeta,
-    ) -> NodeId {
-        let id = self.add_full_int(name, shape, value, dtype, meta);
-        self.anchor_to(id, anchor);
-        id
     }
 
     pub fn add_anchored_full_float(

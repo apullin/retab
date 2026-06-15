@@ -129,20 +129,23 @@ impl IrPass for IrRewriteIndexPutPass {
                 .unwrap_or("torch.int64")
                 .to_string();
 
-            let Some(flat_idx) = build_linear_index(
-                graph,
-                LinearIndexSpec {
-                    anchor: id,
-                    name: &name,
-                    meta: &orig_meta,
-                    index_ids: &idx_ids,
-                    index_shapes: &idx_shapes,
-                    broadcast_shape: &bcast,
-                    linear_scales: &lin_scales,
-                    index_dtype: &idx_dtype,
-                    flat_len: w,
-                },
-            ) else {
+            let flat_idx = {
+                let mut cursor = graph.rewrite_cursor(id);
+                build_linear_index(
+                    &mut cursor,
+                    LinearIndexSpec {
+                        name: &name,
+                        meta: &orig_meta,
+                        index_ids: &idx_ids,
+                        index_shapes: &idx_shapes,
+                        broadcast_shape: &bcast,
+                        linear_scales: &lin_scales,
+                        index_dtype: &idx_dtype,
+                        flat_len: w,
+                    },
+                )
+            };
+            let Some(flat_idx) = flat_idx else {
                 continue;
             };
 

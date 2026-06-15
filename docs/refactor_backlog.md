@@ -226,6 +226,23 @@ Note: the payoff is readability more than deletion. The pass now describes a
   single ordered chain: materialize explicit pad tensors, concatenate padded
   input, run unpadded avg_pool2d, and optionally apply divisor correction.
 
+2026-06-15, IR rewrite cursor slice 8
+Rust LOC: 35,912 -> 35,868
+Movement: -44 Rust LOC
+Deleted/collapsed: the anchor-bearing linear-index helper API plus now-unused
+  anchored dtype-cast and full-int helpers
+Changed: build_linear_index now appends to an IrRewriteCursor, and
+  index_tensor lowering is expressed as one ordered chain around the shared
+  linear-index builder; index_put was adapted to the cursor-owned helper API
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib
+  fx_rewrite_index_put_ir::tests; cargo test --lib; maturin develop --release;
+  focused Python smoke over index_tensor, index_put, and gather: 89 passed,
+  20 xfailed
+Note: this is the first heavier shared-grammar migration in the index family.
+  The important semantic change is ownership: linear-index construction no
+  longer decides how to anchor graph edits, so callers can compose it into a
+  larger rewrite chain.
+
 Slice log:
 
 ```text

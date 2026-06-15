@@ -121,120 +121,108 @@ impl IrPass for IrDecomposeIndexTensorPass {
             let x_meta = x_base_meta.tensor_stamp_same_dtype_or_float32();
             let index_meta = orig_meta.tensor_stamp(&idx_dtype);
 
-            let mut values_in = x_id;
-            if !is_identity_perm(&perm) {
-                let permuted_shape: Vec<i64> =
-                    perm.iter().map(|&pos| x_shape[pos as usize]).collect();
-                let perm_meta = x_meta.preserve_qparams(permuted_shape);
-                let perm_id = graph.add_anchored_permute_copy(
-                    id,
-                    format!("{}_x_perm", node_name),
-                    values_in,
-                    &perm,
-                    perm_meta,
-                );
-                values_in = perm_id;
-            }
-
-            // Flatten x to (B, K, C)
-            let x_bkc_meta = x_meta.preserve_qparams(vec![batch, k, c]);
-            let x_bkc = graph.add_anchored_view_copy(
-                id,
-                format!("{}_x_flat", node_name),
-                values_in,
-                &[batch, k, c],
-                x_bkc_meta,
-            );
-
-            // TOSA GATHER does not support BOOL data; gather as INT8 and cast the
-            // result back to BOOL below.
-            let (gather_meta, x_is_bool) = x_base_meta.tensor_stamp_bool_as_int8_work_or_float32();
-            let gather_x = if x_is_bool {
-                let cast_meta = gather_meta.drop_qparams(vec![batch, k, c]);
-                graph.add_anchored_dtype_cast(
-                    id,
-                    format!("{}_x_i8", node_name),
-                    x_bkc,
-                    gather_meta.dtype(),
-                    cast_meta,
-                )
-            } else {
-                x_bkc
-            };
-
-            let Some(lin_w_id) = build_linear_index(
-                graph,
-                LinearIndexSpec {
-                    anchor: id,
-                    name: &node_name,
-                    meta: &orig_meta,
-                    index_ids: &idx_ids,
-                    index_shapes: &idx_shapes,
-                    broadcast_shape: &broadcast,
-                    linear_scales: &lin_scales,
-                    index_dtype: &idx_dtype,
-                    flat_len: w,
-                },
-            ) else {
-                continue;
-            };
-
-            // Unsqueeze to (1, W), then tile across batch if needed.
-            let idx_1w_meta = index_meta.drop_qparams(vec![1, w]);
-            let idx_bw_seed = graph.add_anchored_call_function(
-                id,
-                format!("{}_idx_1w", node_name),
-                "aten.unsqueeze_copy.default".to_string(),
-                vec![IrArg::Node(lin_w_id), IrArg::Int(0)],
-                idx_1w_meta,
-            );
-
-            let idx_bw = if batch == 1 {
-                idx_bw_seed
-            } else {
-                let expand_meta = index_meta.drop_qparams(vec![batch, w]);
-                let expand_id = graph.add_anchored_call_function(
-                    id,
-                    format!("{}_idx_bw", node_name),
-                    "aten.expand_copy.default".to_string(),
-                    vec![IrArg::Node(idx_bw_seed), i64_list(&[batch, w])],
-                    expand_meta,
-                );
-                expand_id
-            };
-
-            // GATHER(x_bkc, idx_bw) → (B, W, C)
-            let gathered_meta = gather_meta.preserve_qparams(vec![batch, w, c]);
-            let gathered = graph.add_anchored_call_function(
-                id,
-                format!("{}_gather", node_name),
-                "backend.tosa.GATHER.default".to_string(),
-                vec![IrArg::Node(gather_x), IrArg::Node(idx_bw)],
-                gathered_meta,
-            );
-            let gathered = if x_is_bool {
-                let cast_meta = x_meta.drop_qparams(vec![batch, w, c]);
-                graph.add_anchored_dtype_cast(
-                    id,
-                    format!("{}_gather_bool", node_name),
-                    gathered,
-                    "torch.bool",
-                    cast_meta,
-                )
-            } else {
-                gathered
-            };
-
             // Reshape to (...batch, ...broadcast, ...kept)
             let out_shape = compute_index_output_shape(&batch_shape, &broadcast, &kept_shape);
             let result_meta = x_meta.preserve_qparams(out_shape.clone());
-            graph.replace_with_view_copy(
-                id,
-                format!("{}_out", node_name),
-                gathered,
-                &out_shape,
-                result_meta,
-            );
+
+            let result = {
+                let mut cursor = graph.rewrite_cursor(id);
+                let mut values_in = x_id;
+                if !is_identity_perm(&perm) {
+                    let permuted_shape: Vec<i64> =
+                        perm.iter().map(|&pos| x_shape[pos as usize]).collect();
+                    values_in = cursor.permute_copy(
+                        format!("{}_x_perm", node_name),
+                        values_in,
+                        &perm,
+                        x_meta.preserve_qparams(permuted_shape),
+                    );
+                }
+
+                // Flatten x to (B, K, C).
+                let x_bkc = cursor.view_copy(
+                    format!("{}_x_flat", node_name),
+                    values_in,
+                    &[batch, k, c],
+                    x_meta.preserve_qparams(vec![batch, k, c]),
+                );
+
+                // TOSA GATHER does not support BOOL data; gather as INT8 and cast
+                // the result back to BOOL below.
+                let (gather_meta, x_is_bool) =
+                    x_base_meta.tensor_stamp_bool_as_int8_work_or_float32();
+                let gather_x = if x_is_bool {
+                    cursor.dtype_cast(
+                        format!("{}_x_i8", node_name),
+                        x_bkc,
+                        gather_meta.dtype(),
+                        gather_meta.drop_qparams(vec![batch, k, c]),
+                    )
+                } else {
+                    x_bkc
+                };
+
+                let Some(lin_w_id) = build_linear_index(
+                    &mut cursor,
+                    LinearIndexSpec {
+                        name: &node_name,
+                        meta: &orig_meta,
+                        index_ids: &idx_ids,
+                        index_shapes: &idx_shapes,
+                        broadcast_shape: &broadcast,
+                        linear_scales: &lin_scales,
+                        index_dtype: &idx_dtype,
+                        flat_len: w,
+                    },
+                ) else {
+                    continue;
+                };
+
+                // Unsqueeze to (1, W), then tile across batch if needed.
+                let idx_bw_seed = cursor.call_function(
+                    format!("{}_idx_1w", node_name),
+                    "aten.unsqueeze_copy.default",
+                    vec![IrArg::Node(lin_w_id), IrArg::Int(0)],
+                    index_meta.drop_qparams(vec![1, w]),
+                );
+
+                let idx_bw = if batch == 1 {
+                    idx_bw_seed
+                } else {
+                    cursor.call_function(
+                        format!("{}_idx_bw", node_name),
+                        "aten.expand_copy.default",
+                        vec![IrArg::Node(idx_bw_seed), i64_list(&[batch, w])],
+                        index_meta.drop_qparams(vec![batch, w]),
+                    )
+                };
+
+                // GATHER(x_bkc, idx_bw) -> (B, W, C).
+                let gathered = cursor.call_function(
+                    format!("{}_gather", node_name),
+                    "backend.tosa.GATHER.default",
+                    vec![IrArg::Node(gather_x), IrArg::Node(idx_bw)],
+                    gather_meta.preserve_qparams(vec![batch, w, c]),
+                );
+                let gathered = if x_is_bool {
+                    cursor.dtype_cast(
+                        format!("{}_gather_bool", node_name),
+                        gathered,
+                        "torch.bool",
+                        x_meta.drop_qparams(vec![batch, w, c]),
+                    )
+                } else {
+                    gathered
+                };
+
+                cursor.view_copy(
+                    format!("{}_out", node_name),
+                    gathered,
+                    &out_shape,
+                    result_meta,
+                )
+            };
+            graph.replace_and_erase(id, result);
             modified = true;
         }
 

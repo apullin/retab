@@ -1,4 +1,4 @@
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, NodeId, NodeMeta};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrRewriteCursor, NodeId, NodeMeta};
 
 pub(crate) fn contiguous_strides(shape: &[i64]) -> Vec<i64> {
     let mut strides = vec![0; shape.len()];
@@ -15,7 +15,6 @@ pub(crate) fn packed_linear_scales(shape: &[i64]) -> Vec<i64> {
 }
 
 pub(crate) struct LinearIndexSpec<'a> {
-    pub anchor: NodeId,
     pub name: &'a str,
     pub meta: &'a NodeMeta,
     pub index_ids: &'a [NodeId],
@@ -26,7 +25,10 @@ pub(crate) struct LinearIndexSpec<'a> {
     pub flat_len: i64,
 }
 
-pub(crate) fn build_linear_index(graph: &mut IrGraph, spec: LinearIndexSpec<'_>) -> Option<NodeId> {
+pub(crate) fn build_linear_index(
+    cursor: &mut IrRewriteCursor<'_>,
+    spec: LinearIndexSpec<'_>,
+) -> Option<NodeId> {
     if spec.index_ids.len() != spec.index_shapes.len()
         || spec.index_ids.len() != spec.linear_scales.len()
     {
@@ -49,34 +51,31 @@ pub(crate) fn build_linear_index(graph: &mut IrGraph, spec: LinearIndexSpec<'_>)
         if index_shape.len() != spec.broadcast_shape.len() {
             let mut aligned = vec![1; spec.broadcast_shape.len() - index_shape.len()];
             aligned.extend(index_shape);
-            let aligned_id = graph.add_anchored_call_function(
-                spec.anchor,
+            let aligned_meta = index_meta.drop_qparams(aligned.clone());
+            let aligned_id = cursor.view_copy(
                 format!("{}_idx{}_align", spec.name, i),
-                "aten.view_copy.default".to_string(),
-                vec![IrArg::Node(current), i64_list(&aligned)],
-                index_meta.drop_qparams(aligned),
+                current,
+                &aligned,
+                aligned_meta,
             );
             current = aligned_id;
         }
 
-        let broadcast_id = graph.add_anchored_call_function(
-            spec.anchor,
+        let broadcast_id = cursor.call_function(
             format!("{}_idx{}_bcast", spec.name, i),
-            "aten.expand_copy.default".to_string(),
+            "aten.expand_copy.default",
             vec![IrArg::Node(current), i64_list(spec.broadcast_shape)],
             index_meta.drop_qparams(spec.broadcast_shape.to_vec()),
         );
 
-        let flat_id = graph.add_anchored_call_function(
-            spec.anchor,
+        let flat_id = cursor.view_copy(
             format!("{}_idx{}_flat", spec.name, i),
-            "aten.view_copy.default".to_string(),
-            vec![IrArg::Node(broadcast_id), i64_list(&[spec.flat_len])],
+            broadcast_id,
+            &[spec.flat_len],
             index_meta.drop_qparams(vec![spec.flat_len]),
         );
 
-        let scale_id = graph.add_anchored_full_int(
-            spec.anchor,
+        let scale_id = cursor.full_int(
             format!("{}_idx{}_scale", spec.name, i),
             &[1],
             linear_scale,
@@ -84,20 +83,18 @@ pub(crate) fn build_linear_index(graph: &mut IrGraph, spec: LinearIndexSpec<'_>)
             index_meta.drop_qparams(vec![1]),
         );
 
-        let scaled_id = graph.add_anchored_call_function(
-            spec.anchor,
+        let scaled_id = cursor.call_function(
             format!("{}_idx{}_scaled", spec.name, i),
-            "aten.mul.Tensor".to_string(),
+            "aten.mul.Tensor",
             vec![IrArg::Node(flat_id), IrArg::Node(scale_id)],
             index_meta.drop_qparams(vec![spec.flat_len]),
         );
 
         linear_index = Some(match linear_index {
             None => scaled_id,
-            Some(prev) => graph.add_anchored_call_function(
-                spec.anchor,
+            Some(prev) => cursor.call_function(
                 format!("{}_idx{}_add", spec.name, i),
-                "aten.add.Tensor".to_string(),
+                "aten.add.Tensor",
                 vec![IrArg::Node(prev), IrArg::Node(scaled_id)],
                 index_meta.drop_qparams(vec![spec.flat_len]),
             ),
