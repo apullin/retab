@@ -14,7 +14,7 @@ use crate::graph::ir::DType;
 use crate::store::TensorData;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FoldQdqQParamSource {
+enum FoldQdqQParamSource {
     InputNodeMeta,
     OutputNodeMeta,
     LiteralArgs,
@@ -22,54 +22,51 @@ pub(crate) enum FoldQdqQParamSource {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ResolvedFoldQdqQParam {
-    pub qparam: QParam,
-    pub source: FoldQdqQParamSource,
+struct ResolvedFoldQdqQParam {
+    qparam: QParam,
+    source: FoldQdqQParamSource,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ResolvedFoldQdqInput {
-    pub arg_index: usize,
-    pub qparam: ResolvedFoldQdqQParam,
-    pub dq_node_ids: Vec<NodeId>,
+struct ResolvedFoldQdqInput {
+    arg_index: usize,
+    qparam: ResolvedFoldQdqQParam,
+    dq_node_ids: Vec<NodeId>,
 }
 
-pub(crate) fn has_arm_quantized_annotation(meta: &NodeMeta) -> bool {
+fn has_arm_quantized_annotation(meta: &NodeMeta) -> bool {
     meta.extra_bool("arm_quantized_annotation") == Some(true)
 }
 
-pub(crate) fn is_foldable_node(node: &IrNode) -> bool {
+fn is_foldable_node(node: &IrNode) -> bool {
     node.op == NodeOp::CallFunction
         && !node.is_q_or_dq()
         && (is_fold_qdq_constant_target(&node.target) || has_arm_quantized_annotation(&node.meta))
 }
 
-pub(crate) fn resolve_input_qparam_from_meta(meta: &NodeMeta) -> Option<ResolvedFoldQdqQParam> {
+fn resolve_input_qparam_from_meta(meta: &NodeMeta) -> Option<ResolvedFoldQdqQParam> {
     Some(ResolvedFoldQdqQParam {
         qparam: meta.input_qparam()?.clone(),
         source: FoldQdqQParamSource::InputNodeMeta,
     })
 }
 
-pub(crate) fn resolve_output_qparam_from_meta(meta: &NodeMeta) -> Option<ResolvedFoldQdqQParam> {
+fn resolve_output_qparam_from_meta(meta: &NodeMeta) -> Option<ResolvedFoldQdqQParam> {
     Some(ResolvedFoldQdqQParam {
         qparam: meta.output_qparam()?.clone(),
         source: FoldQdqQParamSource::OutputNodeMeta,
     })
 }
 
-pub(crate) fn resolve_qparam_from_meta(meta: &NodeMeta) -> Option<ResolvedFoldQdqQParam> {
+fn resolve_qparam_from_meta(meta: &NodeMeta) -> Option<ResolvedFoldQdqQParam> {
     resolve_output_qparam_from_meta(meta).or_else(|| resolve_input_qparam_from_meta(meta))
 }
 
-pub(crate) fn resolve_qparam_from_node_meta(node: &IrNode) -> Option<ResolvedFoldQdqQParam> {
+fn resolve_qparam_from_node_meta(node: &IrNode) -> Option<ResolvedFoldQdqQParam> {
     resolve_qparam_from_meta(&node.meta)
 }
 
-pub(crate) fn resolve_qparam_from_q_or_dq(
-    graph: &IrGraph,
-    node: &IrNode,
-) -> Option<ResolvedFoldQdqQParam> {
+fn resolve_qparam_from_q_or_dq(graph: &IrGraph, node: &IrNode) -> Option<ResolvedFoldQdqQParam> {
     let mut tensor_lookup = |id| {
         graph
             .node(id)
@@ -80,10 +77,7 @@ pub(crate) fn resolve_qparam_from_q_or_dq(
     resolve_qparam_from_q_or_dq_args(&node.target, &node.args, &mut tensor_lookup)
 }
 
-pub(crate) fn resolve_qparam_from_arg(
-    graph: &IrGraph,
-    arg: &IrArg,
-) -> Option<ResolvedFoldQdqQParam> {
+fn resolve_qparam_from_arg(graph: &IrGraph, arg: &IrArg) -> Option<ResolvedFoldQdqQParam> {
     let IrArg::Node(id) = arg else {
         return None;
     };
@@ -91,7 +85,7 @@ pub(crate) fn resolve_qparam_from_arg(
     resolve_qparam_from_q_or_dq(graph, node).or_else(|| resolve_qparam_from_node_meta(node))
 }
 
-pub(crate) fn resolve_input_qparams_for_foldable_node(
+fn resolve_input_qparams_for_foldable_node(
     graph: &IrGraph,
     node: &IrNode,
 ) -> Vec<ResolvedFoldQdqInput> {
@@ -149,7 +143,7 @@ fn resolve_input_qparam_for_arg(
     }
 }
 
-pub(crate) fn resolve_qparam_from_q_or_dq_args<'a, F>(
+fn resolve_qparam_from_q_or_dq_args<'a, F>(
     target: &str,
     args: &[IrArg],
     tensor_lookup: &mut F,
@@ -358,7 +352,7 @@ fn dtype_to_torch_str(dtype: DType) -> String {
 pub struct IrFoldQdqPass;
 
 impl IrFoldQdqPass {
-    pub(crate) fn candidate_node_ids(&self, graph: &IrGraph) -> Vec<usize> {
+    fn candidate_node_ids(&self, graph: &IrGraph) -> Vec<usize> {
         graph
             .live_node_ids()
             .into_iter()

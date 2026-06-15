@@ -63,6 +63,43 @@ Future slices should record:
 - Exact tests run.
 - Whether any LOC increase is deliberate setup for a later net deletion.
 
+Corrected line-count baseline:
+
+```text
+2026-06-15
+tracked Rust under src/: 35,994 lines
+rough production excluding explicit test files and #[cfg(test)] blocks: 30,324 lines
+rough tests/test helpers: 5,670 lines
+commands:
+  git ls-files '*.rs' | xargs wc -l
+  python parser that skips explicit test files and #[cfg(test)] mod tests blocks
+note: the earlier 27.5K measurement came from a shallow glob that missed deeper modules such as src/serialize/visitors/**; it was not a production-only count
+```
+
+Find-dead-weight audit checkpoint:
+
+```text
+2026-06-15
+Audited: fx_decompose_ops_ir.rs, fx_ir.rs, serialize/visitors/tensor_ops.rs,
+  serialize/visitors/shape_utils.rs, fx_fold_qdq_ir.rs
+Findings:
+  - no obvious compiled-but-unreferenced production functions in the five-file set
+  - fx_decompose_ops_ir.rs, fx_ir.rs, and fx_fold_qdq_ir.rs look large partly because they carry substantial inline #[cfg(test)] modules
+  - serialize/visitors/tensor_ops.rs has debug-cat instrumentation behind config, not dead code
+  - serialize/visitors/shape_utils.rs is dense but most helpers are active shape grammar
+  - fx_fold_qdq_ir.rs exposed a crate-visible qparam-resolution mini-API that was only used internally
+Action:
+  - narrowed fx_fold_qdq_ir.rs qparam-resolution types/helpers and candidate-node query to private module scope
+Movement:
+  - tracked Rust under src/: 35,994 -> 35,988 (-6)
+Validation:
+  - focused mean/sum/cumsum smoke after Metadata/TensorFacts second pass: 116 passed
+  - cargo fmt --check
+  - cargo check --lib
+  - cargo test --lib fx_fold_qdq_ir::tests: 8 passed
+  - cargo test --lib: 147 passed
+```
+
 Slice log:
 
 ```text
