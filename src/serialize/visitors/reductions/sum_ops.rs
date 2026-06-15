@@ -227,11 +227,7 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitRe
             let raw_axes: Vec<i32> = spec.axes.iter().map(|axis| axis.raw_dim).collect();
             if let Some(perms) = reduction_pre_reshape_perms(graph, input_node, node, &raw_axes) {
                 let transpose_name = format!("{}_layout", node.name);
-                let transpose_shape: Vec<i32> = perms
-                    .iter()
-                    .filter_map(|&axis| current_shape.get(axis as usize).copied())
-                    .collect();
-                if transpose_shape.len() == current_shape.len() {
+                if let Some(transpose_shape) = permute_shape(&current_shape, &perms) {
                     result.push_output_op(
                         TosaTensor::new(&transpose_name, transpose_shape, base_dtype),
                         Op::Transpose,

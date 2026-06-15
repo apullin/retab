@@ -27,7 +27,7 @@ mod tensor_ops;
 
 pub use emitter::*;
 
-use super::tensor_layout::apply_tosa_dim_order;
+use super::tensor_layout::{apply_tosa_dim_order, permute_shape};
 use super::tosa_generated::{
     AbsAttribute, AddAttribute, ArithmeticRightShiftAttribute, Attribute, AvgPool2dAttribute,
     BitwiseAndAttribute, BitwiseNotAttribute, BitwiseOrAttribute, BitwiseXorAttribute,

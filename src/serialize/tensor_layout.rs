@@ -45,18 +45,7 @@ pub(crate) fn apply_tosa_dim_order(node: &Node, shape: Vec<i32>) -> Vec<i32> {
     let Some(order) = node.meta.tosa_dim_order.as_ref() else {
         return shape;
     };
-    if order.len() != shape.len() {
-        return shape;
-    }
-    let reordered: Vec<i32> = order
-        .iter()
-        .filter_map(|&src_idx| shape.get(src_idx as usize).copied())
-        .collect();
-    if reordered.len() == shape.len() {
-        reordered
-    } else {
-        shape
-    }
+    permute_shape_u8(&shape, order).unwrap_or(shape)
 }
 
 pub(super) fn raw_i32_shape(node: &Node) -> Vec<i32> {
@@ -107,13 +96,29 @@ pub(super) fn infer_shape_permutation(actual_shape: &[i32], raw_shape: &[i32]) -
 }
 
 pub(super) fn permute_shape(shape: &[i32], perms: &[i32]) -> Option<Vec<i32>> {
-    if shape.len() != perms.len() {
+    permute_shape_by_order(shape, perms)
+}
+
+pub(super) fn permute_shape_u8(shape: &[i32], order: &[u8]) -> Option<Vec<i32>> {
+    permute_shape_by_order(shape, order)
+}
+
+fn permute_i64_shape_u8(shape: &[i64], order: &[u8]) -> Option<Vec<i64>> {
+    permute_shape_by_order(shape, order)
+}
+
+fn permute_shape_by_order<T, I>(shape: &[T], order: &[I]) -> Option<Vec<T>>
+where
+    T: Copy,
+    I: Copy + TryInto<usize>,
+{
+    if shape.len() != order.len() {
         return None;
     }
 
-    perms
+    order
         .iter()
-        .map(|&idx| shape.get(idx as usize).copied())
+        .map(|&idx| idx.try_into().ok().and_then(|idx| shape.get(idx).copied()))
         .collect()
 }
 
@@ -187,13 +192,9 @@ fn permute_tensor_by_order(
         return (data.to_vec(), shape.to_vec());
     }
 
-    let new_shape: Vec<i64> = order
-        .iter()
-        .filter_map(|&axis| shape.get(axis as usize).copied())
-        .collect();
-    if new_shape.len() != rank {
+    let Some(new_shape) = permute_i64_shape_u8(shape, order) else {
         return (data.to_vec(), shape.to_vec());
-    }
+    };
 
     let mut input_strides = vec![1usize; rank];
     for i in (0..rank.saturating_sub(1)).rev() {

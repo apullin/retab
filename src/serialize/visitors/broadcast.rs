@@ -211,19 +211,7 @@ pub(super) fn broadcast_shape_for_binary_inputs(
     let mut padded_raw = vec![1; larger_raw.len().saturating_sub(smaller_raw.len())];
     padded_raw.extend_from_slice(smaller_raw);
 
-    if let Some(order) = layout_node.meta.tosa_dim_order.as_ref() {
-        if order.len() == padded_raw.len() {
-            let reordered: Vec<i32> = order
-                .iter()
-                .filter_map(|&idx| padded_raw.get(idx as usize).copied())
-                .collect();
-            if reordered.len() == padded_raw.len() {
-                return reordered;
-            }
-        }
-    }
-
-    padded_raw
+    apply_tosa_dim_order(layout_node, padded_raw)
 }
 
 /// A flat reshape into the reordered target only preserves data when the

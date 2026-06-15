@@ -218,11 +218,7 @@ pub(super) fn transposed_tensor_shape(
         return None;
     }
 
-    let output_shape: Vec<i32> = perms
-        .iter()
-        .filter_map(|&idx| input_shape.get(idx as usize).copied())
-        .collect();
-    (output_shape.len() == input_shape.len()).then_some(output_shape)
+    permute_shape(&input_shape, &perms)
 }
 
 fn sliced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {

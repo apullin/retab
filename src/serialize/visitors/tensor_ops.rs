@@ -654,11 +654,10 @@ fn maybe_insert_transpose(
             .iter()
             .enumerate()
             .any(|(idx, &dim)| dim as usize != idx);
-        let transposed_shape: Vec<i32> = perms
-            .iter()
-            .filter_map(|&idx| padded_input_shape.get(idx as usize).copied())
-            .collect();
-        if is_non_identity && transposed_shape.len() == padded_input_shape.len() {
+        if is_non_identity {
+            let Some(transposed_shape) = permute_shape(padded_input_shape, &perms) else {
+                return (input_name, padded_input_shape.to_vec(), multiples);
+            };
             let transposed_name = format!("{}_input_layout", node.name);
             result.push_output_op(
                 make_empty_tensor(transposed_name.clone(), transposed_shape.clone(), dtype),
@@ -668,10 +667,7 @@ fn maybe_insert_transpose(
                 }),
                 vec![input_name],
             );
-            multiples = perms
-                .iter()
-                .filter_map(|&idx| multiples.get(idx as usize).copied())
-                .collect();
+            multiples = permute_shape(&multiples, &perms).unwrap_or(multiples);
             return (transposed_name, transposed_shape, multiples);
         }
     }

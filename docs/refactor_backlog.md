@@ -1683,6 +1683,26 @@ Note: Full Rust tests passed `144 passed`; focused Python smoke passed
 `392 passed, 8 xfailed`. This is a production serializer cleanup: layout
 permutation now uses the common tensor permutation grammar instead of separate
 loop bodies for each weight kind.
+
+2026-06-14, serializer checked shape-permutation helper slice
+Rust LOC: 35,691 -> 35,668
+Movement: -23 Rust LOC
+Deleted: repeated serializer `filter_map` shape-permutation blocks around
+dim-order application, binary broadcast layout reshapes, transpose shape
+inference, tile input-layout insertion, and sum post-reduction layout
+normalization
+Added: shared checked shape-permutation helper backing both `i32` TOSA perms
+and `u8` dim-order metadata
+Validation: `cargo fmt`; `cargo check --lib`;
+`cargo test --lib serialize::tensor_layout::tests`;
+`cargo test --lib serialize::visitors::shape_utils::tests`;
+`cargo test --lib serialize::visitors::broadcast::tests`;
+`cargo test --lib serialize::visitors::op_utils::tests`; `cargo test --lib`;
+`maturin develop --release`; focused Python smoke via `/tmp/et.sh` over
+conv2d, depthwise_conv, conv3d, and transpose_conv2d
+Note: Full Rust tests passed `144 passed`; focused Python smoke passed
+`392 passed, 8 xfailed`. Remaining local shape permutations are either IR-side
+logic or axis-list calculations, not the serializer dim-order contract.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar
