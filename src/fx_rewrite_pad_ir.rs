@@ -11,27 +11,24 @@
 
 #[cfg(test)]
 use crate::fx_ir::NodeMeta;
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, TensorMetaStamp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, IrRewriteCursor, NodeId, TensorMetaStamp};
 use crate::fx_target::is_pad_target;
 use crate::runner_logging::log_line;
 
 #[allow(clippy::too_many_arguments)]
 fn add_slice(
-    graph: &mut IrGraph,
-    id: NodeId,
+    cursor: &mut IrRewriteCursor<'_>,
     meta: &TensorMetaStamp<'_>,
     name: String,
     x_id: NodeId,
     x_shape: &[i64],
     dim: usize,
     idx: i64,
-    prev: &mut Option<NodeId>,
 ) -> NodeId {
     let mut out_shape = x_shape.to_vec();
     out_shape[dim] = 1;
     // slice_copy.Tensor(x, dim, idx, idx+1) — width-1 slice keeping the dim.
-    let n = graph.add_anchored_slice_copy(
-        id,
+    cursor.slice_copy(
         name,
         x_id,
         dim as i64,
@@ -39,19 +36,13 @@ fn add_slice(
         idx + 1,
         None,
         meta.preserve_qparams(out_shape),
-    );
-    if let Some(p) = *prev {
-        graph.anchor_after(n, p);
-    }
-    *prev = Some(n);
-    n
+    )
 }
 
 /// Pad `x` along `dim` by (left, right) per `mode`; returns (new node, new shape).
 #[allow(clippy::too_many_arguments)]
 fn pad_along_dim(
-    graph: &mut IrGraph,
-    id: NodeId,
+    cursor: &mut IrRewriteCursor<'_>,
     meta: &TensorMetaStamp<'_>,
     name_prefix: &str,
     counter: &mut usize,
@@ -61,7 +52,6 @@ fn pad_along_dim(
     left: i64,
     right: i64,
     mode: &str,
-    prev: &mut Option<NodeId>,
 ) -> (NodeId, Vec<i64>) {
     if left == 0 && right == 0 {
         return (x_id, x_shape.to_vec());
@@ -76,15 +66,13 @@ fn pad_along_dim(
             _ => left - i, // reflect (mode validated by caller)
         };
         let s = add_slice(
-            graph,
-            id,
+            cursor,
             meta,
             format!("{}_slice{}", name_prefix, *counter),
             x_id,
             x_shape,
             dim,
             idx,
-            prev,
         );
         *counter += 1;
         members.push(IrArg::Node(s));
@@ -97,15 +85,13 @@ fn pad_along_dim(
             _ => size - 2 - i, // reflect (mode validated by caller)
         };
         let s = add_slice(
-            graph,
-            id,
+            cursor,
             meta,
             format!("{}_slice{}", name_prefix, *counter),
             x_id,
             x_shape,
             dim,
             idx,
-            prev,
         );
         *counter += 1;
         members.push(IrArg::Node(s));
@@ -113,18 +99,13 @@ fn pad_along_dim(
 
     let mut out_shape = x_shape.to_vec();
     out_shape[dim] = size + left + right;
-    let cat = graph.add_anchored_call_function(
-        id,
+    let cat = cursor.call_function(
         format!("{}_cat{}", name_prefix, *counter),
         "aten.cat.default",
         vec![IrArg::List(members), IrArg::Int(dim as i64)],
         meta.preserve_qparams(out_shape.clone()),
     );
     *counter += 1;
-    if let Some(p) = *prev {
-        graph.anchor_after(cat, p);
-    }
-    *prev = Some(cat);
     (cat, out_shape)
 }
 
@@ -174,15 +155,14 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let mut cur_id = input_id;
     let mut cur_shape = input_shape;
-    let mut prev: Option<NodeId> = None;
     let mut counter: usize = 0;
+    let mut cursor = graph.rewrite_cursor(id);
     // F.pad pad pairs run innermost dim outward.
     for (pair_idx, chunk) in pad.chunks(2).enumerate() {
         let (left, right) = (chunk[0], chunk[1]);
         let dim = rank - 1 - pair_idx;
         let (nid, nshape) = pad_along_dim(
-            graph,
-            id,
+            &mut cursor,
             &meta,
             &node_name,
             &mut counter,
@@ -192,7 +172,6 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
             left,
             right,
             &mode,
-            &mut prev,
         );
         cur_id = nid;
         cur_shape = nshape;
@@ -201,7 +180,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     if cur_id == input_id {
         return false; // nothing emitted (all-zero pad)
     }
-    graph.replace_and_erase(id, cur_id);
+    cursor.replace_anchor_with(cur_id);
     true
 }
 

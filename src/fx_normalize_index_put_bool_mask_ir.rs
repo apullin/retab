@@ -9,21 +9,11 @@
 //!   out  = where(mask, data, destination)
 //! Runs before IrRewriteIndexPut so the general SCATTER path only sees int indices.
 
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId};
 #[cfg(test)]
-use crate::fx_ir::NodeMeta;
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp, TensorMetaStamp};
+use crate::fx_ir::{NodeMeta, NodeOp};
 use crate::fx_target::is_index_put_family_target;
 use crate::runner_logging::log_line;
-
-fn view_copy(
-    graph: &mut IrGraph,
-    name: String,
-    meta: &TensorMetaStamp<'_>,
-    input_id: NodeId,
-    shape: &[i64],
-) -> NodeId {
-    graph.add_view_copy(name, input_id, shape, meta.preserve_qparams(shape.to_vec()))
-}
 
 fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     let node = &graph.nodes[id];
@@ -91,7 +81,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     let data_meta = orig_meta.tensor_stamp(&data_dtype);
     let dest_rank = dest_shape.len();
 
-    let mut prev: Option<NodeId> = None;
+    let mut cursor = graph.rewrite_cursor(id);
 
     // Place the mask at its index position with singleton dims elsewhere so it
     // broadcasts against the destination (mask covers dims `mask_pos..`).
@@ -105,43 +95,31 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
         if target == mask_shape {
             mask
         } else {
-            let v = view_copy(
-                graph,
+            cursor.view_copy(
                 format!("{}_mask_reshape", node_name),
-                &mask_meta,
                 mask,
                 &target,
-            );
-            graph.anchor_to(v, id);
-            prev = Some(v);
-            v
+                mask_meta.preserve_qparams(target.clone()),
+            )
         }
     };
 
     // Reshape scalar data to all-ones so it broadcasts to any destination shape.
     let data_node = if data_shape.len() != dest_rank {
         let ones = vec![1_i64; dest_rank];
-        let v = view_copy(
-            graph,
+        cursor.view_copy(
             format!("{}_data_reshape", node_name),
-            &data_meta,
             data,
             &ones,
-        );
-        graph.anchor_to(v, id);
-        if let Some(p) = prev {
-            graph.anchor_after(v, p);
-        }
-        prev = Some(v);
-        v
+            data_meta.preserve_qparams(ones.clone()),
+        )
     } else {
         data
     };
 
-    let result = graph.add_node(
-        NodeOp::CallFunction,
+    let result = cursor.call_function(
         format!("{}_where", node_name),
-        "aten.where.self".to_string(),
+        "aten.where.self",
         vec![
             IrArg::Node(mask_node),
             IrArg::Node(data_node),
@@ -149,10 +127,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
         ],
         orig_meta,
     );
-    if let Some(p) = prev {
-        graph.anchor_after(result, p);
-    }
-    graph.replace_and_erase(id, result);
+    cursor.replace_anchor_with(result);
     true
 }
 

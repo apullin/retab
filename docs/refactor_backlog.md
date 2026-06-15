@@ -2048,7 +2048,9 @@ shape-only and slice constant-chain planning through `fx_constant_tensor_eval`
 instead of wrapping first-constant-input lookup locally. Sum reduction-chain
 insertion and pixel-shuffle view/permute decomposition now use existing
 call-function builder helpers instead of open-coding `NodeOp::CallFunction`
-construction plus manual anchoring/metadata cloning.
+construction plus manual anchoring/metadata cloning. Freshly emitted rewrite
+chains now use `IrRewriteCursor`, which owns first-node anchoring, subsequent
+after-anchoring, and final replacement for chain-shaped decompositions.
 
 2026-06-14, call-function builder reuse slice
 
@@ -2064,6 +2066,33 @@ focused Python smoke via `/tmp/et.sh` over sum and pixel_shuffling.
 The slice-copy builder slice later removed raw production
 `aten.slice_copy.Tensor` construction from decomposition and rewrite passes,
 leaving target strings in tests, target grammar, and the builder itself.
+
+2026-06-14, rewrite cursor chain grammar slice
+
+Rust LOC: 36,140
+
+Movement: +159 Rust LOC from the previous committed checkpoint.
+
+Deleted: local `prev`/manual anchor-threading from conv1d unsqueeze,
+non-constant pad rewrite, bool-mask index_put normalization, None-index
+normalization, size-adjust slice insertion, and unfold_copy decomposition.
+
+Added: `IrRewriteCursor`, `IrGraph::rewrite_cursor`,
+`IrGraph::rewrite_cursor_after`, cursor append operations for call functions,
+kwargs call functions, dtype casts, view/permute/slice copies, arange, full-int
+constants, and three cursor invariant tests.
+
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib` with 144
+passed; rebuild via `/tmp/et.sh` with `maturin develop --release` printing
+`Installed retab-0.1.0`; expanded focused Python smoke over addmm, adaptive
+avg-pool, as-strided-copy, avg-pool, cond, conv1d, conv2d, gather, group-norm,
+index-put, index-select, index-tensor, layer-norm, linear, max-pool,
+pixel-shuffling, repeat, select, select-scatter, slice, slice-scatter, split,
+sum, unfold, view, where, and while: 1003 passed, 21 xfailed.
+
+Boundary: cursor is for newly emitted chains. One-off anchors that deliberately
+place a node after an existing producer or at a control-flow boundary should
+stay explicit unless a future helper names that exact semantic placement.
 
 Remaining work should keep adding small builder/query operations only when
 they replace repeated rewrite structure across several passes.

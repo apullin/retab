@@ -8,7 +8,7 @@
 //! Trailing None indices need no permute — they are simply dropped (implicit).
 //! Runs before IrRewriteIndexPut, which then handles the None-free index_put.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, IrRewriteCursor, NodeId, NodeMeta};
 use crate::fx_target::is_index_put_default_target;
 use crate::runner_logging::log_line;
 
@@ -23,23 +23,17 @@ fn is_identity(order: &[usize]) -> bool {
 /// Create a permute_copy node; returns (id, permuted shape).
 #[allow(clippy::too_many_arguments)]
 fn add_permute(
-    graph: &mut IrGraph,
-    anchor: NodeId,
+    cursor: &mut IrRewriteCursor<'_>,
     input_id: NodeId,
     input_shape: &[i64],
     input_meta: &NodeMeta,
     order: &[usize],
     name: String,
-    prev: &mut Option<NodeId>,
 ) -> (NodeId, Vec<i64>) {
     let out_shape = permute_shape(input_shape, order);
     let meta = input_meta.cloned_with_same_dtype_or_float32(out_shape.clone());
     let perm: Vec<i64> = order.iter().map(|&d| d as i64).collect();
-    let n = graph.add_anchored_permute_copy(anchor, name, input_id, &perm, meta);
-    if let Some(p) = *prev {
-        graph.anchor_after(n, p);
-    }
-    *prev = Some(n);
+    let n = cursor.permute_copy(name, input_id, &perm, meta);
     (n, out_shape)
 }
 
@@ -122,19 +116,17 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     }
     let needs_dest_permute = !is_identity(&destination_dim_order);
 
-    let mut prev: Option<NodeId> = None;
+    let mut cursor = graph.rewrite_cursor(id);
 
     // permute destination
     let (dest_use, _dest_use_shape) = if needs_dest_permute {
         add_permute(
-            graph,
-            id,
+            &mut cursor,
             dest_id,
             &dest_shape,
             &dest_meta,
             &destination_dim_order,
             format!("{}_destperm", name),
-            &mut prev,
         )
     } else {
         (dest_id, dest_shape.clone())
@@ -149,30 +141,18 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
             let mut padded = vec![1i64; aligned_rank - data_shape.len()];
             padded.extend_from_slice(&data_shape);
             let meta = data_meta.cloned_with_same_dtype_or_float32(padded.clone());
-            let n = graph.add_anchored_view_copy(
-                id,
-                format!("{}_datareshape", name),
-                data_id,
-                &padded,
-                meta,
-            );
-            if let Some(p) = prev {
-                graph.anchor_after(n, p);
-            }
-            prev = Some(n);
+            let n = cursor.view_copy(format!("{}_datareshape", name), data_id, &padded, meta);
             (n, padded)
         } else {
             (data_id, data_shape.clone())
         };
         let (p, _) = add_permute(
-            graph,
-            id,
+            &mut cursor,
             reshaped_id,
             &reshaped_shape,
             &data_meta,
             &ddo,
             format!("{}_dataperm", name),
-            &mut prev,
         );
         p
     } else {
@@ -199,17 +179,12 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     } else {
         orig_meta.clone()
     };
-    let new_put = graph.add_anchored_call_function(
-        id,
+    let new_put = cursor.call_function(
         format!("{}_norm", name),
         "aten.index_put.default",
         new_args,
         put_meta,
     );
-    if let Some(p) = prev {
-        graph.anchor_after(new_put, p);
-    }
-    prev = Some(new_put);
 
     // permute back
     let final_id = if needs_dest_permute {
@@ -218,21 +193,19 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
             inv[orig_dim] = new_dim;
         }
         let (p, _) = add_permute(
-            graph,
-            id,
+            &mut cursor,
             new_put,
             &put_shape,
             &orig_meta,
             &inv,
             format!("{}_invperm", name),
-            &mut prev,
         );
         p
     } else {
         new_put
     };
 
-    graph.replace_and_erase(id, final_id);
+    cursor.replace_anchor_with(final_id);
     true
 }
 

@@ -6,7 +6,9 @@
 //!   convolution(... stride=[s,1], pad=[p,0], dilation=[d,1])
 //!   view_copy(output[..., W_out, 1] -> [..., W_out])
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta};
+use crate::fx_ir::{
+    i64_list_arg as i64_list, IrArg, IrGraph, IrPass, IrRewriteCursor, NodeId, NodeMeta,
+};
 use crate::fx_target::{is_aten_convolution_default_target, is_conv1d_default_target};
 use crate::runner_logging::log_line;
 
@@ -31,7 +33,7 @@ fn is_conv1d(graph: &IrGraph, id: NodeId) -> bool {
 
 /// Build a view_copy node that reshapes `input_id` to `new_shape`.
 fn add_view_copy(
-    graph: &mut IrGraph,
+    cursor: &mut IrRewriteCursor<'_>,
     name_prefix: &str,
     suffix: &str,
     base_meta: &NodeMeta,
@@ -41,7 +43,7 @@ fn add_view_copy(
     let meta = base_meta
         .tensor_stamp_same_dtype_or_float32()
         .empty_qparam_maps(new_shape.to_vec());
-    graph.add_view_copy(
+    cursor.view_copy(
         format!("{}_{}", name_prefix, suffix),
         input_id,
         new_shape,
@@ -151,19 +153,6 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
         None => return false,
     };
 
-    // Unsqueeze input: [..., W] -> [..., W, 1]
-    let mut x_4d = x_shape.clone();
-    x_4d.push(1);
-    let x_unsqueezed = add_view_copy(graph, &node_name, "input_unsqueeze", &x_meta, x_id, &x_4d);
-    graph.anchor_to(x_unsqueezed, id);
-
-    // Unsqueeze weight: [..., KW] -> [..., KW, 1]
-    let mut w_4d = w_shape.clone();
-    w_4d.push(1);
-    let w_unsqueezed = add_view_copy(graph, &node_name, "weight_unsqueeze", &w_meta, w_id, &w_4d);
-    graph.anchor_to(w_unsqueezed, id);
-    graph.anchor_after(w_unsqueezed, x_unsqueezed);
-
     // Build 2D conv parameters: append trailing dimension.
     let mut stride_2d = stride;
     stride_2d.push(1);
@@ -186,9 +175,33 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
     conv2d_shape.push(1);
 
     let conv2d_meta = base_meta.cloned_with_same_dtype_or_float32(conv2d_shape.to_vec());
+    let mut cursor = graph.rewrite_cursor(id);
 
-    let conv2d = graph.add_anchored_call_function(
-        id,
+    // Unsqueeze input: [..., W] -> [..., W, 1]
+    let mut x_4d = x_shape.clone();
+    x_4d.push(1);
+    let x_unsqueezed = add_view_copy(
+        &mut cursor,
+        &node_name,
+        "input_unsqueeze",
+        &x_meta,
+        x_id,
+        &x_4d,
+    );
+
+    // Unsqueeze weight: [..., KW] -> [..., KW, 1]
+    let mut w_4d = w_shape.clone();
+    w_4d.push(1);
+    let w_unsqueezed = add_view_copy(
+        &mut cursor,
+        &node_name,
+        "weight_unsqueeze",
+        &w_meta,
+        w_id,
+        &w_4d,
+    );
+
+    let conv2d = cursor.call_function(
         format!("{}_conv2d", node_name),
         "aten.convolution.default",
         vec![
@@ -204,11 +217,10 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
         ],
         conv2d_meta,
     );
-    graph.anchor_after(conv2d, w_unsqueezed);
 
     // Squeeze output: [..., W_out, 1] -> [..., W_out]
     let squeezed = add_view_copy(
-        graph,
+        &mut cursor,
         &node_name,
         "output_squeeze",
         &base_meta,
@@ -216,8 +228,7 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
         &orig_out_shape,
     );
 
-    graph.anchor_after(squeezed, conv2d);
-    graph.replace_and_erase(id, squeezed);
+    cursor.replace_anchor_with(squeezed);
     true
 }
 

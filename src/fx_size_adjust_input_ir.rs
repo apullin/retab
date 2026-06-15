@@ -124,8 +124,16 @@ impl IrPass for IrSizeAdjustInputPass {
                 .and_then(|m| m.get(&0))
                 .cloned();
             let mut current = input_id;
+            let slice_base_meta = graph.nodes[input_id]
+                .meta
+                .cloned_with_same_dtype_or_float32(input_shape.clone());
+            let mut cursor = graph.rewrite_cursor_after(id, input_id);
             for (dim, start, end) in &slices {
-                let slice_id = graph.add_slice_copy(
+                let mut meta = slice_base_meta.clone();
+                if let Some(ref q) = consumer_input_q {
+                    meta.set_both_qparams(q.clone());
+                }
+                let slice_id = cursor.slice_copy(
                     format!("{}_adj_d{}", node_name, dim),
                     current,
                     *dim,
@@ -135,16 +143,11 @@ impl IrPass for IrSizeAdjustInputPass {
                     // Match the FX pass: copy the original input metadata onto
                     // the slice node and let the final fake-tensor refresh
                     // reconcile the exact sliced shape.
-                    graph.nodes[input_id]
-                        .meta
-                        .cloned_with_same_dtype_or_float32(input_shape.clone()),
+                    meta,
                 );
-                graph.anchor_after(slice_id, current);
-                if let Some(ref q) = consumer_input_q {
-                    graph.nodes[slice_id].meta.set_both_qparams(q.clone());
-                }
                 current = slice_id;
             }
+            drop(cursor);
 
             // Update conv/pool's first arg to point to the sliced input
             graph.set_arg(id, 0, IrArg::Node(current));

@@ -169,8 +169,14 @@ replace_and_erase
 erase
 ```
 
-Many passes repeat these operations in the same patterns. A future
-`IrBuilder` or `RewriteCursor` should centralize common rewrite shapes.
+For emitted chains, use `IrGraph::rewrite_cursor(anchor)` or
+`IrGraph::rewrite_cursor_after(anchor, previous)`. `IrRewriteCursor` owns the
+"first node anchors to the rewrite site, later nodes anchor after the previous
+emitted node" grammar and provides append operations for call functions,
+view/permute/slice copies, dtype casts, arange, and full-int constants.
+
+Keep one-off anchors explicit when they describe a specific producer or
+control-flow boundary placement rather than a freshly emitted rewrite chain.
 
 ## Pass Pipelines
 

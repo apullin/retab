@@ -71,21 +71,20 @@ impl IrPass for IrDecomposeUnfoldPass {
             let index_meta = orig_meta.tensor_stamp("torch.int32");
             let bool_meta = orig_meta.tensor_stamp("torch.bool");
             let mut values_in = x_id;
+            let work_dtype = work_meta_seed.dtype().to_string();
+            let work_meta = work_meta_seed;
+            let mut cursor = graph.rewrite_cursor(id);
 
             if needs_bool_cast {
-                let cast_meta = work_meta_seed.drop_qparams(input_shape.clone());
-                let cast_id = graph.add_anchored_dtype_cast(
-                    id,
+                let cast_meta = work_meta.drop_qparams(input_shape.clone());
+                let cast_id = cursor.dtype_cast(
                     format!("{}_bool_to_int8", name),
                     x_id,
-                    work_meta_seed.dtype(),
+                    &work_dtype,
                     cast_meta,
                 );
                 values_in = cast_id;
             }
-
-            let values_base_meta = graph.nodes[values_in].meta.clone();
-            let work_meta = values_base_meta.tensor_stamp(work_meta_seed.dtype());
 
             // Flatten x to (P, K, Q)
             let values_meta = if needs_bool_cast {
@@ -93,29 +92,15 @@ impl IrPass for IrDecomposeUnfoldPass {
             } else {
                 work_meta.preserve_qparams(vec![p, k, q])
             };
-            let values = graph.add_anchored_view_copy(
-                id,
-                format!("{}_flat", name),
-                values_in,
-                &[p, k, q],
-                values_meta,
-            );
+            let values =
+                cursor.view_copy(format!("{}_flat", name), values_in, &[p, k, q], values_meta);
 
             // Build sliding-window index: arange(0,U)*step + arange(0,size) → (U*size,)
             let idx_u_meta = index_meta.drop_qparams(vec![u]);
-            let idx_u = graph.add_anchored_arange(
-                id,
-                format!("{}_au", name),
-                0,
-                u,
-                1,
-                "torch.int32",
-                idx_u_meta,
-            );
+            let idx_u = cursor.arange(format!("{}_au", name), 0, u, 1, "torch.int32", idx_u_meta);
 
             let step_meta = index_meta.drop_qparams(vec![1]);
-            let step_t = graph.add_anchored_full_int(
-                id,
+            let step_t = cursor.full_int(
                 format!("{}_step", name),
                 &[1],
                 step,
@@ -124,8 +109,7 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
 
             let idx_scaled_meta = index_meta.drop_qparams(vec![u]);
-            let idx_scaled = graph.add_anchored_call_function(
-                id,
+            let idx_scaled = cursor.call_function(
                 format!("{}_us", name),
                 "aten.mul.Tensor".to_string(),
                 vec![IrArg::Node(idx_u), IrArg::Node(step_t)],
@@ -133,8 +117,7 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
 
             let idx_u2d_meta = index_meta.drop_qparams(vec![u, 1]);
-            let idx_u2d = graph.add_anchored_call_function(
-                id,
+            let idx_u2d = cursor.call_function(
                 format!("{}_u2d", name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(idx_scaled), IrArg::Int(1)],
@@ -142,8 +125,7 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
 
             let idx_c_meta = index_meta.drop_qparams(vec![size]);
-            let idx_c = graph.add_anchored_arange(
-                id,
+            let idx_c = cursor.arange(
                 format!("{}_ac", name),
                 0,
                 size,
@@ -153,8 +135,7 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
 
             let idx_c2d_meta = index_meta.drop_qparams(vec![1, size]);
-            let idx_c2d = graph.add_anchored_call_function(
-                id,
+            let idx_c2d = cursor.call_function(
                 format!("{}_c2d", name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(idx_c), IrArg::Int(0)],
@@ -162,8 +143,7 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
 
             let idx2d_meta = index_meta.drop_qparams(vec![u, size]);
-            let idx2d = graph.add_anchored_call_function(
-                id,
+            let idx2d = cursor.call_function(
                 format!("{}_i2d", name),
                 "aten.add.Tensor".to_string(),
                 vec![IrArg::Node(idx_u2d), IrArg::Node(idx_c2d)],
@@ -171,12 +151,10 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
 
             let idx1d_meta = index_meta.drop_qparams(vec![uc]);
-            let idx1d =
-                graph.add_anchored_view_copy(id, format!("{}_i1d", name), idx2d, &[uc], idx1d_meta);
+            let idx1d = cursor.view_copy(format!("{}_i1d", name), idx2d, &[uc], idx1d_meta);
 
             let idx_unsq_meta = index_meta.drop_qparams(vec![1, uc]);
-            let idx_unsq = graph.add_anchored_call_function(
-                id,
+            let idx_unsq = cursor.call_function(
                 format!("{}_iu", name),
                 "aten.unsqueeze_copy.default".to_string(),
                 vec![IrArg::Node(idx1d), IrArg::Int(0)],
@@ -184,8 +162,7 @@ impl IrPass for IrDecomposeUnfoldPass {
             );
 
             let idx_exp_meta = index_meta.drop_qparams(vec![p, uc]);
-            let idx_exp = graph.add_anchored_call_function(
-                id,
+            let idx_exp = cursor.call_function(
                 format!("{}_ie", name),
                 "aten.expand_copy.default".to_string(),
                 vec![IrArg::Node(idx_unsq), i64_list(&[p, uc])],
@@ -198,8 +175,7 @@ impl IrPass for IrDecomposeUnfoldPass {
             } else {
                 work_meta.preserve_qparams(vec![p, uc, q])
             };
-            let gathered = graph.add_anchored_call_function(
-                id,
+            let gathered = cursor.call_function(
                 format!("{}_g", name),
                 "backend.tosa.GATHER.default".to_string(),
                 vec![IrArg::Node(values), IrArg::Node(idx_exp)],
@@ -212,13 +188,8 @@ impl IrPass for IrDecomposeUnfoldPass {
             } else {
                 work_meta.preserve_qparams(vec![p, u, size, q])
             };
-            let r4d = graph.add_anchored_view_copy(
-                id,
-                format!("{}_r4", name),
-                gathered,
-                &[p, u, size, q],
-                r4d_meta,
-            );
+            let r4d =
+                cursor.view_copy(format!("{}_r4", name), gathered, &[p, u, size, q], r4d_meta);
 
             // Reshape to (...pre, U, size, ...post)
             let mut full_shape: Vec<i64> = pre.clone();
@@ -230,13 +201,8 @@ impl IrPass for IrDecomposeUnfoldPass {
             } else {
                 work_meta.preserve_qparams(full_shape.clone())
             };
-            let reshaped = graph.add_anchored_view_copy(
-                id,
-                format!("{}_rs", name),
-                r4d,
-                &full_shape,
-                reshaped_meta,
-            );
+            let reshaped =
+                cursor.view_copy(format!("{}_rs", name), r4d, &full_shape, reshaped_meta);
 
             // Permute: move size dim to end
             let pre_len = pre.len() as i64;
@@ -251,35 +217,26 @@ impl IrPass for IrDecomposeUnfoldPass {
             for &p in &perm {
                 perm_shape.push(full_shape[p as usize]);
             }
+            let cast_back_shape = perm_shape.clone();
             let permuted_meta = if needs_bool_cast {
                 work_meta.drop_qparams(perm_shape)
             } else {
                 work_meta.preserve_qparams(perm_shape)
             };
-            let permuted = graph.add_anchored_permute_copy(
-                id,
-                format!("{}_pm", name),
-                reshaped,
-                &perm,
-                permuted_meta,
-            );
+            let permuted =
+                cursor.permute_copy(format!("{}_pm", name), reshaped, &perm, permuted_meta);
 
             if needs_bool_cast {
-                let cast_back_shape = graph.nodes[permuted]
-                    .meta
-                    .val_shape()
-                    .unwrap_or(&[])
-                    .to_vec();
                 let cast_back_meta = bool_meta.drop_qparams(cast_back_shape);
-                graph.replace_with_dtype_cast(
-                    id,
+                let cast_back = cursor.dtype_cast(
                     format!("{}_int8_to_bool", name),
                     permuted,
                     "torch.bool",
                     cast_back_meta,
                 );
+                cursor.replace_anchor_with(cast_back);
             } else {
-                graph.replace_and_erase(id, permuted);
+                cursor.replace_anchor_with(permuted);
             }
             modified = true;
         }

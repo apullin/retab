@@ -1482,6 +1482,160 @@ impl IrNode {
     }
 }
 
+/// Cursor for emitting a topo-sensitive rewrite chain at a single anchor.
+///
+/// The first inserted node is anchored to the original node. Each later node is
+/// anchored after the previous inserted node, so passes do not have to carry
+/// local `prev` state or repeat `anchor_to`/`anchor_after` sequencing.
+pub(crate) struct IrRewriteCursor<'a> {
+    graph: &'a mut IrGraph,
+    anchor: NodeId,
+    previous: Option<NodeId>,
+}
+
+impl IrGraph {
+    pub(crate) fn rewrite_cursor(&mut self, anchor: NodeId) -> IrRewriteCursor<'_> {
+        IrRewriteCursor {
+            graph: self,
+            anchor,
+            previous: None,
+        }
+    }
+
+    pub(crate) fn rewrite_cursor_after(
+        &mut self,
+        anchor: NodeId,
+        previous: NodeId,
+    ) -> IrRewriteCursor<'_> {
+        IrRewriteCursor {
+            graph: self,
+            anchor,
+            previous: Some(previous),
+        }
+    }
+}
+
+impl IrRewriteCursor<'_> {
+    pub(crate) fn append_existing(&mut self, id: NodeId) -> NodeId {
+        if let Some(previous) = self.previous {
+            self.graph.anchor_after(id, previous);
+        } else {
+            self.graph.anchor_to(id, self.anchor);
+        }
+        self.previous = Some(id);
+        id
+    }
+
+    pub(crate) fn call_function(
+        &mut self,
+        name: impl Into<String>,
+        target: impl Into<String>,
+        args: Vec<IrArg>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.graph.add_call_function(name, target, args, meta);
+        self.append_existing(id)
+    }
+
+    pub(crate) fn call_function_with_kwargs(
+        &mut self,
+        name: impl Into<String>,
+        target: impl Into<String>,
+        args: Vec<IrArg>,
+        kwargs: HashMap<String, IrArg>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self
+            .graph
+            .add_call_function_with_kwargs(name, target, args, kwargs, meta);
+        self.append_existing(id)
+    }
+
+    pub(crate) fn dtype_cast(
+        &mut self,
+        name: impl Into<String>,
+        source: NodeId,
+        dtype: impl Into<String>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        self.call_function_with_kwargs(
+            name,
+            "aten._to_copy.default",
+            vec![IrArg::Node(source)],
+            dtype_kwarg(dtype),
+            meta,
+        )
+    }
+
+    pub(crate) fn view_copy(
+        &mut self,
+        name: impl Into<String>,
+        source: NodeId,
+        shape: &[i64],
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.graph.add_view_copy(name, source, shape, meta);
+        self.append_existing(id)
+    }
+
+    pub(crate) fn permute_copy(
+        &mut self,
+        name: impl Into<String>,
+        source: NodeId,
+        perm: &[i64],
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.graph.add_permute_copy(name, source, perm, meta);
+        self.append_existing(id)
+    }
+
+    pub(crate) fn slice_copy(
+        &mut self,
+        name: impl Into<String>,
+        source: NodeId,
+        dim: i64,
+        start: i64,
+        end: i64,
+        step: Option<i64>,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self
+            .graph
+            .add_slice_copy(name, source, dim, start, end, step, meta);
+        self.append_existing(id)
+    }
+
+    pub(crate) fn full_int(
+        &mut self,
+        name: impl Into<String>,
+        shape: &[i64],
+        value: i64,
+        dtype: &str,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.graph.add_full_int(name, shape, value, dtype, meta);
+        self.append_existing(id)
+    }
+
+    pub(crate) fn arange(
+        &mut self,
+        name: impl Into<String>,
+        start: i64,
+        end: i64,
+        step: i64,
+        dtype: &str,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.graph.add_arange(name, start, end, step, dtype, meta);
+        self.append_existing(id)
+    }
+
+    pub(crate) fn replace_anchor_with(self, replacement: NodeId) -> NodeId {
+        self.graph.replace_and_erase(self.anchor, replacement);
+        replacement
+    }
+}
+
 /// Resolve a Python FX arg to an IrArg.
 fn resolve_arg(py_arg: &Bound<'_, PyAny>, name_to_id: &HashMap<String, NodeId>) -> IrArg {
     let py_arg_attrs = attrs(py_arg);
@@ -2331,6 +2485,113 @@ mod tests {
         assert_eq!(users[0], vec![2]);
         assert_eq!(users[1], vec![2]);
         assert!(users[2].is_empty());
+    }
+
+    #[test]
+    fn rewrite_cursor_anchors_first_node_to_anchor_and_later_nodes_after_previous() {
+        let mut graph = IrGraph::empty();
+        let x = graph.add_node(
+            NodeOp::Placeholder,
+            "x".into(),
+            "x".into(),
+            vec![],
+            NodeMeta::tensor([1], "torch.float32"),
+        );
+        let anchor = graph.add_node(
+            NodeOp::CallFunction,
+            "anchor".into(),
+            "aten.neg.default".into(),
+            vec![IrArg::Node(x)],
+            NodeMeta::tensor([1], "torch.float32"),
+        );
+
+        let mut cursor = graph.rewrite_cursor(anchor);
+        let view = cursor.view_copy(
+            "view",
+            x,
+            &[1, 1],
+            NodeMeta::tensor([1, 1], "torch.float32"),
+        );
+        let neg = cursor.call_function(
+            "neg",
+            "aten.neg.default",
+            vec![IrArg::Node(view)],
+            NodeMeta::tensor([1, 1], "torch.float32"),
+        );
+
+        assert_eq!(graph.anchors.get(&view), Some(&anchor));
+        assert_eq!(graph.anchors_after.get(&neg), Some(&view));
+    }
+
+    #[test]
+    fn rewrite_cursor_replace_anchor_rewires_users() {
+        let mut graph = IrGraph::empty();
+        let x = graph.add_node(
+            NodeOp::Placeholder,
+            "x".into(),
+            "x".into(),
+            vec![],
+            NodeMeta::tensor([1], "torch.float32"),
+        );
+        let anchor = graph.add_node(
+            NodeOp::CallFunction,
+            "anchor".into(),
+            "aten.neg.default".into(),
+            vec![IrArg::Node(x)],
+            NodeMeta::tensor([1], "torch.float32"),
+        );
+        let user = graph.add_node(
+            NodeOp::CallFunction,
+            "user".into(),
+            "aten.relu.default".into(),
+            vec![IrArg::Node(anchor)],
+            NodeMeta::tensor([1], "torch.float32"),
+        );
+
+        let mut cursor = graph.rewrite_cursor(anchor);
+        let replacement = cursor.call_function(
+            "replacement",
+            "aten.abs.default",
+            vec![IrArg::Node(x)],
+            NodeMeta::tensor([1], "torch.float32"),
+        );
+        cursor.replace_anchor_with(replacement);
+
+        assert!(!graph.nodes[anchor].alive);
+        assert_eq!(graph.nodes[user].args[0].as_node(), Some(replacement));
+    }
+
+    #[test]
+    fn rewrite_cursor_after_anchors_first_node_after_existing_predecessor() {
+        let mut graph = IrGraph::empty();
+        let x = graph.add_node(
+            NodeOp::Placeholder,
+            "x".into(),
+            "x".into(),
+            vec![],
+            NodeMeta::tensor([2], "torch.float32"),
+        );
+        let anchor = graph.add_node(
+            NodeOp::CallFunction,
+            "anchor".into(),
+            "aten.relu.default".into(),
+            vec![IrArg::Node(x)],
+            NodeMeta::tensor([2], "torch.float32"),
+        );
+
+        let mut cursor = graph.rewrite_cursor_after(anchor, x);
+        let slice = cursor.slice_copy(
+            "slice",
+            x,
+            0,
+            0,
+            1,
+            None,
+            NodeMeta::tensor([1], "torch.float32"),
+        );
+
+        assert_eq!(graph.anchors_after.get(&slice), Some(&x));
+        assert!(!graph.anchors.contains_key(&slice));
     }
 }
 
