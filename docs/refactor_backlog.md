@@ -271,6 +271,18 @@ Note: both slice_scatter branches now share the same grammar. The step-1 path
   is an ordered slice/cat chain, while the step-N path is an ordered
   arange/optional-permute/index_put/optional-unpermute chain.
 
+2026-06-15, IR rewrite cursor slice 11
+Rust LOC: 35,836 -> 35,830
+Movement: -6 Rust LOC
+Deleted/collapsed: manual anchored arange/view/full/eq/unsqueeze/expand/where
+  construction in select_scatter lowering
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib; maturin
+  develop --release; focused Python smoke over select_scatter, select, and
+  index_select: 72 passed
+Note: select_scatter now reads as one seven-step rewrite chain ending in
+  replace_anchor_with, matching the cursor grammar used by slice_scatter and
+  index_put.
+
 Slice log:
 
 ```text

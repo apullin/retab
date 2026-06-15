@@ -56,81 +56,74 @@ impl IrPass for IrDecomposeSelectScatterPass {
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
             let input_meta = graph.nodes[input_id].meta.clone();
+            let src_meta = graph.nodes[src_id].meta.clone();
             let index_meta = orig_meta.tensor_stamp("torch.int32");
             let bool_meta = orig_meta.tensor_stamp("torch.bool");
+            let src_shape = src_meta.val_shape().map(|s| s.to_vec()).unwrap_or_default();
+            let mut unsqueezed_shape = src_shape.clone();
+            unsqueezed_shape.insert(dim_norm, 1);
+            let unsqueeze_meta =
+                src_meta.cloned_with_dtype_of_or_float32(unsqueezed_shape, &input_meta);
+            let expand_meta =
+                src_meta.cloned_with_dtype_of_or_float32(input_shape.clone(), &input_meta);
 
-            // 1. arange(0, dim_size) → shape [dim_size], dtype int32
-            let arange_id = graph.add_anchored_call_function(
-                id,
+            let mut cursor = graph.rewrite_cursor(id);
+
+            // 1. arange(0, dim_size) -> shape [dim_size], dtype int32
+            let arange_id = cursor.arange(
                 format!("{}_arange", node_name),
-                "aten.arange.start_step",
-                vec![IrArg::Int(0), IrArg::Int(dim_size)],
+                0,
+                dim_size,
+                1,
+                "torch.int32",
                 index_meta.preserve_qparams(vec![dim_size]),
             );
 
             // 2. view(arange, [1, ..., dim_size, ..., 1])
             let mut mask_shape = vec![1i64; input_shape.len()];
             mask_shape[dim_norm] = dim_size;
-            let viewed_arange = graph.add_anchored_view_copy(
-                id,
+            let viewed_arange = cursor.view_copy(
                 format!("{}_arange_view", node_name),
                 arange_id,
                 &mask_shape,
                 index_meta.preserve_qparams(mask_shape.clone()),
             );
 
-            // 3. full([1], index, dtype=int32) — scalar index tensor
-            let index_tensor = graph.add_anchored_call_function(
-                id,
+            // 3. full([1], index, dtype=int32) - scalar index tensor
+            let index_tensor = cursor.full_int(
                 format!("{}_index_full", node_name),
-                "aten.full.default",
-                vec![i64_list(&[1]), IrArg::Int(index)],
+                &[1],
+                index,
+                "torch.int32",
                 index_meta.preserve_qparams(vec![1]),
             );
 
-            // 4. eq(viewed_arange, index_tensor) → boolean mask
-            let eq_mask = graph.add_anchored_call_function(
-                id,
+            // 4. eq(viewed_arange, index_tensor) -> boolean mask
+            let eq_mask = cursor.call_function(
                 format!("{}_eq", node_name),
                 "aten.eq.Tensor",
                 vec![IrArg::Node(viewed_arange), IrArg::Node(index_tensor)],
                 bool_meta.preserve_qparams(mask_shape),
             );
 
-            // 5. unsqueeze(src, dim) — restore dimension that select removed
-            let src_shape = graph.nodes[src_id]
-                .meta
-                .val_shape()
-                .map(|s| s.to_vec())
-                .unwrap_or_default();
-            let mut unsqueezed_shape = src_shape.clone();
-            unsqueezed_shape.insert(dim_norm, 1);
-            let unsqueeze_node = graph.add_anchored_call_function(
-                id,
+            // 5. unsqueeze(src, dim) - restore dimension that select removed
+            let unsqueeze_node = cursor.call_function(
                 format!("{}_unsqueeze", node_name),
                 "aten.unsqueeze_copy.default",
                 vec![IrArg::Node(src_id), IrArg::Int(dim_norm as i64)],
-                graph.nodes[src_id]
-                    .meta
-                    .clone()
-                    .cloned_with_dtype_of_or_float32(unsqueezed_shape, &input_meta),
+                unsqueeze_meta,
             );
 
             // 6. expand(unsqueezed, input_shape)
-            let expand_node = graph.add_anchored_call_function(
-                id,
+            let expand_node = cursor.call_function(
                 format!("{}_expand", node_name),
                 "aten.expand_copy.default",
                 vec![IrArg::Node(unsqueeze_node), i64_list(&input_shape)],
-                graph.nodes[src_id]
-                    .meta
-                    .clone()
-                    .cloned_with_dtype_of_or_float32(input_shape.clone(), &input_meta),
+                expand_meta,
             );
 
-            // 7. where(mask, expanded_src, input) → result
-            graph.replace_with_call_function(
-                id,
+            // 7. where(mask, expanded_src, input) -> result
+            let result = cursor.call_function(
                 format!("{}_where", node_name),
                 "aten.where.self",
                 vec![
@@ -140,6 +133,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 ],
                 orig_meta,
             );
+            cursor.replace_anchor_with(result);
             modified = true;
         }
 
