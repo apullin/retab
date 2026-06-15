@@ -360,6 +360,19 @@ Note: scalar shift rewriting now uses the same two-node cursor chain as other
   scalar-to-tensor decompositions: materialize scalar tensor, emit tensor op,
   replace the anchor.
 
+2026-06-15, IR rewrite cursor slice 18
+Rust LOC: 35,794 -> 35,794
+Movement: 0 Rust LOC
+Deleted/collapsed: manual anchored chained-reduce insertion and post-insertion
+  final-node qparam mutation in multi-axis sum conversion
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib
+  ir_golden_tests::convert_sum_decomposes_multi_axis_reduction_with_qparam_contract;
+  cargo test --lib; maturin develop --release; focused Python smoke over
+  sum.dim_IntList and default sum FP/INT TOSA cases: 32 passed
+Note: sum conversion now prepares final-step qparams before insertion and emits
+  each reduce through one cursor, making the qparam contract explicit instead
+  of patching the final reduce node afterward.
+
 Slice log:
 
 ```text

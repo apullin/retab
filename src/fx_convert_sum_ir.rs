@@ -80,10 +80,11 @@ impl IrPass for IrConvertSumPass {
 
             let mut current_input = input_id;
             let mut last_reduce: Option<NodeId> = None;
+            let mut cursor = graph.rewrite_cursor(id);
 
-            for &dim in &dims {
+            for (index, &dim) in dims.iter().enumerate() {
                 // Get current input shape for computing output shape.
-                let cur_shape = match graph.node_shape_vec(current_input) {
+                let cur_shape = match cursor.graph().node_shape_vec(current_input) {
                     Some(s) => s,
                     None => continue,
                 };
@@ -114,10 +115,12 @@ impl IrPass for IrConvertSumPass {
                 if let Some(ref oqp) = current_output_qparams {
                     step_meta.set_output_qparams(oqp.clone());
                 }
+                if index + 1 == dims.len() {
+                    step_meta.copy_qparams_from(&orig_meta);
+                }
 
                 // Build args: (current_input, [dim], keepdim)
-                let reduce_id = graph.add_anchored_call_function(
-                    id,
+                let reduce_id = cursor.call_function(
                     format!("{}_reduce_dim{}", orig_name, dim),
                     "aten.sum.dim_IntList",
                     vec![
@@ -136,10 +139,7 @@ impl IrPass for IrConvertSumPass {
 
             // Replace original node with the final chained reduce.
             if let Some(final_id) = last_reduce {
-                // Restore original node's qparams on the final reduce.
-                let final_meta = &mut graph.node_mut(final_id).meta;
-                final_meta.copy_qparams_from(&orig_meta);
-                graph.replace_and_erase(id, final_id);
+                cursor.replace_anchor_with(final_id);
                 modified = true;
             }
         }
