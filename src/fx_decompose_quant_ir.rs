@@ -5,32 +5,8 @@
 //!
 //! Skips DQ→Q pairs (handled by InsertRescalePass).
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId};
 use crate::runner_logging::log_line;
-
-/// Create a _to_copy.default(x) node with dtype kwarg for casting.
-fn add_cast(
-    graph: &mut IrGraph,
-    name: &str,
-    x_id: NodeId,
-    target_dtype: &str,
-    shape: &[i64],
-    orig_meta: &NodeMeta,
-    anchor: NodeId,
-) -> NodeId {
-    if graph.node(x_id).meta.val_dtype() == Some(target_dtype) {
-        return x_id;
-    }
-    graph.add_anchored_dtype_cast(
-        anchor,
-        name.to_string(),
-        x_id,
-        target_dtype,
-        orig_meta
-            .tensor_stamp(target_dtype)
-            .drop_qparams(shape.to_vec()),
-    )
-}
 
 pub struct IrDecomposeQuantPass;
 
@@ -86,10 +62,11 @@ impl IrPass for IrDecomposeQuantPass {
                 Some(n) => n,
                 None => continue,
             };
-            let scale = match &args[1] {
-                IrArg::Float(v) => *v,
-                IrArg::Int(v) => *v as f64,
-                _ => continue,
+            let scale = args[1]
+                .as_float()
+                .or_else(|| args[1].as_int().map(|v| v as f64));
+            let Some(scale) = scale else {
+                continue;
             };
             let zp = match args[2].as_int() {
                 Some(v) => v,
@@ -135,52 +112,48 @@ impl IrPass for IrDecomposeQuantPass {
             let int32_meta = orig_meta.tensor_stamp("torch.int32");
 
             let result = if is_quantize {
+                let mut cursor = graph.rewrite_cursor(id);
+
                 // scale_const = full([1..], 1/scale)
-                let sc = graph.add_anchored_call_function(
-                    id,
+                let sc = cursor.call_function(
                     format!("{}_sc", name),
-                    "aten.full.default".to_string(),
+                    "aten.full.default",
                     vec![i64_list(&ones), IrArg::Float(eff_scale)],
                     fp_meta.drop_qparams(ones.clone()),
                 );
 
                 // zp_const = full([1..], zp) as float
-                let zpc = graph.add_anchored_call_function(
-                    id,
+                let zpc = cursor.call_function(
                     format!("{}_zp", name),
-                    "aten.full.default".to_string(),
+                    "aten.full.default",
                     vec![i64_list(&ones), IrArg::Int(zp)],
                     fp_meta.drop_qparams(ones.clone()),
                 );
 
-                let scaled = graph.add_anchored_call_function(
-                    id,
+                let scaled = cursor.call_function(
                     format!("{}_mul", name),
-                    "aten.mul.Tensor".to_string(),
+                    "aten.mul.Tensor",
                     vec![IrArg::Node(x_id), IrArg::Node(sc)],
                     fp_meta.drop_qparams(shape.clone()),
                 );
 
-                let rounded = graph.add_anchored_call_function(
-                    id,
+                let rounded = cursor.call_function(
                     format!("{}_round", name),
-                    "aten.round.default".to_string(),
+                    "aten.round.default",
                     vec![IrArg::Node(scaled)],
                     fp_meta.drop_qparams(shape.clone()),
                 );
 
-                let shifted = graph.add_anchored_call_function(
-                    id,
+                let shifted = cursor.call_function(
                     format!("{}_add", name),
-                    "aten.add.Tensor".to_string(),
+                    "aten.add.Tensor",
                     vec![IrArg::Node(rounded), IrArg::Node(zpc)],
                     fp_meta.drop_qparams(shape.clone()),
                 );
 
-                let clamped = graph.add_anchored_call_function(
-                    id,
+                let clamped = cursor.call_function(
                     format!("{}_clamp", name),
-                    "aten.clamp.default".to_string(),
+                    "aten.clamp.default",
                     vec![
                         IrArg::Node(shifted),
                         IrArg::Float(qmin as f64),
@@ -189,64 +162,58 @@ impl IrPass for IrDecomposeQuantPass {
                     fp_meta.drop_qparams(shape.clone()),
                 );
 
-                add_cast(
-                    graph,
-                    &format!("{}_cast", name),
+                cursor.dtype_cast_if_needed(
+                    format!("{}_cast", name),
                     clamped,
                     &target_dtype,
-                    &shape,
-                    &orig_meta,
-                    id,
+                    orig_meta
+                        .tensor_stamp(&target_dtype)
+                        .drop_qparams(shape.clone()),
                 )
             } else {
+                let mut cursor = graph.rewrite_cursor(id);
+
                 // dequantize: cast(x, int32) → sub(zp) → cast(fp) → mul(scale)
-                let x_i32 = add_cast(
-                    graph,
-                    &format!("{}_to_i32", name),
+                let x_i32 = cursor.dtype_cast_if_needed(
+                    format!("{}_to_i32", name),
                     x_id,
                     "torch.int32",
-                    &shape,
-                    &orig_meta,
-                    id,
+                    orig_meta
+                        .tensor_stamp("torch.int32")
+                        .drop_qparams(shape.clone()),
                 );
 
-                let zpc = graph.add_anchored_call_function(
-                    id,
+                let zpc = cursor.call_function(
                     format!("{}_zp", name),
-                    "aten.full.default".to_string(),
+                    "aten.full.default",
                     vec![i64_list(&ones), IrArg::Int(zp)],
                     int32_meta.drop_qparams(ones.clone()),
                 );
 
-                let shifted = graph.add_anchored_call_function(
-                    id,
+                let shifted = cursor.call_function(
                     format!("{}_sub", name),
-                    "aten.sub.Tensor".to_string(),
+                    "aten.sub.Tensor",
                     vec![IrArg::Node(x_i32), IrArg::Node(zpc)],
                     int32_meta.drop_qparams(shape.clone()),
                 );
 
-                let casted = add_cast(
-                    graph,
-                    &format!("{}_to_fp", name),
+                let casted = cursor.dtype_cast_if_needed(
+                    format!("{}_to_fp", name),
                     shifted,
                     fp_dtype,
-                    &shape,
-                    &orig_meta,
-                    id,
+                    orig_meta.tensor_stamp(fp_dtype).drop_qparams(shape.clone()),
                 );
 
-                let sc = graph.add_anchored_call_function(
-                    id,
+                let sc = cursor.call_function(
                     format!("{}_sc", name),
-                    "aten.full.default".to_string(),
+                    "aten.full.default",
                     vec![i64_list(&ones), IrArg::Float(eff_scale)],
                     fp_meta.drop_qparams(ones),
                 );
 
-                graph.add_call_function(
+                cursor.call_function(
                     format!("{}_mul", name),
-                    "aten.mul.Tensor".to_string(),
+                    "aten.mul.Tensor",
                     vec![IrArg::Node(casted), IrArg::Node(sc)],
                     fp_meta.drop_qparams(shape),
                 )

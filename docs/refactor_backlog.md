@@ -185,6 +185,21 @@ Note: this completes the specific value-stamped call-function cleanup: the
   passes now spell rewrite order through IrRewriteCursor instead of a second
   anchored helper family.
 
+2026-06-15, IR rewrite cursor slice 5
+Rust LOC: 35,928 -> 35,909
+Movement: -19 Rust LOC
+Deleted/collapsed: the quant decomposition's local conditional-cast helper and
+  manual anchored-node chains for quantize/dequantize arithmetic
+Added: IrRewriteCursor::dtype_cast_if_needed, so conditional casts are part of
+  the shared rewrite-chain grammar rather than pass-local graph surgery
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib
+  fx_decompose_quant_ir::tests; cargo test --lib; maturin develop --release;
+  focused Python smoke over add, mul, and to_copy quant/cast-adjacent cases:
+  51 passed, 1 xfailed
+Note: this is the more important kind of cleanup than raw deletion: the Q/DQ
+  formulas now read as ordered Rust IR rewrite chains, and future passes can
+  reuse the same conditional-cast primitive.
+
 Slice log:
 
 ```text

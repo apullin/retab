@@ -1524,6 +1524,20 @@ impl IrRewriteCursor<'_> {
         )
     }
 
+    pub(crate) fn dtype_cast_if_needed(
+        &mut self,
+        name: impl Into<String>,
+        source: NodeId,
+        dtype: &str,
+        meta: NodeMeta,
+    ) -> NodeId {
+        if self.graph.node(source).meta.val_dtype() == Some(dtype) {
+            source
+        } else {
+            self.dtype_cast(name, source, dtype, meta)
+        }
+    }
+
     pub(crate) fn view_copy(
         &mut self,
         name: impl Into<String>,
