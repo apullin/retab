@@ -37,12 +37,14 @@ These numbers are end-to-end ARM lowering checks. They include ExecuTorch
 orchestration, backend partitioning, Vela compilation, and PTE packing. They are
 not isolated measurements of the Rust serializer/preprocess core.
 
-For a TOSA-only direct fast-lane phase split on `mobilenet_v3_small`:
+The direct TOSA fast-lane sweep also reports an outer `lower_s`, but that is
+still the full `to_edge_transform_and_lower` interval. It is not pure Rust
+preprocess time:
 
 | Phase | Time |
 | --- | ---: |
 | Quant/export prepare | `5.959s` |
-| Lower | `5.605s` |
+| Outer lower | `5.605s` |
 | Pack | `0.291s` |
 
 Command:
@@ -50,6 +52,21 @@ Command:
 ```bash
 python tests/sweep_direct_fastlane.py --model mobilenet_v3_small --json-only
 ```
+
+The CPU phase profiler gives the sharper breakdown for the same model:
+
+| Measured scope | Time |
+| --- | ---: |
+| Full outer lower | `5.580s` |
+| `program._gen_edge_manager_for_partitioners` | `4.604s` |
+| `program._generate_edge_program` | `1.867s` |
+| `backend.TOSABackend.preprocess` total, 23 calls | `0.131s` |
+| `retab_native.run_fx_passes` total, 23 calls | `0.066s` |
+| `retab_native.ingest_and_serialize` total, 23 calls | `0.059s` |
+
+So the current MobileNet direct path is not spending seconds in Rust RETAB.
+The remaining multi-second cost is mostly ExecuTorch/Torch graph machinery
+outside the backend preprocess slice.
 
 The MobileNet artifact mismatch is not treated as a regression by itself here:
 the full correctness matrix passes on the Rust serializer path. If a future
