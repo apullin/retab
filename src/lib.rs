@@ -77,6 +77,8 @@ mod fx_size_adjust_input_ir;
 mod fx_target;
 mod graph;
 mod ingest;
+#[cfg(test)]
+mod ir_golden_tests;
 mod lowering_effects;
 mod runner_logging;
 mod serialize;
