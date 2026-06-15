@@ -24,22 +24,17 @@ impl IrPass for IrDecomposeNotEqualPass {
             let name = node.name.clone();
             let meta = node.meta.clone();
             let args = node.args[..2].to_vec();
+            let mut cursor = graph.rewrite_cursor(id);
 
-            let eq = graph.add_anchored_call_function(
-                id,
-                format!("{name}_eq"),
-                eq_target,
-                args,
-                meta.clone(),
-            );
+            let eq = cursor.call_function(format!("{name}_eq"), eq_target, args, meta.clone());
 
-            graph.replace_with_call_function(
-                id,
+            let result = cursor.call_function(
                 format!("{name}_logical_not"),
                 "aten.logical_not.default",
                 vec![IrArg::Node(eq)],
                 meta,
             );
+            cursor.replace_anchor_with(result);
             true
         });
 

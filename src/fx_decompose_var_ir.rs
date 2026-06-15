@@ -88,65 +88,49 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         .map(|&dim| input_shape[dim as usize].max(1))
         .product();
     let denom = (count - correction).max(1) as f64;
+    let mut cursor = graph.rewrite_cursor(id);
 
-    let mean = graph.add_anchored_call_function_with_val(
-        id,
+    let mean = cursor.call_function(
         format!("{}_mean", name),
         "aten.mean.dim",
         vec![IrArg::Node(x_id), i64_list(&dims), IrArg::Bool(true)],
-        &base_meta,
-        mean_shape.clone(),
-        dtype,
+        base_meta.cloned_with_val(mean_shape.clone(), dtype),
     );
 
-    let diff = graph.add_anchored_call_function_with_val(
-        id,
+    let diff = cursor.call_function(
         format!("{}_diff", name),
         "aten.sub.Tensor",
         vec![IrArg::Node(x_id), IrArg::Node(mean)],
-        &base_meta,
-        input_shape.clone(),
-        dtype,
+        base_meta.cloned_with_val(input_shape.clone(), dtype),
     );
 
-    let squared = graph.add_anchored_call_function_with_val(
-        id,
+    let squared = cursor.call_function(
         format!("{}_squared", name),
         "aten.mul.Tensor",
         vec![IrArg::Node(diff), IrArg::Node(diff)],
-        &base_meta,
-        input_shape.clone(),
-        dtype,
+        base_meta.cloned_with_val(input_shape.clone(), dtype),
     );
 
-    let sum = graph.add_anchored_call_function_with_val(
-        id,
+    let sum = cursor.call_function(
         format!("{}_sum", name),
         "aten.sum.dim_IntList",
         vec![IrArg::Node(squared), i64_list(&dims), IrArg::Bool(keepdim)],
-        &base_meta,
-        output_shape.clone(),
-        dtype,
+        base_meta.cloned_with_val(output_shape.clone(), dtype),
     );
 
-    let coefficient = graph.add_anchored_call_function_with_val(
-        id,
+    let coefficient = cursor.call_function(
         format!("{}_inv_count", name),
         "aten.full.default",
         vec![i64_list(&coefficient_shape), IrArg::Float(1.0 / denom)],
-        &base_meta,
-        coefficient_shape,
-        dtype,
+        base_meta.cloned_with_val(coefficient_shape, dtype),
     );
 
-    graph.replace_with_call_function_with_val(
-        id,
+    let result = cursor.call_function(
         format!("{}_mul", name),
         "aten.mul.Tensor",
         vec![IrArg::Node(sum), IrArg::Node(coefficient)],
-        &base_meta,
-        output_shape,
-        dtype,
+        base_meta.cloned_with_val(output_shape, dtype),
     );
+    cursor.replace_anchor_with(result);
     true
 }

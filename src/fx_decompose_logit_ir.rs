@@ -42,14 +42,14 @@ impl IrPass for IrDecomposeLogitPass {
 
             let meta = graph.nodes[id].meta.clone();
             let base_name = graph.nodes[id].name.clone();
+            let mut cursor = graph.rewrite_cursor(id);
 
             // Track the current x — may be updated by clamp
             let mut x = input_id;
 
             // If eps is not None: x = clamp(x, eps, 1 - eps)
             if let Some(eps_val) = eps {
-                x = graph.add_anchored_call_function(
-                    id,
+                x = cursor.call_function(
                     format!("{base_name}_clamp"),
                     "aten.clamp.default",
                     vec![
@@ -63,8 +63,7 @@ impl IrPass for IrDecomposeLogitPass {
 
             // full(-1.0) with broadcast shape [1; rank]
             let shape_ones: Vec<IrArg> = vec![IrArg::Int(1); rank];
-            let neg_one = graph.add_anchored_call_function(
-                id,
+            let neg_one = cursor.call_function(
                 format!("{base_name}_full_neg1"),
                 "aten.full.default",
                 vec![IrArg::List(shape_ones.clone()), IrArg::Float(-1.0)],
@@ -72,8 +71,7 @@ impl IrPass for IrDecomposeLogitPass {
             );
 
             // neg_x = mul(x, -1.0)
-            let neg_x = graph.add_anchored_call_function(
-                id,
+            let neg_x = cursor.call_function(
                 format!("{base_name}_neg_x"),
                 "aten.mul.Tensor",
                 vec![IrArg::Node(x), IrArg::Node(neg_one)],
@@ -81,8 +79,7 @@ impl IrPass for IrDecomposeLogitPass {
             );
 
             // full(1.0) with broadcast shape [1; rank]
-            let one = graph.add_anchored_call_function(
-                id,
+            let one = cursor.call_function(
                 format!("{base_name}_full_one"),
                 "aten.full.default",
                 vec![IrArg::List(shape_ones), IrArg::Float(1.0)],
@@ -90,8 +87,7 @@ impl IrPass for IrDecomposeLogitPass {
             );
 
             // denom = add(neg_x, 1.0) => (1 - x)
-            let denom = graph.add_anchored_call_function(
-                id,
+            let denom = cursor.call_function(
                 format!("{base_name}_denom"),
                 "aten.add.Tensor",
                 vec![IrArg::Node(neg_x), IrArg::Node(one)],
@@ -99,8 +95,7 @@ impl IrPass for IrDecomposeLogitPass {
             );
 
             // frac = reciprocal(denom) => 1 / (1 - x)
-            let frac = graph.add_anchored_call_function(
-                id,
+            let frac = cursor.call_function(
                 format!("{base_name}_frac"),
                 "aten.reciprocal.default",
                 vec![IrArg::Node(denom)],
@@ -108,8 +103,7 @@ impl IrPass for IrDecomposeLogitPass {
             );
 
             // log_input = mul(x, frac) => x / (1 - x)
-            let log_input = graph.add_anchored_call_function(
-                id,
+            let log_input = cursor.call_function(
                 format!("{base_name}_log_input"),
                 "aten.mul.Tensor",
                 vec![IrArg::Node(x), IrArg::Node(frac)],
@@ -117,13 +111,13 @@ impl IrPass for IrDecomposeLogitPass {
             );
 
             // result = log(log_input)
-            graph.replace_with_call_function(
-                id,
+            let result = cursor.call_function(
                 format!("{base_name}_log"),
                 "aten.log.default",
                 vec![IrArg::Node(log_input)],
                 meta,
             );
+            cursor.replace_anchor_with(result);
             true
         });
 

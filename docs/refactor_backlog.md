@@ -159,6 +159,19 @@ Note: this slice continues moving decomposition passes toward an explicit
   ordered rewrite-chain grammar and removed a dead convenience helper exposed by
   the conversion.
 
+2026-06-15, IR rewrite cursor slice 3
+Rust LOC: 36,025 -> 35,980
+Movement: -45 Rust LOC
+Deleted/collapsed: repeated anchored-node insertion in repeat_interleave, ne,
+  logit, and var decompositions, plus the now-unused
+  replace_with_call_function_with_val helper
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib; maturin
+  develop --release; focused Python smoke over repeat, ne, logit, and var:
+  84 passed
+Note: this slice turned another group of decompositions into a single
+  cursor-driven rewrite chain. The payoff is both smaller code and less
+  hand-managed anchor/copy/replace sequencing.
+
 Slice log:
 
 ```text
