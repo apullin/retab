@@ -127,9 +127,7 @@ fn symmetric_spatial_pad(padding: &[i32], spatial_rank: usize) -> Vec<i32> {
 
 fn synthetic_bias_dtype(node: &Node, acc_type: DType) -> DType {
     let semantic_dtype = node_output_dtype(node);
-    if node.meta.input_qparams.is_empty()
-        && matches!(semantic_dtype, DType::Fp32 | DType::Fp16 | DType::Bf16)
-    {
+    if node.meta.input_qparams.is_empty() && is_float_dtype(semantic_dtype) {
         semantic_dtype
     } else {
         acc_type

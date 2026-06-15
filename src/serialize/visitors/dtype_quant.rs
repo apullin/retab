@@ -174,7 +174,7 @@ pub(super) fn actual_tensor_dtype(graph: &Graph, node: &Node) -> DType {
 fn actual_tensor_dtype_impl(graph: &Graph, node: &Node) -> DType {
     if matches!(node.target, OpTarget::Sum) {
         let semantic_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
-        if matches!(semantic_dtype, DType::Fp32 | DType::Fp16 | DType::Bf16) {
+        if is_float_dtype(semantic_dtype) {
             return semantic_dtype;
         }
     }
@@ -210,7 +210,7 @@ fn actual_tensor_dtype_impl(graph: &Graph, node: &Node) -> DType {
         | OpTarget::TosaMatmul => accumulator_output_dtype(node),
         OpTarget::Sum => {
             let semantic_dtype = node_output_dtype(node);
-            if matches!(semantic_dtype, DType::Fp32 | DType::Fp16 | DType::Bf16) {
+            if is_float_dtype(semantic_dtype) {
                 semantic_dtype
             } else {
                 match passthrough_input_dtype(graph, node) {
@@ -390,6 +390,10 @@ pub(super) fn single_qparam(node: &Node) -> Option<crate::graph::ir::QuantArgs> 
 
 pub(super) fn is_float_dtype(dtype: DType) -> bool {
     matches!(dtype, DType::Fp32 | DType::Fp16 | DType::Bf16)
+}
+
+pub(super) fn is_narrow_float_dtype(dtype: DType) -> bool {
+    matches!(dtype, DType::Fp16 | DType::Bf16)
 }
 
 pub(super) fn compute_multiplier_and_shift_with_width(scale: f64, scale_width: i32) -> (i32, i8) {

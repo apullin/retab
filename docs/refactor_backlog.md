@@ -1703,6 +1703,23 @@ conv2d, depthwise_conv, conv3d, and transpose_conv2d
 Note: Full Rust tests passed `144 passed`; focused Python smoke passed
 `392 passed, 8 xfailed`. Remaining local shape permutations are either IR-side
 logic or axis-list calculations, not the serializer dim-order contract.
+
+2026-06-14, serializer float-dtype predicate cleanup slice
+Rust LOC: 35,668 -> 35,665
+Movement: -3 Rust LOC
+Deleted: repeated raw serializer matches for the TOSA float dtype domain
+(`Fp32 | Fp16 | Bf16`) and narrow-float matmul domain (`Fp16 | Bf16`)
+Added: shared `is_narrow_float_dtype` beside the existing `is_float_dtype`
+predicate; conv/layout, synthetic bias, pool, bool-binary, sum dtype, and matmul
+emission now use named dtype-domain predicates
+Validation: `cargo fmt`; `cargo check --lib`; grep for raw float-domain
+matches under `src/serialize`; `cargo test --lib serialize::visitors`;
+`cargo test --lib serialize::tensor_layout::tests`; `cargo test --lib`;
+`maturin develop --release`; focused Python smoke via `/tmp/et.sh` over add,
+avg_pool2d, bmm, conv2d, depthwise_conv, div, linear, matmul, max_pool, mul,
+and sub with known a8w4/U55/U85/VGF/FVP lanes excluded
+Note: Full Rust tests passed `144 passed`; focused Python smoke passed
+`626 passed, 10 xfailed`. This is a consistency cleanup, not a major LOC win.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

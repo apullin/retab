@@ -32,9 +32,7 @@ fn compute_conv_output_impl(
     is_depthwise: bool,
 ) -> TosaTensor {
     let semantic_dtype = node_output_dtype(node);
-    let dtype = if node.meta.input_qparams.is_empty()
-        && matches!(semantic_dtype, DType::Fp32 | DType::Fp16 | DType::Bf16)
-    {
+    let dtype = if node.meta.input_qparams.is_empty() && is_float_dtype(semantic_dtype) {
         semantic_dtype
     } else {
         conv_accumulator_dtype(node)

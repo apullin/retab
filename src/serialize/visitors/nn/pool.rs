@@ -123,7 +123,7 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
         .map(|input_node| ir_dtype_to_tosa(input_node.meta.val.dtype))
         .unwrap_or(DType::Int8);
     let output_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
-    let acc_type = if matches!(input_dtype, DType::Fp32 | DType::Fp16 | DType::Bf16) {
+    let acc_type = if is_float_dtype(input_dtype) {
         DType::Fp32
     } else {
         DType::Int32

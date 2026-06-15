@@ -21,13 +21,12 @@ pub(super) fn emit_matmul(ctx: &EmitContext) -> EmitResult {
     let defer_reshape_to_rescale = promote_2d && has_only_tosa_rescale_users(graph, node);
     let a_dtype = matmul_input_dtype(graph, node, 0);
     let b_dtype = matmul_input_dtype(graph, node, 1);
-    let float_output_cast_dtype = if matches!(a_dtype, DType::Fp16 | DType::Bf16)
-        && matches!(b_dtype, DType::Fp16 | DType::Bf16)
-    {
-        Some(a_dtype)
-    } else {
-        None
-    };
+    let float_output_cast_dtype =
+        if is_narrow_float_dtype(a_dtype) && is_narrow_float_dtype(b_dtype) {
+            Some(a_dtype)
+        } else {
+            None
+        };
     let needs_float_output_cast = float_output_cast_dtype.is_some();
     let matmul_out_dtype = if needs_float_output_cast {
         DType::Fp32

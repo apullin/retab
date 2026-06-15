@@ -152,9 +152,7 @@ pub(super) fn emit_bool_binary(
         };
         let semantic_dtype = node_output_dtype(input_node);
         let structural_dtype = actual_tensor_dtype(graph, input_node);
-        if !matches!(semantic_dtype, DType::Fp32 | DType::Fp16 | DType::Bf16)
-            || semantic_dtype == structural_dtype
-        {
+        if !is_float_dtype(semantic_dtype) || semantic_dtype == structural_dtype {
             continue;
         }
         let cast_name = format!("{}_input{}_cast", node.name, idx);
