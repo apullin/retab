@@ -41,17 +41,22 @@ impl TensorDeclarationContext {
     }
 }
 
-pub(super) fn apply_tosa_dim_order(node: &Node, shape: Vec<i32>) -> Vec<i32> {
+pub(crate) fn apply_tosa_dim_order(node: &Node, shape: Vec<i32>) -> Vec<i32> {
     let Some(order) = node.meta.tosa_dim_order.as_ref() else {
         return shape;
     };
     if order.len() != shape.len() {
         return shape;
     }
-    order
+    let reordered: Vec<i32> = order
         .iter()
         .filter_map(|&src_idx| shape.get(src_idx as usize).copied())
-        .collect()
+        .collect();
+    if reordered.len() == shape.len() {
+        reordered
+    } else {
+        shape
+    }
 }
 
 pub(super) fn raw_i32_shape(node: &Node) -> Vec<i32> {
@@ -119,138 +124,35 @@ fn permute_weight_data(
     elem_size: usize,
     kind: WeightPermKind,
 ) -> (Vec<u8>, Vec<i64>) {
-    let expected_rank = match kind {
-        WeightPermKind::Conv3d => 5,
-        _ => 4,
-    };
-    if shape.len() != expected_rank {
+    let Some((logical_shape, order)) = weight_permutation_plan(shape, kind) else {
         return (data.to_vec(), shape.to_vec());
-    }
+    };
+    permute_tensor_by_order(data, &logical_shape, elem_size, &order)
+}
 
-    let (d0, d1, d2, d3) = (
-        shape[0] as usize,
-        shape[1] as usize,
-        shape[2] as usize,
-        shape[3] as usize,
-    );
-
+fn weight_permutation_plan(shape: &[i64], kind: WeightPermKind) -> Option<(Vec<i64>, Vec<u8>)> {
     match kind {
-        WeightPermKind::Conv2d => {
-            if d1 == 1 || (d2 == 1 && d3 == 1) {
-                return (data.to_vec(), vec![shape[0], shape[2], shape[3], shape[1]]);
+        WeightPermKind::Conv2d if shape.len() == 4 => Some((shape.to_vec(), vec![0, 2, 3, 1])),
+        WeightPermKind::Conv3d if shape.len() == 5 => Some((shape.to_vec(), vec![0, 2, 3, 4, 1])),
+        WeightPermKind::DepthwiseConv2d { in_channels } if shape.len() == 4 => {
+            let output_channels = usize::try_from(shape[0]).ok()?;
+            if in_channels == 0 || shape[1] != 1 || output_channels % in_channels != 0 {
+                return None;
             }
-            let new_shape = vec![shape[0], shape[2], shape[3], shape[1]];
-            let (nh, nw, ni) = (d2, d3, d1);
-            let mut out = vec![0u8; data.len()];
-
-            for o in 0..d0 {
-                for i in 0..d1 {
-                    for h in 0..d2 {
-                        for w in 0..d3 {
-                            let src_idx = ((o * d1 + i) * d2 + h) * d3 + w;
-                            let dst_idx = ((o * nh + h) * nw + w) * ni + i;
-                            let src_off = src_idx * elem_size;
-                            let dst_off = dst_idx * elem_size;
-                            if src_off + elem_size <= data.len() && dst_off + elem_size <= out.len()
-                            {
-                                out[dst_off..dst_off + elem_size]
-                                    .copy_from_slice(&data[src_off..src_off + elem_size]);
-                            }
-                        }
-                    }
-                }
-            }
-            (out, new_shape)
-        }
-        WeightPermKind::Conv3d => {
-            let (d0, d1, d2, d3, d4) = (
-                shape[0] as usize,
-                shape[1] as usize,
-                shape[2] as usize,
-                shape[3] as usize,
-                shape[4] as usize,
-            );
-            if d1 == 1 || (d2 == 1 && d3 == 1 && d4 == 1) {
-                return (
-                    data.to_vec(),
-                    vec![shape[0], shape[2], shape[3], shape[4], shape[1]],
-                );
-            }
-            let new_shape = vec![shape[0], shape[2], shape[3], shape[4], shape[1]];
-            let (nd, nh, nw, ni) = (d2, d3, d4, d1);
-            let mut out = vec![0u8; data.len()];
-
-            for o in 0..d0 {
-                for i in 0..d1 {
-                    for d in 0..d2 {
-                        for h in 0..d3 {
-                            for w in 0..d4 {
-                                let src_idx = ((((o * d1 + i) * d2 + d) * d3 + h) * d4) + w;
-                                let dst_idx = ((((o * nd + d) * nh + h) * nw + w) * ni) + i;
-                                let src_off = src_idx * elem_size;
-                                let dst_off = dst_idx * elem_size;
-                                if src_off + elem_size <= data.len()
-                                    && dst_off + elem_size <= out.len()
-                                {
-                                    out[dst_off..dst_off + elem_size]
-                                        .copy_from_slice(&data[src_off..src_off + elem_size]);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            (out, new_shape)
-        }
-        WeightPermKind::DepthwiseConv2d { in_channels } => {
-            if in_channels == 0 || d1 != 1 || d0 % in_channels != 0 {
-                return (data.to_vec(), shape.to_vec());
-            }
-
-            let depth_multiplier = d0 / in_channels;
-            if depth_multiplier == 0 {
-                return (data.to_vec(), shape.to_vec());
-            }
-
-            if d2 == 1 && d3 == 1 {
-                return (
-                    data.to_vec(),
+            let depth_multiplier = output_channels / in_channels;
+            (depth_multiplier > 0).then(|| {
+                (
                     vec![
-                        shape[2],
-                        shape[3],
                         in_channels as i64,
                         depth_multiplier as i64,
+                        shape[2],
+                        shape[3],
                     ],
-                );
-            }
-
-            let new_shape = vec![
-                shape[2],
-                shape[3],
-                in_channels as i64,
-                depth_multiplier as i64,
-            ];
-            let (_nh, nw, ni, nm) = (d2, d3, in_channels, depth_multiplier);
-            let mut out = vec![0u8; data.len()];
-
-            for oc in 0..d0 {
-                let ic = oc / depth_multiplier;
-                let m = oc % depth_multiplier;
-                for h in 0..d2 {
-                    for w in 0..d3 {
-                        let src_idx = ((oc * d1) * d2 + h) * d3 + w;
-                        let dst_idx = ((h * nw + w) * ni + ic) * nm + m;
-                        let src_off = src_idx * elem_size;
-                        let dst_off = dst_idx * elem_size;
-                        if src_off + elem_size <= data.len() && dst_off + elem_size <= out.len() {
-                            out[dst_off..dst_off + elem_size]
-                                .copy_from_slice(&data[src_off..src_off + elem_size]);
-                        }
-                    }
-                }
-            }
-            (out, new_shape)
+                    vec![2, 3, 0, 1],
+                )
+            })
         }
+        _ => None,
     }
 }
 

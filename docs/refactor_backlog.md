@@ -1664,6 +1664,25 @@ unfold_copy
 Note: Full Rust tests passed `144 passed`; focused Python smoke passed
 `207 passed, 2 xfailed`. This is a follow-through grammar cleanup, not a major
 LOC-reduction slice.
+
+2026-06-14, serializer tensor-layout permutation grammar slice
+Rust LOC: 35,802 -> 35,691
+Movement: -111 Rust LOC
+Deleted: duplicate `apply_tosa_dim_order` implementation in shape visitors and
+three handwritten conv/depthwise weight-layout nested-loop permutation kernels
+in the serializer tensor-layout path
+Added: shared `tensor_layout::apply_tosa_dim_order` and a small
+`weight_permutation_plan` layer that feeds the existing generic
+`permute_tensor_by_order` engine
+Validation: `cargo fmt`; `cargo check --lib`;
+`cargo test --lib serialize::tensor_layout::tests`;
+`cargo test --lib serialize::visitors::shape_utils::tests`; `cargo test --lib`;
+`maturin develop --release`; focused Python smoke via `/tmp/et.sh` over
+conv2d, depthwise_conv, conv3d, and transpose_conv2d
+Note: Full Rust tests passed `144 passed`; focused Python smoke passed
+`392 passed, 8 xfailed`. This is a production serializer cleanup: layout
+permutation now uses the common tensor permutation grammar instead of separate
+loop bodies for each weight kind.
 ```
 
 ## Refactor 1: Add A Rewrite-IR Target Grammar

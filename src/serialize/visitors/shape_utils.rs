@@ -1,4 +1,5 @@
 use super::*;
+use crate::serialize::tensor_layout::apply_tosa_dim_order;
 use std::cell::RefCell;
 use std::collections::HashMap as StdHashMap;
 
@@ -64,21 +65,6 @@ fn resolve_inferred_shape(shape: &[i32], input_shape: &[i32]) -> Option<Vec<i32>
     let mut resolved = shape.to_vec();
     resolved[negative_positions[0]] = (input_numel / known_product) as i32;
     Some(resolved)
-}
-
-pub(super) fn apply_tosa_dim_order(node: &Node, shape: Vec<i32>) -> Vec<i32> {
-    if let Some(order) = node.meta.tosa_dim_order.as_ref() {
-        if order.len() == shape.len() {
-            let reordered: Vec<i32> = order
-                .iter()
-                .filter_map(|&idx| shape.get(idx as usize).copied())
-                .collect();
-            if reordered.len() == shape.len() {
-                return reordered;
-            }
-        }
-    }
-    shape
 }
 
 pub(super) fn map_axis_to_tosa_dim_order(graph: &Graph, node: &Node, axis: i32) -> i32 {
