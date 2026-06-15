@@ -10,6 +10,39 @@ small batches with full validation.
 
 ## Tracking Policy
 
+## Fresh Metadata/QParam/Arg-Parsing Seam Queue
+
+This queue was opened on 2026-06-15 after the rewrite-cursor cleanup. It tracks
+the next independent semantic-collapse seam, focused on tensor metadata,
+quantization-domain facts, reduction/index domain facts, and argument parsing.
+
+1. [x] Split metadata out of `fx_ir.rs` into a dedicated metadata module while
+   keeping existing pass imports stable.
+2. [ ] Introduce a qparam-domain wrapper around positional input/output qparam
+   maps, with deterministic iteration and centralized clone/copy/chaining
+   semantics.
+3. [ ] Add a reduction-domain model for normalized dims, keepdim, reduced
+   shapes, reduction counts, and qparam chaining across sum/mean/var lowering.
+4. [ ] Add gather/index domain facts for bool-as-int8 working dtype, index
+   dtype, and shared gather/scatter metadata stamping.
+5. [ ] Revisit arg parsing only after the metadata work, keeping lowering-IR
+   arg helpers separate from serializer arg helpers unless a shared abstraction
+   is demonstrably cleaner.
+
+2026-06-15, metadata module split
+Rust LOC: 35,779 -> 35,770
+Movement: -9 Rust LOC
+Deleted/collapsed: the metadata storage/import/stamping implementation from
+  `fx_ir.rs` into `fx_meta.rs`, leaving `fx_ir.rs` focused on graph topology,
+  arg handling, and rewrite mechanics
+Added: `src/fx_meta.rs` as the home for `TensorFacts`, `NodeMeta`,
+  `TensorMetaStamp`, quant facts, layout facts, and metadata import from Python
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib: 147 passed
+Note: this is an enabling slice. It deliberately keeps existing `fx_ir`
+  re-exports for `NodeMeta`, `MetaValue`, and `TensorMetaStamp` so qparam-domain
+  and reduction-domain follow-up work can migrate call sites in smaller,
+  validated batches.
+
 ## Current Follow-Through Queue
 
 As of 2026-06-14, the original architecture backlog is closed for active
