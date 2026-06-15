@@ -149,25 +149,6 @@ impl IrPass for IrRewriteIndexPutPass {
                 continue;
             };
 
-            // Reshape: indices (1, W), source (1, K, C), values (1, W, C)
-            let idx_meta = index_meta.drop_qparams(vec![1, w]);
-            let idx_1w = graph.add_anchored_view_copy(
-                id,
-                format!("{}_idx", name),
-                flat_idx,
-                &[1, w],
-                idx_meta,
-            );
-
-            let src_meta = source_meta.preserve_qparams(vec![1, k, c]);
-            let src_1kc = graph.add_anchored_view_copy(
-                id,
-                format!("{}_src", name),
-                source_id,
-                &[1, k, c],
-                src_meta,
-            );
-
             // Broadcast values to (W, *C_j) before the (1, W, C) view: a bare view
             // is invalid when values needs broadcasting (e.g. scalar data). Rank-
             // align with a leading-1 view first, as the index path does. Mirrors
@@ -181,82 +162,84 @@ impl IrPass for IrRewriteIndexPutPass {
                 .val_shape()
                 .map(|s| s.to_vec())
                 .unwrap_or_default();
-            let mut val_cur = values_id;
-            if values_shape.len() < bcast_val_shape.len() {
-                let mut aligned = vec![1i64; bcast_val_shape.len() - values_shape.len()];
-                aligned.extend_from_slice(&values_shape);
-                let aligned_meta = source_meta.preserve_qparams(aligned.clone());
-                val_cur = graph.add_anchored_view_copy(
-                    id,
-                    format!("{}_vala", name),
-                    val_cur,
-                    &aligned,
-                    aligned_meta,
-                );
-            }
-            let bcast_val_meta = source_meta.preserve_qparams(bcast_val_shape.clone());
-            let val_bcast = graph.add_anchored_call_function(
-                id,
-                format!("{}_valb", name),
-                "aten.expand_copy.default".to_string(),
-                vec![IrArg::Node(val_cur), i64_list(&bcast_val_shape)],
-                bcast_val_meta,
-            );
-            let val_meta = source_meta.preserve_qparams(vec![1, w, c]);
-            let val_1wc = graph.add_anchored_view_copy(
-                id,
-                format!("{}_val", name),
-                val_bcast,
-                &[1, w, c],
-                val_meta,
-            );
 
-            let scatter_values = if accumulate {
-                let gathered_meta = source_meta.preserve_qparams(vec![1, w, c]);
-                let gathered = graph.add_anchored_call_function(
-                    id,
-                    format!("{}_gather_prev", name),
-                    "backend.tosa.GATHER.default".to_string(),
-                    vec![IrArg::Node(src_1kc), IrArg::Node(idx_1w)],
-                    gathered_meta,
+            let result = {
+                let mut cursor = graph.rewrite_cursor_after(id, flat_idx);
+
+                // Reshape: indices (1, W), source (1, K, C), values (1, W, C).
+                let idx_1w = cursor.view_copy(
+                    format!("{}_idx", name),
+                    flat_idx,
+                    &[1, w],
+                    index_meta.drop_qparams(vec![1, w]),
                 );
 
-                let added_meta = source_meta.preserve_qparams(vec![1, w, c]);
-                let added = graph.add_anchored_call_function(
-                    id,
-                    format!("{}_accum", name),
-                    "aten.add.Tensor".to_string(),
-                    vec![IrArg::Node(gathered), IrArg::Node(val_1wc)],
-                    added_meta,
+                let src_1kc = cursor.view_copy(
+                    format!("{}_src", name),
+                    source_id,
+                    &[1, k, c],
+                    source_meta.preserve_qparams(vec![1, k, c]),
                 );
-                added
-            } else {
-                val_1wc
+
+                let mut val_cur = values_id;
+                if values_shape.len() < bcast_val_shape.len() {
+                    let mut aligned = vec![1i64; bcast_val_shape.len() - values_shape.len()];
+                    aligned.extend_from_slice(&values_shape);
+                    let aligned_meta = source_meta.preserve_qparams(aligned.clone());
+                    val_cur =
+                        cursor.view_copy(format!("{}_vala", name), val_cur, &aligned, aligned_meta);
+                }
+                let val_bcast = cursor.call_function(
+                    format!("{}_valb", name),
+                    "aten.expand_copy.default",
+                    vec![IrArg::Node(val_cur), i64_list(&bcast_val_shape)],
+                    source_meta.preserve_qparams(bcast_val_shape.clone()),
+                );
+                let val_1wc = cursor.view_copy(
+                    format!("{}_val", name),
+                    val_bcast,
+                    &[1, w, c],
+                    source_meta.preserve_qparams(vec![1, w, c]),
+                );
+
+                let scatter_values = if accumulate {
+                    let gathered = cursor.call_function(
+                        format!("{}_gather_prev", name),
+                        "backend.tosa.GATHER.default",
+                        vec![IrArg::Node(src_1kc), IrArg::Node(idx_1w)],
+                        source_meta.preserve_qparams(vec![1, w, c]),
+                    );
+
+                    cursor.call_function(
+                        format!("{}_accum", name),
+                        "aten.add.Tensor",
+                        vec![IrArg::Node(gathered), IrArg::Node(val_1wc)],
+                        source_meta.preserve_qparams(vec![1, w, c]),
+                    )
+                } else {
+                    val_1wc
+                };
+
+                // SCATTER(source_flat, indices_flat, values_flat), then reshape back.
+                let scattered = cursor.call_function(
+                    format!("{}_scatter", name),
+                    "backend.tosa.SCATTER.default",
+                    vec![
+                        IrArg::Node(src_1kc),
+                        IrArg::Node(idx_1w),
+                        IrArg::Node(scatter_values),
+                    ],
+                    source_meta.preserve_qparams(vec![1, k, c]),
+                );
+
+                cursor.view_copy(
+                    format!("{}_out", name),
+                    scattered,
+                    &source_shape,
+                    source_meta.preserve_qparams(source_shape.clone()),
+                )
             };
-
-            // SCATTER(source_flat, indices_flat, values_flat)
-            let scattered_meta = source_meta.preserve_qparams(vec![1, k, c]);
-            let scattered = graph.add_anchored_call_function(
-                id,
-                format!("{}_scatter", name),
-                "backend.tosa.SCATTER.default".to_string(),
-                vec![
-                    IrArg::Node(src_1kc),
-                    IrArg::Node(idx_1w),
-                    IrArg::Node(scatter_values),
-                ],
-                scattered_meta,
-            );
-
-            // Reshape back
-            let result_meta = source_meta.preserve_qparams(source_shape.clone());
-            graph.replace_with_view_copy(
-                id,
-                format!("{}_out", name),
-                scattered,
-                &source_shape,
-                result_meta,
-            );
+            graph.replace_and_erase(id, result);
             modified = true;
         }
 

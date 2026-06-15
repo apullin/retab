@@ -243,6 +243,21 @@ Note: this is the first heavier shared-grammar migration in the index family.
   longer decides how to anchor graph edits, so callers can compose it into a
   larger rewrite chain.
 
+2026-06-15, IR rewrite cursor slice 9
+Rust LOC: 35,868 -> 35,851
+Movement: -17 Rust LOC
+Deleted/collapsed: manual anchored view/expand/gather/add/scatter/view suffix
+  construction in index_put lowering
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib
+  fx_rewrite_index_put_ir::tests; cargo test --lib; maturin develop --release;
+  focused Python smoke over index_tensor, index_put, and gather: 89 passed,
+  20 xfailed
+Note: this finishes the low-risk half of index_put. After linear-index creation,
+  the scatter path now reads as a single ordered chain: view indices/source,
+  broadcast values, optionally accumulate prior values, scatter, then view back.
+  The remaining anchored arange for None indices is tied to index collection and
+  should be handled in a separate structural pass if it proves worthwhile.
+
 Slice log:
 
 ```text
