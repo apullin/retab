@@ -702,12 +702,6 @@ impl IrGraph {
         )
     }
 
-    pub(crate) fn add_anchored_rescale(&mut self, anchor: NodeId, spec: RescaleRewrite) -> NodeId {
-        let id = self.add_rescale(spec);
-        self.anchor_to(id, anchor);
-        id
-    }
-
     pub(crate) fn add_after_rescale(&mut self, anchor: NodeId, spec: RescaleRewrite) -> NodeId {
         let id = self.add_rescale(spec);
         self.anchor_after(id, anchor);
@@ -768,21 +762,6 @@ impl IrGraph {
             dtype_kwarg(dtype),
             meta,
         )
-    }
-
-    pub fn add_anchored_arange(
-        &mut self,
-        anchor: NodeId,
-        name: impl Into<String>,
-        start: i64,
-        end: i64,
-        step: i64,
-        dtype: &str,
-        meta: NodeMeta,
-    ) -> NodeId {
-        let id = self.add_arange(name, start, end, step, dtype, meta);
-        self.anchor_to(id, anchor);
-        id
     }
 
     /// Update a single arg by index and mark dirty.
@@ -1464,6 +1443,11 @@ impl IrRewriteCursor<'_> {
         meta: NodeMeta,
     ) -> NodeId {
         let id = self.graph.add_arange(name, start, end, step, dtype, meta);
+        self.append_existing(id)
+    }
+
+    pub(crate) fn rescale(&mut self, spec: RescaleRewrite) -> NodeId {
+        let id = self.graph.add_rescale(spec);
         self.append_existing(id)
     }
 

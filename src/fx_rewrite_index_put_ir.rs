@@ -63,44 +63,47 @@ impl IrPass for IrRewriteIndexPutPass {
             };
             let index_meta = orig_meta.tensor_stamp(&index_dtype);
 
-            // Collect index node IDs and shapes, expanding None to arange
-            let mut idx_ids: Vec<NodeId> = Vec::new();
-            let mut idx_shapes: Vec<Vec<i64>> = Vec::new();
-            let mut invalid_indices = false;
-            for (dim_idx, item) in indices_list.iter().enumerate() {
-                match item {
-                    IrArg::Node(nid) => {
-                        let Some(s) = graph.node_shape(*nid) else {
+            // Collect index node IDs and shapes, expanding None to arange.
+            let (idx_ids, idx_shapes, invalid_indices) = {
+                let mut cursor = graph.rewrite_cursor(id);
+                let mut idx_ids: Vec<NodeId> = Vec::new();
+                let mut idx_shapes: Vec<Vec<i64>> = Vec::new();
+                let mut invalid_indices = false;
+                for (dim_idx, item) in indices_list.iter().enumerate() {
+                    match item {
+                        IrArg::Node(nid) => {
+                            let Some(s) = cursor.graph().node_shape(*nid) else {
+                                invalid_indices = true;
+                                break;
+                            };
+                            idx_ids.push(*nid);
+                            idx_shapes.push(s.to_vec());
+                        }
+                        IrArg::None => {
+                            let Some(&dim_size) = source_shape.get(dim_idx) else {
+                                invalid_indices = true;
+                                break;
+                            };
+                            let arange_meta = index_meta.drop_qparams(vec![dim_size]);
+                            let arange = cursor.arange(
+                                format!("{}_in{}", name, dim_idx),
+                                0,
+                                dim_size,
+                                1,
+                                &index_dtype,
+                                arange_meta,
+                            );
+                            idx_ids.push(arange);
+                            idx_shapes.push(vec![dim_size]);
+                        }
+                        _ => {
                             invalid_indices = true;
                             break;
-                        };
-                        idx_ids.push(*nid);
-                        idx_shapes.push(s.to_vec());
-                    }
-                    IrArg::None => {
-                        let Some(&dim_size) = source_shape.get(dim_idx) else {
-                            invalid_indices = true;
-                            break;
-                        };
-                        let arange_meta = index_meta.drop_qparams(vec![dim_size]);
-                        let arange = graph.add_anchored_arange(
-                            id,
-                            format!("{}_in{}", name, dim_idx),
-                            0,
-                            dim_size,
-                            1,
-                            &index_dtype,
-                            arange_meta,
-                        );
-                        idx_ids.push(arange);
-                        idx_shapes.push(vec![dim_size]);
-                    }
-                    _ => {
-                        invalid_indices = true;
-                        break;
+                        }
                     }
                 }
-            }
+                (idx_ids, idx_shapes, invalid_indices)
+            };
             if invalid_indices || idx_ids.is_empty() {
                 continue;
             }

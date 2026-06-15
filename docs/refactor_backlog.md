@@ -3210,3 +3210,39 @@ Metric:
 
 Rust source LOC increased from `35,751` to `35,816`. This was accepted as a
 semantic-collapse slice rather than a deletion slice.
+
+## Completed: Remove Generic Anchored Helper Family
+
+Status:
+
+Complete for active Rust source.
+
+Change:
+
+The last generic `IrGraph::add_anchored_*` helpers were replaced with
+`IrRewriteCursor` emission. Anchor-to-original placement now has one grammar:
+open a rewrite cursor at the anchor and append nodes through it. The remaining
+`add_after_*` helpers are intentionally still live because they express a
+different producer-placement contract.
+
+Deleted:
+
+- `IrGraph::add_anchored_rescale`
+- `IrGraph::add_anchored_arange`
+
+Added:
+
+- `IrRewriteCursor::rescale(...)`
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo check --lib`
+- `cargo test --lib fx_insert_qdq_rescale_ir::tests`
+- `cargo test --lib fx_rewrite_index_put_ir::tests`
+- `cargo test --lib`
+- `/tmp/et.sh`: `43 passed, 76 deselected, 2 xfailed`
+
+Metric:
+
+Rust source LOC decreased from `35,816` to `35,805`.

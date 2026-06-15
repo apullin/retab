@@ -28,23 +28,25 @@ fn insert_qdq_rescale(graph: &mut IrGraph, dq_id: NodeId, q_id: NodeId) -> bool 
     }
 
     let scale = dq_qp.scale / q_qp.scale;
+    let rescale_name = format!("{}_rescale", q.name);
+    let output_dtype = q_qp.dtype_str.clone();
     let meta = q.meta.rescale_meta_with_input_qparam(
         &graph.node(source_id).meta,
         dq_qp.clone(),
         q_qp.clone(),
     );
-    let rescale = graph.add_anchored_rescale(
-        dq_id,
-        RescaleRewrite::new(
-            format!("{}_rescale", q.name),
+    let rescale = {
+        let mut cursor = graph.rewrite_cursor(dq_id);
+        cursor.rescale(RescaleRewrite::new(
+            rescale_name,
             source_id,
-            q_qp.dtype_str.clone(),
+            output_dtype,
             vec![scale],
             dq_qp.zp,
             q_qp.zp,
             meta,
-        ),
-    );
+        ))
+    };
 
     graph.replace_and_erase(q_id, rescale);
     if !graph.has_live_users(dq_id) {
