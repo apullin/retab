@@ -217,22 +217,28 @@ Common facts include:
 - Layout-neutral markers.
 - Table qparams and other extra metadata.
 
-This data is one of the most fragile parts of the lowering system. Many passes
-need to know whether metadata should be copied, restamped, cleared, inferred,
-or preserved through a synthetic op.
+This data is one of the most fragile parts of the lowering system. Passes must
+state whether metadata is copied, restamped, cleared, inferred, or preserved
+through a synthetic op.
 
-The current code has many targeted helpers, but no single "tensor facts"
-abstraction. A future refactor should make metadata operations explicit:
+`TensorFacts` is the named tensor value-fact domain. `NodeMeta` owns private
+tensor, quant, and layout storage, and production passes should use `NodeMeta`
+and `TensorMetaStamp` helpers rather than reaching into the storage layout or
+rebuilding shape/dtype/qparam policy by hand:
 
 ```text
-copy facts from producer
-copy only dtype and shape
-copy qparams from input slot N
-clear stale qparams
-force output qparams
-stamp layout as NHWC
-derive facts from RESCALE args
+NodeMeta::tensor(shape, dtype)
+NodeMeta::cloned_with_same_dtype_or*
+NodeMeta::cloned_with_dtype_of_or*
+NodeMeta::tensor_stamp_with_dtype_of_or*
+TensorMetaStamp::{preserve_qparams, drop_qparams, empty_qparam_maps, plain_tensor, fresh_tensor}
+NodeMeta::{input_qparams, output_qparams, copy_qparams_from}
+NodeMeta::{set_val_dtype_for_existing_shape, clear_tosa_dim_order_if_rank_mismatch}
 ```
+
+Explicit semantic tensors should remain explicit. Examples include index
+tensors, bool masks, quant cast targets, int32 accumulator work tensors, float
+row/column work tensors, and dtype-valued op arguments.
 
 Avoid adding new ad hoc `meta.extra` keys unless the key is documented and has
 a clear owner.

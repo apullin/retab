@@ -49,7 +49,9 @@ impl IrPass for IrDecomposeMeanPass {
 
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let dtype = graph.node_dtype_or_float32(x_id).to_string();
+            let x_meta = graph.nodes[x_id].meta.clone();
+            let meta = orig_meta.tensor_stamp_with_dtype_of_or_float32(&x_meta);
+            let dtype = meta.dtype();
 
             // 4D spatial reduction → avg_pool2d path
             if input_shape.len() == 4 && dims.iter().all(|&d| d == 2 || d == 3) {
@@ -70,7 +72,7 @@ impl IrPass for IrDecomposeMeanPass {
                         vec![IrArg::Node(x_id), i64_list(&kernel), i64_list(&[1, 1])],
                         &orig_meta,
                         pool_shape.clone(),
-                        &dtype,
+                        dtype,
                     );
 
                     if !keepdim {
@@ -79,7 +81,7 @@ impl IrPass for IrDecomposeMeanPass {
                             format!("{}_view", name),
                             result,
                             &output_shape,
-                            orig_meta.cloned_with_val(output_shape.clone(), &dtype),
+                            meta.preserve_qparams(output_shape.clone()),
                         );
                         modified = true;
                         continue;
@@ -108,7 +110,7 @@ impl IrPass for IrDecomposeMeanPass {
                 vec![IrArg::Node(x_id), i64_list(&dims), IrArg::Bool(true)],
                 &orig_meta,
                 sum_shape.clone(),
-                &dtype,
+                dtype,
             );
 
             // full([1]*rank, 1/count)
@@ -120,7 +122,7 @@ impl IrPass for IrDecomposeMeanPass {
                 vec![i64_list(&ones_shape), IrArg::Float(1.0 / count)],
                 &orig_meta,
                 ones_shape,
-                &dtype,
+                dtype,
             );
 
             // mul(sum, 1/count)
@@ -130,7 +132,7 @@ impl IrPass for IrDecomposeMeanPass {
                 vec![IrArg::Node(sum_id), IrArg::Node(count_id)],
                 &orig_meta,
                 sum_shape.clone(),
-                &dtype,
+                dtype,
             );
             // Note: mul is NOT anchored — it depends on sum_id which may be
             // further decomposed by convert_sum. Conversion re-sorts by def-use,
@@ -185,7 +187,7 @@ impl IrPass for IrDecomposeMeanPass {
                     format!("{}_view", name),
                     mul_id,
                     &output_shape,
-                    orig_meta.cloned_with_val(output_shape.clone(), &dtype),
+                    meta.preserve_qparams(output_shape.clone()),
                 );
                 modified = true;
                 continue;

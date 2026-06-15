@@ -1542,8 +1542,6 @@ pub struct TensorFacts {
     pub dtype: String,
 }
 
-pub type FakeTensorMeta = TensorFacts;
-
 impl TensorFacts {
     pub fn new(shape: impl Into<Vec<i64>>, dtype: impl Into<String>) -> Self {
         Self {
@@ -1655,6 +1653,16 @@ impl NodeMeta {
 
     pub fn tensor_stamp_same_dtype_or_float32(&self) -> TensorMetaStamp<'_> {
         self.tensor_stamp_with_dtype_of_or_float32(self)
+    }
+
+    pub fn tensor_stamp_same_dtype_or_dtype_of_or_float32<'a>(
+        &'a self,
+        dtype_source: &'a Self,
+    ) -> TensorMetaStamp<'a> {
+        match self.val_dtype() {
+            Some(dtype) => self.tensor_stamp(dtype),
+            None => self.tensor_stamp_with_dtype_of_or_float32(dtype_source),
+        }
     }
 
     pub fn tensor_stamp_bool_as_int8_work_dtype_of_or_float32<'a>(
@@ -1891,8 +1899,8 @@ impl NodeMeta {
         self.tensor = Some(facts);
     }
 
-    pub fn set_val(&mut self, ftm: FakeTensorMeta) {
-        self.set_tensor_facts(ftm);
+    pub fn set_val(&mut self, facts: TensorFacts) {
+        self.set_tensor_facts(facts);
     }
 
     pub fn set_tensor_facts_for_existing_shape(&mut self, dtype: impl Into<String>) -> bool {
@@ -2130,13 +2138,21 @@ pub struct TensorMetaStamp<'a> {
     dtype: Cow<'a, str>,
 }
 
-impl TensorMetaStamp<'_> {
+impl<'a> TensorMetaStamp<'a> {
     pub fn dtype(&self) -> &str {
         self.dtype.as_ref()
     }
 
+    pub fn with_dtype(&self, dtype: impl Into<Cow<'a, str>>) -> TensorMetaStamp<'a> {
+        self.base.tensor_stamp(dtype)
+    }
+
     fn facts(&self, shape: impl Into<Vec<i64>>) -> TensorFacts {
         TensorFacts::new(shape, self.dtype.as_ref())
+    }
+
+    pub fn fresh_tensor(&self, shape: impl Into<Vec<i64>>) -> NodeMeta {
+        NodeMeta::tensor(shape, self.dtype.as_ref())
     }
 
     pub fn preserve_qparams(&self, shape: impl Into<Vec<i64>>) -> NodeMeta {

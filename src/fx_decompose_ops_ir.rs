@@ -5,6 +5,7 @@ use std::f64::consts::FRAC_PI_2;
 
 use crate::fx_ir::{
     i64_list_arg as i64_list, IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta, NodeOp,
+    TensorMetaStamp,
 };
 use crate::fx_target::{add_sub_alpha_result_target, group_norm_reshape_target};
 use crate::runner_logging::log_line;
@@ -45,23 +46,32 @@ struct DecomposeRule {
     decompose: DecomposeFn,
 }
 
-#[derive(Clone, Copy)]
 struct MetaFactory<'a> {
-    base: &'a NodeMeta,
-    dtype: &'a str,
+    tensor: TensorMetaStamp<'a>,
+    bool_tensor: TensorMetaStamp<'a>,
 }
 
 impl<'a> MetaFactory<'a> {
     fn new(base: &'a NodeMeta, dtype: &'a str) -> Self {
-        Self { base, dtype }
+        Self {
+            tensor: base.tensor_stamp(dtype),
+            bool_tensor: base.tensor_stamp("torch.bool"),
+        }
     }
 
-    fn tensor(self, shape: &[i64]) -> NodeMeta {
-        self.base.cloned_with_val(shape.to_vec(), self.dtype)
+    fn from_tensor_stamp(tensor: TensorMetaStamp<'a>) -> Self {
+        Self {
+            bool_tensor: tensor.with_dtype("torch.bool"),
+            tensor,
+        }
     }
 
-    fn bool(self, shape: &[i64]) -> NodeMeta {
-        self.base.cloned_with_val(shape.to_vec(), "torch.bool")
+    fn tensor(&self, shape: &[i64]) -> NodeMeta {
+        self.tensor.preserve_qparams(shape.to_vec())
+    }
+
+    fn bool(&self, shape: &[i64]) -> NodeMeta {
+        self.bool_tensor.preserve_qparams(shape.to_vec())
     }
 }
 
@@ -183,14 +193,12 @@ impl ApproxCtx {
         args: Vec<IrArg>,
         shape: &[i64],
     ) -> NodeId {
-        graph.add_anchored_call_function_with_val(
+        graph.add_anchored_call_function(
             self.anchor_id,
             self.op_name(suffix),
             target,
             args,
-            &self.meta,
-            shape.to_vec(),
-            self.dtype(),
+            self.tensor_meta(shape),
         )
     }
 
@@ -1548,15 +1556,13 @@ fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let input_meta = graph.nodes[input_id].meta.clone();
     let value_meta = graph.nodes[value_getitem].meta.clone();
-    let dtype = value_meta
-        .val_dtype()
-        .unwrap_or_else(|| input_meta.val_dtype_or_float32())
-        .to_string();
 
     let mut keepdim_shape = input_shape;
     keepdim_shape[dim] = 1;
 
-    let mut reduce_meta = value_meta.cloned_with_val(keepdim_shape, &dtype);
+    let mut reduce_meta = value_meta
+        .tensor_stamp_same_dtype_or_dtype_of_or_float32(&input_meta)
+        .preserve_qparams(keepdim_shape);
     reduce_meta.copy_dim_order_facts_from(&input_meta);
 
     let reduce_id = graph.add_anchored_call_function(
@@ -2324,11 +2330,9 @@ fn decompose_stack(graph: &mut IrGraph, id: NodeId) -> bool {
 
     let name = graph.nodes[id].name.clone();
     let meta = graph.nodes[id].meta.clone();
-    let dtype = graph.nodes[tensor_ids[0]]
-        .meta
-        .val_dtype_or_float32()
-        .to_string();
-    let metas = MetaFactory::new(&meta, &dtype);
+    let first_meta = graph.nodes[tensor_ids[0]].meta.clone();
+    let metas =
+        MetaFactory::from_tensor_stamp(meta.tensor_stamp_with_dtype_of_or_float32(&first_meta));
 
     // Unsqueeze each tensor at dim
     let mut unsqueezed: Vec<NodeId> = Vec::new();
@@ -2386,10 +2390,12 @@ fn decompose_unbind(graph: &mut IrGraph, id: NodeId) -> bool {
     };
     let rank = x_shape.len() as i64;
     let dim_norm = dim.rem_euclid(rank) as usize;
-    let dtype = graph.node_dtype_or_float32(x_id).to_string();
     let name = graph.nodes[id].name.clone();
     let orig_meta = graph.nodes[id].meta.clone();
-    let metas = MetaFactory::new(&orig_meta, &dtype);
+    let input_meta = graph.nodes[x_id].meta.clone();
+    let metas = MetaFactory::from_tensor_stamp(
+        orig_meta.tensor_stamp_with_dtype_of_or_float32(&input_meta),
+    );
 
     let getitem_users = graph.live_getitem_users(id);
 

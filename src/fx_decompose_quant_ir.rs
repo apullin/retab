@@ -123,14 +123,15 @@ impl IrPass for IrDecomposeQuantPass {
             let rank = shape.len();
             let ones: Vec<i64> = vec![1; rank];
 
-            let fp_dtype = if is_quantize {
-                graph.node_dtype_or_float32(x_id).to_string()
+            let x_meta = graph.nodes[x_id].meta.clone();
+            let fp_meta = if is_quantize {
+                orig_meta.tensor_stamp_with_dtype_of_or_float32(&x_meta)
             } else {
-                graph.node_dtype_or_float32(id).to_string()
+                orig_meta.tensor_stamp_same_dtype_or_float32()
             };
+            let fp_dtype = fp_meta.dtype();
 
             let eff_scale = if is_quantize { 1.0 / scale } else { scale };
-            let fp_meta = orig_meta.tensor_stamp(&fp_dtype);
             let int32_meta = orig_meta.tensor_stamp("torch.int32");
 
             let result = if is_quantize {
@@ -229,7 +230,7 @@ impl IrPass for IrDecomposeQuantPass {
                     graph,
                     &format!("{}_to_fp", name),
                     shifted,
-                    &fp_dtype,
+                    fp_dtype,
                     &shape,
                     &orig_meta,
                     id,

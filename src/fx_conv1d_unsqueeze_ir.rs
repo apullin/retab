@@ -6,7 +6,7 @@
 //!   convolution(... stride=[s,1], pad=[p,0], dilation=[d,1])
 //!   view_copy(output[..., W_out, 1] -> [..., W_out])
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta};
 use crate::fx_target::{is_aten_convolution_default_target, is_conv1d_default_target};
 use crate::runner_logging::log_line;
 
@@ -34,13 +34,12 @@ fn add_view_copy(
     graph: &mut IrGraph,
     name_prefix: &str,
     suffix: &str,
+    base_meta: &NodeMeta,
     input_id: NodeId,
     new_shape: &[i64],
-    dtype: &str,
 ) -> NodeId {
-    let meta = graph.nodes[input_id]
-        .meta
-        .tensor_stamp(dtype)
+    let meta = base_meta
+        .tensor_stamp_same_dtype_or_float32()
         .empty_qparam_maps(new_shape.to_vec());
     graph.add_view_copy(
         format!("{}_{}", name_prefix, suffix),
@@ -139,12 +138,12 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(s) => s,
         None => return false,
     };
-    let x_dtype = match graph.node_dtype(x_id) {
-        Some(d) => d.to_string(),
+    let x_meta = match graph.node_dtype(x_id) {
+        Some(_) => graph.nodes[x_id].meta.clone(),
         None => return false,
     };
-    let w_dtype = match graph.node_dtype(w_id) {
-        Some(d) => d.to_string(),
+    let w_meta = match graph.node_dtype(w_id) {
+        Some(_) => graph.nodes[w_id].meta.clone(),
         None => return false,
     };
     let w_shape = match graph.node_shape_vec(w_id) {
@@ -155,13 +154,13 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
     // Unsqueeze input: [..., W] -> [..., W, 1]
     let mut x_4d = x_shape.clone();
     x_4d.push(1);
-    let x_unsqueezed = add_view_copy(graph, &node_name, "input_unsqueeze", x_id, &x_4d, &x_dtype);
+    let x_unsqueezed = add_view_copy(graph, &node_name, "input_unsqueeze", &x_meta, x_id, &x_4d);
     graph.anchor_to(x_unsqueezed, id);
 
     // Unsqueeze weight: [..., KW] -> [..., KW, 1]
     let mut w_4d = w_shape.clone();
     w_4d.push(1);
-    let w_unsqueezed = add_view_copy(graph, &node_name, "weight_unsqueeze", w_id, &w_4d, &w_dtype);
+    let w_unsqueezed = add_view_copy(graph, &node_name, "weight_unsqueeze", &w_meta, w_id, &w_4d);
     graph.anchor_to(w_unsqueezed, id);
     graph.anchor_after(w_unsqueezed, x_unsqueezed);
 
@@ -180,14 +179,13 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(s) => s,
         None => return false,
     };
-    let orig_out_dtype = match graph.node_dtype(id) {
-        Some(d) => d.to_string(),
-        None => return false,
-    };
+    if graph.node_dtype(id).is_none() {
+        return false;
+    }
     let mut conv2d_shape = orig_out_shape.clone();
     conv2d_shape.push(1);
 
-    let conv2d_meta = base_meta.cloned_with_val(conv2d_shape.to_vec(), &orig_out_dtype);
+    let conv2d_meta = base_meta.cloned_with_same_dtype_or_float32(conv2d_shape.to_vec());
 
     let conv2d = graph.add_anchored_call_function(
         id,
@@ -213,9 +211,9 @@ fn unsqueeze_conv1d(graph: &mut IrGraph, id: NodeId) -> bool {
         graph,
         &node_name,
         "output_squeeze",
+        &base_meta,
         conv2d,
         &orig_out_shape,
-        &orig_out_dtype,
     );
 
     graph.anchor_after(squeezed, conv2d);

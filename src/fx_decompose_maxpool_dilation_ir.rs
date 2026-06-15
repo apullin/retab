@@ -122,8 +122,9 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
             let orig_meta = value_getitem
                 .map(|user_id| graph.nodes[user_id].meta.clone())
                 .unwrap_or_else(|| graph.nodes[id].meta.clone());
-            let dtype = graph.node_dtype_or_float32(x_id).to_string();
-            let meta = orig_meta.tensor_stamp(&dtype);
+            let x_meta = graph.nodes[x_id].meta.clone();
+            let meta = orig_meta.tensor_stamp_with_dtype_of_or_float32(&x_meta);
+            let dtype = meta.dtype();
 
             // 1. constant_pad_nd(x, [pad_w, right_pad, pad_h, bottom_pad, 0,0,0,0], pad_val)
             let x_pad = graph.add_anchored_call_function(
@@ -133,7 +134,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 vec![
                     IrArg::Node(x_id),
                     i64_list(&[pad_w, right_pad, pad_h, bottom_pad, 0, 0, 0, 0]),
-                    pad_value_for_dtype(&dtype),
+                    pad_value_for_dtype(dtype),
                 ],
                 meta.preserve_qparams(vec![n, c, h + pad_h + bottom_pad, w + pad_w + right_pad]),
             );

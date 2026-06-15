@@ -228,7 +228,7 @@ fn unique_name(graph: &IrGraph, base: &str) -> String {
 fn transpose_meta(input_meta: &NodeMeta, perm: &[usize]) -> NodeMeta {
     let mut meta = input_meta
         .tensor_facts()
-        .map(|val| input_meta.cloned_with_val(permuted_shape(&val.shape, perm), val.dtype.clone()))
+        .map(|val| input_meta.cloned_with_same_dtype_or_float32(permuted_shape(&val.shape, perm)))
         .unwrap_or_else(|| input_meta.clone());
     meta.set_tosa_dim_order((0..perm.len()).collect());
     meta

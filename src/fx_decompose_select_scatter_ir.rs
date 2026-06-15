@@ -55,6 +55,8 @@ impl IrPass for IrDecomposeSelectScatterPass {
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
             let input_meta = graph.nodes[input_id].meta.clone();
+            let index_meta = orig_meta.tensor_stamp("torch.int32");
+            let bool_meta = orig_meta.tensor_stamp("torch.bool");
 
             // 1. arange(0, dim_size) → shape [dim_size], dtype int32
             let arange_id = graph.add_anchored_call_function(
@@ -62,7 +64,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 format!("{}_arange", node_name),
                 "aten.arange.start_step",
                 vec![IrArg::Int(0), IrArg::Int(dim_size)],
-                orig_meta.cloned_with_val(vec![dim_size], "torch.int32"),
+                index_meta.preserve_qparams(vec![dim_size]),
             );
 
             // 2. view(arange, [1, ..., dim_size, ..., 1])
@@ -73,7 +75,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 format!("{}_arange_view", node_name),
                 arange_id,
                 &mask_shape,
-                orig_meta.cloned_with_val(mask_shape.clone(), "torch.int32"),
+                index_meta.preserve_qparams(mask_shape.clone()),
             );
 
             // 3. full([1], index, dtype=int32) — scalar index tensor
@@ -82,7 +84,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 format!("{}_index_full", node_name),
                 "aten.full.default",
                 vec![i64_list(&[1]), IrArg::Int(index)],
-                orig_meta.cloned_with_val(vec![1], "torch.int32"),
+                index_meta.preserve_qparams(vec![1]),
             );
 
             // 4. eq(viewed_arange, index_tensor) → boolean mask
@@ -91,7 +93,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 format!("{}_eq", node_name),
                 "aten.eq.Tensor",
                 vec![IrArg::Node(viewed_arange), IrArg::Node(index_tensor)],
-                orig_meta.cloned_with_val(mask_shape, "torch.bool"),
+                bool_meta.preserve_qparams(mask_shape),
             );
 
             // 5. unsqueeze(src, dim) — restore dimension that select removed

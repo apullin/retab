@@ -9,20 +9,20 @@
 //!   out  = where(mask, data, destination)
 //! Runs before IrRewriteIndexPut so the general SCATTER path only sees int indices.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+#[cfg(test)]
+use crate::fx_ir::NodeMeta;
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp, TensorMetaStamp};
 use crate::fx_target::is_index_put_family_target;
 use crate::runner_logging::log_line;
 
 fn view_copy(
     graph: &mut IrGraph,
     name: String,
-    base_meta: &NodeMeta,
+    meta: &TensorMetaStamp<'_>,
     input_id: NodeId,
     shape: &[i64],
-    dtype: &str,
 ) -> NodeId {
-    let meta = base_meta.cloned_with_val(shape.to_vec(), dtype);
-    graph.add_view_copy(name, input_id, shape, meta)
+    graph.add_view_copy(name, input_id, shape, meta.preserve_qparams(shape.to_vec()))
 }
 
 fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
@@ -87,6 +87,8 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
     let data_dtype = graph.node_dtype(data).unwrap_or("torch.int8").to_string();
+    let mask_meta = orig_meta.tensor_stamp("torch.bool");
+    let data_meta = orig_meta.tensor_stamp(&data_dtype);
     let dest_rank = dest_shape.len();
 
     let mut prev: Option<NodeId> = None;
@@ -106,10 +108,9 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
             let v = view_copy(
                 graph,
                 format!("{}_mask_reshape", node_name),
-                &orig_meta,
+                &mask_meta,
                 mask,
                 &target,
-                "torch.bool",
             );
             graph.anchor_to(v, id);
             prev = Some(v);
@@ -123,10 +124,9 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
         let v = view_copy(
             graph,
             format!("{}_data_reshape", node_name),
-            &orig_meta,
+            &data_meta,
             data,
             &ones,
-            &data_dtype,
         );
         graph.anchor_to(v, id);
         if let Some(p) = prev {

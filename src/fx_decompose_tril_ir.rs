@@ -22,16 +22,15 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
     let input_dtype = graph.node_dtype(input_id)?.to_string();
     let base_name = graph.nodes[id].name.clone();
     let base_meta = graph.nodes[id].meta.clone();
+    let float_meta = base_meta.tensor_stamp("torch.float32");
 
     // --- row indices: arange(0, rows) -> [rows], then view to [rows, 1] ---
-    let row_arange = graph.add_anchored_call_function_with_val(
+    let row_arange = graph.add_anchored_call_function(
         id,
         format!("{base_name}_row_arange"),
         "aten.arange.start_step",
         vec![IrArg::Int(0), IrArg::Int(rows), IrArg::Int(1)],
-        &base_meta,
-        vec![rows],
-        "torch.float32",
+        float_meta.preserve_qparams(vec![rows]),
     );
 
     let row_view = graph.add_anchored_view_copy(
@@ -39,7 +38,7 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
         format!("{base_name}_row_view"),
         row_arange,
         &[rows, 1],
-        base_meta.cloned_with_val(vec![rows, 1], "torch.float32"),
+        float_meta.preserve_qparams(vec![rows, 1]),
     );
 
     // If diagonal != 0, add the offset
@@ -49,21 +48,19 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
             format!("{base_name}_row_add_diag"),
             "aten.add.Scalar".to_string(),
             vec![IrArg::Node(row_view), IrArg::Int(diagonal)],
-            base_meta.cloned_with_val(vec![rows, 1], "torch.float32"),
+            float_meta.preserve_qparams(vec![rows, 1]),
         )
     } else {
         row_view
     };
 
     // --- col indices: arange(0, cols) -> [cols], then view to [1, cols] ---
-    let col_arange = graph.add_anchored_call_function_with_val(
+    let col_arange = graph.add_anchored_call_function(
         id,
         format!("{base_name}_col_arange"),
         "aten.arange.start_step",
         vec![IrArg::Int(0), IrArg::Int(cols), IrArg::Int(1)],
-        &base_meta,
-        vec![cols],
-        "torch.float32",
+        float_meta.preserve_qparams(vec![cols]),
     );
 
     let col_view = graph.add_anchored_view_copy(
@@ -71,7 +68,7 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> Option<NodeId> {
         format!("{base_name}_col_view"),
         col_arange,
         &[1, cols],
-        base_meta.cloned_with_val(vec![1, cols], "torch.float32"),
+        float_meta.preserve_qparams(vec![1, cols]),
     );
 
     // --- mask: row >= col -> bool [rows, cols] ---

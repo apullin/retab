@@ -19,18 +19,18 @@ rewrite.
 
 Recommended order:
 
-1. Tensor metadata grammar. Highest remaining simplification potential. Continue
-   collapsing direct shape, dtype, qparam, layout, and table-fact manipulation
-   behind `NodeMeta` helpers or a future `TensorFacts` layer only where it
-   deletes repeated production code.
-2. IR rewrite builders. Keep extracting graph-surgery helpers when the same
+1. IR rewrite builders. Keep extracting graph-surgery helpers when the same
    add/copy/anchor/replace/erase pattern appears in multiple passes.
-3. Target grammar. Migrate raw target-string predicates only by domain and only
+2. Target grammar. Migrate raw target-string predicates only by domain and only
    when the helper replaces multiple call sites or removes a risky substring
    rule.
-4. Python boundary grammar. The inlet is already much cleaner; remaining work
+3. Python boundary grammar. The inlet is already much cleaner; remaining work
    is lower priority and should focus on Python import/object construction or
    new dynamic `GraphModule` reads.
+4. Tensor metadata follow-through. The TensorFacts campaign is complete for
+   active production source; future work should only happen when new repeated
+   metadata grammar appears or when a pass-specific semantic helper deletes
+   production code.
 5. Bookkeeping. Keep this file current by marking large items substantially
    complete once only opportunistic follow-through remains.
 
@@ -1785,14 +1785,13 @@ Add focused Rust tests or Python smoke tests for ambiguous target strings.
 
 Status:
 
-Substantially complete as helper grammar; full `TensorFacts` remains a separate
-design decision. `NodeMeta::set_empty_qparam_maps` names the common
-"present but empty" qparam-map operation, and `NodeMeta::tensor(shape, dtype)`
-now names fresh tensor-valued metadata construction. This is deliberately
-smaller than a full `TensorFacts` abstraction because qparam propagation and
-dirty-flag semantics need more focused migration. Most one-line local aliases
-for fresh tensor metadata have been removed so new tests and passes should call
-`NodeMeta::tensor` directly unless a helper adds real domain meaning. Indexed
+Complete for active production source. `NodeMeta::set_empty_qparam_maps` names
+the common "present but empty" qparam-map operation, and
+`NodeMeta::tensor(shape, dtype)` now names fresh tensor-valued metadata
+construction. `TensorFacts` is the single FX-side tensor value-fact name; the
+legacy `FakeTensorMeta` alias is gone. New tests and passes should call
+`NodeMeta::tensor` directly for fresh tensor metadata unless a helper adds real
+domain meaning. Indexed
 input-qparam lookups and deterministic sorted input-qparam traversal now also
 live on `NodeMeta`. RESCALE output metadata construction now also lives on
 `NodeMeta`, covering output-qparam stamping, stale input-qparam clearing,
@@ -1801,10 +1800,10 @@ for inserted RESCALE nodes. Plain cloned metadata that explicitly drops qparam
 domains is now named by `NodeMeta::cloned_without_qparams`, and production
 passes no longer spell the old chained operation directly. Several production
 passes now also use `NodeMeta::cloned_with_val` directly instead of hand-written
-`FakeTensorMeta` clone-and-restamp blocks. Effectful in-place dtype restamps
-that preserve existing tensor shape now use
-`NodeMeta::set_val_dtype_for_existing_shape`, leaving direct `FakeTensorMeta`
-construction in `NodeMeta` internals rather than production pass restamp code.
+tensor-fact clone-and-restamp blocks. Effectful in-place dtype restamps that
+preserve existing tensor shape now use
+`NodeMeta::set_val_dtype_for_existing_shape`, leaving tensor-fact construction
+in `NodeMeta` internals rather than production pass restamp code.
 Indexed qparam slot stamping now also lives on `NodeMeta`, so simple single-slot
 input/output qparam assignment no longer requires ad hoc `HashMap` construction.
 Defaulted tensor dtype reads now also live on `NodeMeta` via
@@ -1846,6 +1845,14 @@ so production passes use named metadata operations rather than reaching into the
 storage layout. Shape-only metadata restamps that preserve the source dtype now
 use `NodeMeta::cloned_with_same_dtype_or*`, covering repeat-interleave,
 pixel-shuffle, where-mask expansion, and index-put None normalization.
+Qparam-policy-bearing tensor restamps now use `TensorMetaStamp` operations that
+state whether qparams are preserved, dropped, made present-but-empty, or omitted
+for fresh tensors. Source-dtype propagation now uses named stamp helpers rather
+than local string plumbing across pooling, reductions, cumsum, linear, conv1d,
+layernorm, quant, stack/unbind, memory-format, and pad rewrites. Remaining raw
+semantic dtype stamps in production source are intentional operation contracts:
+index tensors, bool masks, quant cast targets, int32 accumulator work tensors,
+float row/column work tensors, and dtype-valued op arguments.
 
 2026-06-14, qparam map accessor slice
 
@@ -1927,6 +1934,39 @@ as-strided-copy, avg-pool, cond, conv1d, conv2d, gather, group-norm, index-put,
 index-select, index-tensor, layer-norm, linear, max-pool, pixel-shuffling,
 repeat, select, select-scatter, slice, slice-scatter, split, sum, unfold, view,
 where, and while: 1003 passed, 21 xfailed.
+
+2026-06-14, TensorFacts completion slice
+
+Rust LOC: 35,981
+
+Movement: +15 Rust LOC from the previous TensorFacts checkpoint.
+
+Deleted: legacy `FakeTensorMeta` alias; remaining local source-dtype string
+plumbing from cumsum, avg-pool padding, max-pool dilation, mean, var,
+layernorm, linear, quant decomposition, grouped-conv slices, conv1d unsqueeze,
+memory-format transpose metadata, pad rewrite, select-scatter helper tensors,
+bool-mask index_put normalization, dim-extrema, stack, and unbind metadata
+construction.
+
+Added: `TensorMetaStamp::fresh_tensor`,
+`TensorMetaStamp::with_dtype`, and
+`NodeMeta::tensor_stamp_same_dtype_or_dtype_of_or_float32` for the remaining
+metadata policies that were repeated but not yet named.
+
+Validation: `cargo fmt`; `cargo check --lib`; `cargo test --lib` with 141
+passed; rebuild via `/tmp/et.sh` with `maturin develop --release` printing
+`Installed retab-0.1.0`; expanded focused Python smoke over addmm, adaptive
+avg-pool, as-strided-copy, avg-pool, cond, conv1d, conv2d, gather, group-norm,
+index-put, index-select, index-tensor, layer-norm, linear, max-pool,
+pixel-shuffling, repeat, select, select-scatter, slice, slice-scatter, split,
+sum, unfold, view, where, and while: 1003 passed, 21 xfailed.
+
+Completion audit: remaining `tensor_stamp(...)`/dtype hits in active production
+source are explicit operation semantics rather than shared TensorFacts
+plumbing: index tensors, bool masks, quant cast targets, int32 accumulator work
+tensors, float row/column work tensors, bool-gather work-domain recovery, and
+dtype-valued op arguments. Do not collapse those behind generic helpers unless
+a new helper names the operation semantic more clearly than the explicit dtype.
 
 Problem:
 

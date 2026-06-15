@@ -35,10 +35,12 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(shape) => shape,
         None => return false,
     };
-    let dtype = graph.node_dtype_or_float32(x_id).to_string();
     let target = graph.nodes[id].target.clone();
     let name = graph.nodes[id].name.clone();
     let base_meta = graph.nodes[id].meta.clone();
+    let x_meta = graph.nodes[x_id].meta.clone();
+    let meta = base_meta.tensor_stamp_with_dtype_of_or_float32(&x_meta);
+    let dtype = meta.dtype();
 
     let dims = normalized_reduction_dims(graph.nodes[id].args.get(1), &input_shape, false);
     if dims.is_empty() {
@@ -94,7 +96,7 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(x_id), i64_list(&dims), IrArg::Bool(true)],
         &base_meta,
         mean_shape.clone(),
-        &dtype,
+        dtype,
     );
 
     let diff = graph.add_anchored_call_function_with_val(
@@ -104,7 +106,7 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(x_id), IrArg::Node(mean)],
         &base_meta,
         input_shape.clone(),
-        &dtype,
+        dtype,
     );
 
     let squared = graph.add_anchored_call_function_with_val(
@@ -114,7 +116,7 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(diff), IrArg::Node(diff)],
         &base_meta,
         input_shape.clone(),
-        &dtype,
+        dtype,
     );
 
     let sum = graph.add_anchored_call_function_with_val(
@@ -124,7 +126,7 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(squared), i64_list(&dims), IrArg::Bool(keepdim)],
         &base_meta,
         output_shape.clone(),
-        &dtype,
+        dtype,
     );
 
     let coefficient = graph.add_anchored_call_function_with_val(
@@ -134,7 +136,7 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![i64_list(&coefficient_shape), IrArg::Float(1.0 / denom)],
         &base_meta,
         coefficient_shape,
-        &dtype,
+        dtype,
     );
 
     graph.replace_with_call_function_with_val(
@@ -144,7 +146,7 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(sum), IrArg::Node(coefficient)],
         &base_meta,
         output_shape,
-        &dtype,
+        dtype,
     );
     true
 }

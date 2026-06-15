@@ -15,11 +15,11 @@ fn slice_meta(graph: &IrGraph, id: NodeId, dim: usize, start: i64, stop: i64) ->
         return None;
     }
     shape[dim] = (stop - start).max(0);
-    let dtype = graph.node_dtype(id)?.to_string();
+    graph.node_dtype(id)?;
     Some(
         graph.nodes[id]
             .meta
-            .tensor_stamp(&dtype)
+            .tensor_stamp_same_dtype_or_float32()
             .empty_qparam_maps(shape),
     )
 }

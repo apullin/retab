@@ -5,7 +5,7 @@
 //!
 //!   full_like(x, fill_value) -> full(x.shape, fill_value)
 //!
-//! The meta (including FakeTensorMeta with shape/dtype) is cloned from the
+//! The meta (including TensorFacts with shape/dtype) is cloned from the
 //! original node, which preserves dtype information through the graph.
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass};

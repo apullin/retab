@@ -9,7 +9,9 @@
 //!   reflect:   left=slice@(left-i),     right=slice@(size-2-i)
 //! Constant-mode pad is left to the serializer's existing handling.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta};
+#[cfg(test)]
+use crate::fx_ir::NodeMeta;
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, TensorMetaStamp};
 use crate::fx_target::is_pad_target;
 use crate::runner_logging::log_line;
 
@@ -17,8 +19,7 @@ use crate::runner_logging::log_line;
 fn add_slice(
     graph: &mut IrGraph,
     id: NodeId,
-    base_meta: &NodeMeta,
-    dtype: &str,
+    meta: &TensorMetaStamp<'_>,
     name: String,
     x_id: NodeId,
     x_shape: &[i64],
@@ -37,7 +38,7 @@ fn add_slice(
         idx,
         idx + 1,
         None,
-        base_meta.cloned_with_val(out_shape, dtype),
+        meta.preserve_qparams(out_shape),
     );
     if let Some(p) = *prev {
         graph.anchor_after(n, p);
@@ -51,8 +52,7 @@ fn add_slice(
 fn pad_along_dim(
     graph: &mut IrGraph,
     id: NodeId,
-    base_meta: &NodeMeta,
-    dtype: &str,
+    meta: &TensorMetaStamp<'_>,
     name_prefix: &str,
     counter: &mut usize,
     x_id: NodeId,
@@ -78,8 +78,7 @@ fn pad_along_dim(
         let s = add_slice(
             graph,
             id,
-            base_meta,
-            dtype,
+            meta,
             format!("{}_slice{}", name_prefix, *counter),
             x_id,
             x_shape,
@@ -100,8 +99,7 @@ fn pad_along_dim(
         let s = add_slice(
             graph,
             id,
-            base_meta,
-            dtype,
+            meta,
             format!("{}_slice{}", name_prefix, *counter),
             x_id,
             x_shape,
@@ -120,7 +118,7 @@ fn pad_along_dim(
         format!("{}_cat{}", name_prefix, *counter),
         "aten.cat.default",
         vec![IrArg::List(members), IrArg::Int(dim as i64)],
-        base_meta.cloned_with_val(out_shape.clone(), dtype),
+        meta.preserve_qparams(out_shape.clone()),
     );
     *counter += 1;
     if let Some(p) = *prev {
@@ -153,10 +151,10 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     };
     let node_name = node.name.clone();
     let orig_meta = node.meta.clone();
-    let dtype = match orig_meta.val_dtype() {
-        Some(d) => d.to_string(),
-        None => return false,
-    };
+    if orig_meta.val_dtype().is_none() {
+        return false;
+    }
+    let meta = orig_meta.tensor_stamp_same_dtype_or_float32();
     let input_shape = match graph.node_shape_vec(input_id) {
         Some(s) => s,
         None => return false,
@@ -185,8 +183,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
         let (nid, nshape) = pad_along_dim(
             graph,
             id,
-            &orig_meta,
-            &dtype,
+            &meta,
             &node_name,
             &mut counter,
             cur_id,

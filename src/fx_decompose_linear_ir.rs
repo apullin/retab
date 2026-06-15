@@ -57,10 +57,6 @@ impl IrPass for IrDecomposeLinearPass {
                 Some(s) => s,
                 None => continue,
             };
-            let output_dtype = graph.node_dtype_or_float32(id).to_string();
-            let input_dtype = graph.node_dtype_or_float32(input_id).to_string();
-            let weight_dtype = graph.node_dtype_or_float32(weights_id).to_string();
-
             // Compute batch dimension: product of all dims except last.
             let ci = input_shape[input_shape.len() - 1];
             let batches: i64 = input_shape[..input_shape.len() - 1].iter().product();
@@ -73,7 +69,7 @@ impl IrPass for IrDecomposeLinearPass {
             let input_4d_shape = [batches, ci, 1, 1];
             let input_base_meta = graph.nodes[input_id].meta.clone();
             let input_4d_meta = input_base_meta
-                .tensor_stamp(&input_dtype)
+                .tensor_stamp_same_dtype_or_float32()
                 .empty_qparam_maps(input_4d_shape);
             let input_reshaped = graph.add_anchored_view_copy(
                 id,
@@ -88,7 +84,7 @@ impl IrPass for IrDecomposeLinearPass {
             let weights_4d_shape = [co, weights_shape[1], 1, 1];
             let weights_base_meta = graph.nodes[weights_id].meta.clone();
             let weights_4d_meta = weights_base_meta
-                .tensor_stamp(&weight_dtype)
+                .tensor_stamp_same_dtype_or_float32()
                 .empty_qparam_maps(weights_4d_shape);
             let weights_reshaped = graph.add_anchored_view_copy(
                 id,
@@ -103,7 +99,7 @@ impl IrPass for IrDecomposeLinearPass {
             //                transposed, output_padding, groups)
             let conv_out_shape = [batches, co, 1, 1];
             let output_base_meta = graph.nodes[id].meta.clone();
-            let output_meta = output_base_meta.tensor_stamp(&output_dtype);
+            let output_meta = output_base_meta.tensor_stamp_same_dtype_or_float32();
             let conv_meta = output_meta.preserve_qparams(conv_out_shape);
             let bias_arg = match bias_id {
                 Some(nid) => IrArg::Node(nid),

@@ -73,12 +73,8 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(shape) => shape.to_vec(),
         None => return false,
     };
-    let dtype = output_meta
-        .val_dtype()
-        .or_else(|| graph.node_dtype(x_id))
-        .unwrap_or("torch.float32")
-        .to_string();
-    let meta = output_meta.tensor_stamp(&dtype);
+    let input_meta = graph.nodes[x_id].meta.clone();
+    let meta = output_meta.tensor_stamp_same_dtype_or_dtype_of_or_float32(&input_meta);
 
     let normalized_shape = match graph.nodes[id]
         .args

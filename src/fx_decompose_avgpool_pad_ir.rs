@@ -79,12 +79,12 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                 input_shape[2],
                 input_shape[3],
             );
-            let dtype = graph.node_dtype_or_float32(x_id).to_string();
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
             let x_meta = graph.nodes[x_id].meta.clone();
-            let input_meta = x_meta.tensor_stamp(&dtype);
-            let output_meta = orig_meta.tensor_stamp(&dtype);
+            let input_meta = x_meta.tensor_stamp_same_dtype_or_float32();
+            let output_meta = orig_meta.tensor_stamp_with_dtype_of_or_float32(&x_meta);
+            let dtype = input_meta.dtype();
 
             let mut pooled_in = x_id;
             let (mut new_pad_h, mut new_pad_w) = (pad_h, pad_w);
@@ -101,7 +101,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                     format!("{}_pre_pad_w", name),
                     &[n, c, h, pad_w],
                     0.0,
-                    &dtype,
+                    dtype,
                     input_meta.drop_qparams(vec![n, c, h, pad_w]),
                 );
                 let mut cat_inputs = vec![IrArg::Node(pre), IrArg::Node(pooled_in)];
@@ -111,7 +111,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                         format!("{}_post_pad_w", name),
                         &[n, c, h, post_pad_w],
                         0.0,
-                        &dtype,
+                        dtype,
                         input_meta.drop_qparams(vec![n, c, h, post_pad_w]),
                     );
                     cat_inputs.push(IrArg::Node(post));
@@ -139,7 +139,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                     format!("{}_pre_pad_h", name),
                     &[n, c, pad_h, cur_w],
                     0.0,
-                    &dtype,
+                    dtype,
                     input_meta.drop_qparams(vec![n, c, pad_h, cur_w]),
                 );
                 let mut cat_inputs = vec![IrArg::Node(pre), IrArg::Node(pooled_in)];
@@ -149,7 +149,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                         format!("{}_post_pad_h", name),
                         &[n, c, post_pad_h, cur_w],
                         0.0,
-                        &dtype,
+                        dtype,
                         input_meta.drop_qparams(vec![n, c, post_pad_h, cur_w]),
                     );
                     cat_inputs.push(IrArg::Node(post));
@@ -187,7 +187,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                     format!("{}_divisor_factor", name),
                     &[1, 1, 1, 1],
                     (kernel_h * kernel_w) as f64 / divisor as f64,
-                    &dtype,
+                    dtype,
                     output_meta.drop_qparams(vec![1, 1, 1, 1]),
                 );
                 graph.add_anchored_call_function(
