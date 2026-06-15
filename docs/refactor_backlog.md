@@ -200,6 +200,20 @@ Note: this is the more important kind of cleanup than raw deletion: the Q/DQ
   formulas now read as ordered Rust IR rewrite chains, and future passes can
   reuse the same conditional-cast primitive.
 
+2026-06-15, IR rewrite cursor slice 6
+Rust LOC: 35,909 -> 35,917
+Movement: +8 Rust LOC
+Deleted/collapsed: manual anchored full/ge/floor/ceil/where construction in the
+  fp32-to-int32 cast decorator
+Added: IrRewriteCursor::full_float, matching the existing full_int cursor
+  primitive so scalar float constants can be emitted inside rewrite chains
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib; maturin
+  develop --release; focused Python smoke over add, mul, and to_copy
+  quant/cast-adjacent cases: 51 passed, 1 xfailed
+Note: setup-positive but semantically useful. The decorator now reads as a
+  single truncation rewrite chain, and future full-float rewrite sites can
+  migrate without pass-local anchoring.
+
 Slice log:
 
 ```text

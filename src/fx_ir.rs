@@ -1588,6 +1588,18 @@ impl IrRewriteCursor<'_> {
         self.append_existing(id)
     }
 
+    pub(crate) fn full_float(
+        &mut self,
+        name: impl Into<String>,
+        shape: &[i64],
+        value: f64,
+        dtype: &str,
+        meta: NodeMeta,
+    ) -> NodeId {
+        let id = self.graph.add_full_float(name, shape, value, dtype, meta);
+        self.append_existing(id)
+    }
+
     pub(crate) fn arange(
         &mut self,
         name: impl Into<String>,
