@@ -29,6 +29,29 @@ fn adjust_pooling_pad_if_needed(
     (output_size - 1) * stride - input_size + kernel_size - pad
 }
 
+fn compute_post_pad(
+    input_size: i64,
+    kernel_size: i64,
+    stride: i64,
+    pad: i64,
+    ceil_mode: bool,
+    divisor_override: Option<i64>,
+) -> i64 {
+    if pad == 0 {
+        return pad;
+    }
+    if ceil_mode && divisor_override.is_none() {
+        return pad;
+    }
+
+    let adjusted = adjust_pooling_pad_if_needed(input_size, kernel_size, stride, pad, ceil_mode);
+    if adjusted > 0 {
+        adjusted
+    } else {
+        pad
+    }
+}
+
 pub struct IrDecomposeAvgPoolPadPass;
 
 impl IrPass for IrDecomposeAvgPoolPadPass {
@@ -73,18 +96,18 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                 Some(shape) if shape.len() == 4 => shape.to_vec(),
                 _ => continue,
             };
-            let (n, c, h, w) = (
-                input_shape[0],
-                input_shape[1],
-                input_shape[2],
-                input_shape[3],
-            );
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
             let x_meta = graph.nodes[x_id].meta.clone();
             let input_meta = x_meta.tensor_stamp_same_dtype_or_float32();
             let output_meta = orig_meta.tensor_stamp_with_dtype_of_or_float32(&x_meta);
             let dtype = input_meta.dtype();
+            let (n, c, h, w) = (
+                input_shape[0],
+                input_shape[1],
+                input_shape[2],
+                input_shape[3],
+            );
 
             let mut pooled_in = x_id;
             let (mut new_pad_h, mut new_pad_w) = (pad_h, pad_w);
@@ -94,70 +117,70 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                 let mut cursor = graph.rewrite_cursor(id);
 
                 if count_include_pad && pad_w > 0 {
-                    post_pad_w = if ceil_mode && divisor_override.is_none() {
-                        pad_w
-                    } else {
-                        adjust_pooling_pad_if_needed(w, kernel_w, stride_w, pad_w, ceil_mode)
-                    };
+                    post_pad_w =
+                        compute_post_pad(w, kernel_w, stride_w, pad_w, ceil_mode, divisor_override);
+                    let pre_shape = vec![n, c, h, pad_w];
                     let pre = cursor.full_float(
                         format!("{}_pre_pad_w", name),
-                        &[n, c, h, pad_w],
+                        &pre_shape,
                         0.0,
                         dtype,
-                        input_meta.drop_qparams(vec![n, c, h, pad_w]),
+                        input_meta.drop_qparams(pre_shape.clone()),
                     );
                     let mut cat_inputs = vec![IrArg::Node(pre), IrArg::Node(pooled_in)];
                     if post_pad_w > 0 {
+                        let post_shape = vec![n, c, h, post_pad_w];
                         let post = cursor.full_float(
                             format!("{}_post_pad_w", name),
-                            &[n, c, h, post_pad_w],
+                            &post_shape,
                             0.0,
                             dtype,
-                            input_meta.drop_qparams(vec![n, c, h, post_pad_w]),
+                            input_meta.drop_qparams(post_shape.clone()),
                         );
                         cat_inputs.push(IrArg::Node(post));
                     }
                     let padded_w = w + pad_w + post_pad_w;
+                    let padded_shape = vec![n, c, h, padded_w];
                     pooled_in = cursor.call_function(
                         format!("{}_pad_w_cat", name),
                         "aten.cat.default",
                         vec![IrArg::List(cat_inputs), IrArg::Int(3)],
-                        input_meta.preserve_qparams(vec![n, c, h, padded_w]),
+                        input_meta.preserve_qparams(padded_shape),
                     );
                     new_pad_w = 0;
                 }
 
                 if count_include_pad && pad_h > 0 {
-                    let post_pad_h = if ceil_mode && divisor_override.is_none() {
-                        pad_h
-                    } else {
-                        adjust_pooling_pad_if_needed(h, kernel_h, stride_h, pad_h, ceil_mode)
-                    };
+                    let post_pad_h =
+                        compute_post_pad(h, kernel_h, stride_h, pad_h, ceil_mode, divisor_override);
                     let cur_w = w + pad_w + post_pad_w;
+                    let pre_shape = vec![n, c, pad_h, cur_w];
                     let pre = cursor.full_float(
                         format!("{}_pre_pad_h", name),
-                        &[n, c, pad_h, cur_w],
+                        &pre_shape,
                         0.0,
                         dtype,
-                        input_meta.drop_qparams(vec![n, c, pad_h, cur_w]),
+                        input_meta.drop_qparams(pre_shape.clone()),
                     );
                     let mut cat_inputs = vec![IrArg::Node(pre), IrArg::Node(pooled_in)];
                     if post_pad_h > 0 {
+                        let post_shape = vec![n, c, post_pad_h, cur_w];
                         let post = cursor.full_float(
                             format!("{}_post_pad_h", name),
-                            &[n, c, post_pad_h, cur_w],
+                            &post_shape,
                             0.0,
                             dtype,
-                            input_meta.drop_qparams(vec![n, c, post_pad_h, cur_w]),
+                            input_meta.drop_qparams(post_shape.clone()),
                         );
                         cat_inputs.push(IrArg::Node(post));
                     }
                     let padded_h = h + pad_h + post_pad_h;
+                    let padded_shape = vec![n, c, padded_h, cur_w];
                     pooled_in = cursor.call_function(
                         format!("{}_pad_h_cat", name),
                         "aten.cat.default",
                         vec![IrArg::List(cat_inputs), IrArg::Int(2)],
-                        input_meta.preserve_qparams(vec![n, c, padded_h, cur_w]),
+                        input_meta.preserve_qparams(padded_shape),
                     );
                     new_pad_h = 0;
                 }

@@ -113,7 +113,17 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
         if !kw.is_empty() {
             kw
         } else {
-            symmetric_pool_pad(&arg_i32_list(node, 3))
+            let input_shape = first_input_node(graph, node)
+                .map(|input_node| actual_tensor_shape(graph, store, input_node))
+                .unwrap_or_default();
+            let ceil_mode = arg_bool(node, 4, false);
+            adjusted_max_pool_pad(
+                &input_shape,
+                &kernel,
+                &stride,
+                &arg_i32_list(node, 3),
+                ceil_mode,
+            )
         }
     };
     let output_tensor = compute_pool_nhwc_output(graph, store, node, &kernel, &stride, &pad);

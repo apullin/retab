@@ -408,7 +408,8 @@ fn pool_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<
     } else if raw_padding.len() == 4 {
         raw_padding
     } else {
-        symmetric_pool_pad(&raw_padding)
+        let ceil_mode = kwarg_bool(node, "ceil_mode", arg_bool(node, 4, false));
+        adjusted_max_pool_pad(&input_shape, &kernel, &stride, &raw_padding, ceil_mode)
     };
 
     pool_nhwc_shape(&input_shape, &kernel, &stride, &pad)
