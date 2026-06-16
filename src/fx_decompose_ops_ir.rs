@@ -1926,12 +1926,7 @@ fn decompose_elu(graph: &mut IrGraph, id: NodeId) -> bool {
     } else {
         x_id
     };
-    let expm1 = ctx.unary(
-        &mut cursor,
-        "expm1",
-        "aten.expm1.default",
-        expm1_input,
-    );
+    let expm1 = ctx.unary(&mut cursor, "expm1", "aten.expm1.default", expm1_input);
     let negative = ctx.mul(&mut cursor, "negative", expm1, alpha_full);
     let ge = ctx.ge(&mut cursor, "ge", x_id, zero);
     let selected_suffix = if (scale - 1.0).abs() > 1e-12 {
@@ -1947,7 +1942,12 @@ fn decompose_elu(graph: &mut IrGraph, id: NodeId) -> bool {
     );
     if (scale - 1.0).abs() > 1e-12 {
         let scale_full = ctx.full(&mut cursor, "scale", scale);
-        ctx.replace_nodes(&mut cursor, "result", "aten.mul.Tensor", &[selected, scale_full]);
+        ctx.replace_nodes(
+            &mut cursor,
+            "result",
+            "aten.mul.Tensor",
+            &[selected, scale_full],
+        );
     } else {
         cursor.replace_anchor_with(selected);
     }

@@ -171,16 +171,6 @@ pub fn permute_order(node: &IrNode, rank: usize) -> Option<Vec<usize>> {
         .collect()
 }
 
-fn dtype_elem_size(dtype: DType) -> usize {
-    match dtype {
-        DType::Bool | DType::Int8 | DType::Int4 | DType::Float8E4M3 | DType::Float8E5M2 => 1,
-        DType::Int16 | DType::Float16 | DType::BFloat16 => 2,
-        DType::Int32 | DType::Float32 => 4,
-        DType::Int48 => 6,
-        DType::Int64 => 8,
-    }
-}
-
 fn contiguous_strides(shape: &[i64]) -> Option<Vec<usize>> {
     let rank = shape.len();
     let shape_usize: Vec<usize> = shape
@@ -466,7 +456,7 @@ pub fn permute_tensor_data(input: &TensorData, order: &[usize]) -> Option<Tensor
     }
 
     let numel = tensor_numel(&input.shape)?;
-    let elem_size = dtype_elem_size(input.dtype);
+    let elem_size = input.dtype.storage_size_bytes();
     if numel.saturating_mul(elem_size) != input.data.len() {
         return None;
     }
@@ -579,7 +569,7 @@ pub fn slice_tensor_data(
 
     let mut shape = input.shape.clone();
     shape[dim] = slice_len;
-    let elem_size = dtype_elem_size(input.dtype);
+    let elem_size = input.dtype.storage_size_bytes();
     let numel = tensor_numel(&shape)?;
     if numel == 0 {
         return Some(TensorData {

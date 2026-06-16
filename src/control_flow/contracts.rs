@@ -202,12 +202,14 @@ fn collect_boundary_contracts_for_graph(
             .enumerate()
             .filter_map(|(idx, &arg_id)| {
                 let arg_node = ir.nodes.get(arg_id)?;
-                let fallback_qparam = list_input_qparam.clone().or_else(|| {
-                    node.meta
-                        .pre_pass_arg_qparams()
-                        .and_then(|saved| saved.get(&idx).cloned())
-                })
-                .or_else(|| metadata::extract_effective_qparam_ir(ir, arg_id));
+                let fallback_qparam = list_input_qparam
+                    .clone()
+                    .or_else(|| {
+                        node.meta
+                            .pre_pass_arg_qparams()
+                            .and_then(|saved| saved.get(&idx).cloned())
+                    })
+                    .or_else(|| metadata::extract_effective_qparam_ir(ir, arg_id));
                 Some(BoundaryInputMeta {
                     meta: arg_node.meta.clone(),
                     boundary_dim_order: boundary_placeholder_dim_order(arg_node),

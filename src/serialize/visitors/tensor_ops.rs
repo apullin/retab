@@ -94,15 +94,9 @@ fn parse_resize_mode(node: &Node) -> ResizeMode {
 }
 
 fn quantize_intermediate_ir_dtype(graph: &Graph, node: &Node) -> crate::graph::ir::DType {
-    use crate::graph::ir::DType as IrDType;
-
-    match first_input_node(graph, node).map(|input| input.meta.val.dtype) {
-        Some(IrDType::Float16) => IrDType::Float16,
-        Some(IrDType::BFloat16) => IrDType::BFloat16,
-        Some(IrDType::Float8E4M3) => IrDType::Float8E4M3,
-        Some(IrDType::Float8E5M2) => IrDType::Float8E5M2,
-        _ => IrDType::Float32,
-    }
+    first_input_node(graph, node)
+        .map(|input| ir_float_dtype_or_float32(input.meta.val.dtype))
+        .unwrap_or(crate::graph::ir::DType::Float32)
 }
 
 fn full_quant_bounds(dtype: DType) -> Option<(i64, i64)> {
@@ -246,14 +240,8 @@ pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
 
     let output_shape = ctx.shape();
     let ir_output_dtype = node.meta.val.dtype;
-    let output_dtype = match ir_output_dtype {
-        crate::graph::ir::DType::Float16
-        | crate::graph::ir::DType::BFloat16
-        | crate::graph::ir::DType::Float8E4M3
-        | crate::graph::ir::DType::Float8E5M2
-        | crate::graph::ir::DType::Float32 => ir_dtype_to_tosa(ir_output_dtype),
-        _ => DType::Fp32,
-    };
+    let output_dtype = ir_dtype_to_tosa(ir_float_dtype_or_float32(ir_output_dtype));
+    let output_ir_dtype = tosa_float_dtype_to_ir_or_float32(output_dtype);
     let scale = arg_f64(node, 1, 1.0);
     let zero_point = arg_i64(node, 2, 0) as f64;
 
@@ -276,13 +264,7 @@ pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
             &mut result,
             zp_name.clone(),
             output_shape.clone(),
-            match output_dtype {
-                DType::Fp16 => crate::graph::ir::DType::Float16,
-                DType::Bf16 => crate::graph::ir::DType::BFloat16,
-                DType::Fp8E4M3 => crate::graph::ir::DType::Float8E4M3,
-                DType::Fp8E5M2 => crate::graph::ir::DType::Float8E5M2,
-                _ => crate::graph::ir::DType::Float32,
-            },
+            output_ir_dtype,
             zero_point,
         ) {
             let sub_output_name = if scale == 1.0 {
@@ -306,13 +288,7 @@ pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
             &mut result,
             scale_name.clone(),
             output_shape.clone(),
-            match output_dtype {
-                DType::Fp16 => crate::graph::ir::DType::Float16,
-                DType::Bf16 => crate::graph::ir::DType::BFloat16,
-                DType::Fp8E4M3 => crate::graph::ir::DType::Float8E4M3,
-                DType::Fp8E5M2 => crate::graph::ir::DType::Float8E5M2,
-                _ => crate::graph::ir::DType::Float32,
-            },
+            output_ir_dtype,
             scale,
         ) {
             let shift_name = push_shift_const(&mut result, &node.name);

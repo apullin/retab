@@ -328,27 +328,9 @@ where
 {
     match arg {
         IrArg::Dtype(value) | IrArg::Str(value) => Some(value.clone()),
-        IrArg::Node(id) => tensor_lookup(*id).map(|tensor| dtype_to_torch_str(tensor.dtype)),
+        IrArg::Node(id) => tensor_lookup(*id).map(|tensor| tensor.dtype.torch_str().to_string()),
         _ => None,
     }
-}
-
-fn dtype_to_torch_str(dtype: DType) -> String {
-    match dtype {
-        DType::Float32 => "torch.float32",
-        DType::Float16 => "torch.float16",
-        DType::BFloat16 => "torch.bfloat16",
-        DType::Float8E4M3 => "torch.float8_e4m3fn",
-        DType::Float8E5M2 => "torch.float8_e5m2",
-        DType::Int8 => "torch.int8",
-        DType::Int16 => "torch.int16",
-        DType::Int32 => "torch.int32",
-        DType::Int64 => "torch.int64",
-        DType::Bool => "torch.bool",
-        DType::Int4 => "torch.int8",
-        DType::Int48 => "torch.int64",
-    }
-    .to_string()
 }
 
 pub struct IrFoldQdqPass;

@@ -29,6 +29,41 @@ pub(crate) fn ir_dtype_to_tosa(dt: crate::graph::ir::DType) -> DType {
     }
 }
 
+fn tosa_float_dtype_to_ir(dtype: DType) -> Option<crate::graph::ir::DType> {
+    use crate::graph::ir::DType as IrDtype;
+    Some(match dtype {
+        DType::Fp32 => IrDtype::Float32,
+        DType::Fp16 => IrDtype::Float16,
+        DType::Bf16 => IrDtype::BFloat16,
+        DType::Fp8E4M3 => IrDtype::Float8E4M3,
+        DType::Fp8E5M2 => IrDtype::Float8E5M2,
+        _ => return None,
+    })
+}
+
+pub(super) fn tosa_float_dtype_to_ir_or_float32(dtype: DType) -> crate::graph::ir::DType {
+    tosa_float_dtype_to_ir(dtype).unwrap_or(crate::graph::ir::DType::Float32)
+}
+
+pub(super) fn ir_float_dtype_or_float32(dtype: crate::graph::ir::DType) -> crate::graph::ir::DType {
+    if dtype.is_float() {
+        dtype
+    } else {
+        crate::graph::ir::DType::Float32
+    }
+}
+
+pub(super) fn tosa_dtype_storage_size(dtype: DType) -> usize {
+    match dtype {
+        DType::Bool | DType::Int4 | DType::Int8 | DType::Fp8E4M3 | DType::Fp8E5M2 => 1,
+        DType::Int16 | DType::Fp16 | DType::Bf16 => 2,
+        DType::Int32 | DType::Fp32 => 4,
+        DType::Int48 => 6,
+        DType::Int64 | DType::Shape => 8,
+        _ => 4,
+    }
+}
+
 pub(super) fn node_output_dtype(node: &Node) -> DType {
     if let Some(dt) = node.meta.tosa_special_dtype {
         return ir_dtype_to_tosa(dt);
@@ -89,10 +124,7 @@ pub(super) fn conv_accumulator_dtype(node: &Node) -> DType {
     match node.meta.val.dtype {
         crate::graph::ir::DType::Int32 => DType::Int32,
         crate::graph::ir::DType::Int48 => DType::Int48,
-        crate::graph::ir::DType::Float16
-        | crate::graph::ir::DType::BFloat16
-        | crate::graph::ir::DType::Float8E4M3
-        | crate::graph::ir::DType::Float8E5M2 => {
+        dtype if dtype.is_narrow_float() => {
             if node.meta.input_qparams.is_empty() {
                 DType::Fp32
             } else {
@@ -165,9 +197,8 @@ pub(super) fn actual_tensor_dtype(graph: &Graph, node: &Node) -> DType {
 
 fn actual_tensor_dtype_impl(graph: &Graph, node: &Node) -> DType {
     if matches!(node.target, OpTarget::Sum) {
-        let semantic_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
-        if is_float_dtype(semantic_dtype) {
-            return semantic_dtype;
+        if node.meta.val.dtype.is_float() {
+            return ir_dtype_to_tosa(node.meta.val.dtype);
         }
     }
     match node.target {
@@ -366,17 +397,13 @@ pub(super) fn single_qparam(node: &Node) -> Option<crate::graph::ir::QuantArgs> 
 }
 
 pub(super) fn is_float_dtype(dtype: DType) -> bool {
-    matches!(
-        dtype,
-        DType::Fp32 | DType::Fp16 | DType::Bf16 | DType::Fp8E4M3 | DType::Fp8E5M2
-    )
+    tosa_float_dtype_to_ir(dtype).is_some()
 }
 
 pub(super) fn is_narrow_float_dtype(dtype: DType) -> bool {
-    matches!(
-        dtype,
-        DType::Fp16 | DType::Bf16 | DType::Fp8E4M3 | DType::Fp8E5M2
-    )
+    tosa_float_dtype_to_ir(dtype)
+        .map(crate::graph::ir::DType::is_narrow_float)
+        .unwrap_or(false)
 }
 
 pub(super) fn compute_multiplier_and_shift_with_width(scale: f64, scale_width: i32) -> (i32, i8) {

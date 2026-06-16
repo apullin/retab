@@ -240,17 +240,6 @@ fn permute_tensor_by_order(
     (out, new_shape)
 }
 
-fn dtype_elem_size(dtype: crate::graph::ir::DType) -> usize {
-    use crate::graph::ir::DType;
-    match dtype {
-        DType::Bool | DType::Int8 | DType::Int4 | DType::Float8E4M3 | DType::Float8E5M2 => 1,
-        DType::Int16 | DType::Float16 | DType::BFloat16 => 2,
-        DType::Int32 | DType::Float32 => 4,
-        DType::Int48 => 6,
-        DType::Int64 => 8,
-    }
-}
-
 fn pack_int4_data(data: &[u8]) -> Vec<u8> {
     let mut packed = Vec::with_capacity(data.len().div_ceil(2));
     let mut idx = 0usize;
@@ -466,7 +455,7 @@ fn serialize_const_placeholder(
         .copied()
         .or_else(|| node.meta.tosa_special_dtype.map(ir_dtype_to_tosa))
         .unwrap_or(store_dtype);
-    let elem_sz = dtype_elem_size(tensor_data.dtype);
+    let elem_sz = tensor_data.dtype.storage_size_bytes();
 
     let (final_data, final_shape_i64) = if let Some(&perm_kind) = weight_perms.get(&node.name) {
         permute_weight_data(&tensor_data.data, &tensor_data.shape, elem_sz, perm_kind)

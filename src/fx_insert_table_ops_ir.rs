@@ -52,9 +52,9 @@ fn table_op_spec(node: &IrNode) -> Option<TableOpSpec> {
             "tanh" => Some(TableOpSpec::unary("gelu_tanh")),
             _ => None,
         },
-        TableOpTargetKind::PowTensorScalar => {
-            node.arg_numeric_f64(1).map(|arg| TableOpSpec::scalar("pow", arg))
-        }
+        TableOpTargetKind::PowTensorScalar => node
+            .arg_numeric_f64(1)
+            .map(|arg| TableOpSpec::scalar("pow", arg)),
         TableOpTargetKind::RemainderScalar => node
             .arg_numeric_f64(1)
             .map(|arg| TableOpSpec::scalar("remainder", arg)),

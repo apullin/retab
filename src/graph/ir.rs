@@ -257,8 +257,36 @@ impl DType {
         )
     }
 
+    pub fn is_float(self) -> bool {
+        matches!(
+            self,
+            DType::Float32
+                | DType::Float16
+                | DType::BFloat16
+                | DType::Float8E4M3
+                | DType::Float8E5M2
+        )
+    }
+
+    pub fn is_narrow_float(self) -> bool {
+        matches!(
+            self,
+            DType::Float16 | DType::BFloat16 | DType::Float8E4M3 | DType::Float8E5M2
+        )
+    }
+
     pub fn is_quantized_integer(self) -> bool {
         matches!(self, DType::Int8 | DType::Int16 | DType::Int32)
+    }
+
+    pub fn storage_size_bytes(self) -> usize {
+        match self {
+            DType::Bool | DType::Int4 | DType::Int8 | DType::Float8E4M3 | DType::Float8E5M2 => 1,
+            DType::Int16 | DType::Float16 | DType::BFloat16 => 2,
+            DType::Int32 | DType::Float32 => 4,
+            DType::Int48 => 6,
+            DType::Int64 => 8,
+        }
     }
 
     pub fn quantized_integer_bounds(self) -> Option<(i64, i64)> {
@@ -279,6 +307,23 @@ impl DType {
             .quantized_integer_bounds()
             .or(Some((i32::MIN as i64, i32::MAX as i64)))
     }
+
+    pub fn torch_str(self) -> &'static str {
+        match self {
+            DType::Float32 => "torch.float32",
+            DType::Float16 => "torch.float16",
+            DType::BFloat16 => "torch.bfloat16",
+            DType::Float8E4M3 => "torch.float8_e4m3fn",
+            DType::Float8E5M2 => "torch.float8_e5m2",
+            DType::Int8 => "torch.int8",
+            DType::Int16 => "torch.int16",
+            DType::Int32 => "torch.int32",
+            DType::Int64 => "torch.int64",
+            DType::Bool => "torch.bool",
+            DType::Int4 => "torch.int8",
+            DType::Int48 => "torch.int64",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -297,6 +342,12 @@ mod tests {
             DType::from_torch_str("torch.float8_e5m2"),
             DType::Float8E5M2
         );
+        assert!(DType::Float8E4M3.is_float());
+        assert!(DType::Float8E5M2.is_narrow_float());
+        assert_eq!(DType::Float8E4M3.storage_size_bytes(), 1);
+        assert_eq!(DType::BFloat16.storage_size_bytes(), 2);
+        assert_eq!(DType::Int48.storage_size_bytes(), 6);
+        assert_eq!(DType::Float8E4M3.torch_str(), "torch.float8_e4m3fn");
         assert!(!DType::torch_str_is_float_like("torch.int8"));
 
         assert_eq!(DType::Int8.quantized_integer_bounds(), Some((-128, 127)));
