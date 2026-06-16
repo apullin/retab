@@ -1,6 +1,6 @@
 use crate::fx_ir::{
     IrArg, IrGraph, IrNode, IrPass, NodeId, NodeMeta, NodeOp, NodeTensor, PlaceholderTensorBinding,
-    QParam, TensorSource,
+    QParam, QParamMap, TensorSource,
 };
 use crate::graph::ir::DType;
 use crate::lowering_effects::LoweringInputKind;
@@ -351,19 +351,17 @@ fn shape_signature(meta: &NodeMeta) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn qparam_map_signature(qparams: Option<&std::collections::HashMap<usize, QParam>>) -> String {
+fn qparam_map_signature(qparams: Option<&QParamMap>) -> String {
     let Some(qparams) = qparams else {
         return "-".to_string();
     };
     if qparams.is_empty() {
         return "{}".to_string();
     }
-    let mut entries: Vec<_> = qparams.iter().collect();
-    entries.sort_by_key(|(index, _)| **index);
     format!(
         "{{{}}}",
-        entries
-            .into_iter()
+        qparams
+            .iter()
             .map(|(index, qp)| format!("{index}:{}@{}:{}", qp.dtype_str, qp.scale, qp.zp))
             .collect::<Vec<_>>()
             .join(",")

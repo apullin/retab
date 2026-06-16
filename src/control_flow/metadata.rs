@@ -1,7 +1,5 @@
 //! Control-flow IR metadata stamping and submodule boundary passes.
 
-use std::collections::HashMap;
-
 use crate::fx_ir::{IrArg, IrGraph, IrNode, IrPass, NodeId, RescaleRewrite};
 use crate::fx_quant::QParam;
 use crate::graph::ir::DType;
@@ -257,7 +255,7 @@ pub(crate) fn strip_while_boundary_qdq_ir(graph: &mut IrGraph) -> bool {
             })
             .collect();
 
-        let mut iqp_map: HashMap<usize, QParam> = graph
+        let mut iqp_map = graph
             .node(out_id)
             .meta
             .cloned_input_qparams()

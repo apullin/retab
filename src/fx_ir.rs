@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use pyo3::prelude::*;
 
-pub(crate) use crate::fx_meta::{MetaValue, NodeMeta, TensorMetaStamp};
+pub(crate) use crate::fx_meta::{MetaValue, NodeMeta, QParamMap, TensorMetaStamp};
 use crate::fx_py_attr::{attrs, items};
 pub(crate) use crate::fx_quant::QParam;
 use crate::fx_target::{classify_ir_target, IrTargetKind};

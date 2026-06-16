@@ -18,7 +18,7 @@ quantization-domain facts, reduction/index domain facts, and argument parsing.
 
 1. [x] Split metadata out of `fx_ir.rs` into a dedicated metadata module while
    keeping existing pass imports stable.
-2. [ ] Introduce a qparam-domain wrapper around positional input/output qparam
+2. [x] Introduce a qparam-domain wrapper around positional input/output qparam
    maps, with deterministic iteration and centralized clone/copy/chaining
    semantics.
 3. [ ] Add a reduction-domain model for normalized dims, keepdim, reduced
@@ -42,6 +42,23 @@ Note: this is an enabling slice. It deliberately keeps existing `fx_ir`
   re-exports for `NodeMeta`, `MetaValue`, and `TensorMetaStamp` so qparam-domain
   and reduction-domain follow-up work can migrate call sites in smaller,
   validated batches.
+
+2026-06-15, qparam map domain slice
+Rust LOC: 35,770 -> 35,843
+Movement: +73 Rust LOC
+Deleted/collapsed: raw `HashMap<usize, QParam>` storage from `NodeMeta` quant
+  facts, local sort-after-read logic in IR-to-serializer conversion and test
+  signatures, and the remaining explicit control-flow qparam-map type
+  annotation
+Added: `QParamMap`, a crate-local qparam-domain wrapper backed by `BTreeMap`
+  with deterministic iteration, centralized insertion, cloning, and
+  pair-construction semantics
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib: 147 passed;
+  `bash /tmp/et.sh` focused qparam-heavy smoke: 518 passed, 1714 deselected,
+  8 xfailed
+Note: this is intentionally setup-positive. The payoff is semantic ownership:
+  qparam maps now have a deterministic domain type, so future reduction and
+  gather/index refactors do not need to clone/sort raw maps by convention.
 
 ## Current Follow-Through Queue
 

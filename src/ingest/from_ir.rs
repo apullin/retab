@@ -9,6 +9,7 @@ use smallvec::SmallVec;
 
 use crate::fx_ir::{
     IrArg, IrGraph, MetaValue, NodeId as IrNodeId, NodeMeta as IrNodeMeta, NodeOp, QParam,
+    QParamMap,
 };
 use crate::fx_target::is_raw_aten_convolution_target;
 use crate::graph::ir::{
@@ -970,17 +971,14 @@ fn map_meta(m: &IrNodeMeta) -> NodeMeta {
     meta
 }
 
-fn qparam_entries<A>(m: Option<&HashMap<usize, QParam>>) -> SmallVec<A>
+fn qparam_entries<A>(m: Option<&QParamMap>) -> SmallVec<A>
 where
     A: smallvec::Array<Item = (u32, QuantArgs)>,
 {
     let Some(map) = m else {
         return SmallVec::new();
     };
-    let mut entries: Vec<(&usize, &QParam)> = map.iter().collect();
-    entries.sort_by_key(|(idx, _)| **idx);
-    entries
-        .into_iter()
+    map.iter()
         .map(|(idx, qp)| (*idx as u32, qparam_to_quantargs(qp)))
         .collect()
 }

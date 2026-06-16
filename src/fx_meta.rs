@@ -4,7 +4,8 @@
 //! facts. Graph topology and rewrite mechanics live in `fx_ir`.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ops::{Index, IndexMut};
 
 use pyo3::prelude::*;
 
@@ -55,9 +56,92 @@ pub enum MetaValue {
 
 #[derive(Debug, Clone, Default)]
 struct QuantFacts {
-    input_qparams: Option<HashMap<usize, QParam>>,
-    output_qparams: Option<HashMap<usize, QParam>>,
-    pre_pass_arg_qparams: Option<HashMap<usize, QParam>>,
+    input_qparams: Option<QParamMap>,
+    output_qparams: Option<QParamMap>,
+    pre_pass_arg_qparams: Option<QParamMap>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct QParamMap {
+    entries: BTreeMap<usize, QParam>,
+}
+
+impl QParamMap {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn from_pairs(pairs: impl IntoIterator<Item = (usize, QParam)>) -> Self {
+        Self {
+            entries: pairs.into_iter().collect(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub(crate) fn get(&self, index: &usize) -> Option<&QParam> {
+        self.entries.get(index)
+    }
+
+    pub(crate) fn get_mut(&mut self, index: &usize) -> Option<&mut QParam> {
+        self.entries.get_mut(index)
+    }
+
+    pub(crate) fn insert(&mut self, index: usize, qparam: QParam) -> Option<QParam> {
+        self.entries.insert(index, qparam)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&usize, &QParam)> {
+        self.entries.iter()
+    }
+
+    pub(crate) fn values(&self) -> impl Iterator<Item = &QParam> {
+        self.entries.values()
+    }
+
+    pub(crate) fn cloned_pairs(&self) -> Vec<(usize, QParam)> {
+        self.entries
+            .iter()
+            .map(|(&index, qparam)| (index, qparam.clone()))
+            .collect()
+    }
+}
+
+impl From<HashMap<usize, QParam>> for QParamMap {
+    fn from(map: HashMap<usize, QParam>) -> Self {
+        Self::from_pairs(map)
+    }
+}
+
+impl FromIterator<(usize, QParam)> for QParamMap {
+    fn from_iter<T: IntoIterator<Item = (usize, QParam)>>(iter: T) -> Self {
+        Self::from_pairs(iter)
+    }
+}
+
+impl<'a> IntoIterator for &'a QParamMap {
+    type Item = (&'a usize, &'a QParam);
+    type IntoIter = std::collections::btree_map::Iter<'a, usize, QParam>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter()
+    }
+}
+
+impl Index<&usize> for QParamMap {
+    type Output = QParam;
+
+    fn index(&self, index: &usize) -> &Self::Output {
+        &self.entries[index]
+    }
+}
+
+impl IndexMut<&usize> for QParamMap {
+    fn index_mut(&mut self, index: &usize) -> &mut Self::Output {
+        self.entries.get_mut(index).expect("missing qparam index")
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -79,7 +163,7 @@ pub struct NodeMeta {
     pub extras: HashMap<String, MetaValue>,
 }
 
-fn extract_qparam_dict(py_dict: &Bound<'_, PyAny>) -> Option<HashMap<usize, QParam>> {
+fn extract_qparam_dict(py_dict: &Bound<'_, PyAny>) -> Option<QParamMap> {
     if py_dict.is_none() || !py_dict.is_truthy().unwrap_or(false) {
         return None;
     }
@@ -90,7 +174,7 @@ fn extract_qparam_dict(py_dict: &Bound<'_, PyAny>) -> Option<HashMap<usize, QPar
     if map.is_empty() {
         None
     } else {
-        Some(map)
+        Some(QParamMap::from(map))
     }
 }
 
@@ -267,24 +351,24 @@ impl NodeMeta {
         self.layout.original_dim_orders.as_deref()
     }
 
-    pub fn set_output_qparams(&mut self, map: HashMap<usize, QParam>) {
-        self.quant.output_qparams = Some(map);
+    pub fn set_output_qparams(&mut self, map: impl Into<QParamMap>) {
+        self.quant.output_qparams = Some(map.into());
     }
 
-    pub fn set_input_qparams(&mut self, map: HashMap<usize, QParam>) {
-        self.quant.input_qparams = Some(map);
+    pub fn set_input_qparams(&mut self, map: impl Into<QParamMap>) {
+        self.quant.input_qparams = Some(map.into());
     }
 
     pub fn set_output_qparams_from(&mut self, pairs: impl IntoIterator<Item = (usize, QParam)>) {
-        self.set_output_qparams(pairs.into_iter().collect());
+        self.set_output_qparams(QParamMap::from_pairs(pairs));
     }
 
     pub fn set_input_qparams_from(&mut self, pairs: impl IntoIterator<Item = (usize, QParam)>) {
-        self.set_input_qparams(pairs.into_iter().collect());
+        self.set_input_qparams(QParamMap::from_pairs(pairs));
     }
 
     pub fn set_empty_input_qparams(&mut self) {
-        self.set_input_qparams(HashMap::new());
+        self.set_input_qparams(QParamMap::new());
     }
 
     pub fn set_single_output_qparam(&mut self, qp: QParam) {
@@ -327,8 +411,8 @@ impl NodeMeta {
         self.set_single_output_qparam(output_qparam);
     }
 
-    pub fn set_pre_pass_arg_qparams(&mut self, map: HashMap<usize, QParam>) {
-        self.quant.pre_pass_arg_qparams = Some(map);
+    pub fn set_pre_pass_arg_qparams(&mut self, map: impl Into<QParamMap>) {
+        self.quant.pre_pass_arg_qparams = Some(map.into());
     }
 
     pub fn clear_output_qparams(&mut self) {
@@ -449,35 +533,37 @@ impl NodeMeta {
         self.quant.input_qparams.as_ref()?.get(&index)
     }
 
-    pub fn input_qparams(&self) -> Option<&HashMap<usize, QParam>> {
+    pub fn input_qparams(&self) -> Option<&QParamMap> {
         self.quant.input_qparams.as_ref()
     }
 
-    pub fn output_qparams(&self) -> Option<&HashMap<usize, QParam>> {
+    pub fn output_qparams(&self) -> Option<&QParamMap> {
         self.quant.output_qparams.as_ref()
     }
 
-    pub fn pre_pass_arg_qparams(&self) -> Option<&HashMap<usize, QParam>> {
+    pub fn pre_pass_arg_qparams(&self) -> Option<&QParamMap> {
         self.quant.pre_pass_arg_qparams.as_ref()
     }
 
-    pub fn cloned_input_qparams(&self) -> Option<HashMap<usize, QParam>> {
+    pub fn cloned_input_qparams(&self) -> Option<QParamMap> {
         self.quant.input_qparams.clone()
     }
 
     pub fn cloned_nonempty_input_qparams_with(
         &self,
         extra_qparams: impl IntoIterator<Item = (usize, QParam)>,
-    ) -> Option<HashMap<usize, QParam>> {
+    ) -> Option<QParamMap> {
         let mut qparams = self.cloned_input_qparams()?;
         if qparams.is_empty() {
             return None;
         }
-        qparams.extend(extra_qparams);
+        for (index, qparam) in extra_qparams {
+            qparams.insert(index, qparam);
+        }
         Some(qparams)
     }
 
-    pub fn cloned_output_qparams(&self) -> Option<HashMap<usize, QParam>> {
+    pub fn cloned_output_qparams(&self) -> Option<QParamMap> {
         self.quant.output_qparams.clone()
     }
 
@@ -510,18 +596,11 @@ impl NodeMeta {
     }
 
     pub fn sorted_input_qparams(&self) -> Vec<(usize, QParam)> {
-        let mut qparams: Vec<_> = self
-            .quant
+        self.quant
             .input_qparams
             .as_ref()
-            .map(|map| {
-                map.iter()
-                    .map(|(&index, qparam)| (index, qparam.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        qparams.sort_by_key(|(index, _)| *index);
-        qparams
+            .map(QParamMap::cloned_pairs)
+            .unwrap_or_default()
     }
 
     pub fn copy_input_qparams_from(&mut self, other: &Self) -> bool {
@@ -569,8 +648,8 @@ impl NodeMeta {
     }
 
     pub fn set_empty_qparam_maps(&mut self) {
-        self.set_input_qparams(HashMap::new());
-        self.set_output_qparams(HashMap::new());
+        self.set_input_qparams(QParamMap::new());
+        self.set_output_qparams(QParamMap::new());
     }
 
     pub fn rescale_output_meta(&self, output_qparam: QParam) -> Self {
