@@ -71,11 +71,32 @@ fn boundary_placeholder_ids(graph: &fx_ir::IrGraph) -> Vec<fx_ir::NodeId> {
 
 fn boundary_external_qparam(input: &BoundaryInputMeta) -> Option<fx_ir::QParam> {
     input
+        .fallback_qparam
+        .clone()
+        .or_else(|| boundary_arg_qparam(input))
+}
+
+fn stamp_boundary_qparam(ph_meta: &mut fx_ir::NodeMeta, input: &BoundaryInputMeta) -> bool {
+    if let Some(qparam) = input.fallback_qparam.clone() {
+        ph_meta.set_both_qparams(qparam);
+        return true;
+    }
+    let mut found_qparam = false;
+    if ph_meta.copy_output_qparams_from(&input.meta) {
+        found_qparam = true;
+    }
+    if ph_meta.copy_input_qparams_from(&input.meta) {
+        found_qparam = true;
+    }
+    found_qparam
+}
+
+fn boundary_arg_qparam(input: &BoundaryInputMeta) -> Option<fx_ir::QParam> {
+    input
         .meta
         .output_qparam()
         .or(input.meta.input_qparam())
         .cloned()
-        .or_else(|| input.fallback_qparam.clone())
 }
 
 fn stamp_boundary_placeholder_meta(
@@ -98,17 +119,12 @@ fn stamp_boundary_placeholder_meta(
         changed += 1;
     }
 
-    let mut found_qparam = false;
-    if ph_meta.copy_output_qparams_from(&input.meta) {
-        found_qparam = true;
-        changed += 1;
-    }
-    if ph_meta.copy_input_qparams_from(&input.meta) {
-        found_qparam = true;
+    let found_qparam = stamp_boundary_qparam(ph_meta, input);
+    if found_qparam {
         changed += 1;
     }
     if !found_qparam {
-        if let Some(qparam) = input.fallback_qparam.clone() {
+        if let Some(qparam) = boundary_arg_qparam(input) {
             ph_meta.set_both_qparams(qparam);
             changed += 1;
         }
@@ -176,16 +192,22 @@ fn collect_boundary_contracts_for_graph(
             continue;
         }
 
+        let list_input_qparam = if is_while {
+            node.meta.input_qparam_at(2).cloned()
+        } else {
+            node.meta.input_qparam_at(3).cloned()
+        };
         let inputs: Vec<BoundaryInputMeta> = parent_arg_ids
             .iter()
             .enumerate()
             .filter_map(|(idx, &arg_id)| {
                 let arg_node = ir.nodes.get(arg_id)?;
-                let fallback_qparam = node
-                    .meta
-                    .pre_pass_arg_qparams()
-                    .and_then(|saved| saved.get(&idx).cloned())
-                    .or_else(|| metadata::extract_effective_qparam_ir(ir, arg_id));
+                let fallback_qparam = list_input_qparam.clone().or_else(|| {
+                    node.meta
+                        .pre_pass_arg_qparams()
+                        .and_then(|saved| saved.get(&idx).cloned())
+                })
+                .or_else(|| metadata::extract_effective_qparam_ir(ir, arg_id));
                 Some(BoundaryInputMeta {
                     meta: arg_node.meta.clone(),
                     boundary_dim_order: boundary_placeholder_dim_order(arg_node),
