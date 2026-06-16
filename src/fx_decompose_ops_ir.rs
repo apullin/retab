@@ -609,7 +609,10 @@ fn pow_scalar_numeric_arg(node: &crate::fx_ir::IrNode) -> Option<f64> {
 }
 
 fn pow_scalar_int_arg(node: &crate::fx_ir::IrNode) -> Option<i64> {
-    node.arg_int(1)
+    node.arg_int(1).or_else(|| {
+        let exp = node.arg_numeric_f64(1)?;
+        (exp > 0.0 && exp.fract() == 0.0).then_some(exp as i64)
+    })
 }
 
 fn alpha_value(node: &crate::fx_ir::IrNode) -> Option<f64> {
@@ -1166,6 +1169,27 @@ mod tests {
         assert_eq!(mul2.target, "aten.mul.Tensor");
         assert_eq!(mul2.args[0].as_node(), Some(mul1.id));
         assert_eq!(mul2.args[1].as_node(), Some(x));
+    }
+
+    #[test]
+    fn decompose_pow_scalar_positive_int_float_rewrites_to_mul_chain() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", &[1, 2, 3, 6]);
+        let pow = f32_call(
+            &mut graph,
+            "pow",
+            "aten.pow.Tensor_Scalar",
+            vec![IrArg::Node(x), IrArg::Float(2.0)],
+            &[1, 2, 3, 6],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[pow].alive);
+
+        let mul1 = live_node(&graph, "pow_mul1");
+        assert_eq!(mul1.target, "aten.mul.Tensor");
+        assert_eq!(mul1.args[0].as_node(), Some(x));
+        assert_eq!(mul1.args[1].as_node(), Some(x));
     }
 
     #[test]

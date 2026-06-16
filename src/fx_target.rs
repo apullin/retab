@@ -201,6 +201,7 @@ const SIMPLE_TABLE_TARGET_RULES: &[(&str, &str)] = &[
     ("reciprocal.default", "reciprocal"),
     ("exp.default", "exp"),
     ("log.default", "log"),
+    ("log10.default", "log10"),
     ("hardsigmoid.default", "hardsigmoid"),
     ("sigmoid.default", "sigmoid"),
     ("atanh.default", "atanh"),

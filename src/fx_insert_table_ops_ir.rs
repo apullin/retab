@@ -162,6 +162,7 @@ fn eval_precomputable_table(kind: &str, scalar_arg: Option<f64>, x: f64) -> Opti
         "logit" => Some((x / (1.0 - x)).ln()),
         "exp" => Some(x.exp()),
         "log" => Some(x.ln()),
+        "log10" => Some(x.log10()),
         "sigmoid" => Some(sigmoid(x)),
         "atanh" => Some(x.atanh()),
         "acosh" => Some(x.acosh()),
@@ -496,6 +497,13 @@ mod tests {
         );
         table_node_with_qparam(
             &mut graph,
+            "log10",
+            "aten.log10.default",
+            Vec::new(),
+            positive_qparam.clone(),
+        );
+        table_node_with_qparam(
+            &mut graph,
             "sqrt",
             "aten.sqrt.default",
             Vec::new(),
@@ -514,13 +522,13 @@ mod tests {
         let result = IrInsertTableOpsEffectPass.run(&mut graph);
 
         assert!(result.modified);
-        assert_eq!(result.effects.items.len(), 6);
+        assert_eq!(result.effects.items.len(), 7);
         for effect in &result.effects.items {
             match effect {
                 LoweringEffect::InsertPrecomputedTableOp(effect) => {
                     assert!(matches!(
                         effect.node_name.as_str(),
-                        "reciprocal" | "log" | "sqrt" | "tan" | "asin" | "expm1"
+                        "reciprocal" | "log" | "log10" | "sqrt" | "tan" | "asin" | "expm1"
                     ));
                 }
                 other => panic!("expected precomputed table effect, got {other:?}"),
