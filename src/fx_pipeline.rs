@@ -28,6 +28,9 @@ pub fn build_hybrid_pipeline(
         Ir(Box::new(
             crate::fx_annotate_output_dim_order_ir::IrAnnotateOutputDimOrderPass,
         )),
+        Ir(Box::new(
+            crate::fx_fuse_batch_norm_ir::IrFuseBatchNorm2dPass,
+        )),
         Ir(Box::new(crate::fx_decompose_ops_ir::IrDecomposeOpsPass)),
         Ir(Box::new(
             crate::fx_decorate_fp_int_cast_ir::IrDecorateFpToIntCastPass,
