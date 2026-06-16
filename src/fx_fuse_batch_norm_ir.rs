@@ -334,4 +334,129 @@ mod tests {
         assert!((bias_values[0] - 3.5).abs() < 1e-6);
         assert!((bias_values[1] - -6.5).abs() < 1e-6);
     }
+
+    #[test]
+    fn fuses_existing_conv_bias_without_bn_affine_params() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [1, 2, 4, 4]);
+        let weight = parameter(
+            &mut graph,
+            "conv_weight",
+            f32_tensor(vec![2, 1, 1, 1], &[8.0, 12.0]),
+        );
+        let bias = parameter(&mut graph, "conv_bias", f32_tensor(vec![2], &[2.0, -3.0]));
+        let mean = parameter(&mut graph, "bn_mean", f32_tensor(vec![2], &[4.0, 1.0]));
+        let var = parameter(&mut graph, "bn_var", f32_tensor(vec![2], &[4.0, 9.0]));
+        let conv = f32_call(
+            &mut graph,
+            "conv",
+            "aten.convolution.default",
+            vec![
+                IrArg::Node(x),
+                IrArg::Node(weight),
+                IrArg::Node(bias),
+                IrArg::List(vec![IrArg::Int(1), IrArg::Int(1)]),
+                IrArg::List(vec![IrArg::Int(0), IrArg::Int(0)]),
+                IrArg::List(vec![IrArg::Int(1), IrArg::Int(1)]),
+                IrArg::Bool(false),
+                IrArg::List(vec![IrArg::Int(0), IrArg::Int(0)]),
+                IrArg::Int(1),
+            ],
+            [1, 2, 4, 4],
+        );
+        let bn = graph.add_node(
+            NodeOp::CallFunction,
+            "bn".to_string(),
+            "aten._native_batch_norm_legit_no_training.default".to_string(),
+            vec![
+                IrArg::Node(conv),
+                IrArg::None,
+                IrArg::None,
+                IrArg::Node(mean),
+                IrArg::Node(var),
+                IrArg::Bool(false),
+                IrArg::Float(1.0),
+                IrArg::Float(0.0),
+                IrArg::Float(0.0),
+            ],
+            f32_meta([1, 2, 4, 4]),
+        );
+        let getitem = graph.add_node(
+            NodeOp::CallFunction,
+            "bn_value".to_string(),
+            "operator.getitem".to_string(),
+            vec![IrArg::Node(bn), IrArg::Int(0)],
+            f32_meta([1, 2, 4, 4]),
+        );
+        output(&mut graph, getitem);
+
+        assert!(IrFuseBatchNorm2dPass.run(&mut graph));
+        let IrArg::Node(fused_weight_id) = graph.node(conv).args[1] else {
+            panic!("missing fused weight")
+        };
+        let IrArg::Node(fused_bias_id) = graph.node(conv).args[2] else {
+            panic!("missing fused bias")
+        };
+        let weight_values =
+            tensor_f32_values(&graph.node(fused_weight_id).tensor.as_ref().unwrap().data).unwrap();
+        let bias_values =
+            tensor_f32_values(&graph.node(fused_bias_id).tensor.as_ref().unwrap().data).unwrap();
+
+        assert!((weight_values[0] - 4.0).abs() < 1e-5);
+        assert!((weight_values[1] - 4.0).abs() < 1e-5);
+        assert!((bias_values[0] - -1.0).abs() < 1e-5);
+        assert!((bias_values[1] - -1.3333334).abs() < 1e-5);
+    }
+
+    #[test]
+    fn skips_non_float32_conv_weights() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [1, 1, 4, 4]);
+        let weight = parameter(
+            &mut graph,
+            "conv_weight",
+            TensorData {
+                data: vec![0; 2],
+                shape: vec![1, 1, 1, 1],
+                dtype: DType::Float16,
+            },
+        );
+        let mean = parameter(&mut graph, "bn_mean", f32_tensor(vec![1], &[0.0]));
+        let var = parameter(&mut graph, "bn_var", f32_tensor(vec![1], &[1.0]));
+        let conv = f32_call(
+            &mut graph,
+            "conv",
+            "aten.convolution.default",
+            vec![
+                IrArg::Node(x),
+                IrArg::Node(weight),
+                IrArg::None,
+                IrArg::List(vec![IrArg::Int(1), IrArg::Int(1)]),
+                IrArg::List(vec![IrArg::Int(0), IrArg::Int(0)]),
+                IrArg::List(vec![IrArg::Int(1), IrArg::Int(1)]),
+                IrArg::Bool(false),
+                IrArg::List(vec![IrArg::Int(0), IrArg::Int(0)]),
+                IrArg::Int(1),
+            ],
+            [1, 1, 4, 4],
+        );
+        let bn = graph.add_node(
+            NodeOp::CallFunction,
+            "bn".to_string(),
+            "aten._native_batch_norm_legit_no_training.default".to_string(),
+            vec![
+                IrArg::Node(conv),
+                IrArg::None,
+                IrArg::None,
+                IrArg::Node(mean),
+                IrArg::Node(var),
+                IrArg::Bool(false),
+            ],
+            f32_meta([1, 1, 4, 4]),
+        );
+        output(&mut graph, bn);
+
+        assert!(!IrFuseBatchNorm2dPass.run(&mut graph));
+        assert!(graph.node(bn).alive);
+    }
 }

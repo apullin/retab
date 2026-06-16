@@ -410,3 +410,39 @@ pub(super) fn compute_multiplier_and_shift_with_width(scale: f64, scale_width: i
 
     (multiplier, final_shift as i8)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::ir::DType as IrDType;
+
+    #[test]
+    fn fp8_ir_dtypes_map_to_tosa_and_float_domains() {
+        assert_eq!(ir_dtype_to_tosa(IrDType::Float8E4M3), DType::Fp8E4M3);
+        assert_eq!(ir_dtype_to_tosa(IrDType::Float8E5M2), DType::Fp8E5M2);
+        assert!(is_float_dtype(DType::Fp8E4M3));
+        assert!(is_float_dtype(DType::Fp8E5M2));
+        assert!(is_narrow_float_dtype(DType::Fp8E4M3));
+        assert!(is_narrow_float_dtype(DType::Fp8E5M2));
+    }
+
+    #[test]
+    fn fp8_default_clamp_bounds_match_torch_storage_bytes() {
+        assert_eq!(
+            default_clamp_bound_bytes(IrDType::Float8E4M3, true),
+            vec![0xfe]
+        );
+        assert_eq!(
+            default_clamp_bound_bytes(IrDType::Float8E4M3, false),
+            vec![0x7e]
+        );
+        assert_eq!(
+            default_clamp_bound_bytes(IrDType::Float8E5M2, true),
+            vec![0xfb]
+        );
+        assert_eq!(
+            default_clamp_bound_bytes(IrDType::Float8E5M2, false),
+            vec![0x7b]
+        );
+    }
+}
