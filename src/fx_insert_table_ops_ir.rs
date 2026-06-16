@@ -11,42 +11,75 @@ pub struct IrInsertTableOpsEffectPass;
 struct TableOpSpec {
     kind: &'static str,
     scalar_arg: Option<f64>,
+    scale: Option<f64>,
+    input_scale: Option<f64>,
+}
+
+impl TableOpSpec {
+    fn unary(kind: &'static str) -> Self {
+        Self {
+            kind,
+            scalar_arg: None,
+            scale: None,
+            input_scale: None,
+        }
+    }
+
+    fn scalar(kind: &'static str, scalar_arg: f64) -> Self {
+        Self {
+            kind,
+            scalar_arg: Some(scalar_arg),
+            scale: None,
+            input_scale: None,
+        }
+    }
+
+    fn elu(alpha: f64, scale: f64, input_scale: f64) -> Self {
+        Self {
+            kind: "elu",
+            scalar_arg: Some(alpha),
+            scale: Some(scale),
+            input_scale: Some(input_scale),
+        }
+    }
 }
 
 fn table_op_spec(node: &IrNode) -> Option<TableOpSpec> {
     match table_op_target_kind(&node.target)? {
-        TableOpTargetKind::Unary(kind) => Some(TableOpSpec {
-            kind,
-            scalar_arg: None,
-        }),
+        TableOpTargetKind::Unary(kind) => Some(TableOpSpec::unary(kind)),
         TableOpTargetKind::Gelu => match node.kwarg_str("approximate").unwrap_or("none") {
-            "none" => Some(TableOpSpec {
-                kind: "gelu",
-                scalar_arg: None,
-            }),
-            "tanh" => Some(TableOpSpec {
-                kind: "gelu_tanh",
-                scalar_arg: None,
-            }),
+            "none" => Some(TableOpSpec::unary("gelu")),
+            "tanh" => Some(TableOpSpec::unary("gelu_tanh")),
             _ => None,
         },
         TableOpTargetKind::PowTensorScalar => {
-            node.arg_numeric_f64(1).map(|scalar_arg| TableOpSpec {
-                kind: "pow",
-                scalar_arg: Some(scalar_arg),
-            })
+            node.arg_numeric_f64(1).map(|arg| TableOpSpec::scalar("pow", arg))
         }
-        TableOpTargetKind::RemainderScalar => {
-            node.arg_numeric_f64(1).map(|scalar_arg| TableOpSpec {
-                kind: "remainder",
-                scalar_arg: Some(scalar_arg),
-            })
-        }
-        TableOpTargetKind::Elu => Some(TableOpSpec {
-            kind: "elu",
-            scalar_arg: Some(node.arg_numeric_f64(1).unwrap_or(1.0)),
-        }),
+        TableOpTargetKind::RemainderScalar => node
+            .arg_numeric_f64(1)
+            .map(|arg| TableOpSpec::scalar("remainder", arg)),
+        TableOpTargetKind::Elu => Some(elu_table_op_spec(node)),
     }
+}
+
+fn elu_table_op_spec(node: &IrNode) -> TableOpSpec {
+    const SELU_ALPHA: f64 = 1.673_263_242_354_377_2;
+    const SELU_SCALE: f64 = 1.050_700_987_355_480_5;
+
+    if node.target.contains("selu.") {
+        return TableOpSpec::elu(SELU_ALPHA, SELU_SCALE, 1.0);
+    }
+    if node.target.contains("celu.") {
+        let alpha = node.arg_or_kwarg_numeric_f64(1, "alpha").unwrap_or(1.0);
+        return TableOpSpec::elu(alpha, 1.0, 1.0 / alpha);
+    }
+
+    TableOpSpec::elu(
+        node.arg_or_kwarg_numeric_f64(1, "alpha").unwrap_or(1.0),
+        node.arg_or_kwarg_numeric_f64(2, "scale").unwrap_or(1.0),
+        node.arg_or_kwarg_numeric_f64(3, "input_scale")
+            .unwrap_or(1.0),
+    )
 }
 
 fn table_quant_spec(qp: &QParam) -> Option<TableTensorSpec> {
@@ -150,8 +183,8 @@ fn erfinv_approx(x: f64) -> f64 {
     p * x
 }
 
-fn eval_precomputable_table(kind: &str, scalar_arg: Option<f64>, x: f64) -> Option<f64> {
-    match kind {
+fn eval_precomputable_table(spec: &TableOpSpec, x: f64) -> Option<f64> {
+    match spec.kind {
         "rsqrt" => Some(x.sqrt().recip()),
         "ceil" => Some(x.ceil()),
         "erf" => Some(erf_approx(x)),
@@ -188,7 +221,7 @@ fn eval_precomputable_table(kind: &str, scalar_arg: Option<f64>, x: f64) -> Opti
             Some(0.5 * x * (1.0 + (SQRT_2_OVER_PI * (x + 0.044_715 * x.powi(3))).tanh()))
         }
         "pow" => {
-            let exponent = scalar_arg?;
+            let exponent = spec.scalar_arg?;
             let rounded = exponent.round();
             if (exponent - rounded).abs() < 1e-12
                 && rounded >= i32::MIN as f64
@@ -200,11 +233,18 @@ fn eval_precomputable_table(kind: &str, scalar_arg: Option<f64>, x: f64) -> Opti
             }
         }
         "elu" => {
-            let alpha = scalar_arg.unwrap_or(1.0);
-            Some(if x >= 0.0 { x } else { alpha * x.exp_m1() })
+            let alpha = spec.scalar_arg.unwrap_or(1.0);
+            let scale = spec.scale.unwrap_or(1.0);
+            let input_scale = spec.input_scale.unwrap_or(1.0);
+            let selected = if x >= 0.0 {
+                x
+            } else {
+                alpha * (input_scale * x).exp_m1()
+            };
+            Some(scale * selected)
         }
         "remainder" => {
-            let divisor = scalar_arg?;
+            let divisor = spec.scalar_arg?;
             if divisor == 0.0 {
                 return None;
             }
@@ -230,7 +270,7 @@ fn plan_precomputed_int8_table(
     let mut data = Vec::with_capacity(256);
     for q in input.qmin..=input.qmax {
         let dequant = ((q - input.zp) as f64) * input.scale;
-        let value = eval_precomputable_table(spec.kind, spec.scalar_arg, dequant)?;
+        let value = eval_precomputable_table(spec, dequant)?;
         let q_out = quantize_to_spec(value, &output)?;
         let q_i8 = i8::try_from(q_out).ok()?;
         data.push(q_i8 as u8);
@@ -311,7 +351,7 @@ fn plan_precomputed_int16_table(
         let clamped = raw_q.clamp(input.qmin, input.qmax);
         let masked = (((clamped as i16) as i32) & !0x7f) as i64;
         let dequant = ((masked - input.zp) as f64) * input.scale;
-        let value = eval_precomputable_table(spec.kind, spec.scalar_arg, dequant)?;
+        let value = eval_precomputable_table(spec, dequant)?;
         lut_values.push(quantize_to_spec(value, &output)?);
     }
 
@@ -647,17 +687,8 @@ mod tests {
 
     #[test]
     fn pow_table_supports_negative_base_integer_exponents() {
-        let spec = TableOpSpec {
-            kind: "pow",
-            scalar_arg: Some(3.0),
-        };
-        assert_eq!(
-            eval_precomputable_table(spec.kind, spec.scalar_arg, -11.0),
-            Some(-1331.0)
-        );
-        assert_eq!(
-            eval_precomputable_table(spec.kind, spec.scalar_arg, -2.0),
-            Some(-8.0)
-        );
+        let spec = TableOpSpec::scalar("pow", 3.0);
+        assert_eq!(eval_precomputable_table(&spec, -11.0), Some(-1331.0));
+        assert_eq!(eval_precomputable_table(&spec, -2.0), Some(-8.0));
     }
 }

@@ -241,7 +241,11 @@ pub(crate) fn table_op_target_kind(target: &str) -> Option<TableOpTargetKind> {
     if target.contains("remainder.Scalar") {
         return Some(TableOpTargetKind::RemainderScalar);
     }
-    if target.contains("elu.default") || target.contains("elu_") {
+    if target.contains("elu.default")
+        || target.contains("elu_")
+        || target.contains("selu.default")
+        || target.contains("celu.default")
+    {
         return Some(TableOpTargetKind::Elu);
     }
     None

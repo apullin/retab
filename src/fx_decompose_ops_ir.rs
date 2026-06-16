@@ -623,6 +623,26 @@ fn elu_alpha(node: &crate::fx_ir::IrNode) -> f64 {
     node.arg_or_kwarg_numeric_f64(1, "alpha").unwrap_or(1.0)
 }
 
+fn elu_params(node: &crate::fx_ir::IrNode) -> (f64, f64, f64) {
+    const SELU_ALPHA: f64 = 1.673_263_242_354_377_2;
+    const SELU_SCALE: f64 = 1.050_700_987_355_480_5;
+
+    if node.target.contains("selu.") {
+        return (SELU_ALPHA, SELU_SCALE, 1.0);
+    }
+    if node.target.contains("celu.") {
+        let alpha = elu_alpha(node);
+        return (alpha, 1.0, 1.0 / alpha);
+    }
+
+    (
+        elu_alpha(node),
+        node.arg_or_kwarg_numeric_f64(2, "scale").unwrap_or(1.0),
+        node.arg_or_kwarg_numeric_f64(3, "input_scale")
+            .unwrap_or(1.0),
+    )
+}
+
 fn gelu_approximate(node: &crate::fx_ir::IrNode) -> &str {
     node.kwarg_str("approximate").unwrap_or("none")
 }
@@ -731,7 +751,7 @@ const DECOMPOSE_RULES: &[DecomposeRule] = &[
     skip_quantized(&["aten.acos."], decompose_acos),
     skip_quantized(&["aten.atan."], decompose_atan),
     skip_quantized(&["aten.acosh."], decompose_acosh),
-    skip_quantized(&["aten.elu."], decompose_elu),
+    skip_quantized(&["aten.elu.", "aten.selu.", "aten.celu."], decompose_elu),
     skip_quantized(&["aten.gelu."], decompose_gelu),
     skip_quantized(&["aten.erfinv."], decompose_erfinv),
     skip_quantized(&["pow.Tensor_Scalar"], decompose_pow_scalar),
@@ -1890,25 +1910,47 @@ fn decompose_asin_or_acos(graph: &mut IrGraph, id: NodeId, is_acos_op: bool) -> 
     true
 }
 
-/// elu(x, alpha) = where(x >= 0, x, alpha * expm1(x))
+/// elu(x, alpha, scale, input_scale) = scale * where(x >= 0, x, alpha * expm1(input_scale * x))
 fn decompose_elu(graph: &mut IrGraph, id: NodeId) -> bool {
     let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
-    let alpha = elu_alpha(&graph.nodes[id]);
+    let (alpha, scale, input_scale) = elu_params(&graph.nodes[id]);
 
     let mut cursor = graph.rewrite_cursor(id);
     let zero = ctx.full(&mut cursor, "zero", 0.0);
     let alpha_full = ctx.full(&mut cursor, "alpha", alpha);
-    let expm1 = ctx.unary(&mut cursor, "expm1", "aten.expm1.default", x_id);
-    let scaled = ctx.mul(&mut cursor, "scaled", expm1, alpha_full);
-    let ge = ctx.ge(&mut cursor, "ge", x_id, zero);
-    ctx.replace_nodes(
+    let expm1_input = if (input_scale - 1.0).abs() > 1e-12 {
+        let input_scale_full = ctx.full(&mut cursor, "input_scale", input_scale);
+        ctx.mul(&mut cursor, "input_scaled", x_id, input_scale_full)
+    } else {
+        x_id
+    };
+    let expm1 = ctx.unary(
         &mut cursor,
-        "result",
-        "aten.where.self",
-        &[ge, x_id, scaled],
+        "expm1",
+        "aten.expm1.default",
+        expm1_input,
     );
+    let negative = ctx.mul(&mut cursor, "negative", expm1, alpha_full);
+    let ge = ctx.ge(&mut cursor, "ge", x_id, zero);
+    let selected_suffix = if (scale - 1.0).abs() > 1e-12 {
+        "select"
+    } else {
+        "result"
+    };
+    let selected = ctx.output_nodes(
+        &mut cursor,
+        selected_suffix,
+        "aten.where.self",
+        &[ge, x_id, negative],
+    );
+    if (scale - 1.0).abs() > 1e-12 {
+        let scale_full = ctx.full(&mut cursor, "scale", scale);
+        ctx.replace_nodes(&mut cursor, "result", "aten.mul.Tensor", &[selected, scale_full]);
+    } else {
+        cursor.replace_anchor_with(selected);
+    }
     true
 }
 
