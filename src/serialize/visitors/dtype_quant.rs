@@ -17,6 +17,8 @@ pub(crate) fn ir_dtype_to_tosa(dt: crate::graph::ir::DType) -> DType {
         IrDtype::Float32 => DType::Fp32,
         IrDtype::Float16 => DType::Fp16,
         IrDtype::BFloat16 => DType::Bf16,
+        IrDtype::Float8E4M3 => DType::Fp8E4M3,
+        IrDtype::Float8E5M2 => DType::Fp8E5M2,
         IrDtype::Int8 => DType::Int8,
         IrDtype::Int16 => DType::Int16,
         IrDtype::Int32 => DType::Int32,
@@ -87,7 +89,10 @@ pub(super) fn conv_accumulator_dtype(node: &Node) -> DType {
     match node.meta.val.dtype {
         crate::graph::ir::DType::Int32 => DType::Int32,
         crate::graph::ir::DType::Int48 => DType::Int48,
-        crate::graph::ir::DType::Float16 | crate::graph::ir::DType::BFloat16 => {
+        crate::graph::ir::DType::Float16
+        | crate::graph::ir::DType::BFloat16
+        | crate::graph::ir::DType::Float8E4M3
+        | crate::graph::ir::DType::Float8E5M2 => {
             if node.meta.input_qparams.is_empty() {
                 DType::Fp32
             } else {
@@ -299,6 +304,8 @@ pub(super) fn default_clamp_bound_bytes(dtype: crate::graph::ir::DType, is_min: 
                 vec![0xff, 0x7b]
             }
         }
+        IrDtype::Float8E4M3 => vec![if is_min { 0xfe } else { 0x7e }],
+        IrDtype::Float8E5M2 => vec![if is_min { 0xfb } else { 0x7b }],
         IrDtype::BFloat16 => {
             if is_min {
                 vec![0x7f, 0xff]
@@ -324,6 +331,7 @@ fn clamp_bound_bytes_from_scalar(dtype: crate::graph::ir::DType, value: f64) -> 
         }
         IrDtype::Float32 => (value as f32).to_le_bytes().to_vec(),
         IrDtype::Float16 | IrDtype::BFloat16 => return scalar_fill_bytes(dtype, value),
+        IrDtype::Float8E4M3 | IrDtype::Float8E5M2 => return None,
     })
 }
 
@@ -358,11 +366,17 @@ pub(super) fn single_qparam(node: &Node) -> Option<crate::graph::ir::QuantArgs> 
 }
 
 pub(super) fn is_float_dtype(dtype: DType) -> bool {
-    matches!(dtype, DType::Fp32 | DType::Fp16 | DType::Bf16)
+    matches!(
+        dtype,
+        DType::Fp32 | DType::Fp16 | DType::Bf16 | DType::Fp8E4M3 | DType::Fp8E5M2
+    )
 }
 
 pub(super) fn is_narrow_float_dtype(dtype: DType) -> bool {
-    matches!(dtype, DType::Fp16 | DType::Bf16)
+    matches!(
+        dtype,
+        DType::Fp16 | DType::Bf16 | DType::Fp8E4M3 | DType::Fp8E5M2
+    )
 }
 
 pub(super) fn compute_multiplier_and_shift_with_width(scale: f64, scale_width: i32) -> (i32, i8) {

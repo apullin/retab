@@ -338,6 +338,8 @@ fn dtype_to_torch_str(dtype: DType) -> String {
         DType::Float32 => "torch.float32",
         DType::Float16 => "torch.float16",
         DType::BFloat16 => "torch.bfloat16",
+        DType::Float8E4M3 => "torch.float8_e4m3fn",
+        DType::Float8E5M2 => "torch.float8_e5m2",
         DType::Int8 => "torch.int8",
         DType::Int16 => "torch.int16",
         DType::Int32 => "torch.int32",

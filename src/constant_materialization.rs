@@ -9,6 +9,7 @@ fn scalar_bytes_impl(dtype: DType, value: f64, int4_as_i8: bool) -> Option<Vec<u
         DType::BFloat16 => crate::tensor_data::encode_bf16(value as f32)
             .to_le_bytes()
             .to_vec(),
+        DType::Float8E4M3 | DType::Float8E5M2 => return None,
         DType::Int8 => (value as i8).to_le_bytes().to_vec(),
         DType::Int4 if int4_as_i8 => (value as i8).to_le_bytes().to_vec(),
         DType::Int16 => (value as i16).to_le_bytes().to_vec(),

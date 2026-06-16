@@ -173,7 +173,7 @@ pub fn permute_order(node: &IrNode, rank: usize) -> Option<Vec<usize>> {
 
 fn dtype_elem_size(dtype: DType) -> usize {
     match dtype {
-        DType::Bool | DType::Int8 | DType::Int4 => 1,
+        DType::Bool | DType::Int8 | DType::Int4 | DType::Float8E4M3 | DType::Float8E5M2 => 1,
         DType::Int16 | DType::Float16 | DType::BFloat16 => 2,
         DType::Int32 | DType::Float32 => 4,
         DType::Int48 => 6,

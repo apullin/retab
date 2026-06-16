@@ -85,4 +85,39 @@ mod tests {
         assert_eq!(result.operators[0].inputs, vec!["x".to_string()]);
         assert_eq!(result.operators[0].outputs, vec!["x_to_i32".to_string()]);
     }
+
+    #[test]
+    fn fp8_cast_serializes_as_cast_with_fp8_output_dtype() {
+        let mut graph = Graph::new();
+        let x = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Other("x".to_string()),
+            smallvec![],
+            Vec::new(),
+            meta(&[2, 3], IrDType::Float32),
+            "x".to_string(),
+        );
+        let cast = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::To,
+            smallvec![Arg::Node(x)],
+            Vec::new(),
+            meta(&[2, 3], IrDType::Float8E4M3),
+            "x_to_fp8".to_string(),
+        );
+        let store = TensorStore::default();
+        let ctx = EmitContext {
+            graph: &graph,
+            node: graph.node(cast).expect("cast node"),
+            store: &store,
+        };
+
+        let result = emit_cast(&ctx);
+
+        assert_eq!(result.operators.len(), 1);
+        assert_eq!(result.operators[0].op, Op::Cast);
+        assert_eq!(result.tensors[0].dtype, DType::Fp8E4M3);
+        assert_eq!(result.operators[0].inputs, vec!["x".to_string()]);
+        assert_eq!(result.operators[0].outputs, vec!["x_to_fp8".to_string()]);
+    }
 }

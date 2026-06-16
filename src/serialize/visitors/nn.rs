@@ -146,7 +146,7 @@ fn output_channels(node: &Node) -> i32 {
 
 fn zero_bytes(dtype: DType, len: usize) -> Vec<u8> {
     let bytes_per_elem = match dtype {
-        DType::Bool | DType::Int4 | DType::Int8 => 1,
+        DType::Bool | DType::Int4 | DType::Int8 | DType::Fp8E4M3 | DType::Fp8E5M2 => 1,
         DType::Int16 | DType::Fp16 | DType::Bf16 => 2,
         DType::Int32 | DType::Fp32 => 4,
         DType::Int48 => 6,

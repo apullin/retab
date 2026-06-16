@@ -99,6 +99,8 @@ fn quantize_intermediate_ir_dtype(graph: &Graph, node: &Node) -> crate::graph::i
     match first_input_node(graph, node).map(|input| input.meta.val.dtype) {
         Some(IrDType::Float16) => IrDType::Float16,
         Some(IrDType::BFloat16) => IrDType::BFloat16,
+        Some(IrDType::Float8E4M3) => IrDType::Float8E4M3,
+        Some(IrDType::Float8E5M2) => IrDType::Float8E5M2,
         _ => IrDType::Float32,
     }
 }
@@ -245,9 +247,11 @@ pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
     let output_shape = ctx.shape();
     let ir_output_dtype = node.meta.val.dtype;
     let output_dtype = match ir_output_dtype {
-        crate::graph::ir::DType::Float16 => DType::Fp16,
-        crate::graph::ir::DType::BFloat16 => DType::Bf16,
-        crate::graph::ir::DType::Float32 => DType::Fp32,
+        crate::graph::ir::DType::Float16
+        | crate::graph::ir::DType::BFloat16
+        | crate::graph::ir::DType::Float8E4M3
+        | crate::graph::ir::DType::Float8E5M2
+        | crate::graph::ir::DType::Float32 => ir_dtype_to_tosa(ir_output_dtype),
         _ => DType::Fp32,
     };
     let scale = arg_f64(node, 1, 1.0);
@@ -275,6 +279,8 @@ pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
             match output_dtype {
                 DType::Fp16 => crate::graph::ir::DType::Float16,
                 DType::Bf16 => crate::graph::ir::DType::BFloat16,
+                DType::Fp8E4M3 => crate::graph::ir::DType::Float8E4M3,
+                DType::Fp8E5M2 => crate::graph::ir::DType::Float8E5M2,
                 _ => crate::graph::ir::DType::Float32,
             },
             zero_point,
@@ -303,6 +309,8 @@ pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
             match output_dtype {
                 DType::Fp16 => crate::graph::ir::DType::Float16,
                 DType::Bf16 => crate::graph::ir::DType::BFloat16,
+                DType::Fp8E4M3 => crate::graph::ir::DType::Float8E4M3,
+                DType::Fp8E5M2 => crate::graph::ir::DType::Float8E5M2,
                 _ => crate::graph::ir::DType::Float32,
             },
             scale,

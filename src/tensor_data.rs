@@ -102,13 +102,20 @@ pub fn extract_tensor_dtype(value: &Bound<'_, PyAny>) -> DType {
 pub fn extract_tensor_bytes(value: &Bound<'_, PyAny>, dtype: DType) -> PyResult<Vec<u8>> {
     let py = value.py();
     let tensor = value.call_method0("contiguous")?.call_method0("cpu")?;
-    let array = if dtype == DType::BFloat16 {
-        let torch = PyModule::import_bound(py, "torch")?;
-        tensor
-            .call_method1("view", (torch.getattr("uint16")?,))?
-            .call_method0("numpy")?
-    } else {
-        tensor.call_method0("numpy")?
+    let array = match dtype {
+        DType::BFloat16 => {
+            let torch = PyModule::import_bound(py, "torch")?;
+            tensor
+                .call_method1("view", (torch.getattr("uint16")?,))?
+                .call_method0("numpy")?
+        }
+        DType::Float8E4M3 | DType::Float8E5M2 => {
+            let torch = PyModule::import_bound(py, "torch")?;
+            tensor
+                .call_method1("view", (torch.getattr("uint8")?,))?
+                .call_method0("numpy")?
+        }
+        _ => tensor.call_method0("numpy")?,
     };
     let view = PyMemoryView::from_bound(&array)?;
     let byte_view = view.call_method1("cast", ("B",))?;
@@ -198,6 +205,7 @@ impl TensorData {
                     .map(|chunk| decode_f16(u16::from_le_bytes([chunk[0], chunk[1]])) as f64)
                     .collect(),
             ),
+            DType::Float8E4M3 | DType::Float8E5M2 => None,
             DType::BFloat16 => Some(
                 self.data
                     .chunks_exact(2)

@@ -216,6 +216,8 @@ pub enum DType {
     Float32,
     Float16,
     BFloat16,
+    Float8E4M3,
+    Float8E5M2,
     Int8,
     Int16,
     Int32,
@@ -227,7 +229,10 @@ pub enum DType {
 
 impl DType {
     pub fn from_torch_str(dtype_str: &str) -> Self {
-        match dtype_str {
+        let dtype_str = dtype_str.to_ascii_lowercase();
+        match dtype_str.as_str() {
+            s if s.contains("float8_e4m3") || s.contains("fp8e4m3") => DType::Float8E4M3,
+            s if s.contains("float8_e5m2") || s.contains("fp8e5m2") => DType::Float8E5M2,
             s if s.contains("float32") => DType::Float32,
             s if s.contains("bfloat16") => DType::BFloat16,
             s if s.contains("float16") => DType::Float16,
@@ -284,6 +289,14 @@ mod tests {
     fn dtype_helpers_preserve_torch_string_domains() {
         assert!(DType::torch_str_is_float_like("torch.float16"));
         assert!(DType::torch_str_is_float_like("torch.bf16"));
+        assert_eq!(
+            DType::from_torch_str("torch.float8_e4m3fn"),
+            DType::Float8E4M3
+        );
+        assert_eq!(
+            DType::from_torch_str("torch.float8_e5m2"),
+            DType::Float8E5M2
+        );
         assert!(!DType::torch_str_is_float_like("torch.int8"));
 
         assert_eq!(DType::Int8.quantized_integer_bounds(), Some((-128, 127)));
