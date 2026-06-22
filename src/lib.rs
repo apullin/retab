@@ -11,6 +11,7 @@ mod control_flow;
 mod fx_activation;
 mod fx_annotate_conv_bias_ir;
 mod fx_annotate_output_dim_order_ir;
+mod fx_batch_norm_args;
 mod fx_canonicalize_gather_ir;
 mod fx_cast_int64_ir;
 mod fx_constant_tensor_eval;

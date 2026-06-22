@@ -4,10 +4,14 @@
 use std::f64::consts::FRAC_PI_2;
 
 use crate::fx_activation::EluParams;
+use crate::fx_batch_norm_args::BatchNormArgs;
 use crate::fx_ir::{
     i64_list_arg as i64_list, normalize_dim, wrap_dim, IrArg, IrGraph, IrPass, MetaValue, NodeId,
 };
-use crate::fx_target::{add_sub_alpha_result_target, elu_target_kind, group_norm_reshape_target};
+use crate::fx_target::{
+    add_sub_alpha_result_target, elu_target_kind, group_norm_reshape_target,
+    BATCH_NORM_TARGET_MARKERS,
+};
 use crate::runner_logging::log_line;
 
 mod approx;
@@ -99,16 +103,6 @@ fn alpha_value(node: &crate::fx_ir::IrNode) -> Option<f64> {
 
 fn gelu_approximate(node: &crate::fx_ir::IrNode) -> &str {
     node.kwarg_str("approximate").unwrap_or("none")
-}
-
-fn batch_norm_training(node: &crate::fx_ir::IrNode) -> bool {
-    node.arg_or_kwarg_bool(5, "training").unwrap_or(false)
-}
-
-fn batch_norm_eps(node: &crate::fx_ir::IrNode) -> f64 {
-    node.kwarg_numeric_f64("eps")
-        .or_else(|| node.args.iter().rev().find_map(IrArg::as_numeric_f64))
-        .unwrap_or(1.0e-5)
 }
 
 /// Check if input is DQ and at least one user is Q (quantized envelope → skip atanh).
@@ -213,15 +207,7 @@ const DECOMPOSE_RULES: &[DecomposeRule] = &[
         &["aten.group_norm", "aten.native_group_norm"],
         decompose_group_norm,
     ),
-    always(
-        &[
-            "aten.batch_norm",
-            "aten.native_batch_norm",
-            "aten._native_batch_norm_legit_no_training",
-            "aten._native_batch_norm_legit.no_stats",
-        ],
-        decompose_batch_norm,
-    ),
+    always(BATCH_NORM_TARGET_MARKERS, decompose_batch_norm),
     always(
         &["aten.log_softmax.", "aten._log_softmax."],
         decompose_log_softmax_wrapper,
@@ -1585,23 +1571,19 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
 
 /// Inference batch norm decomposition for the no-training case.
 fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
-    if batch_norm_training(&graph.nodes[id]) {
+    let Some(args) = BatchNormArgs::parse(&graph.nodes[id]) else {
+        return false;
+    };
+    if args.training {
         return false;
     }
 
     let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
-    let weight_arg = graph.nodes[id].arg_clone_or_none(1);
-    let bias_arg = graph.nodes[id].arg_clone_or_none(2);
-    let running_mean = match graph.nodes[id].arg_node(3) {
-        Some(n) => n,
-        None => return false,
-    };
-    let running_var = match graph.nodes[id].arg_node(4) {
-        Some(n) => n,
-        None => return false,
-    };
+    if x_id != args.input {
+        return false;
+    }
     let shape = ctx.shape.clone();
     if shape.len() < 2 {
         return false;
@@ -1613,14 +1595,13 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     let mut channel_shape = vec![1_i64; shape.len()];
     channel_shape[channel_axis] = num_features;
     let scalar_shape = ctx.scalar_shape();
-    let eps = batch_norm_eps(&graph.nodes[id]);
     let result = {
         let mut cursor = graph.rewrite_cursor(id);
-        let mean_view = ctx.view_shape(&mut cursor, "mean_view", running_mean, &channel_shape);
-        let var_view = ctx.view_shape(&mut cursor, "var_view", running_var, &channel_shape);
+        let mean_view = ctx.view_shape(&mut cursor, "mean_view", args.running_mean, &channel_shape);
+        let var_view = ctx.view_shape(&mut cursor, "var_view", args.running_var, &channel_shape);
 
         let centered = ctx.sub(&mut cursor, "centered", x_id, mean_view);
-        let eps_full = ctx.full_shape(&mut cursor, "eps", eps, &scalar_shape);
+        let eps_full = ctx.full_shape(&mut cursor, "eps", args.eps, &scalar_shape);
 
         let var_eps = ctx.tensor_nodes_shape(
             &mut cursor,
@@ -1640,7 +1621,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
 
         let normed = ctx.mul(&mut cursor, "normed", centered, inv_sqrt);
 
-        let weight_view = match weight_arg {
+        let weight_view = match args.weight_arg {
             IrArg::Node(weight_id) => {
                 ctx.view_shape(&mut cursor, "weight_view", weight_id, &channel_shape)
             }
@@ -1653,7 +1634,7 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
 
         let weighted = ctx.mul(&mut cursor, "weighted", normed, weight_view);
 
-        let bias_view = match bias_arg {
+        let bias_view = match args.bias_arg {
             IrArg::Node(bias_id) => {
                 ctx.view_shape(&mut cursor, "bias_view", bias_id, &channel_shape)
             }

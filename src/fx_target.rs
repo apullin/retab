@@ -84,6 +84,13 @@ macro_rules! contains_any {
     };
 }
 
+pub(crate) const BATCH_NORM_TARGET_MARKERS: &[&str] = &[
+    "aten.batch_norm",
+    "aten.native_batch_norm",
+    "aten._native_batch_norm_legit_no_training",
+    "aten._native_batch_norm_legit.no_stats",
+];
+
 pub(crate) fn classify_ir_target(target: &str) -> IrTargetKind {
     if matches!(
         target,
@@ -591,6 +598,12 @@ pub(crate) fn is_mean_target(target: &str) -> bool {
 
 pub(crate) fn is_full_like_target(target: &str) -> bool {
     target.contains("full_like")
+}
+
+pub(crate) fn is_batch_norm_target(target: &str) -> bool {
+    BATCH_NORM_TARGET_MARKERS
+        .iter()
+        .any(|marker| target.contains(marker))
 }
 
 pub(crate) fn not_equal_replacement_target(target: &str) -> Option<&'static str> {

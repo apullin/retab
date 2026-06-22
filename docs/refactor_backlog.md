@@ -201,6 +201,23 @@ Note: this grows slightly because `ConvArgs` now owns 3D conv syntax and tests.
   The style win is removing another local conv signature parser from a pass
   that should only reason about size-adjust math.
 
+2026-06-22, batch-norm argument grammar slice
+Rust LOC: 37,237 -> 37,292
+Movement: +55 Rust LOC
+Deleted/collapsed: duplicate batch-norm target lists, training parsing, eps
+  fallback parsing, and weight/bias/running-stat positional reads from
+  `fx_decompose_ops_ir` and `fx_fuse_batch_norm_ir`; migrated existing files
+  dropped 18 lines.
+Added: `src/fx_batch_norm_args.rs`, `BATCH_NORM_TARGET_MARKERS`, and
+  `is_batch_norm_target` so BN fusion and BN decomposition share one grammar
+  for inference-only batch norm semantics.
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib:
+  165 passed; `bash /tmp/et.sh` batch-norm smoke on release integration:
+  37 passed, 1 skipped, 182 deselected.
+Note: the parser preserves the old eps behavior by reading an explicit `eps`
+  kwarg first, then the last numeric positional arg. This keeps the weird
+  overload tolerance centralized instead of duplicated.
+
 Corrected line-count baseline:
 
 ```text

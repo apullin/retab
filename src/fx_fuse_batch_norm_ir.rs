@@ -1,7 +1,6 @@
+use crate::fx_batch_norm_args::BatchNormArgs;
 use crate::fx_conv_args::ConvArgs;
-use crate::fx_ir::{
-    IrArg, IrGraph, IrNode, IrPass, NodeId, NodeMeta, NodeOp, NodeTensor, TensorSource,
-};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, NodeTensor, TensorSource};
 use crate::graph::ir::DType;
 use crate::store::TensorData;
 
@@ -19,23 +18,6 @@ impl IrPass for IrFuseBatchNorm2dPass {
         }
         modified
     }
-}
-
-fn is_batch_norm_target(target: &str) -> bool {
-    target.contains("aten.batch_norm")
-        || target.contains("aten.native_batch_norm")
-        || target.contains("aten._native_batch_norm_legit_no_training")
-        || target.contains("aten._native_batch_norm_legit.no_stats")
-}
-
-fn batch_norm_training(node: &IrNode) -> bool {
-    node.arg_or_kwarg_bool(5, "training").unwrap_or(false)
-}
-
-fn batch_norm_eps(node: &IrNode) -> f64 {
-    node.kwarg_numeric_f64("eps")
-        .or_else(|| node.args.iter().rev().find_map(IrArg::as_numeric_f64))
-        .unwrap_or(1.0e-5)
 }
 
 fn tensor_f32_values(tensor: &TensorData) -> Option<Vec<f32>> {
@@ -73,11 +55,6 @@ fn optional_node_tensor(graph: &IrGraph, arg: Option<&IrArg>) -> Option<Option<T
         Some(IrArg::None) | None => Some(None),
         _ => None,
     }
-}
-
-fn tensor_arg(graph: &IrGraph, node_id: NodeId, index: usize) -> Option<TensorData> {
-    let id = graph.node(node_id).arg_node(index)?;
-    Some(graph.node(id).tensor.as_ref()?.data.clone())
 }
 
 fn fuse_conv_bn_tensors(
@@ -179,16 +156,17 @@ fn replace_primary_result_users(graph: &mut IrGraph, id: NodeId, result: NodeId)
 }
 
 fn fuse_batch_norm_node(graph: &mut IrGraph, bn_id: NodeId) -> bool {
-    if !graph.node(bn_id).alive
-        || !is_batch_norm_target(&graph.node(bn_id).target)
-        || batch_norm_training(graph.node(bn_id))
-    {
+    if !graph.node(bn_id).alive {
+        return false;
+    }
+    let Some(bn_args) = BatchNormArgs::parse(graph.node(bn_id)) else {
+        return false;
+    };
+    if bn_args.training {
         return false;
     }
 
-    let Some(conv_id) = graph.node(bn_id).arg_node(0) else {
-        return false;
-    };
+    let conv_id = bn_args.input;
     if !graph.node(conv_id).is_convolution() || graph.single_live_user(conv_id) != Some(bn_id) {
         return false;
     }
@@ -211,19 +189,28 @@ fn fuse_batch_norm_node(graph: &mut IrGraph, bn_id: NodeId) -> bool {
     };
     let conv_bias =
         conv_bias_id.and_then(|id| graph.node(id).tensor.as_ref().map(|t| t.data.clone()));
-    let Some(bn_weight) = optional_node_tensor(graph, graph.node(bn_id).args.get(1)) else {
+    let Some(bn_weight) = optional_node_tensor(graph, Some(&bn_args.weight_arg)) else {
         return false;
     };
-    let Some(bn_bias) = optional_node_tensor(graph, graph.node(bn_id).args.get(2)) else {
+    let Some(bn_bias) = optional_node_tensor(graph, Some(&bn_args.bias_arg)) else {
         return false;
     };
-    let Some(bn_mean) = tensor_arg(graph, bn_id, 3) else {
+    let Some(bn_mean) = graph
+        .node(bn_args.running_mean)
+        .tensor
+        .as_ref()
+        .map(|tensor| tensor.data.clone())
+    else {
         return false;
     };
-    let Some(bn_var) = tensor_arg(graph, bn_id, 4) else {
+    let Some(bn_var) = graph
+        .node(bn_args.running_var)
+        .tensor
+        .as_ref()
+        .map(|tensor| tensor.data.clone())
+    else {
         return false;
     };
-    let eps = batch_norm_eps(graph.node(bn_id));
 
     let Some((fused_weight, fused_bias)) = fuse_conv_bn_tensors(
         &conv_weight,
@@ -232,7 +219,7 @@ fn fuse_batch_norm_node(graph: &mut IrGraph, bn_id: NodeId) -> bool {
         bn_bias.as_ref(),
         &bn_mean,
         &bn_var,
-        eps,
+        bn_args.eps,
     ) else {
         return false;
     };
