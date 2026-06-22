@@ -19,10 +19,7 @@ fn env_any_var(names: &[&str]) -> Option<String> {
 }
 
 pub(crate) fn profile_ingest_serialize_enabled() -> bool {
-    env_any_is_set(&[
-        "RETAB_PROFILE_INGEST_SERIALIZE",
-        "RETAB_PROFILE_INGEST_SERIALIZE",
-    ])
+    env_is_set("RETAB_PROFILE_INGEST_SERIALIZE")
 }
 
 pub(crate) fn fold_fallback_file() -> Option<String> {
