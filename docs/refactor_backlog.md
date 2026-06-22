@@ -218,6 +218,25 @@ Note: the parser preserves the old eps behavior by reading an explicit `eps`
   kwarg first, then the last numeric positional arg. This keeps the weird
   overload tolerance centralized instead of duplicated.
 
+2026-06-22, pool/getitem/group-norm cleanup slice
+Rust LOC: 37,263 -> 37,369
+Movement: +77 Rust LOC
+Deleted/collapsed: max-vs-avg pool target substring branching from
+  `fx_size_adjust_input_ir`, the inline serializer getitem special case, and
+  group-norm positional overload parsing from the group-norm decomposition
+  body. Existing migrated files dropped 29 lines; the new parser module and
+  tests added 106 lines.
+Added: `PoolSizeAdjustKind`, `GROUP_NORM_TARGET_MARKERS`, and
+  `src/fx_group_norm_args.rs` as a narrow grammar for `aten.group_norm` and
+  `aten.native_group_norm` signatures.
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib:
+  166 passed; `/tmp/et.sh` focused TOSA smoke on active ExecuTorch checkout:
+  173 passed, 313 deselected.
+Note: this is not a LOC win. It is a grammar win: group-norm decomposition now
+  builds the math chain from named semantics, pool size adjustment receives
+  typed target facts, and serializer getitem handling uses the existing graph
+  predicate instead of restating dynamic-target matching inline.
+
 Corrected line-count baseline:
 
 ```text

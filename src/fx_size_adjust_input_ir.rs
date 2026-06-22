@@ -2,7 +2,7 @@
 
 use crate::fx_conv_args::ConvArgs;
 use crate::fx_ir::{IrArg, IrGraph, IrPass};
-use crate::fx_target::{size_adjust_target_kind, SizeAdjustTargetKind};
+use crate::fx_target::{size_adjust_target_kind, PoolSizeAdjustKind, SizeAdjustTargetKind};
 use crate::runner_logging::log_line;
 
 fn pair_arg(args: &[IrArg], idx: usize, default: Vec<i64>) -> Vec<i64> {
@@ -13,22 +13,18 @@ fn pair_arg(args: &[IrArg], idx: usize, default: Vec<i64>) -> Vec<i64> {
     }
 }
 
-fn pooling_size_adjust_allowed(target: &str, node: &crate::fx_ir::IrNode) -> bool {
-    if target.contains("max_pool2d") {
-        let ceil_mode = node.arg_bool_or(5, false);
-        return !ceil_mode;
+fn pooling_size_adjust_allowed(kind: PoolSizeAdjustKind, node: &crate::fx_ir::IrNode) -> bool {
+    match kind {
+        PoolSizeAdjustKind::Max => !node.arg_bool_or(5, false),
+        PoolSizeAdjustKind::Avg => {
+            let ceil_mode = node.arg_bool_or(4, false);
+            let count_include_pad = node.arg_bool_or(5, true);
+            let divisor_override = node.arg(6).is_some_and(|arg| !matches!(arg, IrArg::None));
+            let pad = pair_arg(&node.args, 3, vec![0, 0]);
+            let no_padding = pad.iter().all(|&value| value == 0);
+            !ceil_mode && (!count_include_pad || no_padding) && !divisor_override
+        }
     }
-
-    if target.contains("avg_pool2d") {
-        let ceil_mode = node.arg_bool_or(4, false);
-        let count_include_pad = node.arg_bool_or(5, true);
-        let divisor_override = node.arg(6).is_some_and(|arg| !matches!(arg, IrArg::None));
-        let pad = pair_arg(&node.args, 3, vec![0, 0]);
-        let no_padding = pad.iter().all(|&value| value == 0);
-        return !ceil_mode && (!count_include_pad || no_padding) && !divisor_override;
-    }
-
-    false
 }
 
 pub struct IrSizeAdjustInputPass;
@@ -107,8 +103,8 @@ impl IrPass for IrSizeAdjustInputPass {
                     }
                     slices
                 }
-                SizeAdjustTargetKind::Pool => {
-                    if !pooling_size_adjust_allowed(&graph.nodes[id].target, &graph.nodes[id]) {
+                SizeAdjustTargetKind::Pool(pool_kind) => {
+                    if !pooling_size_adjust_allowed(pool_kind, &graph.nodes[id]) {
                         continue;
                     }
                     let kernel = pair_arg(&graph.nodes[id].args, 1, vec![2, 2]);

@@ -110,10 +110,8 @@ pub fn emit_node(
         }
     }
     // Handle the `getitem` special case first (dynamic Other variant).
-    if let OpTarget::Other(target) = &node.target {
-        if target.contains("getitem") {
-            return Some(EmitResult::default());
-        }
+    if is_getitem_node(node) {
+        return Some(EmitResult::default());
     }
 
     EMITTER_TABLE.with(|table| {

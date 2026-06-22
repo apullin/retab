@@ -66,7 +66,13 @@ pub(crate) enum NoopTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SizeAdjustTargetKind {
     Conv,
-    Pool,
+    Pool(PoolSizeAdjustKind),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PoolSizeAdjustKind {
+    Max,
+    Avg,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +96,9 @@ pub(crate) const BATCH_NORM_TARGET_MARKERS: &[&str] = &[
     "aten._native_batch_norm_legit_no_training",
     "aten._native_batch_norm_legit.no_stats",
 ];
+
+pub(crate) const GROUP_NORM_TARGET_MARKERS: &[&str] =
+    &["aten.group_norm", "aten.native_group_norm"];
 
 pub(crate) fn classify_ir_target(target: &str) -> IrTargetKind {
     if matches!(
@@ -404,8 +413,11 @@ pub(crate) fn size_adjust_target_kind(target: &str) -> Option<SizeAdjustTargetKi
     if contains_any!(&target; "convolution.default" | "conv2d" | "conv3d") {
         return Some(SizeAdjustTargetKind::Conv);
     }
-    if contains_any!(&target; "max_pool2d" | "avg_pool2d") {
-        return Some(SizeAdjustTargetKind::Pool);
+    if target.contains("max_pool2d") {
+        return Some(SizeAdjustTargetKind::Pool(PoolSizeAdjustKind::Max));
+    }
+    if target.contains("avg_pool2d") {
+        return Some(SizeAdjustTargetKind::Pool(PoolSizeAdjustKind::Avg));
     }
     None
 }
@@ -909,7 +921,14 @@ mod tests {
             size_adjust_target_kind,
             &[
                 ("aten.conv2d.default", Some(SizeAdjustTargetKind::Conv)),
-                ("aten.avg_pool2d.default", Some(SizeAdjustTargetKind::Pool)),
+                (
+                    "aten.avg_pool2d.default",
+                    Some(SizeAdjustTargetKind::Pool(PoolSizeAdjustKind::Avg)),
+                ),
+                (
+                    "aten.max_pool2d.default",
+                    Some(SizeAdjustTargetKind::Pool(PoolSizeAdjustKind::Max)),
+                ),
                 ("aten.transpose_conv2d.input", None),
             ],
         );

@@ -5,12 +5,13 @@ use std::f64::consts::FRAC_PI_2;
 
 use crate::fx_activation::EluParams;
 use crate::fx_batch_norm_args::BatchNormArgs;
+use crate::fx_group_norm_args::GroupNormArgs;
 use crate::fx_ir::{
     i64_list_arg as i64_list, normalize_dim, wrap_dim, IrArg, IrGraph, IrPass, MetaValue, NodeId,
 };
 use crate::fx_target::{
-    add_sub_alpha_result_target, elu_target_kind, group_norm_reshape_target,
-    BATCH_NORM_TARGET_MARKERS,
+    add_sub_alpha_result_target, elu_target_kind, BATCH_NORM_TARGET_MARKERS,
+    GROUP_NORM_TARGET_MARKERS,
 };
 use crate::runner_logging::log_line;
 
@@ -203,10 +204,7 @@ const DECOMPOSE_RULES: &[DecomposeRule] = &[
     skip_quantized(&["aten.gelu."], decompose_gelu),
     skip_quantized(&["aten.erfinv."], decompose_erfinv),
     skip_quantized(&["pow.Tensor_Scalar"], decompose_pow_scalar),
-    always(
-        &["aten.group_norm", "aten.native_group_norm"],
-        decompose_group_norm,
-    ),
+    always(GROUP_NORM_TARGET_MARKERS, decompose_group_norm),
     always(BATCH_NORM_TARGET_MARKERS, decompose_batch_norm),
     always(
         &["aten.log_softmax.", "aten._log_softmax."],
@@ -1651,55 +1649,13 @@ fn decompose_batch_norm(graph: &mut IrGraph, id: NodeId) -> bool {
 }
 
 fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
-    let args = graph.nodes[id].args.clone();
+    let Some(args) = GroupNormArgs::parse(&graph.nodes[id]) else {
+        return false;
+    };
     let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
-
-    let (weight_arg, bias_arg, group, eps) = match args.len() {
-        8 => (
-            args.get(1).cloned().unwrap_or(IrArg::None),
-            args.get(2).cloned().unwrap_or(IrArg::None),
-            args.get(6).and_then(IrArg::as_int),
-            args.get(7).and_then(IrArg::as_numeric_f64),
-        ),
-        6 => (
-            args.get(2).cloned().unwrap_or(IrArg::None),
-            args.get(3).cloned().unwrap_or(IrArg::None),
-            args.get(1).and_then(IrArg::as_int),
-            args.get(4).and_then(IrArg::as_numeric_f64),
-        ),
-        5 => (
-            args.get(2).cloned().unwrap_or(IrArg::None),
-            args.get(3).cloned().unwrap_or(IrArg::None),
-            args.get(1).and_then(IrArg::as_int),
-            args.get(4).and_then(IrArg::as_numeric_f64),
-        ),
-        4 => (
-            args.get(2).cloned().unwrap_or(IrArg::None),
-            args.get(3).cloned().unwrap_or(IrArg::None),
-            args.get(1).and_then(IrArg::as_int),
-            None,
-        ),
-        2 => (
-            IrArg::None,
-            IrArg::None,
-            args.get(1).and_then(IrArg::as_int),
-            None,
-        ),
-        _ => (
-            graph.nodes[id].kwarg_clone_or_none("weight"),
-            graph.nodes[id].kwarg_clone_or_none("bias"),
-            graph.nodes[id]
-                .kwarg_int("num_groups")
-                .or_else(|| graph.nodes[id].kwarg_int("group")),
-            graph.nodes[id].kwarg_numeric_f64("eps"),
-        ),
-    };
-    let Some(group) = group else {
-        return false;
-    };
-    if group <= 0 {
+    if x_id != args.input {
         return false;
     }
 
@@ -1707,26 +1663,27 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     if shape.len() < 2 {
         return false;
     }
-    let eps = eps.unwrap_or(1.0e-5);
     let n = shape[0];
     let c = shape[1];
-    if c <= 0 || c % group != 0 {
+    if c <= 0 || c % args.group != 0 {
         return false;
     }
-    let channels_per_group = c / group;
+    let channels_per_group = c / args.group;
     let hxw = shape.iter().skip(2).product::<i64>().max(1);
-    let grouped_shape = vec![n, group, channels_per_group, hxw];
+    let grouped_shape = vec![n, args.group, channels_per_group, hxw];
     let reduce_dims = i64_list(&[2, 3]);
     let scalar_shape = vec![1_i64; grouped_shape.len()];
-    let stat_shape = vec![n, group, 1, 1];
-    let affine_shape = vec![1, group, channels_per_group, 1];
-    let Some(reshape_target) = group_norm_reshape_target(&graph.nodes[id].target) else {
-        return false;
-    };
+    let stat_shape = vec![n, args.group, 1, 1];
+    let affine_shape = vec![1, args.group, channels_per_group, 1];
     let result = {
         let mut cursor = graph.rewrite_cursor(id);
-        let grouped =
-            ctx.reshape_shape(&mut cursor, "grouped", reshape_target, x_id, &grouped_shape);
+        let grouped = ctx.reshape_shape(
+            &mut cursor,
+            "grouped",
+            args.reshape_target,
+            x_id,
+            &grouped_shape,
+        );
         let inv_n = ctx.full_shape(
             &mut cursor,
             "inv_n",
@@ -1775,7 +1732,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             &[sum_squared, inv_n],
             &stat_shape,
         );
-        let eps_full = ctx.full_shape(&mut cursor, "eps", eps, &scalar_shape);
+        let eps_full = ctx.full_shape(&mut cursor, "eps", args.eps, &scalar_shape);
         let var_eps = ctx.tensor_nodes_shape(
             &mut cursor,
             "var_eps",
@@ -1798,12 +1755,12 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             &grouped_shape,
         );
 
-        let weighted = match weight_arg {
+        let weighted = match args.weight_arg {
             IrArg::Node(weight_id) => {
                 let weight_view = ctx.reshape_shape(
                     &mut cursor,
                     "weight_view",
-                    reshape_target,
+                    args.reshape_target,
                     weight_id,
                     &affine_shape,
                 );
@@ -1819,12 +1776,12 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             _ => return false,
         };
 
-        let biased = match bias_arg {
+        let biased = match args.bias_arg {
             IrArg::Node(bias_id) => {
                 let bias_view = ctx.reshape_shape(
                     &mut cursor,
                     "bias_view",
-                    reshape_target,
+                    args.reshape_target,
                     bias_id,
                     &affine_shape,
                 );
@@ -1840,7 +1797,7 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             _ => return false,
         };
 
-        ctx.reshape_shape(&mut cursor, "result", reshape_target, biased, &shape)
+        ctx.reshape_shape(&mut cursor, "result", args.reshape_target, biased, &shape)
     };
     replace_primary_result_users(graph, id, result)
 }
