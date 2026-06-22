@@ -1,5 +1,6 @@
 //! Pure Rust IrPass: adjust conv/pool input sizes to yield exact integer outputs.
 
+use crate::fx_conv_args::ConvArgs;
 use crate::fx_ir::{IrArg, IrGraph, IrPass};
 use crate::fx_target::{size_adjust_target_kind, SizeAdjustTargetKind};
 use crate::runner_logging::log_line;
@@ -61,11 +62,11 @@ impl IrPass for IrSizeAdjustInputPass {
 
             let slices = match target_kind {
                 SizeAdjustTargetKind::Conv => {
-                    let weight_shape = graph.nodes[id]
-                        .args
-                        .get(1)
-                        .and_then(|a| a.as_node())
-                        .and_then(|wid| graph.node_shape(wid))
+                    let Some(conv) = ConvArgs::parse(&graph.nodes[id]) else {
+                        continue;
+                    };
+                    let weight_shape = graph
+                        .node_shape(conv.weight)
                         .map(|s| s.to_vec())
                         .unwrap_or_default();
                     if weight_shape.len() < input_shape.len() {
@@ -76,9 +77,9 @@ impl IrPass for IrSizeAdjustInputPass {
                         continue;
                     }
 
-                    let stride = pair_arg(&graph.nodes[id].args, 3, vec![1; spatial_rank]);
-                    let raw_pad = pair_arg(&graph.nodes[id].args, 4, vec![0; spatial_rank]);
-                    let dilation = pair_arg(&graph.nodes[id].args, 5, vec![1; spatial_rank]);
+                    let stride = &conv.stride;
+                    let raw_pad = &conv.padding;
+                    let dilation = &conv.dilation;
                     let pad_per_dim: Vec<(i64, i64)> = if raw_pad.len() == spatial_rank * 2 {
                         (0..spatial_rank)
                             .map(|i| (raw_pad[i * 2], raw_pad[i * 2 + 1]))

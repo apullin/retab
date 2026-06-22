@@ -151,7 +151,10 @@ fn parse_grouped_conv(graph: &IrGraph, id: NodeId) -> Option<ConvArgs> {
         return None;
     }
     let spec = ConvArgs::parse(node)?;
-    if spec.kind == ConvArgKind::Conv1dDefault {
+    if !matches!(
+        spec.kind,
+        ConvArgKind::Conv2dDefault | ConvArgKind::ConvolutionDefault
+    ) {
         return None;
     }
     if spec.groups <= 1 {

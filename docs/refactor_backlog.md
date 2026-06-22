@@ -185,6 +185,22 @@ Note: this is a small target-grammar slice. It removes a subtle substring
   ambiguity where `selu.default` and `celu.default` also contain `elu.default`,
   and centralizes the SELU/CELU parameter constants for future activation work.
 
+2026-06-22, conv size-adjust grammar slice
+Rust LOC: 37,203 -> 37,237
+Movement: +34 Rust LOC
+Deleted/collapsed: manual conv weight/stride/padding/dilation positional reads
+  from `fx_size_adjust_input_ir`; the pass now consumes `ConvArgs` semantic
+  fields for conv size adjustment and keeps `pair_arg` only for pooling.
+Added: `conv3d.default` support in `ConvArgs`, a conv3d parser assertion, and
+  an explicit grouped-conv guard so grouped decomposition remains scoped to
+  2D conv signatures.
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib:
+  164 passed; `bash /tmp/et.sh` size-adjust smoke on release integration:
+  370 passed, 1113 deselected, 1 xfailed.
+Note: this grows slightly because `ConvArgs` now owns 3D conv syntax and tests.
+  The style win is removing another local conv signature parser from a pass
+  that should only reason about size-adjust math.
+
 Corrected line-count baseline:
 
 ```text

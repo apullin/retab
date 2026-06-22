@@ -1,12 +1,14 @@
 use crate::fx_ir::{IrArg, IrNode, NodeId, NodeOp};
 use crate::fx_target::{
     is_aten_convolution_default_target, is_conv1d_default_target, is_conv2d_default_target,
+    is_conv3d_default_target,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConvArgKind {
     Conv1dDefault,
     Conv2dDefault,
+    Conv3dDefault,
     ConvolutionDefault,
 }
 
@@ -36,24 +38,13 @@ impl ConvArgs {
             return None;
         }
         if is_conv1d_default_target(&node.target) {
-            return Self::parse_raw_default(
-                node,
-                ConvArgKind::Conv1dDefault,
-                vec![1],
-                vec![0],
-                vec![1],
-                vec![0],
-            );
+            return Self::parse_raw_default(node, ConvArgKind::Conv1dDefault, 1);
         }
         if is_conv2d_default_target(&node.target) {
-            return Self::parse_raw_default(
-                node,
-                ConvArgKind::Conv2dDefault,
-                vec![1, 1],
-                vec![0, 0],
-                vec![1, 1],
-                vec![0, 0],
-            );
+            return Self::parse_raw_default(node, ConvArgKind::Conv2dDefault, 2);
+        }
+        if is_conv3d_default_target(&node.target) {
+            return Self::parse_raw_default(node, ConvArgKind::Conv3dDefault, 3);
         }
         if is_aten_convolution_default_target(&node.target) {
             return Self::parse_convolution_default(node);
@@ -125,14 +116,7 @@ impl ConvArgs {
         })
     }
 
-    fn parse_raw_default(
-        node: &IrNode,
-        kind: ConvArgKind,
-        default_stride: Vec<i64>,
-        default_padding: Vec<i64>,
-        default_dilation: Vec<i64>,
-        default_output_padding: Vec<i64>,
-    ) -> Option<Self> {
+    fn parse_raw_default(node: &IrNode, kind: ConvArgKind, spatial_rank: usize) -> Option<Self> {
         let args = &node.args;
         if args.len() < 2 {
             return None;
@@ -146,11 +130,17 @@ impl ConvArgs {
             bias,
             bias_arg,
             bias_well_formed,
-            stride: node.arg_int_list(3).unwrap_or(default_stride),
-            padding: node.arg_int_list(4).unwrap_or(default_padding),
-            dilation: node.arg_int_list(5).unwrap_or(default_dilation),
+            stride: node
+                .arg_int_list(3)
+                .unwrap_or_else(|| vec![1; spatial_rank]),
+            padding: node
+                .arg_int_list(4)
+                .unwrap_or_else(|| vec![0; spatial_rank]),
+            dilation: node
+                .arg_int_list(5)
+                .unwrap_or_else(|| vec![1; spatial_rank]),
             transposed: false,
-            output_padding: default_output_padding,
+            output_padding: vec![0; spatial_rank],
             groups: node.arg_int_or(6, 1),
         })
     }
@@ -166,7 +156,9 @@ impl ConvArgs {
 
     pub(crate) fn group_arg_index(&self) -> usize {
         match self.kind {
-            ConvArgKind::Conv1dDefault | ConvArgKind::Conv2dDefault => 6,
+            ConvArgKind::Conv1dDefault
+            | ConvArgKind::Conv2dDefault
+            | ConvArgKind::Conv3dDefault => 6,
             ConvArgKind::ConvolutionDefault => 8,
         }
     }
@@ -181,7 +173,9 @@ impl ConvArgs {
     ) -> Option<Vec<IrArg>> {
         let mut args = vec![IrArg::Node(input), IrArg::Node(weight), bias_arg];
         match self.kind {
-            ConvArgKind::Conv1dDefault | ConvArgKind::Conv2dDefault => {
+            ConvArgKind::Conv1dDefault
+            | ConvArgKind::Conv2dDefault
+            | ConvArgKind::Conv3dDefault => {
                 for index in 3..self.group_arg_index() {
                     if let Some(arg) = original_args.get(index) {
                         args.push(arg.clone());
@@ -303,6 +297,37 @@ mod tests {
         assert_eq!(args.kind, ConvArgKind::Conv2dDefault);
         assert!(!args.is_conv1d_form());
         assert!(args.is_raw_conv2d());
+        assert_eq!(args.groups, 2);
+        assert_eq!(args.group_arg_index(), 6);
+    }
+
+    #[test]
+    fn parses_conv3d_spatial_signature() {
+        let mut graph = IrGraph::empty();
+        let input = placeholder(&mut graph, "input", [1, 4, 8, 8, 8], "torch.float32");
+        let weight = placeholder(&mut graph, "weight", [8, 2, 3, 3, 3], "torch.float32");
+        let conv = call_with_meta(
+            &mut graph,
+            "conv",
+            "aten.conv3d.default",
+            vec![
+                IrArg::Node(input),
+                IrArg::Node(weight),
+                IrArg::None,
+                i64_list_arg(&[1, 2, 3]),
+                i64_list_arg(&[0, 1, 2]),
+                i64_list_arg(&[1, 1, 2]),
+                IrArg::Int(2),
+            ],
+            NodeMeta::tensor([1, 8, 6, 3, 2], "torch.float32"),
+        );
+
+        let args = ConvArgs::parse(graph.node(conv)).unwrap();
+        assert_eq!(args.kind, ConvArgKind::Conv3dDefault);
+        assert_eq!(args.weight, weight);
+        assert_eq!(args.stride, vec![1, 2, 3]);
+        assert_eq!(args.padding, vec![0, 1, 2]);
+        assert_eq!(args.dilation, vec![1, 1, 2]);
         assert_eq!(args.groups, 2);
         assert_eq!(args.group_arg_index(), 6);
     }

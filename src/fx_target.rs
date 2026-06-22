@@ -359,6 +359,10 @@ pub(crate) fn is_conv2d_default_target(target: &str) -> bool {
     target.contains("conv2d.default")
 }
 
+pub(crate) fn is_conv3d_default_target(target: &str) -> bool {
+    target.contains("conv3d.default")
+}
+
 pub(crate) fn is_aten_convolution_default_target(target: &str) -> bool {
     target.contains("convolution.default")
 }
@@ -879,6 +883,7 @@ mod tests {
         ));
         assert!(is_conv1d_default_target("aten.conv1d.default"));
         assert!(is_conv2d_default_target("aten.conv2d.default"));
+        assert!(is_conv3d_default_target("aten.conv3d.default"));
         assert_true(
             is_conv_accumulator_target,
             &[
