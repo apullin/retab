@@ -68,6 +68,7 @@ mod fx_pipeline;
 mod fx_py_attr;
 mod fx_quant;
 mod fx_quantize_clamp_args_ir;
+mod fx_reduction;
 mod fx_remove_noop_ir;
 mod fx_replace_inf_values_ir;
 mod fx_replace_scalar_with_tensor_ir;

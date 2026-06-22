@@ -1,9 +1,7 @@
 //! Pure Rust IrPass: var.correction / var.dim decomposition.
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, normalized_reduction_dims, reduced_shape, IrArg, IrGraph, IrPass,
-    NodeId,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId};
+use crate::fx_reduction::ReductionDomain;
 use crate::fx_target::{is_var_dim_target, is_var_target};
 use crate::runner_logging::log_line;
 
@@ -42,12 +40,6 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
     let meta = base_meta.tensor_stamp_with_dtype_of_or_float32(&x_meta);
     let dtype = meta.dtype();
 
-    let dims = normalized_reduction_dims(graph.nodes[id].args.get(1), &input_shape, false);
-    if dims.is_empty() {
-        graph.replace_and_erase(id, x_id);
-        return true;
-    }
-
     let (keepdim, correction) = if is_var_dim_target(&target) {
         (
             graph.nodes[id]
@@ -76,17 +68,22 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         )
     };
 
-    let mean_shape = reduced_shape(&input_shape, &dims, true);
-    let output_shape = graph.nodes[id]
-        .meta
-        .val_shape()
-        .map(|shape| shape.to_vec())
-        .unwrap_or_else(|| reduced_shape(&input_shape, &dims, keepdim));
-    let coefficient_shape = vec![1; output_shape.len().max(1)];
-    let count: i64 = dims
-        .iter()
-        .map(|&dim| input_shape[dim as usize].max(1))
-        .product();
+    let domain = ReductionDomain::from_arg(
+        input_shape,
+        graph.nodes[id].args.get(1),
+        keepdim,
+        false,
+        graph.nodes[id].meta.val_shape().map(|shape| shape.to_vec()),
+    );
+    if domain.is_empty() {
+        graph.replace_and_erase(id, x_id);
+        return true;
+    }
+    let dims = domain.dims_i64();
+    let mean_shape = domain.shape_with_keepdim(true);
+    let output_shape = domain.output_shape().to_vec();
+    let coefficient_shape = domain.coefficient_shape();
+    let count = domain.element_count_min_one_i64();
     let denom = (count - correction).max(1) as f64;
     let mut cursor = graph.rewrite_cursor(id);
 
@@ -101,14 +98,14 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         format!("{}_diff", name),
         "aten.sub.Tensor",
         vec![IrArg::Node(x_id), IrArg::Node(mean)],
-        base_meta.cloned_with_val(input_shape.clone(), dtype),
+        base_meta.cloned_with_val(domain.input_shape().to_vec(), dtype),
     );
 
     let squared = cursor.call_function(
         format!("{}_squared", name),
         "aten.mul.Tensor",
         vec![IrArg::Node(diff), IrArg::Node(diff)],
-        base_meta.cloned_with_val(input_shape.clone(), dtype),
+        base_meta.cloned_with_val(domain.input_shape().to_vec(), dtype),
     );
 
     let sum = cursor.call_function(

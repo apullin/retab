@@ -8,6 +8,7 @@
 //! so that earlier reductions don't shift the indices of later ones.
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId};
+use crate::fx_reduction::{ReductionDomain, SumQParamChain};
 use crate::fx_target::is_sum_dim_int_list_target;
 use crate::runner_logging::log_line;
 
@@ -34,29 +35,10 @@ impl IrPass for IrConvertSumPass {
                 None => continue,
             };
 
-            let dims = match graph.nodes[id].args[1].as_int_list_or_scalar() {
-                Some(dims) => dims,
-                None => continue,
-            };
-            if dims.is_empty() {
-                continue;
-            }
-            if dims.len() <= 1 {
-                // The native serializer already handles single-axis sums.
-                // Only multi-axis reductions need explicit decomposition.
-                continue;
-            }
-
-            // Normalize negative dims.
             let input_shape = match graph.node_shape_vec(input_id) {
                 Some(s) => s,
                 None => continue,
             };
-            let input_rank = input_shape.len() as i64;
-            let mut dims: Vec<i64> = dims
-                .into_iter()
-                .map(|d| if d < 0 { d + input_rank } else { d })
-                .collect();
 
             // keepdim: args[2] if present, default false.
             let keepdim = graph.nodes[id]
@@ -64,76 +46,43 @@ impl IrPass for IrConvertSumPass {
                 .get(2)
                 .and_then(|a| a.as_bool())
                 .unwrap_or(false);
-
-            // Sort dims descending to keep indices stable during chained reductions.
-            dims.sort_unstable_by(|a, b| b.cmp(a));
+            let domain = ReductionDomain::from_arg(
+                input_shape,
+                graph.nodes[id].args.get(1),
+                keepdim,
+                false,
+                None,
+            );
+            if domain.dim_count() <= 1 {
+                // The native serializer already handles single-axis sums.
+                // Only multi-axis reductions need explicit decomposition.
+                continue;
+            }
+            let steps = domain.chained_single_axis_steps();
 
             let orig_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
             let input_meta = graph.nodes[input_id].meta.clone();
-
-            // Track qparams for chaining: first reduce inherits the original
-            // node's input_qparams; subsequent reduces use the previous
-            // output_qparams as their input_qparams.  (Mirrors the FxPass.)
-            let mut current_input_qparams = orig_meta.cloned_input_qparams();
-            let current_output_qparams = orig_meta.cloned_output_qparams();
+            let mut qparams = SumQParamChain::new(&orig_meta, &input_meta);
 
             let mut current_input = input_id;
             let mut last_reduce: Option<NodeId> = None;
             let mut cursor = graph.rewrite_cursor(id);
 
-            for (index, &dim) in dims.iter().enumerate() {
-                // Get current input shape for computing output shape.
-                let cur_shape = match cursor.graph().node_shape_vec(current_input) {
-                    Some(s) => s,
-                    None => continue,
-                };
-                let rank = cur_shape.len();
-                let normalized_dim = (dim as usize) % rank;
-
-                // Compute output shape for this single-dim reduction.
-                let output_shape = if keepdim {
-                    let mut s = cur_shape;
-                    s[normalized_dim] = 1;
-                    s
-                } else {
-                    let mut s = cur_shape;
-                    s.remove(normalized_dim);
-                    s
-                };
-
-                // Preserve layout metadata from the source sum node. Some
-                // upstream decompositions (for example group_norm) mark their
-                // reduction chain as layout-neutral, and rebuilding from a
-                // blank NodeMeta here silently drops that contract.
-                let mut step_meta =
-                    orig_meta.cloned_with_dtype_of_or_float32(output_shape.clone(), &input_meta);
-                step_meta.clear_tosa_dim_order_if_rank_mismatch(output_shape.len());
-                if let Some(ref iqp) = current_input_qparams {
-                    step_meta.set_input_qparams(iqp.clone());
-                }
-                if let Some(ref oqp) = current_output_qparams {
-                    step_meta.set_output_qparams(oqp.clone());
-                }
-                if index + 1 == dims.len() {
-                    step_meta.copy_qparams_from(&orig_meta);
-                }
-
+            for (index, step) in steps.iter().enumerate() {
                 // Build args: (current_input, [dim], keepdim)
                 let reduce_id = cursor.call_function(
-                    format!("{}_reduce_dim{}", orig_name, dim),
+                    format!("{}_reduce_dim{}", orig_name, step.dim),
                     "aten.sum.dim_IntList",
                     vec![
                         IrArg::Node(current_input),
-                        IrArg::List(vec![IrArg::Int(dim)]),
-                        IrArg::Bool(keepdim),
+                        IrArg::List(vec![IrArg::Int(step.dim)]),
+                        IrArg::Bool(domain.keepdim()),
                     ],
-                    step_meta,
+                    qparams.step_meta(&step.output_shape, index + 1 == steps.len()),
                 );
 
                 current_input = reduce_id;
-                // Chain qparams: next reduce's input_qparams = current output_qparams
-                current_input_qparams = current_output_qparams.clone();
                 last_reduce = Some(reduce_id);
             }
 

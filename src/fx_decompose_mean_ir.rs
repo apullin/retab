@@ -1,9 +1,7 @@
 //! Pure Rust IrPass: mean.dim → sum(keepdim=True) * (1/count) + view, or avg_pool2d for 4D spatial.
 
-use crate::fx_ir::{
-    i64_list_arg as i64_list, normalized_reduction_dims, reduced_shape, IrArg, IrGraph, IrPass,
-    QParam,
-};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass};
+use crate::fx_reduction::{MeanQParamPlan, ReductionDomain};
 use crate::fx_target::is_mean_target;
 use crate::runner_logging::log_line;
 
@@ -34,14 +32,17 @@ impl IrPass for IrDecomposeMeanPass {
                 .get(2)
                 .and_then(|a| a.as_bool())
                 .unwrap_or(false);
-            let dims = normalized_reduction_dims(graph.nodes[id].args.get(1), &input_shape, true);
-            let output_shape = graph.nodes[id]
-                .meta
-                .val_shape()
-                .map(|s| s.to_vec())
-                .unwrap_or_else(|| reduced_shape(&input_shape, &dims, keepdim));
+            let domain = ReductionDomain::from_arg(
+                input_shape,
+                graph.nodes[id].args.get(1),
+                keepdim,
+                true,
+                graph.nodes[id].meta.val_shape().map(|s| s.to_vec()),
+            );
+            let dims = domain.dims_i64();
+            let output_shape = domain.output_shape().to_vec();
 
-            if dims.is_empty() {
+            if domain.is_empty() {
                 graph.replace_and_erase(id, x_id);
                 modified = true;
                 continue;
@@ -54,56 +55,43 @@ impl IrPass for IrDecomposeMeanPass {
             let dtype = meta.dtype();
 
             // 4D spatial reduction → avg_pool2d path
-            if input_shape.len() == 4 && dims.iter().all(|&d| d == 2 || d == 3) {
-                let kernel = match dims.as_slice() {
-                    [2, 3] | [3, 2] => vec![input_shape[2], input_shape[3]],
-                    [2] => vec![input_shape[2], 1],
-                    [3] => vec![1, input_shape[3]],
-                    _ => Vec::new(),
+            if let Some(kernel) = domain.spatial_avg_pool_kernel_4d() {
+                let pool_shape = domain.avg_pool_output_shape(&kernel);
+                let result = {
+                    let mut cursor = graph.rewrite_cursor(id);
+                    let pool = cursor.call_function(
+                        format!("{}_avgpool", name),
+                        "aten.avg_pool2d.default",
+                        vec![IrArg::Node(x_id), i64_list(&kernel), i64_list(&[1, 1])],
+                        orig_meta.cloned_with_val(pool_shape.clone(), dtype),
+                    );
+                    if keepdim {
+                        pool
+                    } else {
+                        cursor.view_copy(
+                            format!("{}_view", name),
+                            pool,
+                            &output_shape,
+                            meta.preserve_qparams(output_shape.clone()),
+                        )
+                    }
                 };
-                if !kernel.is_empty() {
-                    let pool_h = 1i64.max(input_shape[2] / kernel[0].max(1));
-                    let pool_w = 1i64.max(input_shape[3] / kernel[1].max(1));
-                    let pool_shape = vec![input_shape[0], input_shape[1], pool_h, pool_w];
-                    let result = {
-                        let mut cursor = graph.rewrite_cursor(id);
-                        let pool = cursor.call_function(
-                            format!("{}_avgpool", name),
-                            "aten.avg_pool2d.default",
-                            vec![IrArg::Node(x_id), i64_list(&kernel), i64_list(&[1, 1])],
-                            orig_meta.cloned_with_val(pool_shape.clone(), dtype),
-                        );
-                        if keepdim {
-                            pool
-                        } else {
-                            cursor.view_copy(
-                                format!("{}_view", name),
-                                pool,
-                                &output_shape,
-                                meta.preserve_qparams(output_shape.clone()),
-                            )
-                        }
-                    };
-                    graph.replace_and_erase(id, result);
-                    modified = true;
-                    continue;
-                }
+                graph.replace_and_erase(id, result);
+                modified = true;
+                continue;
             }
 
             // General path: sum(keepdim=True) * full(1/count) + optional view
-            let count: f64 = dims
-                .iter()
-                .map(|&d| input_shape.get(d as usize).copied().unwrap_or(1) as f64)
-                .product();
+            let count = domain.element_count_f64();
             if count == 0.0 {
                 continue;
             }
 
             // sum(x, dims, keepdim=True)
-            let sum_shape = reduced_shape(&input_shape, &dims, true);
+            let sum_shape = domain.shape_with_keepdim(true);
 
             // full([1]*rank, 1/count)
-            let ones_shape: Vec<i64> = vec![1; input_shape.len()];
+            let ones_shape = domain.input_rank_unit_shape();
             let (sum_id, count_id, mul_id) = {
                 let mut cursor = graph.rewrite_cursor(id);
                 let sum = cursor.call_function(
@@ -128,37 +116,10 @@ impl IrPass for IrDecomposeMeanPass {
             };
 
             // Annotate qparams if quantized
-            if let Some(input_qp) = orig_meta.input_qparam().cloned() {
-                if let Some(output_qp) = orig_meta.output_qparam().cloned() {
-                    let sum_qp = QParam::per_tensor(
-                        input_qp.scale * count,
-                        input_qp.zp,
-                        input_qp.qmin,
-                        input_qp.qmax,
-                        input_qp.dtype_str.clone(),
-                    );
-                    let full_qp = QParam::per_tensor(
-                        1.0 / (count * input_qp.qmax as f64),
-                        0,
-                        input_qp.qmin,
-                        input_qp.qmax,
-                        input_qp.dtype_str.clone(),
-                    );
-                    graph
-                        .node_mut(sum_id)
-                        .meta
-                        .set_unary_input_output_qparams(input_qp, sum_qp.clone());
-
-                    graph
-                        .node_mut(count_id)
-                        .meta
-                        .set_single_output_qparam(full_qp.clone());
-
-                    graph
-                        .node_mut(mul_id)
-                        .meta
-                        .set_binary_input_output_qparams(sum_qp, full_qp, output_qp);
-                }
+            if let Some(plan) = MeanQParamPlan::from_meta(&orig_meta, count) {
+                plan.stamp_sum(&mut graph.node_mut(sum_id).meta);
+                plan.stamp_coefficient(&mut graph.node_mut(count_id).meta);
+                plan.stamp_mul(&mut graph.node_mut(mul_id).meta);
             }
 
             // Optional view if keepdim=False

@@ -21,7 +21,7 @@ quantization-domain facts, reduction/index domain facts, and argument parsing.
 2. [x] Introduce a qparam-domain wrapper around positional input/output qparam
    maps, with deterministic iteration and centralized clone/copy/chaining
    semantics.
-3. [ ] Add a reduction-domain model for normalized dims, keepdim, reduced
+3. [x] Add a reduction-domain model for normalized dims, keepdim, reduced
    shapes, reduction counts, and qparam chaining across sum/mean/var lowering.
 4. [ ] Add gather/index domain facts for bool-as-int8 working dtype, index
    dtype, and shared gather/scatter metadata stamping.
@@ -57,8 +57,26 @@ Validation: cargo fmt --check; cargo check --lib; cargo test --lib: 147 passed;
   `bash /tmp/et.sh` focused qparam-heavy smoke: 518 passed, 1714 deselected,
   8 xfailed
 Note: this is intentionally setup-positive. The payoff is semantic ownership:
-  qparam maps now have a deterministic domain type, so future reduction and
+ qparam maps now have a deterministic domain type, so future reduction and
   gather/index refactors do not need to clone/sort raw maps by convention.
+
+2026-06-22, reduction domain model
+Rust LOC: 36,679 -> 36,873
+Movement: +194 Rust LOC
+Deleted/collapsed: reduction dim normalization and reduced-shape helpers from
+  `fx_ir.rs`, local multi-axis sum step shape calculation, sum qparam-chain
+  stamping, mean reduction-count calculation, mean qparam-plan construction,
+  variance output/coefficient shape calculation, and variance denominator-count
+  calculation from individual pass bodies.
+Added: `src/fx_reduction.rs` as the home for `ReductionDomain`,
+  `ReductionStep`, `SumQParamChain`, and `MeanQParamPlan`.
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib:
+  157 passed; `bash /tmp/et.sh` reduction smoke on release integration:
+  129 passed, 258 deselected.
+Note: this is deliberately small and semantic-positive rather than LOC-negative.
+  `fx_convert_sum_ir`, `fx_decompose_mean_ir`, and `fx_decompose_var_ir` now
+  ask one domain object for dims, shapes, counts, and qparam semantics instead
+  of each pass encoding its own reduction grammar.
 
 ## Current Follow-Through Queue
 

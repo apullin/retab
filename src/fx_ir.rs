@@ -145,60 +145,6 @@ pub(crate) fn wrap_dim(dim: i64, rank: usize) -> Option<usize> {
     (rank > 0).then_some(dim.rem_euclid(rank) as usize)
 }
 
-pub(crate) fn normalized_reduction_dims(
-    dim_arg: Option<&IrArg>,
-    input_shape: &[i64],
-    skip_unit_dims: bool,
-) -> Vec<i64> {
-    let rank_i64 = input_shape.len() as i64;
-    let dims = dim_arg
-        .and_then(IrArg::as_int_list_or_scalar)
-        .unwrap_or_else(|| (0..rank_i64).collect());
-    let mut normalized = Vec::new();
-
-    for dim in dims {
-        let Some(dim) = normalize_dim(dim, input_shape.len()) else {
-            continue;
-        };
-        if skip_unit_dims && input_shape[dim] == 1 {
-            continue;
-        }
-        let dim_i64 = dim as i64;
-        if !normalized.contains(&dim_i64) {
-            normalized.push(dim_i64);
-        }
-    }
-
-    normalized.sort_unstable();
-    normalized
-}
-
-pub(crate) fn reduced_shape(input_shape: &[i64], dims: &[i64], keepdim: bool) -> Vec<i64> {
-    if keepdim {
-        let mut shape = input_shape.to_vec();
-        for &dim in dims {
-            shape[dim as usize] = 1;
-        }
-        return shape;
-    }
-
-    let mut shape: Vec<i64> = input_shape
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, &extent)| {
-            if dims.contains(&(idx as i64)) {
-                None
-            } else {
-                Some(extent)
-            }
-        })
-        .collect();
-    if shape.is_empty() {
-        shape.push(1);
-    }
-    shape
-}
-
 fn build_placeholder_tensor_bindings(
     exported_program: &Bound<'_, PyAny>,
 ) -> PyResult<HashMap<String, PlaceholderTensorBinding>> {
