@@ -1,5 +1,6 @@
+use crate::fx_activation::EluParams;
 use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, QParam};
-use crate::fx_target::{table_op_target_kind, TableOpTargetKind};
+use crate::fx_target::{table_op_target_kind, EluTargetKind, TableOpTargetKind};
 use crate::graph::ir::DType;
 use crate::lowering_effects::{
     InsertPrecomputedTableOpEffect, LoweringEffect, LoweringEffectBatch, TableTensorSpec,
@@ -58,28 +59,13 @@ fn table_op_spec(node: &IrNode) -> Option<TableOpSpec> {
         TableOpTargetKind::RemainderScalar => node
             .arg_numeric_f64(1)
             .map(|arg| TableOpSpec::scalar("remainder", arg)),
-        TableOpTargetKind::Elu => Some(elu_table_op_spec(node)),
+        TableOpTargetKind::Elu(kind) => Some(elu_table_op_spec(node, kind)),
     }
 }
 
-fn elu_table_op_spec(node: &IrNode) -> TableOpSpec {
-    const SELU_ALPHA: f64 = 1.673_263_242_354_377_2;
-    const SELU_SCALE: f64 = 1.050_700_987_355_480_5;
-
-    if node.target.contains("selu.") {
-        return TableOpSpec::elu(SELU_ALPHA, SELU_SCALE, 1.0);
-    }
-    if node.target.contains("celu.") {
-        let alpha = node.arg_or_kwarg_numeric_f64(1, "alpha").unwrap_or(1.0);
-        return TableOpSpec::elu(alpha, 1.0, 1.0 / alpha);
-    }
-
-    TableOpSpec::elu(
-        node.arg_or_kwarg_numeric_f64(1, "alpha").unwrap_or(1.0),
-        node.arg_or_kwarg_numeric_f64(2, "scale").unwrap_or(1.0),
-        node.arg_or_kwarg_numeric_f64(3, "input_scale")
-            .unwrap_or(1.0),
-    )
+fn elu_table_op_spec(node: &IrNode, kind: EluTargetKind) -> TableOpSpec {
+    let params = EluParams::from_node(node, kind);
+    TableOpSpec::elu(params.alpha, params.scale, params.input_scale)
 }
 
 fn table_quant_spec(qp: &QParam) -> Option<TableTensorSpec> {

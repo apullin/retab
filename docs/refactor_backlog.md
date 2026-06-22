@@ -169,6 +169,22 @@ Future slices should record:
 - Exact tests run.
 - Whether any LOC increase is deliberate setup for a later net deletion.
 
+2026-06-22, activation target grammar slice
+Rust LOC: 37,169 -> 37,203
+Movement: +34 Rust LOC
+Deleted/collapsed: duplicate `elu`/`selu`/`celu` target-substring checks,
+  constants, and parameter extraction from `fx_decompose_ops_ir` and
+  `fx_insert_table_ops_ir`.
+Added: `src/fx_activation.rs`, `EluTargetKind`, and a variant-carrying
+  `TableOpTargetKind::Elu(EluTargetKind)` so ELU-family target classification
+  and parameter semantics are shared by decomposition and table precompute.
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib:
+  163 passed; `bash /tmp/et.sh` activation smoke on release integration:
+  74 passed, 168 deselected.
+Note: this is a small target-grammar slice. It removes a subtle substring
+  ambiguity where `selu.default` and `celu.default` also contain `elu.default`,
+  and centralizes the SELU/CELU parameter constants for future activation work.
+
 Corrected line-count baseline:
 
 ```text

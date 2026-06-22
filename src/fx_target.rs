@@ -39,7 +39,14 @@ pub(crate) enum TableOpTargetKind {
     Gelu,
     PowTensorScalar,
     RemainderScalar,
+    Elu(EluTargetKind),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EluTargetKind {
     Elu,
+    Selu,
+    Celu,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -241,12 +248,21 @@ pub(crate) fn table_op_target_kind(target: &str) -> Option<TableOpTargetKind> {
     if target.contains("remainder.Scalar") {
         return Some(TableOpTargetKind::RemainderScalar);
     }
-    if target.contains("elu.default")
-        || target.contains("elu_")
-        || target.contains("selu.default")
-        || target.contains("celu.default")
-    {
-        return Some(TableOpTargetKind::Elu);
+    if let Some(kind) = elu_target_kind(target) {
+        return Some(TableOpTargetKind::Elu(kind));
+    }
+    None
+}
+
+pub(crate) fn elu_target_kind(target: &str) -> Option<EluTargetKind> {
+    if target.contains("selu.") {
+        return Some(EluTargetKind::Selu);
+    }
+    if target.contains("celu.") {
+        return Some(EluTargetKind::Celu);
+    }
+    if target.contains("elu.default") || target.contains("elu_") {
+        return Some(EluTargetKind::Elu);
     }
     None
 }
@@ -788,7 +804,18 @@ mod tests {
                     "aten.remainder.Scalar",
                     Some(TableOpTargetKind::RemainderScalar),
                 ),
-                ("aten.elu.default", Some(TableOpTargetKind::Elu)),
+                (
+                    "aten.elu.default",
+                    Some(TableOpTargetKind::Elu(EluTargetKind::Elu)),
+                ),
+                (
+                    "aten.selu.default",
+                    Some(TableOpTargetKind::Elu(EluTargetKind::Selu)),
+                ),
+                (
+                    "aten.celu.default",
+                    Some(TableOpTargetKind::Elu(EluTargetKind::Celu)),
+                ),
                 ("aten.add.Tensor", None),
             ],
         );

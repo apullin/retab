@@ -3,10 +3,11 @@
 
 use std::f64::consts::FRAC_PI_2;
 
+use crate::fx_activation::EluParams;
 use crate::fx_ir::{
     i64_list_arg as i64_list, normalize_dim, wrap_dim, IrArg, IrGraph, IrPass, MetaValue, NodeId,
 };
-use crate::fx_target::{add_sub_alpha_result_target, group_norm_reshape_target};
+use crate::fx_target::{add_sub_alpha_result_target, elu_target_kind, group_norm_reshape_target};
 use crate::runner_logging::log_line;
 
 mod approx;
@@ -94,30 +95,6 @@ fn pow_scalar_int_arg(node: &crate::fx_ir::IrNode) -> Option<i64> {
 
 fn alpha_value(node: &crate::fx_ir::IrNode) -> Option<f64> {
     node.arg_or_kwarg_numeric_f64(2, "alpha")
-}
-
-fn elu_alpha(node: &crate::fx_ir::IrNode) -> f64 {
-    node.arg_or_kwarg_numeric_f64(1, "alpha").unwrap_or(1.0)
-}
-
-fn elu_params(node: &crate::fx_ir::IrNode) -> (f64, f64, f64) {
-    const SELU_ALPHA: f64 = 1.673_263_242_354_377_2;
-    const SELU_SCALE: f64 = 1.050_700_987_355_480_5;
-
-    if node.target.contains("selu.") {
-        return (SELU_ALPHA, SELU_SCALE, 1.0);
-    }
-    if node.target.contains("celu.") {
-        let alpha = elu_alpha(node);
-        return (alpha, 1.0, 1.0 / alpha);
-    }
-
-    (
-        elu_alpha(node),
-        node.arg_or_kwarg_numeric_f64(2, "scale").unwrap_or(1.0),
-        node.arg_or_kwarg_numeric_f64(3, "input_scale")
-            .unwrap_or(1.0),
-    )
 }
 
 fn gelu_approximate(node: &crate::fx_ir::IrNode) -> &str {
@@ -1392,7 +1369,14 @@ fn decompose_elu(graph: &mut IrGraph, id: NodeId) -> bool {
     let Some((x_id, ctx)) = ApproxCtx::from_first_input(graph, id) else {
         return false;
     };
-    let (alpha, scale, input_scale) = elu_params(&graph.nodes[id]);
+    let Some(kind) = elu_target_kind(&graph.nodes[id].target) else {
+        return false;
+    };
+    let EluParams {
+        alpha,
+        scale,
+        input_scale,
+    } = EluParams::from_node(&graph.nodes[id], kind);
 
     let mut cursor = graph.rewrite_cursor(id);
     let zero = ctx.full(&mut cursor, "zero", 0.0);
