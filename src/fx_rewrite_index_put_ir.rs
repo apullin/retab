@@ -1,5 +1,6 @@
 //! Pure Rust IrPass: index_put → view + scatter + view for TOSA.
 
+use crate::fx_index_domain::{first_index_dtype, index_stamp, node_index_dtype_or_default};
 use crate::fx_index_linear::{build_linear_index, contiguous_strides, LinearIndexSpec};
 use crate::fx_ir::{
     broadcast_shapes, i64_list_arg as i64_list, shape_product, IrArg, IrGraph, IrPass, NodeId,
@@ -54,14 +55,11 @@ impl IrPass for IrRewriteIndexPutPass {
             let source_base_meta = graph.nodes[source_id].meta.clone();
             let source_meta = source_base_meta.tensor_stamp_same_dtype_or_float32();
 
-            let index_dtype = indices_list.iter().find_map(|item| match item {
-                IrArg::Node(nid) => graph.node_dtype(*nid).map(str::to_string),
-                _ => None,
-            });
+            let index_dtype = first_index_dtype(graph, &indices_list);
             let Some(index_dtype) = index_dtype else {
                 continue;
             };
-            let index_meta = orig_meta.tensor_stamp(&index_dtype);
+            let index_meta = index_stamp(&orig_meta, &index_dtype);
 
             // Collect index node IDs and shapes, expanding None to arange.
             let (idx_ids, idx_shapes, invalid_indices) = {
@@ -126,11 +124,7 @@ impl IrPass for IrRewriteIndexPutPass {
             let strides = contiguous_strides(&source_shape);
             let lin_scales: Vec<i64> = strides.iter().take(num_idx).map(|s| s / c).collect();
 
-            let idx_dtype = graph.nodes[idx_ids[0]]
-                .meta
-                .val_dtype()
-                .unwrap_or("torch.int64")
-                .to_string();
+            let idx_dtype = node_index_dtype_or_default(graph, idx_ids[0]);
 
             let flat_idx = {
                 let mut cursor = graph.rewrite_cursor(id);

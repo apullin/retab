@@ -1,5 +1,6 @@
 //! Pure Rust IrPass: select_scatter → arange + view + full + eq + unsqueeze + expand + where.
 
+use crate::fx_index_domain::{bool_stamp, int32_index_stamp, TOSA_INDEX_DTYPE};
 use crate::fx_ir::{i64_list_arg as i64_list, wrap_dim, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_select_scatter_target;
 use crate::runner_logging::log_line;
@@ -57,8 +58,8 @@ impl IrPass for IrDecomposeSelectScatterPass {
             let orig_meta = graph.nodes[id].meta.clone();
             let input_meta = graph.nodes[input_id].meta.clone();
             let src_meta = graph.nodes[src_id].meta.clone();
-            let index_meta = orig_meta.tensor_stamp("torch.int32");
-            let bool_meta = orig_meta.tensor_stamp("torch.bool");
+            let index_meta = int32_index_stamp(&orig_meta);
+            let bool_meta = bool_stamp(&orig_meta);
             let src_shape = src_meta.val_shape().map(|s| s.to_vec()).unwrap_or_default();
             let mut unsqueezed_shape = src_shape.clone();
             unsqueezed_shape.insert(dim_norm, 1);
@@ -75,7 +76,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 0,
                 dim_size,
                 1,
-                "torch.int32",
+                TOSA_INDEX_DTYPE,
                 index_meta.preserve_qparams(vec![dim_size]),
             );
 
@@ -94,7 +95,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 format!("{}_index_full", node_name),
                 &[1],
                 index,
-                "torch.int32",
+                TOSA_INDEX_DTYPE,
                 index_meta.preserve_qparams(vec![1]),
             );
 

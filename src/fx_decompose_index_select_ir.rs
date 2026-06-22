@@ -1,5 +1,8 @@
 //! Pure Rust IrPass: index_select → view + unsqueeze + expand + GATHER + view.
 
+use crate::fx_index_domain::{
+    bool_stamp, gather_work_stamp_dtype_of_or_float32, index_stamp, node_index_dtype_or_default,
+};
 use crate::fx_ir::{i64_list_arg as i64_list, shape_product, wrap_dim, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_index_select_target;
 use crate::runner_logging::log_line;
@@ -58,16 +61,13 @@ impl IrPass for IrDecomposeIndexSelectPass {
 
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let idx_dtype = graph
-                .node_dtype(index_id)
-                .unwrap_or("torch.int64")
-                .to_string();
+            let idx_dtype = node_index_dtype_or_default(graph, index_id);
 
             let x_meta = graph.nodes[x_id].meta.clone();
             let (gather_meta, needs_bool_cast) =
-                orig_meta.tensor_stamp_bool_as_int8_work_dtype_of_or_float32(&x_meta);
-            let index_meta = orig_meta.tensor_stamp(&idx_dtype);
-            let bool_meta = orig_meta.tensor_stamp("torch.bool");
+                gather_work_stamp_dtype_of_or_float32(&orig_meta, &x_meta);
+            let index_meta = index_stamp(&orig_meta, &idx_dtype);
+            let bool_meta = bool_stamp(&orig_meta);
             let mut cursor = graph.rewrite_cursor(id);
 
             let x_for_gather = if needs_bool_cast {

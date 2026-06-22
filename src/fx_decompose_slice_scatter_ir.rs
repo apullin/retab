@@ -1,6 +1,7 @@
 //! Pure Rust IrPass: slice_scatter -> slice+cat (step == 1)
 //! or arange+permute+index_put (step > 1).
 
+use crate::fx_index_domain::{int32_index_stamp, TOSA_INDEX_DTYPE};
 use crate::fx_ir::{wrap_dim, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_slice_scatter_target;
 use crate::runner_logging::log_line;
@@ -91,7 +92,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
             let meta = graph.nodes[id].meta.clone();
             let input_meta = graph.nodes[input_id].meta.clone();
             let value_meta = meta.tensor_stamp_with_dtype_of_or_float32(&input_meta);
-            let index_meta = meta.tensor_stamp("torch.int32");
+            let index_meta = int32_index_stamp(&meta);
 
             let result = if step == 1 {
                 let mut cursor = graph.rewrite_cursor(id);
@@ -152,7 +153,7 @@ impl IrPass for IrDecomposeSliceScatterPass {
                     start_i,
                     end_i,
                     step,
-                    "torch.int32",
+                    TOSA_INDEX_DTYPE,
                     index_meta.preserve_qparams(vec![width]),
                 );
 

@@ -3,6 +3,9 @@
 //! Handles 2D (N,K → GATHER → N,W) and 3D (N,K,C → permute+reshape → GATHER → reshape+permute).
 //! Bool inputs are cast to int8 before GATHER, then cast back.
 
+use crate::fx_index_domain::{
+    gather_work_stamp_dtype_of_or_float32, index_stamp, DEFAULT_INDEX_DTYPE,
+};
 use crate::fx_ir::{wrap_dim, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_gather_target;
 use crate::runner_logging::log_line;
@@ -67,8 +70,8 @@ impl IrPass for IrCanonicalizeGatherPass {
             let orig_meta = graph.nodes[id].meta.clone();
             let x_meta = graph.nodes[x_id].meta.clone();
             let (work_meta, needs_bool_cast) =
-                orig_meta.tensor_stamp_bool_as_int8_work_dtype_of_or_float32(&x_meta);
-            let index_meta = orig_meta.tensor_stamp("torch.int64");
+                gather_work_stamp_dtype_of_or_float32(&orig_meta, &x_meta);
+            let index_meta = index_stamp(&orig_meta, DEFAULT_INDEX_DTYPE);
 
             let mut values_in = x_id;
             let mut cursor = graph.rewrite_cursor(id);

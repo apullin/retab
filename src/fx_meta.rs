@@ -221,22 +221,6 @@ impl NodeMeta {
         }
     }
 
-    pub fn tensor_stamp_bool_as_int8_work_dtype_of_or_float32<'a>(
-        &'a self,
-        dtype_source: &'a Self,
-    ) -> (TensorMetaStamp<'a>, bool) {
-        let dtype = dtype_source.val_dtype_or_float32();
-        if DType::from_torch_str(dtype) == DType::Bool {
-            (self.tensor_stamp("torch.int8"), true)
-        } else {
-            (self.tensor_stamp(dtype), false)
-        }
-    }
-
-    pub fn tensor_stamp_bool_as_int8_work_or_float32(&self) -> (TensorMetaStamp<'_>, bool) {
-        self.tensor_stamp_bool_as_int8_work_dtype_of_or_float32(self)
-    }
-
     /// Extract typed metadata from a Python FX node.
     pub fn from_fx(node: &Bound<'_, PyAny>) -> PyResult<Self> {
         let meta = attrs(node).object("meta")?;

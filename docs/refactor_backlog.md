@@ -23,7 +23,7 @@ quantization-domain facts, reduction/index domain facts, and argument parsing.
    semantics.
 3. [x] Add a reduction-domain model for normalized dims, keepdim, reduced
    shapes, reduction counts, and qparam chaining across sum/mean/var lowering.
-4. [ ] Add gather/index domain facts for bool-as-int8 working dtype, index
+4. [x] Add gather/index domain facts for bool-as-int8 working dtype, index
    dtype, and shared gather/scatter metadata stamping.
 5. [ ] Revisit arg parsing only after the metadata work, keeping lowering-IR
    arg helpers separate from serializer arg helpers unless a shared abstraction
@@ -77,6 +77,25 @@ Note: this is deliberately small and semantic-positive rather than LOC-negative.
   `fx_convert_sum_ir`, `fx_decompose_mean_ir`, and `fx_decompose_var_ir` now
   ask one domain object for dims, shapes, counts, and qparam semantics instead
   of each pass encoding its own reduction grammar.
+
+2026-06-22, gather/index domain facts
+Rust LOC: 36,873 -> 36,973
+Movement: +100 Rust LOC
+Deleted/collapsed: the generic `NodeMeta` bool-as-int8 gather helpers, local
+  first-index dtype scans, local index dtype defaults, local int32 index stamps,
+  local bool mask stamps, bool-mask broadcast shape construction, scalar-shape
+  checks, and repeated TOSA index dtype literals across indexing/gather passes.
+Added: `src/fx_index_domain.rs` as the home for default index dtype facts,
+  TOSA int32 index facts, bool mask facts, bool-as-int8 gather work dtype, mask
+  broadcast shape, and rank-unit/scalar shape helpers.
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib:
+  160 passed; `bash /tmp/et.sh` indexing/gather/scatter smoke on release
+  integration: 164 passed, 272 deselected, 20 xfailed.
+Note: this intentionally moves a TOSA GATHER limitation out of generic metadata
+  and into the indexing domain. `fx_canonicalize_gather_ir`,
+  `fx_decompose_index_select_ir`, `fx_decompose_index_tensor_ir`,
+  `fx_decompose_unfold_ir`, `fx_rewrite_index_put_ir`, and the scatter
+  decompositions now share one grammar for index dtype and bool gather facts.
 
 ## Current Follow-Through Queue
 

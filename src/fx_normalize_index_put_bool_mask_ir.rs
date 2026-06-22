@@ -9,6 +9,9 @@
 //!   out  = where(mask, data, destination)
 //! Runs before IrRewriteIndexPut so the general SCATTER path only sees int indices.
 
+use crate::fx_index_domain::{
+    bool_stamp, is_scalar_shape, mask_broadcast_shape, rank_unit_shape, BOOL_DTYPE,
+};
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId};
 use crate::fx_target::is_index_put_family_target;
 use crate::runner_logging::log_line;
@@ -56,7 +59,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     let accumulate = node.arg_bool_or(3, false);
 
     // Only the supported simple case: single bool mask, no accumulate, scalar data.
-    if accumulate || graph.node_dtype(mask) != Some("torch.bool") {
+    if accumulate || graph.node_dtype(mask) != Some(BOOL_DTYPE) {
         return false;
     }
     let dest_shape = match graph.node_shape_vec(dest) {
@@ -71,11 +74,11 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(s) => s,
         None => return false,
     };
-    if data_shape.iter().product::<i64>() != 1 {
+    if !is_scalar_shape(&data_shape) {
         return false;
     }
     let data_dtype = graph.node_dtype(data).unwrap_or("torch.int8").to_string();
-    let mask_meta = orig_meta.tensor_stamp("torch.bool");
+    let mask_meta = bool_stamp(&orig_meta);
     let data_meta = orig_meta.tensor_stamp(&data_dtype);
     let dest_rank = dest_shape.len();
 
@@ -84,12 +87,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     // Place the mask at its index position with singleton dims elsewhere so it
     // broadcasts against the destination (mask covers dims `mask_pos..`).
     let mask_node = {
-        let mut target = vec![1_i64; dest_rank];
-        for (i, &d) in mask_shape.iter().enumerate() {
-            if mask_pos + i < dest_rank {
-                target[mask_pos + i] = d;
-            }
-        }
+        let target = mask_broadcast_shape(mask_pos, &mask_shape, dest_rank);
         if target == mask_shape {
             mask
         } else {
@@ -104,7 +102,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
 
     // Reshape scalar data to all-ones so it broadcasts to any destination shape.
     let data_node = if data_shape.len() != dest_rank {
-        let ones = vec![1_i64; dest_rank];
+        let ones = rank_unit_shape(dest_rank);
         cursor.view_copy(
             format!("{}_data_reshape", node_name),
             data,

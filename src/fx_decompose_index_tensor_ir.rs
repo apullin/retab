@@ -1,5 +1,8 @@
 //! Pure Rust IrPass: aten.index.Tensor → linearized GATHER.
 
+use crate::fx_index_domain::{
+    gather_work_stamp_or_float32, index_stamp, node_index_dtype_or_default,
+};
 use crate::fx_index_linear::{build_linear_index, packed_linear_scales, LinearIndexSpec};
 use crate::fx_ir::{broadcast_shapes, i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId};
 use crate::fx_target::is_index_tensor_target;
@@ -113,13 +116,10 @@ impl IrPass for IrDecomposeIndexTensorPass {
 
             let node_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
-            let idx_dtype = graph
-                .node_dtype(idx_ids[0])
-                .unwrap_or("torch.int64")
-                .to_string();
+            let idx_dtype = node_index_dtype_or_default(graph, idx_ids[0]);
             let x_base_meta = graph.nodes[x_id].meta.clone();
             let x_meta = x_base_meta.tensor_stamp_same_dtype_or_float32();
-            let index_meta = orig_meta.tensor_stamp(&idx_dtype);
+            let index_meta = index_stamp(&orig_meta, &idx_dtype);
 
             // Reshape to (...batch, ...broadcast, ...kept)
             let out_shape = compute_index_output_shape(&batch_shape, &broadcast, &kept_shape);
@@ -149,8 +149,7 @@ impl IrPass for IrDecomposeIndexTensorPass {
 
                 // TOSA GATHER does not support BOOL data; gather as INT8 and cast
                 // the result back to BOOL below.
-                let (gather_meta, x_is_bool) =
-                    x_base_meta.tensor_stamp_bool_as_int8_work_or_float32();
+                let (gather_meta, x_is_bool) = gather_work_stamp_or_float32(&x_base_meta);
                 let gather_x = if x_is_bool {
                     cursor.dtype_cast(
                         format!("{}_x_i8", node_name),

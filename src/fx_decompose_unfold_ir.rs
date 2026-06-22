@@ -1,5 +1,8 @@
 //! Pure Rust IrPass: unfold_copy → GATHER-based sliding window.
 
+use crate::fx_index_domain::{
+    bool_stamp, gather_work_stamp_or_float32, int32_index_stamp, TOSA_INDEX_DTYPE,
+};
 use crate::fx_ir::{i64_list_arg as i64_list, shape_product, wrap_dim, IrArg, IrGraph, IrPass};
 use crate::fx_target::is_unfold_copy_target;
 use crate::runner_logging::log_line;
@@ -63,10 +66,9 @@ impl IrPass for IrDecomposeUnfoldPass {
             let name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
             let x_meta = graph.nodes[x_id].meta.clone();
-            let (work_meta_seed, needs_bool_cast) =
-                x_meta.tensor_stamp_bool_as_int8_work_or_float32();
-            let index_meta = orig_meta.tensor_stamp("torch.int32");
-            let bool_meta = orig_meta.tensor_stamp("torch.bool");
+            let (work_meta_seed, needs_bool_cast) = gather_work_stamp_or_float32(&x_meta);
+            let index_meta = int32_index_stamp(&orig_meta);
+            let bool_meta = bool_stamp(&orig_meta);
             let mut values_in = x_id;
             let work_dtype = work_meta_seed.dtype().to_string();
             let work_meta = work_meta_seed;
@@ -94,14 +96,21 @@ impl IrPass for IrDecomposeUnfoldPass {
 
             // Build sliding-window index: arange(0,U)*step + arange(0,size) → (U*size,)
             let idx_u_meta = index_meta.drop_qparams(vec![u]);
-            let idx_u = cursor.arange(format!("{}_au", name), 0, u, 1, "torch.int32", idx_u_meta);
+            let idx_u = cursor.arange(
+                format!("{}_au", name),
+                0,
+                u,
+                1,
+                TOSA_INDEX_DTYPE,
+                idx_u_meta,
+            );
 
             let step_meta = index_meta.drop_qparams(vec![1]);
             let step_t = cursor.full_int(
                 format!("{}_step", name),
                 &[1],
                 step,
-                "torch.int32",
+                TOSA_INDEX_DTYPE,
                 step_meta,
             );
 
@@ -127,7 +136,7 @@ impl IrPass for IrDecomposeUnfoldPass {
                 0,
                 size,
                 1,
-                "torch.int32",
+                TOSA_INDEX_DTYPE,
                 idx_c_meta,
             );
 
