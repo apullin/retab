@@ -154,6 +154,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "retab"
+version = "0.1.0"
+dependencies = [
+ "flatbuffers",
+ "pyo3",
+ "slotmap",
+ "smallvec",
+ "tosa-rs",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -263,17 +274,6 @@ dependencies = [
  "flatbuffers",
  "serde",
  "thiserror",
-]
-
-[[package]]
-name = "retab"
-version = "0.1.0"
-dependencies = [
- "flatbuffers",
- "pyo3",
- "slotmap",
- "smallvec",
- "tosa-rs",
 ]
 
 [[package]]

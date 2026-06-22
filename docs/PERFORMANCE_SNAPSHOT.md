@@ -74,7 +74,7 @@ the backend preprocess slice.
 Direct lowering is excellent for small graphs, but on larger graphs it can
 speculatively preprocess many fragments before falling back to a one-delegate
 standard result. The integration now skips direct lowering above
-`ARM_TOSA_ENGINE_DIRECT_LOWER_NODE_LIMIT`, default `128` graph nodes.
+`RETAB_DIRECT_LOWER_NODE_LIMIT`, default `128` graph nodes.
 
 Single-run local timings after the guard:
 

@@ -452,9 +452,8 @@ cd /Users/andrewpullin/personal/executorch-work/executorch
 source ../.venv/bin/activate
 unset CONDA_PREFIX CONDA_DEFAULT_ENV
 export ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1
-export ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH=1
-export ARM_TOSA_ENGINE_SERIALIZER=rust
-export ARM_TOSA_ENGINE_ROOT=/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine
+export RETAB_ENABLE_PATCH=1
+export RETAB_ROOT=/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine
 export PYTHONPATH=$PWD/src
 python -m pytest -q backends/arm/test/ops/test_cond.py backends/arm/test/ops/test_while.py
 ```
@@ -469,9 +468,8 @@ cd /Users/andrewpullin/personal/executorch-work/executorch
 source ../.venv/bin/activate
 unset CONDA_PREFIX CONDA_DEFAULT_ENV
 export ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1
-export ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH=1
-export ARM_TOSA_ENGINE_SERIALIZER=rust
-export ARM_TOSA_ENGINE_ROOT=/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine
+export RETAB_ENABLE_PATCH=1
+export RETAB_ROOT=/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine
 export PYTHONPATH=$PWD/src
 
 python -m pytest -q --numprocesses=auto backends/arm/test/ --ignore=backends/arm/test/models \

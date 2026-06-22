@@ -14,9 +14,8 @@ cd /Users/andrewpullin/personal/executorch-work/executorch
 source ../.venv/bin/activate
 unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER
 export ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1
-export ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH=1
-export ARM_TOSA_ENGINE_SERIALIZER=rust
-export ARM_TOSA_ENGINE_ROOT=/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine
+export RETAB_ENABLE_PATCH=1
+export RETAB_ROOT=/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine
 export PYTHONPATH=$PWD/src
 ```
 
@@ -66,4 +65,3 @@ Recent full-regression logs:
 | --- | --- | --- |
 | 2026-06-14 | `target/full-regression-followup-20260614-221746` | FP ops and models follow-up after erfinv fix |
 | 2026-06-14 | `target/full-regression-20260614-214921` | Earlier full run that exposed erfinv INT edge failures |
-

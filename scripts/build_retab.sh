@@ -46,6 +46,7 @@ uv pip install --python "${python_bin}" maturin
   "${venv_dir}/bin/maturin" develop --release
 )
 
+rm -f "${site_packages}/retab-source-root-overlay.pth"
 printf '%s\n' "${repo_root}" > "${site_packages}/retab-source-root-overlay.pth"
 
 echo "Built RETAB into ${venv_dir}"

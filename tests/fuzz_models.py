@@ -6,10 +6,10 @@ model comparison). Each model is seeded for reproducibility: a failing seed
 can be re-run in isolation to debug.
 
 Usage (standalone, inside Docker with ARM SDK + Vela):
-    ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH=1 python tests/fuzz_models.py [num_seeds]
+    RETAB_ENABLE_PATCH=1 python tests/fuzz_models.py [num_seeds]
 
 Usage (pytest):
-    ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH=1 pytest tests/fuzz_models.py -v
+    RETAB_ENABLE_PATCH=1 pytest tests/fuzz_models.py -v
 """
 
 import random

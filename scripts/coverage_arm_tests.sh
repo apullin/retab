@@ -332,9 +332,8 @@ coverage_object="${out_dir}/$(basename "${native_ext}")"
 cp "${native_ext}" "${coverage_object}"
 
 export ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1
-export ARM_TEST_ENABLE_ARM_TOSA_ENGINE_PATCH=1
-export ARM_TOSA_ENGINE_SERIALIZER=rust
-export ARM_TOSA_ENGINE_ROOT="${repo_root}"
+export RETAB_ENABLE_PATCH=1
+export RETAB_ROOT="${repo_root}"
 export PYTHONPATH="${repo_root}/python:${executorch_src}/src${PYTHONPATH:+:${PYTHONPATH}}"
 export LLVM_PROFILE_FILE="${profraw_dir}/retab-%p-%m.profraw"
 unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER

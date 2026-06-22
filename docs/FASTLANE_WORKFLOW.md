@@ -118,7 +118,7 @@ with activated(parallel_backend_preprocess_workers=14):
 Equivalent env-var form:
 
 ```bash
-ARM_TOSA_ENGINE_PARALLEL_BACKEND_PREPROCESS_WORKERS=14
+RETAB_PARALLEL_BACKEND_PREPROCESS_WORKERS=14
 ```
 
 Use it only for fragmented multi-delegate cases. It is not enabled by default

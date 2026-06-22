@@ -159,10 +159,9 @@ retab/
 │   ├── serialize/visitors/       # 107 TOSA op emitters
 │   ├── serialize/mod.rs          # TOSA flatbuffer serialization
 │   └── ingest/                   # FX graph → Rust IR conversion
-├── python/retab/               # Python (7k lines)
+├── python/retab/                 # Python integration seam
 │   ├── preprocess.py             # Main pipeline orchestration
-│   ├── _control_flow.py          # Control-flow submodule handling
-│   ├── _helpers.py               # FX graph manipulation helpers
+│   ├── _cf_ctx.py                # Control-flow delegate metadata reads
 │   └── _decomp_hooks.py          # Edge decomposition fast paths
 └── tests/
     ├── fuzz_models.py            # Random CNN generator + validation

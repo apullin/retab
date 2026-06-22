@@ -75,7 +75,7 @@ def _spawn_direct(model: str, seed: int) -> dict[str, object]:
     env = os.environ.copy()
     with tempfile.TemporaryDirectory() as tmpdir:
         dump_path = Path(tmpdir) / f"{model}.tosa"
-        env["ARM_TOSA_ENGINE_DUMP_TOSA"] = str(dump_path)
+        env["RETAB_DUMP_TOSA"] = str(dump_path)
         cmd = [
             sys.executable,
             "tests/sweep_direct_fastlane.py",
