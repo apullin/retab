@@ -14,6 +14,7 @@ mod fx_canonicalize_gather_ir;
 mod fx_cast_int64_ir;
 mod fx_constant_tensor_eval;
 mod fx_conv1d_unsqueeze_ir;
+mod fx_conv_args;
 mod fx_convert_clamp_ir;
 mod fx_convert_full_like_ir;
 mod fx_convert_split_to_slice_ir;

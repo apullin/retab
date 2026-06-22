@@ -25,7 +25,7 @@ quantization-domain facts, reduction/index domain facts, and argument parsing.
    shapes, reduction counts, and qparam chaining across sum/mean/var lowering.
 4. [x] Add gather/index domain facts for bool-as-int8 working dtype, index
    dtype, and shared gather/scatter metadata stamping.
-5. [ ] Revisit arg parsing only after the metadata work, keeping lowering-IR
+5. [x] Revisit arg parsing only after the metadata work, keeping lowering-IR
    arg helpers separate from serializer arg helpers unless a shared abstraction
    is demonstrably cleaner.
 
@@ -96,6 +96,25 @@ Note: this intentionally moves a TOSA GATHER limitation out of generic metadata
   `fx_decompose_index_select_ir`, `fx_decompose_index_tensor_ir`,
   `fx_decompose_unfold_ir`, `fx_rewrite_index_put_ir`, and the scatter
   decompositions now share one grammar for index dtype and bool gather facts.
+
+2026-06-22, conv argument grammar slice
+Rust LOC: 36,973 -> 37,169
+Movement: +196 Rust LOC
+Deleted/collapsed: local convolution signature parsing and reconstruction from
+  `fx_conv1d_unsqueeze_ir`, `fx_decompose_grouped_conv_ir`,
+  `fx_insert_conv_rescale_ir`, `fx_annotate_conv_bias_ir`, and
+  `fx_fuse_batch_norm_ir`; existing migrated pass bodies dropped 113 lines
+  while the new domain module and tests added 309 lines.
+Added: `src/fx_conv_args.rs` as a narrow lowering-domain grammar for
+  `conv1d.default`, `conv2d.default`, and `aten.convolution.default`, with
+  explicit strict-vs-prefix parsing so metadata-only passes preserve shortened
+  test signatures without weakening transforms that need full parameters.
+Validation: cargo fmt --check; cargo check --lib; cargo test --lib:
+  163 passed; `bash /tmp/et.sh` conv smoke on release integration:
+  297 passed, 1 skipped, 1070 deselected, 1 xfailed.
+Note: this intentionally does not merge lowering arg helpers with serializer
+  arg helpers. The serializer operates on TOSA emission args, while the lowering
+  grammar owns FX/IR convolution signatures and pass-local defaults.
 
 ## Current Follow-Through Queue
 

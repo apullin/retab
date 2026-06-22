@@ -5,8 +5,9 @@
 //!   convolution/conv2d(groups=1) per group
 //!   cat(outputs, dim=1)
 
+use crate::fx_conv_args::{ConvArgKind, ConvArgs};
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
-use crate::fx_target::{is_boundary_rescale_target, is_conv2d_default_target};
+use crate::fx_target::is_boundary_rescale_target;
 use crate::runner_logging::log_line;
 
 fn slice_meta(graph: &IrGraph, id: NodeId, dim: usize, start: i64, stop: i64) -> Option<NodeMeta> {
@@ -144,62 +145,30 @@ fn bypass_redundant_output_boundaries(graph: &mut IrGraph, cat_id: NodeId) {
     }
 }
 
-struct GroupedConvSpec {
-    input_id: NodeId,
-    weight_id: NodeId,
-    bias_arg: IrArg,
-    is_raw_conv2d: bool,
-    transposed: bool,
-    groups: i64,
-}
-
-fn parse_grouped_conv(graph: &IrGraph, id: NodeId) -> Option<GroupedConvSpec> {
+fn parse_grouped_conv(graph: &IrGraph, id: NodeId) -> Option<ConvArgs> {
     let node = &graph.nodes[id];
-    if !node.alive || node.op != NodeOp::CallFunction || !node.is_convolution() {
+    if !node.alive || node.op != NodeOp::CallFunction {
+        return None;
+    }
+    let spec = ConvArgs::parse(node)?;
+    if spec.kind == ConvArgKind::Conv1dDefault {
+        return None;
+    }
+    if spec.groups <= 1 {
+        return None;
+    }
+    let in_channels = graph.node_shape(spec.input)?.get(1).copied().unwrap_or(0);
+    if !spec.transposed && in_channels == spec.groups {
         return None;
     }
 
-    let is_raw_conv2d = is_conv2d_default_target(&node.target);
-    let args = &node.args;
-    if (is_raw_conv2d && args.len() < 2) || (!is_raw_conv2d && args.len() < 9) {
-        return None;
-    }
-
-    let groups = if is_raw_conv2d {
-        node.arg_int_or(6, 1)
-    } else {
-        args[8].as_int().unwrap_or(1)
-    };
-    if groups <= 1 {
-        return None;
-    }
-
-    let input_id = args[0].as_node()?;
-    let weight_id = args[1].as_node()?;
-    let bias_arg = match args.get(2) {
-        Some(IrArg::Node(id)) => IrArg::Node(*id),
-        _ => IrArg::None,
-    };
-    let transposed = !is_raw_conv2d && args[6].as_bool().unwrap_or(false);
-    let in_channels = graph.node_shape(input_id)?.get(1).copied().unwrap_or(0);
-    if !transposed && in_channels == groups {
-        return None;
-    }
-
-    Some(GroupedConvSpec {
-        input_id,
-        weight_id,
-        bias_arg,
-        is_raw_conv2d,
-        transposed,
-        groups,
-    })
+    Some(spec)
 }
 
-fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec) -> bool {
+fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: ConvArgs) -> bool {
     let node_name = graph.nodes[id].name.clone();
     let args = graph.nodes[id].args.clone();
-    let weight_shape = match graph.node_shape(spec.weight_id) {
+    let weight_shape = match graph.node_shape(spec.weight) {
         Some(shape) if shape.len() >= 2 => shape.to_vec(),
         _ => return false,
     };
@@ -213,7 +182,7 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
         return false;
     }
 
-    let conv_target = if spec.is_raw_conv2d {
+    let conv_target = if spec.is_raw_conv2d() {
         "aten.conv2d.default"
     } else {
         "aten.convolution.default"
@@ -224,14 +193,13 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
     for group in 0..spec.groups {
         let input_start = group * input_slice_size;
         let input_stop = (group + 1) * input_slice_size;
-        let Some(input_meta) =
-            slice_meta(cursor.graph(), spec.input_id, 1, input_start, input_stop)
+        let Some(input_meta) = slice_meta(cursor.graph(), spec.input, 1, input_start, input_stop)
         else {
             return false;
         };
         let input_slice = cursor.slice_copy(
             format!("{}_input_slice_{}", node_name, group),
-            spec.input_id,
+            spec.input,
             1,
             input_start,
             input_stop,
@@ -245,13 +213,13 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
             (group * output_slice_size, (group + 1) * output_slice_size)
         };
         let Some(weight_meta) =
-            slice_meta(cursor.graph(), spec.weight_id, 0, weight_start, weight_stop)
+            slice_meta(cursor.graph(), spec.weight, 0, weight_start, weight_stop)
         else {
             return false;
         };
         let weight_slice = cursor.slice_copy(
             format!("{}_weight_slice_{}", node_name, group),
-            spec.weight_id,
+            spec.weight,
             0,
             weight_start,
             weight_stop,
@@ -259,17 +227,18 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
             weight_meta,
         );
 
-        let bias_arg = match spec.bias_arg {
+        let bias_arg = match &spec.bias_arg {
             IrArg::Node(bias_id) => {
                 let bias_start = group * output_slice_size;
                 let bias_stop = (group + 1) * output_slice_size;
-                let Some(bias_meta) = slice_meta(cursor.graph(), bias_id, 0, bias_start, bias_stop)
+                let Some(bias_meta) =
+                    slice_meta(cursor.graph(), *bias_id, 0, bias_start, bias_stop)
                 else {
                     return false;
                 };
                 let bias_slice = cursor.slice_copy(
                     format!("{}_bias_slice_{}", node_name, group),
-                    bias_id,
+                    *bias_id,
                     0,
                     bias_start,
                     bias_stop,
@@ -281,22 +250,11 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: GroupedConvSpec
             _ => IrArg::None,
         };
 
-        let mut conv_args = vec![
-            IrArg::Node(input_slice),
-            IrArg::Node(weight_slice),
-            bias_arg,
-        ];
-        if spec.is_raw_conv2d {
-            for idx in 3..6 {
-                if let Some(arg) = args.get(idx) {
-                    conv_args.push(arg.clone());
-                }
-            }
-            conv_args.push(IrArg::Int(1));
-        } else {
-            conv_args.extend(args[3..8].iter().cloned());
-            conv_args.push(IrArg::Int(1));
-        }
+        let Some(conv_args) =
+            spec.args_with_replaced_io_bias_groups(&args, input_slice, weight_slice, bias_arg, 1)
+        else {
+            return false;
+        };
 
         let mut conv_meta = conv_slice_output_meta(cursor.graph(), id, output_slice_size);
         if !configure_conv_qparams(

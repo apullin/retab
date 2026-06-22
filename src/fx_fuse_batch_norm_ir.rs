@@ -1,3 +1,4 @@
+use crate::fx_conv_args::ConvArgs;
 use crate::fx_ir::{
     IrArg, IrGraph, IrNode, IrPass, NodeId, NodeMeta, NodeOp, NodeTensor, TensorSource,
 };
@@ -192,16 +193,20 @@ fn fuse_batch_norm_node(graph: &mut IrGraph, bn_id: NodeId) -> bool {
         return false;
     }
 
-    let Some(weight_id) = graph.node(conv_id).arg_node(1) else {
+    let Some(conv_args) = ConvArgs::parse(graph.node(conv_id)) else {
         return false;
     };
-    let conv_bias_id = match graph.node(conv_id).args.get(2) {
-        Some(IrArg::Node(id)) => Some(*id),
-        Some(IrArg::None) => None,
-        _ => return false,
+    let Some(conv_bias_id) = conv_args.well_formed_bias() else {
+        return false;
     };
 
-    let Some(conv_weight) = tensor_arg(graph, conv_id, 1) else {
+    let weight_id = conv_args.weight;
+    let Some(conv_weight) = graph
+        .node(weight_id)
+        .tensor
+        .as_ref()
+        .map(|tensor| tensor.data.clone())
+    else {
         return false;
     };
     let conv_bias =
@@ -245,8 +250,12 @@ fn fuse_batch_norm_node(graph: &mut IrGraph, bn_id: NodeId) -> bool {
         add_tensor_placeholder(graph, fused_weight_name, fused_weight, fused_weight_meta);
     let fused_bias_id = add_tensor_placeholder(graph, fused_bias_name, fused_bias, fused_bias_meta);
 
-    graph.set_arg(conv_id, 1, IrArg::Node(fused_weight_id));
-    graph.set_arg(conv_id, 2, IrArg::Node(fused_bias_id));
+    graph.set_arg(
+        conv_id,
+        ConvArgs::WEIGHT_INDEX,
+        IrArg::Node(fused_weight_id),
+    );
+    graph.set_arg(conv_id, ConvArgs::BIAS_INDEX, IrArg::Node(fused_bias_id));
     replace_primary_result_users(graph, bn_id, conv_id)
 }
 

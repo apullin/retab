@@ -1,20 +1,19 @@
+use crate::fx_conv_args::ConvArgs;
 use crate::fx_ir::{IrArg, IrGraph, IrPass, MetaValue, NodeMeta, NodeOp};
-use crate::fx_target::{is_aten_convolution_default_target, is_conv_bias_annotation_target};
+use crate::fx_target::is_conv_bias_annotation_target;
 use crate::graph::ir::DType;
 use crate::runner_logging::log_line;
 
 pub struct IrAnnotateConvBiasDtypePass;
 
 fn needs_int16_activation_bias_decomposition(node: &crate::fx_ir::IrNode) -> bool {
-    if !is_aten_convolution_default_target(&node.target) {
+    let Some(conv) = ConvArgs::parse_convolution_prefix(node) else {
+        return false;
+    };
+    if conv.transposed || conv.bias.is_none() {
         return false;
     }
-    if matches!(node.args.get(6), Some(IrArg::Bool(true))) {
-        return false;
-    }
-    if !matches!(node.args.get(2), Some(IrArg::Node(_))) {
-        return false;
-    }
+
     let Some(input_qp) = node.meta.input_qparam_at(0) else {
         return false;
     };
@@ -58,10 +57,14 @@ impl IrPass for IrAnnotateConvBiasDtypePass {
 
         let mut modified = false;
         for conv_id in conv_ids {
-            let Some(IrArg::Node(bias_id)) = graph.nodes[conv_id].args.get(2) else {
+            let bias_id = ConvArgs::parse(&graph.nodes[conv_id])
+                .and_then(|conv| conv.well_formed_bias())
+                .flatten()
+                .or_else(|| graph.nodes[conv_id].args.get(2).and_then(IrArg::as_node));
+            let Some(bias_id) = bias_id else {
                 continue;
             };
-            let bias = graph.node_mut(*bias_id);
+            let bias = graph.node_mut(bias_id);
             if bias.meta.extra_str("tosa_special_dtype") == Some("INT48") {
                 continue;
             }

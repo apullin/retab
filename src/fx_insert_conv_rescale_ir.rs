@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::fx_conv_args::ConvArgs;
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp, QParam, RescaleRewrite};
 use crate::fx_target::{
     is_conv_accumulator_target, is_layout_passthrough_target, is_rank_changing_layout_target,
@@ -119,10 +120,9 @@ fn weight_scales(qparam: &QParam) -> Vec<f64> {
 }
 
 fn activation_rank(graph: &IrGraph, node: &crate::fx_ir::IrNode) -> Option<usize> {
-    match node.args.first() {
-        Some(IrArg::Node(input_id)) => graph.node(*input_id).meta.rank(),
-        _ => node.meta.rank(),
-    }
+    ConvArgs::parse(node)
+        .and_then(|conv| graph.node(conv.input).meta.rank())
+        .or_else(|| node.meta.rank())
 }
 
 fn needs_int16_bias_decomposition(graph: &IrGraph, conv_id: NodeId) -> bool {
@@ -130,11 +130,13 @@ fn needs_int16_bias_decomposition(graph: &IrGraph, conv_id: NodeId) -> bool {
     if !node.alive
         || node.op != NodeOp::CallFunction
         || !is_raw_aten_convolution_target(&node.target)
-        || !matches!(node.args.get(2), Some(IrArg::Node(_)))
     {
         return false;
     }
-    if matches!(node.args.get(6), Some(IrArg::Bool(true))) {
+    let Some(conv) = ConvArgs::parse_convolution_prefix(node) else {
+        return false;
+    };
+    if conv.transposed || conv.bias.is_none() {
         return false;
     }
     let Some(input_qp) = node.meta.input_qparam_at(0) else {
@@ -158,7 +160,10 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
     }
 
     let node = graph.node(conv_id).clone();
-    let Some(IrArg::Node(bias_id)) = node.args.get(2) else {
+    let Some(conv) = ConvArgs::parse_convolution_prefix(&node) else {
+        return false;
+    };
+    let Some(bias_id) = conv.bias else {
         return false;
     };
     let Some(output_qp) = output_qparam(graph, conv_id) else {
@@ -176,7 +181,7 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
     let Some(conv_shape) = graph.node_shape_vec(conv_id) else {
         return false;
     };
-    let Some(&channels) = graph.node_shape(*bias_id).and_then(|shape| shape.first()) else {
+    let Some(&channels) = graph.node_shape(bias_id).and_then(|shape| shape.first()) else {
         return false;
     };
 
@@ -195,10 +200,7 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
         return false;
     }
 
-    {
-        let conv = graph.node_mut(conv_id);
-        conv.args[2] = IrArg::None;
-    }
+    graph.set_arg(conv_id, ConvArgs::BIAS_INDEX, IrArg::None);
 
     let int32_meta = node.meta.tensor_stamp("torch.int32");
 
@@ -216,7 +218,7 @@ fn decompose_int16_bias_conv(graph: &mut IrGraph, conv_id: NodeId) -> bool {
 
         let bias_view = cursor.view_copy(
             format!("{}_bias_view", node.name),
-            *bias_id,
+            bias_id,
             &bias_view_shape,
             int32_meta.plain_tensor(bias_view_shape.clone()),
         );
