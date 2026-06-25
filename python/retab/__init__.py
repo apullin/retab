@@ -1,4 +1,4 @@
-"""RETAB: a fast TOSA generator for ExecuTorch ARM backends.
+"""RETAB: a Rust fast path for ExecuTorch's ARM backend preprocess stage.
 
 Usage:
     from retab import patch_tosa_backend, unpatch_tosa_backend

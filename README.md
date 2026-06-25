@@ -1,12 +1,28 @@
 # RETAB
 
-A fast TOSA generator for ExecuTorch ARM backends, written in Rust.
+A Rust fast path for ExecuTorch's ARM backend preprocess stage.
 
 Takes a quantized FX graph from ExecuTorch's ARM partitioner and produces
-a TOSA flatbuffer for the direct Rust/TOSA fast lane.
+the TOSA flatbuffer consumed by Vela.
 
 Current local benchmarking, artifact checks, and acceptance workflow are
 documented in [docs/FASTLANE_WORKFLOW.md](docs/FASTLANE_WORKFLOW.md).
+
+## Pinned companion stack
+
+RETAB is only one piece of the local ARM lowering stack. The current working
+configuration expects concordant commits in these companion repos:
+
+| Repo | Branch | Commit | Why it is needed |
+| --- | --- | --- | --- |
+| [`apullin/executorch`](https://github.com/apullin/executorch) | `et-python-fastpaths` | `dac215665` | Provides the pluggable ExecuTorch ARM preprocess and Edge manager seams that let RETAB replace `TOSABackend._preprocess`. |
+| [`apullin/tosa-rs`](https://github.com/apullin/tosa-rs) | `master` | `de6e6b0` | Provides the Rust TOSA FlatBuffers serialization/deserialization API used by RETAB's serializer. RETAB builds against the vendored copy at `../vendor/tosa-rs`. |
+| [`apullin/ethos-u-vela`](https://github.com/apullin/ethos-u-vela) | `retab-regor-opt-5.1.0-curated` | `d45b6236` | Optional for RETAB unit builds, but this is the current downstream Vela/Regor branch used for end-to-end `.pte` generation and optimization experiments. |
+
+Treat this as a pinned toolchain, not as independent rolling dependencies. If
+one of these repos moves, rebuild RETAB and re-run the validation matrix before
+advancing the pins. The longer compatibility map is in
+[docs/COMPANION_REPOS.md](docs/COMPANION_REPOS.md).
 
 ## What it replaces
 
@@ -41,6 +57,8 @@ commands and current expected acceptance result.
 - [`uv`](https://docs.astral.sh/uv/)
 - a seam-enabled ExecuTorch checkout with the required RETAB hook points
   (see [compat/executorch.toml](compat/executorch.toml))
+- the companion repository set described in
+  [docs/COMPANION_REPOS.md](docs/COMPANION_REPOS.md)
 
 ### Bootstrap a dedicated UV environment
 
