@@ -488,45 +488,51 @@ impl IrToTosaMemoryFormatPass {
             {
                 continue;
             }
-            let Some(second_id) = graph.single_live_user(first_id) else {
-                continue;
-            };
-            if !graph.nodes[second_id].alive
-                || !graph.nodes[second_id].name.contains("_input_layout")
-                || graph.nodes[second_id].first_node_arg() != Some(first_id)
-            {
-                continue;
-            }
             let Some(input_id) = graph.nodes[first_id].first_node_arg() else {
                 continue;
             };
             let Some(first_perm) = transpose_perm(graph, first_id) else {
                 continue;
             };
-            let Some(second_perm) = transpose_perm(graph, second_id) else {
-                continue;
-            };
-            if !inverse_permutations(&first_perm, &second_perm) {
-                continue;
-            }
-            if graph
-                .node_shape(input_id)
-                .zip(graph.node_shape(second_id))
-                .is_some_and(|(input_shape, second_shape)| input_shape != second_shape)
-            {
-                continue;
+
+            let mut cancelled_for_first = false;
+            let candidate_users = graph.live_user_ids(first_id);
+            for second_id in candidate_users {
+                if !graph.nodes[second_id].alive
+                    || !graph.nodes[second_id].name.contains("_input_layout")
+                    || graph.nodes[second_id].first_node_arg() != Some(first_id)
+                {
+                    continue;
+                }
+                let Some(second_perm) = transpose_perm(graph, second_id) else {
+                    continue;
+                };
+                if !inverse_permutations(&first_perm, &second_perm) {
+                    continue;
+                }
+                if graph
+                    .node_shape(input_id)
+                    .zip(graph.node_shape(second_id))
+                    .is_some_and(|(input_shape, second_shape)| input_shape != second_shape)
+                {
+                    continue;
+                }
+
+                let second_users = graph.live_user_ids(second_id);
+                if second_users.is_empty() {
+                    continue;
+                }
+                for user_id in second_users {
+                    graph.replace_input_use(user_id, second_id, input_id);
+                }
+                graph.erase(second_id);
+                modified = true;
+                cancelled_for_first = true;
             }
 
-            let second_users = graph.live_user_ids(second_id);
-            if second_users.is_empty() {
-                continue;
+            if cancelled_for_first && graph.live_user_ids(first_id).is_empty() {
+                graph.erase(first_id);
             }
-            for user_id in second_users {
-                graph.replace_input_use(user_id, second_id, input_id);
-            }
-            graph.erase(second_id);
-            graph.erase(first_id);
-            modified = true;
         }
         if modified {
             graph.rebuild_users();
@@ -829,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_shared_inverse_layout_transposes() {
+    fn removes_inverse_branch_from_shared_layout_transpose() {
         let mut graph = IrGraph::empty();
         let input = graph.add_node(
             NodeOp::Placeholder,
@@ -867,8 +873,13 @@ mod tests {
             &[1, 32, 1, 48, 2],
         );
 
-        assert!(!IrToTosaMemoryFormatPass.cancel_inverse_layout_transpose_pairs(&mut graph));
+        assert!(IrToTosaMemoryFormatPass.cancel_inverse_layout_transpose_pairs(&mut graph));
         assert!(graph.nodes[output_layout].alive);
-        assert!(graph.nodes[input_layout].alive);
+        assert!(!graph.nodes[input_layout].alive);
+        assert_eq!(graph.nodes[_view].first_node_arg(), Some(input));
+        assert_eq!(
+            graph.nodes[_shared_user].first_node_arg(),
+            Some(output_layout)
+        );
     }
 }
