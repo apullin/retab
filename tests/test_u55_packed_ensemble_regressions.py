@@ -249,6 +249,14 @@ def test_repeat_tile_multiples_are_const_shape(lowered_u55_mini_artifact):
 
 @pytest.mark.xfail(
     strict=True,
+    reason="open size regression: Vela command stream is still inflated for packed views",
+)
+def test_u55_packed_ensemble_pte_stays_compact(lowered_u55_mini_artifact):
+    assert lowered_u55_mini_artifact["pte_size"] < 200_000
+
+
+@pytest.mark.xfail(
+    strict=True,
     reason="open size regression: view-boundary layout ping-pong inflates Vela command streams",
 )
 def test_view_boundary_layout_ping_pong_is_eliminated(lowered_u55_mini_artifact):
