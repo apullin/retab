@@ -2,9 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::fx_target::{
-    is_constant_only_shape_transform_target, is_permute_target, is_raw_aten_convolution_target,
+    is_add_sub_target, is_boundary_rescale_target, is_constant_only_shape_transform_target,
+    is_layout_passthrough_target, is_mean_target, is_mul_target, is_permute_target,
+    is_raw_aten_convolution_target, is_slice_tensor_target, is_sum_dim_int_list_target,
     is_tosa_transpose_target, is_transpose_conv2d_target, is_view_like_target,
-    is_zero_input_constant_target,
+    is_zero_input_constant_target, table_op_target_kind,
 };
 use crate::runner_logging::log_line;
 
@@ -39,12 +41,16 @@ fn initial_spatial_rank(rank: usize) -> usize {
     }
 }
 
-fn memory_format_differs(shape: &[i64], rank: usize) -> bool {
+fn memory_format_differs(shape: &[i64], spatial_rank: usize) -> bool {
+    let rank = shape.len();
     if rank <= 2 {
         return false;
     }
-    let spatial_rank = initial_spatial_rank(rank);
+    let spatial_rank = spatial_rank.min(rank.saturating_sub(2));
     if spatial_rank == 0 {
+        return false;
+    }
+    if rank != spatial_rank + 2 {
         return false;
     }
     let channel_idx = rank.saturating_sub(spatial_rank + 1);
@@ -197,6 +203,18 @@ fn collect_output_node_ids(arg: &IrArg, output_nodes: &mut Vec<NodeId>) {
     }
 }
 
+fn collect_arg_node_ids(arg: &IrArg, nodes: &mut Vec<NodeId>) {
+    match arg {
+        IrArg::Node(id) => nodes.push(*id),
+        IrArg::List(items) => {
+            for item in items {
+                collect_arg_node_ids(item, nodes);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn output_node_ids(graph: &IrGraph, output_id: NodeId) -> Vec<NodeId> {
     let mut output_nodes = Vec::new();
     for arg in &graph.nodes[output_id].args {
@@ -316,6 +334,85 @@ fn spatial_rank(graph: &IrGraph, id: NodeId, default: usize) -> usize {
     graph.nodes[id].meta.tosa_spatial_rank_or(default)
 }
 
+fn spatial_rank_follows_inputs(graph: &IrGraph, id: NodeId) -> bool {
+    let node = &graph.nodes[id];
+    if node.op != NodeOp::CallFunction {
+        return false;
+    }
+    node.is_q_or_dq()
+        || is_layout_passthrough_target(&node.target)
+        || is_slice_tensor_target(&node.target)
+        || is_boundary_rescale_target(&node.target)
+        || is_add_sub_target(&node.target)
+        || is_mul_target(&node.target)
+        || is_sum_dim_int_list_target(&node.target)
+        || is_mean_target(&node.target)
+        || table_op_target_kind(&node.target).is_some()
+        || is_tosa_layout_neutral_target(&node.target)
+}
+
+fn is_tosa_layout_neutral_target(target: &str) -> bool {
+    let lower = target.to_ascii_lowercase();
+    lower.contains("tosa")
+        && [
+            "add",
+            "sub",
+            "mul",
+            "reduce_sum",
+            "table",
+            "slice",
+            "tile",
+            "concat",
+            "reshape",
+        ]
+        .iter()
+        .any(|op| lower.contains(op))
+}
+
+fn direct_input_spatial_ranks(graph: &IrGraph, id: NodeId, limit: usize) -> Vec<usize> {
+    let mut input_ids = Vec::new();
+    for arg in &graph.nodes[id].args {
+        collect_arg_node_ids(arg, &mut input_ids);
+    }
+    let ranks: Vec<(bool, usize)> = input_ids
+        .into_iter()
+        .filter(|&input_id| graph.nodes[input_id].alive)
+        .filter_map(|input_id| {
+            let facts = graph.nodes[input_id].meta.tensor_facts()?;
+            let carries_layout = facts.shape.iter().any(|&dim| dim > 1);
+            Some((
+                carries_layout,
+                spatial_rank(graph, input_id, initial_spatial_rank(facts.rank())).min(limit),
+            ))
+        })
+        .collect();
+    let has_layout_input = ranks.iter().any(|(carries_layout, _)| *carries_layout);
+    ranks
+        .into_iter()
+        .filter(|(carries_layout, _)| *carries_layout || !has_layout_input)
+        .map(|(_, rank)| rank)
+        .collect()
+}
+
+fn hard_user_spatial_rank_floor(graph: &IrGraph, id: NodeId, limit: usize) -> usize {
+    graph
+        .live_user_ids(id)
+        .into_iter()
+        .filter_map(|user_id| {
+            if graph.nodes[user_id].op == NodeOp::Output {
+                let rank = graph.nodes[id].meta.tensor_facts()?.rank();
+                return Some(initial_spatial_rank(rank).min(limit));
+            }
+            if spatial_rank_follows_inputs(graph, user_id) {
+                return None;
+            }
+            let rank = graph.nodes[user_id].meta.tensor_facts()?.rank();
+            Some(spatial_rank(graph, user_id, initial_spatial_rank(rank)).min(limit))
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 impl IrToTosaMemoryFormatPass {
     fn annotate_spatial_ranks(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
@@ -325,6 +422,38 @@ impl IrToTosaMemoryFormatPass {
             };
             let rank = initial_spatial_rank(val.rank());
             modified |= set_spatial_rank(graph, id, rank);
+        }
+        modified
+    }
+
+    fn propagate_layout_neutral_spatial_ranks(&self, graph: &mut IrGraph) -> bool {
+        let mut modified = false;
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for id in graph.live_node_ids() {
+                if !spatial_rank_follows_inputs(graph, id) {
+                    continue;
+                }
+                let Some(val) = graph.nodes[id].meta.tensor_facts() else {
+                    continue;
+                };
+                let limit = val.rank().saturating_sub(2);
+                if limit == 0 {
+                    continue;
+                }
+                let input_floor = direct_input_spatial_ranks(graph, id, limit)
+                    .into_iter()
+                    .max();
+                let Some(input_floor) = input_floor else {
+                    continue;
+                };
+                let propagated = input_floor.max(hard_user_spatial_rank_floor(graph, id, limit));
+                if propagated != spatial_rank(graph, id, 0) {
+                    modified |= set_spatial_rank(graph, id, propagated);
+                    changed = true;
+                }
+            }
         }
         modified
     }
@@ -345,12 +474,17 @@ impl IrToTosaMemoryFormatPass {
                     .unwrap_or(0);
                 let limit = rank.saturating_sub(2);
                 let current = spatial_rank(graph, id, 0);
-                let propagated = graph
+                let mut propagated = graph
                     .users(id)
                     .iter()
                     .filter(|&&user_id| graph.nodes[user_id].alive)
                     .map(|&user_id| spatial_rank(graph, user_id, 0).min(limit))
                     .fold(current, usize::max);
+                if is_view_like_target(&graph.nodes[id].target) {
+                    if let Some(input_id) = graph.nodes[id].first_node_arg() {
+                        propagated = propagated.max(spatial_rank(graph, input_id, 0).min(limit));
+                    }
+                }
                 if propagated != current {
                     modified |= set_spatial_rank(graph, id, propagated);
                     changed = true;
@@ -447,7 +581,8 @@ impl IrToTosaMemoryFormatPass {
             let output_rank = output_shape.len();
             let channel_reshape = is_channel_reshape(&input_shape, &output_shape);
 
-            let input_memory_format_differs = memory_format_differs(&input_shape, input_rank);
+            let input_memory_format_differs =
+                memory_format_differs(&input_shape, spatial_rank(graph, input_id, 2));
             if (channel_reshape || (input_rank >= 4 && output_rank < 4))
                 && input_memory_format_differs
             {
@@ -463,7 +598,8 @@ impl IrToTosaMemoryFormatPass {
                 modified = true;
             }
 
-            let output_memory_format_differs = memory_format_differs(&output_shape, output_rank);
+            let output_memory_format_differs =
+                memory_format_differs(&output_shape, spatial_rank(graph, id, 2));
             if (channel_reshape || (input_rank < 4 && output_rank >= 4))
                 && output_memory_format_differs
             {
@@ -726,6 +862,7 @@ impl IrPass for IrToTosaMemoryFormatPass {
         let is_control_flow_gm = is_control_flow_submodule(graph);
         let mut modified = false;
         modified |= self.annotate_spatial_ranks(graph);
+        modified |= self.propagate_layout_neutral_spatial_ranks(graph);
         modified |= self.propagate_spatial_ranks(graph);
         modified |= self.annotate_dim_orders(graph, is_control_flow_gm);
         modified |= self.insert_view_boundary_transposes(graph);
@@ -794,6 +931,137 @@ mod tests {
             vec![IrArg::Node(input), i64_list(perm)],
             shape,
         )
+    }
+
+    #[test]
+    fn packed_rank5_tensors_do_not_require_physical_3d_layout() {
+        assert!(!memory_format_differs(&[1, 2, 32, 1, 48], 2));
+        assert!(memory_format_differs(&[1, 32, 2, 1, 48], 3));
+    }
+
+    #[test]
+    fn layout_neutral_rank5_chain_inherits_2d_spatial_rank() {
+        let mut graph = IrGraph::empty();
+        let input = graph.add_node(
+            NodeOp::Placeholder,
+            "input".to_string(),
+            "input".to_string(),
+            Vec::new(),
+            NodeMeta::tensor([1, 64, 1, 48], "torch.int8"),
+        );
+        let view = add_node(
+            &mut graph,
+            "packed_view",
+            "aten.view_copy.default",
+            vec![IrArg::Node(input), i64_list(&[1, 2, 32, 1, 48])],
+            &[1, 2, 32, 1, 48],
+        );
+        let sum = add_node(
+            &mut graph,
+            "packed_sum",
+            "backend.tosa.REDUCE_SUM.default",
+            vec![IrArg::Node(view), i64_list(&[2]), IrArg::Bool(true)],
+            &[1, 2, 1, 1, 48],
+        );
+        let scalar = graph.add_node(
+            NodeOp::Placeholder,
+            "broadcast_scalar".to_string(),
+            "broadcast_scalar".to_string(),
+            Vec::new(),
+            NodeMeta::tensor([1, 1, 1, 1, 1], "torch.int8"),
+        );
+        let mul = add_node(
+            &mut graph,
+            "packed_mul",
+            "backend.tosa.MUL.default",
+            vec![IrArg::Node(sum), IrArg::Node(scalar)],
+            &[1, 2, 1, 1, 48],
+        );
+
+        assert!(IrToTosaMemoryFormatPass.annotate_spatial_ranks(&mut graph));
+        assert!(IrToTosaMemoryFormatPass.propagate_layout_neutral_spatial_ranks(&mut graph));
+        assert!(!IrToTosaMemoryFormatPass.propagate_spatial_ranks(&mut graph));
+        assert_eq!(spatial_rank(&graph, view, 0), 2);
+        assert_eq!(spatial_rank(&graph, sum, 0), 2);
+        assert_eq!(spatial_rank(&graph, mul, 0), 2);
+    }
+
+    #[test]
+    fn conv3d_consumer_raises_layout_neutral_chain_to_3d_spatial_rank() {
+        let mut graph = IrGraph::empty();
+        let input = graph.add_node(
+            NodeOp::Placeholder,
+            "input".to_string(),
+            "input".to_string(),
+            Vec::new(),
+            NodeMeta::tensor([1, 64, 1, 48], "torch.int8"),
+        );
+        let view = add_node(
+            &mut graph,
+            "volume_view",
+            "aten.view_copy.default",
+            vec![IrArg::Node(input), i64_list(&[1, 32, 2, 1, 48])],
+            &[1, 32, 2, 1, 48],
+        );
+        let mul = add_node(
+            &mut graph,
+            "volume_mul",
+            "aten.mul.Tensor",
+            vec![IrArg::Node(view), IrArg::Node(view)],
+            &[1, 32, 2, 1, 48],
+        );
+        let _conv = add_node(
+            &mut graph,
+            "conv3d",
+            "aten.conv3d.default",
+            vec![IrArg::Node(mul)],
+            &[1, 16, 2, 1, 48],
+        );
+
+        assert!(IrToTosaMemoryFormatPass.annotate_spatial_ranks(&mut graph));
+        assert!(IrToTosaMemoryFormatPass.propagate_layout_neutral_spatial_ranks(&mut graph));
+        assert!(IrToTosaMemoryFormatPass.propagate_spatial_ranks(&mut graph));
+        assert_eq!(spatial_rank(&graph, view, 0), 3);
+        assert_eq!(spatial_rank(&graph, mul, 0), 3);
+    }
+
+    #[test]
+    fn rank5_graph_output_keeps_default_3d_spatial_rank() {
+        let mut graph = IrGraph::empty();
+        let input = graph.add_node(
+            NodeOp::Placeholder,
+            "input".to_string(),
+            "input".to_string(),
+            Vec::new(),
+            NodeMeta::tensor([1, 3, 4, 5], "torch.float32"),
+        );
+        let view = add_node(
+            &mut graph,
+            "view",
+            "aten.view_copy.default",
+            vec![IrArg::Node(input), i64_list(&[1, 1, 4, 5, 3])],
+            &[1, 1, 4, 5, 3],
+        );
+        let mul = add_node(
+            &mut graph,
+            "mul",
+            "aten.mul.Tensor",
+            vec![IrArg::Node(view), IrArg::Node(view)],
+            &[1, 1, 4, 5, 3],
+        );
+        graph.add_node(
+            NodeOp::Output,
+            "output".to_string(),
+            "output".to_string(),
+            vec![IrArg::Node(mul)],
+            NodeMeta::default(),
+        );
+
+        assert!(IrToTosaMemoryFormatPass.annotate_spatial_ranks(&mut graph));
+        assert!(IrToTosaMemoryFormatPass.propagate_layout_neutral_spatial_ranks(&mut graph));
+        assert!(IrToTosaMemoryFormatPass.propagate_spatial_ranks(&mut graph));
+        assert_eq!(spatial_rank(&graph, view, 0), 3);
+        assert_eq!(spatial_rank(&graph, mul, 0), 3);
     }
 
     #[test]
