@@ -21,7 +21,7 @@ fn slice_meta(graph: &IrGraph, id: NodeId, dim: usize, start: i64, stop: i64) ->
         graph.nodes[id]
             .meta
             .tensor_stamp_same_dtype_or_float32()
-            .empty_qparam_maps(shape),
+            .preserve_qparams(shape),
     )
 }
 
@@ -378,6 +378,7 @@ mod tests {
         let input = placeholder(&mut graph, "input", [1, 6, 8, 8], "torch.int8");
         let weight = placeholder(&mut graph, "weight", [12, 2, 3, 3], "torch.int8");
         let bias = placeholder(&mut graph, "bias", [12], "torch.int8");
+        graph.nodes[input].meta.set_single_output_qparam(per_tensor_qparam(0.25));
         let mut conv_meta = NodeMeta::tensor([1, 12, 6, 6], "torch.int8");
         conv_meta.set_input_qparams_from([
             (0, per_tensor_qparam(0.25)),
@@ -406,6 +407,10 @@ mod tests {
         let qparams = first_group.meta.input_qparams().unwrap();
         assert_eq!(qparams[&1].per_channel_scales, vec![0.1, 0.2, 0.3, 0.4]);
         assert_eq!(qparams[&2].per_channel_scales, vec![1.1, 1.2, 1.3, 1.4]);
+
+        let input_slice = graph.by_name("conv_input_slice_0").unwrap();
+        assert_eq!(input_slice.meta.output_qparam().unwrap().dtype_str, "torch.int8");
+        assert_eq!(input_slice.meta.val_shape(), Some(&[1, 2, 8, 8][..]));
     }
 
     #[test]

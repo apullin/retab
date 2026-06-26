@@ -726,10 +726,7 @@ fn emit_tile_with_multiples(
     }
 
     let multiples_name = format!("{}_multiples", node.name);
-    push_inline_const(
-        &mut result,
-        make_shape_const_tensor(multiples_name.clone(), tile_multiples),
-    );
+    push_const_shape(&mut result, multiples_name.clone(), tile_multiples);
     result.push_output_op(
         make_empty_tensor(
             primary_output_name(graph, node),

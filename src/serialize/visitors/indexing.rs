@@ -489,7 +489,7 @@ pub(super) fn emit_slice(ctx: &EmitContext) -> EmitResult {
         TosaTensor::new(
             &node.name,
             spec.size_shape,
-            ir_dtype_to_tosa(node.meta.val.dtype),
+            node_output_dtype(node),
         ),
         Op::Slice,
         Attribute::Slice(SliceAttribute {}),
