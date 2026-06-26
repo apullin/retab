@@ -251,6 +251,27 @@ fn add_transpose(
     )
 }
 
+fn transpose_perm(graph: &IrGraph, id: NodeId) -> Option<Vec<usize>> {
+    if !is_tosa_transpose_target(&graph.nodes[id].target) {
+        return None;
+    }
+    graph.nodes[id]
+        .args
+        .get(1)?
+        .as_int_list()?
+        .into_iter()
+        .map(|axis| usize::try_from(axis).ok())
+        .collect()
+}
+
+fn inverse_permutations(lhs: &[usize], rhs: &[usize]) -> bool {
+    lhs.len() == rhs.len()
+        && rhs
+            .iter()
+            .enumerate()
+            .all(|(out_axis, &mid_axis)| mid_axis < lhs.len() && lhs[mid_axis] == out_axis)
+}
+
 fn insert_transpose_before(
     graph: &mut IrGraph,
     user_id: NodeId,
@@ -459,6 +480,60 @@ impl IrToTosaMemoryFormatPass {
         modified
     }
 
+    fn cancel_inverse_layout_transpose_pairs(&self, graph: &mut IrGraph) -> bool {
+        let mut modified = false;
+        for first_id in graph.live_call_function_ids() {
+            if !graph.nodes[first_id].alive
+                || !graph.nodes[first_id].name.contains("_output_layout")
+            {
+                continue;
+            }
+            let Some(second_id) = graph.single_live_user(first_id) else {
+                continue;
+            };
+            if !graph.nodes[second_id].alive
+                || !graph.nodes[second_id].name.contains("_input_layout")
+                || graph.nodes[second_id].first_node_arg() != Some(first_id)
+            {
+                continue;
+            }
+            let Some(input_id) = graph.nodes[first_id].first_node_arg() else {
+                continue;
+            };
+            let Some(first_perm) = transpose_perm(graph, first_id) else {
+                continue;
+            };
+            let Some(second_perm) = transpose_perm(graph, second_id) else {
+                continue;
+            };
+            if !inverse_permutations(&first_perm, &second_perm) {
+                continue;
+            }
+            if graph
+                .node_shape(input_id)
+                .zip(graph.node_shape(second_id))
+                .is_some_and(|(input_shape, second_shape)| input_shape != second_shape)
+            {
+                continue;
+            }
+
+            let second_users = graph.live_user_ids(second_id);
+            if second_users.is_empty() {
+                continue;
+            }
+            for user_id in second_users {
+                graph.replace_input_use(user_id, second_id, input_id);
+            }
+            graph.erase(second_id);
+            graph.erase(first_id);
+            modified = true;
+        }
+        if modified {
+            graph.rebuild_users();
+        }
+        modified
+    }
+
     fn insert_input_transposes(&self, graph: &mut IrGraph) -> bool {
         let mut modified = false;
         for id in graph.live_node_ids() {
@@ -650,6 +725,7 @@ impl IrPass for IrToTosaMemoryFormatPass {
         modified |= self.insert_view_boundary_transposes(graph);
         modified |= self.insert_input_transposes(graph);
         modified |= self.insert_output_transposes(graph, is_control_flow_gm);
+        modified |= self.cancel_inverse_layout_transpose_pairs(graph);
         modified |= self.remap_permute_args(graph);
 
         if crate::config::debug_layout_enabled() {
@@ -675,5 +751,124 @@ impl IrPass for IrToTosaMemoryFormatPass {
             ));
         }
         modified
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn add_node(
+        graph: &mut IrGraph,
+        name: &str,
+        target: &str,
+        args: Vec<IrArg>,
+        shape: &[i64],
+    ) -> NodeId {
+        graph.add_node(
+            NodeOp::CallFunction,
+            name.to_string(),
+            target.to_string(),
+            args,
+            NodeMeta::tensor(shape, "torch.int8"),
+        )
+    }
+
+    fn add_transpose_node(
+        graph: &mut IrGraph,
+        name: &str,
+        input: NodeId,
+        perm: &[i64],
+        shape: &[i64],
+    ) -> NodeId {
+        add_node(
+            graph,
+            name,
+            "backend.tosa.TRANSPOSE.default",
+            vec![IrArg::Node(input), i64_list(perm)],
+            shape,
+        )
+    }
+
+    #[test]
+    fn cancels_single_consumer_inverse_layout_transposes() {
+        let mut graph = IrGraph::empty();
+        let input = graph.add_node(
+            NodeOp::Placeholder,
+            "input".to_string(),
+            "input".to_string(),
+            Vec::new(),
+            NodeMeta::tensor([1, 2, 32, 1, 48], "torch.int8"),
+        );
+        let output_layout = add_transpose_node(
+            &mut graph,
+            "view_output_layout",
+            input,
+            &[0, 2, 3, 4, 1],
+            &[1, 32, 1, 48, 2],
+        );
+        let input_layout = add_transpose_node(
+            &mut graph,
+            "next_view_input_layout",
+            output_layout,
+            &[0, 4, 1, 2, 3],
+            &[1, 2, 32, 1, 48],
+        );
+        let view = add_node(
+            &mut graph,
+            "next_view",
+            "aten.view_copy.default",
+            vec![IrArg::Node(input_layout), i64_list(&[1, 2, 32, 48])],
+            &[1, 2, 32, 48],
+        );
+
+        assert!(IrToTosaMemoryFormatPass.cancel_inverse_layout_transpose_pairs(&mut graph));
+        assert!(!graph.nodes[output_layout].alive);
+        assert!(!graph.nodes[input_layout].alive);
+        assert_eq!(graph.nodes[view].first_node_arg(), Some(input));
+    }
+
+    #[test]
+    fn keeps_shared_inverse_layout_transposes() {
+        let mut graph = IrGraph::empty();
+        let input = graph.add_node(
+            NodeOp::Placeholder,
+            "input".to_string(),
+            "input".to_string(),
+            Vec::new(),
+            NodeMeta::tensor([1, 2, 32, 1, 48], "torch.int8"),
+        );
+        let output_layout = add_transpose_node(
+            &mut graph,
+            "view_output_layout",
+            input,
+            &[0, 2, 3, 4, 1],
+            &[1, 32, 1, 48, 2],
+        );
+        let input_layout = add_transpose_node(
+            &mut graph,
+            "next_view_input_layout",
+            output_layout,
+            &[0, 4, 1, 2, 3],
+            &[1, 2, 32, 1, 48],
+        );
+        let _view = add_node(
+            &mut graph,
+            "next_view",
+            "aten.view_copy.default",
+            vec![IrArg::Node(input_layout), i64_list(&[1, 2, 32, 48])],
+            &[1, 2, 32, 48],
+        );
+        let _shared_user = add_node(
+            &mut graph,
+            "shared_rescale",
+            "backend.tosa.RESCALE.default",
+            vec![IrArg::Node(output_layout)],
+            &[1, 32, 1, 48, 2],
+        );
+
+        assert!(!IrToTosaMemoryFormatPass.cancel_inverse_layout_transpose_pairs(&mut graph));
+        assert!(graph.nodes[output_layout].alive);
+        assert!(graph.nodes[input_layout].alive);
     }
 }

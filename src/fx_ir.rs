@@ -937,7 +937,7 @@ impl IrGraph {
         id
     }
 
-    fn rebuild_users(&mut self) {
+    pub(crate) fn rebuild_users(&mut self) {
         self.users = build_user_edges(&self.nodes);
     }
 }
