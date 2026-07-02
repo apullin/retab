@@ -2,6 +2,10 @@
 
 import logging
 import os
+import sys
+import time
+from contextlib import contextmanager
+from typing import Any, Generator
 
 from torch.export.exported_program import ExportedProgram
 from executorch.exir.tracer import _default_decomposition_table
@@ -10,6 +14,25 @@ logger = logging.getLogger(__name__)
 
 _ORIGINAL_PATCHES = {}
 _RUN_DECOMP_DISABLE_UNLIFT_GUARDS = False
+
+
+@contextmanager
+def _profile_scope(name: str, **fields: Any) -> Generator[None, None, None]:
+    if os.environ.get("ET_LOWERING_PROFILE") != "1":
+        yield
+        return
+
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start
+        suffix = "".join(f" {key}={value}" for key, value in fields.items())
+        print(
+            f"[et-lower-profile] {elapsed:9.3f}s retab.{name}{suffix}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _env_get(name: str, *aliases: str) -> str | None:
@@ -139,6 +162,36 @@ def _can_skip_initial_functionalize(
     return _uses_straight_line_fast_path_program(program)
 
 
+def _functionalize_trivial_inplace_ops(program: ExportedProgram) -> int:
+    import torch
+
+    replacements = {
+        torch.ops.aten.relu_.default: torch.ops.aten.relu.default,
+    }
+    rewrite_count = 0
+
+    for module in _iter_graph_modules(program.graph_module):
+        module_modified = False
+        for node in module.graph.nodes:
+            if node.op != "call_function" or node.target not in replacements:
+                continue
+            if not node.args or not isinstance(node.args[0], torch.fx.Node):
+                continue
+
+            input_node = node.args[0]
+            if any(user is not node for user in input_node.users):
+                continue
+
+            node.target = replacements[node.target]
+            module_modified = True
+            rewrite_count += 1
+
+        if module_modified:
+            module.recompile()
+
+    return rewrite_count
+
+
 def _install_edge_decomp_fast_path() -> None:
     """Skip redundant EDGE_DO_NOT_DECOMP cleanup decompositions.
 
@@ -164,158 +217,242 @@ def _install_edge_decomp_fast_path() -> None:
             constant_methods,
             generate_etrecord=False,
         ):
-            for name, program in aten_programs.items():
-                if not _can_skip_initial_functionalize(
-                    program, partitioner.get(name, [])
-                ):
-                    return current(
-                        partitioner,
-                        aten_programs,
-                        config,
-                        constant_methods,
-                        generate_etrecord,
-                    )
-
-            ops_set_to_not_decompose_by_program = defaultdict(list)
-            edge_programs = {}
-            skipped_initial_functionalize = 0
-            skipped_second_passes = 0
-
-            for name, program in aten_programs.items():
-                if partitioner is not None:
-                    partitioners_for_program = partitioner.get(name, [])
-                    if _can_skip_initial_functionalize(
-                        program, partitioners_for_program
+            with _profile_scope(
+                "edge_decomp.optimized_gen_edge_manager", methods=len(aten_programs)
+            ):
+                for name, program in aten_programs.items():
+                    if os.environ.get("RETAB_DISABLE_TRIVIAL_INPLACE_FAST_PATH") != "1":
+                        with _profile_scope(
+                            "edge_decomp.functionalize_trivial_inplace", method=name
+                        ):
+                            _functionalize_trivial_inplace_ops(program)
+                    with _profile_scope(
+                        "edge_decomp.can_skip_initial_functionalize", method=name
                     ):
-                        skipped_initial_functionalize += 1
-                    else:
-                        program = program.run_decompositions({})
-                    final_ops_to_preserve = set()
-
-                    if not partitioners_for_program:
-                        table = _default_decomposition_table()
-                        for op in config.preserve_ops:
-                            table.pop(op, None)
-                        program = program.run_decompositions(table)
-
-                    for curr_partitioner in partitioners_for_program:
-                        curr_ops_no_decomp, _ = curr_partitioner.ops_to_not_decompose(
-                            program
+                        can_skip = _can_skip_initial_functionalize(
+                            program, partitioner.get(name, [])
                         )
-
-                        can_skip_using_edge_do_not_decomp = (
-                            program_mod._can_skip_using_EDGE_DO_NOT_DECOMP(
-                                curr_partitioner, program
+                    if not can_skip:
+                        with _profile_scope("edge_decomp.fallback_current", method=name):
+                            return current(
+                                partitioner,
+                                aten_programs,
+                                config,
+                                constant_methods,
+                                generate_etrecord,
                             )
-                        )
 
-                        if can_skip_using_edge_do_not_decomp:
-                            table = _default_decomposition_table()
-                            ops_needing_preservation = []
+                ops_set_to_not_decompose_by_program = defaultdict(list)
+                edge_programs = {}
+                skipped_initial_functionalize = 0
+                skipped_second_passes = 0
 
-                            for op in curr_ops_no_decomp:
-                                if table.pop(op, None) is not None:
-                                    ops_needing_preservation.append(op)
-
-                            program = program.run_decompositions(table)
-                            final_ops_to_preserve.update(ops_needing_preservation)
+                for name, program in aten_programs.items():
+                    if partitioner is not None:
+                        partitioners_for_program = partitioner.get(name, [])
+                        with _profile_scope(
+                            "edge_decomp.can_skip_initial_functionalize",
+                            method=name,
+                        ):
+                            can_skip = _can_skip_initial_functionalize(
+                                program, partitioners_for_program
+                            )
+                        if can_skip:
+                            skipped_initial_functionalize += 1
                         else:
-                            curr_ops_no_decomp = (
-                                program_mod._remove_invalid_ops_for_not_decompose(
-                                    curr_ops_no_decomp
-                                )
-                            )
+                            with _profile_scope(
+                                "edge_decomp.initial_empty_decomposition", method=name
+                            ):
+                                program = program.run_decompositions({})
+                        final_ops_to_preserve = set()
 
+                        if not partitioners_for_program:
                             table = _default_decomposition_table()
-                            for op in curr_ops_no_decomp:
+                            for op in config.preserve_ops:
                                 table.pop(op, None)
-
-                            program = program.run_decompositions(table)
-
-                            if not _program_contains_targets(
-                                program, set(curr_ops_no_decomp)
+                            with _profile_scope(
+                                "edge_decomp.default_decomposition", method=name
                             ):
-                                skipped_second_passes += 1
-                                continue
+                                program = program.run_decompositions(table)
 
-                            temp_partitioner_dict = {name: [curr_partitioner]}
-                            preserved_ops = (
-                                program_mod._replace_aten_ops_with_transformed_ops(
-                                    name, program, temp_partitioner_dict
+                        for curr_partitioner in partitioners_for_program:
+                            with _profile_scope(
+                                "edge_decomp.ops_to_not_decompose",
+                                method=name,
+                                partitioner=curr_partitioner.__class__.__name__,
+                            ):
+                                curr_ops_no_decomp, _ = (
+                                    curr_partitioner.ops_to_not_decompose(program)
                                 )
-                                or []
-                            )
-                            final_ops_to_preserve.update(preserved_ops)
 
-                            default_table = _default_decomposition_table()
-                            if not any(
-                                op
-                                in {n.target for n in program.graph_module.graph.nodes if n.op == "call_function"}
-                                for op in default_table
+                            with _profile_scope(
+                                "edge_decomp.can_skip_edge_do_not_decomp",
+                                method=name,
+                                partitioner=curr_partitioner.__class__.__name__,
                             ):
-                                skipped_second_passes += 1
-                            else:
-                                program = program.run_decompositions(default_table)
-                            program_mod._restore_transformed_ops_to_aten_ops(program)
+                                can_skip_using_edge_do_not_decomp = (
+                                    program_mod._can_skip_using_EDGE_DO_NOT_DECOMP(
+                                        curr_partitioner, program
+                                    )
+                                )
 
-                    ops_set_to_not_decompose_by_program[name].extend(
-                        final_ops_to_preserve
+                            if can_skip_using_edge_do_not_decomp:
+                                table = _default_decomposition_table()
+                                ops_needing_preservation = []
+
+                                for op in curr_ops_no_decomp:
+                                    if table.pop(op, None) is not None:
+                                        ops_needing_preservation.append(op)
+
+                                with _profile_scope(
+                                    "edge_decomp.preserve_decomposition",
+                                    method=name,
+                                    partitioner=curr_partitioner.__class__.__name__,
+                                ):
+                                    program = program.run_decompositions(table)
+                                final_ops_to_preserve.update(ops_needing_preservation)
+                            else:
+                                curr_ops_no_decomp = (
+                                    program_mod._remove_invalid_ops_for_not_decompose(
+                                        curr_ops_no_decomp
+                                    )
+                                )
+
+                                table = _default_decomposition_table()
+                                for op in curr_ops_no_decomp:
+                                    table.pop(op, None)
+
+                                with _profile_scope(
+                                    "edge_decomp.edge_do_not_decomp_first_decomposition",
+                                    method=name,
+                                    partitioner=curr_partitioner.__class__.__name__,
+                                ):
+                                    program = program.run_decompositions(table)
+
+                                with _profile_scope(
+                                    "edge_decomp.program_contains_preserve_targets",
+                                    method=name,
+                                    partitioner=curr_partitioner.__class__.__name__,
+                                ):
+                                    contains_preserve_targets = _program_contains_targets(
+                                        program, set(curr_ops_no_decomp)
+                                    )
+                                if not contains_preserve_targets:
+                                    skipped_second_passes += 1
+                                    continue
+
+                                temp_partitioner_dict = {name: [curr_partitioner]}
+                                with _profile_scope(
+                                    "edge_decomp.replace_aten_ops_with_transformed_ops",
+                                    method=name,
+                                    partitioner=curr_partitioner.__class__.__name__,
+                                ):
+                                    preserved_ops = (
+                                        program_mod._replace_aten_ops_with_transformed_ops(
+                                            name, program, temp_partitioner_dict
+                                        )
+                                        or []
+                                    )
+                                final_ops_to_preserve.update(preserved_ops)
+
+                                default_table = _default_decomposition_table()
+                                with _profile_scope(
+                                    "edge_decomp.scan_default_table_targets",
+                                    method=name,
+                                    partitioner=curr_partitioner.__class__.__name__,
+                                ):
+                                    call_targets = {
+                                        n.target
+                                        for n in program.graph_module.graph.nodes
+                                        if n.op == "call_function"
+                                    }
+                                    has_default_targets = any(
+                                        op in call_targets for op in default_table
+                                    )
+                                if not has_default_targets:
+                                    skipped_second_passes += 1
+                                else:
+                                    with _profile_scope(
+                                        "edge_decomp.second_default_decomposition",
+                                        method=name,
+                                        partitioner=curr_partitioner.__class__.__name__,
+                                    ):
+                                        program = program.run_decompositions(
+                                            default_table
+                                        )
+                                with _profile_scope(
+                                    "edge_decomp.restore_transformed_ops", method=name
+                                ):
+                                    program_mod._restore_transformed_ops_to_aten_ops(
+                                        program
+                                    )
+
+                        ops_set_to_not_decompose_by_program[name].extend(
+                            final_ops_to_preserve
+                        )
+
+                    with _profile_scope("edge_decomp.generate_edge_program", method=name):
+                        edge_program = program_mod._generate_edge_program(
+                            config,
+                            program,
+                            preserve_ops=ops_set_to_not_decompose_by_program.get(
+                                name, []
+                            )
+                        )
+                    if os.environ.get("ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING") == "1":
+                        try:
+                            from executorch.backends.arm.tosa.partitioner import (
+                                _sync_direct_delegate_output_meta,
+                            )
+
+                            with _profile_scope(
+                                "edge_decomp.sync_direct_delegate_output_meta",
+                                method=name,
+                            ):
+                                _sync_direct_delegate_output_meta(edge_program)
+                        except Exception as exc:
+                            logger.info(
+                                "[fast_preprocess] direct delegate output-meta sync failed for %s: %s",
+                                name,
+                                exc,
+                            )
+
+                    edge_programs[name] = edge_program
+
+                all_ops_not_to_decompose = list(
+                    set().union(*ops_set_to_not_decompose_by_program.values())
+                )
+                config._core_aten_ops_exception_list = list(
+                    set(config._core_aten_ops_exception_list)
+                    | set(all_ops_not_to_decompose)
+                )
+
+                with _profile_scope("edge_decomp.construct_edge_manager"):
+                    edge_manager = program_mod.EdgeProgramManager(
+                        edge_programs,
+                        constant_methods,
+                        config,
+                        all_ops_not_to_decompose,
                     )
 
-                edge_program = program_mod._generate_edge_program(
-                    config,
-                    program,
-                    preserve_ops=ops_set_to_not_decompose_by_program.get(name, []),
-                )
-                if os.environ.get("ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING") == "1":
-                    try:
-                        from executorch.backends.arm.tosa.partitioner import (
-                            _sync_direct_delegate_output_meta,
-                        )
+                if generate_etrecord:
+                    etrecord = program_mod._create_empty_etrecord()
+                    etrecord.add_exported_program(aten_programs)
+                    etrecord.add_edge_dialect_program(copy.deepcopy(edge_manager))
+                    edge_manager._etrecord = etrecord
 
-                        _sync_direct_delegate_output_meta(edge_program)
-                    except Exception as exc:
-                        logger.info(
-                            "[fast_preprocess] direct delegate output-meta sync failed for %s: %s",
-                            name,
-                            exc,
-                        )
+                if skipped_second_passes:
+                    logger.info(
+                        "[fast_preprocess] skipped %d redundant EDGE_DO_NOT_DECOMP cleanup passes",
+                        skipped_second_passes,
+                    )
+                if skipped_initial_functionalize:
+                    logger.info(
+                        "[fast_preprocess] skipped %d upfront empty decomposition passes",
+                        skipped_initial_functionalize,
+                    )
 
-                edge_programs[name] = edge_program
-
-            all_ops_not_to_decompose = list(
-                set().union(*ops_set_to_not_decompose_by_program.values())
-            )
-            config._core_aten_ops_exception_list = list(
-                set(config._core_aten_ops_exception_list)
-                | set(all_ops_not_to_decompose)
-            )
-
-            edge_manager = program_mod.EdgeProgramManager(
-                edge_programs,
-                constant_methods,
-                config,
-                all_ops_not_to_decompose,
-            )
-
-            if generate_etrecord:
-                etrecord = program_mod._create_empty_etrecord()
-                etrecord.add_exported_program(aten_programs)
-                etrecord.add_edge_dialect_program(copy.deepcopy(edge_manager))
-                edge_manager._etrecord = etrecord
-
-            if skipped_second_passes:
-                logger.info(
-                    "[fast_preprocess] skipped %d redundant EDGE_DO_NOT_DECOMP cleanup passes",
-                    skipped_second_passes,
-                )
-            if skipped_initial_functionalize:
-                logger.info(
-                    "[fast_preprocess] skipped %d upfront empty decomposition passes",
-                    skipped_initial_functionalize,
-                )
-
-            return edge_manager
+                return edge_manager
 
         optimized_gen_edge_manager_for_partitioners.__retab_patched__ = True
         optimized_gen_edge_manager_for_partitioners.__wrapped__ = current
@@ -358,6 +495,151 @@ def _install_edge_decomp_fast_path() -> None:
         program_mod,
         "_gen_edge_manager_for_partitioners",
         wrap_gen_edge_manager_for_partitioners,
+    )
+
+
+def _install_op_replace_fast_path() -> None:
+    """Replace ATen targets with Edge targets by rewriting FX nodes in place."""
+    from executorch.exir.passes import replace_aten_with_edge_pass as replace_mod
+    from torch.fx.passes.infra.pass_base import PassResult
+
+    def wrap_call(original):
+        if getattr(original, "__retab_patched__", False):
+            return original
+
+        def fast_call(self, graph_module):
+            modified = False
+            with _profile_scope("edge_decomp.op_replace_fast_call"):
+                for module in _iter_graph_modules(graph_module):
+                    module_modified = False
+                    for node in module.graph.nodes:
+                        if node.op != "call_function":
+                            continue
+                        if not replace_mod.should_lower_to_edge(node.target):
+                            continue
+
+                        edge_target = replace_mod.aten_to_edge(node.target)
+                        if edge_target == node.target:
+                            continue
+
+                        node.target = edge_target
+                        module_modified = True
+
+                    if module_modified:
+                        module.recompile()
+                        modified = True
+
+            return PassResult(graph_module, modified)
+
+        fast_call.__retab_patched__ = True
+        fast_call.__wrapped__ = original
+        return fast_call
+
+    _install_patch_once(
+        "op_replace_call",
+        replace_mod.OpReplacePass,
+        "call",
+        wrap_call,
+    )
+
+
+def _install_memory_format_fast_path() -> None:
+    """Convert memory_format kwargs to dim_order kwargs without ExportPass retracing."""
+    import torch
+    from executorch.exir.dim_order_utils import get_dim_order
+    from executorch.exir.passes import memory_format_ops_pass as memory_format_mod
+    from executorch.exir.passes.dim_order_ops_registry import DimOrderOpsMap
+    from torch.fx.passes.infra.pass_base import PassResult
+
+    def arg_value(arg):
+        if isinstance(arg, torch.fx.Node):
+            return arg.meta.get("val")
+        return arg
+
+    def rank_and_dim_order(arg):
+        value = arg_value(arg)
+        if isinstance(value, torch.Tensor):
+            return value.dim(), [int(d) for d in value.dim_order()]
+        if isinstance(arg, torch.fx.immutable_collections.immutable_list):
+            return len(arg), None
+        if isinstance(arg, (tuple, list)):
+            return len(arg), None
+        if hasattr(value, "__len__") and not isinstance(value, (str, bytes)):
+            return len(value), None
+        return None
+
+    def rewritten_kwargs(node):
+        if not node.args:
+            return None
+
+        nkwargs = dict(node.kwargs)
+        mem_format = nkwargs.pop("memory_format", torch.preserve_format)
+        input_info = rank_and_dim_order(node.args[0])
+        if input_info is None:
+            return None
+
+        ndim, inherited_dim_order = input_info
+        if mem_format in (None, torch.preserve_format):
+            dim_order = (
+                inherited_dim_order
+                if inherited_dim_order is not None
+                else list(range(ndim))
+            )
+        else:
+            dim_order = get_dim_order(mem_format, ndim)
+            if dim_order is None:
+                return None
+
+        nkwargs["dim_order"] = dim_order
+        return nkwargs
+
+    def wrap_call(original):
+        if getattr(original, "__retab_patched__", False):
+            return original
+
+        def fast_call(self, graph_module):
+            updates = []
+            with _profile_scope("edge_decomp.memory_format_fast_scan"):
+                for module in _iter_graph_modules(graph_module):
+                    for node in module.graph.nodes:
+                        if (
+                            node.op != "call_function"
+                            or node.target not in DimOrderOpsMap
+                        ):
+                            continue
+                        nkwargs = rewritten_kwargs(node)
+                        if nkwargs is None:
+                            return original(self, graph_module)
+                        updates.append(
+                            (module, node, DimOrderOpsMap[node.target], nkwargs)
+                        )
+
+            if not updates:
+                return PassResult(graph_module, False)
+
+            touched_modules = set()
+            with _profile_scope(
+                "edge_decomp.memory_format_fast_apply", rewrites=len(updates)
+            ):
+                for module, node, target, nkwargs in updates:
+                    node.target = target
+                    node.kwargs = nkwargs
+                    touched_modules.add(module)
+
+                for module in touched_modules:
+                    module.recompile()
+
+            return PassResult(graph_module, True)
+
+        fast_call.__retab_patched__ = True
+        fast_call.__wrapped__ = original
+        return fast_call
+
+    _install_patch_once(
+        "memory_format_call",
+        memory_format_mod.MemoryFormatOpsPass,
+        "call",
+        wrap_call,
     )
 
 
@@ -812,6 +1094,26 @@ def _uninstall_edge_decomp_fast_path() -> None:
         "gen_edge_manager_for_partitioners",
         program_mod,
         "_gen_edge_manager_for_partitioners",
+    )
+
+
+def _uninstall_op_replace_fast_path() -> None:
+    from executorch.exir.passes import replace_aten_with_edge_pass as replace_mod
+
+    _restore_patch(
+        "op_replace_call",
+        replace_mod.OpReplacePass,
+        "call",
+    )
+
+
+def _uninstall_memory_format_fast_path() -> None:
+    from executorch.exir.passes import memory_format_ops_pass as memory_format_mod
+
+    _restore_patch(
+        "memory_format_call",
+        memory_format_mod.MemoryFormatOpsPass,
+        "call",
     )
 
 

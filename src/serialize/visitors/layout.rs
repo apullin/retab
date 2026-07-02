@@ -40,6 +40,15 @@ fn compute_conv_output_impl(
     let spatial_rank = stride.len(); // 2 for conv2d / depthwise, 3 for conv3d
     let tensor_rank = spatial_rank + 2; // N + spatial dims + C
 
+    let debug_shape = crate::config::debug_slice_enabled();
+    let mut debug_inputs: Option<(
+        String,
+        String,
+        Option<Vec<u8>>,
+        Vec<i32>,
+        Vec<i32>,
+        Vec<i32>,
+    )> = None;
     let computed = (|| -> Option<Vec<i32>> {
         let input_id = match node.args.first()? {
             Arg::Node(id) => *id,
@@ -113,6 +122,20 @@ fn compute_conv_output_impl(
             };
             (oc, kernels)
         };
+        if debug_shape {
+            debug_inputs = Some((
+                input_node.name.clone(),
+                format!("{:?}", input_node.target),
+                input_node
+                    .meta
+                    .tosa_dim_order
+                    .as_ref()
+                    .map(|order| order.iter().copied().collect()),
+                inp.clone(),
+                actual_tensor_shape(graph, store, weight_node),
+                kernels.clone(),
+            ));
+        }
 
         // Compute each spatial output dimension.
         let mut shape = Vec::with_capacity(tensor_rank);
@@ -150,10 +173,10 @@ fn compute_conv_output_impl(
         }
     };
 
-    if crate::config::debug_slice_enabled() {
+    if debug_shape {
         eprintln!(
-            "[ConvShapeDebug] node={} computed={:?} fallback={:?}",
-            node.name, computed, fallback_shape
+            "[ConvShapeDebug] node={} computed={:?} fallback={:?} inputs={:?} pad={:?} stride={:?} dilation={:?} depthwise={}",
+            node.name, computed, fallback_shape, debug_inputs, pad, stride, dilation, is_depthwise
         );
     }
 
@@ -215,18 +238,12 @@ pub(super) fn compute_pool_nhwc_output(
         };
         let input_node = graph.node(input_id)?;
 
-        let input_shape = actual_tensor_shape(graph, store, input_node);
+        let input_shape = pool_input_shape(graph, store, node)
+            .unwrap_or_else(|| actual_tensor_shape(graph, store, input_node));
         pool_nhwc_shape(&input_shape, kernel, stride, pad)
     })();
 
-    let fallback_shape = {
-        let shape = raw_i32_shape(node);
-        if shape.len() == 4 {
-            vec![shape[0], shape[2], shape[3], shape[1]]
-        } else {
-            shape
-        }
-    };
+    let fallback_shape = raw_i32_shape(node);
 
     let final_shape = match computed {
         Some(shape) if shape.iter().all(|&dim| dim > 0) => shape,

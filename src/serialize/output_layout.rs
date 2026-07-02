@@ -1,4 +1,4 @@
-use crate::graph::ir::{Arg, Node};
+use crate::graph::ir::{Arg, Node, OpTarget};
 use crate::graph::Graph;
 use crate::store::TensorStore;
 
@@ -43,7 +43,7 @@ pub(super) fn append_normalized_output_names(
         let preserves_non_identity_layout = has_non_identity_tosa_dim_order(node);
         let has_explicit_output_layout = op_semantics::is_tosa_transpose(&node.target);
         if let Some((output_shape, perms)) =
-            control_flow_parent_output_layout(node, &raw_shape, &serialized_shape)
+            control_flow_parent_output_layout(graph, node, &raw_shape, &serialized_shape)
         {
             push_output_layout_transpose(
                 tensors,
@@ -136,11 +136,15 @@ fn push_output_layout_transpose(
 }
 
 fn control_flow_parent_output_layout(
+    graph: &Graph,
     node: &Node,
     raw_shape: &[i32],
     serialized_shape: &[i32],
 ) -> Option<(Vec<i32>, Vec<i32>)> {
     if !node.meta.arm_control_flow_parent_output_user || raw_shape.len() != 4 {
+        return None;
+    }
+    if is_cond_parent_output(graph, node) {
         return None;
     }
     let perms = node
@@ -150,6 +154,15 @@ fn control_flow_parent_output_layout(
         .and_then(|order| inverse_tosa_dim_order(order))?;
     let output_shape = permute_shape(serialized_shape, &perms)?;
     Some((output_shape, perms))
+}
+
+fn is_cond_parent_output(graph: &Graph, node: &Node) -> bool {
+    let Some(Arg::Node(source_id)) = node.args.first() else {
+        return false;
+    };
+    graph
+        .node(*source_id)
+        .is_some_and(|source| matches!(source.target, OpTarget::CondIf))
 }
 
 fn normalized_output_layout_perms(

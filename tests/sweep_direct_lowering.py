@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sweep the Arm direct-fast-lane over a broader local model corpus.
+"""Sweep the Arm direct lowering path over a broader local model corpus.
 
 Default mode is a parent orchestrator that launches one subprocess per model so
 that Rust panics or other backend failures do not abort the whole sweep.

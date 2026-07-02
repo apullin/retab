@@ -22,6 +22,10 @@ pub(crate) fn profile_ingest_serialize_enabled() -> bool {
     env_is_set("RETAB_PROFILE_INGEST_SERIALIZE")
 }
 
+pub(crate) fn profile_passes_enabled() -> bool {
+    env_is_set("RETAB_PROFILE_PASSES")
+}
+
 pub(crate) fn fold_fallback_file() -> Option<String> {
     std::env::var("ARM_FOLD_FALLBACK_FILE").ok()
 }

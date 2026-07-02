@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Helpers for comparing Python/reference and direct fast-lane TOSA artifacts."""
+"""Helpers for comparing Python/reference and direct Rust TOSA artifacts."""
 
 from __future__ import annotations
 

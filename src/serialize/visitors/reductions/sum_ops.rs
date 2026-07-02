@@ -19,36 +19,8 @@ fn reduction_pre_reshape_perms(
         return None;
     }
 
-    let input_order: Vec<usize> = {
-        let mut order = vec![0usize; input_rank];
-        let mut seen = vec![false; input_rank];
-        let mut valid = true;
-        for raw_axis in 0..input_rank {
-            let pos = map_axis_to_tosa_dim_order(graph, input_node, raw_axis as i32) as usize;
-            if pos >= input_rank || seen[pos] {
-                valid = false;
-                break;
-            }
-            order[pos] = raw_axis;
-            seen[pos] = true;
-        }
-        if valid {
-            order
-        } else {
-            input_node
-                .meta
-                .tosa_dim_order
-                .clone()
-                .map(|order| order.into_iter().map(|axis| axis as usize).collect())
-                .unwrap_or_else(|| (0..input_rank).collect())
-        }
-    };
-    let output_order: Vec<usize> = node
-        .meta
-        .tosa_dim_order
-        .clone()
-        .map(|order| order.into_iter().map(|axis| axis as usize).collect())
-        .unwrap_or_else(|| (0..input_rank.saturating_sub(raw_axes.len())).collect());
+    let input_order = axis_order_for_node(graph, input_node, input_rank);
+    let output_order = node_dim_order_or_identity(node, input_rank.saturating_sub(raw_axes.len()));
 
     let reduced_axes: Vec<usize> = raw_axes
         .iter()

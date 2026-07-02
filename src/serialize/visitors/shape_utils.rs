@@ -94,6 +94,179 @@ pub(super) fn map_axis_to_tosa_dim_order(graph: &Graph, node: &Node, axis: i32) 
     normalized
 }
 
+pub(super) fn normalize_axis(axis: i32, rank: usize) -> Option<usize> {
+    let rank = rank as i32;
+    let normalized = if axis < 0 { axis + rank } else { axis };
+    (0..rank)
+        .contains(&normalized)
+        .then_some(normalized as usize)
+}
+
+pub(super) fn axis_order_for_node(graph: &Graph, node: &Node, rank: usize) -> Vec<usize> {
+    let mut order = vec![0usize; rank];
+    let mut seen = vec![false; rank];
+    for raw_axis in 0..rank {
+        let mapped = map_axis_to_tosa_dim_order(graph, node, raw_axis as i32);
+        let Some(pos) = normalize_axis(mapped, rank) else {
+            return node_dim_order_or_identity(node, rank);
+        };
+        if seen[pos] {
+            return node_dim_order_or_identity(node, rank);
+        }
+        order[pos] = raw_axis;
+        seen[pos] = true;
+    }
+    order
+}
+
+pub(super) fn node_dim_order_or_identity(node: &Node, rank: usize) -> Vec<usize> {
+    node.meta
+        .tosa_dim_order
+        .as_ref()
+        .and_then(|order| {
+            let mut seen = vec![false; rank];
+            let mut out = Vec::with_capacity(rank);
+            if order.len() != rank {
+                return None;
+            }
+            for &axis in order {
+                let axis = axis as usize;
+                if axis >= rank || seen[axis] {
+                    return None;
+                }
+                seen[axis] = true;
+                out.push(axis);
+            }
+            Some(out)
+        })
+        .unwrap_or_else(|| (0..rank).collect())
+}
+
+pub(super) fn mapped_axis_for_current_shape(
+    raw_axis: i32,
+    mapped_axis: i32,
+    current_shape: &[i32],
+) -> i32 {
+    let Some(mapped_axis_idx) = normalize_axis(mapped_axis, current_shape.len()) else {
+        return mapped_axis;
+    };
+    let Some(raw_axis_idx) = normalize_axis(raw_axis, current_shape.len()) else {
+        return mapped_axis;
+    };
+    if mapped_axis_idx != raw_axis_idx
+        && current_shape.get(mapped_axis_idx).copied() == Some(1)
+        && current_shape.get(raw_axis_idx).is_some_and(|&dim| dim != 1)
+    {
+        return raw_axis_idx as i32;
+    }
+    mapped_axis
+}
+
+pub(super) fn map_axis_to_actual_tensor_axis(
+    graph: &Graph,
+    store: &TensorStore,
+    node: &Node,
+    axis: i32,
+) -> i32 {
+    let rank = node.meta.val.shape_len as i32;
+    let normalized = if axis < 0 { axis + rank } else { axis };
+    if normalized < 0 || normalized >= rank {
+        return axis;
+    }
+
+    if op_semantics::is_qdq_shape_passthrough(&node.target) {
+        if let Some(input_node) = first_input_node(graph, node) {
+            let node_shape = actual_tensor_shape(graph, store, node);
+            let input_shape = actual_tensor_shape(graph, store, input_node);
+            if node_shape == input_shape {
+                return map_axis_to_actual_tensor_axis(graph, store, input_node, axis);
+            }
+        }
+    }
+
+    if !matches!(node.target, OpTarget::TosaTranspose) {
+        if let Some(physical_shape) = physical_ordered_raw_shape(node) {
+            if actual_tensor_shape(graph, store, node) != physical_shape {
+                return normalized;
+            }
+        }
+    }
+
+    let has_non_identity_dim_order = node
+        .meta
+        .tosa_dim_order
+        .as_ref()
+        .map(|order| {
+            order
+                .iter()
+                .enumerate()
+                .any(|(idx, &axis)| axis as usize != idx)
+        })
+        .unwrap_or(false);
+    if raw_i32_shape(node) == actual_tensor_shape(graph, store, node)
+        && !matches!(node.target, OpTarget::TosaTranspose)
+        && !has_non_identity_dim_order
+    {
+        return normalized;
+    }
+
+    map_axis_to_tosa_dim_order(graph, node, axis)
+}
+
+pub(super) fn map_slice_axis_to_input_layout(
+    graph: &Graph,
+    node: &Node,
+    input_node: &Node,
+    input_shape: &[i32],
+    axis: i32,
+) -> usize {
+    let rank = input_shape.len() as i32;
+    if rank == 0 {
+        return 0;
+    }
+    let normalized = if axis < 0 { axis + rank } else { axis };
+    let clamped = normalized.clamp(0, rank.saturating_sub(1));
+
+    let node_order_matches_input = node.meta.tosa_dim_order.is_some()
+        && apply_tosa_dim_order(node, raw_i32_shape(input_node)) == input_shape;
+    if node_order_matches_input {
+        map_axis_to_tosa_dim_order(graph, node, clamped) as usize
+    } else {
+        map_axis_to_tosa_dim_order(graph, input_node, clamped) as usize
+    }
+}
+
+pub(super) fn adjust_slice_axis_for_bounds(
+    input_shape: &[i32],
+    mapped_dim: usize,
+    raw_dim: usize,
+    start: i64,
+    end: i64,
+) -> usize {
+    let Some(&mapped_size) = input_shape.get(mapped_dim) else {
+        return mapped_dim;
+    };
+    let Some(&raw_size) = input_shape.get(raw_dim) else {
+        return mapped_dim;
+    };
+
+    let mapped_size = i64::from(mapped_size);
+    let raw_size = i64::from(raw_size);
+    let start_exceeds_mapped = start >= 0 && start > mapped_size;
+    let end_exceeds_mapped = end >= 0 && end != i64::MAX && end > mapped_size;
+    let start_fits_raw = start < 0 || start <= raw_size;
+    let end_fits_raw = end < 0 || end == i64::MAX || end <= raw_size;
+    if mapped_dim != raw_dim
+        && (start_exceeds_mapped || end_exceeds_mapped)
+        && start_fits_raw
+        && end_fits_raw
+    {
+        raw_dim
+    } else {
+        mapped_dim
+    }
+}
+
 pub(super) fn first_input_node<'a>(graph: &'a Graph, node: &Node) -> Option<&'a Node> {
     let Arg::Node(input_id) = node.args.first()? else {
         return None;
@@ -122,7 +295,14 @@ fn normalize_shape_for_node(node: Option<&Node>, shape: Vec<i32>) -> Vec<i32> {
 }
 
 pub(super) fn transpose_perms(node: &Node) -> Vec<i32> {
-    arg_or_kwarg_i32_list(node, 1, "perms")
+    let mut perms = arg_or_kwarg_i32_list(node, 1, "perms");
+    let rank = perms.len() as i32;
+    for dim in &mut perms {
+        if *dim < 0 {
+            *dim += rank;
+        }
+    }
+    perms
 }
 
 fn passthrough_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
@@ -138,6 +318,19 @@ fn passthrough_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> 
     Some(input_shape)
 }
 
+fn physical_ordered_raw_shape(node: &Node) -> Option<Vec<i32>> {
+    let order = node.meta.tosa_dim_order.as_ref()?;
+    if order
+        .iter()
+        .enumerate()
+        .all(|(idx, &axis)| axis as usize == idx)
+    {
+        return None;
+    }
+    let raw_shape = raw_i32_shape(node);
+    (raw_shape.len() == order.len()).then(|| apply_tosa_dim_order(node, raw_shape))
+}
+
 fn shape_preserving_unary_tensor_shape(
     graph: &Graph,
     store: &TensorStore,
@@ -146,7 +339,7 @@ fn shape_preserving_unary_tensor_shape(
     if !op_semantics::is_shape_preserving_unary(&node.target) {
         return None;
     }
-    first_input_shape(graph, store, node)
+    physical_ordered_raw_shape(node).or_else(|| first_input_shape(graph, store, node))
 }
 
 pub(super) fn transposed_tensor_shape(
@@ -182,13 +375,19 @@ fn sliced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Optio
         .or_else(|| explicit_slice_size_shape(node, &input_shape))
 }
 
-fn reduced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
-    if !op_semantics::is_sum_reduction(&node.target) {
-        return None;
+fn reduction_axes(node: &Node) -> Vec<i32> {
+    let mut axes = arg_i32_list(node, 1);
+    if axes.is_empty() {
+        if let Some(Arg::Int(dim)) = node.args.get(1) {
+            axes.push(*dim as i32);
+        }
     }
+    axes
+}
 
-    if op_semantics::is_aten_sum(&node.target) {
-        return Some(apply_tosa_dim_order(node, raw_i32_shape(node)));
+fn reduced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
+    if !op_semantics::is_axis_reduction(&node.target) {
+        return None;
     }
 
     let input_node = first_input_node(graph, node)?;
@@ -197,15 +396,27 @@ fn reduced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Opti
         return None;
     }
 
-    let axes = arg_i32_list(node, 1);
+    let axes = reduction_axes(node);
     if axes.is_empty() {
         return None;
     }
     let keepdim = arg_bool(node, 2, false);
     let mut output_shape = input_shape.clone();
     let mut mapped_axes: Vec<usize> = axes
-        .into_iter()
-        .map(|axis| map_axis_to_tosa_dim_order(graph, input_node, axis) as usize)
+        .iter()
+        .copied()
+        .map(|axis| {
+            (if node.meta.retab_reduce_axes_are_physical {
+                let rank = input_shape.len() as i32;
+                if axis < 0 {
+                    axis + rank
+                } else {
+                    axis
+                }
+            } else {
+                map_axis_to_actual_tensor_axis(graph, store, input_node, axis)
+            }) as usize
+        })
         .collect();
 
     if keepdim {
@@ -220,8 +431,9 @@ fn reduced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Opti
     let input_raw_shape = raw_i32_shape(input_node);
     if input_raw_shape.len() == input_shape.len() {
         let rank = input_raw_shape.len() as i32;
-        let mut raw_axes: Vec<usize> = arg_i32_list(node, 1)
-            .into_iter()
+        let mut raw_axes: Vec<usize> = axes
+            .iter()
+            .copied()
             .map(|axis| if axis < 0 { axis + rank } else { axis })
             .filter(|&axis| axis >= 0 && axis < rank)
             .map(|axis| axis as usize)
@@ -246,14 +458,6 @@ fn reduced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Opti
     Some(output_shape)
 }
 
-fn checked_numel(shape: &[i32]) -> Option<i64> {
-    shape.iter().try_fold(1i64, |acc, &dim| {
-        (dim >= 0)
-            .then_some(dim as i64)
-            .and_then(|dim| acc.checked_mul(dim))
-    })
-}
-
 pub(super) fn broadcast_two_shapes(lhs: &[i32], rhs: &[i32]) -> Option<Vec<i32>> {
     let rank = lhs.len().max(rhs.len());
     let lhs_pad = rank.saturating_sub(lhs.len());
@@ -273,6 +477,49 @@ pub(super) fn broadcast_two_shapes(lhs: &[i32], rhs: &[i32]) -> Option<Vec<i32>>
     }
 
     Some(out)
+}
+
+pub(super) fn emitted_binary_input_shapes(
+    graph: &Graph,
+    store: &TensorStore,
+    node: &Node,
+) -> Vec<Vec<i32>> {
+    let input_nodes: Vec<&Node> = node
+        .args
+        .iter()
+        .filter_map(|arg| graph.node(arg.as_node()?))
+        .take(2)
+        .collect();
+    if input_nodes.len() < 2 {
+        return input_nodes
+            .into_iter()
+            .map(|input| actual_tensor_shape(graph, store, input))
+            .collect();
+    }
+
+    let mut shapes = vec![
+        actual_tensor_shape(graph, store, input_nodes[0]),
+        actual_tensor_shape(graph, store, input_nodes[1]),
+    ];
+
+    if shapes[0].len() != shapes[1].len() {
+        let (smaller_idx, larger_idx) = if shapes[0].len() < shapes[1].len() {
+            (0usize, 1usize)
+        } else {
+            (1usize, 0usize)
+        };
+
+        let target = broadcast_shape_for_binary_inputs(
+            &raw_i32_shape(input_nodes[smaller_idx]),
+            &shapes[larger_idx],
+            node,
+        );
+        if target.len() == shapes[larger_idx].len() {
+            shapes[smaller_idx] = target;
+        }
+    }
+
+    shapes
 }
 
 pub(super) fn binary_input_broadcast_shape(
@@ -299,14 +546,16 @@ fn broadcasted_input_tensor_shape(
     store: &TensorStore,
     node: &Node,
 ) -> Option<Vec<i32>> {
-    let candidate = binary_input_broadcast_shape(graph, store, node)?;
-
-    let raw_shape = raw_i32_shape(node);
-    if raw_shape.len() != candidate.len() {
+    if !op_semantics::is_binary_broadcast(&node.target) {
         return None;
     }
 
-    (checked_numel(&raw_shape)? == checked_numel(&candidate)?).then_some(candidate)
+    if let Some(shape) = physical_ordered_raw_shape(node) {
+        return Some(shape);
+    }
+
+    let candidate = binary_input_broadcast_shape(graph, store, node)?;
+    Some(candidate)
 }
 
 fn table_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
@@ -387,6 +636,66 @@ pub(super) fn pool_nhwc_shape(
     (oh > 0 && ow > 0).then_some(vec![input_shape[0], oh, ow, input_shape[3]])
 }
 
+pub(super) fn pool_input_shape(
+    graph: &Graph,
+    store: &TensorStore,
+    node: &Node,
+) -> Option<Vec<i32>> {
+    let input_node = first_input_node(graph, node)?;
+    if matches!(input_node.target, OpTarget::Pad | OpTarget::TosaPad) {
+        return pad_tensor_shape(graph, store, input_node);
+    }
+    Some(actual_tensor_shape(graph, store, input_node))
+}
+
+pub(super) fn pad_tensor_shape(
+    graph: &Graph,
+    store: &TensorStore,
+    node: &Node,
+) -> Option<Vec<i32>> {
+    if !matches!(node.target, OpTarget::Pad | OpTarget::TosaPad) {
+        return None;
+    }
+    let input_shape = first_input_shape(graph, store, node)?;
+    let rank = input_shape.len();
+    let pad = arg_i32_list(node, 1);
+    let pad_pairs: Vec<(i32, i32)> = pad
+        .chunks(2)
+        .filter_map(|pair| match pair {
+            [before, after] => Some((*before, *after)),
+            _ => None,
+        })
+        .collect();
+    let mut per_dim_pad = vec![(0i32, 0i32); rank];
+    for (i, &pair) in pad_pairs.iter().enumerate() {
+        let dim = rank.saturating_sub(1 + i);
+        if dim < rank {
+            per_dim_pad[dim] = pair;
+        }
+    }
+
+    let reordered_pad = if let Some(order) = node.meta.tosa_dim_order.as_ref() {
+        if order.len() == rank {
+            order
+                .iter()
+                .map(|&idx| per_dim_pad.get(idx as usize).copied().unwrap_or((0, 0)))
+                .collect()
+        } else {
+            per_dim_pad
+        }
+    } else {
+        per_dim_pad
+    };
+
+    let mut output_shape = input_shape;
+    for (i, (before, after)) in reordered_pad.iter().enumerate() {
+        if let Some(slot) = output_shape.get_mut(i) {
+            *slot += before + after;
+        }
+    }
+    Some(output_shape)
+}
+
 fn pool_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
     let is_max_pool = op_semantics::is_max_pool(&node.target);
     let is_avg_pool = op_semantics::is_avg_pool(&node.target);
@@ -394,7 +703,7 @@ fn pool_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<
         return None;
     }
 
-    let input_shape = first_input_shape(graph, store, node)?;
+    let input_shape = pool_input_shape(graph, store, node)?;
     if input_shape.len() != 4 {
         return None;
     }
@@ -429,17 +738,12 @@ fn strided_slice_shape(
     let raw_dim = arg_i64(node, 1, 0);
     let normalized_dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };
     let clamped_dim = normalized_dim.clamp(0, rank.saturating_sub(1));
-    let dim = node
-        .meta
-        .tosa_dim_order
-        .as_ref()
-        .map(|_| map_axis_to_tosa_dim_order(graph, node, clamped_dim as i32) as usize)
-        .unwrap_or_else(|| {
-            map_axis_to_tosa_dim_order(graph, input_node, clamped_dim as i32) as usize
-        });
-    let input_dim = input_shape.get(dim).copied()? as i64;
+    let mut dim =
+        map_slice_axis_to_input_layout(graph, node, input_node, input_shape, clamped_dim as i32);
     let start = arg_i64(node, 2, 0);
-    let end = arg_i64(node, 3, input_dim);
+    let end = arg_i64(node, 3, input_shape.get(dim).copied().unwrap_or(0) as i64);
+    dim = adjust_slice_axis_for_bounds(input_shape, dim, clamped_dim as usize, start, end);
+    let input_dim = input_shape.get(dim).copied()? as i64;
     let step = arg_i64(node, 4, 1);
     let start_idx = if start < 0 {
         (input_dim + start).max(0)
@@ -481,8 +785,9 @@ fn explicit_slice_size_shape(node: &Node, input_shape: &[i32]) -> Option<Vec<i32
 }
 
 fn nhwc_layout_shape(node: &Node, raw_shape: &[i32], reordered_shape: &[i32]) -> Option<Vec<i32>> {
+    let layout_getitem = is_getitem_node(node) && !node.meta.retab_logical_layout_boundary;
     let logical_nhwc = raw_shape.len() == 4
-        && (is_getitem_node(node) || op_semantics::uses_nhwc_layout_shape(&node.target));
+        && (layout_getitem || op_semantics::uses_nhwc_layout_shape(&node.target));
     if !logical_nhwc || reordered_shape != raw_shape {
         return None;
     }
@@ -527,6 +832,10 @@ fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> 
     }
 
     if let Some(shape) = sliced_tensor_shape(graph, store, node) {
+        return shape;
+    }
+
+    if let Some(shape) = pad_tensor_shape(graph, store, node) {
         return shape;
     }
 
@@ -698,5 +1007,219 @@ mod tests {
             actual_tensor_shape(&graph, &store, reciprocal_node),
             vec![10, 10, 10]
         );
+    }
+
+    #[test]
+    fn transpose_perms_normalizes_negative_axes() {
+        let mut graph = Graph::new();
+        let input = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Relu,
+            smallvec![],
+            Vec::new(),
+            meta(&[1, 1, 49, 64, 256], DType::Int8),
+            "x".to_string(),
+        );
+        let permute = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::Permute,
+            smallvec![Arg::Node(input), Arg::IntList(smallvec![0, 1, -1, -2, -3])],
+            Vec::new(),
+            meta(&[1, 1, 256, 64, 49], DType::Int8),
+            "permute".to_string(),
+        );
+
+        let node = graph.node(permute).expect("permute node");
+        assert_eq!(transpose_perms(node), vec![0, 1, 4, 3, 2]);
+    }
+
+    #[test]
+    fn physical_cast_shape_uses_its_own_dim_order() {
+        clear_shape_cache();
+
+        let mut graph = Graph::new();
+        let input = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Relu,
+            smallvec![],
+            Vec::new(),
+            meta(&[1, 3, 224, 224], DType::Float32),
+            "x".to_string(),
+        );
+        let mut cast_meta = meta(&[1, 3, 224, 224], DType::Int8);
+        cast_meta.tosa_dim_order = Some(smallvec![0, 2, 3, 1]);
+        let cast = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::To,
+            smallvec![Arg::Node(input)],
+            Vec::new(),
+            cast_meta,
+            "x_cast".to_string(),
+        );
+
+        let store = TensorStore::default();
+        let cast_node = graph.node(cast).expect("cast node");
+        assert_eq!(
+            actual_tensor_shape(&graph, &store, cast_node),
+            vec![1, 224, 224, 3]
+        );
+    }
+
+    #[test]
+    fn physical_binary_shape_uses_its_own_dim_order() {
+        clear_shape_cache();
+
+        let mut graph = Graph::new();
+        let lhs = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Relu,
+            smallvec![],
+            Vec::new(),
+            meta(&[1, 3, 224, 224], DType::Float32),
+            "lhs".to_string(),
+        );
+        let rhs = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Relu,
+            smallvec![],
+            Vec::new(),
+            meta(&[1], DType::Float32),
+            "rhs".to_string(),
+        );
+        let mut add_meta = meta(&[1, 3, 224, 224], DType::Float32);
+        add_meta.tosa_dim_order = Some(smallvec![0, 2, 3, 1]);
+        let add = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::Add,
+            smallvec![Arg::Node(lhs), Arg::Node(rhs)],
+            Vec::new(),
+            add_meta,
+            "add".to_string(),
+        );
+
+        let store = TensorStore::default();
+        let add_node = graph.node(add).expect("add node");
+        assert_eq!(
+            actual_tensor_shape(&graph, &store, add_node),
+            vec![1, 224, 224, 3]
+        );
+    }
+
+    #[test]
+    fn logical_control_flow_getitem_keeps_contract_shape() {
+        clear_shape_cache();
+
+        let mut graph = Graph::new();
+        let cond = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::CondIf,
+            smallvec![],
+            Vec::new(),
+            meta(&[1, 2, 2, 1], DType::Float32),
+            "cond".to_string(),
+        );
+        let mut getitem_meta = meta(&[1, 1, 2, 2], DType::Float32);
+        getitem_meta.tosa_dim_order = Some(smallvec![0, 1, 2, 3]);
+        getitem_meta.retab_logical_layout_boundary = true;
+        let getitem = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::Other("<built-in function getitem>".to_string()),
+            smallvec![Arg::Node(cond), Arg::Int(0)],
+            Vec::new(),
+            getitem_meta,
+            "getitem".to_string(),
+        );
+
+        let store = TensorStore::default();
+        let getitem_node = graph.node(getitem).expect("getitem node");
+        assert_eq!(
+            actual_tensor_shape(&graph, &store, getitem_node),
+            vec![1, 1, 2, 2]
+        );
+    }
+
+    #[test]
+    fn scalar_dim_reduction_shape_matches_emitted_axis() {
+        clear_shape_cache();
+
+        let mut graph = Graph::new();
+        let mut input_meta = meta(&[1, 16, 16, 16], DType::Bool);
+        input_meta.tosa_dim_order = Some(smallvec![0, 2, 3, 1]);
+        let input = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::LogicalNot,
+            smallvec![],
+            Vec::new(),
+            input_meta,
+            "mask".to_string(),
+        );
+
+        let mut any_meta = meta(&[1, 16, 16, 1], DType::Bool);
+        any_meta.tosa_dim_order = Some(smallvec![0, 2, 3, 1]);
+        let any = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::Any,
+            smallvec![Arg::Node(input), Arg::Int(3), Arg::Bool(true)],
+            Vec::new(),
+            any_meta,
+            "mask_any".to_string(),
+        );
+
+        let store = TensorStore::default();
+        let any_node = graph.node(any).expect("any node");
+        assert_eq!(
+            actual_tensor_shape(&graph, &store, any_node),
+            vec![1, 16, 1, 16]
+        );
+    }
+
+    #[test]
+    fn qdq_passthrough_does_not_remap_reduction_axes_from_stale_dim_order() {
+        clear_shape_cache();
+
+        let mut graph = Graph::new();
+        let input = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Relu,
+            smallvec![],
+            Vec::new(),
+            meta(&[4, 1, 4, 1024], DType::Int32),
+            "grouped".to_string(),
+        );
+        let mut rescale_meta = meta(&[4, 1, 4, 1024], DType::Int32);
+        rescale_meta.tosa_dim_order = Some(smallvec![0, 2, 3, 1]);
+        let rescale = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::TosaRescale,
+            smallvec![Arg::Node(input)],
+            Vec::new(),
+            rescale_meta,
+            "grouped_rescale".to_string(),
+        );
+        let sum = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::Sum,
+            smallvec![
+                Arg::Node(rescale),
+                Arg::IntList(smallvec![3, 2]),
+                Arg::Bool(true)
+            ],
+            Vec::new(),
+            meta(&[4, 1, 1, 1], DType::Int32),
+            "grouped_sum".to_string(),
+        );
+
+        let store = TensorStore::default();
+        let sum_node = graph.node(sum).expect("sum node");
+        assert_eq!(
+            actual_tensor_shape(&graph, &store, sum_node),
+            vec![4, 1, 1, 1]
+        );
+    }
+
+    #[test]
+    fn mapped_axis_falls_back_to_raw_axis_with_remaining_extent() {
+        assert_eq!(mapped_axis_for_current_shape(2, 1, &[4, 1, 4, 1]), 2);
+        assert_eq!(mapped_axis_for_current_shape(2, 1, &[4, 4, 1, 1]), 1);
     }
 }

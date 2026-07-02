@@ -41,6 +41,9 @@ fn compute_rescaled_input_scales(kind: Int32OpKind, scales: &[f64], dtypes: &[DT
             vec![min_scale; scales.len()]
         }
         Int32OpKind::AddSub => {
+            if dtypes.iter().all(|dtype| *dtype == DType::Int32) {
+                return scales.to_vec();
+            }
             let max_scale = scales.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             let is_int16 = dtypes.first() == Some(&DType::Int16);
             let shift_bits: u32 = if is_int16 { 12 } else { 20 };
@@ -90,6 +93,53 @@ fn producer_old_zero_point(graph: &IrGraph, producer_id: NodeId, fallback_zp: i6
     }
 }
 
+fn input_qparam_with_producer_domains(
+    graph: &IrGraph,
+    node: &crate::fx_ir::IrNode,
+) -> Vec<(usize, QParam)> {
+    node.meta
+        .sorted_input_qparams()
+        .into_iter()
+        .map(|(pos, qparam)| {
+            let producer_qparam = node
+                .args
+                .get(pos)
+                .and_then(IrArg::as_node)
+                .filter(|&source_id| should_preserve_int32_edge(graph, source_id, &qparam))
+                .and_then(|source_id| graph.node(source_id).meta.output_qparam())
+                .filter(|producer_qparam| producer_qparam.dtype() == DType::Int32)
+                .cloned();
+            (pos, producer_qparam.unwrap_or(qparam))
+        })
+        .collect()
+}
+
+fn same_int32_domain(qparam: &QParam, scale: f64) -> bool {
+    qparam.dtype() == DType::Int32 && qparam.zp == 0 && (qparam.scale - scale).abs() <= f64::EPSILON
+}
+
+fn should_preserve_int32_edge(_graph: &IrGraph, _source_id: NodeId, edge_qparam: &QParam) -> bool {
+    edge_qparam.dtype() == DType::Int32
+}
+
+fn arithmetic_user_expects_int32_source(
+    graph: &IrGraph,
+    user_id: NodeId,
+    source_id: NodeId,
+) -> bool {
+    let user = graph.node(user_id);
+    if user.op != NodeOp::CallFunction || classify_int32_op(&user.target).is_none() {
+        return false;
+    }
+    user.args.iter().enumerate().any(|(arg_idx, arg)| {
+        arg.contains_node(source_id)
+            && user
+                .meta
+                .input_qparam_at(arg_idx)
+                .is_some_and(|qparam| should_preserve_int32_edge(graph, source_id, qparam))
+    })
+}
+
 fn insert_input_rescale(
     graph: &mut IrGraph,
     consumer_id: NodeId,
@@ -130,7 +180,11 @@ fn insert_output_rescale(
     if output_qparam.scale == 0.0 || !output_qparam.is_quantized_integer_dtype() {
         return false;
     }
-    let users = graph.live_user_ids(source_id);
+    let users: Vec<NodeId> = graph
+        .live_user_ids(source_id)
+        .into_iter()
+        .filter(|&user_id| !arithmetic_user_expects_int32_source(graph, user_id, source_id))
+        .collect();
     if users.is_empty() {
         return false;
     }
@@ -154,7 +208,9 @@ fn insert_output_rescale(
             meta,
         ))
     };
-    graph.replace_live_uses_except(source_id, rescale, rescale);
+    for user_id in users {
+        graph.replace_input_use(user_id, source_id, rescale);
+    }
     true
 }
 
@@ -167,7 +223,7 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
         return false;
     };
 
-    let input_qparams = node.meta.sorted_input_qparams();
+    let input_qparams = input_qparam_with_producer_domains(graph, &node);
     if input_qparams.is_empty()
         || !input_qparams
             .iter()
@@ -200,6 +256,9 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
         if !seen_sources.insert(source_id) {
             continue;
         }
+        if same_int32_domain(qparam, rescaled_scales[key_idx]) {
+            continue;
+        }
         let old_zp = producer_old_zero_point(graph, source_id, zps[key_idx]);
         insert_input_rescale(
             graph,
@@ -213,9 +272,7 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
         rescaled_inputs = true;
     }
 
-    if !rescaled_inputs {
-        return false;
-    }
+    let mut modified = rescaled_inputs;
 
     graph.node_mut(node_id).meta.set_input_qparams_from(
         input_qparams
@@ -226,14 +283,14 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
 
     if let Some(output_int32_scale) = output_int32_scale {
         if let Some(output_qparam) = node.meta.output_qparam().cloned() {
-            if insert_output_rescale(graph, node_id, output_int32_scale, output_qparam) {
-                graph
-                    .node_mut(node_id)
-                    .meta
-                    .set_single_output_qparam(int32_qparam(output_int32_scale));
-                if graph.node(node_id).kwargs.contains_key("dtype") {
-                    graph.set_kwarg(node_id, "dtype", IrArg::Dtype("torch.int32".to_string()));
-                }
+            insert_output_rescale(graph, node_id, output_int32_scale, output_qparam);
+            graph
+                .node_mut(node_id)
+                .meta
+                .set_single_output_qparam(int32_qparam(output_int32_scale));
+            modified = true;
+            if graph.node(node_id).kwargs.contains_key("dtype") {
+                graph.set_kwarg(node_id, "dtype", IrArg::Dtype("torch.int32".to_string()));
             }
         }
     }
@@ -243,9 +300,10 @@ fn insert_int32_rescales_for_node(graph: &mut IrGraph, node_id: NodeId) -> bool 
             .node_mut(node_id)
             .meta
             .set_val_dtype_for_existing_shape("torch.int32");
+        modified = true;
     }
 
-    true
+    modified
 }
 
 fn insert_where_output_rescale(graph: &mut IrGraph, node_id: NodeId) -> bool {
@@ -394,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn rescales_int32_add_inputs_and_output() {
+    fn keeps_int32_add_inputs_direct_and_rescales_output() {
         let mut graph = IrGraph::empty();
         let lhs = placeholder(&mut graph, "lhs", [2], "torch.int32");
         let rhs = placeholder(&mut graph, "rhs", [2], "torch.int32");
@@ -417,13 +475,105 @@ mod tests {
 
         let add_node = graph.node(add);
         assert_eq!(add_node.meta.val_dtype(), Some("torch.int32"));
-        assert!(matches!(add_node.args[0], IrArg::Node(id) if graph.node(id).is_rescale()));
-        assert!(matches!(add_node.args[1], IrArg::Node(id) if graph.node(id).is_rescale()));
+        assert!(matches!(add_node.args[0], IrArg::Node(id) if id == lhs));
+        assert!(matches!(add_node.args[1], IrArg::Node(id) if id == rhs));
 
         let output = graph.by_name("add_output_rescale").unwrap();
         assert!(matches!(output.args[0], IrArg::Node(id) if id == add));
         assert!(matches!(output.args[1], IrArg::Dtype(ref dtype) if dtype == "torch.int32"));
         assert!(matches!(graph.node(user).args[0], IrArg::Node(id) if id == output.id));
+    }
+
+    #[test]
+    fn keeps_int32_arithmetic_users_on_unquantized_output() {
+        let mut graph = IrGraph::empty();
+        let lhs = placeholder(&mut graph, "lhs", [2], "torch.int8");
+        let rhs = placeholder(&mut graph, "rhs", [2], "torch.int8");
+        let mut add_meta = NodeMeta::tensor(&[2], "torch.int8");
+        add_meta.set_binary_input_output_qparams(
+            qparam(0.25, 3, "torch.int8"),
+            qparam(0.5, -4, "torch.int8"),
+            qparam(0.125, 7, "torch.int8"),
+        );
+        let add = call(
+            &mut graph,
+            "add",
+            "aten.add.Tensor",
+            vec![IrArg::Node(lhs), IrArg::Node(rhs)],
+            add_meta,
+        );
+        let quantized_user = view_user(&mut graph, add, "torch.int8");
+
+        let skip = placeholder(&mut graph, "skip", [2], "torch.int8");
+        let mut later_meta = NodeMeta::tensor(&[2], "torch.int8");
+        later_meta.set_binary_input_output_qparams(
+            int32_qparam(0.125),
+            qparam(0.25, 3, "torch.int8"),
+            qparam(0.5, -4, "torch.int8"),
+        );
+        let later_add = call(
+            &mut graph,
+            "later",
+            "aten.add.Tensor",
+            vec![IrArg::Node(add), IrArg::Node(skip)],
+            later_meta,
+        );
+
+        assert!(IrInsertInt32RescalePass.run(&mut graph));
+
+        let output = graph.by_name("add_output_rescale").unwrap();
+        assert!(matches!(graph.node(quantized_user).args[0], IrArg::Node(id) if id == output.id));
+
+        let later_arg0 = graph.by_name("later_arg0_int32_rescale").unwrap();
+        assert!(matches!(later_arg0.args[0], IrArg::Node(id) if id == add));
+        assert!(matches!(graph.node(later_add).args[0], IrArg::Node(id) if id == later_arg0.id));
+    }
+
+    #[test]
+    fn restamps_int32_output_without_quantized_users() {
+        let mut graph = IrGraph::empty();
+        let lhs = placeholder(&mut graph, "lhs", [2], "torch.int8");
+        let rhs = placeholder(&mut graph, "rhs", [2], "torch.int8");
+        let mut mul_meta = NodeMeta::tensor(&[2], "torch.int8");
+        mul_meta.set_binary_input_output_qparams(
+            qparam(0.25, 3, "torch.int8"),
+            qparam(0.5, -4, "torch.int8"),
+            qparam(0.125, 7, "torch.int8"),
+        );
+        let mul = call(
+            &mut graph,
+            "mul",
+            "aten.mul.Tensor",
+            vec![IrArg::Node(lhs), IrArg::Node(rhs)],
+            mul_meta,
+        );
+
+        let skip = placeholder(&mut graph, "skip", [2], "torch.int8");
+        let mut later_meta = NodeMeta::tensor(&[2], "torch.int8");
+        later_meta.set_binary_input_output_qparams(
+            int32_qparam(0.125),
+            qparam(0.25, 3, "torch.int8"),
+            qparam(0.5, -4, "torch.int8"),
+        );
+        let later_add = call(
+            &mut graph,
+            "later",
+            "aten.add.Tensor",
+            vec![IrArg::Node(mul), IrArg::Node(skip)],
+            later_meta,
+        );
+
+        assert!(IrInsertInt32RescalePass.run(&mut graph));
+
+        assert!(graph.by_name("mul_output_rescale").is_none());
+        assert_eq!(graph.node(mul).meta.val_dtype(), Some("torch.int32"));
+        assert_eq!(
+            graph.node(mul).meta.output_qparam().unwrap().dtype_str,
+            "torch.int32"
+        );
+        let later_arg0 = graph.by_name("later_arg0_int32_rescale").unwrap();
+        assert!(matches!(later_arg0.args[0], IrArg::Node(id) if id == mul));
+        assert!(matches!(graph.node(later_add).args[0], IrArg::Node(id) if id == later_arg0.id));
     }
 
     #[test]

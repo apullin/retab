@@ -611,6 +611,9 @@ pub(super) fn emit_resize(ctx: &EmitContext) -> EmitResult {
 pub(super) fn emit_aten_permute(ctx: &EmitContext) -> EmitResult {
     let spec = ParsedShapeTransformSpec::parse(ctx.graph, ctx.store, ctx.node);
     let perms = ctx.arg_i32_list(1);
+    if is_identity_permutation(&perms) {
+        return ctx.emit_identity();
+    }
     emit_shape_transform(
         spec,
         Op::Transpose,
@@ -671,6 +674,7 @@ fn emit_tile_with_multiples(
     input_node: &Node,
     multiples: Vec<i32>,
     tile_rank: usize,
+    align_equal_rank_layout: bool,
 ) -> EmitResult {
     let mut result = EmitResult::default();
     let input_shape = actual_tensor_shape(graph, store, input_node);
@@ -681,7 +685,10 @@ fn emit_tile_with_multiples(
     let mut tile_multiples = multiples;
     let mut tile_input_name = input_name;
     let mut tile_input_shape = input_shape.clone();
+    let mut rank_padded = false;
+    let input_dtype = actual_tensor_dtype(graph, input_node);
     if input_shape.len() < tile_rank {
+        rank_padded = true;
         let mut padded_input_shape = vec![1; tile_rank - input_shape.len()];
         padded_input_shape.extend(input_shape.iter().copied());
 
@@ -696,20 +703,24 @@ fn emit_tile_with_multiples(
             make_empty_tensor(
                 reshaped_name.clone(),
                 padded_input_shape.clone(),
-                actual_tensor_dtype(graph, input_node),
+                input_dtype,
             ),
             Op::Reshape,
             Attribute::Reshape(ReshapeAttribute {}),
             vec![tile_input_name, reshape_shape_name],
         );
+        tile_input_name = reshaped_name;
+        tile_input_shape = padded_input_shape;
+    }
 
+    if rank_padded || align_equal_rank_layout {
         let (name, shape, mults) = maybe_insert_transpose(
             &mut result,
             node,
-            &padded_input_shape,
-            reshaped_name,
+            &tile_input_shape,
+            tile_input_name,
             tile_multiples,
-            actual_tensor_dtype(graph, input_node),
+            input_dtype,
         );
         tile_input_name = name;
         tile_input_shape = shape;
@@ -757,7 +768,7 @@ fn emit_tile_like(
     };
     let tile_rank = multiples.len();
     emit_tile_with_multiples(
-        graph, node, store, input_name, input_node, multiples, tile_rank,
+        graph, node, store, input_name, input_node, multiples, tile_rank, false,
     )
 }
 
@@ -775,16 +786,22 @@ pub(super) fn emit_expand(ctx: &EmitContext) -> EmitResult {
         return EmitResult::default();
     };
 
-    let raw_input_shape = raw_i32_shape(input_node);
     let raw_output_shape = raw_i32_shape(node);
+    let raw_input_shape = raw_i32_shape(input_node);
     let input_shape = actual_tensor_shape(graph, store, input_node);
 
-    // Compute multiples in logical (pre-transpose) order so that
-    // emit_tile_with_multiples can permute them during transpose.
-    let target_shape = if raw_input_shape.len() == raw_output_shape.len() {
-        actual_tensor_shape(graph, store, node)
+    let input_is_layout_boundary = input_node.target == OpTarget::TosaTranspose
+        && (input_node.name.ends_with("_input_layout")
+            || input_node.name.ends_with("_output_layout"));
+    let input_is_physical_equal_rank = input_shape.len() == raw_output_shape.len()
+        && (input_is_layout_boundary || input_shape != raw_input_shape);
+
+    let (target_shape, align_equal_rank_layout) = if input_is_physical_equal_rank {
+        (actual_tensor_shape(graph, store, node), false)
     } else {
-        raw_output_shape
+        // Compute multiples in logical (pre-transpose) order so that the shared
+        // tile emitter can apply `tosa_dim_order` exactly once.
+        (raw_output_shape, true)
     };
     if target_shape.is_empty() {
         return EmitResult::default();
@@ -815,7 +832,14 @@ pub(super) fn emit_expand(ctx: &EmitContext) -> EmitResult {
         .collect();
 
     emit_tile_with_multiples(
-        graph, node, store, input_name, input_node, multiples, tile_rank,
+        graph,
+        node,
+        store,
+        input_name,
+        input_node,
+        multiples,
+        tile_rank,
+        align_equal_rank_layout,
     )
 }
 
@@ -868,13 +892,78 @@ pub(super) fn emit_transpose(ctx: &EmitContext) -> EmitResult {
     let store = ctx.store;
     let mut spec = ParsedShapeTransformSpec::parse(graph, store, node);
     spec.output_shape = transposed_tensor_shape(graph, store, node).unwrap_or(spec.output_shape);
+    let perms = transpose_perms(node);
+    if is_identity_permutation(&perms) {
+        return ctx.emit_identity();
+    }
+    if let Some(input_node) = first_input_node(graph, node) {
+        let input_shape = actual_tensor_shape(graph, store, input_node);
+        if transpose_only_moves_unit_axes(&input_shape, &perms) {
+            let mut result = EmitResult::default();
+            push_reshape_with_shape(
+                &mut result,
+                spec.input_names[0].clone(),
+                spec.output_name,
+                format!("{}_shape", node.name),
+                spec.output_shape,
+                spec.output_dtype,
+            );
+            return result;
+        }
+    }
     emit_shape_transform(
         spec,
         Op::Transpose,
-        Attribute::Transpose(TransposeAttribute {
-            perms: transpose_perms(node),
-        }),
+        Attribute::Transpose(TransposeAttribute { perms }),
     )
+}
+
+fn is_identity_permutation(perms: &[i32]) -> bool {
+    perms
+        .iter()
+        .enumerate()
+        .all(|(axis, &permuted)| usize::try_from(permuted).ok() == Some(axis))
+}
+
+fn transpose_only_moves_unit_axes(input_shape: &[i32], perms: &[i32]) -> bool {
+    if input_shape.len() != perms.len() {
+        return false;
+    }
+
+    let non_unit_axes = input_shape
+        .iter()
+        .enumerate()
+        .filter_map(|(axis, dim)| (*dim != 1).then_some(axis));
+    let permuted_non_unit_axes = perms.iter().filter_map(|axis| {
+        let axis = usize::try_from(*axis).ok()?;
+        input_shape
+            .get(axis)
+            .and_then(|dim| (*dim != 1).then_some(axis))
+    });
+
+    non_unit_axes.eq(permuted_non_unit_axes)
+}
+
+fn is_explicit_layout_boundary(node: &Node) -> bool {
+    node.target == OpTarget::TosaTranspose
+        && (node.name.ends_with("_input_layout") || node.name.ends_with("_output_layout"))
+}
+
+fn is_pool_rank_drop_input(graph: &Graph, node: &Node) -> bool {
+    let source = if is_getitem_node(node) {
+        first_input_node(graph, node).unwrap_or(node)
+    } else {
+        node
+    };
+    op_semantics::is_avg_pool(&source.target) || op_semantics::is_max_pool(&source.target)
+}
+
+fn layout_metadata_source<'a>(graph: &'a Graph, node: &'a Node) -> &'a Node {
+    if is_getitem_node(node) {
+        first_input_node(graph, node).unwrap_or(node)
+    } else {
+        node
+    }
 }
 
 pub(super) fn emit_reshape(ctx: &EmitContext) -> EmitResult {
@@ -889,12 +978,65 @@ pub(super) fn emit_reshape(ctx: &EmitContext) -> EmitResult {
 
     if let Some(input_node) = first_input_node(graph, node) {
         let input_shape = actual_tensor_shape(graph, store, input_node);
-        let needs_avgpool_rank_drop_fix = out_shape.len() == 3
+        let layout_source = layout_metadata_source(graph, input_node);
+        let raw_input_shape = raw_i32_shape(layout_source);
+        if out_shape.len() >= input_shape.len()
+            && !node.meta.retab_preserve_spatial_rank
+            && !is_explicit_layout_boundary(input_node)
+            && input_shape.len() == raw_input_shape.len()
+            && input_shape != raw_input_shape
+            && input_shape.iter().product::<i32>() == raw_input_shape.iter().product::<i32>()
+        {
+            let mut inverse_orders = Vec::new();
+            if let Some(perms) = layout_source
+                .meta
+                .tosa_dim_order
+                .as_ref()
+                .and_then(|order| inverse_tosa_dim_order(order))
+            {
+                inverse_orders.push(perms);
+            }
+            if let Some(perms) =
+                channel_last_order(input_shape.len()).and_then(|order| inverse_permutation(&order))
+            {
+                if !inverse_orders.iter().any(|existing| existing == &perms) {
+                    inverse_orders.push(perms);
+                }
+            }
+            for perms in inverse_orders {
+                if permute_shape(&input_shape, &perms).as_deref()
+                    == Some(raw_input_shape.as_slice())
+                {
+                    let transpose_name = format!("{}_pre_reshape_input_layout", node.name);
+                    result.push_output_op(
+                        make_empty_tensor(
+                            transpose_name.clone(),
+                            raw_input_shape.clone(),
+                            output_dtype,
+                        ),
+                        Op::Transpose,
+                        Attribute::Transpose(TransposeAttribute { perms }),
+                        input_names.clone(),
+                    );
+                    push_reshape_with_shape(
+                        &mut result,
+                        transpose_name,
+                        output_name,
+                        format!("{}_shape", node.name),
+                        out_shape,
+                        output_dtype,
+                    );
+                    return result;
+                }
+            }
+        }
+
+        let needs_pool_rank_drop_fix = out_shape.len() == 3
             && input_shape.len() == 4
             && (input_shape.get(1) == Some(&1) || input_shape.get(2) == Some(&1))
-            && op_semantics::is_avg_pool(&input_node.target);
+            && is_pool_rank_drop_input(graph, input_node);
 
-        if needs_avgpool_rank_drop_fix {
+        if needs_pool_rank_drop_fix {
             let transpose_name = format!("{}_pre_reshape_nchw", node.name);
             let transpose_shape = vec![
                 input_shape[0],
@@ -940,7 +1082,7 @@ pub(super) fn emit_concat(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;
     let mut result = EmitResult::default();
-    let input_names = ctx.input_names();
+    let mut input_names = ctx.input_names();
     let raw_axis = match node.args.get(1) {
         Some(Arg::Int(axis)) => *axis as i32,
         _ => kwarg_i32(node, "axis", 0),
@@ -980,11 +1122,78 @@ pub(super) fn emit_concat(ctx: &EmitContext) -> EmitResult {
             }
         }
     }
+    let output_tensor = make_output_tensor(node);
+    let output_shape = output_tensor.shape.clone();
+    let input_nodes: Vec<&Node> = match node.args.first() {
+        Some(Arg::Node(input_id)) => graph.node(*input_id).into_iter().collect(),
+        Some(Arg::NodeList(ids)) => ids.iter().filter_map(|id| graph.node(*id)).collect(),
+        _ => Vec::new(),
+    };
+    for (idx, input_node) in input_nodes.iter().enumerate().take(input_names.len()) {
+        let input_shape = actual_tensor_shape(graph, ctx.store, input_node);
+        if concat_shape_matches_output(&input_shape, &output_shape, axis as usize) {
+            continue;
+        }
+        let Some((layout_shape, perms)) =
+            concat_input_layout_transform(&input_shape, &output_shape, axis as usize, node)
+        else {
+            continue;
+        };
+        let layout_name = format!("{}_input{}_layout", node.name, idx);
+        result.push_output_op(
+            make_empty_tensor(
+                layout_name.clone(),
+                layout_shape,
+                actual_tensor_dtype(graph, input_node),
+            ),
+            Op::Transpose,
+            Attribute::Transpose(TransposeAttribute { perms }),
+            vec![input_names[idx].clone()],
+        );
+        input_names[idx] = layout_name;
+    }
     result.push_output_op(
-        make_output_tensor(node),
+        output_tensor,
         Op::Concat,
         Attribute::Concat(ConcatAttribute { axis }),
         input_names,
     );
     result
+}
+
+fn concat_shape_matches_output(shape: &[i32], output_shape: &[i32], axis: usize) -> bool {
+    shape.len() == output_shape.len()
+        && shape
+            .iter()
+            .zip(output_shape.iter())
+            .enumerate()
+            .all(|(idx, (&dim, &out_dim))| idx == axis || dim == out_dim)
+}
+
+fn concat_input_layout_transform(
+    input_shape: &[i32],
+    output_shape: &[i32],
+    axis: usize,
+    node: &Node,
+) -> Option<(Vec<i32>, Vec<i32>)> {
+    let mut orders = Vec::new();
+    if let Some(order) = node.meta.tosa_dim_order.as_ref() {
+        orders.push(order.iter().map(|&axis| axis as i32).collect::<Vec<_>>());
+    }
+    if let Some(order) = channel_last_order(input_shape.len()) {
+        if !orders.iter().any(|existing| existing == &order) {
+            orders.push(order);
+        }
+    }
+
+    for perms in orders {
+        let Some(shape) = permute_shape(input_shape, &perms) else {
+            continue;
+        };
+        if concat_shape_matches_output(&shape, output_shape, axis) {
+            return Some((shape, perms));
+        }
+    }
+
+    None
 }

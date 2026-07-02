@@ -236,6 +236,7 @@ impl DType {
             s if s.contains("float32") => DType::Float32,
             s if s.contains("bfloat16") => DType::BFloat16,
             s if s.contains("float16") => DType::Float16,
+            s if s.contains("uint8") => DType::Int8,
             s if s.contains("int8") => DType::Int8,
             s if s.contains("int16") => DType::Int16,
             s if s.contains("int32") => DType::Int32,
@@ -349,6 +350,7 @@ mod tests {
         assert_eq!(DType::Int48.storage_size_bytes(), 6);
         assert_eq!(DType::Float8E4M3.torch_str(), "torch.float8_e4m3fn");
         assert!(!DType::torch_str_is_float_like("torch.int8"));
+        assert_eq!(DType::from_torch_str("torch.uint8"), DType::Int8);
 
         assert_eq!(DType::Int8.quantized_integer_bounds(), Some((-128, 127)));
         assert_eq!(
@@ -481,6 +483,9 @@ pub struct NodeMeta {
     pub tosa_dim_order: Option<SmallVec<[u8; 6]>>,
     pub tosa_special_dtype: Option<DType>,
     pub arm_control_flow_parent_output_user: bool,
+    pub retab_logical_layout_boundary: bool,
+    pub retab_preserve_spatial_rank: bool,
+    pub retab_reduce_axes_are_physical: bool,
     pub preserve_scalar_shape: bool,
 }
 
@@ -493,6 +498,9 @@ impl NodeMeta {
             tosa_dim_order: None,
             tosa_special_dtype: None,
             arm_control_flow_parent_output_user: false,
+            retab_logical_layout_boundary: false,
+            retab_preserve_spatial_rank: false,
+            retab_reduce_axes_are_physical: false,
             preserve_scalar_shape: false,
         }
     }

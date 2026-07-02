@@ -31,8 +31,12 @@ from torch.export.exported_program import ExportedProgram
 from retab._cf_ctx import _collect_delegate_info_meta
 from retab._decomp_hooks import (
     _install_edge_decomp_fast_path,
+    _install_memory_format_fast_path,
+    _install_op_replace_fast_path,
     _install_run_decomp_fast_path,
     _uninstall_edge_decomp_fast_path,
+    _uninstall_memory_format_fast_path,
+    _uninstall_op_replace_fast_path,
     _uninstall_run_decomp_fast_path,
 )
 
@@ -82,16 +86,6 @@ def _run_control_flow_submodule_rust_passes(
         _run_control_flow_submodule_rust_passes(
             submodule, edge_program, retab, region_name
         )
-
-
-def _merge_preprocess_state_dict(original_state_dict, edge_program):
-    import copy
-
-    merged_state_dict = original_state_dict
-    for key, value in dict(edge_program.state_dict).items():
-        if key not in merged_state_dict:
-            merged_state_dict[key] = copy.deepcopy(value)
-    return merged_state_dict
 
 
 def _sync_input_specs_to_placeholder_order(edge_program: ExportedProgram) -> None:
@@ -313,7 +307,7 @@ def _iter_parallel_multimethod_backends():
     from executorch.backends.arm.ethosu.backend import EthosUBackend
     from executorch.backends.arm.ethosu.compile_spec import EthosUCompileSpec
 
-    yield EthosUBackend, EthosUCompileSpec.from_list
+    yield EthosUBackend, _compile_spec_from_list_parser(EthosUCompileSpec)
 
     try:
         from executorch.backends.arm.vgf.backend import VgfBackend
@@ -321,7 +315,14 @@ def _iter_parallel_multimethod_backends():
     except ImportError:
         return
 
-    yield VgfBackend, VgfCompileSpec.from_list
+    yield VgfBackend, _compile_spec_from_list_parser(VgfCompileSpec)
+
+
+def _compile_spec_from_list_parser(compile_spec_cls):
+    parser = getattr(compile_spec_cls, "from_list", None)
+    if parser is not None:
+        return parser
+    return getattr(compile_spec_cls, "_from_list")
 
 
 def _install_parallel_backend_preprocess_multimethods() -> bool:
@@ -385,16 +386,8 @@ def _all_rust_preprocess(
     (which would re-run the full IR pass pipeline on top of the already-
     transformed graph, causing double rescales, double transposes, etc.).
     """
-    import copy
     t0 = time.perf_counter()
     gm = edge_program.graph_module
-
-    # Deep-copy the state_dict BEFORE passes run, because some FX-direct
-    # passes (e.g. RewriteConv) may mutate ep.state_dict in-place.
-    # We want the original (un-mutated) weight data for pre-existing tensors,
-    # but we still need to ingest any new constant placeholders created by the
-    # FX passes later in the pipeline.
-    original_state_dict = copy.deepcopy(dict(edge_program.state_dict))
 
     from retab import _native as _rust
 
@@ -403,9 +396,8 @@ def _all_rust_preprocess(
     t_passes = time.perf_counter() - t0
     _sync_input_specs_to_placeholder_order(edge_program)
 
-    merged_state_dict = _merge_preprocess_state_dict(original_state_dict, edge_program)
     tosa_bytes = _rust.ingest_and_serialize(
-        gm, merged_state_dict, edge_program.graph_signature, edge_program
+        gm, edge_program.state_dict, edge_program.graph_signature, edge_program
     )
 
     _maybe_dump_tosa_artifacts(edge_program, _compile_spec, tosa_bytes)
@@ -460,8 +452,13 @@ def patch_tosa_backend():
     """
     from executorch.backends.arm.tosa.backend import TOSABackend
 
-    _install_edge_decomp_fast_path()
-    _install_run_decomp_fast_path()
+    if os.environ.get("RETAB_DISABLE_DECOMP_HOOKS") != "1":
+        _install_edge_decomp_fast_path()
+        if os.environ.get("RETAB_DISABLE_OP_REPLACE_FAST_PATH") != "1":
+            _install_op_replace_fast_path()
+        if os.environ.get("RETAB_ENABLE_MEMORY_FORMAT_FAST_PATH") == "1":
+            _install_memory_format_fast_path()
+        _install_run_decomp_fast_path()
 
     if _install_backend_preprocess_override():
         _install_parallel_backend_preprocess_multimethods()
@@ -480,6 +477,8 @@ def unpatch_tosa_backend():
     """Restore the original ExecuTorch Arm lowering path."""
 
     _uninstall_run_decomp_fast_path()
+    _uninstall_memory_format_fast_path()
+    _uninstall_op_replace_fast_path()
     _uninstall_edge_decomp_fast_path()
     _restore_parallel_backend_preprocess_multimethods()
 

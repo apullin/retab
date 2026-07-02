@@ -35,11 +35,12 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
     let node = ctx.node;
     let store = ctx.store;
     let mut result = EmitResult::default();
-    let input_shape = node
+    let input_node = node
         .args
         .first()
         .and_then(Arg::as_node)
-        .and_then(|id| graph.node(id))
+        .and_then(|id| graph.node(id));
+    let input_shape = input_node
         .map(|input_node| actual_tensor_shape(graph, store, input_node))
         .unwrap_or_else(|| raw_i32_shape(node));
     let pad = arg_i32_list(node, 1);
@@ -59,6 +60,8 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
         }
     }
 
+    // Torch's pad widths are logical NCHW-order values; the PAD node carries
+    // the physical TOSA layout contract even when its input is a layout reshape.
     let dim_order = node.meta.tosa_dim_order.as_ref();
     let reordered_pad = if let Some(order) = dim_order {
         if order.len() == rank {
@@ -72,7 +75,6 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
     } else {
         per_dim_pad.clone()
     };
-
     let mut output_shape = input_shape.clone();
     for (i, (before, after)) in reordered_pad.iter().enumerate() {
         if let Some(slot) = output_shape.get_mut(i) {

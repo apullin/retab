@@ -1,11 +1,19 @@
 //! Pure Rust IrPass: select_scatter → arange + view + full + eq + unsqueeze + expand + where.
 
 use crate::fx_index_domain::{bool_stamp, int32_index_stamp, TOSA_INDEX_DTYPE};
-use crate::fx_ir::{i64_list_arg as i64_list, wrap_dim, IrArg, IrGraph, IrPass};
+use crate::fx_ir::{
+    i64_list_arg as i64_list, wrap_dim, IrArg, IrGraph, IrPass, MetaValue, NodeMeta,
+};
 use crate::fx_target::is_select_scatter_target;
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeSelectScatterPass;
+
+fn logical_layout_meta(mut meta: NodeMeta) -> NodeMeta {
+    meta.set_extra("retab_logical_layout_boundary", MetaValue::Bool(true));
+    meta.set_extra("retab_preserve_spatial_rank", MetaValue::Bool(true));
+    meta
+}
 
 impl IrPass for IrDecomposeSelectScatterPass {
     fn name(&self) -> &str {
@@ -77,7 +85,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 dim_size,
                 1,
                 TOSA_INDEX_DTYPE,
-                index_meta.preserve_qparams(vec![dim_size]),
+                logical_layout_meta(index_meta.preserve_qparams(vec![dim_size])),
             );
 
             // 2. view(arange, [1, ..., dim_size, ..., 1])
@@ -87,7 +95,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 format!("{}_arange_view", node_name),
                 arange_id,
                 &mask_shape,
-                index_meta.preserve_qparams(mask_shape.clone()),
+                logical_layout_meta(index_meta.preserve_qparams(mask_shape.clone())),
             );
 
             // 3. full([1], index, dtype=int32) - scalar index tensor
@@ -96,7 +104,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 &[1],
                 index,
                 TOSA_INDEX_DTYPE,
-                index_meta.preserve_qparams(vec![1]),
+                logical_layout_meta(index_meta.preserve_qparams(vec![1])),
             );
 
             // 4. eq(viewed_arange, index_tensor) -> boolean mask
@@ -104,7 +112,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 format!("{}_eq", node_name),
                 "aten.eq.Tensor",
                 vec![IrArg::Node(viewed_arange), IrArg::Node(index_tensor)],
-                bool_meta.preserve_qparams(mask_shape),
+                logical_layout_meta(bool_meta.preserve_qparams(mask_shape)),
             );
 
             // 5. unsqueeze(src, dim) - restore dimension that select removed
@@ -112,7 +120,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 format!("{}_unsqueeze", node_name),
                 "aten.unsqueeze_copy.default",
                 vec![IrArg::Node(src_id), IrArg::Int(dim_norm as i64)],
-                unsqueeze_meta,
+                logical_layout_meta(unsqueeze_meta),
             );
 
             // 6. expand(unsqueezed, input_shape)
@@ -120,7 +128,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                 format!("{}_expand", node_name),
                 "aten.expand_copy.default",
                 vec![IrArg::Node(unsqueeze_node), i64_list(&input_shape)],
-                expand_meta,
+                logical_layout_meta(expand_meta),
             );
 
             // 7. where(mask, expanded_src, input) -> result
@@ -132,7 +140,7 @@ impl IrPass for IrDecomposeSelectScatterPass {
                     IrArg::Node(expand_node),
                     IrArg::Node(input_id),
                 ],
-                orig_meta,
+                logical_layout_meta(orig_meta),
             );
             cursor.replace_anchor_with(result);
             modified = true;

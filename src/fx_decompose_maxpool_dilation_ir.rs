@@ -1,6 +1,6 @@
 //! Pure Rust IrPass: dilated max_pool2d → pad + space-to-batch + pool + batch-to-space + slice.
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta};
 use crate::fx_target::{is_max_pool2d_target, is_max_pool2d_with_indices_target};
 use crate::graph::ir::DType;
 use crate::runner_logging::log_line;
@@ -34,6 +34,12 @@ fn pad_value_for_dtype(dtype: &str) -> IrArg {
     } else {
         IrArg::Int(i32::MIN as i64)
     }
+}
+
+fn logical_layout_meta(mut meta: NodeMeta) -> NodeMeta {
+    meta.set_extra("retab_logical_layout_boundary", MetaValue::Bool(true));
+    meta.set_extra("retab_preserve_spatial_rank", MetaValue::Bool(true));
+    meta
 }
 
 pub struct IrDecomposeMaxPoolDilationPass;
@@ -130,6 +136,14 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                 let mut cursor = graph.rewrite_cursor(id);
 
                 // 1. constant_pad_nd(x, [pad_w, right_pad, pad_h, bottom_pad, 0,0,0,0], pad_val)
+                let mut pad_meta = meta.preserve_qparams(vec![
+                    n,
+                    c,
+                    h + pad_h + bottom_pad,
+                    w + pad_w + right_pad,
+                ]);
+                pad_meta.clear_output_qparams();
+                let pad_meta = logical_layout_meta(pad_meta);
                 let x_pad = cursor.call_function(
                     format!("{}_pad", node_name),
                     "aten.constant_pad_nd.default",
@@ -138,12 +152,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                         i64_list(&[pad_w, right_pad, pad_h, bottom_pad, 0, 0, 0, 0]),
                         pad_value_for_dtype(dtype),
                     ],
-                    meta.preserve_qparams(vec![
-                        n,
-                        c,
-                        h + pad_h + bottom_pad,
-                        w + pad_w + right_pad,
-                    ]),
+                    pad_meta,
                 );
 
                 // 2. view -> [N, C, h_pack, d_h, w_pack, d_w]
@@ -151,7 +160,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     format!("{}_pack_view", node_name),
                     x_pad,
                     &[n, c, h_pack, d_h, w_pack, d_w],
-                    meta.preserve_qparams(vec![n, c, h_pack, d_h, w_pack, d_w]),
+                    logical_layout_meta(meta.drop_qparams(vec![n, c, h_pack, d_h, w_pack, d_w])),
                 );
 
                 // 3. permute [3,5,0,1,2,4]
@@ -159,7 +168,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     format!("{}_pack_perm", node_name),
                     x_view,
                     &[3, 5, 0, 1, 2, 4],
-                    meta.preserve_qparams(vec![d_h, d_w, n, c, h_pack, w_pack]),
+                    logical_layout_meta(meta.drop_qparams(vec![d_h, d_w, n, c, h_pack, w_pack])),
                 );
 
                 // 4. view -> [N*d_h*d_w, C, h_pack, w_pack]
@@ -167,7 +176,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     format!("{}_batch", node_name),
                     x_perm,
                     &[n * d_h * d_w, c, h_pack, w_pack],
-                    meta.preserve_qparams(vec![n * d_h * d_w, c, h_pack, w_pack]),
+                    logical_layout_meta(meta.drop_qparams(vec![n * d_h * d_w, c, h_pack, w_pack])),
                 );
 
                 // 5. max_pool2d (non-dilated, zero padding)
@@ -192,7 +201,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     format!("{}_unpack", node_name),
                     pooled,
                     &[d_h, d_w, n, c, h_out, w_out],
-                    meta.preserve_qparams(vec![d_h, d_w, n, c, h_out, w_out]),
+                    logical_layout_meta(meta.drop_qparams(vec![d_h, d_w, n, c, h_out, w_out])),
                 );
 
                 // 7. permute [2,3,4,0,5,1]
@@ -200,7 +209,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     format!("{}_unperm", node_name),
                     unpack,
                     &[2, 3, 4, 0, 5, 1],
-                    meta.preserve_qparams(vec![n, c, h_out, d_h, w_out, d_w]),
+                    logical_layout_meta(meta.drop_qparams(vec![n, c, h_out, d_h, w_out, d_w])),
                 );
 
                 // 8. view -> [N, C, h_out*d_h, w_out*d_w]
@@ -208,7 +217,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     format!("{}_out_view", node_name),
                     unperm,
                     &[n, c, h_out * d_h, w_out * d_w],
-                    meta.preserve_qparams(vec![n, c, h_out * d_h, w_out * d_w]),
+                    logical_layout_meta(meta.drop_qparams(vec![n, c, h_out * d_h, w_out * d_w])),
                 );
 
                 // 9. slice H to h_final
@@ -219,7 +228,7 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     0,
                     h_final,
                     None,
-                    meta.preserve_qparams(vec![n, c, h_final, w_out * d_w]),
+                    logical_layout_meta(meta.preserve_qparams(vec![n, c, h_final, w_out * d_w])),
                 );
 
                 // 10. slice W to w_final
@@ -230,9 +239,12 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
                     0,
                     w_final,
                     None,
-                    meta.preserve_qparams(vec![n, c, h_final, w_final]),
+                    logical_layout_meta(meta.preserve_qparams(vec![n, c, h_final, w_final])),
                 )
             };
+            graph.nodes[result]
+                .meta
+                .set_extra("retab_force_logical_graph_output", MetaValue::Bool(true));
 
             if let Some(value_getitem) = value_getitem {
                 graph.replace_and_erase(value_getitem, result);

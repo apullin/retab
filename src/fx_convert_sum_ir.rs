@@ -47,7 +47,7 @@ impl IrPass for IrConvertSumPass {
                 .and_then(|a| a.as_bool())
                 .unwrap_or(false);
             let domain = ReductionDomain::from_arg(
-                input_shape,
+                input_shape.clone(),
                 graph.nodes[id].args.get(1),
                 keepdim,
                 false,
@@ -58,7 +58,18 @@ impl IrPass for IrConvertSumPass {
                 // Only multi-axis reductions need explicit decomposition.
                 continue;
             }
-            let steps = domain.chained_single_axis_steps();
+            let reduce_domain = if domain.keepdim() {
+                domain.clone()
+            } else {
+                ReductionDomain::from_arg(
+                    input_shape.clone(),
+                    graph.nodes[id].args.get(1),
+                    true,
+                    false,
+                    None,
+                )
+            };
+            let steps = reduce_domain.chained_single_axis_steps();
 
             let orig_name = graph.nodes[id].name.clone();
             let orig_meta = graph.nodes[id].meta.clone();
@@ -70,16 +81,20 @@ impl IrPass for IrConvertSumPass {
             let mut cursor = graph.rewrite_cursor(id);
 
             for (index, step) in steps.iter().enumerate() {
-                // Build args: (current_input, [dim], keepdim)
+                // TOSA reductions keep rank; apply the optional rank-drop once
+                // at the end so each single-axis step remains layout-stable.
                 let reduce_id = cursor.call_function(
                     format!("{}_reduce_dim{}", orig_name, step.dim),
                     "aten.sum.dim_IntList",
                     vec![
                         IrArg::Node(current_input),
                         IrArg::List(vec![IrArg::Int(step.dim)]),
-                        IrArg::Bool(domain.keepdim()),
+                        IrArg::Bool(reduce_domain.keepdim()),
                     ],
-                    qparams.step_meta(&step.output_shape, index + 1 == steps.len()),
+                    qparams.step_meta(
+                        &step.output_shape,
+                        domain.keepdim() && index + 1 == steps.len(),
+                    ),
                 );
 
                 current_input = reduce_id;
@@ -88,7 +103,12 @@ impl IrPass for IrConvertSumPass {
 
             // Replace original node with the final chained reduce.
             if let Some(final_id) = last_reduce {
-                cursor.replace_anchor_with(final_id);
+                let replacement = if domain.keepdim() {
+                    final_id
+                } else {
+                    cursor.view_copy(orig_name, final_id, domain.output_shape(), orig_meta)
+                };
+                cursor.replace_anchor_with(replacement);
                 modified = true;
             }
         }

@@ -1,12 +1,15 @@
 # RETAB
 
-A Rust fast path for ExecuTorch's ARM backend preprocess stage.
+RETAB is a Rust implementation of ExecuTorch's ARM backend preprocess stage.
+It takes the quantized FX graph produced by ExecuTorch's ARM partitioner and
+emits the TOSA flatbuffer consumed by Vela for Ethos-U targets such as U55 and
+U85.
 
-Takes a quantized FX graph from ExecuTorch's ARM partitioner and produces
-the TOSA flatbuffer consumed by Vela.
-
-Current local benchmarking, artifact checks, and acceptance workflow are
-documented in [docs/FASTLANE_WORKFLOW.md](docs/FASTLANE_WORKFLOW.md).
+A substantial Python layer is also shipped. It creates the pluggable seam that
+lets RETAB replace the stock preprocess pipeline, and it supports integration,
+orchestration, patching, test harnesses, and compatibility glue. The replacement
+lowering engine itself lives in Rust: graph transformation, IR handling, and
+TOSA serialization.
 
 ## Pinned companion stack
 
@@ -33,9 +36,61 @@ ExecuTorch ARM pipeline:
                                          RETAB replaces this step
 ```
 
-The `_preprocess` step runs ~30 graph transformation passes and serializes
-to TOSA FlatBuffers. RETAB reimplements both in Rust (24k lines) with a
-Python orchestration layer (7k lines).
+The `_preprocess` step runs graph transformation passes and serializes to TOSA
+FlatBuffers. RETAB reimplements that lowering engine in Rust while preserving
+the ExecuTorch-facing Python API surface.
+
+## Benchmarks
+
+These are local U55 lowering measurements on the pinned companion stack above.
+They are intended as order-of-magnitude evidence, not a public benchmark suite.
+See [docs/BENCHMARK_REPORT.md](docs/BENCHMARK_REPORT.md) for command lines,
+methodology notes, and runtime validation details.
+
+Timing scope matters. RETAB replaces the backend preprocess/TOSA-generation
+slice, but most user-visible scripts measure a wider interval that can also
+include ExecuTorch graph machinery, partitioning, Vela compilation, and PTE
+packing. Quote both scopes separately.
+
+### Replaced Phase
+
+This isolates the `_preprocess` phase RETAB replaces.
+
+| Model | Stock Python `_preprocess` | RETAB `_preprocess` | Phase speedup |
+| --- | ---: | ---: | ---: |
+| `tiny_cnn` | `0.627s` | `0.066s` | `9.5x` |
+
+For the larger local N=34 packed-ensemble stress probe, the current repeated
+RETAB-owned `_preprocess` measurement is `0.704s ± 0.027s` over 10 samples
+after one-time delegate capture. That is the meaningful current number for the
+Rust replacement phase; the end-to-end interval around that model is dominated
+by export, quantization, partitioning, Vela/Regor, and PTE packing.
+
+### End-to-End Lowering
+
+This wider table measures the full ExecuTorch ARM lowering interval around a
+prepared quantized program: partitioning, backend preprocess, Vela, and PTE
+packing. The stock column is the baseline total process time without RETAB.
+Several rows are single-run public/synthetic model-family probes; see the
+benchmark report for exact methodology.
+
+| Model | Size / role | Stock Python ARM | RETAB | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| `tiny_cnn` | small smoke model | `1.401s` | `0.346s` | `4.05x` |
+| `resnet8` | small MLPerf Tiny CNN | `4.151s` | `0.758s` | `5.48x` |
+| `deep_autoencoder` | small MLP-style model | `3.822s` | `1.159s` | `3.30x` |
+| `vgg16_tiny` | VGG-shaped synthetic CNN | `5.279s` | `1.058s` | `4.99x` |
+| `ds_cnn` | small depthwise speech CNN | `4.090s` | `1.461s` | `2.80x` |
+| `resnet18_64` | medium residual CNN | `10.662s` | `3.993s` | `2.67x` |
+| `mobilenet_v2_96` | medium depthwise CNN | `17.452s` | `5.762s` | `3.03x` |
+| `mobilenet_v3_small` | medium real-model check | `19.581s` | `7.948s` | `2.46x` |
+| `densenet121` | large public fragmentation stress CNN | `68.319s` | `29.140s` | `2.34x` |
+
+Across the full six-model probe (`vgg16_tiny`, `mobilenet_v2_96`,
+`resnet18_64`, `resnet8`, `ds_cnn`, `deep_autoencoder`), RETAB and stock were
+byte-identical on FVP for 24/24 input cases. These common model families mostly
+matched stock's Vela SRAM and PTE size, which is the expected result for a
+semantics-preserving replacement backend.
 
 ## Validation
 
@@ -45,8 +100,8 @@ The maintained local validation contract is:
 - optional semantic comparison through the TOSA reference model
 - full Docker-backed direct ARM acceptance in ExecuTorch
 
-See [docs/FASTLANE_WORKFLOW.md](docs/FASTLANE_WORKFLOW.md) for the exact
-commands and current expected acceptance result.
+See [docs/DIRECT_LOWERING_WORKFLOW.md](docs/DIRECT_LOWERING_WORKFLOW.md) for
+the exact commands and current expected acceptance result.
 
 ## Quick start
 
@@ -143,8 +198,9 @@ SCCACHE_DISABLE=1 \
   ./.ci/scripts/run-arm-baremetal-docker-local.sh test_pytest_ops_tosa_direct_lower
 ```
 
-For the current direct fast-lane development workflow, including model probes
-and artifact checks, see [docs/FASTLANE_WORKFLOW.md](docs/FASTLANE_WORKFLOW.md).
+For the current direct lowering development workflow, including model probes
+and artifact checks, see
+[docs/DIRECT_LOWERING_WORKFLOW.md](docs/DIRECT_LOWERING_WORKFLOW.md).
 
 ### Python API
 
@@ -172,9 +228,9 @@ graphs.
 
 ```
 retab/
-├── src/                          # Rust (24k lines)
-│   ├── fx_*.rs                   # 47 FX graph passes (via PyO3)
-│   ├── serialize/visitors/       # 107 TOSA op emitters
+├── src/                          # Rust lowering engine
+│   ├── fx_*.rs                   # FX graph and IR passes
+│   ├── serialize/visitors/       # TOSA op emitters
 │   ├── serialize/mod.rs          # TOSA flatbuffer serialization
 │   └── ingest/                   # FX graph → Rust IR conversion
 ├── python/retab/                 # Python integration seam
@@ -182,11 +238,16 @@ retab/
 │   ├── _cf_ctx.py                # Control-flow delegate metadata reads
 │   └── _decomp_hooks.py          # Edge decomposition fast paths
 └── tests/
+    ├── sweep_direct_lowering.py  # Direct-lowering corpus probe
+    ├── compare_python_vs_direct_lowering.py
     ├── fuzz_models.py            # Random CNN generator + validation
     └── compare_pipelines.py      # Python-vs-Rust exact match test
 ```
 
 ### Key abstractions
+
+RETAB has converged on a few shared grammars for graph rewriting and
+serialization:
 
 - **`FxDecomposer`** — typed DSL for FX graph decompositions (25+ ops)
 - **`NodeInserter`** — fluent builder for FX node creation

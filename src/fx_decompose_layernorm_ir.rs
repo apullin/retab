@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta};
-use crate::fx_target::{is_layer_norm_target, layer_norm_param_view_target};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta};
+use crate::fx_target::{is_layer_norm_target, is_permute_target, layer_norm_param_view_target};
 use crate::runner_logging::log_line;
 
 fn first_output_user_meta(graph: &IrGraph, id: NodeId) -> Option<NodeMeta> {
@@ -28,6 +28,28 @@ fn replace_getitem_users(graph: &mut IrGraph, id: NodeId, replacement: NodeId) {
             graph.replace_and_erase(user, replacement);
         }
     }
+}
+
+fn channels_last_permute(rank: usize) -> Vec<i64> {
+    if rank <= 2 {
+        return (0..rank).map(|axis| axis as i64).collect();
+    }
+    let mut order = vec![0_i64];
+    order.extend((2..rank).map(|axis| axis as i64));
+    order.push(1);
+    order
+}
+
+fn physical_identity_layer_norm_input(
+    graph: &IrGraph,
+    x_id: NodeId,
+    rank: usize,
+) -> Option<NodeId> {
+    if !is_permute_target(&graph.nodes[x_id].target) {
+        return None;
+    }
+    let perm = graph.nodes[x_id].args.get(1)?.as_int_list()?;
+    (perm == channels_last_permute(rank)).then(|| graph.nodes[x_id].first_node_arg())?
 }
 
 pub struct IrDecomposeLayerNormPass;
@@ -88,6 +110,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     if n_dims > rank {
         return false;
     }
+    let reduction_count = normalized_shape.iter().product::<i64>().max(1).to_string();
     let dims: Vec<i64> = ((rank - n_dims)..rank).map(|dim| dim as i64).collect();
     let mut stat_shape = input_shape.clone();
     for &dim in &dims {
@@ -117,9 +140,17 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
     let Some(view_target) = layer_norm_param_view_target(&graph.nodes[id].target) else {
         return false;
     };
+    let original_x_id = x_id;
+    let physical_identity_source = if rank >= 4 {
+        physical_identity_layer_norm_input(graph, x_id, rank)
+    } else {
+        None
+    };
+    let x_id = physical_identity_source.unwrap_or(x_id);
 
-    let output = {
+    let (output, force_identity_layout_ids) = {
         let mut cursor = graph.rewrite_cursor(id);
+        let mut force_identity_layout_ids = Vec::new();
 
         let mean = cursor.call_function(
             format!("{}_mean", name),
@@ -127,6 +158,16 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             vec![IrArg::Node(x_id), i64_list(&dims), IrArg::Bool(true)],
             meta.preserve_qparams(stat_shape.clone()),
         );
+        cursor.graph_mut().nodes[mean].meta.set_extra(
+            "retab_reduction_element_count",
+            MetaValue::Str(reduction_count.clone()),
+        );
+        if physical_identity_source.is_some() {
+            cursor.graph_mut().nodes[mean]
+                .meta
+                .set_extra("retab_reduce_axes_are_physical", MetaValue::Bool(true));
+        }
+        force_identity_layout_ids.push(mean);
 
         let numerator = cursor.call_function(
             format!("{}_sub", name),
@@ -134,6 +175,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             vec![IrArg::Node(x_id), IrArg::Node(mean)],
             meta.preserve_qparams(input_shape.clone()),
         );
+        force_identity_layout_ids.push(numerator);
 
         let mut var_kwargs = HashMap::new();
         var_kwargs.insert("correction".to_string(), IrArg::Int(0));
@@ -145,6 +187,16 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             var_kwargs,
             meta.preserve_qparams(stat_shape.clone()),
         );
+        cursor.graph_mut().nodes[var].meta.set_extra(
+            "retab_reduction_element_count",
+            MetaValue::Str(reduction_count.clone()),
+        );
+        if physical_identity_source.is_some() {
+            cursor.graph_mut().nodes[var]
+                .meta
+                .set_extra("retab_reduce_axes_are_physical", MetaValue::Bool(true));
+        }
+        force_identity_layout_ids.push(var);
 
         let eps = cursor.call_function(
             format!("{}_eps", name),
@@ -152,6 +204,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             vec![i64_list(&scalar_shape), IrArg::Float(epsilon)],
             meta.preserve_qparams(scalar_shape.clone()),
         );
+        force_identity_layout_ids.push(eps);
 
         let variance_eps = cursor.call_function(
             format!("{}_var_eps", name),
@@ -159,6 +212,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             vec![IrArg::Node(var), IrArg::Node(eps)],
             meta.preserve_qparams(stat_shape.clone()),
         );
+        force_identity_layout_ids.push(variance_eps);
 
         let rsqrt = cursor.call_function(
             format!("{}_rsqrt", name),
@@ -166,6 +220,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             vec![IrArg::Node(variance_eps)],
             meta.preserve_qparams(stat_shape),
         );
+        force_identity_layout_ids.push(rsqrt);
 
         let normalized = cursor.call_function(
             format!("{}_normalized", name),
@@ -173,6 +228,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             vec![IrArg::Node(numerator), IrArg::Node(rsqrt)],
             meta.preserve_qparams(output_shape.clone()),
         );
+        force_identity_layout_ids.push(normalized);
 
         let mut output = normalized;
         if let Some(weight_id) = weights {
@@ -182,6 +238,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
                 vec![IrArg::Node(weight_id), i64_list(&param_shape)],
                 meta.preserve_qparams(param_shape.clone()),
             );
+            force_identity_layout_ids.push(weight_reshaped);
 
             output = cursor.call_function(
                 format!("{}_weighted", name),
@@ -189,6 +246,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
                 vec![IrArg::Node(output), IrArg::Node(weight_reshaped)],
                 meta.preserve_qparams(output_shape.clone()),
             );
+            force_identity_layout_ids.push(output);
         }
 
         if let Some(bias_id) = bias {
@@ -198,6 +256,7 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
                 vec![IrArg::Node(bias_id), i64_list(&param_shape)],
                 meta.preserve_qparams(param_shape.clone()),
             );
+            force_identity_layout_ids.push(bias_reshaped);
 
             output = cursor.call_function(
                 format!("{}_biased", name),
@@ -205,11 +264,22 @@ fn decompose_layer_norm(graph: &mut IrGraph, id: NodeId) -> bool {
                 vec![IrArg::Node(output), IrArg::Node(bias_reshaped)],
                 meta.preserve_qparams(output_shape),
             );
+            force_identity_layout_ids.push(output);
         }
-        output
+        (output, force_identity_layout_ids)
     };
 
+    if physical_identity_source.is_some() {
+        for node_id in force_identity_layout_ids {
+            graph.nodes[node_id]
+                .meta
+                .set_extra("retab_force_identity_dim_order", MetaValue::Bool(true));
+        }
+    }
     replace_getitem_users(graph, id, output);
     graph.replace_and_erase(id, output);
+    if physical_identity_source.is_some() && graph.live_user_ids(original_x_id).is_empty() {
+        graph.erase(original_x_id);
+    }
     true
 }

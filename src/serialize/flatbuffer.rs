@@ -6,39 +6,64 @@ use super::attribute_flatbuffer::build_attribute;
 use super::collection::SerializedRegion;
 use super::tosa_generated::{TosaOperator, TosaShape, TosaTensor};
 
+fn log_flatbuffer_profile_phase(profile: bool, phase: &str, start: std::time::Instant) {
+    if profile {
+        eprintln!(
+            "[RETAB][flatbuffer-profile] phase={phase} time_s={:.6}",
+            start.elapsed().as_secs_f64()
+        );
+    }
+}
+
 pub(super) fn serialize_regions_to_tosa_py(
     py: Python<'_>,
     regions: &[SerializedRegion],
     estimated_capacity: usize,
 ) -> Py<PyBytes> {
+    let profile = crate::config::profile_ingest_serialize_enabled();
+    let phase_start = std::time::Instant::now();
     let mut builder = FlatBufferBuilder::with_capacity(estimated_capacity.max(16 * 1024 * 1024));
+    log_flatbuffer_profile_phase(profile, "init_builder", phase_start);
+    let phase_start = std::time::Instant::now();
     let regions: Vec<_> = regions
         .iter()
         .map(|region| build_region(&mut builder, region))
         .collect();
-    finish_tosa_graph_py(py, &mut builder, &regions)
+    log_flatbuffer_profile_phase(profile, "build_regions", phase_start);
+    let phase_start = std::time::Instant::now();
+    let py_bytes = finish_tosa_graph_py(py, &mut builder, &regions);
+    log_flatbuffer_profile_phase(profile, "finish_tosa_graph_py", phase_start);
+    py_bytes
 }
 
 fn build_region<'fbb>(
     builder: &mut FlatBufferBuilder<'fbb>,
     region: &SerializedRegion,
 ) -> WIPOffset<TableFinishedWIPOffset> {
+    let profile = crate::config::profile_ingest_serialize_enabled();
     if crate::config::tosa_engine_debug_enabled() {
         eprintln!("[Serialize] building fb tensors...");
     }
+    let phase_start = std::time::Instant::now();
     let fb_tensors = build_tensors(builder, &region.items.tensors);
+    log_flatbuffer_profile_phase(profile, "build_tensors", phase_start);
     if crate::config::tosa_engine_debug_enabled() {
         eprintln!("[Serialize] building fb shapes...");
     }
+    let phase_start = std::time::Instant::now();
     let fb_shapes = build_shapes(builder, &region.items.shapes);
+    log_flatbuffer_profile_phase(profile, "build_shapes", phase_start);
     if crate::config::tosa_engine_debug_enabled() {
         eprintln!("[Serialize] building fb operators...");
     }
+    let phase_start = std::time::Instant::now();
     let fb_operators = build_operators(builder, &region.items.operators);
+    log_flatbuffer_profile_phase(profile, "build_operators", phase_start);
     if crate::config::tosa_engine_debug_enabled() {
         eprintln!("[Serialize] assembling graph...");
     }
 
+    let phase_start = std::time::Instant::now();
     let fb_input_strs: Vec<_> = region
         .items
         .input_names
@@ -57,7 +82,9 @@ fn build_region<'fbb>(
     let fb_tensors_vec = builder.create_vector(&fb_tensors);
     let fb_shapes_vec = builder.create_vector(&fb_shapes);
     let fb_operators_vec = builder.create_vector(&fb_operators);
+    log_flatbuffer_profile_phase(profile, "build_region_vectors", phase_start);
 
+    let phase_start = std::time::Instant::now();
     let block_name = builder.create_string(&region.name);
     let block = {
         let start = builder.start_table();
@@ -75,7 +102,9 @@ fn build_region<'fbb>(
     let start = builder.start_table();
     builder.push_slot_always::<WIPOffset<_>>(4, region_name);
     builder.push_slot_always::<WIPOffset<_>>(6, blocks_vec);
-    builder.end_table(start)
+    let region_offset = builder.end_table(start);
+    log_flatbuffer_profile_phase(profile, "assemble_region", phase_start);
+    region_offset
 }
 
 fn finalize_tosa_graph(
@@ -143,8 +172,8 @@ fn build_tensors(
         let data = t
             .data
             .as_ref()
-            .filter(|d| !d.is_empty())
-            .map(|d| create_force_aligned_u8_vector(builder, d));
+            .filter(|data| !data.is_empty())
+            .map(|data| create_force_aligned_u8_vector(builder, data));
         let var_name = t
             .variable_name
             .as_ref()

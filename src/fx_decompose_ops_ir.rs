@@ -1684,6 +1684,9 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             x_id,
             &grouped_shape,
         );
+        cursor.graph_mut().nodes[grouped]
+            .meta
+            .set_extra("retab_logical_layout_boundary", MetaValue::Bool(true));
         let inv_n = ctx.full_shape(
             &mut cursor,
             "inv_n",
@@ -1797,8 +1800,15 @@ fn decompose_group_norm(graph: &mut IrGraph, id: NodeId) -> bool {
             _ => return false,
         };
 
-        ctx.reshape_shape(&mut cursor, "result", args.reshape_target, biased, &shape)
+        let result = ctx.reshape_shape(&mut cursor, "result", args.reshape_target, biased, &shape);
+        cursor.graph_mut().nodes[result]
+            .meta
+            .set_extra("retab_logical_layout_boundary", MetaValue::Bool(true));
+        result
     };
+    graph.nodes[result]
+        .meta
+        .set_extra("retab_force_logical_graph_output", MetaValue::Bool(true));
     replace_primary_result_users(graph, id, result)
 }
 

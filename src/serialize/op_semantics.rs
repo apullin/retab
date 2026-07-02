@@ -53,6 +53,13 @@ pub(crate) fn is_accumulator_output(target: &OpTarget) -> bool {
 }
 
 pub(crate) fn is_shape_preserving_unary(target: &OpTarget) -> bool {
+    if matches!(
+        target,
+        OpTarget::Other(name) if name.contains("logical_not") || name.contains("bitwise_not")
+    ) {
+        return true;
+    }
+
     matches!(
         target,
         OpTarget::Relu
@@ -77,6 +84,8 @@ pub(crate) fn is_shape_preserving_unary(target: &OpTarget) -> bool {
             | OpTarget::Round
             | OpTarget::Sin
             | OpTarget::Cos
+            | OpTarget::LogicalNot
+            | OpTarget::BitwiseNot
             | OpTarget::TosaSigmoid
             | OpTarget::TosaTanh
             | OpTarget::TosaExp
@@ -119,12 +128,52 @@ pub(crate) fn is_slice_shape_op(target: &OpTarget) -> bool {
     matches!(target, OpTarget::Slice | OpTarget::TosaSlice)
 }
 
-pub(crate) fn is_sum_reduction(target: &OpTarget) -> bool {
-    matches!(target, OpTarget::Sum | OpTarget::TosaReduceSum)
+pub(crate) fn is_axis_reduction(target: &OpTarget) -> bool {
+    matches!(
+        target,
+        OpTarget::Sum
+            | OpTarget::Mean
+            | OpTarget::Amax
+            | OpTarget::Amin
+            | OpTarget::Any
+            | OpTarget::TosaReduceSum
+            | OpTarget::TosaReduceMax
+            | OpTarget::TosaReduceMin
+            | OpTarget::TosaReduceAny
+    )
 }
 
-pub(crate) fn is_aten_sum(target: &OpTarget) -> bool {
-    matches!(target, OpTarget::Sum)
+pub(crate) fn is_binary_broadcast(target: &OpTarget) -> bool {
+    matches!(
+        target,
+        OpTarget::Add
+            | OpTarget::Sub
+            | OpTarget::Mul
+            | OpTarget::Div
+            | OpTarget::Remainder
+            | OpTarget::Pow
+            | OpTarget::BitwiseAnd
+            | OpTarget::BitwiseOr
+            | OpTarget::BitwiseXor
+            | OpTarget::BitwiseLeftShift
+            | OpTarget::BitwiseRightShift
+            | OpTarget::Eq
+            | OpTarget::Gt
+            | OpTarget::Ge
+            | OpTarget::Lt
+            | OpTarget::Le
+            | OpTarget::LogicalAnd
+            | OpTarget::LogicalOr
+            | OpTarget::LogicalXor
+            | OpTarget::TosaAdd
+            | OpTarget::TosaSub
+            | OpTarget::TosaMul
+            | OpTarget::TosaMaximum
+            | OpTarget::TosaMinimum
+            | OpTarget::TosaEqual
+            | OpTarget::TosaGreater
+            | OpTarget::TosaGreaterEqual
+    )
 }
 
 pub(crate) fn is_max_pool(target: &OpTarget) -> bool {
@@ -146,6 +195,9 @@ pub(crate) fn uses_nhwc_layout_shape(target: &OpTarget) -> bool {
             | OpTarget::AvgPool2d
             | OpTarget::TosaMaxPool2d
             | OpTarget::TosaAvgPool2d
+            | OpTarget::UpsampleNearest2d
+            | OpTarget::UpsampleBilinear2d
+            | OpTarget::TosaResize
     )
 }
 
@@ -183,4 +235,16 @@ pub(crate) fn is_weight_layout_passthrough(target: &OpTarget) -> bool {
             | OpTarget::TosaReshape
             | OpTarget::View
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unresolved_logical_not_is_shape_preserving() {
+        assert!(is_shape_preserving_unary(&OpTarget::Other(
+            "<EdgeOpOverload: aten.logical_not.default>".to_string(),
+        )));
+    }
 }

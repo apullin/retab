@@ -1,16 +1,16 @@
-# Fast-Lane Workflow
+# Direct Lowering Workflow
 
 This note records the current local workflow for benchmarking and validating the
-direct Rust/TOSA fast lane.
+direct Rust/TOSA lowering path.
 
 It is intentionally operational, not aspirational. Use these commands and
-expectations when changing the fast path.
+expectations when changing the direct lowering path.
 
 For the current local green matrix and exact pytest lane shapes, see
 [`VALIDATION_MATRIX.md`](VALIDATION_MATRIX.md).
 
 For the latest local stock-vs-RETAB lowering speed snapshot, see
-[`PERFORMANCE_SNAPSHOT.md`](PERFORMANCE_SNAPSHOT.md).
+[`BENCHMARK_REPORT.md`](BENCHMARK_REPORT.md).
 
 ## Acceptance Gate
 
@@ -34,7 +34,7 @@ Do not treat a perf patch as closed out until this suite is green again.
 
 ## Canonical Models
 
-Use these models for direct fast-lane work:
+Use these models for direct lowering work:
 
 - `resnet18`: conventional CNN sanity benchmark
 - `mobilenet_v3_small`: harder real-model stress benchmark
@@ -49,9 +49,9 @@ For coarse lower/pack timings:
 
 ```bash
 cd /Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine
-python tests/sweep_direct_fastlane.py --model resnet18 --json-only
-python tests/sweep_direct_fastlane.py --model mobilenet_v3_small --json-only
-python tests/sweep_direct_fastlane.py --model cnn_layernorm4d --json-only
+python tests/sweep_direct_lowering.py --model resnet18 --json-only
+python tests/sweep_direct_lowering.py --model mobilenet_v3_small --json-only
+python tests/sweep_direct_lowering.py --model cnn_layernorm4d --json-only
 ```
 
 This harness is good for fast iteration and corpus sweeps.
@@ -66,7 +66,7 @@ comparison:
 
 ```bash
 cd /Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine
-python tests/compare_python_vs_direct_fastlane.py \
+python tests/compare_python_vs_direct_lowering.py \
   --model resnet18 \
   --model mobilenet_v3_small \
   --seed 0
@@ -93,7 +93,7 @@ python tests/compare_model_semantics.py --model mobilenet_v3_small --seed 0
 
 ## Patch Safety Rules
 
-For a fast-lane optimization to be worth keeping:
+For a direct-lowering optimization to be worth keeping:
 
 - lower as a single delegate on the target model when that was the baseline
 - keep artifact hashes identical unless the change is explicitly intended to

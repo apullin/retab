@@ -1,11 +1,33 @@
 //! Pure Rust IrPass: var.correction / var.dim decomposition.
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId};
+use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta};
 use crate::fx_reduction::ReductionDomain;
 use crate::fx_target::{is_var_dim_target, is_var_target};
 use crate::runner_logging::log_line;
 
 pub struct IrDecomposeVarPass;
+
+fn propagate_layout_extras(source: &NodeMeta, dest: &mut NodeMeta) {
+    for key in [
+        "retab_force_identity_dim_order",
+        "retab_reduce_axes_are_physical",
+        "retab_reduction_element_count",
+    ] {
+        if let Some(value) = source.extras.get(key).cloned() {
+            dest.set_extra(key, value);
+        }
+    }
+}
+
+fn explicit_reduction_count(meta: &NodeMeta) -> Option<i64> {
+    meta.extras
+        .get("retab_reduction_element_count")
+        .and_then(|value| match value {
+            crate::fx_ir::MetaValue::Str(raw) => raw.parse::<i64>().ok(),
+            _ => None,
+        })
+        .filter(|count| *count > 0)
+}
 
 impl IrPass for IrDecomposeVarPass {
     fn name(&self) -> &str {
@@ -83,8 +105,10 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
     let mean_shape = domain.shape_with_keepdim(true);
     let output_shape = domain.output_shape().to_vec();
     let coefficient_shape = domain.coefficient_shape();
-    let count = domain.element_count_min_one_i64();
+    let count = explicit_reduction_count(&graph.nodes[id].meta)
+        .unwrap_or_else(|| domain.element_count_min_one_i64());
     let denom = (count - correction).max(1) as f64;
+    let source_meta = graph.nodes[id].meta.clone();
     let mut cursor = graph.rewrite_cursor(id);
 
     let mean = cursor.call_function(
@@ -128,6 +152,9 @@ fn decompose_var(graph: &mut IrGraph, id: NodeId) -> bool {
         vec![IrArg::Node(sum), IrArg::Node(coefficient)],
         base_meta.cloned_with_val(output_shape, dtype),
     );
+    for node_id in [mean, diff, squared, sum, coefficient, result] {
+        propagate_layout_extras(&source_meta, &mut cursor.graph_mut().nodes[node_id].meta);
+    }
     cursor.replace_anchor_with(result);
     true
 }

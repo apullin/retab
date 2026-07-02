@@ -79,12 +79,36 @@ fn resolve_region_name(graph: &Graph, arg: Option<&Arg>) -> String {
 }
 
 fn cond_output_tensors(graph: &Graph, node: &Node) -> Vec<TosaTensor> {
-    let outputs = indexed_output_tensors(graph, node);
+    let outputs = indexed_cond_output_tensors(graph, node);
     if outputs.is_empty() {
-        vec![make_output_tensor(node)]
+        vec![raw_contract_tensor(node)]
     } else {
         outputs.into_iter().map(|(_, tensor)| tensor).collect()
     }
+}
+
+fn raw_contract_tensor(node: &Node) -> TosaTensor {
+    TosaTensor::new(&node.name, raw_i32_shape(node), node_output_dtype(node))
+}
+
+fn indexed_cond_output_tensors(graph: &Graph, node: &Node) -> Vec<(usize, TosaTensor)> {
+    let mut outputs: Vec<(usize, TosaTensor)> = Vec::new();
+    for user_id in &node.users {
+        let Some(user) = graph.node(*user_id) else {
+            continue;
+        };
+        if !is_getitem_node(user) {
+            continue;
+        }
+        let output_idx = match user.args.get(1) {
+            Some(Arg::Int(idx)) if *idx >= 0 => *idx as usize,
+            _ => 0,
+        };
+        outputs.push((output_idx, raw_contract_tensor(user)));
+    }
+
+    outputs.sort_by_key(|(idx, _)| *idx);
+    outputs
 }
 
 fn indexed_output_tensors(graph: &Graph, node: &Node) -> Vec<(usize, TosaTensor)> {

@@ -75,6 +75,10 @@ impl QParam {
         self.dtype().is_quantized_integer()
     }
 
+    pub(crate) fn is_unsigned_u8(&self) -> bool {
+        self.qmin == 0 && self.qmax == 255 || self.dtype_str.to_ascii_lowercase().contains("uint8")
+    }
+
     pub fn supports_axis0_channel_slice(&self, end: usize) -> bool {
         !self.is_per_channel()
             || (self.axis == 0

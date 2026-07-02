@@ -124,12 +124,8 @@ pub fn extract_tensor_bytes(value: &Bound<'_, PyAny>, dtype: DType) -> PyResult<
 
 pub fn extract_tensor_data(value: &Bound<'_, PyAny>) -> PyResult<TensorData> {
     let shape = extract_tensor_shape(value)?;
-    let mut dtype = extract_tensor_dtype(value);
-    let mut data = extract_tensor_bytes(value, dtype)?;
-    if dtype == DType::Int64 {
-        data = cast_i64_bytes_to_i32(&data);
-        dtype = DType::Int32;
-    }
+    let dtype = extract_tensor_dtype(value);
+    let data = extract_tensor_bytes(value, dtype)?;
     Ok(TensorData { data, shape, dtype })
 }
 
@@ -215,17 +211,20 @@ impl TensorData {
             _ => None,
         }
     }
+
+    pub fn int64_values_fit_i32(&self) -> bool {
+        self.dtype == DType::Int64 && int64_bytes_fit_i32(&self.data)
+    }
 }
 
-fn cast_i64_bytes_to_i32(data: &[u8]) -> Vec<u8> {
-    data.chunks_exact(8)
-        .flat_map(|chunk| {
+fn int64_bytes_fit_i32(data: &[u8]) -> bool {
+    data.len() % 8 == 0
+        && data.chunks_exact(8).all(|chunk| {
             let val = i64::from_le_bytes([
                 chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
             ]);
-            (val as i32).to_le_bytes()
+            i32::try_from(val).is_ok()
         })
-        .collect()
 }
 
 #[cfg(test)]
@@ -291,15 +290,20 @@ mod tests {
     }
 
     #[test]
-    fn tensor_data_decodes_vectors_and_casts_i64_bytes() {
+    fn tensor_data_decodes_vectors_and_checks_i64_range() {
         let int64_tensor = TensorData {
             data: [1i64.to_le_bytes(), 3i64.to_le_bytes()].concat(),
             shape: vec![2],
             dtype: DType::Int64,
         };
         assert_eq!(int64_tensor.vec_i64(), Some(vec![1, 3]));
+        assert!(int64_tensor.int64_values_fit_i32());
 
-        let cast = cast_i64_bytes_to_i32(&int64_tensor.data);
-        assert_eq!(cast, [1i32.to_le_bytes(), 3i32.to_le_bytes()].concat(),);
+        let overflow_tensor = TensorData {
+            data: [i64::from(i32::MAX) + 1].map(i64::to_le_bytes).concat(),
+            shape: vec![1],
+            dtype: DType::Int64,
+        };
+        assert!(!overflow_tensor.int64_values_fit_i32());
     }
 }

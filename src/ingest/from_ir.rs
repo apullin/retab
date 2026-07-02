@@ -729,6 +729,14 @@ mod tests {
         IrNodeMeta::tensor([1], "torch.float32")
     }
 
+    #[test]
+    fn map_meta_preserves_rank_restore_layout_tag() {
+        let mut meta = ir_meta();
+        meta.set_extra("retab_preserve_spatial_rank", MetaValue::Bool(true));
+
+        assert!(map_meta(&meta).retab_preserve_spatial_rank);
+    }
+
     fn graph_node(
         name: &str,
         op: OpType,
@@ -966,6 +974,18 @@ fn map_meta(m: &IrNodeMeta) -> NodeMeta {
     meta.tosa_special_dtype = special_dtype_from_extras(m);
     meta.arm_control_flow_parent_output_user = matches!(
         m.extras.get("arm_control_flow_parent_output_user"),
+        Some(MetaValue::Bool(true))
+    );
+    meta.retab_logical_layout_boundary = matches!(
+        m.extras.get("retab_logical_layout_boundary"),
+        Some(MetaValue::Bool(true))
+    );
+    meta.retab_preserve_spatial_rank = matches!(
+        m.extras.get("retab_preserve_spatial_rank"),
+        Some(MetaValue::Bool(true))
+    );
+    meta.retab_reduce_axes_are_physical = matches!(
+        m.extras.get("retab_reduce_axes_are_physical"),
         Some(MetaValue::Bool(true))
     );
     meta

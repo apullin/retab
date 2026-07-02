@@ -208,11 +208,16 @@ pub(super) fn emit_mul(ctx: &EmitContext) -> EmitResult {
     let mut result = EmitResult::default();
     let mut inputs = collect_binary_input_names(graph, store, node, &mut result);
     inputs.push(push_shift_const(&mut result, &node.name));
-    result.push_output_op(
-        ctx.make_output(),
+    let (logical_shape, emitted_shape) = binary_output_shapes(graph, store, node);
+    push_binary_output_with_contract(
+        &mut result,
+        node,
         Op::Mul,
         Attribute::Mul(MulAttribute { shift: 0 }),
         inputs,
+        ctx.dtype(),
+        logical_shape,
+        emitted_shape,
     );
     result
 }

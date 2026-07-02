@@ -77,6 +77,29 @@ pub(super) fn inverse_tosa_dim_order(order: &[u8]) -> Option<Vec<i32>> {
     Some(inverse)
 }
 
+pub(super) fn inverse_permutation(perms: &[i32]) -> Option<Vec<i32>> {
+    let mut inverse = vec![0; perms.len()];
+    for (idx, &axis) in perms.iter().enumerate() {
+        let axis = usize::try_from(axis).ok()?;
+        if axis >= perms.len() {
+            return None;
+        }
+        inverse[axis] = idx as i32;
+    }
+    Some(inverse)
+}
+
+pub(super) fn channel_last_order(rank: usize) -> Option<Vec<i32>> {
+    if rank < 4 {
+        return None;
+    }
+    let mut order = Vec::with_capacity(rank);
+    order.push(0);
+    order.extend((2..rank).map(|axis| axis as i32));
+    order.push(1);
+    Some(order)
+}
+
 pub(super) fn infer_shape_permutation(actual_shape: &[i32], raw_shape: &[i32]) -> Option<Vec<i32>> {
     if actual_shape.len() != raw_shape.len() {
         return None;
@@ -181,6 +204,10 @@ fn permute_tensor_by_order(
         return (data.to_vec(), shape.to_vec());
     }
 
+    if shape.len() == 2 && order == [1, 0] {
+        return transpose_2d_bytes(data, shape, elem_size);
+    }
+
     let rank = shape.len();
     let numel: usize = match shape.iter().try_fold(1usize, |acc, &dim| {
         usize::try_from(dim).ok().and_then(|d| acc.checked_mul(d))
@@ -238,6 +265,45 @@ fn permute_tensor_by_order(
     }
 
     (out, new_shape)
+}
+
+fn transpose_2d_bytes(data: &[u8], shape: &[i64], elem_size: usize) -> (Vec<u8>, Vec<i64>) {
+    let (Some(rows), Some(cols)) = (
+        usize::try_from(shape[0]).ok(),
+        usize::try_from(shape[1]).ok(),
+    ) else {
+        return (data.to_vec(), shape.to_vec());
+    };
+    let Some(numel) = rows.checked_mul(cols) else {
+        return (data.to_vec(), shape.to_vec());
+    };
+    if numel == 0 || numel.saturating_mul(elem_size) != data.len() {
+        return (data.to_vec(), shape.to_vec());
+    }
+
+    let mut out = vec![0u8; data.len()];
+    const TILE: usize = 32;
+    for col_base in (0..cols).step_by(TILE) {
+        let col_end = (col_base + TILE).min(cols);
+        for row_base in (0..rows).step_by(TILE) {
+            let row_end = (row_base + TILE).min(rows);
+            for col in col_base..col_end {
+                let dst_col_base = col * rows * elem_size;
+                for row in row_base..row_end {
+                    let src_off = (row * cols + col) * elem_size;
+                    let dst_off = dst_col_base + row * elem_size;
+                    if elem_size == 1 {
+                        out[dst_off] = data[src_off];
+                    } else {
+                        out[dst_off..dst_off + elem_size]
+                            .copy_from_slice(&data[src_off..src_off + elem_size]);
+                    }
+                }
+            }
+        }
+    }
+
+    (out, vec![shape[1], shape[0]])
 }
 
 fn pack_int4_data(data: &[u8]) -> Vec<u8> {

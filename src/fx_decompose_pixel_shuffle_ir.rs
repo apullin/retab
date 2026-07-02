@@ -15,7 +15,7 @@
 //!   -> permute_copy(0, 1, 3, 5, 2, 4)
 //!   -> view_copy(N, C*r*r, H//r, W//r)
 
-use crate::fx_ir::{IrGraph, IrPass, NodeId, NodeMeta};
+use crate::fx_ir::{IrGraph, IrPass, MetaValue, NodeId, NodeMeta};
 use crate::fx_target::{is_pixel_shuffle_target, is_pixel_unshuffle_target};
 use crate::runner_logging::log_line;
 
@@ -128,6 +128,9 @@ impl IrPass for IrDecomposePixelShufflePass {
                     format!("{}_view2", node_name),
                     &base_meta,
                 );
+                graph.nodes[result_id]
+                    .meta
+                    .set_extra("retab_logical_layout_boundary", MetaValue::Bool(true));
 
                 graph.replace_and_erase(id, result_id);
                 true
@@ -170,6 +173,9 @@ impl IrPass for IrDecomposePixelShufflePass {
                     format!("{}_view2", node_name),
                     &base_meta,
                 );
+                graph.nodes[result_id]
+                    .meta
+                    .set_extra("retab_logical_layout_boundary", MetaValue::Bool(true));
 
                 graph.replace_and_erase(id, result_id);
                 true

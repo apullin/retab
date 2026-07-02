@@ -65,6 +65,9 @@ fn infer_binary_full_qparam(graph: &IrGraph, full_id: usize) -> Option<QParam> {
         if !user.alive {
             continue;
         }
+        if user.meta.val_dtype_kind().is_some_and(DType::is_float) {
+            continue;
+        }
         if let Some(qp) = effective_int_qparam(graph, user_id) {
             return Some(qp);
         }
@@ -373,7 +376,9 @@ impl EffectfulIrPass for IrFuseZeroInputConstantsEffectPass {
 #[cfg(test)]
 mod tests {
     use crate::fx_ir::IrGraph;
-    use crate::test_ir::{call_default as add_call, placeholder_default as placeholder};
+    use crate::test_ir::{
+        call_default as add_call, call_with_meta, placeholder_default as placeholder,
+    };
 
     use super::*;
 
@@ -460,6 +465,36 @@ mod tests {
                     && effect.dtype == DType::Int8
                     && effect.shape == vec![2]
                     && effect.data == vec![12u8, 12u8]
+        ));
+    }
+
+    #[test]
+    fn keeps_float_full_for_float_binary_user_even_with_quantized_other_input() {
+        let mut graph = IrGraph::empty();
+        let other = placeholder_with_qparam(&mut graph, "other", int8_qparam(0.25));
+        let full = add_f32_call(
+            &mut graph,
+            "full",
+            "aten.full.default",
+            vec![IrArg::List(vec![IrArg::Int(2)]), IrArg::Float(0.25)],
+        );
+        call_with_meta(
+            &mut graph,
+            "mul",
+            "aten.mul.Tensor",
+            vec![IrArg::Node(other), IrArg::Node(full)],
+            crate::fx_meta::NodeMeta::tensor([2], "torch.float32"),
+        );
+
+        let result = run_pass(&mut graph);
+
+        assert!(matches!(
+            &result.effects.items[0],
+            LoweringEffect::MaterializeTensorNode(effect)
+                if effect.node_name == "full"
+                    && effect.dtype == DType::Float32
+                    && effect.shape == vec![2]
+                    && effect.data == [0.25f32.to_le_bytes(), 0.25f32.to_le_bytes()].concat()
         ));
     }
 

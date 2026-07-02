@@ -27,7 +27,10 @@ mod tensor_ops;
 
 pub use emitter::*;
 
-use super::tensor_layout::{apply_tosa_dim_order, permute_shape};
+use super::tensor_layout::{
+    apply_tosa_dim_order, channel_last_order, infer_shape_permutation, inverse_permutation,
+    inverse_tosa_dim_order, permute_shape,
+};
 use super::tosa_generated::{
     AbsAttribute, AddAttribute, ArithmeticRightShiftAttribute, Attribute, AvgPool2dAttribute,
     BitwiseAndAttribute, BitwiseNotAttribute, BitwiseOrAttribute, BitwiseXorAttribute,
@@ -101,10 +104,11 @@ pub fn emit_node(
     if let Some(probe) = crate::config::debug_node_probe() {
         if node.name.contains(&probe) {
             eprintln!(
-                "[NodeProbe] serialize {} target={:?} raw_shape={:?} dim_order={:?}",
+                "[NodeProbe] serialize {} target={:?} raw_shape={:?} actual_shape={:?} dim_order={:?}",
                 node.name,
                 node.target,
                 &node.meta.val.shape[..node.meta.val.shape_len as usize],
+                actual_tensor_shape(graph, store, node),
                 node.meta.tosa_dim_order,
             );
         }
@@ -117,7 +121,14 @@ pub fn emit_node(
     EMITTER_TABLE.with(|table| {
         if let Some(emitter) = table.get(&node.target) {
             let ctx = EmitContext { graph, node, store };
-            Some(emitter(&ctx))
+            let emit_result = emitter(&ctx);
+            if let Some(probe) = crate::config::debug_node_probe() {
+                if node.name.contains(&probe) {
+                    eprintln!("[NodeProbe] emitted tensors={:?}", emit_result.tensors);
+                    eprintln!("[NodeProbe] emitted operators={:?}", emit_result.operators);
+                }
+            }
+            Some(emit_result)
         } else {
             if crate::config::tosa_engine_debug_enabled() {
                 eprintln!(

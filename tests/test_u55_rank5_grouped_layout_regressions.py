@@ -1,9 +1,8 @@
-"""RETAB-owned regressions from the U55 packed-ensemble bring-up.
+"""RETAB-owned regressions for U55 rank-5 grouped layout handling.
 
-These tests intentionally use a small synthetic model instead of the full N=34
-network. The shape grammar still exercises the same risky features:
-repeat/TILE, grouped convolutions, channel-direct normalization, and view chains
-across packed ensemble-member dimensions.
+The synthetic model exercises the risky shape grammar behind several historical
+layout bugs: repeat/TILE, grouped convolutions, channel-direct normalization,
+and view chains across rank-5 grouped dimensions.
 
 Run with `RETAB_RUN_U55_REGRESSIONS=1`; the suite invokes Ethos-U lowering and
 is intentionally not part of the default fast unit-test lane.
@@ -23,7 +22,7 @@ from torch import nn
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RETAB_RUN_U55_REGRESSIONS") != "1",
-    reason="set RETAB_RUN_U55_REGRESSIONS=1 to run U55 packed-ensemble regressions",
+    reason="set RETAB_RUN_U55_REGRESSIONS=1 to run U55 grouped-layout regressions",
 )
 
 
@@ -54,7 +53,7 @@ class _ChannelNorm(nn.Module):
         return x * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
 
 
-class _MiniPackedEnsemble(nn.Module):
+class _MiniRank5GroupedModel(nn.Module):
     def __init__(self, n_groups: int = 2, cfg: _MiniConfig | None = None) -> None:
         super().__init__()
         self.n_groups = n_groups
@@ -160,7 +159,7 @@ def lowered_u55_mini_artifact(tmp_path_factory):
 
     torch.manual_seed(0)
     cfg = _MiniConfig()
-    model = _MiniPackedEnsemble(2, cfg).eval()
+    model = _MiniRank5GroupedModel(2, cfg).eval()
     example_inputs = (torch.randn(1, cfg.in_h, cfg.in_w),)
 
     compile_spec = EthosUCompileSpec(
@@ -179,8 +178,8 @@ def lowered_u55_mini_artifact(tmp_path_factory):
     quantized_module = convert_pt2e(quantized_module)
     quantized_ep = torch.export.export(quantized_module, example_inputs, strict=True)
 
-    out_dir = tmp_path_factory.mktemp("u55_packed_ensemble")
-    tosa_path = out_dir / "mini_packed_ensemble.tosa"
+    out_dir = tmp_path_factory.mktemp("u55_rank5_grouped_layout")
+    tosa_path = out_dir / "mini_rank5_grouped_layout.tosa"
     old_dump = os.environ.get("RETAB_DUMP_TOSA")
     os.environ["RETAB_DUMP_TOSA"] = str(tosa_path)
     try:
@@ -209,7 +208,7 @@ def lowered_u55_mini_artifact(tmp_path_factory):
     }
 
 
-def test_u55_packed_ensemble_lowers_to_one_delegate(lowered_u55_mini_artifact):
+def test_u55_rank5_grouped_layout_lowers_to_one_delegate(lowered_u55_mini_artifact):
     assert lowered_u55_mini_artifact["delegate_count"] == 1
     assert lowered_u55_mini_artifact["pte_size"] > 0
 
@@ -218,7 +217,7 @@ def test_grouped_conv_slice_outputs_keep_input_dtype(lowered_u55_mini_artifact):
     dtype = lowered_u55_mini_artifact["dtype"]
     tensors = lowered_u55_mini_artifact["tensors"]
     slice_ops = [op for op in lowered_u55_mini_artifact["ops"] if op["kind"] == "SLICE"]
-    assert slice_ops, "mini packed ensemble should contain grouped-conv SLICE ops"
+    assert slice_ops, "mini rank-5 grouped model should contain grouped-conv SLICE ops"
 
     for op in slice_ops:
         input_dtype = tensors[op["inputs"][0]]["dtype"]
@@ -238,7 +237,7 @@ def test_repeat_tile_multiples_are_const_shape(lowered_u55_mini_artifact):
         output: op["kind"] for op in ops for output in op["outputs"]
     }
     tile_ops = [op for op in ops if op["kind"] == "TILE"]
-    assert tile_ops, "mini packed ensemble should contain repeat/TILE ops"
+    assert tile_ops, "mini rank-5 grouped model should contain repeat/TILE ops"
 
     for op in tile_ops:
         multiples = op["inputs"][1]
@@ -247,7 +246,7 @@ def test_repeat_tile_multiples_are_const_shape(lowered_u55_mini_artifact):
             assert tensors[multiples]["dtype"] == dtype.SHAPE
 
 
-def test_u55_packed_ensemble_pte_stays_compact(lowered_u55_mini_artifact):
+def test_u55_rank5_grouped_layout_pte_stays_compact(lowered_u55_mini_artifact):
     assert lowered_u55_mini_artifact["pte_size"] < 80_000
 
 

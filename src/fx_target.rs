@@ -350,6 +350,13 @@ pub(crate) fn is_boundary_rescale_target(target: &str) -> bool {
 }
 
 pub(crate) fn is_layout_passthrough_target(target: &str) -> bool {
+    if is_raw_aten_convolution_target(target)
+        || is_conv1d_default_target(target)
+        || is_conv2d_default_target(target)
+        || is_conv3d_default_target(target)
+    {
+        return false;
+    }
     let target = target.to_ascii_lowercase();
     contains_any!(
         &target;
@@ -434,11 +441,18 @@ pub(crate) fn is_slice_tensor_target(target: &str) -> bool {
     contains_any!(target, "slice_copy.Tensor", "slice.Tensor") && !target.contains("slice_scatter")
 }
 
+pub(crate) fn is_select_copy_target(target: &str) -> bool {
+    target.contains("select_copy.int") || target.contains("select.int")
+}
+
+pub(crate) fn is_expand_target(target: &str) -> bool {
+    target.contains("expand")
+}
+
 pub(crate) fn is_slice_scatter_target(target: &str) -> bool {
     target.contains("slice_scatter.default")
 }
 
-#[cfg(test)]
 pub(crate) fn is_cat_target(target: &str) -> bool {
     target.contains("aten.cat.default")
 }
@@ -514,12 +528,21 @@ pub(crate) fn is_adaptive_avg_pool2d_target(target: &str) -> bool {
     target.contains("adaptive_avg_pool2d")
 }
 
+pub(crate) fn is_resize_2d_target(target: &str) -> bool {
+    contains_any!(
+        target,
+        "aten.upsample_nearest2d",
+        "aten.upsample_bilinear2d",
+        "backend.tosa.RESIZE"
+    )
+}
+
 pub(crate) fn is_as_strided_copy_target(target: &str) -> bool {
     target.contains("as_strided_copy.default")
 }
 
 pub(crate) fn is_pad_target(target: &str) -> bool {
-    target.contains("aten.pad.default")
+    target.contains("aten.pad.default") || target.contains("aten.constant_pad_nd")
 }
 
 pub(crate) fn is_pixel_shuffle_target(target: &str) -> bool {
@@ -586,6 +609,14 @@ pub(crate) fn is_add_sub_target(target: &str) -> bool {
     contains_any!(target, "add.Tensor", "sub.Tensor")
 }
 
+pub(crate) fn is_div_target(target: &str) -> bool {
+    target.contains("div.Tensor")
+}
+
+pub(crate) fn is_binary_arithmetic_target(target: &str) -> bool {
+    is_add_sub_target(target) || is_mul_target(target) || is_div_target(target)
+}
+
 pub(crate) fn add_sub_alpha_result_target(target: &str) -> Option<&'static str> {
     if target.contains("sub.Tensor") {
         Some("aten.sub.Tensor")
@@ -606,6 +637,18 @@ pub(crate) fn is_sum_dim_int_list_target(target: &str) -> bool {
 
 pub(crate) fn is_mean_target(target: &str) -> bool {
     contains_any!(target, "mean.dim", "mean.default")
+}
+
+pub(crate) fn is_axis_reduction_target(target: &str) -> bool {
+    is_sum_dim_int_list_target(target)
+        || is_mean_target(target)
+        || contains_any!(
+            target,
+            "aten.any.dim",
+            "aten.any.dims",
+            "aten.amax",
+            "aten.amin"
+        )
 }
 
 pub(crate) fn is_full_like_target(target: &str) -> bool {
@@ -1012,6 +1055,7 @@ mod tests {
             &["aten.index_put.default", "aten.index_put_.default"],
         );
         assert_false(is_index_put_default_target, &["aten.index.Tensor"]);
+        assert_true(is_expand_target, &["aten.expand_copy.default"]);
         assert_true(is_where_target, &["aten.where.self", "aten_where.self"]);
         assert_true(is_masked_fill_target, &["aten.masked_fill.Scalar"]);
         assert_true(is_select_scatter_target, &["aten.select_scatter.default"]);
@@ -1037,6 +1081,16 @@ mod tests {
             &["aten.maximum.default", "aten.minimum.default"],
         );
         assert_true(is_add_sub_target, &["aten.add.Tensor", "aten.sub.Tensor"]);
+        assert_true(is_div_target, &["aten.div.Tensor"]);
+        assert_true(
+            is_binary_arithmetic_target,
+            &[
+                "aten.add.Tensor",
+                "aten.sub.Tensor",
+                "aten.mul.Tensor",
+                "aten.div.Tensor",
+            ],
+        );
         assert_cases(
             add_sub_alpha_result_target,
             &[
@@ -1049,6 +1103,7 @@ mod tests {
         assert_true(is_mean_target, &["aten.mean.dim", "aten.mean.default"]);
         assert_true(is_full_like_target, &["aten.full_like.default"]);
         assert_false(is_add_sub_target, &["aten.add.Scalar"]);
+        assert_false(is_binary_arithmetic_target, &["aten.add.Scalar"]);
         assert_cases(
             not_equal_replacement_target,
             &[

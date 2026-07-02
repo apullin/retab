@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compatibility shim for the direct fast-lane model corpus.
+"""Compatibility shim for the direct lowering model corpus.
 
 Family-specific model definitions live under `tests/families/` and register
 themselves through the shared registry in `tests/lib/registry.py`.

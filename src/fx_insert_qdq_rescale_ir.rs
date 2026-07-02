@@ -37,15 +37,18 @@ fn insert_qdq_rescale(graph: &mut IrGraph, dq_id: NodeId, q_id: NodeId) -> bool 
     );
     let rescale = {
         let mut cursor = graph.rewrite_cursor(dq_id);
-        cursor.rescale(RescaleRewrite::new(
-            rescale_name,
-            source_id,
-            output_dtype,
-            vec![scale],
-            dq_qp.zp,
-            q_qp.zp,
-            meta,
-        ))
+        cursor.rescale(
+            RescaleRewrite::new(
+                rescale_name,
+                source_id,
+                output_dtype,
+                vec![scale],
+                dq_qp.zp,
+                q_qp.zp,
+                meta,
+            )
+            .with_unsigned(dq_qp.is_unsigned_u8(), q_qp.is_unsigned_u8()),
+        )
     };
 
     graph.replace_and_erase(q_id, rescale);
@@ -158,6 +161,63 @@ mod tests {
 
         let user = graph.node(user);
         assert!(matches!(user.args[0], IrArg::Node(id) if id == rescale.id));
+    }
+
+    #[test]
+    fn folds_uint8_qdq_pair_with_unsigned_rescale_attrs() {
+        let mut graph = IrGraph::empty();
+        let source = placeholder(&mut graph, "input", [1, 4], "torch.uint8");
+        let dq = f32_call(
+            &mut graph,
+            "dq",
+            "quantized_decomposed.dequantize_per_tensor.default",
+            vec![
+                IrArg::Node(source),
+                IrArg::Float(0.02),
+                IrArg::Int(128),
+                IrArg::Int(0),
+                IrArg::Int(255),
+                IrArg::Dtype("torch.uint8".to_string()),
+            ],
+            [1, 4],
+        );
+        let q = call(
+            &mut graph,
+            "q",
+            "quantized_decomposed.quantize_per_tensor.default",
+            vec![
+                IrArg::Node(dq),
+                IrArg::Float(0.05),
+                IrArg::Int(127),
+                IrArg::Int(0),
+                IrArg::Int(255),
+                IrArg::Dtype("torch.uint8".to_string()),
+            ],
+            [1, 4],
+            "torch.uint8",
+        );
+        call(
+            &mut graph,
+            "user",
+            "aten.view_copy.default",
+            vec![IrArg::Node(q)],
+            [4],
+            "torch.uint8",
+        );
+
+        assert!(IrInsertQdqRescalePass.run(&mut graph));
+
+        let rescale = graph.by_name("q_rescale").unwrap();
+        assert!(matches!(
+            rescale.kwargs.get("input_unsigned"),
+            Some(IrArg::Bool(true))
+        ));
+        assert!(matches!(
+            rescale.kwargs.get("output_unsigned"),
+            Some(IrArg::Bool(true))
+        ));
+        assert!(matches!(rescale.args[3], IrArg::Int(128)));
+        assert!(matches!(rescale.args[4], IrArg::Int(127)));
     }
 
     #[test]

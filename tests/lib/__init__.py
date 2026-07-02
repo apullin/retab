@@ -1,2 +1,1 @@
-"""Shared helpers for Arm direct-fast-lane test harnesses."""
-
+"""Shared helpers for Arm direct lowering test harnesses."""

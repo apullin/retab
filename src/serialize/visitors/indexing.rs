@@ -61,43 +61,15 @@ impl ParsedSelectCopySpec {
             .map(|n| map_axis_to_tosa_dim_order(graph, n, normalized_dim as i32) as usize)
             .unwrap_or(normalized_dim as usize);
 
-        let input_order: Vec<usize> = input_node
-            .map(|n| {
-                let rank = input_shape.len();
-                let mut order = vec![0usize; rank];
-                let mut seen = vec![false; rank];
-                let mut valid = true;
-                for raw_axis in 0..rank {
-                    let pos = map_axis_to_tosa_dim_order(graph, n, raw_axis as i32) as usize;
-                    if pos >= rank || seen[pos] {
-                        valid = false;
-                        break;
-                    }
-                    order[pos] = raw_axis;
-                    seen[pos] = true;
-                }
-                if valid {
-                    order
-                } else {
-                    n.meta
-                        .tosa_dim_order
-                        .clone()
-                        .map(|order| order.into_iter().map(|axis| axis as usize).collect())
-                        .unwrap_or_else(|| (0..rank).collect())
-                }
-            })
+        let input_order = input_node
+            .map(|n| axis_order_for_node(graph, n, input_shape.len()))
             .unwrap_or_else(|| (0..input_shape.len()).collect());
         let normalized_dim = normalized_dim as usize;
         let remaining_axes: Vec<usize> = (0..input_shape.len())
             .filter(|&axis| axis != normalized_dim)
             .collect();
         let output_rank = raw_i32_shape(node).len();
-        let output_order: Vec<usize> = node
-            .meta
-            .tosa_dim_order
-            .clone()
-            .map(|order| order.into_iter().map(|axis| axis as usize).collect())
-            .unwrap_or_else(|| (0..remaining_axes.len()).collect());
+        let output_order = node_dim_order_or_identity(node, remaining_axes.len());
         // `select_copy` removes one logical axis and then collapses the
         // selected size-1 dimension with a reshape. For outputs below rank 4,
         // keep the surviving axes in raw logical order so the user-visible
@@ -164,21 +136,17 @@ impl ParsedSliceSpec {
         let rank = input_shape.len() as i64;
         let raw_dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };
         let raw_dim = raw_dim.clamp(0, rank.saturating_sub(1));
-        let mapped_dim = node
-            .meta
-            .tosa_dim_order
-            .as_ref()
-            .map(|_| map_axis_to_tosa_dim_order(graph, node, raw_dim as i32) as i64)
-            .or_else(|| {
-                input_node.map(|n| map_axis_to_tosa_dim_order(graph, n, raw_dim as i32) as i64)
-            })
-            .unwrap_or(raw_dim) as usize;
+        let mut mapped_dim = input_node
+            .map(|n| map_slice_axis_to_input_layout(graph, node, n, &input_shape, raw_dim as i32))
+            .unwrap_or(raw_dim as usize);
         let start = arg_i64(node, 2, 0);
         let end = arg_i64(
             node,
             3,
             input_shape.get(mapped_dim).copied().unwrap_or(0) as i64,
         );
+        mapped_dim =
+            adjust_slice_axis_for_bounds(&input_shape, mapped_dim, raw_dim as usize, start, end);
         let step = arg_i64(node, 4, 1);
         let input_dim = input_shape.get(mapped_dim).copied().unwrap_or(0) as i64;
         let start_idx = if start < 0 {
@@ -486,11 +454,7 @@ pub(super) fn emit_slice(ctx: &EmitContext) -> EmitResult {
         spec.size_shape.clone(),
     );
     result.push_output_op(
-        TosaTensor::new(
-            &node.name,
-            spec.size_shape,
-            node_output_dtype(node),
-        ),
+        TosaTensor::new(&node.name, spec.size_shape, node_output_dtype(node)),
         Op::Slice,
         Attribute::Slice(SliceAttribute {}),
         vec![

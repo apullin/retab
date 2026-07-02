@@ -61,6 +61,9 @@ pub fn build_hybrid_pipeline(
         Ir(Box::new(
             crate::fx_insert_int32_rescale_ir::IrInsertInt32RescalePass,
         )),
+        Ir(Box::new(
+            crate::fx_fuse_consecutive_rescales_ir::IrFuseConsecutiveRescalesPass,
+        )),
         Ir(Box::new(crate::fx_decompose_quant_ir::IrDecomposeQuantPass)),
         // -- Post-fold: long run of IrPasses (no Python roundtrip) --
         Ir(Box::new(
@@ -211,6 +214,9 @@ fn rescale_steps() -> Vec<crate::fx_ir::PipelineStep> {
         )),
         Ir(Box::new(
             crate::fx_insert_int32_rescale_ir::IrInsertInt32RescalePass,
+        )),
+        Ir(Box::new(
+            crate::fx_fuse_consecutive_rescales_ir::IrFuseConsecutiveRescalesPass,
         )),
     ]
 }

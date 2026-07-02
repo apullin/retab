@@ -3,8 +3,8 @@
 //! TOSA AVG_POOL2D averages over valid (non-pad) elements only, i.e.
 //! count_include_pad=False. Port of upstream DecomposeAvgPool2dPass: when
 //! count_include_pad is set (the aten default) with nonzero padding, pad the
-//! input explicitly with zero constants via cat so the zeros count as valid
-//! elements, then pool without padding; a divisor_override becomes a constant
+//! input explicitly with constant pad so the zeros count as valid elements,
+//! then pool without padding; a divisor_override becomes a constant
 //! multiply by kernel_size / divisor.
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass};
@@ -101,7 +101,6 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
             let x_meta = graph.nodes[x_id].meta.clone();
             let input_meta = x_meta.tensor_stamp_same_dtype_or_float32();
             let output_meta = orig_meta.tensor_stamp_with_dtype_of_or_float32(&x_meta);
-            let dtype = input_meta.dtype();
             let (n, c, h, w) = (
                 input_shape[0],
                 input_shape[1],
@@ -111,78 +110,30 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
 
             let mut pooled_in = x_id;
             let (mut new_pad_h, mut new_pad_w) = (pad_h, pad_w);
-            let mut post_pad_w = 0_i64;
 
             let result = {
                 let mut cursor = graph.rewrite_cursor(id);
 
-                if count_include_pad && pad_w > 0 {
-                    post_pad_w =
-                        compute_post_pad(w, kernel_w, stride_w, pad_w, ceil_mode, divisor_override);
-                    let pre_shape = vec![n, c, h, pad_w];
-                    let pre = cursor.full_float(
-                        format!("{}_pre_pad_w", name),
-                        &pre_shape,
-                        0.0,
-                        dtype,
-                        input_meta.drop_qparams(pre_shape.clone()),
-                    );
-                    let mut cat_inputs = vec![IrArg::Node(pre), IrArg::Node(pooled_in)];
-                    if post_pad_w > 0 {
-                        let post_shape = vec![n, c, h, post_pad_w];
-                        let post = cursor.full_float(
-                            format!("{}_post_pad_w", name),
-                            &post_shape,
-                            0.0,
-                            dtype,
-                            input_meta.drop_qparams(post_shape.clone()),
-                        );
-                        cat_inputs.push(IrArg::Node(post));
-                    }
-                    let padded_w = w + pad_w + post_pad_w;
-                    let padded_shape = vec![n, c, h, padded_w];
-                    pooled_in = cursor.call_function(
-                        format!("{}_pad_w_cat", name),
-                        "aten.cat.default",
-                        vec![IrArg::List(cat_inputs), IrArg::Int(3)],
-                        input_meta.preserve_qparams(padded_shape),
-                    );
-                    new_pad_w = 0;
-                }
-
-                if count_include_pad && pad_h > 0 {
+                if count_include_pad && (pad_h > 0 || pad_w > 0) {
                     let post_pad_h =
                         compute_post_pad(h, kernel_h, stride_h, pad_h, ceil_mode, divisor_override);
-                    let cur_w = w + pad_w + post_pad_w;
-                    let pre_shape = vec![n, c, pad_h, cur_w];
-                    let pre = cursor.full_float(
-                        format!("{}_pre_pad_h", name),
-                        &pre_shape,
-                        0.0,
-                        dtype,
-                        input_meta.drop_qparams(pre_shape.clone()),
-                    );
-                    let mut cat_inputs = vec![IrArg::Node(pre), IrArg::Node(pooled_in)];
-                    if post_pad_h > 0 {
-                        let post_shape = vec![n, c, post_pad_h, cur_w];
-                        let post = cursor.full_float(
-                            format!("{}_post_pad_h", name),
-                            &post_shape,
-                            0.0,
-                            dtype,
-                            input_meta.drop_qparams(post_shape.clone()),
-                        );
-                        cat_inputs.push(IrArg::Node(post));
-                    }
-                    let padded_h = h + pad_h + post_pad_h;
-                    let padded_shape = vec![n, c, padded_h, cur_w];
+                    let post_pad_w =
+                        compute_post_pad(w, kernel_w, stride_w, pad_w, ceil_mode, divisor_override);
+                    let padded_shape = vec![n, c, h + pad_h + post_pad_h, w + pad_w + post_pad_w];
+                    // Keep padding as a semantic PAD node so quantized zero is
+                    // converted through the input qparams at serialization.
                     pooled_in = cursor.call_function(
-                        format!("{}_pad_h_cat", name),
-                        "aten.cat.default",
-                        vec![IrArg::List(cat_inputs), IrArg::Int(2)],
+                        format!("{}_pad", name),
+                        "aten.constant_pad_nd.default",
+                        vec![
+                            IrArg::Node(pooled_in),
+                            i64_list(&[pad_w, post_pad_w, pad_h, post_pad_h]),
+                            IrArg::Float(0.0),
+                        ],
                         input_meta.preserve_qparams(padded_shape),
                     );
                     new_pad_h = 0;
+                    new_pad_w = 0;
                 }
 
                 let pooled = cursor.call_function(
@@ -205,7 +156,7 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
                         format!("{}_divisor_factor", name),
                         &[1, 1, 1, 1],
                         (kernel_h * kernel_w) as f64 / divisor as f64,
-                        dtype,
+                        input_meta.dtype(),
                         output_meta.drop_qparams(vec![1, 1, 1, 1]),
                     );
                     cursor.call_function(

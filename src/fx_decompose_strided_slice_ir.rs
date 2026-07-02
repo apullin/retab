@@ -1,6 +1,8 @@
 //! Pure Rust IrPass: strided slice_copy (step > 1) → unit slice + pad + view + slice + view.
 
-use crate::fx_ir::{i64_list_arg as i64_list, wrap_dim, IrArg, IrGraph, IrPass};
+use crate::fx_ir::{
+    i64_list_arg as i64_list, wrap_dim, IrArg, IrGraph, IrPass, MetaValue, NodeMeta,
+};
 use crate::fx_target::is_slice_tensor_target;
 use crate::graph::ir::DType;
 use crate::runner_logging::log_line;
@@ -22,6 +24,12 @@ fn fixup_end(end: Option<i64>, dim_size: i64) -> i64 {
         e = e.rem_euclid(dim_size);
     }
     e.clamp(0, dim_size)
+}
+
+fn logical_layout_meta(mut meta: NodeMeta) -> NodeMeta {
+    meta.set_extra("retab_logical_layout_boundary", MetaValue::Bool(true));
+    meta.set_extra("retab_preserve_spatial_rank", MetaValue::Bool(true));
+    meta
 }
 
 pub struct IrDecomposeStridedSlicePass;
@@ -99,7 +107,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 start,
                 end,
                 Some(1),
-                meta.preserve_qparams(slice_shape.clone()),
+                logical_layout_meta(meta.preserve_qparams(slice_shape.clone())),
             );
 
             let u = (span_len + step - 1) / step;
@@ -122,7 +130,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                     format!("{}_pad", node_name),
                     "aten.full.default",
                     vec![i64_list(&pad_shape), fill_val],
-                    meta.preserve_qparams(pad_shape),
+                    logical_layout_meta(meta.preserve_qparams(pad_shape)),
                 );
 
                 let mut cat_shape = slice_shape.clone();
@@ -134,7 +142,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                         IrArg::List(vec![IrArg::Node(y), IrArg::Node(pad_node)]),
                         IrArg::Int(dim as i64),
                     ],
-                    meta.preserve_qparams(cat_shape),
+                    logical_layout_meta(meta.preserve_qparams(cat_shape)),
                 );
                 y = cat_node;
             }
@@ -147,7 +155,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 format!("{}_split_view", node_name),
                 y,
                 &split_shape,
-                meta.preserve_qparams(split_shape.clone()),
+                logical_layout_meta(meta.preserve_qparams(split_shape.clone())),
             );
 
             // 4. Inner slice: slice_copy(view1, dim+1, 0, 1, 1) — take first element
@@ -160,7 +168,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 0,
                 1,
                 Some(1),
-                meta.preserve_qparams(inner_shape),
+                logical_layout_meta(meta.preserve_qparams(inner_shape)),
             );
 
             // 5. View: reshape back to output shape [..., u, ...]
@@ -170,7 +178,7 @@ impl IrPass for IrDecomposeStridedSlicePass {
                 format!("{}_out_view", node_name),
                 inner_slice,
                 &out_shape,
-                meta.preserve_qparams(out_shape.clone()),
+                logical_layout_meta(meta.preserve_qparams(out_shape.clone())),
             );
             cursor.replace_anchor_with(result);
             modified = true;

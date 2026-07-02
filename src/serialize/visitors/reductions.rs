@@ -65,9 +65,13 @@ impl ParsedReduceSpec {
             .into_iter()
             .map(|raw_dim| ReduceAxis {
                 raw_dim,
-                tosa_axis: input_node
-                    .map(|n| map_axis_to_tosa_dim_order(graph, n, raw_dim))
-                    .unwrap_or(raw_dim),
+                tosa_axis: if node.meta.retab_reduce_axes_are_physical {
+                    raw_dim
+                } else {
+                    input_node
+                        .map(|n| map_axis_to_actual_tensor_axis(graph, store, n, raw_dim))
+                        .unwrap_or(raw_dim)
+                },
             })
             .collect();
 
@@ -96,9 +100,15 @@ impl ParsedSingleAxisReduceSpec {
                 kwarg_i32(node, "axis", 0)
             }
         };
-        let tosa_axis = input_node
-            .map(|input_node| map_axis_to_tosa_dim_order(graph, input_node, raw_axis))
-            .unwrap_or(raw_axis);
+        let tosa_axis = if node.meta.retab_reduce_axes_are_physical {
+            raw_axis
+        } else {
+            input_node
+                .map(|input_node| {
+                    map_axis_to_actual_tensor_axis(graph, store, input_node, raw_axis)
+                })
+                .unwrap_or(raw_axis)
+        };
         let keepdim = arg_bool(node, 2, true);
         let input_shape = input_node
             .map(|input_node| actual_tensor_shape(graph, store, input_node))
@@ -262,8 +272,11 @@ fn emit_multi_axis_reduce_loop(
     let mut current_shape = input_shape;
 
     for (idx, axis) in axes.iter().enumerate() {
+        let tosa_axis = mapped_axis_for_current_shape(axis.raw_dim, axis.tosa_axis, &current_shape);
         let mut out_shape = current_shape.clone();
-        if let Some(slot) = out_shape.get_mut(axis.tosa_axis as usize) {
+        if let Some(slot) =
+            normalize_axis(tosa_axis, out_shape.len()).and_then(|idx| out_shape.get_mut(idx))
+        {
             *slot = 1;
         }
 
@@ -282,7 +295,7 @@ fn emit_multi_axis_reduce_loop(
         result.push_output_op(
             TosaTensor::new(&out_name, out_shape.clone(), dtype),
             op,
-            make_attr(axis.tosa_axis),
+            make_attr(tosa_axis),
             vec![current_input.clone()],
         );
 

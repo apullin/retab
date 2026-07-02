@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Compare Python/reference lowering against the direct fast lane.
+"""Compare Python/reference lowering against the direct Rust lowering path.
 
 The parent harness runs each model through two isolated child processes:
   1. the baseline Python ARM path
-  2. the direct Rust fast lane
+  2. the direct Rust lowering path
 
 It reports:
   - success/failure
@@ -78,7 +78,7 @@ def _spawn_direct(model: str, seed: int) -> dict[str, object]:
         env["RETAB_DUMP_TOSA"] = str(dump_path)
         cmd = [
             sys.executable,
-            "tests/sweep_direct_fastlane.py",
+            "tests/sweep_direct_lowering.py",
             "--model",
             model,
             "--json-only",

@@ -7,8 +7,8 @@
 
 use crate::fx_ir::{IrArg, IrGraph, IrNode, IrPass, MetaValue, NodeId, NodeMeta, NodeOp, QParam};
 use crate::fx_target::{
-    classify_ir_target, is_add_sub_target, is_fold_qdq_constant_target, is_sum_dim_int_list_target,
-    IrTargetKind,
+    classify_ir_target, is_add_sub_target, is_constant_only_shape_transform_target,
+    is_fold_qdq_constant_target, is_sum_dim_int_list_target, IrTargetKind,
 };
 use crate::graph::ir::DType;
 use crate::store::TensorData;
@@ -333,6 +333,36 @@ where
     }
 }
 
+fn restamp_shape_only_transform_dtypes(graph: &mut IrGraph) -> bool {
+    let mut modified = false;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for id in graph.live_call_function_ids() {
+            if !is_constant_only_shape_transform_target(&graph.nodes[id].target) {
+                continue;
+            }
+            let Some(input_id) = graph.nodes[id].first_node_arg() else {
+                continue;
+            };
+            let Some(input_dtype) = graph.node_dtype(input_id).map(str::to_string) else {
+                continue;
+            };
+            if graph.node_dtype(id) == Some(input_dtype.as_str()) {
+                continue;
+            }
+            if graph.nodes[id]
+                .meta
+                .set_val_dtype_for_existing_shape(input_dtype)
+            {
+                modified = true;
+                changed = true;
+            }
+        }
+    }
+    modified
+}
+
 pub struct IrFoldQdqPass;
 
 impl IrFoldQdqPass {
@@ -461,7 +491,7 @@ impl IrPass for IrFoldQdqPass {
             }
         }
 
-        modified
+        modified | restamp_shape_only_transform_dtypes(graph)
     }
 }
 

@@ -51,6 +51,7 @@ mod fx_decorate_fp_int_cast_ir;
 mod fx_expand_where_mask_ir;
 mod fx_fold_qdq_ir;
 mod fx_fuse_batch_norm_ir;
+mod fx_fuse_consecutive_rescales_ir;
 mod fx_fuse_constant_inputs_ir;
 mod fx_fuse_duplicate_users_ir;
 mod fx_fuse_equal_placeholders_ir;
@@ -173,12 +174,31 @@ fn run_full_fx_pipeline(
     Option<fx_ir::IrGraph>,
     lowering_effects::LoweringEffectBatch,
 )> {
+    use std::time::Instant;
+
+    let profile = crate::config::profile_passes_enabled();
     let py = graph_module.py();
     let exported_program_for_pipeline = exported_program.as_ref().map(|ep| ep.clone_ref(py));
     let pipeline = fx_pipeline::build_hybrid_pipeline(exported_program_for_pipeline);
     let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
+    let started = Instant::now();
     let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
+    if profile {
+        eprintln!(
+            "[RETAB][pass-profile] import_fx nodes={} time_s={:.6}",
+            initial_ir.live_node_count(),
+            started.elapsed().as_secs_f64()
+        );
+    }
+    let started = Instant::now();
     let structural_changed = control_flow::snapshot_pre_pass_qparams_ir(&mut initial_ir);
+    if profile {
+        eprintln!(
+            "[RETAB][pass-profile] prepass=snapshot_pre_pass_qparams changes={} time_s={:.6}",
+            structural_changed,
+            started.elapsed().as_secs_f64()
+        );
+    }
     let (modified, ir, effects) = fx_ir::run_hybrid_pipeline_ext_with_initial_ir(
         py,
         graph_module,
@@ -192,6 +212,15 @@ fn run_full_fx_pipeline(
 fn rebuild_graph_users(graphs: &mut [(String, Graph)]) {
     for (_, graph) in graphs {
         graph.rebuild_user_lists();
+    }
+}
+
+fn log_ingest_profile_phase(profile: bool, phase: &str, start: std::time::Instant) {
+    if profile {
+        eprintln!(
+            "[RETAB][ingest-profile] phase={phase} time_s={:.6}",
+            start.elapsed().as_secs_f64()
+        );
     }
 }
 
@@ -218,7 +247,10 @@ fn ingest_and_serialize_tosa_pybytes(
     _exported_program: Option<PyObject>,
 ) -> PyResult<Py<PyBytes>> {
     let profile = crate::config::profile_ingest_serialize_enabled();
+    let total_start = std::time::Instant::now();
+    let phase_start = std::time::Instant::now();
     let mut stashed = take_stashed_hierarchy();
+    log_ingest_profile_phase(profile, "take_stashed_hierarchy", phase_start);
     let Some((mut ir, effects)) = stashed.parent.take() else {
         return Err(PyRuntimeError::new_err(
             "missing stashed IrGraph for serialization",
@@ -226,6 +258,7 @@ fn ingest_and_serialize_tosa_pybytes(
     };
 
     let has_control_flow = ir_has_control_flow(&ir);
+    let phase_start = std::time::Instant::now();
     if has_control_flow {
         let changed = control_flow::apply_boundary_contracts(&mut ir, &mut stashed.submodules);
         if crate::config::from_ir_debug_enabled() && changed > 0 {
@@ -234,24 +267,37 @@ fn ingest_and_serialize_tosa_pybytes(
             );
         }
     }
+    log_ingest_profile_phase(profile, "control_flow_boundary_contracts", phase_start);
 
     let mut store = crate::store::TensorStore::new();
+    let phase_start = std::time::Instant::now();
     let mut converted = ingest::from_ir::graph_from_ir(&ir, &mut store);
+    log_ingest_profile_phase(profile, "graph_from_ir", phase_start);
+    let phase_start = std::time::Instant::now();
     ingest::from_ir::apply_effects(&mut converted, &mut store, &effects);
+    log_ingest_profile_phase(profile, "apply_effects", phase_start);
+    let phase_start = std::time::Instant::now();
     ingest::finalize::finalize_converted_graph(&mut converted);
+    log_ingest_profile_phase(profile, "finalize_converted_graph", phase_start);
     if crate::config::from_ir_debug_enabled() {
         ingest::from_ir::debug_dump(&converted, "MAIN FROM IR");
     }
+    let phase_start = std::time::Instant::now();
     ingest::from_ir::report_missing_consts(&converted, &store);
+    log_ingest_profile_phase(profile, "report_missing_consts", phase_start);
 
     let mut graphs = vec![(String::from("main"), converted)];
+    let phase_start = std::time::Instant::now();
     if has_control_flow {
         control_flow::append_subgraphs_from_ir(&mut graphs, &mut store, &ir, &stashed.submodules)?;
+        rebuild_graph_users(&mut graphs);
     }
-
-    rebuild_graph_users(&mut graphs);
+    log_ingest_profile_phase(profile, "append_control_flow_subgraphs", phase_start);
+    let phase_start = std::time::Instant::now();
     let py_bytes = serialize::serialize_graphs_to_tosa_py(py, &graphs, &store);
+    log_ingest_profile_phase(profile, "serialize_graphs_to_tosa_py", phase_start);
     if profile {
+        log_ingest_profile_phase(profile, "total", total_start);
         eprintln!(
             "[RETAB][ingest_and_serialize] from-ir graphs={} nodes={} tensors={}",
             graphs.len(),

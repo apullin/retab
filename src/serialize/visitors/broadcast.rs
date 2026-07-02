@@ -83,17 +83,46 @@ pub(super) fn maybe_materialize_binary_broadcast(
         actual_tensor_shape(graph, store, input_nodes[1]),
     ];
 
+    let emitted_shape = emitted_binary_input_shapes(graph, store, node)
+        .into_iter()
+        .reduce(|lhs, rhs| broadcast_two_shapes(&lhs, &rhs).unwrap_or(rhs))
+        .unwrap_or_else(|| actual_tensor_shape(graph, store, node));
+    let output_shape =
+        equal_rank_binary_layout_target_shape(&input_shapes, node).unwrap_or(emitted_shape);
+    for (idx, shape) in input_shapes.iter().enumerate() {
+        if shape == &output_shape || shape.len() != output_shape.len() {
+            continue;
+        }
+        let Some((target_shape, perms)) =
+            layout_transform_to_broadcast_shape(shape, &output_shape, node)
+        else {
+            continue;
+        };
+        let layout_name = format!("{}_input{}_layout", node.name, idx);
+        result.push_output_op(
+            TosaTensor::new(
+                &layout_name,
+                target_shape,
+                actual_tensor_dtype(graph, input_nodes[idx]),
+            ),
+            Op::Transpose,
+            Attribute::Transpose(TransposeAttribute { perms }),
+            vec![input_names[idx].clone()],
+        );
+        input_names[idx] = layout_name;
+    }
+
     let (smaller_idx, target_shape) = if input_shapes[0].len() < input_shapes[1].len() {
         let target_shape = broadcast_shape_for_binary_inputs(
             &raw_i32_shape(input_nodes[0]),
-            &raw_i32_shape(input_nodes[1]),
+            &input_shapes[1],
             node,
         );
         (0usize, target_shape)
     } else if input_shapes[1].len() < input_shapes[0].len() {
         let target_shape = broadcast_shape_for_binary_inputs(
             &raw_i32_shape(input_nodes[1]),
-            &raw_i32_shape(input_nodes[0]),
+            &input_shapes[0],
             node,
         );
         (1usize, target_shape)
@@ -155,11 +184,8 @@ pub(super) fn maybe_materialize_clamp_bound_broadcast(
         return;
     }
 
-    let target_shape = broadcast_shape_for_binary_inputs(
-        &raw_i32_shape(bound_node),
-        &raw_i32_shape(clamp_node),
-        clamp_node,
-    );
+    let target_shape =
+        broadcast_shape_for_binary_inputs(&raw_i32_shape(bound_node), &clamp_shape, clamp_node);
 
     let broadcast_name = format!("{}_{}_broadcast", clamp_node.name, suffix);
     let shape_name = format!("{}_shape", broadcast_name);
@@ -205,13 +231,174 @@ pub(super) fn resolve_clamp_bound_input(
 /// target must be reordered using the current op's `tosa_dim_order`.
 pub(super) fn broadcast_shape_for_binary_inputs(
     smaller_raw: &[i32],
-    larger_raw: &[i32],
+    larger_actual: &[i32],
     layout_node: &Node,
 ) -> Vec<i32> {
-    let mut padded_raw = vec![1; larger_raw.len().saturating_sub(smaller_raw.len())];
+    let mut padded_raw = vec![1; larger_actual.len().saturating_sub(smaller_raw.len())];
     padded_raw.extend_from_slice(smaller_raw);
 
-    apply_tosa_dim_order(layout_node, padded_raw)
+    let reordered = apply_tosa_dim_order(layout_node, padded_raw.clone());
+    for candidate in [&padded_raw, &reordered] {
+        if candidate.len() == larger_actual.len()
+            && candidate
+                .iter()
+                .zip(larger_actual.iter())
+                .all(|(&small, &large)| small == 1 || small == large)
+        {
+            return candidate.to_vec();
+        }
+    }
+
+    reordered
+}
+
+/// Equal-rank binary operands can arrive in different physical layouts when a
+/// layout-sensitive producer has already materialized its output but another
+/// branch is still carrying the raw metadata shape. Prefer the current node's
+/// raw layout when one operand is already there; that keeps the binary op and
+/// its output in the IR contract's layout and only transposes the mismatched
+/// operand.
+pub(super) fn equal_rank_binary_layout_target_shape(
+    input_shapes: &[Vec<i32>; 2],
+    node: &Node,
+) -> Option<Vec<i32>> {
+    if input_shapes[0] == input_shapes[1] {
+        return None;
+    }
+
+    let raw_shape = raw_i32_shape(node);
+    if raw_shape.len() != input_shapes[0].len() || raw_shape.len() != input_shapes[1].len() {
+        return None;
+    }
+
+    let raw_elems = raw_shape.iter().product::<i32>();
+    let same_element_count = input_shapes
+        .iter()
+        .all(|shape| shape.iter().product::<i32>() == raw_elems);
+    if same_element_count && input_shapes.iter().any(|shape| shape == &raw_shape) {
+        return Some(raw_shape);
+    }
+
+    let physical_shape = apply_tosa_dim_order(node, raw_shape.clone());
+    if physical_shape != raw_shape
+        && input_shapes.iter().all(|shape| {
+            same_rank_broadcast_compatible(shape, &physical_shape)
+                || layout_transform_to_broadcast_shape(shape, &physical_shape, node).is_some()
+        })
+    {
+        return Some(physical_shape);
+    }
+
+    for target_shape in input_shapes {
+        if target_shape == &raw_shape || target_shape.iter().product::<i32>() != raw_elems {
+            continue;
+        }
+        if input_shapes.iter().all(|shape| {
+            same_rank_broadcast_compatible(shape, target_shape)
+                || layout_transform_to_broadcast_shape(shape, target_shape, node).is_some()
+        }) {
+            return Some(target_shape.clone());
+        }
+    }
+
+    None
+}
+
+fn same_rank_broadcast_compatible(shape: &[i32], target: &[i32]) -> bool {
+    shape.len() == target.len()
+        && shape
+            .iter()
+            .zip(target.iter())
+            .all(|(&dim, &target_dim)| dim == target_dim || dim == 1)
+}
+
+fn layout_transform_to_broadcast_shape(
+    shape: &[i32],
+    target: &[i32],
+    node: &Node,
+) -> Option<(Vec<i32>, Vec<i32>)> {
+    if same_rank_broadcast_compatible(shape, target) {
+        return None;
+    }
+
+    for forward_perms in layout_orders_for_target(target, node) {
+        if forward_perms.len() != shape.len() || forward_perms.len() != target.len() {
+            continue;
+        }
+        if let Some(forward_shape) = permute_shape(shape, &forward_perms) {
+            if same_rank_broadcast_compatible(&forward_shape, target) {
+                return Some((forward_shape, forward_perms));
+            }
+        }
+
+        let Some(inverse_perms) = inverse_permutation(&forward_perms) else {
+            continue;
+        };
+        let Some(inverse_shape) = permute_shape(shape, &inverse_perms) else {
+            continue;
+        };
+        if same_rank_broadcast_compatible(&inverse_shape, target) {
+            return Some((inverse_shape, inverse_perms));
+        }
+    }
+
+    None
+}
+
+fn layout_orders_for_target(target: &[i32], node: &Node) -> Vec<Vec<i32>> {
+    let mut orders = Vec::new();
+    if let Some(order) = node.meta.tosa_dim_order.as_ref() {
+        push_layout_order(&mut orders, order.iter().map(|&axis| axis as i32).collect());
+    }
+
+    let raw_shape = raw_i32_shape(node);
+    if let Some(order) = channel_last_order(raw_shape.len()) {
+        push_layout_order(&mut orders, order);
+    }
+
+    if raw_shape.len() == target.len() {
+        collect_shape_permutations(&raw_shape, target, &mut orders);
+    }
+
+    orders
+}
+
+fn push_layout_order(orders: &mut Vec<Vec<i32>>, order: Vec<i32>) {
+    if !orders.iter().any(|existing| existing == &order) {
+        orders.push(order);
+    }
+}
+
+fn collect_shape_permutations(raw_shape: &[i32], target: &[i32], orders: &mut Vec<Vec<i32>>) {
+    fn visit(
+        raw_shape: &[i32],
+        target: &[i32],
+        used: &mut [bool],
+        current: &mut Vec<i32>,
+        orders: &mut Vec<Vec<i32>>,
+    ) {
+        if current.len() == target.len() {
+            if !orders.iter().any(|order| order == current) {
+                orders.push(current.clone());
+            }
+            return;
+        }
+
+        let target_dim = target[current.len()];
+        for axis in 0..raw_shape.len() {
+            if used[axis] || raw_shape[axis] != target_dim {
+                continue;
+            }
+            used[axis] = true;
+            current.push(axis as i32);
+            visit(raw_shape, target, used, current, orders);
+            current.pop();
+            used[axis] = false;
+        }
+    }
+
+    let mut used = vec![false; raw_shape.len()];
+    visit(raw_shape, target, &mut used, &mut Vec::new(), orders);
 }
 
 /// A flat reshape into the reordered target only preserves data when the
@@ -279,7 +466,7 @@ mod tests {
         let larger_node = graph.node(larger).expect("larger node");
 
         assert_eq!(
-            broadcast_shape_for_binary_inputs(&[4], &[1, 2, 4, 4], larger_node),
+            broadcast_shape_for_binary_inputs(&[4], &[1, 4, 4, 2], larger_node),
             vec![1, 1, 4, 1]
         );
     }
@@ -301,7 +488,7 @@ mod tests {
 
         assert_eq!(
             broadcast_shape_for_binary_inputs(&[4, 1], &[1, 1, 4, 4], larger_node),
-            vec![1, 4, 1, 1]
+            vec![1, 1, 4, 1]
         );
     }
 
@@ -331,7 +518,7 @@ mod tests {
 
         assert_eq!(larger_node.meta.tosa_dim_order, None);
         assert_eq!(
-            broadcast_shape_for_binary_inputs(&[1, 25, 20], &[1, 10, 25, 20], binary_node),
+            broadcast_shape_for_binary_inputs(&[1, 25, 20], &[1, 25, 20, 10], binary_node),
             vec![1, 25, 20, 1]
         );
     }

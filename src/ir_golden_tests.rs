@@ -35,9 +35,10 @@ fn convert_sum_decomposes_multi_axis_reduction_with_qparam_contract() {
         fixture.graph(),
         &[
             "x|Placeholder|x|args=[]|shape=[2,3,4]|dtype=torch.float32|iqp=-|oqp=-",
-            "sum_reduce_dim2|CallFunction|aten.sum.dim_IntList|args=[%x,[2],false]|shape=[2,3]|dtype=torch.float32|iqp={0:torch.int8@0.25:3}|oqp={0:torch.int8@0.5:-7}",
-            "sum_reduce_dim0|CallFunction|aten.sum.dim_IntList|args=[%sum_reduce_dim2,[0],false]|shape=[3]|dtype=torch.float32|iqp={0:torch.int8@0.25:3}|oqp={0:torch.int8@0.5:-7}",
-            "output|Output|output|args=[%sum_reduce_dim0]|shape=-|dtype=-|iqp=-|oqp=-",
+            "sum_reduce_dim2|CallFunction|aten.sum.dim_IntList|args=[%x,[2],true]|shape=[2,3,1]|dtype=torch.float32|iqp={0:torch.int8@0.25:3}|oqp={0:torch.int8@0.5:-7}",
+            "sum_reduce_dim0|CallFunction|aten.sum.dim_IntList|args=[%sum_reduce_dim2,[0],true]|shape=[1,3,1]|dtype=torch.float32|iqp={0:torch.int8@0.5:-7}|oqp={0:torch.int8@0.5:-7}",
+            "sum|CallFunction|aten.view_copy.default|args=[%sum_reduce_dim0,[3]]|shape=[3]|dtype=torch.float32|iqp={0:torch.int8@0.25:3}|oqp={0:torch.int8@0.5:-7}",
+            "output|Output|output|args=[%sum]|shape=-|dtype=-|iqp=-|oqp=-",
         ],
     );
 }

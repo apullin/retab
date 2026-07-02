@@ -344,7 +344,7 @@ fn collect_output_contracts_for_graph(
 pub(crate) fn snapshot_pre_pass_qparams_ir(graph: &mut fx_ir::IrGraph) -> u32 {
     let cf_ids: Vec<fx_ir::NodeId> = graph
         .live_nodes()
-        .filter(|node| node.is_control_flow())
+        .filter(|node| node.is_while_loop())
         .map(|node| node.id)
         .collect();
 
@@ -395,20 +395,40 @@ fn annotate_parent_rank4_dim_order_ir(graph: &mut fx_ir::IrGraph) -> u32 {
 
     let mut annotated = 0u32;
     for cf_id in cf_ids {
+        let is_while = graph.nodes[cf_id].is_while_loop();
         let user_ids = graph.users(cf_id).to_vec();
         for user_id in user_ids {
             if !graph.nodes[user_id].alive || graph.nodes[user_id].meta.rank() != Some(4) {
                 continue;
             }
-            graph.nodes[user_id].meta.set_extra(
-                "arm_control_flow_parent_output_user",
-                fx_ir::MetaValue::Bool(true),
-            );
-            if graph.nodes[user_id].meta.tosa_dim_order() != Some(&NHWC_DIM_ORDER) {
-                graph.nodes[user_id]
+            if is_while {
+                graph.nodes[user_id].meta.set_extra(
+                    "arm_control_flow_parent_output_user",
+                    fx_ir::MetaValue::Bool(true),
+                );
+                if graph.nodes[user_id].meta.tosa_dim_order() != Some(&NHWC_DIM_ORDER) {
+                    graph.nodes[user_id]
+                        .meta
+                        .set_tosa_dim_order(NHWC_DIM_ORDER.to_vec());
+                    annotated += 1;
+                }
+            } else {
+                let identity = vec![0, 1, 2, 3];
+                if graph.nodes[user_id].meta.tosa_dim_order() != Some(identity.as_slice()) {
+                    graph.nodes[user_id].meta.set_tosa_dim_order(identity);
+                    annotated += 1;
+                }
+                if graph.nodes[user_id]
                     .meta
-                    .set_tosa_dim_order(NHWC_DIM_ORDER.to_vec());
-                annotated += 1;
+                    .extra_bool("retab_logical_layout_boundary")
+                    != Some(true)
+                {
+                    graph.nodes[user_id].meta.set_extra(
+                        "retab_logical_layout_boundary",
+                        fx_ir::MetaValue::Bool(true),
+                    );
+                    annotated += 1;
+                }
             }
         }
     }
@@ -719,7 +739,7 @@ fn strip_while_cond_output_rescales_ir(graph: &mut fx_ir::IrGraph) -> u32 {
     };
     let output_arg_ids = output_arg_node_ids_ir(graph, out_id);
     let mut stripped = 0u32;
-    for rescale_id in output_arg_ids {
+    for (idx, rescale_id) in output_arg_ids.into_iter().enumerate() {
         if !graph.nodes[rescale_id].alive || !graph.nodes[rescale_id].is_rescale() {
             continue;
         }
@@ -728,6 +748,9 @@ fn strip_while_cond_output_rescales_ir(graph: &mut fx_ir::IrGraph) -> u32 {
         };
         let source_is_bool = graph.nodes[src_id].meta.val_dtype_is(DType::Bool);
         if !source_is_bool && !graph.nodes[rescale_id].name.contains("_carried_rescale") {
+            continue;
+        }
+        if !replace_output_arg_at_index_ir(graph, out_id, idx, src_id) {
             continue;
         }
         graph.replace_and_erase(rescale_id, src_id);

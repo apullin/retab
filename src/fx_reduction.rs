@@ -85,28 +85,6 @@ impl ReductionDomain {
             .product()
     }
 
-    pub(crate) fn spatial_avg_pool_kernel_4d(&self) -> Option<Vec<i64>> {
-        if self.input_shape.len() != 4 || !self.dims.iter().all(|&dim| dim == 2 || dim == 3) {
-            return None;
-        }
-
-        match self.dims.as_slice() {
-            [2, 3] => Some(vec![self.input_shape[2], self.input_shape[3]]),
-            [2] => Some(vec![self.input_shape[2], 1]),
-            [3] => Some(vec![1, self.input_shape[3]]),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn avg_pool_output_shape(&self, kernel: &[i64]) -> Vec<i64> {
-        vec![
-            self.input_shape[0],
-            self.input_shape[1],
-            1i64.max(self.input_shape[2] / kernel[0].max(1)),
-            1i64.max(self.input_shape[3] / kernel[1].max(1)),
-        ]
-    }
-
     pub(crate) fn chained_single_axis_steps(&self) -> Vec<ReductionStep> {
         let mut dims = self.dims_i64();
         dims.sort_unstable_by(|lhs, rhs| rhs.cmp(lhs));
@@ -230,6 +208,16 @@ impl MeanQParamPlan {
         }
         let input_qparam = meta.input_qparam()?.clone();
         let output_qparam = meta.output_qparam()?.clone();
+        if meta
+            .val_dtype_kind()
+            .is_some_and(|dtype| !dtype.is_quantized_integer())
+        {
+            return None;
+        }
+        if !input_qparam.is_quantized_integer_dtype() || !output_qparam.is_quantized_integer_dtype()
+        {
+            return None;
+        }
         let sum_qparam = QParam::per_tensor(
             input_qparam.scale * count,
             input_qparam.zp,
@@ -336,5 +324,13 @@ mod tests {
         assert_eq!(sum_meta.output_qparam().unwrap().scale, 1.0);
         assert_eq!(coefficient_meta.output_qparam().unwrap().zp, 0);
         assert_eq!(mul_meta.output_qparam().unwrap().scale, 0.5);
+    }
+
+    #[test]
+    fn mean_qparams_ignore_float_output_domain() {
+        let mut meta = NodeMeta::tensor([2, 4], "torch.float32");
+        meta.set_unary_input_output_qparams(qparam(0.25, 3), qparam(0.5, 5));
+
+        assert!(MeanQParamPlan::from_meta(&meta, 4.0).is_none());
     }
 }
