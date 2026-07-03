@@ -68,7 +68,7 @@ FlatBuffers `size` field compatibility.
 
 - Fork: <https://github.com/apullin/ethos-u-vela>
 - Branch: `retab-regor-opt-5.1.0-curated`
-- Known-good commit: `7096739f`
+- Known-good commit: `123a7e28`
 - Local path: `ethos-u-vela-5.1.0`
 - Upstream remote:
   <https://gitlab.arm.com/artificial-intelligence/ethos-u/ethos-u-vela>
