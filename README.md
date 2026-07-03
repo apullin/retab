@@ -20,7 +20,7 @@ configuration expects concordant commits in these companion repos:
 | --- | --- | --- | --- |
 | [`apullin/executorch`](https://github.com/apullin/executorch) | `et-python-fastpaths` | `dac215665` | Provides the pluggable ExecuTorch ARM preprocess and Edge manager seams that let RETAB replace `TOSABackend._preprocess`. |
 | [`apullin/tosa-rs`](https://github.com/apullin/tosa-rs) | `master` | `de6e6b0` | Provides the Rust TOSA FlatBuffers serialization/deserialization API used by RETAB's serializer. RETAB builds against the vendored copy at `../vendor/tosa-rs`. |
-| [`apullin/ethos-u-vela`](https://github.com/apullin/ethos-u-vela) | `retab-regor-opt-5.1.0-curated` | `750b9e25` | Optional for RETAB unit builds, but this is the current downstream Vela/Regor branch used for end-to-end `.pte` generation and Regor speedups. |
+| [`apullin/ethos-u-vela`](https://github.com/apullin/ethos-u-vela) | `retab-regor-opt-5.1.0-curated` | `00a04a8e` | Optional for RETAB unit builds, but this is the current downstream Vela/Regor branch used for end-to-end `.pte` generation and Regor speedups. |
 
 Treat this as a pinned toolchain, not as independent rolling dependencies. If
 one of these repos moves, rebuild RETAB and re-run the validation matrix before
