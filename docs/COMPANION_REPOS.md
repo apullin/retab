@@ -68,7 +68,7 @@ FlatBuffers `size` field compatibility.
 
 - Fork: <https://github.com/apullin/ethos-u-vela>
 - Branch: `retab-regor-opt-5.1.0-curated`
-- Known-good commit: `123a7e28`
+- Known-good commit: `750b9e25`
 - Local path: `ethos-u-vela-5.1.0`
 - Upstream remote:
   <https://gitlab.arm.com/artificial-intelligence/ethos-u/ethos-u-vela>
@@ -76,7 +76,7 @@ FlatBuffers `size` field compatibility.
 RETAB emits TOSA. Vela consumes that TOSA downstream when building an ARM PTE.
 The curated branch is not required for `cargo check` or pure serializer tests,
 but it is the local branch used for current end-to-end Vela/Regor lowering and
-byte-identical Regor speedups.
+validated Regor speedups.
 
 ### TOSA Tools
 
