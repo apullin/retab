@@ -263,8 +263,160 @@ fn permute_tensor_by_order_cow<'a>(
         return (Cow::Borrowed(data), new_shape);
     }
 
+    if let Some((data, shape)) = permute_tensor_by_known_order(data, shape, elem_size, order) {
+        return (Cow::Owned(data), shape);
+    }
+
     let (data, shape) = permute_tensor_by_order(data, shape, elem_size, order);
     (Cow::Owned(data), shape)
+}
+
+fn permute_tensor_by_known_order(
+    data: &[u8],
+    shape: &[i64],
+    elem_size: usize,
+    order: &[u8],
+) -> Option<(Vec<u8>, Vec<i64>)> {
+    match (shape.len(), order) {
+        (4, [0, 2, 3, 1]) => permute_oihw_to_ohwi_bytes(data, shape, elem_size),
+        (5, [0, 2, 3, 4, 1]) => permute_oidhw_to_odhwi_bytes(data, shape, elem_size),
+        (4, [2, 3, 0, 1]) => permute_depthwise_hwim_bytes(data, shape, elem_size),
+        _ => None,
+    }
+}
+
+fn read_shape4(shape: &[i64]) -> Option<[usize; 4]> {
+    Some([
+        usize::try_from(*shape.first()?).ok()?,
+        usize::try_from(*shape.get(1)?).ok()?,
+        usize::try_from(*shape.get(2)?).ok()?,
+        usize::try_from(*shape.get(3)?).ok()?,
+    ])
+}
+
+fn read_shape5(shape: &[i64]) -> Option<[usize; 5]> {
+    Some([
+        usize::try_from(*shape.first()?).ok()?,
+        usize::try_from(*shape.get(1)?).ok()?,
+        usize::try_from(*shape.get(2)?).ok()?,
+        usize::try_from(*shape.get(3)?).ok()?,
+        usize::try_from(*shape.get(4)?).ok()?,
+    ])
+}
+
+fn copy_element(dst: &mut [u8], dst_off: usize, src: &[u8], src_off: usize, elem_size: usize) {
+    if elem_size == 1 {
+        dst[dst_off] = src[src_off];
+    } else {
+        dst[dst_off..dst_off + elem_size].copy_from_slice(&src[src_off..src_off + elem_size]);
+    }
+}
+
+fn permute_oihw_to_ohwi_bytes(
+    data: &[u8],
+    shape: &[i64],
+    elem_size: usize,
+) -> Option<(Vec<u8>, Vec<i64>)> {
+    let [oc, ic, kh, kw] = read_shape4(shape)?;
+    if !tensor_data_matches_shape(data, shape, elem_size) {
+        return None;
+    }
+    let mut out = vec![0u8; data.len()];
+    for o in 0..oc {
+        let src_o = o * ic * kh * kw;
+        let dst_o = o * kh * kw * ic;
+        for h in 0..kh {
+            for w in 0..kw {
+                let dst_hw = dst_o + (h * kw + w) * ic;
+                for i in 0..ic {
+                    let src_idx = src_o + (i * kh + h) * kw + w;
+                    let dst_idx = dst_hw + i;
+                    copy_element(
+                        &mut out,
+                        dst_idx * elem_size,
+                        data,
+                        src_idx * elem_size,
+                        elem_size,
+                    );
+                }
+            }
+        }
+    }
+    Some((out, vec![shape[0], shape[2], shape[3], shape[1]]))
+}
+
+fn permute_oidhw_to_odhwi_bytes(
+    data: &[u8],
+    shape: &[i64],
+    elem_size: usize,
+) -> Option<(Vec<u8>, Vec<i64>)> {
+    let [oc, ic, kd, kh, kw] = read_shape5(shape)?;
+    if !tensor_data_matches_shape(data, shape, elem_size) {
+        return None;
+    }
+    let mut out = vec![0u8; data.len()];
+    for o in 0..oc {
+        let src_o = o * ic * kd * kh * kw;
+        let dst_o = o * kd * kh * kw * ic;
+        for d in 0..kd {
+            for h in 0..kh {
+                for w in 0..kw {
+                    let dst_dhw = dst_o + ((d * kh + h) * kw + w) * ic;
+                    for i in 0..ic {
+                        let src_idx = src_o + ((i * kd + d) * kh + h) * kw + w;
+                        let dst_idx = dst_dhw + i;
+                        copy_element(
+                            &mut out,
+                            dst_idx * elem_size,
+                            data,
+                            src_idx * elem_size,
+                            elem_size,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Some((out, vec![shape[0], shape[2], shape[3], shape[4], shape[1]]))
+}
+
+fn permute_depthwise_hwim_bytes(
+    data: &[u8],
+    logical_shape: &[i64],
+    elem_size: usize,
+) -> Option<(Vec<u8>, Vec<i64>)> {
+    let [ic, multiplier, kh, kw] = read_shape4(logical_shape)?;
+    if !tensor_data_matches_shape(data, logical_shape, elem_size) {
+        return None;
+    }
+    let mut out = vec![0u8; data.len()];
+    for h in 0..kh {
+        for w in 0..kw {
+            let dst_hw = (h * kw + w) * ic * multiplier;
+            for i in 0..ic {
+                for m in 0..multiplier {
+                    let src_idx = ((i * multiplier + m) * kh + h) * kw + w;
+                    let dst_idx = dst_hw + i * multiplier + m;
+                    copy_element(
+                        &mut out,
+                        dst_idx * elem_size,
+                        data,
+                        src_idx * elem_size,
+                        elem_size,
+                    );
+                }
+            }
+        }
+    }
+    Some((
+        out,
+        vec![
+            logical_shape[2],
+            logical_shape[3],
+            logical_shape[0],
+            logical_shape[1],
+        ],
+    ))
 }
 
 fn permute_tensor_by_order(
