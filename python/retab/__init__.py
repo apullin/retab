@@ -20,8 +20,18 @@ _EXECUTORCH_ARM_EXPORTS = {
     "unpatch_tosa_backend",
 }
 
+_PT2E_FASTPATH_EXPORTS = {
+    "activated_pt2e_fastpaths",
+    "install_pt2e_fastpaths",
+    "uninstall_pt2e_fastpaths",
+}
+
 
 def __getattr__(name):
+    if name in _PT2E_FASTPATH_EXPORTS:
+        from retab.integration import __dict__ as integration_api
+
+        return integration_api[name]
     if name in _EXECUTORCH_ARM_EXPORTS:
         from retab.integration.executorch_arm import __dict__ as integration_api
 
@@ -30,4 +40,4 @@ def __getattr__(name):
 
 
 def __dir__():
-    return sorted(set(globals()) | _EXECUTORCH_ARM_EXPORTS)
+    return sorted(set(globals()) | _EXECUTORCH_ARM_EXPORTS | _PT2E_FASTPATH_EXPORTS)

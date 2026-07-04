@@ -10,3 +10,8 @@ from retab.integration.executorch_arm import (  # noqa: F401
     unpatch_tosa_backend,
     uninstall,
 )
+from retab.integration.torchao_pt2e import (  # noqa: F401
+    activated as activated_pt2e_fastpaths,
+    install as install_pt2e_fastpaths,
+    uninstall as uninstall_pt2e_fastpaths,
+)
