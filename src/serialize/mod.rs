@@ -6,6 +6,7 @@ mod collection;
 mod flatbuffer;
 pub(crate) mod op_semantics;
 mod output_layout;
+mod tensor_decl;
 mod tensor_layout;
 
 use crate::graph::Graph;

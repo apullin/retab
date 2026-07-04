@@ -4,7 +4,8 @@ use pyo3::types::PyBytes;
 
 use super::attribute_flatbuffer::build_attribute;
 use super::collection::SerializedRegion;
-use super::tosa_generated::{TosaOperator, TosaShape, TosaTensor};
+use super::tensor_decl::SerializedTensor;
+use super::tosa_generated::{TosaOperator, TosaShape};
 
 fn log_flatbuffer_profile_phase(profile: bool, phase: &str, start: std::time::Instant) {
     if profile {
@@ -38,7 +39,7 @@ pub(super) fn serialize_regions_to_tosa_py(
 
 fn build_region<'fbb>(
     builder: &mut FlatBufferBuilder<'fbb>,
-    region: &SerializedRegion,
+    region: &SerializedRegion<'_>,
 ) -> WIPOffset<TableFinishedWIPOffset> {
     let profile = crate::config::profile_ingest_serialize_enabled();
     if crate::config::tosa_engine_debug_enabled() {
@@ -163,7 +164,7 @@ fn create_force_aligned_u8_vector<'fbb>(
 
 fn build_tensors(
     builder: &mut FlatBufferBuilder<'_>,
-    tensors: &[TosaTensor],
+    tensors: &[SerializedTensor<'_>],
 ) -> Vec<WIPOffset<TableFinishedWIPOffset>> {
     let mut offsets = Vec::with_capacity(tensors.len());
     for t in tensors {
@@ -173,7 +174,7 @@ fn build_tensors(
             .data
             .as_ref()
             .filter(|data| !data.is_empty())
-            .map(|data| create_force_aligned_u8_vector(builder, data));
+            .map(|data| create_force_aligned_u8_vector(builder, data.as_ref()));
         let var_name = t
             .variable_name
             .as_ref()

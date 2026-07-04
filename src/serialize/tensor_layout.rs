@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::graph::ir::{Arg, Node, OpTarget};
@@ -5,7 +6,8 @@ use crate::graph::Graph;
 use crate::store::TensorData;
 
 use super::op_semantics;
-use super::tosa_generated::{DType, TosaTensor};
+use super::tensor_decl::SerializedTensor;
+use super::tosa_generated::DType;
 use super::visitors::ir_dtype_to_tosa;
 
 /// Describes how a weight tensor should be permuted for TOSA.
@@ -32,12 +34,16 @@ impl TensorDeclarationContext {
         }
     }
 
-    pub(super) fn runtime_placeholder(&self, node: &Node) -> TosaTensor {
+    pub(super) fn runtime_placeholder<'a>(&self, node: &Node) -> SerializedTensor<'a> {
         let (shape, dtype) = placeholder_decl(node);
-        make_graph_tensor(node.name.clone(), shape, dtype, Vec::new())
+        SerializedTensor::new(node.name.clone(), shape, dtype)
     }
 
-    pub(super) fn const_placeholder(&self, node: &Node, tensor_data: &TensorData) -> TosaTensor {
+    pub(super) fn const_placeholder<'a>(
+        &self,
+        node: &Node,
+        tensor_data: &'a TensorData,
+    ) -> SerializedTensor<'a> {
         serialize_const_placeholder(node, tensor_data, &self.weight_perms, &self.dtype_overrides)
     }
 }
@@ -131,6 +137,13 @@ fn permute_i64_shape_u8(shape: &[i64], order: &[u8]) -> Option<Vec<i64>> {
     permute_shape_by_order(shape, order)
 }
 
+fn is_identity_order(order: &[u8]) -> bool {
+    order
+        .iter()
+        .enumerate()
+        .all(|(idx, &axis)| axis as usize == idx)
+}
+
 fn permute_shape_by_order<T, I>(shape: &[T], order: &[I]) -> Option<Vec<T>>
 where
     T: Copy,
@@ -147,16 +160,16 @@ where
 }
 
 /// Permute convolution weight tensors into their physical TOSA layout.
-fn permute_weight_data(
-    data: &[u8],
+fn permute_weight_data<'a>(
+    data: &'a [u8],
     shape: &[i64],
     elem_size: usize,
     kind: WeightPermKind,
-) -> (Vec<u8>, Vec<i64>) {
+) -> (Cow<'a, [u8]>, Vec<i64>) {
     let Some((logical_shape, order)) = weight_permutation_plan(shape, kind) else {
-        return (data.to_vec(), shape.to_vec());
+        return (Cow::Borrowed(data), shape.to_vec());
     };
-    permute_tensor_by_order(data, &logical_shape, elem_size, &order)
+    permute_tensor_by_order_cow(data, &logical_shape, elem_size, &order)
 }
 
 fn weight_permutation_plan(shape: &[i64], kind: WeightPermKind) -> Option<(Vec<i64>, Vec<u8>)> {
@@ -185,7 +198,75 @@ fn weight_permutation_plan(shape: &[i64], kind: WeightPermKind) -> Option<(Vec<i
     }
 }
 
+fn tensor_numel(shape: &[i64]) -> Option<usize> {
+    shape.iter().try_fold(1usize, |acc, &dim| {
+        usize::try_from(dim).ok().and_then(|d| acc.checked_mul(d))
+    })
+}
+
+fn tensor_data_matches_shape(data: &[u8], shape: &[i64], elem_size: usize) -> bool {
+    tensor_numel(shape)
+        .is_some_and(|numel| numel != 0 && numel.saturating_mul(elem_size) == data.len())
+}
+
+fn permutation_preserves_contiguous_data(shape: &[i64], order: &[u8]) -> bool {
+    if shape.len() != order.len() {
+        return false;
+    }
+    let mut seen = vec![false; shape.len()];
+    let mut output_non_singleton_axes = Vec::new();
+    for &axis in order {
+        let axis = axis as usize;
+        if axis >= shape.len() || seen[axis] {
+            return false;
+        }
+        seen[axis] = true;
+        if shape[axis] > 1 {
+            output_non_singleton_axes.push(axis);
+        }
+    }
+    if seen.iter().any(|seen| !seen) {
+        return false;
+    }
+    output_non_singleton_axes
+        == (0..shape.len())
+            .filter(|&axis| shape[axis] > 1)
+            .collect::<Vec<_>>()
+}
+
 /// Permute a tensor's raw bytes according to an arbitrary output-axis order.
+fn permute_tensor_by_order_cow<'a>(
+    data: &'a [u8],
+    shape: &[i64],
+    elem_size: usize,
+    order: &[u8],
+) -> (Cow<'a, [u8]>, Vec<i64>) {
+    if shape.len() != order.len() || shape.is_empty() {
+        return (Cow::Borrowed(data), shape.to_vec());
+    }
+
+    if order
+        .iter()
+        .enumerate()
+        .all(|(idx, &axis)| idx == axis as usize)
+    {
+        return (Cow::Borrowed(data), shape.to_vec());
+    }
+
+    let Some(new_shape) = permute_i64_shape_u8(shape, order) else {
+        return (Cow::Borrowed(data), shape.to_vec());
+    };
+
+    if permutation_preserves_contiguous_data(shape, order)
+        && tensor_data_matches_shape(data, shape, elem_size)
+    {
+        return (Cow::Borrowed(data), new_shape);
+    }
+
+    let (data, shape) = permute_tensor_by_order(data, shape, elem_size, order);
+    (Cow::Owned(data), shape)
+}
+
 fn permute_tensor_by_order(
     data: &[u8],
     shape: &[i64],
@@ -209,9 +290,7 @@ fn permute_tensor_by_order(
     }
 
     let rank = shape.len();
-    let numel: usize = match shape.iter().try_fold(1usize, |acc, &dim| {
-        usize::try_from(dim).ok().and_then(|d| acc.checked_mul(d))
-    }) {
+    let numel: usize = match tensor_numel(shape) {
         Some(v) => v,
         None => return (data.to_vec(), shape.to_vec()),
     };
@@ -220,9 +299,7 @@ fn permute_tensor_by_order(
         return (data.to_vec(), shape.to_vec());
     }
 
-    let Some(new_shape) = permute_i64_shape_u8(shape, order) else {
-        return (data.to_vec(), shape.to_vec());
-    };
+    let new_shape = permute_i64_shape_u8(shape, order).expect("shape/order rank checked above");
 
     let mut input_strides = vec![1usize; rank];
     for i in (0..rank.saturating_sub(1)).rev() {
@@ -485,14 +562,6 @@ fn collect_tensor_dtype_overrides(graph: &Graph) -> HashMap<String, DType> {
     overrides
 }
 
-fn make_graph_tensor(name: String, shape: Vec<i32>, dtype: DType, data: Vec<u8>) -> TosaTensor {
-    if data.is_empty() {
-        TosaTensor::new(&name, shape, dtype)
-    } else {
-        TosaTensor::with_data(&name, shape, dtype, data)
-    }
-}
-
 fn normalize_placeholder_shape(node: &Node, shape: Vec<i32>) -> Vec<i32> {
     if node.meta.preserve_scalar_shape || !shape.is_empty() {
         shape
@@ -509,12 +578,12 @@ fn placeholder_decl(node: &Node) -> (Vec<i32>, DType) {
     )
 }
 
-fn serialize_const_placeholder(
+fn serialize_const_placeholder<'a>(
     node: &Node,
-    tensor_data: &TensorData,
+    tensor_data: &'a TensorData,
     weight_perms: &HashMap<String, WeightPermKind>,
     dtype_overrides: &HashMap<String, DType>,
-) -> TosaTensor {
+) -> SerializedTensor<'a> {
     let store_dtype = ir_dtype_to_tosa(tensor_data.dtype);
     let tensor_dtype = dtype_overrides
         .get(&node.name)
@@ -523,22 +592,40 @@ fn serialize_const_placeholder(
         .unwrap_or(store_dtype);
     let elem_sz = tensor_data.dtype.storage_size_bytes();
 
-    let (final_data, final_shape_i64) = if let Some(&perm_kind) = weight_perms.get(&node.name) {
-        permute_weight_data(&tensor_data.data, &tensor_data.shape, elem_sz, perm_kind)
-    } else if let Some(order) = node.meta.tosa_dim_order.as_ref() {
-        permute_tensor_by_order(&tensor_data.data, &tensor_data.shape, elem_sz, order)
-    } else {
-        (tensor_data.data.clone(), tensor_data.shape.clone())
-    };
+    let (final_data, final_shape_i64): (Cow<'_, [u8]>, Vec<i64>) =
+        if let Some(&perm_kind) = weight_perms.get(&node.name) {
+            permute_weight_data(&tensor_data.data, &tensor_data.shape, elem_sz, perm_kind)
+        } else if let Some(order) = node
+            .meta
+            .tosa_dim_order
+            .as_ref()
+            .filter(|order| !is_identity_order(order))
+        {
+            permute_tensor_by_order_cow(&tensor_data.data, &tensor_data.shape, elem_sz, order)
+        } else {
+            (
+                Cow::Borrowed(tensor_data.data.as_slice()),
+                tensor_data.shape.clone(),
+            )
+        };
     let final_shape: Vec<i32> =
         normalize_placeholder_shape(node, final_shape_i64.iter().map(|&d| d as i32).collect());
-    let final_data = match (tensor_dtype, store_dtype) {
-        (DType::Int4, _) if store_dtype != DType::Int4 => pack_int4_data(&final_data),
-        (DType::Int48, DType::Int32) => widen_int32_data_to_int48(&final_data),
-        _ => final_data,
-    };
 
-    make_graph_tensor(node.name.clone(), final_shape, tensor_dtype, final_data)
+    match (tensor_dtype, store_dtype) {
+        (DType::Int4, _) if store_dtype != DType::Int4 => SerializedTensor::with_owned_data(
+            node.name.clone(),
+            final_shape,
+            tensor_dtype,
+            pack_int4_data(final_data.as_ref()),
+        ),
+        (DType::Int48, DType::Int32) => SerializedTensor::with_owned_data(
+            node.name.clone(),
+            final_shape,
+            tensor_dtype,
+            widen_int32_data_to_int48(final_data.as_ref()),
+        ),
+        _ => SerializedTensor::with_data(node.name.clone(), final_shape, tensor_dtype, final_data),
+    }
 }
 
 #[cfg(test)]
@@ -660,6 +747,7 @@ mod tests {
         let (out, new_shape) = permute_weight_data(&data, &shape, 1, WeightPermKind::Conv2d);
 
         assert_eq!(new_shape, vec![10, 1, 1, 1568]);
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
         assert_eq!(out, data);
     }
 
@@ -761,6 +849,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn identity_dim_order_const_placeholder_borrows_store_data() {
+        let mut node = Node {
+            op: OpType::Placeholder,
+            target: OpTarget::Other("weight_view".to_string()),
+            args: smallvec::SmallVec::new(),
+            kwargs: Vec::new(),
+            meta: NodeMeta::new(crate::graph::ir::TensorInfo::new(
+                &[2, 3],
+                crate::graph::ir::DType::Int8,
+            )),
+            users: smallvec::SmallVec::new(),
+            name: "weight_view".to_string(),
+        };
+        node.meta.tosa_dim_order = Some(smallvec::smallvec![0, 1]);
+
+        let tensor = TensorData {
+            data: vec![1, 2, 3, 4, 5, 6],
+            shape: vec![2, 3],
+            dtype: crate::graph::ir::DType::Int8,
+        };
+        let serialized =
+            TensorDeclarationContext::new(&Graph::new()).const_placeholder(&node, &tensor);
+        let data = serialized.data.as_ref().expect("const tensor data");
+        assert!(matches!(data, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(data.as_ref(), tensor.data.as_slice());
     }
 
     #[test]

@@ -2,34 +2,35 @@ use crate::graph::ir::OpType;
 use crate::graph::Graph;
 use crate::store::TensorStore;
 
+use super::tensor_decl::SerializedTensor;
 use super::tensor_layout::TensorDeclarationContext;
-use super::tosa_generated::{Attribute, TosaOperator, TosaShape, TosaTensor};
+use super::tosa_generated::{Attribute, TosaOperator, TosaShape};
 use super::{output_layout, tosa_generated, visitors};
 
-pub(super) struct SerializedGraphItems {
-    pub(super) tensors: Vec<TosaTensor>,
+pub(super) struct SerializedGraphItems<'a> {
+    pub(super) tensors: Vec<SerializedTensor<'a>>,
     pub(super) shapes: Vec<TosaShape>,
     pub(super) operators: Vec<TosaOperator>,
     pub(super) input_names: Vec<String>,
     pub(super) output_names: Vec<String>,
 }
 
-pub(super) struct SerializedRegion {
+pub(super) struct SerializedRegion<'a> {
     pub(super) name: String,
-    pub(super) items: SerializedGraphItems,
+    pub(super) items: SerializedGraphItems<'a>,
 }
 
-pub(super) fn collect_regions(
+pub(super) fn collect_regions<'a>(
     graphs: &[(String, Graph)],
-    store: &TensorStore,
-) -> Vec<SerializedRegion> {
+    store: &'a TensorStore,
+) -> Vec<SerializedRegion<'a>> {
     graphs
         .iter()
         .map(|(name, graph)| collect_region(name, graph, store))
         .collect()
 }
 
-fn collect_region(name: &str, graph: &Graph, store: &TensorStore) -> SerializedRegion {
+fn collect_region<'a>(name: &str, graph: &Graph, store: &'a TensorStore) -> SerializedRegion<'a> {
     // Region outputs are only true external program outputs on the root graph.
     // Control-flow subgraphs feed COND_IF/WHILE_LOOP directly and must retain
     // their internal layout instead of normalizing back to user-facing shape.
@@ -40,11 +41,11 @@ fn collect_region(name: &str, graph: &Graph, store: &TensorStore) -> SerializedR
     }
 }
 
-fn collect_graph_items(
+fn collect_graph_items<'a>(
     graph: &Graph,
-    store: &TensorStore,
+    store: &'a TensorStore,
     normalize_outputs: bool,
-) -> SerializedGraphItems {
+) -> SerializedGraphItems<'a> {
     let debug = crate::config::tosa_engine_debug_enabled();
     let profile = crate::config::profile_ingest_serialize_enabled();
     let sorted = graph.all_node_ids();
@@ -55,7 +56,7 @@ fn collect_graph_items(
 
     let tensor_decls = TensorDeclarationContext::new(graph);
 
-    let mut tensors: Vec<TosaTensor> = Vec::new();
+    let mut tensors: Vec<SerializedTensor<'a>> = Vec::new();
     let mut shapes: Vec<TosaShape> = Vec::new();
     let mut operators: Vec<TosaOperator> = Vec::new();
     let mut input_names: Vec<String> = Vec::new();
@@ -112,7 +113,7 @@ fn collect_graph_items(
             OpType::CallFunction => {
                 let phase_start = std::time::Instant::now();
                 if let Some(emit_result) = visitors::emit_node(graph, node_id, node, store) {
-                    tensors.extend(emit_result.tensors);
+                    tensors.extend(emit_result.tensors.into_iter().map(SerializedTensor::from));
                     shapes.extend(emit_result.shapes);
                     operators.extend(emit_result.operators);
                 } else {
@@ -128,14 +129,16 @@ fn collect_graph_items(
                 let phase_start = std::time::Instant::now();
                 for arg in &node.args {
                     if normalize_outputs {
+                        let mut output_tensors = Vec::new();
                         output_layout::append_normalized_output_names(
                             graph,
                             store,
                             arg,
-                            &mut tensors,
+                            &mut output_tensors,
                             &mut operators,
                             &mut output_names,
                         );
+                        tensors.extend(output_tensors.into_iter().map(SerializedTensor::from));
                     } else {
                         output_layout::append_output_names(graph, arg, &mut output_names);
                     }
