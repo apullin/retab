@@ -166,6 +166,7 @@ def _functionalize_trivial_inplace_ops(program: ExportedProgram) -> int:
     import torch
 
     replacements = {
+        torch.ops.aten.hardtanh_.default: torch.ops.aten.hardtanh.default,
         torch.ops.aten.relu_.default: torch.ops.aten.relu.default,
     }
     rewrite_count = 0
