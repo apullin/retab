@@ -9,20 +9,22 @@ small set of concordant commits in companion repositories.
 ### RETAB
 
 - Fork: <https://github.com/apullin/retab>
-- Branch: `main`
-- Known-good baseline: `2aa0a7dff`
+- Branch: `test-network`
+- Known-good baseline: `654eb49`
 - Local path: `u55-pipeline/arm-tosa-engine`
 - Role: PyO3 Rust extension plus the thin Python integration layer that
   replaces `TOSABackend._preprocess`.
 
 This repository owns the FX-to-Rust-IR lowering passes, Rust IR rewrites,
-control-flow hierarchy handling, and TOSA flatbuffer emission.
+control-flow hierarchy handling, TOSA flatbuffer emission, and opt-in
+TorchAO/PT2E runtime fast paths. Those TorchAO fast paths are installed by
+RETAB at runtime; they do not require a Torch or TorchAO fork.
 
 ### ExecuTorch
 
 - Fork: <https://github.com/apullin/executorch>
-- Branch: `et-python-fastpaths`
-- Known-good commit: `dac215665`
+- Branch: `retab-instrument-lowering`
+- Known-good commit: `aeba9d044`
 - Local path: `executorch`
 - Upstream remote: <https://github.com/pytorch/executorch>
 
@@ -32,10 +34,11 @@ are recorded in [../compat/executorch.toml](../compat/executorch.toml):
 - `executorch.backends.arm.tosa.backend.TOSABackend.set_preprocess_override`
 - `executorch.exir.program.set_edge_manager_for_partitioners_override`
 
-The branch also carries the local direct-lowering ARM test lane and current
-toolchain expectation fixes used by RETAB validation. Without these commits,
-RETAB can still build as a Rust extension, but it cannot be installed as a
-drop-in ExecuTorch ARM backend fast path.
+The branch also carries the local direct-lowering ARM test lane, ET-side
+lowering fast paths, profiling hooks, and current toolchain expectation fixes
+used by RETAB validation. Without these commits, RETAB can still build as a
+Rust extension, but it cannot be installed as a drop-in ExecuTorch ARM backend
+fast path.
 
 ### `tosa-rs`
 

@@ -18,7 +18,7 @@ configuration expects concordant commits in these companion repos:
 
 | Repo | Branch | Commit | Why it is needed |
 | --- | --- | --- | --- |
-| [`apullin/executorch`](https://github.com/apullin/executorch) | `et-python-fastpaths` | `dac215665` | Provides the pluggable ExecuTorch ARM preprocess and Edge manager seams that let RETAB replace `TOSABackend._preprocess`. |
+| [`apullin/executorch`](https://github.com/apullin/executorch) | `retab-instrument-lowering` | `aeba9d044` | Provides the pluggable ExecuTorch ARM preprocess and Edge manager seams, plus the current ET-side lowering fast paths and profiling hooks. |
 | [`apullin/tosa-rs`](https://github.com/apullin/tosa-rs) | `master` | `de6e6b0` | Provides the Rust TOSA FlatBuffers serialization/deserialization API used by RETAB's serializer. RETAB builds against the vendored copy at `../vendor/tosa-rs`. |
 | [`apullin/ethos-u-vela`](https://github.com/apullin/ethos-u-vela) | `retab-regor-opt-5.1.0-curated` | `a65a8dfe` | Optional for RETAB unit builds, but this is the current downstream Vela/Regor branch used for end-to-end `.pte` generation and Regor speedups. |
 
@@ -26,6 +26,9 @@ Treat this as a pinned toolchain, not as independent rolling dependencies. If
 one of these repos moves, rebuild RETAB and re-run the validation matrix before
 advancing the pins. The longer compatibility map is in
 [docs/COMPANION_REPOS.md](docs/COMPANION_REPOS.md).
+
+RETAB also ships opt-in TorchAO/PT2E fast paths as runtime monkey patches under
+`retab.integration.torchao_pt2e`. Those do not require a Torch or TorchAO fork.
 
 ## What it replaces
 
