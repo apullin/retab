@@ -54,9 +54,21 @@ def _env_get(name: str, *aliases: str, default: str | None = None) -> str | None
 def _run_control_flow_submodule_rust_passes(
     gm, edge_program, retab, region_prefix: str | None = None
 ) -> None:
-    from executorch.backends.arm._passes.arm_pass_utils import (
-        get_cond_while_submodules_nested,
-    )
+    try:
+        from executorch.backends.arm._passes.arm_pass_utils import (
+            get_cond_while_submodules_nested,
+        )
+    except ImportError:
+        # This ExecuTorch build does not expose the control-flow submodule
+        # helper. RETAB's recursive cond/while handling is only needed for
+        # models that contain control flow; models without it (the common case,
+        # e.g. CNN encoders) lower correctly without this step.
+        logger.warning(
+            "[fast_preprocess] get_cond_while_submodules_nested unavailable; "
+            "skipping control-flow submodule passes (cond/while not supported "
+            "on this ExecuTorch build)"
+        )
+        return
 
     if (
         _env_get(

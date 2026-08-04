@@ -24,7 +24,20 @@ def _install_patch_once(slot: str, module, attr: str, wrap):
     if slot in _ORIGINAL_PATCHES:
         return
 
-    original = getattr(module, attr)
+    # These are optional performance fast-paths that monkeypatch ExecuTorch/torch
+    # internals, and those internals move between ExecuTorch versions (not every
+    # TOSAPartitioner exposes `direct_lower`, for instance). The core RETAB TOSA
+    # override installs separately, so skipping an absent target costs speed but
+    # preserves correctness.
+    original = getattr(module, attr, None)
+    if original is None:
+        logger.warning(
+            "[fast_preprocess] skipping patch %s: %s.%s not found in this build",
+            slot,
+            getattr(module, "__name__", module),
+            attr,
+        )
+        return
     _ORIGINAL_PATCHES[slot] = original
     setattr(module, attr, wrap(original))
 
