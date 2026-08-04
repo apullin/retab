@@ -191,6 +191,10 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> Emi
     }
 
     let groups = aten_conv_groups(node);
+    // Resolved before the padding adjustment: depthwise weights need the logical
+    // OIHW metadata to locate the kernel dims, so the pad math cannot be done
+    // without knowing which form this is.
+    let is_depthwise = is_depthwise_aten_conv2d(graph, store, node, groups);
     let pad = adjusted_tosa_pad_for_raw_aten_conv(
         graph,
         store,
@@ -198,10 +202,9 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> Emi
         &spec.pad,
         &spec.stride,
         &spec.dilation,
+        is_depthwise,
     );
     let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
-
-    let is_depthwise = is_depthwise_aten_conv2d(graph, store, node, groups);
 
     let stride = i32_list_or_repeat(spec.stride.clone(), 2, 1);
     let dilation = i32_list_or_repeat(spec.dilation.clone(), 2, 1);
@@ -247,8 +250,9 @@ pub(in crate::serialize::visitors) fn emit_conv2d(ctx: &EmitContext) -> EmitResu
     let raw_pad = i32_list_or_repeat(spec.pad.clone(), 4, 0);
     let stride = i32_list_or_repeat(spec.stride.clone(), 2, 1);
     let dilation = i32_list_or_repeat(spec.dilation.clone(), 2, 1);
-    let pad =
-        adjusted_tosa_pad_for_emitted_conv2d(graph, store, node, &raw_pad, &stride, &dilation);
+    let pad = adjusted_tosa_pad_for_emitted_conv2d(
+        graph, store, node, &raw_pad, &stride, &dilation, false,
+    );
     let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
 
     result.push_output_op(
@@ -305,8 +309,9 @@ pub(in crate::serialize::visitors) fn emit_depthwise_conv2d(ctx: &EmitContext) -
     let raw_pad = i32_list_or_repeat(spec.pad.clone(), 4, 0);
     let stride = i32_list_or_repeat(spec.stride.clone(), 2, 1);
     let dilation = i32_list_or_repeat(spec.dilation.clone(), 2, 1);
-    let pad =
-        adjusted_tosa_pad_for_emitted_conv2d(graph, store, node, &raw_pad, &stride, &dilation);
+    let pad = adjusted_tosa_pad_for_emitted_conv2d(
+        graph, store, node, &raw_pad, &stride, &dilation, true,
+    );
     let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
 
     result.push_output_op(

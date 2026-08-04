@@ -86,7 +86,11 @@ fn rescale_input_shape(graph: &Graph, store: &TensorStore, input_node: &Node) ->
                     &raw_pad,
                     &stride_for_shape,
                     &dilation_for_shape,
+                    // An aten Conv2d can still be depthwise; the branch below
+                    // already relies on the same distinction.
+                    is_depthwise_aten_conv2d(graph, store, input_node),
                 ),
+                // TosaConv2d
                 _ => adjusted_tosa_pad_for_emitted_conv2d(
                     graph,
                     store,
@@ -94,6 +98,7 @@ fn rescale_input_shape(graph: &Graph, store: &TensorStore, input_node: &Node) ->
                     &raw_pad,
                     &stride_for_shape,
                     &dilation_for_shape,
+                    false,
                 ),
             };
             if matches!(input_node.target, OpTarget::Conv2d)
@@ -132,7 +137,9 @@ fn rescale_input_shape(graph: &Graph, store: &TensorStore, input_node: &Node) ->
                     &raw_pad,
                     &stride_for_shape,
                     &dilation_for_shape,
+                    true,
                 ),
+                // TosaDepthwiseConv2d
                 _ => adjusted_tosa_pad_for_emitted_conv2d(
                     graph,
                     store,
@@ -140,6 +147,7 @@ fn rescale_input_shape(graph: &Graph, store: &TensorStore, input_node: &Node) ->
                     &raw_pad,
                     &stride_for_shape,
                     &dilation_for_shape,
+                    true,
                 ),
             };
             compute_depthwise_conv2d_nhwc_output(

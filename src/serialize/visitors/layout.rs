@@ -256,6 +256,7 @@ fn conv_spatial_inputs_and_kernels(
     store: &TensorStore,
     node: &Node,
     spatial_rank: usize,
+    is_depthwise: bool,
 ) -> Option<(Vec<i32>, Vec<i32>)> {
     let tensor_rank = spatial_rank + 2;
     let input_node = graph.node(node.args.first()?.as_node()?)?;
@@ -268,15 +269,50 @@ fn conv_spatial_inputs_and_kernels(
     }
 
     let input_channels = *input_shape.get(spatial_rank + 1)?;
-    let kernel_start = if weight_shape.get(spatial_rank + 1).copied() == Some(input_channels) {
-        1
-    } else {
-        2
-    };
     let input_dims = input_shape.get(1..1 + spatial_rank)?.to_vec();
-    let kernels = weight_shape
-        .get(kernel_start..kernel_start + spatial_rank)?
-        .to_vec();
+
+    // Depthwise weights need the same treatment `compute_conv_output_impl`
+    // applies: `actual_tensor_shape` may have reordered a placeholder's dims and
+    // swapped KH/KW, so a conv1d kernel of 14 taps shows up as [OC, 1, 14, 1]
+    // instead of [OC, 1, 1, 14]. Reading spatial dims off that yields KW=1, the
+    // padding remainder comes out 0, the trailing-pad trim is skipped, and the
+    // op fails TOSA's exact-division rule. The logical OIHW metadata is
+    // authoritative; fall back to the HWCM form only when it is not.
+    let kernels = if is_depthwise {
+        let logical = weight_node.meta.val.shape_slice();
+        if logical.len() == tensor_rank && logical.get(1).copied() == Some(1) {
+            logical
+                .get(2..2 + spatial_rank)?
+                .iter()
+                .map(|&d| d as i32)
+                .collect()
+        } else if spatial_rank == 2 && weight_shape.get(2).copied() == Some(input_channels) {
+            weight_shape.get(0..2)?.to_vec()
+        } else {
+            return None;
+        }
+    } else {
+        let kernel_start = if weight_shape.get(spatial_rank + 1).copied() == Some(input_channels) {
+            1
+        } else {
+            2
+        };
+        weight_shape
+            .get(kernel_start..kernel_start + spatial_rank)?
+            .to_vec()
+    };
+
+    if crate::config::debug_layout_enabled() {
+        eprintln!(
+            "[ConvPadDebug] node={} depthwise={} input={:?} weight={:?} logical={:?} kernels={:?}",
+            node.name,
+            is_depthwise,
+            input_shape,
+            weight_shape,
+            weight_node.meta.val.shape_slice(),
+            kernels
+        );
+    }
     Some((input_dims, kernels))
 }
 
@@ -295,6 +331,7 @@ pub(super) fn adjusted_tosa_pad_for_raw_aten_conv(
     padding: &[i32],
     stride: &[i32],
     dilation: &[i32],
+    is_depthwise: bool,
 ) -> Vec<i32> {
     let symmetric_pad = if padding.len() >= 2 {
         vec![padding[0], padding[0], padding[1], padding[1]]
@@ -304,7 +341,8 @@ pub(super) fn adjusted_tosa_pad_for_raw_aten_conv(
         vec![0, 0, 0, 0]
     };
 
-    let Some((input_dims, kernel_dims)) = conv_spatial_inputs_and_kernels(graph, store, node, 2)
+    let Some((input_dims, kernel_dims)) =
+        conv_spatial_inputs_and_kernels(graph, store, node, 2, is_depthwise)
     else {
         return symmetric_pad;
     };
@@ -353,13 +391,14 @@ fn adjusted_tosa_pad_for_emitted_conv_spatial(
     stride: &[i32],
     dilation: &[i32],
     spatial_rank: usize,
+    is_depthwise: bool,
 ) -> Vec<i32> {
     if pad.len() != spatial_rank * 2 {
         return pad.to_vec();
     }
 
     let Some((input_dims, kernel_dims)) =
-        conv_spatial_inputs_and_kernels(graph, store, node, spatial_rank)
+        conv_spatial_inputs_and_kernels(graph, store, node, spatial_rank, is_depthwise)
     else {
         return pad.to_vec();
     };
@@ -391,8 +430,18 @@ pub(super) fn adjusted_tosa_pad_for_emitted_conv2d(
     pad: &[i32],
     stride: &[i32],
     dilation: &[i32],
+    is_depthwise: bool,
 ) -> Vec<i32> {
-    adjusted_tosa_pad_for_emitted_conv_spatial(graph, store, node, pad, stride, dilation, 2)
+    adjusted_tosa_pad_for_emitted_conv_spatial(
+        graph,
+        store,
+        node,
+        pad,
+        stride,
+        dilation,
+        2,
+        is_depthwise,
+    )
 }
 
 pub(super) fn adjusted_tosa_pad_for_emitted_conv3d(
@@ -403,5 +452,6 @@ pub(super) fn adjusted_tosa_pad_for_emitted_conv3d(
     stride: &[i32],
     dilation: &[i32],
 ) -> Vec<i32> {
-    adjusted_tosa_pad_for_emitted_conv_spatial(graph, store, node, pad, stride, dilation, 3)
+    // TOSA has no depthwise conv3d.
+    adjusted_tosa_pad_for_emitted_conv_spatial(graph, store, node, pad, stride, dilation, 3, false)
 }
