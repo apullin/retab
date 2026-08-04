@@ -196,7 +196,13 @@ mod tests {
 
     #[test]
     fn active_source_has_no_legacy_python_boundary_symbols() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        // `CARGO_MANIFEST_DIR` is only set under Cargo; under another build
+        // system the crate source tree isn't available in the test sandbox, so
+        // skip this scan.
+        let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") else {
+            return;
+        };
+        let root = Path::new(manifest_dir);
         let forbidden = [
             concat!("flush_", "ir"),
             concat!("write_", "back"),
