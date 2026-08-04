@@ -119,7 +119,7 @@ fn finish_tosa_graph_py(
     regions: &[WIPOffset<TableFinishedWIPOffset>],
 ) -> Py<PyBytes> {
     finalize_tosa_graph(builder, regions);
-    PyBytes::new_bound(py, builder.finished_data()).unbind()
+    PyBytes::new(py, builder.finished_data()).unbind()
 }
 
 fn create_force_aligned_u8_vector<'fbb>(

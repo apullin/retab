@@ -87,7 +87,7 @@ pub fn encode_f16(value: f32) -> u16 {
 pub fn extract_tensor_shape(value: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
     attrs(value)
         .object("shape")?
-        .iter()?
+        .try_iter()?
         .map(|dim| dim.and_then(|v| v.extract::<i64>()))
         .collect()
 }
@@ -104,22 +104,22 @@ pub fn extract_tensor_bytes(value: &Bound<'_, PyAny>, dtype: DType) -> PyResult<
     let tensor = value.call_method0("contiguous")?.call_method0("cpu")?;
     let array = match dtype {
         DType::BFloat16 => {
-            let torch = PyModule::import_bound(py, "torch")?;
+            let torch = PyModule::import(py, "torch")?;
             tensor
                 .call_method1("view", (torch.getattr("uint16")?,))?
                 .call_method0("numpy")?
         }
         DType::Float8E4M3 | DType::Float8E5M2 => {
-            let torch = PyModule::import_bound(py, "torch")?;
+            let torch = PyModule::import(py, "torch")?;
             tensor
                 .call_method1("view", (torch.getattr("uint8")?,))?
                 .call_method0("numpy")?
         }
         _ => tensor.call_method0("numpy")?,
     };
-    let view = PyMemoryView::from_bound(&array)?;
+    let view = PyMemoryView::from(&array)?;
     let byte_view = view.call_method1("cast", ("B",))?;
-    PyBuffer::<u8>::get_bound(&byte_view)?.to_vec(py)
+    PyBuffer::<u8>::get(&byte_view)?.to_vec(py)
 }
 
 pub fn extract_tensor_data(value: &Bound<'_, PyAny>) -> PyResult<TensorData> {

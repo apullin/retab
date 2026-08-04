@@ -240,7 +240,7 @@ fn tensor_from_py_value(value: &Bound<'_, PyAny>, source: TensorSource) -> Optio
 fn collect_fx_nodes<'py>(graph: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
     let nodes = attrs(graph)
         .object("nodes")?
-        .iter()?
+        .try_iter()?
         .filter_map(|node| node.ok())
         .collect();
     Ok(nodes)
@@ -310,7 +310,7 @@ fn resolve_fx_kwargs(
 fn fx_node_args<'py>(node: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
     let args = attrs(node).object("args")?;
     let mut result = Vec::new();
-    for arg in args.iter()? {
+    for arg in args.try_iter()? {
         result.push(arg?);
     }
     Ok(result)
@@ -1404,7 +1404,7 @@ fn resolve_arg(py_arg: &Bound<'_, PyAny>, name_to_id: &HashMap<String, NodeId>) 
         }
     }
     // Try list/tuple
-    if let Ok(iter) = py_arg.iter() {
+    if let Ok(iter) = py_arg.try_iter() {
         let items: Vec<IrArg> = iter
             .filter_map(|i| i.ok())
             .map(|i| resolve_arg(&i, name_to_id))
