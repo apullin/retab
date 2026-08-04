@@ -262,7 +262,23 @@ fn import_fx_node<'py>(
 ) -> PyResult<IrNode> {
     let py_node_attrs = attrs(py_node);
     let name = py_node_attrs.or_value("name", String::new());
-    let target = py_node_attrs.required_str("target").unwrap_or_default();
+    let raw_target = py_node_attrs.required_str("target").unwrap_or_default();
+    // Not every build stringifies an `EdgeOpOverload` to the bare op name. Some
+    // append the full schema:
+    //   "<EdgeOpOverload: aten.foo.default>: schema = aten::foo(... bool transposed ...) -> ..."
+    // Target classification here is substring-based, so that trailing schema
+    // text makes matchers fire on operand names rather than the op. Concretely,
+    // `is_layout_passthrough_target` matches "transpose" inside the convolution
+    // schema's "bool transposed", which makes `has_downstream_output_rescale`
+    // walk THROUGH a consumer conv and wrongly skip the Int32->Int8 accumulator
+    // rescale -- Vela then rejects the Int32 conv input. Drop the schema so
+    // classification always sees the clean op name.
+    let target = raw_target
+        .split(": schema")
+        .next()
+        .unwrap_or(&raw_target)
+        .trim()
+        .to_string();
     let op = NodeOp::of(py_node);
     let meta = NodeMeta::from_fx(py_node)?;
     let tensor = tensor_import.tensor_for_node(py_node, &name, &target);
