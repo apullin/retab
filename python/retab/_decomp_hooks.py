@@ -11,6 +11,21 @@ logger = logging.getLogger(__name__)
 _ORIGINAL_PATCHES = {}
 _RUN_DECOMP_DISABLE_UNLIFT_GUARDS = False
 
+# Sticky, process-wide kill switch for the nn_module_stack fast path.
+#
+# The fast path swaps export's ModuleStackTracer for the cheaper PythonKeyTracer
+# (torch passes `store_orig_mod=_record_nn_module_stack`). Nodes that survive the
+# retrace inherit `nn_module_stack` from their pre-decomposition counterpart, but
+# nodes decomposition *creates* have nothing to inherit from and end up bare --
+# which `_verify_nn_module_stack` rejects outright, since it requires the metadata
+# on every top-level call_function/get_attr node.
+#
+# Whether decomposition creates such a node cannot be decided from the
+# pre-decomposition graph that `_uses_straight_line_fast_path_graph_module`
+# inspects, so this is detected on failure and latched off for the rest of the
+# process instead of predicted up front.
+_NN_MODULE_STACK_FAST_PATH_UNSAFE = False
+
 
 def _env_get(name: str, *aliases: str) -> str | None:
     for candidate in (name, *aliases):
@@ -106,6 +121,8 @@ def _graph_module_has_mutating_op(gm) -> bool:
 def _uses_straight_line_fast_path_graph_module(gm) -> bool:
     import torch
 
+    if _NN_MODULE_STACK_FAST_PATH_UNSAFE:
+        return False
     hop_targets = {
         torch.ops.higher_order.cond,
         torch.ops.higher_order.while_loop,
@@ -120,6 +137,22 @@ def _uses_straight_line_fast_path_graph_module(gm) -> bool:
     if _graph_module_contains_targets(gm, {torch.ops.aten.copy.default}):
         return False
     return not _graph_module_has_mutating_op(gm)
+
+
+def _latch_off_nn_module_stack_fast_path(exc: Exception) -> None:
+    """Disable the nn_module_stack fast path for the rest of the process.
+
+    Latched rather than per-call so a model that needs the full ModuleStackTracer
+    pays the doubled decomposition once, not on every `run_decompositions`.
+    """
+    global _NN_MODULE_STACK_FAST_PATH_UNSAFE
+    _NN_MODULE_STACK_FAST_PATH_UNSAFE = True
+    logger.warning(
+        "[fast_preprocess] decomposition produced a node without nn_module_stack "
+        "(%s); disabling the nn_module_stack fast path and retracing with "
+        "ModuleStackTracer. Lowering is correct but slower.",
+        exc,
+    )
 
 
 def _has_trivial_module_call_graph(module_call_graph) -> bool:
@@ -679,11 +712,12 @@ def _install_exported_program_run_decomp_fast_path_patches(
             decompose_custom_triton_ops,
         ):
             global _RUN_DECOMP_DISABLE_UNLIFT_GUARDS
+            from torch._export.verifier import SpecViolationError
+
             use_fast_unlift = _uses_straight_line_fast_path_program(ep)
             previous = _RUN_DECOMP_DISABLE_UNLIFT_GUARDS
-            try:
-                if use_fast_unlift:
-                    _RUN_DECOMP_DISABLE_UNLIFT_GUARDS = True
+
+            def call_original():
                 return original(
                     ep,
                     cia_to_decomp=cia_to_decomp,
@@ -691,6 +725,21 @@ def _install_exported_program_run_decomp_fast_path_patches(
                     joint_loss_index=joint_loss_index,
                     decompose_custom_triton_ops=decompose_custom_triton_ops,
                 )
+
+            try:
+                if use_fast_unlift:
+                    _RUN_DECOMP_DISABLE_UNLIFT_GUARDS = True
+                try:
+                    return call_original()
+                except SpecViolationError as exc:
+                    if not use_fast_unlift or "nn_module_stack" not in str(exc):
+                        raise
+                    # Retrying is sound: the callee derives a fresh module via
+                    # `ep.module()` on every call and leaves `ep` untouched, so the
+                    # second attempt reproduces the stock graph exactly.
+                    _latch_off_nn_module_stack_fast_path(exc)
+                    _RUN_DECOMP_DISABLE_UNLIFT_GUARDS = False
+                    return call_original()
             finally:
                 _RUN_DECOMP_DISABLE_UNLIFT_GUARDS = previous
 
