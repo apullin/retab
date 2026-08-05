@@ -19,7 +19,7 @@ use crate::fx_rewrite_squeeze_ir;
 
 /// Build the lowering pipeline over the persistent IrGraph.
 pub fn build_hybrid_pipeline(
-    _exported_program: Option<pyo3::PyObject>,
+    _exported_program: Option<pyo3::Py<pyo3::PyAny>>,
 ) -> Vec<crate::fx_ir::PipelineStep> {
     use crate::fx_ir::PipelineStep::{Effectful, Ir};
 

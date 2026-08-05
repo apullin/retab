@@ -95,7 +95,7 @@ mod tensor_data;
 #[cfg(test)]
 mod test_ir;
 
-fn clone_bound_pyobject(exported_program: Option<&Bound<'_, PyAny>>) -> Option<PyObject> {
+fn clone_bound_pyobject(exported_program: Option<&Bound<'_, PyAny>>) -> Option<Py<PyAny>> {
     exported_program.map(|ep| ep.clone().unbind())
 }
 
@@ -167,7 +167,7 @@ fn take_stashed_hierarchy() -> StashedPipelineHierarchy {
 
 fn run_full_fx_pipeline(
     graph_module: &Bound<'_, PyAny>,
-    exported_program: Option<PyObject>,
+    exported_program: Option<Py<PyAny>>,
 ) -> PyResult<(
     bool,
     Option<fx_ir::IrGraph>,
@@ -215,7 +215,7 @@ fn ingest_and_serialize_tosa_pybytes(
     _graph_module: &Bound<'_, PyAny>,
     _state_dict: &Bound<'_, PyDict>,
     _graph_signature: &Bound<'_, PyAny>,
-    _exported_program: Option<PyObject>,
+    _exported_program: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyBytes>> {
     let profile = crate::config::profile_ingest_serialize_enabled();
     let mut stashed = take_stashed_hierarchy();
