@@ -30,6 +30,7 @@ from torch.export.exported_program import ExportedProgram
 
 from retab._cf_ctx import _collect_delegate_info_meta
 from retab._decomp_hooks import (
+    _graph_module_contains_targets,
     _install_edge_decomp_fast_path,
     _install_run_decomp_fast_path,
     _uninstall_edge_decomp_fast_path,
@@ -58,16 +59,22 @@ def _run_control_flow_submodule_rust_passes(
         from executorch.backends.arm._passes.arm_pass_utils import (
             get_cond_while_submodules_nested,
         )
-    except ImportError:
-        # This ExecuTorch build does not expose the control-flow submodule
-        # helper. RETAB's recursive cond/while handling is only needed for
-        # models that contain control flow; models without it (the common case,
-        # e.g. CNN encoders) lower correctly without this step.
-        logger.warning(
-            "[fast_preprocess] get_cond_while_submodules_nested unavailable; "
-            "skipping control-flow submodule passes (cond/while not supported "
-            "on this ExecuTorch build)"
-        )
+    except ImportError as exc:
+        # Only cond/while models need this seam. Skipping it for a graph that has no
+        # control flow costs nothing, but skipping it for one that does would emit a
+        # delegate whose submodules never saw the Rust passes -- silently wrong TOSA.
+        # Refuse in that case rather than mislower.
+        import torch
+
+        if _graph_module_contains_targets(
+            gm, {torch.ops.higher_order.cond, torch.ops.higher_order.while_loop}
+        ):
+            raise RuntimeError(
+                "RETAB needs executorch.backends.arm._passes.arm_pass_utils."
+                "get_cond_while_submodules_nested to lower a graph containing cond or "
+                "while_loop, and this ExecuTorch build does not expose it. See "
+                "compat/executorch.toml for the seams RETAB requires."
+            ) from exc
         return
 
     if (
