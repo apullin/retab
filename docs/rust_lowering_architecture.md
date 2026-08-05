@@ -208,6 +208,52 @@ do not yet share a strong local grammar. The largest files are catch-all
 modules that mix several concepts. This makes bugs harder to localize and
 encourages copying patterns instead of reusing helpers.
 
+## Layout
+
+Rank>=4 tensors have two possible orders: the logical torch one (NCHW) and the
+channels-last one TOSA's spatial ops are defined in (NHWC). `NodeMeta`'s
+`tosa_dim_order` records which one a node advertises, and the serializer permutes
+the declared shape -- and, for constants, the payload -- accordingly.
+
+`IrToTosaMemoryFormatPass` (`src/fx_memory_format_ir.rs`) decides that per node.
+It has to reproduce stock ExecuTorch's choice, which is *not* "channels-last
+everywhere":
+
+- Stock keeps the delegate interior logical and wraps each **layout anchor** --
+  convolution, pooling, resize; the ops whose TOSA form is defined channels-last
+  -- in a local `permute -> op -> permute` island
+  (`_passes/rewrite_conv_pass.py` and friends).
+- An elementwise run between two islands merges into them, dropping the permute
+  pair, but only when *every* edge crossing the run's border touches an anchor
+  (`backends/transforms/remove_permutes_around_elementwise_ops.py`). A run that
+  reaches a delegate input or the delegate output is rejected outright and stays
+  logical.
+
+`LayoutPlan` mirrors that. It classifies each node as an anchor, a delegate
+boundary, a reshape barrier, a constant, rank-agnostic (rank<4), or a span
+member; groups spans into maximal runs; and marks a run channels-last exactly
+when all of its borders are anchors. Constants follow the run that consumes
+them, because RETAB materializes a constant's payload in whichever order the
+annotation asks for and has no site that can emit a TRANSPOSE on a constant.
+
+Two consequences worth knowing:
+
+- The permutes are then just boundary repair: `insert_view_boundary_transposes`
+  brackets reshapes that must run in logical order, and
+  `insert_layout_boundary_transposes` reconciles every remaining edge whose ends
+  disagree. One transpose is shared by all consumers that need it, which is what
+  keeps the emitted TRANSPOSE count equal to stock's.
+- A reshape only counts as a barrier when the permutation actually reorders
+  data. `[1, 6] -> [1, 6, 1, 1]`, the shape a decomposed `linear` feeds its
+  convolution, moves only unit dims, so channels-last is a free relabel there
+  and no permute is emitted. `view_layout_sides` is the single source of truth
+  for that test.
+
+Known remaining divergence: when an elementwise run *is* bounded by anchors on
+both sides and pulls in a rank>=4 constant, stock inserts a `permute_copy` node
+on that constant (a TOSA TRANSPOSE) where RETAB bakes the permutation into the
+payload. Reproducing stock there needs a mechanism RETAB does not have.
+
 ## Metadata And Tensor Facts
 
 Metadata is mostly stored in `NodeMeta` in `src/fx_ir.rs`.
