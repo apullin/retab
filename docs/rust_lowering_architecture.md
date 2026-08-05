@@ -249,6 +249,18 @@ Two consequences worth knowing:
   and no permute is emitted. `view_layout_sides` is the single source of truth
   for that test.
 
+`insert_view_boundary_transposes` looks redundant with
+`insert_layout_boundary_transposes` and is not. Collapsing it into a node-level
+`Barrier` role was tried and reverted, because a reshape's layout property is a
+property of each *side*, not of the node: `[1, 16, 7, 7] -> [1, 784]` needs
+logical order on its rank-4 input and has no layout at all on its rank-2 output.
+A single role per node cannot say that, and asserting it node-wide breaks two
+ways at once -- the rank-2 result starts demoting downstream spans that have
+nothing to do with it, and the rank-4 operand's own producer gets skipped for
+having no rank (a tuple-valued `max_pool2d_with_indices`), so the tensor is
+relabelled logical while still holding channels-last data. `ViewLayoutSides`
+keeps the two sides apart deliberately.
+
 Known remaining divergence: when an elementwise run *is* bounded by anchors on
 both sides and pulls in a rank>=4 constant, stock inserts a `permute_copy` node
 on that constant (a TOSA TRANSPOSE) where RETAB bakes the permutation into the
