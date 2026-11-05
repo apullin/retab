@@ -405,28 +405,6 @@ pub(crate) fn is_conv_accumulator_target(target: &str) -> bool {
     contains_any!(&target, "aten.convolution", "aten.conv2d")
 }
 
-/// Ops whose TOSA form is *defined* in channels-last layout, so their operands and
-/// results must be physically permuted (NHWC / NDHWC) rather than logical NCHW.
-///
-/// These are the layout anchors. Stock ExecuTorch wraps each one in a local
-/// `permute -> op -> permute` island (`_passes/rewrite_conv_pass.py`,
-/// `rewrite_max_pool2d_pass.py`, `rewrite_avg_pool2d_pass.py`, `rewrite_upsample.py`)
-/// and leaves the rest of the delegate in logical layout; RETAB instead annotates a
-/// dim order per node, so it needs to know the same anchor set to place the equivalent
-/// boundaries. Both the ATen spelling and the already-rewritten `backend.tosa.*`
-/// spelling are matched, because the layout pass runs before some of the ATen -> TOSA
-/// rewrites and after others.
-pub(crate) fn is_layout_anchor_target(target: &str) -> bool {
-    let target = target.to_ascii_lowercase();
-    contains_any!(
-        &target;
-        "convolution.default" | "conv1d.default" | "conv2d" | "conv3d"
-            | "conv_transpose2d" | "transpose_conv2d" | "transposeconv2d"
-            | "max_pool2d" | "avg_pool2d"
-            | "upsample_nearest2d" | "upsample_bilinear2d" | "tosa.resize"
-    )
-}
-
 pub(crate) fn size_adjust_target_kind(target: &str) -> Option<SizeAdjustTargetKind> {
     let target = target.to_ascii_lowercase();
     if is_transpose_conv2d_target(&target) {
