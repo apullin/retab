@@ -11,6 +11,7 @@ mod tensor_layout;
 mod transpose_peephole;
 
 use crate::graph::Graph;
+use crate::pipeline_config::PipelineConfig;
 use crate::store::TensorStore;
 
 use pyo3::exceptions::PyRuntimeError;
@@ -21,6 +22,7 @@ pub fn serialize_graphs_to_tosa_py(
     py: Python<'_>,
     graphs: &[(String, Graph)],
     store: &TensorStore,
+    config: &PipelineConfig,
 ) -> PyResult<Py<PyBytes>> {
     let tensor_bytes: usize = store.buffers.values().map(|t| t.data.len() + 256).sum();
     let node_count: usize = graphs.iter().map(|(_, g)| g.order.len()).sum();
@@ -36,5 +38,7 @@ pub fn serialize_graphs_to_tosa_py(
         );
     }
     let regions = collection::collect_regions(graphs, store).map_err(PyRuntimeError::new_err)?;
-    Ok(flatbuffer::serialize_regions_to_tosa_py(py, &regions, estimated))
+    Ok(flatbuffer::serialize_regions_to_tosa_py(
+        py, &regions, estimated, config,
+    ))
 }

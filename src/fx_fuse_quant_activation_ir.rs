@@ -8,6 +8,7 @@
 //! The quantize node's qmin is then set to its zero point, so the fused output keeps
 //! the activation's lower bound. Runs before fold_qdq, while Q/DQ nodes are present.
 
+use crate::constant_materialization::quantize_value_stock;
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId};
 use crate::runner_logging::log_line;
 
@@ -18,14 +19,6 @@ const QUANT_SCALE: usize = 1;
 const QUANT_ZP: usize = 2;
 const QUANT_QMIN: usize = 3;
 const QUANT_QMAX: usize = 4;
-
-/// Mirrors `quantized_decomposed.quantize_per_tensor` on one value: float32
-/// arithmetic, round half to even, then clamp to [qmin, qmax].
-fn quantize_value(value: f64, scale: f64, zp: i64, qmin: i64, qmax: i64) -> i64 {
-    let inv_scale = (1.0 / scale) as f32;
-    let rounded = ((value as f32) * inv_scale).round_ties_even() as f64;
-    (rounded + zp as f64).clamp(qmin as f64, qmax as f64) as i64
-}
 
 /// The quantize_per_tensor node whose qmin should become its zero point, if the
 /// activation at `id` is fuseable.
@@ -50,7 +43,7 @@ fn fuseable_quant_user(graph: &IrGraph, id: NodeId) -> Option<NodeId> {
         let zp = quant.arg_int(QUANT_ZP)?;
         let qmin = quant.arg_int(QUANT_QMIN)?;
         let qmax = quant.arg_int(QUANT_QMAX)?;
-        if quantize_value(max_val, scale, zp, qmin, qmax) != qmax {
+        if quantize_value_stock(max_val, scale, zp, qmin, qmax) != qmax {
             return None;
         }
     }
@@ -95,14 +88,14 @@ impl IrPass for IrFuseQuantActivationPass {
 
 #[cfg(test)]
 mod tests {
-    use super::quantize_value;
+    use crate::constant_materialization::quantize_value_stock;
 
     #[test]
     fn quantize_value_rounds_half_to_even_and_clamps() {
-        assert_eq!(quantize_value(6.0, 6.0 / 127.0, 0, -128, 127), 127);
-        assert_eq!(quantize_value(6.0, 0.1, -10, -128, 127), 50);
-        assert_eq!(quantize_value(100.0, 0.1, 0, -128, 127), 127);
-        assert_eq!(quantize_value(0.25, 0.5, 0, -128, 127), 0);
-        assert_eq!(quantize_value(0.75, 0.5, 0, -128, 127), 2);
+        assert_eq!(quantize_value_stock(6.0, 6.0 / 127.0, 0, -128, 127), 127);
+        assert_eq!(quantize_value_stock(6.0, 0.1, -10, -128, 127), 50);
+        assert_eq!(quantize_value_stock(100.0, 0.1, 0, -128, 127), 127);
+        assert_eq!(quantize_value_stock(0.25, 0.5, 0, -128, 127), 0);
+        assert_eq!(quantize_value_stock(0.75, 0.5, 0, -128, 127), 2);
     }
 }

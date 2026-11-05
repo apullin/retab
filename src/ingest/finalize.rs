@@ -189,7 +189,6 @@ fn is_accumulator_op(target: &OpTarget) -> bool {
             | OpTarget::TosaConv2d
             | OpTarget::TosaDepthwiseConv2d
             | OpTarget::TosaTransposeConv2d
-            | OpTarget::TosaFullyConnected
             | OpTarget::Linear
             | OpTarget::Addmm
             | OpTarget::Matmul

@@ -1,4 +1,4 @@
-//! Pure Rust IrPass version of master RewritePadPass — non-constant modes only.
+//! Pure Rust IrPass version of RewritePadPass.
 //!
 //! TOSA `PAD` is constant-only, so reflect/replicate/circular `aten.pad.default`
 //! must be decomposed into `slice_copy` + `cat`. For each padded dim (innermost
@@ -170,7 +170,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     if !is_pad_target(&node.target) || node.args.len() < 2 {
         return false;
     }
-    // args: (input, pad_list, mode, value) — mode may be positional OR a kwarg.
+    // constant_pad_nd has a numeric value at args[2] and always uses constant mode.
     let mode = node
         .arg_or_kwarg_str(2, "mode")
         .unwrap_or("constant")
@@ -288,7 +288,7 @@ impl IrPass for IrRewritePadPass {
         let modified = graph.rewrite_live_call_functions(rewrite_one);
         if modified {
             log_line(format_args!(
-                "[IrRewritePad] decomposed non-constant pad to slice+cat"
+                "[IrRewritePad] rewrote padding with crops and slice+cat"
             ));
         }
         modified
@@ -314,6 +314,52 @@ mod tests {
         assert_eq!(graph.nodes[crop].arg_int(2), Some(2));
         assert_eq!(graph.nodes[crop].arg_int(3), Some(16));
         assert_eq!(graph.nodes[pad].arg_int_list(1), Some(vec![0, 3]));
+    }
+
+    #[test]
+    fn constant_pad_nd_negative_pad_preserves_fill_and_qparams() {
+        for value in [None, Some(IrArg::Int(0)), Some(IrArg::Int(5))] {
+            let mut graph = IrGraph::empty();
+            let x = placeholder(&mut graph, "x", [1, 1, 4, 4], "torch.int8");
+            let qp = crate::test_ir::qparam(0.25, 3, "torch.int8");
+            let mut args = vec![IrArg::Node(x), i64_list_arg(&[-1, 1])];
+            args.extend(value.clone());
+            let pad = call(
+                &mut graph,
+                "pad",
+                "aten.constant_pad_nd.default",
+                args,
+                [1, 1, 4, 4],
+                "torch.int8",
+            );
+            graph.node_mut(pad).meta.set_both_qparams(qp.clone());
+            output(&mut graph, pad);
+
+            assert!(IrRewritePadPass.run(&mut graph));
+            let crop = graph.node(pad).arg_node(0).unwrap();
+            assert!(is_slice_copy_tensor_target(&graph.node(crop).target));
+            assert_eq!(graph.node(crop).arg_int(1), Some(3));
+            assert_eq!(graph.node(crop).arg_int(2), Some(1));
+            assert_eq!(graph.node(crop).arg_int(3), Some(4));
+            assert_eq!(graph.node_shape_vec(crop), Some(vec![1, 1, 4, 3]));
+            assert_eq!(graph.node(pad).arg_int_list(1), Some(vec![0, 1]));
+            assert_eq!(
+                graph.node(pad).args.get(2).and_then(IrArg::as_int),
+                value.as_ref().and_then(IrArg::as_int)
+            );
+            assert!(graph
+                .node(crop)
+                .meta
+                .output_qparam()
+                .unwrap()
+                .same_exact_affine_dtype(&qp));
+            assert!(graph
+                .node(pad)
+                .meta
+                .output_qparam()
+                .unwrap()
+                .same_exact_affine_dtype(&qp));
+        }
     }
 
     #[test]

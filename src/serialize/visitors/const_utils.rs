@@ -1,15 +1,7 @@
 use super::*;
 use crate::constant_materialization::{
-    repeated_scalar_bytes_i32, scalar_bytes as constant_scalar_bytes,
+    quantize_scalar_with_qparam, repeated_scalar_bytes_i32, scalar_bytes as constant_scalar_bytes,
 };
-
-pub(super) fn normalize_tensor_shape(shape: Vec<i32>) -> Vec<i32> {
-    if shape.is_empty() {
-        vec![1]
-    } else {
-        shape
-    }
-}
 
 pub(super) fn make_tensor(
     name: String,
@@ -17,24 +9,11 @@ pub(super) fn make_tensor(
     dtype: DType,
     data: Vec<u8>,
 ) -> TosaTensor {
-    TosaTensor::with_data(&name, normalize_tensor_shape(shape), dtype, data)
+    TosaTensor::with_data(&name, shape, dtype, data)
 }
 
 pub(super) fn make_empty_tensor(name: String, shape: Vec<i32>, dtype: DType) -> TosaTensor {
-    TosaTensor::new(&name, normalize_tensor_shape(shape), dtype)
-}
-
-pub(super) fn make_empty_tensor_for_node(
-    node: &Node,
-    name: String,
-    shape: Vec<i32>,
-    dtype: DType,
-) -> TosaTensor {
-    if node.meta.preserve_scalar_shape && shape.is_empty() {
-        TosaTensor::new(&name, shape, dtype)
-    } else {
-        make_empty_tensor(name, shape, dtype)
-    }
+    TosaTensor::new(&name, shape, dtype)
 }
 
 pub(super) fn make_rank1_const_tensor(
@@ -131,15 +110,6 @@ pub(super) fn quantize_fill_value(node: &Node, value: f64) -> f64 {
     }
 }
 
-/// Mirrors `quantized_decomposed.quantize_per_tensor` on one value, as rc4's
-/// `QuantArgs.quantize_value` calls it: float32 `value * (1 / scale)`, round half to even,
-/// add the zero point, clamp to [qmin, qmax].
-pub(super) fn quantize_scalar_with_qparam(value: f64, qp: crate::graph::ir::QuantArgs) -> f64 {
-    let inv_scale = (1.0 / qp.scale) as f32;
-    let rounded = ((value as f32) * inv_scale).round_ties_even() as f64;
-    (rounded + qp.zero_point as f64).clamp(qp.qmin as f64, qp.qmax as f64)
-}
-
 pub(super) fn push_inline_const(result: &mut EmitResult, tensor: TosaTensor) {
     result.push_const(tensor);
 }
@@ -156,14 +126,6 @@ pub(super) fn push_filled_const_if_supported(
     };
     push_inline_const(result, tensor);
     true
-}
-
-pub(super) fn make_shape_const_tensor(name: String, values: Vec<i32>) -> TosaTensor {
-    let data: Vec<u8> = values
-        .iter()
-        .flat_map(|&d| (d as i64).to_le_bytes())
-        .collect();
-    TosaTensor::with_data(&name, vec![values.len() as i32], DType::Shape, data)
 }
 
 #[cfg(test)]

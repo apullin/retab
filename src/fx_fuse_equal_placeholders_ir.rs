@@ -5,48 +5,44 @@ use crate::lowering_effects::{
     DeleteConstantPlaceholderEffect, LoweringEffect, LoweringEffectBatch,
 };
 
-fn placeholder_fingerprint(
-    graph: &IrGraph,
-    id: NodeId,
-) -> Option<(String, crate::graph::ir::DType, Vec<i64>, Vec<u8>)> {
-    let node = &graph.nodes[id];
-    if !matches!(node.op, NodeOp::Placeholder | NodeOp::GetAttr) {
-        return None;
-    }
-    let tensor = node.tensor.as_ref()?;
-    let special_dtype = node
-        .meta
-        .extra_str("tosa_special_dtype")
-        .unwrap_or_default()
-        .to_string();
-    Some((
-        special_dtype,
-        tensor.data.dtype,
-        tensor.data.shape.clone(),
-        tensor.data.data.clone(),
-    ))
-}
-
+/// Pairs `(duplicate, canonical)` of constant placeholders with equal dtype, shape,
+/// special dtype and bytes; the canonical one is the first in graph order. Only
+/// placeholders that share metadata have their bytes compared, so large unique
+/// weights are never hashed or copied.
 pub fn find_duplicate_placeholder_pairs(graph: &IrGraph) -> Vec<(NodeId, NodeId)> {
-    let mut buckets: HashMap<(String, crate::graph::ir::DType, Vec<i64>, Vec<u8>), Vec<NodeId>> =
+    let mut by_meta: HashMap<(&str, crate::graph::ir::DType, &[i64]), Vec<NodeId>> =
         HashMap::new();
-
-    for id in graph.live_node_ids() {
-        let Some(key) = placeholder_fingerprint(graph, id) else {
+    for node in graph.live_nodes() {
+        if !matches!(node.op, NodeOp::Placeholder | NodeOp::GetAttr) {
+            continue;
+        }
+        let Some(tensor) = node.tensor.as_ref() else {
             continue;
         };
-        buckets.entry(key).or_default().push(id);
+        let special_dtype = node.meta.extra_str("tosa_special_dtype").unwrap_or_default();
+        by_meta
+            .entry((special_dtype, tensor.data.dtype, tensor.data.shape.as_slice()))
+            .or_default()
+            .push(node.id);
     }
 
     let mut pairs = Vec::new();
-    for ids in buckets.values() {
-        let Some((&canonical, duplicates)) = ids.split_first() else {
-            continue;
-        };
-        for &dup in duplicates {
-            pairs.push((dup, canonical));
+    for ids in by_meta.values().filter(|ids| ids.len() > 1) {
+        let mut by_data: HashMap<&[u8], NodeId> = HashMap::new();
+        for &id in ids {
+            let data = graph.nodes[id].tensor.as_ref().map(|t| t.data.data.as_slice());
+            let Some(data) = data else { continue };
+            match by_data.entry(data) {
+                std::collections::hash_map::Entry::Occupied(canonical) => {
+                    pairs.push((id, *canonical.get()));
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(id);
+                }
+            }
         }
     }
+    pairs.sort_unstable();
     pairs
 }
 

@@ -169,6 +169,84 @@ mod tests {
         assert_eq!((inner.carried, inner.additional), (2, 1));
     }
 
+    #[test]
+    fn region_boundaries_keep_logical_shapes_through_layout_transposes() {
+        use crate::test_ir::{call, placeholder, qparam};
+
+        for restore_logical_layout in [false, true] {
+            let mut parent = IrGraph::empty();
+            let x = placeholder(&mut parent, "x", [2, 3, 4, 5], "torch.int8");
+            let qp = qparam(0.25, 3, "torch.int8");
+            parent.node_mut(x).meta.set_both_qparams(qp.clone());
+            parent.node_mut(x).meta.set_tosa_dim_order(vec![0, 1, 2, 3]);
+            let mut input = call(
+                &mut parent,
+                "x_input_layout",
+                "backend.tosa.TRANSPOSE.default",
+                vec![IrArg::Node(x), crate::fx_ir::i64_list_arg(&[0, 2, 3, 1])],
+                [2, 4, 5, 3],
+                "torch.int8",
+            );
+            parent.node_mut(input).meta.set_both_qparams(qp.clone());
+            parent
+                .node_mut(input)
+                .meta
+                .set_tosa_dim_order(vec![0, 2, 3, 1]);
+            let expected_order = if restore_logical_layout {
+                input = call(
+                    &mut parent,
+                    "restore_layout",
+                    "backend.tosa.TRANSPOSE.default",
+                    vec![
+                        IrArg::Node(input),
+                        crate::fx_ir::i64_list_arg(&[0, 3, 1, 2]),
+                    ],
+                    [2, 3, 4, 5],
+                    "torch.int8",
+                );
+                parent.node_mut(input).meta.set_both_qparams(qp.clone());
+                parent
+                    .node_mut(input)
+                    .meta
+                    .set_tosa_dim_order(vec![0, 1, 2, 3]);
+                vec![0, 1, 2, 3]
+            } else {
+                vec![0, 2, 3, 1]
+            };
+            add_while(
+                &mut parent,
+                "loop",
+                "cond",
+                "body",
+                vec![IrArg::Node(input)],
+                Vec::new(),
+            );
+            let parent = (parent, LoweringEffectBatch::default());
+            let mut region = IrGraph::empty();
+            let ph = placeholder(&mut region, "arg", [2, 3, 4, 5], "torch.float32");
+            assert!(
+                apply_pre_submodule_qparam_propagation_ir(
+                    Some("cond"),
+                    &mut region,
+                    Some(&parent),
+                    &BTreeMap::new(),
+                ) > 0
+            );
+            assert_eq!(region.node_shape(ph), Some([2, 3, 4, 5].as_slice()));
+            assert_eq!(region.node(ph).meta.val_dtype(), Some("torch.int8"));
+            assert_eq!(
+                region.node(ph).meta.tosa_dim_order(),
+                Some(expected_order.as_slice())
+            );
+            assert!(region
+                .node(ph)
+                .meta
+                .output_qparam()
+                .unwrap()
+                .same_exact_affine_dtype(&qp));
+        }
+    }
+
     fn active_source_files(root: &Path) -> Vec<PathBuf> {
         fn visit(dir: &Path, out: &mut Vec<PathBuf>) {
             let Ok(entries) = std::fs::read_dir(dir) else {

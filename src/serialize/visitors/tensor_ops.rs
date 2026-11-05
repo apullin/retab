@@ -519,10 +519,7 @@ pub(super) fn emit_eye(ctx: &EmitContext) -> EmitResult {
 
 pub(super) fn emit_scalar_tensor(ctx: &EmitContext) -> EmitResult {
     let node = ctx.node;
-    let mut output_shape = ctx.shape();
-    if output_shape.is_empty() {
-        output_shape.push(1);
-    }
+    let output_shape = ctx.shape();
     let fill_value = arg_f64(node, 0, 0.0);
     emit_filled_const(node, output_shape, fill_value, "emit_scalar_tensor")
 }
@@ -543,19 +540,19 @@ pub(super) fn emit_resize(ctx: &EmitContext) -> EmitResult {
         spec.align_corners,
     );
 
+    // RESIZE's scale, offset and border are shape operands: TOSA 1.0 produces them with
+    // CONST_SHAPE, and Vela rejects a CONST of shape type.
     let mut result = EmitResult::default();
-    let scales_name = result.push_const(make_shape_const_tensor(
-        format!("{}_scales", spec.final_output_name),
+    let scales_name = format!("{}_scales", spec.final_output_name);
+    push_const_shape(
+        &mut result,
+        scales_name.clone(),
         vec![scale_n_y, scale_d_y, scale_n_x, scale_d_x],
-    ));
-    let offset_name = result.push_const(make_shape_const_tensor(
-        format!("{}_offset", spec.final_output_name),
-        vec![offset_y, offset_x],
-    ));
-    let border_name = result.push_const(make_shape_const_tensor(
-        format!("{}_border", spec.final_output_name),
-        vec![border_y, border_x],
-    ));
+    );
+    let offset_name = format!("{}_offset", spec.final_output_name);
+    push_const_shape(&mut result, offset_name.clone(), vec![offset_y, offset_x]);
+    let border_name = format!("{}_border", spec.final_output_name);
+    push_const_shape(&mut result, border_name.clone(), vec![border_y, border_x]);
 
     result.push_output_op(
         make_empty_tensor(
@@ -611,7 +608,7 @@ pub(super) fn emit_resize(ctx: &EmitContext) -> EmitResult {
 
 pub(super) fn emit_aten_permute(ctx: &EmitContext) -> EmitResult {
     let spec = ParsedShapeTransformSpec::parse(ctx.graph, ctx.store, ctx.node);
-    let perms = ctx.arg_i32_list(1);
+    let perms = transpose_perms(ctx.node);
     emit_shape_transform(
         spec,
         Op::Transpose,
@@ -727,10 +724,7 @@ fn emit_tile_with_multiples(
     }
 
     let multiples_name = format!("{}_multiples", node.name);
-    push_inline_const(
-        &mut result,
-        make_shape_const_tensor(multiples_name.clone(), tile_multiples),
-    );
+    push_const_shape(&mut result, multiples_name.clone(), tile_multiples);
     result.push_output_op(
         make_empty_tensor(
             primary_output_name(graph, node),

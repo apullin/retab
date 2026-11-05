@@ -3,6 +3,7 @@
 import pytest
 
 pytest.importorskip("executorch.backends.arm.tosa.backend")
+pytest.importorskip("retab._native")
 
 from executorch.backends.arm.tosa.backend import TOSABackend
 from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
@@ -25,6 +26,17 @@ def test_patch_then_unpatch_restores_stock_attributes():
         rp.unpatch_tosa_backend()
     assert all(TOSABackend.__dict__[name] is value for name, value in stock.items())
     assert _tosa_backend_classes() == 1
+
+
+def test_fast_paths_are_opt_in():
+    from retab import _decomp_hooks
+    from retab.integration.executorch_arm import activated
+
+    with activated():
+        assert not _decomp_hooks._ORIGINAL_PATCHES
+    with activated(fast_paths=True):
+        assert "gen_edge_manager_for_partitioners" in _decomp_hooks._ORIGINAL_PATCHES
+    assert not _decomp_hooks._ORIGINAL_PATCHES
 
 
 def test_stock_preprocess_survives_a_direct_patch():

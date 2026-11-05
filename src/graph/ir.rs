@@ -44,6 +44,8 @@ pub enum OpTarget {
     Gelu,
     Sigmoid,
     Tanh,
+    Maximum,
+    Minimum,
     Clamp,
     Mean,
     Cat,
@@ -65,6 +67,7 @@ pub enum OpTarget {
     Bmm,
     Embedding,
     Exp,
+    Erf,
     Log,
     Neg,
     Reciprocal,
@@ -78,6 +81,7 @@ pub enum OpTarget {
     Select,
     SelectCopy,
     IndexSelect,
+    Gather,
     Where,
     FloorDivide,
     Arange,
@@ -118,7 +122,6 @@ pub enum OpTarget {
     TosaConcat,
     TosaSlice,
     TosaPad,
-    TosaFullyConnected,
     TosaConst,
     TosaConv3d,
     TosaMatmul,
@@ -126,7 +129,6 @@ pub enum OpTarget {
     TosaTanh,
     TosaExp,
     TosaLog,
-    TosaNeg,
     TosaAbs,
     TosaCeil,
     TosaFloor,
@@ -145,7 +147,6 @@ pub enum OpTarget {
     TosaCast,
     TosaNegate,
     TosaReduceMin,
-    TosaReduceAny,
     TosaMaximum,
     TosaMinimum,
 
@@ -484,7 +485,6 @@ pub struct NodeMeta {
     pub tosa_dim_order: Option<SmallVec<[u8; 6]>>,
     pub tosa_special_dtype: Option<DType>,
     pub arm_control_flow_parent_output_user: bool,
-    pub preserve_scalar_shape: bool,
 }
 
 impl NodeMeta {
@@ -496,7 +496,6 @@ impl NodeMeta {
             tosa_dim_order: None,
             tosa_special_dtype: None,
             arm_control_flow_parent_output_user: false,
-            preserve_scalar_shape: false,
         }
     }
 }

@@ -69,6 +69,23 @@ impl DivBuilder<'_, '_> {
             .dtype_cast_if_needed(format!("{}_{tag}", self.name), source, dtype, meta)
     }
 
+    /// Pad a lower-rank operand with leading ones, mirroring stock's
+    /// MatchArgRanksPass (`aten.view_copy` with the padded shape).
+    fn rank_match(&mut self, tag: &str, operand: &mut IntOperand, target_rank: usize) {
+        if operand.shape.len() >= target_rank {
+            return;
+        }
+        let mut padded = vec![1i64; target_rank - operand.shape.len()];
+        padded.extend_from_slice(&operand.shape);
+        operand.id = self.cursor.call_function(
+            format!("{}_{tag}", self.name),
+            "aten.view_copy.default",
+            vec![IrArg::Node(operand.id), crate::fx_ir::i64_list_arg(&padded)],
+            self.meta.cloned_with_val(padded.clone(), "torch.int32"),
+        );
+        operand.shape = padded;
+    }
+
     /// Upstream `_correct_intdiv_floor`.
     fn correct_floor(
         &mut self,
@@ -196,14 +213,21 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId) -> bool {
         name,
         meta,
     };
-    let a = IntOperand {
+    let mut a = IntOperand {
         id: builder.cast("lhs_int32", a.id, &a.shape, "torch.int32"),
         shape: a.shape,
     };
-    let b = IntOperand {
+    let mut b = IntOperand {
         id: builder.cast("rhs_int32", b.id, &b.shape, "torch.int32"),
         shape: b.shape,
     };
+    // Mirror stock's MatchArgRanksPass for this subgraph: pad the lower-rank
+    // operand with leading ones so every binary op below sees equal ranks.
+    // Constant divisors then fold to the broadcast shape instead of leaving
+    // rank-alignment reshapes to serialization.
+    let target_rank = a.shape.len().max(b.shape.len());
+    builder.rank_match("lhs_rank_match", &mut a, target_rank);
+    builder.rank_match("rhs_rank_match", &mut b, target_rank);
     let mut quotient = builder.node(
         "intdiv",
         INTDIV_TARGET,
@@ -286,6 +310,8 @@ mod tests {
             vec![
                 "aten._to_copy.default",
                 "aten._to_copy.default",
+                // The scalar rhs pads to rank 2 like stock's MatchArgRanksPass.
+                "aten.view_copy.default",
                 INTDIV_TARGET,
                 "aten.mul.Tensor",
                 "aten.sub.Tensor",

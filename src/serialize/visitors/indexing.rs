@@ -1,5 +1,6 @@
 use super::emitter::EmitContext;
 use super::*;
+use crate::constant_materialization::quantize_scalar_with_qparam;
 use crate::graph::ir::Arg;
 
 pub fn register(table: &mut EmitterTable) {
@@ -243,10 +244,18 @@ pub(super) fn emit_select(ctx: &EmitContext) -> EmitResult {
     result
 }
 
-fn select_scalar_const_value(store: &TensorStore, node: &Node) -> Option<f64> {
+/// The scalar operand's value, and whether it is already quantized (an integer
+/// constant, e.g. a scalar_tensor folded ahead of time with its output qparams).
+fn select_scalar_const_value(store: &TensorStore, node: &Node) -> Option<(f64, bool)> {
     match node.target {
-        OpTarget::ScalarTensor => node.args.first().map(Arg::as_f64),
-        _ => store.get(&node.name).and_then(|tensor| tensor.scalar_f64()),
+        OpTarget::ScalarTensor => node.args.first().map(|arg| (arg.as_f64(), false)),
+        _ => store.get(&node.name).and_then(|tensor| {
+            let quantized = matches!(
+                tensor.dtype,
+                crate::graph::ir::DType::Int8 | crate::graph::ir::DType::Int16
+            );
+            tensor.scalar_f64().map(|value| (value, quantized))
+        }),
     }
 }
 
@@ -276,14 +285,17 @@ fn maybe_normalize_select_inputs(
         };
         let input_shape = actual_tensor_shape(graph, store, input_node);
         if input_shape != output_shape {
-            let Some(raw_value) = select_scalar_const_value(store, input_node) else {
+            let Some((raw_value, already_quantized)) = select_scalar_const_value(store, input_node)
+            else {
                 continue;
             };
             let fill_value = match (
                 input_node.meta.val.dtype,
                 input_node.meta.output_qparams.first(),
             ) {
-                (crate::graph::ir::DType::Int8 | crate::graph::ir::DType::Int16, Some((_, qp))) => {
+                (crate::graph::ir::DType::Int8 | crate::graph::ir::DType::Int16, Some((_, qp)))
+                    if !already_quantized =>
+                {
                     quantize_scalar_with_qparam(raw_value, *qp)
                 }
                 _ => raw_value,

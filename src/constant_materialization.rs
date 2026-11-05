@@ -1,4 +1,17 @@
-use crate::graph::ir::DType;
+use crate::graph::ir::{DType, QuantArgs};
+
+/// Mirrors `quantized_decomposed.quantize_per_tensor` on one value, as rc4's
+/// `QuantArgs.quantize_value` calls it: float32 `value * (1 / scale)`, round half to even,
+/// add the zero point, clamp to [qmin, qmax].
+pub fn quantize_value_stock(value: f64, scale: f64, zp: i64, qmin: i64, qmax: i64) -> i64 {
+    let inv_scale = (1.0 / scale) as f32;
+    let rounded = ((value as f32) * inv_scale).round_ties_even() as f64;
+    (rounded + zp as f64).clamp(qmin as f64, qmax as f64) as i64
+}
+
+pub fn quantize_scalar_with_qparam(value: f64, qp: QuantArgs) -> f64 {
+    quantize_value_stock(value, qp.scale, qp.zero_point, qp.qmin, qp.qmax) as f64
+}
 
 fn scalar_bytes_impl(dtype: DType, value: f64, int4_as_i8: bool) -> Option<Vec<u8>> {
     Some(match dtype {
@@ -57,4 +70,18 @@ pub fn repeated_scalar_bytes(shape: &[i64], scalar: &[u8]) -> Option<Vec<u8>> {
 
 pub fn repeated_scalar_bytes_i32(shape: &[i32], scalar: &[u8]) -> Option<Vec<u8>> {
     repeat_scalar_bytes(shape_numel_i32(shape)?, scalar)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quantize_value_stock;
+
+    #[test]
+    fn stock_quantize_rounds_half_to_even_in_float32() {
+        assert_eq!(quantize_value_stock(2.5, 1.0, 0, -128, 127), 2);
+        assert_eq!(quantize_value_stock(-2.5, 1.0, 3, -128, 127), 1);
+        assert_eq!(quantize_value_stock(100.0, 0.1, 0, -128, 127), 127);
+        assert_eq!(quantize_value_stock(0.25, 0.5, 0, -128, 127), 0);
+        assert_eq!(quantize_value_stock(0.75, 0.5, 0, -128, 127), 2);
+    }
 }

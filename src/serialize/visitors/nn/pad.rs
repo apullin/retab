@@ -1,4 +1,5 @@
 use super::*;
+use crate::constant_materialization::quantize_scalar_with_qparam;
 
 pub(super) fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;

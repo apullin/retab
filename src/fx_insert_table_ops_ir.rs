@@ -118,8 +118,17 @@ fn quantize_to_spec(value: f64, spec: &TableTensorSpec) -> Option<i64> {
             spec.qmin
         });
     }
-    let rounded = (value / spec.scale).round_ties_even() as i64 + spec.zp;
-    Some(rounded.clamp(spec.qmin, spec.qmax))
+    Some(crate::constant_materialization::quantize_value_stock(
+        value,
+        spec.scale,
+        spec.zp,
+        spec.qmin,
+        spec.qmax,
+    ))
+}
+
+fn dequantize_code(code: i64, zp: i64, scale: f64) -> f64 {
+    ((code - zp) as f32 * scale as f32) as f64
 }
 
 fn sigmoid(x: f64) -> f64 {
@@ -283,13 +292,13 @@ fn plan_precomputed_int8_table(
     if input.dtype != DType::Int8 || output.dtype != DType::Int8 {
         return None;
     }
-    if input.qmax - input.qmin != 255 {
-        return None;
-    }
 
+    // Stock clamps the canonical INT8 domain to the input range, so narrowed
+    // domains still yield a full 256-entry table with duplicated edge values.
     let mut data = Vec::with_capacity(256);
-    for q in input.qmin..=input.qmax {
-        let dequant = ((q - input.zp) as f64) * input.scale;
+    for q in i8::MIN as i64..=i8::MAX as i64 {
+        let clamped = q.clamp(input.qmin, input.qmax);
+        let dequant = dequantize_code(clamped, input.zp, input.scale);
         let value = eval_precomputable_table(spec, dequant)?;
         let q_out = quantize_to_spec(value, &output)?;
         let q_i8 = i8::try_from(q_out).ok()?;
@@ -365,12 +374,21 @@ fn plan_precomputed_int16_table(
         return None;
     }
 
+    let span = (input.qmax + 1 - input.qmin) as f64;
+    let has_full_upper = input.qmax == i16::MAX as i64;
     let mut lut_values = Vec::with_capacity(513);
     for step in 0..=512 {
-        let raw_q = input.qmin + (step * 128);
+        // Stock linspaces qmin..=qmax+1 in 513 steps (int32, truncated).
+        let raw_q = (input.qmin as f64 + step as f64 * span / 512.0) as i64;
         let clamped = raw_q.clamp(input.qmin, input.qmax);
         let masked = (((clamped as i16) as i32) & !0x7f) as i64;
-        let dequant = ((masked - input.zp) as f64) * input.scale;
+        // TOSA interpolates raw codes [32640, 32767] against a virtual right
+        // endpoint at affine code 32768; evaluate its real value there.
+        let dequant = if step == 512 && has_full_upper {
+            dequantize_code(i16::MAX as i64 + 1, input.zp, input.scale)
+        } else {
+            dequantize_code(masked, input.zp, input.scale)
+        };
         let value = eval_precomputable_table(spec, dequant)?;
         lut_values.push(quantize_to_spec(value, &output)?);
     }
@@ -380,17 +398,8 @@ fn plan_precomputed_int16_table(
         .map(|&value| value.unsigned_abs())
         .max()
         .unwrap_or(0);
-    let rshift = ceil_log2_u64(max_abs) + 1 - 16;
-    if rshift < 0 {
-        if crate::config::table_debug_enabled() {
-            eprintln!(
-                "[TABLE16-None] kind={} max_abs={} rshift={} in(scale={},zp={},qmin={},qmax={}) out(scale={},zp={},dtype={:?})",
-                spec.kind, max_abs, rshift, input.scale, input.zp, input.qmin, input.qmax,
-                output.scale, output.zp, output.dtype,
-            );
-        }
-        return None;
-    }
+    // Small outputs already fit in signed int16; stock clamps the shift to 0.
+    let rshift = (ceil_log2_u64(max_abs) + 1 - 16).max(0);
     let rescale_lshift = rshift - 7;
     let data = lut_values
         .into_iter()
@@ -414,6 +423,37 @@ fn plan_precomputed_table(
     spec: &TableOpSpec,
 ) -> Option<InsertPrecomputedTableOpEffect> {
     plan_precomputed_int8_table(node, spec).or_else(|| plan_precomputed_int16_table(node, spec))
+}
+
+pub(crate) fn unsupported_table_node_names(
+    graph: &IrGraph,
+    effects: &LoweringEffectBatch,
+) -> Vec<String> {
+    use std::collections::HashSet;
+    let planned: HashSet<&str> = effects
+        .items
+        .iter()
+        .filter_map(|effect| match effect {
+            LoweringEffect::InsertPrecomputedTableOp(effect) => Some(effect.node_name.as_str()),
+            _ => None,
+        })
+        .collect();
+    graph
+        .live_call_function_ids()
+        .into_iter()
+        .filter_map(|id| {
+            let node = graph.node(id);
+            if !node.meta.has_nonempty_input_and_output_qparams() {
+                return None;
+            }
+            table_op_spec(node)?;
+            if planned.contains(node.name.as_str()) {
+                None
+            } else {
+                Some(node.name.clone())
+            }
+        })
+        .collect()
 }
 
 impl EffectfulIrPass for IrInsertTableOpsEffectPass {
@@ -497,6 +537,36 @@ mod tests {
             Vec::new(),
             int16_qparam(scale, qmin, qmax),
         );
+    }
+
+    fn table_node_with_io_qparams(
+        graph: &mut IrGraph,
+        name: &str,
+        target: &str,
+        args: Vec<IrArg>,
+        input: QParam,
+        output: QParam,
+    ) -> usize {
+        let mut meta = NodeMeta::default();
+        meta.set_input_qparam_at(0, input);
+        meta.set_output_qparam_at(0, output);
+        call_with_meta(graph, name, target, args, meta)
+    }
+
+    fn int16_io_qparam(scale: f64, zp: i64, qmin: i64, qmax: i64) -> QParam {
+        QParam::per_tensor(scale, zp, qmin, qmax, "torch.int16".to_string())
+    }
+
+    fn int8_io_qparam(scale: f64, zp: i64, qmin: i64, qmax: i64) -> QParam {
+        QParam::per_tensor(scale, zp, qmin, qmax, "torch.int8".to_string())
+    }
+
+    fn table_i16_bytes(effect: &InsertPrecomputedTableOpEffect) -> Vec<i16> {
+        effect
+            .data
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect()
     }
 
     #[test]
@@ -696,13 +766,165 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_when_int16_table_requires_negative_shift() {
+    fn clamps_negative_shift_to_zero() {
         let mut graph = IrGraph::empty();
         int16_table_node(&mut graph, "sigmoid16_neg_shift", 0.25, -32768, 32767);
 
         let result = IrInsertTableOpsEffectPass.run(&mut graph);
+        assert!(result.modified);
+        match &result.effects.items[0] {
+            LoweringEffect::InsertPrecomputedTableOp(effect) => {
+                assert_eq!(effect.shape, vec![513]);
+                assert_eq!(effect.rescale_lshift, -7);
+                let table = table_i16_bytes(effect);
+                assert_eq!(table.len(), 513);
+                assert!(table.iter().take(256).all(|&v| v == 0));
+                assert_eq!(table[256], 2);
+                assert!(table.iter().skip(257).all(|&v| v == 4));
+            }
+            other => panic!("unexpected effect: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn int16_softplus_uses_virtual_endpoint() {
+        let mut graph = IrGraph::empty();
+        table_node_with_io_qparams(
+            &mut graph,
+            "softplus16",
+            "aten.softplus.default",
+            vec![IrArg::Int(0)],
+            int16_io_qparam(0.001, 0, -32768, 32767),
+            int16_io_qparam(0.001, 0, -32768, 32767),
+        );
+
+        let result = IrInsertTableOpsEffectPass.run(&mut graph);
+        assert!(result.modified);
+        match &result.effects.items[0] {
+            LoweringEffect::InsertPrecomputedTableOp(effect) => {
+                assert_eq!(effect.shape, vec![513]);
+                assert_eq!(effect.rescale_lshift, -7);
+                let table = table_i16_bytes(effect);
+                assert_eq!(table.len(), 513);
+                assert_eq!(table[511], 32640);
+                assert_eq!(table[512], 32767);
+                assert_eq!(table[510], 32512);
+                #[rustfmt::skip]
+                let expected: [i16; 513] = [
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,1,1,1,1,1,1,1,1,1,2,2,
+                    2,2,3,3,4,4,5,5,6,7,8,9,10,11,13,15,
+                    17,19,21,24,27,31,35,40,45,51,58,66,74,84,95,108,
+                    121,137,154,173,195,219,245,275,307,342,381,423,470,519,573,631,
+                    693,759,829,903,982,1063,1149,1238,1331,1427,1525,1627,1731,1837,1946,2057,
+                    2169,2284,2399,2516,2634,2754,2874,2995,3117,3240,3363,3487,3611,3736,3861,3987,
+                    4113,4239,4365,4491,4618,4745,4872,4999,5126,5253,5381,5508,5636,5763,5891,6018,
+                    6146,6274,6402,6529,6657,6785,6913,7041,7169,7297,7425,7553,7680,7808,7936,8064,
+                    8192,8320,8448,8576,8704,8832,8960,9088,9216,9344,9472,9600,9728,9856,9984,10112,
+                    10240,10368,10496,10624,10752,10880,11008,11136,11264,11392,11520,11648,11776,11904,12032,12160,
+                    12288,12416,12544,12672,12800,12928,13056,13184,13312,13440,13568,13696,13824,13952,14080,14208,
+                    14336,14464,14592,14720,14848,14976,15104,15232,15360,15488,15616,15744,15872,16000,16128,16256,
+                    16384,16512,16640,16768,16896,17024,17152,17280,17408,17536,17664,17792,17920,18048,18176,18304,
+                    18432,18560,18688,18816,18944,19072,19200,19328,19456,19584,19712,19840,19968,20096,20224,20352,
+                    20480,20608,20736,20864,20992,21120,21248,21376,21504,21632,21760,21888,22016,22144,22272,22400,
+                    22528,22656,22784,22912,23040,23168,23296,23424,23552,23680,23808,23936,24064,24192,24320,24448,
+                    24576,24704,24832,24960,25088,25216,25344,25472,25600,25728,25856,25984,26112,26240,26368,26496,
+                    26624,26752,26880,27008,27136,27264,27392,27520,27648,27776,27904,28032,28160,28288,28416,28544,
+                    28672,28800,28928,29056,29184,29312,29440,29568,29696,29824,29952,30080,30208,30336,30464,30592,
+                    30720,30848,30976,31104,31232,31360,31488,31616,31744,31872,32000,32128,32256,32384,32512,32640,
+                    32767,
+                ];
+                assert_eq!(table.as_slice(), &expected);
+            }
+            other => panic!("unexpected effect: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn int16_sigmoid_negative_shift_matches_stock() {
+        let mut graph = IrGraph::empty();
+        table_node_with_io_qparams(
+            &mut graph,
+            "sigmoid16_neg",
+            "aten.sigmoid.default",
+            Vec::new(),
+            int16_io_qparam(0.01, 0, -32768, 32767),
+            int16_io_qparam(0.001, 0, -32768, 32767),
+        );
+
+        let result = IrInsertTableOpsEffectPass.run(&mut graph);
+        assert!(result.modified);
+        match &result.effects.items[0] {
+            LoweringEffect::InsertPrecomputedTableOp(effect) => {
+                assert_eq!(effect.rescale_lshift, -7);
+                let table = table_i16_bytes(effect);
+                #[rustfmt::skip]
+                let expected: [i16; 513] = [
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                    0,0,0,0,0,0,0,0,0,0,0,2,6,21,72,218,
+                    500,782,928,979,994,998,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,1000,
+                    1000,
+                ];
+                assert_eq!(table.as_slice(), &expected);
+            }
+            other => panic!("unexpected effect: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_helper_flags_unplanned_quantized_table_ops() {
+        let mut graph = IrGraph::empty();
+        int16_table_node(&mut graph, "sigmoid16_narrow", 0.25, -1024, 1023);
+        let result = IrInsertTableOpsEffectPass.run(&mut graph);
         assert!(!result.modified);
-        assert!(result.effects.items.is_empty());
+        let missing = unsupported_table_node_names(&graph, &result.effects);
+        assert_eq!(missing, vec!["sigmoid16_narrow".to_string()]);
+
+        let mut ok_graph = IrGraph::empty();
+        int16_table_node(&mut ok_graph, "sigmoid16_ok", 0.25, -32768, 32767);
+        let ok_result = IrInsertTableOpsEffectPass.run(&mut ok_graph);
+        assert!(ok_result.modified);
+        assert!(unsupported_table_node_names(&ok_graph, &ok_result.effects).is_empty());
     }
 
     #[test]
@@ -710,5 +932,99 @@ mod tests {
         let spec = TableOpSpec::scalar("pow", 3.0);
         assert_eq!(eval_precomputable_table(&spec, -11.0), Some(-1331.0));
         assert_eq!(eval_precomputable_table(&spec, -2.0), Some(-8.0));
+    }
+
+    #[test]
+    fn int8_narrow_domain_clamps_canonical_codes() {
+        let mut graph = IrGraph::empty();
+        table_node_with_io_qparams(
+            &mut graph,
+            "sigmoid_narrow",
+            "aten.sigmoid.default",
+            Vec::new(),
+            int8_io_qparam(0.1, 0, -10, 10),
+            int8_io_qparam(0.1, 0, -128, 127),
+        );
+
+        let result = IrInsertTableOpsEffectPass.run(&mut graph);
+        assert!(result.modified);
+        match &result.effects.items[0] {
+            LoweringEffect::InsertPrecomputedTableOp(effect) => {
+                assert_eq!(effect.shape, vec![256]);
+                assert_eq!(effect.rescale_lshift, 0);
+                let table: Vec<i8> =
+                    effect.data.iter().map(|&b| b as i8).collect();
+                #[rustfmt::skip]
+                let expected: [i8; 256] = [
+                    3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,
+                    3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,
+                    3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,
+                    3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,
+                    3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,
+                    3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,
+                    3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,
+                    3,3,3,3,3,3,3,3,3,3,4,4,4,4,5,5,
+                    5,5,5,6,6,6,6,7,7,7,7,7,7,7,7,7,
+                    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+                    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+                    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+                    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+                    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+                    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+                    7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+                ];
+                assert_eq!(table.as_slice(), &expected);
+            }
+            other => panic!("unexpected effect: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn int8_softplus_beta2_uses_float32_quantize() {
+        let mut graph = IrGraph::empty();
+        table_node_with_io_qparams(
+            &mut graph,
+            "softplus_beta2",
+            "aten.softplus.default",
+            vec![
+                IrArg::Int(0),
+                IrArg::Float(2.0),
+                IrArg::Float(5.0),
+            ],
+            int8_io_qparam(0.01, -128, -128, 127),
+            int8_io_qparam(0.02, -128, -128, 127),
+        );
+
+        let result = IrInsertTableOpsEffectPass.run(&mut graph);
+        assert!(result.modified);
+        match &result.effects.items[0] {
+            LoweringEffect::InsertPrecomputedTableOp(effect) => {
+                let table: Vec<i8> =
+                    effect.data.iter().map(|&b| b as i8).collect();
+                assert_eq!(table.len(), 256);
+                assert_eq!(table[125 + 128], -2);
+                #[rustfmt::skip]
+                let expected: [i8; 256] = [
+                    -111,-110,-110,-110,-110,-109,-109,-109,-109,-108,-108,-108,-107,-107,-107,-107,
+                    -106,-106,-106,-105,-105,-105,-105,-104,-104,-104,-103,-103,-103,-102,-102,-102,
+                    -101,-101,-101,-100,-100,-100,-99,-99,-99,-98,-98,-98,-97,-97,-97,-96,
+                    -96,-96,-95,-95,-94,-94,-94,-93,-93,-93,-92,-92,-91,-91,-91,-90,
+                    -90,-89,-89,-89,-88,-88,-87,-87,-87,-86,-86,-85,-85,-85,-84,-84,
+                    -83,-83,-83,-82,-82,-81,-81,-80,-80,-80,-79,-79,-78,-78,-77,-77,
+                    -77,-76,-76,-75,-75,-74,-74,-74,-73,-73,-72,-72,-71,-71,-70,-70,
+                    -69,-69,-69,-68,-68,-67,-67,-66,-66,-65,-65,-64,-64,-64,-63,-63,
+                    -62,-62,-61,-61,-60,-60,-59,-59,-58,-58,-57,-57,-57,-56,-56,-55,
+                    -55,-54,-54,-53,-53,-52,-52,-51,-51,-50,-50,-49,-49,-48,-48,-47,
+                    -47,-47,-46,-46,-45,-45,-44,-44,-43,-43,-42,-42,-41,-41,-40,-40,
+                    -39,-39,-38,-38,-37,-37,-36,-36,-35,-35,-34,-34,-33,-33,-32,-32,
+                    -31,-31,-30,-30,-30,-29,-29,-28,-28,-27,-27,-26,-26,-25,-25,-24,
+                    -24,-23,-23,-22,-22,-21,-21,-20,-20,-19,-19,-18,-18,-17,-17,-16,
+                    -16,-15,-15,-14,-14,-13,-13,-12,-12,-11,-11,-10,-10,-9,-9,-8,
+                    -8,-7,-7,-6,-6,-5,-5,-4,-4,-3,-3,-2,-2,-2,-1,0,
+                ];
+                assert_eq!(table.as_slice(), &expected);
+            }
+            other => panic!("unexpected effect: {other:?}"),
+        }
     }
 }

@@ -207,19 +207,7 @@ fn emit_intdiv(ctx: &EmitContext) -> EmitResult {
 }
 
 pub(super) fn emit_mul(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
-    let node = ctx.node;
-    let store = ctx.store;
-    let mut result = EmitResult::default();
-    let mut inputs = collect_binary_input_names(graph, store, node, &mut result);
-    inputs.push(push_shift_const(&mut result, &node.name));
-    result.push_output_op(
-        ctx.make_output(),
-        Op::Mul,
-        Attribute::Mul(MulAttribute { shift: 0 }),
-        inputs,
-    );
-    result
+    ctx.emit_binary(Op::Mul, Attribute::Mul(MulAttribute { shift: 0 }))
 }
 
 pub(super) fn emit_aten_shape_reshape(ctx: &EmitContext) -> EmitResult {
@@ -230,9 +218,8 @@ pub(super) fn emit_aten_shape_reshape(ctx: &EmitContext) -> EmitResult {
             ctx.name()
         )
     });
-    push_reshape_with_shape_for_node(
+    push_reshape_with_shape(
         &mut result,
-        Some(ctx.node),
         spec.input_name,
         ctx.node.name.clone(),
         format!("{}_shape", ctx.name()),

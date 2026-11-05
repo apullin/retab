@@ -1,4 +1,5 @@
 use super::*;
+use crate::fx_target::{classify_ir_target, IrTargetKind};
 
 pub(super) fn resolve_input_name_from_node_id(graph: &Graph, id: NodeId) -> Option<String> {
     let node = graph.node(id)?;
@@ -45,7 +46,7 @@ pub(super) fn input_name(graph: &Graph, node: &Node, index: usize) -> Option<Str
 }
 
 pub(super) fn is_getitem_node(node: &Node) -> bool {
-    matches!(&node.target, OpTarget::Other(target) if target.contains("getitem"))
+    matches!(&node.target, OpTarget::Other(target) if classify_ir_target(target) == IrTargetKind::GetItem)
 }
 
 /// Match the Python serializer's multi-output convention: when an op's users

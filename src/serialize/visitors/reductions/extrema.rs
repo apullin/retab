@@ -8,7 +8,6 @@ pub(super) fn register(table: &mut EmitterTable) {
         (OpTarget::Amin, emit_aten_amin),
         (OpTarget::TosaReduceMax, emit_aten_amax),
         (OpTarget::TosaReduceMin, emit_aten_amin),
-        (OpTarget::TosaReduceAny, emit_aten_any),
         (OpTarget::ArgMax, emit_argmax),
     ]);
 }
@@ -23,10 +22,17 @@ fn emit_argmax(ctx: &EmitContext) -> EmitResult {
     let input = first_input_node(graph, node)
         .unwrap_or_else(|| panic!("emit_argmax: missing input for node '{}'", node.name));
     let rank = input.meta.val.shape_len as i32;
-    let raw_dim = match node.args.get(1) {
-        Some(Arg::Int(dim)) => *dim as i32,
-        _ => kwarg_i32(node, "dim", 0),
-    };
+    let raw_dim = node
+        .args
+        .get(1)
+        .and_then(Arg::as_i64)
+        .or_else(|| {
+            node.kwargs
+                .iter()
+                .find(|(key, _)| key == "dim")
+                .and_then(|(_, value)| value.as_i64())
+        })
+        .expect("argmax requires an explicit dim") as i32;
     let dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };
     let axis = map_axis_to_tosa_dim_order(graph, input, dim);
     let physical_order: Vec<i32> = match &input.meta.tosa_dim_order {
@@ -77,8 +83,6 @@ fn emit_argmax(ctx: &EmitContext) -> EmitResult {
         reduced_shape.clone()
     };
     result.push_output_op(
-        // Not make_tensor: a rank-1 argmax yields a rank-0 result, which TOSA ARGMAX
-        // requires and make_tensor would promote to [1].
         TosaTensor::new(&argmax_name, argmax_shape, DType::Int32),
         Op::ArgMax,
         attr,

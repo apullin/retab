@@ -7,11 +7,46 @@
 
 use crate::fx_ir::{IrArg, IrGraph, IrNode, IrPass, MetaValue, NodeId, NodeMeta, NodeOp, QParam};
 use crate::fx_target::{
-    classify_ir_target, is_add_sub_target, is_fold_qdq_constant_target, is_sum_dim_int_list_target,
-    IrTargetKind,
+    classify_ir_target, is_add_sub_target, is_comparison_target, is_fold_qdq_constant_target,
+    is_minmax_target, is_mul_target, is_sum_dim_int_list_target, IrTargetKind,
 };
-use crate::graph::ir::DType;
 use crate::store::TensorData;
+
+fn is_default_partial_binary_tensor_target(target: &str) -> bool {
+    is_add_sub_target(target)
+}
+
+fn is_mixed_profile_partial_binary_tensor_target(target: &str) -> bool {
+    is_add_sub_target(target)
+        || is_mul_target(target)
+        || target == "aten.div.Tensor"
+        || is_minmax_target(target)
+        || target == "aten.mm.default"
+        || target == "aten.bmm.default"
+        || is_comparison_target(target)
+        || target == "aten.grid_sampler_2d.default"
+}
+
+fn has_partial_binary_tensor_qdq_inputs(
+    node: &IrNode,
+    quantized_arg_indices: &[usize],
+    preserve_mixed_profile: bool,
+) -> bool {
+    if preserve_mixed_profile {
+        if !is_mixed_profile_partial_binary_tensor_target(&node.target) {
+            return false;
+        }
+    } else if !is_default_partial_binary_tensor_target(&node.target) {
+        return false;
+    }
+    let [lhs, rhs, ..] = node.args.as_slice() else {
+        return false;
+    };
+    if !matches!(lhs, IrArg::Node(_)) || !matches!(rhs, IrArg::Node(_)) {
+        return false;
+    }
+    quantized_arg_indices.contains(&0) != quantized_arg_indices.contains(&1)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FoldQdqQParamSource {
@@ -333,9 +368,30 @@ where
     }
 }
 
-pub struct IrFoldQdqPass;
+pub struct IrFoldQdqPass {
+    pub(crate) preserve_partial_binary_tensor_qdq: bool,
+}
+
+impl Default for IrFoldQdqPass {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl IrFoldQdqPass {
+    pub fn new() -> Self {
+        Self {
+            preserve_partial_binary_tensor_qdq: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_mixed_profile_partial_binary_qdq() -> Self {
+        Self {
+            preserve_partial_binary_tensor_qdq: true,
+        }
+    }
+
     fn candidate_node_ids(&self, graph: &IrGraph) -> Vec<usize> {
         graph
             .live_node_ids()
@@ -361,24 +417,15 @@ impl IrPass for IrFoldQdqPass {
 
             let node = graph.node(node_id).clone();
             let resolved_inputs = resolve_input_qparams_for_foldable_node(graph, &node);
-            let preserves_fp_int32_binary = is_add_sub_target(&node.target)
-                && (resolved_inputs
-                    .iter()
-                    .any(|resolved| resolved.qparam.qparam.dtype() == DType::Int32)
-                    || graph
-                        .live_user_ids(node_id)
-                        .into_iter()
-                        .filter_map(|user_id| {
-                            let user = graph.node(user_id);
-                            if !user.alive || !user.is_quantize_any() {
-                                return None;
-                            }
-                            resolve_qparam_from_q_or_dq(graph, user)
-                        })
-                        .any(|resolved| resolved.qparam.dtype() == DType::Int32));
-            if preserves_fp_int32_binary {
-                continue;
-            }
+            let quantized_arg_indices: Vec<usize> = resolved_inputs
+                .iter()
+                .map(|resolved| resolved.arg_index)
+                .collect();
+            let preserve_qdq = has_partial_binary_tensor_qdq_inputs(
+                &node,
+                &quantized_arg_indices,
+                self.preserve_partial_binary_tensor_qdq,
+            );
 
             let mut input_qparams = Vec::new();
 
@@ -387,6 +434,9 @@ impl IrPass for IrFoldQdqPass {
                 let resolved = resolved_input.qparam;
                 input_qparams.push((idx, resolved.qparam.clone()));
 
+                if preserve_qdq {
+                    continue;
+                }
                 for arg_id in resolved_input.dq_node_ids {
                     let arg_node = graph.node(arg_id).clone();
                     if !arg_node.alive || !arg_node.is_dequantize_any() {
@@ -431,10 +481,18 @@ impl IrPass for IrFoldQdqPass {
                 if !user.alive || !user.is_quantize_any() {
                     continue;
                 }
+                // A Q node may consume this node as scale or zero point; it is
+                // an output quantizer only when this node is its data input.
+                if user.arg_node(0) != Some(node_id) {
+                    continue;
+                }
                 let Some(resolved) = resolve_qparam_from_q_or_dq(graph, &user) else {
                     continue;
                 };
                 output_qparams.push((idx, resolved.qparam.clone()));
+                if preserve_qdq {
+                    continue;
+                }
                 graph.replace_and_erase(user_id, node_id);
                 modified = true;
             }
@@ -446,10 +504,24 @@ impl IrPass for IrFoldQdqPass {
                     .set_output_qparams_from(output_qparams.iter().cloned());
                 modified = true;
 
-                if is_sum_dim_int_list_target(&node.target) {
+                let is_dim_order_copy = matches!(
+                    node.target.as_str(),
+                    "dim_order_ops._to_dim_order_copy.default" | "_to_dim_order_copy.default"
+                );
+                if is_sum_dim_int_list_target(&node.target) || is_dim_order_copy {
                     if let Some((_, output_qparam)) =
                         output_qparams.iter().find(|(index, _)| *index == 0)
                     {
+                        // Stock raises a ValueError here; let it.
+                        if is_dim_order_copy
+                            && (output_qparam.scale != 1.0 || output_qparam.zp != 0)
+                        {
+                            crate::stock_fallback::request(format!(
+                                "quantized _to_dim_order_copy without unit qparams: {}",
+                                node.name
+                            ));
+                            continue;
+                        }
                         graph.set_kwarg(
                             node_id,
                             "dtype",
@@ -470,6 +542,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::fx_ir::{IrNode, MetaValue};
+    use crate::graph::ir::DType;
     use crate::test_ir::{call_default as qdq_node, output, placeholder_default as placeholder};
 
     use super::*;
@@ -673,7 +746,7 @@ mod tests {
         );
         let _output = output(&mut graph, q);
 
-        let pass = IrFoldQdqPass;
+        let pass = IrFoldQdqPass::new();
         assert!(pass.run(&mut graph));
 
         assert!(graph.node(dq).alive == false);
@@ -720,7 +793,7 @@ mod tests {
         );
         let _output = output(&mut graph, q);
 
-        let pass = IrFoldQdqPass;
+        let pass = IrFoldQdqPass::new();
         assert!(pass.run(&mut graph));
 
         assert!(!graph.node(dq0).alive);
@@ -758,7 +831,7 @@ mod tests {
         );
         let _output = output(&mut graph, q);
 
-        let pass = IrFoldQdqPass;
+        let pass = IrFoldQdqPass::new();
         assert!(pass.run(&mut graph));
         assert!(matches!(
             graph.node(sum).kwargs.get("dtype"),
@@ -767,7 +840,449 @@ mod tests {
     }
 
     #[test]
-    fn fold_qdq_pass_preserves_fp_add_for_int32_quantized_io() {
+    fn int32_domain_add_chain_lowers_to_rescale_add_rescale_without_float() {
+        let mut graph = IrGraph::empty();
+        let input = placeholder(&mut graph, "x");
+        let dq0 = qdq_node(
+            &mut graph,
+            "dq0",
+            "quantized_decomposed.dequantize_per_tensor.default",
+            int8_qdq_args(input, 0.5, 3),
+        );
+        let q1 = qdq_node(
+            &mut graph,
+            "q1",
+            "quantized_decomposed.quantize_per_tensor.default",
+            int32_qdq_args(dq0, 0.25),
+        );
+        let dq1 = qdq_node(
+            &mut graph,
+            "dq1",
+            "quantized_decomposed.dequantize_per_tensor.default",
+            int32_qdq_args(q1, 0.25),
+        );
+        let add = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "add",
+            "aten.add.Tensor",
+            vec![IrArg::Node(dq1), IrArg::Node(dq1)],
+            annotated_meta(),
+        );
+        let q2 = qdq_node(
+            &mut graph,
+            "q2",
+            "quantized_decomposed.quantize_per_tensor.default",
+            int32_qdq_args(add, 0.25),
+        );
+        let dq2 = qdq_node(
+            &mut graph,
+            "dq2",
+            "quantized_decomposed.dequantize_per_tensor.default",
+            int32_qdq_args(q2, 0.25),
+        );
+        let q3 = qdq_node(
+            &mut graph,
+            "q3",
+            "quantized_decomposed.quantize_per_tensor.default",
+            int8_qdq_args(dq2, 0.125, 7),
+        );
+        let _output = output(&mut graph, q3);
+
+        assert!(IrFoldQdqPass::new().run(&mut graph));
+        assert!(crate::fx_insert_qdq_rescale_ir::IrInsertQdqRescalePass.run(&mut graph));
+        assert!(!crate::fx_insert_int32_rescale_ir::IrInsertInt32RescalePass.run(&mut graph));
+        assert!(!crate::fx_decompose_quant_ir::IrDecomposeQuantPass.run(&mut graph));
+
+        assert!(graph.live_nodes().all(|node| !node.is_q_or_dq()));
+        assert!(
+            graph
+                .live_nodes()
+                .all(|node| node.meta.val_dtype() != Some("torch.float32"))
+        );
+        let rescales: Vec<_> = graph.live_nodes().filter(|node| node.is_rescale()).collect();
+        assert_eq!(rescales.len(), 2);
+        assert!(graph.node(add).alive);
+        assert!(matches!(
+            graph.node(add).args.as_slice(),
+            [IrArg::Node(a), IrArg::Node(b)] if a == b
+                && graph.node(*a).is_rescale()
+        ));
+        assert_eq!(
+            graph.node(add).meta.input_qparam().unwrap().dtype_str,
+            "torch.int32"
+        );
+        assert_eq!(
+            graph.node(add).meta.output_qparam().unwrap().dtype_str,
+            "torch.int32"
+        );
+    }
+
+    fn partial_binary_qdq_graph(
+        target: &str,
+        extra_args: Vec<IrArg>,
+    ) -> (IrGraph, NodeId, NodeId, NodeId, NodeId) {
+        let mut graph = IrGraph::empty();
+        let x = placeholder(&mut graph, "x");
+        let y = placeholder(&mut graph, "y");
+        let x_q = qdq_node(
+            &mut graph,
+            "x_q",
+            "quantized_decomposed.quantize_per_tensor.default",
+            int8_qdq_args(x, 0.5, 0),
+        );
+        let x_dq = qdq_node(
+            &mut graph,
+            "x_dq",
+            "quantized_decomposed.dequantize_per_tensor.default",
+            int8_qdq_args(x_q, 0.5, 0),
+        );
+        let mut args = vec![IrArg::Node(x_dq), IrArg::Node(y)];
+        args.extend(extra_args);
+        let binary = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "binary",
+            target,
+            args,
+            annotated_meta(),
+        );
+        let out_q = qdq_node(
+            &mut graph,
+            "out_q",
+            "quantized_decomposed.quantize_per_tensor.default",
+            int8_qdq_args(binary, 0.5, 0),
+        );
+        let out_dq = qdq_node(
+            &mut graph,
+            "out_dq",
+            "quantized_decomposed.dequantize_per_tensor.default",
+            int8_qdq_args(out_q, 0.5, 0),
+        );
+        let _output = output(&mut graph, out_dq);
+        (graph, binary, x_dq, y, out_q)
+    }
+
+    #[test]
+    fn preserves_qdq_for_partially_quantized_add_and_sub() {
+        for target in ["aten.add.Tensor", "aten.sub.Tensor"] {
+            let (mut graph, binary, x_dq, y, out_q) =
+                partial_binary_qdq_graph(target, Vec::new());
+
+            assert!(IrFoldQdqPass::new().run(&mut graph));
+
+            let input_keys: Vec<usize> = graph
+                .node(binary)
+                .meta
+                .input_qparams()
+                .unwrap()
+                .iter()
+                .map(|(&index, _)| index)
+                .collect();
+            assert_eq!(input_keys, vec![0]);
+            assert!(graph.node(binary).meta.output_qparam().is_some());
+            assert!(graph.node(x_dq).alive);
+            assert!(graph.node(out_q).alive);
+            assert!(matches!(graph.node(binary).args[0], IrArg::Node(id) if id == x_dq));
+            assert!(matches!(graph.node(binary).args[1], IrArg::Node(id) if id == y));
+            assert!(graph.live_user_ids(binary).contains(&out_q));
+        }
+    }
+
+    #[test]
+    fn folds_mul_with_partial_inputs_by_default() {
+        let (mut graph, binary, x_dq, _, out_q) =
+            partial_binary_qdq_graph("aten.mul.Tensor", Vec::new());
+
+        assert!(IrFoldQdqPass::new().run(&mut graph));
+
+        assert!(!graph.node(x_dq).alive);
+        assert!(!graph.node(out_q).alive);
+        assert!(matches!(graph.node(binary).args[1], IrArg::Node(_)));
+    }
+
+    #[test]
+    fn preserves_mixed_profile_partial_qdq_when_enabled() {
+        let grid_extra = vec![IrArg::Int(0), IrArg::Int(0), IrArg::Bool(false)];
+        let cases: &[(&str, Vec<IrArg>)] = &[
+            ("aten.add.Tensor", Vec::new()),
+            ("aten.sub.Tensor", Vec::new()),
+            ("aten.mul.Tensor", Vec::new()),
+            ("aten.div.Tensor", Vec::new()),
+            ("aten.minimum.default", Vec::new()),
+            ("aten.maximum.default", Vec::new()),
+            ("aten.mm.default", Vec::new()),
+            ("aten.bmm.default", Vec::new()),
+            ("aten.eq.Tensor", Vec::new()),
+            ("aten.ge.Tensor", Vec::new()),
+            ("aten.gt.Tensor", Vec::new()),
+            ("aten.le.Tensor", Vec::new()),
+            ("aten.lt.Tensor", Vec::new()),
+            ("aten.grid_sampler_2d.default", grid_extra),
+        ];
+        for (target, extra_args) in cases {
+            let (mut graph, binary, x_dq, y, out_q) =
+                partial_binary_qdq_graph(target, extra_args.clone());
+
+            assert!(
+                IrFoldQdqPass::with_mixed_profile_partial_binary_qdq().run(&mut graph),
+                "target {target}"
+            );
+
+            let input_keys: Vec<usize> = graph
+                .node(binary)
+                .meta
+                .input_qparams()
+                .unwrap()
+                .iter()
+                .map(|(&index, _)| index)
+                .collect();
+            assert_eq!(input_keys, vec![0], "target {target}");
+            assert!(graph.node(x_dq).alive, "target {target}");
+            assert!(graph.node(out_q).alive, "target {target}");
+            assert!(
+                matches!(graph.node(binary).args[0], IrArg::Node(id) if id == x_dq),
+                "target {target}"
+            );
+            assert!(
+                matches!(graph.node(binary).args[1], IrArg::Node(id) if id == y),
+                "target {target}"
+            );
+            assert!(graph.live_user_ids(binary).contains(&out_q), "target {target}");
+        }
+    }
+
+    #[test]
+    fn does_not_treat_index_as_binary_operand() {
+        for target in ["aten.index_select.default", "aten.gather.default"] {
+            let mut graph = IrGraph::empty();
+            let x = placeholder(&mut graph, "x");
+            let index = placeholder(&mut graph, "index");
+            let node = add_node(
+                &mut graph,
+                NodeOp::CallFunction,
+                "gatherish",
+                target,
+                vec![IrArg::Node(x), IrArg::Int(0), IrArg::Node(index)],
+                annotated_meta(),
+            );
+            let snapshot = graph.node(node).clone();
+            assert!(!has_partial_binary_tensor_qdq_inputs(&snapshot, &[0], false));
+            assert!(!has_partial_binary_tensor_qdq_inputs(&snapshot, &[0], true));
+        }
+    }
+
+    #[test]
+    fn mixed_profile_allowlist_matches_upstream_targets() {
+        use std::collections::HashSet;
+
+        let probe = [
+            "aten.add.Tensor",
+            "aten.sub.Tensor",
+            "aten.mul.Tensor",
+            "aten.div.Tensor",
+            "aten.div.Tensor_mode",
+            "aten.minimum.default",
+            "aten.maximum.default",
+            "aten.mm.default",
+            "aten.bmm.default",
+            "aten.eq.Tensor",
+            "aten.ge.Tensor",
+            "aten.gt.Tensor",
+            "aten.le.Tensor",
+            "aten.lt.Tensor",
+            "aten.grid_sampler_2d.default",
+            "aten.index_select.default",
+            "aten.gather.default",
+            "aten.cat.default",
+        ];
+        let matched: HashSet<&str> = probe
+            .iter()
+            .copied()
+            .filter(|target| is_mixed_profile_partial_binary_tensor_target(target))
+            .collect();
+        let expected: HashSet<&str> = [
+            "aten.add.Tensor",
+            "aten.sub.Tensor",
+            "aten.mul.Tensor",
+            "aten.div.Tensor",
+            "aten.minimum.default",
+            "aten.maximum.default",
+            "aten.mm.default",
+            "aten.bmm.default",
+            "aten.eq.Tensor",
+            "aten.ge.Tensor",
+            "aten.gt.Tensor",
+            "aten.le.Tensor",
+            "aten.lt.Tensor",
+            "aten.grid_sampler_2d.default",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(matched, expected);
+        assert!(is_default_partial_binary_tensor_target("aten.add.Tensor"));
+        assert!(is_default_partial_binary_tensor_target("aten.sub.Tensor"));
+        assert!(!is_default_partial_binary_tensor_target("aten.mul.Tensor"));
+    }
+
+    #[test]
+    fn erases_shared_input_dq_once() {
+        let mut graph = IrGraph::empty();
+        let input = placeholder(&mut graph, "x");
+        let dq = qdq_node(
+            &mut graph,
+            "dq",
+            "quantized_decomposed.dequantize_per_tensor.default",
+            int8_qdq_args(input, 0.25, 3),
+        );
+
+        let add = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "add",
+            "aten.add.Tensor",
+            vec![IrArg::Node(dq), IrArg::Node(dq)],
+            annotated_meta(),
+        );
+        let q = qdq_node(
+            &mut graph,
+            "q",
+            "quantized_decomposed.quantize_per_tensor.default",
+            int8_qdq_args(add, 0.25, 3),
+        );
+        let _output = output(&mut graph, q);
+
+        assert!(IrFoldQdqPass::new().run(&mut graph));
+        assert!(!graph.node(dq).alive);
+        assert!(!graph.node(q).alive);
+        assert!(matches!(
+            graph.node(add).args.as_slice(),
+            [IrArg::Node(a), IrArg::Node(b)] if *a == input && *b == input
+        ));
+    }
+
+    #[test]
+    fn does_not_fold_qparam_node_as_quantized_data() {
+        use crate::fx_ir::{NodeTensor, TensorSource};
+        use crate::store::TensorData;
+
+        let mut graph = IrGraph::empty();
+        let x = placeholder(&mut graph, "x");
+        let zp = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "zp",
+            "aten.full.default",
+            vec![
+                IrArg::List(vec![IrArg::Int(1)]),
+                IrArg::Int(0),
+            ],
+            NodeMeta::default(),
+        );
+        graph.node_mut(zp).tensor = Some(NodeTensor {
+            source: TensorSource::GraphModuleAttr,
+            data: TensorData {
+                data: 0i32.to_le_bytes().to_vec(),
+                shape: vec![1],
+                dtype: DType::Int32,
+            },
+        });
+        let q = qdq_node(
+            &mut graph,
+            "q",
+            "quantized_decomposed.quantize_per_tensor.tensor",
+            vec![
+                IrArg::Node(x),
+                IrArg::Float(0.5),
+                IrArg::Node(zp),
+                IrArg::Int(-127),
+                IrArg::Int(127),
+                IrArg::Dtype("torch.int8".to_string()),
+            ],
+        );
+        let viewer = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "viewer",
+            "aten.view_copy.default",
+            vec![IrArg::Node(q)],
+            NodeMeta::default(),
+        );
+        let _output = output(&mut graph, viewer);
+
+        IrFoldQdqPass::new().run(&mut graph);
+
+        assert!(graph.node(q).alive);
+        assert_eq!(graph.node(viewer).first_node_arg(), Some(q));
+    }
+
+    #[test]
+    fn non_unit_to_dim_order_copy_requests_stock_fallback() {
+        let mut graph = IrGraph::empty();
+        let input = placeholder(&mut graph, "x");
+        let copy = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "copy",
+            "dim_order_ops._to_dim_order_copy.default",
+            vec![IrArg::Node(input)],
+            annotated_meta(),
+        );
+        graph.set_kwarg(copy, "dtype", IrArg::Dtype("torch.int32".to_string()));
+        let q = qdq_node(
+            &mut graph,
+            "q",
+            "quantized_decomposed.quantize_per_tensor.default",
+            int8_qdq_args(copy, 0.5, 0),
+        );
+        let _output = output(&mut graph, q);
+
+        crate::stock_fallback::take();
+        IrFoldQdqPass::new().run(&mut graph);
+        assert_eq!(
+            crate::stock_fallback::take().as_deref(),
+            Some("quantized _to_dim_order_copy without unit qparams: copy")
+        );
+        assert!(matches!(
+            graph.node(copy).kwargs.get("dtype"),
+            Some(IrArg::Dtype(dtype)) if dtype == "torch.int32"
+        ));
+    }
+
+    #[test]
+    fn to_dim_order_copy_gets_output_dtype() {
+        let mut graph = IrGraph::empty();
+        let input = placeholder(&mut graph, "x");
+        let copy = add_node(
+            &mut graph,
+            NodeOp::CallFunction,
+            "copy",
+            "dim_order_ops._to_dim_order_copy.default",
+            vec![IrArg::Node(input)],
+            annotated_meta(),
+        );
+        graph.set_kwarg(
+            copy,
+            "dtype",
+            IrArg::Dtype("torch.int32".to_string()),
+        );
+        let q = qdq_node(
+            &mut graph,
+            "q",
+            "quantized_decomposed.quantize_per_tensor.default",
+            int8_qdq_args(copy, 1.0, 0),
+        );
+        let _output = output(&mut graph, q);
+
+        assert!(IrFoldQdqPass::new().run(&mut graph));
+        assert!(matches!(
+            graph.node(copy).kwargs.get("dtype"),
+            Some(IrArg::Dtype(dtype)) if dtype == "torch.int8"
+        ));
+    }
+
+    #[test]
+    fn fold_qdq_pass_folds_int32_quantized_add() {
         let mut graph = IrGraph::empty();
         let input = placeholder(&mut graph, "x");
         let dq = qdq_node(
@@ -793,12 +1308,18 @@ mod tests {
         );
         let _output = output(&mut graph, q);
 
-        let pass = IrFoldQdqPass;
-        assert!(!pass.run(&mut graph));
-        assert!(graph.node(dq).alive);
-        assert!(graph.node(q).alive);
-        assert!(matches!(graph.node(add).args[0], IrArg::Node(id) if id == dq));
-        assert!(graph.node(add).meta.input_qparams().is_none());
-        assert!(graph.node(add).meta.output_qparams().is_none());
+        let pass = IrFoldQdqPass::new();
+        assert!(pass.run(&mut graph));
+        assert!(!graph.node(dq).alive);
+        assert!(!graph.node(q).alive);
+        assert!(matches!(graph.node(add).args[0], IrArg::Node(id) if id == input));
+        assert_eq!(
+            graph.node(add).meta.input_qparam().unwrap().dtype_str,
+            "torch.int32"
+        );
+        assert_eq!(
+            graph.node(add).meta.output_qparam().unwrap().dtype_str,
+            "torch.int32"
+        );
     }
 }

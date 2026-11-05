@@ -165,12 +165,46 @@ fn resolve_parent_arg_ids_ir(node: &fx_ir::IrNode) -> Vec<fx_ir::NodeId> {
     Vec::new()
 }
 
-fn boundary_placeholder_dim_order(parent_arg: &fx_ir::IrNode) -> Option<Vec<usize>> {
-    let rank = parent_arg.meta.rank()?;
-    if parent_arg.name.ends_with("_input_layout") || is_tosa_transpose_target(&parent_arg.target) {
-        return Some((0..rank).collect());
+fn boundary_placeholder_meta(
+    ir: &fx_ir::IrGraph,
+    parent_id: fx_ir::NodeId,
+) -> (fx_ir::NodeMeta, Option<Vec<usize>>) {
+    let parent_arg = ir.node(parent_id);
+    let fallback = (
+        parent_arg.meta.clone(),
+        parent_arg.meta.cloned_tosa_dim_order(),
+    );
+    if !is_tosa_transpose_target(&parent_arg.target) {
+        return fallback;
     }
-    parent_arg.meta.cloned_tosa_dim_order()
+    let (Some(input_id), Some(perms)) = (parent_arg.first_node_arg(), parent_arg.arg_int_list(1))
+    else {
+        return fallback;
+    };
+    let (input_meta, input_order) = boundary_placeholder_meta(ir, input_id);
+    let Some(shape) = input_meta.val_shape() else {
+        return fallback;
+    };
+    if perms.len() != shape.len() {
+        return fallback;
+    }
+    let input_order = input_order.unwrap_or_else(|| (0..shape.len()).collect());
+    let order: Option<Vec<usize>> = perms
+        .iter()
+        .map(|&dim| {
+            fx_ir::normalize_dim(dim, shape.len()).and_then(|dim| input_order.get(dim).copied())
+        })
+        .collect();
+    let Some(order) = order else {
+        return fallback;
+    };
+    // Layout transposes change physical order; region decompositions still use logical axes.
+    (
+        parent_arg
+            .meta
+            .cloned_with_same_dtype_or_float32(shape.to_vec()),
+        Some(order),
+    )
 }
 
 fn collect_boundary_contracts_for_graph(
@@ -222,9 +256,10 @@ fn collect_boundary_contracts_for_graph(
                         })
                         .or_else(|| metadata::extract_effective_qparam_ir(ir, arg_id))
                 };
+                let (meta, boundary_dim_order) = boundary_placeholder_meta(ir, arg_id);
                 Some(BoundaryInputMeta {
-                    meta: arg_node.meta.clone(),
-                    boundary_dim_order: boundary_placeholder_dim_order(arg_node),
+                    meta,
+                    boundary_dim_order,
                     fallback_qparam,
                 })
             })

@@ -2,10 +2,51 @@ use std::collections::{HashMap, HashSet};
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::fx_target::{
-    is_constant_only_shape_transform_target, is_permute_target, is_raw_aten_convolution_target,
-    is_tosa_transpose_target, is_transpose_conv2d_target, is_view_like_target,
-    is_zero_input_constant_target,
+    is_constant_only_shape_transform_target, is_permute_target, is_physical_layout_target,
+    is_raw_aten_convolution_target, is_tosa_transpose_target, is_transpose_conv2d_target,
+    is_view_like_target, is_zero_input_constant_target,
 };
+
+/// Whether the graph needs physical (channels-last) layout anywhere: a live
+/// convolution or pooling node lowers to a TOSA op consuming NHWC. Graphs
+/// without them (pure elementwise/shape/cast chains) stay logical (NCHW) end
+/// to end like stock, which only transposes around such ops. Control-flow
+/// submodules and graphs with non-contiguous 4D inputs keep the default
+/// channels-last conversion.
+fn keeps_logical_layout(graph: &IrGraph) -> bool {
+    if is_control_flow_submodule(graph) {
+        return false;
+    }
+    // A graph that contains cond/while keeps the default too: its regions are converted
+    // channels-last, and the boundary must agree with them.
+    let has_physical_op_or_control_flow = graph.nodes.iter().any(|node| {
+        node.alive
+            && node.op == NodeOp::CallFunction
+            && (is_physical_layout_target(&node.target)
+                || matches!(
+                    crate::fx_target::classify_ir_target(&node.target),
+                    crate::fx_target::IrTargetKind::Cond | crate::fx_target::IrTargetKind::WhileLoop
+                ))
+    });
+    if has_physical_op_or_control_flow {
+        return false;
+    }
+    graph.nodes.iter().all(|node| {
+        if !node.alive || !is_input_placeholder(graph, node.id) {
+            return true;
+        }
+        let Some(shape) = graph.node_shape(node.id) else {
+            return true;
+        };
+        if shape.len() < 4 {
+            return true;
+        }
+        match node.meta.val_dim_order() {
+            None => true,
+            Some(order) => order.iter().enumerate().all(|(idx, axis)| *axis == idx),
+        }
+    })
+}
 use crate::runner_logging::log_line;
 
 pub struct IrToTosaMemoryFormatPass;
@@ -339,7 +380,12 @@ impl IrToTosaMemoryFormatPass {
         modified
     }
 
-    fn annotate_dim_orders(&self, graph: &mut IrGraph, is_control_flow_gm: bool) -> bool {
+    fn annotate_dim_orders(
+        &self,
+        graph: &mut IrGraph,
+        is_control_flow_gm: bool,
+        logical_only: bool,
+    ) -> bool {
         let mut modified = false;
         for id in graph.live_node_ids() {
             let Some(val) = graph.nodes[id].meta.tensor_facts() else {
@@ -388,7 +434,7 @@ impl IrToTosaMemoryFormatPass {
                 }
             } else if rank == 4 && is_transpose_conv2d_weight(graph, id) {
                 vec![1, 2, 3, 0]
-            } else if rank >= 4 {
+            } else if rank >= 4 && !logical_only {
                 channels_last_order(rank, sr)
             } else {
                 (0..rank).collect::<Vec<_>>()
@@ -619,10 +665,7 @@ impl IrToTosaMemoryFormatPass {
             let mut remapped = vec![0i64; input_rank];
             for j in 0..input_rank {
                 let nchw_axis = if physical_output { f[j] } else { j };
-                let user_mapped = user_perm[nchw_axis] as usize;
-                if user_mapped >= f_inv.len() {
-                    continue;
-                }
+                let user_mapped = user_perm[nchw_axis].rem_euclid(input_rank as i64) as usize;
                 remapped[j] = f_inv[user_mapped] as i64;
             }
 
@@ -643,13 +686,19 @@ impl IrPass for IrToTosaMemoryFormatPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let is_control_flow_gm = is_control_flow_submodule(graph);
+        // Graphs without convolution or pooling lower to layout-neutral TOSA
+        // ops; keep them fully logical (NCHW) like stock instead of routing
+        // everything through channels-last boundary transposes.
+        let logical_only = keeps_logical_layout(graph);
         let mut modified = false;
         modified |= self.annotate_spatial_ranks(graph);
         modified |= self.propagate_spatial_ranks(graph);
-        modified |= self.annotate_dim_orders(graph, is_control_flow_gm);
-        modified |= self.insert_view_boundary_transposes(graph);
-        modified |= self.insert_input_transposes(graph);
-        modified |= self.insert_output_transposes(graph, is_control_flow_gm);
+        modified |= self.annotate_dim_orders(graph, is_control_flow_gm, logical_only);
+        if !logical_only {
+            modified |= self.insert_view_boundary_transposes(graph);
+            modified |= self.insert_input_transposes(graph);
+            modified |= self.insert_output_transposes(graph, is_control_flow_gm);
+        }
         modified |= self.remap_permute_args(graph);
 
         if crate::config::debug_layout_enabled() {
@@ -675,5 +724,110 @@ impl IrPass for IrToTosaMemoryFormatPass {
             ));
         }
         modified
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_ir::{f32_call, f32_placeholder, output};
+
+    fn count_transposes(graph: &IrGraph) -> usize {
+        graph
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.alive
+                    && node.op == NodeOp::CallFunction
+                    && is_tosa_transpose_target(&node.target)
+            })
+            .count()
+    }
+
+    #[test]
+    fn elementwise_only_graph_keeps_logical_layout() {
+        let mut graph = IrGraph::empty();
+        let input = f32_placeholder(&mut graph, "x", [1, 3, 4, 4]);
+        let mul = f32_call(
+            &mut graph,
+            "mul",
+            "aten.mul.Tensor",
+            vec![IrArg::Node(input), IrArg::Node(input)],
+            [1, 3, 4, 4],
+        );
+        output(&mut graph, mul);
+
+        assert!(IrToTosaMemoryFormatPass.run(&mut graph));
+        assert_eq!(count_transposes(&graph), 0);
+        assert_eq!(
+            graph
+                .node(mul)
+                .meta
+                .tosa_dim_order()
+                .map(|order| order.to_vec()),
+            Some(vec![0, 1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn convolution_graph_still_converts_to_channels_last() {
+        let mut graph = IrGraph::empty();
+        let input = f32_placeholder(&mut graph, "x", [1, 3, 4, 4]);
+        let weight = f32_placeholder(&mut graph, "w", [2, 3, 1, 1]);
+        let conv = graph.add_node(
+            NodeOp::CallFunction,
+            "conv".to_string(),
+            "aten.convolution.default".to_string(),
+            vec![IrArg::Node(input), IrArg::Node(weight)],
+            crate::fx_ir::NodeMeta::tensor(vec![1, 2, 4, 4], "torch.float32"),
+        );
+        output(&mut graph, conv);
+
+        assert!(IrToTosaMemoryFormatPass.run(&mut graph));
+        assert!(count_transposes(&graph) > 0);
+        assert_eq!(
+            graph
+                .node(conv)
+                .meta
+                .tosa_dim_order()
+                .map(|order| order.to_vec()),
+            Some(vec![0, 2, 3, 1])
+        );
+    }
+
+    #[test]
+    fn regression_negative_permute_dims_remap_for_logical_and_physical_outputs() {
+        for (physical_output, expected) in [(false, vec![0, 1, 2, 3]), (true, vec![0, 2, 3, 1])] {
+            for dims in [[0, 2, 3, 1], [-4, -2, -1, -3]] {
+                let mut graph = IrGraph::empty();
+                let input = f32_placeholder(&mut graph, "x", [1, 3, 5, 2]);
+                graph
+                    .node_mut(input)
+                    .meta
+                    .set_tosa_dim_order(vec![0, 2, 3, 1]);
+                let permute = f32_call(
+                    &mut graph,
+                    "permute",
+                    "aten.permute.default",
+                    vec![IrArg::Node(input), i64_list(&dims)],
+                    [1, 3, 5, 2],
+                );
+                let result = if physical_output {
+                    f32_call(
+                        &mut graph,
+                        "relu",
+                        "aten.relu.default",
+                        vec![IrArg::Node(permute)],
+                        [1, 3, 5, 2],
+                    )
+                } else {
+                    permute
+                };
+                output(&mut graph, result);
+
+                IrToTosaMemoryFormatPass.remap_permute_args(&mut graph);
+                assert_eq!(graph.node(permute).arg_int_list(1), Some(expected.clone()));
+            }
+        }
     }
 }

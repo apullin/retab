@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use pyo3::exceptions::PyOverflowError;
 use pyo3::prelude::*;
 
 pub(crate) use crate::fx_meta::{MetaValue, NodeMeta, QParamMap, TensorMetaStamp};
@@ -206,55 +207,72 @@ impl<'a, 'py> FxTensorImportContext<'a, 'py> {
         py_node: &Bound<'py, PyAny>,
         name: &str,
         target: &str,
-    ) -> Option<NodeTensor> {
-        let op: String = attrs(py_node).optional("op")?;
+    ) -> PyResult<Option<NodeTensor>> {
+        let Some(op) = attrs(py_node).optional::<String>("op") else {
+            return Ok(None);
+        };
         match op.as_str() {
             "placeholder" => self.placeholder_tensor(name),
             "get_attr" => self.graph_attr_tensor(target),
-            _ => None,
+            _ => Ok(None),
         }
     }
 
-    fn placeholder_tensor(&self, name: &str) -> Option<NodeTensor> {
-        let binding = self.placeholder_bindings.get(name)?;
-        self.placeholder_tensor_from_mapping(self.state_dict, binding)
-            // Lifted tensor constants are not in state_dict; they live in
-            // ep.constants keyed by target_name.
-            .or_else(|| self.placeholder_tensor_from_mapping(self.constants, binding))
-            .or_else(|| self.placeholder_tensor_from_gm_attr(binding))
+    fn placeholder_tensor(&self, name: &str) -> PyResult<Option<NodeTensor>> {
+        let Some(binding) = self.placeholder_bindings.get(name) else {
+            return Ok(None);
+        };
+        for mapping in [self.state_dict, self.constants] {
+            if let Some(tensor) = self.placeholder_tensor_from_mapping(mapping, binding)? {
+                return Ok(Some(tensor));
+            }
+        }
+        self.placeholder_tensor_from_gm_attr(binding)
     }
 
     fn placeholder_tensor_from_mapping(
         &self,
         mapping: Option<&Bound<'py, PyAny>>,
         binding: &PlaceholderTensorBinding,
-    ) -> Option<NodeTensor> {
-        let value = items(mapping?).key(binding.target_name.as_str())?;
+    ) -> PyResult<Option<NodeTensor>> {
+        let Some(value) =
+            mapping.and_then(|mapping| items(mapping).key(binding.target_name.as_str()))
+        else {
+            return Ok(None);
+        };
         tensor_from_py_value(&value, TensorSource::ExportedProgramInput(binding.clone()))
     }
 
     fn placeholder_tensor_from_gm_attr(
         &self,
         binding: &PlaceholderTensorBinding,
-    ) -> Option<NodeTensor> {
-        let value = attrs(self.gm).object(binding.target_name.as_str()).ok()?;
+    ) -> PyResult<Option<NodeTensor>> {
+        let Ok(value) = attrs(self.gm).object(binding.target_name.as_str()) else {
+            return Ok(None);
+        };
         tensor_from_py_value(&value, TensorSource::ExportedProgramInput(binding.clone()))
     }
 
-    fn graph_attr_tensor(&self, target: &str) -> Option<NodeTensor> {
-        let value = attrs(self.gm).object(target).ok()?;
+    fn graph_attr_tensor(&self, target: &str) -> PyResult<Option<NodeTensor>> {
+        let Ok(value) = attrs(self.gm).object(target) else {
+            return Ok(None);
+        };
         if attrs(&value).has("graph") {
-            return None;
+            return Ok(None);
         }
         tensor_from_py_value(&value, TensorSource::GraphModuleAttr)
     }
 }
 
-fn tensor_from_py_value(value: &Bound<'_, PyAny>, source: TensorSource) -> Option<NodeTensor> {
-    Some(NodeTensor {
-        source,
-        data: extract_tensor_data(value).ok()?,
-    })
+fn tensor_from_py_value(
+    value: &Bound<'_, PyAny>,
+    source: TensorSource,
+) -> PyResult<Option<NodeTensor>> {
+    match extract_tensor_data(value) {
+        Ok(data) => Ok(Some(NodeTensor { source, data })),
+        Err(error) if error.is_instance_of::<PyOverflowError>(value.py()) => Err(error),
+        Err(_) => Ok(None),
+    }
 }
 
 fn collect_fx_nodes<'py>(graph: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
@@ -286,7 +304,7 @@ fn import_fx_node<'py>(
     let target = normalize_fx_target(&raw_target);
     let op = NodeOp::of(py_node);
     let meta = NodeMeta::from_fx(py_node)?;
-    let tensor = tensor_import.tensor_for_node(py_node, &name, &target);
+    let tensor = tensor_import.tensor_for_node(py_node, &name, &target)?;
     let args = resolve_fx_args(py_node, name_to_id);
     let kwargs = resolve_fx_kwargs(py_node, name_to_id);
 
@@ -1176,9 +1194,8 @@ impl IrNode {
             IrArg::Int(v) => *v,
             _ => return None,
         };
-        // dtype arg may not resolve cleanly — check if it's a string or use target info
         let dtype_str = match &self.args[5] {
-            IrArg::Str(s) => s.clone(),
+            IrArg::Dtype(s) | IrArg::Str(s) => s.clone(),
             _ => {
                 if qmin == -128 && qmax == 127 {
                     "torch.int8".into()
@@ -1581,6 +1598,27 @@ mod tests {
             normalize_fx_target("<built-in function getitem>"),
             "<built-in function getitem>"
         );
+    }
+
+    #[test]
+    fn parse_qdq_preserves_typed_narrow_range_int16() {
+        let node = test_node(
+            0,
+            vec![
+                IrArg::Node(1),
+                IrArg::Float(0.25),
+                IrArg::Int(0),
+                IrArg::Int(-32767),
+                IrArg::Int(32767),
+                IrArg::Dtype("torch.int16".into()),
+            ],
+            HashMap::new(),
+        );
+        let qparam = node.parse_qdq_qparam().unwrap();
+        assert_eq!(qparam.dtype_str, "torch.int16");
+        assert_eq!(qparam.qmin, -32767);
+        assert_eq!(qparam.qmax, 32767);
+        assert_eq!(qparam.scale, 0.25);
     }
 
     #[test]

@@ -1,0 +1,152 @@
+"""Compile-spec settings at the Python/Rust pipeline boundary."""
+
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+pytest.importorskip("executorch.backends.arm.ethosu.compile_spec")
+pytest.importorskip("retab._native")
+
+from executorch.backends.arm.common.pipeline_config import (
+    LeakyReLULoweringConfig,
+    QuantizeInfConfig,
+    SDPASafeSoftmaxGuardPolicy,
+    SoftmaxDecompositionConfig,
+)
+from executorch.backends.arm.ethosu.compile_spec import EthosUCompileSpec
+from retab import _native
+from retab import preprocess as rp
+
+pytestmark = [pytest.mark.native, pytest.mark.executorch]
+
+
+@pytest.mark.parametrize(
+    "target,tosa_spec,softmax",
+    [
+        ("ethos-u55-128", "TOSA-1.0+INT+int16+int4+u55", "STABLE"),
+        ("ethos-u85-256", "TOSA-1.0+INT+int16+int4+cf", "MASKED"),
+    ],
+)
+def test_pipeline_config_from_ethosu_compile_spec(target, tosa_spec, softmax):
+    compile_spec = EthosUCompileSpec(target)
+    assert rp._build_pipeline_config(compile_spec) == {
+        "tosa_spec": tosa_spec,
+        "tosa_dev_mode": False,
+        "softmax": softmax,
+        "leaky_relu": "DECOMPOSE",
+        "quantize_inf": {"neg_inf": -256.0, "pos_inf": 255.0},
+        "sdpa_safe_softmax_guard": "PRESERVE",
+    }
+    assert not rp._has_non_default_pipeline_config(compile_spec)
+    compile_spec._set_tosa_dev_mode(True)
+    assert rp._build_pipeline_config(compile_spec)["tosa_dev_mode"] is True
+
+
+@pytest.mark.parametrize(
+    "field,value,reason",
+    [
+        ("softmax", SoftmaxDecompositionConfig.MASKED, "non-default pass pipeline config"),
+        ("leaky_relu", LeakyReLULoweringConfig.TABLE, "non-default pass pipeline config"),
+        (
+            "quantize_inf",
+            QuantizeInfConfig(neg_inf=-100.0, pos_inf=200.0),
+            "non-default pass pipeline config",
+        ),
+        (
+            "sdpa_safe_softmax_guard",
+            SDPASafeSoftmaxGuardPolicy.REMOVE,
+            "sdpa_safe_softmax_guard=REMOVE is not supported by RETAB",
+        ),
+        (
+            "sdpa_safe_softmax_guard",
+            SDPASafeSoftmaxGuardPolicy.AUTO,
+            "sdpa_safe_softmax_guard=AUTO is not supported by RETAB",
+        ),
+    ],
+)
+def test_non_default_configs_hand_the_original_program_to_stock(
+    monkeypatch, field, value, reason
+):
+    compile_spec = EthosUCompileSpec("ethos-u55-128")
+    compile_spec.set_pass_pipeline_config(
+        replace(compile_spec._create_default_pipeline_config(), **{field: value})
+    )
+    program = torch.export.export(torch.nn.ReLU(), (torch.ones(2),))
+    calls = []
+    result = object()
+
+    def stock_preprocess(edge_program, spec):
+        calls.append((edge_program, spec))
+        return result
+
+    monkeypatch.setattr(rp, "stock_preprocess", stock_preprocess)
+    assert rp.stock_fallback_reason(program, compile_spec) == reason
+    assert rp._all_rust_preprocess(program, compile_spec) is result
+    assert calls == [(program, compile_spec)]
+
+
+@pytest.mark.parametrize(
+    "entry_point",
+    ["run_fx_passes", "run_fx_cond_passes", "run_fx_submodule_passes"],
+)
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("sdpa_safe_softmax_guard", "REMOVE"),
+        ("sdpa_safe_softmax_guard", "AUTO"),
+        ("leaky_relu", "TABLE"),
+    ],
+)
+def test_native_entry_points_refuse_unported_policies(entry_point, field, value):
+    config = rp._build_pipeline_config(EthosUCompileSpec("ethos-u55-128"))
+    config[field] = value
+    with pytest.raises(ValueError, match=f"{field}={value}.*use stock preprocess"):
+        getattr(_native, entry_point)(None, pipeline_config=config)
+
+
+@pytest.mark.parametrize("recursive", [False, True])
+def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch, recursive):
+    from executorch.exir import graph_module
+
+    compile_spec = EthosUCompileSpec("ethos-u55-128")
+    program = torch.export.export(torch.nn.ReLU(), (torch.ones(2),))
+    cond_branch, loop_body, nested_branch = [
+        torch.fx.symbolic_trace(torch.nn.ReLU()) for _ in range(3)
+    ]
+    cond, loop = SimpleNamespace(target="cond"), SimpleNamespace(target="while_loop")
+    regions = {
+        program.graph_module: [("true_graph", cond_branch, cond)],
+        cond_branch: [("body_graph", loop_body, loop)],
+        loop_body: [("true_graph", nested_branch, cond)],
+        nested_branch: [],
+    }
+    monkeypatch.setattr(graph_module, "get_cond_while_submodules", lambda gm: regions[gm])
+    monkeypatch.setenv("RETAB_FORCE_CF_RECURSIVE_PASSES", "1" if recursive else "0")
+    monkeypatch.setattr(rp, "stock_fallback_reason", lambda ep, spec: None)
+    calls = []
+
+    def record(kind):
+        def run(gm, ep, region_name=None, *, pipeline_config):
+            calls.append((kind, gm, ep, region_name, pipeline_config))
+
+        return run
+
+    for kind in ["run_fx_passes", "run_fx_cond_passes", "run_fx_submodule_passes"]:
+        monkeypatch.setattr(_native, kind, record(kind))
+    monkeypatch.setattr(_native, "ingest_and_serialize", lambda *args: b"tosa")
+
+    result = rp._all_rust_preprocess(program, compile_spec)
+
+    assert result.processed_bytes == b"tosa"
+    assert calls[0][:4] == ("run_fx_passes", program.graph_module, program, None)
+    config = calls[0][4]
+    assert config == rp._build_pipeline_config(compile_spec)
+    assert all(call[2] is program and call[4] is config for call in calls)
+    assert [(kind, region) for kind, _, _, region, _ in calls if region is not None] == [
+        ("run_fx_cond_passes", "true_graph"),
+        ("run_fx_submodule_passes", "true_graph::body_graph"),
+        ("run_fx_cond_passes", "true_graph::body_graph::true_graph"),
+    ]
+    assert sum(call[0] == "run_fx_passes" for call in calls) == (4 if recursive else 1)

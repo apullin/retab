@@ -1,23 +1,20 @@
 # Fast-Lane Workflow
 
-This note records the current local workflow for benchmarking and validating the
-direct Rust/TOSA fast lane.
+This note records the old direct Rust/TOSA fast lane, whose future is undecided.
 
 It is intentionally operational, not aspirational. Use these commands and
 expectations when changing the fast path.
 
-For the current local green matrix and exact pytest lane shapes, see
-[`VALIDATION_MATRIX.md`](VALIDATION_MATRIX.md).
-
-For the latest local stock-vs-RETAB lowering speed snapshot, see
-[`PERFORMANCE_SNAPSHOT.md`](PERFORMANCE_SNAPSHOT.md).
+For the current stock stack, see [COMPANION_REPOS.md](COMPANION_REPOS.md).
+Maintained benchmarks, the differential harness, and the model corpus are
+kept separately, as described in [the README](../README.md#validation).
 
 ## Acceptance Gate
 
 The full direct ARM acceptance target is the Docker-backed ExecuTorch suite:
 
 ```bash
-cd /Users/andrewpullin/personal/executorch-work/executorch
+cd "$EXECUTORCH_SRC"
 EXECUTORCH_ARM_DOCKER_IMAGE_TAG=arm-baremetal:latest \
 SCCACHE_DISABLE=1 \
 ./.ci/scripts/run-arm-baremetal-docker-local.sh test_pytest_ops_tosa_direct_lower
@@ -48,7 +45,7 @@ normal CNN but may fragment or regress on a more awkward graph.
 For coarse lower/pack timings:
 
 ```bash
-cd /Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine
+cd "$RETAB_ROOT"
 python tests/sweep_direct_fastlane.py --model resnet18 --json-only
 python tests/sweep_direct_fastlane.py --model mobilenet_v3_small --json-only
 python tests/sweep_direct_fastlane.py --model cnn_layernorm4d --json-only
@@ -65,7 +62,7 @@ The minimum checked-in artifact check is exact direct-vs-reference TOSA
 comparison:
 
 ```bash
-cd /Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine
+cd "$RETAB_ROOT"
 python tests/compare_python_vs_direct_fastlane.py \
   --model resnet18 \
   --model mobilenet_v3_small \

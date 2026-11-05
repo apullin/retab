@@ -3,13 +3,13 @@
 //! After fold_qdq annotates output_qparams on clamp nodes, this pass quantizes
 //! the min/max scalar arguments to match the output quantization scale.
 
+use crate::constant_materialization::quantize_value_stock;
 use crate::fx_ir::{IrArg, IrGraph, IrPass, QParam};
 use crate::fx_target::is_clamp_target;
 use crate::runner_logging::log_line;
 
 fn quantize_value(qp: &QParam, value: f64) -> i64 {
-    let q = (value / qp.scale + qp.zp as f64).round() as i64;
-    q.max(qp.qmin).min(qp.qmax)
+    quantize_value_stock(value, qp.scale, qp.zp, qp.qmin, qp.qmax)
 }
 
 pub struct IrQuantizeClampArgsPass;
@@ -66,5 +66,18 @@ impl IrPass for IrQuantizeClampArgsPass {
             ));
         }
         modified
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quantize_value;
+    use crate::fx_ir::QParam;
+
+    #[test]
+    fn quantize_clamp_bound_rounds_half_to_even() {
+        let qp = QParam::per_tensor(1.0, 0, -128, 127, "torch.int8".to_string());
+        assert_eq!(quantize_value(&qp, 2.5), 2);
+        assert_eq!(quantize_value(&qp, 3.5), 4);
     }
 }

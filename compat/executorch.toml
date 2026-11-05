@@ -1,7 +1,6 @@
 [executorch]
 mode = "stock"
 reason = "RETAB patches TOSABackend._preprocess at runtime and falls back to stock preprocess outside its scope, so released ExecuTorch wheels work. Fork seams are used when present but are not required."
-default_source_hint = "../executorch"
 tested = ["executorch 1.6.0 (v1.6.0-rc4, 4776f71b6)"]
 
 [executorch.required_seams]

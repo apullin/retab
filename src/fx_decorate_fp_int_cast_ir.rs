@@ -1,6 +1,6 @@
 //! Pure Rust IrPass: truncation semantics for fp32 -> int32 casts.
 //!
-//! Torch float-to-int casts truncate toward zero while TOSA CAST rounds to
+//! Torch float-to-int casts and copies truncate toward zero while TOSA CAST rounds to
 //! nearest even, which shifts values like T5's relative-position bucket
 //! indices by one. Port of upstream DecorateFp32toInt32CastingPass: rewrite
 //! the cast input to where(x >= 0, floor(x), ceil(x)) first.
@@ -8,10 +8,6 @@
 use crate::fx_ir::{IrArg, IrGraph, IrPass};
 use crate::fx_target::{noop_target, NoopTarget};
 use crate::runner_logging::log_line;
-
-fn is_fp_to_int_cast_target(target: &str) -> bool {
-    noop_target(target) == Some(NoopTarget::DtypeCheckedPassthrough)
-}
 
 pub struct IrDecorateFpToIntCastPass;
 
@@ -22,10 +18,12 @@ impl IrPass for IrDecorateFpToIntCastPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let modified = graph.rewrite_live_call_functions(|graph, id| {
-            if !is_fp_to_int_cast_target(&graph.nodes[id].target) {
-                return false;
-            }
-            let x_id = match graph.nodes[id].first_node_arg() {
+            let input_arg = match noop_target(&graph.nodes[id].target) {
+                Some(NoopTarget::DtypeCheckedPassthrough) => 0,
+                Some(NoopTarget::CopySourceArg) => 1,
+                _ => return false,
+            };
+            let x_id = match graph.nodes[id].arg_node(input_arg) {
                 Some(n) => n,
                 None => return false,
             };
@@ -84,7 +82,7 @@ impl IrPass for IrDecorateFpToIntCastPass {
                 ],
                 fp_meta.preserve_qparams(input_shape),
             );
-            graph.set_arg(id, 0, IrArg::Node(truncated));
+            graph.set_arg(id, input_arg, IrArg::Node(truncated));
             true
         });
 

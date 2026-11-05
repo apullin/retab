@@ -18,6 +18,12 @@ pub(super) fn register(table: &mut EmitterTable) {
     // Direct binary ops
     register_binary!(table;
         OpTarget::Pow         => Op::Pow, Attribute::Pow(PowAttribute {});
+        OpTarget::Maximum     => Op::Maximum, Attribute::Maximum(MaximumAttribute {
+            nan_mode: NanPropagationMode::Propagate,
+        });
+        OpTarget::Minimum     => Op::Minimum, Attribute::Minimum(MinimumAttribute {
+            nan_mode: NanPropagationMode::Propagate,
+        });
         OpTarget::TosaMaximum => Op::Maximum, Attribute::Maximum(MaximumAttribute {
             nan_mode: NanPropagationMode::Propagate,
         });

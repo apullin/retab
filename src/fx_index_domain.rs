@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::fx_ir::{IrArg, IrGraph, NodeId};
 use crate::fx_meta::{NodeMeta, TensorMetaStamp};
 use crate::graph::ir::DType;
@@ -72,6 +74,66 @@ pub(crate) fn rank_unit_shape(rank: usize) -> Vec<i64> {
 
 pub(crate) fn is_scalar_shape(shape: &[i64]) -> bool {
     shape.iter().product::<i64>() == 1
+}
+
+/// Indices are nonempty, normalized and bounds-checked by the caller.
+pub(crate) fn slice_concat_for_indices(
+    graph: &mut IrGraph,
+    anchor: NodeId,
+    input: NodeId,
+    dim: usize,
+    indices: &[i64],
+) -> NodeId {
+    let shape = graph
+        .node_shape_vec(input)
+        .expect("static index input shape");
+    let name = graph.nodes[anchor].name.clone();
+    let meta = graph.nodes[anchor].meta.clone();
+    let input_meta = graph.nodes[input].meta.clone();
+    let mut cursor = graph.rewrite_cursor(anchor);
+    let contiguous = indices.windows(2).all(|pair| pair[1] == pair[0] + 1);
+    if contiguous {
+        let mut slice_shape = shape;
+        slice_shape[dim] = indices.len() as i64;
+        return cursor.slice_copy(
+            format!("{name}_slice"),
+            input,
+            dim as i64,
+            indices[0],
+            indices[indices.len() - 1] + 1,
+            None,
+            meta.cloned_with_dtype_of_or_float32(slice_shape, &input_meta),
+        );
+    }
+
+    let mut slice_shape = shape.clone();
+    slice_shape[dim] = 1;
+    let mut slice_ids = HashMap::new();
+    let slices = indices
+        .iter()
+        .enumerate()
+        .map(|(offset, &index)| {
+            IrArg::Node(*slice_ids.entry(index).or_insert_with(|| {
+                cursor.slice_copy(
+                    format!("{name}_slice{offset}"),
+                    input,
+                    dim as i64,
+                    index,
+                    index + 1,
+                    None,
+                    meta.cloned_with_dtype_of_or_float32(slice_shape.clone(), &input_meta),
+                )
+            }))
+        })
+        .collect();
+    let mut output_shape = shape;
+    output_shape[dim] = indices.len() as i64;
+    cursor.call_function(
+        format!("{name}_cat"),
+        "aten.cat.default",
+        vec![IrArg::List(slices), IrArg::Int(dim as i64)],
+        meta.cloned_with_dtype_of_or_float32(output_shape, &input_meta),
+    )
 }
 
 #[cfg(test)]

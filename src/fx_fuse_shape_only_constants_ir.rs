@@ -1,8 +1,10 @@
 use crate::fx_constant_tensor_eval::{
-    constant_input_seeds, node_inputs_are_constant, plan_shape_only_tensor_from_constants,
+    constant_input_seeds, node_has_tensor_inputs, node_inputs_are_constant,
+    plan_shape_only_tensor_from_constants,
 };
+use crate::fx_fuse_zero_input_constants_ir::zero_input_tensor;
 use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, NodeOp};
-use crate::fx_target::is_shape_only_constant_target;
+use crate::fx_target::{is_shape_only_constant_target, is_zero_input_constant_target};
 use crate::lowering_effects::{LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect};
 
 pub struct IrFuseShapeOnlyConstantsEffectPass;
@@ -14,6 +16,19 @@ impl EffectfulIrPass for IrFuseShapeOnlyConstantsEffectPass {
 
     fn run(&self, graph: &mut IrGraph) -> EffectfulIrPassResult {
         let (mut constant_nodes, mut constant_tensors) = constant_input_seeds(graph);
+        for node in &graph.nodes {
+            if !node.alive
+                || node.op != NodeOp::CallFunction
+                || node_has_tensor_inputs(node)
+                || !is_zero_input_constant_target(&node.target)
+            {
+                continue;
+            }
+            if let Some(tensor) = zero_input_tensor(graph, node) {
+                constant_nodes.insert(node.id);
+                constant_tensors.insert(node.id, tensor);
+            }
+        }
 
         let mut effects = Vec::new();
         for node in &graph.nodes {

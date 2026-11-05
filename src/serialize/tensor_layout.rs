@@ -189,7 +189,7 @@ fn permute_tensor_by_order(
         None => return (data.to_vec(), shape.to_vec()),
     };
 
-    if numel == 0 || numel.saturating_mul(elem_size) != data.len() {
+    if numel == 0 || elem_size == 0 || numel.saturating_mul(elem_size) != data.len() {
         return (data.to_vec(), shape.to_vec());
     }
 
@@ -197,47 +197,100 @@ fn permute_tensor_by_order(
         return (data.to_vec(), shape.to_vec());
     };
 
-    let mut input_strides = vec![1usize; rank];
-    for i in (0..rank.saturating_sub(1)).rev() {
-        input_strides[i] = input_strides[i + 1]
-            .checked_mul(shape[i + 1] as usize)
-            .unwrap_or(0);
+    // Size-1 axes don't affect the byte order: when the other axes keep their
+    // relative order (e.g. a 1x1 conv's OIHW -> OHWI), the bytes are already right.
+    let mut moved = order
+        .iter()
+        .map(|&axis| axis as usize)
+        .filter(|&axis| shape[axis] != 1);
+    if moved
+        .try_fold(None, |last: Option<usize>, axis| match last {
+            Some(prev) if axis < prev => None,
+            _ => Some(Some(axis)),
+        })
+        .is_some()
+    {
+        return (data.to_vec(), new_shape);
     }
 
-    let mut output_strides = vec![1usize; rank];
-    for i in (0..rank.saturating_sub(1)).rev() {
-        output_strides[i] = output_strides[i + 1]
-            .checked_mul(new_shape[i + 1] as usize)
-            .unwrap_or(0);
+    let mut input_strides = vec![1usize; rank];
+    for i in (0..rank - 1).rev() {
+        input_strides[i] = input_strides[i + 1] * shape[i + 1] as usize;
     }
+    let src_strides: Vec<usize> = order
+        .iter()
+        .map(|&axis| input_strides[axis as usize])
+        .collect();
+    let out_shape: Vec<usize> = new_shape.iter().map(|&dim| dim as usize).collect();
 
     let mut out = vec![0u8; data.len()];
-    let mut coords = vec![0usize; rank];
-    let mut dst_coords = vec![0usize; rank];
-
-    for src_linear in 0..numel {
-        let mut rem = src_linear;
-        for axis in 0..rank {
-            let stride = input_strides[axis];
-            coords[axis] = if stride == 0 { 0 } else { rem / stride };
-            rem = if stride == 0 { 0 } else { rem % stride };
-        }
-
-        for (out_axis, &in_axis) in order.iter().enumerate() {
-            dst_coords[out_axis] = coords[in_axis as usize];
-        }
-
-        let mut dst_linear = 0usize;
-        for axis in 0..rank {
-            dst_linear += dst_coords[axis] * output_strides[axis];
-        }
-
-        let src_off = src_linear * elem_size;
-        let dst_off = dst_linear * elem_size;
-        out[dst_off..dst_off + elem_size].copy_from_slice(&data[src_off..src_off + elem_size]);
+    match elem_size {
+        1 => gather_permuted::<1>(data, &out_shape, &src_strides, &mut out),
+        2 => gather_permuted::<2>(data, &out_shape, &src_strides, &mut out),
+        4 => gather_permuted::<4>(data, &out_shape, &src_strides, &mut out),
+        8 => gather_permuted::<8>(data, &out_shape, &src_strides, &mut out),
+        _ => gather_permuted_bytes(data, elem_size, &out_shape, &src_strides, &mut out),
     }
-
     (out, new_shape)
+}
+
+/// Fill `out` (row-major in `out_shape`) from `data`, where output axis `k` steps
+/// `src_strides[k]` elements in the source. Walks the output with an odometer, so
+/// there is no per-element division.
+fn gather_permuted<const N: usize>(
+    data: &[u8],
+    out_shape: &[usize],
+    src_strides: &[usize],
+    out: &mut [u8],
+) {
+    let (src, _) = data.as_chunks::<N>();
+    let (dst, _) = out.as_chunks_mut::<N>();
+    let inner = out_shape.len() - 1;
+    let (inner_len, inner_stride) = (out_shape[inner], src_strides[inner]);
+    let mut index = vec![0usize; inner];
+    let mut base = 0usize;
+    for row in dst.chunks_exact_mut(inner_len) {
+        if inner_stride == 1 {
+            row.copy_from_slice(&src[base..base + inner_len]);
+        } else {
+            for (i, element) in row.iter_mut().enumerate() {
+                *element = src[base + i * inner_stride];
+            }
+        }
+        for axis in (0..inner).rev() {
+            index[axis] += 1;
+            base += src_strides[axis];
+            if index[axis] < out_shape[axis] {
+                break;
+            }
+            base -= src_strides[axis] * out_shape[axis];
+            index[axis] = 0;
+        }
+    }
+}
+
+fn gather_permuted_bytes(
+    data: &[u8],
+    elem_size: usize,
+    out_shape: &[usize],
+    src_strides: &[usize],
+    out: &mut [u8],
+) {
+    let rank = out_shape.len();
+    let mut index = vec![0usize; rank];
+    let mut src = 0usize;
+    for dst in out.chunks_exact_mut(elem_size) {
+        dst.copy_from_slice(&data[src * elem_size..(src + 1) * elem_size]);
+        for axis in (0..rank).rev() {
+            index[axis] += 1;
+            src += src_strides[axis];
+            if index[axis] < out_shape[axis] {
+                break;
+            }
+            src -= src_strides[axis] * out_shape[axis];
+            index[axis] = 0;
+        }
+    }
 }
 
 fn pack_int4_data(data: &[u8]) -> Vec<u8> {
@@ -427,18 +480,10 @@ fn make_graph_tensor(name: String, shape: Vec<i32>, dtype: DType, data: Vec<u8>)
     }
 }
 
-fn normalize_placeholder_shape(node: &Node, shape: Vec<i32>) -> Vec<i32> {
-    if node.meta.preserve_scalar_shape || !shape.is_empty() {
-        shape
-    } else {
-        vec![1]
-    }
-}
-
 fn placeholder_decl(node: &Node) -> (Vec<i32>, DType) {
     let raw_shape = raw_i32_shape(node);
     (
-        normalize_placeholder_shape(node, apply_tosa_dim_order(node, raw_shape)),
+        apply_tosa_dim_order(node, raw_shape),
         ir_dtype_to_tosa(node.meta.val.dtype),
     )
 }
@@ -464,8 +509,7 @@ fn serialize_const_placeholder(
     } else {
         (tensor_data.data.clone(), tensor_data.shape.clone())
     };
-    let final_shape: Vec<i32> =
-        normalize_placeholder_shape(node, final_shape_i64.iter().map(|&d| d as i32).collect());
+    let final_shape: Vec<i32> = final_shape_i64.iter().map(|&d| d as i32).collect();
     let final_data = match (tensor_dtype, store_dtype) {
         (DType::Int4, _) if store_dtype != DType::Int4 => pack_int4_data(&final_data),
         (DType::Int48, DType::Int32) => widen_int32_data_to_int48(&final_data),
@@ -477,6 +521,51 @@ fn serialize_const_placeholder(
 
 #[cfg(test)]
 mod tests {
+    fn reference_permute(data: &[u8], shape: &[i64], elem_size: usize, order: &[u8]) -> Vec<u8> {
+        let rank = shape.len();
+        let new_shape: Vec<usize> = order.iter().map(|&a| shape[a as usize] as usize).collect();
+        let mut in_strides = vec![1usize; rank];
+        for i in (0..rank - 1).rev() {
+            in_strides[i] = in_strides[i + 1] * shape[i + 1] as usize;
+        }
+        let numel: usize = new_shape.iter().product();
+        let mut out = vec![0u8; data.len()];
+        for dst in 0..numel {
+            let (mut rem, mut src) = (dst, 0usize);
+            for axis in (0..rank).rev() {
+                let coord = rem % new_shape[axis];
+                rem /= new_shape[axis];
+                src += coord * in_strides[order[axis] as usize];
+            }
+            out[dst * elem_size..(dst + 1) * elem_size]
+                .copy_from_slice(&data[src * elem_size..(src + 1) * elem_size]);
+        }
+        out
+    }
+
+    #[test]
+    fn permute_tensor_by_order_matches_a_reference_gather() {
+        let cases: &[(&[i64], &[u8])] = &[
+            (&[2, 3, 4, 5], &[0, 2, 3, 1]),
+            (&[3, 1, 4, 2], &[2, 3, 0, 1]),
+            (&[4, 6, 1, 1], &[0, 2, 3, 1]),
+            (&[2, 3, 4, 5, 2], &[0, 2, 3, 4, 1]),
+            (&[5, 7], &[1, 0]),
+            (&[1, 3, 1, 4], &[2, 0, 3, 1]),
+            (&[2, 1, 3], &[1, 2, 0]),
+        ];
+        for &(shape, order) in cases {
+            for elem_size in [1usize, 2, 3, 4, 8] {
+                let numel: i64 = shape.iter().product();
+                let data: Vec<u8> = (0..numel as usize * elem_size).map(|i| (i * 7 + 3) as u8).collect();
+                let (out, new_shape) = super::permute_tensor_by_order(&data, shape, elem_size, order);
+                let expected_shape: Vec<i64> = order.iter().map(|&a| shape[a as usize]).collect();
+                assert_eq!(new_shape, expected_shape, "{shape:?} {order:?}");
+                assert_eq!(out, reference_permute(&data, shape, elem_size, order), "{shape:?} {order:?} {elem_size}");
+            }
+        }
+    }
+
     use super::*;
     use crate::graph::ir::{NodeMeta, OpType};
     use crate::store::TensorData;
@@ -698,8 +787,8 @@ mod tests {
     }
 
     #[test]
-    fn scalar_placeholders_normalize_to_rank1_unless_preserved() {
-        let mut node = Node {
+    fn scalar_placeholders_keep_rank0() {
+        let node = Node {
             op: OpType::Placeholder,
             target: OpTarget::Other("scalar".to_string()),
             args: smallvec::SmallVec::new(),
@@ -711,7 +800,7 @@ mod tests {
             users: smallvec::SmallVec::new(),
             name: "scalar".to_string(),
         };
-        assert_eq!(placeholder_decl(&node).0, vec![1]);
+        assert_eq!(placeholder_decl(&node).0, Vec::<i32>::new());
 
         let tensor = TensorData {
             data: vec![7u8],
@@ -720,11 +809,6 @@ mod tests {
         };
         let context = TensorDeclarationContext::new(&Graph::new());
         let serialized = context.const_placeholder(&node, &tensor);
-        assert_eq!(serialized.shape, vec![1]);
-
-        node.meta.preserve_scalar_shape = true;
-        assert_eq!(placeholder_decl(&node).0, Vec::<i32>::new());
-        let preserved = context.const_placeholder(&node, &tensor);
-        assert_eq!(preserved.shape, Vec::<i32>::new());
+        assert_eq!(serialized.shape, Vec::<i32>::new());
     }
 }

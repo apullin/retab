@@ -4,6 +4,71 @@ use crate::fx_ir::IrArg;
 use crate::test_ir::{assert_live_signature, qparam, IrFixture};
 
 #[test]
+fn region_pipelines_preserve_output_dequantize_for_boundary_contracts() {
+    use crate::fx_ir::PipelineStep;
+    use crate::fx_pipeline::{build_ir_cond_submodule_pipeline, build_ir_while_submodule_pipeline};
+    use crate::pipeline_config::PipelineConfig;
+
+    let config = PipelineConfig::from_tosa_spec("TOSA-1.0+INT+cf");
+    for pipeline in [
+        build_ir_cond_submodule_pipeline(&config),
+        build_ir_while_submodule_pipeline(&config),
+    ] {
+        let mut fixture = IrFixture::new();
+        let input = fixture.placeholder("x", [2, 3], "torch.int8");
+        let qp = qparam(0.25, 3, "torch.int8");
+        fixture
+            .graph_mut()
+            .node_mut(input)
+            .meta
+            .set_both_qparams(qp.clone());
+        let flip = fixture.call(
+            "flip",
+            "aten.flip.default",
+            vec![IrArg::Node(input), crate::fx_ir::i64_list_arg(&[0, 1])],
+            [2, 3],
+            "torch.int8",
+        );
+        fixture.graph_mut().node_mut(flip).meta.set_both_qparams(qp);
+        let dq = fixture.f32_call(
+            "dq",
+            "quantized_decomposed.dequantize_per_tensor.default",
+            vec![
+                IrArg::Node(flip),
+                IrArg::Float(0.25),
+                IrArg::Int(3),
+                IrArg::Int(-128),
+                IrArg::Int(127),
+                IrArg::Dtype("torch.int8".into()),
+            ],
+            [2, 3],
+        );
+        fixture.output(dq);
+        for step in pipeline {
+            match step {
+                PipelineStep::Ir(pass) => {
+                    pass.run(fixture.graph_mut());
+                }
+                PipelineStep::Effectful(pass) => {
+                    pass.run(fixture.graph_mut());
+                }
+            }
+        }
+        let graph = fixture.graph();
+        assert!(graph.node(dq).alive);
+        assert!(graph.node(dq).is_dequantize());
+        assert_eq!(graph.output_node().unwrap().first_node_arg(), Some(dq));
+        assert_eq!(
+            graph
+                .live_nodes()
+                .filter(|node| node.meta.val_dtype() == Some("torch.float32"))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
 fn convert_sum_decomposes_multi_axis_reduction_with_qparam_contract() {
     let mut fixture = IrFixture::new();
     let input = fixture.f32_placeholder("x", [2, 3, 4]);
@@ -35,9 +100,10 @@ fn convert_sum_decomposes_multi_axis_reduction_with_qparam_contract() {
         fixture.graph(),
         &[
             "x|Placeholder|x|args=[]|shape=[2,3,4]|dtype=torch.float32|iqp=-|oqp=-",
-            "sum_reduce_dim2|CallFunction|aten.sum.dim_IntList|args=[%x,[2],false]|shape=[2,3]|dtype=torch.float32|iqp={0:torch.int8@0.25:3}|oqp={0:torch.int8@0.5:-7}",
-            "sum_reduce_dim0|CallFunction|aten.sum.dim_IntList|args=[%sum_reduce_dim2,[0],false]|shape=[3]|dtype=torch.float32|iqp={0:torch.int8@0.25:3}|oqp={0:torch.int8@0.5:-7}",
-            "output|Output|output|args=[%sum_reduce_dim0]|shape=-|dtype=-|iqp=-|oqp=-",
+            "sum_reduce_dim0|CallFunction|aten.sum.dim_IntList|args=[%x,[0],true]|shape=[1,3,4]|dtype=torch.float32|iqp={0:torch.int8@0.25:3}|oqp={0:torch.int8@0.5:-7}",
+            "sum_reduce_dim2|CallFunction|aten.sum.dim_IntList|args=[%sum_reduce_dim0,[2],true]|shape=[1,3,1]|dtype=torch.float32|iqp={0:torch.int8@0.25:3}|oqp={0:torch.int8@0.5:-7}",
+            "sum_view|CallFunction|aten.view_copy.default|args=[%sum_reduce_dim2,[3]]|shape=[3]|dtype=torch.float32|iqp={0:torch.int8@0.25:3}|oqp={0:torch.int8@0.5:-7}",
+            "output|Output|output|args=[%sum_view]|shape=-|dtype=-|iqp=-|oqp=-",
         ],
     );
 }

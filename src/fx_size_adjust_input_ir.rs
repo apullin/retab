@@ -20,9 +20,14 @@ fn pooling_size_adjust_allowed(kind: PoolSizeAdjustKind, node: &crate::fx_ir::Ir
             let ceil_mode = node.arg_bool_or(4, false);
             let count_include_pad = node.arg_bool_or(5, true);
             let divisor_override = node.arg(6).is_some_and(|arg| !matches!(arg, IrArg::None));
+            let kernel_area = node.arg_int_pair_or_scalar(1).map(|(h, w)| h * w);
+            let divisor_matches_kernel =
+                node.arg_int(6).is_some() && node.arg_int(6) == kernel_area;
             let pad = pair_arg(&node.args, 3, vec![0, 0]);
             let no_padding = pad.iter().all(|&value| value == 0);
-            !ceil_mode && (!count_include_pad || no_padding) && !divisor_override
+            !ceil_mode
+                && (!count_include_pad || no_padding)
+                && (!divisor_override || divisor_matches_kernel)
         }
     }
 }
@@ -61,6 +66,9 @@ impl IrPass for IrSizeAdjustInputPass {
                     let Some(conv) = ConvArgs::parse(&graph.nodes[id]) else {
                         continue;
                     };
+                    if conv.transposed {
+                        continue;
+                    }
                     let weight_shape = graph
                         .node_shape(conv.weight)
                         .map(|s| s.to_vec())
@@ -181,5 +189,76 @@ impl IrPass for IrSizeAdjustInputPass {
             ));
         }
         modified
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fx_ir::i64_list_arg;
+    use crate::test_ir::{f32_call, f32_placeholder, output};
+
+    #[test]
+    fn regression_transposed_convolution_keeps_seven_by_seven_input() {
+        let mut graph = IrGraph::empty();
+        let input = f32_placeholder(&mut graph, "x", [1, 1, 7, 7]);
+        let weight = f32_placeholder(&mut graph, "weight", [1, 1, 2, 2]);
+        let conv = f32_call(
+            &mut graph,
+            "conv_transpose",
+            "aten.convolution.default",
+            vec![
+                IrArg::Node(input),
+                IrArg::Node(weight),
+                IrArg::None,
+                i64_list_arg(&[2, 2]),
+                i64_list_arg(&[0, 0]),
+                i64_list_arg(&[1, 1]),
+                IrArg::Bool(true),
+                i64_list_arg(&[0, 0]),
+                IrArg::Int(1),
+            ],
+            [1, 1, 14, 14],
+        );
+        output(&mut graph, conv);
+
+        assert!(!IrSizeAdjustInputPass.run(&mut graph));
+        assert_eq!(graph.node(conv).arg_node(0), Some(input));
+        assert_eq!(graph.node_shape(input), Some([1, 1, 7, 7].as_slice()));
+        assert_eq!(graph.live_call_function_ids(), vec![conv]);
+    }
+
+    #[test]
+    fn regression_avg_pool_with_kernel_area_divisor_slices_unused_edges() {
+        let mut graph = IrGraph::empty();
+        let input = f32_placeholder(&mut graph, "x", [1, 1, 5, 5]);
+        let pool = f32_call(
+            &mut graph,
+            "pool",
+            "aten.avg_pool2d.default",
+            vec![
+                IrArg::Node(input),
+                i64_list_arg(&[2, 2]),
+                i64_list_arg(&[2, 2]),
+                i64_list_arg(&[0, 0]),
+                IrArg::Bool(false),
+                IrArg::Bool(true),
+                IrArg::Int(4),
+            ],
+            [1, 1, 2, 2],
+        );
+        output(&mut graph, pool);
+        assert!(!crate::fx_decompose_avgpool_pad_ir::IrDecomposeAvgPoolPadPass.run(&mut graph));
+
+        assert!(IrSizeAdjustInputPass.run(&mut graph));
+        let width_slice = graph.node(pool).arg_node(0).unwrap();
+        assert_eq!(graph.node(width_slice).target, "aten.slice_copy.Tensor");
+        assert_eq!(graph.node(width_slice).arg_int(1), Some(3));
+        assert_eq!(graph.node(width_slice).arg_int(3), Some(4));
+        let height_slice = graph.node(width_slice).arg_node(0).unwrap();
+        assert_eq!(graph.node(height_slice).target, "aten.slice_copy.Tensor");
+        assert_eq!(graph.node(height_slice).arg_int(1), Some(2));
+        assert_eq!(graph.node(height_slice).arg_int(3), Some(4));
+        assert_eq!(graph.node(height_slice).arg_node(0), Some(input));
     }
 }

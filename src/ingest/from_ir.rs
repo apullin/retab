@@ -98,8 +98,10 @@ fn graph_from_ir_ext(
             continue; // emitted as a String region reference, not a node
         }
         let placeholder_like = matches!(ir_node.op, NodeOp::Placeholder | NodeOp::GetAttr);
-        let preserve_placeholder =
-            preserve_dead_placeholders && matches!(ir_node.op, NodeOp::Placeholder);
+        // A runtime input stays in the block signature even when nothing reads it, as in
+        // stock; only dead constants are dropped.
+        let preserve_placeholder = matches!(ir_node.op, NodeOp::Placeholder)
+            && (preserve_dead_placeholders || ir_node.tensor.is_none());
         if placeholder_like && !preserve_placeholder && !referenced.contains(&ir_node.id) {
             continue; // dead constant/param placeholder
         }
@@ -177,7 +179,7 @@ fn graph_from_ir_ext(
     fold_constant_reshapes(&mut graph, store);
     // Folding leaves the original constants (e.g. the pre-reshape weight) with no
     // users -- drop them so we don't emit duplicate CONST tensors.
-    remove_dead_constants(&mut graph, preserve_dead_placeholders);
+    remove_dead_constants(&mut graph, store, preserve_dead_placeholders);
 
     // The IrGraph's node Vec is in pass-INSERTION order: passes append new nodes
     // (transposes, rescales) at the end rather than at their topological
@@ -348,7 +350,11 @@ fn apply_effects_ext(
         }
     }
     if applied {
-        remove_dead_constants(graph, preserve_graph_inputs);
+        // Materializing a node drops its inputs, which can orphan the ops that fed
+        // it (e.g. the accumulator RESCALE after a folded conv); stock's retraces
+        // drop those too.
+        remove_dead_calls(graph);
+        remove_dead_constants(graph, store, preserve_graph_inputs);
         graph.order = topo_order(graph);
         graph.rebuild_user_lists();
     }
@@ -639,9 +645,42 @@ fn remove_node(graph: &mut Graph, nid: NodeId) {
     graph.node_names.retain(|&(x, _)| x != nid);
 }
 
+/// Remove call_function nodes that nothing references, repeating until none are left.
+fn remove_dead_calls(graph: &mut Graph) {
+    loop {
+        let mut referenced: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        for &nid in &graph.order {
+            if let Some(n) = graph.nodes.get(nid) {
+                referenced.extend(Graph::collect_input_ids(n));
+            }
+        }
+        if let Some(out) = graph.output {
+            referenced.insert(out);
+        }
+        let dead: Vec<NodeId> = graph
+            .order
+            .iter()
+            .copied()
+            .filter(|nid| {
+                !referenced.contains(nid)
+                    && graph
+                        .nodes
+                        .get(*nid)
+                        .is_some_and(|n| n.op == OpType::CallFunction)
+            })
+            .collect();
+        if dead.is_empty() {
+            return;
+        }
+        for nid in dead {
+            remove_node(graph, nid);
+        }
+    }
+}
+
 /// Remove unreferenced placeholder/constant nodes (e.g. constants left dead by
 /// fold_constant_reshapes), so we don't emit duplicate CONST tensors.
-fn remove_dead_constants(graph: &mut Graph, preserve_graph_inputs: bool) {
+fn remove_dead_constants(graph: &mut Graph, store: &TensorStore, preserve_graph_inputs: bool) {
     let mut referenced: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
     for &nid in &graph.order {
         if let Some(n) = graph.nodes.get(nid) {
@@ -661,10 +700,11 @@ fn remove_dead_constants(graph: &mut Graph, preserve_graph_inputs: bool) {
             if preserve_graph_inputs && graph.inputs.contains(&nid) {
                 return false;
             }
-            graph
-                .nodes
-                .get(nid)
-                .is_some_and(|n| n.op == OpType::Placeholder && !referenced.contains(&nid))
+            graph.nodes.get(nid).is_some_and(|n| {
+                n.op == OpType::Placeholder
+                    && !referenced.contains(&nid)
+                    && store.get(&n.name).is_some()
+            })
         })
         .collect();
     for nid in dead {
@@ -820,6 +860,76 @@ mod tests {
             graph.nodes[consumer].args[2],
             Arg::String("already::qualified".to_string())
         );
+    }
+
+    #[test]
+    fn materializing_a_consumer_drops_the_ops_that_only_fed_it() {
+        use crate::lowering_effects::{
+            LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect,
+        };
+
+        let mut ir = IrGraph::empty();
+        let input = ir.add_node(
+            NodeOp::Placeholder,
+            "x".to_string(),
+            "x".to_string(),
+            vec![],
+            ir_meta(),
+        );
+        let rescale = ir.add_node(
+            NodeOp::CallFunction,
+            "rescale".to_string(),
+            "backend.tosa.RESCALE.default".to_string(),
+            vec![IrArg::Node(input)],
+            ir_meta(),
+        );
+        let view = ir.add_node(
+            NodeOp::CallFunction,
+            "view".to_string(),
+            "aten.view_copy.default".to_string(),
+            vec![IrArg::Node(rescale)],
+            ir_meta(),
+        );
+        let add = ir.add_node(
+            NodeOp::CallFunction,
+            "add".to_string(),
+            "aten.add.Tensor".to_string(),
+            vec![IrArg::Node(view), IrArg::Node(input)],
+            ir_meta(),
+        );
+        ir.add_node(
+            NodeOp::Output,
+            "output".to_string(),
+            "output".to_string(),
+            vec![IrArg::Node(add)],
+            ir_meta(),
+        );
+
+        let mut store = TensorStore::new();
+        let mut graph = graph_from_ir(&ir, &mut store);
+        let mut effects = LoweringEffectBatch::default();
+        effects.push(LoweringEffect::MaterializeTensorNode(
+            MaterializeTensorNodeEffect::from_tensor(
+                "view".to_string(),
+                TensorData {
+                    data: vec![1, 2],
+                    shape: vec![2],
+                    dtype: DType::Int8,
+                },
+                true,
+            ),
+        ));
+        apply_effects(&mut graph, &mut store, &effects);
+
+        let names: Vec<_> = graph
+            .order
+            .iter()
+            .map(|&nid| graph.nodes[nid].name.as_str())
+            .collect();
+        assert!(!names.contains(&"rescale"));
+        for kept in ["x", "view", "add", "output"] {
+            assert!(names.contains(&kept), "{kept} missing from {names:?}");
+        }
     }
 
     #[test]

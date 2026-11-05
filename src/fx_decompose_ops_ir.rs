@@ -10,8 +10,7 @@ use crate::fx_ir::{
     i64_list_arg as i64_list, normalize_dim, wrap_dim, IrArg, IrGraph, IrPass, MetaValue, NodeId,
 };
 use crate::fx_target::{
-    add_sub_alpha_result_target, elu_target_kind, BATCH_NORM_TARGET_MARKERS,
-    GROUP_NORM_TARGET_MARKERS,
+    add_sub_alpha_result_target, elu_target_kind, BATCH_NORM_TARGETS, GROUP_NORM_TARGETS,
 };
 use crate::runner_logging::log_line;
 
@@ -204,8 +203,8 @@ const DECOMPOSE_RULES: &[DecomposeRule] = &[
     skip_quantized(&["aten.gelu."], decompose_gelu),
     skip_quantized(&["aten.erfinv."], decompose_erfinv),
     skip_quantized(&["pow.Tensor_Scalar"], decompose_pow_scalar),
-    always(GROUP_NORM_TARGET_MARKERS, decompose_group_norm),
-    always(BATCH_NORM_TARGET_MARKERS, decompose_batch_norm),
+    always(GROUP_NORM_TARGETS, decompose_group_norm),
+    always(BATCH_NORM_TARGETS, decompose_batch_norm),
     always(
         &["aten.log_softmax.", "aten._log_softmax."],
         decompose_log_softmax_wrapper,
@@ -498,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn decompose_log_softmax_rewrites_to_log_of_softmax_chain() {
+    fn decompose_log_softmax_subtracts_log_of_sum_exp() {
         let mut graph = IrGraph::empty();
         let x = f32_placeholder(&mut graph, "x", &[2, 3, 4]);
         let log_softmax = f32_call(
@@ -514,8 +513,26 @@ mod tests {
         assert!(has_live_target(
             &graph,
             "log_softmax_result",
-            "aten.log.default"
+            "aten.sub.Tensor"
         ));
+        let log = live_node(&graph, "log_softmax_log_sum");
+        assert_eq!(log.target, "aten.log.default");
+        assert_eq!(
+            log.first_node_arg(),
+            Some(live_node(&graph, "log_softmax_sum").id)
+        );
+        assert_eq!(log.meta.val_shape(), Some([2, 1, 4].as_slice()));
+        let result = live_node(&graph, "log_softmax_result");
+        assert_eq!(
+            result.args[0].as_node(),
+            Some(live_node(&graph, "log_softmax_shifted").id)
+        );
+        assert_eq!(result.args[1].as_node(), Some(log.id));
+        assert!(!graph.nodes.iter().any(|node| node.alive
+            && matches!(
+                node.target.as_str(),
+                "aten.reciprocal.default" | "aten.mul.Tensor"
+            )));
     }
 
     #[test]
@@ -1108,19 +1125,29 @@ fn decompose_softmax_like(graph: &mut IrGraph, id: NodeId, log_output: bool) -> 
         &sum_shape,
     );
 
-    let recip = ctx.tensor_shape(
-        &mut cursor,
-        "recip",
-        "aten.reciprocal.default",
-        vec![IrArg::Node(sum)],
-        &sum_shape,
-    );
-
-    let softmax = ctx.mul(&mut cursor, "softmax", exp, recip);
-
     if log_output {
-        ctx.replace_nodes(&mut cursor, "result", "aten.log.default", &[softmax]);
+        let log_sum = ctx.tensor_shape(
+            &mut cursor,
+            "log_sum",
+            "aten.log.default",
+            vec![IrArg::Node(sum)],
+            &sum_shape,
+        );
+        ctx.replace_nodes(
+            &mut cursor,
+            "result",
+            "aten.sub.Tensor",
+            &[shifted, log_sum],
+        );
     } else {
+        let recip = ctx.tensor_shape(
+            &mut cursor,
+            "recip",
+            "aten.reciprocal.default",
+            vec![IrArg::Node(sum)],
+            &sum_shape,
+        );
+        let softmax = ctx.mul(&mut cursor, "softmax", exp, recip);
         ctx.replace_nodes(&mut cursor, "result", "aten.clone.default", &[softmax]);
     }
     true

@@ -1,11 +1,15 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin>=1.16,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "retab"
-version = "0.2.0"
+dynamic = ["version"]
+description = "Rust acceleration for ExecuTorch Arm TOSA 1.0 INT preprocessing and serialization"
 requires-python = ">=3.10"
+
+[project.urls]
+Repository = "https://github.com/apullin/retab"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

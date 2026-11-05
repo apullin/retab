@@ -47,7 +47,6 @@ pub(crate) fn is_accumulator_output(target: &OpTarget) -> bool {
             | OpTarget::TosaConv2d
             | OpTarget::TosaDepthwiseConv2d
             | OpTarget::TosaTransposeConv2d
-            | OpTarget::TosaFullyConnected
             | OpTarget::TosaMatmul
     )
 }
@@ -62,6 +61,7 @@ pub(crate) fn is_shape_preserving_unary(target: &OpTarget) -> bool {
             | OpTarget::Sigmoid
             | OpTarget::Tanh
             | OpTarget::Exp
+            | OpTarget::Erf
             | OpTarget::Log
             | OpTarget::Neg
             | OpTarget::Reciprocal

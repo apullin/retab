@@ -1,3 +1,4 @@
+use crate::pipeline_config::PipelineConfig;
 use flatbuffers::{FlatBufferBuilder, TableFinishedWIPOffset, Vector, WIPOffset};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -10,11 +11,12 @@ pub(super) fn serialize_regions_to_tosa_py(
     py: Python<'_>,
     regions: &[SerializedRegion],
     estimated_capacity: usize,
+    config: &PipelineConfig,
 ) -> Py<PyBytes> {
     let mut builder = FlatBufferBuilder::with_capacity(estimated_capacity.max(16 * 1024 * 1024));
     let regions: Vec<_> = regions
         .iter()
-        .map(|region| build_region(&mut builder, region))
+        .map(|region| build_region(&mut builder, region, config))
         .collect();
     finish_tosa_graph_py(py, &mut builder, &regions)
 }
@@ -22,6 +24,7 @@ pub(super) fn serialize_regions_to_tosa_py(
 fn build_region<'fbb>(
     builder: &mut FlatBufferBuilder<'fbb>,
     region: &SerializedRegion,
+    config: &PipelineConfig,
 ) -> WIPOffset<TableFinishedWIPOffset> {
     if crate::config::tosa_engine_debug_enabled() {
         eprintln!("[Serialize] building fb tensors...");
@@ -34,7 +37,7 @@ fn build_region<'fbb>(
     if crate::config::tosa_engine_debug_enabled() {
         eprintln!("[Serialize] building fb operators...");
     }
-    let fb_operators = build_operators(builder, &region.items.operators);
+    let fb_operators = build_operators(builder, &region.items.operators, config.is_u55_subset);
     if crate::config::tosa_engine_debug_enabled() {
         eprintln!("[Serialize] assembling graph...");
     }
@@ -138,6 +141,12 @@ fn build_tensors(
 ) -> Vec<WIPOffset<TableFinishedWIPOffset>> {
     let mut offsets = Vec::with_capacity(tensors.len());
     for t in tensors {
+        assert_ne!(
+            t.dtype,
+            super::tosa_generated::DType::Int64,
+            "TOSA 1.0 does not support INT64 tensor '{}'",
+            t.name
+        );
         let name = builder.create_string(&t.name);
         let shape = builder.create_vector(&t.shape);
         let data = t
@@ -195,6 +204,7 @@ fn build_shapes(
 fn build_operators(
     builder: &mut FlatBufferBuilder<'_>,
     operators: &[TosaOperator],
+    is_u55_subset: bool,
 ) -> Vec<WIPOffset<TableFinishedWIPOffset>> {
     let mut offsets = Vec::with_capacity(operators.len());
     for op in operators {
@@ -207,7 +217,7 @@ fn build_operators(
         let inputs = builder.create_vector(&input_strs);
         let outputs = builder.create_vector(&output_strs);
 
-        let (attr_type, attr_offset) = build_attribute(builder, &op.attribute);
+        let (attr_type, attr_offset) = build_attribute(builder, &op.attribute, is_u55_subset);
 
         let start = builder.start_table();
         builder.push_slot::<u32>(4, op.op as u32, 0);
@@ -220,4 +230,112 @@ fn build_operators(
         offsets.push(builder.end_table(start));
     }
     offsets
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serialize::tosa_generated::DType;
+
+    #[test]
+    #[should_panic(expected = "INT64")]
+    fn regression_int64_tensor_cannot_reach_tosa_1_0_flatbuffer() {
+        let tensor = TosaTensor {
+            name: "int64_tensor".into(),
+            shape: vec![1],
+            dtype: DType::Int64,
+            data: Some(1i64.to_le_bytes().to_vec()),
+            ..Default::default()
+        };
+        let mut builder = FlatBufferBuilder::new();
+        build_tensors(&mut builder, &[tensor]);
+    }
+
+    #[test]
+    fn int64_constants_and_runtime_inputs_return_serialization_errors() {
+        use crate::graph::ir::{Arg, DType as IrDType, NodeMeta, OpTarget, OpType, TensorInfo};
+        use crate::graph::Graph;
+        use crate::store::{TensorData, TensorStore};
+        use smallvec::smallvec;
+
+        for constant in [false, true] {
+            let mut graph = Graph::new();
+            let input = graph.create_node(
+                OpType::Placeholder,
+                OpTarget::Other("x".into()),
+                smallvec![],
+                Vec::new(),
+                NodeMeta::new(TensorInfo::new(&[1], IrDType::Int64)),
+                "x".into(),
+            );
+            graph.create_node(
+                OpType::Output,
+                OpTarget::Other("output".into()),
+                smallvec![Arg::Node(input)],
+                Vec::new(),
+                NodeMeta::new(TensorInfo::new(&[1], IrDType::Int64)),
+                "output".into(),
+            );
+            let mut store = TensorStore::default();
+            if constant {
+                store.insert(
+                    "x".into(),
+                    TensorData {
+                        data: 1i64.to_le_bytes().to_vec(),
+                        shape: vec![1],
+                        dtype: IrDType::Int64,
+                    },
+                );
+            }
+            let error = match super::super::collection::collect_regions(
+                &[("main".into(), graph)],
+                &store,
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("accepted an INT64 tensor"),
+            };
+            assert!(error.contains("TOSA 1.0 does not support INT64 tensor 'x'"));
+        }
+    }
+
+    #[test]
+    fn u55_shift_rounding_reaches_every_serialized_region() {
+        use super::super::collection::SerializedGraphItems;
+        use super::super::tosa_generated::{ArithmeticRightShiftAttribute, Attribute, Op};
+
+        for spec in ["TOSA-1.0+INT+u55", "TOSA-1.0+INT+cf", "TOSA-1.0+INT"] {
+            let config = PipelineConfig::from_tosa_spec(spec);
+            let regions: Vec<_> = ["main", "branch", "loop_body"]
+                .into_iter()
+                .map(|name| SerializedRegion {
+                    name: name.into(),
+                    items: SerializedGraphItems {
+                        tensors: vec![],
+                        shapes: vec![],
+                        input_names: vec![],
+                        output_names: vec![],
+                        operators: vec![TosaOperator::new(
+                            Op::ArithmeticRightShift,
+                            Attribute::ArithmeticRightShift(ArithmeticRightShiftAttribute {}),
+                            vec!["x".into(), "shift".into()],
+                            vec!["out".into()],
+                        )],
+                    },
+                })
+                .collect();
+            let mut builder = FlatBufferBuilder::new();
+            let regions: Vec<_> = regions
+                .iter()
+                .map(|region| build_region(&mut builder, region, &config))
+                .collect();
+            finalize_tosa_graph(&mut builder, &regions);
+            let graph = tosa_rs::generated::root_as_tosa_graph(builder.finished_data()).unwrap();
+            for region in graph.regions().unwrap() {
+                let block = region.blocks().unwrap().get(0);
+                let op = block.operators().unwrap().get(0);
+                let attr = op.attribute_as_arithmetic_right_shift_attribute().unwrap();
+                assert_eq!(attr.round(), config.is_u55_subset);
+            }
+        }
+    }
 }

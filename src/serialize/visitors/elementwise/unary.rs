@@ -17,6 +17,7 @@ pub(super) fn register(table: &mut EmitterTable) {
         OpTarget::Sigmoid     => Op::Sigmoid,    Attribute::Sigmoid(SigmoidAttribute {});
         OpTarget::Tanh        => Op::Tanh,       Attribute::Tanh(TanhAttribute {});
         OpTarget::Exp         => Op::Exp,        Attribute::Exp(ExpAttribute {});
+        OpTarget::Erf         => Op::Erf,        Attribute::Erf(ErfAttribute {});
         OpTarget::Log         => Op::Log,        Attribute::Log(LogAttribute {});
         OpTarget::Abs         => Op::Abs,        Attribute::Abs(AbsAttribute {});
         OpTarget::Reciprocal  => Op::Reciprocal, Attribute::Reciprocal(ReciprocalAttribute {});

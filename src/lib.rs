@@ -12,8 +12,10 @@ mod fx_activation;
 mod fx_annotate_conv_bias_ir;
 mod fx_annotate_output_dim_order_ir;
 mod fx_batch_norm_args;
+mod fx_broadcast_args_ir;
 mod fx_canonicalize_gather_ir;
 mod fx_cast_int64_ir;
+mod fx_cast_to_int32_ir;
 mod fx_constant_tensor_eval;
 mod fx_conv1d_unsqueeze_ir;
 mod fx_conv_args;
@@ -26,12 +28,13 @@ mod fx_decompose_addmm_ir;
 mod fx_decompose_as_strided_copy_ir;
 mod fx_decompose_avgpool_pad_ir;
 mod fx_decompose_cumsum_ir;
-mod fx_decompose_embedding_ir;
 mod fx_decompose_div_tensor_mode_ir;
+mod fx_decompose_embedding_ir;
 mod fx_decompose_flip_ir;
 mod fx_decompose_grouped_conv_ir;
 mod fx_decompose_index_select_ir;
 mod fx_decompose_index_tensor_ir;
+mod fx_decompose_large_stride_maxpool_ir;
 mod fx_decompose_layernorm_ir;
 mod fx_decompose_linear_ir;
 mod fx_decompose_logit_ir;
@@ -54,6 +57,7 @@ mod fx_decorate_fp_int_cast_ir;
 mod fx_expand_where_mask_ir;
 mod fx_fold_qdq_ir;
 mod fx_fuse_batch_norm_ir;
+mod fx_fuse_cascaded_views_ir;
 mod fx_fuse_constant_inputs_ir;
 mod fx_fuse_duplicate_users_ir;
 mod fx_fuse_equal_placeholders_ir;
@@ -68,12 +72,14 @@ mod fx_insert_int32_rescale_ir;
 mod fx_insert_qdq_rescale_ir;
 mod fx_insert_table_ops_ir;
 mod fx_ir;
+mod fx_legalize_integer_arithmetic_ir;
 mod fx_memory_format_ir;
 mod fx_meta;
 mod fx_normalize_index_put_bool_mask_ir;
 mod fx_normalize_index_put_none_indices_ir;
 mod fx_normalize_maxpool_rank_ir;
 mod fx_pipeline;
+mod fx_propagate_slice_views_ir;
 mod fx_py_attr;
 mod fx_quant;
 mod fx_quantize_clamp_args_ir;
@@ -92,8 +98,10 @@ mod ingest;
 #[cfg(test)]
 mod ir_golden_tests;
 mod lowering_effects;
+mod pipeline_config;
 mod runner_logging;
 mod serialize;
+mod stock_fallback;
 mod store;
 mod tensor_data;
 #[cfg(test)]
@@ -110,6 +118,7 @@ pub(crate) type StashedPipeline = (fx_ir::IrGraph, lowering_effects::LoweringEff
 struct StashedPipelineHierarchy {
     parent: Option<StashedPipeline>,
     submodules: BTreeMap<String, StashedPipeline>,
+    pipeline_config: Option<pipeline_config::PipelineConfig>,
 }
 
 /// True if the stashed IrGraph contains a control-flow op (cond / while_loop).
@@ -148,11 +157,12 @@ thread_local! {
         std::cell::RefCell::new(StashedPipelineHierarchy::default());
 }
 
-fn stash_ir(stashed: Option<StashedPipeline>) {
+fn stash_ir(stashed: Option<StashedPipeline>, pipeline_config: pipeline_config::PipelineConfig) {
     STASHED_IR.with(|s| {
         let mut stash = s.borrow_mut();
         stash.parent = stashed;
         stash.submodules.clear();
+        stash.pipeline_config = Some(pipeline_config);
     });
 }
 
@@ -165,21 +175,86 @@ fn stash_submodule_ir(region_name: Option<String>, stashed: Option<StashedPipeli
     });
 }
 
+thread_local! {
+    /// Main-graph runtime inputs that nothing consumes, from the last serialization.
+    static LAST_UNUSED_INPUTS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Main-block inputs that no operator reads and that aren't block outputs. This reads
+/// the serialized block because emitters can drop an operand the graph still lists
+/// (e.g. the overwritten destination of `copy_`).
+fn unused_main_block_inputs(tosa: &[u8]) -> Vec<String> {
+    let Ok(graph) = tosa_rs::generated::root_as_tosa_graph(tosa) else {
+        return Vec::new();
+    };
+    let Some(block) = graph
+        .regions()
+        .and_then(|regions| regions.iter().next())
+        .and_then(|region| region.blocks())
+        .and_then(|blocks| blocks.iter().next())
+    else {
+        return Vec::new();
+    };
+    let mut consumed: std::collections::HashSet<&str> = block
+        .operators()
+        .into_iter()
+        .flatten()
+        .filter_map(|op| op.inputs())
+        .flatten()
+        .collect();
+    consumed.extend(block.outputs().into_iter().flatten());
+    block
+        .inputs()
+        .into_iter()
+        .flatten()
+        .filter(|name| !consumed.contains(name))
+        .map(str::to_string)
+        .collect()
+}
+
 fn take_stashed_hierarchy() -> StashedPipelineHierarchy {
     STASHED_IR.with(|s| std::mem::take(&mut *s.borrow_mut()))
+}
+
+/// Fail with a `RETAB_STOCK_FALLBACK:` error (the Python seam then calls stock) when a
+/// pass requested it or a quantized table op has no planned TABLE.
+fn ensure_retab_can_lower(
+    ir: Option<&fx_ir::IrGraph>,
+    effects: &lowering_effects::LoweringEffectBatch,
+) -> PyResult<()> {
+    if let Some(reason) = stock_fallback::take() {
+        return Err(PyRuntimeError::new_err(format!(
+            "RETAB_STOCK_FALLBACK: {reason}"
+        )));
+    }
+    let Some(graph) = ir else {
+        return Ok(());
+    };
+    let missing = crate::fx_insert_table_ops_ir::unsupported_table_node_names(graph, effects);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(PyRuntimeError::new_err(format!(
+        "RETAB_STOCK_FALLBACK: unsupported table op: {} would emit integer TOSA SIGMOID/TANH/etc",
+        missing.join(", ")
+    )))
 }
 
 fn run_full_fx_pipeline(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<Py<PyAny>>,
+    pipeline_config: &pipeline_config::PipelineConfig,
 ) -> PyResult<(
     bool,
     Option<fx_ir::IrGraph>,
     lowering_effects::LoweringEffectBatch,
 )> {
     let py = graph_module.py();
+    stock_fallback::take();
     let exported_program_for_pipeline = exported_program.as_ref().map(|ep| ep.clone_ref(py));
-    let pipeline = fx_pipeline::build_hybrid_pipeline(exported_program_for_pipeline);
+    let pipeline =
+        fx_pipeline::build_hybrid_pipeline(exported_program_for_pipeline, pipeline_config);
     let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
     let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
     let structural_changed = control_flow::snapshot_pre_pass_qparams_ir(&mut initial_ir);
@@ -190,6 +265,7 @@ fn run_full_fx_pipeline(
         &pipeline,
         Some(initial_ir),
     )?;
+    ensure_retab_can_lower(ir.as_ref(), &effects)?;
     Ok((modified || structural_changed > 0, ir, effects))
 }
 
@@ -228,6 +304,9 @@ fn ingest_and_serialize_tosa_pybytes(
             "missing stashed IrGraph for serialization",
         ));
     };
+    let pipeline_config = stashed.pipeline_config.take().ok_or_else(|| {
+        PyRuntimeError::new_err("missing stashed pipeline config for serialization")
+    })?;
 
     let has_control_flow = ir_has_control_flow(&ir);
     if has_control_flow {
@@ -254,7 +333,9 @@ fn ingest_and_serialize_tosa_pybytes(
     }
 
     rebuild_graph_users(&mut graphs);
-    let py_bytes = serialize::serialize_graphs_to_tosa_py(py, &graphs, &store)?;
+    let py_bytes = serialize::serialize_graphs_to_tosa_py(py, &graphs, &store, &pipeline_config)?;
+    let unused = unused_main_block_inputs(py_bytes.bind(py).as_bytes());
+    LAST_UNUSED_INPUTS.with(|slot| *slot.borrow_mut() = unused);
     if profile {
         eprintln!(
             "[RETAB][ingest_and_serialize] from-ir graphs={} nodes={} tensors={}",
@@ -268,26 +349,34 @@ fn ingest_and_serialize_tosa_pybytes(
 
 /// Run the parent lowering pipeline and stash the resulting IrGraph.
 #[pyfunction]
-#[pyo3(signature = (graph_module, exported_program=None))]
+#[pyo3(signature = (graph_module, exported_program=None, *, pipeline_config))]
 fn run_fx_passes(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<&Bound<'_, PyAny>>,
+    pipeline_config: &Bound<'_, PyDict>,
 ) -> PyResult<bool> {
-    let (modified, ir, effects) =
-        run_full_fx_pipeline(graph_module, clone_bound_pyobject(exported_program))?;
-    stash_ir(ir.map(|g| (g, effects)));
+    let pipeline_config = pipeline_config::PipelineConfig::from_py(pipeline_config)?;
+    let (modified, ir, effects) = run_full_fx_pipeline(
+        graph_module,
+        clone_bound_pyobject(exported_program),
+        &pipeline_config,
+    )?;
+    stash_ir(ir.map(|g| (g, effects)), pipeline_config);
     Ok(modified)
 }
 
 /// Run the while_loop submodule IR pipeline and stash the resulting IrGraph.
 #[pyfunction]
-#[pyo3(signature = (graph_module, exported_program=None, region_name=None))]
+#[pyo3(signature = (graph_module, exported_program=None, region_name=None, *, pipeline_config))]
 fn run_fx_submodule_passes(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<&Bound<'_, PyAny>>,
     region_name: Option<String>,
+    pipeline_config: &Bound<'_, PyDict>,
 ) -> PyResult<bool> {
-    let pipeline = fx_pipeline::build_ir_while_submodule_pipeline();
+    let pipeline_config = pipeline_config::PipelineConfig::from_py(pipeline_config)?;
+    let pipeline = fx_pipeline::build_ir_while_submodule_pipeline(&pipeline_config);
+    stock_fallback::take();
     let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
     let propagation_changed =
         apply_pre_submodule_qparam_propagation_ir(region_name.as_deref(), &mut initial_ir);
@@ -298,19 +387,23 @@ fn run_fx_submodule_passes(
         &pipeline,
         Some(initial_ir),
     )?;
+    ensure_retab_can_lower(ir.as_ref(), &effects)?;
     stash_submodule_ir(region_name, ir.map(|g| (g, effects)));
     Ok(modified || propagation_changed > 0)
 }
 
 /// Run the cond branch submodule IR pipeline and stash the resulting IrGraph.
 #[pyfunction]
-#[pyo3(signature = (graph_module, exported_program=None, region_name=None))]
+#[pyo3(signature = (graph_module, exported_program=None, region_name=None, *, pipeline_config))]
 fn run_fx_cond_passes(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<&Bound<'_, PyAny>>,
     region_name: Option<String>,
+    pipeline_config: &Bound<'_, PyDict>,
 ) -> PyResult<bool> {
-    let pipeline = fx_pipeline::build_ir_cond_submodule_pipeline();
+    let pipeline_config = pipeline_config::PipelineConfig::from_py(pipeline_config)?;
+    let pipeline = fx_pipeline::build_ir_cond_submodule_pipeline(&pipeline_config);
+    stock_fallback::take();
     let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
     let propagation_changed =
         apply_pre_submodule_qparam_propagation_ir(region_name.as_deref(), &mut initial_ir);
@@ -321,8 +414,17 @@ fn run_fx_cond_passes(
         &pipeline,
         Some(initial_ir),
     )?;
+    ensure_retab_can_lower(ir.as_ref(), &effects)?;
     stash_submodule_ir(region_name, ir.map(|g| (g, effects)));
     Ok(modified || propagation_changed > 0)
+}
+
+/// Runtime inputs of the last serialized main graph that no op consumes. Ethos-U
+/// binds delegate arguments by position after Vela drops unused inputs, so its
+/// backend must reject these.
+#[pyfunction]
+fn last_unused_inputs() -> Vec<String> {
+    LAST_UNUSED_INPUTS.with(|slot| slot.borrow().clone())
 }
 
 /// Serialize the lowered stashed IR hierarchy to a TOSA flatbuffer.
@@ -351,5 +453,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_fx_passes, m)?)?;
     m.add_function(wrap_pyfunction!(run_fx_submodule_passes, m)?)?;
     m.add_function(wrap_pyfunction!(run_fx_cond_passes, m)?)?;
+    m.add_function(wrap_pyfunction!(last_unused_inputs, m)?)?;
     Ok(())
 }

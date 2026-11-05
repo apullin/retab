@@ -11,6 +11,10 @@ venv_arg=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --venv)
+      if [[ $# -lt 2 || -z "$2" || "$2" == --* ]]; then
+        echo "error: --venv requires an existing virtual environment path" >&2
+        exit 1
+      fi
       venv_arg="$2"
       shift 2
       ;;
@@ -36,14 +40,15 @@ else:
 PY
 )"
 
-uv pip install --python "${python_bin}" maturin
+uv pip install --python "${python_bin}" "maturin>=1.16,<2"
 
 (
   cd "${repo_root}"
   export VIRTUAL_ENV="${venv_dir}"
-  export PATH="${HOME}/.cargo/bin:${venv_dir}/bin:${PATH}"
+  export PATH="/opt/homebrew/bin:${HOME}/.cargo/bin:${venv_dir}/bin:${PATH}"
   unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER
-  "${venv_dir}/bin/maturin" develop --release
+  require_flatc
+  "${venv_dir}/bin/maturin" develop --release --locked
 )
 
 find "${site_packages}" -maxdepth 1 -type f \

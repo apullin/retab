@@ -264,7 +264,7 @@ mod tests {
         let index_put = call_with_meta(
             &mut graph,
             "index_put",
-            "index_put_.default",
+            "aten.index_put_.default",
             vec![
                 IrArg::Node(source),
                 IrArg::List(vec![IrArg::None, IrArg::Node(index)]),

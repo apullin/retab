@@ -1,104 +1,84 @@
-# Companion Repositories
+# Companion Stack
 
-RETAB is the Rust implementation of ExecuTorch's ARM backend preprocess stage,
-but it is not a standalone upstream-only checkout yet. A working tree needs a
-small set of concordant commits in companion repositories.
+RETAB works with stock ExecuTorch v1.6.0-rc4. It replaces
+`TOSABackend._preprocess` at runtime; neither an ExecuTorch fork nor a custom
+Vela branch is required. The compatibility record is
+[../compat/executorch.toml](../compat/executorch.toml).
 
-## Required
+## Tested Python stack
 
-### RETAB
+| Component | Tested version | Source |
+| --- | --- | --- |
+| ExecuTorch | Wheel `1.6.0`; tag `v1.6.0-rc4`; commit `4776f71b6` | [pytorch/executorch](https://github.com/pytorch/executorch/tree/v1.6.0-rc4) |
+| torch | `2.15.0` | PyPI |
+| torchvision | `0.29.2` | PyPI |
+| torchao | `0.18.0`; tested build `0.18.0+cpu` | Python package |
+| ethos-u-vela | `5.2.0` | [PyPI](https://pypi.org/project/ethos-u-vela/5.2.0/) |
+| tosa-tools | `2026.5.0` | [PyPI](https://pypi.org/project/tosa-tools/2026.5.0/) |
+| flatbuffers (Python) | `25.2.10` | PyPI |
 
-- Fork: <https://github.com/apullin/retab>
-- Branch: `main`
-- Known-good baseline: `2aa0a7dff`
-- Local path: `u55-pipeline/arm-tosa-engine`
-- Role: PyO3 Rust extension plus the thin Python integration layer that
-  replaces `TOSABackend._preprocess`.
+The tested interpreter is Python 3.12. The package's Python floor is 3.10;
+its runtime uses 3.10 union type syntax and does not import `tomllib`.
+ExecuTorch's Arm backend imports `torchao.prototype.mx_formats`, supplied by
+the tested torchao version.
 
-This repository owns the FX-to-Rust-IR lowering passes, Rust IR rewrites,
-control-flow hierarchy handling, and TOSA flatbuffer emission.
+Stock `TOSABackend.preprocess` and `EthosUBackend.preprocess` both call
+`TOSABackend._preprocess`, so the runtime replacement reaches TOSA generation
+without changing the downstream Vela compilation step. RETAB keeps stock
+preprocessing available for unsupported profiles and graph contracts; see
+[the README scope list](../README.md#integration-and-scope).
 
-### ExecuTorch
+The override setters listed as optional in the compatibility file are used
+when a checkout exposes them. Missing fork hooks do not prevent installation.
+`_decomp_hooks.py` also installs guarded performance patches against available
+ExecuTorch and torch helpers.
 
-- Fork: <https://github.com/apullin/executorch>
-- Branch: `et-python-fastpaths`
-- Known-good commit: `dac215665`
-- Local path: `executorch`
-- Upstream remote: <https://github.com/pytorch/executorch>
+## Rust TOSA dependency
 
-RETAB needs a seam-enabled ExecuTorch checkout. The required public hook points
-are recorded in [../compat/executorch.toml](../compat/executorch.toml):
-
-- `executorch.backends.arm.tosa.backend.TOSABackend.set_preprocess_override`
-- `executorch.exir.program.set_edge_manager_for_partitioners_override`
-
-The branch also carries the local direct-lowering ARM test lane and current
-toolchain expectation fixes used by RETAB validation. Without these commits,
-RETAB can still build as a Rust extension, but it cannot be installed as a
-drop-in ExecuTorch ARM backend fast path.
-
-### `tosa-rs`
-
-- Fork: <https://github.com/apullin/tosa-rs>
-- Branch: `master`
-- Known-good commit: `de6e6b0`
-- Source checkout: `../rust-tosa` in this workspace, symlinked to
-  `/Users/andrewpullin/personal/rust-tosa`
-- Vendored copy used by Cargo: `u55-pipeline/vendor/tosa-rs`
-
-RETAB depends on `tosa-rs` through this local Cargo path:
+[../Cargo.toml](../Cargo.toml) still declares:
 
 ```toml
 tosa-rs = { path = "../vendor/tosa-rs" }
 ```
 
-The crate provides the Rust TOSA FlatBuffers serialization/deserialization API
-used by RETAB's serializer. The fork currently includes the TOSA 1.0 update,
-builder API, serialization/deserialization layer, `union_type()` support,
-`MulAttribute.shift`, and current WHILE_LOOP field names.
+Supply that tree at `$RETAB_ROOT/../vendor/tosa-rs` before building. It is
+outside this Git repository, so a RETAB clone alone does not provide the Rust
+TOSA dependency. The checked-in manifest does not identify an immutable
+`tosa-rs` revision; this document therefore does not assert a source commit.
 
-Because `u55-pipeline/vendor/tosa-rs` is outside the RETAB Git repository, keep
-it synchronized deliberately when updating `../rust-tosa`. See
-[VENDOR_PATCHES.md](VENDOR_PATCHES.md) for the local guard around generated
-FlatBuffers `size` field compatibility.
+The dependency supplies the TOSA schema types and generated API used by
+RETAB. Its `build.rs` runs `flatc`, which must be version 25 or newer. On
+macOS, put Homebrew first:
 
-## Optional For Full Local Toolchain
+```bash
+export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$PATH"
+flatc --version
+```
 
-### Ethos-U Vela
+Conda's `flatc` 24 generates an incompatible size-field API. RETAB's build
+script checks the supplied serializer source for the matching size-field
+patch; see [VENDOR_PATCHES.md](VENDOR_PATCHES.md).
 
-- Fork: <https://github.com/apullin/ethos-u-vela>
-- Branch: `retab-regor-opt-5.1.0-curated`
-- Known-good commit: `d45b6236`
-- Local path: `ethos-u-vela-5.1.0`
-- Upstream remote:
-  <https://gitlab.arm.com/artificial-intelligence/ethos-u/ethos-u-vela>
+The Rust `flatbuffers` runtime is `24.12.23` in `Cargo.lock`. This is separate
+from the Python `flatbuffers==25.2.10` package and the `flatc` >= 25 build tool.
+Do not infer a Cargo runtime version from the Python stack table.
 
-RETAB emits TOSA. Vela consumes that TOSA downstream when building an ARM PTE.
-The curated branch is not required for `cargo check` or pure serializer tests,
-but it is the local branch used for current end-to-end Vela/Regor optimization
-experiments.
+## Existing source-checkout helpers
 
-### TOSA Tools
+The wheel-based setup in [../README.md](../README.md#quick-start) is the
+current starting point. `scripts/bootstrap_uv.sh` and
+`scripts/install_executorch.sh` retain the source-overlay workflow. They need
+an existing environment and an explicitly supplied ExecuTorch source path
+(`--source` or `EXECUTORCH_SRC`). The installer also expects its source
+serializer tree and uses standard-library `tomllib`, requiring Python 3.11
+or newer for that script.
 
-- Upstream: <https://gitlab.arm.com/tosa/tosa-tools>
-- Local path: `tosa-tools`
+## Updating the stack
 
-TOSA tools are optional for semantic reference-model comparison. They are not a
-RETAB build dependency. The old local `macos-pybind-dynamic-lookup` branch was
-an investigation against an outdated checkout; current TOSA tools already carry
-the relevant macOS pybind fix upstream.
+Verify proposed versions and source revisions, rebuild with
+`cargo test --lib --locked` and maturin, and run the repository's Python tests.
+The crate is a `cdylib`; use maturin for extension linkage rather than
+`cargo build --lib` alone. Maturin reads RETAB's version from `Cargo.toml`.
 
-## Compatibility Rule
-
-Treat these as one pinned toolchain, not independent rolling dependencies:
-
-1. Update ExecuTorch, `tosa-rs`, Vela, or TOSA tools in isolation only on a
-   temporary branch.
-2. Rebuild RETAB with `cargo check --lib` and `maturin develop --release`.
-3. Run the ARM ops and models regression lanes from
-   [VALIDATION_MATRIX.md](VALIDATION_MATRIX.md).
-4. Only then advance the documented branch/commit pointers here.
-
-The key invariant is that the Python seam, Rust IR lowering, Rust TOSA
-serializer, and downstream Vela consumer agree on the same TOSA schema and ARM
-backend contracts.
+Benchmarks, the differential harness against stock ExecuTorch, and the model
+corpus are kept separately in a private repository.

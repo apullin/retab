@@ -70,14 +70,13 @@ fn push_binary_output_with_contract(
     if emitted_shape != logical_shape && emitted_elems == logical_elems {
         let temp_name = format!("{}_broadcast_output", node.name);
         result.push_output_op(
-            make_empty_tensor_for_node(node, temp_name.clone(), emitted_shape, dtype),
+            make_empty_tensor(temp_name.clone(), emitted_shape, dtype),
             op,
             attribute,
             inputs,
         );
-        push_reshape_with_shape_for_node(
+        push_reshape_with_shape(
             result,
-            Some(node),
             temp_name,
             node.name.clone(),
             format!("{}_shape", node.name),
@@ -86,7 +85,7 @@ fn push_binary_output_with_contract(
         );
     } else {
         result.push_output_op(
-            make_empty_tensor_for_node(node, node.name.clone(), logical_shape, dtype),
+            make_empty_tensor(node.name.clone(), logical_shape, dtype),
             op,
             attribute,
             inputs,
@@ -119,7 +118,10 @@ pub(super) fn emit_direct_binary(
     attribute: Attribute,
 ) -> EmitResult {
     let mut result = EmitResult::default();
-    let inputs = collect_binary_input_names(graph, store, node, &mut result);
+    let mut inputs = collect_binary_input_names(graph, store, node, &mut result);
+    if op == Op::Mul {
+        inputs.push(push_shift_const(&mut result, &node.name));
+    }
     let (logical_shape, emitted_shape) = binary_output_shapes(graph, store, node);
     let output_dtype = node_output_dtype(node);
     push_binary_output_with_contract(

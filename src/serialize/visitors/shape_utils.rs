@@ -21,22 +21,12 @@ pub(super) fn literal_output_shape(node: &Node) -> Option<Vec<i32>> {
 }
 
 pub(super) fn raw_i32_shape(node: &Node) -> Vec<i32> {
-    let shape: Vec<i32> = node
-        .meta
+    node.meta
         .val
         .shape_slice()
         .iter()
         .map(|&d| d as i32)
-        .collect();
-
-    if shape.is_empty() && matches!(node.target, OpTarget::ScalarTensor) {
-        // TOSA does not model rank-0 tensors directly; represent scalar_tensor
-        // as a rank-1 [1] tensor so downstream broadcast/rescale shapes stay
-        // self-consistent.
-        return vec![1];
-    }
-
-    shape
+        .collect()
 }
 
 fn resolve_inferred_shape(shape: &[i32], input_shape: &[i32]) -> Option<Vec<i32>> {
@@ -109,20 +99,15 @@ fn first_input_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<
     ))
 }
 
-fn normalize_shape_for_node(node: Option<&Node>, shape: Vec<i32>) -> Vec<i32> {
-    if node
-        .map(|node| node.meta.preserve_scalar_shape)
-        .unwrap_or(false)
-        && shape.is_empty()
-    {
-        shape
-    } else {
-        normalize_tensor_shape(shape)
-    }
-}
-
 pub(super) fn transpose_perms(node: &Node) -> Vec<i32> {
-    arg_or_kwarg_i32_list(node, 1, "perms")
+    let name = if node.target == OpTarget::Permute {
+        "dims"
+    } else {
+        "perms"
+    };
+    let perms = arg_or_kwarg_i32_list(node, 1, name);
+    let rank = perms.len() as i32;
+    perms.into_iter().map(|dim| dim.rem_euclid(rank)).collect()
 }
 
 fn passthrough_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<Vec<i32>> {
@@ -499,8 +484,7 @@ pub(crate) fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Nod
     if let Some(cached) = SHAPE_CACHE.with(|c| c.borrow().get(&node.name).cloned()) {
         return cached;
     }
-    let raw_result = actual_tensor_shape_impl(graph, store, node);
-    let result = normalize_shape_for_node(Some(node), raw_result);
+    let result = actual_tensor_shape_impl(graph, store, node);
     SHAPE_CACHE.with(|c| c.borrow_mut().insert(node.name.clone(), result.clone()));
     result
 }
@@ -599,12 +583,11 @@ pub(super) fn promoted_2d_matmul_shape(
 pub(super) fn make_output_tensor(node: &Node) -> TosaTensor {
     let final_shape = logical_output_shape(node);
     let dtype = node_output_dtype(node);
-    make_empty_tensor_for_node(node, node.name.clone(), final_shape, dtype)
+    make_empty_tensor(node.name.clone(), final_shape, dtype)
 }
 
 pub(super) fn logical_output_shape(node: &Node) -> Vec<i32> {
-    let raw_result = apply_tosa_dim_order(node, raw_i32_shape(node));
-    normalize_shape_for_node(Some(node), raw_result)
+    apply_tosa_dim_order(node, raw_i32_shape(node))
 }
 
 pub(super) fn make_actual_output_tensor(
@@ -612,8 +595,7 @@ pub(super) fn make_actual_output_tensor(
     store: &TensorStore,
     node: &Node,
 ) -> TosaTensor {
-    make_empty_tensor_for_node(
-        node,
+    make_empty_tensor(
         node.name.clone(),
         actual_tensor_shape(graph, store, node),
         node_output_dtype(node),
@@ -628,30 +610,7 @@ pub(super) fn push_reshape_with_shape(
     out_shape: Vec<i32>,
     dtype: DType,
 ) {
-    push_reshape_with_shape_for_node(
-        result,
-        None,
-        input_name,
-        output_name,
-        shape_name,
-        out_shape,
-        dtype,
-    );
-}
-
-pub(super) fn push_reshape_with_shape_for_node(
-    result: &mut EmitResult,
-    node: Option<&Node>,
-    input_name: String,
-    output_name: String,
-    shape_name: String,
-    out_shape: Vec<i32>,
-    dtype: DType,
-) {
-    let out_shape = normalize_shape_for_node(node, out_shape);
-    let output_tensor = node
-        .map(|node| make_empty_tensor_for_node(node, output_name.clone(), out_shape.clone(), dtype))
-        .unwrap_or_else(|| make_empty_tensor(output_name.clone(), out_shape.clone(), dtype));
+    let output_tensor = make_empty_tensor(output_name, out_shape.clone(), dtype);
     push_const_shape(result, shape_name.clone(), out_shape);
     result.push_output_op(
         output_tensor,
@@ -674,6 +633,39 @@ mod tests {
     }
 
     #[test]
+    fn scalar_while_predicate_reshape_keeps_shape_and_output_ranks_equal() {
+        clear_shape_cache();
+        let mut graph = Graph::new();
+        let input = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Other("predicate".into()),
+            smallvec![],
+            Vec::new(),
+            meta(&[1], DType::Bool),
+            "predicate".into(),
+        );
+        let reshape = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::View,
+            smallvec![Arg::Node(input), Arg::IntList(smallvec![])],
+            Vec::new(),
+            meta(&[], DType::Bool),
+            "predicate_scalar".into(),
+        );
+        let result = emit_node(
+            &graph,
+            reshape,
+            graph.node(reshape).unwrap(),
+            &TensorStore::new(),
+        )
+        .unwrap();
+        assert_eq!(result.operators.last().unwrap().op, Op::Reshape);
+        assert!(result.tensors.last().unwrap().shape.is_empty());
+        assert_eq!(result.shapes[0].rank, 0);
+        assert!(result.shapes[0].data.is_empty());
+    }
+
+    #[test]
     fn ceil_pool_drops_window_starting_inside_padding() {
         // k=2 s=2 p=1 on H=5: naive ceil gives 4 windows, but the last
         // would start at 6 >= 5 + 1, so it is dropped -> 3 rows.
@@ -689,6 +681,45 @@ mod tests {
     #[test]
     fn floor_pool_post_pad_is_zero_when_windows_fit_exactly() {
         assert_eq!(pool_post_pad(8, 3, 2, 1, false), 0);
+    }
+
+    #[test]
+    fn regression_negative_permutation_dims_emit_nonnegative_transpose_perms() {
+        for target in [OpTarget::Permute, OpTarget::TosaTranspose] {
+            clear_shape_cache();
+            let mut graph = Graph::new();
+            let input = graph.create_node(
+                OpType::Placeholder,
+                OpTarget::Other("x".into()),
+                smallvec![],
+                Vec::new(),
+                meta(&[1, 2, 3, 5], DType::Float32),
+                "x".into(),
+            );
+            let transpose = graph.create_node(
+                OpType::CallFunction,
+                target,
+                smallvec![Arg::Node(input), Arg::IntList(smallvec![-4, -2, -1, -3])],
+                Vec::new(),
+                meta(&[1, 3, 5, 2], DType::Float32),
+                "transpose".into(),
+            );
+            let store = TensorStore::default();
+            let node = graph.node(transpose).unwrap();
+            let result = emit_node(&graph, transpose, node, &store).unwrap();
+
+            assert_eq!(result.operators.len(), 1);
+            assert_eq!(result.operators[0].op, Op::Transpose);
+            let Attribute::Transpose(attr) = &result.operators[0].attribute else {
+                panic!("expected transpose attribute");
+            };
+            assert_eq!(attr.perms, vec![0, 2, 3, 1]);
+            assert_eq!(result.tensors[0].shape, vec![1, 3, 5, 2]);
+            assert_eq!(
+                transposed_tensor_shape(&graph, &store, node),
+                Some(vec![1, 3, 5, 2])
+            );
+        }
     }
 
     #[test]

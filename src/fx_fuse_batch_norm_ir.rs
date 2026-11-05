@@ -65,6 +65,8 @@ fn fuse_conv_bn_tensors(
     bn_mean: &TensorData,
     bn_var: &TensorData,
     eps: f64,
+    transposed: bool,
+    groups: i64,
 ) -> Option<(TensorData, TensorData)> {
     let weight = tensor_f32_values(conv_weight)?;
     let bias = optional_f32_values(conv_bias)?;
@@ -73,7 +75,18 @@ fn fuse_conv_bn_tensors(
     let mean = tensor_f32_values(bn_mean)?;
     let var = tensor_f32_values(bn_var)?;
 
-    let out_channels = *conv_weight.shape.first()? as usize;
+    let input_channels = usize::try_from(*conv_weight.shape.first()?).ok()?;
+    let groups = usize::try_from(groups).ok()?;
+    if groups == 0 || input_channels == 0 || input_channels % groups != 0 {
+        return None;
+    }
+    let out_channels = if transposed {
+        usize::try_from(*conv_weight.shape.get(1)?)
+            .ok()?
+            .checked_mul(groups)?
+    } else {
+        input_channels
+    };
     if out_channels == 0
         || mean.len() != out_channels
         || var.len() != out_channels
@@ -93,12 +106,38 @@ fn fuse_conv_bn_tensors(
     }
 
     let mut fused_weight = weight;
-    for channel in 0..out_channels {
-        let scale = scales[channel];
-        let start = channel * per_output_weight_elems;
-        let end = start + per_output_weight_elems;
-        for value in &mut fused_weight[start..end] {
-            *value *= scale;
+    if transposed {
+        let output_channels_per_group = out_channels / groups;
+        let input_channels_per_group = input_channels / groups;
+        let kernel_elems = fused_weight.len() / (input_channels * output_channels_per_group);
+        if kernel_elems == 0
+            || fused_weight.len() % (input_channels * output_channels_per_group) != 0
+        {
+            return None;
+        }
+        // ConvTranspose weights are [Cin, Cout/groups, ...].
+        for (input_channel, channel_weights) in fused_weight
+            .chunks_exact_mut(output_channels_per_group * kernel_elems)
+            .enumerate()
+        {
+            let group = input_channel / input_channels_per_group;
+            for (output_channel, kernel) in
+                channel_weights.chunks_exact_mut(kernel_elems).enumerate()
+            {
+                let scale = scales[group * output_channels_per_group + output_channel];
+                for value in kernel {
+                    *value *= scale;
+                }
+            }
+        }
+    } else {
+        for channel in 0..out_channels {
+            let scale = scales[channel];
+            let start = channel * per_output_weight_elems;
+            let end = start + per_output_weight_elems;
+            for value in &mut fused_weight[start..end] {
+                *value *= scale;
+            }
         }
     }
 
@@ -220,6 +259,8 @@ fn fuse_batch_norm_node(graph: &mut IrGraph, bn_id: NodeId) -> bool {
         &bn_mean,
         &bn_var,
         bn_args.eps,
+        conv_args.transposed,
+        conv_args.groups,
     ) else {
         return false;
     };
@@ -251,6 +292,95 @@ mod tests {
     use super::*;
     use crate::fx_ir::NodeOp;
     use crate::test_ir::{f32_call, f32_meta, f32_placeholder, f32_tensor, output, parameter};
+
+    #[test]
+    fn regression_transposed_conv_bn_scales_output_channels_within_each_group() {
+        for (groups, input_channels, scales, expected_weights) in [
+            (1, 2, vec![2.0, 3.0], vec![2.0, 6.0, 6.0, 12.0]),
+            (
+                2,
+                4,
+                vec![2.0, 3.0, 5.0, 7.0],
+                vec![2.0, 6.0, 6.0, 12.0, 25.0, 42.0, 35.0, 56.0],
+            ),
+            (1, 3, vec![2.0, 3.0], vec![2.0, 6.0, 6.0, 12.0, 10.0, 18.0]),
+        ] {
+            let mut graph = IrGraph::empty();
+            let output_channels = scales.len() as i64;
+            let x = f32_placeholder(&mut graph, "x", [1, input_channels, 1, 1]);
+            let weights: Vec<f32> = (1..=input_channels * 2).map(|v| v as f32).collect();
+            let weight = parameter(
+                &mut graph,
+                "weight",
+                f32_tensor(vec![input_channels, 2, 1, 1], &weights),
+            );
+            let bias = parameter(
+                &mut graph,
+                "bias",
+                f32_tensor(vec![output_channels], &vec![2.0; scales.len()]),
+            );
+            let mean = parameter(
+                &mut graph,
+                "mean",
+                f32_tensor(vec![output_channels], &vec![1.0; scales.len()]),
+            );
+            let var = parameter(
+                &mut graph,
+                "var",
+                f32_tensor(vec![output_channels], &vec![1.0; scales.len()]),
+            );
+            let gamma = parameter(
+                &mut graph,
+                "gamma",
+                f32_tensor(vec![output_channels], &scales),
+            );
+            let conv = f32_call(
+                &mut graph,
+                "conv_transpose",
+                "aten.convolution.default",
+                vec![
+                    IrArg::Node(x),
+                    IrArg::Node(weight),
+                    IrArg::Node(bias),
+                    crate::fx_ir::i64_list_arg(&[1, 1]),
+                    crate::fx_ir::i64_list_arg(&[0, 0]),
+                    crate::fx_ir::i64_list_arg(&[1, 1]),
+                    IrArg::Bool(true),
+                    crate::fx_ir::i64_list_arg(&[0, 0]),
+                    IrArg::Int(groups),
+                ],
+                [1, output_channels, 1, 1],
+            );
+            let bn = f32_call(
+                &mut graph,
+                "bn",
+                "aten.batch_norm.default",
+                vec![
+                    IrArg::Node(conv),
+                    IrArg::Node(gamma),
+                    IrArg::None,
+                    IrArg::Node(mean),
+                    IrArg::Node(var),
+                    IrArg::Bool(false),
+                    IrArg::Float(0.1),
+                    IrArg::Float(0.0),
+                    IrArg::Bool(true),
+                ],
+                [1, output_channels, 1, 1],
+            );
+            let out = output(&mut graph, bn);
+
+            assert!(IrFuseBatchNorm2dPass.run(&mut graph));
+            assert_eq!(graph.node(out).arg_node(0), Some(conv));
+            let fused_weight = graph.node(conv).arg_node(1).unwrap();
+            let fused_bias = graph.node(conv).arg_node(2).unwrap();
+            let weight_data = &graph.node(fused_weight).tensor.as_ref().unwrap().data;
+            let bias_data = &graph.node(fused_bias).tensor.as_ref().unwrap().data;
+            assert_eq!(tensor_f32_values(weight_data), Some(expected_weights));
+            assert_eq!(tensor_f32_values(bias_data), Some(scales));
+            assert_eq!(bias_data.shape, vec![output_channels]);
+        }
+    }
 
     #[test]
     fn fuses_conv_batch_norm_into_weight_and_bias_placeholders() {

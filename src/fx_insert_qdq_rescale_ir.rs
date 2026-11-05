@@ -94,7 +94,72 @@ impl IrPass for IrInsertQdqRescalePass {
 mod tests {
     use super::*;
     use crate::fx_ir::IrArg;
-    use crate::test_ir::{call, f32_call, placeholder};
+    use crate::test_ir::{call, f32_call, output, placeholder};
+
+    #[test]
+    fn folds_int32_to_int8_requantization_without_float_decomposition() {
+        for dtype in [
+            IrArg::Dtype("torch.int32".to_string()),
+            IrArg::Str("torch.int32".to_string()),
+        ] {
+            let mut graph = IrGraph::empty();
+            let source = placeholder(&mut graph, "input", [2, 3], "torch.int32");
+            let dq = f32_call(
+                &mut graph,
+                "dq",
+                "quantized_decomposed.dequantize_per_tensor.default",
+                vec![
+                    IrArg::Node(source),
+                    IrArg::Float(0.125),
+                    IrArg::Int(0),
+                    IrArg::Int(i32::MIN as i64),
+                    IrArg::Int(i32::MAX as i64),
+                    dtype,
+                ],
+                [2, 3],
+            );
+            let q = call(
+                &mut graph,
+                "q",
+                "quantized_decomposed.quantize_per_tensor.default",
+                vec![
+                    IrArg::Node(dq),
+                    IrArg::Float(0.25),
+                    IrArg::Int(-7),
+                    IrArg::Int(-128),
+                    IrArg::Int(127),
+                    IrArg::Dtype("torch.int8".to_string()),
+                ],
+                [2, 3],
+                "torch.int8",
+            );
+            let out = output(&mut graph, q);
+
+            crate::fx_fold_qdq_ir::IrFoldQdqPass::new().run(&mut graph);
+            assert!(IrInsertQdqRescalePass.run(&mut graph));
+            assert!(!crate::fx_decompose_quant_ir::IrDecomposeQuantPass.run(&mut graph));
+
+            let rescale = graph.by_name("q_rescale").unwrap();
+            assert!(rescale.is_rescale());
+            assert_eq!(rescale.arg_node(0), Some(source));
+            assert!(matches!(
+                rescale.args[2],
+                IrArg::List(ref scales)
+                    if matches!(scales.as_slice(), [IrArg::Float(0.5)])
+            ));
+            assert_eq!(rescale.arg_int(3), Some(0));
+            assert_eq!(rescale.arg_int(4), Some(-7));
+            assert_eq!(rescale.meta.val_dtype(), Some("torch.int8"));
+            assert_eq!(
+                rescale.meta.input_qparam().unwrap().dtype_str,
+                "torch.int32"
+            );
+            assert_eq!(graph.node(out).arg_node(0), Some(rescale.id));
+            assert!(graph.live_nodes().all(|node| {
+                !node.is_q_or_dq() && node.meta.val_dtype() != Some("torch.float32")
+            }));
+        }
+    }
 
     #[test]
     fn folds_dq_q_pair_into_rescale() {
@@ -158,6 +223,75 @@ mod tests {
 
         let user = graph.node(user);
         assert!(matches!(user.args[0], IrArg::Node(id) if id == rescale.id));
+    }
+
+    #[test]
+    fn folds_mixed_int8_int16_pairs_into_rescale() {
+        for (input_dtype, output_dtype, input_min, output_min) in [
+            ("torch.int8", "torch.int16", -128, -32767),
+            ("torch.int16", "torch.int8", -32767, -128),
+        ] {
+            let mut graph = IrGraph::empty();
+            let source = placeholder(&mut graph, "input", [10], input_dtype);
+            let dq = f32_call(
+                &mut graph,
+                "dq",
+                "quantized_decomposed.dequantize_per_tensor.default",
+                vec![
+                    IrArg::Node(source),
+                    IrArg::Float(0.5),
+                    IrArg::Int(0),
+                    IrArg::Int(input_min),
+                    IrArg::Int(if input_dtype == "torch.int8" {
+                        127
+                    } else {
+                        32767
+                    }),
+                    IrArg::Dtype(input_dtype.into()),
+                ],
+                [10],
+            );
+            let q = call(
+                &mut graph,
+                "q",
+                "quantized_decomposed.quantize_per_tensor.default",
+                vec![
+                    IrArg::Node(dq),
+                    IrArg::Float(0.25),
+                    IrArg::Int(0),
+                    IrArg::Int(output_min),
+                    IrArg::Int(if output_dtype == "torch.int8" {
+                        127
+                    } else {
+                        32767
+                    }),
+                    IrArg::Dtype(output_dtype.into()),
+                ],
+                [10],
+                output_dtype,
+            );
+            let user = call(
+                &mut graph,
+                "user",
+                "aten.view_copy.default",
+                vec![IrArg::Node(q)],
+                [1, 10],
+                output_dtype,
+            );
+
+            assert!(IrInsertQdqRescalePass.run(&mut graph));
+            assert!(!graph.node(dq).alive);
+            assert!(!graph.node(q).alive);
+            let rescale = graph.by_name("q_rescale").unwrap();
+            assert_eq!(rescale.first_node_arg(), Some(source));
+            assert!(matches!(rescale.args[1], IrArg::Dtype(ref dtype) if dtype == output_dtype));
+            assert!(matches!(
+                rescale.args[2], IrArg::List(ref scales)
+                    if matches!(scales.as_slice(), [IrArg::Float(2.0)])
+            ));
+            assert_eq!(rescale.meta.val_dtype(), Some(output_dtype));
+            assert_eq!(graph.node(user).first_node_arg(), Some(rescale.id));
+        }
     }
 
     #[test]

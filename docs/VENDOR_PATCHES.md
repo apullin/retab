@@ -2,7 +2,7 @@
 
 `retab` depends on the local path crate `../vendor/tosa-rs`. That vendor
 directory is outside this Git repository, so local edits there are not
-committed with `arm-tosa-engine`.
+tracked with RETAB.
 
 ## `tosa-rs` FlatBuffers `size` Field
 

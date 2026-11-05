@@ -3,33 +3,12 @@ use pyo3::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::fx_ir;
-use crate::graph::ir::{Arg, DType, NodeId};
+use crate::graph::ir::{Arg, NodeId};
 use crate::graph::Graph;
 use crate::store::TensorStore;
 use crate::StashedPipeline;
 
 use super::{collect_region_metadata, WhileBodyInputCounts};
-
-fn mark_scalar_outputs(graph: &mut Graph) {
-    let Some(output_id) = graph.output else {
-        return;
-    };
-    let Some(output_node) = graph.node(output_id) else {
-        return;
-    };
-    let output_args = output_node.args.clone();
-
-    for arg in output_args {
-        for node_id in arg.node_refs() {
-            let Some(node) = graph.node_mut(node_id) else {
-                continue;
-            };
-            if node.meta.val.dtype == DType::Bool {
-                node.meta.preserve_scalar_shape = true;
-            }
-        }
-    }
-}
 
 fn append_while_body_passthrough_outputs(graph: &mut Graph, counts: WhileBodyInputCounts) {
     let additional_inputs: Vec<NodeId> = graph
@@ -111,9 +90,6 @@ pub(crate) fn append_subgraphs_from_ir(
             effects,
         );
         crate::ingest::finalize::finalize_converted_graph(&mut sub_graph);
-        if while_cond_graph_names.contains(&region) {
-            mark_scalar_outputs(&mut sub_graph);
-        }
         if let Some(counts) = while_body_input_counts.get(&region).copied() {
             append_while_body_passthrough_outputs(&mut sub_graph, counts);
         }

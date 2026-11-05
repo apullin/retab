@@ -25,6 +25,7 @@ pub(crate) enum ZeroInputConstantTarget {
     Arange,
     Linspace,
     Eye,
+    ScalarTensor,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,114 +84,68 @@ pub(crate) enum LayerNormTargetKind {
     NativeOrOther,
 }
 
-macro_rules! contains_any {
-    ($target:expr, $($marker:literal),+ $(,)?) => {
-        false $(|| $target.contains($marker))+
-    };
-    ($target:expr; $($marker:literal)|+ $(,)?) => {
-        false $(|| $target.contains($marker))+
-    };
-}
-
-pub(crate) const BATCH_NORM_TARGET_MARKERS: &[&str] = &[
-    "aten.batch_norm",
-    "aten.native_batch_norm",
-    "aten._native_batch_norm_legit_no_training",
+pub(crate) const BATCH_NORM_TARGETS: &[&str] = &[
+    "aten.batch_norm.default",
+    "aten.native_batch_norm.default",
+    "aten._native_batch_norm_legit_no_training.default",
     "aten._native_batch_norm_legit.no_stats",
 ];
 
-pub(crate) const GROUP_NORM_TARGET_MARKERS: &[&str] =
-    &["aten.group_norm", "aten.native_group_norm"];
+pub(crate) const GROUP_NORM_TARGETS: &[&str] =
+    &["aten.group_norm.default", "aten.native_group_norm.default"];
 
 pub(crate) fn classify_ir_target(target: &str) -> IrTargetKind {
-    if matches!(
-        target,
-        "cond" | "higher_order.cond" | "torch.ops.higher_order.cond"
-    ) {
-        return IrTargetKind::Cond;
+    match target {
+        "cond" | "higher_order.cond" | "torch.ops.higher_order.cond" => IrTargetKind::Cond,
+        "while_loop" | "higher_order.while_loop" | "torch.ops.higher_order.while_loop" => {
+            IrTargetKind::WhileLoop
+        }
+        "getitem" | "operator.getitem" | "<built-in function getitem>" => IrTargetKind::GetItem,
+        "quantized_decomposed.dequantize_per_channel.default" => IrTargetKind::DequantizePerChannel,
+        "quantized_decomposed.dequantize_per_tensor.default"
+        | "quantized_decomposed.dequantize_per_tensor.tensor"
+        | "quantized_decomposed.dequantize_per_tensor.tensor2" => IrTargetKind::DequantizePerTensor,
+        "quantized_decomposed.quantize_per_channel.default" => IrTargetKind::QuantizePerChannel,
+        "quantized_decomposed.quantize_per_tensor.default"
+        | "quantized_decomposed.quantize_per_tensor.tensor"
+        | "quantized_decomposed.quantize_per_tensor.tensor2" => IrTargetKind::QuantizePerTensor,
+        "backend.tosa.RESCALE.default" | "tosa.RESCALE.default" => IrTargetKind::TosaRescale,
+        "aten.convolution.default" | "aten.conv2d.default" => IrTargetKind::AtenConv,
+        "aten.linear.default" => IrTargetKind::AtenLinear,
+        "aten.relu.default" => IrTargetKind::AtenRelu,
+        "aten.hardtanh.default" => IrTargetKind::AtenHardtanh,
+        "aten.addmm.default" => IrTargetKind::AtenAddmm,
+        "aten.bmm.default" => IrTargetKind::AtenBmm,
+        "aten.mm.default" => IrTargetKind::AtenMm,
+        "aten.matmul.default" => IrTargetKind::AtenMatmul,
+        _ => IrTargetKind::Other,
     }
-    if matches!(
-        target,
-        "while_loop" | "higher_order.while_loop" | "torch.ops.higher_order.while_loop"
-    ) {
-        return IrTargetKind::WhileLoop;
-    }
-    if target.contains("getitem") {
-        return IrTargetKind::GetItem;
-    }
-
-    if contains_any!(
-        target,
-        "quantized_decomposed.dequantize_per_channel",
-        "dequantize_per_channel"
-    ) {
-        return IrTargetKind::DequantizePerChannel;
-    }
-    if contains_any!(
-        target,
-        "quantized_decomposed.dequantize_per_tensor",
-        "dequantize_per_tensor"
-    ) {
-        return IrTargetKind::DequantizePerTensor;
-    }
-    if target.contains("quantized_decomposed.quantize_per_channel")
-        || (target.contains("quantize_per_channel") && !target.contains("dequantize"))
-    {
-        return IrTargetKind::QuantizePerChannel;
-    }
-    if target.contains("quantized_decomposed.quantize_per_tensor")
-        || (target.contains("quantize_per_tensor") && !target.contains("dequantize"))
-    {
-        return IrTargetKind::QuantizePerTensor;
-    }
-
-    if target.contains("tosa") && target.to_ascii_lowercase().contains("rescale") {
-        return IrTargetKind::TosaRescale;
-    }
-
-    if is_aten_convolution_default_target(target) || is_conv2d_default_target(target) {
-        return IrTargetKind::AtenConv;
-    }
-    if target.contains("linear.default") {
-        return IrTargetKind::AtenLinear;
-    }
-    // Exact match: a substring test would also claim aten.leaky_relu.default.
-    if target == "aten.relu.default" {
-        return IrTargetKind::AtenRelu;
-    }
-    if target.contains("hardtanh.default") {
-        return IrTargetKind::AtenHardtanh;
-    }
-    if target.contains("aten.addmm") {
-        return IrTargetKind::AtenAddmm;
-    }
-    if target.contains("aten.bmm") {
-        return IrTargetKind::AtenBmm;
-    }
-    if target.contains("aten.mm.") {
-        return IrTargetKind::AtenMm;
-    }
-    if target.contains("aten.matmul") {
-        return IrTargetKind::AtenMatmul;
-    }
-
-    IrTargetKind::Other
 }
 
 pub(crate) fn zero_input_constant_target(target: &str) -> Option<ZeroInputConstantTarget> {
-    if target.contains("aten.full.default") {
-        return Some(ZeroInputConstantTarget::Full);
+    match target {
+        "aten.full.default" => Some(ZeroInputConstantTarget::Full),
+        "aten.arange.default" | "aten.arange.start" | "aten.arange.start_step" => {
+            Some(ZeroInputConstantTarget::Arange)
+        }
+        "aten.linspace.default" => Some(ZeroInputConstantTarget::Linspace),
+        "aten.eye.default" | "aten.eye.m" => Some(ZeroInputConstantTarget::Eye),
+        "aten.scalar_tensor.default" => Some(ZeroInputConstantTarget::ScalarTensor),
+        _ => None,
     }
-    if target.contains("aten.arange") {
-        return Some(ZeroInputConstantTarget::Arange);
-    }
-    if target.contains("aten.linspace") {
-        return Some(ZeroInputConstantTarget::Linspace);
-    }
-    if target.contains("aten.eye") {
-        return Some(ZeroInputConstantTarget::Eye);
-    }
-    None
+}
+
+pub(crate) fn is_to_copy_target(target: &str) -> bool {
+    matches!(
+        target,
+        "aten._to_copy.default"
+            | "dim_order_ops._to_dim_order_copy.default"
+            | "_to_dim_order_copy.default"
+    )
+}
+
+pub(crate) fn is_reciprocal_target(target: &str) -> bool {
+    target == "aten.reciprocal.default"
 }
 
 pub(crate) fn is_zero_input_constant_target(target: &str) -> bool {
@@ -198,113 +153,89 @@ pub(crate) fn is_zero_input_constant_target(target: &str) -> bool {
 }
 
 pub(crate) fn is_fold_qdq_constant_target(target: &str) -> bool {
-    contains_any!(
+    matches!(
         target,
-        "full_like.default",
-        "full.default",
-        "arange.start_step",
-        "eye.default",
-        "linspace.default",
-        "scalar_tensor.default"
+        "aten.full_like.default"
+            | "aten.full.default"
+            | "aten.arange.start_step"
+            | "aten.eye.default"
+            | "aten.linspace.default"
+            | "aten.scalar_tensor.default"
     )
 }
 
 pub(crate) fn arange_target_kind(target: &str) -> Option<ArangeTargetKind> {
-    if target.contains("aten.arange.start_step") {
-        return Some(ArangeTargetKind::StartStep);
+    match target {
+        "aten.arange.start_step" => Some(ArangeTargetKind::StartStep),
+        "aten.arange.start" => Some(ArangeTargetKind::Start),
+        _ => None,
     }
-    if target.contains("aten.arange.start") {
-        return Some(ArangeTargetKind::Start);
-    }
-    None
 }
 
-const SIMPLE_TABLE_TARGET_RULES: &[(&str, &str)] = &[
-    ("rsqrt.default", "rsqrt"),
-    ("ceil.default", "ceil"),
-    ("floor.default", "floor"),
-    ("round.default", "round"),
-    ("reciprocal.default", "reciprocal"),
-    ("exp.default", "exp"),
-    ("log.default", "log"),
-    ("log10.default", "log10"),
-    ("hardsigmoid.default", "hardsigmoid"),
-    ("sigmoid.default", "sigmoid"),
-    ("atanh.default", "atanh"),
-    ("asinh.default", "asinh"),
-    ("acosh.default", "acosh"),
-    ("atan.default", "atan"),
-    ("tanh.default", "tanh"),
-    ("silu.default", "silu"),
-    ("erf.default", "erf"),
-    ("aten.sin.", "sin"),
-    ("aten.cos.", "cos"),
-    ("sinh.default", "sinh"),
-    ("cosh.default", "cosh"),
-    ("tan.default", "tan"),
-    ("acos.default", "acos"),
-    ("asin.default", "asin"),
-    ("expm1.default", "expm1"),
-    ("hardswish.default", "hardswish"),
-    ("erfinv.default", "erfinv"),
-    ("log1p.default", "log1p"),
-    ("sqrt.default", "sqrt"),
+const SIMPLE_TABLE_TARGETS: &[(&str, &str)] = &[
+    ("aten.rsqrt.default", "rsqrt"),
+    ("aten.ceil.default", "ceil"),
+    ("aten.floor.default", "floor"),
+    ("aten.round.default", "round"),
+    ("aten.reciprocal.default", "reciprocal"),
+    ("aten.exp.default", "exp"),
+    ("aten.log.default", "log"),
+    ("aten.log10.default", "log10"),
+    ("aten.hardsigmoid.default", "hardsigmoid"),
+    ("aten.sigmoid.default", "sigmoid"),
+    ("aten.atanh.default", "atanh"),
+    ("aten.asinh.default", "asinh"),
+    ("aten.acosh.default", "acosh"),
+    ("aten.atan.default", "atan"),
+    ("aten.tanh.default", "tanh"),
+    ("aten.silu.default", "silu"),
+    ("aten.erf.default", "erf"),
+    ("aten.sin.default", "sin"),
+    ("aten.cos.default", "cos"),
+    ("aten.sinh.default", "sinh"),
+    ("aten.cosh.default", "cosh"),
+    ("aten.tan.default", "tan"),
+    ("aten.acos.default", "acos"),
+    ("aten.asin.default", "asin"),
+    ("aten.expm1.default", "expm1"),
+    ("aten.hardswish.default", "hardswish"),
+    ("aten.erfinv.default", "erfinv"),
+    ("aten.log1p.default", "log1p"),
+    ("aten.sqrt.default", "sqrt"),
 ];
 
 pub(crate) fn table_op_target_kind(target: &str) -> Option<TableOpTargetKind> {
-    if target == "aten.softplus.default" {
-        return Some(TableOpTargetKind::Softplus);
+    match target {
+        "aten.softplus.default" => Some(TableOpTargetKind::Softplus),
+        "aten.gelu.default" => Some(TableOpTargetKind::Gelu),
+        "aten.pow.Tensor_Scalar" => Some(TableOpTargetKind::PowTensorScalar),
+        "aten.remainder.Scalar" => Some(TableOpTargetKind::RemainderScalar),
+        "aten.leaky_relu.default" => Some(TableOpTargetKind::LeakyRelu),
+        _ => SIMPLE_TABLE_TARGETS
+            .iter()
+            .find_map(|(symbol, kind)| {
+                (*symbol == target).then_some(TableOpTargetKind::Unary(kind))
+            })
+            .or_else(|| elu_target_kind(target).map(TableOpTargetKind::Elu)),
     }
-    if target.contains("gelu.default") {
-        return Some(TableOpTargetKind::Gelu);
-    }
-    if let Some((_, kind)) = SIMPLE_TABLE_TARGET_RULES
-        .iter()
-        .find(|(needle, _)| target.contains(needle))
-    {
-        return Some(TableOpTargetKind::Unary(kind));
-    }
-    if target.contains("pow.Tensor_Scalar") {
-        return Some(TableOpTargetKind::PowTensorScalar);
-    }
-    if target.contains("remainder.Scalar") {
-        return Some(TableOpTargetKind::RemainderScalar);
-    }
-    if target == "aten.leaky_relu.default" {
-        return Some(TableOpTargetKind::LeakyRelu);
-    }
-    if let Some(kind) = elu_target_kind(target) {
-        return Some(TableOpTargetKind::Elu(kind));
-    }
-    None
 }
 
-/// Anchored on the "aten." prefix: a bare "elu.default" test also matches relu,
-/// leaky_relu and gelu.
 pub(crate) fn elu_target_kind(target: &str) -> Option<EluTargetKind> {
-    if contains_any!(target, "aten.selu.", "aten.selu_.") {
-        return Some(EluTargetKind::Selu);
+    match target {
+        "aten.selu.default" | "aten.selu_.default" => Some(EluTargetKind::Selu),
+        "aten.celu.default" | "aten.celu_.default" => Some(EluTargetKind::Celu),
+        "aten.elu.default" | "aten.elu_.default" => Some(EluTargetKind::Elu),
+        _ => None,
     }
-    if contains_any!(target, "aten.celu.", "aten.celu_.") {
-        return Some(EluTargetKind::Celu);
-    }
-    if contains_any!(target, "aten.elu.", "aten.elu_.") {
-        return Some(EluTargetKind::Elu);
-    }
-    None
 }
 
 pub(crate) fn shape_only_constant_target(target: &str) -> Option<ShapeOnlyConstantTarget> {
-    if contains_any!(target, "aten.reshape.default", "aten.view_copy.default") {
-        return Some(ShapeOnlyConstantTarget::Reshape);
+    match target {
+        "aten.reshape.default" | "aten.view_copy.default" => Some(ShapeOnlyConstantTarget::Reshape),
+        "aten.unsqueeze_copy.default" => Some(ShapeOnlyConstantTarget::Unsqueeze),
+        "aten.permute_copy.default" => Some(ShapeOnlyConstantTarget::Permute),
+        _ => None,
     }
-    if target.contains("aten.unsqueeze_copy.default") {
-        return Some(ShapeOnlyConstantTarget::Unsqueeze);
-    }
-    if target.contains("aten.permute_copy.default") {
-        return Some(ShapeOnlyConstantTarget::Permute);
-    }
-    None
 }
 
 pub(crate) fn is_shape_only_constant_target(target: &str) -> bool {
@@ -318,39 +249,42 @@ pub(crate) fn is_constant_only_shape_transform_target(target: &str) -> bool {
 }
 
 pub(crate) fn noop_target(target: &str) -> Option<NoopTarget> {
-    if target.contains("aten.copy.default") {
-        return Some(NoopTarget::CopySourceArg);
+    match target {
+        "aten.copy.default" => Some(NoopTarget::CopySourceArg),
+        "dim_order_ops._to_dim_order_copy.default"
+        | "_to_dim_order_copy.default"
+        | "aten._to_copy.default" => Some(NoopTarget::DtypeCheckedPassthrough),
+        "aten.clone.default"
+        | "dim_order_ops._clone_dim_order.default"
+        | "_clone_dim_order.default"
+        | "aten.alias_copy.default"
+        | "alias_copy.default"
+        | "aten.detach_copy.default"
+        | "detach_copy.default" => Some(NoopTarget::PassthroughFirstArg),
+        _ => None,
     }
-    if contains_any!(
-        target,
-        "_to_dim_order_copy.default",
-        "aten._to_copy.default"
-    ) {
-        return Some(NoopTarget::DtypeCheckedPassthrough);
-    }
-    if contains_any!(
-        target;
-        "aten.clone.default" | "_clone_dim_order.default" | "alias_copy.default" | "detach_copy.default"
-    ) {
-        return Some(NoopTarget::PassthroughFirstArg);
-    }
-    None
 }
 
 pub(crate) fn is_view_like_target(target: &str) -> bool {
-    contains_any!(
-        target;
-        "view_copy" | "flatten" | "reshape" | "aten.view." | "aten._unsafe_view"
+    matches!(
+        target,
+        "aten.view_copy.default"
+            | "aten.flatten.using_ints"
+            | "aten.reshape.default"
+            | "aten.view.default"
+            | "aten._unsafe_view.default"
     )
 }
 
 pub(crate) fn is_permute_target(target: &str) -> bool {
-    contains_any!(target, "permute_copy", "aten.permute.")
+    matches!(target, "aten.permute_copy.default" | "aten.permute.default")
 }
 
 pub(crate) fn is_tosa_transpose_target(target: &str) -> bool {
-    let target = target.to_ascii_lowercase();
-    target.contains("tosa") && target.contains("transpose")
+    matches!(
+        target,
+        "backend.tosa.TRANSPOSE.default" | "tosa.TRANSPOSE.default"
+    )
 }
 
 pub(crate) fn is_boundary_rescale_target(target: &str) -> bool {
@@ -361,129 +295,210 @@ pub(crate) fn is_boundary_rescale_target(target: &str) -> bool {
 }
 
 pub(crate) fn is_layout_passthrough_target(target: &str) -> bool {
-    let target = target.to_ascii_lowercase();
-    contains_any!(
-        &target;
-        "view" | "reshape" | "transpose" | "permute" | "squeeze" | "unsqueeze" | "flatten" | "contiguous"
-    )
+    is_rank_changing_layout_target(target)
+        || is_permute_target(target)
+        || is_dim_transpose_target(target)
+        || is_tosa_transpose_target(target)
+        || target == "aten.contiguous.default"
 }
 
 pub(crate) fn is_rank_changing_layout_target(target: &str) -> bool {
-    let target = target.to_ascii_lowercase();
-    contains_any!(&target; "view" | "reshape" | "flatten" | "squeeze" | "unsqueeze")
+    is_view_like_target(target)
+        || is_squeeze_target(target)
+        || is_unsqueeze_target(target)
+        || matches!(
+            target,
+            "backend.tosa.RESHAPE.default" | "tosa.RESHAPE.default"
+        )
 }
 
 pub(crate) fn is_transpose_conv2d_target(target: &str) -> bool {
-    let target = target.to_ascii_lowercase();
-    contains_any!(&target, "transpose_conv2d", "transposeconv2d")
+    matches!(
+        target,
+        "aten.conv_transpose2d.input"
+            | "backend.tosa.TRANSPOSE_CONV2D.default"
+            | "tosa.TRANSPOSE_CONV2D.default"
+    )
 }
 
 pub(crate) fn is_conv1d_default_target(target: &str) -> bool {
-    target.contains("conv1d.default")
+    target == "aten.conv1d.default"
 }
 
 pub(crate) fn is_conv2d_default_target(target: &str) -> bool {
-    target.contains("conv2d.default")
+    target == "aten.conv2d.default"
 }
 
 pub(crate) fn is_conv3d_default_target(target: &str) -> bool {
-    target.contains("conv3d.default")
+    target == "aten.conv3d.default"
 }
 
 pub(crate) fn is_aten_convolution_default_target(target: &str) -> bool {
-    target.contains("convolution.default")
+    target == "aten.convolution.default"
 }
 
 pub(crate) fn is_conv_bias_annotation_target(target: &str) -> bool {
     is_aten_convolution_default_target(target)
         || is_conv2d_default_target(target)
-        || contains_any!(
-            target;
-            "conv3d.default" | "conv_transpose2d" | "transpose_conv2d" | "transposeconv2d" | "backend.tosa.CONV" | "backend.tosa.DEPTHWISE_CONV" | "backend.tosa.TRANSPOSE_CONV2D"
+        || is_conv3d_default_target(target)
+        || is_transpose_conv2d_target(target)
+        || matches!(
+            target,
+            "backend.tosa.CONV2D.default"
+                | "tosa.CONV2D.default"
+                | "backend.tosa.CONV3D.default"
+                | "tosa.CONV3D.default"
+                | "backend.tosa.DEPTHWISE_CONV2D.default"
+                | "tosa.DEPTHWISE_CONV2D.default"
         )
 }
 
 pub(crate) fn is_raw_aten_convolution_target(target: &str) -> bool {
-    let target = target.to_ascii_lowercase();
-    contains_any!(&target, "aten.convolution", "edge__ops_aten_convolution")
+    matches!(
+        target,
+        "aten.convolution.default" | "edge__ops_aten_convolution.default"
+    )
+}
+
+/// Targets that lower to TOSA ops consuming physical (channels-last) layout.
+/// Stock only transposes around such ops; graphs without them stay logical
+/// (NCHW) end to end.
+pub(crate) fn is_physical_layout_target(target: &str) -> bool {
+    is_conv_bias_annotation_target(target)
+        || is_raw_aten_convolution_target(target)
+        || is_conv1d_default_target(target)
+        || is_plain_avg_pool2d_target(target)
+        || is_adaptive_avg_pool2d_target(target)
+        || is_max_pool2d_target(target)
+        || matches!(
+            target,
+            "backend.tosa.AVG_POOL2D.default"
+                | "tosa.AVG_POOL2D.default"
+                | "backend.tosa.MAX_POOL2D.default"
+                | "tosa.MAX_POOL2D.default"
+                | "aten.adaptive_max_pool2d.default"
+                // TOSA RESIZE is defined on NHWC too (stock wraps it in permutes).
+                | "aten.upsample_nearest2d.default"
+                | "aten.upsample_nearest2d.vec"
+                | "aten.upsample_bilinear2d.default"
+                | "aten.upsample_bilinear2d.vec"
+                | "backend.tosa.RESIZE.default"
+                | "tosa.RESIZE.default"
+        )
 }
 
 pub(crate) fn is_conv_accumulator_target(target: &str) -> bool {
-    let target = target.to_ascii_lowercase();
-    if target.contains("tosa") {
-        return contains_any!(&target, "conv2d", "depthwise_conv2d", "conv3d");
-    }
-    contains_any!(&target, "aten.convolution", "aten.conv2d")
+    is_raw_aten_convolution_target(target)
+        || matches!(
+            target,
+            "aten.conv2d.default"
+                | "aten.conv2d.padding"
+                | "backend.tosa.CONV2D.default"
+                | "tosa.CONV2D.default"
+                | "backend.tosa.DEPTHWISE_CONV2D.default"
+                | "tosa.DEPTHWISE_CONV2D.default"
+                | "backend.tosa.CONV3D.default"
+                | "tosa.CONV3D.default"
+        )
 }
 
 pub(crate) fn size_adjust_target_kind(target: &str) -> Option<SizeAdjustTargetKind> {
-    let target = target.to_ascii_lowercase();
-    if is_transpose_conv2d_target(&target) {
-        return None;
-    }
-    if contains_any!(&target; "convolution.default" | "conv2d" | "conv3d") {
+    if is_aten_convolution_default_target(target)
+        || is_conv2d_default_target(target)
+        || is_conv3d_default_target(target)
+        || matches!(
+            target,
+            "aten.conv2d.padding"
+                | "aten.conv3d.padding"
+                | "backend.tosa.CONV2D.default"
+                | "tosa.CONV2D.default"
+                | "backend.tosa.DEPTHWISE_CONV2D.default"
+                | "tosa.DEPTHWISE_CONV2D.default"
+                | "backend.tosa.CONV3D.default"
+                | "tosa.CONV3D.default"
+        )
+    {
         return Some(SizeAdjustTargetKind::Conv);
     }
-    if target.contains("max_pool2d") {
+    if is_max_pool2d_target(target)
+        || matches!(
+            target,
+            "backend.tosa.MAX_POOL2D.default" | "tosa.MAX_POOL2D.default"
+        )
+    {
         return Some(SizeAdjustTargetKind::Pool(PoolSizeAdjustKind::Max));
     }
-    if target.contains("avg_pool2d") {
+    if is_plain_avg_pool2d_target(target)
+        || matches!(
+            target,
+            "backend.tosa.AVG_POOL2D.default" | "tosa.AVG_POOL2D.default"
+        )
+    {
         return Some(SizeAdjustTargetKind::Pool(PoolSizeAdjustKind::Avg));
     }
     None
 }
 
 pub(crate) fn is_split_target(target: &str) -> bool {
-    contains_any!(target, "split_with_sizes_copy", "split_copy")
+    matches!(
+        target,
+        "aten.split_with_sizes_copy.default" | "aten.split_copy.Tensor" | "aten.split_copy.sizes"
+    )
 }
 
 pub(crate) fn is_slice_copy_tensor_target(target: &str) -> bool {
-    target.contains("aten.slice_copy.Tensor")
+    target == "aten.slice_copy.Tensor"
 }
 
 pub(crate) fn is_slice_tensor_target(target: &str) -> bool {
-    contains_any!(target, "slice_copy.Tensor", "slice.Tensor") && !target.contains("slice_scatter")
+    matches!(target, "aten.slice_copy.Tensor" | "aten.slice.Tensor")
 }
 
 pub(crate) fn is_slice_scatter_target(target: &str) -> bool {
-    target.contains("slice_scatter.default")
+    target == "aten.slice_scatter.default"
 }
 
 #[cfg(test)]
 pub(crate) fn is_cat_target(target: &str) -> bool {
-    target.contains("aten.cat.default")
+    target == "aten.cat.default"
 }
 
 pub(crate) fn is_unfold_copy_target(target: &str) -> bool {
-    target.contains("unfold_copy")
+    target == "aten.unfold_copy.default"
 }
 
 pub(crate) fn is_gather_target(target: &str) -> bool {
-    target.contains("aten.gather.default")
+    target == "aten.gather.default"
 }
 
 pub(crate) fn is_tril_target(target: &str) -> bool {
-    contains_any!(target; "aten.tril" | "aten_tril" | "aten.tril_copy" | "aten_tril_copy")
+    matches!(
+        target,
+        "aten.tril.default"
+            | "aten.tril_copy.default"
+            | "aten_tril.default"
+            | "aten_tril_copy.default"
+    )
 }
 
 pub(crate) fn is_embedding_target(target: &str) -> bool {
-    target.contains("aten.embedding")
+    target == "aten.embedding.default"
 }
 
 pub(crate) fn is_logit_target(target: &str) -> bool {
-    target.contains("logit")
+    matches!(target, "aten.logit.default" | "aten.logit_.default")
 }
 
 pub(crate) fn is_index_select_target(target: &str) -> bool {
-    target.contains("index_select.default")
+    target == "aten.index_select.default"
 }
 
 pub(crate) fn is_index_tensor_target(target: &str) -> bool {
-    target.contains("aten.index.Tensor")
+    target == "aten.index.Tensor"
 }
 
 pub(crate) fn is_cumsum_target(target: &str) -> bool {
-    target.contains("cumsum")
+    matches!(target, "aten.cumsum.default" | "aten.cumsum_.default")
 }
 
 pub(crate) fn is_layer_norm_target(target: &str) -> bool {
@@ -491,15 +506,11 @@ pub(crate) fn is_layer_norm_target(target: &str) -> bool {
 }
 
 pub(crate) fn layer_norm_target_kind(target: &str) -> Option<LayerNormTargetKind> {
-    if target.contains("native_layer_norm") {
-        return Some(LayerNormTargetKind::NativeOrOther);
+    match target {
+        "aten.native_layer_norm.default" => Some(LayerNormTargetKind::NativeOrOther),
+        "aten.layer_norm.default" => Some(LayerNormTargetKind::Plain),
+        _ => None,
     }
-    if target.contains("layer_norm.default") {
-        return Some(LayerNormTargetKind::Plain);
-    }
-    target
-        .contains("layer_norm")
-        .then_some(LayerNormTargetKind::NativeOrOther)
 }
 
 pub(crate) fn layer_norm_param_view_target(target: &str) -> Option<&'static str> {
@@ -510,170 +521,324 @@ pub(crate) fn layer_norm_param_view_target(target: &str) -> Option<&'static str>
 }
 
 pub(crate) fn is_var_target(target: &str) -> bool {
-    contains_any!(target; "var.correction" | "var_correction" | "var.dim" | "var_dim")
+    matches!(target, "aten.var.correction" | "aten.var.dim")
 }
 
 pub(crate) fn is_var_dim_target(target: &str) -> bool {
-    target.contains("var.dim")
+    target == "aten.var.dim"
 }
 
 pub(crate) fn is_plain_avg_pool2d_target(target: &str) -> bool {
-    target.contains("avg_pool2d") && !target.contains("adaptive")
+    target == "aten.avg_pool2d.default"
 }
 
 pub(crate) fn is_adaptive_avg_pool2d_target(target: &str) -> bool {
-    target.contains("adaptive_avg_pool2d")
+    matches!(
+        target,
+        "aten.adaptive_avg_pool2d.default" | "aten._adaptive_avg_pool2d.default"
+    )
 }
 
 pub(crate) fn is_as_strided_copy_target(target: &str) -> bool {
-    target.contains("as_strided_copy.default")
+    target == "aten.as_strided_copy.default"
 }
 
 pub(crate) fn is_pad_target(target: &str) -> bool {
-    target.contains("aten.pad.default")
+    matches!(target, "aten.pad.default" | "aten.constant_pad_nd.default")
 }
 
 pub(crate) fn is_pixel_shuffle_target(target: &str) -> bool {
-    target.contains("pixel_shuffle") && !target.contains("pixel_unshuffle")
+    target == "aten.pixel_shuffle.default"
 }
 
 pub(crate) fn is_pixel_unshuffle_target(target: &str) -> bool {
-    target.contains("pixel_unshuffle")
+    target == "aten.pixel_unshuffle.default"
 }
 
 pub(crate) fn is_squeeze_target(target: &str) -> bool {
-    !target.contains("unsqueeze")
-        && contains_any!(
-            target;
-            "squeeze_copy" | "squeeze.dim" | "squeeze.default" | "squeeze.dims"
-        )
+    matches!(
+        target,
+        "aten.squeeze_copy.default"
+            | "aten.squeeze_copy.dim"
+            | "aten.squeeze_copy.dims"
+            | "aten.squeeze.dim"
+            | "aten.squeeze.default"
+            | "aten.squeeze.dims"
+    )
 }
 
 pub(crate) fn is_unsqueeze_target(target: &str) -> bool {
-    contains_any!(target, "unsqueeze_copy", "unsqueeze.default")
+    matches!(
+        target,
+        "aten.unsqueeze_copy.default" | "aten.unsqueeze.default"
+    )
 }
 
 pub(crate) fn is_dim_transpose_target(target: &str) -> bool {
-    contains_any!(target, "transpose_copy", "transpose.int")
+    matches!(target, "aten.transpose_copy.int" | "aten.transpose.int")
 }
 
 pub(crate) fn is_index_put_family_target(target: &str) -> bool {
-    target.contains("index_put")
+    matches!(
+        target,
+        "aten.index_put.default" | "aten.index_put_.default" | "aten._index_put_impl_.default"
+    )
 }
 
 pub(crate) fn is_index_put_default_target(target: &str) -> bool {
-    contains_any!(target, "index_put.default", "index_put_.default")
+    matches!(target, "aten.index_put.default" | "aten.index_put_.default")
 }
 
 pub(crate) fn is_where_target(target: &str) -> bool {
-    contains_any!(target, "where.self", "aten_where")
+    matches!(target, "aten.where.self" | "aten_where.self")
 }
 
 pub(crate) fn is_masked_fill_target(target: &str) -> bool {
-    target.contains("masked_fill")
+    matches!(
+        target,
+        "aten.masked_fill.Scalar"
+            | "aten.masked_fill.Tensor"
+            | "aten.masked_fill_.Scalar"
+            | "aten.masked_fill_.Tensor"
+    )
 }
 
 pub(crate) fn is_select_scatter_target(target: &str) -> bool {
-    target.contains("select_scatter.default")
+    target == "aten.select_scatter.default"
 }
 
 pub(crate) fn is_clamp_target(target: &str) -> bool {
-    target.contains("clamp.default")
+    target == "aten.clamp.default"
 }
 
 pub(crate) fn is_abs_target(target: &str) -> bool {
-    target.contains("abs.default")
+    target == "aten.abs.default"
 }
 
 pub(crate) fn is_comparison_target(target: &str) -> bool {
-    contains_any!(target; "eq.Tensor" | "ge.Tensor" | "gt.Tensor" | "le.Tensor" | "lt.Tensor")
+    matches!(
+        target,
+        "aten.eq.Tensor"
+            | "aten.ge.Tensor"
+            | "aten.gt.Tensor"
+            | "aten.le.Tensor"
+            | "aten.lt.Tensor"
+    )
 }
 
 pub(crate) fn is_minmax_target(target: &str) -> bool {
-    contains_any!(target, "maximum.default", "minimum.default")
+    matches!(target, "aten.maximum.default" | "aten.minimum.default")
 }
 
 pub(crate) fn is_add_sub_target(target: &str) -> bool {
-    contains_any!(target, "add.Tensor", "sub.Tensor")
+    matches!(target, "aten.add.Tensor" | "aten.sub.Tensor")
 }
 
 pub(crate) fn add_sub_alpha_result_target(target: &str) -> Option<&'static str> {
-    if target.contains("sub.Tensor") {
-        Some("aten.sub.Tensor")
-    } else if target.contains("add.Tensor") {
-        Some("aten.add.Tensor")
-    } else {
-        None
+    match target {
+        "aten.sub.Tensor" => Some("aten.sub.Tensor"),
+        "aten.add.Tensor" => Some("aten.add.Tensor"),
+        _ => None,
     }
 }
 
 pub(crate) fn is_mul_target(target: &str) -> bool {
-    target.contains("mul.Tensor")
+    target == "aten.mul.Tensor"
 }
 
 pub(crate) fn is_sum_dim_int_list_target(target: &str) -> bool {
-    target.contains("sum.dim_IntList")
+    target == "aten.sum.dim_IntList"
 }
 
 pub(crate) fn is_mean_target(target: &str) -> bool {
-    contains_any!(target, "mean.dim", "mean.default")
+    matches!(target, "aten.mean.dim" | "aten.mean.default")
 }
 
 pub(crate) fn is_full_like_target(target: &str) -> bool {
-    target.contains("full_like")
+    target == "aten.full_like.default"
 }
 
 pub(crate) fn is_batch_norm_target(target: &str) -> bool {
-    BATCH_NORM_TARGET_MARKERS
-        .iter()
-        .any(|marker| target.contains(marker))
+    BATCH_NORM_TARGETS.iter().any(|symbol| *symbol == target)
 }
 
 pub(crate) fn not_equal_replacement_target(target: &str) -> Option<&'static str> {
-    if target.contains("aten.ne.Scalar") {
-        Some("aten.eq.Scalar")
-    } else if contains_any!(target, "aten.ne.Tensor", "aten.ne_.Tensor") {
-        Some("aten.eq.Tensor")
-    } else {
-        None
+    match target {
+        "aten.ne.Scalar" => Some("aten.eq.Scalar"),
+        "aten.ne.Tensor" | "aten.ne_.Tensor" => Some("aten.eq.Tensor"),
+        _ => None,
     }
 }
 
 pub(crate) fn scalar_shift_replacement_target(target: &str) -> Option<&'static str> {
-    if target.contains("aten.__lshift__.Scalar") {
-        Some("aten.bitwise_left_shift.Tensor")
-    } else if target.contains("aten.__rshift__.Scalar") {
-        Some("aten.bitwise_right_shift.Tensor")
-    } else {
-        None
+    match target {
+        "aten.__lshift__.Scalar" => Some("aten.bitwise_left_shift.Tensor"),
+        "aten.__rshift__.Scalar" => Some("aten.bitwise_right_shift.Tensor"),
+        _ => None,
     }
 }
 
 pub(crate) fn is_repeat_interleave_self_int_target(target: &str) -> bool {
-    target.contains("repeat_interleave.self_int")
+    target == "aten.repeat_interleave.self_int"
 }
 
 pub(crate) fn is_max_pool2d_target(target: &str) -> bool {
-    target.contains("max_pool2d")
+    matches!(
+        target,
+        "aten.max_pool2d.default" | "aten.max_pool2d_with_indices.default"
+    )
 }
 
 pub(crate) fn is_max_pool2d_with_indices_target(target: &str) -> bool {
-    target.contains("max_pool2d") && target.contains("with_indices")
+    target == "aten.max_pool2d_with_indices.default"
 }
 
 pub(crate) fn group_norm_reshape_target(target: &str) -> Option<&'static str> {
-    if target.contains("native_group_norm") {
-        Some("aten.view_copy.default")
-    } else if contains_any!(target, "aten.group_norm", "aten.native_group_norm") {
-        Some("aten.reshape.default")
-    } else {
-        None
+    match target {
+        "aten.native_group_norm.default" => Some("aten.view_copy.default"),
+        "aten.group_norm.default" => Some("aten.reshape.default"),
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_wrapped_and_extended_targets_in_all_predicates() {
+        let predicates: &[fn(&str) -> bool] = &[
+            is_zero_input_constant_target,
+            is_fold_qdq_constant_target,
+            is_shape_only_constant_target,
+            is_constant_only_shape_transform_target,
+            is_view_like_target,
+            is_permute_target,
+            is_tosa_transpose_target,
+            is_boundary_rescale_target,
+            is_layout_passthrough_target,
+            is_rank_changing_layout_target,
+            is_transpose_conv2d_target,
+            is_conv1d_default_target,
+            is_conv2d_default_target,
+            is_conv3d_default_target,
+            is_aten_convolution_default_target,
+            is_conv_bias_annotation_target,
+            is_raw_aten_convolution_target,
+            is_conv_accumulator_target,
+            is_split_target,
+            is_slice_copy_tensor_target,
+            is_slice_tensor_target,
+            is_slice_scatter_target,
+            is_cat_target,
+            is_unfold_copy_target,
+            is_gather_target,
+            is_tril_target,
+            is_embedding_target,
+            is_logit_target,
+            is_index_select_target,
+            is_index_tensor_target,
+            is_cumsum_target,
+            is_layer_norm_target,
+            is_var_target,
+            is_var_dim_target,
+            is_plain_avg_pool2d_target,
+            is_adaptive_avg_pool2d_target,
+            is_as_strided_copy_target,
+            is_pad_target,
+            is_pixel_shuffle_target,
+            is_pixel_unshuffle_target,
+            is_squeeze_target,
+            is_unsqueeze_target,
+            is_dim_transpose_target,
+            is_index_put_family_target,
+            is_index_put_default_target,
+            is_where_target,
+            is_to_copy_target,
+            is_reciprocal_target,
+            is_physical_layout_target,
+            is_masked_fill_target,
+            is_select_scatter_target,
+            is_clamp_target,
+            is_abs_target,
+            is_comparison_target,
+            is_minmax_target,
+            is_add_sub_target,
+            is_mul_target,
+            is_sum_dim_int_list_target,
+            is_mean_target,
+            is_full_like_target,
+            is_batch_norm_target,
+            is_repeat_interleave_self_int_target,
+            is_max_pool2d_target,
+            is_max_pool2d_with_indices_target,
+        ];
+        for fixture in [
+            include_str!("../tests/fixtures/rc4_arm_edge_targets.tsv"),
+            include_str!("../tests/fixtures/rc4_tosa_targets.tsv"),
+        ] {
+            for line in fixture.lines().filter(|line| !line.starts_with('#')) {
+                let (symbol, _) = line.split_once('\t').unwrap();
+                for unknown in [format!("renamed.{symbol}"), format!("{symbol}.renamed")] {
+                    for predicate in predicates {
+                        assert!(!predicate(&unknown), "{unknown}");
+                    }
+                    assert_eq!(
+                        classify_ir_target(&unknown),
+                        IrTargetKind::Other,
+                        "{unknown}"
+                    );
+                    assert_eq!(zero_input_constant_target(&unknown), None, "{unknown}");
+                    assert_eq!(arange_target_kind(&unknown), None, "{unknown}");
+                    assert_eq!(table_op_target_kind(&unknown), None, "{unknown}");
+                    assert_eq!(elu_target_kind(&unknown), None, "{unknown}");
+                    assert_eq!(shape_only_constant_target(&unknown), None, "{unknown}");
+                    assert_eq!(noop_target(&unknown), None, "{unknown}");
+                    assert_eq!(size_adjust_target_kind(&unknown), None, "{unknown}");
+                    assert_eq!(layer_norm_target_kind(&unknown), None, "{unknown}");
+                    assert_eq!(layer_norm_param_view_target(&unknown), None, "{unknown}");
+                    assert_eq!(add_sub_alpha_result_target(&unknown), None, "{unknown}");
+                    assert_eq!(not_equal_replacement_target(&unknown), None, "{unknown}");
+                    assert_eq!(scalar_shift_replacement_target(&unknown), None, "{unknown}");
+                    assert_eq!(group_norm_reshape_target(&unknown), None, "{unknown}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_near_miss_linear_targets() {
+        assert_eq!(
+            classify_ir_target("aten.bilinear.default"),
+            IrTargetKind::Other
+        );
+        assert_eq!(
+            classify_ir_target("aten.upsample_bilinear2d.default"),
+            IrTargetKind::Other
+        );
+    }
+
+    #[test]
+    fn rejects_near_miss_sub_targets() {
+        assert!(!is_add_sub_target("aten.rsub.Tensor"));
+        assert_eq!(add_sub_alpha_result_target("aten.rsub.Tensor"), None);
+    }
+
+    #[test]
+    fn rejects_near_miss_pool_targets() {
+        assert!(!is_max_pool2d_target("aten.adaptive_max_pool2d.default"));
+        assert!(!is_max_pool2d_with_indices_target(
+            "aten.adaptive_max_pool2d_with_indices.default"
+        ));
+        assert_eq!(
+            size_adjust_target_kind("aten.adaptive_max_pool2d.default"),
+            None
+        );
+        assert_eq!(
+            size_adjust_target_kind("aten.adaptive_avg_pool2d.default"),
+            None
+        );
+    }
 
     fn assert_cases<T>(classify: impl Fn(&str) -> T, cases: &[(&str, T)])
     where
@@ -722,12 +887,12 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_tosa_rescale_case_insensitively() {
+    fn recognizes_exact_tosa_rescale_symbols() {
         assert_cases(
             classify_ir_target,
             &[
                 ("backend.tosa.RESCALE.default", IrTargetKind::TosaRescale),
-                ("tosa.rescale.default", IrTargetKind::TosaRescale),
+                ("tosa.RESCALE.default", IrTargetKind::TosaRescale),
             ],
         );
     }
@@ -784,6 +949,10 @@ mod tests {
                     Some(ZeroInputConstantTarget::Linspace),
                 ),
                 ("aten.eye.default", Some(ZeroInputConstantTarget::Eye)),
+                (
+                    "aten.scalar_tensor.default",
+                    Some(ZeroInputConstantTarget::ScalarTensor),
+                ),
             ],
         );
         assert_cases(
@@ -816,6 +985,20 @@ mod tests {
             ],
         );
         assert!(is_zero_input_constant_target("aten.eye.default"));
+        assert!(is_zero_input_constant_target("aten.scalar_tensor.default"));
+        assert!(is_to_copy_target("aten._to_copy.default"));
+        assert!(is_to_copy_target(
+            "dim_order_ops._to_dim_order_copy.default"
+        ));
+        assert!(!is_to_copy_target("aten.copy.default"));
+        assert!(is_reciprocal_target("aten.reciprocal.default"));
+        assert!(!is_reciprocal_target("aten.rsqrt.default"));
+        assert!(is_physical_layout_target("aten.convolution.default"));
+        assert!(is_physical_layout_target("aten.avg_pool2d.default"));
+        assert!(is_physical_layout_target("aten.max_pool2d.default"));
+        assert!(is_physical_layout_target("backend.tosa.CONV2D.default"));
+        assert!(!is_physical_layout_target("aten.mul.Tensor"));
+        assert!(!is_physical_layout_target("aten.rsqrt.default"));
         assert_true(
             is_fold_qdq_constant_target,
             &["aten.scalar_tensor.default", "aten.full_like.default"],
@@ -899,11 +1082,23 @@ mod tests {
     fn recognizes_layout_target_families() {
         assert_true(
             is_layout_passthrough_target,
-            &["aten.transpose.int", "aten.contiguous.default"],
+            &[
+                "aten.transpose.int",
+                "aten.contiguous.default",
+                "backend.tosa.RESHAPE.default",
+                "tosa.RESHAPE.default",
+            ],
         );
         assert!(is_tosa_transpose_target("backend.tosa.TRANSPOSE.default"));
         assert!(is_rank_changing_layout_target("aten.flatten.using_ints"));
         assert_false(is_rank_changing_layout_target, &["aten.transpose.int"]);
+        assert_false(
+            is_layout_passthrough_target,
+            &[
+                "backend.tosa.TRANSPOSE_CONV2D.default",
+                "backend.tosa.CONV2D_BLOCK_SCALED.default",
+            ],
+        );
     }
 
     #[test]
@@ -1011,7 +1206,10 @@ mod tests {
             &["aten.adaptive_avg_pool2d.default"],
         );
         assert_true(is_as_strided_copy_target, &["aten.as_strided_copy.default"]);
-        assert_true(is_pad_target, &["aten.pad.default"]);
+        assert_true(
+            is_pad_target,
+            &["aten.pad.default", "aten.constant_pad_nd.default"],
+        );
         assert!(is_pixel_shuffle_target("aten.pixel_shuffle.default"));
         assert_false(is_pixel_shuffle_target, &["aten.pixel_unshuffle.default"]);
         assert!(is_pixel_unshuffle_target("aten.pixel_unshuffle.default"));

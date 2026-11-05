@@ -51,12 +51,16 @@ def _restore_parallel_backend_preprocess_workers_override(
     os.environ[_PARALLEL_BACKEND_PREPROCESS_ENV] = previous
 
 
-def install(*, parallel_backend_preprocess_workers: int | None = None) -> None:
-    """Install the RETAB fast path into ExecuTorch Arm lowering.
+def install(
+    *, fast_paths: bool = False, parallel_backend_preprocess_workers: int | None = None
+) -> None:
+    """Install RETAB's preprocess into ExecuTorch Arm lowering.
 
-    `parallel_backend_preprocess_workers` is an opt-in escape hatch for highly
-    fragmented lowers that fan out into many delegates. Leave it unset for the
-    default serial behavior.
+    `fast_paths` also installs RETAB's edge-manager and run_decompositions fast
+    paths (off by default). `parallel_backend_preprocess_workers` is an opt-in
+    escape hatch for highly fragmented lowers that fan out into many delegates.
+    Leave it unset for the default serial behavior. Nested installs keep the
+    options of the outermost one.
     """
     global _install_depth
 
@@ -65,7 +69,7 @@ def install(*, parallel_backend_preprocess_workers: int | None = None) -> None:
     )
     try:
         if _install_depth == 0:
-            _patch_tosa_backend()
+            _patch_tosa_backend(fast_paths=fast_paths)
     except Exception:
         _restore_parallel_backend_preprocess_workers_override(previous)
         raise
@@ -97,14 +101,16 @@ unpatch_tosa_backend = uninstall
 
 
 @contextmanager
-def activated(*, parallel_backend_preprocess_workers: int | None = None):
-    """Temporarily install the ExecuTorch Arm fast path.
+def activated(
+    *, fast_paths: bool = False, parallel_backend_preprocess_workers: int | None = None
+):
+    """Temporarily install RETAB's preprocess into ExecuTorch Arm lowering.
 
-    Set `parallel_backend_preprocess_workers` to opt into the experimental
-    multi-process backend preprocess path for fragmented multi-delegate graphs.
+    See install() for `fast_paths` and `parallel_backend_preprocess_workers`.
     """
     install(
-        parallel_backend_preprocess_workers=parallel_backend_preprocess_workers
+        fast_paths=fast_paths,
+        parallel_backend_preprocess_workers=parallel_backend_preprocess_workers,
     )
     try:
         yield

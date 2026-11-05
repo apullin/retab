@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
-use crate::constant_materialization::{repeated_scalar_bytes, scalar_storage_bytes};
+use crate::constant_materialization::{
+    quantize_scalar_with_qparam, quantize_value_stock, repeated_scalar_bytes,
+    scalar_storage_bytes,
+};
 use crate::fx_constant_tensor_eval::{node_has_tensor_inputs, tensor_numel};
 use crate::fx_ir::{
     EffectfulIrPass, EffectfulIrPassResult, IrArg, IrGraph, IrNode, NodeOp, QParam,
@@ -11,6 +14,7 @@ use crate::fx_target::{
 };
 use crate::graph::ir::DType;
 use crate::lowering_effects::{LoweringEffect, LoweringEffectBatch, MaterializeTensorNodeEffect};
+use crate::store::TensorData;
 
 pub struct IrFuseZeroInputConstantsEffectPass;
 
@@ -105,9 +109,8 @@ fn quantized_scalar_bytes(qp: &QParam, value: f64) -> Option<(DType, Vec<u8>)> {
         return None;
     }
     let dtype = qp.dtype();
-    let quantized = (value / qp.scale + qp.zp as f64)
-        .round()
-        .clamp(qp.qmin as f64, qp.qmax as f64);
+    let quantized =
+        quantize_value_stock(value, qp.scale, qp.zp, qp.qmin, qp.qmax) as f64;
     Some((dtype, scalar_storage_bytes(dtype, quantized)?))
 }
 
@@ -179,7 +182,7 @@ fn arange_output_shape(node: &IrNode, start: f64, end: f64, step: f64) -> Option
     Some(vec![len])
 }
 
-fn plan_zero_input_arange(node: &IrNode) -> Option<MaterializeTensorNodeEffect> {
+fn plan_zero_input_arange(node: &IrNode) -> Option<TensorData> {
     let (start, end, step) = arange_spec(node)?;
     let shape = arange_output_shape(node, start, end, step)?;
     let numel = tensor_numel(&shape)?;
@@ -191,16 +194,10 @@ fn plan_zero_input_arange(node: &IrNode) -> Option<MaterializeTensorNodeEffect> 
         (0..numel).map(|idx| start + (idx as f64 * step)),
     )?;
 
-    Some(MaterializeTensorNodeEffect {
-        node_name: node.name.clone(),
-        data,
-        shape,
-        dtype,
-        allow_missing: true,
-    })
+    Some(TensorData { data, shape, dtype })
 }
 
-fn plan_zero_input_linspace(node: &IrNode) -> Option<MaterializeTensorNodeEffect> {
+fn plan_zero_input_linspace(node: &IrNode) -> Option<TensorData> {
     let start = node.args.first()?.as_scalar_literal_f64()?;
     let end = node.args.get(1)?.as_scalar_literal_f64()?;
     let steps = match node.args.get(2)? {
@@ -227,13 +224,7 @@ fn plan_zero_input_linspace(node: &IrNode) -> Option<MaterializeTensorNodeEffect
         }),
     )?;
 
-    Some(MaterializeTensorNodeEffect {
-        node_name: node.name.clone(),
-        data,
-        shape,
-        dtype,
-        allow_missing: true,
-    })
+    Some(TensorData { data, shape, dtype })
 }
 
 fn full_bail_reason(graph: &IrGraph, node: &IrNode) -> &'static str {
@@ -266,7 +257,7 @@ fn full_bail_reason(graph: &IrGraph, node: &IrNode) -> &'static str {
     "ok_but_planned_none"
 }
 
-fn plan_zero_input_eye(node: &IrNode) -> Option<MaterializeTensorNodeEffect> {
+fn plan_zero_input_eye(node: &IrNode) -> Option<TensorData> {
     let n = match node.args.first()? {
         IrArg::Int(value) => usize::try_from(*value).ok()?,
         _ => return None,
@@ -289,16 +280,10 @@ fn plan_zero_input_eye(node: &IrNode) -> Option<MaterializeTensorNodeEffect> {
         (0..n).flat_map(|row| (0..m).map(move |col| if row == col { 1.0 } else { 0.0 })),
     )?;
 
-    Some(MaterializeTensorNodeEffect {
-        node_name: node.name.clone(),
-        data,
-        shape,
-        dtype,
-        allow_missing: true,
-    })
+    Some(TensorData { data, shape, dtype })
 }
 
-fn plan_zero_input_full(graph: &IrGraph, node: &IrNode) -> Option<MaterializeTensorNodeEffect> {
+fn plan_zero_input_full(graph: &IrGraph, node: &IrNode) -> Option<TensorData> {
     let shape = full_shape(node)?;
     let fill_value = full_fill_value(node)?;
 
@@ -315,13 +300,65 @@ fn plan_zero_input_full(graph: &IrGraph, node: &IrNode) -> Option<MaterializeTen
         (dtype, scalar_storage_bytes(dtype, fill_value)?)
     };
 
-    Some(MaterializeTensorNodeEffect {
-        node_name: node.name.clone(),
+    Some(TensorData {
         data: repeated_scalar_bytes(&shape, &scalar)?,
         shape,
         dtype,
-        allow_missing: true,
     })
+}
+
+fn plan_zero_input_scalar_tensor(node: &IrNode) -> Option<TensorData> {
+    let value = node.args.first()?.as_scalar_literal_f64()?;
+    let shape = node
+        .meta
+        .val_shape()
+        .map(|shape| shape.to_vec())
+        .unwrap_or_default();
+
+    // Like stock's ComputeConstantOpsAOTPass: compute the scalar in float and
+    // quantize it with the node's output qparams when they are present.
+    if let Some(qp) = node
+        .meta
+        .output_qparam()
+        .filter(|qp| !qp.is_per_channel() && qp.is_integer_dtype())
+    {
+        let dtype = qp.dtype();
+        let quantized = quantize_scalar_with_qparam(
+            value,
+            crate::graph::ir::QuantArgs {
+                scale: qp.scale,
+                zero_point: qp.zp,
+                dtype,
+                qmin: qp.qmin,
+                qmax: qp.qmax,
+            },
+        );
+        return Some(TensorData {
+            data: scalar_storage_bytes(dtype, quantized)?,
+            shape,
+            dtype,
+        });
+    }
+
+    let dtype = explicit_zero_input_dtype(node)?;
+    Some(TensorData {
+        data: scalar_storage_bytes(dtype, value)?,
+        shape,
+        dtype,
+    })
+}
+
+/// Planned bytes for a zero-input factory node (full/arange/linspace/eye/
+/// scalar_tensor), shared by the materializing sweep and by the constant
+/// propagation in the other constant-folding passes.
+pub(crate) fn zero_input_tensor(graph: &IrGraph, node: &IrNode) -> Option<TensorData> {
+    match planned_zero_input_constant_target(node)? {
+        ZeroInputConstantTarget::Full => plan_zero_input_full(graph, node),
+        ZeroInputConstantTarget::Arange => plan_zero_input_arange(node),
+        ZeroInputConstantTarget::Linspace => plan_zero_input_linspace(node),
+        ZeroInputConstantTarget::Eye => plan_zero_input_eye(node),
+        ZeroInputConstantTarget::ScalarTensor => plan_zero_input_scalar_tensor(node),
+    }
 }
 
 fn planned_zero_input_constant_target(node: &IrNode) -> Option<ZeroInputConstantTarget> {
@@ -342,14 +379,16 @@ impl EffectfulIrPass for IrFuseZeroInputConstantsEffectPass {
             let Some(target) = planned_zero_input_constant_target(node) else {
                 continue;
             };
-            let effect = match target {
-                ZeroInputConstantTarget::Full => plan_zero_input_full(graph, node),
-                ZeroInputConstantTarget::Arange => plan_zero_input_arange(node),
-                ZeroInputConstantTarget::Linspace => plan_zero_input_linspace(node),
-                ZeroInputConstantTarget::Eye => plan_zero_input_eye(node),
-            };
-            if let Some(effect) = effect {
-                effects.push(LoweringEffect::MaterializeTensorNode(effect));
+            if let Some(tensor) = zero_input_tensor(graph, node) {
+                effects.push(LoweringEffect::MaterializeTensorNode(
+                    MaterializeTensorNodeEffect {
+                        node_name: node.name.clone(),
+                        data: tensor.data,
+                        shape: tensor.shape,
+                        dtype: tensor.dtype,
+                        allow_missing: true,
+                    },
+                ));
                 continue;
             }
             let why = if target == ZeroInputConstantTarget::Full {
@@ -609,6 +648,64 @@ mod tests {
             .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
             .collect::<Vec<_>>();
         assert_eq!(values, vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn materializes_scalar_tensor_from_rust() {
+        let mut graph = IrGraph::empty();
+        let id = add_call(
+            &mut graph,
+            "scalar",
+            "aten.scalar_tensor.default",
+            vec![IrArg::Int(9)],
+        );
+        graph
+            .node_mut(id)
+            .meta
+            .set_tensor_facts(crate::fx_meta::TensorFacts::new(vec![], "torch.int32"));
+
+        let result = run_pass(&mut graph);
+
+        assert!(matches!(
+            &result.effects.items[0],
+            LoweringEffect::MaterializeTensorNode(effect)
+                if effect.node_name == "scalar"
+                    && effect.dtype == DType::Int32
+                    && effect.shape.is_empty()
+                    && effect.data == 9i32.to_le_bytes().to_vec()
+        ));
+    }
+
+    #[test]
+    fn materializes_quantized_scalar_tensor_from_output_qparams() {
+        let mut graph = IrGraph::empty();
+        let id = add_call(
+            &mut graph,
+            "scalar",
+            "aten.scalar_tensor.default",
+            vec![IrArg::Float(2.0)],
+        );
+        graph
+            .node_mut(id)
+            .meta
+            .set_tensor_facts(crate::fx_meta::TensorFacts::new(vec![], "torch.float32"));
+        graph
+            .node_mut(id)
+            .meta
+            .set_single_output_qparam(int8_qparam(0.5));
+
+        let result = run_pass(&mut graph);
+
+        // Computed in float (2.0) then quantized at scale 0.5, like stock's
+        // ComputeConstantOpsAOTPass.
+        assert!(matches!(
+            &result.effects.items[0],
+            LoweringEffect::MaterializeTensorNode(effect)
+                if effect.node_name == "scalar"
+                    && effect.dtype == DType::Int8
+                    && effect.shape.is_empty()
+                    && effect.data == vec![4u8]
+        ));
     }
 
     #[test]

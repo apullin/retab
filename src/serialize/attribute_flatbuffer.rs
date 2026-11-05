@@ -5,6 +5,7 @@ use super::tosa_generated::Attribute;
 pub(super) fn build_attribute(
     builder: &mut FlatBufferBuilder<'_>,
     attr: &Attribute,
+    is_u55_subset: bool,
 ) -> (u8, Option<WIPOffset<TableFinishedWIPOffset>>) {
     match attr {
         Attribute::None => (0, None),
@@ -44,13 +45,17 @@ pub(super) fn build_attribute(
         | Attribute::BitwiseXor(_)
         | Attribute::LogicalLeftShift(_)
         | Attribute::LogicalRightShift(_)
-        | Attribute::ArithmeticRightShift(_)
         | Attribute::LogicalNot(_)
         | Attribute::LogicalAnd(_)
         | Attribute::LogicalOr(_)
         | Attribute::LogicalXor(_)
         | Attribute::Pow(_)
         | Attribute::IntDiv(_) => empty_attr(builder, attr),
+
+        // tosa-rs currently drops the schema's round field.
+        Attribute::ArithmeticRightShift(_) => finish_attr(builder, attr, |builder| {
+            builder.push_slot::<bool>(4, is_u55_subset, false);
+        }),
 
         Attribute::Conv2d(a) => conv_attr(
             builder,

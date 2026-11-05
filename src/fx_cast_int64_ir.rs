@@ -44,6 +44,14 @@ impl EffectfulIrPass for IrCastInt64ToInt32EffectPass {
             if node.meta.val_shape().is_none() {
                 continue;
             }
+            // Stock raises for int64 buffers outside the int32 range; let it.
+            if let Err(error) = crate::tensor_data::cast_i64_bytes_to_i32(&tensor.data.data) {
+                crate::stock_fallback::request(format!(
+                    "int64 buffer outside the int32 range: {}: {error}",
+                    node.name
+                ));
+                continue;
+            }
 
             graph
                 .node_mut(node_id)
@@ -65,8 +73,7 @@ impl EffectfulIrPass for IrCastInt64ToInt32EffectPass {
         // already yields INT32, so a following int32 dim-order copy becomes a no-op.
         for node_id in graph.live_call_function_ids() {
             let node = graph.node(node_id);
-            if node.target == "aten.argmax.default"
-                && node.meta.val_dtype() == Some("torch.int64")
+            if node.target == "aten.argmax.default" && node.meta.val_dtype() == Some("torch.int64")
             {
                 graph
                     .node_mut(node_id)
@@ -87,6 +94,40 @@ mod tests {
     use crate::test_ir::{buffer, call_default, parameter};
 
     use super::*;
+
+    #[test]
+    fn regression_cast_rejects_out_of_range_buffers_before_changing_meta() {
+        for value in [i32::MIN as i64 - 1, i32::MAX as i64 + 1, i64::MIN, i64::MAX] {
+            let mut graph = IrGraph::empty();
+            let placeholder = buffer(
+                &mut graph,
+                "buf",
+                TensorData {
+                    data: value.to_le_bytes().to_vec(),
+                    shape: vec![1],
+                    dtype: DType::Int64,
+                },
+            );
+            graph.node_mut(placeholder).meta = NodeMeta::tensor([1], "torch.int64");
+            call_default(
+                &mut graph,
+                "use_buf",
+                "aten.add.Tensor",
+                vec![IrArg::Node(placeholder), IrArg::Node(placeholder)],
+            );
+
+            crate::stock_fallback::take();
+            let result = IrCastInt64ToInt32EffectPass.run(&mut graph);
+            let reason = crate::stock_fallback::take()
+                .unwrap_or_else(|| panic!("accepted out-of-range value {value}"));
+            assert!(reason.starts_with("int64 buffer outside the int32 range: buf"), "{reason}");
+            assert!(!result.changed());
+            assert_eq!(
+                graph.node(placeholder).meta.val_dtype(),
+                Some("torch.int64")
+            );
+        }
+    }
 
     #[test]
     fn effectful_cast_plans_buffer_cast_and_updates_meta() {

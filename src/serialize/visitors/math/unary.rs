@@ -3,8 +3,7 @@ use super::*;
 pub(super) fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
     table.extend([
-        (OpTarget::TosaNeg, emit_negate as EmitFn),
-        (OpTarget::TosaNegate, emit_negate),
+        (OpTarget::TosaNegate, emit_negate as EmitFn),
         (OpTarget::TosaCeil, emit_ceil),
         (OpTarget::TosaFloor, emit_floor),
         (OpTarget::Neg, emit_negate),

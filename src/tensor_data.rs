@@ -1,4 +1,5 @@
 use pyo3::buffer::PyBuffer;
+use pyo3::exceptions::PyOverflowError;
 use pyo3::prelude::*;
 use pyo3::types::PyMemoryView;
 
@@ -127,7 +128,7 @@ pub fn extract_tensor_data(value: &Bound<'_, PyAny>) -> PyResult<TensorData> {
     let mut dtype = extract_tensor_dtype(value);
     let mut data = extract_tensor_bytes(value, dtype)?;
     if dtype == DType::Int64 {
-        data = cast_i64_bytes_to_i32(&data);
+        data = cast_i64_bytes_to_i32(&data).map_err(PyOverflowError::new_err)?;
         dtype = DType::Int32;
     }
     Ok(TensorData { data, shape, dtype })
@@ -217,15 +218,18 @@ impl TensorData {
     }
 }
 
-fn cast_i64_bytes_to_i32(data: &[u8]) -> Vec<u8> {
-    data.chunks_exact(8)
-        .flat_map(|chunk| {
-            let val = i64::from_le_bytes([
-                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-            ]);
-            (val as i32).to_le_bytes()
-        })
-        .collect()
+pub(crate) fn cast_i64_bytes_to_i32(data: &[u8]) -> Result<Vec<u8>, String> {
+    if data.len() % 8 != 0 {
+        return Err("invalid int64 tensor byte length".into());
+    }
+    let mut out = Vec::with_capacity(data.len() / 2);
+    for chunk in data.chunks_exact(8) {
+        let val = i64::from_le_bytes(chunk.try_into().unwrap());
+        let narrowed = i32::try_from(val)
+            .map_err(|_| format!("int64 constant value {val} is outside the int32 range"))?;
+        out.extend_from_slice(&narrowed.to_le_bytes());
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -299,7 +303,31 @@ mod tests {
         };
         assert_eq!(int64_tensor.vec_i64(), Some(vec![1, 3]));
 
-        let cast = cast_i64_bytes_to_i32(&int64_tensor.data);
+        let cast = cast_i64_bytes_to_i32(&int64_tensor.data).unwrap();
         assert_eq!(cast, [1i32.to_le_bytes(), 3i32.to_le_bytes()].concat(),);
+    }
+
+    #[test]
+    fn int64_cast_preserves_int32_boundaries_and_empty_data() {
+        let data = [
+            i64::from(i32::MIN).to_le_bytes(),
+            i64::from(i32::MAX).to_le_bytes(),
+        ]
+        .concat();
+        assert_eq!(
+            cast_i64_bytes_to_i32(&data).unwrap(),
+            [i32::MIN.to_le_bytes(), i32::MAX.to_le_bytes()].concat()
+        );
+        assert_eq!(cast_i64_bytes_to_i32(&[]).unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn int64_cast_rejects_out_of_range_values_and_partial_elements() {
+        for value in [i32::MIN as i64 - 1, i32::MAX as i64 + 1, i64::MIN, i64::MAX] {
+            let error = cast_i64_bytes_to_i32(&value.to_le_bytes()).unwrap_err();
+            assert!(error.contains("outside the int32 range"));
+            assert!(error.contains(&value.to_string()));
+        }
+        assert!(cast_i64_bytes_to_i32(&[0; 7]).is_err());
     }
 }

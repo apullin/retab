@@ -1,198 +1,200 @@
 # RETAB
 
-A Rust fast path for ExecuTorch's ARM backend preprocess stage.
-
-Takes a quantized FX graph from ExecuTorch's ARM partitioner and produces
-the TOSA flatbuffer consumed by Vela.
-
-Current local benchmarking, artifact checks, and acceptance workflow are
-documented in [docs/FASTLANE_WORKFLOW.md](docs/FASTLANE_WORKFLOW.md).
+RETAB is a Rust/PyO3 implementation of ExecuTorch's Arm TOSA preprocessing
+stage, focused on Ethos-U55 INT lowering. It transforms quantized FX graphs
+and serializes TOSA flatbuffers for Vela. The goal is numerical agreement with
+stock ExecuTorch v1.6.0-rc4, with matching structure where practical, while
+reducing preprocessing time.
 
 ## Pinned companion stack
 
-RETAB is only one piece of the local ARM lowering stack. The current working
-configuration expects concordant commits in these companion repos:
+RETAB runs on stock ExecuTorch; no ExecuTorch fork is required. The tested
+Python stack is:
 
-| Repo | Branch | Commit | Why it is needed |
-| --- | --- | --- | --- |
-| [`apullin/executorch`](https://github.com/apullin/executorch) | `et-python-fastpaths` | `dac215665` | Provides the pluggable ExecuTorch ARM preprocess and Edge manager seams that let RETAB replace `TOSABackend._preprocess`. |
-| [`apullin/tosa-rs`](https://github.com/apullin/tosa-rs) | `master` | `de6e6b0` | Provides the Rust TOSA FlatBuffers serialization/deserialization API used by RETAB's serializer. RETAB builds against the vendored copy at `../vendor/tosa-rs`. |
-| [`apullin/ethos-u-vela`](https://github.com/apullin/ethos-u-vela) | `retab-regor-opt-5.1.0-curated` | `d45b6236` | Optional for RETAB unit builds, but this is the current downstream Vela/Regor branch used for end-to-end `.pte` generation and optimization experiments. |
+| Component | Version |
+| --- | --- |
+| ExecuTorch | Wheel `1.6.0`, upstream tag `v1.6.0-rc4`, commit `4776f71b6` |
+| torch | `2.15.0` |
+| torchvision | `0.29.2` |
+| torchao | `0.18.0` (the tested environment uses `0.18.0+cpu`) |
+| ethos-u-vela | `5.2.0` from PyPI |
+| tosa-tools | `2026.5.0` |
+| flatbuffers (Python) | `25.2.10` |
 
-Treat this as a pinned toolchain, not as independent rolling dependencies. If
-one of these repos moves, rebuild RETAB and re-run the validation matrix before
-advancing the pins. The longer compatibility map is in
-[docs/COMPANION_REPOS.md](docs/COMPANION_REPOS.md).
+Cargo still uses the local `tosa-rs` dependency at
+`$RETAB_ROOT/../vendor/tosa-rs`. Its build requires `flatc` >= 25. The Rust
+FlatBuffers runtime is locked separately in `Cargo.lock`; the Python package
+version above is not a Rust dependency pin. See
+[docs/COMPANION_REPOS.md](docs/COMPANION_REPOS.md) and
+[compat/executorch.toml](compat/executorch.toml) for compatibility details.
 
-## What it replaces
+## Integration and scope
 
+```text
+torch.export -> quantize -> Arm partitioner -> TOSABackend._preprocess
+                                                | RETAB: Rust passes + TOSA
+                                                v
+                                             Vela -> .pte
 ```
-ExecuTorch ARM pipeline:
-  torch.export → quantize → partition → [TOSABackend._preprocess] → Vela → .pte
-                                         ^^^^^^^^^^^^^^^^^^^^^^^^
-                                         RETAB replaces this step
-```
 
-The `_preprocess` step runs ~30 graph transformation passes and serializes
-to TOSA FlatBuffers. RETAB reimplements both in Rust (24k lines) with a
-Python orchestration layer (7k lines).
+[python/retab/preprocess.py](python/retab/preprocess.py) replaces
+`TOSABackend._preprocess` at runtime and preserves the stock implementation
+for fallback and restoration. Optional fork override hooks are used when
+present. Activation also installs guarded decomposition fast paths from
+`_decomp_hooks.py` against available ExecuTorch and torch helpers.
 
-## Validation
+RETAB handles TOSA 1.0 INT graphs with the target's default pass pipeline.
+It hands these cases to stock preprocessing:
 
-The maintained local validation contract is:
+- float profiles;
+- TOSA versions whose major/minor version is not 1.0;
+- TOSA development mode;
+- custom pass pipeline configurations;
+- registered pass insertions;
+- delegate-owned mutable buffers;
+- symbolic tensor shapes.
 
-- artifact comparison against the Python reference path
-- optional semantic comparison through the TOSA reference model
-- full Docker-backed direct ARM acceptance in ExecuTorch
-
-See [docs/FASTLANE_WORKFLOW.md](docs/FASTLANE_WORKFLOW.md) for the exact
-commands and current expected acceptance result.
+`retab.preprocess.preprocess_stats()` reports RETAB calls and stock fallback
+counts by reason in the current process.
 
 ## Quick start
 
 ### Prerequisites
 
-- Rust toolchain (stable)
-- Python >= 3.10
-- [`uv`](https://docs.astral.sh/uv/)
-- a seam-enabled ExecuTorch checkout with the required RETAB hook points
-  (see [compat/executorch.toml](compat/executorch.toml))
-- the companion repository set described in
-  [docs/COMPANION_REPOS.md](docs/COMPANION_REPOS.md)
+- A stable Rust toolchain.
+- Python >= 3.10; the tested environment uses Python 3.12.
+- [uv](https://docs.astral.sh/uv/).
+- The `tosa-rs` tree required by Cargo, including the compatibility patch
+  described in [docs/VENDOR_PATCHES.md](docs/VENDOR_PATCHES.md).
+- `flatc` >= 25. On macOS, Homebrew's `flatc` must come first on `PATH`;
+  conda's `flatc` 24 breaks `tosa-rs` code generation.
 
-### Bootstrap a dedicated UV environment
-
-Use RETAB in its own virtual environment. Do not rely on the user's base
-Python install.
+### Create an environment explicitly
 
 ```bash
 git clone https://github.com/apullin/retab.git
 cd retab
-./scripts/bootstrap_uv.sh --source /path/to/executorch
+export RETAB_ROOT="$PWD"
+export VENV="$RETAB_ROOT/.venv"
+export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$PATH"
+
+uv venv --python 3.12 "$VENV"
+uv pip install --python "$VENV/bin/python" \
+  "executorch==1.6.0" "torch==2.15.0" "torchvision==0.29.2" \
+  "torchao==0.18.0" "ethos-u-vela==5.2.0" \
+  "tosa-tools==2026.5.0" "flatbuffers==25.2.10" maturin pytest
 ```
 
-This will:
+An ExecuTorch source overlay is unnecessary for this wheel-based setup.
+The existing source-checkout installer is a separate workflow; see
+[docs/COMPANION_REPOS.md](docs/COMPANION_REPOS.md).
 
-- create `.venv/`
-- install the Torch stack into that environment
-- install ExecuTorch's Python dependencies and expose the source checkout via a
-  `.pth` overlay
-- build RETAB with `maturin develop --release`
-- run a smoke lowering pass
-
-### Build only
-
-If the environment already exists and ExecuTorch is already installed:
+### Build and test
 
 ```bash
-./scripts/build_retab.sh
+cd "$RETAB_ROOT"
+export PYO3_PYTHON="$VENV/bin/python"
+cargo test --lib --locked
+./scripts/build_retab.sh --venv "$VENV"
+PYTHONPATH="$RETAB_ROOT/python" "$VENV/bin/python" -P -m pytest tests
 ```
+
+The build helper requires an existing environment supplied with `--venv` or
+through an activated environment's `VIRTUAL_ENV`. It fails if neither is
+provided and never creates an environment implicitly.
+
+Use `cargo test --lib --locked` for the Rust check and maturin to build the
+extension. `cargo build --lib` alone does not link this `cdylib` correctly.
+`pyo3/extension-module` is enabled only by maturin, so Rust unit tests can link
+to Python normally.
+
+To produce a wheel:
+
+```bash
+"$VENV/bin/maturin" build --release --locked \
+  --interpreter "$VENV/bin/python" --out "$RETAB_ROOT/target/wheels"
+```
+
+Maturin takes the package version from `Cargo.toml`.
+
+`tests/` contains Python integration, placeholder binding, control-flow
+metadata, and CNN lowering smoke tests. Tests requiring the native extension,
+ExecuTorch's Arm backend, or the TOSA reference model skip when those
+components are unavailable.
 
 ### Smoke lower
 
 ```bash
-./scripts/smoke_checkout_build_and_lower.sh
+./scripts/smoke_checkout_build_and_lower.sh --venv "$VENV"
+"$VENV/bin/python" -P examples/lower_with_retab.py --out tmp/tiny_cnn.pte
 ```
-
-### Example lowering script
-
-```bash
-.venv/bin/python examples/lower_with_retab.py --out tmp/tiny_cnn.pte
-```
-
-For highly fragmented multi-delegate lowers, RETAB also exposes an
-experimental parallel backend-preprocess mode:
-
-```bash
-.venv/bin/python examples/lower_with_retab.py \
-  --parallel-backend-preprocess-workers 14 \
-  --out tmp/tiny_cnn.pte
-```
-
-### Benchmark stock ExecuTorch vs RETAB
-
-```bash
-.venv/bin/python scripts/benchmark_stock_vs_retab.py --model mobilenet_v3_small
-```
-
-To benchmark the experimental parallel backend-preprocess path on the RETAB
-side only:
-
-```bash
-.venv/bin/python scripts/benchmark_stock_vs_retab.py \
-  --model densenet121 \
-  --parallel-backend-preprocess-workers 14
-```
-
-This runs the same prepared quantized model through:
-
-- stock ExecuTorch Arm lowering
-- RETAB-activated lowering
-
-and reports median lower time plus final `.pte` SHA-256 hashes.
-
-The stock-vs-RETAB benchmark currently expects an environment with the native
-`tosa_serializer` package available for the stock ExecuTorch Arm path.
-
-### Run the test suite
-
-```bash
-# From the executorch directory:
-EXECUTORCH_ARM_DOCKER_IMAGE_TAG=arm-baremetal:latest \
-SCCACHE_DISABLE=1 \
-  ./.ci/scripts/run-arm-baremetal-docker-local.sh test_pytest_ops_tosa_direct_lower
-```
-
-For the current direct fast-lane development workflow, including model probes
-and artifact checks, see [docs/FASTLANE_WORKFLOW.md](docs/FASTLANE_WORKFLOW.md).
 
 ### Python API
 
 ```python
 from retab.integration.executorch_arm import activated
+from retab.preprocess import preprocess_stats
 
 with activated():
-    # ... run ExecuTorch ARM lowering as usual ...
-    # RETAB is now active for all TOSA generation
+    # Run ExecuTorch Arm lowering as usual.
     ...
+
+print(preprocess_stats())
 ```
 
-The same API exposes the experimental multi-process backend-preprocess path:
+`install()` and `uninstall()` provide the same integration without a context
+manager. Nested activation restores the stock backend when the outermost
+activation exits.
 
-```python
-with activated(parallel_backend_preprocess_workers=14):
-    ...
-```
+By default only `TOSABackend._preprocess` is replaced. `activated(fast_paths=True)`
+also installs RETAB's edge-manager and `run_decompositions` fast paths, which
+speed up the rest of `to_edge_transform_and_lower` but have no test coverage on
+rc4 yet.
 
-Keep that opt-in. It is useful for heavily fragmented lowers with many
-delegates, but it is not a universal win on already-clean single-delegate
-graphs.
+For fragmented graphs, an experimental multi-process backend preprocessing
+mode is available through `activated(parallel_backend_preprocess_workers=8)`
+or `RETAB_PARALLEL_BACKEND_PREPROCESS_WORKERS`. It is opt-in and returns to
+serial execution for debug artifact dumps or when fork multiprocessing is
+unavailable. Counters remain process-local.
+
+[docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) documents all environment reads,
+including legacy aliases and settings that are dormant on stock rc4.
+
+## Validation
+
+Benchmarks, the stock-versus-RETAB differential harness, and the model corpus
+are kept separately in a private repository.
 
 ## Architecture
 
-```
+```text
 retab/
-├── src/                          # Rust (24k lines)
-│   ├── fx_*.rs                   # 47 FX graph passes (via PyO3)
-│   ├── serialize/visitors/       # 107 TOSA op emitters
-│   ├── serialize/mod.rs          # TOSA flatbuffer serialization
-│   └── ingest/                   # FX graph → Rust IR conversion
-├── python/retab/                 # Python integration seam
-│   ├── preprocess.py             # Main pipeline orchestration
-│   ├── _cf_ctx.py                # Control-flow delegate metadata reads
-│   └── _decomp_hooks.py          # Edge decomposition fast paths
-└── tests/
-    ├── fuzz_models.py            # Random CNN generator + validation
-    └── compare_pipelines.py      # Python-vs-Rust exact match test
+├── src/
+│   ├── lib.rs                   # PyO3 entry points and stashed IR hierarchy
+│   ├── fx_ir.rs                 # Mutable rewrite graph and pass runner
+│   ├── fx_meta.rs               # Tensor, quantization, and layout metadata
+│   ├── fx_pipeline.rs           # Ordered parent and submodule pipelines
+│   ├── fx_*_ir.rs               # Rust graph transformation passes
+│   ├── control_flow/            # Region assembly and boundary contracts
+│   ├── ingest/                  # Rewrite IR to serializer graph conversion
+│   └── serialize/               # TOSA visitors and flatbuffer assembly
+├── python/retab/
+│   ├── integration/             # Stable ExecuTorch install/activation API
+│   ├── preprocess.py            # Backend scope, orchestration, and counters
+│   ├── _cf_ctx.py               # Delegate metadata reads
+│   └── _decomp_hooks.py          # Guarded decomposition fast paths
+├── compat/executorch.toml       # Tested stock stack and optional hooks
+└── tests/                       # Python integration tests and rc4 inventories
 ```
 
-### Key abstractions
+`IrGraph`, `IrPass` / `EffectfulIrPass`, and `IrRewriteCursor` implement graph
+rewrites. `NodeMeta` and `TensorMetaStamp` carry tensor facts. The serializer
+uses a typed `OpTarget`, `EmitContext`, and an emitter dispatch table.
 
-- **`FxDecomposer`** — typed DSL for FX graph decompositions (25+ ops)
-- **`NodeInserter`** — fluent builder for FX node creation
-- **`fx_pass!`** — macro generating FX pass boilerplate (19/35 passes)
-- **`EmitContext`** — rich context for TOSA op emitters (14 accessors)
-- **`register_unary!/binary!`** — data-driven emitter dispatch tables
+See [docs/rust_lowering_architecture.md](docs/rust_lowering_architecture.md)
+for the current implementation map. Earlier design notes are under
+[docs/history/](docs/history/). The old direct-lowering lane remains recorded
+in [docs/FASTLANE_WORKFLOW.md](docs/FASTLANE_WORKFLOW.md).
 
 ## License
 

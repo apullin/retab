@@ -69,6 +69,9 @@ fn reduction_pre_reshape_perms(
     let remaining_axes: Vec<usize> = (0..input_rank)
         .filter(|axis| !reduced_axes.contains(axis))
         .collect();
+    if remaining_axes.is_empty() {
+        return None;
+    }
     let mut desired_axes: Vec<usize> = output_order
         .iter()
         .filter_map(|&output_axis| remaining_axes.get(output_axis).copied())

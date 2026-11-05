@@ -17,6 +17,11 @@ pub(crate) struct ReductionDomain {
 }
 
 impl ReductionDomain {
+    pub(crate) fn for_sum(input_shape: Vec<i64>, dim_arg: Option<&IrArg>, keepdim: bool) -> Self {
+        let dim_arg = dim_arg.filter(|arg| !arg.as_int_list().is_some_and(|dims| dims.is_empty()));
+        Self::from_arg(input_shape, dim_arg, keepdim, false, None)
+    }
+
     pub(crate) fn from_arg(
         input_shape: Vec<i64>,
         dim_arg: Option<&IrArg>,
@@ -85,43 +90,13 @@ impl ReductionDomain {
             .product()
     }
 
-    pub(crate) fn spatial_avg_pool_kernel_4d(&self) -> Option<Vec<i64>> {
-        if self.input_shape.len() != 4 || !self.dims.iter().all(|&dim| dim == 2 || dim == 3) {
-            return None;
-        }
-
-        match self.dims.as_slice() {
-            [2, 3] => Some(vec![self.input_shape[2], self.input_shape[3]]),
-            [2] => Some(vec![self.input_shape[2], 1]),
-            [3] => Some(vec![1, self.input_shape[3]]),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn avg_pool_output_shape(&self, kernel: &[i64]) -> Vec<i64> {
-        vec![
-            self.input_shape[0],
-            self.input_shape[1],
-            1i64.max(self.input_shape[2] / kernel[0].max(1)),
-            1i64.max(self.input_shape[3] / kernel[1].max(1)),
-        ]
-    }
-
-    pub(crate) fn chained_single_axis_steps(&self) -> Vec<ReductionStep> {
-        let mut dims = self.dims_i64();
-        dims.sort_unstable_by(|lhs, rhs| rhs.cmp(lhs));
-
+    pub(crate) fn keepdim_single_axis_steps(&self) -> Vec<ReductionStep> {
         let mut current_shape = self.input_shape.clone();
-        dims.into_iter()
+        self.dims_i64()
+            .into_iter()
             .map(|dim| {
-                let rank = current_shape.len();
-                let normalized_dim = (dim as usize) % rank;
                 let mut output_shape = current_shape.clone();
-                if self.keepdim {
-                    output_shape[normalized_dim] = 1;
-                } else {
-                    output_shape.remove(normalized_dim);
-                }
+                output_shape[dim as usize] = 1;
                 current_shape = output_shape.clone();
                 ReductionStep { dim, output_shape }
             })
@@ -295,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn reduction_domain_builds_descending_chained_steps() {
+    fn sum_domain_preserves_rank_between_reductions() {
         let domain = ReductionDomain::from_arg(
             vec![2, 3, 4, 5],
             Some(&IrArg::List(vec![IrArg::Int(1), IrArg::Int(3)])),
@@ -303,21 +278,28 @@ mod tests {
             false,
             None,
         );
-        let steps = domain.chained_single_axis_steps();
+        let steps = domain.keepdim_single_axis_steps();
 
         assert_eq!(
             steps,
             vec![
                 ReductionStep {
-                    dim: 3,
-                    output_shape: vec![2, 3, 4],
+                    dim: 1,
+                    output_shape: vec![2, 1, 4, 5],
                 },
                 ReductionStep {
-                    dim: 1,
-                    output_shape: vec![2, 4],
+                    dim: 3,
+                    output_shape: vec![2, 1, 4, 1],
                 },
             ]
         );
+    }
+
+    #[test]
+    fn sum_domain_treats_empty_dims_as_all_dimensions() {
+        let domain = ReductionDomain::for_sum(vec![2, 3, 4], Some(&IrArg::List(vec![])), false);
+        assert_eq!(domain.dims_i64(), vec![0, 1, 2]);
+        assert_eq!(domain.element_count_min_one_i64(), 24);
     }
 
     #[test]
