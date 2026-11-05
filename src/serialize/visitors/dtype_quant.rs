@@ -471,6 +471,8 @@ mod tests {
     }
 
     #[test]
+    // 0.7071 is an arbitrary scale near the rounding boundary, not 1/sqrt(2).
+    #[allow(clippy::approx_constant)]
     fn multiplier_and_shift_match_upstream() {
         for scale in [
             0.0, 1e-12, 3.1e-7, 0.000123, 0.00390625, 0.0213, 0.25, 0.4999999, 0.5, 0.7071,
