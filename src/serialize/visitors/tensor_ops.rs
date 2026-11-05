@@ -25,6 +25,7 @@ pub fn register(table: &mut EmitterTable) {
         (OpTarget::UpsampleNearest2d, emit_resize),
         (OpTarget::UpsampleBilinear2d, emit_resize),
         (OpTarget::Cat, emit_concat),
+        (OpTarget::Flip, emit_flip),
         (OpTarget::Zeros, emit_full),
     ]);
 }
@@ -935,6 +936,32 @@ pub(super) fn emit_reshape(ctx: &EmitContext) -> EmitResult {
         Op::Reshape,
         Attribute::Reshape(ReshapeAttribute {}),
         reshape_inputs,
+    );
+    result
+}
+
+/// Single-axis `aten.flip` -> TOSA REVERSE (upstream FlipVisitor). Multi-axis flips
+/// are split into a chain of single-axis flips by `IrDecomposeFlipPass`.
+pub(super) fn emit_flip(ctx: &EmitContext) -> EmitResult {
+    let node = ctx.node;
+    let dims: Vec<i64> = match node.args.get(1) {
+        Some(Arg::IntList(dims)) => dims.to_vec(),
+        Some(Arg::Int(dim)) => vec![*dim],
+        _ => vec![],
+    };
+    let [dim] = dims.as_slice() else {
+        panic!(
+            "emit_flip: '{}' expects exactly one flip dim after IrDecomposeFlipPass, got {:?}",
+            node.name, dims
+        );
+    };
+    let axis = map_axis_to_tosa_dim_order(ctx.graph, node, *dim as i32);
+    let mut result = EmitResult::default();
+    result.push_output_op(
+        make_output_tensor(node),
+        Op::Reverse,
+        Attribute::Reverse(ReverseAttribute { axis }),
+        ctx.input_names(),
     );
     result
 }

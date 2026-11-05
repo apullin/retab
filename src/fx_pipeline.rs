@@ -46,6 +46,8 @@ pub fn build_hybrid_pipeline(
         Ir(Box::new(crate::fx_decompose_var_ir::IrDecomposeVarPass)),
         // -- Fold Q/DQ + rescale --
         Ir(Box::new(crate::fx_fold_qdq_ir::IrFoldQdqPass)),
+        Ir(Box::new(crate::fx_decompose_flip_ir::IrDecomposeFlipPass)),
+        Ir(Box::new(crate::fx_decompose_roll_ir::IrDecomposeRollPass)),
         Ir(Box::new(
             crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass,
         )),
@@ -103,6 +105,9 @@ pub fn build_hybrid_pipeline(
         Ir(Box::new(
             fx_replace_scalar_with_tensor_ir::IrReplaceScalarWithTensorPass,
         )),
+        Ir(Box::new(
+            crate::fx_decompose_div_tensor_mode_ir::IrDecomposeDivTensorModePass,
+        )),
         Ir(Box::new(fx_decompose_addmm_ir::IrDecomposeAddmmPass)),
         Ir(Box::new(fx_decompose_cumsum_ir::IrDecomposeCumsumPass)),
         Ir(Box::new(
@@ -132,6 +137,9 @@ pub fn build_hybrid_pipeline(
         )),
         Ir(Box::new(
             crate::fx_decompose_avgpool_pad_ir::IrDecomposeAvgPoolPadPass,
+        )),
+        Ir(Box::new(
+            crate::fx_normalize_maxpool_rank_ir::IrNormalizeMaxPool2dInputRankPass,
         )),
         Ir(Box::new(
             crate::fx_decompose_maxpool_dilation_ir::IrDecomposeMaxPoolDilationPass,
@@ -215,12 +223,22 @@ fn rescale_steps() -> Vec<crate::fx_ir::PipelineStep> {
     ]
 }
 
+/// Submodule counterparts of main-pipeline decompositions that control-flow bodies
+/// also need (upstream runs its full backend pipeline on cond/while submodules).
+fn submodule_decompositions() -> Vec<crate::fx_ir::PipelineStep> {
+    use crate::fx_ir::PipelineStep::Ir;
+    vec![Ir(Box::new(
+        crate::fx_conv1d_unsqueeze_ir::IrConv1dUnsqueezePass,
+    ))]
+}
+
 fn submodule_fold_and_fuse() -> Vec<crate::fx_ir::PipelineStep> {
     use crate::fx_ir::PipelineStep::{Effectful, Ir};
     vec![
         Effectful(Box::new(
             crate::fx_insert_table_ops_ir::IrInsertTableOpsEffectPass,
         )),
+        Ir(Box::new(fx_convert_full_like_ir::IrConvertFullLikePass)),
         Effectful(Box::new(
             crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass,
         )),
@@ -242,6 +260,7 @@ pub fn build_ir_while_submodule_pipeline() -> Vec<crate::fx_ir::PipelineStep> {
             crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass,
         )),
     ];
+    steps.extend(submodule_decompositions());
     steps.extend(rescale_steps());
     steps.extend(submodule_fold_and_fuse());
     steps.push(Ir(Box::new(
@@ -262,6 +281,7 @@ pub fn build_ir_cond_submodule_pipeline() -> Vec<crate::fx_ir::PipelineStep> {
             crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass,
         )),
     ];
+    steps.extend(submodule_decompositions());
     steps.extend(rescale_steps());
     steps.extend(submodule_fold_and_fuse());
     steps.push(Ir(Box::new(
@@ -269,6 +289,9 @@ pub fn build_ir_cond_submodule_pipeline() -> Vec<crate::fx_ir::PipelineStep> {
     )));
     steps.push(Ir(Box::new(
         crate::fx_memory_format_ir::IrToTosaMemoryFormatPass,
+    )));
+    steps.push(Ir(Box::new(
+        crate::fx_insert_conv_rescale_ir::IrInsertConvAccumulatorRescalePass,
     )));
     steps
 }

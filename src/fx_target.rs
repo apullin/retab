@@ -39,6 +39,8 @@ pub(crate) enum TableOpTargetKind {
     Gelu,
     PowTensorScalar,
     RemainderScalar,
+    LeakyRelu,
+    Softplus,
     Elu(EluTargetKind),
 }
 
@@ -152,7 +154,8 @@ pub(crate) fn classify_ir_target(target: &str) -> IrTargetKind {
     if target.contains("linear.default") {
         return IrTargetKind::AtenLinear;
     }
-    if target.contains("relu.default") {
+    // Exact match: a substring test would also claim aten.leaky_relu.default.
+    if target == "aten.relu.default" {
         return IrTargetKind::AtenRelu;
     }
     if target.contains("hardtanh.default") {
@@ -249,6 +252,9 @@ const SIMPLE_TABLE_TARGET_RULES: &[(&str, &str)] = &[
 ];
 
 pub(crate) fn table_op_target_kind(target: &str) -> Option<TableOpTargetKind> {
+    if target == "aten.softplus.default" {
+        return Some(TableOpTargetKind::Softplus);
+    }
     if target.contains("gelu.default") {
         return Some(TableOpTargetKind::Gelu);
     }
@@ -264,20 +270,25 @@ pub(crate) fn table_op_target_kind(target: &str) -> Option<TableOpTargetKind> {
     if target.contains("remainder.Scalar") {
         return Some(TableOpTargetKind::RemainderScalar);
     }
+    if target == "aten.leaky_relu.default" {
+        return Some(TableOpTargetKind::LeakyRelu);
+    }
     if let Some(kind) = elu_target_kind(target) {
         return Some(TableOpTargetKind::Elu(kind));
     }
     None
 }
 
+/// Anchored on the "aten." prefix: a bare "elu.default" test also matches relu,
+/// leaky_relu and gelu.
 pub(crate) fn elu_target_kind(target: &str) -> Option<EluTargetKind> {
-    if target.contains("selu.") {
+    if contains_any!(target, "aten.selu.", "aten.selu_.") {
         return Some(EluTargetKind::Selu);
     }
-    if target.contains("celu.") {
+    if contains_any!(target, "aten.celu.", "aten.celu_.") {
         return Some(EluTargetKind::Celu);
     }
-    if target.contains("elu.default") || target.contains("elu_") {
+    if contains_any!(target, "aten.elu.", "aten.elu_.") {
         return Some(EluTargetKind::Elu);
     }
     None
@@ -727,6 +738,8 @@ mod tests {
             classify_ir_target,
             &[
                 ("aten.relu.default", IrTargetKind::AtenRelu),
+                ("aten.leaky_relu.default", IrTargetKind::Other),
+                ("aten.relu_.default", IrTargetKind::Other),
                 ("aten.hardtanh.default", IrTargetKind::AtenHardtanh),
                 ("aten.convolution.default", IrTargetKind::AtenConv),
                 ("aten.linear.default", IrTargetKind::AtenLinear),
@@ -845,6 +858,12 @@ mod tests {
                     "aten.celu.default",
                     Some(TableOpTargetKind::Elu(EluTargetKind::Celu)),
                 ),
+                (
+                    "aten.leaky_relu.default",
+                    Some(TableOpTargetKind::LeakyRelu),
+                ),
+                ("aten.softplus.default", Some(TableOpTargetKind::Softplus)),
+                ("aten.relu.default", None),
                 ("aten.add.Tensor", None),
             ],
         );

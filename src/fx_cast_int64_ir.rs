@@ -61,6 +61,21 @@ impl EffectfulIrPass for IrCastInt64ToInt32EffectPass {
             modified = true;
         }
 
+        // Bounded index sources (upstream ConvertInt64OutputOpsToInt32): TOSA ARGMAX
+        // already yields INT32, so a following int32 dim-order copy becomes a no-op.
+        for node_id in graph.live_call_function_ids() {
+            let node = graph.node(node_id);
+            if node.target == "aten.argmax.default"
+                && node.meta.val_dtype() == Some("torch.int64")
+            {
+                graph
+                    .node_mut(node_id)
+                    .meta
+                    .set_val_dtype_for_existing_shape("torch.int32");
+                modified = true;
+            }
+        }
+
         EffectfulIrPassResult { modified, effects }
     }
 }

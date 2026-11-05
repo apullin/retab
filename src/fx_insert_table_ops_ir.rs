@@ -35,6 +35,17 @@ impl TableOpSpec {
         }
     }
 
+    /// softplus(x, beta, threshold) (upstream PR #23522): beta in `scalar_arg`,
+    /// threshold in `scale`.
+    fn softplus(beta: f64, threshold: f64) -> Self {
+        Self {
+            kind: "softplus",
+            scalar_arg: Some(beta),
+            scale: Some(threshold),
+            input_scale: None,
+        }
+    }
+
     fn elu(alpha: f64, scale: f64, input_scale: f64) -> Self {
         Self {
             kind: "elu",
@@ -59,6 +70,16 @@ fn table_op_spec(node: &IrNode) -> Option<TableOpSpec> {
         TableOpTargetKind::RemainderScalar => node
             .arg_numeric_f64(1)
             .map(|arg| TableOpSpec::scalar("remainder", arg)),
+        TableOpTargetKind::Softplus => Some(TableOpSpec::softplus(
+            node.arg_or_kwarg_numeric_f64(1, "beta").unwrap_or(1.0),
+            node.arg_or_kwarg_numeric_f64(2, "threshold")
+                .unwrap_or(20.0),
+        )),
+        TableOpTargetKind::LeakyRelu => Some(TableOpSpec::scalar(
+            "leaky_relu",
+            node.arg_or_kwarg_numeric_f64(1, "negative_slope")
+                .unwrap_or(0.01),
+        )),
         TableOpTargetKind::Elu(kind) => Some(elu_table_op_spec(node, kind)),
     }
 }
@@ -228,6 +249,19 @@ fn eval_precomputable_table(spec: &TableOpSpec, x: f64) -> Option<f64> {
                 alpha * (input_scale * x).exp_m1()
             };
             Some(scale * selected)
+        }
+        "softplus" => {
+            let (beta, threshold) = (spec.scalar_arg?, spec.scale?);
+            // torch.nn.functional.softplus: linear above the threshold.
+            Some(if beta * x > threshold {
+                x
+            } else {
+                (beta * x).exp().ln_1p() / beta
+            })
+        }
+        "leaky_relu" => {
+            let negative_slope = spec.scalar_arg?;
+            Some(if x > 0.0 { x } else { x * negative_slope })
         }
         "remainder" => {
             let divisor = spec.scalar_arg?;

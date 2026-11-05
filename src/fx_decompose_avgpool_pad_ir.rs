@@ -21,11 +21,14 @@ fn adjust_pooling_pad_if_needed(
     ceil_mode: bool,
 ) -> i64 {
     let numerator = input_size - kernel_size + 2 * pad;
-    let output_size = if ceil_mode {
+    let mut output_size = if ceil_mode {
         (numerator + stride - 1).div_euclid(stride) + 1
     } else {
         numerator.div_euclid(stride) + 1
     };
+    if ceil_mode && (output_size - 1) * stride >= input_size + pad {
+        output_size -= 1;
+    }
     (output_size - 1) * stride - input_size + kernel_size - pad
 }
 
@@ -40,12 +43,12 @@ fn compute_post_pad(
     if pad == 0 {
         return pad;
     }
-    if ceil_mode && divisor_override.is_none() {
+    let adjusted = adjust_pooling_pad_if_needed(input_size, kernel_size, stride, pad, ceil_mode);
+    if ceil_mode && divisor_override.is_none() && adjusted > pad {
         return pad;
     }
 
-    let adjusted = adjust_pooling_pad_if_needed(input_size, kernel_size, stride, pad, ceil_mode);
-    if adjusted > 0 {
+    if adjusted >= 0 {
         adjusted
     } else {
         pad
@@ -229,5 +232,67 @@ impl IrPass for IrDecomposeAvgPoolPadPass {
             ));
         }
         modified
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fx_ir::IrPass;
+    use crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass;
+    use crate::fx_target::is_slice_copy_tensor_target;
+    use crate::test_ir::{call, f32_placeholder, live_node, output};
+
+    #[test]
+    fn adjust_applies_ceil_drop_rule() {
+        assert_eq!(adjust_pooling_pad_if_needed(5, 2, 2, 1, true), 0);
+    }
+
+    #[test]
+    fn floor_post_pad_is_zero_when_adjusted_pad_vanishes() {
+        assert_eq!(compute_post_pad(8, 3, 2, 1, false, None), 0);
+    }
+
+    #[test]
+    fn ceil_post_pad_without_divisor_uses_smaller_adjusted_pad() {
+        assert_eq!(compute_post_pad(5, 3, 3, 1, true, None), 0);
+    }
+
+    #[test]
+    fn floor_avgpool_pads_pre_only_and_needs_no_slice() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [1, 1, 8, 8]);
+        let pool = call(
+            &mut graph,
+            "avg",
+            "aten.avg_pool2d.default",
+            vec![
+                IrArg::Node(x),
+                i64_list(&[3, 3]),
+                i64_list(&[2, 2]),
+                i64_list(&[1, 1]),
+                IrArg::Bool(false),
+                IrArg::Bool(true),
+            ],
+            [1, 1, 4, 4],
+            "torch.float32",
+        );
+        output(&mut graph, pool);
+
+        assert!(IrDecomposeAvgPoolPadPass.run(&mut graph));
+        let unpadded = live_node(&graph, "avg_unpadded");
+        let padded_in = unpadded.args[0].as_node().expect("pooled input");
+        assert_eq!(
+            graph.node_shape_vec(padded_in),
+            Some(vec![1, 1, 9, 9])
+        );
+
+        assert!(!IrSizeAdjustInputPass.run(&mut graph));
+        assert!(
+            !graph
+                .nodes
+                .iter()
+                .any(|n| n.alive && is_slice_copy_tensor_target(&n.target))
+        );
     }
 }

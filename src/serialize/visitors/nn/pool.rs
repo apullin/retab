@@ -127,8 +127,17 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
         }
     };
     let output_tensor = compute_pool_nhwc_output(graph, store, node, &kernel, &stride, &pad);
-    let input_zp = node_input_zero_point(graph, node, 0, "input_zp", 0);
-    let output_zp = node_output_zero_point(node, "output_zp", 0);
+    // rc4's RewriteAvgPool2dPass materializes both zero points with
+    // `call_scalar(zp, meta)`. The `full` node inherits the avg-pool meta, output_qparams
+    // included, so ComputeConstantOpsAOTPass quantizes the zero point as if it were a real
+    // value (a negative zp usually saturates to qmin). Both operands get the same
+    // treatment and AVG_POOL2D is linear in them, so only the rounding changes; mirror it
+    // for numeric parity with stock.
+    let input_zp =
+        quantize_fill_value(node, node_input_zero_point(graph, node, 0, "input_zp", 0) as f64)
+            as i32;
+    let output_zp =
+        quantize_fill_value(node, node_output_zero_point(node, "output_zp", 0) as f64) as i32;
     let input_dtype = first_input_node(graph, node)
         .map(|input_node| ir_dtype_to_tosa(input_node.meta.val.dtype))
         .unwrap_or(DType::Int8);

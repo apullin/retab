@@ -324,11 +324,14 @@ pub(super) fn pool_post_pad(
     ceil_mode: bool,
 ) -> i32 {
     let numer = input_size - kernel_size + 2 * pad;
-    let output_size = if ceil_mode {
+    let mut output_size = if ceil_mode {
         ((numer + stride - 1) / stride) + 1
     } else {
         (numer / stride) + 1
     };
+    if ceil_mode && (output_size - 1) * stride >= input_size + pad {
+        output_size -= 1;
+    }
     ((output_size - 1) * stride - input_size + kernel_size - pad).max(0)
 }
 
@@ -668,6 +671,24 @@ mod tests {
 
     fn meta(shape: &[i64], dtype: DType) -> NodeMeta {
         NodeMeta::new(TensorInfo::new(shape, dtype))
+    }
+
+    #[test]
+    fn ceil_pool_drops_window_starting_inside_padding() {
+        // k=2 s=2 p=1 on H=5: naive ceil gives 4 windows, but the last
+        // would start at 6 >= 5 + 1, so it is dropped -> 3 rows.
+        assert_eq!(pool_post_pad(5, 2, 2, 1, true), 0);
+        let pad = adjusted_max_pool_pad(&[1, 5, 5, 1], &[2, 2], &[2, 2], &[1, 1], true);
+        assert_eq!(pad, vec![1, 0, 1, 0]);
+        assert_eq!(
+            pool_nhwc_shape(&[1, 5, 5, 1], &[2, 2], &[2, 2], &pad),
+            Some(vec![1, 3, 3, 1])
+        );
+    }
+
+    #[test]
+    fn floor_pool_post_pad_is_zero_when_windows_fit_exactly() {
+        assert_eq!(pool_post_pad(8, 3, 2, 1, false), 0);
     }
 
     #[test]

@@ -7,9 +7,14 @@
 //!   replicate: left=slice@0,           right=slice@(size-1)
 //!   circular:  left=slice@(size-left+i),right=slice@i
 //!   reflect:   left=slice@(left-i),     right=slice@(size-2-i)
-//! Constant-mode pad is left to the serializer's existing handling.
+//! Negative padding crops (upstream PRs #24108 / #24084): constant mode crops with a
+//! `slice_copy` and keeps the non-negative remainder on the PAD node, which the
+//! serializer emits as TOSA PAD; reflect/replicate pad from the original borders and
+//! then crop; circular crops and then wraps the cropped input.
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, IrRewriteCursor, NodeId, TensorMetaStamp};
+use crate::fx_ir::{
+    i64_list_arg, IrArg, IrGraph, IrPass, IrRewriteCursor, NodeId, TensorMetaStamp,
+};
 use crate::fx_target::is_pad_target;
 use crate::runner_logging::log_line;
 
@@ -107,6 +112,59 @@ fn pad_along_dim(
     (cat, out_shape)
 }
 
+/// Crop `x` along `dim` by the negative parts of (left, right); returns (new node,
+/// new shape). Negative padding removes elements, which TOSA PAD cannot express.
+#[allow(clippy::too_many_arguments)]
+fn crop_along_dim(
+    cursor: &mut IrRewriteCursor<'_>,
+    meta: &TensorMetaStamp<'_>,
+    name_prefix: &str,
+    counter: &mut usize,
+    x_id: NodeId,
+    x_shape: &[i64],
+    dim: usize,
+    left: i64,
+    right: i64,
+) -> (NodeId, Vec<i64>) {
+    if left >= 0 && right >= 0 {
+        return (x_id, x_shape.to_vec());
+    }
+    let start = (-left).max(0);
+    let end = x_shape[dim] + right.min(0);
+    let mut out_shape = x_shape.to_vec();
+    out_shape[dim] = end - start;
+    let cropped = cursor.slice_copy(
+        format!("{}_crop{}", name_prefix, *counter),
+        x_id,
+        dim as i64,
+        start,
+        end,
+        None,
+        meta.preserve_qparams(out_shape.clone()),
+    );
+    *counter += 1;
+    (cropped, out_shape)
+}
+
+/// False if (left, right) cannot be lowered along a dim of `size`. Checked in the
+/// same order the rewrite applies padding and cropping for each mode.
+fn pad_pair_supported(mode: &str, size: i64, left: i64, right: i64) -> bool {
+    let (pad_left, pad_right) = (left.max(0), right.max(0));
+    let (crop_left, crop_right) = ((-left).max(0), (-right).max(0));
+    match mode {
+        // Pad from the original borders first, then crop the padded tensor.
+        "reflect" | "replicate" => {
+            let reflect_ok = mode != "reflect" || (pad_left < size && pad_right < size);
+            reflect_ok && size + pad_left + pad_right - crop_left - crop_right > 0
+        }
+        // Crop first; circular then wraps the cropped input.
+        _ => {
+            let cropped = size - crop_left - crop_right;
+            cropped > 0 && (mode != "circular" || (pad_left <= cropped && pad_right <= cropped))
+        }
+    }
+}
+
 fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     let node = &graph.nodes[id];
     if !is_pad_target(&node.target) || node.args.len() < 2 {
@@ -117,8 +175,11 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
         .arg_or_kwarg_str(2, "mode")
         .unwrap_or("constant")
         .to_string();
-    if !matches!(mode.as_str(), "reflect" | "replicate" | "circular") {
-        return false; // constant handled by the serializer
+    if !matches!(
+        mode.as_str(),
+        "constant" | "reflect" | "replicate" | "circular"
+    ) {
+        return false;
     }
     let input_id = match node.args[0].as_node() {
         Some(n) => n,
@@ -128,6 +189,10 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
         Some(p) if p.len() % 2 == 0 => p,
         _ => return false,
     };
+    // A non-negative constant pad is serialized directly as TOSA PAD.
+    if mode == "constant" && pad.iter().all(|&p| p >= 0) {
+        return false;
+    }
     let node_name = node.name.clone();
     let orig_meta = node.meta.clone();
     if orig_meta.val_dtype().is_none() {
@@ -142,11 +207,10 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     if pad.len() / 2 > rank {
         return false;
     }
-    // Validate up front so we never emit a partial chain (reflect requires pad < size).
+    // Validate up front so we never emit a partial chain.
     for (pair_idx, chunk) in pad.chunks(2).enumerate() {
-        let dim = rank - 1 - pair_idx;
-        let size = input_shape[dim];
-        if mode == "reflect" && (chunk[0] >= size || chunk[1] >= size) {
+        let size = input_shape[rank - 1 - pair_idx];
+        if !pad_pair_supported(&mode, size, chunk[0], chunk[1]) {
             return false;
         }
     }
@@ -159,7 +223,30 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     for (pair_idx, chunk) in pad.chunks(2).enumerate() {
         let (left, right) = (chunk[0], chunk[1]);
         let dim = rank - 1 - pair_idx;
-        let (nid, nshape) = pad_along_dim(
+        let pad_dim = |cursor: &mut IrRewriteCursor<'_>,
+                       counter: &mut usize,
+                       x_id: NodeId,
+                       x_shape: &[i64]| {
+            pad_along_dim(
+                cursor,
+                &meta,
+                &node_name,
+                counter,
+                x_id,
+                x_shape,
+                dim,
+                left.max(0),
+                right.max(0),
+                &mode,
+            )
+        };
+        // Reflect and replicate pad from the original borders, then crop. Circular
+        // wraps the cropped input. Constant crops here and leaves the non-negative
+        // remainder on the PAD node.
+        if matches!(mode.as_str(), "reflect" | "replicate") {
+            (cur_id, cur_shape) = pad_dim(&mut cursor, &mut counter, cur_id, &cur_shape);
+        }
+        (cur_id, cur_shape) = crop_along_dim(
             &mut cursor,
             &meta,
             &node_name,
@@ -169,12 +256,20 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
             dim,
             left,
             right,
-            &mode,
         );
-        cur_id = nid;
-        cur_shape = nshape;
+        if mode == "circular" {
+            (cur_id, cur_shape) = pad_dim(&mut cursor, &mut counter, cur_id, &cur_shape);
+        }
     }
 
+    if mode == "constant" {
+        drop(cursor);
+        let mut args = graph.nodes[id].args.clone();
+        args[0] = IrArg::Node(cur_id);
+        args[1] = i64_list_arg(&pad.iter().map(|&p| p.max(0)).collect::<Vec<_>>());
+        graph.set_args(id, args);
+        return true;
+    }
     if cur_id == input_id {
         return false; // nothing emitted (all-zero pad)
     }
@@ -206,6 +301,72 @@ mod tests {
     use crate::fx_ir::i64_list_arg;
     use crate::fx_target::{is_cat_target, is_slice_copy_tensor_target};
     use crate::test_ir::{call, live_node as named, output, placeholder};
+
+    #[test]
+    fn constant_negative_pad_crops_then_keeps_clamped_pad() {
+        // x [1,4,16], pad (-2, 3): crop 2 from the start, then PAD (0, 3).
+        let (mut graph, pad) = pad_graph(&[1, 4, 16], &[-2, 3], "constant");
+        assert!(IrRewritePadPass.run(&mut graph));
+        assert!(graph.nodes[pad].alive);
+        let crop = graph.nodes[pad].arg_node(0).unwrap();
+        assert!(is_slice_copy_tensor_target(&graph.nodes[crop].target));
+        assert_eq!(graph.node_shape_vec(crop), Some(vec![1, 4, 14]));
+        assert_eq!(graph.nodes[crop].arg_int(2), Some(2));
+        assert_eq!(graph.nodes[crop].arg_int(3), Some(16));
+        assert_eq!(graph.nodes[pad].arg_int_list(1), Some(vec![0, 3]));
+    }
+
+    #[test]
+    fn non_negative_constant_pad_is_left_to_the_serializer() {
+        let (mut graph, _) = pad_graph(&[1, 4, 16], &[1, 2], "constant");
+        assert!(!IrRewritePadPass.run(&mut graph));
+    }
+
+    #[test]
+    fn reflect_pads_from_original_borders_then_crops() {
+        // x [1,3,6], reflect pad (3, -2): pad 3 on the left from the original
+        // borders (cat of width 9), then crop 2 from the end -> width 7.
+        let (mut graph, pad) = pad_graph(&[1, 3, 6], &[3, -2], "reflect");
+        assert!(IrRewritePadPass.run(&mut graph));
+        assert!(!graph.nodes[pad].alive);
+        let out = graph.output_node().unwrap().first_node_arg().unwrap();
+        assert!(is_slice_copy_tensor_target(&graph.nodes[out].target));
+        assert_eq!(graph.node_shape_vec(out), Some(vec![1, 3, 7]));
+        let padded = graph.nodes[out].arg_node(0).unwrap();
+        assert!(is_cat_target(&graph.nodes[padded].target));
+        assert_eq!(graph.node_shape_vec(padded), Some(vec![1, 3, 9]));
+    }
+
+    #[test]
+    fn replicate_can_crop_more_than_the_original_width_after_padding() {
+        // x [1,3,6], replicate pad (-6, 2): pad 2 on the right first (width 8), then
+        // crop 6 from the start -> width 2.
+        let (mut graph, _) = pad_graph(&[1, 3, 6], &[-6, 2], "replicate");
+        assert!(IrRewritePadPass.run(&mut graph));
+        let out = graph.output_node().unwrap().first_node_arg().unwrap();
+        assert!(is_slice_copy_tensor_target(&graph.nodes[out].target));
+        assert_eq!(graph.node_shape_vec(out), Some(vec![1, 3, 2]));
+        assert_eq!(graph.nodes[out].arg_int(2), Some(6));
+        assert_eq!(graph.nodes[out].arg_int(3), Some(8));
+    }
+
+    #[test]
+    fn circular_crops_then_wraps_the_cropped_input() {
+        // x [1,8], circular pad (-2, 1): crop 2 from the start (width 6), then wrap
+        // one element taken from the cropped tensor's start -> width 7.
+        let (mut graph, _) = pad_graph(&[1, 8], &[-2, 1], "circular");
+        assert!(IrRewritePadPass.run(&mut graph));
+        let out = graph.output_node().unwrap().first_node_arg().unwrap();
+        assert!(is_cat_target(&graph.nodes[out].target));
+        assert_eq!(graph.node_shape_vec(out), Some(vec![1, 7]));
+        let IrArg::List(members) = &graph.nodes[out].args[0] else {
+            panic!("cat members");
+        };
+        let cropped = members[0].as_node().unwrap();
+        assert_eq!(graph.node_shape_vec(cropped), Some(vec![1, 6]));
+        let wrap = members[1].as_node().unwrap();
+        assert_eq!(graph.nodes[wrap].arg_node(0), Some(cropped));
+    }
 
     fn pad_graph(in_shape: &[i64], pad: &[i64], mode: &str) -> (IrGraph, NodeId) {
         let mut graph = IrGraph::empty();

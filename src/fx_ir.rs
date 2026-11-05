@@ -45,6 +45,26 @@ impl NodeOp {
 
 pub type NodeId = usize;
 
+/// Reduce an FX target string to the bare op name, e.g. "aten.relu.default".
+///
+/// `EdgeOpOverload` stringifies as
+///   "<EdgeOpOverload: aten.foo.default>: schema = aten::foo(... bool transposed ...) -> ..."
+/// Classification must see only the op name. Trailing schema text makes substring
+/// matchers fire on operand names (`is_layout_passthrough_target` matched "transpose"
+/// inside convolution's "bool transposed" and skipped the Int32->Int8 accumulator
+/// rescale), and the wrapper defeats exact matches (a relu test must not also claim
+/// "aten.leaky_relu.default").
+pub(crate) fn normalize_fx_target(raw: &str) -> String {
+    let without_schema = raw.split(": schema").next().unwrap_or(raw).trim();
+    without_schema
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .and_then(|s| s.split_once(": ").map(|(_, op)| op))
+        .unwrap_or(without_schema)
+        .trim()
+        .to_string()
+}
+
 /// A node in the Rust IR graph.
 #[derive(Debug, Clone)]
 pub struct IrNode {
@@ -263,22 +283,7 @@ fn import_fx_node<'py>(
     let py_node_attrs = attrs(py_node);
     let name = py_node_attrs.or_value("name", String::new());
     let raw_target = py_node_attrs.required_str("target").unwrap_or_default();
-    // Not every build stringifies an `EdgeOpOverload` to the bare op name. Some
-    // append the full schema:
-    //   "<EdgeOpOverload: aten.foo.default>: schema = aten::foo(... bool transposed ...) -> ..."
-    // Target classification here is substring-based, so that trailing schema
-    // text makes matchers fire on operand names rather than the op. Concretely,
-    // `is_layout_passthrough_target` matches "transpose" inside the convolution
-    // schema's "bool transposed", which makes `has_downstream_output_rescale`
-    // walk THROUGH a consumer conv and wrongly skip the Int32->Int8 accumulator
-    // rescale -- Vela then rejects the Int32 conv input. Drop the schema so
-    // classification always sees the clean op name.
-    let target = raw_target
-        .split(": schema")
-        .next()
-        .unwrap_or(&raw_target)
-        .trim()
-        .to_string();
+    let target = normalize_fx_target(&raw_target);
     let op = NodeOp::of(py_node);
     let meta = NodeMeta::from_fx(py_node)?;
     let tensor = tensor_import.tensor_for_node(py_node, &name, &target);
@@ -779,11 +784,6 @@ impl IrGraph {
             .into_iter()
             .filter(|&user_id| self.nodes[user_id].op == NodeOp::CallFunction)
             .collect()
-    }
-
-    pub fn single_live_call_function_user(&self, id: NodeId) -> Option<NodeId> {
-        let users = self.live_call_function_users(id);
-        (users.len() == 1).then(|| users[0])
     }
 
     pub fn live_getitem_users(&self, id: NodeId) -> Vec<(NodeId, i64)> {
@@ -1562,6 +1562,28 @@ mod tests {
     }
 
     #[test]
+    fn normalize_fx_target_strips_edge_wrapper_and_schema() {
+        assert_eq!(
+            normalize_fx_target(
+                "<EdgeOpOverload: aten.leaky_relu.default>: schema = aten::leaky_relu(Tensor self, Scalar negative_slope=0.01) -> Tensor"
+            ),
+            "aten.leaky_relu.default"
+        );
+        assert_eq!(
+            normalize_fx_target("<EdgeOpOverload: aten.relu.default>"),
+            "aten.relu.default"
+        );
+        assert_eq!(
+            normalize_fx_target("aten.relu.default"),
+            "aten.relu.default"
+        );
+        assert_eq!(
+            normalize_fx_target("<built-in function getitem>"),
+            "<built-in function getitem>"
+        );
+    }
+
+    #[test]
     fn build_user_edges_includes_nested_args_and_kwargs() {
         let mut kwargs = HashMap::new();
         kwargs.insert("other".into(), IrArg::Node(0));
@@ -1716,6 +1738,24 @@ pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
     let mut ir = initial_ir;
     let mut any_modified = false;
     let mut effects = LoweringEffectBatch::default();
+    let probe = crate::config::debug_node_probe();
+    let probe_after = |graph: &IrGraph, pass: &str| {
+        let Some(needle) = probe.as_deref() else {
+            return;
+        };
+        for node in graph.live_nodes().filter(|node| node.name.contains(needle)) {
+            eprintln!(
+                "[NodeProbe] after {pass}: {} target={} shape={:?} dtype={:?} out_qparam={:?}",
+                node.name,
+                node.target,
+                graph.node_shape(node.id),
+                node.meta.val_dtype(),
+                node.meta
+                    .output_qparam()
+                    .map(|q| (q.scale, q.zp, q.dtype_str.clone())),
+            );
+        }
+    };
 
     for (i, step) in steps.iter().enumerate() {
         match step {
@@ -1730,6 +1770,7 @@ pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
                 let modified = pass.run(graph);
                 let after = graph.live_node_count();
                 log_pass_result("HybridPipeline", pass.name(), modified, before, after);
+                probe_after(graph, pass.name());
                 if modified {
                     any_modified = true;
                 }
@@ -1750,6 +1791,7 @@ pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
                     before,
                     after,
                 );
+                probe_after(graph, pass.name());
                 if result.changed() {
                     any_modified = true;
                     effects.items.extend(result.effects.items);

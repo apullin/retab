@@ -133,7 +133,7 @@ fn stamp_boundary_placeholder_meta(
     changed
 }
 
-fn node_ids_from_ir_arg(arg: Option<&fx_ir::IrArg>) -> Vec<fx_ir::NodeId> {
+pub(super) fn node_ids_from_ir_arg(arg: Option<&fx_ir::IrArg>) -> Vec<fx_ir::NodeId> {
     fn collect(arg: &fx_ir::IrArg, out: &mut Vec<fx_ir::NodeId>) {
         match arg {
             fx_ir::IrArg::Node(id) => out.push(*id),
@@ -202,14 +202,26 @@ fn collect_boundary_contracts_for_graph(
             .enumerate()
             .filter_map(|(idx, &arg_id)| {
                 let arg_node = ir.nodes.get(arg_id)?;
-                let fallback_qparam = list_input_qparam
-                    .clone()
-                    .or_else(|| {
-                        node.meta
-                            .pre_pass_arg_qparams()
-                            .and_then(|saved| saved.get(&idx).cloned())
-                    })
-                    .or_else(|| metadata::extract_effective_qparam_ir(ir, arg_id));
+                // The list-level qparam is the one the quantizer shares between the
+                // quantized operands. A constant passed as raw integers (no qparams before
+                // the pipeline) carries none; the branch's own DQ interprets it.
+                let raw_constant = arg_node.tensor.is_some()
+                    && node
+                        .meta
+                        .pre_pass_arg_qparams()
+                        .is_some_and(|saved| saved.get(&idx).is_none());
+                let fallback_qparam = if raw_constant {
+                    None
+                } else {
+                    list_input_qparam
+                        .clone()
+                        .or_else(|| {
+                            node.meta
+                                .pre_pass_arg_qparams()
+                                .and_then(|saved| saved.get(&idx).cloned())
+                        })
+                        .or_else(|| metadata::extract_effective_qparam_ir(ir, arg_id))
+                };
                 Some(BoundaryInputMeta {
                     meta: arg_node.meta.clone(),
                     boundary_dim_order: boundary_placeholder_dim_order(arg_node),
@@ -809,5 +821,9 @@ pub(crate) fn apply_boundary_contracts(
         }
         changed += inserts;
     }
-    changed
+    let rewritten = super::captured_conv::rewrite_captured_conv_biases(parent_ir, submodules);
+    if rewritten > 0 && cf_debug {
+        eprintln!("[RETAB][cf-boundary-ir] rewrote {rewritten} captured conv bias(es) to INT32");
+    }
+    changed + rewritten
 }

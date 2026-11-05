@@ -27,6 +27,8 @@ mod fx_decompose_as_strided_copy_ir;
 mod fx_decompose_avgpool_pad_ir;
 mod fx_decompose_cumsum_ir;
 mod fx_decompose_embedding_ir;
+mod fx_decompose_div_tensor_mode_ir;
+mod fx_decompose_flip_ir;
 mod fx_decompose_grouped_conv_ir;
 mod fx_decompose_index_select_ir;
 mod fx_decompose_index_tensor_ir;
@@ -41,6 +43,7 @@ mod fx_decompose_ops_ir;
 mod fx_decompose_pixel_shuffle_ir;
 mod fx_decompose_quant_ir;
 mod fx_decompose_repeat_interleave_ir;
+mod fx_decompose_roll_ir;
 mod fx_decompose_select_scatter_ir;
 mod fx_decompose_slice_scatter_ir;
 mod fx_decompose_strided_slice_ir;
@@ -69,6 +72,7 @@ mod fx_memory_format_ir;
 mod fx_meta;
 mod fx_normalize_index_put_bool_mask_ir;
 mod fx_normalize_index_put_none_indices_ir;
+mod fx_normalize_maxpool_rank_ir;
 mod fx_pipeline;
 mod fx_py_attr;
 mod fx_quant;
@@ -250,7 +254,7 @@ fn ingest_and_serialize_tosa_pybytes(
     }
 
     rebuild_graph_users(&mut graphs);
-    let py_bytes = serialize::serialize_graphs_to_tosa_py(py, &graphs, &store);
+    let py_bytes = serialize::serialize_graphs_to_tosa_py(py, &graphs, &store)?;
     if profile {
         eprintln!(
             "[RETAB][ingest_and_serialize] from-ir graphs={} nodes={} tensors={}",

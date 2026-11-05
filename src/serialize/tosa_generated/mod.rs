@@ -14,11 +14,11 @@ pub use tosa_rs::{DType, NanPropagationMode, Op, ResizeMode, RoundingMode};
 // Attribute structs -- re-export those whose fields match exactly
 // ---------------------------------------------------------------------------
 pub use tosa_rs::{
-    AvgPool2dAttribute, ClampAttribute, ConcatAttribute, CondIfAttribute, Conv2dAttribute,
-    Conv3dAttribute, DepthwiseConv2dAttribute, MaxPool2dAttribute, MaximumAttribute,
-    MinimumAttribute, MulAttribute, ReduceAnyAttribute, ReduceMaxAttribute, ReduceMinAttribute,
-    ReduceSumAttribute, RescaleAttribute, ResizeAttribute, TransposeAttribute,
-    TransposeConv2dAttribute, WhileLoopAttribute,
+    ArgMaxAttribute, AvgPool2dAttribute, ClampAttribute, ConcatAttribute, CondIfAttribute,
+    Conv2dAttribute, Conv3dAttribute, DepthwiseConv2dAttribute, MaxPool2dAttribute,
+    MaximumAttribute, MinimumAttribute, MulAttribute, ReduceAnyAttribute, ReduceMaxAttribute,
+    ReduceMinAttribute, ReduceSumAttribute, RescaleAttribute, ResizeAttribute, ReverseAttribute,
+    TransposeAttribute, TransposeConv2dAttribute, WhileLoopAttribute,
 };
 
 // ---------------------------------------------------------------------------

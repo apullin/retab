@@ -55,7 +55,7 @@ if [[ ${#executorch_deps[@]} -gt 0 ]]; then
   uv pip install --python "${python_bin}" "${executorch_deps[@]}"
 fi
 
-arm_extra_packages="${RETAB_ARM_EXTRA_PACKAGES:-ethos-u-vela==5.0.0}"
+arm_extra_packages="${RETAB_ARM_EXTRA_PACKAGES:-ethos-u-vela==5.2.0}"
 uv pip install --python "${python_bin}" ${arm_extra_packages}
 
 site_packages="$("${python_bin}" - <<'PY'
@@ -157,22 +157,24 @@ printf '%s\n' "${executorch_src}/src" > "${site_packages}/executorch-source-over
 
 "${python_bin}" - <<'PY'
 import tosa_serializer
+import torchao.prototype.mx_formats  # noqa: F401  ExecuTorch 1.6 imports it with TOSABackend
 from executorch.backends.arm.tosa.backend import TOSABackend
-from executorch.exir.program import set_edge_manager_for_partitioners_override
 
-missing = []
 if not hasattr(tosa_serializer, "__file__"):
-    missing.append("tosa_serializer")
-if not hasattr(TOSABackend, "set_preprocess_override"):
-    missing.append("TOSABackend.set_preprocess_override")
-if not callable(set_edge_manager_for_partitioners_override):
-    missing.append("executorch.exir.program.set_edge_manager_for_partitioners_override")
-if missing:
-    raise SystemExit(
-        "error: ExecuTorch checkout is missing required RETAB seams: "
-        + ", ".join(missing)
-    )
-print("ExecuTorch seam check: ok")
+    raise SystemExit("error: tosa_serializer is not importable")
+if not callable(getattr(TOSABackend, "_preprocess", None)):
+    raise SystemExit("error: TOSABackend._preprocess not found; RETAB cannot patch this ExecuTorch")
+
+optional_seams = []
+if hasattr(TOSABackend, "set_preprocess_override"):
+    optional_seams.append("TOSABackend.set_preprocess_override")
+try:
+    from executorch.exir.program import set_edge_manager_for_partitioners_override  # noqa: F401
+except ImportError:
+    pass
+else:
+    optional_seams.append("set_edge_manager_for_partitioners_override")
+print("ExecuTorch check: ok (optional fork seams: " + (", ".join(optional_seams) or "none") + ")")
 PY
 
 echo "Installed ExecuTorch dependencies and source overlay from ${executorch_src} into ${venv_dir}"

@@ -7,6 +7,7 @@ pub fn register(table: &mut EmitterTable) {
         (OpTarget::TosaAdd, emit_add as EmitFn),
         (OpTarget::TosaSub, emit_sub),
         (OpTarget::TosaMul, emit_mul),
+        (OpTarget::TosaIntDiv, emit_intdiv),
         (OpTarget::TosaClamp, emit_clamp),
         (OpTarget::Add, emit_add),
         (OpTarget::Sub, emit_sub),
@@ -199,6 +200,10 @@ pub(super) fn emit_add(ctx: &EmitContext) -> EmitResult {
 
 pub(super) fn emit_sub(ctx: &EmitContext) -> EmitResult {
     ctx.emit_binary(Op::Sub, Attribute::Sub(SubAttribute {}))
+}
+
+fn emit_intdiv(ctx: &EmitContext) -> EmitResult {
+    ctx.emit_binary(Op::IntDiv, Attribute::IntDiv(IntDivAttribute {}))
 }
 
 pub(super) fn emit_mul(ctx: &EmitContext) -> EmitResult {

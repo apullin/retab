@@ -12,6 +12,7 @@ const CONTROL_FLOW_RULES: &[(&str, OpTarget)] = &[
 ];
 
 const TOSA_RULES: &[TargetRule] = &[
+    (&["intdiv"], OpTarget::TosaIntDiv),
     (&["rescale"], OpTarget::TosaRescale),
     (&["resize"], OpTarget::TosaResize),
     (&["depthwise_conv2d"], OpTarget::TosaDepthwiseConv2d),
@@ -85,6 +86,7 @@ const QUANTIZED_DECOMPOSED_RULES: &[TargetRule] = &[
 const ATEN_RULES: &[TargetRule] = &[
     (&["aten.conv_transpose2d"], OpTarget::ConvTranspose2d),
     (&["aten.conv2d", "aten.convolution"], OpTarget::Conv2d),
+    (&["aten.argmax."], OpTarget::ArgMax),
     (&["aten.relu"], OpTarget::Relu),
     (&["aten.add."], OpTarget::Add),
     (&["aten.sub."], OpTarget::Sub),
@@ -117,6 +119,7 @@ const ATEN_RULES: &[TargetRule] = &[
     (&["aten.mean"], OpTarget::Mean),
     (&["aten.cat"], OpTarget::Cat),
     (&["aten.slice_copy", "aten.slice"], OpTarget::Slice),
+    (&["aten.flip."], OpTarget::Flip),
     (&["aten.index_select"], OpTarget::IndexSelect),
     (&["aten.select_copy", "aten.select"], OpTarget::SelectCopy),
     (&["aten.unsqueeze"], OpTarget::Unsqueeze),
@@ -279,6 +282,10 @@ mod tests {
         assert_eq!(
             parse_op_target("backend.tosa.TRANSPOSE_CONV2D.default"),
             OpTarget::TosaTransposeConv2d
+        );
+        assert_eq!(
+            parse_op_target("backend.tosa.INTDIV.default"),
+            OpTarget::TosaIntDiv
         );
     }
 

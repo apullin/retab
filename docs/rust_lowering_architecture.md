@@ -451,11 +451,9 @@ Control-flow validation:
 cd /Users/andrewpullin/personal/executorch-work/executorch
 source ../.venv/bin/activate
 unset CONDA_PREFIX CONDA_DEFAULT_ENV
-export ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1
-export RETAB_ENABLE_PATCH=1
-export RETAB_ROOT=/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine
-export PYTHONPATH=$PWD/src
-python -m pytest -q backends/arm/test/ops/test_cond.py backends/arm/test/ops/test_while.py
+export PYTHONPATH=$PWD/src:<retab>/python:<retab-lab>/tests
+export RETAB_PREPROCESS_ONLY=1   # read by retab_rc4_plugin; add -p retab_rc4_plugin to pytest
+python -m pytest -p retab_rc4_plugin -q backends/arm/test/ops/test_cond.py backends/arm/test/ops/test_while.py
 ```
 
 Run control-flow tests twice when touching control-flow, metadata propagation,
@@ -467,12 +465,10 @@ Full ops and models validation:
 cd /Users/andrewpullin/personal/executorch-work/executorch
 source ../.venv/bin/activate
 unset CONDA_PREFIX CONDA_DEFAULT_ENV
-export ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1
-export RETAB_ENABLE_PATCH=1
-export RETAB_ROOT=/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine
-export PYTHONPATH=$PWD/src
+export PYTHONPATH=$PWD/src:<retab>/python:<retab-lab>/tests
+export RETAB_PREPROCESS_ONLY=1   # read by retab_rc4_plugin; add -p retab_rc4_plugin to pytest
 
-python -m pytest -q --numprocesses=auto backends/arm/test/ --ignore=backends/arm/test/models \
+python -m pytest -p retab_rc4_plugin -q --numprocesses=auto backends/arm/test/ --ignore=backends/arm/test/models \
   -k 'tosa and not FP and (INT or 16a8w or a16w8 or quantized or qat)'
 
 python -m pytest -q --numprocesses=auto backends/arm/test/ --ignore=backends/arm/test/models \

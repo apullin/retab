@@ -4,6 +4,7 @@ use crate::fx_ir;
 use crate::StashedPipeline;
 
 mod assembly;
+mod captured_conv;
 mod contracts;
 mod metadata;
 

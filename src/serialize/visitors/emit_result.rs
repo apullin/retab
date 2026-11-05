@@ -8,6 +8,9 @@ pub struct EmitResult {
     pub operators: Vec<TosaOperator>,
     pub tensors: Vec<TosaTensor>,
     pub shapes: Vec<TosaShape>,
+    /// Names of visitor-generated constants (tensors and shapes) that the block's
+    /// `ConstantPool` may merge with identical earlier constants.
+    pub poolable: Vec<String>,
 }
 
 impl EmitResult {
@@ -36,6 +39,7 @@ impl EmitResult {
 
     pub fn push_const(&mut self, tensor: TosaTensor) -> String {
         let name = tensor.name.clone();
+        self.poolable.push(name.clone());
         self.tensors.push(tensor);
         self.push_op(
             Op::Const,

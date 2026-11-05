@@ -24,6 +24,9 @@ Options:
   --keep-instrumented    Leave the installed extension coverage-instrumented.
   --llvm-profdata PATH   Override llvm-profdata.
   --llvm-cov PATH        Override llvm-cov.
+  --plugin-dir PATH      Directory holding retab_rc4_plugin.py, the pytest plugin that
+                         routes TOSA preprocess through RETAB. Defaults to
+                         ../../retab-lab/tests or RETAB_PYTEST_PLUGIN_DIR.
   -h, --help             Show this help.
 
 Default lanes: ops-int, ops-fp, models-int, models-fp.
@@ -138,6 +141,8 @@ run_lane() {
   while IFS= read -r -d '' arg; do
     args+=("${arg}")
   done < <(lane_pytest_args "${lane}")
+  # The plugin swaps RETAB in and fails the lane if RETAB never handled a graph.
+  args=(-p retab_rc4_plugin "${args[@]}")
 
   {
     printf '==> lane: %s\n' "${lane}"
@@ -172,6 +177,7 @@ strict_tests=0
 keep_instrumented=0
 llvm_profdata_arg="${LLVM_PROFDATA:-}"
 llvm_cov_arg="${LLVM_COV:-}"
+plugin_dir="${RETAB_PYTEST_PLUGIN_DIR:-${repo_root}/../../retab-lab/tests}"
 lanes=()
 
 while [[ $# -gt 0 ]]; do
@@ -219,6 +225,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --llvm-cov)
       llvm_cov_arg="$2"
+      shift 2
+      ;;
+    --plugin-dir)
+      plugin_dir="$2"
       shift 2
       ;;
     -h | --help)
@@ -331,10 +341,12 @@ PY
 coverage_object="${out_dir}/$(basename "${native_ext}")"
 cp "${native_ext}" "${coverage_object}"
 
-export ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1
-export RETAB_ENABLE_PATCH=1
-export RETAB_ROOT="${repo_root}"
-export PYTHONPATH="${repo_root}/python:${executorch_src}/src${PYTHONPATH:+:${PYTHONPATH}}"
+if [[ ! -f "${plugin_dir}/retab_rc4_plugin.py" ]]; then
+  echo "error: retab_rc4_plugin.py not found in ${plugin_dir}; pass --plugin-dir" >&2
+  exit 1
+fi
+export RETAB_PREPROCESS_ONLY=1
+export PYTHONPATH="${repo_root}/python:${plugin_dir}:${executorch_src}/src${PYTHONPATH:+:${PYTHONPATH}}"
 export LLVM_PROFILE_FILE="${profraw_dir}/retab-%p-%m.profraw"
 unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER
 

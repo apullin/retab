@@ -19,11 +19,15 @@ fn pack_dimension(dil: i64, pad: i64, orig: i64, kernel: i64, stride: i64) -> (i
 }
 
 fn pool_output_size(input: i64, kernel: i64, stride: i64, pad: i64, ceil_mode: bool) -> i64 {
-    if ceil_mode {
+    let mut output = if ceil_mode {
         (input + 2 * pad - kernel + stride - 1) / stride + 1
     } else {
         (input + 2 * pad - kernel) / stride + 1
+    };
+    if ceil_mode && (output - 1) * stride >= input + pad {
+        output -= 1;
     }
+    output
 }
 
 fn pad_value_for_dtype(dtype: &str) -> IrArg {
@@ -262,5 +266,20 @@ impl IrPass for IrDecomposeMaxPoolDilationPass {
             ));
         }
         modified
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ceil_output_drops_window_starting_inside_padding() {
+        assert_eq!(pool_output_size(4, 1, 2, 0, true), 2);
+    }
+
+    #[test]
+    fn floor_output_size_unchanged() {
+        assert_eq!(pool_output_size(8, 2, 2, 0, false), 4);
     }
 }

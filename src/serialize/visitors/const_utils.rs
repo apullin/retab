@@ -52,6 +52,7 @@ pub(super) fn push_const_shape(result: &mut EmitResult, shape_name: String, valu
         .iter()
         .flat_map(|&d| (d as i64).to_le_bytes())
         .collect();
+    result.poolable.push(shape_name.clone());
     result.shapes.push(TosaShape {
         name: shape_name.clone(),
         rank,
@@ -130,9 +131,13 @@ pub(super) fn quantize_fill_value(node: &Node, value: f64) -> f64 {
     }
 }
 
+/// Mirrors `quantized_decomposed.quantize_per_tensor` on one value, as rc4's
+/// `QuantArgs.quantize_value` calls it: float32 `value * (1 / scale)`, round half to even,
+/// add the zero point, clamp to [qmin, qmax].
 pub(super) fn quantize_scalar_with_qparam(value: f64, qp: crate::graph::ir::QuantArgs) -> f64 {
-    let quantized = ((value / qp.scale) + qp.zero_point as f64).round() as i64;
-    quantized.clamp(qp.qmin, qp.qmax) as f64
+    let inv_scale = (1.0 / qp.scale) as f32;
+    let rounded = ((value as f32) * inv_scale).round_ties_even() as f64;
+    (rounded + qp.zero_point as f64).clamp(qp.qmin as f64, qp.qmax as f64)
 }
 
 pub(super) fn push_inline_const(result: &mut EmitResult, tensor: TosaTensor) {
@@ -163,8 +168,31 @@ pub(super) fn make_shape_const_tensor(name: String, values: Vec<i32>) -> TosaTen
 
 #[cfg(test)]
 mod tests {
-    use super::scalar_fill_bytes;
-    use crate::graph::ir::DType as IrDType;
+    use super::{quantize_scalar_with_qparam, scalar_fill_bytes};
+    use crate::graph::ir::{DType as IrDType, QuantArgs};
+
+    fn int8_qargs(scale: f64, zero_point: i64) -> QuantArgs {
+        QuantArgs {
+            scale,
+            zero_point,
+            dtype: IrDType::Int8,
+            qmin: -128,
+            qmax: 127,
+        }
+    }
+
+    #[test]
+    fn quantize_scalar_matches_quantize_per_tensor() {
+        // Ties round to even, as torch.round does.
+        assert_eq!(quantize_scalar_with_qparam(2.5, int8_qargs(1.0, 0)), 2.0);
+        assert_eq!(quantize_scalar_with_qparam(-2.5, int8_qargs(1.0, 3)), 1.0);
+        // An avg-pool zero point quantized through its own output qparams saturates.
+        assert_eq!(
+            quantize_scalar_with_qparam(-3.0, int8_qargs(0.012688863091170788, -3)),
+            -128.0
+        );
+        assert_eq!(quantize_scalar_with_qparam(0.0, int8_qargs(0.02, -7)), -7.0);
+    }
 
     #[test]
     fn scalar_fill_bytes_encodes_fp32_constants_as_float_bytes() {

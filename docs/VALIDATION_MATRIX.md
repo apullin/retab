@@ -13,11 +13,16 @@ Run from the ExecuTorch checkout with the uv-managed environment:
 cd /Users/andrewpullin/personal/executorch-work/executorch
 source ../.venv/bin/activate
 unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER
-export ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING=1
-export RETAB_ENABLE_PATCH=1
-export RETAB_ROOT=/Users/andrewpullin/personal/executorch-work/u55-pipeline/arm-tosa-engine
-export PYTHONPATH=$PWD/src
+export PYTHONPATH=$PWD/src:<retab>/python:<retab-lab>/tests
+export RETAB_PREPROCESS_ONLY=1   # read by retab_rc4_plugin; pass -p retab_rc4_plugin to pytest
 ```
+
+Validation lanes run from the separate retab-lab harness. Its pytest plugin
+(`tests/retab_rc4_plugin.py`, loaded with `-p retab_rc4_plugin` and `RETAB_PREPROCESS_ONLY=1`)
+swaps RETAB into `TOSABackend._preprocess`, counts the graphs RETAB handled and the ones that
+fell back to stock, and fails the run if RETAB handled none. The old `RETAB_ENABLE_PATCH`,
+`RETAB_ROOT` and `ARM_TEST_ENABLE_DIRECT_BACKEND_LOWERING` variables are not read by stock
+ExecuTorch; lanes that set only those ran stock lowering.
 
 Before Python regression lanes, rebuild and reinstall the extension:
 

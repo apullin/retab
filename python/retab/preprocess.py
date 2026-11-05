@@ -20,6 +20,7 @@ step. Vela compilation still happens normally downstream.
 import logging
 import os
 import time
+from collections import Counter
 from collections.abc import Callable
 from typing import List
 
@@ -30,7 +31,6 @@ from torch.export.exported_program import ExportedProgram
 
 from retab._cf_ctx import _collect_delegate_info_meta
 from retab._decomp_hooks import (
-    _graph_module_contains_targets,
     _install_edge_decomp_fast_path,
     _install_run_decomp_fast_path,
     _uninstall_edge_decomp_fast_path,
@@ -55,27 +55,7 @@ def _env_get(name: str, *aliases: str, default: str | None = None) -> str | None
 def _run_control_flow_submodule_rust_passes(
     gm, edge_program, retab, region_prefix: str | None = None
 ) -> None:
-    try:
-        from executorch.backends.arm._passes.arm_pass_utils import (
-            get_cond_while_submodules_nested,
-        )
-    except ImportError as exc:
-        # Only cond/while models need this seam. Skipping it for a graph that has no
-        # control flow costs nothing, but skipping it for one that does would emit a
-        # delegate whose submodules never saw the Rust passes -- silently wrong TOSA.
-        # Refuse in that case rather than mislower.
-        import torch
-
-        if _graph_module_contains_targets(
-            gm, {torch.ops.higher_order.cond, torch.ops.higher_order.while_loop}
-        ):
-            raise RuntimeError(
-                "RETAB needs executorch.backends.arm._passes.arm_pass_utils."
-                "get_cond_while_submodules_nested to lower a graph containing cond or "
-                "while_loop, and this ExecuTorch build does not expose it. See "
-                "compat/executorch.toml for the seams RETAB requires."
-            ) from exc
-        return
+    from executorch.exir.graph_module import get_cond_while_submodules
 
     if (
         _env_get(
@@ -84,14 +64,14 @@ def _run_control_flow_submodule_rust_passes(
         )
         == "1"
     ):
-        for name, submodule, _ in get_cond_while_submodules_nested(gm):
+        for name, submodule, _ in get_cond_while_submodules(gm):
             retab.run_fx_passes(submodule, edge_program)
             logger.info(
                 "[fast_preprocess] ran recursive fx pass pipeline on control-flow submodule %s",
                 name,
             )
 
-    for name, submodule, cf_node in get_cond_while_submodules_nested(gm):
+    for name, submodule, cf_node in get_cond_while_submodules(gm):
         region_name = f"{region_prefix}::{name}" if region_prefix else name
         cf_target = str(getattr(cf_node, "target", ""))
         if "cond" in cf_target:
@@ -332,7 +312,7 @@ def _iter_parallel_multimethod_backends():
     from executorch.backends.arm.ethosu.backend import EthosUBackend
     from executorch.backends.arm.ethosu.compile_spec import EthosUCompileSpec
 
-    yield EthosUBackend, EthosUCompileSpec.from_list
+    yield EthosUBackend, EthosUCompileSpec._from_list
 
     try:
         from executorch.backends.arm.vgf.backend import VgfBackend
@@ -340,7 +320,7 @@ def _iter_parallel_multimethod_backends():
     except ImportError:
         return
 
-    yield VgfBackend, VgfCompileSpec.from_list
+    yield VgfBackend, VgfCompileSpec._from_list
 
 
 def _install_parallel_backend_preprocess_multimethods() -> bool:
@@ -390,6 +370,102 @@ def _restore_parallel_backend_preprocess_multimethods() -> bool:
 
 
 
+# -- Stock originals, scope check and counters --------------------------------
+
+# Class-dict values of TOSABackend attributes as stock ExecuTorch defined them. They are
+# captured once, before any RETAB patch, and serve both the stock fallback and unpatching.
+_stock_tosa_backend_attrs: dict[str, object] = {}
+_preprocess_counts: Counter = Counter()
+_stock_fallback_counts: Counter = Counter()
+
+
+def _is_retab_callable(value) -> bool:
+    fn = value.__func__ if isinstance(value, staticmethod) else value
+    return bool(getattr(fn, "_retab_override", False))
+
+
+def _capture_stock_tosa_backend() -> None:
+    from executorch.backends.arm.tosa.backend import TOSABackend
+
+    for name in ("preprocess", "_preprocess"):
+        value = TOSABackend.__dict__.get(name)
+        if name not in _stock_tosa_backend_attrs and value is not None and not _is_retab_callable(value):
+            _stock_tosa_backend_attrs[name] = value
+
+
+def stock_preprocess(
+    edge_program: ExportedProgram, compile_spec: TosaCompileSpec
+) -> PreprocessResult:
+    """Run unmodified ExecuTorch TOSA preprocess, whether or not RETAB is patched in."""
+    _capture_stock_tosa_backend()
+    original = _stock_tosa_backend_attrs.get("_preprocess")
+    if original is None:
+        raise RuntimeError("stock TOSABackend._preprocess was replaced before RETAB could capture it")
+    fn = original.__func__ if isinstance(original, staticmethod) else original
+    return fn(edge_program, compile_spec)
+
+
+def _has_registered_pass_insertions() -> bool:
+    try:
+        from executorch.backends.arm._passes.arm_pass_manager import (
+            _registered_pass_insertions,
+        )
+    except ImportError:
+        return False
+    return any(
+        insertions.before_passes or insertions.after_passes
+        for insertions in _registered_pass_insertions.values()
+    )
+
+
+def _has_non_default_pipeline_config(compile_spec) -> bool:
+    config = getattr(compile_spec, "_pipeline_config", None)
+    if config is None:
+        return False
+    return config != compile_spec._create_default_pipeline_config()
+
+
+def _has_symbolic_shapes(graph_module) -> bool:
+    for node in graph_module.graph.nodes:
+        shape = getattr(node.meta.get("val"), "shape", None)
+        if shape is not None and any(not isinstance(dim, int) for dim in shape):
+            return True
+    return False
+
+
+def stock_fallback_reason(
+    edge_program: ExportedProgram, compile_spec: TosaCompileSpec
+) -> str | None:
+    """Why this graph must go to stock preprocess, or None when RETAB handles it.
+
+    RETAB implements TOSA 1.0 INT lowering with the target's default pass pipeline.
+    """
+    spec = compile_spec.tosa_spec
+    if spec.support_float():
+        return f"float profile ({spec})"
+    if (spec.version.major, spec.version.minor) != (1, 0):
+        return f"TOSA version {spec.version}"
+    if compile_spec.tosa_dev_mode:
+        return "tosa_dev_mode"
+    if _has_non_default_pipeline_config(compile_spec):
+        return "non-default pass pipeline config"
+    if _has_registered_pass_insertions():
+        return "registered pass insertions"
+    if edge_program.graph_signature.buffers_to_mutate:
+        return "delegate-owned mutable buffers"
+    if _has_symbolic_shapes(edge_program.graph_module):
+        return "symbolic shapes"
+    return None
+
+
+def preprocess_stats() -> dict:
+    """RETAB preprocess calls and stock fallbacks (by reason) in this process."""
+    return {
+        "retab": _preprocess_counts["retab"],
+        "stock_fallback": dict(_stock_fallback_counts),
+    }
+
+
 # -- Internal implementations ------------------------------------------------
 
 
@@ -405,6 +481,14 @@ def _all_rust_preprocess(
     transformed graph, causing double rescales, double transposes, etc.).
     """
     import copy
+
+    reason = stock_fallback_reason(edge_program, _compile_spec)
+    if reason is not None:
+        _stock_fallback_counts[reason] += 1
+        logger.info("[retab] stock preprocess fallback: %s", reason)
+        return stock_preprocess(edge_program, _compile_spec)
+    _preprocess_counts["retab"] += 1
+
     t0 = time.perf_counter()
     gm = edge_program.graph_module
 
@@ -440,6 +524,9 @@ def _all_rust_preprocess(
     )
 
 
+_all_rust_preprocess._retab_override = True
+
+
 # -- Public API: backend override and compatibility fallback -----------------
 
 
@@ -449,6 +536,9 @@ def fast_preprocess(
     """Drop-in for TOSABackend.preprocess using the dedicated Rust path."""
     compile_spec = TosaCompileSpec._from_list(compile_specs)
     return _all_rust_preprocess(edge_program, compile_spec)
+
+
+fast_preprocess._retab_override = True
 
 
 def _install_backend_preprocess_override() -> bool:
@@ -479,6 +569,7 @@ def patch_tosa_backend():
     """
     from executorch.backends.arm.tosa.backend import TOSABackend
 
+    _capture_stock_tosa_backend()
     _install_edge_decomp_fast_path()
     _install_run_decomp_fast_path()
 
@@ -489,10 +580,11 @@ def patch_tosa_backend():
         )
         return
 
+    # Stock TOSABackend.preprocess and EthosUBackend both call TOSABackend._preprocess,
+    # so swapping that one attribute (keeping its name) routes every TOSA lowering here.
     TOSABackend._preprocess = staticmethod(_all_rust_preprocess)
-    TOSABackend.preprocess = staticmethod(fast_preprocess)
     _install_parallel_backend_preprocess_multimethods()
-    logger.info("[fast_preprocess] Patched TOSABackend (legacy all_rust mode)")
+    logger.info("[fast_preprocess] Patched TOSABackend._preprocess (all_rust mode)")
 
 
 def unpatch_tosa_backend():
@@ -506,12 +598,13 @@ def unpatch_tosa_backend():
         logger.info("[fast_preprocess] Cleared TOSABackend preprocess override")
         return
 
-    import importlib
+    # Restore the stock attributes in place. importlib.reload would create a second
+    # TOSABackend class while other modules keep the patched one.
+    from executorch.backends.arm.tosa.backend import TOSABackend
 
-    import executorch.backends.arm.tosa.backend as mod
-
-    importlib.reload(mod)
-    logger.info("[fast_preprocess] Restored original TOSABackend")
+    for name, original in _stock_tosa_backend_attrs.items():
+        setattr(TOSABackend, name, original)
+    logger.info("[fast_preprocess] Restored stock TOSABackend attributes")
 
 
 class FastTOSABackend:
@@ -529,3 +622,9 @@ class FastTOSABackend:
         compile_spec: TosaCompileSpec,
     ) -> PreprocessResult:
         return _all_rust_preprocess(edge_program, compile_spec)
+
+
+try:
+    _capture_stock_tosa_backend()
+except ImportError as exc:  # pragma: no cover - ExecuTorch without the Arm backend
+    logger.debug("[retab] could not capture stock TOSABackend: %s", exc)

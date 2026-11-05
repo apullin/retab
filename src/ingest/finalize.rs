@@ -255,6 +255,13 @@ fn fixup_quantized_dtypes_once(graph: &mut Graph) {
         };
 
         if op == OpType::CallFunction {
+            // TOSA ARGMAX always produces INT32 indices, whatever the input quantization.
+            if target == OpTarget::ArgMax {
+                if let Some(node) = graph.node_mut(node_id) {
+                    node.meta.val.dtype = DType::Int32;
+                }
+                continue;
+            }
             if is_accumulator_op(&target) && (has_input_qp || has_output_qp) {
                 if let Some(node) = graph.node_mut(node_id) {
                     node.meta.val.dtype = DType::Int32;
@@ -297,6 +304,11 @@ fn fixup_quantized_dtypes_once(graph: &mut Graph) {
                 continue;
             }
 
+            // A bool result (comparison, logical op, or a view of one) is never
+            // quantized: its input qparams describe the operands, not the output.
+            if current_dtype == DType::Bool && output_qp_dtype.is_none() {
+                continue;
+            }
             let new_dtype = output_qp_dtype.or(input_qp_dtype);
             if let Some(dt) = new_dtype {
                 if let Some(node) = graph.node_mut(node_id) {

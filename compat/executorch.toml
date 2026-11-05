@@ -1,9 +1,13 @@
 [executorch]
-mode = "source-checkout"
-reason = "RETAB currently relies on seam-enabled ExecuTorch builds that are not guaranteed to exist in released pip wheels."
+mode = "stock"
+reason = "RETAB patches TOSABackend._preprocess at runtime and falls back to stock preprocess outside its scope, so released ExecuTorch wheels work. Fork seams are used when present but are not required."
 default_source_hint = "../executorch"
+tested = ["executorch 1.6.0 (v1.6.0-rc4, 4776f71b6)"]
 
 [executorch.required_seams]
+preprocess = "executorch.backends.arm.tosa.backend.TOSABackend._preprocess"
+
+[executorch.optional_seams]
 preprocess_override = "executorch.backends.arm.tosa.backend.TOSABackend.set_preprocess_override"
 edge_manager_override = "executorch.exir.program.set_edge_manager_for_partitioners_override"
 
@@ -12,8 +16,17 @@ requires = ">=3.10"
 tested = ["3.12"]
 
 [torch]
+# ExecuTorch 1.6 imports torchao.prototype.mx_formats whenever TOSABackend is imported;
+# torchao 0.18 provides it.
 tested = [
-  "torch 2.10.0",
-  "torchvision 0.25.0",
-  "torchao 0.16.0+cpu",
+  "torch 2.15.0",
+  "torchvision 0.29.2",
+  "torchao 0.18.0+cpu",
+]
+
+[arm]
+tested = [
+  "ethos-u-vela 5.2.0",
+  "tosa-tools 2026.5.0",
+  "flatbuffers 25.2.10",
 ]

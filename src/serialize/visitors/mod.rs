@@ -29,20 +29,20 @@ pub use emitter::*;
 
 use super::tensor_layout::{apply_tosa_dim_order, permute_shape};
 use super::tosa_generated::{
-    AbsAttribute, AddAttribute, ArithmeticRightShiftAttribute, Attribute, AvgPool2dAttribute,
-    BitwiseAndAttribute, BitwiseNotAttribute, BitwiseOrAttribute, BitwiseXorAttribute,
-    CastAttribute, CeilAttribute, ClampAttribute, ConcatAttribute, ConstAttribute,
-    ConstShapeAttribute, Conv2dAttribute, Conv3dAttribute, CosAttribute, DType,
+    AbsAttribute, AddAttribute, ArgMaxAttribute, ArithmeticRightShiftAttribute, Attribute,
+    AvgPool2dAttribute, BitwiseAndAttribute, BitwiseNotAttribute, BitwiseOrAttribute,
+    BitwiseXorAttribute, CastAttribute, CeilAttribute, ClampAttribute, ConcatAttribute,
+    ConstAttribute, ConstShapeAttribute, Conv2dAttribute, Conv3dAttribute, CosAttribute, DType,
     DepthwiseConv2dAttribute, EqualAttribute, ErfAttribute, ExpAttribute, FloorAttribute,
-    GatherAttribute, GreaterAttribute, GreaterEqualAttribute, LogAttribute, LogicalAndAttribute,
+    GatherAttribute, GreaterAttribute, GreaterEqualAttribute, IntDivAttribute, LogAttribute, LogicalAndAttribute,
     LogicalLeftShiftAttribute, LogicalNotAttribute, LogicalOrAttribute, LogicalXorAttribute,
     MatMulAttribute, MaxPool2dAttribute, MaximumAttribute, MinimumAttribute, MulAttribute,
     NanPropagationMode, NegateAttribute, Op, PadAttribute, PowAttribute, ReciprocalAttribute,
     ReduceAnyAttribute, ReduceMaxAttribute, ReduceMinAttribute, ReduceSumAttribute,
-    RescaleAttribute, ReshapeAttribute, ResizeAttribute, ResizeMode, RoundingMode, RsqrtAttribute,
-    ScatterAttribute, SelectAttribute, SigmoidAttribute, SinAttribute, SliceAttribute,
-    SubAttribute, TableAttribute, TanhAttribute, TosaOperator, TosaShape, TosaTensor,
-    TransposeAttribute, TransposeConv2dAttribute,
+    RescaleAttribute, ReshapeAttribute, ResizeAttribute, ResizeMode, ReverseAttribute,
+    RoundingMode, RsqrtAttribute, ScatterAttribute, SelectAttribute, SigmoidAttribute,
+    SinAttribute, SliceAttribute, SubAttribute, TableAttribute, TanhAttribute, TosaOperator,
+    TosaShape, TosaTensor, TransposeAttribute, TransposeConv2dAttribute,
 };
 use crate::graph::ir::{Arg, Node, NodeId, OpTarget, OpType};
 use crate::graph::Graph;
@@ -60,7 +60,7 @@ use dtype_quant::{
     normalize_rescale_zp, output_qparam_zero_point, passthrough_input_dtype, single_qparam,
     tosa_dtype_storage_size, tosa_float_dtype_to_ir_or_float32,
 };
-use emit_result::EmitResult;
+pub(crate) use emit_result::EmitResult;
 use graph_utils::*;
 use layout::*;
 use op_utils::*;

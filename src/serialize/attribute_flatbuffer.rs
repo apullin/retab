@@ -116,6 +116,7 @@ pub(super) fn build_attribute(
 
         Attribute::ReduceSum(a) => scalar_i32_attr(builder, attr, a.axis),
         Attribute::Concat(a) => scalar_i32_attr(builder, attr, a.axis),
+        Attribute::Reverse(a) => scalar_i32_attr(builder, attr, a.axis),
 
         Attribute::TransposeConv2d(a) => transpose_conv_attr(
             builder,
@@ -136,6 +137,7 @@ pub(super) fn build_attribute(
         Attribute::ReduceAny(a) => scalar_i32_attr(builder, attr, a.axis),
 
         Attribute::ReduceMax(a) => axis_nan_mode_attr(builder, attr, a.axis, a.nan_mode as u32),
+        Attribute::ArgMax(a) => axis_nan_mode_attr(builder, attr, a.axis, a.nan_mode as u32),
 
         Attribute::ReduceMin(a) => axis_nan_mode_attr(builder, attr, a.axis, a.nan_mode as u32),
 
