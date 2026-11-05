@@ -105,6 +105,7 @@ mod graph;
 mod ingest;
 #[cfg(test)]
 mod ir_golden_tests;
+mod layout;
 mod lowering_effects;
 mod pipeline_config;
 mod runner_logging;

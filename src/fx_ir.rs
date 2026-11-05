@@ -903,6 +903,77 @@ impl IrGraph {
         result
     }
 
+    /// Renumber the nodes so that `order`, which lists every live node once,
+    /// becomes the node-vector order; dead nodes follow in their old relative
+    /// order. A fresh `from_fx_with_tensors` graph has this shape (ids in FX
+    /// node order), and when `order` is topological both
+    /// `topological_live_node_ids` and `ingest::from_ir`, which seeds its
+    /// def-use sort with id order, then emit the live nodes in `order`. Node
+    /// references, user lists, the name index and the replacement map are
+    /// rewritten; the position anchors are dropped because `order` already
+    /// places every node. Returns the old-to-new id map.
+    pub(crate) fn reorder_nodes(&mut self, order: &[NodeId]) -> Vec<NodeId> {
+        fn remap(arg: &mut IrArg, new_ids: &[NodeId]) {
+            match arg {
+                IrArg::Node(id) => {
+                    if let Some(&new_id) = new_ids.get(*id) {
+                        *id = new_id;
+                    }
+                }
+                IrArg::List(items) => {
+                    for item in items {
+                        remap(item, new_ids);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        const UNASSIGNED: NodeId = NodeId::MAX;
+        let mut new_ids = vec![UNASSIGNED; self.nodes.len()];
+        let mut next_id = 0;
+        for &id in order {
+            assert!(
+                self.nodes[id].alive && new_ids[id] == UNASSIGNED,
+                "reorder_nodes: node {id} is dead or listed twice"
+            );
+            new_ids[id] = next_id;
+            next_id += 1;
+        }
+        for (id, new_id) in new_ids.iter_mut().enumerate() {
+            if *new_id == UNASSIGNED {
+                assert!(
+                    !self.nodes[id].alive,
+                    "reorder_nodes: live node {id} is missing from the order"
+                );
+                *new_id = next_id;
+                next_id += 1;
+            }
+        }
+
+        let mut nodes = std::mem::take(&mut self.nodes);
+        nodes.sort_unstable_by_key(|node| new_ids[node.id]);
+        for node in &mut nodes {
+            node.id = new_ids[node.id];
+            for arg in node.args.iter_mut().chain(node.kwargs.values_mut()) {
+                remap(arg, &new_ids);
+            }
+        }
+        self.nodes = nodes;
+        for id in self.name_to_id.values_mut() {
+            *id = new_ids[*id];
+        }
+        self.replacements = self
+            .replacements
+            .drain()
+            .map(|(dead, replacement)| (new_ids[dead], new_ids[replacement]))
+            .collect();
+        self.anchors.clear();
+        self.anchors_after.clear();
+        self.rebuild_users();
+        new_ids
+    }
+
     pub(crate) fn constant_shape(&self, arg: &IrArg) -> Option<Vec<i64>> {
         if let IrArg::Node(id) = arg {
             let node = self.node(*id);
