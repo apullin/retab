@@ -4,7 +4,7 @@ use crate::fx_py_attr::attrs;
 use crate::graph::ir::DType;
 
 /// Quantization parameters extracted once from Python QuantArgs objects.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct QParam {
     pub scale: f64,
     pub zp: i64,

@@ -1,4 +1,4 @@
-pub mod tosa_generated;
+pub mod tosa_types;
 pub mod visitors;
 
 mod attribute_flatbuffer;
@@ -29,7 +29,7 @@ pub fn serialize_graphs_to_tosa_py(
     let estimated = tensor_bytes + node_count * 512 + 1024 * 1024;
     visitors::shape_utils::clear_shape_cache();
     visitors::dtype_quant::clear_dtype_cache();
-    if crate::config::tosa_engine_debug_enabled() {
+    if crate::config::retab_debug_enabled() {
         eprintln!(
             "[Serialize] pre-allocating {}MB for {} tensors, {} nodes",
             estimated / (1024 * 1024),

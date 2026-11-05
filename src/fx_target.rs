@@ -299,7 +299,10 @@ pub(crate) fn is_layout_passthrough_target(target: &str) -> bool {
         || is_permute_target(target)
         || is_dim_transpose_target(target)
         || is_tosa_transpose_target(target)
-        || target == "aten.contiguous.default"
+        || matches!(
+            target,
+            "aten.contiguous.default" | "backend.tosa.IDENTITY.default" | "tosa.IDENTITY.default"
+        )
 }
 
 pub(crate) fn is_rank_changing_layout_target(target: &str) -> bool {
@@ -452,6 +455,10 @@ pub(crate) fn is_slice_copy_tensor_target(target: &str) -> bool {
 
 pub(crate) fn is_slice_tensor_target(target: &str) -> bool {
     matches!(target, "aten.slice_copy.Tensor" | "aten.slice.Tensor")
+}
+
+pub(crate) fn is_tosa_slice_target(target: &str) -> bool {
+    matches!(target, "backend.tosa.SLICE.default" | "tosa.SLICE.default")
 }
 
 pub(crate) fn is_slice_scatter_target(target: &str) -> bool {
@@ -659,7 +666,7 @@ pub(crate) fn is_full_like_target(target: &str) -> bool {
 }
 
 pub(crate) fn is_batch_norm_target(target: &str) -> bool {
-    BATCH_NORM_TARGETS.iter().any(|symbol| *symbol == target)
+    BATCH_NORM_TARGETS.contains(&target)
 }
 
 pub(crate) fn not_equal_replacement_target(target: &str) -> Option<&'static str> {

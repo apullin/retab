@@ -159,7 +159,7 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitRe
         .first()
         .and_then(Arg::as_node)
         .and_then(|id| graph.node(id));
-    if crate::config::tosa_engine_debug_enabled() {
+    if crate::config::retab_debug_enabled() {
         eprintln!(
             "[SumDebug] node={} raw_shape={:?} actual_input_shape={:?} axes={:?} keepdim={} input_order={:?} node_order={:?} final_shape={:?}",
             node.name,

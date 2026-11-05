@@ -383,6 +383,7 @@ pub(super) fn adjusted_tosa_pad_for_raw_aten_conv(
     vec![pad_h, pad_bottom, pad_w, pad_right]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn adjusted_tosa_pad_for_emitted_conv_spatial(
     graph: &Graph,
     store: &TensorStore,

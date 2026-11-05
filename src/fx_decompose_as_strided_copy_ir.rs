@@ -70,10 +70,7 @@ impl IrPass for IrDecomposeAsStridedCopyPass {
 
             // Extract storage_offset (args[3] if present, else 0)
             let storage_offset = if graph.nodes[id].args.len() > 3 {
-                match graph.nodes[id].args[3].as_int() {
-                    Some(v) => v,
-                    None => 0,
-                }
+                graph.nodes[id].args[3].as_int().unwrap_or_default()
             } else {
                 0
             };

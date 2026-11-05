@@ -255,6 +255,7 @@ impl NodeMeta {
             "arm_constant_placeholder",
             "arm_control_flow_placeholder",
             "arm_control_flow_parent_output_user",
+            "do_not_fuse_duplicate",
         ] {
             if let Some(b) = meta_attrs.optional::<bool>(key) {
                 extras.insert(key.into(), MetaValue::Bool(b));

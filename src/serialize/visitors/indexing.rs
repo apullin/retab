@@ -161,6 +161,27 @@ impl ParsedSliceSpec {
             .map(|n| actual_tensor_shape(graph, store, n))
             .unwrap_or_else(|| raw_i32_shape(node));
 
+        if node.target == OpTarget::TosaSlice {
+            return Self {
+                input_name,
+                input_shape,
+                raw_dim: 0,
+                mapped_dim: 0,
+                start: 0,
+                end: 0,
+                step: 1,
+                start_shape: apply_tosa_dim_order(node, shape_arg_i32_list(graph, node, 1)),
+                size_shape: apply_tosa_dim_order(node, shape_arg_i32_list(graph, node, 2)),
+                input_target: input_node
+                    .map(|n| format!("{:?}", n.target))
+                    .unwrap_or_default(),
+                input_order: input_node
+                    .and_then(|n| n.meta.tosa_dim_order.as_ref())
+                    .map(|order| format!("{order:?}"))
+                    .unwrap_or_default(),
+            };
+        }
+
         let raw_dim = arg_i64(node, 1, 0);
         let rank = input_shape.len() as i64;
         let raw_dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };

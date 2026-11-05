@@ -43,7 +43,7 @@ pub(crate) fn runner_logging_enabled() -> bool {
     ])
 }
 
-pub(crate) fn tosa_engine_debug_enabled() -> bool {
+pub(crate) fn retab_debug_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| env_any_is_set(&["RETAB_DEBUG", "TOSA_ENGINE_DEBUG"]))
 }

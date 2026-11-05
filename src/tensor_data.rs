@@ -160,26 +160,25 @@ impl TensorData {
             DType::Int8 => Some(self.data.iter().map(|&b| i64::from(b as i8)).collect()),
             DType::Int16 => Some(
                 self.data
-                    .chunks_exact(2)
-                    .map(|chunk| i64::from(i16::from_le_bytes([chunk[0], chunk[1]])))
+                    .as_chunks::<2>().0.iter()
+                    .map(|chunk| i64::from(i16::from_le_bytes(*chunk)))
                     .collect(),
             ),
             DType::Int32 => Some(
                 self.data
-                    .chunks_exact(4)
+                    .as_chunks::<4>().0.iter()
                     .map(|chunk| {
-                        i64::from(i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                        i64::from(i32::from_le_bytes(*chunk))
                     })
                     .collect(),
             ),
             DType::Int64 => Some(
                 self.data
-                    .chunks_exact(8)
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
                     .map(|chunk| {
-                        i64::from_le_bytes([
-                            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
-                            chunk[7],
-                        ])
+                        i64::from_le_bytes(*chunk)
                     })
                     .collect(),
             ),
@@ -194,23 +193,23 @@ impl TensorData {
                 .map(|vals| vals.into_iter().map(|v| v as f64).collect()),
             DType::Float32 => Some(
                 self.data
-                    .chunks_exact(4)
+                    .as_chunks::<4>().0.iter()
                     .map(|chunk| {
-                        f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64
+                        f32::from_le_bytes(*chunk) as f64
                     })
                     .collect(),
             ),
             DType::Float16 => Some(
                 self.data
-                    .chunks_exact(2)
-                    .map(|chunk| decode_f16(u16::from_le_bytes([chunk[0], chunk[1]])) as f64)
+                    .as_chunks::<2>().0.iter()
+                    .map(|chunk| decode_f16(u16::from_le_bytes(*chunk)) as f64)
                     .collect(),
             ),
             DType::Float8E4M3 | DType::Float8E5M2 => None,
             DType::BFloat16 => Some(
                 self.data
-                    .chunks_exact(2)
-                    .map(|chunk| decode_bf16(u16::from_le_bytes([chunk[0], chunk[1]])) as f64)
+                    .as_chunks::<2>().0.iter()
+                    .map(|chunk| decode_bf16(u16::from_le_bytes(*chunk)) as f64)
                     .collect(),
             ),
             _ => None,
@@ -219,12 +218,12 @@ impl TensorData {
 }
 
 pub(crate) fn cast_i64_bytes_to_i32(data: &[u8]) -> Result<Vec<u8>, String> {
-    if data.len() % 8 != 0 {
+    if !data.len().is_multiple_of(8) {
         return Err("invalid int64 tensor byte length".into());
     }
     let mut out = Vec::with_capacity(data.len() / 2);
-    for chunk in data.chunks_exact(8) {
-        let val = i64::from_le_bytes(chunk.try_into().unwrap());
+    for chunk in data.as_chunks::<8>().0 {
+        let val = i64::from_le_bytes(*chunk);
         let narrowed = i32::try_from(val)
             .map_err(|_| format!("int64 constant value {val} is outside the int32 range"))?;
         out.extend_from_slice(&narrowed.to_le_bytes());
@@ -263,7 +262,7 @@ mod tests {
         // Exact powers of two round-trip through both formats.
         for v in [0.0_f32, 1.0, -1.0, 0.5, 2.0, -0.25] {
             assert_eq!(decode_bf16(encode_bf16(v)), v, "bf16 {v}");
-            assert_eq!(f32::from(half_decode_f16(encode_f16(v))), v, "f16 {v}");
+            assert_eq!(half_decode_f16(encode_f16(v)), v, "f16 {v}");
         }
         // Signed zero and infinities.
         assert_eq!(encode_bf16(f32::INFINITY), 0x7f80);

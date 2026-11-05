@@ -613,6 +613,7 @@ impl IrGraph {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_slice_copy(
         &mut self,
         name: impl Into<String>,
@@ -756,6 +757,178 @@ impl IrGraph {
         self.live_nodes().map(|node| node.id).collect()
     }
 
+    pub(crate) fn topological_live_node_ids(&self) -> Vec<NodeId> {
+        let mut predecessors = vec![Vec::new(); self.nodes.len()];
+        for (&id, &anchor) in &self.anchors {
+            predecessors[anchor].push(id);
+        }
+        for (&id, &anchor) in &self.anchors_after {
+            predecessors[id].push(anchor);
+        }
+        for node in self.live_nodes() {
+            for arg in node.args.iter().chain(node.kwargs.values()) {
+                arg.collect_node_ids(&mut predecessors[node.id]);
+            }
+        }
+        for deps in &mut predecessors {
+            deps.sort_unstable();
+            deps.dedup();
+        }
+
+        let mut visited = vec![false; self.nodes.len()];
+        let mut result = Vec::new();
+        // Dead anchors retain the position of their replacement chains.
+        for start in 0..self.nodes.len() {
+            let mut stack = vec![(start, false)];
+            while let Some((id, post)) = stack.pop() {
+                if post {
+                    if self.nodes[id].alive {
+                        result.push(id);
+                    }
+                } else if !visited[id] {
+                    visited[id] = true;
+                    stack.push((id, true));
+                    stack.extend(predecessors[id].iter().rev().map(|&dep| (dep, false)));
+                }
+            }
+        }
+        result
+    }
+
+    pub(crate) fn constant_shape(&self, arg: &IrArg) -> Option<Vec<i64>> {
+        if let IrArg::Node(id) = arg {
+            let node = self.node(*id);
+            if !node.alive
+                || node.op != NodeOp::CallFunction
+                || !matches!(
+                    node.target.as_str(),
+                    "backend.tosa.CONST_SHAPE.default" | "tosa.CONST_SHAPE.default"
+                )
+            {
+                return None;
+            }
+            node.args.first()?.as_int_list()
+        } else {
+            arg.as_int_list()
+        }
+    }
+
+    pub(crate) fn shape_in_node_order(
+        &self,
+        node: NodeId,
+        input: NodeId,
+        shape: &[i64],
+    ) -> Option<Vec<i64>> {
+        let input_order = self.node(input).meta.tosa_dim_order();
+        let output_order = self.node(node).meta.tosa_dim_order().or(input_order);
+        let physical = if let Some(order) = input_order {
+            if order.len() != shape.len() {
+                return None;
+            }
+            order
+                .iter()
+                .map(|&axis| shape.get(axis).copied())
+                .collect::<Option<Vec<_>>>()?
+        } else {
+            shape.to_vec()
+        };
+        let mut logical = physical.clone();
+        if let Some(order) = output_order {
+            if order.len() != shape.len() {
+                return None;
+            }
+            for (index, &axis) in order.iter().enumerate() {
+                *logical.get_mut(axis)? = physical[index];
+            }
+        }
+        Some(logical)
+    }
+
+    pub(crate) fn logical_input_shape(&self, node: NodeId, input: NodeId) -> Option<Vec<i64>> {
+        let mut current = input;
+        let mut permutations = Vec::new();
+        while crate::fx_target::is_tosa_transpose_target(&self.node(current).target)
+            || crate::fx_target::is_permute_target(&self.node(current).target)
+        {
+            permutations.push(self.node(current).arg_int_list(1)?);
+            current = self.node(current).arg_node(0)?;
+        }
+        let mut physical = self.node_shape_vec(current)?;
+        if let Some(order) = self.node(current).meta.tosa_dim_order() {
+            if order.len() != physical.len() {
+                return None;
+            }
+            physical = order
+                .iter()
+                .map(|&axis| physical.get(axis).copied())
+                .collect::<Option<Vec<_>>>()?;
+        }
+        // A generated transpose's val and dim-order metadata both describe
+        // its layout; derive its physical shape from the operand and perms.
+        for permutation in permutations.into_iter().rev() {
+            if permutation.len() != physical.len() {
+                return None;
+            }
+            physical = permutation
+                .into_iter()
+                .map(|axis| normalize_dim(axis, physical.len()).map(|axis| physical[axis]))
+                .collect::<Option<Vec<_>>>()?;
+        }
+        let mut logical = physical.clone();
+        if let Some(order) = self
+            .node(node)
+            .meta
+            .tosa_dim_order()
+            .or(self.node(input).meta.tosa_dim_order())
+        {
+            if order.len() != physical.len() {
+                return None;
+            }
+            for (index, &axis) in order.iter().enumerate() {
+                *logical.get_mut(axis)? = physical[index];
+            }
+        }
+        Some(logical)
+    }
+
+    pub(crate) fn eliminate_dead_code(&mut self) -> bool {
+        let mut reachable = vec![false; self.nodes.len()];
+        let mut stack: Vec<_> = self
+            .live_nodes()
+            .filter(|node| {
+                matches!(
+                    node.op,
+                    NodeOp::Placeholder | NodeOp::Output | NodeOp::Other
+                )
+            })
+            .map(|node| node.id)
+            .collect();
+        while let Some(id) = stack.pop() {
+            if reachable[id] || !self.nodes[id].alive {
+                continue;
+            }
+            reachable[id] = true;
+            for arg in self.nodes[id]
+                .args
+                .iter()
+                .chain(self.nodes[id].kwargs.values())
+            {
+                arg.collect_node_ids(&mut stack);
+            }
+        }
+        let mut modified = false;
+        for node in &mut self.nodes {
+            if node.alive && !reachable[node.id] {
+                node.alive = false;
+                modified = true;
+            }
+        }
+        if modified {
+            self.rebuild_users();
+        }
+        modified
+    }
+
     pub fn live_call_function_ids(&self) -> Vec<NodeId> {
         self.live_nodes()
             .filter(|node| node.op == NodeOp::CallFunction)
@@ -853,6 +1026,9 @@ impl IrGraph {
                 continue;
             }
             for arg in &mut node.args {
+                replace_in_arg(arg, old_id, new_id);
+            }
+            for arg in node.kwargs.values_mut() {
                 replace_in_arg(arg, old_id, new_id);
             }
         }
@@ -1339,6 +1515,7 @@ impl IrRewriteCursor<'_> {
         self.append_existing(id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn slice_copy(
         &mut self,
         name: impl Into<String>,
@@ -1535,6 +1712,17 @@ impl IrArg {
             _ => false,
         }
     }
+    pub(crate) fn collect_node_ids(&self, ids: &mut Vec<NodeId>) {
+        match self {
+            IrArg::Node(id) => ids.push(*id),
+            IrArg::List(items) => {
+                for item in items {
+                    item.collect_node_ids(ids);
+                }
+            }
+            _ => {}
+        }
+    }
     pub fn as_int_list(&self) -> Option<Vec<i64>> {
         match self {
             IrArg::List(items) => items.iter().map(|a| a.as_int()).collect(),
@@ -1558,6 +1746,70 @@ impl IrArg {
             _ => None,
         }
     }
+}
+
+// ===========================================================================
+// IR pipeline: one persistent IrGraph, with lowering effects deferred to serialization
+// ===========================================================================
+
+/// A pipeline step: a pure `IrPass`, or an `EffectfulIrPass` that also records
+/// deferred lowering effects.
+pub enum PipelineStep {
+    Ir(Box<dyn IrPass>),
+    Effectful(Box<dyn EffectfulIrPass>),
+}
+
+/// Run `steps` over `graph` and collect the effectful passes' lowering effects.
+pub fn run_ir_pipeline(
+    steps: &[PipelineStep],
+    mut graph: IrGraph,
+) -> (bool, IrGraph, LoweringEffectBatch) {
+    use crate::runner_logging::{log_pass_result, log_pass_start};
+
+    let mut any_modified = false;
+    let mut effects = LoweringEffectBatch::default();
+    let probe = crate::config::debug_node_probe();
+    let probe_after = |graph: &IrGraph, pass: &str| {
+        let Some(needle) = probe.as_deref() else {
+            return;
+        };
+        for node in graph.live_nodes().filter(|node| node.name.contains(needle)) {
+            eprintln!(
+                "[NodeProbe] after {pass}: {} target={} shape={:?} dtype={:?} out_qparam={:?}",
+                node.name,
+                node.target,
+                graph.node_shape(node.id),
+                node.meta.val_dtype(),
+                node.meta
+                    .output_qparam()
+                    .map(|q| (q.scale, q.zp, q.dtype_str.clone())),
+            );
+        }
+    };
+
+    for (i, step) in steps.iter().enumerate() {
+        let before = graph.live_node_count();
+        let (name, modified) = match step {
+            PipelineStep::Ir(pass) => {
+                log_pass_start("IrPipeline", i, steps.len(), pass.name());
+                (pass.name(), pass.run(&mut graph))
+            }
+            PipelineStep::Effectful(pass) => {
+                log_pass_start("IrPipeline", i, steps.len(), pass.name());
+                let result = pass.run(&mut graph);
+                let changed = result.changed();
+                if changed {
+                    effects.items.extend(result.effects.items);
+                }
+                (pass.name(), changed)
+            }
+        };
+        log_pass_result("IrPipeline", name, modified, before, graph.live_node_count());
+        probe_after(&graph, name);
+        any_modified |= modified;
+    }
+
+    (any_modified, graph, effects)
 }
 
 #[cfg(test)]
@@ -1751,92 +2003,4 @@ mod tests {
         assert_eq!(graph.anchors_after.get(&slice), Some(&x));
         assert!(!graph.anchors.contains_key(&slice));
     }
-}
-
-// ===========================================================================
-// Hybrid pipeline: persistent IrGraph with deferred lowering effects
-// ===========================================================================
-
-/// A step in the hybrid pipeline: either a pure Rust `IrPass` or an `EffectfulIrPass`
-/// with deferred lowering effects.
-pub enum PipelineStep {
-    Ir(Box<dyn IrPass>),
-    Effectful(Box<dyn EffectfulIrPass>),
-}
-
-pub fn run_hybrid_pipeline_ext_with_initial_ir<'py>(
-    _py: Python<'py>,
-    gm: &Bound<'py, PyAny>,
-    exported_program: Option<&Bound<'py, PyAny>>,
-    steps: &[PipelineStep],
-    initial_ir: Option<IrGraph>,
-) -> PyResult<(bool, Option<IrGraph>, LoweringEffectBatch)> {
-    use crate::runner_logging::{log_pass_result, log_pass_start};
-
-    let mut ir = initial_ir;
-    let mut any_modified = false;
-    let mut effects = LoweringEffectBatch::default();
-    let probe = crate::config::debug_node_probe();
-    let probe_after = |graph: &IrGraph, pass: &str| {
-        let Some(needle) = probe.as_deref() else {
-            return;
-        };
-        for node in graph.live_nodes().filter(|node| node.name.contains(needle)) {
-            eprintln!(
-                "[NodeProbe] after {pass}: {} target={} shape={:?} dtype={:?} out_qparam={:?}",
-                node.name,
-                node.target,
-                graph.node_shape(node.id),
-                node.meta.val_dtype(),
-                node.meta
-                    .output_qparam()
-                    .map(|q| (q.scale, q.zp, q.dtype_str.clone())),
-            );
-        }
-    };
-
-    for (i, step) in steps.iter().enumerate() {
-        match step {
-            PipelineStep::Ir(pass) => {
-                // Ensure we have an IrGraph
-                if ir.is_none() {
-                    ir = Some(IrGraph::from_fx_with_tensors(gm, exported_program)?);
-                }
-                let graph = ir.as_mut().unwrap();
-                let before = graph.live_node_count();
-                log_pass_start("HybridPipeline", i, steps.len(), pass.name());
-                let modified = pass.run(graph);
-                let after = graph.live_node_count();
-                log_pass_result("HybridPipeline", pass.name(), modified, before, after);
-                probe_after(graph, pass.name());
-                if modified {
-                    any_modified = true;
-                }
-            }
-            PipelineStep::Effectful(pass) => {
-                if ir.is_none() {
-                    ir = Some(IrGraph::from_fx_with_tensors(gm, exported_program)?);
-                }
-                let graph = ir.as_mut().unwrap();
-                let before = graph.live_node_count();
-                log_pass_start("HybridPipeline", i, steps.len(), pass.name());
-                let result = pass.run(graph);
-                let after = graph.live_node_count();
-                log_pass_result(
-                    "HybridPipeline",
-                    pass.name(),
-                    result.changed(),
-                    before,
-                    after,
-                );
-                probe_after(graph, pass.name());
-                if result.changed() {
-                    any_modified = true;
-                    effects.items.extend(result.effects.items);
-                }
-            }
-        }
-    }
-
-    Ok((any_modified, ir, effects))
 }

@@ -19,10 +19,7 @@ use crate::fx_rewrite_squeeze_ir;
 use crate::pipeline_config::{PipelineConfig, SoftmaxDecompositionConfig};
 
 /// Build the lowering pipeline over the persistent IrGraph.
-pub fn build_hybrid_pipeline(
-    _exported_program: Option<pyo3::Py<pyo3::PyAny>>,
-    config: &PipelineConfig,
-) -> Vec<crate::fx_ir::PipelineStep> {
+pub fn build_main_pipeline(config: &PipelineConfig) -> Vec<crate::fx_ir::PipelineStep> {
     lowering_steps(true, config)
 }
 
@@ -57,11 +54,14 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(crate::fx_fold_qdq_ir::IrFoldQdqPass {
             preserve_partial_binary_tensor_qdq: config.support_float,
         })),
-        Ir(Box::new(crate::fx_decompose_flip_ir::IrDecomposeFlipPass)),
-        Ir(Box::new(crate::fx_decompose_roll_ir::IrDecomposeRollPass)),
+        Ir(Box::new(
+            crate::fx_fuse_consecutive_clamps_ir::IrFuseConsecutiveClampsPass,
+        )),
         Ir(Box::new(
             crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass,
         )),
+        Ir(Box::new(crate::fx_decompose_flip_ir::IrDecomposeFlipPass)),
+        Ir(Box::new(crate::fx_decompose_roll_ir::IrDecomposeRollPass)),
         Ir(Box::new(
             crate::fx_decompose_linear_ir::IrDecomposeLinearPass,
         )),
@@ -214,7 +214,6 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(
             crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
         )),
-        Ir(Box::new(crate::fx_rewrite_pad_ir::IrRewritePadPass)),
         // -- Postprocessing --
         Effectful(Box::new(
             crate::fx_cast_int64_ir::IrCastInt64ToInt32EffectPass,
@@ -237,17 +236,36 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Effectful(Box::new(
             crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEffectPass,
         )),
+        // Before the layout pass, so the chunks get dim orders like any other node.
+        Ir(Box::new(
+            crate::fx_decompose_permute_for_u55_ir::IrDecomposePermuteForU55Pass {
+                split_permutes: config.u55_split_permutes.clone(),
+            },
+        )),
         // Copy lowering compares logical shapes and emits views/repeats for layout conversion.
         Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)),
         Ir(Box::new(
             crate::fx_memory_format_ir::IrToTosaMemoryFormatPass,
         )),
+        Ir(Box::new(crate::fx_rewrite_pad_ir::IrRewritePadPass)),
         Ir(Box::new(
-            crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass,
+            crate::fx_rewrite_cat_slice_ir::IrRewriteCatSlicePass,
         )),
         Ir(Box::new(
-            crate::fx_insert_conv_rescale_ir::IrInsertConvAccumulatorRescalePass,
+            crate::fx_fuse_consecutive_concats_ir::IrFuseConsecutiveConcatsPass,
         )),
+        // Slice-view propagation matches aten.slice_copy, which RewriteSlice retargets.
+        Ir(Box::new(
+            crate::fx_propagate_slice_views_ir::IrPropagateSliceViewsPass,
+        )),
+        Ir(Box::new(
+            crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
+        )),
+        Ir(Box::new(crate::fx_rewrite_slice_ir::IrRewriteSlicePass)),
+        Ir(Box::new(
+            crate::fx_fuse_consecutive_slices_ir::IrFuseConsecutiveSlicesPass,
+        )),
+        Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)),
         Effectful(Box::new(
             crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass,
         )),
@@ -257,15 +275,26 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Effectful(Box::new(
             crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEffectPass::matmul_only(),
         )),
+        Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)),
+        Ir(Box::new(
+            crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass,
+        )),
+        Ir(Box::new(
+            crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass,
+        )),
+        Ir(Box::new(
+            crate::fx_insert_conv_rescale_ir::IrInsertConvAccumulatorRescalePass,
+        )),
     ]);
-    steps.push(Ir(Box::new(
-        crate::fx_propagate_slice_views_ir::IrPropagateSliceViewsPass,
-    )));
     steps.push(Ir(Box::new(
         crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
     )));
     steps.push(Ir(Box::new(
         crate::fx_fuse_cascaded_views_ir::IrFuseDuplicateViewsPass,
+    )));
+    // rc4 runs EnsureUniqueOutputNodes last; the while pipeline relies on that.
+    steps.push(Ir(Box::new(
+        crate::fx_ensure_unique_output_nodes_ir::IrEnsureUniqueOutputNodesPass,
     )));
     steps
 }
@@ -279,10 +308,12 @@ pub fn build_ir_while_submodule_pipeline(
     let mut steps = vec![Ir(Box::new(crate::control_flow::IrStripWhileBoundaryQPass))];
     // Boundary Q/DQ must survive until control_flow::contracts aligns region IO.
     steps.extend(lowering_steps(false, config));
-    // Loop-carried output alignment runs last, once the producer scales are final.
+    let unique_outputs = steps.pop().unwrap();
+    // Align loop-carried outputs once the producer scales are final.
     steps.push(Ir(Box::new(
         crate::control_flow::IrInsertCarriedOutputRescalePass,
     )));
+    steps.push(unique_outputs);
     steps
 }
 
@@ -305,6 +336,114 @@ mod tests {
                 PipelineStep::Effectful(pass) => pass.name().to_owned(),
             })
             .collect()
+    }
+
+    #[test]
+    fn rc4_fusions_and_cleanup_are_ordered_in_parent_and_region_pipelines() {
+        for spec in ["TOSA-1.0+FP", "TOSA-1.0+INT+u55", "TOSA-1.0+INT+cf"] {
+            let config = PipelineConfig::from_tosa_spec(spec);
+            for names in [
+                pass_names(lowering_steps(true, &config)),
+                pass_names(build_ir_cond_submodule_pipeline(&config)),
+                pass_names(build_ir_while_submodule_pipeline(&config)),
+            ] {
+                let position = |pass| names.iter().position(|name| name == pass).unwrap();
+                let fold = position("IrFoldQdq");
+                assert_eq!(
+                    &names[fold + 1..fold + 3],
+                    ["IrFuseConsecutiveClamps", "IrFuseDuplicateUsers"]
+                );
+                assert!(position("IrFuseConsecutiveClamps") < position("IrQuantizeClampArgs"));
+                let layout = position("IrToTosaMemoryFormat");
+                assert_eq!(names[layout - 1], "IrRemoveNoop");
+                assert_eq!(
+                    &names[layout + 1..layout + 9],
+                    [
+                        "IrRewritePad",
+                        "IrRewriteCatSlice",
+                        "IrFuseConsecutiveConcats",
+                        "IrPropagateSliceViews",
+                        "IrFuseCascadedViews",
+                        "IrRewriteSlice",
+                        "IrFuseConsecutiveSlices",
+                        "IrRemoveNoop"
+                    ]
+                );
+                let late_noop = names
+                    .iter()
+                    .rposition(|name| name == "IrRemoveNoop")
+                    .unwrap();
+                assert_eq!(
+                    &names[late_noop + 1..late_noop + 4],
+                    [
+                        "IrFuseDuplicateUsers",
+                        "IrRewriteMatmulRescale",
+                        "IrInsertConvAccumulatorRescale"
+                    ]
+                );
+                assert_eq!(names.last().unwrap(), "IrEnsureUniqueOutputNodes");
+            }
+        }
+    }
+
+    #[test]
+    fn late_fusion_merges_equal_constant_users_then_makes_outputs_unique() {
+        use crate::fx_ir::{IrArg, IrGraph};
+        use crate::test_ir::{buffer, f32_call, f32_placeholder, f32_tensor, output};
+
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 3]);
+        let first = buffer(&mut graph, "first", f32_tensor(vec![2, 3], &[1.0; 6]));
+        let second = buffer(&mut graph, "second", f32_tensor(vec![2, 3], &[1.0; 6]));
+        let left = f32_call(
+            &mut graph,
+            "left",
+            "aten.add.Tensor",
+            vec![IrArg::Node(x), IrArg::Node(first)],
+            [2, 3],
+        );
+        let right = f32_call(
+            &mut graph,
+            "right",
+            "aten.add.Tensor",
+            vec![IrArg::Node(x), IrArg::Node(second)],
+            [2, 3],
+        );
+        let out = output(&mut graph, left);
+        graph.set_args(
+            out,
+            vec![IrArg::List(vec![IrArg::Node(left), IrArg::Node(right)])],
+        );
+        let config = PipelineConfig::from_tosa_spec("TOSA-1.0+FP");
+        for step in lowering_steps(true, &config) {
+            match step {
+                PipelineStep::Ir(pass) => {
+                    pass.run(&mut graph);
+                }
+                PipelineStep::Effectful(pass) => {
+                    pass.run(&mut graph);
+                }
+            }
+        }
+        assert_eq!(
+            graph
+                .live_nodes()
+                .filter(|node| node.target == "aten.add.Tensor")
+                .count(),
+            1
+        );
+        let IrArg::List(outputs) = &graph.node(out).args[0] else {
+            panic!("output list")
+        };
+        let identities: Vec<_> = outputs
+            .iter()
+            .map(|arg| graph.node(arg.as_node().unwrap()))
+            .collect();
+        assert_ne!(identities[0].id, identities[1].id);
+        assert!(identities
+            .iter()
+            .all(|node| node.target == "backend.tosa.IDENTITY.default"));
+        assert_eq!(identities[0].arg_node(0), identities[1].arg_node(0));
     }
 
     #[test]

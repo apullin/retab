@@ -133,13 +133,13 @@ mod tests {
     #[test]
     fn decomposes_roll_into_tail_head_concat() {
         let mut graph = IrGraph::empty();
-        let x = placeholder(&mut graph, "x", &[2, 5], "torch.int8");
+        let x = placeholder(&mut graph, "x", [2, 5], "torch.int8");
         let roll = call(
             &mut graph,
             "roll",
             "aten.roll.default",
             vec![IrArg::Node(x), i64_list_arg(&[2]), i64_list_arg(&[1])],
-            &[2, 5],
+            [2, 5],
             "torch.int8",
         );
         output(&mut graph, roll);

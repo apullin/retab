@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::tosa_generated::{DType, Op};
+use super::tosa_types::{DType, Op};
 use super::visitors::EmitResult;
 
 #[derive(Default)]
@@ -85,7 +85,7 @@ impl ConstantPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serialize::tosa_generated::{Attribute, ConstAttribute, TosaTensor};
+    use crate::serialize::tosa_types::{Attribute, ConstAttribute, TosaTensor};
 
     fn zp_result(node: &str, zp: i8) -> EmitResult {
         let mut result = EmitResult::default();

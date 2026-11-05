@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn rewrites_left_shift_scalar_to_tensor_form() {
         let mut graph = IrGraph::empty();
-        let x = placeholder(&mut graph, "x", &[2, 3], "torch.int16");
+        let x = placeholder(&mut graph, "x", [2, 3], "torch.int16");
         let shift = call(
             &mut graph,
             "lshift",

@@ -352,12 +352,12 @@ mod tests {
     }
 
     fn int8_activation_meta() -> NodeMeta {
-        tensor_meta(&[1, 4, 8, 8], "torch.int8")
+        tensor_meta([1, 4, 8, 8], "torch.int8")
     }
 
     fn int8_conv(graph: &mut IrGraph, target: &str, meta: NodeMeta) -> NodeId {
-        let input = placeholder(graph, "input", &[1, 3, 8, 8], "torch.int8");
-        let weight = placeholder(graph, "weight", &[4, 3, 3, 3], "torch.int8");
+        let input = placeholder(graph, "input", [1, 3, 8, 8], "torch.int8");
+        let weight = placeholder(graph, "weight", [4, 3, 3, 3], "torch.int8");
         call(
             graph,
             "conv",
@@ -524,7 +524,7 @@ mod tests {
                 IrArg::Int(7),
                 IrArg::Int(0),
             ],
-            tensor_meta(&[1, 4, 8, 8], "torch.int32"),
+            tensor_meta([1, 4, 8, 8], "torch.int32"),
         );
 
         assert!(IrInsertConvAccumulatorRescalePass.run(&mut graph));
@@ -541,10 +541,10 @@ mod tests {
     #[test]
     fn decomposes_int16_bias_convolution_into_add_chain() {
         let mut graph = IrGraph::empty();
-        let input = placeholder(&mut graph, "input", &[1, 3, 8, 8], "torch.int16");
-        let weight = placeholder(&mut graph, "weight", &[4, 3, 3, 3], "torch.int8");
-        let bias = placeholder(&mut graph, "bias", &[4], "torch.int32");
-        let mut conv_meta = NodeMeta::tensor(&[1, 4, 8, 8], "torch.int16");
+        let input = placeholder(&mut graph, "input", [1, 3, 8, 8], "torch.int16");
+        let weight = placeholder(&mut graph, "weight", [4, 3, 3, 3], "torch.int8");
+        let bias = placeholder(&mut graph, "bias", [4], "torch.int32");
+        let mut conv_meta = NodeMeta::tensor([1, 4, 8, 8], "torch.int16");
         conv_meta.set_input_qparams_from([
             (0, qparam(0.5, 0, "torch.int16")),
             (1, per_channel_qparam(&[0.25, 0.5, 0.75, 1.0], "torch.int8")),
@@ -566,7 +566,7 @@ mod tests {
             "user",
             "aten.view_copy.default",
             vec![IrArg::Node(conv)],
-            tensor_meta(&[1, 4, 8, 8], "torch.int16"),
+            tensor_meta([1, 4, 8, 8], "torch.int16"),
         );
         output(&mut graph, user);
 

@@ -59,13 +59,13 @@ mod tests {
 
     fn flip_graph(dims: &[i64]) -> (IrGraph, crate::fx_ir::NodeId) {
         let mut graph = IrGraph::empty();
-        let x = placeholder(&mut graph, "x", &[1, 2, 3, 4], "torch.int8");
+        let x = placeholder(&mut graph, "x", [1, 2, 3, 4], "torch.int8");
         let flip = call(
             &mut graph,
             "flip",
             "aten.flip.default",
             vec![IrArg::Node(x), i64_list_arg(dims)],
-            &[1, 2, 3, 4],
+            [1, 2, 3, 4],
             "torch.int8",
         );
         output(&mut graph, flip);

@@ -173,7 +173,6 @@ impl IrPass for IrSizeAdjustInputPass {
                 );
                 current = slice_id;
             }
-            drop(cursor);
 
             // Update conv/pool's first arg to point to the sliced input
             graph.set_arg(id, 0, IrArg::Node(current));
@@ -197,6 +196,53 @@ mod tests {
     use super::*;
     use crate::fx_ir::i64_list_arg;
     use crate::test_ir::{f32_call, f32_placeholder, output};
+
+    #[test]
+    fn convolution_height_and_width_trims_fuse_after_layout_conversion() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [1, 3, 8, 8]);
+        let weight = f32_placeholder(&mut graph, "weight", [4, 3, 1, 1]);
+        let conv = f32_call(
+            &mut graph,
+            "conv",
+            "aten.convolution.default",
+            vec![
+                IrArg::Node(x),
+                IrArg::Node(weight),
+                IrArg::None,
+                i64_list_arg(&[2, 2]),
+                i64_list_arg(&[0, 0]),
+                i64_list_arg(&[1, 1]),
+                IrArg::Bool(false),
+                i64_list_arg(&[0, 0]),
+                IrArg::Int(1),
+            ],
+            [1, 4, 4, 4],
+        );
+        output(&mut graph, conv);
+        assert!(IrSizeAdjustInputPass.run(&mut graph));
+        assert_eq!(
+            graph
+                .live_nodes()
+                .filter(|node| node.target == "aten.slice_copy.Tensor")
+                .count(),
+            2
+        );
+        crate::fx_memory_format_ir::IrToTosaMemoryFormatPass.run(&mut graph);
+        assert!(crate::fx_rewrite_slice_ir::IrRewriteSlicePass.run(&mut graph));
+        assert!(crate::fx_fuse_consecutive_slices_ir::IrFuseConsecutiveSlicesPass.run(&mut graph));
+        let slice = graph.node(graph.node(conv).arg_node(0).unwrap());
+        assert_eq!(slice.target, "backend.tosa.SLICE.default");
+        assert_eq!(slice.arg_int_list(1), Some(vec![0, 0, 0, 0]));
+        assert_eq!(slice.arg_int_list(2), Some(vec![1, 3, 7, 7]));
+        assert_eq!(
+            graph
+                .live_nodes()
+                .filter(|node| node.target == "backend.tosa.SLICE.default")
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn regression_transposed_convolution_keeps_seven_by_seven_input() {

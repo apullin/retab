@@ -199,7 +199,7 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
         return false;
     }
     let meta = orig_meta.tensor_stamp_same_dtype_or_float32();
-    let input_shape = match graph.node_shape_vec(input_id) {
+    let input_shape = match graph.logical_input_shape(id, input_id) {
         Some(s) => s,
         None => return false,
     };
@@ -263,7 +263,6 @@ fn rewrite_one(graph: &mut IrGraph, id: NodeId) -> bool {
     }
 
     if mode == "constant" {
-        drop(cursor);
         let mut args = graph.nodes[id].args.clone();
         args[0] = IrArg::Node(cur_id);
         args[1] = i64_list_arg(&pad.iter().map(|&p| p.max(0)).collect::<Vec<_>>());
@@ -301,6 +300,43 @@ mod tests {
     use crate::fx_ir::i64_list_arg;
     use crate::fx_target::{is_cat_target, is_slice_copy_tensor_target};
     use crate::test_ir::{call, live_node as named, output, placeholder};
+
+    #[test]
+    fn fully_negative_constant_pad_lowers_to_one_slice() {
+        let mut graph = IrGraph::empty();
+        let x = placeholder(&mut graph, "x", [1, 2, 6, 8], "torch.int8");
+        let pad = call(
+            &mut graph,
+            "pad",
+            "aten.constant_pad_nd.default",
+            vec![
+                IrArg::Node(x),
+                i64_list_arg(&[-1, -2, -1, 0]),
+                IrArg::Int(5),
+            ],
+            [1, 2, 5, 5],
+            "torch.int8",
+        );
+        let qp = crate::test_ir::qparam(0.25, 3, "torch.int8");
+        graph.node_mut(pad).meta.set_both_qparams(qp.clone());
+        output(&mut graph, pad);
+        crate::fx_memory_format_ir::IrToTosaMemoryFormatPass.run(&mut graph);
+        assert!(IrRewritePadPass.run(&mut graph));
+        assert_eq!(graph.node(pad).arg_int_list(1), Some(vec![0, 0, 0, 0]));
+        assert!(crate::fx_rewrite_slice_ir::IrRewriteSlicePass.run(&mut graph));
+        assert!(crate::fx_fuse_consecutive_slices_ir::IrFuseConsecutiveSlicesPass.run(&mut graph));
+        assert!(crate::fx_remove_noop_ir::IrRemoveNoopPass.run(&mut graph));
+        assert!(!graph.node(pad).alive);
+        let slices: Vec<_> = graph
+            .live_nodes()
+            .filter(|node| node.target == "backend.tosa.SLICE.default")
+            .collect();
+        assert_eq!(slices.len(), 1);
+        assert_eq!(slices[0].arg_int_list(1), Some(vec![0, 0, 1, 1]));
+        assert_eq!(slices[0].arg_int_list(2), Some(vec![1, 2, 5, 5]));
+        assert_eq!(slices[0].meta.input_qparam(), Some(&qp));
+        assert_eq!(slices[0].meta.output_qparam(), Some(&qp));
+    }
 
     #[test]
     fn constant_negative_pad_crops_then_keeps_clamped_pad() {

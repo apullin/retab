@@ -20,7 +20,7 @@ backend.tosa.CLZ.default	Other
 backend.tosa.CONCAT.default	TosaConcat
 backend.tosa.CONCAT_SHAPE.default	Other
 backend.tosa.CONST.default	TosaConst
-backend.tosa.CONST_SHAPE.default	Other
+backend.tosa.CONST_SHAPE.default	TosaConstShape
 backend.tosa.CONV2D.default	TosaConv2d
 backend.tosa.CONV2D_BLOCK_SCALED.default	Other
 backend.tosa.CONV3D.default	TosaConv3d
@@ -39,7 +39,7 @@ backend.tosa.FLOOR.default	TosaFloor
 backend.tosa.GATHER.default	TosaGather
 backend.tosa.GREATER.default	TosaGreater
 backend.tosa.GREATER_EQUAL.default	TosaGreaterEqual
-backend.tosa.IDENTITY.default	Other
+backend.tosa.IDENTITY.default	TosaIdentity
 backend.tosa.INTDIV.default	TosaIntDiv
 backend.tosa.LOG.default	TosaLog
 backend.tosa.LOG2_CEIL_SHAPE.default	Other

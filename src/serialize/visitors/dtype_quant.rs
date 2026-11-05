@@ -196,11 +196,10 @@ pub(super) fn actual_tensor_dtype(graph: &Graph, node: &Node) -> DType {
 }
 
 fn actual_tensor_dtype_impl(graph: &Graph, node: &Node) -> DType {
-    if matches!(node.target, OpTarget::Sum) {
-        if node.meta.val.dtype.is_float() {
+    if matches!(node.target, OpTarget::Sum)
+        && node.meta.val.dtype.is_float() {
             return ir_dtype_to_tosa(node.meta.val.dtype);
         }
-    }
     match node.target {
         ref target if op_semantics::is_layout_dtype_passthrough(target) => {
             match node.args.first() {

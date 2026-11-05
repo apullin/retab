@@ -267,14 +267,14 @@ mod tests {
 
     fn div_graph(lhs: &str, rhs: &str, rhs_shape: &[i64], mode: &str) -> (IrGraph, NodeId) {
         let mut graph = IrGraph::empty();
-        let a = placeholder(&mut graph, "a", &[4, 8], lhs);
+        let a = placeholder(&mut graph, "a", [4, 8], lhs);
         let b = placeholder(&mut graph, "b", rhs_shape, rhs);
         let div = call(
             &mut graph,
             "div",
             "aten.div.Tensor_mode",
             vec![IrArg::Node(a), IrArg::Node(b)],
-            &[4, 8],
+            [4, 8],
             lhs,
         );
         graph.node_mut(div).kwargs =

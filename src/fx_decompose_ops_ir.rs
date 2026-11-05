@@ -336,658 +336,6 @@ fn decompose_pow_scalar(graph: &mut IrGraph, id: NodeId) -> bool {
     true
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::fx_ir::{NodeMeta, NodeOp};
-    use crate::test_ir::{
-        call, f32_call, f32_meta, f32_placeholder, has_live_target, live_node, meta as tensor_meta,
-        placeholder,
-    };
-
-    use super::*;
-
-    #[test]
-    fn decompose_max_dim_rewrites_to_amax_and_squeeze() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[2, 3, 4]);
-        let max = graph.add_node(
-            NodeOp::CallFunction,
-            "max".to_string(),
-            "executorch.exir.dialects.edge._ops.aten.max.dim".to_string(),
-            vec![IrArg::Node(x), IrArg::Int(1)],
-            NodeMeta::default(),
-        );
-        let getitem = graph.add_node(
-            NodeOp::CallFunction,
-            "getitem".to_string(),
-            "getitem".to_string(),
-            vec![IrArg::Node(max), IrArg::Int(0)],
-            f32_meta(&[2, 4]),
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[max].alive);
-        assert!(!graph.nodes[getitem].alive);
-
-        let reduce = graph
-            .nodes
-            .iter()
-            .find(|node| node.alive && node.name == "max_amax")
-            .expect("amax node");
-        assert_eq!(reduce.target, "aten.amax.default");
-        assert_eq!(reduce.args[0].as_node(), Some(x));
-        assert_eq!(reduce.args[1].as_int(), Some(1));
-        assert_eq!(reduce.args[2].as_bool(), Some(true));
-        assert_eq!(reduce.meta.val_shape().unwrap(), &[2, 1, 4]);
-
-        let squeeze = graph
-            .nodes
-            .iter()
-            .find(|node| node.alive && node.name == "max_result")
-            .expect("squeeze node");
-        assert_eq!(squeeze.target, "aten.squeeze_copy.dims");
-        assert_eq!(squeeze.args[0].as_node(), Some(reduce.id));
-        assert_eq!(squeeze.meta.val_shape().unwrap(), &[2, 4]);
-    }
-
-    #[test]
-    fn skips_max_dim_when_index_output_is_live() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[2, 3, 4]);
-        let max = graph.add_node(
-            NodeOp::CallFunction,
-            "max".to_string(),
-            "executorch.exir.dialects.edge._ops.aten.max.dim".to_string(),
-            vec![IrArg::Node(x), IrArg::Int(1)],
-            NodeMeta::default(),
-        );
-        let _values = graph.add_node(
-            NodeOp::CallFunction,
-            "getitem".to_string(),
-            "getitem".to_string(),
-            vec![IrArg::Node(max), IrArg::Int(0)],
-            f32_meta(&[2, 4]),
-        );
-        let indices = graph.add_node(
-            NodeOp::CallFunction,
-            "getitem_1".to_string(),
-            "getitem".to_string(),
-            vec![IrArg::Node(max), IrArg::Int(1)],
-            tensor_meta(&[2, 4], "torch.int64"),
-        );
-        let _use_indices = graph.add_node(
-            NodeOp::CallFunction,
-            "use_indices".to_string(),
-            "aten.add.Tensor".to_string(),
-            vec![IrArg::Node(indices), IrArg::Node(indices)],
-            tensor_meta(&[2, 4], "torch.int64"),
-        );
-
-        assert!(!IrDecomposeOpsPass.run(&mut graph));
-        assert!(graph.nodes[max].alive);
-        assert!(graph.nodes[indices].alive);
-    }
-
-    #[test]
-    fn decompose_atan_rewrites_to_piecewise_chain() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[2, 3]);
-        let atan = f32_call(
-            &mut graph,
-            "atan",
-            "aten.atan.default",
-            vec![IrArg::Node(x)],
-            &[2, 3],
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[atan].alive);
-        assert!(has_live_target(&graph, "atan_result", "aten.where.self"));
-    }
-
-    #[test]
-    fn decompose_acos_rewrites_to_piecewise_chain() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[2, 3]);
-        let acos = f32_call(
-            &mut graph,
-            "acos",
-            "aten.acos.default",
-            vec![IrArg::Node(x)],
-            &[2, 3],
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[acos].alive);
-        assert!(has_live_target(&graph, "acos_result", "aten.where.self"));
-    }
-
-    #[test]
-    fn decompose_softmax_rewrites_to_reduce_exp_chain() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[2, 3, 4]);
-        let softmax = f32_call(
-            &mut graph,
-            "softmax",
-            "aten._softmax.default",
-            vec![IrArg::Node(x), IrArg::Int(1)],
-            &[2, 3, 4],
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[softmax].alive);
-        // softmax decomposes to amax -> sub -> exp -> sum -> reciprocal -> mul (-> clone)
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|n| n.alive && n.target == "aten.amax.default"));
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|n| n.alive && n.target == "aten.exp.default"));
-        assert!(graph
-            .nodes
-            .iter()
-            .any(|n| n.alive && n.target == "aten.reciprocal.default"));
-        assert!(has_live_target(
-            &graph,
-            "softmax_softmax",
-            "aten.mul.Tensor"
-        ));
-    }
-
-    #[test]
-    fn decompose_log_softmax_subtracts_log_of_sum_exp() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[2, 3, 4]);
-        let log_softmax = f32_call(
-            &mut graph,
-            "log_softmax",
-            "aten._log_softmax.default",
-            vec![IrArg::Node(x), IrArg::Int(1)],
-            &[2, 3, 4],
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[log_softmax].alive);
-        assert!(has_live_target(
-            &graph,
-            "log_softmax_result",
-            "aten.sub.Tensor"
-        ));
-        let log = live_node(&graph, "log_softmax_log_sum");
-        assert_eq!(log.target, "aten.log.default");
-        assert_eq!(
-            log.first_node_arg(),
-            Some(live_node(&graph, "log_softmax_sum").id)
-        );
-        assert_eq!(log.meta.val_shape(), Some([2, 1, 4].as_slice()));
-        let result = live_node(&graph, "log_softmax_result");
-        assert_eq!(
-            result.args[0].as_node(),
-            Some(live_node(&graph, "log_softmax_shifted").id)
-        );
-        assert_eq!(result.args[1].as_node(), Some(log.id));
-        assert!(!graph.nodes.iter().any(|node| node.alive
-            && matches!(
-                node.target.as_str(),
-                "aten.reciprocal.default" | "aten.mul.Tensor"
-            )));
-    }
-
-    #[test]
-    fn decompose_add_with_alpha_scales_rhs_before_add() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[1, 4, 5]);
-        let y = f32_placeholder(&mut graph, "y", &[4, 1]);
-        let add = f32_call(
-            &mut graph,
-            "add",
-            "aten.add.Tensor",
-            vec![IrArg::Node(x), IrArg::Node(y), IrArg::Float(1.5)],
-            &[1, 4, 5],
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[add].alive);
-
-        let scaled_rhs = live_node(&graph, "add_alpha_mul");
-        assert_eq!(scaled_rhs.target, "aten.mul.Tensor");
-
-        let final_add = live_node(&graph, "add_alpha_result");
-        assert_eq!(final_add.target, "aten.add.Tensor");
-        assert_eq!(final_add.args.len(), 2);
-        assert_eq!(final_add.args[0].as_node(), Some(x));
-        assert_eq!(final_add.args[1].as_node(), Some(scaled_rhs.id));
-    }
-
-    #[test]
-    fn decompose_tan_rewrites_to_sin_cos_div() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[2, 3]);
-        let tan = f32_call(
-            &mut graph,
-            "tan",
-            "aten.tan.default",
-            vec![IrArg::Node(x)],
-            &[2, 3],
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[tan].alive);
-
-        let sin = live_node(&graph, "tan_sin");
-        assert_eq!(sin.target, "aten.sin.default");
-        assert_eq!(sin.args[0].as_node(), Some(x));
-
-        let cos = live_node(&graph, "tan_cos");
-        assert_eq!(cos.target, "aten.cos.default");
-        assert_eq!(cos.args[0].as_node(), Some(x));
-
-        let div = live_node(&graph, "tan_result");
-        assert_eq!(div.target, "aten.div.Tensor");
-        assert_eq!(div.args[0].as_node(), Some(sin.id));
-        assert_eq!(div.args[1].as_node(), Some(cos.id));
-    }
-
-    #[test]
-    fn decompose_pow_scalar_zero_rewrites_to_full_like() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[1, 2, 3, 7]);
-        let pow = f32_call(
-            &mut graph,
-            "pow",
-            "aten.pow.Tensor_Scalar",
-            vec![IrArg::Node(x), IrArg::Float(0.0)],
-            &[1, 2, 3, 7],
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[pow].alive);
-
-        let eq = live_node(&graph, "pow_self_eq");
-        assert_eq!(eq.target, "aten.eq.Tensor");
-        assert_eq!(eq.args[0].as_node(), Some(x));
-        assert_eq!(eq.args[1].as_node(), Some(x));
-
-        let one = live_node(&graph, "pow_one");
-        assert_eq!(one.target, "aten.full.default");
-
-        let ones = live_node(&graph, "pow_ones");
-        assert_eq!(ones.target, "aten.where.self");
-        assert_eq!(ones.args[0].as_node(), Some(eq.id));
-        assert_eq!(ones.args[1].as_node(), Some(one.id));
-        assert_eq!(ones.args[2].as_node(), Some(one.id));
-    }
-
-    #[test]
-    fn decompose_pow_scalar_positive_int_rewrites_to_mul_chain() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[1, 2, 3, 6]);
-        let pow = f32_call(
-            &mut graph,
-            "pow",
-            "aten.pow.Tensor_Scalar",
-            vec![IrArg::Node(x), IrArg::Int(3)],
-            &[1, 2, 3, 6],
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[pow].alive);
-
-        let mul1 = live_node(&graph, "pow_mul1");
-        assert_eq!(mul1.target, "aten.mul.Tensor");
-        assert_eq!(mul1.args[0].as_node(), Some(x));
-        assert_eq!(mul1.args[1].as_node(), Some(x));
-
-        let mul2 = live_node(&graph, "pow_mul2");
-        assert_eq!(mul2.target, "aten.mul.Tensor");
-        assert_eq!(mul2.args[0].as_node(), Some(mul1.id));
-        assert_eq!(mul2.args[1].as_node(), Some(x));
-    }
-
-    #[test]
-    fn decompose_pow_scalar_positive_int_float_rewrites_to_mul_chain() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[1, 2, 3, 6]);
-        let pow = f32_call(
-            &mut graph,
-            "pow",
-            "aten.pow.Tensor_Scalar",
-            vec![IrArg::Node(x), IrArg::Float(2.0)],
-            &[1, 2, 3, 6],
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[pow].alive);
-
-        let mul1 = live_node(&graph, "pow_mul1");
-        assert_eq!(mul1.target, "aten.mul.Tensor");
-        assert_eq!(mul1.args[0].as_node(), Some(x));
-        assert_eq!(mul1.args[1].as_node(), Some(x));
-    }
-
-    #[test]
-    fn skips_tan_inside_quantized_envelope() {
-        let mut graph = IrGraph::empty();
-        let x = placeholder(&mut graph, "x", &[2, 3], "torch.int8");
-        let dq = f32_call(
-            &mut graph,
-            "x_dq",
-            "quantized_decomposed.dequantize_per_tensor.default",
-            vec![IrArg::Node(x)],
-            &[2, 3],
-        );
-        let tan = f32_call(
-            &mut graph,
-            "tan",
-            "aten.tan.default",
-            vec![IrArg::Node(dq)],
-            &[2, 3],
-        );
-        let q = call(
-            &mut graph,
-            "tan_q",
-            "quantized_decomposed.quantize_per_tensor.default",
-            vec![IrArg::Node(tan)],
-            &[2, 3],
-            "torch.int8",
-        );
-
-        assert!(!IrDecomposeOpsPass.run(&mut graph));
-        assert!(graph.nodes[tan].alive);
-        assert_eq!(graph.nodes[tan].target, "aten.tan.default");
-        assert!(graph.nodes[q].alive);
-    }
-
-    #[test]
-    fn skips_pow_inside_quantized_envelope() {
-        let mut graph = IrGraph::empty();
-        let x = placeholder(&mut graph, "x", &[1, 2, 3, 6], "torch.int8");
-        let dq = f32_call(
-            &mut graph,
-            "x_dq",
-            "quantized_decomposed.dequantize_per_tensor.default",
-            vec![IrArg::Node(x)],
-            &[1, 2, 3, 6],
-        );
-        let pow = f32_call(
-            &mut graph,
-            "pow",
-            "aten.pow.Tensor_Scalar",
-            vec![IrArg::Node(dq), IrArg::Int(3)],
-            &[1, 2, 3, 6],
-        );
-        let q = call(
-            &mut graph,
-            "pow_q",
-            "quantized_decomposed.quantize_per_tensor.default",
-            vec![IrArg::Node(pow)],
-            &[1, 2, 3, 6],
-            "torch.int8",
-        );
-
-        assert!(!IrDecomposeOpsPass.run(&mut graph));
-        assert!(graph.nodes[pow].alive);
-        assert_eq!(graph.nodes[pow].target, "aten.pow.Tensor_Scalar");
-        assert!(graph.nodes[q].alive);
-    }
-
-    #[test]
-    fn decompose_sinh_rewrites_via_exp_sub_mul() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[2, 3]);
-        let sinh = f32_call(
-            &mut graph,
-            "sinh",
-            "aten.sinh.default",
-            vec![IrArg::Node(x)],
-            &[2, 3],
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[sinh].alive);
-        assert!(has_live_target(&graph, "sinh_result", "aten.mul.Tensor"));
-    }
-
-    #[test]
-    fn decompose_cosh_rewrites_via_exp_add_mul() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[2, 3]);
-        let cosh = f32_call(
-            &mut graph,
-            "cosh",
-            "aten.cosh.default",
-            vec![IrArg::Node(x)],
-            &[2, 3],
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[cosh].alive);
-        assert!(has_live_target(&graph, "cosh_result", "aten.mul.Tensor"));
-    }
-
-    #[test]
-    fn decompose_asinh_rewrites_via_log_and_sqrt() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[2, 3]);
-        let asinh = f32_call(
-            &mut graph,
-            "asinh",
-            "aten.asinh.default",
-            vec![IrArg::Node(x)],
-            &[2, 3],
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[asinh].alive);
-        assert!(has_live_target(&graph, "asinh_result", "aten.log.default"));
-    }
-
-    #[test]
-    fn decompose_acosh_rewrites_via_log_and_sqrt() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[2, 3]);
-        let acosh = f32_call(
-            &mut graph,
-            "acosh",
-            "aten.acosh.default",
-            vec![IrArg::Node(x)],
-            &[2, 3],
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[acosh].alive);
-        assert!(has_live_target(&graph, "acosh_result", "aten.log.default"));
-    }
-
-    #[test]
-    fn decompose_elu_rewrites_via_expm1_ge_where() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[2, 3]);
-        let elu = f32_call(
-            &mut graph,
-            "elu",
-            "aten.elu.default",
-            vec![IrArg::Node(x), IrArg::Float(2.0)],
-            &[2, 3],
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[elu].alive);
-        assert!(has_live_target(&graph, "elu_result", "aten.where.self"));
-    }
-
-    #[test]
-    fn decompose_gelu_none_rewrites_via_erf() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[2, 3]);
-        let gelu = f32_call(
-            &mut graph,
-            "gelu",
-            "aten.gelu.default",
-            vec![IrArg::Node(x)],
-            &[2, 3],
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[gelu].alive);
-        assert!(has_live_target(&graph, "gelu_result", "aten.mul.Tensor"));
-        assert!(has_live_target(&graph, "gelu_erf", "aten.erf.default"));
-    }
-
-    #[test]
-    fn decompose_gelu_tanh_rewrites_via_tanh() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[2, 3]);
-        let gelu = f32_call(
-            &mut graph,
-            "gelu",
-            "aten.gelu.default",
-            vec![IrArg::Node(x)],
-            &[2, 3],
-        );
-        graph.set_kwarg(gelu, "approximate", IrArg::Str("tanh".to_string()));
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[gelu].alive);
-        assert!(has_live_target(&graph, "gelu_tanh", "aten.tanh.default"));
-    }
-
-    #[test]
-    fn decompose_batch_norm_rewrites_to_elementwise_chain() {
-        let mut graph = IrGraph::empty();
-        let x = graph.add_node(
-            NodeOp::Placeholder,
-            "x".to_string(),
-            "x".to_string(),
-            vec![],
-            NodeMeta::tensor(&[1, 4, 5, 6], "torch.float32"),
-        );
-        let weight = graph.add_node(
-            NodeOp::Placeholder,
-            "weight".to_string(),
-            "weight".to_string(),
-            vec![],
-            NodeMeta::tensor(&[4], "torch.float32"),
-        );
-        let bias = graph.add_node(
-            NodeOp::Placeholder,
-            "bias".to_string(),
-            "bias".to_string(),
-            vec![],
-            NodeMeta::tensor(&[4], "torch.float32"),
-        );
-        let mean = graph.add_node(
-            NodeOp::Placeholder,
-            "mean".to_string(),
-            "mean".to_string(),
-            vec![],
-            NodeMeta::tensor(&[4], "torch.float32"),
-        );
-        let var = graph.add_node(
-            NodeOp::Placeholder,
-            "var".to_string(),
-            "var".to_string(),
-            vec![],
-            NodeMeta::tensor(&[4], "torch.float32"),
-        );
-        let bn = graph.add_node(
-            NodeOp::CallFunction,
-            "bn".to_string(),
-            "aten.batch_norm.default".to_string(),
-            vec![
-                IrArg::Node(x),
-                IrArg::Node(weight),
-                IrArg::Node(bias),
-                IrArg::Node(mean),
-                IrArg::Node(var),
-                IrArg::Bool(false),
-                IrArg::Float(0.1),
-                IrArg::Float(1.0e-5),
-                IrArg::Bool(false),
-            ],
-            NodeMeta::tensor(&[1, 4, 5, 6], "torch.float32"),
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[bn].alive);
-        assert!(graph.nodes.iter().any(|node| node.alive
-            && node.name == "bn_result"
-            && node.target == "aten.add.Tensor"));
-        assert!(graph.nodes.iter().any(|node| node.alive
-            && node.name == "bn_inv_sqrt"
-            && node.target == "aten.rsqrt.default"));
-        let result = graph
-            .nodes
-            .iter()
-            .find(|node| node.alive && node.name == "bn_result")
-            .expect("result");
-        assert_eq!(result.meta.val_shape().unwrap(), &[1, 4, 5, 6]);
-        let mean_view = graph
-            .nodes
-            .iter()
-            .find(|node| node.alive && node.name == "bn_mean_view")
-            .expect("mean view");
-        assert_eq!(mean_view.meta.val_shape().unwrap(), &[1, 4, 1, 1]);
-    }
-
-    #[test]
-    fn decompose_group_norm_rewrites_to_reduction_chain() {
-        let mut graph = IrGraph::empty();
-        let x = graph.add_node(
-            NodeOp::Placeholder,
-            "x".to_string(),
-            "x".to_string(),
-            vec![],
-            NodeMeta::tensor(&[1, 6, 8], "torch.float32"),
-        );
-        let weight = graph.add_node(
-            NodeOp::Placeholder,
-            "weight".to_string(),
-            "weight".to_string(),
-            vec![],
-            NodeMeta::tensor(&[6], "torch.float32"),
-        );
-        let bias = graph.add_node(
-            NodeOp::Placeholder,
-            "bias".to_string(),
-            "bias".to_string(),
-            vec![],
-            NodeMeta::tensor(&[6], "torch.float32"),
-        );
-        let gn = graph.add_node(
-            NodeOp::CallFunction,
-            "gn".to_string(),
-            "aten.group_norm.default".to_string(),
-            vec![
-                IrArg::Node(x),
-                IrArg::Int(2),
-                IrArg::Node(weight),
-                IrArg::Node(bias),
-                IrArg::Float(1.0e-5),
-                IrArg::Bool(true),
-            ],
-            NodeMeta::tensor(&[1, 6, 8], "torch.float32"),
-        );
-
-        assert!(IrDecomposeOpsPass.run(&mut graph));
-        assert!(!graph.nodes[gn].alive);
-        assert!(graph.nodes.iter().any(|node| node.alive
-            && node.name == "gn_grouped"
-            && node.target == "aten.reshape.default"));
-        assert!(graph.nodes.iter().any(|node| node.alive
-            && node.name == "gn_result"
-            && node.target == "aten.reshape.default"));
-        let grouped = graph
-            .nodes
-            .iter()
-            .find(|node| node.alive && node.name == "gn_grouped")
-            .expect("grouped");
-        assert_eq!(grouped.meta.val_shape().unwrap(), &[1, 2, 3, 8]);
-    }
-}
-
 fn decompose_dim_extrema(graph: &mut IrGraph, id: NodeId) -> bool {
     let node_target = graph.nodes[id].target.clone();
     let node_name = graph.nodes[id].name.clone();
@@ -1449,7 +797,7 @@ fn decompose_gelu(graph: &mut IrGraph, id: NodeId) -> bool {
         "tanh" => {
             let sqrt_two = ctx.full_scalar(&mut cursor, "sqrt_two", std::f64::consts::SQRT_2);
             let two_over_sqrt_pi =
-                ctx.full_scalar(&mut cursor, "two_over_sqrt_pi", 1.128_379_167_095_512_6);
+                ctx.full_scalar(&mut cursor, "two_over_sqrt_pi", std::f64::consts::FRAC_2_SQRT_PI);
             let cube_coeff = ctx.full_scalar(&mut cursor, "cube_coeff", 0.044_715);
 
             let sqrt_mul = ctx.tensor_scalar(
@@ -1509,7 +857,7 @@ fn decompose_erfinv(graph: &mut IrGraph, id: NodeId) -> bool {
     let deriv_eps = ctx.full_scalar(&mut cursor, "deriv_eps", 1.0e-3);
     let corr_max = ctx.full_scalar(&mut cursor, "corr_max", 0.5);
     let two_over_sqrt_pi =
-        ctx.full_scalar(&mut cursor, "two_over_sqrt_pi", 1.128_379_167_095_512_6);
+        ctx.full_scalar(&mut cursor, "two_over_sqrt_pi", std::f64::consts::FRAC_2_SQRT_PI);
     let nan = ctx.full_scalar(&mut cursor, "nan", f64::NAN);
     let pos_inf = ctx.full_scalar(&mut cursor, "pos_inf", f64::INFINITY);
     let neg_inf = ctx.full_scalar(&mut cursor, "neg_inf", f64::NEG_INFINITY);
@@ -1957,4 +1305,656 @@ fn decompose_unbind(graph: &mut IrGraph, id: NodeId) -> bool {
     // Erase the unbind node itself (now has no users)
     graph.erase(id);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::fx_ir::{NodeMeta, NodeOp};
+    use crate::test_ir::{
+        call, f32_call, f32_meta, f32_placeholder, has_live_target, live_node, meta as tensor_meta,
+        placeholder,
+    };
+
+    use super::*;
+
+    #[test]
+    fn decompose_max_dim_rewrites_to_amax_and_squeeze() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 3, 4]);
+        let max = graph.add_node(
+            NodeOp::CallFunction,
+            "max".to_string(),
+            "executorch.exir.dialects.edge._ops.aten.max.dim".to_string(),
+            vec![IrArg::Node(x), IrArg::Int(1)],
+            NodeMeta::default(),
+        );
+        let getitem = graph.add_node(
+            NodeOp::CallFunction,
+            "getitem".to_string(),
+            "getitem".to_string(),
+            vec![IrArg::Node(max), IrArg::Int(0)],
+            f32_meta([2, 4]),
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[max].alive);
+        assert!(!graph.nodes[getitem].alive);
+
+        let reduce = graph
+            .nodes
+            .iter()
+            .find(|node| node.alive && node.name == "max_amax")
+            .expect("amax node");
+        assert_eq!(reduce.target, "aten.amax.default");
+        assert_eq!(reduce.args[0].as_node(), Some(x));
+        assert_eq!(reduce.args[1].as_int(), Some(1));
+        assert_eq!(reduce.args[2].as_bool(), Some(true));
+        assert_eq!(reduce.meta.val_shape().unwrap(), &[2, 1, 4]);
+
+        let squeeze = graph
+            .nodes
+            .iter()
+            .find(|node| node.alive && node.name == "max_result")
+            .expect("squeeze node");
+        assert_eq!(squeeze.target, "aten.squeeze_copy.dims");
+        assert_eq!(squeeze.args[0].as_node(), Some(reduce.id));
+        assert_eq!(squeeze.meta.val_shape().unwrap(), &[2, 4]);
+    }
+
+    #[test]
+    fn skips_max_dim_when_index_output_is_live() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 3, 4]);
+        let max = graph.add_node(
+            NodeOp::CallFunction,
+            "max".to_string(),
+            "executorch.exir.dialects.edge._ops.aten.max.dim".to_string(),
+            vec![IrArg::Node(x), IrArg::Int(1)],
+            NodeMeta::default(),
+        );
+        let _values = graph.add_node(
+            NodeOp::CallFunction,
+            "getitem".to_string(),
+            "getitem".to_string(),
+            vec![IrArg::Node(max), IrArg::Int(0)],
+            f32_meta([2, 4]),
+        );
+        let indices = graph.add_node(
+            NodeOp::CallFunction,
+            "getitem_1".to_string(),
+            "getitem".to_string(),
+            vec![IrArg::Node(max), IrArg::Int(1)],
+            tensor_meta([2, 4], "torch.int64"),
+        );
+        let _use_indices = graph.add_node(
+            NodeOp::CallFunction,
+            "use_indices".to_string(),
+            "aten.add.Tensor".to_string(),
+            vec![IrArg::Node(indices), IrArg::Node(indices)],
+            tensor_meta([2, 4], "torch.int64"),
+        );
+
+        assert!(!IrDecomposeOpsPass.run(&mut graph));
+        assert!(graph.nodes[max].alive);
+        assert!(graph.nodes[indices].alive);
+    }
+
+    #[test]
+    fn decompose_atan_rewrites_to_piecewise_chain() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 3]);
+        let atan = f32_call(
+            &mut graph,
+            "atan",
+            "aten.atan.default",
+            vec![IrArg::Node(x)],
+            [2, 3],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[atan].alive);
+        assert!(has_live_target(&graph, "atan_result", "aten.where.self"));
+    }
+
+    #[test]
+    fn decompose_acos_rewrites_to_piecewise_chain() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 3]);
+        let acos = f32_call(
+            &mut graph,
+            "acos",
+            "aten.acos.default",
+            vec![IrArg::Node(x)],
+            [2, 3],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[acos].alive);
+        assert!(has_live_target(&graph, "acos_result", "aten.where.self"));
+    }
+
+    #[test]
+    fn decompose_softmax_rewrites_to_reduce_exp_chain() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 3, 4]);
+        let softmax = f32_call(
+            &mut graph,
+            "softmax",
+            "aten._softmax.default",
+            vec![IrArg::Node(x), IrArg::Int(1)],
+            [2, 3, 4],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[softmax].alive);
+        // softmax decomposes to amax -> sub -> exp -> sum -> reciprocal -> mul (-> clone)
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|n| n.alive && n.target == "aten.amax.default"));
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|n| n.alive && n.target == "aten.exp.default"));
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|n| n.alive && n.target == "aten.reciprocal.default"));
+        assert!(has_live_target(
+            &graph,
+            "softmax_softmax",
+            "aten.mul.Tensor"
+        ));
+    }
+
+    #[test]
+    fn decompose_log_softmax_subtracts_log_of_sum_exp() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 3, 4]);
+        let log_softmax = f32_call(
+            &mut graph,
+            "log_softmax",
+            "aten._log_softmax.default",
+            vec![IrArg::Node(x), IrArg::Int(1)],
+            [2, 3, 4],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[log_softmax].alive);
+        assert!(has_live_target(
+            &graph,
+            "log_softmax_result",
+            "aten.sub.Tensor"
+        ));
+        let log = live_node(&graph, "log_softmax_log_sum");
+        assert_eq!(log.target, "aten.log.default");
+        assert_eq!(
+            log.first_node_arg(),
+            Some(live_node(&graph, "log_softmax_sum").id)
+        );
+        assert_eq!(log.meta.val_shape(), Some([2, 1, 4].as_slice()));
+        let result = live_node(&graph, "log_softmax_result");
+        assert_eq!(
+            result.args[0].as_node(),
+            Some(live_node(&graph, "log_softmax_shifted").id)
+        );
+        assert_eq!(result.args[1].as_node(), Some(log.id));
+        assert!(!graph.nodes.iter().any(|node| node.alive
+            && matches!(
+                node.target.as_str(),
+                "aten.reciprocal.default" | "aten.mul.Tensor"
+            )));
+    }
+
+    #[test]
+    fn decompose_add_with_alpha_scales_rhs_before_add() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [1, 4, 5]);
+        let y = f32_placeholder(&mut graph, "y", [4, 1]);
+        let add = f32_call(
+            &mut graph,
+            "add",
+            "aten.add.Tensor",
+            vec![IrArg::Node(x), IrArg::Node(y), IrArg::Float(1.5)],
+            [1, 4, 5],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[add].alive);
+
+        let scaled_rhs = live_node(&graph, "add_alpha_mul");
+        assert_eq!(scaled_rhs.target, "aten.mul.Tensor");
+
+        let final_add = live_node(&graph, "add_alpha_result");
+        assert_eq!(final_add.target, "aten.add.Tensor");
+        assert_eq!(final_add.args.len(), 2);
+        assert_eq!(final_add.args[0].as_node(), Some(x));
+        assert_eq!(final_add.args[1].as_node(), Some(scaled_rhs.id));
+    }
+
+    #[test]
+    fn decompose_tan_rewrites_to_sin_cos_div() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 3]);
+        let tan = f32_call(
+            &mut graph,
+            "tan",
+            "aten.tan.default",
+            vec![IrArg::Node(x)],
+            [2, 3],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[tan].alive);
+
+        let sin = live_node(&graph, "tan_sin");
+        assert_eq!(sin.target, "aten.sin.default");
+        assert_eq!(sin.args[0].as_node(), Some(x));
+
+        let cos = live_node(&graph, "tan_cos");
+        assert_eq!(cos.target, "aten.cos.default");
+        assert_eq!(cos.args[0].as_node(), Some(x));
+
+        let div = live_node(&graph, "tan_result");
+        assert_eq!(div.target, "aten.div.Tensor");
+        assert_eq!(div.args[0].as_node(), Some(sin.id));
+        assert_eq!(div.args[1].as_node(), Some(cos.id));
+    }
+
+    #[test]
+    fn decompose_pow_scalar_zero_rewrites_to_full_like() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [1, 2, 3, 7]);
+        let pow = f32_call(
+            &mut graph,
+            "pow",
+            "aten.pow.Tensor_Scalar",
+            vec![IrArg::Node(x), IrArg::Float(0.0)],
+            [1, 2, 3, 7],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[pow].alive);
+
+        let eq = live_node(&graph, "pow_self_eq");
+        assert_eq!(eq.target, "aten.eq.Tensor");
+        assert_eq!(eq.args[0].as_node(), Some(x));
+        assert_eq!(eq.args[1].as_node(), Some(x));
+
+        let one = live_node(&graph, "pow_one");
+        assert_eq!(one.target, "aten.full.default");
+
+        let ones = live_node(&graph, "pow_ones");
+        assert_eq!(ones.target, "aten.where.self");
+        assert_eq!(ones.args[0].as_node(), Some(eq.id));
+        assert_eq!(ones.args[1].as_node(), Some(one.id));
+        assert_eq!(ones.args[2].as_node(), Some(one.id));
+    }
+
+    #[test]
+    fn decompose_pow_scalar_positive_int_rewrites_to_mul_chain() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [1, 2, 3, 6]);
+        let pow = f32_call(
+            &mut graph,
+            "pow",
+            "aten.pow.Tensor_Scalar",
+            vec![IrArg::Node(x), IrArg::Int(3)],
+            [1, 2, 3, 6],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[pow].alive);
+
+        let mul1 = live_node(&graph, "pow_mul1");
+        assert_eq!(mul1.target, "aten.mul.Tensor");
+        assert_eq!(mul1.args[0].as_node(), Some(x));
+        assert_eq!(mul1.args[1].as_node(), Some(x));
+
+        let mul2 = live_node(&graph, "pow_mul2");
+        assert_eq!(mul2.target, "aten.mul.Tensor");
+        assert_eq!(mul2.args[0].as_node(), Some(mul1.id));
+        assert_eq!(mul2.args[1].as_node(), Some(x));
+    }
+
+    #[test]
+    fn decompose_pow_scalar_positive_int_float_rewrites_to_mul_chain() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [1, 2, 3, 6]);
+        let pow = f32_call(
+            &mut graph,
+            "pow",
+            "aten.pow.Tensor_Scalar",
+            vec![IrArg::Node(x), IrArg::Float(2.0)],
+            [1, 2, 3, 6],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[pow].alive);
+
+        let mul1 = live_node(&graph, "pow_mul1");
+        assert_eq!(mul1.target, "aten.mul.Tensor");
+        assert_eq!(mul1.args[0].as_node(), Some(x));
+        assert_eq!(mul1.args[1].as_node(), Some(x));
+    }
+
+    #[test]
+    fn skips_tan_inside_quantized_envelope() {
+        let mut graph = IrGraph::empty();
+        let x = placeholder(&mut graph, "x", [2, 3], "torch.int8");
+        let dq = f32_call(
+            &mut graph,
+            "x_dq",
+            "quantized_decomposed.dequantize_per_tensor.default",
+            vec![IrArg::Node(x)],
+            [2, 3],
+        );
+        let tan = f32_call(
+            &mut graph,
+            "tan",
+            "aten.tan.default",
+            vec![IrArg::Node(dq)],
+            [2, 3],
+        );
+        let q = call(
+            &mut graph,
+            "tan_q",
+            "quantized_decomposed.quantize_per_tensor.default",
+            vec![IrArg::Node(tan)],
+            [2, 3],
+            "torch.int8",
+        );
+
+        assert!(!IrDecomposeOpsPass.run(&mut graph));
+        assert!(graph.nodes[tan].alive);
+        assert_eq!(graph.nodes[tan].target, "aten.tan.default");
+        assert!(graph.nodes[q].alive);
+    }
+
+    #[test]
+    fn skips_pow_inside_quantized_envelope() {
+        let mut graph = IrGraph::empty();
+        let x = placeholder(&mut graph, "x", [1, 2, 3, 6], "torch.int8");
+        let dq = f32_call(
+            &mut graph,
+            "x_dq",
+            "quantized_decomposed.dequantize_per_tensor.default",
+            vec![IrArg::Node(x)],
+            [1, 2, 3, 6],
+        );
+        let pow = f32_call(
+            &mut graph,
+            "pow",
+            "aten.pow.Tensor_Scalar",
+            vec![IrArg::Node(dq), IrArg::Int(3)],
+            [1, 2, 3, 6],
+        );
+        let q = call(
+            &mut graph,
+            "pow_q",
+            "quantized_decomposed.quantize_per_tensor.default",
+            vec![IrArg::Node(pow)],
+            [1, 2, 3, 6],
+            "torch.int8",
+        );
+
+        assert!(!IrDecomposeOpsPass.run(&mut graph));
+        assert!(graph.nodes[pow].alive);
+        assert_eq!(graph.nodes[pow].target, "aten.pow.Tensor_Scalar");
+        assert!(graph.nodes[q].alive);
+    }
+
+    #[test]
+    fn decompose_sinh_rewrites_via_exp_sub_mul() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 3]);
+        let sinh = f32_call(
+            &mut graph,
+            "sinh",
+            "aten.sinh.default",
+            vec![IrArg::Node(x)],
+            [2, 3],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[sinh].alive);
+        assert!(has_live_target(&graph, "sinh_result", "aten.mul.Tensor"));
+    }
+
+    #[test]
+    fn decompose_cosh_rewrites_via_exp_add_mul() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 3]);
+        let cosh = f32_call(
+            &mut graph,
+            "cosh",
+            "aten.cosh.default",
+            vec![IrArg::Node(x)],
+            [2, 3],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[cosh].alive);
+        assert!(has_live_target(&graph, "cosh_result", "aten.mul.Tensor"));
+    }
+
+    #[test]
+    fn decompose_asinh_rewrites_via_log_and_sqrt() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 3]);
+        let asinh = f32_call(
+            &mut graph,
+            "asinh",
+            "aten.asinh.default",
+            vec![IrArg::Node(x)],
+            [2, 3],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[asinh].alive);
+        assert!(has_live_target(&graph, "asinh_result", "aten.log.default"));
+    }
+
+    #[test]
+    fn decompose_acosh_rewrites_via_log_and_sqrt() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 3]);
+        let acosh = f32_call(
+            &mut graph,
+            "acosh",
+            "aten.acosh.default",
+            vec![IrArg::Node(x)],
+            [2, 3],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[acosh].alive);
+        assert!(has_live_target(&graph, "acosh_result", "aten.log.default"));
+    }
+
+    #[test]
+    fn decompose_elu_rewrites_via_expm1_ge_where() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 3]);
+        let elu = f32_call(
+            &mut graph,
+            "elu",
+            "aten.elu.default",
+            vec![IrArg::Node(x), IrArg::Float(2.0)],
+            [2, 3],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[elu].alive);
+        assert!(has_live_target(&graph, "elu_result", "aten.where.self"));
+    }
+
+    #[test]
+    fn decompose_gelu_none_rewrites_via_erf() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 3]);
+        let gelu = f32_call(
+            &mut graph,
+            "gelu",
+            "aten.gelu.default",
+            vec![IrArg::Node(x)],
+            [2, 3],
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[gelu].alive);
+        assert!(has_live_target(&graph, "gelu_result", "aten.mul.Tensor"));
+        assert!(has_live_target(&graph, "gelu_erf", "aten.erf.default"));
+    }
+
+    #[test]
+    fn decompose_gelu_tanh_rewrites_via_tanh() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 3]);
+        let gelu = f32_call(
+            &mut graph,
+            "gelu",
+            "aten.gelu.default",
+            vec![IrArg::Node(x)],
+            [2, 3],
+        );
+        graph.set_kwarg(gelu, "approximate", IrArg::Str("tanh".to_string()));
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[gelu].alive);
+        assert!(has_live_target(&graph, "gelu_tanh", "aten.tanh.default"));
+    }
+
+    #[test]
+    fn decompose_batch_norm_rewrites_to_elementwise_chain() {
+        let mut graph = IrGraph::empty();
+        let x = graph.add_node(
+            NodeOp::Placeholder,
+            "x".to_string(),
+            "x".to_string(),
+            vec![],
+            NodeMeta::tensor([1, 4, 5, 6], "torch.float32"),
+        );
+        let weight = graph.add_node(
+            NodeOp::Placeholder,
+            "weight".to_string(),
+            "weight".to_string(),
+            vec![],
+            NodeMeta::tensor([4], "torch.float32"),
+        );
+        let bias = graph.add_node(
+            NodeOp::Placeholder,
+            "bias".to_string(),
+            "bias".to_string(),
+            vec![],
+            NodeMeta::tensor([4], "torch.float32"),
+        );
+        let mean = graph.add_node(
+            NodeOp::Placeholder,
+            "mean".to_string(),
+            "mean".to_string(),
+            vec![],
+            NodeMeta::tensor([4], "torch.float32"),
+        );
+        let var = graph.add_node(
+            NodeOp::Placeholder,
+            "var".to_string(),
+            "var".to_string(),
+            vec![],
+            NodeMeta::tensor([4], "torch.float32"),
+        );
+        let bn = graph.add_node(
+            NodeOp::CallFunction,
+            "bn".to_string(),
+            "aten.batch_norm.default".to_string(),
+            vec![
+                IrArg::Node(x),
+                IrArg::Node(weight),
+                IrArg::Node(bias),
+                IrArg::Node(mean),
+                IrArg::Node(var),
+                IrArg::Bool(false),
+                IrArg::Float(0.1),
+                IrArg::Float(1.0e-5),
+                IrArg::Bool(false),
+            ],
+            NodeMeta::tensor([1, 4, 5, 6], "torch.float32"),
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[bn].alive);
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "bn_result"
+            && node.target == "aten.add.Tensor"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "bn_inv_sqrt"
+            && node.target == "aten.rsqrt.default"));
+        let result = graph
+            .nodes
+            .iter()
+            .find(|node| node.alive && node.name == "bn_result")
+            .expect("result");
+        assert_eq!(result.meta.val_shape().unwrap(), &[1, 4, 5, 6]);
+        let mean_view = graph
+            .nodes
+            .iter()
+            .find(|node| node.alive && node.name == "bn_mean_view")
+            .expect("mean view");
+        assert_eq!(mean_view.meta.val_shape().unwrap(), &[1, 4, 1, 1]);
+    }
+
+    #[test]
+    fn decompose_group_norm_rewrites_to_reduction_chain() {
+        let mut graph = IrGraph::empty();
+        let x = graph.add_node(
+            NodeOp::Placeholder,
+            "x".to_string(),
+            "x".to_string(),
+            vec![],
+            NodeMeta::tensor([1, 6, 8], "torch.float32"),
+        );
+        let weight = graph.add_node(
+            NodeOp::Placeholder,
+            "weight".to_string(),
+            "weight".to_string(),
+            vec![],
+            NodeMeta::tensor([6], "torch.float32"),
+        );
+        let bias = graph.add_node(
+            NodeOp::Placeholder,
+            "bias".to_string(),
+            "bias".to_string(),
+            vec![],
+            NodeMeta::tensor([6], "torch.float32"),
+        );
+        let gn = graph.add_node(
+            NodeOp::CallFunction,
+            "gn".to_string(),
+            "aten.group_norm.default".to_string(),
+            vec![
+                IrArg::Node(x),
+                IrArg::Int(2),
+                IrArg::Node(weight),
+                IrArg::Node(bias),
+                IrArg::Float(1.0e-5),
+                IrArg::Bool(true),
+            ],
+            NodeMeta::tensor([1, 6, 8], "torch.float32"),
+        );
+
+        assert!(IrDecomposeOpsPass.run(&mut graph));
+        assert!(!graph.nodes[gn].alive);
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "gn_grouped"
+            && node.target == "aten.reshape.default"));
+        assert!(graph.nodes.iter().any(|node| node.alive
+            && node.name == "gn_result"
+            && node.target == "aten.reshape.default"));
+        let grouped = graph
+            .nodes
+            .iter()
+            .find(|node| node.alive && node.name == "gn_grouped")
+            .expect("grouped");
+        assert_eq!(grouped.meta.val_shape().unwrap(), &[1, 2, 3, 8]);
+    }
 }

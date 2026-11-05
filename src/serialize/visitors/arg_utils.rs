@@ -22,6 +22,20 @@ pub(super) fn arg_i32_list(node: &Node, idx: usize) -> Vec<i32> {
     }
 }
 
+pub(super) fn shape_arg_i32_list(graph: &Graph, node: &Node, idx: usize) -> Vec<i32> {
+    if let Some(Arg::Node(id)) = node.args.get(idx) {
+        if let Some(shape) = graph
+            .node(*id)
+            .filter(|shape| shape.target == OpTarget::TosaConstShape)
+        {
+            return arg_i32_list(shape, 0);
+        }
+        Vec::new()
+    } else {
+        arg_i32_list(node, idx)
+    }
+}
+
 pub(super) fn kwarg_or_arg_i32_list(node: &Node, name: &str, idx: usize) -> Vec<i32> {
     let kw = kwarg_i32_list(node, name);
     if kw.is_empty() {

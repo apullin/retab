@@ -1,6 +1,6 @@
 use flatbuffers::{FlatBufferBuilder, TableFinishedWIPOffset, WIPOffset};
 
-use super::tosa_generated::Attribute;
+use super::tosa_types::Attribute;
 
 pub(super) fn build_attribute(
     builder: &mut FlatBufferBuilder<'_>,

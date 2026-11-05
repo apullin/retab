@@ -53,8 +53,8 @@ mod tests {
     #[test]
     fn decomposes_ne_tensor_to_eq_then_logical_not() {
         let mut graph = IrGraph::empty();
-        let lhs = placeholder(&mut graph, "lhs", &[2, 3], "torch.float32");
-        let rhs = placeholder(&mut graph, "rhs", &[2, 3], "torch.float32");
+        let lhs = placeholder(&mut graph, "lhs", [2, 3], "torch.float32");
+        let rhs = placeholder(&mut graph, "rhs", [2, 3], "torch.float32");
         let ne = call(
             &mut graph,
             "ne",
@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn decomposes_ne_scalar_to_eq_scalar_then_logical_not() {
         let mut graph = IrGraph::empty();
-        let lhs = placeholder(&mut graph, "lhs", &[4], "torch.float32");
+        let lhs = placeholder(&mut graph, "lhs", [4], "torch.float32");
         let ne = call(
             &mut graph,
             "ne_scalar",

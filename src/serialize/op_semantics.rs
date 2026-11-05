@@ -31,6 +31,7 @@ pub(crate) fn is_layout_dtype_passthrough(target: &OpTarget) -> bool {
             | OpTarget::Contiguous
             | OpTarget::TosaReshape
             | OpTarget::TosaTranspose
+            | OpTarget::TosaIdentity
     )
 }
 
@@ -87,6 +88,7 @@ pub(crate) fn is_shape_preserving_unary(target: &OpTarget) -> bool {
             | OpTarget::TosaCos
             | OpTarget::TosaSin
             | OpTarget::TosaRsqrt
+            | OpTarget::TosaIdentity
     )
 }
 

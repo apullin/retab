@@ -387,6 +387,7 @@ fn fixup_quantized_dtypes_once(graph: &mut Graph) {
                         | OpTarget::Squeeze
                         | OpTarget::Unsqueeze
                         | OpTarget::TosaReshape
+                        | OpTarget::TosaIdentity
                         | OpTarget::Permute
                         | OpTarget::TosaTranspose
                         | OpTarget::AvgPool2d

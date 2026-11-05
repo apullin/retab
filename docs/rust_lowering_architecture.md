@@ -173,7 +173,7 @@ across `collection.rs`, `constant_pool.rs`, `tensor_layout.rs`,
 keyed by `graph::ir::OpTarget`. Each visitor receives `EmitContext` and
 produces an `EmitResult` containing the required tensors and operations.
 Flatbuffer assembly writes the TOSA 1.0 graph and its named regions using
-schema types exposed through `serialize/tosa_generated/mod.rs` and the
+schema types exposed through `serialize/tosa_types/mod.rs` and the
 external `tosa-rs` dependency.
 
 The serializer rejects INT64 tensors reaching TOSA 1.0 emission. Layout,

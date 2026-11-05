@@ -28,7 +28,7 @@ mod tensor_ops;
 pub use emitter::*;
 
 use super::tensor_layout::{apply_tosa_dim_order, permute_shape};
-use super::tosa_generated::{
+use super::tosa_types::{
     AbsAttribute, AddAttribute, ArgMaxAttribute, ArithmeticRightShiftAttribute, Attribute,
     AvgPool2dAttribute, BitwiseAndAttribute, BitwiseNotAttribute, BitwiseOrAttribute,
     BitwiseXorAttribute, CastAttribute, CeilAttribute, ClampAttribute, ConcatAttribute,
@@ -119,7 +119,7 @@ pub fn emit_node(
             let ctx = EmitContext { graph, node, store };
             Some(emitter(&ctx))
         } else {
-            if crate::config::tosa_engine_debug_enabled() {
+            if crate::config::retab_debug_enabled() {
                 eprintln!(
                     "[emit_node] SKIPPED unhandled target: {:?} (node '{}')",
                     node.target, node.name

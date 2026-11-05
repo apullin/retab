@@ -5,6 +5,7 @@ use crate::serialize::op_semantics;
 pub fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
     table.extend([
+        (OpTarget::TosaConstShape, emit_const_shape as EmitFn),
         (OpTarget::TosaConst, emit_const as EmitFn),
         (OpTarget::Full, emit_full),
         (OpTarget::Copy, emit_copy),
@@ -28,6 +29,16 @@ pub fn register(table: &mut EmitterTable) {
         (OpTarget::Flip, emit_flip),
         (OpTarget::Zeros, emit_full),
     ]);
+}
+
+fn emit_const_shape(ctx: &EmitContext) -> EmitResult {
+    let mut result = EmitResult::default();
+    push_const_shape(
+        &mut result,
+        ctx.node.name.clone(),
+        arg_i32_list(ctx.node, 0),
+    );
+    result
 }
 
 struct ParsedResizeSpec {

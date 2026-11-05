@@ -749,8 +749,8 @@ mod tests {
         let pass = IrFoldQdqPass::new();
         assert!(pass.run(&mut graph));
 
-        assert!(graph.node(dq).alive == false);
-        assert!(graph.node(q).alive == false);
+        assert!(!graph.node(dq).alive);
+        assert!(!graph.node(q).alive);
         assert!(matches!(graph.node(add).args[0], IrArg::Node(id) if id == input));
         assert_eq!(graph.node(add).meta.input_qparam().unwrap().scale, 0.25);
         assert_eq!(graph.node(add).meta.output_qparam().unwrap().zp, 3);

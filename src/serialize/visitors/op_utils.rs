@@ -51,6 +51,7 @@ fn binary_output_shapes(graph: &Graph, store: &TensorStore, node: &Node) -> (Vec
     (logical_shape, emitted_shape)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_binary_output_with_contract(
     result: &mut EmitResult,
     node: &Node,
@@ -182,6 +183,52 @@ pub(super) fn emit_bool_binary(
     result
 }
 
+pub(super) fn emit_identity(graph: &Graph, store: &TensorStore, node: &Node) -> EmitResult {
+    emit_direct_unary(graph, store, node, Op::Identity, Attribute::None)
+}
+
+pub(super) fn is_integral_dtype(dtype: DType) -> bool {
+    matches!(dtype, DType::Int8 | DType::Int16 | DType::Int32)
+}
+
+pub(super) fn push_shift_const(result: &mut EmitResult, node_name: &str) -> String {
+    let shift_name = format!("{}_shift", node_name);
+    result.push_const(make_rank1_const_tensor(
+        shift_name.clone(),
+        DType::Int8,
+        vec![0u8],
+        1,
+    ));
+    shift_name
+}
+
+pub(super) fn push_rank1_const(
+    result: &mut EmitResult,
+    name: String,
+    dtype: DType,
+    data: Vec<u8>,
+    len: usize,
+) -> String {
+    push_inline_const(
+        result,
+        make_rank1_const_tensor(name.clone(), dtype, data, len),
+    );
+    name
+}
+
+pub(super) fn push_zero_point_const(
+    result: &mut EmitResult,
+    name: String,
+    dtype: DType,
+    value: i32,
+) -> String {
+    push_rank1_const(result, name, dtype, encode_zp_for_dtype(value, dtype), 1)
+}
+
+pub(super) fn temp_tensor(name: String, shape: Vec<i32>, dtype: DType) -> TosaTensor {
+    make_empty_tensor(name, shape, dtype)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,50 +352,4 @@ mod tests {
         assert_eq!(result.tensors[0].shape, vec![1, 1, 1, 8]);
         assert_eq!(result.tensors[1].shape, vec![1, 1, 1024, 8]);
     }
-}
-
-pub(super) fn emit_identity(graph: &Graph, store: &TensorStore, node: &Node) -> EmitResult {
-    emit_direct_unary(graph, store, node, Op::Identity, Attribute::None)
-}
-
-pub(super) fn is_integral_dtype(dtype: DType) -> bool {
-    matches!(dtype, DType::Int8 | DType::Int16 | DType::Int32)
-}
-
-pub(super) fn push_shift_const(result: &mut EmitResult, node_name: &str) -> String {
-    let shift_name = format!("{}_shift", node_name);
-    result.push_const(make_rank1_const_tensor(
-        shift_name.clone(),
-        DType::Int8,
-        vec![0u8],
-        1,
-    ));
-    shift_name
-}
-
-pub(super) fn push_rank1_const(
-    result: &mut EmitResult,
-    name: String,
-    dtype: DType,
-    data: Vec<u8>,
-    len: usize,
-) -> String {
-    push_inline_const(
-        result,
-        make_rank1_const_tensor(name.clone(), dtype, data, len),
-    );
-    name
-}
-
-pub(super) fn push_zero_point_const(
-    result: &mut EmitResult,
-    name: String,
-    dtype: DType,
-    value: i32,
-) -> String {
-    push_rank1_const(result, name, dtype, encode_zp_for_dtype(value, dtype), 1)
-}
-
-pub(super) fn temp_tensor(name: String, shape: Vec<i32>, dtype: DType) -> TosaTensor {
-    make_empty_tensor(name, shape, dtype)
 }

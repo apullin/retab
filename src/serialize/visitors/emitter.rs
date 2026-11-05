@@ -17,7 +17,7 @@ use super::emit_result::EmitResult;
 use super::graph_utils::{collect_input_names, input_name, primary_output_name};
 use super::op_utils::{emit_bool_binary, emit_direct_binary, emit_direct_unary, emit_identity};
 use super::shape_utils::{actual_tensor_shape, make_actual_output_tensor};
-use crate::serialize::tosa_generated::{Attribute, DType, Op, TosaTensor};
+use crate::serialize::tosa_types::{Attribute, DType, Op, TosaTensor};
 
 /// Everything an emitter needs to produce TOSA operators + tensors for one node.
 pub struct EmitContext<'a> {

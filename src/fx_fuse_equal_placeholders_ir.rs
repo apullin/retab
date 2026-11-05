@@ -28,22 +28,37 @@ pub fn find_duplicate_placeholder_pairs(graph: &IrGraph) -> Vec<(NodeId, NodeId)
 
     let mut pairs = Vec::new();
     for ids in by_meta.values().filter(|ids| ids.len() > 1) {
-        let mut by_data: HashMap<&[u8], NodeId> = HashMap::new();
+        // Same-shape weights (e.g. one per transformer layer) are usually different:
+        // a sampled fingerprint separates them without reading all their bytes, and
+        // a byte comparison confirms the rare candidates that match.
+        let mut canonicals: HashMap<u64, Vec<(NodeId, &[u8])>> = HashMap::new();
         for &id in ids {
-            let data = graph.nodes[id].tensor.as_ref().map(|t| t.data.data.as_slice());
-            let Some(data) = data else { continue };
-            match by_data.entry(data) {
-                std::collections::hash_map::Entry::Occupied(canonical) => {
-                    pairs.push((id, *canonical.get()));
-                }
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert(id);
-                }
+            let Some(data) = graph.nodes[id].tensor.as_ref().map(|t| t.data.data.as_slice())
+            else {
+                continue;
+            };
+            let candidates = canonicals.entry(sampled_fingerprint(data)).or_default();
+            match candidates.iter().find(|(_, other)| *other == data) {
+                Some(&(canonical, _)) => pairs.push((id, canonical)),
+                None => candidates.push((id, data)),
             }
         }
     }
     pairs.sort_unstable();
     pairs
+}
+
+/// Hash of the length and up to 64 bytes from each of the start, middle and end.
+fn sampled_fingerprint(data: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    const SAMPLE: usize = 64;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data.len().hash(&mut hasher);
+    let middle = data.len() / 2;
+    for start in [0, middle.saturating_sub(SAMPLE / 2), data.len().saturating_sub(SAMPLE)] {
+        data[start..(start + SAMPLE).min(data.len())].hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 pub struct IrFuseEqualPlaceholdersEffectPass;
@@ -111,6 +126,21 @@ mod tests {
 
         let pairs = find_duplicate_placeholder_pairs(&graph);
         assert_eq!(pairs, vec![(duplicate, canonical)]);
+    }
+
+    #[test]
+    fn same_fingerprint_with_different_bytes_is_not_a_duplicate() {
+        // 4096 bytes: the sampled fingerprint never reads offset 1000.
+        let base = vec![7u8; 4096];
+        let mut changed = base.clone();
+        changed[1000] = 8;
+        assert_eq!(sampled_fingerprint(&base), sampled_fingerprint(&changed));
+
+        let mut graph = IrGraph::empty();
+        let first = add_placeholder(&mut graph, "a", base.clone(), vec![1024]);
+        add_placeholder(&mut graph, "b", changed, vec![1024]);
+        let third = add_placeholder(&mut graph, "c", base, vec![1024]);
+        assert_eq!(find_duplicate_placeholder_pairs(&graph), vec![(third, first)]);
     }
 
     #[test]

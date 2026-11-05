@@ -122,6 +122,8 @@ pub enum OpTarget {
     TosaConcat,
     TosaSlice,
     TosaPad,
+    TosaIdentity,
+    TosaConstShape,
     TosaConst,
     TosaConv3d,
     TosaMatmul,

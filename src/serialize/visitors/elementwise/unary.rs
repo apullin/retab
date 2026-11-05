@@ -3,6 +3,7 @@ use super::*;
 pub(super) fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
     register_unary!(table;
+        OpTarget::TosaIdentity => Op::Identity, Attribute::None;
         OpTarget::TosaTable   => Op::Table,      Attribute::Table(TableAttribute {});
         OpTarget::TosaSigmoid => Op::Sigmoid,    Attribute::Sigmoid(SigmoidAttribute {});
         OpTarget::TosaTanh    => Op::Tanh,       Attribute::Tanh(TanhAttribute {});

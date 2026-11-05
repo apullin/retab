@@ -142,7 +142,7 @@ def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch, r
     assert result.processed_bytes == b"tosa"
     assert calls[0][:4] == ("run_fx_passes", program.graph_module, program, None)
     config = calls[0][4]
-    assert config == rp._build_pipeline_config(compile_spec)
+    assert config == {**rp._build_pipeline_config(compile_spec), "u55_split_permutes": []}
     assert all(call[2] is program and call[4] is config for call in calls)
     assert [(kind, region) for kind, _, _, region, _ in calls if region is not None] == [
         ("run_fx_cond_passes", "true_graph"),

@@ -5,6 +5,7 @@
 //!      scalar qmin to rewrite);
 //!   2. for `hardtanh`, its upper bound quantizes to that node's qmax;
 //!   3. its input is a convolution or linear whose only user is the activation.
+//!
 //! The quantize node's qmin is then set to its zero point, so the fused output keeps
 //! the activation's lower bound. Runs before fold_qdq, while Q/DQ nodes are present.
 

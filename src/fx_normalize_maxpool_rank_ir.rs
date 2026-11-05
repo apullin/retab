@@ -119,13 +119,13 @@ mod tests {
     #[test]
     fn lifts_rank3_max_pool_with_indices_and_squeezes_its_getitem() {
         let mut graph = IrGraph::empty();
-        let x = placeholder(&mut graph, "x", &[3, 9, 11], "torch.int8");
+        let x = placeholder(&mut graph, "x", [3, 9, 11], "torch.int8");
         let pool = call(
             &mut graph,
             "pool",
             "aten.max_pool2d_with_indices.default",
             vec![IrArg::Node(x), i64_list_arg(&[3, 3]), i64_list_arg(&[2, 2])],
-            &[],
+            [],
             "torch.int8",
         );
         let item = call(
@@ -133,7 +133,7 @@ mod tests {
             "item",
             "<built-in function getitem>",
             vec![IrArg::Node(pool), IrArg::Int(0)],
-            &[3, 4, 5],
+            [3, 4, 5],
             "torch.int8",
         );
         output(&mut graph, item);
@@ -151,13 +151,13 @@ mod tests {
     #[test]
     fn leaves_rank4_pools_alone() {
         let mut graph = IrGraph::empty();
-        let x = placeholder(&mut graph, "x", &[1, 3, 9, 11], "torch.int8");
+        let x = placeholder(&mut graph, "x", [1, 3, 9, 11], "torch.int8");
         let pool = call(
             &mut graph,
             "pool",
             "aten.max_pool2d.default",
             vec![IrArg::Node(x), i64_list_arg(&[3, 3])],
-            &[1, 3, 4, 5],
+            [1, 3, 4, 5],
             "torch.int8",
         );
         output(&mut graph, pool);

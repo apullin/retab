@@ -57,6 +57,7 @@ fn optional_node_tensor(graph: &IrGraph, arg: Option<&IrArg>) -> Option<Option<T
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fuse_conv_bn_tensors(
     conv_weight: &TensorData,
     conv_bias: Option<&TensorData>,
@@ -100,6 +101,7 @@ fn fuse_conv_bn_tensors(
 
     let per_output_weight_elems = weight.len() / out_channels;
     let mut scales = Vec::with_capacity(out_channels);
+    #[allow(clippy::needless_range_loop)] // var must cover every output channel
     for channel in 0..out_channels {
         let gamma = gamma.get(channel).copied().unwrap_or(1.0);
         scales.push(gamma / (var[channel] + eps as f32).sqrt());
@@ -131,8 +133,7 @@ fn fuse_conv_bn_tensors(
             }
         }
     } else {
-        for channel in 0..out_channels {
-            let scale = scales[channel];
+        for (channel, &scale) in scales.iter().enumerate() {
             let start = channel * per_output_weight_elems;
             let end = start + per_output_weight_elems;
             for value in &mut fused_weight[start..end] {

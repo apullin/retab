@@ -161,9 +161,9 @@ mod tests {
     #[test]
     fn decompose_addmm_reads_alpha_beta_from_kwargs() {
         let mut graph = IrGraph::empty();
-        let bias = placeholder(&mut graph, "bias", &[2, 2]);
-        let mat1 = placeholder(&mut graph, "mat1", &[2, 3]);
-        let mat2 = placeholder(&mut graph, "mat2", &[3, 2]);
+        let bias = placeholder(&mut graph, "bias", [2, 2]);
+        let mat1 = placeholder(&mut graph, "mat1", [2, 3]);
+        let mat2 = placeholder(&mut graph, "mat2", [3, 2]);
         let mut kwargs = HashMap::new();
         kwargs.insert("alpha".to_string(), IrArg::Float(0.0));
         kwargs.insert("beta".to_string(), IrArg::Float(1.0));

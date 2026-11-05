@@ -1,7 +1,7 @@
 use super::emitter::EmitContext;
 use super::*;
 use crate::graph::ir::Arg;
-use crate::serialize::tosa_generated::{CondIfAttribute, WhileLoopAttribute};
+use crate::serialize::tosa_types::{CondIfAttribute, WhileLoopAttribute};
 
 pub fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;

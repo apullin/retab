@@ -43,6 +43,7 @@ mod fx_decompose_maxpool_dilation_ir;
 mod fx_decompose_mean_ir;
 mod fx_decompose_ne_ir;
 mod fx_decompose_ops_ir;
+mod fx_decompose_permute_for_u55_ir;
 mod fx_decompose_pixel_shuffle_ir;
 mod fx_decompose_quant_ir;
 mod fx_decompose_repeat_interleave_ir;
@@ -54,10 +55,14 @@ mod fx_decompose_tril_ir;
 mod fx_decompose_unfold_ir;
 mod fx_decompose_var_ir;
 mod fx_decorate_fp_int_cast_ir;
+mod fx_ensure_unique_output_nodes_ir;
 mod fx_expand_where_mask_ir;
 mod fx_fold_qdq_ir;
 mod fx_fuse_batch_norm_ir;
 mod fx_fuse_cascaded_views_ir;
+mod fx_fuse_consecutive_clamps_ir;
+mod fx_fuse_consecutive_concats_ir;
+mod fx_fuse_consecutive_slices_ir;
 mod fx_fuse_constant_inputs_ir;
 mod fx_fuse_duplicate_users_ir;
 mod fx_fuse_equal_placeholders_ir;
@@ -87,9 +92,11 @@ mod fx_reduction;
 mod fx_remove_noop_ir;
 mod fx_replace_inf_values_ir;
 mod fx_replace_scalar_with_tensor_ir;
+mod fx_rewrite_cat_slice_ir;
 mod fx_rewrite_index_put_ir;
 mod fx_rewrite_matmul_ir;
 mod fx_rewrite_pad_ir;
+mod fx_rewrite_slice_ir;
 mod fx_rewrite_squeeze_ir;
 mod fx_size_adjust_input_ir;
 mod fx_target;
@@ -252,21 +259,13 @@ fn run_full_fx_pipeline(
 )> {
     let py = graph_module.py();
     stock_fallback::take();
-    let exported_program_for_pipeline = exported_program.as_ref().map(|ep| ep.clone_ref(py));
-    let pipeline =
-        fx_pipeline::build_hybrid_pipeline(exported_program_for_pipeline, pipeline_config);
+    let pipeline = fx_pipeline::build_main_pipeline(pipeline_config);
     let exported_program = exported_program.as_ref().map(|ep| ep.bind(py));
     let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
     let structural_changed = control_flow::snapshot_pre_pass_qparams_ir(&mut initial_ir);
-    let (modified, ir, effects) = fx_ir::run_hybrid_pipeline_ext_with_initial_ir(
-        py,
-        graph_module,
-        exported_program,
-        &pipeline,
-        Some(initial_ir),
-    )?;
-    ensure_retab_can_lower(ir.as_ref(), &effects)?;
-    Ok((modified || structural_changed > 0, ir, effects))
+    let (modified, ir, effects) = fx_ir::run_ir_pipeline(&pipeline, initial_ir);
+    ensure_retab_can_lower(Some(&ir), &effects)?;
+    Ok((modified || structural_changed > 0, Some(ir), effects))
 }
 
 fn rebuild_graph_users(graphs: &mut [(String, Graph)]) {
@@ -290,13 +289,7 @@ fn apply_pre_submodule_qparam_propagation_ir(
     })
 }
 
-fn ingest_and_serialize_tosa_pybytes(
-    py: Python<'_>,
-    _graph_module: &Bound<'_, PyAny>,
-    _state_dict: &Bound<'_, PyDict>,
-    _graph_signature: &Bound<'_, PyAny>,
-    _exported_program: Option<Py<PyAny>>,
-) -> PyResult<Py<PyBytes>> {
+fn ingest_and_serialize_tosa_pybytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
     let profile = crate::config::profile_ingest_serialize_enabled();
     let mut stashed = take_stashed_hierarchy();
     let Some((mut ir, effects)) = stashed.parent.take() else {
@@ -380,15 +373,9 @@ fn run_fx_submodule_passes(
     let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
     let propagation_changed =
         apply_pre_submodule_qparam_propagation_ir(region_name.as_deref(), &mut initial_ir);
-    let (modified, ir, effects) = fx_ir::run_hybrid_pipeline_ext_with_initial_ir(
-        graph_module.py(),
-        graph_module,
-        exported_program,
-        &pipeline,
-        Some(initial_ir),
-    )?;
-    ensure_retab_can_lower(ir.as_ref(), &effects)?;
-    stash_submodule_ir(region_name, ir.map(|g| (g, effects)));
+    let (modified, ir, effects) = fx_ir::run_ir_pipeline(&pipeline, initial_ir);
+    ensure_retab_can_lower(Some(&ir), &effects)?;
+    stash_submodule_ir(region_name, Some((ir, effects)));
     Ok(modified || propagation_changed > 0)
 }
 
@@ -407,15 +394,9 @@ fn run_fx_cond_passes(
     let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
     let propagation_changed =
         apply_pre_submodule_qparam_propagation_ir(region_name.as_deref(), &mut initial_ir);
-    let (modified, ir, effects) = fx_ir::run_hybrid_pipeline_ext_with_initial_ir(
-        graph_module.py(),
-        graph_module,
-        exported_program,
-        &pipeline,
-        Some(initial_ir),
-    )?;
-    ensure_retab_can_lower(ir.as_ref(), &effects)?;
-    stash_submodule_ir(region_name, ir.map(|g| (g, effects)));
+    let (modified, ir, effects) = fx_ir::run_ir_pipeline(&pipeline, initial_ir);
+    ensure_retab_can_lower(Some(&ir), &effects)?;
+    stash_submodule_ir(region_name, Some((ir, effects)));
     Ok(modified || propagation_changed > 0)
 }
 
@@ -427,23 +408,10 @@ fn last_unused_inputs() -> Vec<String> {
     LAST_UNUSED_INPUTS.with(|slot| slot.borrow().clone())
 }
 
-/// Serialize the lowered stashed IR hierarchy to a TOSA flatbuffer.
+/// Serialize the IR hierarchy stashed by the `run_fx_*` entry points to a TOSA flatbuffer.
 #[pyfunction]
-#[pyo3(signature = (graph_module, state_dict, graph_signature, exported_program=None))]
-fn ingest_and_serialize(
-    py: Python<'_>,
-    graph_module: &Bound<'_, PyAny>,
-    state_dict: &Bound<'_, PyDict>,
-    graph_signature: &Bound<'_, PyAny>,
-    exported_program: Option<&Bound<'_, PyAny>>,
-) -> PyResult<Py<PyBytes>> {
-    ingest_and_serialize_tosa_pybytes(
-        py,
-        graph_module,
-        state_dict,
-        graph_signature,
-        clone_bound_pyobject(exported_program),
-    )
+fn ingest_and_serialize(py: Python<'_>) -> PyResult<Py<PyBytes>> {
+    ingest_and_serialize_tosa_pybytes(py)
 }
 
 #[pymodule]

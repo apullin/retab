@@ -138,8 +138,10 @@ mod tests {
         assert_eq!(
             effects[1]
                 .data
-                .chunks_exact(4)
-                .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| i32::from_le_bytes(*chunk))
                 .collect::<Vec<_>>(),
             vec![1, 3, 2, 4]
         );

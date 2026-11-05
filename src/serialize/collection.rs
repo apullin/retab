@@ -6,10 +6,10 @@ use crate::store::TensorStore;
 
 use super::constant_pool::ConstantPool;
 use super::tensor_layout::TensorDeclarationContext;
-use super::tosa_generated::{
+use super::tosa_types::{
     Attribute, ConstShapeAttribute, Op, ReshapeAttribute, TosaOperator, TosaShape, TosaTensor,
 };
-use super::{output_layout, tosa_generated, visitors};
+use super::{output_layout, tosa_types, visitors};
 
 pub(super) struct SerializedGraphItems {
     pub(super) tensors: Vec<TosaTensor>,
@@ -55,7 +55,7 @@ fn collect_graph_items(
     store: &TensorStore,
     normalize_outputs: bool,
 ) -> Result<SerializedGraphItems, String> {
-    let debug = crate::config::tosa_engine_debug_enabled();
+    let debug = crate::config::retab_debug_enabled();
     let sorted = graph.all_node_ids();
     if debug {
         eprintln!("[Serialize] using insertion order, {} nodes", sorted.len());
@@ -92,8 +92,8 @@ fn collect_graph_items(
                 if let Some(tensor_data) = store.get(name) {
                     tensors.push(tensor_decls.const_placeholder(node, tensor_data));
                     operators.push(TosaOperator::new(
-                        tosa_generated::Op::Const,
-                        Attribute::Const(tosa_generated::ConstAttribute {}),
+                        tosa_types::Op::Const,
+                        Attribute::Const(tosa_types::ConstAttribute {}),
                         vec![],
                         vec![name.clone()],
                     ));
@@ -191,7 +191,7 @@ fn collect_graph_items(
     }
     if let Some(tensor) = tensors
         .iter()
-        .find(|tensor| tensor.dtype == tosa_generated::DType::Int64)
+        .find(|tensor| tensor.dtype == tosa_types::DType::Int64)
     {
         return Err(format!(
             "TOSA 1.0 does not support INT64 tensor '{}'",
@@ -201,7 +201,7 @@ fn collect_graph_items(
     // Shape values come from CONST_SHAPE; Vela rejects a CONST whose output has shape type.
     if let Some(tensor) = tensors
         .iter()
-        .find(|tensor| tensor.dtype == tosa_generated::DType::Shape)
+        .find(|tensor| tensor.dtype == tosa_types::DType::Shape)
     {
         return Err(format!(
             "shape-typed tensor '{}' must be produced by CONST_SHAPE, not stored as a tensor",
@@ -213,11 +213,11 @@ fn collect_graph_items(
     // must not carry float tensors. Pure-float regions only come from tests calling the
     // native API directly; the spec-based check arrives with the pipeline config (APU-124).
     let quantized_region = tensors.iter().any(|tensor| {
-        use tosa_generated::DType;
+        use tosa_types::DType;
         tensor.data.is_none() && matches!(tensor.dtype, DType::Int4 | DType::Int8 | DType::Int16)
     });
     if let Some(tensor) = tensors.iter().filter(|_| quantized_region).find(|tensor| {
-        use tosa_generated::DType;
+        use tosa_types::DType;
         matches!(
             tensor.dtype,
             DType::Fp32
@@ -505,6 +505,158 @@ mod tests {
     }
 
     #[test]
+    fn fused_slice_serializes_multidimensional_starts_and_sizes_in_nhwc_order() {
+        let mut graph = IrGraph::empty();
+        let x = placeholder(&mut graph, "x", [1, 8, 10, 3], "torch.int8");
+        graph.node_mut(x).meta.set_tosa_dim_order(vec![0, 1, 2, 3]);
+        let first = call(
+            &mut graph,
+            "first",
+            "aten.slice_copy.Tensor",
+            vec![IrArg::Node(x), IrArg::Int(2), IrArg::Int(1), IrArg::Int(7)],
+            [1, 3, 6, 10],
+            "torch.int8",
+        );
+        let second = call(
+            &mut graph,
+            "second",
+            "aten.slice_copy.Tensor",
+            vec![
+                IrArg::Node(first),
+                IrArg::Int(3),
+                IrArg::Int(2),
+                IrArg::Int(5),
+            ],
+            [1, 3, 6, 3],
+            "torch.int8",
+        );
+        for id in [first, second] {
+            graph.node_mut(id).meta.set_tosa_dim_order(vec![0, 2, 3, 1]);
+        }
+        output(&mut graph, second);
+        let items = lower_region(
+            &mut graph,
+            vec![
+                PipelineStep::Ir(Box::new(crate::fx_rewrite_slice_ir::IrRewriteSlicePass)),
+                PipelineStep::Ir(Box::new(
+                    crate::fx_fuse_consecutive_slices_ir::IrFuseConsecutiveSlicesPass,
+                )),
+            ],
+        );
+        let slices: Vec<_> = items
+            .operators
+            .iter()
+            .filter(|op| op.op == Op::Slice)
+            .collect();
+        assert_eq!(slices.len(), 1);
+        assert_eq!(slices[0].inputs[0], "x");
+        for (input, values) in [(1, vec![0i64, 1, 2, 0]), (2, vec![1i64, 6, 3, 3])] {
+            let shape = items
+                .shapes
+                .iter()
+                .find(|shape| shape.name == slices[0].inputs[input])
+                .unwrap();
+            assert_eq!(
+                shape.data,
+                values
+                    .into_iter()
+                    .flat_map(i64::to_le_bytes)
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(
+            items
+                .tensors
+                .iter()
+                .find(|tensor| tensor.name == "second")
+                .unwrap()
+                .shape,
+            vec![1, 6, 3, 3]
+        );
+    }
+
+    #[test]
+    fn noop_pad_removal_exposes_transpose_cleanup() {
+        let mut graph = IrGraph::empty();
+        let x = placeholder(&mut graph, "x", [2, 3], "torch.float32");
+        let first = call(
+            &mut graph,
+            "first",
+            "aten.permute_copy.default",
+            vec![IrArg::Node(x), i64_list_arg(&[1, 0])],
+            [3, 2],
+            "torch.float32",
+        );
+        let padding = graph.add_call_function(
+            "padding",
+            "backend.tosa.CONST_SHAPE.default",
+            vec![i64_list_arg(&[0, 0, 0, 0])],
+            crate::fx_ir::NodeMeta::default(),
+        );
+        let padded = call(
+            &mut graph,
+            "padded",
+            "backend.tosa.PAD.default",
+            vec![IrArg::Node(first), IrArg::Node(padding)],
+            [3, 2],
+            "torch.float32",
+        );
+        let second = call(
+            &mut graph,
+            "second",
+            "aten.permute_copy.default",
+            vec![IrArg::Node(padded), i64_list_arg(&[1, 0])],
+            [2, 3],
+            "torch.float32",
+        );
+        let neg = call(
+            &mut graph,
+            "neg",
+            "aten.neg.default",
+            vec![IrArg::Node(second)],
+            [2, 3],
+            "torch.float32",
+        );
+        output(&mut graph, neg);
+        let items = lower_region(
+            &mut graph,
+            vec![PipelineStep::Ir(Box::new(
+                crate::fx_remove_noop_ir::IrRemoveNoopPass,
+            ))],
+        );
+        assert!(items
+            .operators
+            .iter()
+            .all(|op| !matches!(op.op, Op::Pad | Op::Transpose)));
+        assert_eq!(items.output_names, vec!["neg"]);
+        assert_eq!(items.operators.last().unwrap().inputs[0], "x");
+    }
+
+    #[test]
+    fn unique_output_identities_serialize_without_requantizing_the_input() {
+        let mut graph = IrGraph::empty();
+        let x = placeholder(&mut graph, "x", [2, 3], "torch.int8");
+        let out = output(&mut graph, x);
+        graph.set_args(out, vec![IrArg::List(vec![IrArg::Node(x), IrArg::Node(x)])]);
+        let items = lower_region(
+            &mut graph,
+            vec![PipelineStep::Ir(Box::new(
+                crate::fx_ensure_unique_output_nodes_ir::IrEnsureUniqueOutputNodesPass,
+            ))],
+        );
+        assert_eq!(
+            items.operators.iter().map(|op| op.op).collect::<Vec<_>>(),
+            vec![Op::Identity, Op::Identity]
+        );
+        assert_ne!(items.output_names[0], items.output_names[1]);
+        assert!(items.operators.iter().all(|op| op.inputs == ["x"]));
+        assert!(items
+            .tensors
+            .iter()
+            .all(|tensor| tensor.dtype == tosa_types::DType::Int8));
+    }
+
+    #[test]
     fn rejects_elementwise_input_output_rank_mismatches() {
         for (op, data_inputs) in [
             (Op::Add, 2),
@@ -535,7 +687,7 @@ mod tests {
                             TosaTensor::new(
                                 name,
                                 output_shape.clone(),
-                                tosa_generated::DType::Int32,
+                                tosa_types::DType::Int32,
                             )
                         })
                         .collect();
@@ -543,7 +695,7 @@ mod tests {
                     tensors.push(TosaTensor::new(
                         "output",
                         output_shape.clone(),
-                        tosa_generated::DType::Int32,
+                        tosa_types::DType::Int32,
                     ));
                     let operators = vec![TosaOperator::new(
                         op,
@@ -566,14 +718,14 @@ mod tests {
     fn elementwise_rank_check_allows_broadcast_and_parameter_ranks() {
         for shape in [vec![], vec![2, 3]] {
             let tensors = vec![
-                TosaTensor::new("x", shape.clone(), tosa_generated::DType::Int32),
-                TosaTensor::new("y", vec![1; shape.len()], tosa_generated::DType::Int32),
-                TosaTensor::new("predicate", shape.clone(), tosa_generated::DType::Bool),
-                TosaTensor::new("output", shape, tosa_generated::DType::Int32),
-                TosaTensor::new("shift", vec![1], tosa_generated::DType::Int8),
-                TosaTensor::new("multiplier", vec![1], tosa_generated::DType::Int32),
-                TosaTensor::new("zp", vec![1], tosa_generated::DType::Int32),
-                TosaTensor::new("table", vec![256], tosa_generated::DType::Int8),
+                TosaTensor::new("x", shape.clone(), tosa_types::DType::Int32),
+                TosaTensor::new("y", vec![1; shape.len()], tosa_types::DType::Int32),
+                TosaTensor::new("predicate", shape.clone(), tosa_types::DType::Bool),
+                TosaTensor::new("output", shape, tosa_types::DType::Int32),
+                TosaTensor::new("shift", vec![1], tosa_types::DType::Int8),
+                TosaTensor::new("multiplier", vec![1], tosa_types::DType::Int32),
+                TosaTensor::new("zp", vec![1], tosa_types::DType::Int32),
+                TosaTensor::new("table", vec![256], tosa_types::DType::Int8),
             ];
             for (op, inputs) in [
                 (Op::Add, vec!["x", "y"]),
@@ -601,8 +753,8 @@ mod tests {
     fn rank_matching_does_not_hide_unary_rank_mismatches() {
         for op in [Op::Rescale, Op::Cast, Op::Table, Op::Identity] {
             let mut tensors = vec![
-                TosaTensor::new("x", vec![], tosa_generated::DType::Int32),
-                TosaTensor::new("output", vec![1], tosa_generated::DType::Int32),
+                TosaTensor::new("x", vec![], tosa_types::DType::Int32),
+                TosaTensor::new("output", vec![1], tosa_types::DType::Int32),
             ];
             let mut shapes = Vec::new();
             let mut operators = vec![TosaOperator::new(
@@ -769,8 +921,8 @@ mod tests {
                 .find(|op| op.op == Op::Rescale)
                 .unwrap();
             for (name, dtype) in [
-                (&rescale.inputs[0], tosa_generated::DType::Int32),
-                (&rescale.outputs[0], tosa_generated::DType::Int8),
+                (&rescale.inputs[0], tosa_types::DType::Int32),
+                (&rescale.outputs[0], tosa_types::DType::Int8),
             ] {
                 let tensor = items
                     .tensors
@@ -1003,7 +1155,7 @@ mod tests {
 
     #[test]
     fn cond_and_while_regions_serialize_multi_axis_flip_and_roll() {
-        use tosa_generated::Op;
+        use tosa_types::Op;
         let config = PipelineConfig::from_tosa_spec("TOSA-1.0+INT+cf");
         for pipeline in [
             build_ir_cond_submodule_pipeline(&config),
@@ -1056,13 +1208,13 @@ mod tests {
                 .find(|tensor| items.output_names.contains(&tensor.name))
                 .unwrap();
             assert_eq!(output.shape, vec![2, 3]);
-            assert_eq!(output.dtype, tosa_generated::DType::Int8);
+            assert_eq!(output.dtype, tosa_types::DType::Int8);
         }
     }
 
     #[test]
     fn cond_and_while_regions_lower_integer_div_and_rank3_max_pool() {
-        use tosa_generated::Op;
+        use tosa_types::Op;
         let config = PipelineConfig::from_tosa_spec("TOSA-1.0+INT+cf");
         for pipeline in [
             build_ir_cond_submodule_pipeline(&config),
@@ -1119,7 +1271,7 @@ mod tests {
                     .find(|tensor| &tensor.name == name)
                     .unwrap();
                 assert_eq!(tensor.shape.len(), 4);
-                assert_eq!(tensor.dtype, tosa_generated::DType::Int8);
+                assert_eq!(tensor.dtype, tosa_types::DType::Int8);
             }
             assert_eq!(items.output_names.len(), 2);
         }
@@ -1223,7 +1375,7 @@ mod tests {
 
     #[test]
     fn argmax_consumers_match_emitted_scalar_ranks() {
-        use tosa_generated::Op;
+        use tosa_types::Op;
 
         for (cast, scalar_shape) in [
             (false, vec![]),
@@ -1393,7 +1545,7 @@ mod tests {
             "backend.tosa.UNKNOWN.default",
             "backend.tosa.CONV2D_ADAPTIVE.default",
             "backend.tosa.LOGICAL_LEFT_SHIFT.default",
-            "backend.tosa.CONST_SHAPE.default",
+            "backend.tosa.CONST_SHAPE.out",
             "aten.getitem_renamed.default",
             "renamed.getitem",
             "aten.gather.default",

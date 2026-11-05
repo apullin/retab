@@ -5,7 +5,7 @@ use pyo3::types::PyBytes;
 
 use super::attribute_flatbuffer::build_attribute;
 use super::collection::SerializedRegion;
-use super::tosa_generated::{TosaOperator, TosaShape, TosaTensor};
+use super::tosa_types::{TosaOperator, TosaShape, TosaTensor};
 
 pub(super) fn serialize_regions_to_tosa_py(
     py: Python<'_>,
@@ -26,19 +26,19 @@ fn build_region<'fbb>(
     region: &SerializedRegion,
     config: &PipelineConfig,
 ) -> WIPOffset<TableFinishedWIPOffset> {
-    if crate::config::tosa_engine_debug_enabled() {
+    if crate::config::retab_debug_enabled() {
         eprintln!("[Serialize] building fb tensors...");
     }
     let fb_tensors = build_tensors(builder, &region.items.tensors);
-    if crate::config::tosa_engine_debug_enabled() {
+    if crate::config::retab_debug_enabled() {
         eprintln!("[Serialize] building fb shapes...");
     }
     let fb_shapes = build_shapes(builder, &region.items.shapes);
-    if crate::config::tosa_engine_debug_enabled() {
+    if crate::config::retab_debug_enabled() {
         eprintln!("[Serialize] building fb operators...");
     }
     let fb_operators = build_operators(builder, &region.items.operators, config.is_u55_subset);
-    if crate::config::tosa_engine_debug_enabled() {
+    if crate::config::retab_debug_enabled() {
         eprintln!("[Serialize] assembling graph...");
     }
 
@@ -143,7 +143,7 @@ fn build_tensors(
     for t in tensors {
         assert_ne!(
             t.dtype,
-            super::tosa_generated::DType::Int64,
+            super::tosa_types::DType::Int64,
             "TOSA 1.0 does not support INT64 tensor '{}'",
             t.name
         );
@@ -235,7 +235,7 @@ fn build_operators(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serialize::tosa_generated::DType;
+    use crate::serialize::tosa_types::DType;
 
     #[test]
     #[should_panic(expected = "INT64")]
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn u55_shift_rounding_reaches_every_serialized_region() {
         use super::super::collection::SerializedGraphItems;
-        use super::super::tosa_generated::{ArithmeticRightShiftAttribute, Attribute, Op};
+        use super::super::tosa_types::{ArithmeticRightShiftAttribute, Attribute, Op};
 
         for spec in ["TOSA-1.0+INT+u55", "TOSA-1.0+INT+cf", "TOSA-1.0+INT"] {
             let config = PipelineConfig::from_tosa_spec(spec);

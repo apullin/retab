@@ -553,8 +553,10 @@ mod tests {
         assert_eq!(effect.shape, vec![1, 2]);
         let values = effect
             .data
-            .chunks_exact(4)
-            .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| i32::from_le_bytes(*chunk))
             .collect::<Vec<_>>();
         assert_eq!(values, vec![3, 4]);
     }
@@ -603,8 +605,10 @@ mod tests {
         let mm = seen.get("mm").expect("missing mm effect");
         let mm_values = mm
             .data
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect::<Vec<_>>();
         assert_eq!(mm.shape, vec![2, 2]);
         assert_eq!(mm_values, vec![58.0, 64.0, 139.0, 154.0]);
@@ -612,8 +616,10 @@ mod tests {
         let addmm = seen.get("addmm").expect("missing addmm effect");
         let addmm_values = addmm
             .data
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect::<Vec<_>>();
         assert_eq!(addmm.shape, vec![2, 2]);
         assert_eq!(addmm_values, vec![58.5, 65.5, 139.5, 155.5]);

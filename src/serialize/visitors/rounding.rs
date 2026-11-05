@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_bankers_round_with_fill(
     result: &mut EmitResult,
     base_name: &str,

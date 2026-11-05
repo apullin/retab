@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::tosa_generated::{
+use super::tosa_types::{
     Attribute, ConstShapeAttribute, Op, ReshapeAttribute, TosaOperator, TosaShape, TosaTensor,
 };
 
@@ -99,10 +99,7 @@ fn cancel_inverse_pairs(
         removed.insert(output);
         let first_output = operators[first].outputs[0].clone();
         operators.remove(second);
-        if use_counts(operators, output_names)
-            .get(&first_output)
-            .is_none()
-        {
+        if !use_counts(operators, output_names).contains_key(&first_output) {
             operators.remove(first);
             removed.insert(first_output);
         }
@@ -194,7 +191,7 @@ pub(super) fn simplify_transposes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serialize::tosa_generated::{DType, TransposeAttribute};
+    use crate::serialize::tosa_types::{DType, TransposeAttribute};
 
     fn tensor(name: &str, shape: &[i32]) -> TosaTensor {
         TosaTensor::new(name, shape.to_vec(), DType::Int8)

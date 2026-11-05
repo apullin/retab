@@ -163,6 +163,11 @@ fn sliced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Optio
         return None;
     }
 
+    if node.target == OpTarget::TosaSlice {
+        let size = shape_arg_i32_list(graph, node, 2);
+        return (size.len() == input_shape.len()).then(|| apply_tosa_dim_order(node, size));
+    }
+
     strided_slice_shape(graph, node, input_node, &input_shape)
         .or_else(|| explicit_slice_size_shape(node, &input_shape))
 }

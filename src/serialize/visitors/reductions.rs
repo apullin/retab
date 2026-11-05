@@ -163,6 +163,7 @@ enum ReduceExtremaKind {
 ///   3. Mul(scale)       – skipped when scale == 1.0
 ///
 /// Returns the name of the tensor produced by the last op in the chain.
+#[allow(clippy::too_many_arguments)]
 fn emit_quant_to_float_chain(
     result: &mut EmitResult,
     node_name: &str,
@@ -244,6 +245,7 @@ fn emit_quant_to_float_chain(
 ///
 /// Returns `(last_tensor_name, last_shape)` so the caller can do any
 /// post-processing (e.g. multiply by reciprocal for mean, reshape, etc.).
+#[allow(clippy::too_many_arguments)]
 fn emit_multi_axis_reduce_loop(
     result: &mut EmitResult,
     node_name: &str,

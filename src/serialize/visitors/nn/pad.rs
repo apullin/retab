@@ -43,7 +43,7 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
         .and_then(|id| graph.node(id))
         .map(|input_node| actual_tensor_shape(graph, store, input_node))
         .unwrap_or_else(|| raw_i32_shape(node));
-    let pad = arg_i32_list(node, 1);
+    let pad = shape_arg_i32_list(graph, node, 1);
     let rank = input_shape.len();
     let pad_pairs: Vec<(i32, i32)> = pad
         .chunks(2)
@@ -54,7 +54,11 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
         .collect();
     let mut per_dim_pad = vec![(0i32, 0i32); rank];
     for (i, &pair) in pad_pairs.iter().enumerate() {
-        let dim = rank.saturating_sub(1 + i);
+        let dim = if node.target == OpTarget::TosaPad {
+            i
+        } else {
+            rank.saturating_sub(1 + i)
+        };
         if dim < rank {
             per_dim_pad[dim] = pair;
         }
@@ -98,7 +102,7 @@ pub(in crate::serialize::visitors) fn emit_pad(ctx: &EmitContext) -> EmitResult 
     let raw_pad_value = pad_fill_value(node);
     let pad_dtype = ir_dtype_to_tosa(node.meta.val.dtype);
     let pad_value = match (pad_dtype, node.meta.output_qparams.first()) {
-        (DType::Int8 | DType::Int16, Some((_, qp))) => {
+        (DType::Int8 | DType::Int16, Some((_, qp))) if node.target != OpTarget::TosaPad => {
             quantize_scalar_with_qparam(raw_pad_value, *qp)
         }
         _ => raw_pad_value,

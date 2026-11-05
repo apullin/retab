@@ -7,7 +7,7 @@ use super::tensor_layout::{
     apply_tosa_dim_order, infer_shape_permutation, inverse_tosa_dim_order, node_tensor_dtype,
     permute_shape, raw_i32_shape,
 };
-use super::tosa_generated::{Attribute, Op, TosaOperator, TosaTensor, TransposeAttribute};
+use super::tosa_types::{Attribute, Op, TosaOperator, TosaTensor, TransposeAttribute};
 use super::visitors;
 
 pub(super) fn append_output_names(graph: &Graph, arg: &Arg, output_names: &mut Vec<String>) {

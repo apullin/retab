@@ -113,13 +113,13 @@ fn decode_integers(data: &TensorData) -> Option<Vec<f32>> {
         DType::Int8 => data.data.iter().map(|&b| b as i8 as f32).collect(),
         DType::Int16 => data
             .data
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32)
+            .as_chunks::<2>().0.iter()
+            .map(|c| i16::from_le_bytes(*c) as f32)
             .collect(),
         DType::Int32 => data
             .data
-            .chunks_exact(4)
-            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f32)
+            .as_chunks::<4>().0.iter()
+            .map(|c| i32::from_le_bytes(*c) as f32)
             .collect(),
         _ => return None,
     };

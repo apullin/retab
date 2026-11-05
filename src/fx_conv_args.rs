@@ -4,6 +4,7 @@ use crate::fx_target::{
     is_conv3d_default_target,
 };
 
+#[allow(clippy::enum_variant_names)] // named after the aten overloads
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConvArgKind {
     Conv1dDefault,

@@ -626,12 +626,12 @@ fn cast_buffer_int64_to_int32(store: &mut TensorStore, name: &str) -> bool {
 /// value exceeds the int32 range (matching ConvertInt64ConstOpsToInt32Pass, which
 /// leaves out-of-range constants as int64).
 fn downcast_int64_le_to_int32(data: &[u8]) -> Option<Vec<u8>> {
-    if data.len() % 8 != 0 {
+    if !data.len().is_multiple_of(8) {
         return None;
     }
     let mut out = Vec::with_capacity(data.len() / 2);
-    for chunk in data.chunks_exact(8) {
-        let v = i64::from_le_bytes(chunk.try_into().ok()?);
+    for chunk in data.as_chunks::<8>().0 {
+        let v = i64::from_le_bytes(*chunk);
         let narrowed = i32::try_from(v).ok()?;
         out.extend_from_slice(&narrowed.to_le_bytes());
     }
@@ -752,6 +752,147 @@ pub fn debug_dump(graph: &Graph, label: &str) {
                 n.meta.tosa_dim_order,
             );
         }
+    }
+}
+
+fn map_op(op: NodeOp) -> OpType {
+    match op {
+        NodeOp::Placeholder | NodeOp::GetAttr => OpType::Placeholder,
+        NodeOp::Output => OpType::Output,
+        NodeOp::CallFunction | NodeOp::Other => OpType::CallFunction,
+    }
+}
+
+fn map_arg(
+    a: &IrArg,
+    idmap: &HashMap<IrNodeId, NodeId>,
+    submodule_map: &HashMap<IrNodeId, String>,
+) -> Arg {
+    match a {
+        IrArg::Node(id) => {
+            if let Some(name) = submodule_map.get(id) {
+                Arg::String(name.clone())
+            } else {
+                idmap.get(id).map(|&n| Arg::Node(n)).unwrap_or(Arg::None)
+            }
+        }
+        IrArg::Int(v) => Arg::Int(*v),
+        IrArg::Float(v) => Arg::Float(*v),
+        IrArg::Bool(v) => Arg::Bool(*v),
+        IrArg::Str(s) => Arg::String(s.clone()),
+        IrArg::Dtype(s) => Arg::Dtype(DType::from_torch_str(s)),
+        IrArg::None => Arg::None,
+        IrArg::List(items) => map_list(items, idmap, submodule_map),
+    }
+}
+
+/// serialize `Arg` lists are typed (`NodeList`/`IntList`/`FloatList`), unlike the
+/// general `IrArg::List`. Classify by element type.
+fn map_list(
+    items: &[IrArg],
+    idmap: &HashMap<IrNodeId, NodeId>,
+    _submodule_map: &HashMap<IrNodeId, String>,
+) -> Arg {
+    if items.is_empty() {
+        return Arg::IntList(SmallVec::new());
+    }
+    if items.iter().all(|x| matches!(x, IrArg::Node(_))) {
+        let ids = items
+            .iter()
+            .filter_map(|x| match x {
+                IrArg::Node(id) => idmap.get(id).copied(),
+                _ => None,
+            })
+            .collect();
+        return Arg::NodeList(ids);
+    }
+    if items
+        .iter()
+        .all(|x| matches!(x, IrArg::Int(_) | IrArg::Bool(_)))
+    {
+        let v = items
+            .iter()
+            .map(|x| match x {
+                IrArg::Int(i) => *i,
+                IrArg::Bool(b) => *b as i64,
+                _ => 0,
+            })
+            .collect();
+        return Arg::IntList(v);
+    }
+    if items
+        .iter()
+        .all(|x| matches!(x, IrArg::Float(_) | IrArg::Int(_)))
+    {
+        let v = items
+            .iter()
+            .map(|x| match x {
+                IrArg::Float(f) => *f,
+                IrArg::Int(i) => *i as f64,
+                _ => 0.0,
+            })
+            .collect();
+        return Arg::FloatList(v);
+    }
+    // Mixed/optional lists (e.g. symint lists with Nones) are rare in lowered
+    // graphs; empty for now, refine if the battery surfaces one.
+    Arg::IntList(SmallVec::new())
+}
+
+fn map_meta(m: &IrNodeMeta) -> NodeMeta {
+    let val = match m.tensor_facts() {
+        Some(ft) => TensorInfo::new(&ft.shape, DType::from_torch_str(&ft.dtype)),
+        None => TensorInfo::new(&[], DType::Float32),
+    };
+    let mut meta = NodeMeta::new(val);
+    meta.input_qparams = qparam_entries(m.input_qparams());
+    meta.output_qparams = qparam_entries(m.output_qparams());
+    meta.tosa_dim_order = m
+        .tosa_dim_order()
+        .map(|v| v.iter().map(|&x| x as u8).collect());
+    meta.tosa_special_dtype = special_dtype_from_extras(m);
+    meta.arm_control_flow_parent_output_user = matches!(
+        m.extras.get("arm_control_flow_parent_output_user"),
+        Some(MetaValue::Bool(true))
+    );
+    meta
+}
+
+fn qparam_entries<A>(m: Option<&QParamMap>) -> SmallVec<A>
+where
+    A: smallvec::Array<Item = (u32, QuantArgs)>,
+{
+    let Some(map) = m else {
+        return SmallVec::new();
+    };
+    map.iter()
+        .map(|(idx, qp)| (*idx as u32, qparam_to_quantargs(qp)))
+        .collect()
+}
+
+fn qparam_to_quantargs(qp: &QParam) -> QuantArgs {
+    QuantArgs {
+        scale: qp.scale,
+        zero_point: qp.zp,
+        dtype: qp.dtype(),
+        qmin: qp.qmin,
+        qmax: qp.qmax,
+    }
+}
+
+fn special_dtype_from_extras(m: &IrNodeMeta) -> Option<DType> {
+    match m.extras.get("tosa_special_dtype") {
+        Some(MetaValue::Str(s)) => {
+            let s = s.to_uppercase();
+            if s.contains("48") {
+                Some(DType::Int48)
+            } else if s.contains('4') {
+                Some(DType::Int4)
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -975,146 +1116,5 @@ mod tests {
         let rescale_id = node_id_by_name(&graph, "late_rescale");
         let user_id = node_id_by_name(&graph, "user");
         assert!(graph.nodes[rescale_id].users.contains(&user_id));
-    }
-}
-
-fn map_op(op: NodeOp) -> OpType {
-    match op {
-        NodeOp::Placeholder | NodeOp::GetAttr => OpType::Placeholder,
-        NodeOp::Output => OpType::Output,
-        NodeOp::CallFunction | NodeOp::Other => OpType::CallFunction,
-    }
-}
-
-fn map_arg(
-    a: &IrArg,
-    idmap: &HashMap<IrNodeId, NodeId>,
-    submodule_map: &HashMap<IrNodeId, String>,
-) -> Arg {
-    match a {
-        IrArg::Node(id) => {
-            if let Some(name) = submodule_map.get(id) {
-                Arg::String(name.clone())
-            } else {
-                idmap.get(id).map(|&n| Arg::Node(n)).unwrap_or(Arg::None)
-            }
-        }
-        IrArg::Int(v) => Arg::Int(*v),
-        IrArg::Float(v) => Arg::Float(*v),
-        IrArg::Bool(v) => Arg::Bool(*v),
-        IrArg::Str(s) => Arg::String(s.clone()),
-        IrArg::Dtype(s) => Arg::Dtype(DType::from_torch_str(s)),
-        IrArg::None => Arg::None,
-        IrArg::List(items) => map_list(items, idmap, submodule_map),
-    }
-}
-
-/// serialize `Arg` lists are typed (`NodeList`/`IntList`/`FloatList`), unlike the
-/// general `IrArg::List`. Classify by element type.
-fn map_list(
-    items: &[IrArg],
-    idmap: &HashMap<IrNodeId, NodeId>,
-    _submodule_map: &HashMap<IrNodeId, String>,
-) -> Arg {
-    if items.is_empty() {
-        return Arg::IntList(SmallVec::new());
-    }
-    if items.iter().all(|x| matches!(x, IrArg::Node(_))) {
-        let ids = items
-            .iter()
-            .filter_map(|x| match x {
-                IrArg::Node(id) => idmap.get(id).copied(),
-                _ => None,
-            })
-            .collect();
-        return Arg::NodeList(ids);
-    }
-    if items
-        .iter()
-        .all(|x| matches!(x, IrArg::Int(_) | IrArg::Bool(_)))
-    {
-        let v = items
-            .iter()
-            .map(|x| match x {
-                IrArg::Int(i) => *i,
-                IrArg::Bool(b) => *b as i64,
-                _ => 0,
-            })
-            .collect();
-        return Arg::IntList(v);
-    }
-    if items
-        .iter()
-        .all(|x| matches!(x, IrArg::Float(_) | IrArg::Int(_)))
-    {
-        let v = items
-            .iter()
-            .map(|x| match x {
-                IrArg::Float(f) => *f,
-                IrArg::Int(i) => *i as f64,
-                _ => 0.0,
-            })
-            .collect();
-        return Arg::FloatList(v);
-    }
-    // Mixed/optional lists (e.g. symint lists with Nones) are rare in lowered
-    // graphs; empty for now, refine if the battery surfaces one.
-    Arg::IntList(SmallVec::new())
-}
-
-fn map_meta(m: &IrNodeMeta) -> NodeMeta {
-    let val = match m.tensor_facts() {
-        Some(ft) => TensorInfo::new(&ft.shape, DType::from_torch_str(&ft.dtype)),
-        None => TensorInfo::new(&[], DType::Float32),
-    };
-    let mut meta = NodeMeta::new(val);
-    meta.input_qparams = qparam_entries(m.input_qparams());
-    meta.output_qparams = qparam_entries(m.output_qparams());
-    meta.tosa_dim_order = m
-        .tosa_dim_order()
-        .map(|v| v.iter().map(|&x| x as u8).collect());
-    meta.tosa_special_dtype = special_dtype_from_extras(m);
-    meta.arm_control_flow_parent_output_user = matches!(
-        m.extras.get("arm_control_flow_parent_output_user"),
-        Some(MetaValue::Bool(true))
-    );
-    meta
-}
-
-fn qparam_entries<A>(m: Option<&QParamMap>) -> SmallVec<A>
-where
-    A: smallvec::Array<Item = (u32, QuantArgs)>,
-{
-    let Some(map) = m else {
-        return SmallVec::new();
-    };
-    map.iter()
-        .map(|(idx, qp)| (*idx as u32, qparam_to_quantargs(qp)))
-        .collect()
-}
-
-fn qparam_to_quantargs(qp: &QParam) -> QuantArgs {
-    QuantArgs {
-        scale: qp.scale,
-        zero_point: qp.zp,
-        dtype: qp.dtype(),
-        qmin: qp.qmin,
-        qmax: qp.qmax,
-    }
-}
-
-fn special_dtype_from_extras(m: &IrNodeMeta) -> Option<DType> {
-    match m.extras.get("tosa_special_dtype") {
-        Some(MetaValue::Str(s)) => {
-            let s = s.to_uppercase();
-            if s.contains("48") {
-                Some(DType::Int48)
-            } else if s.contains('4') {
-                Some(DType::Int4)
-            } else {
-                None
-            }
-        }
-        _ => None,
     }
 }

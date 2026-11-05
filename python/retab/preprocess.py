@@ -414,6 +414,46 @@ def _build_pipeline_config(compile_spec: TosaCompileSpec) -> dict:
     }
 
 
+def _u55_permutes_to_split(edge_program: ExportedProgram, compile_spec: TosaCompileSpec) -> list[str]:
+    """Permutes that rc4's DecomposePermuteForU55Pass splits on U55.
+
+    Their input shape fails U55's worst-case TRANSPOSE rule and the installed Vela rejects
+    a one-TRANSPOSE probe, which is the same check stock runs. RETAB's Rust pass then
+    splits these nodes with upstream's chunk plan.
+    """
+    if not compile_spec.tosa_spec.is_U55_subset:
+        return []
+    from executorch.backends.arm._passes.decompose_permute_for_u55_pass import (
+        DecomposePermuteForU55Pass,
+    )
+    from executorch.backends.arm.constants import DQ_OPS
+    from executorch.exir.graph_module import get_cond_while_submodules
+
+    names = []
+
+    def visit(graph_module) -> None:
+        for node in graph_module.graph.nodes:
+            if node.op != "call_function" or node.target not in DecomposePermuteForU55Pass._PERMUTE_OPS:
+                continue
+            producer = node.args[0]
+            val = producer.meta.get("val")
+            if val is None:
+                continue
+            shape = tuple(val.shape)
+            if not DecomposePermuteForU55Pass._violates_u55_worst_case_constraint(shape):
+                continue
+            # The TRANSPOSE runs on the quantized tensor, not the dequantized float.
+            dtype = producer.args[-1] if producer.target in DQ_OPS else val.dtype
+            permutation = tuple(dim % len(shape) for dim in node.args[1])
+            if DecomposePermuteForU55Pass._violates_exact_constraint(shape, permutation, dtype):
+                names.append(node.name)
+        for _, submodule, _ in get_cond_while_submodules(graph_module):
+            visit(submodule)
+
+    visit(edge_program.graph_module)
+    return names
+
+
 def _has_non_default_pipeline_config(compile_spec) -> bool:
     config = getattr(compile_spec, "_pipeline_config", None)
     if config is None:
@@ -509,6 +549,7 @@ def _all_rust_preprocess(
     from retab import _native as _rust
 
     pipeline_config = _build_pipeline_config(_compile_spec)
+    pipeline_config["u55_split_permutes"] = _u55_permutes_to_split(edge_program, _compile_spec)
     try:
         _rust.run_fx_passes(gm, edge_program, pipeline_config=pipeline_config)
         _run_control_flow_submodule_rust_passes(gm, edge_program, _rust, pipeline_config)
@@ -522,9 +563,7 @@ def _all_rust_preprocess(
     t_passes = time.perf_counter() - t0
 
     try:
-        tosa_bytes = _rust.ingest_and_serialize(
-            gm, edge_program.state_dict, edge_program.graph_signature, edge_program
-        )
+        tosa_bytes = _rust.ingest_and_serialize()
     except Exception as exc:  # noqa: BLE001 - Rust requests stock via message
         reason = _native_fallback_reason(exc)
         if reason is None:

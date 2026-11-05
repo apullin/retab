@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 // Compatibility re-export module: bridges tosa-rs types to the API
 // that the rest of retab expects. Where types are identical they are
@@ -40,53 +39,7 @@ pub use tosa_rs::{
 // ---------------------------------------------------------------------------
 // Structural types -- re-export those that are layout-compatible
 // ---------------------------------------------------------------------------
-pub use tosa_rs::{OpLocation, SoftwareVersion, TosaRegion, TosaShape};
-
-// ---------------------------------------------------------------------------
-// Version -- same fields, but retab default is (1,0,0,false) while
-// tosa-rs default is (-1,-1,-1,true). Re-export the struct, override Default.
-// ---------------------------------------------------------------------------
-/// Version table -- wraps tosa_rs::Version with retab's default.
-#[derive(Debug, Clone)]
-pub struct Version {
-    pub major: i32,
-    pub minor: i32,
-    pub patch: i32,
-    pub draft: bool,
-}
-
-impl Default for Version {
-    fn default() -> Self {
-        Self {
-            major: 1,
-            minor: 0,
-            patch: 0,
-            draft: false,
-        }
-    }
-}
-
-impl From<Version> for tosa_rs::Version {
-    fn from(v: Version) -> Self {
-        tosa_rs::Version {
-            major: v.major,
-            minor: v.minor,
-            patch: v.patch,
-            draft: v.draft,
-        }
-    }
-}
-
-impl From<tosa_rs::Version> for Version {
-    fn from(v: tosa_rs::Version) -> Self {
-        Version {
-            major: v.major,
-            minor: v.minor,
-            patch: v.patch,
-            draft: v.draft,
-        }
-    }
-}
+pub use tosa_rs::TosaShape;
 
 // ---------------------------------------------------------------------------
 // TosaTensor -- re-exported directly from tosa-rs.
@@ -102,30 +55,17 @@ pub struct TosaOperator {
     pub attribute: Attribute,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
-    pub location: Option<OpLocation>,
 }
 
 impl TosaOperator {
-    /// Create an operator with no location metadata (the common case).
     pub fn new(op: Op, attribute: Attribute, inputs: Vec<String>, outputs: Vec<String>) -> Self {
         Self {
             op,
             attribute,
             inputs,
             outputs,
-            location: None,
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// TosaGraph -- same fields but uses our local Version.
-// ---------------------------------------------------------------------------
-#[derive(Debug, Clone)]
-pub struct TosaGraph {
-    pub version: Version,
-    pub regions: Vec<TosaRegion>,
-    pub software_version: Option<SoftwareVersion>,
 }
 
 // ---------------------------------------------------------------------------

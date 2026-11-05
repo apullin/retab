@@ -5,7 +5,7 @@ use crate::graph::Graph;
 use crate::store::TensorData;
 
 use super::op_semantics;
-use super::tosa_generated::{DType, TosaTensor};
+use super::tosa_types::{DType, TosaTensor};
 use super::visitors::ir_dtype_to_tosa;
 
 /// Describes how a weight tensor should be permuted for TOSA.
@@ -311,8 +311,8 @@ fn pack_int4_data(data: &[u8]) -> Vec<u8> {
 
 fn widen_int32_data_to_int48(data: &[u8]) -> Vec<u8> {
     let mut widened = Vec::with_capacity((data.len() / 4) * 6);
-    for chunk in data.chunks_exact(4) {
-        let value = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as i64;
+    for chunk in data.as_chunks::<4>().0.iter() {
+        let value = i32::from_le_bytes(*chunk) as i64;
         let bytes = value.to_le_bytes();
         widened.extend_from_slice(&bytes[..6]);
     }
@@ -336,7 +336,7 @@ fn infer_depthwise_in_channels(graph: &Graph, node: &Node, oc: usize) -> usize {
             .flatten()
         {
             let candidate = candidate as usize;
-            if candidate == groups && oc % candidate == 0 {
+            if candidate == groups && oc.is_multiple_of(candidate) {
                 return candidate;
             }
         }
@@ -347,7 +347,7 @@ fn infer_depthwise_in_channels(graph: &Graph, node: &Node, oc: usize) -> usize {
         .flatten()
     {
         let candidate = candidate as usize;
-        if candidate > 0 && oc % candidate == 0 {
+        if candidate > 0 && oc.is_multiple_of(candidate) {
             return candidate;
         }
     }
@@ -380,7 +380,7 @@ fn depthwise_weight_perm(graph: &Graph, node: &Node, weight_node: &Node) -> Opti
 
     let oc = weight_shape.first().copied().unwrap_or(0) as usize;
     let in_channels = infer_depthwise_in_channels(graph, node, oc);
-    (in_channels > 0 && in_channels == groups as usize && oc % in_channels == 0)
+    (in_channels > 0 && in_channels == groups as usize && oc.is_multiple_of(in_channels))
         .then_some(WeightPermKind::DepthwiseConv2d { in_channels })
 }
 
@@ -394,7 +394,7 @@ fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind>
             OpTarget::TosaConv2d => Some(WeightPermKind::Conv2d),
             OpTarget::Conv2d => match node.args.get(1) {
                 Some(Arg::Node(weight_id)) => graph.node(*weight_id).map(|weight_node| {
-                    depthwise_weight_perm(graph, node, weight_node).unwrap_or_else(|| {
+                    depthwise_weight_perm(graph, node, weight_node).unwrap_or({
                         if weight_node.meta.val.shape_len == 5 {
                             WeightPermKind::Conv3d
                         } else {
@@ -630,8 +630,8 @@ mod tests {
             for w in 0..3usize {
                 for i in 0..1usize {
                     for m in 0..16usize {
-                        let src_idx = ((m * 1 + i) * 3 + h) * 3 + w;
-                        let dst_idx = ((h * 3 + w) * 1 + i) * 16 + m;
+                        let src_idx = ((m + i) * 3 + h) * 3 + w;
+                        let dst_idx = ((h * 3 + w) + i) * 16 + m;
                         assert_eq!(
                             out[dst_idx], data[src_idx],
                             "Mismatch at h={h},w={w},i={i},m={m}"
@@ -663,8 +663,8 @@ mod tests {
         for oc in 0..6usize {
             for h in 0..2usize {
                 for w in 0..2usize {
-                    let src_idx = ((oc * 1) * 2 + h) * 2 + w;
-                    let dst_idx = ((h * 2 + w) * 6 + oc) * 1;
+                    let src_idx = (oc * 2 + h) * 2 + w;
+                    let dst_idx = (h * 2 + w) * 6 + oc;
                     assert_eq!(
                         out[dst_idx], data[src_idx],
                         "Mismatch at oc={oc},h={h},w={w}"

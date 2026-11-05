@@ -36,6 +36,8 @@ const TOSA_TARGETS: &[(&str, OpTarget)] = &[
     ("backend.tosa.SLICE.default", OpTarget::TosaSlice),
     ("backend.tosa.TABLE.default", OpTarget::TosaTable),
     ("backend.tosa.PAD.default", OpTarget::TosaPad),
+    ("backend.tosa.IDENTITY.default", OpTarget::TosaIdentity),
+    ("backend.tosa.CONST_SHAPE.default", OpTarget::TosaConstShape),
     ("backend.tosa.GATHER.default", OpTarget::TosaGather),
     ("backend.tosa.SCATTER.default", OpTarget::TosaScatter),
     ("backend.tosa.SELECT.default", OpTarget::TosaSelect),
@@ -464,7 +466,7 @@ mod tests {
     fn rejects_near_miss_tosa_targets() {
         for target in [
             "backend.tosa.LOGICAL_LEFT_SHIFT.default",
-            "backend.tosa.CONST_SHAPE.default",
+            "backend.tosa.CONST_SHAPE.out",
             "backend.tosa.MAX_POOL2D_ADAPTIVE.default",
             "backend.tosa.CONV2D_BLOCK_SCALED.default",
         ] {

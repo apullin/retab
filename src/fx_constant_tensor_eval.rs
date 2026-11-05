@@ -273,8 +273,8 @@ fn broadcast_offset(out_linear: usize, out_shape: &[i64], input_shape: &[i64]) -
     let mut out_coords = vec![0usize; out_rank];
     for axis in 0..out_rank {
         let stride = out_strides[axis];
-        out_coords[axis] = if stride == 0 { 0 } else { rem / stride };
-        rem = if stride == 0 { 0 } else { rem % stride };
+        out_coords[axis] = rem.checked_div(stride).unwrap_or(0);
+        rem = rem.checked_rem(stride).unwrap_or(0);
     }
 
     let rank_delta = out_rank - in_rank;
@@ -661,7 +661,7 @@ pub fn plan_constant_conv_tensor(
         .map(|dim| usize::try_from(*dim))
         .collect::<Result<_, _>>()
         .ok()?;
-    if in_spatial.iter().any(|&dim| dim == 0) || kernel.iter().any(|&dim| dim == 0) {
+    if in_spatial.contains(&0) || kernel.contains(&0) {
         return None;
     }
     let mut out_spatial = Vec::with_capacity(spatial_rank);
@@ -807,8 +807,8 @@ pub fn permute_tensor_data(input: &TensorData, order: &[usize]) -> Option<Tensor
         let mut rem = src_linear;
         for axis in 0..rank {
             let stride = input_strides[axis];
-            coords[axis] = if stride == 0 { 0 } else { rem / stride };
-            rem = if stride == 0 { 0 } else { rem % stride };
+            coords[axis] = rem.checked_div(stride).unwrap_or(0);
+            rem = rem.checked_rem(stride).unwrap_or(0);
         }
         for (out_axis, &in_axis) in order.iter().enumerate() {
             dst_coords[out_axis] = coords[in_axis];
@@ -921,8 +921,8 @@ pub fn slice_tensor_data(
         let mut rem = out_linear;
         for axis in 0..rank {
             let stride = output_strides[axis];
-            out_coords[axis] = if stride == 0 { 0 } else { rem / stride };
-            rem = if stride == 0 { 0 } else { rem % stride };
+            out_coords[axis] = rem.checked_div(stride).unwrap_or(0);
+            rem = rem.checked_rem(stride).unwrap_or(0);
             in_coords[axis] = out_coords[axis];
         }
         in_coords[dim] = usize::try_from(start + (out_coords[dim] as i64 * step)).ok()?;
@@ -1171,7 +1171,7 @@ pub fn plan_constant_reciprocal_tensor(node: &IrNode, input: &TensorData) -> Opt
         let dtype = output_qparam.dtype();
         let mut data = Vec::new();
         for value in values {
-            let quantized = quantize_scalar_with_qparam(value, quant_args.clone());
+            let quantized = quantize_scalar_with_qparam(value, quant_args);
             data.extend_from_slice(&scalar_storage_bytes(dtype, quantized)?);
         }
         let shape = input.shape.clone();
@@ -1227,8 +1227,10 @@ mod tests {
         let output = permute_tensor_data(&input, &[1, 0]).expect("permute");
         let values = output
             .data
-            .chunks_exact(4)
-            .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| i32::from_le_bytes(*chunk))
             .collect::<Vec<_>>();
         assert_eq!(output.shape, vec![2, 2]);
         assert_eq!(values, vec![1, 3, 2, 4]);
@@ -1240,8 +1242,10 @@ mod tests {
         let output = slice_tensor_data(&input, 1, 1, 3, 1).expect("slice");
         let values = output
             .data
-            .chunks_exact(4)
-            .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| i32::from_le_bytes(*chunk))
             .collect::<Vec<_>>();
         assert_eq!(output.shape, vec![2, 2]);
         assert_eq!(values, vec![2, 3, 5, 6]);

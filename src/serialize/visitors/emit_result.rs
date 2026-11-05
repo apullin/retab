@@ -67,6 +67,7 @@ impl EmitResult {
     }
 
     /// Emit a binary op: two inputs -> one output (same shape as first).
+    #[allow(clippy::too_many_arguments)]
     pub fn binary(
         &mut self,
         name: String,
@@ -87,6 +88,7 @@ impl EmitResult {
     }
 
     /// Emit a ternary op (e.g. MUL with shift, SELECT): three inputs -> one output.
+    #[allow(clippy::too_many_arguments)]
     pub fn ternary(
         &mut self,
         name: String,

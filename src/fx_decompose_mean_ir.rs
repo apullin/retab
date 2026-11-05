@@ -169,7 +169,7 @@ mod tests {
         for dims in [vec![2], vec![3], vec![2, 3]] {
             let mut graph = IrGraph::empty();
             let shape = [2, 3, 5, 7];
-            let x = f32_placeholder(&mut graph, "x", &shape);
+            let x = f32_placeholder(&mut graph, "x", shape);
             let mut output_shape = shape;
             for &dim in &dims {
                 output_shape[dim as usize] = 1;
@@ -179,7 +179,7 @@ mod tests {
                 "mean",
                 "aten.mean.dim",
                 vec![IrArg::Node(x), i64_list(&dims), IrArg::Bool(true)],
-                &output_shape,
+                output_shape,
             );
 
             assert!(IrDecomposeMeanPass.run(&mut graph));
@@ -195,13 +195,13 @@ mod tests {
     #[test]
     fn mean_without_keepdim_only_reshapes_the_result() {
         let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", &[2, 3, 5]);
+        let x = f32_placeholder(&mut graph, "x", [2, 3, 5]);
         let mean = f32_call(
             &mut graph,
             "mean",
             "aten.mean.dim",
             vec![IrArg::Node(x), i64_list(&[-1]), IrArg::Bool(false)],
-            &[2, 3],
+            [2, 3],
         );
 
         assert!(IrDecomposeMeanPass.run(&mut graph));

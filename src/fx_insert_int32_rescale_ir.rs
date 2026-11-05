@@ -450,7 +450,7 @@ mod tests {
             "user",
             "aten.view_copy.default",
             vec![IrArg::Node(input)],
-            NodeMeta::tensor(&[2], dtype),
+            NodeMeta::tensor([2], dtype),
         )
     }
 
@@ -575,7 +575,7 @@ mod tests {
         let mut graph = IrGraph::empty();
         let lhs = placeholder(&mut graph, "lhs", [2], "torch.int8");
         let rhs = placeholder(&mut graph, "rhs", [2], "torch.int8");
-        let mut add_meta = NodeMeta::tensor(&[2], "torch.int8");
+        let mut add_meta = NodeMeta::tensor([2], "torch.int8");
         add_meta.set_binary_input_output_qparams(
             qparam(0.25, 3, "torch.int8"),
             qparam(0.5, -4, "torch.int8"),
@@ -609,7 +609,7 @@ mod tests {
         let mut graph = IrGraph::empty();
         let lhs = placeholder(&mut graph, "lhs", [2], "torch.int32");
         let rhs = placeholder(&mut graph, "rhs", [2], "torch.int32");
-        let mut add_meta = NodeMeta::tensor(&[2], "torch.int32");
+        let mut add_meta = NodeMeta::tensor([2], "torch.int32");
         add_meta.set_binary_input_output_qparams(
             int32_qparam(0.25),
             int32_qparam(0.5),
@@ -653,7 +653,7 @@ mod tests {
                     IrArg::Int(127),
                     IrArg::Dtype("torch.int8".to_string()),
                 ],
-                NodeMeta::tensor(&[2], "torch.int8"),
+                NodeMeta::tensor([2], "torch.int8"),
             );
             let x_dq = f32_call(
                 &mut graph,
@@ -669,7 +669,7 @@ mod tests {
                 ],
                 [2],
             );
-            let mut binary_meta = NodeMeta::tensor(&[2], "torch.int8");
+            let mut binary_meta = NodeMeta::tensor([2], "torch.int8");
             binary_meta.set_input_qparams_from([(0, qparam(0.5, 0, "torch.int8"))]);
             binary_meta.set_single_output_qparam(qparam(0.5, 0, "torch.int8"));
             let binary = call(
@@ -691,7 +691,7 @@ mod tests {
                     IrArg::Int(127),
                     IrArg::Dtype("torch.int8".to_string()),
                 ],
-                NodeMeta::tensor(&[2], "torch.int8"),
+                NodeMeta::tensor([2], "torch.int8"),
             );
             let user = view_user(&mut graph, out_q, "torch.int8");
 
@@ -709,7 +709,7 @@ mod tests {
         let cond = placeholder(&mut graph, "cond", [2], "torch.bool");
         let lhs = placeholder(&mut graph, "lhs", [2], "torch.int8");
         let rhs = placeholder(&mut graph, "rhs", [2], "torch.int8");
-        let mut where_meta = NodeMeta::tensor(&[2], "torch.int8");
+        let mut where_meta = NodeMeta::tensor([2], "torch.int8");
         where_meta.set_input_qparams_from([
             (1, qparam(0.5, 3, "torch.int8")),
             (2, qparam(0.5, 3, "torch.int8")),

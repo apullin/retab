@@ -73,9 +73,7 @@ def test_placeholder_tensor_bindings_follow_graph_signature(placeholder_order):
         ep,
         pipeline_config=_build_pipeline_config(TosaCompileSpec("TOSA-1.0+INT")),
     )
-    tosa_bytes = retab.ingest_and_serialize(
-        ep.graph_module, dict(ep.state_dict), ep.graph_signature, ep
-    )
+    tosa_bytes = retab.ingest_and_serialize()
     block = TosaGraph.GetRootAs(tosa_bytes, 0).Regions(0).Blocks(0)
     assert [block.Inputs(i).decode() for i in range(block.InputsLength())] == [
         names["input"]
