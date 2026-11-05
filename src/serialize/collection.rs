@@ -1081,7 +1081,7 @@ mod tests {
             let mut graph =
                 crate::ingest::from_ir::graph_from_ir_preserve_placeholders(&ir, &mut store);
             crate::ingest::finalize::finalize_converted_graph(&mut graph);
-            crate::ingest::from_ir::prefix_graph(&mut graph, &mut store, &format!("{region}::"));
+            crate::ingest::from_ir::suffix_graph(&mut graph, &mut store, region);
             graphs.push((region.into(), graph));
         }
         visitors::shape_utils::clear_shape_cache();
@@ -1117,16 +1117,16 @@ mod tests {
         assert!(shape("body", &items("body").output_names[1]).is_empty());
         assert_eq!(items("body").output_names.len(), 3);
         assert_eq!(items("main").output_names, vec!["result"]);
-        assert_eq!(items("cond").output_names, vec!["cond::predicate"]);
+        assert_eq!(items("cond").output_names, vec!["predicate_cond"]);
         for name in [
-            "cond::sum",
-            "cond::quantized",
-            "cond::comparison_input",
-            "cond::predicate",
+            "sum_cond",
+            "quantized_cond",
+            "comparison_input_cond",
+            "predicate_cond",
         ] {
             assert!(shape("cond", name).is_empty());
         }
-        assert_eq!(shape("cond", "cond::gt"), &[1]);
+        assert_eq!(shape("cond", "gt_cond"), &[1]);
         let comparison = items("cond")
             .operators
             .iter()

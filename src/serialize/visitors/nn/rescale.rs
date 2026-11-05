@@ -233,6 +233,21 @@ fn direct_rescale_scales(node: &Node) -> Vec<f64> {
     }
 }
 
+/// Upstream's multiplier and shift, except for an INT32 input with scale > 1, where
+/// RETAB raises the shift to at least 20 and drops as many low multiplier bits. TOSA's
+/// apply_scale_32 requires |value| < 2^(shift - 1), and a large accumulator-to-output
+/// scale gives a small shift, so the reference model would reject most accumulator
+/// values (they saturate the output either way). Found by fuzzing random quantized
+/// networks (3780ec7). Stock doesn't do this, so these RESCALEs differ from stock's.
+fn rescale_multiplier_and_shift(scale: f64, scale_width: i32, input_dtype: DType) -> (i32, i8) {
+    let (mut multiplier, mut shift) = compute_multiplier_and_shift_with_width(scale, scale_width);
+    if input_dtype == DType::Int32 && scale > 1.0 && shift < 20 {
+        multiplier >>= i32::from(20 - shift).min(31);
+        shift = 20;
+    }
+    (multiplier, shift)
+}
+
 fn emit_direct_rescale_param_tensors(
     result: &mut EmitResult,
     node: &Node,
@@ -241,22 +256,9 @@ fn emit_direct_rescale_param_tensors(
     let scales = direct_rescale_scales(node);
     let scale32 = input_tosa_dtype != DType::Int48;
     let scale_width = if scale32 { 32 } else { 16 };
-    // TOSA apply_scale_32 requires |value| < 2^(shift-1).  When scale > 1
-    // the computed shift is small, and large INT32 accumulator values can
-    // overflow.  Clamp shift to >= 20 only for large-scale INT32 rescales
-    // (accumulator→output).  Small-scale INT32 rescales (INT8→INT32 upscale,
-    // scale ≤ 1) already produce shift >= 31 and don't need clamping.
     let (multipliers, shifts): (Vec<i32>, Vec<i8>) = scales
         .iter()
-        .map(|&scale| {
-            let (mut m, mut s) = compute_multiplier_and_shift_with_width(scale, scale_width);
-            if input_tosa_dtype == DType::Int32 && scale > 1.0 && s < 20 {
-                let deficit = (20 - s) as i32;
-                m >>= deficit.min(31);
-                s = 20;
-            }
-            (m, s)
-        })
+        .map(|&scale| rescale_multiplier_and_shift(scale, scale_width, input_tosa_dtype))
         .unzip();
     let multiplier_name = format!("{}_multipliers", node.name);
     let shift_name = format!("{}_shifts", node.name);
@@ -414,4 +416,27 @@ pub(in crate::serialize::visitors) fn emit_rescale(ctx: &EmitContext) -> EmitRes
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_large_int32_upscales_get_the_shift_floor() {
+        // scale 4096.5 has upstream shift 31 - 13 = 18.
+        let upstream = compute_multiplier_and_shift_with_width(4096.5, 32);
+        assert_eq!(upstream.1, 18);
+        assert_eq!(
+            rescale_multiplier_and_shift(4096.5, 32, DType::Int32),
+            (upstream.0 >> 2, 20)
+        );
+        for (scale, dtype) in [(4096.5, DType::Int8), (1.5, DType::Int32), (0.25, DType::Int32)] {
+            assert_eq!(
+                rescale_multiplier_and_shift(scale, 32, dtype),
+                compute_multiplier_and_shift_with_width(scale, 32),
+                "{scale} {dtype:?}"
+            );
+        }
+    }
 }

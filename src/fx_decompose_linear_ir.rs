@@ -1,10 +1,16 @@
-//! Pure Rust IrPass version of FxDecomposeLinearPass.
+//! Port of rc4's DecomposeLinearPass: a Linear becomes a 1x1 conv with the rows in
+//! the width.
 //!
-//! Decomposes `aten.linear.default(x, weight, bias)` into:
-//!   1. Reshape input to 4D:  [..., Ci] -> [N, Ci, 1, 1]
-//!   2. Reshape weight to 4D: [Co, Ci] -> [Co, Ci, 1, 1]
-//!   3. Conv2d with 1x1 kernel (aten.convolution.default)
-//!   4. Reshape output back:  [N, Co, 1, 1] -> [..., Co]
+//! `aten.linear.default(x, weight, bias)` becomes
+//!   1. view x:          [..., Ci] -> [1, 1, rows, Ci]
+//!   2. permute(0,3,1,2) -> [1, Ci, 1, rows]
+//!   3. view weight:     [Co, Ci] -> [Co, Ci, 1, 1]
+//!   4. 1x1 conv        -> [1, Co, 1, rows]
+//!   5. permute(0,2,3,1) -> [1, 1, rows, Co]
+//!   6. view            -> [..., Co]
+//!
+//! In NHWC the rows are the width, so Vela never sees a batch of `rows`. The layout
+//! pass turns both permutes into no-ops (see `fx_memory_format_ir` layout islands).
 
 use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId};
 use crate::runner_logging::log_line;
@@ -64,13 +70,12 @@ impl IrPass for IrDecomposeLinearPass {
 
             let node_name = graph.nodes[id].name.clone();
 
-            // 1. Reshape input to 4D: [..., Ci] -> [batches, Ci, 1, 1]
-            //    Propagate input qparams to the reshaped node.
-            let input_4d_shape = [batches, ci, 1, 1];
+            let input_rows_shape = [1, 1, batches, ci];
+            let input_4d_shape = [1, ci, 1, batches];
             let input_base_meta = graph.nodes[input_id].meta.clone();
-            let input_4d_meta = input_base_meta
-                .tensor_stamp_same_dtype_or_float32()
-                .empty_qparam_maps(input_4d_shape);
+            let input_stamp = input_base_meta.tensor_stamp_same_dtype_or_float32();
+            let input_rows_meta = input_stamp.empty_qparam_maps(input_rows_shape);
+            let input_4d_meta = input_stamp.empty_qparam_maps(input_4d_shape);
 
             // 2. Reshape weights to 4D: [Co, Ci] -> [Co, Ci, 1, 1]
             //    Propagate weight qparams (including per-channel) to the reshaped node.
@@ -83,7 +88,8 @@ impl IrPass for IrDecomposeLinearPass {
             // 3. Conv2d with 1x1 kernel
             //    convolution(input, weight, bias, stride, padding, dilation,
             //                transposed, output_padding, groups)
-            let conv_out_shape = [batches, co, 1, 1];
+            let conv_out_shape = [1, co, 1, batches];
+            let output_rows_shape = [1, 1, batches, co];
             let output_base_meta = graph.nodes[id].meta.clone();
             let output_meta = output_base_meta.tensor_stamp_same_dtype_or_float32();
             let conv_meta = output_meta.preserve_qparams(conv_out_shape);
@@ -94,10 +100,16 @@ impl IrPass for IrDecomposeLinearPass {
 
             let mut cursor = graph.rewrite_cursor(id);
 
-            let input_reshaped = cursor.view_copy(
+            let input_rows = cursor.view_copy(
                 format!("{}_input_view", node_name),
                 input_id,
-                &input_4d_shape,
+                &input_rows_shape,
+                input_rows_meta,
+            );
+            let input_reshaped = cursor.permute_copy(
+                format!("{}_input_permute", node_name),
+                input_rows,
+                &[0, 3, 1, 2],
                 input_4d_meta,
             );
 
@@ -125,11 +137,16 @@ impl IrPass for IrDecomposeLinearPass {
                 conv_meta,
             );
 
-            // 4. Reshape output back to original shape
+            let output_rows = cursor.permute_copy(
+                format!("{}_output_permute", node_name),
+                conv,
+                &[0, 2, 3, 1],
+                output_meta.empty_qparam_maps(output_rows_shape),
+            );
             let out_meta = output_meta.empty_qparam_maps(output_shape.clone());
             let result = cursor.view_copy(
                 format!("{}_output_view", node_name),
-                conv,
+                output_rows,
                 &output_shape,
                 out_meta,
             );

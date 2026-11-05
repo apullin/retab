@@ -405,9 +405,13 @@ pub(super) fn is_narrow_float_dtype(dtype: DType) -> bool {
         .unwrap_or(false)
 }
 
+/// Upstream `_compute_multiplier_and_shift` (op_tosa_rescale.py) for one scale.
 pub(super) fn compute_multiplier_and_shift_with_width(scale: f64, scale_width: i32) -> (i32, i8) {
+    let offset = if scale_width == 16 { 15 } else { 31 };
+    // frexp(0) is (0, 0), so upstream emits multiplier 0 with shift `offset`; TOSA
+    // requires 2 <= shift <= 62 even when the multiplier is 0.
     if scale == 0.0 {
-        return (0, 0);
+        return (0, offset as i8);
     }
 
     let bits = scale.to_bits();
@@ -415,7 +419,6 @@ pub(super) fn compute_multiplier_and_shift_with_width(scale: f64, scale_width: i
     let exponent = biased_exp - 1022;
     let mantissa = f64::from_bits((bits & 0x800F_FFFF_FFFF_FFFF) | 0x3FE0_0000_0000_0000);
 
-    let offset = if scale_width == 16 { 15 } else { 31 };
     let const_2_pow_offset: i64 = 1_i64 << offset;
     let mut shifted_mantissa = (mantissa * const_2_pow_offset as f64).round() as i64;
     let mut shift = exponent;
@@ -441,6 +444,49 @@ pub(super) fn compute_multiplier_and_shift_with_width(scale: f64, scale_width: i
 mod tests {
     use super::*;
     use crate::graph::ir::DType as IrDType;
+
+    /// Upstream's algorithm, written with frexp semantics.
+    fn upstream_multiplier_and_shift(scale: f64, scale_width: i32) -> (i32, i8) {
+        let offset = if scale_width == 16 { 15 } else { 31 };
+        let (mantissa, exponent) = if scale == 0.0 {
+            (0.0, 0)
+        } else {
+            let exponent = scale.abs().log2().floor() as i32 + 1;
+            (scale / 2f64.powi(exponent), exponent)
+        };
+        let limit = 1i64 << offset;
+        let mut shifted = (mantissa * limit as f64).round() as i64;
+        let mut shift = exponent;
+        if shifted == limit {
+            shifted /= 2;
+            shift += 1;
+        }
+        let mut shift = offset - shift;
+        let mut multiplier = shifted;
+        if shift > 62 {
+            multiplier >>= (shift - 62).min(31);
+            shift = 62;
+        }
+        (multiplier as i32, shift as i8)
+    }
+
+    #[test]
+    fn multiplier_and_shift_match_upstream() {
+        for scale in [
+            0.0, 1e-12, 3.1e-7, 0.000123, 0.00390625, 0.0213, 0.25, 0.4999999, 0.5, 0.7071,
+            0.99999999, 1.0, 1.5, 3.999, 255.0, 4096.5,
+        ] {
+            for width in [16, 32] {
+                assert_eq!(
+                    compute_multiplier_and_shift_with_width(scale, width),
+                    upstream_multiplier_and_shift(scale, width),
+                    "scale {scale} width {width}"
+                );
+            }
+        }
+        assert_eq!(compute_multiplier_and_shift_with_width(0.0, 32), (0, 31));
+        assert_eq!(compute_multiplier_and_shift_with_width(0.0, 16), (0, 15));
+    }
 
     #[test]
     fn fp8_ir_dtypes_map_to_tosa_and_float_domains() {

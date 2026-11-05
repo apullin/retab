@@ -298,6 +298,209 @@ mod tests {
         }
     }
 
+    /// The attribute encoder writes table slots by hand; tosa-rs's generated reader is
+    /// the reference. Every field gets a non-default value so a wrong slot or type shows.
+    #[test]
+    fn tosa_rs_reads_back_every_attribute_retab_writes() {
+        use super::super::collection::SerializedGraphItems;
+        use super::super::tosa_types::*;
+
+        let conv = Conv2dAttribute {
+            pad: vec![1, 2, 3, 4],
+            stride: vec![2, 3],
+            dilation: vec![3, 4],
+            local_bound: true,
+            acc_type: DType::Int32,
+        };
+        let attributes = vec![
+            (Op::Const, Attribute::Const(ConstAttribute {})),
+            (Op::ConstShape, Attribute::ConstShape(ConstShapeAttribute {})),
+            (Op::Add, Attribute::Add(AddAttribute {})),
+            (Op::Sub, Attribute::Sub(SubAttribute {})),
+            (Op::Mul, Attribute::Mul(MulAttribute {})),
+            (Op::Reshape, Attribute::Reshape(ReshapeAttribute {})),
+            (Op::Table, Attribute::Table(TableAttribute {})),
+            (Op::Sigmoid, Attribute::Sigmoid(SigmoidAttribute {})),
+            (Op::Tanh, Attribute::Tanh(TanhAttribute {})),
+            (Op::Exp, Attribute::Exp(ExpAttribute {})),
+            (Op::Log, Attribute::Log(LogAttribute {})),
+            (Op::Negate, Attribute::Negate(NegateAttribute {})),
+            (Op::Abs, Attribute::Abs(AbsAttribute {})),
+            (Op::Ceil, Attribute::Ceil(CeilAttribute {})),
+            (Op::Floor, Attribute::Floor(FloorAttribute {})),
+            (Op::Reciprocal, Attribute::Reciprocal(ReciprocalAttribute {})),
+            (Op::Erf, Attribute::Erf(ErfAttribute {})),
+            (Op::Cos, Attribute::Cos(CosAttribute {})),
+            (Op::Sin, Attribute::Sin(SinAttribute {})),
+            (Op::Rsqrt, Attribute::Rsqrt(RsqrtAttribute {})),
+            (Op::MatMul, Attribute::MatMul(MatMulAttribute {})),
+            (Op::Pad, Attribute::Pad(PadAttribute {})),
+            (Op::Slice, Attribute::Slice(SliceAttribute {})),
+            (Op::Gather, Attribute::Gather(GatherAttribute {})),
+            (Op::Scatter, Attribute::Scatter(ScatterAttribute {})),
+            (Op::Select, Attribute::Select(SelectAttribute {})),
+            (Op::Cast, Attribute::Cast(CastAttribute {})),
+            (Op::Equal, Attribute::Equal(EqualAttribute {})),
+            (Op::Greater, Attribute::Greater(GreaterAttribute {})),
+            (Op::GreaterEqual, Attribute::GreaterEqual(GreaterEqualAttribute {})),
+            (Op::BitwiseNot, Attribute::BitwiseNot(BitwiseNotAttribute {})),
+            (Op::BitwiseAnd, Attribute::BitwiseAnd(BitwiseAndAttribute {})),
+            (Op::BitwiseOr, Attribute::BitwiseOr(BitwiseOrAttribute {})),
+            (Op::BitwiseXor, Attribute::BitwiseXor(BitwiseXorAttribute {})),
+            (Op::LogicalLeftShift, Attribute::LogicalLeftShift(LogicalLeftShiftAttribute {})),
+            (Op::LogicalRightShift, Attribute::LogicalRightShift(LogicalRightShiftAttribute {})),
+            (Op::LogicalNot, Attribute::LogicalNot(LogicalNotAttribute {})),
+            (Op::LogicalAnd, Attribute::LogicalAnd(LogicalAndAttribute {})),
+            (Op::LogicalOr, Attribute::LogicalOr(LogicalOrAttribute {})),
+            (Op::LogicalXor, Attribute::LogicalXor(LogicalXorAttribute {})),
+            (Op::Pow, Attribute::Pow(PowAttribute {})),
+            (Op::IntDiv, Attribute::IntDiv(IntDivAttribute {})),
+            (
+                Op::ArithmeticRightShift,
+                Attribute::ArithmeticRightShift(ArithmeticRightShiftAttribute { round: true }),
+            ),
+            (Op::Conv2d, Attribute::Conv2d(conv.clone())),
+            (
+                Op::Conv3d,
+                Attribute::Conv3d(Conv3dAttribute {
+                    pad: vec![1, 2, 3, 4, 5, 6],
+                    stride: vec![2, 3, 4],
+                    dilation: vec![3, 4, 5],
+                    local_bound: true,
+                    acc_type: DType::Int48,
+                }),
+            ),
+            (
+                Op::DepthwiseConv2d,
+                Attribute::DepthwiseConv2d(DepthwiseConv2dAttribute {
+                    pad: conv.pad.clone(),
+                    stride: conv.stride.clone(),
+                    dilation: conv.dilation.clone(),
+                    local_bound: true,
+                    acc_type: DType::Fp32,
+                }),
+            ),
+            (
+                Op::Rescale,
+                Attribute::Rescale(RescaleAttribute {
+                    scale32: true,
+                    rounding_mode: RoundingMode::DoubleRound,
+                    per_channel: true,
+                    input_unsigned: true,
+                    output_unsigned: true,
+                }),
+            ),
+            (Op::Resize, Attribute::Resize(ResizeAttribute { mode: ResizeMode::Bilinear })),
+            (
+                Op::MaxPool2d,
+                Attribute::MaxPool2d(MaxPool2dAttribute {
+                    kernel: vec![3, 2],
+                    stride: vec![2, 1],
+                    pad: vec![1, 0, 1, 0],
+                    nan_mode: NanPropagationMode::Ignore,
+                }),
+            ),
+            (Op::Transpose, Attribute::Transpose(TransposeAttribute { perms: vec![0, 3, 1, 2] })),
+            (
+                Op::Clamp,
+                Attribute::Clamp(ClampAttribute {
+                    min_val: vec![0x80],
+                    max_val: vec![0x7f],
+                    nan_mode: NanPropagationMode::Ignore,
+                }),
+            ),
+            (
+                Op::AvgPool2d,
+                Attribute::AvgPool2d(AvgPool2dAttribute {
+                    kernel: vec![3, 2],
+                    stride: vec![2, 1],
+                    pad: vec![1, 0, 1, 0],
+                    acc_type: DType::Int32,
+                }),
+            ),
+            (Op::ReduceSum, Attribute::ReduceSum(ReduceSumAttribute { axis: 2 })),
+            (Op::Concat, Attribute::Concat(ConcatAttribute { axis: 3 })),
+            (Op::Reverse, Attribute::Reverse(ReverseAttribute { axis: 1 })),
+            (
+                Op::TransposeConv2d,
+                Attribute::TransposeConv2d(TransposeConv2dAttribute {
+                    out_pad: vec![1, 2, 3, 4],
+                    stride: vec![2, 3],
+                    local_bound: true,
+                    acc_type: DType::Int48,
+                }),
+            ),
+            (
+                Op::CondIf,
+                Attribute::CondIf(CondIfAttribute {
+                    then_graph: "then".into(),
+                    else_graph: "else".into(),
+                }),
+            ),
+            (
+                Op::WhileLoop,
+                Attribute::WhileLoop(WhileLoopAttribute {
+                    cond_branch: "cond".into(),
+                    body_branch: "body".into(),
+                }),
+            ),
+            (
+                Op::Maximum,
+                Attribute::Maximum(MaximumAttribute { nan_mode: NanPropagationMode::Ignore }),
+            ),
+            (
+                Op::Minimum,
+                Attribute::Minimum(MinimumAttribute { nan_mode: NanPropagationMode::Ignore }),
+            ),
+            (Op::ReduceAny, Attribute::ReduceAny(ReduceAnyAttribute { axis: 2 })),
+            (
+                Op::ReduceMax,
+                Attribute::ReduceMax(ReduceMaxAttribute {
+                    axis: 1,
+                    nan_mode: NanPropagationMode::Ignore,
+                }),
+            ),
+            (
+                Op::ArgMax,
+                Attribute::ArgMax(ArgMaxAttribute { axis: 3, nan_mode: NanPropagationMode::Ignore }),
+            ),
+            (
+                Op::ReduceMin,
+                Attribute::ReduceMin(ReduceMinAttribute {
+                    axis: 2,
+                    nan_mode: NanPropagationMode::Ignore,
+                }),
+            ),
+        ];
+        let region = SerializedRegion {
+            name: "main".into(),
+            items: SerializedGraphItems {
+                tensors: vec![],
+                shapes: vec![],
+                input_names: vec![],
+                output_names: vec![],
+                operators: attributes
+                    .iter()
+                    .map(|(op, attribute)| {
+                        TosaOperator::new(*op, attribute.clone(), vec!["a".into()], vec!["b".into()])
+                    })
+                    .collect(),
+            },
+        };
+        let config = PipelineConfig::from_tosa_spec("TOSA-1.0+INT");
+        let mut builder = FlatBufferBuilder::new();
+        let regions = vec![build_region(&mut builder, &region, &config)];
+        finalize_tosa_graph(&mut builder, &regions);
+
+        let graph = tosa_rs::deserialize(builder.finished_data()).unwrap();
+        let operators = &graph.regions[0].blocks[0].operators;
+        assert_eq!(operators.len(), attributes.len());
+        for ((op, attribute), read) in attributes.iter().zip(operators) {
+            assert_eq!(read.op, *op);
+            assert_eq!(read.attribute, *attribute, "{op:?}");
+        }
+    }
+
     #[test]
     fn u55_shift_rounding_reaches_every_serialized_region() {
         use super::super::collection::SerializedGraphItems;
@@ -316,7 +519,7 @@ mod tests {
                         output_names: vec![],
                         operators: vec![TosaOperator::new(
                             Op::ArithmeticRightShift,
-                            Attribute::ArithmeticRightShift(ArithmeticRightShiftAttribute {}),
+                            Attribute::ArithmeticRightShift(ArithmeticRightShiftAttribute { round: false }),
                             vec!["x".into(), "shift".into()],
                             vec!["out".into()],
                         )],

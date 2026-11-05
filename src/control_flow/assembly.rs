@@ -8,7 +8,7 @@ use crate::graph::Graph;
 use crate::store::TensorStore;
 use crate::StashedPipeline;
 
-use super::{collect_region_metadata, WhileBodyInputCounts};
+use super::{collect_region_metadata, region_name_from_ir_arg, WhileBodyInputCounts};
 
 fn append_while_body_passthrough_outputs(graph: &mut Graph, counts: WhileBodyInputCounts) {
     let additional_inputs: Vec<NodeId> = graph
@@ -55,23 +55,66 @@ fn drop_subgraph_input_store_entries(graph: &Graph, store: &mut TensorStore) {
     }
 }
 
+/// Child regions of one graph in stock's emission order: cond `[1, 2]`
+/// (then, else), while `[0, 1]` (cond, body).
+fn child_regions(ir: &fx_ir::IrGraph, region: Option<&str>) -> Vec<String> {
+    let mut children = Vec::new();
+    for node in ir.live_nodes() {
+        let branches = if node.is_cond() {
+            [node.args.get(1), node.args.get(2)]
+        } else if node.is_while_loop() {
+            [node.args.first(), node.args.get(1)]
+        } else {
+            continue;
+        };
+        for arg in branches {
+            if let Some(name) = region_name_from_ir_arg(ir, arg, region) {
+                children.push(name);
+            }
+        }
+    }
+    children
+}
+
+/// Regions in stock's pre-order emission order: the parent's children first in
+/// `[1, 2]`/`[0, 1]` order, recursing into each before the next sibling. Any
+/// stashed region no live node references is appended last, as before.
+fn ordered_regions(
+    parent_ir: &fx_ir::IrGraph,
+    submodules: &BTreeMap<String, StashedPipeline>,
+) -> Vec<String> {
+    let mut order = Vec::new();
+    let mut visited = BTreeSet::new();
+    let mut pending = child_regions(parent_ir, None);
+    pending.reverse();
+    while let Some(region) = pending.pop() {
+        if !visited.insert(region.clone()) {
+            continue;
+        }
+        order.push(region.clone());
+        if let Some((ir, _)) = submodules.get(&region) {
+            let mut children = child_regions(ir, Some(region.as_str()));
+            children.reverse();
+            pending.extend(children);
+        }
+    }
+    for region in submodules.keys() {
+        if visited.insert(region.clone()) {
+            order.push(region.clone());
+        }
+    }
+    order
+}
+
 pub(crate) fn append_subgraphs_from_ir(
     graphs: &mut Vec<(String, Graph)>,
     store: &mut TensorStore,
     parent_ir: &fx_ir::IrGraph,
     submodules: &BTreeMap<String, StashedPipeline>,
 ) -> PyResult<()> {
-    let (while_cond_graph_names, while_body_input_counts) =
-        collect_region_metadata(parent_ir, submodules);
+    let (_, while_body_input_counts) = collect_region_metadata(parent_ir, submodules);
 
-    let referenced_regions: BTreeSet<String> = while_cond_graph_names
-        .iter()
-        .cloned()
-        .chain(while_body_input_counts.keys().cloned())
-        .chain(submodules.keys().cloned())
-        .collect();
-
-    for region in referenced_regions {
+    for region in ordered_regions(parent_ir, submodules) {
         if graphs.iter().any(|(name, _)| name == &region) {
             continue;
         }
@@ -97,18 +140,75 @@ pub(crate) fn append_subgraphs_from_ir(
         if crate::config::from_ir_debug_enabled() {
             crate::ingest::from_ir::debug_dump(&sub_graph, &format!("CF SUBGRAPH {region}"));
         }
-        crate::ingest::from_ir::prefix_graph(
-            &mut sub_graph,
-            &mut sub_store,
-            &format!("{region}::"),
-        );
+        crate::ingest::from_ir::suffix_graph(&mut sub_graph, &mut sub_store, &region);
         for (key, value) in sub_store.buffers {
-            if store.get(&key).is_none() {
-                store.insert(key, value);
+            match store.get(&key) {
+                None => store.insert(key, value),
+                Some(existing) if existing.data == value.data => {}
+                // Stock's `name_region` tensor names can collide with a parent
+                // constant's name; stock keeps one tensor list per block, RETAB one
+                // store, so hand the graph to stock rather than lose either tensor.
+                Some(_) => {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "RETAB_STOCK_FALLBACK: control-flow constant name collision: \
+                         region '{region}' constant '{key}' differs from an earlier one"
+                    )));
+                }
             }
         }
         graphs.push((region, sub_graph));
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fx_ir::{IrArg, IrGraph, NodeMeta, NodeOp};
+    use crate::lowering_effects::LoweringEffectBatch;
+
+    fn add_cond(graph: &mut IrGraph, name: &str, then: &str, else_: &str) {
+        graph.add_node(
+            NodeOp::CallFunction,
+            name.to_string(),
+            "torch.ops.higher_order.cond".to_string(),
+            vec![
+                IrArg::Int(1),
+                IrArg::Str(then.to_string()),
+                IrArg::Str(else_.to_string()),
+            ],
+            NodeMeta::default(),
+        );
+    }
+
+    fn stash(graph: IrGraph) -> StashedPipeline {
+        (graph, LoweringEffectBatch::default())
+    }
+
+    #[test]
+    fn nested_regions_emit_then_before_else_pre_order() {
+        let mut parent = IrGraph::empty();
+        add_cond(&mut parent, "outer", "b_branch", "a_branch");
+
+        let mut inner = IrGraph::empty();
+        add_cond(&mut inner, "nested", "z_leaf", "a_leaf");
+
+        let mut submodules = BTreeMap::new();
+        submodules.insert("b_branch".to_string(), stash(inner));
+        submodules.insert("b_branch__z_leaf".to_string(), stash(IrGraph::empty()));
+        submodules.insert("b_branch__a_leaf".to_string(), stash(IrGraph::empty()));
+        submodules.insert("a_branch".to_string(), stash(IrGraph::empty()));
+
+        // Alphabetical order would put a_branch first; stock emits [1, 2].
+        assert_eq!(
+            ordered_regions(&parent, &submodules),
+            vec![
+                "b_branch".to_string(),
+                "b_branch__z_leaf".to_string(),
+                "b_branch__a_leaf".to_string(),
+                "a_branch".to_string(),
+            ]
+        );
+    }
 }

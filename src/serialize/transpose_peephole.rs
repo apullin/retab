@@ -57,6 +57,90 @@ fn use_counts(operators: &[TosaOperator], output_names: &[String]) -> HashMap<St
     counts
 }
 
+/// A TRANSPOSE with identity perms only copies its input, so its readers read the
+/// input. RETAB's layout islands leave these where a permute is a physical no-op.
+fn drop_identity_transposes(
+    operators: &mut Vec<TosaOperator>,
+    input_names: &[String],
+    output_names: &mut [String],
+) -> HashSet<String> {
+    let mut removed = HashSet::new();
+    let mut index = 0;
+    while index < operators.len() {
+        let op = &operators[index];
+        let identity = transpose_perms(op)
+            .is_some_and(|perms| perms.iter().enumerate().all(|(axis, &p)| p == axis as i32));
+        let (Some(source), Some(output)) = (op.inputs.first().cloned(), op.outputs.first().cloned())
+        else {
+            index += 1;
+            continue;
+        };
+        // A block output must not alias a block input.
+        if !identity || (input_names.contains(&source) && output_names.contains(&output)) {
+            index += 1;
+            continue;
+        }
+        for name in operators
+            .iter_mut()
+            .flat_map(|op| op.inputs.iter_mut())
+            .chain(output_names.iter_mut())
+        {
+            if *name == output {
+                *name = source.clone();
+            }
+        }
+        operators.remove(index);
+        removed.insert(output);
+    }
+    removed
+}
+
+/// A RESHAPE to the shape it already has only copies its input. Layout islands leave
+/// these where a reshape of NHWC data lands on the same physical shape.
+fn drop_identity_reshapes(
+    tensors: &[TosaTensor],
+    operators: &mut Vec<TosaOperator>,
+    input_names: &[String],
+    output_names: &mut [String],
+) -> HashSet<String> {
+    let tensor_shapes: HashMap<&str, &[i32]> = tensors
+        .iter()
+        .map(|t| (t.name.as_str(), t.shape.as_slice()))
+        .collect();
+    let mut removed = HashSet::new();
+    let mut index = 0;
+    while index < operators.len() {
+        let op = &operators[index];
+        let (Some(source), Some(output)) = (op.inputs.first().cloned(), op.outputs.first().cloned())
+        else {
+            index += 1;
+            continue;
+        };
+        let same_shape = op.op == Op::Reshape
+            && matches!(
+                (tensor_shapes.get(source.as_str()), tensor_shapes.get(output.as_str())),
+                (Some(a), Some(b)) if a == b
+            );
+        // A block output must not alias a block input.
+        if !same_shape || (input_names.contains(&source) && output_names.contains(&output)) {
+            index += 1;
+            continue;
+        }
+        for name in operators
+            .iter_mut()
+            .flat_map(|op| op.inputs.iter_mut())
+            .chain(output_names.iter_mut())
+        {
+            if *name == output {
+                *name = source.clone();
+            }
+        }
+        operators.remove(index);
+        removed.insert(output);
+    }
+    removed
+}
+
 fn cancel_inverse_pairs(
     operators: &mut Vec<TosaOperator>,
     input_names: &[String],
@@ -174,6 +258,27 @@ fn relabel_singleton_transposes(
     count
 }
 
+fn read_names(operators: &[TosaOperator]) -> HashSet<String> {
+    operators
+        .iter()
+        .flat_map(|op| op.inputs.iter().cloned())
+        .collect()
+}
+
+/// Drop the CONST_SHAPE ops, and their shapes, that only the removed RESHAPEs read.
+fn drop_orphaned_const_shapes(
+    shapes: &mut Vec<TosaShape>,
+    operators: &mut Vec<TosaOperator>,
+    read_before: &HashSet<String>,
+) {
+    let read_now = read_names(operators);
+    let orphaned: HashSet<String> = read_before.difference(&read_now).cloned().collect();
+    operators.retain(|op| {
+        op.op != Op::ConstShape || !op.outputs.iter().any(|out| orphaned.contains(out))
+    });
+    shapes.retain(|shape| !orphaned.contains(&shape.name));
+}
+
 /// Remove redundant transposes from one block. Returns the number of TRANSPOSE ops
 /// removed or rewritten.
 pub(super) fn simplify_transposes(
@@ -183,9 +288,14 @@ pub(super) fn simplify_transposes(
     input_names: &[String],
     output_names: &mut [String],
 ) -> usize {
-    let removed = cancel_inverse_pairs(operators, input_names, output_names);
+    let mut removed = drop_identity_transposes(operators, input_names, output_names);
+    removed.extend(cancel_inverse_pairs(operators, input_names, output_names));
+    let relabeled = relabel_singleton_transposes(tensors, shapes, operators);
+    let read_before = read_names(operators);
+    removed.extend(drop_identity_reshapes(tensors, operators, input_names, output_names));
     tensors.retain(|t| !removed.contains(&t.name));
-    removed.len() + relabel_singleton_transposes(tensors, shapes, operators)
+    drop_orphaned_const_shapes(shapes, operators, &read_before);
+    removed.len() + relabeled
 }
 
 #[cfg(test)]
@@ -195,6 +305,60 @@ mod tests {
 
     fn tensor(name: &str, shape: &[i32]) -> TosaTensor {
         TosaTensor::new(name, shape.to_vec(), DType::Int8)
+    }
+
+    #[test]
+    fn same_shape_reshapes_and_their_shapes_are_dropped() {
+        let tensors = vec![tensor("x", &[1, 1, 1, 8]), tensor("r", &[1, 1, 1, 8]), tensor("y", &[1, 1, 1, 8])];
+        let mut shapes = vec![TosaShape { name: "s".into(), rank: 4, data: vec![] }];
+        let mut operators = vec![
+            TosaOperator::new(
+                Op::ConstShape,
+                Attribute::ConstShape(ConstShapeAttribute {}),
+                vec![],
+                vec!["s".into()],
+            ),
+            TosaOperator::new(
+                Op::Reshape,
+                Attribute::Reshape(ReshapeAttribute {}),
+                vec!["x".into(), "s".into()],
+                vec!["r".into()],
+            ),
+            TosaOperator::new(
+                Op::Abs,
+                Attribute::Abs(crate::serialize::tosa_types::AbsAttribute {}),
+                vec!["r".into()],
+                vec!["y".into()],
+            ),
+        ];
+        let mut outputs = vec!["y".to_string()];
+        let read_before = read_names(&operators);
+        let removed = drop_identity_reshapes(&tensors, &mut operators, &[], &mut outputs);
+        drop_orphaned_const_shapes(&mut shapes, &mut operators, &read_before);
+        assert_eq!(removed, HashSet::from(["r".to_string()]));
+        assert_eq!(operators.len(), 1);
+        assert_eq!(operators[0].inputs, vec!["x".to_string()]);
+        assert!(shapes.is_empty());
+    }
+
+    #[test]
+    fn identity_transposes_are_dropped_unless_they_link_block_input_and_output() {
+        let mut operators = vec![
+            transpose("x", "t0", &[0, 1, 2, 3]),
+            TosaOperator::new(
+                Op::Abs,
+                Attribute::Abs(crate::serialize::tosa_types::AbsAttribute {}),
+                vec!["t0".into()],
+                vec!["y".into()],
+            ),
+            transpose("x", "z", &[0, 1, 2, 3]),
+        ];
+        let mut outputs = vec!["y".to_string(), "z".to_string()];
+        let removed = drop_identity_transposes(&mut operators, &["x".to_string()], &mut outputs);
+        assert_eq!(removed, HashSet::from(["t0".to_string()]));
+        assert_eq!(operators.len(), 2);
+        assert_eq!(operators[0].inputs, vec!["x".to_string()]);
+        assert_eq!(outputs, vec!["y".to_string(), "z".to_string()]);
     }
 
     fn transpose(input: &str, output: &str, perms: &[i32]) -> TosaOperator {

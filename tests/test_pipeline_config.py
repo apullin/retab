@@ -146,7 +146,7 @@ def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch, r
     assert all(call[2] is program and call[4] is config for call in calls)
     assert [(kind, region) for kind, _, _, region, _ in calls if region is not None] == [
         ("run_fx_cond_passes", "true_graph"),
-        ("run_fx_submodule_passes", "true_graph::body_graph"),
-        ("run_fx_cond_passes", "true_graph::body_graph::true_graph"),
+        ("run_fx_submodule_passes", "true_graph__body_graph"),
+        ("run_fx_cond_passes", "true_graph__body_graph__true_graph"),
     ]
     assert sum(call[0] == "run_fx_passes" for call in calls) == (4 if recursive else 1)

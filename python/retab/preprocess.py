@@ -76,7 +76,7 @@ def _run_control_flow_submodule_rust_passes(
             )
 
     for name, submodule, cf_node in get_cond_while_submodules(gm):
-        region_name = f"{region_prefix}::{name}" if region_prefix else name
+        region_name = f"{region_prefix}__{name}" if region_prefix else name
         cf_target = str(getattr(cf_node, "target", ""))
         if "cond" in cf_target:
             retab.run_fx_cond_passes(

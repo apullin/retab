@@ -50,11 +50,12 @@ pub(super) fn build_attribute(
         | Attribute::LogicalOr(_)
         | Attribute::LogicalXor(_)
         | Attribute::Pow(_)
-        | Attribute::IntDiv(_) => empty_attr(builder, attr),
+        | Attribute::IntDiv(_)
+        | Attribute::Mul(_) => empty_attr(builder, attr),
 
-        // tosa-rs currently drops the schema's round field.
-        Attribute::ArithmeticRightShift(_) => finish_attr(builder, attr, |builder| {
-            builder.push_slot::<bool>(4, is_u55_subset, false);
+        // U55 only supports round = true (as in rc4's RshiftVisitor).
+        Attribute::ArithmeticRightShift(a) => finish_attr(builder, attr, |builder| {
+            builder.push_slot::<bool>(4, a.round || is_u55_subset, false);
         }),
 
         Attribute::Conv2d(a) => conv_attr(
@@ -107,8 +108,6 @@ pub(super) fn build_attribute(
         Attribute::Transpose(a) => vector_i32_attr(builder, attr, &a.perms),
 
         Attribute::Clamp(a) => clamp_attr(builder, attr, &a.min_val, &a.max_val, a.nan_mode as u32),
-
-        Attribute::Mul(a) => scalar_i32_attr(builder, attr, a.shift),
 
         Attribute::AvgPool2d(a) => pool_attr(
             builder,

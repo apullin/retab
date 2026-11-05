@@ -15,6 +15,7 @@ mod fx_batch_norm_args;
 mod fx_broadcast_args_ir;
 mod fx_canonicalize_gather_ir;
 mod fx_cast_int64_ir;
+mod fx_cancel_views_around_unary_ir;
 mod fx_cast_to_int32_ir;
 mod fx_constant_tensor_eval;
 mod fx_conv1d_unsqueeze_ir;

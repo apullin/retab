@@ -19,7 +19,7 @@ pub(super) fn register(table: &mut EmitterTable) {
     // Direct binary ops
     register_binary!(table;
         OpTarget::BitwiseLeftShift  => Op::LogicalLeftShift,      Attribute::LogicalLeftShift(LogicalLeftShiftAttribute {});
-        OpTarget::BitwiseRightShift => Op::ArithmeticRightShift,  Attribute::ArithmeticRightShift(ArithmeticRightShiftAttribute {});
+        OpTarget::BitwiseRightShift => Op::ArithmeticRightShift,  Attribute::ArithmeticRightShift(ArithmeticRightShiftAttribute { round: false });
         OpTarget::LogicalAnd        => Op::LogicalAnd,            Attribute::LogicalAnd(LogicalAndAttribute {});
         OpTarget::LogicalOr         => Op::LogicalOr,             Attribute::LogicalOr(LogicalOrAttribute {});
     );

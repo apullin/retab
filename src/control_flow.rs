@@ -23,7 +23,7 @@ pub(crate) struct WhileBodyInputCounts {
 
 fn qualify_region(parent_region: Option<&str>, local_name: &str) -> String {
     match parent_region {
-        Some(prefix) if !local_name.contains("::") => format!("{prefix}::{local_name}"),
+        Some(prefix) if !local_name.contains("__") => format!("{prefix}__{local_name}"),
         _ => local_name.to_string(),
     }
 }
@@ -120,6 +120,19 @@ mod tests {
     }
 
     #[test]
+    fn nested_regions_join_with_double_underscore_like_stock() {
+        assert_eq!(
+            qualify_region(Some("outer"), "inner"),
+            "outer__inner".to_string()
+        );
+        assert_eq!(qualify_region(None, "inner"), "inner".to_string());
+        assert_eq!(
+            qualify_region(Some("outer"), "outer__inner"),
+            "outer__inner".to_string()
+        );
+    }
+
+    #[test]
     fn nested_while_region_metadata_is_qualified_and_sorted() {
         let mut parent = IrGraph::empty();
         add_while(
@@ -152,7 +165,7 @@ mod tests {
         assert_eq!(
             cond_regions.into_iter().collect::<Vec<_>>(),
             vec![
-                "outer_body::z_inner_cond".to_string(),
+                "outer_body__z_inner_cond".to_string(),
                 "z_parent_cond".to_string(),
             ]
         );
@@ -160,12 +173,12 @@ mod tests {
             body_counts.keys().cloned().collect::<Vec<_>>(),
             vec![
                 "outer_body".to_string(),
-                "outer_body::a_inner_body".to_string(),
+                "outer_body__a_inner_body".to_string(),
             ]
         );
         let outer = body_counts.get("outer_body").unwrap();
         assert_eq!((outer.carried, outer.additional), (1, 2));
-        let inner = body_counts.get("outer_body::a_inner_body").unwrap();
+        let inner = body_counts.get("outer_body__a_inner_body").unwrap();
         assert_eq!((inner.carried, inner.additional), (2, 1));
     }
 

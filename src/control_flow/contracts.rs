@@ -856,9 +856,9 @@ pub(crate) fn apply_boundary_contracts(
         }
         changed += inserts;
     }
-    let rewritten = super::captured_conv::rewrite_captured_conv_biases(parent_ir, submodules);
+    let rewritten = super::captured_conv::rewrite_captured_conv_operands(parent_ir, submodules);
     if rewritten > 0 && cf_debug {
-        eprintln!("[RETAB][cf-boundary-ir] rewrote {rewritten} captured conv bias(es) to INT32");
+        eprintln!("[RETAB][cf-boundary-ir] rewrote {rewritten} captured conv weight(s)/bias(es)");
     }
     changed + rewritten
 }

@@ -1,19 +1,26 @@
 //! Port of the control-flow part of upstream RewriteConvPass (ExecuTorch v1.6.0-rc4):
-//! `_resolve_control_flow_constant` and `_rewrite_control_flow_bias`.
+//! `_resolve_control_flow_constant`, `_rewrite_control_flow_bias` and the
+//! control-flow case of `_rewrite_weight`.
 //!
-//! When a cond branch captures a conv bias from the enclosing graph, the bias arrives as
-//! a branch input. The quantizer treats that input as an activation, so the branch sees
-//! an int8 tensor requantized at the boundary rather than the INT32 bias at
-//! input_scale * weight_scale that TOSA CONV2D needs. The bias is traced back through
-//! the boundary RESCALEs and branch inputs, across nested conds, to the constant in the
-//! outermost graph. It is then dequantized at the scale the RESCALE chain implies and
-//! requantized into a branch-local INT32 constant. This runs after the boundary
-//! contracts have created those RESCALEs.
+//! A conv weight or bias that a cond branch captures from the enclosing graph arrives
+//! as a branch input, requantized at the boundary like an activation. Both are traced
+//! back through the boundary RESCALEs and branch inputs, across nested conds, to the
+//! constant in the outermost graph, and replaced with branch-local constants:
+//!
+//! - The bias is dequantized at the scale the RESCALE chain implies and requantized
+//!   into the INT32 bias at input_scale * weight_scale that TOSA CONV2D needs.
+//! - The weight becomes a constant in the conv's weight layout, followed by the same
+//!   RESCALE chain. RESCALE is elementwise, so it commutes with the layout change, and
+//!   the weight needs no runtime RESHAPE or TRANSPOSE.
+//!
+//! This runs after the boundary contracts have created those RESCALEs. The branch
+//! inputs stay, unused, so the branch keeps the cond's operand list.
 
 use std::collections::BTreeMap;
 
 use crate::fx_conv_args::ConvArgs;
 use crate::fx_ir::{IrArg, IrGraph, IrNode, NodeId, NodeMeta, NodeOp, NodeTensor, TensorSource};
+use crate::fx_target::{is_tosa_transpose_target, is_view_like_target};
 use crate::graph::ir::DType;
 use crate::store::TensorData;
 use crate::StashedPipeline;
@@ -48,21 +55,44 @@ fn cond_invocations(
     invocations
 }
 
-/// `(scale ratio, input zero point)` of a boundary RESCALE.
-fn rescale_params(node: &IrNode) -> Option<(f64, i64)> {
-    let IrArg::List(scales) = node.args.get(2)? else {
-        return None;
-    };
-    let IrArg::Int(input_zp) = node.args.get(3)? else {
-        return None;
-    };
-    Some((scales.first()?.as_float()?, *input_zp))
+/// A boundary RESCALE on the path from a captured constant into a branch.
+struct BoundaryRescale {
+    target: String,
+    args: Vec<IrArg>,
+    meta: NodeMeta,
+}
+
+impl BoundaryRescale {
+    fn of(node: &IrNode) -> Self {
+        Self {
+            target: node.target.clone(),
+            args: node.args.clone(),
+            meta: node.meta.clone(),
+        }
+    }
+
+    /// `(scale ratio, input zero point)`.
+    fn params(&self) -> Option<(f64, i64)> {
+        let IrArg::List(scales) = self.args.get(2)? else {
+            return None;
+        };
+        let IrArg::Int(input_zp) = self.args.get(3)? else {
+            return None;
+        };
+        Some((scales.first()?.as_float()?, *input_zp))
+    }
 }
 
 struct CapturedConstant {
     data: TensorData,
     /// Boundary RESCALEs from the branch outwards.
-    rescales: Vec<(f64, i64)>,
+    rescales: Vec<BoundaryRescale>,
+}
+
+impl CapturedConstant {
+    fn rescale_params(&self) -> Option<Vec<(f64, i64)>> {
+        self.rescales.iter().map(BoundaryRescale::params).collect()
+    }
 }
 
 /// Upstream `_resolve_control_flow_constant`: follow RESCALEs and branch inputs outwards
@@ -84,7 +114,7 @@ fn resolve_captured_constant(
         };
         let node = ir.node(current);
         if node.is_rescale() {
-            rescales.push(rescale_params(node)?);
+            rescales.push(BoundaryRescale::of(node));
             current = node.first_node_arg()?;
             continue;
         }
@@ -126,21 +156,22 @@ fn decode_integers(data: &TensorData) -> Option<Vec<f32>> {
     Some(values)
 }
 
-/// Upstream `_rewrite_control_flow_bias` arithmetic. The tensor math runs in float32,
-/// like the torch ops upstream, so ties round the same way.
+/// Upstream `_rewrite_control_flow_bias` arithmetic, given the stored bias and its
+/// boundary RESCALEs `(scale ratio, input zero point)` from the branch outwards. The
+/// tensor math runs in float32, like the torch ops upstream, so ties round the same way.
 fn requantize_bias(
-    captured: &CapturedConstant,
+    data: &TensorData,
+    rescales: &[(f64, i64)],
     bias_scale: f64,
     input_scale: f64,
     weight_scales: &[f64],
 ) -> Option<Vec<i32>> {
-    let values = decode_integers(&captured.data)?;
-    let boundary_scale = captured
-        .rescales
+    let values = decode_integers(data)?;
+    let boundary_scale = rescales
         .iter()
         .rev()
         .fold(1.0f64, |acc, &(ratio, _)| acc * ratio);
-    let boundary_zp = captured.rescales.last()?.1 as f32;
+    let boundary_zp = rescales.last()?.1 as f32;
     let source_scale = (boundary_scale * bias_scale) as f32;
     let input_scale = input_scale as f32;
     if weight_scales.len() != 1 && weight_scales.len() != values.len() {
@@ -190,7 +221,13 @@ fn plan_bias_rewrite(
     } else {
         vec![weight_qp.scale]
     };
-    let values = requantize_bias(&captured, bias_qp.scale, input_qp.scale, &weight_scales)?;
+    let values = requantize_bias(
+        &captured.data,
+        &captured.rescale_params()?,
+        bias_qp.scale,
+        input_qp.scale,
+        &weight_scales,
+    )?;
     Some(BiasRewrite {
         region: region.to_string(),
         conv: conv.id,
@@ -222,11 +259,19 @@ fn apply_bias_rewrite(ir: &mut IrGraph, rewrite: BiasRewrite) {
         },
     });
     ir.set_arg(rewrite.conv, ConvArgs::BIAS_INDEX, IrArg::Node(constant));
+    erase_dead_operand_chain(ir, rewrite.old_bias);
+}
 
-    let mut dead = Some(rewrite.old_bias);
+/// Erase the layout ops and RESCALEs that fed a replaced conv operand, back to the
+/// first node something else still uses. The branch input itself stays.
+fn erase_dead_operand_chain(ir: &mut IrGraph, start: NodeId) {
+    let mut dead = Some(start);
     while let Some(id) = dead {
         let node = ir.node(id);
-        if !node.is_rescale() || !ir.live_user_ids(id).is_empty() {
+        let removable = node.is_rescale()
+            || is_view_like_target(&node.target)
+            || is_tosa_transpose_target(&node.target);
+        if !removable || !ir.live_user_ids(id).is_empty() {
             break;
         }
         dead = node.first_node_arg();
@@ -234,32 +279,148 @@ fn apply_bias_rewrite(ir: &mut IrGraph, rewrite: BiasRewrite) {
     }
 }
 
-/// Rewrite every captured, boundary-rescaled conv bias in the cond branches to an INT32
-/// constant. Returns the number of rewritten convs.
-pub(crate) fn rewrite_captured_conv_biases(
+struct WeightRewrite {
+    region: String,
+    conv: NodeId,
+    old_weight: NodeId,
+    name: String,
+    /// The captured constant, reshaped to the weight's logical (OIHW) shape.
+    data: TensorData,
+    /// The physical layout: the TRANSPOSE the branch ran on the weight, or the
+    /// operand's own dim order when it had none.
+    dim_order: Option<Vec<usize>>,
+    /// The boundary RESCALEs to re-apply, outermost first.
+    rescales: Vec<BoundaryRescale>,
+}
+
+/// Upstream `_rewrite_weight` for a weight a cond branch captures. In the branch the
+/// conv reads `TRANSPOSE(reshape*(RESCALE*(branch input)))`, where the reshape is the
+/// conv1d unsqueeze and the TRANSPOSE the layout change to OHWI.
+fn plan_weight_rewrite(
+    parent: &IrGraph,
+    submodules: &BTreeMap<String, StashedPipeline>,
+    invocations: &BTreeMap<String, Invocation>,
+    region: &str,
+    conv: &IrNode,
+) -> Option<WeightRewrite> {
+    let ir = &submodules.get(region)?.0;
+    let args = ConvArgs::parse(conv)?;
+    // Plain convs only. The serializer lays out depthwise and transposed weights
+    // differently, and reads a conv with one input channel as depthwise.
+    if args.groups != 1 || args.transposed {
+        return None;
+    }
+    let operand = ir.node(args.weight);
+    let (logical, dim_order) = if is_tosa_transpose_target(&operand.target) {
+        let perm = operand.arg_int_list(1)?;
+        let order = perm
+            .iter()
+            .map(|&axis| usize::try_from(axis).ok())
+            .collect::<Option<Vec<_>>>()?;
+        (operand.first_node_arg()?, Some(order))
+    } else {
+        (args.weight, operand.meta.cloned_tosa_dim_order())
+    };
+    let shape = ir.node(logical).meta.val_shape()?.to_vec();
+    if shape.get(1).is_none_or(|&in_channels| in_channels < 2)
+        || dim_order.as_ref().is_some_and(|order| order.len() != shape.len())
+    {
+        return None;
+    }
+    let mut source = logical;
+    while is_view_like_target(&ir.node(source).target) {
+        source = ir.node(source).first_node_arg()?;
+    }
+    let source_node = ir.node(source);
+    if source_node.tensor.is_some()
+        || !(source_node.is_rescale() || source_node.op == NodeOp::Placeholder)
+    {
+        return None;
+    }
+    let captured = resolve_captured_constant(parent, submodules, invocations, region, source)?;
+    let numel = usize::try_from(shape.iter().product::<i64>()).ok()?;
+    if numel * captured.data.dtype.storage_size_bytes() != captured.data.data.len() {
+        return None;
+    }
+    let mut rescales = captured.rescales;
+    rescales.reverse();
+    Some(WeightRewrite {
+        region: region.to_string(),
+        conv: conv.id,
+        old_weight: args.weight,
+        name: format!("{}_captured_weight", conv.name),
+        data: TensorData {
+            data: captured.data.data,
+            shape,
+            dtype: captured.data.dtype,
+        },
+        dim_order,
+        rescales,
+    })
+}
+
+/// The new constant has the logical shape and the TRANSPOSE as its dim order, so the
+/// serializer writes it in OHWI. The re-applied RESCALEs keep that shape and order, as
+/// elementwise ops on an NHWC tensor do, and the conv reads the last one.
+fn apply_weight_rewrite(ir: &mut IrGraph, rewrite: WeightRewrite) {
+    let shape = rewrite.data.shape.clone();
+    let mut constant_meta = NodeMeta::tensor(shape.clone(), rewrite.data.dtype.torch_str());
+    constant_meta.replace_tosa_dim_order(rewrite.dim_order.clone());
+    let constant = ir.add_node(
+        NodeOp::GetAttr,
+        rewrite.name.clone(),
+        rewrite.name.clone(),
+        Vec::new(),
+        constant_meta,
+    );
+    ir.node_mut(constant).tensor = Some(NodeTensor {
+        source: TensorSource::GraphModuleAttr,
+        data: rewrite.data,
+    });
+    let mut weight = constant;
+    for (index, rescale) in rewrite.rescales.into_iter().enumerate() {
+        let mut args = rescale.args;
+        args[0] = IrArg::Node(weight);
+        let mut meta = rescale.meta.cloned_with_same_dtype_or(shape.clone(), "torch.int8");
+        meta.replace_tosa_dim_order(rewrite.dim_order.clone());
+        weight = ir.add_call_function(
+            format!("{}_rescale{index}", rewrite.name),
+            rescale.target,
+            args,
+            meta,
+        );
+    }
+    ir.set_arg(rewrite.conv, ConvArgs::WEIGHT_INDEX, IrArg::Node(weight));
+    erase_dead_operand_chain(ir, rewrite.old_weight);
+}
+
+/// Replace every captured conv weight and boundary-rescaled conv bias in the cond
+/// branches with branch-local constants. Returns the number of rewritten operands.
+pub(crate) fn rewrite_captured_conv_operands(
     parent: &IrGraph,
     submodules: &mut BTreeMap<String, StashedPipeline>,
 ) -> u32 {
     let invocations = cond_invocations(parent, submodules);
-    let mut rewrites = Vec::new();
+    let mut biases = Vec::new();
+    let mut weights = Vec::new();
     for (region, (ir, _)) in submodules.iter() {
         for conv in ir
             .live_nodes()
             .filter(|node| ConvArgs::parse(node).is_some())
         {
-            rewrites.extend(plan_bias_rewrite(
-                parent,
-                submodules,
-                &invocations,
-                region,
-                conv,
-            ));
+            biases.extend(plan_bias_rewrite(parent, submodules, &invocations, region, conv));
+            weights.extend(plan_weight_rewrite(parent, submodules, &invocations, region, conv));
         }
     }
-    let count = rewrites.len() as u32;
-    for rewrite in rewrites {
+    let count = (biases.len() + weights.len()) as u32;
+    for rewrite in biases {
         if let Some((ir, _)) = submodules.get_mut(&rewrite.region) {
             apply_bias_rewrite(ir, rewrite);
+        }
+    }
+    for rewrite in weights {
+        if let Some((ir, _)) = submodules.get_mut(&rewrite.region) {
+            apply_weight_rewrite(ir, rewrite);
         }
     }
     count
@@ -280,11 +441,9 @@ mod tests {
     #[test]
     fn requantizes_at_the_outermost_stored_scale() {
         // One boundary: parent scale 0.02 (zp 3) requantized to the branch scale 0.05.
-        let captured = CapturedConstant {
-            data: int8_constant(&[13, -7, 3]),
-            rescales: vec![(0.02 / 0.05, 3)],
-        };
-        let values = requantize_bias(&captured, 0.05, 0.1, &[0.01, 0.02, 0.04]).unwrap();
+        let data = int8_constant(&[13, -7, 3]);
+        let values =
+            requantize_bias(&data, &[(0.02 / 0.05, 3)], 0.05, 0.1, &[0.01, 0.02, 0.04]).unwrap();
         // (q - 3) * 0.02 / (0.1 * w)
         assert_eq!(values, vec![200, -100, 0]);
     }
@@ -293,20 +452,15 @@ mod tests {
     fn composes_nested_boundaries_outer_to_inner() {
         // Parent scale 0.02, zp 1 -> outer branch 0.04 -> inner branch 0.08. The inner
         // RESCALE is found first; the zero point comes from the outermost one.
-        let captured = CapturedConstant {
-            data: int8_constant(&[11]),
-            rescales: vec![(0.04 / 0.08, 5), (0.02 / 0.04, 1)],
-        };
-        let values = requantize_bias(&captured, 0.08, 0.5, &[0.1]).unwrap();
+        let data = int8_constant(&[11]);
+        let rescales = [(0.04 / 0.08, 5), (0.02 / 0.04, 1)];
+        let values = requantize_bias(&data, &rescales, 0.08, 0.5, &[0.1]).unwrap();
         assert_eq!(values, vec![4]);
     }
 
     #[test]
     fn rejects_mismatched_weight_scales() {
-        let captured = CapturedConstant {
-            data: int8_constant(&[1, 2, 3]),
-            rescales: vec![(1.0, 0)],
-        };
-        assert!(requantize_bias(&captured, 1.0, 1.0, &[1.0, 1.0]).is_none());
+        let data = int8_constant(&[1, 2, 3]);
+        assert!(requantize_bias(&data, &[(1.0, 0)], 1.0, 1.0, &[1.0, 1.0]).is_none());
     }
 }

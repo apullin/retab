@@ -8,8 +8,8 @@ name = "retab"
 crate-type = ["cdylib"]
 
 [dependencies]
-flatbuffers = "24.3"
-tosa-rs = { path = "../vendor/tosa-rs" }
+flatbuffers = "25.2.10"
+tosa-rs = { path = "../../../rust-tosa" }  # APU-126: temporary, until tosa-rs is tagged; then a git rev
 pyo3 = { version = "0.27.2", features = ["extension-module"] }
 smallvec = "1.13"
 slotmap = "1"

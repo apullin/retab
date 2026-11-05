@@ -106,7 +106,7 @@ def test_cond_flip_roll_tosa_INT(nested, predicate, inner_predicate):
     assert transformed_regions == (3 if nested else 2)
     if nested:
         assert any(
-            "::" in graph.Regions(i).Name().decode()
+            "__" in graph.Regions(i).Name().decode()
             for i in range(graph.RegionsLength())
         )
 

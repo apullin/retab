@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::fx_ir::{i64_list_arg as i64_list, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{
+    i64_list_arg as i64_list, IrArg, IrGraph, IrNode, IrPass, NodeId, NodeMeta, NodeOp,
+};
 use crate::fx_target::{
-    is_constant_only_shape_transform_target, is_permute_target, is_physical_layout_target,
-    is_raw_aten_convolution_target, is_tosa_transpose_target, is_transpose_conv2d_target,
-    is_view_like_target, is_zero_input_constant_target,
+    classify_ir_target, is_constant_only_shape_transform_target, is_permute_target,
+    is_physical_layout_target, is_raw_aten_convolution_target, is_tosa_transpose_target,
+    is_transpose_conv2d_target, is_view_like_target, is_zero_input_constant_target, IrTargetKind,
 };
 
 /// Whether the graph needs physical (channels-last) layout anywhere: a live
@@ -226,6 +228,378 @@ fn is_transpose_conv2d_weight(graph: &IrGraph, id: NodeId) -> bool {
     })
 }
 
+fn node_input_ids(node: &IrNode) -> Vec<NodeId> {
+    fn collect(arg: &IrArg, out: &mut Vec<NodeId>) {
+        match arg {
+            IrArg::Node(id) => out.push(*id),
+            IrArg::List(items) => items.iter().for_each(|item| collect(item, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for arg in node.args.iter().chain(node.kwargs.values()) {
+        collect(arg, &mut out);
+    }
+    out
+}
+
+fn has_rank_at_least_4(graph: &IrGraph, id: NodeId) -> bool {
+    graph.node_shape(id).is_some_and(|shape| shape.len() >= 4)
+}
+
+/// Computed from constants only: no runtime input anywhere upstream.
+fn is_constant_derived(graph: &IrGraph, id: NodeId, memo: &mut HashMap<NodeId, bool>) -> bool {
+    if let Some(&cached) = memo.get(&id) {
+        return cached;
+    }
+    let node = &graph.nodes[id];
+    let result = match node.op {
+        NodeOp::Placeholder => {
+            node.tensor.is_some() || node.meta.extra_bool("arm_constant_placeholder") == Some(true)
+        }
+        NodeOp::GetAttr => node.tensor.is_some(),
+        NodeOp::CallFunction => {
+            let inputs = node_input_ids(node);
+            is_zero_input_constant_target(&node.target)
+                || (!inputs.is_empty()
+                    && inputs
+                        .into_iter()
+                        .all(|input| is_constant_derived(graph, input, memo)))
+        }
+        _ => false,
+    };
+    memo.insert(id, result);
+    result
+}
+
+/// Nodes laid out in the permuted order between a `permute(0, 2, 3, 1)` of a
+/// channels-last tensor and the `permute(0, 3, 1, 2)` that undoes it, as in ConvNeXt
+/// blocks and channels-first LayerNorms.
+///
+/// The first permute's input is already NHWC in memory, so the permute is
+/// physically a no-op. rc4's channels-last passes keep the ops after it in that
+/// order: LayerNorm reduces over the last axis and Linear's reshapes cost nothing.
+/// RETAB's default would give those rank-4 tensors a second channels-last order and
+/// wrap every reshape in transposes. Island tensors take the identity order instead;
+/// both permutes then become identities.
+#[derive(Default)]
+struct LayoutIslands {
+    /// Rank-4 tensors, and the constants they read, kept in logical order.
+    identity: HashSet<NodeId>,
+    /// `permute(0, 2, 3, 1)` nodes that enter an island.
+    seeds: HashSet<NodeId>,
+    /// `permute(0, 3, 1, 2)` nodes that leave one.
+    exits: HashSet<NodeId>,
+    /// Rank-4 constants the island's ops read; they take the identity order too, so
+    /// nothing outside the islands may read them.
+    constants: HashSet<NodeId>,
+}
+
+enum IslandStep {
+    /// Layout-agnostic: takes the identity order.
+    Identity,
+    /// A Linear's 1x1 conv and its reshapes on `[M, C, 1, 1]`: NHWC and NCHW hold the
+    /// same bytes, so these keep the default order.
+    Neutral,
+    /// The permute that leaves the island.
+    Exit,
+    Abort,
+}
+
+fn is_trivial_spatial(graph: &IrGraph, id: NodeId) -> bool {
+    graph
+        .node_shape_vec(id)
+        .is_some_and(|shape| !memory_format_differs(&shape, shape.len()))
+}
+
+/// The permute's TOSA perms when its input is in identity order and its output in the
+/// default channels-last order.
+fn exit_perms(graph: &IrGraph, id: NodeId) -> Option<Vec<i64>> {
+    let node = &graph.nodes[id];
+    let perm = node.arg_int_list(1)?;
+    let rank = perm.len();
+    if rank < 4 || graph.node_shape(id)?.len() != rank {
+        return None;
+    }
+    let output_order = channels_last_order(rank, spatial_rank(graph, id, 2));
+    output_order
+        .iter()
+        .map(|&axis| perm.get(axis).map(|&p| p.rem_euclid(rank as i64)))
+        .collect()
+}
+
+fn island_step(graph: &IrGraph, id: NodeId, identity: &HashSet<NodeId>) -> IslandStep {
+    let node = &graph.nodes[id];
+    if node.op != NodeOp::CallFunction
+        || matches!(
+            classify_ir_target(&node.target),
+            IrTargetKind::Cond | IrTargetKind::WhileLoop
+        )
+    {
+        return IslandStep::Abort;
+    }
+    if is_permute_target(&node.target) || is_tosa_transpose_target(&node.target) {
+        let leaves = node.first_node_arg().is_some_and(|input| identity.contains(&input))
+            && exit_perms(graph, id).is_some_and(|perms| {
+                perms.iter().enumerate().all(|(axis, &p)| p == axis as i64)
+            });
+        return if leaves {
+            IslandStep::Exit
+        } else {
+            IslandStep::Abort
+        };
+    }
+    if is_physical_layout_target(&node.target) {
+        let tensors = node_input_ids(node).into_iter().chain(std::iter::once(id));
+        let trivial = tensors
+            .filter(|&tensor| has_rank_at_least_4(graph, tensor))
+            .all(|tensor| is_trivial_spatial(graph, tensor));
+        return if trivial {
+            IslandStep::Neutral
+        } else {
+            IslandStep::Abort
+        };
+    }
+    if is_view_like_target(&node.target) {
+        let feeds_physical_op = graph
+            .live_user_ids(id)
+            .into_iter()
+            .any(|user| is_physical_layout_target(&graph.nodes[user].target));
+        return match (feeds_physical_op, is_trivial_spatial(graph, id)) {
+            (false, _) => IslandStep::Identity,
+            (true, true) => IslandStep::Neutral,
+            (true, false) => IslandStep::Abort,
+        };
+    }
+    match graph.node_shape(id).map(|shape| shape.len()) {
+        Some(rank) if rank <= 4 => IslandStep::Identity,
+        _ => IslandStep::Abort,
+    }
+}
+
+/// All dims but the first are 1, so every order lays the constant out the same way.
+fn is_layout_invariant(graph: &IrGraph, id: NodeId) -> bool {
+    graph
+        .node_shape(id)
+        .is_some_and(|shape| shape.iter().skip(1).all(|&dim| dim == 1))
+}
+
+fn collect_rank4_constants(graph: &IrGraph, id: NodeId, out: &mut HashSet<NodeId>) {
+    if !has_rank_at_least_4(graph, id) || is_layout_invariant(graph, id) || !out.insert(id) {
+        return;
+    }
+    for input in node_input_ids(&graph.nodes[id]) {
+        collect_rank4_constants(graph, input, out);
+    }
+}
+
+/// The island a seed opens, or `None` when it isn't closed: every rank-4 path must
+/// end in a `permute(0, 3, 1, 2)` that undoes the channels-last order, or drop below
+/// rank 4, without reaching the graph output, a spatial op or control flow; and every
+/// rank-4 input must come from the island or from constants. `find_layout_islands`
+/// checks that only islands read those constants.
+fn grow_island(graph: &IrGraph, seed: NodeId) -> Option<LayoutIslands> {
+    let mut island = LayoutIslands::default();
+    island.seeds.insert(seed);
+    island.identity.insert(seed);
+    let mut neutral = HashSet::new();
+    let mut queue = vec![seed];
+    while let Some(id) = queue.pop() {
+        // A rank<4 tensor has the same layout everywhere; its readers need nothing.
+        if !has_rank_at_least_4(graph, id) {
+            continue;
+        }
+        for user in graph.live_user_ids(id) {
+            if island.identity.contains(&user)
+                || neutral.contains(&user)
+                || island.exits.contains(&user)
+            {
+                continue;
+            }
+            match island_step(graph, user, &island.identity) {
+                IslandStep::Identity => {
+                    island.identity.insert(user);
+                    queue.push(user);
+                }
+                // A conv or pool reads the declared NHWC shape, so it may only read
+                // tensors in the default order.
+                IslandStep::Neutral
+                    if is_physical_layout_target(&graph.nodes[user].target)
+                        && island.identity.contains(&id) =>
+                {
+                    island_debug(graph, seed, "spatial op reads an island tensor", user);
+                    return None;
+                }
+                IslandStep::Neutral => {
+                    neutral.insert(user);
+                    queue.push(user);
+                }
+                IslandStep::Exit => {
+                    island.exits.insert(user);
+                }
+                IslandStep::Abort => {
+                    island_debug(graph, seed, "unsupported user", user);
+                    return None;
+                }
+            }
+        }
+    }
+    let mut memo = HashMap::new();
+    let mut constants = HashSet::new();
+    let members: Vec<(NodeId, bool)> = island
+        .identity
+        .iter()
+        .map(|&id| (id, true))
+        .chain(neutral.iter().map(|&id| (id, false)))
+        .collect();
+    for (id, takes_identity) in members {
+        if id == seed {
+            continue;
+        }
+        for input in node_input_ids(&graph.nodes[id]) {
+            if island.identity.contains(&input)
+                || neutral.contains(&input)
+                || !has_rank_at_least_4(graph, input)
+            {
+                continue;
+            }
+            if !is_constant_derived(graph, input, &mut memo) {
+                island_debug(graph, seed, "rank-4 input from outside", input);
+                return None;
+            }
+            // A conv weight keeps its own layout; constants the island's elementwise
+            // ops read take the identity order with them.
+            if takes_identity {
+                collect_rank4_constants(graph, input, &mut constants);
+            }
+        }
+    }
+    island.constants = constants;
+    Some(island)
+}
+
+/// The view's input is in logical order when the view runs: it has rank < 4, its
+/// channels-last bytes equal its logical bytes (spatial dims of 1, e.g. after a
+/// global pool), or `insert_view_boundary_transposes` puts a transpose back to
+/// logical order before it.
+fn view_reads_logical_input(graph: &IrGraph, id: NodeId) -> bool {
+    let Some(input) = graph.nodes[id].first_node_arg() else {
+        return false;
+    };
+    let (Some(input_shape), Some(output_shape)) =
+        (graph.node_shape_vec(input), graph.node_shape_vec(id))
+    else {
+        return false;
+    };
+    if input_shape.len() < 4 || !memory_format_differs(&input_shape, input_shape.len()) {
+        return true;
+    }
+    is_channel_reshape(&input_shape, &output_shape) || output_shape.len() < 4
+}
+
+fn island_debug(graph: &IrGraph, seed: NodeId, reason: &str, at: NodeId) {
+    if crate::config::debug_layout_enabled() {
+        eprintln!(
+            "[LayoutDebug] no island at {}: {reason}: {} ({})",
+            graph.nodes[seed].name, graph.nodes[at].name, graph.nodes[at].target
+        );
+    }
+}
+
+fn find_layout_islands(graph: &IrGraph) -> LayoutIslands {
+    // `islands` only tracks claimed nodes while growing, so islands don't overlap.
+    let mut islands = LayoutIslands::default();
+    let mut candidates: Vec<LayoutIslands> = Vec::new();
+    let mut constant_memo = HashMap::new();
+    for id in graph.live_call_function_ids() {
+        let node = &graph.nodes[id];
+        if islands.identity.contains(&id) {
+            continue;
+        }
+        // A reshape whose input arrives in logical order produces logical order, like
+        // Linear's `view -> permute(0, 3, 1, 2)` into its 1x1 conv.
+        // A view straight into a conv or pool keeps the default order: those read the
+        // declared NHWC shape, which differs from the logical one even when the bytes
+        // agree.
+        if is_view_like_target(&node.target)
+            && has_rank_at_least_4(graph, id)
+            && view_reads_logical_input(graph, id)
+            && !is_constant_derived(graph, id, &mut constant_memo)
+            && !graph
+                .live_user_ids(id)
+                .into_iter()
+                .any(|user| is_physical_layout_target(&graph.nodes[user].target))
+        {
+            if let Some(island) = grow_island(graph, id) {
+                islands.identity.extend(island.identity.iter().copied());
+                candidates.push(island);
+            }
+            continue;
+        }
+        if !is_permute_target(&node.target) {
+            continue;
+        }
+        let (Some(input), Some(perm)) = (node.first_node_arg(), node.arg_int_list(1)) else {
+            continue;
+        };
+        let Some(rank) = graph.node_shape(input).map(|shape| shape.len()) else {
+            continue;
+        };
+        // The input must be a channels-last intermediate, not a graph input.
+        if rank < 4
+            || graph.nodes[input].op != NodeOp::CallFunction
+            || islands.identity.contains(&input)
+        {
+            continue;
+        }
+        let entry: Vec<i64> = channels_last_order(rank, spatial_rank(graph, input, 2))
+            .into_iter()
+            .map(|axis| axis as i64)
+            .collect();
+        if perm != entry {
+            continue;
+        }
+        if let Some(island) = grow_island(graph, id) {
+            islands.identity.extend(island.identity.iter().copied());
+            candidates.push(island);
+        }
+    }
+    // Islands may share a deduplicated constant, but nothing else may read it:
+    // drop islands whose constants have other readers until that holds for all.
+    loop {
+        let readers: HashSet<NodeId> = candidates
+            .iter()
+            .flat_map(|island| island.identity.iter().chain(&island.constants))
+            .copied()
+            .collect();
+        let before = candidates.len();
+        candidates.retain(|island| {
+            let shared = island.constants.iter().find(|&&constant| {
+                graph
+                    .live_user_ids(constant)
+                    .into_iter()
+                    .any(|user| !readers.contains(&user))
+            });
+            if let Some(&constant) = shared {
+                let seed = *island.seeds.iter().next().expect("an island has a seed");
+                island_debug(graph, seed, "constant also read outside the islands", constant);
+            }
+            shared.is_none()
+        });
+        if candidates.len() == before {
+            break;
+        }
+    }
+    let mut islands = LayoutIslands::default();
+    for island in candidates {
+        islands.identity.extend(island.identity);
+        islands.identity.extend(island.constants);
+        islands.seeds.extend(island.seeds);
+        islands.exits.extend(island.exits);
+    }
+    islands
+}
+
 fn collect_output_node_ids(arg: &IrArg, output_nodes: &mut Vec<NodeId>) {
     match arg {
         IrArg::Node(id) => output_nodes.push(*id),
@@ -385,6 +759,7 @@ impl IrToTosaMemoryFormatPass {
         graph: &mut IrGraph,
         is_control_flow_gm: bool,
         logical_only: bool,
+        islands: &LayoutIslands,
     ) -> bool {
         let mut modified = false;
         for id in graph.live_node_ids() {
@@ -434,7 +809,7 @@ impl IrToTosaMemoryFormatPass {
                 }
             } else if rank == 4 && is_transpose_conv2d_weight(graph, id) {
                 vec![1, 2, 3, 0]
-            } else if rank >= 4 && !logical_only {
+            } else if rank >= 4 && !logical_only && !islands.identity.contains(&id) {
                 channels_last_order(rank, sr)
             } else {
                 (0..rank).collect::<Vec<_>>()
@@ -448,7 +823,7 @@ impl IrToTosaMemoryFormatPass {
         modified
     }
 
-    fn insert_view_boundary_transposes(&self, graph: &mut IrGraph) -> bool {
+    fn insert_view_boundary_transposes(&self, graph: &mut IrGraph, islands: &LayoutIslands) -> bool {
         let mut modified = false;
         let mut constant_memo = HashMap::new();
         for id in graph.live_call_function_ids() {
@@ -472,7 +847,9 @@ impl IrToTosaMemoryFormatPass {
             let output_rank = output_shape.len();
             let channel_reshape = is_channel_reshape(&input_shape, &output_shape);
 
-            let input_memory_format_differs = memory_format_differs(&input_shape, input_rank);
+            // Island tensors are already in logical order.
+            let input_memory_format_differs = memory_format_differs(&input_shape, input_rank)
+                && !islands.identity.contains(&input_id);
             if (channel_reshape || (input_rank >= 4 && output_rank < 4))
                 && input_memory_format_differs
             {
@@ -488,7 +865,8 @@ impl IrToTosaMemoryFormatPass {
                 modified = true;
             }
 
-            let output_memory_format_differs = memory_format_differs(&output_shape, output_rank);
+            let output_memory_format_differs = memory_format_differs(&output_shape, output_rank)
+                && !islands.identity.contains(&id);
             if (channel_reshape || (input_rank < 4 && output_rank >= 4))
                 && output_memory_format_differs
             {
@@ -615,10 +993,19 @@ impl IrToTosaMemoryFormatPass {
         modified
     }
 
-    fn remap_permute_args(&self, graph: &mut IrGraph) -> bool {
+    fn remap_permute_args(&self, graph: &mut IrGraph, islands: &LayoutIslands) -> bool {
         let mut modified = false;
         for id in graph.live_call_function_ids() {
             if !is_permute_target(&graph.nodes[id].target) {
+                continue;
+            }
+            if islands.exits.contains(&id) {
+                if let Some(perms) = exit_perms(graph, id) {
+                    if graph.nodes[id].arg_int_list(1).as_deref() != Some(perms.as_slice()) {
+                        graph.set_arg(id, 1, i64_list(&perms));
+                        modified = true;
+                    }
+                }
                 continue;
             }
             let Some(input_id) = graph.nodes[id].first_node_arg() else {
@@ -661,7 +1048,7 @@ impl IrToTosaMemoryFormatPass {
             // when the output is logical (reaches the graph boundary through only q/dq and
             // layout-neutral ops) use f_inv o user_perm so an explicit rank-4 layout permute like
             // [0,2,3,1] is not double-transposed.
-            let physical_output = output_is_physical(graph, id);
+            let physical_output = !islands.seeds.contains(&id) && output_is_physical(graph, id);
             let mut remapped = vec![0i64; input_rank];
             for j in 0..input_rank {
                 let nchw_axis = if physical_output { f[j] } else { j };
@@ -693,13 +1080,18 @@ impl IrPass for IrToTosaMemoryFormatPass {
         let mut modified = false;
         modified |= self.annotate_spatial_ranks(graph);
         modified |= self.propagate_spatial_ranks(graph);
-        modified |= self.annotate_dim_orders(graph, is_control_flow_gm, logical_only);
+        let islands = if logical_only || is_control_flow_gm {
+            LayoutIslands::default()
+        } else {
+            find_layout_islands(graph)
+        };
+        modified |= self.annotate_dim_orders(graph, is_control_flow_gm, logical_only, &islands);
         if !logical_only {
-            modified |= self.insert_view_boundary_transposes(graph);
+            modified |= self.insert_view_boundary_transposes(graph, &islands);
             modified |= self.insert_input_transposes(graph);
             modified |= self.insert_output_transposes(graph, is_control_flow_gm);
         }
-        modified |= self.remap_permute_args(graph);
+        modified |= self.remap_permute_args(graph, &islands);
 
         if crate::config::debug_layout_enabled() {
             for id in graph.live_node_ids() {
@@ -825,9 +1217,243 @@ mod tests {
                 };
                 output(&mut graph, result);
 
-                IrToTosaMemoryFormatPass.remap_permute_args(&mut graph);
+                IrToTosaMemoryFormatPass.remap_permute_args(&mut graph, &LayoutIslands::default());
                 assert_eq!(graph.node(permute).arg_int_list(1), Some(expected.clone()));
             }
         }
+    }
+
+    fn constant(graph: &mut IrGraph, name: &str, shape: &[i64]) -> NodeId {
+        let id = f32_placeholder(graph, name, shape.to_vec());
+        graph
+            .node_mut(id)
+            .meta
+            .set_extra("arm_constant_placeholder", crate::fx_ir::MetaValue::Bool(true));
+        id
+    }
+
+    fn conv(graph: &mut IrGraph, name: &str, input: NodeId, weight: NodeId, shape: [i64; 4]) -> NodeId {
+        graph.add_node(
+            NodeOp::CallFunction,
+            name.to_string(),
+            "aten.convolution.default".to_string(),
+            vec![IrArg::Node(input), IrArg::Node(weight)],
+            crate::fx_ir::NodeMeta::tensor(shape.to_vec(), "torch.float32"),
+        )
+    }
+
+    fn view(graph: &mut IrGraph, name: &str, input: NodeId, shape: &[i64]) -> NodeId {
+        f32_call(
+            graph,
+            name,
+            "aten.view_copy.default",
+            vec![IrArg::Node(input), i64_list(shape)],
+            shape.to_vec(),
+        )
+    }
+
+    fn dim_order(graph: &IrGraph, id: NodeId) -> Option<Vec<usize>> {
+        graph.node(id).meta.cloned_tosa_dim_order()
+    }
+
+    /// A ConvNeXt block's middle: conv -> permute(0,2,3,1) -> scale by a [C] parameter
+    /// -> Linear (view, 1x1 conv, view) -> relu -> permute(0,3,1,2) -> conv.
+    fn convnext_like(close_island: bool) -> (IrGraph, [NodeId; 6]) {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [1, 16, 8, 8]);
+        let w0 = constant(&mut graph, "w0", &[16, 16, 3, 3]);
+        let conv0 = conv(&mut graph, "conv0", x, w0, [1, 16, 8, 8]);
+        let seed = f32_call(
+            &mut graph,
+            "permute",
+            "aten.permute_copy.default",
+            vec![IrArg::Node(conv0), i64_list(&[0, 2, 3, 1])],
+            [1, 8, 8, 16],
+        );
+        let gamma = constant(&mut graph, "gamma", &[16]);
+        let gamma_view = view(&mut graph, "gamma_view", gamma, &[1, 1, 1, 16]);
+        let scaled = f32_call(
+            &mut graph,
+            "scaled",
+            "aten.mul.Tensor",
+            vec![IrArg::Node(seed), IrArg::Node(gamma_view)],
+            [1, 8, 8, 16],
+        );
+        let linear_in = view(&mut graph, "linear_in", scaled, &[64, 16, 1, 1]);
+        let linear_w = constant(&mut graph, "linear_w", &[32, 16]);
+        let linear_w_view = view(&mut graph, "linear_w_view", linear_w, &[32, 16, 1, 1]);
+        let linear = conv(&mut graph, "linear", linear_in, linear_w_view, [64, 32, 1, 1]);
+        let linear_out = view(&mut graph, "linear_out", linear, &[1, 8, 8, 32]);
+        let act = f32_call(
+            &mut graph,
+            "act",
+            "aten.relu.default",
+            vec![IrArg::Node(linear_out)],
+            [1, 8, 8, 32],
+        );
+        let exit = if close_island {
+            let exit = f32_call(
+                &mut graph,
+                "unpermute",
+                "aten.permute_copy.default",
+                vec![IrArg::Node(act), i64_list(&[0, 3, 1, 2])],
+                [1, 32, 8, 8],
+            );
+            let w1 = constant(&mut graph, "w1", &[32, 32, 3, 3]);
+            let conv1 = conv(&mut graph, "conv1", exit, w1, [1, 32, 8, 8]);
+            output(&mut graph, conv1);
+            exit
+        } else {
+            output(&mut graph, act);
+            act
+        };
+        (graph, [conv0, seed, scaled, gamma_view, linear_out, exit])
+    }
+
+    #[test]
+    fn permute_island_keeps_the_permuted_order_without_transposes() {
+        let (mut graph, [conv0, seed, scaled, gamma_view, linear_out, exit]) = convnext_like(true);
+        assert!(IrToTosaMemoryFormatPass.run(&mut graph));
+
+        // Both permutes are physical no-ops now.
+        assert_eq!(graph.node(seed).arg_int_list(1), Some(vec![0, 1, 2, 3]));
+        assert_eq!(graph.node(exit).arg_int_list(1), Some(vec![0, 1, 2, 3]));
+        // Only the graph's own input and output transposes remain; the Linear's
+        // reshapes get none.
+        let transposes: Vec<String> = graph
+            .nodes
+            .iter()
+            .filter(|node| node.alive && is_tosa_transpose_target(&node.target))
+            .map(|node| node.name.clone())
+            .collect();
+        assert_eq!(transposes.len(), 2, "{transposes:?}");
+        assert!(transposes.iter().all(|name| !name.starts_with("linear")), "{transposes:?}");
+        for id in [seed, scaled, gamma_view, linear_out] {
+            assert_eq!(dim_order(&graph, id), Some(vec![0, 1, 2, 3]), "{}", graph.node(id).name);
+        }
+        for id in [conv0, exit] {
+            assert_eq!(dim_order(&graph, id), Some(vec![0, 2, 3, 1]), "{}", graph.node(id).name);
+        }
+    }
+
+    /// conv -> [permute -> mul(scale) -> unpermute -> conv] twice, both reading the same
+    /// deduplicated [1, 1, 1, 16] scale; optionally a third reader outside the islands.
+    fn islands_sharing_a_constant(outside_reader: bool) -> (IrGraph, NodeId, [NodeId; 2]) {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [1, 16, 8, 8]);
+        let scale = constant(&mut graph, "scale", &[1, 1, 1, 16]);
+        let mut current = x;
+        let mut seeds = Vec::new();
+        for block in 0..2 {
+            let w = constant(&mut graph, &format!("w{block}"), &[16, 16, 3, 3]);
+            let conv_out = conv(&mut graph, &format!("conv{block}"), current, w, [1, 16, 8, 8]);
+            let seed = f32_call(
+                &mut graph,
+                &format!("permute{block}"),
+                "aten.permute_copy.default",
+                vec![IrArg::Node(conv_out), i64_list(&[0, 2, 3, 1])],
+                [1, 8, 8, 16],
+            );
+            let scaled = f32_call(
+                &mut graph,
+                &format!("scaled{block}"),
+                "aten.mul.Tensor",
+                vec![IrArg::Node(seed), IrArg::Node(scale)],
+                [1, 8, 8, 16],
+            );
+            current = f32_call(
+                &mut graph,
+                &format!("unpermute{block}"),
+                "aten.permute_copy.default",
+                vec![IrArg::Node(scaled), i64_list(&[0, 3, 1, 2])],
+                [1, 16, 8, 8],
+            );
+            seeds.push(seed);
+        }
+        let w = constant(&mut graph, "w_last", &[16, 16, 3, 3]);
+        let mut last = conv(&mut graph, "conv_last", current, w, [1, 16, 8, 8]);
+        if outside_reader {
+            last = f32_call(
+                &mut graph,
+                "outside",
+                "aten.add.Tensor",
+                vec![IrArg::Node(last), IrArg::Node(scale)],
+                [1, 16, 8, 8],
+            );
+        }
+        output(&mut graph, last);
+        (graph, scale, [seeds[0], seeds[1]])
+    }
+
+    #[test]
+    fn islands_may_share_a_constant_nothing_else_reads() {
+        let (mut graph, scale, seeds) = islands_sharing_a_constant(false);
+        assert!(IrToTosaMemoryFormatPass.run(&mut graph));
+        for seed in seeds {
+            assert_eq!(graph.node(seed).arg_int_list(1), Some(vec![0, 1, 2, 3]));
+        }
+        assert_eq!(dim_order(&graph, scale), Some(vec![0, 1, 2, 3]));
+
+        let (mut graph, scale, seeds) = islands_sharing_a_constant(true);
+        assert!(IrToTosaMemoryFormatPass.run(&mut graph));
+        for seed in seeds {
+            assert_ne!(graph.node(seed).arg_int_list(1), Some(vec![0, 1, 2, 3]));
+        }
+        assert_eq!(dim_order(&graph, scale), Some(vec![0, 2, 3, 1]));
+    }
+
+    /// rc4's Linear lowering on a rank-2 input, behind a conv so the graph isn't
+    /// logical-only: view -> permute(0,3,1,2) -> 1x1 conv -> permute(0,2,3,1) -> view.
+    #[test]
+    fn linear_rows_in_width_needs_no_transposes() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [1, 8, 4, 4]);
+        let w0 = constant(&mut graph, "w0", &[8, 8, 3, 3]);
+        let conv0 = conv(&mut graph, "conv0", x, w0, [1, 8, 4, 4]);
+        let flat = view(&mut graph, "flat", conv0, &[16, 8]);
+        let rows = view(&mut graph, "rows", flat, &[1, 1, 16, 8]);
+        let into_conv = f32_call(
+            &mut graph,
+            "into_conv",
+            "aten.permute_copy.default",
+            vec![IrArg::Node(rows), i64_list(&[0, 3, 1, 2])],
+            [1, 8, 1, 16],
+        );
+        let w = constant(&mut graph, "w", &[32, 8, 1, 1]);
+        let linear = conv(&mut graph, "linear", into_conv, w, [1, 32, 1, 16]);
+        let out_of_conv = f32_call(
+            &mut graph,
+            "out_of_conv",
+            "aten.permute_copy.default",
+            vec![IrArg::Node(linear), i64_list(&[0, 2, 3, 1])],
+            [1, 1, 16, 32],
+        );
+        let result = view(&mut graph, "result", out_of_conv, &[16, 32]);
+        output(&mut graph, result);
+
+        assert!(IrToTosaMemoryFormatPass.run(&mut graph));
+        assert_eq!(graph.node(into_conv).arg_int_list(1), Some(vec![0, 1, 2, 3]));
+        assert_eq!(graph.node(out_of_conv).arg_int_list(1), Some(vec![0, 1, 2, 3]));
+        assert_eq!(dim_order(&graph, rows), Some(vec![0, 1, 2, 3]));
+        assert_eq!(dim_order(&graph, linear), Some(vec![0, 2, 3, 1]));
+        let transposes: Vec<String> = graph
+            .nodes
+            .iter()
+            .filter(|node| node.alive && is_tosa_transpose_target(&node.target))
+            .map(|node| node.name.clone())
+            .collect();
+        // Only the conv0 input's layout transpose and the flatten's input transpose.
+        assert!(
+            transposes.iter().all(|name| !name.starts_with("rows") && !name.starts_with("result")),
+            "{transposes:?}"
+        );
+    }
+
+    #[test]
+    fn an_island_that_reaches_the_graph_output_is_not_formed() {
+        let (mut graph, [_, seed, scaled, ..]) = convnext_like(false);
+        assert!(IrToTosaMemoryFormatPass.run(&mut graph));
+        assert_ne!(graph.node(seed).arg_int_list(1), Some(vec![0, 1, 2, 3]));
+        assert_eq!(dim_order(&graph, scaled), Some(vec![0, 2, 3, 1]));
     }
 }

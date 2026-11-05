@@ -221,7 +221,7 @@ fn emit_quant_to_float_chain(
             result.push_output_op(
                 TosaTensor::new(&mul_name, input_shape.to_vec(), target_dtype),
                 Op::Mul,
-                Attribute::Mul(MulAttribute { shift: 0 }),
+                Attribute::Mul(MulAttribute {}),
                 vec![current, scale_name, shift_name],
             );
             current = mul_name;

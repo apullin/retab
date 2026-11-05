@@ -242,6 +242,10 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
                 split_permutes: config.u55_split_permutes.clone(),
             },
         )),
+        // Linear's view pairs around an activation, before layout sees them.
+        Ir(Box::new(
+            crate::fx_cancel_views_around_unary_ir::IrCancelViewsAroundUnaryPass,
+        )),
         // Copy lowering compares logical shapes and emits views/repeats for layout conversion.
         Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)),
         Ir(Box::new(

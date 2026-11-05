@@ -533,14 +533,16 @@ fn materialize_const(
     true
 }
 
-/// Prefix every node name and store key of a converted submodule graph with
-/// `{region}::` (matching ingest's qualify_name), so control-flow submodule graphs
-/// don't collide with the parent or each other in the shared TensorStore. The
-/// serializer keys a placeholder's constant data by node.name, so names and store
-/// keys must move together. Intra-graph references are by NodeId, so renaming is
-/// safe. Building block for IR-native control-flow hierarchy assembly.
-pub fn prefix_graph(graph: &mut Graph, store: &mut TensorStore, prefix: &str) {
-    if prefix.is_empty() {
+/// Append stock's `_{region}` suffix to every node name and store key of a
+/// converted submodule graph, so its constants don't collide with the parent's or
+/// another region's in the shared TensorStore. The serializer keys a placeholder's
+/// constant data by node.name, so names and store keys must move together.
+/// Intra-graph references are by NodeId, so renaming is safe. The region names a
+/// COND_IF / WHILE_LOOP references (`Arg::String`) are qualified as
+/// `{region}__{local}` instead, matching stock's region names; other string
+/// arguments (padding or rounding modes) are left alone.
+pub fn suffix_graph(graph: &mut Graph, store: &mut TensorStore, region: &str) {
+    if region.is_empty() {
         return;
     }
     let mut keys_to_move: Vec<String> = Vec::new();
@@ -549,29 +551,28 @@ pub fn prefix_graph(graph: &mut Graph, store: &mut TensorStore, prefix: &str) {
             if store.buffers.contains_key(&n.name) {
                 keys_to_move.push(n.name.clone());
             }
-            for arg in n.args.iter_mut() {
-                prefix_region_arg(arg, prefix);
+            if matches!(n.target, OpTarget::CondIf | OpTarget::WhileLoop) {
+                for arg in n.args.iter_mut() {
+                    qualify_region_arg(arg, region);
+                }
             }
-            for (_, arg) in n.kwargs.iter_mut() {
-                prefix_region_arg(arg, prefix);
-            }
-            n.name = format!("{prefix}{}", n.name);
+            n.name = format!("{}_{region}", n.name);
         }
     }
     for (_, name) in graph.node_names.iter_mut() {
-        *name = format!("{prefix}{name}");
+        *name = format!("{name}_{region}");
     }
     for key in keys_to_move {
         if let Some(data) = store.buffers.remove(&key) {
-            store.buffers.insert(format!("{prefix}{key}"), data);
+            store.buffers.insert(format!("{key}_{region}"), data);
         }
     }
 }
 
-fn prefix_region_arg(arg: &mut Arg, prefix: &str) {
+fn qualify_region_arg(arg: &mut Arg, region: &str) {
     match arg {
-        Arg::String(name) if !name.contains("::") => {
-            *name = format!("{prefix}{name}");
+        Arg::String(name) if !name.contains("__") => {
+            *name = format!("{region}__{name}");
         }
         _ => {}
     }
@@ -945,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn prefix_graph_moves_node_names_and_store_keys_together() {
+    fn suffix_graph_moves_node_names_and_store_keys_together() {
         let mut graph = Graph::new();
         let weight = graph.nodes.insert(graph_node(
             "weight",
@@ -956,17 +957,24 @@ mod tests {
         let consumer = graph.nodes.insert(graph_node(
             "consumer",
             OpType::CallFunction,
-            OpTarget::Other("backend.tosa.COND_IF.default".to_string()),
+            OpTarget::CondIf,
             smallvec![
                 Arg::Node(weight),
                 Arg::String("nested_region".to_string()),
-                Arg::String("already::qualified".to_string())
+                Arg::String("already__qualified".to_string())
             ],
         ));
-        graph.order.extend([weight, consumer]);
+        let pad = graph.nodes.insert(graph_node(
+            "pad",
+            OpType::CallFunction,
+            OpTarget::Other("aten.pad.default".to_string()),
+            smallvec![Arg::Node(weight), Arg::String("reflect".to_string())],
+        ));
+        graph.order.extend([weight, consumer, pad]);
         graph.node_names.extend([
             (weight, "weight".to_string()),
             (consumer, "consumer".to_string()),
+            (pad, "pad".to_string()),
         ]);
 
         let mut store = TensorStore::new();
@@ -979,28 +987,30 @@ mod tests {
             },
         );
 
-        prefix_graph(&mut graph, &mut store, "then_branch::");
+        suffix_graph(&mut graph, &mut store, "then_branch");
 
         assert!(store.get("weight").is_none());
-        assert!(store.get("then_branch::weight").is_some());
-        assert_eq!(graph.nodes[weight].name, "then_branch::weight");
-        assert_eq!(graph.nodes[consumer].name, "then_branch::consumer");
+        assert!(store.get("weight_then_branch").is_some());
+        assert_eq!(graph.nodes[weight].name, "weight_then_branch");
+        assert_eq!(graph.nodes[consumer].name, "consumer_then_branch");
         assert!(graph
             .node_names
             .iter()
-            .any(|(_, name)| name == "then_branch::weight"));
+            .any(|(_, name)| name == "weight_then_branch"));
         assert!(graph
             .node_names
             .iter()
-            .any(|(_, name)| name == "then_branch::consumer"));
+            .any(|(_, name)| name == "consumer_then_branch"));
         assert_eq!(
             graph.nodes[consumer].args[1],
-            Arg::String("then_branch::nested_region".to_string())
+            Arg::String("then_branch__nested_region".to_string())
         );
         assert_eq!(
             graph.nodes[consumer].args[2],
-            Arg::String("already::qualified".to_string())
+            Arg::String("already__qualified".to_string())
         );
+        // Only COND_IF / WHILE_LOOP strings name regions.
+        assert_eq!(graph.nodes[pad].args[1], Arg::String("reflect".to_string()));
     }
 
     #[test]

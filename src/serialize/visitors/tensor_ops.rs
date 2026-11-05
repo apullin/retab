@@ -158,7 +158,7 @@ pub(super) fn emit_quantize_per_tensor(ctx: &EmitContext) -> EmitResult {
                     intermediate_dtype,
                 ),
                 Op::Mul,
-                Attribute::Mul(MulAttribute { shift: 0 }),
+                Attribute::Mul(MulAttribute {}),
                 vec![current_name, scale_name, shift_name],
             );
             current_name = scaled_name;
@@ -307,7 +307,7 @@ pub(super) fn emit_dequantize_per_tensor(ctx: &EmitContext) -> EmitResult {
             result.push_output_op(
                 make_output_tensor(node),
                 Op::Mul,
-                Attribute::Mul(MulAttribute { shift: 0 }),
+                Attribute::Mul(MulAttribute {}),
                 vec![current_name, scale_name, shift_name],
             );
         }

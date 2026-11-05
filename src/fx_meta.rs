@@ -618,6 +618,10 @@ impl NodeMeta {
         self.extras.remove("tosa_special_dtype").is_some()
     }
 
+    pub fn replace_tosa_dim_order(&mut self, order: Option<Vec<usize>>) {
+        self.layout.tosa_dim_order = order;
+    }
+
     pub fn clear_tosa_dim_order_if_rank_mismatch(&mut self, rank: usize) -> bool {
         if self
             .layout

@@ -91,7 +91,7 @@ pub(in crate::serialize::visitors) fn emit_aten_mean(ctx: &EmitContext) -> EmitR
     result.push_output_op(
         TosaTensor::new(&final_name, current_shape.clone(), base_dtype),
         Op::Mul,
-        Attribute::Mul(MulAttribute { shift: 0 }),
+        Attribute::Mul(MulAttribute {}),
         vec![sum_name, recip_name, shift_name],
     );
 

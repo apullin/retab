@@ -207,7 +207,7 @@ fn emit_intdiv(ctx: &EmitContext) -> EmitResult {
 }
 
 pub(super) fn emit_mul(ctx: &EmitContext) -> EmitResult {
-    ctx.emit_binary(Op::Mul, Attribute::Mul(MulAttribute { shift: 0 }))
+    ctx.emit_binary(Op::Mul, Attribute::Mul(MulAttribute {}))
 }
 
 pub(super) fn emit_aten_shape_reshape(ctx: &EmitContext) -> EmitResult {
