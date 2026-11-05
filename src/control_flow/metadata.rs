@@ -105,6 +105,7 @@ fn replace_output_arg_use(graph: &mut IrGraph, out_id: NodeId, old: NodeId, new:
             _ => {}
         }
     }
+    graph.sync_node_users(out_id);
 }
 
 /// Pure Rust: walk producer chain to find effective qparam.

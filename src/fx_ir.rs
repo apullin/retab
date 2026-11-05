@@ -67,6 +67,9 @@ pub(crate) fn normalize_fx_target(raw: &str) -> String {
 }
 
 /// A node in the Rust IR graph.
+///
+/// `IrGraph` indexes the node references in `args` and `kwargs`. Change them through
+/// the graph's methods, or call `IrGraph::sync_node_users` after editing them in place.
 #[derive(Debug, Clone)]
 pub struct IrNode {
     pub id: NodeId,
@@ -375,6 +378,9 @@ fn collect_users_from_arg(arg: &IrArg, user_id: NodeId, users: &mut [Vec<NodeId>
     }
 }
 
+/// From-scratch reverse edges: `users[x]` lists each live node whose args or kwargs
+/// reference `x` at any list depth, once, in ascending id order. References to ids
+/// at or past `nodes.len()` are skipped.
 fn build_user_edges(nodes: &[IrNode]) -> Vec<Vec<NodeId>> {
     let mut users = vec![Vec::new(); nodes.len()];
     for node in nodes {
@@ -391,13 +397,76 @@ fn build_user_edges(nodes: &[IrNode]) -> Vec<Vec<NodeId>> {
     users
 }
 
+/// The node ids `node` references in its args and kwargs, ascending and deduplicated.
+/// Dead nodes reference nothing, matching `build_user_edges`.
+fn node_operands(node: &IrNode) -> Vec<NodeId> {
+    let mut operands = Vec::new();
+    if node.alive {
+        for arg in node.args.iter().chain(node.kwargs.values()) {
+            arg.collect_node_ids(&mut operands);
+        }
+        operands.sort_unstable();
+        operands.dedup();
+    }
+    operands
+}
+
+fn insert_sorted(list: &mut Vec<NodeId>, id: NodeId) {
+    if let Err(position) = list.binary_search(&id) {
+        list.insert(position, id);
+    }
+}
+
+fn remove_sorted(list: &mut Vec<NodeId>, id: NodeId) {
+    if let Ok(position) = list.binary_search(&id) {
+        list.remove(position);
+    }
+}
+
+/// How an edit affected the user lists that `users(id)` reported before the index
+/// became incremental. See `IrGraph::legacy_users`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LegacyUsers {
+    /// The old code rebuilt or updated those lists for this edit; the caller handles
+    /// the overlay.
+    Updated,
+    /// The old code left those lists alone, so the overlay keeps each touched list as
+    /// it was.
+    Untouched,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test builds check the incremental user index after every edit. Benchmarks on
+    /// large graphs switch this off.
+    static CHECK_USERS_AFTER_EDIT: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
 /// The full graph: ordered list of nodes + lookup by name.
 #[derive(Debug)]
 pub struct IrGraph {
     pub nodes: Vec<IrNode>,
     name_to_id: HashMap<String, NodeId>,
-    /// Reverse edges: users[node_id] = list of node IDs that reference this node in their args.
+    /// Exact reverse edges, updated by every edit: `users[x]` lists each live node whose
+    /// args or kwargs reference `x` at any list depth, once, in ascending id order. It
+    /// always equals `build_user_edges(&nodes)`.
     users: Vec<Vec<NodeId>>,
+    /// `operands[u]`: the ids `u` references, ascending and deduplicated, as recorded in
+    /// `users` (empty while `u` is dead). An edit to `u` diffs against it and touches
+    /// only the lists that change.
+    operands: Vec<Vec<NodeId>>,
+    /// Users of ids at or past `nodes.len()` (forward references). `add_node` adopts
+    /// them, so `users` keeps matching a from-scratch rebuild.
+    pending_users: HashMap<NodeId, Vec<NodeId>>,
+    /// Compatibility overlay for `users(id)`. Before the index became incremental,
+    /// `users(id)` returned a cache that only `set_args`, `set_arg`,
+    /// `replace_input_use` and `eliminate_dead_code` rebuilt. Between rebuilds it kept
+    /// erased users, ignored kwargs edits and in-place edits, and `replace_all_uses`
+    /// appended the moved users after the existing ones. Some `users(id)` callers can
+    /// see the difference, so each entry here holds that cache's list for an id where
+    /// it differs from `users`. The old rebuild points clear the overlay. Once those
+    /// callers move to `live_user_ids`, the overlay can go.
+    legacy_users: HashMap<NodeId, Vec<NodeId>>,
     /// Replacement map: dead_id → replacement_id (recorded by replace_and_erase).
     replacements: HashMap<NodeId, NodeId>,
     /// Explicit position anchors retained for IR ordering and serialization hints.
@@ -446,6 +515,9 @@ impl IrGraph {
             nodes: Vec::new(),
             name_to_id: HashMap::new(),
             users: Vec::new(),
+            operands: Vec::new(),
+            pending_users: HashMap::new(),
+            legacy_users: HashMap::new(),
             replacements: HashMap::new(),
             anchors: HashMap::new(),
             anchors_after: HashMap::new(),
@@ -498,16 +570,19 @@ impl IrGraph {
             .map(|(id, py_node)| import_fx_node(id, py_node, &name_to_id, &tensor_import))
             .collect::<PyResult<Vec<_>>>()?;
 
-        let users = build_user_edges(&nodes);
-
-        Ok(Self {
+        let mut graph = Self {
             nodes,
             name_to_id,
-            users,
+            users: Vec::new(),
+            operands: Vec::new(),
+            pending_users: HashMap::new(),
+            legacy_users: HashMap::new(),
             replacements: HashMap::new(),
             anchors: HashMap::new(),
             anchors_after: HashMap::new(),
-        })
+        };
+        graph.rebuild_users();
+        Ok(graph)
     }
 
     /// Iterate placeholders.
@@ -529,15 +604,18 @@ impl IrGraph {
         &self.nodes[id]
     }
 
-    /// Get mutable node by ID.
+    /// Get mutable node by ID. After changing the node references in its `args` or
+    /// `kwargs` through this, call `sync_node_users(id)`.
     pub fn node_mut(&mut self, id: NodeId) -> &mut IrNode {
         &mut self.nodes[id]
     }
 
-    /// Update a node's args and rebuild reverse-use lists.
+    /// Update a node's args and their reverse-use entries.
     pub fn set_args(&mut self, id: NodeId, args: Vec<IrArg>) {
         self.nodes[id].args = args;
-        self.rebuild_users();
+        self.sync_operands(id, LegacyUsers::Updated);
+        self.reset_legacy_users();
+        self.check_users_after_edit();
     }
 
     /// Add a node with kwargs (e.g. dtype for _to_copy).
@@ -552,6 +630,9 @@ impl IrGraph {
     ) -> NodeId {
         let id = self.add_node(op, name, target, args, meta);
         self.nodes[id].kwargs = kwargs;
+        // The old code never recorded kwargs references made here.
+        self.sync_operands(id, LegacyUsers::Untouched);
+        self.check_users_after_edit();
         id
     }
 
@@ -717,22 +798,53 @@ impl IrGraph {
         )
     }
 
-    /// Update a single arg by index and mark dirty.
+    /// Update a single arg by index. An out-of-range index is ignored.
     pub fn set_arg(&mut self, id: NodeId, index: usize, value: IrArg) {
         if index < self.nodes[id].args.len() {
             self.nodes[id].args[index] = value;
-            self.rebuild_users();
+            self.sync_operands(id, LegacyUsers::Updated);
+            self.reset_legacy_users();
+            self.check_users_after_edit();
         }
     }
 
     /// Update a kwarg.
     pub fn set_kwarg(&mut self, id: NodeId, key: impl Into<String>, value: IrArg) {
         self.nodes[id].kwargs.insert(key.into(), value);
+        self.sync_operands(id, LegacyUsers::Untouched);
+        self.check_users_after_edit();
     }
 
-    /// Get users (nodes that reference this node in their args).
+    /// Remove a kwarg, returning its value.
+    pub(crate) fn remove_kwarg(&mut self, id: NodeId, key: &str) -> Option<IrArg> {
+        let removed = self.nodes[id].kwargs.remove(key);
+        self.sync_operands(id, LegacyUsers::Untouched);
+        self.check_users_after_edit();
+        removed
+    }
+
+    /// Re-record `id`'s node references after its `args` or `kwargs` were edited in
+    /// place through `node_mut`. O(references of `id`).
+    pub(crate) fn sync_node_users(&mut self, id: NodeId) {
+        self.sync_operands(id, LegacyUsers::Untouched);
+        self.check_users_after_edit();
+    }
+
+    /// The user list this node had under the pre-incremental cache (see
+    /// `legacy_users`): ascending ids right after a rebuild, but it can still hold
+    /// erased users, miss kwargs and in-place edits, or list `replace_all_uses` moves
+    /// out of order. Use `live_user_ids` for the exact list.
     pub fn users(&self, id: NodeId) -> &[NodeId] {
-        &self.users[id]
+        self.legacy_users.get(&id).unwrap_or(&self.users[id])
+    }
+
+    /// Every live node that references `id` in its args or kwargs, once each, in
+    /// ascending id order.
+    fn exact_users(&self, id: NodeId) -> &[NodeId] {
+        match self.users.get(id) {
+            Some(users) => users,
+            None => self.pending_users.get(&id).map_or(&[], Vec::as_slice),
+        }
     }
 
     pub fn live_nodes(&self) -> impl Iterator<Item = &IrNode> {
@@ -743,14 +855,10 @@ impl IrGraph {
         self.live_nodes().count()
     }
 
+    /// Every live node that references `id` in its args or kwargs, once each, in
+    /// ascending id order. O(users of `id`).
     pub fn live_user_ids(&self, id: NodeId) -> Vec<NodeId> {
-        self.live_nodes()
-            .filter(|node| {
-                node.args.iter().any(|arg| arg.contains_node(id))
-                    || node.kwargs.values().any(|arg| arg.contains_node(id))
-            })
-            .map(|node| node.id)
-            .collect()
+        self.exact_users(id).to_vec()
     }
 
     pub fn live_node_ids(&self) -> Vec<NodeId> {
@@ -916,15 +1024,20 @@ impl IrGraph {
                 arg.collect_node_ids(&mut stack);
             }
         }
-        let mut modified = false;
+        let mut erased = Vec::new();
         for node in &mut self.nodes {
             if node.alive && !reachable[node.id] {
                 node.alive = false;
-                modified = true;
+                erased.push(node.id);
             }
         }
+        for &id in &erased {
+            self.sync_operands(id, LegacyUsers::Updated);
+        }
+        let modified = !erased.is_empty();
         if modified {
-            self.rebuild_users();
+            self.reset_legacy_users();
+            self.check_users_after_edit();
         }
         modified
     }
@@ -962,23 +1075,30 @@ impl IrGraph {
     }
 
     pub fn has_live_users(&self, id: NodeId) -> bool {
-        !self.live_user_ids(id).is_empty()
+        !self.exact_users(id).is_empty()
     }
 
     pub fn single_live_user(&self, id: NodeId) -> Option<NodeId> {
-        let users = self.live_user_ids(id);
-        (users.len() == 1).then(|| users[0])
+        match self.exact_users(id) {
+            [user] => Some(*user),
+            _ => None,
+        }
     }
 
     pub fn live_call_function_users(&self, id: NodeId) -> Vec<NodeId> {
-        self.live_user_ids(id)
-            .into_iter()
+        self.exact_users(id)
+            .iter()
+            .copied()
             .filter(|&user_id| self.nodes[user_id].op == NodeOp::CallFunction)
             .collect()
     }
 
+    /// Live getitem nodes whose first arg is `id`, in ascending id order, with their
+    /// index arg (default 0).
     pub fn live_getitem_users(&self, id: NodeId) -> Vec<(NodeId, i64)> {
-        self.live_nodes()
+        self.exact_users(id)
+            .iter()
+            .map(|&user_id| &self.nodes[user_id])
             .filter(|node| node.is_getitem())
             .filter(|node| node.first_node_arg() == Some(id))
             .map(|node| (node.id, node.arg_int_or(1, 0)))
@@ -1005,75 +1125,62 @@ impl IrGraph {
 
     /// Replace all references to `old_id` with `new_id` in args across the graph.
     pub fn replace_all_uses(&mut self, old_id: NodeId, new_id: NodeId) {
-        fn replace_in_arg(arg: &mut IrArg, old: NodeId, new: NodeId) -> bool {
-            match arg {
-                IrArg::Node(id) if *id == old => {
-                    *id = new;
-                    true
+        // Every live node that references `old_id` is in its exact user list. The old
+        // code rewrote every live node, which changes the same set.
+        let rewired = self.users[old_id].clone();
+        if old_id == new_id {
+            return;
+        }
+        for &user_id in &rewired {
+            let node = &mut self.nodes[user_id];
+            for arg in node.args.iter_mut().chain(node.kwargs.values_mut()) {
+                replace_node_in_arg(arg, old_id, new_id);
+            }
+        }
+        // The old cache moved its list for `old_id` onto the end of the list for
+        // `new_id`, skipping ids already there. Read both before the exact lists change.
+        // The list for `new_id` needs an overlay entry if the move appends to it or the
+        // exact list changes under it.
+        let moved = self
+            .legacy_users
+            .remove(&old_id)
+            .unwrap_or_else(|| self.users[old_id].clone());
+        let pin_new = !moved.is_empty() || (!rewired.is_empty() && new_id < self.users.len());
+        let legacy_new = pin_new.then(|| {
+            self.legacy_users
+                .get(&new_id)
+                .unwrap_or(&self.users[new_id])
+                .clone()
+        });
+        for &user_id in &rewired {
+            self.sync_operands(user_id, LegacyUsers::Updated);
+        }
+        if let Some(mut list) = legacy_new {
+            for user_id in moved {
+                if !list.contains(&user_id) {
+                    list.push(user_id);
                 }
-                IrArg::List(items) => {
-                    let mut changed = false;
-                    for item in items {
-                        changed |= replace_in_arg(item, old, new);
-                    }
-                    changed
-                }
-                _ => false,
             }
+            self.legacy_users.insert(new_id, list);
         }
-        for node in &mut self.nodes {
-            if !node.alive {
-                continue;
-            }
-            for arg in &mut node.args {
-                replace_in_arg(arg, old_id, new_id);
-            }
-            for arg in node.kwargs.values_mut() {
-                replace_in_arg(arg, old_id, new_id);
-            }
-        }
-        // Update users: move old's users to new
-        let old_users = std::mem::take(&mut self.users[old_id]);
-        for &user_id in &old_users {
-            if !self.users[new_id].contains(&user_id) {
-                self.users[new_id].push(user_id);
-            }
-        }
+        self.check_users_after_edit();
     }
 
     /// Replace uses of `old_id` with `new_id` in a single user node.
     pub fn replace_input_use(&mut self, user_id: NodeId, old_id: NodeId, new_id: NodeId) -> bool {
-        fn replace_in_arg(arg: &mut IrArg, old: NodeId, new: NodeId) -> bool {
-            match arg {
-                IrArg::Node(id) if *id == old => {
-                    *id = new;
-                    true
-                }
-                IrArg::List(items) => {
-                    let mut changed = false;
-                    for item in items {
-                        changed |= replace_in_arg(item, old, new);
-                    }
-                    changed
-                }
-                _ => false,
-            }
-        }
-
         let mut changed = false;
         if let Some(node) = self.nodes.get_mut(user_id) {
             if !node.alive {
                 return false;
             }
-            for arg in &mut node.args {
-                changed |= replace_in_arg(arg, old_id, new_id);
-            }
-            for arg in node.kwargs.values_mut() {
-                changed |= replace_in_arg(arg, old_id, new_id);
+            for arg in node.args.iter_mut().chain(node.kwargs.values_mut()) {
+                changed |= replace_node_in_arg(arg, old_id, new_id);
             }
         }
         if changed {
-            self.rebuild_users();
+            self.sync_operands(user_id, LegacyUsers::Updated);
+            self.reset_legacy_users();
+            self.check_users_after_edit();
         }
         changed
     }
@@ -1098,6 +1205,9 @@ impl IrGraph {
     /// Mark a node as dead. Conversion and structural rebuilds skip dead nodes.
     pub fn erase(&mut self, id: NodeId) {
         self.nodes[id].alive = false;
+        // The old cache kept the erased node in its operands' user lists.
+        self.sync_operands(id, LegacyUsers::Untouched);
+        self.check_users_after_edit();
     }
 
     /// Replace all uses of `old_id` with `new_id`, then erase `old_id`.
@@ -1128,10 +1238,6 @@ impl IrGraph {
         meta: NodeMeta,
     ) -> NodeId {
         let id = self.nodes.len();
-        for arg in &args {
-            collect_users_from_arg(arg, id, &mut self.users);
-        }
-        self.users.push(Vec::new());
         self.name_to_id.insert(name.clone(), id);
         self.nodes.push(IrNode {
             id,
@@ -1144,11 +1250,156 @@ impl IrGraph {
             tensor: None,
             alive: true,
         });
+        self.users
+            .push(self.pending_users.remove(&id).unwrap_or_default());
+        self.operands.push(Vec::new());
+        self.sync_operands(id, LegacyUsers::Updated);
+        // The old cache appended `id` to the list of each operand below `id`, as the
+        // exact lists just did (`id` is the largest id), and started an empty list for
+        // `id`. Only overlay entries and a non-empty list for `id` need fixing.
+        for &operand in &self.operands[id] {
+            if operand < id {
+                if let Some(list) = self.legacy_users.get_mut(&operand) {
+                    if !list.contains(&id) {
+                        list.push(id);
+                    }
+                }
+            }
+        }
+        if !self.users[id].is_empty() {
+            self.legacy_users.insert(id, Vec::new());
+        }
+        self.check_users_after_edit();
         id
     }
 
-    fn rebuild_users(&mut self) {
+    /// Recompute every user list from scratch in O(nodes + references). Edits through
+    /// the graph methods keep the lists current; this is for bulk in-place edits. Like
+    /// the old full rebuild, it resets `users(id)` to the exact lists.
+    pub(crate) fn rebuild_users(&mut self) {
         self.users = build_user_edges(&self.nodes);
+        self.operands = self.nodes.iter().map(node_operands).collect();
+        self.pending_users.clear();
+        for (user_id, operands) in self.operands.iter().enumerate() {
+            for &operand in operands
+                .iter()
+                .filter(|&&operand| operand >= self.nodes.len())
+            {
+                self.pending_users.entry(operand).or_default().push(user_id);
+            }
+        }
+        self.reset_legacy_users();
+        self.check_users_after_edit();
+    }
+
+    /// Mark an edit that rebuilt every user list in the old code, which made
+    /// `users(id)` exact again.
+    fn reset_legacy_users(&mut self) {
+        if !self.legacy_users.is_empty() {
+            // A fresh map, not `clear()`: clearing keeps a large table to sweep again.
+            self.legacy_users = HashMap::new();
+        }
+    }
+
+    /// Bring the user lists in line with `id`'s current args and kwargs (none if `id` is
+    /// dead), touching only the lists of operands that were added or dropped.
+    fn sync_operands(&mut self, id: NodeId, legacy: LegacyUsers) {
+        let current = node_operands(&self.nodes[id]);
+        let recorded = std::mem::take(&mut self.operands[id]);
+        for &operand in &recorded {
+            if current.binary_search(&operand).is_err() {
+                self.record_use(operand, id, false, legacy);
+            }
+        }
+        for &operand in &current {
+            if recorded.binary_search(&operand).is_err() {
+                self.record_use(operand, id, true, legacy);
+            }
+        }
+        self.operands[id] = current;
+    }
+
+    /// Add `user` to (or drop it from) the exact user list of `operand`.
+    fn record_use(&mut self, operand: NodeId, user: NodeId, used: bool, legacy: LegacyUsers) {
+        let Some(list) = self.users.get_mut(operand) else {
+            let pending = self.pending_users.entry(operand).or_default();
+            if used {
+                insert_sorted(pending, user);
+            } else {
+                remove_sorted(pending, user);
+                if pending.is_empty() {
+                    self.pending_users.remove(&operand);
+                }
+            }
+            return;
+        };
+        if legacy == LegacyUsers::Untouched {
+            self.legacy_users
+                .entry(operand)
+                .or_insert_with(|| list.clone());
+        }
+        if used {
+            insert_sorted(list, user);
+        } else {
+            remove_sorted(list, user);
+        }
+    }
+
+    /// Test builds check the user index against a from-scratch rebuild after each edit.
+    fn check_users_after_edit(&self) {
+        #[cfg(test)]
+        if CHECK_USERS_AFTER_EDIT.with(std::cell::Cell::get) {
+            self.assert_users_consistent();
+        }
+    }
+
+    /// Assert that the incremental user index matches a from-scratch rebuild.
+    #[cfg(test)]
+    pub(crate) fn assert_users_consistent(&self) {
+        assert_eq!(
+            self.users,
+            build_user_edges(&self.nodes),
+            "incremental user lists differ from a rebuild"
+        );
+        assert_eq!(self.operands.len(), self.nodes.len());
+        let mut pending: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for node in &self.nodes {
+            let operands = node_operands(node);
+            for &operand in operands
+                .iter()
+                .filter(|&&operand| operand >= self.nodes.len())
+            {
+                pending.entry(operand).or_default().push(node.id);
+            }
+            assert_eq!(
+                self.operands[node.id], operands,
+                "recorded operands of node {} are stale",
+                node.id
+            );
+        }
+        assert_eq!(
+            self.pending_users, pending,
+            "forward-reference users are stale"
+        );
+        assert!(self.legacy_users.keys().all(|&id| id < self.nodes.len()));
+    }
+}
+
+/// Rewrite every reference to `old` in `arg` (at any list depth) to `new`.
+fn replace_node_in_arg(arg: &mut IrArg, old: NodeId, new: NodeId) -> bool {
+    match arg {
+        IrArg::Node(id) if *id == old => {
+            *id = new;
+            true
+        }
+        IrArg::List(items) => {
+            let mut changed = false;
+            for item in items {
+                changed |= replace_node_in_arg(item, old, new);
+            }
+            changed
+        }
+        _ => false,
     }
 }
 
@@ -1811,6 +2062,9 @@ pub fn run_ir_pipeline(
 
     (any_modified, graph, effects)
 }
+
+#[cfg(test)]
+mod users_tests;
 
 #[cfg(test)]
 mod tests {
