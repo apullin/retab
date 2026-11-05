@@ -35,33 +35,22 @@ ExecuTorch and torch helpers.
 
 ## Rust TOSA dependency
 
-[../Cargo.toml](../Cargo.toml) still declares:
+[../Cargo.toml](../Cargo.toml) pins [`tosa-rs`](https://github.com/apullin/tosa-rs)
+by git revision (tag v0.2.0). It supplies the TOSA 1.0/1.1 schema types and
+the generated FlatBuffers API, committed in that repository, so building RETAB
+needs no `flatc`. Run `cargo fetch` once if later builds must work offline.
+
+To edit RETAB and a local tosa-rs checkout together, override the dependency in
+an untracked `.cargo/config.toml` (ignored by Git):
 
 ```toml
-tosa-rs = { path = "../vendor/tosa-rs" }
+[patch."https://github.com/apullin/tosa-rs"]
+tosa-rs = { path = "/path/to/tosa-rs" }
 ```
 
-Supply that tree at `$RETAB_ROOT/../vendor/tosa-rs` before building. It is
-outside this Git repository, so a RETAB clone alone does not provide the Rust
-TOSA dependency. The checked-in manifest does not identify an immutable
-`tosa-rs` revision; this document therefore does not assert a source commit.
-
-The dependency supplies the TOSA schema types and generated API used by
-RETAB. Its `build.rs` runs `flatc`, which must be version 25 or newer. On
-macOS, put Homebrew first:
-
-```bash
-export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$PATH"
-flatc --version
-```
-
-Conda's `flatc` 24 generates an incompatible size-field API. RETAB's build
-script checks the supplied serializer source for the matching size-field
-patch; see [VENDOR_PATCHES.md](VENDOR_PATCHES.md).
-
-The Rust `flatbuffers` runtime is `24.12.23` in `Cargo.lock`. This is separate
-from the Python `flatbuffers==25.2.10` package and the `flatc` >= 25 build tool.
-Do not infer a Cargo runtime version from the Python stack table.
+The Rust `flatbuffers` runtime is pinned to `25.2.10` in Cargo.toml, the same
+version tosa-rs uses. This is separate from the Python `flatbuffers==25.2.10`
+package; do not infer one from the other.
 
 ## Existing source-checkout helpers
 

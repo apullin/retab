@@ -107,6 +107,37 @@ and erasure methods. Rewrite passes retain raw target strings, with shared
 classification in `fx_target.rs`; the later serializer graph has typed
 `OpTarget` values.
 
+Linear follows rc4's DecomposeLinearPass: the rows go in the width of a 1x1
+convolution (`view [1, 1, rows, Ci]`, `permute(0, 3, 1, 2)`, conv,
+`permute(0, 2, 3, 1)`, `view`), so Vela never sees a batch of rows. Just
+before the layout pass, `fx_cancel_views_around_unary_ir.rs` turns
+`view(f(view(x)))` into `f(x)` when the outer view restores `x`'s shape and
+`f` is a per-tensor pointwise op, such as the activation between two Linears.
+
+## Layout
+
+RETAB records layout as a `tosa_dim_order` on each node's metadata rather
+than as explicit permute nodes. `IrToTosaMemoryFormatPass`
+([../src/fx_memory_format_ir.rs](../src/fx_memory_format_ir.rs)) gives rank-4
+and higher tensors a channels-last order when the graph has a spatial op, and
+keeps graphs without one logical end to end. It inserts TRANSPOSEs at graph
+inputs and outputs and around reshapes that change the channel axis, and it
+rewrites user permutes to act on the physical layout. The serializer reads the
+orders: constants are written permuted, and output shapes follow them.
+
+Layout islands are an interim rule until rc4's layout design is ported (Linear
+APU-135). A `permute(0, 2, 3, 1)` of a channels-last tensor, or a reshape of
+data that is already in logical order, opens an island. Its ops keep the
+identity order until the permute that restores channels-last, or until the data
+drops below rank 4. Both permutes then become identities. An island only forms
+when it is closed: no path may reach the graph output, a spatial op or control
+flow, and every rank-4 input must come from the island or from constants that
+only islands read.
+
+`serialize/transpose_peephole.rs` cleans up each block after emission. It drops
+identity TRANSPOSEs and same-shape RESHAPEs, cancels inverse TRANSPOSE pairs,
+and turns TRANSPOSEs that only move size-1 axes into RESHAPEs.
+
 ## Metadata and constants
 
 [../src/fx_meta.rs](../src/fx_meta.rs) owns `TensorFacts`, `NodeMeta`,
@@ -137,8 +168,9 @@ operation targets through `ingest/target_map.rs`.
 where a control-flow region's block signature requires them.
 `apply_effects()` and its placeholder-preserving variant apply the deferred
 effect batches. `ingest/finalize.rs` owns `finalize_converted_graph()`.
-`prefix_graph()` updates child node names, region references, and tensor
-store keys together.
+`suffix_graph()` gives a region's nodes and tensor-store keys stock's
+`<name>_<region>` names, and qualifies the region names its COND_IF and
+WHILE_LOOP ops reference as `<region>__<child>`.
 
 Conversion must preserve graph topology, runtime-versus-constant input
 classification, tensor-store keys, region names, and lifted constants from
@@ -154,12 +186,14 @@ entry point. Its implementation is split by responsibility:
 | `control_flow/metadata.rs` | Pre-pass qparam snapshots, parent-to-child propagation, and submodule metadata passes. |
 | `control_flow/contracts.rs` | Parent/child boundary contracts and carried-output compatibility. |
 | `control_flow/assembly.rs` | Conversion, naming, and assembly of nested serializer regions. |
-| `control_flow/captured_conv.rs` | Captured convolution handling for child regions. |
+| `control_flow/captured_conv.rs` | Conv weights and biases a cond branch captures from an enclosing graph, rewritten as branch-local constants (rc4's `_rewrite_weight` and `_rewrite_control_flow_bias`). |
 | `serialize/visitors/control_flow.rs` | Emit TOSA control-flow operations and region references. |
 
 Cond outputs follow the parent-observed boundary contract. While
 loop-carried outputs follow the corresponding loop-carried input contract.
-These contracts are applied to Rust IR before region conversion.
+These contracts are applied to Rust IR before region conversion. Regions are
+emitted in stock's pre-order: cond branches as `[1, 2]`, while loops as
+`[0, 1]`, each child before the next sibling.
 
 ## TOSA serialization
 

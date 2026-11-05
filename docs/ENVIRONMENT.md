@@ -60,7 +60,7 @@ them later in the same process does not refresh the cached flags.
 
 | Variable | Read location | Effect |
 | --- | --- | --- |
-| `CARGO_MANIFEST_DIR` | [build.rs](../build.rs): `main`, using `env::var`; `src/control_flow.rs`: the compile-time `option_env!` in `active_source_has_no_legacy_python_boundary_symbols` | Required Cargo-provided crate root for the build guard, which locates `../vendor/tosa-rs/src/serialize.rs`. The Rust invariant test also uses it to locate source files. |
+| `CARGO_MANIFEST_DIR` | `src/control_flow.rs`: the compile-time `option_env!` in `active_source_has_no_legacy_python_boundary_symbols` | Cargo-provided crate root; the Rust invariant test uses it to locate source files. |
 | `VIRTUAL_ENV` | [scripts/_common.sh](../scripts/_common.sh): `resolve_venv_dir` | Selects an activated existing environment when `--venv` is absent. An explicit `--venv` wins. Missing both is an error; helpers never create a venv implicitly. `build_retab.sh` exports the selected value for maturin. |
 | `EXECUTORCH_SRC` | `scripts/_common.sh`: `resolve_executorch_src` | Selects the source checkout for the source-overlay helpers when `--source`/`--executorch-src` is absent. Missing both is an error. The stock-wheel setup does not need it. |
 | `RETAB_TORCH_PACKAGES` | [scripts/install_executorch.sh](../scripts/install_executorch.sh) | Whitespace-separated uv install arguments. Default: `torch torchvision torchao`. This legacy install helper does not pin the tested stack by default. |

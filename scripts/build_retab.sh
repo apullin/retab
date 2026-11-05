@@ -47,7 +47,6 @@ uv pip install --python "${python_bin}" "maturin>=1.16,<2"
   export VIRTUAL_ENV="${venv_dir}"
   export PATH="/opt/homebrew/bin:${HOME}/.cargo/bin:${venv_dir}/bin:${PATH}"
   unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER
-  require_flatc
   "${venv_dir}/bin/maturin" develop --release --locked
 )
 

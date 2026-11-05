@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 flatbuffers = "25.2.10"
-tosa-rs = { path = "../../../rust-tosa" }  # APU-126: temporary, until tosa-rs is tagged; then a git rev
+tosa-rs = { git = "https://github.com/apullin/tosa-rs", rev = "7f061363007936059ad9cd45c6c3be426fbac1f4" }  # v0.2.0
 pyo3 = { version = "0.27.2", features = ["extension-module"] }
 smallvec = "1.13"
 slotmap = "1"

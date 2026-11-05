@@ -21,10 +21,10 @@ Python stack is:
 | tosa-tools | `2026.5.0` |
 | flatbuffers (Python) | `25.2.10` |
 
-Cargo still uses the local `tosa-rs` dependency at
-`$RETAB_ROOT/../vendor/tosa-rs`. Its build requires `flatc` >= 25. The Rust
-FlatBuffers runtime is locked separately in `Cargo.lock`; the Python package
-version above is not a Rust dependency pin. See
+Cargo fetches [`tosa-rs`](https://github.com/apullin/tosa-rs) v0.2.0 by git
+revision. It ships its generated FlatBuffers code, so building RETAB needs no
+`flatc`. The Rust FlatBuffers runtime is locked separately in `Cargo.lock`; the
+Python package version above is not a Rust dependency pin. See
 [docs/COMPANION_REPOS.md](docs/COMPANION_REPOS.md) and
 [compat/executorch.toml](compat/executorch.toml) for compatibility details.
 
@@ -64,10 +64,8 @@ counts by reason in the current process.
 - A stable Rust toolchain.
 - Python >= 3.10; the tested environment uses Python 3.12.
 - [uv](https://docs.astral.sh/uv/).
-- The `tosa-rs` tree required by Cargo, including the compatibility patch
-  described in [docs/VENDOR_PATCHES.md](docs/VENDOR_PATCHES.md).
-- `flatc` >= 25. On macOS, Homebrew's `flatc` must come first on `PATH`;
-  conda's `flatc` 24 breaks `tosa-rs` code generation.
+- Network access for the first `cargo build`, which fetches `tosa-rs` from
+  GitHub (`cargo fetch` once to build offline afterwards).
 
 ### Create an environment explicitly
 

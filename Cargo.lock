@@ -261,7 +261,8 @@ dependencies = [
 
 [[package]]
 name = "tosa-rs"
-version = "0.1.0"
+version = "0.2.0"
+source = "git+https://github.com/apullin/tosa-rs?rev=7f061363007936059ad9cd45c6c3be426fbac1f4#7f061363007936059ad9cd45c6c3be426fbac1f4"
 dependencies = [
  "flatbuffers",
  "serde",
