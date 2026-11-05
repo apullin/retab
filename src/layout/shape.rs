@@ -16,25 +16,27 @@
 //! - **Shape comes from the operands**, with torch's semantics for each op,
 //!   including the argument checks fake execution (or rc4's later retrace)
 //!   would make.
-//! - **Dtype follows the producer.** Fake execution re-derives dtypes with
-//!   torch's promotion rules, and moving a copy never changes an operand's
-//!   dtype, so in rc4 a crossed node keeps the dtype it had. RETAB's IR differs
-//!   from torch on purpose in places: quantized table ops such as `aten.sigmoid`
-//!   keep integer vals and lower to a deferred TABLE (`fx_insert_table_ops_ir`),
-//!   and integer accumulators such as `sum` carry `torch.int32` vals without a
-//!   `dtype` kwarg (`fx_insert_int32_rescale_ir`). torch's rules (int to float
-//!   for sigmoid, int64 for an integer sum) would change dtypes a move cannot
-//!   change, so copies, unary ops and reductions take their input's dtype;
-//!   multi-operand ops promote their value operands with torch's rules, which
-//!   is the identity when they agree, as TOSA requires; comparisons, `isinf`,
-//!   `isnan` and logical ops give `torch.bool`; RESCALE and dtype casts take
-//!   their dtype argument.
-//! - **Moved copies lose stale qparams.** A view or permute that moved no longer
-//!   sits where its qparams were recorded; once it crosses a RESCALE, say, its
-//!   output qparams describe the other side. Its refreshed meta drops them, as
-//!   rc4's `create_node` drops them from copies it makes out of another node's
-//!   meta (`backends/arm/_passes/arm_pass_utils.py:174-182`). Crossed ops keep
-//!   theirs: a view or permute does not change the values they see.
+//! - **Dtype follows the producer.** A view or permute copy takes its input's
+//!   dtype, as `refresh_permute_view_meta` does (`input_val.new_empty`). Any
+//!   other node keeps the dtype it records: fake execution re-derives dtypes
+//!   with torch's promotion rules, and a layout move never changes an operand's
+//!   dtype, so in rc4 a crossed node keeps the dtype it had. RETAB's IR also
+//!   differs from torch on purpose in places: quantized table ops such as
+//!   `aten.sigmoid` keep integer vals and lower to a deferred TABLE
+//!   (`fx_insert_table_ops_ir`), integer accumulators such as `sum` carry
+//!   `torch.int32` vals without a `dtype` kwarg (`fx_insert_int32_rescale_ir`),
+//!   and `div.Tensor` of integers records the float result. Re-deriving would
+//!   change dtypes a move cannot change. [`infer_facts`] derives a dtype for a
+//!   node that has none: copies, unary ops and reductions take their input's
+//!   dtype; multi-operand ops promote their value operands with torch's rules,
+//!   which is the identity when they agree, as TOSA requires; comparisons,
+//!   `isinf`, `isnan` and logical ops give `torch.bool`; RESCALE and dtype casts
+//!   take their dtype argument.
+//! - **Qparams stay.** rc4 assigns only `meta["val"]` when it refreshes a node,
+//!   and the propagation passes copy meta wholesale when they clone a copy
+//!   (`backends/transforms/propagate_view_copy_permute_pass.py:878`,
+//!   `backends/arm/_passes/move_data_movement_ops_to_smaller_dtype_pass.py:136,155`),
+//!   so a moved view or permute keeps the qparams it had.
 //!
 //! Everything else in the meta is left alone, as rc4 assigns only
 //! `meta["val"]`. Layout facts in particular: explicit mode never writes them.
@@ -150,9 +152,9 @@ pub(crate) fn has_local_rule(target: &str) -> bool {
 /// Mirrors rc4's `_refresh_node_meta`
 /// (`backends/transforms/propagate_view_copy_permute_pass.py:164-192`): a node
 /// without input nodes is returned unchanged (`:165-166`), view and permute
-/// copies follow `refresh_permute_view_meta` (`:167-171`) and lose their qparams
-/// (see the module docs), and other ops get the facts fake execution would give
-/// (`:173-192`). Callers refresh in dependency order, as rc4 does: after moving
+/// copies follow `refresh_permute_view_meta` (`:167-171`), and other ops get the
+/// shape fake execution would give (`:173-192`) and keep their recorded dtype
+/// (see the module docs). Qparams are left alone. Callers refresh in dependency order, as rc4 does: after moving
 /// a copy up, the copy then the crossed nodes in reverse path order (`:560-567`);
 /// after moving it down, the crossed nodes in path order then the copy
 /// (`:912-919`).
@@ -162,10 +164,13 @@ pub(crate) fn refreshed_meta(graph: &IrGraph, id: NodeId) -> Result<NodeMeta, Sh
     if !has_input_nodes(node) {
         return Ok(meta);
     }
-    meta.set_tensor_facts(infer_facts(graph, id)?);
-    if is_layout_transform(&node.target) {
-        meta.clear_all_qparams();
+    let mut facts = infer_facts(graph, id)?;
+    if !is_layout_transform(&node.target) {
+        if let Some(dtype) = node.meta.val_dtype() {
+            facts.dtype = dtype.to_owned();
+        }
     }
+    meta.set_tensor_facts(facts);
     Ok(meta)
 }
 
@@ -1292,7 +1297,8 @@ mod tests {
     /// (`backends/arm/test/passes/test_move_data_movement_ops_to_smaller_dtype_pass.py`),
     /// rewired as `_move_after_rescale` does
     /// (`backends/arm/_passes/move_data_movement_ops_to_smaller_dtype_pass.py:120-137`).
-    /// The moved permute also drops its stale qparams; the RESCALE keeps its own.
+    /// Both keep their qparams: rc4 refreshes only the permute's val
+    /// (`refresh_permute_view_meta`) and copies the RESCALE's meta.
     #[test]
     fn permute_moved_after_a_narrowing_rescale() {
         let mut g = LayoutGraph::new();
@@ -1325,8 +1331,32 @@ mod tests {
             (g.shape(permute), g.dtype(permute)),
             (&[1, 3, 4, 2][..], I8)
         );
-        assert!(!g.graph().node(permute).meta.has_qparam_metadata());
+        assert!(g.graph().node(permute).meta.has_qparam_metadata());
         assert!(g.graph().node(rescale).meta.output_qparam().is_some());
+    }
+
+    /// A crossed op keeps the dtype it records, even where torch's promotion of
+    /// its operands would give another: a layout move cannot change a dtype.
+    #[test]
+    fn crossed_ops_keep_their_recorded_dtype() {
+        let mut g = LayoutGraph::new();
+        let a = g.typed_input("a", &[2, 3], I32);
+        let b = g.typed_input("b", &[2, 3], I32);
+        let div = g.call("aten.div.Tensor", vec![node(a), node(b)]);
+        g.output(&[div]);
+        g.graph_mut()
+            .node_mut(div)
+            .meta
+            .set_tensor_facts(TensorFacts::new(vec![2, 3], "torch.float32"));
+
+        let a_t = g.permute(a, &[1, 0]);
+        let b_t = g.permute(b, &[1, 0]);
+        g.rewire(div, a, a_t);
+        g.rewire(div, b, b_t);
+        g.refresh(div);
+
+        assert_eq!((g.shape(div), g.dtype(div)), (&[3, 2][..], "torch.float32"));
+        assert_eq!(g.dtype(a_t), I32);
     }
 
     /// Port of rc4's `test_moves_permute_before_widening_rescale`
