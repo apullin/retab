@@ -16,7 +16,7 @@ use crate::fx_remove_noop_ir;
 use crate::fx_replace_inf_values_ir;
 use crate::fx_replace_scalar_with_tensor_ir;
 use crate::fx_rewrite_squeeze_ir;
-use crate::pipeline_config::{PipelineConfig, SoftmaxDecompositionConfig};
+use crate::pipeline_config::{LayoutMode, PipelineConfig, SoftmaxDecompositionConfig};
 
 /// Build the lowering pipeline over the persistent IrGraph.
 pub fn build_main_pipeline(config: &PipelineConfig) -> Vec<crate::fx_ir::PipelineStep> {
@@ -28,9 +28,13 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
 
     let mut steps = vec![
         // -- Early decompositions (before fold_qdq) --
-        Ir(Box::new(
-            crate::fx_annotate_output_dim_order_ir::IrAnnotateOutputDimOrderPass,
-        )),
+        // P2 of APU-135 gives explicit mode IrNormalizeDelegateIOLayout here, rc4's first
+        // pass (backends/arm/_passes/arm_pass_manager.py:544).
+        match config.layout {
+            LayoutMode::DimOrder | LayoutMode::Explicit => Ir(Box::new(
+                crate::fx_annotate_output_dim_order_ir::IrAnnotateOutputDimOrderPass,
+            )),
+        },
         Ir(Box::new(
             crate::fx_fuse_batch_norm_ir::IrFuseBatchNorm2dPass,
         )),
@@ -248,9 +252,13 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         )),
         // Copy lowering compares logical shapes and emits views/repeats for layout conversion.
         Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)),
-        Ir(Box::new(
-            crate::fx_memory_format_ir::IrToTosaMemoryFormatPass,
-        )),
+        // P2 of APU-135 gives explicit mode rc4's phase-6 block here
+        // (backends/arm/_passes/arm_pass_manager.py:715-749).
+        match config.layout {
+            LayoutMode::DimOrder | LayoutMode::Explicit => Ir(Box::new(
+                crate::fx_memory_format_ir::IrToTosaMemoryFormatPass,
+            )),
+        },
         Ir(Box::new(crate::fx_rewrite_pad_ir::IrRewritePadPass)),
         Ir(Box::new(
             crate::fx_rewrite_cat_slice_ir::IrRewriteCatSlicePass,
@@ -448,6 +456,33 @@ mod tests {
             .iter()
             .all(|node| node.target == "backend.tosa.IDENTITY.default"));
         assert_eq!(identities[0].arg_node(0), identities[1].arg_node(0));
+    }
+
+    #[test]
+    fn layout_modes_build_the_same_parent_and_region_pipelines() {
+        let builders: [fn(&PipelineConfig) -> Vec<PipelineStep>; 3] = [
+            build_main_pipeline,
+            build_ir_cond_submodule_pipeline,
+            build_ir_while_submodule_pipeline,
+        ];
+        for spec in [
+            "TOSA-1.0+FP",
+            "TOSA-1.0+INT+int16+int4+u55",
+            "TOSA-1.0+INT+int16+int4+cf",
+        ] {
+            let dim_order = PipelineConfig::from_tosa_spec(spec);
+            let explicit = PipelineConfig {
+                layout: LayoutMode::Explicit,
+                ..dim_order.clone()
+            };
+            for build in builders {
+                let names = pass_names(build(&dim_order));
+                for pass in ["IrAnnotateOutputDimOrder", "IrToTosaMemoryFormat"] {
+                    assert!(names.iter().any(|name| name == pass), "{spec}: {pass}");
+                }
+                assert_eq!(pass_names(build(&explicit)), names, "{spec}");
+            }
+        }
     }
 
     #[test]

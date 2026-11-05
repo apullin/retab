@@ -21,6 +21,38 @@ pub enum SdpaSafeSoftmaxGuardPolicy {
     Auto,
 }
 
+/// The layout model the pipeline lowers with. APU-135 runs the two side by side until
+/// explicit mode reaches parity, then deletes `DimOrder`.
+///
+/// - `DimOrder` (RETAB's model): nodes keep logical shapes, and `IrToTosaMemoryFormat`
+///   gives them a channels-last `tosa_dim_order` that the serializer applies.
+/// - `Explicit` (rc4's model): a node's val is its TOSA shape, and every layout change
+///   is a permute node, lowered one-to-one to TRANSPOSE
+///   (`backends/arm/_passes/aten_to_tosa_data_layout.py:60-68`).
+///
+/// Until P2 ports the explicit-mode passes, both modes build the same pipeline.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LayoutMode {
+    #[default]
+    DimOrder,
+    Explicit,
+}
+
+impl std::str::FromStr for LayoutMode {
+    type Err = String;
+
+    /// Parse the pipeline-config `layout` value.
+    fn from_str(name: &str) -> Result<Self, String> {
+        match name {
+            "dim_order" => Ok(Self::DimOrder),
+            "explicit" => Ok(Self::Explicit),
+            _ => Err(format!(
+                "unknown layout config: {name:?} (expected \"dim_order\" or \"explicit\")"
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QuantizeInfConfig {
     pub neg_inf: f64,
@@ -52,6 +84,10 @@ pub struct PipelineConfig {
     /// Permutes that Vela can't run on U55 (rc4's probe, run in Python); split by
     /// `IrDecomposePermuteForU55Pass`.
     pub u55_split_permutes: std::collections::HashSet<String>,
+    /// Pipeline-config key `layout`, which Python sets from `RETAB_LAYOUT`. The parent's
+    /// config is stashed with its IR, so `ingest_and_serialize` (ingest and the
+    /// serializer) gets the mode the passes ran in.
+    pub layout: LayoutMode,
 }
 
 fn required<'py, T: FromPyObjectOwned<'py>>(config: &Bound<'py, PyDict>, key: &str) -> PyResult<T> {
@@ -83,6 +119,7 @@ impl PipelineConfig {
             quantize_inf: QuantizeInfConfig::default(),
             sdpa_safe_softmax_guard: SdpaSafeSoftmaxGuardPolicy::Preserve,
             u55_split_permutes: Default::default(),
+            layout: LayoutMode::default(),
         }
     }
 
@@ -126,6 +163,12 @@ impl PipelineConfig {
         };
         if let Some(names) = config.get_item("u55_split_permutes")? {
             result.u55_split_permutes = names.extract::<Vec<String>>()?.into_iter().collect();
+        }
+        if let Some(layout) = config.get_item("layout")? {
+            result.layout = layout
+                .extract::<String>()?
+                .parse()
+                .map_err(PyValueError::new_err)?;
         }
         result.validate().map_err(PyValueError::new_err)?;
         Ok(result)
@@ -200,5 +243,27 @@ mod tests {
         config.sdpa_safe_softmax_guard = SdpaSafeSoftmaxGuardPolicy::Preserve;
         config.leaky_relu = LeakyReluLoweringConfig::Table;
         assert!(config.validate().unwrap_err().contains("leaky_relu=TABLE"));
+    }
+
+    #[test]
+    fn layout_defaults_to_dim_order_and_parses_only_exact_names() {
+        for spec in ["TOSA-1.0+INT+int16+int4+u55", "TOSA-1.0+INT+int16+int4+cf"] {
+            let config = PipelineConfig::from_tosa_spec(spec);
+            assert_eq!(config.layout, LayoutMode::DimOrder);
+            let explicit = PipelineConfig {
+                layout: LayoutMode::Explicit,
+                ..config
+            };
+            assert!(explicit.validate().is_ok());
+        }
+        assert_eq!("dim_order".parse(), Ok(LayoutMode::DimOrder));
+        assert_eq!("explicit".parse(), Ok(LayoutMode::Explicit));
+        for name in ["", "DIM_ORDER", "Explicit", "dim-order", " explicit"] {
+            let error = name.parse::<LayoutMode>().unwrap_err();
+            assert!(
+                error.starts_with(&format!("unknown layout config: {name:?}")),
+                "{error}"
+            );
+        }
     }
 }

@@ -29,7 +29,8 @@ pytestmark = [pytest.mark.native, pytest.mark.executorch]
         ("ethos-u85-256", "TOSA-1.0+INT+int16+int4+cf", "MASKED"),
     ],
 )
-def test_pipeline_config_from_ethosu_compile_spec(target, tosa_spec, softmax):
+def test_pipeline_config_from_ethosu_compile_spec(monkeypatch, target, tosa_spec, softmax):
+    monkeypatch.delenv("RETAB_LAYOUT", raising=False)
     compile_spec = EthosUCompileSpec(target)
     assert rp._build_pipeline_config(compile_spec) == {
         "tosa_spec": tosa_spec,
@@ -38,10 +39,27 @@ def test_pipeline_config_from_ethosu_compile_spec(target, tosa_spec, softmax):
         "leaky_relu": "DECOMPOSE",
         "quantize_inf": {"neg_inf": -256.0, "pos_inf": 255.0},
         "sdpa_safe_softmax_guard": "PRESERVE",
+        "layout": "dim_order",
     }
     assert not rp._has_non_default_pipeline_config(compile_spec)
     compile_spec._set_tosa_dev_mode(True)
     assert rp._build_pipeline_config(compile_spec)["tosa_dev_mode"] is True
+
+
+@pytest.mark.parametrize("layout", ["dim_order", "explicit"])
+def test_retab_layout_sets_the_layout_without_sending_graphs_to_stock(monkeypatch, layout):
+    monkeypatch.setenv("RETAB_LAYOUT", layout)
+    compile_spec = EthosUCompileSpec("ethos-u55-128")
+    program = torch.export.export(torch.nn.ReLU(), (torch.ones(2),))
+    assert rp._build_pipeline_config(compile_spec)["layout"] == layout
+    assert rp.stock_fallback_reason(program, compile_spec) is None
+
+
+@pytest.mark.parametrize("value", ["", "DIM_ORDER", "Explicit", "dim-order", " explicit"])
+def test_unknown_retab_layout_is_an_error(monkeypatch, value):
+    monkeypatch.setenv("RETAB_LAYOUT", value)
+    with pytest.raises(ValueError, match="RETAB_LAYOUT must be 'dim_order' or 'explicit'"):
+        rp._build_pipeline_config(EthosUCompileSpec("ethos-u55-128"))
 
 
 @pytest.mark.parametrize(
@@ -104,6 +122,35 @@ def test_native_entry_points_refuse_unported_policies(entry_point, field, value)
     config[field] = value
     with pytest.raises(ValueError, match=f"{field}={value}.*use stock preprocess"):
         getattr(_native, entry_point)(None, pipeline_config=config)
+
+
+@pytest.mark.parametrize(
+    "entry_point",
+    ["run_fx_passes", "run_fx_cond_passes", "run_fx_submodule_passes"],
+)
+def test_native_entry_points_refuse_unknown_layouts(entry_point):
+    config = rp._build_pipeline_config(EthosUCompileSpec("ethos-u55-128"))
+    config["layout"] = "nhwc"
+    with pytest.raises(ValueError, match='unknown layout config: "nhwc"'):
+        getattr(_native, entry_point)(None, pipeline_config=config)
+
+
+def test_layout_modes_lower_to_identical_tosa_until_explicit_mode_has_passes():
+    """Explicit mode builds the dim-order pipeline in P0; a missing key means dim_order."""
+    from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
+
+    program = torch.export.export(
+        torch.nn.Sequential(torch.nn.Conv2d(2, 4, 3), torch.nn.ReLU()),
+        (torch.ones(1, 2, 8, 8),),
+    ).run_decompositions()
+    config = rp._build_pipeline_config(TosaCompileSpec("TOSA-1.0+INT"))
+    del config["layout"]
+    tosa = []
+    for layout in [None, "dim_order", "explicit"]:
+        layout_config = config if layout is None else {**config, "layout": layout}
+        _native.run_fx_passes(program.graph_module, program, pipeline_config=layout_config)
+        tosa.append(_native.ingest_and_serialize())
+    assert tosa[0] and tosa[0] == tosa[1] == tosa[2]
 
 
 @pytest.mark.parametrize("recursive", [False, True])

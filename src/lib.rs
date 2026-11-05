@@ -425,3 +425,34 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(last_unused_inputs, m)?)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline_config::{LayoutMode, PipelineConfig};
+
+    #[test]
+    fn stashed_hierarchy_carries_the_layout_mode_to_serialization() {
+        let lowered = || {
+            (
+                fx_ir::IrGraph::empty(),
+                lowering_effects::LoweringEffectBatch::default(),
+            )
+        };
+        for layout in [LayoutMode::Explicit, LayoutMode::DimOrder] {
+            let config = PipelineConfig {
+                layout,
+                ..PipelineConfig::from_tosa_spec("TOSA-1.0+INT+cf")
+            };
+            stash_ir(Some(lowered()), config);
+            stash_submodule_ir(Some("true_graph".to_owned()), Some(lowered()));
+            let stashed = take_stashed_hierarchy();
+            assert!(stashed.parent.is_some());
+            assert!(stashed.submodules.contains_key("true_graph"));
+            assert_eq!(
+                stashed.pipeline_config.map(|config| config.layout),
+                Some(layout)
+            );
+        }
+    }
+}
