@@ -7,6 +7,8 @@
 
 #[allow(dead_code)]
 pub(crate) mod canonicalize;
+#[cfg(test)]
+mod canonicalize_upstream_tests;
 #[allow(dead_code)]
 pub(crate) mod ctx;
 #[allow(dead_code)]
