@@ -1200,6 +1200,14 @@ impl IrGraph {
             .collect()
     }
 
+    /// The names of [`Self::live_placeholder_ids`], in the same order.
+    pub fn live_placeholder_names(&self) -> Vec<String> {
+        self.live_nodes()
+            .filter(|node| node.op == NodeOp::Placeholder)
+            .map(|node| node.name.clone())
+            .collect()
+    }
+
     pub fn live_output_ids(&self) -> Vec<NodeId> {
         self.live_nodes()
             .filter(|node| node.op == NodeOp::Output)

@@ -33,10 +33,14 @@ pub fn build_main_pipeline(config: &PipelineConfig) -> Vec<crate::fx_ir::Pipelin
 /// where-mask tiling is off too (SELECT broadcasts the rank-matched mask), and so are
 /// the RETAB-only view cleanups in and after phase 6, while IrFuseCascadedViews still
 /// runs before phase 6 (APU-161). In a region (`!decompose_qdq`) explicit mode skips
-/// IrNormalizeDelegateIOLayout, which owns only the delegate's IO (critique A2), and
-/// its constants are `get_attr` nodes; a region conv's weight and bias captured from
-/// the parent are folded into region constants at serialization, after the boundary
-/// contracts (`layout::rewrite_conv`, `control_flow::captured_conv`; APU-135 S8).
+/// IrNormalizeDelegateIOLayout (critique A2): rc4 runs it on every region, where it
+/// does nothing because `_regularize_submodule` gives region IO the parent's contiguous
+/// post-pass vals, but RETAB imports a region from the original edge submodule, whose
+/// IO keeps the export's dim order, so the pass could permute region IO where rc4's
+/// leaves it. A region's constants are `get_attr` nodes; a region conv's weight and
+/// bias captured from the parent are folded into region constants at serialization,
+/// after the boundary contracts (`layout::rewrite_conv`, `control_flow::captured_conv`;
+/// APU-135 S8).
 fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx_ir::PipelineStep> {
     use crate::fx_ir::PipelineStep::{Effectful, Ir};
 
@@ -48,7 +52,7 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         LayoutMode::DimOrder => steps.push(Ir(Box::new(
             crate::fx_annotate_output_dim_order_ir::IrAnnotateOutputDimOrderPass,
         ))),
-        // rc4's first pass (APM:544).
+        // rc4's first pass (APM:544); parent only (critique A2, see above).
         LayoutMode::Explicit if !in_region => steps.push(Ir(Box::new(
             crate::layout::normalize_delegate_io::IrNormalizeDelegateIOLayoutPass,
         ))),
@@ -89,6 +93,7 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         // so the spec flag alone decides. U55 subsets never set it.
         Ir(Box::new(crate::fx_fold_qdq_ir::IrFoldQdqPass {
             preserve_partial_binary_tensor_qdq: config.support_float,
+            control_flow_lists_take_first_qparam: explicit,
         })),
         Ir(Box::new(
             crate::fx_fuse_consecutive_clamps_ir::IrFuseConsecutiveClampsPass,
@@ -782,7 +787,8 @@ mod tests {
     /// Explicit mode builds rc4's order (design §1, §4.1, critique A2, B9): the
     /// dim-order passes are gone, rc4's passes sit at their APM slots, and the
     /// phase-6 block replaces IrToTosaMemoryFormat. Regions get the same list without
-    /// IrNormalizeDelegateIOLayout.
+    /// IrNormalizeDelegateIOLayout, whose imported region IO can keep the export's
+    /// dim order (`control_flow` tests show why).
     #[test]
     fn explicit_mode_builds_rc4s_order_in_parent_and_region_pipelines() {
         for spec in [

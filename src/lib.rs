@@ -300,6 +300,29 @@ fn apply_pre_submodule_qparam_propagation_ir(
     })
 }
 
+/// Align each control-flow region's IO with the graph that invokes it
+/// (`control_flow::apply_boundary_contracts`). Explicit mode's captured_conv runs inside
+/// and can ask for a stock fallback: a captured weight that does not resolve to a
+/// constant, a bias that is not int32, or a while loop's capture. The pass pipelines'
+/// checks are behind us, so this returns that request's reason for the caller to raise
+/// (P2 critique B6). Dim-order mode's contracts request nothing.
+fn apply_control_flow_contracts(
+    ir: &mut fx_ir::IrGraph,
+    submodules: &mut BTreeMap<String, StashedPipeline>,
+    layout: pipeline_config::LayoutMode,
+) -> Result<(), String> {
+    let changed = control_flow::apply_boundary_contracts(ir, submodules, layout);
+    if crate::config::from_ir_debug_enabled() && changed > 0 {
+        eprintln!(
+            "[RETAB][cf-boundary-ir] applied {changed} parent/submodule boundary metadata update(s)"
+        );
+    }
+    match layout {
+        pipeline_config::LayoutMode::Explicit => stock_fallback::take().map_or(Ok(()), Err),
+        pipeline_config::LayoutMode::DimOrder => Ok(()),
+    }
+}
+
 fn ingest_and_serialize_tosa_pybytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
     let started = std::time::Instant::now();
     let profile = crate::config::profile_ingest_serialize_enabled();
@@ -317,19 +340,8 @@ fn ingest_and_serialize_tosa_pybytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
     let explicit = layout == pipeline_config::LayoutMode::Explicit;
     let has_control_flow = ir_has_control_flow(&ir);
     if has_control_flow {
-        let changed =
-            control_flow::apply_boundary_contracts(&mut ir, &mut stashed.submodules, layout);
-        if crate::config::from_ir_debug_enabled() && changed > 0 {
-            eprintln!(
-                "[RETAB][cf-boundary-ir] applied {changed} parent/submodule boundary metadata update(s)"
-            );
-        }
-    }
-    // Explicit mode can request a stock fallback at serialization time (its captured_conv
-    // runs inside the contracts and sends unresolvable captured weights and non-int32
-    // biases to stock), so check here as well as after the pass pipelines (P2 critique B6).
-    if explicit {
-        fail_on_stock_fallback_request()?;
+        apply_control_flow_contracts(&mut ir, &mut stashed.submodules, layout)
+            .map_err(|reason| PyRuntimeError::new_err(format!("RETAB_STOCK_FALLBACK: {reason}")))?;
     }
 
     let mut store = crate::store::TensorStore::new();
@@ -434,6 +446,96 @@ fn run_fx_passes(
     Ok(modified)
 }
 
+/// Why a region pipeline in `layout` must not join the stashed hierarchy, if it must
+/// not: the parent pipeline stashed for serialization ran the other layout mode (P2
+/// design §4.1, "Mixed modes"). One mode drives the whole hierarchy: the region
+/// pipelines, the boundary contracts, captured_conv, ingest and the serializer all take
+/// the stashed parent's.
+///
+/// Mixed modes cannot arise through `retab.preprocess`, the only caller that answers a
+/// `RETAB_STOCK_FALLBACK:` error: `_all_rust_preprocess` builds one pipeline config per
+/// delegate, hands that same dict to `run_fx_passes` and to every region entry point,
+/// and runs the regions only once `run_fx_passes` has stashed that delegate's parent.
+/// A mismatch therefore means a caller drove the native entry points with two configs.
+/// That is a bug, not an input stock could take, so it is a hard error: a stock fallback
+/// would hide it.
+fn mixed_layout_error(region: Option<&str>, layout: pipeline_config::LayoutMode) -> Option<String> {
+    let parent = STASHED_IR.with(|s| s.borrow().pipeline_config.as_ref().map(|c| c.layout))?;
+    (parent != layout).then(|| {
+        format!(
+            "control-flow region {} runs the {} layout, but the parent pipeline stashed for it \
+             ran {}: a delegate's parent and regions must share one pipeline config",
+            region.unwrap_or("<unnamed>"),
+            layout.as_str(),
+            parent.as_str()
+        )
+    })
+}
+
+/// Run a control-flow region's pipeline `steps` over `ir`, as `fx_ir::run_ir_pipeline`
+/// does.
+///
+/// Critique B2: a region's placeholders are its runtime inputs, which the boundary
+/// contracts and captured_conv pair with the invoking cond's or while loop's operands
+/// by position. A pass that added, dropped or reordered one would shift that pairing
+/// and miscompile silently. No explicit pass does so (region constants are `get_attr`
+/// nodes, `layout::ctx::GraphScope::Region`), so in explicit mode this checks that the
+/// pipeline kept them, names and order, and requests a stock fallback if it did not.
+/// Dim-order mode does not check.
+fn run_region_pipeline(
+    region: Option<&str>,
+    steps: &[fx_ir::PipelineStep],
+    ir: fx_ir::IrGraph,
+    layout: pipeline_config::LayoutMode,
+) -> (bool, fx_ir::IrGraph, lowering_effects::LoweringEffectBatch) {
+    let before =
+        (layout == pipeline_config::LayoutMode::Explicit).then(|| ir.live_placeholder_names());
+    let (modified, ir, effects) = fx_ir::run_ir_pipeline(steps, ir);
+    if let Some(before) = before {
+        let after = ir.live_placeholder_names();
+        if after != before {
+            stock_fallback::request(format!(
+                "region placeholders changed: region {}: the pipeline turned placeholders \
+                 {before:?} into {after:?}, which would shift the boundary operands",
+                region.unwrap_or("<unnamed>")
+            ));
+        }
+    }
+    (modified, ir, effects)
+}
+
+/// Run a control-flow region's pipeline, from `build`, and stash the resulting IrGraph
+/// for serialization.
+fn run_region_passes(
+    graph_module: &Bound<'_, PyAny>,
+    exported_program: Option<&Bound<'_, PyAny>>,
+    region_name: Option<String>,
+    pipeline_config: &Bound<'_, PyDict>,
+    build: fn(&pipeline_config::PipelineConfig) -> Vec<fx_ir::PipelineStep>,
+) -> PyResult<bool> {
+    let pipeline_config = pipeline_config::PipelineConfig::from_py(pipeline_config)?;
+    if let Some(error) = mixed_layout_error(region_name.as_deref(), pipeline_config.layout) {
+        return Err(PyRuntimeError::new_err(error));
+    }
+    let pipeline = build(&pipeline_config);
+    stock_fallback::take();
+    let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
+    let propagation_changed = apply_pre_submodule_qparam_propagation_ir(
+        region_name.as_deref(),
+        &mut initial_ir,
+        pipeline_config.layout,
+    );
+    let (modified, ir, effects) = run_region_pipeline(
+        region_name.as_deref(),
+        &pipeline,
+        initial_ir,
+        pipeline_config.layout,
+    );
+    ensure_retab_can_lower(Some(&ir), &effects)?;
+    stash_submodule_ir(region_name, Some((ir, effects)));
+    Ok(modified || propagation_changed > 0)
+}
+
 /// Run the while_loop submodule IR pipeline and stash the resulting IrGraph.
 #[pyfunction]
 #[pyo3(signature = (graph_module, exported_program=None, region_name=None, *, pipeline_config))]
@@ -443,19 +545,13 @@ fn run_fx_submodule_passes(
     region_name: Option<String>,
     pipeline_config: &Bound<'_, PyDict>,
 ) -> PyResult<bool> {
-    let pipeline_config = pipeline_config::PipelineConfig::from_py(pipeline_config)?;
-    let pipeline = fx_pipeline::build_ir_while_submodule_pipeline(&pipeline_config);
-    stock_fallback::take();
-    let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
-    let propagation_changed = apply_pre_submodule_qparam_propagation_ir(
-        region_name.as_deref(),
-        &mut initial_ir,
-        pipeline_config.layout,
-    );
-    let (modified, ir, effects) = fx_ir::run_ir_pipeline(&pipeline, initial_ir);
-    ensure_retab_can_lower(Some(&ir), &effects)?;
-    stash_submodule_ir(region_name, Some((ir, effects)));
-    Ok(modified || propagation_changed > 0)
+    run_region_passes(
+        graph_module,
+        exported_program,
+        region_name,
+        pipeline_config,
+        fx_pipeline::build_ir_while_submodule_pipeline,
+    )
 }
 
 /// Run the cond branch submodule IR pipeline and stash the resulting IrGraph.
@@ -467,19 +563,13 @@ fn run_fx_cond_passes(
     region_name: Option<String>,
     pipeline_config: &Bound<'_, PyDict>,
 ) -> PyResult<bool> {
-    let pipeline_config = pipeline_config::PipelineConfig::from_py(pipeline_config)?;
-    let pipeline = fx_pipeline::build_ir_cond_submodule_pipeline(&pipeline_config);
-    stock_fallback::take();
-    let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
-    let propagation_changed = apply_pre_submodule_qparam_propagation_ir(
-        region_name.as_deref(),
-        &mut initial_ir,
-        pipeline_config.layout,
-    );
-    let (modified, ir, effects) = fx_ir::run_ir_pipeline(&pipeline, initial_ir);
-    ensure_retab_can_lower(Some(&ir), &effects)?;
-    stash_submodule_ir(region_name, Some((ir, effects)));
-    Ok(modified || propagation_changed > 0)
+    run_region_passes(
+        graph_module,
+        exported_program,
+        region_name,
+        pipeline_config,
+        fx_pipeline::build_ir_cond_submodule_pipeline,
+    )
 }
 
 /// Runtime inputs of the last serialized main graph that no op consumes. Ethos-U
@@ -535,5 +625,117 @@ mod tests {
                 Some(layout)
             );
         }
+    }
+
+    /// P2 design §4.1: a region pipeline in the other layout mode than the stashed
+    /// parent's is rejected, with a hard error rather than a stock fallback (only a
+    /// caller driving the native entry points with two configs gets there). Without a
+    /// stashed parent there is nothing to compare.
+    #[test]
+    fn region_pipelines_must_run_the_stashed_parents_layout_mode() {
+        let config = |layout| PipelineConfig {
+            layout,
+            ..PipelineConfig::from_tosa_spec("TOSA-1.0+INT+cf")
+        };
+        take_stashed_hierarchy();
+        for layout in [LayoutMode::DimOrder, LayoutMode::Explicit] {
+            assert_eq!(mixed_layout_error(Some("true_graph"), layout), None);
+        }
+        for (parent, region) in [
+            (LayoutMode::Explicit, LayoutMode::DimOrder),
+            (LayoutMode::DimOrder, LayoutMode::Explicit),
+        ] {
+            stash_ir(None, config(parent));
+            assert_eq!(mixed_layout_error(Some("true_graph"), parent), None);
+            let error = mixed_layout_error(Some("true_graph"), region).expect("a mismatch");
+            assert_eq!(
+                error,
+                format!(
+                    "control-flow region true_graph runs the {} layout, but the parent pipeline \
+                     stashed for it ran {}: a delegate's parent and regions must share one \
+                     pipeline config",
+                    region.as_str(),
+                    parent.as_str()
+                )
+            );
+            assert!(!error.contains("RETAB_STOCK_FALLBACK"), "{error}");
+        }
+        take_stashed_hierarchy();
+    }
+
+    /// Critique B2: in explicit mode a region pipeline that changes the region's
+    /// placeholders requests a stock fallback, as a region-blind pass would: it makes a
+    /// constant with the parent's scope, a placeholder, here at the graph head, which
+    /// shifts the boundary operands. Dim-order mode does not check, and a pipeline that
+    /// keeps the placeholders requests nothing.
+    #[test]
+    fn region_pipelines_that_change_the_placeholders_go_to_stock_in_explicit_mode() {
+        use crate::graph::ir::DType;
+        use crate::layout::ctx::{GraphScope, InsertPoint, LayoutCtx};
+        use crate::lowering_effects::LoweringInputKind;
+        use crate::store::TensorData;
+        use crate::test_ir::{output, placeholder};
+
+        struct HeadConstantPass;
+        impl fx_ir::IrPass for HeadConstantPass {
+            fn name(&self) -> &str {
+                "HeadConstant"
+            }
+
+            fn run(&self, graph: &mut fx_ir::IrGraph) -> bool {
+                let mut ctx = LayoutCtx::with_scope(graph, GraphScope::Parent);
+                let zero_point = TensorData {
+                    data: vec![0],
+                    shape: vec![1],
+                    dtype: DType::Int8,
+                };
+                ctx.with_insert_point(InsertPoint::Start, |ctx| {
+                    ctx.create_constant("avg_pool_zp", LoweringInputKind::Buffer, zero_point)
+                });
+                ctx.finish();
+                true
+            }
+        }
+
+        let region = || {
+            let mut region = fx_ir::IrGraph::empty();
+            let x = placeholder(&mut region, "x_ph", [1, 2, 8], "torch.int8");
+            placeholder(&mut region, "w_ph", [4, 2, 3], "torch.int8");
+            output(&mut region, x);
+            region
+        };
+        let head_constant = [fx_ir::PipelineStep::Ir(Box::new(HeadConstantPass))];
+        stock_fallback::take();
+
+        let (modified, ir, _) = run_region_pipeline(
+            Some("true_graph"),
+            &head_constant,
+            region(),
+            LayoutMode::Explicit,
+        );
+        assert!(modified);
+        assert_eq!(ir.live_placeholder_names(), ["avg_pool_zp", "x_ph", "w_ph"]);
+        assert_eq!(
+            stock_fallback::take().as_deref(),
+            Some(
+                "region placeholders changed: region true_graph: the pipeline turned \
+                 placeholders [\"x_ph\", \"w_ph\"] into [\"avg_pool_zp\", \"x_ph\", \"w_ph\"], \
+                 which would shift the boundary operands"
+            )
+        );
+
+        let (_, ir, _) = run_region_pipeline(
+            Some("true_graph"),
+            &head_constant,
+            region(),
+            LayoutMode::DimOrder,
+        );
+        assert_eq!(ir.live_placeholder_names(), ["avg_pool_zp", "x_ph", "w_ph"]);
+        assert_eq!(stock_fallback::take(), None);
+
+        let (_, ir, _) =
+            run_region_pipeline(Some("true_graph"), &[], region(), LayoutMode::Explicit);
+        assert_eq!(ir.live_placeholder_names(), ["x_ph", "w_ph"]);
+        assert_eq!(stock_fallback::take(), None);
     }
 }
