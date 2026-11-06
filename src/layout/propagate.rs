@@ -74,7 +74,11 @@
 //!   split is all-or-nothing and puts each copy right after its branch, and the
 //!   region search's outcome doesn't depend on its visit order (a rejected
 //!   node is rejected on every path; `blocks_moving` can only differ between
-//!   paths at the moving copy itself, which fails both orders).
+//!   paths at the moving copy itself, which fails both orders). Only whether a
+//!   fork plan raises can depend on it: TOSA's `is_swappable` raises for a
+//!   non-keepdim mean, and a branch the plan rejects first hides it, which
+//!   needs a non-keepdim mean at phase 6, where Arm has already normalized
+//!   them.
 //! - **A cat's repeated input.** `_maybe_split_upwards_cat_fanout` rebuilds a
 //!   cat from `all_input_nodes`, which lists a repeated input once, so rc4
 //!   turns `cat([x, x])` into `cat([permute(x)])` and changes the result. The
