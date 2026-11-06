@@ -201,8 +201,8 @@ fn reference_permute(data: &TensorData, dims: &[usize]) -> Vec<u8> {
     out
 }
 
-/// The users of `name`'s nodes, each as `(user name, arg index)`, before
-/// a run renumbers and erases nodes; see `output_permutes_keep_the_conv_values`.
+/// Each use of `id` as `(user name, arg index)`: names survive the
+/// renumbering a run does, ids don't (see `output_permutes_keep_the_conv_values`).
 fn uses_of(graph: &IrGraph, id: NodeId) -> Vec<(String, usize)> {
     graph
         .live_user_ids(id)
