@@ -5,7 +5,12 @@
 //! RETAB keeps the aten target, which the serializer lowers to MATMUL, so the
 //! rescaled node is RETAB's MATMUL. In explicit layout mode (APU-135 P2) the
 //! pass also writes MATMUL's dtype into its val: int32 for int8 and int16
-//! inputs, from rc4's fake kernel (`backends/arm/tosa/dialect/ops/matmul.py:28-76`).
+//! inputs, from rc4's fake kernel (`backends/arm/tosa/dialect/ops/matmul.py:28-76`),
+//! and marks an int16 product INT48, as rc4 marks its MATMUL
+//! (`rewrite_matmul.py:102-104`). The layout passes read that mark: a RESCALE
+//! of INT48 data is not elementwise, so no view crosses it onto the packed
+//! INT48 accumulator, and no permute moves over it
+//! (`TosaPropagationOverrides`, APU-135 P3).
 //! Otherwise RETAB leaves a quantized compute node's val in float32 (design
 //! F2). `layout::dtype::value_dtype` reads that val, so the explicit layout
 //! passes see an int32 accumulator before the RESCALE, as rc4's
@@ -51,13 +56,16 @@ fn insert_matmul_rescale(graph: &mut IrGraph, matmul_id: NodeId, layout: LayoutM
         ))
     };
     if layout == LayoutMode::Explicit {
-        let accumulator = dtype::operand_dtype(graph, matmul_id, 0)
-            .and_then(|input| dtype::matmul_output_dtype(&input));
+        let input = dtype::operand_dtype(graph, matmul_id, 0);
+        let accumulator = input.as_deref().and_then(dtype::matmul_output_dtype);
         if let Some(accumulator) = accumulator {
-            graph
-                .node_mut(matmul_id)
-                .meta
-                .set_val_dtype_for_existing_shape(accumulator);
+            let meta = &mut graph.node_mut(matmul_id).meta;
+            meta.set_val_dtype_for_existing_shape(accumulator);
+            // rc4 rescales an int32 product to an int8 or int16 output, and marks
+            // the MATMUL INT48 when its first input is int16.
+            if input.as_deref() == Some("torch.int16") && accumulator == "torch.int32" {
+                dtype::set_special_dtype(meta, dtype::SpecialDtype::Int48);
+            }
         }
     }
     graph.replace_live_uses_except(matmul_id, rescale, rescale)
@@ -209,6 +217,13 @@ mod tests {
                 );
                 let rescale = graph.by_name("bmm_output_rescale").unwrap();
                 assert_eq!(rescale.meta.val_dtype(), Some(dtype));
+                // rc4 marks an int16 MATMUL INT48 (rewrite_matmul.py:102-104).
+                let int48 = layout == LayoutMode::Explicit && dtype == "torch.int16";
+                assert_eq!(
+                    meta.extra_str(crate::layout::dtype::SPECIAL_DTYPE_KEY),
+                    int48.then_some("INT48"),
+                    "{dtype} {layout:?}"
+                );
             }
         }
     }

@@ -2409,6 +2409,38 @@ mod tests {
         }
     }
 
+    /// An A16W8 matmul (test_matmul.py `double_input_randn_rand_1d_4d`): the
+    /// int16 product is INT48, as rc4's RewriteMatmulPass marks it, so its
+    /// RESCALE is not elementwise (`_is_per_tensor_rescale` compares the special
+    /// dtypes) and Up keeps the bmm decomposition's output view after it.
+    /// Hoisted, the view would reshape the packed INT48 accumulator, which the
+    /// TOSA reference model rejects. An unmarked (int8) product lets it cross.
+    #[test]
+    fn up_keeps_a_view_after_the_rescale_of_an_int48_product() {
+        for (int48, crosses) in [(true, false), (false, true)] {
+            let mut g = LayoutGraph::new();
+            let a = g.typed_input("a", &[8, 1, 5], "torch.int16");
+            let b = g.typed_input("b", &[8, 5, 3], "torch.int16");
+            let bmm = g.add_unrefreshed("aten.bmm.default", vec![node(a), node(b)]);
+            let meta = &mut g.graph_mut().node_mut(bmm).meta;
+            meta.set_tensor_facts(TensorFacts::new(vec![8, 1, 3], "torch.int32"));
+            if int48 {
+                crate::layout::dtype::set_special_dtype(meta, crate::layout::dtype::SpecialDtype::Int48);
+            }
+            let rescale = g.rescale(bmm, "torch.int16", 0.5);
+            let view = g.view(rescale, &[2, 4, 3]);
+            g.output(&[view]);
+            let modified = run(&mut g, PropagateConfig::arm_without_program(Direction::Up));
+            assert_eq!(modified, crosses, "int48={int48}");
+            let expected: &[&str] = if crosses {
+                &["aten.bmm.default", VIEW, RESCALE]
+            } else {
+                &["aten.bmm.default", RESCALE, VIEW]
+            };
+            g.assert_targets(expected);
+        }
+    }
+
     #[test]
     fn up_hoists_a_permute_above_unary_ops() {
         let mut g = LayoutGraph::new();
