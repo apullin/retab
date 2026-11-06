@@ -608,7 +608,7 @@ fn mapped_concat_dim(
 /// (`:46-81`): a placeholder whose name or target looks like a transform's
 /// gets its name as target. rc4 also renames the input spec of the old target
 /// (`:68-78`); RETAB has no graph signature (inputs are keyed by node name).
-fn normalize_transform_input_placeholders(ctx: &mut LayoutCtx<'_>, permute_targets: &[&str]) -> bool {
+pub(crate) fn normalize_transform_input_placeholders(ctx: &mut LayoutCtx<'_>, permute_targets: &[&str]) -> bool {
     // `_target_placeholder_name` (`:100-101`).
     let base_names: Vec<String> = std::iter::once(VIEW_TARGET)
         .chain(permute_targets.iter().copied())

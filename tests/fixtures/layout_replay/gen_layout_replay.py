@@ -2080,6 +2080,19 @@ def move_data_movement_cases():
         b.output([r])
 
     @case
+    def casting_copy_moves_below_a_rescale(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        c = b.call(D._to_dim_order_copy.default, x, dtype=torch.int32)
+        b.output([b.call(A.neg.default, rescale(b, c, torch.int16))])
+
+    @case
+    def casting_copy_feeds_a_true_division(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        c = b.call(D._to_dim_order_copy.default, x, dtype=torch.int32)
+        r = rescale(b, c, torch.int16)
+        b.output([b.call(A.div.Tensor, r, r), c])
+
+    @case
     def independent_moves_in_order(b):
         x = b.input("x", (2, 3), dtype=torch.int32)
         y = b.input("y", (3, 4), dtype=torch.int8)

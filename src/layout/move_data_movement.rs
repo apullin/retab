@@ -60,7 +60,7 @@ use crate::fx_ir::{IrArg, IrGraph, IrNode, IrPass, NodeId, NodeOp};
 use crate::fx_meta::TensorFacts;
 use crate::layout::ctx::LayoutCtx;
 use crate::layout::fx_node::{all_input_nodes, element_size, is_per_tensor_rescale, is_rescale};
-use crate::layout::pointwise::is_transparent_copy;
+use crate::layout::pointwise::{is_pointwise, is_transparent_copy};
 use crate::layout::shape::{infer_facts, is_layout_transform, mark_contiguous, refreshed_meta, ShapeError};
 
 const PERMUTE_COPY: &str = "aten.permute_copy.default";
@@ -369,24 +369,46 @@ fn retrace(ctx: &mut LayoutCtx<'_>, touched: Vec<NodeId>) {
     }
 }
 
-/// The value fake execution gives `id` in rc4's retrace. A view, permute,
-/// dim-order copy or RESCALE takes its dtype from its input or its dtype
-/// argument, as torch does; everything else keeps the dtype RETAB records
-/// (`layout::shape`'s rule) and only its shape is re-derived. The two differ
-/// only where rc4's move is unsound: a `_to_dim_order_copy` that casts moves
-/// across a RESCALE and changes the dtype its users see.
+/// Pointwise targets whose integer result torch makes floating point (true
+/// division); RETAB records that float, which `layout::shape`'s
+/// dtype-preserving elementwise rule doesn't give.
+const TRUE_DIVISION: &[&str] = &["aten.div.Tensor", "aten.div.Scalar", "aten.div_.Tensor"];
+
+/// The value fake execution gives `id` in rc4's retrace. Views, permutes,
+/// dim-order copies and RESCALEs take their dtype from an input or a dtype
+/// argument, and pointwise ops other than true division promote their
+/// operands' dtypes, as `layout::shape` derives them; everything else keeps
+/// the dtype RETAB records, which differs from torch's on purpose for some
+/// ops (`layout::shape`'s module docs), and only its shape is re-derived.
+/// The derived dtypes equal the recorded ones unless rc4's move was unsound:
+/// a `_to_dim_order_copy` that casts moves across a RESCALE and changes the
+/// dtype its users see.
 fn retraced_facts(graph: &IrGraph, id: NodeId) -> Result<TensorFacts, ShapeError> {
     let mut facts = infer_facts(graph, id)?;
     let node = graph.node(id);
-    let derives_dtype = is_layout_transform(&node.target)
-        || is_transparent_copy(&node.target)
-        || is_rescale(&node.target);
+    let target = node.target.as_str();
+    let derives_dtype = is_layout_transform(target)
+        || is_transparent_copy(target)
+        || is_rescale(target)
+        || (is_pointwise(target) && !TRUE_DIVISION.contains(&target));
     if !derives_dtype {
         if let Some(dtype) = node.meta.val_dtype() {
             facts.dtype = dtype.to_owned();
         }
     }
     Ok(facts)
+}
+
+#[cfg(test)]
+thread_local! {
+    static CHECK_READY_SET: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Switch the per-rewrite ready-set check of test builds on or off for this
+/// thread; it costs O(N) per rewrite. Returns the old setting.
+#[cfg(test)]
+pub(crate) fn set_check_ready_set(enabled: bool) -> bool {
+    CHECK_READY_SET.with(|check| check.replace(enabled))
 }
 
 /// The ready nodes, and a min-heap of their graph positions.
@@ -441,8 +463,12 @@ impl ReadyNodes {
 
     /// Test builds check after every rewrite that the ready set is exactly
     /// what rc4's rescan would see, so a missed neighbour fails loudly.
+    /// Timing tests switch the check off ([`set_check_ready_set`]).
     #[cfg(test)]
     fn assert_complete(&self, ctx: &LayoutCtx<'_>) {
+        if !CHECK_READY_SET.with(std::cell::Cell::get) {
+            return;
+        }
         for id in ctx.order().iter() {
             assert_eq!(
                 plan(ctx, id).is_some(),

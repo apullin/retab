@@ -21,6 +21,7 @@
 //! conversion (`ingest::from_ir::graph_from_ir`) never reads them; it seeds its
 //! def-use sort (`topo_order`) with node-id order.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -387,6 +388,8 @@ pub(crate) struct LayoutCtx<'g> {
     versions: Vec<u64>,
     insert_point: InsertPoint,
     attempts: HashMap<(RuleId, NodeId), ReadSet>,
+    /// Per base name, the lowest suffix `unique_name` may still find free.
+    name_suffixes: RefCell<HashMap<String, u64>>,
 }
 
 impl<'g> LayoutCtx<'g> {
@@ -401,6 +404,7 @@ impl<'g> LayoutCtx<'g> {
             versions,
             insert_point: InsertPoint::End,
             attempts: HashMap::new(),
+            name_suffixes: RefCell::new(HashMap::new()),
         }
     }
 
@@ -504,14 +508,24 @@ impl<'g> LayoutCtx<'g> {
     }
 
     /// `name`, or the first of `name_1`, `name_2`, ... that no node has.
+    ///
+    /// The graph's name index only grows, so a suffix found taken stays taken;
+    /// remembering where each base's scan stopped keeps a run of nodes with one
+    /// name (rc4 names every node it creates after its target) at amortized
+    /// O(1) per name instead of O(nodes so far), as FX's `_Namespace` counters do.
     pub(crate) fn unique_name(&self, name: String) -> String {
         if !self.graph.contains_name(&name) {
             return name;
         }
-        (1..)
-            .map(|n| format!("{name}_{n}"))
-            .find(|candidate| !self.graph.contains_name(candidate))
-            .expect("an unused suffix")
+        let mut suffixes = self.name_suffixes.borrow_mut();
+        let next = suffixes.entry(name.clone()).or_insert(1);
+        loop {
+            let candidate = format!("{name}_{next}");
+            if !self.graph.contains_name(&candidate) {
+                return candidate;
+            }
+            *next += 1;
+        }
     }
 
     /// `graph.call_function(target, args)` at the insert point.
@@ -1127,6 +1141,29 @@ mod tests {
     /// Nested insertion scopes and permanent or moving insert points; expected
     /// orders from `nested()` in tests/fixtures/torch_fx_insert_order.py
     /// (torch 2.15.0).
+    /// `unique_name` picks the first free suffix, gaps included, and keeps
+    /// doing so as the names it hands out are taken.
+    #[test]
+    fn unique_names_take_the_first_free_suffix() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2]);
+        for name in ["n", "n_1", "n_3"] {
+            f32_call(&mut graph, name, RELU, vec![IrArg::Node(x)], [2]);
+        }
+        let mut ctx = LayoutCtx::new(&mut graph);
+        assert_eq!(ctx.unique_name("fresh".into()), "fresh");
+        assert_eq!(ctx.unique_name("n".into()), "n_2");
+        // Asking again without taking it returns the same name.
+        assert_eq!(ctx.unique_name("n".into()), "n_2");
+        let names: Vec<String> = (0..4)
+            .map(|_| {
+                let id = ctx.call_function("n", RELU, vec![IrArg::Node(x)], f32_meta(vec![2]));
+                ctx.node(id).name.clone()
+            })
+            .collect();
+        assert_eq!(names, ["n_2", "n_4", "n_5", "n_6"]);
+    }
+
     #[test]
     fn ctx_insert_points_match_torch_fx_scopes() {
         let base = || {

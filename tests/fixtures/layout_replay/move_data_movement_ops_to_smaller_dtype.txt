@@ -363,6 +363,35 @@ after modified=true
 %2 = aten.permute_copy.default(%1, [1, 0]) : torch.int8[3, 2] q=in{0}/out{0}
 output([%2])
 end
+case casting_copy_moves_below_a_rescale
+before
+%0 = placeholder x : torch.int32[2, 3] q=none
+%1 = dim_order_ops._to_dim_order_copy.default(%0, dtype=torch.int32) : torch.int32[2, 3] q=none
+%2 = tosa.RESCALE.default(%1, torch.int16, [0.5], 0, 0) : torch.int16[2, 3] q=none
+%3 = aten.neg.default(%2) : torch.int16[2, 3] q=none
+output([%3])
+after modified=true
+%0 = placeholder x : torch.int32[2, 3] q=none
+%1 = tosa.RESCALE.default(%0, torch.int16, [0.5], 0, 0) : torch.int16[2, 3] q=none
+%2 = dim_order_ops._to_dim_order_copy.default(%1, dtype=torch.int32) : torch.int32[2, 3] q=none
+%3 = aten.neg.default(%2) : torch.int32[2, 3] q=none
+output([%3])
+end
+case casting_copy_feeds_a_true_division
+before
+%0 = placeholder x : torch.int32[2, 3] q=none
+%1 = dim_order_ops._to_dim_order_copy.default(%0, dtype=torch.int32) : torch.int32[2, 3] q=none
+%2 = tosa.RESCALE.default(%1, torch.int16, [0.5], 0, 0) : torch.int16[2, 3] q=none
+%3 = aten.div.Tensor(%2, %2) : torch.float32[2, 3] q=none
+output([%3, %1])
+after modified=true
+%0 = placeholder x : torch.int32[2, 3] q=none
+%1 = dim_order_ops._to_dim_order_copy.default(%0, dtype=torch.int32) : torch.int32[2, 3] q=none
+%2 = tosa.RESCALE.default(%0, torch.int16, [0.5], 0, 0) : torch.int16[2, 3] q=none
+%3 = dim_order_ops._to_dim_order_copy.default(%2, dtype=torch.int32) : torch.int32[2, 3] q=none
+%4 = aten.div.Tensor(%3, %3) : torch.float32[2, 3] q=none
+output([%4, %1])
+end
 case independent_moves_in_order
 before
 %0 = placeholder x : torch.int32[2, 3] q=none

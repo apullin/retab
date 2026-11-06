@@ -60,3 +60,9 @@ pub(crate) mod replay;
 // MoveDataMovementOpsToSmallerDtype (APU-160).
 #[cfg(test)]
 mod fuse_helpers_replay_tests;
+// rc4's own tests for those three passes, ported.
+#[cfg(test)]
+mod fuse_helpers_upstream_tests;
+// Large-graph checks and timings for those three passes.
+#[cfg(test)]
+mod fuse_helpers_scaling_tests;
