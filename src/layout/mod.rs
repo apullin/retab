@@ -88,3 +88,6 @@ mod propagate_upstream_tests;
 // Large-graph checks and timings for the propagation passes.
 #[cfg(test)]
 mod propagate_scaling_tests;
+// Adversarial review of the propagation port: rc4 behaviours it misses.
+#[cfg(test)]
+mod propagate_review_tests;
