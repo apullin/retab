@@ -793,7 +793,7 @@ fn parse_data(text: &str) -> Result<Data, String> {
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(format!("odd-length hex data ({} digits)", hex.len()));
     }
     (0..hex.len())
@@ -1489,10 +1489,10 @@ fn snapshot_data(node: &IrNode) -> Option<Data> {
     let bytes = &tensor.data.data;
     if tensor.data.dtype == DType::Int32 && node.meta.val_dtype() == Some("torch.int64") {
         let widened = bytes
-            .chunks_exact(4)
-            .flat_map(|chunk| {
-                i64::from(i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])).to_le_bytes()
-            })
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|chunk| i64::from(i32::from_le_bytes(*chunk)).to_le_bytes())
             .collect();
         return Some(Data::Bytes(widened));
     }
@@ -2023,10 +2023,10 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
         message.push(0);
     }
     message.extend_from_slice(&bits.to_be_bytes());
-    for block in message.chunks_exact(64) {
+    for block in message.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
-        for (slot, word) in w.iter_mut().zip(block.chunks_exact(4)) {
-            *slot = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        for (slot, word) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+            *slot = u32::from_be_bytes(*word);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
