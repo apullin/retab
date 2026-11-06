@@ -27,9 +27,9 @@
 //!   int32 when it fits). The planners' rc4 quirks, such as quantizing a
 //!   factory with its output qparams, come along unchanged.
 //! - **How** the IR changes follows rc4: the names, the constant kinds and
-//!   insert points, the special-dtype propagation, the graph-wide dead-code
-//!   elimination and the deletion of the constant placeholders the folds
-//!   leave unused.
+//!   insert points, the special-dtype propagation, the folds rc4 skips or
+//!   abandons, the graph-wide dead-code elimination and the deletion of the
+//!   constant placeholders the folds leave unused.
 //!
 //! Each new constant gets a new name, so an effect an earlier pass planned
 //! under the folded node's name finds no live node at ingest and is skipped
@@ -40,7 +40,8 @@
 //! In a region the constants are `get_attr` nodes (see
 //! [`GraphScope::Region`]) and no placeholder is added or deleted, since the
 //! boundary contracts pair region placeholders with the parent's operands by
-//! position (critique B2).
+//! position (critique B2). Ingest tells such a constant from a branch
+//! reference by its data, so a folded cond predicate stays a tensor.
 
 use std::collections::HashMap;
 
@@ -50,6 +51,7 @@ use crate::fx_ir::{
     EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, IrPass, MetaValue, NodeId, NodeOp,
     TensorSource,
 };
+use crate::graph::ir::DType;
 use crate::ingest::from_ir::materialized_tensor;
 use crate::layout::ctx::{GraphScope, InsertPoint, LayoutCtx};
 use crate::lowering_effects::{LoweringEffect, LoweringInputKind};
@@ -106,16 +108,18 @@ impl IrPass for IrMaterializeConstantsPass {
         if precomputed {
             ctx.eliminate_dead_code();
         }
-        let fused_inputs = fuse_constant_args(&mut ctx, &mut plan.folds);
-        if !fused_inputs.is_empty() {
+        let fused = fuse_constant_args(&mut ctx, &mut plan.folds);
+        if !fused.inputs.is_empty() {
             ctx.eliminate_dead_code();
             if scope == GraphScope::Parent {
-                delete_unused_constant_inputs(&mut ctx, fused_inputs);
+                delete_unused_constant_inputs(&mut ctx, fused.inputs);
             }
-        } else if !precomputed {
+        } else if !precomputed && !fused.left_unused_constants {
             // Every planned fold was skipped; nothing changed.
             return false;
         }
+        // An abandoned fold alone still changed the graph, although rc4
+        // reports `modified=False` and so skips the dead-code elimination.
         ctx.finish();
 
         if let Some(before) = placeholders_before {
@@ -217,6 +221,14 @@ fn compute_constant_ops_aot(
     changed
 }
 
+/// What FuseConstantArgs's sweep did.
+struct Fused {
+    /// The folded nodes' inputs, rc4's `input_nodes_to_maybe_delete`.
+    inputs: Vec<NodeId>,
+    /// Whether an abandoned fold left its unused constant behind.
+    left_unused_constants: bool,
+}
+
 /// FuseConstantArgsPass.call (`:228-285`) over the planned folds, in graph
 /// order: each becomes `<node>_fused_const`, of its first input's kind and
 /// inserted directly before that input (`:192-207`), with the inputs' special
@@ -224,43 +236,61 @@ fn compute_constant_ops_aot(
 /// producer, so a chain ends as one constant where the chain's source was.
 ///
 /// rc4 folds a node only when every input is a constant by the time the sweep
-/// reaches it, and never one marked SHAPE (`:155-157`). The planners' plan
-/// meets the first rule except below a SHAPE-marked node, which the shape-only
-/// planner folds; such a node and everything planned on top of it stay call
-/// nodes here, and their deferred effects still fold them at ingest.
+/// reaches it. It never folds a node marked SHAPE (`:155-157`), nor one whose
+/// args or kwargs hold a SHAPE-marked node (`_arg_contains_symbolic_shape`,
+/// `:243-246`; its symbolic-value cases have no counterpart in RETAB's static
+/// IR). The planners' plan meets the first rule except below a skipped node:
+/// the shape-only planner folds SHAPE-marked nodes, and the constant-inputs
+/// planner folds their users. Such nodes, and everything planned on top of
+/// them, stay call nodes here, and their deferred effects still fold them at
+/// ingest.
 ///
-/// Returns the folded nodes' inputs, rc4's `input_nodes_to_maybe_delete`.
-fn fuse_constant_args(
-    ctx: &mut LayoutCtx<'_>,
-    planned: &mut HashMap<NodeId, TensorData>,
-) -> Vec<NodeId> {
-    let mut fused_inputs = Vec::new();
+/// When the special-dtype check raises (see [`propagated_special_dtype`]),
+/// rc4 logs the exception and abandons the fold (`:267-276`): the op stays,
+/// and so does the unused constant `_fuse_nodes` had already created.
+fn fuse_constant_args(ctx: &mut LayoutCtx<'_>, planned: &mut HashMap<NodeId, TensorData>) -> Fused {
+    let mut fused = Fused {
+        inputs: Vec::new(),
+        left_unused_constants: false,
+    };
     for id in ctx.order().to_vec() {
         let Some(data) = planned.remove(&id) else {
             continue;
         };
-        if is_shape_marked(ctx.node(id)) {
-            continue;
-        }
         let inputs = ctx.all_input_nodes(id);
         let Some(&first) = inputs.first() else {
             continue;
         };
-        if !inputs.iter().all(|&input| is_constant(ctx.node(input))) {
+        if is_shape_marked(ctx.node(id))
+            || inputs.iter().any(|&input| is_shape_marked(ctx.node(input)))
+            || !inputs.iter().all(|&input| is_constant(ctx.node(input)))
+        {
             continue;
         }
         let name = format!("{}_fused_const", ctx.node(id).name);
         let kind = constant_kind(ctx.node(first));
         let special_dtype = propagated_special_dtype(ctx.graph(), &inputs, &data);
         let constant = ctx.inserting_before(first, |ctx| ctx.create_constant(name, kind, data));
-        if let Some(special_dtype) = special_dtype {
-            ctx.meta_mut(constant)
-                .set_extra(SPECIAL_DTYPE, MetaValue::Str(special_dtype));
+        match special_dtype {
+            Ok(Some(special_dtype)) => {
+                ctx.meta_mut(constant)
+                    .set_extra(SPECIAL_DTYPE, MetaValue::Str(special_dtype));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                crate::runner_logging::log_line(format_args!(
+                    "[IrMaterializeConstants] failed to fuse constant op {} due to \
+                     exception: {error}",
+                    ctx.node(id).name
+                ));
+                fused.left_unused_constants = true;
+                continue;
+            }
         }
         ctx.replace_all_uses_with(id, constant);
-        fused_inputs.extend(inputs);
+        fused.inputs.extend(inputs);
     }
-    fused_inputs
+    fused
 }
 
 /// FuseConstantArgsPass.maybe_delete (`:215-221`), after the dead-code
@@ -290,13 +320,19 @@ fn is_shape_marked(node: &IrNode) -> bool {
 
 /// FuseConstantArgsPass._propagate_special_dtype (`:132-147`): the inputs'
 /// special dtype other than SHAPE, when there is exactly one and the folded
-/// data fits it. This is how an INT4 weight's fold stays INT4, which
-/// RewriteConvPass then copies onto the conv-local weight.
+/// data passes rc4's range check ([`passes_range_check`]). This is how an
+/// INT4 weight's fold stays INT4, which RewriteConvPass then copies onto the
+/// conv-local weight.
+///
+/// `Err` is the exception the check raises, which makes rc4 abandon the fold:
+/// torch's error for bool, empty or float8 data, or `TosaSpecialDtype.max()`'s
+/// for a special dtype other than INT4 and INT48, which an INT graph never
+/// carries.
 fn propagated_special_dtype(
     graph: &IrGraph,
     inputs: &[NodeId],
     data: &TensorData,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     let mut found: Vec<&str> = Vec::new();
     for &input in inputs {
         let Some(raw) = graph.node(input).meta.extra_str(SPECIAL_DTYPE) else {
@@ -314,19 +350,58 @@ fn propagated_special_dtype(
                  implemented, skipping"
             ));
         }
-        return None;
+        return Ok(None);
     };
-    // `TosaSpecialDtype.max()` covers only INT4 and INT48; rc4 fails the fold
-    // for any other special dtype, which an INT graph never carries.
-    let max = match special_dtype_name(raw) {
-        "INT4" => 7.0,
-        "INT48" => ((1i64 << 47) - 1) as f64,
-        _ => return None,
+    let bound = match special_dtype_name(raw) {
+        "INT4" => 7,
+        "INT48" => (1 << 47) - 1,
+        _ => return Err(format!("Unrecognized TosaSpecialDtype {raw}.")),
     };
-    // `data.abs().max() <= special_dtype.max()`, which a NaN fails.
-    let values = data.vec_f64()?;
-    let fits = !values.is_empty() && values.iter().all(|value| value.abs() <= max);
-    fits.then(|| (*raw).to_string())
+    Ok(passes_range_check(data, bound)?.then(|| (*raw).to_string()))
+}
+
+/// rc4's range check `data.abs().max() <= special_dtype.max()` (`:146`), with
+/// `bound` the special dtype's max and torch's semantics, which compute in
+/// the data's dtype:
+///
+/// - `abs` wraps a signed integer dtype's minimum to itself, which passes
+///   any bound;
+/// - the bound converts to the data's dtype, wrapping too: for int8, int16
+///   and int32 data INT48's bound becomes -1, which only the minimum passes
+///   (rc4 keeps INT48 on int64 data, not on int32 data);
+/// - a float bound rounds (INT48's to 2**47 in float32 and bfloat16) or
+///   overflows (float16), and a NaN fails the check.
+///
+/// `Err` is torch's error for the data that `abs` or `max` rejects.
+fn passes_range_check(data: &TensorData, bound: i64) -> Result<bool, String> {
+    if data.dtype == DType::Bool {
+        return Err("\"abs_cpu\" not implemented for 'Bool'".to_string());
+    }
+    if data.element_count() == 0 {
+        return Err(
+            "max(): Expected reduction dim to be specified for input.numel() == 0".to_string(),
+        );
+    }
+    let bits = match data.dtype {
+        DType::Int8 => 8,
+        DType::Int16 => 16,
+        DType::Int32 => 32,
+        DType::Int64 => 64,
+        DType::Float32 | DType::BFloat16 | DType::Float16 => {
+            let bound = match data.dtype {
+                DType::Float16 if bound > 65504 => f64::INFINITY,
+                _ => f64::from(bound as f32),
+            };
+            let values = data.vec_f64().expect("float data decodes");
+            return Ok(values.iter().all(|value| value.abs() <= bound));
+        }
+        dtype => return Err(format!("\"max_all\" not implemented for {dtype:?}")),
+    };
+    let wrap = |value: i64| (value << (64 - bits)) >> (64 - bits);
+    let values = data.vec_i64().expect("integer data decodes");
+    Ok(values
+        .iter()
+        .all(|&value| wrap(value.wrapping_abs()) <= wrap(bound)))
 }
 
 fn placeholder_names(graph: &IrGraph) -> Vec<String> {
@@ -344,7 +419,6 @@ mod tests {
     use super::*;
     use crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEffectPass;
     use crate::fx_ir::{IrArg, NodeMeta, QParam};
-    use crate::graph::ir::DType;
     use crate::lowering_effects::LoweringEffectBatch;
     use crate::store::TensorStore;
     use crate::test_ir::{call, call_with_meta, constant_placeholder, placeholder};
@@ -376,6 +450,14 @@ mod tests {
             data: values.iter().flat_map(|v| v.to_le_bytes()).collect(),
             shape: shape.to_vec(),
             dtype: DType::Int32,
+        }
+    }
+
+    fn int64_tensor(shape: &[i64], values: &[i64]) -> TensorData {
+        TensorData {
+            data: values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            shape: shape.to_vec(),
+            dtype: DType::Int64,
         }
     }
 
@@ -1067,9 +1149,12 @@ mod tests {
             .map(str::to_string)
     }
 
-    /// `_propagate_special_dtype`: an INT4 weight's fold is INT4 while its
-    /// values fit [-7, 7]; data beyond INT4's range, mixed special dtypes and
-    /// SHAPE (ignored, `:137`) behave as in rc4.
+    /// `_propagate_special_dtype`, as in the rc4 venv: an INT4 weight's fold
+    /// is INT4 while its values fit [-7, 7], and INT48 carries over onto int64
+    /// data. Data beyond INT4's range, INT48 on int32 data (rc4 compares in
+    /// int32, where INT48's bound wraps to -1) and mixed special dtypes get
+    /// none. A bool fold with mixed special dtypes never reaches the range
+    /// check, so it is fused.
     #[test]
     fn the_inputs_special_dtype_carries_over_when_the_data_fits() {
         let mut graph = IrGraph::empty();
@@ -1079,8 +1164,8 @@ mod tests {
         marked(&mut graph, wide, "INT4");
         let w48 = weight(&mut graph, "w48", int32_tensor(&[2], &[1, 2]));
         marked(&mut graph, w48, "TosaSpecialDtype.INT48");
-        let shape = weight(&mut graph, "shape", int32_tensor(&[2], &[5, 6]));
-        marked(&mut graph, shape, "SHAPE");
+        let w48_64 = weight(&mut graph, "w48_64", int64_tensor(&[2], &[1 << 40, 2]));
+        marked(&mut graph, w48_64, "INT48");
         let v4 = call(
             &mut graph,
             "v4",
@@ -1105,6 +1190,14 @@ mod tests {
             [1, 2],
             "torch.int32",
         );
+        let v48_64 = call(
+            &mut graph,
+            "v48_64",
+            VIEW,
+            vec![node(w48_64), ints(&[1, 2])],
+            [1, 2],
+            "torch.int64",
+        );
         let mixed = call(
             &mut graph,
             "mixed",
@@ -1113,15 +1206,7 @@ mod tests {
             [2],
             "torch.bool",
         );
-        let with_shape = call(
-            &mut graph,
-            "with_shape",
-            "aten.gt.Tensor",
-            vec![node(shape), node(w4)],
-            [2, 2],
-            "torch.bool",
-        );
-        output(&mut graph, &[v4, v_wide, v48, mixed, with_shape]);
+        output(&mut graph, &[v4, v_wide, v48, v48_64, mixed]);
 
         assert!(run(&mut graph));
         assert_eq!(
@@ -1134,19 +1219,174 @@ mod tests {
             "8 is outside INT4"
         );
         assert_eq!(
-            special_dtype(&graph, "v48_fused_const").as_deref(),
-            Some("TosaSpecialDtype.INT48")
+            special_dtype(&graph, "v48_fused_const"),
+            None,
+            "INT48's bound wraps to -1 in int32"
+        );
+        assert_eq!(
+            special_dtype(&graph, "v48_64_fused_const").as_deref(),
+            Some("INT48")
         );
         assert_eq!(
             special_dtype(&graph, "mixed_fused_const"),
             None,
             "INT48 and INT4"
         );
-        assert_eq!(
-            special_dtype(&graph, "with_shape_fused_const").as_deref(),
-            Some("INT4"),
-            "a bool fold of an INT4 input fits INT4, as in rc4"
+    }
+
+    /// The range check against the rc4 venv (`data.abs().max() <=
+    /// special_dtype.max()` on each tensor): integer data compares in its own
+    /// dtype, where `abs` of the minimum and INT48's bound wrap; a float bound
+    /// rounds or overflows; bool, empty and float8 data raise.
+    #[test]
+    fn the_range_check_follows_torch() {
+        use crate::tensor_data::{encode_bf16, encode_f16};
+
+        const INT4: i64 = 7;
+        const INT48: i64 = (1 << 47) - 1;
+        let raw = |dtype: DType, data: Vec<u8>, len: usize| TensorData {
+            data,
+            shape: vec![len as i64],
+            dtype,
+        };
+        let i8s = |values: &[i8]| int8_tensor(&[values.len() as i64], values);
+        let i16s = |values: &[i16]| {
+            let data = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            raw(DType::Int16, data, values.len())
+        };
+        let i32s = |values: &[i32]| int32_tensor(&[values.len() as i64], values);
+        let i64s = |values: &[i64]| int64_tensor(&[values.len() as i64], values);
+        let f32s = |values: &[f32]| f32_tensor(&[values.len() as i64], values);
+        let half = |dtype: DType, bits: u16| raw(dtype, bits.to_le_bytes().to_vec(), 1);
+        let f16 = |value: f32| half(DType::Float16, encode_f16(value));
+        let bf16 = |value: f32| half(DType::BFloat16, encode_bf16(value));
+        let cases = [
+            ("int8 [-7, 7]", i8s(&[-7, 7]), INT4, true),
+            ("int8 [-8]", i8s(&[-8]), INT4, false),
+            ("int8 [-128, 3]", i8s(&[-128, 3]), INT4, true),
+            ("int8 [1, 2]", i8s(&[1, 2]), INT48, false),
+            ("int8 [-128]", i8s(&[-128]), INT48, true),
+            ("int16 [1, -32768]", i16s(&[1, -32768]), INT48, false),
+            ("int32 [1, 2]", i32s(&[1, 2]), INT48, false),
+            ("int64 [1, 2]", i64s(&[1, 2]), INT48, true),
+            ("int64 [2**50]", i64s(&[1 << 50]), INT48, false),
+            ("int64 [min]", i64s(&[i64::MIN]), INT4, true),
+            ("f32 [8]", f32s(&[8.0]), INT4, false),
+            ("f32 [8]", f32s(&[8.0]), INT48, true),
+            ("f32 [nan, 1]", f32s(&[f32::NAN, 1.0]), INT48, false),
+            ("f32 [inf]", f32s(&[f32::INFINITY]), INT48, false),
+            ("f32 [2**47]", f32s(&[2f32.powi(47)]), INT48, true),
+            ("bf16 [inf]", bf16(f32::INFINITY), INT48, false),
+            ("f16 [inf]", f16(f32::INFINITY), INT48, true),
+            ("f16 [8]", f16(8.0), INT4, false),
+        ];
+        for (what, data, bound, expected) in cases {
+            assert_eq!(
+                passes_range_check(&data, bound),
+                Ok(expected),
+                "{what} against {bound}"
+            );
+        }
+        let raising = [
+            ("bool", raw(DType::Bool, vec![1], 1)),
+            ("empty", i8s(&[])),
+            ("float8", raw(DType::Float8E4M3, vec![0x38], 1)),
+        ];
+        for (what, data) in raising {
+            assert!(passes_range_check(&data, INT4).is_err(), "{what}");
+        }
+    }
+
+    /// When the range check raises (bool data, empty data), rc4 abandons the
+    /// fold after creating its constant, as in the rc4 venv (`p_w4,
+    /// aten_gt_tensor_1_fused_const, p_w4b`): the op stays a call node, and
+    /// the unused `_fused_const` stays directly before the op's first input,
+    /// without a special dtype. With no fold done rc4 reports `modified=False`,
+    /// so no dead code goes either.
+    #[test]
+    fn an_abandoned_fold_leaves_the_op_and_its_unused_constant_like_rc4() {
+        let mut graph = IrGraph::empty();
+        let w4 = weight(&mut graph, "w4", int8_tensor(&[2], &[-7, 3]));
+        marked(&mut graph, w4, "INT4");
+        let w48 = weight(&mut graph, "w48", int32_tensor(&[2], &[1, 2]));
+        marked(&mut graph, w48, "TosaSpecialDtype.INT48");
+        let other = weight(&mut graph, "other", int8_tensor(&[2], &[1, 2]));
+        let x = placeholder(&mut graph, "x", [2], "torch.int8");
+        call(
+            &mut graph,
+            "dead_neg",
+            "aten.neg.default",
+            vec![node(x)],
+            [2],
+            "torch.int8",
         );
+        let gt4 = call(
+            &mut graph,
+            "gt4",
+            "aten.gt.Tensor",
+            vec![node(other), node(w4)],
+            [2],
+            "torch.bool",
+        );
+        let gt48 = call(
+            &mut graph,
+            "gt48",
+            "aten.gt.Tensor",
+            vec![node(w48), node(other)],
+            [2],
+            "torch.bool",
+        );
+        let empty = call(
+            &mut graph,
+            "empty",
+            SLICE,
+            vec![node(w4), IrArg::Int(0), IrArg::Int(1), IrArg::Int(1)],
+            [0],
+            "torch.int8",
+        );
+        output(&mut graph, &[x, gt4, gt48, empty]);
+        let planned =
+            effects_by_name(IrFuseConstantInputsEffectPass::with_data_slices().run(&mut graph));
+        for name in ["gt4", "gt48", "empty"] {
+            assert!(planned.contains_key(name), "{name} is planned");
+        }
+
+        assert!(run(&mut graph), "the unused constants are a change");
+        assert_eq!(
+            names(&graph),
+            [
+                "empty_fused_const",
+                "w4",
+                "gt48_fused_const",
+                "w48",
+                "gt4_fused_const",
+                "other",
+                "x",
+                "dead_neg",
+                "gt4",
+                "gt48",
+                "empty",
+                "output"
+            ]
+        );
+        for name in ["gt4_fused_const", "gt48_fused_const", "empty_fused_const"] {
+            let constant = live(&graph, name);
+            assert!(!graph.has_live_users(constant), "{name} is unused");
+            assert_eq!(special_dtype(&graph, name), None, "{name}");
+            assert_eq!(kind(&graph, name), "Buffer", "{name}");
+        }
+        assert_tensor_eq(
+            tensor(&graph, "gt4_fused_const"),
+            &TensorData {
+                data: vec![1, 0],
+                shape: vec![2],
+                dtype: DType::Bool,
+            },
+            "1 > -7 and 2 > 3",
+        );
+        for name in ["gt4", "gt48", "empty"] {
+            assert_eq!(graph.node(live(&graph, name)).op, NodeOp::CallFunction);
+        }
     }
 
     /// rc4 never fuses a SHAPE-marked node (`:155-157`), but the shape-only
@@ -1658,17 +1898,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Review (S0a): rc4 behaviour the port misses
+    // Review (S0a): folds rc4 skips or abandons; region cond predicates
     // -----------------------------------------------------------------------
 
     /// rc4's FuseConstantArgs skips any node whose args include a SHAPE-marked
     /// node (`_arg_contains_symbolic_shape`, `:243-246`), whether or not the
     /// node itself is marked. Checked in the rc4 venv
     /// (/tmp/s0a_review_probe/shape_input_probe.py): `gt(p_shape[SHAPE], p_w4)`
-    /// stays a call node. The planner plans it, and the pass folds it.
+    /// stays a call node. The planner plans it; the pass leaves it, creating
+    /// nothing.
     #[test]
-    #[ignore = "BUG: a node reading a SHAPE-marked constant is folded; rc4 skips it \
-                (fuse_constant_ops_pass.py:243-246)"]
     fn a_node_reading_a_shape_marked_constant_is_not_folded() {
         let mut graph = IrGraph::empty();
         let shape = weight(&mut graph, "shape", int32_tensor(&[2], &[5, 6]));
@@ -1685,9 +1924,12 @@ mod tests {
         output(&mut graph, &[gt]);
         let planned =
             effects_by_name(IrFuseConstantInputsEffectPass::with_data_slices().run(&mut graph));
-        assert!(planned.contains_key("gt"), "the planner plans the comparison");
+        assert!(
+            planned.contains_key("gt"),
+            "the planner plans the comparison"
+        );
 
-        run(&mut graph);
+        assert!(!run(&mut graph), "nothing changes");
         assert!(
             graph
                 .live_nodes()
@@ -1705,11 +1947,9 @@ mod tests {
     /// for 'Bool'); `call` catches it and the op is not fused (rc4 only leaves
     /// an unused `_fused_const` placeholder behind). Checked in the rc4 venv
     /// (/tmp/s0a_review_probe/shape_input_probe.py): `gt(p_w4b, p_w4[INT4])`
-    /// stays a call node. The pass folds it and marks the bool constant INT4,
-    /// which the serializer's INT4 handling would then apply to bool data.
+    /// stays a call node. So does the pass's, and no bool constant is marked
+    /// INT4, which the serializer would have packed as INT4.
     #[test]
-    #[ignore = "BUG: a bool fold with one INT4/INT48 input is fused and marked INT4; \
-                rc4's _propagate_special_dtype raises on bool data and abandons the fold"]
     fn a_bool_fold_with_one_int4_input_is_not_fused_like_rc4() {
         let mut graph = IrGraph::empty();
         let w4 = weight(&mut graph, "w4", int8_tensor(&[2], &[-7, 3]));
@@ -1742,16 +1982,15 @@ mod tests {
         );
     }
 
-    /// Region constants are `get_attr` nodes, but `graph_from_ir` emits every
-    /// `get_attr` that is a direct arg of a cond as a region name
-    /// (`ingest/from_ir.rs:79-87`). A cond predicate the pass folds inside a
-    /// region therefore stops being a tensor: the converted cond reads the
-    /// string "pred_pre_computed" and the constant itself is dropped. On the
-    /// dim-order route the predicate is still a call node at conversion and
-    /// its effect folds it afterwards, so the cond keeps a tensor predicate.
+    /// Region constants are `get_attr` nodes, and `graph_from_ir` used to emit
+    /// every `get_attr` that is a direct arg of a cond as a region name
+    /// (`ingest/from_ir.rs`), so a cond predicate the pass folded inside a
+    /// region became the string "pred_pre_computed" and lost its constant. It
+    /// now treats only a `get_attr` without data as a region reference, so the
+    /// explicit route keeps the tensor predicate that the dim-order route gets
+    /// by folding the predicate at ingest. Exporting a nested
+    /// `torch.cond(torch.full((), True), ...)` inside a branch gives this shape.
     #[test]
-    #[ignore = "BUG: in a region, a folded cond predicate becomes a get_attr, which \
-                graph_from_ir mistakes for a branch submodule (from_ir.rs:79-87)"]
     fn a_folded_cond_predicate_in_a_region_stays_a_tensor() {
         use crate::graph::ir::{Arg, OpTarget};
 
@@ -1813,7 +2052,9 @@ mod tests {
 
         // Dim-order route: the factory's effect folds the predicate at ingest.
         let mut deferred = build();
-        let effects = IrFuseZeroInputConstantsEffectPass.run(&mut deferred).effects;
+        let effects = IrFuseZeroInputConstantsEffectPass
+            .run(&mut deferred)
+            .effects;
         let mut store = TensorStore::new();
         let mut converted =
             crate::ingest::from_ir::graph_from_ir_preserve_placeholders(&deferred, &mut store);
