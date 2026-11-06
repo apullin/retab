@@ -135,11 +135,8 @@ Python passes on captured graphs in `tests/fixtures/layout_replay/` and
 compares the results.
 
 RETAB's earlier model, which recorded a channels-last `tosa_dim_order` in node
-metadata for the serializer to apply, no longer runs (APU-162). Its serializer
-side is dead code until it is deleted: the branches that
-`Graph::is_explicit_layout` (always true) switches off,
-`serialize/output_layout.rs`, `serialize/transpose_peephole.rs`, and the
-`tosa_dim_order` readers in ingest and the serializer.
+metadata for the serializer to apply, is deleted (APU-162): ingest and the
+serializer take each node's layout from its val.
 
 ## Metadata and constants
 
@@ -203,8 +200,7 @@ emitted in stock's pre-order: cond branches as `[1, 2]`, while loops as
 [../src/serialize/mod.rs](../src/serialize/mod.rs) coordinates serialization
 and clears per-serialization shape/dtype caches. The implementation is split
 across `collection.rs`, `constant_pool.rs`, `tensor_layout.rs`,
-`output_layout.rs`, `transpose_peephole.rs`, `attribute_flatbuffer.rs`, and
-`flatbuffer.rs`.
+`attribute_flatbuffer.rs`, and `flatbuffer.rs`.
 
 `serialize/visitors/mod.rs` builds a domain-registered emitter dispatch table
 keyed by `graph::ir::OpTarget`. Each visitor receives `EmitContext` and
