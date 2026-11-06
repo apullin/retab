@@ -31,8 +31,11 @@
 //! defers nested visits onto a stack (`visit`, `:457-485`), which is not a
 //! recursive DFS, and that order decides which permutation a node reached on
 //! two paths gets; [`Detector::visit`] keeps the same stack discipline. torch.fx
-//! iterates `node.users` in insertion order, which after rc4's retraces is graph
-//! order, so users are visited in graph order; `all_input_nodes` is positional
+//! iterates `node.users` in insertion order, which after a retrace is graph
+//! order, so users are visited in graph order. (rc4's propagation passes do not
+//! retrace between their propagation steps, so when they call this pass FX's
+//! order can differ; that changes the result only for a node a search reaches
+//! on two paths with different permutations.) `all_input_nodes` is positional
 //! args, then kwargs sorted by name (RETAB keeps kwargs in a map).
 //!
 //! Where RETAB's IR differs from rc4's at this point of the pipeline:
@@ -50,9 +53,10 @@
 //!   node's value (`:451-453`). The port re-derives only the values a rewrite
 //!   can change, in graph order: the region, the views it remaps, the nodes it
 //!   creates and the permutes it rewrites, then any node whose input value
-//!   changed (see [`refresh`]). A value torch would reject panics, as rc4's
-//!   retrace raises. The retrace also renames call nodes after their targets;
-//!   RETAB keeps the names.
+//!   changed (see [`refresh`]). Dtypes stay as recorded (`layout::shape`),
+//!   except a RESCALE's, which is its dtype argument as in rc4's fake kernel. A
+//!   value torch would reject panics, as rc4's retrace raises. The retrace also
+//!   renames call nodes after their targets; RETAB keeps the names.
 //! - **Edge order.** rc4 iterates `edges_in` and `constant_edges_in`, sets of
 //!   node pairs, in an order that depends on object addresses, and the order
 //!   can matter. Each compensating node goes directly after its constant
