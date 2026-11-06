@@ -36,6 +36,17 @@ pub(crate) mod normalize_delegate_io;
 pub(crate) mod pending;
 #[allow(dead_code)]
 pub(crate) mod pointwise;
+// rc4's pool argument helpers; IrDecomposeAvgPoolPad shares the pad adjustment.
+#[allow(dead_code)]
+pub(crate) mod pool;
+// rc4's RewriteAvgPool2dPass, RewriteMaxPool2dPass and RewriteUpsamplePass for
+// explicit mode (APU-156, P2 S7).
+#[allow(dead_code)]
+pub(crate) mod rewrite_avg_pool2d;
+#[allow(dead_code)]
+pub(crate) mod rewrite_max_pool2d;
+#[allow(dead_code)]
+pub(crate) mod rewrite_upsample;
 #[allow(dead_code)]
 pub(crate) mod shape;
 
