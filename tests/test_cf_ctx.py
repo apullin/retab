@@ -1,4 +1,4 @@
-"""Focused tests for control-flow delegate context helpers."""
+"""Focused tests for the delegate metadata helper."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def _load_cf_ctx():
     return module
 
 
-_delegate_output_contract = _load_cf_ctx()._delegate_output_contract
+_collect_delegate_info_meta = _load_cf_ctx()._collect_delegate_info_meta
 
 
 @dataclass
@@ -31,69 +31,36 @@ class _DummyNode:
     meta: dict = field(default_factory=dict)
 
 
-def test_delegate_output_contract_reinterprets_table_output_layout_shape():
-    source = _DummyNode(
-        "source",
-        target="aten.sigmoid.default",
-        meta={
-            "val": torch.randn(1, 8, 4, 4),
-            "tosa_dim_order": (0, 2, 3, 1),
-        },
-    )
-    table = _DummyNode(
-        "table",
-        target="tosa.TABLE",
-        args=(source,),
-        meta={
-            "val": torch.randn(1, 8, 4, 4),
-            "tosa_dim_order": (0, 2, 3, 1),
-        },
-    )
-    rescale = _DummyNode(
-        "table_rescale",
-        target="tosa.RESCALE",
-        args=(table,),
-        meta={
-            "val": torch.randn(1, 8, 4, 4),
-            "tosa_dim_order": (0, 2, 3, 1),
-        },
-    )
-    output_layout = _DummyNode(
-        "sigmoid_output_layout",
-        target="tosa.TRANSPOSE",
-        args=(rescale, (0, 3, 1, 2)),
-        meta={
-            "val": torch.randn(1, 4, 8, 4),
-            "tosa_dim_order": (0, 2, 3, 1),
-        },
-    )
+class _DummyGraph:
+    def __init__(self, output):
+        self._output = output
 
-    fake_val, dim_order = _delegate_output_contract(output_layout)
-
-    assert tuple(fake_val.shape) == (1, 8, 4, 4)
-    assert dim_order == (0, 1, 2, 3)
+    def output_node(self):
+        return self._output
 
 
-def test_delegate_output_contract_leaves_normal_output_layout_transpose_unchanged():
-    source = _DummyNode(
-        "source",
-        target="aten.add.Tensor",
-        meta={
-            "val": torch.randn(1, 8, 4, 4),
-            "tosa_dim_order": (0, 2, 3, 1),
-        },
-    )
-    output_layout = _DummyNode(
-        "add_output_layout",
-        target="tosa.TRANSPOSE",
-        args=(source, (0, 3, 1, 2)),
-        meta={
-            "val": torch.randn(1, 4, 8, 4),
-            "tosa_dim_order": (0, 2, 3, 1),
-        },
-    )
+@dataclass
+class _DummyGraphModule:
+    graph: _DummyGraph
 
-    fake_val, dim_order = _delegate_output_contract(output_layout)
 
-    assert fake_val is output_layout.meta["val"]
-    assert dim_order == (0, 2, 3, 1)
+def _graph_module(outputs) -> _DummyGraphModule:
+    output = _DummyNode("output", op="output", args=(outputs,))
+    return _DummyGraphModule(_DummyGraph(output))
+
+
+def test_delegate_info_meta_lists_every_output_leaf_in_order():
+    first = _DummyNode("first", meta={"val": torch.randn(1, 8, 4, 4)})
+    second = _DummyNode("second", meta={"val": torch.randn(2)})
+    untyped = _DummyNode("untyped")
+
+    outputs = (first, [second, None], (untyped,))
+    info = _collect_delegate_info_meta(_graph_module(outputs))
+
+    entries = info["output_meta"]
+    assert all(set(entry) == {"fake_val", "node_name"} for entry in entries)
+    assert [entry["node_name"] for entry in entries] == ["first", "second", "untyped"]
+    assert entries[0]["fake_val"] is first.meta["val"]
+    assert entries[1]["fake_val"] is second.meta["val"]
+    assert entries[2]["fake_val"] is None
+
