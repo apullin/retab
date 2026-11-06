@@ -2437,3 +2437,8 @@ mod tests {
         assert!(expand_shape(&[2, 3], &[4, 3]).is_err());
     }
 }
+
+// Adversarial review tests (APU-158 review), with access to the private caches.
+#[cfg(test)]
+#[path = "remove_permutes_review_tests.rs"]
+mod review_tests;
