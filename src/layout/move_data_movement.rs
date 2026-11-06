@@ -46,12 +46,16 @@
 //! `node.users` insertion order; which narrowing RESCALE a split serves first
 //! changes only node names.
 //!
-//! **Divergences** (only where rc4's own rewrite is unsound): rc4 moves a
-//! permute before a RESCALE that has other users too, which rewires them to
-//! the permuted value. When such a user comes before the permute, rc4's lint
-//! raises, and so does the port. Otherwise rc4's retrace re-derives the
-//! values downstream by fake execution; the port re-derives those it has a
-//! local rule for (`layout::shape`) and leaves the rest.
+//! **Unsound rewrites.** rc4 moves a permute before a RESCALE that has other
+//! users too, which rewires them to the permuted value, and moves a casting
+//! `_to_dim_order_copy` across a RESCALE, which changes the dtype its users
+//! see. The port does the same. Where a rewired user comes before the
+//! permute, rc4's lint raises and the port panics. Otherwise rc4's retrace
+//! re-derives the values downstream by fake execution; the port re-derives
+//! them with `layout::shape`'s rules ([`retraced_facts`]), and where it has no
+//! rule, or rc4's retrace would raise on a shape it can't derive, it keeps the
+//! old value. The replay fixtures and a 2529-case fuzz run match rc4 in every
+//! case, including the 28 and 135 where rc4 raises.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet};
