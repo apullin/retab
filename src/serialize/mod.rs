@@ -15,7 +15,7 @@ mod explicit_rewrite_conv_tests;
 mod flatbuffer;
 pub(crate) mod op_semantics;
 mod output_layout;
-mod tensor_layout;
+pub(crate) mod tensor_layout;
 mod transpose_peephole;
 
 use crate::graph::Graph;

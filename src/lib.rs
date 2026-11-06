@@ -301,6 +301,7 @@ fn apply_pre_submodule_qparam_propagation_ir(
 }
 
 fn ingest_and_serialize_tosa_pybytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
+    let started = std::time::Instant::now();
     let profile = crate::config::profile_ingest_serialize_enabled();
     let mut stashed = take_stashed_hierarchy();
     let Some((mut ir, effects)) = stashed.parent.take() else {
@@ -368,6 +369,12 @@ fn ingest_and_serialize_tosa_pybytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
             graphs.len(),
             graphs.iter().map(|(_, g)| g.order.len()).sum::<usize>(),
             store.buffers.len(),
+        );
+    }
+    if std::env::var_os("RETAB_PASS_TIMING").is_some() {
+        eprintln!(
+            "[RETAB][pass-timing] ingest and serialize: {:.2} ms",
+            started.elapsed().as_secs_f64() * 1e3
         );
     }
     Ok(py_bytes)

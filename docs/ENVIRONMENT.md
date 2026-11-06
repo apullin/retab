@@ -43,6 +43,7 @@ instead takes the first readable string value.
 
 | Variable(s) | Read helper and consumers | Effect and default |
 | --- | --- | --- |
+| `RETAB_PASS_TIMING` | None | `src/fx_ir.rs`: `run_ir_pipeline`; `src/lib.rs`: `ingest_and_serialize_tosa_pybytes` | Presence prints each IR pipeline run's total time and its 15 slowest passes, plus the ingest-and-serialize time, to stderr. Unset disables it. |
 | `RETAB_PROFILE_INGEST_SERIALIZE` | `profile_ingest_serialize_enabled`; `src/lib.rs`: `ingest_and_serialize_tosa_pybytes` | Presence prints the final from-IR graph, node, and tensor counts to stderr after serialization. Unset disables it. |
 | `ARM_FOLD_FALLBACK_FILE` | `fold_fallback_file`; `src/lib.rs`: `fold_fallback_log`, called by `fx_fuse_constant_inputs_ir.rs`, `fx_fuse_zero_input_constants_ir.rs`, `fx_insert_table_ops_ir.rs`, and `ingest/from_ir.rs` | File path for appended constant-materialization and missing-constant diagnostics. Unset disables logging; open/write errors are ignored. These records describe Rust constant handling, not stock backend fallback counts. |
 | `RETAB_FROM_IR_DEBUG`, `ARM_FROM_IR_DEBUG` | `from_ir_debug_enabled`, `from_ir_debug_is_set`; `src/lib.rs`, `ingest/from_ir.rs`, `control_flow/assembly.rs`, `control_flow/contracts.rs` | Exactly `1` enables converted-graph dumps and control-flow boundary diagnostics. Presence alone also enables submodule-reference diagnostics in `graph_from_ir_ext`. Unset disables both. |

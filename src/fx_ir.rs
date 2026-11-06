@@ -2172,6 +2172,8 @@ pub fn run_ir_pipeline(
 
     let mut any_modified = false;
     let mut effects = LoweringEffectBatch::default();
+    let timing = std::env::var_os("RETAB_PASS_TIMING").is_some();
+    let mut pass_times: Vec<(String, std::time::Duration)> = Vec::new();
     let probe = crate::config::debug_node_probe();
     let probe_after = |graph: &IrGraph, pass: &str| {
         let Some(needle) = probe.as_deref() else {
@@ -2193,6 +2195,7 @@ pub fn run_ir_pipeline(
 
     for (i, step) in steps.iter().enumerate() {
         let before = graph.live_node_count();
+        let started = std::time::Instant::now();
         let (name, modified) = match step {
             PipelineStep::Ir(pass) => {
                 log_pass_start("IrPipeline", i, steps.len(), pass.name());
@@ -2208,12 +2211,32 @@ pub fn run_ir_pipeline(
                 (pass.name(), changed)
             }
         };
+        if timing {
+            pass_times.push((name.to_owned(), started.elapsed()));
+        }
         log_pass_result("IrPipeline", name, modified, before, graph.live_node_count());
         probe_after(&graph, name);
         any_modified |= modified;
     }
 
+    if timing {
+        report_pass_times(&mut pass_times, graph.live_node_count());
+    }
     (any_modified, graph, effects)
+}
+
+/// `RETAB_PASS_TIMING`: the pipeline's total and its slowest passes, on stderr.
+fn report_pass_times(pass_times: &mut [(String, std::time::Duration)], nodes: usize) {
+    let total: std::time::Duration = pass_times.iter().map(|(_, time)| *time).sum();
+    eprintln!(
+        "[RETAB][pass-timing] {} passes, {:.2} ms, {nodes} live nodes after",
+        pass_times.len(),
+        total.as_secs_f64() * 1e3
+    );
+    pass_times.sort_by_key(|(_, time)| std::cmp::Reverse(*time));
+    for (name, time) in pass_times.iter().take(15) {
+        eprintln!("[RETAB][pass-timing] {:9.2} ms  {name}", time.as_secs_f64() * 1e3);
+    }
 }
 
 #[cfg(test)]

@@ -163,7 +163,7 @@ fn weight_permutation_plan(shape: &[i64], kind: WeightPermKind) -> Option<(Vec<i
 }
 
 /// Permute a tensor's raw bytes according to an arbitrary output-axis order.
-fn permute_tensor_by_order(
+pub(crate) fn permute_tensor_by_order(
     data: &[u8],
     shape: &[i64],
     elem_size: usize,
