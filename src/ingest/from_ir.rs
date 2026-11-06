@@ -130,12 +130,14 @@ fn graph_from_ir_ext(
         } else {
             OpTarget::Other(ir_node.target.clone())
         };
+        let mut meta = map_meta(&ir_node.meta);
+        meta.table_rescale_split = crate::layout::pending::has_split_rescale(ir_node);
         let node = Node {
             op,
             target,
             args: SmallVec::new(),
             kwargs: Vec::new(),
-            meta: map_meta(&ir_node.meta),
+            meta,
             users: SmallVec::new(),
             name: ir_node.name.clone(),
         };
@@ -365,7 +367,9 @@ fn apply_effects_ext(
 
 /// Replace a unary math node (e.g. `tan`, `sigmoid`) with a TOSA TABLE op fed by
 /// the precomputed table constant. INT8 table -> INT8 output; INT16 -> INT32
-/// output with a trailing rescale of 2^rescale_lshift.
+/// output with a trailing rescale of 2^rescale_lshift, unless the table's RESCALE
+/// is already its own node (`NodeMeta::table_rescale_split`, `layout::pending`),
+/// where the TABLE stands alone and that node does the shift.
 fn apply_precomputed_table(
     graph: &mut Graph,
     store: &mut TensorStore,
@@ -375,14 +379,19 @@ fn apply_precomputed_table(
     let Some(&nid) = name_map.get(&e.node_name) else {
         return false;
     };
-    let (input_arg, out_shape, dim_order) = {
+    let (input_arg, out_shape, dim_order, rescale_split) = {
         let Some(n) = graph.nodes.get(nid) else {
             return false;
         };
         let Some(input_arg) = n.args.first().cloned() else {
             return false;
         };
-        (input_arg, n.meta.val, n.meta.tosa_dim_order.clone())
+        (
+            input_arg,
+            n.meta.val,
+            n.meta.tosa_dim_order.clone(),
+            n.meta.table_rescale_split,
+        )
     };
 
     // Table constant node.
@@ -430,8 +439,8 @@ fn apply_precomputed_table(
 
     // INT16 TABLE produces INT32; a trailing rescale by 2^rescale_lshift aligns
     // it while staying INT32. The eventual INT16 quantization is done by a
-    // downstream rescale.
-    if e.input.dtype == DType::Int16 {
+    // downstream rescale. A split table's RESCALE is already in the graph.
+    if e.input.dtype == DType::Int16 && !rescale_split {
         let scale = 2.0_f64.powi(e.rescale_lshift as i32);
         let rescale_name = format!("{}_table_rescale", e.node_name);
         // The rescale's destination dtype is the effect's carried output dtype

@@ -1371,3 +1371,74 @@ fn explicit_graphs_carrying_dim_orders_go_to_stock() {
         "{error}"
     );
 }
+
+/// APU-135 P3: a 16-bit pending table that a layout pass left split (`layout::pending`).
+/// rc4's InsertTableOpsPass gives a 16-bit table that needs a left shift two nodes, a
+/// TABLE returning int32 and a RESCALE by `2**lshift` (insert_table_ops.py:400-417), and
+/// rc4's Down pass can park a rank-changing view between them. RETAB holds the two in the
+/// pending table and splits them for the propagation passes; one that stays split has its
+/// RESCALE as a node of its own after the view. Ingest must then emit the TABLE alone, or
+/// the shift happens twice: once in the RESCALE ingest appends to every 16-bit TABLE and
+/// once in the RESCALE node.
+#[test]
+fn a_split_16_bit_table_serializes_its_table_alone() {
+    use crate::fx_ir::EffectfulIrPass;
+    use crate::layout::ctx::LayoutCtx;
+    use crate::layout::pending::{has_split_rescale, split_table_rescales};
+
+    // x -> sigmoid, a 16-bit table that needs a shift of -7 (input 1/1024, output 1/32768).
+    let mut ir = IrGraph::empty();
+    let x = placeholder(&mut ir, "x", [2, 3], INT16);
+    let sigmoid = call(
+        &mut ir,
+        "sigmoid",
+        "aten.sigmoid.default",
+        vec![IrArg::Node(x)],
+        [2, 3],
+        FLOAT32,
+    );
+    ir.node_mut(sigmoid)
+        .meta
+        .set_unary_input_output_qparams(qp(1.0 / 1024.0, 0, INT16), qp(1.0 / 32768.0, 0, INT16));
+    output(&mut ir, sigmoid);
+    let effects = crate::fx_insert_table_ops_ir::IrInsertTableOpsEffectPass
+        .run(&mut ir)
+        .effects;
+
+    // The split, then the view the Down pass parks between the TABLE and its RESCALE.
+    {
+        let mut ctx = LayoutCtx::new(&mut ir);
+        assert_eq!(split_table_rescales(&mut ctx), [sigmoid]);
+        let rescale = ctx.order().next(sigmoid).expect("the RESCALE follows the table");
+        let view = ctx.inserting_after(sigmoid, |ctx| {
+            ctx.call_function(
+                "sigmoid_view",
+                "aten.view_copy.default",
+                vec![IrArg::Node(sigmoid), i64_list_arg(&[6])],
+                crate::fx_ir::NodeMeta::tensor(vec![6], INT32),
+            )
+        });
+        ctx.replace_input_with(rescale, sigmoid, view);
+        ctx.meta_mut(rescale).set_tensor_facts(crate::fx_meta::TensorFacts::new(vec![6], INT16));
+        ctx.finish();
+    }
+    assert!(has_split_rescale(ir.node(sigmoid)));
+
+    let mut store = TensorStore::new();
+    let mut graph = crate::ingest::from_ir::graph_from_ir(&ir, &mut store);
+    graph.layout = LayoutMode::Explicit;
+    crate::ingest::from_ir::apply_effects(&mut graph, &mut store, &effects);
+    crate::ingest::finalize::finalize_converted_graph(&mut graph);
+    graph.rebuild_user_lists();
+    let items = try_serialize_graph(graph, &store).unwrap();
+
+    let table = single_op(&items, Op::Table);
+    let table_out = tensor(&items, &table.outputs[0]);
+    assert_eq!((table_out.shape.as_slice(), table_out.dtype), (&[2, 3][..], DType::Int32));
+    let reshape = single_op(&items, Op::Reshape);
+    assert_eq!(reshape.inputs[0], table.outputs[0]);
+    let rescale = single_op(&items, Op::Rescale);
+    assert_eq!(rescale.inputs[0], reshape.outputs[0]);
+    let out = tensor(&items, &rescale.outputs[0]);
+    assert_eq!((out.shape.as_slice(), out.dtype), (&[6][..], DType::Int16));
+}
