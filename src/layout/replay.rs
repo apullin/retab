@@ -42,6 +42,10 @@
 //! with placeholder values; empty maps stay empty (the importer drops them,
 //! but RETAB passes create them), so the ports' handling of both is visible.
 //!
+//! Exceptions: a case recorded as `after raises <type>` (a fixture whose
+//! generator spec sets `records_raises`) expects the port to panic, as RETAB's
+//! passes fail where rc4's raise; anything else is a `no-panic` mismatch.
+//!
 //! Usage: a pass's replay test is one line,
 //! `replay::check(&IrFooPass, include_str!("../../tests/fixtures/layout_replay/foo.txt"))`.
 //! [`check_known`] names cases still expected to differ, with a reason, and
@@ -114,6 +118,9 @@ pub(crate) struct Case {
     /// The `modified` flag rc4's pass returned.
     pub(crate) modified: bool,
     pub(crate) after: Graph,
+    /// The exception type rc4's pass raised (`after raises <type>`), which the
+    /// port must answer with a panic; `after` is then a copy of `before`.
+    pub(crate) raises: Option<String>,
 }
 
 /// Which dim orders [`compare`] checks; see the module docs.
@@ -245,9 +252,14 @@ pub(crate) fn replay_case(pass: &dyn IrPass, case: &Case, options: Options) -> C
         Ok(modified) => (Some(modified), snapshot(&graph)),
         Err(payload) => (None, Err(panic_message(payload.as_ref()))),
     };
-    let mismatch = match &actual {
-        Ok(actual) => compare(&case.after, actual, options).err(),
-        Err(error) => Some(Mismatch {
+    let mismatch = match (&case.raises, &actual) {
+        (Some(_), Err(_)) if retab_modified.is_none() => None,
+        (Some(raised), _) => Some(Mismatch {
+            class: "no-panic",
+            detail: format!("rc4 raised {raised}; RETAB did not panic"),
+        }),
+        (None, Ok(actual)) => compare(&case.after, actual, options).err(),
+        (None, Err(error)) => Some(Mismatch {
             class: if retab_modified.is_none() {
                 "panic"
             } else {
@@ -263,6 +275,10 @@ pub(crate) fn replay_case(pass: &dyn IrPass, case: &Case, options: Options) -> C
                 Ok(graph) => graph.to_string(),
                 Err(error) => format!("    <{error}>\n"),
             };
+            let rc4_after = match &case.raises {
+                Some(raised) => format!("    <raises {raised}>\n"),
+                None => case.after.to_string(),
+            };
             format!(
                 "case {} ({}): {}\n  before:\n{}  rc4 after (modified={}):\n{}  RETAB after (modified={}):\n{}",
                 case.name,
@@ -270,7 +286,7 @@ pub(crate) fn replay_case(pass: &dyn IrPass, case: &Case, options: Options) -> C
                 mismatch.detail,
                 case.before,
                 case.modified,
-                case.after,
+                rc4_after,
                 retab_modified.map_or("panic".to_string(), |modified| modified.to_string()),
                 actual
             )
@@ -339,6 +355,24 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Case>, String> {
         let (number, header) = lines
             .next()
             .ok_or_else(|| format!("case {name}: missing `after`"))?;
+        if let Some(raised) = header.strip_prefix("after raises ") {
+            match lines.next() {
+                Some((_, "end")) => {}
+                Some((number, line)) => {
+                    return Err(at(number, format!("expected `end`, got {line:?}")))
+                }
+                None => return Err(format!("case {name}: missing `end`")),
+            }
+            check_dead_flags(&before).map_err(|error| format!("case {name} (before): {error}"))?;
+            cases.push(Case {
+                name: name.to_string(),
+                after: before.clone(),
+                before,
+                modified: false,
+                raises: Some(raised.to_string()),
+            });
+            continue;
+        }
         let rest = header.strip_prefix("after modified=").ok_or_else(|| {
             at(
                 number,
@@ -374,6 +408,7 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Case>, String> {
             before,
             modified,
             after,
+            raises: None,
         });
     }
     Ok(cases)

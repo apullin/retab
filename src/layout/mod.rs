@@ -50,3 +50,6 @@ mod p1_review_tests;
 mod p1_replay_tests;
 #[cfg(test)]
 pub(crate) mod replay;
+// rc4 replays of RemovePermutesAroundElementwiseTosaOps (APU-158).
+#[cfg(test)]
+mod remove_permutes_replay_tests;

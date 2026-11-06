@@ -53,12 +53,16 @@
 //!   changed (see [`refresh`]). A value torch would reject panics, as rc4's
 //!   retrace raises. The retrace also renames call nodes after their targets;
 //!   RETAB keeps the names.
-//! - **Constant compensation order.** Each compensating node goes directly
-//!   after its constant (`:850`), so the nodes for one constant feeding several
-//!   region nodes land in the reverse of the order rc4 iterates
-//!   `constant_edges_in`, a set of node pairs whose order depends on object
-//!   addresses. The port iterates it in graph order of (constant, user); the
-//!   replay generator pins rc4 to the same order.
+//! - **Edge order.** rc4 iterates `edges_in` and `constant_edges_in`, sets of
+//!   node pairs, in an order that depends on object addresses, and the order
+//!   can matter. Each compensating node goes directly after its constant
+//!   (`:850`), so the nodes for one constant feeding several region nodes land
+//!   in reverse iteration order. And `replace_input_with` rewrites every use,
+//!   so when one bypassed permute feeds another into the same region node,
+//!   bypassing the downstream one first lets the upstream bypass rewrite both
+//!   uses (`:832-838`). The port iterates both sets in graph order of their
+//!   pairs, which also gives the correct rewrite in the second case; the replay
+//!   generator pins rc4 to the same order.
 //!
 //! # Complexity
 //!
@@ -1535,8 +1539,12 @@ fn permute_subgraph(
         update_interleave(ctx, head, triple, &subgraph.start_of(head));
     }
 
-    // Skip the incoming permutes (`:831-838`).
-    for &(input, out) in subgraph.edges_in.iter() {
+    // Skip the incoming permutes (`:831-838`), in graph order of (permute,
+    // user): `replace_input_with` rewrites every use, so when one bypassed
+    // permute feeds another into the same node, the order decides what the
+    // node reads.
+    let edges_in = in_graph_order(ctx, subgraph.edges_in.iter().copied());
+    for (input, out) in edges_in {
         rewrite.bypassed.insert(input);
         let source = first_arg_node(ctx.node(input))
             .or_else(|| ctx.node(input).kwargs.get("input").and_then(IrArg::as_node))
@@ -1547,16 +1555,8 @@ fn permute_subgraph(
 
     // Compensate the constant inputs (`:840-873`), in graph order of
     // (constant, user).
-    let mut constant_edges: Vec<(u64, u64, NodeId, NodeId)> = subgraph
-        .constant_edges_in
-        .iter()
-        .map(|&(constant, user)| {
-            let key = |id| ctx.order().key(id).expect("region nodes are placed");
-            (key(constant), key(user), constant, user)
-        })
-        .collect();
-    constant_edges.sort_unstable();
-    for (_, _, constant, user) in constant_edges {
+    let constant_edges = in_graph_order(ctx, subgraph.constant_edges_in.iter().copied());
+    for (constant, user) in constant_edges {
         let const_shape = ctx.graph().node_shape_vec(constant);
         let node_end_perm = subgraph.end_of(user);
         let permute_rank = node_end_perm.len();
@@ -1608,6 +1608,20 @@ fn permute_subgraph(
         rewrite.seeds.push(*out);
     }
     true
+}
+
+/// `edges` sorted by the graph positions of their nodes: the order the replay
+/// generator pins rc4's address-ordered edge sets to (see the module docs).
+fn in_graph_order(
+    ctx: &LayoutCtx<'_>,
+    edges: impl Iterator<Item = (NodeId, NodeId)>,
+) -> Vec<(NodeId, NodeId)> {
+    let key = |id| ctx.order().key(id).expect("region edges join placed nodes");
+    let mut keyed: Vec<(u64, u64, NodeId, NodeId)> = edges
+        .map(|(from, to)| (key(from), key(to), from, to))
+        .collect();
+    keyed.sort_unstable();
+    keyed.into_iter().map(|(_, _, from, to)| (from, to)).collect()
 }
 
 /// `_subgraph_edges_are_current` (`:887-929`): whether an earlier rewrite
