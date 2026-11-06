@@ -6,9 +6,10 @@
 //! RewriteUpsamplePass and RewriteAvgPool2dPass (alone and with the
 //! ComputeConstantOpsAOTPass after it) receive and return. The tests below pin
 //! what the fixtures hold, so a regeneration that drops a case or loses a
-//! detail fails here. The ports don't exist yet: each has a commented-out
-//! replay hook below for S3, S4 and S7 to enable, followed by the tests that
-//! pin the S1 review's findings.
+//! detail fails here. Each port has a replay hook below: IrRewriteConv's (S3,
+//! and S4's A16W8 and U55 fixtures) are enabled, the pool and upsample ports'
+//! (S7) are still commented out. The tests that pin the S1 review's findings
+//! follow them.
 
 use std::collections::BTreeSet;
 
