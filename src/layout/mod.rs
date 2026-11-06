@@ -6,6 +6,8 @@
 //! top of it. Until those passes land, only tests reach these modules.
 
 #[allow(dead_code)]
+pub(crate) mod canonicalize;
+#[allow(dead_code)]
 pub(crate) mod ctx;
 #[allow(dead_code)]
 pub(crate) mod dim_maps;
