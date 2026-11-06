@@ -21,22 +21,22 @@ pub enum SdpaSafeSoftmaxGuardPolicy {
     Auto,
 }
 
-/// The layout model the pipeline lowers with. APU-135 runs the two side by side until
-/// explicit mode reaches parity, then deletes `DimOrder`.
+/// The layout model the pipeline lowers with. Explicit mode is the default; dim-order
+/// mode stays selectable (`RETAB_LAYOUT=dim_order`) until P4 deletes it (APU-162).
 ///
-/// - `DimOrder` (RETAB's model): nodes keep logical shapes, and `IrToTosaMemoryFormat`
-///   gives them a channels-last `tosa_dim_order` that the serializer applies.
 /// - `Explicit` (rc4's model): a node's val is its TOSA shape, and every layout change
 ///   is a permute node, lowered one-to-one to TRANSPOSE
 ///   (`backends/arm/_passes/aten_to_tosa_data_layout.py:60-68`).
+/// - `DimOrder` (RETAB's earlier model): nodes keep logical shapes, and
+///   `IrToTosaMemoryFormat` gives them a channels-last `tosa_dim_order` that the
+///   serializer applies.
 ///
 /// `fx_pipeline::lowering_steps` builds each mode's pipeline. Explicit mode is rc4's
-/// order without its permute/view propagation, which P3 ports, so it lowers correctly
-/// but with extra TRANSPOSEs.
+/// order, its permute/view propagation included (APU-135).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LayoutMode {
-    #[default]
     DimOrder,
+    #[default]
     Explicit,
 }
 
@@ -262,15 +262,15 @@ mod tests {
     }
 
     #[test]
-    fn layout_defaults_to_dim_order_and_parses_only_exact_names() {
+    fn layout_defaults_to_explicit_and_parses_only_exact_names() {
         for spec in ["TOSA-1.0+INT+int16+int4+u55", "TOSA-1.0+INT+int16+int4+cf"] {
             let config = PipelineConfig::from_tosa_spec(spec);
-            assert_eq!(config.layout, LayoutMode::DimOrder);
-            let explicit = PipelineConfig {
-                layout: LayoutMode::Explicit,
+            assert_eq!(config.layout, LayoutMode::Explicit);
+            let dim_order = PipelineConfig {
+                layout: LayoutMode::DimOrder,
                 ..config
             };
-            assert!(explicit.validate().is_ok());
+            assert!(dim_order.validate().is_ok());
         }
         assert_eq!("dim_order".parse(), Ok(LayoutMode::DimOrder));
         assert_eq!("explicit".parse(), Ok(LayoutMode::Explicit));

@@ -39,7 +39,7 @@ def test_pipeline_config_from_ethosu_compile_spec(monkeypatch, target, tosa_spec
         "leaky_relu": "DECOMPOSE",
         "quantize_inf": {"neg_inf": -256.0, "pos_inf": 255.0},
         "sdpa_safe_softmax_guard": "PRESERVE",
-        "layout": "dim_order",
+        "layout": "explicit",
     }
     assert not rp._has_non_default_pipeline_config(compile_spec)
     compile_spec._set_tosa_dev_mode(True)
@@ -142,8 +142,8 @@ def _main_block_ops(tosa: bytes) -> list[int]:
     return [block.Operators(i).Op() for i in range(block.OperatorsLength())]
 
 
-def test_missing_layout_means_dim_order_and_explicit_mode_rewrites_the_conv():
-    """A missing key means dim_order. Explicit mode builds rc4's pipeline (APU-157): the
+def test_missing_layout_means_explicit_and_explicit_mode_rewrites_the_conv():
+    """A missing key means explicit (APU-161). Explicit mode builds rc4's pipeline: the
     conv becomes a channels-last TOSA CONV2D on a pre-permuted weight between explicit
     TRANSPOSEs, so nothing reaches the serializer's aten-conv guard (P2 design X5) and
     the graph stays with RETAB."""
@@ -157,14 +157,14 @@ def test_missing_layout_means_dim_order_and_explicit_mode_rewrites_the_conv():
     config = rp._build_pipeline_config(TosaCompileSpec("TOSA-1.0+INT"))
     del config["layout"]
     tosa = []
-    for layout in [None, "dim_order", "explicit"]:
+    for layout in [None, "explicit", "dim_order"]:
         layout_config = config if layout is None else {**config, "layout": layout}
         _native.run_fx_passes(program.graph_module, program, pipeline_config=layout_config)
         tosa.append(_native.ingest_and_serialize())
     assert tosa[0] and tosa[0] == tosa[1]
 
-    ops = _main_block_ops(tosa[2])
-    assert tosa[2] != tosa[0]
+    ops = _main_block_ops(tosa[1])
+    assert tosa[2] != tosa[1]
     assert ops.count(Op.Op.CONV2D) == 1
     # The input permute to NHWC and the output permute back; the weight is a constant.
     assert ops.count(Op.Op.TRANSPOSE) == 2

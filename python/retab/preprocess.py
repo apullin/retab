@@ -408,7 +408,7 @@ def _has_registered_pass_insertions() -> bool:
 
 def _build_pipeline_config(compile_spec: TosaCompileSpec) -> dict:
     """The compile spec's pipeline settings, plus the layout model from RETAB_LAYOUT."""
-    layout = _env_get("RETAB_LAYOUT", default="dim_order")
+    layout = _env_get("RETAB_LAYOUT", default="explicit")
     if layout not in ("dim_order", "explicit"):
         raise ValueError(f"RETAB_LAYOUT must be 'dim_order' or 'explicit', got {layout!r}")
     return {

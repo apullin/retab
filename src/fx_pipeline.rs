@@ -588,7 +588,7 @@ mod tests {
     #[test]
     fn rc4_fusions_and_cleanup_are_ordered_in_parent_and_region_pipelines() {
         for spec in ["TOSA-1.0+FP", "TOSA-1.0+INT+u55", "TOSA-1.0+INT+cf"] {
-            let config = PipelineConfig::from_tosa_spec(spec);
+            let config = dim_order(spec);
             for names in [
                 pass_names(lowering_steps(true, &config)),
                 pass_names(build_ir_cond_submodule_pipeline(&config)),
@@ -740,6 +740,13 @@ mod tests {
         }
     }
 
+    fn dim_order(spec: &str) -> PipelineConfig {
+        PipelineConfig {
+            layout: LayoutMode::DimOrder,
+            ..PipelineConfig::from_tosa_spec(spec)
+        }
+    }
+
     #[test]
     fn dim_order_mode_keeps_its_layout_passes_in_parent_and_region_pipelines() {
         let builders: [fn(&PipelineConfig) -> Vec<PipelineStep>; 3] = [
@@ -752,7 +759,7 @@ mod tests {
             "TOSA-1.0+INT+int16+int4+u55",
             "TOSA-1.0+INT+int16+int4+cf",
         ] {
-            let dim_order = PipelineConfig::from_tosa_spec(spec);
+            let dim_order = dim_order(spec);
             for build in builders {
                 let names = pass_names(build(&dim_order));
                 for pass in DIM_ORDER_ONLY.iter().chain(&RETAB_ONLY) {
@@ -979,7 +986,7 @@ mod tests {
             "IrExplicitControlFlowOutputGuard",
         ];
         for spec in ["TOSA-1.0+INT+int16+int4+u55", "TOSA-1.0+INT+int16+int4+cf"] {
-            let dim_order = PipelineConfig::from_tosa_spec(spec);
+            let dim_order = dim_order(spec);
             let config = explicit(spec);
             for (dim_order_names, explicit_names) in [
                 (
@@ -1078,7 +1085,7 @@ mod tests {
         assert_eq!(graph.node_shape(mask.id), Some([1, 2, 5].as_slice()));
         assert_eq!(mask.arg_node(0), Some(live_node(&graph, "mask").id));
 
-        let graph = lower(&PipelineConfig::from_tosa_spec("TOSA-1.0+INT"));
+        let graph = lower(&dim_order("TOSA-1.0+INT"));
         let mask = where_mask(&graph);
         assert_eq!(mask.target, "aten.expand_copy.default");
         assert_eq!(graph.node_shape(mask.id), Some([3, 2, 5].as_slice()));
