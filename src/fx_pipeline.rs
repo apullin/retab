@@ -512,10 +512,6 @@ fn explicit_phase6_steps(
                 split_permutes: config.u55_split_permutes.clone(),
             },
         )),
-        // RETAB-only; kept through P2 (design §1b slot 12).
-        Ir(Box::new(
-            crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
-        )),
         Ir(Box::new(crate::fx_rewrite_slice_ir::IrRewriteSlicePass)),
         Ir(Box::new(
             crate::fx_fuse_consecutive_slices_ir::IrFuseConsecutiveSlicesPass,
@@ -695,7 +691,7 @@ mod tests {
 
     /// rc4's phase-6 block (APM:715-749) as explicit mode builds it, in
     /// IrToTosaMemoryFormat's slot right after the first late IrRemoveNoop.
-    const EXPLICIT_PHASE6: [&str; 20] = [
+    const EXPLICIT_PHASE6: [&str; 19] = [
         "IrRewriteUpsample",
         "IrRewriteMaxPool2d",
         "IrRewriteConv",
@@ -710,7 +706,6 @@ mod tests {
         "IrRewriteCatSlice",
         "IrFuseConsecutiveConcats",
         "IrDecomposePermuteForU55",
-        "IrFuseCascadedViews",
         "IrRewriteSlice",
         "IrFuseConsecutiveSlices",
         "IrRemoveNoop",
@@ -979,10 +974,14 @@ mod tests {
                     .collect();
                 shared.sort();
                 explicit_shared.sort();
-                // The steps of a pass that explicit mode drops in one place only: dim-order
-                // mode's with_data_slices IrFuseConstantInputsEp, and the IrFuseCascadedViews
-                // after phase 6.
-                for dropped in ["IrFuseConstantInputsEp", "IrFuseCascadedViews"] {
+                // The steps of a pass that explicit mode drops in some places only:
+                // dim-order mode's with_data_slices IrFuseConstantInputsEp, and the
+                // IrFuseCascadedViews in and after phase 6.
+                for dropped in [
+                    "IrFuseConstantInputsEp",
+                    "IrFuseCascadedViews",
+                    "IrFuseCascadedViews",
+                ] {
                     let index = shared.iter().position(|name| name == dropped).unwrap();
                     shared.remove(index);
                 }
