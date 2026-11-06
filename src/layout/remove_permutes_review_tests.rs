@@ -136,16 +136,6 @@ fn open_residual_stream(blocks: usize) -> LayoutGraph {
     g
 }
 
-/// Read-set entries the memo holds, counting each shared set once.
-fn memo_entries(memo: &RemovePermutesMemo) -> usize {
-    let mut seen = HashSet::new();
-    memo.failed
-        .values()
-        .filter(|reads| seen.insert(Rc::as_ptr(reads).cast::<(NodeId, u64)>() as usize))
-        .map(|reads| reads.len())
-        .sum()
-}
-
 /// One call on `open_residual_stream(blocks)`: search steps, memo read-set
 /// entries and wall time, with the test builds' per-edit checks off.
 fn measure_open_stream(blocks: usize) -> (usize, usize, std::time::Duration) {
@@ -162,22 +152,23 @@ fn measure_open_stream(blocks: usize) -> (usize, usize, std::time::Duration) {
     let modified = remove_permutes_in_ctx(&mut ctx, &config, &mut memo, DeadCode::Local);
     let elapsed = started.elapsed();
     let steps = SEARCH_STEPS.with(std::cell::Cell::get);
-    let entries = memo_entries(&memo);
+    let entries = memo.entries();
     CHECK_SKIPPED_SEARCHES.with(|check| check.set(checks.1));
     crate::fx_ir::set_check_users_after_edit(checks.0);
     assert!(!modified);
     (steps, entries, elapsed)
 }
 
-/// Every failed search outside a closed simple component stores its whole
-/// read set (in the per-call cache and the cross-call memo), and on this
-/// stream each of the N searches reads O(N) nodes, so memory grows
-/// quadratically on top of rc4's quadratic walk (rc4 keeps no read sets).
-/// Release (`open_stream_scaling_report`): 500, 1000, 2000 and 4000 blocks
-/// take 0.12, 0.46, 2.4 and 10.8 s and hold 3, 15, 61 and 244 MiB of read
-/// sets.
+/// On this stream each of the N searches reads O(N) nodes before it fails,
+/// as in rc4. When every failed search kept its whole read set (in the
+/// per-call cache and the cross-call memo), memory grew quadratically on top
+/// of rc4's quadratic walk, where rc4 keeps nothing: 500, 1000, 2000 and
+/// 4000 blocks held 0.25M, 1.0M, 4.0M and 16.0M read-set entries (up to 244
+/// MiB). Searches with more than `EXACT_READS_CAP` reads now share one
+/// union, and the same streams hold 22,759, 23,759, 25,759 and 29,759
+/// entries for the same 0.13M to 8.0M search steps
+/// (`open_stream_scaling_report` prints the release table).
 #[test]
-#[ignore = "BUG: memo read sets grow quadratically on an open component (4000 blocks: 16M entries, 244 MiB, 10.8 s in release)"]
 fn failed_search_memory_grows_linearly_on_an_open_residual_stream() {
     let (_, small, _) = measure_open_stream(250);
     let (_, large, _) = measure_open_stream(500);
@@ -199,4 +190,56 @@ fn open_stream_scaling_report() {
             entries * std::mem::size_of::<(NodeId, u64)>() / (1 << 20)
         );
     }
+}
+
+/// Steps of each of two calls of the pass on one ctx over
+/// `open_residual_stream(blocks)`, with `between` run on the ctx between them.
+/// Test builds re-run every skipped search to check that it fails.
+fn two_calls_on_an_open_stream(
+    blocks: usize,
+    between: impl FnOnce(&mut LayoutCtx<'_>, &[NodeId]),
+) -> (usize, usize) {
+    let users = crate::fx_ir::set_check_users_after_edit(false);
+    let mut g = open_residual_stream(blocks);
+    let stream: Vec<NodeId> = g.graph().topological_live_node_ids();
+    let config = RemovePermutesConfig::tosa();
+    let mut ctx = LayoutCtx::new(g.graph_mut());
+    let mut memo = RemovePermutesMemo::default();
+    let mut run = |ctx: &mut LayoutCtx<'_>| {
+        SEARCH_STEPS.with(|steps| steps.set(0));
+        assert!(!remove_permutes_in_ctx(ctx, &config, &mut memo, DeadCode::Local));
+        SEARCH_STEPS.with(std::cell::Cell::get)
+    };
+    let first = run(&mut ctx);
+    between(&mut ctx, &stream);
+    let second = run(&mut ctx);
+    crate::fx_ir::set_check_users_after_edit(users);
+    (first, second)
+}
+
+/// The searches that read more than `EXACT_READS_CAP` nodes share the union,
+/// which proves them all again on an unchanged ctx.
+#[test]
+fn the_union_skips_an_unchanged_open_stream() {
+    let (first, second) = two_calls_on_an_open_stream(300, |_, _| {});
+    assert!(first > 300 * 150, "{first} steps");
+    assert_eq!(second, 0);
+}
+
+/// Changing a node only the search from the head read (the squeeze view
+/// pair is upstream of every other start) invalidates the union, so every
+/// search it proves runs again; the searches near the output keep their own
+/// read sets and stay skipped.
+#[test]
+fn a_changed_union_node_reruns_only_the_union_searches() {
+    let (first, second) = two_calls_on_an_open_stream(300, |ctx, stream| {
+        let view = stream
+            .iter()
+            .copied()
+            .find(|&id| ctx.node(id).target == "aten.view_copy.default")
+            .expect("the head view");
+        ctx.meta_mut(view);
+    });
+    assert!(second > 0, "the union searches run again");
+    assert!(second < first, "{second} of {first} steps: the small searches stay skipped");
 }

@@ -101,8 +101,21 @@
 //! the nodes whose value can change, and dead code goes in one sweep (O(N),
 //! as rc4's `eliminate_dead_code`) or, inside a caller that keeps the graph free
 //! of dead code, only from the nodes the call stopped using ([`DeadCode`]).
-//! Region searches that start outside closed simple components can still revisit
-//! a region once per entry permute, as rc4 does.
+//! Putting users back in graph order after a call that changed the graph is
+//! O(N), like the permute scan.
+//!
+//! The quadratic case: a region search that starts outside closed simple
+//! components can still walk a region once per entry permute, as rc4 does.
+//! When every such search walks most of a long region before it fails, the
+//! call takes O(N²) steps: a residual stream of N adds, each entered through
+//! its own permute, with one squeeze/unsqueeze view pair at its head (which
+//! makes the component open) and the output at its far end, takes N²/2
+//! (`review_tests::open_stream_scaling_report`). Memory stays linear there:
+//! a failed search keeps its own read set only while it is small, and the
+//! others share one union of what they read, so after a call the memo holds
+//! at most 16 read-set entries per node, plus 65,536, plus one union of at
+//! most N nodes (see [`Proofs`]). The price is coarser invalidation for the
+//! large searches, which a change to any node in the union re-runs.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -352,6 +365,18 @@ thread_local! {
     static SEARCH_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Whether test builds re-run each skipped search to check it fails.
     static CHECK_SKIPPED_SEARCHES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// Test override of the memo's read-set cap and budget (see [`Proofs`]).
+    static MEMO_LIMITS: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` with the memo's read-set cap and budget set to `cap` and `budget`
+/// on this thread, so small graphs reach the union and the compaction.
+#[cfg(test)]
+pub(crate) fn with_memo_limits<R>(cap: usize, budget: usize, f: impl FnOnce() -> R) -> R {
+    let saved = MEMO_LIMITS.with(|limits| limits.replace(Some((cap, budget))));
+    let result = f();
+    MEMO_LIMITS.with(|limits| limits.set(saved));
+    result
 }
 
 /// A matched repeat_interleave: `(dim, scale, expand_node, view_node)`
@@ -500,9 +525,10 @@ fn find_subgraphs(
     let mut processed: HashSet<NodeId> = HashSet::new();
     // Searches that failed without meeting a claimed node, by start node and
     // permutation: the same search fails again for the rest of the call.
-    let mut failed_starts: HashMap<(NodeId, Perm), ReadSet> = HashMap::new();
+    let mut failed_starts: HashMap<(NodeId, Perm), Proof> = HashMap::new();
     // Whether each memo read set met so far is still current.
     let mut current: HashMap<usize, (ReadSet, bool)> = HashMap::new();
+    let mut proofs = Proofs::new(ctx);
     let permutes: Vec<NodeId> = ctx
         .order()
         .iter()
@@ -520,29 +546,29 @@ fn find_subgraphs(
             {
                 continue;
             }
-            // A search known to fail is skipped; one proven by this call's
-            // caches is remembered with the read set of the proof.
-            let skipped = if let Some(reads) = failed_starts.get(&(user, start.clone())) {
-                Some(Some(reads.clone()))
-            } else if memo.known_failure(ctx, permute, user, &mut current) {
-                Some(None)
+            // A search known to fail is skipped and remembered with the proof.
+            let skipped = if let Some(proof) = failed_starts.get(&(user, start.clone())) {
+                Some(proof.clone())
+            } else if let Some(reads) = memo.fresh_proof(ctx, permute, user, &mut current) {
+                Some(Proof::Reads(reads))
             } else {
-                detector.components.known_failure(user, &start).map(Some)
+                detector.components.known_failure(user, &start).map(Proof::Reads)
             };
             if let Some(proof) = skipped {
-                // Test builds check that the skipped search does fail.
+                // Test builds check that the skipped search does fail; the
+                // check's steps are not search steps.
                 #[cfg(test)]
                 if CHECK_SKIPPED_SEARCHES.with(std::cell::Cell::get) {
+                    let steps = SEARCH_STEPS.with(std::cell::Cell::get);
                     let mut check = Subgraph::new(start.clone(), end.clone());
                     assert!(
                         !detector.visit(ctx, user, &mut check, &processed),
                         "a skipped search from {} succeeds",
                         ctx.node(user).name
                     );
+                    SEARCH_STEPS.with(|count| count.set(steps));
                 }
-                if let Some(reads) = proof {
-                    memo.record(permute, user, reads);
-                }
+                proofs.keep((permute, user), proof);
                 continue;
             }
             let mut subgraph = Subgraph::new(start.clone(), end.clone());
@@ -555,16 +581,152 @@ fn find_subgraphs(
                 continue;
             }
             detector.reads.push(permute);
-            let reads = stamp(ctx, detector.reads.iter().copied());
-            memo.record(permute, user, reads.clone());
-            failed_starts.insert((user, start.clone()), reads);
+            let proof = proofs.record(ctx, (permute, user), &detector.reads);
+            failed_starts.insert((user, start.clone()), proof);
             if detector.simple {
                 let search_reads = std::mem::take(&mut detector.reads);
                 detector.cache_component_failure(ctx, user, &start, &search_reads);
             }
         }
     }
+    memo.failed = proofs.finish(ctx);
     found
+}
+
+/// A failed search's own read set may hold at most this many reads (before
+/// deduplication); a larger one joins the call's union (see [`Proofs`]).
+const EXACT_READS_CAP: usize = 1024;
+
+/// The memo may hold this many read-set entries per node, plus
+/// [`MEMO_ENTRIES_FLOOR`], besides one union.
+const MEMO_ENTRIES_PER_NODE: usize = 16;
+const MEMO_ENTRIES_FLOOR: usize = 1 << 16;
+
+/// The read-set cap and the call's budget for a graph of `nodes` nodes.
+fn memo_limits(nodes: usize) -> (usize, usize) {
+    #[cfg(test)]
+    if let Some(limits) = MEMO_LIMITS.with(std::cell::Cell::get) {
+        return limits;
+    }
+    (EXACT_READS_CAP, MEMO_ENTRIES_PER_NODE * nodes + MEMO_ENTRIES_FLOOR)
+}
+
+/// Why a skipped or failed search fails: the nodes it read, or membership in
+/// the call's union.
+#[derive(Clone)]
+enum Proof {
+    Reads(ReadSet),
+    Union,
+}
+
+/// The failed searches one call remembers, kept within a memory bound.
+///
+/// Each failed search is proven by the nodes it read, as version stamps. In
+/// a component the closed-simple cache cannot cover, N entry permutes can
+/// each re-walk O(N) nodes before they fail (`review_tests::open_residual_stream`),
+/// as in rc4, and one read set per search would hold O(N²) entries where rc4
+/// keeps nothing. So a search keeps its own read set only while it read at
+/// most [`EXACT_READS_CAP`] nodes and the call's own read sets fit the
+/// budget, [`MEMO_ENTRIES_PER_NODE`] entries per node plus
+/// [`MEMO_ENTRIES_FLOOR`]; the others share one read set, the union of what
+/// they read, which a change to any of those nodes invalidates as a whole.
+/// When the call ends, the read sets kept from earlier calls and the
+/// component proofs count against the budget too, and the largest sets are
+/// merged into the union until the rest fit. Every read set met in one call
+/// is current until its rewrites start, so any of them can join the union,
+/// stamped at the end of the search sweep. After each call the memo holds at
+/// most the budget plus a union of at most N nodes, and only the searches of
+/// that call's permute-user pairs.
+struct Proofs {
+    /// Remembered searches with their own (or a shared component) read set.
+    reads: HashMap<(NodeId, NodeId), ReadSet>,
+    /// Remembered searches proven by the union.
+    union_pairs: Vec<(NodeId, NodeId)>,
+    union_nodes: HashSet<NodeId>,
+    /// Entries in the read sets this call created.
+    own_entries: usize,
+    cap: usize,
+    budget: usize,
+}
+
+impl Proofs {
+    fn new(ctx: &LayoutCtx<'_>) -> Self {
+        let (cap, budget) = memo_limits(ctx.order().len());
+        Self {
+            reads: HashMap::new(),
+            union_pairs: Vec::new(),
+            union_nodes: HashSet::new(),
+            own_entries: 0,
+            cap,
+            budget,
+        }
+    }
+
+    /// Remember a skipped search with the proof that skipped it.
+    fn keep(&mut self, pair: (NodeId, NodeId), proof: Proof) {
+        match proof {
+            Proof::Reads(reads) => {
+                self.reads.insert(pair, reads);
+            }
+            Proof::Union => self.union_pairs.push(pair),
+        }
+    }
+
+    /// Remember a search that failed after reading `reads`.
+    fn record(&mut self, ctx: &LayoutCtx<'_>, pair: (NodeId, NodeId), reads: &[NodeId]) -> Proof {
+        if reads.len() <= self.cap && self.own_entries + reads.len() <= self.budget {
+            let stamped = stamp(ctx, reads.iter().copied());
+            self.own_entries += stamped.len();
+            self.reads.insert(pair, stamped.clone());
+            return Proof::Reads(stamped);
+        }
+        self.union_nodes.extend(reads.iter().copied());
+        self.union_pairs.push(pair);
+        Proof::Union
+    }
+
+    /// The memo for the next call: merge the largest read sets into the
+    /// union until the rest fit the budget, then stamp the union. Ties go by
+    /// the first pair a set proves, so the choice is deterministic.
+    fn finish(mut self, ctx: &LayoutCtx<'_>) -> HashMap<(NodeId, NodeId), ReadSet> {
+        let mut pairs: Vec<((NodeId, NodeId), ReadSet)> = self.reads.drain().collect();
+        pairs.sort_unstable_by_key(|(pair, _)| *pair);
+        let mut seen = HashSet::new();
+        let distinct: Vec<ReadSet> = pairs
+            .iter()
+            .filter(|(_, reads)| seen.insert(read_set_key(reads)))
+            .map(|(_, reads)| reads.clone())
+            .collect();
+        let mut total: usize = distinct.iter().map(|reads| reads.len()).sum();
+        let mut merged = HashSet::new();
+        if total > self.budget {
+            let mut largest: Vec<&ReadSet> = distinct.iter().collect();
+            largest.sort_by_key(|reads| Reverse(reads.len()));
+            for reads in largest {
+                if total <= self.budget {
+                    break;
+                }
+                self.union_nodes.extend(reads.iter().map(|&(id, _)| id));
+                merged.insert(read_set_key(reads));
+                total -= reads.len();
+            }
+        }
+        let mut next = HashMap::new();
+        for (pair, reads) in pairs {
+            if merged.contains(&read_set_key(&reads)) {
+                self.union_pairs.push(pair);
+            } else {
+                next.insert(pair, reads);
+            }
+        }
+        if !self.union_pairs.is_empty() {
+            let union = stamp(ctx, self.union_nodes);
+            for pair in self.union_pairs {
+                next.insert(pair, union.clone());
+            }
+        }
+        next
+    }
 }
 
 /// The region search and the node predicates it uses, with rc4's per-call
@@ -1132,6 +1294,11 @@ fn stamp(ctx: &LayoutCtx<'_>, reads: impl IntoIterator<Item = NodeId>) -> ReadSe
     stamped.into()
 }
 
+/// Identifies a shared read set while something keeps it alive.
+fn read_set_key(reads: &ReadSet) -> usize {
+    Rc::as_ptr(reads).cast::<(NodeId, u64)>() as usize
+}
+
 /// Push what the predicates read about `id`: its args, meta and users, its
 /// inputs' values, and the expand and view an interleave match looks at
 /// below it.
@@ -1152,46 +1319,53 @@ fn note_reads_of(ctx: &LayoutCtx<'_>, id: NodeId, reads: &mut Vec<NodeId>) {
 /// A search from `(permute, user)` that failed without meeting a node claimed
 /// by an earlier region fails again as long as no node it read has changed:
 /// claimed nodes can only add failures. The ctx bumps a node's version when its
-/// args, meta or users change, so a read set of version stamps detects any
-/// change that could alter the search.
+/// args, meta, users or the order of its users change, so a read set of
+/// version stamps, or a superset of one, detects any change that could alter
+/// the search. Each call keeps only its own pairs' searches, within the
+/// memory bound [`Proofs`] describes.
 #[derive(Default)]
 pub(crate) struct RemovePermutesMemo {
     failed: HashMap<(NodeId, NodeId), ReadSet>,
 }
 
 impl RemovePermutesMemo {
-    /// Whether the search from `(permute, user)` is known to fail. A read set
-    /// shared by several searches is checked once per call: `current` holds
-    /// each one met so far (keeping it alive, so its address stays unique).
-    fn known_failure(
+    /// The proof that the search from `(permute, user)` still fails, if one is
+    /// remembered and still current. A read set shared by several searches is
+    /// checked once per call: `current` holds each one met so far (keeping it
+    /// alive, so its address stays unique).
+    fn fresh_proof(
         &self,
         ctx: &LayoutCtx<'_>,
         permute: NodeId,
         user: NodeId,
         current: &mut HashMap<usize, (ReadSet, bool)>,
-    ) -> bool {
-        let Some(reads) = self.failed.get(&(permute, user)) else {
-            return false;
-        };
-        let key = Rc::as_ptr(reads).cast::<(NodeId, u64)>() as usize;
-        current
-            .entry(key)
+    ) -> Option<ReadSet> {
+        let reads = self.failed.get(&(permute, user))?;
+        let fresh = current
+            .entry(read_set_key(reads))
             .or_insert_with(|| {
                 let fresh = reads
                     .iter()
                     .all(|&(id, version)| ctx.version(id) == version);
                 (reads.clone(), fresh)
             })
-            .1
-    }
-
-    fn record(&mut self, permute: NodeId, user: NodeId, reads: ReadSet) {
-        self.failed.insert((permute, user), reads);
+            .1;
+        fresh.then(|| reads.clone())
     }
 
     /// How many failed searches are remembered.
     pub(crate) fn len(&self) -> usize {
         self.failed.len()
+    }
+
+    /// Read-set entries the memo holds, counting each shared set once.
+    pub(crate) fn entries(&self) -> usize {
+        let mut seen = HashSet::new();
+        self.failed
+            .values()
+            .filter(|reads| seen.insert(read_set_key(reads)))
+            .map(|reads| reads.len())
+            .sum()
     }
 }
 

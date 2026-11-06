@@ -168,9 +168,22 @@ fn remove_permutes_replay_external() {
 /// rc4's propagation passes call the pass again on the graph it returned.
 /// A second call that shares the first call's ctx and memo (and so skips
 /// the searches the memo proves still fail; test builds re-run each one to
-/// check) must leave the graph a fresh second call leaves.
+/// check) must leave the graph a fresh second call leaves. The fixture's
+/// searches are small, so the memo's union and compaction (`Proofs`) are
+/// forced too: every failed search into the union (cap 0), and every read
+/// set, or all but the smallest, merged into it at the end of a call (budget
+/// 0 or 8).
 #[test]
 fn a_second_call_with_the_memo_matches_a_fresh_one() {
+    use crate::layout::remove_permutes::with_memo_limits;
+
+    second_call_with_the_memo_matches_a_fresh_one();
+    for (cap, budget) in [(0, usize::MAX), (usize::MAX, 0), (usize::MAX, 8)] {
+        with_memo_limits(cap, budget, second_call_with_the_memo_matches_a_fresh_one);
+    }
+}
+
+fn second_call_with_the_memo_matches_a_fresh_one() {
     use crate::fx_ir::IrPass;
 
     let config = RemovePermutesConfig::tosa();
