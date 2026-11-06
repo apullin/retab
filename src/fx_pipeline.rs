@@ -302,9 +302,17 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(
             crate::fx_rewrite_index_put_ir::IrRewriteIndexPutPass,
         )),
-        Effectful(Box::new(
+    ]);
+    if !explicit {
+        // rc4 merges equal placeholders only after phase 6 (APM:755), where explicit
+        // mode does. Merging here would hand IrRewriteConv another constant's val: the
+        // importer narrows int64 data to int32 and keeps the int64 val, so an all-zero
+        // int32 bias merges into an unused int64 zero point.
+        steps.push(Effectful(Box::new(
             crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEffectPass,
-        )),
+        )));
+    }
+    steps.extend(vec![
         Effectful(Box::new(
             crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass,
         )),
@@ -839,6 +847,8 @@ mod tests {
                     guard >= names.len() - 3,
                     "{spec}: the guard runs after every explicit pass"
                 );
+                // Only after phase 6, as rc4 (APM:755).
+                assert_eq!(count("IrFuseEqualPlaceholdersEp"), 1, "{spec}");
                 assert_eq!(names.last().unwrap(), "IrEnsureUniqueOutputNodes");
             }
         }
