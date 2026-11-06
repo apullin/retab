@@ -30,12 +30,21 @@
 //! line; each function names the rc4 lines it mirrors. rc4's region search
 //! defers nested visits onto a stack (`visit`, `:457-485`), which is not a
 //! recursive DFS, and that order decides which permutation a node reached on
-//! two paths gets; [`Detector::visit`] keeps the same stack discipline. torch.fx
-//! iterates `node.users` in insertion order, which after a retrace is graph
-//! order, so users are visited in graph order. (rc4's propagation passes do not
-//! retrace between their propagation steps, so when they call this pass FX's
-//! order can differ; that changes the result only for a node a search reaches
-//! on two paths with different permutations.) `all_input_nodes` is positional
+//! two paths gets; [`Detector::visit`] keeps the same stack discipline.
+//!
+//! Users are visited in torch.fx's order, as rc4 iterates `node.users`
+//! (`:433`, `:566`), which the ctx tracks (`LayoutCtx::users_in_fx_order`).
+//! That order is graph order after a retrace. rc4's propagation passes, this
+//! pass's only caller in the Arm pipeline, rewire nodes between their calls of
+//! it without one, and every rewire moves the rewired node to the end of its
+//! inputs' users. The order then decides more than which permutation a node
+//! reached on two paths gets: the sweep visits each permute's users in that
+//! order, so it also decides which of two regions sharing a boundary permute
+//! is found first and rewritten (`review_tests::a_rewired_user_order_decides_which_region_is_rewritten`;
+//! tests/fixtures/layout_replay/remove_permutes_user_order.txt replays rc4 on
+//! graphs whose users were reordered). A call that changes the graph ends
+//! with rc4's retrace (`:453`), which puts every node's users back in graph
+//! order (`LayoutCtx::retraced`). `all_input_nodes` (`fx_node`) is positional
 //! args, then kwargs sorted by name (RETAB keeps kwargs in a map).
 //!
 //! Where RETAB's IR differs from rc4's at this point of the pipeline:
@@ -46,9 +55,26 @@
 //!   the visit's constant-rank check on that rank-1 table input, which fails a
 //!   rank-0 region (`:631-637`); [`Detector::visit_one`] applies that check.
 //! - **Constants.** rc4's subclass reads parameters, buffers and lifted
-//!   constants from the graph signature (`:30-43`); RETAB marks them with
-//!   tensor data. The base rule (`get_attr`, `b_`/`p_`/`c_` placeholder names,
-//!   `full`) is kept as is (`:672-688`).
+//!   constants from the graph signature (`:30-43`); in RETAB those
+//!   placeholders carry tensor data, which the port reads instead. The base
+//!   rule (`get_attr`, `b_`/`p_`/`c_` placeholder names, `full`) is kept as is
+//!   (`:672-688`). This matches rc4 only once rc4's constant folds exist in
+//!   the IR. By phase 6, ComputeConstantOpsAOTPass and FuseConstantArgsPass
+//!   (`arm_pass_manager.py:699-700`) have replaced every constant-only
+//!   subgraph with a `<node>_pre_computed` or `<node>_fused_const` signature
+//!   constant, while RETAB's ingest applies the same folds later, as
+//!   `MaterializeTensorNode` lowering effects, and keeps the call nodes. On
+//!   such a graph the pass meets `view`, `permute` or `mul` chains of
+//!   parameters where rc4 meets one constant, and decides differently
+//!   (tests/fixtures/remove_permutes_review/pending_fold.py, run on rc4: a
+//!   rank-raising view of a parameter blocks a region rc4 rewrites, a
+//!   permuted parameter loses the compensating permute rc4 keeps on the
+//!   folded constant, and a product of two parameters gets two compensating
+//!   permutes where rc4 inserts one). APU-135 P2 S0a's
+//!   IrMaterializeConstantsPass (`src/layout/constants.rs`, on layout/rc4-port
+//!   since the merge at 1092ab8) materializes the folds as placeholders with
+//!   tensor data (`get_attr` in a region) at rc4's slot. Explicit mode must
+//!   not run this pass before that pass has run.
 //! - **The retrace.** rc4 ends with `ExportPass.call`, which re-derives every
 //!   node's value (`:451-453`). The port re-derives only the values a rewrite
 //!   can change, in graph order: the region, the views it remaps, the nodes it
@@ -67,6 +93,15 @@
 //!   uses (`:832-838`). The port iterates both sets in graph order of their
 //!   pairs, which also gives the correct rewrite in the second case; the replay
 //!   generator pins rc4 to the same order.
+//! - **A `None` reduction dim.** RETAB's importer spells `[]` as `None`
+//!   (`resolve_arg` in src/fx_ir.rs), so the port cannot tell
+//!   `sum.dim_IntList(x, None, True)` from `sum.dim_IntList(x, [], True)`. It
+//!   reads both as `[]` (which reduces every dim, as `None` does) and so
+//!   leaves rc4's result for `[]`; for `None`, rc4's `update_reduction_dim`
+//!   raises TypeError iterating it (`:969-981`). Neither reaches phase 6: rc4's
+//!   DecomposeSumPass and RETAB's IrConvertSumPass split a sum over `None` or
+//!   `[]` into single-dim sums first. It is the review fixture's one known
+//!   mismatch (`review_tests::a_none_reduction_dim_reads_as_an_empty_list`).
 //!
 //! # Complexity
 //!
@@ -92,8 +127,21 @@
 //! the nodes whose value can change, and dead code goes in one sweep (O(N),
 //! as rc4's `eliminate_dead_code`) or, inside a caller that keeps the graph free
 //! of dead code, only from the nodes the call stopped using ([`DeadCode`]).
-//! Region searches that start outside closed simple components can still revisit
-//! a region once per entry permute, as rc4 does.
+//! Putting users back in graph order after a call that changed the graph is
+//! O(N), like the permute scan.
+//!
+//! The quadratic case: a region search that starts outside closed simple
+//! components can still walk a region once per entry permute, as rc4 does.
+//! When every such search walks most of a long region before it fails, the
+//! call takes O(N²) steps: a residual stream of N adds, each entered through
+//! its own permute, with one squeeze/unsqueeze view pair at its head (which
+//! makes the component open) and the output at its far end, takes N²/2
+//! (`review_tests::open_stream_scaling_report`). Memory stays linear there:
+//! a failed search keeps its own read set only while it is small, and the
+//! others share one union of what they read, so after a call the memo holds
+//! at most 16 read-set entries per node, plus 65,536, plus one union of at
+//! most N nodes (see [`Proofs`]). The price is coarser invalidation for the
+//! large searches, which a change to any node in the union re-runs.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -104,6 +152,7 @@ use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrNode, IrPass, NodeId, NodeMet
 use crate::fx_meta::TensorFacts;
 use crate::fx_target::{classify_ir_target, IrTargetKind};
 use crate::layout::ctx::{is_impure_call, LayoutCtx};
+use crate::layout::fx_node::{all_input_nodes, rc4_target};
 use crate::layout::pending::{is_pending_table, TABLE_OPS};
 use crate::layout::pointwise::is_pointwise;
 use crate::layout::shape::{
@@ -215,15 +264,10 @@ impl RemovePermutesConfig {
     }
 }
 
-/// RETAB spells TOSA dialect targets `backend.tosa.X` or `tosa.X`.
+/// The same target in either of RETAB's spellings (`backend.tosa.X` or
+/// `tosa.X`; [`rc4_target`]).
 fn same_target(lhs: &str, rhs: &str) -> bool {
-    let canonical = |target: &str| {
-        target
-            .strip_prefix("backend.")
-            .unwrap_or(target)
-            .to_string()
-    };
-    lhs == rhs || canonical(lhs) == canonical(rhs)
+    lhs == rhs || rc4_target(lhs) == rc4_target(rhs)
 }
 
 fn is_tosa_table_target(target: &str) -> bool {
@@ -325,6 +369,9 @@ pub(crate) fn remove_permutes_in_ctx(
         DeadCode::Local => eliminate_dead_from(ctx, rewrite.unused.iter().copied()),
     }
     refresh(ctx, &rewrite);
+    // rc4's retrace (`:453`) rebuilds the graph in node order, so every
+    // node's users are in graph order again.
+    ctx.retraced();
     true
 }
 
@@ -340,6 +387,18 @@ thread_local! {
     static SEARCH_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Whether test builds re-run each skipped search to check it fails.
     pub(crate) static CHECK_SKIPPED_SEARCHES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// Test override of the memo's read-set cap and budget (see [`Proofs`]).
+    static MEMO_LIMITS: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` with the memo's read-set cap and budget set to `cap` and `budget`
+/// on this thread, so small graphs reach the union and the compaction.
+#[cfg(test)]
+pub(crate) fn with_memo_limits<R>(cap: usize, budget: usize, f: impl FnOnce() -> R) -> R {
+    let saved = MEMO_LIMITS.with(|limits| limits.replace(Some((cap, budget))));
+    let result = f();
+    MEMO_LIMITS.with(|limits| limits.set(saved));
+    result
 }
 
 /// A matched repeat_interleave: `(dim, scale, expand_node, view_node)`
@@ -488,9 +547,10 @@ fn find_subgraphs(
     let mut processed: HashSet<NodeId> = HashSet::new();
     // Searches that failed without meeting a claimed node, by start node and
     // permutation: the same search fails again for the rest of the call.
-    let mut failed_starts: HashMap<(NodeId, Perm), ReadSet> = HashMap::new();
+    let mut failed_starts: HashMap<(NodeId, Perm), Proof> = HashMap::new();
     // Whether each memo read set met so far is still current.
     let mut current: HashMap<usize, (ReadSet, bool)> = HashMap::new();
+    let mut proofs = Proofs::new(ctx);
     let permutes: Vec<NodeId> = ctx
         .order()
         .iter()
@@ -508,29 +568,29 @@ fn find_subgraphs(
             {
                 continue;
             }
-            // A search known to fail is skipped; one proven by this call's
-            // caches is remembered with the read set of the proof.
-            let skipped = if let Some(reads) = failed_starts.get(&(user, start.clone())) {
-                Some(Some(reads.clone()))
-            } else if memo.known_failure(ctx, permute, user, &mut current) {
-                Some(None)
+            // A search known to fail is skipped and remembered with the proof.
+            let skipped = if let Some(proof) = failed_starts.get(&(user, start.clone())) {
+                Some(proof.clone())
+            } else if let Some(reads) = memo.fresh_proof(ctx, permute, user, &mut current) {
+                Some(Proof::Reads(reads))
             } else {
-                detector.components.known_failure(user, &start).map(Some)
+                detector.components.known_failure(user, &start).map(Proof::Reads)
             };
             if let Some(proof) = skipped {
-                // Test builds check that the skipped search does fail.
+                // Test builds check that the skipped search does fail; the
+                // check's steps are not search steps.
                 #[cfg(test)]
                 if CHECK_SKIPPED_SEARCHES.with(std::cell::Cell::get) {
+                    let steps = SEARCH_STEPS.with(std::cell::Cell::get);
                     let mut check = Subgraph::new(start.clone(), end.clone());
                     assert!(
                         !detector.visit(ctx, user, &mut check, &processed),
                         "a skipped search from {} succeeds",
                         ctx.node(user).name
                     );
+                    SEARCH_STEPS.with(|count| count.set(steps));
                 }
-                if let Some(reads) = proof {
-                    memo.record(permute, user, reads);
-                }
+                proofs.keep((permute, user), proof);
                 continue;
             }
             let mut subgraph = Subgraph::new(start.clone(), end.clone());
@@ -543,16 +603,152 @@ fn find_subgraphs(
                 continue;
             }
             detector.reads.push(permute);
-            let reads = stamp(ctx, detector.reads.iter().copied());
-            memo.record(permute, user, reads.clone());
-            failed_starts.insert((user, start.clone()), reads);
+            let proof = proofs.record(ctx, (permute, user), &detector.reads);
+            failed_starts.insert((user, start.clone()), proof);
             if detector.simple {
                 let search_reads = std::mem::take(&mut detector.reads);
                 detector.cache_component_failure(ctx, user, &start, &search_reads);
             }
         }
     }
+    memo.failed = proofs.finish(ctx);
     found
+}
+
+/// A failed search's own read set may hold at most this many reads (before
+/// deduplication); a larger one joins the call's union (see [`Proofs`]).
+const EXACT_READS_CAP: usize = 1024;
+
+/// The memo may hold this many read-set entries per node, plus
+/// [`MEMO_ENTRIES_FLOOR`], besides one union.
+const MEMO_ENTRIES_PER_NODE: usize = 16;
+const MEMO_ENTRIES_FLOOR: usize = 1 << 16;
+
+/// The read-set cap and the call's budget for a graph of `nodes` nodes.
+fn memo_limits(nodes: usize) -> (usize, usize) {
+    #[cfg(test)]
+    if let Some(limits) = MEMO_LIMITS.with(std::cell::Cell::get) {
+        return limits;
+    }
+    (EXACT_READS_CAP, MEMO_ENTRIES_PER_NODE * nodes + MEMO_ENTRIES_FLOOR)
+}
+
+/// Why a skipped or failed search fails: the nodes it read, or membership in
+/// the call's union.
+#[derive(Clone)]
+enum Proof {
+    Reads(ReadSet),
+    Union,
+}
+
+/// The failed searches one call remembers, kept within a memory bound.
+///
+/// Each failed search is proven by the nodes it read, as version stamps. In
+/// a component the closed-simple cache cannot cover, N entry permutes can
+/// each re-walk O(N) nodes before they fail (`review_tests::open_residual_stream`),
+/// as in rc4, and one read set per search would hold O(N²) entries where rc4
+/// keeps nothing. So a search keeps its own read set only while it read at
+/// most [`EXACT_READS_CAP`] nodes and the call's own read sets fit the
+/// budget, [`MEMO_ENTRIES_PER_NODE`] entries per node plus
+/// [`MEMO_ENTRIES_FLOOR`]; the others share one read set, the union of what
+/// they read, which a change to any of those nodes invalidates as a whole.
+/// When the call ends, the read sets kept from earlier calls and the
+/// component proofs count against the budget too, and the largest sets are
+/// merged into the union until the rest fit. Every read set met in one call
+/// is current until its rewrites start, so any of them can join the union,
+/// stamped at the end of the search sweep. After each call the memo holds at
+/// most the budget plus a union of at most N nodes, and only the searches of
+/// that call's permute-user pairs.
+struct Proofs {
+    /// Remembered searches with their own (or a shared component) read set.
+    reads: HashMap<(NodeId, NodeId), ReadSet>,
+    /// Remembered searches proven by the union.
+    union_pairs: Vec<(NodeId, NodeId)>,
+    union_nodes: HashSet<NodeId>,
+    /// Entries in the read sets this call created.
+    own_entries: usize,
+    cap: usize,
+    budget: usize,
+}
+
+impl Proofs {
+    fn new(ctx: &LayoutCtx<'_>) -> Self {
+        let (cap, budget) = memo_limits(ctx.order().len());
+        Self {
+            reads: HashMap::new(),
+            union_pairs: Vec::new(),
+            union_nodes: HashSet::new(),
+            own_entries: 0,
+            cap,
+            budget,
+        }
+    }
+
+    /// Remember a skipped search with the proof that skipped it.
+    fn keep(&mut self, pair: (NodeId, NodeId), proof: Proof) {
+        match proof {
+            Proof::Reads(reads) => {
+                self.reads.insert(pair, reads);
+            }
+            Proof::Union => self.union_pairs.push(pair),
+        }
+    }
+
+    /// Remember a search that failed after reading `reads`.
+    fn record(&mut self, ctx: &LayoutCtx<'_>, pair: (NodeId, NodeId), reads: &[NodeId]) -> Proof {
+        if reads.len() <= self.cap && self.own_entries + reads.len() <= self.budget {
+            let stamped = stamp(ctx, reads.iter().copied());
+            self.own_entries += stamped.len();
+            self.reads.insert(pair, stamped.clone());
+            return Proof::Reads(stamped);
+        }
+        self.union_nodes.extend(reads.iter().copied());
+        self.union_pairs.push(pair);
+        Proof::Union
+    }
+
+    /// The memo for the next call: merge the largest read sets into the
+    /// union until the rest fit the budget, then stamp the union. Ties go by
+    /// the first pair a set proves, so the choice is deterministic.
+    fn finish(mut self, ctx: &LayoutCtx<'_>) -> HashMap<(NodeId, NodeId), ReadSet> {
+        let mut pairs: Vec<((NodeId, NodeId), ReadSet)> = self.reads.drain().collect();
+        pairs.sort_unstable_by_key(|(pair, _)| *pair);
+        let mut seen = HashSet::new();
+        let distinct: Vec<ReadSet> = pairs
+            .iter()
+            .filter(|(_, reads)| seen.insert(read_set_key(reads)))
+            .map(|(_, reads)| reads.clone())
+            .collect();
+        let mut total: usize = distinct.iter().map(|reads| reads.len()).sum();
+        let mut merged = HashSet::new();
+        if total > self.budget {
+            let mut largest: Vec<&ReadSet> = distinct.iter().collect();
+            largest.sort_by_key(|reads| Reverse(reads.len()));
+            for reads in largest {
+                if total <= self.budget {
+                    break;
+                }
+                self.union_nodes.extend(reads.iter().map(|&(id, _)| id));
+                merged.insert(read_set_key(reads));
+                total -= reads.len();
+            }
+        }
+        let mut next = HashMap::new();
+        for (pair, reads) in pairs {
+            if merged.contains(&read_set_key(&reads)) {
+                self.union_pairs.push(pair);
+            } else {
+                next.insert(pair, reads);
+            }
+        }
+        if !self.union_pairs.is_empty() {
+            let union = stamp(ctx, self.union_nodes);
+            for pair in self.union_pairs {
+                next.insert(pair, union.clone());
+            }
+        }
+        next
+    }
 }
 
 /// The region search and the node predicates it uses, with rc4's per-call
@@ -1120,6 +1316,11 @@ fn stamp(ctx: &LayoutCtx<'_>, reads: impl IntoIterator<Item = NodeId>) -> ReadSe
     stamped.into()
 }
 
+/// Identifies a shared read set while something keeps it alive.
+fn read_set_key(reads: &ReadSet) -> usize {
+    Rc::as_ptr(reads).cast::<(NodeId, u64)>() as usize
+}
+
 /// Push what the predicates read about `id`: its args, meta and users, its
 /// inputs' values, and the expand and view an interleave match looks at
 /// below it.
@@ -1140,46 +1341,53 @@ fn note_reads_of(ctx: &LayoutCtx<'_>, id: NodeId, reads: &mut Vec<NodeId>) {
 /// A search from `(permute, user)` that failed without meeting a node claimed
 /// by an earlier region fails again as long as no node it read has changed:
 /// claimed nodes can only add failures. The ctx bumps a node's version when its
-/// args, meta or users change, so a read set of version stamps detects any
-/// change that could alter the search.
+/// args, meta, users or the order of its users change, so a read set of
+/// version stamps, or a superset of one, detects any change that could alter
+/// the search. Each call keeps only its own pairs' searches, within the
+/// memory bound [`Proofs`] describes.
 #[derive(Default)]
 pub(crate) struct RemovePermutesMemo {
     failed: HashMap<(NodeId, NodeId), ReadSet>,
 }
 
 impl RemovePermutesMemo {
-    /// Whether the search from `(permute, user)` is known to fail. A read set
-    /// shared by several searches is checked once per call: `current` holds
-    /// each one met so far (keeping it alive, so its address stays unique).
-    fn known_failure(
+    /// The proof that the search from `(permute, user)` still fails, if one is
+    /// remembered and still current. A read set shared by several searches is
+    /// checked once per call: `current` holds each one met so far (keeping it
+    /// alive, so its address stays unique).
+    fn fresh_proof(
         &self,
         ctx: &LayoutCtx<'_>,
         permute: NodeId,
         user: NodeId,
         current: &mut HashMap<usize, (ReadSet, bool)>,
-    ) -> bool {
-        let Some(reads) = self.failed.get(&(permute, user)) else {
-            return false;
-        };
-        let key = Rc::as_ptr(reads).cast::<(NodeId, u64)>() as usize;
-        current
-            .entry(key)
+    ) -> Option<ReadSet> {
+        let reads = self.failed.get(&(permute, user))?;
+        let fresh = current
+            .entry(read_set_key(reads))
             .or_insert_with(|| {
                 let fresh = reads
                     .iter()
                     .all(|&(id, version)| ctx.version(id) == version);
                 (reads.clone(), fresh)
             })
-            .1
-    }
-
-    fn record(&mut self, permute: NodeId, user: NodeId, reads: ReadSet) {
-        self.failed.insert((permute, user), reads);
+            .1;
+        fresh.then(|| reads.clone())
     }
 
     /// How many failed searches are remembered.
     pub(crate) fn len(&self) -> usize {
         self.failed.len()
+    }
+
+    /// Read-set entries the memo holds, counting each shared set once.
+    pub(crate) fn entries(&self) -> usize {
+        let mut seen = HashSet::new();
+        self.failed
+            .values()
+            .filter(|reads| seen.insert(read_set_key(reads)))
+            .map(|reads| reads.len())
+            .sum()
     }
 }
 
@@ -1412,29 +1620,9 @@ fn live_user_count(ctx: &LayoutCtx<'_>, id: NodeId) -> usize {
     ctx.graph().live_user_ids(id).len()
 }
 
-/// `node.users`, in graph order: torch.fx keeps users in insertion order,
-/// which is graph order after a retrace.
+/// `node.users`, in torch.fx's insertion order (see the module docs).
 fn users(ctx: &LayoutCtx<'_>, id: NodeId) -> Vec<NodeId> {
-    let mut users = ctx.graph().live_user_ids(id);
-    ctx.order().sort(&mut users);
-    users
-}
-
-/// `node.all_input_nodes`: positional args, then kwargs by name, each node
-/// once.
-fn all_input_nodes(node: &IrNode) -> Vec<NodeId> {
-    let mut ids = Vec::new();
-    for arg in &node.args {
-        arg.collect_node_ids(&mut ids);
-    }
-    let mut kwargs: Vec<(&String, &IrArg)> = node.kwargs.iter().collect();
-    kwargs.sort_by(|lhs, rhs| lhs.0.cmp(rhs.0));
-    for (_, arg) in kwargs {
-        arg.collect_node_ids(&mut ids);
-    }
-    let mut seen = HashSet::new();
-    ids.retain(|&id| seen.insert(id));
-    ids
+    ctx.users_in_fx_order(id)
 }
 
 /// `get_arg` (`backends/transforms/permute_pass_utils.py:87-116`): a keyword
@@ -1773,7 +1961,8 @@ fn update_dim(ctx: &mut LayoutCtx<'_>, id: NodeId, perm: &[usize]) {
 }
 
 /// `update_reduction_dim` (`:969-981`). FX import spells `[]` as `None`, so a
-/// `None` dim reads as the empty list.
+/// `None` dim reads as the empty list, where rc4 raises on a real `None` (see
+/// the module docs).
 fn update_reduction_dim(ctx: &mut LayoutCtx<'_>, id: NodeId, perm: &[usize]) {
     let node = ctx.node(id);
     let rank = perm.len() as i64;

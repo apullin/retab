@@ -1,8 +1,10 @@
 //! Adversarial review tests for the remove-permutes port (APU-158 review).
 //!
 //! A child module of `remove_permutes`, so the tests can reach the port's
-//! private caches. Tests marked `#[ignore = "BUG: ..."]` demonstrate an issue
-//! and fail when run with `--ignored`; each names the rc4 evidence it encodes.
+//! private caches. Each test names the rc4 evidence it encodes. The review's
+//! three BUG tests now run: the user-order and memo-memory ones pass since
+//! the fixes, and the `None` reduction dim, a deliberate divergence, is
+//! pinned to rc4's `dim=[]` result.
 
 use super::*;
 use crate::layout::replay;
@@ -12,7 +14,7 @@ const REVIEW_FIXTURE: &str =
     include_str!("../../tests/fixtures/remove_permutes_review/remove_permutes_review.txt");
 
 /// rc4 raises TypeError iterating a `None` reduction dim; see
-/// `a_none_reduction_dim_fails_like_rc4`.
+/// `a_none_reduction_dim_reads_as_an_empty_list`.
 const NONE_DIM_CASE: &str = "sum_with_dim_none_keepdim";
 
 /// The review cases (tests/fixtures/remove_permutes_review) match rc4, except
@@ -24,29 +26,41 @@ fn review_cases_match_rc4() {
         REVIEW_FIXTURE,
         &[(
             NONE_DIM_CASE,
-            "rc4 raises TypeError on dim=None; the port reads None as [] (FX import's spelling)",
+            "rc4 raises TypeError iterating dim=None; RETAB's importer spells [] as None, so the \
+             port reads it as [] and leaves rc4's dim=[] result; DecomposeSumPass and \
+             IrConvertSumPass split such sums before phase 6",
         )],
     );
 }
 
 /// `sum.dim_IntList(x, None, True)` in a region: rc4's `update_reduction_dim`
-/// iterates `None` and raises TypeError (recorded in the review fixture); the
-/// port reads `IrArg::None` as `[]` and rewrites the region. rc4's
-/// DecomposeSumPass and RETAB's IrConvertSumPass both turn multi-dim sums into
-/// single-dim ones before phase 6, so the pipeline should not deliver this.
+/// iterates `None` and raises TypeError (recorded in the review fixture).
+/// RETAB's importer spells `[]` as `None`, so the IR cannot tell this graph
+/// from `sum.dim_IntList(x, [], True)` (case `sum_with_empty_dim_keepdim`),
+/// and the port deliberately reads `None` as `[]`, which reduces every dim as
+/// `None` does: it leaves exactly the graph rc4 leaves for `[]`. rc4's
+/// DecomposeSumPass and RETAB's IrConvertSumPass split sums over `None` or
+/// `[]` into single-dim sums before phase 6, so the pipeline delivers neither.
 #[test]
-#[ignore = "BUG: a None reduction dim is rewritten as [] where rc4 raises TypeError (minor; unreachable after DecomposeSumPass/IrConvertSumPass)"]
-fn a_none_reduction_dim_fails_like_rc4() {
-    let results = replay::replay(
-        &IrRemovePermutesAroundElementwiseTosaOpsPass,
-        REVIEW_FIXTURE,
-        replay::Options::default(),
-    );
-    let result = results
-        .iter()
-        .find(|result| result.name == NONE_DIM_CASE)
-        .expect("the case is in the review fixture");
-    assert!(result.mismatch.is_none(), "{}", result.report);
+fn a_none_reduction_dim_reads_as_an_empty_list() {
+    let cases = replay::parse(REVIEW_FIXTURE).expect("the review fixture parses");
+    let case = |name: &str| {
+        cases
+            .iter()
+            .find(|case| case.name == name)
+            .unwrap_or_else(|| panic!("no case {name}"))
+    };
+    let (none_dim, empty_dim) = (case(NONE_DIM_CASE), case("sum_with_empty_dim_keepdim"));
+    assert!(none_dim.raises.is_some(), "rc4 raises on dim=None");
+    let options = replay::Options::default();
+    let (none_graph, empty_graph) = (replay::build(&none_dim.before), replay::build(&empty_dim.before));
+    let imported = |graph: &IrGraph| replay::snapshot(graph).expect("a valid graph");
+    replay::compare(&imported(&empty_graph), &imported(&none_graph), options)
+        .expect("the importer builds the same IR for dim=None and dim=[]");
+    let mut graph = none_graph;
+    assert!(IrRemovePermutesAroundElementwiseTosaOpsPass.run(&mut graph));
+    replay::compare(&empty_dim.after, &imported(&graph), options)
+        .expect("the port leaves rc4's dim=[] result");
 }
 
 /// rc4 iterates `node.users` in FX insertion order. rc4's propagation passes
@@ -58,10 +72,9 @@ fn a_none_reduction_dim_fails_like_rc4() {
 /// invalidates the other. rc4 (tests/fixtures/remove_permutes_review/user_order.py):
 /// with users [relu, add] it leaves 2 permutes; with [add, relu] it rewrites
 /// U2's region and leaves 1 permute: `relu(P)`, `add(x, relu)`. No node is
-/// reached on two paths, which the module docs give as the only case where
-/// the order matters. The port sorts users by graph order and leaves 2.
+/// reached on two paths. The port visits users in the order the ctx tracks
+/// (`LayoutCtx::users_in_fx_order`) and matches rc4.
 #[test]
-#[ignore = "BUG: users are visited in graph order, not FX insertion order; after a rewire in the caller's ctx the port rewrites a different region than rc4"]
 fn a_rewired_user_order_decides_which_region_is_rewritten() {
     let mut g = LayoutGraph::new();
     let x = g.input("x", &[4, 4]);
@@ -93,6 +106,30 @@ fn a_rewired_user_order_decides_which_region_is_rewritten() {
     assert_eq!(args(u1), [p], "rc4: relu(P)");
 }
 
+/// The same graph built with U1 reading P from the start, so P's users are
+/// in graph order, [relu, add]: rc4 (user_order.py, `rewire=False`) rewrites
+/// U1's region first, which takes E1 away from U2's, and leaves 2 permutes:
+/// `relu(x)`, `add(P, relu)` and U2's exit.
+#[test]
+fn users_in_graph_order_rewrite_the_first_region() {
+    let mut g = LayoutGraph::new();
+    let x = g.input("x", &[4, 4]);
+    g.input("y", &[4, 4]);
+    let p = g.permute(x, &[1, 0]);
+    let u1 = g.call(RELU, vec![node(p)]);
+    let e1 = g.permute(u1, &[1, 0]);
+    let u2 = g.call(ADD, vec![node(p), node(e1)]);
+    let e2 = g.permute(u2, &[1, 0]);
+    g.output(&[e2]);
+    let names = [x, p, u1, u2].map(|id| g.name(id));
+    assert!(IrRemovePermutesAroundElementwiseTosaOpsPass.run(g.graph_mut()));
+    let [x, p, u1, u2] = names.map(|name| g.id(&name));
+    assert_eq!(g.count(PERMUTE), 2, "rc4 leaves two permutes");
+    let args = |id| g.graph().node(id).args.iter().filter_map(IrArg::as_node).collect::<Vec<_>>();
+    assert_eq!(args(u1), [x], "rc4: relu(x)");
+    assert_eq!(args(u2), [p, u1], "rc4: add(P, relu)");
+}
+
 /// A residual stream like `tests::residual_stream`, with a squeeze/unsqueeze
 /// view pair at its head: the views are permutable but not simple, so no
 /// component is closed and the component cache never applies. Every search
@@ -113,16 +150,6 @@ fn open_residual_stream(blocks: usize) -> LayoutGraph {
     g
 }
 
-/// Read-set entries the memo holds, counting each shared set once.
-fn memo_entries(memo: &RemovePermutesMemo) -> usize {
-    let mut seen = HashSet::new();
-    memo.failed
-        .values()
-        .filter(|reads| seen.insert(Rc::as_ptr(reads).cast::<(NodeId, u64)>() as usize))
-        .map(|reads| reads.len())
-        .sum()
-}
-
 /// One call on `open_residual_stream(blocks)`: search steps, memo read-set
 /// entries and wall time, with the test builds' per-edit checks off.
 fn measure_open_stream(blocks: usize) -> (usize, usize, std::time::Duration) {
@@ -139,22 +166,23 @@ fn measure_open_stream(blocks: usize) -> (usize, usize, std::time::Duration) {
     let modified = remove_permutes_in_ctx(&mut ctx, &config, &mut memo, DeadCode::Local);
     let elapsed = started.elapsed();
     let steps = SEARCH_STEPS.with(std::cell::Cell::get);
-    let entries = memo_entries(&memo);
+    let entries = memo.entries();
     CHECK_SKIPPED_SEARCHES.with(|check| check.set(checks.1));
     crate::fx_ir::set_check_users_after_edit(checks.0);
     assert!(!modified);
     (steps, entries, elapsed)
 }
 
-/// Every failed search outside a closed simple component stores its whole
-/// read set (in the per-call cache and the cross-call memo), and on this
-/// stream each of the N searches reads O(N) nodes, so memory grows
-/// quadratically on top of rc4's quadratic walk (rc4 keeps no read sets).
-/// Release (`open_stream_scaling_report`): 500, 1000, 2000 and 4000 blocks
-/// take 0.12, 0.46, 2.4 and 10.8 s and hold 3, 15, 61 and 244 MiB of read
-/// sets.
+/// On this stream each of the N searches reads O(N) nodes before it fails,
+/// as in rc4. When every failed search kept its whole read set (in the
+/// per-call cache and the cross-call memo), memory grew quadratically on top
+/// of rc4's quadratic walk, where rc4 keeps nothing: 500, 1000, 2000 and
+/// 4000 blocks held 0.25M, 1.0M, 4.0M and 16.0M read-set entries (up to 244
+/// MiB). Searches with more than `EXACT_READS_CAP` reads now share one
+/// union, and the same streams hold 22,759, 23,759, 25,759 and 29,759
+/// entries for the same 0.13M to 8.0M search steps
+/// (`open_stream_scaling_report` prints the release table).
 #[test]
-#[ignore = "BUG: memo read sets grow quadratically on an open component (4000 blocks: 16M entries, 244 MiB, 10.8 s in release)"]
 fn failed_search_memory_grows_linearly_on_an_open_residual_stream() {
     let (_, small, _) = measure_open_stream(250);
     let (_, large, _) = measure_open_stream(500);
@@ -176,4 +204,56 @@ fn open_stream_scaling_report() {
             entries * std::mem::size_of::<(NodeId, u64)>() / (1 << 20)
         );
     }
+}
+
+/// Steps of each of two calls of the pass on one ctx over
+/// `open_residual_stream(blocks)`, with `between` run on the ctx between them.
+/// Test builds re-run every skipped search to check that it fails.
+fn two_calls_on_an_open_stream(
+    blocks: usize,
+    between: impl FnOnce(&mut LayoutCtx<'_>, &[NodeId]),
+) -> (usize, usize) {
+    let users = crate::fx_ir::set_check_users_after_edit(false);
+    let mut g = open_residual_stream(blocks);
+    let stream: Vec<NodeId> = g.graph().topological_live_node_ids();
+    let config = RemovePermutesConfig::tosa();
+    let mut ctx = LayoutCtx::new(g.graph_mut());
+    let mut memo = RemovePermutesMemo::default();
+    let mut run = |ctx: &mut LayoutCtx<'_>| {
+        SEARCH_STEPS.with(|steps| steps.set(0));
+        assert!(!remove_permutes_in_ctx(ctx, &config, &mut memo, DeadCode::Local));
+        SEARCH_STEPS.with(std::cell::Cell::get)
+    };
+    let first = run(&mut ctx);
+    between(&mut ctx, &stream);
+    let second = run(&mut ctx);
+    crate::fx_ir::set_check_users_after_edit(users);
+    (first, second)
+}
+
+/// The searches that read more than `EXACT_READS_CAP` nodes share the union,
+/// which proves them all again on an unchanged ctx.
+#[test]
+fn the_union_skips_an_unchanged_open_stream() {
+    let (first, second) = two_calls_on_an_open_stream(300, |_, _| {});
+    assert!(first > 300 * 150, "{first} steps");
+    assert_eq!(second, 0);
+}
+
+/// Changing a node only the search from the head read (the squeeze view
+/// pair is upstream of every other start) invalidates the union, so every
+/// search it proves runs again; the searches near the output keep their own
+/// read sets and stay skipped.
+#[test]
+fn a_changed_union_node_reruns_only_the_union_searches() {
+    let (first, second) = two_calls_on_an_open_stream(300, |ctx, stream| {
+        let view = stream
+            .iter()
+            .copied()
+            .find(|&id| ctx.node(id).target == "aten.view_copy.default")
+            .expect("the head view");
+        ctx.meta_mut(view);
+    });
+    assert!(second > 0, "the union searches run again");
+    assert!(second < first, "{second} of {first} steps: the small searches stay skipped");
 }
