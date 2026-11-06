@@ -442,6 +442,13 @@ thread_local! {
     static CHECK_USERS_AFTER_EDIT: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
+/// Switch the user-index check test builds make after every edit, on this
+/// thread; scaling tests on large graphs turn it off. Returns the old setting.
+#[cfg(test)]
+pub(crate) fn set_check_users_after_edit(on: bool) -> bool {
+    CHECK_USERS_AFTER_EDIT.with(|check| check.replace(on))
+}
+
 /// The full graph: ordered list of nodes + lookup by name.
 #[derive(Debug)]
 pub struct IrGraph {

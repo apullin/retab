@@ -77,7 +77,8 @@
 //!   only add failures);
 //! - [`RemovePermutesMemo`] carries failed searches across calls that share a
 //!   `LayoutCtx`, keyed by (permute, user) and invalidated through the ctx's
-//!   version stamps of every node the search read;
+//!   version stamps of every node the search read (searches the per-call
+//!   caches skipped share the read set of their proof, checked once per call);
 //! - a failed search over a *closed simple* component (permutable nodes that
 //!   neither change rank nor are numel-1, with every traversable neighbour
 //!   inside) fails from every start inside it with the same permutation, so
@@ -329,6 +330,14 @@ pub(crate) fn remove_permutes_in_ctx(
 
 type Perm = Rc<[usize]>;
 
+#[cfg(test)]
+thread_local! {
+    /// Region-search steps (`_visit` calls) on this thread, for scaling tests.
+    static SEARCH_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Whether test builds re-run each skipped search to check it fails.
+    static CHECK_SKIPPED_SEARCHES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
 /// A matched repeat_interleave: `(dim, scale, expand_node, view_node)`
 /// (`:61-65`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -475,7 +484,9 @@ fn find_subgraphs(
     let mut processed: HashSet<NodeId> = HashSet::new();
     // Searches that failed without meeting a claimed node, by start node and
     // permutation: the same search fails again for the rest of the call.
-    let mut failed_starts: HashSet<(NodeId, Perm)> = HashSet::new();
+    let mut failed_starts: HashMap<(NodeId, Perm), ReadSet> = HashMap::new();
+    // Whether each memo read set met so far is still current.
+    let mut current: HashMap<usize, (ReadSet, bool)> = HashMap::new();
     let permutes: Vec<NodeId> = ctx
         .order()
         .iter()
@@ -493,10 +504,29 @@ fn find_subgraphs(
             {
                 continue;
             }
-            if failed_starts.contains(&(user, start.clone()))
-                || memo.known_failure(ctx, permute, user)
-                || detector.components.known_failure(user, &start)
-            {
+            // A search known to fail is skipped; one proven by this call's
+            // caches is remembered with the read set of the proof.
+            let skipped = if let Some(reads) = failed_starts.get(&(user, start.clone())) {
+                Some(Some(reads.clone()))
+            } else if memo.known_failure(ctx, permute, user, &mut current) {
+                Some(None)
+            } else {
+                detector.components.known_failure(user, &start).map(Some)
+            };
+            if let Some(proof) = skipped {
+                // Test builds check that the skipped search does fail.
+                #[cfg(test)]
+                if CHECK_SKIPPED_SEARCHES.with(std::cell::Cell::get) {
+                    let mut check = Subgraph::new(start.clone(), end.clone());
+                    assert!(
+                        !detector.visit(ctx, user, &mut check, &processed),
+                        "a skipped search from {} succeeds",
+                        ctx.node(user).name
+                    );
+                }
+                if let Some(reads) = proof {
+                    memo.record(permute, user, reads);
+                }
                 continue;
             }
             let mut subgraph = Subgraph::new(start.clone(), end.clone());
@@ -508,13 +538,13 @@ fn find_subgraphs(
             if detector.hit_processed {
                 continue;
             }
-            failed_starts.insert((user, start.clone()));
-            let mut reads = std::mem::take(&mut detector.reads);
-            reads.push(permute);
-            memo.record(ctx, permute, user, &reads);
-            detector.reads = reads;
+            detector.reads.push(permute);
+            let reads = stamp(ctx, detector.reads.iter().copied());
+            memo.record(permute, user, reads.clone());
+            failed_starts.insert((user, start.clone()), reads);
             if detector.simple {
-                detector.cache_component_failure(ctx, user, &start);
+                let search_reads = std::mem::take(&mut detector.reads);
+                detector.cache_component_failure(ctx, user, &start, &search_reads);
             }
         }
     }
@@ -595,6 +625,8 @@ impl<'c> Detector<'c> {
             end: current_end,
             start: current_start,
         } = item;
+        #[cfg(test)]
+        SEARCH_STEPS.with(|steps| steps.set(steps.get() + 1));
         if subgraph.nodes.contains(&node) {
             return true;
         }
@@ -762,15 +794,7 @@ impl<'c> Detector<'c> {
     /// its inputs' values, and the expand and view an interleave match looks
     /// at below it.
     fn note_reads(&mut self, ctx: &LayoutCtx<'_>, id: NodeId) {
-        self.reads.push(id);
-        self.reads.extend(all_input_nodes(ctx.node(id)));
-        let users = ctx.graph().live_user_ids(id);
-        if let [expand] = users[..] {
-            if ctx.node(expand).target == EXPAND_COPY {
-                self.reads.extend(ctx.graph().live_user_ids(expand));
-            }
-        }
-        self.reads.extend(users);
+        note_reads_of(ctx, id, &mut self.reads);
     }
 
     /// `is_node_permutable` (`:705-723`).
@@ -944,24 +968,39 @@ impl<'c> Detector<'c> {
 
     /// After a search over simple nodes failed at `start`, cache the failure
     /// for its whole component if the component is closed (see
-    /// [`ComponentCache`]).
-    fn cache_component_failure(&mut self, ctx: &LayoutCtx<'_>, start: NodeId, perm: &Perm) {
-        if let Some(component) = self.closed_simple_component(ctx, start) {
-            self.components.record_failure(component, perm.clone());
+    /// [`ComponentCache`]), with what a search over the component reads.
+    fn cache_component_failure(
+        &mut self,
+        ctx: &LayoutCtx<'_>,
+        start: NodeId,
+        perm: &Perm,
+        search_reads: &[NodeId],
+    ) {
+        if let Some((index, mut reads)) = self.closed_simple_component(ctx, start) {
+            reads.extend_from_slice(search_reads);
+            self.components
+                .failures
+                .insert((index, perm.clone()), stamp(ctx, reads));
         }
     }
 
-    /// The nodes a search from `start` can reach, if all of them are simple
-    /// and none can reach a node that is permutable but not simple.
-    fn closed_simple_component(&mut self, ctx: &LayoutCtx<'_>, start: NodeId) -> Option<Vec<NodeId>> {
-        if let Some(component) = self.components.component_of(start) {
-            return Some(component.to_vec());
+    /// The closed simple component holding `start` and the nodes a search
+    /// over it reads, or `None` when a search from `start` can reach a node
+    /// that is permutable but not simple.
+    fn closed_simple_component(
+        &mut self,
+        ctx: &LayoutCtx<'_>,
+        start: NodeId,
+    ) -> Option<(usize, Vec<NodeId>)> {
+        if let Some(&index) = self.components.component_index.get(&start) {
+            return Some((index, self.components.reads[index].clone()));
         }
         if self.components.open.contains(&start) {
             return None;
         }
         let mut members = vec![start];
         let mut seen: HashSet<NodeId> = HashSet::from([start]);
+        let mut reads = Vec::new();
         let mut index = 0;
         while index < members.len() {
             let node = members[index];
@@ -972,6 +1011,7 @@ impl<'c> Detector<'c> {
                 self.components.open.extend(members);
                 return None;
             }
+            note_reads_of(ctx, node, &mut reads);
             let mut neighbours = Vec::new();
             for user in users(ctx, node) {
                 let user_node = ctx.node(user);
@@ -984,7 +1024,11 @@ impl<'c> Detector<'c> {
                 neighbours.push(user);
             }
             for input in all_input_nodes(ctx.node(node)) {
-                if is_permute_target(&ctx.node(input).target)
+                let input_node = ctx.node(input);
+                if VIEW_OPS.contains(&input_node.target.as_str()) {
+                    reads.extend(first_arg_node(input_node));
+                }
+                if is_permute_target(&input_node.target)
                     || numel(ctx, input) == Some(1)
                     || self.is_permutation_sink_view(ctx, input)
                     || self.is_constant(ctx, input)
@@ -1002,13 +1046,19 @@ impl<'c> Detector<'c> {
                 if self.interleave_triple(ctx, neighbour).is_none()
                     && !self.is_node_permutable(ctx, neighbour)
                 {
+                    note_reads_of(ctx, neighbour, &mut reads);
                     continue;
                 }
                 seen.insert(neighbour);
                 members.push(neighbour);
             }
         }
-        Some(members)
+        let index = self.components.reads.len();
+        for &member in &members {
+            self.components.component_index.insert(member, index);
+        }
+        self.components.reads.push(reads.clone());
+        Some((index, reads))
     }
 
     /// A permutable node whose searches keep their permutation and that every
@@ -1039,39 +1089,46 @@ impl<'c> Detector<'c> {
 #[derive(Default)]
 struct ComponentCache {
     component_index: HashMap<NodeId, usize>,
-    components: Vec<Vec<NodeId>>,
-    failures: HashSet<(usize, Perm)>,
+    /// What a search over each component reads.
+    reads: Vec<Vec<NodeId>>,
+    /// Failed (component, permutation) pairs, with the reads that prove it.
+    failures: HashMap<(usize, Perm), ReadSet>,
     /// Nodes whose component reaches a permutable node that is not simple.
     open: HashSet<NodeId>,
 }
 
 impl ComponentCache {
-    fn component_of(&self, node: NodeId) -> Option<&[NodeId]> {
-        self.component_index
-            .get(&node)
-            .map(|&index| self.components[index].as_slice())
+    /// The proof that a search from `start` with `perm` fails, if one is known.
+    fn known_failure(&self, start: NodeId, perm: &Perm) -> Option<ReadSet> {
+        let &index = self.component_index.get(&start)?;
+        self.failures.get(&(index, perm.clone())).cloned()
     }
+}
 
-    fn record_failure(&mut self, members: Vec<NodeId>, perm: Perm) {
-        let index = match members.first().and_then(|first| self.component_index.get(first)) {
-            Some(&index) => index,
-            None => {
-                let index = self.components.len();
-                for &member in &members {
-                    self.component_index.insert(member, index);
-                }
-                self.components.push(members);
-                index
-            }
-        };
-        self.failures.insert((index, perm));
-    }
+/// The nodes a failed search read, each with its version stamp at the time,
+/// sorted by node. Searches proven to fail by the same reads share one.
+type ReadSet = Rc<[(NodeId, u64)]>;
 
-    fn known_failure(&self, start: NodeId, perm: &Perm) -> bool {
-        self.component_index
-            .get(&start)
-            .is_some_and(|&index| self.failures.contains(&(index, perm.clone())))
+fn stamp(ctx: &LayoutCtx<'_>, reads: impl IntoIterator<Item = NodeId>) -> ReadSet {
+    let mut stamped: Vec<(NodeId, u64)> = reads.into_iter().map(|id| (id, ctx.version(id))).collect();
+    stamped.sort_unstable();
+    stamped.dedup();
+    stamped.into()
+}
+
+/// Push what the predicates read about `id`: its args, meta and users, its
+/// inputs' values, and the expand and view an interleave match looks at
+/// below it.
+fn note_reads_of(ctx: &LayoutCtx<'_>, id: NodeId, reads: &mut Vec<NodeId>) {
+    reads.push(id);
+    reads.extend(all_input_nodes(ctx.node(id)));
+    let users = ctx.graph().live_user_ids(id);
+    if let [expand] = users[..] {
+        if ctx.node(expand).target == EXPAND_COPY {
+            reads.extend(ctx.graph().live_user_ids(expand));
+        }
     }
+    reads.extend(users);
 }
 
 /// Failed searches remembered across calls on one `LayoutCtx`.
@@ -1083,24 +1140,37 @@ impl ComponentCache {
 /// change that could alter the search.
 #[derive(Default)]
 pub(crate) struct RemovePermutesMemo {
-    failed: HashMap<(NodeId, NodeId), Box<[(NodeId, u64)]>>,
+    failed: HashMap<(NodeId, NodeId), ReadSet>,
 }
 
 impl RemovePermutesMemo {
-    fn known_failure(&self, ctx: &LayoutCtx<'_>, permute: NodeId, user: NodeId) -> bool {
-        self.failed.get(&(permute, user)).is_some_and(|reads| {
-            reads
-                .iter()
-                .all(|&(id, version)| ctx.version(id) == version)
-        })
+    /// Whether the search from `(permute, user)` is known to fail. A read set
+    /// shared by several searches is checked once per call: `current` holds
+    /// each one met so far (keeping it alive, so its address stays unique).
+    fn known_failure(
+        &self,
+        ctx: &LayoutCtx<'_>,
+        permute: NodeId,
+        user: NodeId,
+        current: &mut HashMap<usize, (ReadSet, bool)>,
+    ) -> bool {
+        let Some(reads) = self.failed.get(&(permute, user)) else {
+            return false;
+        };
+        let key = Rc::as_ptr(reads).cast::<(NodeId, u64)>() as usize;
+        current
+            .entry(key)
+            .or_insert_with(|| {
+                let fresh = reads
+                    .iter()
+                    .all(|&(id, version)| ctx.version(id) == version);
+                (reads.clone(), fresh)
+            })
+            .1
     }
 
-    fn record(&mut self, ctx: &LayoutCtx<'_>, permute: NodeId, user: NodeId, reads: &[NodeId]) {
-        let mut stamped: Vec<(NodeId, u64)> = reads.iter().map(|&id| (id, ctx.version(id))).collect();
-        stamped.sort_unstable();
-        stamped.dedup();
-        self.failed
-            .insert((permute, user), stamped.into_boxed_slice());
+    fn record(&mut self, permute: NodeId, user: NodeId, reads: ReadSet) {
+        self.failed.insert((permute, user), reads);
     }
 
     /// How many failed searches are remembered.
@@ -1247,7 +1317,7 @@ fn is_constant_pad(node: &IrNode) -> bool {
         IrArg::None => 0,
         _ => return false,
     };
-    if pad_len % 2 != 0 {
+    if !pad_len.is_multiple_of(2) {
         return false;
     }
     if node.target == PAD_DEFAULT {
@@ -1984,7 +2054,7 @@ fn retraced_meta(graph: &IrGraph, id: NodeId) -> Result<NodeMeta, ShapeError> {
 
 /// `constant_pad_nd(self, pad)`: pad pairs run from the last dim backwards.
 fn pad_shape(shape: &[i64], pad: &[i64]) -> Result<Vec<i64>, ShapeError> {
-    if pad.len() % 2 != 0 || pad.len() / 2 > shape.len() {
+    if !pad.len().is_multiple_of(2) || pad.len() / 2 > shape.len() {
         return Err(ShapeError::InvalidArg("pad length"));
     }
     let mut out = shape.to_vec();
@@ -2036,6 +2106,7 @@ pub(crate) fn is_constant_in(graph: &mut IrGraph, config: &RemovePermutesConfig,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::testing::{node, LayoutGraph, ADD, NEG, PERMUTE, RELU};
 
     #[test]
     fn find_extra_ones_matches_rc4() {
@@ -2075,6 +2146,163 @@ mod tests {
         assert_eq!(get_permutation(&permute(i64_list_arg(&[0, 0, 1]))), None);
         assert_eq!(get_permutation(&permute(i64_list_arg(&[0, 3, 1]))), None);
         assert_eq!(get_permutation(&permute(IrArg::None)), Some(vec![]));
+    }
+
+    /// Turns off, on this thread, the checks test builds make that would make
+    /// a scaling test quadratic: the user index after every edit and the
+    /// re-run of every skipped search. Restored on drop.
+    struct Unchecked {
+        users: bool,
+        skips: bool,
+    }
+
+    impl Unchecked {
+        fn new() -> Self {
+            Self {
+                users: crate::fx_ir::set_check_users_after_edit(false),
+                skips: CHECK_SKIPPED_SEARCHES.with(|check| check.replace(false)),
+            }
+        }
+    }
+
+    impl Drop for Unchecked {
+        fn drop(&mut self) {
+            CHECK_SKIPPED_SEARCHES.with(|check| check.set(self.skips));
+            crate::fx_ir::set_check_users_after_edit(self.users);
+        }
+    }
+
+    /// Region-search steps and wall time of `run` on this thread.
+    fn measured(run: impl FnOnce() -> bool) -> (bool, usize, std::time::Duration) {
+        SEARCH_STEPS.with(|steps| steps.set(0));
+        let started = std::time::Instant::now();
+        let modified = run();
+        let elapsed = started.elapsed();
+        (modified, SEARCH_STEPS.with(std::cell::Cell::get), elapsed)
+    }
+
+    /// A residual stream of `blocks` adds, each fed by its own permute with
+    /// the same permutation, whose last add reaches the graph output: every
+    /// search fails at the output after walking the stream. rc4 walks it once
+    /// per permute; the component cache walks it once.
+    fn residual_stream(blocks: usize) -> LayoutGraph {
+        let mut g = LayoutGraph::new();
+        let x = g.input("x", &[1, 3, 4, 5]);
+        let mut stream = g.permute(x, &[0, 2, 3, 1]);
+        stream = g.call(RELU, vec![node(stream)]);
+        for block in 0..blocks {
+            let y = g.input(&format!("y{block}"), &[1, 3, 4, 5]);
+            let branch = g.permute(y, &[0, 2, 3, 1]);
+            stream = g.call(ADD, vec![node(stream), node(branch)]);
+        }
+        g.output(&[stream]);
+        g
+    }
+
+    #[test]
+    fn a_failing_component_is_searched_once() {
+        let _unchecked = Unchecked::new();
+        for blocks in [500, 2000] {
+            let mut g = residual_stream(blocks);
+            let (modified, steps, _) = measured(|| {
+                IrRemovePermutesAroundElementwiseTosaOpsPass.run(g.graph_mut())
+            });
+            assert!(!modified);
+            // One walk of the stream (each add is reached from its user and
+            // its input) plus one closure, not one walk per permute.
+            assert!(
+                steps <= 3 * blocks + 10,
+                "{steps} search steps for {blocks} blocks"
+            );
+        }
+    }
+
+    /// `blocks` independent regions `x -> permute -> relu -> neg -> permute^-1`.
+    fn independent_regions(blocks: usize) -> LayoutGraph {
+        let mut g = LayoutGraph::new();
+        let mut outputs = Vec::new();
+        for block in 0..blocks {
+            let x = g.input(&format!("x{block}"), &[1, 3, 4, 5]);
+            let p = g.permute(x, &[0, 2, 3, 1]);
+            let r = g.call(RELU, vec![node(p)]);
+            let n = g.call(NEG, vec![node(r)]);
+            outputs.push(g.permute(n, &[0, 3, 1, 2]));
+        }
+        g.output(&outputs);
+        g
+    }
+
+    #[test]
+    fn independent_regions_are_searched_once_each() {
+        let _unchecked = Unchecked::new();
+        for blocks in [1000, 4000] {
+            let mut g = independent_regions(blocks);
+            let (modified, steps, _) = measured(|| {
+                IrRemovePermutesAroundElementwiseTosaOpsPass.run(g.graph_mut())
+            });
+            assert!(modified);
+            assert_eq!(g.count(PERMUTE), 0);
+            assert_eq!(steps, 2 * blocks);
+        }
+    }
+
+    /// Wall time on growing graphs, for the record:
+    /// `cargo test --release --lib remove_permutes_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing report"]
+    fn remove_permutes_timing() {
+        let _unchecked = Unchecked::new();
+        for blocks in [5_000, 20_000, 80_000] {
+            let mut regions = independent_regions(blocks);
+            let (_, steps, elapsed) = measured(|| {
+                IrRemovePermutesAroundElementwiseTosaOpsPass.run(regions.graph_mut())
+            });
+            let nodes = regions.graph().nodes.len();
+            println!("independent regions: {nodes} nodes, {steps} steps, {elapsed:?}");
+            let mut stream = residual_stream(blocks);
+            let (_, steps, elapsed) = measured(|| {
+                IrRemovePermutesAroundElementwiseTosaOpsPass.run(stream.graph_mut())
+            });
+            let nodes = stream.graph().nodes.len();
+            println!("failing residual stream: {nodes} nodes, {steps} steps, {elapsed:?}");
+        }
+    }
+
+    #[test]
+    fn a_deep_region_is_searched_without_recursion() {
+        let _unchecked = Unchecked::new();
+        let mut g = LayoutGraph::new();
+        let x = g.input("x", &[1, 2, 3]);
+        let mut chain = g.permute(x, &[0, 2, 1]);
+        for _ in 0..50_000 {
+            chain = g.call("aten.hardtanh.default", vec![node(chain)]);
+        }
+        let out = g.permute(chain, &[0, 2, 1]);
+        g.output(&[out]);
+        let (modified, steps, _) =
+            measured(|| IrRemovePermutesAroundElementwiseTosaOpsPass.run(g.graph_mut()));
+        assert!(modified);
+        assert_eq!(g.count(PERMUTE), 0);
+        assert_eq!(steps, 50_000);
+    }
+
+    /// A second call on an unchanged ctx skips every search the first one
+    /// failed.
+    #[test]
+    fn the_memo_skips_unchanged_failed_searches() {
+        let _unchecked = Unchecked::new();
+        let mut g = residual_stream(50);
+        let config = RemovePermutesConfig::tosa();
+        let graph = g.graph_mut();
+        let mut ctx = LayoutCtx::new(graph);
+        let mut memo = RemovePermutesMemo::default();
+        let (first, first_steps, _) =
+            measured(|| remove_permutes_in_ctx(&mut ctx, &config, &mut memo, DeadCode::Local));
+        let (second, second_steps, _) =
+            measured(|| remove_permutes_in_ctx(&mut ctx, &config, &mut memo, DeadCode::Local));
+        assert!(!first && !second);
+        assert!(first_steps > 0);
+        assert_eq!(second_steps, 0);
     }
 
     #[test]

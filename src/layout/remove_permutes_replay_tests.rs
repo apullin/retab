@@ -89,3 +89,51 @@ fn remove_permutes_replay_external() {
     let names: Vec<&str> = failures.iter().map(|result| result.name.as_str()).collect();
     println!("all differing cases: {}", names.join(" "));
 }
+
+/// rc4's propagation passes call the pass again on the graph it returned.
+/// A second call that shares the first call's ctx and memo (and so skips
+/// the searches the memo proves still fail; test builds re-run each one to
+/// check) must leave the graph a fresh second call leaves.
+#[test]
+fn a_second_call_with_the_memo_matches_a_fresh_one() {
+    use crate::fx_ir::IrPass;
+    use crate::layout::ctx::LayoutCtx;
+    use crate::layout::remove_permutes::{
+        remove_permutes_in_ctx, DeadCode, RemovePermutesConfig, RemovePermutesMemo,
+    };
+
+    let config = RemovePermutesConfig::tosa();
+    let mut remembered = 0;
+    for case in replay::parse(FIXTURE).expect("the fixture parses") {
+        if case.raises.is_some() || case.name == "pending_table_in_a_rank0_region" {
+            continue;
+        }
+        let mut shared = replay::build(&case.before);
+        {
+            let mut ctx = LayoutCtx::new(&mut shared);
+            let mut memo = RemovePermutesMemo::default();
+            remove_permutes_in_ctx(&mut ctx, &config, &mut memo, DeadCode::Full);
+            remove_permutes_in_ctx(&mut ctx, &config, &mut memo, DeadCode::Local);
+            remembered += memo.len();
+            ctx.finish();
+        }
+        let mut fresh = replay::build(&case.before);
+        IrRemovePermutesAroundElementwiseTosaOpsPass.run(&mut fresh);
+        IrRemovePermutesAroundElementwiseTosaOpsPass.run(&mut fresh);
+        let (shared, fresh) = (
+            replay::snapshot(&shared).expect("a valid graph"),
+            replay::snapshot(&fresh).expect("a valid graph"),
+        );
+        let options = Options {
+            dead_nodes: true,
+            ..Options::default()
+        };
+        if let Err(mismatch) = replay::compare(&fresh, &shared, options) {
+            panic!(
+                "case {}: the memoized second call differs: {mismatch:?}\nfresh:\n{fresh}shared:\n{shared}",
+                case.name
+            );
+        }
+    }
+    assert!(remembered > 0, "no search was remembered across calls");
+}
