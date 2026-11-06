@@ -68,10 +68,11 @@
 //! lookups misread the qparam-less nodes rc4's rewrite creates (see
 //! `control_flow_hazard`), so every region conv requests a stock fallback, and
 //! so does a parent conv reading a cond or while output whose getitem has no
-//! output qparams. The region rules S8 builds on are in place: constants are
-//! `get_attr` nodes (`GraphScope::Region`), and a weight or bias captured from
-//! the parent (a placeholder) is reported as such. FP8 is out of scope (design
-//! F1).
+//! output qparams, directly or through copies without input qparams, such as
+//! explicit IrSizeAdjustInput's slices. The region rules S8 builds on are in
+//! place: constants are `get_attr` nodes (`GraphScope::Region`), and a weight
+//! or bias captured from the parent (a placeholder) is reported as such. FP8
+//! is out of scope (design F1).
 //!
 //! **Stock fallbacks** (design §2.11, critique B5, B10). Where rc4 raises, the
 //! pass requests a stock fallback (`stock_fallback::request`) and stops, so
@@ -95,6 +96,9 @@ use crate::fx_ir::{
     QParamMap,
 };
 use crate::fx_meta::TensorFacts;
+use crate::fx_target::{
+    is_layout_passthrough_target, is_slice_tensor_target, noop_target, NoopTarget,
+};
 use crate::graph::ir::DType;
 use crate::layout::constants::{constant_kind, is_constant};
 use crate::layout::ctx::{GraphScope, InsertPoint, LayoutCtx};
@@ -367,6 +371,20 @@ fn to_i64(dims: &[usize]) -> Vec<i64> {
 ///   qparams, else from the input qparams of the getitem's direct consumers
 ///   (`infer_output_qparams_map_ir`); the conv was that consumer, its input
 ///   permute has none, and the region's output RESCALE would be lost.
+///
+/// The second lookup also fails when the conv reads such a getitem through
+/// data-movement copies without input qparams (`control_flow_output_read`).
+/// Explicit IrSizeAdjustInput builds its slices with emptied qparam maps, as
+/// rc4's `create_node(from_node=...)` does, and `IrDecomposeLinear`'s input
+/// views and `IrDecomposeGroupedConv`'s group slices have none in either
+/// mode. The contract then finds no target whether or not the conv is
+/// rewritten. But the aten conv sends the graph to stock at serialization
+/// (the explicit-mode aten-conv guard), and the rewritten graph would
+/// serialize without the output RESCALE. So these convs fall back too. Before
+/// S8 lifts the fallback, the contract needs these targets from elsewhere:
+/// recorded before the explicit passes run, as rc4's
+/// InsertControlFlowRescalesPass reads them at APM:595, or read through such
+/// copies.
 fn control_flow_hazard(graph: &IrGraph, scope: GraphScope, input: NodeId) -> Option<String> {
     if scope == GraphScope::Region {
         return Some(
@@ -375,19 +393,67 @@ fn control_flow_hazard(graph: &IrGraph, scope: GraphScope, input: NodeId) -> Opt
                 .to_string(),
         );
     }
-    let node = graph.node(input);
-    let reads_control_flow = node.is_getitem()
-        && node.meta.output_qparam().is_none()
-        && node
-            .first_node_arg()
-            .is_some_and(|source| graph.node(source).is_control_flow());
-    reads_control_flow.then(|| {
+    let (getitem, copies) = control_flow_output_read(graph, input)?;
+    let getitem = &graph.node(getitem).name;
+    Some(if copies.is_empty() {
         format!(
-            "it reads control-flow output {}, whose boundary contract takes its qparam from the \
-             conv, which the rewrite replaces with a qparam-less permute (APU-135 S8)",
-            node.name
+            "it reads control-flow output {getitem}, whose boundary contract takes its qparam \
+             from the conv, which the rewrite replaces with a qparam-less permute (APU-135 S8)"
+        )
+    } else {
+        let copies: Vec<&str> = copies
+            .iter()
+            .map(|&copy| graph.node(copy).name.as_str())
+            .collect();
+        format!(
+            "it reads control-flow output {getitem} through copies without input qparams ({}), \
+             so the output's boundary contract finds no qparam, and the aten conv is what sends \
+             the graph to stock (APU-135 S8)",
+            copies.join(", ")
         )
     })
+}
+
+/// The cond or while output the conv reads with no qparam on the way for the
+/// output's boundary contract: a getitem without output qparams, read directly
+/// or through data-movement copies without input qparams. The contract looks
+/// only at the getitem's own output qparams and at its direct consumers' input
+/// qparams, so it can read none of these nodes, and the conv's input qparams
+/// leave with the rewrite. Returns the getitem and the copies, from the
+/// getitem's consumer to the conv's input.
+fn control_flow_output_read(graph: &IrGraph, input: NodeId) -> Option<(NodeId, Vec<NodeId>)> {
+    let mut copies = Vec::new();
+    let mut current = input;
+    // A copy chain cannot be longer than the graph; the bound keeps a
+    // malformed (cyclic) graph from looping.
+    for _ in 0..=graph.nodes.len() {
+        let node = graph.node(current);
+        if node.is_getitem() {
+            let unqualified = node.meta.output_qparam().is_none()
+                && node
+                    .first_node_arg()
+                    .is_some_and(|source| graph.node(source).is_control_flow());
+            copies.reverse();
+            return unqualified.then_some((current, copies));
+        }
+        if !copies_its_input(node) || node.meta.input_qparam().is_some() {
+            return None;
+        }
+        copies.push(current);
+        current = node.first_node_arg()?;
+    }
+    None
+}
+
+/// A data-movement copy: its value holds its first input's elements unchanged,
+/// so they keep that input's quantization. These are permutes, views and other
+/// rank changes, slices, and clones.
+fn copies_its_input(node: &IrNode) -> bool {
+    let target = node.target.as_str();
+    node.op == NodeOp::CallFunction
+        && (is_layout_passthrough_target(target)
+            || is_slice_tensor_target(target)
+            || noop_target(target) == Some(NoopTarget::PassthroughFirstArg))
 }
 
 /// The conv's weight, as RCP resolves it (`_resolve_control_flow_constant`,
