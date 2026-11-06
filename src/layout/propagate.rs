@@ -147,6 +147,7 @@ use crate::fx_meta::TensorFacts;
 use crate::layout::canonicalize::{canonicalize_view_copy_permute, is_singleton_permutation};
 use crate::layout::ctx::{LayoutCtx, RuleId};
 use crate::layout::dim_maps::{PermuteMap, ViewMap};
+use crate::layout::dtype::{is_float_dtype, value_dtype};
 use crate::layout::fuse_duplicate_users::{fuse_duplicate_users, TableStage, TOSA_EXCLUDED_TARGETS};
 use crate::layout::fuse_identical_input_transforms::{
     fuse_identical_input_transforms, is_layout_invariant, FuseIdenticalInputTransforms, DELEGATION_TAG_META_KEY,
@@ -1931,7 +1932,25 @@ impl<'c> Propagator<'c> {
         }
         let tensors = cat.args.first().cloned().unwrap_or(IrArg::None);
         let mut rest_args: Vec<IrArg> = cat.args.iter().skip(2).cloned().collect();
-        let node_meta = graph.node(node).meta.clone();
+        // `next_node.meta = dict(node.meta)` (`:883`): the cat takes the permute's
+        // meta, whose val holds rc4's dtype for the permute. RETAB's may not
+        // (design F2): a quantized compute node keeps a float32 val and its dtype
+        // in qparams, and a copy follows its producer's val, so a qparam-less
+        // permute of such a node holds float32 and takes its dtype from its input
+        // (`value_dtype` rule 4). The cat takes the permute's qparams along, which
+        // still give it the permute's dtype (rules 2-3), but it is no copy: rule 4
+        // is lost, and the cat would serialize as float32. So in that case it
+        // takes the permute's dtype into its val, which keeps `value_dtype` across
+        // the move, as rc4's dict copy keeps the val's dtype.
+        let mut node_meta = graph.node(node).meta.clone();
+        let float_without_qparams = node_meta.val_dtype().is_some_and(is_float_dtype)
+            && node_meta.output_qparam().is_none()
+            && node_meta.input_qparam().is_none();
+        if float_without_qparams {
+            if let Some(dtype) = value_dtype(graph, node) {
+                node_meta.set_val_dtype_for_existing_shape(&dtype);
+            }
+        }
         let cat_users_list = cat_users;
 
         let mut new_inputs: HashMap<NodeId, NodeId> = HashMap::new();
@@ -2352,6 +2371,42 @@ mod tests {
         assert_eq!(g.shape(g.id("relu")), [1, 2, 3, 4]);
         assert_eq!(g.shape(g.id("neg")), [1, 2, 3, 4]);
         assert_eq!(g.shape(g.id("permute_copy")), [1, 3, 4, 2]);
+    }
+
+    /// A grouped conv in explicit mode: IrRewriteConv's per-group outputs are
+    /// int8 NHWC values, their cat is a quantized compute node RETAB keeps as
+    /// float32 with int8 qparams (design F2), and FuseIdenticalInputTransforms
+    /// has sunk the groups' NCHW permutes below it as one permute, whose val it
+    /// refreshed from the cat: float32, without qparams. Up splits the cat
+    /// fan-out (`:824-886`) and gives the cat that permute's meta, which holds
+    /// int8 in rc4. The cat must keep int8 (from the permute's input,
+    /// `value_dtype` rule 4), or the serializer types its CONCAT float32, which
+    /// the INT profile rejects (test_conv2d.py groups_bias).
+    #[test]
+    fn up_keeps_a_split_cats_storage_dtype() {
+        let mut g = LayoutGraph::new();
+        let r0 = g.typed_input("r0", &[1, 5, 5, 1], "torch.int8");
+        let r1 = g.typed_input("r1", &[1, 5, 5, 1], "torch.int8");
+        let cat = g.cat(&[r0, r1], 3);
+        let int8 = crate::fx_ir::QParam::per_tensor(0.0134, 12, -128, 127, "torch.int8".to_string());
+        let meta = &mut g.graph_mut().node_mut(cat).meta;
+        meta.set_val_dtype_for_existing_shape("torch.float32");
+        meta.set_input_qparams_from([(0, int8.clone())]);
+        meta.set_single_output_qparam(int8);
+        let p = g.permute(cat, &[0, 3, 1, 2]);
+        assert_eq!(g.dtype(p), "torch.float32");
+        g.output(&[p]);
+        assert!(run(&mut g, PropagateConfig::arm_without_program(Direction::Up)));
+        // The driver's canonicalization turns the cat inputs' singleton permutes
+        // into views, as rc4's does.
+        g.assert_targets(&[VIEW, VIEW, super::CAT]);
+        let cat = g.id("cat");
+        assert_eq!(g.shape(cat), [1, 2, 5, 5]);
+        assert_eq!(g.dtype(cat), "torch.int8");
+        assert!(g.graph().node(cat).meta.output_qparam().is_none(), "rc4's permute meta");
+        for input in all_input_nodes(g.graph().node(cat)) {
+            assert_eq!(g.dtype(input), "torch.int8");
+        }
     }
 
     #[test]

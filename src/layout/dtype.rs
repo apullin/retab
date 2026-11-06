@@ -348,7 +348,7 @@ fn first_qparam_dtype(qparams: Option<&QParamMap>) -> Option<&str> {
         .filter(|dtype| !dtype.is_empty())
 }
 
-fn is_float_dtype(dtype: &str) -> bool {
+pub(crate) fn is_float_dtype(dtype: &str) -> bool {
     matches!(
         dtype,
         "torch.float16"
