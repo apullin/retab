@@ -90,6 +90,7 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         // so the spec flag alone decides. U55 subsets never set it.
         Ir(Box::new(crate::fx_fold_qdq_ir::IrFoldQdqPass {
             preserve_partial_binary_tensor_qdq: config.support_float,
+            control_flow_lists_take_first_qparam: explicit,
         })),
         Ir(Box::new(
             crate::fx_fuse_consecutive_clamps_ir::IrFuseConsecutiveClampsPass,
