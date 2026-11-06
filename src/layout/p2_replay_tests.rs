@@ -672,3 +672,195 @@ fn a_port_that_does_nothing_matches_no_case() {
 // fn rewrite_avg_pool2d_matches_rc4() {
 //     replay::check(&IrRewriteAvgPool2dPass, REWRITE_AVG_POOL2D);
 // }
+
+// ---------------------------------------------------------------------------
+// Adversarial review of S1 (APU-135): each ignored test below fails today and
+// pins one gap between the fixtures or the harness and the P2 design. Run them
+// with `cargo test --lib p2_replay_tests::review_ -- --ignored`.
+// ---------------------------------------------------------------------------
+
+/// RETAB keeps the edge graph's `max_pool2d_with_indices` args up to
+/// IrRewriteMaxPool2d: IrNormalizeMaxPool2dInputRank only lifts the input,
+/// IrDecomposeMaxPoolDilation skips undilated pools, and IrSizeAdjustInput only
+/// replaces arg 0. Those are the args RemoveGetItemPass receives. The
+/// `_with_indices` cases, which are meant to start from RETAB's form, copy the
+/// args of rc4's max_pool2d after DecomposeMaxPool2dPass instead, which spells
+/// the defaults out as scalars (`0, 1, False`). So the omitted stride, padding,
+/// dilation and ceil_mode that RETAB actually has are never replayed.
+#[test]
+#[ignore = "BUG: the `_with_indices` pools carry rc4's DecomposeMaxPool2dPass args (pad 0, dilation 1, ceil False), not the edge args RETAB keeps"]
+fn review_with_indices_pools_keep_the_edge_args() {
+    let rewritten = cases(REWRITE_MAX_POOL2D);
+    for source in cases(REMOVE_GETITEM) {
+        let edge = nodes_of(&source.before, MAX_POOL_WITH_INDICES)
+            .next()
+            .expect("the edge pool");
+        let undone = case(&rewritten, &format!("{}_with_indices", source.name));
+        let pool = nodes_of(&undone.before, MAX_POOL_WITH_INDICES)
+            .next()
+            .expect("the undone pool");
+        assert_eq!(&args(pool)[1..], &args(edge)[1..], "{}", undone.name);
+    }
+}
+
+/// SizeAdjustInputPass slices a conv's input when the stride leaves a
+/// remainder larger than the padding (k3 s2 p0 on an even size, say), so
+/// RewriteConvPass sees `slice -> conv` and emits slice -> permute -> view ->
+/// CONV2D for conv1d (design C7: "Replay fixtures must use the RCP-output
+/// order"); the port must read the sliced val (F5). No case has such a slice:
+/// every model's remainder is at most its padding. (grouped2d's slices are
+/// DecomposeGroupedConvPass's channel slices, along dim 1.)
+#[test]
+#[ignore = "BUG: no conv case replays a SizeAdjustInputPass slice of the conv input (design C7, F5)"]
+fn review_conv_fixture_replays_size_adjust_slices() {
+    let spatially_sliced = |case: &Case| {
+        nodes_of(&case.before, CONVOLUTION).any(|conv| {
+            let x = node_arg(&case.before, conv, 0);
+            target(x) == Some("aten.slice_copy.Tensor")
+                && matches!(args(x).get(1), Some(replay::Arg::Int(dim)) if *dim >= 2)
+        })
+    };
+    let conv = cases(REWRITE_CONV);
+    for kind in ["conv1d", "conv2d"] {
+        assert!(
+            conv.iter()
+                .any(|case| case.name.starts_with(kind) && spatially_sliced(case)),
+            "no {kind} case has a sliced input"
+        );
+    }
+}
+
+/// The design's S3 list replays "shared dw weights" for §2.6's shared-weight
+/// handling (each conv gets its own rewritten copy, the second placed before
+/// the first). The `dw_shared_weights_*` cases share nothing: the quantizer
+/// freezes one weight per conv, so the two convs read two placeholders with
+/// equal data, exactly like any two-conv model.
+#[test]
+#[ignore = "BUG: the dw_shared_weights_* convs read two separate weight placeholders, so no case shares a weight"]
+fn review_shared_weight_cases_share_one_weight() {
+    let conv = cases(REWRITE_CONV);
+    for name in ["dw_shared_weights_pt", "dw_shared_weights_pc"] {
+        let case = case(&conv, name);
+        let weights: BTreeSet<usize> = nodes_of(&case.before, CONVOLUTION)
+            .map(|conv| match &args(conv)[1] {
+                replay::Arg::Node(position) => *position,
+                other => panic!("{name}: weight {other:?}"),
+            })
+            .collect();
+        assert_eq!(weights.len(), 1, "{name}: the convs read {weights:?}");
+    }
+}
+
+/// Design risk 6 asks for nsimplify(tolerance=1e-6) parity on nearest scale
+/// factors, with 1.6 as the float32 value a quantized export can carry
+/// (1.6000000238; rewrite_upsample.py:101-108). Every scale factor in the
+/// fixture is within 1e-15 of its rational (1.6 is the double 1.6), so a port
+/// with a far tighter tolerance than 1e-6 still matches every case.
+#[test]
+#[ignore = "BUG: no nearest case has a float32-rounded scale factor, so nsimplify's 1e-6 tolerance is never exercised (design risk 6)"]
+fn review_upsample_covers_float32_rounded_scale_factors() {
+    let rounded = f64::from(1.6f32);
+    let found = cases(REWRITE_UPSAMPLE).iter().any(|case| {
+        nodes_of(&case.before, "aten.upsample_nearest2d.vec").any(|node| {
+            matches!(args(node).get(2), Some(replay::Arg::List(items))
+                if items.contains(&replay::Arg::Float(rounded)))
+        })
+    });
+    assert!(found, "no nearest case has scale factor {rounded:?}");
+}
+
+/// At the P2 slots RETAB's qparams come from IrFoldQdq, whose per-channel
+/// QParam keeps the first scale and zero point in `scale` and `zp`
+/// (`resolve_per_channel_qparam` in src/fx_fold_qdq_ir.rs). The replay imports
+/// them the way `QParam::from_py` reads an rc4 QuantArgs (1.0 and 0), a path
+/// RETAB's pipeline never takes for these graphs.
+#[test]
+#[ignore = "BUG: per-channel qparams import with scale 1.0 and zp 0, not IrFoldQdq's first scale and zero point"]
+fn review_per_channel_qparams_import_like_ir_fold_qdq() {
+    let conv = cases(REWRITE_CONV);
+    let graph = replay::import(case(&conv, "conv2d_pc"));
+    let id = graph
+        .live_call_function_ids()
+        .into_iter()
+        .find(|&id| graph.node(id).target == CONVOLUTION)
+        .expect("the conv");
+    let weight = graph.node(id).meta.input_qparam_at(1).expect("weight qparam");
+    assert!(weight.is_per_channel());
+    assert_eq!(
+        (weight.scale, weight.zp),
+        (weight.per_channel_scales[0], weight.per_channel_zps[0])
+    );
+}
+
+/// rc4's P2 passes end in a retrace, so no P2 after graph holds a dead node
+/// (the P2 fixtures have none), yet the hooks above call `replay::check`, which
+/// drops dead nodes before comparing (a P1 convention: rc4's P1 passes leave
+/// dead views behind). A port that never erases the rewritten aten conv
+/// (design §2.3 step 9), or leaves §2.8(c)'s unused squeeze view, RESCALE and
+/// permute, still matches every case. Nothing downstream removes such a node
+/// reliably (LayoutCtx::finish doesn't DCE; ingest drops dead calls only when
+/// an effect applied), and in explicit mode a leftover aten conv reaches the
+/// X5 guard and silently sends the graph to stock.
+#[test]
+#[ignore = "BUG: the P2 replay hooks (`replay::check`) accept a port that leaves the rewritten aten conv behind, dead"]
+fn review_p2_hooks_reject_leftover_dead_nodes() {
+    use crate::fx_ir::{IrArg, NodeMeta, NodeOp};
+
+    let conv = cases(REWRITE_CONV);
+    let case = case(&conv, "conv2d_pt");
+    // rc4's after graph, as a port that reproduces it would leave it...
+    let mut graph = replay::build(&replay::retab_dtypes(&case.after));
+    // ...plus the original convolution, never erased.
+    let id = |name: &str| IrArg::Node(graph.by_name(name).expect(name).id);
+    let ints = |values: &[i64]| IrArg::List(values.iter().map(|&v| IrArg::Int(v)).collect());
+    let args = vec![
+        id("quantized_decomposed_quantize_per_tensor_default"),
+        id("b__frozen_param0"),
+        id("b__frozen_param1"),
+        ints(&[1, 1]),
+        ints(&[1, 1]),
+        ints(&[1, 1]),
+        IrArg::Bool(false),
+        ints(&[0, 0]),
+        IrArg::Int(1),
+    ];
+    graph.add_node(
+        NodeOp::CallFunction,
+        "aten_convolution_default".to_string(),
+        CONVOLUTION.to_string(),
+        args,
+        NodeMeta::tensor(vec![1, 4, 8, 8], "torch.float32"),
+    );
+    let actual = replay::snapshot(&graph).unwrap();
+    assert_eq!(count(&actual, &[CONVOLUTION]), 1);
+    // `replay::check` compares with `Options::default()`.
+    assert!(
+        replay::compare_case(case, &actual, Options::default()).is_err(),
+        "a leftover aten conv matched rc4's after graph"
+    );
+}
+
+/// RETAB's IR never holds rc4's `tosa.X` spelling at the P2 slots: the INT32
+/// RESCALEs IrRewriteConv retargets (design §2.8) come from
+/// IrInsertInt32Rescale, which builds `backend.tosa.RESCALE.default`
+/// (`IrGraph::add_rescale`). The replay imports before graphs with rc4's
+/// `tosa.RESCALE.default` (and `tosa.MAX_POOL2D`/`tosa.AVG_POOL2D` in the mixed
+/// chains), so a port that matches the target string literally sees one
+/// spelling in the replay and the other in production. The comparison already
+/// treats the two as one target; the import doesn't.
+#[test]
+#[ignore = "BUG: before graphs import TOSA nodes in rc4's `tosa.X` spelling, which RETAB's passes never produce (they write `backend.tosa.X`)"]
+fn review_before_graph_tosa_targets_import_in_retab_spelling() {
+    let a16w8 = cases(REWRITE_CONV_A16W8);
+    let graph = replay::import(case(&a16w8, "conv_add_a16w8"));
+    let rescales: Vec<String> = graph
+        .live_call_function_ids()
+        .into_iter()
+        .map(|id| graph.node(id).target.clone())
+        .filter(|target| target.ends_with("RESCALE.default"))
+        .collect();
+    assert_eq!(rescales.len(), 3, "{rescales:?}");
+    for target in &rescales {
+        assert_eq!(target, "backend.tosa.RESCALE.default");
+    }
+}
