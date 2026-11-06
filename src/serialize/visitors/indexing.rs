@@ -31,15 +31,13 @@ struct ParsedSelectCopySpec {
 struct ParsedSliceSpec {
     input_name: String,
     input_shape: Vec<i32>,
-    raw_dim: i64,
-    mapped_dim: usize,
+    dim: usize,
     start: i64,
     end: i64,
     step: i64,
     start_shape: Vec<i32>,
     size_shape: Vec<i32>,
     input_target: String,
-    input_order: String,
 }
 
 impl ParsedSelectCopySpec {
@@ -58,7 +56,7 @@ impl ParsedSelectCopySpec {
         let rank = input_shape.len() as i64;
         let normalized_dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };
         let mapped_dim = input_node
-            .map(|n| map_axis_to_tosa_dim_order(n, normalized_dim as i32) as usize)
+            .map(|n| normalize_axis(n, normalized_dim as i32) as usize)
             .unwrap_or(normalized_dim as usize);
 
         let raw_index = arg_i64(node, 2, 0);
@@ -95,19 +93,14 @@ impl ParsedSliceSpec {
             return Self {
                 input_name,
                 input_shape,
-                raw_dim: 0,
-                mapped_dim: 0,
+                dim: 0,
                 start: 0,
                 end: 0,
                 step: 1,
-                start_shape: apply_tosa_dim_order(node, shape_arg_i32_list(graph, node, 1)),
-                size_shape: apply_tosa_dim_order(node, shape_arg_i32_list(graph, node, 2)),
+                start_shape: shape_arg_i32_list(graph, node, 1),
+                size_shape: shape_arg_i32_list(graph, node, 2),
                 input_target: input_node
                     .map(|n| format!("{:?}", n.target))
-                    .unwrap_or_default(),
-                input_order: input_node
-                    .and_then(|n| n.meta.tosa_dim_order.as_ref())
-                    .map(|order| format!("{order:?}"))
                     .unwrap_or_default(),
             };
         }
@@ -115,22 +108,11 @@ impl ParsedSliceSpec {
         let raw_dim = arg_i64(node, 1, 0);
         let rank = input_shape.len() as i64;
         let raw_dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };
-        let raw_dim = raw_dim.clamp(0, rank.saturating_sub(1));
-        let mapped_dim = node
-            .meta
-            .tosa_dim_order
-            .as_ref()
-            .map(|_| map_axis_to_tosa_dim_order(node, raw_dim as i32) as i64)
-            .or_else(|| input_node.map(|n| map_axis_to_tosa_dim_order(n, raw_dim as i32) as i64))
-            .unwrap_or(raw_dim) as usize;
+        let dim = raw_dim.clamp(0, rank.saturating_sub(1)) as usize;
         let start = arg_i64(node, 2, 0);
-        let end = arg_i64(
-            node,
-            3,
-            input_shape.get(mapped_dim).copied().unwrap_or(0) as i64,
-        );
+        let end = arg_i64(node, 3, input_shape.get(dim).copied().unwrap_or(0) as i64);
         let step = arg_i64(node, 4, 1);
-        let input_dim = input_shape.get(mapped_dim).copied().unwrap_or(0) as i64;
+        let input_dim = input_shape.get(dim).copied().unwrap_or(0) as i64;
         let start_idx = if start < 0 {
             (input_dim + start).max(0)
         } else {
@@ -145,34 +127,24 @@ impl ParsedSliceSpec {
         };
 
         let mut start_shape = vec![0; input_shape.len()];
-        start_shape[mapped_dim] = start_idx as i32;
+        start_shape[dim] = start_idx as i32;
         let mut size_shape = input_shape.clone();
-        size_shape[mapped_dim] = slice_len as i32;
+        size_shape[dim] = slice_len as i32;
 
         let input_target = input_node
             .map(|n| format!("{:?}", n.target))
-            .unwrap_or_else(|| "<none>".to_string());
-        let input_order = input_node
-            .and_then(|n| {
-                n.meta
-                    .tosa_dim_order
-                    .as_ref()
-                    .map(|order| format!("{:?}", order))
-            })
             .unwrap_or_else(|| "<none>".to_string());
 
         Self {
             input_name,
             input_shape,
-            raw_dim,
-            mapped_dim,
+            dim,
             start,
             end,
             step,
             start_shape,
             size_shape,
             input_target,
-            input_order,
         }
     }
 }
@@ -404,13 +376,11 @@ pub(super) fn emit_slice(ctx: &EmitContext) -> EmitResult {
 
     if crate::config::debug_slice_enabled() {
         eprintln!(
-            "[SliceDebug] node={} input_target={} input_order={} input_shape={:?} raw_dim={} mapped_dim={} start={} end={} step={} start_shape={:?} size_shape={:?}",
+            "[SliceDebug] node={} input_target={} input_shape={:?} dim={} start={} end={} step={} start_shape={:?} size_shape={:?}",
             node.name,
             spec.input_target,
-            spec.input_order,
             spec.input_shape,
-            spec.raw_dim,
-            spec.mapped_dim,
+            spec.dim,
             spec.start,
             spec.end,
             spec.step,

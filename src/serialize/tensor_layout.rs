@@ -29,13 +29,6 @@ impl TensorDeclarationContext {
     }
 }
 
-pub(crate) fn apply_tosa_dim_order(node: &Node, shape: Vec<i32>) -> Vec<i32> {
-    let Some(order) = node.meta.tosa_dim_order.as_ref() else {
-        return shape;
-    };
-    permute_shape_u8(&shape, order).unwrap_or(shape)
-}
-
 pub(super) fn raw_i32_shape(node: &Node) -> Vec<i32> {
     node.meta
         .val
@@ -47,10 +40,6 @@ pub(super) fn raw_i32_shape(node: &Node) -> Vec<i32> {
 
 pub(super) fn permute_shape(shape: &[i32], perms: &[i32]) -> Option<Vec<i32>> {
     permute_shape_by_order(shape, perms)
-}
-
-pub(super) fn permute_shape_u8(shape: &[i32], order: &[u8]) -> Option<Vec<i32>> {
-    permute_shape_by_order(shape, order)
 }
 
 fn permute_i64_shape_u8(shape: &[i64], order: &[u8]) -> Option<Vec<i64>> {
@@ -266,11 +255,7 @@ fn make_graph_tensor(name: String, shape: Vec<i32>, dtype: DType, data: Vec<u8>)
 }
 
 fn placeholder_decl(node: &Node) -> (Vec<i32>, DType) {
-    let raw_shape = raw_i32_shape(node);
-    (
-        apply_tosa_dim_order(node, raw_shape),
-        ir_dtype_to_tosa(node.meta.val.dtype),
-    )
+    (raw_i32_shape(node), ir_dtype_to_tosa(node.meta.val.dtype))
 }
 
 /// rc4's conv rewrite already put conv weights in TOSA's OHWI/HWCM/ODHWI layouts, so a
@@ -286,18 +271,11 @@ fn serialize_const_placeholder(
         .copied()
         .or_else(|| node.meta.tosa_special_dtype.map(ir_dtype_to_tosa))
         .unwrap_or(store_dtype);
-    let elem_sz = tensor_data.dtype.storage_size_bytes();
-
-    let (final_data, final_shape_i64) = if let Some(order) = node.meta.tosa_dim_order.as_ref() {
-        permute_tensor_by_order(&tensor_data.data, &tensor_data.shape, elem_sz, order)
-    } else {
-        (tensor_data.data.clone(), tensor_data.shape.clone())
-    };
-    let final_shape: Vec<i32> = final_shape_i64.iter().map(|&d| d as i32).collect();
+    let final_shape: Vec<i32> = tensor_data.shape.iter().map(|&d| d as i32).collect();
     let final_data = match (tensor_dtype, store_dtype) {
-        (DType::Int4, _) if store_dtype != DType::Int4 => pack_int4_data(&final_data),
-        (DType::Int48, DType::Int32) => widen_int32_data_to_int48(&final_data),
-        _ => final_data,
+        (DType::Int4, _) if store_dtype != DType::Int4 => pack_int4_data(&tensor_data.data),
+        (DType::Int48, DType::Int32) => widen_int32_data_to_int48(&tensor_data.data),
+        _ => tensor_data.data.clone(),
     };
 
     make_graph_tensor(node.name.clone(), final_shape, tensor_dtype, final_data)

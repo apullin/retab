@@ -484,7 +484,6 @@ pub struct NodeMeta {
     pub val: TensorInfo,
     pub input_qparams: SmallVec<[(u32, QuantArgs); 2]>,
     pub output_qparams: SmallVec<[(u32, QuantArgs); 1]>,
-    pub tosa_dim_order: Option<SmallVec<[u8; 6]>>,
     pub tosa_special_dtype: Option<DType>,
     /// A 16-bit pending table whose shift RESCALE is its own node, because an
     /// explicit layout pass put a node between the two, as rc4 does with its
@@ -498,7 +497,6 @@ impl NodeMeta {
             val,
             input_qparams: SmallVec::new(),
             output_qparams: SmallVec::new(),
-            tosa_dim_order: None,
             tosa_special_dtype: None,
             table_rescale_split: false,
         }

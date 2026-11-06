@@ -58,7 +58,7 @@ pub(in crate::serialize::visitors) fn emit_transpose_conv2d(ctx: &EmitContext) -
     let node = ctx.node;
     let mut result = EmitResult::default();
     let input_names = ctx.input_names();
-    let output_shape = apply_tosa_dim_order(node, raw_i32_shape(node));
+    let output_shape = raw_i32_shape(node);
     let acc_type = conv_accumulator_dtype(node);
     let output_dtype = synthetic_bias_dtype(node, acc_type);
     let output_tensor = make_empty_tensor(node.name.clone(), output_shape, output_dtype);

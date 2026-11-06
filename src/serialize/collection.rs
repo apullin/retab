@@ -77,7 +77,6 @@ fn collect_graph_items(
         validate_insertion_order(graph, &sorted);
     }
     reject_aten_spatial_ops(region, graph)?;
-    reject_dim_orders(region, graph)?;
     if debug {
         check_explicit_layout_invariants(region, graph, store)?;
     }
@@ -270,35 +269,8 @@ pub(super) fn reject_aten_spatial_ops(region: &str, graph: &Graph) -> Result<(),
     ))
 }
 
-/// Explicit mode, in every build: an explicit graph carries its layout in its vals and
-/// has no dim orders (P2 design §2.7, D1). A graph that has one was laid out, at least in
-/// part, by dim-order logic that no explicit gate switched off (the control-flow
-/// contracts' rank-4 getitem dim order was one until S8). The explicit gates switch off
-/// the serializer's dim-order rules (the main-output TRANSPOSE, G4; the axis remap
-/// through a TOSA TRANSPOSE, G8; ...), so such a graph can serialize to invalid or wrong
-/// TOSA. It goes to stock instead, through the same seam as the aten spatial ops.
-pub(super) fn reject_dim_orders(region: &str, graph: &Graph) -> Result<(), String> {
-    let Some((node, order)) = graph
-        .order
-        .iter()
-        .filter_map(|&id| graph.node(id))
-        .filter(|node| node.op != OpType::Output)
-        .find_map(|node| Some((node, node.meta.tosa_dim_order.as_ref()?)))
-    else {
-        return Ok(());
-    };
-    Err(format!(
-        "RETAB_STOCK_FALLBACK: dim order in explicit layout: '{}' ({:?}) in region '{}' has \
-         tosa_dim_order {order:?}",
-        node.name, node.target, region
-    ))
-}
-
-/// Explicit mode under RETAB_DEBUG (P2 design D1): a node's val is its TOSA shape, so no
-/// node may carry a dim order and the serializer's re-derived shape must equal the val.
-/// This catches stale vals and implicit-layout logic that survived the explicit gates.
-/// (`collect_graph_items` sends graphs with dim orders to stock first, so there it
-/// reports stale vals.)
+/// Under RETAB_DEBUG (P2 design D1): a node's val is its TOSA shape, so the serializer's
+/// re-derived shape must equal the val. This catches stale vals.
 pub(super) fn check_explicit_layout_invariants(
     region: &str,
     graph: &Graph,
@@ -307,10 +279,6 @@ pub(super) fn check_explicit_layout_invariants(
     let mut violations = Vec::new();
     for node in graph.order.iter().filter_map(|&id| graph.node(id)) {
         if node.op == OpType::Output {
-            continue;
-        }
-        if let Some(order) = &node.meta.tosa_dim_order {
-            violations.push(format!("'{}' has tosa_dim_order {order:?}", node.name));
             continue;
         }
         let val: Vec<i32> = node

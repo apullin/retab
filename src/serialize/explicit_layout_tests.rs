@@ -1136,8 +1136,8 @@ fn explicit_mode_drops_the_singleton_transposes_of_select_and_sum() {
 }
 
 #[test]
-fn explicit_invariant_check_reports_dim_orders_and_stale_vals() {
-    // D1, run under RETAB_DEBUG in explicit mode.
+fn explicit_invariant_check_reports_stale_vals() {
+    // D1, run under RETAB_DEBUG.
     let mut graph = Graph::new();
     let x = graph.create_node(
         OpType::Placeholder,
@@ -1147,7 +1147,7 @@ fn explicit_invariant_check_reports_dim_orders_and_stale_vals() {
         NodeMeta::new(TensorInfo::new(&[1, 4, 4, 3], IrDType::Int8)),
         "x".into(),
     );
-    let nhwc = graph.create_node(
+    graph.create_node(
         OpType::CallFunction,
         OpTarget::Permute,
         smallvec![Arg::Node(x), Arg::IntList(smallvec![0, 2, 3, 1])],
@@ -1162,7 +1162,6 @@ fn explicit_invariant_check_reports_dim_orders_and_stale_vals() {
         Ok(())
     );
 
-    graph.node_mut(nhwc).unwrap().meta.tosa_dim_order = Some(smallvec![0, 2, 3, 1]);
     // IrSizeAdjustInput's slices keep the unsliced val (design F5).
     graph.create_node(
         OpType::CallFunction,
@@ -1174,14 +1173,10 @@ fn explicit_invariant_check_reports_dim_orders_and_stale_vals() {
     );
     visitors::shape_utils::clear_shape_cache();
     let error = check_explicit_layout_invariants("main", &graph, &store).unwrap_err();
-    assert!(error.starts_with("explicit layout invariant broken in region 'main': "));
-    assert!(
-        error.contains("'nhwc' has tosa_dim_order [0, 2, 3, 1]"),
-        "{error}"
-    );
-    assert!(
-        error.contains("'slice' (Slice) has val [1, 4, 4, 3] but serializes as [1, 2, 4, 3]"),
-        "{error}"
+    assert_eq!(
+        error,
+        "explicit layout invariant broken in region 'main': 'slice' (Slice) has val \
+         [1, 4, 4, 3] but serializes as [1, 2, 4, 3]"
     );
 }
 
@@ -1236,52 +1231,6 @@ fn explicit_transposes_take_their_shape_from_their_input() {
     let items = try_serialize_graph(graph, &store).unwrap();
     assert_transposes_consistent(&items);
     assert_eq!(tensor(&items, "transpose").shape, [1, 2, 3, 4]);
-}
-
-#[test]
-fn explicit_graphs_carrying_dim_orders_go_to_stock() {
-    // Explicit graphs keep their layout in vals. A dim order means dim-order logic laid out
-    // the graph: before S8 the control-flow contracts marked the rank-4 users of a cond
-    // NHWC (a neg stands in for the cond's getitem). The explicit gates switch off the
-    // dim-order rules such a graph needs, so it goes to stock in every build, not only
-    // under RETAB_DEBUG (D1).
-    let build = |spatial: bool| {
-        let mut ir = IrGraph::empty();
-        let x = placeholder(&mut ir, "x", [1, 2, 3, 4], FLOAT32);
-        let target = if spatial {
-            "aten.convolution.default"
-        } else {
-            "aten.neg.default"
-        };
-        let getitem = call(
-            &mut ir,
-            "getitem",
-            target,
-            vec![IrArg::Node(x)],
-            [1, 2, 3, 4],
-            FLOAT32,
-        );
-        ir.node_mut(getitem)
-            .meta
-            .set_tosa_dim_order(vec![0, 2, 3, 1]);
-        output(&mut ir, getitem);
-        ir
-    };
-
-    let (graph, store) = ingest(&build(false));
-    assert_eq!(
-        try_serialize_graph(graph, &store).err().unwrap(),
-        "RETAB_STOCK_FALLBACK: dim order in explicit layout: 'getitem' (Neg) in region 'main' \
-         has tosa_dim_order [0, 2, 3, 1]"
-    );
-
-    // An aten spatial op is reported first (X5).
-    let (graph, store) = ingest(&build(true));
-    let error = try_serialize_graph(graph, &store).err().unwrap();
-    assert!(
-        error.starts_with("RETAB_STOCK_FALLBACK: aten spatial op in explicit layout: "),
-        "{error}"
-    );
 }
 
 /// APU-135 P3: a 16-bit pending table that a layout pass left split (`layout::pending`).

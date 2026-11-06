@@ -60,7 +60,7 @@ fn count(region: &SerializedRegion, op: Op) -> usize {
 /// S8 (design §4.3.1): a rank-4 cond or while output keeps its val, as in rc4, where a
 /// region's IO takes the parent's vals. The boundary contracts used to give it the NHWC
 /// dim order of dim-order mode's channels-last regions, and explicit serialization sent
-/// every such graph to stock (`reject_dim_orders`).
+/// every such graph to stock.
 #[test]
 fn rank4_control_flow_outputs_keep_their_vals() {
     let logical: Vec<i32> = RANK4.iter().map(|&dim| dim as i32).collect();

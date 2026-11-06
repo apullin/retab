@@ -27,7 +27,7 @@ mod tensor_ops;
 
 pub use emitter::*;
 
-use super::tensor_layout::{apply_tosa_dim_order, permute_shape};
+use super::tensor_layout::permute_shape;
 use super::tosa_types::{
     AbsAttribute, AddAttribute, ArgMaxAttribute, ArithmeticRightShiftAttribute, Attribute,
     AvgPool2dAttribute, BitwiseAndAttribute, BitwiseNotAttribute, BitwiseOrAttribute,
@@ -101,11 +101,10 @@ pub fn emit_node(
     if let Some(probe) = crate::config::debug_node_probe() {
         if node.name.contains(&probe) {
             eprintln!(
-                "[NodeProbe] serialize {} target={:?} raw_shape={:?} dim_order={:?}",
+                "[NodeProbe] serialize {} target={:?} raw_shape={:?}",
                 node.name,
                 node.target,
                 &node.meta.val.shape[..node.meta.val.shape_len as usize],
-                node.meta.tosa_dim_order,
             );
         }
     }

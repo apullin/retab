@@ -74,7 +74,7 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitRe
         .and_then(|id| graph.node(id));
     if crate::config::retab_debug_enabled() {
         eprintln!(
-            "[SumDebug] node={} raw_shape={:?} actual_input_shape={:?} axes={:?} keepdim={} input_order={:?} node_order={:?} final_shape={:?}",
+            "[SumDebug] node={} raw_shape={:?} actual_input_shape={:?} axes={:?} keepdim={} final_shape={:?}",
             node.name,
             raw_i32_shape(node),
             spec.input_shape,
@@ -83,8 +83,6 @@ pub(in crate::serialize::visitors) fn emit_aten_sum(ctx: &EmitContext) -> EmitRe
                 .map(|axis| (axis.raw_dim, axis.tosa_axis))
                 .collect::<Vec<_>>(),
             spec.keepdim,
-            input_node.and_then(|n| n.meta.tosa_dim_order.clone()),
-            node.meta.tosa_dim_order.clone(),
             ctx.shape(),
         );
     }

@@ -1,6 +1,5 @@
 use super::*;
 use crate::serialize::op_semantics;
-use crate::serialize::tensor_layout::apply_tosa_dim_order;
 use std::cell::RefCell;
 use std::collections::HashMap as StdHashMap;
 
@@ -58,20 +57,15 @@ fn resolve_inferred_shape(shape: &[i32], input_shape: &[i32]) -> Option<Vec<i32>
     Some(resolved)
 }
 
-pub(super) fn map_axis_to_tosa_dim_order(node: &Node, axis: i32) -> i32 {
+/// `axis` counted from the front of `node`'s val; an axis outside it comes back as is.
+pub(super) fn normalize_axis(node: &Node, axis: i32) -> i32 {
     let rank = node.meta.val.shape_len as i32;
     let normalized = if axis < 0 { axis + rank } else { axis };
-    if normalized < 0 || normalized >= rank {
-        return axis;
+    if (0..rank).contains(&normalized) {
+        normalized
+    } else {
+        axis
     }
-
-    if let Some(order) = node.meta.tosa_dim_order.as_ref() {
-        if let Some(pos) = order.iter().position(|&dim| dim as i32 == normalized) {
-            return pos as i32;
-        }
-    }
-
-    normalized
 }
 
 pub(super) fn first_input_node<'a>(graph: &'a Graph, node: &Node) -> Option<&'a Node> {
@@ -155,10 +149,10 @@ fn sliced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Optio
 
     if node.target == OpTarget::TosaSlice {
         let size = shape_arg_i32_list(graph, node, 2);
-        return (size.len() == input_shape.len()).then(|| apply_tosa_dim_order(node, size));
+        return (size.len() == input_shape.len()).then_some(size);
     }
 
-    strided_slice_shape(node, input_node, &input_shape)
+    strided_slice_shape(node, &input_shape)
         .or_else(|| explicit_slice_size_shape(node, &input_shape))
 }
 
@@ -168,7 +162,7 @@ fn reduced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Opti
     }
 
     if op_semantics::is_aten_sum(&node.target) {
-        return Some(apply_tosa_dim_order(node, raw_i32_shape(node)));
+        return Some(raw_i32_shape(node));
     }
 
     let input_node = first_input_node(graph, node)?;
@@ -185,7 +179,7 @@ fn reduced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Opti
     let mut output_shape = input_shape.clone();
     let mut mapped_axes: Vec<usize> = axes
         .into_iter()
-        .map(|axis| map_axis_to_tosa_dim_order(input_node, axis) as usize)
+        .map(|axis| normalize_axis(input_node, axis) as usize)
         .collect();
 
     if keepdim {
@@ -214,7 +208,7 @@ fn reduced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Opti
                 reduced_raw_shape.remove(axis);
             }
         }
-        return Some(apply_tosa_dim_order(node, reduced_raw_shape));
+        return Some(reduced_raw_shape);
     }
 
     mapped_axes.sort_unstable_by(|a, b| b.cmp(a));
@@ -398,7 +392,7 @@ fn pool_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<
     pool_nhwc_shape(&input_shape, &kernel, &stride, &pad)
 }
 
-fn strided_slice_shape(node: &Node, input_node: &Node, input_shape: &[i32]) -> Option<Vec<i32>> {
+fn strided_slice_shape(node: &Node, input_shape: &[i32]) -> Option<Vec<i32>> {
     if node.args.len() < 4 {
         return None;
     }
@@ -406,13 +400,7 @@ fn strided_slice_shape(node: &Node, input_node: &Node, input_shape: &[i32]) -> O
     let rank = input_shape.len() as i64;
     let raw_dim = arg_i64(node, 1, 0);
     let normalized_dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };
-    let clamped_dim = normalized_dim.clamp(0, rank.saturating_sub(1));
-    let dim = node
-        .meta
-        .tosa_dim_order
-        .as_ref()
-        .map(|_| map_axis_to_tosa_dim_order(node, clamped_dim as i32) as usize)
-        .unwrap_or_else(|| map_axis_to_tosa_dim_order(input_node, clamped_dim as i32) as usize);
+    let dim = normalized_dim.clamp(0, rank.saturating_sub(1)) as usize;
     let input_dim = input_shape.get(dim).copied()? as i64;
     let start = arg_i64(node, 2, 0);
     let end = arg_i64(node, 3, input_dim);
@@ -438,26 +426,11 @@ fn strided_slice_shape(node: &Node, input_node: &Node, input_shape: &[i32]) -> O
 
 fn explicit_slice_size_shape(node: &Node, input_shape: &[i32]) -> Option<Vec<i32>> {
     let size = kwarg_i32_list(node, "size");
-    if size.len() != input_shape.len() {
-        return None;
-    }
-
-    let reordered = apply_tosa_dim_order(node, size.clone());
-    for candidate in [size.clone(), reordered] {
-        if candidate
-            .iter()
-            .zip(input_shape.iter())
-            .all(|(out_dim, in_dim)| *out_dim >= 0 && *out_dim <= *in_dim)
-        {
-            return Some(candidate);
-        }
-    }
-
-    Some(size)
+    (size.len() == input_shape.len()).then_some(size)
 }
 
 /// Reconstruct the concrete TOSA tensor shape once at the serializer boundary
-/// instead of re-validating dim-order and layout facts ad hoc at each emitter.
+/// instead of ad hoc at each emitter.
 pub(crate) fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Vec<i32> {
     // Memoize: check cache first
     if let Some(cached) = SHAPE_CACHE.with(|c| c.borrow().get(&node.name).cloned()) {
@@ -483,7 +456,7 @@ fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> 
                 .map(|input| actual_tensor_shape(graph, store, input))
                 .unwrap_or_default();
             if let Some(resolved_shape) = resolve_inferred_shape(&shape, &input_shape) {
-                return apply_tosa_dim_order(node, resolved_shape);
+                return resolved_shape;
             }
         }
     }
@@ -529,7 +502,7 @@ fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> 
             }
         }
     }
-    apply_tosa_dim_order(node, raw_shape)
+    raw_shape
 }
 
 pub(super) fn promoted_2d_matmul_shape(
@@ -562,13 +535,11 @@ pub(super) fn promoted_2d_matmul_shape(
 }
 
 pub(super) fn make_output_tensor(node: &Node) -> TosaTensor {
-    let final_shape = logical_output_shape(node);
-    let dtype = node_output_dtype(node);
-    make_empty_tensor(node.name.clone(), final_shape, dtype)
-}
-
-pub(super) fn logical_output_shape(node: &Node) -> Vec<i32> {
-    apply_tosa_dim_order(node, raw_i32_shape(node))
+    make_empty_tensor(
+        node.name.clone(),
+        raw_i32_shape(node),
+        node_output_dtype(node),
+    )
 }
 
 pub(super) fn make_actual_output_tensor(

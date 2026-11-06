@@ -379,19 +379,14 @@ fn apply_precomputed_table(
     let Some(&nid) = name_map.get(&e.node_name) else {
         return false;
     };
-    let (input_arg, out_shape, dim_order, rescale_split) = {
+    let (input_arg, out_shape, rescale_split) = {
         let Some(n) = graph.nodes.get(nid) else {
             return false;
         };
         let Some(input_arg) = n.args.first().cloned() else {
             return false;
         };
-        (
-            input_arg,
-            n.meta.val,
-            n.meta.tosa_dim_order.clone(),
-            n.meta.table_rescale_split,
-        )
+        (input_arg, n.meta.val, n.meta.table_rescale_split)
     };
 
     // Table constant node.
@@ -434,7 +429,6 @@ fn apply_precomputed_table(
         n.target = OpTarget::TosaTable;
         n.args = table_args;
         n.meta.val = table_val;
-        n.meta.tosa_dim_order = dim_order.clone();
     }
 
     // INT16 TABLE produces INT32; a trailing rescale by 2^rescale_lshift aligns
@@ -456,14 +450,12 @@ fn apply_precomputed_table(
         r_args.push(Arg::Int(0));
         let mut r_val = out_shape;
         r_val.dtype = out_dtype;
-        let mut r_meta = NodeMeta::new(r_val);
-        r_meta.tosa_dim_order = dim_order;
         let r_node = Node {
             op: OpType::CallFunction,
             target: OpTarget::TosaRescale,
             args: r_args,
             kwargs: Vec::new(),
-            meta: r_meta,
+            meta: NodeMeta::new(r_val),
             users: SmallVec::new(),
             name: rescale_name.clone(),
         };
@@ -763,7 +755,7 @@ pub fn debug_dump(graph: &Graph, label: &str) {
     for &nid in &graph.order {
         if let Some(n) = graph.nodes.get(nid) {
             eprintln!(
-                "  {:?} {} op={:?} target={:?} args={:?} val={:?}:{:?} dimorder={:?}",
+                "  {:?} {} op={:?} target={:?} args={:?} val={:?}:{:?}",
                 nid,
                 n.name,
                 n.op,
@@ -771,7 +763,6 @@ pub fn debug_dump(graph: &Graph, label: &str) {
                 n.args,
                 n.meta.val.shape_slice(),
                 n.meta.val.dtype,
-                n.meta.tosa_dim_order,
             );
         }
     }
@@ -869,9 +860,6 @@ fn map_meta(m: &IrNodeMeta) -> NodeMeta {
     let mut meta = NodeMeta::new(val);
     meta.input_qparams = qparam_entries(m.input_qparams());
     meta.output_qparams = qparam_entries(m.output_qparams());
-    meta.tosa_dim_order = m
-        .tosa_dim_order()
-        .map(|v| v.iter().map(|&x| x as u8).collect());
     meta.tosa_special_dtype = special_dtype_from_extras(m);
     meta
 }

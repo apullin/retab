@@ -668,51 +668,9 @@ pub(super) fn emit_aten_permute(ctx: &EmitContext) -> EmitResult {
     )
 }
 
-/// If the node has a non-identity `tosa_dim_order`, insert a transpose op and
-/// permute `multiples` to match. Returns the (possibly updated) input name,
-/// input shape, and multiples.
-fn maybe_insert_transpose(
-    result: &mut EmitResult,
-    node: &Node,
-    padded_input_shape: &[i32],
-    input_name: String,
-    mut multiples: Vec<i32>,
-    dtype: DType,
-) -> (String, Vec<i32>, Vec<i32>) {
-    if let Some(perms) = node
-        .meta
-        .tosa_dim_order
-        .as_ref()
-        .map(|order| order.iter().map(|&dim| dim as i32).collect::<Vec<_>>())
-    {
-        let is_non_identity = perms
-            .iter()
-            .enumerate()
-            .any(|(idx, &dim)| dim as usize != idx);
-        if is_non_identity {
-            let Some(transposed_shape) = permute_shape(padded_input_shape, &perms) else {
-                return (input_name, padded_input_shape.to_vec(), multiples);
-            };
-            let transposed_name = format!("{}_input_layout", node.name);
-            result.push_output_op(
-                make_empty_tensor(transposed_name.clone(), transposed_shape.clone(), dtype),
-                Op::Transpose,
-                Attribute::Transpose(TransposeAttribute {
-                    perms: perms.clone(),
-                }),
-                vec![input_name],
-            );
-            multiples = permute_shape(&multiples, &perms).unwrap_or(multiples);
-            return (transposed_name, transposed_shape, multiples);
-        }
-    }
-    (input_name, padded_input_shape.to_vec(), multiples)
-}
-
 /// Shared implementation for tile-like ops (`repeat` and `expand`).
 ///
-/// Pads the input shape to `tile_rank` if needed, optionally transposes to
-/// match the node's `tosa_dim_order`, then emits a TOSA `Tile` operator.
+/// Pads the input shape to `tile_rank` if needed, then emits a TOSA `Tile` operator.
 fn emit_tile_with_multiples(
     graph: &Graph,
     node: &Node,
@@ -728,7 +686,7 @@ fn emit_tile_with_multiples(
         return result;
     }
 
-    let mut tile_multiples = multiples;
+    let tile_multiples = multiples;
     let mut tile_input_name = input_name;
     let mut tile_input_shape = input_shape.clone();
     if input_shape.len() < tile_rank {
@@ -752,18 +710,8 @@ fn emit_tile_with_multiples(
             Attribute::Reshape(ReshapeAttribute {}),
             vec![tile_input_name, reshape_shape_name],
         );
-
-        let (name, shape, mults) = maybe_insert_transpose(
-            &mut result,
-            node,
-            &padded_input_shape,
-            reshaped_name,
-            tile_multiples,
-            actual_tensor_dtype(graph, input_node),
-        );
-        tile_input_name = name;
-        tile_input_shape = shape;
-        tile_multiples = mults;
+        tile_input_name = reshaped_name;
+        tile_input_shape = padded_input_shape;
     }
 
     let output_shape: Vec<i32> = tile_input_shape
@@ -873,14 +821,7 @@ pub(super) fn emit_repeat(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;
     let store = ctx.store;
-    let mut multiples = ctx.arg_i32_list(1);
-    if let Some(Arg::Node(input_id)) = node.args.first() {
-        if let Some(input_node) = graph.node(*input_id) {
-            if raw_i32_shape(input_node).len() == multiples.len() {
-                multiples = apply_tosa_dim_order(node, multiples);
-            }
-        }
-    }
+    let multiples = ctx.arg_i32_list(1);
     emit_tile_like(graph, node, store, multiples)
 }
 
@@ -963,7 +904,7 @@ pub(super) fn emit_flip(ctx: &EmitContext) -> EmitResult {
             node.name, dims
         );
     };
-    let axis = map_axis_to_tosa_dim_order(node, *dim as i32);
+    let axis = normalize_axis(node, *dim as i32);
     let mut result = EmitResult::default();
     result.push_output_op(
         make_output_tensor(node),
@@ -983,21 +924,19 @@ pub(super) fn emit_concat(ctx: &EmitContext) -> EmitResult {
         Some(Arg::Int(axis)) => *axis as i32,
         _ => kwarg_i32(node, "axis", 0),
     };
-    // Map the cat axis through the OUTPUT node's dim_order, matching upstream
-    // op_cat.py (`dim = output.dim_order.index(dim)`). Equivalent when operand
-    // layouts are uniform (the norm), but the output is the canonical reference.
-    let axis = map_axis_to_tosa_dim_order(node, raw_axis);
+    // rc4's CONCAT visitor takes the axis as given (`op_tosa_concat.py`); a negative
+    // one is counted from the back of the output.
+    let axis = normalize_axis(node, raw_axis);
     if crate::config::debug_cat_enabled() {
         fn dbg_shape(n: &crate::graph::ir::Node) -> Vec<i64> {
             n.meta.val.shape[..n.meta.val.shape_len as usize].to_vec()
         }
         eprintln!(
-            "[CatDebug] {} raw_axis={} axis={} logical={:?} dim_order={:?} emitted={:?}",
+            "[CatDebug] {} raw_axis={} axis={} logical={:?} emitted={:?}",
             node.name,
             raw_axis,
             axis,
             dbg_shape(node),
-            node.meta.tosa_dim_order,
             actual_tensor_shape(graph, ctx.store, node),
         );
         let ids = match node.args.first() {
@@ -1008,11 +947,10 @@ pub(super) fn emit_concat(ctx: &EmitContext) -> EmitResult {
         for id in ids {
             if let Some(n) = graph.node(id) {
                 eprintln!(
-                    "[CatDebug]   in {} target={:?} logical={:?} dim_order={:?} emitted={:?}",
+                    "[CatDebug]   in {} target={:?} logical={:?} emitted={:?}",
                     n.name,
                     n.target,
                     dbg_shape(n),
-                    n.meta.tosa_dim_order,
                     actual_tensor_shape(graph, ctx.store, n),
                 );
             }
