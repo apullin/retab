@@ -98,6 +98,14 @@ and ExecuTorch.
   RewriteAvgPool2dPass against the graph after the ComputeConstantOpsAOTPass
   that follows it (arm_pass_manager.py:698-699), where the zero points are
   `<full>_pre_computed` placeholders quantized with the pool's output qparams.
+- `rewrite_conv_rc4_tests.txt`: rc4's own RewriteConvPass tests
+  (backends/arm/test/passes/test_rewrite_conv_pass.py) that call the pass
+  directly on an edge program instead of lowering through the pipeline. Each
+  case builds the program one of those tests builds (an FP program, or a
+  VGF-quantized one after the test's `_run_pre_rewrite_passes`) and calls
+  RewriteConvPass the way the test does, so the Rust ports of the tests can
+  assert the test's facts on RETAB's result and replay rc4's whole graph.
+  `modified` is the flag the pass returned.
 
 These files start with a `format 2` line and record more per node:
 
@@ -2652,6 +2660,217 @@ def generate_pipeline(spec: PipelineSpec, cache: LoweringCache) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# rc4's own RewriteConvPass tests (APU-135 P2 S3)
+# --------------------------------------------------------------------------
+#
+# The installed package doesn't ship backends/arm/test/passes, so the models
+# and helpers those tests use are copied here (TinyConvReluCat, ConvModule,
+# Conv1dBiasModule, `_export_quantized`, `_run_pre_rewrite_passes`); the
+# DWConvsModule above is rc4's. Every case seeds torch with SEED before it
+# builds the model and its inputs: the structure is the test's, the data is
+# this generator's.
+
+
+class TinyConvReluCat(NN.Module):
+    """test_rewrite_conv_pass.py's TinyConvReluCat."""
+
+    def __init__(self, conv1_bias: bool = True) -> None:
+        super().__init__()
+        self.conv1 = NN.Conv2d(4, 4, 3, padding=1, bias=conv1_bias)
+        self.conv2 = NN.Conv2d(8, 4, 1)
+        with torch.no_grad():
+            for param in self.parameters():
+                param.uniform_(-0.1, 0.1)
+
+    def forward(self, x, y):
+        relu_out = torch.nn.functional.relu(self.conv1(x))
+        merged = torch.cat((relu_out, y), dim=1)
+        return self.conv2(merged)
+
+
+class ConvModule(NN.Module):
+    """test_rewrite_conv_pass.py's ConvModule: k3 s3 p0, 3 -> 16."""
+
+    def __init__(self):
+        super().__init__()
+        self.conv = NN.Conv2d(3, 16, kernel_size=3, stride=3, padding=0)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class Conv1dBiasModule(NN.Module):
+    """test_rewrite_conv_pass.py's Conv1dBiasModule."""
+
+    def __init__(self, depthwise: bool = False) -> None:
+        super().__init__()
+        groups = 4 if depthwise else 1
+        out_channels = 8 if depthwise else 6
+        self.conv = NN.Conv1d(4, out_channels, kernel_size=3, padding=1, groups=groups, bias=True)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+def rc4_test_fp_program(model, inputs):
+    """`to_edge(export(model, inputs)).exported_program()`, as the FP tests
+    (and PassPipeline's to_edge stage) build it."""
+    from executorch.exir import to_edge
+
+    ep = to_edge(torch.export.export(model.eval(), inputs)).exported_program()
+    return ep, ep.graph_module
+
+
+def rc4_test_vgf_program(model):
+    """The VGF tests' `_export_quantized` (VgfQuantizer on TOSA-1.0+INT+FP,
+    per-channel, symmetric [-127, 127]), `to_edge` without IR validity checks
+    and `_run_pre_rewrite_passes` (test_rewrite_conv_pass.py:166-224)."""
+    from executorch.backends.arm._passes import (
+        ConvertToClampPass,
+        FoldAndAnnotateQParamsPass,
+        FuseQuantizedActivationPass,
+        QuantizeClampArgumentsPass,
+    )
+    from executorch.backends.arm.quantizer.arm_quantizer import (
+        get_symmetric_quantization_config,
+        VgfQuantizer,
+    )
+    from executorch.backends.arm.vgf import VgfCompileSpec
+    from executorch.exir import EdgeCompileConfig, to_edge
+
+    inputs = (torch.rand(1, 4, 16, 16), torch.rand(1, 4, 16, 16) - 0.065)
+    quantizer = VgfQuantizer(VgfCompileSpec("TOSA-1.0+INT+FP"))
+    quantizer.set_global(
+        get_symmetric_quantization_config(
+            is_per_channel=True, act_qmin=-127, act_qmax=127, weight_qmin=-127, weight_qmax=127
+        )
+    )
+    exported = torch.export.export(model.eval(), inputs).module(check_guards=False)
+    quantized = quantizer._quantize_with_submodules(exported, [inputs])
+    ep = to_edge(
+        torch.export.export(quantized, inputs),
+        compile_config=EdgeCompileConfig(_check_ir_validity=False),
+    ).exported_program()
+    gm = ep.graph_module
+    for pass_ in (
+        FuseQuantizedActivationPass(),
+        ConvertToClampPass(),
+        FoldAndAnnotateQParamsPass(ep),
+        QuantizeClampArgumentsPass(),
+    ):
+        gm = pass_(gm).graph_module
+    return ep, gm
+
+
+class Rc4TestCase:
+    """One rc4 test's RewriteConvPass call: the program it runs the pass on
+    and the TOSA spec of the lowering context it calls it in (None: none)."""
+
+    def __init__(self, name: str, test: str, build, spec: str | None) -> None:
+        self.name = name
+        self.test = test
+        self.build = build
+        self.spec = spec
+
+
+def rc4_test_cases() -> list[Rc4TestCase]:
+    return [
+        Rc4TestCase(
+            "tosa_fp_dw_convs_shared_weights",
+            "test_rewrite_conv_tosa_FP (:438)",
+            lambda: rc4_test_fp_program(DWConvsModule(), (torch.randn(1, 6, 24, 24),)),
+            "TOSA-1.0+FP",
+        ),
+        Rc4TestCase(
+            "no_convolution",
+            "test_rewrite_conv_without_convolution_does_not_require_context (:555)",
+            lambda: rc4_test_fp_program(NN.Identity(), (torch.randn(1, 4),)),
+            None,
+        ),
+        Rc4TestCase(
+            "conv1d_atomic_rank3_layout_boundaries",
+            "test_rewrite_conv1d_emits_atomic_rank3_layout_boundaries[False] (:828)",
+            lambda: rc4_test_fp_program(Conv1dBiasModule(False), (torch.randn(1, 4, 8),)),
+            "TOSA-1.0+INT+FP",
+        ),
+        Rc4TestCase(
+            "conv1d_dw_atomic_rank3_layout_boundaries",
+            "test_rewrite_conv1d_emits_atomic_rank3_layout_boundaries[True] (:828)",
+            lambda: rc4_test_fp_program(Conv1dBiasModule(True), (torch.randn(1, 4, 8),)),
+            "TOSA-1.0+INT+FP",
+        ),
+        Rc4TestCase(
+            "vgf_quant_no_bias_conv_relu_cat",
+            "test_rewrite_conv_vgf_quant_infers_quantized_bias_dtype_from_inputs (:911)",
+            lambda: rc4_test_vgf_program(TinyConvReluCat(conv1_bias=False)),
+            "TOSA-1.0+INT+FP",
+        ),
+        Rc4TestCase(
+            # The test's dynamic H and W are multiples of three; RETAB's IR is
+            # static, so the example input's shape stands for them.
+            "static_padding_remainder_zero",
+            "test_rewrite_conv_dynamic_keeps_static_padding_when_symbolic_remainder_is_zero"
+            " (:975), static",
+            lambda: rc4_test_fp_program(ConvModule(), (torch.randn(1, 3, 9, 12),)),
+            "TOSA-1.0+FP",
+        ),
+    ]
+
+
+RC4_TEST_FIXTURE = "rewrite_conv_rc4_tests"
+RC4_TEST_SOURCES = CONV_SOURCES
+
+
+def rc4_test_case_lines(case: Rc4TestCase) -> list[str]:
+    from executorch.backends.arm._passes.rewrite_conv_pass import RewriteConvPass
+
+    torch.manual_seed(SEED)
+    ep, gm = case.build()
+    before = capture_graph(gm, ep)
+    for node in before.nodes:
+        if node.data is not None and node.data.startswith("sha256:"):
+            raise AssertionError(f"{case.name}: before-graph constant {node.name} is too large")
+    rewrite = RewriteConvPass(ep)
+    if case.spec is None:
+        result = rewrite(gm)
+    else:
+        with TosaLoweringContext(TosaSpecification.create_from_string(case.spec)):
+            result = rewrite(gm)
+    after = capture_graph(result.graph_module, ep)
+    before_lines, after_lines = before.lines(), after.lines()
+    lines = ["before", *before_lines, f"after modified={str(bool(result.modified)).lower()}"]
+    if after_lines == before_lines:
+        lines[-1] += " same"
+    else:
+        lines += after_lines
+    return [f"case {case.name}", f"# {case.test}", *lines, "end"]
+
+
+def generate_rc4_tests() -> list[str]:
+    import torchao
+
+    cases = rc4_test_cases()
+    git = getattr(executorch.version, "git_version", "unknown")
+    lines = [
+        "# rc4 RewriteConvPass before/after graphs from rc4's own pass tests"
+        " (backends/arm/test/passes/test_rewrite_conv_pass.py), for src/layout/replay.rs.",
+        "# Generated by tests/fixtures/layout_replay/gen_layout_replay.py; don't edit by hand.",
+        "# Regenerate with the rc4 environment, from a neutral directory:",
+        "#   cd /tmp && <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py"
+        f" --pass {RC4_TEST_FIXTURE}",
+        f"# executorch {executorch.version.__version__} (git {git}), torch {torch.__version__},"
+        f" torchao {torchao.__version__}, python {sys.version.split()[0]}",
+        f"# seed {SEED}: {len(cases)} cases; format {FORMAT}: see the generator's docstring.",
+    ]
+    for relative in RC4_TEST_SOURCES + PIPELINE_COMMON_SOURCES + COMMON_SOURCES:
+        lines.append(f"# rc4-source sha256 {source_sha256(relative)} {relative}")
+    lines.append(f"format {FORMAT}")
+    for case in cases:
+        lines += rc4_test_case_lines(case)
+    return lines
+
+
+# --------------------------------------------------------------------------
 # Driver
 # --------------------------------------------------------------------------
 
@@ -2758,7 +2977,7 @@ def main() -> None:
         "--pass",
         dest="only",
         action="append",
-        choices=[p.name for p in PASSES + PIPELINE_SPECS],
+        choices=[p.name for p in PASSES + PIPELINE_SPECS] + [RC4_TEST_FIXTURE],
         help="write this fixture (repeatable; default: all)",
     )
     parser.add_argument("--random", type=int, default=RANDOM_CASES)
@@ -2809,6 +3028,18 @@ def main() -> None:
         path = args.out / f"{spec.name}.txt"
         path.write_text(text)
         print(f"{path.name}: {count} cases", file=sys.stderr)
+
+    if not args.only or RC4_TEST_FIXTURE in args.only:
+        if args.case:
+            matches = [case for case in rc4_test_cases() if case.name == args.case]
+            if matches:
+                print("\n".join(rc4_test_case_lines(matches[0])))
+        else:
+            lines = generate_rc4_tests()
+            path = args.out / f"{RC4_TEST_FIXTURE}.txt"
+            path.write_text("\n".join(lines) + "\n")
+            count = sum(1 for line in lines if line.startswith("case "))
+            print(f"{path.name}: {count} cases", file=sys.stderr)
 
 
 if __name__ == "__main__":

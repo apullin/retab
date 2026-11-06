@@ -215,7 +215,9 @@ enum ConvForm {
 fn conv_form(target: &str) -> Option<ConvForm> {
     match target {
         CONVOLUTION => Some(ConvForm::Convolution),
-        "aten.conv1d.default" | "aten.conv2d.default" | "aten.conv3d.default"
+        "aten.conv1d.default"
+        | "aten.conv2d.default"
+        | "aten.conv3d.default"
         | CONV_TRANSPOSE2D_INPUT => Some(ConvForm::Raw),
         _ => None,
     }
@@ -613,7 +615,12 @@ fn plan(graph: &IrGraph, scope: GraphScope, conv: NodeId) -> Result<Option<ConvR
         let [op0, op1] = output_padding[..] else {
             return Err("output padding does not match the spatial rank".to_string());
         };
-        let out_pad = [-padding[0], -padding[0] + op0, -padding[1], -padding[1] + op1];
+        let out_pad = [
+            -padding[0],
+            -padding[0] + op0,
+            -padding[1],
+            -padding[1] + op1,
+        ];
         let kind = Kind {
             target: TOSA_TRANSPOSE_CONV2D,
             pre: &NHWC,
@@ -622,7 +629,11 @@ fn plan(graph: &IrGraph, scope: GraphScope, conv: NodeId) -> Result<Option<ConvR
             weight_reshape: None,
             name_suffix: "ohwi",
         };
-        (kind, vec![i64_list_arg(&out_pad), i64_list_arg(&stride)], None)
+        (
+            kind,
+            vec![i64_list_arg(&out_pad), i64_list_arg(&stride)],
+            None,
+        )
     } else {
         // RCP:987-1004: duplicate each pad, then trim each trailing one.
         let mut pad: Vec<i64> = padding.iter().flat_map(|&p| [p, p]).collect();

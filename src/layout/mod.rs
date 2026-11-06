@@ -39,6 +39,8 @@ pub(crate) mod pointwise;
 // rc4's RewriteConvPass for explicit mode (APU-135 P2 S3, APU-155).
 #[allow(dead_code)]
 pub(crate) mod rewrite_conv;
+#[cfg(test)]
+mod rewrite_conv_tests;
 #[allow(dead_code)]
 pub(crate) mod shape;
 
