@@ -95,24 +95,11 @@
 //! from merging them again (design F7). The generic profile keeps duplicate
 //! heads, as rc4 does.
 //!
-//! **U55 permute splits** (design F8, F9). Python decides which edge permutes
-//! `IrDecomposePermuteForU55` splits, by node name on the edge program
-//! (`PipelineConfig::u55_split_permutes`), while rc4 judges whatever permutes
-//! are alive at `arm_pass_manager.py:736`, after this pass. When the INT32
-//! RESCALEs of a listed source permute move to its copy on the widened branch,
-//! the copy is marked to be split as well
-//! (`fx_decompose_permute_for_u55_ir::mark_split`), whether or not the permute
-//! itself is erased. rc4 splits that copy too. Its input has the source
-//! permute's dims, which break U55's worst-case rule: Python lists only
-//! permutes that break it, and the rule doesn't depend on the order of the
-//! dims. Its input is also int32, and rc4's exact check treats an int32
-//! TRANSPOSE as unsupported without asking Vela. Without the mark, a listed
-//! permute erased here would lose its split silently. Every other permute the
-//! pass creates stays unsplit in P2 (F8), including the int32 layout permutes
-//! of both widened branches. rc4 splits those on the same grounds when the
-//! conv's dims break the rule. In rc4 the copy reaches `:736` already fused
-//! with the widened layout permute (PropagateViewCopyPermuteDownPass, `:726`,
-//! a P3 port), and that fused permute is the one split.
+//! **U55 permute splits** (design F8). rc4 judges whatever permutes are
+//! alive at `arm_pass_manager.py:736`, after this pass, including the ones
+//! this pass creates. Explicit mode's `IrDecomposePermuteForU55` does the
+//! same on U55, asking Python's Vela probe, so this pass leaves the split to
+//! it.
 //!
 //! **Regions** (APU-135 S8; design §2.9, §4.3). A region's constants are
 //! `get_attr` nodes (`GraphScope::Region`). A weight or bias the region
@@ -157,11 +144,10 @@
 //! that requested it stays as it was; a fallback also skips the U55 step,
 //! which rc4 never reaches after raising.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::fx_constant_tensor_eval::permute_tensor_data;
 use crate::fx_conv_args::{ConvArgKind, ConvArgs};
-use crate::fx_decompose_permute_for_u55_ir::mark_split;
 use crate::fx_fuse_duplicate_users_ir::node_signature_from;
 use crate::fx_ir::{
     i64_list_arg, IrArg, IrGraph, IrNode, IrPass, MetaValue, NodeId, NodeMeta, NodeOp, QParam,
@@ -236,24 +222,17 @@ pub(crate) struct IrRewriteConvPass {
     /// graph are left for explicit mode's captured_conv (design §2.9; see the
     /// module docs).
     pub(crate) in_region: bool,
-    /// `PipelineConfig::u55_split_permutes`: the edge permutes, by name, that
-    /// `IrDecomposePermuteForU55Pass` splits on U55 (design F8). A listed
-    /// source permute's copy on an A16W8 widened branch is marked to be split
-    /// too (see "U55 permute splits" in the module docs).
-    pub(crate) u55_split_permutes: HashSet<String>,
 }
 
 impl IrRewriteConvPass {
     /// The pass for a pipeline lowering to `config`'s TOSA spec: the U55
     /// separation runs on the U55 subset (`TOSA-1.0+INT+...+u55`, which
     /// `PipelineConfig::from_tosa_spec` records as `is_u55_subset`, as rc4's
-    /// `TosaSpecification.is_U55_subset` does), and the copies of the permutes
-    /// `config` lists for splitting carry that split.
+    /// `TosaSpecification.is_U55_subset` does).
     pub(crate) fn new(config: &PipelineConfig, in_region: bool) -> Self {
         Self {
             is_u55_subset: config.is_u55_subset,
             in_region,
-            u55_split_permutes: config.u55_split_permutes.clone(),
         }
     }
 }
@@ -292,13 +271,7 @@ impl IrPass for IrRewriteConvPass {
                     "{} reaches RewriteConvPass's slot; only aten.convolution is rewritten",
                     node.target
                 )),
-                Some(ConvForm::Convolution) => plan(
-                    ctx.graph(),
-                    ctx.order(),
-                    scope,
-                    id,
-                    &self.u55_split_permutes,
-                ),
+                Some(ConvForm::Convolution) => plan(ctx.graph(), ctx.order(), scope, id),
             };
             match planned {
                 Ok(Some(rewrite)) => {
@@ -515,9 +488,6 @@ struct PermutedInt32Users {
     rescales: Vec<NodeId>,
     /// The widened copy's value shape: the conv's, permuted by the user's dims.
     shape: Vec<i64>,
-    /// The permute is listed in `u55_split_permutes`, so its widened copy is
-    /// marked to be split too.
-    listed_for_u55_split: bool,
 }
 
 /// `_insert_a16w8_output_branches` (RCP:665-816) for one A16W8 conv of
@@ -533,8 +503,7 @@ struct Int32Branches {
 }
 
 /// Plan the A16W8 branches of `conv`, whose default RESCALE is `rescale` and
-/// whose value has shape `conv_shape`, with `u55_split_permutes` the edge
-/// permutes listed for splitting on U55; `Err` where rc4 raises (RCP:711-716,
+/// whose value has shape `conv_shape`; `Err` where rc4 raises (RCP:711-716,
 /// :511-531) or a user's arguments don't parse.
 fn plan_int32_branches(
     graph: &IrGraph,
@@ -542,7 +511,6 @@ fn plan_int32_branches(
     conv: NodeId,
     rescale: &RescaleRewrite,
     conv_shape: &[i64],
-    u55_split_permutes: &HashSet<String>,
 ) -> Result<Int32Branches, String> {
     let mut direct = Vec::new();
     for user in direct_int32_rescale_users(graph, order, conv) {
@@ -581,7 +549,6 @@ fn plan_int32_branches(
             permute: user,
             rescales,
             shape,
-            listed_for_u55_split: u55_split_permutes.contains(&node.name),
         });
     }
     Ok(Int32Branches {
@@ -868,14 +835,12 @@ struct Kind {
 
 /// Plan the rewrite of `conv` (RCP:889-1271 without the graph edits), or
 /// `None` for a conv to leave alone; `Err` is a stock fallback's reason.
-/// `order` is the graph order, for walking the conv's users as rc4 does, and
-/// `u55_split_permutes` the pass's list of edge permutes split on U55.
+/// `order` is the graph order, for walking the conv's users as rc4 does.
 fn plan(
     graph: &IrGraph,
     order: &NodeOrder,
     scope: GraphScope,
     conv: NodeId,
-    u55_split_permutes: &HashSet<String>,
 ) -> Result<Option<ConvRewrite>, String> {
     let node = graph.node(conv);
     let args = ConvArgs::parse_convolution_default(node)
@@ -1308,7 +1273,6 @@ fn plan(
             conv,
             rescale,
             &output.shape,
-            u55_split_permutes,
         )?)
     } else {
         None
@@ -1630,8 +1594,7 @@ struct OutputLayout<'a> {
 /// accumulator, as `plan_int32_branches` planned them. Every created node is
 /// `create_node(from_node=...)`'s, with emptied qparam maps: the RESCALE and
 /// permutes from the conv (`source`), a permute copy from the permute it
-/// copies. A copy of a permute listed for splitting on U55 is marked for
-/// `IrDecomposePermuteForU55Pass` (`mark_split`).
+/// copies.
 fn insert_a16w8_output_branches(
     ctx: &mut LayoutCtx<'_>,
     source: &NodeMeta,
@@ -1711,13 +1674,7 @@ fn insert_a16w8_output_branches(
         let permute = ctx.node(user.permute);
         let name = format!("{}_int32", permute.name);
         let dims = permute.args[1].clone();
-        let mut created = meta::from_node(&permute.meta, TensorFacts::new(user.shape, INT32));
-        // A split listed for the permute by name reaches its copy, which has
-        // the same dims and an int32 input; the permute itself may be erased
-        // below.
-        if user.listed_for_u55_split {
-            mark_split(&mut created);
-        }
+        let created = meta::from_node(&permute.meta, TensorFacts::new(user.shape, INT32));
         let widened_permute = ctx.inserting_after(widened_output, |ctx| {
             ctx.call_function(
                 name,

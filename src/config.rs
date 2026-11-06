@@ -26,6 +26,10 @@ pub(crate) fn fold_fallback_file() -> Option<String> {
     std::env::var("ARM_FOLD_FALLBACK_FILE").ok()
 }
 
+pub(crate) fn u55_permute_log_file() -> Option<String> {
+    std::env::var("RETAB_U55_PERMUTE_LOG").ok()
+}
+
 pub(crate) fn from_ir_debug_enabled() -> bool {
     env_any_equals(&["RETAB_FROM_IR_DEBUG", "ARM_FROM_IR_DEBUG"], "1")
 }

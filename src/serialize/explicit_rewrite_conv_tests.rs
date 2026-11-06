@@ -36,7 +36,6 @@ fn rewritten(fixture: &str, name: &str) -> IrGraph {
     let pass = IrRewriteConvPass {
         is_u55_subset: false,
         in_region: false,
-        u55_split_permutes: Default::default(),
     };
     rewritten_with(&pass, fixture, name)
 }

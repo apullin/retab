@@ -83,8 +83,12 @@ pub struct PipelineConfig {
     pub leaky_relu: LeakyReluLoweringConfig,
     pub quantize_inf: QuantizeInfConfig,
     pub sdpa_safe_softmax_guard: SdpaSafeSoftmaxGuardPolicy,
-    /// Permutes that Vela can't run on U55 (rc4's probe, run in Python); split by
-    /// `IrDecomposePermuteForU55Pass`.
+    /// The edge permutes dim-order mode's `IrDecomposePermuteForU55Pass` splits on U55,
+    /// by name (Python's `_u55_permutes_to_split`). Python asks stock's exact check about
+    /// each edge permute that breaks U55's worst-case TRANSPOSE rule, but outside a
+    /// `TosaLoweringContext` the check never runs Vela and rejects them all, so in
+    /// practice this is every such permute. Explicit mode on U55 gets an empty list and
+    /// asks the probe at the pass (`preprocess._u55_transpose_probe`).
     pub u55_split_permutes: std::collections::HashSet<String>,
     /// Pipeline-config key `layout`, which Python sets from `RETAB_LAYOUT`. The parent's
     /// config is stashed with its IR, so `ingest_and_serialize` (ingest and the
