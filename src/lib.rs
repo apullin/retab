@@ -300,6 +300,29 @@ fn apply_pre_submodule_qparam_propagation_ir(
     })
 }
 
+/// Align each control-flow region's IO with the graph that invokes it
+/// (`control_flow::apply_boundary_contracts`). Explicit mode's captured_conv runs inside
+/// and can ask for a stock fallback: a captured weight that does not resolve to a
+/// constant, or a bias that is not int32 data. The pass pipelines' checks are behind
+/// us, so this returns that request's reason for the caller to raise (P2 critique B6).
+/// Dim-order mode's contracts request nothing.
+fn apply_control_flow_contracts(
+    ir: &mut fx_ir::IrGraph,
+    submodules: &mut BTreeMap<String, StashedPipeline>,
+    layout: pipeline_config::LayoutMode,
+) -> Result<(), String> {
+    let changed = control_flow::apply_boundary_contracts(ir, submodules, layout);
+    if crate::config::from_ir_debug_enabled() && changed > 0 {
+        eprintln!(
+            "[RETAB][cf-boundary-ir] applied {changed} parent/submodule boundary metadata update(s)"
+        );
+    }
+    match layout {
+        pipeline_config::LayoutMode::Explicit => stock_fallback::take().map_or(Ok(()), Err),
+        pipeline_config::LayoutMode::DimOrder => Ok(()),
+    }
+}
+
 fn ingest_and_serialize_tosa_pybytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
     let started = std::time::Instant::now();
     let profile = crate::config::profile_ingest_serialize_enabled();
@@ -317,19 +340,9 @@ fn ingest_and_serialize_tosa_pybytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
     let explicit = layout == pipeline_config::LayoutMode::Explicit;
     let has_control_flow = ir_has_control_flow(&ir);
     if has_control_flow {
-        let changed =
-            control_flow::apply_boundary_contracts(&mut ir, &mut stashed.submodules, layout);
-        if crate::config::from_ir_debug_enabled() && changed > 0 {
-            eprintln!(
-                "[RETAB][cf-boundary-ir] applied {changed} parent/submodule boundary metadata update(s)"
-            );
-        }
-    }
-    // Explicit mode can request a stock fallback at serialization time (its captured_conv
-    // runs inside the contracts and sends unresolvable captured weights and non-int32
-    // biases to stock), so check here as well as after the pass pipelines (P2 critique B6).
-    if explicit {
-        fail_on_stock_fallback_request()?;
+        apply_control_flow_contracts(&mut ir, &mut stashed.submodules, layout).map_err(
+            |reason| PyRuntimeError::new_err(format!("RETAB_STOCK_FALLBACK: {reason}")),
+        )?;
     }
 
     let mut store = crate::store::TensorStore::new();
