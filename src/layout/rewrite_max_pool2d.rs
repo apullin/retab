@@ -295,3 +295,249 @@ fn rewrite(ctx: &mut LayoutCtx<'_>, id: NodeId, plan: &Plan) {
     }
     ctx.erase_node(id);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fx_ir::{NodeMeta, QParam, QParamMap};
+    use crate::layout::testing::{ints, node, LayoutGraph, PERMUTE};
+    use crate::test_ir::qparam;
+
+    const I8: &str = "torch.int8";
+    const F32: &str = "torch.float32";
+    const GETITEM: &str = "<built-in function getitem>";
+    const UNSQUEEZE: &str = "aten.unsqueeze_copy.default";
+    const SQUEEZE: &str = "aten.squeeze_copy.dims";
+
+    /// `IrArg` has no `PartialEq`; its derived `Debug` is exact.
+    fn assert_args(actual: &[IrArg], expected: &[IrArg]) {
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+    }
+
+    fn by_name<'a>(g: &'a LayoutGraph, name: &str) -> &'a crate::fx_ir::IrNode {
+        g.graph().node(g.id(name))
+    }
+
+    fn keys(map: Option<&QParamMap>) -> Option<Vec<usize>> {
+        map.map(|map| map.iter().map(|(&key, _)| key).collect())
+    }
+
+    /// `x -> max_pool2d(x, args...) -> output`, as rc4's RemoveGetItemPass
+    /// leaves it: input qparams and an empty output map.
+    fn plain_graph(input: &[i64], args: Vec<IrArg>, output: &[i64], iq: QParam) -> (LayoutGraph, String) {
+        let mut g = LayoutGraph::new();
+        let x = g.typed_input("x", input, I8);
+        let mut all_args = vec![node(x)];
+        all_args.extend(args);
+        let pool = g.add_unrefreshed(MAX_POOL2D, all_args);
+        let mut meta = NodeMeta::tensor(output.to_vec(), F32);
+        meta.set_single_input_qparam(iq);
+        meta.set_output_qparams(QParamMap::new());
+        g.graph_mut().node_mut(pool).meta = meta;
+        g.output(&[pool]);
+        let name = g.name(pool);
+        (g, name)
+    }
+
+    /// RETAB's form: `x -> max_pool2d_with_indices(x, args...) -> getitem(.., 0)
+    /// -> output`. The pool has no val (it is a tuple) and input qparams only;
+    /// the getitem holds the float32 val and the output qparams (critique A3).
+    fn with_indices_graph(
+        input: &[i64],
+        input_dtype: &str,
+        args: Vec<IrArg>,
+        output: &[i64],
+        q: QParam,
+    ) -> (LayoutGraph, String, String) {
+        let mut g = LayoutGraph::new();
+        let x = g.typed_input("x", input, input_dtype);
+        let mut all_args = vec![node(x)];
+        all_args.extend(args);
+        let pool = g.add_unrefreshed(MAX_POOL2D_WITH_INDICES, all_args);
+        g.graph_mut().node_mut(pool).meta.set_single_input_qparam(q.clone());
+        let getitem = g.add_unrefreshed(GETITEM, vec![node(pool), IrArg::Int(0)]);
+        let mut meta = NodeMeta::tensor(output.to_vec(), F32);
+        meta.set_single_output_qparam(q);
+        g.graph_mut().node_mut(getitem).meta = meta;
+        g.output(&[getitem]);
+        let (pool, getitem) = (g.name(pool), g.name(getitem));
+        (g, pool, getitem)
+    }
+
+    fn assert_declined(g: &mut LayoutGraph, reason: &str) {
+        crate::stock_fallback::take();
+        let before: Vec<String> = g.targets().into_iter().map(str::to_string).collect();
+        assert!(!IrRewriteMaxPool2dPass.run(g.graph_mut()));
+        assert_eq!(g.targets(), before, "a declined rewrite changes nothing");
+        let request = crate::stock_fallback::take().expect("a stock fallback request");
+        assert!(request.contains(reason), "{request}");
+    }
+
+    /// rc4's `max_pool_k3s2p1` capture: kernel and stride as given, the post
+    /// pads adjusted, and the pool's meta (input qparams, an empty output map)
+    /// on all three nodes.
+    #[test]
+    fn plain_max_pool_becomes_permutes_around_max_pool2d() {
+        let q = qparam(0.019, -2, I8);
+        let (mut g, name) = plain_graph(
+            &[1, 3, 8, 8],
+            vec![ints(&[3, 3]), ints(&[2, 2]), ints(&[1, 1]), IrArg::Int(1), IrArg::Bool(false)],
+            &[1, 3, 4, 4],
+            q.clone(),
+        );
+        assert!(IrRewriteMaxPool2dPass.run(g.graph_mut()));
+        g.assert_targets(&[PERMUTE, TOSA_MAX_POOL2D, PERMUTE]);
+        assert!(g.graph().by_name(&name).is_none_or(|node| !node.alive));
+        let pre = by_name(&g, &format!("{name}_nhwc"));
+        assert_args(&pre.args, &[node(g.id("x")), ints(&[0, 2, 3, 1])]);
+        assert_eq!((g.shape(pre.id), g.dtype(pre.id)), (&[1, 8, 8, 3][..], I8));
+        let pool = by_name(&g, &format!("{name}_tosa"));
+        assert_args(
+            &pool.args,
+            &[node(pre.id), ints(&[3, 3]), ints(&[2, 2]), ints(&[1, 0, 1, 0])],
+        );
+        assert_eq!((g.shape(pool.id), g.dtype(pool.id)), (&[1, 4, 4, 3][..], I8));
+        let post = by_name(&g, &format!("{name}_nchw"));
+        assert_args(&post.args, &[node(pool.id), ints(&[0, 3, 1, 2])]);
+        assert_eq!((g.shape(post.id), g.dtype(post.id)), (&[1, 3, 4, 4][..], I8));
+        for id in [pre.id, pool.id, post.id] {
+            let meta = &g.graph().node(id).meta;
+            assert_eq!(meta.input_qparam(), Some(&q));
+            assert_eq!(keys(meta.output_qparams()), Some(vec![]));
+            assert_eq!(meta.val_dim_order(), Some(&[0, 1, 2, 3][..]));
+        }
+        assert!(g.graph().output_node().unwrap().args[0].contains_node(post.id));
+    }
+
+    /// RemoveGetItemPass's effect (critique A3/B3): the chain replaces the
+    /// getitem, the getitem and the tuple-valued pool go, and the new nodes
+    /// carry the pool's input qparams only; the getitem's output qparams are
+    /// dropped as rc4 drops them. The input permute keeps x's float32 (a conv
+    /// output in RETAB's IR) while MAX_POOL2D takes the int8 rc4 sees.
+    #[test]
+    fn with_indices_pool_takes_the_getitems_place() {
+        let q = qparam(0.0056, -128, I8);
+        let (mut g, pool, getitem) =
+            with_indices_graph(&[1, 3, 8, 8], F32, vec![ints(&[2, 2]), ints(&[2, 2])], &[1, 3, 4, 4], q.clone());
+        assert!(IrRewriteMaxPool2dPass.run(g.graph_mut()));
+        g.assert_targets(&[PERMUTE, TOSA_MAX_POOL2D, PERMUTE]);
+        for gone in [&pool, &getitem] {
+            assert!(g.graph().by_name(gone).is_none_or(|node| !node.alive), "{gone}");
+        }
+        let pre = by_name(&g, &format!("{pool}_nhwc"));
+        assert_eq!(g.dtype(pre.id), F32);
+        let tosa = by_name(&g, &format!("{pool}_tosa"));
+        assert_args(&tosa.args, &[node(pre.id), ints(&[2, 2]), ints(&[2, 2]), ints(&[0, 0, 0, 0])]);
+        assert_eq!((g.shape(tosa.id), g.dtype(tosa.id)), (&[1, 4, 4, 3][..], I8));
+        let post = by_name(&g, &format!("{pool}_nchw"));
+        assert_eq!((g.shape(post.id), g.dtype(post.id)), (&[1, 3, 4, 4][..], I8));
+        for id in [pre.id, tosa.id, post.id] {
+            let meta = &g.graph().node(id).meta;
+            assert_eq!(meta.input_qparam(), Some(&q));
+            assert!(meta.output_qparams().is_none(), "the getitem's output qparams are dropped");
+        }
+        assert!(g.graph().output_node().unwrap().args[0].contains_node(post.id));
+    }
+
+    /// An omitted stride is the kernel (rc4's
+    /// `test_rewrite_max_pool2d_tosa_empty_stride_uses_kernel_size`), and so is
+    /// a falsy one.
+    #[test]
+    fn a_falsy_stride_is_the_kernel() {
+        for stride in [None, Some(IrArg::None), Some(IrArg::List(vec![]))] {
+            let mut args = vec![ints(&[2, 2])];
+            args.extend(stride.clone());
+            let (mut g, pool, _) = with_indices_graph(&[1, 3, 8, 8], I8, args, &[1, 3, 4, 4], qparam(0.1, 0, I8));
+            assert!(IrRewriteMaxPool2dPass.run(g.graph_mut()), "{stride:?}");
+            let tosa = by_name(&g, &format!("{pool}_tosa"));
+            assert_eq!(tosa.arg_int_list(2), Some(vec![2, 2]), "{stride:?}");
+        }
+    }
+
+    /// rc4's `max_pool_ceil_mode` capture: ceil mode adds a post pad.
+    #[test]
+    fn ceil_mode_adds_a_post_pad() {
+        let (mut g, pool, _) = with_indices_graph(
+            &[1, 3, 8, 8],
+            I8,
+            vec![ints(&[3, 3]), ints(&[2, 2]), ints(&[0, 0]), ints(&[1, 1]), IrArg::Bool(true)],
+            &[1, 3, 4, 4],
+            qparam(0.1, 0, I8),
+        );
+        assert!(IrRewriteMaxPool2dPass.run(g.graph_mut()));
+        let tosa = by_name(&g, &format!("{pool}_tosa"));
+        assert_eq!(tosa.arg_int_list(3), Some(vec![0, 1, 0, 1]));
+    }
+
+    /// IrNormalizeMaxPool2dInputRank's form for an unbatched pool: the chain
+    /// sits between its unsqueeze and squeeze.
+    #[test]
+    fn rank3_pools_are_rewritten_inside_their_unsqueeze_and_squeeze() {
+        let q = qparam(0.1, 0, I8);
+        let mut g = LayoutGraph::new();
+        let x = g.typed_input("x", &[3, 8, 8], I8);
+        let unsqueeze = g.add_unrefreshed(UNSQUEEZE, vec![node(x), IrArg::Int(0)]);
+        g.graph_mut().node_mut(unsqueeze).meta = NodeMeta::tensor(vec![1, 3, 8, 8], I8);
+        let pool = g.add_unrefreshed(MAX_POOL2D_WITH_INDICES, vec![node(unsqueeze), ints(&[2, 2]), ints(&[2, 2])]);
+        g.graph_mut().node_mut(pool).meta.set_single_input_qparam(q.clone());
+        let getitem = g.add_unrefreshed(GETITEM, vec![node(pool), IrArg::Int(0)]);
+        let mut meta = NodeMeta::tensor(vec![1, 3, 4, 4], F32);
+        meta.set_single_output_qparam(q);
+        g.graph_mut().node_mut(getitem).meta = meta;
+        let squeeze = g.add_unrefreshed(SQUEEZE, vec![node(getitem), ints(&[0])]);
+        g.graph_mut().node_mut(squeeze).meta = NodeMeta::tensor(vec![3, 4, 4], F32);
+        g.output(&[squeeze]);
+        assert!(IrRewriteMaxPool2dPass.run(g.graph_mut()));
+        g.assert_targets(&[UNSQUEEZE, PERMUTE, TOSA_MAX_POOL2D, PERMUTE, SQUEEZE]);
+    }
+
+    #[test]
+    fn rc4_errors_go_to_stock() {
+        let q = || qparam(0.1, 0, I8);
+        // `:88-95`: DecomposeMaxPool2dPass should have removed the dilation.
+        let (mut g, ..) = with_indices_graph(
+            &[1, 3, 8, 8],
+            I8,
+            vec![ints(&[2, 2]), ints(&[1, 1]), ints(&[0, 0]), ints(&[2, 2])],
+            &[1, 3, 6, 6],
+            q(),
+        );
+        assert_declined(&mut g, "dilation");
+        // rc4 indexes `kernel[1]`.
+        let (mut g, ..) = with_indices_graph(&[1, 3, 8, 8], I8, vec![ints(&[2])], &[1, 3, 4, 4], q());
+        assert_declined(&mut g, "kernel");
+        // A rank-3 input that IrNormalizeMaxPool2dInputRank didn't lift.
+        let (mut g, _) = plain_graph(&[3, 8, 8], vec![ints(&[2, 2])], &[3, 4, 4], q());
+        assert_declined(&mut g, "rank-3");
+        // An output the getitem's val contradicts.
+        let (mut g, ..) = with_indices_graph(&[1, 3, 8, 8], I8, vec![ints(&[2, 2])], &[1, 3, 5, 5], q());
+        assert_declined(&mut g, "value");
+    }
+
+    /// RemoveGetItemPass's AssertionErrors (`remove_getitem_op.py:32-62`): the
+    /// tuple-valued pool needs exactly one user, a getitem of index 0.
+    #[test]
+    fn remove_getitem_user_patterns_go_to_stock() {
+        let q = || qparam(0.1, 0, I8);
+        // The indices are read.
+        let (mut g, _, getitem) = with_indices_graph(&[1, 3, 8, 8], I8, vec![ints(&[2, 2])], &[1, 3, 4, 4], q());
+        let id = g.id(&getitem);
+        g.graph_mut().set_arg(id, 1, IrArg::Int(1));
+        assert_declined(&mut g, "getitem index");
+        // Values and indices both.
+        let (mut g, pool, getitem) = with_indices_graph(&[1, 3, 8, 8], I8, vec![ints(&[2, 2])], &[1, 3, 4, 4], q());
+        let pool_id = g.id(&pool);
+        let indices = g.add_unrefreshed(GETITEM, vec![node(pool_id), IrArg::Int(1)]);
+        g.graph_mut().node_mut(indices).meta = NodeMeta::tensor(vec![1, 3, 4, 4], "torch.int64");
+        let output = g.graph().output_node().unwrap().id;
+        let values = g.id(&getitem);
+        g.graph_mut().set_args(output, vec![IrArg::List(vec![node(values), node(indices)])]);
+        assert_declined(&mut g, "2 users");
+        // A user that isn't a getitem.
+        let (mut g, pool, getitem) = with_indices_graph(&[1, 3, 8, 8], I8, vec![ints(&[2, 2])], &[1, 3, 4, 4], q());
+        let (pool_id, getitem_id) = (g.id(&pool), g.id(&getitem));
+        g.graph_mut().node_mut(getitem_id).target = "aten.relu.default".to_string();
+        g.graph_mut().set_args(getitem_id, vec![node(pool_id)]);
+        assert_declined(&mut g, "not a getitem");
+    }
+}

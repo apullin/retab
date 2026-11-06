@@ -304,3 +304,321 @@ fn rewrite(ctx: &mut LayoutCtx<'_>, id: NodeId, plan: &Plan) {
     ctx.replace_all_uses_with(id, post);
     ctx.erase_node(id);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fx_ir::{NodeMeta, QParam, TensorSource};
+    use crate::graph::ir::DType;
+    use crate::layout::constants::IrMaterializeConstantsPass;
+    use crate::layout::testing::{ints, node, LayoutGraph, PERMUTE};
+    use crate::lowering_effects::LoweringInputKind;
+    use crate::test_ir::qparam;
+
+    const I8: &str = "torch.int8";
+    const I16: &str = "torch.int16";
+    const F32: &str = "torch.float32";
+
+    /// `IrArg` has no `PartialEq`; its derived `Debug` is exact.
+    fn assert_args(actual: &[IrArg], expected: &[IrArg]) {
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+    }
+
+    fn int16_qparam(scale: f64, zp: i64) -> QParam {
+        QParam::per_tensor(scale, zp, -32767, 32767, I16.to_string())
+    }
+
+    /// `x -> avg_pool2d(x, args...) -> output`. A quantized pool holds RETAB's
+    /// float32 val (design F2) and `iq`/`oq`; a float pool holds `input_dtype`.
+    fn pool_graph(
+        input: &[i64],
+        input_dtype: &str,
+        args: Vec<IrArg>,
+        output: &[i64],
+        iq: Option<QParam>,
+        oq: Option<QParam>,
+    ) -> (LayoutGraph, String) {
+        let mut g = LayoutGraph::new();
+        let x = g.typed_input("x", input, input_dtype);
+        let mut all_args = vec![node(x)];
+        all_args.extend(args);
+        let pool = g.add_unrefreshed(AVG_POOL2D, all_args);
+        let quantized = iq.is_some() || oq.is_some();
+        let dtype = if quantized { F32 } else { input_dtype };
+        let mut meta = NodeMeta::tensor(output.to_vec(), dtype);
+        if let Some(iq) = iq {
+            meta.set_single_input_qparam(iq);
+        }
+        if let Some(oq) = oq {
+            meta.set_single_output_qparam(oq);
+        }
+        g.graph_mut().node_mut(pool).meta = meta;
+        g.output(&[pool]);
+        let name = g.name(pool);
+        (g, name)
+    }
+
+    fn by_name<'a>(g: &'a LayoutGraph, name: &str) -> &'a crate::fx_ir::IrNode {
+        g.graph().node(g.id(name))
+    }
+
+    fn assert_declined(g: &mut LayoutGraph, reason: &str) {
+        crate::stock_fallback::take();
+        let before: Vec<String> = g.targets().into_iter().map(str::to_string).collect();
+        assert!(!IrRewriteAvgPool2dPass.run(g.graph_mut()));
+        assert_eq!(g.targets(), before, "a declined rewrite changes nothing");
+        let request = crate::stock_fallback::take().expect("a stock fallback request");
+        assert!(request.contains(reason), "{request}");
+    }
+
+    /// rc4's `avg_pool_k3s2p1` shape with distinct input and output zero points,
+    /// which the captured cases never have (their pools share qparams): each
+    /// `full` takes its own map's zero point, input first, and every node copies
+    /// the pool's meta, qparams included.
+    #[test]
+    fn quantized_pool_becomes_zero_points_permutes_and_avg_pool2d() {
+        let (iq, oq) = (qparam(0.1, -3, I8), qparam(0.2, 5, I8));
+        let (mut g, name) = pool_graph(
+            &[1, 3, 8, 8],
+            I8,
+            vec![ints(&[3, 3]), ints(&[2, 2]), ints(&[1, 1]), IrArg::Bool(false), IrArg::Bool(false)],
+            &[1, 3, 4, 4],
+            Some(iq.clone()),
+            Some(oq.clone()),
+        );
+        assert!(IrRewriteAvgPool2dPass.run(g.graph_mut()));
+        g.assert_targets(&[FULL, FULL, PERMUTE, TOSA_AVG_POOL2D, PERMUTE]);
+        assert!(g.graph().by_name(&name).is_none_or(|node| !node.alive));
+
+        let input_zp = by_name(&g, &format!("{name}_input_zero_point"));
+        let output_zp = by_name(&g, &format!("{name}_output_zero_point"));
+        for (zp, value) in [(input_zp, -3), (output_zp, 5)] {
+            assert_args(&zp.args, &[ints(&[1]), IrArg::Int(value)]);
+            assert_eq!(format!("{:?}", zp.kwarg("dtype")), format!("{:?}", Some(IrArg::Dtype(I8.into()))));
+            assert_eq!((g.shape(zp.id), g.dtype(zp.id)), (&[1][..], I8));
+            assert_eq!(zp.meta.input_qparam(), Some(&iq));
+            assert_eq!(zp.meta.output_qparam(), Some(&oq));
+        }
+        let pre = by_name(&g, &format!("{name}_nhwc"));
+        assert_args(&pre.args, &[node(g.id("x")), ints(&[0, 2, 3, 1])]);
+        assert_eq!((g.shape(pre.id), g.dtype(pre.id)), (&[1, 8, 8, 3][..], I8));
+        let pool = by_name(&g, &format!("{name}_tosa"));
+        assert_args(
+            &pool.args,
+            &[
+                node(pre.id),
+                node(input_zp.id),
+                node(output_zp.id),
+                ints(&[3, 3]),
+                ints(&[2, 2]),
+                ints(&[1, 0, 1, 0]),
+                IrArg::Dtype("torch.int32".into()),
+            ],
+        );
+        // The input dtype rc4's kernel keeps, from the input qparam.
+        assert_eq!((g.shape(pool.id), g.dtype(pool.id)), (&[1, 4, 4, 3][..], I8));
+        let post = by_name(&g, &format!("{name}_nchw"));
+        assert_args(&post.args, &[node(pool.id), ints(&[0, 3, 1, 2])]);
+        assert_eq!((g.shape(post.id), g.dtype(post.id)), (&[1, 3, 4, 4][..], I8));
+        for id in [pre.id, pool.id, post.id] {
+            let meta = &g.graph().node(id).meta;
+            assert_eq!(meta.input_qparam(), Some(&iq));
+            assert_eq!(meta.output_qparam(), Some(&oq));
+            assert_eq!(meta.val_dim_order(), Some(&[0, 1, 2, 3][..]));
+        }
+        assert!(g.graph().output_node().unwrap().args[0].contains_node(post.id));
+    }
+
+    /// An omitted stride is the kernel (rc4's
+    /// `test_rewrite_avg_pool2d_tosa_empty_stride_uses_kernel_size`), and so is
+    /// any falsy one: RETAB's import spells `[]` as None.
+    #[test]
+    fn a_falsy_stride_is_the_kernel() {
+        for stride in [None, Some(IrArg::None), Some(IrArg::List(vec![])), Some(IrArg::Int(0))] {
+            let mut args = vec![ints(&[2, 3])];
+            args.extend(stride.clone());
+            let (mut g, name) = pool_graph(&[1, 3, 8, 9], F32, args, &[1, 3, 4, 3], None, None);
+            assert!(IrRewriteAvgPool2dPass.run(g.graph_mut()), "{stride:?}");
+            let pool = by_name(&g, &format!("{name}_tosa"));
+            assert_eq!(pool.arg_int_list(4), Some(vec![2, 3]), "{stride:?}");
+        }
+    }
+
+    /// One-element lists apply to both axes (`to_2tuple`), and ceil mode adds a
+    /// post pad (`adjust_pooling_pad_if_needed`).
+    #[test]
+    fn one_element_lists_and_ceil_mode() {
+        let q = qparam(0.05, 0, I8);
+        let (mut g, name) = pool_graph(
+            &[1, 3, 8, 8],
+            I8,
+            vec![ints(&[3]), ints(&[2]), ints(&[0]), IrArg::Bool(true)],
+            &[1, 3, 4, 4],
+            Some(q.clone()),
+            Some(q),
+        );
+        assert!(IrRewriteAvgPool2dPass.run(g.graph_mut()));
+        let pool = by_name(&g, &format!("{name}_tosa"));
+        assert_eq!(pool.arg_int_list(3), Some(vec![3, 3]));
+        assert_eq!(pool.arg_int_list(4), Some(vec![2, 2]));
+        assert_eq!(pool.arg_int_list(5), Some(vec![0, 1, 0, 1]));
+        assert_eq!(g.shape(pool.id), [1, 4, 4, 3]);
+    }
+
+    /// `:69-75`: int16 accumulates in int32 too; a float pool in float32 with
+    /// zero points of 0 in its own dtype (rc4's FP path, test only).
+    #[test]
+    fn accumulator_and_zero_point_dtypes_follow_the_input() {
+        let q = int16_qparam(0.000244140625, 0);
+        let (mut g, name) = pool_graph(
+            &[1, 3, 8, 8],
+            I16,
+            vec![ints(&[2, 2]), ints(&[2, 2]), ints(&[0, 0])],
+            &[1, 3, 4, 4],
+            Some(q.clone()),
+            Some(q),
+        );
+        assert!(IrRewriteAvgPool2dPass.run(g.graph_mut()));
+        let pool = by_name(&g, &format!("{name}_tosa"));
+        assert_eq!(format!("{:?}", pool.args[6]), "Dtype(\"torch.int32\")");
+        assert_eq!(g.dtype(pool.id), I16);
+        assert_eq!(g.dtype(g.id(&format!("{name}_input_zero_point"))), I16);
+
+        let (mut g, name) = pool_graph(&[1, 3, 8, 8], F32, vec![ints(&[2, 2])], &[1, 3, 4, 4], None, None);
+        assert!(IrRewriteAvgPool2dPass.run(g.graph_mut()));
+        let pool = by_name(&g, &format!("{name}_tosa"));
+        assert_eq!(format!("{:?}", pool.args[6]), "Dtype(\"torch.float32\")");
+        let zp = by_name(&g, &format!("{name}_input_zero_point"));
+        assert_args(&zp.args, &[ints(&[1]), IrArg::Int(0)]);
+        assert_eq!(g.dtype(zp.id), F32);
+        assert!(!zp.meta.has_qparam_metadata());
+    }
+
+    /// With IrMaterializeConstants after it, as rc4 runs ComputeConstantOpsAOT
+    /// at `arm_pass_manager.py:699`, each zero point becomes a buffer at the
+    /// graph head holding the zero point quantized with the pool's *output*
+    /// qparams (rc4's quirk, critique A7): q(-3) = round(-3 / 0.2) + 5 = -10 and
+    /// q(5) = 30, output zero point first. In a region they are `get_attr`
+    /// nodes and the placeholders stay as they were (critique B2).
+    #[test]
+    fn zero_points_materialize_quantized_with_the_output_qparams() {
+        for in_region in [false, true] {
+            let (mut g, name) = pool_graph(
+                &[1, 3, 8, 8],
+                I8,
+                vec![ints(&[2, 2]), ints(&[2, 2])],
+                &[1, 3, 4, 4],
+                Some(qparam(0.1, -3, I8)),
+                Some(qparam(0.2, 5, I8)),
+            );
+            let placeholders = |g: &LayoutGraph| -> Vec<String> {
+                g.graph()
+                    .live_placeholder_ids()
+                    .into_iter()
+                    .map(|id| g.name(id))
+                    .collect()
+            };
+            let before = placeholders(&g);
+            assert!(IrRewriteAvgPool2dPass.run(g.graph_mut()));
+            assert_eq!(placeholders(&g), before, "the rewrite adds no placeholder");
+            assert!(IrMaterializeConstantsPass { in_region }.run(g.graph_mut()));
+            assert_eq!(g.count(FULL), 0);
+            let pool = by_name(&g, &format!("{name}_tosa"));
+            let constant = |index: usize| {
+                let id = pool.args[index].as_node().unwrap();
+                g.graph().node(id)
+            };
+            for (index, value) in [(1, -10i8), (2, 30i8)] {
+                let zp = constant(index);
+                let tensor = zp.tensor.as_ref().expect("constant data");
+                assert_eq!(tensor.data.dtype, DType::Int8);
+                assert_eq!(tensor.data.data, vec![value as u8], "zero point {index}");
+                if in_region {
+                    assert_eq!(zp.op, NodeOp::GetAttr);
+                } else {
+                    assert_eq!(zp.op, NodeOp::Placeholder);
+                    let TensorSource::ExportedProgramInput(binding) = &tensor.source else {
+                        panic!("a parent constant is bound to the exported program");
+                    };
+                    assert_eq!(binding.input_kind, LoweringInputKind::Buffer);
+                }
+            }
+            let order = g.graph().topological_live_node_ids();
+            let position = |index: usize| {
+                let id = pool.args[index].as_node().unwrap();
+                order.iter().position(|&live| live == id).unwrap()
+            };
+            assert!(position(2) < position(1), "rc4 puts the output zero point first");
+            if in_region {
+                assert_eq!(placeholders(&g), before);
+            }
+        }
+    }
+
+    #[test]
+    fn rc4_errors_go_to_stock() {
+        let q = || Some(qparam(0.1, 0, I8));
+        let pool = |input: &[i64], args: Vec<IrArg>, output: &[i64], iq, oq| {
+            pool_graph(input, I8, args, output, iq, oq).0
+        };
+        // `get_zp_per_tensor` raises for a per-channel zero point.
+        let mut per_channel = qparam(0.1, 0, I8);
+        per_channel.per_channel_scales = vec![0.1, 0.2, 0.3];
+        per_channel.per_channel_zps = vec![0, 0, 0];
+        let mut g = pool(&[1, 3, 8, 8], vec![ints(&[2, 2])], &[1, 3, 4, 4], q(), Some(per_channel));
+        assert_declined(&mut g, "per-channel");
+        // rc4 reads `x.data.shape[3]`.
+        let mut g = pool(&[3, 8, 8], vec![ints(&[2, 2])], &[3, 4, 4], q(), q());
+        assert_declined(&mut g, "rank-3");
+        // A kernel that doesn't unpack as two values.
+        let mut g = pool(&[1, 3, 8, 8], vec![ints(&[2, 2, 2])], &[1, 3, 4, 4], q(), q());
+        assert_declined(&mut g, "kernel");
+        // AVG_POOL2D's zero points must have the input's dtype.
+        let mut g = pool(
+            &[1, 3, 8, 8],
+            vec![ints(&[2, 2])],
+            &[1, 3, 4, 4],
+            q(),
+            Some(int16_qparam(0.1, 0)),
+        );
+        assert_declined(&mut g, "zero points of torch.int16");
+        // An output the pool's val contradicts.
+        let mut g = pool(&[1, 3, 8, 8], vec![ints(&[2, 2])], &[1, 3, 5, 5], q(), q());
+        assert_declined(&mut g, "value");
+        // A keyword argument with a value, which rc4 would drop.
+        let mut g = pool(&[1, 3, 8, 8], vec![ints(&[2, 2])], &[1, 3, 4, 4], q(), q());
+        let id = g.id("avg_pool2d");
+        g.graph_mut().set_kwarg(id, "divisor_override", IrArg::Int(2));
+        assert_declined(&mut g, "keyword");
+    }
+
+    /// The first pool rc4 would raise on stops the pass; pools before it stay
+    /// rewritten (the graph goes to stock either way).
+    #[test]
+    fn a_declined_pool_stops_the_pass() {
+        crate::stock_fallback::take();
+        let q = qparam(0.1, 0, I8);
+        let (mut g, first) = pool_graph(&[1, 3, 8, 8], I8, vec![ints(&[2, 2])], &[1, 3, 4, 4], Some(q.clone()), Some(q.clone()));
+        let first_id = g.id(&first);
+        let second = g.add_unrefreshed(AVG_POOL2D, vec![node(first_id), ints(&[2, 2, 2])]);
+        let mut meta = NodeMeta::tensor(vec![1, 3, 2, 2], F32);
+        meta.set_both_qparams(q);
+        g.graph_mut().node_mut(second).meta = meta;
+        let output = g.graph().output_node().unwrap().id;
+        g.rewire(output, first_id, second);
+        assert!(IrRewriteAvgPool2dPass.run(g.graph_mut()));
+        g.assert_targets(&[FULL, FULL, PERMUTE, TOSA_AVG_POOL2D, PERMUTE, AVG_POOL2D]);
+        assert!(crate::stock_fallback::take().is_some());
+    }
+
+    #[test]
+    fn graphs_without_avg_pools_are_left_alone() {
+        let mut g = LayoutGraph::new();
+        let x = g.input("x", &[1, 3, 4, 4]);
+        let y = g.permute(x, &[0, 2, 3, 1]);
+        g.output(&[y]);
+        let before = g.graph().topological_live_node_ids();
+        assert!(!IrRewriteAvgPool2dPass.run(g.graph_mut()));
+        assert_eq!(g.graph().topological_live_node_ids(), before);
+    }
+}

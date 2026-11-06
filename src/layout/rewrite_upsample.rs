@@ -515,3 +515,604 @@ fn rewrite(ctx: &mut LayoutCtx<'_>, id: NodeId, plan: &Plan) {
     ctx.replace_all_uses_with(id, post);
     ctx.erase_node(id);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fx_ir::{NodeMeta, QParam};
+    use crate::layout::dtype::special_dtype;
+    use crate::layout::testing::{ints, node, LayoutGraph, PERMUTE, RESCALE};
+    use crate::test_ir::qparam;
+
+    const I8: &str = "torch.int8";
+    const I16: &str = "torch.int16";
+    const I32: &str = "torch.int32";
+    const F32: &str = "torch.float32";
+    const N: ResizeMode = ResizeMode::Nearest;
+    const B: ResizeMode = ResizeMode::Bilinear;
+
+    /// `IrArg` has no `PartialEq`; its derived `Debug` is exact.
+    fn assert_args(actual: &[IrArg], expected: &[IrArg]) {
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+    }
+
+    fn assert_arg(actual: Option<&IrArg>, expected: &IrArg) {
+        assert_eq!(format!("{actual:?}"), format!("{:?}", Some(expected)));
+    }
+
+    fn int16_qparam(scale: f64) -> QParam {
+        QParam::per_tensor(scale, 0, -32767, 32767, I16.to_string())
+    }
+
+    /// `x -> <target>(x, args...) -> output`: the upsample holds RETAB's float32
+    /// val for a quantized activation and `qparam` on both maps.
+    fn upsample_graph(
+        target: &str,
+        input: &[i64],
+        input_dtype: &str,
+        args: Vec<IrArg>,
+        output: &[i64],
+        qparam: Option<QParam>,
+    ) -> (LayoutGraph, String) {
+        let mut g = LayoutGraph::new();
+        let x = g.typed_input("x", input, input_dtype);
+        let mut all_args = vec![node(x)];
+        all_args.extend(args);
+        let upsample = g.add_unrefreshed(target, all_args);
+        let mut meta = NodeMeta::tensor(output.to_vec(), F32);
+        if let Some(qparam) = qparam {
+            meta.set_both_qparams(qparam);
+        } else {
+            meta.set_tensor_facts(TensorFacts::new(output.to_vec(), input_dtype));
+        }
+        g.graph_mut().node_mut(upsample).meta = meta;
+        g.output(&[upsample]);
+        let name = g.name(upsample);
+        (g, name)
+    }
+
+    fn floats(values: &[f64]) -> IrArg {
+        IrArg::List(values.iter().map(|&v| IrArg::Float(v)).collect())
+    }
+
+    fn by_name<'a>(g: &'a LayoutGraph, name: &str) -> &'a IrNode {
+        g.graph().node(g.id(name))
+    }
+
+    fn qparam_keys(map: Option<&crate::fx_ir::QParamMap>) -> Option<Vec<usize>> {
+        map.map(|map| map.iter().map(|(&key, _)| key).collect())
+    }
+
+    fn assert_declined(g: &mut LayoutGraph, reason: &str) {
+        crate::stock_fallback::take();
+        let before = g.targets().into_iter().map(str::to_string).collect::<Vec<_>>();
+        assert!(!IrRewriteUpsamplePass.run(g.graph_mut()));
+        assert_eq!(g.targets(), before, "a declined rewrite changes nothing");
+        let request = crate::stock_fallback::take().expect("a stock fallback request");
+        assert!(request.contains(reason), "{request}");
+    }
+
+    /// `get_resize_parameters_1d` against rc4's own function, run in
+    /// .venv-et16 (sympy 1.14): every branch (nearest integer upscale,
+    /// fractional and downscale; bilinear half-pixel and `align_corners`,
+    /// including its size-1 fallback to `out / in`), and nearest scale factors
+    /// as doubles and float32 values, near-integers and irrationals, whose
+    /// `nsimplify(tolerance=1e-6)` takes `limit_denominator`'s semiconvergent
+    /// path. Regenerate with the loop in `get_resize_parameters_1d`'s rc4
+    /// tests over these `(in, out, align_corners, mode, scale_factor)` rows.
+    #[test]
+    fn resize_parameters_match_rc4() {
+        #[rustfmt::skip]
+        let rows: &[(i64, i64, bool, ResizeMode, Option<f64>, ResizeAxis)] = &[
+        (1, 1, false, N, None, [2, 2, 0, 0]),
+        (1, 2, false, N, None, [4, 2, -1, 1]),
+        (1, 5, false, N, None, [10, 2, -4, 4]),
+        (2, 1, false, N, None, [2, 4, -1, -3]),
+        (2, 2, false, N, None, [2, 2, 0, 0]),
+        (2, 3, false, N, None, [6, 4, -3, -1]),
+        (2, 4, false, N, None, [4, 2, -1, 1]),
+        (2, 7, false, N, None, [14, 4, -7, 3]),
+        (3, 1, false, N, None, [2, 6, -1, -5]),
+        (3, 2, false, N, None, [4, 6, -2, -4]),
+        (3, 6, false, N, None, [4, 2, -1, 1]),
+        (3, 7, false, N, None, [14, 6, -7, 1]),
+        (3, 12, false, N, None, [8, 2, -3, 3]),
+        (3, 24, false, N, None, [16, 2, -7, 7]),
+        (4, 2, false, N, None, [2, 4, -1, -3]),
+        (4, 3, false, N, None, [6, 8, -3, -5]),
+        (4, 6, false, N, None, [6, 4, -3, -1]),
+        (4, 8, false, N, None, [4, 2, -1, 1]),
+        (4, 10, false, N, None, [10, 4, -5, 1]),
+        (5, 3, false, N, None, [6, 10, -3, -7]),
+        (5, 8, false, N, None, [16, 10, -8, -2]),
+        (5, 9, false, N, None, [18, 10, -9, -1]),
+        (5, 10, false, N, None, [4, 2, -1, 1]),
+        (6, 4, false, N, None, [4, 6, -2, -4]),
+        (6, 9, false, N, None, [6, 4, -3, -1]),
+        (7, 3, false, N, None, [6, 14, -3, -11]),
+        (7, 10, false, N, None, [20, 14, -10, -4]),
+        (8, 3, false, N, None, [6, 16, -3, -13]),
+        (8, 12, false, N, None, [6, 4, -3, -1]),
+        (8, 16, false, N, None, [4, 2, -1, 1]),
+        (9, 3, false, N, None, [2, 6, -1, -5]),
+        (9, 4, false, N, None, [8, 18, -4, -14]),
+        (12, 5, false, N, None, [10, 24, -5, -19]),
+        (16, 2, false, N, None, [2, 16, -1, -15]),
+        (16, 33, false, N, None, [66, 32, -33, 1]),
+        (32, 3, false, N, None, [6, 64, -3, -61]),
+        (1, 1, false, B, None, [2, 2, 0, 0]),
+        (1, 2, false, B, None, [4, 2, -1, 1]),
+        (1, 5, false, B, None, [10, 2, -4, 4]),
+        (2, 1, false, B, None, [2, 4, 1, -1]),
+        (2, 2, false, B, None, [2, 2, 0, 0]),
+        (2, 3, false, B, None, [6, 4, -1, 1]),
+        (2, 4, false, B, None, [4, 2, -1, 1]),
+        (2, 7, false, B, None, [14, 4, -5, 5]),
+        (3, 1, false, B, None, [2, 6, 2, -2]),
+        (3, 2, false, B, None, [4, 6, 1, -1]),
+        (3, 6, false, B, None, [4, 2, -1, 1]),
+        (3, 7, false, B, None, [14, 6, -4, 4]),
+        (3, 12, false, B, None, [8, 2, -3, 3]),
+        (3, 24, false, B, None, [16, 2, -7, 7]),
+        (4, 2, false, B, None, [2, 4, 1, -1]),
+        (4, 3, false, B, None, [6, 8, 1, -1]),
+        (4, 6, false, B, None, [6, 4, -1, 1]),
+        (4, 8, false, B, None, [4, 2, -1, 1]),
+        (4, 10, false, B, None, [10, 4, -3, 3]),
+        (5, 3, false, B, None, [6, 10, 2, -2]),
+        (5, 8, false, B, None, [16, 10, -3, 3]),
+        (5, 9, false, B, None, [18, 10, -4, 4]),
+        (5, 10, false, B, None, [4, 2, -1, 1]),
+        (6, 4, false, B, None, [4, 6, 1, -1]),
+        (6, 9, false, B, None, [6, 4, -1, 1]),
+        (7, 3, false, B, None, [6, 14, 4, -4]),
+        (7, 10, false, B, None, [20, 14, -3, 3]),
+        (8, 3, false, B, None, [6, 16, 5, -5]),
+        (8, 12, false, B, None, [6, 4, -1, 1]),
+        (8, 16, false, B, None, [4, 2, -1, 1]),
+        (9, 3, false, B, None, [2, 6, 2, -2]),
+        (9, 4, false, B, None, [8, 18, 5, -5]),
+        (12, 5, false, B, None, [10, 24, 7, -7]),
+        (16, 2, false, B, None, [2, 16, 7, -7]),
+        (16, 33, false, B, None, [66, 32, -17, 17]),
+        (32, 3, false, B, None, [6, 64, 29, -29]),
+        (1, 1, true, B, None, [2, 2, 0, 0]),
+        (1, 2, true, B, None, [4, 2, 0, 2]),
+        (1, 5, true, B, None, [10, 2, 0, 8]),
+        (2, 1, true, B, None, [2, 4, 0, -2]),
+        (2, 2, true, B, None, [2, 2, 0, 0]),
+        (2, 3, true, B, None, [4, 2, 0, 0]),
+        (2, 4, true, B, None, [6, 2, 0, 0]),
+        (2, 7, true, B, None, [12, 2, 0, 0]),
+        (3, 1, true, B, None, [2, 6, 0, -4]),
+        (3, 2, true, B, None, [2, 4, 0, 0]),
+        (3, 6, true, B, None, [10, 4, 0, 0]),
+        (3, 7, true, B, None, [6, 2, 0, 0]),
+        (3, 12, true, B, None, [22, 4, 0, 0]),
+        (3, 24, true, B, None, [46, 4, 0, 0]),
+        (4, 2, true, B, None, [2, 6, 0, 0]),
+        (4, 3, true, B, None, [4, 6, 0, 0]),
+        (4, 6, true, B, None, [10, 6, 0, 0]),
+        (4, 8, true, B, None, [14, 6, 0, 0]),
+        (4, 10, true, B, None, [6, 2, 0, 0]),
+        (5, 3, true, B, None, [2, 4, 0, 0]),
+        (5, 8, true, B, None, [14, 8, 0, 0]),
+        (5, 9, true, B, None, [4, 2, 0, 0]),
+        (5, 10, true, B, None, [18, 8, 0, 0]),
+        (6, 4, true, B, None, [6, 10, 0, 0]),
+        (6, 9, true, B, None, [16, 10, 0, 0]),
+        (7, 3, true, B, None, [2, 6, 0, 0]),
+        (7, 10, true, B, None, [6, 4, 0, 0]),
+        (8, 3, true, B, None, [4, 14, 0, 0]),
+        (8, 12, true, B, None, [22, 14, 0, 0]),
+        (8, 16, true, B, None, [30, 14, 0, 0]),
+        (9, 3, true, B, None, [2, 8, 0, 0]),
+        (9, 4, true, B, None, [6, 16, 0, 0]),
+        (12, 5, true, B, None, [8, 22, 0, 0]),
+        (16, 2, true, B, None, [2, 30, 0, 0]),
+        (16, 33, true, B, None, [64, 30, 0, 0]),
+        (32, 3, true, B, None, [4, 62, 0, 0]),
+        (4, 8, false, N, Some(2.0), [4, 2, -1, 1]),
+        (4, 6, false, N, Some(1.5), [6, 4, -3, -1]),
+        (5, 8, false, N, Some(1.6), [16, 10, -8, -2]),
+        (5, 8, false, N, Some(1.600000023841858), [16, 10, -8, -2]),
+        (4, 6, false, N, Some(1.6), [16, 10, -8, -6]),
+        (4, 6, false, N, Some(1.600000023841858), [16, 10, -8, -6]),
+        (4, 10, false, N, Some(2.5), [10, 4, -5, 1]),
+        (9, 3, false, N, Some(0.3333333333333333), [2, 6, -1, -5]),
+        (9, 3, false, N, Some(0.3333333432674408), [2, 6, -1, -5]),
+        (8, 4, false, N, Some(0.5), [2, 4, -1, -3]),
+        (8, 2, false, N, Some(0.25), [2, 8, -1, -7]),
+        (8, 6, false, N, Some(0.75), [6, 8, -3, -5]),
+        (30, 3, false, N, Some(0.10000000149011612), [2, 20, -1, -19]),
+        (30, 3, false, N, Some(0.1), [2, 20, -1, -19]),
+        (8, 10, false, N, Some(1.25), [10, 8, -5, -3]),
+        (5, 6, false, N, Some(1.2000000476837158), [12, 10, -6, -4]),
+        (5, 6, false, N, Some(1.2), [12, 10, -6, -4]),
+        (3, 9, false, N, Some(3.0), [6, 2, -2, 2]),
+        (9, 6, false, N, Some(0.6666666865348816), [4, 6, -2, -4]),
+        (9, 6, false, N, Some(0.6666666666666666), [4, 6, -2, -4]),
+        (4, 7, false, N, Some(1.75), [14, 8, -7, -1]),
+        (10, 3, false, N, Some(0.30000001192092896), [6, 20, -3, -17]),
+        (10, 3, false, N, Some(0.3), [6, 20, -3, -17]),
+        (5, 5, false, N, Some(1.0), [2, 2, 0, 0]),
+        (3, 7, false, N, Some(2.3333333333333335), [14, 6, -7, 1]),
+        (3, 6, false, N, Some(2.3333332538604736), [14, 6, -7, -5]),
+        (2, 8, false, N, Some(4.0), [8, 2, -3, 3]),
+        (3, 9, false, N, Some(3.141592653589793), [6253070, 1990414, -3126535, 290637]),
+        (3, 8, false, N, Some(2.718281828459045), [2168966, 797918, -1084483, 163011]),
+        (9, 9, false, N, Some(1.0000001), [2, 2, 0, 0]),
+        (7, 9, false, N, Some(1.4142135623730951), [1331714, 941664, -665857, -1122829]),
+        (9, 8, false, N, Some(0.999999), [1999998, 2000000, -999999, -2999983]),
+        (7, 9, false, N, Some(1.4142135381698608), [109726, 77588, -54863, -92515]),
+        (9, 9, false, N, Some(1.0000005), [2000002, 2000000, -1000001, -1000017]),
+        ];
+        assert_eq!(rows.len(), 142);
+        for &(input, output, align_corners, mode, factor, expected) in rows {
+            assert_eq!(
+                resize_parameters_1d(input, output, align_corners, mode, factor),
+                Ok(expected),
+                "({input}, {output}, {align_corners}, {mode:?}, {factor:?})"
+            );
+        }
+    }
+
+    /// Python's own `fractions.Fraction.limit_denominator` doctests, and the
+    /// float32 scale factors design risk 6 names.
+    #[test]
+    fn limit_denominator_and_nsimplify_match_python() {
+        let pi = exact_fraction(3.141592653589793).unwrap();
+        assert_eq!(limit_denominator(pi.0, pi.1, 10), (22, 7));
+        assert_eq!(limit_denominator(pi.0, pi.1, 100), (311, 99));
+        assert_eq!(limit_denominator(4321, 8765, 10000), (4321, 8765));
+        for (factor, expected) in [
+            (1.6, (8, 5)),
+            (f64::from(1.6f32), (8, 5)),
+            (2.5, (5, 2)),
+            (1.0 / 3.0, (1, 3)),
+            (f64::from(1.0f32 / 3.0), (1, 3)),
+            (2.0, (2, 1)),
+            (0.5, (1, 2)),
+            (1.0000001, (1, 1)),
+        ] {
+            assert_eq!(nsimplify_scale_factor(factor), Ok(expected), "{factor}");
+        }
+        for factor in [0.0, -2.0, f64::INFINITY, f64::NAN, 1e-300, 1e300] {
+            assert!(nsimplify_scale_factor(factor).is_err(), "{factor}");
+        }
+        assert_eq!(exact_fraction(0.75), Some((3, 4)));
+        assert_eq!(exact_fraction(6.0), Some((6, 1)));
+    }
+
+    /// rc4's nearest 5 -> 8 (design §3.3, critique C): scale [16, 10], offset
+    /// -8, border -2 per axis, where RETAB's dim-order emitter computes -3 and 3.
+    #[test]
+    fn nearest_int8_upsample_becomes_const_shapes_permutes_and_resize() {
+        let q = qparam(0.017, 4, I8);
+        let (mut g, name) = upsample_graph(
+            UPSAMPLE_NEAREST2D_VEC,
+            &[1, 3, 5, 5],
+            I8,
+            vec![ints(&[8, 8]), IrArg::None],
+            &[1, 3, 8, 8],
+            Some(q.clone()),
+        );
+        assert!(IrRewriteUpsamplePass.run(g.graph_mut()));
+        g.assert_targets(&[
+            TOSA_CONST_SHAPE,
+            TOSA_CONST_SHAPE,
+            TOSA_CONST_SHAPE,
+            PERMUTE,
+            TOSA_RESIZE,
+            PERMUTE,
+        ]);
+        assert!(g.graph().by_name(&name).is_none_or(|node| !node.alive));
+        for (suffix, values) in [
+            ("scale", &[16, 10, 16, 10][..]),
+            ("offset", &[-8, -8][..]),
+            ("border", &[-2, -2][..]),
+        ] {
+            let shape = by_name(&g, &format!("{name}_{suffix}"));
+            assert_args(&shape.args, &[ints(values)]);
+            assert!(shape.meta.tensor_facts().is_none());
+            assert_eq!(special_dtype(&shape.meta), Some(SpecialDtype::Shape));
+            assert_eq!(qparam_keys(shape.meta.input_qparams()), Some(vec![]));
+            assert_eq!(qparam_keys(shape.meta.output_qparams()), Some(vec![]));
+        }
+        let pre = by_name(&g, &format!("{name}_nhwc"));
+        assert_args(&pre.args, &[node(g.id("x")), ints(&[0, 2, 3, 1])]);
+        assert_eq!(g.shape(pre.id), [1, 5, 5, 3]);
+        assert_eq!(g.dtype(pre.id), I8);
+        // Critique A1: only the RESIZE keeps the upsample's qparams.
+        assert_eq!(qparam_keys(pre.meta.input_qparams()), Some(vec![]));
+        let resize = by_name(&g, &format!("{name}_tosa"));
+        assert_args(&resize.args, &[
+                node(pre.id),
+                node(g.id(&format!("{name}_scale"))),
+                node(g.id(&format!("{name}_offset"))),
+                node(g.id(&format!("{name}_border"))),
+            ]
+        );
+        assert_eq!(resize.kwarg("resize_mode").and_then(IrArg::as_str), Some("nearest"));
+        assert_eq!((g.shape(resize.id), g.dtype(resize.id)), (&[1, 8, 8, 3][..], I8));
+        assert_eq!(resize.meta.input_qparam(), Some(&q));
+        assert_eq!(resize.meta.output_qparam(), Some(&q));
+        assert_eq!(special_dtype(&resize.meta), None);
+        let post = by_name(&g, &format!("{name}_nchw"));
+        assert_args(&post.args, &[node(resize.id), ints(&[0, 3, 1, 2])]);
+        assert_eq!((g.shape(post.id), g.dtype(post.id)), (&[1, 3, 8, 8][..], I8));
+        assert_eq!(qparam_keys(post.meta.output_qparams()), Some(vec![]));
+        for id in [pre.id, resize.id, post.id] {
+            assert_eq!(g.graph().node(id).meta.val_dim_order(), Some(&[0, 1, 2, 3][..]));
+        }
+        let output = g.graph().output_node().unwrap();
+        assert!(output.args[0].contains_node(post.id));
+    }
+
+    /// Design F10 and `rewrite_upsample.py:258-289`: an int8 bilinear RESIZE
+    /// produces int32, and a RESCALE by `1 / (scale_y_n * scale_x_n)` brings it
+    /// back to the upsample's int8, with empty qparam maps.
+    #[test]
+    fn int8_bilinear_resize_is_int32_then_rescaled() {
+        let q = qparam(0.016, 12, I8);
+        let (mut g, name) = upsample_graph(
+            UPSAMPLE_BILINEAR2D_VEC,
+            &[1, 3, 4, 4],
+            I8,
+            vec![IrArg::None, IrArg::Bool(false), floats(&[2.0, 2.0])],
+            &[1, 3, 8, 8],
+            Some(q.clone()),
+        );
+        assert!(IrRewriteUpsamplePass.run(g.graph_mut()));
+        g.assert_targets(&[
+            TOSA_CONST_SHAPE,
+            TOSA_CONST_SHAPE,
+            TOSA_CONST_SHAPE,
+            PERMUTE,
+            TOSA_RESIZE,
+            RESCALE,
+            PERMUTE,
+        ]);
+        let resize = by_name(&g, &format!("{name}_tosa"));
+        assert_args(&by_name(&g, &format!("{name}_scale")).args, &[ints(&[4, 2, 4, 2])]);
+        assert_args(&by_name(&g, &format!("{name}_offset")).args, &[ints(&[-1, -1])]);
+        assert_args(&by_name(&g, &format!("{name}_border")).args, &[ints(&[1, 1])]);
+        assert_eq!(resize.kwarg("resize_mode").and_then(IrArg::as_str), Some("bilinear"));
+        assert_eq!((g.shape(resize.id), g.dtype(resize.id)), (&[1, 8, 8, 3][..], I32));
+        assert_eq!(special_dtype(&resize.meta), None);
+        let rescale = by_name(&g, &format!("{name}_rescale"));
+        assert_args(&rescale.args, &[
+                node(resize.id),
+                IrArg::Dtype(I8.into()),
+                IrArg::List(vec![IrArg::Float(0.0625)]),
+                IrArg::Int(0),
+                IrArg::Int(0),
+            ]
+        );
+        assert_eq!((g.shape(rescale.id), g.dtype(rescale.id)), (&[1, 8, 8, 3][..], I8));
+        assert_eq!(qparam_keys(rescale.meta.input_qparams()), Some(vec![]));
+        assert_eq!(qparam_keys(rescale.meta.output_qparams()), Some(vec![]));
+        let post = by_name(&g, &format!("{name}_nchw"));
+        assert_arg(post.args.first(), &node(rescale.id));
+        assert_eq!((g.shape(post.id), g.dtype(post.id)), (&[1, 3, 8, 8][..], I8));
+    }
+
+    /// `:274-277`: an int16 bilinear RESIZE stays int16 but accumulates in
+    /// INT48, and its RESCALE brings it back to int16.
+    #[test]
+    fn int16_bilinear_resize_is_int48() {
+        let (mut g, name) = upsample_graph(
+            UPSAMPLE_BILINEAR2D_VEC,
+            &[1, 3, 4, 4],
+            I16,
+            vec![IrArg::None, IrArg::Bool(false), floats(&[2.0, 2.0])],
+            &[1, 3, 8, 8],
+            Some(int16_qparam(0.000244140625)),
+        );
+        assert!(IrRewriteUpsamplePass.run(g.graph_mut()));
+        let resize = by_name(&g, &format!("{name}_tosa"));
+        assert_eq!(g.dtype(resize.id), I16);
+        assert_eq!(special_dtype(&resize.meta), Some(SpecialDtype::Int48));
+        let rescale = by_name(&g, &format!("{name}_rescale"));
+        assert_arg(rescale.args.get(1), &IrArg::Dtype(I16.into()));
+        assert_eq!(g.dtype(rescale.id), I16);
+        assert_eq!(special_dtype(&rescale.meta), None);
+    }
+
+    /// rc4's `align_corners` 5 -> 9: ratio 8/4 = 2, offset and border 0.
+    #[test]
+    fn align_corners_uses_the_corner_ratio() {
+        let (mut g, name) = upsample_graph(
+            UPSAMPLE_BILINEAR2D_VEC,
+            &[1, 3, 5, 5],
+            I8,
+            vec![ints(&[9, 9]), IrArg::Bool(true), IrArg::None],
+            &[1, 3, 9, 9],
+            Some(qparam(0.017, 4, I8)),
+        );
+        assert!(IrRewriteUpsamplePass.run(g.graph_mut()));
+        assert_args(&by_name(&g, &format!("{name}_scale")).args, &[ints(&[4, 2, 4, 2])]);
+        assert_args(&by_name(&g, &format!("{name}_offset")).args, &[ints(&[0, 0])]);
+        assert_args(&by_name(&g, &format!("{name}_border")).args, &[ints(&[0, 0])]);
+        let rescale = by_name(&g, &format!("{name}_rescale"));
+        assert_arg(rescale.args.get(2), &IrArg::List(vec![IrArg::Float(1.0 / 16.0)]));
+    }
+
+    /// A float32-rounded nearest factor gives the same compact rational as the
+    /// double (design risk 6): 1.600000023841858 is 8/5, not 13421773/8388608.
+    #[test]
+    fn nearest_scale_factors_are_recovered_like_nsimplify() {
+        let factor = f64::from(1.6f32);
+        let (mut g, name) = upsample_graph(
+            UPSAMPLE_NEAREST2D_VEC,
+            &[1, 3, 5, 5],
+            I8,
+            vec![IrArg::None, floats(&[factor, factor])],
+            &[1, 3, 8, 8],
+            Some(qparam(0.017, 4, I8)),
+        );
+        assert!(IrRewriteUpsamplePass.run(g.graph_mut()));
+        assert_args(&by_name(&g, &format!("{name}_scale")).args, &[ints(&[16, 10, 16, 10])]
+        );
+        assert_args(&by_name(&g, &format!("{name}_offset")).args, &[ints(&[-8, -8])]);
+        assert_args(&by_name(&g, &format!("{name}_border")).args, &[ints(&[-2, -2])]);
+    }
+
+    /// A float bilinear upsample needs no RESCALE (rc4's FP path; RETAB lowers
+    /// INT only, design F1).
+    #[test]
+    fn float_bilinear_resize_has_no_rescale() {
+        let (mut g, name) = upsample_graph(
+            UPSAMPLE_BILINEAR2D_VEC,
+            &[1, 3, 4, 4],
+            F32,
+            vec![IrArg::None, IrArg::Bool(false), floats(&[2.0, 2.0])],
+            &[1, 3, 8, 8],
+            None,
+        );
+        assert!(IrRewriteUpsamplePass.run(g.graph_mut()));
+        assert_eq!(g.count(RESCALE), 0);
+        let resize = by_name(&g, &format!("{name}_tosa"));
+        assert_eq!(g.dtype(resize.id), F32);
+        // The upsample has no qparam maps, so neither does anything built from it.
+        assert!(!resize.meta.has_qparam_metadata());
+    }
+
+    /// rc4's ChainedBilinearInterpolate (`test_upsample_nearest2d.py`): the
+    /// second upsample reads the first's output permute.
+    #[test]
+    fn chained_upsamples_are_both_rewritten() {
+        let q = qparam(0.016, 12, I8);
+        let (mut g, first) = upsample_graph(
+            UPSAMPLE_BILINEAR2D_VEC,
+            &[1, 3, 4, 4],
+            I8,
+            vec![IrArg::None, IrArg::Bool(false), floats(&[2.0, 2.0])],
+            &[1, 3, 8, 8],
+            Some(q.clone()),
+        );
+        let first_id = g.id(&first);
+        let second = g.add_unrefreshed(
+            UPSAMPLE_BILINEAR2D_VEC,
+            vec![node(first_id), IrArg::None, IrArg::Bool(false), floats(&[2.0, 2.0])],
+        );
+        let mut meta = NodeMeta::tensor(vec![1, 3, 16, 16], F32);
+        meta.set_both_qparams(q);
+        g.graph_mut().node_mut(second).meta = meta;
+        let output = g.graph().output_node().unwrap().id;
+        g.rewire(output, first_id, second);
+        let second = g.name(second);
+        assert!(IrRewriteUpsamplePass.run(g.graph_mut()));
+        assert_eq!(g.count(TOSA_RESIZE), 2);
+        let second_pre = by_name(&g, &format!("{second}_nhwc"));
+        assert_arg(second_pre.args.first(), &node(g.id(&format!("{first}_nchw"))));
+        assert_eq!(g.shape(by_name(&g, &format!("{second}_tosa")).id), [1, 16, 16, 3]);
+    }
+
+    /// RESIZE parameters rc4's validation rejects go to stock (critique B10):
+    /// the exact 1/16 bilinear downscale, which rc4's
+    /// DecomposeUnsupportedBilinearResizePass turns into an avg pool first.
+    #[test]
+    fn parameters_rc4_rejects_go_to_stock() {
+        let (mut g, _) = upsample_graph(
+            UPSAMPLE_BILINEAR2D_VEC,
+            &[1, 3, 32, 32],
+            I8,
+            vec![ints(&[2, 2]), IrArg::Bool(false), IrArg::None],
+            &[1, 3, 2, 2],
+            Some(qparam(0.016, 12, I8)),
+        );
+        assert_declined(&mut g, "downscale");
+    }
+
+    #[test]
+    fn malformed_upsamples_go_to_stock() {
+        let q = || Some(qparam(0.016, 12, I8));
+        // One scale factor for two axes: rc4's `scale_factors_yx[1]` raises.
+        let (mut g, _) = upsample_graph(
+            UPSAMPLE_NEAREST2D_VEC,
+            &[1, 3, 4, 4],
+            I8,
+            vec![IrArg::None, floats(&[2.0])],
+            &[1, 3, 8, 8],
+            q(),
+        );
+        assert_declined(&mut g, "one scale factor");
+        // A rank-3 input: the RESIZE kernel needs rank 4.
+        let (mut g, _) = upsample_graph(
+            UPSAMPLE_NEAREST2D_VEC,
+            &[3, 4, 4],
+            I8,
+            vec![ints(&[8, 8]), IrArg::None],
+            &[3, 8, 8],
+            q(),
+        );
+        assert_declined(&mut g, "rank 4");
+        // A missing argument: rc4 unpacks four.
+        let (mut g, _) = upsample_graph(
+            UPSAMPLE_BILINEAR2D_VEC,
+            &[1, 3, 4, 4],
+            I8,
+            vec![ints(&[8, 8]), IrArg::Bool(false)],
+            &[1, 3, 8, 8],
+            q(),
+        );
+        assert_declined(&mut g, "3 positional arguments");
+        // An output that disagrees with the upsample's val. rc4's border makes
+        // the spatial sizes agree by construction (a nearest 2x factor with a
+        // 9-wide val gives border 3 and 9 columns), so only a malformed val,
+        // here one with four channels, can.
+        let (mut g, _) = upsample_graph(
+            UPSAMPLE_NEAREST2D_VEC,
+            &[1, 3, 4, 4],
+            I8,
+            vec![IrArg::None, floats(&[2.0, 2.0])],
+            &[1, 4, 8, 8],
+            q(),
+        );
+        assert_declined(&mut g, "value");
+    }
+
+    /// rc4 targets the `.vec` overloads only; a `.default` stays an aten op,
+    /// which the serializer's explicit-mode guard sends to stock (X5).
+    #[test]
+    fn default_overloads_are_left_to_the_serializer_guard() {
+        crate::stock_fallback::take();
+        let (mut g, _) = upsample_graph(
+            "aten.upsample_nearest2d.default",
+            &[1, 3, 4, 4],
+            I8,
+            vec![ints(&[8, 8])],
+            &[1, 3, 8, 8],
+            Some(qparam(0.016, 12, I8)),
+        );
+        assert!(!IrRewriteUpsamplePass.run(g.graph_mut()));
+        g.assert_targets(&["aten.upsample_nearest2d.default"]);
+        assert_eq!(crate::stock_fallback::take(), None);
+    }
+
+    /// The rewrite creates call nodes only, so a region's placeholders, which
+    /// the boundary contracts pair with the parent's operands by position, stay
+    /// as they are (critique B2).
+    #[test]
+    fn the_rewrite_adds_no_placeholders() {
+        let (mut g, _) = upsample_graph(
+            UPSAMPLE_BILINEAR2D_VEC,
+            &[1, 3, 4, 4],
+            I8,
+            vec![IrArg::None, IrArg::Bool(false), floats(&[2.0, 2.0])],
+            &[1, 3, 8, 8],
+            Some(qparam(0.016, 12, I8)),
+        );
+        let names = |g: &LayoutGraph| -> Vec<String> {
+            g.graph()
+                .live_placeholder_ids()
+                .into_iter()
+                .map(|id| g.name(id))
+                .collect()
+        };
+        let before = names(&g);
+        assert!(IrRewriteUpsamplePass.run(g.graph_mut()));
+        assert_eq!(names(&g), before);
+    }
+}
