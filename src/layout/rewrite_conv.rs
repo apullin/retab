@@ -1031,7 +1031,7 @@ fn plan(
             // RCP:925-931 requantizes a captured bias through the boundary
             // RESCALEs, which RETAB inserts at serialization: explicit mode's
             // captured_conv does it then, and sends a quantized conv whose bias
-            // is still not int32 data to stock (critique A10).
+            // is still not int32 to stock, as rc4's TOSA kernel rejects it.
             if captured_branch_input(graph, bias).is_none() {
                 return Err(format!(
                     "bias {} is neither a region constant nor captured from the parent graph",

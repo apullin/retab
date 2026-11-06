@@ -303,9 +303,9 @@ fn apply_pre_submodule_qparam_propagation_ir(
 /// Align each control-flow region's IO with the graph that invokes it
 /// (`control_flow::apply_boundary_contracts`). Explicit mode's captured_conv runs inside
 /// and can ask for a stock fallback: a captured weight that does not resolve to a
-/// constant, or a bias that is not int32 data. The pass pipelines' checks are behind
-/// us, so this returns that request's reason for the caller to raise (P2 critique B6).
-/// Dim-order mode's contracts request nothing.
+/// constant, a bias that is not int32, or a while loop's capture. The pass pipelines'
+/// checks are behind us, so this returns that request's reason for the caller to raise
+/// (P2 critique B6). Dim-order mode's contracts request nothing.
 fn apply_control_flow_contracts(
     ir: &mut fx_ir::IrGraph,
     submodules: &mut BTreeMap<String, StashedPipeline>,

@@ -120,6 +120,33 @@ struct Unresolved {
     node: NodeId,
 }
 
+impl Unresolved {
+    /// Critique B7: the while-loop region (in `while_regions`) at one of whose inputs
+    /// the walk stopped, if it stopped at one. A while loop's captures are carried
+    /// inputs, which RETAB does not resolve (see
+    /// [`rewrite_explicit_captured_conv_operands`]).
+    fn while_loop_input<'a>(
+        &'a self,
+        submodules: &BTreeMap<String, StashedPipeline>,
+        while_regions: &BTreeSet<String>,
+    ) -> Option<&'a str> {
+        let region = self.region.as_deref()?;
+        let (ir, _) = submodules.get(region)?;
+        (while_regions.contains(region) && ir.node(self.node).op == NodeOp::Placeholder)
+            .then_some(region)
+    }
+}
+
+/// The stock fallback's reason for `conv`'s `operand` (its weight or bias) `name`, which
+/// while-loop region `region` captures (critique B7).
+fn while_capture_reason(operand: &str, name: &str, conv: &IrNode, region: &str) -> String {
+    format!(
+        "{operand} {name} of {} is captured by while-loop region {region}, whose captured \
+         constants RETAB does not resolve (critique B7)",
+        conv.name
+    )
+}
+
 /// Upstream `_resolve_control_flow_constant`: follow RESCALEs and branch inputs outwards
 /// until a node with constant data is reached.
 fn resolve_captured_constant(
@@ -609,24 +636,14 @@ fn plan_explicit_weight_rewrite(
     let source = ir.node(current);
     let captured = walk_captured_constant(parent, submodules, invocations, region, current)
         .map_err(|stop| {
-            let loop_input = stop.region.as_ref().filter(|stopped| {
-                while_regions.contains(*stopped)
-                    && submodules.get(*stopped).is_some_and(|(stopped_ir, _)| {
-                        stopped_ir.node(stop.node).op == NodeOp::Placeholder
-                    })
-            });
-            match loop_input {
-                Some(loop_region) => format!(
-                    "weight {weight_name} of {} is captured by while-loop region {loop_region}, \
-                     whose captured constants RETAB does not resolve (critique B7)",
-                    conv.name
-                ),
-                None => format!(
+            let Some(loop_region) = stop.while_loop_input(submodules, while_regions) else {
+                return format!(
                     "weight {weight_name} of {} does not resolve to a constant of an enclosing \
                      cond's graph",
                     conv.name
-                ),
-            }
+                );
+            };
+            while_capture_reason("weight", weight_name, conv, loop_region)
         })?;
     if source
         .meta
@@ -740,18 +757,14 @@ fn apply_explicit_weight_rewrite(ir: &mut IrGraph, rewrite: ExplicitWeightRewrit
     erase_dead_operand_chain(ir, rewrite.old_weight, ChainOps::Explicit);
 }
 
-/// Critique A10: a quantized region conv's bias must be int32 data, a region
-/// constant (`get_attr`) holding int32. rc4's TOSA convolution kernels require
-/// an int32 bias (`backends/arm/tosa/dialect/ops/conv2d.py:46-50`), and the
-/// int32 biases RewriteConvPass gives a region conv are all constants: the
-/// conv's own, its zero bias (`_add_bias`), or a captured bias requantized
-/// through its boundary RESCALEs (`_rewrite_control_flow_bias`). A captured
-/// bias whose boundary qparams match reaches the conv without a boundary
-/// RESCALE, so it is not requantized and stays the branch's int8 input, which
-/// rc4's kernel rejects; one behind a RESCALE that does not resolve to a
-/// constant makes rc4 raise in `_resolve_control_flow_constant`. A runtime
-/// int32 bias (a raw int32 operand, say) goes to stock as well: rc4 would
-/// lower it as a runtime bias, and stock gives the delegate rc4's lowering.
+/// Critique A10: rc4's TOSA convolution kernels require an int32 bias for a
+/// quantized conv (`backends/arm/tosa/dialect/ops/conv2d.py:46-50`).
+/// RewriteConvPass keeps a bias whose dtype is int32, constant or runtime, and
+/// hands any other to `_rewrite_control_flow_bias` (RCP:925-933), which
+/// requantizes only a boundary RESCALE of a constant. A captured bias whose
+/// boundary qparams match reaches the conv without a boundary RESCALE, so it
+/// is not requantized and stays the branch's int8 input; rc4 leaves it too,
+/// and the kernel raises.
 fn non_int32_bias(ir: &IrGraph, conv: &IrNode) -> Option<String> {
     if !is_quantized_conv(&conv.meta) {
         return None;
@@ -761,21 +774,38 @@ fn non_int32_bias(ir: &IrGraph, conv: &IrNode) -> Option<String> {
         .get(ConvArgs::BIAS_INDEX)
         .and_then(IrArg::as_node)?;
     let node = ir.node(bias);
-    match &node.tensor {
-        Some(tensor) if node.op == NodeOp::GetAttr && tensor.data.dtype == DType::Int32 => None,
-        Some(tensor) if node.op == NodeOp::GetAttr => Some(format!(
-            "{}'s bias {} holds {} data, not int32",
+    let dtype = match &node.tensor {
+        Some(tensor) => Some(tensor.data.dtype.torch_str().to_owned()),
+        None => value_dtype(ir, bias),
+    };
+    (dtype.as_deref() != Some("torch.int32")).then(|| {
+        format!(
+            "{}'s bias {} is {}, not int32",
             conv.name,
             node.name,
-            tensor.data.dtype.torch_str()
-        )),
-        _ => Some(format!(
-            "{}'s bias {} is a runtime {} tensor, not int32 data",
-            conv.name,
-            node.name,
-            value_dtype(ir, bias).as_deref().unwrap_or("untyped")
-        )),
-    }
+            dtype.as_deref().unwrap_or("untyped")
+        )
+    })
+}
+
+/// Critique B7 for a bias: the fallback reason when `conv`'s bias, behind any
+/// RESCALEs, is the input of a while loop's region (in `while_regions`).
+fn while_captured_bias(
+    parent: &IrGraph,
+    submodules: &BTreeMap<String, StashedPipeline>,
+    invocations: &BTreeMap<String, Invocation>,
+    while_regions: &BTreeSet<String>,
+    region: &str,
+    conv: &IrNode,
+) -> Option<String> {
+    let bias = conv
+        .args
+        .get(ConvArgs::BIAS_INDEX)
+        .and_then(IrArg::as_node)?;
+    let stop = walk_captured_constant(parent, submodules, invocations, region, bias).err()?;
+    let loop_region = stop.while_loop_input(submodules, while_regions)?;
+    let name = &submodules.get(region)?.0.node(bias).name;
+    Some(while_capture_reason("bias", name, conv, loop_region))
 }
 
 /// Explicit layout mode's captured_conv (APU-135 S8; P2 design §4.3). Returns
@@ -797,12 +827,12 @@ fn non_int32_bias(ir: &IrGraph, conv: &IrNode) -> Option<String> {
 ///
 /// Where rc4 raises, the graph goes to stock (`stock_fallback::request`): a
 /// weight that does not resolve to a constant, and a quantized conv whose bias
-/// is not int32 data afterwards (`non_int32_bias`, critique A10). Nothing
-/// changes then. The request reaches Python through `ingest_and_serialize`'s
-/// check right after the contracts (critique B6).
+/// is not int32 afterwards (`non_int32_bias`, critique A10). Nothing changes
+/// then. The request reaches Python through `ingest_and_serialize`'s check
+/// right after the contracts (critique B6).
 ///
-/// Captures of a while loop's regions go to stock too (critique B7): only cond
-/// invocations are followed. rc4 resolves while-loop captures as well, through
+/// Captures of a while loop's regions go to stock too (critique B7), a weight's
+/// or a non-int32 bias's: only cond invocations are followed. rc4 resolves while-loop captures as well, through
 /// the operand `_regularize_submodule` records on every region placeholder
 /// (`tosa/backend.py:222-238`), so stock gives such a delegate exactly rc4's
 /// outcome. Resolving them here would take while semantics rc4 does not model:
@@ -872,9 +902,16 @@ pub(crate) fn rewrite_explicit_captured_conv_operands(
                 continue;
             }
             if let Some(reason) = non_int32_bias(ir, conv) {
-                crate::stock_fallback::request(format!(
-                    "captured_conv: region {region}: {reason}, which rc4's TOSA kernels reject"
-                ));
+                let reason = while_captured_bias(
+                    parent,
+                    submodules,
+                    &invocations,
+                    &while_regions,
+                    region,
+                    conv,
+                )
+                .unwrap_or_else(|| format!("{reason}, which rc4's TOSA kernels reject"));
+                crate::stock_fallback::request(format!("captured_conv: region {region}: {reason}"));
                 return 0;
             }
         }
@@ -1303,12 +1340,34 @@ mod tests {
         assert_eq!(values, expected);
     }
 
+    /// `conv1d_region`, with the conv reading a region constant weight in OHWI
+    /// instead of the captured one.
+    fn conv1d_region_with_constant_weight(bias_scale: Option<f64>) -> IrGraph {
+        let mut region = conv1d_region(Some(4.0), bias_scale, I8);
+        let conv = live_node(&region, "conv_tosa").id;
+        let weight = region.add_constant_node(
+            NodeOp::GetAttr,
+            "conv_weight_constant".into(),
+            "conv_weight_constant".into(),
+            NodeTensor {
+                source: TensorSource::GraphModuleAttr,
+                data: TensorData {
+                    data: weight_ohwi_bytes(),
+                    shape: vec![4, 1, 3, 2],
+                    dtype: DType::Int8,
+                },
+            },
+            NodeMeta::tensor(vec![4, 1, 3, 2], I8),
+        );
+        region.set_arg(conv, 1, IrArg::Node(weight));
+        region
+    }
+
     /// Where rc4 raises the graph goes to stock, and nothing changes: a weight
     /// read through a runtime op; and a captured bias whose boundary needed no
     /// RESCALE, which stays an int8 branch input that rc4's TOSA kernel rejects
-    /// (critique A10). So do a captured weight in a while body, which only cond
-    /// invocations resolve (critique B7), and a runtime int32 bias, which is not
-    /// int32 data (A10).
+    /// (critique A10). So do a while body's captured weight and captured int8
+    /// bias, which only cond invocations would resolve (critique B7).
     #[test]
     fn explicit_captured_conv_falls_back_where_rc4_raises() {
         struct Case {
@@ -1318,12 +1377,6 @@ mod tests {
             graph: IrGraph,
             reason: &'static str,
         }
-        let mut int32_runtime_bias = conv1d_region(Some(4.0), None, I8);
-        let b = live_node(&int32_runtime_bias, "b_ph").id;
-        int32_runtime_bias
-            .node_mut(b)
-            .meta
-            .set_tensor_facts(crate::fx_meta::TensorFacts::new([4], "torch.int32"));
         let mut int8_constant_bias = conv1d_region(Some(4.0), Some(7.0), I8);
         let conv = live_node(&int8_constant_bias, "conv_tosa").id;
         let constant = int8_constant_bias.add_constant_node(
@@ -1360,6 +1413,15 @@ mod tests {
                          resolve (critique B7)",
             },
             Case {
+                label: "a while body's captured bias",
+                parent: parent_graph(WHILE_LOOP, ["loop_cond", "loop_body"]),
+                region: "loop_body",
+                graph: conv1d_region_with_constant_weight(Some(7.0)),
+                reason: "region loop_body: bias b_rescale of conv_tosa is captured by while-loop \
+                         region loop_body, whose captured constants RETAB does not resolve \
+                         (critique B7)",
+            },
+            Case {
                 label: "a weight read through a runtime op",
                 parent: parent_graph(COND, ["true_graph", "false_graph"]),
                 region: "true_graph",
@@ -1371,21 +1433,15 @@ mod tests {
                 parent: parent_graph(COND, ["true_graph", "false_graph"]),
                 region: "true_graph",
                 graph: conv1d_region(Some(4.0), None, I8),
-                reason: "conv_tosa's bias b_ph is a runtime torch.int8 tensor, not int32 data",
-            },
-            Case {
-                label: "a runtime int32 bias",
-                parent: parent_graph(COND, ["true_graph", "false_graph"]),
-                region: "true_graph",
-                graph: int32_runtime_bias,
-                reason: "conv_tosa's bias b_ph is a runtime torch.int32 tensor, not int32 data",
+                reason: "conv_tosa's bias b_ph is torch.int8, not int32, which rc4's TOSA kernels \
+                         reject",
             },
             Case {
                 label: "a region constant bias holding int8",
                 parent: parent_graph(COND, ["true_graph", "false_graph"]),
                 region: "true_graph",
                 graph: int8_constant_bias,
-                reason: "conv_tosa's bias conv_bias holds torch.int8 data, not int32",
+                reason: "conv_tosa's bias conv_bias is torch.int8, not int32",
             },
         ];
         for case in cases {
@@ -1403,6 +1459,28 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    /// rc4's RewriteConvPass keeps a quantized conv's bias whose dtype is int32,
+    /// runtime or constant (RCP:925-933), so captured_conv keeps it too: a cond
+    /// branch's captured weight is rewritten, and its int32 branch input stays
+    /// the bias. (`explicit_region_constants_stay` keeps a constant one.)
+    #[test]
+    fn explicit_captured_conv_keeps_a_runtime_int32_bias() {
+        let parent = parent_graph(COND, ["true_graph", "false_graph"]);
+        let mut region = conv1d_region(Some(4.0), None, I8);
+        let b = live_node(&region, "b_ph").id;
+        region
+            .node_mut(b)
+            .meta
+            .set_tensor_facts(crate::fx_meta::TensorFacts::new([4], "torch.int32"));
+        let mut submodules = regions(vec![("true_graph", region)]);
+        assert_eq!(rewrite_explicitly(&parent, &mut submodules), (1, None));
+        let region = &submodules["true_graph"].0;
+        let conv = live_node(region, "conv_tosa");
+        assert_eq!(conv.arg_node(2), Some(b));
+        let weight = region.node(conv.arg_node(1).expect("a weight"));
+        assert_eq!(weight.name, "conv_weight_ohwi_captured_rescale0");
     }
 
     /// Critique B6: a fallback captured_conv requests at serialization reaches
