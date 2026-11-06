@@ -308,6 +308,10 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
     }
     steps.extend(vec![
         Ir(Box::new(fx_rewrite_squeeze_ir::IrRewriteSqueezePass)),
+        // RETAB-only. rc4's FuseViewCopyTransform (APM:725) fuses overlapping chains
+        // (single-user only, also through unary ops) and keeps a chain's first view. In
+        // explicit mode, removing this pass only renamed tensors on the corpus, and on
+        // the op tests also reordered ops (APU-161).
         Ir(Box::new(
             crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
         )),
@@ -892,6 +896,14 @@ mod tests {
                 ] {
                     assert_eq!(count(pass), 1, "{spec}: {pass}");
                 }
+                // The one RETAB-only view cleanup explicit mode keeps, right after
+                // IrRewriteSqueeze (APU-161).
+                assert_eq!(count("IrFuseCascadedViews"), 1, "{spec}");
+                assert_eq!(
+                    names[position("IrFuseCascadedViews") - 1],
+                    "IrRewriteSqueeze",
+                    "{spec}"
+                );
 
                 // After phase 6: the late constant effects, FuseEqualPlaceholders
                 // (APM:755), the cleanup, and EnsureUniqueOutputNodes last.
