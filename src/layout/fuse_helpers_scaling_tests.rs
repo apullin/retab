@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use crate::fx_ir::{set_check_users_after_edit, IrPass};
 use crate::layout::ctx::LayoutCtx;
-use crate::layout::fuse_duplicate_users::{fuse_duplicate_users, IrFuseDuplicateUsersPass, TOSA_EXCLUDED_TARGETS};
+use crate::layout::fuse_duplicate_users::{
+    fuse_duplicate_users, IrFuseDuplicateUsersPass, TableStage, TOSA_EXCLUDED_TARGETS,
+};
 use crate::layout::fuse_identical_input_transforms::{
     fuse_identical_input_transforms, FuseIdenticalInputTransforms, IrFuseIdenticalInputTransformsPass,
 };
@@ -42,6 +44,28 @@ impl Drop for UncheckedEdits {
 /// (duplicates once the adds fuse) and their product. Six nodes per block
 /// (seven without `shared`); the pass fuses two of them. With `shared`, one
 /// `c` serves every block, so its user list grows with the graph.
+/// Per block, two quantized sigmoids of one value with equal qparams (one
+/// table) and a third with another output scale, joined by adds.
+fn pending_tables_graph(blocks: usize) -> LayoutGraph {
+    let mut g = LayoutGraph::new();
+    let mut prev = g.typed_input("x", &[4], "torch.int8");
+    for _ in 0..blocks {
+        let mut tables = Vec::new();
+        for output_scale in [0.5, 0.5, 0.25] {
+            let table = g.call(SIGMOID, vec![node(prev)]);
+            g.graph_mut().node_mut(table).meta.set_unary_input_output_qparams(
+                crate::test_ir::qparam(0.5, 0, "torch.int8"),
+                crate::test_ir::qparam(output_scale, 0, "torch.int8"),
+            );
+            tables.push(table);
+        }
+        let sum = g.call(ADD, vec![node(tables[0]), node(tables[1])]);
+        prev = g.call(ADD, vec![node(sum), node(tables[2])]);
+    }
+    g.output(&[prev]);
+    g
+}
+
 fn duplicate_users_graph(blocks: usize, shared: bool) -> LayoutGraph {
     let mut g = LayoutGraph::new();
     let shared_c = g.input("c", &[4]);
@@ -103,8 +127,19 @@ fn fuse_duplicate_users_on_a_large_graph() {
     let _unchecked = UncheckedEdits::new();
     let blocks = 4000;
     let mut g = duplicate_users_graph(blocks, false);
-    assert!(IrFuseDuplicateUsersPass.run(g.graph_mut()));
+    assert!(IrFuseDuplicateUsersPass::EARLY.run(g.graph_mut()));
     assert_eq!((g.count(ADD), g.count(RELU)), (blocks, blocks));
+}
+
+/// At `:765` a pending table's signature is its table; equal tables of one
+/// input fuse, and building each table once per visit stays linear.
+#[test]
+fn late_fuse_duplicate_users_on_a_large_graph_of_tables() {
+    let _unchecked = UncheckedEdits::new();
+    let blocks = 2000;
+    let mut g = pending_tables_graph(blocks);
+    assert!(IrFuseDuplicateUsersPass::LATE.run(g.graph_mut()));
+    assert_eq!(g.count(SIGMOID), 2 * blocks);
 }
 
 #[test]
@@ -140,8 +175,8 @@ fn repeated_ctx_calls_find_nothing_new() {
     let _unchecked = UncheckedEdits::new();
     let mut g = duplicate_users_graph(500, true);
     let mut ctx = LayoutCtx::new(g.graph_mut());
-    assert!(fuse_duplicate_users(&mut ctx, TOSA_EXCLUDED_TARGETS));
-    assert!(!fuse_duplicate_users(&mut ctx, TOSA_EXCLUDED_TARGETS));
+    assert!(fuse_duplicate_users(&mut ctx, TOSA_EXCLUDED_TARGETS, TableStage::OwnTableConstants));
+    assert!(!fuse_duplicate_users(&mut ctx, TOSA_EXCLUDED_TARGETS, TableStage::OwnTableConstants));
     ctx.finish();
     let mut g = identical_transforms_graph(500, true);
     let mut ctx = LayoutCtx::new(g.graph_mut());
@@ -160,11 +195,12 @@ fn fuse_helpers_scaling_report() {
             let label = if shared { "one shared input" } else { "inputs per block" };
             let mut g = duplicate_users_graph(blocks, shared);
             let nodes = g.graph().live_node_count();
-            let (_, pass) = timed(|| IrFuseDuplicateUsersPass.run(g.graph_mut()));
+            let (_, pass) = timed(|| IrFuseDuplicateUsersPass::EARLY.run(g.graph_mut()));
             let mut g = duplicate_users_graph(blocks, shared);
             let mut ctx = LayoutCtx::new(g.graph_mut());
-            fuse_duplicate_users(&mut ctx, TOSA_EXCLUDED_TARGETS);
-            let (_, again) = timed(|| fuse_duplicate_users(&mut ctx, TOSA_EXCLUDED_TARGETS));
+            const STAGE: TableStage = TableStage::OwnTableConstants;
+            fuse_duplicate_users(&mut ctx, TOSA_EXCLUDED_TARGETS, STAGE);
+            let (_, again) = timed(|| fuse_duplicate_users(&mut ctx, TOSA_EXCLUDED_TARGETS, STAGE));
             rows.push(format!(
                 "FuseDuplicateUsers, {label}, {nodes} nodes: pass {pass:?}, repeated ctx call {again:?}"
             ));

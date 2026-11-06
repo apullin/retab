@@ -47,8 +47,10 @@
 //! `NodeMeta::from_fx` records `val.dim_order()`. A `kind=` placeholder gets a
 //! zero-filled `NodeTensor`, which is how RETAB tells parameters, buffers and
 //! lifted constants from runtime inputs. QParam maps keep the fixture's keys
-//! with placeholder values; empty maps stay empty (the importer drops them,
-//! but RETAB passes create them), so the ports' handling of both is visible.
+//! with placeholder values, or the values a `qp=` annotation gives; empty maps
+//! stay empty (the importer drops them, but RETAB passes create them), so the
+//! ports' handling of both is visible. Qparam values only build the "before"
+//! graph: the comparison checks keys.
 //!
 //! Usage: a pass's replay test is one line,
 //! `replay::check(&IrFooPass, include_str!("../../tests/fixtures/layout_replay/foo.txt"))`.
@@ -132,6 +134,18 @@ pub(crate) struct Node {
     /// `meta["do_not_fuse_duplicate"]` is set.
     pub(crate) no_fuse: bool,
     pub(crate) dead: bool,
+    /// Qparam values the fixture gives (`qp=`); other keys hold
+    /// [`placeholder_qparam`]. Not compared.
+    pub(crate) q_values: Vec<QValue>,
+}
+
+/// A per-tensor qparam value from a `qp=` annotation: `input_qparams[key]`
+/// when `input` holds, else `output_qparams[key]`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct QValue {
+    pub(crate) input: bool,
+    pub(crate) key: usize,
+    pub(crate) qparam: QParam,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -543,6 +557,7 @@ fn parse_node(line: &str, position: usize) -> Result<Node, String> {
         special: None,
         no_fuse: false,
         dead: false,
+        q_values: Vec::new(),
     };
     for note in cursor.rest().split(' ').filter(|note| !note.is_empty()) {
         if note == "dead" {
@@ -563,6 +578,8 @@ fn parse_node(line: &str, position: usize) -> Result<Node, String> {
                 Op::Placeholder { constant, .. } => *constant = Some(kind.to_string()),
                 Op::Call { .. } => return Err("kind= on a call node".to_string()),
             }
+        } else if let Some(spec) = note.strip_prefix("qp=") {
+            node.q_values.push(parse_qvalue(spec)?);
         } else if let Some(spec) = note.strip_prefix("q=") {
             if spec != "none" {
                 for map in spec.split('/') {
@@ -592,6 +609,35 @@ fn parse_usizes(text: &str, open: char, close: char) -> Result<Vec<usize>, Strin
         .filter(|item| !item.is_empty())
         .map(|item| item.parse().map_err(|_| format!("bad index {item:?}")))
         .collect()
+}
+
+/// `qp=in0:0.25:0:-128:127:torch.int8`: map and key, then scale, zero
+/// point, qmin, qmax and dtype.
+fn parse_qvalue(spec: &str) -> Result<QValue, String> {
+    let bad = || format!("bad qparam value {spec:?}");
+    let fields: Vec<&str> = spec.split(':').collect();
+    let [slot, scale, zp, qmin, qmax, dtype] = fields[..] else {
+        return Err(bad());
+    };
+    let (input, key) = if let Some(key) = slot.strip_prefix("in") {
+        (true, key)
+    } else if let Some(key) = slot.strip_prefix("out") {
+        (false, key)
+    } else {
+        return Err(bad());
+    };
+    let int = |text: &str| text.parse::<i64>().map_err(|_| bad());
+    Ok(QValue {
+        input,
+        key: key.parse().map_err(|_| bad())?,
+        qparam: QParam::per_tensor(
+            scale.parse().map_err(|_| bad())?,
+            int(zp)?,
+            int(qmin)?,
+            int(qmax)?,
+            dtype.to_string(),
+        ),
+    })
 }
 
 /// rc4's `dead` flags must agree with liveness computed from the output.
@@ -836,10 +882,10 @@ fn node_meta(node: &Node) -> NodeMeta {
             .unwrap_or_else(|| (0..rank).collect()),
     );
     if let Some(keys) = &node.q_in {
-        meta.set_input_qparams(qparam_map(keys));
+        meta.set_input_qparams(qparam_map(keys, node, true));
     }
     if let Some(keys) = &node.q_out {
-        meta.set_output_qparams(qparam_map(keys));
+        meta.set_output_qparams(qparam_map(keys, node, false));
     }
     if let Some(special) = &node.special {
         // The importer records the enum's display (`NodeMeta::from_fx`).
@@ -854,12 +900,19 @@ fn node_meta(node: &Node) -> NodeMeta {
     meta
 }
 
-fn qparam_map(keys: &[usize]) -> QParamMap {
+/// The qparam a fixture key holds unless a `qp=` annotation gives one: the
+/// generator's `QARGS`.
+pub(crate) fn placeholder_qparam() -> QParam {
+    QParam::per_tensor(0.5, 0, -128, 127, "torch.int8".to_string())
+}
+
+fn qparam_map(keys: &[usize], node: &Node, input: bool) -> QParamMap {
     QParamMap::from_pairs(keys.iter().map(|&key| {
-        (
-            key,
-            QParam::per_tensor(0.5, 0, -128, 127, "torch.int8".to_string()),
-        )
+        let given = node
+            .q_values
+            .iter()
+            .find(|value| value.input == input && value.key == key);
+        (key, given.map_or_else(placeholder_qparam, |value| value.qparam.clone()))
     }))
 }
 
@@ -953,6 +1006,7 @@ pub(crate) fn snapshot(ir: &IrGraph) -> Result<Graph, String> {
             special: special_dtype(&node.meta).map(str::to_string),
             no_fuse: node.meta.extra_bool(DO_NOT_FUSE_DUPLICATE_META_KEY) == Some(true),
             dead: false,
+            q_values: Vec::new(),
         });
     }
     let output = output.ok_or_else(|| "the graph has no output node".to_string())?;
@@ -1353,6 +1407,20 @@ impl fmt::Display for Graph {
                 write!(f, " target={target}")?;
             }
             write!(f, " q={}", qparams_label(node))?;
+            for value in &node.q_values {
+                let qparam = &value.qparam;
+                write!(
+                    f,
+                    " qp={}{}:{:?}:{}:{}:{}:{}",
+                    if value.input { "in" } else { "out" },
+                    value.key,
+                    qparam.scale,
+                    qparam.zp,
+                    qparam.qmin,
+                    qparam.qmax,
+                    qparam.dtype_str
+                )?;
+            }
             if let Some(special) = &node.special {
                 write!(f, " special={special}")?;
             }
@@ -1691,6 +1759,37 @@ end
         )
         .replace("    ", "");
         assert_eq!(parse(&printed).unwrap()[0].before, cases[0].before);
+    }
+
+    /// `qp=` gives a key its qparam value in the built graph; other keys hold
+    /// the placeholder, and values round-trip through printing.
+    #[test]
+    fn qparam_values_build_the_before_graph() {
+        const QVALUE_FIXTURE: &str = "\
+case qvalues
+before
+%0 = placeholder x : torch.int16[2] q=none
+%1 = aten.sigmoid.default(%0) : torch.int16[2] q=in{0}/out{0,1} qp=in0:0.0009765625:0:-32768:32767:torch.int16 qp=out1:3.0517578125e-05:-3:-32767:32767:torch.int16
+output([%1])
+after modified=false same
+end
+";
+        let cases = parse(QVALUE_FIXTURE).unwrap();
+        let before = &cases[0].before;
+        let graph = build(before);
+        let meta = &graph.node(1).meta;
+        assert_eq!(
+            meta.input_qparam(),
+            Some(&QParam::per_tensor(1.0 / 1024.0, 0, -32768, 32767, "torch.int16".into()))
+        );
+        assert_eq!(meta.output_qparam(), Some(&placeholder_qparam()));
+        assert_eq!(
+            meta.output_qparams().and_then(|map| map.get(&1)),
+            Some(&QParam::per_tensor(1.0 / 32768.0, -3, -32767, 32767, "torch.int16".into()))
+        );
+        let printed = format!("case qvalues\nbefore\n{before}after modified=false same\nend\n").replace("    ", "");
+        assert_eq!(&parse(&printed).unwrap()[0].before, before);
+        assert!(parse(&QVALUE_FIXTURE.replace("qp=in0:", "qp=on0:")).is_err());
     }
 
     #[test]

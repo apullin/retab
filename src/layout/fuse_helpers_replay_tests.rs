@@ -2,11 +2,16 @@
 //! MoveDataMovementOpsToSmallerDtype (APU-160). Every case of each fixture in
 //! tests/fixtures/layout_replay must match what the real rc4 pass did,
 //! including the `modified` flag, which the propagation driver loops on; see
-//! `replay` for what else is compared.
+//! `replay` for what else is compared. FuseDuplicateUsers
+//! is replayed at its three table stages: alone (`arm_pass_manager.py:587`),
+//! after InsertTableOpsPass (the propagation driver) and after
+//! FuseEqualPlaceholdersPass too (`:765`).
 
 use crate::fx_ir::{IrGraph, IrPass};
 use crate::layout::ctx::LayoutCtx;
-use crate::layout::fuse_duplicate_users::IrFuseDuplicateUsersPass;
+use crate::layout::fuse_duplicate_users::{
+    fuse_duplicate_users, IrFuseDuplicateUsersPass, TableStage, TOSA_EXCLUDED_TARGETS,
+};
 use crate::layout::fuse_identical_input_transforms::{
     fuse_identical_input_transforms, FuseIdenticalInputTransforms, IrFuseIdenticalInputTransformsPass,
 };
@@ -15,6 +20,10 @@ use crate::layout::replay::{self, Options};
 
 const FUSE_DUPLICATE_USERS: &str =
     include_str!("../../tests/fixtures/layout_replay/fuse_duplicate_users.txt");
+const FUSE_DUPLICATE_USERS_DRIVER: &str =
+    include_str!("../../tests/fixtures/layout_replay/fuse_duplicate_users_driver.txt");
+const FUSE_DUPLICATE_USERS_LATE: &str =
+    include_str!("../../tests/fixtures/layout_replay/fuse_duplicate_users_late.txt");
 const FUSE_IDENTICAL_INPUT_TRANSFORMS: &str =
     include_str!("../../tests/fixtures/layout_replay/fuse_identical_input_transforms.txt");
 const FUSE_IDENTICAL_INPUT_TRANSFORMS_DRIVER: &str =
@@ -38,9 +47,51 @@ const SHARED_NAN_OBJECT: &str = "rc4 fuses users that share one NaN float object
 #[test]
 fn fuse_duplicate_users_matches_rc4() {
     replay::check_known_with(
-        &IrFuseDuplicateUsersPass,
+        &IrFuseDuplicateUsersPass::EARLY,
         FUSE_DUPLICATE_USERS,
         &[("one_shared_nan_object_fuses", SHARED_NAN_OBJECT)],
+        WITH_FLAG,
+    );
+}
+
+/// The propagation driver's `fuse_horizontal`
+/// (backends/transforms/propagate_view_copy_permute_pass.py:569-576) at phase
+/// 6, after InsertTableOpsPass: `fuse_duplicate_users` on a `LayoutCtx` at
+/// [`TableStage::OwnTableConstants`].
+struct DriverFuseDuplicateUsers;
+
+impl IrPass for DriverFuseDuplicateUsers {
+    fn name(&self) -> &str {
+        "DriverFuseDuplicateUsers"
+    }
+
+    fn run(&self, graph: &mut IrGraph) -> bool {
+        let mut ctx = LayoutCtx::new(graph);
+        let modified = fuse_duplicate_users(&mut ctx, TOSA_EXCLUDED_TARGETS, TableStage::OwnTableConstants);
+        if modified {
+            ctx.finish();
+        }
+        modified
+    }
+}
+
+/// rc4 fuses two 16-bit TABLEs with equal tables at `:765` and keeps one
+/// RESCALE per original; the port keeps both pending tables (see
+/// `layout::fuse_duplicate_users`), so only `modified` differs.
+const SIXTEEN_BIT_TABLES: &str =
+    "rc4 fuses 16-bit TABLEs and keeps each RESCALE, which a pending table can't express; the port keeps both";
+
+#[test]
+fn fuse_duplicate_users_in_the_driver_matches_rc4() {
+    replay::check_known_with(&DriverFuseDuplicateUsers, FUSE_DUPLICATE_USERS_DRIVER, &[], WITH_FLAG);
+}
+
+#[test]
+fn late_fuse_duplicate_users_matches_rc4() {
+    replay::check_known_with(
+        &IrFuseDuplicateUsersPass::LATE,
+        FUSE_DUPLICATE_USERS_LATE,
+        &[("int16_tables_keep_one_rescale_each", SIXTEEN_BIT_TABLES)],
         WITH_FLAG,
     );
 }
@@ -130,6 +181,8 @@ fn move_data_movement_fails_like_rc4_for_the_same_reason() {
 fn fixtures_cover_their_passes() {
     for (fixture, minimum_random, minimum_modified) in [
         (FUSE_DUPLICATE_USERS, 300, 200),
+        (FUSE_DUPLICATE_USERS_DRIVER, 300, 150),
+        (FUSE_DUPLICATE_USERS_LATE, 300, 200),
         (FUSE_IDENTICAL_INPUT_TRANSFORMS, 300, 120),
         (MOVE_DATA_MOVEMENT, 300, 150),
     ] {
@@ -154,8 +207,18 @@ fn fixtures_cover_their_passes() {
 #[test]
 #[ignore = "diagnostic: prints replay statistics; run with --ignored --nocapture"]
 fn fuse_helpers_replay_report() {
-    let passes: [(&dyn IrPass, &str, &str); 4] = [
-        (&IrFuseDuplicateUsersPass, "fuse_duplicate_users.txt", FUSE_DUPLICATE_USERS),
+    let passes: [(&dyn IrPass, &str, &str); 6] = [
+        (&IrFuseDuplicateUsersPass::EARLY, "fuse_duplicate_users.txt", FUSE_DUPLICATE_USERS),
+        (
+            &DriverFuseDuplicateUsers,
+            "fuse_duplicate_users_driver.txt",
+            FUSE_DUPLICATE_USERS_DRIVER,
+        ),
+        (
+            &IrFuseDuplicateUsersPass::LATE,
+            "fuse_duplicate_users_late.txt",
+            FUSE_DUPLICATE_USERS_LATE,
+        ),
         (
             &IrFuseIdenticalInputTransformsPass,
             "fuse_identical_input_transforms.txt",

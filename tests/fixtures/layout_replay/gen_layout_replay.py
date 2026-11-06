@@ -34,6 +34,11 @@ How the graphs are built and run:
   `graph_pass(exported_program.graph_module)`, inside the
   `TosaLoweringContext` the pass manager provides. No DCE runs afterwards:
   dead nodes rc4 leaves are recorded and marked `dead`.
+- FuseDuplicateUsers also runs where rc4 already has TABLE ops (the
+  `fuse_duplicate_users_driver` and `_late` fixtures, see `TableStagePass`):
+  the real InsertTableOpsPass (and FuseEqualPlaceholdersPass) bring the graph
+  to that stage first, and the TABLE nodes are turned back into the table ops
+  RETAB still holds, so the fixture shows rc4's decisions in RETAB's form.
 
 Fixture format (one node per line, in graph order):
 
@@ -53,7 +58,9 @@ and `[...]` for lists and tuples; kwargs follow as `name=value`. The value is
 `dtype[shape]`. Annotations: `dim_order=` (only when not the identity),
 `kind=param|buffer|constant` (constant placeholders), `target=` (a placeholder
 whose target is not its name), `q=` (`none`, or `in{keys}` / `out{keys}` for
-present `input_qparams` / `output_qparams` maps, `{}` when empty), `special=`
+present `input_qparams` / `output_qparams` maps, `{}` when empty), `qp=` (the
+value of one map entry that isn't `QARGS`, as
+`qp=out0:<scale>:<zp>:<qmin>:<qmax>:<dtype>`), `special=`
 (the `TosaSpecialDtype` member in `meta["tosa_special_dtype"]`), `nofuse`
 (`meta["do_not_fuse_duplicate"]` is set) and `dead` (a call node the output
 doesn't reach). `after modified=<bool> same` means the after graph prints
@@ -85,10 +92,18 @@ from executorch.backends.arm._passes import (
     NormalizeDelegateIOLayoutPass,
     RewriteHighRankSingletonPermutePass,
 )
+from executorch.backends.arm._passes.fuse_equal_placeholders_pass import (
+    FuseEqualPlaceholdersPass,
+)
+from executorch.backends.arm._passes.fuse_duplicate_users_pass import (
+    TOSA_EXCLUDED_TARGETS,
+)
+from executorch.backends.arm._passes.insert_table_ops import InsertTableOpsPass, TableOps
 from executorch.backends.arm._passes.quant_args import QuantArgs
 from executorch.backends.arm.tosa.mapping import TosaSpecialDtype
 from executorch.backends.transforms.fuse_duplicate_users_pass import (
     DO_NOT_FUSE_DUPLICATE_META_KEY,
+    FuseDuplicateUsersPass as SharedFuseDuplicateUsersPass,
 )
 from executorch.backends.transforms.fuse_identical_input_transforms_pass import (
     FuseIdenticalInputTransformsPass as SharedFuseIdenticalInputTransformsPass,
@@ -99,6 +114,7 @@ from executorch.backends.arm.tosa.specification import (
 )
 from executorch.exir.dialects._ops import ops as exir_ops
 from executorch.exir.dialects.edge._ops import EdgeOpOverload
+from executorch.exir.pass_base import PassResult
 from torch._export.verifier import Verifier
 from torch._ops import HigherOrderOperator, OpOverload
 from torch._subclasses.fake_tensor import FakeTensorMode
@@ -325,6 +341,21 @@ def fmt_qparams(meta) -> str:
     return "/".join(parts) if parts else "none"
 
 
+def fmt_qvalues(meta) -> list[str]:
+    """`qp=` notes for the qparam entries that aren't `QARGS`."""
+    notes = []
+    for key, label in (("input_qparams", "in"), ("output_qparams", "out")):
+        for index, args in sorted(meta.get(key, {}).items()):
+            if args == QARGS:
+                continue
+            if args.per_channel or isinstance(args.scale, list):
+                raise TypeError(f"cannot print per-channel qparams {args}")
+            notes.append(
+                f"qp={label}{index}:{float(args.scale)!r}:{args.zp}:{args.qmin}:{args.qmax}:{args.dtype}"
+            )
+    return notes
+
+
 def placeholder_kinds(ep: ExportedProgram) -> dict[str, str]:
     signature = ep.graph_signature
     kinds = {name: "param" for name in signature.inputs_to_parameters}
@@ -372,6 +403,7 @@ def dump(gm: torch.fx.GraphModule, kinds: dict[str, str]) -> list[str]:
         if node.op == "placeholder" and node.target != node.name:
             notes.append(f"target={node.target}")
         notes.append(f"q={fmt_qparams(node.meta)}")
+        notes.extend(fmt_qvalues(node.meta))
         special = node.meta.get(TosaSpecialDtype.meta_key())
         if special is not None:
             notes.append(f"special={special.name}")
@@ -389,7 +421,9 @@ def dump(gm: torch.fx.GraphModule, kinds: dict[str, str]) -> list[str]:
 
 
 class PassSpec:
-    def __init__(self, name, make, sources, structured, random_profile, random_cases=None):
+    def __init__(
+        self, name, make, sources, structured, random_profile, random_cases=None, tosa_spec=None
+    ):
         self.name = name
         self.make: Callable[[ExportedProgram], object] = make
         self.sources = sources
@@ -398,6 +432,8 @@ class PassSpec:
         # More random graphs where torch rejects enough of them that fewer
         # than RANDOM_CASES would be left.
         self.random_cases = RANDOM_CASES if random_cases is None else random_cases
+        # 16-bit TABLE ops need the int16 extension.
+        self.tosa_spec = TOSA_SPEC if tosa_spec is None else tosa_spec
 
 
 class BuildError(Exception):
@@ -407,7 +443,7 @@ class BuildError(Exception):
 def run_case(spec: PassSpec, build: Callable[[Builder], None]) -> list[str]:
     # TOSA dialect ops need the context to build, and the pass manager runs
     # every pass inside it (`ArmPassManager._tosa_context`).
-    with TosaLoweringContext(TosaSpecification.create_from_string(TOSA_SPEC)):
+    with TosaLoweringContext(TosaSpecification.create_from_string(spec.tosa_spec)):
         builder = Builder()
         try:
             build(builder)
@@ -1509,6 +1545,299 @@ def fuse_duplicate_users_cases():
     return cases
 
 
+# FuseDuplicateUsers where rc4 already has TABLE ops ---------------------
+
+# Meta keys the table-stage composite uses to find its way back; never dumped.
+_TABLE_OF = "retab_replay_table_of"
+_TABLE_RESCALE = "retab_replay_table_rescale"
+
+
+def qargs(scale, zp=0, dtype=torch.int8, qmin=None, qmax=None) -> QuantArgs:
+    info = torch.iinfo(dtype)
+    return QuantArgs(
+        scale=scale,
+        zp=zp,
+        qmin=info.min if qmin is None else qmin,
+        qmax=info.max if qmax is None else qmax,
+        dtype=dtype,
+    )
+
+
+def table_op(b, target, x, qin, qout, *args, **kwargs):
+    """A quantized table op as RETAB holds it where rc4 has a TABLE
+    (`layout::pending`): one input and one output qparam, and the value
+    InsertTableOpsPass's TABLE (or its RESCALE) returns, `x`'s shape in the
+    output qparam's dtype, so rc4's retraces leave downstream values alone.
+    The op is never executed on integers, which torch rejects for some
+    (leaky_relu with a float slope)."""
+    node = b.graph.create_node("call_function", target, (x, *args), kwargs)
+    if b.first_call is None:
+        b.first_call = node
+    with b.mode:
+        node.meta["val"] = torch.empty(tuple(x.meta["val"].shape), dtype=qout.dtype)
+    node.meta["input_qparams"] = {0: qin}
+    node.meta["output_qparams"] = {0: qout}
+    return node
+
+
+def _is_table_op(node) -> bool:
+    """InsertTableOpsPass's test (insert_table_ops.py:359-366)."""
+    return (
+        node.op == "call_function"
+        and node.target in set(TableOps.included_ops())
+        and len(node.meta.get("input_qparams", {})) > 0
+        and len(node.meta.get("output_qparams", {})) > 0
+    )
+
+
+class TableStagePass:
+    """FuseDuplicateUsers at a stage where rc4 already has TABLE ops.
+
+    InsertTableOpsPass (arm_pass_manager.py:708), and FuseEqualPlaceholdersPass
+    (`:755`) when `merge_constants` holds, bring the graph to the stage; then
+    `make_fdu()` runs as its rc4 caller constructs it, and every TABLE (with
+    the RESCALE a 16-bit table gets) becomes the table op it replaced again,
+    reading the TABLE's input, so the fixture shows rc4's decisions in the
+    form RETAB keeps (`layout::pending`). Where rc4 fused 16-bit TABLEs, each
+    of their RESCALEs becomes its own table op, which RETAB never fuses
+    either; only `modified` tells. `modified` is FuseDuplicateUsers' own.
+    """
+
+    def __init__(self, ep, make_fdu, merge_constants):
+        self.ep = ep
+        self.make_fdu = make_fdu
+        self.merge_constants = merge_constants
+        merge = "FuseEqualPlaceholdersPass + " if merge_constants else ""
+        self.rc4_name = f"InsertTableOpsPass + {merge}FuseDuplicateUsersPass"
+
+    def __call__(self, gm):
+        originals = {node.name: node for node in gm.graph.nodes if _is_table_op(node)}
+        names = {node.name for node in gm.graph.nodes}
+        gm = InsertTableOpsPass(self.ep)(gm).graph_module
+        for node in gm.graph.nodes:
+            if node.name in names:
+                continue
+            if node.target == T.TABLE.default:
+                constant = node.args[1].name
+                node.meta[_TABLE_OF] = constant.removeprefix("b_").removesuffix("_table_constant")
+            elif node.target == T.RESCALE.default:
+                (table,) = node.all_input_nodes
+                node.meta[_TABLE_OF] = table.meta[_TABLE_OF]
+                node.meta[_TABLE_RESCALE] = True
+        if self.merge_constants:
+            gm = FuseEqualPlaceholdersPass(self.ep)(gm).graph_module
+        result = self.make_fdu()(gm)
+        gm = result.graph_module
+        graph = gm.graph
+        for table in [n for n in graph.nodes if n.target == T.TABLE.default]:
+            rescales = [user for user in table.users if user.meta.get(_TABLE_RESCALE)]
+            for node in rescales or [table]:
+                original = originals[node.meta[_TABLE_OF]]
+                with graph.inserting_before(node):
+                    restored = graph.create_node(
+                        "call_function",
+                        original.target,
+                        (table.args[0], *original.args[1:]),
+                        dict(original.kwargs),
+                    )
+                restored.meta = dict(original.meta)
+                node.replace_all_uses_with(restored)
+                graph.erase_node(node)
+            if rescales and not table.users:
+                graph.erase_node(table)
+        for node in list(graph.nodes):
+            if node.op == "placeholder" and node.name.startswith("b_") and not node.users:
+                graph.erase_node(node)
+        return PassResult(gm, result.modified)
+
+
+# The table ops the table-stage cases use, with their extra arguments; elu
+# reads rc4-only meta (insert_table_ops.py:128-134) and is left out.
+TABLE_TARGETS = [
+    (A.sigmoid.default, (), {}),
+    (A.tanh.default, (), {}),
+    (A.exp.default, (), {}),
+    (A.ceil.default, (), {}),
+    (A.floor.default, (), {}),
+    (A.round.default, (), {}),
+    (A.rsqrt.default, (), {}),
+    (A.hardswish.default, (), {}),
+    (A.gelu.default, (), {}),
+    (A.gelu.default, (), {"approximate": "tanh"}),
+    (A.leaky_relu.default, (0.125,), {}),
+    (A.pow.Tensor_Scalar, (2,), {}),
+    (A.pow.Tensor_Scalar, (3,), {}),
+    (A.softplus.default, (1.0, 20.0), {}),
+]
+# Int8 qparams the random table cases draw from: equal draws give equal
+# tables, and the scale-1 and saturating ones give tables that coincide.
+TABLE_QPARAMS = [
+    qargs(0.5),
+    qargs(0.25),
+    qargs(1.0),
+    qargs(0.5, 3),
+    qargs(0.5, qmin=-127),
+    qargs(1 / 256, -128),
+]
+
+
+def table_stage_cases():
+    cases = {}
+
+    def case(fn):
+        cases[fn.__name__] = fn
+        return fn
+
+    def two(b, first, second, target=A.sigmoid.default, *args):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        b.output([table_op(b, target, x, *first, *args), table_op(b, target, x, *second, *args)])
+
+    @case
+    def equal_tables(b):
+        two(b, (qargs(0.5), qargs(0.5)), (qargs(0.5), qargs(0.5)))
+
+    @case
+    def output_scales_differ(b):
+        two(b, (qargs(0.5), qargs(0.5)), (qargs(0.5), qargs(0.25)))
+
+    @case
+    def input_zero_points_differ(b):
+        two(b, (qargs(0.5), qargs(0.5)), (qargs(0.5, 3), qargs(0.5)))
+
+    @case
+    def saturating_tables_coincide(b):
+        two(b, (qargs(0.5), qargs(1.0)), (qargs(0.5, qmin=-127), qargs(1.0)))
+
+    @case
+    def ceil_and_floor_of_integer_codes_coincide(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        ceil = table_op(b, A.ceil.default, x, qargs(1.0), qargs(1.0))
+        floor = table_op(b, A.floor.default, x, qargs(1.0), qargs(1.0))
+        b.output([floor, ceil])
+
+    @case
+    def ceil_and_floor_of_half_codes_differ(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        ceil = table_op(b, A.ceil.default, x, qargs(0.5), qargs(1.0))
+        floor = table_op(b, A.floor.default, x, qargs(0.5), qargs(1.0))
+        b.output([ceil, floor])
+
+    @case
+    def tables_of_different_inputs(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        y = b.input("y", (2, 3), dtype=torch.int8)
+        b.output(
+            [
+                table_op(b, A.sigmoid.default, x, qargs(0.5), qargs(0.5)),
+                table_op(b, A.sigmoid.default, y, qargs(0.5), qargs(0.5)),
+            ]
+        )
+
+    @case
+    def three_tables_two_equal(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        b.output(
+            [
+                table_op(b, A.tanh.default, x, qargs(0.5), qargs(0.25)),
+                table_op(b, A.tanh.default, x, qargs(0.5), qargs(1 / 256, -128)),
+                table_op(b, A.tanh.default, x, qargs(0.5), qargs(0.25)),
+            ]
+        )
+
+    @case
+    def users_of_one_table_fuse(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        t = table_op(b, A.sigmoid.default, x, qargs(0.5), qargs(0.5))
+        b.output([b.call(A.neg.default, t), b.call(A.neg.default, t)])
+
+    @case
+    def a_fusion_exposes_equal_tables(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        n0 = b.call(A.neg.default, x)
+        n1 = b.call(A.neg.default, x)
+        b.output(
+            [
+                table_op(b, A.exp.default, n0, qargs(0.5), qargs(0.5)),
+                table_op(b, A.exp.default, n1, qargs(0.5), qargs(0.5)),
+            ]
+        )
+
+    @case
+    def equal_tables_expose_equal_users(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        t0 = table_op(b, A.sigmoid.default, x, qargs(0.5), qargs(0.5))
+        t1 = table_op(b, A.sigmoid.default, x, qargs(0.5), qargs(0.5))
+        b.output([b.call(A.abs.default, t0), b.call(A.abs.default, t1)])
+
+    @case
+    def a_marked_table(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        first = table_op(b, A.sigmoid.default, x, qargs(0.5), qargs(0.5))
+        mark_no_fuse(first)
+        b.output([first, table_op(b, A.sigmoid.default, x, qargs(0.5), qargs(0.5))])
+
+    @case
+    def a_table_and_a_float_op(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        b.output(
+            [
+                table_op(b, A.sigmoid.default, x, qargs(0.5), qargs(0.5)),
+                b.call(A.sigmoid.default, x),
+                b.call(A.sigmoid.default, x),
+            ]
+        )
+
+    @case
+    def table_arguments(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        q = (qargs(0.5), qargs(0.5))
+        b.output(
+            [
+                table_op(b, A.pow.Tensor_Scalar, x, *q, 2),
+                table_op(b, A.pow.Tensor_Scalar, x, *q, 2),
+                table_op(b, A.pow.Tensor_Scalar, x, *q, 3),
+                table_op(b, A.leaky_relu.default, x, *q, 0.125),
+                table_op(b, A.leaky_relu.default, x, *q, 0.25),
+                table_op(b, A.gelu.default, x, *q),
+                table_op(b, A.gelu.default, x, *q, approximate="tanh"),
+                table_op(b, A.gelu.default, x, *q, approximate="none"),
+                table_op(b, A.softplus.default, x, *q, 1.0, 20.0),
+                table_op(b, A.softplus.default, x, *q, 2.0, 20.0),
+            ]
+        )
+
+    @case
+    def a_table_of_a_table(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        inner = [table_op(b, A.exp.default, x, qargs(0.25), qargs(0.5)) for _ in range(2)]
+        b.output([table_op(b, A.tanh.default, t, qargs(0.5), qargs(0.5)) for t in inner])
+
+    @case
+    def rescale_users_of_tables(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        t0 = table_op(b, A.sigmoid.default, x, qargs(0.5), qargs(0.5))
+        t1 = table_op(b, A.sigmoid.default, x, qargs(0.5), qargs(0.5))
+        b.output([rescale(b, t0, torch.int32), rescale(b, t1, torch.int32)])
+
+    @case
+    def int16_tables_keep_one_rescale_each(b):
+        x = b.input("x", (2, 3), dtype=torch.int16)
+        q = (qargs(1 / 1024, dtype=torch.int16), qargs(1 / 32768, dtype=torch.int16))
+        b.output([table_op(b, A.sigmoid.default, x, *q), table_op(b, A.sigmoid.default, x, *q)])
+
+    @case
+    def int16_tables_that_differ(b):
+        x = b.input("x", (2, 3), dtype=torch.int16)
+        b.output(
+            [
+                table_op(b, A.tanh.default, x, qargs(1 / 1024, dtype=torch.int16), qargs(1 / 32768, dtype=torch.int16)),
+                table_op(b, A.tanh.default, x, qargs(1 / 512, dtype=torch.int16), qargs(1 / 32768, dtype=torch.int16)),
+            ]
+        )
+
+    return cases
+
+
 def fuse_identical_input_transforms_cases():
     cases = {}
 
@@ -2336,6 +2665,8 @@ class RandomGraph:
             self.identical_transforms_step(kind)
         elif kind.startswith("mdm_"):
             self.data_movement_step(kind)
+        elif kind.startswith("table"):
+            self.table_step(kind)
         else:
             raise ValueError(kind)
 
@@ -2404,6 +2735,48 @@ class RandomGraph:
             computed = [n for n in self.pool if n.op == "call_function"]
             if computed:
                 mark_no_fuse(rng.choice(computed))
+        else:
+            raise ValueError(kind)
+
+    # FuseDuplicateUsers where rc4 has TABLE ops --------------------------
+
+    def table_step(self, kind: str) -> None:
+        rng, b = self.rng, self.b
+
+        def draw():
+            return rng.choice(TABLE_QPARAMS), rng.choice(TABLE_QPARAMS)
+
+        if kind == "table":
+            x = self.pick(torch.int8)
+            target, args, kwargs = rng.choice(TABLE_TARGETS)
+            self.pool.append(table_op(b, target, x, *draw(), *args, **kwargs))
+        elif kind == "table_dup":
+            x = self.pick(torch.int8)
+            target, args, kwargs = rng.choice(TABLE_TARGETS)
+            first = draw()
+            for _ in range(rng.randint(2, 3)):
+                q = first if rng.random() < 0.6 else draw()
+                if rng.random() < 0.2:
+                    target, args, kwargs = rng.choice(TABLE_TARGETS)
+                self.pool.append(table_op(b, target, x, *q, *args, **kwargs))
+        elif kind == "table_user":
+            tables = [n for n in self.pool if _is_table_op(n)]
+            if not tables:
+                return
+            t = rng.choice(tables)
+            if rng.random() < 0.3:
+                other = self.operand_for(t, torch.int8)
+                for _ in range(rng.randint(1, 2)):
+                    self.pool.append(b.call(A.add.Tensor, t, other))
+            else:
+                op = rng.choice([A.neg.default, A.abs.default, A.relu.default])
+                for _ in range(rng.randint(1, 2)):
+                    self.pool.append(b.call(op, t))
+        elif kind == "table_int_dup":
+            x = self.pick(torch.int8)
+            op = rng.choice([A.neg.default, A.abs.default])
+            for _ in range(rng.randint(2, 3)):
+                self.pool.append(b.call(op, x))
         else:
             raise ValueError(kind)
 
@@ -2623,6 +2996,14 @@ PROFILES = {
         "dead": 0.3,
     },
     "move_data_movement": {"mdm_chain": 4, "mdm_fanout": 1.5, "mdm_special": 0.4, "dead": 0.2},
+    "table_stage": {
+        "table": 2,
+        "table_dup": 3,
+        "table_user": 1.5,
+        "table_int_dup": 1,
+        "mark": 0.3,
+        "dead": 0.3,
+    },
 }
 
 
@@ -2689,6 +3070,43 @@ PASSES = [
         fuse_duplicate_users_cases,
         "fuse_duplicate_users",
         random_cases=360,
+    ),
+    # The propagation driver's fuse_horizontal at phase 6
+    # (propagate_view_copy_permute_pass.py:569-576, with the TOSA exclusions of
+    # backends/arm/_passes/propagate_view_copy_permute_pass.py:37-38), after
+    # InsertTableOpsPass (arm_pass_manager.py:708).
+    PassSpec(
+        "fuse_duplicate_users_driver",
+        lambda ep: TableStagePass(
+            ep, lambda: SharedFuseDuplicateUsersPass(TOSA_EXCLUDED_TARGETS), merge_constants=False
+        ),
+        [
+            "backends/transforms/fuse_duplicate_users_pass.py",
+            "backends/arm/_passes/fuse_duplicate_users_pass.py",
+            "backends/arm/_passes/insert_table_ops.py",
+            "backends/transforms/propagate_view_copy_permute_pass.py",
+            "backends/arm/_passes/propagate_view_copy_permute_pass.py",
+        ],
+        table_stage_cases,
+        "table_stage",
+        random_cases=360,
+        tosa_spec="TOSA-1.0+FP+INT+int16",
+    ),
+    # FuseDuplicateUsersPass() at arm_pass_manager.py:765, after
+    # FuseEqualPlaceholdersPass (`:755`).
+    PassSpec(
+        "fuse_duplicate_users_late",
+        lambda ep: TableStagePass(ep, FuseDuplicateUsersPass, merge_constants=True),
+        [
+            "backends/transforms/fuse_duplicate_users_pass.py",
+            "backends/arm/_passes/fuse_duplicate_users_pass.py",
+            "backends/arm/_passes/insert_table_ops.py",
+            "backends/arm/_passes/fuse_equal_placeholders_pass.py",
+        ],
+        table_stage_cases,
+        "table_stage",
+        random_cases=360,
+        tosa_spec="TOSA-1.0+FP+INT+int16",
     ),
     PassSpec(
         "fuse_identical_input_transforms",
@@ -2810,7 +3228,8 @@ def main() -> None:
     for spec in PASSES:
         if args.only and spec.name != args.only:
             continue
-        rc4_pass = type(spec.make(None)).__name__
+        made = spec.make(None)
+        rc4_pass = getattr(made, "rc4_name", type(made).__name__)
         if args.case:
             cases = dict(spec.structured())
             if args.case.startswith("random_"):

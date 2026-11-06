@@ -341,7 +341,7 @@ fn fuse_duplicate_users_tosa_fp_fuse_avg_pool() {
     g.output(&[out]);
     assert_eq!(g.count(AVG_POOL), 3);
 
-    assert!(IrFuseDuplicateUsersPass.run(g.graph_mut()));
+    assert!(IrFuseDuplicateUsersPass::EARLY.run(g.graph_mut()));
 
     assert_eq!(g.count(AVG_POOL), 1);
 }
@@ -363,7 +363,7 @@ fn fuse_duplicate_users_tosa_fp_fuse_avg_pool_chain() {
     g.output(&[out]);
     assert_eq!(g.count(AVG_POOL), 6);
 
-    assert!(IrFuseDuplicateUsersPass.run(g.graph_mut()));
+    assert!(IrFuseDuplicateUsersPass::EARLY.run(g.graph_mut()));
 
     assert_eq!(g.count(AVG_POOL), 2);
 }
@@ -393,7 +393,7 @@ fn fuse_duplicate_users_preserves_graph_order_for_representative() {
     let adds = calls_to(&g, ADD);
     assert_eq!(adds, vec![g.id(&earlier), g.id(&later)]);
 
-    assert!(IrFuseDuplicateUsersPass.run(g.graph_mut()));
+    assert!(IrFuseDuplicateUsersPass::EARLY.run(g.graph_mut()));
 
     assert_eq!(calls_to(&g, ADD), vec![g.id(&earlier)]);
     assert!(g.graph().by_name(&later).is_none_or(|node| !node.alive));
@@ -411,7 +411,7 @@ fn fuse_duplicate_users_honors_do_not_fuse_marker() {
         .meta
         .set_extra(DO_NOT_FUSE_DUPLICATE_META_KEY, MetaValue::Bool(true));
 
-    assert!(!IrFuseDuplicateUsersPass.run(g.graph_mut()));
+    assert!(!IrFuseDuplicateUsersPass::EARLY.run(g.graph_mut()));
 
     assert_eq!(g.count(ADD), 2);
 }
@@ -428,7 +428,7 @@ fn fuse_duplicate_users_skips_erased_queued_nodes() {
     let r1 = g.call(RELU, vec![node(n1)]);
     g.output(&[r0, r1]);
 
-    assert!(IrFuseDuplicateUsersPass.run(g.graph_mut()));
+    assert!(IrFuseDuplicateUsersPass::EARLY.run(g.graph_mut()));
 
     let (negs, relus) = (calls_to(&g, NEG), calls_to(&g, RELU));
     assert_eq!((negs.len(), relus.len()), (1, 1));
@@ -457,7 +457,7 @@ fn fuse_duplicate_users_keeps_identical_rescale_users() {
     let (first, second) = (rescale(&mut g), rescale(&mut g));
     g.output(&[first, second]);
 
-    assert!(!IrFuseDuplicateUsersPass.run(g.graph_mut()));
+    assert!(!IrFuseDuplicateUsersPass::EARLY.run(g.graph_mut()));
 
     assert_eq!(g.count(RESCALE), 2);
 }
@@ -477,7 +477,7 @@ fn fuse_duplicate_users_runs_after_tosa_transformations() {
     let second = g.add_unrefreshed("tosa.ADD.default", vec![node(x), node(buffer)]);
     g.output(&[first, second]);
 
-    assert!(IrFuseDuplicateUsersPass.run(g.graph_mut()));
+    assert!(IrFuseDuplicateUsersPass::LATE.run(g.graph_mut()));
 
     let adds = calls_to(&g, "tosa.ADD.default");
     assert_eq!(adds.len(), 1);
@@ -485,7 +485,8 @@ fn fuse_duplicate_users_runs_after_tosa_transformations() {
 }
 
 /// `test_remove_data_layout_noops.py::test_noop_removal_exposes_duplicate_user_cleanup`,
-/// at FuseDuplicateUsersPass: RemoveNoopPass dropped the zero PAD, leaving
+/// at FuseDuplicateUsersPass after the post-processing RemoveNoopPass
+/// (`arm_pass_manager.py:762-765`): RemoveNoopPass dropped the zero PAD, leaving
 /// two `add(x, y)`s (confirmed in the venv); one remains and feeds both
 /// outputs, which EnsureUniqueOutputNodesPass (not ported) then separates.
 #[test]
@@ -497,7 +498,7 @@ fn noop_removal_exposes_duplicate_user_cleanup() {
     let second = g.call(ADD, vec![node(x), node(y)]);
     g.output(&[first, second]);
 
-    assert!(IrFuseDuplicateUsersPass.run(g.graph_mut()));
+    assert!(IrFuseDuplicateUsersPass::LATE.run(g.graph_mut()));
 
     assert_eq!(g.count(ADD), 1);
     let outputs = output_nodes(g.graph());

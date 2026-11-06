@@ -8,10 +8,13 @@
 //! graphs, so `replay` compares the port with rc4's exact result. The tests
 //! are ignored with the bug they show, so the suite stays green until the port
 //! is fixed; run them with `cargo test --lib fuse_helpers_review -- --ignored`.
+//! The FuseDuplicateUsers ones are fixed and run.
 
 use crate::fx_ir::{IrPass, NodeId, QParam};
 use crate::layout::ctx::LayoutCtx;
-use crate::layout::fuse_duplicate_users::{fuse_duplicate_users, IrFuseDuplicateUsersPass, TOSA_EXCLUDED_TARGETS};
+use crate::layout::fuse_duplicate_users::{
+    fuse_duplicate_users, IrFuseDuplicateUsersPass, TableStage, TOSA_EXCLUDED_TARGETS,
+};
 use crate::layout::move_data_movement::IrMoveDataMovementOpsToSmallerDtypePass;
 use crate::layout::replay::{self, Options};
 use crate::layout::testing::*;
@@ -52,11 +55,11 @@ fn pending_sigmoid(g: &mut LayoutGraph, x: NodeId, output: QParam) -> NodeId {
 ///   `['tosa.TABLE.default', 'tosa.TABLE.default']`, placeholders
 ///   `b_aten_sigmoid_default_table_constant` and `..._1_...`; modified=False.
 ///
-/// RETAB still holds both as `aten.sigmoid` with the same args, and the port
-/// fuses them; it never consults `is_pending_table`, unlike the P1 port of
-/// FuseViewCopyTransform (`p1_review_tests::fuse_view_copy_stops_at_a_pending_table`).
+/// RETAB still holds both as `aten.sigmoid` with the same args; the port
+/// fused them until the driver passed its table stage
+/// ([`TableStage::OwnTableConstants`]), as the P1 port of FuseViewCopyTransform
+/// checks `is_pending_table` (`p1_review_tests::fuse_view_copy_stops_at_a_pending_table`).
 #[test]
-#[ignore = "BUG: fuse_duplicate_users (the driver's fuse_horizontal) fuses pending TABLE ops; rc4's phase-6 TABLEs each read their own table constant and never fuse"]
 fn fuse_duplicate_users_in_the_driver_keeps_pending_tables_apart() {
     let mut g = LayoutGraph::new();
     let x = g.typed_input("x", &[2, 3], "torch.int8");
@@ -66,7 +69,7 @@ fn fuse_duplicate_users_in_the_driver_keeps_pending_tables_apart() {
 
     let fused = {
         let mut ctx = LayoutCtx::new(g.graph_mut());
-        let fused = fuse_duplicate_users(&mut ctx, TOSA_EXCLUDED_TARGETS);
+        let fused = fuse_duplicate_users(&mut ctx, TOSA_EXCLUDED_TARGETS, TableStage::OwnTableConstants);
         if fused {
             ctx.finish();
         }
@@ -89,12 +92,12 @@ fn fuse_duplicate_users_in_the_driver_keeps_pending_tables_apart() {
 ///   FuseDuplicateUsersPass): modified=False, two `tosa.TABLE.default`.
 ///   With equal output scales the same sequence ends with one TABLE.
 ///
-/// The port fuses the two pending sigmoids at `:765` whatever their qparams,
-/// so one consumer reads a value quantized for the other: a miscompile, not
-/// just an op-count difference. One `IrFuseDuplicateUsersPass` cannot match
-/// rc4 at both positions.
+/// The port fused the two pending sigmoids at `:765` whatever their qparams,
+/// so one consumer read a value quantized for the other: a miscompile, not
+/// just an op-count difference. One configuration cannot match rc4 at both
+/// positions, hence [`IrFuseDuplicateUsersPass::EARLY`] and
+/// [`IrFuseDuplicateUsersPass::LATE`].
 #[test]
-#[ignore = "BUG: IrFuseDuplicateUsersPass at :765 fuses pending TABLE ops whose output qparams differ; rc4's TABLE constants differ there, so it keeps both"]
 fn fuse_duplicate_users_at_765_keeps_tables_with_different_qparams() {
     let mut g = LayoutGraph::new();
     let x = g.typed_input("x", &[2, 3], "torch.int8");
@@ -102,7 +105,7 @@ fn fuse_duplicate_users_at_765_keeps_tables_with_different_qparams() {
     let second = pending_sigmoid(&mut g, x, qparam(0.25, 0, "torch.int8"));
     g.output(&[first, second]);
 
-    let fused = IrFuseDuplicateUsersPass.run(g.graph_mut());
+    let fused = IrFuseDuplicateUsersPass::LATE.run(g.graph_mut());
 
     assert!(!fused, "rc4 at :765 reports modified=False");
     assert_eq!(g.count(SIGMOID), 2, "rc4 keeps both TABLEs");
