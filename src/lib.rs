@@ -324,9 +324,9 @@ fn ingest_and_serialize_tosa_pybytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
             );
         }
     }
-    // Explicit mode can request a stock fallback at serialization time (P2's explicit
-    // captured_conv will run inside the contracts), so check here as well as after the
-    // pass pipelines (P2 critique B6).
+    // Explicit mode can request a stock fallback at serialization time (its captured_conv
+    // runs inside the contracts and sends unresolvable captured weights and non-int32
+    // biases to stock), so check here as well as after the pass pipelines (P2 critique B6).
     if explicit {
         fail_on_stock_fallback_request()?;
     }

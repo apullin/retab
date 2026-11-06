@@ -31,8 +31,10 @@ pub fn build_main_pipeline(config: &PipelineConfig) -> Vec<crate::fx_ir::Pipelin
 /// reads `tosa_dim_order` is off, rc4's layout passes take their APM slots, and
 /// IrToTosaMemoryFormat's slot holds the phase-6 block (APM:715-749). In a region
 /// (`!decompose_qdq`) explicit mode skips IrNormalizeDelegateIOLayout, which owns only
-/// the delegate's IO (critique A2), and its constants are `get_attr` nodes; region
-/// convs still fall back to stock until S8 (`layout::rewrite_conv`).
+/// the delegate's IO (critique A2), and its constants are `get_attr` nodes; a region
+/// conv's weight and bias captured from the parent are folded into region constants
+/// at serialization, after the boundary contracts (`layout::rewrite_conv`,
+/// `control_flow::captured_conv`; APU-135 S8).
 fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx_ir::PipelineStep> {
     use crate::fx_ir::PipelineStep::{Effectful, Ir};
 
