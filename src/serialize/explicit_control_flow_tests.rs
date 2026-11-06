@@ -154,7 +154,10 @@ fn a_region_avg_pool_and_captured_conv_keep_the_branch_inputs_aligned() {
         shape: shape.to_vec(),
         dtype: DType::Int8,
     };
-    let weight = int8(&[4, 2, 3, 3], (0..72).map(|v| (v % 23 - 11) as i8).collect());
+    let weight = int8(
+        &[4, 2, 3, 3],
+        (0..72).map(|v| (v % 23 - 11) as i8).collect(),
+    );
     let bias = int8(&[4], vec![13, -7, 3, 0]);
 
     // A branch after IrFoldQdq: the captured weight and bias read through their
@@ -175,11 +178,7 @@ fn a_region_avg_pool_and_captured_conv_keep_the_branch_inputs_aligned() {
             &mut region,
             "avg_pool",
             "aten.avg_pool2d.default",
-            vec![
-                IrArg::Node(x),
-                i64_list_arg(&[2, 2]),
-                i64_list_arg(&[2, 2]),
-            ],
+            vec![IrArg::Node(x), i64_list_arg(&[2, 2]), i64_list_arg(&[2, 2])],
             pool_meta,
         );
         let mut quantize = |name: &str, input, shape: &[i64], scale| {
@@ -360,7 +359,10 @@ fn a_region_avg_pool_and_captured_conv_keep_the_branch_inputs_aligned() {
             .find(|operator| operator.op == Op::AvgPool2d)
             .expect("an AVG_POOL2D");
         for zero_point in &pool.inputs[1..3] {
-            assert!(tensor(branch, zero_point).data.is_some(), "{label}: {zero_point}");
+            assert!(
+                tensor(branch, zero_point).data.is_some(),
+                "{label}: {zero_point}"
+            );
             assert!(
                 !branch.items.input_names.contains(zero_point),
                 "{label}: {zero_point}"

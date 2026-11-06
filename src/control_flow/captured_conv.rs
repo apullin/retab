@@ -187,7 +187,9 @@ fn walk_captured_constant(
         let node = ir.node(current);
         if node.is_rescale() {
             rescales.push(BoundaryRescale::of(node));
-            current = node.first_node_arg().ok_or_else(|| stop(&region, current))?;
+            current = node
+                .first_node_arg()
+                .ok_or_else(|| stop(&region, current))?;
             continue;
         }
         if let Some(tensor) = &node.tensor {
@@ -1493,10 +1495,7 @@ mod tests {
 
         crate::stock_fallback::take();
         let mut parent = parent_graph(WHILE_LOOP, ["loop_cond", "loop_body"]);
-        let mut submodules = regions(vec![(
-            "loop_body",
-            conv1d_region(Some(4.0), Some(7.0), I8),
-        )]);
+        let mut submodules = regions(vec![("loop_body", conv1d_region(Some(4.0), Some(7.0), I8))]);
         let reason =
             crate::apply_control_flow_contracts(&mut parent, &mut submodules, LayoutMode::Explicit)
                 .expect_err("a stock fallback");
@@ -1519,8 +1518,13 @@ mod tests {
             Ok(())
         );
         let region = &submodules["true_graph"].0;
-        let weight = live_node(region, "conv_tosa").arg_node(1).expect("a weight");
-        assert_eq!(region.node(weight).name, "conv_weight_ohwi_captured_rescale0");
+        let weight = live_node(region, "conv_tosa")
+            .arg_node(1)
+            .expect("a weight");
+        assert_eq!(
+            region.node(weight).name,
+            "conv_weight_ohwi_captured_rescale0"
+        );
     }
 
     /// A region conv IrRewriteConv gave region constants (its own pre-permuted

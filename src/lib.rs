@@ -340,9 +340,8 @@ fn ingest_and_serialize_tosa_pybytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
     let explicit = layout == pipeline_config::LayoutMode::Explicit;
     let has_control_flow = ir_has_control_flow(&ir);
     if has_control_flow {
-        apply_control_flow_contracts(&mut ir, &mut stashed.submodules, layout).map_err(
-            |reason| PyRuntimeError::new_err(format!("RETAB_STOCK_FALLBACK: {reason}")),
-        )?;
+        apply_control_flow_contracts(&mut ir, &mut stashed.submodules, layout)
+            .map_err(|reason| PyRuntimeError::new_err(format!("RETAB_STOCK_FALLBACK: {reason}")))?;
     }
 
     let mut store = crate::store::TensorStore::new();

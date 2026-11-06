@@ -484,19 +484,20 @@ mod tests {
         }
     }
 
-    /// Critique A2: explicit mode keeps IrNormalizeDelegateIOLayout out of the region
-    /// pipelines, though rc4 runs its pass on every region. rc4's does nothing there,
-    /// because `_regularize_submodule` gives region IO the parent's post-pass vals,
-    /// which the parent's normalization made contiguous. RETAB imports a region from
-    /// the original edge submodule, and the boundary gives a placeholder the parent
+    /// Critique A2: why explicit mode keeps IrNormalizeDelegateIOLayout out of the
+    /// region pipelines (the `fx_pipeline` tests check that it does), though rc4 runs
+    /// its pass on every region. rc4's does nothing there, because
+    /// `_regularize_submodule` gives region IO the parent's post-pass vals, which the
+    /// parent's normalization made contiguous. RETAB imports a region from the
+    /// original edge submodule, and the boundary gives a placeholder the parent
     /// operand's val but not its dim order. So a channels-last export's branch input
     /// keeps the export's dim order (torch.export gives its val `(0, 2, 3, 1)`), and
     /// the pass would permute it where rc4's leaves it.
     #[test]
     fn region_inputs_keep_the_exports_dim_order_so_regions_skip_io_normalization() {
-        use crate::fx_ir::{IrPass, PipelineStep};
+        use crate::fx_ir::IrPass;
         use crate::layout::normalize_delegate_io::IrNormalizeDelegateIOLayoutPass;
-        use crate::pipeline_config::{LayoutMode, PipelineConfig};
+        use crate::pipeline_config::LayoutMode;
         use fixtures::RANK4;
 
         const CHANNELS_LAST: [usize; 4] = [0, 2, 3, 1];
@@ -531,20 +532,6 @@ mod tests {
             Some([2, 2, 2, 3].as_slice()),
             "the branch input would take the physical shape the parent does not pass"
         );
-
-        let config = PipelineConfig {
-            layout: LayoutMode::Explicit,
-            ..PipelineConfig::from_tosa_spec("TOSA-1.0+INT+cf")
-        };
-        for steps in [
-            crate::fx_pipeline::build_ir_cond_submodule_pipeline(&config),
-            crate::fx_pipeline::build_ir_while_submodule_pipeline(&config),
-        ] {
-            assert!(!steps.iter().any(|step| match step {
-                PipelineStep::Ir(pass) => pass.name() == "IrNormalizeDelegateIOLayout",
-                PipelineStep::Effectful(pass) => pass.name() == "IrNormalizeDelegateIOLayout",
-            }));
-        }
     }
 
     fn active_source_files(root: &Path) -> Vec<PathBuf> {
