@@ -15,7 +15,7 @@ use super::tosa_types::{Attribute, DType, Op, ResizeMode, TosaOperator, TosaTens
 use super::visitors;
 use crate::fx_ir::{
     i64_list_arg, IrArg, IrGraph, MetaValue, NodeId, NodeTensor, PlaceholderTensorBinding, QParam,
-    TensorSource,
+    QParamMap, TensorSource,
 };
 use crate::graph::ir::{Arg, DType as IrDType, NodeMeta, OpTarget, OpType, TensorInfo};
 use crate::graph::Graph;
@@ -540,23 +540,31 @@ fn pool_chain(
 #[test]
 fn max_pool2d_reads_rc4_positional_arguments() {
     // X2: the TOSA visitor read kwargs only, so the kernel fell back to [2, 2].
-    let ir = pool_chain(
+    let mut ir = pool_chain(
         "backend.tosa.MAX_POOL2D.default",
         |_| vec![list(&[3, 3]), list(&[2, 2]), list(&[1, 1, 1, 1])],
         &[1, 5, 5, 4],
     );
-    let items = serialize_explicit(&ir);
-    let pool = single_op(&items, Op::MaxPool2d);
-    let Attribute::MaxPool2d(attribute) = &pool.attribute else {
-        panic!("expected a MAX_POOL2D attribute");
-    };
-    assert_eq!(attribute.kernel, [3, 3]);
-    assert_eq!(attribute.stride, [2, 2]);
-    assert_eq!(attribute.pad, [1, 1, 1, 1]);
-    assert_eq!(pool.inputs, ["x_nhwc"]);
-    assert_eq!(tensor(&items, "pool").shape, [1, 5, 5, 4]);
-    assert_eq!(tensor(&items, "pool").dtype, DType::Int8);
-    assert_eq!(tensor(&items, "out").shape, [1, 4, 5, 5]);
+    for input_qparams_only in [false, true] {
+        if input_qparams_only {
+            // From `max_pool2d_with_indices` + getitem, rc4's RemoveGetItemPass keeps the
+            // pool node's meta, which has no output qparams (critique A3/B3).
+            let pool = ir.by_name("pool").unwrap().id;
+            ir.node_mut(pool).meta.set_output_qparams(QParamMap::new());
+        }
+        let items = serialize_explicit(&ir);
+        let pool = single_op(&items, Op::MaxPool2d);
+        let Attribute::MaxPool2d(attribute) = &pool.attribute else {
+            panic!("expected a MAX_POOL2D attribute");
+        };
+        assert_eq!(attribute.kernel, [3, 3]);
+        assert_eq!(attribute.stride, [2, 2]);
+        assert_eq!(attribute.pad, [1, 1, 1, 1]);
+        assert_eq!(pool.inputs, ["x_nhwc"]);
+        assert_eq!(tensor(&items, "pool").shape, [1, 5, 5, 4]);
+        assert_eq!(tensor(&items, "pool").dtype, DType::Int8);
+        assert_eq!(tensor(&items, "out").shape, [1, 4, 5, 5]);
+    }
 }
 
 #[test]
