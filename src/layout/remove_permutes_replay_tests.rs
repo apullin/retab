@@ -1,13 +1,88 @@
 //! rc4 replays of `RemovePermutesAroundElementwiseTosaOps` (APU-158): every
 //! case of tests/fixtures/layout_replay/remove_permutes_around_elementwise.txt
 //! must match what the real rc4 pass did (see `replay` for what is compared),
-//! except the divergences listed with their reasons.
+//! except the divergences listed with their reasons. So must every case of
+//! tests/fixtures/layout_replay/remove_permutes_user_order.txt, whose graphs
+//! have users out of graph order.
 
-use crate::layout::remove_permutes::IrRemovePermutesAroundElementwiseTosaOpsPass;
+use crate::fx_ir::{IrGraph, NodeId};
+use crate::layout::ctx::LayoutCtx;
+use crate::layout::remove_permutes::{
+    remove_permutes_in_ctx, DeadCode, IrRemovePermutesAroundElementwiseTosaOpsPass,
+    RemovePermutesConfig, RemovePermutesMemo,
+};
 use crate::layout::replay::{self, DimOrders, Options};
 
 const FIXTURE: &str =
     include_str!("../../tests/fixtures/layout_replay/remove_permutes_around_elementwise.txt");
+
+const USER_ORDER_FIXTURE: &str =
+    include_str!("../../tests/fixtures/layout_replay/remove_permutes_user_order.txt");
+
+/// The pass inside a `LayoutCtx`, as rc4's propagation passes run it, after
+/// touching the case's nodes through the ctx: `set_args` with the same args
+/// moves each to the end of its inputs' users, as `node.args = node.args`
+/// does in torch.fx.
+struct TouchedInCtx {
+    /// Replay the touches; without them users stay in graph order.
+    touch: bool,
+}
+
+impl replay::Port for TouchedInCtx {
+    fn name(&self) -> &str {
+        "remove_permutes_in_ctx"
+    }
+
+    fn run(&self, graph: &mut IrGraph, touches: &[NodeId]) -> bool {
+        let mut ctx = LayoutCtx::new(graph);
+        if self.touch {
+            for &id in touches {
+                let args = ctx.node(id).args.clone();
+                ctx.set_args(id, args);
+            }
+        }
+        let modified = remove_permutes_in_ctx(
+            &mut ctx,
+            &RemovePermutesConfig::tosa(),
+            &mut RemovePermutesMemo::default(),
+            DeadCode::Full,
+        );
+        if modified {
+            ctx.finish();
+        }
+        modified
+    }
+}
+
+/// Every case of the user-order fixture matches rc4: hand cases around two
+/// regions that share a boundary permute (`shared_boundary` in the
+/// generator) and 600 random graphs whose call nodes were touched in a
+/// random order before rc4 ran.
+#[test]
+fn remove_permutes_on_reordered_users_matches_rc4() {
+    replay::check_port_known(&TouchedInCtx { touch: true }, USER_ORDER_FIXTURE, &[]);
+}
+
+/// The user-order fixture depends on user order: with users left in graph
+/// order, the hand case `touched_first_user_goes_last` and dozens of random
+/// cases differ from rc4 (the generator measured 51 random graphs whose rc4
+/// result changes with their touches).
+#[test]
+fn the_user_order_fixture_depends_on_user_order() {
+    let results = replay::replay_port(
+        &TouchedInCtx { touch: false },
+        USER_ORDER_FIXTURE,
+        Options::default(),
+    );
+    let differing: Vec<&str> = results
+        .iter()
+        .filter(|result| result.mismatch.is_some())
+        .map(|result| result.name.as_str())
+        .collect();
+    assert!(differing.contains(&"touched_first_user_goes_last"), "{differing:?}");
+    assert!(!differing.contains(&"users_in_graph_order"), "{differing:?}");
+    assert!(differing.len() > 40, "only {} cases depend on their user order", differing.len());
+}
 
 /// rc4 runs this pass after `InsertTableOpsPass`, so a quantized table op is
 /// a `TABLE(x, table)` there, and the visit's constant check on the rank-1
@@ -97,10 +172,6 @@ fn remove_permutes_replay_external() {
 #[test]
 fn a_second_call_with_the_memo_matches_a_fresh_one() {
     use crate::fx_ir::IrPass;
-    use crate::layout::ctx::LayoutCtx;
-    use crate::layout::remove_permutes::{
-        remove_permutes_in_ctx, DeadCode, RemovePermutesConfig, RemovePermutesMemo,
-    };
 
     let config = RemovePermutesConfig::tosa();
     let mut remembered = 0;
@@ -143,11 +214,6 @@ fn a_second_call_with_the_memo_matches_a_fresh_one() {
 /// leaves.
 #[test]
 fn local_dead_code_matches_the_full_sweep_on_graphs_without_dead_code() {
-    use crate::layout::ctx::LayoutCtx;
-    use crate::layout::remove_permutes::{
-        remove_permutes_in_ctx, DeadCode, RemovePermutesConfig, RemovePermutesMemo,
-    };
-
     let config = RemovePermutesConfig::tosa();
     let mut compared = 0;
     for case in replay::parse(FIXTURE).expect("the fixture parses") {

@@ -46,6 +46,11 @@
 //! generator spec sets `records_raises`) expects the port to panic, as RETAB's
 //! passes fail where rc4's raise; anything else is a `no-panic` mismatch.
 //!
+//! User order: a case may `touch` nodes before the pass runs (the generator
+//! re-sets their args, which moves each to the end of its inputs' torch.fx
+//! users). Only a [`Port`] that runs inside a `LayoutCtx` can replay that,
+//! with `LayoutCtx::set_args`; an `IrPass` port panics on such a case.
+//!
 //! Usage: a pass's replay test is one line,
 //! `replay::check(&IrFooPass, include_str!("../../tests/fixtures/layout_replay/foo.txt"))`.
 //! [`check_known`] names cases still expected to differ, with a reason, and
@@ -121,6 +126,36 @@ pub(crate) struct Case {
     /// The exception type rc4's pass raised (`after raises <type>`), which the
     /// port must answer with a panic; `after` is then a copy of `before`.
     pub(crate) raises: Option<String>,
+    /// Positions of the nodes the generator touched, in order, before running
+    /// the pass (`touch %N ..`): each moved to the end of its inputs' users.
+    pub(crate) touches: Vec<usize>,
+}
+
+/// How a replay runs a port on a case's "before" graph.
+pub(crate) trait Port {
+    fn name(&self) -> &str;
+
+    /// Run the port on `graph`, after touching `touches` in order (see
+    /// [`Case::touches`]); returns whether it changed the graph.
+    fn run(&self, graph: &mut IrGraph, touches: &[NodeId]) -> bool;
+}
+
+/// An `IrPass` as a [`Port`]. A pass builds its own `LayoutCtx`, whose users
+/// start in graph order, so it cannot replay touches.
+struct PassPort<'a>(&'a dyn IrPass);
+
+impl Port for PassPort<'_> {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn run(&self, graph: &mut IrGraph, touches: &[NodeId]) -> bool {
+        assert!(
+            touches.is_empty(),
+            "an IrPass cannot replay `touch`; replay this fixture through a ctx port"
+        );
+        self.0.run(graph)
+    }
 }
 
 /// Which dim orders [`compare`] checks; see the module docs.
@@ -171,7 +206,12 @@ pub(crate) fn check(pass: &dyn IrPass, fixture: &str) {
 /// Like [`check`], except that each `(case, reason)` in `known` must still
 /// differ from rc4, so the list shrinks as the port is fixed.
 pub(crate) fn check_known(pass: &dyn IrPass, fixture: &str, known: &[(&str, &str)]) {
-    let results = replay(pass, fixture, Options::default());
+    check_port_known(&PassPort(pass), fixture, known);
+}
+
+/// [`check_known`] for any [`Port`].
+pub(crate) fn check_port_known(port: &dyn Port, fixture: &str, known: &[(&str, &str)]) {
+    let results = replay_port(port, fixture, Options::default());
     let mut problems = Vec::new();
     for (name, _) in known {
         match results.iter().find(|result| result.name == *name) {
@@ -192,7 +232,7 @@ pub(crate) fn check_known(pass: &dyn IrPass, fixture: &str, known: &[(&str, &str
     }
     let mut message = format!(
         "{}: {} of {} rc4 replay cases differ ({})\n",
-        pass.name(),
+        port.name(),
         failures.len(),
         results.len(),
         class_counts(failures.iter().copied())
@@ -238,16 +278,27 @@ pub(crate) fn check_cases_with(pass: &dyn IrPass, fixture: &str, names: &[&str],
 
 /// Replay every case of `fixture` through `pass`.
 pub(crate) fn replay(pass: &dyn IrPass, fixture: &str, options: Options) -> Vec<CaseResult> {
+    replay_port(&PassPort(pass), fixture, options)
+}
+
+/// Replay every case of `fixture` through `port`.
+pub(crate) fn replay_port(port: &dyn Port, fixture: &str, options: Options) -> Vec<CaseResult> {
     let cases = parse(fixture).unwrap_or_else(|error| panic!("bad replay fixture: {error}"));
     cases
         .iter()
-        .map(|case| replay_case(pass, case, options))
+        .map(|case| replay_case_with(port, case, options))
         .collect()
 }
 
 pub(crate) fn replay_case(pass: &dyn IrPass, case: &Case, options: Options) -> CaseResult {
-    let mut graph = build(&case.before);
-    let run = catch_unwind(AssertUnwindSafe(|| pass.run(&mut graph)));
+    replay_case_with(&PassPort(pass), case, options)
+}
+
+/// Replay one case through `port`.
+pub(crate) fn replay_case_with(port: &dyn Port, case: &Case, options: Options) -> CaseResult {
+    let (mut graph, ids) = build_with_ids(&case.before);
+    let touches: Vec<NodeId> = case.touches.iter().map(|&position| ids[position]).collect();
+    let run = catch_unwind(AssertUnwindSafe(|| port.run(&mut graph, &touches)));
     let (retab_modified, actual) = match run {
         Ok(modified) => (Some(modified), snapshot(&graph)),
         Err(payload) => (None, Err(panic_message(payload.as_ref()))),
@@ -279,8 +330,15 @@ pub(crate) fn replay_case(pass: &dyn IrPass, case: &Case, options: Options) -> C
                 Some(raised) => format!("    <raises {raised}>\n"),
                 None => case.after.to_string(),
             };
+            let touches = if case.touches.is_empty() {
+                String::new()
+            } else {
+                let positions: Vec<String> =
+                    case.touches.iter().map(|position| format!("%{position}")).collect();
+                format!("  touched first: {}\n", positions.join(" "))
+            };
             format!(
-                "case {} ({}): {}\n  before:\n{}  rc4 after (modified={}):\n{}  RETAB after (modified={}):\n{}",
+                "case {} ({}): {}\n  before:\n{}{touches}  rc4 after (modified={}):\n{}  RETAB after (modified={}):\n{}",
                 case.name,
                 mismatch.class,
                 mismatch.detail,
@@ -352,9 +410,23 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Case>, String> {
             None => return Err(format!("case {name}: missing `before`")),
         }
         let before = parse_graph(&mut lines).map_err(|(number, error)| at(number, error))?;
-        let (number, header) = lines
+        let (mut number, mut header) = lines
             .next()
             .ok_or_else(|| format!("case {name}: missing `after`"))?;
+        let mut touches = Vec::new();
+        if let Some(rest) = header.strip_prefix("touch ") {
+            for token in rest.split_whitespace() {
+                let position = token
+                    .strip_prefix('%')
+                    .and_then(|digits| digits.parse::<usize>().ok())
+                    .filter(|&position| position < before.nodes.len())
+                    .ok_or_else(|| at(number, format!("bad touched node {token:?}")))?;
+                touches.push(position);
+            }
+            (number, header) = lines
+                .next()
+                .ok_or_else(|| format!("case {name}: missing `after`"))?;
+        }
         if let Some(raised) = header.strip_prefix("after raises ") {
             match lines.next() {
                 Some((_, "end")) => {}
@@ -370,6 +442,7 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Case>, String> {
                 before,
                 modified: false,
                 raises: Some(raised.to_string()),
+                touches,
             });
             continue;
         }
@@ -409,6 +482,7 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Case>, String> {
             modified,
             after,
             raises: None,
+            touches,
         });
     }
     Ok(cases)
@@ -696,6 +770,11 @@ impl<'a> Cursor<'a> {
 
 /// The `IrGraph` RETAB's importer would build for `graph`.
 pub(crate) fn build(graph: &Graph) -> IrGraph {
+    build_with_ids(graph).0
+}
+
+/// [`build`], with the id of each fixture position.
+pub(crate) fn build_with_ids(graph: &Graph) -> (IrGraph, Vec<NodeId>) {
     let mut ir = IrGraph::empty();
     let mut ids: Vec<NodeId> = Vec::with_capacity(graph.nodes.len());
     for (position, node) in graph.nodes.iter().enumerate() {
@@ -743,7 +822,7 @@ pub(crate) fn build(graph: &Graph) -> IrGraph {
         vec![ir_arg(&graph.output, &ids)],
         NodeMeta::default(),
     );
-    ir
+    (ir, ids)
 }
 
 fn ir_arg(arg: &Arg, ids: &[NodeId]) -> IrArg {

@@ -57,6 +57,13 @@ and `[...]` for lists and tuples; kwargs follow as `name=value`. The value is
 `after modified=<bool> same` means the after graph prints exactly like before.
 `after raises <ExceptionType>` records that the rc4 pass raised (only for passes
 whose spec sets `records_raises`); the port must then panic.
+
+A `touch %N %M ..` line between the before graph and `after` lists nodes whose
+args were re-set (`node.args = node.args`), in that order, before the pass ran.
+torch.fx moves an updated node to the end of every input's `users`
+(`Node._update_args_kwargs`), so touches put users out of graph order, as the
+rewires rc4's propagation passes make between their calls of the fusion pass
+do. The port must replay them in its `LayoutCtx` (`LayoutCtx::set_args`).
 """
 
 from __future__ import annotations
@@ -156,6 +163,8 @@ class Builder:
         self.constants: dict[str, torch.Tensor] = {}
         self.first_call: torch.fx.Node | None = None
         self.output_node: torch.fx.Node | None = None
+        # Nodes to touch before the pass runs (see the `touch` line).
+        self.touches: list[torch.fx.Node] = []
 
     def _placeholder(self, name, shape, dtype, dim_order) -> torch.fx.Node:
         order = list(range(len(shape))) if dim_order is None else list(dim_order)
@@ -225,6 +234,11 @@ class Builder:
 
     def output(self, results, container=tuple) -> None:
         self.output_node = self.graph.output(container(results))
+
+    def touch(self, node) -> None:
+        """Re-set `node`'s args before the pass runs, which moves it to the end
+        of its inputs' users."""
+        self.touches.append(node)
 
     def exported_program(self) -> ExportedProgram:
         """Wrap the graph in an ExportedProgram. Output leaves that aren't
@@ -377,7 +391,14 @@ def dump(gm: torch.fx.GraphModule, kinds: dict[str, str]) -> list[str]:
 
 class PassSpec:
     def __init__(
-        self, name, make, sources, structured, random_profile, records_raises=False
+        self,
+        name,
+        make,
+        sources,
+        structured,
+        random_profile,
+        records_raises=False,
+        random_scale=1,
     ):
         self.name = name
         self.make: Callable[[ExportedProgram], object] = make
@@ -386,10 +407,22 @@ class PassSpec:
         self.random_profile = random_profile
         # Record a raising pass as `after raises <type>` instead of failing.
         self.records_raises = records_raises
+        # This many times `--random` random cases.
+        self.random_scale = random_scale
 
 
 class BuildError(Exception):
     """torch rejected a random graph while it was being built."""
+
+
+def touch(gm: torch.fx.GraphModule, touches: Sequence[torch.fx.Node]) -> list[str]:
+    """Touch `touches` in order and return the `touch` line, if any."""
+    if not touches:
+        return []
+    position = {node: index for index, node in enumerate(gm.graph.nodes)}
+    for node in touches:
+        node.args = node.args
+    return ["touch " + " ".join(f"%{position[node]}" for node in touches)]
 
 
 def run_case(spec: PassSpec, build: Callable[[Builder], None]) -> list[str]:
@@ -404,6 +437,7 @@ def run_case(spec: PassSpec, build: Callable[[Builder], None]) -> list[str]:
             raise BuildError(f"{type(error).__name__}: {error}") from error
         kinds = placeholder_kinds(ep)
         before = dump(ep.graph_module, kinds)
+        before += touch(ep.graph_module, builder.touches)
         graph_pass = spec.make(ep)
         if spec.records_raises:
             try:
@@ -414,7 +448,7 @@ def run_case(spec: PassSpec, build: Callable[[Builder], None]) -> list[str]:
             result = graph_pass(ep.graph_module)
     after = dump(result.graph_module, kinds)
     lines = ["before", *before, f"after modified={str(bool(result.modified)).lower()}"]
-    if after == before:
+    if after == [line for line in before if not line.startswith("touch ")]:
         lines[-1] += " same"
     else:
         lines += after
@@ -1504,6 +1538,8 @@ PROFILES = {
 def random_case(profile: str, seed: int) -> Callable[[Builder], None]:
     if profile == "remove_permutes":
         return remove_permutes_random_case(seed)
+    if profile == "remove_permutes_user_order":
+        return remove_permutes_user_order_random_case(seed)
 
     def build(b: Builder) -> None:
         rng = random.Random(seed)
@@ -2546,6 +2582,168 @@ def remove_permutes_random_case(seed: int) -> Callable[[Builder], None]:
 
 
 # --------------------------------------------------------------------------
+# RemovePermutesAroundElementwiseTosaOps on users out of graph order
+# --------------------------------------------------------------------------
+
+
+def shared_boundary(b: Builder, touched=()) -> None:
+    """P = permute(x) feeds U1 = relu(P), whose exit E1 is also an entry of
+    U2 = add(P, E1): the regions from U1 and U2 share E1, so the one the
+    sweep meets first among P's users is rewritten. `touched` names nodes to
+    touch, in order: "u1", "u2"."""
+    x = b.input("x", (4, 4))
+    b.input("y", (4, 4))
+    p = b.permute(x, [1, 0])
+    u1 = b.call(A.relu.default, p)
+    e1 = b.permute(u1, [1, 0])
+    u2 = b.call(A.add.Tensor, p, e1)
+    b.output([b.permute(u2, [1, 0])])
+    for name in touched:
+        b.touch({"u1": u1, "u2": u2}[name])
+
+
+def remove_permutes_user_order_cases():
+    cases = {}
+
+    def case(fn):
+        cases[fn.__name__] = fn
+        return fn
+
+    @case
+    def users_in_graph_order(b):
+        shared_boundary(b)
+
+    @case
+    def touched_first_user_goes_last(b):
+        # P.users = [U2, U1], as after U1 is rewired to read P.
+        shared_boundary(b, ["u1"])
+
+    @case
+    def touching_users_in_graph_order_keeps_it(b):
+        shared_boundary(b, ["u1", "u2"])
+
+    @case
+    def touching_the_last_user_changes_nothing(b):
+        shared_boundary(b, ["u2"])
+
+    @case
+    def three_users_of_one_permute(b):
+        """Three regions from P's users, two of which share an exit."""
+        x = b.input("x", (2, 3, 4))
+        p = b.permute(x, [0, 2, 1])
+        u1 = b.call(A.neg.default, p)
+        e1 = b.permute(u1, [0, 2, 1])
+        u2 = b.call(A.mul.Tensor, p, b.permute(e1, [0, 2, 1]))
+        u3 = b.call(A.abs.default, p)
+        b.output([b.permute(u2, [0, 2, 1]), b.permute(u3, [0, 2, 1]), e1])
+        b.touch(u1)
+        b.touch(u3)
+
+    @case
+    def region_user_order_inside_the_search(b):
+        """A region node whose users are visited in touched order: one user
+        leads to a non-matching exit, the other to the inverse."""
+        x = b.input("x", (1, 3, 4, 5))
+        p = b.permute(x, TO_NHWC)
+        r = b.call(A.relu.default, p)
+        a = b.call(A.neg.default, r)
+        c = b.call(A.abs.default, r)
+        b.output([b.permute(a, TO_NCHW), b.permute(c, [0, 3, 2, 1])])
+        b.touch(a)
+
+    return cases
+
+
+# Self-inverse permutations: with one of these every exit permute is also an
+# entry permute, as in `shared_boundary`.
+INVOLUTIONS = {
+    2: [[1, 0]],
+    3: [[0, 2, 1], [2, 1, 0], [1, 0, 2]],
+    4: [[0, 1, 3, 2], [1, 0, 2, 3], [0, 3, 2, 1], [2, 1, 0, 3], [1, 0, 3, 2], [3, 2, 1, 0]],
+}
+
+
+class SharedBoundaryRandom:
+    """Seeded random graphs of small regions that share entry and exit
+    permutes: one self-inverse permutation P and a shape P maps to itself, so
+    a permute by P can enter any region and every region's exit can enter a
+    later one. Most regions read the first entry permute, so its users start
+    regions that compete for the same exits: which one the sweep meets first,
+    and so which one is rewritten, depends on the order of its users."""
+
+    UNARY = [A.relu.default, A.neg.default, A.abs.default, A.sigmoid.default]
+    BINARY = [A.add.Tensor, A.mul.Tensor, A.sub.Tensor]
+
+    def __init__(self, rng: random.Random, b: Builder) -> None:
+        self.rng = rng
+        self.b = b
+        self.perm = rng.choice(INVOLUTIONS[rng.choice([2, 3, 4])])
+        self.shape = [0] * len(self.perm)
+        for i, j in enumerate(self.perm):
+            if not self.shape[i]:
+                self.shape[i] = self.shape[j] = rng.randint(2, 4)
+        self.count = 0
+        self.first = self.b.permute(self.new_input(), self.perm)
+        self.exits: list[torch.fx.Node] = []
+        self.open_ends: list[torch.fx.Node] = []
+
+    def new_input(self) -> torch.fx.Node:
+        self.count += 1
+        if self.rng.random() < 0.15:
+            return self.b.constant("param", f"w{self.count}", self.shape)
+        return self.b.input(f"x{self.count}", self.shape)
+
+    def entry(self) -> torch.fx.Node:
+        rng = self.rng
+        roll = rng.random()
+        if roll < 0.45 or not self.exits:
+            return self.first if roll < 0.85 else self.b.permute(self.new_input(), self.perm)
+        return rng.choice(self.exits)
+
+    def region(self) -> None:
+        rng = self.rng
+        value = self.entry()
+        if rng.random() < 0.5:
+            value = self.b.call(rng.choice(self.BINARY), value, self.entry())
+        for _ in range(rng.randint(0, 2)):
+            if rng.random() < 0.6:
+                value = self.b.call(rng.choice(self.UNARY), value)
+            else:
+                other = self.entry() if rng.random() < 0.7 else self.new_input()
+                value = self.b.call(rng.choice(self.BINARY), value, other)
+        if value.target != A.permute_copy.default and rng.random() < 0.85:
+            self.exits.append(self.b.permute(value, self.perm))
+        else:
+            self.open_ends.append(value)
+
+    def finish(self) -> None:
+        outputs = [n for n in self.exits if not n.users] + self.open_ends
+        self.b.output(outputs or [self.first])
+
+
+def remove_permutes_user_order_random_case(seed: int) -> Callable[[Builder], None]:
+    """An even seed takes the `remove_permutes` random graph (same seed, same
+    graph), an odd one a `SharedBoundaryRandom` graph; then a random subset of
+    the call nodes is touched in a random order."""
+
+    def build(b: Builder) -> None:
+        if seed % 2 == 0:
+            remove_permutes_random_case(seed)(b)
+        else:
+            rng = random.Random(seed)
+            graph = SharedBoundaryRandom(rng, b)
+            for _ in range(rng.randint(2, 6)):
+                graph.region()
+            graph.finish()
+        rng = random.Random(seed ^ 0x5EED)
+        calls = [node for node in b.graph.nodes if node.op == "call_function"]
+        for node in rng.sample(calls, rng.randint(1, len(calls))):
+            b.touch(node)
+
+    return build
+
+
+# --------------------------------------------------------------------------
 # Driver
 # --------------------------------------------------------------------------
 
@@ -2612,6 +2810,23 @@ PASSES = [
         remove_permutes_cases,
         "remove_permutes",
         records_raises=True,
+    ),
+    PassSpec(
+        "remove_permutes_user_order",
+        lambda ep: RemovePermutesAroundElementwiseTosaOps(ep),
+        [
+            "backends/transforms/remove_permutes_around_elementwise_ops.py",
+            "backends/arm/_passes/remove_permutes_around_elementwise_tosa_ops.py",
+            "backends/transforms/permute_pass_utils.py",
+            "backends/transforms/channels_last_layout.py",
+            "backends/arm/_passes/insert_table_ops.py",
+            "backends/arm/_passes/propagate_view_copy_permute_pass.py",
+        ],
+        remove_permutes_user_order_cases,
+        "remove_permutes_user_order",
+        records_raises=True,
+        # About one random graph in ten depends on its user order.
+        random_scale=2,
     ),
 ]
 COMMON_SOURCES = ["backends/arm/_passes/arm_pass.py", "exir/pass_base.py"]
@@ -2683,8 +2898,9 @@ def main() -> None:
                 cases[args.case] = random_case(spec.random_profile, args.seed * 100_000 + index)
             print("\n".join(run_case(spec, cases[args.case])))
             continue
-        lines, skipped = generate(spec, args.seed, args.random)
-        head = header(spec, args.seed, args.random, skipped, rc4_pass)
+        random_cases = args.random * spec.random_scale
+        lines, skipped = generate(spec, args.seed, random_cases)
+        head = header(spec, args.seed, random_cases, skipped, rc4_pass)
         text = "\n".join(head + lines) + "\n"
         path = args.out / f"{spec.name}.txt"
         path.write_text(text)
