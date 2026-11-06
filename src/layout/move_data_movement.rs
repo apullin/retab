@@ -196,7 +196,9 @@ fn uses_wider_dtype(graph: &IrGraph, data_movement: NodeId, rescale: NodeId, sma
     if !is_per_tensor_rescale(graph, rescale) {
         return false;
     }
-    let size = |id: NodeId| graph.node_dtype(id).and_then(element_size);
+    // rc4 reads fake dtypes; RETAB keeps a quantized value's dtype partly in
+    // its qparams (design F2), so read the value dtype.
+    let size = |id: NodeId| crate::layout::dtype::value_dtype(graph, id).as_deref().and_then(element_size);
     matches!((size(data_movement), size(smaller_side)), (Some(wide), Some(narrow)) if wide > narrow)
 }
 
@@ -620,6 +622,34 @@ mod tests {
     use crate::fx_meta::MetaValue;
     use crate::layout::fx_node::SPECIAL_DTYPE_KEY;
     use crate::layout::testing::*;
+
+    /// RETAB keeps a quantized compute node's val float32 and its real dtype in
+    /// its qparams (design F2). rc4 sees an int8 producer, an int32 RESCALE and
+    /// an int32 permute, and moves the permute to the int8 side; comparing raw
+    /// vals (float32 against int32, both 4 bytes) would leave it.
+    #[test]
+    fn reads_value_dtypes_through_retabs_float32_quantized_vals() {
+        let mut g = LayoutGraph::new();
+        let x = g.input("x", &[1, 2, 3, 4]);
+        let add = g.call("aten.add.Tensor", vec![node(x), node(x)]);
+        g.graph_mut()
+            .node_mut(add)
+            .meta
+            .set_single_output_qparam(crate::test_ir::qparam(0.5, 0, "torch.int8"));
+        let rescale = g.rescale(add, "torch.int32", 2.0);
+        let permute = g.permute(rescale, &[0, 2, 3, 1]);
+        g.output(&[permute]);
+        assert_eq!(g.dtype(add), "torch.float32");
+
+        assert!(IrMoveDataMovementOpsToSmallerDtypePass.run(g.graph_mut()));
+
+        let targets = g.targets();
+        let position = |target: &str| targets.iter().position(|t| *t == target).unwrap();
+        assert!(
+            position("aten.permute_copy.default") < position("backend.tosa.RESCALE.default"),
+            "{targets:?}"
+        );
+    }
 
     fn run(g: &mut LayoutGraph) -> bool {
         IrMoveDataMovementOpsToSmallerDtypePass.run(g.graph_mut())

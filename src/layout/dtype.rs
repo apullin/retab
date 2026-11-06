@@ -282,6 +282,12 @@ pub(crate) fn value_dtype(graph: &IrGraph, id: NodeId) -> Option<String> {
         if records_value_dtype(&node.target) || is_typed_matmul(node, &facts.dtype) {
             return Some(facts.dtype.clone());
         }
+        // An integer or bool val already holds the real dtype, as ingest's
+        // fixup assumes: a layout copy refreshed by `layout::shape` carries its
+        // producer's dtype even when its copied qparams name another.
+        if !is_float_dtype(&facts.dtype) {
+            return Some(facts.dtype.clone());
+        }
         if let Some(dtype) = first_qparam_dtype(node.meta.output_qparams()) {
             return Some(dtype.to_owned());
         }
