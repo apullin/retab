@@ -40,8 +40,11 @@ How the graphs are built and run:
   to that stage first, and the TABLE nodes are turned back into the table ops
   RETAB still holds, so the fixture shows rc4's decisions in RETAB's form.
   The propagation passes run the same way (`PropagationPass`), with the TABLE
-  values they changed; `_without_program` fixtures build them without the
-  exported program, as rc4's graph-level tests do.
+  values they changed; where rc4 leaves a 16-bit TABLE and its RESCALE apart,
+  the table op holds the TABLE's int32 value and the RESCALE stays a node
+  (RETAB's split form, `layout::pending`). `_without_program` fixtures build
+  them without the exported program, as rc4's graph-level tests do, and the
+  `_down_up` fixture runs the Down pass and then the Up pass, as phase 6 does.
 
 Fixture format (one node per line, in graph order):
 
@@ -498,9 +501,6 @@ def run_case(spec: PassSpec, build: Callable[[Builder], None]) -> list[str]:
         graph_pass = spec.make(ep)
         try:
             result = graph_pass(ep.graph_module)
-        except UnrepresentableError as error:
-            # rc4's result has no RETAB form (see `PropagationPass`).
-            raise BuildError(f"{type(error).__name__}: {error}") from error
         except Exception as error:  # noqa: BLE001 - recorded for the port to match
             # The message goes in a comment, which the parser skips: tests that
             # check the port fails for rc4's reason read it from the text.
@@ -4393,9 +4393,34 @@ _PROPAGATION_TABLE_OF = "retab_replay_propagation_table_of"
 _PROPAGATION_TABLE_RESCALE = "retab_replay_propagation_table_rescale"
 
 
-class UnrepresentableError(Exception):
-    """rc4 left a TABLE and its RESCALE apart, which RETAB's single pending
-    table op can't express (layout::propagate's module docs)."""
+_PROPAGATION_ORIGINAL = "retab_replay_propagation_original"
+
+
+def insert_table_ops(ep, gm):
+    """The real InsertTableOpsPass (`arm_pass_manager.py:708`), with each
+    TABLE it makes marked with the name of the table op it replaced and each
+    RESCALE it makes with its TABLE's mark. Returns the graph module and the
+    table ops by name. The pass's retrace renames nodes, so a RESCALE the
+    graph already had can take the name of a new one: new nodes are told apart
+    by a marker set on every node first, which the retrace carries over (it
+    copies each node's meta), not by name."""
+    originals = {node.name: node for node in gm.graph.nodes if _is_table_op(node)}
+    if not originals:
+        return gm, originals
+    for node in gm.graph.nodes:
+        node.meta[_PROPAGATION_ORIGINAL] = True
+    gm = InsertTableOpsPass(ep)(gm).graph_module
+    new_nodes = [node for node in gm.graph.nodes if not node.meta.pop(_PROPAGATION_ORIGINAL, False)]
+    for node in new_nodes:
+        if node.target == T.TABLE.default:
+            constant = node.args[1].name
+            node.meta[_PROPAGATION_TABLE_OF] = constant.removeprefix("b_").removesuffix("_table_constant")
+    for node in new_nodes:
+        if node.target == T.RESCALE.default:
+            (table,) = node.all_input_nodes
+            node.meta[_PROPAGATION_TABLE_OF] = table.meta[_PROPAGATION_TABLE_OF]
+            node.meta[_PROPAGATION_TABLE_RESCALE] = True
+    return gm, originals
 
 
 class PropagationPass:
@@ -4404,66 +4429,58 @@ class PropagationPass:
     exported_program)`), on a graph whose quantized table ops are TABLE ops.
 
     The real InsertTableOpsPass (`arm_pass_manager.py:708`) brings the graph
-    to that stage first, and afterwards every TABLE (with the RESCALE a
-    16-bit table gets) becomes the table op it replaced again, reading the
-    TABLE's input and holding the value the TABLE (or its RESCALE) holds, so
-    the fixture shows rc4's decisions in the form RETAB keeps
-    (`layout::pending`). `modified` is the propagation pass's own.
+    to that stage first (`insert_table_ops`), and afterwards every TABLE
+    becomes the table op it replaced again, reading the TABLE's input
+    (`restore_pending_tables`), so the fixture shows rc4's decisions in the
+    form RETAB keeps (`layout::pending`). `modified` is the propagation pass's
+    own. `pass_classes` lists the passes to run in turn: one, or the Down and
+    the Up pass as phase 6 runs them.
     """
 
-    def __init__(self, ep, pass_cls, compile_spec=True, with_program=True):
+    def __init__(self, ep, *pass_classes, compile_spec=True, with_program=True):
         self.ep = ep
-        self.pass_cls = pass_cls
+        self.pass_classes = pass_classes
         self.compile_spec = TosaCompileSpec(PROPAGATE_TOSA_SPEC) if compile_spec else None
         self.with_program = with_program
-        self.rc4_name = f"InsertTableOpsPass + {pass_cls.__module__.split('.')[1]} {pass_cls.__name__}"
+        names = " + ".join(f"{cls.__module__.split('.')[1]} {cls.__name__}" for cls in pass_classes)
+        self.rc4_name = f"InsertTableOpsPass + {names}"
 
     def __call__(self, gm):
-        originals = {node.name: node for node in gm.graph.nodes if _is_table_op(node)}
-        if originals:
-            names = {node.name for node in gm.graph.nodes}
-            gm = InsertTableOpsPass(self.ep)(gm).graph_module
-            for node in gm.graph.nodes:
-                if node.name in names:
-                    continue
-                if node.target == T.TABLE.default:
-                    constant = node.args[1].name
-                    node.meta[_PROPAGATION_TABLE_OF] = constant.removeprefix("b_").removesuffix("_table_constant")
-                elif node.target == T.RESCALE.default:
-                    (table,) = node.all_input_nodes
-                    node.meta[_PROPAGATION_TABLE_OF] = table.meta[_PROPAGATION_TABLE_OF]
-                    node.meta[_PROPAGATION_TABLE_RESCALE] = True
-        if self.with_program:
-            graph_pass = self.pass_cls(self.compile_spec, self.ep)
-        else:
-            graph_pass = self.pass_cls()
-        result = graph_pass(gm)
-        gm = result.graph_module
+        gm, originals = insert_table_ops(self.ep, gm)
+        modified = False
+        for pass_cls in self.pass_classes:
+            if self.with_program:
+                graph_pass = pass_cls(self.compile_spec, self.ep)
+            else:
+                graph_pass = pass_cls()
+            result = graph_pass(gm)
+            gm = result.graph_module
+            modified |= result.modified
         if originals:
             restore_pending_tables(gm, originals)
-        return PassResult(gm, result.modified)
+        return PassResult(gm, modified)
 
 
 def restore_pending_tables(gm, originals) -> None:
+    """Turn every TABLE back into the table op it replaced, reading the
+    TABLE's input. Where a 16-bit TABLE's RESCALE still reads only the TABLE
+    and is its only user, the table op takes the RESCALE's place and value;
+    where rc4 left the two apart (a view parked between them), the table op
+    holds the TABLE's int32 value and the RESCALE stays a node, which is
+    RETAB's split form (`layout::pending::split_table_rescales`)."""
     graph = gm.graph
+    rescale_of = {
+        node.meta[_PROPAGATION_TABLE_OF]: node
+        for node in graph.nodes
+        if node.target == T.RESCALE.default and node.meta.get(_PROPAGATION_TABLE_RESCALE)
+    }
     for table in [n for n in graph.nodes if n.target == T.TABLE.default]:
         if _PROPAGATION_TABLE_OF not in table.meta:
             continue
         original = originals[table.meta[_PROPAGATION_TABLE_OF]]
-        rescales = [
-            n
-            for n in graph.nodes
-            if n.target == T.RESCALE.default
-            and n.meta.get(_PROPAGATION_TABLE_RESCALE)
-            and n.meta.get(_PROPAGATION_TABLE_OF) == table.meta[_PROPAGATION_TABLE_OF]
-        ]
-        if rescales:
-            (rescale,) = rescales
-            if list(table.users) != [rescale] or rescale.all_input_nodes != [table]:
-                raise UnrepresentableError(f"{table.name} and {rescale.name} came apart")
-            output = rescale
-        else:
-            output = table
+        rescale = rescale_of.get(table.meta[_PROPAGATION_TABLE_OF])
+        merged = rescale is not None and list(table.users) == [rescale] and rescale.all_input_nodes == [table]
+        output = rescale if merged else table
         with graph.inserting_before(output):
             restored = graph.create_node(
                 "call_function",
@@ -4475,8 +4492,11 @@ def restore_pending_tables(gm, originals) -> None:
         restored.meta["val"] = output.meta["val"]
         output.replace_all_uses_with(restored)
         graph.erase_node(output)
-        if output is not table:
+        if merged:
             graph.erase_node(table)
+    for rescale in rescale_of.values():
+        rescale.meta.pop(_PROPAGATION_TABLE_OF, None)
+        rescale.meta.pop(_PROPAGATION_TABLE_RESCALE, None)
     for node in list(graph.nodes):
         if node.op == "placeholder" and node.name.startswith("b_") and not node.users:
             graph.erase_node(node)
@@ -5010,6 +5030,31 @@ def propagation_cases():
         advance_then_region_move(b, view=False)
 
     @case
+    def channel_split_after_clamp(b):
+        # The same with a slice, the shape RewriteConvPass leaves around a
+        # channel split between two convolutions: rc4's walk rewrites the
+        # slice's dim from 1 to 3, the region move keeps it, and the slice
+        # cuts W instead of C; both outputs change shape.
+        y = b.input("y", (1, 3, 5, 8))
+        s = b.call(A.slice_copy.Tensor, b.call(A.clamp.default, b.permute(y, TO_FIRST), 0.0, 6.0), 1, 0, 4)
+        b.output([b.permute(s, TO_LAST), b.call(A.neg.default, s)])
+
+    @case
+    def sweep_rewiring_reorders_users_for_remove_permutes(b):
+        # The Down sweeps rewire nodes, which moves them to the end of their
+        # inputs' users, and the fusion round runs RemovePermutes before any
+        # re-trace, so it meets the users in that order: rc4 ends with one
+        # permute here, and with two if the users were in graph order.
+        x = b.input("x0", (3, 3))
+        p1 = b.permute(x, [1, 0])
+        p2 = b.permute(p1, [1, 0])
+        n4 = b.call(A.neg.default, b.view(p2, [3, 3]))
+        s6 = b.call(A.sub.Tensor, b.permute(n4, [1, 0]), p2)
+        p9 = b.permute(b.permute(b.permute(s6, [1, 0]), [1, 0]), [1, 0])
+        m11 = b.call(A.mul.Tensor, p9, b.view(p9, [3, 3]))
+        b.output([p1, b.permute(b.call(A.sub.Tensor, m11, p1), [1, 0])])
+
+    @case
     def region_with_qparams_on_the_permute(b):
         x = b.input("x", X4)
         p = b.permute(x, TO_LAST)
@@ -5260,6 +5305,41 @@ def propagation_cases():
         x = b.input("x", (2, 3, 4), dtype=torch.int16)
         b.output([b.view(int16_table(b, b.call(A.abs.default, x)), [6, 4])])
 
+    def view_into_an_int16_table(b, n):
+        # Down sinks the view past the TABLE (which then reads x's [n, 8])
+        # and stops it at the RESCALE, which a rank-changing view can't
+        # cross; RETAB keeps the table split there (`layout::pending`).
+        # Moving up, the TABLE guard keeps the view below the TABLE when it
+        # would read [n, 1, 1, 8] with n > 1 (MLBEDSW-11805).
+        x = b.input("x", (n, 8), dtype=torch.int16)
+        b.output([int16_table(b, b.view(x, [n, 1, 1, 8]))])
+
+    @case
+    def view_parks_between_an_int16_table_and_its_rescale(b):
+        view_into_an_int16_table(b, 2)
+
+    @case
+    def view_parks_before_a_safe_int16_table_rescale(b):
+        view_into_an_int16_table(b, 1)
+
+    @case
+    def permute_parks_between_an_int16_table_and_its_rescale(b):
+        # Moving up, the permute crosses the RESCALE but not the TABLE, which
+        # would read the permute's [2, 1, 1, 8].
+        x = b.input("x", (2, 8, 1, 1), dtype=torch.int16)
+        b.output([b.permute(int16_table(b, x), [0, 2, 3, 1])])
+
+    @case
+    def int16_tables_behind_a_shared_permute(b):
+        # The view's walk down parks it in its table, so the shared permute
+        # keeps one user and its chain cancels.
+        x = b.input("x1", (2, 1, 3), dtype=torch.int16)
+        p = b.permute(x, [1, 2, 0])
+        t = table_op(b, A.tanh.default, b.permute(p, [0, 2, 1]), qargs(1 / 256, dtype=torch.int16), qargs(1 / 4096, dtype=torch.int16))
+        s1 = int16_table(b, b.permute(t, [1, 2, 0]))
+        s2 = table_op(b, A.sigmoid.default, b.view(p, [1, 6]), qargs(1 / 2048, dtype=torch.int16), qargs(1 / 2048, dtype=torch.int16))
+        b.output([s1, s2])
+
     @case
     def scatter_user_pins_a_view(b):
         x = b.input("x", (3, 16, 2, 8))
@@ -5326,12 +5406,21 @@ PROPAGATION_UNARY = [
     A.sqrt.default,
 ]
 PROPAGATION_BINARY = [A.add.Tensor, A.sub.Tensor, A.mul.Tensor, A.maximum.default]
+# 16-bit table ops and (input, output) qparams the random graphs draw: most
+# pairs need a left shift, so InsertTableOpsPass adds a RESCALE.
+TABLE16_TARGETS = [(A.sigmoid.default, (), {}), (A.tanh.default, (), {}), (A.exp.default, (), {})]
+TABLE16_QPARAMS = [
+    (qargs(1 / 1024, dtype=torch.int16), qargs(1 / 32768, dtype=torch.int16)),
+    (qargs(1 / 256, dtype=torch.int16), qargs(1 / 4096, dtype=torch.int16)),
+    (qargs(1 / 2048, dtype=torch.int16), qargs(1 / 2048, dtype=torch.int16)),
+]
 
 
 class PropagationGraph:
     """Seeded random graphs for the propagation passes: chains of pointwise
     ops, keepdim means, slices, cats and forks with permutes and views among
-    them, int8 RESCALE and TABLE islands, INT48 data and SCATTER users."""
+    them, int8 and int16 RESCALE and TABLE islands (a 16-bit TABLE is followed
+    by a RESCALE), INT48 data and SCATTER users."""
 
     WEIGHTS = {
         "permute": 3,
@@ -5351,6 +5440,7 @@ class PropagationGraph:
         "same_transforms": 0.8,
         "int": 0.8,
         "table": 0.7,
+        "table16": 0.7,
         "scatter": 0.15,
         "mm": 0.25,
         "dead": 0.12,
@@ -5628,6 +5718,19 @@ class PropagationGraph:
             self.keep(t)
             if rng.random() < 0.5:
                 self.keep(self.transform(t))
+        elif kind == "table16":
+            x = self.pick(torch.int16)
+            roll = rng.random()
+            if roll < 0.35:
+                x = b.permute(x, self.permutation(x.meta["val"].dim()))
+            elif roll < 0.7:
+                x = b.view(x, self.view_shape(list(x.meta["val"].shape)))
+            target, args, kwargs = rng.choice(TABLE16_TARGETS)
+            qin, qout = rng.choice(TABLE16_QPARAMS)
+            t = table_op(b, target, x, qin, qout, *args, **kwargs)
+            self.keep(t)
+            if rng.random() < 0.5:
+                self.keep(self.transform(t))
         elif kind == "scatter":
             x = self.pick()
             shape = list(x.meta["val"].shape)
@@ -5893,6 +5996,18 @@ PASSES = [
     PassSpec(
         "propagate_view_copy_permute_up",
         lambda ep: PropagationPass(ep, PropagateViewCopyPermuteUpPass),
+        PROPAGATION_SOURCES,
+        propagation_cases,
+        "propagate",
+        random_cases=420,
+        tosa_spec=PROPAGATE_TOSA_SPEC,
+    ),
+    # The Down pass, then the Up pass, as phase 6 runs them: the Up pass
+    # meets what Down left, such as a view parked between a 16-bit TABLE and
+    # its RESCALE.
+    PassSpec(
+        "propagate_view_copy_permute_down_up",
+        lambda ep: PropagationPass(ep, PropagateViewCopyPermuteDownPass, PropagateViewCopyPermuteUpPass),
         PROPAGATION_SOURCES,
         propagation_cases,
         "propagate",

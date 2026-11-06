@@ -1,32 +1,17 @@
 //! Adversarial review of the propagation port (APU-159): rc4 behaviours the
-//! port misses. Each failing test is `#[ignore = "BUG: ..."]` so the suite
-//! stays green; run them with
-//! `cargo test --lib propagate_review -- --ignored`.
+//! port missed, each now fixed and kept as a regression test, plus
+//! diagnostics that replay the review's probe fixtures
+//! (`cargo test --lib propagate_review -- --ignored`).
 //!
 //! The rc4 evidence for each comes from probe scripts run in the rc4 venv
-//! (named in each test), which build the graph with
-//! `tests/fixtures/layout_replay/gen_layout_replay.py`'s builder and run the
-//! real passes as `arm_pass_manager.py:726-727` builds them.
+//! (tests/fixtures/propagate_review, named in each test), which build the
+//! graph with `tests/fixtures/layout_replay/gen_layout_replay.py`'s builder
+//! and run the real passes as `arm_pass_manager.py:726-727` builds them.
 
 use crate::fx_ir::{IrGraph, IrPass};
 use crate::layout::propagate::IrPropagateViewCopyPermutePass;
+use crate::layout::propagate_replay_tests::DownThenUp;
 use crate::layout::replay::{self, Options};
-
-/// The Arm Down pass, then the Arm Up pass, as phase 6 runs them
-/// (`arm_pass_manager.py:726-727`).
-struct DownThenUp;
-
-impl IrPass for DownThenUp {
-    fn name(&self) -> &str {
-        "IrPropagateViewCopyPermuteDown+Up"
-    }
-
-    fn run(&self, graph: &mut IrGraph) -> bool {
-        let down = IrPropagateViewCopyPermutePass::ARM_DOWN.run(graph);
-        let up = IrPropagateViewCopyPermutePass::ARM_UP.run(graph);
-        down | up
-    }
-}
 
 const WITH_FLAG: Options = Options {
     dim_orders: replay::DimOrders::Ignore,
@@ -125,15 +110,14 @@ end
 /// after Up:   (unchanged)  TABLE operand shape after Down+Up: [2, 8]
 /// ```
 ///
-/// The port treats the pending 16-bit table as transparent (its RESCALE), so
-/// the rank-changing view can never cross it moving down; the table keeps
-/// reading `[2, 1, 1, 8]`, the operand rc4 steers away from. The closest RETAB
-/// form of rc4's result is the table reading `x` with the view after it (a
-/// per-tensor RESCALE commutes with the view). With N = 1 rc4's Up pass moves
-/// the view back above the table, so the two agree there.
+/// The port used to treat the pending 16-bit table as transparent (for its
+/// RESCALE), so the view could never cross it moving down and the table kept
+/// reading `[2, 1, 1, 8]`, the operand rc4 steers away from. The driver now
+/// gives the table rc4's two nodes (`layout::pending::split_table_rescales`),
+/// so the view parks between them as in rc4, and the table stays split.
 #[test]
-#[ignore = "BUG: a 16-bit pending table keeps the [N,1,1,C] operand rc4's Down pass removes (TABLE guard, MLBEDSW-11805)"]
 fn int16_table_does_not_keep_the_unsafe_operand_rc4_removes() {
+    use crate::layout::pending::{has_split_rescale, TABLE_RESCALE_OF_KEY};
     let mut graph = before(UNSAFE_INT16_TABLE, "view_into_int16_table_unsafe_operand");
     DownThenUp.run(&mut graph);
     let table = only_call(&graph, "aten.sigmoid.default");
@@ -144,6 +128,13 @@ fn int16_table_does_not_keep_the_unsafe_operand_rc4_removes() {
         "rc4's TABLE reads x's [2, 8] after Down+Up; the port's reads {:?}",
         graph.node_shape(operand)
     );
+    assert!(has_split_rescale(graph.node(table)));
+    assert_eq!(graph.node(table).meta.val_dtype(), Some("torch.int32"));
+    let view = only_call(&graph, "aten.view_copy.default");
+    let rescale = only_call(&graph, "tosa.RESCALE.default");
+    assert_eq!(graph.live_user_ids(table), [view]);
+    assert_eq!(graph.node(rescale).args[0].as_node(), Some(view));
+    assert_eq!(graph.node(rescale).meta.extra_str(TABLE_RESCALE_OF_KEY), Some(graph.node(table).name.as_str()));
 }
 
 /// A structural signature of `graph` that ignores node order: each node is
@@ -258,17 +249,14 @@ end
 /// rc4's Down pass sinks the view `%6` past its TABLE and parks it before
 /// the TABLE's RESCALE (trace_t16_minimal.py prints each stage); with that
 /// user gone the shared permute's remaining chain cancels and canonicalizes,
-/// and after Up rc4 has one permute and two views. The port can't sink the
-/// rank-changing view into the pending 16-bit table (it counts as transparent
-/// for its RESCALE), so the shared permute keeps two users and the other
-/// branch ends as a second permute: two TRANSPOSEs where rc4 has one. Out of
-/// 2,000 random graphs with 16-bit tables (fuzz_t16.py), the port's Down+Up
-/// differs from rc4's in 29: this one structurally, 24 in node order only
-/// and 4 in the `modified` flag; the committed fixtures can't show any of
-/// them, since rc4's Down result is unrepresentable in RETAB's form and the
-/// random generator draws only int8 tables.
+/// and after Up rc4 has one permute and two views. The port could not sink
+/// the rank-changing view into the pending 16-bit table (it counted as
+/// transparent for its RESCALE), so the shared permute kept two users and the
+/// other branch ended as a second permute: two TRANSPOSEs where rc4 has one.
+/// With the table split for the pass the two agree; the committed
+/// `propagate_view_copy_permute_down_up` fixture holds this case and random
+/// graphs with 16-bit tables.
 #[test]
-#[ignore = "BUG: 16-bit pending tables modelled as transparent: Down+Up leaves an extra TRANSPOSE rc4 doesn't"]
 fn int16_tables_behind_a_shared_permute_match_rc4_after_down_and_up() {
     replay::check_cases_with(
         &DownThenUp,
@@ -309,23 +297,17 @@ output([%1, %5])
 end
 ";
 
-/// The module docs argue that FX user order can't change the driver's
-/// result, but only for the walks' own reads. The driver also runs
-/// RemovePermutesAroundElementwiseTosaOps between sweeps, with no retrace
-/// after a sweep that changed the graph, so rc4 hands it users in FX
-/// insertion order, which the sweeps' rewiring has taken out of graph order;
-/// the remove-permutes port's user-order bug
-/// (`remove_permutes_review_tests::a_rewired_user_order_decides_which_region_is_rewritten`)
-/// is reachable through this driver. rc4 ends with one permute (the returned
-/// `x.permute`); re-sorting every node's users into graph order before each
-/// fusion sub-pass makes rc4 end with two, exactly the port's result
+/// The driver runs RemovePermutesAroundElementwiseTosaOps after sweeps that
+/// rewired nodes, with no retrace in between, so rc4 hands it users in FX
+/// insertion order, which the sweeps' rewiring has taken out of graph order,
+/// and that order decides which region it rewrites. rc4 ends with one permute
+/// (the returned `x.permute`); re-sorting every node's users into graph order
+/// before each fusion sub-pass makes rc4 end with two
 /// (probe_user_order_min.py prints both; pinpoint_order.py shows sorting
-/// before RemovePermutes alone is enough). The port leaves an extra
-/// TRANSPOSE. A targeted search found 2 such graphs in 4,000
-/// (user_order_motif.py); the committed generator's random graphs found none
-/// in 1,500 (user_order_search.py).
+/// before RemovePermutes alone is enough). The port used to end with two; it
+/// now keeps torch.fx's user order through the sweeps
+/// (`LayoutCtx::users_in_fx_order`) and resets it where rc4 re-traces.
 #[test]
-#[ignore = "BUG: the driver hands RemovePermutes graph-order users where rc4's sweeps leave FX insertion order; an extra TRANSPOSE"]
 fn down_pass_matches_rc4_when_sweeps_reorder_users() {
     replay::check_cases_with(
         &IrPropagateViewCopyPermutePass::ARM_DOWN,
@@ -360,21 +342,18 @@ output([%4, %5])
 end
 ";
 
-/// The port keeps the rc4 bug its module docs describe for reductions, and
-/// slices reach it too, which the Arm pipeline has at phase 6: the Down walk
-/// crosses the clamp and the slice, rewriting the slice's dim from 1 to 3
-/// (`:930-982` applies the args as it advances), finds the fork after the
-/// slice unsplittable (a permute branch isn't swappable), and falls back to a
-/// region move from the original permute (`:1031-1035`), which leaves the
+/// rc4's Down walk crosses the clamp and the slice, rewriting the slice's dim
+/// from 1 to 3 as it advances (`:234-235`), finds the fork after the slice
+/// unsplittable (a permute branch isn't swappable), and falls back to a
+/// region move from the original permute (`:1036-1039`), which leaves the
 /// slice reading NCHW data with the NHWC dim; the next sweep moves the new
 /// permute past the slice and maps the dim again. Both graph outputs change
 /// shape, `[1, 3, 5, 4]` to `[1, 3, 4, 8]` and `[1, 4, 3, 5]` to
-/// `[1, 8, 3, 4]` (check_split_numerics.py runs both in torch), and the port
-/// replays rc4 exactly (`propagate_review_external` on the recorded case).
-/// Matching rc4 here means emitting a wrong model; the port could decline the
-/// fallback after an arg-update crossing instead.
+/// `[1, 8, 3, 4]` (check_split_numerics.py runs both in torch). The port used
+/// to replay that; it now takes the walk's assignments back before the
+/// region move (`WalkWrites::undo`), a known divergence in the replays
+/// (`channel_split_after_clamp`).
 #[test]
-#[ignore = "BUG: kept rc4 miscompile: a slice crossed before an unsplittable fork keeps its rewritten dim and cuts the wrong axis (graph outputs change shape)"]
 fn down_pass_keeps_a_channel_split_on_the_channel_axis() {
     let mut graph = before(CHANNEL_SPLIT, "channel_split_after_clamp");
     IrPropagateViewCopyPermutePass::ARM_DOWN.run(&mut graph);
@@ -392,19 +371,16 @@ fn down_pass_keeps_a_channel_split_on_the_channel_axis() {
     );
 }
 
-/// The module docs say a failed walk is memoized "under the version stamps
-/// of every node it read". `is_per_tensor_rescale` also reads the RESCALE's
-/// input's special dtype (`_is_per_tensor_rescale`,
+/// A failed walk is memoized under the version stamps of every node it read.
+/// `is_per_tensor_rescale` also reads the RESCALE's input's special dtype
+/// (`_is_per_tensor_rescale`,
 /// backends/arm/_passes/propagate_view_copy_permute_pass.py:132-144), and a
-/// walk that fails there (a view moving up, which `blocks_moving` doesn't
-/// read inputs for) never records that input. Here the RESCALE's input loses
-/// its INT4 marker after a failed walk, so the view can now cross; the memo
-/// still skips the walk. Latent today: nothing in the driver rewrites a
-/// node's special dtype in place, but the read set doesn't say so. Test
-/// builds catch it through `CHECK_SKIPPED_WALKS` (switched off here to show
-/// what a release build does).
+/// walk that failed there (a view moving up, which `blocks_moving` doesn't
+/// read inputs for) used not to record that input. Here the RESCALE's input
+/// loses its INT4 marker after a failed walk, so the view can now cross, and
+/// the memo must not skip the walk. `CHECK_SKIPPED_WALKS` is switched off to
+/// show what a release build does.
 #[test]
-#[ignore = "BUG (minor, latent): the walk memo omits the RESCALE input whose special dtype is_per_tensor_rescale reads"]
 fn walk_memo_reads_the_rescale_input_special_dtype() {
     use crate::fx_meta::MetaValue;
     use crate::layout::ctx::LayoutCtx;

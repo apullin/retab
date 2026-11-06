@@ -3,7 +3,7 @@
 They run rc4's Arm propagation passes, built as arm_pass_manager.py:726-727
 builds them (with the exported program), on graphs made with the replay
 generator's builder: the Down pass, the Up pass, or both in sequence
-(`DownThenUp`), and write fixture-format cases to `$RETAB_REVIEW_DIR`
+(the generator's `PropagationPass`), and write fixture-format cases to `$RETAB_REVIEW_DIR`
 (default /tmp/retab_review) as down.txt, up.txt and down_up.txt, which
 `propagate_review_external` and `propagate_review_order_only` replay.
 
@@ -18,56 +18,25 @@ import sys
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "layout_replay"))
 import gen_layout_replay as G  # noqa: E402
 
-import torch  # noqa: E402
 from executorch.backends.arm._passes import (  # noqa: E402
     PropagateViewCopyPermuteDownPass,
     PropagateViewCopyPermuteUpPass,
 )
-from executorch.exir.pass_base import PassResult  # noqa: E402
 
 logging.getLogger("torch._subclasses.fake_tensor").setLevel(logging.CRITICAL)
-
-
-class DownThenUp:
-    """InsertTableOps, the Arm Down pass, the Arm Up pass, then the TABLEs
-    restored to RETAB's form, as G.PropagationPass does for one pass."""
-
-    rc4_name = "InsertTableOpsPass + Down + Up"
-
-    def __init__(self, ep):
-        self.ep = ep
-
-    def __call__(self, gm):
-        down = G.PropagationPass(self.ep, PropagateViewCopyPermuteDownPass)
-        # Run both passes between one InsertTableOps and one restore.
-        originals = {node.name: node for node in gm.graph.nodes if G._is_table_op(node)}
-        if originals:
-            names = {node.name for node in gm.graph.nodes}
-            gm = G.InsertTableOpsPass(self.ep)(gm).graph_module
-            for node in gm.graph.nodes:
-                if node.name in names:
-                    continue
-                if node.target == G.T.TABLE.default:
-                    constant = node.args[1].name
-                    node.meta[G._PROPAGATION_TABLE_OF] = constant.removeprefix("b_").removesuffix("_table_constant")
-                elif node.target == G.T.RESCALE.default:
-                    (table,) = node.all_input_nodes
-                    node.meta[G._PROPAGATION_TABLE_OF] = table.meta[G._PROPAGATION_TABLE_OF]
-                    node.meta[G._PROPAGATION_TABLE_RESCALE] = True
-        modified = False
-        for cls in (PropagateViewCopyPermuteDownPass, PropagateViewCopyPermuteUpPass):
-            result = cls(down.compile_spec, self.ep)(gm)
-            gm = result.graph_module
-            modified |= result.modified
-        if originals:
-            G.restore_pending_tables(gm, originals)
-        return PassResult(gm, modified)
 
 
 SPECS = {
     "down": G.PassSpec("down", lambda ep: G.PropagationPass(ep, PropagateViewCopyPermuteDownPass), [], None, None, tosa_spec=G.PROPAGATE_TOSA_SPEC),
     "up": G.PassSpec("up", lambda ep: G.PropagationPass(ep, PropagateViewCopyPermuteUpPass), [], None, None, tosa_spec=G.PROPAGATE_TOSA_SPEC),
-    "down_up": G.PassSpec("down_up", lambda ep: DownThenUp(ep), [], None, None, tosa_spec=G.PROPAGATE_TOSA_SPEC),
+    "down_up": G.PassSpec(
+        "down_up",
+        lambda ep: G.PropagationPass(ep, PropagateViewCopyPermuteDownPass, PropagateViewCopyPermuteUpPass),
+        [],
+        None,
+        None,
+        tosa_spec=G.PROPAGATE_TOSA_SPEC,
+    ),
 }
 
 

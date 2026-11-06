@@ -19,8 +19,9 @@
 //! keepdim reductions and slices, with their dims remapped through
 //! `layout::dim_maps`; Up also swaps views across slices and reductions and
 //! splits a cat whose users are all the same permute; Down also splits a
-//! permute over a fork, or moves it past a single-exit pointwise region. Every
-//! rewrite is planned in full before the graph changes.
+//! permute over a fork, or moves it past a single-exit pointwise region. Fork
+//! splits and region moves are planned in full before the graph changes; a
+//! walk assigns each crossed node's swapped args as it advances.
 //!
 //! # The driver (`:106-139`)
 //!
@@ -47,53 +48,69 @@
 //! table constant, which RETAB has no node for: the constant is a second input
 //! that only the table uses and that is never layout-invariant
 //! ([`Propagator::has_table_constant`]). So Up never hoists past a pending
-//! table's input (two inputs end the walk, `:247-254`), and a pending table
-//! makes a pointwise region unsafe (`:1213-1222`) and can't be crossed by a
-//! fork split's elementwise rule (`:1336-1350`). A 16-bit table is a TABLE
-//! followed by a per-tensor RESCALE in rc4 (insert_table_ops.py:410-417); the
-//! port treats such a pending table as transparent too, which matches rc4
-//! moving up (the RESCALE comes first) but not moving down: rc4 stops a
-//! rank-changing view between the TABLE and its RESCALE, which RETAB can't
-//! express, so the port keeps the view above the table.
+//! table's input (two inputs end the walk, `:250-256`), and a pending table
+//! makes a pointwise region unsafe (`:1209-1222`) and can't be crossed by a
+//! fork split's elementwise rule (`:1320-1336`). A 16-bit table that needs a
+//! left shift is a TABLE producing int32 followed by a per-tensor RESCALE in
+//! rc4 (insert_table_ops.py:400-417), and the walks treat the two differently:
+//! the RESCALE is transparent, so a rank-changing view moving down crosses the
+//! TABLE and stops at the RESCALE, parked between the two. So every entry
+//! point that walks gives each such table rc4's two nodes first
+//! (`layout::pending::split_table_rescales`: the pending table holds the
+//! TABLE's int32 value and a real RESCALE node follows it) and folds back the
+//! ones whose RESCALE still follows alone at the end (`merge_table_rescales`),
+//! where the replay generator restores rc4's two nodes as one. A table that
+//! stays split marks a node rc4 parked inside it.
 //!
 //! # Differences from rc4
 //!
 //! - **No re-trace.** rc4 re-traces the whole graph with `ExportPass` after
-//!   its first vertical fusion and at the end (`_retrace`, `:158-162`), and
+//!   its first vertical fusion and at the end (`_retrace`, `:159-162`), and
 //!   every fusion pass re-traces when it changes the graph. In a sound
 //!   rewrite the values that change are exactly those rc4's local refresh
 //!   sets (`:164-192`, crossed nodes and the moved copy), plus the new nodes'
-//!   values it sets explicitly, so the port refreshes those ([`refresh_node`]);
-//!   at each re-trace point it eliminates dead code (the driver's) and
-//!   re-derives the users of the refreshed nodes, which only an unsound rewrite
-//!   changes ([`Propagator::retrace_stale`]). Node names are kept where the
-//!   re-trace renames.
-//! - **User order.** FX iterates `node.users` in insertion order, which
-//!   re-traces reset to graph order and rewrites shuffle. Down's next nodes are
-//!   taken in graph order here. Which order cannot change the result: a fork
-//!   split is all-or-nothing and puts each copy right after its branch, and the
-//!   region search's outcome doesn't depend on its visit order (a rejected
-//!   node is rejected on every path; `blocks_moving` can only differ between
-//!   paths at the moving copy itself, which fails both orders). Only whether a
-//!   fork plan raises can depend on it: TOSA's `is_swappable` raises for a
-//!   non-keepdim mean, and a branch the plan rejects first hides it, which
-//!   needs a non-keepdim mean at phase 6, where Arm has already normalized
-//!   them.
+//!   values it sets explicitly, so the port refreshes those ([`refresh_node`]).
+//!   At each re-trace point it eliminates dead code (the driver's), returns
+//!   every node's users to graph order (below) and re-derives the users of the
+//!   refreshed nodes, which only an unsound rewrite changes
+//!   ([`Propagator::retrace_stale`]). Node names are kept where the re-trace
+//!   renames.
 //! - **A cat's repeated input.** `_maybe_split_upwards_cat_fanout` rebuilds a
 //!   cat from `all_input_nodes`, which lists a repeated input once, so rc4
 //!   turns `cat([x, x])` into `cat([permute(x)])` and changes the result. The
 //!   port keeps every occurrence, each reading the input's one new permute.
+//! - **The walk's args after a region move.** Down's advance assigns the
+//!   swapped args as it crosses each node (`:234-235`), before it knows how
+//!   the walk ends. When the fork after a crossed mean or slice can't be split,
+//!   rc4 falls back to a region move planned from the original permute
+//!   (`:1036-1039`), which keeps those args: the crossed node then reads the
+//!   moved permute's output with dims meant for its input. Its users change
+//!   shape, or rc4's next re-trace raises (a channel split after a clamp cuts
+//!   W instead of C). The port takes the walk's assignments back before the
+//!   region move ([`WalkWrites::undo`]), so the crossed nodes read what they
+//!   did, and the replays list rc4's cases as known divergences.
 //! - **`IrArg::None` dims.** RETAB's importer reads `[]` as `IrArg::None`, so a
 //!   reduction's dims of `None` read as `[]` (every dim), where rc4 sees a
 //!   Python `None` and declines.
 //!
-//! rc4's own bugs are kept, so the port fails or miscompiles where rc4 does
-//! (both are in the replay fixtures): Down's advance rewrites a reduction's
-//! dims before it knows the move will happen, and a fork after the reduction
-//! can fall back to a region move from the original permute that keeps the
-//! rewritten dims, changing what the reduction's users read; the re-trace
-//! emulation ([`Propagator::retrace_stale`]) then panics where rc4's re-trace
-//! raises, or reshapes the users as rc4's does.
+//! # User order
+//!
+//! FX keeps each node's users in insertion order: every args update moves the
+//! updated node to the end of its inputs' users, and a re-trace rebuilds the
+//! graph in node order. rc4 iterates `node.users` in the walks (Down's next
+//! nodes and the fork and region searches, the rewires in `_move_node`,
+//! `_apply_fork_split` and the cat split) and, through the driver, in
+//! RemovePermutesAroundElementwiseTosaOps, which runs after sweeps that rewired
+//! nodes and before any re-trace, so the order the sweeps leave decides which
+//! of two regions sharing a permute it rewrites. The port reads users in that
+//! order everywhere rc4 iterates them (`LayoutCtx::users_in_fx_order`),
+//! assigns args where rc4 does even when they don't change (each assignment
+//! reorders), and resets the order where rc4 re-traces: at `_retrace` and
+//! after each fusion pass that changed the graph ([`Propagator::retrace_point`]).
+//! A failed walk changes nothing, and its outcome doesn't depend on the order
+//! (a fork plan is all-or-nothing, and the region search rejects a node on
+//! every path), so the memo can still skip it; a node whose users reorder gets
+//! a new version anyway.
 //!
 //! # Complexity
 //!
@@ -106,19 +123,21 @@
 //! unchanged region costs one memo check per sweep. A walk costs the nodes it
 //! passes and their neighbours; a region search costs the region and its
 //! boundary, and rc4's `enumerate(graph.nodes)` order index (`:1108-1111`) is a
-//! sort by the ctx's order keys. The fusions cost what their ports cost: an
-//! O(N) scan each, with memos that skip unchanged nodes across rounds. A
-//! re-trace point re-derives only the users of the nodes refreshed since the
-//! last one, and goes further only where a value changed. In all,
-//! O(R·N + I·T·log T) plus the rewrites and the retried walks, for R fusion
-//! rounds and I sweeps; rc4 is O((R + I)·N) re-traces on top of the same work.
+//! sort by the ctx's order keys. Reading a node's k users in FX order sorts
+//! them by their stamps, O(k log k). The fusions cost what their ports cost:
+//! an O(N) scan each, with memos that skip unchanged nodes across rounds. A
+//! re-trace point restamps every node once, O(N), and re-derives only the
+//! users of the nodes refreshed since the last one, going further only where
+//! a value changed. Splitting and folding 16-bit tables is an O(N) scan per
+//! pass. In all, O(R·N + I·T·log T) plus the rewrites and the retried walks,
+//! for R fusion rounds and I sweeps; rc4 is O((R + I)·N) re-traces on top of
+//! the same work.
 //! `propagate_scaling_tests` times both passes on 50-60k-node graphs at
 //! 0.2-0.5 s in a release test build, growing about linearly with size.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use crate::fx_insert_table_ops_ir::planned_table;
 use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::fx_meta::TensorFacts;
 use crate::layout::canonicalize::{canonicalize_view_copy_permute, is_singleton_permutation};
@@ -129,7 +148,7 @@ use crate::layout::fuse_identical_input_transforms::{
     fuse_identical_input_transforms, is_layout_invariant, FuseIdenticalInputTransforms, DELEGATION_TAG_META_KEY,
 };
 use crate::layout::fx_node::{all_input_nodes, is_per_tensor_rescale, is_rescale, rc4_target, special_dtype};
-use crate::layout::pending::is_pending_table;
+use crate::layout::pending::{is_pending_table, merge_table_rescales, split_table_rescales};
 use crate::layout::pointwise::{is_pointwise, is_transparent_copy};
 use crate::layout::remove_permutes::{remove_permutes_in_ctx, DeadCode, RemovePermutesConfig, RemovePermutesMemo};
 use crate::layout::shape::{has_local_rule, int_list, mark_contiguous, refreshed_meta};
@@ -289,8 +308,14 @@ thread_local! {
 }
 
 /// `PropagateViewCopyPermutePass.call(graph_module)` (`:106-139`) inside `ctx`;
-/// returns rc4's `modified`.
+/// returns rc4's `modified`. 16-bit pending tables take rc4's two-node shape
+/// for the pass ([`with_table_rescales`]).
 pub(crate) fn propagate_view_copy_permute(ctx: &mut LayoutCtx<'_>, config: &PropagateConfig) -> bool {
+    with_table_rescales(ctx, config, |ctx| drive(ctx, config))
+}
+
+/// The driver proper (`:106-139`).
+fn drive(ctx: &mut LayoutCtx<'_>, config: &PropagateConfig) -> bool {
     let mut propagator = Propagator::new(config);
     let mut modified = propagator.fuse_horizontal(ctx);
     let vertical = propagator.fuse_vertical(ctx);
@@ -318,19 +343,46 @@ pub(crate) fn propagate_view_copy_permute(ctx: &mut LayoutCtx<'_>, config: &Prop
     modified
 }
 
-/// One sweep, `_propagate_iteration` (`:141-153`), without the fusions: rc4's
+/// One sweep, `_propagate_iteration` (`:141-152`), without the fusions: rc4's
 /// tests call it directly.
 pub(crate) fn propagate_iteration(ctx: &mut LayoutCtx<'_>, config: &PropagateConfig) -> bool {
-    let mut propagator = Propagator::new(config);
-    propagator.collect_transforms(ctx);
-    propagator.propagate_iteration(ctx)
+    with_table_rescales(ctx, config, |ctx| {
+        let mut propagator = Propagator::new(config);
+        propagator.collect_transforms(ctx);
+        propagator.propagate_iteration(ctx)
+    })
 }
 
-/// `_propagate(node)` (`:236-280`) for one copy.
+/// `_propagate(node)` (`:238-282`) for one copy.
 pub(crate) fn propagate_node(ctx: &mut LayoutCtx<'_>, config: &PropagateConfig, node: NodeId) -> bool {
-    let mut propagator = Propagator::new(config);
-    let mut reads = Reads::default();
-    propagator.propagate(ctx, node, &mut reads)
+    with_table_rescales(ctx, config, |ctx| {
+        let mut propagator = Propagator::new(config);
+        let mut reads = Reads::default();
+        propagator.propagate(ctx, node, &mut reads)
+    })
+}
+
+/// Run `f` with every 16-bit pending table in rc4's shape, a TABLE and its own
+/// RESCALE node (`layout::pending::split_table_rescales`; Arm's passes only,
+/// as only they know TABLE), then fold back each table whose RESCALE still
+/// follows it alone (`merge_table_rescales`). A table left split marks a node
+/// rc4 parked between its TABLE and RESCALE. Returns `f`'s result: the split
+/// and the fold are representation changes, not rewrites rc4 reports. The
+/// fold after a single sweep or walk restamps the RESCALE's users, so a test
+/// calling those again in the same ctx sees them later in their inputs' users
+/// than rc4 would.
+fn with_table_rescales(ctx: &mut LayoutCtx<'_>, config: &PropagateConfig, f: impl FnOnce(&mut LayoutCtx<'_>) -> bool) -> bool {
+    if config.overrides != Overrides::Tosa {
+        return f(ctx);
+    }
+    if !split_table_rescales(ctx).is_empty() {
+        cover("table.split");
+    }
+    let modified = f(ctx);
+    if merge_table_rescales(ctx) > 0 {
+        cover("table.kept_split");
+    }
+    modified
 }
 
 /// `_move_node(node, frontier, previous_frontier)`, which one of rc4's tests
@@ -370,6 +422,51 @@ impl Reads {
 
     fn extend(&mut self, ids: impl IntoIterator<Item = NodeId>) {
         self.0.extend(ids);
+    }
+}
+
+/// The arg assignments one walk made as it advanced (`:234-235`), in order,
+/// with each assigned node's args from before the walk.
+#[derive(Default)]
+struct WalkWrites {
+    order: Vec<NodeId>,
+    before: HashMap<NodeId, Vec<IrArg>>,
+    /// The args each assignment wrote, for [`Self::redo`].
+    written: Vec<Vec<IrArg>>,
+    changed: bool,
+}
+
+impl WalkWrites {
+    /// `node.args = args`: rc4 assigns even unchanged args, which moves the
+    /// node to the end of its inputs' users.
+    fn set_args(&mut self, ctx: &mut LayoutCtx<'_>, id: NodeId, args: Vec<IrArg>) {
+        let current = &ctx.node(id).args;
+        self.changed |= !same_args(current, &args);
+        self.before.entry(id).or_insert_with(|| current.clone());
+        self.order.push(id);
+        self.written.push(args.clone());
+        ctx.set_args(id, args);
+    }
+
+    /// Whether an assignment changed a node's args.
+    fn changed_args(&self) -> bool {
+        self.changed
+    }
+
+    /// Give every assigned node its args from before the walk again,
+    /// assigning in the walk's order so each node's place in its inputs'
+    /// users is the one rc4's assignments gave it.
+    fn undo(&self, ctx: &mut LayoutCtx<'_>) {
+        for &id in &self.order {
+            ctx.set_args(id, self.before[&id].clone());
+        }
+    }
+
+    /// Assign the walk's args again after an [`Self::undo`].
+    fn redo(&self, ctx: &mut LayoutCtx<'_>) {
+        for (&id, args) in self.order.iter().zip(&self.written) {
+            ctx.set_args(id, args.clone());
+        }
     }
 }
 
@@ -543,26 +640,36 @@ impl<'c> Propagator<'c> {
         modified
     }
 
-    /// `_retrace` (`:158-162`): dead-code elimination; see the module docs.
+    /// `_retrace` (`:158-162`): dead-code elimination, then the re-trace,
+    /// which puts every node's users back in graph order; see the module docs.
     fn retrace(&mut self, ctx: &mut LayoutCtx<'_>) {
         #[cfg(test)]
         RETRACES.with(|retraces| retraces.set(retraces.get() + 1));
         ctx.eliminate_dead_code();
+        self.retrace_point(ctx);
+    }
+
+    /// What an `ExportPass` re-trace does that later steps can see: every
+    /// node's users return to graph order (`LayoutCtx::retraced`), and the
+    /// values the walks left stale are re-derived ([`Self::retrace_stale`]).
+    /// rc4 re-traces at `_retrace` and at the end of each fusion pass that
+    /// changed the graph.
+    fn retrace_point(&mut self, ctx: &mut LayoutCtx<'_>) {
+        ctx.retraced();
         self.retrace_stale(ctx);
     }
 
-    /// The part of an `ExportPass` re-trace the walks need: rc4's local refresh
-    /// sets only the crossed nodes and the moved copy (`:164-192`), and a sound
-    /// rewrite leaves every other value as it was. Down's advance can change a
-    /// reduction's dims and then fall back to a region move from the original
-    /// copy (`:250-258`, `:1031-1035`), which changes the values the
-    /// reduction's users read; rc4 keeps their old values until the next
-    /// re-trace, which re-derives them and raises where they no longer fit.
-    /// So at each re-trace point (the driver's `_retrace`, and each fusion pass
-    /// that changed the graph, as each re-traces), the users of the refreshed
-    /// nodes are re-derived in graph order, and their users when a value
-    /// changes; a value torch would reject panics. A node without a local rule
-    /// keeps its value: only an already broken rewrite reaches one.
+    /// The part of an `ExportPass` re-trace that re-derives values: rc4's
+    /// local refresh sets only the crossed nodes and the moved copy
+    /// (`:164-192`), and a sound rewrite leaves every other value as it was,
+    /// so at each re-trace point the users of the refreshed nodes are
+    /// re-derived in graph order, and their users when a value changes; a
+    /// value torch would reject panics, as rc4's re-trace raises. The one
+    /// unsound rewrite known, rc4's region move keeping the walk's args
+    /// (`:234-235`, `:1036-1039`), is taken back before it happens
+    /// ([`WalkWrites::undo`]), so this is a guard that finds nothing in the
+    /// replays. A node without a local rule keeps its value: only an already
+    /// broken rewrite reaches one.
     fn retrace_stale(&mut self, ctx: &mut LayoutCtx<'_>) {
         if self.stale.is_empty() {
             return;
@@ -607,6 +714,9 @@ impl<'c> Propagator<'c> {
     /// `duplicate_user_fusion_exclusions()` (`:569-576`; TOSA's are
     /// `TOSA_EXCLUDED_TARGETS`, backends/arm/_passes/propagate_view_copy_permute_pass.py:37-38),
     /// Down `FuseIdenticalInputTransformsPass(permute_targets=...)` (`:921-928`).
+    /// Either re-traces when it changed the graph
+    /// (backends/transforms/fuse_duplicate_users_pass.py:147-151,
+    /// backends/transforms/fuse_identical_input_transforms_pass.py:200-204).
     fn fuse_horizontal(&mut self, ctx: &mut LayoutCtx<'_>) -> bool {
         let modified = match self.config.direction {
             Direction::Up => {
@@ -616,13 +726,17 @@ impl<'c> Propagator<'c> {
             Direction::Down => fuse_identical_input_transforms(ctx, &FuseIdenticalInputTransforms::DRIVER),
         };
         if modified {
-            self.retrace_stale(ctx);
+            self.retrace_point(ctx);
         }
         modified
     }
 
     /// `fuse_vertical` (`:301-316`): the fusion pass, then
-    /// `CanonicalizeViewCopyPermutePass(self._permute_targets)`.
+    /// `CanonicalizeViewCopyPermutePass(self._permute_targets)`. Each
+    /// re-traces when it changed the graph
+    /// (backends/transforms/remove_permutes_around_elementwise_ops.py:453,
+    /// backends/transforms/canonicalize_view_copy_permute_pass.py:93-100);
+    /// `remove_permutes_in_ctx` resets the user order itself.
     fn fuse_vertical(&mut self, ctx: &mut LayoutCtx<'_>) -> bool {
         let mut modified = false;
         if self.tosa() && self.config.exported_program {
@@ -633,12 +747,12 @@ impl<'c> Propagator<'c> {
                 DeadCode::Full,
             );
             if removed {
-                self.retrace_stale(ctx);
+                self.retrace_point(ctx);
             }
             modified |= removed;
         }
         if canonicalize_view_copy_permute(ctx) {
-            self.retrace_stale(ctx);
+            self.retrace_point(ctx);
             modified = true;
         }
         modified
@@ -648,16 +762,17 @@ impl<'c> Propagator<'c> {
     // One walk
     // -----------------------------------------------------------------------
 
-    /// `_propagate(node)` (`:236-280`).
+    /// `_propagate(node)` (`:238-282`).
     fn propagate(&mut self, ctx: &mut LayoutCtx<'_>, node: NodeId, reads: &mut Reads) -> bool {
         let mut frontier = node;
         let mut previous_frontier: Option<NodeId> = None;
         let mut path = vec![node];
         let mut moved = false;
+        let mut writes = WalkWrites::default();
         reads.add(node);
         while let Some(next_nodes) = self.validated_next_nodes(ctx, node, frontier, reads) {
             if next_nodes.len() > 1 {
-                if !self.maybe_split_fork(ctx, node, frontier, previous_frontier, &next_nodes.nodes, reads) {
+                if !self.maybe_split_fork(ctx, node, frontier, previous_frontier, &next_nodes.nodes, reads, &mut writes) {
                     if next_nodes.table_constant {
                         cover("up.stop.table_constant");
                     }
@@ -667,7 +782,7 @@ impl<'c> Propagator<'c> {
                 return true;
             }
             let next_node = next_nodes.nodes[0];
-            if self.advance_through_next_node(ctx, node, next_node, reads) {
+            if self.advance_through_next_node(ctx, node, next_node, reads, &mut writes) {
                 previous_frontier = Some(frontier);
                 frontier = next_node;
                 path.push(next_node);
@@ -692,7 +807,7 @@ impl<'c> Propagator<'c> {
         true
     }
 
-    /// `_validated_next_nodes` (`:194-217`).
+    /// `_validated_next_nodes` (`:200-219`).
     fn validated_next_nodes(
         &self,
         ctx: &LayoutCtx<'_>,
@@ -724,8 +839,8 @@ impl<'c> Propagator<'c> {
     }
 
     /// `_get_next_nodes`: Up, the frontier's inputs (`:578-579`), with a
-    /// pending table's constant; Down, its users (`:930-931`), in graph order
-    /// (see the module docs).
+    /// pending table's constant; Down, its users in torch.fx's order
+    /// (`:930-931`).
     fn next_nodes(&self, ctx: &LayoutCtx<'_>, frontier: NodeId, reads: &mut Reads) -> NextNodes {
         let graph = ctx.graph();
         reads.add(frontier);
@@ -735,7 +850,7 @@ impl<'c> Propagator<'c> {
                 table_constant: self.has_table_constant(ctx, frontier),
             },
             Direction::Down => NextNodes {
-                nodes: users_in_order(ctx, frontier, reads),
+                nodes: fx_users(ctx, frontier, reads),
                 table_constant: false,
             },
         }
@@ -761,13 +876,17 @@ impl<'c> Propagator<'c> {
         })
     }
 
-    /// `_advance_through_next_node` (`:219-234`).
+    /// `_advance_through_next_node` (`:221-236`). rc4 assigns both arg tuples
+    /// (`:234-235`) even when they are unchanged, which moves both nodes to
+    /// the end of their inputs' users; `writes` logs the assignments so a
+    /// region move can take them back ([`Self::maybe_split_fork`]).
     fn advance_through_next_node(
         &mut self,
         ctx: &mut LayoutCtx<'_>,
         node: NodeId,
         next_node: NodeId,
         reads: &mut Reads,
+        writes: &mut WalkWrites,
     ) -> bool {
         reads.add(next_node);
         if !self.is_swappable(ctx, next_node, reads) {
@@ -776,14 +895,8 @@ impl<'c> Propagator<'c> {
         let Some((node_args, next_args)) = self.maybe_swap_args(ctx, node, next_node, reads) else {
             return false;
         };
-        // rc4 assigns both arg tuples (`:230-231`); rewriting equal args
-        // changes nothing but FX's user order.
-        if !same_args(&ctx.node(node).args, &node_args) {
-            ctx.set_args(node, node_args);
-        }
-        if !same_args(&ctx.node(next_node).args, &next_args) {
-            ctx.set_args(next_node, next_args);
-        }
+        writes.set_args(ctx, node, node_args);
+        writes.set_args(ctx, next_node, next_args);
         true
     }
 
@@ -815,23 +928,27 @@ impl<'c> Propagator<'c> {
 
     /// `is_transparent` (`:419-426`); TOSA adds RESCALE
     /// (backends/arm/_passes/propagate_view_copy_permute_pass.py:95-99). A
-    /// pending 16-bit table counts too, for its RESCALE (see the module docs).
+    /// 16-bit pending table's RESCALE is its own node by the time a walk runs
+    /// (see the module docs).
     fn is_transparent(&self, ctx: &LayoutCtx<'_>, id: NodeId) -> bool {
         let graph = ctx.graph();
         let target = graph.node(id).target.as_str();
         if is_transparent_copy(target) {
             return true;
         }
-        self.tosa() && (is_rescale(target) || pending_table_has_rescale(graph, id))
+        self.tosa() && is_rescale(target)
     }
 
-    /// `is_elementwise` (`:460-470`); TOSA's (`:123-128`): a per-tensor
-    /// RESCALE and any TABLE.
-    fn is_elementwise(&self, ctx: &LayoutCtx<'_>, id: NodeId) -> bool {
+    /// `is_elementwise` (`:460-470`); TOSA's (`:125-130`): a per-tensor
+    /// RESCALE and any TABLE. `_is_per_tensor_rescale` (`:132-144`) reads the
+    /// RESCALE's input, which joins `reads`.
+    fn is_elementwise(&self, ctx: &LayoutCtx<'_>, id: NodeId, reads: &mut Reads) -> bool {
         let graph = ctx.graph();
         let node = graph.node(id);
         if self.tosa() {
             if is_rescale(&node.target) {
+                reads.add(id);
+                reads.extend(all_input_nodes(node));
                 return is_per_tensor_rescale(graph, id);
             }
             if is_table(graph, id) {
@@ -848,13 +965,13 @@ impl<'c> Propagator<'c> {
         !is_pending_table(node) && is_pointwise(&node.target)
     }
 
-    /// `is_multi_input_elementwise` (`:428-430`); TOSA's TABLE (`:117-118`).
+    /// `is_multi_input_elementwise` (`:428-430`); TOSA's TABLE (`:119-120`).
     fn is_multi_input_elementwise(&self, ctx: &LayoutCtx<'_>, id: NodeId) -> bool {
         let graph = ctx.graph();
         self.tosa() && is_table(graph, id)
     }
 
-    /// `blocks_crossing` (`:432-434`); TOSA's SCATTER (`:120-121`).
+    /// `blocks_crossing` (`:432-434`); TOSA's SCATTER (`:122-123`).
     fn blocks_crossing(&self, ctx: &LayoutCtx<'_>, id: NodeId) -> bool {
         let graph = ctx.graph();
         self.tosa() && rc4_target(&graph.node(id).target) == SCATTER
@@ -908,7 +1025,7 @@ impl<'c> Propagator<'c> {
                 );
             }
         }
-        self.is_elementwise(ctx, next_node) || self.is_arg_update_target(&node.target)
+        self.is_elementwise(ctx, next_node, reads) || self.is_arg_update_target(&node.target)
     }
 
     /// `target in self._REDUCTION_TARGETS` (`:68-71`; TOSA's, `:40-42`).
@@ -955,7 +1072,7 @@ impl<'c> Propagator<'c> {
         if !self.up() {
             return false;
         }
-        if graph.node(moving).target != PERMUTE_TARGET || !self.is_elementwise(ctx, next_node) {
+        if graph.node(moving).target != PERMUTE_TARGET || !self.is_elementwise(ctx, next_node, reads) {
             return false;
         }
         let Some(rank) = graph.node_shape(next_node).map(<[i64]>::len) else {
@@ -971,7 +1088,7 @@ impl<'c> Propagator<'c> {
     fn base_can_move_through_elementwise(&self, ctx: &LayoutCtx<'_>, moving: NodeId, next_node: NodeId, reads: &mut Reads) -> bool {
         let graph = ctx.graph();
         reads.add(next_node);
-        if !self.is_elementwise(ctx, next_node)
+        if !self.is_elementwise(ctx, next_node, reads)
             || (all_input_nodes(graph.node(next_node)).len() != 1
                 && !self.is_multi_input_elementwise(ctx, next_node))
             || graph.node_shape(next_node).is_none()
@@ -1018,7 +1135,7 @@ impl<'c> Propagator<'c> {
     /// `_can_split_through_elementwise` (`:1336-1350`).
     fn can_split_through_elementwise(&self, ctx: &LayoutCtx<'_>, frontier: NodeId, next_node: NodeId, reads: &mut Reads) -> bool {
         let graph = ctx.graph();
-        if !self.is_elementwise(ctx, next_node) {
+        if !self.is_elementwise(ctx, next_node, reads) {
             return false;
         }
         let Some(rank) = graph.node_shape(frontier).map(<[i64]>::len) else {
@@ -1084,7 +1201,7 @@ impl<'c> Propagator<'c> {
     fn up_swap_permute_args(&self, ctx: &LayoutCtx<'_>, node: NodeId, next_node: NodeId, reads: &mut Reads) -> Option<(Vec<IrArg>, Vec<IrArg>)> {
         let graph = ctx.graph();
         let next = graph.node(next_node);
-        if self.is_elementwise(ctx, next_node) {
+        if self.is_elementwise(ctx, next_node, reads) {
             if !self.can_move_through_elementwise(ctx, node, next_node, reads) {
                 return None;
             }
@@ -1136,7 +1253,7 @@ impl<'c> Propagator<'c> {
     fn up_swap_view_args(&self, ctx: &LayoutCtx<'_>, node: NodeId, next_node: NodeId, reads: &mut Reads) -> Option<(Vec<IrArg>, Vec<IrArg>)> {
         let graph = ctx.graph();
         let next = graph.node(next_node);
-        if self.is_elementwise(ctx, next_node) {
+        if self.is_elementwise(ctx, next_node, reads) {
             if !self.can_move_through_elementwise(ctx, node, next_node, reads) {
                 return None;
             }
@@ -1240,7 +1357,7 @@ impl<'c> Propagator<'c> {
     fn down_swap_permute_args(&self, ctx: &LayoutCtx<'_>, node: NodeId, next_node: NodeId, reads: &mut Reads) -> Option<(Vec<IrArg>, Vec<IrArg>)> {
         let graph = ctx.graph();
         let next = graph.node(next_node);
-        if self.is_elementwise(ctx, next_node) {
+        if self.is_elementwise(ctx, next_node, reads) {
             if !self.can_move_through_elementwise(ctx, node, next_node, reads) {
                 return None;
             }
@@ -1282,7 +1399,7 @@ impl<'c> Propagator<'c> {
     fn down_swap_view_args(&self, ctx: &LayoutCtx<'_>, node: NodeId, next_node: NodeId, reads: &mut Reads) -> Option<(Vec<IrArg>, Vec<IrArg>)> {
         let graph = ctx.graph();
         let next = graph.node(next_node);
-        if self.is_elementwise(ctx, next_node) {
+        if self.is_elementwise(ctx, next_node, reads) {
             if !self.can_move_through_elementwise(ctx, node, next_node, reads) {
                 return None;
             }
@@ -1326,8 +1443,17 @@ impl<'c> Propagator<'c> {
     // Forks moving down
     // -----------------------------------------------------------------------
 
-    /// `_maybe_split_fork`: Up has none (`:360-372`); Down splits the permute
-    /// over the branches, or moves it past a pointwise region (`:1013-1041`).
+    /// `_maybe_split_fork`: Up has none (`:359-369`); Down splits the permute
+    /// over the branches, or moves it past a pointwise region (`:1015-1042`).
+    ///
+    /// The region move is planned from the original permute, so the walk's
+    /// crossings are not part of it, but rc4 keeps the args its advance
+    /// already assigned (`:234-235`): a slice or mean the walk crossed then
+    /// reads the moved permute's output with dims meant for its input, a
+    /// wrong graph (the module docs). The port takes those assignments back
+    /// first ([`WalkWrites::undo`]), so the crossed nodes read what they read
+    /// before, and plans again on that graph.
+    #[allow(clippy::too_many_arguments)]
     fn maybe_split_fork(
         &mut self,
         ctx: &mut LayoutCtx<'_>,
@@ -1336,6 +1462,7 @@ impl<'c> Propagator<'c> {
         previous_frontier: Option<NodeId>,
         next_nodes: &[NodeId],
         reads: &mut Reads,
+        writes: &mut WalkWrites,
     ) -> bool {
         if self.up() {
             return false;
@@ -1351,15 +1478,29 @@ impl<'c> Propagator<'c> {
             self.apply_fork_split(ctx, node, frontier, producer, branch_splits);
             return true;
         }
-        if let Some(plan) = self.plan_pointwise_region_move(ctx, node, reads) {
-            cover("down.region_move");
-            self.apply_pointwise_region_move(ctx, node, plan);
-            return true;
+        let Some(mut plan) = self.plan_pointwise_region_move(ctx, node, reads) else {
+            return false;
+        };
+        if writes.changed_args() {
+            cover("down.region_move.undo");
+            writes.undo(ctx);
+            match self.plan_pointwise_region_move(ctx, node, &mut Reads::default()) {
+                Some(replanned) => plan = replanned,
+                None => {
+                    // Only a crossing that rewrote the permute's own dims
+                    // (the shared pass's non-keepdim reductions) can change
+                    // the plan; go on as rc4 does without the region move.
+                    writes.redo(ctx);
+                    return false;
+                }
+            }
         }
-        false
+        cover("down.region_move");
+        self.apply_pointwise_region_move(ctx, node, plan);
+        true
     }
 
-    /// `_plan_fork_split` (`:1268-1334`).
+    /// `_plan_fork_split` (`:1265-1318`).
     fn plan_fork_split(
         &self,
         ctx: &LayoutCtx<'_>,
@@ -1399,8 +1540,8 @@ impl<'c> Propagator<'c> {
     }
 
     /// The permute's dims normalized once, when it is a valid permute with
-    /// one tensor input: the shared start of `_plan_fork_split` (`:1284-1295`)
-    /// and `_pointwise_region_permute_dims` (`:1116-1135`).
+    /// one tensor input: the shared start of `_plan_fork_split` (`:1283-1294`)
+    /// and `_pointwise_region_permute_dims` (`:1119-1138`).
     fn normalized_permute_dims(&self, ctx: &LayoutCtx<'_>, node: NodeId, reads: &mut Reads) -> Option<Vec<usize>> {
         let graph = ctx.graph();
         let n = graph.node(node);
@@ -1423,7 +1564,7 @@ impl<'c> Propagator<'c> {
         Some(normalized.into_iter().map(|dim| dim as usize).collect())
     }
 
-    /// `_apply_fork_split` (`:1352-1403`).
+    /// `_apply_fork_split` (`:1338-1391`).
     fn apply_fork_split(
         &mut self,
         ctx: &mut LayoutCtx<'_>,
@@ -1433,7 +1574,7 @@ impl<'c> Propagator<'c> {
         branch_splits: Vec<ForkBranchSplit>,
     ) {
         if frontier != node {
-            let original_user = users_in_order(ctx, node, &mut Reads::default())[0];
+            let original_user = ctx.users_in_fx_order(node)[0];
             ctx.replace_input_with(original_user, node, producer);
         }
         let node_target = ctx.node(node).target.clone();
@@ -1466,7 +1607,7 @@ impl<'c> Propagator<'c> {
                 )
             });
             self.transforms.push(branch_transform);
-            for user in ctx.graph().live_user_ids(next_node) {
+            for user in ctx.users_in_fx_order(next_node) {
                 if user != branch_transform {
                     ctx.replace_input_with(user, next_node, branch_transform);
                 }
@@ -1477,7 +1618,7 @@ impl<'c> Propagator<'c> {
         }
     }
 
-    /// `_plan_pointwise_region_move` (`:1043-1114`).
+    /// `_plan_pointwise_region_move` (`:1044-1117`).
     fn plan_pointwise_region_move(&self, ctx: &LayoutCtx<'_>, node: NodeId, reads: &mut Reads) -> Option<PointwiseRegionMove> {
         let graph = ctx.graph();
         let normalized_dims = self.normalized_permute_dims(ctx, node, reads)?;
@@ -1518,9 +1659,10 @@ impl<'c> Propagator<'c> {
         })
     }
 
-    /// `_discover_pointwise_region` (`:1137-1166`): the elementwise nodes the
+    /// `_discover_pointwise_region` (`:1140-1169`): the elementwise nodes the
     /// permute can move past and the edges leaving them; `None` where a path
-    /// rejects a node another path accepted.
+    /// rejects a node another path accepted. Users are visited in torch.fx's
+    /// order, as rc4 iterates `node.users`.
     #[allow(clippy::type_complexity)]
     fn discover_pointwise_region(
         &self,
@@ -1530,7 +1672,7 @@ impl<'c> Propagator<'c> {
         reads: &mut Reads,
     ) -> Option<(HashSet<NodeId>, HashSet<(NodeId, NodeId)>)> {
         let mut region: HashSet<NodeId> = HashSet::new();
-        let mut pending: Vec<(NodeId, NodeId)> = users_in_order(ctx, node, reads)
+        let mut pending: Vec<(NodeId, NodeId)> = fx_users(ctx, node, reads)
             .into_iter()
             .map(|user| (node, user))
             .collect();
@@ -1555,7 +1697,7 @@ impl<'c> Propagator<'c> {
             }
             region.insert(candidate);
             pending.extend(
-                users_in_order(ctx, candidate, reads)
+                fx_users(ctx, candidate, reads)
                     .into_iter()
                     .map(|user| (candidate, user)),
             );
@@ -1563,7 +1705,7 @@ impl<'c> Propagator<'c> {
         Some((region, exit_edges))
     }
 
-    /// `_can_include_in_pointwise_region` (`:1168-1198`).
+    /// `_can_include_in_pointwise_region` (`:1171-1198`).
     fn can_include_in_pointwise_region(
         &self,
         ctx: &LayoutCtx<'_>,
@@ -1574,7 +1716,7 @@ impl<'c> Propagator<'c> {
         reads: &mut Reads,
     ) -> bool {
         let graph = ctx.graph();
-        if !self.is_elementwise(ctx, candidate) {
+        if !self.is_elementwise(ctx, candidate, reads) {
             return false;
         }
         let Some(shape) = graph.node_shape(candidate) else {
@@ -1665,7 +1807,7 @@ impl<'c> Propagator<'c> {
         if graph.node(node).target != PERMUTE_TARGET || graph.node(next_node).target != CAT {
             return false;
         }
-        let cat_users = users_in_order(ctx, next_node, reads);
+        let cat_users = fx_users(ctx, next_node, reads);
         if cat_users.is_empty() {
             return false;
         }
@@ -1790,7 +1932,7 @@ impl<'c> Propagator<'c> {
                 };
                 ctx.replace_input_with(node, original_input, producer);
                 ctx.replace_input_with(frontier_user, producer, node);
-                for user in ctx.graph().live_user_ids(node) {
+                for user in ctx.users_in_fx_order(node) {
                     if user != frontier_user {
                         ctx.replace_input_with(user, node, original_input);
                     }
@@ -1798,11 +1940,11 @@ impl<'c> Propagator<'c> {
                 ctx.move_before(node, frontier_user);
             }
             Direction::Down => {
-                let original_user = users_in_order(ctx, node, &mut Reads::default())[0];
+                let original_user = ctx.users_in_fx_order(node)[0];
                 let producer = all_input_nodes(ctx.node(node))[0];
                 let output = ctx.node(frontier).op == NodeOp::Output;
                 let frontier_input = if output { previous_frontier } else { frontier };
-                let frontier_users = ctx.graph().live_user_ids(frontier_input);
+                let frontier_users = ctx.users_in_fx_order(frontier_input);
                 ctx.replace_input_with(original_user, node, producer);
                 ctx.replace_input_with(node, producer, frontier_input);
                 for user in frontier_users {
@@ -1898,13 +2040,6 @@ fn is_table(graph: &IrGraph, id: NodeId) -> bool {
     rc4_target(&node.target) == TABLE || is_pending_table(node)
 }
 
-/// Whether rc4 follows this pending table with a RESCALE: a 16-bit table
-/// with a non-zero left shift (insert_table_ops.py:410-417).
-fn pending_table_has_rescale(graph: &IrGraph, id: NodeId) -> bool {
-    let node = graph.node(id);
-    is_pending_table(node) && planned_table(node).is_some_and(|table| table.rescale_lshift != 0)
-}
-
 /// `_node_or_inputs_are_int48` (backends/arm/_passes/propagate_view_copy_permute_pass.py:81-88).
 fn node_or_inputs_are_int48(graph: &IrGraph, id: NodeId, reads: &mut Reads) -> bool {
     reads.add(id);
@@ -1919,12 +2054,11 @@ fn node_or_inputs_are_int48(graph: &IrGraph, id: NodeId, reads: &mut Reads) -> b
         .any(|&input| special_dtype(&graph.node(input).meta) == Some("INT48"))
 }
 
-/// `id`'s users in graph order; reading them is reading `id`.
-fn users_in_order(ctx: &LayoutCtx<'_>, id: NodeId, reads: &mut Reads) -> Vec<NodeId> {
+/// `id.users` in torch.fx's order (`LayoutCtx::users_in_fx_order`); reading
+/// them is reading `id`, whose version changes when they reorder.
+fn fx_users(ctx: &LayoutCtx<'_>, id: NodeId, reads: &mut Reads) -> Vec<NodeId> {
     reads.add(id);
-    let mut users = ctx.graph().live_user_ids(id);
-    ctx.order().sort(&mut users);
-    users
+    ctx.users_in_fx_order(id)
 }
 
 /// `PermuteMap(node)`, which raises for dims that aren't a permutation.

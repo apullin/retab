@@ -1,9 +1,7 @@
-"""Random propagation graphs with 16-bit TABLE ops (the committed generator
-only draws int8 tables), recorded per pass and as Down then Up. Usage:
-`fuzz_t16.py down|up|down_up <count> <seed>`. Cases where rc4's result keeps a
-TABLE apart from its RESCALE have no RETAB form and are skipped (reported on
-stderr). A pre-existing RESCALE renamed by InsertTableOps' retrace makes the
-generator's TABLE marking raise KeyError; such cases are harness artifacts."""
+"""Random propagation graphs weighted towards 16-bit TABLE ops, recorded per
+pass and as Down then Up. Usage: `fuzz_t16.py down|up|down_up <count> <seed>`.
+Where rc4 keeps a TABLE apart from its RESCALE, the fixture holds RETAB's
+split form (`layout::pending`)."""
 import random
 import sys
 
