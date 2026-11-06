@@ -6,9 +6,9 @@
 //! RewriteUpsamplePass and RewriteAvgPool2dPass (alone and with the
 //! ComputeConstantOpsAOTPass after it) receive and return. The tests below pin
 //! what the fixtures hold, so a regeneration that drops a case or loses a
-//! detail fails here. The ports don't exist yet: each has a commented-out
-//! replay hook below for S3, S4 and S7 to enable, followed by the tests that
-//! pin the S1 review's findings.
+//! detail fails here. Each port's replay hook follows: S7's pool and upsample
+//! hooks run, and S3's and S4's conv hooks are commented out until their ports
+//! land. The tests that pin the S1 review's findings come last.
 
 use std::collections::BTreeSet;
 
