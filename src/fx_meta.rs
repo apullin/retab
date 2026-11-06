@@ -60,7 +60,7 @@ struct QuantFacts {
     output_qparams: Option<QParamMap>,
     pre_pass_arg_qparams: Option<QParamMap>,
     /// On a cond or while node: the output RESCALE targets recorded before the
-    /// explicit-mode layout passes, by output index
+    /// layout passes, by output index
     /// (`control_flow::IrRecordControlFlowRescaleTargetsPass`).
     control_flow_output_targets: Option<QParamMap>,
 }

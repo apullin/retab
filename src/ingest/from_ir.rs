@@ -77,8 +77,8 @@ fn graph_from_ir_ext(
         }
         // The branch/region args of a control-flow op reference region get_attr
         // nodes; emit them as String region names, not graph nodes. A get_attr
-        // holding tensor data is a constant (explicit mode's region constants,
-        // e.g. a folded cond predicate), not a region reference.
+        // holding tensor data is a constant (a region constant, e.g. a folded
+        // cond predicate), not a region reference.
         for a in &n.args {
             if let IrArg::Node(id) = a {
                 if let Some(m) = ir.node_opt(*id) {
@@ -527,7 +527,7 @@ fn materialize_const(
 }
 
 /// The constant a MaterializeTensorNode effect's data becomes, here and in
-/// explicit mode's in-IR materialization (`layout::constants`). TOSA has no
+/// the in-IR materialization (`layout::constants`). TOSA has no
 /// int64; mirror ConvertInt64ConstOpsToInt32Pass by downcasting an int64 const
 /// to int32 when every value fits the int32 range.
 pub(crate) fn materialized_tensor(
@@ -1135,7 +1135,7 @@ mod tests {
 
     /// A cond's branch args are get_attr nodes without data and become region
     /// names. A get_attr holding data is a constant, so a predicate folded
-    /// into one (an explicit-mode region constant) stays a tensor operand.
+    /// into one (a region constant) stays a tensor operand.
     #[test]
     fn a_get_attr_with_data_is_a_cond_operand_not_a_region() {
         use crate::fx_ir::{NodeTensor, TensorSource};

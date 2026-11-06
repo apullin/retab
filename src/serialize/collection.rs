@@ -248,9 +248,9 @@ fn collect_graph_items(
 }
 
 /// Every aten conv, pool and upsample must have been rewritten to its TOSA op (P2 design
-/// X5, critique B11). Their visitors build the NHWC view from dim orders, which RETAB's
-/// graphs don't have, so a survivor (a rewrite declined it) sends the graph to stock,
-/// through the same seam as `control_flow::assembly`.
+/// X5, critique B11). Their visitors date from the dim-order model, so a survivor (a
+/// rewrite declined it) sends the graph to stock, through the same seam as
+/// `control_flow::assembly`.
 pub(super) fn reject_aten_spatial_ops(region: &str, graph: &Graph) -> Result<(), String> {
     let Some(node) = graph
         .order

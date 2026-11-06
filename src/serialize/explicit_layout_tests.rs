@@ -1,4 +1,4 @@
-//! Serializer tests for explicit layout mode (APU-135 P2 design S2). Each test hand-builds
+//! Serializer tests for the explicit layout model (APU-135 P2 design S2). Each test hand-builds
 //! the graph one of rc4's channels-last rewrites leaves (RewriteConvPass,
 //! RewriteMaxPool2dPass, RewriteAvgPool2dPass, RewriteUpsamplePass), ingests it the way
 //! `ingest_and_serialize` does, and checks the TOSA against what rc4 emits for it.
@@ -359,7 +359,7 @@ fn assert_shape_operands_declared(items: &SerializedGraphItems) {
 #[test]
 fn conv2d_serializes_ohwi_weights_val_shapes_and_pads_as_given() {
     // rc4's CONV2D for Conv2d(3, 8, (3, 5), padding=(1, 2)) on [1, 3, 6, 10]. OHWI
-    // [8, 3, 5, 3]: dim-order mode would permute it again to [8, 5, 3, 3] (B1).
+    // [8, 3, 5, 3]: the dim-order serializer permuted it again to [8, 5, 3, 3] (B1).
     let case = ConvCase {
         target: "backend.tosa.CONV2D.default",
         input: &[1, 6, 10, 3],
@@ -382,13 +382,13 @@ fn conv2d_serializes_ohwi_weights_val_shapes_and_pads_as_given() {
 
 #[test]
 fn depthwise_hwcm_weights_keep_their_layout_and_the_val_shape() {
-    // KW == 1 weights match the serializer's OIHW guess (B3): [3, 1, 4, 2] would give a
-    // [1, 7, 5, 3] output, [1, 1, 4, 2] a [1, 2, 4, 1] one. [4, 1, 2, 2] (KH % C == 0)
-    // is also re-permuted as OIHW by dim-order's weight plan (B1). IrRewriteConv makes
-    // KW == 1 weights routinely through the Cin = 1 depthwise rule (design §2.4, Risk 4):
-    // cumsum's [K, 1, 1, 1] and Linear(in=1)'s [1, 1, 1, Co]. Dim-order logic gets both
-    // wrong: [5, 1, 1, 1] becomes [1, 1, 1, 5] with a [3, 13, 4, 5] output, and
-    // [1, 1, 1, 6] becomes [1, 6, 1, 1] with a [1, 4, 6, 1] output. Each case is the
+    // KW == 1 weights matched the dim-order serializer's OIHW guess (B3): [3, 1, 4, 2]
+    // would give a [1, 7, 5, 3] output, [1, 1, 4, 2] a [1, 2, 4, 1] one. [4, 1, 2, 2]
+    // (KH % C == 0) was also re-permuted as OIHW by its weight plan (B1). IrRewriteConv
+    // makes KW == 1 weights routinely through the Cin = 1 depthwise rule (design §2.4,
+    // Risk 4): cumsum's [K, 1, 1, 1] and Linear(in=1)'s [1, 1, 1, Co]. Dim-order logic got
+    // both wrong: [5, 1, 1, 1] became [1, 1, 1, 5] with a [3, 13, 4, 5] output, and
+    // [1, 1, 1, 6] became [1, 6, 1, 1] with a [1, 4, 6, 1] output. Each case is the
     // DEPTHWISE_CONV2D rc4 emits for the module in its comment.
     for (input, weight, params, val) in [
         // Conv2d(4, 8, (3, 1), groups=4, stride=2, padding=(1, 0)) on [1, 4, 16, 11]
@@ -831,7 +831,7 @@ fn resize_chain(
 #[test]
 fn nearest_resize_serializes_rc4_parameters() {
     // X4: rc4's nearest 5 -> 8 is scale [16, 10], offset -8, border -2 per axis; the
-    // dim-order emitter recomputes offset -3, border 3. A float32 val (RETAB's usual
+    // aten upsample emitter recomputes offset -3, border 3. A float32 val (RETAB's usual
     // typing of quantized compute nodes) takes the inherited qparam's int8.
     for resize_dtype in [INT8, FLOAT32] {
         let ir = resize_chain(
@@ -944,12 +944,12 @@ fn int16_bilinear_resize_is_int48_into_its_rescale() {
 }
 
 // ---------------------------------------------------------------------------
-// Gates on dim-order-mode logic
+// Gates on dim-order-era visitors
 // ---------------------------------------------------------------------------
 
 #[test]
 fn aten_spatial_ops_send_explicit_graphs_to_stock() {
-    // X5 and critique B11: their visitors only work with dim orders.
+    // X5 and critique B11: their visitors date from the dim-order model.
     for target in [
         "aten.convolution.default",
         "aten.conv1d.default",
@@ -1104,8 +1104,8 @@ fn rank4_getitems_and_tosa_convs_keep_their_val_shapes() {
 
 #[test]
 fn explicit_mode_drops_the_singleton_transposes_of_select_and_sum() {
-    // G7: without dim orders these TRANSPOSEs only move the removed size-1 dim, and
-    // explicit mode has no peephole to relabel them as RESHAPEs.
+    // G7: the dim-order serializer's TRANSPOSEs here only moved the removed size-1 dim;
+    // with no peephole to relabel them as RESHAPEs, none may be emitted.
     let mut ir = IrGraph::empty();
     let x = placeholder(&mut ir, "x", [2, 3, 4], INT32);
     let select = call(
@@ -1204,10 +1204,10 @@ fn assert_transposes_consistent(items: &SerializedGraphItems) {
 
 #[test]
 fn explicit_transposes_take_their_shape_from_their_input() {
-    // A TRANSPOSE's val is not its TOSA shape when dim-order logic made it: it permutes the
-    // logical input ([1, 2, 3, 4] here) rather than the [1, 3, 4, 2] the TRANSPOSE reads.
-    // The serializer recomputes the shape from the input, as it does for a permute, which
-    // is also right for a val that is the TOSA shape. D1 now sees such a stale val.
+    // A TRANSPOSE's val was not its TOSA shape when dim-order logic made it: it permuted
+    // the logical input ([1, 2, 3, 4] here) rather than the [1, 3, 4, 2] the TRANSPOSE
+    // reads. The serializer recomputes the shape from the input, as it does for a permute,
+    // which is also right for a val that is the TOSA shape. D1 sees such a stale val.
     let mut ir = IrGraph::empty();
     let x = placeholder(&mut ir, "x", [1, 3, 4, 2], FLOAT32);
     let transpose = call(

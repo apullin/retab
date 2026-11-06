@@ -1,4 +1,4 @@
-//! Serializer tests for explicit layout mode's control flow (APU-135 P2 design S8). Each
+//! Serializer tests for control flow in the explicit layout model (APU-135 P2 design S8). Each
 //! test takes a hand-built parent and its regions through the boundary contracts,
 //! ingest and serialization, as `ingest_and_serialize` does.
 
@@ -14,7 +14,7 @@ use crate::store::TensorStore;
 use crate::StashedPipeline;
 
 /// Serialize `parent` and its regions as `ingest_and_serialize` does, and check D1 on
-/// every graph: no dim order, and every node serializes at its val's shape.
+/// every graph: every node serializes at its val's shape.
 fn serialize_hierarchy(
     (mut parent, mut submodules): (IrGraph, BTreeMap<String, StashedPipeline>),
 ) -> Result<Vec<SerializedRegion>, String> {

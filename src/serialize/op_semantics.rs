@@ -133,14 +133,12 @@ pub(crate) fn is_avg_pool(target: &OpTarget) -> bool {
     matches!(target, OpTarget::AvgPool2d | OpTarget::TosaAvgPool2d)
 }
 
-/// TOSA-dialect ops whose shape the serializer recomputes (or reorders) in dim-order
-/// mode. In explicit layout mode their val is the TOSA shape, so the serializer reads
-/// it as-is (P2 design §4.2 G1, critique B1).
+/// TOSA-dialect ops whose val is their TOSA shape, so the serializer reads it as is
+/// rather than recomputing it from their arguments (P2 design §4.2 G1, critique B1).
 ///
-/// TRANSPOSE is not one of them. No explicit pass creates one (permutes stay
-/// `aten.permute_copy`, design §1c), so the only TRANSPOSEs an explicit graph can hold come
-/// from dim-order logic (IrToTosaMemoryFormat), whose vals are not TOSA shapes. Recomputing
-/// a TRANSPOSE's shape from its input is right for both kinds of val.
+/// TRANSPOSE is not one of them. No pass creates one (permutes stay
+/// `aten.permute_copy`, design §1c), and recomputing a TRANSPOSE's shape from its input,
+/// as for a permute, is right whether or not its val is the TOSA shape.
 pub(crate) fn has_explicit_tosa_shape_val(target: &OpTarget) -> bool {
     matches!(
         target,
@@ -154,9 +152,9 @@ pub(crate) fn has_explicit_tosa_shape_val(target: &OpTarget) -> bool {
     )
 }
 
-/// Aten conv, pool and upsample ops. Their visitors build the NHWC view from dim
-/// orders, so in explicit layout mode they must have been rewritten to TOSA ops
-/// before serialization (P2 design X5, critique B11).
+/// Aten conv, pool and upsample ops. Their visitors date from the dim-order model, so
+/// they must have been rewritten to TOSA ops before serialization (P2 design X5,
+/// critique B11).
 pub(crate) fn is_aten_spatial_layout_op(target: &OpTarget) -> bool {
     matches!(
         target,

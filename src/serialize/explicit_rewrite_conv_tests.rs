@@ -1,11 +1,11 @@
-//! End-to-end checks of `IrRewriteConvPass` (APU-135 P2 S3, S4) through explicit-mode
-//! ingest and serialization: rc4's captured graphs (`rewrite_conv*.txt`), rewritten
+//! End-to-end checks of `IrRewriteConvPass` (APU-135 P2 S3, S4) through ingest and
+//! serialization: rc4's captured graphs (`rewrite_conv*.txt`), rewritten
 //! by the pass, serialize to the TOSA rc4's form implies. Each TOSA conv reads its
 //! pre-permuted weight as given (no second permutation, design B1) and declares the
 //! val's shape with the accumulator's dtype (G1, A9); the RESCALE reads the
 //! accumulator; the only layout ops are the rewrite's TRANSPOSEs (and conv1d's
-//! RESHAPEs), with no peephole folding them away (G5); and no node carries a dim
-//! order or serializes at a shape other than its val's (D1). A16W8 convs whose
+//! RESHAPEs), with no peephole folding them away (G5); and no node serializes at a
+//! shape other than its val's (D1). A16W8 convs whose
 //! INT48 accumulators branch to int32 consumers, U55 clones included, serialize too.
 
 use super::collection::{check_explicit_layout_invariants, collect_regions, SerializedGraphItems};
@@ -54,7 +54,7 @@ fn rewritten_with(pass: &IrRewriteConvPass, fixture: &str, name: &str) -> IrGrap
     graph
 }
 
-/// Ingest and serialize `ir` as `ingest_and_serialize` does in explicit mode.
+/// Ingest and serialize `ir` as `ingest_and_serialize` does.
 fn serialize_explicit(ir: &IrGraph) -> Result<SerializedGraphItems, String> {
     let mut store = TensorStore::new();
     let mut graph: Graph = crate::ingest::from_ir::graph_from_ir(ir, &mut store);
@@ -62,7 +62,7 @@ fn serialize_explicit(ir: &IrGraph) -> Result<SerializedGraphItems, String> {
     graph.rebuild_user_lists();
     visitors::shape_utils::clear_shape_cache();
     visitors::dtype_quant::clear_dtype_cache();
-    // D1: no dim order, and every node serializes at its val's shape.
+    // D1: every node serializes at its val's shape.
     check_explicit_layout_invariants("main", &graph, &store)?;
     let mut regions = collect_regions(&[("main".to_string(), graph)], &store)?;
     Ok(regions.remove(0).items)
@@ -235,8 +235,8 @@ fn rewritten_convs_serialize_in_explicit_mode() {
     }
 }
 
-/// A16W8 convs with INT32 consumers (APU-135 P2 S4, design §2.8) serialize in
-/// explicit mode, standing in for the whole lowering rc4's
+/// A16W8 convs with INT32 consumers (APU-135 P2 S4, design §2.8) serialize, standing
+/// in for the whole lowering rc4's
 /// `test_rewrite_conv_a16w8_mixed_consumers_restore_int16` runs first
 /// (`_lower_a16w8_to_tosa`): every TOSA conv, U55 clones included, declares an
 /// INT48 accumulator; each RESCALE of one reads it as INT48 (scale32 off) and

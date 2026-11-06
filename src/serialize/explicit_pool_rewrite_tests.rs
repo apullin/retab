@@ -1,8 +1,8 @@
-//! The explicit-mode pool and upsample rewrites (APU-156, P2 design S7) end to
+//! The pool and upsample rewrites (APU-156, P2 design S7) end to
 //! end: each test builds the IR RETAB's pipeline holds at the rewrite's slot,
 //! runs the rewrite (and, for the avg pool's zero points, the
 //! IrMaterializeConstants that follows it at rc4's ComputeConstantOpsAOT slot),
-//! then ingests and serializes in explicit mode as `explicit_layout_tests`
+//! then ingests and serializes as `explicit_layout_tests`
 //! does. S2's tests hand-build rc4-shaped graphs; these check that what the
 //! passes actually leave serializes to rc4's TOSA.
 
