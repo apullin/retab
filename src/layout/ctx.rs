@@ -904,16 +904,26 @@ pub(crate) fn all_input_nodes(graph: &IrGraph, node: &IrNode) -> Vec<NodeId> {
 }
 
 /// Whether each node in `order` comes after the nodes of `order` it reads, the
-/// check `LayoutCtx::is_topological` makes.
+/// check `LayoutCtx::is_topological` makes. Every `LayoutCtx::new` runs it, so
+/// it reuses one buffer instead of building `all_input_nodes` per node.
 fn is_topological_order(graph: &IrGraph, order: &[NodeId]) -> bool {
     let mut position = vec![usize::MAX; graph.nodes.len()];
     for (index, &id) in order.iter().enumerate() {
         position[id] = index;
     }
+    let mut inputs = Vec::new();
     order.iter().enumerate().all(|(index, &id)| {
-        all_input_nodes(graph, graph.node(id))
-            .into_iter()
-            .all(|input| position[input] == usize::MAX || position[input] < index)
+        let node = graph.node(id);
+        inputs.clear();
+        for arg in node.args.iter().chain(node.kwargs.values()) {
+            arg.collect_node_ids(&mut inputs);
+        }
+        // Nodes outside `order` (dead ones) are not constrained.
+        inputs.iter().all(|&input| {
+            position
+                .get(input)
+                .is_none_or(|&at| at == usize::MAX || at < index)
+        })
     })
 }
 

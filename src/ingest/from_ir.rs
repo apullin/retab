@@ -510,7 +510,7 @@ fn materialize_const(
     let Some(&nid) = name_map.get(name) else {
         return false;
     };
-    let tensor = materialized_tensor(data, shape, dtype);
+    let tensor = materialized_tensor(data.to_vec(), shape.to_vec(), dtype);
     let val = TensorInfo::new(&tensor.shape, tensor.dtype);
     store.insert(name.to_string(), tensor);
     if let Some(n) = graph.nodes.get_mut(nid) {
@@ -527,23 +527,19 @@ fn materialize_const(
 /// int64; mirror ConvertInt64ConstOpsToInt32Pass by downcasting an int64 const
 /// to int32 when every value fits the int32 range.
 pub(crate) fn materialized_tensor(
-    data: &[u8],
-    shape: &[i64],
+    data: Vec<u8>,
+    shape: Vec<i64>,
     dtype: DType,
 ) -> crate::store::TensorData {
     let narrowed = match dtype {
-        DType::Int64 => downcast_int64_le_to_int32(data),
+        DType::Int64 => downcast_int64_le_to_int32(&data),
         _ => None,
     };
     let (data, dtype) = match narrowed {
         Some(narrowed) => (narrowed, DType::Int32),
-        None => (data.to_vec(), dtype),
+        None => (data, dtype),
     };
-    crate::store::TensorData {
-        data,
-        shape: shape.to_vec(),
-        dtype,
-    }
+    crate::store::TensorData { data, shape, dtype }
 }
 
 /// Append stock's `_{region}` suffix to every node name and store key of a

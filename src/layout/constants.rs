@@ -18,9 +18,10 @@
 //!
 //! - **What** becomes a constant, and which bytes it holds, is the planners'
 //!   decision. The pass runs IrFuseZeroInputConstantsEffectPass (rc4's
-//!   ComputeConstantOpsAOT share), IrFuseShapeOnlyConstantsEffectPass and
+//!   ComputeConstantOpsAOT share) and
 //!   IrFuseConstantInputsEffectPass::with_data_slices (FuseConstantArgs's
-//!   share; the variant the pipeline runs at this slot, `fx_pipeline.rs:208`),
+//!   share; the variant the pipeline runs at this slot, `fx_pipeline.rs:208`,
+//!   which also plans everything IrFuseShapeOnlyConstantsEffectPass plans),
 //!   and gives each planned node the tensor ingest would store under its name
 //!   (`ingest::from_ir::materialized_tensor`, which narrows int64 data to
 //!   int32 when it fits). The planners' rc4 quirks, such as quantizing a
@@ -44,7 +45,6 @@
 use std::collections::HashMap;
 
 use crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEffectPass;
-use crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEffectPass;
 use crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass;
 use crate::fx_ir::{
     EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, IrPass, MetaValue, NodeId, NodeOp,
@@ -124,7 +124,6 @@ impl IrPass for IrMaterializeConstantsPass {
 }
 
 /// The planners' constants by node: rc4's two passes' shares.
-#[derive(Default)]
 struct Plan {
     /// ComputeConstantOpsAOT's share: zero-input factories.
     factories: HashMap<NodeId, TensorData>,
@@ -134,22 +133,23 @@ struct Plan {
 
 impl Plan {
     /// Run the effect planners on `graph`, which they only read, and key
-    /// their MaterializeTensorNode effects by node. A node two planners plan
-    /// keeps the later plan, as ingest applies effects in order. Planner
-    /// order: IrFuseConstantInputsEffectPass plans every node the shape-only
-    /// planner does, with the same bytes; the shape-only planner runs too so
-    /// that the pass covers each planner whose effects ingest applies.
+    /// their MaterializeTensorNode effects by node.
+    ///
+    /// IrFuseShapeOnlyConstantsEffectPass needs no run of its own:
+    /// IrFuseConstantInputsEffectPass plans every node it plans, with the same
+    /// bytes. Both seed the same constants and zero-input factories, the
+    /// latter counts at least as many nodes constant, and a shape-only target
+    /// reads only its first argument. matmul_only is likewise the subset of
+    /// with_data_slices without slices.
     fn of(graph: &mut IrGraph) -> Self {
         let factories = IrFuseZeroInputConstantsEffectPass.run(graph);
-        let shape_only = IrFuseShapeOnlyConstantsEffectPass.run(graph);
-        let constant_inputs = IrFuseConstantInputsEffectPass::with_data_slices().run(graph);
+        let folds = IrFuseConstantInputsEffectPass::with_data_slices().run(graph);
 
         let ids = live_ids_by_name(graph);
-        let mut plan = Self::default();
-        record(&mut plan.factories, factories, &ids);
-        record(&mut plan.folds, shape_only, &ids);
-        record(&mut plan.folds, constant_inputs, &ids);
-        plan
+        Self {
+            factories: planned_constants(factories, &ids),
+            folds: planned_constants(folds, &ids),
+        }
     }
 }
 
@@ -165,22 +165,26 @@ fn live_ids_by_name(graph: &IrGraph) -> HashMap<String, Option<NodeId>> {
     ids
 }
 
-fn record(
-    plan: &mut HashMap<NodeId, TensorData>,
+/// Each MaterializeTensorNode effect's node and the tensor ingest stores for
+/// it. A node planned twice keeps the later plan, as ingest applies effects in
+/// order.
+fn planned_constants(
     result: EffectfulIrPassResult,
     ids: &HashMap<String, Option<NodeId>>,
-) {
+) -> HashMap<NodeId, TensorData> {
+    let mut planned = HashMap::new();
     for effect in result.effects.items {
         let LoweringEffect::MaterializeTensorNode(effect) = effect else {
             continue;
         };
         if let Some(&Some(id)) = ids.get(&effect.node_name) {
-            plan.insert(
+            planned.insert(
                 id,
-                materialized_tensor(&effect.data, &effect.shape, effect.dtype),
+                materialized_tensor(effect.data, effect.shape, effect.dtype),
             );
         }
     }
+    planned
 }
 
 /// ComputeConstantOpsAOTPass.call (`:355-374`): each planned factory, in graph
@@ -332,6 +336,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEffectPass;
     use crate::fx_ir::{IrArg, NodeMeta, QParam};
     use crate::graph::ir::DType;
     use crate::lowering_effects::LoweringEffectBatch;
@@ -1350,6 +1355,39 @@ mod tests {
             effects.items.extend(result.effects.items);
         }
         effects
+    }
+
+    fn effects_by_name(
+        effects: EffectfulIrPassResult,
+    ) -> HashMap<String, (Vec<u8>, Vec<i64>, DType)> {
+        effects
+            .effects
+            .items
+            .into_iter()
+            .filter_map(|effect| match effect {
+                LoweringEffect::MaterializeTensorNode(effect) => {
+                    Some((effect.node_name, (effect.data, effect.shape, effect.dtype)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `Plan::of` skips IrFuseShapeOnlyConstantsEffectPass because
+    /// IrFuseConstantInputsEffectPass::with_data_slices plans every node it
+    /// plans, with the same bytes. Should either planner change, this fails.
+    #[test]
+    fn the_constant_inputs_planner_covers_the_shape_only_planner() {
+        let mut graph = every_planner_graph();
+        let shape_only = effects_by_name(IrFuseShapeOnlyConstantsEffectPass.run(&mut graph));
+        let constant_inputs =
+            effects_by_name(IrFuseConstantInputsEffectPass::with_data_slices().run(&mut graph));
+        let mut names: Vec<&String> = shape_only.keys().collect();
+        names.sort_unstable();
+        assert_eq!(names, ["linspace_view", "permute", "view"]);
+        for (name, planned) in &shape_only {
+            assert_eq!(constant_inputs.get(name), Some(planned), "{name}");
+        }
     }
 
     /// The node names `run` folded, keyed by the constant that replaced them.
