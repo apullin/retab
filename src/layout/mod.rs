@@ -28,6 +28,8 @@ pub(crate) mod pending;
 #[allow(dead_code)]
 pub(crate) mod pointwise;
 #[allow(dead_code)]
+pub(crate) mod remove_permutes;
+#[allow(dead_code)]
 pub(crate) mod shape;
 
 // rc4's own tests for the P1 passes, ported (APU-135 P1).
