@@ -647,10 +647,7 @@ impl<'c> Propagator<'c> {
         let mut path = vec![node];
         let mut moved = false;
         reads.add(node);
-        loop {
-            let Some(next_nodes) = self.validated_next_nodes(ctx, node, frontier, reads) else {
-                break;
-            };
+        while let Some(next_nodes) = self.validated_next_nodes(ctx, node, frontier, reads) {
             if next_nodes.len() > 1 {
                 if !self.maybe_split_fork(ctx, node, frontier, previous_frontier, &next_nodes.nodes, reads) {
                     if next_nodes.table_constant {
