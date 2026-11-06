@@ -1152,3 +1152,86 @@ fn u55_clones_take_fresh_names() {
         .collect();
     assert_eq!(clones.len(), 1, "{clones:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Review of APU-155 S4
+// ---------------------------------------------------------------------------
+
+/// `permuted_int32_a16w8_u55` (`A16W8PermutedInt32Consumer` on the U55 subset)
+/// at `[1, 4, 257, 257]`: the shapes scaled so the conv's source permute fails
+/// U55's worst-case TRANSPOSE rule (257 * 257 > 65536). The 1x1 convs keep
+/// their weights, so only values change.
+fn large_permuted_int32_u55() -> IrGraph {
+    let fixture = REWRITE_CONV_A16W8_U55.replace("[1, 4, 8, 8]", "[1, 4, 257, 257]");
+    let case = replay::parse(&fixture)
+        .expect("a valid fixture")
+        .into_iter()
+        .find(|case| case.name == "permuted_int32_a16w8_u55")
+        .expect("the case");
+    replay::import(&case)
+}
+
+/// Review of APU-155 S4 (minor; design F8/F9 family). On U55, which edge
+/// permutes `IrDecomposePermuteForU55` splits is decided in Python, by node
+/// name, on the edge program (`_u55_permutes_to_split`,
+/// `PipelineConfig::u55_split_permutes`). When every user of a conv's source
+/// permute is an INT32 RESCALE, the A16W8 branching erases that permute and
+/// gives its consumers a copy named `{permute}_int32` on the widened branch,
+/// so a split decided for the edge permute reaches no live node and is
+/// dropped silently, as F9 describes for effects keyed by an erased name.
+/// Before S4, S3 sent these graphs to stock, which splits the permute; rc4
+/// runs DecomposePermuteForU55Pass (`arm_pass_manager.py:736`) on the graph
+/// after RewriteConvPass, so it judges the copy itself. F8 accepts that
+/// permutes the rewrite creates are never split in P2, but the module docs
+/// don't say that an edge permute already listed for splitting loses its
+/// split. The test passes once the listed permute's split reaches the
+/// widened copy (for example, by carrying its membership in
+/// `u55_split_permutes` to the copy), or once such a conv falls back.
+#[test]
+#[ignore = "BUG: on U55 the A16W8 branching erases a source permute listed in \
+            u55_split_permutes and its {permute}_int32 copy is never split"]
+fn a_u55_split_listed_source_permute_keeps_its_split() {
+    let mut graph = large_permuted_int32_u55();
+    let producer = calls(&graph, CONVOLUTION)[0];
+    let source_permute = users(&graph, producer)
+        .into_iter()
+        .find(|&user| graph.node(user).target == PERMUTE)
+        .expect("the source permute");
+    let name = graph.node(source_permute).name.clone();
+    let mut config = PipelineConfig::from_tosa_spec("TOSA-1.0+INT+int16+int4+u55");
+    config.u55_split_permutes.insert(name.clone());
+    let split = || crate::fx_decompose_permute_for_u55_ir::IrDecomposePermuteForU55Pass {
+        split_permutes: config.u55_split_permutes.clone(),
+    };
+    const CAT: &str = "aten.cat.default";
+
+    // Control: without the rewrite, the listed permute is split into sliced
+    // permutes and a cat.
+    let mut unrewritten = large_permuted_int32_u55();
+    assert!(split().run(&mut unrewritten), "the permute is split-worthy");
+    assert_eq!(calls(&unrewritten, CAT).len(), 1);
+
+    crate::stock_fallback::take();
+    assert!(IrRewriteConvPass::new(&config, false).run(&mut graph));
+    assert_eq!(crate::stock_fallback::take(), None);
+    // The INT32 RESCALE the permute fed now reads the widened copy.
+    let copy = graph
+        .by_name(&format!("{name}_int32"))
+        .filter(|node| node.alive)
+        .map(|node| node.id)
+        .expect("the widened copy of the source permute");
+    assert!(users(&graph, copy)
+        .into_iter()
+        .any(|user| is_rescale_to(&graph, user, INT32)));
+    split().run(&mut graph);
+    assert_eq!(
+        calls(&graph, CAT).len(),
+        1,
+        "the split decided for {name} reaches no live permute: {name} is {}",
+        if graph.by_name(&name).is_some_and(|node| node.alive) {
+            "live"
+        } else {
+            "erased"
+        }
+    );
+}
