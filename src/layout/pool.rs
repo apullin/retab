@@ -53,11 +53,12 @@ pub(crate) fn stride_or_kernel(node: &IrNode, kernel: [i64; 2]) -> Option<[i64; 
     }
 }
 
-/// `ceil_mode` at `index`, False when absent; rc4 only tests its truthiness.
+/// `ceil_mode` at `index`, False when absent; rc4 only tests its truthiness,
+/// so an int counts too.
 pub(crate) fn ceil_mode_arg(node: &IrNode, index: usize) -> Option<bool> {
     match node.args.get(index) {
-        None | Some(IrArg::None) => Some(false),
-        Some(IrArg::Bool(value)) => Some(*value),
+        None => Some(false),
+        Some(arg @ (IrArg::None | IrArg::Bool(_) | IrArg::Int(_))) => Some(is_truthy(arg)),
         Some(_) => None,
     }
 }
