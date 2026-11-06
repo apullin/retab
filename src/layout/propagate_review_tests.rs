@@ -391,3 +391,57 @@ fn down_pass_keeps_a_channel_split_on_the_channel_axis() {
         "the graph outputs must keep their shapes"
     );
 }
+
+/// The module docs say a failed walk is memoized "under the version stamps
+/// of every node it read". `is_per_tensor_rescale` also reads the RESCALE's
+/// input's special dtype (`_is_per_tensor_rescale`,
+/// backends/arm/_passes/propagate_view_copy_permute_pass.py:132-144), and a
+/// walk that fails there (a view moving up, which `blocks_moving` doesn't
+/// read inputs for) never records that input. Here the RESCALE's input loses
+/// its INT4 marker after a failed walk, so the view can now cross; the memo
+/// still skips the walk. Latent today: nothing in the driver rewrites a
+/// node's special dtype in place, but the read set doesn't say so. Test
+/// builds catch it through `CHECK_SKIPPED_WALKS` (switched off here to show
+/// what a release build does).
+#[test]
+#[ignore = "BUG (minor, latent): the walk memo omits the RESCALE input whose special dtype is_per_tensor_rescale reads"]
+fn walk_memo_reads_the_rescale_input_special_dtype() {
+    use crate::fx_meta::MetaValue;
+    use crate::layout::ctx::LayoutCtx;
+    use crate::layout::fx_node::SPECIAL_DTYPE_KEY;
+    use crate::layout::propagate::{propagate_iteration, Direction, PropagateConfig, CHECK_SKIPPED_WALKS};
+    use crate::layout::testing::*;
+
+    let build = |marked: bool| {
+        let mut g = LayoutGraph::new();
+        let x = g.typed_input("x", &[2, 3], "torch.int8");
+        if marked {
+            g.graph_mut()
+                .node_mut(x)
+                .meta
+                .set_extra(SPECIAL_DTYPE_KEY, MetaValue::Str("INT4".into()));
+        }
+        let r = g.rescale(x, "torch.int32", 0.5);
+        let v = g.view(r, &[3, 2]);
+        g.output(&[v]);
+        (g, x)
+    };
+    let config = PropagateConfig::arm(Direction::Up);
+    // Control: without the marker and without a memo, the view crosses.
+    let (mut control, _) = build(false);
+    assert!(propagate_iteration(&mut LayoutCtx::new(control.graph_mut()), &config));
+    let (mut g, x) = build(true);
+    let moved = {
+        let mut ctx = LayoutCtx::new(g.graph_mut());
+        assert!(
+            !propagate_iteration(&mut ctx, &config),
+            "the INT4 marker on the input fails `_is_per_tensor_rescale`, so the view stays"
+        );
+        ctx.meta_mut(x).extras.remove(SPECIAL_DTYPE_KEY);
+        let checking = CHECK_SKIPPED_WALKS.with(|check| check.replace(false));
+        let moved = propagate_iteration(&mut ctx, &config);
+        CHECK_SKIPPED_WALKS.with(|check| check.set(checking));
+        moved
+    };
+    assert!(moved, "with the marker gone the RESCALE is per-tensor and the view crosses it");
+}
