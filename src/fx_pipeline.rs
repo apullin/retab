@@ -211,8 +211,11 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(
             crate::fx_annotate_conv_bias_ir::IrAnnotateConvBiasDtypePass,
         )),
+        // Explicit mode slices as rc4 does (APU-135 P2, design §4.2-P).
         Ir(Box::new(
-            crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass,
+            crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass {
+                layout: config.layout,
+            },
         )),
         Ir(Box::new(fx_rewrite_squeeze_ir::IrRewriteSqueezePass)),
         Ir(Box::new(
