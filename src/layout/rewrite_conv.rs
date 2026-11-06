@@ -34,10 +34,12 @@
 //! evaluate is a constant node here too and the pass reads its tensor. The
 //! pre-permuted weight is a new constant of the source's kind, inserted
 //! directly after the source (RCP:368-376), carrying its special dtype (INT4,
-//! RCP:377-378); a conv without a bias gets a zero bias, an int32 parameter
-//! inserted before the first placeholder (RCP:160-195), so several end up in
-//! reverse conv order. The sources stay, unused, as rc4 leaves them; ingest
-//! drops unused constants. A conv whose tensor inputs are all constants is
+//! RCP:377-378). A folded source is the `{node}_fused_const` placeholder
+//! `IrMaterializeConstantsPass` put where FuseConstantArgs puts it, so the
+//! order is rc4's `[fused_const, {c}_weight_*]` (critique A6). A conv without
+//! a bias gets a zero bias, an int32 parameter inserted before the first
+//! placeholder (RCP:160-195), so several end up in reverse conv order. The
+//! sources stay, unused, as rc4 leaves them; ingest drops unused constants. A conv whose tensor inputs are all constants is
 //! left alone (design §2.2): rc4 folds it at `:700`, and RETAB folds it when a
 //! planner can (`IrMaterializeConstantsPass`, or the effect keyed by its name);
 //! one no planner folds reaches the serializer as an aten conv, and its
