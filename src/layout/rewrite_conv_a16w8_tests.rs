@@ -37,6 +37,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use crate::fx_decompose_permute_for_u55_ir::{is_marked_split, IrDecomposePermuteForU55Pass};
 use crate::fx_fuse_duplicate_users_ir::node_signature_from;
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, QParam};
 use crate::fx_meta::TensorFacts;
@@ -1171,67 +1172,140 @@ fn large_permuted_int32_u55() -> IrGraph {
     replay::import(&case)
 }
 
-/// Review of APU-155 S4 (minor; design F8/F9 family). On U55, which edge
-/// permutes `IrDecomposePermuteForU55` splits is decided in Python, by node
-/// name, on the edge program (`_u55_permutes_to_split`,
-/// `PipelineConfig::u55_split_permutes`). When every user of a conv's source
-/// permute is an INT32 RESCALE, the A16W8 branching erases that permute and
-/// gives its consumers a copy named `{permute}_int32` on the widened branch,
-/// so a split decided for the edge permute reaches no live node and is
-/// dropped silently, as F9 describes for effects keyed by an erased name.
-/// Before S4, S3 sent these graphs to stock, which splits the permute; rc4
-/// runs DecomposePermuteForU55Pass (`arm_pass_manager.py:736`) on the graph
-/// after RewriteConvPass, so it judges the copy itself. F8 accepts that
-/// permutes the rewrite creates are never split in P2, but the module docs
-/// don't say that an edge permute already listed for splitting loses its
-/// split. The test passes once the listed permute's split reaches the
-/// widened copy (for example, by carrying its membership in
-/// `u55_split_permutes` to the copy), or once such a conv falls back.
-#[test]
-#[ignore = "BUG: on U55 the A16W8 branching erases a source permute listed in \
-            u55_split_permutes and its {permute}_int32 copy is never split"]
-fn a_u55_split_listed_source_permute_keeps_its_split() {
-    let mut graph = large_permuted_int32_u55();
-    let producer = calls(&graph, CONVOLUTION)[0];
-    let source_permute = users(&graph, producer)
+/// The producer conv's source permute in [`large_permuted_int32_u55`] and its
+/// name, and a U55 pipeline config that lists it for splitting.
+fn listed_source_permute(graph: &IrGraph) -> (NodeId, String, PipelineConfig) {
+    let producer = calls(graph, CONVOLUTION)[0];
+    let source_permute = users(graph, producer)
         .into_iter()
         .find(|&user| graph.node(user).target == PERMUTE)
         .expect("the source permute");
     let name = graph.node(source_permute).name.clone();
     let mut config = PipelineConfig::from_tosa_spec("TOSA-1.0+INT+int16+int4+u55");
     config.u55_split_permutes.insert(name.clone());
-    let split = || crate::fx_decompose_permute_for_u55_ir::IrDecomposePermuteForU55Pass {
+    (source_permute, name, config)
+}
+
+/// The split pass as the pipeline builds it from `config`.
+fn split_pass(config: &PipelineConfig) -> IrDecomposePermuteForU55Pass {
+    IrDecomposePermuteForU55Pass {
         split_permutes: config.u55_split_permutes.clone(),
-    };
-    const CAT: &str = "aten.cat.default";
+    }
+}
+
+const CAT: &str = "aten.cat.default";
+
+/// Review of APU-155 S4 (minor; design F8/F9 family), now fixed. On U55,
+/// Python decides which edge permutes `IrDecomposePermuteForU55` splits, by
+/// node name on the edge program (`_u55_permutes_to_split`,
+/// `PipelineConfig::u55_split_permutes`). When every user of a conv's source
+/// permute is an INT32 RESCALE, the A16W8 branching erases that permute and
+/// gives its consumers a copy named `{permute}_int32` on the widened branch.
+/// So a split listed for the edge permute reached no live node and was dropped
+/// silently, as F9 describes for effects keyed by an erased name. Before S4,
+/// S3 sent these graphs to stock. rc4 runs DecomposePermuteForU55Pass
+/// (`arm_pass_manager.py:736`) on the graph after RewriteConvPass and splits
+/// the copy. The copy has the permute's dims, which break the worst-case rule
+/// because the permute is listed, and an int32 input, which rc4's exact check
+/// takes as unsupported without asking Vela. By then rc4 has fused the copy
+/// with the widened layout permute (PropagateViewCopyPermuteDownPass, P3), and
+/// an rc4 lowering of this model at this size splits that fused permute. The
+/// copy now carries the split in its meta (`mark_split`).
+#[test]
+fn a_u55_split_listed_source_permute_keeps_its_split() {
+    let mut graph = large_permuted_int32_u55();
+    let (_, name, config) = listed_source_permute(&graph);
 
     // Control: without the rewrite, the listed permute is split into sliced
     // permutes and a cat.
     let mut unrewritten = large_permuted_int32_u55();
-    assert!(split().run(&mut unrewritten), "the permute is split-worthy");
+    assert!(split_pass(&config).run(&mut unrewritten), "the permute is split-worthy");
     assert_eq!(calls(&unrewritten, CAT).len(), 1);
 
     crate::stock_fallback::take();
     assert!(IrRewriteConvPass::new(&config, false).run(&mut graph));
     assert_eq!(crate::stock_fallback::take(), None);
-    // The INT32 RESCALE the permute fed now reads the widened copy.
+    assert!(
+        !graph.by_name(&name).is_some_and(|node| node.alive),
+        "only INT32 RESCALEs read {name}, so the branching erases it"
+    );
+    // The INT32 RESCALE the permute fed now reads the widened copy, which
+    // carries the split.
     let copy = graph
         .by_name(&format!("{name}_int32"))
         .filter(|node| node.alive)
         .map(|node| node.id)
         .expect("the widened copy of the source permute");
-    assert!(users(&graph, copy)
+    let [int32] = users(&graph, copy)[..] else {
+        panic!("the copy feeds the INT32 RESCALE");
+    };
+    assert!(is_rescale_to(&graph, int32, INT32));
+    assert!(is_marked_split(&graph.node(copy).meta));
+
+    assert!(split_pass(&config).run(&mut graph));
+    let [cat] = calls(&graph, CAT)[..] else {
+        panic!("the split decided for {name} splits its copy, and nothing else");
+    };
+    assert_eq!(graph.node(cat).name, format!("{name}_int32_u55_cat"));
+    assert_eq!(graph.node(int32).arg_node(0), Some(cat));
+    assert!(!graph.node(copy).alive);
+}
+
+/// A listed source permute that other nodes read too stays and keeps its own
+/// split by name, and its widened copy is split as well. Being listed means
+/// the permute's dims break U55's worst-case rule, so rc4 splits the copy's
+/// int32 TRANSPOSE at `:736` whatever Vela says.
+#[test]
+fn a_u55_split_listed_shared_permute_and_its_copy_are_both_split() {
+    let mut graph = large_permuted_int32_u55();
+    let (source_permute, name, config) = listed_source_permute(&graph);
+    let output = graph.output_node().expect("an output").id;
+    let mut outputs = match &graph.node(output).args[0] {
+        IrArg::List(items) => items.clone(),
+        other => panic!("output {other:?}"),
+    };
+    outputs.push(IrArg::Node(source_permute));
+    graph.set_args(output, vec![IrArg::List(outputs)]);
+
+    crate::stock_fallback::take();
+    assert!(IrRewriteConvPass::new(&config, false).run(&mut graph));
+    assert_eq!(crate::stock_fallback::take(), None);
+    assert!(graph.node(source_permute).alive);
+    assert!(!is_marked_split(&graph.node(source_permute).meta), "listed by name");
+    let copy = graph
+        .by_name(&format!("{name}_int32"))
+        .expect("the widened copy")
+        .id;
+    assert!(is_marked_split(&graph.node(copy).meta));
+
+    assert!(split_pass(&config).run(&mut graph));
+    let mut cats: Vec<String> = calls(&graph, CAT)
         .into_iter()
-        .any(|user| is_rescale_to(&graph, user, INT32)));
-    split().run(&mut graph);
-    assert_eq!(
-        calls(&graph, CAT).len(),
-        1,
-        "the split decided for {name} reaches no live permute: {name} is {}",
-        if graph.by_name(&name).is_some_and(|node| node.alive) {
-            "live"
-        } else {
-            "erased"
-        }
-    );
+        .map(|cat| graph.node(cat).name.clone())
+        .collect();
+    cats.sort();
+    assert_eq!(cats, [format!("{name}_int32_u55_cat"), format!("{name}_u55_cat")]);
+}
+
+/// The copy of a source permute Python didn't list stays unmarked, on U55 as
+/// on the generic profile: the permutes the rewrite creates are never split in
+/// P2 (design F8), and the mark only carries a decision Python made.
+#[test]
+fn an_unlisted_source_permutes_copy_is_not_marked() {
+    for spec in ["TOSA-1.0+INT+int16+int4+u55", "TOSA-1.0+INT+int16"] {
+        let mut graph = large_permuted_int32_u55();
+        let (_, name, _) = listed_source_permute(&graph);
+        let mut config = PipelineConfig::from_tosa_spec(spec);
+        config.u55_split_permutes.insert("aten_permute_copy_default_unrelated".to_string());
+        crate::stock_fallback::take();
+        assert!(IrRewriteConvPass::new(&config, false).run(&mut graph), "{spec}");
+        assert_eq!(crate::stock_fallback::take(), None, "{spec}");
+        let copy = graph
+            .by_name(&format!("{name}_int32"))
+            .expect("the widened copy")
+            .id;
+        assert!(!is_marked_split(&graph.node(copy).meta), "{spec}");
+        assert!(graph.live_nodes().all(|node| !is_marked_split(&node.meta)), "{spec}");
+        assert!(!split_pass(&config).run(&mut graph), "{spec}");
+    }
 }

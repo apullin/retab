@@ -62,6 +62,7 @@ fn parent_pass() -> IrRewriteConvPass {
     IrRewriteConvPass {
         is_u55_subset: false,
         in_region: false,
+        u55_split_permutes: Default::default(),
     }
 }
 
@@ -69,6 +70,7 @@ fn region_pass() -> IrRewriteConvPass {
     IrRewriteConvPass {
         is_u55_subset: false,
         in_region: true,
+        u55_split_permutes: Default::default(),
     }
 }
 
@@ -817,6 +819,7 @@ fn a16w8_without_int32_consumers_matches_rc4() {
     let u55_pass = IrRewriteConvPass {
         is_u55_subset: true,
         in_region: false,
+        u55_split_permutes: Default::default(),
     };
     replay::check_cases(&u55_pass, REWRITE_CONV_A16W8_U55, &names);
 
@@ -1551,6 +1554,7 @@ fn a_fallback_stops_after_the_convs_before_it() {
             IrRewriteConvPass {
                 is_u55_subset: true,
                 in_region: false,
+                u55_split_permutes: Default::default(),
             },
             3,
         ),

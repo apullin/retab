@@ -679,6 +679,7 @@ fn rewrite_conv_matches_rc4() {
         &IrRewriteConvPass {
             is_u55_subset: false,
             in_region: false,
+            u55_split_permutes: Default::default(),
         },
         REWRITE_CONV,
     );
@@ -691,6 +692,7 @@ fn rewrite_conv_a16w8_matches_rc4() {
         &IrRewriteConvPass {
             is_u55_subset: false,
             in_region: false,
+            u55_split_permutes: Default::default(),
         },
         REWRITE_CONV_A16W8,
     );
@@ -702,6 +704,7 @@ fn rewrite_conv_a16w8_u55_matches_rc4() {
         &IrRewriteConvPass {
             is_u55_subset: true,
             in_region: false,
+            u55_split_permutes: Default::default(),
         },
         REWRITE_CONV_A16W8_U55,
     );
