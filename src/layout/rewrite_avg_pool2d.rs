@@ -584,6 +584,40 @@ mod tests {
         }
     }
 
+    /// rc4's ComputeConstantOpsAOTPass quantizes a `full` only when the node
+    /// has output qparams (`fuse_constant_ops_pass.py:325-334`); otherwise it
+    /// evaluates `full((1,), zp, dtype=int8)` as it is. rc4's
+    /// RewriteAvgPool2dPass then ComputeConstantOpsAOTPass on an int8 pool
+    /// with input qparams (0.1, -3) and an empty output map gives the zero
+    /// points int8 [-3] and [0] (run in .venv-et16, review of APU-156).
+    /// IrMaterializeConstants' planner (`plan_zero_input_full`'s `int_qparam`)
+    /// falls back to the input qparams instead and quantizes both:
+    /// round(-3 / 0.1) - 3 = -33 and round(0 / 0.1) - 3 = -3. The module docs'
+    /// "quantized with the pool's output qparams, which is rc4's quirk" holds
+    /// only when the pool has output qparams.
+    #[test]
+    #[ignore = "BUG: a pool without output qparams gets zero points quantized with its input \
+                qparams; rc4 leaves them unquantized"]
+    fn zero_points_of_a_pool_without_output_qparams_stay_unquantized() {
+        let (mut g, name) = pool_graph(
+            &[1, 3, 8, 8],
+            I8,
+            vec![ints(&[2, 2]), ints(&[2, 2])],
+            &[1, 3, 4, 4],
+            Some(qparam(0.1, -3, I8)),
+            None,
+        );
+        assert!(IrRewriteAvgPool2dPass.run(g.graph_mut()));
+        assert!(IrMaterializeConstantsPass { in_region: false }.run(g.graph_mut()));
+        let pool = by_name(&g, &format!("{name}_tosa"));
+        for (index, value) in [(1, -3i8), (2, 0i8)] {
+            let id = pool.args[index].as_node().unwrap();
+            let tensor = g.graph().node(id).tensor.as_ref().expect("constant data");
+            assert_eq!(tensor.data.dtype, DType::Int8);
+            assert_eq!(tensor.data.data, vec![value as u8], "zero point {index}");
+        }
+    }
+
     #[test]
     fn rc4_errors_go_to_stock() {
         let q = || Some(qparam(0.1, 0, I8));
