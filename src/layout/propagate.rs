@@ -321,7 +321,7 @@ thread_local! {
     pub(crate) static TRACE: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Log `ctx` under `label` in [`TRACE`] (test builds only).
+/// Log `ctx` under `label` in `TRACE` (test builds only).
 #[inline]
 fn trace(_ctx: &LayoutCtx<'_>, _label: impl FnOnce() -> String) {
     #[cfg(test)]
@@ -480,7 +480,7 @@ pub(crate) fn is_swappable(ctx: &LayoutCtx<'_>, config: &PropagateConfig, node: 
     Propagator::new(config).is_swappable(ctx, node, &mut Reads::default())
 }
 
-/// Count a branch in [`COVERAGE`] (test builds only).
+/// Count a branch in `COVERAGE` (test builds only).
 #[inline]
 fn cover(_branch: &'static str) {
     #[cfg(test)]

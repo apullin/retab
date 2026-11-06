@@ -16,7 +16,7 @@ impl IrPass for IrStripWhileBoundaryQPass {
 }
 
 /// IrPass: align each while_loop body output to its corresponding placeholder's
-/// quantization domain by inserting a RESCALE (output[i] feeds back as input[i],
+/// quantization domain by inserting a RESCALE (`output[i]` feeds back as `input[i]`,
 /// so their scale/zp must match). The IR analogue of FxInsertRescalePass::carried.
 pub struct IrInsertCarriedOutputRescalePass;
 impl IrPass for IrInsertCarriedOutputRescalePass {
