@@ -11,8 +11,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::fx_ir::IrGraph;
-use crate::fx_ir::IrPass;
+use crate::fx_ir::{IrGraph, IrPass};
 use crate::layout::replay::{self, Case, Data, DimOrders, Graph, Op, Options, QValue, Val};
 
 const REWRITE_CONV: &str = include_str!("../../tests/fixtures/layout_replay/rewrite_conv.txt");
