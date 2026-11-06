@@ -277,3 +277,60 @@ fn int16_tables_behind_a_shared_permute_match_rc4_after_down_and_up() {
         WITH_FLAG,
     );
 }
+
+/// Recorded in the venv by probe_user_order_min.py (the review's scripts):
+/// the minimized form of a case user_order_motif.py found.
+const DRIVER_USER_ORDER: &str = "\
+case driver_user_order
+before
+%0 = placeholder x0 : torch.float32[3, 3] q=none
+%1 = aten.permute_copy.default(%0, [1, 0]) : torch.float32[3, 3] q=none
+%2 = aten.permute_copy.default(%1, [1, 0]) : torch.float32[3, 3] q=none
+%3 = aten.view_copy.default(%2, [3, 3]) : torch.float32[3, 3] q=none
+%4 = aten.neg.default(%3) : torch.float32[3, 3] q=none
+%5 = aten.permute_copy.default(%4, [1, 0]) : torch.float32[3, 3] q=none
+%6 = aten.sub.Tensor(%5, %2) : torch.float32[3, 3] q=none
+%7 = aten.permute_copy.default(%6, [1, 0]) : torch.float32[3, 3] q=none
+%8 = aten.permute_copy.default(%7, [1, 0]) : torch.float32[3, 3] q=none
+%9 = aten.permute_copy.default(%8, [1, 0]) : torch.float32[3, 3] q=none
+%10 = aten.view_copy.default(%9, [3, 3]) : torch.float32[3, 3] q=none
+%11 = aten.mul.Tensor(%9, %10) : torch.float32[3, 3] q=none
+%12 = aten.sub.Tensor(%11, %1) : torch.float32[3, 3] q=none
+%13 = aten.permute_copy.default(%12, [1, 0]) : torch.float32[3, 3] q=none
+output([%1, %13])
+after modified=true
+%0 = placeholder x0 : torch.float32[3, 3] q=none
+%1 = aten.permute_copy.default(%0, [1, 0]) : torch.float32[3, 3] q=none
+%2 = aten.neg.default(%1) : torch.float32[3, 3] q=none
+%3 = aten.sub.Tensor(%2, %0) : torch.float32[3, 3] q=none
+%4 = aten.mul.Tensor(%3, %3) : torch.float32[3, 3] q=none
+%5 = aten.sub.Tensor(%4, %0) : torch.float32[3, 3] q=none
+output([%1, %5])
+end
+";
+
+/// The module docs argue that FX user order can't change the driver's
+/// result, but only for the walks' own reads. The driver also runs
+/// RemovePermutesAroundElementwiseTosaOps between sweeps, with no retrace
+/// after a sweep that changed the graph, so rc4 hands it users in FX
+/// insertion order, which the sweeps' rewiring has taken out of graph order;
+/// the remove-permutes port's user-order bug
+/// (`remove_permutes_review_tests::a_rewired_user_order_decides_which_region_is_rewritten`)
+/// is reachable through this driver. rc4 ends with one permute (the returned
+/// `x.permute`); re-sorting every node's users into graph order before each
+/// fusion sub-pass makes rc4 end with two, exactly the port's result
+/// (probe_user_order_min.py prints both; pinpoint_order.py shows sorting
+/// before RemovePermutes alone is enough). The port leaves an extra
+/// TRANSPOSE. A targeted search found 2 such graphs in 4,000
+/// (user_order_motif.py); the committed generator's random graphs found none
+/// in 1,500 (user_order_search.py).
+#[test]
+#[ignore = "BUG: the driver hands RemovePermutes graph-order users where rc4's sweeps leave FX insertion order; an extra TRANSPOSE"]
+fn down_pass_matches_rc4_when_sweeps_reorder_users() {
+    replay::check_cases_with(
+        &IrPropagateViewCopyPermutePass::ARM_DOWN,
+        DRIVER_USER_ORDER,
+        &["driver_user_order"],
+        WITH_FLAG,
+    );
+}
