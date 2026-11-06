@@ -6,9 +6,7 @@
 //! results taken by running the rc4 passes in `.venv-et16`; the embedded
 //! fixtures were printed by `gen_layout_replay.py`'s `run_case` for these
 //! graphs, so `replay` compares the port with rc4's exact result. The tests
-//! are ignored with the bug they show, so the suite stays green until the port
-//! is fixed; run them with `cargo test --lib fuse_helpers_review -- --ignored`.
-//! The FuseDuplicateUsers ones are fixed and run.
+//! were ignored with the bug they showed until the port was fixed.
 
 use crate::fx_ir::{IrPass, NodeId, QParam};
 use crate::layout::ctx::LayoutCtx;
@@ -121,10 +119,11 @@ fn fuse_duplicate_users_at_765_keeps_tables_with_different_qparams() {
 /// length 4 at -1! Mismatching argument at index 1 had torch.Size([1, 2, 3,
 /// 4]); but expected shape should be broadcastable to [1, 3, 4, 2]".
 ///
-/// The port's `retrace` gets `Incompatible` for the `add`, and because the
-/// `add` is not a touched node it keeps the stale `[1,2,3,4]` value and
-/// returns modified=true: a graph whose `add` no longer matches its operands,
-/// where rc4 (and the P1 rule "fail like rc4", commit 46b9368) fails.
+/// The port's `retrace` got `Incompatible` for the `add` and, because the
+/// `add` was not a touched node, kept the stale `[1,2,3,4]` value and
+/// returned modified=true: a graph whose `add` no longer matched its operands,
+/// where rc4 (and the P1 rule "fail like rc4", commit 46b9368) fails. It now
+/// re-derives every node whose operand values changed, and panics there.
 const ADD_READS_A_REWIRED_RESCALE: &str = "\
 case add_reads_a_rewired_rescale
 before
@@ -139,7 +138,6 @@ end
 ";
 
 #[test]
-#[ignore = "BUG: MoveDataMovementOps' retrace keeps a stale value where a rewired user's operands no longer broadcast; rc4's retrace raises RuntimeError"]
 fn move_data_movement_fails_where_rc4s_retrace_raises() {
     replay::check_known_with(
         &IrMoveDataMovementOpsToSmallerDtypePass,
@@ -153,11 +151,12 @@ fn move_data_movement_fails_where_rc4s_retrace_raises() {
 /// `exp` and `sqrt` of the int8/int32 value at `torch.float32`, as torch's
 /// unary float ops promote integer inputs.
 ///
-/// The port's `retraced_facts` re-derives the dtype of every pointwise user
-/// of a moved node by operand promotion, excepting only true division
-/// (`TRUE_DIVISION`), so it rewrites both values to the integer input dtype,
-/// although a sound move cannot change any value downstream (the rule
-/// `layout::shape`'s module docs give for keeping recorded dtypes).
+/// The port's `retraced_facts` re-derived the dtype of every pointwise user
+/// of a moved node by operand promotion, excepting only true division, so it
+/// rewrote both values to the integer input dtype, although a sound move
+/// cannot change any value downstream (the rule `layout::shape`'s module docs
+/// give for keeping recorded dtypes). It now leaves a node whose operand
+/// values are unchanged alone.
 const FLOAT_UNARY_AFTER_A_MOVE: &str = "\
 case exp_after_narrowing_rescale
 before
@@ -190,7 +189,6 @@ end
 ";
 
 #[test]
-#[ignore = "BUG: MoveDataMovementOps' retrace gives exp/sqrt of an integer value an integer dtype after a sound move; rc4 keeps torch.float32"]
 fn move_data_movement_keeps_float_results_of_unary_ops() {
     replay::check_known_with(
         &IrMoveDataMovementOpsToSmallerDtypePass,

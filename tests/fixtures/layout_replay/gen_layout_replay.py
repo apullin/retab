@@ -64,7 +64,8 @@ value of one map entry that isn't `QARGS`, as
 (the `TosaSpecialDtype` member in `meta["tosa_special_dtype"]`), `nofuse`
 (`meta["do_not_fuse_duplicate"]` is set) and `dead` (a call node the output
 doesn't reach). `after modified=<bool> same` means the after graph prints
-exactly like before; `after raises=<ExceptionType>` means the rc4 pass raised.
+exactly like before; `after raises=<ExceptionType>` means the rc4 pass raised,
+and the comment line after it (`# rc4: ...`) holds the start of its message.
 """
 
 from __future__ import annotations
@@ -456,7 +457,10 @@ def run_case(spec: PassSpec, build: Callable[[Builder], None]) -> list[str]:
         try:
             result = graph_pass(ep.graph_module)
         except Exception as error:  # noqa: BLE001 - recorded for the port to match
-            return ["before", *before, f"after raises={type(error).__name__}"]
+            # The message goes in a comment, which the parser skips: tests that
+            # check the port fails for rc4's reason read it from the text.
+            message = " ".join(str(error).split())[:300]
+            return ["before", *before, f"after raises={type(error).__name__}", f"# rc4: {message}"]
     after = dump(result.graph_module, kinds)
     lines = ["before", *before, f"after modified={str(bool(result.modified)).lower()}"]
     if after == before:
@@ -2422,6 +2426,79 @@ def move_data_movement_cases():
         b.output([b.call(A.div.Tensor, r, r), c])
 
     @case
+    def add_reads_a_rewired_rescale(b):
+        x = b.input("x", (1, 2, 3, 4), dtype=torch.int8)
+        y = b.input("y", (1, 2, 3, 4), dtype=torch.int32)
+        r = rescale(b, x, torch.int32)
+        p = b.permute(r, [0, 2, 3, 1])
+        b.output([p, b.call(A.add.Tensor, r, y)])
+
+    @case
+    def add_reads_a_rewired_rescale_of_the_same_shape(b):
+        x = b.input("x", (1, 2, 2, 2), dtype=torch.int8)
+        y = b.input("y", (1, 2, 2, 2), dtype=torch.int32)
+        r = rescale(b, x, torch.int32)
+        p = b.permute(r, [0, 2, 3, 1])
+        b.output([p, b.call(A.add.Tensor, r, y)])
+
+    @case
+    def a_rewired_user_broadcasts_to_a_new_shape(b):
+        x = b.input("x", (2, 1), dtype=torch.int8)
+        y = b.input("y", (2, 1), dtype=torch.int32)
+        r = rescale(b, x, torch.int32)
+        p = b.permute(r, [1, 0])
+        s = b.call(A.add.Tensor, r, y)
+        b.output([p, b.call(A.neg.default, s), b.call(A.sum.dim_IntList, s, [0], True)])
+
+    @case
+    def a_rewired_user_without_a_shape_rule(b):
+        x = b.input("x", (1, 2, 3, 4), dtype=torch.int8)
+        r = rescale(b, x, torch.int32)
+        p = b.permute(r, [0, 2, 3, 1])
+        b.output([p, b.call(A.flip.default, r, [0])])
+
+    @case
+    def exp_after_narrowing_rescale(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        r = rescale(b, b.permute(x, [1, 0]), torch.int8)
+        b.output([b.call(A.exp.default, r)])
+
+    @case
+    def sqrt_after_widening_rescale(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        p = b.permute(rescale(b, x, torch.int32), [1, 0])
+        b.output([b.call(A.sqrt.default, p)])
+
+    @case
+    def float_results_after_a_sound_move(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        r = rescale(b, b.permute(x, [1, 0]), torch.int8)
+        b.output(
+            [
+                b.call(A.div.Tensor, r, r),
+                b.call(A.mul.Tensor, r, 0.5),
+                b.call(A.gt.Tensor, r, r),
+                b.call(A.rsqrt.default, r),
+            ]
+        )
+
+    @case
+    def casting_copy_feeds_float_results(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        c = b.call(D._to_dim_order_copy.default, x, dtype=torch.int32)
+        r = rescale(b, c, torch.int16)
+        b.output(
+            [
+                b.call(A.exp.default, r),
+                b.call(A.mul.Tensor, r, 0.5),
+                b.call(A.add.Tensor, r, r),
+                b.call(A.ne.Tensor, r, r),
+                b.call(A.sum.dim_IntList, r, [0], True),
+                b.call(A.cat.default, [r, r], 0),
+            ]
+        )
+
+    @case
     def independent_moves_in_order(b):
         x = b.input("x", (2, 3), dtype=torch.int32)
         y = b.input("y", (3, 4), dtype=torch.int8)
@@ -2927,6 +3004,43 @@ class RandomGraph:
             computed = [n for n in self.pool if n.op == "call_function"]
             if computed:
                 set_special(rng.choice(computed))
+        elif kind == "mdm_shared_rescale":
+            # A RESCALE that widens, read by a permute and by later users,
+            # which rc4 rewires to the permuted value when the permute moves.
+            narrow = rng.choice([torch.int8, torch.int16])
+            value = self.pick(narrow)
+            r = rescale(b, value, torch.int32)
+            self.pool.append(b.permute(r, self.permutation(r.meta["val"].dim())))
+            for _ in range(rng.randint(1, 2)):
+                if rng.random() < 0.5:
+                    partner = self.operand_for(r, torch.int32)
+                    user = b.call(rng.choice([A.add.Tensor, A.mul.Tensor, A.maximum.default]), r, partner)
+                else:
+                    user = b.call(rng.choice([A.neg.default, A.abs.default, A.exp.default, A.sqrt.default]), r)
+                self.pool.append(user)
+                if rng.random() < 0.4:
+                    self.pool.append(b.call(rng.choice([A.neg.default, A.relu.default]), user))
+        elif kind == "mdm_float_user":
+            # Float and bool results of integer values, often moved ones.
+            candidates = [n for n in self.pool if n.meta["val"].dtype in int_dtypes]
+            if not candidates:
+                return
+            value = candidates[-1 - min(int(rng.expovariate(0.7)), len(candidates) - 1)]
+            op = rng.choice(["exp", "sqrt", "rsqrt", "sigmoid", "div", "mul_float", "gt", "sum"])
+            if op == "div":
+                user = b.call(A.div.Tensor, value, value)
+            elif op == "mul_float":
+                user = b.call(A.mul.Tensor, value, 0.5)
+            elif op == "gt":
+                user = b.call(A.gt.Tensor, value, value)
+            elif op == "sum":
+                rank = value.meta["val"].dim()
+                if rank == 0:
+                    return
+                user = b.call(A.sum.dim_IntList, value, [rng.randrange(rank)], True)
+            else:
+                user = b.call(getattr(A, op).default, value)
+            self.pool.append(user)
         else:
             raise ValueError(kind)
 
@@ -2995,7 +3109,14 @@ PROFILES = {
         "unary": 0.7,
         "dead": 0.3,
     },
-    "move_data_movement": {"mdm_chain": 4, "mdm_fanout": 1.5, "mdm_special": 0.4, "dead": 0.2},
+    "move_data_movement": {
+        "mdm_chain": 4,
+        "mdm_fanout": 1.5,
+        "mdm_special": 0.4,
+        "mdm_shared_rescale": 1.2,
+        "mdm_float_user": 1.2,
+        "dead": 0.2,
+    },
     "table_stage": {
         "table": 2,
         "table_dup": 3,

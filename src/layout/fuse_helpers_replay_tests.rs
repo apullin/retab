@@ -137,26 +137,52 @@ fn fuse_identical_input_transforms_driver_entry_matches_rc4() {
     );
 }
 
+/// rc4's retrace fake-executes `flip` on the rewired, permuted value; the
+/// port has no local shape rule for it and fails rather than keep a stale
+/// value (`move_data_movement::rederived_facts`).
+const NO_SHAPE_RULE: &str = "the port has no local rule for a node whose operands rc4 changed, and fails instead";
+
 #[test]
 fn move_data_movement_ops_to_smaller_dtype_matches_rc4() {
     replay::check_known_with(
         &IrMoveDataMovementOpsToSmallerDtypePass,
         MOVE_DATA_MOVEMENT,
-        &[],
+        &[("a_rewired_user_without_a_shape_rule", NO_SHAPE_RULE)],
         WITH_FLAG,
     );
 }
 
-/// Where rc4's MoveDataMovementOpsToSmallerDtype raises, it is always its
-/// closing `graph.lint()` rejecting a RESCALE user that now comes before the
-/// RESCALE, and the port panics for that reason too.
+/// rc4's message for each raising case: the `# rc4: ...` comment the
+/// generator writes after `after raises=`, which `replay::parse` skips.
+fn rc4_messages(fixture: &str) -> std::collections::HashMap<String, String> {
+    let mut messages = std::collections::HashMap::new();
+    let mut case = None;
+    for line in fixture.lines() {
+        if let Some(name) = line.strip_prefix("case ") {
+            case = Some(name.to_string());
+        } else if let Some(message) = line.strip_prefix("# rc4: ") {
+            messages.insert(case.clone().expect("a message inside a case"), message.to_string());
+        }
+    }
+    messages
+}
+
+/// Where rc4's MoveDataMovementOpsToSmallerDtype raises, it is its closing
+/// `graph.lint()` rejecting a RESCALE user that now comes before the
+/// RESCALE, or its retrace's fake execution rejecting a rewired user's
+/// operands; the port panics for the same reason.
 #[test]
 fn move_data_movement_fails_like_rc4_for_the_same_reason() {
     let cases = replay::parse(MOVE_DATA_MOVEMENT).unwrap();
+    let messages = rc4_messages(MOVE_DATA_MOVEMENT);
     let raising: Vec<&replay::Case> = cases.iter().filter(|case| case.raises.is_some()).collect();
-    assert!(raising.len() >= 10, "{} raising cases", raising.len());
+    let lint = |message: &str| message.contains("used before it has been defined");
+    let lint_cases = raising.iter().filter(|case| lint(&messages[&case.name])).count();
+    assert!(lint_cases >= 10, "{lint_cases} cases where rc4's lint raises");
+    assert!(raising.len() - lint_cases >= 10, "{} cases where rc4's retrace raises", raising.len() - lint_cases);
     for case in raising {
         assert_eq!(case.raises.as_deref(), Some("RuntimeError"), "{}", case.name);
+        let rc4 = &messages[&case.name];
         let mut graph = replay::build(&case.before);
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             IrMoveDataMovementOpsToSmallerDtypePass.run(&mut graph)
@@ -167,11 +193,13 @@ fn move_data_movement_fails_like_rc4_for_the_same_reason() {
             .map(String::as_str)
             .or_else(|| panic.downcast_ref::<&str>().copied())
             .unwrap_or_default();
-        assert!(
-            message.contains("used before it has been defined"),
-            "{}: {message}",
-            case.name
-        );
+        let expected = if lint(rc4) {
+            "used before it has been defined"
+        } else {
+            assert!(rc4.contains("broadcast"), "{}: rc4 raised {rc4}", case.name);
+            "rc4's retrace raises here: incompatible operands"
+        };
+        assert!(message.contains(expected), "{}: rc4 raised {rc4}; the port panicked with {message}", case.name);
     }
 }
 
