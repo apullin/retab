@@ -32,14 +32,6 @@ impl Graph {
         }
     }
 
-    /// Always true: every graph is lowered with rc4's explicit layout model, where a
-    /// node's val is its TOSA shape (APU-135, APU-162). Ingest and the serializer still
-    /// test it to switch off their implicit-layout logic, until P4 phase B deletes that
-    /// logic with this method.
-    pub fn is_explicit_layout(&self) -> bool {
-        true
-    }
-
     /// Get a reference to a node by its ID.
     pub fn node(&self, id: NodeId) -> Option<&Node> {
         self.nodes.get(id)

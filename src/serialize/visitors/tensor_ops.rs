@@ -1,6 +1,5 @@
 use super::emitter::EmitContext;
 use super::*;
-use crate::serialize::op_semantics;
 
 pub fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
@@ -541,12 +540,8 @@ pub(super) fn emit_scalar_tensor(ctx: &EmitContext) -> EmitResult {
 /// rescale is its own RESCALE node, so this only serializes the node. The parameters go
 /// through `push_const_shape`, which pools them into the operands' own CONST_SHAPE
 /// tensors: those are pooled too, so naming them directly could dangle when two hold
-/// the same values (offset and border are both [0, 0] for align_corners). Dim-order
-/// graphs keep the recomputing path.
+/// the same values (offset and border are both [0, 0] for align_corners).
 fn emit_tosa_resize(ctx: &EmitContext) -> EmitResult {
-    if !ctx.graph.is_explicit_layout() {
-        return emit_resize(ctx);
-    }
     let graph = ctx.graph;
     let node = ctx.node;
     let mut result = EmitResult::default();
@@ -933,53 +928,12 @@ pub(super) fn emit_transpose(ctx: &EmitContext) -> EmitResult {
 }
 
 pub(super) fn emit_reshape(ctx: &EmitContext) -> EmitResult {
-    let graph = ctx.graph;
     let node = ctx.node;
-    let store = ctx.store;
     let mut result = EmitResult::default();
     let input_names = ctx.input_names();
     let out_shape = ctx.shape();
     let output_name = ctx.primary_output_name();
     let output_dtype = ctx.passthrough_dtype();
-
-    // In explicit mode a view of an AVG_POOL2D already works in its NHWC coordinates
-    // (P2 design G6).
-    if let Some(input_node) = first_input_node(graph, node).filter(|_| !graph.is_explicit_layout())
-    {
-        let input_shape = actual_tensor_shape(graph, store, input_node);
-        let needs_avgpool_rank_drop_fix = out_shape.len() == 3
-            && input_shape.len() == 4
-            && (input_shape.get(1) == Some(&1) || input_shape.get(2) == Some(&1))
-            && op_semantics::is_avg_pool(&input_node.target);
-
-        if needs_avgpool_rank_drop_fix {
-            let transpose_name = format!("{}_pre_reshape_nchw", node.name);
-            let transpose_shape = vec![
-                input_shape[0],
-                input_shape[3],
-                input_shape[1],
-                input_shape[2],
-            ];
-            result.push_output_op(
-                make_empty_tensor(transpose_name.clone(), transpose_shape, output_dtype),
-                Op::Transpose,
-                Attribute::Transpose(TransposeAttribute {
-                    perms: vec![0, 3, 1, 2],
-                }),
-                input_names.clone(),
-            );
-
-            push_reshape_with_shape(
-                &mut result,
-                transpose_name,
-                output_name,
-                format!("{}_shape", node.name),
-                out_shape,
-                output_dtype,
-            );
-            return result;
-        }
-    }
 
     let shape_name = format!("{}_shape", node.name);
     push_const_shape(&mut result, shape_name.clone(), out_shape.clone());
@@ -1009,7 +963,7 @@ pub(super) fn emit_flip(ctx: &EmitContext) -> EmitResult {
             node.name, dims
         );
     };
-    let axis = map_axis_to_tosa_dim_order(ctx.graph, node, *dim as i32);
+    let axis = map_axis_to_tosa_dim_order(node, *dim as i32);
     let mut result = EmitResult::default();
     result.push_output_op(
         make_output_tensor(node),
@@ -1032,7 +986,7 @@ pub(super) fn emit_concat(ctx: &EmitContext) -> EmitResult {
     // Map the cat axis through the OUTPUT node's dim_order, matching upstream
     // op_cat.py (`dim = output.dim_order.index(dim)`). Equivalent when operand
     // layouts are uniform (the norm), but the output is the canonical reference.
-    let axis = map_axis_to_tosa_dim_order(graph, node, raw_axis);
+    let axis = map_axis_to_tosa_dim_order(node, raw_axis);
     if crate::config::debug_cat_enabled() {
         fn dbg_shape(n: &crate::graph::ir::Node) -> Vec<i64> {
             n.meta.val.shape[..n.meta.val.shape_len as usize].to_vec()

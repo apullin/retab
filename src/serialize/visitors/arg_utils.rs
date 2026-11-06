@@ -54,16 +54,6 @@ pub(super) fn kwarg_or_arg_i32_list_or(
     i32_list_or(kwarg_or_arg_i32_list(node, name, idx), default)
 }
 
-pub(super) fn kwarg_or_arg_i32_list_or_repeat(
-    node: &Node,
-    name: &str,
-    idx: usize,
-    len: usize,
-    default: i32,
-) -> Vec<i32> {
-    i32_list_or_repeat(kwarg_or_arg_i32_list(node, name, idx), len, default)
-}
-
 pub(super) fn arg_or_kwarg_i32_list(node: &Node, idx: usize, name: &str) -> Vec<i32> {
     let arg = arg_i32_list(node, idx);
     if arg.is_empty() {

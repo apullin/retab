@@ -172,20 +172,6 @@ pub(crate) fn is_aten_spatial_layout_op(target: &OpTarget) -> bool {
     )
 }
 
-pub(crate) fn uses_nhwc_layout_shape(target: &OpTarget) -> bool {
-    matches!(
-        target,
-        OpTarget::Conv2d
-            | OpTarget::DepthwiseConv2d
-            | OpTarget::TosaConv2d
-            | OpTarget::TosaDepthwiseConv2d
-            | OpTarget::MaxPool2d
-            | OpTarget::AvgPool2d
-            | OpTarget::TosaMaxPool2d
-            | OpTarget::TosaAvgPool2d
-    )
-}
-
 pub(crate) fn is_shape_literal_reshape(target: &OpTarget) -> bool {
     matches!(
         target,

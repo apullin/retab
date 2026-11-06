@@ -25,8 +25,6 @@ struct ParsedPoolSpec {
 enum PoolArgSource {
     /// aten positional args (arg_i32_list / arg_bool)
     Positional,
-    /// tosa kwargs (kwarg_i32_list / kwarg_bool)
-    Keyword,
     /// rc4's `MAX_POOL2D(x, kernel, stride, pad)`: positional, pad already adjusted.
     TosaPositional,
 }
@@ -41,12 +39,6 @@ impl ParsedPoolSpec {
                 arg_i32_list(node, 2),
                 arg_i32_list(node, 3),
                 arg_bool(node, 5, false),
-            ),
-            PoolArgSource::Keyword => (
-                kwarg_i32_list(node, "kernel"),
-                kwarg_i32_list(node, "stride"),
-                kwarg_i32_list(node, "pad"),
-                kwarg_bool(node, "ceil_mode", false),
             ),
             // A 4-element pad passes through `adjusted_max_pool_pad` unchanged.
             PoolArgSource::TosaPositional => (
@@ -79,28 +71,21 @@ pub(in crate::serialize::visitors) fn emit_aten_max_pool2d(ctx: &EmitContext) ->
 }
 
 pub(in crate::serialize::visitors) fn emit_max_pool2d(ctx: &EmitContext) -> EmitResult {
-    // Explicit-mode MAX_POOL2D nodes come from IrRewriteMaxPool2d in rc4's positional
-    // form, without kwargs (P2 design X2).
-    let source = if ctx.graph.is_explicit_layout() {
-        PoolArgSource::TosaPositional
-    } else {
-        PoolArgSource::Keyword
-    };
-    let spec = ParsedPoolSpec::parse(ctx.graph, ctx.node, ctx.store, source);
+    // MAX_POOL2D nodes come from IrRewriteMaxPool2d in rc4's positional form, without
+    // kwargs (P2 design X2).
+    let spec = ParsedPoolSpec::parse(
+        ctx.graph,
+        ctx.node,
+        ctx.store,
+        PoolArgSource::TosaPositional,
+    );
     emit_max_pool2d_from_spec(ctx, spec)
 }
 
 fn emit_max_pool2d_from_spec(ctx: &EmitContext, spec: ParsedPoolSpec) -> EmitResult {
     let mut result = EmitResult::default();
     let output_name = primary_output_name(ctx.graph, ctx.node);
-    let mut output_tensor = compute_pool_nhwc_output(
-        ctx.graph,
-        ctx.store,
-        ctx.node,
-        &spec.kernel,
-        &spec.stride,
-        &spec.pad,
-    );
+    let mut output_tensor = pool_output_tensor(ctx.node);
     output_tensor.name = output_name.clone();
     result.push_output_op(
         output_tensor,
@@ -117,14 +102,10 @@ fn emit_max_pool2d_from_spec(ctx: &EmitContext, spec: ParsedPoolSpec) -> EmitRes
 }
 
 /// rc4's `AVG_POOL2D(x, input_zp, output_zp, kernel, stride, pad, acc_type)` (P2 design
-/// X3). The zero points are graph constants that the explicit pipeline materializes,
-/// already quantized the way rc4's ComputeConstantOpsAOTPass does, so the operator reads
-/// them as its 2nd and 3rd inputs and nothing is recomputed here. Dim-order graphs keep
-/// the aten-style path.
+/// X3). The zero points are graph constants that the pipeline materializes, already
+/// quantized the way rc4's ComputeConstantOpsAOTPass does, so the operator reads them as
+/// its 2nd and 3rd inputs and nothing is recomputed here.
 pub(in crate::serialize::visitors) fn emit_tosa_avg_pool2d(ctx: &EmitContext) -> EmitResult {
-    if !ctx.graph.is_explicit_layout() {
-        return emit_avg_pool2d(ctx);
-    }
     let graph = ctx.graph;
     let node = ctx.node;
     let kernel = arg_i32_list(node, 3);
@@ -137,7 +118,7 @@ pub(in crate::serialize::visitors) fn emit_tosa_avg_pool2d(ctx: &EmitContext) ->
             _ => DType::Int32,
         },
     };
-    let output_tensor = compute_pool_nhwc_output(graph, ctx.store, node, &kernel, &stride, &pad);
+    let output_tensor = pool_output_tensor(node);
     let mut result = EmitResult::default();
     result.push_output_op(
         output_tensor,
@@ -179,7 +160,7 @@ pub(in crate::serialize::visitors) fn emit_avg_pool2d(ctx: &EmitContext) -> Emit
             )
         }
     };
-    let output_tensor = compute_pool_nhwc_output(graph, store, node, &kernel, &stride, &pad);
+    let output_tensor = pool_output_tensor(node);
     // rc4's RewriteAvgPool2dPass materializes both zero points with
     // `call_scalar(zp, meta)`. The `full` node inherits the avg-pool meta, output_qparams
     // included, so ComputeConstantOpsAOTPass quantizes the zero point as if it were a real

@@ -168,15 +168,13 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> Emi
 
     let spec = ParsedConvSpec::parse_aten(ctx);
     if input_rank(graph, node) == 5 {
-        let raw_pad = symmetric_spatial_pad(&spec.pad, 3);
+        let pad = symmetric_spatial_pad(&spec.pad, 3);
         let stride = i32_list_or_repeat(spec.stride.clone(), 3, 1);
         let dilation = i32_list_or_repeat(spec.dilation.clone(), 3, 1);
-        let pad =
-            adjusted_tosa_pad_for_emitted_conv3d(graph, store, node, &raw_pad, &stride, &dilation);
         let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
 
         result.push_output_op(
-            compute_conv3d_ndhwc_output(graph, store, node, &pad, &stride, &dilation),
+            conv_output_tensor(node),
             Op::Conv3d,
             Attribute::Conv3d(Conv3dAttribute {
                 pad,
@@ -211,7 +209,7 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> Emi
 
     if is_depthwise {
         result.push_output_op(
-            compute_depthwise_conv2d_nhwc_output(graph, store, node, &pad, &stride, &dilation),
+            conv_output_tensor(node),
             Op::DepthwiseConv2d,
             Attribute::DepthwiseConv2d(DepthwiseConv2dAttribute {
                 pad,
@@ -224,7 +222,7 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> Emi
         );
     } else {
         result.push_output_op(
-            compute_conv2d_nhwc_output(graph, store, node, &pad, &stride, &dilation),
+            conv_output_tensor(node),
             Op::Conv2d,
             Attribute::Conv2d(Conv2dAttribute {
                 pad,
@@ -243,20 +241,17 @@ pub(in crate::serialize::visitors) fn emit_aten_conv2d(ctx: &EmitContext) -> Emi
 pub(in crate::serialize::visitors) fn emit_conv2d(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;
-    let store = ctx.store;
     let mut result = EmitResult::default();
 
     let spec = ParsedConvSpec::parse_tosa(ctx);
-    let raw_pad = i32_list_or_repeat(spec.pad.clone(), 4, 0);
+    // rc4's pad, already adjusted for TOSA's exact division (P2 design G2).
+    let pad = i32_list_or_repeat(spec.pad.clone(), 4, 0);
     let stride = i32_list_or_repeat(spec.stride.clone(), 2, 1);
     let dilation = i32_list_or_repeat(spec.dilation.clone(), 2, 1);
-    let pad = adjusted_tosa_pad_for_emitted_conv2d(
-        graph, store, node, &raw_pad, &stride, &dilation, false,
-    );
     let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
 
     result.push_output_op(
-        compute_conv2d_nhwc_output(graph, store, node, &pad, &stride, &dilation),
+        conv_output_tensor(node),
         Op::Conv2d,
         Attribute::Conv2d(Conv2dAttribute {
             pad,
@@ -273,19 +268,17 @@ pub(in crate::serialize::visitors) fn emit_conv2d(ctx: &EmitContext) -> EmitResu
 pub(in crate::serialize::visitors) fn emit_conv3d(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;
-    let store = ctx.store;
     let mut result = EmitResult::default();
 
     let spec = ParsedConvSpec::parse_tosa(ctx);
-    let raw_pad = i32_list_or_repeat(spec.pad.clone(), 6, 0);
+    // rc4's pad, already adjusted for TOSA's exact division (P2 design G2).
+    let pad = i32_list_or_repeat(spec.pad.clone(), 6, 0);
     let stride = i32_list_or_repeat(spec.stride.clone(), 3, 1);
     let dilation = i32_list_or_repeat(spec.dilation.clone(), 3, 1);
-    let pad =
-        adjusted_tosa_pad_for_emitted_conv3d(graph, store, node, &raw_pad, &stride, &dilation);
     let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
 
     result.push_output_op(
-        compute_conv3d_ndhwc_output(graph, store, node, &pad, &stride, &dilation),
+        conv_output_tensor(node),
         Op::Conv3d,
         Attribute::Conv3d(Conv3dAttribute {
             pad,
@@ -302,20 +295,17 @@ pub(in crate::serialize::visitors) fn emit_conv3d(ctx: &EmitContext) -> EmitResu
 pub(in crate::serialize::visitors) fn emit_depthwise_conv2d(ctx: &EmitContext) -> EmitResult {
     let graph = ctx.graph;
     let node = ctx.node;
-    let store = ctx.store;
     let mut result = EmitResult::default();
 
     let spec = ParsedConvSpec::parse_tosa(ctx);
-    let raw_pad = i32_list_or_repeat(spec.pad.clone(), 4, 0);
+    // rc4's pad, already adjusted for TOSA's exact division (P2 design G2).
+    let pad = i32_list_or_repeat(spec.pad.clone(), 4, 0);
     let stride = i32_list_or_repeat(spec.stride.clone(), 2, 1);
     let dilation = i32_list_or_repeat(spec.dilation.clone(), 2, 1);
-    let pad = adjusted_tosa_pad_for_emitted_conv2d(
-        graph, store, node, &raw_pad, &stride, &dilation, true,
-    );
     let conv_inputs = spec.prepare_inputs(&mut result, graph, node);
 
     result.push_output_op(
-        compute_depthwise_conv2d_nhwc_output(graph, store, node, &pad, &stride, &dilation),
+        conv_output_tensor(node),
         Op::DepthwiseConv2d,
         Attribute::DepthwiseConv2d(DepthwiseConv2dAttribute {
             pad,

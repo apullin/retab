@@ -58,25 +58,11 @@ fn resolve_inferred_shape(shape: &[i32], input_shape: &[i32]) -> Option<Vec<i32>
     Some(resolved)
 }
 
-pub(super) fn map_axis_to_tosa_dim_order(graph: &Graph, node: &Node, axis: i32) -> i32 {
+pub(super) fn map_axis_to_tosa_dim_order(node: &Node, axis: i32) -> i32 {
     let rank = node.meta.val.shape_len as i32;
     let normalized = if axis < 0 { axis + rank } else { axis };
     if normalized < 0 || normalized >= rank {
         return axis;
-    }
-
-    // Dim-order mode's generated TRANSPOSEs keep logical vals. IrToTosaMemoryFormat stamps
-    // a dim order on each, so an explicit graph holding one goes to stock before
-    // serialization (`reject_dim_orders`); any other TRANSPOSE permutes its axes like a
-    // permute (P2 design G8).
-    if matches!(node.target, OpTarget::TosaTranspose) && !graph.is_explicit_layout() {
-        if let Some(input_node) = first_input_node(graph, node) {
-            let input_axis = map_axis_to_tosa_dim_order(graph, input_node, normalized);
-            let perms = transpose_perms(node);
-            if let Some(pos) = perms.iter().position(|&dim| dim == input_axis) {
-                return pos as i32;
-            }
-        }
     }
 
     if let Some(order) = node.meta.tosa_dim_order.as_ref() {
@@ -172,7 +158,7 @@ fn sliced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Optio
         return (size.len() == input_shape.len()).then(|| apply_tosa_dim_order(node, size));
     }
 
-    strided_slice_shape(graph, node, input_node, &input_shape)
+    strided_slice_shape(node, input_node, &input_shape)
         .or_else(|| explicit_slice_size_shape(node, &input_shape))
 }
 
@@ -199,7 +185,7 @@ fn reduced_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Opti
     let mut output_shape = input_shape.clone();
     let mut mapped_axes: Vec<usize> = axes
         .into_iter()
-        .map(|axis| map_axis_to_tosa_dim_order(graph, input_node, axis) as usize)
+        .map(|axis| map_axis_to_tosa_dim_order(input_node, axis) as usize)
         .collect();
 
     if keepdim {
@@ -412,12 +398,7 @@ fn pool_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Option<
     pool_nhwc_shape(&input_shape, &kernel, &stride, &pad)
 }
 
-fn strided_slice_shape(
-    graph: &Graph,
-    node: &Node,
-    input_node: &Node,
-    input_shape: &[i32],
-) -> Option<Vec<i32>> {
+fn strided_slice_shape(node: &Node, input_node: &Node, input_shape: &[i32]) -> Option<Vec<i32>> {
     if node.args.len() < 4 {
         return None;
     }
@@ -430,10 +411,8 @@ fn strided_slice_shape(
         .meta
         .tosa_dim_order
         .as_ref()
-        .map(|_| map_axis_to_tosa_dim_order(graph, node, clamped_dim as i32) as usize)
-        .unwrap_or_else(|| {
-            map_axis_to_tosa_dim_order(graph, input_node, clamped_dim as i32) as usize
-        });
+        .map(|_| map_axis_to_tosa_dim_order(node, clamped_dim as i32) as usize)
+        .unwrap_or_else(|| map_axis_to_tosa_dim_order(input_node, clamped_dim as i32) as usize);
     let input_dim = input_shape.get(dim).copied()? as i64;
     let start = arg_i64(node, 2, 0);
     let end = arg_i64(node, 3, input_dim);
@@ -477,15 +456,6 @@ fn explicit_slice_size_shape(node: &Node, input_shape: &[i32]) -> Option<Vec<i32
     Some(size)
 }
 
-fn nhwc_layout_shape(node: &Node, raw_shape: &[i32], reordered_shape: &[i32]) -> Option<Vec<i32>> {
-    let logical_nhwc = raw_shape.len() == 4
-        && (is_getitem_node(node) || op_semantics::uses_nhwc_layout_shape(&node.target));
-    if !logical_nhwc || reordered_shape != raw_shape {
-        return None;
-    }
-    Some(vec![raw_shape[0], raw_shape[2], raw_shape[3], raw_shape[1]])
-}
-
 /// Reconstruct the concrete TOSA tensor shape once at the serializer boundary
 /// instead of re-validating dim-order and layout facts ad hoc at each emitter.
 pub(crate) fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Node) -> Vec<i32> {
@@ -499,11 +469,11 @@ pub(crate) fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Nod
 }
 
 fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> Vec<i32> {
-    // In explicit layout mode a TOSA conv/pool/resize val is its TOSA shape. The rules
-    // below would misread it: `pool_tensor_shape` takes AVG_POOL2D's zero-point operands
-    // for its kernel and stride (critique B1), and the broadcast and NHWC rules were
-    // written for logical NCHW vals. A TRANSPOSE keeps the input-permuting rule below.
-    if graph.is_explicit_layout() && op_semantics::has_explicit_tosa_shape_val(&node.target) {
+    // A TOSA conv/pool/resize val is its TOSA shape. The rules below would misread it:
+    // `pool_tensor_shape` takes AVG_POOL2D's zero-point operands for its kernel and stride
+    // (critique B1), and the broadcast rule was written for logical NCHW vals. A TRANSPOSE
+    // keeps the input-permuting rule below.
+    if op_semantics::has_explicit_tosa_shape_val(&node.target) {
         return raw_i32_shape(node);
     }
 
@@ -559,16 +529,7 @@ fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> 
             }
         }
     }
-    let reordered_shape = apply_tosa_dim_order(node, raw_shape.clone());
-
-    // The NHWC guess fires exactly when a node has no dim order, which is every node in
-    // explicit mode; there it would reorder NHWC vals and rank-4 control-flow getitems
-    // (P2 design B2).
-    if node.op == OpType::Placeholder || graph.is_explicit_layout() {
-        return reordered_shape;
-    }
-
-    nhwc_layout_shape(node, &raw_shape, &reordered_shape).unwrap_or(reordered_shape)
+    apply_tosa_dim_order(node, raw_shape)
 }
 
 pub(super) fn promoted_2d_matmul_shape(
@@ -740,31 +701,6 @@ mod tests {
                 Some(vec![1, 3, 5, 2])
             );
         }
-    }
-
-    #[test]
-    fn transposes_do_not_remap_axes() {
-        // P2 design G8: a TRANSPOSE's val is physical, so an axis does not map through
-        // the TRANSPOSE's input.
-        let mut graph = Graph::new();
-        let x = graph.create_node(
-            OpType::Placeholder,
-            OpTarget::Other("x".into()),
-            smallvec![],
-            Vec::new(),
-            meta(&[2, 3, 4], DType::Float32),
-            "x".into(),
-        );
-        let transpose = graph.create_node(
-            OpType::CallFunction,
-            OpTarget::TosaTranspose,
-            smallvec![Arg::Node(x), Arg::IntList(smallvec![2, 0, 1])],
-            Vec::new(),
-            meta(&[4, 2, 3], DType::Float32),
-            "transpose".into(),
-        );
-        let node = graph.node(transpose).unwrap();
-        assert_eq!(map_axis_to_tosa_dim_order(&graph, node, 0), 0);
     }
 
     #[test]

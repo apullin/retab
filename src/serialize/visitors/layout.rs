@@ -1,264 +1,26 @@
 use super::*;
 
-/// Compute a single spatial output dimension for convolution:
-///   output = (input + pad_before + pad_after - (kernel - 1) * dilation - 1) / stride + 1
-fn conv_spatial_output_dim(
-    input_len: i32,
-    pad_before: i32,
-    pad_after: i32,
-    kernel: i32,
-    dilation: i32,
-    stride: i32,
-) -> i32 {
-    (input_len + pad_before + pad_after - (kernel - 1) * dilation - 1) / stride + 1
-}
-
-/// Unified convolution output shape computation for 2D, 3D, and depthwise
-/// convolutions in NHWC / NDHWC layout. The spatial rank is inferred from
-/// `stride.len()`.
-///
-/// For depthwise convolutions (`is_depthwise = true`), the weight shape is read
-/// from the node metadata (logical NCHW layout) and the output-channel count is
-/// taken from `ws[0]` with kernels at `ws[2..]`.  For regular convolutions the
-/// weight shape comes from `actual_tensor_shape` and the kernel/OC split is
-/// inferred from whether the last weight dim matches the input channel count.
-fn compute_conv_output_impl(
-    graph: &Graph,
-    store: &TensorStore,
-    node: &Node,
-    pad: &[i32],
-    stride: &[i32],
-    dilation: &[i32],
-    is_depthwise: bool,
-) -> TosaTensor {
+/// A TOSA conv's output tensor. Its val is the TOSA output shape; only the shape comes
+/// from it, the dtype stays the accumulator's, because the TOSA conv inherits the aten
+/// conv's int8 output qparams (P2 design G1, critique A9).
+pub(super) fn conv_output_tensor(node: &Node) -> TosaTensor {
     let semantic_dtype = node_output_dtype(node);
     let dtype = if node.meta.input_qparams.is_empty() && is_float_dtype(semantic_dtype) {
         semantic_dtype
     } else {
         conv_accumulator_dtype(node)
     };
-    // Explicit mode: the val is the TOSA output shape. Only the shape comes from it; the
-    // dtype stays the accumulator's, because the TOSA conv inherits the aten conv's int8
-    // output qparams (P2 design G1, critique A9).
-    if graph.is_explicit_layout() {
-        return TosaTensor::new(&node.name, raw_i32_shape(node), dtype);
-    }
-    let spatial_rank = stride.len(); // 2 for conv2d / depthwise, 3 for conv3d
-    let tensor_rank = spatial_rank + 2; // N + spatial dims + C
-
-    let computed = (|| -> Option<Vec<i32>> {
-        let input_id = match node.args.first()? {
-            Arg::Node(id) => *id,
-            _ => return None,
-        };
-        let weight_id = match node.args.get(1)? {
-            Arg::Node(id) => *id,
-            _ => return None,
-        };
-        let input_node = graph.node(input_id)?;
-        let weight_node = graph.node(weight_id)?;
-
-        let inp = actual_tensor_shape(graph, store, input_node);
-        if inp.len() != tensor_rank {
-            return None;
-        }
-        let n = inp[0];
-        // Spatial input dims are inp[1..1+spatial_rank].
-        let spatial_inputs: Vec<i32> = inp[1..1 + spatial_rank].to_vec();
-
-        // Determine output channels and kernel spatial dims.
-        let (oc, kernels): (i32, Vec<i32>) = if is_depthwise {
-            let ic = *inp.get(1 + spatial_rank)?;
-            let logical_ws = weight_node.meta.val.shape_slice();
-            let actual_ws = actual_tensor_shape(graph, store, weight_node);
-            if logical_ws.len() == tensor_rank && logical_ws.get(1).copied() == Some(1) {
-                // Logical depthwise metadata is still OIHW [OC, 1, KH, KW] even if
-                // `actual_tensor_shape()` has already applied dim-order reordering on a
-                // placeholder. Using the reordered placeholder shape here swaps KH/KW for
-                // cases like cumsum's synthetic kernel [1, 1, K, 1] and yields invalid
-                // depthwise output shapes.
-                let oc = logical_ws[0] as i32;
-                let kernels: Vec<i32> = logical_ws[2..2 + spatial_rank]
-                    .iter()
-                    .map(|&d| d as i32)
-                    .collect();
-                (oc, kernels)
-            } else if spatial_rank == 2
-                && actual_ws.len() == tensor_rank
-                && actual_ws.get(2).copied() == Some(ic)
-            {
-                // Memory-format lowering emits depthwise weights as HWCM.
-                let multiplier = actual_ws.get(3).copied().unwrap_or(1).max(1);
-                (ic * multiplier, actual_ws[0..2].to_vec())
-            } else {
-                if logical_ws.len() != tensor_rank {
-                    return None;
-                }
-                // Logical depthwise metadata is [OC, 1, kH, kW].
-                let oc = logical_ws[0] as i32;
-                let kernels: Vec<i32> = logical_ws[2..2 + spatial_rank]
-                    .iter()
-                    .map(|&d| d as i32)
-                    .collect();
-                (oc, kernels)
-            }
-        } else {
-            let ws = actual_tensor_shape(graph, store, weight_node);
-            if ws.len() != tensor_rank {
-                return None;
-            }
-            let ic = *inp.get(1 + spatial_rank)?; // last dim of NHWC input
-            let oc = ws[0];
-            // If last dim of weight matches input channels, kernels are at
-            // ws[1..1+spatial_rank]; otherwise they are at ws[2..2+spatial_rank]
-            // (weight stored in a different layout).
-            let kernels: Vec<i32> = if ws[tensor_rank - 1] == ic {
-                ws[1..1 + spatial_rank].to_vec()
-            } else {
-                ws[2..2 + spatial_rank].to_vec()
-            };
-            (oc, kernels)
-        };
-
-        // Compute each spatial output dimension.
-        let mut shape = Vec::with_capacity(tensor_rank);
-        shape.push(n);
-        for i in 0..spatial_rank {
-            let pad_before = *pad.get(i * 2).unwrap_or(&0);
-            let pad_after = *pad.get(i * 2 + 1).unwrap_or(&0);
-            let s = *stride.get(i).unwrap_or(&1);
-            let d = *dilation.get(i).unwrap_or(&1);
-            shape.push(conv_spatial_output_dim(
-                spatial_inputs[i],
-                pad_before,
-                pad_after,
-                kernels[i],
-                d,
-                s,
-            ));
-        }
-        shape.push(oc);
-
-        Some(shape)
-    })();
-
-    let fallback_shape = {
-        let shape = raw_i32_shape(node);
-        if shape.len() == tensor_rank && tensor_rank >= 3 {
-            // Permute from NCHW/NCDHW to NHWC/NDHWC: move dim[1] to the end.
-            let mut nhwc = Vec::with_capacity(tensor_rank);
-            nhwc.push(shape[0]);
-            nhwc.extend_from_slice(&shape[2..]);
-            nhwc.push(shape[1]);
-            nhwc
-        } else {
-            shape
-        }
-    };
-
-    if crate::config::debug_slice_enabled() {
-        eprintln!(
-            "[ConvShapeDebug] node={} computed={:?} fallback={:?}",
-            node.name, computed, fallback_shape
-        );
-    }
-
-    let final_shape = match computed {
-        Some(shape) if shape.iter().all(|&dim| dim > 0) => shape,
-        _ => fallback_shape,
-    };
-
-    TosaTensor::new(&node.name, final_shape, dtype)
+    TosaTensor::new(&node.name, raw_i32_shape(node), dtype)
 }
 
-pub(super) fn compute_conv2d_nhwc_output(
-    graph: &Graph,
-    store: &TensorStore,
-    node: &Node,
-    pad: &[i32],
-    stride: &[i32],
-    dilation: &[i32],
-) -> TosaTensor {
-    compute_conv_output_impl(graph, store, node, pad, stride, dilation, false)
-}
-
-pub(super) fn compute_conv3d_ndhwc_output(
-    graph: &Graph,
-    store: &TensorStore,
-    node: &Node,
-    pad: &[i32],
-    stride: &[i32],
-    dilation: &[i32],
-) -> TosaTensor {
-    compute_conv_output_impl(graph, store, node, pad, stride, dilation, false)
-}
-
-pub(super) fn compute_depthwise_conv2d_nhwc_output(
-    graph: &Graph,
-    store: &TensorStore,
-    node: &Node,
-    pad: &[i32],
-    stride: &[i32],
-    dilation: &[i32],
-) -> TosaTensor {
-    compute_conv_output_impl(graph, store, node, pad, stride, dilation, true)
-}
-
-pub(super) fn compute_pool_nhwc_output(
-    graph: &Graph,
-    store: &TensorStore,
-    node: &Node,
-    kernel: &[i32],
-    stride: &[i32],
-    pad: &[i32],
-) -> TosaTensor {
-    let dtype = node_output_dtype(node);
-    // Explicit mode: the val is the TOSA output shape (P2 design G1, critique B1).
-    if graph.is_explicit_layout() {
-        return TosaTensor::new(&node.name, raw_i32_shape(node), dtype);
-    }
-
-    let computed = (|| -> Option<Vec<i32>> {
-        let input_id = match node.args.first()? {
-            Arg::Node(id) => *id,
-            _ => return None,
-        };
-        let input_node = graph.node(input_id)?;
-
-        let input_shape = actual_tensor_shape(graph, store, input_node);
-        pool_nhwc_shape(&input_shape, kernel, stride, pad)
-    })();
-
-    let fallback_shape = {
-        let shape = raw_i32_shape(node);
-        if shape.len() == 4 {
-            vec![shape[0], shape[2], shape[3], shape[1]]
-        } else {
-            shape
-        }
-    };
-
-    let final_shape = match computed {
-        Some(shape) if shape.iter().all(|&dim| dim > 0) => shape,
-        _ => fallback_shape,
-    };
-
-    TosaTensor::new(&node.name, final_shape, dtype)
+/// A TOSA pool's output tensor: its val is the TOSA output shape (P2 design G1,
+/// critique B1).
+pub(super) fn pool_output_tensor(node: &Node) -> TosaTensor {
+    TosaTensor::new(&node.name, raw_i32_shape(node), node_output_dtype(node))
 }
 
 fn conv_pad_remainder(input_len: i32, pad: i32, dilation: i32, kernel: i32, stride: i32) -> i32 {
     (input_len + 2 * pad - dilation * (kernel - 1) - 1) % stride
-}
-
-fn conv_tosa_pad_remainder(
-    input_len: i32,
-    pad_before: i32,
-    pad_after: i32,
-    dilation: i32,
-    kernel: i32,
-    stride: i32,
-) -> i32 {
-    (input_len + pad_before + pad_after - dilation * (kernel - 1) - 1) % stride
 }
 
 fn conv_spatial_inputs_and_kernels(
@@ -281,22 +43,13 @@ fn conv_spatial_inputs_and_kernels(
     let input_channels = *input_shape.get(spatial_rank + 1)?;
     let input_dims = input_shape.get(1..1 + spatial_rank)?.to_vec();
 
-    // Depthwise weights need the same treatment `compute_conv_output_impl`
-    // applies: `actual_tensor_shape` may have reordered a placeholder's dims and
+    // `actual_tensor_shape` may have reordered a depthwise placeholder's dims and
     // swapped KH/KW, so a conv1d kernel of 14 taps shows up as [OC, 1, 14, 1]
     // instead of [OC, 1, 1, 14]. Reading spatial dims off that yields KW=1, the
     // padding remainder comes out 0, the trailing-pad trim is skipped, and the
     // op fails TOSA's exact-division rule. The logical OIHW metadata is
     // authoritative; fall back to the HWCM form only when it is not.
-    let kernels = if is_depthwise
-        && graph.is_explicit_layout()
-        && node.target == OpTarget::TosaDepthwiseConv2d
-    {
-        // An explicit-mode TOSA depthwise weight is always HWCM [KH, KW, C, M]. KW == 1
-        // weights ([3, 1, 4, 2], cumsum's [K, 1, 1, 1]) would match the OIHW guess
-        // below (P2 design B3).
-        weight_shape.get(0..2)?.to_vec()
-    } else if is_depthwise {
+    let kernels = if is_depthwise {
         let logical = weight_node.meta.val.shape_slice();
         if logical.len() == tensor_rank && logical.get(1).copied() == Some(1) {
             logical
@@ -401,81 +154,6 @@ pub(super) fn adjusted_tosa_pad_for_raw_aten_conv(
     vec![pad_h, pad_bottom, pad_w, pad_right]
 }
 
-#[allow(clippy::too_many_arguments)]
-fn adjusted_tosa_pad_for_emitted_conv_spatial(
-    graph: &Graph,
-    store: &TensorStore,
-    node: &Node,
-    pad: &[i32],
-    stride: &[i32],
-    dilation: &[i32],
-    spatial_rank: usize,
-    is_depthwise: bool,
-) -> Vec<i32> {
-    // Explicit-mode TOSA convs carry rc4's already-adjusted pad (P2 design G2).
-    if pad.len() != spatial_rank * 2 || graph.is_explicit_layout() {
-        return pad.to_vec();
-    }
-
-    let Some((input_dims, kernel_dims)) =
-        conv_spatial_inputs_and_kernels(graph, store, node, spatial_rank, is_depthwise)
-    else {
-        return pad.to_vec();
-    };
-
-    let mut adjusted = pad.to_vec();
-    for axis in 0..spatial_rank {
-        let pad_before = adjusted[axis * 2];
-        let pad_after = adjusted[axis * 2 + 1];
-        let remainder = conv_tosa_pad_remainder(
-            input_dims[axis],
-            pad_before,
-            pad_after,
-            *dilation.get(axis).unwrap_or(&1),
-            kernel_dims[axis],
-            *stride.get(axis).unwrap_or(&1),
-        );
-        if remainder <= pad_after {
-            adjusted[axis * 2 + 1] = pad_after - remainder;
-        }
-    }
-
-    adjusted
-}
-
-pub(super) fn adjusted_tosa_pad_for_emitted_conv2d(
-    graph: &Graph,
-    store: &TensorStore,
-    node: &Node,
-    pad: &[i32],
-    stride: &[i32],
-    dilation: &[i32],
-    is_depthwise: bool,
-) -> Vec<i32> {
-    adjusted_tosa_pad_for_emitted_conv_spatial(
-        graph,
-        store,
-        node,
-        pad,
-        stride,
-        dilation,
-        2,
-        is_depthwise,
-    )
-}
-
-pub(super) fn adjusted_tosa_pad_for_emitted_conv3d(
-    graph: &Graph,
-    store: &TensorStore,
-    node: &Node,
-    pad: &[i32],
-    stride: &[i32],
-    dilation: &[i32],
-) -> Vec<i32> {
-    // TOSA has no depthwise conv3d.
-    adjusted_tosa_pad_for_emitted_conv_spatial(graph, store, node, pad, stride, dilation, 3, false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,29 +224,15 @@ mod tests {
         (graph, conv)
     }
 
-    #[test]
-    fn depthwise_kernels_come_from_hwcm_weights() {
-        // P2 design B3: a KW == 1 HWCM weight [3, 1, 4, 2] also reads as OIHW [O, 1, KH, KW].
-        let (graph, conv) = tosa_conv(
-            OpTarget::TosaDepthwiseConv2d,
-            &[1, 16, 11, 4],
-            &[3, 1, 4, 2],
-            &[2, 2],
-            &[1, 0, 0, 0],
-            &[1, 8, 6, 8],
-        );
-        let store = TensorStore::new();
+    fn emit(graph: &Graph, id: NodeId) -> EmitResult {
         clear_shape_cache();
-        let node = graph.node(conv).unwrap();
-        assert_eq!(
-            conv_spatial_inputs_and_kernels(&graph, &store, node, 2, true),
-            Some((vec![16, 11], vec![3, 1]))
-        );
+        emit_node(graph, id, graph.node(id).unwrap(), &TensorStore::new()).unwrap()
     }
 
     #[test]
     fn conv_pads_are_used_as_given() {
-        // P2 design G2: rc4 already adjusted the pad, so [1, 1, 2, 2] stays as it is.
+        // P2 design G2: rc4 already adjusted the pad, so [1, 1, 2, 2] stays as it is, and
+        // the output shape is the val (G1).
         let (graph, conv) = tosa_conv(
             OpTarget::TosaConv2d,
             &[1, 6, 10, 3],
@@ -577,26 +241,19 @@ mod tests {
             &[1, 1, 2, 2],
             &[1, 3, 5, 8],
         );
-        let store = TensorStore::new();
-        clear_shape_cache();
-        let node = graph.node(conv).unwrap();
-        assert_eq!(
-            adjusted_tosa_pad_for_emitted_conv2d(
-                &graph,
-                &store,
-                node,
-                &[1, 1, 2, 2],
-                &[2, 2],
-                &[1, 1],
-                false
-            ),
-            vec![1, 1, 2, 2]
-        );
+        let result = emit(&graph, conv);
+        let op = result.operators.last().unwrap();
+        let Attribute::Conv2d(attr) = &op.attribute else {
+            panic!("expected CONV2D, got {:?}", op.op);
+        };
+        assert_eq!(attr.pad, vec![1, 1, 2, 2]);
+        assert_eq!(result.tensors.last().unwrap().shape, vec![1, 3, 5, 8]);
     }
 
     #[test]
     fn pool_outputs_are_the_val() {
-        // P2 design G1: the output shape is the val, not recomputed from the arguments.
+        // P2 design G1: the output shape is the val, not recomputed from the arguments,
+        // which would give [1, 4, 4, 4].
         let mut graph = Graph::new();
         let x = input(&mut graph, "x", &[1, 9, 9, 4]);
         let pool = add(
@@ -606,16 +263,14 @@ mod tests {
             OpTarget::TosaMaxPool2d,
             smallvec![
                 Arg::Node(x),
-                list(&[3, 3]),
                 list(&[2, 2]),
-                list(&[1, 1, 1, 1])
+                list(&[2, 2]),
+                list(&[0, 0, 0, 0])
             ],
             &[1, 5, 5, 4],
         );
-        let store = TensorStore::new();
-        clear_shape_cache();
-        let node = graph.node(pool).unwrap();
-        let output = compute_pool_nhwc_output(&graph, &store, node, &[2, 2], &[2, 2], &[0; 4]);
-        assert_eq!(output.shape, vec![1, 5, 5, 4]);
+        let result = emit(&graph, pool);
+        assert_eq!(result.operators.last().unwrap().op, Op::MaxPool2d);
+        assert_eq!(result.tensors.last().unwrap().shape, vec![1, 5, 5, 4]);
     }
 }

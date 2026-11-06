@@ -66,7 +66,7 @@ impl ParsedReduceSpec {
             .map(|raw_dim| ReduceAxis {
                 raw_dim,
                 tosa_axis: input_node
-                    .map(|n| map_axis_to_tosa_dim_order(graph, n, raw_dim))
+                    .map(|n| map_axis_to_tosa_dim_order(n, raw_dim))
                     .unwrap_or(raw_dim),
             })
             .collect();
@@ -97,7 +97,7 @@ impl ParsedSingleAxisReduceSpec {
             }
         };
         let tosa_axis = input_node
-            .map(|input_node| map_axis_to_tosa_dim_order(graph, input_node, raw_axis))
+            .map(|input_node| map_axis_to_tosa_dim_order(input_node, raw_axis))
             .unwrap_or(raw_axis);
         let keepdim = arg_bool(node, 2, true);
         let input_shape = input_node

@@ -76,12 +76,10 @@ fn collect_graph_items(
         eprintln!("[Serialize] using insertion order, {} nodes", sorted.len());
         validate_insertion_order(graph, &sorted);
     }
-    if graph.is_explicit_layout() {
-        reject_aten_spatial_ops(region, graph)?;
-        reject_dim_orders(region, graph)?;
-        if debug {
-            check_explicit_layout_invariants(region, graph, store)?;
-        }
+    reject_aten_spatial_ops(region, graph)?;
+    reject_dim_orders(region, graph)?;
+    if debug {
+        check_explicit_layout_invariants(region, graph, store)?;
     }
 
     let tensor_decls = TensorDeclarationContext::new(graph);
@@ -250,10 +248,10 @@ fn collect_graph_items(
     })
 }
 
-/// Explicit mode only (P2 design X5, critique B11): every aten conv, pool and upsample
-/// must have been rewritten to its TOSA op. Their visitors build the NHWC view from dim
-/// orders, which explicit graphs don't have, so a survivor (a rewrite declined it) sends
-/// the graph to stock, through the same seam as `control_flow::assembly`.
+/// Every aten conv, pool and upsample must have been rewritten to its TOSA op (P2 design
+/// X5, critique B11). Their visitors build the NHWC view from dim orders, which RETAB's
+/// graphs don't have, so a survivor (a rewrite declined it) sends the graph to stock,
+/// through the same seam as `control_flow::assembly`.
 pub(super) fn reject_aten_spatial_ops(region: &str, graph: &Graph) -> Result<(), String> {
     let Some(node) = graph
         .order

@@ -62,18 +62,6 @@ fn input_rank(graph: &Graph, node: &Node) -> usize {
     }
 }
 
-fn conv_stride_arg(node: &Node, spatial_rank: usize) -> Vec<i32> {
-    kwarg_or_arg_i32_list_or_repeat(node, "stride", 3, spatial_rank, 1)
-}
-
-fn conv_dilation_arg(node: &Node, spatial_rank: usize) -> Vec<i32> {
-    kwarg_or_arg_i32_list_or_repeat(node, "dilation", 5, spatial_rank, 1)
-}
-
-fn conv_pad_arg(node: &Node, pad_len: usize) -> Vec<i32> {
-    kwarg_or_arg_i32_list_or_repeat(node, "pad", 4, pad_len, 0)
-}
-
 fn extend_conv_inputs(
     mut input_names: Vec<String>,
     input_zp_name: String,
@@ -97,7 +85,7 @@ fn prepare_conv_inputs(
     if matches!(input_names.len(), 2 | 4) {
         input_names.insert(
             2,
-            push_zero_bias_tensor(result, graph, node, synthetic_bias_dtype(node, acc_type)),
+            push_zero_bias_tensor(result, node, synthetic_bias_dtype(node, acc_type)),
         );
     }
     if input_names.len() >= 5 {
@@ -134,28 +122,17 @@ fn synthetic_bias_dtype(node: &Node, acc_type: DType) -> DType {
     }
 }
 
-fn output_channels(graph: &Graph, node: &Node) -> i32 {
-    let shape = node.meta.val.shape_slice();
-    // An explicit-mode TOSA conv's val is channels-last.
-    let channels = if graph.is_explicit_layout() {
-        shape.last()
-    } else {
-        shape.get(1).or_else(|| shape.first())
-    };
-    channels.copied().unwrap_or(0) as i32
+/// A TOSA conv's val is channels-last.
+fn output_channels(node: &Node) -> i32 {
+    node.meta.val.shape_slice().last().copied().unwrap_or(0) as i32
 }
 
 fn zero_bytes(dtype: DType, len: usize) -> Vec<u8> {
     vec![0; tosa_dtype_storage_size(dtype) * len]
 }
 
-fn push_zero_bias_tensor(
-    result: &mut EmitResult,
-    graph: &Graph,
-    node: &Node,
-    dtype: DType,
-) -> String {
-    let channels = output_channels(graph, node).max(0) as usize;
+fn push_zero_bias_tensor(result: &mut EmitResult, node: &Node, dtype: DType) -> String {
+    let channels = output_channels(node).max(0) as usize;
     result.push_const(TosaTensor::with_data(
         &format!("{}_bias", node.name),
         vec![channels as i32],

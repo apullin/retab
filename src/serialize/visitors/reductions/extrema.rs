@@ -34,7 +34,7 @@ fn emit_argmax(ctx: &EmitContext) -> EmitResult {
         })
         .expect("argmax requires an explicit dim") as i32;
     let dim = if raw_dim < 0 { raw_dim + rank } else { raw_dim };
-    let axis = map_axis_to_tosa_dim_order(graph, input, dim);
+    let axis = map_axis_to_tosa_dim_order(input, dim);
     let physical_order: Vec<i32> = match &input.meta.tosa_dim_order {
         Some(order) if order.len() == rank as usize => order.iter().map(|&d| d as i32).collect(),
         _ => (0..rank).collect(),
