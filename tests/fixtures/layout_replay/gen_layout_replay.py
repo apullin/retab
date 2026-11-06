@@ -5642,6 +5642,27 @@ PASSES = [
         random_cases=420,
         tosa_spec=PROPAGATE_TOSA_SPEC,
     ),
+    # The same passes built without arguments, as rc4's graph-level tests
+    # build them: no fusion pass, so the walks meet every permute
+    # RemovePermutes would have cancelled first.
+    PassSpec(
+        "propagate_view_copy_permute_down_without_program",
+        lambda ep: PropagationPass(ep, PropagateViewCopyPermuteDownPass, with_program=False),
+        PROPAGATION_SOURCES,
+        propagation_cases,
+        "propagate",
+        random_cases=420,
+        tosa_spec=PROPAGATE_TOSA_SPEC,
+    ),
+    PassSpec(
+        "propagate_view_copy_permute_up_without_program",
+        lambda ep: PropagationPass(ep, PropagateViewCopyPermuteUpPass, with_program=False),
+        PROPAGATION_SOURCES,
+        propagation_cases,
+        "propagate",
+        random_cases=420,
+        tosa_spec=PROPAGATE_TOSA_SPEC,
+    ),
 ]
 COMMON_SOURCES = ["backends/arm/_passes/arm_pass.py", "exir/pass_base.py"]
 

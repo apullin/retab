@@ -6,11 +6,24 @@
 //! turns quantized table ops into TABLE ops before the pass and back after
 //! (`PropagationPass`), so the fixtures show rc4's decisions in RETAB's form.
 
-use crate::layout::propagate::IrPropagateViewCopyPermutePass;
+use crate::layout::propagate::{Direction, IrPropagateViewCopyPermutePass, PropagateConfig};
 use crate::layout::replay::{self, Options};
 
 const DOWN: &str = include_str!("../../tests/fixtures/layout_replay/propagate_view_copy_permute_down.txt");
 const UP: &str = include_str!("../../tests/fixtures/layout_replay/propagate_view_copy_permute_up.txt");
+const DOWN_WITHOUT_PROGRAM: &str =
+    include_str!("../../tests/fixtures/layout_replay/propagate_view_copy_permute_down_without_program.txt");
+const UP_WITHOUT_PROGRAM: &str =
+    include_str!("../../tests/fixtures/layout_replay/propagate_view_copy_permute_up_without_program.txt");
+
+/// Arm's passes built without arguments, as rc4's graph-level tests build
+/// them: no fusion pass.
+const ARM_DOWN_WITHOUT_PROGRAM: IrPropagateViewCopyPermutePass = IrPropagateViewCopyPermutePass {
+    config: PropagateConfig::arm_without_program(Direction::Down),
+};
+const ARM_UP_WITHOUT_PROGRAM: IrPropagateViewCopyPermutePass = IrPropagateViewCopyPermutePass {
+    config: PropagateConfig::arm_without_program(Direction::Up),
+};
 
 /// The default comparison plus the `modified` flag and dead nodes: rc4 removes
 /// dead code only where a step changed something, which decides what later
@@ -42,6 +55,24 @@ fn propagate_up_matches_rc4() {
     );
 }
 
+/// The same cases through the passes built without an exported program, so
+/// with no RemovePermutes round: the walks meet every permute the fusion pass
+/// would have cancelled first.
+#[test]
+fn propagate_down_without_a_program_matches_rc4() {
+    replay::check_known_with(&ARM_DOWN_WITHOUT_PROGRAM, DOWN_WITHOUT_PROGRAM, &[], WITH_FLAG);
+}
+
+#[test]
+fn propagate_up_without_a_program_matches_rc4() {
+    replay::check_known_with(
+        &ARM_UP_WITHOUT_PROGRAM,
+        UP_WITHOUT_PROGRAM,
+        &[("cat_with_a_repeated_input", REPEATED_CAT_INPUT)],
+        WITH_FLAG,
+    );
+}
+
 /// Per-pass statistics under the default comparison and with the flag,
 /// for a fuzzing session: `cargo test --lib propagate_replay_report -- --ignored --nocapture`.
 #[test]
@@ -50,6 +81,8 @@ fn propagate_replay_report() {
     for (pass, fixture) in [
         (&IrPropagateViewCopyPermutePass::ARM_DOWN, DOWN),
         (&IrPropagateViewCopyPermutePass::ARM_UP, UP),
+        (&ARM_DOWN_WITHOUT_PROGRAM, DOWN_WITHOUT_PROGRAM),
+        (&ARM_UP_WITHOUT_PROGRAM, UP_WITHOUT_PROGRAM),
     ] {
         for (label, options) in [("default", Options::default()), ("flag+dead", WITH_FLAG)] {
             let results = replay::replay(pass, fixture, options);
@@ -72,7 +105,7 @@ fn propagate_replay_report() {
     }
 }
 
-/// The rewrite branches the Arm passes have, each of which the two fixtures
+/// The rewrite branches the Arm passes have, each of which the four fixtures
 /// must reach at least once. Three can't be reached with the TOSA overrides
 /// and are covered by the ported shared tests instead: the shared pass's
 /// non-keepdim reductions (`*.reduction_dropped`), a region path that one
@@ -124,6 +157,8 @@ fn coverage_of_both_fixtures() -> std::collections::BTreeMap<&'static str, usize
     for (pass, fixture) in [
         (&IrPropagateViewCopyPermutePass::ARM_DOWN, DOWN),
         (&IrPropagateViewCopyPermutePass::ARM_UP, UP),
+        (&ARM_DOWN_WITHOUT_PROGRAM, DOWN_WITHOUT_PROGRAM),
+        (&ARM_UP_WITHOUT_PROGRAM, UP_WITHOUT_PROGRAM),
     ] {
         replay::replay(pass, fixture, WITH_FLAG);
     }
@@ -164,6 +199,8 @@ fn propagate_replay_external() {
     for (pass, file) in [
         (&IrPropagateViewCopyPermutePass::ARM_DOWN, "propagate_view_copy_permute_down.txt"),
         (&IrPropagateViewCopyPermutePass::ARM_UP, "propagate_view_copy_permute_up.txt"),
+        (&ARM_DOWN_WITHOUT_PROGRAM, "propagate_view_copy_permute_down_without_program.txt"),
+        (&ARM_UP_WITHOUT_PROGRAM, "propagate_view_copy_permute_up_without_program.txt"),
     ] {
         let path = std::path::Path::new(&dir).join(file);
         let Ok(text) = std::fs::read_to_string(&path) else {
