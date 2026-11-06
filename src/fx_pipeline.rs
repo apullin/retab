@@ -950,9 +950,10 @@ mod tests {
         }
     }
 
-    /// APU-157: dim-order mode's merge, run before IrRewriteConv, hands the
-    /// Linear's bias users the int64 zero point, and IrRewriteConv sends the graph
-    /// to stock, as it did the multihead attention op tests.
+    /// APU-157: explicit mode used to merge as dim-order mode does, on the data
+    /// alone and before phase 6. That hands the Linear's bias users the int64 zero
+    /// point, and IrRewriteConv sends the graph to stock, as it did the multihead
+    /// attention op tests.
     #[test]
     fn merging_on_the_data_before_rewrite_conv_hands_the_linear_an_int64_bias() {
         use crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEffectPass;
