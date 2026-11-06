@@ -27,7 +27,7 @@
 //!   (`fuse_constant_ops_pass.py:327-335`, [`FullQParams::Rc4`]): quantized
 //!   with the pool's output qparams when it has them, which is rc4's quirk,
 //!   and holding the zero point itself when it has none, input qparams or
-//!   not. Explicit mode needs that pass after this one: dim-order's
+//!   not. The pipeline needs that pass after this one: the effects of
 //!   IrFuseZeroInputConstantsEffectPass, at ingest, would quantize the zero
 //!   points of a pool without output qparams with its input qparams. Because
 //!   the zero points are call nodes, the rewrite needs no constant of its own

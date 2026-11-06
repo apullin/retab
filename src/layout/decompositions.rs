@@ -5,7 +5,7 @@
 //! `DecomposeSignPass` (`decompose_sign_pass.py`, `:629`).
 //!
 //! RETAB lowers `aten.round`, `aten.sqrt` and `aten.sign` in the serializer
-//! (or as a TABLE effect), so dim-order mode keeps each as one node. rc4 has
+//! (or as a TABLE effect), so without these ports each stays one node. rc4 has
 //! replaced them by the time its phase-6 layout passes run, and those passes
 //! treat the replacement differently from the original: FuseViewCopyTransform
 //! fuses a view across a unary op such as `aten.sign`, but not across the

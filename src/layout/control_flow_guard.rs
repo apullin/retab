@@ -29,8 +29,8 @@
 //! without output qparams or a recorded target, with no direct consumer the
 //! contract can read, that reaches a node with input qparams through
 //! data-movement copies without input qparams. The target exists, but the
-//! contract cannot see it. Where no node on the way has qparams, the contract
-//! finds nothing in dim-order mode either, and the graph stays with RETAB.
+//! contract cannot see it. Where no node on the way has qparams, there is no
+//! target for the copies to hide, and the graph stays with RETAB.
 
 use std::collections::HashSet;
 
@@ -322,8 +322,8 @@ mod tests {
         assert_eq!(guard(&mut graph), None);
     }
 
-    /// Without qparams anywhere past the copies the contract finds nothing in
-    /// dim-order mode either; a copy that has input qparams is readable.
+    /// Without qparams anywhere past the copies there is no target for them to
+    /// hide; a copy that has input qparams is readable.
     #[test]
     fn no_target_or_a_qualified_copy_stays_with_retab() {
         let (mut graph, getitem) = cond_output();

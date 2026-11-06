@@ -1439,12 +1439,10 @@ fn output_contract_finds_a_target(graph: &IrGraph, getitem: NodeId) -> bool {
 /// and the output RESCALE would be missing whenever the branch output qparams
 /// differ from the parent's.
 ///
-/// A conv1d's rank-3 input is the case nothing else catches today. Until S8
-/// the contracts stamp a dim order on every rank-4 cond output
-/// (`annotate_parent_rank4_dim_order_ir`), and `reject_dim_orders` sends such
-/// an explicit graph to stock at serialization; a rank-3 or rank-5 output gets
-/// no dim order. Dim-order slices copy the conv's input qparam onto both maps,
-/// so dim-order mode keeps the target.
+/// Before S8 a conv1d's rank-3 input was the one case nothing else caught: the
+/// contracts stamped a dim order on every rank-4 cond output, and
+/// `reject_dim_orders` sent such a graph to stock at serialization, but a
+/// rank-3 or rank-5 output got no dim order.
 #[test]
 fn convs_reading_control_flow_outputs_through_size_adjust_slices_fall_back_until_s8() {
     for (name, sliced_dims) in [
@@ -1550,9 +1548,9 @@ fn convs_reading_control_flow_outputs_with_a_target_qparam_are_rewritten() {
 }
 
 /// A Linear reading a cond output without a recorded target falls back too. `IrDecomposeLinear`
-/// reads the getitem through an input view and permute without qparams (in
-/// both modes, as rc4's DecomposeLinearPass does), so the output contract has
-/// no direct consumer to read.
+/// reads the getitem through an input view and permute without qparams (as
+/// rc4's DecomposeLinearPass does), so the output contract has no direct
+/// consumer to read.
 #[test]
 fn linears_reading_control_flow_outputs_fall_back_until_s8() {
     let mut graph = imported(REWRITE_CONV, "linear_pt");

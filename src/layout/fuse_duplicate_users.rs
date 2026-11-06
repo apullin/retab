@@ -143,7 +143,7 @@ impl IrFuseDuplicateUsersPass {
 
 impl IrPass for IrFuseDuplicateUsersPass {
     fn name(&self) -> &str {
-        // `IrFuseDuplicateUsers` is the dim-order pipeline's pass.
+        // `IrFuseDuplicateUsers` names RETAB's own pass (`fx_fuse_duplicate_users_ir`).
         match self.stage {
             TableStage::BeforeTables => "IrLayoutFuseDuplicateUsers",
             TableStage::OwnTableConstants => "IrLayoutFuseDuplicateUsersOwnTables",

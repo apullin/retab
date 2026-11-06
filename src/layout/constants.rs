@@ -12,16 +12,16 @@
 //!
 //! RETAB folds the same subgraphs as deferred lowering effects: a planner
 //! records a MaterializeTensorNode effect keyed by the node's name and ingest
-//! applies it (`ingest::from_ir::apply_effects`), so in dim-order mode the call
-//! nodes stay in the IR until conversion. [`IrMaterializeConstantsPass`] runs
+//! applies it (`ingest::from_ir::apply_effects`), so the effect passes leave the
+//! call nodes in the IR until conversion. [`IrMaterializeConstantsPass`] runs
 //! the same planners at rc4's slot and applies their plan to the IR instead:
 //!
 //! - **What** becomes a constant, and which bytes it holds, is the planners'
 //!   decision. The pass runs IrFuseZeroInputConstantsEffectPass (rc4's
 //!   ComputeConstantOpsAOT share) and
 //!   IrFuseConstantInputsEffectPass::with_data_slices (FuseConstantArgs's
-//!   share; the variant the pipeline runs at this slot, `fx_pipeline.rs:208`,
-//!   which also plans everything IrFuseShapeOnlyConstantsEffectPass plans),
+//!   share; the variant that also plans everything
+//!   IrFuseShapeOnlyConstantsEffectPass plans),
 //!   and gives each planned node the tensor ingest would store under its name
 //!   (`ingest::from_ir::materialized_tensor`, which narrows int64 data to
 //!   int32 when it fits). The planners' rc4 quirks, such as quantizing a
