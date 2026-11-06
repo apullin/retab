@@ -398,6 +398,97 @@ fn run_fx_passes(
     Ok(modified)
 }
 
+/// Why a region pipeline in `layout` must not join the stashed hierarchy, if it must
+/// not: the parent pipeline stashed for serialization ran the other layout mode (P2
+/// design §4.1, "Mixed modes"). One mode drives the whole hierarchy: the region
+/// pipelines, the boundary contracts, captured_conv, ingest and the serializer all take
+/// the stashed parent's.
+///
+/// Mixed modes cannot arise through `retab.preprocess`, the only caller that answers a
+/// `RETAB_STOCK_FALLBACK:` error: `_all_rust_preprocess` builds one pipeline config per
+/// delegate, hands that same dict to `run_fx_passes` and to every region entry point,
+/// and runs the regions only once `run_fx_passes` has stashed that delegate's parent.
+/// A mismatch therefore means a caller drove the native entry points with two configs.
+/// That is a bug, not an input stock could take, so it is a hard error: a stock fallback
+/// would hide it.
+fn mixed_layout_error(region: Option<&str>, layout: pipeline_config::LayoutMode) -> Option<String> {
+    let parent = STASHED_IR.with(|s| s.borrow().pipeline_config.as_ref().map(|c| c.layout))?;
+    (parent != layout).then(|| {
+        format!(
+            "control-flow region {} runs the {} layout, but the parent pipeline stashed for it \
+             ran {}: a delegate's parent and regions must share one pipeline config",
+            region.unwrap_or("<unnamed>"),
+            layout.as_str(),
+            parent.as_str()
+        )
+    })
+}
+
+/// A graph's live placeholders, by name and in order.
+fn placeholder_names(graph: &fx_ir::IrGraph) -> Vec<String> {
+    graph
+        .live_placeholder_ids()
+        .into_iter()
+        .map(|id| graph.node(id).name.clone())
+        .collect()
+}
+
+/// Critique B2: a region's placeholders are its runtime inputs, which the boundary
+/// contracts and captured_conv pair with the invoking cond's or while loop's operands
+/// by position. A pass that added, dropped or reordered one would shift that pairing
+/// and miscompile silently. No explicit pass does so (region constants are `get_attr`
+/// nodes, `layout::ctx::GraphScope::Region`), so explicit mode checks that a region
+/// pipeline kept them, names and order, and sends the graph to stock if it did not.
+/// Returns that fallback's reason.
+fn region_placeholders_changed(
+    region: Option<&str>,
+    before: &[String],
+    after: &fx_ir::IrGraph,
+) -> Option<String> {
+    let after = placeholder_names(after);
+    (after != before).then(|| {
+        format!(
+            "region placeholders changed: region {}: the pipeline turned placeholders {before:?} \
+             into {after:?}, which would shift the boundary operands",
+            region.unwrap_or("<unnamed>")
+        )
+    })
+}
+
+/// Run a control-flow region's pipeline, from `build`, and stash the resulting IrGraph
+/// for serialization.
+fn run_region_passes(
+    graph_module: &Bound<'_, PyAny>,
+    exported_program: Option<&Bound<'_, PyAny>>,
+    region_name: Option<String>,
+    pipeline_config: &Bound<'_, PyDict>,
+    build: fn(&pipeline_config::PipelineConfig) -> Vec<fx_ir::PipelineStep>,
+) -> PyResult<bool> {
+    let pipeline_config = pipeline_config::PipelineConfig::from_py(pipeline_config)?;
+    if let Some(error) = mixed_layout_error(region_name.as_deref(), pipeline_config.layout) {
+        return Err(PyRuntimeError::new_err(error));
+    }
+    let pipeline = build(&pipeline_config);
+    stock_fallback::take();
+    let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
+    let propagation_changed = apply_pre_submodule_qparam_propagation_ir(
+        region_name.as_deref(),
+        &mut initial_ir,
+        pipeline_config.layout,
+    );
+    let placeholders = (pipeline_config.layout == pipeline_config::LayoutMode::Explicit)
+        .then(|| placeholder_names(&initial_ir));
+    let (modified, ir, effects) = fx_ir::run_ir_pipeline(&pipeline, initial_ir);
+    if let Some(reason) = placeholders
+        .and_then(|before| region_placeholders_changed(region_name.as_deref(), &before, &ir))
+    {
+        stock_fallback::request(reason);
+    }
+    ensure_retab_can_lower(Some(&ir), &effects)?;
+    stash_submodule_ir(region_name, Some((ir, effects)));
+    Ok(modified || propagation_changed > 0)
+}
+
 /// Run the while_loop submodule IR pipeline and stash the resulting IrGraph.
 #[pyfunction]
 #[pyo3(signature = (graph_module, exported_program=None, region_name=None, *, pipeline_config))]
@@ -407,19 +498,13 @@ fn run_fx_submodule_passes(
     region_name: Option<String>,
     pipeline_config: &Bound<'_, PyDict>,
 ) -> PyResult<bool> {
-    let pipeline_config = pipeline_config::PipelineConfig::from_py(pipeline_config)?;
-    let pipeline = fx_pipeline::build_ir_while_submodule_pipeline(&pipeline_config);
-    stock_fallback::take();
-    let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
-    let propagation_changed = apply_pre_submodule_qparam_propagation_ir(
-        region_name.as_deref(),
-        &mut initial_ir,
-        pipeline_config.layout,
-    );
-    let (modified, ir, effects) = fx_ir::run_ir_pipeline(&pipeline, initial_ir);
-    ensure_retab_can_lower(Some(&ir), &effects)?;
-    stash_submodule_ir(region_name, Some((ir, effects)));
-    Ok(modified || propagation_changed > 0)
+    run_region_passes(
+        graph_module,
+        exported_program,
+        region_name,
+        pipeline_config,
+        fx_pipeline::build_ir_while_submodule_pipeline,
+    )
 }
 
 /// Run the cond branch submodule IR pipeline and stash the resulting IrGraph.
@@ -431,19 +516,13 @@ fn run_fx_cond_passes(
     region_name: Option<String>,
     pipeline_config: &Bound<'_, PyDict>,
 ) -> PyResult<bool> {
-    let pipeline_config = pipeline_config::PipelineConfig::from_py(pipeline_config)?;
-    let pipeline = fx_pipeline::build_ir_cond_submodule_pipeline(&pipeline_config);
-    stock_fallback::take();
-    let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
-    let propagation_changed = apply_pre_submodule_qparam_propagation_ir(
-        region_name.as_deref(),
-        &mut initial_ir,
-        pipeline_config.layout,
-    );
-    let (modified, ir, effects) = fx_ir::run_ir_pipeline(&pipeline, initial_ir);
-    ensure_retab_can_lower(Some(&ir), &effects)?;
-    stash_submodule_ir(region_name, Some((ir, effects)));
-    Ok(modified || propagation_changed > 0)
+    run_region_passes(
+        graph_module,
+        exported_program,
+        region_name,
+        pipeline_config,
+        fx_pipeline::build_ir_cond_submodule_pipeline,
+    )
 }
 
 /// Runtime inputs of the last serialized main graph that no op consumes. Ethos-U
@@ -499,5 +578,75 @@ mod tests {
                 Some(layout)
             );
         }
+    }
+
+    /// P2 design §4.1: a region pipeline in the other layout mode than the stashed
+    /// parent's is rejected, with a hard error rather than a stock fallback (only a
+    /// caller driving the native entry points with two configs gets there). Without a
+    /// stashed parent there is nothing to compare.
+    #[test]
+    fn region_pipelines_must_run_the_stashed_parents_layout_mode() {
+        let config = |layout| PipelineConfig {
+            layout,
+            ..PipelineConfig::from_tosa_spec("TOSA-1.0+INT+cf")
+        };
+        take_stashed_hierarchy();
+        for layout in [LayoutMode::DimOrder, LayoutMode::Explicit] {
+            assert_eq!(mixed_layout_error(Some("true_graph"), layout), None);
+        }
+        for (parent, region) in [
+            (LayoutMode::Explicit, LayoutMode::DimOrder),
+            (LayoutMode::DimOrder, LayoutMode::Explicit),
+        ] {
+            stash_ir(None, config(parent));
+            assert_eq!(mixed_layout_error(Some("true_graph"), parent), None);
+            let error = mixed_layout_error(Some("true_graph"), region).expect("a mismatch");
+            assert_eq!(
+                error,
+                format!(
+                    "control-flow region true_graph runs the {} layout, but the parent pipeline \
+                     stashed for it ran {}: a delegate's parent and regions must share one \
+                     pipeline config",
+                    region.as_str(),
+                    parent.as_str()
+                )
+            );
+            assert!(!error.contains("RETAB_STOCK_FALLBACK"), "{error}");
+        }
+        take_stashed_hierarchy();
+    }
+
+    /// Critique B2: explicit mode sends a region to stock when its pipeline added,
+    /// dropped or reordered a placeholder, which would shift the boundary operands, as a
+    /// region constant made as a placeholder at the graph head would.
+    #[test]
+    fn region_placeholder_changes_are_reported() {
+        use crate::test_ir::{output, placeholder};
+
+        let region = |head_constant: bool| {
+            let mut region = fx_ir::IrGraph::empty();
+            if head_constant {
+                placeholder(&mut region, "avg_pool_zp", [1], "torch.int8");
+            }
+            let x = placeholder(&mut region, "x_ph", [1, 2, 8], "torch.int8");
+            placeholder(&mut region, "w_ph", [4, 2, 3], "torch.int8");
+            output(&mut region, x);
+            region
+        };
+        let before = placeholder_names(&region(false));
+        assert_eq!(before, ["x_ph", "w_ph"]);
+        assert_eq!(
+            region_placeholders_changed(Some("true_graph"), &before, &region(false)),
+            None
+        );
+
+        let reason = region_placeholders_changed(Some("true_graph"), &before, &region(true))
+            .expect("a changed placeholder list");
+        assert_eq!(
+            reason,
+            "region placeholders changed: region true_graph: the pipeline turned placeholders \
+             [\"x_ph\", \"w_ph\"] into [\"avg_pool_zp\", \"x_ph\", \"w_ph\"], which would shift \
+             the boundary operands"
+        );
     }
 }

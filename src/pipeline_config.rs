@@ -55,6 +55,16 @@ impl std::str::FromStr for LayoutMode {
     }
 }
 
+impl LayoutMode {
+    /// The pipeline-config `layout` value, as `RETAB_LAYOUT` spells it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DimOrder => "dim_order",
+            Self::Explicit => "explicit",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QuantizeInfConfig {
     pub neg_inf: f64,
@@ -260,6 +270,9 @@ mod tests {
         }
         assert_eq!("dim_order".parse(), Ok(LayoutMode::DimOrder));
         assert_eq!("explicit".parse(), Ok(LayoutMode::Explicit));
+        for layout in [LayoutMode::DimOrder, LayoutMode::Explicit] {
+            assert_eq!(layout.as_str().parse(), Ok(layout));
+        }
         for name in ["", "DIM_ORDER", "Explicit", "dim-order", " explicit"] {
             let error = name.parse::<LayoutMode>().unwrap_err();
             assert!(
