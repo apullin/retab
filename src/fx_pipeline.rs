@@ -307,11 +307,12 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
     ]);
     if !explicit {
         // rc4 merges equal placeholders only after phase 6 (APM:755), where explicit
-        // mode does. Merging here would hand IrRewriteConv another constant's val: the
-        // importer narrows int64 data to int32 and keeps the int64 val, so an all-zero
-        // int32 bias merges into an unused int64 zero point.
+        // mode does. Merging here, on the data alone, sent the multihead attention
+        // op tests to stock in explicit mode (`fx_fuse_equal_placeholders_ir`).
         steps.push(Effectful(Box::new(
-            crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEffectPass,
+            crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEffectPass {
+                layout: config.layout,
+            },
         )));
     }
     steps.extend(vec![
@@ -378,9 +379,12 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
     ]);
     if explicit {
         // FuseEqualPlaceholders (APM:755): merges the per-conv weights of convs that
-        // share one, and equal constants phase 6 created; design §1c.
+        // share one, and equal constants phase 6 created; design §1c. Its key holds
+        // the val dtype, as rc4's holds the tensor's dtype.
         steps.push(Effectful(Box::new(
-            crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEffectPass,
+            crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEffectPass {
+                layout: config.layout,
+            },
         )));
     }
     steps.extend(vec![
@@ -913,6 +917,99 @@ mod tests {
                 assert_eq!(shared, explicit_shared, "{spec}");
             }
         }
+    }
+
+    /// rc4's `linear_pc` graph at RewriteConvPass, a per-channel quantized Linear,
+    /// with the all-zero bias of the multihead attention op tests' projections. Its
+    /// weight's zero point `b__zero_point_0` comes first, unused: an all-zero int64
+    /// buffer, whose data the importer narrows to int32. `b__zero_point_1` is the
+    /// bias's zero point, all-zero int32.
+    fn linear_with_a_zero_bias() -> crate::fx_ir::IrGraph {
+        use crate::layout::replay;
+        let fixture = include_str!("../tests/fixtures/layout_replay/rewrite_conv.txt");
+        let case = replay::parse(fixture)
+            .expect("a valid fixture")
+            .into_iter()
+            .find(|case| case.name == "linear_pc")
+            .expect("the linear_pc case");
+        let mut graph = replay::import(&case);
+        let bias = crate::test_ir::live_node(&graph, "b__frozen_param1").id;
+        let tensor = graph.node_mut(bias).tensor.as_mut().expect("bias data");
+        tensor.data.data.fill(0);
+        graph
+    }
+
+    fn run_steps(steps: &[PipelineStep], graph: &mut crate::fx_ir::IrGraph) {
+        for step in steps {
+            match step {
+                PipelineStep::Ir(pass) => {
+                    pass.run(graph);
+                }
+                PipelineStep::Effectful(pass) => {
+                    pass.run(graph);
+                }
+            }
+        }
+    }
+
+    /// APU-157: explicit mode used to merge as dim-order mode does, on the data
+    /// alone and before phase 6. That hands the Linear's bias users the int64 zero
+    /// point, and IrRewriteConv sends the graph to stock, as it did the multihead
+    /// attention op tests.
+    #[test]
+    fn merging_on_the_data_before_rewrite_conv_hands_the_linear_an_int64_bias() {
+        use crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEffectPass;
+        use crate::fx_ir::{EffectfulIrPass, IrPass};
+        use crate::layout::rewrite_conv::IrRewriteConvPass;
+
+        let mut graph = linear_with_a_zero_bias();
+        IrFuseEqualPlaceholdersEffectPass {
+            layout: LayoutMode::DimOrder,
+        }
+        .run(&mut graph);
+        crate::stock_fallback::take();
+        IrRewriteConvPass {
+            is_u55_subset: false,
+            in_region: false,
+        }
+        .run(&mut graph);
+        let reason = crate::stock_fallback::take().expect("a stock fallback");
+        assert!(
+            reason.contains("a torch.int64 bias for a torch.int32 accumulator"),
+            "{reason}"
+        );
+    }
+
+    /// Explicit mode lowers that Linear from the postprocessing block on (where
+    /// dim-order mode merges) without a fallback, and its TOSA convolution ends up
+    /// reading the int32 zero constant, as rc4's reads `b__zero_point_1_common`.
+    /// The int64 zero point stays apart, as rc4's `b__zero_point_0_common` does.
+    #[test]
+    fn explicit_mode_keeps_an_int64_zero_point_off_a_linears_zero_bias() {
+        let config = explicit("TOSA-1.0+INT");
+        let steps = lowering_steps(true, &config);
+        let names = pass_names(lowering_steps(true, &config));
+        let start = names
+            .iter()
+            .position(|name| name == "IrCastInt64ToInt32Ep")
+            .unwrap();
+
+        let mut graph = linear_with_a_zero_bias();
+        crate::stock_fallback::take();
+        run_steps(&steps[start..], &mut graph);
+        assert_eq!(crate::stock_fallback::take(), None);
+
+        let convs: Vec<_> = graph
+            .live_nodes()
+            .filter(|node| node.target == "backend.tosa.CONV2D.default")
+            .collect();
+        assert_eq!(convs.len(), 1);
+        let bias = graph.node(convs[0].args[2].as_node().expect("a bias node"));
+        assert_eq!(bias.name, "b__zero_point_1");
+        assert_eq!(bias.meta.val_dtype(), Some("torch.int32"));
+        let weight_zp = crate::test_ir::live_node(&graph, "b__zero_point_0");
+        assert_eq!(weight_zp.meta.val_dtype(), Some("torch.int64"));
+        assert!(!graph.has_live_users(weight_zp.id));
     }
 
     #[test]
