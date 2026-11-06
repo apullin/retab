@@ -16,6 +16,8 @@ mod canonicalize_rc4_tests;
 mod canonicalize_upstream_tests;
 #[allow(dead_code)]
 pub(crate) mod ctx;
+// rc4's round, sqrt and sign decompositions before phase 6 (APU-135 P2 S9).
+pub(crate) mod decompositions;
 #[allow(dead_code)]
 pub(crate) mod dim_maps;
 // The dtypes rc4 reads from fake tensors, from RETAB's qparams (APU-135 P2).
