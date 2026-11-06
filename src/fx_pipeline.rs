@@ -69,6 +69,18 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
             crate::fx_decompose_layernorm_ir::IrDecomposeLayerNormPass,
         )),
         Ir(Box::new(crate::fx_decompose_var_ir::IrDecomposeVarPass)),
+    ]);
+    if explicit {
+        // rc4 reads each cond and while output's RESCALE target at APM:595, from the
+        // getitem's output qparams that FoldAndAnnotateQParams took from the quantize
+        // after it (APM:574). RETAB inserts those RESCALEs at serialization, so it
+        // records the targets here, from that quantize, before IrFoldQdq folds it and
+        // before any layout pass can hide it (APU-135 S8).
+        steps.push(Ir(Box::new(
+            crate::control_flow::IrRecordControlFlowRescaleTargetsPass,
+        )));
+    }
+    steps.extend(vec![
         // -- Fold Q/DQ + rescale --
         // Stock sets preserve_partial_binary_tensor_qdq when the TOSA spec
         // supports float or the output format is VGF; RETAB has no VGF path,
@@ -423,7 +435,8 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
     )));
     if explicit {
         // After every explicit pass: a control-flow output whose boundary-contract
-        // target their qparam-less copies hide goes to stock until S8.
+        // target their qparam-less copies hide, and that has no recorded target,
+        // goes to stock.
         steps.push(Ir(Box::new(
             crate::layout::control_flow_guard::IrExplicitControlFlowOutputGuardPass,
         )));
@@ -726,6 +739,7 @@ mod tests {
                 for pass in [
                     "IrNormalizeDelegateIOLayout",
                     "IrFuseIdenticalInputTransforms",
+                    "IrRecordControlFlowRescaleTargets",
                     "IrDecomposeRound",
                     "IrDecomposeSqrt",
                     "IrDecomposeSign",
@@ -801,6 +815,12 @@ mod tests {
                     "{spec}"
                 );
                 assert_eq!(count("IrFuseIdenticalInputTransforms"), 1, "{spec}");
+
+                // The control-flow RESCALE targets, recorded right before the fold
+                // (rc4 reads them at APM:595, from FoldAndAnnotate's annotation).
+                let record = position("IrRecordControlFlowRescaleTargets");
+                assert_eq!(names[record + 1], "IrFoldQdq", "{spec}");
+                assert_eq!(count("IrRecordControlFlowRescaleTargets"), 1, "{spec}");
 
                 // APM:611, :617 and :629: after the fold, before the scalar rewrite.
                 let round = position("IrDecomposeRound");
@@ -908,6 +928,7 @@ mod tests {
         let explicit_only = [
             "IrNormalizeDelegateIOLayout",
             "IrFuseIdenticalInputTransforms",
+            "IrRecordControlFlowRescaleTargets",
             "IrDecomposeRound",
             "IrDecomposeSqrt",
             "IrDecomposeSign",

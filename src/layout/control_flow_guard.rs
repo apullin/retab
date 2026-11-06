@@ -1,5 +1,5 @@
 //! Explicit mode's stock fallback for control-flow outputs whose boundary
-//! contract cannot find its target qparam (APU-135 P2, until S8).
+//! contract cannot find its target qparam (APU-135 P2 and S8).
 //!
 //! RETAB inserts a cond or while output's RESCALE at serialization
 //! (`control_flow::contracts::apply_boundary_contracts`). The target qparam
@@ -15,16 +15,22 @@
 //! inserts no RESCALE, and the consumers read the region's output in the
 //! region's quantization.
 //!
-//! IrRewriteConv already requests the fallback for the convs it would rewrite
+//! Explicit mode now records each output's target before IrFoldQdq, from the
+//! quantize that follows the getitem, as rc4 reads it
+//! (`control_flow::IrRecordControlFlowRescaleTargetsPass`), and the contract
+//! takes the recorded target, so a recorded output is never at risk
+//! ([`output_target_recorded`]). What is left is an output the record found
+//! no target for, which the contract can only find in the graph as it is at
+//! serialization.
+//!
+//! IrRewriteConv requests the fallback for the convs it would rewrite
 //! (`control_flow_hazard` in `layout::rewrite_conv`). This pass runs after
 //! every explicit pass and requests it for any other such getitem: one
-//! without output qparams, with no direct consumer the contract can read,
-//! that reaches a node with input qparams through data-movement copies
-//! without input qparams. The target exists, but the contract cannot see it.
-//! Where no node on the way has qparams, the contract finds nothing in
-//! dim-order mode either, and the graph stays with RETAB. S8 lifts this
-//! fallback once the contracts record their targets before the explicit
-//! passes run or read through such copies.
+//! without output qparams or a recorded target, with no direct consumer the
+//! contract can read, that reaches a node with input qparams through
+//! data-movement copies without input qparams. The target exists, but the
+//! contract cannot see it. Where no node on the way has qparams, the contract
+//! finds nothing in dim-order mode either, and the graph stays with RETAB.
 
 use std::collections::HashSet;
 
@@ -73,8 +79,8 @@ fn hidden_output_target(graph: &IrGraph) -> Option<String> {
     None
 }
 
-/// A getitem of a cond or while without output qparams, whose target the
-/// contract looks for among its consumers.
+/// A getitem of a cond or while without output qparams or a recorded target,
+/// whose target the contract looks for among its consumers.
 fn is_unqualified_control_flow_output(graph: &IrGraph, node: &IrNode) -> bool {
     node.op == NodeOp::CallFunction
         && node.is_getitem()
@@ -82,6 +88,26 @@ fn is_unqualified_control_flow_output(graph: &IrGraph, node: &IrNode) -> bool {
         && node
             .first_node_arg()
             .is_some_and(|source| graph.node(source).is_control_flow())
+        && !output_target_recorded(graph, node)
+}
+
+/// Whether the cond or while that getitem `node` reads carries a recorded
+/// target for its output index (`IrRecordControlFlowRescaleTargetsPass`),
+/// which the boundary contract takes whatever the graph shows by then.
+pub(crate) fn output_target_recorded(graph: &IrGraph, node: &IrNode) -> bool {
+    let (Some(source), Some(index)) = (node.first_node_arg(), node.args.get(1)) else {
+        return false;
+    };
+    let Some(index) = index.as_int() else {
+        return false;
+    };
+    usize::try_from(index).is_ok_and(|index| {
+        graph
+            .node(source)
+            .meta
+            .control_flow_output_targets()
+            .is_some_and(|targets| targets.get(&index).is_some())
+    })
 }
 
 /// Whether `infer_output_qparams_map_ir` takes a target from this consumer.
@@ -225,6 +251,36 @@ mod tests {
             ),
             "{reason}"
         );
+    }
+
+    /// The same view, but the cond carries the target the record took before
+    /// IrFoldQdq (`IrRecordControlFlowRescaleTargetsPass`), which the contract
+    /// uses: nothing to do. A record for another output doesn't count.
+    #[test]
+    fn a_recorded_target_stays_with_retab() {
+        for (recorded_index, falls_back) in [(0, false), (1, true)] {
+            let (mut graph, getitem) = cond_output();
+            let cond = graph.node(getitem).first_node_arg().unwrap();
+            graph
+                .node_mut(cond)
+                .meta
+                .set_control_flow_output_targets(crate::fx_ir::QParamMap::from_pairs([(
+                    recorded_index,
+                    qparam(0.2, 1, I8),
+                )]));
+            let y = placeholder(&mut graph, "y", [1, 4], F32);
+            let view = call(
+                &mut graph,
+                "getitem_rank_matched",
+                "aten.view_copy.default",
+                vec![IrArg::Node(getitem), i64_list_arg(&[1, 4])],
+                [1, 4],
+                F32,
+            );
+            let add = add_with_qparams(&mut graph, "add", y, view);
+            output(&mut graph, add);
+            assert_eq!(guard(&mut graph).is_some(), falls_back, "{recorded_index}");
+        }
     }
 
     /// The contract can read a direct consumer's input qparams, or the

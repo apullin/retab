@@ -370,6 +370,114 @@ fn infer_output_qparams_map_ir(
     result
 }
 
+/// The output RESCALE targets of cond or while node `cf_id`: the ones recorded
+/// before the explicit-mode passes ([`IrRecordControlFlowRescaleTargetsPass`]),
+/// then, for outputs without a recorded target, the ones the graph shows now
+/// (`infer_output_qparams_map_ir`). Without a record, only the latter.
+fn output_targets_ir(graph: &fx_ir::IrGraph, cf_id: fx_ir::NodeId) -> Vec<(usize, fx_ir::QParam)> {
+    let Some(recorded) = graph.node(cf_id).meta.control_flow_output_targets() else {
+        return infer_output_qparams_map_ir(graph, cf_id);
+    };
+    let mut targets = recorded.cloned_pairs();
+    for (index, qparam) in infer_output_qparams_map_ir(graph, cf_id) {
+        if recorded.get(&index).is_none() && !targets.iter().any(|(seen, _)| *seen == index) {
+            targets.push((index, qparam));
+        }
+    }
+    targets.sort_by_key(|(index, _)| *index);
+    targets
+}
+
+/// The output targets of cond or while node `cf_id` as rc4 has them at
+/// `arm_pass_manager.py:595`, read before IrFoldQdq: FoldAndAnnotateQParamsPass
+/// annotates each getitem's output qparams from the quantize that follows it
+/// (APM:574), and InsertControlFlowRescalesPass reads those. So a getitem's own
+/// output qparam counts first, then that of a quantize reading it as its data
+/// input, then whatever `infer_output_qparams_map_ir` finds (a consumer's input
+/// qparams, a dequantize). One target per output index, the first found.
+fn recorded_output_targets_ir(graph: &fx_ir::IrGraph, cf_id: fx_ir::NodeId) -> fx_ir::QParamMap {
+    let mut targets = fx_ir::QParamMap::new();
+    let mut getitems: Vec<(usize, fx_ir::NodeId)> = graph
+        .users(cf_id)
+        .iter()
+        .filter_map(|&id| {
+            let node = graph.node(id);
+            match (node.alive, node.args.get(1)) {
+                (true, Some(fx_ir::IrArg::Int(index))) => Some((*index as usize, id)),
+                _ => None,
+            }
+        })
+        .collect();
+    getitems.sort();
+    for (index, getitem) in getitems {
+        if targets.get(&index).is_some() {
+            continue;
+        }
+        let node = graph.node(getitem);
+        let quantized = node.meta.output_qparam().cloned().or_else(|| {
+            graph.users(getitem).iter().find_map(|&user| {
+                let user = graph.node(user);
+                (user.alive && user.is_quantize() && user.arg_node(0) == Some(getitem))
+                    .then(|| user.parse_qdq_qparam())
+                    .flatten()
+            })
+        });
+        if let Some(qparam) = quantized {
+            targets.insert(index, qparam);
+        }
+    }
+    for (index, qparam) in infer_output_qparams_map_ir(graph, cf_id) {
+        if targets.get(&index).is_none() {
+            targets.insert(index, qparam);
+        }
+    }
+    targets
+}
+
+/// Record on every cond and while node the targets of its output contracts
+/// ([`recorded_output_targets_ir`]). Returns how many nodes got a record.
+pub(crate) fn record_control_flow_output_targets_ir(graph: &mut fx_ir::IrGraph) -> u32 {
+    let cf_ids: Vec<fx_ir::NodeId> = graph
+        .live_nodes()
+        .filter(|node| node.is_cond() || node.is_while_loop())
+        .map(|node| node.id)
+        .collect();
+    for &cf_id in &cf_ids {
+        let targets = recorded_output_targets_ir(graph, cf_id);
+        graph
+            .node_mut(cf_id)
+            .meta
+            .set_control_flow_output_targets(targets);
+    }
+    cf_ids.len() as u32
+}
+
+/// Explicit mode records its control-flow output targets before IrFoldQdq. rc4
+/// inserts a cond or while output's RESCALE at `arm_pass_manager.py:595`
+/// (InsertControlFlowRescalesPass), before any layout pass, from the getitem's
+/// output qparams; RETAB inserts it at serialization (`apply_boundary_contracts`),
+/// after the whole pipeline. By then the explicit passes can have put copies
+/// without qparams between a getitem and the consumer that held its target
+/// (IrMatchArgRanks' views, explicit IrSizeAdjustInput's slices, the conv and
+/// upsample rewrites' input permutes, propagated permutes and views), and even
+/// before `:595` IrDecomposeLinear's views and IrInsertInt32Rescale's RESCALEs
+/// can stand in for that consumer, while IrFoldQdq annotates a getitem only
+/// when it is foldable. So the record reads the quantize that follows each
+/// getitem, which is what rc4's annotation comes from, before the fold removes
+/// it. It changes no node but the cond and while nodes' meta.
+pub(crate) struct IrRecordControlFlowRescaleTargetsPass;
+
+impl fx_ir::IrPass for IrRecordControlFlowRescaleTargetsPass {
+    fn name(&self) -> &str {
+        "IrRecordControlFlowRescaleTargets"
+    }
+
+    fn run(&self, graph: &mut fx_ir::IrGraph) -> bool {
+        record_control_flow_output_targets_ir(graph);
+        false
+    }
+}
+
 fn collect_output_contracts_for_graph(
     ir: &fx_ir::IrGraph,
     parent_region: Option<&str>,
@@ -382,7 +490,7 @@ fn collect_output_contracts_for_graph(
         if !is_cond && !is_while {
             continue;
         }
-        let targets = infer_output_qparams_map_ir(ir, node.id);
+        let targets = output_targets_ir(ir, node.id);
         if targets.is_empty() {
             continue;
         }
@@ -1205,5 +1313,256 @@ mod tests {
         let region = &submodules["true_graph"].0;
         let output = region.output_node().expect("an output");
         assert_eq!(output.meta.input_qparam_at(0), None);
+    }
+
+    fn quantize_or_dequantize(
+        graph: &mut IrGraph,
+        name: &str,
+        target: &str,
+        input: fx_ir::NodeId,
+        (scale, zp): (f64, i64),
+        shape: &[i64],
+        dtype: &str,
+    ) -> fx_ir::NodeId {
+        call(
+            graph,
+            name,
+            target,
+            vec![
+                IrArg::Node(input),
+                IrArg::Float(scale),
+                IrArg::Int(zp),
+                IrArg::Int(-128),
+                IrArg::Int(127),
+                IrArg::Dtype(I8.into()),
+            ],
+            shape.to_vec(),
+            dtype,
+        )
+    }
+
+    const QUANTIZE: &str = "quantized_decomposed.quantize_per_tensor.default";
+    const DEQUANTIZE: &str = "quantized_decomposed.dequantize_per_tensor.default";
+
+    /// rc4's `CondZeroArgsOneOutput` with branch constants 3.0 and -0.5 instead of
+    /// 0 and 1: the cond output is quantized for [-0.5, 3.0] (`3.5 / 255`, zero
+    /// point -91), the true branch's constant for [0, 3.0] (`3 / 255`, -128).
+    /// The parent as the edge program has it: the getitem is quantized right
+    /// after the cond.
+    fn constant_branch_parent() -> IrGraph {
+        let mut parent = IrGraph::empty();
+        let cond = call_with_meta(
+            &mut parent,
+            "cond",
+            "torch.ops.higher_order.cond",
+            vec![
+                IrArg::Int(1),
+                IrArg::Str("true_graph".into()),
+                IrArg::Str("false_graph".into()),
+                IrArg::List(vec![]),
+            ],
+            NodeMeta::default(),
+        );
+        let getitem = call(
+            &mut parent,
+            "getitem",
+            "<built-in function getitem>",
+            vec![IrArg::Node(cond), IrArg::Int(0)],
+            [10],
+            "torch.float32",
+        );
+        let quantize = quantize_or_dequantize(
+            &mut parent,
+            "getitem_quantize",
+            QUANTIZE,
+            getitem,
+            (3.5 / 255.0, -91),
+            &[10],
+            I8,
+        );
+        output(&mut parent, quantize);
+        parent
+    }
+
+    /// The true branch after explicit mode's pipeline: IrMaterializeConstants
+    /// folded `full((10,), 3.0)` into a region constant without qparams, and the
+    /// output's dequantize carries the branch's quantization.
+    fn constant_branch_region() -> IrGraph {
+        let mut region = IrGraph::empty();
+        let constant = region_constant(
+            &mut region,
+            "aten_full_default_pre_computed",
+            TensorData {
+                data: vec![127u8; 10],
+                shape: vec![10],
+                dtype: DType::Int8,
+            },
+        );
+        let dequantize = quantize_or_dequantize(
+            &mut region,
+            "output_dequantize",
+            DEQUANTIZE,
+            constant,
+            (3.0 / 255.0, -128),
+            &[10],
+            "torch.float32",
+        );
+        output(&mut region, dequantize);
+        region
+    }
+
+    /// The RESCALE the output contract put after `source` in `region`, as
+    /// `(scale, input zero point, output zero point)`.
+    fn output_rescale(region: &IrGraph, source: &str) -> (f64, i64, i64) {
+        let rescale = live_node(region, &format!("{source}_cf_output_rescale"));
+        assert_eq!(rescale.first_node_arg(), Some(live_node(region, source).id));
+        let output = region.output_node().expect("an output");
+        assert_eq!(output_arg_node_ids_ir(region, output.id), [rescale.id]);
+        let IrArg::List(scales) = &rescale.args[2] else {
+            panic!("RESCALE scales");
+        };
+        let [IrArg::Float(scale)] = scales.as_slice() else {
+            panic!("one scale: {scales:?}");
+        };
+        (*scale, rescale.args[3].as_int().unwrap(), rescale.args[4].as_int().unwrap())
+    }
+
+    /// The step-4 gap of the explicit bring-up (APU-135): a cond branch's
+    /// constant, folded by IrMaterializeConstants, has no qparams, so the output
+    /// contract must take the branch side from the output's dequantize and the
+    /// parent side from the target recorded before IrFoldQdq. The scales are far
+    /// from identity (`(3 / 255) / (3.5 / 255) = 6 / 7`, zero point -128 to -91),
+    /// unlike rc4's zero_args_one_output, whose RESCALEs move nothing visibly
+    /// (the zeros sit at the zero point and the ones' scale is 1.0005).
+    #[test]
+    fn explicit_constant_branch_outputs_rescale_to_the_recorded_target() {
+        let mut parent = constant_branch_parent();
+        assert_eq!(record_control_flow_output_targets_ir(&mut parent), 1);
+        // IrFoldQdq then folds the getitem's quantize away, and RETAB's fold need
+        // not annotate the getitem.
+        let quantize = live_node(&parent, "getitem_quantize").id;
+        let getitem = live_node(&parent, "getitem").id;
+        parent.replace_and_erase(quantize, getitem);
+        assert_eq!(infer_output_qparams_map_ir(&parent, live_node(&parent, "cond").id), []);
+
+        let mut submodules: BTreeMap<String, StashedPipeline> = BTreeMap::from([(
+            "true_graph".to_string(),
+            (constant_branch_region(), LoweringEffectBatch::default()),
+        )]);
+        crate::stock_fallback::take();
+        apply_boundary_contracts(&mut parent, &mut submodules, LayoutMode::Explicit);
+        assert_eq!(crate::stock_fallback::take(), None);
+        let region = &submodules["true_graph"].0;
+        let (scale, input_zp, output_zp) =
+            output_rescale(region, "aten_full_default_pre_computed");
+        assert!((scale - 6.0 / 7.0).abs() < 1e-12, "{scale}");
+        assert_eq!((input_zp, output_zp), (-128, -91));
+    }
+
+    /// The record reads the quantize that follows each getitem, which is where
+    /// rc4's FoldAndAnnotateQParamsPass takes the getitem's output qparams from
+    /// (APM:574), one target per output index; a getitem's own output qparams
+    /// come first, and `infer_output_qparams_map_ir` fills the rest.
+    #[test]
+    fn recorded_targets_come_from_the_quantize_after_each_getitem() {
+        let mut parent = constant_branch_parent();
+        let cond = live_node(&parent, "cond").id;
+        // A second output, read through a dequantize only.
+        let getitem_1 = call(
+            &mut parent,
+            "getitem_1",
+            "<built-in function getitem>",
+            vec![IrArg::Node(cond), IrArg::Int(1)],
+            [10],
+            I8,
+        );
+        quantize_or_dequantize(
+            &mut parent,
+            "getitem_1_dequantize",
+            DEQUANTIZE,
+            getitem_1,
+            (0.25, 4),
+            &[10],
+            "torch.float32",
+        );
+        record_control_flow_output_targets_ir(&mut parent);
+        let recorded = parent
+            .node(cond)
+            .meta
+            .control_flow_output_targets()
+            .expect("a record")
+            .cloned_pairs();
+        let summary: Vec<(usize, f64, i64)> = recorded
+            .iter()
+            .map(|(index, qparam)| (*index, qparam.scale, qparam.zp))
+            .collect();
+        assert_eq!(summary, [(0, 3.5 / 255.0, -91), (1, 0.25, 4)]);
+
+        // A getitem's own output qparams win over its quantize.
+        let getitem = live_node(&parent, "getitem").id;
+        parent
+            .node_mut(getitem)
+            .meta
+            .set_single_output_qparam(qparam(0.5, 1, I8));
+        record_control_flow_output_targets_ir(&mut parent);
+        let target = parent
+            .node(cond)
+            .meta
+            .control_flow_output_targets()
+            .and_then(|targets| targets.get(&0).cloned())
+            .expect("a target");
+        assert_eq!((target.scale, target.zp), (0.5, 1));
+    }
+
+    /// After the explicit passes a copy without qparams can stand between a
+    /// getitem and the consumer that held its target (here a propagated
+    /// permute), and the graph then shows no target; the recorded one still
+    /// reaches the contract. Without the record the output stays unrescaled.
+    #[test]
+    fn recorded_targets_survive_copies_that_hide_the_consumer() {
+        let build = |record: bool| {
+            let mut parent = parent_graph();
+            let getitem = live_node(&parent, "getitem").id;
+            if record {
+                record_control_flow_output_targets_ir(&mut parent);
+            }
+            parent.node_mut(getitem).meta.clear_output_qparams();
+            let output_id = parent.output_node().expect("an output").id;
+            let permute = call(
+                &mut parent,
+                "getitem_permute",
+                "aten.permute_copy.default",
+                vec![IrArg::Node(getitem), i64_list_arg(&[0, 2, 1])],
+                [1, 8, 4],
+                I8,
+            );
+            let mut add_meta = NodeMeta::tensor(vec![1, 8, 4], I8);
+            add_meta.set_input_qparams_from([(0, qparam(0.05, 3, I8)), (1, qparam(0.05, 3, I8))]);
+            add_meta.set_single_output_qparam(qparam(0.1, 0, I8));
+            let add = call_with_meta(
+                &mut parent,
+                "add",
+                "aten.add.Tensor",
+                vec![IrArg::Node(permute), IrArg::Node(permute)],
+                add_meta,
+            );
+            parent.set_args(output_id, vec![IrArg::List(vec![IrArg::Node(add)])]);
+            let mut submodules: BTreeMap<String, StashedPipeline> = BTreeMap::from([(
+                "true_graph".to_string(),
+                (conv_region(), LoweringEffectBatch::default()),
+            )]);
+            crate::stock_fallback::take();
+            apply_boundary_contracts(&mut parent, &mut submodules, LayoutMode::Explicit);
+            assert_eq!(crate::stock_fallback::take(), None);
+            submodules.remove("true_graph").unwrap().0
+        };
+        let region = build(true);
+        let (scale, input_zp, output_zp) = output_rescale(&region, "conv_ncl");
+        assert!((scale - 0.04 / 0.05).abs() < 1e-12, "{scale}");
+        assert_eq!((input_zp, output_zp), (7, 3));
+        let region = build(false);
+        assert!(!region
+            .live_nodes()
+            .any(|node| node.name.ends_with("_cf_output_rescale")));
     }
 }

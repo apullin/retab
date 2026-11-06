@@ -1285,8 +1285,9 @@ fn boundary_contracts_misread_the_rewrites_rescale() {
     assert_ne!(read.scale, output_qparam.scale);
 }
 
-/// A parent conv reading a cond output falls back until S8: the cond's output
-/// contract takes its target qparam from the getitem's direct consumers
+/// A parent conv reading a cond output without a recorded target falls back
+/// (see `convs_reading_recorded_control_flow_outputs_are_rewritten` for one
+/// with): the cond's output contract takes its target qparam from the getitem's direct consumers
 /// (`infer_output_qparams_map_ir`), and the rewrite's input permute has none.
 /// A getitem carrying its own output qparams is unaffected.
 #[test]
@@ -1324,6 +1325,43 @@ fn convs_reading_control_flow_outputs_fall_back_until_s8() {
             let reason = reason.expect("a fallback");
             assert!(reason.contains("control-flow output getitem"), "{reason}");
         }
+    }
+}
+
+/// APU-135 S8: with the target the record took before IrFoldQdq on the cond
+/// (`IrRecordControlFlowRescaleTargetsPass`), the output contract no longer
+/// needs the conv's input qparams, so a conv reading the cond output is
+/// rewritten. A record for another output index leaves the fallback.
+#[test]
+fn convs_reading_recorded_control_flow_outputs_are_rewritten() {
+    for (recorded_index, rewritten) in [(0, true), (1, false)] {
+        let mut graph = imported(REWRITE_CONV, "conv2d_pt");
+        let conv = single_call(&graph, CONVOLUTION);
+        let input = arg(&graph, conv, 0);
+        let input_shape = shape(&graph, input);
+        let mut cond_meta = crate::fx_meta::NodeMeta::default();
+        cond_meta.set_control_flow_output_targets(crate::fx_ir::QParamMap::from_pairs([(
+            recorded_index,
+            int8(0.1, 0),
+        )]));
+        let cond = crate::test_ir::call_with_meta(
+            &mut graph,
+            "cond",
+            "torch.ops.higher_order.cond",
+            vec![IrArg::Node(input)],
+            cond_meta,
+        );
+        let getitem = crate::test_ir::call_with_meta(
+            &mut graph,
+            "getitem",
+            "<built-in function getitem>",
+            vec![IrArg::Node(cond), IrArg::Int(0)],
+            crate::fx_meta::NodeMeta::tensor(input_shape, "torch.int8"),
+        );
+        graph.set_arg(conv, 0, IrArg::Node(getitem));
+        let (modified, reason) = run_with(&parent_pass(), &mut graph);
+        assert_eq!(modified, rewritten, "{recorded_index}");
+        assert_eq!(reason.is_none(), rewritten, "{reason:?}");
     }
 }
 
@@ -1400,8 +1438,8 @@ fn output_contract_finds_a_target(graph: &IrGraph, getitem: NodeId) -> bool {
 /// gets explicit IrSizeAdjustInput's slices, and those carry emptied qparam
 /// maps, as rc4's do (`fx_size_adjust_input_ir.rs` module docs). The output
 /// contract then finds no target qparam among the getitem's direct consumers,
-/// whether or not the conv is rewritten (`control_flow_hazard`). So the conv
-/// falls back until S8, as one reading the getitem directly does, and the
+/// whether or not the conv is rewritten (`control_flow_hazard`). So without a
+/// recorded target the conv falls back, as one reading the getitem directly does, and the
 /// graph stays as IrSizeAdjustInput left it. Without the fallback, the rewrite
 /// would remove the aten conv that sends the graph to stock at serialization,
 /// and the output RESCALE would be missing whenever the branch output qparams
@@ -1517,7 +1555,7 @@ fn convs_reading_control_flow_outputs_with_a_target_qparam_are_rewritten() {
     }
 }
 
-/// A Linear reading a cond output falls back until S8 too. `IrDecomposeLinear`
+/// A Linear reading a cond output without a recorded target falls back too. `IrDecomposeLinear`
 /// reads the getitem through an input view and permute without qparams (in
 /// both modes, as rc4's DecomposeLinearPass does), so the output contract has
 /// no direct consumer to read.

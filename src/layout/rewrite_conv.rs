@@ -129,11 +129,13 @@
 //! input read directly or through its boundary quantize and data-movement
 //! copies, the chain captured_conv can resolve (`captured_branch_input`).
 //!
-//! **Not here yet.** A conv reading a cond or while output whose getitem has
-//! no output qparams, directly or through copies without input qparams, such
-//! as explicit IrSizeAdjustInput's slices, requests a stock fallback until the
-//! boundary contracts can find that output's target qparam (see
-//! `control_flow_hazard`). FP8 is out of scope (design F1).
+//! **Control-flow outputs.** A conv reading a cond or while output whose
+//! getitem has no output qparams, directly or through copies without input
+//! qparams, such as explicit IrSizeAdjustInput's slices, requests a stock
+//! fallback when the cond or while carries no recorded target for that output
+//! (see `control_flow_hazard`); explicit mode records the targets before
+//! IrFoldQdq, so in its pipeline that leaves only outputs no quantize
+//! followed. FP8 is out of scope (design F1).
 //!
 //! **Stock fallbacks** (design §2.11, critique B5, B10). Where rc4 raises, the
 //! pass requests a stock fallback (`stock_fallback::request`) and stops, so
@@ -607,9 +609,9 @@ fn to_i64(dims: &[usize]) -> Vec<i64> {
     dims.iter().map(|&dim| dim as i64).collect()
 }
 
-/// Why a conv that `plan` could rewrite must still go to stock until the
-/// boundary contracts can read past the nodes this pass creates (APU-135 S8;
-/// design §4.3). rc4 inserts its control-flow boundary RESCALEs before
+/// Why a conv that `plan` could rewrite must still go to stock when the
+/// boundary contracts cannot read past the nodes this pass creates (APU-135
+/// S8; design §4.3). rc4 inserts its control-flow boundary RESCALEs before
 /// RewriteConvPass (APM:595); RETAB's boundary contracts run at
 /// serialization, after the whole pipeline
 /// (`control_flow::contracts::apply_boundary_contracts`). A cond or while
@@ -632,11 +634,12 @@ fn to_i64(dims: &[usize]) -> Vec<i64> {
 /// mode. The contract then finds no target whether or not the conv is
 /// rewritten. But the aten conv sends the graph to stock at serialization
 /// (the explicit-mode aten-conv guard), and the rewritten graph would
-/// serialize without the output RESCALE. So these convs fall back too. Before
-/// the fallback can go, the contract needs these targets from elsewhere:
-/// recorded before the explicit passes run, as rc4's
-/// InsertControlFlowRescalesPass reads them at APM:595, or read through such
-/// copies.
+/// serialize without the output RESCALE. So these convs fall back too, unless
+/// the cond or while carries a recorded target for the output: explicit mode
+/// records them before IrFoldQdq, from the quantize after each getitem, which
+/// is where rc4's InsertControlFlowRescalesPass target comes from at APM:595
+/// (`control_flow::IrRecordControlFlowRescaleTargetsPass`), and the contract
+/// takes a recorded target whatever the graph shows by then.
 fn control_flow_hazard(graph: &IrGraph, input: NodeId) -> Option<String> {
     let (getitem, copies) = control_flow_output_read(graph, input)?;
     let getitem = &graph.node(getitem).name;
@@ -677,7 +680,8 @@ fn control_flow_output_read(graph: &IrGraph, input: NodeId) -> Option<(NodeId, V
             let unqualified = node.meta.output_qparam().is_none()
                 && node
                     .first_node_arg()
-                    .is_some_and(|source| graph.node(source).is_control_flow());
+                    .is_some_and(|source| graph.node(source).is_control_flow())
+                && !crate::layout::control_flow_guard::output_target_recorded(graph, node);
             copies.reverse();
             return unqualified.then_some((current, copies));
         }

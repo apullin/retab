@@ -17,7 +17,7 @@ mod canonicalize_upstream_tests;
 #[allow(dead_code)]
 pub(crate) mod ctx;
 // Explicit mode's stock fallback for control-flow outputs whose contract target
-// its copies hide, until S8.
+// its copies hide and no record holds.
 pub(crate) mod control_flow_guard;
 // rc4's round, sqrt and sign decompositions before phase 6 (APU-135 P2 S9).
 pub(crate) mod decompositions;

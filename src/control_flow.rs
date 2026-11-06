@@ -14,7 +14,7 @@ pub(crate) use assembly::append_subgraphs_from_ir;
 pub(crate) use assembly::try_append_subgraphs_from_ir;
 pub(crate) use contracts::{
     apply_boundary_contracts, apply_pre_submodule_qparam_propagation_ir,
-    snapshot_pre_pass_qparams_ir,
+    snapshot_pre_pass_qparams_ir, IrRecordControlFlowRescaleTargetsPass,
 };
 pub(crate) use metadata::{IrInsertCarriedOutputRescalePass, IrStripWhileBoundaryQPass};
 // IrRewriteConv's tests pin how the boundary contracts read its nodes (APU-135 S3).

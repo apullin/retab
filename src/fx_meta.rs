@@ -59,6 +59,10 @@ struct QuantFacts {
     input_qparams: Option<QParamMap>,
     output_qparams: Option<QParamMap>,
     pre_pass_arg_qparams: Option<QParamMap>,
+    /// On a cond or while node: the output RESCALE targets recorded before the
+    /// explicit-mode layout passes, by output index
+    /// (`control_flow::IrRecordControlFlowRescaleTargetsPass`).
+    control_flow_output_targets: Option<QParamMap>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -281,6 +285,7 @@ impl NodeMeta {
                 input_qparams,
                 output_qparams,
                 pre_pass_arg_qparams,
+                control_flow_output_targets: None,
             },
             layout: LayoutFacts {
                 val_dim_order,
@@ -398,6 +403,10 @@ impl NodeMeta {
 
     pub fn set_pre_pass_arg_qparams(&mut self, map: impl Into<QParamMap>) {
         self.quant.pre_pass_arg_qparams = Some(map.into());
+    }
+
+    pub(crate) fn set_control_flow_output_targets(&mut self, map: impl Into<QParamMap>) {
+        self.quant.control_flow_output_targets = Some(map.into());
     }
 
     pub fn clear_output_qparams(&mut self) {
@@ -535,6 +544,10 @@ impl NodeMeta {
 
     pub fn pre_pass_arg_qparams(&self) -> Option<&QParamMap> {
         self.quant.pre_pass_arg_qparams.as_ref()
+    }
+
+    pub(crate) fn control_flow_output_targets(&self) -> Option<&QParamMap> {
+        self.quant.control_flow_output_targets.as_ref()
     }
 
     pub fn cloned_input_qparams(&self) -> Option<QParamMap> {
