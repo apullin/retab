@@ -806,10 +806,12 @@ fn non_int32_bias(ir: &IrGraph, conv: &IrNode) -> Option<String> {
 /// invocations are followed. rc4 resolves while-loop captures as well, through
 /// the operand `_regularize_submodule` records on every region placeholder
 /// (`tosa/backend.py:222-238`), so stock lowers such a delegate exactly as rc4
-/// does. Resolving them here would take while semantics rc4 does not model: a
-/// carried input changes every iteration, so only additional inputs are
-/// loop-invariant, while rc4 resolves a carried input to its initial value. No
-/// rc4 op test has a conv in a while body.
+/// does. Resolving them here would take while semantics rc4 does not model:
+/// torch.export makes a body's captured parameters carried inputs, which the
+/// body hands back through a clone, and a carried input holds its initial
+/// value on every iteration only if each one passes it through unchanged. rc4
+/// resolves any carried input to its initial value; RETAB would have to prove
+/// the pass-through. No rc4 op test has a conv in a while body.
 pub(crate) fn rewrite_explicit_captured_conv_operands(
     parent: &IrGraph,
     submodules: &mut BTreeMap<String, StashedPipeline>,
