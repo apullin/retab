@@ -28,9 +28,9 @@
 //!   factory with its output qparams, come along. One rule is rc4's rather
 //!   than the planners': a `full` that carries qparam maps is quantized only
 //!   with its output qparams, as ComputeConstantOpsAOT does (`:327-335`),
-//!   where the dim-order planners fall back to its input qparams
-//!   ([`FullQParams::Rc4`]). Both planners apply it, so a fold over such a
-//!   `full` reads the bytes the `full` is materialized with.
+//!   where the planners, as the effect passes run them, fall back to its
+//!   input qparams ([`FullQParams::Rc4`]). Both planners apply it, so a fold
+//!   over such a `full` reads the bytes the `full` is materialized with.
 //! - **How** the IR changes follows rc4: the names, the constant kinds and
 //!   insert points, the special-dtype propagation, the folds rc4 skips or
 //!   abandons, the graph-wide dead-code elimination and the deletion of the
@@ -40,7 +40,8 @@
 //! under the folded node's name finds no live node at ingest and is skipped
 //! (P2 design F9); the constant already holds the same data. Nodes the
 //! planners leave alone (targets they do not fold, transposed convs, ...)
-//! stay call nodes and keep the dim-order treatment.
+//! stay call nodes, which the effect passes that run later can still plan for
+//! ingest.
 //!
 //! In a region the constants are `get_attr` nodes (see
 //! [`GraphScope::Region`]) and no placeholder is added or deleted, since the
@@ -884,11 +885,11 @@ mod tests {
     /// rc4's passes copy their node's meta, qparams included, onto the `full`
     /// nodes they create (`ArmPass.call_scalar`), so the pass gives that rule
     /// to every `full` with qparam maps, empty ones included
-    /// ([`FullQParams::Rc4`]). The dim-order planners, which the effect passes
-    /// keep, quantize such a `full` with its input qparams or, with empty
-    /// maps, with its users' (APU-156 review). A bare `full`, as RETAB's
-    /// decompositions create them, keeps that inference here too, and a fold
-    /// over a `full` holds the bytes the `full` gets.
+    /// ([`FullQParams::Rc4`]). The planners, as the effect passes run them,
+    /// quantize such a `full` with its input qparams or, with empty maps, with
+    /// its users' (APU-156 review). A bare `full`, as RETAB's decompositions
+    /// create them, keeps that inference here too, and a fold over a `full`
+    /// holds the bytes the `full` gets.
     #[test]
     fn a_full_with_qparam_maps_is_quantized_only_with_its_output_qparams() {
         /// `full((2,), 3.0, dtype=torch.int8)`, as `call_scalar` spells it.
@@ -951,9 +952,9 @@ mod tests {
             ("empty", [12, 12]),
             ("bare", [12, 12]),
         ] {
-            assert_eq!(factories[name].0, values, "the dim-order planner: {name}");
+            assert_eq!(factories[name].0, values, "the effect pass: {name}");
         }
-        assert_eq!(folds["view"].0, [7, 7], "the dim-order planner: view");
+        assert_eq!(folds["view"].0, [7, 7], "the effect pass: view");
 
         let mut graph = build();
         assert!(run(&mut graph));
@@ -1795,8 +1796,8 @@ mod tests {
     /// The pass's constants hold exactly what ingest stores for the effects
     /// the planners plan on the same graph (with the pass's rule for `full`),
     /// after `apply_effects` and the int64 narrowing, with the same converted
-    /// value, and every folded node the outputs reach in the dim-order route
-    /// is a constant here.
+    /// value, and every folded node the outputs reach in the effect route is
+    /// a constant here.
     #[test]
     fn constants_hold_what_ingest_stores_for_the_planners_effects() {
         let mut deferred = every_planner_graph();
@@ -2092,8 +2093,8 @@ mod tests {
     /// (`ingest/from_ir.rs`), so a cond predicate the pass folded inside a
     /// region became the string "pred_pre_computed" and lost its constant. It
     /// now treats only a `get_attr` without data as a region reference, so the
-    /// explicit route keeps the tensor predicate that the dim-order route gets
-    /// by folding the predicate at ingest. Exporting a nested
+    /// explicit route keeps the tensor predicate that the effect route gets by
+    /// folding the predicate at ingest. Exporting a nested
     /// `torch.cond(torch.full((), True), ...)` inside a branch gives this shape.
     #[test]
     fn a_folded_cond_predicate_in_a_region_stays_a_tensor() {
@@ -2155,7 +2156,7 @@ mod tests {
             }
         };
 
-        // Dim-order route: the factory's effect folds the predicate at ingest.
+        // Effect route: the factory's effect folds the predicate at ingest.
         let mut deferred = build();
         let effects = IrFuseZeroInputConstantsEffectPass
             .run(&mut deferred)

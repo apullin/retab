@@ -23,12 +23,11 @@ pub struct IrFuseZeroInputConstantsEffectPass;
 /// quantize them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FullQParams {
-    /// The dim-order planners' rule, which the effect passes use: the node's
-    /// output qparam, else its input qparam, else one its users imply
-    /// ([`infer_binary_full_qparam`]).
+    /// The effect passes' rule: the node's output qparam, else its input
+    /// qparam, else one its users imply ([`infer_binary_full_qparam`]).
     Planner,
     /// rc4's ComputeConstantOpsAOTPass (`fuse_constant_ops_pass.py:327-335`),
-    /// which explicit mode's IrMaterializeConstantsPass applies. rc4
+    /// which IrMaterializeConstantsPass applies. rc4
     /// quantizes a `full` only with its own output qparams; without them it
     /// evaluates `full(*args, **kwargs)`, so the fill value stays as is, in
     /// the dtype kwarg's dtype, input qparams or not. rc4's passes copy their

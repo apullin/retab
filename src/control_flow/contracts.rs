@@ -141,10 +141,10 @@ fn resolve_parent_arg_ids_ir(node: &fx_ir::IrNode) -> Vec<fx_ir::NodeId> {
 }
 
 /// The meta a region placeholder takes from the operand bound to it. A val is the
-/// tensor as TOSA sees it, on both sides of the boundary, and no node has a dim order.
-/// The placeholder takes the operand's val as it is, as rc4's `_regularize_submodule`
-/// gives region IO the parent's post-pass vals (`backends/arm/tosa/backend.py:204-249`),
-/// and the boundary writes no dim order (P2 design §1c, §4.3.1).
+/// tensor as TOSA sees it, on both sides of the boundary, so the placeholder takes the
+/// operand's val as it is, as rc4's `_regularize_submodule` gives region IO the
+/// parent's post-pass vals (`backends/arm/tosa/backend.py:204-249`; P2 design §1c,
+/// §4.3.1).
 fn boundary_placeholder_meta(ir: &fx_ir::IrGraph, parent_id: fx_ir::NodeId) -> fx_ir::NodeMeta {
     ir.node(parent_id).meta.clone()
 }
@@ -841,9 +841,8 @@ fn strip_while_cond_output_rescales_ir(graph: &mut fx_ir::IrGraph) -> u32 {
 /// At serialization: align every control-flow region's IO with the graph that invokes
 /// it (boundary vals and qparams, and RESCALEs for inputs and outputs whose qparams
 /// differ), then resolve the conv weights and biases the cond branches capture
-/// (`captured_conv`). No dim order is written: boundary placeholders take the
-/// operand's val. The regions' output qparams come from their output dequantizes
-/// (APU-135 S8).
+/// (`captured_conv`). Boundary placeholders take the operand's val. The regions'
+/// output qparams come from their output dequantizes (APU-135 S8).
 pub(crate) fn apply_boundary_contracts(
     parent_ir: &mut fx_ir::IrGraph,
     submodules: &mut BTreeMap<String, StashedPipeline>,
