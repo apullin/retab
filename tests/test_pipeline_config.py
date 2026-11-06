@@ -172,6 +172,40 @@ def test_missing_layout_means_dim_order_and_explicit_mode_rewrites_the_conv():
     assert ops.index(Op.Op.TRANSPOSE) < conv < len(ops) - 1 - ops[::-1].index(Op.Op.TRANSPOSE)
 
 
+class _CondModule(torch.nn.Module):
+    def forward(self, x):
+        def true_branch(value):
+            return value + 1
+
+        def false_branch(value):
+            return value - 1
+
+        return torch.cond(x.sum() > 0, true_branch, false_branch, [x])
+
+
+def test_region_entry_points_reject_a_layout_mode_the_parent_did_not_run():
+    """P2 design §4.1: a delegate's parent pipeline and its regions run one layout mode.
+    `_all_rust_preprocess` hands every entry point the same config, so a region in the
+    other mode means a caller passed two configs: a hard error, not a stock fallback."""
+    from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
+    from executorch.exir.graph_module import get_cond_while_submodules
+
+    program = torch.export.export(_CondModule(), (torch.ones(2, 2),)).run_decompositions()
+    config = rp._build_pipeline_config(TosaCompileSpec("TOSA-1.0+INT+cf"))
+    explicit = {**config, "layout": "explicit"}
+    dim_order = {**config, "layout": "dim_order"}
+    (name, branch, _), *_ = get_cond_while_submodules(program.graph_module)
+
+    for parent, region in [(explicit, dim_order), (dim_order, explicit)]:
+        _native.run_fx_passes(program.graph_module, program, pipeline_config=parent)
+        with pytest.raises(RuntimeError, match="must share one pipeline config") as error:
+            _native.run_fx_cond_passes(branch, program, name, pipeline_config=region)
+        assert rp._native_fallback_reason(error.value) is None, error.value
+        with pytest.raises(RuntimeError, match="must share one pipeline config"):
+            _native.run_fx_submodule_passes(branch, program, name, pipeline_config=region)
+        _native.run_fx_cond_passes(branch, program, name, pipeline_config=parent)
+
+
 @pytest.mark.parametrize("recursive", [False, True])
 def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch, recursive):
     from executorch.exir import graph_module
