@@ -52,6 +52,9 @@
 //! ports' handling of both is visible. Qparam values only build the "before"
 //! graph: the comparison checks keys.
 //!
+//! The remove-permutes fixture records a raise as `after raises <type>`
+//! without the message comment; the parser reads both spellings.
+//!
 //! Usage: a pass's replay test is one line,
 //! `replay::check(&IrFooPass, include_str!("../../tests/fixtures/layout_replay/foo.txt"))`.
 //! [`check_known`] names cases still expected to differ, with a reason, and
@@ -418,7 +421,10 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Case>, String> {
         let (number, header) = lines
             .next()
             .ok_or_else(|| format!("case {name}: missing `after`"))?;
-        if let Some(exception) = header.strip_prefix("after raises=") {
+        if let Some(exception) = header
+            .strip_prefix("after raises=")
+            .or_else(|| header.strip_prefix("after raises "))
+        {
             match lines.next() {
                 Some((_, "end")) => {}
                 Some((number, line)) => {

@@ -66,6 +66,8 @@ value of one map entry that isn't `QARGS`, as
 doesn't reach). `after modified=<bool> same` means the after graph prints
 exactly like before; `after raises=<ExceptionType>` means the rc4 pass raised,
 and the comment line after it (`# rc4: ...`) holds the start of its message.
+Older fixtures (the remove-permutes one) write `after raises <ExceptionType>`
+without the comment; the parser accepts both.
 """
 
 from __future__ import annotations
@@ -81,6 +83,7 @@ from pathlib import Path
 
 import executorch
 import executorch.backends.arm.tosa.dialect  # noqa: F401  registers exir_ops.backend.tosa
+import executorch.backends.transforms.channels_last_ops  # noqa: F401  registers exir_ops.edge.channels_last
 import executorch.version
 import torch
 from executorch.backends.arm._passes import (
@@ -91,6 +94,7 @@ from executorch.backends.arm._passes import (
     MatchArgRanksPass,
     MoveDataMovementOpsToSmallerDtypePass,
     NormalizeDelegateIOLayoutPass,
+    RemovePermutesAroundElementwiseTosaOps,
     RewriteHighRankSingletonPermutePass,
 )
 from executorch.backends.arm._passes.fuse_equal_placeholders_pass import (
@@ -112,6 +116,9 @@ from executorch.backends.transforms.fuse_identical_input_transforms_pass import 
 from executorch.backends.arm.tosa.specification import (
     TosaLoweringContext,
     TosaSpecification,
+)
+from executorch.backends.transforms.remove_permutes_around_elementwise_ops import (
+    RemovePermutesAroundElementwiseOps,
 )
 from executorch.exir.dialects._ops import ops as exir_ops
 from executorch.exir.dialects.edge._ops import EdgeOpOverload
@@ -423,7 +430,8 @@ def dump(gm: torch.fx.GraphModule, kinds: dict[str, str]) -> list[str]:
 
 class PassSpec:
     def __init__(
-        self, name, make, sources, structured, random_profile, random_cases=None, tosa_spec=None
+        self, name, make, sources, structured, random_profile, random_cases=None, tosa_spec=None,
+        records_raises=False,
     ):
         self.name = name
         self.make: Callable[[ExportedProgram], object] = make
@@ -435,6 +443,8 @@ class PassSpec:
         self.random_cases = RANDOM_CASES if random_cases is None else random_cases
         # 16-bit TABLE ops need the int16 extension.
         self.tosa_spec = TOSA_SPEC if tosa_spec is None else tosa_spec
+        # Every spec records a raising pass now; kept for the specs that ask.
+        self.records_raises = records_raises
 
 
 class BuildError(Exception):
@@ -3129,6 +3139,9 @@ PROFILES = {
 
 
 def random_case(profile: str, seed: int) -> Callable[[Builder], None]:
+    if profile == "remove_permutes":
+        return remove_permutes_random_case(seed)
+
     def build(b: Builder) -> None:
         rng = random.Random(seed)
         graph = RandomGraph(rng, profile, b)
@@ -3137,6 +3150,1033 @@ def random_case(profile: str, seed: int) -> Callable[[Builder], None]:
             graph.pool.append(graph.new_input(graph.shape(rank), dim_order=graph.dim_order(rank)))
         for _ in range(rng.randint(1, 9)):
             graph.step(PROFILES[profile])
+        graph.finish()
+
+    return build
+
+
+# --------------------------------------------------------------------------
+# RemovePermutesAroundElementwiseTosaOps
+# --------------------------------------------------------------------------
+
+
+class _GraphOrderedEdges(set):
+    """A set of node pairs, iterated in graph order of its pairs.
+
+    rc4 iterates `edges_in` and `constant_edges_in` in an order that depends
+    on object addresses, and the order can change the result: where the
+    compensating permutes for a constant feeding several region nodes land
+    (each goes directly after the constant), and what a region node reads when
+    one of its bypassed permutes feeds another (`replace_input_with` replaces
+    every use, so bypassing the downstream permute first lets the upstream
+    bypass rewrite both). Pinning both to graph order makes the fixture
+    reproducible; the RETAB port iterates in the same order.
+    """
+
+    def __iter__(self):
+        edges = list(set.__iter__(self))
+        if not edges:
+            return iter(edges)
+        position = {node: index for index, node in enumerate(edges[0][0].graph.nodes)}
+        return iter(sorted(edges, key=lambda edge: (position[edge[0]], position[edge[1]])))
+
+
+class _PinnedSubgraph(RemovePermutesAroundElementwiseOps.Subgraph):
+    """rc4's Subgraph with `edges_in` and `constant_edges_in` pinned,
+    including the set the TOSA subclass assigns
+    (remove_permutes_around_elementwise_tosa_ops.py:53)."""
+
+    def __setattr__(self, name, value):
+        if name in ("edges_in", "constant_edges_in"):
+            value = _GraphOrderedEdges(value)
+        super().__setattr__(name, value)
+
+
+RemovePermutesAroundElementwiseOps.Subgraph = _PinnedSubgraph
+
+TO_NHWC = [0, 2, 3, 1]
+TO_NCHW = [0, 3, 1, 2]
+
+
+def inverse_permutation(perm: Sequence[int]) -> list[int]:
+    rank = len(perm)
+    normalized = [d % rank for d in perm] if rank else []
+    return [normalized.index(i) for i in range(rank)]
+
+
+def interleave(b, x, dim, scale, head="unsqueeze"):
+    """repeat_interleave(scale, dim) as unsqueeze -> expand_copy -> view_copy."""
+    shape = list(x.meta["val"].shape)
+    unsqueezed = list(shape)
+    unsqueezed.insert(dim + 1, 1)
+    if head == "unsqueeze":
+        u = b.call(A.unsqueeze_copy.default, x, dim + 1)
+    else:
+        u = b.view(x, unsqueezed)
+    expanded = list(unsqueezed)
+    expanded[dim + 1] = scale
+    e = b.call(A.expand_copy.default, u, expanded)
+    merged = list(shape)
+    merged[dim] *= scale
+    return b.view(e, merged)
+
+
+def remove_permutes_cases():
+    cases = {}
+
+    def case(fn):
+        cases[fn.__name__] = fn
+        return fn
+
+    X4 = (2, 3, 4, 5)
+
+    @case
+    def no_permute(b):
+        x = b.input("x", X4)
+        b.output([b.call(A.relu.default, x)])
+
+    @case
+    def round_trip_around_a_unary_op(b):
+        x = b.input("x", X4)
+        r = b.call(A.relu.default, b.permute(x, TO_NHWC))
+        b.output([b.permute(r, TO_NCHW)])
+
+    @case
+    def channels_last_dialect_permutes(b):
+        x = b.input("x", X4)
+        CL = exir_ops.edge.channels_last.permute_copy.default
+        r = b.call(A.hardtanh.default, b.call(CL, x, TO_NHWC))
+        b.output([b.call(CL, r, TO_NCHW)])
+
+    @case
+    def aten_permute_default_is_not_a_permute(b):
+        x = b.input("x", X4)
+        r = b.call(A.relu.default, b.call(A.permute.default, x, TO_NHWC))
+        b.output([b.call(A.permute.default, r, TO_NCHW)])
+
+    @case
+    def diamond_region(b):
+        x = b.input("x", X4)
+        a = b.call(A.abs.default, b.permute(x, TO_NHWC))
+        n = b.call(A.neg.default, a)
+        s = b.call(A.sigmoid.default, a)
+        b.output([b.permute(b.call(A.add.Tensor, n, s), TO_NCHW)])
+
+    @case
+    def two_entry_permutes_with_the_same_permutation(b):
+        x = b.input("x", X4)
+        y = b.input("y", X4)
+        a = b.call(A.add.Tensor, b.permute(x, TO_NHWC), b.permute(y, TO_NHWC))
+        b.output([b.permute(a, TO_NCHW)])
+
+    @case
+    def negative_dims_in_the_permutes(b):
+        x = b.input("x", X4)
+        r = b.call(A.relu.default, b.permute(x, [0, -2, -1, 1]))
+        b.output([b.permute(r, [0, -1, 1, 2])])
+
+    @case
+    def entry_permute_with_a_user_outside_the_region(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_NHWC)
+        r = b.call(A.relu.default, p)
+        b.output([b.permute(r, TO_NCHW), p])
+
+    @case
+    def mismatched_entry_permute_fails(b):
+        x = b.input("x", (2, 3, 4, 4))
+        y = b.input("y", (2, 4, 3, 4))
+        a = b.call(A.add.Tensor, b.permute(x, TO_NHWC), b.permute(y, [0, 3, 1, 2]))
+        b.output([b.permute(a, TO_NCHW)])
+
+    @case
+    def non_inverse_exit_is_composed(b):
+        x = b.input("x", (2, 3, 4))
+        m = b.call(A.mul.Tensor, *[b.permute(x, [1, 2, 0])] * 2)
+        b.output([b.permute(m, [1, 0, 2])])
+
+    @case
+    def non_inverse_exit_with_dims_as_a_kwarg(b):
+        x = b.input("x", (2, 3, 4))
+        m = b.call(A.mul.Tensor, *[b.permute(x, [1, 2, 0])] * 2)
+        b.output([b.call(A.permute_copy.default, m, dims=[1, 0, 2])])
+
+    @case
+    def non_inverse_exit_that_removes_nothing_is_skipped(b):
+        x = b.input("x", (2, 3, 4))
+        p = b.permute(x, [1, 2, 0])
+        m = b.call(A.neg.default, p)
+        b.output([b.permute(m, [1, 0, 2]), p])
+
+    @case
+    def matching_and_composed_exits(b):
+        x = b.input("x", (2, 3, 4))
+        m = b.call(A.relu.default, b.permute(x, [1, 2, 0]))
+        b.output([b.permute(m, [2, 0, 1]), b.permute(m, [1, 0, 2])])
+
+    @case
+    def region_reaching_the_output_fails(b):
+        x = b.input("x", X4)
+        r = b.call(A.relu.default, b.permute(x, TO_NHWC))
+        b.output([b.permute(r, TO_NCHW), r])
+
+    @case
+    def region_feeding_a_non_permutable_op_fails(b):
+        x = b.input("x", X4)
+        r = b.call(A.relu.default, b.permute(x, TO_NHWC))
+        c = b.call(A.cumsum.default, r, 1)
+        b.output([b.permute(r, TO_NCHW), c])
+
+    @case
+    def broadcast_raising_the_rank_fails(b):
+        x = b.input("x", (1, 8))
+        ones = b.call(A.full.default, [1, 1, 1], 1.0)
+        a = b.call(A.add.Tensor, b.permute(x, [1, 0]), ones)
+        s = b.call(A.slice_copy.Tensor, a, 2, 0, 1)
+        b.output([b.view(s, [8])])
+
+    @case
+    def numel1_inputs_stay_wired(b):
+        x = b.input("x", X4)
+        c = b.constant("param", "c", (1, 1, 1, 1))
+        d = b.input("d", (1,))
+        m = b.call(A.mul.Tensor, b.permute(x, TO_NHWC), c)
+        a = b.call(A.add.Tensor, m, d)
+        b.output([b.permute(a, TO_NCHW)])
+
+    @case
+    def full_constant_gets_a_permute(b):
+        x = b.input("x", X4)
+        f = b.call(A.full.default, [2, 4, 5, 3], 0.5)
+        a = b.call(A.add.Tensor, b.permute(x, TO_NHWC), f)
+        b.output([b.permute(a, TO_NCHW)])
+
+    @case
+    def signature_constants_get_permutes(b):
+        x = b.input("x", X4)
+        w = b.constant("param", "w", (2, 4, 5, 3))
+        y = b.input("y", (3,))
+        v = b.constant("buffer", "v", (1, 4, 5, 3))
+        k = b.constant("constant", "k", (2, 1, 1, 3))
+        a = b.call(A.add.Tensor, b.permute(x, TO_NHWC), w)
+        m = b.call(A.mul.Tensor, a, v)
+        s = b.call(A.sub.Tensor, m, k)
+        b.output([b.permute(s, TO_NCHW), y])
+
+    @case
+    def prefixed_user_input_counts_as_a_constant(b):
+        x = b.input("x", X4)
+        w = b.input("p_weight", (2, 4, 5, 3))
+        a = b.call(A.add.Tensor, b.permute(x, TO_NHWC), w)
+        b.output([b.permute(a, TO_NCHW)])
+
+    @case
+    def plain_user_input_in_the_region_fails(b):
+        x = b.input("x", X4)
+        w = b.input("w", (2, 4, 5, 3))
+        a = b.call(A.add.Tensor, b.permute(x, TO_NHWC), w)
+        b.output([b.permute(a, TO_NCHW)])
+
+    @case
+    def constant_feeding_two_region_nodes(b):
+        x = b.input("x", X4)
+        w = b.constant("param", "w", (2, 4, 5, 3))
+        m = b.call(A.mul.Tensor, b.permute(x, TO_NHWC), w)
+        s = b.call(A.sub.Tensor, m, w)
+        b.output([b.permute(s, TO_NCHW)])
+
+    @case
+    def lower_rank_constant_gets_a_view(b):
+        x = b.input("x", (2, 5, 4))
+        c = b.constant("param", "c", (1, 5))
+        a = b.call(A.add.Tensor, b.permute(x, [0, 2, 1]), c)
+        b.output([b.permute(a, [0, 2, 1])])
+
+    @case
+    def lower_rank_constant_with_a_moved_dim_raises(b):
+        x = b.input("x", X4)
+        c = b.constant("buffer", "c", (5, 3))
+        a = b.call(A.mul.Tensor, b.permute(x, TO_NHWC), c)
+        b.output([b.permute(a, TO_NCHW)])
+
+    @case
+    def keepdim_reductions_remap_their_dims(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_NHWC)
+        mx = b.call(A.amax.default, p, [1], True)
+        mn = b.call(A.amin.default, p, -1, True)
+        me = b.call(A.mean.dim, p, [1, 2], True)
+        su = b.call(A.sum.dim_IntList, p, [-1], keepdim=True)
+        t = b.call(A.sub.Tensor, p, mx)
+        t = b.call(A.add.Tensor, t, mn)
+        t = b.call(A.mul.Tensor, t, me)
+        t = b.call(A.sub.Tensor, t, su)
+        b.output([b.permute(t, TO_NCHW)])
+
+    @case
+    def reduction_without_keepdim_fails(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_NHWC)
+        m = b.call(A.mean.dim, p, [3])
+        b.output([b.permute(b.call(A.relu.default, p), TO_NCHW), m])
+
+    @case
+    def amax_with_the_default_dim_gets_a_dim_kwarg(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_NHWC)
+        m = b.call(A.amax.default, p, keepdim=True)
+        b.output([b.permute(b.call(A.sub.Tensor, p, m), TO_NCHW)])
+
+    @case
+    def cat_dims_remapped(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_NHWC)
+        c0 = b.call(A.cat.default, [p, p], 3)
+        c1 = b.call(A.cat.default, [p, p], dim=-1)
+        c2 = b.call(A.cat.default, [p, p])
+        b.output([b.permute(c0, TO_NCHW), b.permute(c1, TO_NCHW), b.permute(c2, TO_NCHW)])
+
+    @case
+    def cat_with_a_second_entry_permute(b):
+        x = b.input("x", X4)
+        y = b.input("y", (2, 1, 4, 5))
+        c = b.call(A.cat.default, [b.permute(x, TO_NHWC), b.permute(y, TO_NHWC)], 3)
+        b.output([b.permute(c, TO_NCHW)])
+
+    @case
+    def slice_dims_remapped(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_NHWC)
+        s0 = b.call(A.slice_copy.Tensor, p, 3, 0, 2)
+        s1 = b.call(A.slice_copy.Tensor, s0, dim=1, start=1, end=3)
+        s2 = b.call(A.slice_copy.Tensor, s1, start=0, end=1)
+        b.output([b.permute(s2, TO_NCHW)])
+
+    @case
+    def constant_pad_nd_remapped(b):
+        x = b.input("x", (1, 6, 6, 3))
+        p = b.permute(x, TO_NCHW)
+        pad = b.call(A.constant_pad_nd.default, p, [0, 0, 0, 0, 0, 1], 0.0)
+        b.output([b.permute(pad, TO_NHWC)])
+
+    @case
+    def constant_pad_nd_on_two_dims(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_NHWC)
+        pad = b.call(A.constant_pad_nd.default, p, [1, 2, 0, 1])
+        b.output([b.permute(pad, TO_NCHW)])
+
+    @case
+    def aten_pad_constant_mode_remapped(b):
+        x = b.input("x", (1, 6, 6, 3))
+        p = b.permute(x, TO_NCHW)
+        pad = b.call(A.pad.default, p, [0, 0, 0, 0, 0, 1], "constant", 0.0)
+        b.output([b.permute(pad, TO_NHWC)])
+
+    @case
+    def aten_pad_reflect_mode_fails(b):
+        x = b.input("x", (1, 6, 3))
+        p = b.permute(x, [0, 2, 1])
+        pad = b.call(A.pad.default, p, [1, 1], "reflect")
+        b.output([b.permute(pad, [0, 2, 1])])
+
+    @case
+    def unsqueeze_and_squeeze_views(b):
+        x = b.input("x", (1, 12, 4))
+        v1 = b.view(b.permute(x, [0, 2, 1]), [1, 4, 1, 12])
+        m = b.call(A.mul.Tensor, v1, v1)
+        v2 = b.view(m, [1, 4, 12])
+        b.output([b.permute(v2, [0, 2, 1])])
+
+    @case
+    def squeeze_view_into_a_lower_rank_exit(b):
+        x = b.input("x", (1, 1, 4, 6))
+        v = b.view(b.permute(x, TO_NCHW), [1, 6, 4])
+        h = b.call(A.hardtanh.default, v)
+        b.output([b.permute(h, [0, 2, 1])])
+
+    @case
+    def squeeze_of_a_moved_unit_dim(b):
+        x = b.input("x", (5, 3, 1, 4))
+        v = b.view(b.permute(x, [2, 0, 1, 3]), [5, 3, 4])
+        s = b.call(A.slice_copy.Tensor, v, 0, 0, 3)
+        m = b.call(A.mul.Tensor, s, s)
+        b.output([b.permute(m, [1, 0, 2])])
+
+    @case
+    def view_adding_and_removing_two_unit_dims(b):
+        x = b.input("x", (1, 4, 6))
+        v1 = b.view(b.permute(x, [0, 2, 1]), [1, 1, 1, 6, 4])
+        m = b.call(A.mul.Tensor, v1, v1)
+        v2 = b.view(m, [1, 6, 4])
+        b.output([b.permute(v2, [0, 2, 1])])
+
+    @case
+    def non_squeeze_view_fails(b):
+        x = b.input("x", (1, 6, 8))
+        v = b.view(b.permute(x, [0, 2, 1]), [1, 4, 12])
+        m = b.call(A.mul.Tensor, v, v)
+        b.output([b.permute(m, [0, 2, 1])])
+
+    @case
+    def singleton_view_boundary(b):
+        x = b.input("x", (1, 8, 4))
+        c = b.call(A.clamp.default, b.permute(x, [0, 2, 1]), 0.0, None)
+        v = b.view(c, [1, 4, 8, 1])
+        b.output([b.permute(v, TO_NHWC)])
+
+    @case
+    def shared_singleton_view_is_not_a_boundary(b):
+        x = b.input("x", (1, 4, 8))
+        v = b.view(b.permute(x, [0, 2, 1]), [1, 8, 4, 1])
+        b.output([b.permute(v, TO_NHWC), b.permute(v, TO_NCHW)])
+
+    @case
+    def upstream_view_reached_at_another_rank_fails(b):
+        x = b.input("x", (1, 12, 4))
+        f = b.call(A.full.default, [4, 12], 1.0)
+        v = b.view(f, [1, 4, 12])
+        a = b.call(A.add.Tensor, b.permute(x, [0, 2, 1]), v)
+        b.output([b.permute(a, [0, 2, 1])])
+
+    @case
+    def upstream_squeeze_view_reached_at_another_rank_fails(b):
+        x = b.input("x", (4, 8))
+        y = b.input("y", (8, 4, 1))
+        a = b.call(A.add.Tensor, b.permute(x, [1, 0]), b.view(y, [8, 4]))
+        b.output([b.permute(a, [1, 0])])
+
+    @case
+    def sink_view_below_the_region(b):
+        x = b.input("x", (1, 4, 1, 1))
+        direct = b.input("direct", (1, 8, 4))
+        p = b.permute(x, TO_NHWC)
+        v = b.view(b.call(A.mul.Tensor, p, p), [1, 1, 4])
+        b.output([b.call(A.sub.Tensor, direct, v)])
+
+    @case
+    def sink_view_below_the_region_splitting_its_dim(b):
+        x = b.input("x", (1, 4, 1, 1))
+        p = b.permute(x, TO_NHWC)
+        b.output([b.view(b.call(A.mul.Tensor, p, p), [1, 2, 2])])
+
+    @case
+    def sink_view_into_the_region_is_remapped(b):
+        x = b.input("x", (1, 8, 4))
+        g = b.input("g", (1, 1, 1, 4))
+        skip = b.input("skip", (1, 8, 4))
+        c = b.call(A.clamp.default, b.permute(x, [0, 2, 1]), 0.0, None)
+        gate = b.view(g, [1, 4, 1])
+        m = b.call(A.mul.Tensor, c, gate)
+        r = b.call(A.add.Tensor, m, b.permute(skip, [0, 2, 1]))
+        b.output([b.permute(b.view(c, [1, 4, 8, 1]), TO_NHWC), b.permute(r, [0, 2, 1])])
+
+    @case
+    def splitting_sink_view_into_the_region_fails(b):
+        x = b.input("x", (1, 4, 2))
+        s = b.input("s", (1, 1, 1, 8))
+        m = b.call(A.mul.Tensor, b.permute(x, [0, 2, 1]), b.view(s, [1, 2, 4]))
+        b.output([b.permute(m, [0, 2, 1])])
+
+    @case
+    def sink_view_with_two_users_fails(b):
+        x = b.input("x", (1, 8, 4))
+        g = b.input("g", (1, 1, 1, 4))
+        gate = b.view(g, [1, 4, 1])
+        m = b.call(A.mul.Tensor, b.permute(x, [0, 2, 1]), gate)
+        b.output([b.permute(m, [0, 2, 1]), b.call(A.neg.default, gate)])
+
+    @case
+    def keyword_tensor_input(b):
+        x = b.input("x", (1, 4, 1, 1))
+        direct = b.input("direct", (1, 8, 4))
+        p = b.permute(x, TO_NHWC)
+        v = b.view(b.call(A.mul.Tensor, p, p), [1, 1, 4])
+        b.output([b.call(A.sub.Tensor, v, other=direct)])
+
+    @case
+    def interleave_with_an_unsqueeze_head(b):
+        x = b.input("x", (1, 16, 20, 1))
+        v = interleave(b, b.permute(x, TO_NCHW), 3, 2)
+        b.output([b.permute(v, TO_NHWC)])
+
+    @case
+    def interleave_with_a_view_head(b):
+        x = b.input("x", (1, 16, 20, 3))
+        v = interleave(b, b.permute(x, TO_NCHW), 2, 4, head="view")
+        b.output([b.permute(v, TO_NHWC)])
+
+    @case
+    def interleave_with_keyword_arguments(b):
+        x = b.input("x", (1, 16, 20, 1))
+        p = b.permute(x, TO_NCHW)
+        u = b.call(A.unsqueeze_copy.default, p, dim=4)
+        e = b.call(A.expand_copy.default, u, size=[1, 1, 16, 20, 2])
+        v = b.call(A.view_copy.default, e, size=[1, 1, 16, 40])
+        b.output([b.permute(v, TO_NHWC)])
+
+    @case
+    def interleave_composes_with_elementwise_ops(b):
+        x = b.input("x", (1, 16, 20, 1))
+        p = b.permute(x, TO_NCHW)
+        v = interleave(b, b.call(A.mul.Tensor, p, p), 3, 2)
+        b.output([b.permute(b.call(A.hardtanh.default, v), TO_NHWC)])
+
+    @case
+    def interleave_after_a_nop_stretch(b):
+        x = b.input("x", (1, 16, 20, 1))
+        u0 = b.call(A.unsqueeze_copy.default, b.permute(x, TO_NCHW), 3)
+        v0 = b.view(u0, [1, 1, 16, 20])
+        b.output([b.permute(interleave(b, v0, 3, 2), TO_NHWC)])
+
+    @case
+    def interleave_with_an_extra_expand_user_fails(b):
+        x = b.input("x", (1, 16, 20, 1))
+        u = b.call(A.unsqueeze_copy.default, b.permute(x, TO_NCHW), 4)
+        e = b.call(A.expand_copy.default, u, [1, 1, 16, 20, 2])
+        v = b.view(e, [1, 1, 16, 40])
+        b.output([b.permute(v, TO_NHWC), b.call(A.mul.Tensor, e, e)])
+
+    @case
+    def interleave_with_a_non_merging_view_fails(b):
+        x = b.input("x", (1, 16, 20, 1))
+        u = b.call(A.unsqueeze_copy.default, b.permute(x, TO_NCHW), 4)
+        e = b.call(A.expand_copy.default, u, [1, 1, 16, 20, 2])
+        b.output([b.view(e, [1, 16, 20, 2])])
+
+    @case
+    def per_tensor_and_per_channel_rescales(b):
+        x = b.input("x", (1, 3, 4, 5), dtype=torch.int32)
+        p = b.permute(x, TO_NHWC)
+        r0 = b.call(T.RESCALE.default, p, torch.int8, [0.5], 0, 0)
+        r1 = b.call(T.RESCALE.default, r0, torch.int32, [0.5, 0.25, 0.125], 0, 0)
+        b.output([b.permute(r1, TO_NCHW)])
+
+    @case
+    def quantize_dequantize_region(b):
+        x = b.input("x", X4)
+        q = b.call(Q.quantize_per_tensor.default, b.permute(x, TO_NHWC), 0.5, 0, -128, 127, torch.int8)
+        d = b.call(Q.dequantize_per_tensor.default, q, 0.5, 0, -128, 127, torch.int8)
+        b.output([b.permute(d, TO_NCHW)])
+
+    @case
+    def hardswish_is_permutable_as_a_table_op(b):
+        x = b.input("x", X4)
+        h = b.call(A.hardswish.default, b.permute(x, TO_NHWC))
+        b.output([b.permute(h, TO_NCHW)])
+
+    @case
+    def pending_table_region(b):
+        x = b.input("x", X4)
+        s = b.call(A.sigmoid.default, b.permute(x, TO_NHWC))
+        set_qparams(s, inputs=[0], outputs=[0])
+        b.output([b.permute(s, TO_NCHW)])
+
+    @case
+    def table_constant_edge_is_dropped(b):
+        x = b.input("x", (1, 3, 4, 5), dtype=torch.int8)
+        table = b.constant("buffer", "b_table_constant", (256,), dtype=torch.int8)
+        t = b.call(T.TABLE.default, b.permute(x, TO_NHWC), table)
+        b.output([b.permute(t, TO_NCHW)])
+
+    @case
+    def table_in_a_rank0_region_fails(b):
+        x = b.input("x", (), dtype=torch.int8)
+        table = b.constant("buffer", "b_table_constant", (256,), dtype=torch.int8)
+        t = b.call(T.TABLE.default, b.permute(x, []), table)
+        b.output([b.permute(t, [])])
+
+    @case
+    def pending_table_in_a_rank0_region(b):
+        x = b.input("x", ())
+        s = b.call(A.sigmoid.default, b.permute(x, []))
+        set_qparams(s, inputs=[0], outputs=[0])
+        b.output([b.permute(s, [])])
+
+    @case
+    def rank0_region(b):
+        x = b.input("x", ())
+        b.output([b.permute(b.call(A.relu.default, b.permute(x, [])), [])])
+
+    @case
+    def stale_shared_boundary_is_skipped(b):
+        x = b.input("x", (1, 6, 6, 4))
+        w = b.input("p_layer_norm_weight", (1, 1, 1, 4))
+        p = b.permute(x, [0, 3, 1, 2])
+        m1 = b.call(A.mul.Tensor, p, p)
+        shared = b.permute(m1, TO_NHWC)
+        m2 = b.call(A.mul.Tensor, shared, w)
+        b.output([b.permute(m2, [0, 3, 1, 2])])
+
+    @case
+    def permute_bypassed_by_one_region_is_kept_by_another(b):
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (2, 4, 3))
+        pa = b.permute(x, [0, 2, 1])
+        t = b.call(A.tanh.default, b.permute(y, [0, 2, 1]))
+        pb = b.permute(t, [0, 2, 1])
+        m = b.call(A.mul.Tensor, pa, pb)
+        b.output([b.permute(m, [0, 2, 1])])
+
+    @case
+    def chained_regions_fold_one_per_call(b):
+        x = b.input("x", (2, 3, 4))
+        pa = b.permute(x, [1, 2, 0])
+        pb = b.permute(b.call(A.mul.Tensor, pa, pa), [1, 0, 2])
+        pc = b.permute(b.call(A.add.Tensor, pb, pb), [0, 2, 1])
+        b.output([pc])
+
+    @case
+    def exit_permute_returned_twice_and_used(b):
+        x = b.input("x", X4)
+        q = b.permute(b.call(A.relu.default, b.permute(x, TO_NHWC)), TO_NCHW)
+        b.output([q, b.call(A.neg.default, q), q])
+
+    @case
+    def deep_region(b):
+        x = b.input("x", (1, 2, 3))
+        node = b.permute(x, [0, 2, 1])
+        for _ in range(300):
+            node = b.call(A.hardtanh.default, node)
+        b.output([b.permute(node, [0, 2, 1])])
+
+    @case
+    def unrelated_dead_code_goes_when_modified(b):
+        x = b.input("x", X4)
+        b.call(A.neg.default, x)
+        r = b.call(A.relu.default, b.permute(x, TO_NHWC))
+        b.output([b.permute(r, TO_NCHW)])
+
+    @case
+    def dead_code_stays_when_nothing_changes(b):
+        x = b.input("x", X4)
+        b.call(A.neg.default, x)
+        b.output([b.call(A.relu.default, b.permute(x, TO_NHWC))])
+
+    @case
+    def permutes_into_a_shared_region_from_both_sides(b):
+        x = b.input("x", X4)
+        y = b.input("y", (2, 4, 5, 3))
+        a = b.call(A.add.Tensor, b.permute(x, TO_NHWC), y)
+        b.output([b.permute(a, TO_NCHW), b.permute(b.call(A.neg.default, a), TO_NCHW)])
+
+    @case
+    def two_regions_off_one_permute(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_NHWC)
+        r = b.call(A.relu.default, p)
+        n = b.call(A.neg.default, p)
+        b.output([b.permute(r, TO_NCHW), b.permute(n, TO_NCHW)])
+
+    @case
+    def chained_entry_permutes_into_one_node(b):
+        x = b.input("x", (2, 3, 3))
+        p1 = b.permute(x, [0, 2, 1])
+        p2 = b.permute(p1, [0, 2, 1])
+        s = b.call(A.sub.Tensor, p2, p1)
+        b.output([b.permute(b.call(A.exp.default, s), [0, 2, 1])])
+
+    @case
+    def constant_read_directly_and_through_an_entry_permute(b):
+        c = b.constant("param", "c", (2, 3, 3))
+        a = b.call(A.add.Tensor, b.permute(c, [0, 2, 1]), c)
+        b.output([b.permute(b.call(A.relu.default, a), [0, 2, 1])])
+
+    @case
+    def sink_view_into_the_region_at_a_lower_rank_fails(b):
+        x = b.input("x", (1, 8, 4))
+        g = b.input("g", (4,))
+        m = b.call(A.mul.Tensor, b.permute(x, [0, 2, 1]), b.view(g, [4, 1]))
+        b.output([b.permute(m, [0, 2, 1])])
+
+    @case
+    def squeeze_view_with_an_exit_permute(b):
+        x = b.input("x", (1, 6, 4))
+        v = b.view(b.permute(x, [0, 2, 1]), [4, 6])
+        b.output([b.permute(v, [1, 0])])
+
+    @case
+    def permute_into_a_splitting_view(b):
+        x = b.input("x", (2, 3, 4))
+        b.output([b.view(b.permute(x, [1, 0, 2]), [3, 2, 2, 2])])
+
+    @case
+    def expand_adding_a_leading_dim_is_not_an_interleave(b):
+        x = b.input("x", (1, 4, 3))
+        u = b.call(A.unsqueeze_copy.default, b.permute(x, [0, 2, 1]), 2)
+        e = b.call(A.expand_copy.default, u, [2, 1, 3, 2, 4])
+        b.output([e])
+
+    @case
+    def zero_scale_expand_is_not_an_interleave(b):
+        x = b.input("x", (1, 4, 3))
+        u = b.call(A.unsqueeze_copy.default, b.permute(x, [0, 2, 1]), 2)
+        e = b.call(A.expand_copy.default, u, [1, 3, 0, 4])
+        b.output([b.view(e, [1, 0, 4])])
+
+    @case
+    def expand_followed_by_a_non_view_is_not_an_interleave(b):
+        x = b.input("x", (1, 4, 3))
+        u = b.call(A.unsqueeze_copy.default, b.permute(x, [0, 2, 1]), 2)
+        e = b.call(A.expand_copy.default, u, [1, 3, 2, 4])
+        b.output([b.call(A.relu.default, e)])
+
+    @case
+    def constant_pad_nd_with_the_pad_as_a_kwarg_fails(b):
+        x = b.input("x", (1, 6, 6, 3))
+        pad = b.call(A.constant_pad_nd.default, b.permute(x, TO_NCHW), pad=[1, 1])
+        b.output([b.permute(pad, TO_NHWC)])
+
+    @case
+    def region_with_a_qparam_permute_exit(b):
+        x = b.input("x", X4)
+        r = b.call(A.relu.default, b.permute(x, TO_NHWC))
+        q = b.permute(r, [0, 2, 1, 3])
+        set_qparams(q, inputs=[0], outputs=[0])
+        b.output([q])
+
+    return cases
+
+
+class RemovePermutesRandom:
+    """Seeded random graphs shaped for RemovePermutesAroundElementwiseOps:
+    regions of elementwise and dim-carrying ops between a permute and,
+    usually, its inverse, with constants, numel-1 operands, sink views,
+    rank-changing views, interleaves, TOSA ops and blockers mixed in."""
+
+    FLOAT_UNARY = [
+        A.relu.default,
+        A.abs.default,
+        A.neg.default,
+        A.sigmoid.default,
+        A.tanh.default,
+        A.exp.default,
+        A.hardtanh.default,
+        A.hardswish.default,
+        A.erf.default,
+        A.leaky_relu.default,
+    ]
+    INT_UNARY = [A.abs.default, A.neg.default]
+    BINARY = [A.add.Tensor, A.sub.Tensor, A.mul.Tensor, A.maximum.default, A.minimum.default]
+
+    def __init__(self, rng: random.Random, b: Builder) -> None:
+        self.rng = rng
+        self.b = b
+        self.inputs = 0
+        self.perm: dict[torch.fx.Node, list[int]] = {}
+        self.exits: list[torch.fx.Node] = []
+        self.values: list[torch.fx.Node] = []
+
+    # Helpers ---------------------------------------------------------------
+
+    def name(self, prefix="x") -> str:
+        self.inputs += 1
+        return f"{prefix}{self.inputs}"
+
+    def shape(self, rank: int) -> list[int]:
+        rng = self.rng
+        while True:
+            dims = [1 if rng.random() < 0.25 else rng.randint(2, 5) for _ in range(rank)]
+            if math.prod(dims) <= 240:
+                return dims
+
+    def try_call(self, target, *args, **kwargs):
+        try:
+            return self.b.call(target, *args, **kwargs)
+        except Exception:  # noqa: BLE001  torch rejected the op; skip the step
+            return None
+
+    def new_input(self, shape, dtype=torch.float32):
+        rng = self.rng
+        roll = rng.random()
+        if roll < 0.15:
+            kind = rng.choice(["param", "buffer", "constant"])
+            node = self.b.constant(kind, self.name("w"), shape, dtype)
+        elif roll < 0.2:
+            node = self.b.input(self.name(rng.choice(["p_", "b_", "c_"])), shape, dtype)
+        else:
+            node = self.b.input(self.name(), shape, dtype)
+        return node
+
+    def operand(self, like: torch.fx.Node) -> torch.fx.Node | float:
+        """A second operand for a binary op on the region value `like`."""
+        rng = self.rng
+        shape = list(like.meta["val"].shape)
+        dtype = like.meta["val"].dtype
+        rank = len(shape)
+        roll = rng.random()
+        if roll < 0.25:
+            same = [v for v in self.values if list(v.meta["val"].shape) == shape and v.meta["val"].dtype == dtype]
+            if same:
+                return rng.choice(same)
+        if roll < 0.45:
+            # A constant of the region's rank, possibly broadcasting.
+            const_shape = [1 if rng.random() < 0.3 else d for d in shape]
+            if rng.random() < 0.3:
+                return self.try_call(A.full.default, const_shape, 0.5, dtype=dtype) or 2.0
+            kind = rng.choice(["param", "buffer", "constant"])
+            return self.b.constant(kind, self.name("w"), const_shape, dtype)
+        if roll < 0.52:
+            # A lower-rank constant.
+            low = rng.randint(1, max(1, rank - 1)) if rank > 1 else 1
+            const_shape = shape[rank - low :] if rank else [1]
+            return self.b.constant("param", self.name("w"), const_shape, dtype)
+        if roll < 0.62:
+            return self.new_input([1] * rng.randint(0, rank), dtype)
+        if roll < 0.68 and dtype == torch.float32:
+            return 2.0
+        if roll < 0.78 and like in self.perm and rank:
+            # Another permuted input with the same permutation (or not).
+            perm = self.perm[like]
+            if rng.random() < 0.25:
+                perm = list(range(rank))
+                rng.shuffle(perm)
+            source_shape = [0] * rank
+            for i, d in enumerate(perm):
+                source_shape[d] = shape[i]
+            return self.b.permute(self.new_input(source_shape, dtype), perm)
+        if roll < 0.86 and rank:
+            # A sink view into the region: one non-unit dim at most.
+            non_unit = [i for i, d in enumerate(shape) if d != 1]
+            target = [1] * rank
+            if non_unit:
+                i = rng.choice(non_unit)
+                target[i] = shape[i]
+            source = self.new_input([math.prod(target)] if rng.random() < 0.5 else [1, math.prod(target)], dtype)
+            return self.try_call(A.view_copy.default, source, target) or 2.0
+        return self.new_input(shape, dtype)
+
+    def keep(self, node, perm):
+        if node is not None:
+            self.values.append(node)
+            if perm is not None:
+                self.perm[node] = perm
+        return node
+
+    def pick(self) -> torch.fx.Node:
+        values = self.values
+        return values[-1 - min(int(self.rng.expovariate(0.8)), len(values) - 1)]
+
+    # Steps -----------------------------------------------------------------
+
+    def step(self) -> None:
+        rng = self.rng
+        v = self.pick()
+        val = v.meta["val"]
+        shape = list(val.shape)
+        rank = len(shape)
+        is_float = val.dtype == torch.float32
+        perm = self.perm.get(v)
+        kind = rng.choices(
+            [
+                "unary",
+                "binary",
+                "reduction",
+                "cat",
+                "slice",
+                "pad",
+                "rescale",
+                "qdq",
+                "table",
+                "unsqueeze",
+                "squeeze",
+                "interleave",
+                "inner_permute",
+                "blocker",
+            ],
+            [5, 6, 2, 1.5, 1.5, 1, 1, 0.7, 1, 1.2, 1.2, 0.6, 0.6, 0.4],
+        )[0]
+        b = self.b
+        if kind == "unary":
+            target = rng.choice(self.FLOAT_UNARY if is_float else self.INT_UNARY)
+            self.keep(self.try_call(target, v), perm)
+        elif kind == "binary":
+            other = self.operand(v)
+            args = (v, other) if rng.random() < 0.7 or not isinstance(other, torch.fx.Node) else (other, v)
+            self.keep(self.try_call(rng.choice(self.BINARY), *args), perm)
+        elif kind == "reduction" and rank:
+            target = rng.choice([A.amax.default, A.amin.default, A.mean.dim, A.sum.dim_IntList])
+            if not is_float and target is A.mean.dim:
+                return
+            dims = rng.sample(range(rank), rng.randint(1, rank))
+            dims = [d - rank if rng.random() < 0.3 else d for d in dims]
+            dim = dims[0] if len(dims) == 1 and rng.random() < 0.4 and target in (A.amax.default, A.amin.default) else dims
+            keepdim = rng.random() < 0.85
+            if rng.random() < 0.5:
+                node = self.try_call(target, v, dim, keepdim)
+            else:
+                node = self.try_call(target, v, dim, keepdim=keepdim)
+            if node is not None and keepdim:
+                self.keep(self.try_call(A.sub.Tensor, v, node), perm)
+            elif node is not None:
+                self.exits.append(node)
+        elif kind == "cat" and rank:
+            dim = rng.randrange(rank)
+            dim = dim - rank if rng.random() < 0.3 else dim
+            others = [o for o in self.values if list(o.meta["val"].shape) == shape and o.meta["val"].dtype == val.dtype]
+            tensors = [v, rng.choice(others)]
+            roll = rng.random()
+            if roll < 0.5:
+                node = self.try_call(A.cat.default, tensors, dim)
+            elif roll < 0.8:
+                node = self.try_call(A.cat.default, tensors, dim=dim)
+            else:
+                node = self.try_call(A.cat.default, tensors)
+            self.keep(node, perm)
+        elif kind == "slice" and rank:
+            dims = [i for i, d in enumerate(shape) if d >= 2]
+            if not dims:
+                return
+            dim = rng.choice(dims)
+            end = rng.randint(1, shape[dim])
+            if rng.random() < 0.6:
+                node = self.try_call(A.slice_copy.Tensor, v, dim, 0, end)
+            else:
+                node = self.try_call(A.slice_copy.Tensor, v, dim=dim, start=0, end=end)
+            self.keep(node, perm)
+        elif kind == "pad" and rank and is_float:
+            pairs = rng.randint(1, rank)
+            pad = []
+            for _ in range(pairs):
+                pad += [rng.randint(0, 2), rng.randint(0, 1)]
+            roll = rng.random()
+            if roll < 0.5:
+                node = self.try_call(A.constant_pad_nd.default, v, pad, 0.0)
+            elif roll < 0.85:
+                node = self.try_call(A.pad.default, v, pad, "constant", 0.0)
+            else:
+                node = self.try_call(A.pad.default, v, pad[:2], "reflect")
+            self.keep(node, perm)
+        elif kind == "rescale" and not is_float:
+            if rng.random() < 0.8 or not rank:
+                scales = [0.5]
+            else:
+                scales = [0.5] * shape[-1]
+            dtype = torch.int8 if val.dtype == torch.int32 else torch.int32
+            self.keep(self.try_call(T.RESCALE.default, v, dtype, scales, 0, 0), perm)
+        elif kind == "qdq" and is_float:
+            q = self.try_call(Q.quantize_per_tensor.default, v, 0.5, 0, -128, 127, torch.int8)
+            if q is not None:
+                self.keep(self.try_call(Q.dequantize_per_tensor.default, q, 0.5, 0, -128, 127, torch.int8), perm)
+        elif kind == "table" and is_float and rank:
+            node = self.try_call(rng.choice([A.sigmoid.default, A.tanh.default, A.exp.default]), v)
+            if node is not None:
+                set_qparams(node, inputs=[0], outputs=[0])
+            self.keep(node, perm)
+        elif kind == "unsqueeze" and rank < 5:
+            positions = sorted(rng.sample(range(rank + 2), rng.randint(1, 2)))
+            out = list(shape)
+            for p in positions:
+                out.insert(min(p, len(out)), 1)
+            node = self.try_call(A.view_copy.default, v, out)
+            self.keep(node, adapt_permutation(perm, shape, out) if perm else None)
+        elif kind == "squeeze" and 1 in shape:
+            ones = [i for i, d in enumerate(shape) if d == 1]
+            drop = set(rng.sample(ones, rng.randint(1, len(ones))))
+            out = [d for i, d in enumerate(shape) if i not in drop]
+            node = self.try_call(A.view_copy.default, v, out)
+            self.keep(node, adapt_permutation(perm, shape, out) if perm else None)
+        elif kind == "interleave" and rank:
+            dim = rng.randrange(rank)
+            try:
+                node = interleave(b, v, dim, rng.randint(1, 3), head=rng.choice(["unsqueeze", "view"]))
+            except Exception:  # noqa: BLE001
+                node = None
+            self.keep(node, perm)
+        elif kind == "inner_permute" and rank:
+            inner = list(range(rank))
+            rng.shuffle(inner)
+            node = b.permute(v, inner)
+            self.keep(node, inner)
+        elif kind == "blocker" and rank:
+            self.exits.append(self.try_call(A.cumsum.default, v, rng.randrange(rank)))
+
+    def region(self) -> None:
+        rng = self.rng
+        rank = rng.choices([0, 1, 2, 3, 4, 5], [0.3, 0.6, 1.5, 3, 4, 1])[0]
+        dtype = torch.int32 if rng.random() < 0.15 else torch.float32
+        perm = list(range(rank))
+        rng.shuffle(perm)
+        source = self.new_input(self.shape(rank), dtype)
+        written = [d - rank if rng.random() < 0.2 else d for d in perm]
+        entry = self.b.permute(source, written)
+        self.values = [entry]
+        self.perm = {entry: perm}
+        for _ in range(rng.randint(1, 7)):
+            self.step()
+        for _ in range(rng.randint(1, 2)):
+            self.exit(self.pick())
+
+    def exit(self, v) -> None:
+        rng = self.rng
+        val = v.meta["val"]
+        rank = val.dim()
+        perm = self.perm.get(v)
+        roll = rng.random()
+        if roll < 0.6 and perm is not None:
+            self.exits.append(self.b.permute(v, inverse_permutation(perm)))
+        elif roll < 0.8:
+            other = list(range(rank))
+            rng.shuffle(other)
+            self.exits.append(self.b.permute(v, other))
+        elif roll < 0.9 and sum(d != 1 for d in val.shape) <= 1:
+            self.exits.append(self.try_call(A.view_copy.default, v, [val.numel()]))
+        else:
+            self.exits.append(v)
+
+    def finish(self) -> None:
+        rng = self.rng
+        outputs = [n for n in self.exits if n is not None and not n.users]
+        dangling = [n for n in self.b.graph.nodes if n.op == "call_function" and not n.users]
+        outputs += [n for n in dangling if n not in outputs and rng.random() < 0.2]
+        if not outputs:
+            outputs = [self.values[-1]]
+        if rng.random() < 0.15:
+            outputs.append(rng.choice(self.values))
+        if rng.random() < 0.1:
+            self.b.call(A.neg.default, rng.choice(self.values))  # dead code
+        self.b.output(outputs)
+
+
+def adapt_permutation(perm, in_shape, out_shape):
+    """rc4's `_adapt_permute_across_view` for a squeeze/unsqueeze view, so the
+    generator can close a region across a rank change."""
+
+    def extra_ones(longer, shorter):
+        extra, j = [], 0
+        for i, d in enumerate(longer):
+            if j < len(shorter) and d == shorter[j]:
+                j += 1
+                continue
+            if d != 1:
+                return None
+            extra.append(i)
+        return extra if j == len(shorter) else None
+
+    if len(out_shape) > len(in_shape):
+        positions = extra_ones(out_shape, in_shape)
+        if positions is None:
+            return None
+        new = list(perm)
+        for index in positions:
+            new = [x + 1 if x >= index else x for x in new]
+            new.insert(index, index)
+        return new
+    if len(in_shape) > len(out_shape):
+        positions = extra_ones(in_shape, out_shape)
+        if positions is None:
+            return None
+        removed = {perm[p] for p in positions}
+        return [x - sum(1 for r in removed if r < x) for x in perm if x not in removed]
+    return None
+
+
+def remove_permutes_random_case(seed: int) -> Callable[[Builder], None]:
+    def build(b: Builder) -> None:
+        rng = random.Random(seed)
+        graph = RemovePermutesRandom(rng, b)
+        for _ in range(rng.randint(1, 3)):
+            graph.region()
         graph.finish()
 
     return build
@@ -3284,6 +4324,23 @@ PASSES = [
         ],
         canonicalize_cases,
         "canonicalize",
+    ),
+    PassSpec(
+        "remove_permutes_around_elementwise",
+        # `TosaPropagationOverrides.make_fusion_pass`
+        # (backends/arm/_passes/propagate_view_copy_permute_pass.py:90-93).
+        lambda ep: RemovePermutesAroundElementwiseTosaOps(ep),
+        [
+            "backends/transforms/remove_permutes_around_elementwise_ops.py",
+            "backends/arm/_passes/remove_permutes_around_elementwise_tosa_ops.py",
+            "backends/transforms/permute_pass_utils.py",
+            "backends/transforms/channels_last_layout.py",
+            "backends/arm/_passes/insert_table_ops.py",
+            "backends/arm/_passes/propagate_view_copy_permute_pass.py",
+        ],
+        remove_permutes_cases,
+        "remove_permutes",
+        records_raises=True,
     ),
 ]
 COMMON_SOURCES = ["backends/arm/_passes/arm_pass.py", "exir/pass_base.py"]
