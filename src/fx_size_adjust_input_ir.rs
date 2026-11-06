@@ -299,56 +299,8 @@ impl IrPass for IrSizeAdjustInputPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::{i64_list_arg, IrNode, PipelineStep, QParamMap};
-    use crate::pipeline_config::PipelineConfig;
+    use crate::fx_ir::{i64_list_arg, IrNode, QParamMap};
     use crate::test_ir::{f32_call, f32_placeholder, output, placeholder, qparam};
-
-    #[test]
-    fn convolution_height_and_width_trims_fuse_after_layout_conversion() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", [1, 3, 8, 8]);
-        let weight = f32_placeholder(&mut graph, "weight", [4, 3, 1, 1]);
-        let conv = f32_call(
-            &mut graph,
-            "conv",
-            "aten.convolution.default",
-            vec![
-                IrArg::Node(x),
-                IrArg::Node(weight),
-                IrArg::None,
-                i64_list_arg(&[2, 2]),
-                i64_list_arg(&[0, 0]),
-                i64_list_arg(&[1, 1]),
-                IrArg::Bool(false),
-                i64_list_arg(&[0, 0]),
-                IrArg::Int(1),
-            ],
-            [1, 4, 4, 4],
-        );
-        output(&mut graph, conv);
-        assert!(IrSizeAdjustInputPass::default().run(&mut graph));
-        assert_eq!(
-            graph
-                .live_nodes()
-                .filter(|node| node.target == "aten.slice_copy.Tensor")
-                .count(),
-            2
-        );
-        crate::fx_memory_format_ir::IrToTosaMemoryFormatPass.run(&mut graph);
-        assert!(crate::fx_rewrite_slice_ir::IrRewriteSlicePass.run(&mut graph));
-        assert!(crate::fx_fuse_consecutive_slices_ir::IrFuseConsecutiveSlicesPass.run(&mut graph));
-        let slice = graph.node(graph.node(conv).arg_node(0).unwrap());
-        assert_eq!(slice.target, "backend.tosa.SLICE.default");
-        assert_eq!(slice.arg_int_list(1), Some(vec![0, 0, 0, 0]));
-        assert_eq!(slice.arg_int_list(2), Some(vec![1, 3, 7, 7]));
-        assert_eq!(
-            graph
-                .live_nodes()
-                .filter(|node| node.target == "backend.tosa.SLICE.default")
-                .count(),
-            1
-        );
-    }
 
     #[test]
     fn regression_transposed_convolution_keeps_seven_by_seven_input() {
@@ -936,35 +888,5 @@ mod tests {
                 "output"
             ]
         );
-    }
-
-    /// The main and region pipelines build the pass for their layout mode.
-    #[test]
-    fn pipelines_slice_as_their_layout_mode_says() {
-        let pass_in = |steps: Vec<PipelineStep>| {
-            steps
-                .into_iter()
-                .find_map(|step| match step {
-                    PipelineStep::Ir(pass) if pass.name() == "IrSizeAdjustInput" => Some(pass),
-                    _ => None,
-                })
-                .expect("the pipeline adjusts input sizes")
-        };
-        for layout in [LayoutMode::DimOrder, LayoutMode::Explicit] {
-            let config = PipelineConfig {
-                layout,
-                ..PipelineConfig::from_tosa_spec("TOSA-1.0+INT")
-            };
-            for steps in [
-                crate::fx_pipeline::build_main_pipeline(&config),
-                crate::fx_pipeline::build_ir_cond_submodule_pipeline(&config),
-            ] {
-                let (mut graph, _, conv) =
-                    quantized_conv(&[1, 3, 10], &[4, 3, 2], &[3], &[0], &[1, 4, 3]);
-                let adjusted = pass_in(steps).run(&mut graph);
-                assert_eq!(adjusted, layout == LayoutMode::Explicit, "{layout:?}");
-                assert_eq!(slice_chain(&graph, conv).len(), usize::from(adjusted));
-            }
-        }
     }
 }

@@ -153,7 +153,6 @@ struct LayoutFacts {
     val_dim_order: Option<Vec<usize>>,
     tosa_dim_order: Option<Vec<usize>>,
     original_dim_orders: Option<Vec<Vec<usize>>>,
-    tosa_spatial_rank: Option<usize>,
 }
 
 /// Metadata fields extracted from `node.meta`. The common fields are typed;
@@ -248,8 +247,6 @@ impl NodeMeta {
 
         let original_dim_orders = meta_attrs.optional("original_dim_orders");
 
-        let tosa_spatial_rank = meta_attrs.optional("tosa_spatial_rank");
-
         let pre_pass_arg_qparams = meta_attrs
             .value("_pre_pass_arg_qparams")
             .and_then(|v| extract_qparam_dict(&v));
@@ -291,7 +288,6 @@ impl NodeMeta {
                 val_dim_order,
                 tosa_dim_order,
                 original_dim_orders,
-                tosa_spatial_rank,
             },
             extras,
         })
@@ -335,10 +331,6 @@ impl NodeMeta {
 
     pub fn cloned_tosa_dim_order(&self) -> Option<Vec<usize>> {
         self.layout.tosa_dim_order.clone()
-    }
-
-    pub fn original_dim_orders(&self) -> Option<&[Vec<usize>]> {
-        self.layout.original_dim_orders.as_deref()
     }
 
     pub fn set_output_qparams(&mut self, map: impl Into<QParamMap>) {
@@ -423,26 +415,6 @@ impl NodeMeta {
 
     pub fn set_val_dim_order(&mut self, order: Vec<usize>) {
         self.layout.val_dim_order = Some(order);
-    }
-
-    pub fn set_original_dim_orders(&mut self, orders: Vec<Vec<usize>>) {
-        self.layout.original_dim_orders = Some(orders);
-    }
-
-    pub fn set_tosa_spatial_rank(&mut self, rank: usize) -> bool {
-        if self.layout.tosa_spatial_rank == Some(rank) {
-            return false;
-        }
-        self.layout.tosa_spatial_rank = Some(rank);
-        true
-    }
-
-    pub fn tosa_spatial_rank_or(&self, default: usize) -> usize {
-        self.layout.tosa_spatial_rank.unwrap_or(default)
-    }
-
-    pub fn tosa_spatial_rank(&self) -> Option<usize> {
-        self.layout.tosa_spatial_rank
     }
 
     pub fn copy_dim_order_facts_from(&mut self, other: &Self) {
@@ -745,14 +717,6 @@ impl<'a> TensorMetaStamp<'a> {
     pub fn empty_qparam_maps(&self, shape: impl Into<Vec<i64>>) -> NodeMeta {
         let mut meta = self.base.cloned_with_tensor_facts(self.facts(shape));
         meta.set_empty_qparam_maps();
-        meta
-    }
-
-    pub fn plain_tensor(&self, shape: impl Into<Vec<i64>>) -> NodeMeta {
-        let mut meta = self.base.cloned_with_tensor_facts(self.facts(shape));
-        meta.set_empty_input_qparams();
-        meta.clear_output_qparams();
-        meta.clear_tosa_special_dtype();
         meta
     }
 }

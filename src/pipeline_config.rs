@@ -93,13 +93,6 @@ pub struct PipelineConfig {
     pub leaky_relu: LeakyReluLoweringConfig,
     pub quantize_inf: QuantizeInfConfig,
     pub sdpa_safe_softmax_guard: SdpaSafeSoftmaxGuardPolicy,
-    /// The edge permutes dim-order mode's `IrDecomposePermuteForU55Pass` splits on U55,
-    /// by name (Python's `_u55_permutes_to_split`). Python asks stock's exact check about
-    /// each edge permute that breaks U55's worst-case TRANSPOSE rule, but outside a
-    /// `TosaLoweringContext` the check never runs Vela and rejects them all, so in
-    /// practice this is every such permute. Explicit mode on U55 gets an empty list and
-    /// asks the probe at the pass (`preprocess._u55_transpose_probe`).
-    pub u55_split_permutes: std::collections::HashSet<String>,
     /// Pipeline-config key `layout`, which Python sets from `RETAB_LAYOUT`. The parent's
     /// config is stashed with its IR, so `ingest_and_serialize` (ingest and the
     /// serializer) gets the mode the passes ran in.
@@ -134,7 +127,6 @@ impl PipelineConfig {
             leaky_relu: LeakyReluLoweringConfig::Decompose,
             quantize_inf: QuantizeInfConfig::default(),
             sdpa_safe_softmax_guard: SdpaSafeSoftmaxGuardPolicy::Preserve,
-            u55_split_permutes: Default::default(),
             layout: LayoutMode::default(),
         }
     }
@@ -177,9 +169,6 @@ impl PipelineConfig {
             neg_inf: required(&quantize_inf, "neg_inf")?,
             pos_inf: required(&quantize_inf, "pos_inf")?,
         };
-        if let Some(names) = config.get_item("u55_split_permutes")? {
-            result.u55_split_permutes = names.extract::<Vec<String>>()?.into_iter().collect();
-        }
         if let Some(layout) = config.get_item("layout")? {
             result.layout = layout
                 .extract::<String>()?

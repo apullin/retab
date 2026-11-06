@@ -79,44 +79,6 @@ impl ConvArgs {
         })
     }
 
-    pub(crate) fn parse_convolution_prefix(node: &IrNode) -> Option<Self> {
-        if node.op != NodeOp::CallFunction || !is_aten_convolution_default_target(&node.target) {
-            return None;
-        }
-        let args = &node.args;
-        if args.len() < 2 {
-            return None;
-        }
-        let (bias, bias_arg, bias_well_formed) =
-            parse_optional_node_arg(args.get(Self::BIAS_INDEX));
-        Some(Self {
-            kind: ConvArgKind::ConvolutionDefault,
-            input: args.get(Self::INPUT_INDEX)?.as_node()?,
-            weight: args.get(Self::WEIGHT_INDEX)?.as_node()?,
-            bias,
-            bias_arg,
-            bias_well_formed,
-            stride: args
-                .get(3)
-                .and_then(IrArg::as_int_list)
-                .unwrap_or_else(|| vec![1, 1]),
-            padding: args
-                .get(4)
-                .and_then(IrArg::as_int_list)
-                .unwrap_or_else(|| vec![0, 0]),
-            dilation: args
-                .get(5)
-                .and_then(IrArg::as_int_list)
-                .unwrap_or_else(|| vec![1, 1]),
-            transposed: args.get(6).and_then(IrArg::as_bool).unwrap_or(false),
-            output_padding: args
-                .get(7)
-                .and_then(IrArg::as_int_list)
-                .unwrap_or_else(|| vec![0, 0]),
-            groups: args.get(8).and_then(IrArg::as_int).unwrap_or(1),
-        })
-    }
-
     fn parse_raw_default(node: &IrNode, kind: ConvArgKind, spatial_rank: usize) -> Option<Self> {
         let args = &node.args;
         if args.len() < 2 {
@@ -144,11 +106,6 @@ impl ConvArgs {
             output_padding: vec![0; spatial_rank],
             groups: node.arg_int_or(6, 1),
         })
-    }
-
-    pub(crate) fn is_conv1d_form(&self) -> bool {
-        self.kind == ConvArgKind::Conv1dDefault
-            || (self.kind == ConvArgKind::ConvolutionDefault && self.stride.len() == 1)
     }
 
     pub(crate) fn is_raw_conv2d(&self) -> bool {
@@ -216,7 +173,7 @@ mod tests {
     use crate::test_ir::{call_with_meta, placeholder};
 
     #[test]
-    fn parses_conv1d_defaults_as_1d_form() {
+    fn parses_conv1d_defaults() {
         let mut graph = IrGraph::empty();
         let input = placeholder(&mut graph, "input", [1, 3, 16], "torch.float32");
         let weight = placeholder(&mut graph, "weight", [4, 3, 3], "torch.float32");
@@ -230,7 +187,6 @@ mod tests {
 
         let args = ConvArgs::parse(graph.node(conv)).unwrap();
         assert_eq!(args.kind, ConvArgKind::Conv1dDefault);
-        assert!(args.is_conv1d_form());
         assert_eq!(args.stride, vec![1]);
         assert_eq!(args.padding, vec![0]);
         assert_eq!(args.dilation, vec![1]);
@@ -268,7 +224,6 @@ mod tests {
         assert_eq!(args.weight, weight);
         assert_eq!(args.bias, Some(bias));
         assert_eq!(args.well_formed_bias(), Some(Some(bias)));
-        assert!(args.is_conv1d_form());
         assert_eq!(args.groups, 2);
         assert_eq!(args.group_arg_index(), 8);
     }
@@ -296,7 +251,6 @@ mod tests {
 
         let args = ConvArgs::parse(graph.node(conv)).unwrap();
         assert_eq!(args.kind, ConvArgKind::Conv2dDefault);
-        assert!(!args.is_conv1d_form());
         assert!(args.is_raw_conv2d());
         assert_eq!(args.groups, 2);
         assert_eq!(args.group_arg_index(), 6);

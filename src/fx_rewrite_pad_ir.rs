@@ -320,7 +320,6 @@ mod tests {
         let qp = crate::test_ir::qparam(0.25, 3, "torch.int8");
         graph.node_mut(pad).meta.set_both_qparams(qp.clone());
         output(&mut graph, pad);
-        crate::fx_memory_format_ir::IrToTosaMemoryFormatPass.run(&mut graph);
         assert!(IrRewritePadPass.run(&mut graph));
         assert_eq!(graph.node(pad).arg_int_list(1), Some(vec![0, 0, 0, 0]));
         assert!(crate::fx_rewrite_slice_ir::IrRewriteSlicePass.run(&mut graph));

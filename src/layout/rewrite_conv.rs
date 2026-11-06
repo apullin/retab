@@ -1228,8 +1228,7 @@ fn plan(
         // `quantization_annotator.py:136-138`), so its scales are per input
         // channel. rc4 emits them as they are, and TOSA's reference model
         // rejects the RESCALE (rc4 xfails those op tests,
-        // `test_transpose_conv2d.py:497-501`); dim-order mode's
-        // IrInsertConvAccumulatorRescale does the same.
+        // `test_transpose_conv2d.py:497-501`).
         let scales = weight_scales
             .iter()
             .map(|&weight_scale| (input_scale * weight_scale) / output_scale)

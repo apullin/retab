@@ -227,48 +227,4 @@ mod tests {
             }
         }
     }
-
-    /// The main and region pipelines build the pass for their layout mode.
-    #[test]
-    fn pipelines_rescale_matmuls_as_their_layout_mode_says() {
-        use crate::fx_ir::PipelineStep;
-        use crate::fx_pipeline::{
-            build_ir_cond_submodule_pipeline, build_ir_while_submodule_pipeline,
-            build_main_pipeline,
-        };
-        use crate::pipeline_config::PipelineConfig;
-
-        for (layout, expected) in [
-            (LayoutMode::DimOrder, "torch.float32"),
-            (LayoutMode::Explicit, "torch.int32"),
-        ] {
-            let config = PipelineConfig {
-                layout,
-                ..PipelineConfig::from_tosa_spec("TOSA-1.0+INT")
-            };
-            for steps in [
-                build_main_pipeline(&config),
-                build_ir_cond_submodule_pipeline(&config),
-                build_ir_while_submodule_pipeline(&config),
-            ] {
-                let pass = steps
-                    .into_iter()
-                    .find_map(|step| match step {
-                        PipelineStep::Ir(pass) if pass.name() == "IrRewriteMatmulRescale" => {
-                            Some(pass)
-                        }
-                        _ => None,
-                    })
-                    .expect("the pipeline rescales matmuls");
-                let mut graph = IrGraph::empty();
-                let bmm = quantized_bmm(&mut graph, "torch.int8");
-                assert!(pass.run(&mut graph));
-                assert_eq!(
-                    graph.node(bmm).meta.val_dtype(),
-                    Some(expected),
-                    "{layout:?}"
-                );
-            }
-        }
-    }
 }

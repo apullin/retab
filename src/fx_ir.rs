@@ -2117,6 +2117,7 @@ impl IrArg {
             _ => None,
         }
     }
+    #[cfg(test)]
     pub fn contains_node(&self, target: NodeId) -> bool {
         match self {
             IrArg::Node(id) => *id == target,

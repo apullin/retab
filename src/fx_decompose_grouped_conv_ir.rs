@@ -514,41 +514,4 @@ mod tests {
         );
         assert_eq!(groups, [group.clone(), group]);
     }
-
-    /// The main and region pipelines build the pass for their layout mode.
-    #[test]
-    fn pipelines_split_rank5_depthwise_convs_as_their_layout_mode_says() {
-        use crate::fx_ir::PipelineStep;
-        use crate::fx_pipeline::{
-            build_ir_cond_submodule_pipeline, build_ir_while_submodule_pipeline,
-            build_main_pipeline,
-        };
-        use crate::pipeline_config::PipelineConfig;
-
-        for layout in [LayoutMode::DimOrder, LayoutMode::Explicit] {
-            let config = PipelineConfig {
-                layout,
-                ..PipelineConfig::from_tosa_spec("TOSA-1.0+INT")
-            };
-            for steps in [
-                build_main_pipeline(&config),
-                build_ir_cond_submodule_pipeline(&config),
-                build_ir_while_submodule_pipeline(&config),
-            ] {
-                let pass = steps
-                    .into_iter()
-                    .find_map(|step| match step {
-                        PipelineStep::Ir(pass) if pass.name() == "IrDecomposeGroupedConv" => {
-                            Some(pass)
-                        }
-                        _ => None,
-                    })
-                    .expect("the pipeline decomposes grouped convs");
-                let mut graph = IrGraph::empty();
-                rank5_depthwise_conv(&mut graph);
-                let split = pass.run(&mut graph);
-                assert_eq!(split, layout == LayoutMode::Explicit, "{layout:?}");
-            }
-        }
-    }
 }

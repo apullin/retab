@@ -71,7 +71,7 @@ impl SpecialDtype {
     /// The member a recorded `tosa_special_dtype` names. RETAB's importer
     /// records the enum's display, `TosaSpecialDtype.INT48`
     /// (`NodeMeta::from_fx`), while its passes write the bare member name
-    /// (`fx_fold_qdq_ir`, `fx_annotate_conv_bias_ir`); both are accepted.
+    /// (`fx_fold_qdq_ir`, [`set_special_dtype`]); both are accepted.
     pub(crate) fn parse(text: &str) -> Option<Self> {
         let name = text.strip_prefix("TosaSpecialDtype.").unwrap_or(text);
         Self::NAMES

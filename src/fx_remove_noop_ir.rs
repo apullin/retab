@@ -976,45 +976,4 @@ mod tests {
         assert_eq!(graph.node(cast).target, "aten._to_copy.default");
         assert_eq!(graph.node(cast).arg_node(0), Some(truncated));
     }
-
-    #[test]
-    fn copy_lowering_uses_logical_shapes_before_memory_format_conversion() {
-        let mut graph = IrGraph::empty();
-        let dst = placeholder(&mut graph, "dst", [1, 2, 3, 4], "torch.float32");
-        let src = placeholder(&mut graph, "src", [1, 2, 3, 4], "torch.float32");
-        let copy = call(
-            &mut graph,
-            "copy",
-            "aten.copy.default",
-            vec![IrArg::Node(dst), IrArg::Node(src)],
-            [1, 2, 3, 4],
-            "torch.float32",
-        );
-        let sum = call(
-            &mut graph,
-            "sum",
-            "aten.add.Tensor",
-            vec![IrArg::Node(copy), IrArg::Node(src)],
-            [1, 2, 3, 4],
-            "torch.float32",
-        );
-        output(&mut graph, sum);
-
-        assert!(IrRemoveNoopPass.run(&mut graph));
-        assert!(crate::fx_memory_format_ir::IrToTosaMemoryFormatPass.run(&mut graph));
-
-        assert!(!graph.node(copy).alive);
-        assert_eq!(graph.node(sum).arg_node(0), graph.node(sum).arg_node(1));
-        // Elementwise-only graphs stay logical (NCHW): no boundary transpose.
-        let input = graph.node(sum).arg_node(0).unwrap();
-        assert_eq!(graph.node(input).name, "src");
-        assert_eq!(
-            graph
-                .node(sum)
-                .meta
-                .tosa_dim_order()
-                .map(|order| order.to_vec()),
-            Some(vec![0, 1, 2, 3])
-        );
-    }
 }

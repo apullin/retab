@@ -1,10 +1,7 @@
-use std::collections::HashMap;
-
 use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeOp};
 use crate::fx_target::is_view_like_target;
 
 pub struct IrFuseCascadedViewsPass;
-pub struct IrFuseDuplicateViewsPass;
 
 impl IrPass for IrFuseCascadedViewsPass {
     fn name(&self) -> &str {
@@ -41,51 +38,6 @@ impl IrPass for IrFuseCascadedViewsPass {
                     graph.erase(parent);
                 }
                 modified = true;
-            }
-        }
-        modified
-    }
-}
-
-impl IrPass for IrFuseDuplicateViewsPass {
-    fn name(&self) -> &str {
-        "IrFuseDuplicateViews"
-    }
-
-    fn run(&self, graph: &mut IrGraph) -> bool {
-        let mut modified = false;
-        let mut representatives = HashMap::new();
-        for id in graph.live_call_function_ids() {
-            let node = graph.node(id);
-            if node.target != "aten.view_copy.default"
-                || node.meta.input_qparams().is_some_and(|q| !q.is_empty())
-                || node.meta.output_qparams().is_some_and(|q| !q.is_empty())
-                || node.meta.extra_str("tosa_special_dtype").is_some()
-                || graph
-                    .live_user_ids(id)
-                    .iter()
-                    .any(|&user| graph.node(user).op == NodeOp::Output)
-            {
-                continue;
-            }
-            let (Some(input), Some(shape)) = (node.first_node_arg(), graph.node_shape_vec(id))
-            else {
-                continue;
-            };
-            let key = (
-                input,
-                shape,
-                node.meta.cloned_tosa_dim_order(),
-                node.meta.val_dtype().map(str::to_owned),
-            );
-            if let Some(&representative) = representatives.get(&key) {
-                for user in graph.live_user_ids(id) {
-                    graph.replace_input_use(user, id, representative);
-                }
-                graph.replace_and_erase(id, representative);
-                modified = true;
-            } else {
-                representatives.insert(key, id);
             }
         }
         modified
@@ -221,81 +173,5 @@ mod tests {
         assert_eq!(graph.node(flatten).target, "aten.view_copy.default");
         assert_eq!(graph.node(flatten).first_node_arg(), Some(x));
         assert_eq!(graph.node(flatten).args[1].as_int_list(), Some(vec![6, 4]));
-    }
-
-    #[test]
-    fn deduplicates_gate_views_without_fusing_their_rescale_users() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", [1, 24]);
-        let mut views = Vec::new();
-        let mut rescales = Vec::new();
-        for gate in 0..3 {
-            let view = f32_call(
-                &mut graph,
-                &format!("view{gate}"),
-                "aten.view_copy.default",
-                vec![IrArg::Node(x), i64_list_arg(&[1, 24, 1, 1])],
-                [1, 24, 1, 1],
-            );
-            graph.nodes[view].meta.set_tosa_dim_order(vec![0, 2, 3, 1]);
-            views.push(view);
-            rescales.push(f32_call(
-                &mut graph,
-                &format!("rescale{gate}"),
-                "backend.tosa.RESCALE.default",
-                vec![IrArg::Node(view), IrArg::Float(0.25)],
-                [1, 24, 1, 1],
-            ));
-        }
-        graph.add_node(
-            NodeOp::Output,
-            "output".into(),
-            "output".into(),
-            vec![IrArg::List(rescales.iter().copied().map(IrArg::Node).collect())],
-            crate::fx_ir::NodeMeta::default(),
-        );
-
-        assert!(IrFuseDuplicateViewsPass.run(&mut graph));
-        assert!(graph.node(views[0]).alive);
-        assert!(views[1..].iter().all(|&view| !graph.node(view).alive));
-        for rescale in rescales {
-            assert!(graph.node(rescale).alive);
-            assert_eq!(graph.node(rescale).first_node_arg(), Some(views[0]));
-        }
-        assert!(!IrFuseDuplicateViewsPass.run(&mut graph));
-    }
-
-    #[test]
-    fn preserves_duplicate_views_that_are_graph_outputs() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", [1, 24]);
-        let mut views = Vec::new();
-        for branch in 0..2 {
-            views.push(f32_call(
-                &mut graph,
-                &format!("view{branch}"),
-                "aten.view_copy.default",
-                vec![IrArg::Node(x), i64_list_arg(&[1, 24, 1, 1])],
-                [1, 24, 1, 1],
-            ));
-        }
-        let relu = f32_call(
-            &mut graph,
-            "relu",
-            "aten.relu.default",
-            vec![IrArg::Node(views[0])],
-            [1, 24, 1, 1],
-        );
-        graph.add_node(
-            NodeOp::Output,
-            "output".into(),
-            "output".into(),
-            vec![IrArg::List(vec![IrArg::Node(relu), IrArg::Node(views[1])])],
-            crate::fx_ir::NodeMeta::default(),
-        );
-
-        assert!(!IrFuseDuplicateViewsPass.run(&mut graph));
-        assert!(views.iter().all(|&view| graph.node(view).alive));
-        assert_eq!(graph.node(relu).first_node_arg(), Some(views[0]));
     }
 }
