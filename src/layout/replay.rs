@@ -1439,6 +1439,29 @@ end
         );
     }
 
+    /// A `touch` line lists node positions between the before graph and
+    /// `after`; an `IrPass` port cannot replay it.
+    #[test]
+    fn touches_parse_and_need_a_ctx_port() {
+        let text = "\
+case touched
+before
+%0 = placeholder x : torch.float32[2] q=none
+%1 = aten.relu.default(%0) : torch.float32[2] q=none
+%2 = aten.neg.default(%0) : torch.float32[2] q=none
+output([%1, %2])
+touch %1 %2 %1
+after modified=false same
+end
+";
+        let cases = parse(text).unwrap();
+        assert_eq!(cases[0].touches, [1, 2, 1]);
+        let result = replay_case(&Noop, &cases[0], Options::default());
+        assert_eq!(result.mismatch.map(|mismatch| mismatch.class), Some("panic"));
+        assert!(parse(&text.replace("touch %1 %2 %1", "touch %3")).is_err());
+        assert!(parse(&text.replace("touch %1 %2 %1", "touch 1")).is_err());
+    }
+
     #[test]
     fn printing_round_trips() {
         for case in parse(FIXTURE).unwrap() {
