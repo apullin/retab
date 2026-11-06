@@ -13,11 +13,14 @@
 //!   graph signature's input specs and `process_placeholder`; RETAB keys inputs
 //!   by node name and has no signature, so only the placeholder targets are
 //!   checked.
-//! - The pipeline tests (`test_fuse_duplicate_users_runs_after_tosa_transformations`,
+//! - The tests that run other passes first
+//!   (`test_fuse_duplicate_users_runs_after_tosa_transformations`,
 //!   `test_noop_removal_exposes_duplicate_user_cleanup`,
-//!   `test_splits_merged_permute_at_distinct_narrowing_rescales`) are ported at
-//!   the pass level: the fixture is the graph this pass receives in rc4's
-//!   pipeline, confirmed by running the passes before it in the venv.
+//!   `test_splits_merged_permute_at_distinct_narrowing_rescales` and the three
+//!   `test_smaller_dtype_pass_restores_permute_*` of
+//!   test_propagate_permutes_views_pass.py) are ported at the pass level: the
+//!   fixture is the graph this pass receives there, captured by running the
+//!   passes before it in the venv.
 
 use std::collections::HashMap;
 
@@ -1115,4 +1118,78 @@ fn splits_merged_permute_at_distinct_narrowing_rescales() {
         assert_eq!(g.dtype(permute), "torch.int8");
         assert_eq!(g.graph().node(input_of(&g, permute)).target, RESCALE);
     }
+}
+
+// From backends/arm/test/passes/test_propagate_permutes_views_pass.py, which
+// runs PropagateViewCopyPermuteUpPass and then MoveDataMovementOps: each port
+// starts from the graph the Up pass hands MoveDataMovementOps there (captured
+// in the venv) and checks what it returns.
+
+/// `test_smaller_dtype_pass_restores_permute_after_narrowing_rescale_fed_by_binary_op`:
+/// the Up pass leaves `add -> permute -> RESCALE:i8`; the permute moves back
+/// below the RESCALE.
+#[test]
+fn smaller_dtype_pass_restores_permute_after_narrowing_rescale_fed_by_binary_op() {
+    let mut g = LayoutGraph::new();
+    let x = g.typed_input("x", &[1, 2, 3, 4], "torch.int32");
+    let y = g.typed_input("y", &[1, 2, 3, 4], "torch.int32");
+    let add = g.call(ADD, vec![node(x), node(y)]);
+    let permute = g.permute(add, &[0, 2, 3, 1]);
+    let rescale = rescale_with(&mut g, permute, "torch.int8", &[1.0]);
+    g.output(&[rescale]);
+
+    assert!(run_mdm(&mut g));
+
+    g.assert_targets(&[ADD, RESCALE, PERMUTE]);
+    let [_, rescale, permute] = calls(&g)[..] else {
+        panic!("three calls");
+    };
+    assert_eq!((g.shape(rescale), g.dtype(rescale)), (&[1, 2, 3, 4][..], "torch.int8"));
+    assert_eq!((g.shape(permute), g.dtype(permute)), (&[1, 3, 4, 2][..], "torch.int8"));
+}
+
+/// `test_smaller_dtype_pass_restores_permute_after_narrowing_rescale_from_shared_placeholder`:
+/// the placeholder's other user, a `neg`, is left alone.
+#[test]
+fn smaller_dtype_pass_restores_permute_after_narrowing_rescale_from_shared_placeholder() {
+    let mut g = LayoutGraph::new();
+    let x = g.typed_input("x", &[1, 2, 3, 4], "torch.int32");
+    let permute = g.permute(x, &[0, 2, 3, 1]);
+    let rescale = rescale_with(&mut g, permute, "torch.int8", &[1.0]);
+    let neg = g.call(NEG, vec![node(x)]);
+    g.output(&[rescale, neg]);
+
+    assert!(run_mdm(&mut g));
+
+    g.assert_targets(&[RESCALE, PERMUTE, NEG]);
+    let [rescale, permute, neg] = calls(&g)[..] else {
+        panic!("three calls");
+    };
+    assert_eq!(input_of(&g, rescale), g.id("x"));
+    assert_eq!(input_of(&g, permute), rescale);
+    assert_eq!((input_of(&g, neg), g.dtype(neg)), (g.id("x"), "torch.int32"));
+    assert_eq!(output_nodes(g.graph()), vec![permute, neg]);
+}
+
+/// `test_smaller_dtype_pass_restores_permute_after_narrowing_rescale_behind_unary`:
+/// the Up pass leaves `permute -> clone -> RESCALE:i8`; the clone moves below
+/// the RESCALE first, then the permute, and the clone ends up on int8.
+#[test]
+fn smaller_dtype_pass_restores_permute_after_narrowing_rescale_behind_unary() {
+    let mut g = LayoutGraph::new();
+    let x = g.typed_input("x", &[1, 2, 3, 4], "torch.int32");
+    let permute = g.permute(x, &[0, 2, 3, 1]);
+    let clone = g.call(CLONE, vec![node(permute)]);
+    let rescale = rescale_with(&mut g, clone, "torch.int8", &[1.0]);
+    g.output(&[rescale]);
+
+    assert!(run_mdm(&mut g));
+
+    g.assert_targets(&[RESCALE, PERMUTE, CLONE]);
+    let [rescale, permute, clone] = calls(&g)[..] else {
+        panic!("three calls");
+    };
+    assert_eq!((g.shape(rescale), g.dtype(rescale)), (&[1, 2, 3, 4][..], "torch.int8"));
+    assert_eq!((g.shape(permute), g.dtype(permute)), (&[1, 3, 4, 2][..], "torch.int8"));
+    assert_eq!((g.shape(clone), g.dtype(clone)), (&[1, 3, 4, 2][..], "torch.int8"));
 }
