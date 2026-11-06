@@ -102,7 +102,8 @@ use crate::layout::ctx::{is_impure_call, LayoutCtx};
 use crate::layout::pending::{is_pending_table, TABLE_OPS};
 use crate::layout::pointwise::is_pointwise;
 use crate::layout::shape::{
-    has_local_rule, int_list, mark_contiguous, reduce_shape, refreshed_meta, ShapeError,
+    has_local_rule, infer_facts, int_list, mark_contiguous, reduce_shape, refreshed_meta,
+    ShapeError,
 };
 
 /// `PERMUTE_COPY_TARGETS` (`backends/transforms/channels_last_layout.py:14-18`).
@@ -1837,11 +1838,12 @@ fn eliminate_dead_from(ctx: &mut LayoutCtx<'_>, candidates: impl IntoIterator<It
 fn refresh(ctx: &mut LayoutCtx<'_>, rewrite: &Rewrite) {
     let mut queue: BinaryHeap<Reverse<(u64, NodeId)>> = BinaryHeap::new();
     let mut queued: HashSet<NodeId> = HashSet::new();
+    // Only calls have values to re-derive; the output node has none.
     let push = |ctx: &LayoutCtx<'_>,
                 queue: &mut BinaryHeap<Reverse<(u64, NodeId)>>,
                 queued: &mut HashSet<NodeId>,
                 id: NodeId| {
-        if !ctx.is_erased(id) && queued.insert(id) {
+        if !ctx.is_erased(id) && ctx.node(id).op == NodeOp::CallFunction && queued.insert(id) {
             let key = ctx.order().key(id).expect("live nodes are placed");
             queue.push(Reverse((key, id)));
         }
@@ -1894,10 +1896,20 @@ fn refresh(ctx: &mut LayoutCtx<'_>, rewrite: &Rewrite) {
 
 /// `id`'s meta with its value re-derived from its operands, as rc4's retrace
 /// does: [`refreshed_meta`] where `layout::shape` has a rule, else the rules
-/// for the other targets a region can hold. Recorded dtypes and qparams stay
-/// (see `layout::shape`).
+/// for the other targets a region can hold. Qparams stay, and so do recorded
+/// dtypes (see `layout::shape`), except a RESCALE's, which is its dtype
+/// argument.
 fn retraced_meta(graph: &IrGraph, id: NodeId) -> Result<NodeMeta, ShapeError> {
     let node = graph.node(id);
+    if classify_ir_target(&node.target) == IrTargetKind::TosaRescale {
+        // RESCALE's value dtype is its dtype argument: rc4's fake kernel
+        // returns `torch.empty_like(x, dtype=dtype)`
+        // (backends/arm/tosa/dialect/ops/conversion_ops.py:213).
+        let mut meta = refreshed_meta(graph, id)?;
+        meta.set_tensor_facts(infer_facts(graph, id)?);
+        mark_contiguous(&mut meta);
+        return Ok(meta);
+    }
     if has_local_rule(&node.target) || all_input_nodes(node).is_empty() {
         return refreshed_meta(graph, id);
     }
@@ -2011,6 +2023,14 @@ fn expand_shape(shape: &[i64], size: &[i64]) -> Result<Vec<i64>, ShapeError> {
             }
         })
         .collect()
+}
+
+/// rc4's `_is_constant` for `id` under `config`, for the upstream test of the
+/// subclass's per-call constant names.
+#[cfg(test)]
+pub(crate) fn is_constant_in(graph: &mut IrGraph, config: &RemovePermutesConfig, id: NodeId) -> bool {
+    let ctx = LayoutCtx::new(graph);
+    Detector::new(config).is_constant(&ctx, id)
 }
 
 #[cfg(test)]
