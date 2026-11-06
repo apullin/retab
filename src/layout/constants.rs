@@ -98,17 +98,23 @@ impl IrPass for IrMaterializeConstantsPass {
         let placeholders_before = (scope == GraphScope::Region).then(|| placeholder_names(graph));
 
         let mut ctx = LayoutCtx::with_scope(graph, scope);
+        // Each rc4 pass that changes the graph ends with a graph-wide
+        // `eliminate_dead_code()` (`:369-372`, `:278-280`), which drops the
+        // folded nodes. ComputeConstantOpsAOT's runs before FuseConstantArgs
+        // sweeps, so that sweep never folds a dead op.
         let precomputed = compute_constant_ops_aot(&mut ctx, &mut plan.factories);
+        if precomputed {
+            ctx.eliminate_dead_code();
+        }
         let fused_inputs = fuse_constant_args(&mut ctx, &mut plan.folds);
-        if !precomputed && fused_inputs.is_empty() {
+        if !fused_inputs.is_empty() {
+            ctx.eliminate_dead_code();
+            if scope == GraphScope::Parent {
+                delete_unused_constant_inputs(&mut ctx, fused_inputs);
+            }
+        } else if !precomputed {
             // Every planned fold was skipped; nothing changed.
             return false;
-        }
-        // Both rc4 passes end with a graph-wide `eliminate_dead_code()`
-        // (`:278-280`, `:369-372`), which drops the folded nodes.
-        ctx.eliminate_dead_code();
-        if scope == GraphScope::Parent {
-            delete_unused_constant_inputs(&mut ctx, fused_inputs);
         }
         ctx.finish();
 
@@ -137,10 +143,10 @@ impl Plan {
     ///
     /// IrFuseShapeOnlyConstantsEffectPass needs no run of its own:
     /// IrFuseConstantInputsEffectPass plans every node it plans, with the same
-    /// bytes. Both seed the same constants and zero-input factories, the
-    /// latter counts at least as many nodes constant, and a shape-only target
-    /// reads only its first argument. matmul_only is likewise the subset of
-    /// with_data_slices without slices.
+    /// bytes. Both seed the same constants and factories, the constant-inputs
+    /// planner counts at least as many nodes constant, and a shape-only target
+    /// reads only its first argument (a test pins this). matmul_only is
+    /// likewise the subset of with_data_slices without slices.
     fn of(graph: &mut IrGraph) -> Self {
         let factories = IrFuseZeroInputConstantsEffectPass.run(graph);
         let folds = IrFuseConstantInputsEffectPass::with_data_slices().run(graph);
@@ -949,6 +955,43 @@ mod tests {
         output(&mut graph, &[x]);
         assert!(run(&mut graph));
         assert_eq!(names(&graph), ["unused_pre_computed", "x", "output"]);
+    }
+
+    /// ComputeConstantOpsAOT's dead-code elimination runs before
+    /// FuseConstantArgs sweeps. With a factory in the graph a dead fold is
+    /// dropped, not folded, and its input placeholder stays; without one, rc4
+    /// folds the dead op too, deletes its input and keeps the unused constant.
+    #[test]
+    fn a_dead_fold_is_dropped_once_a_factory_was_materialized() {
+        let build = |with_factory: bool| {
+            let mut graph = IrGraph::empty();
+            let x = placeholder(&mut graph, "x", [2], "torch.int8");
+            let w = weight(&mut graph, "w", int8_tensor(&[2], &[1, 2]));
+            call(
+                &mut graph,
+                "dead_view",
+                VIEW,
+                vec![node(w), ints(&[2, 1])],
+                [2, 1],
+                "torch.int8",
+            );
+            let mut results = vec![x];
+            if with_factory {
+                let mut meta = NodeMeta::tensor([1], "torch.float32");
+                meta.set_single_output_qparam(int8_qparam(1.0, 0));
+                results.push(full(&mut graph, "f", &[1], 3.0, meta));
+            }
+            output(&mut graph, &results);
+            graph
+        };
+
+        let mut graph = build(true);
+        assert!(run(&mut graph));
+        assert_eq!(names(&graph), ["f_pre_computed", "x", "w", "output"]);
+
+        let mut graph = build(false);
+        assert!(run(&mut graph));
+        assert_eq!(names(&graph), ["x", "dead_view_fused_const", "output"]);
     }
 
     /// Like rc4's `eliminate_dead_code()`, a change drops every dead pure node,
