@@ -29,12 +29,14 @@ pub fn build_main_pipeline(config: &PipelineConfig) -> Vec<crate::fx_ir::Pipelin
 /// pipeline. Explicit mode is rc4's order (`backends/arm/_passes/arm_pass_manager.py`,
 /// "APM" below; P2 design §1 and §4.1 with its critique): every pass that writes or
 /// reads `tosa_dim_order` is off, rc4's layout passes take their APM slots, and
-/// IrToTosaMemoryFormat's slot holds the phase-6 block (APM:715-749). In a region
-/// (`!decompose_qdq`) explicit mode skips IrNormalizeDelegateIOLayout, which owns only
-/// the delegate's IO (critique A2), and its constants are `get_attr` nodes; a region
-/// conv's weight and bias captured from the parent are folded into region constants
-/// at serialization, after the boundary contracts (`layout::rewrite_conv`,
-/// `control_flow::captured_conv`; APU-135 S8).
+/// IrToTosaMemoryFormat's slot holds the phase-6 block (APM:715-749). The RETAB-only
+/// where-mask tiling is off too (SELECT broadcasts the rank-matched mask), and so are
+/// the RETAB-only view cleanups in and after phase 6, while IrFuseCascadedViews still
+/// runs before phase 6 (APU-161). In a region (`!decompose_qdq`) explicit mode skips
+/// IrNormalizeDelegateIOLayout, which owns only the delegate's IO (critique A2), and
+/// its constants are `get_attr` nodes; a region conv's weight and bias captured from
+/// the parent are folded into region constants at serialization, after the boundary
+/// contracts (`layout::rewrite_conv`, `control_flow::captured_conv`; APU-135 S8).
 fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx_ir::PipelineStep> {
     use crate::fx_ir::PipelineStep::{Effectful, Ir};
 
