@@ -36,6 +36,9 @@ pub(crate) mod normalize_delegate_io;
 pub(crate) mod pending;
 #[allow(dead_code)]
 pub(crate) mod pointwise;
+// rc4's RewriteConvPass for explicit mode (APU-135 P2 S3, APU-155).
+#[allow(dead_code)]
+pub(crate) mod rewrite_conv;
 #[allow(dead_code)]
 pub(crate) mod shape;
 

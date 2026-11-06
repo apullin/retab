@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 
 use crate::fx_ir::{IrGraph, IrPass};
 use crate::layout::replay::{self, Case, Data, DimOrders, Graph, Op, Options, QValue, Val};
+use crate::layout::rewrite_conv::IrRewriteConvPass;
 
 const REWRITE_CONV: &str = include_str!("../../tests/fixtures/layout_replay/rewrite_conv.txt");
 const REWRITE_CONV_A16W8: &str =
@@ -671,10 +672,16 @@ fn a_port_that_does_nothing_matches_no_case() {
 // ---------------------------------------------------------------------------
 
 // S3 (APU-155): IrRewriteConv on INT8 (per-tensor and per-channel) and A8W4.
-// #[test]
-// fn rewrite_conv_matches_rc4() {
-//     replay::check(&IrRewriteConvPass { is_u55_subset: false, in_region: false }, REWRITE_CONV);
-// }
+#[test]
+fn rewrite_conv_matches_rc4() {
+    replay::check(
+        &IrRewriteConvPass {
+            is_u55_subset: false,
+            in_region: false,
+        },
+        REWRITE_CONV,
+    );
+}
 
 // S4 (APU-155): A16W8 INT48 branching, on the generic profile and on U55.
 // #[test]
