@@ -113,16 +113,6 @@ fn is_identity_view(graph: &IrGraph, id: NodeId, input: NodeId) -> bool {
     if graph.node_shape(id) != Some(input_shape) {
         return false;
     }
-    if let Some((input_order, output_order)) = graph
-        .node(input)
-        .meta
-        .tosa_dim_order()
-        .zip(node.meta.tosa_dim_order())
-    {
-        if input_order != output_order {
-            return false;
-        }
-    }
     let Some(mut shape) = node.arg(1).and_then(|arg| graph.constant_shape(arg)) else {
         return false;
     };
@@ -240,7 +230,7 @@ impl IrPass for IrRemoveNoopPass {
                     _ => false,
                 };
                 let full_slice = static_slice(graph, id).is_some_and(|slice| {
-                    graph.logical_input_shape(id, input).is_some_and(|shape| {
+                    graph.logical_input_shape(input).is_some_and(|shape| {
                         slice.start.len() == shape.len()
                             && slice.start.iter().all(|&start| start == 0)
                             && slice.size == shape

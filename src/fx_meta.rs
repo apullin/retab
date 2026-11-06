@@ -1,6 +1,6 @@
 //! Typed FX metadata imported into the Rust lowering IR.
 //!
-//! This module owns tensor, quantization, layout, and passthrough metadata
+//! This module owns tensor (value and dim order), quantization, and passthrough metadata
 //! facts. Graph topology and rewrite mechanics live in `fx_ir`.
 
 use std::borrow::Cow;
@@ -148,19 +148,14 @@ impl IndexMut<&usize> for QParamMap {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct LayoutFacts {
-    val_dim_order: Option<Vec<usize>>,
-    tosa_dim_order: Option<Vec<usize>>,
-}
-
 /// Metadata fields extracted from `node.meta`. The common fields are typed;
 /// rare fields stay in the Python meta dict and are not touched.
 #[derive(Debug, Clone, Default)]
 pub struct NodeMeta {
     tensor: Option<TensorFacts>,
     quant: QuantFacts,
-    layout: LayoutFacts,
+    /// torch's dim order of the value, `meta["val"].dim_order()`.
+    val_dim_order: Option<Vec<usize>>,
     /// Arbitrary extra meta keys for passthrough (skip_size_adjust, do_not_fuse_duplicate, etc).
     pub extras: HashMap<String, MetaValue>,
 }
@@ -242,8 +237,6 @@ impl NodeMeta {
             .as_ref()
             .and_then(|v| attrs(v).call_optional("dim_order"));
 
-        let tosa_dim_order = meta_attrs.optional("tosa_dim_order");
-
         let pre_pass_arg_qparams = meta_attrs
             .value("_pre_pass_arg_qparams")
             .and_then(|v| extract_qparam_dict(&v));
@@ -276,10 +269,7 @@ impl NodeMeta {
                 pre_pass_arg_qparams,
                 control_flow_output_targets: None,
             },
-            layout: LayoutFacts {
-                val_dim_order,
-                tosa_dim_order,
-            },
+            val_dim_order,
             extras,
         })
     }
@@ -314,15 +304,7 @@ impl NodeMeta {
     }
 
     pub fn val_dim_order(&self) -> Option<&[usize]> {
-        self.layout.val_dim_order.as_deref()
-    }
-
-    pub fn tosa_dim_order(&self) -> Option<&[usize]> {
-        self.layout.tosa_dim_order.as_deref()
-    }
-
-    pub fn cloned_tosa_dim_order(&self) -> Option<Vec<usize>> {
-        self.layout.tosa_dim_order.clone()
+        self.val_dim_order.as_deref()
     }
 
     pub fn set_output_qparams(&mut self, map: impl Into<QParamMap>) {
@@ -401,17 +383,12 @@ impl NodeMeta {
         self.quant.input_qparams = None;
     }
 
-    pub fn set_tosa_dim_order(&mut self, order: Vec<usize>) {
-        self.layout.tosa_dim_order = Some(order);
-    }
-
     pub fn set_val_dim_order(&mut self, order: Vec<usize>) {
-        self.layout.val_dim_order = Some(order);
+        self.val_dim_order = Some(order);
     }
 
-    pub fn copy_dim_order_facts_from(&mut self, other: &Self) {
-        self.layout.val_dim_order = other.layout.val_dim_order.clone();
-        self.layout.tosa_dim_order = other.layout.tosa_dim_order.clone();
+    pub fn copy_val_dim_order_from(&mut self, other: &Self) {
+        self.val_dim_order = other.val_dim_order.clone();
     }
 
     pub fn tensor_facts(&self) -> Option<&TensorFacts> {
@@ -430,7 +407,7 @@ impl NodeMeta {
     /// is not a tensor (a TOSA `CONST_SHAPE` holds an `int[]`).
     pub fn clear_val(&mut self) {
         self.tensor = None;
-        self.layout.val_dim_order = None;
+        self.val_dim_order = None;
     }
 
     pub fn set_tensor_facts_for_existing_shape(&mut self, dtype: impl Into<String>) -> bool {
@@ -601,22 +578,20 @@ impl NodeMeta {
         self.extras.remove("tosa_special_dtype").is_some()
     }
 
-    pub fn replace_tosa_dim_order(&mut self, order: Option<Vec<usize>>) {
-        self.layout.tosa_dim_order = order;
+    // Temporary (APU-162): no-op stand-ins for RETAB's deleted tosa_dim_order, which
+    // nothing reads any more. They keep src/control_flow's remaining calls compiling;
+    // they go when that code drops the calls (the dead-code lint flags them then).
+    pub fn replace_tosa_dim_order(&mut self, _order: Option<Vec<usize>>) {}
+
+    pub fn set_tosa_dim_order(&mut self, _order: Vec<usize>) {}
+
+    pub fn cloned_tosa_dim_order(&self) -> Option<Vec<usize>> {
+        None
     }
 
-    pub fn clear_tosa_dim_order_if_rank_mismatch(&mut self, rank: usize) -> bool {
-        if self
-            .layout
-            .tosa_dim_order
-            .as_ref()
-            .is_some_and(|order| order.len() != rank)
-        {
-            self.layout.tosa_dim_order = None;
-            true
-        } else {
-            false
-        }
+    #[cfg(test)]
+    pub fn tosa_dim_order(&self) -> Option<&[usize]> {
+        None
     }
 
     pub fn set_empty_qparam_maps(&mut self) {

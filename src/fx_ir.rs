@@ -1049,38 +1049,10 @@ impl IrGraph {
         }
     }
 
-    pub(crate) fn shape_in_node_order(
-        &self,
-        node: NodeId,
-        input: NodeId,
-        shape: &[i64],
-    ) -> Option<Vec<i64>> {
-        let input_order = self.node(input).meta.tosa_dim_order();
-        let output_order = self.node(node).meta.tosa_dim_order().or(input_order);
-        let physical = if let Some(order) = input_order {
-            if order.len() != shape.len() {
-                return None;
-            }
-            order
-                .iter()
-                .map(|&axis| shape.get(axis).copied())
-                .collect::<Option<Vec<_>>>()?
-        } else {
-            shape.to_vec()
-        };
-        let mut logical = physical.clone();
-        if let Some(order) = output_order {
-            if order.len() != shape.len() {
-                return None;
-            }
-            for (index, &axis) in order.iter().enumerate() {
-                *logical.get_mut(axis)? = physical[index];
-            }
-        }
-        Some(logical)
-    }
-
-    pub(crate) fn logical_input_shape(&self, node: NodeId, input: NodeId) -> Option<Vec<i64>> {
+    /// `input`'s shape, derived from the operand of its chain of transposes and permutes
+    /// through their perms rather than read from their vals; None when a perm does not
+    /// fit.
+    pub(crate) fn logical_input_shape(&self, input: NodeId) -> Option<Vec<i64>> {
         let mut current = input;
         let mut permutations = Vec::new();
         while crate::fx_target::is_tosa_transpose_target(&self.node(current).target)
@@ -1089,42 +1061,17 @@ impl IrGraph {
             permutations.push(self.node(current).arg_int_list(1)?);
             current = self.node(current).arg_node(0)?;
         }
-        let mut physical = self.node_shape_vec(current)?;
-        if let Some(order) = self.node(current).meta.tosa_dim_order() {
-            if order.len() != physical.len() {
-                return None;
-            }
-            physical = order
-                .iter()
-                .map(|&axis| physical.get(axis).copied())
-                .collect::<Option<Vec<_>>>()?;
-        }
-        // A generated transpose's val and dim-order metadata both describe
-        // its layout; derive its physical shape from the operand and perms.
+        let mut shape = self.node_shape_vec(current)?;
         for permutation in permutations.into_iter().rev() {
-            if permutation.len() != physical.len() {
+            if permutation.len() != shape.len() {
                 return None;
             }
-            physical = permutation
+            shape = permutation
                 .into_iter()
-                .map(|axis| normalize_dim(axis, physical.len()).map(|axis| physical[axis]))
+                .map(|axis| normalize_dim(axis, shape.len()).map(|axis| shape[axis]))
                 .collect::<Option<Vec<_>>>()?;
         }
-        let mut logical = physical.clone();
-        if let Some(order) = self
-            .node(node)
-            .meta
-            .tosa_dim_order()
-            .or(self.node(input).meta.tosa_dim_order())
-        {
-            if order.len() != physical.len() {
-                return None;
-            }
-            for (index, &axis) in order.iter().enumerate() {
-                *logical.get_mut(axis)? = physical[index];
-            }
-        }
-        Some(logical)
+        Some(shape)
     }
 
     pub(crate) fn eliminate_dead_code(&mut self) -> bool {

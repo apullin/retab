@@ -176,7 +176,6 @@ impl<'a> SumQParamChain<'a> {
         let mut step_meta = self
             .source_meta
             .cloned_with_dtype_of_or_float32(output_shape.to_vec(), self.input_meta);
-        step_meta.clear_tosa_dim_order_if_rank_mismatch(output_shape.len());
         if let Some(ref qparams) = self.current_input_qparams {
             step_meta.set_input_qparams(qparams.clone());
         }

@@ -27,7 +27,6 @@ fn slice_range(node: &IrNode, rank: usize, dim_size: i64) -> Option<(usize, i64,
 
 fn overlapping_inputs(
     graph: &IrGraph,
-    source: NodeId,
     inputs: &[NodeId],
     dim: usize,
     rank: usize,
@@ -37,7 +36,7 @@ fn overlapping_inputs(
     let mut overlaps = Vec::new();
     let mut offset = 0i64;
     for &input in inputs {
-        let shape = graph.logical_input_shape(source, input)?;
+        let shape = graph.logical_input_shape(input)?;
         if shape.len() != rank {
             return None;
         }
@@ -92,9 +91,8 @@ impl IrPass for IrRewriteCatSlicePass {
                 if user_node.arg_node(0) != Some(source) || slice_dim != dim {
                     break;
                 }
-                let Some(overlaps) =
-                    overlapping_inputs(graph, source, &inputs, dim, rank, start, end)
-                        .filter(|overlaps| !overlaps.is_empty())
+                let Some(overlaps) = overlapping_inputs(graph, &inputs, dim, rank, start, end)
+                    .filter(|overlaps| !overlaps.is_empty())
                 else {
                     break;
                 };
@@ -124,10 +122,7 @@ impl IrPass for IrRewriteCatSlicePass {
                     {
                         overlap.input
                     } else {
-                        let mut shape = cursor
-                            .graph()
-                            .logical_input_shape(user, overlap.input)
-                            .unwrap();
+                        let mut shape = cursor.graph().logical_input_shape(overlap.input).unwrap();
                         shape[dim] = overlap.end - overlap.start;
                         let mut slice_meta = meta.cloned_with_same_dtype_or_float32(shape);
                         if let Some(qparam) = &input_qparam {
