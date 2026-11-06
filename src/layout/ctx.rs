@@ -575,6 +575,16 @@ impl<'g> LayoutCtx<'g> {
         self.bump(id);
     }
 
+    /// Replace `id`'s kwargs: `node.kwargs = ...` (torch/fx/node.py:490), as at
+    /// backends/transforms/fuse_identical_input_transforms_pass.py:241.
+    pub(crate) fn set_kwargs(&mut self, id: NodeId, kwargs: HashMap<String, IrArg>) {
+        self.bump_inputs_of(id);
+        self.graph.node_mut(id).kwargs = kwargs;
+        self.graph.sync_node_users(id);
+        self.bump_inputs_of(id);
+        self.bump(id);
+    }
+
     /// Retarget `id` in place, as at
     /// backends/transforms/canonicalize_view_copy_permute_pass.py:433.
     pub(crate) fn set_target(&mut self, id: NodeId, target: impl Into<String>) {
