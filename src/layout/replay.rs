@@ -19,9 +19,10 @@
 //!
 //! A case where rc4's pass raised (`after raises=...`) matches when the port
 //! panics, as the P1 ports fail where rc4 raises. The `modified` flag the pass
-//! returns is compared only on request (`Options::modified`), since the P1
-//! passes predate it; the propagation driver loops on it, so its helpers check
-//! it.
+//! returns is compared only on request (`Options::modified`): the propagation
+//! driver loops on it, so its helpers check it, while the P1 replays predate
+//! the option (all agree with rc4 except IrRewriteHighRankSingletonPermute,
+//! which returns false in 18 cases where rc4 reports a change it didn't make).
 //!
 //! Dim orders are recorded but compared only on request (`Options::dim_orders`).
 //! rc4's passes end in an `ExportPass` retrace that recomputes every val, so a

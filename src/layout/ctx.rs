@@ -1138,9 +1138,6 @@ mod tests {
         assert_eq!(scenarios, 2);
     }
 
-    /// Nested insertion scopes and permanent or moving insert points; expected
-    /// orders from `nested()` in tests/fixtures/torch_fx_insert_order.py
-    /// (torch 2.15.0).
     /// `unique_name` picks the first free suffix, gaps included, and keeps
     /// doing so as the names it hands out are taken.
     #[test]
@@ -1164,6 +1161,9 @@ mod tests {
         assert_eq!(names, ["n_2", "n_4", "n_5", "n_6"]);
     }
 
+    /// Nested insertion scopes and permanent or moving insert points; expected
+    /// orders from `nested()` in tests/fixtures/torch_fx_insert_order.py
+    /// (torch 2.15.0).
     #[test]
     fn ctx_insert_points_match_torch_fx_scopes() {
         let base = || {
