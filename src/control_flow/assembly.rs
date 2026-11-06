@@ -132,6 +132,19 @@ pub(crate) fn append_subgraphs_from_ir(
     submodules: &BTreeMap<String, StashedPipeline>,
     layout: crate::pipeline_config::LayoutMode,
 ) -> PyResult<()> {
+    try_append_subgraphs_from_ir(graphs, store, parent_ir, submodules, layout)
+        .map_err(PyRuntimeError::new_err)
+}
+
+/// [`append_subgraphs_from_ir`] without Python, so tests can link it: the error is the
+/// message the Python exception carries.
+pub(crate) fn try_append_subgraphs_from_ir(
+    graphs: &mut Vec<(String, Graph)>,
+    store: &mut TensorStore,
+    parent_ir: &fx_ir::IrGraph,
+    submodules: &BTreeMap<String, StashedPipeline>,
+    layout: crate::pipeline_config::LayoutMode,
+) -> Result<(), String> {
     let (_, while_body_input_counts) = collect_region_metadata(parent_ir, submodules);
 
     for region in ordered_regions(parent_ir, submodules) {
@@ -139,9 +152,9 @@ pub(crate) fn append_subgraphs_from_ir(
             continue;
         }
         let Some(stashed) = submodules.get(&region) else {
-            return Err(PyRuntimeError::new_err(format!(
+            return Err(format!(
                 "missing stashed IrGraph for control-flow region '{region}'"
-            )));
+            ));
         };
 
         let (mut sub_graph, mut sub_store) = ingest_region(stashed, layout);
@@ -161,10 +174,10 @@ pub(crate) fn append_subgraphs_from_ir(
                 // constant's name; stock keeps one tensor list per block, RETAB one
                 // store, so hand the graph to stock rather than lose either tensor.
                 Some(_) => {
-                    return Err(PyRuntimeError::new_err(format!(
+                    return Err(format!(
                         "RETAB_STOCK_FALLBACK: control-flow constant name collision: \
                          region '{region}' constant '{key}' differs from an earlier one"
-                    )));
+                    ));
                 }
             }
         }

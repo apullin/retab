@@ -23,18 +23,36 @@ pub fn build_main_pipeline(config: &PipelineConfig) -> Vec<crate::fx_ir::Pipelin
     lowering_steps(true, config)
 }
 
+/// The parent pipeline (`decompose_qdq`) or a control-flow region's.
+///
+/// `config.layout` picks the layout model (APU-135). Dim-order mode is RETAB's own
+/// pipeline. Explicit mode is rc4's order (`backends/arm/_passes/arm_pass_manager.py`,
+/// "APM" below; P2 design §1 and §4.1 with its critique): every pass that writes or
+/// reads `tosa_dim_order` is off, rc4's layout passes take their APM slots, and
+/// IrToTosaMemoryFormat's slot holds the phase-6 block (APM:715-749). In a region
+/// (`!decompose_qdq`) explicit mode skips IrNormalizeDelegateIOLayout, which owns only
+/// the delegate's IO (critique A2), and its constants are `get_attr` nodes; a region
+/// conv's weight and bias captured from the parent are folded into region constants
+/// at serialization, after the boundary contracts (`layout::rewrite_conv`,
+/// `control_flow::captured_conv`; APU-135 S8).
 fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx_ir::PipelineStep> {
     use crate::fx_ir::PipelineStep::{Effectful, Ir};
 
-    let mut steps = vec![
-        // -- Early decompositions (before fold_qdq) --
-        // P2 of APU-135 gives explicit mode IrNormalizeDelegateIOLayout here, rc4's first
-        // pass (backends/arm/_passes/arm_pass_manager.py:544).
-        match config.layout {
-            LayoutMode::DimOrder | LayoutMode::Explicit => Ir(Box::new(
-                crate::fx_annotate_output_dim_order_ir::IrAnnotateOutputDimOrderPass,
-            )),
-        },
+    let explicit = config.layout == LayoutMode::Explicit;
+    let in_region = !decompose_qdq;
+    let mut steps = Vec::new();
+    // -- Early decompositions (before fold_qdq) --
+    match config.layout {
+        LayoutMode::DimOrder => steps.push(Ir(Box::new(
+            crate::fx_annotate_output_dim_order_ir::IrAnnotateOutputDimOrderPass,
+        ))),
+        // rc4's first pass (APM:544).
+        LayoutMode::Explicit if !in_region => steps.push(Ir(Box::new(
+            crate::layout::normalize_delegate_io::IrNormalizeDelegateIOLayoutPass,
+        ))),
+        LayoutMode::Explicit => {}
+    }
+    steps.extend(vec![
         Ir(Box::new(
             crate::fx_fuse_batch_norm_ir::IrFuseBatchNorm2dPass,
         )),
@@ -64,14 +82,21 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(
             crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass,
         )),
+        // TODO(P3, APU-160): explicit mode's IrFuseIdenticalInputTransforms (APM:591),
+        // design §1a.
         Ir(Box::new(crate::fx_decompose_flip_ir::IrDecomposeFlipPass)),
         Ir(Box::new(crate::fx_decompose_roll_ir::IrDecomposeRollPass)),
         Ir(Box::new(
             crate::fx_decompose_linear_ir::IrDecomposeLinearPass,
         )),
-        Ir(Box::new(
+    ]);
+    // rc4 rewrites conv1d inside RewriteConvPass (design §1a).
+    if !explicit {
+        steps.push(Ir(Box::new(
             crate::fx_conv1d_unsqueeze_ir::IrConv1dUnsqueezePass,
-        )),
+        )));
+    }
+    steps.extend(vec![
         Ir(Box::new(
             crate::fx_insert_qdq_rescale_ir::IrInsertQdqRescalePass,
         )),
@@ -81,7 +106,7 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(
             crate::fx_insert_int32_rescale_ir::IrFuseConsecutiveRescalesPass,
         )),
-    ];
+    ]);
     if decompose_qdq {
         steps.push(Ir(Box::new(
             crate::fx_decompose_quant_ir::IrDecomposeQuantPass,
@@ -100,6 +125,17 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         steps.push(Ir(Box::new(
             fx_decompose_masked_fill_ir::IrDecomposeMaskedFillPass,
         )));
+    }
+    if explicit {
+        // APM:611, :617 and :629: after the fold (round and sqrt read qparams) and
+        // before IrReplaceScalarWithTensor (APM:656); design §4.4.
+        steps.extend(vec![
+            Ir(Box::new(
+                crate::layout::decompositions::IrDecomposeRoundPass,
+            )),
+            Ir(Box::new(crate::layout::decompositions::IrDecomposeSqrtPass)),
+            Ir(Box::new(crate::layout::decompositions::IrDecomposeSignPass)),
+        ]);
     }
     steps.extend(vec![
         Ir(Box::new(
@@ -155,6 +191,16 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
             crate::fx_quantize_clamp_args_ir::IrQuantizeClampArgsPass,
         )),
         Ir(Box::new(fx_convert_full_like_ir::IrConvertFullLikePass)),
+    ]);
+    if explicit {
+        // APM:664, right after ConvertFullLikeToFull (APM:661); design C3. RETAB runs
+        // its avg-pool, var and mean decompositions after this slot, where rc4 runs
+        // them before (critique B9); phase-6 slot 7 rank-matches what they create.
+        steps.push(Ir(Box::new(
+            crate::layout::match_arg_ranks::IrMatchArgRanksPass,
+        )));
+    }
+    steps.extend(vec![
         Effectful(Box::new(
             crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass,
         )),
@@ -208,18 +254,39 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
                 layout: config.layout,
             },
         )),
-        Effectful(Box::new(
-            crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEffectPass::with_data_slices(),
-        )),
-        Ir(Box::new(
-            crate::fx_annotate_conv_bias_ir::IrAnnotateConvBiasDtypePass,
-        )),
-        // Explicit mode slices as rc4 does (APU-135 P2, design §4.2-P).
-        Ir(Box::new(
-            crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass {
-                layout: config.layout,
-            },
-        )),
+    ]);
+    if !explicit {
+        // Explicit mode folds constants in the IR after the avg-pool rewrite instead
+        // (IrMaterializeConstants), and IrRewriteConv types the conv bias itself.
+        steps.extend(vec![
+            Effectful(Box::new(
+                crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEffectPass::with_data_slices(
+                ),
+            )),
+            Ir(Box::new(
+                crate::fx_annotate_conv_bias_ir::IrAnnotateConvBiasDtypePass,
+            )),
+        ]);
+    }
+    // Explicit mode slices as rc4 does (APU-135 P2, design §4.2-P).
+    steps.push(Ir(Box::new(
+        crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass {
+            layout: config.layout,
+        },
+    )));
+    if explicit {
+        // APM:698, then ComputeConstantOpsAOT and FuseConstantArgs (APM:699-700), which
+        // also materialize the avg-pool zero points.
+        steps.extend(vec![
+            Ir(Box::new(
+                crate::layout::rewrite_avg_pool2d::IrRewriteAvgPool2dPass,
+            )),
+            Ir(Box::new(
+                crate::layout::constants::IrMaterializeConstantsPass { in_region },
+            )),
+        ]);
+    }
+    steps.extend(vec![
         Ir(Box::new(fx_rewrite_squeeze_ir::IrRewriteSqueezePass)),
         Ir(Box::new(
             crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
@@ -237,53 +304,69 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(
             crate::fx_rewrite_index_put_ir::IrRewriteIndexPutPass,
         )),
-        Effectful(Box::new(
-            crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEffectPass,
-        )),
+    ]);
+    if !explicit {
+        // rc4 merges equal placeholders only after phase 6 (APM:755), where explicit
+        // mode does. Merging here, on the data alone, sent the multihead attention
+        // op tests to stock in explicit mode (`fx_fuse_equal_placeholders_ir`).
+        steps.push(Effectful(Box::new(
+            crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEffectPass {
+                layout: config.layout,
+            },
+        )));
+    }
+    steps.extend(vec![
         Effectful(Box::new(
             crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass,
         )),
         Effectful(Box::new(
             crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEffectPass,
         )),
-        // Before the layout pass, so the chunks get dim orders like any other node.
-        Ir(Box::new(
-            crate::fx_decompose_permute_for_u55_ir::IrDecomposePermuteForU55Pass {
-                split_permutes: config.u55_split_permutes.clone(),
-            },
-        )),
-        // Linear's view pairs around an activation, before layout sees them.
-        Ir(Box::new(
-            crate::fx_cancel_views_around_unary_ir::IrCancelViewsAroundUnaryPass,
-        )),
-        // Copy lowering compares logical shapes and emits views/repeats for layout conversion.
-        Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)),
-        // P2 of APU-135 gives explicit mode rc4's phase-6 block here
-        // (backends/arm/_passes/arm_pass_manager.py:715-749).
-        match config.layout {
-            LayoutMode::DimOrder | LayoutMode::Explicit => Ir(Box::new(
+    ]);
+    if !explicit {
+        steps.extend(vec![
+            // Before the layout pass, so the chunks get dim orders like any other node.
+            Ir(Box::new(
+                crate::fx_decompose_permute_for_u55_ir::IrDecomposePermuteForU55Pass {
+                    split_permutes: config.u55_split_permutes.clone(),
+                },
+            )),
+            // Linear's view pairs around an activation, before layout sees them.
+            Ir(Box::new(
+                crate::fx_cancel_views_around_unary_ir::IrCancelViewsAroundUnaryPass,
+            )),
+        ]);
+    }
+    // Copy lowering compares logical shapes and emits views/repeats for layout conversion.
+    steps.push(Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)));
+    match config.layout {
+        LayoutMode::DimOrder => steps.extend(vec![
+            Ir(Box::new(
                 crate::fx_memory_format_ir::IrToTosaMemoryFormatPass,
             )),
-        },
-        Ir(Box::new(crate::fx_rewrite_pad_ir::IrRewritePadPass)),
-        Ir(Box::new(
-            crate::fx_rewrite_cat_slice_ir::IrRewriteCatSlicePass,
-        )),
-        Ir(Box::new(
-            crate::fx_fuse_consecutive_concats_ir::IrFuseConsecutiveConcatsPass,
-        )),
-        // Slice-view propagation matches aten.slice_copy, which RewriteSlice retargets.
-        Ir(Box::new(
-            crate::fx_propagate_slice_views_ir::IrPropagateSliceViewsPass,
-        )),
-        Ir(Box::new(
-            crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
-        )),
-        Ir(Box::new(crate::fx_rewrite_slice_ir::IrRewriteSlicePass)),
-        Ir(Box::new(
-            crate::fx_fuse_consecutive_slices_ir::IrFuseConsecutiveSlicesPass,
-        )),
-        Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)),
+            Ir(Box::new(crate::fx_rewrite_pad_ir::IrRewritePadPass)),
+            Ir(Box::new(
+                crate::fx_rewrite_cat_slice_ir::IrRewriteCatSlicePass,
+            )),
+            Ir(Box::new(
+                crate::fx_fuse_consecutive_concats_ir::IrFuseConsecutiveConcatsPass,
+            )),
+            // Slice-view propagation matches aten.slice_copy, which RewriteSlice retargets.
+            Ir(Box::new(
+                crate::fx_propagate_slice_views_ir::IrPropagateSliceViewsPass,
+            )),
+            Ir(Box::new(
+                crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
+            )),
+            Ir(Box::new(crate::fx_rewrite_slice_ir::IrRewriteSlicePass)),
+            Ir(Box::new(
+                crate::fx_fuse_consecutive_slices_ir::IrFuseConsecutiveSlicesPass,
+            )),
+            Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)),
+        ]),
+        LayoutMode::Explicit => steps.extend(explicit_phase6_steps(config, in_region)),
+    }
+    steps.extend(vec![
         Effectful(Box::new(
             crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass,
         )),
@@ -293,31 +376,127 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Effectful(Box::new(
             crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEffectPass::matmul_only(),
         )),
+    ]);
+    if explicit {
+        // FuseEqualPlaceholders (APM:755): merges the per-conv weights of convs that
+        // share one, and equal constants phase 6 created; design §1c. Its key holds
+        // the val dtype, as rc4's holds the tensor's dtype.
+        steps.push(Effectful(Box::new(
+            crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEffectPass {
+                layout: config.layout,
+            },
+        )));
+    }
+    steps.extend(vec![
         Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)),
         Ir(Box::new(
             crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass,
         )),
-        // Explicit mode types the accumulator as rc4's MATMUL (APU-135 P2).
-        Ir(Box::new(
-            crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass {
-                layout: config.layout,
-            },
-        )),
-        Ir(Box::new(
-            crate::fx_insert_conv_rescale_ir::IrInsertConvAccumulatorRescalePass,
-        )),
     ]);
+    if !explicit {
+        steps.extend(vec![
+            Ir(Box::new(
+                crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass {
+                    layout: config.layout,
+                },
+            )),
+            // Explicit mode's IrRewriteConv puts the accumulator RESCALE in place; on
+            // its graphs this pass would add a second one (design §1c).
+            Ir(Box::new(
+                crate::fx_insert_conv_rescale_ir::IrInsertConvAccumulatorRescalePass,
+            )),
+        ]);
+    }
     steps.push(Ir(Box::new(
         crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
     )));
     steps.push(Ir(Box::new(
         crate::fx_fuse_cascaded_views_ir::IrFuseDuplicateViewsPass,
     )));
+    if explicit {
+        // After every explicit pass: a control-flow output whose boundary-contract
+        // target their qparam-less copies hide goes to stock until S8.
+        steps.push(Ir(Box::new(
+            crate::layout::control_flow_guard::IrExplicitControlFlowOutputGuardPass,
+        )));
+    }
     // rc4 runs EnsureUniqueOutputNodes last; the while pipeline relies on that.
     steps.push(Ir(Box::new(
         crate::fx_ensure_unique_output_nodes_ir::IrEnsureUniqueOutputNodesPass,
     )));
     steps
+}
+
+/// Explicit mode's phase-6 block (APM:715-749, design §1b), in IrToTosaMemoryFormat's
+/// slot. rc4's passes that never fire for TOSA-1.0 INT (DecomposeAdaptiveMaxPool2d,
+/// FoldScalarMulIntoConv, the MXFP rewrites; design F1) are left out, and its tail
+/// (ResolveViewCopyInferredDim, InsertConstShapes, InsertDataLayoutCasts) is the
+/// serializer's.
+fn explicit_phase6_steps(
+    config: &PipelineConfig,
+    in_region: bool,
+) -> Vec<crate::fx_ir::PipelineStep> {
+    use crate::fx_ir::PipelineStep::Ir;
+    vec![
+        Ir(Box::new(
+            crate::layout::rewrite_upsample::IrRewriteUpsamplePass,
+        )),
+        Ir(Box::new(
+            crate::layout::rewrite_max_pool2d::IrRewriteMaxPool2dPass,
+        )),
+        Ir(Box::new(crate::layout::rewrite_conv::IrRewriteConvPass::new(
+            config, in_region,
+        ))),
+        // RewriteMatmulPass (APM:724); dim-order mode runs it after the late fusions.
+        Ir(Box::new(
+            crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass {
+                layout: config.layout,
+            },
+        )),
+        Ir(Box::new(
+            crate::layout::fuse_view_copy::IrFuseViewCopyTransformPass,
+        )),
+        // TODO(P3, APU-159): PropagateViewCopyPermuteDownPass (APM:726).
+        // TODO(P3, APU-159): PropagateViewCopyPermuteUpPass (APM:727).
+        Ir(Box::new(crate::fx_rewrite_pad_ir::IrRewritePadPass)),
+        Ir(Box::new(
+            crate::layout::move_data_movement::IrMoveDataMovementOpsToSmallerDtypePass,
+        )),
+        Ir(Box::new(
+            crate::layout::match_arg_ranks::IrMatchArgRanksPass,
+        )),
+        Ir(Box::new(
+            crate::layout::high_rank_singleton_permute::IrRewriteHighRankSingletonPermutePass,
+        )),
+        Ir(Box::new(
+            crate::fx_rewrite_cat_slice_ir::IrRewriteCatSlicePass,
+        )),
+        Ir(Box::new(
+            crate::fx_fuse_consecutive_concats_ir::IrFuseConsecutiveConcatsPass,
+        )),
+        // Splits only the permutes Python's Vela probe named on the edge program
+        // (design F8).
+        Ir(Box::new(
+            crate::fx_decompose_permute_for_u55_ir::IrDecomposePermuteForU55Pass {
+                split_permutes: config.u55_split_permutes.clone(),
+            },
+        )),
+        // RETAB-only; kept through P2 (design §1b slot 12).
+        Ir(Box::new(
+            crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
+        )),
+        Ir(Box::new(crate::fx_rewrite_slice_ir::IrRewriteSlicePass)),
+        Ir(Box::new(
+            crate::fx_fuse_consecutive_slices_ir::IrFuseConsecutiveSlicesPass,
+        )),
+        Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)),
+        Ir(Box::new(
+            crate::layout::canonicalize::IrCanonicalizeViewCopyPermutePass,
+        )),
+        Ir(Box::new(
+            crate::layout::fuse_view_copy::IrFuseViewCopyTransformPass,
+        )),
+    ]
 }
 
 /// IR-native control-flow submodule pipelines: transforms run as IrPasses on a
@@ -467,8 +646,50 @@ mod tests {
         assert_eq!(identities[0].arg_node(0), identities[1].arg_node(0));
     }
 
+    /// The passes that write or read `tosa_dim_order`, and the RETAB passes rc4 does
+    /// inside RewriteConvPass, which explicit mode leaves out (design §1).
+    const DIM_ORDER_ONLY: [&str; 7] = [
+        "IrAnnotateOutputDimOrder",
+        "IrConv1dUnsqueeze",
+        "IrAnnotateConvBiasDtype",
+        "IrCancelViewsAroundUnary",
+        "IrToTosaMemoryFormat",
+        "IrPropagateSliceViews",
+        "IrInsertConvAccumulatorRescale",
+    ];
+
+    /// rc4's phase-6 block (APM:715-749) as explicit mode builds it, in
+    /// IrToTosaMemoryFormat's slot right after the first late IrRemoveNoop.
+    const EXPLICIT_PHASE6: [&str; 18] = [
+        "IrRewriteUpsample",
+        "IrRewriteMaxPool2d",
+        "IrRewriteConv",
+        "IrRewriteMatmulRescale",
+        "IrFuseViewCopyTransform",
+        "IrRewritePad",
+        "IrMoveDataMovementOpsToSmallerDtype",
+        "IrMatchArgRanks",
+        "IrRewriteHighRankSingletonPermute",
+        "IrRewriteCatSlice",
+        "IrFuseConsecutiveConcats",
+        "IrDecomposePermuteForU55",
+        "IrFuseCascadedViews",
+        "IrRewriteSlice",
+        "IrFuseConsecutiveSlices",
+        "IrRemoveNoop",
+        "IrCanonicalizeViewCopyPermute",
+        "IrFuseViewCopyTransform",
+    ];
+
+    fn explicit(spec: &str) -> PipelineConfig {
+        PipelineConfig {
+            layout: LayoutMode::Explicit,
+            ..PipelineConfig::from_tosa_spec(spec)
+        }
+    }
+
     #[test]
-    fn layout_modes_build_the_same_parent_and_region_pipelines() {
+    fn dim_order_mode_keeps_its_layout_passes_in_parent_and_region_pipelines() {
         let builders: [fn(&PipelineConfig) -> Vec<PipelineStep>; 3] = [
             build_main_pipeline,
             build_ir_cond_submodule_pipeline,
@@ -480,18 +701,315 @@ mod tests {
             "TOSA-1.0+INT+int16+int4+cf",
         ] {
             let dim_order = PipelineConfig::from_tosa_spec(spec);
-            let explicit = PipelineConfig {
-                layout: LayoutMode::Explicit,
-                ..dim_order.clone()
-            };
             for build in builders {
                 let names = pass_names(build(&dim_order));
-                for pass in ["IrAnnotateOutputDimOrder", "IrToTosaMemoryFormat"] {
+                for pass in DIM_ORDER_ONLY {
                     assert!(names.iter().any(|name| name == pass), "{spec}: {pass}");
                 }
-                assert_eq!(pass_names(build(&explicit)), names, "{spec}");
+                for pass in [
+                    "IrNormalizeDelegateIOLayout",
+                    "IrDecomposeRound",
+                    "IrDecomposeSqrt",
+                    "IrDecomposeSign",
+                    "IrRewriteAvgPool2d",
+                    "IrMaterializeConstants",
+                    "IrRewriteUpsample",
+                    "IrRewriteMaxPool2d",
+                    "IrRewriteConv",
+                    "IrFuseViewCopyTransform",
+                    "IrMoveDataMovementOpsToSmallerDtype",
+                    "IrMatchArgRanks",
+                    "IrRewriteHighRankSingletonPermute",
+                    "IrCanonicalizeViewCopyPermute",
+                ] {
+                    assert!(!names.iter().any(|name| name == pass), "{spec}: {pass}");
+                }
             }
         }
+    }
+
+    /// Explicit mode builds rc4's order (design §1, §4.1, critique A2, B9): the
+    /// dim-order passes are gone, rc4's passes sit at their APM slots, and the
+    /// phase-6 block replaces IrToTosaMemoryFormat. Regions get the same list without
+    /// IrNormalizeDelegateIOLayout.
+    #[test]
+    fn explicit_mode_builds_rc4s_order_in_parent_and_region_pipelines() {
+        for spec in [
+            "TOSA-1.0+INT",
+            "TOSA-1.0+INT+int16+int4+u55",
+            "TOSA-1.0+INT+int16+int4+cf",
+        ] {
+            let config = explicit(spec);
+            for (in_region, names) in [
+                (false, pass_names(build_main_pipeline(&config))),
+                (true, pass_names(build_ir_cond_submodule_pipeline(&config))),
+                (true, pass_names(build_ir_while_submodule_pipeline(&config))),
+            ] {
+                let count = |pass: &str| names.iter().filter(|name| *name == pass).count();
+                let position = |pass: &str| {
+                    names
+                        .iter()
+                        .position(|name| name == pass)
+                        .unwrap_or_else(|| panic!("{spec}: {pass} missing"))
+                };
+                for pass in DIM_ORDER_ONLY {
+                    assert_eq!(count(pass), 0, "{spec}: {pass}");
+                }
+
+                // APM:544, the first pass, parent only.
+                if in_region {
+                    assert_eq!(count("IrNormalizeDelegateIOLayout"), 0, "{spec}");
+                } else {
+                    assert_eq!(names[0], "IrNormalizeDelegateIOLayout", "{spec}");
+                    assert_eq!(count("IrNormalizeDelegateIOLayout"), 1, "{spec}");
+                }
+
+                // APM:611, :617 and :629: after the fold, before the scalar rewrite.
+                let round = position("IrDecomposeRound");
+                assert_eq!(
+                    &names[round..round + 4],
+                    [
+                        "IrDecomposeRound",
+                        "IrDecomposeSqrt",
+                        "IrDecomposeSign",
+                        "IrDecomposeEmbedding"
+                    ],
+                    "{spec}"
+                );
+                assert!(position("IrFoldQdq") < round);
+                assert!(position("IrReplaceInfAndLimitValues") < round);
+                assert!(round < position("IrReplaceScalarWithTensor"));
+                if config.softmax == SoftmaxDecompositionConfig::Masked {
+                    assert_eq!(names[round - 1], "IrDecomposeMaskedFill", "{spec}");
+                }
+
+                // APM:664, right after ConvertFullLikeToFull (design C3), and again
+                // in phase 6.
+                let full_like = position("IrConvertFullLike");
+                assert_eq!(names[full_like + 1], "IrMatchArgRanks", "{spec}");
+                assert_eq!(count("IrMatchArgRanks"), 2, "{spec}");
+
+                // APM:695-700: SizeAdjustInput, RewriteAvgPool2d, then the constant
+                // folds in the IR, in place of the with_data_slices effect pass and
+                // the conv-bias annotation.
+                let size_adjust = position("IrSizeAdjustInput");
+                assert_eq!(
+                    &names[size_adjust - 1..size_adjust + 3],
+                    [
+                        "IrDecomposeGroupedConv",
+                        "IrSizeAdjustInput",
+                        "IrRewriteAvgPool2d",
+                        "IrMaterializeConstants"
+                    ],
+                    "{spec}"
+                );
+                assert!(position("IrInsertTableOpsEp") < size_adjust);
+                assert_eq!(
+                    count("IrFuseConstantInputsEp"),
+                    2,
+                    "{spec}: matmul_only twice"
+                );
+
+                // The phase-6 block, once, after the late IrRemoveNoop, and nothing
+                // dim-order-specific before it.
+                let phase6 = position("IrRewriteUpsample");
+                assert_eq!(names[phase6 - 1], "IrRemoveNoop", "{spec}");
+                assert_eq!(names[phase6 - 2], "IrFuseShapeOnlyConstantsEp", "{spec}");
+                assert_eq!(
+                    &names[phase6..phase6 + EXPLICIT_PHASE6.len()],
+                    EXPLICIT_PHASE6
+                );
+                for pass in [
+                    "IrRewriteConv",
+                    "IrRewriteMatmulRescale",
+                    "IrRewriteUpsample",
+                    "IrRewriteMaxPool2d",
+                    "IrDecomposePermuteForU55",
+                    "IrRewriteAvgPool2d",
+                ] {
+                    assert_eq!(count(pass), 1, "{spec}: {pass}");
+                }
+
+                // After phase 6: the late constant effects, FuseEqualPlaceholders
+                // (APM:755), the cleanup, and EnsureUniqueOutputNodes last.
+                let tail = phase6 + EXPLICIT_PHASE6.len();
+                assert_eq!(
+                    &names[tail..tail + 6],
+                    [
+                        "IrFuseZeroInputConstantsEp",
+                        "IrFuseShapeOnlyConstantsEp",
+                        "IrFuseConstantInputsEp",
+                        "IrFuseEqualPlaceholdersEp",
+                        "IrRemoveNoop",
+                        "IrFuseDuplicateUsers",
+                    ],
+                    "{spec}"
+                );
+                let guard = position("IrExplicitControlFlowOutputGuard");
+                assert_eq!(count("IrExplicitControlFlowOutputGuard"), 1, "{spec}");
+                assert_eq!(names[guard - 1], "IrFuseDuplicateViews", "{spec}");
+                assert!(
+                    guard >= names.len() - 3,
+                    "{spec}: the guard runs after every explicit pass"
+                );
+                // Only after phase 6, as rc4 (APM:755).
+                assert_eq!(count("IrFuseEqualPlaceholdersEp"), 1, "{spec}");
+                assert_eq!(names.last().unwrap(), "IrEnsureUniqueOutputNodes");
+            }
+        }
+    }
+
+    /// Explicit mode changes only the layout passes: removing them from both modes'
+    /// lists, and the explicit additions, leaves the same pipeline (minus the moved
+    /// passes' positions).
+    #[test]
+    fn explicit_mode_keeps_every_other_pass_of_dim_order_mode() {
+        let explicit_only = [
+            "IrNormalizeDelegateIOLayout",
+            "IrDecomposeRound",
+            "IrDecomposeSqrt",
+            "IrDecomposeSign",
+            "IrMatchArgRanks",
+            "IrRewriteAvgPool2d",
+            "IrMaterializeConstants",
+            "IrRewriteUpsample",
+            "IrRewriteMaxPool2d",
+            "IrRewriteConv",
+            "IrFuseViewCopyTransform",
+            "IrMoveDataMovementOpsToSmallerDtype",
+            "IrRewriteHighRankSingletonPermute",
+            "IrCanonicalizeViewCopyPermute",
+            "IrFuseEqualPlaceholdersEp",
+            "IrExplicitControlFlowOutputGuard",
+        ];
+        for spec in ["TOSA-1.0+INT+int16+int4+u55", "TOSA-1.0+INT+int16+int4+cf"] {
+            let dim_order = PipelineConfig::from_tosa_spec(spec);
+            let config = explicit(spec);
+            for (dim_order_names, explicit_names) in [
+                (
+                    pass_names(build_main_pipeline(&dim_order)),
+                    pass_names(build_main_pipeline(&config)),
+                ),
+                (
+                    pass_names(build_ir_while_submodule_pipeline(&dim_order)),
+                    pass_names(build_ir_while_submodule_pipeline(&config)),
+                ),
+            ] {
+                let mut shared: Vec<String> = dim_order_names
+                    .into_iter()
+                    .filter(|name| !DIM_ORDER_ONLY.contains(&name.as_str()))
+                    .filter(|name| !explicit_only.contains(&name.as_str()))
+                    .collect();
+                let mut explicit_shared: Vec<String> = explicit_names
+                    .into_iter()
+                    .filter(|name| !explicit_only.contains(&name.as_str()))
+                    .collect();
+                shared.sort();
+                explicit_shared.sort();
+                // Dim-order mode's with_data_slices effect pass is the one
+                // IrFuseConstantInputsEp explicit mode drops.
+                let dropped = shared
+                    .iter()
+                    .position(|name| name == "IrFuseConstantInputsEp")
+                    .unwrap();
+                shared.remove(dropped);
+                assert_eq!(shared, explicit_shared, "{spec}");
+            }
+        }
+    }
+
+    /// rc4's `linear_pc` graph at RewriteConvPass, a per-channel quantized Linear,
+    /// with the all-zero bias of the multihead attention op tests' projections. Its
+    /// weight's zero point `b__zero_point_0` comes first, unused: an all-zero int64
+    /// buffer, whose data the importer narrows to int32. `b__zero_point_1` is the
+    /// bias's zero point, all-zero int32.
+    fn linear_with_a_zero_bias() -> crate::fx_ir::IrGraph {
+        use crate::layout::replay;
+        let fixture = include_str!("../tests/fixtures/layout_replay/rewrite_conv.txt");
+        let case = replay::parse(fixture)
+            .expect("a valid fixture")
+            .into_iter()
+            .find(|case| case.name == "linear_pc")
+            .expect("the linear_pc case");
+        let mut graph = replay::import(&case);
+        let bias = crate::test_ir::live_node(&graph, "b__frozen_param1").id;
+        let tensor = graph.node_mut(bias).tensor.as_mut().expect("bias data");
+        tensor.data.data.fill(0);
+        graph
+    }
+
+    fn run_steps(steps: &[PipelineStep], graph: &mut crate::fx_ir::IrGraph) {
+        for step in steps {
+            match step {
+                PipelineStep::Ir(pass) => {
+                    pass.run(graph);
+                }
+                PipelineStep::Effectful(pass) => {
+                    pass.run(graph);
+                }
+            }
+        }
+    }
+
+    /// APU-157: explicit mode used to merge as dim-order mode does, on the data
+    /// alone and before phase 6. That hands the Linear's bias users the int64 zero
+    /// point, and IrRewriteConv sends the graph to stock, as it did the multihead
+    /// attention op tests.
+    #[test]
+    fn merging_on_the_data_before_rewrite_conv_hands_the_linear_an_int64_bias() {
+        use crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEffectPass;
+        use crate::fx_ir::{EffectfulIrPass, IrPass};
+        use crate::layout::rewrite_conv::IrRewriteConvPass;
+
+        let mut graph = linear_with_a_zero_bias();
+        IrFuseEqualPlaceholdersEffectPass {
+            layout: LayoutMode::DimOrder,
+        }
+        .run(&mut graph);
+        crate::stock_fallback::take();
+        IrRewriteConvPass {
+            is_u55_subset: false,
+            in_region: false,
+            u55_split_permutes: Default::default(),
+        }
+        .run(&mut graph);
+        let reason = crate::stock_fallback::take().expect("a stock fallback");
+        assert!(
+            reason.contains("a torch.int64 bias for a torch.int32 accumulator"),
+            "{reason}"
+        );
+    }
+
+    /// Explicit mode lowers that Linear from the postprocessing block on (where
+    /// dim-order mode merges) without a fallback, and its TOSA convolution ends up
+    /// reading the int32 zero constant, as rc4's reads `b__zero_point_1_common`.
+    /// The int64 zero point stays apart, as rc4's `b__zero_point_0_common` does.
+    #[test]
+    fn explicit_mode_keeps_an_int64_zero_point_off_a_linears_zero_bias() {
+        let config = explicit("TOSA-1.0+INT");
+        let steps = lowering_steps(true, &config);
+        let names = pass_names(lowering_steps(true, &config));
+        let start = names
+            .iter()
+            .position(|name| name == "IrCastInt64ToInt32Ep")
+            .unwrap();
+
+        let mut graph = linear_with_a_zero_bias();
+        crate::stock_fallback::take();
+        run_steps(&steps[start..], &mut graph);
+        assert_eq!(crate::stock_fallback::take(), None);
+
+        let convs: Vec<_> = graph
+            .live_nodes()
+            .filter(|node| node.target == "backend.tosa.CONV2D.default")
+            .collect();
+        assert_eq!(convs.len(), 1);
+        let bias = graph.node(convs[0].args[2].as_node().expect("a bias node"));
+        assert_eq!(bias.name, "b__zero_point_1");
+        assert_eq!(bias.meta.val_dtype(), Some("torch.int32"));
+        let weight_zp = crate::test_ir::live_node(&graph, "b__zero_point_0");
+        assert_eq!(weight_zp.meta.val_dtype(), Some("torch.int64"));
+        assert!(!graph.has_live_users(weight_zp.id));
     }
 
     #[test]

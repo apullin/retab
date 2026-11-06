@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::fx_ir;
 use crate::fx_target::is_tosa_transpose_target;
 use crate::graph::ir::DType;
+use crate::pipeline_config::LayoutMode;
 use crate::StashedPipeline;
 
 use super::{collect_region_metadata, metadata, region_name_from_ir_arg};
@@ -165,11 +166,25 @@ fn resolve_parent_arg_ids_ir(node: &fx_ir::IrNode) -> Vec<fx_ir::NodeId> {
     Vec::new()
 }
 
+/// The meta a region placeholder takes from the operand bound to it, and the dim order
+/// that the boundary gives it.
+///
+/// Explicit mode: a val is the tensor as TOSA sees it, on both sides of the boundary,
+/// and no node has a dim order. The placeholder takes the operand's val as it is, as
+/// rc4's `_regularize_submodule` gives region IO the parent's post-pass vals
+/// (`backends/arm/tosa/backend.py:204-249`), and the boundary writes no dim order. The
+/// TOSA TRANSPOSE case below reconstructs a logical shape under a physical dim order,
+/// which is dim-order logic; it is inert in explicit mode, where permutes stay
+/// `aten.permute_copy` until the serializer (P2 design §1c, §4.3.1).
 fn boundary_placeholder_meta(
     ir: &fx_ir::IrGraph,
     parent_id: fx_ir::NodeId,
+    layout: LayoutMode,
 ) -> (fx_ir::NodeMeta, Option<Vec<usize>>) {
     let parent_arg = ir.node(parent_id);
+    if layout == LayoutMode::Explicit {
+        return (parent_arg.meta.clone(), None);
+    }
     let fallback = (
         parent_arg.meta.clone(),
         parent_arg.meta.cloned_tosa_dim_order(),
@@ -181,7 +196,7 @@ fn boundary_placeholder_meta(
     else {
         return fallback;
     };
-    let (input_meta, input_order) = boundary_placeholder_meta(ir, input_id);
+    let (input_meta, input_order) = boundary_placeholder_meta(ir, input_id, layout);
     let Some(shape) = input_meta.val_shape() else {
         return fallback;
     };
@@ -212,6 +227,7 @@ fn collect_boundary_contracts_for_graph(
     parent_region: Option<&str>,
     contracts: &mut Vec<BoundaryContract>,
     while_body_regions: &mut BTreeSet<String>,
+    layout: LayoutMode,
 ) {
     for node_id in ir.live_node_ids() {
         let node = ir.node(node_id);
@@ -256,7 +272,7 @@ fn collect_boundary_contracts_for_graph(
                         })
                         .or_else(|| metadata::extract_effective_qparam_ir(ir, arg_id))
                 };
-                let (meta, boundary_dim_order) = boundary_placeholder_meta(ir, arg_id);
+                let (meta, boundary_dim_order) = boundary_placeholder_meta(ir, arg_id, layout);
                 Some(BoundaryInputMeta {
                     meta,
                     boundary_dim_order,
@@ -431,6 +447,11 @@ pub(crate) fn snapshot_pre_pass_qparams_ir(graph: &mut fx_ir::IrGraph) -> u32 {
     saved
 }
 
+/// Dim-order mode lays a region's rank-4 tensors out channels-last, so a parent's rank-4
+/// cond or while output arrives NHWC: give each such getitem that dim order, and mark it
+/// for the main-output TRANSPOSE back to the user's layout (`serialize::output_layout`).
+/// Explicit mode never calls this: there a region's outputs keep their vals, as rc4's do
+/// (P2 design §4.3.1).
 fn annotate_parent_rank4_dim_order_ir(graph: &mut fx_ir::IrGraph) -> u32 {
     const NHWC_DIM_ORDER: [usize; 4] = [0, 2, 3, 1];
 
@@ -524,6 +545,7 @@ fn find_boundary_contract_for_region(
     region_name: &str,
     parent: Option<&StashedPipeline>,
     submodules: &BTreeMap<String, StashedPipeline>,
+    layout: LayoutMode,
 ) -> Option<(BoundaryContract, bool)> {
     let mut contracts = Vec::new();
     let mut while_body_regions = BTreeSet::new();
@@ -534,6 +556,7 @@ fn find_boundary_contract_for_region(
             None,
             &mut contracts,
             &mut while_body_regions,
+            layout,
         );
     }
     for (region, (ir, _)) in submodules.iter() {
@@ -542,6 +565,7 @@ fn find_boundary_contract_for_region(
             Some(region.as_str()),
             &mut contracts,
             &mut while_body_regions,
+            layout,
         );
     }
 
@@ -554,17 +578,22 @@ fn find_boundary_contract_for_region(
         })
 }
 
+/// Before a region's pipeline runs: give its placeholders the vals and qparams of the
+/// operands bound to them, read from the stashed post-pipeline graphs that invoke it.
+/// `layout` is the hierarchy's layout mode (Python passes one pipeline config to the
+/// parent and to every region).
 pub(crate) fn apply_pre_submodule_qparam_propagation_ir(
     region_name: Option<&str>,
     graph: &mut fx_ir::IrGraph,
     parent: Option<&StashedPipeline>,
     submodules: &BTreeMap<String, StashedPipeline>,
+    layout: LayoutMode,
 ) -> u32 {
     let Some(region_name) = region_name else {
         return 0;
     };
     let Some((contract, is_while_body)) =
-        find_boundary_contract_for_region(region_name, parent, submodules)
+        find_boundary_contract_for_region(region_name, parent, submodules, layout)
     else {
         return 0;
     };
@@ -576,8 +605,28 @@ pub(crate) fn apply_pre_submodule_qparam_propagation_ir(
     changed
 }
 
-fn rewrite_output_dequantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
+/// Drop the dequantizes that only feed RESCALEs or the region's output: the
+/// region hands its outputs over quantized, and the output contracts rescale
+/// them into the parent's quantization.
+///
+/// With `record_output_qparams` (explicit layout mode), a dequantize feeding
+/// the output first records its qparam as the output node's input qparam for
+/// that output, unless one is recorded, which is rc4's FoldAndAnnotateQParamsPass
+/// annotation that InsertControlFlowRescalesPass reads as the region side of
+/// the output's RESCALE (`insert_rescales_pass.py`, `_rescale_submodule_outputs`;
+/// APU-135 S8). For an output that is not itself a RESCALE, the output
+/// contract then takes it rather than walking back from the output's producer
+/// (`apply_output_rescale_contract_ir`). Explicit mode needs it: rc4's
+/// rewrites end a convolution or a bilinear upsample with a qparam-less
+/// RESCALE and permute, and the walk reverse engineers that RESCALE from the
+/// TOSA op's inherited output qparam, which gives a wrong scale (for a
+/// per-tensor conv, `s_out^2 / (s_in * s_w)` rather than `s_out`).
+fn rewrite_output_dequantize_boundaries_ir(
+    graph: &mut fx_ir::IrGraph,
+    record_output_qparams: bool,
+) -> u32 {
     let mut rewritten = 0u32;
+    let output_id = graph.output_node().map(|node| node.id);
     let ids = graph.live_node_ids();
     for dq_id in ids {
         if !graph.nodes[dq_id].is_dequantize() {
@@ -597,10 +646,42 @@ fn rewrite_output_dequantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
         if !all_rescale_or_output {
             continue;
         }
+        if record_output_qparams {
+            if let (Some(out_id), Some(qparam)) = (output_id, graph.nodes[dq_id].parse_qdq_qparam())
+            {
+                record_output_source_qparam(graph, out_id, dq_id, &qparam);
+            }
+        }
         graph.replace_and_erase(dq_id, source_id);
         rewritten += 1;
     }
     rewritten
+}
+
+/// Record `qparam` as the output node's input qparam for each output `value`
+/// is, unless that output has one.
+fn record_output_source_qparam(
+    graph: &mut fx_ir::IrGraph,
+    out_id: fx_ir::NodeId,
+    value: fx_ir::NodeId,
+    qparam: &fx_ir::QParam,
+) {
+    let slots: Vec<usize> = output_arg_node_ids_ir(graph, out_id)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &id)| (id == value).then_some(index))
+        .collect();
+    if slots.is_empty() {
+        return;
+    }
+    let meta = &mut graph.nodes[out_id].meta;
+    let mut qparams = meta.cloned_input_qparams().unwrap_or_default();
+    for slot in slots {
+        if qparams.get(&slot).is_none() {
+            qparams.insert(slot, qparam.clone());
+        }
+    }
+    meta.set_input_qparams(qparams);
 }
 
 fn rewrite_quantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
@@ -783,15 +864,30 @@ fn strip_while_cond_output_rescales_ir(graph: &mut fx_ir::IrGraph) -> u32 {
     stripped
 }
 
+/// At serialization: align every control-flow region's IO with the graph that invokes
+/// it (boundary vals and qparams, and RESCALEs for inputs and outputs whose qparams
+/// differ), then resolve the conv weights and biases the cond branches capture
+/// (`captured_conv`). `layout` is the hierarchy's layout mode. Explicit mode writes no
+/// dim order (no rank-4 getitem annotation; boundary placeholders take the operand's
+/// val), records the regions' output qparams from their output dequantizes, and uses
+/// its own captured_conv (APU-135 S8).
 pub(crate) fn apply_boundary_contracts(
     parent_ir: &mut fx_ir::IrGraph,
     submodules: &mut BTreeMap<String, StashedPipeline>,
+    layout: LayoutMode,
 ) -> u32 {
+    let explicit = layout == LayoutMode::Explicit;
     let mut contracts = Vec::new();
     let mut output_contracts = Vec::new();
     let mut while_body_regions = BTreeSet::new();
     let (while_cond_regions, _) = collect_region_metadata(parent_ir, submodules);
-    collect_boundary_contracts_for_graph(parent_ir, None, &mut contracts, &mut while_body_regions);
+    collect_boundary_contracts_for_graph(
+        parent_ir,
+        None,
+        &mut contracts,
+        &mut while_body_regions,
+        layout,
+    );
     collect_output_contracts_for_graph(parent_ir, None, &mut output_contracts);
     for (region, (ir, _)) in submodules.iter() {
         collect_boundary_contracts_for_graph(
@@ -799,13 +895,17 @@ pub(crate) fn apply_boundary_contracts(
             Some(region.as_str()),
             &mut contracts,
             &mut while_body_regions,
+            layout,
         );
         collect_output_contracts_for_graph(ir, Some(region.as_str()), &mut output_contracts);
     }
     contracts.sort_by(|a, b| a.region.cmp(&b.region));
     output_contracts.sort_by(|a, b| a.region.cmp(&b.region));
 
-    let mut changed = annotate_parent_rank4_dim_order_ir(parent_ir);
+    let mut changed = match layout {
+        LayoutMode::DimOrder => annotate_parent_rank4_dim_order_ir(parent_ir),
+        LayoutMode::Explicit => 0,
+    };
     let cf_debug = crate::config::from_ir_debug_enabled();
     for (region, (ir, _)) in submodules.iter_mut() {
         if while_cond_regions.contains(region) {
@@ -817,7 +917,7 @@ pub(crate) fn apply_boundary_contracts(
             }
             changed += stripped;
         }
-        let rewrites = rewrite_output_dequantize_boundaries_ir(ir);
+        let rewrites = rewrite_output_dequantize_boundaries_ir(ir, explicit);
         if rewrites > 0 && cf_debug {
             eprintln!(
                 "[RETAB][cf-boundary-ir] rewrote {rewrites} output DQ boundary node(s) in {region}"
@@ -856,9 +956,254 @@ pub(crate) fn apply_boundary_contracts(
         }
         changed += inserts;
     }
-    let rewritten = super::captured_conv::rewrite_captured_conv_operands(parent_ir, submodules);
+    let rewritten = match layout {
+        LayoutMode::DimOrder => {
+            super::captured_conv::rewrite_captured_conv_operands(parent_ir, submodules)
+        }
+        LayoutMode::Explicit => {
+            super::captured_conv::rewrite_explicit_captured_conv_operands(parent_ir, submodules)
+        }
+    };
     if rewritten > 0 && cf_debug {
         eprintln!("[RETAB][cf-boundary-ir] rewrote {rewritten} captured conv weight(s)/bias(es)");
     }
     changed + rewritten
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, NodeMeta, NodeOp, NodeTensor, TensorSource};
+    use crate::lowering_effects::LoweringEffectBatch;
+    use crate::store::TensorData;
+    use crate::test_ir::{call, call_with_meta, live_node, output, placeholder, qparam};
+
+    const I8: &str = "torch.int8";
+
+    /// The parent: `x -> cond(true_graph, false_graph) -> getitem -> output`;
+    /// the getitem holds the cond output's quantization, `(0.05, 3)`.
+    fn parent_graph() -> IrGraph {
+        let mut parent = IrGraph::empty();
+        let x = placeholder(&mut parent, "x", [1, 2, 8], I8);
+        let cond = call_with_meta(
+            &mut parent,
+            "cond",
+            "torch.ops.higher_order.cond",
+            vec![
+                IrArg::Int(1),
+                IrArg::Str("true_graph".into()),
+                IrArg::Str("false_graph".into()),
+                IrArg::List(vec![IrArg::Node(x)]),
+            ],
+            NodeMeta::default(),
+        );
+        let getitem = call(
+            &mut parent,
+            "getitem",
+            "<built-in function getitem>",
+            vec![IrArg::Node(cond), IrArg::Int(0)],
+            [1, 4, 8],
+            I8,
+        );
+        parent
+            .node_mut(getitem)
+            .meta
+            .set_single_output_qparam(qparam(0.05, 3, I8));
+        output(&mut parent, getitem);
+        parent
+    }
+
+    fn region_constant(graph: &mut IrGraph, name: &str, data: TensorData) -> fx_ir::NodeId {
+        let meta = NodeMeta::tensor(data.shape.clone(), data.dtype.torch_str());
+        graph.add_constant_node(
+            NodeOp::GetAttr,
+            name.to_string(),
+            name.to_string(),
+            NodeTensor {
+                source: TensorSource::GraphModuleAttr,
+                data,
+            },
+            meta,
+        )
+    }
+
+    /// A cond branch ending in explicit IrRewriteConv's conv1d chain, as rc4
+    /// builds it: the TOSA conv inherits the conv's qparams (input 0.02 and
+    /// weight 0.005, output `(0.04, 7)`); its RESCALE, squeeze view and output
+    /// permute have none; the branch output's dequantize carries the output's
+    /// quantization.
+    fn conv_region() -> IrGraph {
+        let mut region = IrGraph::empty();
+        let x = placeholder(&mut region, "x_ph", [1, 2, 8], I8);
+        let x_nlc = call(
+            &mut region,
+            "conv_nlc",
+            "aten.permute_copy.default",
+            vec![IrArg::Node(x), i64_list_arg(&[0, 2, 1])],
+            [1, 8, 2],
+            I8,
+        );
+        let x_nhwc = call(
+            &mut region,
+            "conv_nhwc",
+            "aten.view_copy.default",
+            vec![IrArg::Node(x_nlc), i64_list_arg(&[1, 1, 8, 2])],
+            [1, 1, 8, 2],
+            I8,
+        );
+        let weight = region_constant(
+            &mut region,
+            "conv_weight_ohwi",
+            TensorData {
+                data: vec![1; 24],
+                shape: vec![4, 1, 3, 2],
+                dtype: DType::Int8,
+            },
+        );
+        let bias = region_constant(
+            &mut region,
+            "conv_bias",
+            TensorData {
+                data: vec![0; 16],
+                shape: vec![4],
+                dtype: DType::Int32,
+            },
+        );
+        let mut conv_meta = NodeMeta::tensor(vec![1, 1, 8, 4], "torch.int32");
+        conv_meta.set_input_qparams_from([(0, qparam(0.02, 0, I8)), (1, qparam(0.005, 0, I8))]);
+        conv_meta.set_single_output_qparam(qparam(0.04, 7, I8));
+        let conv = call_with_meta(
+            &mut region,
+            "conv_tosa",
+            "backend.tosa.CONV2D.default",
+            vec![
+                IrArg::Node(x_nhwc),
+                IrArg::Node(weight),
+                IrArg::Node(bias),
+                i64_list_arg(&[1, 1]),
+                i64_list_arg(&[0, 0, 1, 1]),
+                i64_list_arg(&[1, 1]),
+            ],
+            conv_meta,
+        );
+        let no_qparams = |shape: &[i64]| {
+            let mut meta = NodeMeta::tensor(shape.to_vec(), I8);
+            meta.set_empty_input_qparams();
+            meta.set_output_qparams(fx_ir::QParamMap::new());
+            meta
+        };
+        let rescale = call_with_meta(
+            &mut region,
+            "conv_rescale",
+            "backend.tosa.RESCALE.default",
+            vec![
+                IrArg::Node(conv),
+                IrArg::Dtype(I8.into()),
+                IrArg::List(vec![IrArg::Float(0.02 * 0.005 / 0.04)]),
+                IrArg::Int(0),
+                IrArg::Int(7),
+            ],
+            no_qparams(&[1, 1, 8, 4]),
+        );
+        let squeeze = call_with_meta(
+            &mut region,
+            "conv_squeeze",
+            "aten.view_copy.default",
+            vec![IrArg::Node(rescale), i64_list_arg(&[1, 8, 4])],
+            no_qparams(&[1, 8, 4]),
+        );
+        let permute = call_with_meta(
+            &mut region,
+            "conv_ncl",
+            "aten.permute_copy.default",
+            vec![IrArg::Node(squeeze), i64_list_arg(&[0, 2, 1])],
+            no_qparams(&[1, 4, 8]),
+        );
+        let dequantize = call(
+            &mut region,
+            "output_dequantize",
+            "quantized_decomposed.dequantize_per_tensor.default",
+            vec![
+                IrArg::Node(permute),
+                IrArg::Float(0.04),
+                IrArg::Int(7),
+                IrArg::Int(-128),
+                IrArg::Int(127),
+                IrArg::Dtype(I8.into()),
+            ],
+            [1, 4, 8],
+            "torch.float32",
+        );
+        region.add_node(
+            NodeOp::Output,
+            "output".into(),
+            "output".into(),
+            vec![IrArg::List(vec![IrArg::Node(dequantize)])],
+            NodeMeta::default(),
+        );
+        region
+    }
+
+    fn apply(layout: LayoutMode) -> (IrGraph, BTreeMap<String, StashedPipeline>) {
+        let mut parent = parent_graph();
+        let mut submodules: BTreeMap<String, StashedPipeline> = BTreeMap::from([(
+            "true_graph".to_string(),
+            (conv_region(), LoweringEffectBatch::default()),
+        )]);
+        crate::stock_fallback::take();
+        apply_boundary_contracts(&mut parent, &mut submodules, layout);
+        assert_eq!(crate::stock_fallback::take(), None, "{layout:?}");
+        (parent, submodules)
+    }
+
+    /// APU-135 S8: explicit mode records a cond branch's output quantization
+    /// from its output dequantize, as rc4's FoldAndAnnotateQParamsPass does, so
+    /// the output RESCALE takes the branch output from the conv's `(0.04, 7)`
+    /// to the parent's `(0.05, 3)`. The walk from the output permute instead
+    /// reverse engineers the qparam-less RESCALE from the TOSA conv's inherited
+    /// output qparam, `0.04 / (0.02 * 0.005 / 0.04) = 16`, which dim-order mode
+    /// would use (it never sees this chain: its convs stay aten until the
+    /// serializer).
+    #[test]
+    fn explicit_region_outputs_take_their_dequantizes_qparams() {
+        let (_, submodules) = apply(LayoutMode::Explicit);
+        let region = &submodules["true_graph"].0;
+        assert!(!region
+            .live_nodes()
+            .any(|node| node.name == "output_dequantize"));
+        let output = region.output_node().expect("an output");
+        let recorded = output.meta.input_qparam_at(0).expect("a recorded qparam");
+        assert_eq!((recorded.scale, recorded.zp), (0.04, 7));
+        let rescale = live_node(region, "conv_ncl_cf_output_rescale");
+        assert_eq!(
+            format!("{:?}", &rescale.args[1..]),
+            format!(
+                "{:?}",
+                [
+                    IrArg::Dtype(I8.into()),
+                    IrArg::List(vec![IrArg::Float(0.04 / 0.05)]),
+                    IrArg::Int(7),
+                    IrArg::Int(3),
+                ]
+            )
+        );
+        assert_eq!(
+            rescale.first_node_arg(),
+            Some(live_node(region, "conv_ncl").id)
+        );
+
+        let walked =
+            super::metadata::extract_effective_qparam_ir(region, live_node(region, "conv_ncl").id)
+                .expect("a qparam");
+        assert!((walked.scale - 16.0).abs() < 1e-9, "{}", walked.scale);
+    }
+
+    /// Dim-order mode keeps its output contract: nothing is recorded.
+    #[test]
+    fn dim_order_region_outputs_record_nothing() {
+        let (_, submodules) = apply(LayoutMode::DimOrder);
+        let region = &submodules["true_graph"].0;
+        let output = region.output_node().expect("an output");
+        assert_eq!(output.meta.input_qparam_at(0), None);
+    }
 }

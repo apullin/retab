@@ -3,7 +3,7 @@
 # Regenerate with the rc4 environment, from a neutral directory:
 #   cd /tmp && <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py --pass rewrite_conv
 # executorch 1.6.0 (git 4776f71b6f0daa5dfc7d758d5836fc1cc0d40154), torch 2.15.0, torchao 0.18.0+cpu, python 3.12.8
-# seed 135: 66 cases; format 2: see the generator's docstring.
+# seed 135: 67 cases; format 2: see the generator's docstring.
 # rc4-source sha256 dcaa17134fac980261be8172e6e612171105c18db51e65a729f7a50a197eb826 backends/arm/_passes/rewrite_conv_pass.py
 # rc4-source sha256 9910ce1a359088c2f70b3dde685248917ae4f90eeacef48bfbbbb4752ccf3836 backends/arm/_passes/decompose_grouped_conv_pass.py
 # rc4-source sha256 00f06e920c46c268c09e80073886364ea8cf512a4ac2192a7eed3e172a487df0 backends/arm/_passes/decompose_linear_pass.py
@@ -1688,4 +1688,25 @@ after modified=true
 %14 = aten.permute_copy.default(%13, [0, 2, 3, 1]) : torch.int8[1, 1, 2, 4] q=in{}/out{}
 %15 = aten.view_copy.default(%14, [2, 4]) : torch.int8[2, 4] q=in{}/out{}
 output([%15])
+end
+case tconv2d_nobias_a8w4
+before
+%0 = placeholder b__scale_0 : torch.float32[3] kind=buffer data=hex:f567bf3cc8f7bf3c68eabb3c q=none
+%1 = placeholder b__zero_point_0 : torch.int64[3] kind=buffer data=hex:000000000000000000000000000000000000000000000000 q=none
+%2 = placeholder b__frozen_param0 : torch.int8[3, 4, 3, 3] kind=buffer data=hex:fd040606f90206fcfc05fe04fd0604fefffdfb0201fc03fefdff01fa00ff04fbfdf9fe0100010404fc06fcfb01060706fa050400fbfe0506030203fe04fc05fc0000f906ff060000fc01fbfafd00fcf90606fcfd0305fa0601fd0202010401fefb0702ff060105fa07fe0600 special=INT4 q=none
+%3 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 3, 6, 6] q=none
+%4 = aten.convolution.default(%3, %2, None, [2, 2], [1, 1], [1, 1], True, [1, 1], 1) : torch.int8[1, 4, 12, 12] q=in{0:torch.int8(0.023538220673799515,-27,-128,127),1:torch.int8([0.023365000262856483,0.023433580994606018,0.02293892204761505],[0,0,0],-7,7,axis=0)}/out{0:torch.int8(0.006889950949698687,4,-128,127)}
+output([%4])
+after modified=true
+%0 = placeholder aten_convolution_default_bias : torch.int32[4] kind=param data=hex:00000000000000000000000000000000 q=none
+%1 = placeholder b__scale_0 : torch.float32[3] kind=buffer data=hex:f567bf3cc8f7bf3c68eabb3c q=none
+%2 = placeholder b__zero_point_0 : torch.int64[3] kind=buffer data=hex:000000000000000000000000000000000000000000000000 q=none
+%3 = placeholder b__frozen_param0 : torch.int8[3, 4, 3, 3] kind=buffer data=hex:fd040606f90206fcfc05fe04fd0604fefffdfb0201fc03fefdff01fa00ff04fbfdf9fe0100010404fc06fcfb01060706fa050400fbfe0506030203fe04fc05fc0000f906ff060000fc01fbfafd00fcf90606fcfd0305fa0601fd0202010401fefb0702ff060105fa07fe0600 special=INT4 q=none
+%4 = placeholder aten_convolution_default_weight_ohwi : torch.int8[4, 3, 3, 3] kind=buffer data=hex:fd00fc0401010604fb0604faf9fcfd02060006fcfcfcfbf9fc0106050606fe07fc0406fdfdfa030605050404fafe0006fffb01fdfefdfb0502020602010301fc0204030301fefefefd04fbfffc07010502fafcff000006ff000104f905fb06fafdff07f906fefe0006010000 special=INT4 q=none
+%5 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 3, 6, 6] q=none
+%6 = aten.permute_copy.default(%5, [0, 2, 3, 1]) : torch.int8[1, 6, 6, 3] q=in{}/out{}
+%7 = tosa.TRANSPOSE_CONV2D.default(%6, %4, %0, [-1, 0, -1, 0], [2, 2]) : torch.int32[1, 12, 12, 4] q=in{0:torch.int8(0.023538220673799515,-27,-128,127),1:torch.int8([0.023365000262856483,0.023433580994606018,0.02293892204761505],[0,0,0],-7,7,axis=0)}/out{0:torch.int8(0.006889950949698687,4,-128,127)}
+%8 = tosa.RESCALE.default(%7, torch.int8, [0.07982212591144079, 0.08005641907400123, 0.07836650988051823], 0, 4) : torch.int8[1, 12, 12, 4] q=in{}/out{}
+%9 = aten.permute_copy.default(%8, [0, 3, 1, 2]) : torch.int8[1, 4, 12, 12] q=in{}/out{}
+output([%9])
 end

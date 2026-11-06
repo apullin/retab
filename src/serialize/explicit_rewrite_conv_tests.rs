@@ -138,6 +138,12 @@ fn rewritten_convs_serialize_in_explicit_mode() {
         ),
         (REWRITE_CONV, "cumsum_pt", Op::DepthwiseConv2d, DType::Int32),
         (REWRITE_CONV, "conv2d_a8w4", Op::Conv2d, DType::Int32),
+        (
+            REWRITE_CONV,
+            "tconv2d_nobias_a8w4",
+            Op::TransposeConv2d,
+            DType::Int32,
+        ),
         (REWRITE_CONV_A16W8, "conv2d_a16w8", Op::Conv2d, DType::Int48),
         (
             REWRITE_CONV_A16W8,
@@ -341,4 +347,42 @@ fn a16w8_branches_serialize_in_explicit_mode() {
             .count();
         assert_eq!(count(&items, Op::Transpose), transposes, "{name}");
     }
+}
+
+/// An A8W4 transposed conv's RESCALE carries rc4's 3 input-channel scales for its
+/// 4-channel accumulator (see `rescales_take_one_scale_per_weight_scale`) and
+/// serializes as rc4's `_build_rescale` does (`op_tosa_rescale.py:134-150, 301`):
+/// one multiplier and one shift per scale, `per_channel` because there are several.
+/// That is the RESCALE TOSA's reference model rejects for stock too.
+#[test]
+fn a8w4_transposed_conv_rescales_serialize_one_multiplier_per_scale() {
+    let ir = rewritten(REWRITE_CONV, "tconv2d_nobias_a8w4");
+    let items = serialize_explicit(&ir).unwrap_or_else(|error| panic!("{error}"));
+    let conv = items
+        .operators
+        .iter()
+        .find(|o| o.op == Op::TransposeConv2d)
+        .expect("a TRANSPOSE_CONV2D");
+    let accumulator = tensor(&items, &conv.outputs[0]);
+    assert_eq!(
+        (accumulator.shape.as_slice(), accumulator.dtype),
+        (&[1, 12, 12, 4][..], DType::Int32)
+    );
+    let rescale = items
+        .operators
+        .iter()
+        .find(|o| o.op == Op::Rescale && o.inputs.first() == conv.outputs.first())
+        .expect("a RESCALE reading the accumulator");
+    assert_eq!(tensor(&items, &rescale.inputs[1]).shape, [3], "multipliers");
+    assert_eq!(tensor(&items, &rescale.inputs[2]).shape, [3], "shifts");
+    let Attribute::Rescale(attribute) = &rescale.attribute else {
+        panic!("expected a RESCALE attribute");
+    };
+    assert!(attribute.per_channel);
+    assert!(attribute.scale32);
+    let output = tensor(&items, &rescale.outputs[0]);
+    assert_eq!(
+        (output.shape.as_slice(), output.dtype),
+        (&[1, 12, 12, 4][..], DType::Int8)
+    );
 }

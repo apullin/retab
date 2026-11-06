@@ -286,6 +286,7 @@ fn rebuild_graph_users(graphs: &mut [(String, Graph)]) {
 fn apply_pre_submodule_qparam_propagation_ir(
     region_name: Option<&str>,
     graph: &mut fx_ir::IrGraph,
+    layout: pipeline_config::LayoutMode,
 ) -> u32 {
     STASHED_IR.with(|stash| {
         let stash = stash.borrow();
@@ -294,6 +295,7 @@ fn apply_pre_submodule_qparam_propagation_ir(
             graph,
             stash.parent.as_ref(),
             &stash.submodules,
+            layout,
         )
     })
 }
@@ -314,16 +316,17 @@ fn ingest_and_serialize_tosa_pybytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
     let explicit = layout == pipeline_config::LayoutMode::Explicit;
     let has_control_flow = ir_has_control_flow(&ir);
     if has_control_flow {
-        let changed = control_flow::apply_boundary_contracts(&mut ir, &mut stashed.submodules);
+        let changed =
+            control_flow::apply_boundary_contracts(&mut ir, &mut stashed.submodules, layout);
         if crate::config::from_ir_debug_enabled() && changed > 0 {
             eprintln!(
                 "[RETAB][cf-boundary-ir] applied {changed} parent/submodule boundary metadata update(s)"
             );
         }
     }
-    // Explicit mode can request a stock fallback at serialization time (P2's explicit
-    // captured_conv will run inside the contracts), so check here as well as after the
-    // pass pipelines (P2 critique B6).
+    // Explicit mode can request a stock fallback at serialization time (its captured_conv
+    // runs inside the contracts and sends unresolvable captured weights and non-int32
+    // biases to stock), so check here as well as after the pass pipelines (P2 critique B6).
     if explicit {
         fail_on_stock_fallback_request()?;
     }
@@ -401,8 +404,11 @@ fn run_fx_submodule_passes(
     let pipeline = fx_pipeline::build_ir_while_submodule_pipeline(&pipeline_config);
     stock_fallback::take();
     let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
-    let propagation_changed =
-        apply_pre_submodule_qparam_propagation_ir(region_name.as_deref(), &mut initial_ir);
+    let propagation_changed = apply_pre_submodule_qparam_propagation_ir(
+        region_name.as_deref(),
+        &mut initial_ir,
+        pipeline_config.layout,
+    );
     let (modified, ir, effects) = fx_ir::run_ir_pipeline(&pipeline, initial_ir);
     ensure_retab_can_lower(Some(&ir), &effects)?;
     stash_submodule_ir(region_name, Some((ir, effects)));
@@ -422,8 +428,11 @@ fn run_fx_cond_passes(
     let pipeline = fx_pipeline::build_ir_cond_submodule_pipeline(&pipeline_config);
     stock_fallback::take();
     let mut initial_ir = fx_ir::IrGraph::from_fx_with_tensors(graph_module, exported_program)?;
-    let propagation_changed =
-        apply_pre_submodule_qparam_propagation_ir(region_name.as_deref(), &mut initial_ir);
+    let propagation_changed = apply_pre_submodule_qparam_propagation_ir(
+        region_name.as_deref(),
+        &mut initial_ir,
+        pipeline_config.layout,
+    );
     let (modified, ir, effects) = fx_ir::run_ir_pipeline(&pipeline, initial_ir);
     ensure_retab_can_lower(Some(&ir), &effects)?;
     stash_submodule_ir(region_name, Some((ir, effects)));

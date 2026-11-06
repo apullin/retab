@@ -287,12 +287,11 @@ pub(super) fn reject_aten_spatial_ops(region: &str, graph: &Graph) -> Result<(),
 
 /// Explicit mode, in every build: an explicit graph carries its layout in its vals and
 /// has no dim orders (P2 design §2.7, D1). A graph that has one was laid out, at least in
-/// part, by dim-order logic. `RETAB_LAYOUT=explicit` keeps running IrToTosaMemoryFormat
-/// until the explicit pipeline replaces it (S6), and the control-flow contracts keep
-/// writing rank-4 dim orders until S8. The explicit gates switch off the serializer's
-/// dim-order rules (the main-output TRANSPOSE, G4; the axis remap through a TOSA
-/// TRANSPOSE, G8; ...), so such a graph can serialize to invalid or wrong TOSA. It goes
-/// to stock instead, through the same seam as the aten spatial ops.
+/// part, by dim-order logic that no explicit gate switched off (the control-flow
+/// contracts' rank-4 getitem dim order was one until S8). The explicit gates switch off
+/// the serializer's dim-order rules (the main-output TRANSPOSE, G4; the axis remap
+/// through a TOSA TRANSPOSE, G8; ...), so such a graph can serialize to invalid or wrong
+/// TOSA. It goes to stock instead, through the same seam as the aten spatial ops.
 pub(super) fn reject_dim_orders(region: &str, graph: &Graph) -> Result<(), String> {
     let Some((node, order)) = graph
         .order

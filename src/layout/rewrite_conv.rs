@@ -54,9 +54,10 @@
 //! its output dtype, and a layout copy its producer's val dtype.
 //!
 //! **Output RESCALE** (RCP:464-509). `scales[i] = (s_in * s_w[i]) / s_out` in
-//! f64, one per output channel for a per-channel weight; the output qparams
-//! are the conv's own, else those of a sole `view_copy` or `clamp` user
-//! (RCP:420-450). An int16 activation (A16W8) marks the TOSA convolution and
+//! f64, one per weight scale as rc4 zips them (normally one per output channel;
+//! an A8W4 transposed conv's weight is quantized per input channel, and rc4
+//! keeps those scales); the output qparams are the conv's own, else those of a
+//! sole `view_copy` or `clamp` user (RCP:420-450). An int16 activation (A16W8) marks the TOSA convolution and
 //! its bias INT48 (RCP:414-418, :856).
 //!
 //! **A16W8 branches** (RCP:665-816, :1234-1269; design §2.8). An A16W8 conv's
@@ -113,30 +114,40 @@
 //! with the widened layout permute (PropagateViewCopyPermuteDownPass, `:726`,
 //! a P3 port), and that fused permute is the one split.
 //!
-//! **Not here yet.** Control flow is S8's (design §2.9, §4.3): RETAB
-//! applies the boundary contracts at serialization, and two of their qparam
-//! lookups misread the qparam-less nodes rc4's rewrite creates (see
-//! `control_flow_hazard`), so every region conv requests a stock fallback, and
-//! so does a parent conv reading a cond or while output whose getitem has no
-//! output qparams, directly or through copies without input qparams, such as
-//! explicit IrSizeAdjustInput's slices. The region rules S8 builds on are in
-//! place: constants are `get_attr` nodes (`GraphScope::Region`), and a weight
-//! or bias captured from the parent (a placeholder) is reported as such. FP8
-//! is out of scope (design F1).
+//! **Regions** (APU-135 S8; design §2.9, §4.3). A region's constants are
+//! `get_attr` nodes (`GraphScope::Region`). A weight or bias the region
+//! captures from the parent graph arrives as a branch input. rc4 resolves it
+//! to the parent's constant here, through the boundary RESCALEs it inserted at
+//! `arm_pass_manager.py:595` (`_resolve_control_flow_constant`, RCP:223-326);
+//! RETAB inserts those RESCALEs at serialization
+//! (`control_flow::contracts::apply_boundary_contracts`), after the region
+//! pipeline. So a captured weight gets its layout change as runtime ops on the
+//! branch input, `permute_copy(W, dims)` and for HWCM and conv1d a
+//! `view_copy(·, shape)`, and a captured bias stays as it is; explicit mode's
+//! captured_conv folds both into region constants after the boundary
+//! contracts (`control_flow::captured_conv`). A captured operand is a branch
+//! input read directly or through its boundary quantize and data-movement
+//! copies, the chain captured_conv can resolve (`captured_branch_input`).
+//!
+//! **Not here yet.** A conv reading a cond or while output whose getitem has
+//! no output qparams, directly or through copies without input qparams, such
+//! as explicit IrSizeAdjustInput's slices, requests a stock fallback until the
+//! boundary contracts can find that output's target qparam (see
+//! `control_flow_hazard`). FP8 is out of scope (design F1).
 //!
 //! **Stock fallbacks** (design §2.11, critique B5, B10). Where rc4 raises, the
 //! pass requests a stock fallback (`stock_fallback::request`) and stops, so
 //! stock reports its own error: a transposed conv that is not 2-D or is
 //! dilated (RCP:939-947), a grouped CONV3D (RCP:147-158), a stride remainder
 //! larger than the padding (RCP:126-129), a weight that is not a constant
-//! (RCP:243-251), a quantized conv whose bias is not int32 or whose weight is
-//! not int8, or whose input or output qparams are missing or per-channel
-//! (RCP:434-438, :471-474), dtypes rc4's TOSA kernels reject
-//! (`tosa/dialect/ops/conv2d.py:17-88`), and an A16W8 conv's direct INT32
-//! RESCALE whose input zero point is not the conv's output zero point, or
-//! whose scales don't combine with the conv's (RCP:511-531, :711-716). So
-//! does anything the port cannot rewrite faithfully: a grouped conv
-//! `IrDecomposeGroupedConv` declined (B5), the raw
+//! (RCP:243-251) or, in a region, a captured one, a quantized conv whose bias
+//! is not int32 or whose weight is not int8, or whose input or output qparams
+//! are missing or per-channel (RCP:434-438, :471-474), dtypes rc4's TOSA
+//! kernels reject (`tosa/dialect/ops/conv2d.py:17-88`), and an A16W8 conv's
+//! direct INT32 RESCALE whose input zero point is not the conv's output zero
+//! point, or whose scales don't combine with the conv's (RCP:511-531,
+//! :711-716). So does anything the port cannot rewrite faithfully: a grouped
+//! conv `IrDecomposeGroupedConv` declined (B5), the raw
 //! `aten.conv{1,2,3}d`/`conv_transpose2d` forms (design §2.2), a conv whose
 //! rewritten output shape would not be its own (B10), and an INT32 RESCALE or
 //! permute user whose arguments don't parse. Each conv is planned before the
@@ -219,8 +230,9 @@ pub(crate) struct IrRewriteConvPass {
     /// that spec, `PipelineConfig::is_u55_subset`.
     pub(crate) is_u55_subset: bool,
     /// The pipeline's region flag: constants are `get_attr` nodes
-    /// (`GraphScope::Region`). Until S8 every region conv falls back to stock
-    /// (design §2.9; see `control_flow_hazard`).
+    /// (`GraphScope::Region`), and weights and biases captured from the parent
+    /// graph are left for explicit mode's captured_conv (design §2.9; see the
+    /// module docs).
     pub(crate) in_region: bool,
     /// `PipelineConfig::u55_split_permutes`: the edge permutes, by name, that
     /// `IrDecomposePermuteForU55Pass` splits on U55 (design F8). A listed
@@ -595,28 +607,24 @@ fn to_i64(dims: &[usize]) -> Vec<i64> {
     dims.iter().map(|&dim| dim as i64).collect()
 }
 
-/// Why a conv that `plan` could rewrite must still go to stock until S8 makes
-/// control flow explicit-aware (design §2.9, §4.3). rc4 inserts its
-/// control-flow boundary RESCALEs before RewriteConvPass (APM:595); RETAB's
-/// boundary contracts run at serialization, after the whole pipeline
-/// (`control_flow::contracts::apply_boundary_contracts`), and two of their
-/// qparam lookups misread the nodes this pass creates, which carry no qparams
-/// as rc4's do:
+/// Why a conv that `plan` could rewrite must still go to stock until the
+/// boundary contracts can read past the nodes this pass creates (APU-135 S8;
+/// design §4.3). rc4 inserts its control-flow boundary RESCALEs before
+/// RewriteConvPass (APM:595); RETAB's boundary contracts run at
+/// serialization, after the whole pipeline
+/// (`control_flow::contracts::apply_boundary_contracts`). A cond or while
+/// output's target qparam comes from its getitem's output qparams, else from
+/// the input qparams of the getitem's direct consumers
+/// (`infer_output_qparams_map_ir`); the conv was that consumer, its input
+/// permute has none, as rc4's does, and the region's output RESCALE would be
+/// lost. This holds in a region too, for the output of a cond it holds.
 ///
-/// - A region output's own qparam comes from `extract_effective_qparam_ir`,
-///   which walks a qparam-less output permute to the RESCALE and reverse
-///   engineers it (`reverse_engineer_rescale_ir`) as a rescale of the TOSA
-///   conv's inherited output qparam: for a per-tensor weight it computes
-///   `s_out^2 / (s_in * s_w)`, not `s_out`, and the output contract inserts a
-///   wrong RESCALE (cumsum's per-tensor kernel in a cond branch is one). So in
-///   a region every conv falls back, after the reasons specific to regions
-///   (captured operands).
-/// - A cond or while output's target qparam comes from its getitem's output
-///   qparams, else from the input qparams of the getitem's direct consumers
-///   (`infer_output_qparams_map_ir`); the conv was that consumer, its input
-///   permute has none, and the region's output RESCALE would be lost.
+/// (A region output's own qparam is safe: explicit mode records it from the
+/// region's output dequantize, as rc4's FoldAndAnnotateQParamsPass does, so
+/// the output contract does not reverse engineer the rewrite's qparam-less
+/// RESCALE; `contracts::rewrite_output_dequantize_boundaries_ir`.)
 ///
-/// The second lookup also fails when the conv reads such a getitem through
+/// The lookup also fails when the conv reads such a getitem through
 /// data-movement copies without input qparams (`control_flow_output_read`).
 /// Explicit IrSizeAdjustInput builds its slices with emptied qparam maps, as
 /// rc4's `create_node(from_node=...)` does, and `IrDecomposeLinear`'s input
@@ -625,18 +633,11 @@ fn to_i64(dims: &[usize]) -> Vec<i64> {
 /// rewritten. But the aten conv sends the graph to stock at serialization
 /// (the explicit-mode aten-conv guard), and the rewritten graph would
 /// serialize without the output RESCALE. So these convs fall back too. Before
-/// S8 lifts the fallback, the contract needs these targets from elsewhere:
+/// the fallback can go, the contract needs these targets from elsewhere:
 /// recorded before the explicit passes run, as rc4's
 /// InsertControlFlowRescalesPass reads them at APM:595, or read through such
 /// copies.
-fn control_flow_hazard(graph: &IrGraph, scope: GraphScope, input: NodeId) -> Option<String> {
-    if scope == GraphScope::Region {
-        return Some(
-            "region convs wait for the explicit-mode boundary contracts and captured_conv \
-             (APU-135 S8): the output contract misreads the rewrite's qparam-less RESCALE"
-                .to_string(),
-        );
-    }
+fn control_flow_hazard(graph: &IrGraph, input: NodeId) -> Option<String> {
     let (getitem, copies) = control_flow_output_read(graph, input)?;
     let getitem = &graph.node(getitem).name;
     Some(if copies.is_empty() {
@@ -700,42 +701,106 @@ fn copies_its_input(node: &IrNode) -> bool {
             || noop_target(target) == Some(NoopTarget::PassthroughFirstArg))
 }
 
-/// The conv's weight, as RCP resolves it (`_resolve_control_flow_constant`,
-/// RCP:223-261, without control flow). In the parent it must be a constant
-/// placeholder: rc4 raises for anything else, including a `get_attr`
-/// (`get_constant_placeholder_kind`). In a region only a `get_attr` constant
-/// survives ingest as a constant; a placeholder is the parent's operand.
-fn constant_weight(graph: &IrGraph, scope: GraphScope, weight: NodeId) -> Result<&IrNode, String> {
-    let node = graph.node(weight);
-    let expected = match scope {
-        GraphScope::Parent => NodeOp::Placeholder,
-        GraphScope::Region => NodeOp::GetAttr,
-    };
-    if is_constant(node) && node.op == expected {
-        return Ok(node);
-    }
-    Err(match scope {
-        GraphScope::Parent => format!(
-            "weight {} is not a constant placeholder, which RewriteConvPass requires",
-            node.name
-        ),
-        GraphScope::Region => format!(
-            "weight {} is captured from the parent graph; region convs with captured weights \
-             need runtime weight layout ops and the explicit captured_conv (APU-135 S8)",
-            node.name
-        ),
-    })
+/// The conv's weight, as RCP finds it (`_rewrite_weight`, RCP:328-378).
+enum WeightOperand<'g> {
+    /// A constant. In the parent it must be a placeholder: rc4 raises for
+    /// anything else, including a `get_attr` (`get_constant_placeholder_kind`).
+    /// In a region only a `get_attr` constant survives ingest as a constant
+    /// (design F4).
+    Constant(&'g IrNode),
+    /// A region weight captured from the parent graph, with its value: rc4
+    /// resolves it to the parent's constant (`_resolve_control_flow_constant`,
+    /// RCP:223-261); here it gets runtime layout ops, which explicit mode's
+    /// captured_conv folds (see the module docs).
+    Captured(TensorFacts),
 }
 
-/// The pre-permuted weight constant (RCP:328-403).
-struct WeightRewrite {
-    /// The source weight, which the new constant follows.
-    source: NodeId,
-    name_suffix: &'static str,
-    kind: LoweringInputKind,
-    data: TensorData,
-    /// The source's `tosa_special_dtype` (RCP:377-378).
-    special: Option<MetaValue>,
+/// Classify the conv's weight; `Err` is a stock fallback's reason.
+fn weight_operand(
+    graph: &IrGraph,
+    scope: GraphScope,
+    weight: NodeId,
+) -> Result<WeightOperand<'_>, String> {
+    let node = graph.node(weight);
+    match scope {
+        GraphScope::Parent if is_constant(node) && node.op == NodeOp::Placeholder => {
+            Ok(WeightOperand::Constant(node))
+        }
+        GraphScope::Parent => Err(format!(
+            "weight {} is not a constant placeholder, which RewriteConvPass requires",
+            node.name
+        )),
+        GraphScope::Region if is_constant(node) && node.op == NodeOp::GetAttr => {
+            Ok(WeightOperand::Constant(node))
+        }
+        GraphScope::Region if captured_branch_input(graph, weight).is_some() => node
+            .meta
+            .tensor_facts()
+            .cloned()
+            .map(WeightOperand::Captured)
+            .ok_or_else(|| format!("captured weight {} has no value", node.name)),
+        // RCP:243-251: `_resolve_control_flow_constant` raises.
+        GraphScope::Region => Err(format!(
+            "weight {} is neither a region constant nor captured from the parent graph, which \
+             RewriteConvPass requires",
+            node.name
+        )),
+    }
+}
+
+/// The branch input a region operand captures from the parent graph, when it
+/// does: the operand is a placeholder, which ingest makes a runtime input
+/// bound to the parent's operand, data or not (`control_flow/assembly.rs`),
+/// read directly or through its boundary quantize, which the boundary
+/// contracts turn into the boundary RESCALE (or drop), a RESCALE, and the
+/// data-movement copies RETAB puts on a weight (a Linear's weight view). These
+/// are the chains explicit mode's captured_conv folds after the contracts
+/// (`control_flow::captured_conv`), as rc4's `_resolve_control_flow_constant`
+/// follows RESCALEs and branch inputs (RCP:223-261).
+fn captured_branch_input(graph: &IrGraph, operand: NodeId) -> Option<NodeId> {
+    let mut current = operand;
+    // A chain cannot be longer than the graph; the bound keeps a malformed
+    // (cyclic) graph from looping.
+    for _ in 0..=graph.nodes.len() {
+        let node = graph.node(current);
+        if node.op == NodeOp::Placeholder {
+            return Some(current);
+        }
+        let passes_through = node.op == NodeOp::CallFunction
+            && (node.is_quantize()
+                || node.is_rescale()
+                || matches!(node.target.as_str(), PERMUTE | VIEW));
+        if !passes_through {
+            return None;
+        }
+        current = node.first_node_arg()?;
+    }
+    None
+}
+
+/// The weight the TOSA convolution reads.
+enum WeightRewrite {
+    /// The pre-permuted constant (RCP:328-403), directly after `source`.
+    Constant {
+        /// The source weight, which the new constant follows.
+        source: NodeId,
+        name_suffix: &'static str,
+        kind: LoweringInputKind,
+        data: TensorData,
+        /// The source's `tosa_special_dtype` (RCP:377-378).
+        special: Option<MetaValue>,
+    },
+    /// A captured region weight's layout change as runtime ops after
+    /// `source` (design §2.9): `permute_copy(source, dims)`, then for HWCM and
+    /// conv1d `view_copy(·, reshaped.shape)`. The last is named as rc4 names
+    /// the constant, `{c}_weight_<suffix>`.
+    Runtime {
+        source: NodeId,
+        name_suffix: &'static str,
+        dims: Vec<i64>,
+        permuted: TensorFacts,
+        reshaped: Option<TensorFacts>,
+    },
 }
 
 enum BiasRewrite {
@@ -743,6 +808,11 @@ enum BiasRewrite {
     Keep(NodeId),
     /// `_add_bias`'s zeros (RCP:160-195).
     Zeros(TensorData),
+    /// A region bias captured from the parent graph, which stays: explicit
+    /// mode's captured_conv requantizes it into the int32 bias, and marks that
+    /// INT48 for an int16 activation, after the boundary contracts
+    /// (`_rewrite_control_flow_bias`, RCP:263-326).
+    Captured(NodeId),
 }
 
 /// RCP:818-877's RESCALE.
@@ -832,24 +902,41 @@ fn plan(
         ));
     }
     let spatial_rank = rank - 2;
-    let weight_node = constant_weight(graph, scope, args.weight)?;
-    let weight_data = &weight_node
-        .tensor
-        .as_ref()
-        .expect("a constant carries its data")
-        .data;
-    if weight_data.shape.len() != rank
-        || weight_node
-            .meta
-            .val_shape()
-            .is_some_and(|shape| shape != weight_data.shape.as_slice())
-    {
+    let weight_operand = weight_operand(graph, scope, args.weight)?;
+    let weight_name = &graph.node(args.weight).name;
+    let (weight_shape, weight_dtype) = match &weight_operand {
+        WeightOperand::Constant(weight_node) => {
+            let data = &weight_node
+                .tensor
+                .as_ref()
+                .expect("a constant carries its data")
+                .data;
+            if weight_node
+                .meta
+                .val_shape()
+                .is_some_and(|shape| shape != data.shape.as_slice())
+            {
+                return Err(format!(
+                    "weight {weight_name}'s value {:?} is not its data's shape {:?}",
+                    weight_node.meta.val_shape(),
+                    data.shape
+                ));
+            }
+            (data.shape.clone(), data.dtype.torch_str().to_owned())
+        }
+        // The weight as the branch reads it: the boundary quantize gives it
+        // the dtype the parent's constant is requantized into.
+        WeightOperand::Captured(value) => (
+            value.shape.clone(),
+            value_dtype(graph, args.weight)
+                .ok_or_else(|| format!("captured weight {weight_name} has no dtype"))?,
+        ),
+    };
+    if weight_shape.len() != rank {
         return Err(format!(
-            "weight {} of shape {:?} does not fit a rank-{rank} convolution",
-            weight_node.name, weight_data.shape
+            "weight {weight_name} of shape {weight_shape:?} does not fit a rank-{rank} convolution"
         ));
     }
-    let weight_shape = weight_data.shape.clone();
 
     // Step 1 (RCP:903-906, :405-412).
     let quantized = is_quantized_conv(&node.meta);
@@ -882,7 +969,6 @@ fn plan(
             ))
         }
     };
-    let weight_dtype = weight_data.dtype.torch_str();
     let expected_weight = if quantized { INT8 } else { activation.as_str() };
     if weight_dtype != expected_weight {
         return Err(format!(
@@ -934,17 +1020,24 @@ fn plan(
                 dtype,
             })
         }
-        Some(bias) => {
-            let bias_node = graph.node(bias);
+        Some(bias)
             if scope == GraphScope::Region
-                && !(is_constant(bias_node) && bias_node.op == NodeOp::GetAttr)
-            {
+                && !(is_constant(graph.node(bias)) && graph.node(bias).op == NodeOp::GetAttr) =>
+        {
+            // RCP:925-931 requantizes a captured bias through the boundary
+            // RESCALEs, which RETAB inserts at serialization: explicit mode's
+            // captured_conv does it then, and sends a quantized conv whose bias
+            // is still not int32 to stock, as rc4's TOSA kernel rejects it.
+            if captured_branch_input(graph, bias).is_none() {
                 return Err(format!(
-                    "bias {} is captured from the parent graph; region conv biases need the \
-                     explicit captured_conv (APU-135 S8)",
-                    bias_node.name
+                    "bias {} is neither a region constant nor captured from the parent graph",
+                    graph.node(bias).name
                 ));
             }
+            BiasRewrite::Captured(bias)
+        }
+        Some(bias) => {
+            let bias_node = graph.node(bias);
             let bias_dtype = value_dtype(graph, bias)
                 .ok_or_else(|| format!("bias {} has no dtype", bias_node.name))?;
             if bias_dtype != tosa_dtype {
@@ -1100,34 +1193,37 @@ fn plan(
 
     // RCP:361-364: permute, reshape, `.contiguous()`; the bytes keep their
     // dtype, and the output channels stay outermost (OHWI) or C*M ordered
-    // (HWCM), so per-channel qparams still line up.
-    let mut rewritten = permute_tensor_data(weight_data, kind.weight_dims)
-        .ok_or_else(|| format!("cannot permute weight {}", weight_node.name))?;
+    // (HWCM), so per-channel qparams still line up. A captured weight gets the
+    // same permute and reshape as runtime ops.
+    let shape_error = |error: crate::layout::shape::ShapeError| error.to_string();
+    let weight_dims = to_i64(kind.weight_dims);
+    let permuted_weight_shape = permute_shape(&weight_shape, &weight_dims).map_err(shape_error)?;
     if let Some(shape) = &kind.weight_reshape {
-        if shape.iter().product::<i64>() != rewritten.shape.iter().product::<i64>() {
+        if shape.iter().product::<i64>() != permuted_weight_shape.iter().product::<i64>() {
             return Err(format!(
-                "weight {} of shape {weight_shape:?} cannot take the shape {shape:?}",
-                weight_node.name
+                "weight {weight_name} of shape {weight_shape:?} cannot take the shape {shape:?}"
             ));
         }
-        rewritten.shape.clone_from(shape);
     }
+    let tosa_weight_shape = kind
+        .weight_reshape
+        .clone()
+        .unwrap_or_else(|| permuted_weight_shape.clone());
 
     // The TOSA op's value (RCP:1152-1160): rc4's fake kernels.
     let pre_dims = to_i64(kind.pre);
-    let shape_error = |error: crate::layout::shape::ShapeError| error.to_string();
     let permuted_shape = permute_shape(&input.shape, &pre_dims).map_err(shape_error)?;
     let tosa_input = input_view_shape.as_deref().unwrap_or(&permuted_shape);
     let list = |index: usize| params[index].as_int_list().expect("an int list");
     let tosa_shape = match kind.target {
         TOSA_TRANSPOSE_CONV2D => {
-            transpose_conv2d_shape(tosa_input, &rewritten.shape, &list(0), &list(1))
+            transpose_conv2d_shape(tosa_input, &tosa_weight_shape, &list(0), &list(1))
         }
         TOSA_DEPTHWISE_CONV2D => {
-            depthwise_conv2d_shape(tosa_input, &rewritten.shape, &list(0), &list(1), &list(2))
+            depthwise_conv2d_shape(tosa_input, &tosa_weight_shape, &list(0), &list(1), &list(2))
         }
-        TOSA_CONV3D => conv3d_shape(tosa_input, &rewritten.shape, &list(0), &list(1), &list(2)),
-        _ => conv2d_shape(tosa_input, &rewritten.shape, &list(0), &list(1), &list(2)),
+        TOSA_CONV3D => conv3d_shape(tosa_input, &tosa_weight_shape, &list(0), &list(1), &list(2)),
+        _ => conv2d_shape(tosa_input, &tosa_weight_shape, &list(0), &list(1), &list(2)),
     }
     .map_err(shape_error)?;
 
@@ -1155,15 +1251,16 @@ fn plan(
         } else {
             vec![weight.scale]
         };
-        // A per-channel RESCALE needs one scale per output channel.
-        let channels = *tosa_shape.last().expect("a rank-4 or rank-5 accumulator");
-        if weight_scales.len() != 1 && weight_scales.len() as i64 != channels {
-            return Err(format!(
-                "{} weight scales for {channels} output channels",
-                weight_scales.len()
-            ));
-        }
-        // RCP:481-488, with exactly this association.
+        // RCP:481-488, with exactly this association. rc4 zips the weight's
+        // scales with the cycled input and output scales, so the RESCALE gets
+        // one scale per weight scale, which need not be one per output channel:
+        // rc4's quantizer leaves an int4 transposed conv's per-channel weight on
+        // IOHW axis 0 (`_adjust_weight_qspec_for_conv_transpose`,
+        // `quantization_annotator.py:136-138`), so its scales are per input
+        // channel. rc4 emits them as they are, and TOSA's reference model
+        // rejects the RESCALE (rc4 xfails those op tests,
+        // `test_transpose_conv2d.py:497-501`); dim-order mode's
+        // IrInsertConvAccumulatorRescale does the same.
         let scales = weight_scales
             .iter()
             .map(|&weight_scale| (input_scale * weight_scale) / output_scale)
@@ -1194,7 +1291,7 @@ fn plan(
             output.shape
         ));
     }
-    if let Some(reason) = control_flow_hazard(graph, scope, args.input) {
+    if let Some(reason) = control_flow_hazard(graph, args.input) {
         return Err(reason);
     }
     // Step 8 (RCP:1234-1249): an A16W8 conv1d narrows to int16 instead of
@@ -1213,17 +1310,41 @@ fn plan(
         None
     };
 
+    let weight = match weight_operand {
+        WeightOperand::Constant(weight_node) => {
+            let data = &weight_node
+                .tensor
+                .as_ref()
+                .expect("a constant carries its data")
+                .data;
+            let mut rewritten = permute_tensor_data(data, kind.weight_dims)
+                .ok_or_else(|| format!("cannot permute weight {weight_name}"))?;
+            rewritten.shape = tosa_weight_shape;
+            WeightRewrite::Constant {
+                source: args.weight,
+                name_suffix: kind.name_suffix,
+                kind: constant_kind(weight_node),
+                data: rewritten,
+                special: weight_node.meta.extras.get(SPECIAL_DTYPE_KEY).cloned(),
+            }
+        }
+        // Each layout copy takes its producer's dtype (`layout::shape`).
+        WeightOperand::Captured(value) => WeightRewrite::Runtime {
+            source: args.weight,
+            name_suffix: kind.name_suffix,
+            dims: weight_dims,
+            permuted: TensorFacts::new(permuted_weight_shape, value.dtype.clone()),
+            reshaped: kind
+                .weight_reshape
+                .map(|shape| TensorFacts::new(shape, value.dtype.clone())),
+        },
+    };
+
     Ok(Some(ConvRewrite {
         conv,
         input: args.input,
         int16_activation,
-        weight: WeightRewrite {
-            source: args.weight,
-            name_suffix: kind.name_suffix,
-            kind: constant_kind(weight_node),
-            data: rewritten,
-            special: weight_node.meta.extras.get(SPECIAL_DTYPE_KEY).cloned(),
-        },
+        weight,
         bias,
         permuted_input: TensorFacts::new(permuted_shape, input.dtype.clone()),
         input_view: input_view_shape.map(|shape| TensorFacts::new(shape, input.dtype.clone())),
@@ -1281,20 +1402,23 @@ fn apply(ctx: &mut LayoutCtx<'_>, rewrite: ConvRewrite) -> Option<NodeId> {
 
     // The bias (RCP:919-933, :414-418): zeros before the first placeholder,
     // the only position from which constants stay ahead of every user input.
-    let bias = match bias {
-        BiasRewrite::Keep(bias) => bias,
+    let (bias, int48_bias) = match bias {
+        BiasRewrite::Keep(bias) => (bias, int16_activation),
         BiasRewrite::Zeros(data) => {
             let first_placeholder = ctx
                 .order()
                 .iter()
                 .find(|&id| ctx.node(id).op == NodeOp::Placeholder);
             let point = first_placeholder.map_or(InsertPoint::Start, InsertPoint::Before);
-            ctx.with_insert_point(point, |ctx| {
+            let zeros = ctx.with_insert_point(point, |ctx| {
                 ctx.create_constant(format!("{name}_bias"), LoweringInputKind::Parameter, data)
-            })
+            });
+            (zeros, int16_activation)
         }
+        // captured_conv marks the int32 bias it makes (RCP:323-325).
+        BiasRewrite::Captured(bias) => (bias, false),
     };
-    if int16_activation {
+    if int48_bias {
         set_special_dtype(ctx.meta_mut(bias), SpecialDtype::Int48);
     }
 
@@ -1320,18 +1444,61 @@ fn apply(ctx: &mut LayoutCtx<'_>, rewrite: ConvRewrite) -> Option<NodeId> {
         }
     });
 
-    // The pre-permuted weight, directly after its source (RCP:368-378).
-    let weight_constant = ctx.inserting_after(weight.source, |ctx| {
-        ctx.create_constant(
-            format!("{name}_weight_{}", weight.name_suffix),
-            weight.kind,
-            weight.data,
-        )
-    });
-    if let Some(special) = weight.special {
-        ctx.meta_mut(weight_constant)
-            .set_extra(SPECIAL_DTYPE_KEY, special);
-    }
+    // The pre-permuted weight, directly after its source (RCP:368-378), or a
+    // captured weight's runtime layout ops there.
+    let weight_operand = match weight {
+        WeightRewrite::Constant {
+            source: weight_source,
+            name_suffix,
+            kind,
+            data,
+            special,
+        } => {
+            let constant = ctx.inserting_after(weight_source, |ctx| {
+                ctx.create_constant(format!("{name}_weight_{name_suffix}"), kind, data)
+            });
+            if let Some(special) = special {
+                ctx.meta_mut(constant).set_extra(SPECIAL_DTYPE_KEY, special);
+            }
+            constant
+        }
+        WeightRewrite::Runtime {
+            source: weight_source,
+            name_suffix,
+            dims,
+            permuted,
+            reshaped,
+        } => {
+            let last = format!("{name}_weight_{name_suffix}");
+            let permute_name = if reshaped.is_some() {
+                format!("{name}_weight_permute")
+            } else {
+                last.clone()
+            };
+            let permute = ctx.inserting_after(weight_source, |ctx| {
+                ctx.call_function(
+                    permute_name,
+                    PERMUTE,
+                    vec![IrArg::Node(weight_source), i64_list_arg(&dims)],
+                    meta::from_node(&source, permuted),
+                )
+            });
+            match reshaped {
+                None => permute,
+                Some(view) => {
+                    let size = i64_list_arg(&view.shape);
+                    ctx.inserting_after(permute, |ctx| {
+                        ctx.call_function(
+                            last,
+                            VIEW,
+                            vec![IrArg::Node(permute), size],
+                            meta::from_node(&source, view),
+                        )
+                    })
+                }
+            }
+        }
+    };
 
     // The TOSA op directly after the conv, inheriting its qparams
     // (RCP:1175-1183), then the RESCALE, conv1d's view and the output permute,
@@ -1342,7 +1509,7 @@ fn apply(ctx: &mut LayoutCtx<'_>, rewrite: ConvRewrite) -> Option<NodeId> {
     }
     let mut args = vec![
         IrArg::Node(tosa_input),
-        IrArg::Node(weight_constant),
+        IrArg::Node(weight_operand),
         IrArg::Node(bias),
     ];
     args.extend(params);

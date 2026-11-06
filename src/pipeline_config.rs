@@ -30,7 +30,9 @@ pub enum SdpaSafeSoftmaxGuardPolicy {
 ///   is a permute node, lowered one-to-one to TRANSPOSE
 ///   (`backends/arm/_passes/aten_to_tosa_data_layout.py:60-68`).
 ///
-/// Until P2 ports the explicit-mode passes, both modes build the same pipeline.
+/// `fx_pipeline::lowering_steps` builds each mode's pipeline. Explicit mode is rc4's
+/// order without its permute/view propagation, which P3 ports, so it lowers correctly
+/// but with extra TRANSPOSEs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LayoutMode {
     #[default]
