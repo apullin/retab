@@ -3,7 +3,7 @@
 # Regenerate with the rc4 environment, from a neutral directory:
 #   cd /tmp && <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py --pass rewrite_max_pool2d
 # executorch 1.6.0 (git 4776f71b6f0daa5dfc7d758d5836fc1cc0d40154), torch 2.15.0, torchao 0.18.0+cpu, python 3.12.8
-# seed 135: 16 cases; format 2: see the generator's docstring.
+# seed 135: 18 cases; format 2: see the generator's docstring.
 # rc4-source sha256 955b9cae8766124854386cbf7d60a8d6216fa66a38bb298e569fbacbf8c12368 backends/arm/_passes/rewrite_max_pool2d_pass.py
 # rc4-source sha256 ed20248a3da65a6af39218ff5153b1f1a10585f2c9b8a4e27f49ab5bc4bb8fa1 backends/arm/_passes/remove_getitem_pass.py
 # rc4-source sha256 91bf1a6cfcca25ad912cc02b769a55e57f2d25a3d27a94a1920a92daeb650b19 backends/transforms/remove_getitem_op.py
@@ -229,6 +229,31 @@ after modified=true
 %9 = tosa.MAX_POOL2D.default(%8, [2, 2], [2, 2], [0, 0, 0, 0]) : torch.int8[1, 4, 4, 3] q=in{0:torch.int8(0.005590089596807957,-128,-128,127)}/out{}
 %10 = aten.permute_copy.default(%9, [0, 3, 1, 2]) : torch.int8[1, 3, 4, 4] q=in{0:torch.int8(0.005590089596807957,-128,-128,127)}/out{}
 output([%10])
+end
+case max_pool_no_stride_pc
+before
+%0 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 3, 9, 9] q=none
+%1 = aten.max_pool2d.default(%0, [3, 3], [3, 3], 0, 1, False) : torch.int8[1, 3, 3, 3] q=in{0:torch.int8(0.018880348652601242,-2,-128,127)}/out{}
+output([%1])
+after modified=true
+%0 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 3, 9, 9] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.int8[1, 9, 9, 3] q=in{0:torch.int8(0.018880348652601242,-2,-128,127)}/out{}
+%2 = tosa.MAX_POOL2D.default(%1, [3, 3], [3, 3], [0, 0, 0, 0]) : torch.int8[1, 3, 3, 3] q=in{0:torch.int8(0.018880348652601242,-2,-128,127)}/out{}
+%3 = aten.permute_copy.default(%2, [0, 3, 1, 2]) : torch.int8[1, 3, 3, 3] q=in{0:torch.int8(0.018880348652601242,-2,-128,127)}/out{}
+output([%3])
+end
+case max_pool_no_stride_pc_with_indices
+before
+%0 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 3, 9, 9] q=none
+%1 = aten.max_pool2d_with_indices.default(%0, [3, 3]) : (torch.int8[1, 3, 3, 3], torch.int64[1, 3, 3, 3]) q=in{0:torch.int8(0.018880348652601242,-2,-128,127)}/out{}
+%2 = <built-in function getitem>(%1, 0) : torch.int8[1, 3, 3, 3] q=in{}/out{0:torch.int8(0.018880348652601242,-2,-128,127)}
+output([%2])
+after modified=true
+%0 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 3, 9, 9] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.int8[1, 9, 9, 3] q=in{0:torch.int8(0.018880348652601242,-2,-128,127)}/out{}
+%2 = tosa.MAX_POOL2D.default(%1, [3, 3], [3, 3], [0, 0, 0, 0]) : torch.int8[1, 3, 3, 3] q=in{0:torch.int8(0.018880348652601242,-2,-128,127)}/out{}
+%3 = aten.permute_copy.default(%2, [0, 3, 1, 2]) : torch.int8[1, 3, 3, 3] q=in{0:torch.int8(0.018880348652601242,-2,-128,127)}/out{}
+output([%3])
 end
 case max_pool_k3s2p1_a16w8
 before

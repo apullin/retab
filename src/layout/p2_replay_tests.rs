@@ -285,6 +285,10 @@ fn p2_fixtures_cover_the_design_case_lists() {
         "bilinear_scale1_5_pc",
         "nearest_scale2_a16w8",
         "bilinear_scale2_a16w8",
+        // S7's additions: rc4's 6 -> 9 test vector and two downscales.
+        "nearest_size_6to9_pc",
+        "nearest_scale_half_pc",
+        "bilinear_size_8to3_pc",
     ] {
         assert!(upsample.contains(case), "{case}");
     }
@@ -293,7 +297,10 @@ fn p2_fixtures_cover_the_design_case_lists() {
         assert!(max_pool.contains(&case), "{case}");
         assert!(max_pool.contains(&format!("{case}_with_indices")), "{case}");
     }
+    // rc4's no-stride pass-test modules, in the pipeline (S7).
+    assert!(max_pool.contains("max_pool_no_stride_pc_with_indices"));
     assert_eq!(names(REWRITE_AVG_POOL2D), names(REWRITE_AVG_POOL2D_AOT));
+    assert!(names(REWRITE_AVG_POOL2D).contains("avg_pool_no_stride_pc"));
 }
 
 #[test]

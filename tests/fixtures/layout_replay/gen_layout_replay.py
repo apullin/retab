@@ -2298,6 +2298,9 @@ MAX_POOL_MODELS = {
     "rect": (lambda: PoolM(NN.MaxPool2d((3, 2), (2, 1), (1, 0))), shape_input(1, 3, 8, 7)),
     "rank3": (lambda: PoolM(NN.MaxPool2d(2, 2)), shape_input(3, 8, 8)),
     "after_conv": (lambda: PoolM(NN.MaxPool2d(2, 2), conv=True), shape_input(1, 3, 8, 8)),
+    # rc4's MaxPool2dWithoutStride (test_rewrite_max_pool2d_pass.py): export
+    # omits the stride, which RewriteMaxPool2dPass reads as the kernel.
+    "no_stride": (lambda: PoolM(lambda x: FN.max_pool2d(x, 3)), shape_input(1, 3, 9, 9)),
 }
 
 AVG_POOL_MODELS = {
@@ -2312,6 +2315,12 @@ AVG_POOL_MODELS = {
     "adaptive": (lambda: PoolM(NN.AdaptiveAvgPool2d((2, 2))), shape_input(1, 3, 8, 8)),
     "global": (lambda: PoolM(NN.AvgPool2d(8)), shape_input(1, 3, 8, 8)),
     "after_conv": (lambda: PoolM(NN.AvgPool2d(2, 2), conv=True), shape_input(1, 3, 8, 8)),
+    # rc4's AvgPool2dWithEmptyStride (test_rewrite_avg_pool2d_pass.py): export
+    # omits `stride=[]`, which RewriteAvgPool2dPass reads as the kernel.
+    "no_stride": (
+        lambda: PoolM(lambda x: FN.avg_pool2d(x, kernel_size=[2, 3], stride=[])),
+        shape_input(1, 3, 8, 9),
+    ),
 }
 
 UPSAMPLE_MODELS = {
@@ -2352,6 +2361,14 @@ UPSAMPLE_MODELS = {
     "bilinear_scale1_5": (
         lambda: UpsampleM("bilinear", scale=1.5, align_corners=False),
         shape_input(1, 3, 4, 4),
+    ),
+    # test_get_resize_parameters_1d_nearest_matches_pytorch_scale_factor's 6 -> 9.
+    "nearest_size_6to9": (lambda: UpsampleM("nearest", size=(9, 9)), shape_input(1, 3, 6, 6)),
+    # Downscales: nearest by an explicit factor, bilinear by size.
+    "nearest_scale_half": (lambda: UpsampleM("nearest", scale=0.5), shape_input(1, 3, 8, 8)),
+    "bilinear_size_8to3": (
+        lambda: UpsampleM("bilinear", size=(3, 3), align_corners=False),
+        shape_input(1, 3, 8, 8),
     ),
 }
 
