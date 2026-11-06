@@ -1186,10 +1186,11 @@ fn listed_source_permute(graph: &IrGraph) -> (NodeId, String, PipelineConfig) {
     (source_permute, name, config)
 }
 
-/// The split pass as the pipeline builds it from `config`.
+/// The split pass as the explicit pipeline builds it from `config`.
 fn split_pass(config: &PipelineConfig) -> IrDecomposePermuteForU55Pass {
     IrDecomposePermuteForU55Pass {
         split_permutes: config.u55_split_permutes.clone(),
+        probe_live_permutes: true,
     }
 }
 

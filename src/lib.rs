@@ -380,20 +380,56 @@ fn ingest_and_serialize_tosa_pybytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
     Ok(py_bytes)
 }
 
-/// Run the parent lowering pipeline and stash the resulting IrGraph.
+/// `callable(shape, dims, dtype) -> bool`, Python's exact U55 TRANSPOSE check
+/// (`preprocess._u55_transpose_probe`), as the U55 split's probe. The pipeline runs on
+/// the thread that holds the GIL, so a call reattaches at no cost. The first exception
+/// goes to `error`, for `run_fx_passes` to raise once the pipeline returns; the failed
+/// call counts as a rejection meanwhile, as a failed probe does in rc4's check.
+fn python_transpose_probe(
+    callable: Py<PyAny>,
+    error: std::rc::Rc<std::cell::RefCell<Option<PyErr>>>,
+) -> Box<fx_decompose_permute_for_u55_ir::TransposeProbe> {
+    Box::new(move |shape, perm, dtype| {
+        Python::attach(|py| {
+            callable
+                .call1(py, (shape, perm, dtype))
+                .and_then(|verdict| verdict.extract::<bool>(py))
+                .unwrap_or_else(|err| {
+                    error.borrow_mut().get_or_insert(err);
+                    true
+                })
+        })
+    })
+}
+
+/// Run the parent lowering pipeline and stash the resulting IrGraph. Explicit mode on
+/// U55 passes `u55_transpose_probe`, Python's exact U55 TRANSPOSE check, which the U55
+/// permute split asks about each live permute that breaks the worst-case rule
+/// (`fx_decompose_permute_for_u55_ir`). U55 has no control flow, so the region entry
+/// points take none.
 #[pyfunction]
-#[pyo3(signature = (graph_module, exported_program=None, *, pipeline_config))]
+#[pyo3(signature = (graph_module, exported_program=None, *, pipeline_config, u55_transpose_probe=None))]
 fn run_fx_passes(
     graph_module: &Bound<'_, PyAny>,
     exported_program: Option<&Bound<'_, PyAny>>,
     pipeline_config: &Bound<'_, PyDict>,
+    u55_transpose_probe: Option<Py<PyAny>>,
 ) -> PyResult<bool> {
     let pipeline_config = pipeline_config::PipelineConfig::from_py(pipeline_config)?;
-    let (modified, ir, effects) = run_full_fx_pipeline(
-        graph_module,
-        clone_bound_pyobject(exported_program),
-        &pipeline_config,
-    )?;
+    let probe_error = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let probe = u55_transpose_probe
+        .map(|callable| python_transpose_probe(callable, std::rc::Rc::clone(&probe_error)));
+    let lowered = fx_decompose_permute_for_u55_ir::with_transpose_probe(probe, || {
+        run_full_fx_pipeline(
+            graph_module,
+            clone_bound_pyobject(exported_program),
+            &pipeline_config,
+        )
+    });
+    if let Some(err) = probe_error.take() {
+        return Err(err);
+    }
+    let (modified, ir, effects) = lowered?;
     stash_ir(ir.map(|g| (g, effects)), pipeline_config);
     Ok(modified)
 }

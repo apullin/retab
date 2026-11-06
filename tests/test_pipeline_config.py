@@ -194,7 +194,7 @@ def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch, r
     calls = []
 
     def record(kind):
-        def run(gm, ep, region_name=None, *, pipeline_config):
+        def run(gm, ep, region_name=None, *, pipeline_config, u55_transpose_probe=None):
             calls.append((kind, gm, ep, region_name, pipeline_config))
 
         return run
@@ -216,3 +216,38 @@ def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch, r
         ("run_fx_cond_passes", "true_graph__body_graph__true_graph"),
     ]
     assert sum(call[0] == "run_fx_passes" for call in calls) == (4 if recursive else 1)
+
+
+@pytest.mark.parametrize("layout", ["dim_order", "explicit"])
+def test_explicit_mode_hands_the_u55_split_rc4s_exact_check(monkeypatch, layout):
+    """Explicit mode on U55 gives run_fx_passes rc4's exact TRANSPOSE check, which the
+    U55 split asks about the permutes alive at its slot, and no edge names; dim-order
+    mode gives it the edge names and no check (APU-160). The check runs Vela in a
+    lowering context: a batch-1 NCHW-to-NHWC transpose of a 320x320 image passes, which
+    rc4's check called outside one would reject."""
+    from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
+
+    monkeypatch.setenv("RETAB_LAYOUT", layout)
+    monkeypatch.setattr(rp, "stock_fallback_reason", lambda ep, spec: None)
+    monkeypatch.setattr(rp, "_u55_permutes_to_split", lambda ep, spec: ["edge_permute"])
+    calls = []
+
+    def run(gm, ep, *, pipeline_config, u55_transpose_probe=None):
+        calls.append((pipeline_config["u55_split_permutes"], u55_transpose_probe))
+
+    monkeypatch.setattr(_native, "run_fx_passes", run)
+    monkeypatch.setattr(_native, "ingest_and_serialize", lambda: b"tosa")
+    program = torch.export.export(torch.nn.ReLU(), (torch.ones(2),))
+    for spec in ["TOSA-1.0+INT+int16+int4+u55", "TOSA-1.0+INT+int16+int4+cf"]:
+        rp._all_rust_preprocess(program, TosaCompileSpec(spec))
+
+    (u55_names, probe), (u85_names, u85_probe) = calls
+    assert u85_names == ["edge_permute"] and u85_probe is None
+    if layout == "dim_order":
+        assert u55_names == ["edge_permute"] and probe is None
+        return
+    assert u55_names == [] and probe is not None
+    assert probe([2, 2, 257, 257], [0, 2, 3, 1], "torch.int8") is True
+    assert probe([1, 3, 320, 320], [0, 2, 3, 1], "torch.int8") is False
+    assert probe([1, 3, 320, 320], [0, 2, 3, 1], "torch.int32") is True
+    assert probe([1, 3, 320, 320], [0, 2, 3, 1], "") is True

@@ -95,12 +95,14 @@
 //! from merging them again (design F7). The generic profile keeps duplicate
 //! heads, as rc4 does.
 //!
-//! **U55 permute splits** (design F8, F9). Python decides which edge permutes
-//! `IrDecomposePermuteForU55` splits, by node name on the edge program
-//! (`PipelineConfig::u55_split_permutes`), while rc4 judges whatever permutes
-//! are alive at `arm_pass_manager.py:736`, after this pass. When the INT32
-//! RESCALEs of a listed source permute move to its copy on the widened branch,
-//! the copy is marked to be split as well
+//! **U55 permute splits** (design F8, F9). rc4 judges whatever permutes are
+//! alive at `arm_pass_manager.py:736`, after this pass, and so does
+//! `IrDecomposePermuteForU55` when the pipeline runs with Python's Vela
+//! probe, as explicit lowering on U55 does: every permute this pass creates
+//! is judged there. Without the probe it splits the edge permutes Python
+//! names (`PipelineConfig::u55_split_permutes`), and the rest of this
+//! paragraph applies. When the INT32 RESCALEs of a listed source permute move
+//! to its copy on the widened branch, the copy is marked to be split as well
 //! (`fx_decompose_permute_for_u55_ir::mark_split`), whether or not the permute
 //! itself is erased. rc4 splits that copy too. Its input has the source
 //! permute's dims, which break U55's worst-case rule: Python lists only
@@ -108,11 +110,11 @@
 //! dims. Its input is also int32, and rc4's exact check treats an int32
 //! TRANSPOSE as unsupported without asking Vela. Without the mark, a listed
 //! permute erased here would lose its split silently. Every other permute the
-//! pass creates stays unsplit in P2 (F8), including the int32 layout permutes
-//! of both widened branches. rc4 splits those on the same grounds when the
-//! conv's dims break the rule. In rc4 the copy reaches `:736` already fused
-//! with the widened layout permute (PropagateViewCopyPermuteDownPass, `:726`,
-//! a P3 port), and that fused permute is the one split.
+//! pass creates stays unsplit, including the int32 layout permutes of both
+//! widened branches. rc4 splits those on the same grounds when the conv's
+//! dims break the rule. In rc4 the copy reaches `:736` already fused with the
+//! widened layout permute (PropagateViewCopyPermuteDownPass, `:726`), and
+//! that fused permute is the one split.
 //!
 //! **Regions** (APU-135 S8; design §2.9, §4.3). A region's constants are
 //! `get_attr` nodes (`GraphScope::Region`). A weight or bias the region

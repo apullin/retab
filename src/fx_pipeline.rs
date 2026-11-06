@@ -349,6 +349,7 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
             Ir(Box::new(
                 crate::fx_decompose_permute_for_u55_ir::IrDecomposePermuteForU55Pass {
                     split_permutes: config.u55_split_permutes.clone(),
+                    probe_live_permutes: false,
                 },
             )),
             // Linear's view pairs around an activation, before layout sees them.
@@ -502,11 +503,13 @@ fn explicit_phase6_steps(
         Ir(Box::new(
             crate::fx_fuse_consecutive_concats_ir::IrFuseConsecutiveConcatsPass,
         )),
-        // Splits only the permutes Python's Vela probe named on the edge program
-        // (design F8).
+        // Asks Python's Vela probe about every live permute that breaks U55's worst-case
+        // rule, as rc4 does (design F8); without a probe, splits the permutes it named
+        // on the edge program.
         Ir(Box::new(
             crate::fx_decompose_permute_for_u55_ir::IrDecomposePermuteForU55Pass {
                 split_permutes: config.u55_split_permutes.clone(),
+                probe_live_permutes: true,
             },
         )),
         // RETAB-only; kept through P2 (design §1b slot 12).
