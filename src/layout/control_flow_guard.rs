@@ -9,8 +9,9 @@
 //! layout pass runs. Explicit mode's passes can then put copies without
 //! qparams between a getitem and the consumer that held the target, as rc4's
 //! do: IrMatchArgRanks' rank views (`layout::match_arg_ranks`), explicit
-//! IrSizeAdjustInput's slices, and the input permutes of the pool, upsample
-//! and conv rewrites (`layout::meta`). The contract then finds no target,
+//! IrSizeAdjustInput's slices, and the input permutes of the upsample and
+//! conv rewrites (the pool rewrites' permutes keep the pool's qparams;
+//! `layout::meta`). The contract then finds no target,
 //! inserts no RESCALE, and the consumers read the region's output in the
 //! region's quantization.
 //!
