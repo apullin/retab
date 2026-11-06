@@ -834,17 +834,17 @@ fn while_captured_bias(
 /// right after the contracts (critique B6).
 ///
 /// Captures of a while loop's regions go to stock too (critique B7), a weight's
-/// or a non-int32 bias's: only cond invocations are followed. rc4 resolves while-loop captures as well, through
-/// the operand `_regularize_submodule` records on every region placeholder
-/// (`tosa/backend.py:222-238`), so stock gives such a delegate exactly rc4's
-/// outcome. Resolving them here would take while semantics rc4 does not model:
-/// torch.export makes a body's captured parameters carried inputs, which the
-/// body hands back through a clone, and a carried input holds its initial
-/// value on every iteration only if each one passes it through unchanged. rc4
-/// resolves any carried input to its initial value; RETAB would have to prove
-/// the pass-through. For that form rc4 then raises anyway: RewriteConvPass
-/// cannot put the rewritten weight ahead of the region's user inputs. No rc4
-/// op test has a conv in a while body.
+/// or a non-int32 bias's: only cond invocations are followed. rc4 resolves
+/// while-loop captures as well, through the operand `_regularize_submodule`
+/// records on every region placeholder (`tosa/backend.py:222-238`), so stock
+/// gives such a delegate exactly rc4's outcome. Resolving them here would take
+/// while semantics rc4 does not model: torch.export makes a body's captured
+/// parameters carried inputs, which the body hands back through a clone, and a
+/// carried input holds its initial value on every iteration only if each one
+/// passes it through unchanged. rc4 resolves any carried input to its initial
+/// value; RETAB would have to prove the pass-through. For that form rc4 then
+/// raises anyway: RewriteConvPass cannot put the rewritten weight ahead of the
+/// region's user inputs. No rc4 op test has a conv in a while body.
 pub(crate) fn rewrite_explicit_captured_conv_operands(
     parent: &IrGraph,
     submodules: &mut BTreeMap<String, StashedPipeline>,
