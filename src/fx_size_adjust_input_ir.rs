@@ -405,11 +405,12 @@ mod tests {
     const I32: &str = "torch.int32";
     const F32: &str = "torch.float32";
 
-    /// The graphs of `/tmp/s0b_probe/size_adjust.py`, which records rc4's
-    /// graph after SizeAdjustInputPass for a quantized model: `x -> relu ->
-    /// conv` (or `-> max_pool2d`), int8 per-channel. RETAB's IR holds the relu,
-    /// which rc4 has turned into a clamp, in float32 with int8 qparams (design
-    /// F2), and the weight and bias in their storage dtypes.
+    /// The graphs rc4 leaves after SizeAdjustInputPass, dumped from its
+    /// pipeline (`to_edge_transform_and_lower` with the pass patched to print
+    /// its result) for quantized `x -> relu -> conv` and `-> max_pool2d`
+    /// models, int8 per-channel. RETAB's IR holds the relu, which rc4 has
+    /// turned into a clamp, in float32 with int8 qparams (design F2), and the
+    /// weight and bias in their storage dtypes.
     fn quantized_relu(graph: &mut IrGraph, shape: &[i64]) -> NodeId {
         let x = placeholder(graph, "x", shape.to_vec(), I8);
         let clamp = f32_call(
