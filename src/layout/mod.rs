@@ -66,3 +66,6 @@ mod fuse_helpers_upstream_tests;
 // Large-graph checks and timings for those three passes.
 #[cfg(test)]
 mod fuse_helpers_scaling_tests;
+// Adversarial review of those three ports: rc4 behaviours they miss.
+#[cfg(test)]
+mod fuse_helpers_review_tests;
