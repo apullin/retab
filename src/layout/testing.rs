@@ -4,12 +4,15 @@
 //! facts from `shape`'s local refresh, the way rc4's layout tests attach
 //! `meta["val"]` to hand-built FX graphs (for example
 //! `backends/transforms/test/test_propagate_view_copy_permute_pass.py`), so
-//! fixtures cannot drift from the shapes the passes will compute. Assertions
-//! read live call targets in graph order.
+//! fixtures cannot drift from the shapes the passes will compute. That covers
+//! the TOSA ops the explicit-mode rewrites create (`shape/tosa.rs`), whose
+//! `CONST_SHAPE` operands [`LayoutGraph::const_shape`] builds. Assertions read
+//! live call targets in graph order.
 
 use std::collections::HashMap;
 
 use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, NodeId, NodeMeta, NodeOp};
+use crate::layout::meta;
 use crate::layout::shape::refreshed_meta;
 
 pub(crate) const PERMUTE: &str = "aten.permute_copy.default";
@@ -31,6 +34,15 @@ pub(crate) const SIGMOID: &str = "aten.sigmoid.default";
 pub(crate) const CLAMP_TENSOR: &str = "aten.clamp.Tensor";
 pub(crate) const WHERE: &str = "aten.where.self";
 pub(crate) const MASKED_FILL: &str = "aten.masked_fill.Scalar";
+pub(crate) const CONVOLUTION: &str = "aten.convolution.default";
+pub(crate) const TOSA_CONV2D: &str = "backend.tosa.CONV2D.default";
+pub(crate) const TOSA_DEPTHWISE_CONV2D: &str = "backend.tosa.DEPTHWISE_CONV2D.default";
+pub(crate) const TOSA_TRANSPOSE_CONV2D: &str = "backend.tosa.TRANSPOSE_CONV2D.default";
+pub(crate) const TOSA_CONV3D: &str = "backend.tosa.CONV3D.default";
+pub(crate) const TOSA_MAX_POOL2D: &str = "backend.tosa.MAX_POOL2D.default";
+pub(crate) const TOSA_AVG_POOL2D: &str = "backend.tosa.AVG_POOL2D.default";
+pub(crate) const TOSA_RESIZE: &str = "backend.tosa.RESIZE.default";
+pub(crate) const TOSA_CONST_SHAPE: &str = "backend.tosa.CONST_SHAPE.default";
 
 /// A tensor operand.
 pub(crate) fn node(id: NodeId) -> IrArg {
@@ -131,6 +143,20 @@ impl LayoutGraph {
                 IrArg::Int(0),
                 IrArg::Int(0),
             ],
+        )
+    }
+
+    /// A `backend.tosa.CONST_SHAPE` holding `values`, as rc4's
+    /// `create_shape_node` builds it: an `int[]` value rather than a tensor,
+    /// and `tosa_special_dtype` SHAPE (`meta::shape_node`).
+    pub(crate) fn const_shape(&mut self, values: &[i64]) -> NodeId {
+        let name = self.fresh_name(&op_name(TOSA_CONST_SHAPE));
+        self.graph.add_call_function_with_kwargs(
+            name,
+            TOSA_CONST_SHAPE,
+            vec![ints(values)],
+            HashMap::new(),
+            meta::shape_node(&NodeMeta::default()),
         )
     }
 

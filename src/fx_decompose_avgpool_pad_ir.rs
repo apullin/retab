@@ -287,7 +287,7 @@ mod tests {
             Some(vec![1, 1, 9, 9])
         );
 
-        assert!(!IrSizeAdjustInputPass.run(&mut graph));
+        assert!(!IrSizeAdjustInputPass::default().run(&mut graph));
         assert!(
             !graph
                 .nodes

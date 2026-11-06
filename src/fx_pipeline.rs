@@ -202,8 +202,11 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
             crate::fx_insert_table_ops_ir::IrInsertTableOpsEffectPass,
         )),
         // -- ATen -> TOSA --
+        // Explicit mode also splits rank-5 depthwise convs (APU-135 P2, design §4.2-P).
         Ir(Box::new(
-            crate::fx_decompose_grouped_conv_ir::IrDecomposeGroupedConvPass,
+            crate::fx_decompose_grouped_conv_ir::IrDecomposeGroupedConvPass {
+                layout: config.layout,
+            },
         )),
         Effectful(Box::new(
             crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEffectPass::with_data_slices(),
@@ -211,8 +214,11 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(
             crate::fx_annotate_conv_bias_ir::IrAnnotateConvBiasDtypePass,
         )),
+        // Explicit mode slices as rc4 does (APU-135 P2, design §4.2-P).
         Ir(Box::new(
-            crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass,
+            crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass {
+                layout: config.layout,
+            },
         )),
         Ir(Box::new(fx_rewrite_squeeze_ir::IrRewriteSqueezePass)),
         Ir(Box::new(
@@ -291,8 +297,11 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(
             crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass,
         )),
+        // Explicit mode types the accumulator as rc4's MATMUL (APU-135 P2).
         Ir(Box::new(
-            crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass,
+            crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass {
+                layout: config.layout,
+            },
         )),
         Ir(Box::new(
             crate::fx_insert_conv_rescale_ir::IrInsertConvAccumulatorRescalePass,

@@ -15,12 +15,18 @@ mod canonicalize_upstream_tests;
 pub(crate) mod ctx;
 #[allow(dead_code)]
 pub(crate) mod dim_maps;
+// The dtypes rc4 reads from fake tensors, from RETAB's qparams (APU-135 P2).
+#[allow(dead_code)]
+pub(crate) mod dtype;
 #[allow(dead_code)]
 pub(crate) mod fuse_view_copy;
 #[allow(dead_code)]
 pub(crate) mod high_rank_singleton_permute;
 #[allow(dead_code)]
 pub(crate) mod match_arg_ranks;
+// rc4's meta rules for created nodes (`create_node`, `call_operator`).
+#[allow(dead_code)]
+pub(crate) mod meta;
 #[allow(dead_code)]
 pub(crate) mod normalize_delegate_io;
 #[allow(dead_code)]

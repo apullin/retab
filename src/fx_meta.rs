@@ -454,6 +454,13 @@ impl NodeMeta {
         self.set_tensor_facts(facts);
     }
 
+    /// Drop the value facts and the value's dim order, for a node whose value
+    /// is not a tensor (a TOSA `CONST_SHAPE` holds an `int[]`).
+    pub fn clear_val(&mut self) {
+        self.tensor = None;
+        self.layout.val_dim_order = None;
+    }
+
     pub fn set_tensor_facts_for_existing_shape(&mut self, dtype: impl Into<String>) -> bool {
         let Some(shape) = self.val_shape().map(|shape| shape.to_vec()) else {
             return false;
