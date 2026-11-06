@@ -18,10 +18,11 @@ use crate::layout::replay::{self, Options};
 use crate::layout::testing::*;
 use crate::test_ir::qparam;
 
-/// The comparison the APU-160 replays use: the default plus the `modified` flag.
+/// The comparison the APU-160 replays use: the default plus the `modified`
+/// flag and dead nodes.
 const WITH_FLAG: Options = Options {
     dim_orders: replay::DimOrders::Ignore,
-    dead_nodes: false,
+    dead_nodes: true,
     modified: true,
 };
 

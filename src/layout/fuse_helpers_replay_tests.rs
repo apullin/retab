@@ -1,11 +1,12 @@
 //! rc4 replays of FuseDuplicateUsers, FuseIdenticalInputTransforms and
 //! MoveDataMovementOpsToSmallerDtype (APU-160). Every case of each fixture in
 //! tests/fixtures/layout_replay must match what the real rc4 pass did,
-//! including the `modified` flag, which the propagation driver loops on; see
-//! `replay` for what else is compared. FuseDuplicateUsers
-//! is replayed at its three table stages: alone (`arm_pass_manager.py:587`),
-//! after InsertTableOpsPass (the propagation driver) and after
-//! FuseEqualPlaceholdersPass too (`:765`).
+//! including the `modified` flag, which the propagation driver loops on, and
+//! the dead nodes; see `replay` for what else is compared.
+//!
+//! FuseDuplicateUsers is replayed at its three table stages: alone
+//! (`arm_pass_manager.py:587`), after InsertTableOpsPass (the propagation
+//! driver) and after FuseEqualPlaceholdersPass too (`:765`).
 
 use crate::fx_ir::{IrGraph, IrPass};
 use crate::layout::ctx::LayoutCtx;
@@ -31,10 +32,12 @@ const FUSE_IDENTICAL_INPUT_TRANSFORMS_DRIVER: &str =
 const MOVE_DATA_MOVEMENT: &str =
     include_str!("../../tests/fixtures/layout_replay/move_data_movement_ops_to_smaller_dtype.txt");
 
-/// The default comparison plus the `modified` flag.
+/// The default comparison plus the `modified` flag and dead nodes: rc4's
+/// FuseIdenticalInputTransforms removes dead code only when it changed
+/// something, and the other two leave it, which the ports must match.
 const WITH_FLAG: Options = Options {
     dim_orders: replay::DimOrders::Ignore,
-    dead_nodes: false,
+    dead_nodes: true,
     modified: true,
 };
 
