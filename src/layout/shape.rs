@@ -205,11 +205,8 @@ pub(crate) fn infer_facts(graph: &IrGraph, id: NodeId) -> Result<TensorFacts, Sh
     )
 }
 
-/// Value facts `node` would have, reading operand facts through `facts_of`.
-///
-/// `node` need not be in a graph: a planner can pass a node with rewritten
-/// arguments, and a lookup that answers for operands it has not created yet.
-/// No operand is a `CONST_SHAPE` here; [`infer_node_facts_with`] reads them.
+/// [`infer_node_facts_with`] for a node without `CONST_SHAPE` operands.
+#[cfg(test)]
 pub(crate) fn infer_node_facts<'a>(
     node: &IrNode,
     facts_of: &dyn Fn(NodeId) -> Option<&'a TensorFacts>,
@@ -217,8 +214,12 @@ pub(crate) fn infer_node_facts<'a>(
     infer_node_facts_with(node, facts_of, &|_| None)
 }
 
-/// [`infer_node_facts`], also reading the `int[]` a `CONST_SHAPE` operand
-/// holds through `shape_values_of` (a TOSA RESIZE's scale, offset and border).
+/// Value facts `node` would have, reading operand facts through `facts_of`
+/// and the `int[]` a `CONST_SHAPE` operand holds through `shape_values_of` (a
+/// TOSA RESIZE's scale, offset and border).
+///
+/// `node` need not be in a graph: a planner can pass a node with rewritten
+/// arguments, and a lookup that answers for operands it has not created yet.
 pub(crate) fn infer_node_facts_with<'a>(
     node: &IrNode,
     facts_of: &dyn Fn(NodeId) -> Option<&'a TensorFacts>,
@@ -568,6 +569,7 @@ pub(crate) fn view_shape(source: &[i64], size: &[i64]) -> Result<Vec<i64>, Shape
 }
 
 /// Numpy broadcast of `shapes`, as fake execution of a pointwise op computes it.
+#[cfg(test)]
 pub(crate) fn broadcast_shape(shapes: &[&[i64]]) -> Result<Vec<i64>, ShapeError> {
     let shapes: Vec<Vec<i64>> = shapes.iter().map(|shape| shape.to_vec()).collect();
     broadcast_shapes(&shapes).ok_or(ShapeError::Incompatible("operand shapes do not broadcast"))

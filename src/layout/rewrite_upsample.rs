@@ -26,7 +26,8 @@
 //!   the input permute and the RESIZE go before the upsample in that order, the
 //!   RESCALE right after the RESIZE and the output permute after that.
 //! - **Dtypes.** rc4 branches on the input's fake dtype and types the RESCALE
-//!   with the upsample's ([`dtype::operand_dtype`], [`dtype::value_dtype`];
+//!   with the upsample's ([`dtype::operand_dtype`](crate::layout::dtype::operand_dtype),
+//!   [`dtype::value_dtype`](crate::layout::dtype::value_dtype);
 //!   design F2). The RESIZE holds its fake kernel's dtype: int8 for nearest,
 //!   int32 for int8 bilinear, int16 for int16 (design F10). An int8 or int16
 //!   bilinear RESIZE is followed by the RESCALE, and an int16 one is marked

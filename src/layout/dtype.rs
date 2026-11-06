@@ -15,12 +15,12 @@
 //! | rc4 check | helper |
 //! |---|---|
 //! | `RewriteConvPass._is_quantized_conv` (`rewrite_conv_pass.py:405-406`), the design's "q" | [`is_quantized_conv`] |
-//! | `_is_int16_activation_conv` (`:408-412`): `input_qparams[0].dtype`, else the input's fake dtype | [`activation_dtype`] |
-//! | `_insert_output_conversion`'s `is_a8w8_conv`/`is_a16w8_conv` (`:830-841`): the TOSA conv's fake dtype is int32 and the input's is int8/int16 | [`conv_output_dtype`] of [`activation_dtype`] |
+//! | `_is_int16_activation_conv` (`:408-412`): `input_qparams[0].dtype`, else the input's fake dtype | [`operand_dtype`] at index 0 |
+//! | `_insert_output_conversion`'s `is_a8w8_conv`/`is_a16w8_conv` (`:830-841`): the TOSA conv's fake dtype is int32 and the input's is int8/int16 | [`conv_output_dtype`] of [`operand_dtype`] at index 0 |
 //! | the conv's bias test (`:926-927`): `get_first_fake_tensor(bias).dtype != torch.int32` | [`value_dtype`] of the bias |
-//! | `MoveDataMovementOpsToSmallerDtypePass._uses_wider_dtype` (`move_data_movement_ops_to_smaller_dtype_pass.py:73-87`): `element_size()` of two fake values | [`element_size`] of [`value_dtype`] |
-//! | `_is_per_tensor_rescale` there (`:89-98`) and in the TOSA propagation overrides (`propagate_view_copy_permute_pass.py:132-144`): the RESCALE and its input carry the same special dtype | [`special_dtype`] |
-//! | `TosaPropagationOverrides._node_or_inputs_are_int48` (`propagate_view_copy_permute_pass.py:82-89`), behind `blocks_moving` (`:48-60`) | [`node_or_inputs_are_int48`] |
+//! | `MoveDataMovementOpsToSmallerDtypePass._uses_wider_dtype` (`move_data_movement_ops_to_smaller_dtype_pass.py:73-87`): `element_size()` of two fake values | [`fx_node::element_size`](crate::layout::fx_node::element_size) of [`value_dtype`] |
+//! | `_is_per_tensor_rescale` there (`:89-98`) and in the TOSA propagation overrides (`propagate_view_copy_permute_pass.py:132-144`): the RESCALE and its input carry the same special dtype | [`fx_node::is_per_tensor_rescale`](crate::layout::fx_node::is_per_tensor_rescale) |
+//! | `TosaPropagationOverrides._node_or_inputs_are_int48` (`propagate_view_copy_permute_pass.py:82-89`), behind `blocks_moving` (`:48-60`) | the propagation pass's own helper (`layout::propagate`) |
 //! | RewriteUpsamplePass's `input_dtype` (`rewrite_upsample.py:258-263`) and RewriteAvgPool2dPass's accumulator choice (`rewrite_avg_pool2d_pass.py:66-72`): the input's fake dtype | [`operand_dtype`] at index 0 |
 //! | the TOSA fake kernels' output dtypes (`backends/arm/tosa/dialect/ops/conv2d.py:17-88`, `resize.py:28-55`, `matmul.py:28-76`) | [`conv_output_dtype`], [`resize_output_dtype`], [`matmul_output_dtype`] |
 //!
@@ -72,6 +72,7 @@ impl SpecialDtype {
     /// records the enum's display, `TosaSpecialDtype.INT48`
     /// (`NodeMeta::from_fx`), while its passes write the bare member name
     /// (`fx_fold_qdq_ir`, [`set_special_dtype`]); both are accepted.
+    #[cfg(test)]
     pub(crate) fn parse(text: &str) -> Option<Self> {
         let name = text.strip_prefix("TosaSpecialDtype.").unwrap_or(text);
         Self::NAMES
@@ -89,7 +90,9 @@ impl SpecialDtype {
     }
 }
 
-/// `node.meta.get(TosaSpecialDtype.meta_key())`.
+/// `node.meta.get(TosaSpecialDtype.meta_key())`, for tests; the passes read
+/// the recorded name (`layout::fx_node::special_dtype`).
+#[cfg(test)]
 pub(crate) fn special_dtype(meta: &NodeMeta) -> Option<SpecialDtype> {
     meta.extra_str(SPECIAL_DTYPE_KEY)
         .and_then(SpecialDtype::parse)
@@ -114,32 +117,9 @@ pub(crate) fn copy_special_dtype(source: &NodeMeta, target: &mut NodeMeta) -> bo
 }
 
 /// Whether `meta` is marked INT48.
+#[cfg(test)]
 pub(crate) fn is_int48(meta: &NodeMeta) -> bool {
     special_dtype(meta) == Some(SpecialDtype::Int48)
-}
-
-/// `TosaPropagationOverrides._node_or_inputs_are_int48`
-/// (`propagate_view_copy_permute_pass.py:82-89`): `id` or a node it reads is
-/// marked INT48.
-pub(crate) fn node_or_inputs_are_int48(graph: &IrGraph, id: NodeId) -> bool {
-    let node = graph.node(id);
-    is_int48(&node.meta)
-        || input_node_ids(node).into_iter().any(|input| {
-            graph
-                .node_opt(input)
-                .is_some_and(|input| is_int48(&input.meta))
-        })
-}
-
-/// `torch.Tensor.element_size()` for a dtype named as torch prints it.
-pub(crate) fn element_size(dtype: &str) -> Option<usize> {
-    Some(match dtype.strip_prefix("torch.")? {
-        "bool" | "uint8" | "int8" | "float8_e4m3fn" | "float8_e5m2" => 1,
-        "int16" | "uint16" | "float16" | "bfloat16" => 2,
-        "int32" | "uint32" | "float32" => 4,
-        "int64" | "uint64" | "float64" => 8,
-        _ => return None,
-    })
 }
 
 /// `RewriteConvPass._is_quantized_conv` (`rewrite_conv_pass.py:405-406`):
@@ -171,15 +151,6 @@ pub(crate) fn operand_dtype(graph: &IrGraph, id: NodeId, index: usize) -> Option
         Some(IrArg::Node(input)) => value_dtype(graph, *input),
         _ => None,
     }
-}
-
-/// A convolution's activation dtype: `input_qparams[0].dtype`, else the fake
-/// dtype of its input (`_is_int16_activation_conv`, `rewrite_conv_pass.py:408-412`).
-/// RCP:830-841 reads the input's fake dtype directly; once
-/// `_get_effective_conv_input_qparams` has filled index 0 (`:452-462`) the
-/// two agree.
-pub(crate) fn activation_dtype(graph: &IrGraph, conv: NodeId) -> Option<String> {
-    operand_dtype(graph, conv, 0)
 }
 
 /// The output dtype of rc4's TOSA convolution fake kernels for an input of
@@ -360,16 +331,6 @@ pub(crate) fn is_float_dtype(dtype: &str) -> bool {
     )
 }
 
-fn input_node_ids(node: &IrNode) -> Vec<NodeId> {
-    let mut ids = Vec::new();
-    for arg in node.args.iter().chain(node.kwargs.values()) {
-        arg.collect_node_ids(&mut ids);
-    }
-    ids.sort_unstable();
-    ids.dedup();
-    ids
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,33 +412,6 @@ mod tests {
         set_special_dtype(&mut target, SpecialDtype::Int48);
         assert!(!copy_special_dtype(&NodeMeta::default(), &mut target));
         assert!(is_int48(&target));
-    }
-
-    /// `torch.empty(0, dtype=d).element_size()` in torch 2.15.
-    #[test]
-    fn element_sizes_match_torch() {
-        for (dtype, size) in [
-            ("bool", 1),
-            ("uint8", 1),
-            ("int8", 1),
-            ("int16", 2),
-            ("int32", 4),
-            ("int64", 8),
-            ("float16", 2),
-            ("bfloat16", 2),
-            ("float32", 4),
-            ("float64", 8),
-            ("float8_e4m3fn", 1),
-            ("float8_e5m2", 1),
-        ] {
-            assert_eq!(
-                element_size(&format!("torch.{dtype}")),
-                Some(size),
-                "{dtype}"
-            );
-        }
-        assert_eq!(element_size("int8"), None);
-        assert_eq!(element_size("torch.int48"), None);
     }
 
     #[test]
@@ -704,9 +638,11 @@ mod tests {
     }
 
     /// RCP:408-412 both ways: `input_qparams[0]` decides; without it, the
-    /// input's fake dtype does.
+    /// input's fake dtype does. RCP:830-841 reads the input's fake dtype
+    /// directly; once `_get_effective_conv_input_qparams` has filled index 0
+    /// (`:452-462`) the two agree.
     #[test]
-    fn activation_dtype_prefers_the_conv_input_qparam() {
+    fn a_conv_operand_dtype_prefers_the_conv_input_qparam() {
         let mut g = LayoutGraph::new();
         let x = g.input("x", &[1, 3, 8, 8]);
         let relu = g.call(RELU, vec![node(x)]);
@@ -730,10 +666,10 @@ mod tests {
             &[1, 4, 6, 6],
             F32,
         );
-        assert_eq!(activation_dtype(g.graph(), conv).as_deref(), Some(I8));
+        assert_eq!(operand_dtype(g.graph(), conv, 0).as_deref(), Some(I8));
         meta_of(&mut g, conv)
             .set_input_qparams_from([(0, qparam(0.1, 0, I16)), (1, qparam(0.2, 0, I8))]);
-        assert_eq!(activation_dtype(g.graph(), conv).as_deref(), Some(I16));
+        assert_eq!(operand_dtype(g.graph(), conv, 0).as_deref(), Some(I16));
         assert_eq!(operand_dtype(g.graph(), conv, 1).as_deref(), Some(I8));
         // RCP:926-927 reads the bias's own fake dtype, which a float bias
         // (BN-fused weights, critique B10) fails.
@@ -741,7 +677,7 @@ mod tests {
         let float_bias = g.input("float_bias", &[4]);
         assert_eq!(value_dtype(g.graph(), float_bias).as_deref(), Some(F32));
         assert_eq!(
-            conv_output_dtype(&activation_dtype(g.graph(), conv).unwrap()),
+            conv_output_dtype(&operand_dtype(g.graph(), conv, 0).unwrap()),
             Some(I32)
         );
     }
@@ -751,19 +687,5 @@ mod tests {
         let mut meta = NodeMeta::default();
         meta.set_single_input_qparam(QParam::per_tensor(0.5, 0, -128, 127, String::new()));
         assert_eq!(input_qparam_dtype(&meta, 0), None);
-    }
-
-    #[test]
-    fn int48_blocks_through_the_node_or_any_input() {
-        let mut g = LayoutGraph::new();
-        let x = g.typed_input("x", &[1, 4, 4, 2], I32);
-        let rescale = g.rescale(x, I16, 0.5);
-        let permute = g.permute(rescale, &[0, 3, 1, 2]);
-        assert!(!node_or_inputs_are_int48(g.graph(), permute));
-        set_special_dtype(meta_of(&mut g, x), SpecialDtype::Int48);
-        assert!(node_or_inputs_are_int48(g.graph(), rescale));
-        assert!(!node_or_inputs_are_int48(g.graph(), permute));
-        set_special_dtype(meta_of(&mut g, permute), SpecialDtype::Int48);
-        assert!(node_or_inputs_are_int48(g.graph(), permute));
     }
 }

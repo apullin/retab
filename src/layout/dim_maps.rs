@@ -246,9 +246,9 @@ struct ViewGroups {
 /// rc4 `ViewMap` (:225-1007). It expands both shapes into ordered prime-factor
 /// streams, matches them, and groups factors that share a source axis, share a target
 /// axis, or cross in the matching. A source dim maps to every target dim sharing a
-/// group with it; singleton dims belong to no group. For [4, 3, 10] -> [2, 2, 1, 5, 3,
-/// 2] the groups pair source [0] with target [0, 1] and source [1, 2] with target
-/// [3, 4, 5].
+/// group with it; singleton dims belong to no group. For `[4, 3, 10] -> [2, 2, 1, 5,
+/// 3, 2]` the groups pair source `[0]` with target `[0, 1]` and source `[1, 2]` with
+/// target `[3, 4, 5]`.
 #[derive(Debug, Clone)]
 pub struct ViewMap {
     source_shape: Vec<i64>,
@@ -274,6 +274,7 @@ impl ViewMap {
         self.groups.is_some()
     }
 
+    #[cfg(test)]
     pub fn source_shape(&self) -> &[i64] {
         &self.source_shape
     }

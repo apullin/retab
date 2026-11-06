@@ -28,7 +28,7 @@ use crate::fx_conv_args::ConvArgs;
 use crate::fx_ir::{
     IrArg, IrGraph, IrNode, MetaValue, NodeId, NodeMeta, NodeOp, NodeTensor, TensorSource,
 };
-use crate::fx_target::{is_permute_target, is_tosa_transpose_target, is_view_like_target};
+use crate::fx_target::{is_permute_target, is_view_like_target};
 use crate::graph::ir::DType;
 use crate::layout::dtype::{
     is_quantized_conv, set_special_dtype, value_dtype, SpecialDtype, SPECIAL_DTYPE_KEY,
@@ -349,16 +349,14 @@ fn apply_bias_rewrite(ir: &mut IrGraph, rewrite: BiasRewrite) {
 }
 
 /// Erase the layout ops and RESCALEs that fed a replaced conv operand, back to the
-/// first node something else still uses: views, TRANSPOSEs and the `permute_copy`
-/// IrRewriteConv puts on a captured weight (design §4.3). The branch input itself
-/// stays.
+/// first node something else still uses: views and the `permute_copy` IrRewriteConv
+/// puts on a captured weight (design §4.3). The branch input itself stays.
 fn erase_dead_operand_chain(ir: &mut IrGraph, start: NodeId) {
     let mut dead = Some(start);
     while let Some(id) = dead {
         let node = ir.node(id);
         let removable = node.is_rescale()
             || is_view_like_target(&node.target)
-            || is_tosa_transpose_target(&node.target)
             || is_permute_target(&node.target);
         if !removable || !ir.live_user_ids(id).is_empty() {
             break;
@@ -553,9 +551,9 @@ fn unique_name(ir: &IrGraph, name: String) -> String {
         .expect("an unused suffix")
 }
 
-/// The region constant has the physical shape and no dim order, as every
-/// explicit-mode value; the rebuilt RESCALEs keep their arguments and meta
-/// with that value, and the conv reads the last one.
+/// The region constant's val is its physical shape, as every val is; the
+/// rebuilt RESCALEs keep their arguments and meta with that shape, and the
+/// conv reads the last one.
 fn apply_explicit_weight_rewrite(ir: &mut IrGraph, rewrite: ExplicitWeightRewrite) {
     let shape = rewrite.data.shape.clone();
     let name = unique_name(ir, rewrite.name);
@@ -581,7 +579,6 @@ fn apply_explicit_weight_rewrite(ir: &mut IrGraph, rewrite: ExplicitWeightRewrit
         let mut meta = rescale
             .meta
             .cloned_with_same_dtype_or(shape.clone(), "torch.int8");
-        meta.replace_tosa_dim_order(None);
         mark_contiguous(&mut meta);
         let rescale_name = unique_name(ir, format!("{name}_rescale{index}"));
         weight = ir.add_call_function(rescale_name, rescale.target, args, meta);
@@ -1023,7 +1020,6 @@ mod tests {
         assert_eq!(node.op, NodeOp::GetAttr, "{}", node.name);
         let tensor = node.tensor.as_ref().expect("a constant");
         assert!(matches!(tensor.source, TensorSource::GraphModuleAttr));
-        assert_eq!(node.meta.tosa_dim_order(), None, "{}", node.name);
         &tensor.data
     }
 
@@ -1049,7 +1045,6 @@ mod tests {
         assert_eq!(rescale.name, "conv_weight_ohwi_captured_rescale0");
         assert_eq!(scale_args(rescale), rescale_args);
         assert_eq!(region.node_shape(rescale.id), Some([4, 1, 3, 2].as_slice()));
-        assert_eq!(rescale.meta.tosa_dim_order(), None);
         let constant = rescale.first_node_arg().expect("an input");
         assert_eq!(region.node(constant).name, "conv_weight_ohwi_captured");
         let data = region_constant(region, constant);

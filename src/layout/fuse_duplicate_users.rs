@@ -14,9 +14,12 @@
 //! [`fuse_duplicate_users`] is the pass body inside a [`LayoutCtx`], for the
 //! propagation driver's `fuse_horizontal`
 //! (`backends/transforms/propagate_view_copy_permute_pass.py:569-576`), which
-//! passes [`TableStage::OwnTableConstants`]; [`IrFuseDuplicateUsersPass`] is
-//! the standalone pass, [`IrFuseDuplicateUsersPass::EARLY`] at
-//! `arm_pass_manager.py:587` and [`IrFuseDuplicateUsersPass::LATE`] at `:765`.
+//! passes [`TableStage::OwnTableConstants`]. At the pass's own slots,
+//! `arm_pass_manager.py:587` and `:765`, RETAB runs its own
+//! `fx_fuse_duplicate_users_ir`; the standalone port of those two,
+//! `IrFuseDuplicateUsersPass::EARLY` and `::LATE`, and the stage only `LATE`
+//! uses, `TableStage::SharedTableConstants`, are for rc4's ported tests and
+//! exist only in test builds.
 //!
 //! **TABLE ops.** RETAB lowers a quantized table op to TABLE only when it
 //! serializes (`layout::pending`), while rc4 has replaced it by the time two
@@ -70,8 +73,12 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 
+#[cfg(test)]
 use crate::fx_insert_table_ops_ir::planned_table;
-use crate::fx_ir::{IrGraph, IrNode, IrPass, NodeId, NodeOp};
+#[cfg(test)]
+use crate::fx_ir::{IrGraph, IrPass};
+use crate::fx_ir::{IrNode, NodeId, NodeOp};
+#[cfg(test)]
 use crate::graph::ir::DType;
 use crate::layout::ctx::{LayoutCtx, RuleId};
 use crate::layout::fx_node::{rc4_target, PyValue};
@@ -103,6 +110,7 @@ pub(crate) enum TableStage {
     OwnTableConstants,
     /// After FuseEqualPlaceholdersPass: the pass at `:765`. Pending tables of
     /// one input are duplicates when their tables are equal.
+    #[cfg(test)]
     SharedTableConstants,
 }
 
@@ -115,6 +123,7 @@ impl TableStage {
         match self {
             Self::BeforeTables => RuleId("fuse_duplicate_users.before_tables"),
             Self::OwnTableConstants => RuleId("fuse_duplicate_users.own_table_constants"),
+            #[cfg(test)]
             Self::SharedTableConstants => RuleId("fuse_duplicate_users.shared_table_constants"),
         }
     }
@@ -125,11 +134,14 @@ impl TableStage {
     }
 }
 
-/// The Arm `FuseDuplicateUsersPass()` at one of its two pipeline positions.
+/// The Arm `FuseDuplicateUsersPass()` at one of its two pipeline positions,
+/// for rc4's ported tests.
+#[cfg(test)]
 pub(crate) struct IrFuseDuplicateUsersPass {
     stage: TableStage,
 }
 
+#[cfg(test)]
 impl IrFuseDuplicateUsersPass {
     /// `arm_pass_manager.py:587`, before InsertTableOpsPass.
     pub(crate) const EARLY: Self = Self {
@@ -141,6 +153,7 @@ impl IrFuseDuplicateUsersPass {
     };
 }
 
+#[cfg(test)]
 impl IrPass for IrFuseDuplicateUsersPass {
     fn name(&self) -> &str {
         // `IrFuseDuplicateUsers` names RETAB's own pass (`fx_fuse_duplicate_users_ir`).
@@ -285,6 +298,7 @@ enum Signature {
     },
     /// A pending table at `:765`: rc4's `TABLE(input, table_constant)`, with
     /// the constant identified by what FuseEqualPlaceholdersPass merges on.
+    #[cfg(test)]
     Table {
         input: NodeId,
         dtype: DType,
@@ -299,6 +313,7 @@ enum Signature {
 fn user_signature(node: &IrNode, stage: TableStage) -> Option<Signature> {
     if stage.holds_as_table(node) {
         return match stage {
+            #[cfg(test)]
             TableStage::SharedTableConstants => table_signature(node),
             TableStage::BeforeTables | TableStage::OwnTableConstants => None,
         };
@@ -324,6 +339,7 @@ fn user_signature(node: &IrNode, stage: TableStage) -> Option<Signature> {
 /// (insert_table_ops.py:403-406) and FuseEqualPlaceholdersPass keys a
 /// constant on its dtype, shape and bytes. None for a table followed by a
 /// RESCALE, or one RETAB can't plan.
+#[cfg(test)]
 fn table_signature(node: &IrNode) -> Option<Signature> {
     let input = node.args.first()?.as_node()?;
     let table = planned_table(node)?;

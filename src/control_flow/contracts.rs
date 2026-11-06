@@ -24,20 +24,6 @@ struct OutputContract {
     targets: Vec<(usize, fx_ir::QParam)>,
 }
 
-fn boundary_rescale_meta(
-    base_meta: &fx_ir::NodeMeta,
-    source_meta: &fx_ir::NodeMeta,
-    source_qp: &fx_ir::QParam,
-    target_qp: &fx_ir::QParam,
-) -> fx_ir::NodeMeta {
-    let mut meta =
-        base_meta.rescale_meta_with_input_qparam(source_meta, source_qp.clone(), target_qp.clone());
-    if let Some(dim_order) = source_meta.cloned_tosa_dim_order() {
-        meta.set_tosa_dim_order(dim_order);
-    }
-    meta
-}
-
 fn add_boundary_rescale(
     graph: &mut fx_ir::IrGraph,
     name: String,
@@ -46,12 +32,13 @@ fn add_boundary_rescale(
     source_qp: &fx_ir::QParam,
     target_qp: &fx_ir::QParam,
 ) -> fx_ir::NodeId {
-    let meta = boundary_rescale_meta(
-        &graph.nodes[base_meta_id].meta,
-        &graph.nodes[source_id].meta,
-        source_qp,
-        target_qp,
-    );
+    let meta = graph.nodes[base_meta_id]
+        .meta
+        .rescale_meta_with_input_qparam(
+            &graph.nodes[source_id].meta,
+            source_qp.clone(),
+            target_qp.clone(),
+        );
     graph.add_rescale(fx_ir::RescaleRewrite::new(
         name,
         source_id,
@@ -100,13 +87,8 @@ fn boundary_arg_qparam(input: &BoundaryInputMeta) -> Option<fx_ir::QParam> {
 fn stamp_boundary_placeholder_meta(
     ph_meta: &mut fx_ir::NodeMeta,
     input: &BoundaryInputMeta,
-    count_marker_write: bool,
 ) -> u32 {
     let mut changed = 0u32;
-    ph_meta.set_extra("arm_control_flow_placeholder", fx_ir::MetaValue::Bool(true));
-    if count_marker_write {
-        changed += 1;
-    }
     if let Some(val) = input.meta.tensor_facts().cloned() {
         ph_meta.set_val(val);
         changed += 1;
@@ -159,10 +141,10 @@ fn resolve_parent_arg_ids_ir(node: &fx_ir::IrNode) -> Vec<fx_ir::NodeId> {
 }
 
 /// The meta a region placeholder takes from the operand bound to it. A val is the
-/// tensor as TOSA sees it, on both sides of the boundary, and no node has a dim order.
-/// The placeholder takes the operand's val as it is, as rc4's `_regularize_submodule`
-/// gives region IO the parent's post-pass vals (`backends/arm/tosa/backend.py:204-249`),
-/// and the boundary writes no dim order (P2 design §1c, §4.3.1).
+/// tensor as TOSA sees it, on both sides of the boundary, so the placeholder takes the
+/// operand's val as it is, as rc4's `_regularize_submodule` gives region IO the
+/// parent's post-pass vals (`backends/arm/tosa/backend.py:204-249`; P2 design §1c,
+/// §4.3.1).
 fn boundary_placeholder_meta(ir: &fx_ir::IrGraph, parent_id: fx_ir::NodeId) -> fx_ir::NodeMeta {
     ir.node(parent_id).meta.clone()
 }
@@ -251,7 +233,7 @@ fn infer_output_qparams_map_ir(
     graph: &fx_ir::IrGraph,
     cf_id: fx_ir::NodeId,
 ) -> Vec<(usize, fx_ir::QParam)> {
-    let mut user_ids: Vec<fx_ir::NodeId> = graph.users(cf_id).to_vec();
+    let mut user_ids = graph.live_user_ids(cf_id);
     user_ids.sort_by(|&a, &b| {
         let ak = graph.node(a).args.get(1).and_then(|arg| match arg {
             fx_ir::IrArg::Int(i) => Some(*i),
@@ -272,9 +254,6 @@ fn infer_output_qparams_map_ir(
     let mut result = Vec::new();
     for user_id in user_ids {
         let user = graph.node(user_id);
-        if !user.alive {
-            continue;
-        }
         let idx = match user.args.get(1) {
             Some(fx_ir::IrArg::Int(i)) => *i as usize,
             _ => continue,
@@ -284,11 +263,8 @@ fn infer_output_qparams_map_ir(
             continue;
         }
         let mut found = false;
-        for &consumer_id in graph.users(user_id) {
+        for consumer_id in graph.live_user_ids(user_id) {
             let consumer = graph.node(consumer_id);
-            if !consumer.alive {
-                continue;
-            }
             if let Some(qparam) = consumer.meta.input_qparam() {
                 result.push((idx, qparam.clone()));
                 found = true;
@@ -298,9 +274,9 @@ fn infer_output_qparams_map_ir(
         if found {
             continue;
         }
-        for &consumer_id in graph.users(user_id) {
+        for consumer_id in graph.live_user_ids(user_id) {
             let consumer = graph.node(consumer_id);
-            if !consumer.alive || !consumer.is_dequantize() {
+            if !consumer.is_dequantize() {
                 continue;
             }
             if let Some(qparam) = consumer.parse_qdq_qparam() {
@@ -340,14 +316,11 @@ fn output_targets_ir(graph: &fx_ir::IrGraph, cf_id: fx_ir::NodeId) -> Vec<(usize
 fn recorded_output_targets_ir(graph: &fx_ir::IrGraph, cf_id: fx_ir::NodeId) -> fx_ir::QParamMap {
     let mut targets = fx_ir::QParamMap::new();
     let mut getitems: Vec<(usize, fx_ir::NodeId)> = graph
-        .users(cf_id)
-        .iter()
-        .filter_map(|&id| {
-            let node = graph.node(id);
-            match (node.alive, node.args.get(1)) {
-                (true, Some(fx_ir::IrArg::Int(index))) => Some((*index as usize, id)),
-                _ => None,
-            }
+        .live_user_ids(cf_id)
+        .into_iter()
+        .filter_map(|id| match graph.node(id).args.get(1) {
+            Some(fx_ir::IrArg::Int(index)) => Some((*index as usize, id)),
+            _ => None,
         })
         .collect();
     getitems.sort();
@@ -357,9 +330,9 @@ fn recorded_output_targets_ir(graph: &fx_ir::IrGraph, cf_id: fx_ir::NodeId) -> f
         }
         let node = graph.node(getitem);
         let quantized = node.meta.output_qparam().cloned().or_else(|| {
-            graph.users(getitem).iter().find_map(|&user| {
+            graph.live_user_ids(getitem).into_iter().find_map(|user| {
                 let user = graph.node(user);
-                (user.alive && user.is_quantize() && user.arg_node(0) == Some(getitem))
+                (user.is_quantize() && user.arg_node(0) == Some(getitem))
                     .then(|| user.parse_qdq_qparam())
                     .flatten()
             })
@@ -507,7 +480,7 @@ fn apply_boundary_contract_to_submodule(
     for (ph_id, input) in placeholder_ids.iter().copied().zip(contract.inputs.iter()) {
         let internal_qparam = graph.nodes[ph_id].meta.output_qparam().cloned();
         let external_qparam = boundary_external_qparam(input);
-        changed += stamp_boundary_placeholder_meta(&mut graph.nodes[ph_id].meta, input, false);
+        changed += stamp_boundary_placeholder_meta(&mut graph.nodes[ph_id].meta, input);
 
         let Some(external_qp) = external_qparam else {
             continue;
@@ -549,7 +522,7 @@ fn apply_qparam_contract_to_submodule(
 
     let mut changed = 0u32;
     for (ph_id, input) in placeholder_ids.iter().copied().zip(contract.inputs.iter()) {
-        changed += stamp_boundary_placeholder_meta(&mut graph.nodes[ph_id].meta, input, true);
+        changed += stamp_boundary_placeholder_meta(&mut graph.nodes[ph_id].meta, input);
     }
 
     changed
@@ -639,13 +612,13 @@ fn rewrite_output_dequantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
         let Some(source_id) = graph.nodes[dq_id].first_node_arg() else {
             continue;
         };
-        let user_ids = graph.users(dq_id).to_vec();
+        let user_ids = graph.live_user_ids(dq_id);
         if user_ids.is_empty() {
             continue;
         }
         let all_rescale_or_output = user_ids.iter().all(|&uid| {
             let user = &graph.nodes[uid];
-            user.alive && (user.is_rescale() || user.op == fx_ir::NodeOp::Output)
+            user.is_rescale() || user.op == fx_ir::NodeOp::Output
         });
         if !all_rescale_or_output {
             continue;
@@ -868,9 +841,8 @@ fn strip_while_cond_output_rescales_ir(graph: &mut fx_ir::IrGraph) -> u32 {
 /// At serialization: align every control-flow region's IO with the graph that invokes
 /// it (boundary vals and qparams, and RESCALEs for inputs and outputs whose qparams
 /// differ), then resolve the conv weights and biases the cond branches capture
-/// (`captured_conv`). No dim order is written: boundary placeholders take the
-/// operand's val. The regions' output qparams come from their output dequantizes
-/// (APU-135 S8).
+/// (`captured_conv`). Boundary placeholders take the operand's val. The regions'
+/// output qparams come from their output dequantizes (APU-135 S8).
 pub(crate) fn apply_boundary_contracts(
     parent_ir: &mut fx_ir::IrGraph,
     submodules: &mut BTreeMap<String, StashedPipeline>,

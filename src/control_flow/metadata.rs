@@ -16,7 +16,7 @@ impl IrPass for IrStripWhileBoundaryQPass {
 }
 
 /// IrPass: align each while_loop body output to its corresponding placeholder's
-/// quantization domain by inserting a RESCALE (output[i] feeds back as input[i],
+/// quantization domain by inserting a RESCALE (`output[i]` feeds back as `input[i]`,
 /// so their scale/zp must match). The IR analogue of FxInsertRescalePass::carried.
 pub struct IrInsertCarriedOutputRescalePass;
 impl IrPass for IrInsertCarriedOutputRescalePass {
@@ -222,7 +222,7 @@ pub(crate) fn strip_while_boundary_qdq_ir(graph: &mut IrGraph) -> bool {
     // Strip Q nodes from placeholders
     let ph_ids: Vec<NodeId> = graph.placeholders().map(|n| n.id).collect();
     for ph_id in ph_ids {
-        let user_ids = graph.users(ph_id).to_vec();
+        let user_ids = graph.live_user_ids(ph_id);
         for q_id in user_ids {
             if !graph.nodes[q_id].alive || !graph.nodes[q_id].is_quantize() {
                 continue;

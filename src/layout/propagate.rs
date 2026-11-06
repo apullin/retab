@@ -186,6 +186,7 @@ pub(crate) enum Direction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Overrides {
     /// The shared pass's defaults, as rc4's shared tests construct it.
+    #[cfg(test)]
     Shared,
     /// `TosaPropagationOverrides`, Arm's passes.
     Tosa,
@@ -221,6 +222,7 @@ impl PropagateConfig {
 
     /// Arm's pass constructed without arguments, as rc4's graph-level tests
     /// do (`PropagateViewCopyPermuteDownPass()`): no fusion pass.
+    #[cfg(test)]
     pub(crate) const fn arm_without_program(direction: Direction) -> Self {
         Self {
             direction,
@@ -231,6 +233,7 @@ impl PropagateConfig {
     }
 
     /// The shared pass constructed without arguments.
+    #[cfg(test)]
     pub(crate) const fn shared(direction: Direction) -> Self {
         Self {
             direction,
@@ -254,7 +257,9 @@ impl PropagateConfig {
             (_, _, true) => RuleId("propagate_view_copy_permute.hooked"),
             (Direction::Up, Overrides::Tosa, false) => RuleId("propagate_view_copy_permute.up.tosa"),
             (Direction::Down, Overrides::Tosa, false) => RuleId("propagate_view_copy_permute.down.tosa"),
+            #[cfg(test)]
             (Direction::Up, Overrides::Shared, false) => RuleId("propagate_view_copy_permute.up.shared"),
+            #[cfg(test)]
             (Direction::Down, Overrides::Shared, false) => RuleId("propagate_view_copy_permute.down.shared"),
         }
     }
@@ -316,7 +321,7 @@ thread_local! {
     pub(crate) static TRACE: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Log `ctx` under `label` in [`TRACE`] (test builds only).
+/// Log `ctx` under `label` in `TRACE` (test builds only).
 #[inline]
 fn trace(_ctx: &LayoutCtx<'_>, _label: impl FnOnce() -> String) {
     #[cfg(test)]
@@ -412,6 +417,7 @@ fn drive(ctx: &mut LayoutCtx<'_>, config: &PropagateConfig) -> bool {
 
 /// One sweep, `_propagate_iteration` (`:141-152`), without the fusions: rc4's
 /// tests call it directly.
+#[cfg(test)]
 pub(crate) fn propagate_iteration(ctx: &mut LayoutCtx<'_>, config: &PropagateConfig) -> bool {
     with_table_rescales(ctx, config, |ctx| {
         let mut propagator = Propagator::new(config);
@@ -420,7 +426,9 @@ pub(crate) fn propagate_iteration(ctx: &mut LayoutCtx<'_>, config: &PropagateCon
     })
 }
 
-/// `_propagate(node)` (`:238-282`) for one copy.
+/// `_propagate(node)` (`:238-282`) for one copy, which rc4's tests call
+/// directly.
+#[cfg(test)]
 pub(crate) fn propagate_node(ctx: &mut LayoutCtx<'_>, config: &PropagateConfig, node: NodeId) -> bool {
     with_table_rescales(ctx, config, |ctx| {
         let mut propagator = Propagator::new(config);
@@ -454,6 +462,7 @@ fn with_table_rescales(ctx: &mut LayoutCtx<'_>, config: &PropagateConfig, f: imp
 
 /// `_move_node(node, frontier, previous_frontier)`, which one of rc4's tests
 /// calls directly.
+#[cfg(test)]
 pub(crate) fn move_node(
     ctx: &mut LayoutCtx<'_>,
     config: &PropagateConfig,
@@ -465,12 +474,13 @@ pub(crate) fn move_node(
 }
 
 /// `is_swappable(node)`, which panics for a non-keepdim reduction under the
-/// TOSA overrides, as rc4 raises.
+/// TOSA overrides, as rc4 raises; rc4's tests call it directly.
+#[cfg(test)]
 pub(crate) fn is_swappable(ctx: &LayoutCtx<'_>, config: &PropagateConfig, node: NodeId) -> bool {
     Propagator::new(config).is_swappable(ctx, node, &mut Reads::default())
 }
 
-/// Count a branch in [`COVERAGE`] (test builds only).
+/// Count a branch in `COVERAGE` (test builds only).
 #[inline]
 fn cover(_branch: &'static str) {
     #[cfg(test)]

@@ -242,10 +242,8 @@ impl NodeMeta {
             .and_then(|v| extract_qparam_dict(&v));
 
         let mut extras = HashMap::new();
-        for key in ["arm_control_flow_placeholder", "do_not_fuse_duplicate"] {
-            if let Some(b) = meta_attrs.optional::<bool>(key) {
-                extras.insert(key.into(), MetaValue::Bool(b));
-            }
+        if let Some(b) = meta_attrs.optional::<bool>("do_not_fuse_duplicate") {
+            extras.insert("do_not_fuse_duplicate".into(), MetaValue::Bool(b));
         }
         if let Some(b) = meta_attrs.optional::<bool>("skip_size_adjust") {
             extras.insert("skip_size_adjust".into(), MetaValue::Bool(b));
@@ -576,22 +574,6 @@ impl NodeMeta {
 
     pub fn clear_tosa_special_dtype(&mut self) -> bool {
         self.extras.remove("tosa_special_dtype").is_some()
-    }
-
-    // Temporary (APU-162): no-op stand-ins for RETAB's deleted tosa_dim_order, which
-    // nothing reads any more. They keep src/control_flow's remaining calls compiling;
-    // they go when that code drops the calls (the dead-code lint flags them then).
-    pub fn replace_tosa_dim_order(&mut self, _order: Option<Vec<usize>>) {}
-
-    pub fn set_tosa_dim_order(&mut self, _order: Vec<usize>) {}
-
-    pub fn cloned_tosa_dim_order(&self) -> Option<Vec<usize>> {
-        None
-    }
-
-    #[cfg(test)]
-    pub fn tosa_dim_order(&self) -> Option<&[usize]> {
-        None
     }
 
     pub fn set_empty_qparam_maps(&mut self) {

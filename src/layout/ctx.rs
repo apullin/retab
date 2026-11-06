@@ -98,10 +98,6 @@ impl NodeOrder {
         self.len
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
     pub(crate) fn contains(&self, id: NodeId) -> bool {
         self.key.get(id).is_some_and(|&key| key != UNPLACED)
     }
@@ -110,6 +106,7 @@ impl NodeOrder {
         non_nil(self.head)
     }
 
+    #[cfg(test)]
     pub(crate) fn last(&self) -> Option<NodeId> {
         non_nil(self.tail)
     }
@@ -155,6 +152,7 @@ impl NodeOrder {
     }
 
     /// Nodes in reverse order: `reversed(graph.nodes)`.
+    #[cfg(test)]
     pub(crate) fn iter_rev(&self) -> impl Iterator<Item = NodeId> + '_ {
         std::iter::successors(self.last(), move |&id| non_nil(self.prev[id]))
     }
@@ -491,6 +489,7 @@ impl<'g> LayoutCtx<'g> {
         self.graph
     }
 
+    #[cfg(test)]
     pub(crate) fn scope(&self) -> GraphScope {
         self.scope
     }
@@ -573,6 +572,7 @@ impl<'g> LayoutCtx<'g> {
         self.stamp_in_graph_order();
     }
 
+    #[cfg(test)]
     pub(crate) fn insert_point(&self) -> InsertPoint {
         self.insert_point
     }
@@ -950,10 +950,6 @@ impl<'g> LayoutCtx<'g> {
         })
     }
 
-    pub(crate) fn forget_attempt(&mut self, rule: RuleId, anchor: NodeId) {
-        self.attempts.remove(&(rule, anchor));
-    }
-
     /// Whether every node comes after the live nodes it reads, which
     /// `Graph.lint` requires (torch/fx/graph.py:2612) and `finish` needs.
     pub(crate) fn is_topological(&self) -> bool {
@@ -1209,7 +1205,7 @@ mod tests {
         order.sort(&mut ids);
         assert_eq!(ids, [4, 0, 2]);
         assert_consistent(&order);
-        assert!(NodeOrder::new(&[]).is_empty());
+        assert_eq!(NodeOrder::new(&[]).len(), 0);
     }
 
     /// The FX no-op cases: `n.prepend(n)`, `n.append(n)`, `n.append(n.next)`
@@ -2127,9 +2123,6 @@ mod tests {
             !ctx.should_retry(RULE, b),
             "a node already erased when read does not force retries"
         );
-
-        ctx.forget_attempt(RULE, b);
-        assert!(ctx.should_retry(RULE, b));
     }
 
     /// A pass appended `n` and anchored it before `a`, as RETAB's rewrite
@@ -2207,8 +2200,8 @@ mod tests {
         assert_eq!(graph.node(3).args[0].as_node(), Some(2), "c reads a");
         assert_eq!(graph.node(3).kwargs["other"].as_node(), Some(1));
         assert_eq!(graph.live_user_ids(1), [2, 3]);
-        assert_eq!(graph.users(0), [1]);
-        assert_eq!(graph.users(2), [3]);
+        assert_eq!(graph.live_user_ids(0), [1]);
+        assert_eq!(graph.live_user_ids(2), [3]);
     }
 
     #[test]
