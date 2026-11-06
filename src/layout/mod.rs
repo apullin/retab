@@ -29,6 +29,12 @@ pub(crate) mod pointwise;
 pub(crate) mod shape;
 #[allow(dead_code)]
 pub(crate) mod table;
+// rc4's own tests for the P1 passes, ported (APU-135 P1).
+#[cfg(test)]
+mod p1_upstream_tests;
+// rc4 graph dumps as test fixtures and expectations.
+#[cfg(test)]
+pub(crate) mod rc4_dump;
 // Helpers beyond those shape.rs's tests use are for the P1-P3 pass tests.
 #[cfg(test)]
 #[allow(dead_code)]
