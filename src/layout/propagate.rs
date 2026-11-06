@@ -103,9 +103,13 @@
 //! passes and their neighbours; a region search costs the region and its
 //! boundary, and rc4's `enumerate(graph.nodes)` order index (`:1108-1111`) is a
 //! sort by the ctx's order keys. The fusions cost what their ports cost: an
-//! O(N) scan each, with memos that skip unchanged nodes across rounds. In all,
+//! O(N) scan each, with memos that skip unchanged nodes across rounds. A
+//! re-trace point re-derives only the users of the nodes refreshed since the
+//! last one, and goes further only where a value changed. In all,
 //! O(R·N + I·T·log T) plus the rewrites and the retried walks, for R fusion
 //! rounds and I sweeps; rc4 is O((R + I)·N) re-traces on top of the same work.
+//! `propagate_scaling_tests` times both passes on 50-60k-node graphs at
+//! 0.2-0.45 s in a release test build, growing about linearly.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
