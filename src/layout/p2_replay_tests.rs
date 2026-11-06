@@ -531,6 +531,7 @@ fn p2_fixtures_round_trip_through_the_importer() {
         dim_orders: DimOrders::All,
         dead_nodes: true,
         float32_activations: false,
+        modified: false,
     };
     for (name, fixture, _, _) in fixtures() {
         for case in cases(fixture) {

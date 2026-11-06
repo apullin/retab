@@ -442,6 +442,13 @@ thread_local! {
     static CHECK_USERS_AFTER_EDIT: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
+/// Switch the per-edit user-index check on or off for this thread, as timing
+/// tests on large graphs outside this module need. Returns the old setting.
+#[cfg(test)]
+pub(crate) fn set_check_users_after_edit(enabled: bool) -> bool {
+    CHECK_USERS_AFTER_EDIT.with(|check| check.replace(enabled))
+}
+
 /// The full graph: ordered list of nodes + lookup by name.
 #[derive(Debug)]
 pub struct IrGraph {

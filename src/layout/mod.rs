@@ -22,7 +22,13 @@ pub(crate) mod dim_maps;
 #[allow(dead_code)]
 pub(crate) mod dtype;
 #[allow(dead_code)]
+pub(crate) mod fuse_duplicate_users;
+#[allow(dead_code)]
+pub(crate) mod fuse_identical_input_transforms;
+#[allow(dead_code)]
 pub(crate) mod fuse_view_copy;
+#[allow(dead_code)]
+pub(crate) mod fx_node;
 #[allow(dead_code)]
 pub(crate) mod high_rank_singleton_permute;
 #[allow(dead_code)]
@@ -30,6 +36,8 @@ pub(crate) mod match_arg_ranks;
 // rc4's meta rules for created nodes (`create_node`, `call_operator`).
 #[allow(dead_code)]
 pub(crate) mod meta;
+#[allow(dead_code)]
+pub(crate) mod move_data_movement;
 #[allow(dead_code)]
 pub(crate) mod normalize_delegate_io;
 #[allow(dead_code)]
@@ -60,3 +68,16 @@ mod p1_replay_tests;
 mod p2_replay_tests;
 #[cfg(test)]
 pub(crate) mod replay;
+// rc4 replays of FuseDuplicateUsers, FuseIdenticalInputTransforms and
+// MoveDataMovementOpsToSmallerDtype (APU-160).
+#[cfg(test)]
+mod fuse_helpers_replay_tests;
+// rc4's own tests for those three passes, ported.
+#[cfg(test)]
+mod fuse_helpers_upstream_tests;
+// Large-graph checks and timings for those three passes.
+#[cfg(test)]
+mod fuse_helpers_scaling_tests;
+// Adversarial review of those three ports: rc4 behaviours they miss.
+#[cfg(test)]
+mod fuse_helpers_review_tests;

@@ -1,13 +1,14 @@
 //! Replays ExecuTorch v1.6.0-rc4's layout passes against the RETAB ports
-//! (APU-135 P1 and P2).
+//! (APU-135 P1, P2 and the P3 helpers of APU-160).
 //!
 //! `tests/fixtures/layout_replay/gen_layout_replay.py` records rc4 graphs
 //! before and after a pass, one fixture per pass (the format is in the
-//! generator's docstring). The P1 fixtures run the real rc4 pass on hand-built
-//! edge graphs; the P2 fixtures (`format 2`) capture the graphs rc4's
-//! ArmPassManager pipeline hands to the pass and gets back while it lowers
-//! small quantized models. [`check`] rebuilds every "before" graph as an
-//! `IrGraph`, runs the port and compares the result with rc4's "after" graph:
+//! generator's docstring). The P1 and APU-160 fixtures (format 1) run the real
+//! rc4 pass on hand-built edge graphs; the P2 fixtures (`format 2`) capture
+//! the graphs rc4's ArmPassManager pipeline hands to the pass and gets back
+//! while it lowers small quantized models. [`check`] rebuilds every "before"
+//! graph as an `IrGraph`, runs the port and compares the result with rc4's
+//! "after" graph:
 //!
 //! - nodes in graph order (`IrGraph::topological_live_node_ids`, which
 //!   `LayoutCtx::finish`'s renumbering makes the ctx order), with each node's
@@ -18,10 +19,24 @@
 //!   as None) is the same as no kwarg;
 //! - each node's dtype and shape, and whether its `input_qparams` and
 //!   `output_qparams` maps are absent, empty or hold which keys;
-//! - placeholders' constant kinds;
+//! - each node's TOSA special dtype (`tosa_special_dtype`) and
+//!   `do_not_fuse_duplicate` marker;
+//! - placeholders' constant kinds, and in format 1 their targets (format 2
+//!   records none);
 //! - the output node's argument;
-//! - in format 2 also every qparam's value, each constant's data, special
-//!   dtypes (`tosa_special_dtype`) and the `do_not_fuse_duplicate` flag.
+//! - in format 2 also every qparam's value and each constant's data.
+//!
+//! The P1 fixtures predate the special dtypes, markers and targets in format
+//! 1, but their graphs hold none, so they read the same either way.
+//!
+//! A case where rc4's pass raised (`after raises=...`) matches when the port
+//! panics, as the P1 ports fail where rc4 raises. The `modified` flag the pass
+//! returns is compared only on request (`Options::modified`): the propagation
+//! driver loops on it, so its helpers check it, while the P1 replays predate
+//! the option (all agree with rc4 except IrRewriteHighRankSingletonPermute,
+//! which returns false in 18 cases where rc4 reports a change it didn't make).
+//! A format-2 case's flag is whether the pass changed the graph
+//! ([`Case::modified`]).
 //!
 //! Dim orders are recorded but compared only on request (`Options::dim_orders`).
 //! rc4's passes end in an `ExportPass` retrace that recomputes every val, so a
@@ -52,21 +67,29 @@
 //! devices, layouts and memory formats the importer can't read. Every node
 //! gets its val's dim order, the identity unless the fixture says otherwise,
 //! as `NodeMeta::from_fx` records `val.dim_order()`; a val that isn't a
-//! tensor (a tuple) imports as no val at all. Constant placeholders and
-//! `get_attr` nodes get a `NodeTensor`, which is how RETAB tells parameters,
-//! buffers and lifted constants from runtime inputs: the fixture's data in
-//! format 2 (int64 data narrowed to int32 the way `extract_tensor_data` does
-//! it, and widened back for comparison), zeros otherwise. QParam maps keep the
-//! fixture's keys; empty maps stay empty (the importer drops them, but RETAB
-//! passes create them), so the ports' handling of both is visible. In format 1
-//! the values are placeholders; in format 2 they are rc4's, built the way
-//! IrFoldQdq builds the qparams RETAB's IR holds at the P2 slots (a per-channel
-//! qparam keeps its first scale and zero point in `scale` and `zp` besides its
-//! lists, `resolve_per_channel_qparam` in src/fx_fold_qdq_ir.rs). Special
-//! dtypes import in RETAB's own spelling (`INT48`, as RETAB's passes write it),
-//! and so do the TOSA targets of format-2 before graphs: RETAB's passes create
-//! `backend.tosa.X` (`IrGraph::add_rescale`, for one), where rc4's capture
-//! prints `tosa.X`.
+//! tensor (a tuple) imports as no val at all. A placeholder's target is its
+//! name unless the fixture gives another (`target=`). Constant placeholders
+//! and `get_attr` nodes get a `NodeTensor`, which is how RETAB tells
+//! parameters, buffers and lifted constants from runtime inputs: the fixture's
+//! data in format 2 (int64 data narrowed to int32 the way
+//! `extract_tensor_data` does it, and widened back for comparison), zeros
+//! otherwise. QParam maps keep the fixture's keys; empty maps stay empty (the
+//! importer drops them, but RETAB passes create them), so the ports' handling
+//! of both is visible. In format 1 a key holds the generator's placeholder
+//! value ([`placeholder_qparam`]) unless a `qp=` annotation gives its value,
+//! and the values only build the "before" graph: the comparison checks keys.
+//! In format 2 every value is rc4's, built the way IrFoldQdq builds the
+//! qparams RETAB's IR holds at the P2 slots (a per-channel qparam keeps its
+//! first scale and zero point in `scale` and `zp` besides its lists,
+//! `resolve_per_channel_qparam` in src/fx_fold_qdq_ir.rs), and compared.
+//!
+//! Special dtypes import ([`import`]) as RETAB's importer records them in
+//! format 1, the enum's display (`TosaSpecialDtype.INT48`,
+//! `NodeMeta::from_fx`), and in RETAB's own spelling in format 2 (`INT48`, as
+//! RETAB's passes write it before the P2 slots), which is also how [`build`]
+//! writes them. The TOSA targets of format-2 before graphs import in RETAB's
+//! spelling too: RETAB's passes create `backend.tosa.X`
+//! (`IrGraph::add_rescale`, for one), where rc4's capture prints `tosa.X`.
 //!
 //! Dtypes (format 2, design F2 and critique A11): rc4 types a quantized
 //! activation int8 or int16 while RETAB's IR keeps it float32 and carries the
@@ -83,11 +106,13 @@
 //! Usage: a pass's replay test is one line,
 //! `replay::check(&IrFooPass, include_str!("../../tests/fixtures/layout_replay/foo.txt"))`.
 //! [`check_known`] names cases still expected to differ, with a reason, and
-//! fails once one matches; [`check_cases`] and [`check_cases_with`] replay
-//! chosen cases, as the ignored BUG tests in `p1_replay_tests` do. There,
+//! fails once one matches, and [`check_known_with`] adds checks such as the
+//! `modified` flag; [`check_cases`] and [`check_cases_with`] replay chosen
+//! cases, as the ignored BUG tests in `p1_replay_tests` do. There,
 //! `replay_report` prints per-pass statistics under every comparison mode and
 //! `replay_external` replays fixtures too large to commit (a fuzzing run).
-//! `p2_replay_tests` holds the P2 fixtures' sanity tests and their replay hooks.
+//! `p2_replay_tests` holds the P2 fixtures' sanity tests and their replay
+//! hooks, and `fuse_helpers_replay_tests` the APU-160 replays.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Write as _};
@@ -98,6 +123,8 @@ use crate::fx_ir::{
     NodeTensor, PlaceholderTensorBinding, QParam, QParamMap, TensorSource,
 };
 use crate::graph::ir::DType;
+use crate::layout::fuse_duplicate_users::DO_NOT_FUSE_DUPLICATE_META_KEY;
+use crate::layout::fx_node::{special_dtype, SPECIAL_DTYPE_KEY};
 use crate::lowering_effects::LoweringInputKind;
 use crate::store::TensorData;
 
@@ -108,11 +135,10 @@ pub(crate) const FORMAT: u32 = 2;
 pub(crate) const DATA_HEX_LIMIT: usize = 4096;
 
 const FLOAT32: &str = "torch.float32";
-const SPECIAL_DTYPE: &str = "tosa_special_dtype";
-const DO_NOT_FUSE: &str = "do_not_fuse_duplicate";
 
-/// An argument, with node references as positions in the graph.
-#[derive(Debug, Clone, PartialEq)]
+/// An argument, with node references as positions in the graph. Equality
+/// holds a NaN equal to a NaN: both graphs print the same `nan`.
+#[derive(Debug, Clone)]
 pub(crate) enum Arg {
     Node(usize),
     Int(i64),
@@ -127,13 +153,32 @@ pub(crate) enum Arg {
     None,
 }
 
+impl PartialEq for Arg {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Node(a), Self::Node(b)) => a == b,
+            (Self::Int(a), Self::Int(b)) => a == b,
+            (Self::Float(a), Self::Float(b)) => a == b || (a.is_nan() && b.is_nan()),
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::Str(a), Self::Str(b))
+            | (Self::Dtype(a), Self::Dtype(b))
+            | (Self::Opaque(a), Self::Opaque(b)) => a == b,
+            (Self::List(a), Self::List(b)) => a == b,
+            (Self::None, Self::None) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Op {
     /// `constant` is `param`, `buffer` or `constant` for a constant placeholder
-    /// (`attr` for one backed by a graph-module attribute).
+    /// (`attr` for one backed by a graph-module attribute); `target` is the
+    /// placeholder's target when it isn't its name.
     Placeholder {
         name: String,
         constant: Option<String>,
+        target: Option<String>,
     },
     GetAttr {
         name: String,
@@ -174,7 +219,8 @@ pub(crate) struct QValue {
 }
 
 /// A qparam map: its keys in order, each with its value when the fixture
-/// records one (format 2).
+/// records one: every key in format 2, a key a `qp=` annotation gives in
+/// format 1 (the others hold [`placeholder_qparam`]).
 pub(crate) type QMap = Vec<(usize, Option<QValue>)>;
 
 /// A constant's data: its bytes, or the SHA-256 digest (lowercase hex) of
@@ -195,9 +241,10 @@ pub(crate) struct Node {
     pub(crate) q_out: Option<QMap>,
     /// The constant's data (format 2), in its own dtype.
     pub(crate) data: Option<Data>,
-    /// `tosa_special_dtype`, without the `TosaSpecialDtype.` prefix.
+    /// The `TosaSpecialDtype` member name in `meta["tosa_special_dtype"]`,
+    /// without the `TosaSpecialDtype.` prefix.
     pub(crate) special: Option<String>,
-    /// `do_not_fuse_duplicate` is set.
+    /// `meta["do_not_fuse_duplicate"]` is set.
     pub(crate) no_fuse: bool,
     pub(crate) dead: bool,
 }
@@ -211,12 +258,15 @@ pub(crate) struct Graph {
 #[derive(Debug, Clone)]
 pub(crate) struct Case {
     pub(crate) name: String,
-    /// The fixture's format: 1 for the P1 fixtures, 2 for the P2 ones.
+    /// The fixture's format: 1 for the hand-built P1 and APU-160 fixtures, 2
+    /// for the pipeline-captured P2 ones.
     pub(crate) format: u32,
     pub(crate) before: Graph,
     /// The `modified` flag rc4's pass returned (format 1) or whether the pass
     /// changed the graph (format 2, whose capture hooks can't see the flag).
     pub(crate) modified: bool,
+    /// The exception rc4's pass raised; `after` is then a copy of `before`.
+    pub(crate) raises: Option<String>,
     pub(crate) after: Graph,
 }
 
@@ -239,6 +289,8 @@ pub(crate) struct Options {
     /// Accept RETAB's float32 for rc4's quantized activations (design F2);
     /// set for every format-2 case.
     pub(crate) float32_activations: bool,
+    /// Compare the pass's `modified` flag with rc4's ([`Case::modified`]).
+    pub(crate) modified: bool,
 }
 
 /// The first difference between rc4's graph and RETAB's.
@@ -282,7 +334,17 @@ pub(crate) fn check(pass: &dyn IrPass, fixture: &str) {
 /// Like [`check`], except that each `(case, reason)` in `known` must still
 /// differ from rc4, so the list shrinks as the port is fixed.
 pub(crate) fn check_known(pass: &dyn IrPass, fixture: &str, known: &[(&str, &str)]) {
-    let results = replay(pass, fixture, Options::default());
+    check_known_with(pass, fixture, known, Options::default());
+}
+
+/// [`check_known`] with more checks, such as the `modified` flag.
+pub(crate) fn check_known_with(
+    pass: &dyn IrPass,
+    fixture: &str,
+    known: &[(&str, &str)],
+    options: Options,
+) {
+    let results = replay(pass, fixture, options);
     let mut problems = Vec::new();
     for (name, _) in known {
         match results.iter().find(|result| result.name == *name) {
@@ -357,12 +419,18 @@ pub(crate) fn replay(pass: &dyn IrPass, fixture: &str, options: Options) -> Vec<
 }
 
 /// The graph a replay hands the port: `case.before` as RETAB's importer
-/// would build it, with RETAB's dtypes and TOSA target spelling in format 2.
+/// would build it, with the importer's special-dtype spelling in format 1 and
+/// RETAB's dtypes and spellings in format 2 (see the module docs).
 pub(crate) fn import(case: &Case) -> IrGraph {
-    build(&as_imported(case))
+    let special_prefix = if case.format >= 2 {
+        ""
+    } else {
+        IMPORTED_SPECIAL_PREFIX
+    };
+    build_with(&as_imported(case), special_prefix)
 }
 
-/// [`import`]'s graph in fixture form.
+/// [`import`]'s graph in fixture form, special dtypes by member name.
 pub(crate) fn as_imported(case: &Case) -> Graph {
     if case.format >= 2 {
         retab_targets(&retab_dtypes(&case.before))
@@ -371,21 +439,25 @@ pub(crate) fn as_imported(case: &Case) -> Graph {
     }
 }
 
-/// Compare RETAB's graph after a replay of `case` with rc4's: [`compare`],
-/// with format 2's float32 activations and dead nodes (its graphs hold no
-/// dead code, so one RETAB leaves is a difference), or without the details
-/// format 1 doesn't record.
+/// Compare RETAB's graph after a replay of `case` with rc4's: [`compare`] of
+/// what the case's format records and compares ([`comparable`]), with format
+/// 2's float32 activations and dead nodes (its graphs hold no dead code, so
+/// one RETAB leaves is a difference).
 pub(crate) fn compare_case(case: &Case, actual: &Graph, options: Options) -> Result<(), Mismatch> {
-    if case.format >= 2 {
-        let options = Options {
+    let options = if case.format >= 2 {
+        Options {
             float32_activations: true,
             dead_nodes: true,
             ..options
-        };
-        compare(&case.after, actual, options)
+        }
     } else {
-        compare(&case.after, &without_details(actual), options)
-    }
+        options
+    };
+    compare(
+        &comparable(&case.after, case.format),
+        &comparable(actual, case.format),
+        options,
+    )
 }
 
 pub(crate) fn replay_case(pass: &dyn IrPass, case: &Case, options: Options) -> CaseResult {
@@ -395,16 +467,25 @@ pub(crate) fn replay_case(pass: &dyn IrPass, case: &Case, options: Options) -> C
         Ok(modified) => (Some(modified), snapshot(&graph)),
         Err(payload) => (None, Err(panic_message(payload.as_ref()))),
     };
-    let actual = actual.map(|actual| {
-        if case.format >= 2 {
-            actual
-        } else {
-            without_details(&actual)
-        }
-    });
-    let mismatch = match &actual {
-        Ok(actual) => compare_case(case, actual, options).err(),
-        Err(error) => Some(Mismatch {
+    // RETAB's graph as the case's format compares it, which the report shows.
+    let actual = actual.map(|actual| comparable(&actual, case.format));
+    let mismatch = match (&case.raises, &actual) {
+        (Some(_), _) if retab_modified.is_none() => None,
+        (Some(exception), _) => Some(Mismatch {
+            class: "raises",
+            detail: format!("rc4 raises {exception}; RETAB returned without panicking"),
+        }),
+        (None, Ok(actual)) => compare_case(case, actual, options).err().or_else(|| {
+            (options.modified && retab_modified != Some(case.modified)).then(|| Mismatch {
+                class: "modified",
+                detail: format!(
+                    "rc4 modified={}, RETAB modified={}",
+                    case.modified,
+                    retab_modified.map_or("panic".to_string(), |modified| modified.to_string())
+                ),
+            })
+        }),
+        (None, Err(error)) => Some(Mismatch {
             class: if retab_modified.is_none() {
                 "panic"
             } else {
@@ -426,6 +507,10 @@ pub(crate) fn replay_case(pass: &dyn IrPass, case: &Case, options: Options) -> C
                 ""
             };
             let before = as_imported(case);
+            let rc4_after = match &case.raises {
+                Some(exception) => format!("    <raises {exception}>\n"),
+                None => case.after.to_string(),
+            };
             format!(
                 "case {} ({}): {}\n  before{note}:\n{}  rc4 after (modified={}):\n{}  RETAB after (modified={}):\n{}",
                 case.name,
@@ -433,7 +518,7 @@ pub(crate) fn replay_case(pass: &dyn IrPass, case: &Case, options: Options) -> C
                 mismatch.detail,
                 before,
                 case.modified,
-                case.after,
+                rc4_after,
                 retab_modified.map_or("panic".to_string(), |modified| modified.to_string()),
                 actual
             )
@@ -514,6 +599,25 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Case>, String> {
         let (number, header) = lines
             .next()
             .ok_or_else(|| format!("case {name}: missing `after`"))?;
+        if let Some(exception) = header.strip_prefix("after raises=") {
+            match lines.next() {
+                Some((_, "end")) => {}
+                Some((number, line)) => {
+                    return Err(at(number, format!("expected `end`, got {line:?}")))
+                }
+                None => return Err(format!("case {name}: missing `end`")),
+            }
+            check_graph(&before, format).map_err(|error| format!("case {name} (before): {error}"))?;
+            cases.push(Case {
+                name: name.to_string(),
+                format,
+                after: before.clone(),
+                before,
+                modified: false,
+                raises: Some(exception.to_string()),
+            });
+            continue;
+        }
         let rest = header.strip_prefix("after modified=").ok_or_else(|| {
             at(
                 number,
@@ -542,17 +646,14 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Case>, String> {
             None => return Err(format!("case {name}: missing `end`")),
         }
         for (graph, label) in [(&before, "before"), (&after, "after")] {
-            check_dead_flags(graph).map_err(|error| format!("case {name} ({label}): {error}"))?;
-            if format >= 2 {
-                check_details(graph)
-                    .map_err(|error| format!("case {name} ({label}): {error}"))?;
-            }
+            check_graph(graph, format).map_err(|error| format!("case {name} ({label}): {error}"))?;
         }
         cases.push(Case {
             name: name.to_string(),
             format,
             before,
             modified,
+            raises: None,
             after,
         });
     }
@@ -608,6 +709,7 @@ fn parse_node(line: &str, position: usize) -> Result<Node, String> {
         Op::Placeholder {
             name,
             constant: None,
+            target: None,
         }
     } else if cursor.eat("get_attr ") {
         let name = cursor.until(" : ")?.to_string();
@@ -635,10 +737,12 @@ fn parse_node(line: &str, position: usize) -> Result<Node, String> {
         no_fuse: false,
         dead: false,
     };
+    let mut given = Vec::new();
     for note in cursor.rest().split(' ').filter(|note| !note.is_empty()) {
         if note == "dead" {
             node.dead = true;
-        } else if note == "no_fuse" {
+        } else if note == "no_fuse" || note == "nofuse" {
+            // Format 2 spells the marker `no_fuse`, format 1 `nofuse`.
             node.no_fuse = true;
         } else if let Some(order) = note.strip_prefix("dim_order=") {
             node.dim_order = Some(parse_usizes(order, '[', ']')?);
@@ -647,6 +751,13 @@ fn parse_node(line: &str, position: usize) -> Result<Node, String> {
                 Op::Placeholder { constant, .. } => *constant = Some(kind.to_string()),
                 _ => return Err("kind= on a node that isn't a placeholder".to_string()),
             }
+        } else if let Some(name) = note.strip_prefix("target=") {
+            match &mut node.op {
+                Op::Placeholder { target, .. } => *target = Some(name.to_string()),
+                _ => return Err("target= on a node that isn't a placeholder".to_string()),
+            }
+        } else if let Some(spec) = note.strip_prefix("qp=") {
+            given.push(parse_qp(spec)?);
         } else if let Some(spec) = note.strip_prefix("q=") {
             (node.q_in, node.q_out) = parse_qparams(spec)?;
         } else if let Some(data) = note.strip_prefix("data=") {
@@ -655,6 +766,18 @@ fn parse_node(line: &str, position: usize) -> Result<Node, String> {
             node.special = Some(special.to_string());
         } else {
             return Err(format!("unknown annotation {note:?}"));
+        }
+    }
+    // A `qp=` value belongs to a key of the `q=` maps that has none yet.
+    for (input, key, value) in given {
+        let label = if input { "in" } else { "out" };
+        let map = if input { &mut node.q_in } else { &mut node.q_out };
+        let entry = map
+            .as_mut()
+            .and_then(|map| map.iter_mut().find(|(slot, _)| *slot == key))
+            .ok_or_else(|| format!("qp={label}{key} names a key its q= map lacks"))?;
+        if entry.1.replace(value).is_some() {
+            return Err(format!("qparam {label}{key} has two values"));
         }
     }
     Ok(node)
@@ -828,6 +951,45 @@ fn hex_encode(bytes: &[u8]) -> String {
         let _ = write!(text, "{byte:02x}");
     }
     text
+}
+
+/// `qp=in0:0.25:0:-128:127:torch.int8` (format 1): whether the value is an
+/// input qparam, its key, and the per-tensor value from scale, zero point,
+/// qmin, qmax and dtype.
+fn parse_qp(spec: &str) -> Result<(bool, usize, QValue), String> {
+    let bad = || format!("bad qparam value {spec:?}");
+    let fields: Vec<&str> = spec.split(':').collect();
+    let [slot, scale, zp, qmin, qmax, dtype] = fields[..] else {
+        return Err(bad());
+    };
+    let (input, key) = if let Some(key) = slot.strip_prefix("in") {
+        (true, key)
+    } else if let Some(key) = slot.strip_prefix("out") {
+        (false, key)
+    } else {
+        return Err(bad());
+    };
+    let int = |text: &str| text.parse::<i64>().map_err(|_| bad());
+    let value = QValue {
+        dtype: dtype.to_string(),
+        per_channel: false,
+        scales: vec![scale.parse().map_err(|_| bad())?],
+        zps: vec![int(zp)?],
+        qmin: int(qmin)?,
+        qmax: int(qmax)?,
+        axis: 0,
+    };
+    Ok((input, key.parse().map_err(|_| bad())?, value))
+}
+
+/// The checks every graph of a `format` fixture passes: [`check_dead_flags`],
+/// and in format 2 [`check_details`].
+fn check_graph(graph: &Graph, format: u32) -> Result<(), String> {
+    check_dead_flags(graph)?;
+    if format >= 2 {
+        check_details(graph)?;
+    }
+    Ok(())
 }
 
 /// rc4's `dead` flags must agree with liveness computed from the output.
@@ -1170,19 +1332,33 @@ fn dtype_matches(node: &Node, want: &str, got: &str, float32_activations: bool) 
 // Building the "before" IrGraph
 // ---------------------------------------------------------------------------
 
+/// How RETAB's importer records a special dtype: the enum's display,
+/// `TosaSpecialDtype.INT48` (`NodeMeta::from_fx`).
+const IMPORTED_SPECIAL_PREFIX: &str = "TosaSpecialDtype.";
+
 /// The `IrGraph` RETAB's importer would build for `graph`, with `graph`'s
-/// dtypes as they are; [`import`] adds RETAB's dtypes for format 2.
+/// dtypes as they are and special dtypes in RETAB's spelling (`INT48`);
+/// [`import`] adds each format's dtypes and spellings.
 pub(crate) fn build(graph: &Graph) -> IrGraph {
+    build_with(graph, "")
+}
+
+/// [`build`], with `special_prefix` before each special dtype's member name.
+fn build_with(graph: &Graph, special_prefix: &str) -> IrGraph {
     let mut ir = IrGraph::empty();
     let mut ids: Vec<NodeId> = Vec::with_capacity(graph.nodes.len());
     for (position, node) in graph.nodes.iter().enumerate() {
-        let meta = node_meta(node);
+        let meta = node_meta(node, special_prefix);
         let id = match &node.op {
-            Op::Placeholder { name, constant } => {
+            Op::Placeholder {
+                name,
+                constant,
+                target,
+            } => {
                 let id = ir.add_node(
                     NodeOp::Placeholder,
                     name.clone(),
-                    name.clone(),
+                    target.clone().unwrap_or_else(|| name.clone()),
                     Vec::new(),
                     meta,
                 );
@@ -1245,7 +1421,7 @@ fn ir_arg(arg: &Arg, ids: &[NodeId]) -> IrArg {
     }
 }
 
-fn node_meta(node: &Node) -> NodeMeta {
+fn node_meta(node: &Node, special_prefix: &str) -> NodeMeta {
     let mut meta = match &node.val {
         Val::Tensor { dtype, shape } => {
             let mut meta = NodeMeta::tensor(shape.clone(), dtype.clone());
@@ -1266,19 +1442,28 @@ fn node_meta(node: &Node) -> NodeMeta {
         meta.set_output_qparams(qparam_map(map));
     }
     if let Some(special) = &node.special {
-        meta.set_extra(SPECIAL_DTYPE, MetaValue::Str(special.clone()));
+        meta.set_extra(
+            SPECIAL_DTYPE_KEY,
+            MetaValue::Str(format!("{special_prefix}{special}")),
+        );
     }
     if node.no_fuse {
-        meta.set_extra(DO_NOT_FUSE, MetaValue::Bool(true));
+        meta.set_extra(DO_NOT_FUSE_DUPLICATE_META_KEY, MetaValue::Bool(true));
     }
     meta
+}
+
+/// The qparam a fixture key holds unless the fixture gives its value (a
+/// format-1 key without a `qp=` annotation): the generator's `QARGS`.
+pub(crate) fn placeholder_qparam() -> QParam {
+    QParam::per_tensor(0.5, 0, -128, 127, "torch.int8".to_string())
 }
 
 fn qparam_map(map: &QMap) -> QParamMap {
     QParamMap::from_pairs(map.iter().map(|(key, value)| {
         let qparam = match value {
             Some(value) => qparam(value),
-            None => QParam::per_tensor(0.5, 0, -128, 127, "torch.int8".to_string()),
+            None => placeholder_qparam(),
         };
         (*key, qparam)
     }))
@@ -1402,6 +1587,7 @@ pub(crate) fn snapshot(ir: &IrGraph) -> Result<Graph, String> {
             NodeOp::Placeholder => Op::Placeholder {
                 name: node.name.clone(),
                 constant: node.tensor.as_ref().map(constant_kind),
+                target: (node.target != node.name).then(|| node.target.clone()),
             },
             NodeOp::GetAttr => Op::GetAttr {
                 name: node.name.clone(),
@@ -1440,13 +1626,9 @@ pub(crate) fn snapshot(ir: &IrGraph) -> Result<Graph, String> {
             q_in: node.meta.input_qparams().map(fixture_qmap),
             q_out: node.meta.output_qparams().map(fixture_qmap),
             data: snapshot_data(node),
-            special: node.meta.extra_str(SPECIAL_DTYPE).map(|special| {
-                special
-                    .strip_prefix("TosaSpecialDtype.")
-                    .unwrap_or(special)
-                    .to_string()
-            }),
-            no_fuse: node.meta.extra_bool(DO_NOT_FUSE) == Some(true),
+            // By member name, in either spelling (`fx_node::special_dtype`).
+            special: special_dtype(&node.meta).map(str::to_string),
+            no_fuse: node.meta.extra_bool(DO_NOT_FUSE_DUPLICATE_META_KEY) == Some(true),
             dead: false,
         });
     }
@@ -1535,19 +1717,24 @@ fn snapshot_data(node: &IrNode) -> Option<Data> {
     Some(Data::Bytes(bytes.clone()))
 }
 
-/// `graph` without what format 1 doesn't record: qparam values, data,
-/// special dtypes and flags.
-pub(crate) fn without_details(graph: &Graph) -> Graph {
+/// `graph` without what a `format` case doesn't compare. Format 1 records no
+/// constant data and compares qparam keys, not values (a `qp=` value only
+/// builds the "before" graph); format 2 records no placeholder targets.
+pub(crate) fn comparable(graph: &Graph, format: u32) -> Graph {
     let mut graph = graph.clone();
     for node in &mut graph.nodes {
+        if format >= 2 {
+            if let Op::Placeholder { target, .. } = &mut node.op {
+                *target = None;
+            }
+            continue;
+        }
         for map in [&mut node.q_in, &mut node.q_out].into_iter().flatten() {
             for (_, value) in map.iter_mut() {
                 *value = None;
             }
         }
         node.data = None;
-        node.special = None;
-        node.no_fuse = false;
     }
     graph
 }
@@ -1657,9 +1844,26 @@ pub(crate) fn compare(expected: &Graph, actual: &Graph, options: Options) -> Res
     for (position, (want, got)) in expected.nodes.iter().zip(&actual.nodes).enumerate() {
         let at = format!("%{position}");
         match (&want.op, &got.op) {
-            (Op::Placeholder { constant: a, .. }, Op::Placeholder { constant: b, .. }) => {
+            (
+                Op::Placeholder {
+                    constant: a,
+                    target: target_a,
+                    ..
+                },
+                Op::Placeholder {
+                    constant: b,
+                    target: target_b,
+                    ..
+                },
+            ) => {
                 if a != b {
                     return mismatch("constant-kind", format!("{at}: rc4 {a:?}, RETAB {b:?}"));
+                }
+                if target_a != target_b {
+                    return mismatch(
+                        "placeholder-target",
+                        format!("{at}: rc4 {target_a:?}, RETAB {target_b:?}"),
+                    );
                 }
             }
             (Op::GetAttr { .. }, Op::GetAttr { .. }) => {}
@@ -1769,7 +1973,7 @@ pub(crate) fn compare(expected: &Graph, actual: &Graph, options: Options) -> Res
         }
         if want.special != got.special {
             return mismatch(
-                "special",
+                "special-dtype",
                 format!(
                     "{label}: rc4 {:?}, RETAB {:?}",
                     want.special.as_deref(),
@@ -2011,6 +2215,13 @@ impl fmt::Display for Graph {
             {
                 write!(f, " kind={kind}")?;
             }
+            if let Op::Placeholder {
+                target: Some(target),
+                ..
+            } = &node.op
+            {
+                write!(f, " target={target}")?;
+            }
             if let Some(data) = &node.data {
                 write!(f, " data={}", data_text(data))?;
             }
@@ -2020,6 +2231,7 @@ impl fmt::Display for Graph {
             if node.no_fuse {
                 write!(f, " no_fuse")?;
             }
+            // Qparam values print in the maps, as format 2 writes them.
             write!(f, " q={}", qparams_label(node))?;
             if node.dead {
                 write!(f, " dead")?;
@@ -2219,7 +2431,8 @@ end
             nodes[1].op,
             Op::Placeholder {
                 name: "w".to_string(),
-                constant: Some("param".to_string())
+                constant: Some("param".to_string()),
+                target: None,
             }
         );
         let Op::Call { args, kwargs, .. } = &nodes[3].op else {
@@ -2305,6 +2518,7 @@ end
                     dim_orders: DimOrders::All,
                     dead_nodes: true,
                     float32_activations: false,
+                    modified: true,
                 };
                 assert_eq!(compare(&case.before, &graph, strict), Ok(()), "{}", case.name);
             }
@@ -2337,7 +2551,7 @@ end
         let weight = graph.node(0);
         let tensor = weight.tensor.as_ref().unwrap();
         assert_eq!(tensor.data.data, vec![0x01, 0xff]);
-        assert_eq!(weight.meta.extra_str(SPECIAL_DTYPE), Some("INT4"));
+        assert_eq!(weight.meta.extra_str(SPECIAL_DTYPE_KEY), Some("INT4"));
         // `extract_tensor_data` narrows int64 to int32.
         let zero_points = graph.node(1).tensor.as_ref().unwrap();
         assert_eq!(zero_points.data.dtype, DType::Int32);
@@ -2361,7 +2575,10 @@ end
         assert!(matches!(graph.node(6).kwargs["device"], IrArg::None));
         assert!(graph.node(7).meta.tensor_facts().is_none());
         assert!(graph.node(7).meta.val_dim_order().is_none());
-        assert_eq!(graph.node(10).meta.extra_bool(DO_NOT_FUSE), Some(true));
+        assert_eq!(
+            graph.node(10).meta.extra_bool(DO_NOT_FUSE_DUPLICATE_META_KEY),
+            Some(true)
+        );
     }
 
     #[test]
@@ -2431,7 +2648,7 @@ end
         assert_eq!(class(&|graph| graph.nodes[0].data = None), Some("data"));
         assert_eq!(
             class(&|graph| graph.nodes[10].special = None),
-            Some("special")
+            Some("special-dtype")
         );
         assert_eq!(
             class(&|graph| graph.nodes[10].no_fuse = false),
@@ -2627,6 +2844,235 @@ end
         assert_eq!(class(&graph, DimOrders::Placeholders), Some("dim-order"));
     }
 
+    /// Annotations and forms the APU-160 fixtures use.
+    const META_FIXTURE: &str = "\
+case meta
+before
+%0 = placeholder aten_view_copy_default_2 : torch.int32[2] target=aten_view_copy_default q=none special=INT48
+%1 = aten.neg.default(%0) : torch.int32[2] q=none nofuse
+output([%1])
+after modified=false same
+end
+case raised
+before
+%0 = placeholder x : torch.float32[2] q=none
+%1 = aten.relu.default(%0) : torch.float32[2] q=none
+output([%1])
+after raises=RuntimeError
+end
+";
+
+    /// Panics, as a port does where rc4 raises.
+    struct Panics;
+
+    impl IrPass for Panics {
+        fn name(&self) -> &str {
+            "Panics"
+        }
+
+        fn run(&self, _graph: &mut IrGraph) -> bool {
+            panic!("like rc4")
+        }
+    }
+
+    /// Changes nothing but claims it did.
+    struct ClaimsModified;
+
+    impl IrPass for ClaimsModified {
+        fn name(&self) -> &str {
+            "ClaimsModified"
+        }
+
+        fn run(&self, _graph: &mut IrGraph) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn meta_annotations_parse_build_and_print() {
+        let cases = parse(META_FIXTURE).unwrap();
+        let nodes = &cases[0].before.nodes;
+        assert_eq!(
+            nodes[0].op,
+            Op::Placeholder {
+                name: "aten_view_copy_default_2".to_string(),
+                constant: None,
+                target: Some("aten_view_copy_default".to_string()),
+            }
+        );
+        assert_eq!(nodes[0].special.as_deref(), Some("INT48"));
+        assert!(nodes[1].no_fuse && !nodes[0].no_fuse);
+        assert_eq!(cases[1].raises.as_deref(), Some("RuntimeError"));
+        // A format-1 import records the importer's spelling; `build` RETAB's.
+        assert_eq!(
+            build(&cases[0].before).node(0).meta.extra_str(SPECIAL_DTYPE_KEY),
+            Some("INT48")
+        );
+        let graph = import(&cases[0]);
+        assert_eq!(graph.node(0).target, "aten_view_copy_default");
+        assert_eq!(
+            graph.node(0).meta.extra_str(SPECIAL_DTYPE_KEY),
+            Some("TosaSpecialDtype.INT48")
+        );
+        assert_eq!(graph.node(1).meta.extra_bool(DO_NOT_FUSE_DUPLICATE_META_KEY), Some(true));
+        let strict = Options {
+            dim_orders: DimOrders::All,
+            dead_nodes: true,
+            float32_activations: false,
+            modified: false,
+        };
+        assert_eq!(compare(&cases[0].before, &snapshot(&graph).unwrap(), strict), Ok(()));
+        let printed = format!(
+            "case meta\nbefore\n{}after modified=false same\nend\n",
+            cases[0].before
+        )
+        .replace("    ", "");
+        assert_eq!(parse(&printed).unwrap()[0].before, cases[0].before);
+    }
+
+    /// `qp=` gives a key its qparam value in the built graph; other keys hold
+    /// the placeholder, and values round-trip through printing.
+    #[test]
+    fn qparam_values_build_the_before_graph() {
+        const QVALUE_FIXTURE: &str = "\
+case qvalues
+before
+%0 = placeholder x : torch.int16[2] q=none
+%1 = aten.sigmoid.default(%0) : torch.int16[2] q=in{0}/out{0,1} qp=in0:0.0009765625:0:-32768:32767:torch.int16 qp=out1:3.0517578125e-05:-3:-32767:32767:torch.int16
+output([%1])
+after modified=false same
+end
+";
+        let cases = parse(QVALUE_FIXTURE).unwrap();
+        let before = &cases[0].before;
+        let graph = build(before);
+        let meta = &graph.node(1).meta;
+        assert_eq!(
+            meta.input_qparam(),
+            Some(&QParam::per_tensor(1.0 / 1024.0, 0, -32768, 32767, "torch.int16".into()))
+        );
+        assert_eq!(meta.output_qparam(), Some(&placeholder_qparam()));
+        assert_eq!(
+            meta.output_qparams().and_then(|map| map.get(&1)),
+            Some(&QParam::per_tensor(1.0 / 32768.0, -3, -32767, 32767, "torch.int16".into()))
+        );
+        let printed = format!("case qvalues\nbefore\n{before}after modified=false same\nend\n").replace("    ", "");
+        assert_eq!(&parse(&printed).unwrap()[0].before, before);
+        assert!(parse(&QVALUE_FIXTURE.replace("qp=in0:", "qp=on0:")).is_err());
+    }
+
+    #[test]
+    fn meta_differences_are_classified() {
+        let cases = parse(META_FIXTURE).unwrap();
+        let mut graph = build(&cases[0].before);
+        graph.node_mut(1).meta.extras.remove(DO_NOT_FUSE_DUPLICATE_META_KEY);
+        let actual = snapshot(&graph).unwrap();
+        let class = compare(&cases[0].after, &actual, Options::default())
+            .unwrap_err()
+            .class;
+        assert_eq!(class, "no-fuse");
+        let mut graph = build(&cases[0].before);
+        graph.node_mut(0).meta.extras.remove(SPECIAL_DTYPE_KEY);
+        let actual = snapshot(&graph).unwrap();
+        let class = compare(&cases[0].after, &actual, Options::default())
+            .unwrap_err()
+            .class;
+        assert_eq!(class, "special-dtype");
+        let mut graph = build(&cases[0].before);
+        graph.node_mut(0).target = graph.node(0).name.clone();
+        let actual = snapshot(&graph).unwrap();
+        let class = compare(&cases[0].after, &actual, Options::default())
+            .unwrap_err()
+            .class;
+        assert_eq!(class, "placeholder-target");
+    }
+
+    /// Each format compares what it records: format 1 the special dtype, the
+    /// marker and the placeholder target but no qparam values, format 2 the
+    /// values but no placeholder targets. Each imports special dtypes in its
+    /// own spelling.
+    #[test]
+    fn each_format_compares_what_it_records() {
+        const BOTH: &str = "\
+case both
+before
+%0 = placeholder x : torch.int8[2] target=input q=none special=INT48
+%1 = aten.neg.default(%0) : torch.int8[2] q=in{0}/out{0} qp=out0:0.25:1:-128:127:torch.int8 nofuse
+output([%1])
+after modified=false same
+end
+";
+        let format_1 = parse(BOTH).unwrap().remove(0);
+        let mut format_2 = format_1.clone();
+        format_2.format = 2;
+        let special = |case: &Case| {
+            import(case).node(0).meta.extra_str(SPECIAL_DTYPE_KEY).map(str::to_string)
+        };
+        assert_eq!(special(&format_1).as_deref(), Some("TosaSpecialDtype.INT48"));
+        assert_eq!(special(&format_2).as_deref(), Some("INT48"));
+        let actual = snapshot(&import(&format_1)).unwrap();
+        let class = |case: &Case, edit: &dyn Fn(&mut Graph)| {
+            let mut graph = actual.clone();
+            edit(&mut graph);
+            compare_case(case, &graph, Options::default())
+                .err()
+                .map(|mismatch| mismatch.class)
+        };
+        let rescaled = |graph: &mut Graph| {
+            let map = graph.nodes[1].q_out.as_mut().unwrap();
+            map[0].1.as_mut().unwrap().scales[0] = 0.5;
+        };
+        let retargeted = |graph: &mut Graph| {
+            if let Op::Placeholder { target, .. } = &mut graph.nodes[0].op {
+                *target = None;
+            }
+        };
+        for case in [&format_1, &format_2] {
+            assert_eq!(class(case, &|_| {}), None);
+            assert_eq!(
+                class(case, &|graph| graph.nodes[0].special = None),
+                Some("special-dtype")
+            );
+            assert_eq!(
+                class(case, &|graph| graph.nodes[1].no_fuse = false),
+                Some("no-fuse")
+            );
+        }
+        assert_eq!(class(&format_1, &rescaled), None);
+        assert_eq!(class(&format_2, &rescaled), Some("qparams"));
+        assert_eq!(class(&format_1, &retargeted), Some("placeholder-target"));
+        assert_eq!(class(&format_2, &retargeted), None);
+    }
+
+    #[test]
+    fn raising_cases_need_a_panic() {
+        let classes = |pass: &dyn IrPass| -> Vec<Option<&'static str>> {
+            replay(pass, META_FIXTURE, Options::default())
+                .iter()
+                .map(|result| result.mismatch.as_ref().map(|mismatch| mismatch.class))
+                .collect()
+        };
+        assert_eq!(classes(&Noop), [None, Some("raises")]);
+        assert_eq!(classes(&Panics), [Some("panic"), None]);
+    }
+
+    #[test]
+    fn the_modified_flag_counts_only_when_asked() {
+        let with_flag = Options {
+            modified: true,
+            ..Options::default()
+        };
+        let classes = |options| -> Vec<Option<&'static str>> {
+            replay(&ClaimsModified, META_FIXTURE, options)
+                .iter()
+                .map(|result| result.mismatch.as_ref().map(|mismatch| mismatch.class))
+                .collect()
+        };
+        assert_eq!(classes(Options::default()), [None, Some("raises")]);
+        assert_eq!(classes(with_flag), [Some("modified"), Some("raises")]);
+        check_known_with(&Noop, META_FIXTURE, &[("raised", "Noop never panics")], with_flag);
+    }
+
     #[test]
     fn bad_fixtures_are_rejected() {
         let bad = [
@@ -2638,11 +3084,21 @@ end
             // Format 2 needs every qparam's value and every constant's data.
             "format 2\ncase x\nbefore\n%0 = placeholder x : torch.float32[2] q=out{0}\noutput([%0])\nafter modified=false same\nend\n",
             "format 2\ncase x\nbefore\n%0 = placeholder x : torch.float32[2] kind=param q=none\noutput([%0])\nafter modified=false same\nend\n",
+            "format 2\ncase x\nbefore\n%0 = placeholder x : torch.float32[2] q=out{0}\noutput([%0])\nafter raises=RuntimeError\nend\n",
             "format 3\ncase x\nbefore\n%0 = placeholder x : torch.float32[2] q=none\noutput([%0])\nafter modified=false same\nend\n",
             "case x\nbefore\n%0 = placeholder x : torch.int8[2] data=hex:0 q=none\noutput([%0])\nafter modified=false same\nend\n",
             "case x\nbefore\n%0 = placeholder x : torch.int8[2] q=in{0:torch.int8(0.5,0,-128)} \noutput([%0])\nafter modified=false same\nend\n",
             "case x\nbefore\n%0 = placeholder x : torch.int8[2] q=in{1,0}\noutput([%0])\nafter modified=false same\nend\n",
             "case x\nbefore\n%0 = get_attr x : torch.int8[2] kind=param q=none\noutput([%0])\nafter modified=false same\nend\n",
+            // `target=` is for placeholders only.
+            "case x\nbefore\n%0 = placeholder x : torch.float32[2] q=none\n%1 = aten.relu.default(%0) : torch.float32[2] target=y q=none\noutput([%1])\nafter modified=false same\nend\n",
+            "case x\nbefore\n%0 = get_attr x : torch.int8[2] target=y q=none\noutput([%0])\nafter modified=false same\nend\n",
+            // A raising case has no after graph.
+            "case x\nbefore\n%0 = placeholder x : torch.float32[2] q=none\noutput([%0])\nafter raises=RuntimeError\n%0 = placeholder x : torch.float32[2] q=none\nend\n",
+            // A `qp=` value needs a key of its map without a value.
+            "case x\nbefore\n%0 = placeholder x : torch.int8[2] q=in{0} qp=out0:0.25:0:-128:127:torch.int8\noutput([%0])\nafter modified=false same\nend\n",
+            "case x\nbefore\n%0 = placeholder x : torch.int8[2] q=in{0} qp=in1:0.25:0:-128:127:torch.int8\noutput([%0])\nafter modified=false same\nend\n",
+            "case x\nbefore\n%0 = placeholder x : torch.int8[2] q=in{0:torch.int8(0.5,0,-128,127)} qp=in0:0.25:0:-128:127:torch.int8\noutput([%0])\nafter modified=false same\nend\n",
         ];
         for text in bad {
             assert!(parse(text).is_err(), "{text}");
