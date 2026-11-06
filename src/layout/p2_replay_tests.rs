@@ -684,14 +684,27 @@ fn rewrite_conv_matches_rc4() {
 }
 
 // S4 (APU-155): A16W8 INT48 branching, on the generic profile and on U55.
-// #[test]
-// fn rewrite_conv_a16w8_matches_rc4() {
-//     replay::check(&IrRewriteConvPass { is_u55_subset: false, in_region: false }, REWRITE_CONV_A16W8);
-// }
-// #[test]
-// fn rewrite_conv_a16w8_u55_matches_rc4() {
-//     replay::check(&IrRewriteConvPass { is_u55_subset: true, in_region: false }, REWRITE_CONV_A16W8_U55);
-// }
+#[test]
+fn rewrite_conv_a16w8_matches_rc4() {
+    replay::check(
+        &IrRewriteConvPass {
+            is_u55_subset: false,
+            in_region: false,
+        },
+        REWRITE_CONV_A16W8,
+    );
+}
+
+#[test]
+fn rewrite_conv_a16w8_u55_matches_rc4() {
+    replay::check(
+        &IrRewriteConvPass {
+            is_u55_subset: true,
+            in_region: false,
+        },
+        REWRITE_CONV_A16W8_U55,
+    );
+}
 
 // S7 (APU-156): IrRewriteMaxPool2d also does RemoveGetItemPass's work; the
 // `_with_indices` cases start from RETAB's max_pool2d_with_indices + getitem,

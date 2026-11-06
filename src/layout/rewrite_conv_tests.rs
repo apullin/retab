@@ -1219,6 +1219,18 @@ fn linears_reading_control_flow_outputs_fall_back_until_s8() {
     assert!(reason.contains(&copies), "{reason}");
 }
 
+/// The INT32 RESCALE `IrInsertInt32Rescale` put directly on `conv`.
+fn int32_user(graph: &IrGraph, conv: NodeId) -> NodeId {
+    graph
+        .live_user_ids(conv)
+        .into_iter()
+        .find(|&user| {
+            graph.node(user).target == RESCALE
+                && matches!(&graph.node(user).args[1], IrArg::Dtype(dtype) if dtype == "torch.int32")
+        })
+        .expect("a direct INT32 RESCALE user")
+}
+
 /// One stock fallback's trigger: an edit of rc4's graph `case` of `fixture`,
 /// and a fragment of the reason the pass gives.
 struct Fallback {
@@ -1433,20 +1445,64 @@ fn rc4s_errors_and_unported_cases_fall_back_to_stock() {
             reason: "region conv biases need the explicit captured_conv",
         },
         Fallback {
-            label: "A16W8 INT32 consumers (S4)",
+            label: "A16W8 INT32 RESCALE with another input zero point (RCP:711-716)",
             fixture: REWRITE_CONV_A16W8,
             case: "conv_add_a16w8",
             region: false,
-            edit: |_, _| {},
-            reason: "APU-135 S4",
+            edit: |graph, conv| {
+                let user = int32_user(graph, conv);
+                graph.set_arg(user, 3, IrArg::Int(1));
+            },
+            reason: "different intermediate zero points: 0 and 1",
         },
         Fallback {
-            label: "A16W8 INT32 consumers behind a permute (S4)",
+            label: "A16W8 INT32 RESCALE with a scale count of its own (RCP:518-526)",
+            fixture: REWRITE_CONV_A16W8,
+            case: "conv_add_a16w8",
+            region: false,
+            edit: |graph, conv| {
+                let user = int32_user(graph, conv);
+                let scales = IrArg::List(vec![IrArg::Float(1.0); 3]);
+                graph.set_arg(user, 2, scales);
+            },
+            reason: "incompatible scale counts: 4 and 3",
+        },
+        Fallback {
+            label: "A16W8 INT32 RESCALE without scales (RCP:514-515)",
+            fixture: REWRITE_CONV_A16W8,
+            case: "conv_add_a16w8",
+            region: false,
+            edit: |graph, conv| {
+                let user = int32_user(graph, conv);
+                graph.set_arg(user, 2, IrArg::List(Vec::new()));
+            },
+            reason: "Cannot combine empty rescale factors",
+        },
+        Fallback {
+            label: "A16W8 INT32 RESCALE whose zero points don't parse",
+            fixture: REWRITE_CONV_A16W8,
+            case: "conv_add_a16w8",
+            region: false,
+            edit: |graph, conv| {
+                let user = int32_user(graph, conv);
+                graph.set_arg(user, 4, IrArg::None);
+            },
+            reason: "has malformed arguments",
+        },
+        Fallback {
+            label: "A16W8 permute user whose dims don't parse",
             fixture: REWRITE_CONV_A16W8,
             case: "permuted_int32_a16w8",
             region: false,
-            edit: |_, _| {},
-            reason: "APU-135 S4",
+            edit: |graph, conv| {
+                let permute = graph
+                    .live_user_ids(conv)
+                    .into_iter()
+                    .find(|&user| graph.node(user).target == PERMUTE)
+                    .expect("the permute user");
+                graph.set_arg(permute, 1, IrArg::None);
+            },
+            reason: "does not permute the conv's value",
         },
     ];
     for fallback in fallbacks {
@@ -1476,29 +1532,68 @@ fn rc4s_errors_and_unported_cases_fall_back_to_stock() {
 /// rc4 raises at the first conv it cannot rewrite; the port requests the
 /// fallback there and stops, keeping the convs before it rewritten and the
 /// graph valid for the passes that still run before the request is honoured.
+/// rc4 never reaches its U55 step then (RCP:1273), and neither does the port.
 #[test]
 fn a_fallback_stops_after_the_convs_before_it() {
     // A16W8MixedConsumerChain: expand and depthwise feed clamps, the
-    // projection and the following conv feed INT32 RESCALEs.
-    let mut graph = imported(REWRITE_CONV_A16W8, "mixed_chain_conv_a16w8");
-    let convs = calls(&graph, CONVOLUTION);
-    assert_eq!(convs.len(), 4);
-    let names: Vec<String> = convs
-        .iter()
-        .map(|&conv| graph.node(conv).name.clone())
-        .collect();
-    let (modified, reason) = run_with(&parent_pass(), &mut graph);
-    assert!(modified);
-    let reason = reason.expect("a fallback");
-    assert!(
-        reason.contains(&format!("IrRewriteConv: {}: ", names[2])),
-        "{reason}"
-    );
-    let left: Vec<NodeId> = names[2..].iter().map(|name| named(&graph, name)).collect();
-    assert_eq!(calls(&graph, CONVOLUTION), left);
-    assert_eq!(calls(&graph, CONV2D).len(), 1);
-    assert_eq!(calls(&graph, DEPTHWISE).len(), 1);
-    replay::snapshot(&graph).expect("a valid graph");
+    // projection and the following conv feed INT32 RESCALEs; the projection's
+    // feeds the following conv too, so it branches.
+    for (fixture, case, pass, failing) in [
+        (
+            REWRITE_CONV_A16W8,
+            "mixed_chain_conv_a16w8",
+            parent_pass(),
+            2,
+        ),
+        (
+            REWRITE_CONV_A16W8_U55,
+            "mixed_chain_conv_a16w8_u55",
+            IrRewriteConvPass {
+                is_u55_subset: true,
+                in_region: false,
+            },
+            3,
+        ),
+    ] {
+        let mut graph = imported(fixture, case);
+        let convs = calls(&graph, CONVOLUTION);
+        assert_eq!(convs.len(), 4);
+        let names: Vec<String> = convs
+            .iter()
+            .map(|&conv| graph.node(conv).name.clone())
+            .collect();
+        // RCP:711-716 raises for an INT32 RESCALE off the conv's zero point.
+        let user = int32_user(&graph, convs[failing]);
+        graph.set_arg(user, 3, IrArg::Int(7));
+        let (modified, reason) = run_with(&pass, &mut graph);
+        assert!(modified, "{case}");
+        let reason = reason.expect("a fallback");
+        assert!(
+            reason.contains(&format!("IrRewriteConv: {}: ", names[failing])),
+            "{case}: {reason}"
+        );
+        let left: Vec<NodeId> = names[failing..]
+            .iter()
+            .map(|name| named(&graph, name))
+            .collect();
+        assert_eq!(calls(&graph, CONVOLUTION), left, "{case}");
+        assert_eq!(calls(&graph, CONV2D).len(), failing - 1, "{case}");
+        assert_eq!(calls(&graph, DEPTHWISE).len(), 1, "{case}");
+        // The projection's accumulator, rewritten before the fallback, keeps
+        // both RESCALEs: no clone, no flag.
+        for &tosa in &tosa_convs(&graph) {
+            assert_eq!(
+                graph.node(tosa).meta.extra_bool("do_not_fuse_duplicate"),
+                None,
+                "{case}"
+            );
+        }
+        if failing == 3 {
+            let projection = calls(&graph, CONV2D)[1];
+            assert_eq!(graph.live_user_ids(projection).len(), 2, "{case}");
+        }
+        replay::snapshot(&graph).expect("a valid graph");
+    }
 }
 
 /// A graph with several fallbacks reports the first conv's reason only.
