@@ -39,6 +39,9 @@ How the graphs are built and run:
   the real InsertTableOpsPass (and FuseEqualPlaceholdersPass) bring the graph
   to that stage first, and the TABLE nodes are turned back into the table ops
   RETAB still holds, so the fixture shows rc4's decisions in RETAB's form.
+  The propagation passes run the same way (`PropagationPass`), with the TABLE
+  values they changed; `_without_program` fixtures build them without the
+  exported program, as rc4's graph-level tests do.
 
 Fixture format (one node per line, in graph order):
 
