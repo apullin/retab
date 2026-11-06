@@ -1079,3 +1079,97 @@ fn explicit_invariant_check_reports_dim_orders_and_stale_vals() {
         "{error}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Review findings
+// ---------------------------------------------------------------------------
+
+/// Every TRANSPOSE declares the shape its perms make of its input.
+fn assert_transposes_consistent(items: &SerializedGraphItems) {
+    for op in ops_of(items, Op::Transpose) {
+        let Attribute::Transpose(attribute) = &op.attribute else {
+            panic!("expected a TRANSPOSE attribute");
+        };
+        let input = &tensor(items, &op.inputs[0]).shape;
+        let expected: Vec<i32> = attribute.perms.iter().map(|&p| input[p as usize]).collect();
+        assert_eq!(
+            tensor(items, &op.outputs[0]).shape,
+            expected,
+            "TRANSPOSE {:?} of {input:?} by {:?}",
+            op.outputs,
+            attribute.perms
+        );
+    }
+}
+
+#[test]
+#[ignore = "BUG: explicit mode trusts the vals of dim-order TRANSPOSEs: invalid TOSA, no stock fallback"]
+fn explicit_mode_does_not_trust_dim_order_transpose_vals() {
+    // RETAB_LAYOUT=explicit still runs the dim-order pipeline until S6, and the
+    // control-flow contracts keep writing dim orders in explicit mode until S8. For
+    // `torch.cond(x.sum() > 0, flip, roll, [x])` on an int8 [1, 2, 3, 4] input lowered
+    // with TOSA-1.0+INT+cf, RETAB_FROM_IR_DEBUG shows this main graph at ded4277:
+    //   value_input_layout = TRANSPOSE(value, [0, 2, 3, 1])  val [1, 3, 4, 2], order [0, 2, 3, 1]
+    //   getitem = cond[0]                                     val [1, 2, 3, 4], order [0, 2, 3, 1]
+    //   getitem_output_layout = TRANSPOSE(getitem, [0, 3, 1, 2]) val [1, 4, 2, 3], order [0, 1, 2, 3]
+    // The last val follows dim-order semantics (the logical input permuted), not the
+    // TOSA shape. `has_explicit_tosa_shape_val` (TosaTranspose) and the explicit
+    // `emit_transpose` trust it, so the TRANSPOSE is declared [1, 4, 2, 3] from a
+    // [1, 3, 4, 2] input and the TOSA reference model rejects the flatbuffer ("Invalid
+    // TOSA graph"). Dim-order mode, and explicit mode before S2, emit a valid
+    // [1, 2, 3, 4]. No explicit pass creates a TOSA TRANSPOSE (permutes stay
+    // aten.permute_copy, design §1c), so the only ones explicit mode can see are
+    // dim-order ones. Fix: drop TosaTranspose from the val rule and the emit_transpose
+    // override, and/or send explicit graphs that carry tosa_dim_order to stock outside
+    // RETAB_DEBUG (D1 already detects them). A unary stands in for cond + getitem.
+    let mut ir = IrGraph::empty();
+    let value = placeholder(&mut ir, "value", [1, 2, 3, 4], FLOAT32);
+    ir.node_mut(value).meta.set_tosa_dim_order(vec![0, 1, 2, 3]);
+    let input_layout = call(
+        &mut ir,
+        "value_input_layout",
+        "backend.tosa.TRANSPOSE.default",
+        vec![IrArg::Node(value), list(&[0, 2, 3, 1])],
+        [1, 3, 4, 2],
+        FLOAT32,
+    );
+    ir.node_mut(input_layout)
+        .meta
+        .set_tosa_dim_order(vec![0, 2, 3, 1]);
+    let getitem = call(
+        &mut ir,
+        "getitem",
+        "aten.neg.default",
+        vec![IrArg::Node(input_layout)],
+        [1, 2, 3, 4],
+        FLOAT32,
+    );
+    ir.node_mut(getitem)
+        .meta
+        .set_tosa_dim_order(vec![0, 2, 3, 1]);
+    let output_layout = call(
+        &mut ir,
+        "getitem_output_layout",
+        "backend.tosa.TRANSPOSE.default",
+        vec![IrArg::Node(getitem), list(&[0, 3, 1, 2])],
+        [1, 4, 2, 3],
+        FLOAT32,
+    );
+    ir.node_mut(output_layout)
+        .meta
+        .set_tosa_dim_order(vec![0, 1, 2, 3]);
+    output(&mut ir, output_layout);
+
+    let dim_order = serialize(&ir, LayoutMode::DimOrder);
+    assert_transposes_consistent(&dim_order);
+    assert_eq!(
+        tensor(&dim_order, "getitem_output_layout").shape,
+        [1, 2, 3, 4]
+    );
+
+    let (graph, store) = ingest(&ir, LayoutMode::Explicit);
+    match try_serialize_graph(graph, &store) {
+        Err(error) => assert!(error.starts_with("RETAB_STOCK_FALLBACK:"), "{error}"),
+        Ok(explicit) => assert_transposes_consistent(&explicit),
+    }
+}
