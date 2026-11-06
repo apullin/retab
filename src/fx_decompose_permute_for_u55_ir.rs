@@ -16,6 +16,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta};
+use crate::layout::dtype::value_dtype;
 
 const MAX_PRODUCT: i64 = 1 << 16;
 
@@ -179,13 +180,31 @@ fn emit(
     )
 }
 
-fn decompose_one(graph: &mut IrGraph, id: NodeId, split_permutes: &HashSet<String>) -> bool {
+fn violates_worst_case(shape: &[i64]) -> bool {
+    !violating_combinations(shape).is_empty()
+}
+
+/// Append one line about a permute this pass judged to the `RETAB_U55_PERMUTE_LOG`
+/// file: its name, its input's shape and value dtype, its dims, what decided it and
+/// whether it is split. Write errors are ignored.
+fn log_judgement(path: &str, line: String) {
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+fn decompose_one(
+    graph: &mut IrGraph,
+    id: NodeId,
+    split_permutes: &HashSet<String>,
+    log: Option<&str>,
+) -> bool {
     let node = &graph.nodes[id];
     if !matches!(
         node.target.as_str(),
         "aten.permute_copy.default" | "aten.permute.default"
-    ) || !(split_permutes.contains(&node.name) || is_marked_split(&node.meta))
-    {
+    ) {
         return false;
     }
     let (Some(input), Some(perm)) = (node.first_node_arg(), node.arg_int_list(1)) else {
@@ -199,12 +218,29 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId, split_permutes: &HashSet<Strin
         return false;
     }
     let perm: Vec<i64> = perm.iter().map(|&axis| axis.rem_euclid(rank)).collect();
+    // rc4's quick check: a permute that passes the worst-case rule runs on U55.
+    if !violates_worst_case(&shape) {
+        return false;
+    }
+    let listed = split_permutes.contains(&node.name);
+    let marked = is_marked_split(&node.meta);
+    let split = listed || marked;
+    if let Some(path) = log {
+        let dtype = value_dtype(graph, input).unwrap_or_else(|| "?".to_string());
+        log_judgement(
+            path,
+            format!(
+                "{}\tshape={shape:?}\tperm={perm:?}\tdtype={dtype}\tlisted={listed}\tmarked={marked}\tsplit={split}\n",
+                node.name
+            ),
+        );
+    }
+    if !split {
+        return false;
+    }
     let Some(limits) = split_chunk_limits(&shape) else {
         return false;
     };
-    if limits.is_empty() {
-        return false;
-    }
     // The chunks pass the worst-case rule, so none carries the decision on, as none
     // has a listed name.
     let mut meta = node.meta.clone();
@@ -227,14 +263,16 @@ impl IrPass for IrDecomposePermuteForU55Pass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        if self.split_permutes.is_empty()
+        let log = crate::config::u55_permute_log_file();
+        if log.is_none()
+            && self.split_permutes.is_empty()
             && !graph.live_nodes().any(|node| is_marked_split(&node.meta))
         {
             return false;
         }
         let mut modified = false;
         for id in graph.live_call_function_ids() {
-            modified |= decompose_one(graph, id, &self.split_permutes);
+            modified |= decompose_one(graph, id, &self.split_permutes, log.as_deref());
         }
         modified
     }
