@@ -200,6 +200,17 @@ fn actual_tensor_dtype_impl(graph: &Graph, node: &Node) -> DType {
         && node.meta.val.dtype.is_float() {
             return ir_dtype_to_tosa(node.meta.val.dtype);
         }
+    let explicit_layout = graph.is_explicit_layout();
+    // An explicit-mode TOSA RESIZE inherits the upsample's int8 output qparam, but an int8
+    // bilinear RESIZE produces int32 (INT48 when marked), which its RESCALE reads (P2
+    // critique A8/B4).
+    if explicit_layout && node.target == OpTarget::TosaResize {
+        return node
+            .meta
+            .tosa_special_dtype
+            .map(ir_dtype_to_tosa)
+            .unwrap_or_else(|| ir_dtype_to_tosa(node.meta.val.dtype));
+    }
     match node.target {
         ref target if op_semantics::is_layout_dtype_passthrough(target) => {
             match node.args.first() {
@@ -211,7 +222,13 @@ fn actual_tensor_dtype_impl(graph: &Graph, node: &Node) -> DType {
             }
         }
         OpTarget::To => node_output_dtype(node),
-        ref target if op_semantics::is_accumulator_output(target) => accumulator_output_dtype(node),
+        // TOSA CONV3D only reaches the serializer in explicit mode (P2 design X1).
+        ref target
+            if op_semantics::is_accumulator_output(target)
+                || (explicit_layout && *target == OpTarget::TosaConv3d) =>
+        {
+            accumulator_output_dtype(node)
+        }
         OpTarget::Sum => {
             let semantic_dtype = node_output_dtype(node);
             if is_float_dtype(semantic_dtype) {

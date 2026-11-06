@@ -11,7 +11,7 @@ pub fn register(table: &mut EmitterTable) {
         (OpTarget::Copy, emit_copy),
         (OpTarget::Eye, emit_eye),
         (OpTarget::ScalarTensor, emit_scalar_tensor),
-        (OpTarget::TosaResize, emit_resize),
+        (OpTarget::TosaResize, emit_tosa_resize),
         (OpTarget::TosaTranspose, emit_transpose),
         (OpTarget::TosaReshape, emit_reshape),
         (OpTarget::TosaConcat, emit_concat),
@@ -535,6 +535,52 @@ pub(super) fn emit_scalar_tensor(ctx: &EmitContext) -> EmitResult {
     emit_filled_const(node, output_shape, fill_value, "emit_scalar_tensor")
 }
 
+/// rc4's `RESIZE(x, scale, offset, border, *, resize_mode)` (P2 design X4). The rewrite
+/// already computed the parameters (`rewrite_upsample.py:45-155` keeps align_corners and
+/// the nearest-mode offsets) into CONST_SHAPE operands, and an int8/int16 bilinear
+/// rescale is its own RESCALE node, so this only serializes the node. The parameters go
+/// through `push_const_shape`, which pools them into the operands' own CONST_SHAPE
+/// tensors: those are pooled too, so naming them directly could dangle when two hold
+/// the same values (offset and border are both [0, 0] for align_corners). Dim-order
+/// graphs keep the recomputing path.
+fn emit_tosa_resize(ctx: &EmitContext) -> EmitResult {
+    if !ctx.graph.is_explicit_layout() {
+        return emit_resize(ctx);
+    }
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let mut result = EmitResult::default();
+    let Some(input_name) = ctx.input_name(0) else {
+        return result;
+    };
+    let mut inputs = vec![input_name];
+    for (index, suffix) in [(1, "scales"), (2, "offset"), (3, "border")] {
+        let name = format!("{}_{suffix}", node.name);
+        push_const_shape(
+            &mut result,
+            name.clone(),
+            shape_arg_i32_list(graph, node, index),
+        );
+        inputs.push(name);
+    }
+    // The val dtype, not the inherited output qparam: int8 bilinear produces int32, and
+    // int16 bilinear is marked INT48 (`tosa/dialect/ops/resize.py:28-53`).
+    let dtype = node
+        .meta
+        .tosa_special_dtype
+        .map(ir_dtype_to_tosa)
+        .unwrap_or_else(|| ir_dtype_to_tosa(node.meta.val.dtype));
+    result.push_output_op(
+        make_empty_tensor(ctx.primary_output_name(), ctx.shape(), dtype),
+        Op::Resize,
+        Attribute::Resize(ResizeAttribute {
+            mode: parse_resize_mode(node),
+        }),
+        inputs,
+    );
+    result
+}
+
 pub(super) fn emit_resize(ctx: &EmitContext) -> EmitResult {
     let Some(spec) = ParsedResizeSpec::parse(ctx.graph, ctx.node, ctx.store) else {
         return EmitResult::default();
@@ -876,7 +922,11 @@ pub(super) fn emit_transpose(ctx: &EmitContext) -> EmitResult {
     let node = ctx.node;
     let store = ctx.store;
     let mut spec = ParsedShapeTransformSpec::parse(graph, store, node);
-    spec.output_shape = transposed_tensor_shape(graph, store, node).unwrap_or(spec.output_shape);
+    // In explicit mode `spec.output_shape` is already the TRANSPOSE's val.
+    if !graph.is_explicit_layout() {
+        spec.output_shape =
+            transposed_tensor_shape(graph, store, node).unwrap_or(spec.output_shape);
+    }
     emit_shape_transform(
         spec,
         Op::Transpose,
@@ -896,7 +946,10 @@ pub(super) fn emit_reshape(ctx: &EmitContext) -> EmitResult {
     let output_name = ctx.primary_output_name();
     let output_dtype = ctx.passthrough_dtype();
 
-    if let Some(input_node) = first_input_node(graph, node) {
+    // In explicit mode a view of an AVG_POOL2D already works in its NHWC coordinates
+    // (P2 design G6).
+    if let Some(input_node) = first_input_node(graph, node).filter(|_| !graph.is_explicit_layout())
+    {
         let input_shape = actual_tensor_shape(graph, store, input_node);
         let needs_avgpool_rank_drop_fix = out_shape.len() == 3
             && input_shape.len() == 4

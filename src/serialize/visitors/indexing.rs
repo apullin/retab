@@ -119,7 +119,11 @@ impl ParsedSelectCopySpec {
             .filter_map(|axis| input_order.iter().position(|&candidate| candidate == *axis))
             .map(|pos| pos as i32)
             .collect();
-        let pre_reshape_perms = if perms.len() == input_shape.len()
+        // Explicit mode has no dim orders, so the only effect would be a TRANSPOSE that
+        // moves the selected size-1 dim (P2 design G7).
+        let pre_reshape_perms = if graph.is_explicit_layout() {
+            None
+        } else if perms.len() == input_shape.len()
             && perms
                 .iter()
                 .enumerate()

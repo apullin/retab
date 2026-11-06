@@ -37,6 +37,12 @@ fn compute_conv_output_impl(
     } else {
         conv_accumulator_dtype(node)
     };
+    // Explicit mode: the val is the TOSA output shape. Only the shape comes from it; the
+    // dtype stays the accumulator's, because the TOSA conv inherits the aten conv's int8
+    // output qparams (P2 design G1, critique A9).
+    if graph.is_explicit_layout() {
+        return TosaTensor::new(&node.name, raw_i32_shape(node), dtype);
+    }
     let spatial_rank = stride.len(); // 2 for conv2d / depthwise, 3 for conv3d
     let tensor_rank = spatial_rank + 2; // N + spatial dims + C
 
@@ -207,6 +213,10 @@ pub(super) fn compute_pool_nhwc_output(
     pad: &[i32],
 ) -> TosaTensor {
     let dtype = node_output_dtype(node);
+    // Explicit mode: the val is the TOSA output shape (P2 design G1, critique B1).
+    if graph.is_explicit_layout() {
+        return TosaTensor::new(&node.name, raw_i32_shape(node), dtype);
+    }
 
     let computed = (|| -> Option<Vec<i32>> {
         let input_id = match node.args.first()? {
@@ -278,7 +288,15 @@ fn conv_spatial_inputs_and_kernels(
     // padding remainder comes out 0, the trailing-pad trim is skipped, and the
     // op fails TOSA's exact-division rule. The logical OIHW metadata is
     // authoritative; fall back to the HWCM form only when it is not.
-    let kernels = if is_depthwise {
+    let kernels = if is_depthwise
+        && graph.is_explicit_layout()
+        && node.target == OpTarget::TosaDepthwiseConv2d
+    {
+        // An explicit-mode TOSA depthwise weight is always HWCM [KH, KW, C, M]. KW == 1
+        // weights ([3, 1, 4, 2], cumsum's [K, 1, 1, 1]) would match the OIHW guess
+        // below (P2 design B3).
+        weight_shape.get(0..2)?.to_vec()
+    } else if is_depthwise {
         let logical = weight_node.meta.val.shape_slice();
         if logical.len() == tensor_rank && logical.get(1).copied() == Some(1) {
             logical
@@ -394,7 +412,8 @@ fn adjusted_tosa_pad_for_emitted_conv_spatial(
     spatial_rank: usize,
     is_depthwise: bool,
 ) -> Vec<i32> {
-    if pad.len() != spatial_rank * 2 {
+    // Explicit-mode TOSA convs carry rc4's already-adjusted pad (P2 design G2).
+    if pad.len() != spatial_rank * 2 || graph.is_explicit_layout() {
         return pad.to_vec();
     }
 

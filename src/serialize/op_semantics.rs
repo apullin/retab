@@ -137,6 +137,41 @@ pub(crate) fn is_avg_pool(target: &OpTarget) -> bool {
     matches!(target, OpTarget::AvgPool2d | OpTarget::TosaAvgPool2d)
 }
 
+/// TOSA-dialect ops whose shape the serializer recomputes (or reorders) in dim-order
+/// mode. In explicit layout mode their val is the TOSA shape, so the serializer reads
+/// it as-is (P2 design §4.2 G1, critique B1).
+pub(crate) fn has_explicit_tosa_shape_val(target: &OpTarget) -> bool {
+    matches!(
+        target,
+        OpTarget::TosaConv2d
+            | OpTarget::TosaDepthwiseConv2d
+            | OpTarget::TosaConv3d
+            | OpTarget::TosaTransposeConv2d
+            | OpTarget::TosaMaxPool2d
+            | OpTarget::TosaAvgPool2d
+            | OpTarget::TosaResize
+            | OpTarget::TosaTranspose
+    )
+}
+
+/// Aten conv, pool and upsample ops. Their visitors build the NHWC view from dim
+/// orders, so in explicit layout mode they must have been rewritten to TOSA ops
+/// before serialization (P2 design X5, critique B11).
+pub(crate) fn is_aten_spatial_layout_op(target: &OpTarget) -> bool {
+    matches!(
+        target,
+        OpTarget::Conv1d
+            | OpTarget::Conv2d
+            | OpTarget::DepthwiseConv2d
+            | OpTarget::ConvTranspose2d
+            | OpTarget::MaxPool2d
+            | OpTarget::AvgPool2d
+            | OpTarget::AdaptiveAvgPool2d
+            | OpTarget::UpsampleNearest2d
+            | OpTarget::UpsampleBilinear2d
+    )
+}
+
 pub(crate) fn uses_nhwc_layout_shape(target: &OpTarget) -> bool {
     matches!(
         target,

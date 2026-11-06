@@ -4,7 +4,7 @@ pub(super) fn register(table: &mut EmitterTable) {
     use crate::graph::ir::OpTarget;
     table.extend([
         (OpTarget::TosaMaxPool2d, emit_max_pool2d as EmitFn),
-        (OpTarget::TosaAvgPool2d, emit_avg_pool2d),
+        (OpTarget::TosaAvgPool2d, emit_tosa_avg_pool2d),
         (OpTarget::MaxPool2d, emit_aten_max_pool2d),
         (OpTarget::AvgPool2d, emit_avg_pool2d),
     ]);
@@ -27,6 +27,8 @@ enum PoolArgSource {
     Positional,
     /// tosa kwargs (kwarg_i32_list / kwarg_bool)
     Keyword,
+    /// rc4's `MAX_POOL2D(x, kernel, stride, pad)`: positional, pad already adjusted.
+    TosaPositional,
 }
 
 impl ParsedPoolSpec {
@@ -45,6 +47,13 @@ impl ParsedPoolSpec {
                 kwarg_i32_list(node, "stride"),
                 kwarg_i32_list(node, "pad"),
                 kwarg_bool(node, "ceil_mode", false),
+            ),
+            // A 4-element pad passes through `adjusted_max_pool_pad` unchanged.
+            PoolArgSource::TosaPositional => (
+                arg_i32_list(node, 1),
+                arg_i32_list(node, 2),
+                arg_i32_list(node, 3),
+                false,
             ),
         };
 
@@ -70,7 +79,14 @@ pub(in crate::serialize::visitors) fn emit_aten_max_pool2d(ctx: &EmitContext) ->
 }
 
 pub(in crate::serialize::visitors) fn emit_max_pool2d(ctx: &EmitContext) -> EmitResult {
-    let spec = ParsedPoolSpec::parse(ctx.graph, ctx.node, ctx.store, PoolArgSource::Keyword);
+    // Explicit-mode MAX_POOL2D nodes come from IrRewriteMaxPool2d in rc4's positional
+    // form, without kwargs (P2 design X2).
+    let source = if ctx.graph.is_explicit_layout() {
+        PoolArgSource::TosaPositional
+    } else {
+        PoolArgSource::Keyword
+    };
+    let spec = ParsedPoolSpec::parse(ctx.graph, ctx.node, ctx.store, source);
     emit_max_pool2d_from_spec(ctx, spec)
 }
 
@@ -96,6 +112,43 @@ fn emit_max_pool2d_from_spec(ctx: &EmitContext, spec: ParsedPoolSpec) -> EmitRes
             nan_mode: NanPropagationMode::Propagate,
         }),
         spec.input_names,
+    );
+    result
+}
+
+/// rc4's `AVG_POOL2D(x, input_zp, output_zp, kernel, stride, pad, acc_type)` (P2 design
+/// X3). The zero points are graph constants that the explicit pipeline materializes,
+/// already quantized the way rc4's ComputeConstantOpsAOTPass does, so the operator reads
+/// them as its 2nd and 3rd inputs and nothing is recomputed here. Dim-order graphs keep
+/// the aten-style path.
+pub(in crate::serialize::visitors) fn emit_tosa_avg_pool2d(ctx: &EmitContext) -> EmitResult {
+    if !ctx.graph.is_explicit_layout() {
+        return emit_avg_pool2d(ctx);
+    }
+    let graph = ctx.graph;
+    let node = ctx.node;
+    let kernel = arg_i32_list(node, 3);
+    let stride = arg_i32_list(node, 4);
+    let pad = arg_i32_list(node, 5);
+    let acc_type = match node.args.get(6) {
+        Some(Arg::Dtype(dtype)) => ir_dtype_to_tosa(*dtype),
+        _ => match first_input_node(graph, node).map(|input| input.meta.val.dtype) {
+            Some(dtype) if dtype.is_float() => DType::Fp32,
+            _ => DType::Int32,
+        },
+    };
+    let output_tensor = compute_pool_nhwc_output(graph, ctx.store, node, &kernel, &stride, &pad);
+    let mut result = EmitResult::default();
+    result.push_output_op(
+        output_tensor,
+        Op::AvgPool2d,
+        Attribute::AvgPool2d(AvgPool2dAttribute {
+            kernel,
+            stride,
+            pad,
+            acc_type,
+        }),
+        ctx.input_names(),
     );
     result
 }

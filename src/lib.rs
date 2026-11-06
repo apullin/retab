@@ -226,17 +226,24 @@ fn take_stashed_hierarchy() -> StashedPipelineHierarchy {
     STASHED_IR.with(|s| std::mem::take(&mut *s.borrow_mut()))
 }
 
+/// Fail with a `RETAB_STOCK_FALLBACK:` error (the Python seam then calls stock) when
+/// someone called `stock_fallback::request` since the last check.
+fn fail_on_stock_fallback_request() -> PyResult<()> {
+    match stock_fallback::take() {
+        Some(reason) => Err(PyRuntimeError::new_err(format!(
+            "RETAB_STOCK_FALLBACK: {reason}"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// Fail with a `RETAB_STOCK_FALLBACK:` error (the Python seam then calls stock) when a
 /// pass requested it or a quantized table op has no planned TABLE.
 fn ensure_retab_can_lower(
     ir: Option<&fx_ir::IrGraph>,
     effects: &lowering_effects::LoweringEffectBatch,
 ) -> PyResult<()> {
-    if let Some(reason) = stock_fallback::take() {
-        return Err(PyRuntimeError::new_err(format!(
-            "RETAB_STOCK_FALLBACK: {reason}"
-        )));
-    }
+    fail_on_stock_fallback_request()?;
     let Some(graph) = ir else {
         return Ok(());
     };
@@ -303,6 +310,8 @@ fn ingest_and_serialize_tosa_pybytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
         PyRuntimeError::new_err("missing stashed pipeline config for serialization")
     })?;
 
+    let layout = pipeline_config.layout;
+    let explicit = layout == pipeline_config::LayoutMode::Explicit;
     let has_control_flow = ir_has_control_flow(&ir);
     if has_control_flow {
         let changed = control_flow::apply_boundary_contracts(&mut ir, &mut stashed.submodules);
@@ -312,9 +321,16 @@ fn ingest_and_serialize_tosa_pybytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
             );
         }
     }
+    // Explicit mode can request a stock fallback at serialization time (the explicit
+    // captured_conv runs inside the contracts), so check here as well as after the
+    // pass pipelines (P2 critique B6).
+    if explicit {
+        fail_on_stock_fallback_request()?;
+    }
 
     let mut store = crate::store::TensorStore::new();
     let mut converted = ingest::from_ir::graph_from_ir(&ir, &mut store);
+    converted.layout = layout;
     ingest::from_ir::apply_effects(&mut converted, &mut store, &effects);
     ingest::finalize::finalize_converted_graph(&mut converted);
     if crate::config::from_ir_debug_enabled() {
@@ -324,11 +340,23 @@ fn ingest_and_serialize_tosa_pybytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
 
     let mut graphs = vec![(String::from("main"), converted)];
     if has_control_flow {
-        control_flow::append_subgraphs_from_ir(&mut graphs, &mut store, &ir, &stashed.submodules)?;
+        control_flow::append_subgraphs_from_ir(
+            &mut graphs,
+            &mut store,
+            &ir,
+            &stashed.submodules,
+            layout,
+        )?;
     }
 
     rebuild_graph_users(&mut graphs);
-    let py_bytes = serialize::serialize_graphs_to_tosa_py(py, &graphs, &store, &pipeline_config)?;
+    let serialized = serialize::serialize_graphs_to_tosa_py(py, &graphs, &store, &pipeline_config);
+    // A fallback requested during ingest or serialization wins over a later error, which
+    // is usually its consequence (B6).
+    if explicit {
+        fail_on_stock_fallback_request()?;
+    }
+    let py_bytes = serialized?;
     let unused = unused_main_block_inputs(py_bytes.bind(py).as_bytes());
     LAST_UNUSED_INPUTS.with(|slot| *slot.borrow_mut() = unused);
     if profile {

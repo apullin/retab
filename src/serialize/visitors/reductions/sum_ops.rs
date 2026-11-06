@@ -15,7 +15,9 @@ fn reduction_pre_reshape_perms(
     raw_axes: &[i32],
 ) -> Option<Vec<i32>> {
     let input_rank = input_node.meta.val.shape_len as usize;
-    if input_rank == 0 || raw_axes.is_empty() {
+    // Explicit mode has no dim orders, so the only effect would be a TRANSPOSE that
+    // moves the reduced size-1 dims (P2 design G7).
+    if input_rank == 0 || raw_axes.is_empty() || graph.is_explicit_layout() {
         return None;
     }
 

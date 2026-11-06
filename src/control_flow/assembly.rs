@@ -111,6 +111,7 @@ pub(crate) fn append_subgraphs_from_ir(
     store: &mut TensorStore,
     parent_ir: &fx_ir::IrGraph,
     submodules: &BTreeMap<String, StashedPipeline>,
+    layout: crate::pipeline_config::LayoutMode,
 ) -> PyResult<()> {
     let (_, while_body_input_counts) = collect_region_metadata(parent_ir, submodules);
 
@@ -127,6 +128,8 @@ pub(crate) fn append_subgraphs_from_ir(
         let mut sub_store = TensorStore::new();
         let mut sub_graph =
             crate::ingest::from_ir::graph_from_ir_preserve_placeholders(ir, &mut sub_store);
+        // Regions are lowered in the parent's mode; finalize already depends on it.
+        sub_graph.layout = layout;
         crate::ingest::from_ir::apply_effects_preserve_placeholders(
             &mut sub_graph,
             &mut sub_store,

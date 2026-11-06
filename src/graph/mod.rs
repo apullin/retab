@@ -5,6 +5,8 @@ use slotmap::SlotMap;
 #[cfg(test)]
 use smallvec::SmallVec;
 
+use crate::pipeline_config::LayoutMode;
+
 /// The core graph IR. Nodes live in a SlotMap arena and are referenced by
 /// stable `NodeId` keys. The graph tracks insertion order via `order`, input
 /// placeholders via `inputs`, and the single output node via `output`.
@@ -19,6 +21,11 @@ pub struct Graph {
     pub output: Option<NodeId>,
     /// Human-readable names for debugging.
     pub node_names: Vec<(NodeId, String)>,
+    /// The layout model the graph was lowered with. Ingest sets it from the stashed
+    /// pipeline config, before finalize, for the parent and every region. In `Explicit`
+    /// mode a node's val is its TOSA shape, so ingest and the serializer switch off
+    /// their implicit-layout logic (APU-135 P2 design §4.2).
+    pub layout: LayoutMode,
 }
 
 impl Graph {
@@ -29,7 +36,13 @@ impl Graph {
             inputs: Vec::new(),
             output: None,
             node_names: Vec::new(),
+            layout: LayoutMode::DimOrder,
         }
+    }
+
+    /// Whether the graph was lowered in explicit layout mode.
+    pub fn is_explicit_layout(&self) -> bool {
+        self.layout == LayoutMode::Explicit
     }
 
     /// Get a reference to a node by its ID.

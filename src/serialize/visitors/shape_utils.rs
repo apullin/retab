@@ -65,7 +65,9 @@ pub(super) fn map_axis_to_tosa_dim_order(graph: &Graph, node: &Node, axis: i32) 
         return axis;
     }
 
-    if matches!(node.target, OpTarget::TosaTranspose) {
+    // Dim-order mode's generated TRANSPOSEs keep logical vals; an explicit-mode TRANSPOSE's
+    // val is already physical (P2 design G8).
+    if matches!(node.target, OpTarget::TosaTranspose) && !graph.is_explicit_layout() {
         if let Some(input_node) = first_input_node(graph, node) {
             let input_axis = map_axis_to_tosa_dim_order(graph, input_node, normalized);
             let perms = transpose_perms(node);
@@ -495,6 +497,14 @@ pub(crate) fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Nod
 }
 
 fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> Vec<i32> {
+    // In explicit layout mode a TOSA conv/pool/resize/transpose val is its TOSA shape.
+    // The rules below would misread it: `pool_tensor_shape` takes AVG_POOL2D's zero-point
+    // operands for its kernel and stride (critique B1), and the broadcast and NHWC rules
+    // were written for logical NCHW vals.
+    if graph.is_explicit_layout() && op_semantics::has_explicit_tosa_shape_val(&node.target) {
+        return raw_i32_shape(node);
+    }
+
     if op_semantics::is_shape_literal_reshape(&node.target) {
         if let Some(shape) = literal_output_shape(node) {
             let input_shape = first_input_node(graph, node)
@@ -549,7 +559,10 @@ fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> 
     }
     let reordered_shape = apply_tosa_dim_order(node, raw_shape.clone());
 
-    if node.op == OpType::Placeholder {
+    // The NHWC guess fires exactly when a node has no dim order, which is every node in
+    // explicit mode; there it would reorder NHWC vals and rank-4 control-flow getitems
+    // (P2 design B2).
+    if node.op == OpType::Placeholder || graph.is_explicit_layout() {
         return reordered_shape;
     }
 
