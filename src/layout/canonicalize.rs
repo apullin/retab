@@ -9,15 +9,18 @@
 //! view below its permute. While a chain stays longer than two it swaps the
 //! first swappable view/permute pair and fuses again; each swap makes two ops
 //! of the same kind adjacent, so the chain shrinks. Nodes are rewritten in
-//! place (they keep their names and meta; only the value is refreshed), and
-//! dead code is eliminated from the whole graph if anything changed.
+//! place (they keep their meta; only the value is refreshed), and dead code is
+//! eliminated from the whole graph if anything changed. rc4's closing retrace
+//! also renames every call node after its target; RETAB keeps the names, which
+//! nothing compares. A permute dim outside its input's rank panics where rc4
+//! raises.
 
 use std::collections::HashSet;
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::layout::ctx::LayoutCtx;
 use crate::layout::dim_maps::{is_permutation, normalize_dim, normalize_dims, ViewMap};
-use crate::layout::shape::{int_list, int_list_arg, refreshed_meta};
+use crate::layout::shape::{int_list, refreshed_meta};
 
 const VIEW: &str = "aten.view_copy.default";
 const PERMUTE: &str = "aten.permute_copy.default";
@@ -150,16 +153,14 @@ fn fuse_sequential_ops(ctx: &mut LayoutCtx<'_>, chain: &mut Vec<NodeId>) -> bool
                 let rank = input_shape.len();
                 let mut dims = permute_dims(ctx, node);
                 if dims.iter().any(|&dim| dim < 0 || dim >= rank as i64) {
-                    let Ok(normalized) = dims
+                    // rc4's `_normalize_dim` asserts (dim_maps.py:42).
+                    dims = dims
                         .iter()
-                        .map(|&dim| normalize_dim(dim, rank).map(|dim| dim as i64))
-                        .collect::<Result<Vec<_>, _>>()
-                    else {
-                        // rc4 asserts on a dim outside the rank.
-                        index += 1;
-                        continue;
-                    };
-                    dims = normalized;
+                        .map(|&dim| match normalize_dim(dim, rank) {
+                            Ok(dim) => dim as i64,
+                            Err(_) => panic!("Invalid dim {dim} for rank {rank}"),
+                        })
+                        .collect();
                     set_node_op(ctx, node, PERMUTE, input, &dims);
                     changed = true;
                 }
@@ -209,17 +210,17 @@ fn fuse_pair(ctx: &mut LayoutCtx<'_>, chain: &mut Vec<NodeId>, index: usize) -> 
     if is_permute(ctx, node) && is_permute(ctx, next) {
         let dims = permute_dims(ctx, node);
         // Python indexes `dims` with the next permute's raw dims, so a negative
-        // one counts from the end.
-        let Some(fused) = permute_dims(ctx, next)
+        // one counts from the end and one out of range raises IndexError.
+        let fused: Vec<i64> = permute_dims(ctx, next)
             .iter()
             .map(|&dim| {
                 let index = if dim < 0 { dim + dims.len() as i64 } else { dim };
-                usize::try_from(index).ok().and_then(|index| dims.get(index).copied())
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|index| dims.get(index).copied())
+                    .unwrap_or_else(|| panic!("permute dim {dim} out of range for {dims:?}"))
             })
-            .collect::<Option<Vec<_>>>()
-        else {
-            return false;
-        };
+            .collect();
         set_node_op(ctx, node, PERMUTE, input, &fused);
         remove_node(ctx, chain, index + 1, node);
         return true;
@@ -336,7 +337,7 @@ fn remove_node(ctx: &mut LayoutCtx<'_>, chain: &mut Vec<NodeId>, index: usize, r
 /// as `refresh_permute_view_meta` does; the rest of its meta stays.
 fn set_node_op(ctx: &mut LayoutCtx<'_>, node: NodeId, target: &str, input: NodeId, arg: &[i64]) {
     ctx.set_target(node, target);
-    ctx.set_args(node, vec![IrArg::Node(input), int_list_arg(arg)]);
+    ctx.set_args(node, vec![IrArg::Node(input), i64_list_arg(arg)]);
     let meta = refreshed_meta(ctx.graph(), node).expect("views and permutes have a shape rule");
     *ctx.meta_mut(node) = meta;
 }

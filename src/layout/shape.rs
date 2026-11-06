@@ -397,18 +397,9 @@ pub(crate) fn mark_contiguous(meta: &mut NodeMeta) {
     }
 }
 
-/// An `int[]` argument as RETAB's FX import spells it: an empty list becomes
-/// `IrArg::None`. Layout passes build view sizes and permute dims with this so
-/// their nodes look like imported ones.
-pub(crate) fn int_list_arg(values: &[i64]) -> IrArg {
-    if values.is_empty() {
-        IrArg::None
-    } else {
-        crate::fx_ir::i64_list_arg(values)
-    }
-}
-
-/// An `int[]` argument, reading `IrArg::None` as the empty list.
+/// An `int[]` argument, reading `IrArg::None` as the empty list: RETAB's FX
+/// import spells `[]` that way, while passes spell it `IrArg::List(vec![])` as
+/// rc4 does.
 pub(crate) fn int_list(arg: &IrArg) -> Option<Vec<i64>> {
     required_int_list(Some(arg), "int[]").ok()
 }

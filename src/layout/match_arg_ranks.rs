@@ -8,10 +8,10 @@
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::fx_meta::TensorFacts;
 use crate::layout::ctx::LayoutCtx;
-use crate::layout::shape::{int_list_arg, mark_contiguous};
+use crate::layout::shape::mark_contiguous;
 
 const VIEW_COPY: &str = "aten.view_copy.default";
 
@@ -151,7 +151,7 @@ fn insert_rank_view(
             NodeOp::CallFunction,
             name,
             VIEW_COPY,
-            vec![IrArg::Node(arg), int_list_arg(&new_shape)],
+            vec![IrArg::Node(arg), i64_list_arg(&new_shape)],
             HashMap::new(),
             meta,
         )

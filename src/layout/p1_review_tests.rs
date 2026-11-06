@@ -444,12 +444,12 @@ fn high_rank_all_singleton_permute_becomes_two_views_through_rank0() {
     assert_vals_match_retrace(&g);
 }
 
-/// The rank-0 view above gets its empty size as `IrArg::List(vec![])`; FX
-/// import, which every other rank-0 view comes through, spells it
-/// `IrArg::None` (`fx_ir::resolve_arg`). Readers that handle one spelling
-/// miss the other (see `fuse_view_copy_refreshes_meta_for_a_rank0_final_view`).
+/// The rank-0 view above gets an empty size. rc4 spells it `[]`
+/// (`view_copy(x, [])`), and the port keeps that spelling, `IrArg::List(vec![])`;
+/// FX import spells an imported one `IrArg::None` (`fx_ir::resolve_arg`), so
+/// readers accept both (`layout::shape::int_list`).
 #[test]
-fn high_rank_rank0_view_size_uses_the_import_spelling() {
+fn high_rank_rank0_view_size_is_empty() {
     let mut g = LayoutGraph::new();
     let x = g.input("x", &[1, 1, 1, 1, 1]);
     let p = g.permute(x, &[4, 3, 2, 1, 0]);
@@ -463,11 +463,8 @@ fn high_rank_rank0_view_size_uses_the_import_spelling() {
         .into_iter()
         .find(|&id| g.graph().node(id).target == VIEW)
         .unwrap();
-    assert!(
-        matches!(g.graph().node(first).args[1], IrArg::None),
-        "{:?}",
-        g.graph().node(first).args[1]
-    );
+    let size = &g.graph().node(first).args[1];
+    assert_eq!(crate::layout::shape::int_list(size), Some(vec![]), "{size:?}");
 }
 
 /// rc4's retrace interprets every node, dead ones included, so a dead permute

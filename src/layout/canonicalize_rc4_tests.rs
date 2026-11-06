@@ -1135,13 +1135,11 @@ fn chain_with_out_of_range_permute() -> LayoutGraph {
 }
 
 #[test]
-#[ignore = "BUG: a permute dim outside its input's rank after a swappable pair makes the pass loop forever; rc4 raises"]
 fn out_of_range_permute_dims_do_not_hang() {
     // rc4: AssertionError "Invalid dim 5 for rank 2" (dim_maps.py:42, from
     // canonicalize_view_copy_permute_pass.py:178-181) in the first
-    // _fuse_sequential_ops. RETAB skips the bad permute, then swaps
-    // (permute, view) and back forever, because the swapped permute can't fuse
-    // with the bad one (fuse_pair returns false).
+    // _fuse_sequential_ops. The port once skipped the bad permute and then
+    // swapped (permute, view) back and forth forever; it now panics as rc4 raises.
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let mut g = chain_with_out_of_range_permute();
@@ -1151,11 +1149,10 @@ fn out_of_range_permute_dims_do_not_hang() {
         let _ = sender.send(outcome.is_err());
     });
     let finished = receiver.recv_timeout(Duration::from_secs(10));
-    assert!(finished.is_ok(), "the pass is still running after 10 s");
+    assert_eq!(finished, Ok(true), "the pass must raise as rc4 does, not hang or return");
 }
 
 #[test]
-#[ignore = "BUG: a permute dim outside its input's rank is skipped silently; rc4 raises AssertionError or IndexError"]
 fn out_of_range_permute_dims_raise_as_rc4_does() {
     // rc4 raises for both: AssertionError (dim_maps.py:42) for the lone permute,
     // IndexError at canonicalize_view_copy_permute_pass.py:249 for the pair.
@@ -1189,12 +1186,10 @@ fn out_of_range_permute_dims_raise_as_rc4_does() {
 }
 
 #[test]
-#[ignore = "BUG: the pass's whole-graph DCE drops an unused in-place op that rc4's eliminate_dead_code keeps as impure"]
 fn dead_code_elimination_keeps_unused_impure_calls() {
     // rc4 (torch 2.15 Graph.eliminate_dead_code): node.is_impure() is true for
-    // an edge aten.add_.Tensor, so the unused add_ stays. RETAB's
-    // LayoutCtx::eliminate_dead_code keeps only what reaches an output,
-    // placeholder or non-call node (ctx.rs documents the difference).
+    // an edge aten.add_.Tensor, so the unused add_ stays, as it does in
+    // LayoutCtx::eliminate_dead_code (ctx.rs is_impure_call).
     let mut g = LayoutGraph::new();
     let x = g.input("x", &[2, 3]);
     let y = g.input("y", &[2, 3]);

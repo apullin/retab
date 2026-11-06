@@ -30,10 +30,15 @@ impl IrPass for IrNormalizeDelegateIOLayoutPass {
         if !modified {
             return false;
         }
-        // rc4's retrace re-derives every value from the now contiguous inputs,
-        // so every value in the graph is contiguous afterwards.
+        // rc4's retrace re-derives every computed value from the now
+        // contiguous runtime inputs; placeholders keep theirs, so a
+        // channels-last parameter stays channels-last. Its fake kernels can
+        // also carry such a parameter's strides into a value (a convolution);
+        // RETAB does not model that, and nothing reads these orders later.
         for id in ctx.order().to_vec() {
-            mark_contiguous(ctx.meta_mut(id));
+            if ctx.node(id).op != NodeOp::Placeholder {
+                mark_contiguous(ctx.meta_mut(id));
+            }
         }
         ctx.finish();
         true

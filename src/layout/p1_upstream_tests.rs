@@ -646,7 +646,6 @@ fn arm_fuse_views_before_a_permute() {
 /// (`fuse_view_copy.py:190-192`). Its retrace still gives the view and the
 /// `relu` the value `[2, 16]` (confirmed by running rc4 on this graph).
 #[test]
-#[ignore = "BUG: fuse_view_copy writes the last view's raw size list, -1 included, into the fused nodes' values"]
 fn fused_view_with_an_inferred_dim_keeps_resolved_values() {
     fuse_view_copy(
         &[

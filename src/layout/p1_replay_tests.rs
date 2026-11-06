@@ -3,6 +3,7 @@
 //! `replay` for what is compared.
 
 use crate::fx_ir::IrPass;
+use crate::layout::canonicalize::IrCanonicalizeViewCopyPermutePass;
 use crate::layout::fuse_view_copy::IrFuseViewCopyTransformPass;
 use crate::layout::high_rank_singleton_permute::IrRewriteHighRankSingletonPermutePass;
 use crate::layout::match_arg_ranks::IrMatchArgRanksPass;
@@ -39,48 +40,22 @@ fn high_rank_singleton_permute_matches_rc4() {
 
 #[test]
 fn fuse_view_copy_matches_rc4() {
-    replay::check_known(
-        &IrFuseViewCopyTransformPass,
-        FUSE_VIEW_COPY,
-        FUSE_VIEW_COPY_KNOWN,
+    replay::check(&IrFuseViewCopyTransformPass, FUSE_VIEW_COPY);
+}
+
+#[test]
+fn canonicalize_view_copy_permute_matches_rc4() {
+    replay::check(
+        &IrCanonicalizeViewCopyPermutePass,
+        CANONICALIZE_VIEW_COPY_PERMUTE,
     );
 }
 
-const FUSE_RANK0: &str = "BUG: the last view of the chain has rank 0";
-const FUSE_INFERRED: &str = "BUG: the last view of the chain infers a dim (-1)";
-
-/// FuseViewCopy cases that still differ from rc4, by bug; see the two
-/// ignored tests below. Delete entries as the port is fixed.
-const FUSE_VIEW_COPY_KNOWN: &[(&str, &str)] = &[
-    ("final_view_to_rank0", FUSE_RANK0),
-    ("random_18", FUSE_RANK0),
-    ("random_28", FUSE_RANK0),
-    ("random_32", FUSE_RANK0),
-    ("random_75", FUSE_RANK0),
-    ("random_128", FUSE_RANK0),
-    ("random_165", FUSE_RANK0),
-    ("random_196", FUSE_RANK0),
-    ("final_view_with_an_inferred_dim", FUSE_INFERRED),
-    ("random_6", FUSE_INFERRED),
-    ("random_95", FUSE_INFERRED),
-    ("random_129", FUSE_INFERRED),
-    ("random_130", FUSE_INFERRED),
-    ("random_145", FUSE_INFERRED),
-    ("random_148", FUSE_INFERRED),
-    ("random_163", FUSE_INFERRED),
-    ("random_192", FUSE_INFERRED),
-    ("random_259", FUSE_INFERRED),
-];
-
-/// rc4 gives the first view and the unary ops before the last removed view
-/// the shape that view computes: `node.args = (node.args[0], final_shape)`
-/// (fuse_view_copy.py:190-192), then the retrace (:207) re-runs view_copy. The
-/// port parses the last view's shape argument instead
-/// (fuse_view_copy.rs:98-116); RETAB's importer turns `[]` into `IrArg::None`
-/// (`resolve_arg`, fx_ir.rs:1949), so `as_int_list` fails, the loop `continue`s
-/// and the retained nodes keep their old shapes ([1] where rc4 has []).
+/// Regression: rc4 gives the first view and the unary ops before the last
+/// removed view the shape that view computes (fuse_view_copy.py:190-192, then
+/// the retrace at :207). RETAB's importer spells the empty size `IrArg::None`,
+/// which the port once failed to parse, leaving [1] where rc4 has [].
 #[test]
-#[ignore = "BUG: a fused view chain whose last view has rank 0 keeps its old shapes"]
 fn fuse_view_copy_rank0_final_view() {
     replay::check_cases(
         &IrFuseViewCopyTransformPass,
@@ -89,10 +64,9 @@ fn fuse_view_copy_rank0_final_view() {
     );
 }
 
-/// The same code path: a last view of `[-1, 8]` sets the retained nodes'
-/// shapes to [-1, 8] where rc4's retrace computes [3, 8].
+/// Regression: a last view of `[-1, 8]` once set the retained nodes' shapes to
+/// [-1, 8] where rc4's retrace computes [3, 8].
 #[test]
-#[ignore = "BUG: a fused view chain whose last view has a -1 dim records -1 as a size"]
 fn fuse_view_copy_inferred_final_dim() {
     replay::check_cases(
         &IrFuseViewCopyTransformPass,
@@ -101,16 +75,11 @@ fn fuse_view_copy_inferred_final_dim() {
     );
 }
 
-/// rc4's retrace gives every node it creates the val its op returns
-/// (`self.tracer.set_metadata(res_proxy.node, res_data)`, exir/pass_base.py:690),
-/// so the views and the reduced permute have identity dim orders of their own
-/// rank. The port builds their meta with `stamp.preserve_qparams`
-/// (high_rank_singleton_permute.rs:117,132,142), which clones the permute's
-/// meta, dim order included: the rank-4 view in `rank5_with_a_singleton`
-/// carries [0, 1, 2, 3, 4]. Nothing reads it in explicit mode yet.
+/// Regression: rc4's retrace gives the views and the reduced permute that
+/// replace a high-rank permute identity dim orders of their own rank
+/// (exir/pass_base.py:690); the port once cloned the permute's rank-5 order.
 #[test]
-#[ignore = "BUG: views replacing a high-rank permute keep its dim order of the old rank"]
-fn high_rank_singleton_permute_new_nodes_keep_the_old_rank_dim_order() {
+fn high_rank_singleton_permute_new_nodes_get_dim_orders_of_their_rank() {
     replay::check_cases_with(
         &IrRewriteHighRankSingletonPermutePass,
         HIGH_RANK_SINGLETON_PERMUTE,
@@ -122,12 +91,11 @@ fn high_rank_singleton_permute_new_nodes_keep_the_old_rank_dim_order() {
     );
 }
 
-/// rc4's retrace recomputes the val of every node a fusion reshapes. The port
-/// sets their tensor facts only (fuse_view_copy.rs:112-116), so in
-/// `docstring_example` abs goes from [24] to [2, 12] and keeps dim order [0].
+/// Regression: rc4's retrace recomputes the val of every node a fusion
+/// reshapes; in `docstring_example` abs goes from [24] to [2, 12] with dim
+/// order [0, 1].
 #[test]
-#[ignore = "BUG: nodes a view fusion reshapes keep their dim order of the old rank"]
-fn fuse_view_copy_reshaped_nodes_keep_the_old_rank_dim_order() {
+fn fuse_view_copy_reshaped_nodes_get_dim_orders_of_their_rank() {
     replay::check_cases_with(
         &IrFuseViewCopyTransformPass,
         FUSE_VIEW_COPY,
@@ -138,12 +106,6 @@ fn fuse_view_copy_reshaped_nodes_keep_the_old_rank_dim_order() {
         },
     );
 }
-
-// The Rust canonicalizer doesn't exist yet; its fixture is ready:
-// #[test]
-// fn canonicalize_view_copy_permute_matches_rc4() {
-//     replay::check(&IrCanonicalizeViewCopyPermutePass, CANONICALIZE_VIEW_COPY_PERMUTE);
-// }
 
 #[test]
 fn every_fixture_parses_and_covers_its_pass() {

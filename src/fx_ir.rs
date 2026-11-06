@@ -1076,6 +1076,11 @@ impl IrGraph {
     }
 
     pub(crate) fn eliminate_dead_code(&mut self) -> bool {
+        self.eliminate_dead_code_keeping(|_| false)
+    }
+
+    /// `eliminate_dead_code`, with the live nodes `keep` accepts as extra roots.
+    pub(crate) fn eliminate_dead_code_keeping(&mut self, keep: impl Fn(&IrNode) -> bool) -> bool {
         let mut reachable = vec![false; self.nodes.len()];
         let mut stack: Vec<_> = self
             .live_nodes()
@@ -1083,7 +1088,7 @@ impl IrGraph {
                 matches!(
                     node.op,
                     NodeOp::Placeholder | NodeOp::Output | NodeOp::Other
-                )
+                ) || keep(node)
             })
             .map(|node| node.id)
             .collect();

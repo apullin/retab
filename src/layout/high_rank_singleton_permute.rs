@@ -8,10 +8,10 @@
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::fx_target::is_permute_target;
 use crate::layout::ctx::LayoutCtx;
-use crate::layout::shape::{int_list_arg, mark_contiguous};
+use crate::layout::shape::mark_contiguous;
 
 const VIEW_COPY: &str = "aten.view_copy.default";
 
@@ -118,7 +118,7 @@ fn rewrite(ctx: &mut LayoutCtx<'_>, id: NodeId, plan: Plan) {
             NodeOp::CallFunction,
             format!("{name}_drop_unit_dims"),
             VIEW_COPY,
-            vec![IrArg::Node(input), int_list_arg(&plan.reduced_input_shape)],
+            vec![IrArg::Node(input), i64_list_arg(&plan.reduced_input_shape)],
             HashMap::new(),
             meta(plan.reduced_input_shape.clone()),
         );
@@ -129,13 +129,23 @@ fn rewrite(ctx: &mut LayoutCtx<'_>, id: NodeId, plan: Plan) {
                     .iter()
                     .map(|&axis| plan.reduced_input_shape[axis as usize])
                     .collect();
+                let mut permute_meta = meta(shape);
+                if target == "aten.permute.default" {
+                    // Unlike permute_copy, a permute is a strided view of its
+                    // contiguous input: its dim order is the inverse permutation.
+                    let mut order = vec![0; permutation.len()];
+                    for (index, &axis) in permutation.iter().enumerate() {
+                        order[axis as usize] = index;
+                    }
+                    permute_meta.set_val_dim_order(order);
+                }
                 ctx.create_node(
                     NodeOp::CallFunction,
                     format!("{name}_reduced"),
                     target,
-                    vec![IrArg::Node(reduced_input), int_list_arg(permutation)],
+                    vec![IrArg::Node(reduced_input), i64_list_arg(permutation)],
                     kwargs,
-                    meta(shape),
+                    permute_meta,
                 )
             }
         };
@@ -143,7 +153,7 @@ fn rewrite(ctx: &mut LayoutCtx<'_>, id: NodeId, plan: Plan) {
             NodeOp::CallFunction,
             format!("{name}_restore_rank"),
             VIEW_COPY,
-            vec![IrArg::Node(reduced_output), int_list_arg(&plan.output_shape)],
+            vec![IrArg::Node(reduced_output), i64_list_arg(&plan.output_shape)],
             HashMap::new(),
             meta(plan.output_shape.clone()),
         )

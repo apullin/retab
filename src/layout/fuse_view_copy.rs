@@ -17,7 +17,7 @@ use crate::fx_ir::{IrGraph, IrPass, NodeId, NodeOp};
 use crate::fx_meta::TensorFacts;
 use crate::layout::ctx::LayoutCtx;
 use crate::layout::shape::{mark_contiguous, refreshed_meta};
-use crate::layout::table::is_pending_table;
+use crate::layout::pending::is_pending_table;
 
 const VIEW_COPY: &str = "aten.view_copy.default";
 
@@ -51,8 +51,8 @@ const UNARY_ELEMENTWISE_OPS: &[&str] = &[
     "aten.log.default",
 ];
 
-/// A quantized table op is a TABLE in rc4 by now (see `layout::table`), and
-/// TABLE is not in the fusible set.
+/// rc4 has already turned a quantized table op into a TABLE (see
+/// `layout::pending`), and TABLE is not in the fusible set.
 fn is_fusible(ctx: &LayoutCtx<'_>, id: NodeId) -> bool {
     let node = ctx.node(id);
     node.op == NodeOp::CallFunction

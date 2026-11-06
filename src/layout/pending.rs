@@ -1,14 +1,21 @@
-//! Ops that rc4 has already turned into `backend.tosa.TABLE` when its layout
-//! passes run.
+//! TABLE nodes that rc4 has already inserted when its phase-6 layout passes
+//! run, but RETAB still holds as the original aten op.
 //!
-//! `InsertTableOpsPass` (`arm_pass_manager.py:708`) runs before phase 6. It
-//! replaces each node whose target is in `TableOps` and that has non-empty
-//! input and output qparams (`backends/arm/_passes/insert_table_ops.py:36-75`
-//! and the quantized-only check in its `call`). RETAB emits TABLE only at
-//! serialization (`fx_insert_table_ops_ir`), so the layout passes must treat
-//! such a node as the TABLE it will become: not a unary elementwise op.
+//! `InsertTableOpsPass` (`arm_pass_manager.py:708`) replaces each node whose
+//! target is in `TableOps` and that has non-empty input and output qparams
+//! (`backends/arm/_passes/insert_table_ops.py:36-75` and the quantized-only
+//! check in its `call`). RETAB emits TABLE only at serialization, as a lowering
+//! effect (`fx_insert_table_ops_ir`), so there is no IR node for the layout
+//! passes to see; they treat such a node as the TABLE it will become, not as a
+//! unary elementwise op.
+//!
+//! rc4 also decomposes round, sqrt and sign before phase 6 (`:611-629`), which
+//! RETAB lowers in the serializer. That gap is closed in the pipeline instead:
+//! explicit mode runs those decompositions ahead of phase 6 (APU-157), so the
+//! passes stay faithful ports.
 
 use crate::fx_ir::{IrNode, NodeOp};
+
 
 /// `TableOps.unary_table_ops` and `special_table_ops`, as the venv's rc4
 /// lists them, sorted.

@@ -24,11 +24,12 @@ pub(crate) mod match_arg_ranks;
 #[allow(dead_code)]
 pub(crate) mod normalize_delegate_io;
 #[allow(dead_code)]
+pub(crate) mod pending;
+#[allow(dead_code)]
 pub(crate) mod pointwise;
 #[allow(dead_code)]
 pub(crate) mod shape;
-#[allow(dead_code)]
-pub(crate) mod table;
+
 // rc4's own tests for the P1 passes, ported (APU-135 P1).
 #[cfg(test)]
 mod p1_upstream_tests;

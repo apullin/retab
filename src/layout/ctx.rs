@@ -313,6 +313,45 @@ impl NodeOrder {
     }
 }
 
+/// torch.fx's `Node.is_impure` for a call (`torch/_library/utils.py`
+/// `is_impure`, torch 2.15), on RETAB's target strings: a mutable schema
+/// (an in-place `name_` op or an `out` variant), an op in
+/// `torch/fx/node.py`'s `_side_effectful_functions`, or a seeded random op.
+pub(crate) fn is_impure_call(target: &str) -> bool {
+    const SIDE_EFFECTFUL: &[&str] = &[
+        "aten._assert_async.msg",
+        "aten._assert_scalar.default",
+        "aten._assert_tensor_metadata.default",
+        "aten.sym_constrain_range.default",
+        "aten.sym_constrain_range_for_size.default",
+        "prims._sink_tokens.default",
+    ];
+    const SEEDED_RANDOM: &[&str] = &[
+        "bernoulli",
+        "multinomial",
+        "native_dropout",
+        "normal",
+        "poisson",
+        "rand",
+        "rand_like",
+        "randint",
+        "randint_like",
+        "randn",
+        "randn_like",
+        "randperm",
+    ];
+    let mut parts = target.split('.');
+    let (Some(_namespace), Some(name)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    let overload = parts.next().unwrap_or("default");
+    SIDE_EFFECTFUL.contains(&target)
+        || (name.ends_with('_') && !name.trim_end_matches('_').is_empty())
+        || overload == "out"
+        || overload.ends_with("_out")
+        || SEEDED_RANDOM.contains(&name)
+}
+
 /// Identifies a rewrite rule in the attempt memo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct RuleId(pub(crate) &'static str);
@@ -604,13 +643,15 @@ impl<'g> LayoutCtx<'g> {
         self.bump(id);
     }
 
-    /// `IrGraph::eliminate_dead_code`, kept in step with the order. rc4 calls
-    /// `graph.eliminate_dead_code()` instead (e.g.
-    /// backends/transforms/propagate_view_copy_permute_pass.py:160), which
-    /// also keeps unused impure nodes; RETAB's version keeps whatever reaches
-    /// a placeholder, output or non-call node.
+    /// `graph.eliminate_dead_code()` as rc4 calls it (e.g.
+    /// backends/transforms/propagate_view_copy_permute_pass.py:160), kept in
+    /// step with the order: unused nodes go unless they are impure
+    /// ([`is_impure_call`]).
     pub(crate) fn eliminate_dead_code(&mut self) -> bool {
-        if !self.graph.eliminate_dead_code() {
+        if !self
+            .graph
+            .eliminate_dead_code_keeping(|node| node.op == NodeOp::CallFunction && is_impure_call(&node.target))
+        {
             return false;
         }
         let erased: Vec<NodeId> = self
