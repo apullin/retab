@@ -7,25 +7,18 @@
 //! is split when rc4's exact check, a Vela compile of a one-TRANSPOSE probe, rejects it.
 //! The answer depends on the installed Vela, so it comes from Python.
 //!
-//! In explicit mode a node's val is its TOSA shape, and most permutes alive at the slot
-//! are ones RETAB's passes created (IrRewriteConv's NHWC and NCHW permutes, the pool and
-//! upsample permutes, the propagation's fused permutes). There `run_fx_passes` installs
-//! Python's exact check as a [`TransposeProbe`] ([`with_transpose_probe`]), and this pass
-//! asks it about each live permute that breaks the worst-case rule, as rc4 does
-//! (`preprocess._u55_transpose_probe`).
-//!
-//! Dim-order mode, and explicit mode without a probe (Rust tests), decide by name instead:
-//! Python lists the edge permutes to split (`PipelineConfig::u55_split_permutes`,
-//! `preprocess._u55_permutes_to_split`). A pass that hands a listed permute's role to a
-//! copy under a new name (names are never reused, design F9) carries the decision on the
-//! copy's meta instead ([`mark_split`]), and this pass splits a marked permute as it
-//! splits a listed one. Explicit mode's IrRewriteConv marks the copy of an A16W8 conv's
-//! source permute on its widened INT32 branch (`layout::rewrite_conv`).
+//! Explicit mode judges the same permutes the same way ([`SplitBy::Probe`]): on U55,
+//! `run_fx_passes` installs Python's exact check (`preprocess._u55_transpose_probe`) as
+//! a [`TransposeProbe`] ([`with_transpose_probe`]), and its verdict alone decides. Where
+//! rc4 raises, for a rejected permute that has no split plan, the pass requests a stock
+//! fallback. Dim-order mode's permutes don't have their TOSA shapes yet, so its pass
+//! splits the edge permutes Python lists by name instead ([`SplitBy::Name`]).
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::rc::Rc;
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId};
 use crate::layout::dtype::value_dtype;
 
 const MAX_PRODUCT: i64 = 1 << 16;
@@ -39,7 +32,7 @@ pub(crate) type TransposeProbe = dyn Fn(&[i64], &[i64], &str) -> bool;
 /// An installed [`TransposeProbe`] and its verdicts by (shape, dims, dtype): each new
 /// question costs a Vela compile, tens of milliseconds.
 struct InstalledProbe {
-    check: Box<TransposeProbe>,
+    check: Rc<TransposeProbe>,
     verdicts: HashMap<(Vec<i64>, Vec<i64>, String), bool>,
 }
 
@@ -63,7 +56,7 @@ pub(crate) fn with_transpose_probe<R>(
         }
     }
     let installed = probe.map(|check| InstalledProbe {
-        check,
+        check: Rc::from(check),
         verdicts: HashMap::new(),
     });
     let _restore = Restore(PROBE.with(|slot| slot.replace(installed)));
@@ -75,45 +68,42 @@ fn probe_installed() -> bool {
 }
 
 /// The installed probe's verdict, asked once per (shape, dims, dtype) while it is
-/// installed; `None` without a probe.
+/// installed; `None` without a probe. The slot isn't borrowed while the probe runs, so
+/// a probe that calls back into RETAB (Python lowering another program, which installs
+/// its own probe) finds it free. [`with_transpose_probe`] restores the slot on return,
+/// so the verdict is remembered by the probe that gave it.
 fn probe_verdict(shape: &[i64], perm: &[i64], dtype: &str) -> Option<bool> {
+    let key = (shape.to_vec(), perm.to_vec(), dtype.to_owned());
+    let (known, check) = PROBE.with(|slot| {
+        let slot = slot.borrow();
+        let probe = slot.as_ref()?;
+        Some((probe.verdicts.get(&key).copied(), Rc::clone(&probe.check)))
+    })?;
+    if known.is_some() {
+        return known;
+    }
+    let verdict = check(shape, perm, dtype);
     PROBE.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        let probe = slot.as_mut()?;
-        let key = (shape.to_vec(), perm.to_vec(), dtype.to_owned());
-        Some(
-            *probe
-                .verdicts
-                .entry(key)
-                .or_insert_with(|| (probe.check)(shape, perm, dtype)),
-        )
-    })
+        if let Some(probe) = slot.borrow_mut().as_mut() {
+            probe.verdicts.insert(key, verdict);
+        }
+    });
+    Some(verdict)
 }
 
-/// The meta key of [`mark_split`]. RETAB's own: rc4 needs no such mark, as it decides
-/// at the pass itself.
-const SPLIT_MARK: &str = "retab_u55_split";
-
-/// Mark the permute whose meta this is to be split on U55, as if its name were in
-/// `split_permutes`.
-pub(crate) fn mark_split(meta: &mut NodeMeta) {
-    meta.set_extra(SPLIT_MARK, MetaValue::Bool(true));
-}
-
-/// Whether [`mark_split`] marked this meta.
-pub(crate) fn is_marked_split(meta: &NodeMeta) -> bool {
-    meta.extra_bool(SPLIT_MARK) == Some(true)
+/// What decides whether the pass splits a live permute whose input breaks the
+/// worst-case rule.
+pub enum SplitBy {
+    /// Dim-order mode: Python's list of the edge permutes to split, by name
+    /// (`PipelineConfig::u55_split_permutes`).
+    Name(HashSet<String>),
+    /// Explicit mode: the installed [`TransposeProbe`]'s verdict, as rc4's exact check.
+    /// Without a probe (a pipeline not lowering for U55) nothing is judged.
+    Probe,
 }
 
 pub struct IrDecomposePermuteForU55Pass {
-    /// The edge permutes to split, by name: Python's `_u55_permutes_to_split`. Permutes
-    /// marked by [`mark_split`] are split too.
-    pub split_permutes: HashSet<String>,
-    /// Explicit mode's pass: with a [`TransposeProbe`] installed, the probe alone decides
-    /// whether a live permute that breaks the worst-case rule is split, as rc4's exact
-    /// check does, and names and marks are not consulted. Dim-order mode's permutes don't
-    /// have their TOSA shapes yet, so its pass never asks.
-    pub probe_live_permutes: bool,
+    pub split_by: SplitBy,
 }
 
 fn combinations(rank: usize, len: usize) -> Vec<Vec<usize>> {
@@ -270,72 +260,113 @@ fn log_judgement(path: &str, line: String) {
 }
 
 impl IrDecomposePermuteForU55Pass {
-    /// rc4's `call_operator` for the permute `id`, if it is one: split it when its input
-    /// breaks the worst-case rule and the probe rejects it, or, without a probe, when it
-    /// is listed or marked.
-    fn decompose_one(&self, graph: &mut IrGraph, id: NodeId, log: Option<&str>) -> bool {
+    /// The pass, appending a line per permute it judges to `log`
+    /// (`RETAB_U55_PERMUTE_LOG`).
+    fn run_with_log(&self, graph: &mut IrGraph, log: Option<&str>) -> bool {
+        // Without names or a probe the pipeline isn't lowering for U55 (or, in dim-order
+        // mode, no edge permute needs a split), so there is nothing to judge or log.
+        let judging = match &self.split_by {
+            SplitBy::Name(names) => !names.is_empty(),
+            SplitBy::Probe => probe_installed(),
+        };
+        if !judging {
+            return false;
+        }
+        let mut modified = false;
+        for id in graph.live_call_function_ids() {
+            match self.decompose_one(graph, id, log) {
+                Ok(split) => modified |= split,
+                Err(reason) => {
+                    crate::stock_fallback::request(format!("IrDecomposePermuteForU55: {reason}"));
+                    break;
+                }
+            }
+        }
+        modified
+    }
+
+    /// rc4's `call_operator` for the node `id`: a permute whose input breaks the
+    /// worst-case rule is split when its name is listed or the probe rejects it.
+    /// `Ok(true)` when it was split; `Err` is a stock fallback's reason, where rc4 raises.
+    fn decompose_one(
+        &self,
+        graph: &mut IrGraph,
+        id: NodeId,
+        log: Option<&str>,
+    ) -> Result<bool, String> {
         let node = &graph.nodes[id];
         if !matches!(
             node.target.as_str(),
             "aten.permute_copy.default" | "aten.permute.default"
         ) {
-            return false;
+            return Ok(false);
         }
         let (Some(input), Some(perm)) = (node.first_node_arg(), node.arg_int_list(1)) else {
-            return false;
+            return Ok(false);
         };
         let Some(shape) = graph.node_shape_vec(input) else {
-            return false;
+            return Ok(false);
         };
         let rank = shape.len() as i64;
         if rank == 0 || perm.len() != shape.len() {
-            return false;
+            return Ok(false);
         }
         let perm: Vec<i64> = perm.iter().map(|&axis| axis.rem_euclid(rank)).collect();
         // rc4's quick check: a permute that passes the worst-case rule runs on U55.
         if !violates_worst_case(&shape) {
-            return false;
+            return Ok(false);
         }
-        let listed = self.split_permutes.contains(&node.name);
-        let marked = is_marked_split(&node.meta);
         // rc4 asks about `args[0].data.dtype`, the integer dtype its retraced vals hold.
         let dtype = value_dtype(graph, input).unwrap_or_default();
-        let verdict = if self.probe_live_permutes {
-            probe_verdict(&shape, &perm, &dtype)
+        let (decider, decided) = match &self.split_by {
+            SplitBy::Name(names) => ("listed", names.contains(&node.name)),
+            SplitBy::Probe => ("probe", probe_verdict(&shape, &perm, &dtype) == Some(true)),
+        };
+        let limits = if decided {
+            split_chunk_limits(&shape)
         } else {
             None
         };
-        let split = verdict.unwrap_or(listed || marked);
+        // rc4 raises for a permute its exact check rejects and no plan splits; dim-order
+        // mode keeps such a listed permute whole.
+        let fall_back = decided && limits.is_none() && matches!(self.split_by, SplitBy::Probe);
         if let Some(path) = log {
-            let probe = verdict.map_or("-".to_string(), |verdict| verdict.to_string());
+            let outcome = if fall_back {
+                "fallback"
+            } else if limits.is_some() {
+                "true"
+            } else {
+                "false"
+            };
             log_judgement(
                 path,
                 format!(
-                    "{}\tshape={shape:?}\tperm={perm:?}\tdtype={dtype}\tlisted={listed}\tmarked={marked}\tprobe={probe}\tsplit={split}\n",
+                    "{}\tshape={shape:?}\tperm={perm:?}\tdtype={dtype}\t{decider}={decided}\tsplit={outcome}\n",
                     node.name
                 ),
             );
         }
-        if !split {
-            return false;
+        if fall_back {
+            return Err(format!(
+                "{}: the U55 probe rejects a TRANSPOSE of shape={shape:?} by perm={perm:?}, \
+                 and no split plan passes the worst-case rule (rc4's \
+                 DecomposePermuteForU55Pass raises)",
+                node.name
+            ));
         }
-        let Some(limits) = split_chunk_limits(&shape) else {
-            return false;
+        let Some(limits) = limits else {
+            return Ok(false);
         };
-        // The chunks pass the worst-case rule, so none carries the decision on, as none
-        // has a listed name.
-        let mut meta = node.meta.clone();
-        meta.extras.remove(SPLIT_MARK);
         let split = Split {
             name: node.name.clone(),
             perm: &perm,
             axes: limits.into_iter().collect(),
-            meta,
+            meta: node.meta.clone(),
         };
         let mut cursor = graph.rewrite_cursor(id);
         let result = emit(&mut cursor, &split, input, shape, 0, "");
         cursor.replace_anchor_with(result);
-        true
+        Ok(true)
     }
 }
 
@@ -345,29 +376,16 @@ impl IrPass for IrDecomposePermuteForU55Pass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let log = crate::config::u55_permute_log_file();
-        let probing = self.probe_live_permutes && probe_installed();
-        if log.is_none()
-            && !probing
-            && self.split_permutes.is_empty()
-            && !graph.live_nodes().any(|node| is_marked_split(&node.meta))
-        {
-            return false;
-        }
-        let mut modified = false;
-        for id in graph.live_call_function_ids() {
-            modified |= self.decompose_one(graph, id, log.as_deref());
-        }
-        modified
+        self.run_with_log(graph, crate::config::u55_permute_log_file().as_deref())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::rc::Rc;
+    use std::cell::Cell;
 
     use super::*;
-    use crate::fx_ir::{i64_list_arg, NodeOp};
+    use crate::fx_ir::{i64_list_arg, NodeMeta, NodeOp};
     use crate::test_ir::{call, f32_call, f32_placeholder, output, placeholder, qparam};
 
     const I8: &str = "torch.int8";
@@ -419,10 +437,17 @@ mod tests {
         );
     }
 
-    fn pass(split_permutes: &[&str], probe_live_permutes: bool) -> IrDecomposePermuteForU55Pass {
+    /// Dim-order mode's pass, splitting the permutes `names`.
+    fn by_name(names: &[&str]) -> IrDecomposePermuteForU55Pass {
         IrDecomposePermuteForU55Pass {
-            split_permutes: split_permutes.iter().map(|name| name.to_string()).collect(),
-            probe_live_permutes,
+            split_by: SplitBy::Name(names.iter().map(|name| name.to_string()).collect()),
+        }
+    }
+
+    /// Explicit mode's pass, asking the installed probe.
+    fn by_probe() -> IrDecomposePermuteForU55Pass {
+        IrDecomposePermuteForU55Pass {
+            split_by: SplitBy::Probe,
         }
     }
 
@@ -463,10 +488,7 @@ mod tests {
             [2, 257, 257, 2],
         );
         let out = output(&mut graph, permute);
-        let pass = IrDecomposePermuteForU55Pass {
-            split_permutes: HashSet::from(["permute".to_string()]),
-            probe_live_permutes: false,
-        };
+        let pass = by_name(&["permute"]);
 
         assert!(pass.run(&mut graph));
         let result = graph.node(out).first_node_arg().unwrap();
@@ -482,38 +504,6 @@ mod tests {
         assert_eq!(graph.node_shape_vec(result), Some(vec![2, 257, 257, 2]));
     }
 
-    /// A permute whose role a rewrite handed to it from a listed one carries the split
-    /// in its meta: it is split under its own name with no name listed at all, and the
-    /// chunks it becomes don't carry the mark on.
-    #[test]
-    fn splits_a_marked_permute_whatever_its_name() {
-        let mut graph = IrGraph::empty();
-        let x = f32_placeholder(&mut graph, "x", [2, 2, 257, 257]);
-        let permute = f32_call(
-            &mut graph,
-            "permute_int32",
-            "aten.permute_copy.default",
-            vec![IrArg::Node(x), IrArg::List(vec![IrArg::Int(0), IrArg::Int(2), IrArg::Int(3), IrArg::Int(1)])],
-            [2, 257, 257, 2],
-        );
-        mark_split(&mut graph.node_mut(permute).meta);
-        let out = output(&mut graph, permute);
-        let pass = IrDecomposePermuteForU55Pass {
-            split_permutes: HashSet::new(),
-            probe_live_permutes: false,
-        };
-
-        assert!(pass.run(&mut graph));
-        assert!(!graph.node(permute).alive);
-        let cat = graph.node(out).first_node_arg().unwrap();
-        assert_eq!(graph.node(cat).target, "aten.cat.default");
-        assert_eq!(graph.node(cat).name, "permute_int32_u55_cat");
-        let created: Vec<_> = graph.live_nodes().filter(|node| node.name.starts_with("permute_int32_u55")).collect();
-        assert_eq!(created.len(), 5, "two slices, two permutes and the cat");
-        assert!(created.iter().all(|node| !is_marked_split(&node.meta)));
-        assert!(!pass.run(&mut graph), "the chunks are not split again");
-    }
-
     #[test]
     fn leaves_unlisted_permutes_alone() {
         let mut graph = IrGraph::empty();
@@ -526,11 +516,9 @@ mod tests {
             [2, 257, 257, 2],
         );
         output(&mut graph, permute);
-        let pass = IrDecomposePermuteForU55Pass {
-            split_permutes: HashSet::new(),
-            probe_live_permutes: false,
-        };
+        let pass = by_name(&["another_permute"]);
         assert!(!pass.run(&mut graph));
+        assert!(graph.node(permute).alive);
     }
 
     /// Explicit mode asks the probe about every live permute whose input breaks the
@@ -549,7 +537,7 @@ mod tests {
         outputs(&mut graph, &[rejected, accepted, small]);
         let (probe, questions) = fake_probe(&[&[2, 2, 257, 257]]);
 
-        assert!(with_transpose_probe(Some(probe), || pass(&[], true).run(&mut graph)));
+        assert!(with_transpose_probe(Some(probe), || by_probe().run(&mut graph)));
         assert_eq!(
             *questions.borrow(),
             vec![
@@ -562,57 +550,110 @@ mod tests {
         assert!(graph.node(small).alive);
     }
 
-    /// rc4 decides by its exact check alone: with a probe, a listed or marked permute
-    /// that Vela accepts stays whole, and a permute nobody named is split when Vela
-    /// rejects it.
+    /// Dim-order mode's pass splits the permutes Python listed and never asks a probe,
+    /// even an installed one.
     #[test]
-    fn the_probe_alone_decides_in_explicit_mode() {
+    fn dim_order_mode_splits_by_name_and_never_asks() {
         let mut graph = IrGraph::empty();
         let a = placeholder(&mut graph, "a", [2, 2, 257, 257], I8);
         let listed = permute(&mut graph, "listed", a, &[0, 2, 3, 1]);
-        let b = placeholder(&mut graph, "b", [2, 257, 257, 2], I8);
-        let marked = permute(&mut graph, "marked", b, &[0, 3, 1, 2]);
-        mark_split(&mut graph.node_mut(marked).meta);
-        let c = placeholder(&mut graph, "c", [65537, 2, 2], I8);
-        let created = permute(&mut graph, "created", c, &[1, 2, 0]);
-        outputs(&mut graph, &[listed, marked, created]);
-        let (probe, _) = fake_probe(&[&[65537, 2, 2]]);
+        let b = placeholder(&mut graph, "b", [65537, 2, 2], I8);
+        let unlisted = permute(&mut graph, "unlisted", b, &[1, 2, 0]);
+        outputs(&mut graph, &[listed, unlisted]);
+        let (probe, questions) = fake_probe(&[&[2, 2, 257, 257], &[65537, 2, 2]]);
 
-        assert!(with_transpose_probe(Some(probe), || pass(&["listed"], true).run(&mut graph)));
-        assert!(graph.node(listed).alive);
-        assert!(graph.node(marked).alive);
-        assert!(was_split(&graph, "created"));
+        assert!(with_transpose_probe(Some(probe), || by_name(&["listed"]).run(&mut graph)));
+        assert!(questions.borrow().is_empty());
+        assert!(was_split(&graph, "listed"));
+        assert!(graph.node(unlisted).alive);
     }
 
-    /// Dim-order mode's pass never asks, whatever is installed, and explicit mode's
-    /// pass without a probe splits the listed and marked permutes as before.
+    /// `RETAB_U55_PERMUTE_LOG` gets one line per permute the pass judges: what decided
+    /// it and whether it was split. A pass with neither names nor a probe isn't lowering
+    /// for U55 and doesn't walk the graph, so it writes nothing.
     #[test]
-    fn names_decide_in_dim_order_mode_and_without_a_probe() {
+    fn logs_the_permutes_it_judges() {
         let build = || {
             let mut graph = IrGraph::empty();
             let a = placeholder(&mut graph, "a", [2, 2, 257, 257], I8);
-            let listed = permute(&mut graph, "listed", a, &[0, 2, 3, 1]);
-            let b = placeholder(&mut graph, "b", [2, 257, 257, 2], I8);
-            let marked = permute(&mut graph, "marked", b, &[0, 3, 1, 2]);
-            mark_split(&mut graph.node_mut(marked).meta);
-            let c = placeholder(&mut graph, "c", [65537, 2, 2], I8);
-            let unnamed = permute(&mut graph, "unnamed", c, &[1, 2, 0]);
-            outputs(&mut graph, &[listed, marked, unnamed]);
-            (graph, unnamed)
+            let rejected = permute(&mut graph, "rejected", a, &[0, 2, 3, 1]);
+            let b = placeholder(&mut graph, "b", [1, 3, 320, 320], I8);
+            let accepted = permute(&mut graph, "accepted", b, &[0, 2, 3, 1]);
+            outputs(&mut graph, &[rejected, accepted]);
+            graph
+        };
+        let log = std::env::temp_dir().join(format!(
+            "retab_u55_permute_log_test_{}.tsv",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&log);
+        let path = log.to_str();
+
+        assert!(!probe_installed());
+        assert!(!by_probe().run_with_log(&mut build(), path));
+        assert!(!by_name(&[]).run_with_log(&mut build(), path));
+        assert!(!log.exists());
+
+        let (probe, _) = fake_probe(&[&[2, 2, 257, 257]]);
+        assert!(with_transpose_probe(Some(probe), || {
+            by_probe().run_with_log(&mut build(), path)
+        }));
+        assert!(by_name(&["rejected"]).run_with_log(&mut build(), path));
+        let lines = std::fs::read_to_string(&log).unwrap();
+        std::fs::remove_file(&log).unwrap();
+        assert_eq!(
+            lines.lines().collect::<Vec<_>>(),
+            [
+                "rejected\tshape=[2, 2, 257, 257]\tperm=[0, 2, 3, 1]\tdtype=torch.int8\tprobe=true\tsplit=true",
+                "accepted\tshape=[1, 3, 320, 320]\tperm=[0, 2, 3, 1]\tdtype=torch.int8\tprobe=false\tsplit=false",
+                "rejected\tshape=[2, 2, 257, 257]\tperm=[0, 2, 3, 1]\tdtype=torch.int8\tlisted=true\tsplit=true",
+                "accepted\tshape=[1, 3, 320, 320]\tperm=[0, 2, 3, 1]\tdtype=torch.int8\tlisted=false\tsplit=false",
+            ]
+        );
+    }
+
+    /// rc4 raises when its exact check rejects a permute that no chunk plan brings
+    /// within the worst-case rule (`_find_safe_split_chunk_limits` gives `None`), as for
+    /// a (2, 300, 300, 300, 2) input: three of its dims always multiply past 2**16. So
+    /// explicit mode sends the graph to stock, which raises its own error, and judges
+    /// nothing after that permute. Dim-order mode keeps such a listed permute whole, as
+    /// it always has.
+    #[test]
+    fn a_rejected_permute_without_a_split_plan_goes_to_stock() {
+        const HUGE: [i64; 5] = [2, 300, 300, 300, 2];
+        assert_eq!(split_chunk_limits(&HUGE), None);
+        let build = || {
+            let mut graph = IrGraph::empty();
+            let a = placeholder(&mut graph, "a", HUGE, I8);
+            let unsplittable = permute(&mut graph, "unsplittable", a, &[0, 2, 3, 4, 1]);
+            let b = placeholder(&mut graph, "b", [2, 2, 257, 257], I8);
+            let splittable = permute(&mut graph, "splittable", b, &[0, 2, 3, 1]);
+            outputs(&mut graph, &[unsplittable, splittable]);
+            (graph, unsplittable, splittable)
         };
 
-        let (mut graph, unnamed) = build();
-        let (probe, questions) = fake_probe(&[&[2, 2, 257, 257], &[2, 257, 257, 2], &[65537, 2, 2]]);
-        assert!(with_transpose_probe(Some(probe), || pass(&["listed"], false).run(&mut graph)));
-        assert!(questions.borrow().is_empty());
-        assert!(was_split(&graph, "listed") && was_split(&graph, "marked"));
-        assert!(graph.node(unnamed).alive);
+        let (mut graph, unsplittable, splittable) = build();
+        let (probe, questions) = fake_probe(&[&HUGE, &[2, 2, 257, 257]]);
+        crate::stock_fallback::take();
+        assert!(!with_transpose_probe(Some(probe), || by_probe().run(&mut graph)));
+        let reason = crate::stock_fallback::take().expect("a stock fallback");
+        assert_eq!(
+            reason,
+            "IrDecomposePermuteForU55: unsplittable: the U55 probe rejects a TRANSPOSE of \
+             shape=[2, 300, 300, 300, 2] by perm=[0, 2, 3, 4, 1], and no split plan passes \
+             the worst-case rule (rc4's DecomposePermuteForU55Pass raises)"
+        );
+        assert_eq!(
+            *questions.borrow(),
+            vec![question(&HUGE, &[0, 2, 3, 4, 1], I8)]
+        );
+        assert!(graph.node(unsplittable).alive && graph.node(splittable).alive);
 
-        let (mut graph, unnamed) = build();
-        assert!(!probe_installed());
-        assert!(pass(&["listed"], true).run(&mut graph));
-        assert!(was_split(&graph, "listed") && was_split(&graph, "marked"));
-        assert!(graph.node(unnamed).alive);
+        let (mut graph, unsplittable, _) = build();
+        assert!(by_name(&["unsplittable", "splittable"]).run(&mut graph));
+        assert_eq!(crate::stock_fallback::take(), None);
+        assert!(graph.node(unsplittable).alive);
+        assert!(was_split(&graph, "splittable"));
     }
 
     /// A Vela compile per question: the probe hears each (shape, dims, dtype) once
@@ -628,7 +669,7 @@ mod tests {
         outputs(&mut graph, &[first, second, wider]);
         let (probe, questions) = fake_probe(&[]);
 
-        assert!(!with_transpose_probe(Some(probe), || pass(&[], true).run(&mut graph)));
+        assert!(!with_transpose_probe(Some(probe), || by_probe().run(&mut graph)));
         assert_eq!(
             *questions.borrow(),
             vec![
@@ -664,7 +705,7 @@ mod tests {
         outputs(&mut graph, &[quantized, widened, chained]);
         let (probe, questions) = fake_probe(&[]);
 
-        with_transpose_probe(Some(probe), || pass(&[], true).run(&mut graph));
+        with_transpose_probe(Some(probe), || by_probe().run(&mut graph));
         assert_eq!(graph.node_dtype(copy), Some("torch.float32"));
         assert_eq!(
             *questions.borrow(),
@@ -695,5 +736,32 @@ mod tests {
             assert_eq!(verdict(), Some(true));
         });
         assert_eq!(verdict(), None);
+    }
+
+    /// The slot isn't borrowed while the probe runs: a probe that re-enters RETAB, as
+    /// Python could by lowering another program, can install and ask a probe of its own,
+    /// and its own verdict is still remembered.
+    #[test]
+    fn a_probe_can_reenter_while_it_is_asked() {
+        let calls = Rc::new(Cell::new(0));
+        let counted = Rc::clone(&calls);
+        let outer: Box<TransposeProbe> = Box::new(move |_: &[i64], _: &[i64], _: &str| {
+            counted.set(counted.get() + 1);
+            let inner: Box<TransposeProbe> = Box::new(|_: &[i64], _: &[i64], _: &str| false);
+            let nested = with_transpose_probe(Some(inner), || {
+                probe_verdict(&[65537, 2, 2], &[1, 2, 0], I8)
+            });
+            assert_eq!(nested, Some(false));
+            true
+        });
+        with_transpose_probe(Some(outer), || {
+            for _ in 0..2 {
+                assert_eq!(
+                    probe_verdict(&[2, 2, 257, 257], &[0, 2, 3, 1], I8),
+                    Some(true)
+                );
+            }
+        });
+        assert_eq!(calls.get(), 1);
     }
 }

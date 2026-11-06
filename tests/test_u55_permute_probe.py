@@ -6,6 +6,10 @@ worst-case TRANSPOSE rule (2 * 32769 > 2**16) and that Vela rejects, so rc4 spli
 into SLICE -> TRANSPOSE -> CONCAT. Without the probe, explicit mode split only permutes
 named on the edge program, left these two whole, and Vela failed with "Non-passthrough
 operation (Transpose) could not run on NPU".
+
+The other way round, a permute that breaks the worst-case rule but that Vela accepts stays
+whole. Python's edge list named every permute that breaks the rule, as its exact check
+can't run Vela outside a lowering context, so explicit mode used to split those too.
 """
 
 import copy
@@ -23,6 +27,8 @@ pytest.importorskip("ethosu.vela")
 CONV_ATEN = "torch.ops.aten.conv2d.default"
 CONV_EXIR = "executorch_exir_dialects_edge__ops_aten_convolution_default"
 INPUT_SHAPE = (2, 2, 1, 32769)
+PIXEL_UNSHUFFLE_ATEN = "torch.ops.aten.pixel_unshuffle.default"
+PIXEL_UNSHUFFLE_EXIR = "executorch_exir_dialects_edge__ops_aten_pixel_unshuffle_default"
 
 
 class BatchedConv(torch.nn.Module):
@@ -122,3 +128,29 @@ def test_ethos_u55_vela_compiles_the_split_conv_permutes(stock_and_retab):
 
     [(stock, retab)] = stock_and_retab
     _assert_split_like_stock(stock, retab)
+
+
+def test_tosa_u55_pixel_unshuffle_keeps_the_transpose_vela_accepts(stock_and_retab):
+    """rc4's U55 pixel_unshuffle case with a contiguous (1, 12, 270, 480) input
+    (test_pixel_shuffling.py, "rand_4d_contiguous"). Its permute of the
+    (1, 12, 135, 2, 240, 2) view breaks U55's worst-case rule (12 * 135 * 2 * 240 >
+    2**16), but Vela accepts the TRANSPOSE, so rc4 keeps it whole: one TRANSPOSE, as
+    stock emits. Explicit mode split it into 12 along the 240 axis while Python's edge
+    list decided. Vela's own compile of the whole graph overruns U55's scratch arena,
+    for stock as for RETAB, so the TOSA pipeline stands in for the Ethos-U55 one."""
+    from executorch.backends.arm.test.tester.test_pipeline import TosaPipelineINT
+
+    torch.manual_seed(0)
+    pipeline = TosaPipelineINT[tuple[torch.Tensor]](
+        torch.nn.PixelUnshuffle(2),
+        (torch.randn(1, 12, 270, 480),),
+        PIXEL_UNSHUFFLE_ATEN,
+        PIXEL_UNSHUFFLE_EXIR,
+        tosa_extensions=["u55"],
+    )
+    pipeline.run()
+
+    [(stock, retab)] = stock_and_retab
+    assert Counter(_ops(stock))["TRANSPOSE"] == 1
+    assert Counter(_ops(retab))["TRANSPOSE"] == 1
+    assert _ops(retab, constants=False) == _ops(stock, constants=False)

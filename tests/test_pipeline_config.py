@@ -247,6 +247,7 @@ def test_explicit_mode_hands_the_u55_split_rc4s_exact_check(monkeypatch, layout)
         assert u55_names == ["edge_permute"] and probe is None
         return
     assert u55_names == [] and probe is not None
+    pytest.importorskip("ethosu.vela")
     assert probe([2, 2, 257, 257], [0, 2, 3, 1], "torch.int8") is True
     assert probe([1, 3, 320, 320], [0, 2, 3, 1], "torch.int8") is False
     assert probe([1, 3, 320, 320], [0, 2, 3, 1], "torch.int32") is True
