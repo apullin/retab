@@ -56,3 +56,7 @@ mod p1_review_tests;
 mod p1_replay_tests;
 #[cfg(test)]
 pub(crate) mod replay;
+// rc4 replays of FuseDuplicateUsers, FuseIdenticalInputTransforms and
+// MoveDataMovementOpsToSmallerDtype (APU-160).
+#[cfg(test)]
+mod fuse_helpers_replay_tests;

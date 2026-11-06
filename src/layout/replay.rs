@@ -13,8 +13,15 @@
 //!   names don't matter;
 //! - each node's dtype and shape, and whether its `input_qparams` and
 //!   `output_qparams` maps are absent, empty or hold which keys;
-//! - placeholders' constant kinds;
+//! - each node's TOSA special dtype and `do_not_fuse_duplicate` marker;
+//! - placeholders' constant kinds and targets;
 //! - the output node's argument.
+//!
+//! A case where rc4's pass raised (`after raises=...`) matches when the port
+//! panics, as the P1 ports fail where rc4 raises. The `modified` flag the pass
+//! returns is compared only on request (`Options::modified`), since the P1
+//! passes predate it; the propagation driver loops on it, so its helpers check
+//! it.
 //!
 //! Dim orders are recorded but compared only on request (`Options::dim_orders`).
 //! rc4's passes end in an `ExportPass` retrace that recomputes every val, so a
@@ -58,12 +65,16 @@ use crate::fx_ir::{
     IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp, NodeTensor, PlaceholderTensorBinding, QParam,
     QParamMap, TensorSource,
 };
+use crate::fx_meta::MetaValue;
 use crate::graph::ir::DType;
+use crate::layout::fuse_duplicate_users::DO_NOT_FUSE_DUPLICATE_META_KEY;
+use crate::layout::fx_node::{special_dtype, SPECIAL_DTYPE_KEY};
 use crate::lowering_effects::LoweringInputKind;
 use crate::store::TensorData;
 
-/// An argument, with node references as positions in the graph.
-#[derive(Debug, Clone, PartialEq)]
+/// An argument, with node references as positions in the graph. Equality
+/// holds a NaN equal to a NaN: both graphs print the same `nan`.
+#[derive(Debug, Clone)]
 pub(crate) enum Arg {
     Node(usize),
     Int(i64),
@@ -75,12 +86,29 @@ pub(crate) enum Arg {
     None,
 }
 
+impl PartialEq for Arg {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Node(a), Self::Node(b)) => a == b,
+            (Self::Int(a), Self::Int(b)) => a == b,
+            (Self::Float(a), Self::Float(b)) => a == b || (a.is_nan() && b.is_nan()),
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::Str(a), Self::Str(b)) | (Self::Dtype(a), Self::Dtype(b)) => a == b,
+            (Self::List(a), Self::List(b)) => a == b,
+            (Self::None, Self::None) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Op {
-    /// `constant` is `param`, `buffer` or `constant` for a constant placeholder.
+    /// `constant` is `param`, `buffer` or `constant` for a constant placeholder;
+    /// `target` is the placeholder's target when it isn't its name.
     Placeholder {
         name: String,
         constant: Option<String>,
+        target: Option<String>,
     },
     Call {
         target: String,
@@ -98,6 +126,10 @@ pub(crate) struct Node {
     pub(crate) dim_order: Option<Vec<usize>>,
     pub(crate) q_in: Option<Vec<usize>>,
     pub(crate) q_out: Option<Vec<usize>>,
+    /// The `TosaSpecialDtype` member name in `meta["tosa_special_dtype"]`.
+    pub(crate) special: Option<String>,
+    /// `meta["do_not_fuse_duplicate"]` is set.
+    pub(crate) no_fuse: bool,
     pub(crate) dead: bool,
 }
 
@@ -113,6 +145,8 @@ pub(crate) struct Case {
     pub(crate) before: Graph,
     /// The `modified` flag rc4's pass returned.
     pub(crate) modified: bool,
+    /// The exception rc4's pass raised; `after` is then a copy of `before`.
+    pub(crate) raises: Option<String>,
     pub(crate) after: Graph,
 }
 
@@ -131,6 +165,8 @@ pub(crate) struct Options {
     pub(crate) dim_orders: DimOrders,
     /// Compare dead nodes too instead of dropping them from both graphs.
     pub(crate) dead_nodes: bool,
+    /// Compare the pass's `modified` flag with rc4's.
+    pub(crate) modified: bool,
 }
 
 /// The first difference between rc4's graph and RETAB's.
@@ -164,7 +200,17 @@ pub(crate) fn check(pass: &dyn IrPass, fixture: &str) {
 /// Like [`check`], except that each `(case, reason)` in `known` must still
 /// differ from rc4, so the list shrinks as the port is fixed.
 pub(crate) fn check_known(pass: &dyn IrPass, fixture: &str, known: &[(&str, &str)]) {
-    let results = replay(pass, fixture, Options::default());
+    check_known_with(pass, fixture, known, Options::default());
+}
+
+/// [`check_known`] with more checks, such as the `modified` flag.
+pub(crate) fn check_known_with(
+    pass: &dyn IrPass,
+    fixture: &str,
+    known: &[(&str, &str)],
+    options: Options,
+) {
+    let results = replay(pass, fixture, options);
     let mut problems = Vec::new();
     for (name, _) in known {
         match results.iter().find(|result| result.name == *name) {
@@ -245,9 +291,23 @@ pub(crate) fn replay_case(pass: &dyn IrPass, case: &Case, options: Options) -> C
         Ok(modified) => (Some(modified), snapshot(&graph)),
         Err(payload) => (None, Err(panic_message(payload.as_ref()))),
     };
-    let mismatch = match &actual {
-        Ok(actual) => compare(&case.after, actual, options).err(),
-        Err(error) => Some(Mismatch {
+    let mismatch = match (&case.raises, &actual) {
+        (Some(_), _) if retab_modified.is_none() => None,
+        (Some(exception), _) => Some(Mismatch {
+            class: "raises",
+            detail: format!("rc4 raises {exception}; RETAB returned without panicking"),
+        }),
+        (None, Ok(actual)) => compare(&case.after, actual, options).err().or_else(|| {
+            (options.modified && retab_modified != Some(case.modified)).then(|| Mismatch {
+                class: "modified",
+                detail: format!(
+                    "rc4 modified={}, RETAB modified={}",
+                    case.modified,
+                    retab_modified.map_or("panic".to_string(), |modified| modified.to_string())
+                ),
+            })
+        }),
+        (None, Err(error)) => Some(Mismatch {
             class: if retab_modified.is_none() {
                 "panic"
             } else {
@@ -263,6 +323,10 @@ pub(crate) fn replay_case(pass: &dyn IrPass, case: &Case, options: Options) -> C
                 Ok(graph) => graph.to_string(),
                 Err(error) => format!("    <{error}>\n"),
             };
+            let rc4_after = match &case.raises {
+                Some(exception) => format!("    <raises {exception}>\n"),
+                None => case.after.to_string(),
+            };
             format!(
                 "case {} ({}): {}\n  before:\n{}  rc4 after (modified={}):\n{}  RETAB after (modified={}):\n{}",
                 case.name,
@@ -270,7 +334,7 @@ pub(crate) fn replay_case(pass: &dyn IrPass, case: &Case, options: Options) -> C
                 mismatch.detail,
                 case.before,
                 case.modified,
-                case.after,
+                rc4_after,
                 retab_modified.map_or("panic".to_string(), |modified| modified.to_string()),
                 actual
             )
@@ -339,6 +403,24 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Case>, String> {
         let (number, header) = lines
             .next()
             .ok_or_else(|| format!("case {name}: missing `after`"))?;
+        if let Some(exception) = header.strip_prefix("after raises=") {
+            match lines.next() {
+                Some((_, "end")) => {}
+                Some((number, line)) => {
+                    return Err(at(number, format!("expected `end`, got {line:?}")))
+                }
+                None => return Err(format!("case {name}: missing `end`")),
+            }
+            check_dead_flags(&before).map_err(|error| format!("case {name} (before): {error}"))?;
+            cases.push(Case {
+                name: name.to_string(),
+                after: before.clone(),
+                before,
+                modified: false,
+                raises: Some(exception.to_string()),
+            });
+            continue;
+        }
         let rest = header.strip_prefix("after modified=").ok_or_else(|| {
             at(
                 number,
@@ -373,6 +455,7 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Case>, String> {
             name: name.to_string(),
             before,
             modified,
+            raises: None,
             after,
         });
     }
@@ -428,6 +511,7 @@ fn parse_node(line: &str, position: usize) -> Result<Node, String> {
         Op::Placeholder {
             name,
             constant: None,
+            target: None,
         }
     } else {
         let target = cursor.until("(")?.to_string();
@@ -455,11 +539,22 @@ fn parse_node(line: &str, position: usize) -> Result<Node, String> {
         dim_order: None,
         q_in: None,
         q_out: None,
+        special: None,
+        no_fuse: false,
         dead: false,
     };
     for note in cursor.rest().split(' ').filter(|note| !note.is_empty()) {
         if note == "dead" {
             node.dead = true;
+        } else if note == "nofuse" {
+            node.no_fuse = true;
+        } else if let Some(special) = note.strip_prefix("special=") {
+            node.special = Some(special.to_string());
+        } else if let Some(name) = note.strip_prefix("target=") {
+            match &mut node.op {
+                Op::Placeholder { target, .. } => *target = Some(name.to_string()),
+                Op::Call { .. } => return Err("target= on a call node".to_string()),
+            }
         } else if let Some(order) = note.strip_prefix("dim_order=") {
             node.dim_order = Some(parse_usizes(order, '[', ']')?);
         } else if let Some(kind) = note.strip_prefix("kind=") {
@@ -666,11 +761,15 @@ pub(crate) fn build(graph: &Graph) -> IrGraph {
     for (position, node) in graph.nodes.iter().enumerate() {
         let meta = node_meta(node);
         let id = match &node.op {
-            Op::Placeholder { name, constant } => {
+            Op::Placeholder {
+                name,
+                constant,
+                target,
+            } => {
                 let id = ir.add_node(
                     NodeOp::Placeholder,
                     name.clone(),
-                    name.clone(),
+                    target.clone().unwrap_or_else(|| name.clone()),
                     Vec::new(),
                     meta,
                 );
@@ -740,6 +839,16 @@ fn node_meta(node: &Node) -> NodeMeta {
     }
     if let Some(keys) = &node.q_out {
         meta.set_output_qparams(qparam_map(keys));
+    }
+    if let Some(special) = &node.special {
+        // The importer records the enum's display (`NodeMeta::from_fx`).
+        meta.set_extra(
+            SPECIAL_DTYPE_KEY,
+            MetaValue::Str(format!("TosaSpecialDtype.{special}")),
+        );
+    }
+    if node.no_fuse {
+        meta.set_extra(DO_NOT_FUSE_DUPLICATE_META_KEY, MetaValue::Bool(true));
     }
     meta
 }
@@ -811,6 +920,7 @@ pub(crate) fn snapshot(ir: &IrGraph) -> Result<Graph, String> {
             NodeOp::Placeholder => Op::Placeholder {
                 name: node.name.clone(),
                 constant: node.tensor.as_ref().map(constant_kind),
+                target: (node.target != node.name).then(|| node.target.clone()),
             },
             NodeOp::CallFunction => Op::Call {
                 target: node.target.clone(),
@@ -839,6 +949,8 @@ pub(crate) fn snapshot(ir: &IrGraph) -> Result<Graph, String> {
             dim_order,
             q_in: node.meta.input_qparams().map(qparam_keys),
             q_out: node.meta.output_qparams().map(qparam_keys),
+            special: special_dtype(&node.meta).map(str::to_string),
+            no_fuse: node.meta.extra_bool(DO_NOT_FUSE_DUPLICATE_META_KEY) == Some(true),
             dead: false,
         });
     }
@@ -981,9 +1093,26 @@ pub(crate) fn compare(expected: &Graph, actual: &Graph, options: Options) -> Res
     for (position, (want, got)) in expected.nodes.iter().zip(&actual.nodes).enumerate() {
         let at = format!("%{position}");
         match (&want.op, &got.op) {
-            (Op::Placeholder { constant: a, .. }, Op::Placeholder { constant: b, .. }) => {
+            (
+                Op::Placeholder {
+                    constant: a,
+                    target: target_a,
+                    ..
+                },
+                Op::Placeholder {
+                    constant: b,
+                    target: target_b,
+                    ..
+                },
+            ) => {
                 if a != b {
                     return mismatch("constant-kind", format!("{at}: rc4 {a:?}, RETAB {b:?}"));
+                }
+                if target_a != target_b {
+                    return mismatch(
+                        "placeholder-target",
+                        format!("{at}: rc4 {target_a:?}, RETAB {target_b:?}"),
+                    );
                 }
             }
             (
@@ -1068,6 +1197,18 @@ pub(crate) fn compare(expected: &Graph, actual: &Graph, options: Options) -> Res
                     order_label(&want.dim_order),
                     order_label(&got.dim_order)
                 ),
+            );
+        }
+        if want.special != got.special {
+            return mismatch(
+                "special-dtype",
+                format!("{label}: rc4 {:?}, RETAB {:?}", want.special, got.special),
+            );
+        }
+        if want.no_fuse != got.no_fuse {
+            return mismatch(
+                "no-fuse",
+                format!("{label}: rc4 nofuse={}, RETAB nofuse={}", want.no_fuse, got.no_fuse),
             );
         }
         if (&want.q_in, &want.q_out) != (&got.q_in, &got.q_out) {
@@ -1203,7 +1344,20 @@ impl fmt::Display for Graph {
             {
                 write!(f, " kind={kind}")?;
             }
+            if let Op::Placeholder {
+                target: Some(target),
+                ..
+            } = &node.op
+            {
+                write!(f, " target={target}")?;
+            }
             write!(f, " q={}", qparams_label(node))?;
+            if let Some(special) = &node.special {
+                write!(f, " special={special}")?;
+            }
+            if node.no_fuse {
+                write!(f, " nofuse")?;
+            }
             if node.dead {
                 write!(f, " dead")?;
             }
@@ -1302,7 +1456,8 @@ end
             nodes[1].op,
             Op::Placeholder {
                 name: "w".to_string(),
-                constant: Some("param".to_string())
+                constant: Some("param".to_string()),
+                target: None,
             }
         );
         let Op::Call { args, kwargs, .. } = &nodes[3].op else {
@@ -1346,6 +1501,7 @@ end
             let strict = Options {
                 dim_orders: DimOrders::All,
                 dead_nodes: true,
+                modified: true,
             };
             assert_eq!(compare(&case.before, &graph, strict), Ok(()));
         }
@@ -1456,6 +1612,141 @@ end
         assert_eq!(class(&graph, DimOrders::Placeholders), Some("dim-order"));
     }
 
+    /// Annotations and forms the APU-160 fixtures use.
+    const META_FIXTURE: &str = "\
+case meta
+before
+%0 = placeholder aten_view_copy_default_2 : torch.int32[2] target=aten_view_copy_default q=none special=INT48
+%1 = aten.neg.default(%0) : torch.int32[2] q=none nofuse
+output([%1])
+after modified=false same
+end
+case raised
+before
+%0 = placeholder x : torch.float32[2] q=none
+%1 = aten.relu.default(%0) : torch.float32[2] q=none
+output([%1])
+after raises=RuntimeError
+end
+";
+
+    /// Panics, as a port does where rc4 raises.
+    struct Panics;
+
+    impl IrPass for Panics {
+        fn name(&self) -> &str {
+            "Panics"
+        }
+
+        fn run(&self, _graph: &mut IrGraph) -> bool {
+            panic!("like rc4")
+        }
+    }
+
+    /// Changes nothing but claims it did.
+    struct ClaimsModified;
+
+    impl IrPass for ClaimsModified {
+        fn name(&self) -> &str {
+            "ClaimsModified"
+        }
+
+        fn run(&self, _graph: &mut IrGraph) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn meta_annotations_parse_build_and_print() {
+        let cases = parse(META_FIXTURE).unwrap();
+        let nodes = &cases[0].before.nodes;
+        assert_eq!(
+            nodes[0].op,
+            Op::Placeholder {
+                name: "aten_view_copy_default_2".to_string(),
+                constant: None,
+                target: Some("aten_view_copy_default".to_string()),
+            }
+        );
+        assert_eq!(nodes[0].special.as_deref(), Some("INT48"));
+        assert!(nodes[1].no_fuse && !nodes[0].no_fuse);
+        assert_eq!(cases[1].raises.as_deref(), Some("RuntimeError"));
+        let graph = build(&cases[0].before);
+        assert_eq!(graph.node(0).target, "aten_view_copy_default");
+        assert_eq!(
+            graph.node(0).meta.extra_str(SPECIAL_DTYPE_KEY),
+            Some("TosaSpecialDtype.INT48")
+        );
+        assert_eq!(graph.node(1).meta.extra_bool(DO_NOT_FUSE_DUPLICATE_META_KEY), Some(true));
+        let strict = Options {
+            dim_orders: DimOrders::All,
+            dead_nodes: true,
+            modified: false,
+        };
+        assert_eq!(compare(&cases[0].before, &snapshot(&graph).unwrap(), strict), Ok(()));
+        let printed = format!(
+            "case meta\nbefore\n{}after modified=false same\nend\n",
+            cases[0].before
+        )
+        .replace("    ", "");
+        assert_eq!(parse(&printed).unwrap()[0].before, cases[0].before);
+    }
+
+    #[test]
+    fn meta_differences_are_classified() {
+        let cases = parse(META_FIXTURE).unwrap();
+        let mut graph = build(&cases[0].before);
+        graph.node_mut(1).meta.extras.remove(DO_NOT_FUSE_DUPLICATE_META_KEY);
+        let actual = snapshot(&graph).unwrap();
+        let class = compare(&cases[0].after, &actual, Options::default())
+            .unwrap_err()
+            .class;
+        assert_eq!(class, "no-fuse");
+        let mut graph = build(&cases[0].before);
+        graph.node_mut(0).meta.extras.remove(SPECIAL_DTYPE_KEY);
+        let actual = snapshot(&graph).unwrap();
+        let class = compare(&cases[0].after, &actual, Options::default())
+            .unwrap_err()
+            .class;
+        assert_eq!(class, "special-dtype");
+        let mut graph = build(&cases[0].before);
+        graph.node_mut(0).target = graph.node(0).name.clone();
+        let actual = snapshot(&graph).unwrap();
+        let class = compare(&cases[0].after, &actual, Options::default())
+            .unwrap_err()
+            .class;
+        assert_eq!(class, "placeholder-target");
+    }
+
+    #[test]
+    fn raising_cases_need_a_panic() {
+        let classes = |pass: &dyn IrPass| -> Vec<Option<&'static str>> {
+            replay(pass, META_FIXTURE, Options::default())
+                .iter()
+                .map(|result| result.mismatch.as_ref().map(|mismatch| mismatch.class))
+                .collect()
+        };
+        assert_eq!(classes(&Noop), [None, Some("raises")]);
+        assert_eq!(classes(&Panics), [Some("panic"), None]);
+    }
+
+    #[test]
+    fn the_modified_flag_counts_only_when_asked() {
+        let with_flag = Options {
+            modified: true,
+            ..Options::default()
+        };
+        let classes = |options| -> Vec<Option<&'static str>> {
+            replay(&ClaimsModified, META_FIXTURE, options)
+                .iter()
+                .map(|result| result.mismatch.as_ref().map(|mismatch| mismatch.class))
+                .collect()
+        };
+        assert_eq!(classes(Options::default()), [None, Some("raises")]);
+        assert_eq!(classes(with_flag), [Some("modified"), Some("raises")]);
+        check_known_with(&Noop, META_FIXTURE, &[("raised", "Noop never panics")], with_flag);
+    }
+
     #[test]
     fn bad_fixtures_are_rejected() {
         let bad = [
@@ -1464,6 +1755,8 @@ end
             "case x\nbefore\n%0 = placeholder x : torch.float32[2] q=none\n%1 = aten.relu.default(%0) : torch.float32[2] q=none\noutput([%0])\nafter modified=false same\nend\n",
             "case x\nbefore\n%0 = placeholder x : torch.float32[2] q=none\noutput([%0])\nafter modified=maybe same\nend\n",
             "case x\nbefore\n%0 = placeholder x : torch.float32[2] q=none weird\noutput([%0])\nafter modified=false same\nend\n",
+            "case x\nbefore\n%0 = placeholder x : torch.float32[2] q=none\n%1 = aten.relu.default(%0) : torch.float32[2] target=y q=none\noutput([%1])\nafter modified=false same\nend\n",
+            "case x\nbefore\n%0 = placeholder x : torch.float32[2] q=none\noutput([%0])\nafter raises=RuntimeError\n%0 = placeholder x : torch.float32[2] q=none\nend\n",
         ];
         for text in bad {
             assert!(parse(text).is_err(), "{text}");

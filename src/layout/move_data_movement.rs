@@ -36,8 +36,8 @@
 //! refreshes views and permutes), and a split RESCALE keeps its old shape.
 //! The decisions read element sizes from those values, so the port sets
 //! exactly what rc4 sets, then re-derives the values the retrace would for the
-//! nodes the pass touched (RESCALE, permute and dim-order copy rules) and for
-//! anything downstream whose value then changes (see [`retrace`]).
+//! nodes the pass touched and for anything downstream whose value then
+//! changes (see [`retrace`]).
 //!
 //! **Spellings.** RETAB writes `_clone_dim_order` and `_to_dim_order_copy`
 //! with or without their namespace, and emits `aten._to_copy.default` where
@@ -61,7 +61,7 @@ use crate::fx_meta::TensorFacts;
 use crate::layout::ctx::LayoutCtx;
 use crate::layout::fx_node::{all_input_nodes, element_size, is_per_tensor_rescale, is_rescale};
 use crate::layout::pointwise::is_transparent_copy;
-use crate::layout::shape::{infer_facts, mark_contiguous, refreshed_meta};
+use crate::layout::shape::{infer_facts, is_layout_transform, mark_contiguous, refreshed_meta, ShapeError};
 
 const PERMUTE_COPY: &str = "aten.permute_copy.default";
 
@@ -331,50 +331,62 @@ fn affected_nodes(graph: &IrGraph, changed: &[NodeId], users_changed: &[NodeId])
     nodes
 }
 
-/// rc4's closing retrace (`:69`) for what this pass changed: re-derive the
-/// values of the touched nodes with fake-execution rules (a RESCALE takes its
-/// dtype argument, a permute or copy its input's dtype), in graph order, then
-/// refresh users downstream while their values change. A downstream node
-/// without a local rule keeps its value.
-fn retrace(ctx: &mut LayoutCtx<'_>, mut touched: Vec<NodeId>) {
-    touched.retain(|&id| !ctx.is_erased(id));
-    touched.sort_unstable();
-    touched.dedup();
-    ctx.order().sort(&mut touched);
-    let touched_set: HashSet<NodeId> = touched.iter().copied().collect();
-    let mut changed: Vec<NodeId> = Vec::new();
-    for &id in &touched {
-        let facts = infer_facts(ctx.graph(), id)
-            .unwrap_or_else(|error| panic!("rc4's retrace raises here: {error}"));
-        if ctx.node(id).meta.tensor_facts() != Some(&facts) {
-            set_facts(ctx, id, facts);
-        }
-        changed.push(id);
-    }
-    // Downstream, in graph order: a min-heap of positions.
+/// rc4's closing retrace (`:69`) for what this pass changed: one sweep in
+/// graph order over the touched nodes and whatever downstream reads them,
+/// re-deriving each value ([`retraced_facts`]). A touched node's users are
+/// always visited, since they may now read a different node; another node's
+/// users only when its value changed. A downstream node without a local rule
+/// keeps its value. The sweep moves no node, so order keys stay valid.
+fn retrace(ctx: &mut LayoutCtx<'_>, touched: Vec<NodeId>) {
+    let touched: HashSet<NodeId> = touched.into_iter().filter(|&id| !ctx.is_erased(id)).collect();
     let mut pending: BinaryHeap<Reverse<(u64, NodeId)>> = BinaryHeap::new();
     let mut queued: HashSet<NodeId> = HashSet::new();
-    let push_users = |ctx: &LayoutCtx<'_>, id: NodeId, pending: &mut BinaryHeap<_>, queued: &mut HashSet<NodeId>| {
-        for user in ctx.graph().live_user_ids(id) {
-            if !touched_set.contains(&user) && ctx.node(user).op == NodeOp::CallFunction && queued.insert(user) {
-                let key = ctx.order().key(user).expect("a live node is placed");
-                pending.push(Reverse((key, user)));
-            }
+    let push = |ctx: &LayoutCtx<'_>, id: NodeId, pending: &mut BinaryHeap<_>, queued: &mut HashSet<NodeId>| {
+        if ctx.node(id).op == NodeOp::CallFunction && queued.insert(id) {
+            let key = ctx.order().key(id).expect("a live node is placed");
+            pending.push(Reverse((key, id)));
         }
     };
-    for id in changed {
-        push_users(ctx, id, &mut pending, &mut queued);
+    for &id in &touched {
+        push(ctx, id, &mut pending, &mut queued);
     }
     while let Some(Reverse((_, id))) = pending.pop() {
-        let Ok(meta) = refreshed_meta(ctx.graph(), id) else {
-            continue;
+        let is_touched = touched.contains(&id);
+        let facts = match retraced_facts(ctx.graph(), id) {
+            Ok(facts) => facts,
+            Err(error) if is_touched => panic!("rc4's retrace raises here: {error}"),
+            Err(_) => continue,
         };
-        if meta.tensor_facts() == ctx.node(id).meta.tensor_facts() {
-            continue;
+        let changed = ctx.node(id).meta.tensor_facts() != Some(&facts);
+        if changed {
+            set_facts(ctx, id, facts);
         }
-        *ctx.meta_mut(id) = meta;
-        push_users(ctx, id, &mut pending, &mut queued);
+        if changed || is_touched {
+            for user in ctx.graph().live_user_ids(id) {
+                push(ctx, user, &mut pending, &mut queued);
+            }
+        }
     }
+}
+
+/// The value fake execution gives `id` in rc4's retrace. A view, permute,
+/// dim-order copy or RESCALE takes its dtype from its input or its dtype
+/// argument, as torch does; everything else keeps the dtype RETAB records
+/// (`layout::shape`'s rule) and only its shape is re-derived. The two differ
+/// only where rc4's move is unsound: a `_to_dim_order_copy` that casts moves
+/// across a RESCALE and changes the dtype its users see.
+fn retraced_facts(graph: &IrGraph, id: NodeId) -> Result<TensorFacts, ShapeError> {
+    let mut facts = infer_facts(graph, id)?;
+    let node = graph.node(id);
+    let derives_dtype = is_layout_transform(&node.target)
+        || is_transparent_copy(&node.target)
+        || is_rescale(&node.target);
+    if !derives_dtype {
+        if let Some(dtype) = node.meta.val_dtype() {
+            facts.dtype = dtype.to_owned();
+        }
+    }
+    Ok(facts)
 }
 
 /// The ready nodes, and a min-heap of their graph positions.

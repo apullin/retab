@@ -51,10 +51,13 @@ RETAB's spelling (`normalize_fx_target` in src/fx_ir.rs). Args: `%N`, ints,
 floats (Python repr), `True`/`False`, `None`, `"str"`, dtypes (`torch.int8`)
 and `[...]` for lists and tuples; kwargs follow as `name=value`. The value is
 `dtype[shape]`. Annotations: `dim_order=` (only when not the identity),
-`kind=param|buffer|constant` (constant placeholders), `q=` (`none`, or
-`in{keys}` / `out{keys}` for present `input_qparams` / `output_qparams` maps,
-`{}` when empty) and `dead` (a call node the output doesn't reach).
-`after modified=<bool> same` means the after graph prints exactly like before.
+`kind=param|buffer|constant` (constant placeholders), `target=` (a placeholder
+whose target is not its name), `q=` (`none`, or `in{keys}` / `out{keys}` for
+present `input_qparams` / `output_qparams` maps, `{}` when empty), `special=`
+(the `TosaSpecialDtype` member in `meta["tosa_special_dtype"]`), `nofuse`
+(`meta["do_not_fuse_duplicate"]` is set) and `dead` (a call node the output
+doesn't reach). `after modified=<bool> same` means the after graph prints
+exactly like before; `after raises=<ExceptionType>` means the rc4 pass raised.
 """
 
 from __future__ import annotations
@@ -74,12 +77,22 @@ import executorch.version
 import torch
 from executorch.backends.arm._passes import (
     CanonicalizeViewCopyPermutePass,
+    FuseDuplicateUsersPass,
+    FuseIdenticalInputTransformsPass,
     FuseViewCopyTransformPass,
     MatchArgRanksPass,
+    MoveDataMovementOpsToSmallerDtypePass,
     NormalizeDelegateIOLayoutPass,
     RewriteHighRankSingletonPermutePass,
 )
 from executorch.backends.arm._passes.quant_args import QuantArgs
+from executorch.backends.arm.tosa.mapping import TosaSpecialDtype
+from executorch.backends.transforms.fuse_duplicate_users_pass import (
+    DO_NOT_FUSE_DUPLICATE_META_KEY,
+)
+from executorch.backends.transforms.fuse_identical_input_transforms_pass import (
+    FuseIdenticalInputTransformsPass as SharedFuseIdenticalInputTransformsPass,
+)
 from executorch.backends.arm.tosa.specification import (
     TosaLoweringContext,
     TosaSpecification,
@@ -356,7 +369,14 @@ def dump(gm: torch.fx.GraphModule, kinds: dict[str, str]) -> list[str]:
             notes.append(f"dim_order=[{','.join(map(str, dim_order))}]")
         if node.op == "placeholder" and node.name in kinds:
             notes.append(f"kind={kinds[node.name]}")
+        if node.op == "placeholder" and node.target != node.name:
+            notes.append(f"target={node.target}")
         notes.append(f"q={fmt_qparams(node.meta)}")
+        special = node.meta.get(TosaSpecialDtype.meta_key())
+        if special is not None:
+            notes.append(f"special={special.name}")
+        if node.meta.get(DO_NOT_FUSE_DUPLICATE_META_KEY, False):
+            notes.append("nofuse")
         if node.op == "call_function" and node not in reached:
             notes.append("dead")
         lines.append(f"%{pos[node]} = {head} : {fmt_val(val)} {' '.join(notes)}")
@@ -369,12 +389,15 @@ def dump(gm: torch.fx.GraphModule, kinds: dict[str, str]) -> list[str]:
 
 
 class PassSpec:
-    def __init__(self, name, make, sources, structured, random_profile):
+    def __init__(self, name, make, sources, structured, random_profile, random_cases=None):
         self.name = name
         self.make: Callable[[ExportedProgram], object] = make
         self.sources = sources
         self.structured = structured
         self.random_profile = random_profile
+        # More random graphs where torch rejects enough of them that fewer
+        # than RANDOM_CASES would be left.
+        self.random_cases = RANDOM_CASES if random_cases is None else random_cases
 
 
 class BuildError(Exception):
@@ -394,7 +417,10 @@ def run_case(spec: PassSpec, build: Callable[[Builder], None]) -> list[str]:
         kinds = placeholder_kinds(ep)
         before = dump(ep.graph_module, kinds)
         graph_pass = spec.make(ep)
-        result = graph_pass(ep.graph_module)
+        try:
+            result = graph_pass(ep.graph_module)
+        except Exception as error:  # noqa: BLE001 - recorded for the port to match
+            return ["before", *before, f"after raises={type(error).__name__}"]
     after = dump(result.graph_module, kinds)
     lines = ["before", *before, f"after modified={str(bool(result.modified)).lower()}"]
     if after == before:
@@ -1235,6 +1261,836 @@ def canonicalize_cases():
 
 
 # --------------------------------------------------------------------------
+# APU-160: FuseDuplicateUsers, FuseIdenticalInputTransforms and
+# MoveDataMovementOpsToSmallerDtype
+# --------------------------------------------------------------------------
+
+
+def rescale(b, x, dtype, scales=(0.5,), in_zp=0, out_zp=0, **kwargs):
+    return b.call(T.RESCALE.default, x, dtype, list(scales), in_zp, out_zp, **kwargs)
+
+
+def set_special(node, special=TosaSpecialDtype.INT48) -> None:
+    node.meta[TosaSpecialDtype.meta_key()] = special
+
+
+def mark_no_fuse(node) -> None:
+    node.meta[DO_NOT_FUSE_DUPLICATE_META_KEY] = True
+
+
+def avg_pool(b, x):
+    """`torch.nn.AvgPool2d(1)` as edge lowers it (test_fuse_duplicate_users_pass.py)."""
+    return b.call(A.avg_pool2d.default, x, [1, 1], [1, 1], [0, 0], False, True)
+
+
+def fuse_duplicate_users_cases():
+    cases = {}
+
+    def case(fn):
+        cases[fn.__name__] = fn
+        return fn
+
+    @case
+    def docstring_example(b):
+        x = b.input("x", (2, 3))
+        bias = b.input("bias", (2, 3))
+        y = b.call(A.relu.default, x)
+        b.output([b.call(A.add.Tensor, y, bias), b.call(A.add.Tensor, y, bias)])
+
+    @case
+    def three_avg_pools(b):
+        x = b.input("x", (1, 1, 1, 1))
+        s = b.call(A.add.Tensor, avg_pool(b, x), avg_pool(b, x))
+        b.output([b.call(A.add.Tensor, s, avg_pool(b, x))])
+
+    @case
+    def avg_pool_chains(b):
+        x = b.input("x", (1, 1, 1, 1))
+        first = avg_pool(b, avg_pool(b, x))
+        second = avg_pool(b, avg_pool(b, x))
+        third = avg_pool(b, avg_pool(b, x))
+        s = b.call(A.add.Tensor, first, second)
+        b.output([b.call(A.add.Tensor, s, third)])
+
+    @case
+    def users_not_in_node_order(b):
+        x = b.input("x", (1,))
+        y = b.input("y", (1,))
+        later = b.call(A.add.Tensor, x, y)
+        with b.graph.inserting_before(later):
+            earlier = b.call(A.add.Tensor, x, y)
+            consumer = b.call(A.neg.default, earlier)
+        b.first_call = earlier
+        b.output([consumer, later])
+
+    @case
+    def do_not_fuse_marker_on_the_first(b):
+        x = b.input("x", (1,))
+        y = b.input("y", (1,))
+        first = b.call(A.add.Tensor, x, y)
+        mark_no_fuse(first)
+        b.output([first, b.call(A.add.Tensor, x, y)])
+
+    @case
+    def do_not_fuse_marker_on_the_second(b):
+        x = b.input("x", (1,))
+        y = b.input("y", (1,))
+        first = b.call(A.add.Tensor, x, y)
+        second = b.call(A.add.Tensor, x, y)
+        mark_no_fuse(second)
+        third = b.call(A.add.Tensor, x, y)
+        b.output([first, second, third])
+
+    @case
+    def erased_node_still_queued(b):
+        x = b.input("x", (1,))
+        n0 = b.call(A.neg.default, x)
+        n1 = b.call(A.neg.default, x)
+        b.output([b.call(A.relu.default, n0), b.call(A.relu.default, n1)])
+
+    @case
+    def identical_rescale_users_are_kept(b):
+        x = b.input("x", (1,), dtype=torch.int8)
+        b.output([rescale(b, x, torch.int32, [1.0], 16, 0), rescale(b, x, torch.int32, [1.0], 16, 0)])
+
+    @case
+    def users_of_kept_rescales_still_fuse(b):
+        x = b.input("x", (2,), dtype=torch.int8)
+        r = rescale(b, x, torch.int32)
+        b.output([b.call(A.neg.default, r), b.call(A.neg.default, r), rescale(b, x, torch.int32)])
+
+    @case
+    def scalar_args_compare_by_value(b):
+        x = b.input("x", (2,))
+        b.output(
+            [
+                b.call(A.mul.Tensor, x, 2),
+                b.call(A.mul.Tensor, x, 2.0),
+                b.call(A.mul.Tensor, x, True),
+                b.call(A.mul.Tensor, x, 1),
+                b.call(A.mul.Tensor, x, 1.5),
+                b.call(A.mul.Tensor, x, 0.0),
+                b.call(A.mul.Tensor, x, -0.0),
+                b.call(A.mul.Tensor, x, False),
+            ]
+        )
+
+    @case
+    def separate_nan_scalars_never_fuse(b):
+        x = b.input("x", (2,))
+        b.output([b.call(A.add.Tensor, x, float("nan")), b.call(A.add.Tensor, x, float("nan"))])
+
+    @case
+    def one_shared_nan_object_fuses(b):
+        x = b.input("x", (2,))
+        nan = float("nan")
+        b.output([b.call(A.add.Tensor, x, nan), b.call(A.add.Tensor, x, nan)])
+
+    @case
+    def kwargs_take_part(b):
+        x = b.input("x", (2,))
+        y = b.input("y", (2,))
+        b.output(
+            [
+                b.call(A.add.Tensor, x, y, alpha=2),
+                b.call(A.add.Tensor, x, y, alpha=2.0),
+                b.call(A.add.Tensor, x, y),
+                b.call(A.add.Tensor, x, y, alpha=1),
+            ]
+        )
+
+    @case
+    def argument_order_matters(b):
+        x = b.input("x", (2,))
+        y = b.input("y", (2,))
+        b.output([b.call(A.add.Tensor, x, y), b.call(A.add.Tensor, y, x)])
+
+    @case
+    def different_targets_same_args(b):
+        x = b.input("x", (2,))
+        y = b.input("y", (2,))
+        b.output([b.call(A.add.Tensor, x, y), b.call(A.sub.Tensor, x, y), b.call(A.mul.Tensor, x, y)])
+
+    @case
+    def a_single_user_is_skipped(b):
+        x = b.input("x", (2,))
+        b.output([b.call(A.neg.default, x)])
+
+    @case
+    def duplicates_returned_together(b):
+        x = b.input("x", (2, 3))
+        b.output([b.call(A.relu.default, x), b.call(A.relu.default, x), x])
+
+    @case
+    def list_args_with_nodes(b):
+        x = b.input("x", (2, 3))
+        y = b.input("y", (2, 3))
+        b.output(
+            [
+                b.call(A.cat.default, [x, y], 0),
+                b.call(A.cat.default, [x, y], 0),
+                b.call(A.cat.default, [x, y], 1),
+                b.call(A.cat.default, [y, x], 0),
+            ]
+        )
+
+    @case
+    def a_fusion_exposes_list_users(b):
+        x = b.input("x", (2, 3))
+        n0 = b.call(A.neg.default, x)
+        n1 = b.call(A.neg.default, x)
+        b.output([b.call(A.cat.default, [n0, x], 1), b.call(A.cat.default, [n1, x], 1)])
+
+    @case
+    def a_fusion_rewires_a_later_group_member(b):
+        x = b.input("x", (2,))
+        a0 = b.call(A.add.Tensor, x, x)
+        a1 = b.call(A.add.Tensor, x, x)
+        c0 = b.call(A.add.Tensor, x, a0)
+        c1 = b.call(A.add.Tensor, x, a1)
+        b.output([c0, c1])
+
+    @case
+    def representative_is_earliest_after_a_cascade(b):
+        x = b.input("x", (2,))
+        n0 = b.call(A.neg.default, x)
+        later_user = b.call(A.relu.default, n0)
+        n1 = b.call(A.neg.default, x)
+        earlier_user = b.call(A.relu.default, n1)
+        b.output([earlier_user, later_user])
+
+    @case
+    def dim_order_copies(b):
+        x = b.input("x", (2, 3))
+        b.output(
+            [
+                b.call(D._clone_dim_order.default, x),
+                b.call(D._clone_dim_order.default, x),
+                b.call(D._to_dim_order_copy.default, x, dtype=torch.float16),
+                b.call(D._to_dim_order_copy.default, x, dtype=torch.float16),
+                b.call(D._to_dim_order_copy.default, x, dtype=torch.float32),
+            ]
+        )
+
+    @case
+    def tosa_ops_other_than_rescale_fuse(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        y = b.input("y", (2, 3), dtype=torch.int32)
+        b.output([b.call(T.ADD.default, x, y), b.call(T.ADD.default, x, y), b.call(T.SUB.default, x, y)])
+
+    @case
+    def dead_duplicates_fuse_too(b):
+        x = b.input("x", (2,))
+        live = b.call(A.neg.default, x)
+        b.call(A.neg.default, x)
+        b.output([live])
+
+    @case
+    def views_and_permutes(b):
+        x = b.input("x", (2, 3, 4))
+        b.output(
+            [
+                b.view(x, [6, 4]),
+                b.view(x, [6, 4]),
+                b.view(x, [-1, 4]),
+                b.permute(x, [0, 2, 1]),
+                b.permute(x, [0, 2, 1]),
+                b.permute(x, [0, -1, 1]),
+            ]
+        )
+
+    @case
+    def qparams_do_not_take_part(b):
+        x = b.input("x", (2,), dtype=torch.int8)
+        first = b.call(A.neg.default, x)
+        set_qparams(first, inputs=[0], outputs=[0])
+        b.output([first, b.call(A.neg.default, x)])
+
+    return cases
+
+
+def fuse_identical_input_transforms_cases():
+    cases = {}
+
+    def case(fn):
+        cases[fn.__name__] = fn
+        return fn
+
+    def binary(b, x_shape, y_shape, x_transforms, y_transforms, op=A.add.Tensor, dtype=torch.float32):
+        x = b.input("x", x_shape, dtype=dtype)
+        y = b.input("y", y_shape, dtype=dtype)
+        for target, arg in x_transforms:
+            x = b.call(target, x, list(arg))
+        for target, arg in y_transforms:
+            y = b.call(target, y, list(arg))
+        b.output([b.call(op, x, y)])
+
+    V = A.view_copy.default
+    P = A.permute_copy.default
+
+    # rc4's test_fuse_identical_input_transforms_pass.py graphs.
+    cases["sinks_view"] = lambda b: binary(b, (6,), (6,), [(V, [2, 3])], [(V, [2, 3])])
+    cases["sinks_permute"] = lambda b: binary(
+        b, (2, 3, 4), (2, 3, 4), [(P, [0, 2, 1])], [(P, [0, 2, 1])]
+    )
+
+    @case
+    def sinks_where_input_permutes(b):
+        c = b.input("condition", (2, 3, 4), dtype=torch.bool)
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (2, 3, 4))
+        b.output([b.call(A.where.self, b.permute(c, [0, 2, 1]), b.permute(x, [0, 2, 1]), b.permute(y, [0, 2, 1]))])
+
+    @case
+    def sinks_cat_input_views(b):
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (2, 3, 4))
+        b.output([b.call(A.cat.default, [b.view(x, [6, 4]), b.view(y, [6, 4])], 1)])
+
+    cases["rejects_cat_mixed_transforms"] = lambda b: concat(b, (2, 3, 4), (2, 3, 4), (V, [2, 3, 4]), (P, [0, 1, 2]), 0)
+    cases["rejects_cat_different_permutes"] = lambda b: concat(
+        b, (2, 3, 4), (2, 4, 3), (P, [0, 1, 2]), (P, [0, 2, 1]), 0
+    )
+
+    def concat(b, x_shape, y_shape, x_transform, y_transform, dim):
+        x = b.input("x", x_shape)
+        y = b.input("y", y_shape)
+        tx = b.call(x_transform[0], x, list(x_transform[1]))
+        ty = b.call(y_transform[0], y, list(y_transform[1]))
+        b.output([b.call(A.cat.default, [tx, ty], dim)])
+
+    @case
+    def rejects_shared_binary_input_transform(b):
+        x = b.input("x", (6,))
+        y = b.input("y", (6,))
+        vx = b.view(x, [2, 3])
+        b.output([b.call(A.add.Tensor, vx, b.view(y, [2, 3])), vx])
+
+    @case
+    def rejects_shared_cat_input_transform(b):
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (2, 3, 4))
+        vx = b.view(x, [6, 4])
+        b.output([b.call(A.cat.default, [vx, b.view(y, [6, 4])], 1), vx])
+
+    cases["rejects_different_views"] = lambda b: binary(b, (6,), (6,), [(V, [2, 3])], [(V, [1, 2, 3])])
+    cases["rejects_different_permutes"] = lambda b: binary(
+        b, (2, 1, 3), (2, 1, 3), [(P, [0, 2, 1])], [(P, [0, 1, 2])]
+    )
+    cases["sinks_view_permute_chain"] = lambda b: binary(
+        b, (6, 4), (6, 4), [(V, [2, 3, 4]), (P, [0, 2, 1])], [(V, [2, 3, 4]), (P, [0, 2, 1])]
+    )
+    cases["sinks_permute_view_chain"] = lambda b: binary(
+        b, (2, 3, 4), (2, 3, 4), [(P, [0, 2, 1]), (V, [2, 2, 6])], [(P, [0, 2, 1]), (V, [2, 2, 6])]
+    )
+    for index, (xs, ys, vs) in enumerate([((1, 6), (6,), (2, 3)), ((1, 1, 6), (1, 6), (3, 2))]):
+        cases[f"sinks_views_through_rank_broadcasts_{index}"] = (
+            lambda b, xs=xs, ys=ys, vs=vs: binary(b, xs, ys, [(V, vs)], [(V, vs)])
+        )
+    for index, (xs, ys, vs) in enumerate(
+        [((1, 6), (6, 1), (2, 3)), ((1, 1, 6), (1, 6, 1), (3, 2)), ((6,), (6, 1), (3, 2))]
+    ):
+        cases[f"rejects_views_through_expanding_broadcast_{index}"] = (
+            lambda b, xs=xs, ys=ys, vs=vs: binary(b, xs, ys, [(V, vs)], [(V, vs)])
+        )
+    for index, (xs, ys) in enumerate([((1, 2, 3), (4, 2, 3)), ((4, 1, 3), (1, 2, 3)), ((4, 2, 1), (1, 1, 3))]):
+        cases[f"sinks_permutes_through_broadcasts_{index}"] = (
+            lambda b, xs=xs, ys=ys: binary(b, xs, ys, [(P, [0, 2, 1])], [(P, [0, 2, 1])])
+        )
+
+    @case
+    def cat_rejects_different_view_inputs(b):
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (1, 6, 4))
+        b.output([b.call(A.cat.default, [b.view(x, [6, 4]), b.view(y, [6, 4])], 1)])
+
+    # Branches of `_sink_identical_input_transforms` and its helpers.
+    @case
+    def non_target_op_is_skipped(b):
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (2, 3, 4))
+        b.output([b.call(A.maximum.default, b.permute(x, [0, 2, 1]), b.permute(y, [0, 2, 1]))])
+
+    @case
+    def one_transform_used_twice_is_one_input(b):
+        x = b.input("x", (2, 3, 4))
+        p = b.permute(x, [0, 2, 1])
+        b.output([b.call(A.add.Tensor, p, p)])
+
+    @case
+    def scalar_operand_is_one_input(b):
+        x = b.input("x", (2, 3, 4))
+        b.output([b.call(A.mul.Tensor, b.permute(x, [0, 2, 1]), 2.0)])
+
+    @case
+    def no_transform_input(b):
+        x = b.input("x", (2, 3))
+        y = b.input("y", (2, 3))
+        b.output([b.call(A.add.Tensor, x, y)])
+
+    @case
+    def view_and_permute_differ(b):
+        x = b.input("x", (2, 3))
+        y = b.input("y", (3, 2))
+        b.output([b.call(A.add.Tensor, b.view(x, [3, 2]), b.permute(y, [0, 1]))])
+
+    @case
+    def layout_invariant_operand(b):
+        x = b.input("x", (2, 3, 4))
+        ones = b.input("ones", (1, 1, 1))
+        b.output([b.call(A.mul.Tensor, b.permute(x, [0, 2, 1]), ones)])
+
+    @case
+    def layout_invariant_first_operand(b):
+        x = b.input("x", (2, 3, 4))
+        ones = b.input("ones", (1, 1, 1))
+        b.output([b.call(A.sub.Tensor, ones, b.permute(x, [2, 0, 1]))])
+
+    @case
+    def layout_invariant_rank_must_match(b):
+        x = b.input("x", (2, 3, 4))
+        ones = b.input("ones", (1, 1))
+        b.output([b.call(A.add.Tensor, b.permute(x, [0, 2, 1]), ones)])
+
+    @case
+    def non_unit_operand_blocks(b):
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (1, 4, 1))
+        b.output([b.call(A.add.Tensor, b.permute(x, [0, 2, 1]), y)])
+
+    @case
+    def layout_invariant_view_operand(b):
+        x = b.input("x", (1, 6))
+        ones = b.input("ones", (1, 1))
+        b.output([b.call(A.add.Tensor, b.view(x, [2, 3]), ones)])
+
+    @case
+    def layout_invariant_where_condition(b):
+        c = b.input("c", (1, 1, 1), dtype=torch.bool)
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (2, 3, 4))
+        b.output([b.call(A.where.self, c, b.permute(x, [1, 0, 2]), b.permute(y, [1, 0, 2]))])
+
+    @case
+    def cat_rejects_a_layout_invariant_input(b):
+        x = b.input("x", (1, 1, 1))
+        ones = b.input("ones", (1, 1, 1))
+        b.output([b.call(A.cat.default, [b.permute(x, [0, 2, 1]), ones], 0)])
+
+    @case
+    def view_producers_that_do_not_broadcast(b):
+        x = b.input("x", (6,))
+        y = b.input("y", (2, 3))
+        b.output([b.call(A.add.Tensor, b.view(x, [2, 3]), b.view(y, [2, 3]))])
+
+    @case
+    def view_with_an_inferred_dim(b):
+        x = b.input("x", (2, 6))
+        y = b.input("y", (2, 6))
+        b.output([b.call(A.add.Tensor, b.view(x, [-1, 3]), b.view(y, [-1, 3]))])
+
+    @case
+    def negative_permute_dims(b):
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (2, 3, 4))
+        b.output([b.call(A.mul.Tensor, b.permute(x, [-1, 0, -2]), b.permute(y, [-1, 0, -2]))])
+
+    @case
+    def comparison_output_is_bool(b):
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (2, 3, 4))
+        b.output([b.call(A.gt.Tensor, b.permute(x, [2, 1, 0]), b.permute(y, [2, 1, 0]))])
+
+    @case
+    def integer_ops(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        y = b.input("y", (2, 3), dtype=torch.int32)
+        px, py = b.permute(x, [1, 0]), b.permute(y, [1, 0])
+        vx, vy = b.view(x, [6]), b.view(y, [6])
+        b.output(
+            [
+                b.call(A.bitwise_and.Tensor, px, py),
+                b.call(A.bitwise_left_shift.Tensor, vx, vy),
+            ]
+        )
+
+    @case
+    def kwargs_are_kept(b):
+        x = b.input("x", (2, 3))
+        y = b.input("y", (2, 3))
+        b.output([b.call(A.sub.Tensor, b.permute(x, [1, 0]), b.permute(y, [1, 0]), alpha=2.0)])
+
+    @case
+    def users_read_the_new_transform(b):
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (2, 3, 4))
+        a = b.call(A.add.Tensor, b.permute(x, [0, 2, 1]), b.permute(y, [0, 2, 1]))
+        b.output([b.call(A.relu.default, a), b.call(A.neg.default, a), a])
+
+    @case
+    def sunk_transforms_meet_again(b):
+        x = b.input("x", (2, 3))
+        y = b.input("y", (2, 3))
+        z = b.input("z", (2, 3))
+        w = b.input("w", (2, 3))
+        a = b.call(A.add.Tensor, b.permute(x, [1, 0]), b.permute(y, [1, 0]))
+        c = b.call(A.mul.Tensor, b.permute(z, [1, 0]), b.permute(w, [1, 0]))
+        b.output([b.call(A.sub.Tensor, a, c)])
+
+    @case
+    def qparams_follow_the_transform(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        y = b.input("y", (2, 3), dtype=torch.int8)
+        px, py = b.permute(x, [1, 0]), b.permute(y, [1, 0])
+        set_qparams(px, inputs=[0], outputs=[0])
+        a = b.call(A.add.Tensor, px, py)
+        set_qparams(a, inputs=[0, 1], outputs=[0])
+        b.output([a])
+
+    @case
+    def special_dtype_follows_the_transform(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        y = b.input("y", (2, 3), dtype=torch.int32)
+        px, py = b.permute(x, [1, 0]), b.permute(y, [1, 0])
+        set_special(px)
+        b.output([b.call(A.add.Tensor, px, py)])
+
+    @case
+    def cat_permutes_map_the_dim(b):
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (2, 5, 4))
+        b.output([b.call(A.cat.default, [b.permute(x, [0, 2, 1]), b.permute(y, [0, 2, 1])], 2)])
+
+    @case
+    def cat_dim_as_kwarg(b):
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (2, 5, 4))
+        b.output([b.call(A.cat.default, [b.permute(x, [0, 2, 1]), b.permute(y, [0, 2, 1])], dim=-1)])
+
+    @case
+    def cat_without_dim(b):
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (5, 3, 4))
+        b.output([b.call(A.cat.default, [b.permute(x, [0, 2, 1]), b.permute(y, [0, 2, 1])])])
+
+    @case
+    def cat_three_inputs(b):
+        x = b.input("x", (2, 3))
+        y = b.input("y", (2, 1))
+        z = b.input("z", (2, 4))
+        b.output([b.call(A.cat.default, [b.permute(x, [1, 0]), b.permute(y, [1, 0]), b.permute(z, [1, 0])], 0)])
+
+    @case
+    def cat_repeated_input(b):
+        x = b.input("x", (2, 3))
+        y = b.input("y", (2, 3))
+        px = b.permute(x, [1, 0])
+        b.output([b.call(A.cat.default, [px, b.permute(y, [1, 0]), px], 0)])
+
+    @case
+    def cat_producers_differ_off_the_dim(b):
+        x = b.input("x", (2, 3))
+        y = b.input("y", (3, 3))
+        b.output([b.call(A.cat.default, [b.view(x, [6]), b.view(y, [9])], 0)])
+
+    @case
+    def cat_view_dim_maps_to_two_dims(b):
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (2, 3, 4))
+        b.output([b.call(A.cat.default, [b.view(x, [6, 4]), b.view(y, [6, 4])], 0)])
+
+    @case
+    def cat_view_that_splits_a_dim(b):
+        x = b.input("x", (6, 4))
+        y = b.input("y", (6, 4))
+        b.output([b.call(A.cat.default, [b.view(x, [2, 3, 4]), b.view(y, [2, 3, 4])], 2)])
+
+    @case
+    def cat_view_with_singletons(b):
+        x = b.input("x", (3, 4))
+        y = b.input("y", (3, 4))
+        b.output([b.call(A.cat.default, [b.view(x, [1, 3, 4]), b.view(y, [1, 3, 4])], 0)])
+
+    @case
+    def cat_views_numel_mismatch(b):
+        x = b.input("x", (2, 4))
+        y = b.input("y", (2, 2, 2))
+        b.output([b.call(A.cat.default, [b.view(x, [8]), b.view(y, [8])], 0)])
+
+    @case
+    def concatenate_target(b):
+        x = b.input("x", (2, 3))
+        y = b.input("y", (2, 3))
+        b.output([b.call(A.concatenate.default, [b.permute(x, [1, 0]), b.permute(y, [1, 0])], 1)])
+
+    @case
+    def dead_code_goes_when_modified(b):
+        x = b.input("x", (2, 3))
+        y = b.input("y", (2, 3))
+        b.call(A.neg.default, x)
+        b.output([b.call(A.add.Tensor, b.permute(x, [1, 0]), b.permute(y, [1, 0]))])
+
+    @case
+    def dead_code_stays_when_unmodified(b):
+        x = b.input("x", (2, 3))
+        y = b.input("y", (2, 3))
+        b.call(A.neg.default, x)
+        b.output([b.call(A.add.Tensor, x, y)])
+
+    @case
+    def rank0_views(b):
+        x = b.input("x", (1,))
+        y = b.input("y", (1,))
+        b.output([b.call(A.add.Tensor, b.view(x, []), b.view(y, []))])
+
+    # NormalizeTransformInputPlaceholdersPass.
+    @case
+    def transform_named_placeholder_target_is_normalized(b):
+        x = b.input("aten_view_copy_default_2", (2, 3))
+        x.target = "aten_view_copy_default"
+        y = b.input("y", (2, 3))
+        b.output([b.call(A.add.Tensor, x, y)])
+
+    @case
+    def permute_named_placeholder_target_is_normalized(b):
+        x = b.input("aten_permute_copy_default_1", (2, 3))
+        x.target = "x"
+        y = b.input("y", (2, 3))
+        b.output([b.call(A.sub.Tensor, x, y)])
+
+    @case
+    def target_alone_can_look_like_a_transform(b):
+        x = b.input("x", (2, 3))
+        x.target = "aten_view_copy_default_7"
+        y = b.input("y", (2, 3))
+        b.output([b.call(A.add.Tensor, x, y)])
+
+    @case
+    def matching_names_are_left_alone(b):
+        x = b.input("aten_view_copy_default", (2, 3))
+        y = b.input("y", (2, 3))
+        b.output([b.call(A.add.Tensor, x, y)])
+
+    @case
+    def non_transform_names_are_left_alone(b):
+        x = b.input("custom_view_copy_default", (2, 3))
+        x.target = "custom_view_copy_default_base"
+        y = b.input("y", (2, 3))
+        b.output([b.call(A.add.Tensor, x, y)])
+
+    @case
+    def normalization_needs_a_target_op(b):
+        x = b.input("aten_view_copy_default_2", (2, 3))
+        x.target = "aten_view_copy_default"
+        b.call(A.neg.default, x)
+        b.output([b.call(A.relu.default, x)])
+
+    @case
+    def normalization_alone_removes_dead_code(b):
+        x = b.input("aten_view_copy_default_2", (2, 3))
+        x.target = "aten_view_copy_default"
+        y = b.input("y", (2, 3))
+        b.call(A.neg.default, x)
+        b.output([b.call(A.add.Tensor, x, y)])
+
+    return cases
+
+
+def move_data_movement_cases():
+    cases = {}
+
+    def case(fn):
+        cases[fn.__name__] = fn
+        return fn
+
+    # rc4's test_move_data_movement_ops_to_smaller_dtype_pass.py graphs.
+    @case
+    def moves_permute_after_narrowing_rescale(b):
+        x = b.input("x", (1, 2, 3, 4), dtype=torch.int32)
+        b.output([rescale(b, b.permute(x, [0, 2, 3, 1]), torch.int8, [1.0], 0, 0)])
+
+    @case
+    def moves_permute_before_widening_rescale(b):
+        x = b.input("x", (1, 2, 3, 4), dtype=torch.int8)
+        b.output([b.permute(rescale(b, x, torch.int32, [1.0], 0, 0), [0, 2, 3, 1])])
+
+    @case
+    def keeps_per_channel_rescale_order(b):
+        x = b.input("x", (1, 2, 3, 4), dtype=torch.int32)
+        b.output([rescale(b, b.permute(x, [0, 2, 3, 1]), torch.int8, [1.0, 2.0], 0, 0)])
+
+    @case
+    def splits_merged_permute_at_distinct_narrowing_rescales(b):
+        x = b.input("x", (1, 2, 3, 4), dtype=torch.int32)
+        p = b.permute(x, [0, 2, 3, 1])
+        b.output([rescale(b, p, torch.int8, [1.0]), rescale(b, p, torch.int8, [2.0])])
+
+    # Branches.
+    @case
+    def clone_moves_after_narrowing_rescale(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        b.output([rescale(b, b.call(D._clone_dim_order.default, x), torch.int8)])
+
+    @case
+    def clone_moves_before_widening_rescale(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        b.output([b.call(D._clone_dim_order.default, rescale(b, x, torch.int32))])
+
+    @case
+    def to_dim_order_copy_moves(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        c = b.call(D._to_dim_order_copy.default, x, dtype=torch.int32)
+        b.output([rescale(b, c, torch.int16)])
+
+    @case
+    def to_dim_order_copy_keeps_its_dtype_kwarg(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        r = rescale(b, x, torch.int32)
+        b.output([b.call(D._to_dim_order_copy.default, r, dtype=torch.int32)])
+
+    @case
+    def stale_clone_moves_back_and_forth(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        c = b.call(D._clone_dim_order.default, x)
+        b.output([rescale(b, rescale(b, c, torch.int8), torch.int16)])
+
+    @case
+    def stale_clone_under_a_permute(b):
+        x = b.input("x", (1, 2, 3, 4), dtype=torch.int32)
+        c = b.call(D._clone_dim_order.default, x)
+        p = b.permute(c, [0, 2, 3, 1])
+        b.output([rescale(b, rescale(b, p, torch.int8), torch.int16)])
+
+    @case
+    def equal_widths_stay(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        b.output([rescale(b, b.permute(x, [1, 0]), torch.int32)])
+
+    @case
+    def float_permutes_stay(b):
+        x = b.input("x", (2, 3))
+        y = b.input("y", (2, 3), dtype=torch.int8)
+        b.output([b.permute(x, [1, 0]), rescale(b, y, torch.int32)])
+
+    @case
+    def int16_steps(b):
+        x = b.input("x", (2, 3, 4), dtype=torch.int16)
+        p = b.permute(rescale(b, x, torch.int32), [2, 0, 1])
+        b.output([rescale(b, b.permute(p, [1, 2, 0]), torch.int8)])
+
+    @case
+    def between_widening_and_narrowing_rescales(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        p = b.permute(rescale(b, x, torch.int32), [1, 0])
+        b.output([rescale(b, p, torch.int8)])
+
+    @case
+    def permute_chain_before_a_narrowing_rescale(b):
+        x = b.input("x", (1, 2, 3, 4), dtype=torch.int32)
+        p1 = b.permute(x, [0, 2, 3, 1])
+        p2 = b.permute(p1, [0, 3, 1, 2])
+        b.output([rescale(b, p2, torch.int8)])
+
+    @case
+    def permute_chain_after_a_widening_rescale(b):
+        x = b.input("x", (1, 2, 3, 4), dtype=torch.int8)
+        p1 = b.permute(rescale(b, x, torch.int32), [0, 2, 3, 1])
+        b.output([b.permute(p1, [0, 3, 1, 2])])
+
+    @case
+    def split_keeps_the_original_for_other_users(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        p = b.permute(x, [1, 0])
+        b.output([rescale(b, p, torch.int8), b.call(A.neg.default, p)])
+
+    @case
+    def split_with_the_narrowing_rescale_second(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        p = b.permute(x, [1, 0])
+        b.output([b.call(A.neg.default, p), rescale(b, p, torch.int8)])
+
+    @case
+    def split_three_ways(b):
+        x = b.input("x", (2, 3, 4), dtype=torch.int32)
+        p = b.permute(x, [2, 0, 1])
+        b.output([rescale(b, p, torch.int8, [1.0]), rescale(b, p, torch.int16, [2.0]), rescale(b, p, torch.int8, [3.0])])
+
+    @case
+    def per_channel_user_does_not_count(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        p = b.permute(x, [1, 0])
+        b.output([rescale(b, p, torch.int8, [1.0, 2.0, 3.0]), rescale(b, p, torch.int8, [0.5])])
+
+    @case
+    def special_dtype_mismatch_blocks(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        p = b.permute(x, [1, 0])
+        set_special(p)
+        b.output([rescale(b, p, torch.int8)])
+
+    @case
+    def matching_special_dtypes_allow(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        p = b.permute(x, [1, 0])
+        set_special(p)
+        r = rescale(b, p, torch.int8)
+        set_special(r)
+        b.output([r])
+
+    @case
+    def special_dtype_on_the_producer(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        set_special(x)
+        r = rescale(b, x, torch.int32)
+        b.output([b.permute(r, [1, 0])])
+
+    @case
+    def rescale_with_unsigned_input(b):
+        x = b.input("x", (2, 3), dtype=torch.int8)
+        r = rescale(b, x, torch.int32, [0.5], 128, 0, input_unsigned=True)
+        b.output([b.permute(r, [1, 0])])
+
+    @case
+    def widening_rescale_with_a_later_other_user(b):
+        x = b.input("x", (1, 2, 3, 4), dtype=torch.int8)
+        r = rescale(b, x, torch.int32)
+        p = b.permute(r, [0, 2, 3, 1])
+        b.output([p, b.call(A.neg.default, r)])
+
+    @case
+    def widening_rescale_with_an_earlier_other_user(b):
+        x = b.input("x", (1, 2, 3, 4), dtype=torch.int8)
+        r = rescale(b, x, torch.int32)
+        n = b.call(A.neg.default, r)
+        b.output([b.permute(r, [0, 2, 3, 1]), n])
+
+    @case
+    def rescale_users_follow_the_move(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        r = rescale(b, b.permute(x, [1, 0]), torch.int8)
+        b.output([b.call(A.neg.default, r), b.call(A.abs.default, r)])
+
+    @case
+    def qparams_stay_with_their_nodes(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        p = b.permute(x, [1, 0])
+        set_qparams(p, inputs=[0], outputs=[0])
+        r = rescale(b, p, torch.int8)
+        set_qparams(r, outputs=[0])
+        b.output([r])
+
+    @case
+    def independent_moves_in_order(b):
+        x = b.input("x", (2, 3), dtype=torch.int32)
+        y = b.input("y", (3, 4), dtype=torch.int8)
+        first = rescale(b, b.permute(x, [1, 0]), torch.int8)
+        second = b.permute(rescale(b, y, torch.int16), [1, 0])
+        b.output([first, second])
+
+    return cases
+
+
+# --------------------------------------------------------------------------
 # Random cases
 # --------------------------------------------------------------------------
 
@@ -1256,6 +2112,28 @@ BINARY_FLOAT = [
 ]
 COMPARE = [A.eq.Tensor, A.gt.Tensor, A.ge.Tensor, A.lt.Tensor, A.le.Tensor, A.ne.Tensor]
 NON_TARGET_BINARY = [A.atan2.default, A.fmod.Tensor, A.hypot.default]
+FIIT_FLOAT_OPS = [
+    A.add.Tensor,
+    A.sub.Tensor,
+    A.mul.Tensor,
+    A.div.Tensor,
+    A.remainder.Tensor,
+    A.eq.Tensor,
+    A.gt.Tensor,
+    A.ge.Tensor,
+    A.lt.Tensor,
+    A.le.Tensor,
+    A.ne.Tensor,
+    A.maximum.default,
+]
+FIIT_INT_OPS = [
+    A.bitwise_and.Tensor,
+    A.bitwise_or.Tensor,
+    A.bitwise_xor.Tensor,
+    A.bitwise_left_shift.Tensor,
+    A.bitwise_right_shift.Tensor,
+    A.add.Tensor,
+]
 
 
 def prime_factors(n: int) -> list[int]:
@@ -1439,6 +2317,230 @@ class RandomGraph:
         elif kind == "dead":
             x = self.pick()
             b.call(rng.choice(UNARY_FLOAT), x)
+        elif kind.startswith("dup_") or kind == "mark":
+            self.duplicate_step(kind)
+        elif kind.startswith("fiit_"):
+            self.identical_transforms_step(kind)
+        elif kind.startswith("mdm_"):
+            self.data_movement_step(kind)
+        else:
+            raise ValueError(kind)
+
+    # FuseDuplicateUsers ---------------------------------------------------
+
+    def duplicate_step(self, kind: str) -> None:
+        rng, b = self.rng, self.b
+        copies = rng.randint(2, 3)
+        if kind == "dup_unary":
+            x = self.pick()
+            op = rng.choice([*UNARY_FLOAT, D._clone_dim_order.default])
+            for _ in range(copies):
+                self.emit(b.call(op, x))
+        elif kind == "dup_binary":
+            x = self.pick()
+            y = self.operand_for(x)
+            op = rng.choice([A.add.Tensor, A.sub.Tensor, A.mul.Tensor, A.maximum.default])
+            for _ in range(copies):
+                args = (x, y) if rng.random() < 0.8 else (y, x)
+                kwargs = {}
+                if op in (A.add.Tensor, A.sub.Tensor) and rng.random() < 0.3:
+                    kwargs["alpha"] = rng.choice([1, 1.0, 2, 2.0, True])
+                self.emit(b.call(op, *args, **kwargs))
+        elif kind == "dup_scalar":
+            x = self.pick()
+            op = rng.choice([A.mul.Tensor, A.add.Tensor])
+            for _ in range(copies):
+                scalar = rng.choice([2, 2.0, 1, 1.0, True, 0.5, 0.0, -0.0, False])
+                self.emit(b.call(op, x, scalar))
+        elif kind == "dup_rescale":
+            x = self.pick(torch.int8)
+            for _ in range(copies):
+                r = rescale(b, x, torch.int32, [rng.choice([0.5, 0.25])])
+                self.pool.append(r)
+                if rng.random() < 0.5:
+                    self.emit(b.call(A.neg.default, r))
+        elif kind == "dup_cat":
+            x = self.pick()
+            rank = x.meta["val"].dim()
+            if rank == 0:
+                return
+            other = x if rng.random() < 0.5 else self.emit(b.call(A.neg.default, x))
+            dim = rng.randrange(-rank, rank)
+            for _ in range(copies):
+                parts = [x, other] if rng.random() < 0.8 else [other, x]
+                self.emit(b.call(A.cat.default, parts, dim))
+        elif kind == "dup_view":
+            x = self.pick()
+            shape = self.view_shape(list(x.meta["val"].shape))
+            for _ in range(copies):
+                self.emit(b.view(x, shape))
+        elif kind == "dup_permute":
+            x = self.pick()
+            dims = self.permutation(x.meta["val"].dim())
+            for _ in range(copies):
+                self.emit(b.permute(x, dims))
+        elif kind == "dup_chain":
+            x = self.pick()
+            ops = [rng.choice(UNARY_FLOAT) for _ in range(rng.randint(2, 3))]
+            for _ in range(2):
+                value = x
+                for op in ops:
+                    value = b.call(op, value)
+                self.emit(value)
+        elif kind == "mark":
+            computed = [n for n in self.pool if n.op == "call_function"]
+            if computed:
+                mark_no_fuse(rng.choice(computed))
+        else:
+            raise ValueError(kind)
+
+    # FuseIdenticalInputTransforms ---------------------------------------
+
+    def transform_for(self, x):
+        shape = list(x.meta["val"].shape)
+        if self.rng.random() < 0.5:
+            return A.permute_copy.default, self.permutation(len(shape))
+        return A.view_copy.default, self.view_shape(shape)
+
+    def transform_partner(self, x, transform, dtype=torch.float32):
+        """An input the same transform applies to: usually x's shape, else a
+        same-rank broadcast partner (permute) or another shape with x's
+        element count (view)."""
+        rng = self.rng
+        shape = list(x.meta["val"].shape)
+        if rng.random() < 0.7 or not shape:
+            partner = shape
+        elif transform[0] is A.permute_copy.default:
+            partner = [1 if rng.random() < 0.4 else d for d in shape]
+        else:
+            partner = [d for d in self.view_shape(shape) if d != -1]
+            if math.prod(partner) != math.prod(shape):
+                partner = shape
+        node = self.new_input(partner, dtype, self.dim_order(len(partner)))
+        self.pool.append(node)
+        return node
+
+    def apply(self, transform, x):
+        return self.b.call(transform[0], x, list(transform[1]))
+
+    def identical_transforms_step(self, kind: str) -> None:
+        rng, b = self.rng, self.b
+        if kind in ("fiit_binary", "fiit_int", "fiit_shared"):
+            dtype = torch.int32 if kind == "fiit_int" else torch.float32
+            x = self.pick(dtype)
+            transform = self.transform_for(x)
+            y = self.transform_partner(x, transform, dtype)
+            tx, ty = self.apply(transform, x), self.apply(transform, y)
+            ops = FIIT_INT_OPS if kind == "fiit_int" else FIIT_FLOAT_OPS
+            args = (tx, ty) if rng.random() < 0.5 else (ty, tx)
+            self.emit(b.call(rng.choice(ops), *args))
+            if kind == "fiit_shared":
+                self.emit(b.call(A.neg.default, rng.choice([tx, ty])))
+        elif kind == "fiit_invariant":
+            x = self.pick()
+            transform = self.transform_for(x)
+            tx = self.apply(transform, x)
+            rank = tx.meta["val"].dim()
+            roll = rng.random()
+            if roll < 0.7:
+                shape = [1] * rank
+            elif roll < 0.85:
+                shape = [1] * max(0, rank + rng.choice([-1, 1]))
+            else:
+                shape = [1 if rng.random() < 0.5 else d for d in tx.meta["val"].shape]
+            ones = self.new_input(shape)
+            self.pool.append(ones)
+            args = (tx, ones) if rng.random() < 0.6 else (ones, tx)
+            self.emit(b.call(rng.choice(FIIT_FLOAT_OPS), *args))
+        elif kind == "fiit_where":
+            x = self.pick()
+            transform = self.transform_for(x)
+            y = self.transform_partner(x, transform)
+            if rng.random() < 0.7:
+                c = self.new_input(list(x.meta["val"].shape), torch.bool)
+                condition = self.apply(transform, c)
+            else:
+                condition = self.new_input([1] * len(transform[1]), torch.bool)
+            self.emit(b.call(A.where.self, condition, self.apply(transform, x), self.apply(transform, y)))
+        elif kind == "fiit_cat":
+            x = self.pick()
+            shape = list(x.meta["val"].shape)
+            transform = self.transform_for(x)
+            tx = self.apply(transform, x)
+            out_rank = tx.meta["val"].dim()
+            if out_rank == 0:
+                return
+            dim = rng.randrange(-out_rank, out_rank)
+            partner = list(shape)
+            if transform[0] is A.permute_copy.default and rng.random() < 0.8:
+                source = transform[1][dim % out_rank] % out_rank
+                partner[source] = rng.randint(1, 4)
+            y = self.new_input(partner, dim_order=self.dim_order(len(partner)))
+            self.pool.append(y)
+            parts = [tx, self.apply(transform, y)]
+            if rng.random() < 0.2:
+                z = self.new_input(partner)
+                parts.append(self.apply(transform, z))
+            style = rng.random()
+            if style < 0.7:
+                node = b.call(A.cat.default, parts, dim)
+            elif style < 0.85:
+                node = b.call(A.cat.default, parts, dim=dim)
+            else:
+                node = b.call(A.cat.default, parts)
+            self.emit(node)
+        elif kind == "fiit_chain":
+            x = self.pick()
+            first = self.transform_for(x)
+            y = self.transform_partner(x, first)
+            tx, ty = self.apply(first, x), self.apply(first, y)
+            second = self.transform_for(tx)
+            self.emit(b.call(rng.choice(FIIT_FLOAT_OPS), self.apply(second, tx), self.apply(second, ty)))
+        elif kind == "fiit_mixed":
+            x = self.pick()
+            transform = self.transform_for(x)
+            y = self.transform_partner(x, transform)
+            other = self.transform_for(y)
+            self.emit(b.call(rng.choice(FIIT_FLOAT_OPS), self.apply(transform, x), self.apply(other, y)))
+        else:
+            raise ValueError(kind)
+
+    # MoveDataMovementOpsToSmallerDtype -----------------------------------
+
+    def data_movement_step(self, kind: str) -> None:
+        rng, b = self.rng, self.b
+        int_dtypes = [torch.int8, torch.int16, torch.int32]
+        if kind == "mdm_chain":
+            value = self.pick(rng.choice(int_dtypes))
+            for _ in range(rng.randint(2, 5)):
+                step = rng.choices(["rescale", "permute", "clone", "to_copy"], [4, 4, 1, 1])[0]
+                if step == "rescale":
+                    scales = [0.5] if rng.random() < 0.85 else [0.5, 0.25]
+                    value = rescale(b, value, rng.choice(int_dtypes), scales)
+                elif step == "permute":
+                    value = b.permute(value, self.permutation(value.meta["val"].dim()))
+                elif step == "clone":
+                    value = b.call(D._clone_dim_order.default, value)
+                elif rng.random() < 0.5:
+                    value = b.call(D._to_dim_order_copy.default, value, dtype=value.meta["val"].dtype)
+                else:
+                    value = b.call(D._to_dim_order_copy.default, value)
+                if rng.random() < 0.15:
+                    self.pool.append(value)
+            self.emit(value)
+        elif kind == "mdm_fanout":
+            value = self.pick(rng.choice(int_dtypes))
+            p = b.permute(value, self.permutation(value.meta["val"].dim()))
+            for _ in range(rng.randint(2, 3)):
+                if rng.random() < 0.75:
+                    scales = [rng.choice([0.5, 0.25])] if rng.random() < 0.85 else [0.5, 0.25]
+                    self.emit(rescale(b, p, rng.choice(int_dtypes), scales))
+                else:
+                    self.emit(b.call(A.neg.default, p))
+        elif kind == "mdm_special":
+            computed = [n for n in self.pool if n.op == "call_function"]
+            if computed:
+                set_special(rng.choice(computed))
         else:
             raise ValueError(kind)
 
@@ -1481,6 +2583,33 @@ PROFILES = {
     "high_rank": {"high_rank_permute": 3, "permute": 1, "unary": 1, "view": 1, "dead": 0.2},
     "fuse_view_copy": {"view": 4, "fuse_unary": 3, "binary": 1, "dead": 0.4, "permute": 0.3},
     "canonicalize": {"view": 4, "permute": 4, "unary": 1, "binary": 0.5, "dead": 0.2},
+    "fuse_duplicate_users": {
+        "dup_unary": 2,
+        "dup_binary": 2,
+        "dup_scalar": 1,
+        "dup_rescale": 0.7,
+        "dup_cat": 0.6,
+        "dup_view": 0.6,
+        "dup_permute": 0.6,
+        "dup_chain": 1,
+        "mark": 0.3,
+        "unary": 1,
+        "binary": 1,
+        "dead": 0.3,
+    },
+    "fuse_identical_input_transforms": {
+        "fiit_binary": 4,
+        "fiit_int": 0.7,
+        "fiit_invariant": 1.2,
+        "fiit_where": 0.8,
+        "fiit_cat": 2,
+        "fiit_chain": 1,
+        "fiit_shared": 0.6,
+        "fiit_mixed": 0.8,
+        "unary": 0.7,
+        "dead": 0.3,
+    },
+    "move_data_movement": {"mdm_chain": 4, "mdm_fanout": 1.5, "mdm_special": 0.4, "dead": 0.2},
 }
 
 
@@ -1536,6 +2665,61 @@ PASSES = [
         ],
         fuse_view_copy_cases,
         "fuse_view_copy",
+    ),
+    PassSpec(
+        "fuse_duplicate_users",
+        lambda ep: FuseDuplicateUsersPass(),
+        [
+            "backends/transforms/fuse_duplicate_users_pass.py",
+            "backends/arm/_passes/fuse_duplicate_users_pass.py",
+        ],
+        fuse_duplicate_users_cases,
+        "fuse_duplicate_users",
+        random_cases=360,
+    ),
+    PassSpec(
+        "fuse_identical_input_transforms",
+        lambda ep: FuseIdenticalInputTransformsPass(ep),
+        [
+            "backends/transforms/fuse_identical_input_transforms_pass.py",
+            "backends/arm/_passes/fuse_identical_input_transforms_pass.py",
+            "backends/transforms/permute_view_meta.py",
+            "backends/transforms/dim_maps.py",
+        ],
+        fuse_identical_input_transforms_cases,
+        "fuse_identical_input_transforms",
+        random_cases=400,
+    ),
+    # The propagation driver's construction (propagate_view_copy_permute_pass.py:
+    # 921-928): the shared pass, Arm's permute targets, no exported program and
+    # no ArmOpTargetedPass gate. Random graphs never hold transform-named
+    # placeholders, the only thing the two constructions disagree on.
+    PassSpec(
+        "fuse_identical_input_transforms_driver",
+        lambda ep: SharedFuseIdenticalInputTransformsPass(
+            permute_targets=frozenset({A.permute_copy.default})
+        ),
+        [
+            "backends/transforms/fuse_identical_input_transforms_pass.py",
+            "backends/transforms/propagate_view_copy_permute_pass.py",
+            "backends/transforms/permute_view_meta.py",
+            "backends/transforms/dim_maps.py",
+        ],
+        fuse_identical_input_transforms_cases,
+        "fuse_identical_input_transforms",
+        random_cases=0,
+    ),
+    PassSpec(
+        "move_data_movement_ops_to_smaller_dtype",
+        lambda ep: MoveDataMovementOpsToSmallerDtypePass(),
+        [
+            "backends/arm/_passes/move_data_movement_ops_to_smaller_dtype_pass.py",
+            "backends/transforms/permute_view_meta.py",
+            "backends/arm/tosa/dialect/ops/conversion_ops.py",
+        ],
+        move_data_movement_cases,
+        "move_data_movement",
+        random_cases=360,
     ),
     PassSpec(
         "canonicalize_view_copy_permute",
@@ -1602,7 +2786,9 @@ def main() -> None:
     logging.getLogger("torch._subclasses.fake_tensor").setLevel(logging.CRITICAL)
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--pass", dest="only", choices=[p.name for p in PASSES])
-    parser.add_argument("--random", type=int, default=RANDOM_CASES)
+    parser.add_argument(
+        "--random", type=int, help=f"random graphs per pass (default {RANDOM_CASES} or the pass's own)"
+    )
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--out", type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument("--case", help="print one case of --pass instead of writing")
@@ -1619,8 +2805,9 @@ def main() -> None:
                 cases[args.case] = random_case(spec.random_profile, args.seed * 100_000 + index)
             print("\n".join(run_case(spec, cases[args.case])))
             continue
-        lines, skipped = generate(spec, args.seed, args.random)
-        head = header(spec, args.seed, args.random, skipped, rc4_pass)
+        random_cases = args.random if args.random is not None else spec.random_cases
+        lines, skipped = generate(spec, args.seed, random_cases)
+        head = header(spec, args.seed, random_cases, skipped, rc4_pass)
         text = "\n".join(head + lines) + "\n"
         path = args.out / f"{spec.name}.txt"
         path.write_text(text)
