@@ -1657,6 +1657,182 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Review (S0a): rc4 behaviour the port misses
+    // -----------------------------------------------------------------------
+
+    /// rc4's FuseConstantArgs skips any node whose args include a SHAPE-marked
+    /// node (`_arg_contains_symbolic_shape`, `:243-246`), whether or not the
+    /// node itself is marked. Checked in the rc4 venv
+    /// (/tmp/s0a_review_probe/shape_input_probe.py): `gt(p_shape[SHAPE], p_w4)`
+    /// stays a call node. The planner plans it, and the pass folds it.
+    #[test]
+    #[ignore = "BUG: a node reading a SHAPE-marked constant is folded; rc4 skips it \
+                (fuse_constant_ops_pass.py:243-246)"]
+    fn a_node_reading_a_shape_marked_constant_is_not_folded() {
+        let mut graph = IrGraph::empty();
+        let shape = weight(&mut graph, "shape", int32_tensor(&[2], &[5, 6]));
+        marked(&mut graph, shape, "SHAPE");
+        let w = weight(&mut graph, "w", int32_tensor(&[2], &[1, 9]));
+        let gt = call(
+            &mut graph,
+            "gt",
+            "aten.gt.Tensor",
+            vec![node(shape), node(w)],
+            [2],
+            "torch.bool",
+        );
+        output(&mut graph, &[gt]);
+        let planned =
+            effects_by_name(IrFuseConstantInputsEffectPass::with_data_slices().run(&mut graph));
+        assert!(planned.contains_key("gt"), "the planner plans the comparison");
+
+        run(&mut graph);
+        assert!(
+            graph
+                .live_nodes()
+                .any(|node| node.name == "gt" && node.op == NodeOp::CallFunction),
+            "rc4 leaves gt a call node; got {:?}",
+            names(&graph)
+        );
+        assert!(graph
+            .live_nodes()
+            .all(|node| !node.name.starts_with("gt_fused_const")));
+    }
+
+    /// rc4's `_propagate_special_dtype` evaluates `data.abs().max()` on the
+    /// folded data. For a bool result torch raises ("abs_cpu" not implemented
+    /// for 'Bool'); `call` catches it and the op is not fused (rc4 only leaves
+    /// an unused `_fused_const` placeholder behind). Checked in the rc4 venv
+    /// (/tmp/s0a_review_probe/shape_input_probe.py): `gt(p_w4b, p_w4[INT4])`
+    /// stays a call node. The pass folds it and marks the bool constant INT4,
+    /// which the serializer's INT4 handling would then apply to bool data.
+    #[test]
+    #[ignore = "BUG: a bool fold with one INT4/INT48 input is fused and marked INT4; \
+                rc4's _propagate_special_dtype raises on bool data and abandons the fold"]
+    fn a_bool_fold_with_one_int4_input_is_not_fused_like_rc4() {
+        let mut graph = IrGraph::empty();
+        let w4 = weight(&mut graph, "w4", int8_tensor(&[2], &[-7, 3]));
+        marked(&mut graph, w4, "INT4");
+        let other = weight(&mut graph, "other", int8_tensor(&[2], &[1, 2]));
+        let gt = call(
+            &mut graph,
+            "gt",
+            "aten.gt.Tensor",
+            vec![node(other), node(w4)],
+            [2],
+            "torch.bool",
+        );
+        output(&mut graph, &[gt]);
+
+        run(&mut graph);
+        assert!(
+            graph.live_nodes().all(|node| {
+                node.meta.val_dtype() != Some("torch.bool")
+                    || node.meta.extra_str(SPECIAL_DTYPE).is_none()
+            }),
+            "no bool tensor may carry INT4"
+        );
+        assert!(
+            graph
+                .live_nodes()
+                .any(|node| node.name == "gt" && node.op == NodeOp::CallFunction),
+            "rc4 leaves gt a call node; got {:?}",
+            names(&graph)
+        );
+    }
+
+    /// Region constants are `get_attr` nodes, but `graph_from_ir` emits every
+    /// `get_attr` that is a direct arg of a cond as a region name
+    /// (`ingest/from_ir.rs:79-87`). A cond predicate the pass folds inside a
+    /// region therefore stops being a tensor: the converted cond reads the
+    /// string "pred_pre_computed" and the constant itself is dropped. On the
+    /// dim-order route the predicate is still a call node at conversion and
+    /// its effect folds it afterwards, so the cond keeps a tensor predicate.
+    #[test]
+    #[ignore = "BUG: in a region, a folded cond predicate becomes a get_attr, which \
+                graph_from_ir mistakes for a branch submodule (from_ir.rs:79-87)"]
+    fn a_folded_cond_predicate_in_a_region_stays_a_tensor() {
+        use crate::graph::ir::{Arg, OpTarget};
+
+        let build = || {
+            let mut graph = IrGraph::empty();
+            let x = placeholder(&mut graph, "x", [2], "torch.int8");
+            let pred = call(
+                &mut graph,
+                "pred",
+                FULL,
+                vec![ints(&[]), IrArg::Bool(true)],
+                Vec::<i64>::new(),
+                "torch.bool",
+            );
+            graph.set_kwarg(pred, "dtype", IrArg::Dtype("torch.bool".to_string()));
+            let branches: Vec<NodeId> = ["true_graph_0", "false_graph_0"]
+                .into_iter()
+                .map(|name| {
+                    graph.add_node(
+                        NodeOp::GetAttr,
+                        name.to_string(),
+                        name.to_string(),
+                        Vec::new(),
+                        NodeMeta::default(),
+                    )
+                })
+                .collect();
+            let cond = call(
+                &mut graph,
+                "cond",
+                "torch.ops.higher_order.cond",
+                vec![
+                    node(pred),
+                    node(branches[0]),
+                    node(branches[1]),
+                    IrArg::List(vec![node(x)]),
+                ],
+                [2],
+                "torch.int8",
+            );
+            output(&mut graph, &[cond]);
+            graph
+        };
+        let predicate = |graph: &crate::graph::Graph, store: &TensorStore| {
+            let cond = graph
+                .order
+                .iter()
+                .map(|&id| &graph.nodes[id])
+                .find(|node| node.target == OpTarget::CondIf)
+                .expect("a cond");
+            match &cond.args[0] {
+                Arg::Node(id) => {
+                    let name = graph.nodes[*id].name.clone();
+                    Ok(store.get(&name).map(|tensor| tensor.data.clone()))
+                }
+                other => Err(format!("{other:?}")),
+            }
+        };
+
+        // Dim-order route: the factory's effect folds the predicate at ingest.
+        let mut deferred = build();
+        let effects = IrFuseZeroInputConstantsEffectPass.run(&mut deferred).effects;
+        let mut store = TensorStore::new();
+        let mut converted =
+            crate::ingest::from_ir::graph_from_ir_preserve_placeholders(&deferred, &mut store);
+        crate::ingest::from_ir::apply_effects_preserve_placeholders(
+            &mut converted,
+            &mut store,
+            &effects,
+        );
+        assert_eq!(predicate(&converted, &store), Ok(Some(vec![1])));
+
+        // Explicit route: the pass folds the predicate into a region get_attr.
+        let mut materialized = build();
+        assert!(run_in_region(&mut materialized));
+        let mut store = TensorStore::new();
+        let converted =
+            crate::ingest::from_ir::graph_from_ir_preserve_placeholders(&materialized, &mut store);
+        assert_eq!(predicate(&converted, &store), Ok(Some(vec![1])));
+    }
+
     #[test]
     fn helpers_classify_constants() {
         let mut graph = IrGraph::empty();
