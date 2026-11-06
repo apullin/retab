@@ -1,8 +1,10 @@
 //! Adversarial review tests for the remove-permutes port (APU-158 review).
 //!
 //! A child module of `remove_permutes`, so the tests can reach the port's
-//! private caches. Tests marked `#[ignore = "BUG: ..."]` demonstrate an issue
-//! and fail when run with `--ignored`; each names the rc4 evidence it encodes.
+//! private caches. Each test names the rc4 evidence it encodes. The review's
+//! three BUG tests now run: the user-order and memo-memory ones pass since
+//! the fixes, and the `None` reduction dim, a deliberate divergence, is
+//! pinned to rc4's `dim=[]` result.
 
 use super::*;
 use crate::layout::replay;
@@ -12,7 +14,7 @@ const REVIEW_FIXTURE: &str =
     include_str!("../../tests/fixtures/remove_permutes_review/remove_permutes_review.txt");
 
 /// rc4 raises TypeError iterating a `None` reduction dim; see
-/// `a_none_reduction_dim_fails_like_rc4`.
+/// `a_none_reduction_dim_reads_as_an_empty_list`.
 const NONE_DIM_CASE: &str = "sum_with_dim_none_keepdim";
 
 /// The review cases (tests/fixtures/remove_permutes_review) match rc4, except
@@ -24,29 +26,41 @@ fn review_cases_match_rc4() {
         REVIEW_FIXTURE,
         &[(
             NONE_DIM_CASE,
-            "rc4 raises TypeError on dim=None; the port reads None as [] (FX import's spelling)",
+            "rc4 raises TypeError iterating dim=None; RETAB's importer spells [] as None, so the \
+             port reads it as [] and leaves rc4's dim=[] result; DecomposeSumPass and \
+             IrConvertSumPass split such sums before phase 6",
         )],
     );
 }
 
 /// `sum.dim_IntList(x, None, True)` in a region: rc4's `update_reduction_dim`
-/// iterates `None` and raises TypeError (recorded in the review fixture); the
-/// port reads `IrArg::None` as `[]` and rewrites the region. rc4's
-/// DecomposeSumPass and RETAB's IrConvertSumPass both turn multi-dim sums into
-/// single-dim ones before phase 6, so the pipeline should not deliver this.
+/// iterates `None` and raises TypeError (recorded in the review fixture).
+/// RETAB's importer spells `[]` as `None`, so the IR cannot tell this graph
+/// from `sum.dim_IntList(x, [], True)` (case `sum_with_empty_dim_keepdim`),
+/// and the port deliberately reads `None` as `[]`, which reduces every dim as
+/// `None` does: it leaves exactly the graph rc4 leaves for `[]`. rc4's
+/// DecomposeSumPass and RETAB's IrConvertSumPass split sums over `None` or
+/// `[]` into single-dim sums before phase 6, so the pipeline delivers neither.
 #[test]
-#[ignore = "BUG: a None reduction dim is rewritten as [] where rc4 raises TypeError (minor; unreachable after DecomposeSumPass/IrConvertSumPass)"]
-fn a_none_reduction_dim_fails_like_rc4() {
-    let results = replay::replay(
-        &IrRemovePermutesAroundElementwiseTosaOpsPass,
-        REVIEW_FIXTURE,
-        replay::Options::default(),
-    );
-    let result = results
-        .iter()
-        .find(|result| result.name == NONE_DIM_CASE)
-        .expect("the case is in the review fixture");
-    assert!(result.mismatch.is_none(), "{}", result.report);
+fn a_none_reduction_dim_reads_as_an_empty_list() {
+    let cases = replay::parse(REVIEW_FIXTURE).expect("the review fixture parses");
+    let case = |name: &str| {
+        cases
+            .iter()
+            .find(|case| case.name == name)
+            .unwrap_or_else(|| panic!("no case {name}"))
+    };
+    let (none_dim, empty_dim) = (case(NONE_DIM_CASE), case("sum_with_empty_dim_keepdim"));
+    assert!(none_dim.raises.is_some(), "rc4 raises on dim=None");
+    let options = replay::Options::default();
+    let (none_graph, empty_graph) = (replay::build(&none_dim.before), replay::build(&empty_dim.before));
+    let imported = |graph: &IrGraph| replay::snapshot(graph).expect("a valid graph");
+    replay::compare(&imported(&empty_graph), &imported(&none_graph), options)
+        .expect("the importer builds the same IR for dim=None and dim=[]");
+    let mut graph = none_graph;
+    assert!(IrRemovePermutesAroundElementwiseTosaOpsPass.run(&mut graph));
+    replay::compare(&empty_dim.after, &imported(&graph), options)
+        .expect("the port leaves rc4's dim=[] result");
 }
 
 /// rc4 iterates `node.users` in FX insertion order. rc4's propagation passes

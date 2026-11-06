@@ -55,9 +55,26 @@
 //!   the visit's constant-rank check on that rank-1 table input, which fails a
 //!   rank-0 region (`:631-637`); [`Detector::visit_one`] applies that check.
 //! - **Constants.** rc4's subclass reads parameters, buffers and lifted
-//!   constants from the graph signature (`:30-43`); RETAB marks them with
-//!   tensor data. The base rule (`get_attr`, `b_`/`p_`/`c_` placeholder names,
-//!   `full`) is kept as is (`:672-688`).
+//!   constants from the graph signature (`:30-43`); in RETAB those
+//!   placeholders carry tensor data, which the port reads instead. The base
+//!   rule (`get_attr`, `b_`/`p_`/`c_` placeholder names, `full`) is kept as is
+//!   (`:672-688`). This matches rc4 only once rc4's constant folds exist in
+//!   the IR. By phase 6, ComputeConstantOpsAOTPass and FuseConstantArgsPass
+//!   (`arm_pass_manager.py:699-700`) have replaced every constant-only
+//!   subgraph with a `<node>_pre_computed` or `<node>_fused_const` signature
+//!   constant, while RETAB's ingest applies the same folds later, as
+//!   `MaterializeTensorNode` lowering effects, and keeps the call nodes. On
+//!   such a graph the pass meets `view`, `permute` or `mul` chains of
+//!   parameters where rc4 meets one constant, and decides differently
+//!   (tests/fixtures/remove_permutes_review/pending_fold.py, run on rc4: a
+//!   rank-raising view of a parameter blocks a region rc4 rewrites, a
+//!   permuted parameter loses the compensating permute rc4 keeps on the
+//!   folded constant, and a product of two parameters gets two compensating
+//!   permutes where rc4 inserts one). APU-135 P2 S0a's
+//!   IrMaterializeConstantsPass (`src/layout/constants.rs`, on layout/rc4-port
+//!   since the merge at 1092ab8) materializes the folds as placeholders with
+//!   tensor data (`get_attr` in a region) at rc4's slot. Explicit mode must
+//!   not run this pass before that pass has run.
 //! - **The retrace.** rc4 ends with `ExportPass.call`, which re-derives every
 //!   node's value (`:451-453`). The port re-derives only the values a rewrite
 //!   can change, in graph order: the region, the views it remaps, the nodes it
@@ -76,6 +93,15 @@
 //!   uses (`:832-838`). The port iterates both sets in graph order of their
 //!   pairs, which also gives the correct rewrite in the second case; the replay
 //!   generator pins rc4 to the same order.
+//! - **A `None` reduction dim.** RETAB's importer spells `[]` as `None`
+//!   (`resolve_arg` in src/fx_ir.rs), so the port cannot tell
+//!   `sum.dim_IntList(x, None, True)` from `sum.dim_IntList(x, [], True)`. It
+//!   reads both as `[]` (which reduces every dim, as `None` does) and so
+//!   leaves rc4's result for `[]`; for `None`, rc4's `update_reduction_dim`
+//!   raises TypeError iterating it (`:969-981`). Neither reaches phase 6: rc4's
+//!   DecomposeSumPass and RETAB's IrConvertSumPass split a sum over `None` or
+//!   `[]` into single-dim sums first. It is the review fixture's one known
+//!   mismatch (`review_tests::a_none_reduction_dim_reads_as_an_empty_list`).
 //!
 //! # Complexity
 //!
@@ -1956,7 +1982,8 @@ fn update_dim(ctx: &mut LayoutCtx<'_>, id: NodeId, perm: &[usize]) {
 }
 
 /// `update_reduction_dim` (`:969-981`). FX import spells `[]` as `None`, so a
-/// `None` dim reads as the empty list.
+/// `None` dim reads as the empty list, where rc4 raises on a real `None` (see
+/// the module docs).
 fn update_reduction_dim(ctx: &mut LayoutCtx<'_>, id: NodeId, perm: &[usize]) {
     let node = ctx.node(id);
     let rank = perm.len() as i64;
