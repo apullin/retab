@@ -40,6 +40,12 @@ How the graphs are built and run:
   the real InsertTableOpsPass (and FuseEqualPlaceholdersPass) bring the graph
   to that stage first, and the TABLE nodes are turned back into the table ops
   RETAB still holds, so the fixture shows rc4's decisions in RETAB's form.
+  The propagation passes run the same way (`PropagationPass`), with the TABLE
+  values they changed; where rc4 leaves a 16-bit TABLE and its RESCALE apart,
+  the table op holds the TABLE's int32 value and the RESCALE stays a node
+  (RETAB's split form, `layout::pending`). `_without_program` fixtures build
+  them without the exported program, as rc4's graph-level tests do, and the
+  `_down_up` fixture runs the Down pass and then the Up pass, as phase 6 does.
 
 Fixture format (one node per line, in graph order):
 
@@ -157,6 +163,7 @@ import argparse
 import hashlib
 import logging
 import math
+import os
 import random
 import sys
 from collections.abc import Callable, Sequence
@@ -168,6 +175,8 @@ import executorch.backends.transforms.channels_last_ops  # noqa: F401  registers
 import executorch.version
 import torch
 from executorch.backends.arm._passes import (
+    PropagateViewCopyPermuteDownPass,
+    PropagateViewCopyPermuteUpPass,
     CanonicalizeViewCopyPermutePass,
     FuseDuplicateUsersPass,
     FuseIdenticalInputTransformsPass,
@@ -186,6 +195,7 @@ from executorch.backends.arm._passes.fuse_duplicate_users_pass import (
 )
 from executorch.backends.arm._passes.insert_table_ops import InsertTableOpsPass, TableOps
 from executorch.backends.arm._passes.quant_args import QuantArgs
+from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
 from executorch.backends.arm.tosa.mapping import TosaSpecialDtype
 from executorch.backends.transforms.fuse_duplicate_users_pass import (
     DO_NOT_FUSE_DUPLICATE_META_KEY,
@@ -3245,6 +3255,8 @@ def random_case(profile: str, seed: int) -> Callable[[Builder], None]:
         return remove_permutes_random_case(seed)
     if profile == "remove_permutes_user_order":
         return remove_permutes_user_order_random_case(seed)
+    if profile == "propagate":
+        return propagation_random_case(seed)
 
     def build(b: Builder) -> None:
         rng = random.Random(seed)
@@ -5982,8 +5994,1430 @@ def remove_permutes_user_order_random_case(seed: int) -> Callable[[Builder], Non
 
 
 # --------------------------------------------------------------------------
+# PropagateViewCopyPermuteDownPass / PropagateViewCopyPermuteUpPass
+# --------------------------------------------------------------------------
+
+# 16-bit TABLE ops need the int16 extension.
+PROPAGATE_TOSA_SPEC = "TOSA-1.0+FP+INT+int16"
+_PROPAGATION_TABLE_OF = "retab_replay_propagation_table_of"
+_PROPAGATION_TABLE_RESCALE = "retab_replay_propagation_table_rescale"
+
+
+_PROPAGATION_ORIGINAL = "retab_replay_propagation_original"
+
+
+def insert_table_ops(ep, gm):
+    """The real InsertTableOpsPass (`arm_pass_manager.py:708`), with each
+    TABLE it makes marked with the name of the table op it replaced and each
+    RESCALE it makes with its TABLE's mark. Returns the graph module and the
+    table ops by name. The pass's retrace renames nodes, so a RESCALE the
+    graph already had can take the name of a new one: new nodes are told apart
+    by a marker set on every node first, which the retrace carries over (it
+    copies each node's meta), not by name."""
+    originals = {node.name: node for node in gm.graph.nodes if _is_table_op(node)}
+    if not originals:
+        return gm, originals
+    for node in gm.graph.nodes:
+        node.meta[_PROPAGATION_ORIGINAL] = True
+    gm = InsertTableOpsPass(ep)(gm).graph_module
+    new_nodes = [node for node in gm.graph.nodes if not node.meta.pop(_PROPAGATION_ORIGINAL, False)]
+    for node in new_nodes:
+        if node.target == T.TABLE.default:
+            constant = node.args[1].name
+            node.meta[_PROPAGATION_TABLE_OF] = constant.removeprefix("b_").removesuffix("_table_constant")
+    for node in new_nodes:
+        if node.target == T.RESCALE.default:
+            (table,) = node.all_input_nodes
+            node.meta[_PROPAGATION_TABLE_OF] = table.meta[_PROPAGATION_TABLE_OF]
+            node.meta[_PROPAGATION_TABLE_RESCALE] = True
+    return gm, originals
+
+
+class PropagationPass:
+    """rc4's Arm propagation pass, constructed as `arm_pass_manager.py:726-727`
+    constructs it (`PropagateViewCopyPermuteDownPass(compile_spec,
+    exported_program)`), on a graph whose quantized table ops are TABLE ops.
+
+    The real InsertTableOpsPass (`arm_pass_manager.py:708`) brings the graph
+    to that stage first (`insert_table_ops`), and afterwards every TABLE
+    becomes the table op it replaced again, reading the TABLE's input
+    (`restore_pending_tables`), so the fixture shows rc4's decisions in the
+    form RETAB keeps (`layout::pending`). `modified` is the propagation pass's
+    own. `pass_classes` lists the passes to run in turn: one, or the Down and
+    the Up pass as phase 6 runs them.
+    """
+
+    def __init__(self, ep, *pass_classes, compile_spec=True, with_program=True):
+        self.ep = ep
+        self.pass_classes = pass_classes
+        self.compile_spec = TosaCompileSpec(PROPAGATE_TOSA_SPEC) if compile_spec else None
+        self.with_program = with_program
+        names = " + ".join(f"{cls.__module__.split('.')[1]} {cls.__name__}" for cls in pass_classes)
+        self.rc4_name = f"InsertTableOpsPass + {names}"
+
+    def __call__(self, gm):
+        gm, originals = insert_table_ops(self.ep, gm)
+        modified = False
+        for pass_cls in self.pass_classes:
+            if self.with_program:
+                graph_pass = pass_cls(self.compile_spec, self.ep)
+            else:
+                graph_pass = pass_cls()
+            result = graph_pass(gm)
+            gm = result.graph_module
+            modified |= result.modified
+        if originals:
+            restore_pending_tables(gm, originals)
+        return PassResult(gm, modified)
+
+
+def restore_pending_tables(gm, originals) -> None:
+    """Turn every TABLE back into the table op it replaced, reading the
+    TABLE's input. Where a 16-bit TABLE's RESCALE still reads only the TABLE
+    and is its only user, the table op takes the RESCALE's place and value;
+    where rc4 left the two apart (a view parked between them), the table op
+    holds the TABLE's int32 value and the RESCALE stays a node, which is
+    RETAB's split form (`layout::pending::split_table_rescales`)."""
+    graph = gm.graph
+    rescale_of = {
+        node.meta[_PROPAGATION_TABLE_OF]: node
+        for node in graph.nodes
+        if node.target == T.RESCALE.default and node.meta.get(_PROPAGATION_TABLE_RESCALE)
+    }
+    for table in [n for n in graph.nodes if n.target == T.TABLE.default]:
+        if _PROPAGATION_TABLE_OF not in table.meta:
+            continue
+        original = originals[table.meta[_PROPAGATION_TABLE_OF]]
+        rescale = rescale_of.get(table.meta[_PROPAGATION_TABLE_OF])
+        merged = rescale is not None and list(table.users) == [rescale] and rescale.all_input_nodes == [table]
+        output = rescale if merged else table
+        with graph.inserting_before(output):
+            restored = graph.create_node(
+                "call_function",
+                original.target,
+                (table.args[0], *original.args[1:]),
+                dict(original.kwargs),
+            )
+        restored.meta = dict(original.meta)
+        restored.meta["val"] = output.meta["val"]
+        output.replace_all_uses_with(restored)
+        graph.erase_node(output)
+        if merged:
+            graph.erase_node(table)
+    for rescale in rescale_of.values():
+        rescale.meta.pop(_PROPAGATION_TABLE_OF, None)
+        rescale.meta.pop(_PROPAGATION_TABLE_RESCALE, None)
+    for node in list(graph.nodes):
+        if node.op == "placeholder" and node.name.startswith("b_") and not node.users:
+            graph.erase_node(node)
+
+
+class PropagationRunError(Exception):
+    pass
+
+
+def propagation_cases():
+    cases = {}
+
+    def case(fn):
+        cases[fn.__name__] = fn
+        return fn
+
+    X4 = (1, 2, 3, 4)
+    TO_LAST = [0, 2, 3, 1]
+    TO_FIRST = [0, 3, 1, 2]
+
+    def unaries(b, x, ops=(A.relu.default, A.neg.default)):
+        for op in ops:
+            x = b.call(op, x)
+        return x
+
+    def int8_table(b, x, target=A.sigmoid.default, *args):
+        return table_op(b, target, x, qargs(0.5), qargs(0.25), *args)
+
+    def int16_table(b, x, target=A.sigmoid.default):
+        return table_op(b, target, x, qargs(1 / 1024, dtype=torch.int16), qargs(1 / 32768, dtype=torch.int16))
+
+    # Moves across pointwise ops ---------------------------------------
+
+    @case
+    def permute_then_unary_chain(b):
+        x = b.input("x", X4)
+        b.output([unaries(b, b.permute(x, TO_LAST))])
+
+    @case
+    def unary_chain_then_permute(b):
+        x = b.input("x", X4)
+        b.output([b.permute(unaries(b, x), TO_LAST)])
+
+    @case
+    def view_then_unary_chain(b):
+        x = b.input("x", (2, 3, 4))
+        b.output([unaries(b, b.view(x, [2, 12]))])
+
+    @case
+    def unary_chain_then_view(b):
+        x = b.input("x", (2, 3, 4))
+        b.output([b.view(unaries(b, x), [2, 12])])
+
+    @case
+    def view_with_an_inferred_dim(b):
+        x = b.input("x", (2, 3, 4))
+        b.output([b.view(unaries(b, b.view(x, [-1, 4])), [6, 2, 2])])
+
+    @case
+    def negative_permute_dims(b):
+        x = b.input("x", X4)
+        b.output([b.permute(unaries(b, b.permute(x, [0, -2, -1, 1])), [0, -1, 1, 2])])
+
+    @case
+    def rank0_view_and_permute(b):
+        x = b.input("x", ())
+        v = b.view(b.call(A.relu.default, b.permute(x, [])), [1])
+        b.output([b.call(A.neg.default, v)])
+
+    @case
+    def permute_returned_directly(b):
+        x = b.input("x", X4)
+        b.output([b.permute(x, TO_LAST)])
+
+    @case
+    def permute_of_a_placeholder_used_twice(b):
+        x = b.input("x", X4)
+        b.output([b.call(A.relu.default, b.permute(x, TO_LAST)), b.call(A.neg.default, x)])
+
+    @case
+    def shared_producer_stops_up(b):
+        x = b.input("x", X4)
+        r = b.call(A.relu.default, x)
+        b.output([b.permute(b.call(A.neg.default, r), TO_LAST), b.call(A.abs.default, r)])
+
+    @case
+    def transparent_copies(b):
+        x = b.input("x", X4)
+        c = b.call(D._clone_dim_order.default, b.permute(x, TO_LAST))
+        t = b.call(D._to_dim_order_copy.default, c, dtype=torch.float32)
+        b.output([b.permute(b.call(A.relu.default, t), TO_FIRST)])
+
+    @case
+    def rank_changing_view_stops_at_a_transparent_copy(b):
+        x = b.input("x", (2, 3, 4))
+        c = b.call(D._clone_dim_order.default, b.view(x, [6, 4]))
+        b.output([b.view(b.call(D._clone_dim_order.default, b.call(A.relu.default, c)), [24])])
+
+    @case
+    def rank_preserving_view_crosses_a_transparent_copy(b):
+        x = b.input("x", (2, 3, 4))
+        c = b.call(D._clone_dim_order.default, b.view(x, [3, 2, 4]))
+        b.output([b.view(b.call(D._clone_dim_order.default, c), [4, 3, 2])])
+
+    @case
+    def aten_view_default_crosses_pointwise_ops(b):
+        x = b.input("x", (2, 3, 4))
+        v = b.call(A.view.default, x, [6, 4])
+        b.output([b.call(A.view.default, unaries(b, v), [24])])
+
+    @case
+    def aten_view_default_meets_a_slice(b):
+        x = b.input("x", (2, 3, 4))
+        s = b.call(A.slice_copy.Tensor, x, 0, 0, 1)
+        b.output([b.call(A.view.default, s, [12])])
+
+    @case
+    def dtype_changing_pointwise_ops(b):
+        x = b.input("x", X4)
+        y = b.input("y", X4)
+        p = b.permute(x, TO_LAST)
+        g = b.call(A.gt.Tensor, p, b.permute(y, TO_LAST))
+        b.output([b.permute(b.call(A.logical_not.default, g), TO_FIRST)])
+
+    # Binary ops -------------------------------------------------------
+
+    @case
+    def up_crosses_a_binary_op_with_a_layout_invariant_operand(b):
+        x = b.input("x", X4)
+        ones = b.input("ones", (1, 1, 1, 1))
+        b.output([b.permute(b.call(A.add.Tensor, x, ones), TO_LAST)])
+
+    @case
+    def up_stops_at_a_binary_op_with_two_layout_operands(b):
+        x = b.input("x", X4)
+        y = b.input("y", X4)
+        b.output([b.permute(b.call(A.add.Tensor, x, y), TO_LAST)])
+
+    @case
+    def up_crosses_a_rank_raising_broadcast(b):
+        x = b.input("x", (3, 4))
+        ones = b.input("ones", (1, 1, 1, 1))
+        b.output([b.permute(b.call(A.mul.Tensor, x, ones), [0, 1, 3, 2])])
+
+    @case
+    def up_rank_raising_broadcast_that_moves_a_new_axis(b):
+        x = b.input("x", (3, 4))
+        ones = b.input("ones", (1, 1, 1, 1))
+        b.output([b.permute(b.call(A.mul.Tensor, x, ones), [1, 0, 3, 2])])
+
+    @case
+    def down_stops_at_a_binary_op_with_a_scalar_like_operand(b):
+        x = b.input("x", X4)
+        ones = b.input("ones", (1, 1))
+        b.output([b.call(A.add.Tensor, b.permute(x, TO_LAST), ones)])
+
+    @case
+    def identical_permutes_into_a_binary_op(b):
+        x = b.input("x", X4)
+        y = b.input("y", X4)
+        b.output([b.call(A.add.Tensor, b.permute(x, TO_LAST), b.permute(y, TO_LAST))])
+
+    @case
+    def identical_views_into_a_cat(b):
+        x = b.input("x", (2, 3, 4))
+        y = b.input("y", (2, 3, 4))
+        b.output([b.call(A.cat.default, [b.view(x, [6, 4]), b.view(y, [6, 4])], 1)])
+
+    @case
+    def where_with_a_broadcast_condition(b):
+        c = b.input("c", (1, 1, 1), dtype=torch.bool)
+        x = b.input("x", (1, 3, 5))
+        z = b.input("z", (1, 1, 1))
+        b.output([b.permute(b.call(A.where.self, c, x, z), [0, 2, 1])])
+
+    @case
+    def binary_with_itself(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_LAST)
+        b.output([b.call(A.mul.Tensor, p, p)])
+
+    # Reductions -------------------------------------------------------
+
+    @case
+    def permute_crosses_a_keepdim_mean(b):
+        x = b.input("x", X4)
+        m = b.call(A.mean.dim, b.permute(x, TO_LAST), [1, -1], True)
+        b.output([b.call(A.relu.default, m)])
+
+    @case
+    def keepdim_mean_then_permute(b):
+        x = b.input("x", X4)
+        b.output([b.permute(b.call(A.mean.dim, x, [2], True), TO_LAST)])
+
+    @case
+    def mean_with_an_int_dim(b):
+        x = b.input("x", X4)
+        b.output([b.permute(b.call(A.mean.dim, b.permute(x, TO_LAST), -1, True), TO_FIRST)])
+
+    @case
+    def mean_without_keepdim_raises(b):
+        x = b.input("x", X4)
+        b.output([b.call(A.mean.dim, b.permute(x, TO_LAST), [1])])
+
+    @case
+    def mean_with_keepdim_false_raises(b):
+        x = b.input("x", X4)
+        b.output([b.permute(b.call(A.mean.dim, x, [1], False), [0, 2, 1])])
+
+    @case
+    def keepdim_as_a_kwarg(b):
+        x = b.input("x", X4)
+        b.output([b.permute(b.call(A.mean.dim, x, [1], keepdim=True), TO_LAST)])
+
+    @case
+    def sum_is_not_a_tosa_reduction(b):
+        x = b.input("x", X4)
+        s = b.call(A.sum.dim_IntList, b.permute(x, TO_LAST), [3], True)
+        b.output([b.permute(s, TO_FIRST)])
+
+    @case
+    def view_moves_before_a_mean_with_a_split_dim(b):
+        x = b.input("x", (6, 4))
+        b.output([b.view(b.call(A.mean.dim, x, [0], True), [1, 1, 4])])
+
+    @case
+    def view_stays_after_a_mean_it_cannot_map(b):
+        x = b.input("x", (1, 50, 10, 20))
+        b.output([b.view(b.call(A.mean.dim, x, [-1], True), [1, 50, 10])])
+
+    @case
+    def view_moves_after_a_mean(b):
+        x = b.input("x", (2, 3, 4))
+        m = b.call(A.mean.dim, b.view(x, [2, 12]), [1], True)
+        b.output([b.call(A.relu.default, m)])
+
+    @case
+    def view_crosses_a_mean_over_whole_groups(b):
+        x = b.input("x", (4, 6))
+        m = b.call(A.mean.dim, b.view(x, [2, 2, 6]), [0, 1], True)
+        b.output([b.call(A.relu.default, m)])
+
+    # Slices -----------------------------------------------------------
+
+    @case
+    def permute_crosses_a_slice(b):
+        x = b.input("x", (1, 4, 3, 3))
+        s = b.call(A.slice_copy.Tensor, b.permute(x, TO_LAST), 3, 0, 2)
+        b.output([b.call(A.relu.default, s)])
+
+    @case
+    def slice_then_permute(b):
+        x = b.input("x", (3, 2, 8, 16))
+        s = b.call(A.slice_copy.Tensor, x, 0, 0, 1)
+        b.output([b.permute(s, [0, 3, 1, 2])])
+
+    @case
+    def slice_then_permute_then_view(b):
+        x = b.input("x", (3, 2, 8, 16))
+        s = b.call(A.slice_copy.Tensor, x, 0, 0, 1)
+        b.output([b.view(b.permute(s, [0, 3, 1, 2]), [1, 32, 8])])
+
+    @case
+    def view_moves_before_a_unit_slice(b):
+        x = b.input("x", (5, 2, 3, 4, 6))
+        s = b.call(A.slice_copy.Tensor, x, 2, 1, 2)
+        b.output([b.view(s, [5, 2, 24])])
+
+    @case
+    def unit_slice_before_a_reordering_view(b):
+        x = b.input("x", (1, 3, 1, 7))
+        s = b.call(A.slice_copy.Tensor, x, 3, 2, 3)
+        b.output([b.view(s, [1, 1, 1, 3])])
+
+    @case
+    def view_with_a_mapped_slice_dim(b):
+        x = b.input("x", (4, 3, 5))
+        s = b.call(A.slice_copy.Tensor, x, 2, 1, 4)
+        b.output([b.view(s, [12, 3])])
+
+    @case
+    def split_dim_view_stops_at_a_slice(b):
+        x = b.input("x", (6, 4))
+        s = b.call(A.slice_copy.Tensor, x, 0, 0, 4)
+        b.output([b.view(s, [2, 2, 4])])
+
+    @case
+    def rank_changing_view_stops_at_a_slice(b):
+        x = b.input("x", (1, 2, 3))
+        s = b.call(A.slice_copy.Tensor, x, 0, 0, 1)
+        b.output([b.view(s, [2, 3])])
+
+    @case
+    def slice_with_a_step(b):
+        x = b.input("x", (4, 6))
+        s = b.call(A.slice_copy.Tensor, x, 1, 0, 6, 2)
+        b.output([b.permute(s, [1, 0])])
+
+    @case
+    def slice_with_open_bounds(b):
+        x = b.input("x", (4, 6))
+        s = b.call(A.slice_copy.Tensor, x, 1, None, 3)
+        b.output([b.view(s, [12])])
+
+    @case
+    def view_moves_after_a_slice(b):
+        x = b.input("x", (2, 3, 4))
+        s = b.call(A.slice_copy.Tensor, b.view(x, [6, 4]), 1, 1, 3)
+        b.output([b.call(A.relu.default, s)])
+
+    # Cat fan-outs -----------------------------------------------------
+
+    @case
+    def noop_permute_after_a_cat_splits(b):
+        x = b.input("x", (1, 1, 3, 4))
+        y = b.input("y", (1, 1, 3, 4))
+        b.output([b.permute(b.call(A.cat.default, [x, y], 1), TO_LAST)])
+
+    @case
+    def two_equal_permutes_after_a_cat(b):
+        x = b.input("x", (1, 1, 3, 4))
+        y = b.input("y", (1, 1, 3, 4))
+        c = b.call(A.cat.default, [x, y], 1)
+        b.output([b.permute(c, TO_LAST), b.call(A.relu.default, b.permute(c, TO_LAST))])
+
+    @case
+    def different_permutes_after_a_cat(b):
+        x = b.input("x", (1, 1, 3, 4))
+        y = b.input("y", (1, 1, 3, 4))
+        c = b.call(A.cat.default, [x, y], 1)
+        b.output([b.permute(c, TO_LAST), b.permute(c, [0, 2, 1, 3])])
+
+    @case
+    def cat_with_a_non_permute_user(b):
+        x = b.input("x", (1, 1, 3, 4))
+        y = b.input("y", (1, 1, 3, 4))
+        c = b.call(A.cat.default, [x, y], 1)
+        b.output([b.permute(c, TO_LAST), b.call(A.relu.default, c)])
+
+    @case
+    def permute_after_a_cat_moving_real_dims(b):
+        x = b.input("x", (1, 2, 3, 4))
+        y = b.input("y", (1, 2, 3, 4))
+        b.output([b.permute(b.call(A.cat.default, [x, y], 1), TO_LAST)])
+
+    @case
+    def cat_without_a_dim(b):
+        x = b.input("x", (1, 1, 3, 4))
+        y = b.input("y", (2, 1, 3, 4))
+        b.output([b.permute(b.call(A.cat.default, [x, y]), [1, 0, 2, 3])])
+
+    @case
+    def cat_dim_as_a_kwarg(b):
+        x = b.input("x", (1, 1, 3, 4))
+        y = b.input("y", (1, 1, 3, 4))
+        b.output([b.permute(b.call(A.cat.default, [x, y], dim=1), TO_LAST)])
+
+    @case
+    def cat_with_a_repeated_input(b):
+        x = b.input("x", (1, 1, 3, 4))
+        b.output([b.permute(b.call(A.cat.default, [x, x], 1), TO_LAST)])
+
+    @case
+    def cat_inputs_with_qparams(b):
+        x = b.input("x", (1, 1, 3, 4))
+        y = b.call(A.relu.default, b.input("y", (1, 1, 3, 4)))
+        set_qparams(y, inputs=[0], outputs=[0])
+        p = b.permute(b.call(A.cat.default, [x, y], 1), TO_LAST)
+        set_qparams(p, outputs=[0])
+        b.output([p])
+
+    # Forks moving down ------------------------------------------------
+
+    @case
+    def fork_into_two_unary_ops(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_LAST)
+        b.output([b.call(A.relu.default, p), b.call(A.neg.default, p)])
+
+    @case
+    def fork_branches_rejoin(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_LAST)
+        b.output([b.call(A.add.Tensor, b.call(A.abs.default, p), b.call(A.neg.default, p))])
+
+    @case
+    def fork_mixed_rejoin_and_diverge(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_LAST)
+        left, right, other = (b.call(op, p) for op in (A.abs.default, A.neg.default, A.relu.default))
+        b.output([b.call(A.add.Tensor, left, right), other])
+
+    @case
+    def fork_after_crossed_nodes(b):
+        x = b.input("x", X4)
+        r = b.call(A.relu.default, b.permute(x, TO_LAST))
+        b.output([b.call(A.abs.default, r), b.call(A.neg.default, r)])
+
+    @case
+    def fork_into_slices(b):
+        x = b.input("x", (1, 4, 3, 3))
+        p = b.permute(x, TO_LAST)
+        left = b.view(b.call(A.slice_copy.Tensor, p, 3, 0, 2), [1, 9, 2])
+        right = b.view(b.call(A.slice_copy.Tensor, p, 3, 2, 4), [1, 9, 2])
+        b.output([b.permute(left, [0, 2, 1]), b.permute(right, [0, 2, 1])])
+
+    @case
+    def fork_into_a_keepdim_mean(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_LAST)
+        b.output([b.call(A.mean.dim, p, [1], True), b.call(A.relu.default, p)])
+
+    @case
+    def fork_with_a_non_elementwise_branch(b):
+        x = b.input("x", (2, 3))
+        w = b.input("w", (2, 2))
+        p = b.permute(x, [1, 0])
+        b.output([b.call(A.add.Tensor, b.call(A.relu.default, p), b.call(A.mm.default, p, w))])
+
+    @case
+    def fork_branch_with_a_layout_invariant_operand(b):
+        x = b.input("x", X4)
+        ones = b.input("ones", (1, 1, 1, 1))
+        p = b.permute(x, TO_LAST)
+        b.output([b.call(A.add.Tensor, p, ones), b.call(A.neg.default, p)])
+
+    @case
+    def fork_branch_reading_another_branch(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_LAST)
+        a = b.call(A.abs.default, p)
+        b.output([b.call(A.add.Tensor, p, a)])
+
+    @case
+    def fork_branch_changes_rank(b):
+        x = b.input("x", (2, 3))
+        p = b.permute(x, [1, 0])
+        b.output([b.call(A.relu.default, p), b.call(A.add.Tensor, p, b.input("y", (4, 3, 2)))])
+
+    @case
+    def view_stops_at_a_fork(b):
+        x = b.input("x", (2, 3, 4))
+        v = b.view(x, [6, 4])
+        b.output([b.call(A.relu.default, v), b.call(A.neg.default, v)])
+
+    @case
+    def fork_branch_with_qparams(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_LAST)
+        r = b.call(A.relu.default, p)
+        set_qparams(r, inputs=[0], outputs=[0])
+        b.output([r, b.call(A.neg.default, p)])
+
+    @case
+    def fork_into_a_cat_with_an_untracked_input(b):
+        x = b.input("x", X4)
+        y = b.input("y", (1, 3, 4, 2))
+        p = b.permute(x, TO_LAST)
+        b.output([b.call(A.cat.default, [b.call(A.relu.default, p), b.call(A.neg.default, p), y], 3)])
+
+    # Pointwise regions moving down -----------------------------------
+
+    @case
+    def single_exit_pointwise_region(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_LAST)
+        b.output([b.call(A.sub.Tensor, p, b.call(A.floor.default, p))])
+
+    @case
+    def pointwise_region_with_two_exits(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_LAST)
+        f = b.call(A.floor.default, p)
+        b.output([f, b.call(A.sub.Tensor, p, f)])
+
+    @case
+    def pointwise_region_with_an_outside_operand(b):
+        x = b.input("x", X4)
+        y = b.input("y", (1, 3, 4, 2))
+        p = b.permute(x, TO_LAST)
+        f = b.call(A.floor.default, p)
+        b.output([b.call(A.sub.Tensor, b.call(A.add.Tensor, p, y), f)])
+
+    @case
+    def pointwise_region_with_a_layout_invariant_operand(b):
+        x = b.input("x", X4)
+        ones = b.input("ones", (1, 1, 1, 1))
+        p = b.permute(x, TO_LAST)
+        f = b.call(A.floor.default, p)
+        b.output([b.call(A.sub.Tensor, b.call(A.mul.Tensor, p, ones), f)])
+
+    @case
+    def elementwise_fork_into_a_where(b):
+        x = b.input("x", X4)
+        scale = b.input("scale", (1, 1, 1, 1))
+        bias = b.input("bias", (1, 1, 1, 1))
+        s = b.call(A.mul.Tensor, b.permute(x, TO_LAST), scale)
+        cond = b.call(A.ge.Tensor, s, bias)
+        fl = b.call(A.floor.default, b.call(A.add.Tensor, s, bias))
+        ce = b.call(A.ceil.default, b.call(A.sub.Tensor, s, bias))
+        b.output([b.call(A.where.self, cond, fl, ce)])
+
+    @case
+    def region_reaching_a_reduction(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_LAST)
+        f = b.call(A.floor.default, p)
+        b.output([b.call(A.mean.dim, b.call(A.sub.Tensor, p, f), [1], True)])
+
+    def advance_then_region_move(b, view):
+        # rc4's Down walk crosses floor and the mean, rewriting the mean's
+        # dims, then fails to split the fork after it and falls back to a
+        # region move from the permute, which keeps the rewritten dims: the
+        # mean's users get a new shape, which rc4's next re-trace re-derives
+        # (and raises on where a view no longer fits).
+        x = b.input("x", (4, 2, 1, 3))
+        ones = b.input("ones", (1, 1, 1, 1))
+        other = b.input("other", (1, 3, 1, 1))
+        p = b.permute(x, [1, 3, 2, 0])
+        m = b.call(A.mean.dim, b.call(A.floor.default, p), [0, 2, -1], True)
+        w = b.call(A.where.self, b.call(A.gt.Tensor, m, ones), m, other)
+        c = b.call(A.ceil.default, w)
+        b.output([b.view(c, [3]) if view else c])
+
+    @case
+    def advance_then_region_move_breaks_a_view(b):
+        advance_then_region_move(b, view=True)
+
+    @case
+    def advance_then_region_move_reshapes_users(b):
+        advance_then_region_move(b, view=False)
+
+    @case
+    def channel_split_after_clamp(b):
+        # The same with a slice, the shape RewriteConvPass leaves around a
+        # channel split between two convolutions: rc4's walk rewrites the
+        # slice's dim from 1 to 3, the region move keeps it, and the slice
+        # cuts W instead of C; both outputs change shape.
+        y = b.input("y", (1, 3, 5, 8))
+        s = b.call(A.slice_copy.Tensor, b.call(A.clamp.default, b.permute(y, TO_FIRST), 0.0, 6.0), 1, 0, 4)
+        b.output([b.permute(s, TO_LAST), b.call(A.neg.default, s)])
+
+    @case
+    def sweep_rewiring_reorders_users_for_remove_permutes(b):
+        # The Down sweeps rewire nodes, which moves them to the end of their
+        # inputs' users, and the fusion round runs RemovePermutes before any
+        # re-trace, so it meets the users in that order: rc4 ends with one
+        # permute here, and with two if the users were in graph order.
+        x = b.input("x0", (3, 3))
+        p1 = b.permute(x, [1, 0])
+        p2 = b.permute(p1, [1, 0])
+        n4 = b.call(A.neg.default, b.view(p2, [3, 3]))
+        s6 = b.call(A.sub.Tensor, b.permute(n4, [1, 0]), p2)
+        p9 = b.permute(b.permute(b.permute(s6, [1, 0]), [1, 0]), [1, 0])
+        m11 = b.call(A.mul.Tensor, p9, b.view(p9, [3, 3]))
+        b.output([p1, b.permute(b.call(A.sub.Tensor, m11, p1), [1, 0])])
+
+    @case
+    def region_with_qparams_on_the_permute(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_LAST)
+        set_qparams(p, inputs=[0], outputs=[0])
+        b.output([b.call(A.sub.Tensor, p, b.call(A.ceil.default, p))])
+
+    # Dead code ----------------------------------------------------------
+
+    @case
+    def dead_user_of_a_permute(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_LAST)
+        b.call(A.relu.default, p)
+        b.output([x])
+
+    @case
+    def dead_transparent_user_of_a_permute(b):
+        # RemovePermutes leaves a dim-order copy alone, so Down walks into it
+        # and finds no user: rc4 asserts (`:200-205`).
+        x = b.input("x", X4)
+        b.call(D._clone_dim_order.default, b.permute(x, TO_LAST))
+        b.output([x])
+
+    @case
+    def dead_user_beside_a_live_one(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_LAST)
+        b.call(A.relu.default, p)
+        b.output([b.call(A.neg.default, p)])
+
+    @case
+    def dead_user_of_the_permutes_input(b):
+        x = b.input("x", X4)
+        r = b.call(A.relu.default, x)
+        b.call(A.abs.default, r)
+        b.output([b.permute(r, TO_LAST)])
+
+    @case
+    def dead_permute(b):
+        x = b.input("x", X4)
+        b.call(A.relu.default, b.permute(x, TO_LAST))
+        b.output([b.call(A.neg.default, x)])
+
+    # Fusions ------------------------------------------------------------
+
+    @case
+    def inverse_permutes_around_a_chain(b):
+        x = b.input("x", X4)
+        b.output([b.permute(unaries(b, b.permute(x, TO_LAST)), TO_FIRST)])
+
+    @case
+    def consecutive_permutes(b):
+        x = b.input("x", (1, 2, 3))
+        b.output([b.permute(b.permute(x, [0, 2, 1]), [0, 2, 1])])
+
+    @case
+    def duplicate_permutes_of_one_producer(b):
+        x = b.input("x", X4)
+        r = b.call(A.relu.default, x)
+        b.output([b.call(A.add.Tensor, b.permute(r, TO_LAST), b.permute(r, TO_LAST))])
+
+    @case
+    def fusion_enables_further_propagation(b):
+        x = b.input("x", X4)
+        r = b.call(A.relu.default, x)
+        n = b.call(A.neg.default, r)
+        b.output([b.call(A.add.Tensor, b.permute(n, TO_LAST), b.permute(r, TO_LAST))])
+
+    @case
+    def duplicate_permutes_at_a_placeholder(b):
+        x = b.input("x", (1, 4, 3, 3))
+        left = b.call(A.slice_copy.Tensor, x, 1, 0, 2)
+        right = b.call(A.slice_copy.Tensor, x, 1, 2, 4)
+        b.output([b.permute(left, TO_LAST), b.permute(right, TO_LAST)])
+
+    @case
+    def matching_chains_across_a_slice_fanout(b):
+        x = b.input("x", (1, 4, 3, 3))
+        left = b.view(b.call(A.slice_copy.Tensor, x, 1, 0, 2), [1, 2, 9])
+        right = b.view(b.call(A.slice_copy.Tensor, x, 1, 2, 4), [1, 2, 9])
+        b.output([b.permute(left, [0, 2, 1]), b.permute(right, [0, 2, 1])])
+
+    @case
+    def singleton_permutes_fused_horizontally(b):
+        x = b.input("x", (1, 1, 1, 1))
+        y = b.input("y", (1, 1, 1, 1))
+        b.output([b.call(A.add.Tensor, b.permute(x, TO_LAST), b.permute(y, TO_LAST))])
+
+    @case
+    def sunk_view_before_a_rank_reducing_permute(b):
+        x = b.input("x", (2, 8, 1, 32))
+        y = b.input("y", (2, 8, 1, 32))
+        a = b.call(A.add.Tensor, b.view(x, [2, 8, 32]), b.view(y, [2, 8, 32]))
+        b.output([b.permute(b.view(a, [2, 8, 32]), [0, 2, 1])])
+
+    @case
+    def mixed_permute_and_view_chain(b):
+        x = b.input("x", (2, 3, 4))
+        p = b.permute(x, [1, 0, 2])
+        v = b.view(p, [3, 8])
+        t = b.call(A.relu.default, v)
+        b.output([b.permute(b.view(t, [3, 2, 4]), [1, 0, 2])])
+
+    # TOSA: RESCALE, TABLE, INT48, SCATTER -------------------------------
+
+    @case
+    def per_tensor_rescale_is_crossed(b):
+        x = b.input("x", X4, dtype=torch.int32)
+        b.output([b.permute(rescale(b, x, torch.int8, [1.0]), TO_LAST)])
+
+    @case
+    def permute_sinks_through_rescales(b):
+        x = b.input("x", X4, dtype=torch.int8)
+        r = rescale(b, b.permute(x, TO_LAST), torch.int32)
+        b.output([rescale(b, b.call(A.abs.default, r), torch.int8)])
+
+    @case
+    def per_channel_rescale_blocks(b):
+        x = b.input("x", (2, 3, 4, 5), dtype=torch.int32)
+        b.output([b.permute(rescale(b, x, torch.int8, [1.0] * 5), TO_FIRST)])
+
+    @case
+    def rank_changing_view_stops_at_a_rescale(b):
+        x = b.input("x", (2, 3, 4), dtype=torch.int8)
+        b.output([b.view(rescale(b, b.call(A.abs.default, x), torch.int32), [6, 4])])
+
+    @case
+    def rank_preserving_view_crosses_a_rescale(b):
+        x = b.input("x", (2, 3, 4), dtype=torch.int8)
+        b.output([b.view(rescale(b, x, torch.int32), [3, 2, 4])])
+
+    @case
+    def rescale_changing_the_special_dtype(b):
+        x = b.input("x", (1, 1, 1, 15), dtype=torch.int32)
+        set_special(x)
+        b.output([b.view(rescale(b, x, torch.int32, [1.0]), [15])])
+
+    @case
+    def int48_permute_does_not_move(b):
+        x = b.input("x", X4, dtype=torch.int32)
+        set_special(x)
+        r = b.call(A.relu.default, x)
+        set_special(r)
+        p = b.permute(r, TO_LAST)
+        set_special(p)
+        b.output([p])
+
+    @case
+    def permute_stops_before_an_int48_input(b):
+        x = b.input("x", (2, 3, 5), dtype=torch.int32)
+        set_special(x)
+        b.output([b.permute(rescale(b, x, torch.int8, [0.25]), [1, 0, 2])])
+
+    @case
+    def int48_value_stops_a_sinking_permute(b):
+        x = b.input("x", X4, dtype=torch.int32)
+        r = b.call(A.abs.default, b.permute(x, TO_LAST))
+        set_special(r)
+        b.output([b.call(A.neg.default, r)])
+
+    @case
+    def int48_only_blocks_permutes(b):
+        x = b.input("x", (2, 3, 4), dtype=torch.int32)
+        set_special(x)
+        b.output([b.view(b.call(A.abs.default, x), [3, 2, 4])])
+
+    @case
+    def shared_rescale_producer_stops_up(b):
+        x = b.input("x", (10, 80, 16), dtype=torch.int8)
+        y = b.input("y", (10, 80, 16), dtype=torch.int32)
+        r = rescale(b, x, torch.int32, [1.0])
+        b.output([b.permute(r, [1, 0, 2]), b.call(A.add.Tensor, r, y)])
+
+    @case
+    def int8_table_between_permutes(b):
+        x = b.input("x", (2, 3, 4), dtype=torch.int8)
+        t = int8_table(b, b.permute(x, [1, 0, 2]))
+        b.output([b.permute(t, [1, 0, 2])])
+
+    @case
+    def permute_then_int8_table_chain(b):
+        x = b.input("x", X4, dtype=torch.int8)
+        t = int8_table(b, b.call(A.abs.default, b.permute(x, TO_LAST)))
+        b.output([b.call(A.neg.default, t)])
+
+    @case
+    def int8_table_then_permute(b):
+        x = b.input("x", (2, 3, 4), dtype=torch.int8)
+        b.output([b.permute(int8_table(b, b.call(A.abs.default, x)), [1, 0, 2])])
+
+    @case
+    def view_and_permute_around_a_table(b):
+        x = b.input("x", (2, 3, 4), dtype=torch.int8)
+        t = int8_table(b, b.view(b.permute(x, [1, 0, 2]), [3, 8]))
+        b.output([b.permute(b.view(t, [3, 2, 4]), [1, 0, 2])])
+
+    @case
+    def view_stays_before_an_unsafe_table_operand(b):
+        x = b.input("x", (990, 1, 1, 64), dtype=torch.int8)
+        b.output([int8_table(b, b.view(x, [99, 10, 64]))])
+
+    @case
+    def view_stays_after_an_unsafe_table_operand(b):
+        x = b.input("x", (99, 10, 64), dtype=torch.int8)
+        b.output([b.view(int8_table(b, x), [990, 1, 1, 64])])
+
+    @case
+    def view_sinks_through_a_safe_table(b):
+        x = b.input("x", (1, 1, 1, 64), dtype=torch.int8)
+        b.output([int8_table(b, b.view(x, [1, 64]))])
+
+    @case
+    def hardswish_table(b):
+        x = b.input("x", X4, dtype=torch.int8)
+        t = int8_table(b, b.permute(x, TO_LAST), A.hardswish.default)
+        b.output([b.call(A.neg.default, t)])
+
+    @case
+    def table_in_a_pointwise_region(b):
+        x = b.input("x", X4, dtype=torch.int8)
+        p = b.permute(x, TO_LAST)
+        b.output([b.call(A.sub.Tensor, p, int8_table(b, p))])
+
+    @case
+    def table_as_a_fork_branch(b):
+        x = b.input("x", X4, dtype=torch.int8)
+        p = b.permute(x, TO_LAST)
+        b.output([int8_table(b, p), b.call(A.neg.default, p)])
+
+    @case
+    def table_with_a_layout_invariant_input(b):
+        x = b.input("x", (1, 1, 1, 1), dtype=torch.int8)
+        b.output([b.permute(int8_table(b, x), TO_LAST)])
+
+    @case
+    def int16_table_between_permutes(b):
+        x = b.input("x", (2, 3, 4), dtype=torch.int16)
+        t = int16_table(b, b.permute(x, [1, 0, 2]))
+        b.output([b.permute(t, [1, 0, 2])])
+
+    @case
+    def permute_sinks_through_an_int16_table(b):
+        x = b.input("x", (2, 3, 4), dtype=torch.int16)
+        b.output([b.call(A.neg.default, int16_table(b, b.permute(x, [1, 0, 2])))])
+
+    @case
+    def rank_changing_view_stops_at_an_int16_table(b):
+        x = b.input("x", (2, 3, 4), dtype=torch.int16)
+        b.output([b.view(int16_table(b, b.call(A.abs.default, x)), [6, 4])])
+
+    def view_into_an_int16_table(b, n):
+        # Down sinks the view past the TABLE (which then reads x's [n, 8])
+        # and stops it at the RESCALE, which a rank-changing view can't
+        # cross; RETAB keeps the table split there (`layout::pending`).
+        # Moving up, the TABLE guard keeps the view below the TABLE when it
+        # would read [n, 1, 1, 8] with n > 1 (MLBEDSW-11805).
+        x = b.input("x", (n, 8), dtype=torch.int16)
+        b.output([int16_table(b, b.view(x, [n, 1, 1, 8]))])
+
+    @case
+    def view_parks_between_an_int16_table_and_its_rescale(b):
+        view_into_an_int16_table(b, 2)
+
+    @case
+    def view_parks_before_a_safe_int16_table_rescale(b):
+        view_into_an_int16_table(b, 1)
+
+    @case
+    def permute_parks_between_an_int16_table_and_its_rescale(b):
+        # Moving up, the permute crosses the RESCALE but not the TABLE, which
+        # would read the permute's [2, 1, 1, 8].
+        x = b.input("x", (2, 8, 1, 1), dtype=torch.int16)
+        b.output([b.permute(int16_table(b, x), [0, 2, 3, 1])])
+
+    @case
+    def int16_tables_behind_a_shared_permute(b):
+        # The view's walk down parks it in its table, so the shared permute
+        # keeps one user and its chain cancels.
+        x = b.input("x1", (2, 1, 3), dtype=torch.int16)
+        p = b.permute(x, [1, 2, 0])
+        t = table_op(b, A.tanh.default, b.permute(p, [0, 2, 1]), qargs(1 / 256, dtype=torch.int16), qargs(1 / 4096, dtype=torch.int16))
+        s1 = int16_table(b, b.permute(t, [1, 2, 0]))
+        s2 = table_op(b, A.sigmoid.default, b.view(p, [1, 6]), qargs(1 / 2048, dtype=torch.int16), qargs(1 / 2048, dtype=torch.int16))
+        b.output([s1, s2])
+
+    @case
+    def scatter_user_pins_a_view(b):
+        x = b.input("x", (3, 16, 2, 8))
+        indices = b.input("indices", (1, 4), dtype=torch.int32)
+        data = b.input("data", (1, 4, 8))
+        s = b.call(A.slice_copy.Tensor, x, 0, 0, 1)
+        b.output([b.call(T.SCATTER.default, b.view(s, [1, 32, 8]), indices, data)])
+
+    @case
+    def scatter_input_after_a_sinking_permute(b):
+        x = b.input("x", (1, 8, 32))
+        indices = b.input("indices", (1, 4), dtype=torch.int32)
+        data = b.input("data", (1, 4, 8))
+        p = b.permute(b.call(A.relu.default, x), [0, 2, 1])
+        b.output([b.call(T.SCATTER.default, b.call(A.neg.default, p), indices, data)])
+
+    # Qparams ride along -----------------------------------------------
+
+    @case
+    def qparams_on_moved_nodes(b):
+        x = b.input("x", X4)
+        p = b.permute(x, TO_LAST)
+        set_qparams(p, inputs=[0], outputs=[0])
+        r = b.call(A.relu.default, p)
+        set_qparams(r, inputs=[], outputs=[0])
+        b.output([r])
+
+    @case
+    def constants_feed_the_chain(b):
+        x = b.input("x", X4)
+        w = b.constant("param", "w", (1, 3, 4, 2))
+        b.output([b.call(A.add.Tensor, b.permute(x, TO_LAST), w)])
+
+    return cases
+
+
+# Steps per random propagation graph; a fuzzing session can ask for larger
+# graphs with RETAB_REPLAY_PROPAGATION_STEPS=low,high (the committed fixtures
+# use the default).
+PROPAGATION_STEPS = tuple(
+    int(bound) for bound in os.environ.get("RETAB_REPLAY_PROPAGATION_STEPS", "2,10").split(",")
+)
+
+
+def propagation_random_case(seed: int) -> Callable[[Builder], None]:
+    def build(b: Builder) -> None:
+        rng = random.Random(seed)
+        graph = PropagationGraph(rng, b)
+        for _ in range(rng.randint(1, 3)):
+            graph.fresh_float()
+        for _ in range(rng.randint(*PROPAGATION_STEPS)):
+            graph.step()
+        graph.finish()
+
+    return build
+
+
+PROPAGATION_UNARY = [
+    A.relu.default,
+    A.abs.default,
+    A.neg.default,
+    A.floor.default,
+    A.ceil.default,
+    A.sqrt.default,
+]
+PROPAGATION_BINARY = [A.add.Tensor, A.sub.Tensor, A.mul.Tensor, A.maximum.default]
+# 16-bit table ops and (input, output) qparams the random graphs draw: most
+# pairs need a left shift, so InsertTableOpsPass adds a RESCALE.
+TABLE16_TARGETS = [(A.sigmoid.default, (), {}), (A.tanh.default, (), {}), (A.exp.default, (), {})]
+TABLE16_QPARAMS = [
+    (qargs(1 / 1024, dtype=torch.int16), qargs(1 / 32768, dtype=torch.int16)),
+    (qargs(1 / 256, dtype=torch.int16), qargs(1 / 4096, dtype=torch.int16)),
+    (qargs(1 / 2048, dtype=torch.int16), qargs(1 / 2048, dtype=torch.int16)),
+]
+
+
+class PropagationGraph:
+    """Seeded random graphs for the propagation passes: chains of pointwise
+    ops, keepdim means, slices, cats and forks with permutes and views among
+    them, int8 and int16 RESCALE and TABLE islands (a 16-bit TABLE is followed
+    by a RESCALE), INT48 data and SCATTER users."""
+
+    WEIGHTS = {
+        "permute": 3,
+        "view": 2,
+        "unary": 3,
+        "transparent": 0.8,
+        "binary": 2,
+        "where": 0.5,
+        "mean": 1,
+        "sum": 0.3,
+        "slice": 1.2,
+        "cat": 0.8,
+        "fork": 1.2,
+        "region": 0.6,
+        "chain": 1.5,
+        "pre_chain": 1,
+        "same_transforms": 0.8,
+        "int": 0.8,
+        "table": 0.7,
+        "table16": 0.7,
+        "scatter": 0.15,
+        "mm": 0.25,
+        "dead": 0.12,
+        "qparams": 0.5,
+        "slice_view": 0.8,
+        "view_slice": 0.8,
+        "mean_view": 0.6,
+        "view_mean": 0.6,
+        "permute_mean": 0.6,
+    }
+
+    def __init__(self, rng: random.Random, b: Builder) -> None:
+        self.rng = rng
+        self.b = b
+        self.pool: list[torch.fx.Node] = []
+        self.inputs = 0
+
+    def random_slice(self, x):
+        rng = self.rng
+        shape = list(x.meta["val"].shape)
+        dim = rng.randrange(len(shape))
+        size = shape[dim]
+        if rng.random() < 0.45:
+            start = rng.randrange(size)
+            end = start + 1
+        else:
+            start = rng.randrange(size)
+            end = rng.randint(start + 1, size)
+        return self.b.call(A.slice_copy.Tensor, x, dim - len(shape) if rng.random() < 0.15 else dim, start, end)
+
+    def random_keepdim_mean(self, x):
+        rank = x.meta["val"].dim()
+        dims = sorted(self.rng.sample(range(rank), self.rng.randint(1, rank)))
+        if self.rng.random() < 0.2:
+            dims = [d - rank for d in dims]
+        return self.b.call(A.mean.dim, x, dims, True)
+
+    def shape(self, rank: int, max_numel: int = 180) -> list[int]:
+        while True:
+            dims = [1 if self.rng.random() < 0.3 else self.rng.randint(2, 4) for _ in range(rank)]
+            if math.prod(dims) <= max_numel:
+                return dims
+
+    def permutation(self, rank: int) -> list[int]:
+        dims = list(range(rank))
+        self.rng.shuffle(dims)
+        if self.rng.random() < 0.2:
+            dims = [d - rank if self.rng.random() < 0.5 else d for d in dims]
+        return dims
+
+    def view_shape(self, shape) -> list[int]:
+        rng = self.rng
+        factors = prime_factors(math.prod(shape))
+        rng.shuffle(factors)
+        buckets = rng.randint(1, min(4, max(1, len(factors)))) if factors else 0
+        dims = [1] * buckets
+        for f in factors:
+            dims[rng.randrange(buckets)] *= f
+        while len(dims) < 5 and rng.random() < 0.25:
+            dims.insert(rng.randint(0, len(dims)), 1)
+        if not dims and rng.random() < 0.5:
+            dims = [1] * rng.randint(1, 2)
+        if dims and rng.random() < 0.1:
+            dims[rng.randrange(len(dims))] = -1
+        return dims
+
+    def new_input(self, shape, dtype=torch.float32) -> torch.fx.Node:
+        name = f"x{self.inputs}"
+        self.inputs += 1
+        node = self.b.input(name, shape, dtype)
+        if self.rng.random() < 0.1:
+            set_qparams(node, inputs=self.rng.choice([None, [0]]), outputs=[0])
+        return node
+
+    def fresh_float(self, rank=None) -> torch.fx.Node:
+        rank = self.rng.randint(0, 5) if rank is None else rank
+        node = self.new_input(self.shape(rank))
+        self.pool.append(node)
+        return node
+
+    def pick(self, dtype=torch.float32) -> torch.fx.Node:
+        candidates = [n for n in self.pool if n.meta["val"].dtype == dtype]
+        if not candidates or self.rng.random() < 0.12:
+            node = self.new_input(self.shape(self.rng.randint(0, 5)), dtype)
+            self.pool.append(node)
+            return node
+        return candidates[-1 - min(int(self.rng.expovariate(0.8)), len(candidates) - 1)]
+
+    def keep(self, node):
+        self.pool.append(node)
+        return node
+
+    def partner(self, x) -> torch.fx.Node:
+        """A second operand for `x`: same shape, all-ones, broadcast or lower rank."""
+        rng = self.rng
+        shape = list(x.meta["val"].shape)
+        roll = rng.random()
+        if roll < 0.35:
+            other = shape
+        elif roll < 0.6:
+            other = [1] * len(shape)
+        elif roll < 0.8:
+            other = [1 if rng.random() < 0.5 else d for d in shape]
+        else:
+            keep = rng.randint(0, len(shape))
+            other = [1 if rng.random() < 0.4 else d for d in shape[len(shape) - keep :]]
+        return self.keep(self.new_input(other, x.meta["val"].dtype))
+
+    def unary(self, x):
+        return self.b.call(self.rng.choice(PROPAGATION_UNARY), x)
+
+    def transform(self, x):
+        shape = list(x.meta["val"].shape)
+        if self.rng.random() < 0.6:
+            return self.b.permute(x, self.permutation(len(shape)))
+        return self.b.view(x, self.view_shape(shape))
+
+    def maybe_qparams(self, node):
+        # Never on a table op: with both maps it would be a pending table.
+        if self.rng.random() < 0.08 and node.target not in set(TableOps.included_ops()):
+            set_qparams(node, inputs=self.rng.choice([[], [0]]), outputs=[0])
+        return node
+
+    def step(self) -> None:
+        rng, b = self.rng, self.b
+        kind = rng.choices(list(self.WEIGHTS), list(self.WEIGHTS.values()))[0]
+        if kind == "permute":
+            x = self.pick()
+            self.keep(self.maybe_qparams(b.permute(x, self.permutation(x.meta["val"].dim()))))
+        elif kind == "view":
+            x = self.pick()
+            self.keep(self.maybe_qparams(b.view(x, self.view_shape(list(x.meta["val"].shape)))))
+        elif kind == "unary":
+            self.keep(self.maybe_qparams(self.unary(self.pick())))
+        elif kind == "transparent":
+            x = self.pick()
+            if rng.random() < 0.5:
+                self.keep(b.call(D._clone_dim_order.default, x))
+            else:
+                self.keep(b.call(D._to_dim_order_copy.default, x, dtype=torch.float32))
+        elif kind == "binary":
+            x = self.pick()
+            y = self.partner(x)
+            args = (x, y) if rng.random() < 0.6 else (y, x)
+            self.keep(self.maybe_qparams(b.call(rng.choice(PROPAGATION_BINARY), *args)))
+        elif kind == "where":
+            x = self.pick()
+            y = self.partner(x)
+            cond = b.call(A.gt.Tensor, x, y)
+            self.keep(b.call(A.where.self, cond, x, self.partner(x)))
+        elif kind in ("mean", "sum"):
+            x = self.pick()
+            rank = x.meta["val"].dim()
+            if rank == 0:
+                return
+            dims = sorted(rng.sample(range(rank), rng.randint(1, rank)))
+            dims = [d - rank if rng.random() < 0.2 else d for d in dims]
+            keepdim = rng.random() >= 0.03
+            target = A.mean.dim if kind == "mean" else A.sum.dim_IntList
+            if rng.random() < 0.15 and len(dims) == 1:
+                dims = dims[0]
+            self.keep(b.call(target, x, dims, keepdim))
+        elif kind == "slice":
+            x = self.pick()
+            shape = list(x.meta["val"].shape)
+            if not shape:
+                return
+            dim = rng.randrange(len(shape))
+            size = shape[dim]
+            if rng.random() < 0.4:
+                start = rng.randrange(size)
+                end = start + 1
+            else:
+                start = rng.randrange(size)
+                end = rng.randint(start + 1, size)
+            args = [x, dim - len(shape) if rng.random() < 0.15 else dim, start, end]
+            if rng.random() < 0.1:
+                args.append(rng.choice([1, 2]))
+            self.keep(b.call(A.slice_copy.Tensor, *args))
+        elif kind == "cat":
+            x = self.pick()
+            shape = list(x.meta["val"].shape)
+            if not shape:
+                return
+            dim = rng.randrange(len(shape))
+            other_shape = list(shape)
+            other_shape[dim] = rng.randint(1, 3)
+            parts = [x, self.keep(self.new_input(other_shape))]
+            if rng.random() < 0.3:
+                parts.append(self.keep(self.new_input(other_shape)))
+            rng.shuffle(parts)
+            c = self.keep(b.call(A.cat.default, parts, dim))
+            if rng.random() < 0.5:
+                self.keep(b.permute(c, self.permutation(len(shape))))
+        elif kind == "fork":
+            x = self.pick()
+            source = self.transform(x) if rng.random() < 0.6 else x
+            for _ in range(rng.randint(2, 3)):
+                branch = rng.random()
+                shape = list(source.meta["val"].shape)
+                if branch < 0.55 or not shape:
+                    self.keep(self.unary(source))
+                elif branch < 0.75:
+                    dim = rng.randrange(len(shape))
+                    self.keep(b.call(A.slice_copy.Tensor, source, dim, 0, max(1, shape[dim] - 1)))
+                elif branch < 0.9:
+                    self.keep(b.call(A.mean.dim, source, [rng.randrange(len(shape))], True))
+                else:
+                    self.keep(b.call(A.add.Tensor, source, self.partner(source)))
+        elif kind == "region":
+            x = self.pick()
+            p = b.permute(x, self.permutation(x.meta["val"].dim()))
+            f = b.call(rng.choice([A.floor.default, A.ceil.default, A.abs.default]), p)
+            node = b.call(A.sub.Tensor, p, f)
+            if rng.random() < 0.3:
+                self.keep(f)
+            self.keep(node)
+        elif kind == "chain":
+            x = self.pick()
+            rank = x.meta["val"].dim()
+            perm = self.permutation(rank)
+            value = b.permute(x, perm)
+            for _ in range(rng.randint(1, 3)):
+                value = self.unary(value)
+            if rng.random() < 0.6:
+                inverse = [0] * rank
+                for i, d in enumerate(perm):
+                    inverse[d % rank] = i
+                value = b.permute(value, inverse)
+            else:
+                value = self.transform(value)
+            self.keep(value)
+        elif kind == "pre_chain":
+            value = self.pick()
+            for _ in range(rng.randint(1, 3)):
+                value = self.unary(value)
+            self.keep(self.transform(value))
+        elif kind == "same_transforms":
+            x = self.pick()
+            shape = list(x.meta["val"].shape)
+            y = self.keep(self.new_input(shape))
+            if rng.random() < 0.5:
+                perm = self.permutation(len(shape))
+                tx, ty = b.permute(x, perm), b.permute(y, perm)
+            else:
+                view = self.view_shape(shape)
+                tx, ty = b.view(x, view), b.view(y, view)
+            self.keep(b.call(rng.choice(PROPAGATION_BINARY), tx, ty))
+        elif kind == "int":
+            narrow = rng.choice([torch.int8, torch.int16])
+            x = self.pick(torch.int8) if narrow == torch.int8 and rng.random() < 0.5 else self.new_input(self.shape(rng.randint(1, 4)), narrow)
+            value = x
+            for _ in range(rng.randint(2, 4)):
+                step = rng.choices(["rescale", "permute", "view", "abs"], [3, 3, 1, 1])[0]
+                dtype = value.meta["val"].dtype
+                if step == "rescale":
+                    out = torch.int32 if dtype != torch.int32 else rng.choice([torch.int8, torch.int16])
+                    scales = [0.5] if rng.random() < 0.85 else [0.5] * max(1, value.meta["val"].shape[-1] if value.meta["val"].dim() else 1)
+                    value = rescale(b, value, out, scales)
+                elif step == "permute":
+                    value = b.permute(value, self.permutation(value.meta["val"].dim()))
+                elif step == "view":
+                    value = b.view(value, self.view_shape(list(value.meta["val"].shape)))
+                else:
+                    value = b.call(A.abs.default, value)
+                if rng.random() < 0.15:
+                    set_special(value)
+            self.keep(value)
+        elif kind == "table":
+            x = self.pick(torch.int8)
+            if rng.random() < 0.5:
+                x = b.permute(x, self.permutation(x.meta["val"].dim()))
+            target, args, kwargs = rng.choice(TABLE_TARGETS)
+            t = table_op(b, target, x, rng.choice(TABLE_QPARAMS), rng.choice(TABLE_QPARAMS), *args, **kwargs)
+            self.keep(t)
+            if rng.random() < 0.5:
+                self.keep(self.transform(t))
+        elif kind == "table16":
+            x = self.pick(torch.int16)
+            roll = rng.random()
+            if roll < 0.35:
+                x = b.permute(x, self.permutation(x.meta["val"].dim()))
+            elif roll < 0.7:
+                x = b.view(x, self.view_shape(list(x.meta["val"].shape)))
+            target, args, kwargs = rng.choice(TABLE16_TARGETS)
+            qin, qout = rng.choice(TABLE16_QPARAMS)
+            t = table_op(b, target, x, qin, qout, *args, **kwargs)
+            self.keep(t)
+            if rng.random() < 0.5:
+                self.keep(self.transform(t))
+        elif kind == "scatter":
+            x = self.pick()
+            shape = list(x.meta["val"].shape)
+            if len(shape) != 3:
+                return
+            n, _, c = shape
+            indices = self.new_input([n, 2], torch.int32)
+            data = self.new_input([n, 2, c])
+            self.keep(b.call(T.SCATTER.default, x, indices, data))
+        elif kind == "mm":
+            x = self.pick()
+            shape = list(x.meta["val"].shape)
+            if len(shape) != 2:
+                return
+            w = self.new_input([shape[1], rng.randint(1, 3)])
+            self.keep(b.call(A.mm.default, x, w))
+        elif kind == "dead":
+            self.unary(self.pick())
+        elif kind in ("slice_view", "view_slice", "mean_view", "view_mean", "permute_mean"):
+            x = self.pick()
+            if x.meta["val"].dim() == 0:
+                return
+            if kind == "slice_view":
+                s = self.random_slice(x)
+                self.keep(b.view(s, self.view_shape(list(s.meta["val"].shape))))
+            elif kind == "view_slice":
+                v = b.view(x, self.view_shape(list(x.meta["val"].shape)))
+                if v.meta["val"].dim():
+                    self.keep(self.random_slice(v))
+            elif kind == "mean_view":
+                m = self.random_keepdim_mean(x)
+                self.keep(b.view(m, self.view_shape(list(m.meta["val"].shape))))
+            elif kind == "view_mean":
+                v = b.view(x, self.view_shape(list(x.meta["val"].shape)))
+                if v.meta["val"].dim():
+                    self.keep(self.random_keepdim_mean(v))
+            else:
+                rank = x.meta["val"].dim()
+                if rng.random() < 0.5:
+                    self.keep(self.random_keepdim_mean(b.permute(x, self.permutation(rank))))
+                else:
+                    self.keep(b.permute(self.random_keepdim_mean(x), self.permutation(rank)))
+        elif kind == "qparams":
+            computed = [n for n in self.pool if n.op == "call_function" and not _is_table_op(n)]
+            if computed:
+                node = rng.choice(computed)
+                if node.target not in set(TableOps.included_ops()):
+                    set_qparams(node, inputs=[0], outputs=[0])
+        else:
+            raise ValueError(kind)
+
+    def finish(self) -> None:
+        rng = self.rng
+        computed = [n for n in self.pool if n.op == "call_function"]
+        outputs = [n for n in computed if not n.users] or [rng.choice(self.pool)]
+        rng.shuffle(outputs)
+        if computed and rng.random() < 0.2:
+            outputs.append(rng.choice(computed))
+        self.b.output(outputs)
+
+
+# --------------------------------------------------------------------------
 # Driver
 # --------------------------------------------------------------------------
+
+PROPAGATION_SOURCES = [
+    "backends/transforms/propagate_view_copy_permute_pass.py",
+    "backends/arm/_passes/propagate_view_copy_permute_pass.py",
+    "backends/transforms/dim_maps.py",
+    "backends/transforms/permute_view_meta.py",
+    "backends/transforms/canonicalize_view_copy_permute_pass.py",
+    "backends/transforms/fuse_duplicate_users_pass.py",
+    "backends/transforms/fuse_identical_input_transforms_pass.py",
+    "backends/transforms/remove_permutes_around_elementwise_ops.py",
+    "backends/arm/_passes/remove_permutes_around_elementwise_tosa_ops.py",
+    "backends/arm/_passes/insert_table_ops.py",
+]
 
 PASSES = [
     PassSpec(
@@ -6155,6 +7589,60 @@ PASSES = [
         "remove_permutes_user_order",
         # About one random graph in ten depends on its user order.
         random_cases=2 * RANDOM_CASES,
+    ),
+    # `PropagateViewCopyPermuteDownPass(self.compile_spec, exported_program)`
+    # and the Up pass (arm_pass_manager.py:726-727), after InsertTableOpsPass
+    # (`:708`); see `PropagationPass`.
+    PassSpec(
+        "propagate_view_copy_permute_down",
+        lambda ep: PropagationPass(ep, PropagateViewCopyPermuteDownPass),
+        PROPAGATION_SOURCES,
+        propagation_cases,
+        "propagate",
+        random_cases=420,
+        tosa_spec=PROPAGATE_TOSA_SPEC,
+    ),
+    PassSpec(
+        "propagate_view_copy_permute_up",
+        lambda ep: PropagationPass(ep, PropagateViewCopyPermuteUpPass),
+        PROPAGATION_SOURCES,
+        propagation_cases,
+        "propagate",
+        random_cases=420,
+        tosa_spec=PROPAGATE_TOSA_SPEC,
+    ),
+    # The Down pass, then the Up pass, as phase 6 runs them: the Up pass
+    # meets what Down left, such as a view parked between a 16-bit TABLE and
+    # its RESCALE.
+    PassSpec(
+        "propagate_view_copy_permute_down_up",
+        lambda ep: PropagationPass(ep, PropagateViewCopyPermuteDownPass, PropagateViewCopyPermuteUpPass),
+        PROPAGATION_SOURCES,
+        propagation_cases,
+        "propagate",
+        random_cases=420,
+        tosa_spec=PROPAGATE_TOSA_SPEC,
+    ),
+    # The same passes built without arguments, as rc4's graph-level tests
+    # build them: no fusion pass, so the walks meet every permute
+    # RemovePermutes would have cancelled first.
+    PassSpec(
+        "propagate_view_copy_permute_down_without_program",
+        lambda ep: PropagationPass(ep, PropagateViewCopyPermuteDownPass, with_program=False),
+        PROPAGATION_SOURCES,
+        propagation_cases,
+        "propagate",
+        random_cases=420,
+        tosa_spec=PROPAGATE_TOSA_SPEC,
+    ),
+    PassSpec(
+        "propagate_view_copy_permute_up_without_program",
+        lambda ep: PropagationPass(ep, PropagateViewCopyPermuteUpPass, with_program=False),
+        PROPAGATION_SOURCES,
+        propagation_cases,
+        "propagate",
+        random_cases=420,
+        tosa_spec=PROPAGATE_TOSA_SPEC,
     ),
 ]
 COMMON_SOURCES = ["backends/arm/_passes/arm_pass.py", "exir/pass_base.py"]

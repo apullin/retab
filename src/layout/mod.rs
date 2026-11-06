@@ -48,6 +48,8 @@ pub(crate) mod pointwise;
 #[allow(dead_code)]
 pub(crate) mod pool;
 #[allow(dead_code)]
+pub(crate) mod propagate;
+#[allow(dead_code)]
 pub(crate) mod remove_permutes;
 // rc4's RewriteAvgPool2dPass for explicit mode (APU-156, P2 S7).
 #[allow(dead_code)]
@@ -111,3 +113,15 @@ mod remove_permutes_replay_tests;
 // rc4's own tests for RemovePermutesAroundElementwise(Tosa)Ops (APU-158).
 #[cfg(test)]
 mod remove_permutes_upstream_tests;
+// rc4 replays of the propagation passes (APU-159).
+#[cfg(test)]
+mod propagate_replay_tests;
+// rc4's own tests for the propagation passes, ported (APU-159).
+#[cfg(test)]
+mod propagate_upstream_tests;
+// Large-graph checks and timings for the propagation passes.
+#[cfg(test)]
+mod propagate_scaling_tests;
+// Adversarial review of the propagation port: rc4 behaviours it misses.
+#[cfg(test)]
+mod propagate_review_tests;

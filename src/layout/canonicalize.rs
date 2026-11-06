@@ -41,36 +41,48 @@ impl IrPass for IrCanonicalizeViewCopyPermutePass {
             return false;
         }
         let mut ctx = LayoutCtx::new(graph);
-        let mut modified = false;
-        for mut chain in collect_chains(&ctx) {
-            loop {
-                modified |= fuse_sequential_ops(&mut ctx, &mut chain);
-                if chain.len() <= 2 {
-                    break;
-                }
-                // `call` (`:58-86`): swap the first pair that can be swapped.
-                let swap = (0..chain.len() - 1).find_map(|index| {
-                    maybe_swap_args(&ctx, chain[index], chain[index + 1])
-                        .map(|args| (index, args))
-                });
-                let Some((index, (op1_arg, op2_arg))) = swap else {
-                    break;
-                };
-                let (op1, op2) = (chain[index], chain[index + 1]);
-                let input = input_of(&ctx, op1);
-                let op1_target = ctx.node(op1).target.clone();
-                let op2_target = ctx.node(op2).target.clone();
-                set_node_op(&mut ctx, op1, &op2_target, input, &op1_arg);
-                set_node_op(&mut ctx, op2, &op1_target, op1, &op2_arg);
-                modified = true;
-            }
-        }
+        let modified = canonicalize_view_copy_permute(&mut ctx);
         if modified {
-            ctx.eliminate_dead_code();
             ctx.finish();
         }
         modified
     }
+}
+
+/// `CanonicalizeViewCopyPermutePass(permute_targets).call(graph_module)`
+/// (`:56-97`) inside `ctx`, with the default permute targets; returns rc4's
+/// `modified`. Dead code is eliminated from the whole graph when anything
+/// changed, as rc4 does. The propagation driver's `fuse_vertical`
+/// (backends/transforms/propagate_view_copy_permute_pass.py:301-316) runs it
+/// in its own ctx. Cost: O(N) to collect the chains, plus the chain work.
+pub(crate) fn canonicalize_view_copy_permute(ctx: &mut LayoutCtx<'_>) -> bool {
+    let mut modified = false;
+    for mut chain in collect_chains(ctx) {
+        loop {
+            modified |= fuse_sequential_ops(ctx, &mut chain);
+            if chain.len() <= 2 {
+                break;
+            }
+            // `call` (`:58-86`): swap the first pair that can be swapped.
+            let swap = (0..chain.len() - 1).find_map(|index| {
+                maybe_swap_args(ctx, chain[index], chain[index + 1]).map(|args| (index, args))
+            });
+            let Some((index, (op1_arg, op2_arg))) = swap else {
+                break;
+            };
+            let (op1, op2) = (chain[index], chain[index + 1]);
+            let input = input_of(ctx, op1);
+            let op1_target = ctx.node(op1).target.clone();
+            let op2_target = ctx.node(op2).target.clone();
+            set_node_op(ctx, op1, &op2_target, input, &op1_arg);
+            set_node_op(ctx, op2, &op1_target, op1, &op2_arg);
+            modified = true;
+        }
+    }
+    if modified {
+        ctx.eliminate_dead_code();
+    }
+    modified
 }
 
 fn is_target(graph: &IrGraph, id: NodeId) -> bool {
@@ -308,7 +320,7 @@ fn only_inserts_singletons(input_shape: &[i64], output_shape: &[i64]) -> bool {
 
 /// `_is_singleton_permutation` (`:383-394`): the permutation keeps the
 /// non-singleton axes in order.
-fn is_singleton_permutation(shape: &[i64], permutation: &[i64]) -> bool {
+pub(crate) fn is_singleton_permutation(shape: &[i64], permutation: &[i64]) -> bool {
     let rank = shape.len();
     let Ok(normalized) = normalize_dims(permutation, rank) else {
         return false;

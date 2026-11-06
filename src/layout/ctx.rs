@@ -551,8 +551,13 @@ impl<'g> LayoutCtx<'g> {
     /// (backends/transforms/remove_permutes_around_elementwise_ops.py:453). A
     /// node whose users this reorders gets a new version. O(N), plus O(k log k)
     /// for each node whose k users may have left graph order since the last
-    /// reset.
+    /// reset; O(1) when no node was restamped or moved since then.
     pub(crate) fn retraced(&mut self) {
+        if self.user_order_dirty.is_empty() {
+            // No node was restamped or moved since the last reset, so every
+            // user list is still in graph order.
+            return;
+        }
         let dirty: Vec<NodeId> = self.user_order_dirty.drain().collect();
         for id in dirty {
             if !self.order.contains(id) {

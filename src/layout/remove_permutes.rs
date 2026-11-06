@@ -386,7 +386,7 @@ thread_local! {
     /// Region-search steps (`_visit` calls) on this thread, for scaling tests.
     static SEARCH_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Whether test builds re-run each skipped search to check it fails.
-    static CHECK_SKIPPED_SEARCHES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    pub(crate) static CHECK_SKIPPED_SEARCHES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
     /// Test override of the memo's read-set cap and budget (see [`Proofs`]).
     static MEMO_LIMITS: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
 }

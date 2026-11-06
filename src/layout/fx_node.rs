@@ -62,7 +62,10 @@ pub(crate) fn rc4_target(target: &str) -> Cow<'_, str> {
 /// argument holding a NaN, and callers treat it as equal to nothing. RETAB's
 /// importer also reads an empty list or tuple, and any object it doesn't know
 /// (a device, a memory format), as `None` (`fx_ir::resolve_arg`), so those
-/// compare equal to `None` here although they don't in rc4.
+/// compare equal to `None` here although they don't in rc4. An empty list a
+/// pass writes (`IrArg::List(vec![])`, as the layout ports spell a rank-0
+/// view's shape) is the same `None`, so it equals an imported `[]`, as the two
+/// are equal in rc4.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum PyValue {
     Node(NodeId),
@@ -86,6 +89,7 @@ impl PyValue {
             IrArg::Float(value) => Self::float(*value)?,
             IrArg::Str(text) => Self::Str(text.clone()),
             IrArg::Dtype(dtype) => Self::Dtype(dtype.clone()),
+            IrArg::List(items) if items.is_empty() => Self::None,
             IrArg::List(items) => Self::Tuple(items.iter().map(Self::of).collect::<Option<_>>()?),
             IrArg::None => Self::None,
         })
@@ -209,6 +213,8 @@ mod tests {
             value(IrArg::Int((1 << 53) + 1)),
             value(IrArg::Float(((1i64 << 53) + 1) as f64))
         );
+        // An imported `[]` is `IrArg::None`; one a pass writes equals it.
+        assert_eq!(value(IrArg::List(Vec::new())), value(IrArg::None));
         assert_eq!(PyValue::of(&IrArg::Float(f64::NAN)), None);
         assert_eq!(PyValue::of(&IrArg::List(vec![IrArg::Float(f64::NAN)])), None);
         assert!(!py_eq(&IrArg::Float(f64::NAN), &IrArg::Float(f64::NAN)));
