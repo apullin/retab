@@ -24,9 +24,9 @@
 //! does (`rewrite_conv_pass.py:408-412`; [`dtype::operand_dtype`]).
 //!
 //! **Arguments.** rc4's argument order, including AVG_POOL2D's zero points
-//! before the kernel (`avg_pool2d.py:92-104`, critique B1). RESIZE's scale,
+//! before the kernel (`avg_pool2d.py:91-104`, critique B1). RESIZE's scale,
 //! offset and border are `CONST_SHAPE` nodes in rc4's graphs
-//! (`rewrite_upsample.py:205-230`) or literal lists; a rule reads a
+//! (`rewrite_upsample.py:205-231`) or literal lists; a rule reads a
 //! `CONST_SHAPE` through the operand lookup's shape values
 //! (`IrGraph::constant_shape`).
 //!
@@ -252,7 +252,7 @@ pub(crate) fn conv3d_shape(
 /// `_common.py:105-134`): an NHWC input, `kernel[2]`, `stride[2]` and `pad[4]`
 /// as (top, bottom, left, right); each spatial output is
 /// `floor((in + pads - kernel) / stride) + 1`. Both kernels require rank 4
-/// (`max_pool2d.py:85-86`, `avg_pool2d.py:128-129`).
+/// (`max_pool2d.py:86-87`, `avg_pool2d.py:128-129`).
 pub(crate) fn pool2d_shape(
     input: &[i64],
     kernel: &[i64],
@@ -279,9 +279,9 @@ pub(crate) fn pool2d_shape(
 }
 
 /// RESIZE's output height and width for an input of `input_hw`
-/// (`resize.py:71-113`), after rc4's validation of the parameters
-/// (`get_tosa_resize_validation_error`, `resize_utils.py:290-320`, without an
-/// expected output) and of the output (`:88-103`). `scale` is
+/// (`resize.py:71-118`), after rc4's validation of the parameters
+/// (`get_tosa_resize_validation_error`, `resize_utils.py:314-341`, without an
+/// expected output) and of the output (`:90-106`). `scale` is
 /// `[y_n, y_d, x_n, x_d]` in TOSA's doubled-rational form; `offset` and
 /// `border` are `[y, x]`. The argument lengths are checked first; rc4's
 /// unpacking checks them as it reaches each list.
@@ -296,11 +296,11 @@ pub(crate) fn resize_output_hw(
     let [border_y, border_x] = values::<2>(border, "RESIZE border must have 2 values")?;
     let invalid = ShapeError::InvalidArg;
 
-    // `_validate_dimensions` (`:62-86`).
+    // `_validate_dimensions` (`:62-87`).
     if input_hw.iter().any(|&dim| dim >= MAX_RESIZE_DIMENSION) {
         return Err(invalid("RESIZE dimensions must be less than 16384"));
     }
-    // `_validate_scale` (`:109-161`), without the exact-boundary allowance.
+    // `_validate_scale` (`:109-160`), without the exact-boundary allowance.
     let int16 = |value: &i64| (INT16_MIN..=INT16_MAX).contains(value);
     if !scale.iter().all(int16) {
         return Err(invalid("RESIZE scale must be in int16 range"));
@@ -319,18 +319,18 @@ pub(crate) fn resize_output_hw(
     if y_d >= 16 * y_n || x_d >= 16 * x_n {
         return Err(invalid("RESIZE downscale must be greater than 1/16"));
     }
-    // `_validate_offset` (`:192-214`).
+    // `_validate_offset` (`:200-220`).
     if !(-y_n..16 * y_n).contains(&offset_y) || !(-x_n..16 * x_n).contains(&offset_x) {
         return Err(invalid("RESIZE offset out of range"));
     }
-    // `_validate_border` (`:217-245`).
+    // `_validate_border` (`:223-252`).
     if !border.iter().all(int16) {
         return Err(invalid("RESIZE border must be in int16 range"));
     }
     if !(-16 * y_n..y_n).contains(&border_y) || !(-16 * x_n..x_n).contains(&border_x) {
         return Err(invalid("RESIZE border out of range"));
     }
-    // `calculate_tosa_resize_output_hw` (`:270-287`): upscale by the
+    // `calculate_tosa_resize_output_hw` (`:281-311`): upscale by the
     // numerator, apply offset and border, downscale by the denominator.
     let output = |input: i64, n: i64, d: i64, offset: i64, border: i64| {
         let upscaled =
@@ -341,7 +341,7 @@ pub(crate) fn resize_output_hw(
         output(input_hw[0], y_n, y_d, offset_y, border_y),
         output(input_hw[1], x_n, x_d, offset_x, border_x),
     ];
-    // `get_tosa_resize_output_hw_validation_error` (`:88-103`).
+    // `get_tosa_resize_output_hw_validation_error` (`:90-106`).
     if output_hw.iter().any(|&dim| dim <= 0) {
         return Err(invalid("RESIZE output dimensions must be positive"));
     }
@@ -429,7 +429,7 @@ impl Operands<'_, '_> {
         ))
     }
 
-    /// MAX_POOL2D (`max_pool2d.py:55-75`): `(input, kernel, stride, pad)`; the
+    /// MAX_POOL2D (`max_pool2d.py:54-74`): `(input, kernel, stride, pad)`; the
     /// output keeps the input dtype.
     fn tosa_max_pool2d(&self) -> Result<TensorFacts, ShapeError> {
         let input = self.tensor(0, "input")?;
@@ -440,7 +440,7 @@ impl Operands<'_, '_> {
         Ok(TensorFacts::new(shape, self.kernel_input_dtype(input)))
     }
 
-    /// AVG_POOL2D (`avg_pool2d.py:92-133`): `(input, input_zp, output_zp,
+    /// AVG_POOL2D (`avg_pool2d.py:91-133`): `(input, input_zp, output_zp,
     /// kernel, stride, pad, acc_type)`; the output keeps the input dtype.
     fn tosa_avg_pool2d(&self) -> Result<TensorFacts, ShapeError> {
         let input = self.tensor(0, "input")?;
@@ -989,7 +989,7 @@ mod tests {
     }
 
     /// rc4's graphs pass RESIZE's parameters as `CONST_SHAPE` nodes
-    /// (`rewrite_upsample.py:205-230`).
+    /// (`rewrite_upsample.py:205-231`).
     #[test]
     fn dsl_builds_resizes_from_const_shapes_or_lists() {
         let mut g = LayoutGraph::new();

@@ -2,7 +2,7 @@
 //! derived from RETAB's IR (APU-135 P2).
 //!
 //! rc4 retraces after `FoldAndAnnotateQParamsPass`
-//! (`backends/arm/_passes/fold_qdq_with_annotated_qparams_pass.py:459-461`),
+//! (`backends/arm/_passes/fold_qdq_with_annotated_qparams_pass.py:464-466`),
 //! so a quantized node's `meta["val"]` holds its integer dtype, and its passes
 //! branch on that. RETAB's IR keeps a quantized compute node's val in
 //! float32 and records the real dtype in its qparams (design F2): a quantized
@@ -19,10 +19,10 @@
 //! | `_insert_output_conversion`'s `is_a8w8_conv`/`is_a16w8_conv` (`:830-841`): the TOSA conv's fake dtype is int32 and the input's is int8/int16 | [`conv_output_dtype`] of [`activation_dtype`] |
 //! | the conv's bias test (`:926-927`): `get_first_fake_tensor(bias).dtype != torch.int32` | [`value_dtype`] of the bias |
 //! | `MoveDataMovementOpsToSmallerDtypePass._uses_wider_dtype` (`move_data_movement_ops_to_smaller_dtype_pass.py:73-87`): `element_size()` of two fake values | [`element_size`] of [`value_dtype`] |
-//! | `_is_per_tensor_rescale` there (`:89-98`) and in the TOSA propagation overrides (`propagate_view_copy_permute_pass.py:130-142`): the RESCALE and its input carry the same special dtype | [`special_dtype`] |
-//! | `TosaPropagationOverrides._node_or_inputs_are_int48` (`propagate_view_copy_permute_pass.py:75-81`), behind `blocks_moving` (`:47-57`) | [`node_or_inputs_are_int48`] |
-//! | RewriteUpsamplePass's `input_dtype` (`rewrite_upsample.py:254-258`) and RewriteAvgPool2dPass's accumulator choice: the input's fake dtype | [`operand_dtype`] at index 0 |
-//! | the TOSA fake kernels' output dtypes (`backends/arm/tosa/dialect/ops/conv2d.py:17-88`, `resize.py:28-53`) | [`conv_output_dtype`], [`resize_output_dtype`] |
+//! | `_is_per_tensor_rescale` there (`:89-98`) and in the TOSA propagation overrides (`propagate_view_copy_permute_pass.py:132-144`): the RESCALE and its input carry the same special dtype | [`special_dtype`] |
+//! | `TosaPropagationOverrides._node_or_inputs_are_int48` (`propagate_view_copy_permute_pass.py:82-89`), behind `blocks_moving` (`:48-60`) | [`node_or_inputs_are_int48`] |
+//! | RewriteUpsamplePass's `input_dtype` (`rewrite_upsample.py:258-263`) and RewriteAvgPool2dPass's accumulator choice (`rewrite_avg_pool2d_pass.py:66-72`): the input's fake dtype | [`operand_dtype`] at index 0 |
+//! | the TOSA fake kernels' output dtypes (`backends/arm/tosa/dialect/ops/conv2d.py:17-88`, `resize.py:28-55`) | [`conv_output_dtype`], [`resize_output_dtype`] |
 //!
 //! The values that passes *write* follow RETAB's representation, not these
 //! helpers: a created layout copy takes its producer's val dtype
@@ -98,13 +98,26 @@ pub(crate) fn set_special_dtype(meta: &mut NodeMeta, dtype: SpecialDtype) {
     meta.set_extra(SPECIAL_DTYPE_KEY, MetaValue::Str(dtype.name().to_string()));
 }
 
+/// `if special := source.meta.get(key): target.meta[key] = special`, as
+/// RewriteConvPass does for a rewritten weight (`rewrite_conv_pass.py:377-378`)
+/// and for the squeeze view and output permute after the TOSA convolution
+/// (`:1204-1214`, `:1226-1229`). The recorded spelling is kept. Returns
+/// whether `source` had one.
+pub(crate) fn copy_special_dtype(source: &NodeMeta, target: &mut NodeMeta) -> bool {
+    let Some(value) = source.extras.get(SPECIAL_DTYPE_KEY).cloned() else {
+        return false;
+    };
+    target.set_extra(SPECIAL_DTYPE_KEY, value);
+    true
+}
+
 /// Whether `meta` is marked INT48.
 pub(crate) fn is_int48(meta: &NodeMeta) -> bool {
     special_dtype(meta) == Some(SpecialDtype::Int48)
 }
 
 /// `TosaPropagationOverrides._node_or_inputs_are_int48`
-/// (`propagate_view_copy_permute_pass.py:75-81`): `id` or a node it reads is
+/// (`propagate_view_copy_permute_pass.py:82-89`): `id` or a node it reads is
 /// marked INT48.
 pub(crate) fn node_or_inputs_are_int48(graph: &IrGraph, id: NodeId) -> bool {
     let node = graph.node(id);
@@ -135,7 +148,7 @@ pub(crate) fn is_quantized_conv(meta: &NodeMeta) -> bool {
 }
 
 /// The dtype of input qparam `index`, which FoldAndAnnotateQParamsPass keys by
-/// argument position (`fold_qdq_with_annotated_qparams_pass.py:417-422`).
+/// argument position (`fold_qdq_with_annotated_qparams_pass.py:409-412`).
 pub(crate) fn input_qparam_dtype(meta: &NodeMeta, index: usize) -> Option<&str> {
     meta.input_qparam_at(index)
         .map(|qparam| qparam.dtype_str.as_str())
@@ -184,7 +197,7 @@ pub(crate) fn conv_output_dtype(input: &str) -> Option<&'static str> {
 }
 
 /// The output dtype of rc4's RESIZE fake kernel (`_get_output_dtype`,
-/// `backends/arm/tosa/dialect/ops/resize.py:28-53`): int8 stays int8 for
+/// `backends/arm/tosa/dialect/ops/resize.py:28-55`): int8 stays int8 for
 /// nearest and widens to int32 for bilinear; int16 and floats keep their
 /// dtype. `None` where rc4 raises.
 pub(crate) fn resize_output_dtype(input: &str, bilinear: bool) -> Option<&'static str> {
@@ -367,6 +380,27 @@ mod tests {
         assert_eq!(meta.extra_str(SPECIAL_DTYPE_KEY), Some("INT4"));
         assert_eq!(special_dtype(&meta), Some(SpecialDtype::Int4));
         assert!(!is_int48(&meta));
+    }
+
+    /// RCP:377-378 copies an INT4 weight's marker; an unmarked source leaves
+    /// the target alone.
+    #[test]
+    fn copy_special_dtype_copies_the_recorded_value() {
+        let mut source = NodeMeta::default();
+        source.set_extra(
+            SPECIAL_DTYPE_KEY,
+            MetaValue::Str("TosaSpecialDtype.INT4".into()),
+        );
+        let mut target = NodeMeta::default();
+        assert!(copy_special_dtype(&source, &mut target));
+        assert_eq!(
+            target.extra_str(SPECIAL_DTYPE_KEY),
+            Some("TosaSpecialDtype.INT4")
+        );
+        assert_eq!(special_dtype(&target), Some(SpecialDtype::Int4));
+        set_special_dtype(&mut target, SpecialDtype::Int48);
+        assert!(!copy_special_dtype(&NodeMeta::default(), &mut target));
+        assert!(is_int48(&target));
     }
 
     /// `torch.empty(0, dtype=d).element_size()` in torch 2.15.

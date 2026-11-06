@@ -6,13 +6,13 @@
 //! mode differs:
 //!
 //! - A convolution input of rank 3 or more is adjusted (`get_slices_convolution`,
-//!   `:206-238`): explicit mode keeps conv1d at rank 3, while dim-order mode
+//!   `:199-231`): explicit mode keeps conv1d at rank 3, while dim-order mode
 //!   meets conv1d only after `IrConv1dUnsqueeze`. Pool inputs stay rank 4.
 //! - Each slice has its sliced val, which the explicit rewrites read for the
 //!   convolution's input permute and pad remainder; dim-order mode leaves the
 //!   input's unsliced val (F5).
 //! - Each slice is built from the node it feeds, with that node's qparam maps
-//!   emptied (`create_node(..., from_node=node)`, `:392-398`; `layout::meta`).
+//!   emptied (`create_node(..., from_node=node)`, `:396-401`; `layout::meta`).
 //!   Without qparams, its val holds its real dtype: the dtype rc4 gives the
 //!   consumer's input, which the consumer's input qparam records
 //!   (`layout::dtype::operand_dtype`). Dim-order mode copies the input's meta
@@ -65,7 +65,7 @@ pub struct IrSizeAdjustInputPass {
     pub layout: LayoutMode,
 }
 
-/// rc4's slices for `consumer` (`size_adjust_input_pass.py:375-405`): one
+/// rc4's slices for `consumer` (`size_adjust_input_pass.py:377-403`): one
 /// `slice_copy(x, dim, 0, end)` per adjusted axis, chained from `input`,
 /// placed before the consumer. Returns the last slice, or `None` if a slice
 /// shape cannot be derived.
@@ -649,7 +649,7 @@ mod tests {
         }
     }
 
-    /// rc4's `_needs_truncation` (`test_size_adjust_input_pass.py:62-63`).
+    /// rc4's `_needs_truncation` (`test_size_adjust_input_pass.py:60-61`).
     fn needs_truncation(input: i64, kernel: i64, stride: i64, pad: i64) -> bool {
         (input + 2 * pad - kernel).rem_euclid(stride) > pad
     }
@@ -688,7 +688,7 @@ mod tests {
 
     /// Ports of rc4's static `test_size_adjust_input_static_conv2d`,
     /// `..._no_adjustment_needed` and `..._skips_transpose_conv2d`
-    /// (`backends/arm/test/passes/test_size_adjust_input_pass.py:66-160`) on
+    /// (`backends/arm/test/passes/test_size_adjust_input_pass.py:64-154`) on
     /// float graphs: the convolution's input val no longer needs truncation,
     /// and the slices have no qparam maps because the convolution has none.
     #[test]
@@ -714,7 +714,7 @@ mod tests {
     }
 
     /// Ports of rc4's `test_size_adjust_input_static_pooling` and
-    /// `..._no_adjustment_needed` (`:290-357`).
+    /// `..._no_adjustment_needed` (`:269-342`).
     #[test]
     fn explicit_mode_passes_rc4s_static_pooling_tests() {
         for (stride, sliced) in [(3, true), (1, false)] {
@@ -734,7 +734,7 @@ mod tests {
     }
 
     /// rc4 inserts the slices directly before the node they feed
-    /// (`graph.inserting_before(node)`, `size_adjust_input_pass.py:375`).
+    /// (`graph.inserting_before(node)`, `size_adjust_input_pass.py:377`).
     #[test]
     fn explicit_slices_sit_directly_before_their_consumer() {
         let mut graph = IrGraph::empty();

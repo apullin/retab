@@ -11,24 +11,25 @@
 //!   caller then assigns `meta["val"]`, or the pass's closing retrace does.
 //!   - RewriteConvPass builds every node this way. Only the TOSA convolution
 //!     inherits the convolution's qparams, output qparams included
-//!     (`rewrite_conv_pass.py:1154-1161`), and so does a U55 clone of it
-//!     (`:646-655`).
+//!     (`rewrite_conv_pass.py:1175-1182`), and so does a U55 clone of it
+//!     (`:652-663`).
 //!   - RewriteUpsamplePass builds its `CONST_SHAPE`s, permutes and RESCALE
 //!     from the upsample with empty maps; only the RESIZE inherits
 //!     (`rewrite_upsample.py:205-297`).
 //!   - SizeAdjustInputPass builds its slices from the convolution or pool
-//!     they feed, so they have empty maps (`size_adjust_input_pass.py:392-398`).
+//!     they feed, so they have empty maps (`size_adjust_input_pass.py:396-401`).
 //!   - NormalizeDelegateIOLayoutPass builds its permutes from the boundary
 //!     node (`normalize_delegate_io_layout_pass.py`).
 //! - [`call_operator`] is `ArmPass.call_operator(op, args, kwargs, meta,
-//!   updated=True)` (`arm_pass.py:91-108`). It copies every key of the meta it
+//!   updated=True)` (`arm_pass.py:88-111`). It copies every key of the meta it
 //!   is given, qparams included, and `ExportPass._fx` sets the value to the
 //!   fake kernel's result. RewriteAvgPool2dPass and RewriteMaxPool2dPass build
-//!   their permutes and TOSA pools this way from the pool's meta, so all of
-//!   them keep the pool's qparams. rc4's max pool has input qparams only:
+//!   their permutes and TOSA pools this way from the pool's meta
+//!   (`rewrite_avg_pool2d_pass.py:74-106`, `rewrite_max_pool2d_pass.py:118-170`),
+//!   so all of them keep the pool's qparams. rc4's max pool has input qparams only:
 //!   RemoveGetItemPass made it from the `max_pool2d_with_indices` node, whose
 //!   output qparams sit on the getitem (critique A3).
-//! - [`shape_node`] is `create_shape_node` (`arm_pass_utils.py:195-213`): a
+//! - [`shape_node`] is `create_shape_node` (`arm_pass_utils.py:195-216`): a
 //!   [`from_node`] copy marked `TosaSpecialDtype.SHAPE`, whose value is an
 //!   `int[]` rather than a tensor.
 //!
@@ -94,7 +95,7 @@ pub(crate) fn assign_val(meta: &mut NodeMeta, val: TensorFacts) {
 
 /// `create_node`'s `new_meta["input_qparams"] = {}` and
 /// `new_meta["output_qparams"] = {}`, each only if the key is present
-/// (`arm_pass_utils.py:176-181`).
+/// (`arm_pass_utils.py:178-182`).
 fn empty_qparam_maps(meta: &mut NodeMeta) {
     if meta.input_qparams().is_some() {
         meta.set_empty_input_qparams();
@@ -187,7 +188,7 @@ mod tests {
     }
 
     /// The source's special dtype and do-not-fuse flag come along, as rc4's
-    /// U55 clone of an INT48 convolution needs (`rewrite_conv_pass.py:646-656`).
+    /// U55 clone of an INT48 convolution needs (`rewrite_conv_pass.py:651-662`).
     #[test]
     fn extras_are_copied_like_any_other_key() {
         let mut source = conv_meta();
@@ -215,6 +216,29 @@ mod tests {
         assert_eq!(keys(meta.output_qparams()), Some(vec![]));
         assert_eq!(meta.extra_str(SPECIAL_DTYPE_KEY), Some("SHAPE"));
         assert_eq!(special_dtype(&meta), Some(SpecialDtype::Shape));
+    }
+
+    /// Each rewrite family's qparam rule, built from one source: RewriteConv's
+    /// permutes and RESCALE empty the maps while its TOSA op inherits them,
+    /// output qparams included (critique A9); RewriteUpsample's nodes all
+    /// empty them except the RESIZE (A1); the pool rewrites copy them (A3).
+    #[test]
+    fn rewrite_families_follow_rc4s_qparam_rules() {
+        let source = conv_meta();
+        let facts = || TensorFacts::new(vec![1, 4, 4, 3], I8);
+        let maps = |meta: &NodeMeta| (keys(meta.input_qparams()), keys(meta.output_qparams()));
+        let emptied = (Some(vec![]), Some(vec![]));
+        let kept = (Some(vec![0, 1, 2]), Some(vec![0]));
+
+        // RewriteConvPass: input permute, TOSA op, RESCALE, output permute.
+        assert_eq!(maps(&from_node(&source, facts())), emptied);
+        assert_eq!(maps(&inheriting_qparams(&source, facts())), kept);
+        // RewriteUpsamplePass: CONST_SHAPEs, permutes and RESCALE; RESIZE.
+        assert_eq!(maps(&shape_node(&source)), emptied);
+        assert_eq!(maps(&from_node(&source, facts())), emptied);
+        assert_eq!(maps(&inheriting_qparams(&source, facts())), kept);
+        // RewriteAvgPool2dPass and RewriteMaxPool2dPass: every node.
+        assert_eq!(maps(&call_operator(&source, facts())), kept);
     }
 
     #[test]
