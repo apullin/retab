@@ -8,6 +8,13 @@
 //! - A convolution input of rank 3 or more is adjusted (`get_slices_convolution`,
 //!   `:199-231`): explicit mode keeps conv1d at rank 3, while dim-order mode
 //!   meets conv1d only after `IrConv1dUnsqueeze`. Pool inputs stay rank 4.
+//! - A one-element parameter list applies to every spatial axis, as rc4's
+//!   `expand_around_channel` makes it: a convolution's stride, padding and
+//!   dilation (`:211-215`) and a pool's kernel, stride and padding
+//!   (`:248-250`). Dim-order mode reads the missing entries as stride 1,
+//!   padding 0 and dilation 1 (a pool's as kernel 2, the kernel, and padding
+//!   0). It meets such a convolution only after `IrConv1dUnsqueeze`, which
+//!   takes any one-element stride for conv1d.
 //! - Each slice has its sliced val, which the explicit rewrites read for the
 //!   convolution's input permute and pad remainder; dim-order mode leaves the
 //!   input's unsliced val (F5).
@@ -20,14 +27,14 @@
 //!   needs to type the slice.
 //!
 //! Explicit mode is gated on the layout mode until the default-mode corpus
-//! shows whether the first two changes are byte-identical there; the third
-//! must stay gated.
+//! shows whether the rank, expansion and val changes are byte-identical
+//! there; the meta change must stay gated.
 
 use crate::fx_conv_args::ConvArgs;
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId};
 use crate::fx_meta::TensorFacts;
 use crate::fx_target::{size_adjust_target_kind, PoolSizeAdjustKind, SizeAdjustTargetKind};
-use crate::layout::shape::slice_shape;
+use crate::layout::shape::{expand_around_channel, slice_shape};
 use crate::layout::{dtype, meta};
 use crate::pipeline_config::LayoutMode;
 use crate::runner_logging::log_line;
@@ -133,6 +140,16 @@ impl IrPass for IrSizeAdjustInputPass {
             };
 
             let node_name = graph.nodes[id].name.clone();
+            // rc4 applies a one-element parameter list to every spatial axis
+            // (`expand_around_channel`); dim-order mode reads the missing
+            // entries through the defaults below.
+            let per_axis = |param: Vec<i64>, spatial_rank: usize| {
+                if explicit {
+                    expand_around_channel(&param, spatial_rank)
+                } else {
+                    param
+                }
+            };
 
             let slices = match target_kind {
                 SizeAdjustTargetKind::Conv => {
@@ -154,9 +171,10 @@ impl IrPass for IrSizeAdjustInputPass {
                         continue;
                     }
 
-                    let stride = &conv.stride;
-                    let raw_pad = &conv.padding;
-                    let dilation = &conv.dilation;
+                    // `size_adjust_input_pass.py:211-215`.
+                    let stride = per_axis(conv.stride, spatial_rank);
+                    let raw_pad = per_axis(conv.padding, spatial_rank);
+                    let dilation = per_axis(conv.dilation, spatial_rank);
                     let pad_per_dim: Vec<(i64, i64)> = if raw_pad.len() == spatial_rank * 2 {
                         (0..spatial_rank)
                             .map(|i| (raw_pad[i * 2], raw_pad[i * 2 + 1]))
@@ -188,9 +206,13 @@ impl IrPass for IrSizeAdjustInputPass {
                     if !pooling_size_adjust_allowed(pool_kind, &graph.nodes[id]) {
                         continue;
                     }
-                    let kernel = pair_arg(&graph.nodes[id].args, 1, vec![2, 2]);
-                    let stride = pair_arg(&graph.nodes[id].args, 2, kernel.clone());
-                    let pad = pair_arg(&graph.nodes[id].args, 3, vec![0, 0]);
+                    // `size_adjust_input_pass.py:248-250`. An empty stride list
+                    // reads as the kernel through the per-axis default below,
+                    // as rc4's falsy `args[2]` does (`:239-243`).
+                    let args = &graph.nodes[id].args;
+                    let kernel = per_axis(pair_arg(args, 1, vec![2, 2]), 2);
+                    let stride = per_axis(pair_arg(args, 2, kernel.clone()), 2);
+                    let pad = per_axis(pair_arg(args, 3, vec![0, 0]), 2);
                     let mut slices = Vec::new();
                     for i in 0..2 {
                         let dim = i + 2;
@@ -734,6 +756,20 @@ mod tests {
         }
     }
 
+    /// Each slice feeding `consumer`: `(dim, start, end)` and its val's shape.
+    fn slice_bounds_and_shapes(
+        graph: &IrGraph,
+        consumer: NodeId,
+    ) -> Vec<((i64, i64, i64), Vec<i64>)> {
+        slice_chain(graph, consumer)
+            .into_iter()
+            .map(|slice| {
+                let (bounds, shape, ..) = describe(slice);
+                (bounds, shape)
+            })
+            .collect()
+    }
+
     /// rc4 expands a one-element stride, padding or dilation around the
     /// channel before it computes the slices (`expand_around_channel`,
     /// `arm_pass_utils.py:135-145`, called at `size_adjust_input_pass.py:211-215`).
@@ -741,13 +777,15 @@ mod tests {
     /// `convolution(x, w, None, [3], [1], [1, 1], False, [0, 0], 1)`. rc4's
     /// SizeAdjustInputPass, run in .venv-et16 on that edge graph, slices a
     /// `[1, 3, 9, 9]` input to `[1, 3, 8, 9]` then `[1, 3, 8, 8]`, and leaves a
-    /// `[1, 3, 10, 10]` input alone. RETAB reads the missing width stride as 1
-    /// and both pads as 0, so it slices nothing on 9x9 and cuts a visited row
-    /// on 10x10 (the conv would then have 3 output rows, not 4).
+    /// `[1, 3, 10, 10]` input alone. With `stride=[2], padding=[0],
+    /// dilation=[2]`, exported as given, it slices a `[1, 3, 10, 10]` input to
+    /// `[1, 3, 9, 10]` then `[1, 3, 9, 9]`. Dim-order mode reads the missing
+    /// width stride as 1 and both pads as 0, so it slices nothing on 9x9; it
+    /// would cut a visited row on 10x10.
     #[test]
-    #[ignore = "BUG: explicit-mode slicing does not expand one-element conv stride/padding lists as rc4's expand_around_channel does"]
     fn explicit_mode_expands_one_element_conv_params_like_rc4() {
-        let build = |input: [i64; 4], out: [i64; 4]| {
+        let build = |input: [i64; 4], params: [&[i64]; 3], out: [i64; 4]| {
+            let [stride, padding, dilation] = params;
             let mut graph = IrGraph::empty();
             let x = f32_placeholder(&mut graph, "x", input);
             let weight = f32_placeholder(&mut graph, "weight", [4, 3, 3, 3]);
@@ -759,9 +797,9 @@ mod tests {
                     IrArg::Node(x),
                     IrArg::Node(weight),
                     IrArg::None,
-                    i64_list_arg(&[3]),
-                    i64_list_arg(&[1]),
-                    i64_list_arg(&[1, 1]),
+                    i64_list_arg(stride),
+                    i64_list_arg(padding),
+                    i64_list_arg(dilation),
                     IrArg::Bool(false),
                     i64_list_arg(&[0, 0]),
                     IrArg::Int(1),
@@ -771,27 +809,93 @@ mod tests {
             output(&mut graph, conv);
             (graph, conv)
         };
-        let slices = |graph: &IrGraph, conv: NodeId| -> Vec<((i64, i64, i64), Vec<i64>)> {
-            slice_chain(graph, conv)
-                .into_iter()
-                .map(|slice| {
-                    let (bounds, shape, ..) = describe(slice);
-                    (bounds, shape)
-                })
-                .collect()
-        };
+        let s3p1: [&[i64]; 3] = [&[3], &[1], &[1, 1]];
 
-        let (mut graph, conv) = build([1, 3, 9, 9], [1, 4, 3, 3]);
+        let (mut graph, conv) = build([1, 3, 9, 9], s3p1, [1, 4, 3, 3]);
         let adjusted = EXPLICIT.run(&mut graph);
         assert_eq!(
-            slices(&graph, conv),
+            slice_bounds_and_shapes(&graph, conv),
             [((2, 0, 8), vec![1, 3, 8, 9]), ((3, 0, 8), vec![1, 3, 8, 8])]
         );
         assert!(adjusted);
 
-        let (mut graph, conv) = build([1, 3, 10, 10], [1, 4, 4, 4]);
+        let (mut graph, conv) = build([1, 3, 10, 10], s3p1, [1, 4, 4, 4]);
         assert!(!EXPLICIT.run(&mut graph));
-        assert!(slices(&graph, conv).is_empty());
+        assert!(slice_bounds_and_shapes(&graph, conv).is_empty());
+
+        let (mut graph, conv) = build([1, 3, 10, 10], [&[2], &[0], &[2]], [1, 4, 3, 3]);
+        assert!(EXPLICIT.run(&mut graph));
+        assert_eq!(
+            slice_bounds_and_shapes(&graph, conv),
+            [
+                ((2, 0, 9), vec![1, 3, 9, 10]),
+                ((3, 0, 9), vec![1, 3, 9, 9])
+            ]
+        );
+
+        // Dim-order mode keeps its reading.
+        let (mut graph, conv) = build([1, 3, 9, 9], s3p1, [1, 4, 3, 3]);
+        assert!(!DIM_ORDER.run(&mut graph));
+        assert!(slice_bounds_and_shapes(&graph, conv).is_empty());
+    }
+
+    /// The pool side of `expand_around_channel` (`size_adjust_input_pass.py:248-250`).
+    /// rc4's SizeAdjustInputPass, run in .venv-et16 after RemoveGetItemPass on
+    /// `F.max_pool2d(x, [3], [2], [0])` and on `F.avg_pool2d(x, [3], [2], [0],
+    /// count_include_pad=False)`, which export the lists as given, slices a
+    /// `[1, 3, 10, 10]` input to `[1, 3, 9, 10]` then `[1, 3, 9, 9]`; with
+    /// `[3], [3], [1]` it leaves a `[1, 3, 11, 11]` input alone. Dim-order mode
+    /// reads the missing width entries as kernel 2, stride 2 and padding 0, so
+    /// it slices only the height of the first and cuts a visited column of the
+    /// second.
+    #[test]
+    fn explicit_mode_expands_one_element_pool_params_like_rc4() {
+        let build = |target: &str, hw: i64, params: [i64; 3], out: i64| {
+            let [kernel, stride, pad] = params;
+            let mut graph = IrGraph::empty();
+            let x = f32_placeholder(&mut graph, "x", [1, 3, hw, hw]);
+            let mut args = vec![
+                IrArg::Node(x),
+                i64_list_arg(&[kernel]),
+                i64_list_arg(&[stride]),
+                i64_list_arg(&[pad]),
+            ];
+            if target == "aten.avg_pool2d.default" {
+                // ceil_mode, count_include_pad
+                args.extend([IrArg::Bool(false), IrArg::Bool(false)]);
+            }
+            let pool = f32_call(&mut graph, "pool", target, args, [1, 3, out, out]);
+            output(&mut graph, pool);
+            (graph, pool)
+        };
+        for target in ["aten.max_pool2d.default", "aten.avg_pool2d.default"] {
+            let (mut graph, pool) = build(target, 10, [3, 2, 0], 4);
+            assert!(EXPLICIT.run(&mut graph), "{target}");
+            assert_eq!(
+                slice_bounds_and_shapes(&graph, pool),
+                [
+                    ((2, 0, 9), vec![1, 3, 9, 10]),
+                    ((3, 0, 9), vec![1, 3, 9, 9])
+                ],
+                "{target}"
+            );
+
+            let (mut graph, pool) = build(target, 11, [3, 3, 1], 4);
+            assert!(!EXPLICIT.run(&mut graph), "{target}");
+            assert!(slice_bounds_and_shapes(&graph, pool).is_empty(), "{target}");
+
+            // Dim-order mode keeps its reading.
+            let (mut graph, pool) = build(target, 10, [3, 2, 0], 4);
+            assert!(DIM_ORDER.run(&mut graph), "{target}");
+            assert_eq!(
+                slice_bounds_and_shapes(&graph, pool)
+                    .into_iter()
+                    .map(|(bounds, _)| bounds)
+                    .collect::<Vec<_>>(),
+                [(2, 0, 9)],
+                "{target}"
+            );
+        }
     }
 
     /// rc4 inserts the slices directly before the node they feed

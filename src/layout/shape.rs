@@ -440,6 +440,20 @@ pub(crate) fn int_list(arg: &IrArg) -> Option<Vec<i64>> {
     required_int_list(Some(arg), "int[]").ok()
 }
 
+/// rc4's `expand_around_channel` (`backends/arm/_passes/arm_pass_utils.py:135-145`)
+/// for a convolution's or pool's per-axis parameter: a one-element list
+/// applies to every spatial axis, as torch's kernels read it, and any other
+/// list is returned unchanged. Export keeps the list the model passed:
+/// `F.conv2d(x, w, stride=[3], padding=[1])` becomes
+/// `convolution(x, w, None, [3], [1], [1, 1], False, [0, 0], 1)`. rc4's scalar
+/// case does not arise, as RETAB's IR spells these parameters as lists.
+pub(crate) fn expand_around_channel(param: &[i64], spatial_rank: usize) -> Vec<i64> {
+    match param {
+        [value] if spatial_rank > 1 => vec![*value; spatial_rank],
+        _ => param.to_vec(),
+    }
+}
+
 /// An `int[]` parameter. FX import turns an empty list into `IrArg::None`
 /// (`fx_ir::resolve_arg`), which is how a rank-0 permute or view arrives.
 fn required_int_list(arg: Option<&IrArg>, what: &'static str) -> Result<Vec<i64>, ShapeError> {
@@ -920,6 +934,27 @@ mod tests {
             slice_shape(RANK0, 0, None, None, 1),
             invalid("dim out of range")
         );
+    }
+
+    /// rc4's `expand_around_channel`, run in .venv-et16 on the same inputs.
+    #[test]
+    fn expand_around_channel_repeats_only_a_one_element_list() {
+        let cases: [(&[i64], usize, &[i64]); 7] = [
+            (&[3], 2, &[3, 3]),
+            (&[3], 1, &[3]),
+            (&[3], 3, &[3, 3, 3]),
+            (&[1, 2], 2, &[1, 2]),
+            (&[], 2, &[]),
+            (&[1, 2], 3, &[1, 2]),
+            (&[0], 0, &[0]),
+        ];
+        for (param, spatial_rank, expected) in cases {
+            assert_eq!(
+                expand_around_channel(param, spatial_rank),
+                expected,
+                "{param:?} at spatial rank {spatial_rank}"
+            );
+        }
     }
 
     #[test]
