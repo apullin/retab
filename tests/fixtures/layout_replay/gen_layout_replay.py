@@ -2140,6 +2140,12 @@ def remove_permutes_cases():
         b.output([b.permute(b.call(A.exp.default, s), [0, 2, 1])])
 
     @case
+    def constant_read_directly_and_through_an_entry_permute(b):
+        c = b.constant("param", "c", (2, 3, 3))
+        a = b.call(A.add.Tensor, b.permute(c, [0, 2, 1]), c)
+        b.output([b.permute(b.call(A.relu.default, a), [0, 2, 1])])
+
+    @case
     def sink_view_into_the_region_at_a_lower_rank_fails(b):
         x = b.input("x", (1, 8, 4))
         g = b.input("g", (4,))

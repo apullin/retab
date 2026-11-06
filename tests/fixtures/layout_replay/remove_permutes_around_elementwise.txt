@@ -1643,6 +1643,21 @@ after modified=true
 %3 = aten.exp.default(%2) : torch.float32[2, 3, 3] q=none
 output([%3])
 end
+case constant_read_directly_and_through_an_entry_permute
+before
+%0 = placeholder c : torch.float32[2, 3, 3] kind=param q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[2, 3, 3] q=none
+%2 = aten.add.Tensor(%1, %0) : torch.float32[2, 3, 3] q=none
+%3 = aten.relu.default(%2) : torch.float32[2, 3, 3] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[2, 3, 3] q=none
+output([%4])
+after modified=true
+%0 = placeholder c : torch.float32[2, 3, 3] kind=param q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[2, 3, 3] q=none
+%2 = aten.add.Tensor(%1, %1) : torch.float32[2, 3, 3] q=none
+%3 = aten.relu.default(%2) : torch.float32[2, 3, 3] q=none
+output([%3])
+end
 case sink_view_into_the_region_at_a_lower_rank_fails
 before
 %0 = placeholder x : torch.float32[1, 8, 4] q=none
