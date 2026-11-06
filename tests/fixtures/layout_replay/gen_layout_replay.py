@@ -2762,6 +2762,218 @@ def rc4_test_vgf_program(model):
     return ep, gm
 
 
+class Conv2dBiasModule(NN.Module):
+    """test_rewrite_conv_pass.py's Conv2dBiasModule."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = NN.Conv2d(4, 6, kernel_size=3, stride=1, padding=1, bias=True)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class DepthwiseConv2dBiasModule(NN.Module):
+    """test_rewrite_conv_pass.py's DepthwiseConv2dBiasModule."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = NN.Conv2d(4, 4, kernel_size=3, padding=1, groups=4, bias=True)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class Conv3dBiasModule(NN.Module):
+    """test_rewrite_conv_pass.py's Conv3dBiasModule."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = NN.Conv3d(3, 5, kernel_size=3, stride=1, padding=1, bias=True)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class TransposeConv2dBiasModule(NN.Module):
+    """test_rewrite_conv_pass.py's TransposeConv2dBiasModule."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = NN.ConvTranspose2d(
+            3, 4, kernel_size=3, stride=2, padding=1, output_padding=1, bias=True
+        )
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+# `_compile_spec_int16().tosa_spec`, the A16W8 tests' default lowering context
+# (test_rewrite_conv_pass.py:170-171, :285), and the U55 subset
+# test_rewrite_conv_a16w8_u55_separates_distinct_output_rescales passes (:655).
+A16W8_TEST_SPEC = "TOSA-1.0+INT+FP+int16"
+A16W8_TEST_U55_SPEC = "TOSA-1.0+INT+int16+int4+u55"
+
+
+def rc4_test_a16w8_program(model, inputs, spec: str, insert_int32_rescales: bool = True):
+    """The A16W8 tests' program (test_rewrite_conv_pass.py:194-293):
+    `_export_quantized_a16w8` (VgfQuantizer on TOSA-1.0+INT+FP+int16 with
+    `get_symmetric_a16w8_quantization_config()`), `to_edge` without IR validity
+    checks and `_run_pre_rewrite_passes`, then, as `_rewrite_a16w8_convs` does,
+    InsertRescaleInt32Pass in the lowering context of `spec`, the TOSA spec
+    RewriteConvPass then runs in. The int16-bias tests (:933-972) call
+    RewriteConvPass without InsertRescaleInt32Pass."""
+    from executorch.backends.arm._passes import (
+        ConvertToClampPass,
+        FoldAndAnnotateQParamsPass,
+        FuseQuantizedActivationPass,
+        InsertRescaleInt32Pass,
+        QuantizeClampArgumentsPass,
+    )
+    from executorch.backends.arm.quantizer.arm_quantizer import (
+        get_symmetric_a16w8_quantization_config,
+        VgfQuantizer,
+    )
+    from executorch.backends.arm.vgf import VgfCompileSpec
+    from executorch.exir import EdgeCompileConfig, to_edge
+
+    exported = torch.export.export(model.eval(), inputs).module(check_guards=False)
+    quantizer = VgfQuantizer(VgfCompileSpec("TOSA-1.0+INT+FP+int16"))
+    quantizer.set_global(get_symmetric_a16w8_quantization_config())
+    quantized = quantizer._quantize_with_submodules(exported, [inputs])
+    ep = to_edge(
+        torch.export.export(quantized, inputs),
+        compile_config=EdgeCompileConfig(_check_ir_validity=False),
+    ).exported_program()
+    gm = ep.graph_module
+    for pass_ in (
+        FuseQuantizedActivationPass(),
+        ConvertToClampPass(),
+        FoldAndAnnotateQParamsPass(ep),
+        QuantizeClampArgumentsPass(),
+    ):
+        gm = pass_(gm).graph_module
+    if insert_int32_rescales:
+        with TosaLoweringContext(TosaSpecification.create_from_string(spec)):
+            gm = InsertRescaleInt32Pass()(gm).graph_module
+    return ep, gm
+
+
+def rc4_test_a16w8_cases() -> list[Rc4TestCase]:
+    """The A16W8 tests' RewriteConvPass calls (test_rewrite_conv_pass.py:446-972)."""
+
+    def a16w8(name, test, model, shape, spec=A16W8_TEST_SPEC, insert_int32_rescales=True):
+        return Rc4TestCase(
+            name,
+            test,
+            lambda: rc4_test_a16w8_program(
+                model(), (torch.randn(*shape),), spec, insert_int32_rescales
+            ),
+            spec,
+        )
+
+    mixed = "test_rewrite_conv_a16w8_mixed_consumers_restore_int16"
+    u55 = "test_rewrite_conv_a16w8_u55_separates_distinct_output_rescales (:650)"
+    bias = "test_rewrite_conv_int16_bias_lowers_to_single_tosa_conv"
+    return [
+        a16w8(
+            "a16w8_mixed_consumers_conv",
+            f"{mixed}[conv] (:446); {u55}, generic",
+            lambda: A16W8MixedConsumerChain(NN.Conv2d(4, 4, 1)),
+            (1, 4, 8, 8),
+        ),
+        a16w8(
+            "a16w8_mixed_consumers_conv_u55",
+            f"{u55}, U55",
+            lambda: A16W8MixedConsumerChain(NN.Conv2d(4, 4, 1)),
+            (1, 4, 8, 8),
+            spec=A16W8_TEST_U55_SPEC,
+        ),
+        a16w8(
+            "a16w8_mixed_consumers_depthwise_conv",
+            f"{mixed}[depthwise_conv] (:446)",
+            lambda: A16W8MixedConsumerChain(NN.Conv2d(4, 4, 3, padding=1, groups=4)),
+            (1, 4, 8, 8),
+        ),
+        a16w8(
+            "a16w8_mixed_consumers_avg_pool",
+            f"{mixed}[avg_pool] (:446)",
+            lambda: A16W8MixedConsumerChain(NN.AvgPool2d(3, stride=1, padding=1)),
+            (1, 4, 8, 8),
+        ),
+        a16w8(
+            "a16w8_mixed_consumers_max_pool",
+            f"{mixed}[max_pool] (:446)",
+            lambda: A16W8MixedConsumerChain(NN.MaxPool2d(3, stride=1, padding=1)),
+            (1, 4, 8, 8),
+        ),
+        a16w8(
+            "a16w8_mixed_consumers_conv3d",
+            f"{mixed}[conv3d] (:446)",
+            lambda: A16W8MixedConsumer(NN.Conv3d(4, 4, 3, padding=1), NN.Conv3d(4, 4, 1)),
+            (1, 4, 4, 8, 8),
+        ),
+        a16w8(
+            "a16w8_mixed_consumers_transpose_conv2d",
+            f"{mixed}[transpose_conv2d] (:446)",
+            lambda: A16W8MixedConsumer(NN.ConvTranspose2d(4, 4, 3, padding=1), NN.Conv2d(4, 4, 1)),
+            (1, 4, 8, 8),
+        ),
+        a16w8(
+            "a16w8_preserves_int32_for_int32_consumers",
+            "test_rewrite_conv_a16w8_preserves_int32_for_int32_consumers (:690)",
+            A16W8Int32Consumer,
+            (1, 4, 8, 8),
+        ),
+        a16w8(
+            "conv1d_a16w8_narrows_instead_of_forking_int32",
+            "test_rewrite_conv1d_a16w8_narrows_instead_of_forking_int32 (:723)",
+            A16W8Conv1dInt32Consumer,
+            (1, 4, 8),
+        ),
+        a16w8(
+            "conv1d_a16w8_shares_one_layout_boundary",
+            "test_rewrite_conv1d_a16w8_shares_one_layout_boundary (:757)",
+            A16W8Conv1dSharedConsumers,
+            (1, 4, 8),
+        ),
+        a16w8(
+            "a16w8_preserves_int32_after_permute",
+            "test_rewrite_conv_a16w8_preserves_int32_after_permute (:786)",
+            A16W8PermutedInt32Consumer,
+            (1, 4, 8, 8),
+        ),
+        a16w8(
+            "int16_bias_conv2d",
+            f"{bias}[Conv2dBiasModule] (:933)",
+            Conv2dBiasModule,
+            (1, 4, 8, 8),
+            insert_int32_rescales=False,
+        ),
+        a16w8(
+            "int16_bias_depthwise_conv2d",
+            f"{bias}[DepthwiseConv2dBiasModule] (:933)",
+            DepthwiseConv2dBiasModule,
+            (1, 4, 8, 8),
+            insert_int32_rescales=False,
+        ),
+        a16w8(
+            "int16_bias_conv3d",
+            f"{bias}[Conv3dBiasModule] (:933)",
+            Conv3dBiasModule,
+            (1, 3, 6, 6, 6),
+            insert_int32_rescales=False,
+        ),
+        a16w8(
+            "int16_bias_transpose_conv2d",
+            f"{bias}[TransposeConv2dBiasModule] (:933)",
+            TransposeConv2dBiasModule,
+            (1, 3, 6, 6),
+            insert_int32_rescales=False,
+        ),
+    ]
+
+
 class Rc4TestCase:
     """One rc4 test's RewriteConvPass call: the program it runs the pass on
     and the TOSA spec of the lowering context it calls it in (None: none)."""
@@ -2814,11 +3026,13 @@ def rc4_test_cases() -> list[Rc4TestCase]:
             lambda: rc4_test_fp_program(ConvModule(), (torch.randn(1, 3, 9, 12),)),
             "TOSA-1.0+FP",
         ),
-    ]
+    ] + rc4_test_a16w8_cases()
 
 
 RC4_TEST_FIXTURE = "rewrite_conv_rc4_tests"
-RC4_TEST_SOURCES = CONV_SOURCES
+# The A16W8 cases' U55 step signs RESCALE-to-permute heads with
+# `build_node_signature`.
+RC4_TEST_SOURCES = CONV_SOURCES + ["backends/transforms/fuse_duplicate_users_pass.py"]
 
 
 def rc4_test_case_lines(case: Rc4TestCase) -> list[str]:

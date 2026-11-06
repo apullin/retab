@@ -20,10 +20,10 @@
 //! | `..._dynamic_keeps_static_padding_when_symbolic_remainder_is_zero` (:975) | [`rc4_test_rewrite_conv_keeps_static_padding_when_the_remainder_is_zero`], on the test's static example shape |
 //! | the three static `_adjust_pad_if_needed` tests (:1002-1027) | [`rc4_test_rewrite_conv_adjust_pad_if_needed_static`] |
 //!
-//! Not ported: the A16W8 tests (:446-827, :933-972) are S4's; the six
-//! symbolic `_adjust_pad_if_needed` tests (:1029-1141) need SymInts, which
-//! RETAB's static IR has none of; `:884` tests FoldAndAnnotateQParamsPass and
-//! `:899` a whole VGF lowering, not this pass.
+//! The A16W8 tests (:446-827, :933-972) are S4's, in `rewrite_conv_a16w8_tests`.
+//! Not ported: the six symbolic `_adjust_pad_if_needed` tests (:1029-1141)
+//! need SymInts, which RETAB's static IR has none of; `:884` tests
+//! FoldAndAnnotateQParamsPass and `:899` a whole VGF lowering, not this pass.
 
 use std::collections::HashMap;
 
