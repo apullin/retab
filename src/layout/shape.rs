@@ -39,7 +39,10 @@
 //!   so a moved view or permute keeps the qparams it had.
 //!
 //! Everything else in the meta is left alone, as rc4 assigns only
-//! `meta["val"]`. Layout facts in particular: explicit mode never writes them.
+//! `meta["val"]`. The value's strides are the exception: in explicit mode
+//! every value is contiguous, as rc4's retrace leaves it, so the refreshed
+//! value gets the identity `val_dim_order` (see [`mark_contiguous`]). The other
+//! layout facts stay; explicit mode never writes them.
 
 use std::fmt;
 
@@ -171,6 +174,7 @@ pub(crate) fn refreshed_meta(graph: &IrGraph, id: NodeId) -> Result<NodeMeta, Sh
         }
     }
     meta.set_tensor_facts(facts);
+    mark_contiguous(&mut meta);
     Ok(meta)
 }
 
@@ -382,6 +386,31 @@ impl<'n, 'a> Operands<'n, 'a> {
         };
         Ok(TensorFacts::new(input.shape.clone(), dtype))
     }
+}
+
+/// Give `meta` the identity dim order of its value's rank. In explicit mode
+/// every value is contiguous, as rc4's retrace leaves it; only
+/// `IrNormalizeDelegateIOLayout` reads the exported dim orders.
+pub(crate) fn mark_contiguous(meta: &mut NodeMeta) {
+    if let Some(rank) = meta.tensor_facts().map(|facts| facts.shape.len()) {
+        meta.set_val_dim_order((0..rank).collect());
+    }
+}
+
+/// An `int[]` argument as RETAB's FX import spells it: an empty list becomes
+/// `IrArg::None`. Layout passes build view sizes and permute dims with this so
+/// their nodes look like imported ones.
+pub(crate) fn int_list_arg(values: &[i64]) -> IrArg {
+    if values.is_empty() {
+        IrArg::None
+    } else {
+        crate::fx_ir::i64_list_arg(values)
+    }
+}
+
+/// An `int[]` argument, reading `IrArg::None` as the empty list.
+pub(crate) fn int_list(arg: &IrArg) -> Option<Vec<i64>> {
+    required_int_list(Some(arg), "int[]").ok()
 }
 
 /// An `int[]` parameter. FX import turns an empty list into `IrArg::None`

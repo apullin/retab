@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeMeta, NodeOp};
 use crate::fx_meta::{QParamMap, TensorFacts};
 use crate::layout::ctx::LayoutCtx;
+use crate::layout::shape::mark_contiguous;
 
 const PERMUTE_COPY: &str = "aten.permute_copy.default";
 
@@ -26,10 +27,16 @@ impl IrPass for IrNormalizeDelegateIOLayoutPass {
         let mut ctx = LayoutCtx::new(graph);
         let mut modified = normalize_inputs(&mut ctx);
         modified |= normalize_outputs(&mut ctx);
-        if modified {
-            ctx.finish();
+        if !modified {
+            return false;
         }
-        modified
+        // rc4's retrace re-derives every value from the now contiguous inputs,
+        // so every value in the graph is contiguous afterwards.
+        for id in ctx.order().to_vec() {
+            mark_contiguous(ctx.meta_mut(id));
+        }
+        ctx.finish();
+        true
     }
 }
 

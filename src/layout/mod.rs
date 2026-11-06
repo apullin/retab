@@ -23,6 +23,8 @@ pub(crate) mod normalize_delegate_io;
 pub(crate) mod pointwise;
 #[allow(dead_code)]
 pub(crate) mod shape;
+#[allow(dead_code)]
+pub(crate) mod table;
 // Helpers beyond those shape.rs's tests use are for the P1-P3 pass tests.
 #[cfg(test)]
 #[allow(dead_code)]

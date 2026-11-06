@@ -14,7 +14,10 @@
 //! Then dead code is eliminated from the whole graph, as rc4 does.
 
 use crate::fx_ir::{IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_meta::TensorFacts;
 use crate::layout::ctx::LayoutCtx;
+use crate::layout::shape::{mark_contiguous, refreshed_meta};
+use crate::layout::table::is_pending_table;
 
 const VIEW_COPY: &str = "aten.view_copy.default";
 
@@ -48,8 +51,13 @@ const UNARY_ELEMENTWISE_OPS: &[&str] = &[
     "aten.log.default",
 ];
 
-fn is_fusible(target: &str) -> bool {
-    target == VIEW_COPY || UNARY_ELEMENTWISE_OPS.contains(&target)
+/// A quantized table op is a TABLE in rc4 by now (see `layout::table`), and
+/// TABLE is not in the fusible set.
+fn is_fusible(ctx: &LayoutCtx<'_>, id: NodeId) -> bool {
+    let node = ctx.node(id);
+    node.op == NodeOp::CallFunction
+        && (node.target == VIEW_COPY || UNARY_ELEMENTWISE_OPS.contains(&node.target.as_str()))
+        && !is_pending_table(node)
 }
 
 pub(crate) struct IrFuseViewCopyTransformPass;
@@ -97,22 +105,27 @@ fn merge_view_copy_chains(ctx: &mut LayoutCtx<'_>) -> bool {
         modified = true;
         let final_shape = ctx.node(last).args[1].clone();
         let input = ctx.node(start).args[0].clone();
-        ctx.set_args(start, vec![input, final_shape.clone()]);
+        ctx.set_args(start, vec![input, final_shape]);
         for view in removed {
             let source = ctx.node(view).args[0]
                 .as_node()
                 .expect("a chained view reads its chain predecessor");
             ctx.replace_all_uses_with(view, source);
         }
-        // The retrace gives the first view and the unary ops up to the last
-        // removed view the final shape; their dtypes don't change.
-        let Some(shape) = final_shape.as_int_list() else {
-            continue;
-        };
-        for id in retained {
+        // The retrace re-derives the first view's value from its new size, which
+        // may hold a -1 or be empty, and the unary ops after it up to the last
+        // removed view take that shape; their dtypes don't change.
+        let start_meta = refreshed_meta(ctx.graph(), start).expect("views have a shape rule");
+        let shape = start_meta
+            .tensor_facts()
+            .map(|facts| facts.shape.clone())
+            .expect("a refreshed view has a value");
+        *ctx.meta_mut(start) = start_meta;
+        for id in retained.into_iter().filter(|&id| id != start) {
             let meta = ctx.meta_mut(id);
             let dtype = meta.val_dtype().unwrap_or("torch.float32").to_owned();
-            meta.set_tensor_facts(crate::fx_meta::TensorFacts::new(shape.clone(), dtype));
+            meta.set_tensor_facts(TensorFacts::new(shape.clone(), dtype));
+            mark_contiguous(meta);
         }
     }
     modified
@@ -126,14 +139,13 @@ fn find_view_copy_chain(ctx: &LayoutCtx<'_>, start: NodeId) -> (Vec<NodeId>, Vec
     let mut removed = Vec::new();
     let mut end = start;
     loop {
-        let node = ctx.node(end);
-        if node.op != NodeOp::CallFunction || !is_fusible(&node.target) {
+        if !is_fusible(ctx, end) {
             break;
         }
         let Some(user) = ctx.graph().single_live_user(end) else {
             break;
         };
-        if !is_fusible(&ctx.node(user).target) {
+        if !is_fusible(ctx, user) {
             break;
         }
         if ctx.node(user).target == VIEW_COPY {

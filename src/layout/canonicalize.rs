@@ -14,10 +14,10 @@
 
 use std::collections::HashSet;
 
-use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeOp};
 use crate::layout::ctx::LayoutCtx;
 use crate::layout::dim_maps::{is_permutation, normalize_dim, normalize_dims, ViewMap};
-use crate::layout::shape::refreshed_meta;
+use crate::layout::shape::{int_list, int_list_arg, refreshed_meta};
 
 const VIEW: &str = "aten.view_copy.default";
 const PERMUTE: &str = "aten.permute_copy.default";
@@ -96,7 +96,7 @@ fn shape(ctx: &LayoutCtx<'_>, id: NodeId) -> Vec<i64> {
 }
 
 fn permute_dims(ctx: &LayoutCtx<'_>, id: NodeId) -> Vec<i64> {
-    ctx.node(id).args[1].as_int_list().unwrap_or_default()
+    int_list(&ctx.node(id).args[1]).unwrap_or_default()
 }
 
 /// `_collect_chains` (`:100-136`): linear single-user chains of views and
@@ -293,7 +293,7 @@ fn view_permute_swap(ctx: &LayoutCtx<'_>, view: NodeId, permute: NodeId) -> Opti
 /// (`_view_map`, `:396-401`) or the map is not valid.
 fn view_map(ctx: &LayoutCtx<'_>, view: NodeId) -> Option<ViewMap> {
     let source = shape(ctx, input_of(ctx, view));
-    let target = ctx.node(view).args[1].as_int_list()?;
+    let target = int_list(&ctx.node(view).args[1])?;
     ViewMap::from_shapes(&source, &target)
         .ok()
         .filter(ViewMap::is_valid_map)
@@ -336,7 +336,7 @@ fn remove_node(ctx: &mut LayoutCtx<'_>, chain: &mut Vec<NodeId>, index: usize, r
 /// as `refresh_permute_view_meta` does; the rest of its meta stays.
 fn set_node_op(ctx: &mut LayoutCtx<'_>, node: NodeId, target: &str, input: NodeId, arg: &[i64]) {
     ctx.set_target(node, target);
-    ctx.set_args(node, vec![IrArg::Node(input), i64_list_arg(arg)]);
+    ctx.set_args(node, vec![IrArg::Node(input), int_list_arg(arg)]);
     let meta = refreshed_meta(ctx.graph(), node).expect("views and permutes have a shape rule");
     *ctx.meta_mut(node) = meta;
 }

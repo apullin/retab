@@ -8,9 +8,10 @@
 
 use std::collections::HashMap;
 
-use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeId, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::fx_target::is_permute_target;
 use crate::layout::ctx::LayoutCtx;
+use crate::layout::shape::{int_list_arg, mark_contiguous};
 
 const VIEW_COPY: &str = "aten.view_copy.default";
 
@@ -106,15 +107,20 @@ fn rewrite(ctx: &mut LayoutCtx<'_>, id: NodeId, plan: Plan) {
     let name = node.name.clone();
     let base = node.meta.clone();
     let stamp = base.tensor_stamp_same_dtype_or_float32();
+    let meta = |shape: Vec<i64>| -> NodeMeta {
+        let mut meta = stamp.preserve_qparams(shape);
+        mark_contiguous(&mut meta);
+        meta
+    };
 
     let output = ctx.inserting_before(id, |ctx| {
         let reduced_input = ctx.create_node(
             NodeOp::CallFunction,
             format!("{name}_drop_unit_dims"),
             VIEW_COPY,
-            vec![IrArg::Node(input), i64_list_arg(&plan.reduced_input_shape)],
+            vec![IrArg::Node(input), int_list_arg(&plan.reduced_input_shape)],
             HashMap::new(),
-            stamp.preserve_qparams(plan.reduced_input_shape.clone()),
+            meta(plan.reduced_input_shape.clone()),
         );
         let reduced_output = match &plan.reduced_permutation {
             None => reduced_input,
@@ -127,9 +133,9 @@ fn rewrite(ctx: &mut LayoutCtx<'_>, id: NodeId, plan: Plan) {
                     NodeOp::CallFunction,
                     format!("{name}_reduced"),
                     target,
-                    vec![IrArg::Node(reduced_input), i64_list_arg(permutation)],
+                    vec![IrArg::Node(reduced_input), int_list_arg(permutation)],
                     kwargs,
-                    stamp.preserve_qparams(shape),
+                    meta(shape),
                 )
             }
         };
@@ -137,9 +143,9 @@ fn rewrite(ctx: &mut LayoutCtx<'_>, id: NodeId, plan: Plan) {
             NodeOp::CallFunction,
             format!("{name}_restore_rank"),
             VIEW_COPY,
-            vec![IrArg::Node(reduced_output), i64_list_arg(&plan.output_shape)],
+            vec![IrArg::Node(reduced_output), int_list_arg(&plan.output_shape)],
             HashMap::new(),
-            stamp.preserve_qparams(plan.output_shape.clone()),
+            meta(plan.output_shape.clone()),
         )
     });
     ctx.replace_all_uses_with(id, output);
