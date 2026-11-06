@@ -36,6 +36,8 @@ pub(crate) mod pending;
 #[allow(dead_code)]
 pub(crate) mod pointwise;
 #[allow(dead_code)]
+pub(crate) mod propagate;
+#[allow(dead_code)]
 pub(crate) mod remove_permutes;
 #[allow(dead_code)]
 pub(crate) mod shape;
