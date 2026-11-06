@@ -228,14 +228,6 @@ fn a_region_avg_pool_and_captured_conv_keep_the_branch_inputs_aligned() {
         output(&mut region, conv);
         region
     };
-    let placeholders = |graph: &IrGraph| -> Vec<String> {
-        graph
-            .live_placeholder_ids()
-            .into_iter()
-            .map(|id| graph.node(id).name.clone())
-            .collect()
-    };
-
     let rewrite_conv = IrRewriteConvPass {
         is_u55_subset: false,
         in_region: true,
@@ -244,13 +236,17 @@ fn a_region_avg_pool_and_captured_conv_keep_the_branch_inputs_aligned() {
     let mut submodules: BTreeMap<String, StashedPipeline> = BTreeMap::new();
     for name in BRANCHES {
         let mut region = branch();
-        let before = placeholders(&region);
+        let before = region.live_placeholder_names();
         crate::stock_fallback::take();
         assert!(IrRewriteAvgPool2dPass.run(&mut region));
         assert!(IrMaterializeConstantsPass { in_region: true }.run(&mut region));
         assert!(rewrite_conv.run(&mut region));
         assert_eq!(crate::stock_fallback::take(), None);
-        assert_eq!(placeholders(&region), before, "the branch inputs stay");
+        assert_eq!(
+            region.live_placeholder_names(),
+            before,
+            "the branch inputs stay"
+        );
         let pool = region
             .live_nodes()
             .find(|node| node.target == "backend.tosa.AVG_POOL2D.default")

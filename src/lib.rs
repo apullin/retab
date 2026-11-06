@@ -437,35 +437,36 @@ fn mixed_layout_error(region: Option<&str>, layout: pipeline_config::LayoutMode)
     })
 }
 
-/// A graph's live placeholders, by name and in order.
-fn placeholder_names(graph: &fx_ir::IrGraph) -> Vec<String> {
-    graph
-        .live_placeholder_ids()
-        .into_iter()
-        .map(|id| graph.node(id).name.clone())
-        .collect()
-}
-
+/// Run a control-flow region's pipeline `steps` over `ir`, as `fx_ir::run_ir_pipeline`
+/// does.
+///
 /// Critique B2: a region's placeholders are its runtime inputs, which the boundary
 /// contracts and captured_conv pair with the invoking cond's or while loop's operands
 /// by position. A pass that added, dropped or reordered one would shift that pairing
 /// and miscompile silently. No explicit pass does so (region constants are `get_attr`
-/// nodes, `layout::ctx::GraphScope::Region`), so explicit mode checks that a region
-/// pipeline kept them, names and order, and sends the graph to stock if it did not.
-/// Returns that fallback's reason.
-fn region_placeholders_changed(
+/// nodes, `layout::ctx::GraphScope::Region`), so in explicit mode this checks that the
+/// pipeline kept them, names and order, and requests a stock fallback if it did not.
+/// Dim-order mode does not check.
+fn run_region_pipeline(
     region: Option<&str>,
-    before: &[String],
-    after: &fx_ir::IrGraph,
-) -> Option<String> {
-    let after = placeholder_names(after);
-    (after != before).then(|| {
-        format!(
-            "region placeholders changed: region {}: the pipeline turned placeholders {before:?} \
-             into {after:?}, which would shift the boundary operands",
-            region.unwrap_or("<unnamed>")
-        )
-    })
+    steps: &[fx_ir::PipelineStep],
+    ir: fx_ir::IrGraph,
+    layout: pipeline_config::LayoutMode,
+) -> (bool, fx_ir::IrGraph, lowering_effects::LoweringEffectBatch) {
+    let before =
+        (layout == pipeline_config::LayoutMode::Explicit).then(|| ir.live_placeholder_names());
+    let (modified, ir, effects) = fx_ir::run_ir_pipeline(steps, ir);
+    if let Some(before) = before {
+        let after = ir.live_placeholder_names();
+        if after != before {
+            stock_fallback::request(format!(
+                "region placeholders changed: region {}: the pipeline turned placeholders \
+                 {before:?} into {after:?}, which would shift the boundary operands",
+                region.unwrap_or("<unnamed>")
+            ));
+        }
+    }
+    (modified, ir, effects)
 }
 
 /// Run a control-flow region's pipeline, from `build`, and stash the resulting IrGraph
@@ -489,14 +490,12 @@ fn run_region_passes(
         &mut initial_ir,
         pipeline_config.layout,
     );
-    let placeholders = (pipeline_config.layout == pipeline_config::LayoutMode::Explicit)
-        .then(|| placeholder_names(&initial_ir));
-    let (modified, ir, effects) = fx_ir::run_ir_pipeline(&pipeline, initial_ir);
-    if let Some(reason) = placeholders
-        .and_then(|before| region_placeholders_changed(region_name.as_deref(), &before, &ir))
-    {
-        stock_fallback::request(reason);
-    }
+    let (modified, ir, effects) = run_region_pipeline(
+        region_name.as_deref(),
+        &pipeline,
+        initial_ir,
+        pipeline_config.layout,
+    );
     ensure_retab_can_lower(Some(&ir), &effects)?;
     stash_submodule_ir(region_name, Some((ir, effects)));
     Ok(modified || propagation_changed > 0)
@@ -629,37 +628,79 @@ mod tests {
         take_stashed_hierarchy();
     }
 
-    /// Critique B2: explicit mode sends a region to stock when its pipeline added,
-    /// dropped or reordered a placeholder, which would shift the boundary operands, as a
-    /// region constant made as a placeholder at the graph head would.
+    /// Critique B2: in explicit mode a region pipeline that changes the region's
+    /// placeholders requests a stock fallback, as a region-blind pass would: it makes a
+    /// constant with the parent's scope, a placeholder, here at the graph head, which
+    /// shifts the boundary operands. Dim-order mode does not check, and a pipeline that
+    /// keeps the placeholders requests nothing.
     #[test]
-    fn region_placeholder_changes_are_reported() {
+    fn region_pipelines_that_change_the_placeholders_go_to_stock_in_explicit_mode() {
+        use crate::graph::ir::DType;
+        use crate::layout::ctx::{GraphScope, InsertPoint, LayoutCtx};
+        use crate::lowering_effects::LoweringInputKind;
+        use crate::store::TensorData;
         use crate::test_ir::{output, placeholder};
 
-        let region = |head_constant: bool| {
-            let mut region = fx_ir::IrGraph::empty();
-            if head_constant {
-                placeholder(&mut region, "avg_pool_zp", [1], "torch.int8");
+        struct HeadConstantPass;
+        impl fx_ir::IrPass for HeadConstantPass {
+            fn name(&self) -> &str {
+                "HeadConstant"
             }
+
+            fn run(&self, graph: &mut fx_ir::IrGraph) -> bool {
+                let mut ctx = LayoutCtx::with_scope(graph, GraphScope::Parent);
+                let zero_point = TensorData {
+                    data: vec![0],
+                    shape: vec![1],
+                    dtype: DType::Int8,
+                };
+                ctx.with_insert_point(InsertPoint::Start, |ctx| {
+                    ctx.create_constant("avg_pool_zp", LoweringInputKind::Buffer, zero_point)
+                });
+                ctx.finish();
+                true
+            }
+        }
+
+        let region = || {
+            let mut region = fx_ir::IrGraph::empty();
             let x = placeholder(&mut region, "x_ph", [1, 2, 8], "torch.int8");
             placeholder(&mut region, "w_ph", [4, 2, 3], "torch.int8");
             output(&mut region, x);
             region
         };
-        let before = placeholder_names(&region(false));
-        assert_eq!(before, ["x_ph", "w_ph"]);
+        let head_constant = [fx_ir::PipelineStep::Ir(Box::new(HeadConstantPass))];
+        stock_fallback::take();
+
+        let (modified, ir, _) = run_region_pipeline(
+            Some("true_graph"),
+            &head_constant,
+            region(),
+            LayoutMode::Explicit,
+        );
+        assert!(modified);
+        assert_eq!(ir.live_placeholder_names(), ["avg_pool_zp", "x_ph", "w_ph"]);
         assert_eq!(
-            region_placeholders_changed(Some("true_graph"), &before, &region(false)),
-            None
+            stock_fallback::take().as_deref(),
+            Some(
+                "region placeholders changed: region true_graph: the pipeline turned \
+                 placeholders [\"x_ph\", \"w_ph\"] into [\"avg_pool_zp\", \"x_ph\", \"w_ph\"], \
+                 which would shift the boundary operands"
+            )
         );
 
-        let reason = region_placeholders_changed(Some("true_graph"), &before, &region(true))
-            .expect("a changed placeholder list");
-        assert_eq!(
-            reason,
-            "region placeholders changed: region true_graph: the pipeline turned placeholders \
-             [\"x_ph\", \"w_ph\"] into [\"avg_pool_zp\", \"x_ph\", \"w_ph\"], which would shift \
-             the boundary operands"
+        let (_, ir, _) = run_region_pipeline(
+            Some("true_graph"),
+            &head_constant,
+            region(),
+            LayoutMode::DimOrder,
         );
+        assert_eq!(ir.live_placeholder_names(), ["avg_pool_zp", "x_ph", "w_ph"]);
+        assert_eq!(stock_fallback::take(), None);
+
+        let (_, ir, _) =
+            run_region_pipeline(Some("true_graph"), &[], region(), LayoutMode::Explicit);
+        assert_eq!(ir.live_placeholder_names(), ["x_ph", "w_ph"]);
+        assert_eq!(stock_fallback::take(), None);
     }
 }

@@ -102,7 +102,8 @@ impl IrPass for IrMaterializeConstantsPass {
             return false;
         }
         let scope = GraphScope::of_region(self.in_region);
-        let placeholders_before = (scope == GraphScope::Region).then(|| placeholder_names(graph));
+        let placeholders_before =
+            (scope == GraphScope::Region).then(|| graph.live_placeholder_names());
 
         let mut ctx = LayoutCtx::with_scope(graph, scope);
         // Each rc4 pass that changes the graph ends with a graph-wide
@@ -129,7 +130,7 @@ impl IrPass for IrMaterializeConstantsPass {
 
         if let Some(before) = placeholders_before {
             debug_assert_eq!(
-                placeholder_names(graph),
+                graph.live_placeholder_names(),
                 before,
                 "a region's placeholders must stay as they are"
             );
@@ -410,14 +411,6 @@ fn passes_range_check(data: &TensorData, bound: i64) -> Result<bool, String> {
     Ok(values
         .iter()
         .all(|&value| wrap(value.wrapping_abs()) <= wrap(bound)))
-}
-
-fn placeholder_names(graph: &IrGraph) -> Vec<String> {
-    graph
-        .live_placeholder_ids()
-        .into_iter()
-        .map(|id| graph.node(id).name.clone())
-        .collect()
 }
 
 #[cfg(test)]
@@ -1962,7 +1955,7 @@ mod tests {
             &int8_tensor(&[4], &[2, 2, 2, 2]),
             "region fold",
         );
-        assert_eq!(placeholder_names(&graph), ["x", "y"]);
+        assert_eq!(graph.live_placeholder_names(), ["x", "y"]);
 
         let mut store = TensorStore::new();
         let converted =
