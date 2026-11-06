@@ -28,7 +28,7 @@ use crate::fx_conv_args::ConvArgs;
 use crate::fx_ir::{
     IrArg, IrGraph, IrNode, MetaValue, NodeId, NodeMeta, NodeOp, NodeTensor, TensorSource,
 };
-use crate::fx_target::{is_permute_target, is_tosa_transpose_target, is_view_like_target};
+use crate::fx_target::{is_permute_target, is_view_like_target};
 use crate::graph::ir::DType;
 use crate::layout::dtype::{
     is_quantized_conv, set_special_dtype, value_dtype, SpecialDtype, SPECIAL_DTYPE_KEY,
@@ -349,16 +349,14 @@ fn apply_bias_rewrite(ir: &mut IrGraph, rewrite: BiasRewrite) {
 }
 
 /// Erase the layout ops and RESCALEs that fed a replaced conv operand, back to the
-/// first node something else still uses: views, TRANSPOSEs and the `permute_copy`
-/// IrRewriteConv puts on a captured weight (design §4.3). The branch input itself
-/// stays.
+/// first node something else still uses: views and the `permute_copy` IrRewriteConv
+/// puts on a captured weight (design §4.3). The branch input itself stays.
 fn erase_dead_operand_chain(ir: &mut IrGraph, start: NodeId) {
     let mut dead = Some(start);
     while let Some(id) = dead {
         let node = ir.node(id);
         let removable = node.is_rescale()
             || is_view_like_target(&node.target)
-            || is_tosa_transpose_target(&node.target)
             || is_permute_target(&node.target);
         if !removable || !ir.live_user_ids(id).is_empty() {
             break;
