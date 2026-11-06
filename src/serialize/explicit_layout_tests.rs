@@ -87,7 +87,9 @@ fn mark_special(graph: &mut IrGraph, id: NodeId, special: &str) {
         .set_extra("tosa_special_dtype", MetaValue::Str(special.to_string()));
 }
 
-/// A layout permute as rc4's rewrites create it: the permuted val, no qparams.
+/// A layout permute with the permuted val and no qparams, as rc4's conv and upsample
+/// rewrites create it. (The pool rewrites copy the pool's qparams onto theirs; the
+/// serializer types the permute the same either way.)
 fn permute(graph: &mut IrGraph, name: &str, input: NodeId, dims: &[i64], dtype: &str) -> NodeId {
     let shape = permuted(graph.node_shape(input).unwrap(), dims);
     call(
