@@ -147,3 +147,41 @@ fn propagate_replay_coverage_report() {
         println!("{branch:40} {count}");
     }
 }
+
+/// Replays propagation fixtures written elsewhere, such as a large fuzzing
+/// run that is too big to commit:
+///
+/// ```text
+/// cd /tmp && <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py \
+///     --pass propagate_view_copy_permute_down --random 3000 --seed 7 --out /tmp/replay
+/// RETAB_REPLAY_DIR=/tmp/replay cargo test --lib propagate_replay_external -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "diagnostic: replays the propagation fixtures in $RETAB_REPLAY_DIR"]
+fn propagate_replay_external() {
+    let dir = std::env::var("RETAB_REPLAY_DIR").expect("set RETAB_REPLAY_DIR");
+    for (pass, file) in [
+        (&IrPropagateViewCopyPermutePass::ARM_DOWN, "propagate_view_copy_permute_down.txt"),
+        (&IrPropagateViewCopyPermutePass::ARM_UP, "propagate_view_copy_permute_up.txt"),
+    ] {
+        let path = std::path::Path::new(&dir).join(file);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            println!("{}: skipped", path.display());
+            continue;
+        };
+        let results = replay::replay(pass, &text, WITH_FLAG);
+        let failures: Vec<_> = results.iter().filter(|result| result.mismatch.is_some()).collect();
+        println!(
+            "{}: {} of {} differ ({})",
+            path.display(),
+            failures.len(),
+            results.len(),
+            replay::class_counts(failures.iter().copied())
+        );
+        for failure in failures.iter().take(4) {
+            println!("{}", failure.report);
+        }
+        let names: Vec<&str> = failures.iter().map(|result| result.name.as_str()).collect();
+        println!("all: {}", names.join(" "));
+    }
+}

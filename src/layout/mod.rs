@@ -82,3 +82,6 @@ mod remove_permutes_upstream_tests;
 // rc4 replays of the propagation passes (APU-159).
 #[cfg(test)]
 mod propagate_replay_tests;
+// rc4's own tests for the propagation passes, ported (APU-159).
+#[cfg(test)]
+mod propagate_upstream_tests;

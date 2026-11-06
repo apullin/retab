@@ -1,0 +1,1379 @@
+# The graphs rc4's propagation tests hand PropagateViewCopyPermute*Pass, and what it returns.
+# Recorded by tests/fixtures/propagate_upstream/record_rc4_test_calls.py; don't edit by hand.
+case test_mixed_reconvergence_fork_does_not_strand_a_permute#0|shared.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.abs.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.sigmoid.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%5 = aten.add.Tensor(%2, %3) : torch.float32[1, 3, 4, 2] q=none
+output([%5, %4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.abs.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.neg.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.sigmoid.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%5 = aten.add.Tensor(%1, %2) : torch.float32[1, 2, 3, 4] q=none
+%6 = aten.permute_copy.default(%5, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output([%6, %4])
+end
+case test_mixed_reconvergence_fork_does_not_strand_a_permute#1|shared.up
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.abs.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.neg.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.sigmoid.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%5 = aten.add.Tensor(%1, %2) : torch.float32[1, 2, 3, 4] q=none
+%6 = aten.permute_copy.default(%5, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output([%6, %4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.abs.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.neg.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.sigmoid.default(%3) : torch.float32[1, 3, 4, 2] q=none
+%5 = aten.add.Tensor(%1, %2) : torch.float32[1, 2, 3, 4] q=none
+%6 = aten.permute_copy.default(%5, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output([%6, %4])
+end
+case test_fork_split_still_applies_when_every_branch_rejoins#0|shared.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.abs.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.add.Tensor(%2, %3) : torch.float32[1, 3, 4, 2] q=none
+output(%4)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.abs.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.neg.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.add.Tensor(%1, %2) : torch.float32[1, 2, 3, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output(%4)
+end
+case test_fork_split_still_applies_when_every_branch_rejoins#1|shared.up
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.abs.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.neg.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.add.Tensor(%1, %2) : torch.float32[1, 2, 3, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output(%4)
+after modified=false same
+end
+case test_fork_split_still_applies_when_every_branch_diverges#0|shared.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.abs.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%1) : torch.float32[1, 3, 4, 2] q=none
+output([%2, %3])
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.abs.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output([%2, %4])
+end
+case test_fork_split_still_applies_when_every_branch_diverges#1|shared.up
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.abs.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output([%2, %4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.abs.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%1) : torch.float32[1, 3, 4, 2] q=none
+output([%2, %3])
+end
+case test_down_pass_remembers_path_blocked_before_shared_node#0|shared.down~_BlockAddToAddPass
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.abs.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.add.Tensor(%1, %2) : torch.float32[1, 3, 4, 2] q=none
+%5 = aten.add.Tensor(%4, %3) : torch.float32[1, 3, 4, 2] q=none
+output(%5)
+after modified=false same
+end
+case test_permute_crosses_rank_dropping_reduction[False-PropagateViewCopyPermuteDownPass-expected_permute0-expected_reduction_dims0]#0|shared.down
+before
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [2, 0, 1]) : torch.float32[4, 2, 3] dim_order=[1,2,0] q=none
+%2 = aten.sum.dim_IntList(%1, [1]) : torch.float32[4, 3] q=none
+output(%2)
+after modified=true
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.sum.dim_IntList(%0, [0]) : torch.float32[3, 4] q=none
+%2 = aten.permute_copy.default(%1, [1, 0]) : torch.float32[4, 3] q=none
+output(%2)
+end
+case test_permute_crosses_rank_dropping_reduction[False-PropagateViewCopyPermuteUpPass-expected_permute1-expected_reduction_dims1]#0|shared.up
+before
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.sum.dim_IntList(%0, [0]) : torch.float32[3, 4] q=none
+%2 = aten.permute_copy.default(%1, [1, 0]) : torch.float32[4, 3] dim_order=[1,0] q=none
+output(%2)
+after modified=true
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[2, 4, 3] q=none
+%2 = aten.sum.dim_IntList(%1, [0]) : torch.float32[4, 3] q=none
+output(%2)
+end
+case test_permute_crosses_rank_dropping_reduction[True-PropagateViewCopyPermuteDownPass-expected_permute0-expected_reduction_dims0]#0|shared.down
+before
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [2, 0, 1]) : torch.float32[4, 2, 3] dim_order=[1,2,0] q=none
+%2 = aten.sum.dim_IntList(%1, [1], False) : torch.float32[4, 3] q=none
+output(%2)
+after modified=true
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.sum.dim_IntList(%0, [0], False) : torch.float32[3, 4] q=none
+%2 = aten.permute_copy.default(%1, [1, 0]) : torch.float32[4, 3] q=none
+output(%2)
+end
+case test_permute_crosses_rank_dropping_reduction[True-PropagateViewCopyPermuteUpPass-expected_permute1-expected_reduction_dims1]#0|shared.up
+before
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.sum.dim_IntList(%0, [0], False) : torch.float32[3, 4] q=none
+%2 = aten.permute_copy.default(%1, [1, 0]) : torch.float32[4, 3] dim_order=[1,0] q=none
+output(%2)
+after modified=true
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[2, 4, 3] q=none
+%2 = aten.sum.dim_IntList(%1, [0], False) : torch.float32[4, 3] q=none
+output(%2)
+end
+case test_upward_permute_preserves_scalar_reduction[False-dims0]#0|shared.up
+before
+%0 = placeholder x : torch.float32[] q=none
+%1 = aten.sum.dim_IntList(%0, [0]) : torch.float32[] q=none
+%2 = aten.permute_copy.default(%1, []) : torch.float32[] q=none
+output(%2)
+after modified=true
+%0 = placeholder x : torch.float32[] q=none
+%1 = aten.sum.dim_IntList(%0, [0]) : torch.float32[] q=none
+output(%1)
+end
+case test_upward_permute_preserves_scalar_reduction[False-dims1]#0|shared.up
+before
+%0 = placeholder x : torch.float32[] q=none
+%1 = aten.sum.dim_IntList(%0, [-1]) : torch.float32[] q=none
+%2 = aten.permute_copy.default(%1, []) : torch.float32[] q=none
+output(%2)
+after modified=true
+%0 = placeholder x : torch.float32[] q=none
+%1 = aten.sum.dim_IntList(%0, [-1]) : torch.float32[] q=none
+output(%1)
+end
+case test_upward_permute_preserves_scalar_reduction[False-dims2]#0|shared.up
+before
+%0 = placeholder x : torch.float32[] q=none
+%1 = aten.sum.dim_IntList(%0, []) : torch.float32[] q=none
+%2 = aten.permute_copy.default(%1, []) : torch.float32[] q=none
+output(%2)
+after modified=true
+%0 = placeholder x : torch.float32[] q=none
+%1 = aten.sum.dim_IntList(%0, []) : torch.float32[] q=none
+output(%1)
+end
+case test_upward_permute_preserves_scalar_reduction[True-dims0]#0|shared.up
+before
+%0 = placeholder x : torch.float32[] q=none
+%1 = aten.sum.dim_IntList(%0, [0], False) : torch.float32[] q=none
+%2 = aten.permute_copy.default(%1, []) : torch.float32[] q=none
+output(%2)
+after modified=true
+%0 = placeholder x : torch.float32[] q=none
+%1 = aten.sum.dim_IntList(%0, [0], False) : torch.float32[] q=none
+output(%1)
+end
+case test_upward_permute_preserves_scalar_reduction[True-dims1]#0|shared.up
+before
+%0 = placeholder x : torch.float32[] q=none
+%1 = aten.sum.dim_IntList(%0, [-1], False) : torch.float32[] q=none
+%2 = aten.permute_copy.default(%1, []) : torch.float32[] q=none
+output(%2)
+after modified=true
+%0 = placeholder x : torch.float32[] q=none
+%1 = aten.sum.dim_IntList(%0, [-1], False) : torch.float32[] q=none
+output(%1)
+end
+case test_upward_permute_preserves_scalar_reduction[True-dims2]#0|shared.up
+before
+%0 = placeholder x : torch.float32[] q=none
+%1 = aten.sum.dim_IntList(%0, [], False) : torch.float32[] q=none
+%2 = aten.permute_copy.default(%1, []) : torch.float32[] q=none
+output(%2)
+after modified=true
+%0 = placeholder x : torch.float32[] q=none
+%1 = aten.sum.dim_IntList(%0, [], False) : torch.float32[] q=none
+output(%1)
+end
+case test_downward_permute_crosses_reduction_over_all_dims#0|shared.down
+before
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [2, 0, 1]) : torch.float32[4, 2, 3] dim_order=[1,2,0] q=none
+%2 = aten.sum.dim_IntList(%1, []) : torch.float32[] q=none
+output(%2)
+after modified=true
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.sum.dim_IntList(%0, [2, 0, 1]) : torch.float32[] q=none
+output(%1)
+end
+case test_upward_permute_crosses_rank_expanding_binary_after_reduction#0|shared.up
+before
+%0 = placeholder x : torch.float32[2, 3] q=none
+%1 = placeholder bias : torch.float32[1, 1, 1, 1] q=none
+%2 = aten.add.Tensor(%0, %1) : torch.float32[1, 1, 2, 3] q=none
+%3 = aten.sum.dim_IntList(%2, [0]) : torch.float32[1, 2, 3] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[1, 3, 2] dim_order=[0,2,1] q=none
+output(%4)
+after modified=true
+%0 = placeholder x : torch.float32[2, 3] q=none
+%1 = placeholder bias : torch.float32[1, 1, 1, 1] q=none
+%2 = aten.permute_copy.default(%0, [1, 0]) : torch.float32[3, 2] q=none
+%3 = aten.add.Tensor(%2, %1) : torch.float32[1, 1, 3, 2] q=none
+%4 = aten.sum.dim_IntList(%3, [0]) : torch.float32[1, 3, 2] q=none
+output(%4)
+end
+case test_upward_permute_preserves_broadcast_comparison[shape0]#0|shared.up
+before
+%0 = placeholder scalar : torch.int64[1, 1, 1] q=none
+%1 = placeholder data : torch.int64[1, 3, 5] q=none
+%2 = aten.ge.Tensor(%0, %1) : torch.bool[1, 3, 5] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 1]) : torch.bool[1, 5, 3] dim_order=[0,2,1] q=none
+%4 = aten.any.dim(%3, -1, True) : torch.bool[1, 5, 1] q=none
+%5 = aten.view_copy.default(%4, [1, 5]) : torch.bool[1, 5] q=none
+output(%5)
+after modified=true
+%0 = placeholder scalar : torch.int64[1, 1, 1] q=none
+%1 = placeholder data : torch.int64[1, 3, 5] q=none
+%2 = aten.permute_copy.default(%1, [0, 2, 1]) : torch.int64[1, 5, 3] q=none
+%3 = aten.ge.Tensor(%0, %2) : torch.bool[1, 5, 3] q=none
+%4 = aten.any.dim(%3, -1, True) : torch.bool[1, 5, 1] q=none
+%5 = aten.view_copy.default(%4, [1, 5]) : torch.bool[1, 5] q=none
+output(%5)
+end
+case test_upward_permute_preserves_broadcast_comparison[shape1]#0|shared.up
+before
+%0 = placeholder scalar : torch.int64[1, 1, 1] q=none
+%1 = placeholder data : torch.int64[1, 5, 5] q=none
+%2 = aten.ge.Tensor(%0, %1) : torch.bool[1, 5, 5] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 1]) : torch.bool[1, 5, 5] dim_order=[0,2,1] q=none
+%4 = aten.any.dim(%3, -1, True) : torch.bool[1, 5, 1] q=none
+%5 = aten.view_copy.default(%4, [1, 5]) : torch.bool[1, 5] q=none
+output(%5)
+after modified=true
+%0 = placeholder scalar : torch.int64[1, 1, 1] q=none
+%1 = placeholder data : torch.int64[1, 5, 5] q=none
+%2 = aten.permute_copy.default(%1, [0, 2, 1]) : torch.int64[1, 5, 5] q=none
+%3 = aten.ge.Tensor(%0, %2) : torch.bool[1, 5, 5] q=none
+%4 = aten.any.dim(%3, -1, True) : torch.bool[1, 5, 1] q=none
+%5 = aten.view_copy.default(%4, [1, 5]) : torch.bool[1, 5] q=none
+output(%5)
+end
+case test_upward_permute_moves_through_broadcast_where#0|shared.up
+before
+%0 = placeholder condition : torch.bool[1, 1, 1] q=none
+%1 = placeholder data : torch.float32[1, 3, 5] q=none
+%2 = placeholder other : torch.float32[1, 1, 1] q=none
+%3 = aten.where.self(%0, %1, %2) : torch.float32[1, 3, 5] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[1, 5, 3] dim_order=[0,2,1] q=none
+output(%4)
+after modified=true
+%0 = placeholder condition : torch.bool[1, 1, 1] q=none
+%1 = placeholder data : torch.float32[1, 3, 5] q=none
+%2 = placeholder other : torch.float32[1, 1, 1] q=none
+%3 = aten.permute_copy.default(%1, [0, 2, 1]) : torch.float32[1, 5, 3] q=none
+%4 = aten.where.self(%0, %3, %2) : torch.float32[1, 5, 3] q=none
+output(%4)
+end
+case test_propagate_permute_down_through_transparent_ops_tosa_FP#0|arm.up+ep
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.relu.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%2) : torch.float32[1, 3, 4, 2] q=none
+output([%3])
+after modified=false same
+end
+case test_propagate_view_down_through_transparent_ops_tosa_FP#0|arm.up+ep
+before
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.view_copy.default(%0, [2, 12]) : torch.float32[2, 12] q=none
+%2 = aten.relu.default(%1) : torch.float32[2, 12] q=none
+%3 = aten.neg.default(%2) : torch.float32[2, 12] q=none
+output([%3])
+after modified=false same
+end
+case test_propagate_scalar_view_down_through_unary_elementwise#0|arm.down
+before
+%0 = placeholder x : torch.float32[] q=none
+%1 = aten.view_copy.default(%0, [1]) : torch.float32[1] q=none
+%2 = aten.relu.default(%1) : torch.float32[1] q=none
+output(%2)
+after modified=true
+%0 = placeholder x : torch.float32[] q=none
+%1 = aten.relu.default(%0) : torch.float32[] q=none
+%2 = aten.view_copy.default(%1, [1]) : torch.float32[1] q=none
+output(%2)
+end
+case test_propagate_permute_up_through_transparent_ops_tosa_FP#0|arm.up+ep
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.relu.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.neg.default(%1) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output([%3])
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.relu.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%2) : torch.float32[1, 3, 4, 2] q=none
+output([%3])
+end
+case test_propagate_permute_up_swaps_with_binary_transparent_op_tosa_FP#0|arm.up+ep
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.add.Tensor(%0, %1) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output([%3])
+after modified=false same
+end
+case test_propagate_view_up_through_transparent_ops_tosa_FP#0|arm.up+ep
+before
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.relu.default(%0) : torch.float32[2, 3, 4] q=none
+%2 = aten.neg.default(%1) : torch.float32[2, 3, 4] q=none
+%3 = aten.view_copy.default(%2, [2, 12]) : torch.float32[2, 12] q=none
+output([%3])
+after modified=true
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.view_copy.default(%0, [2, 12]) : torch.float32[2, 12] q=none
+%2 = aten.relu.default(%1) : torch.float32[2, 12] q=none
+%3 = aten.neg.default(%2) : torch.float32[2, 12] q=none
+output([%3])
+end
+case test_propagate_stops_at_non_transparent_ops_tosa_FP#0|arm.up+ep
+before
+%0 = placeholder x : torch.float32[3, 2] q=none
+%1 = placeholder weight : torch.float32[3, 4] q=none
+%2 = aten.permute_copy.default(%0, [1, 0]) : torch.float32[2, 3] q=none
+%3 = aten.mm.default(%2, %1) : torch.float32[2, 4] q=none
+output([%3])
+after modified=false same
+end
+case test_propagate_stops_at_branches_tosa_FP#0|arm.up+ep
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.relu.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.add.Tensor(%2, %3) : torch.float32[1, 3, 4, 2] q=none
+output([%4])
+after modified=false same
+end
+case test_propagate_moves_before_parameter_tosa_FP#0|arm.up+ep
+before
+%0 = placeholder p_weight : torch.float32[1, 2, 3, 4] kind=param q=none
+%1 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.add.Tensor(%1, %0) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output([%3])
+after modified=false same
+end
+case test_propagation_retraces_once_after_reaching_fixed_point#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.relu.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%2) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.relu.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.neg.default(%1) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+end
+case test_down_pass_moves_permute_after_transparent_chain#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.relu.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%2) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.relu.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.neg.default(%1) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+end
+case test_down_pass_propagates_for_u85_like_tosa_int_cf#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.relu.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%2) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.relu.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.neg.default(%1) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+end
+case test_down_pass_still_canonicalizes_for_u85_like_tosa_int_cf#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 3, 2] q=none
+%2 = aten.permute_copy.default(%1, [0, 2, 1]) : torch.float32[1, 2, 3] q=none
+output(%2)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3] q=none
+output(%0)
+end
+case test_down_pass_moves_view_after_transparent_chain#0|arm.down
+before
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.view_copy.default(%0, [2, 12]) : torch.float32[2, 12] q=none
+%2 = aten.relu.default(%1) : torch.float32[2, 12] q=none
+%3 = aten.neg.default(%2) : torch.float32[2, 12] q=none
+output(%3)
+after modified=true
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.relu.default(%0) : torch.float32[2, 3, 4] q=none
+%2 = aten.neg.default(%1) : torch.float32[2, 3, 4] q=none
+%3 = aten.view_copy.default(%2, [2, 12]) : torch.float32[2, 12] q=none
+output(%3)
+end
+case test_down_pass_moves_permute_to_graph_output#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.relu.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%2) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.relu.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.neg.default(%1) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+end
+case test_up_pass_moves_permute_to_graph_input#0|arm.up
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.relu.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.neg.default(%1) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.relu.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%2) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+end
+case test_up_pass_fuses_duplicate_permutes_at_placeholder#0|arm.up
+before
+%0 = placeholder x : torch.float32[1, 4, 3, 3] q=none
+%1 = aten.slice_copy.Tensor(%0, 1, 0, 2) : torch.float32[1, 2, 3, 3] q=none
+%2 = aten.slice_copy.Tensor(%0, 1, 2, 4) : torch.float32[1, 2, 3, 3] q=none
+%3 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.float32[1, 3, 3, 2] q=none
+%4 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 3, 2] q=none
+output([%3, %4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 3, 3] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 3, 4] q=none
+%2 = aten.slice_copy.Tensor(%1, 3, 0, 2) : torch.float32[1, 3, 3, 2] q=none
+%3 = aten.slice_copy.Tensor(%1, 3, 2, 4) : torch.float32[1, 3, 3, 2] q=none
+output([%2, %3])
+end
+case test_up_pass_refreshes_permute_meta_before_view_slice_swap#0|arm.up
+before
+%0 = placeholder x : torch.float32[3, 2, 8, 16] q=none
+%1 = aten.slice_copy.Tensor(%0, 0, 0, 1) : torch.float32[1, 2, 8, 16] q=none
+%2 = aten.permute_copy.default(%1, [0, 3, 1, 2]) : torch.float32[1, 16, 2, 8] q=none
+%3 = aten.view_copy.default(%2, [1, 32, 8]) : torch.float32[1, 32, 8] q=none
+output(%3)
+after modified=true
+%0 = placeholder x : torch.float32[3, 2, 8, 16] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[3, 16, 2, 8] q=none
+%2 = aten.view_copy.default(%1, [3, 32, 8]) : torch.float32[3, 32, 8] q=none
+%3 = aten.slice_copy.Tensor(%2, 0, 0, 1) : torch.float32[1, 32, 8] q=none
+output(%3)
+end
+case test_up_pass_preserves_slice_permute_view_output#0|arm.up+ep
+before
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.slice_copy.Tensor(%0, 1, 0, 1) : torch.float32[2, 1, 4] q=none
+%2 = aten.permute_copy.default(%1, [2, 1, 0]) : torch.float32[4, 1, 2] q=none
+%3 = aten.view_copy.default(%2, [8, 1]) : torch.float32[8, 1] q=none
+output([%3])
+after modified=true
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [2, 1, 0]) : torch.float32[4, 3, 2] q=none
+%2 = aten.slice_copy.Tensor(%1, 1, 0, 1) : torch.float32[4, 1, 2] q=none
+%3 = aten.view_copy.default(%2, [8, 1]) : torch.float32[8, 1] q=none
+output([%3])
+end
+case test_up_pass_keeps_scatter_input_view_after_slice#0|arm.up
+before
+%0 = placeholder x : torch.float32[3, 16, 2, 8] q=none
+%1 = placeholder indices : torch.int32[1, 4] q=none
+%2 = placeholder data : torch.float32[1, 4, 16] q=none
+%3 = aten.slice_copy.Tensor(%0, 0, 0, 1) : torch.float32[1, 16, 2, 8] q=none
+%4 = aten.view_copy.default(%3, [1, 32, 8]) : torch.float32[1, 32, 8] q=none
+%5 = tosa.SCATTER.default(%4, %1, %2) : torch.float32[1, 32, 8] q=none
+output(%5)
+after modified=false same
+end
+case test_up_pass_hoists_matching_transform_chain_across_slice_fanout#0|arm.up
+before
+%0 = placeholder x : torch.float32[1, 4, 3, 3] q=none
+%1 = aten.slice_copy.Tensor(%0, 1, 0, 2) : torch.float32[1, 2, 3, 3] q=none
+%2 = aten.slice_copy.Tensor(%0, 1, 2, 4) : torch.float32[1, 2, 3, 3] q=none
+%3 = aten.view_copy.default(%1, [1, 2, 9]) : torch.float32[1, 2, 9] q=none
+%4 = aten.view_copy.default(%2, [1, 2, 9]) : torch.float32[1, 2, 9] q=none
+%5 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[1, 9, 2] q=none
+%6 = aten.permute_copy.default(%4, [0, 2, 1]) : torch.float32[1, 9, 2] q=none
+output([%5, %6])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 3, 3] q=none
+%1 = aten.view_copy.default(%0, [1, 4, 9]) : torch.float32[1, 4, 9] q=none
+%2 = aten.permute_copy.default(%1, [0, 2, 1]) : torch.float32[1, 9, 4] q=none
+%3 = aten.slice_copy.Tensor(%2, 2, 0, 2) : torch.float32[1, 9, 2] q=none
+%4 = aten.slice_copy.Tensor(%2, 2, 2, 4) : torch.float32[1, 9, 2] q=none
+output([%3, %4])
+end
+case test_up_pass_hoists_unit_slice_views_with_different_args#0|arm.up
+before
+%0 = placeholder x : torch.float32[5, 2, 3, 4, 6] q=none
+%1 = aten.slice_copy.Tensor(%0, 2, 0, 1) : torch.float32[5, 2, 1, 4, 6] q=none
+%2 = aten.slice_copy.Tensor(%0, 2, 1, 2) : torch.float32[5, 2, 1, 4, 6] q=none
+%3 = aten.view_copy.default(%1, [5, 2, 4, 6]) : torch.float32[5, 2, 4, 6] q=none
+%4 = aten.view_copy.default(%2, [5, 2, 24]) : torch.float32[5, 2, 24] q=none
+output([%3, %4])
+after modified=true
+%0 = placeholder x : torch.float32[5, 2, 3, 4, 6] q=none
+%1 = aten.view_copy.default(%0, [5, 2, 12, 6]) : torch.float32[5, 2, 12, 6] q=none
+%2 = aten.slice_copy.Tensor(%1, 2, 0, 4) : torch.float32[5, 2, 4, 6] q=none
+%3 = aten.view_copy.default(%0, [5, 2, 72]) : torch.float32[5, 2, 72] q=none
+%4 = aten.slice_copy.Tensor(%3, 2, 24, 48) : torch.float32[5, 2, 24] q=none
+output([%2, %4])
+end
+case test_up_pass_keeps_mismatched_transform_slice_fanout_split#0|arm.up
+before
+%0 = placeholder x : torch.float32[1, 4, 3, 3] q=none
+%1 = aten.slice_copy.Tensor(%0, 1, 0, 2) : torch.float32[1, 2, 3, 3] q=none
+%2 = aten.slice_copy.Tensor(%0, 1, 2, 4) : torch.float32[1, 2, 3, 3] q=none
+%3 = aten.view_copy.default(%1, [1, 2, 9]) : torch.float32[1, 2, 9] q=none
+%4 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 3, 2] q=none
+output([%3, %4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 3, 3] q=none
+%1 = aten.view_copy.default(%0, [1, 4, 9]) : torch.float32[1, 4, 9] q=none
+%2 = aten.slice_copy.Tensor(%1, 1, 0, 2) : torch.float32[1, 2, 9] q=none
+%3 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 3, 4] q=none
+%4 = aten.slice_copy.Tensor(%3, 3, 2, 4) : torch.float32[1, 3, 3, 2] q=none
+output([%2, %4])
+end
+case test_down_pass_moves_matching_input_permutations_after_binary_op#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.add.Tensor(%2, %3) : torch.float32[1, 3, 4, 2] q=none
+output(%4)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.add.Tensor(%0, %1) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+end
+case test_down_pass_moves_permute_through_single_exit_pointwise_region#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.floor.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.sub.Tensor(%1, %2) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.floor.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.sub.Tensor(%0, %1) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+end
+case test_down_pass_checks_each_path_into_shared_pointwise_node#0|arm.down~_BlockFloorToSubPass
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.floor.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.sub.Tensor(%1, %2) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+after modified=false same
+end
+case test_down_pass_keeps_permute_before_multiple_exit_pointwise_region#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.floor.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.sub.Tensor(%1, %2) : torch.float32[1, 3, 4, 2] q=none
+output([%2, %3])
+after modified=false same
+end
+case test_down_pass_keeps_lower_rank_singleton_input_before_binary_op#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 1] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.add.Tensor(%2, %1) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+after modified=false same
+end
+case test_down_pass_keeps_sunk_view_before_rank_reducing_permute#0|arm.down
+before
+%0 = placeholder x : torch.float32[2, 8, 1, 32] q=none
+%1 = placeholder y : torch.float32[2, 8, 1, 32] q=none
+%2 = aten.view_copy.default(%0, [2, 8, 32]) : torch.float32[2, 8, 32] q=none
+%3 = aten.view_copy.default(%1, [2, 8, 32]) : torch.float32[2, 8, 32] q=none
+%4 = aten.add.Tensor(%2, %3) : torch.float32[2, 8, 32] q=none
+%5 = aten.view_copy.default(%4, [2, 8, 32]) : torch.float32[2, 8, 32] q=none
+%6 = aten.permute_copy.default(%5, [0, 2, 1]) : torch.float32[2, 32, 8] q=none
+output(%6)
+after modified=true
+%0 = placeholder x : torch.float32[2, 8, 1, 32] q=none
+%1 = placeholder y : torch.float32[2, 8, 1, 32] q=none
+%2 = aten.add.Tensor(%0, %1) : torch.float32[2, 8, 1, 32] q=none
+%3 = aten.view_copy.default(%2, [2, 8, 32]) : torch.float32[2, 8, 32] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[2, 32, 8] q=none
+output(%4)
+end
+case test_down_pass_canonicalizes_horizontally_fused_singleton_permute#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 1, 1, 1] q=none
+%1 = placeholder y : torch.float32[1, 1, 1, 1] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 1, 1, 1] q=none
+%3 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.float32[1, 1, 1, 1] q=none
+%4 = aten.add.Tensor(%2, %3) : torch.float32[1, 1, 1, 1] q=none
+output(%4)
+after modified=true
+%0 = placeholder x : torch.float32[1, 1, 1, 1] q=none
+%1 = placeholder y : torch.float32[1, 1, 1, 1] q=none
+%2 = aten.add.Tensor(%0, %1) : torch.float32[1, 1, 1, 1] q=none
+output(%2)
+end
+case test_down_pass_moves_matching_input_permutations_after_cat#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.cat.default([%2, %3], 3) : torch.float32[1, 3, 4, 4] q=none
+output(%4)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.cat.default([%0, %1], 1) : torch.float32[1, 4, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 4] q=none
+output(%3)
+end
+case test_down_pass_swaps_concat_with_matching_input_permutations#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.cat.default([%2, %3], 3) : torch.float32[1, 3, 4, 4] q=none
+output(%4)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.cat.default([%0, %1], 1) : torch.float32[1, 4, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 4] q=none
+output(%3)
+end
+case test_up_pass_moves_noop_input_permutations_before_cat#0|arm.up
+before
+%0 = placeholder x : torch.float32[1, 1, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 1, 3, 4] q=none
+%2 = aten.cat.default([%0, %1], 1) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+after modified=true
+%0 = placeholder x : torch.float32[1, 1, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 1, 3, 4] q=none
+%2 = aten.view_copy.default(%0, [1, 3, 4, 1]) : torch.float32[1, 3, 4, 1] q=none
+%3 = aten.view_copy.default(%1, [1, 3, 4, 1]) : torch.float32[1, 3, 4, 1] q=none
+%4 = aten.cat.default([%2, %3], 3) : torch.float32[1, 3, 4, 2] q=none
+output(%4)
+end
+case test_up_pass_swaps_concat_with_noop_output_permutation#0|arm.up
+before
+%0 = placeholder x : torch.float32[1, 1, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 1, 3, 4] q=none
+%2 = aten.cat.default([%0, %1], 1) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+after modified=true
+%0 = placeholder x : torch.float32[1, 1, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 1, 3, 4] q=none
+%2 = aten.view_copy.default(%0, [1, 3, 4, 1]) : torch.float32[1, 3, 4, 1] q=none
+%3 = aten.view_copy.default(%1, [1, 3, 4, 1]) : torch.float32[1, 3, 4, 1] q=none
+%4 = aten.cat.default([%2, %3], 3) : torch.float32[1, 3, 4, 2] q=none
+output(%4)
+end
+case test_down_pass_keeps_shared_input_permutations_before_cat#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.relu.default(%2) : torch.float32[1, 3, 4, 2] q=none
+%5 = aten.cat.default([%2, %3], 3) : torch.float32[1, 3, 4, 4] q=none
+output([%5, %4])
+after modified=false same
+end
+case test_down_pass_keeps_permutation_before_sum#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.sum.dim_IntList(%1, [3], True) : torch.float32[1, 3, 4, 1] q=none
+output(%2)
+after modified=false same
+end
+case test_down_pass_keeps_permute_before_reduction_with_layout_dependent_user[False]#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 512, 796] q=none
+%1 = placeholder direct : torch.float32[1, 796, 512] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 796, 512] q=none
+%3 = aten.relu.default(%2) : torch.float32[1, 796, 512] q=none
+%4 = aten.mean.dim(%3, [1], True) : torch.float32[1, 1, 512] q=none
+%5 = aten.sub.Tensor(%1, %4) : torch.float32[1, 796, 512] q=none
+output(%5)
+after modified=true
+%0 = placeholder x : torch.float32[1, 512, 796] q=none
+%1 = placeholder direct : torch.float32[1, 796, 512] q=none
+%2 = aten.relu.default(%0) : torch.float32[1, 512, 796] q=none
+%3 = aten.mean.dim(%2, [2], True) : torch.float32[1, 512, 1] q=none
+%4 = aten.view_copy.default(%3, [1, 1, 512]) : torch.float32[1, 1, 512] q=none
+%5 = aten.sub.Tensor(%1, %4) : torch.float32[1, 796, 512] q=none
+output(%5)
+end
+case test_down_pass_keeps_permute_before_reduction_with_layout_dependent_user[True]#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 512, 796] q=none
+%1 = placeholder direct : torch.float32[1, 796, 512] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 796, 512] q=none
+%3 = aten.relu.default(%2) : torch.float32[1, 796, 512] q=none
+%4 = aten.mean.dim(%3, [1], True) : torch.float32[1, 1, 512] q=none
+%5 = aten.sub.Tensor(%4, %1) : torch.float32[1, 796, 512] q=none
+output(%5)
+after modified=true
+%0 = placeholder x : torch.float32[1, 512, 796] q=none
+%1 = placeholder direct : torch.float32[1, 796, 512] q=none
+%2 = aten.relu.default(%0) : torch.float32[1, 512, 796] q=none
+%3 = aten.mean.dim(%2, [2], True) : torch.float32[1, 512, 1] q=none
+%4 = aten.view_copy.default(%3, [1, 1, 512]) : torch.float32[1, 1, 512] q=none
+%5 = aten.sub.Tensor(%4, %1) : torch.float32[1, 796, 512] q=none
+output(%5)
+end
+case test_down_pass_splits_permute_over_elementwise_fanout#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.relu.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%1) : torch.float32[1, 3, 4, 2] q=none
+output([%2, %3])
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.relu.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output([%2, %4])
+end
+case test_down_pass_splits_permute_over_slice_fanout#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 4, 3, 3] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 3, 4] q=none
+%2 = aten.slice_copy.Tensor(%1, 3, 0, 2) : torch.float32[1, 3, 3, 2] q=none
+%3 = aten.slice_copy.Tensor(%1, 3, 2, 4) : torch.float32[1, 3, 3, 2] q=none
+%4 = aten.view_copy.default(%2, [1, 9, 2]) : torch.float32[1, 9, 2] q=none
+%5 = aten.view_copy.default(%3, [1, 9, 2]) : torch.float32[1, 9, 2] q=none
+%6 = aten.permute_copy.default(%4, [0, 2, 1]) : torch.float32[1, 2, 9] q=none
+%7 = aten.permute_copy.default(%5, [0, 2, 1]) : torch.float32[1, 2, 9] q=none
+output([%6, %7])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 3, 3] q=none
+%1 = aten.slice_copy.Tensor(%0, 1, 0, 2) : torch.float32[1, 2, 3, 3] q=none
+%2 = aten.view_copy.default(%1, [1, 2, 9]) : torch.float32[1, 2, 9] q=none
+%3 = aten.slice_copy.Tensor(%0, 1, 2, 4) : torch.float32[1, 2, 3, 3] q=none
+%4 = aten.view_copy.default(%3, [1, 2, 9]) : torch.float32[1, 2, 9] q=none
+output([%2, %4])
+end
+case test_down_pass_stops_when_fanout_branch_has_nontransparent_op#0|arm.down
+before
+%0 = placeholder x : torch.float32[2, 3] q=none
+%1 = placeholder weight : torch.float32[2, 2] q=none
+%2 = aten.permute_copy.default(%0, [1, 0]) : torch.float32[3, 2] q=none
+%3 = aten.relu.default(%2) : torch.float32[3, 2] q=none
+%4 = aten.mm.default(%2, %1) : torch.float32[3, 2] q=none
+%5 = aten.add.Tensor(%3, %4) : torch.float32[3, 2] q=none
+output(%5)
+after modified=false same
+end
+case test_down_pass_stops_when_convergence_has_untracked_input#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.relu.default(%2) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.neg.default(%2) : torch.float32[1, 3, 4, 2] q=none
+%5 = aten.cat.default([%3, %4, %1], 3) : torch.float32[1, 3, 4, 6] q=none
+output(%5)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.relu.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.neg.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%5 = aten.permute_copy.default(%4, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%6 = aten.cat.default([%3, %5, %1], 3) : torch.float32[1, 3, 4, 6] q=none
+output(%6)
+end
+case test_down_pass_stops_view_before_cat_converging_fanout#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.view_copy.default(%0, [1, 3, 4, 2]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.relu.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.cat.default([%2, %3], 3) : torch.float32[1, 3, 4, 4] q=none
+output(%4)
+after modified=false same
+end
+case test_up_pass_fuses_equivalent_output_permutations_before_fan_out#0|arm.up
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.relu.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.add.Tensor(%2, %3) : torch.float32[1, 3, 4, 2] q=none
+output(%4)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.relu.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.add.Tensor(%2, %2) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+end
+case test_up_pass_fusion_enables_further_propagation#0|arm.up
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.relu.default(%0) : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.neg.default(%1) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%5 = aten.add.Tensor(%3, %4) : torch.float32[1, 3, 4, 2] q=none
+output(%5)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.relu.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%2) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.add.Tensor(%3, %2) : torch.float32[1, 3, 4, 2] q=none
+output(%4)
+end
+case test_propagate_moves_before_dtype_changing_rescale#0|arm.up
+before
+%0 = placeholder x : torch.int32[1, 2, 3, 4] q=none
+%1 = tosa.RESCALE.default(%0, torch.int8, [1.0], 0, 0) : torch.int8[1, 2, 3, 4] q=none
+%2 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.int8[1, 3, 4, 2] q=none
+output(%2)
+after modified=true
+%0 = placeholder x : torch.int32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.int32[1, 3, 4, 2] q=none
+%2 = tosa.RESCALE.default(%1, torch.int8, [1.0], 0, 0) : torch.int8[1, 3, 4, 2] q=none
+output(%2)
+end
+case test_propagate_moves_through_elementwise_fork#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder scale : torch.float32[1, 1, 1, 1] q=none
+%2 = placeholder bias : torch.float32[1, 1, 1, 1] q=none
+%3 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.mul.Tensor(%3, %1) : torch.float32[1, 3, 4, 2] q=none
+%5 = aten.ge.Tensor(%4, %2) : torch.bool[1, 3, 4, 2] q=none
+%6 = aten.add.Tensor(%4, %2) : torch.float32[1, 3, 4, 2] q=none
+%7 = aten.sub.Tensor(%4, %2) : torch.float32[1, 3, 4, 2] q=none
+%8 = aten.floor.default(%6) : torch.float32[1, 3, 4, 2] q=none
+%9 = aten.ceil.default(%7) : torch.float32[1, 3, 4, 2] q=none
+%10 = aten.where.self(%5, %8, %9) : torch.float32[1, 3, 4, 2] q=none
+output(%10)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder scale : torch.float32[1, 1, 1, 1] q=none
+%2 = placeholder bias : torch.float32[1, 1, 1, 1] q=none
+%3 = aten.mul.Tensor(%0, %1) : torch.float32[1, 2, 3, 4] q=none
+%4 = aten.ge.Tensor(%3, %2) : torch.bool[1, 2, 3, 4] q=none
+%5 = aten.add.Tensor(%3, %2) : torch.float32[1, 2, 3, 4] q=none
+%6 = aten.sub.Tensor(%3, %2) : torch.float32[1, 2, 3, 4] q=none
+%7 = aten.floor.default(%5) : torch.float32[1, 2, 3, 4] q=none
+%8 = aten.ceil.default(%6) : torch.float32[1, 2, 3, 4] q=none
+%9 = aten.where.self(%4, %7, %8) : torch.float32[1, 2, 3, 4] q=none
+%10 = aten.permute_copy.default(%9, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output(%10)
+end
+case test_propagate_stops_at_sum_reduction_fork#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder bias : torch.float32[1, 1, 1, 1] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.sum.dim_IntList(%2, [1], True) : torch.float32[1, 1, 4, 2] q=none
+%4 = aten.ge.Tensor(%3, %1) : torch.bool[1, 1, 4, 2] q=none
+%5 = aten.sum.dim_IntList(%2, [1], True) : torch.float32[1, 1, 4, 2] q=none
+%6 = aten.mean.dim(%2, [1], True) : torch.float32[1, 1, 4, 2] q=none
+%7 = aten.floor.default(%5) : torch.float32[1, 1, 4, 2] q=none
+%8 = aten.ceil.default(%6) : torch.float32[1, 1, 4, 2] q=none
+%9 = aten.where.self(%4, %7, %8) : torch.float32[1, 1, 4, 2] q=none
+output(%9)
+after modified=false same
+end
+case test_propagate_view_moves_through_elementwise_fork#0|arm.down
+before
+%0 = placeholder x : torch.float32[1, 2, 12] q=none
+%1 = placeholder scale : torch.float32[1, 1, 1] q=none
+%2 = placeholder bias : torch.float32[1, 1, 1] q=none
+%3 = aten.view_copy.default(%0, [1, 3, 8]) : torch.float32[1, 3, 8] q=none
+%4 = aten.mul.Tensor(%3, %1) : torch.float32[1, 3, 8] q=none
+%5 = aten.ge.Tensor(%4, %2) : torch.bool[1, 3, 8] q=none
+%6 = aten.add.Tensor(%4, %2) : torch.float32[1, 3, 8] q=none
+%7 = aten.sub.Tensor(%4, %2) : torch.float32[1, 3, 8] q=none
+%8 = aten.floor.default(%6) : torch.float32[1, 3, 8] q=none
+%9 = aten.ceil.default(%7) : torch.float32[1, 3, 8] q=none
+%10 = aten.where.self(%5, %8, %9) : torch.float32[1, 3, 8] q=none
+output(%10)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 12] q=none
+%1 = placeholder scale : torch.float32[1, 1, 1] q=none
+%2 = placeholder bias : torch.float32[1, 1, 1] q=none
+%3 = aten.mul.Tensor(%0, %1) : torch.float32[1, 2, 12] q=none
+%4 = aten.view_copy.default(%3, [1, 3, 8]) : torch.float32[1, 3, 8] q=none
+%5 = aten.ge.Tensor(%4, %2) : torch.bool[1, 3, 8] q=none
+%6 = aten.add.Tensor(%4, %2) : torch.float32[1, 3, 8] q=none
+%7 = aten.sub.Tensor(%4, %2) : torch.float32[1, 3, 8] q=none
+%8 = aten.floor.default(%6) : torch.float32[1, 3, 8] q=none
+%9 = aten.ceil.default(%7) : torch.float32[1, 3, 8] q=none
+%10 = aten.where.self(%5, %8, %9) : torch.float32[1, 3, 8] q=none
+output(%10)
+end
+case test_propagate_fuses_permute_view_around_table#0|arm.down
+before
+%0 = placeholder x : torch.int8[2, 3, 4] q=none
+%1 = placeholder table : torch.int8[256] q=none
+%2 = aten.permute_copy.default(%0, [1, 0, 2]) : torch.int8[3, 2, 4] q=none
+%3 = aten.view_copy.default(%2, [3, 8]) : torch.int8[3, 8] q=none
+%4 = tosa.TABLE.default(%3, %1) : torch.int8[3, 8] q=none
+%5 = aten.view_copy.default(%4, [3, 2, 4]) : torch.int8[3, 2, 4] q=none
+%6 = aten.permute_copy.default(%5, [1, 0, 2]) : torch.int8[2, 3, 4] q=none
+output(%6)
+after modified=true
+%0 = placeholder x : torch.int8[2, 3, 4] q=none
+%1 = placeholder table : torch.int8[256] q=none
+%2 = tosa.TABLE.default(%0, %1) : torch.int8[2, 3, 4] q=none
+output(%2)
+end
+case test_propagate_up_moves_permute_before_table#0|arm.up
+before
+%0 = placeholder x : torch.int8[2, 3, 4] q=none
+%1 = placeholder table : torch.int8[256] q=none
+%2 = tosa.TABLE.default(%0, %1) : torch.int8[2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [1, 0, 2]) : torch.int8[3, 2, 4] q=none
+output(%3)
+after modified=true
+%0 = placeholder x : torch.int8[2, 3, 4] q=none
+%1 = placeholder table : torch.int8[256] q=none
+%2 = aten.permute_copy.default(%0, [1, 0, 2]) : torch.int8[3, 2, 4] q=none
+%3 = tosa.TABLE.default(%2, %1) : torch.int8[3, 2, 4] q=none
+output(%3)
+end
+case test_propagate_down_keeps_view_before_table_with_batched_singleton_spatial#0|arm.down
+before
+%0 = placeholder x : torch.int8[990, 1, 1, 64] q=none
+%1 = placeholder table : torch.int8[256] q=none
+%2 = aten.view_copy.default(%0, [99, 10, 64]) : torch.int8[99, 10, 64] q=none
+%3 = tosa.TABLE.default(%2, %1) : torch.int8[99, 10, 64] q=none
+output(%3)
+after modified=false same
+end
+case test_propagate_up_keeps_view_after_table_with_batched_singleton_spatial#0|arm.up
+before
+%0 = placeholder x : torch.int8[99, 10, 64] q=none
+%1 = placeholder table : torch.int8[256] q=none
+%2 = tosa.TABLE.default(%0, %1) : torch.int8[99, 10, 64] q=none
+%3 = aten.view_copy.default(%2, [990, 1, 1, 64]) : torch.int8[990, 1, 1, 64] q=none
+output(%3)
+after modified=false same
+end
+case test_propagate_down_still_sinks_view_through_table_for_safe_shapes#0|arm.down
+before
+%0 = placeholder x : torch.int8[1, 1, 1, 64] q=none
+%1 = placeholder table : torch.int8[256] q=none
+%2 = aten.view_copy.default(%0, [1, 64]) : torch.int8[1, 64] q=none
+%3 = tosa.TABLE.default(%2, %1) : torch.int8[1, 64] q=none
+output(%3)
+after modified=true
+%0 = placeholder x : torch.int8[1, 1, 1, 64] q=none
+%1 = placeholder table : torch.int8[256] q=none
+%2 = tosa.TABLE.default(%0, %1) : torch.int8[1, 1, 1, 64] q=none
+%3 = aten.view_copy.default(%2, [1, 64]) : torch.int8[1, 64] q=none
+output(%3)
+end
+case test_propagate_stops_at_per_channel_rescale#0|arm.up
+before
+%0 = placeholder x : torch.int32[2, 3, 4, 5] q=none
+%1 = tosa.RESCALE.default(%0, torch.int8, [1.0, 1.0, 1.0, 1.0, 1.0], 0, 0) : torch.int8[2, 3, 4, 5] q=none
+%2 = aten.permute_copy.default(%1, [0, 3, 1, 2]) : torch.int8[2, 5, 3, 4] q=none
+output(%2)
+after modified=false same
+end
+case test_propagate_stops_at_rescale_changing_special_dtype#0|arm.up
+before
+%0 = placeholder x : torch.int32[1, 1, 1, 15] q=none special=INT48
+%1 = tosa.RESCALE.default(%0, torch.int32, [1.0], 0, 0) : torch.int32[1, 1, 1, 15] q=none
+%2 = aten.view_copy.default(%1, [15]) : torch.int32[15] q=none
+output(%2)
+after modified=false same
+end
+case test_propagate_up_stops_at_shared_rescale_producer#0|arm.up
+before
+%0 = placeholder x : torch.int8[10, 80, 16] q=none
+%1 = placeholder y : torch.int32[10, 80, 16] q=none
+%2 = tosa.RESCALE.default(%0, torch.int32, [1.0], 0, 0) : torch.int32[10, 80, 16] q=none
+%3 = aten.permute_copy.default(%2, [1, 0, 2]) : torch.int32[80, 10, 16] q=none
+%4 = aten.add.Tensor(%2, %1) : torch.int32[10, 80, 16] q=none
+output([%3, %4])
+after modified=false same
+end
+case test_smaller_dtype_pass_restores_permute_after_narrowing_rescale_fed_by_binary_op#0|arm.up
+before
+%0 = placeholder x : torch.int32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.int32[1, 2, 3, 4] q=none
+%2 = aten.add.Tensor(%0, %1) : torch.int32[1, 2, 3, 4] q=none
+%3 = tosa.RESCALE.default(%2, torch.int8, [1.0], 0, 0) : torch.int8[1, 2, 3, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.int8[1, 3, 4, 2] q=none
+output(%4)
+after modified=true
+%0 = placeholder x : torch.int32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.int32[1, 2, 3, 4] q=none
+%2 = aten.add.Tensor(%0, %1) : torch.int32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.int32[1, 3, 4, 2] q=none
+%4 = tosa.RESCALE.default(%3, torch.int8, [1.0], 0, 0) : torch.int8[1, 3, 4, 2] q=none
+output(%4)
+end
+case test_propagate_up_crosses_same_width_rescale_fed_by_binary_op#0|arm.up
+before
+%0 = placeholder x : torch.int32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.int32[1, 2, 3, 4] q=none
+%2 = aten.add.Tensor(%0, %1) : torch.int32[1, 2, 3, 4] q=none
+%3 = tosa.RESCALE.default(%2, torch.int32, [1.0], 0, 0) : torch.int32[1, 2, 3, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.int32[1, 3, 4, 2] q=none
+output(%4)
+after modified=true
+%0 = placeholder x : torch.int32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.int32[1, 2, 3, 4] q=none
+%2 = aten.add.Tensor(%0, %1) : torch.int32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.int32[1, 3, 4, 2] q=none
+%4 = tosa.RESCALE.default(%3, torch.int32, [1.0], 0, 0) : torch.int32[1, 3, 4, 2] q=none
+output(%4)
+end
+case test_smaller_dtype_pass_restores_permute_after_narrowing_rescale_from_shared_placeholder#0|arm.up
+before
+%0 = placeholder x : torch.int32[1, 2, 3, 4] q=none
+%1 = tosa.RESCALE.default(%0, torch.int8, [1.0], 0, 0) : torch.int8[1, 2, 3, 4] q=none
+%2 = aten.neg.default(%0) : torch.int32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.int8[1, 3, 4, 2] q=none
+output([%3, %2])
+after modified=true
+%0 = placeholder x : torch.int32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.int32[1, 3, 4, 2] q=none
+%2 = tosa.RESCALE.default(%1, torch.int8, [1.0], 0, 0) : torch.int8[1, 3, 4, 2] q=none
+%3 = aten.neg.default(%0) : torch.int32[1, 2, 3, 4] q=none
+output([%2, %3])
+end
+case test_propagate_up_crosses_widening_rescale_fed_by_binary_op#0|arm.up
+before
+%0 = placeholder x : torch.int8[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.int8[1, 2, 3, 4] q=none
+%2 = aten.add.Tensor(%0, %1) : torch.int8[1, 2, 3, 4] q=none
+%3 = tosa.RESCALE.default(%2, torch.int32, [1.0], 0, 0) : torch.int32[1, 2, 3, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.int32[1, 3, 4, 2] q=none
+output(%4)
+after modified=true
+%0 = placeholder x : torch.int8[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.int8[1, 2, 3, 4] q=none
+%2 = aten.add.Tensor(%0, %1) : torch.int8[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.int8[1, 3, 4, 2] q=none
+%4 = tosa.RESCALE.default(%3, torch.int32, [1.0], 0, 0) : torch.int32[1, 3, 4, 2] q=none
+output(%4)
+end
+case test_smaller_dtype_pass_restores_permute_after_narrowing_rescale_behind_unary#0|arm.up
+before
+%0 = placeholder x : torch.int32[1, 2, 3, 4] q=none
+%1 = dim_order_ops._clone_dim_order.default(%0) : torch.int32[1, 2, 3, 4] q=none
+%2 = tosa.RESCALE.default(%1, torch.int8, [1.0], 0, 0) : torch.int8[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.int8[1, 3, 4, 2] q=none
+output(%3)
+after modified=true
+%0 = placeholder x : torch.int32[1, 2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.int32[1, 3, 4, 2] q=none
+%2 = dim_order_ops._clone_dim_order.default(%1) : torch.int32[1, 3, 4, 2] q=none
+%3 = tosa.RESCALE.default(%2, torch.int8, [1.0], 0, 0) : torch.int8[1, 3, 4, 2] q=none
+output(%3)
+end
+case test_tagged_int48_permute_does_not_propagate#0|arm.up
+before
+%0 = placeholder x : torch.int32[1, 2, 3, 4] q=none special=INT48
+%1 = aten.relu.default(%0) : torch.int32[1, 2, 3, 4] q=none special=INT48
+%2 = aten.permute_copy.default(%1, [0, 2, 3, 1]) : torch.int32[1, 3, 4, 2] q=none special=INT48
+output(%2)
+after modified=false same
+end
+case test_permute_does_not_cross_int48_rescale_input#0|arm.up
+before
+%0 = placeholder x : torch.int32[2, 3, 5] q=none special=INT48
+%1 = tosa.RESCALE.default(%0, torch.int8, [0.25], 0, 0) : torch.int8[2, 3, 5] q=none
+%2 = aten.permute_copy.default(%1, [1, 0, 2]) : torch.int8[3, 2, 5] q=none
+output(%2)
+after modified=false same
+end
+case test_propagate_keeps_output_view_after_sum_with_split_dim_remap#0|arm.up
+before
+%0 = placeholder x : torch.float32[6, 4] q=none
+%1 = aten.sum.dim_IntList(%0, [0], True) : torch.float32[1, 4] q=none
+%2 = aten.view_copy.default(%1, [1, 1, 4]) : torch.float32[1, 1, 4] q=none
+output(%2)
+after modified=false same
+end
+case test_propagate_stops_view_map_update_before_sum#0|arm.up
+before
+%0 = placeholder x : torch.float32[6, 4] q=none
+%1 = aten.slice_copy.Tensor(%0, 0, 0, 4) : torch.float32[4, 4] q=none
+%2 = aten.sum.dim_IntList(%1, [0], True) : torch.float32[1, 4] q=none
+%3 = aten.view_copy.default(%2, [1, 1, 4]) : torch.float32[1, 1, 4] q=none
+output(%3)
+after modified=false same
+end
+case test_propagate_moves_output_view_before_mean_with_split_dim_remap#0|arm.up
+before
+%0 = placeholder x : torch.float32[6, 4] q=none
+%1 = aten.mean.dim(%0, [0], True) : torch.float32[1, 4] q=none
+%2 = aten.view_copy.default(%1, [1, 1, 4]) : torch.float32[1, 1, 4] q=none
+output(%2)
+after modified=true
+%0 = placeholder x : torch.float32[6, 4] q=none
+%1 = aten.view_copy.default(%0, [6, 1, 4]) : torch.float32[6, 1, 4] q=none
+%2 = aten.mean.dim(%1, [0, 1], True) : torch.float32[1, 1, 4] q=none
+output(%2)
+end
+case test_propagate_keeps_reduction_squeeze_after_sum#0|arm.up
+before
+%0 = placeholder x : torch.float32[1, 50, 10, 20] q=none
+%1 = aten.sum.dim_IntList(%0, [-1], True) : torch.float32[1, 50, 10, 1] q=none
+%2 = aten.view_copy.default(%1, [1, 50, 10]) : torch.float32[1, 50, 10] q=none
+output(%2)
+after modified=false same
+end
+case test_propagate_keeps_unit_slice_before_reordering_view#0|arm.up
+before
+%0 = placeholder x : torch.float32[1, 3, 1, 7] q=none
+%1 = aten.slice_copy.Tensor(%0, 3, 2, 3) : torch.float32[1, 3, 1, 1] q=none
+%2 = aten.view_copy.default(%1, [1, 1, 1, 3]) : torch.float32[1, 1, 1, 3] q=none
+output(%2)
+after modified=false same
+end
+case test_propagate_stops_when_downward_inputs_are_not_equivalent_transforms#0|arm.up
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%3 = aten.add.Tensor(%2, %1) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+after modified=false same
+end
+case test_propagate_stops_split_dim_view_at_slice#0|arm.up
+before
+%0 = placeholder x : torch.float32[6, 4] q=none
+%1 = aten.slice_copy.Tensor(%0, 0, 0, 4) : torch.float32[4, 4] q=none
+%2 = aten.view_copy.default(%1, [2, 2, 4]) : torch.float32[2, 2, 4] q=none
+output(%2)
+after modified=false same
+end
+case test_propagate_stops_merged_trailing_dim_view_at_slice#0|arm.up
+before
+%0 = placeholder x : torch.float32[25, 5, 13, 7] q=none
+%1 = aten.slice_copy.Tensor(%0, 1, 0, 2) : torch.float32[25, 2, 13, 7] q=none
+%2 = aten.view_copy.default(%1, [1, 25, 182]) : torch.float32[1, 25, 182] q=none
+output(%2)
+after modified=false same
+end
+case test_propagate_stops_split_dim_view_at_cat#0|arm.up
+before
+%0 = placeholder x : torch.float32[3, 4] q=none
+%1 = placeholder y : torch.float32[3, 4] q=none
+%2 = aten.cat.default([%0, %1], 0) : torch.float32[6, 4] q=none
+%3 = aten.view_copy.default(%2, [2, 3, 4]) : torch.float32[2, 3, 4] q=none
+output(%3)
+after modified=false same
+end
+case test_propagate_keeps_channel_unit_slice_before_reordering_view#0|arm.up
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.slice_copy.Tensor(%0, 1, 0, 1) : torch.float32[1, 1, 3, 4] q=none
+%2 = aten.view_copy.default(%1, [1, 3, 4, 1]) : torch.float32[1, 3, 4, 1] q=none
+output(%2)
+after modified=false same
+end
+case test_propagate_up_stops_at_multiple_distinct_edge_nodes#0|arm.up
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.add.Tensor(%0, %1) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output(%3)
+after modified=false same
+end
+case test_propagate_up_moves_to_top_node_before_distinct_edge_nodes#0|arm.up
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.add.Tensor(%0, %1) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.relu.default(%2) : torch.float32[1, 2, 3, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+output(%4)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder y : torch.float32[1, 2, 3, 4] q=none
+%2 = aten.add.Tensor(%0, %1) : torch.float32[1, 2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%4 = aten.relu.default(%3) : torch.float32[1, 3, 4, 2] q=none
+output(%4)
+end
+case test_propagate_stops_rank_changing_view_at_slice#0|arm.up
+before
+%0 = placeholder x : torch.float32[1, 2, 3] q=none
+%1 = aten.slice_copy.Tensor(%0, 0, 0, 1) : torch.float32[1, 2, 3] q=none
+%2 = aten.view_copy.default(%1, [2, 3]) : torch.float32[2, 3] q=none
+output(%2)
+after modified=false same
+end
+case test_per_channel_affine_rank4_u55_INT#0|arm.down+ep
+before
+%0 = placeholder b__frozen_param0 : torch.int16[240] kind=buffer q=none
+%1 = tosa.RESCALE.default(%0, torch.int32, [1.0], 0, 0) : torch.int32[240] q=in{}/out{}
+%2 = placeholder b__frozen_param1 : torch.int16[240] kind=buffer q=none
+%3 = tosa.RESCALE.default(%2, torch.int32, [2048.0], 0, 0) : torch.int32[240] q=in{}/out{}
+%4 = placeholder b__frozen_param2 : torch.int16[240] kind=buffer q=none
+%5 = tosa.RESCALE.default(%4, torch.int32, [1.0], 0, 0) : torch.int32[240] q=in{}/out{}
+%6 = placeholder b__frozen_param3 : torch.int16[240] kind=buffer q=none
+%7 = tosa.RESCALE.default(%6, torch.int32, [2048.0], 0, 0) : torch.int32[240] q=in{}/out{}
+%8 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int16[1, 240] q=none
+%9 = aten.view_copy.default(%8, [1, 1, 1, 240]) : torch.int16[1, 1, 1, 240] q=in{0}/out{0} qp=in0:0.000244140625:0:-32767:32767:torch.int16 qp=out0:0.000244140625:0:-32767:32767:torch.int16
+%10 = tosa.RESCALE.default(%9, torch.int32, [1.0], 0, 0) : torch.int32[1, 1, 1, 240] q=in{}/out{}
+%11 = aten.view_copy.default(%1, [1, 1, 1, 240]) : torch.int32[1, 1, 1, 240] q=none
+%12 = aten.mul.Tensor(%10, %11) : torch.int32[1, 1, 1, 240] q=in{0,1}/out{0} qp=in0:0.000244140625:0:-2147483648:2147483647:torch.int32 qp=in1:0.000244140625:0:-2147483648:2147483647:torch.int32 qp=out0:5.960464477539063e-08:0:-2147483648:2147483647:torch.int32
+%13 = tosa.RESCALE.default(%12, torch.int16, [0.000244140625], 0, 0) : torch.int16[1, 1, 1, 240] q=in{}/out{}
+%14 = tosa.RESCALE.default(%13, torch.int32, [2048.0], 0, 0) : torch.int32[1, 1, 1, 240] q=in{}/out{}
+%15 = aten.view_copy.default(%3, [1, 1, 1, 240]) : torch.int32[1, 1, 1, 240] q=none
+%16 = aten.add.Tensor(%14, %15) : torch.int32[1, 1, 1, 240] q=in{0,1}/out{0} qp=in0:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32 qp=in1:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32 qp=out0:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32
+%17 = tosa.RESCALE.default(%16, torch.int16, [0.00048828125], 0, 0) : torch.int16[1, 1, 1, 240] q=in{}/out{}
+%18 = aten.permute_copy.default(%17, [0, 3, 1, 2]) : torch.int16[1, 240, 1, 1] q=in{0}/out{0} qp=in0:0.000244140625:0:-32767:32767:torch.int16 qp=out0:0.000244140625:0:-32767:32767:torch.int16
+%19 = aten.view_copy.default(%18, [1, 240]) : torch.int16[1, 240] q=in{0}/out{0} qp=in0:0.000244140625:0:-32767:32767:torch.int16 qp=out0:0.000244140625:0:-32767:32767:torch.int16
+%20 = tosa.RESCALE.default(%19, torch.int32, [1.0], 0, 0) : torch.int32[1, 240] q=in{}/out{}
+%21 = aten.view_copy.default(%5, [1, 240]) : torch.int32[1, 240] q=none
+%22 = aten.mul.Tensor(%20, %21) : torch.int32[1, 240] q=in{0,1}/out{0} qp=in0:0.000244140625:0:-2147483648:2147483647:torch.int32 qp=in1:0.000244140625:0:-2147483648:2147483647:torch.int32 qp=out0:5.960464477539063e-08:0:-2147483648:2147483647:torch.int32
+%23 = tosa.RESCALE.default(%22, torch.int16, [0.000244140625], 0, 0) : torch.int16[1, 240] q=in{}/out{}
+%24 = tosa.RESCALE.default(%23, torch.int32, [2048.0], 0, 0) : torch.int32[1, 240] q=in{}/out{}
+%25 = aten.view_copy.default(%7, [1, 240]) : torch.int32[1, 240] q=none
+%26 = aten.add.Tensor(%24, %25) : torch.int32[1, 240] q=in{0,1}/out{0} qp=in0:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32 qp=in1:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32 qp=out0:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32
+%27 = tosa.RESCALE.default(%26, torch.int16, [0.00048828125], 0, 0) : torch.int16[1, 240] q=in{}/out{}
+output([%27])
+after modified=true
+%0 = placeholder b__frozen_param0 : torch.int16[240] kind=buffer q=none
+%1 = tosa.RESCALE.default(%0, torch.int32, [1.0], 0, 0) : torch.int32[240] q=in{}/out{}
+%2 = placeholder b__frozen_param1 : torch.int16[240] kind=buffer q=none
+%3 = tosa.RESCALE.default(%2, torch.int32, [2048.0], 0, 0) : torch.int32[240] q=in{}/out{}
+%4 = placeholder b__frozen_param2 : torch.int16[240] kind=buffer q=none
+%5 = tosa.RESCALE.default(%4, torch.int32, [1.0], 0, 0) : torch.int32[240] q=in{}/out{}
+%6 = placeholder b__frozen_param3 : torch.int16[240] kind=buffer q=none
+%7 = tosa.RESCALE.default(%6, torch.int32, [2048.0], 0, 0) : torch.int32[240] q=in{}/out{}
+%8 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int16[1, 240] q=none
+%9 = aten.view_copy.default(%8, [1, 1, 1, 240]) : torch.int16[1, 1, 1, 240] q=in{0}/out{0} qp=in0:0.000244140625:0:-32767:32767:torch.int16 qp=out0:0.000244140625:0:-32767:32767:torch.int16
+%10 = tosa.RESCALE.default(%9, torch.int32, [1.0], 0, 0) : torch.int32[1, 1, 1, 240] q=in{}/out{}
+%11 = aten.view_copy.default(%1, [1, 1, 1, 240]) : torch.int32[1, 1, 1, 240] q=none
+%12 = aten.mul.Tensor(%10, %11) : torch.int32[1, 1, 1, 240] q=in{0,1}/out{0} qp=in0:0.000244140625:0:-2147483648:2147483647:torch.int32 qp=in1:0.000244140625:0:-2147483648:2147483647:torch.int32 qp=out0:5.960464477539063e-08:0:-2147483648:2147483647:torch.int32
+%13 = tosa.RESCALE.default(%12, torch.int16, [0.000244140625], 0, 0) : torch.int16[1, 1, 1, 240] q=in{}/out{}
+%14 = tosa.RESCALE.default(%13, torch.int32, [2048.0], 0, 0) : torch.int32[1, 1, 1, 240] q=in{}/out{}
+%15 = aten.view_copy.default(%3, [1, 1, 1, 240]) : torch.int32[1, 1, 1, 240] q=none
+%16 = aten.add.Tensor(%14, %15) : torch.int32[1, 1, 1, 240] q=in{0,1}/out{0} qp=in0:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32 qp=in1:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32 qp=out0:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32
+%17 = tosa.RESCALE.default(%16, torch.int16, [0.00048828125], 0, 0) : torch.int16[1, 1, 1, 240] q=in{}/out{}
+%18 = aten.view_copy.default(%17, [1, 240]) : torch.int16[1, 240] q=in{0}/out{0} qp=in0:0.000244140625:0:-32767:32767:torch.int16 qp=out0:0.000244140625:0:-32767:32767:torch.int16
+%19 = tosa.RESCALE.default(%18, torch.int32, [1.0], 0, 0) : torch.int32[1, 240] q=in{}/out{}
+%20 = aten.view_copy.default(%5, [1, 240]) : torch.int32[1, 240] q=none
+%21 = aten.mul.Tensor(%19, %20) : torch.int32[1, 240] q=in{0,1}/out{0} qp=in0:0.000244140625:0:-2147483648:2147483647:torch.int32 qp=in1:0.000244140625:0:-2147483648:2147483647:torch.int32 qp=out0:5.960464477539063e-08:0:-2147483648:2147483647:torch.int32
+%22 = tosa.RESCALE.default(%21, torch.int16, [0.000244140625], 0, 0) : torch.int16[1, 240] q=in{}/out{}
+%23 = tosa.RESCALE.default(%22, torch.int32, [2048.0], 0, 0) : torch.int32[1, 240] q=in{}/out{}
+%24 = aten.view_copy.default(%7, [1, 240]) : torch.int32[1, 240] q=none
+%25 = aten.add.Tensor(%23, %24) : torch.int32[1, 240] q=in{0,1}/out{0} qp=in0:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32 qp=in1:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32 qp=out0:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32
+%26 = tosa.RESCALE.default(%25, torch.int16, [0.00048828125], 0, 0) : torch.int16[1, 240] q=in{}/out{}
+output([%26])
+end
+case test_per_channel_affine_rank4_u55_INT#1|arm.up+ep
+before
+%0 = placeholder b__frozen_param0 : torch.int16[240] kind=buffer q=none
+%1 = tosa.RESCALE.default(%0, torch.int32, [1.0], 0, 0) : torch.int32[240] q=in{}/out{}
+%2 = placeholder b__frozen_param1 : torch.int16[240] kind=buffer q=none
+%3 = tosa.RESCALE.default(%2, torch.int32, [2048.0], 0, 0) : torch.int32[240] q=in{}/out{}
+%4 = placeholder b__frozen_param2 : torch.int16[240] kind=buffer q=none
+%5 = tosa.RESCALE.default(%4, torch.int32, [1.0], 0, 0) : torch.int32[240] q=in{}/out{}
+%6 = placeholder b__frozen_param3 : torch.int16[240] kind=buffer q=none
+%7 = tosa.RESCALE.default(%6, torch.int32, [2048.0], 0, 0) : torch.int32[240] q=in{}/out{}
+%8 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int16[1, 240] q=none
+%9 = aten.view_copy.default(%8, [1, 1, 1, 240]) : torch.int16[1, 1, 1, 240] q=in{0}/out{0} qp=in0:0.000244140625:0:-32767:32767:torch.int16 qp=out0:0.000244140625:0:-32767:32767:torch.int16
+%10 = tosa.RESCALE.default(%9, torch.int32, [1.0], 0, 0) : torch.int32[1, 1, 1, 240] q=in{}/out{}
+%11 = aten.view_copy.default(%1, [1, 1, 1, 240]) : torch.int32[1, 1, 1, 240] q=none
+%12 = aten.mul.Tensor(%10, %11) : torch.int32[1, 1, 1, 240] q=in{0,1}/out{0} qp=in0:0.000244140625:0:-2147483648:2147483647:torch.int32 qp=in1:0.000244140625:0:-2147483648:2147483647:torch.int32 qp=out0:5.960464477539063e-08:0:-2147483648:2147483647:torch.int32
+%13 = tosa.RESCALE.default(%12, torch.int16, [0.000244140625], 0, 0) : torch.int16[1, 1, 1, 240] q=in{}/out{}
+%14 = tosa.RESCALE.default(%13, torch.int32, [2048.0], 0, 0) : torch.int32[1, 1, 1, 240] q=in{}/out{}
+%15 = aten.view_copy.default(%3, [1, 1, 1, 240]) : torch.int32[1, 1, 1, 240] q=none
+%16 = aten.add.Tensor(%14, %15) : torch.int32[1, 1, 1, 240] q=in{0,1}/out{0} qp=in0:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32 qp=in1:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32 qp=out0:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32
+%17 = tosa.RESCALE.default(%16, torch.int16, [0.00048828125], 0, 0) : torch.int16[1, 1, 1, 240] q=in{}/out{}
+%18 = aten.view_copy.default(%17, [1, 240]) : torch.int16[1, 240] q=in{0}/out{0} qp=in0:0.000244140625:0:-32767:32767:torch.int16 qp=out0:0.000244140625:0:-32767:32767:torch.int16
+%19 = tosa.RESCALE.default(%18, torch.int32, [1.0], 0, 0) : torch.int32[1, 240] q=in{}/out{}
+%20 = aten.view_copy.default(%5, [1, 240]) : torch.int32[1, 240] q=none
+%21 = aten.mul.Tensor(%19, %20) : torch.int32[1, 240] q=in{0,1}/out{0} qp=in0:0.000244140625:0:-2147483648:2147483647:torch.int32 qp=in1:0.000244140625:0:-2147483648:2147483647:torch.int32 qp=out0:5.960464477539063e-08:0:-2147483648:2147483647:torch.int32
+%22 = tosa.RESCALE.default(%21, torch.int16, [0.000244140625], 0, 0) : torch.int16[1, 240] q=in{}/out{}
+%23 = tosa.RESCALE.default(%22, torch.int32, [2048.0], 0, 0) : torch.int32[1, 240] q=in{}/out{}
+%24 = aten.view_copy.default(%7, [1, 240]) : torch.int32[1, 240] q=none
+%25 = aten.add.Tensor(%23, %24) : torch.int32[1, 240] q=in{0,1}/out{0} qp=in0:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32 qp=in1:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32 qp=out0:1.1920928955078125e-07:0:-2147483648:2147483647:torch.int32
+%26 = tosa.RESCALE.default(%25, torch.int16, [0.00048828125], 0, 0) : torch.int16[1, 240] q=in{}/out{}
+output([%26])
+after modified=false same
+end
