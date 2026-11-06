@@ -10,8 +10,9 @@
 use std::collections::HashMap;
 
 use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeMeta, NodeOp};
-use crate::fx_meta::{QParamMap, TensorFacts};
+use crate::fx_meta::TensorFacts;
 use crate::layout::ctx::LayoutCtx;
+use crate::layout::meta;
 use crate::layout::shape::mark_contiguous;
 
 const PERMUTE_COPY: &str = "aten.permute_copy.default";
@@ -73,7 +74,8 @@ fn normalize_inputs(ctx: &mut LayoutCtx<'_>) -> bool {
         meta.set_val_dim_order(identity(order.len()));
 
         let transpose = inverse(&order);
-        let permute_meta = copied_meta(ctx.node(id).meta.clone(), permuted(&boundary, &transpose));
+        let permute_meta =
+            boundary_permute_meta(&ctx.node(id).meta, permuted(&boundary, &transpose));
         let name = format!("{}_logical", ctx.node(id).name);
         let permute = ctx.inserting_after(id, |ctx| {
             ctx.create_node(
@@ -126,7 +128,7 @@ fn rewrite_output_arg(ctx: &mut LayoutCtx<'_>, arg: &IrArg) -> (IrArg, bool) {
             if is_identity(&order) || order.len() != shape.len() {
                 return (arg.clone(), false);
             }
-            let meta = copied_meta(node.meta.clone(), permuted(&shape, &order));
+            let meta = boundary_permute_meta(&node.meta, permuted(&shape, &order));
             let name = format!("{}_dim_order", node.name);
             // Each output permute goes directly after its producer, so a
             // producer returned twice gets the second permute first.
@@ -158,22 +160,11 @@ fn rewrite_output_arg(ctx: &mut LayoutCtx<'_>, arg: &IrArg) -> (IrArg, bool) {
     }
 }
 
-/// `create_node(..., from_node=node)` (`arm_pass_utils.py:173-182`): every key
-/// of the source meta, with present qparam maps emptied. The value is
-/// `permute_fake_tensor_metadata` (`arm_pass_utils.py:820-830`): a fresh
-/// contiguous tensor, so the dim order is the identity.
-fn copied_meta(mut meta: NodeMeta, shape: Vec<i64>) -> NodeMeta {
-    if meta.input_qparams().is_some() {
-        meta.set_empty_input_qparams();
-    }
-    if meta.output_qparams().is_some() {
-        meta.set_output_qparams(QParamMap::new());
-    }
-    let rank = shape.len();
-    let dtype = dtype_of(&meta);
-    meta.set_tensor_facts(TensorFacts::new(shape, dtype));
-    meta.set_val_dim_order(identity(rank));
-    meta
+/// `create_node(..., from_node=node)` ([`meta::from_node`]) holding
+/// `permute_fake_tensor_metadata` (`arm_pass_utils.py:820-830`): `shape`, in
+/// the boundary node's dtype.
+fn boundary_permute_meta(source: &NodeMeta, shape: Vec<i64>) -> NodeMeta {
+    meta::from_node(source, TensorFacts::new(shape, dtype_of(source)))
 }
 
 fn dtype_of(meta: &NodeMeta) -> String {
@@ -209,6 +200,7 @@ fn to_i64(dims: &[usize]) -> Vec<i64> {
 mod tests {
     use super::*;
     use crate::fx_ir::NodeId;
+    use crate::fx_meta::QParamMap;
     use crate::layout::testing::*;
     use crate::test_ir::qparam;
 

@@ -9,7 +9,9 @@
 //! derives [`TensorFacts`] with one rule per op family the layout passes touch:
 //! view and permute copies, pointwise ops with numpy broadcasting, transparent
 //! copies, `mean.dim` and `sum.dim_IntList`, `slice_copy`, `cat` and
-//! `backend.tosa.RESCALE`. A target without a rule is an error, never a guess.
+//! `backend.tosa.RESCALE`, plus the TOSA convolutions, pools and RESIZE the
+//! explicit-mode rewrites create, ported from rc4's fake kernels (`shape/tosa.rs`).
+//! A target without a rule is an error, never a guess.
 //!
 //! Three rules decide what a refresh changes:
 //!
@@ -31,7 +33,9 @@
 //!   dtype; multi-operand ops promote their value operands with torch's rules,
 //!   which is the identity when they agree, as TOSA requires; comparisons,
 //!   `isinf`, `isnan` and logical ops give `torch.bool`; RESCALE and dtype casts
-//!   take their dtype argument.
+//!   take their dtype argument; the TOSA convolutions, pools and RESIZE give
+//!   their fake kernel's dtype for the input dtype rc4 would see, which a
+//!   quantized node's input qparams record (`shape/tosa.rs`).
 //! - **Qparams stay.** rc4 assigns only `meta["val"]` when it refreshes a node,
 //!   and the propagation passes copy meta wholesale when they clone a copy
 //!   (`backends/transforms/propagate_view_copy_permute_pass.py:878`,
@@ -50,6 +54,11 @@ use crate::fx_ir::{broadcast_shapes, normalize_dim, IrArg, IrGraph, IrNode, Node
 use crate::fx_meta::TensorFacts;
 use crate::fx_target::{classify_ir_target, IrTargetKind};
 use crate::layout::pointwise::{is_pointwise, is_transparent_copy};
+
+pub(crate) mod tosa;
+
+pub(crate) use tosa::tosa_op_name;
+use tosa::TosaOp;
 
 const PERMUTE_COPY: &str = "aten.permute_copy.default";
 const VIEW_COPY: &str = "aten.view_copy.default";
@@ -121,9 +130,14 @@ enum Rule {
     Slice,
     Cat,
     Rescale,
+    /// A TOSA op an explicit-mode rewrite creates (`shape/tosa.rs`).
+    Tosa(TosaOp),
 }
 
 fn rule(target: &str) -> Option<Rule> {
+    if let Some(op) = TosaOp::of(target) {
+        return Some(Rule::Tosa(op));
+    }
     match target {
         PERMUTE_COPY => Some(Rule::Permute),
         VIEW_COPY | VIEW_DEFAULT => Some(Rule::View),
@@ -180,23 +194,42 @@ pub(crate) fn refreshed_meta(graph: &IrGraph, id: NodeId) -> Result<NodeMeta, Sh
 
 /// Value facts `id` would have for its current operands.
 pub(crate) fn infer_facts(graph: &IrGraph, id: NodeId) -> Result<TensorFacts, ShapeError> {
-    infer_node_facts(graph.node(id), &|input| {
-        graph
-            .node_opt(input)
-            .and_then(|node| node.meta.tensor_facts())
-    })
+    infer_node_facts_with(
+        graph.node(id),
+        &|input| {
+            graph
+                .node_opt(input)
+                .and_then(|node| node.meta.tensor_facts())
+        },
+        &|input| graph.constant_shape(&IrArg::Node(input)),
+    )
 }
 
 /// Value facts `node` would have, reading operand facts through `facts_of`.
 ///
 /// `node` need not be in a graph: a planner can pass a node with rewritten
 /// arguments, and a lookup that answers for operands it has not created yet.
+/// No operand is a `CONST_SHAPE` here; [`infer_node_facts_with`] reads them.
 pub(crate) fn infer_node_facts<'a>(
     node: &IrNode,
     facts_of: &dyn Fn(NodeId) -> Option<&'a TensorFacts>,
 ) -> Result<TensorFacts, ShapeError> {
+    infer_node_facts_with(node, facts_of, &|_| None)
+}
+
+/// [`infer_node_facts`], also reading the `int[]` a `CONST_SHAPE` operand
+/// holds through `shape_values_of` (a TOSA RESIZE's scale, offset and border).
+pub(crate) fn infer_node_facts_with<'a>(
+    node: &IrNode,
+    facts_of: &dyn Fn(NodeId) -> Option<&'a TensorFacts>,
+    shape_values_of: &dyn Fn(NodeId) -> Option<Vec<i64>>,
+) -> Result<TensorFacts, ShapeError> {
     let rule = rule(&node.target).ok_or_else(|| ShapeError::Unsupported(node.target.clone()))?;
-    let operands = Operands { node, facts_of };
+    let operands = Operands {
+        node,
+        facts_of,
+        shape_values_of,
+    };
     match rule {
         Rule::Permute => operands.permute(),
         Rule::View => operands.view(),
@@ -206,6 +239,7 @@ pub(crate) fn infer_node_facts<'a>(
         Rule::Slice => operands.slice(),
         Rule::Cat => operands.cat(),
         Rule::Rescale => operands.rescale(),
+        Rule::Tosa(op) => operands.tosa(op),
     }
 }
 
@@ -221,6 +255,8 @@ fn has_input_nodes(node: &IrNode) -> bool {
 struct Operands<'n, 'a> {
     node: &'n IrNode,
     facts_of: &'n dyn Fn(NodeId) -> Option<&'a TensorFacts>,
+    /// The `int[]` of a `CONST_SHAPE` operand.
+    shape_values_of: &'n dyn Fn(NodeId) -> Option<Vec<i64>>,
 }
 
 impl<'n, 'a> Operands<'n, 'a> {
