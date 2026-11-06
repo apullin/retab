@@ -5163,6 +5163,11 @@ class PropagationGraph:
         "mm": 0.25,
         "dead": 0.12,
         "qparams": 0.5,
+        "slice_view": 0.8,
+        "view_slice": 0.8,
+        "mean_view": 0.6,
+        "view_mean": 0.6,
+        "permute_mean": 0.6,
     }
 
     def __init__(self, rng: random.Random, b: Builder) -> None:
@@ -5170,6 +5175,26 @@ class PropagationGraph:
         self.b = b
         self.pool: list[torch.fx.Node] = []
         self.inputs = 0
+
+    def random_slice(self, x):
+        rng = self.rng
+        shape = list(x.meta["val"].shape)
+        dim = rng.randrange(len(shape))
+        size = shape[dim]
+        if rng.random() < 0.45:
+            start = rng.randrange(size)
+            end = start + 1
+        else:
+            start = rng.randrange(size)
+            end = rng.randint(start + 1, size)
+        return self.b.call(A.slice_copy.Tensor, x, dim - len(shape) if rng.random() < 0.15 else dim, start, end)
+
+    def random_keepdim_mean(self, x):
+        rank = x.meta["val"].dim()
+        dims = sorted(self.rng.sample(range(rank), self.rng.randint(1, rank)))
+        if self.rng.random() < 0.2:
+            dims = [d - rank for d in dims]
+        return self.b.call(A.mean.dim, x, dims, True)
 
     def shape(self, rank: int, max_numel: int = 180) -> list[int]:
         while True:
@@ -5429,6 +5454,30 @@ class PropagationGraph:
             self.keep(b.call(A.mm.default, x, w))
         elif kind == "dead":
             self.unary(self.pick())
+        elif kind in ("slice_view", "view_slice", "mean_view", "view_mean", "permute_mean"):
+            x = self.pick()
+            if x.meta["val"].dim() == 0:
+                return
+            if kind == "slice_view":
+                s = self.random_slice(x)
+                self.keep(b.view(s, self.view_shape(list(s.meta["val"].shape))))
+            elif kind == "view_slice":
+                v = b.view(x, self.view_shape(list(x.meta["val"].shape)))
+                if v.meta["val"].dim():
+                    self.keep(self.random_slice(v))
+            elif kind == "mean_view":
+                m = self.random_keepdim_mean(x)
+                self.keep(b.view(m, self.view_shape(list(m.meta["val"].shape))))
+            elif kind == "view_mean":
+                v = b.view(x, self.view_shape(list(x.meta["val"].shape)))
+                if v.meta["val"].dim():
+                    self.keep(self.random_keepdim_mean(v))
+            else:
+                rank = x.meta["val"].dim()
+                if rng.random() < 0.5:
+                    self.keep(self.random_keepdim_mean(b.permute(x, self.permutation(rank))))
+                else:
+                    self.keep(b.permute(self.random_keepdim_mean(x), self.permutation(rank)))
         elif kind == "qparams":
             computed = [n for n in self.pool if n.op == "call_function" and not _is_table_op(n)]
             if computed:
