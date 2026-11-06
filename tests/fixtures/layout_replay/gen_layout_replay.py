@@ -10,10 +10,11 @@ checkout can't shadow the installed package:
 
     cd /tmp && <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py
 
-Options: `--pass NAME` writes one fixture, `--random N` and `--seed S` change
-the random cases, `--out DIR` writes elsewhere, `--case NAME` prints one case.
-The output is stable for a given torch, ExecuTorch and CPython `random`
-(written with torch 2.15.0, ExecuTorch 1.6.0 and CPython 3.12).
+Options: `--pass NAME` writes one fixture (repeat it for several), `--random N`
+and `--seed S` change the random cases, `--out DIR` writes elsewhere, `--case
+NAME` prints one case (of `--pass`). The output is stable for a given torch, ExecuTorch and CPython
+`random` (written with torch 2.15.0, torchao 0.18.0, ExecuTorch 1.6.0 and
+CPython 3.12).
 
 How the graphs are built and run:
 
@@ -55,6 +56,60 @@ and `[...]` for lists and tuples; kwargs follow as `name=value`. The value is
 `in{keys}` / `out{keys}` for present `input_qparams` / `output_qparams` maps,
 `{}` when empty) and `dead` (a call node the output doesn't reach).
 `after modified=<bool> same` means the after graph prints exactly like before.
+
+Pipeline-captured fixtures (APU-135 P2)
+---------------------------------------
+
+The P2 fixtures (`rewrite_conv*.txt`, `rewrite_max_pool2d.txt`,
+`remove_getitem.txt`, `rewrite_upsample.txt`, `rewrite_avg_pool2d*.txt`) are
+not hand-built: small nn.Modules are quantized with rc4's TOSAQuantizer (INT
+profiles) and lowered with `to_edge_transform_and_lower` and the
+TOSAPartitioner, and capture passes registered with
+`register_pass_insertions_before/after` (arm_pass_manager.py:278-296) record
+the graph the real ArmPassManager pipeline hands to the target pass and the
+graph it gets back. `modified` is whether the pass changed the graph (the
+hooks can't see the flag the pass returned). Every case seeds torch with
+`SEED` before it builds the model and its inputs, so the output is stable for
+a given torch, torchao and ExecuTorch.
+
+- `rewrite_conv.txt`: RewriteConvPass on INT8 (per-tensor `_pt`, per-channel
+  `_pc`) and A8W4 (`_a8w4`) models; `rewrite_conv_a16w8.txt` and
+  `rewrite_conv_a16w8_u55.txt`: A16W8 models on TOSA-1.0+INT+int16 and on the
+  U55 subset (`TOSA-1.0+INT+int16+int4+u55`).
+- `remove_getitem.txt`: RemoveGetItemPass (arm_pass_manager.py:605) on the
+  max-pool models, which shows that rc4's MAX_POOL2D keeps the input qparams
+  of `max_pool2d_with_indices` and drops the getitem's output qparams.
+- `rewrite_max_pool2d.txt`: RewriteMaxPool2dPass. RETAB has no
+  RemoveGetItemPass and keeps `max_pool2d_with_indices` + `getitem(0)`, so
+  each case also comes as `<case>_with_indices`: the same rc4 before graph
+  with RemoveGetItem undone (the pool becomes `max_pool2d_with_indices` with
+  the qparam maps rc4 gave it before RemoveGetItem, followed by a getitem with
+  the getitem's maps), and the same after graph.
+- `rewrite_upsample.txt`: RewriteUpsamplePass.
+- `rewrite_avg_pool2d.txt`: RewriteAvgPool2dPass alone (the zero points are
+  still `aten.full` nodes); `rewrite_avg_pool2d_aot.txt`: the graph before
+  RewriteAvgPool2dPass against the graph after the ComputeConstantOpsAOTPass
+  that follows it (arm_pass_manager.py:698-699), where the zero points are
+  `<full>_pre_computed` placeholders quantized with the pool's output qparams.
+
+These files start with a `format 2` line and record more per node:
+
+- `q=` holds each qparam's value, `{key:value,...}`: a per-tensor value is
+  `dtype(scale,zp,qmin,qmax)` and a per-channel one
+  `dtype([scales],[zps],qmin,qmax,axis=A)`, with floats in Python repr and no
+  spaces, e.g. `q=in{0:torch.int8(0.0176,10,-128,127)}/out{}`.
+- `data=hex:<bytes>` on every constant placeholder (and `get_attr` node): the
+  tensor's contiguous little-endian bytes in its own dtype, or
+  `data=sha256:<digest>` of those bytes above 4 KiB. The generator refuses a
+  before graph with a sha256 constant, so every replay imports real data.
+- `special=INT48|INT4|SHAPE|...`: the node's `tosa_special_dtype`.
+- `no_fuse`: the node's `do_not_fuse_duplicate` flag is set.
+- vals that aren't tensors print as tuples, `(torch.int8[1, 3, 4, 4],
+  torch.int64[1, 3, 4, 4])` for `max_pool2d_with_indices` and `(4, 2, 4, 2)`
+  for CONST_SHAPE.
+- `get_attr NAME` nodes print like placeholders; devices, layouts and memory
+  formats print as `device:cpu`, `layout:torch.strided` and
+  `memory_format:torch.contiguous_format`.
 """
 
 from __future__ import annotations
@@ -1499,6 +1554,1051 @@ def random_case(profile: str, seed: int) -> Callable[[Builder], None]:
 
 
 # --------------------------------------------------------------------------
+# Pipeline-captured fixtures (APU-135 P2)
+# --------------------------------------------------------------------------
+
+FORMAT = 2
+DATA_HEX_LIMIT = 4096
+NN = torch.nn
+FN = torch.nn.functional
+
+
+class Ref:
+    """A node reference in a captured graph: the node's position."""
+
+    __slots__ = ("index",)
+
+    def __init__(self, index: int) -> None:
+        self.index = index
+
+
+class DNode:
+    """One node of a captured graph, with everything a fixture line prints."""
+
+    def __init__(self, op: str, name: str) -> None:
+        self.op = op
+        self.name = name
+        self.target = ""
+        self.args: list = []
+        self.kwargs: dict = {}
+        self.val = ""
+        self.shape: list[int] | None = None
+        self.dim_order: list[int] | None = None
+        self.kind: str | None = None
+        self.data: str | None = None
+        self.special: str | None = None
+        self.no_fuse = False
+        self.qin: dict | None = None
+        self.qout: dict | None = None
+
+    def copy(self) -> "DNode":
+        node = DNode(self.op, self.name)
+        node.__dict__.update(self.__dict__)
+        node.args = list(self.args)
+        node.kwargs = dict(self.kwargs)
+        return node
+
+
+class Captured:
+    """A captured graph: its nodes and the output node's argument."""
+
+    def __init__(self, nodes: list[DNode], output) -> None:
+        self.nodes = nodes
+        self.output = output
+
+    def lines(self) -> list[str]:
+        return format_captured(self)
+
+
+def fmt_val2(val) -> str:
+    if isinstance(val, torch.Tensor):
+        return fmt_val(val)
+    if isinstance(val, (list, tuple)):
+        return "(" + ", ".join(fmt_val2(item) for item in val) + ")"
+    if isinstance(val, (int, torch.SymInt)) and not isinstance(val, bool):
+        return str(int(val))
+    raise TypeError(f"cannot print val {val!r} ({type(val).__name__})")
+
+
+def fmt_arg2(arg) -> str:
+    if isinstance(arg, Ref):
+        return f"%{arg.index}"
+    if isinstance(arg, torch.device):
+        return f"device:{arg}"
+    if isinstance(arg, torch.layout):
+        return f"layout:{arg}"
+    if isinstance(arg, torch.memory_format):
+        return f"memory_format:{arg}"
+    if isinstance(arg, (list, tuple)):
+        return "[" + ", ".join(fmt_arg2(a) for a in arg) + "]"
+    return fmt_arg(arg, {})
+
+
+def fmt_quant_args(qargs) -> str:
+    dtype = str(qargs.dtype)
+    if qargs.per_channel:
+        if not isinstance(qargs.scale, (list, tuple)) or not isinstance(
+            qargs.zp, (list, tuple)
+        ):
+            raise TypeError(f"per-channel qparams without lists: {qargs}")
+        scales = ",".join(repr(float(s)) for s in qargs.scale)
+        zps = ",".join(str(int(z)) for z in qargs.zp)
+        return (
+            f"{dtype}([{scales}],[{zps}],{int(qargs.qmin)},{int(qargs.qmax)},"
+            f"axis={int(qargs.axis)})"
+        )
+    text = f"{dtype}({float(qargs.scale)!r},{int(qargs.zp)},{int(qargs.qmin)},{int(qargs.qmax)}"
+    if int(qargs.axis) != 0:
+        text += f",axis={int(qargs.axis)}"
+    return text + ")"
+
+
+def fmt_qmap(qmap: dict) -> str:
+    return "{" + ",".join(f"{k}:{fmt_quant_args(qmap[k])}" for k in sorted(qmap)) + "}"
+
+
+def fmt_qparams2(node: DNode) -> str:
+    parts = []
+    if node.qin is not None:
+        parts.append(f"in{fmt_qmap(node.qin)}")
+    if node.qout is not None:
+        parts.append(f"out{fmt_qmap(node.qout)}")
+    return "/".join(parts) if parts else "none"
+
+
+def tensor_bytes(tensor: torch.Tensor) -> bytes:
+    flat = tensor.detach().cpu().contiguous().reshape(-1)
+    return flat.view(torch.uint8).numpy().tobytes()
+
+
+def encode_data(tensor: torch.Tensor) -> str:
+    raw = tensor_bytes(tensor)
+    if len(raw) <= DATA_HEX_LIMIT:
+        return "hex:" + raw.hex()
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def special_dtype_name(value) -> str:
+    return getattr(value, "name", None) or str(value)
+
+
+def capture_graph(gm: torch.fx.GraphModule, ep: ExportedProgram) -> Captured:
+    """`gm` as DNodes: targets, args, vals, qparams and constant data."""
+    from executorch.backends.arm.tosa.mapping import TosaSpecialDtype
+
+    nodes = list(gm.graph.nodes)
+    output = gm.graph.output_node()
+    if nodes[-1] is not output:
+        raise AssertionError("the output node must be last")
+    pos = {node: index for index, node in enumerate(nodes)}
+
+    def convert(arg):
+        if isinstance(arg, torch.fx.Node):
+            return Ref(pos[arg])
+        if isinstance(arg, (list, tuple)):
+            return [convert(a) for a in arg]
+        if isinstance(arg, dict):
+            raise TypeError(f"cannot capture a dict argument {arg!r}")
+        return arg
+
+    signature = ep.graph_signature
+    bindings = {}
+    for mapping, kind in (
+        (signature.inputs_to_parameters, "param"),
+        (signature.inputs_to_buffers, "buffer"),
+        (signature.inputs_to_lifted_tensor_constants, "constant"),
+    ):
+        for name, target in mapping.items():
+            bindings[name] = (kind, target)
+
+    def constant_tensor(target: str):
+        if target in ep.state_dict:
+            return ep.state_dict[target]
+        if target in ep.constants:
+            return ep.constants[target]
+        return None
+
+    captured = []
+    for node in nodes[:-1]:
+        dnode = DNode(node.op, node.name)
+        tensor = None
+        if node.op == "placeholder":
+            if node.name in bindings:
+                dnode.kind, target = bindings[node.name]
+                tensor = constant_tensor(target)
+                if tensor is None:
+                    raise AssertionError(f"no data for constant placeholder {node.name}")
+        elif node.op == "get_attr":
+            tensor = gm
+            for part in str(node.target).split("."):
+                tensor = getattr(tensor, part)
+            if not isinstance(tensor, torch.Tensor):
+                raise TypeError(f"get_attr {node.name} is not a tensor")
+        elif node.op == "call_function":
+            dnode.target = retab_target(node.target)
+            dnode.args = convert(list(node.args))
+            dnode.kwargs = {k: convert(v) for k, v in node.kwargs.items()}
+        else:
+            raise AssertionError(f"unexpected node op {node.op}")
+        if "val" not in node.meta:
+            raise AssertionError(f"{node.name} has no val")
+        val = node.meta["val"]
+        dnode.val = fmt_val2(val)
+        if isinstance(val, torch.Tensor):
+            dnode.shape = [int(d) for d in val.shape]
+            order = list(val.dim_order())
+            if order != list(range(len(order))):
+                dnode.dim_order = order
+        if tensor is not None:
+            if not isinstance(val, torch.Tensor) or (
+                tensor.dtype != val.dtype or list(tensor.shape) != list(val.shape)
+            ):
+                raise AssertionError(f"{node.name}: data {tensor.dtype}{list(tensor.shape)} "
+                                     f"doesn't match its val {dnode.val}")
+            dnode.data = encode_data(tensor)
+        special = node.meta.get(TosaSpecialDtype.meta_key())
+        if special is not None:
+            dnode.special = special_dtype_name(special)
+        dnode.no_fuse = bool(node.meta.get("do_not_fuse_duplicate", False))
+        for key, attr in (("input_qparams", "qin"), ("output_qparams", "qout")):
+            if key in node.meta and node.meta[key] is not None:
+                setattr(dnode, attr, dict(node.meta[key]))
+        captured.append(dnode)
+    return Captured(captured, convert(output.args[0]))
+
+
+def captured_refs(arg, out: list[int]) -> None:
+    if isinstance(arg, Ref):
+        out.append(arg.index)
+    elif isinstance(arg, list):
+        for item in arg:
+            captured_refs(item, out)
+
+
+def format_captured(graph: Captured) -> list[str]:
+    reached = set()
+    stack: list[int] = []
+    captured_refs(graph.output, stack)
+    while stack:
+        index = stack.pop()
+        if index in reached:
+            continue
+        reached.add(index)
+        node = graph.nodes[index]
+        captured_refs(node.args, stack)
+        captured_refs(list(node.kwargs.values()), stack)
+    lines = []
+    for index, node in enumerate(graph.nodes):
+        if node.op in ("placeholder", "get_attr"):
+            head = f"{node.op} {node.name}"
+        else:
+            args = [fmt_arg2(a) for a in node.args]
+            args += [f"{k}={fmt_arg2(v)}" for k, v in node.kwargs.items()]
+            head = f"{node.target}({', '.join(args)})"
+        notes = []
+        if node.dim_order is not None:
+            notes.append(f"dim_order=[{','.join(map(str, node.dim_order))}]")
+        if node.kind is not None:
+            notes.append(f"kind={node.kind}")
+        if node.data is not None:
+            notes.append(f"data={node.data}")
+        if node.special is not None:
+            notes.append(f"special={node.special}")
+        if node.no_fuse:
+            notes.append("no_fuse")
+        notes.append(f"q={fmt_qparams2(node)}")
+        if node.op == "call_function" and index not in reached:
+            notes.append("dead")
+        lines.append(f"%{index} = {head} : {node.val} {' '.join(notes)}")
+    lines.append(f"output({fmt_arg2(graph.output)})")
+    return lines
+
+
+def undo_remove_getitem(graph: Captured, source: Captured) -> Captured:
+    """`graph` with each `max_pool2d` turned back into the
+    `max_pool2d_with_indices` + `getitem(0)` pair RETAB keeps. The pair takes
+    its qparam maps from `source`, the graph RemoveGetItemPass received, pool
+    for pool in graph order."""
+    pairs = []
+    for index, node in enumerate(source.nodes):
+        if node.target != "aten.max_pool2d_with_indices.default":
+            continue
+        users = [
+            user
+            for user in source.nodes
+            if user.target == "<built-in function getitem>"
+            and isinstance(user.args[0], Ref)
+            and user.args[0].index == index
+        ]
+        if len(users) != 1 or users[0].args[1] != 0:
+            raise AssertionError("expected one getitem(0) per max_pool2d_with_indices")
+        pairs.append((node, users[0]))
+    pools = [i for i, node in enumerate(graph.nodes) if node.target == "aten.max_pool2d.default"]
+    if len(pools) != len(pairs):
+        raise AssertionError(f"{len(pools)} max_pool2d nodes, {len(pairs)} source pairs")
+    new_nodes: list[DNode] = []
+    remap: dict[int, int] = {}
+    for index, node in enumerate(graph.nodes):
+        if index not in pools:
+            remap[index] = len(new_nodes)
+            new_nodes.append(node.copy())
+            continue
+        pool_source, getitem_source = pairs[pools.index(index)]
+        pool = node.copy()
+        pool.target = "aten.max_pool2d_with_indices.default"
+        dims = ", ".join(map(str, node.shape))
+        pool.val = f"({node.val}, torch.int64[{dims}])"
+        pool.shape = None
+        pool.dim_order = None
+        pool.qin = pool_source.qin
+        pool.qout = pool_source.qout
+        new_nodes.append(pool)
+        getitem = DNode("call_function", f"{node.name}_getitem")
+        getitem.target = "<built-in function getitem>"
+        getitem.args = [Ref(len(new_nodes) - 1), 0]
+        getitem.val = node.val
+        getitem.shape = node.shape
+        getitem.dim_order = node.dim_order
+        getitem.qin = getitem_source.qin
+        getitem.qout = getitem_source.qout
+        remap[index] = len(new_nodes)
+        new_nodes.append(getitem)
+
+    def renumber(arg):
+        if isinstance(arg, Ref):
+            return Ref(remap[arg.index])
+        if isinstance(arg, list):
+            return [renumber(a) for a in arg]
+        return arg
+
+    for node in new_nodes:
+        if node.target == "<built-in function getitem>" and node.name.endswith("_getitem"):
+            continue
+        node.args = renumber(node.args)
+        node.kwargs = {k: renumber(v) for k, v in node.kwargs.items()}
+    return Captured(new_nodes, renumber(graph.output))
+
+
+class Recorder:
+    """What the capture passes saw during one lowering: `(hook, phase,
+    Captured)` in pipeline order."""
+
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, Captured]] = []
+
+    def take(self) -> list[tuple[str, str, Captured]]:
+        records, self.records = self.records, []
+        return records
+
+
+RECORDER = Recorder()
+
+
+def make_capture_pass(hook: str, phase: str):
+    from executorch.backends.arm._passes.arm_pass import ArmPass
+    from executorch.exir.pass_base import PassResult
+
+    class CapturePass(ArmPass):
+        _passes_required_after: set = set()
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.hook = hook
+            self.phase = phase
+            # `_ExportedProgramGraphPassAdapter.call` sets this for the call.
+            self.exported_program = None
+
+        def call(self, graph_module):
+            RECORDER.records.append(
+                (self.hook, self.phase, capture_graph(graph_module, self.exported_program))
+            )
+            return PassResult(graph_module, False)
+
+    CapturePass.__name__ = f"Capture_{phase}_{hook}"
+    return CapturePass()
+
+
+def capture_hooks():
+    """`(hook name, rc4 pass class)` for every pass the P2 fixtures capture."""
+    from executorch.backends.arm._passes import (
+        ComputeConstantOpsAOTPass,
+        RemoveGetItemPass,
+        RewriteAvgPool2dPass,
+        RewriteConvPass,
+        RewriteMaxPool2dPass,
+        RewriteUpsamplePass,
+    )
+
+    return [
+        ("remove_getitem", RemoveGetItemPass),
+        ("rewrite_avg_pool2d", RewriteAvgPool2dPass),
+        ("compute_constant_ops_aot", ComputeConstantOpsAOTPass),
+        ("rewrite_upsample", RewriteUpsamplePass),
+        ("rewrite_max_pool2d", RewriteMaxPool2dPass),
+        ("rewrite_conv", RewriteConvPass),
+    ]
+
+
+# Models ---------------------------------------------------------------------
+
+
+class Conv2dM(NN.Module):
+    def __init__(self, cin=3, cout=4, k=3, stride=1, padding=1, dilation=1, groups=1, bias=True):
+        super().__init__()
+        self.conv = NN.Conv2d(
+            cin, cout, k, stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias
+        )
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class Conv1dM(NN.Module):
+    def __init__(self, cin=4, cout=6, k=3, stride=2, padding=1, groups=1, bias=True):
+        super().__init__()
+        self.conv = NN.Conv1d(cin, cout, k, stride=stride, padding=padding, groups=groups, bias=bias)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class Conv3dM(NN.Module):
+    def __init__(self, cin=3, cout=5, k=3, stride=(1, 2, 2), padding=1, bias=True):
+        super().__init__()
+        self.conv = NN.Conv3d(cin, cout, k, stride=stride, padding=padding, bias=bias)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class TConv2dM(NN.Module):
+    def __init__(self, cin=3, cout=4, k=3, stride=2, padding=1, output_padding=1, bias=True):
+        super().__init__()
+        self.conv = NN.ConvTranspose2d(
+            cin, cout, k, stride=stride, padding=padding, output_padding=output_padding, bias=bias
+        )
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class LinearM(NN.Module):
+    def __init__(self, cin=8, cout=4):
+        super().__init__()
+        self.fc = NN.Linear(cin, cout)
+
+    def forward(self, x):
+        return self.fc(x)
+
+
+class ConvActM(NN.Module):
+    """A conv followed by an activation: relu (fused into the conv's output
+    qparams) or a hardtanh whose clamp stays."""
+
+    def __init__(self, act, lo=-1.0, hi=1.0):
+        super().__init__()
+        self.conv = NN.Conv2d(3, 4, 3, padding=1)
+        self.act, self.lo, self.hi = act, lo, hi
+
+    def forward(self, x):
+        y = self.conv(x)
+        return FN.relu(y) if self.act == "relu" else FN.hardtanh(y, self.lo, self.hi)
+
+
+class TwoConvsNoBias(NN.Module):
+    def __init__(self):
+        super().__init__()
+        self.c1 = NN.Conv2d(3, 4, 3, padding=1, bias=False)
+        self.c2 = NN.Conv2d(4, 5, 1, bias=False)
+
+    def forward(self, x):
+        return self.c2(self.c1(x))
+
+
+class TwoConvsOneInput(NN.Module):
+    def __init__(self):
+        super().__init__()
+        self.a = NN.Conv2d(3, 4, 3, padding=1)
+        self.b = NN.Conv2d(3, 4, 1)
+
+    def forward(self, x):
+        return self.a(x) + self.b(x)
+
+
+class DWConvsSharedWeights(NN.Module):
+    """rc4's test_dw_convs_with_shared_weights shape: one depthwise conv used twice."""
+
+    def __init__(self):
+        super().__init__()
+        conv = NN.Conv2d(6, 6, kernel_size=(2, 2), groups=6)
+        self.seq = NN.ModuleList([conv, NN.ReLU(), conv])
+
+    def forward(self, x):
+        for module in self.seq:
+            x = module(x)
+        return x
+
+
+class CumsumM(NN.Module):
+    def forward(self, x):
+        return torch.cumsum(x, dim=1)
+
+
+# rc4's test_rewrite_conv_pass.py A16W8 models.
+
+
+class A16W8MixedConsumerChain(NN.Module):
+    def __init__(self, following):
+        super().__init__()
+        self.expand = NN.Conv2d(4, 8, 1)
+        self.depthwise = NN.Conv2d(8, 8, 3, padding=1, groups=8)
+        self.project = NN.Conv2d(8, 4, 1)
+        self.following = following
+
+    def forward(self, x):
+        expanded = FN.relu(self.expand(x))
+        filtered = FN.relu(self.depthwise(expanded))
+        projected = self.project(filtered)
+        residual = projected + x
+        return self.following(projected) + residual
+
+
+class A16W8Int32Consumer(NN.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = NN.Conv2d(4, 4, 1)
+
+    def forward(self, x):
+        return self.conv(x) + x
+
+
+class A16W8Conv1dInt32Consumer(NN.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = NN.Conv1d(4, 4, 1)
+
+    def forward(self, x):
+        return self.conv(x) + x
+
+
+class A16W8Conv1dSharedConsumers(NN.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = NN.Conv1d(4, 4, 1)
+
+    def forward(self, x):
+        y = self.conv(x)
+        return y - y.amax(dim=2, keepdim=True)
+
+
+class A16W8MixedConsumer(NN.Module):
+    def __init__(self, producer, following):
+        super().__init__()
+        self.producer = producer
+        self.following = following
+
+    def forward(self, x):
+        produced = self.producer(x)
+        return self.following(produced) + produced + x
+
+
+class A16W8PermutedInt32Consumer(NN.Module):
+    def __init__(self):
+        super().__init__()
+        self.producer = NN.Conv2d(4, 4, 1)
+        self.following = NN.Conv2d(4, 4, 1)
+
+    def forward(self, x):
+        produced = self.producer(x)
+        permuted = produced.permute(0, 1, 3, 2)
+        return self.following(produced) + permuted + x
+
+
+class ConvAddSub(NN.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = NN.Conv2d(4, 4, 1)
+
+    def forward(self, x):
+        y = self.conv(x)
+        return y + x, y - x
+
+
+class PoolM(NN.Module):
+    def __init__(self, pool, conv=False):
+        super().__init__()
+        self.conv = NN.Conv2d(3, 3, 3, padding=1) if conv else None
+        self.pool = pool
+
+    def forward(self, x):
+        if self.conv is not None:
+            x = FN.relu(self.conv(x))
+        return self.pool(x)
+
+
+class UpsampleM(NN.Module):
+    def __init__(self, mode, size=None, scale=None, align_corners=None):
+        super().__init__()
+        self.mode, self.size, self.scale, self.align_corners = mode, size, scale, align_corners
+
+    def forward(self, x):
+        return FN.interpolate(
+            x,
+            size=self.size,
+            scale_factor=self.scale,
+            mode=self.mode,
+            align_corners=self.align_corners,
+        )
+
+
+def quant_config(name: str):
+    """`(TOSA spec, quantization config)` for a quantization label."""
+    from executorch.backends.arm.quantizer.arm_quantizer import (
+        get_symmetric_a16w8_quantization_config,
+        get_symmetric_a8w4_quantization_config,
+        get_symmetric_quantization_config,
+    )
+
+    if name == "pt":
+        return "TOSA-1.0+INT", get_symmetric_quantization_config(is_per_channel=False)
+    if name == "pc":
+        return "TOSA-1.0+INT", get_symmetric_quantization_config(is_per_channel=True)
+    if name == "a8w4":
+        return "TOSA-1.0+INT+int4", get_symmetric_a8w4_quantization_config(
+            is_per_channel=True, is_qat=False
+        )
+    if name == "a16w8":
+        return "TOSA-1.0+INT+int16", get_symmetric_a16w8_quantization_config()
+    if name == "a16w8_u55":
+        return "TOSA-1.0+INT+int16+int4+u55", get_symmetric_a16w8_quantization_config()
+    raise ValueError(name)
+
+
+def shape_input(*shape):
+    return lambda: (torch.randn(*shape),)
+
+
+# `name -> (model factory, input factory)`.
+CONV_MODELS = {
+    "conv2d": (lambda: Conv2dM(), shape_input(1, 3, 8, 8)),
+    "conv2d_nobias": (lambda: Conv2dM(bias=False), shape_input(1, 3, 8, 8)),
+    "conv2d_s2p1": (lambda: Conv2dM(stride=2, padding=1), shape_input(1, 3, 8, 8)),
+    "conv2d_s3p2": (lambda: Conv2dM(stride=3, padding=2), shape_input(1, 3, 10, 11)),
+    "conv2d_dilation2": (lambda: Conv2dM(padding=2, dilation=2), shape_input(1, 3, 8, 8)),
+    "conv2d_relu": (lambda: ConvActM("relu"), shape_input(1, 3, 8, 8)),
+    "conv2d_hardtanh": (lambda: ConvActM("hardtanh"), shape_input(1, 3, 8, 8)),
+    "conv2d_relu6": (lambda: ConvActM("hardtanh", 0.0, 6.0), shape_input(1, 3, 8, 8)),
+    "dw2d": (lambda: Conv2dM(4, 8, groups=4), shape_input(1, 4, 8, 8)),
+    "dw2d_nobias": (lambda: Conv2dM(4, 8, groups=4, bias=False), shape_input(1, 4, 8, 8)),
+    "dw2d_kx1": (
+        lambda: Conv2dM(4, 8, k=(3, 1), padding=(1, 0), groups=4),
+        shape_input(1, 4, 8, 8),
+    ),
+    "grouped2d": (lambda: Conv2dM(4, 6, groups=2), shape_input(1, 4, 8, 8)),
+    "tconv2d": (lambda: TConv2dM(), shape_input(1, 3, 6, 6)),
+    "tconv2d_nobias": (lambda: TConv2dM(bias=False), shape_input(1, 3, 6, 6)),
+    "conv1d": (lambda: Conv1dM(), shape_input(1, 4, 9)),
+    "conv1d_nobias": (lambda: Conv1dM(bias=False), shape_input(1, 4, 9)),
+    "conv1d_dw": (lambda: Conv1dM(4, 8, groups=4), shape_input(1, 4, 9)),
+    "conv3d": (lambda: Conv3dM(), shape_input(1, 3, 4, 6, 6)),
+    "linear": (lambda: LinearM(), shape_input(2, 8)),
+    "linear_rank3": (lambda: LinearM(8, 5), shape_input(2, 3, 8)),
+    "linear_in1": (lambda: LinearM(1, 4), shape_input(2, 1)),
+    "conv2d_cin1": (lambda: Conv2dM(1, 4), shape_input(1, 1, 8, 8)),
+    "conv1d_cin1": (lambda: Conv1dM(1, 4, stride=1), shape_input(1, 1, 9)),
+    "conv3d_cin1": (lambda: Conv3dM(1, 4, stride=1), shape_input(1, 1, 4, 6, 6)),
+    "two_convs_no_bias": (lambda: TwoConvsNoBias(), shape_input(1, 3, 8, 8)),
+    "two_convs_one_input": (lambda: TwoConvsOneInput(), shape_input(1, 3, 8, 8)),
+    "dw_shared_weights": (lambda: DWConvsSharedWeights(), shape_input(1, 6, 24, 24)),
+    "cumsum": (lambda: CumsumM(), shape_input(1, 4, 5)),
+}
+
+A16W8_MODELS = {
+    "conv2d": CONV_MODELS["conv2d"],
+    "dw2d": CONV_MODELS["dw2d"],
+    "tconv2d": CONV_MODELS["tconv2d"],
+    "conv3d": CONV_MODELS["conv3d"],
+    "conv1d": CONV_MODELS["conv1d"],
+    "linear": CONV_MODELS["linear"],
+    "conv_add": (lambda: A16W8Int32Consumer(), shape_input(1, 4, 8, 8)),
+    "conv1d_add": (lambda: A16W8Conv1dInt32Consumer(), shape_input(1, 4, 8)),
+    "conv1d_shared_consumers": (lambda: A16W8Conv1dSharedConsumers(), shape_input(1, 4, 8)),
+    "conv_add_sub": (lambda: ConvAddSub(), shape_input(1, 4, 8, 8)),
+    "permuted_int32": (lambda: A16W8PermutedInt32Consumer(), shape_input(1, 4, 8, 8)),
+    # test_rewrite_conv_a16w8_mixed_consumers_restore_int16's six models.
+    "mixed_chain_conv": (
+        lambda: A16W8MixedConsumerChain(NN.Conv2d(4, 4, 1)),
+        shape_input(1, 4, 8, 8),
+    ),
+    "mixed_chain_dw": (
+        lambda: A16W8MixedConsumerChain(NN.Conv2d(4, 4, 3, padding=1, groups=4)),
+        shape_input(1, 4, 8, 8),
+    ),
+    "mixed_chain_avg_pool": (
+        lambda: A16W8MixedConsumerChain(NN.AvgPool2d(3, stride=1, padding=1)),
+        shape_input(1, 4, 8, 8),
+    ),
+    "mixed_chain_max_pool": (
+        lambda: A16W8MixedConsumerChain(NN.MaxPool2d(3, stride=1, padding=1)),
+        shape_input(1, 4, 8, 8),
+    ),
+    "mixed_conv3d": (
+        lambda: A16W8MixedConsumer(NN.Conv3d(4, 4, 3, padding=1), NN.Conv3d(4, 4, 1)),
+        shape_input(1, 4, 4, 8, 8),
+    ),
+    "mixed_tconv": (
+        lambda: A16W8MixedConsumer(NN.ConvTranspose2d(4, 4, 3, padding=1), NN.Conv2d(4, 4, 1)),
+        shape_input(1, 4, 8, 8),
+    ),
+}
+
+MAX_POOL_MODELS = {
+    "k3s2p1": (lambda: PoolM(NN.MaxPool2d(3, 2, 1)), shape_input(1, 3, 8, 8)),
+    "k2s2": (lambda: PoolM(NN.MaxPool2d(2, 2)), shape_input(1, 3, 8, 8)),
+    "k3s1p1": (lambda: PoolM(NN.MaxPool2d(3, 1, 1)), shape_input(1, 3, 8, 8)),
+    "ceil_mode": (lambda: PoolM(NN.MaxPool2d(3, 2, 0, ceil_mode=True)), shape_input(1, 3, 8, 8)),
+    "rect": (lambda: PoolM(NN.MaxPool2d((3, 2), (2, 1), (1, 0))), shape_input(1, 3, 8, 7)),
+    "rank3": (lambda: PoolM(NN.MaxPool2d(2, 2)), shape_input(3, 8, 8)),
+    "after_conv": (lambda: PoolM(NN.MaxPool2d(2, 2), conv=True), shape_input(1, 3, 8, 8)),
+}
+
+AVG_POOL_MODELS = {
+    "k3s2p1": (
+        lambda: PoolM(NN.AvgPool2d(3, 2, 1, count_include_pad=False)),
+        shape_input(1, 3, 8, 8),
+    ),
+    "k3s2p1_include_pad": (lambda: PoolM(NN.AvgPool2d(3, 2, 1)), shape_input(1, 3, 8, 8)),
+    "k2s2": (lambda: PoolM(NN.AvgPool2d(2, 2)), shape_input(1, 3, 8, 8)),
+    "ceil_mode": (lambda: PoolM(NN.AvgPool2d(3, 2, 0, ceil_mode=True)), shape_input(1, 3, 8, 8)),
+    "rect": (lambda: PoolM(NN.AvgPool2d((3, 2), (2, 1), (1, 0))), shape_input(1, 3, 8, 7)),
+    "adaptive": (lambda: PoolM(NN.AdaptiveAvgPool2d((2, 2))), shape_input(1, 3, 8, 8)),
+    "global": (lambda: PoolM(NN.AvgPool2d(8)), shape_input(1, 3, 8, 8)),
+    "after_conv": (lambda: PoolM(NN.AvgPool2d(2, 2), conv=True), shape_input(1, 3, 8, 8)),
+}
+
+UPSAMPLE_MODELS = {
+    "nearest_size_5to8": (lambda: UpsampleM("nearest", size=(8, 8)), shape_input(1, 3, 5, 5)),
+    "nearest_scale2": (lambda: UpsampleM("nearest", scale=2.0), shape_input(1, 3, 4, 4)),
+    "nearest_scale1_5": (lambda: UpsampleM("nearest", scale=1.5), shape_input(1, 3, 4, 4)),
+    "nearest_scale1_6": (lambda: UpsampleM("nearest", scale=1.6), shape_input(1, 3, 5, 5)),
+    "nearest_scale2_5": (lambda: UpsampleM("nearest", scale=2.5), shape_input(1, 3, 4, 4)),
+    "nearest_scale_third": (lambda: UpsampleM("nearest", scale=1 / 3), shape_input(1, 3, 9, 9)),
+    "nearest_scale2x3": (lambda: UpsampleM("nearest", scale=(2.0, 3.0)), shape_input(1, 3, 4, 4)),
+    "bilinear_scale2": (
+        lambda: UpsampleM("bilinear", scale=2.0, align_corners=False),
+        shape_input(1, 3, 4, 4),
+    ),
+    "bilinear_scale2_align_corners": (
+        lambda: UpsampleM("bilinear", scale=2.0, align_corners=True),
+        shape_input(1, 3, 4, 4),
+    ),
+    "bilinear_size_5to9_align_corners": (
+        lambda: UpsampleM("bilinear", size=(9, 9), align_corners=True),
+        shape_input(1, 3, 5, 5),
+    ),
+    "bilinear_size_5to8": (
+        lambda: UpsampleM("bilinear", size=(8, 8), align_corners=False),
+        shape_input(1, 3, 5, 5),
+    ),
+    "bilinear_scale1_5": (
+        lambda: UpsampleM("bilinear", scale=1.5, align_corners=False),
+        shape_input(1, 3, 4, 4),
+    ),
+}
+
+
+class ModelCase:
+    def __init__(self, name: str, models: dict, model: str, quant: str) -> None:
+        self.name = name
+        self.make, self.inputs = models[model]
+        self.quant = quant
+
+
+def model_cases(prefix: str, models: dict, quants: Sequence[str], only=None) -> list[ModelCase]:
+    names = list(models) if only is None else list(only)
+    return [
+        ModelCase(f"{prefix}{name}_{quant}", models, name, quant)
+        for name in names
+        for quant in quants
+    ]
+
+
+class PipelineSpec:
+    """One P2 fixture: the hook whose before graph opens each case, the hook
+    whose after graph closes it, the cases and the rc4 sources they depend on."""
+
+    def __init__(self, name, rc4_pass, before, after, cases, sources, with_indices=False):
+        self.name = name
+        self.rc4_pass = rc4_pass
+        self.before = before
+        self.after = after
+        self.cases: Callable[[], list[ModelCase]] = cases
+        self.sources = sources
+        self.with_indices = with_indices
+
+
+PIPELINE_COMMON_SOURCES = [
+    "backends/arm/_passes/arm_pass_manager.py",
+    "backends/arm/_passes/arm_pass_utils.py",
+    "backends/arm/_passes/fold_qdq_with_annotated_qparams_pass.py",
+    "backends/arm/_passes/size_adjust_input_pass.py",
+    "backends/arm/quantizer/arm_quantizer.py",
+    "backends/arm/quantizer/quantization_annotator.py",
+]
+CONV_SOURCES = [
+    "backends/arm/_passes/rewrite_conv_pass.py",
+    "backends/arm/_passes/decompose_grouped_conv_pass.py",
+    "backends/arm/_passes/decompose_linear_pass.py",
+    "backends/arm/_passes/insert_rescales_pass.py",
+    "backends/arm/tosa/dialect/ops/conv2d.py",
+    "backends/arm/tosa/dialect/ops/conv3d.py",
+    "backends/arm/tosa/dialect/ops/depthwise_conv2d.py",
+    "backends/arm/tosa/dialect/ops/transpose_conv2d.py",
+]
+MAX_POOL_SOURCES = [
+    "backends/arm/_passes/rewrite_max_pool2d_pass.py",
+    "backends/arm/_passes/remove_getitem_pass.py",
+    "backends/transforms/remove_getitem_op.py",
+    "backends/arm/tosa/dialect/ops/max_pool2d.py",
+]
+AVG_POOL_SOURCES = [
+    "backends/arm/_passes/rewrite_avg_pool2d_pass.py",
+    "backends/arm/_passes/fuse_constant_ops_pass.py",
+    "backends/arm/tosa/dialect/ops/avg_pool2d.py",
+]
+UPSAMPLE_SOURCES = [
+    "backends/arm/_passes/rewrite_upsample.py",
+    "backends/arm/tosa/dialect/ops/resize.py",
+    "backends/arm/tosa/dialect/ops/shape_ops.py",
+]
+
+
+def conv_cases():
+    return (
+        model_cases("", CONV_MODELS, ["pt", "pc"])
+        + model_cases("", CONV_MODELS, ["a8w4"], only=["conv2d", "dw2d", "conv1d", "linear"])
+    )
+
+
+def max_pool_cases():
+    return model_cases("max_pool_", MAX_POOL_MODELS, ["pc"]) + model_cases(
+        "max_pool_", MAX_POOL_MODELS, ["a16w8"], only=["k3s2p1"]
+    )
+
+
+def avg_pool_cases():
+    return model_cases("avg_pool_", AVG_POOL_MODELS, ["pc"]) + model_cases(
+        "avg_pool_", AVG_POOL_MODELS, ["a16w8"], only=["k3s2p1"]
+    )
+
+
+def upsample_cases():
+    return model_cases("", UPSAMPLE_MODELS, ["pc"]) + model_cases(
+        "", UPSAMPLE_MODELS, ["a16w8"], only=["nearest_scale2", "bilinear_scale2"]
+    )
+
+
+PIPELINE_SPECS = [
+    PipelineSpec(
+        "rewrite_conv",
+        "RewriteConvPass",
+        "rewrite_conv",
+        "rewrite_conv",
+        conv_cases,
+        CONV_SOURCES,
+    ),
+    PipelineSpec(
+        "rewrite_conv_a16w8",
+        "RewriteConvPass",
+        "rewrite_conv",
+        "rewrite_conv",
+        lambda: model_cases("", A16W8_MODELS, ["a16w8"]),
+        CONV_SOURCES,
+    ),
+    PipelineSpec(
+        "rewrite_conv_a16w8_u55",
+        "RewriteConvPass",
+        "rewrite_conv",
+        "rewrite_conv",
+        # The U55 subset has no CONV3D.
+        lambda: model_cases(
+            "",
+            A16W8_MODELS,
+            ["a16w8_u55"],
+            only=[name for name in A16W8_MODELS if name not in ("conv3d", "mixed_conv3d")],
+        ),
+        CONV_SOURCES,
+    ),
+    PipelineSpec(
+        "remove_getitem",
+        "RemoveGetItemPass",
+        "remove_getitem",
+        "remove_getitem",
+        max_pool_cases,
+        MAX_POOL_SOURCES,
+    ),
+    PipelineSpec(
+        "rewrite_max_pool2d",
+        "RewriteMaxPool2dPass",
+        "rewrite_max_pool2d",
+        "rewrite_max_pool2d",
+        max_pool_cases,
+        MAX_POOL_SOURCES,
+        with_indices=True,
+    ),
+    PipelineSpec(
+        "rewrite_upsample",
+        "RewriteUpsamplePass",
+        "rewrite_upsample",
+        "rewrite_upsample",
+        upsample_cases,
+        UPSAMPLE_SOURCES,
+    ),
+    PipelineSpec(
+        "rewrite_avg_pool2d",
+        "RewriteAvgPool2dPass",
+        "rewrite_avg_pool2d",
+        "rewrite_avg_pool2d",
+        avg_pool_cases,
+        AVG_POOL_SOURCES,
+    ),
+    PipelineSpec(
+        "rewrite_avg_pool2d_aot",
+        "RewriteAvgPool2dPass then ComputeConstantOpsAOTPass",
+        "rewrite_avg_pool2d",
+        "compute_constant_ops_aot",
+        avg_pool_cases,
+        AVG_POOL_SOURCES,
+    ),
+]
+
+
+class LoweringCache:
+    """Each model case is lowered once; its captures serve every fixture."""
+
+    def __init__(self) -> None:
+        self.records: dict[str, list[tuple[str, str, Captured]]] = {}
+
+    def get(self, case: ModelCase) -> list[tuple[str, str, Captured]]:
+        if case.name not in self.records:
+            self.records[case.name] = lower_and_capture(case)
+        return self.records[case.name]
+
+
+def lower_and_capture(case: ModelCase) -> list[tuple[str, str, Captured]]:
+    from executorch.backends.arm._passes.arm_pass_manager import (
+        clear_registered_pass_insertions,
+        register_pass_insertions_after,
+        register_pass_insertions_before,
+    )
+    from executorch.backends.arm.quantizer import TOSAQuantizer
+    from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
+    from executorch.backends.arm.tosa.partitioner import TOSAPartitioner
+    from executorch.exir import EdgeCompileConfig, to_edge_transform_and_lower
+
+    spec, config = quant_config(case.quant)
+    torch.manual_seed(SEED)
+    model = case.make().eval()
+    inputs = case.inputs()
+    compile_spec = TosaCompileSpec(spec)
+    quantizer = TOSAQuantizer(compile_spec)
+    quantizer.set_global(config)
+    exported = torch.export.export(model, inputs)
+    with torch.no_grad():
+        quantized = quantizer._quantize_with_submodules(
+            exported.module(check_guards=False), [inputs]
+        )
+    exported = torch.export.export(quantized, inputs)
+    clear_registered_pass_insertions()
+    for hook, pass_type in capture_hooks():
+        register_pass_insertions_before(pass_type, [make_capture_pass(hook, "before")])
+        register_pass_insertions_after(pass_type, [make_capture_pass(hook, "after")])
+    RECORDER.take()
+    try:
+        to_edge_transform_and_lower(
+            exported,
+            compile_config=EdgeCompileConfig(_check_ir_validity=False),
+            partitioner=[TOSAPartitioner(compile_spec)],
+        )
+    finally:
+        clear_registered_pass_insertions()
+    return RECORDER.take()
+
+
+def captures(records, hook: str, phase: str) -> list[Captured]:
+    return [graph for h, p, graph in records if h == hook and p == phase]
+
+
+def pipeline_case_bodies(spec: PipelineSpec, case: ModelCase, cache: LoweringCache):
+    """`(case name, lines)` for one model case; one per pipeline run that
+    reached the hooks (a model with several partitions runs it several
+    times), plus the `_with_indices` variants."""
+    records = cache.get(case)
+    befores = captures(records, spec.before, "before")
+    afters = captures(records, spec.after, "after")
+    if not befores or len(befores) != len(afters):
+        raise AssertionError(
+            f"{spec.name}/{case.name}: {len(befores)} before and {len(afters)} after "
+            "captures (was the model partitioned?)"
+        )
+    sources = captures(records, "remove_getitem", "before") if spec.with_indices else []
+    bodies = []
+    for run, (before, after) in enumerate(zip(befores, afters)):
+        name = case.name if len(befores) == 1 else f"{case.name}_run{run}"
+        for graph in (before,):
+            for node in graph.nodes:
+                if node.data is not None and node.data.startswith("sha256:"):
+                    raise AssertionError(
+                        f"{spec.name}/{name}: before-graph constant {node.name} is over "
+                        f"{DATA_HEX_LIMIT} bytes, so a replay can't import it"
+                    )
+        variants = [(name, before)]
+        if spec.with_indices:
+            if len(sources) != len(befores):
+                raise AssertionError(f"{name}: no RemoveGetItemPass capture to undo")
+            variants.append((f"{name}_with_indices", undo_remove_getitem(before, sources[run])))
+        after_lines = after.lines()
+        for variant, graph in variants:
+            before_lines = graph.lines()
+            modified = before.lines() != after_lines
+            lines = ["before", *before_lines, f"after modified={str(modified).lower()}"]
+            if after_lines == before_lines:
+                lines[-1] += " same"
+            else:
+                lines += after_lines
+            bodies.append((variant, lines))
+    return bodies
+
+
+def pipeline_header(spec: PipelineSpec, count: int) -> list[str]:
+    import torchao
+
+    git = getattr(executorch.version, "git_version", "unknown")
+    lines = [
+        f"# rc4 {spec.rc4_pass} before/after graphs, captured in ArmPassManager's pipeline,"
+        " for src/layout/replay.rs.",
+        "# Generated by tests/fixtures/layout_replay/gen_layout_replay.py; don't edit by hand.",
+        "# Regenerate with the rc4 environment, from a neutral directory:",
+        "#   cd /tmp && <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py"
+        f" --pass {spec.name}",
+        f"# executorch {executorch.version.__version__} (git {git}), torch {torch.__version__},"
+        f" torchao {torchao.__version__}, python {sys.version.split()[0]}",
+        f"# seed {SEED}: {count} cases; format {FORMAT}: see the generator's docstring.",
+    ]
+    for relative in spec.sources + PIPELINE_COMMON_SOURCES + COMMON_SOURCES:
+        lines.append(f"# rc4-source sha256 {source_sha256(relative)} {relative}")
+    return lines
+
+
+def generate_pipeline(spec: PipelineSpec, cache: LoweringCache) -> list[str]:
+    lines = [f"format {FORMAT}"]
+    for case in spec.cases():
+        for name, body in pipeline_case_bodies(spec, case, cache):
+            lines += [f"case {name}", *body, "end"]
+    return lines
+
+
+# --------------------------------------------------------------------------
 # Driver
 # --------------------------------------------------------------------------
 
@@ -1601,7 +2701,13 @@ def main() -> None:
     # FakeTensor logs a traceback for every random graph torch rejects.
     logging.getLogger("torch._subclasses.fake_tensor").setLevel(logging.CRITICAL)
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--pass", dest="only", choices=[p.name for p in PASSES])
+    parser.add_argument(
+        "--pass",
+        dest="only",
+        action="append",
+        choices=[p.name for p in PASSES + PIPELINE_SPECS],
+        help="write this fixture (repeatable; default: all)",
+    )
     parser.add_argument("--random", type=int, default=RANDOM_CASES)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--out", type=Path, default=Path(__file__).resolve().parent)
@@ -1609,7 +2715,7 @@ def main() -> None:
     args = parser.parse_args()
 
     for spec in PASSES:
-        if args.only and spec.name != args.only:
+        if args.only and spec.name not in args.only:
             continue
         rc4_pass = type(spec.make(None)).__name__
         if args.case:
@@ -1626,6 +2732,30 @@ def main() -> None:
         path.write_text(text)
         count = sum(1 for line in lines if line.startswith("case "))
         print(f"{path.name}: {count} cases ({skipped} random graphs skipped)", file=sys.stderr)
+
+    cache = LoweringCache()
+    for spec in PIPELINE_SPECS:
+        if args.only and spec.name not in args.only:
+            continue
+        if args.case:
+            matches = [
+                c
+                for c in spec.cases()
+                if args.case == c.name or args.case.startswith(c.name + "_")
+            ]
+            case = max(matches, key=lambda c: len(c.name), default=None)
+            if case is None:
+                parser.error(f"no case {args.case} in {spec.name}")
+            for name, body in pipeline_case_bodies(spec, case, cache):
+                if name == args.case:
+                    print("\n".join([f"case {name}", *body, "end"]))
+            continue
+        lines = generate_pipeline(spec, cache)
+        count = sum(1 for line in lines if line.startswith("case "))
+        text = "\n".join(pipeline_header(spec, count) + lines) + "\n"
+        path = args.out / f"{spec.name}.txt"
+        path.write_text(text)
+        print(f"{path.name}: {count} cases", file=sys.stderr)
 
 
 if __name__ == "__main__":

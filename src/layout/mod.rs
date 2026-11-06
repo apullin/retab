@@ -43,8 +43,11 @@ pub(crate) mod testing;
 // Fidelity review of the P1 ports against rc4.
 #[cfg(test)]
 mod p1_review_tests;
-// rc4 replays: the harness and the P1 passes' replay tests.
+// rc4 replays: the harness, the P1 passes' replay tests and the P2 fixtures'
+// sanity tests and replay hooks.
 #[cfg(test)]
 mod p1_replay_tests;
+#[cfg(test)]
+mod p2_replay_tests;
 #[cfg(test)]
 pub(crate) mod replay;
