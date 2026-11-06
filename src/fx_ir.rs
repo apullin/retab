@@ -909,14 +909,20 @@ impl IrGraph {
     }
 
     /// Renumber the nodes so that `order`, which lists every live node once,
-    /// becomes the node-vector order; dead nodes follow in their old relative
-    /// order. A fresh `from_fx_with_tensors` graph has this shape (ids in FX
-    /// node order), and when `order` is topological both
+    /// becomes the node-vector order. A fresh `from_fx_with_tensors` graph has
+    /// this shape (ids in FX node order), and when `order` is topological both
     /// `topological_live_node_ids` and `ingest::from_ir`, which seeds its
     /// def-use sort with id order, then emit the live nodes in `order`. Node
     /// references, user lists, the name index and the replacement map are
     /// rewritten; the position anchors are dropped because `order` already
     /// places every node. Returns the old-to-new id map.
+    ///
+    /// Dead nodes keep their old relative order. A dead placeholder stays
+    /// among the placeholders, directly after the live placeholder it followed
+    /// (or before the first one if none did), because `placeholders()` lists
+    /// dead placeholders too and region code indexes placeholders by position
+    /// (`IrInsertCarriedOutputRescalePass` pairs while-body placeholders with
+    /// the loop-carried outputs). Every other dead node follows the live ones.
     pub(crate) fn reorder_nodes(&mut self, order: &[NodeId]) -> Vec<NodeId> {
         fn remap(arg: &mut IrArg, new_ids: &[NodeId]) {
             match arg {
@@ -934,26 +940,64 @@ impl IrGraph {
             }
         }
 
-        const UNASSIGNED: NodeId = NodeId::MAX;
-        let mut new_ids = vec![UNASSIGNED; self.nodes.len()];
-        let mut next_id = 0;
+        let mut listed = vec![false; self.nodes.len()];
         for &id in order {
             assert!(
-                self.nodes[id].alive && new_ids[id] == UNASSIGNED,
+                self.nodes[id].alive && !listed[id],
                 "reorder_nodes: node {id} is dead or listed twice"
             );
-            new_ids[id] = next_id;
-            next_id += 1;
+            listed[id] = true;
         }
-        for (id, new_id) in new_ids.iter_mut().enumerate() {
-            if *new_id == UNASSIGNED {
-                assert!(
-                    !self.nodes[id].alive,
-                    "reorder_nodes: live node {id} is missing from the order"
-                );
-                *new_id = next_id;
-                next_id += 1;
+        for node in &self.nodes {
+            assert!(
+                listed[node.id] || !node.alive,
+                "reorder_nodes: live node {} is missing from the order",
+                node.id
+            );
+        }
+
+        // Each dead placeholder rides behind the live placeholder before it in
+        // id order; the ones before every live placeholder ride ahead of the
+        // first.
+        let mut leading_dead = Vec::new();
+        let mut dead_after: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let (mut first_live, mut last_live) = (None, None);
+        for node in self
+            .nodes
+            .iter()
+            .filter(|node| node.op == NodeOp::Placeholder)
+        {
+            match (node.alive, last_live) {
+                (true, _) => {
+                    first_live.get_or_insert(node.id);
+                    last_live = Some(node.id);
+                }
+                (false, Some(live)) => dead_after.entry(live).or_default().push(node.id),
+                (false, None) => leading_dead.push(node.id),
             }
+        }
+        let mut sequence = Vec::with_capacity(self.nodes.len());
+        for &id in order {
+            if Some(id) == first_live {
+                sequence.append(&mut leading_dead);
+            }
+            sequence.push(id);
+            if let Some(dead) = dead_after.remove(&id) {
+                sequence.extend(dead);
+            }
+        }
+        // Without a live placeholder the dead ones lead the dead nodes.
+        sequence.append(&mut leading_dead);
+        sequence.extend(
+            self.nodes
+                .iter()
+                .filter(|node| !node.alive && node.op != NodeOp::Placeholder)
+                .map(|node| node.id),
+        );
+        debug_assert_eq!(sequence.len(), self.nodes.len());
+        let mut new_ids = vec![0; self.nodes.len()];
+        for (new_id, &id) in sequence.iter().enumerate() {
+            new_ids[id] = new_id;
         }
 
         let mut nodes = std::mem::take(&mut self.nodes);
@@ -1351,6 +1395,26 @@ impl IrGraph {
             self.legacy_users.insert(id, Vec::new());
         }
         self.check_users_after_edit();
+        id
+    }
+
+    /// Add a constant: a placeholder or get_attr node without arguments that
+    /// carries its data in `IrNode::tensor`, as imported parameters and
+    /// captured_conv's constants do. Appended like `add_node`.
+    pub(crate) fn add_constant_node(
+        &mut self,
+        op: NodeOp,
+        name: String,
+        target: String,
+        tensor: NodeTensor,
+        meta: NodeMeta,
+    ) -> NodeId {
+        debug_assert!(
+            matches!(op, NodeOp::Placeholder | NodeOp::GetAttr),
+            "a constant is a placeholder or get_attr node, not {op:?}"
+        );
+        let id = self.add_node(op, name, target, Vec::new(), meta);
+        self.nodes[id].tensor = Some(tensor);
         id
     }
 
