@@ -339,7 +339,7 @@ thread_local! {
     /// Region-search steps (`_visit` calls) on this thread, for scaling tests.
     static SEARCH_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Whether test builds re-run each skipped search to check it fails.
-    static CHECK_SKIPPED_SEARCHES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    pub(crate) static CHECK_SKIPPED_SEARCHES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
 /// A matched repeat_interleave: `(dim, scale, expand_node, view_node)`

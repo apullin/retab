@@ -76,6 +76,7 @@ import argparse
 import hashlib
 import logging
 import math
+import os
 import random
 import sys
 from collections.abc import Callable, Sequence
@@ -5080,13 +5081,21 @@ def propagation_cases():
     return cases
 
 
+# Steps per random propagation graph; a fuzzing session can ask for larger
+# graphs with RETAB_REPLAY_PROPAGATION_STEPS=low,high (the committed fixtures
+# use the default).
+PROPAGATION_STEPS = tuple(
+    int(bound) for bound in os.environ.get("RETAB_REPLAY_PROPAGATION_STEPS", "2,10").split(",")
+)
+
+
 def propagation_random_case(seed: int) -> Callable[[Builder], None]:
     def build(b: Builder) -> None:
         rng = random.Random(seed)
         graph = PropagationGraph(rng, b)
         for _ in range(rng.randint(1, 3)):
             graph.fresh_float()
-        for _ in range(rng.randint(2, 10)):
+        for _ in range(rng.randint(*PROPAGATION_STEPS)):
             graph.step()
         graph.finish()
 

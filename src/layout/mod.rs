@@ -85,3 +85,6 @@ mod propagate_replay_tests;
 // rc4's own tests for the propagation passes, ported (APU-159).
 #[cfg(test)]
 mod propagate_upstream_tests;
+// Large-graph checks and timings for the propagation passes.
+#[cfg(test)]
+mod propagate_scaling_tests;
