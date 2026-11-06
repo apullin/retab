@@ -266,7 +266,7 @@ fn collect_graph_items(
 /// must have been rewritten to its TOSA op. Their visitors build the NHWC view from dim
 /// orders, which explicit graphs don't have, so a survivor (a rewrite declined it) sends
 /// the graph to stock, through the same seam as `control_flow::assembly`.
-fn reject_aten_spatial_ops(region: &str, graph: &Graph) -> Result<(), String> {
+pub(super) fn reject_aten_spatial_ops(region: &str, graph: &Graph) -> Result<(), String> {
     let Some(node) = graph
         .order
         .iter()
@@ -287,7 +287,7 @@ fn reject_aten_spatial_ops(region: &str, graph: &Graph) -> Result<(), String> {
 /// Explicit mode under RETAB_DEBUG (P2 design D1): a node's val is its TOSA shape, so no
 /// node may carry a dim order and the serializer's re-derived shape must equal the val.
 /// This catches stale vals and implicit-layout logic that survived the explicit gates.
-fn check_explicit_layout_invariants(
+pub(super) fn check_explicit_layout_invariants(
     region: &str,
     graph: &Graph,
     store: &TensorStore,
