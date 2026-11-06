@@ -7,9 +7,10 @@
 //! generator's docstring). The P1, APU-160 and APU-158 fixtures (format 1)
 //! run the real rc4 pass on hand-built edge graphs; the P2 fixtures
 //! (`format 2`) capture the graphs rc4's ArmPassManager pipeline hands to the
-//! pass and gets back while it lowers small quantized models. [`check`]
-//! rebuilds every "before" graph as an `IrGraph`, runs the port and compares
-//! the result with rc4's "after" graph:
+//! pass and gets back while it lowers small quantized models, except
+//! `rewrite_conv_rc4_tests.txt`, which calls RewriteConvPass on the programs
+//! rc4's own pass tests build. [`check`] rebuilds every "before" graph as an
+//! `IrGraph`, runs the port and compares the result with rc4's "after" graph:
 //!
 //! - nodes in graph order (`IrGraph::topological_live_node_ids`, which
 //!   `LayoutCtx::finish`'s renumbering makes the ctx order), with each node's
@@ -37,7 +38,7 @@
 //! loops on it, so its helpers check it, while the P1 replays predate the
 //! option (all agree with rc4 except IrRewriteHighRankSingletonPermute, which
 //! returns false in 18 cases where rc4 reports a change it didn't make).
-//! A format-2 case's flag is whether the pass changed the graph
+//! A pipeline-captured case's flag is whether the pass changed the graph
 //! ([`Case::modified`]).
 //!
 //! Dim orders are recorded but compared only on request (`Options::dim_orders`).
@@ -120,8 +121,9 @@
 //! `p1_replay_tests` do. There, `replay_report` prints per-pass statistics
 //! under every comparison mode and `replay_external` replays fixtures too
 //! large to commit (a fuzzing run). `p2_replay_tests` holds the P2 fixtures'
-//! sanity tests and their replay hooks, `fuse_helpers_replay_tests` the
-//! APU-160 replays and `remove_permutes_replay_tests` the APU-158 ones.
+//! sanity tests and their replay hooks, `rewrite_conv_tests` the replays of
+//! rc4's RewriteConvPass tests, `fuse_helpers_replay_tests` the APU-160
+//! replays and `remove_permutes_replay_tests` the APU-158 ones.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Write as _};
@@ -268,11 +270,12 @@ pub(crate) struct Graph {
 pub(crate) struct Case {
     pub(crate) name: String,
     /// The fixture's format: 1 for the hand-built P1 and APU-160 fixtures, 2
-    /// for the pipeline-captured P2 ones.
+    /// for the P2 ones (the pipeline captures and `rewrite_conv_rc4_tests`).
     pub(crate) format: u32,
     pub(crate) before: Graph,
-    /// The `modified` flag rc4's pass returned (format 1) or whether the pass
-    /// changed the graph (format 2, whose capture hooks can't see the flag).
+    /// The `modified` flag rc4's pass returned (format 1 and
+    /// `rewrite_conv_rc4_tests`) or whether the pass changed the graph (the
+    /// pipeline captures, whose hooks can't see the flag).
     pub(crate) modified: bool,
     /// The exception type rc4's pass raised (`after raises=<type>`), which the
     /// port must answer with a panic; `after` is then a copy of `before`.

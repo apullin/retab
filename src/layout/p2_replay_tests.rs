@@ -6,9 +6,10 @@
 //! RewriteUpsamplePass and RewriteAvgPool2dPass (alone and with the
 //! ComputeConstantOpsAOTPass after it) receive and return. The tests below pin
 //! what the fixtures hold, so a regeneration that drops a case or loses a
-//! detail fails here. Each port's replay hook follows: S7's pool and upsample
-//! hooks run, and S3's and S4's conv hooks are commented out until their ports
-//! land. The tests that pin the S1 review's findings come last.
+//! detail fails here. Each port's replay hook follows: S3's conv hook and
+//! S7's pool and upsample hooks run, and S4's A16W8 conv hooks are commented
+//! out until its port lands. The tests that pin the S1 review's findings come
+//! last.
 
 use std::collections::BTreeSet;
 
@@ -16,6 +17,7 @@ use crate::fx_ir::{IrGraph, IrPass};
 use crate::layout::constants::IrMaterializeConstantsPass;
 use crate::layout::replay::{self, Case, Data, DimOrders, Graph, Op, Options, QValue, Val};
 use crate::layout::rewrite_avg_pool2d::IrRewriteAvgPool2dPass;
+use crate::layout::rewrite_conv::IrRewriteConvPass;
 use crate::layout::rewrite_max_pool2d::IrRewriteMaxPool2dPass;
 use crate::layout::rewrite_upsample::IrRewriteUpsamplePass;
 
@@ -683,10 +685,16 @@ fn a_port_that_does_nothing_matches_no_case() {
 // ---------------------------------------------------------------------------
 
 // S3 (APU-155): IrRewriteConv on INT8 (per-tensor and per-channel) and A8W4.
-// #[test]
-// fn rewrite_conv_matches_rc4() {
-//     replay::check(&IrRewriteConvPass { is_u55_subset: false, in_region: false }, REWRITE_CONV);
-// }
+#[test]
+fn rewrite_conv_matches_rc4() {
+    replay::check(
+        &IrRewriteConvPass {
+            is_u55_subset: false,
+            in_region: false,
+        },
+        REWRITE_CONV,
+    );
+}
 
 // S4 (APU-155): A16W8 INT48 branching, on the generic profile and on U55.
 // #[test]

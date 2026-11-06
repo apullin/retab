@@ -8,6 +8,8 @@ mod constant_pool;
 mod explicit_layout_tests;
 #[cfg(test)]
 mod explicit_pool_rewrite_tests;
+#[cfg(test)]
+mod explicit_rewrite_conv_tests;
 mod flatbuffer;
 pub(crate) mod op_semantics;
 mod output_layout;
