@@ -6,7 +6,7 @@
 //! accumulator; the only layout ops are the rewrite's TRANSPOSEs (and conv1d's
 //! RESHAPEs), with no peephole folding them away (G5).
 
-use super::collection::{collect_regions, SerializedGraphItems};
+use super::collection::{check_explicit_layout_invariants, collect_regions, SerializedGraphItems};
 use super::tosa_types::{DType, Op, TosaTensor};
 use super::visitors;
 use crate::fx_ir::{IrGraph, IrPass, NodeOp};
@@ -54,6 +54,8 @@ fn serialize_explicit(ir: &IrGraph) -> Result<SerializedGraphItems, String> {
     graph.rebuild_user_lists();
     visitors::shape_utils::clear_shape_cache();
     visitors::dtype_quant::clear_dtype_cache();
+    // D1: no dim order, and every node serializes at its val's shape.
+    check_explicit_layout_invariants("main", &graph, &store)?;
     let mut regions = collect_regions(&[("main".to_string(), graph)], &store)?;
     Ok(regions.remove(0).items)
 }

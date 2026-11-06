@@ -147,8 +147,8 @@ pub(crate) struct IrRewriteConvPass {
     /// §2.8); until then the flag has nothing to act on.
     pub(crate) is_u55_subset: bool,
     /// The pipeline's region flag: constants are `get_attr` nodes
-    /// (`GraphScope::Region`), and a conv whose weight or bias is captured from
-    /// the parent falls back to stock (design §2.9, S8).
+    /// (`GraphScope::Region`). Until S8 every region conv falls back to stock
+    /// (design §2.9; see `control_flow_hazard`).
     pub(crate) in_region: bool,
 }
 
