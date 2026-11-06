@@ -325,10 +325,6 @@ impl NodeMeta {
         self.layout.tosa_dim_order.as_deref()
     }
 
-    pub fn cloned_tosa_dim_order(&self) -> Option<Vec<usize>> {
-        self.layout.tosa_dim_order.clone()
-    }
-
     pub fn set_output_qparams(&mut self, map: impl Into<QParamMap>) {
         self.quant.output_qparams = Some(map.into());
     }
@@ -405,6 +401,7 @@ impl NodeMeta {
         self.quant.input_qparams = None;
     }
 
+    #[cfg(test)]
     pub fn set_tosa_dim_order(&mut self, order: Vec<usize>) {
         self.layout.tosa_dim_order = Some(order);
     }
@@ -603,10 +600,6 @@ impl NodeMeta {
 
     pub fn clear_tosa_special_dtype(&mut self) -> bool {
         self.extras.remove("tosa_special_dtype").is_some()
-    }
-
-    pub fn replace_tosa_dim_order(&mut self, order: Option<Vec<usize>>) {
-        self.layout.tosa_dim_order = order;
     }
 
     pub fn clear_tosa_dim_order_if_rank_mismatch(&mut self, rank: usize) -> bool {
