@@ -14,6 +14,9 @@ pub(crate) use contracts::{
     snapshot_pre_pass_qparams_ir,
 };
 pub(crate) use metadata::{IrInsertCarriedOutputRescalePass, IrStripWhileBoundaryQPass};
+// IrRewriteConv's tests pin how the boundary contracts read its nodes (APU-135 S3).
+#[cfg(test)]
+pub(crate) use metadata::extract_effective_qparam_ir;
 
 #[derive(Clone, Copy)]
 pub(crate) struct WhileBodyInputCounts {

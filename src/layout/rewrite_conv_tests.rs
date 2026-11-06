@@ -901,12 +901,12 @@ fn make_region_constant(graph: &mut IrGraph, id: NodeId) {
     node.tensor.as_mut().expect("a constant").source = TensorSource::GraphModuleAttr;
 }
 
-/// Design F4, §2.9: in a region the pass's constants are `get_attr` nodes,
-/// and the region's placeholders stay as they are, since the boundary
-/// contracts pair them with the parent's operands by position.
+/// Every region conv falls back until S8 (see `control_flow_hazard`), even one
+/// whose weight and bias are region constants (`get_attr` nodes, design F4),
+/// and leaves the region as it was.
 #[test]
-fn region_constants_are_get_attrs() {
-    for name in ["conv2d_pt", "conv2d_nobias_pt"] {
+fn region_convs_fall_back_until_s8() {
+    for name in ["conv2d_pt", "conv2d_nobias_pt", "cumsum_pt"] {
         let mut graph = imported(REWRITE_CONV, name);
         let conv = single_call(&graph, CONVOLUTION);
         for constant in graph.node(conv).args[1..3]
@@ -916,25 +916,81 @@ fn region_constants_are_get_attrs() {
         {
             make_region_constant(&mut graph, constant);
         }
-        let placeholders = |graph: &IrGraph| -> Vec<String> {
-            graph
-                .live_placeholder_ids()
-                .into_iter()
-                .map(|id| graph.node(id).name.clone())
-                .collect()
-        };
-        let before = placeholders(&graph);
-        let (modified, fallback) = run_with(&region_pass(), &mut graph);
-        assert_eq!((modified, fallback), (true, None), "{name}");
-        assert_eq!(placeholders(&graph), before, "{name}");
-        let tosa = single_call(&graph, CONV2D);
-        for index in [1, 2] {
-            let constant = graph.node(arg(&graph, tosa, index));
-            assert_eq!(constant.op, NodeOp::GetAttr, "{name} arg {index}");
-            assert!(matches!(
-                constant.tensor.as_ref().map(|tensor| &tensor.source),
-                Some(TensorSource::GraphModuleAttr)
-            ));
+        let before = replay::snapshot(&graph).expect("a valid graph");
+        let (modified, reason) = run_with(&region_pass(), &mut graph);
+        assert!(!modified, "{name}");
+        let reason = reason.expect("a fallback");
+        assert!(reason.contains("APU-135 S8"), "{name}: {reason}");
+        assert!(reason.contains("boundary contracts"), "{name}: {reason}");
+        assert_eq!(replay::snapshot(&graph).expect("a valid graph"), before);
+    }
+}
+
+/// Why region convs fall back: the output contract's qparam lookup
+/// (`extract_effective_qparam_ir`) walks the rewrite's qparam-less output
+/// permute to its RESCALE and reverse engineers it as a rescale of the TOSA
+/// conv's inherited output qparam. With a per-tensor weight that gives
+/// `s_out^2 / (s_in * s_w)` instead of the conv's `s_out`, so a cond branch
+/// ending in such a conv would get a wrong output RESCALE. When S8 fixes the
+/// lookup this test fails: lift the region fallback then.
+#[test]
+fn boundary_contracts_misread_the_rewrites_rescale() {
+    let mut graph = imported(REWRITE_CONV, "conv2d_pt");
+    let conv = single_call(&graph, CONVOLUTION);
+    let meta = graph.node(conv).meta.clone();
+    rewrite(&mut graph);
+    let output = graph.output_node().expect("output");
+    let Some(IrArg::List(results)) = output.args.first() else {
+        panic!("output list");
+    };
+    let permute = results[0].as_node().expect("a node");
+    let read = crate::control_flow::extract_effective_qparam_ir(&graph, permute).expect("a qparam");
+    let input = meta.input_qparam_at(0).unwrap().scale;
+    let weight = meta.input_qparam_at(1).unwrap().scale;
+    let output_qparam = meta.output_qparam().unwrap();
+    let multiplier = (input * weight) / output_qparam.scale;
+    assert_eq!(read.scale, output_qparam.scale / multiplier);
+    assert_ne!(read.scale, output_qparam.scale);
+}
+
+/// A parent conv reading a cond output falls back until S8: the cond's output
+/// contract takes its target qparam from the getitem's direct consumers
+/// (`infer_output_qparams_map_ir`), and the rewrite's input permute has none.
+/// A getitem carrying its own output qparams is unaffected.
+#[test]
+fn convs_reading_control_flow_outputs_fall_back_until_s8() {
+    for getitem_qparams in [false, true] {
+        let mut graph = imported(REWRITE_CONV, "conv2d_pt");
+        let conv = single_call(&graph, CONVOLUTION);
+        let input = arg(&graph, conv, 0);
+        let input_shape = shape(&graph, input);
+        let cond = crate::test_ir::call_with_meta(
+            &mut graph,
+            "cond",
+            "torch.ops.higher_order.cond",
+            vec![IrArg::Node(input)],
+            crate::fx_meta::NodeMeta::default(),
+        );
+        let mut meta = crate::fx_meta::NodeMeta::tensor(input_shape, "torch.int8");
+        if getitem_qparams {
+            meta.set_single_output_qparam(int8(0.1, 0));
+        }
+        let getitem = crate::test_ir::call_with_meta(
+            &mut graph,
+            "getitem",
+            "<built-in function getitem>",
+            vec![IrArg::Node(cond), IrArg::Int(0)],
+            meta,
+        );
+        assert!(graph.node(cond).is_control_flow() && graph.node(getitem).is_getitem());
+        graph.set_arg(conv, 0, IrArg::Node(getitem));
+        let (modified, reason) = run_with(&parent_pass(), &mut graph);
+        if getitem_qparams {
+            assert_eq!((modified, reason), (true, None));
+        } else {
+            assert!(!modified);
+            let reason = reason.expect("a fallback");
+            assert!(reason.contains("control-flow output getitem"), "{reason}");
         }
     }
 }

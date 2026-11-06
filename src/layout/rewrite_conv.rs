@@ -61,10 +61,15 @@
 //! are S4's: an A16W8 conv of spatial rank 2 or 3 that feeds an INT32 RESCALE,
 //! directly or through a permute, requests a stock fallback until then, and
 //! without such consumers no accumulator gets a second user, so the U55 step
-//! has nothing to separate. Regions are S8's (design §2.9): a region conv
-//! whose weight or bias is captured from the parent (a placeholder) requests a
-//! stock fallback, while one whose operands are region constants (`get_attr`)
-//! is rewritten with `get_attr` constants. FP8 is out of scope (design F1).
+//! has nothing to separate. Control flow is S8's (design §2.9, §4.3): RETAB
+//! applies the boundary contracts at serialization, and two of their qparam
+//! lookups misread the qparam-less nodes rc4's rewrite creates (see
+//! `control_flow_hazard`), so every region conv requests a stock fallback, and
+//! so does a parent conv reading a cond or while output whose getitem has no
+//! output qparams. The region rules S8 builds on are in place: constants are
+//! `get_attr` nodes (`GraphScope::Region`), and a weight or bias captured from
+//! the parent (a placeholder) is reported as such. FP8 is out of scope (design
+//! F1).
 //!
 //! **Stock fallbacks** (design §2.11, critique B5, B10). Where rc4 raises, the
 //! pass requests a stock fallback (`stock_fallback::request`) and stops, so
@@ -338,6 +343,49 @@ fn is_float(dtype: &str) -> bool {
 
 fn to_i64(dims: &[usize]) -> Vec<i64> {
     dims.iter().map(|&dim| dim as i64).collect()
+}
+
+/// Why a conv that `plan` could rewrite must still go to stock until S8 makes
+/// control flow explicit-aware (design §2.9, §4.3). rc4 inserts its
+/// control-flow boundary RESCALEs before RewriteConvPass (APM:595); RETAB's
+/// boundary contracts run at serialization, after the whole pipeline
+/// (`control_flow::contracts::apply_boundary_contracts`), and two of their
+/// qparam lookups misread the nodes this pass creates, which carry no qparams
+/// as rc4's do:
+///
+/// - A region output's own qparam comes from `extract_effective_qparam_ir`,
+///   which walks a qparam-less output permute to the RESCALE and reverse
+///   engineers it (`reverse_engineer_rescale_ir`) as a rescale of the TOSA
+///   conv's inherited output qparam: for a per-tensor weight it computes
+///   `s_out^2 / (s_in * s_w)`, not `s_out`, and the output contract inserts a
+///   wrong RESCALE (cumsum's per-tensor kernel in a cond branch is one). So in
+///   a region every conv falls back, after the reasons specific to regions
+///   (captured operands).
+/// - A cond or while output's target qparam comes from its getitem's output
+///   qparams, else from the input qparams of the getitem's direct consumers
+///   (`infer_output_qparams_map_ir`); the conv was that consumer, its input
+///   permute has none, and the region's output RESCALE would be lost.
+fn control_flow_hazard(graph: &IrGraph, scope: GraphScope, input: NodeId) -> Option<String> {
+    if scope == GraphScope::Region {
+        return Some(
+            "region convs wait for the explicit-mode boundary contracts and captured_conv \
+             (APU-135 S8): the output contract misreads the rewrite's qparam-less RESCALE"
+                .to_string(),
+        );
+    }
+    let node = graph.node(input);
+    let reads_control_flow = node.is_getitem()
+        && node.meta.output_qparam().is_none()
+        && node
+            .first_node_arg()
+            .is_some_and(|source| graph.node(source).is_control_flow());
+    reads_control_flow.then(|| {
+        format!(
+            "it reads control-flow output {}, whose boundary contract takes its qparam from the \
+             conv, which the rewrite replaces with a qparam-less permute (APU-135 S8)",
+            node.name
+        )
+    })
 }
 
 /// The conv's weight, as RCP resolves it (`_resolve_control_flow_constant`,
@@ -834,6 +882,9 @@ fn plan(graph: &IrGraph, scope: GraphScope, conv: NodeId) -> Result<Option<ConvR
             "the rewrite would give {output_shape:?}, not the convolution's {:?}",
             output.shape
         ));
+    }
+    if let Some(reason) = control_flow_hazard(graph, scope, args.input) {
+        return Err(reason);
     }
 
     Ok(Some(ConvRewrite {
