@@ -4794,6 +4794,29 @@ def propagation_cases():
         f = b.call(A.floor.default, p)
         b.output([b.call(A.mean.dim, b.call(A.sub.Tensor, p, f), [1], True)])
 
+    def advance_then_region_move(b, view):
+        # rc4's Down walk crosses floor and the mean, rewriting the mean's
+        # dims, then fails to split the fork after it and falls back to a
+        # region move from the permute, which keeps the rewritten dims: the
+        # mean's users get a new shape, which rc4's next re-trace re-derives
+        # (and raises on where a view no longer fits).
+        x = b.input("x", (4, 2, 1, 3))
+        ones = b.input("ones", (1, 1, 1, 1))
+        other = b.input("other", (1, 3, 1, 1))
+        p = b.permute(x, [1, 3, 2, 0])
+        m = b.call(A.mean.dim, b.call(A.floor.default, p), [0, 2, -1], True)
+        w = b.call(A.where.self, b.call(A.gt.Tensor, m, ones), m, other)
+        c = b.call(A.ceil.default, w)
+        b.output([b.view(c, [3]) if view else c])
+
+    @case
+    def advance_then_region_move_breaks_a_view(b):
+        advance_then_region_move(b, view=True)
+
+    @case
+    def advance_then_region_move_reshapes_users(b):
+        advance_then_region_move(b, view=False)
+
     @case
     def region_with_qparams_on_the_permute(b):
         x = b.input("x", X4)

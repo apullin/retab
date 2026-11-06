@@ -60,11 +60,14 @@
 //!
 //! - **No re-trace.** rc4 re-traces the whole graph with `ExportPass` after
 //!   its first vertical fusion and at the end (`_retrace`, `:158-162`), and
-//!   every fusion pass re-traces when it changes the graph. The values that
-//!   change are exactly those rc4's local refresh sets (`:164-192`, crossed
-//!   nodes and the moved copy), plus the new nodes' values it sets explicitly,
-//!   so the port refreshes those ([`refresh_node`]) and its `_retrace` is the
-//!   dead-code elimination. Node names are kept where the re-trace renames.
+//!   every fusion pass re-traces when it changes the graph. In a sound
+//!   rewrite the values that change are exactly those rc4's local refresh
+//!   sets (`:164-192`, crossed nodes and the moved copy), plus the new nodes'
+//!   values it sets explicitly, so the port refreshes those ([`refresh_node`]);
+//!   at each re-trace point it eliminates dead code (the driver's) and
+//!   re-derives the users of the refreshed nodes, which only an unsound rewrite
+//!   changes ([`Propagator::retrace_stale`]). Node names are kept where the
+//!   re-trace renames.
 //! - **User order.** FX iterates `node.users` in insertion order, which
 //!   re-traces reset to graph order and rewrites shuffle. Down's next nodes are
 //!   taken in graph order here. Which order cannot change the result: a fork
@@ -79,6 +82,14 @@
 //! - **`IrArg::None` dims.** RETAB's importer reads `[]` as `IrArg::None`, so a
 //!   reduction's dims of `None` read as `[]` (every dim), where rc4 sees a
 //!   Python `None` and declines.
+//!
+//! rc4's own bugs are kept, so the port fails or miscompiles where rc4 does
+//! (both are in the replay fixtures): Down's advance rewrites a reduction's
+//! dims before it knows the move will happen, and a fork after the reduction
+//! can fall back to a region move from the original permute that keeps the
+//! rewritten dims, changing what the reduction's users read; the re-trace
+//! emulation ([`Propagator::retrace_stale`]) then panics where rc4's re-trace
+//! raises, or reshapes the users as rc4's does.
 //!
 //! # Complexity
 //!
@@ -96,7 +107,8 @@
 //! O(R·N + I·T·log T) plus the rewrites and the retried walks, for R fusion
 //! rounds and I sweeps; rc4 is O((R + I)·N) re-traces on top of the same work.
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::fx_insert_table_ops_ir::planned_table;
 use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrPass, NodeId, NodeOp};
@@ -112,7 +124,7 @@ use crate::layout::fx_node::{all_input_nodes, is_per_tensor_rescale, is_rescale,
 use crate::layout::pending::is_pending_table;
 use crate::layout::pointwise::{is_pointwise, is_transparent_copy};
 use crate::layout::remove_permutes::{remove_permutes_in_ctx, DeadCode, RemovePermutesConfig, RemovePermutesMemo};
-use crate::layout::shape::{int_list, mark_contiguous, refreshed_meta};
+use crate::layout::shape::{has_local_rule, int_list, mark_contiguous, refreshed_meta};
 
 /// `_VIEW_TARGET` (`:59`).
 pub(crate) const VIEW_TARGET: &str = "aten.view_copy.default";
@@ -429,6 +441,9 @@ struct Propagator<'c> {
     /// Every live copy, and maybe some ids that stopped being one.
     transforms: Vec<NodeId>,
     remove_permutes_memo: RemovePermutesMemo,
+    /// Users of the nodes the walks refreshed since the last re-trace, whose
+    /// values rc4 leaves as they are until then ([`Self::retrace_stale`]).
+    stale: Vec<NodeId>,
 }
 
 impl<'c> Propagator<'c> {
@@ -437,6 +452,7 @@ impl<'c> Propagator<'c> {
             config,
             transforms: Vec::new(),
             remove_permutes_memo: RemovePermutesMemo::default(),
+            stale: Vec::new(),
         }
     }
 
@@ -520,10 +536,63 @@ impl<'c> Propagator<'c> {
     }
 
     /// `_retrace` (`:158-162`): dead-code elimination; see the module docs.
-    fn retrace(&self, ctx: &mut LayoutCtx<'_>) {
+    fn retrace(&mut self, ctx: &mut LayoutCtx<'_>) {
         #[cfg(test)]
         RETRACES.with(|retraces| retraces.set(retraces.get() + 1));
         ctx.eliminate_dead_code();
+        self.retrace_stale(ctx);
+    }
+
+    /// The part of an `ExportPass` re-trace the walks need: rc4's local refresh
+    /// sets only the crossed nodes and the moved copy (`:164-192`), and a sound
+    /// rewrite leaves every other value as it was. Down's advance can change a
+    /// reduction's dims and then fall back to a region move from the original
+    /// copy (`:250-258`, `:1031-1035`), which changes the values the
+    /// reduction's users read; rc4 keeps their old values until the next
+    /// re-trace, which re-derives them and raises where they no longer fit.
+    /// So at each re-trace point (the driver's `_retrace`, and each fusion pass
+    /// that changed the graph, as each re-traces), the users of the refreshed
+    /// nodes are re-derived in graph order, and their users when a value
+    /// changes; a value torch would reject panics. A node without a local rule
+    /// keeps its value: only an already broken rewrite reaches one.
+    fn retrace_stale(&mut self, ctx: &mut LayoutCtx<'_>) {
+        if self.stale.is_empty() {
+            return;
+        }
+        let mut heap: BinaryHeap<Reverse<(u64, NodeId)>> = BinaryHeap::new();
+        let mut queued: HashSet<NodeId> = HashSet::new();
+        let push = |ctx: &LayoutCtx<'_>, heap: &mut BinaryHeap<Reverse<(u64, NodeId)>>, queued: &mut HashSet<NodeId>, id: NodeId| {
+            if let Some(key) = ctx.order().key(id) {
+                if queued.insert(id) {
+                    heap.push(Reverse((key, id)));
+                }
+            }
+        };
+        for id in std::mem::take(&mut self.stale) {
+            push(ctx, &mut heap, &mut queued, id);
+        }
+        // Only meta changes below, so the order keys stay valid.
+        while let Some(Reverse((_, id))) = heap.pop() {
+            let node = ctx.node(id);
+            if ctx.is_erased(id) || node.op != NodeOp::CallFunction {
+                continue;
+            }
+            if !has_local_rule(&node.target) && !is_table(ctx.graph(), id) {
+                continue;
+            }
+            let Some(old) = node.meta.tensor_facts().cloned() else {
+                continue;
+            };
+            let meta = refreshed_node_meta(ctx.graph(), id);
+            if meta.tensor_facts() == Some(&old) {
+                continue;
+            }
+            cover("retrace.stale_value");
+            *ctx.meta_mut(id) = meta;
+            for user in ctx.graph().live_user_ids(id) {
+                push(ctx, &mut heap, &mut queued, user);
+            }
+        }
     }
 
     /// `fuse_horizontal`: Up runs `FuseDuplicateUsersPass` with
@@ -531,13 +600,17 @@ impl<'c> Propagator<'c> {
     /// `TOSA_EXCLUDED_TARGETS`, backends/arm/_passes/propagate_view_copy_permute_pass.py:37-38),
     /// Down `FuseIdenticalInputTransformsPass(permute_targets=...)` (`:921-928`).
     fn fuse_horizontal(&mut self, ctx: &mut LayoutCtx<'_>) -> bool {
-        match self.config.direction {
+        let modified = match self.config.direction {
             Direction::Up => {
                 let excluded: &[&str] = if self.tosa() { TOSA_EXCLUDED_TARGETS } else { &[] };
                 fuse_duplicate_users(ctx, excluded, TableStage::OwnTableConstants)
             }
             Direction::Down => fuse_identical_input_transforms(ctx, &FuseIdenticalInputTransforms::DRIVER),
+        };
+        if modified {
+            self.retrace_stale(ctx);
         }
+        modified
     }
 
     /// `fuse_vertical` (`:301-316`): the fusion pass, then
@@ -545,14 +618,21 @@ impl<'c> Propagator<'c> {
     fn fuse_vertical(&mut self, ctx: &mut LayoutCtx<'_>) -> bool {
         let mut modified = false;
         if self.tosa() && self.config.exported_program {
-            modified |= remove_permutes_in_ctx(
+            let removed = remove_permutes_in_ctx(
                 ctx,
                 &RemovePermutesConfig::tosa(),
                 &mut self.remove_permutes_memo,
                 DeadCode::Full,
             );
+            if removed {
+                self.retrace_stale(ctx);
+            }
+            modified |= removed;
         }
-        modified |= canonicalize_view_copy_permute(ctx);
+        if canonicalize_view_copy_permute(ctx) {
+            self.retrace_stale(ctx);
+            modified = true;
+        }
         modified
     }
 
@@ -1741,7 +1821,7 @@ impl<'c> Propagator<'c> {
     /// `_refresh_propagation_meta`: Up refreshes the copy, then the crossed
     /// nodes in reverse (`:560-567`); Down the crossed nodes in order, then the
     /// copy (`:912-919`).
-    fn refresh_propagation_meta(&self, ctx: &mut LayoutCtx<'_>, moving: NodeId, path: &[NodeId]) {
+    fn refresh_propagation_meta(&mut self, ctx: &mut LayoutCtx<'_>, moving: NodeId, path: &[NodeId]) {
         #[cfg(test)]
         LOCAL_REFRESHES.with(|count| count.set(count.get() + 1));
         match self.config.direction {
@@ -1758,6 +1838,11 @@ impl<'c> Propagator<'c> {
                 refresh_node(ctx, moving);
             }
         }
+        for &node in path.iter().chain(std::iter::once(&moving)) {
+            if !ctx.is_erased(node) {
+                self.stale.extend(ctx.graph().live_user_ids(node));
+            }
+        }
     }
 }
 
@@ -1769,8 +1854,13 @@ pub(crate) fn refresh_node(ctx: &mut LayoutCtx<'_>, id: NodeId) {
     if ctx.is_erased(id) || all_input_nodes(ctx.node(id)).is_empty() {
         return;
     }
-    let graph = ctx.graph();
-    let meta = if is_table(graph, id) {
+    let meta = refreshed_node_meta(ctx.graph(), id);
+    *ctx.meta_mut(id) = meta;
+}
+
+/// `id`'s meta with the value its operands give (see [`refresh_node`]).
+fn refreshed_node_meta(graph: &IrGraph, id: NodeId) -> crate::fx_ir::NodeMeta {
+    if is_table(graph, id) {
         let input = all_input_nodes(graph.node(id))[0];
         let shape = graph
             .node_shape_vec(input)
@@ -1785,8 +1875,7 @@ pub(crate) fn refresh_node(ctx: &mut LayoutCtx<'_>, id: NodeId) {
             let node = graph.node(id);
             panic!("cannot refresh {} ({}): {error}", node.name, node.target)
         })
-    };
-    *ctx.meta_mut(id) = meta;
+    }
 }
 
 /// `id`'s value shape becomes `shape`, keeping its dtype:

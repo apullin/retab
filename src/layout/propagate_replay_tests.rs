@@ -101,6 +101,7 @@ const TOSA_BRANCHES: &[&str] = &[
     "endpoint",
     "int48",
     "memo.skip",
+    "retrace.stale_value",
     "table_guard",
     "up.blocks_crossing",
     "up.cat_fanout",

@@ -926,6 +926,46 @@ after modified=true
 %4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.float32[1, 1, 4, 2] q=none
 output([%4])
 end
+case advance_then_region_move_breaks_a_view
+before
+%0 = placeholder x : torch.float32[4, 2, 1, 3] q=none
+%1 = placeholder ones : torch.float32[1, 1, 1, 1] q=none
+%2 = placeholder other : torch.float32[1, 3, 1, 1] q=none
+%3 = aten.permute_copy.default(%0, [1, 3, 2, 0]) : torch.float32[2, 3, 1, 4] q=none
+%4 = aten.floor.default(%3) : torch.float32[2, 3, 1, 4] q=none
+%5 = aten.mean.dim(%4, [0, 2, -1], True) : torch.float32[1, 3, 1, 1] q=none
+%6 = aten.gt.Tensor(%5, %1) : torch.bool[1, 3, 1, 1] q=none
+%7 = aten.where.self(%6, %5, %2) : torch.float32[1, 3, 1, 1] q=none
+%8 = aten.ceil.default(%7) : torch.float32[1, 3, 1, 1] q=none
+%9 = aten.view_copy.default(%8, [3]) : torch.float32[3] q=none
+output([%9])
+after raises=RuntimeError
+# rc4: shape '[3]' is invalid for input of size 12 While executing %aten_view_copy_default : [num_users=1] = call_function[target=executorch.exir.dialects.edge._ops.aten.view_copy.default](args = (%aten_ceil_default, [3]), kwargs = {}) Original traceback: None Use tlparse to see full graph. (https://github
+end
+case advance_then_region_move_reshapes_users
+before
+%0 = placeholder x : torch.float32[4, 2, 1, 3] q=none
+%1 = placeholder ones : torch.float32[1, 1, 1, 1] q=none
+%2 = placeholder other : torch.float32[1, 3, 1, 1] q=none
+%3 = aten.permute_copy.default(%0, [1, 3, 2, 0]) : torch.float32[2, 3, 1, 4] q=none
+%4 = aten.floor.default(%3) : torch.float32[2, 3, 1, 4] q=none
+%5 = aten.mean.dim(%4, [0, 2, -1], True) : torch.float32[1, 3, 1, 1] q=none
+%6 = aten.gt.Tensor(%5, %1) : torch.bool[1, 3, 1, 1] q=none
+%7 = aten.where.self(%6, %5, %2) : torch.float32[1, 3, 1, 1] q=none
+%8 = aten.ceil.default(%7) : torch.float32[1, 3, 1, 1] q=none
+output([%8])
+after modified=true
+%0 = placeholder x : torch.float32[4, 2, 1, 3] q=none
+%1 = placeholder ones : torch.float32[1, 1, 1, 1] q=none
+%2 = placeholder other : torch.float32[1, 3, 1, 1] q=none
+%3 = aten.floor.default(%0) : torch.float32[4, 2, 1, 3] q=none
+%4 = aten.mean.dim(%3, [3, 2, 1], True) : torch.float32[4, 1, 1, 1] q=none
+%5 = aten.view_copy.default(%4, [1, 1, 1, 4]) : torch.float32[1, 1, 1, 4] q=none
+%6 = aten.gt.Tensor(%5, %1) : torch.bool[1, 1, 1, 4] q=none
+%7 = aten.where.self(%6, %5, %2) : torch.float32[1, 3, 1, 4] q=none
+%8 = aten.ceil.default(%7) : torch.float32[1, 3, 1, 4] q=none
+output([%8])
+end
 case region_with_qparams_on_the_permute
 before
 %0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
