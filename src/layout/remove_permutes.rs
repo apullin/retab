@@ -2106,7 +2106,7 @@ pub(crate) fn is_constant_in(graph: &mut IrGraph, config: &RemovePermutesConfig,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::testing::{node, LayoutGraph, ADD, NEG, PERMUTE, RELU};
+    use crate::layout::testing::{node, LayoutGraph, ADD, NEG, PERMUTE, RELU, SIGMOID};
 
     #[test]
     fn find_extra_ones_matches_rc4() {
@@ -2311,6 +2311,116 @@ mod tests {
         assert!(!first && !second);
         assert!(first_steps > 0);
         assert_eq!(second_steps, 0);
+    }
+
+    fn run_with(config: RemovePermutesConfig, g: &mut LayoutGraph) -> bool {
+        IrRemovePermutesAroundElementwiseOpsPass { config }.run(g.graph_mut())
+    }
+
+    /// A `get_attr` tensor is a constant (`:677-678`) and gets its
+    /// compensating permute directly after it, as rc4 does (checked with rc4
+    /// on the same graph; the replay format has no `get_attr`).
+    #[test]
+    fn a_get_attr_constant_gets_a_permute_after_it() {
+        let mut g = LayoutGraph::new();
+        let x = g.input("x", &[1, 3, 4, 5]);
+        let w = g.graph_mut().add_node(
+            NodeOp::GetAttr,
+            "frozen_w".to_string(),
+            "frozen_w".to_string(),
+            Vec::new(),
+            NodeMeta::tensor(vec![1, 4, 5, 3], "torch.float32"),
+        );
+        let p = g.permute(x, &[0, 2, 3, 1]);
+        let add = g.call(ADD, vec![node(p), node(w)]);
+        let q = g.permute(add, &[0, 3, 1, 2]);
+        g.output(&[q]);
+        let names = [x, w, add].map(|id| g.name(id));
+
+        assert!(run_with(RemovePermutesConfig::base(), &mut g));
+
+        let [x, w, add] = names.map(|name| g.id(&name));
+        g.assert_targets(&[PERMUTE, ADD]);
+        let permute = g.graph().node(add).args[1].as_node().expect("a permuted constant");
+        assert_eq!(g.graph().node(permute).args[0].as_node(), Some(w));
+        assert_eq!(g.graph().node(permute).arg_int_list(1), Some(vec![0, 3, 1, 2]));
+        assert_eq!(g.graph().node(add).args[0].as_node(), Some(x));
+        let order = g.graph().topological_live_node_ids();
+        let at = |id| order.iter().position(|&o| o == id).expect("live");
+        assert_eq!(at(permute), at(w) + 1);
+        assert_eq!(g.shape(add), &[1, 3, 4, 5]);
+    }
+
+    /// RETAB spells the TOSA dialect `backend.tosa.X` and `tosa.X`; RESCALE is
+    /// permutable in the subclass either way.
+    #[test]
+    fn both_rescale_spellings_are_permutable() {
+        for target in ["backend.tosa.RESCALE.default", "tosa.RESCALE.default"] {
+            let mut g = LayoutGraph::new();
+            let x = g.typed_input("x", &[1, 3, 4, 5], "torch.int32");
+            let p = g.permute(x, &[0, 2, 3, 1]);
+            let args = vec![
+                node(p),
+                IrArg::Dtype("torch.int8".to_string()),
+                IrArg::List(vec![IrArg::Float(0.5)]),
+                IrArg::Int(0),
+                IrArg::Int(0),
+            ];
+            let r = g.call(target, args);
+            let q = g.permute(r, &[0, 3, 1, 2]);
+            g.output(&[q]);
+            let rescale = g.name(r);
+
+            assert!(run_with(RemovePermutesConfig::tosa(), &mut g), "{target}");
+
+            g.assert_targets(&[target]);
+            assert_eq!(g.shape(g.id(&rescale)), &[1, 3, 4, 5]);
+            assert_eq!(g.dtype(g.id(&rescale)), "torch.int8");
+        }
+    }
+
+    fn rank0_sigmoid_region(qparams: bool) -> LayoutGraph {
+        let mut g = LayoutGraph::new();
+        let x = g.input("x", &[]);
+        let p = g.permute(x, &[]);
+        let s = g.call(SIGMOID, vec![node(p)]);
+        if qparams {
+            let qparam = crate::fx_ir::QParam::per_tensor(0.5, 0, -128, 127, "torch.int8".to_string());
+            g.graph_mut().node_mut(s).meta.set_both_qparams(qparam);
+        }
+        let q = g.permute(s, &[]);
+        g.output(&[q]);
+        g
+    }
+
+    /// RETAB-only: a quantized table op is the TABLE rc4 has inserted by now,
+    /// whose rank-1 table fails a rank-0 region in the subclass. Without
+    /// qparams, or in the base pass, the op is just elementwise.
+    #[test]
+    fn a_pending_table_fails_a_rank0_region() {
+        assert!(!run_with(RemovePermutesConfig::tosa(), &mut rank0_sigmoid_region(true)));
+        assert!(run_with(RemovePermutesConfig::tosa(), &mut rank0_sigmoid_region(false)));
+        assert!(run_with(RemovePermutesConfig::base(), &mut rank0_sigmoid_region(true)));
+    }
+
+    /// `hardswish` is not tagged pointwise, so only the subclass, which lists
+    /// the TABLE ops (`:19-26`), crosses it.
+    #[test]
+    fn hardswish_is_permutable_only_in_the_subclass() {
+        let build = || {
+            let mut g = LayoutGraph::new();
+            let x = g.input("x", &[1, 3, 4, 5]);
+            let p = g.permute(x, &[0, 2, 3, 1]);
+            let h = g.add_unrefreshed("aten.hardswish.default", vec![node(p)]);
+            g.graph_mut().node_mut(h).meta = NodeMeta::tensor(vec![1, 4, 5, 3], "torch.float32");
+            let q = g.permute(h, &[0, 3, 1, 2]);
+            g.output(&[q]);
+            g
+        };
+        assert!(!run_with(RemovePermutesConfig::base(), &mut build()));
+        let mut g = build();
+        assert!(run_with(RemovePermutesConfig::tosa(), &mut g));
+        g.assert_targets(&["aten.hardswish.default"]);
     }
 
     #[test]

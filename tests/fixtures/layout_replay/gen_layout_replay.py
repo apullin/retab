@@ -1557,8 +1557,8 @@ class _PinnedSubgraph(RemovePermutesAroundElementwiseOps.Subgraph):
 
 RemovePermutesAroundElementwiseOps.Subgraph = _PinnedSubgraph
 
-NHWC = [0, 2, 3, 1]
-NCHW = [0, 3, 1, 2]
+TO_NHWC = [0, 2, 3, 1]
+TO_NCHW = [0, 3, 1, 2]
 
 
 def inverse_permutation(perm: Sequence[int]) -> list[int]:
@@ -1601,36 +1601,36 @@ def remove_permutes_cases():
     @case
     def round_trip_around_a_unary_op(b):
         x = b.input("x", X4)
-        r = b.call(A.relu.default, b.permute(x, NHWC))
-        b.output([b.permute(r, NCHW)])
+        r = b.call(A.relu.default, b.permute(x, TO_NHWC))
+        b.output([b.permute(r, TO_NCHW)])
 
     @case
     def channels_last_dialect_permutes(b):
         x = b.input("x", X4)
         CL = exir_ops.edge.channels_last.permute_copy.default
-        r = b.call(A.hardtanh.default, b.call(CL, x, NHWC))
-        b.output([b.call(CL, r, NCHW)])
+        r = b.call(A.hardtanh.default, b.call(CL, x, TO_NHWC))
+        b.output([b.call(CL, r, TO_NCHW)])
 
     @case
     def aten_permute_default_is_not_a_permute(b):
         x = b.input("x", X4)
-        r = b.call(A.relu.default, b.call(A.permute.default, x, NHWC))
-        b.output([b.call(A.permute.default, r, NCHW)])
+        r = b.call(A.relu.default, b.call(A.permute.default, x, TO_NHWC))
+        b.output([b.call(A.permute.default, r, TO_NCHW)])
 
     @case
     def diamond_region(b):
         x = b.input("x", X4)
-        a = b.call(A.abs.default, b.permute(x, NHWC))
+        a = b.call(A.abs.default, b.permute(x, TO_NHWC))
         n = b.call(A.neg.default, a)
         s = b.call(A.sigmoid.default, a)
-        b.output([b.permute(b.call(A.add.Tensor, n, s), NCHW)])
+        b.output([b.permute(b.call(A.add.Tensor, n, s), TO_NCHW)])
 
     @case
     def two_entry_permutes_with_the_same_permutation(b):
         x = b.input("x", X4)
         y = b.input("y", X4)
-        a = b.call(A.add.Tensor, b.permute(x, NHWC), b.permute(y, NHWC))
-        b.output([b.permute(a, NCHW)])
+        a = b.call(A.add.Tensor, b.permute(x, TO_NHWC), b.permute(y, TO_NHWC))
+        b.output([b.permute(a, TO_NCHW)])
 
     @case
     def negative_dims_in_the_permutes(b):
@@ -1641,16 +1641,16 @@ def remove_permutes_cases():
     @case
     def entry_permute_with_a_user_outside_the_region(b):
         x = b.input("x", X4)
-        p = b.permute(x, NHWC)
+        p = b.permute(x, TO_NHWC)
         r = b.call(A.relu.default, p)
-        b.output([b.permute(r, NCHW), p])
+        b.output([b.permute(r, TO_NCHW), p])
 
     @case
     def mismatched_entry_permute_fails(b):
         x = b.input("x", (2, 3, 4, 4))
         y = b.input("y", (2, 4, 3, 4))
-        a = b.call(A.add.Tensor, b.permute(x, NHWC), b.permute(y, [0, 3, 1, 2]))
-        b.output([b.permute(a, NCHW)])
+        a = b.call(A.add.Tensor, b.permute(x, TO_NHWC), b.permute(y, [0, 3, 1, 2]))
+        b.output([b.permute(a, TO_NCHW)])
 
     @case
     def non_inverse_exit_is_composed(b):
@@ -1680,15 +1680,15 @@ def remove_permutes_cases():
     @case
     def region_reaching_the_output_fails(b):
         x = b.input("x", X4)
-        r = b.call(A.relu.default, b.permute(x, NHWC))
-        b.output([b.permute(r, NCHW), r])
+        r = b.call(A.relu.default, b.permute(x, TO_NHWC))
+        b.output([b.permute(r, TO_NCHW), r])
 
     @case
     def region_feeding_a_non_permutable_op_fails(b):
         x = b.input("x", X4)
-        r = b.call(A.relu.default, b.permute(x, NHWC))
+        r = b.call(A.relu.default, b.permute(x, TO_NHWC))
         c = b.call(A.cumsum.default, r, 1)
-        b.output([b.permute(r, NCHW), c])
+        b.output([b.permute(r, TO_NCHW), c])
 
     @case
     def broadcast_raising_the_rank_fails(b):
@@ -1703,16 +1703,16 @@ def remove_permutes_cases():
         x = b.input("x", X4)
         c = b.constant("param", "c", (1, 1, 1, 1))
         d = b.input("d", (1,))
-        m = b.call(A.mul.Tensor, b.permute(x, NHWC), c)
+        m = b.call(A.mul.Tensor, b.permute(x, TO_NHWC), c)
         a = b.call(A.add.Tensor, m, d)
-        b.output([b.permute(a, NCHW)])
+        b.output([b.permute(a, TO_NCHW)])
 
     @case
     def full_constant_gets_a_permute(b):
         x = b.input("x", X4)
         f = b.call(A.full.default, [2, 4, 5, 3], 0.5)
-        a = b.call(A.add.Tensor, b.permute(x, NHWC), f)
-        b.output([b.permute(a, NCHW)])
+        a = b.call(A.add.Tensor, b.permute(x, TO_NHWC), f)
+        b.output([b.permute(a, TO_NCHW)])
 
     @case
     def signature_constants_get_permutes(b):
@@ -1721,32 +1721,32 @@ def remove_permutes_cases():
         y = b.input("y", (3,))
         v = b.constant("buffer", "v", (1, 4, 5, 3))
         k = b.constant("constant", "k", (2, 1, 1, 3))
-        a = b.call(A.add.Tensor, b.permute(x, NHWC), w)
+        a = b.call(A.add.Tensor, b.permute(x, TO_NHWC), w)
         m = b.call(A.mul.Tensor, a, v)
         s = b.call(A.sub.Tensor, m, k)
-        b.output([b.permute(s, NCHW), y])
+        b.output([b.permute(s, TO_NCHW), y])
 
     @case
     def prefixed_user_input_counts_as_a_constant(b):
         x = b.input("x", X4)
         w = b.input("p_weight", (2, 4, 5, 3))
-        a = b.call(A.add.Tensor, b.permute(x, NHWC), w)
-        b.output([b.permute(a, NCHW)])
+        a = b.call(A.add.Tensor, b.permute(x, TO_NHWC), w)
+        b.output([b.permute(a, TO_NCHW)])
 
     @case
     def plain_user_input_in_the_region_fails(b):
         x = b.input("x", X4)
         w = b.input("w", (2, 4, 5, 3))
-        a = b.call(A.add.Tensor, b.permute(x, NHWC), w)
-        b.output([b.permute(a, NCHW)])
+        a = b.call(A.add.Tensor, b.permute(x, TO_NHWC), w)
+        b.output([b.permute(a, TO_NCHW)])
 
     @case
     def constant_feeding_two_region_nodes(b):
         x = b.input("x", X4)
         w = b.constant("param", "w", (2, 4, 5, 3))
-        m = b.call(A.mul.Tensor, b.permute(x, NHWC), w)
+        m = b.call(A.mul.Tensor, b.permute(x, TO_NHWC), w)
         s = b.call(A.sub.Tensor, m, w)
-        b.output([b.permute(s, NCHW)])
+        b.output([b.permute(s, TO_NCHW)])
 
     @case
     def lower_rank_constant_gets_a_view(b):
@@ -1759,13 +1759,13 @@ def remove_permutes_cases():
     def lower_rank_constant_with_a_moved_dim_raises(b):
         x = b.input("x", X4)
         c = b.constant("buffer", "c", (5, 3))
-        a = b.call(A.mul.Tensor, b.permute(x, NHWC), c)
-        b.output([b.permute(a, NCHW)])
+        a = b.call(A.mul.Tensor, b.permute(x, TO_NHWC), c)
+        b.output([b.permute(a, TO_NCHW)])
 
     @case
     def keepdim_reductions_remap_their_dims(b):
         x = b.input("x", X4)
-        p = b.permute(x, NHWC)
+        p = b.permute(x, TO_NHWC)
         mx = b.call(A.amax.default, p, [1], True)
         mn = b.call(A.amin.default, p, -1, True)
         me = b.call(A.mean.dim, p, [1, 2], True)
@@ -1774,67 +1774,67 @@ def remove_permutes_cases():
         t = b.call(A.add.Tensor, t, mn)
         t = b.call(A.mul.Tensor, t, me)
         t = b.call(A.sub.Tensor, t, su)
-        b.output([b.permute(t, NCHW)])
+        b.output([b.permute(t, TO_NCHW)])
 
     @case
     def reduction_without_keepdim_fails(b):
         x = b.input("x", X4)
-        p = b.permute(x, NHWC)
+        p = b.permute(x, TO_NHWC)
         m = b.call(A.mean.dim, p, [3])
-        b.output([b.permute(b.call(A.relu.default, p), NCHW), m])
+        b.output([b.permute(b.call(A.relu.default, p), TO_NCHW), m])
 
     @case
     def amax_with_the_default_dim_gets_a_dim_kwarg(b):
         x = b.input("x", X4)
-        p = b.permute(x, NHWC)
+        p = b.permute(x, TO_NHWC)
         m = b.call(A.amax.default, p, keepdim=True)
-        b.output([b.permute(b.call(A.sub.Tensor, p, m), NCHW)])
+        b.output([b.permute(b.call(A.sub.Tensor, p, m), TO_NCHW)])
 
     @case
     def cat_dims_remapped(b):
         x = b.input("x", X4)
-        p = b.permute(x, NHWC)
+        p = b.permute(x, TO_NHWC)
         c0 = b.call(A.cat.default, [p, p], 3)
         c1 = b.call(A.cat.default, [p, p], dim=-1)
         c2 = b.call(A.cat.default, [p, p])
-        b.output([b.permute(c0, NCHW), b.permute(c1, NCHW), b.permute(c2, NCHW)])
+        b.output([b.permute(c0, TO_NCHW), b.permute(c1, TO_NCHW), b.permute(c2, TO_NCHW)])
 
     @case
     def cat_with_a_second_entry_permute(b):
         x = b.input("x", X4)
         y = b.input("y", (2, 1, 4, 5))
-        c = b.call(A.cat.default, [b.permute(x, NHWC), b.permute(y, NHWC)], 3)
-        b.output([b.permute(c, NCHW)])
+        c = b.call(A.cat.default, [b.permute(x, TO_NHWC), b.permute(y, TO_NHWC)], 3)
+        b.output([b.permute(c, TO_NCHW)])
 
     @case
     def slice_dims_remapped(b):
         x = b.input("x", X4)
-        p = b.permute(x, NHWC)
+        p = b.permute(x, TO_NHWC)
         s0 = b.call(A.slice_copy.Tensor, p, 3, 0, 2)
         s1 = b.call(A.slice_copy.Tensor, s0, dim=1, start=1, end=3)
         s2 = b.call(A.slice_copy.Tensor, s1, start=0, end=1)
-        b.output([b.permute(s2, NCHW)])
+        b.output([b.permute(s2, TO_NCHW)])
 
     @case
     def constant_pad_nd_remapped(b):
         x = b.input("x", (1, 6, 6, 3))
-        p = b.permute(x, NCHW)
+        p = b.permute(x, TO_NCHW)
         pad = b.call(A.constant_pad_nd.default, p, [0, 0, 0, 0, 0, 1], 0.0)
-        b.output([b.permute(pad, NHWC)])
+        b.output([b.permute(pad, TO_NHWC)])
 
     @case
     def constant_pad_nd_on_two_dims(b):
         x = b.input("x", X4)
-        p = b.permute(x, NHWC)
+        p = b.permute(x, TO_NHWC)
         pad = b.call(A.constant_pad_nd.default, p, [1, 2, 0, 1])
-        b.output([b.permute(pad, NCHW)])
+        b.output([b.permute(pad, TO_NCHW)])
 
     @case
     def aten_pad_constant_mode_remapped(b):
         x = b.input("x", (1, 6, 6, 3))
-        p = b.permute(x, NCHW)
+        p = b.permute(x, TO_NCHW)
         pad = b.call(A.pad.default, p, [0, 0, 0, 0, 0, 1], "constant", 0.0)
-        b.output([b.permute(pad, NHWC)])
+        b.output([b.permute(pad, TO_NHWC)])
 
     @case
     def aten_pad_reflect_mode_fails(b):
@@ -1854,7 +1854,7 @@ def remove_permutes_cases():
     @case
     def squeeze_view_into_a_lower_rank_exit(b):
         x = b.input("x", (1, 1, 4, 6))
-        v = b.view(b.permute(x, NCHW), [1, 6, 4])
+        v = b.view(b.permute(x, TO_NCHW), [1, 6, 4])
         h = b.call(A.hardtanh.default, v)
         b.output([b.permute(h, [0, 2, 1])])
 
@@ -1886,13 +1886,13 @@ def remove_permutes_cases():
         x = b.input("x", (1, 8, 4))
         c = b.call(A.clamp.default, b.permute(x, [0, 2, 1]), 0.0, None)
         v = b.view(c, [1, 4, 8, 1])
-        b.output([b.permute(v, NHWC)])
+        b.output([b.permute(v, TO_NHWC)])
 
     @case
     def shared_singleton_view_is_not_a_boundary(b):
         x = b.input("x", (1, 4, 8))
         v = b.view(b.permute(x, [0, 2, 1]), [1, 8, 4, 1])
-        b.output([b.permute(v, NHWC), b.permute(v, NCHW)])
+        b.output([b.permute(v, TO_NHWC), b.permute(v, TO_NCHW)])
 
     @case
     def upstream_view_reached_at_another_rank_fails(b):
@@ -1913,14 +1913,14 @@ def remove_permutes_cases():
     def sink_view_below_the_region(b):
         x = b.input("x", (1, 4, 1, 1))
         direct = b.input("direct", (1, 8, 4))
-        p = b.permute(x, NHWC)
+        p = b.permute(x, TO_NHWC)
         v = b.view(b.call(A.mul.Tensor, p, p), [1, 1, 4])
         b.output([b.call(A.sub.Tensor, direct, v)])
 
     @case
     def sink_view_below_the_region_splitting_its_dim(b):
         x = b.input("x", (1, 4, 1, 1))
-        p = b.permute(x, NHWC)
+        p = b.permute(x, TO_NHWC)
         b.output([b.view(b.call(A.mul.Tensor, p, p), [1, 2, 2])])
 
     @case
@@ -1932,7 +1932,7 @@ def remove_permutes_cases():
         gate = b.view(g, [1, 4, 1])
         m = b.call(A.mul.Tensor, c, gate)
         r = b.call(A.add.Tensor, m, b.permute(skip, [0, 2, 1]))
-        b.output([b.permute(b.view(c, [1, 4, 8, 1]), NHWC), b.permute(r, [0, 2, 1])])
+        b.output([b.permute(b.view(c, [1, 4, 8, 1]), TO_NHWC), b.permute(r, [0, 2, 1])])
 
     @case
     def splitting_sink_view_into_the_region_fails(b):
@@ -1953,94 +1953,94 @@ def remove_permutes_cases():
     def keyword_tensor_input(b):
         x = b.input("x", (1, 4, 1, 1))
         direct = b.input("direct", (1, 8, 4))
-        p = b.permute(x, NHWC)
+        p = b.permute(x, TO_NHWC)
         v = b.view(b.call(A.mul.Tensor, p, p), [1, 1, 4])
         b.output([b.call(A.sub.Tensor, v, other=direct)])
 
     @case
     def interleave_with_an_unsqueeze_head(b):
         x = b.input("x", (1, 16, 20, 1))
-        v = interleave(b, b.permute(x, NCHW), 3, 2)
-        b.output([b.permute(v, NHWC)])
+        v = interleave(b, b.permute(x, TO_NCHW), 3, 2)
+        b.output([b.permute(v, TO_NHWC)])
 
     @case
     def interleave_with_a_view_head(b):
         x = b.input("x", (1, 16, 20, 3))
-        v = interleave(b, b.permute(x, NCHW), 2, 4, head="view")
-        b.output([b.permute(v, NHWC)])
+        v = interleave(b, b.permute(x, TO_NCHW), 2, 4, head="view")
+        b.output([b.permute(v, TO_NHWC)])
 
     @case
     def interleave_with_keyword_arguments(b):
         x = b.input("x", (1, 16, 20, 1))
-        p = b.permute(x, NCHW)
+        p = b.permute(x, TO_NCHW)
         u = b.call(A.unsqueeze_copy.default, p, dim=4)
         e = b.call(A.expand_copy.default, u, size=[1, 1, 16, 20, 2])
         v = b.call(A.view_copy.default, e, size=[1, 1, 16, 40])
-        b.output([b.permute(v, NHWC)])
+        b.output([b.permute(v, TO_NHWC)])
 
     @case
     def interleave_composes_with_elementwise_ops(b):
         x = b.input("x", (1, 16, 20, 1))
-        p = b.permute(x, NCHW)
+        p = b.permute(x, TO_NCHW)
         v = interleave(b, b.call(A.mul.Tensor, p, p), 3, 2)
-        b.output([b.permute(b.call(A.hardtanh.default, v), NHWC)])
+        b.output([b.permute(b.call(A.hardtanh.default, v), TO_NHWC)])
 
     @case
     def interleave_after_a_nop_stretch(b):
         x = b.input("x", (1, 16, 20, 1))
-        u0 = b.call(A.unsqueeze_copy.default, b.permute(x, NCHW), 3)
+        u0 = b.call(A.unsqueeze_copy.default, b.permute(x, TO_NCHW), 3)
         v0 = b.view(u0, [1, 1, 16, 20])
-        b.output([b.permute(interleave(b, v0, 3, 2), NHWC)])
+        b.output([b.permute(interleave(b, v0, 3, 2), TO_NHWC)])
 
     @case
     def interleave_with_an_extra_expand_user_fails(b):
         x = b.input("x", (1, 16, 20, 1))
-        u = b.call(A.unsqueeze_copy.default, b.permute(x, NCHW), 4)
+        u = b.call(A.unsqueeze_copy.default, b.permute(x, TO_NCHW), 4)
         e = b.call(A.expand_copy.default, u, [1, 1, 16, 20, 2])
         v = b.view(e, [1, 1, 16, 40])
-        b.output([b.permute(v, NHWC), b.call(A.mul.Tensor, e, e)])
+        b.output([b.permute(v, TO_NHWC), b.call(A.mul.Tensor, e, e)])
 
     @case
     def interleave_with_a_non_merging_view_fails(b):
         x = b.input("x", (1, 16, 20, 1))
-        u = b.call(A.unsqueeze_copy.default, b.permute(x, NCHW), 4)
+        u = b.call(A.unsqueeze_copy.default, b.permute(x, TO_NCHW), 4)
         e = b.call(A.expand_copy.default, u, [1, 1, 16, 20, 2])
         b.output([b.view(e, [1, 16, 20, 2])])
 
     @case
     def per_tensor_and_per_channel_rescales(b):
         x = b.input("x", (1, 3, 4, 5), dtype=torch.int32)
-        p = b.permute(x, NHWC)
+        p = b.permute(x, TO_NHWC)
         r0 = b.call(T.RESCALE.default, p, torch.int8, [0.5], 0, 0)
         r1 = b.call(T.RESCALE.default, r0, torch.int32, [0.5, 0.25, 0.125], 0, 0)
-        b.output([b.permute(r1, NCHW)])
+        b.output([b.permute(r1, TO_NCHW)])
 
     @case
     def quantize_dequantize_region(b):
         x = b.input("x", X4)
-        q = b.call(Q.quantize_per_tensor.default, b.permute(x, NHWC), 0.5, 0, -128, 127, torch.int8)
+        q = b.call(Q.quantize_per_tensor.default, b.permute(x, TO_NHWC), 0.5, 0, -128, 127, torch.int8)
         d = b.call(Q.dequantize_per_tensor.default, q, 0.5, 0, -128, 127, torch.int8)
-        b.output([b.permute(d, NCHW)])
+        b.output([b.permute(d, TO_NCHW)])
 
     @case
     def hardswish_is_permutable_as_a_table_op(b):
         x = b.input("x", X4)
-        h = b.call(A.hardswish.default, b.permute(x, NHWC))
-        b.output([b.permute(h, NCHW)])
+        h = b.call(A.hardswish.default, b.permute(x, TO_NHWC))
+        b.output([b.permute(h, TO_NCHW)])
 
     @case
     def pending_table_region(b):
         x = b.input("x", X4)
-        s = b.call(A.sigmoid.default, b.permute(x, NHWC))
+        s = b.call(A.sigmoid.default, b.permute(x, TO_NHWC))
         set_qparams(s, inputs=[0], outputs=[0])
-        b.output([b.permute(s, NCHW)])
+        b.output([b.permute(s, TO_NCHW)])
 
     @case
     def table_constant_edge_is_dropped(b):
         x = b.input("x", (1, 3, 4, 5), dtype=torch.int8)
         table = b.constant("buffer", "b_table_constant", (256,), dtype=torch.int8)
-        t = b.call(T.TABLE.default, b.permute(x, NHWC), table)
-        b.output([b.permute(t, NCHW)])
+        t = b.call(T.TABLE.default, b.permute(x, TO_NHWC), table)
+        b.output([b.permute(t, TO_NCHW)])
 
     @case
     def table_in_a_rank0_region_fails(b):
@@ -2067,7 +2067,7 @@ def remove_permutes_cases():
         w = b.input("p_layer_norm_weight", (1, 1, 1, 4))
         p = b.permute(x, [0, 3, 1, 2])
         m1 = b.call(A.mul.Tensor, p, p)
-        shared = b.permute(m1, NHWC)
+        shared = b.permute(m1, TO_NHWC)
         m2 = b.call(A.mul.Tensor, shared, w)
         b.output([b.permute(m2, [0, 3, 1, 2])])
 
@@ -2092,7 +2092,7 @@ def remove_permutes_cases():
     @case
     def exit_permute_returned_twice_and_used(b):
         x = b.input("x", X4)
-        q = b.permute(b.call(A.relu.default, b.permute(x, NHWC)), NCHW)
+        q = b.permute(b.call(A.relu.default, b.permute(x, TO_NHWC)), TO_NCHW)
         b.output([q, b.call(A.neg.default, q), q])
 
     @case
@@ -2107,29 +2107,29 @@ def remove_permutes_cases():
     def unrelated_dead_code_goes_when_modified(b):
         x = b.input("x", X4)
         b.call(A.neg.default, x)
-        r = b.call(A.relu.default, b.permute(x, NHWC))
-        b.output([b.permute(r, NCHW)])
+        r = b.call(A.relu.default, b.permute(x, TO_NHWC))
+        b.output([b.permute(r, TO_NCHW)])
 
     @case
     def dead_code_stays_when_nothing_changes(b):
         x = b.input("x", X4)
         b.call(A.neg.default, x)
-        b.output([b.call(A.relu.default, b.permute(x, NHWC))])
+        b.output([b.call(A.relu.default, b.permute(x, TO_NHWC))])
 
     @case
     def permutes_into_a_shared_region_from_both_sides(b):
         x = b.input("x", X4)
         y = b.input("y", (2, 4, 5, 3))
-        a = b.call(A.add.Tensor, b.permute(x, NHWC), y)
-        b.output([b.permute(a, NCHW), b.permute(b.call(A.neg.default, a), NCHW)])
+        a = b.call(A.add.Tensor, b.permute(x, TO_NHWC), y)
+        b.output([b.permute(a, TO_NCHW), b.permute(b.call(A.neg.default, a), TO_NCHW)])
 
     @case
     def two_regions_off_one_permute(b):
         x = b.input("x", X4)
-        p = b.permute(x, NHWC)
+        p = b.permute(x, TO_NHWC)
         r = b.call(A.relu.default, p)
         n = b.call(A.neg.default, p)
-        b.output([b.permute(r, NCHW), b.permute(n, NCHW)])
+        b.output([b.permute(r, TO_NCHW), b.permute(n, TO_NCHW)])
 
     @case
     def chained_entry_permutes_into_one_node(b):
@@ -2181,13 +2181,13 @@ def remove_permutes_cases():
     @case
     def constant_pad_nd_with_the_pad_as_a_kwarg_fails(b):
         x = b.input("x", (1, 6, 6, 3))
-        pad = b.call(A.constant_pad_nd.default, b.permute(x, NCHW), pad=[1, 1])
-        b.output([b.permute(pad, NHWC)])
+        pad = b.call(A.constant_pad_nd.default, b.permute(x, TO_NCHW), pad=[1, 1])
+        b.output([b.permute(pad, TO_NHWC)])
 
     @case
     def region_with_a_qparam_permute_exit(b):
         x = b.input("x", X4)
-        r = b.call(A.relu.default, b.permute(x, NHWC))
+        r = b.call(A.relu.default, b.permute(x, TO_NHWC))
         q = b.permute(r, [0, 2, 1, 3])
         set_qparams(q, inputs=[0], outputs=[0])
         b.output([q])

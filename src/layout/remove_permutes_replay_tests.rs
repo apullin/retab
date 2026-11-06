@@ -137,3 +137,49 @@ fn a_second_call_with_the_memo_matches_a_fresh_one() {
     }
     assert!(remembered > 0, "no search was remembered across calls");
 }
+
+/// Inside a caller that keeps the graph free of dead code, `DeadCode::Local`
+/// (erase only what the call stopped using) leaves what rc4's full sweep
+/// leaves.
+#[test]
+fn local_dead_code_matches_the_full_sweep_on_graphs_without_dead_code() {
+    use crate::layout::ctx::LayoutCtx;
+    use crate::layout::remove_permutes::{
+        remove_permutes_in_ctx, DeadCode, RemovePermutesConfig, RemovePermutesMemo,
+    };
+
+    let config = RemovePermutesConfig::tosa();
+    let mut compared = 0;
+    for case in replay::parse(FIXTURE).expect("the fixture parses") {
+        let already_dead = case.before.nodes.iter().any(|node| node.dead);
+        if already_dead || case.raises.is_some() || !case.modified {
+            continue;
+        }
+        let mut graph = replay::build(&case.before);
+        {
+            let mut ctx = LayoutCtx::new(&mut graph);
+            let modified = remove_permutes_in_ctx(
+                &mut ctx,
+                &config,
+                &mut RemovePermutesMemo::default(),
+                DeadCode::Local,
+            );
+            if modified {
+                ctx.finish();
+            }
+        }
+        let snapshot = replay::snapshot(&graph).expect("a valid graph");
+        let options = Options {
+            dead_nodes: true,
+            ..Options::default()
+        };
+        if KNOWN.iter().any(|(known, _)| *known == case.name) {
+            continue;
+        }
+        replay::compare(&case.after, &snapshot, options).unwrap_or_else(|mismatch| {
+            panic!("case {}: local dead-code removal differs: {mismatch:?}", case.name)
+        });
+        compared += 1;
+    }
+    assert!(compared > 50, "only {compared} cases compared");
+}
