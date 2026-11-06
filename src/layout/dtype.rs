@@ -515,6 +515,53 @@ mod tests {
         assert_eq!(value_dtype(g.graph(), rescale).as_deref(), Some(I16));
     }
 
+    /// rc4's RewriteMatmulPass (APM:724) replaces a quantized bmm with TOSA
+    /// MATMUL, which inherits the bmm's maps, int8 output qparams included, and
+    /// whose fake kernel gives int32 for int8 inputs
+    /// (`backends/arm/tosa/dialect/ops/matmul.py:33-38`); a RESCALE with empty
+    /// maps follows. rc4 dump in .venv-et16: `tosa_matmul_default ::
+    /// int32[1, 4, 3] iq={0:int8,1:int8} oq={0:int8}`. RETAB keeps the
+    /// `aten.bmm` with the same maps, and IrRewriteMatmulRescale (explicit
+    /// phase-6 slot 4, before P3's MoveDataMovementOpsToSmallerDtype) puts the
+    /// RESCALE after it; ingest types the bmm int32 (`is_accumulator_op`,
+    /// `ingest/finalize.rs`). `value_dtype` takes rule 2, the stale int8 output
+    /// qparam, so `_uses_wider_dtype` would see an int8 -> int8 RESCALE and
+    /// leave a permute between the bmm and its RESCALE on the int32 side.
+    #[test]
+    #[ignore = "BUG: value_dtype gives a rescaled matmul accumulator its inherited int8 output-qparam dtype; rc4's MATMUL is int32"]
+    fn a_rescaled_matmul_accumulator_has_rc4s_int32_dtype() {
+        use crate::fx_ir::IrPass;
+
+        let mut g = LayoutGraph::new();
+        let a = g.typed_input("a", &[1, 4, 8], I8);
+        let b = g.typed_input("b", &[1, 8, 3], I8);
+        let bmm = raw(
+            &mut g,
+            "aten.bmm.default",
+            vec![node(a), node(b)],
+            &[1, 4, 3],
+            F32,
+        );
+        meta_of(&mut g, bmm).set_binary_input_output_qparams(
+            qparam(0.1, 0, I8),
+            qparam(0.2, 0, I8),
+            qparam(0.3, 4, I8),
+        );
+        g.output(&[bmm]);
+        assert!(crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass.run(g.graph_mut()));
+        let rescale = g
+            .graph()
+            .live_nodes()
+            .find(|candidate| candidate.target == RESCALE)
+            .map(|candidate| candidate.id)
+            .expect("IrRewriteMatmulRescale adds a RESCALE");
+        assert_eq!(g.graph().node(rescale).arg_node(0), Some(bmm));
+        assert_eq!(value_dtype(g.graph(), rescale).as_deref(), Some(I8));
+
+        assert_eq!(value_dtype(g.graph(), bmm).as_deref(), Some(I32));
+        assert_eq!(operand_dtype(g.graph(), rescale, 0).as_deref(), Some(I32));
+    }
+
     #[test]
     fn comparisons_and_integer_vals_ignore_their_input_qparams() {
         let mut g = LayoutGraph::new();

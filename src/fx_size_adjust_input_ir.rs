@@ -734,6 +734,66 @@ mod tests {
         }
     }
 
+    /// rc4 expands a one-element stride, padding or dilation around the
+    /// channel before it computes the slices (`expand_around_channel`,
+    /// `arm_pass_utils.py:135-145`, called at `size_adjust_input_pass.py:211-215`).
+    /// `F.conv2d(x, w, stride=[3], padding=[1])` exports as
+    /// `convolution(x, w, None, [3], [1], [1, 1], False, [0, 0], 1)`. rc4's
+    /// SizeAdjustInputPass, run in .venv-et16 on that edge graph, slices a
+    /// `[1, 3, 9, 9]` input to `[1, 3, 8, 9]` then `[1, 3, 8, 8]`, and leaves a
+    /// `[1, 3, 10, 10]` input alone. RETAB reads the missing width stride as 1
+    /// and both pads as 0, so it slices nothing on 9x9 and cuts a visited row
+    /// on 10x10 (the conv would then have 3 output rows, not 4).
+    #[test]
+    #[ignore = "BUG: explicit-mode slicing does not expand one-element conv stride/padding lists as rc4's expand_around_channel does"]
+    fn explicit_mode_expands_one_element_conv_params_like_rc4() {
+        let build = |input: [i64; 4], out: [i64; 4]| {
+            let mut graph = IrGraph::empty();
+            let x = f32_placeholder(&mut graph, "x", input);
+            let weight = f32_placeholder(&mut graph, "weight", [4, 3, 3, 3]);
+            let conv = f32_call(
+                &mut graph,
+                "conv",
+                "aten.convolution.default",
+                vec![
+                    IrArg::Node(x),
+                    IrArg::Node(weight),
+                    IrArg::None,
+                    i64_list_arg(&[3]),
+                    i64_list_arg(&[1]),
+                    i64_list_arg(&[1, 1]),
+                    IrArg::Bool(false),
+                    i64_list_arg(&[0, 0]),
+                    IrArg::Int(1),
+                ],
+                out,
+            );
+            output(&mut graph, conv);
+            (graph, conv)
+        };
+        let slices = |graph: &IrGraph, conv: NodeId| -> Vec<((i64, i64, i64), Vec<i64>)> {
+            slice_chain(graph, conv)
+                .into_iter()
+                .map(|slice| {
+                    let (bounds, shape, ..) = describe(slice);
+                    (bounds, shape)
+                })
+                .collect()
+        };
+
+        let (mut graph, conv) = build([1, 3, 9, 9], [1, 4, 3, 3]);
+        let adjusted = EXPLICIT.run(&mut graph);
+        assert_eq!(
+            slices(&graph, conv),
+            [((2, 0, 8), vec![1, 3, 8, 9]), ((3, 0, 8), vec![1, 3, 8, 8])]
+        );
+        assert!(adjusted);
+
+        let (mut graph, conv) = build([1, 3, 10, 10], [1, 4, 4, 4]);
+        assert!(!EXPLICIT.run(&mut graph));
+        assert!(slices(&graph, conv).is_empty());
+    }
+
     /// rc4 inserts the slices directly before the node they feed
     /// (`graph.inserting_before(node)`, `size_adjust_input_pass.py:377`).
     #[test]

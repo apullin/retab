@@ -424,4 +424,58 @@ mod tests {
 
         assert!(!IrDecomposeGroupedConvPass.run(&mut graph));
     }
+
+    /// Design §4.2-P, part of step S5: rc4 keeps rank-4 depthwise convs for
+    /// RewriteConvPass but decomposes rank-5 ones, as TOSA has no
+    /// DEPTHWISE_CONV3D (`decompose_grouped_conv_pass.py:256-263`). rc4's
+    /// DecomposeGroupedConvPass, run in .venv-et16, turns `Conv3d(2, 2, 1,
+    /// groups=2)` on `[1, 2, 3, 4, 4]` into two groups=1 convolutions on
+    /// `[1, 1, 3, 4, 4]` with `[1, 1, 1, 1, 1]` weights. RETAB skips depthwise
+    /// at every rank, so the conv stays grouped, and the explicit IrRewriteConv
+    /// would see CONV3D with groups != 1 (RCP:147-158).
+    #[test]
+    #[ignore = "BUG: S5 is incomplete: IrDecomposeGroupedConv still skips rank-5 depthwise convs, which rc4 decomposes"]
+    fn decomposes_rank5_depthwise_conv_like_rc4() {
+        let mut graph = IrGraph::empty();
+        let input = placeholder(&mut graph, "input", [1, 2, 3, 4, 4], "torch.int8");
+        let weight = placeholder(&mut graph, "weight", [2, 1, 1, 1, 1], "torch.int8");
+        let conv = call_with_meta(
+            &mut graph,
+            "conv",
+            "aten.convolution.default",
+            vec![
+                IrArg::Node(input),
+                IrArg::Node(weight),
+                IrArg::None,
+                i64_list(&[1, 1, 1]),
+                i64_list(&[0, 0, 0]),
+                i64_list(&[1, 1, 1]),
+                IrArg::Bool(false),
+                i64_list(&[0, 0, 0]),
+                IrArg::Int(2),
+            ],
+            NodeMeta::tensor([1, 2, 3, 4, 4], "torch.int8"),
+        );
+        output(&mut graph, conv);
+
+        assert!(IrDecomposeGroupedConvPass.run(&mut graph));
+        assert!(!graph.nodes[conv].alive);
+        let groups: Vec<_> = graph
+            .live_nodes()
+            .filter(|node| node.target == "aten.convolution.default")
+            .map(|node| {
+                (
+                    node.arg_int(8),
+                    graph.node_shape_vec(node.arg_node(0).unwrap()),
+                    graph.node_shape_vec(node.arg_node(1).unwrap()),
+                )
+            })
+            .collect();
+        let group = (
+            Some(1),
+            Some(vec![1, 1, 3, 4, 4]),
+            Some(vec![1, 1, 1, 1, 1]),
+        );
+        assert_eq!(groups, [group.clone(), group]);
+    }
 }
