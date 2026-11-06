@@ -165,6 +165,34 @@ fn remove_permutes_replay_external() {
     println!("all differing cases: {}", names.join(" "));
 }
 
+/// Replays a user-order fixture written elsewhere through the ctx port:
+///
+/// ```text
+/// cd /tmp && <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py \
+///     --pass remove_permutes_user_order --random 2000 --out /tmp/replay
+/// RETAB_REPLAY_DIR=/tmp/replay cargo test --lib remove_permutes_user_order_replay_external -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "diagnostic: replays $RETAB_REPLAY_DIR/remove_permutes_user_order.txt"]
+fn remove_permutes_user_order_replay_external() {
+    let dir = std::env::var("RETAB_REPLAY_DIR").expect("set RETAB_REPLAY_DIR");
+    let path = std::path::Path::new(&dir).join("remove_permutes_user_order.txt");
+    let text = std::fs::read_to_string(&path).expect("read the external fixture");
+    let results = replay::replay_port(&TouchedInCtx { touch: true }, &text, Options::default());
+    let failures: Vec<_> = results.iter().filter(|result| result.mismatch.is_some()).collect();
+    println!(
+        "{}: {} of {} cases differ ({})",
+        path.display(),
+        failures.len(),
+        results.len(),
+        replay::class_counts(failures.iter().copied())
+    );
+    for failure in failures.iter().take(5) {
+        println!("{}", failure.report);
+    }
+    assert!(failures.is_empty());
+}
+
 /// rc4's propagation passes call the pass again on the graph it returned.
 /// A second call that shares the first call's ctx and memo (and so skips
 /// the searches the memo proves still fail; test builds re-run each one to
