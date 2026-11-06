@@ -399,6 +399,13 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
     steps.push(Ir(Box::new(
         crate::fx_fuse_cascaded_views_ir::IrFuseDuplicateViewsPass,
     )));
+    if explicit {
+        // After every explicit pass: a control-flow output whose boundary-contract
+        // target their qparam-less copies hide goes to stock until S8.
+        steps.push(Ir(Box::new(
+            crate::layout::control_flow_guard::IrExplicitControlFlowOutputGuardPass,
+        )));
+    }
     // rc4 runs EnsureUniqueOutputNodes last; the while pipeline relies on that.
     steps.push(Ir(Box::new(
         crate::fx_ensure_unique_output_nodes_ir::IrEnsureUniqueOutputNodesPass,
@@ -825,6 +832,13 @@ mod tests {
                     ],
                     "{spec}"
                 );
+                let guard = position("IrExplicitControlFlowOutputGuard");
+                assert_eq!(count("IrExplicitControlFlowOutputGuard"), 1, "{spec}");
+                assert_eq!(names[guard - 1], "IrFuseDuplicateViews", "{spec}");
+                assert!(
+                    guard >= names.len() - 3,
+                    "{spec}: the guard runs after every explicit pass"
+                );
                 assert_eq!(names.last().unwrap(), "IrEnsureUniqueOutputNodes");
             }
         }
@@ -851,6 +865,7 @@ mod tests {
             "IrRewriteHighRankSingletonPermute",
             "IrCanonicalizeViewCopyPermute",
             "IrFuseEqualPlaceholdersEp",
+            "IrExplicitControlFlowOutputGuard",
         ];
         for spec in ["TOSA-1.0+INT+int16+int4+u55", "TOSA-1.0+INT+int16+int4+cf"] {
             let dim_order = PipelineConfig::from_tosa_spec(spec);
