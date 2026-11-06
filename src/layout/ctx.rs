@@ -438,9 +438,10 @@ impl<'g> LayoutCtx<'g> {
     }
 
     /// `id`'s version stamp. It increases whenever, through this ctx, the
-    /// node's args, kwargs, target or meta change, it is moved or erased, or
-    /// a node starts, stops or rewrites a use of it. Inserting an unrelated
-    /// node next to it does not count.
+    /// node's args, kwargs, target or meta change, it is moved or erased, a
+    /// node starts, stops or rewrites a use of it, or its users change order
+    /// (see `users_in_fx_order`). Inserting an unrelated node next to it does
+    /// not count.
     pub(crate) fn version(&self, id: NodeId) -> u64 {
         self.versions.get(id).copied().unwrap_or(0)
     }
