@@ -86,9 +86,12 @@
 //!   (`:1036-1039`), which keeps those args: the crossed node then reads the
 //!   moved permute's output with dims meant for its input. Its users change
 //!   shape, or rc4's next re-trace raises (a channel split after a clamp cuts
-//!   W instead of C). The port takes the walk's assignments back before the
-//!   region move ([`WalkWrites::undo`]), so the crossed nodes read what they
-//!   did, and the replays list rc4's cases as known divergences.
+//!   W instead of C). Where the kept dims change what a crossed node computes
+//!   ([`same_op_args`]: a keepdim mean over the same axes, or over other
+//!   size-1 axes, computes the same), the port takes the walk's assignments
+//!   back before the region move ([`WalkWrites::undo`]), so the crossed nodes
+//!   read what they did, and the replays list rc4's cases as known
+//!   divergences; elsewhere it keeps rc4's graph.
 //! - **`IrArg::None` dims.** RETAB's importer reads `[]` as `IrArg::None`, so a
 //!   reduction's dims of `None` read as `[]` (every dim), where rc4 sees a
 //!   Python `None` and declines.
@@ -305,6 +308,66 @@ thread_local! {
     /// Walks started (`_propagate` calls the sweeps made) on this thread, for
     /// the scaling tests.
     pub(crate) static WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// When set, the driver logs the graph with each node's users in
+    /// torch.fx's order after each sweep and around each fusion pass, the
+    /// points tests/fixtures/propagate_review/trace_driver.py logs in rc4.
+    pub(crate) static TRACE: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Log `ctx` under `label` in [`TRACE`] (test builds only).
+#[inline]
+fn trace(_ctx: &LayoutCtx<'_>, _label: impl FnOnce() -> String) {
+    #[cfg(test)]
+    TRACE.with(|trace| {
+        if let Some(log) = trace.borrow_mut().as_mut() {
+            log.push(format!("{}\n{}", _label(), describe_users(_ctx)));
+        }
+    });
+}
+
+/// Each node in order with its args and its users in torch.fx's order, by
+/// position, as trace_driver.py prints rc4's graph.
+#[cfg(test)]
+fn describe_users(ctx: &LayoutCtx<'_>) -> String {
+    let order: Vec<NodeId> = ctx.order().iter().collect();
+    let position: HashMap<NodeId, usize> = order.iter().enumerate().map(|(index, &id)| (id, index)).collect();
+    fn arg_text(arg: &IrArg, position: &HashMap<NodeId, usize>) -> String {
+        match arg {
+            IrArg::Node(id) => format!("%{}", position[id]),
+            IrArg::List(items) => format!(
+                "[{}]",
+                items.iter().map(|item| arg_text(item, position)).collect::<Vec<_>>().join(", ")
+            ),
+            IrArg::Float(value) => format!("{value:?}"),
+            IrArg::Dtype(dtype) => dtype.clone(),
+            other => python_repr(other),
+        }
+    }
+    let mut lines = Vec::new();
+    for &id in &order {
+        let node = ctx.node(id);
+        if node.op == NodeOp::Output {
+            continue;
+        }
+        let (target, args) = match node.op {
+            NodeOp::CallFunction => (
+                node.target.clone(),
+                node.args.iter().map(|arg| arg_text(arg, &position)).collect::<Vec<_>>(),
+            ),
+            _ => ("placeholder".to_string(), Vec::new()),
+        };
+        let users = ctx.users_in_fx_order(id);
+        let mut names: Vec<String> = users
+            .iter()
+            .filter(|&&user| ctx.node(user).op != NodeOp::Output)
+            .map(|user| format!("'%{}'", position[user]))
+            .collect();
+        if users.iter().any(|&user| ctx.node(user).op == NodeOp::Output) {
+            names.push("'out'".to_string());
+        }
+        lines.push(format!("  %{} {target}({}) users=[{}]", position[&id], args.join(", "), names.join(", ")));
+    }
+    lines.join("\n")
 }
 
 /// `PropagateViewCopyPermutePass.call(graph_module)` (`:106-139`) inside `ctx`;
@@ -325,7 +388,9 @@ fn drive(ctx: &mut LayoutCtx<'_>, config: &PropagateConfig) -> bool {
     }
     propagator.collect_transforms(ctx);
     loop {
-        if propagator.propagate_iteration(ctx) {
+        let swept = propagator.propagate_iteration(ctx);
+        trace(ctx, || format!("after sweep modified={}", if swept { "True" } else { "False" }));
+        if swept {
             modified = true;
             continue;
         }
@@ -433,24 +498,26 @@ struct WalkWrites {
     before: HashMap<NodeId, Vec<IrArg>>,
     /// The args each assignment wrote, for [`Self::redo`].
     written: Vec<Vec<IrArg>>,
-    changed: bool,
 }
 
 impl WalkWrites {
     /// `node.args = args`: rc4 assigns even unchanged args, which moves the
     /// node to the end of its inputs' users.
     fn set_args(&mut self, ctx: &mut LayoutCtx<'_>, id: NodeId, args: Vec<IrArg>) {
-        let current = &ctx.node(id).args;
-        self.changed |= !same_args(current, &args);
-        self.before.entry(id).or_insert_with(|| current.clone());
+        self.before.entry(id).or_insert_with(|| ctx.node(id).args.clone());
         self.order.push(id);
         self.written.push(args.clone());
         ctx.set_args(id, args);
     }
 
-    /// Whether an assignment changed a node's args.
-    fn changed_args(&self) -> bool {
-        self.changed
+    /// Whether some assigned node now computes something else than before the
+    /// walk ([`same_op_args`]): a mean over the same axes listed in another
+    /// order, or over size-1 axes besides, is the same op, and rc4's region
+    /// move then keeps a sound graph, which the port keeps too.
+    fn changed_meaning(&self, ctx: &LayoutCtx<'_>) -> bool {
+        self.before
+            .iter()
+            .any(|(&id, before)| !same_op_args(ctx.graph(), id, before, &ctx.node(id).args))
     }
 
     /// Give every assigned node its args from before the walk again,
@@ -718,6 +785,7 @@ impl<'c> Propagator<'c> {
     /// (backends/transforms/fuse_duplicate_users_pass.py:147-151,
     /// backends/transforms/fuse_identical_input_transforms_pass.py:200-204).
     fn fuse_horizontal(&mut self, ctx: &mut LayoutCtx<'_>) -> bool {
+        trace(ctx, || format!("before {}", if self.up() { "fdu" } else { "fiit" }));
         let modified = match self.config.direction {
             Direction::Up => {
                 let excluded: &[&str] = if self.tosa() { TOSA_EXCLUDED_TARGETS } else { &[] };
@@ -740,6 +808,7 @@ impl<'c> Propagator<'c> {
     fn fuse_vertical(&mut self, ctx: &mut LayoutCtx<'_>) -> bool {
         let mut modified = false;
         if self.tosa() && self.config.exported_program {
+            trace(ctx, || "before remove_permutes".to_string());
             let removed = remove_permutes_in_ctx(
                 ctx,
                 &RemovePermutesConfig::tosa(),
@@ -751,6 +820,7 @@ impl<'c> Propagator<'c> {
             }
             modified |= removed;
         }
+        trace(ctx, || "before canonicalize".to_string());
         if canonicalize_view_copy_permute(ctx) {
             self.retrace_point(ctx);
             modified = true;
@@ -1450,8 +1520,9 @@ impl<'c> Propagator<'c> {
     /// crossings are not part of it, but rc4 keeps the args its advance
     /// already assigned (`:234-235`): a slice or mean the walk crossed then
     /// reads the moved permute's output with dims meant for its input, a
-    /// wrong graph (the module docs). The port takes those assignments back
-    /// first ([`WalkWrites::undo`]), so the crossed nodes read what they read
+    /// wrong graph wherever those dims change what it computes (the module
+    /// docs). The port then takes the assignments back first
+    /// ([`WalkWrites::undo`]), so the crossed nodes read what they read
     /// before, and plans again on that graph.
     #[allow(clippy::too_many_arguments)]
     fn maybe_split_fork(
@@ -1481,7 +1552,7 @@ impl<'c> Propagator<'c> {
         let Some(mut plan) = self.plan_pointwise_region_move(ctx, node, reads) else {
             return false;
         };
-        if writes.changed_args() {
+        if writes.changed_meaning(ctx) {
             cover("down.region_move.undo");
             writes.undo(ctx);
             match self.plan_pointwise_region_move(ctx, node, &mut Reads::default()) {
@@ -2114,6 +2185,57 @@ fn keep_dim_arg(graph: &IrGraph, node: NodeId) -> Option<&IrArg> {
 /// `arg is True`.
 fn is_true(arg: Option<&IrArg>) -> bool {
     matches!(arg, Some(IrArg::Bool(true)))
+}
+
+/// Whether `lhs` and `rhs`, two arg lists of `id`, make the same op: the same
+/// args, or for a mean, sum or slice the same args but its dims, where those
+/// dims do the same to its input. A keepdim reduction is the same over axes
+/// that differ only in size-1 axes of its input (`[0, 2, -1]` and `[3, 0]`
+/// for an input of shape `[2, 3, 1, 4]`); a slice is the same on the same
+/// axis, or when it keeps the whole of either axis.
+fn same_op_args(graph: &IrGraph, id: NodeId, lhs: &[IrArg], rhs: &[IrArg]) -> bool {
+    if same_args(lhs, rhs) {
+        return true;
+    }
+    let target = graph.node(id).target.as_str();
+    if !matches!(target, MEAN_DIM | SUM_DIM_INT_LIST | SLICE_COPY) || lhs.len() != rhs.len() || lhs.len() < 2 {
+        return false;
+    }
+    if !lhs.iter().zip(rhs).enumerate().all(|(index, (a, b))| index == 1 || same_arg(a, b)) {
+        return false;
+    }
+    let Some(shape) = lhs[0].as_node().and_then(|input| graph.node_shape(input)) else {
+        return false;
+    };
+    if shape.is_empty() {
+        return false;
+    }
+    let rank = shape.len() as i64;
+    let axes = |arg: &IrArg| -> Option<std::collections::BTreeSet<usize>> {
+        Some(dim_arg(arg)?.dims().iter().map(|dim| dim.rem_euclid(rank) as usize).collect())
+    };
+    let (Some(a), Some(b)) = (axes(&lhs[1]), axes(&rhs[1])) else {
+        return false;
+    };
+    if a == b {
+        return true;
+    }
+    if target == SLICE_COPY {
+        let whole = |axis: usize| {
+            python_int(&lhs[2]) == Some(0)
+                && lhs.get(3).and_then(python_int).is_some_and(|end| end >= shape[axis])
+                && lhs.get(4).is_none_or(|step| python_int(step) == Some(1))
+        };
+        let only = |axes: &std::collections::BTreeSet<usize>| (axes.len() == 1).then(|| *axes.iter().next().expect("one axis"));
+        return matches!((only(&a), only(&b)), (Some(x), Some(y)) if whole(x) && whole(y));
+    }
+    if !is_true(keep_dim_arg(graph, id)) {
+        return false;
+    }
+    let wide = |axes: &std::collections::BTreeSet<usize>| -> std::collections::BTreeSet<usize> {
+        axes.iter().copied().filter(|&axis| shape[axis] != 1).collect()
+    };
+    wide(&a) == wide(&b)
 }
 
 /// Whether two argument lists are the same, value for value (floats by bits).

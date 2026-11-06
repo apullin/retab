@@ -65,10 +65,12 @@ const REPEATED_CAT_INPUT: &str = "rc4 drops a repeated cat input when it splits 
 /// (`:234-235`), and when the fork after it can't be split it falls back to a
 /// region move planned from the original permute (`:1036-1039`), which keeps
 /// those args: the crossed node then reads the moved permute's output with
-/// dims meant for its input. The port takes the assignments back first
-/// (`layout::propagate`'s module docs), so its graph keeps the outputs' shapes
-/// where rc4's re-trace raises (a view no longer fits) or its outputs change
-/// shape.
+/// dims meant for its input. Where that changes what the node computes, the
+/// port takes the assignments back first (`layout::propagate`'s module docs),
+/// so its graph keeps the outputs' shapes where rc4's re-trace raises (a view
+/// no longer fits) or its outputs change shape. Fuzzing found the same in 1
+/// of 1,500 of the generator's random graphs run Down then Up
+/// (fuzz_down_up.py 1500 7, random_544: a slice after a relu).
 const REGION_MOVE_KEEPS_WALK_ARGS: &str =
     "rc4's region-move fallback keeps the args the walk assigned to a crossed mean or slice, a wrong graph; the port takes them back";
 

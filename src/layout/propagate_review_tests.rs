@@ -421,3 +421,24 @@ fn walk_memo_reads_the_rescale_input_special_dtype() {
     };
     assert!(moved, "with the marker gone the RESCALE is per-tensor and the view crosses it");
 }
+
+/// Prints the Down driver's trace (`propagate::TRACE`) on one case of
+/// `$RETAB_REVIEW_DIR/down.txt`, named by `$RETAB_TRACE_CASE`, to compare with
+/// tests/fixtures/propagate_review/trace_driver.py's log of rc4 (the two
+/// print the same graph text, users in torch.fx's order, at the same points,
+/// so `diff` finds the first step where they part).
+#[test]
+#[ignore = "diagnostic: prints the driver trace of $RETAB_TRACE_CASE in $RETAB_REVIEW_DIR/down.txt"]
+fn propagate_review_trace() {
+    use crate::layout::propagate::TRACE;
+    let (Ok(dir), Ok(name)) = (std::env::var("RETAB_REVIEW_DIR"), std::env::var("RETAB_TRACE_CASE")) else {
+        println!("set RETAB_REVIEW_DIR and RETAB_TRACE_CASE");
+        return;
+    };
+    let text = std::fs::read_to_string(std::path::Path::new(&dir).join("down.txt")).expect("down.txt");
+    let mut graph = before(&text, &name);
+    TRACE.with(|trace| *trace.borrow_mut() = Some(Vec::new()));
+    IrPropagateViewCopyPermutePass::ARM_DOWN.run(&mut graph);
+    let log = TRACE.with(|trace| trace.borrow_mut().take()).unwrap_or_default();
+    println!("{}", log.join("\n"));
+}
