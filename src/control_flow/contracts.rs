@@ -24,20 +24,6 @@ struct OutputContract {
     targets: Vec<(usize, fx_ir::QParam)>,
 }
 
-fn boundary_rescale_meta(
-    base_meta: &fx_ir::NodeMeta,
-    source_meta: &fx_ir::NodeMeta,
-    source_qp: &fx_ir::QParam,
-    target_qp: &fx_ir::QParam,
-) -> fx_ir::NodeMeta {
-    let mut meta =
-        base_meta.rescale_meta_with_input_qparam(source_meta, source_qp.clone(), target_qp.clone());
-    if let Some(dim_order) = source_meta.cloned_tosa_dim_order() {
-        meta.set_tosa_dim_order(dim_order);
-    }
-    meta
-}
-
 fn add_boundary_rescale(
     graph: &mut fx_ir::IrGraph,
     name: String,
@@ -46,12 +32,13 @@ fn add_boundary_rescale(
     source_qp: &fx_ir::QParam,
     target_qp: &fx_ir::QParam,
 ) -> fx_ir::NodeId {
-    let meta = boundary_rescale_meta(
-        &graph.nodes[base_meta_id].meta,
-        &graph.nodes[source_id].meta,
-        source_qp,
-        target_qp,
-    );
+    let meta = graph.nodes[base_meta_id]
+        .meta
+        .rescale_meta_with_input_qparam(
+            &graph.nodes[source_id].meta,
+            source_qp.clone(),
+            target_qp.clone(),
+        );
     graph.add_rescale(fx_ir::RescaleRewrite::new(
         name,
         source_id,
@@ -100,13 +87,8 @@ fn boundary_arg_qparam(input: &BoundaryInputMeta) -> Option<fx_ir::QParam> {
 fn stamp_boundary_placeholder_meta(
     ph_meta: &mut fx_ir::NodeMeta,
     input: &BoundaryInputMeta,
-    count_marker_write: bool,
 ) -> u32 {
     let mut changed = 0u32;
-    ph_meta.set_extra("arm_control_flow_placeholder", fx_ir::MetaValue::Bool(true));
-    if count_marker_write {
-        changed += 1;
-    }
     if let Some(val) = input.meta.tensor_facts().cloned() {
         ph_meta.set_val(val);
         changed += 1;
@@ -507,7 +489,7 @@ fn apply_boundary_contract_to_submodule(
     for (ph_id, input) in placeholder_ids.iter().copied().zip(contract.inputs.iter()) {
         let internal_qparam = graph.nodes[ph_id].meta.output_qparam().cloned();
         let external_qparam = boundary_external_qparam(input);
-        changed += stamp_boundary_placeholder_meta(&mut graph.nodes[ph_id].meta, input, false);
+        changed += stamp_boundary_placeholder_meta(&mut graph.nodes[ph_id].meta, input);
 
         let Some(external_qp) = external_qparam else {
             continue;
@@ -549,7 +531,7 @@ fn apply_qparam_contract_to_submodule(
 
     let mut changed = 0u32;
     for (ph_id, input) in placeholder_ids.iter().copied().zip(contract.inputs.iter()) {
-        changed += stamp_boundary_placeholder_meta(&mut graph.nodes[ph_id].meta, input, true);
+        changed += stamp_boundary_placeholder_meta(&mut graph.nodes[ph_id].meta, input);
     }
 
     changed
