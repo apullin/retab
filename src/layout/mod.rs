@@ -52,9 +52,11 @@ pub(crate) mod remove_permutes;
 // rc4's RewriteAvgPool2dPass for explicit mode (APU-156, P2 S7).
 #[allow(dead_code)]
 pub(crate) mod rewrite_avg_pool2d;
-// rc4's RewriteConvPass for explicit mode (APU-135 P2 S3, APU-155).
+// rc4's RewriteConvPass for explicit mode (APU-135 P2 S3 and S4, APU-155).
 #[allow(dead_code)]
 pub(crate) mod rewrite_conv;
+#[cfg(test)]
+mod rewrite_conv_a16w8_tests;
 #[cfg(test)]
 mod rewrite_conv_tests;
 // rc4's RewriteMaxPool2dPass and RewriteUpsamplePass for explicit mode

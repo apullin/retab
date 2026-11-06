@@ -5,14 +5,38 @@
 //! enough to pass upstream's worst-case rule. Whether a permute needs it is decided in
 //! Python with rc4's own Vela probe (`PipelineConfig::u55_split_permutes`), because the
 //! answer depends on the installed Vela.
+//!
+//! That decision is keyed by the edge program's node names, while rc4 judges whatever
+//! permutes are alive when its pass runs. A pass that hands a listed permute's role to a
+//! copy under a new name (names are never reused, design F9) carries the decision on the
+//! copy's meta instead ([`mark_split`]), and this pass splits a marked permute as it
+//! splits a listed one. Explicit mode's IrRewriteConv marks the copy of an A16W8 conv's
+//! source permute on its widened INT32 branch (`layout::rewrite_conv`).
 
 use std::collections::{BTreeMap, HashSet};
 
-use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, MetaValue, NodeId, NodeMeta};
 
 const MAX_PRODUCT: i64 = 1 << 16;
 
+/// The meta key of [`mark_split`]. RETAB's own: rc4 needs no such mark, as it decides
+/// at the pass itself.
+const SPLIT_MARK: &str = "retab_u55_split";
+
+/// Mark the permute whose meta this is to be split on U55, as if its name were in
+/// `split_permutes`.
+pub(crate) fn mark_split(meta: &mut NodeMeta) {
+    meta.set_extra(SPLIT_MARK, MetaValue::Bool(true));
+}
+
+/// Whether [`mark_split`] marked this meta.
+pub(crate) fn is_marked_split(meta: &NodeMeta) -> bool {
+    meta.extra_bool(SPLIT_MARK) == Some(true)
+}
+
 pub struct IrDecomposePermuteForU55Pass {
+    /// The edge permutes to split, by name: Python's `_u55_permutes_to_split`. Permutes
+    /// marked by [`mark_split`] are split too.
     pub split_permutes: HashSet<String>,
 }
 
@@ -160,7 +184,7 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId, split_permutes: &HashSet<Strin
     if !matches!(
         node.target.as_str(),
         "aten.permute_copy.default" | "aten.permute.default"
-    ) || !split_permutes.contains(&node.name)
+    ) || !(split_permutes.contains(&node.name) || is_marked_split(&node.meta))
     {
         return false;
     }
@@ -181,11 +205,15 @@ fn decompose_one(graph: &mut IrGraph, id: NodeId, split_permutes: &HashSet<Strin
     if limits.is_empty() {
         return false;
     }
+    // The chunks pass the worst-case rule, so none carries the decision on, as none
+    // has a listed name.
+    let mut meta = node.meta.clone();
+    meta.extras.remove(SPLIT_MARK);
     let split = Split {
         name: node.name.clone(),
         perm: &perm,
         axes: limits.into_iter().collect(),
-        meta: node.meta.clone(),
+        meta,
     };
     let mut cursor = graph.rewrite_cursor(id);
     let result = emit(&mut cursor, &split, input, shape, 0, "");
@@ -199,7 +227,9 @@ impl IrPass for IrDecomposePermuteForU55Pass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        if self.split_permutes.is_empty() {
+        if self.split_permutes.is_empty()
+            && !graph.live_nodes().any(|node| is_marked_split(&node.meta))
+        {
             return false;
         }
         let mut modified = false;
@@ -260,6 +290,35 @@ mod tests {
             .collect();
         assert_eq!(shapes, vec![vec![2, 255, 257, 2], vec![2, 2, 257, 2]]);
         assert_eq!(graph.node_shape_vec(result), Some(vec![2, 257, 257, 2]));
+    }
+
+    /// A permute whose role a rewrite handed to it from a listed one carries the split
+    /// in its meta: it is split under its own name with no name listed at all, and the
+    /// chunks it becomes don't carry the mark on.
+    #[test]
+    fn splits_a_marked_permute_whatever_its_name() {
+        let mut graph = IrGraph::empty();
+        let x = f32_placeholder(&mut graph, "x", [2, 2, 257, 257]);
+        let permute = f32_call(
+            &mut graph,
+            "permute_int32",
+            "aten.permute_copy.default",
+            vec![IrArg::Node(x), IrArg::List(vec![IrArg::Int(0), IrArg::Int(2), IrArg::Int(3), IrArg::Int(1)])],
+            [2, 257, 257, 2],
+        );
+        mark_split(&mut graph.node_mut(permute).meta);
+        let out = output(&mut graph, permute);
+        let pass = IrDecomposePermuteForU55Pass { split_permutes: HashSet::new() };
+
+        assert!(pass.run(&mut graph));
+        assert!(!graph.node(permute).alive);
+        let cat = graph.node(out).first_node_arg().unwrap();
+        assert_eq!(graph.node(cat).target, "aten.cat.default");
+        assert_eq!(graph.node(cat).name, "permute_int32_u55_cat");
+        let created: Vec<_> = graph.live_nodes().filter(|node| node.name.starts_with("permute_int32_u55")).collect();
+        assert_eq!(created.len(), 5, "two slices, two permutes and the cat");
+        assert!(created.iter().all(|node| !is_marked_split(&node.meta)));
+        assert!(!pass.run(&mut graph), "the chunks are not split again");
     }
 
     #[test]

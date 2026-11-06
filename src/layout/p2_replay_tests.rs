@@ -6,9 +6,9 @@
 //! RewriteUpsamplePass and RewriteAvgPool2dPass (alone and with the
 //! ComputeConstantOpsAOTPass after it) receive and return. The tests below pin
 //! what the fixtures hold, so a regeneration that drops a case or loses a
-//! detail fails here. Each port's replay hook follows: S3's conv hook and
-//! S7's pool and upsample hooks run, and S4's A16W8 conv hooks are commented
-//! out until its port lands. The tests that pin the S1 review's findings come
+//! detail fails here. Each port's replay hook follows, and all of them run:
+//! IrRewriteConv's (S3, plus S4's A16W8 and U55 fixtures) and the pool and
+//! upsample ports' (S7). The tests that pin the S1 review's findings come
 //! last.
 
 use std::collections::BTreeSet;
@@ -691,20 +691,36 @@ fn rewrite_conv_matches_rc4() {
         &IrRewriteConvPass {
             is_u55_subset: false,
             in_region: false,
+            u55_split_permutes: Default::default(),
         },
         REWRITE_CONV,
     );
 }
 
 // S4 (APU-155): A16W8 INT48 branching, on the generic profile and on U55.
-// #[test]
-// fn rewrite_conv_a16w8_matches_rc4() {
-//     replay::check(&IrRewriteConvPass { is_u55_subset: false, in_region: false }, REWRITE_CONV_A16W8);
-// }
-// #[test]
-// fn rewrite_conv_a16w8_u55_matches_rc4() {
-//     replay::check(&IrRewriteConvPass { is_u55_subset: true, in_region: false }, REWRITE_CONV_A16W8_U55);
-// }
+#[test]
+fn rewrite_conv_a16w8_matches_rc4() {
+    replay::check(
+        &IrRewriteConvPass {
+            is_u55_subset: false,
+            in_region: false,
+            u55_split_permutes: Default::default(),
+        },
+        REWRITE_CONV_A16W8,
+    );
+}
+
+#[test]
+fn rewrite_conv_a16w8_u55_matches_rc4() {
+    replay::check(
+        &IrRewriteConvPass {
+            is_u55_subset: true,
+            in_region: false,
+            u55_split_permutes: Default::default(),
+        },
+        REWRITE_CONV_A16W8_U55,
+    );
+}
 
 // S7 (APU-156): IrRewriteMaxPool2d also does RemoveGetItemPass's work; the
 // `_with_indices` cases start from RETAB's max_pool2d_with_indices + getitem,
