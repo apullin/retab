@@ -4,8 +4,8 @@
 //!
 //! Each test names the rc4 behaviour it pins. "venv" marks graphs whose rc4
 //! output was taken by running the rc4 pass in `.venv-et16`; the test rebuilds
-//! that graph. A test marked `#[ignore = "BUG: ..."]` fails on the current port
-//! and documents a divergence for the pass files.
+//! that graph. Tests that once failed on the ports document the divergences the
+//! review found; all now pass.
 
 use std::collections::HashMap;
 
@@ -146,7 +146,6 @@ fn assert_dim_order_fits(g: &LayoutGraph, id: NodeId) {
 /// reshapes to rank 0. The serializer reads a View's size only as an int list
 /// (`literal_output_shape`) and otherwise falls back to that stale meta.
 #[test]
-#[ignore = "BUG: fuse_view_copy skips the meta refresh when the final view is rank 0 (size IrArg::None)"]
 fn fuse_view_copy_refreshes_meta_for_a_rank0_final_view() {
     let mut g = LayoutGraph::new();
     let x = g.input("x", &[1, 1]);
@@ -174,7 +173,6 @@ fn fuse_view_copy_refreshes_meta_for_a_rank0_final_view() {
 /// serializer re-resolves a negative dim, but the passes in between read val
 /// shapes, and so will the explicit-mode serializer (port plan, P2).
 #[test]
-#[ignore = "BUG: fuse_view_copy writes an unresolved -1 from the final view's size into val shapes"]
 fn fuse_view_copy_resolves_an_inferred_dim_in_the_final_view() {
     let mut g = LayoutGraph::new();
     let x = g.input("x", &[2, 3, 4]);
@@ -204,7 +202,6 @@ fn fuse_view_copy_resolves_an_inferred_dim_in_the_final_view() {
 /// `[N,1,1,C]` operand rc4's propagation guard keeps away from TABLE for an
 /// Ethos-U85 miscompile (`propagate_view_copy_permute_pass.py:61-81`).
 #[test]
-#[ignore = "BUG: fuse_view_copy fuses through a pending TABLE (quantized aten.sigmoid), which rc4 sees as backend.tosa.TABLE"]
 fn fuse_view_copy_stops_at_a_pending_table() {
     let mut g = LayoutGraph::new();
     let x = g.typed_input("x", &[2, 3], "torch.int8");
@@ -401,7 +398,6 @@ fn fuse_view_copy_fuses_independent_chains_in_one_sweep() {
 /// The retrace gives the retained nodes contiguous values of the new rank;
 /// the port keeps the dim orders they had (rank 1 here, on rank-2 shapes).
 #[test]
-#[ignore = "BUG (minor): fuse_view_copy leaves retained nodes' val_dim_order at the old rank"]
 fn fuse_view_copy_retained_nodes_get_a_dim_order_of_their_new_rank() {
     let mut g = LayoutGraph::new();
     let x = g.input("x", &[2, 3]);
@@ -453,7 +449,6 @@ fn high_rank_all_singleton_permute_becomes_two_views_through_rank0() {
 /// `IrArg::None` (`fx_ir::resolve_arg`). Readers that handle one spelling
 /// miss the other (see `fuse_view_copy_refreshes_meta_for_a_rank0_final_view`).
 #[test]
-#[ignore = "BUG (minor): high_rank_singleton_permute spells an empty view size List([]), import spells it None"]
 fn high_rank_rank0_view_size_uses_the_import_spelling() {
     let mut g = LayoutGraph::new();
     let x = g.input("x", &[1, 1, 1, 1, 1]);
@@ -605,7 +600,6 @@ fn high_rank_leaves_an_invalid_permutation_alone() {
 /// venv: the reduced view and permute are contiguous rank-4 values. The port
 /// gives them the permute's whole meta, including its rank-5 dim order.
 #[test]
-#[ignore = "BUG (minor): high_rank_singleton_permute copies the rank-5 val_dim_order onto the rank-4 nodes"]
 fn high_rank_new_nodes_get_dim_orders_of_their_own_rank() {
     let mut g = LayoutGraph::new();
     let x = g.input("x", &[1, 2, 3, 4, 5]);
@@ -1026,7 +1020,6 @@ fn normalize_io_input_permute_empties_both_qparam_maps() {
 /// contiguous (`dim_order (0, 1, 2, 3)`). The port leaves the channels-last
 /// dim order it was imported with.
 #[test]
-#[ignore = "BUG (minor): normalize_delegate_io leaves interior nodes' val_dim_order as imported; rc4's retrace makes them contiguous"]
 fn normalize_io_interior_nodes_become_contiguous() {
     let mut g = LayoutGraph::new();
     let x = g.input("x", &[1, 3, 4, 5]);
