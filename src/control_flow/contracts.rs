@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::fx_ir;
-use crate::fx_target::is_tosa_transpose_target;
 use crate::graph::ir::DType;
-use crate::pipeline_config::LayoutMode;
 use crate::StashedPipeline;
 
 use super::{collect_region_metadata, metadata, region_name_from_ir_arg};
@@ -11,7 +9,6 @@ use super::{collect_region_metadata, metadata, region_name_from_ir_arg};
 #[derive(Clone)]
 struct BoundaryInputMeta {
     meta: fx_ir::NodeMeta,
-    boundary_dim_order: Option<Vec<usize>>,
     fallback_qparam: Option<fx_ir::QParam>,
 }
 
@@ -114,11 +111,6 @@ fn stamp_boundary_placeholder_meta(
         ph_meta.set_val(val);
         changed += 1;
     }
-    if let Some(dim_order) = input.boundary_dim_order.clone() {
-        ph_meta.set_val_dim_order(dim_order.clone());
-        ph_meta.set_tosa_dim_order(dim_order);
-        changed += 1;
-    }
 
     let found_qparam = stamp_boundary_qparam(ph_meta, input);
     if found_qparam {
@@ -166,60 +158,13 @@ fn resolve_parent_arg_ids_ir(node: &fx_ir::IrNode) -> Vec<fx_ir::NodeId> {
     Vec::new()
 }
 
-/// The meta a region placeholder takes from the operand bound to it, and the dim order
-/// that the boundary gives it.
-///
-/// Explicit mode: a val is the tensor as TOSA sees it, on both sides of the boundary,
-/// and no node has a dim order. The placeholder takes the operand's val as it is, as
-/// rc4's `_regularize_submodule` gives region IO the parent's post-pass vals
-/// (`backends/arm/tosa/backend.py:204-249`), and the boundary writes no dim order. The
-/// TOSA TRANSPOSE case below reconstructs a logical shape under a physical dim order,
-/// which is dim-order logic; it is inert in explicit mode, where permutes stay
-/// `aten.permute_copy` until the serializer (P2 design §1c, §4.3.1).
-fn boundary_placeholder_meta(
-    ir: &fx_ir::IrGraph,
-    parent_id: fx_ir::NodeId,
-    layout: LayoutMode,
-) -> (fx_ir::NodeMeta, Option<Vec<usize>>) {
-    let parent_arg = ir.node(parent_id);
-    if layout == LayoutMode::Explicit {
-        return (parent_arg.meta.clone(), None);
-    }
-    let fallback = (
-        parent_arg.meta.clone(),
-        parent_arg.meta.cloned_tosa_dim_order(),
-    );
-    if !is_tosa_transpose_target(&parent_arg.target) {
-        return fallback;
-    }
-    let (Some(input_id), Some(perms)) = (parent_arg.first_node_arg(), parent_arg.arg_int_list(1))
-    else {
-        return fallback;
-    };
-    let (input_meta, input_order) = boundary_placeholder_meta(ir, input_id, layout);
-    let Some(shape) = input_meta.val_shape() else {
-        return fallback;
-    };
-    if perms.len() != shape.len() {
-        return fallback;
-    }
-    let input_order = input_order.unwrap_or_else(|| (0..shape.len()).collect());
-    let order: Option<Vec<usize>> = perms
-        .iter()
-        .map(|&dim| {
-            fx_ir::normalize_dim(dim, shape.len()).and_then(|dim| input_order.get(dim).copied())
-        })
-        .collect();
-    let Some(order) = order else {
-        return fallback;
-    };
-    // Layout transposes change physical order; region decompositions still use logical axes.
-    (
-        parent_arg
-            .meta
-            .cloned_with_same_dtype_or_float32(shape.to_vec()),
-        Some(order),
-    )
+/// The meta a region placeholder takes from the operand bound to it. A val is the
+/// tensor as TOSA sees it, on both sides of the boundary, and no node has a dim order.
+/// The placeholder takes the operand's val as it is, as rc4's `_regularize_submodule`
+/// gives region IO the parent's post-pass vals (`backends/arm/tosa/backend.py:204-249`),
+/// and the boundary writes no dim order (P2 design §1c, §4.3.1).
+fn boundary_placeholder_meta(ir: &fx_ir::IrGraph, parent_id: fx_ir::NodeId) -> fx_ir::NodeMeta {
+    ir.node(parent_id).meta.clone()
 }
 
 fn collect_boundary_contracts_for_graph(
@@ -227,7 +172,6 @@ fn collect_boundary_contracts_for_graph(
     parent_region: Option<&str>,
     contracts: &mut Vec<BoundaryContract>,
     while_body_regions: &mut BTreeSet<String>,
-    layout: LayoutMode,
 ) {
     for node_id in ir.live_node_ids() {
         let node = ir.node(node_id);
@@ -272,10 +216,8 @@ fn collect_boundary_contracts_for_graph(
                         })
                         .or_else(|| metadata::extract_effective_qparam_ir(ir, arg_id))
                 };
-                let (meta, boundary_dim_order) = boundary_placeholder_meta(ir, arg_id, layout);
                 Some(BoundaryInputMeta {
-                    meta,
-                    boundary_dim_order,
+                    meta: boundary_placeholder_meta(ir, arg_id),
                     fallback_qparam,
                 })
             })
@@ -555,42 +497,6 @@ pub(crate) fn snapshot_pre_pass_qparams_ir(graph: &mut fx_ir::IrGraph) -> u32 {
     saved
 }
 
-/// Dim-order mode lays a region's rank-4 tensors out channels-last, so a parent's rank-4
-/// cond or while output arrives NHWC: give each such getitem that dim order, and mark it
-/// for the main-output TRANSPOSE back to the user's layout (`serialize::output_layout`).
-/// Explicit mode never calls this: there a region's outputs keep their vals, as rc4's do
-/// (P2 design §4.3.1).
-fn annotate_parent_rank4_dim_order_ir(graph: &mut fx_ir::IrGraph) -> u32 {
-    const NHWC_DIM_ORDER: [usize; 4] = [0, 2, 3, 1];
-
-    let cf_ids: Vec<fx_ir::NodeId> = graph
-        .live_nodes()
-        .filter(|node| node.is_control_flow())
-        .map(|node| node.id)
-        .collect();
-
-    let mut annotated = 0u32;
-    for cf_id in cf_ids {
-        let user_ids = graph.users(cf_id).to_vec();
-        for user_id in user_ids {
-            if !graph.nodes[user_id].alive || graph.nodes[user_id].meta.rank() != Some(4) {
-                continue;
-            }
-            graph.nodes[user_id].meta.set_extra(
-                "arm_control_flow_parent_output_user",
-                fx_ir::MetaValue::Bool(true),
-            );
-            if graph.nodes[user_id].meta.tosa_dim_order() != Some(&NHWC_DIM_ORDER) {
-                graph.nodes[user_id]
-                    .meta
-                    .set_tosa_dim_order(NHWC_DIM_ORDER.to_vec());
-                annotated += 1;
-            }
-        }
-    }
-    annotated
-}
-
 fn apply_boundary_contract_to_submodule(
     graph: &mut fx_ir::IrGraph,
     contract: &BoundaryContract,
@@ -653,7 +559,6 @@ fn find_boundary_contract_for_region(
     region_name: &str,
     parent: Option<&StashedPipeline>,
     submodules: &BTreeMap<String, StashedPipeline>,
-    layout: LayoutMode,
 ) -> Option<(BoundaryContract, bool)> {
     let mut contracts = Vec::new();
     let mut while_body_regions = BTreeSet::new();
@@ -664,7 +569,6 @@ fn find_boundary_contract_for_region(
             None,
             &mut contracts,
             &mut while_body_regions,
-            layout,
         );
     }
     for (region, (ir, _)) in submodules.iter() {
@@ -673,7 +577,6 @@ fn find_boundary_contract_for_region(
             Some(region.as_str()),
             &mut contracts,
             &mut while_body_regions,
-            layout,
         );
     }
 
@@ -688,20 +591,17 @@ fn find_boundary_contract_for_region(
 
 /// Before a region's pipeline runs: give its placeholders the vals and qparams of the
 /// operands bound to them, read from the stashed post-pipeline graphs that invoke it.
-/// `layout` is the hierarchy's layout mode (Python passes one pipeline config to the
-/// parent and to every region).
 pub(crate) fn apply_pre_submodule_qparam_propagation_ir(
     region_name: Option<&str>,
     graph: &mut fx_ir::IrGraph,
     parent: Option<&StashedPipeline>,
     submodules: &BTreeMap<String, StashedPipeline>,
-    layout: LayoutMode,
 ) -> u32 {
     let Some(region_name) = region_name else {
         return 0;
     };
     let Some((contract, is_while_body)) =
-        find_boundary_contract_for_region(region_name, parent, submodules, layout)
+        find_boundary_contract_for_region(region_name, parent, submodules)
     else {
         return 0;
     };
@@ -717,22 +617,18 @@ pub(crate) fn apply_pre_submodule_qparam_propagation_ir(
 /// region hands its outputs over quantized, and the output contracts rescale
 /// them into the parent's quantization.
 ///
-/// With `record_output_qparams` (explicit layout mode), a dequantize feeding
-/// the output first records its qparam as the output node's input qparam for
-/// that output, unless one is recorded, which is rc4's FoldAndAnnotateQParamsPass
-/// annotation that InsertControlFlowRescalesPass reads as the region side of
-/// the output's RESCALE (`insert_rescales_pass.py`, `_rescale_submodule_outputs`;
-/// APU-135 S8). For an output that is not itself a RESCALE, the output
-/// contract then takes it rather than walking back from the output's producer
-/// (`apply_output_rescale_contract_ir`). Explicit mode needs it: rc4's
-/// rewrites end a convolution or a bilinear upsample with a qparam-less
-/// RESCALE and permute, and the walk reverse engineers that RESCALE from the
-/// TOSA op's inherited output qparam, which gives a wrong scale (for a
-/// per-tensor conv, `s_out^2 / (s_in * s_w)` rather than `s_out`).
-fn rewrite_output_dequantize_boundaries_ir(
-    graph: &mut fx_ir::IrGraph,
-    record_output_qparams: bool,
-) -> u32 {
+/// A dequantize feeding the output first records its qparam as the output node's
+/// input qparam for that output, unless one is recorded, which is rc4's
+/// FoldAndAnnotateQParamsPass annotation that InsertControlFlowRescalesPass reads as
+/// the region side of the output's RESCALE (`insert_rescales_pass.py`,
+/// `_rescale_submodule_outputs`; APU-135 S8). For an output that is not itself a
+/// RESCALE, the output contract then takes it rather than walking back from the
+/// output's producer (`apply_output_rescale_contract_ir`). The layout rewrites need
+/// it: rc4's rewrites end a convolution or a bilinear upsample with a qparam-less
+/// RESCALE and permute, and the walk reverse engineers that RESCALE from the TOSA
+/// op's inherited output qparam, which gives a wrong scale (for a per-tensor conv,
+/// `s_out^2 / (s_in * s_w)` rather than `s_out`).
+fn rewrite_output_dequantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
     let mut rewritten = 0u32;
     let output_id = graph.output_node().map(|node| node.id);
     let ids = graph.live_node_ids();
@@ -754,11 +650,8 @@ fn rewrite_output_dequantize_boundaries_ir(
         if !all_rescale_or_output {
             continue;
         }
-        if record_output_qparams {
-            if let (Some(out_id), Some(qparam)) = (output_id, graph.nodes[dq_id].parse_qdq_qparam())
-            {
-                record_output_source_qparam(graph, out_id, dq_id, &qparam);
-            }
+        if let (Some(out_id), Some(qparam)) = (output_id, graph.nodes[dq_id].parse_qdq_qparam()) {
+            record_output_source_qparam(graph, out_id, dq_id, &qparam);
         }
         graph.replace_and_erase(dq_id, source_id);
         rewritten += 1;
@@ -975,27 +868,18 @@ fn strip_while_cond_output_rescales_ir(graph: &mut fx_ir::IrGraph) -> u32 {
 /// At serialization: align every control-flow region's IO with the graph that invokes
 /// it (boundary vals and qparams, and RESCALEs for inputs and outputs whose qparams
 /// differ), then resolve the conv weights and biases the cond branches capture
-/// (`captured_conv`). `layout` is the hierarchy's layout mode. Explicit mode writes no
-/// dim order (no rank-4 getitem annotation; boundary placeholders take the operand's
-/// val), records the regions' output qparams from their output dequantizes, and uses
-/// its own captured_conv (APU-135 S8).
+/// (`captured_conv`). No dim order is written: boundary placeholders take the
+/// operand's val. The regions' output qparams come from their output dequantizes
+/// (APU-135 S8).
 pub(crate) fn apply_boundary_contracts(
     parent_ir: &mut fx_ir::IrGraph,
     submodules: &mut BTreeMap<String, StashedPipeline>,
-    layout: LayoutMode,
 ) -> u32 {
-    let explicit = layout == LayoutMode::Explicit;
     let mut contracts = Vec::new();
     let mut output_contracts = Vec::new();
     let mut while_body_regions = BTreeSet::new();
     let (while_cond_regions, _) = collect_region_metadata(parent_ir, submodules);
-    collect_boundary_contracts_for_graph(
-        parent_ir,
-        None,
-        &mut contracts,
-        &mut while_body_regions,
-        layout,
-    );
+    collect_boundary_contracts_for_graph(parent_ir, None, &mut contracts, &mut while_body_regions);
     collect_output_contracts_for_graph(parent_ir, None, &mut output_contracts);
     for (region, (ir, _)) in submodules.iter() {
         collect_boundary_contracts_for_graph(
@@ -1003,17 +887,13 @@ pub(crate) fn apply_boundary_contracts(
             Some(region.as_str()),
             &mut contracts,
             &mut while_body_regions,
-            layout,
         );
         collect_output_contracts_for_graph(ir, Some(region.as_str()), &mut output_contracts);
     }
     contracts.sort_by(|a, b| a.region.cmp(&b.region));
     output_contracts.sort_by(|a, b| a.region.cmp(&b.region));
 
-    let mut changed = match layout {
-        LayoutMode::DimOrder => annotate_parent_rank4_dim_order_ir(parent_ir),
-        LayoutMode::Explicit => 0,
-    };
+    let mut changed = 0;
     let cf_debug = crate::config::from_ir_debug_enabled();
     for (region, (ir, _)) in submodules.iter_mut() {
         if while_cond_regions.contains(region) {
@@ -1025,7 +905,7 @@ pub(crate) fn apply_boundary_contracts(
             }
             changed += stripped;
         }
-        let rewrites = rewrite_output_dequantize_boundaries_ir(ir, explicit);
+        let rewrites = rewrite_output_dequantize_boundaries_ir(ir);
         if rewrites > 0 && cf_debug {
             eprintln!(
                 "[RETAB][cf-boundary-ir] rewrote {rewrites} output DQ boundary node(s) in {region}"
@@ -1064,14 +944,8 @@ pub(crate) fn apply_boundary_contracts(
         }
         changed += inserts;
     }
-    let rewritten = match layout {
-        LayoutMode::DimOrder => {
-            super::captured_conv::rewrite_captured_conv_operands(parent_ir, submodules)
-        }
-        LayoutMode::Explicit => {
-            super::captured_conv::rewrite_explicit_captured_conv_operands(parent_ir, submodules)
-        }
-    };
+    let rewritten =
+        super::captured_conv::rewrite_explicit_captured_conv_operands(parent_ir, submodules);
     if rewritten > 0 && cf_debug {
         eprintln!("[RETAB][cf-boundary-ir] rewrote {rewritten} captured conv weight(s)/bias(es)");
     }
@@ -1252,29 +1126,27 @@ mod tests {
         region
     }
 
-    fn apply(layout: LayoutMode) -> (IrGraph, BTreeMap<String, StashedPipeline>) {
+    fn apply() -> (IrGraph, BTreeMap<String, StashedPipeline>) {
         let mut parent = parent_graph();
         let mut submodules: BTreeMap<String, StashedPipeline> = BTreeMap::from([(
             "true_graph".to_string(),
             (conv_region(), LoweringEffectBatch::default()),
         )]);
         crate::stock_fallback::take();
-        apply_boundary_contracts(&mut parent, &mut submodules, layout);
-        assert_eq!(crate::stock_fallback::take(), None, "{layout:?}");
+        apply_boundary_contracts(&mut parent, &mut submodules);
+        assert_eq!(crate::stock_fallback::take(), None);
         (parent, submodules)
     }
 
-    /// APU-135 S8: explicit mode records a cond branch's output quantization
-    /// from its output dequantize, as rc4's FoldAndAnnotateQParamsPass does, so
-    /// the output RESCALE takes the branch output from the conv's `(0.04, 7)`
-    /// to the parent's `(0.05, 3)`. The walk from the output permute instead
-    /// reverse engineers the qparam-less RESCALE from the TOSA conv's inherited
-    /// output qparam, `0.04 / (0.02 * 0.005 / 0.04) = 16`, which dim-order mode
-    /// would use (it never sees this chain: its convs stay aten until the
-    /// serializer).
+    /// APU-135 S8: the contracts record a cond branch's output quantization from
+    /// its output dequantize, as rc4's FoldAndAnnotateQParamsPass does, so the
+    /// output RESCALE takes the branch output from the conv's `(0.04, 7)` to the
+    /// parent's `(0.05, 3)`. The walk from the output permute instead reverse
+    /// engineers the qparam-less RESCALE from the TOSA conv's inherited output
+    /// qparam, `0.04 / (0.02 * 0.005 / 0.04) = 16`.
     #[test]
-    fn explicit_region_outputs_take_their_dequantizes_qparams() {
-        let (_, submodules) = apply(LayoutMode::Explicit);
+    fn region_outputs_take_their_dequantizes_qparams() {
+        let (_, submodules) = apply();
         let region = &submodules["true_graph"].0;
         assert!(!region
             .live_nodes()
@@ -1304,15 +1176,6 @@ mod tests {
             super::metadata::extract_effective_qparam_ir(region, live_node(region, "conv_ncl").id)
                 .expect("a qparam");
         assert!((walked.scale - 16.0).abs() < 1e-9, "{}", walked.scale);
-    }
-
-    /// Dim-order mode keeps its output contract: nothing is recorded.
-    #[test]
-    fn dim_order_region_outputs_record_nothing() {
-        let (_, submodules) = apply(LayoutMode::DimOrder);
-        let region = &submodules["true_graph"].0;
-        let output = region.output_node().expect("an output");
-        assert_eq!(output.meta.input_qparam_at(0), None);
     }
 
     fn quantize_or_dequantize(
@@ -1450,7 +1313,7 @@ mod tests {
             (constant_branch_region(), LoweringEffectBatch::default()),
         )]);
         crate::stock_fallback::take();
-        apply_boundary_contracts(&mut parent, &mut submodules, LayoutMode::Explicit);
+        apply_boundary_contracts(&mut parent, &mut submodules);
         assert_eq!(crate::stock_fallback::take(), None);
         let region = &submodules["true_graph"].0;
         let (scale, input_zp, output_zp) =
@@ -1552,7 +1415,7 @@ mod tests {
                 (conv_region(), LoweringEffectBatch::default()),
             )]);
             crate::stock_fallback::take();
-            apply_boundary_contracts(&mut parent, &mut submodules, LayoutMode::Explicit);
+            apply_boundary_contracts(&mut parent, &mut submodules);
             assert_eq!(crate::stock_fallback::take(), None);
             submodules.remove("true_graph").unwrap().0
         };

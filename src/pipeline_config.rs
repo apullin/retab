@@ -21,50 +21,6 @@ pub enum SdpaSafeSoftmaxGuardPolicy {
     Auto,
 }
 
-/// The layout model the pipeline lowers with. Explicit mode is the default; dim-order
-/// mode stays selectable (`RETAB_LAYOUT=dim_order`) until P4 deletes it (APU-162).
-///
-/// - `Explicit` (rc4's model): a node's val is its TOSA shape, and every layout change
-///   is a permute node, lowered one-to-one to TRANSPOSE
-///   (`backends/arm/_passes/aten_to_tosa_data_layout.py:60-68`).
-/// - `DimOrder` (RETAB's earlier model): nodes keep logical shapes, and
-///   `IrToTosaMemoryFormat` gives them a channels-last `tosa_dim_order` that the
-///   serializer applies.
-///
-/// `fx_pipeline::lowering_steps` builds each mode's pipeline. Explicit mode is rc4's
-/// order, its permute/view propagation included (APU-135).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum LayoutMode {
-    DimOrder,
-    #[default]
-    Explicit,
-}
-
-impl std::str::FromStr for LayoutMode {
-    type Err = String;
-
-    /// Parse the pipeline-config `layout` value.
-    fn from_str(name: &str) -> Result<Self, String> {
-        match name {
-            "dim_order" => Ok(Self::DimOrder),
-            "explicit" => Ok(Self::Explicit),
-            _ => Err(format!(
-                "unknown layout config: {name:?} (expected \"dim_order\" or \"explicit\")"
-            )),
-        }
-    }
-}
-
-impl LayoutMode {
-    /// The pipeline-config `layout` value, as `RETAB_LAYOUT` spells it.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::DimOrder => "dim_order",
-            Self::Explicit => "explicit",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QuantizeInfConfig {
     pub neg_inf: f64,
@@ -93,10 +49,6 @@ pub struct PipelineConfig {
     pub leaky_relu: LeakyReluLoweringConfig,
     pub quantize_inf: QuantizeInfConfig,
     pub sdpa_safe_softmax_guard: SdpaSafeSoftmaxGuardPolicy,
-    /// Pipeline-config key `layout`, which Python sets from `RETAB_LAYOUT`. The parent's
-    /// config is stashed with its IR, so `ingest_and_serialize` (ingest and the
-    /// serializer) gets the mode the passes ran in.
-    pub layout: LayoutMode,
 }
 
 fn required<'py, T: FromPyObjectOwned<'py>>(config: &Bound<'py, PyDict>, key: &str) -> PyResult<T> {
@@ -127,7 +79,6 @@ impl PipelineConfig {
             leaky_relu: LeakyReluLoweringConfig::Decompose,
             quantize_inf: QuantizeInfConfig::default(),
             sdpa_safe_softmax_guard: SdpaSafeSoftmaxGuardPolicy::Preserve,
-            layout: LayoutMode::default(),
         }
     }
 
@@ -169,12 +120,6 @@ impl PipelineConfig {
             neg_inf: required(&quantize_inf, "neg_inf")?,
             pos_inf: required(&quantize_inf, "pos_inf")?,
         };
-        if let Some(layout) = config.get_item("layout")? {
-            result.layout = layout
-                .extract::<String>()?
-                .parse()
-                .map_err(PyValueError::new_err)?;
-        }
         result.validate().map_err(PyValueError::new_err)?;
         Ok(result)
     }
@@ -248,30 +193,5 @@ mod tests {
         config.sdpa_safe_softmax_guard = SdpaSafeSoftmaxGuardPolicy::Preserve;
         config.leaky_relu = LeakyReluLoweringConfig::Table;
         assert!(config.validate().unwrap_err().contains("leaky_relu=TABLE"));
-    }
-
-    #[test]
-    fn layout_defaults_to_explicit_and_parses_only_exact_names() {
-        for spec in ["TOSA-1.0+INT+int16+int4+u55", "TOSA-1.0+INT+int16+int4+cf"] {
-            let config = PipelineConfig::from_tosa_spec(spec);
-            assert_eq!(config.layout, LayoutMode::Explicit);
-            let dim_order = PipelineConfig {
-                layout: LayoutMode::DimOrder,
-                ..config
-            };
-            assert!(dim_order.validate().is_ok());
-        }
-        assert_eq!("dim_order".parse(), Ok(LayoutMode::DimOrder));
-        assert_eq!("explicit".parse(), Ok(LayoutMode::Explicit));
-        for layout in [LayoutMode::DimOrder, LayoutMode::Explicit] {
-            assert_eq!(layout.as_str().parse(), Ok(layout));
-        }
-        for name in ["", "DIM_ORDER", "Explicit", "dim-order", " explicit"] {
-            let error = name.parse::<LayoutMode>().unwrap_err();
-            assert!(
-                error.starts_with(&format!("unknown layout config: {name:?}")),
-                "{error}"
-            );
-        }
     }
 }

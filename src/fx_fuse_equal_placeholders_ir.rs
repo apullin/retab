@@ -14,16 +14,14 @@
 //! has the same data as an all-zero int32 bias. When the zero point comes
 //! first, the bias's users read a constant whose val is int64. The multihead
 //! attention op tests' Linears did, and IrRewriteConv sent them to stock while
-//! explicit mode still ran this pass before phase 6 (APU-157). In explicit
-//! layout mode the key therefore also holds the val dtype, which is rc4's
-//! tensor dtype. Dim-order mode keys on the data alone, so its output does not
-//! change.
+//! this pass still ran before phase 6 (APU-157). The key therefore also holds
+//! the val dtype, which is rc4's tensor dtype.
 //!
 //! rc4 also casts every int64 buffer that has users to int32 just before the
 //! merge (CastInt64BuffersToInt32Pass, `arm_pass_manager.py:754`).
 //! IrCastInt64ToInt32EffectPass skips a buffer whose data the importer already
-//! narrowed, so that buffer's val stays int64. Explicit mode keeps such a buffer
-//! apart from an equal int32 constant that rc4 merges it with. That costs one
+//! narrowed, so that buffer's val stays int64. RETAB keeps such a buffer apart
+//! from an equal int32 constant that rc4 merges it with. That costs one
 //! constant, and every user still reads its own dtype.
 
 use std::collections::HashMap;
@@ -33,7 +31,6 @@ use crate::graph::ir::DType;
 use crate::lowering_effects::{
     DeleteConstantPlaceholderEffect, LoweringEffect, LoweringEffectBatch,
 };
-use crate::pipeline_config::LayoutMode;
 
 /// What a constant must share with another before their bytes are compared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -41,19 +38,15 @@ struct ConstantKey<'a> {
     special_dtype: &'a str,
     dtype: DType,
     shape: &'a [i64],
-    /// Explicit mode only: the val dtype, rc4's `str(tensor.dtype)`.
+    /// The val dtype, rc4's `str(tensor.dtype)`.
     val_dtype: Option<&'a str>,
 }
 
 /// Pairs `(duplicate, canonical)` of constant placeholders with equal dtype, shape,
-/// special dtype and bytes, and in explicit mode equal val dtypes (see the module
-/// docs); the canonical one is the first in graph order. Only placeholders that
-/// share metadata have their bytes compared, so large unique weights are never
-/// hashed or copied.
-pub fn find_duplicate_placeholder_pairs(
-    graph: &IrGraph,
-    layout: LayoutMode,
-) -> Vec<(NodeId, NodeId)> {
+/// special dtype, val dtype and bytes (see the module docs); the canonical one is
+/// the first in graph order. Only placeholders that share metadata have their bytes
+/// compared, so large unique weights are never hashed or copied.
+pub fn find_duplicate_placeholder_pairs(graph: &IrGraph) -> Vec<(NodeId, NodeId)> {
     let mut by_meta: HashMap<ConstantKey<'_>, Vec<NodeId>> = HashMap::new();
     for node in graph.live_nodes() {
         if !matches!(node.op, NodeOp::Placeholder | NodeOp::GetAttr) {
@@ -66,10 +59,7 @@ pub fn find_duplicate_placeholder_pairs(
             special_dtype: node.meta.extra_str("tosa_special_dtype").unwrap_or_default(),
             dtype: tensor.data.dtype,
             shape: tensor.data.shape.as_slice(),
-            val_dtype: match layout {
-                LayoutMode::DimOrder => None,
-                LayoutMode::Explicit => node.meta.val_dtype(),
-            },
+            val_dtype: node.meta.val_dtype(),
         };
         by_meta.entry(key).or_default().push(node.id);
     }
@@ -109,12 +99,8 @@ fn sampled_fingerprint(data: &[u8]) -> u64 {
     hasher.finish()
 }
 
-/// The layout mode decides whether constants with different val dtypes stay
-/// apart; see the module docs.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct IrFuseEqualPlaceholdersEffectPass {
-    pub layout: LayoutMode,
-}
+/// See the module docs.
+pub struct IrFuseEqualPlaceholdersEffectPass;
 
 impl EffectfulIrPass for IrFuseEqualPlaceholdersEffectPass {
     fn name(&self) -> &str {
@@ -125,7 +111,7 @@ impl EffectfulIrPass for IrFuseEqualPlaceholdersEffectPass {
         let mut modified = false;
         let mut effects = LoweringEffectBatch::default();
 
-        for (dup, canonical) in find_duplicate_placeholder_pairs(graph, self.layout) {
+        for (dup, canonical) in find_duplicate_placeholder_pairs(graph) {
             let placeholder_name = graph.node(dup).name.clone();
             graph.replace_and_erase(dup, canonical);
             effects.push(LoweringEffect::DeleteConstantPlaceholder(
@@ -167,8 +153,6 @@ mod tests {
         id
     }
 
-    const LAYOUTS: [LayoutMode; 2] = [LayoutMode::DimOrder, LayoutMode::Explicit];
-
     #[test]
     fn finds_duplicate_placeholder_pairs() {
         let mut graph = IrGraph::empty();
@@ -179,10 +163,8 @@ mod tests {
             .meta
             .set_extra("tosa_special_dtype", MetaValue::Str("INT48".to_string()));
 
-        for layout in LAYOUTS {
-            let pairs = find_duplicate_placeholder_pairs(&graph, layout);
-            assert_eq!(pairs, vec![(duplicate, canonical)], "{layout:?}");
-        }
+        let pairs = find_duplicate_placeholder_pairs(&graph);
+        assert_eq!(pairs, vec![(duplicate, canonical)]);
     }
 
     #[test]
@@ -197,44 +179,35 @@ mod tests {
         let first = add_placeholder(&mut graph, "a", base.clone(), vec![1024]);
         add_placeholder(&mut graph, "b", changed, vec![1024]);
         let third = add_placeholder(&mut graph, "c", base, vec![1024]);
-        for layout in LAYOUTS {
-            assert_eq!(
-                find_duplicate_placeholder_pairs(&graph, layout),
-                vec![(third, first)],
-                "{layout:?}"
-            );
-        }
+        assert_eq!(
+            find_duplicate_placeholder_pairs(&graph),
+            vec![(third, first)]
+        );
     }
 
     #[test]
     fn effectful_pass_plans_delete_effects_and_rewrites_graph() {
-        for layout in LAYOUTS {
-            let mut graph = IrGraph::empty();
-            let canonical =
-                add_placeholder(&mut graph, "a", 1i32.to_le_bytes().to_vec(), vec![1]);
-            let duplicate =
-                add_placeholder(&mut graph, "b", 1i32.to_le_bytes().to_vec(), vec![1]);
-            let user = graph.add_node(
-                NodeOp::CallFunction,
-                "use_b".to_string(),
-                "aten.add.Tensor".to_string(),
-                vec![crate::fx_ir::IrArg::Node(duplicate)],
-                NodeMeta::default(),
-            );
+        let mut graph = IrGraph::empty();
+        let canonical = add_placeholder(&mut graph, "a", 1i32.to_le_bytes().to_vec(), vec![1]);
+        let duplicate = add_placeholder(&mut graph, "b", 1i32.to_le_bytes().to_vec(), vec![1]);
+        let user = graph.add_node(
+            NodeOp::CallFunction,
+            "use_b".to_string(),
+            "aten.add.Tensor".to_string(),
+            vec![crate::fx_ir::IrArg::Node(duplicate)],
+            NodeMeta::default(),
+        );
 
-            let pass = IrFuseEqualPlaceholdersEffectPass { layout };
-            let result = pass.run(&mut graph);
+        let result = IrFuseEqualPlaceholdersEffectPass.run(&mut graph);
 
-            assert!(result.modified);
-            assert_eq!(graph.node(user).args[0].as_node(), Some(canonical));
-            assert!(!graph.node(duplicate).alive);
-            assert_eq!(result.effects.items.len(), 1);
-            let LoweringEffect::DeleteConstantPlaceholder(effect) = &result.effects.items[0]
-            else {
-                panic!("expected delete effect");
-            };
-            assert_eq!(effect.placeholder_name, "b");
-        }
+        assert!(result.modified);
+        assert_eq!(graph.node(user).args[0].as_node(), Some(canonical));
+        assert!(!graph.node(duplicate).alive);
+        assert_eq!(result.effects.items.len(), 1);
+        let LoweringEffect::DeleteConstantPlaceholder(effect) = &result.effects.items[0] else {
+            panic!("expected delete effect");
+        };
+        assert_eq!(effect.placeholder_name, "b");
     }
 
     /// A `[3]` buffer of zeros as RETAB's importer builds it: int64 data is
@@ -309,10 +282,10 @@ mod tests {
     /// rc4 merges the int64 zero points among themselves and every int32 zero
     /// constant into the first int32 one (`b__zero_point_0_common`, unused,
     /// and `b__zero_point_1_common`, which every projection's convolution
-    /// reads). Explicit mode keeps the same buckets, so the convolutions read
-    /// an int32 bias.
+    /// reads). RETAB keeps the same buckets, so the convolutions read an int32
+    /// bias.
     #[test]
-    fn explicit_mode_keeps_int64_zero_points_off_int32_biases_as_rc4_does() {
+    fn keeps_int64_zero_points_off_int32_biases_as_rc4_does() {
         let Attention {
             mut graph,
             weight_zps,
@@ -321,7 +294,7 @@ mod tests {
             convs,
         } = attention();
         assert_eq!(
-            find_duplicate_placeholder_pairs(&graph, LayoutMode::Explicit),
+            find_duplicate_placeholder_pairs(&graph),
             vec![
                 (biases[0], bias_zps[0]),
                 (weight_zps[1], weight_zps[0]),
@@ -330,10 +303,7 @@ mod tests {
             ]
         );
 
-        let result = IrFuseEqualPlaceholdersEffectPass {
-            layout: LayoutMode::Explicit,
-        }
-        .run(&mut graph);
+        let result = IrFuseEqualPlaceholdersEffectPass.run(&mut graph);
         assert!(result.modified);
         for conv in convs {
             let bias = graph.node(conv).args[0].as_node().unwrap();
@@ -347,52 +317,19 @@ mod tests {
         );
     }
 
-    /// Dim-order mode keys on the data alone and keeps doing so: every zero
-    /// constant merges into the first, an int64 zero point, as before explicit
-    /// mode existed.
+    /// The pass compares the val dtype on top of the data: a constant without a
+    /// val still merges with another one without a val, never with one that has
+    /// a val.
     #[test]
-    fn dim_order_mode_still_merges_on_the_narrowed_data() {
-        let Attention {
-            mut graph,
-            weight_zps,
-            convs,
-            ..
-        } = attention();
-        assert_eq!(
-            find_duplicate_placeholder_pairs(&graph, LayoutMode::DimOrder).len(),
-            5
-        );
-
-        IrFuseEqualPlaceholdersEffectPass {
-            layout: LayoutMode::DimOrder,
-        }
-        .run(&mut graph);
-        for conv in convs {
-            assert_eq!(graph.node(conv).args[0].as_node(), Some(weight_zps[0]));
-        }
-        assert_eq!(
-            graph.node(weight_zps[0]).meta.val_dtype(),
-            Some("torch.int64")
-        );
-    }
-
-    /// Explicit mode compares the val dtype on top of the data: a constant
-    /// without a val still merges with another one without a val, never with
-    /// one that has a val.
-    #[test]
-    fn explicit_mode_tells_a_missing_val_from_any_val_dtype() {
+    fn tells_a_missing_val_from_any_val_dtype() {
         let mut graph = IrGraph::empty();
         let bare = add_placeholder(&mut graph, "bare", vec![0; 4], vec![1]);
         let typed = add_placeholder(&mut graph, "typed", vec![0; 4], vec![1]);
         graph.node_mut(typed).meta = NodeMeta::tensor([1], "torch.int32");
         let bare_again = add_placeholder(&mut graph, "bare_again", vec![0; 4], vec![1]);
         assert_eq!(
-            find_duplicate_placeholder_pairs(&graph, LayoutMode::Explicit),
+            find_duplicate_placeholder_pairs(&graph),
             vec![(bare_again, bare)]
-        );
-        assert_eq!(
-            find_duplicate_placeholder_pairs(&graph, LayoutMode::DimOrder),
-            vec![(typed, bare), (bare_again, bare)]
         );
     }
 }

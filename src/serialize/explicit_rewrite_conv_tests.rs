@@ -15,7 +15,7 @@ use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeOp};
 use crate::graph::Graph;
 use crate::layout::replay;
 use crate::layout::rewrite_conv::IrRewriteConvPass;
-use crate::pipeline_config::{LayoutMode, PipelineConfig};
+use crate::pipeline_config::PipelineConfig;
 use crate::store::TensorStore;
 
 const REWRITE_CONV: &str = include_str!("../../tests/fixtures/layout_replay/rewrite_conv.txt");
@@ -58,7 +58,6 @@ fn rewritten_with(pass: &IrRewriteConvPass, fixture: &str, name: &str) -> IrGrap
 fn serialize_explicit(ir: &IrGraph) -> Result<SerializedGraphItems, String> {
     let mut store = TensorStore::new();
     let mut graph: Graph = crate::ingest::from_ir::graph_from_ir(ir, &mut store);
-    graph.layout = LayoutMode::Explicit;
     crate::ingest::finalize::finalize_converted_graph(&mut graph);
     graph.rebuild_user_lists();
     visitors::shape_utils::clear_shape_cache();

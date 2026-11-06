@@ -121,7 +121,8 @@ fn resolve_qparam_from_arg(graph: &IrGraph, arg: &IrArg) -> Option<ResolvedFoldQ
 }
 
 /// `first_list_qparam`: a list argument takes its first dequantized item's qparams
-/// rather than its last's (see `IrFoldQdqPass::control_flow_lists_take_first_qparam`).
+/// rather than its last's, as a cond's or while loop's operand list does (see
+/// `IrFoldQdqPass::run`).
 fn resolve_input_qparams_for_foldable_node(
     graph: &IrGraph,
     node: &IrNode,
@@ -376,15 +377,6 @@ where
 
 pub struct IrFoldQdqPass {
     pub(crate) preserve_partial_binary_tensor_qdq: bool,
-    /// Explicit layout mode: a cond's or while loop's operand list takes its first
-    /// dequantized operand's qparams, as rc4's FoldAndAnnotateQParamsPass gives it
-    /// (`_merge_qparams` keeps the first, fold_qdq_with_annotated_qparams_pass.py:43-53).
-    /// rc4's InsertControlFlowRescalesPass maps every operand of the list to that one
-    /// qparam (`_get_input_qparams_map`, insert_rescales_pass.py:607-623), and RETAB's
-    /// boundary contracts do the same with the list qparam this pass records
-    /// (`control_flow::contracts`), so the boundary RESCALEs are rc4's. Dim-order mode
-    /// keeps the last dequantized operand's.
-    pub(crate) control_flow_lists_take_first_qparam: bool,
 }
 
 impl Default for IrFoldQdqPass {
@@ -397,7 +389,6 @@ impl IrFoldQdqPass {
     pub fn new() -> Self {
         Self {
             preserve_partial_binary_tensor_qdq: false,
-            control_flow_lists_take_first_qparam: false,
         }
     }
 
@@ -405,7 +396,6 @@ impl IrFoldQdqPass {
     pub fn with_mixed_profile_partial_binary_qdq() -> Self {
         Self {
             preserve_partial_binary_tensor_qdq: true,
-            control_flow_lists_take_first_qparam: false,
         }
     }
 
@@ -433,11 +423,17 @@ impl IrPass for IrFoldQdqPass {
             }
 
             let node = graph.node(node_id).clone();
-            let resolved_inputs = resolve_input_qparams_for_foldable_node(
-                graph,
-                &node,
-                self.control_flow_lists_take_first_qparam && node.is_control_flow(),
-            );
+            // A cond's or while loop's operand list takes its first dequantized
+            // operand's qparams, as rc4's FoldAndAnnotateQParamsPass gives it
+            // (`_merge_qparams` keeps the first,
+            // fold_qdq_with_annotated_qparams_pass.py:43-53). rc4's
+            // InsertControlFlowRescalesPass maps every operand of the list to that one
+            // qparam (`_get_input_qparams_map`, insert_rescales_pass.py:607-623), and
+            // RETAB's boundary contracts do the same with the list qparam this pass
+            // records (`control_flow::contracts`), so the boundary RESCALEs are rc4's.
+            // Other lists (a cat's) keep their last dequantized item's.
+            let resolved_inputs =
+                resolve_input_qparams_for_foldable_node(graph, &node, node.is_control_flow());
             let quantized_arg_indices: Vec<usize> = resolved_inputs
                 .iter()
                 .map(|resolved| resolved.arg_index)
@@ -829,13 +825,13 @@ mod tests {
     }
 
     /// rc4's FoldAndAnnotateQParamsPass gives a list argument its first dequantized
-    /// item's qparams (`_merge_qparams`); explicit mode does so for a cond's or while
-    /// loop's operand list, whose qparam the boundary contracts give every operand, as
-    /// rc4's InsertControlFlowRescalesPass does. Dim-order mode keeps the last item's,
-    /// and other lists (a cat's) keep it in both modes. Every dequantize folds away.
+    /// item's qparams (`_merge_qparams`); the pass does so for a cond's or while loop's
+    /// operand list, whose qparam the boundary contracts give every operand, as rc4's
+    /// InsertControlFlowRescalesPass does. Other lists (a cat's) keep the last item's.
+    /// Every dequantize folds away.
     #[test]
-    fn control_flow_operand_lists_take_the_first_qparam_in_explicit_mode() {
-        let fold = |target: &str, explicit: bool| {
+    fn control_flow_operand_lists_take_the_first_qparam() {
+        let fold = |target: &str| {
             let mut graph = IrGraph::empty();
             let value = placeholder(&mut graph, "value");
             let limit = placeholder(&mut graph, "limit");
@@ -876,20 +872,14 @@ mod tests {
                 annotated_meta(),
             );
             let _output = output(&mut graph, node);
-            let pass = IrFoldQdqPass {
-                preserve_partial_binary_tensor_qdq: false,
-                control_flow_lists_take_first_qparam: explicit,
-            };
-            assert!(pass.run(&mut graph));
+            assert!(IrFoldQdqPass::new().run(&mut graph));
             assert!(!graph.node(dq_value).alive && !graph.node(dq_limit).alive);
             let qparam = graph.node(node).meta.input_qparam_at(list_index).cloned();
             qparam.map(|qparam| (qparam.scale, qparam.zp))
         };
         const WHILE_LOOP: &str = "torch.ops.higher_order.while_loop";
-        assert_eq!(fold(WHILE_LOOP, true), Some((0.25, 3)));
-        assert_eq!(fold(WHILE_LOOP, false), Some((0.5, 7)));
-        assert_eq!(fold("aten.cat.default", true), Some((0.5, 7)));
-        assert_eq!(fold("aten.cat.default", false), Some((0.5, 7)));
+        assert_eq!(fold(WHILE_LOOP), Some((0.25, 3)));
+        assert_eq!(fold("aten.cat.default"), Some((0.5, 7)));
     }
 
     #[test]

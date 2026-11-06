@@ -106,17 +106,6 @@ def test_native_entry_points_refuse_unported_policies(entry_point, field, value)
         getattr(_native, entry_point)(None, pipeline_config=config)
 
 
-@pytest.mark.parametrize(
-    "entry_point",
-    ["run_fx_passes", "run_fx_cond_passes", "run_fx_submodule_passes"],
-)
-def test_native_entry_points_refuse_unknown_layouts(entry_point):
-    config = rp._build_pipeline_config(EthosUCompileSpec("ethos-u55-128"))
-    config["layout"] = "nhwc"
-    with pytest.raises(ValueError, match='unknown layout config: "nhwc"'):
-        getattr(_native, entry_point)(None, pipeline_config=config)
-
-
 def _main_block_ops(tosa: bytes) -> list[int]:
     from tosa import TosaGraph
 
@@ -124,11 +113,10 @@ def _main_block_ops(tosa: bytes) -> list[int]:
     return [block.Operators(i).Op() for i in range(block.OperatorsLength())]
 
 
-def test_missing_layout_means_explicit_and_explicit_mode_rewrites_the_conv():
-    """A missing key means explicit (APU-161). Explicit mode builds rc4's pipeline: the
-    conv becomes a channels-last TOSA CONV2D on a pre-permuted weight between explicit
-    TRANSPOSEs, so nothing reaches the serializer's aten-conv guard (P2 design X5) and
-    the graph stays with RETAB."""
+def test_the_conv_becomes_a_channels_last_tosa_conv2d():
+    """RETAB builds rc4's pipeline: the conv becomes a channels-last TOSA CONV2D on a
+    pre-permuted weight between explicit TRANSPOSEs, so nothing reaches the serializer's
+    aten-conv guard (P2 design X5) and the graph stays with RETAB."""
     from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
     from tosa import Op
 
@@ -137,54 +125,13 @@ def test_missing_layout_means_explicit_and_explicit_mode_rewrites_the_conv():
     module = torch.nn.Sequential(torch.nn.Conv2d(2, 4, 3), torch.nn.ReLU()).requires_grad_(False)
     program = torch.export.export(module, (torch.ones(1, 2, 8, 8),)).run_decompositions()
     config = rp._build_pipeline_config(TosaCompileSpec("TOSA-1.0+INT"))
-    tosa = []
-    for layout in [None, "explicit", "dim_order"]:
-        layout_config = config if layout is None else {**config, "layout": layout}
-        _native.run_fx_passes(program.graph_module, program, pipeline_config=layout_config)
-        tosa.append(_native.ingest_and_serialize())
-    assert tosa[0] and tosa[0] == tosa[1]
-
-    ops = _main_block_ops(tosa[1])
-    assert tosa[2] != tosa[1]
+    _native.run_fx_passes(program.graph_module, program, pipeline_config=config)
+    ops = _main_block_ops(_native.ingest_and_serialize())
     assert ops.count(Op.Op.CONV2D) == 1
     # The input permute to NHWC and the output permute back; the weight is a constant.
     assert ops.count(Op.Op.TRANSPOSE) == 2
     conv = ops.index(Op.Op.CONV2D)
     assert ops.index(Op.Op.TRANSPOSE) < conv < len(ops) - 1 - ops[::-1].index(Op.Op.TRANSPOSE)
-
-
-class _CondModule(torch.nn.Module):
-    def forward(self, x):
-        def true_branch(value):
-            return value + 1
-
-        def false_branch(value):
-            return value - 1
-
-        return torch.cond(x.sum() > 0, true_branch, false_branch, [x])
-
-
-def test_region_entry_points_reject_a_layout_mode_the_parent_did_not_run():
-    """P2 design §4.1: a delegate's parent pipeline and its regions run one layout mode.
-    `_all_rust_preprocess` hands every entry point the same config, so a region in the
-    other mode means a caller passed two configs: a hard error, not a stock fallback."""
-    from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
-    from executorch.exir.graph_module import get_cond_while_submodules
-
-    program = torch.export.export(_CondModule(), (torch.ones(2, 2),)).run_decompositions()
-    config = rp._build_pipeline_config(TosaCompileSpec("TOSA-1.0+INT+cf"))
-    explicit = {**config, "layout": "explicit"}
-    dim_order = {**config, "layout": "dim_order"}
-    (name, branch, _), *_ = get_cond_while_submodules(program.graph_module)
-
-    for parent, region in [(explicit, dim_order), (dim_order, explicit)]:
-        _native.run_fx_passes(program.graph_module, program, pipeline_config=parent)
-        with pytest.raises(RuntimeError, match="must share one pipeline config") as error:
-            _native.run_fx_cond_passes(branch, program, name, pipeline_config=region)
-        assert rp._native_fallback_reason(error.value) is None, error.value
-        with pytest.raises(RuntimeError, match="must share one pipeline config"):
-            _native.run_fx_submodule_passes(branch, program, name, pipeline_config=region)
-        _native.run_fx_cond_passes(branch, program, name, pipeline_config=parent)
 
 
 @pytest.mark.parametrize("recursive", [False, True])

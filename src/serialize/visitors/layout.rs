@@ -480,7 +480,6 @@ pub(super) fn adjusted_tosa_pad_for_emitted_conv3d(
 mod tests {
     use super::*;
     use crate::graph::ir::{DType as IrDType, NodeMeta, TensorInfo};
-    use crate::pipeline_config::LayoutMode;
     use smallvec::{smallvec, SmallVec};
 
     fn add(
@@ -548,9 +547,9 @@ mod tests {
     }
 
     #[test]
-    fn explicit_depthwise_kernels_come_from_hwcm_weights() {
+    fn depthwise_kernels_come_from_hwcm_weights() {
         // P2 design B3: a KW == 1 HWCM weight [3, 1, 4, 2] also reads as OIHW [O, 1, KH, KW].
-        let (mut graph, conv) = tosa_conv(
+        let (graph, conv) = tosa_conv(
             OpTarget::TosaDepthwiseConv2d,
             &[1, 16, 11, 4],
             &[3, 1, 4, 2],
@@ -559,26 +558,18 @@ mod tests {
             &[1, 8, 6, 8],
         );
         let store = TensorStore::new();
-        for (layout, kernels) in [
-            (LayoutMode::DimOrder, vec![4, 2]),
-            (LayoutMode::Explicit, vec![3, 1]),
-        ] {
-            graph.layout = layout;
-            clear_shape_cache();
-            let node = graph.node(conv).unwrap();
-            assert_eq!(
-                conv_spatial_inputs_and_kernels(&graph, &store, node, 2, true),
-                Some((vec![16, 11], kernels)),
-                "{layout:?}"
-            );
-        }
+        clear_shape_cache();
+        let node = graph.node(conv).unwrap();
+        assert_eq!(
+            conv_spatial_inputs_and_kernels(&graph, &store, node, 2, true),
+            Some((vec![16, 11], vec![3, 1]))
+        );
     }
 
     #[test]
-    fn explicit_conv_pads_are_used_as_given() {
-        // P2 design G2: rc4 already adjusted the pad. Dim-order mode trims any pad whose
-        // remainder fits: [1, 1, 2, 2] becomes [1, 0, 2, 1] here.
-        let (mut graph, conv) = tosa_conv(
+    fn conv_pads_are_used_as_given() {
+        // P2 design G2: rc4 already adjusted the pad, so [1, 1, 2, 2] stays as it is.
+        let (graph, conv) = tosa_conv(
             OpTarget::TosaConv2d,
             &[1, 6, 10, 3],
             &[8, 3, 5, 3],
@@ -587,32 +578,25 @@ mod tests {
             &[1, 3, 5, 8],
         );
         let store = TensorStore::new();
-        for (layout, pad) in [
-            (LayoutMode::DimOrder, vec![1, 0, 2, 1]),
-            (LayoutMode::Explicit, vec![1, 1, 2, 2]),
-        ] {
-            graph.layout = layout;
-            clear_shape_cache();
-            let node = graph.node(conv).unwrap();
-            assert_eq!(
-                adjusted_tosa_pad_for_emitted_conv2d(
-                    &graph,
-                    &store,
-                    node,
-                    &[1, 1, 2, 2],
-                    &[2, 2],
-                    &[1, 1],
-                    false
-                ),
-                pad,
-                "{layout:?}"
-            );
-        }
+        clear_shape_cache();
+        let node = graph.node(conv).unwrap();
+        assert_eq!(
+            adjusted_tosa_pad_for_emitted_conv2d(
+                &graph,
+                &store,
+                node,
+                &[1, 1, 2, 2],
+                &[2, 2],
+                &[1, 1],
+                false
+            ),
+            vec![1, 1, 2, 2]
+        );
     }
 
     #[test]
-    fn explicit_pool_outputs_are_the_val() {
-        // P2 design G1: dim-order mode recomputes the output from the parsed arguments.
+    fn pool_outputs_are_the_val() {
+        // P2 design G1: the output shape is the val, not recomputed from the arguments.
         let mut graph = Graph::new();
         let x = input(&mut graph, "x", &[1, 9, 9, 4]);
         let pool = add(
@@ -629,15 +613,9 @@ mod tests {
             &[1, 5, 5, 4],
         );
         let store = TensorStore::new();
-        for (layout, shape) in [
-            (LayoutMode::DimOrder, vec![1, 4, 4, 4]),
-            (LayoutMode::Explicit, vec![1, 5, 5, 4]),
-        ] {
-            graph.layout = layout;
-            clear_shape_cache();
-            let node = graph.node(pool).unwrap();
-            let output = compute_pool_nhwc_output(&graph, &store, node, &[2, 2], &[2, 2], &[0; 4]);
-            assert_eq!(output.shape, shape, "{layout:?}");
-        }
+        clear_shape_cache();
+        let node = graph.node(pool).unwrap();
+        let output = compute_pool_nhwc_output(&graph, &store, node, &[2, 2], &[2, 2], &[0; 4]);
+        assert_eq!(output.shape, vec![1, 5, 5, 4]);
     }
 }

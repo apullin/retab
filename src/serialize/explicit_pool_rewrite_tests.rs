@@ -16,7 +16,6 @@ use crate::layout::constants::IrMaterializeConstantsPass;
 use crate::layout::rewrite_avg_pool2d::IrRewriteAvgPool2dPass;
 use crate::layout::rewrite_max_pool2d::IrRewriteMaxPool2dPass;
 use crate::layout::rewrite_upsample::IrRewriteUpsamplePass;
-use crate::pipeline_config::LayoutMode;
 use crate::store::TensorStore;
 use crate::test_ir::{call, call_with_meta, output, placeholder};
 
@@ -34,7 +33,6 @@ fn qp(scale: f64, zp: i64, dtype: &str) -> QParam {
 fn serialize_explicit(ir: &IrGraph) -> SerializedGraphItems {
     let mut store = TensorStore::new();
     let mut graph: Graph = crate::ingest::from_ir::graph_from_ir(ir, &mut store);
-    graph.layout = LayoutMode::Explicit;
     crate::ingest::finalize::finalize_converted_graph(&mut graph);
     graph.rebuild_user_lists();
     visitors::shape_utils::clear_shape_cache();

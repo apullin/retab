@@ -1409,13 +1409,10 @@ fn drop_rc4_slices(graph: &mut IrGraph) {
     }
 }
 
-/// Explicit IrSizeAdjustInput, which must slice without a fallback.
+/// IrSizeAdjustInput, which must slice without a fallback.
 fn size_adjust_explicitly(graph: &mut IrGraph) {
     crate::stock_fallback::take();
-    let pass = crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass {
-        layout: crate::pipeline_config::LayoutMode::Explicit,
-    };
-    assert!(pass.run(graph));
+    assert!(crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass.run(graph));
     assert_eq!(crate::stock_fallback::take(), None);
 }
 
@@ -2128,9 +2125,7 @@ fn grouped_convs_after_retabs_decomposition() {
     crate::test_ir::output(&mut graph, conv);
     rewrite_after(
         &mut graph,
-        &crate::fx_decompose_grouped_conv_ir::IrDecomposeGroupedConvPass {
-            layout: crate::pipeline_config::LayoutMode::Explicit,
-        },
+        &crate::fx_decompose_grouped_conv_ir::IrDecomposeGroupedConvPass,
     );
 
     let convs = calls(&graph, CONV2D);

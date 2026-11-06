@@ -596,7 +596,6 @@ mod tests {
     fn a_rescaled_matmul_accumulator_has_rc4s_int32_dtype() {
         use crate::fx_ir::IrPass;
         use crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass;
-        use crate::pipeline_config::LayoutMode;
 
         let mut g = LayoutGraph::new();
         let a = g.typed_input("a", &[1, 4, 8], I8);
@@ -615,10 +614,7 @@ mod tests {
         );
         g.output(&[bmm]);
         assert_eq!(value_dtype(g.graph(), bmm).as_deref(), Some(I8));
-        let explicit = IrRewriteMatmulRescalePass {
-            layout: LayoutMode::Explicit,
-        };
-        assert!(explicit.run(g.graph_mut()));
+        assert!(IrRewriteMatmulRescalePass.run(g.graph_mut()));
         let rescale = g
             .graph()
             .live_nodes()

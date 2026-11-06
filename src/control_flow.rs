@@ -264,9 +264,9 @@ mod tests {
     }
 
     /// A parent that runs a while loop over a layout TRANSPOSE of `x` (rank 4, int8,
-    /// quantized at the returned qparam), laid out as dim-order mode lays it out: the
-    /// TRANSPOSE to NHWC, then, if `restore_logical_layout`, one back to NCHW. Returns
-    /// the parent, the qparam and the val of the loop's operand.
+    /// quantized at the returned qparam), laid out as RETAB's earlier dim-order model
+    /// laid it out: the TRANSPOSE to NHWC, then, if `restore_logical_layout`, one back
+    /// to NCHW. Returns the parent, the qparam and the val of the loop's operand.
     fn while_over_layout_transposes(
         restore_logical_layout: bool,
     ) -> (IrGraph, crate::fx_ir::QParam, Vec<i64>) {
@@ -320,54 +320,14 @@ mod tests {
         (parent, qp, operand_shape)
     }
 
+    /// APU-135 P2 design §4.3.1: a region placeholder takes the val of the operand
+    /// bound to it, as rc4's `_regularize_submodule` does, and the boundary writes no
+    /// dim order, before the region's pipeline and at serialization alike. The parent
+    /// is the dim-order fixture above, dim orders and TOSA TRANSPOSEs included, which
+    /// RETAB's graphs no longer have: the boundary neither reconstructs a logical shape
+    /// through a TRANSPOSE nor copies an operand's dim order.
     #[test]
-    fn region_boundaries_keep_logical_shapes_through_layout_transposes() {
-        use crate::pipeline_config::LayoutMode;
-        use crate::test_ir::placeholder;
-
-        for restore_logical_layout in [false, true] {
-            let (parent, qp, _) = while_over_layout_transposes(restore_logical_layout);
-            let expected_order = if restore_logical_layout {
-                vec![0, 1, 2, 3]
-            } else {
-                vec![0, 2, 3, 1]
-            };
-            let parent = (parent, LoweringEffectBatch::default());
-            let mut region = IrGraph::empty();
-            let ph = placeholder(&mut region, "arg", [2, 3, 4, 5], "torch.float32");
-            assert!(
-                apply_pre_submodule_qparam_propagation_ir(
-                    Some("cond"),
-                    &mut region,
-                    Some(&parent),
-                    &BTreeMap::new(),
-                    LayoutMode::DimOrder,
-                ) > 0
-            );
-            assert_eq!(region.node_shape(ph), Some([2, 3, 4, 5].as_slice()));
-            assert_eq!(region.node(ph).meta.val_dtype(), Some("torch.int8"));
-            assert_eq!(
-                region.node(ph).meta.tosa_dim_order(),
-                Some(expected_order.as_slice())
-            );
-            assert!(region
-                .node(ph)
-                .meta
-                .output_qparam()
-                .unwrap()
-                .same_exact_affine_dtype(&qp));
-        }
-    }
-
-    /// Explicit mode (APU-135 P2 design §4.3.1): a region placeholder takes the val of
-    /// the operand bound to it, as rc4's `_regularize_submodule` does, and the boundary
-    /// writes no dim order, before the region's pipeline and at serialization alike. The
-    /// parent is the dim-order fixture above, dim orders and TOSA TRANSPOSEs included,
-    /// which explicit graphs never have: explicit mode neither reconstructs a logical
-    /// shape through a TRANSPOSE nor copies an operand's dim order.
-    #[test]
-    fn explicit_region_boundaries_take_operand_vals_without_dim_orders() {
-        use crate::pipeline_config::LayoutMode;
+    fn region_boundaries_take_operand_vals_without_dim_orders() {
         use crate::test_ir::{output, placeholder};
 
         let region_with_input = || {
@@ -399,7 +359,6 @@ mod tests {
                     &mut region,
                     Some(&stashed_parent),
                     &BTreeMap::new(),
-                    LayoutMode::Explicit,
                 ) > 0
             );
             check(&region, ph, "pre-pass propagation");
@@ -413,9 +372,7 @@ mod tests {
                     (name.to_string(), (region, LoweringEffectBatch::default()))
                 })
                 .collect();
-            assert!(
-                apply_boundary_contracts(&mut parent, &mut submodules, LayoutMode::Explicit) > 0
-            );
+            assert!(apply_boundary_contracts(&mut parent, &mut submodules) > 0);
             for (name, (region, _)) in &submodules {
                 let ph = region.live_placeholder_ids()[0];
                 check(region, ph, &format!("serialization, {name}"));
@@ -423,69 +380,55 @@ mod tests {
         }
     }
 
-    /// Dim-order mode lays a region's rank-4 tensors out channels-last, so the boundary
-    /// contracts give a parent's rank-4 cond or while output the NHWC dim order. Explicit
-    /// mode keeps it in its val, as rc4 does (APU-135 P2 design §4.3.1): no node in the
-    /// hierarchy gets a dim order, which explicit serialization would send to stock. The
-    /// rest of the contract still applies in both modes.
+    /// A parent's rank-4 cond or while output keeps its layout in its val, as rc4's
+    /// does (APU-135 P2 design §4.3.1): no node in the hierarchy gets a dim order, which
+    /// serialization would send to stock, and the rest of the contract still applies.
     #[test]
-    fn only_dim_order_mode_lays_rank4_control_flow_outputs_out_nhwc() {
-        use crate::pipeline_config::LayoutMode;
+    fn rank4_control_flow_outputs_keep_their_vals_without_dim_orders() {
         use crate::test_ir::live_node;
         use fixtures::RANK4;
 
         for while_loop in [false, true] {
-            for layout in [LayoutMode::DimOrder, LayoutMode::Explicit] {
-                let case = format!("while_loop={while_loop} {layout:?}");
-                let (mut parent, mut submodules) = fixtures::rank4_hierarchy(while_loop);
-                apply_boundary_contracts(&mut parent, &mut submodules, layout);
+            let case = format!("while_loop={while_loop}");
+            let (mut parent, mut submodules) = fixtures::rank4_hierarchy(while_loop);
+            apply_boundary_contracts(&mut parent, &mut submodules);
 
-                let getitem = &live_node(&parent, "getitem").meta;
-                assert_eq!(getitem.val_shape(), Some(RANK4.as_slice()), "{case}");
-                let parent_output_user = getitem.extra_bool("arm_control_flow_parent_output_user");
-                match layout {
-                    LayoutMode::DimOrder => {
-                        assert_eq!(
-                            getitem.tosa_dim_order(),
-                            Some([0, 2, 3, 1].as_slice()),
-                            "{case}"
-                        );
-                        assert_eq!(parent_output_user, Some(true), "{case}");
-                    }
-                    LayoutMode::Explicit => {
-                        assert_eq!(parent_output_user, None, "{case}");
-                        let graphs = std::iter::once(("main", &parent)).chain(
-                            submodules
-                                .iter()
-                                .map(|(name, (region, _))| (name.as_str(), region)),
-                        );
-                        for (graph_name, graph) in graphs {
-                            for node in graph.live_nodes() {
-                                assert_eq!(
-                                    node.meta.tosa_dim_order(),
-                                    None,
-                                    "{case}: {graph_name} {}",
-                                    node.name
-                                );
-                            }
-                        }
-                    }
-                }
-                for (name, (region, _)) in &submodules {
-                    let arg = &live_node(region, "arg0_1").meta;
+            let getitem = &live_node(&parent, "getitem").meta;
+            assert_eq!(getitem.val_shape(), Some(RANK4.as_slice()), "{case}");
+            assert_eq!(
+                getitem.extra_bool("arm_control_flow_parent_output_user"),
+                None,
+                "{case}"
+            );
+            let graphs = std::iter::once(("main", &parent)).chain(
+                submodules
+                    .iter()
+                    .map(|(name, (region, _))| (name.as_str(), region)),
+            );
+            for (graph_name, graph) in graphs {
+                for node in graph.live_nodes() {
                     assert_eq!(
-                        arg.extra_bool("arm_control_flow_placeholder"),
-                        Some(true),
-                        "{case}: {name}"
+                        node.meta.tosa_dim_order(),
+                        None,
+                        "{case}: {graph_name} {}",
+                        node.name
                     );
-                    assert_eq!(arg.val_shape(), Some(RANK4.as_slice()), "{case}");
                 }
+            }
+            for (name, (region, _)) in &submodules {
+                let arg = &live_node(region, "arg0_1").meta;
+                assert_eq!(
+                    arg.extra_bool("arm_control_flow_placeholder"),
+                    Some(true),
+                    "{case}: {name}"
+                );
+                assert_eq!(arg.val_shape(), Some(RANK4.as_slice()), "{case}");
             }
         }
     }
 
-    /// Critique A2: why explicit mode keeps IrNormalizeDelegateIOLayout out of the
-    /// region pipelines (the `fx_pipeline` tests check that it does), though rc4 runs
+    /// Critique A2: why RETAB keeps IrNormalizeDelegateIOLayout out of the region
+    /// pipelines (the `fx_pipeline` tests check that it does), though rc4 runs
     /// its pass on every region. rc4's does nothing there, because
     /// `_regularize_submodule` gives region IO the parent's post-pass vals, which the
     /// parent's normalization made contiguous. RETAB imports a region from the
@@ -497,7 +440,6 @@ mod tests {
     fn region_inputs_keep_the_exports_dim_order_so_regions_skip_io_normalization() {
         use crate::fx_ir::IrPass;
         use crate::layout::normalize_delegate_io::IrNormalizeDelegateIOLayoutPass;
-        use crate::pipeline_config::LayoutMode;
         use fixtures::RANK4;
 
         const CHANNELS_LAST: [usize; 4] = [0, 2, 3, 1];
@@ -516,7 +458,6 @@ mod tests {
                 &mut region,
                 Some(&stashed_parent),
                 &BTreeMap::new(),
-                LayoutMode::Explicit,
             ) > 0
         );
         assert_eq!(region.node_shape(arg), Some(RANK4.as_slice()));

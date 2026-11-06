@@ -134,11 +134,12 @@ passes at their ArmPassManager positions, which
 Python passes on captured graphs in `tests/fixtures/layout_replay/` and
 compares the results.
 
-RETAB's earlier model stays selectable with `RETAB_LAYOUT=dim_order` until it
-is deleted (APU-162). It records a channels-last `tosa_dim_order` in node
-metadata (`IrToTosaMemoryFormatPass`, with layout islands) that the serializer
-applies, and `serialize/transpose_peephole.rs` cleans up the TRANSPOSEs it
-leaves.
+RETAB's earlier model, which recorded a channels-last `tosa_dim_order` in node
+metadata for the serializer to apply, no longer runs (APU-162). Its serializer
+side is dead code until it is deleted: the branches that
+`Graph::is_explicit_layout` (always true) switches off,
+`serialize/output_layout.rs`, `serialize/transpose_peephole.rs`, and the
+`tosa_dim_order` readers in ingest and the serializer.
 
 ## Metadata and constants
 

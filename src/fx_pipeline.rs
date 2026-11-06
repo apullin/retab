@@ -15,7 +15,7 @@ use crate::fx_remove_noop_ir;
 use crate::fx_replace_inf_values_ir;
 use crate::fx_replace_scalar_with_tensor_ir;
 use crate::fx_rewrite_squeeze_ir;
-use crate::pipeline_config::{LayoutMode, PipelineConfig, SoftmaxDecompositionConfig};
+use crate::pipeline_config::{PipelineConfig, SoftmaxDecompositionConfig};
 
 /// Build the lowering pipeline over the persistent IrGraph.
 pub fn build_main_pipeline(config: &PipelineConfig) -> Vec<crate::fx_ir::PipelineStep> {
@@ -78,7 +78,6 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         // so the spec flag alone decides. U55 subsets never set it.
         Ir(Box::new(crate::fx_fold_qdq_ir::IrFoldQdqPass {
             preserve_partial_binary_tensor_qdq: config.support_float,
-            control_flow_lists_take_first_qparam: true,
         })),
         Ir(Box::new(
             crate::fx_fuse_consecutive_clamps_ir::IrFuseConsecutiveClampsPass,
@@ -242,15 +241,11 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         // -- ATen -> TOSA --
         // Splits rank-5 depthwise convs too (APU-135 P2, design §4.2-P).
         Ir(Box::new(
-            crate::fx_decompose_grouped_conv_ir::IrDecomposeGroupedConvPass {
-                layout: LayoutMode::Explicit,
-            },
+            crate::fx_decompose_grouped_conv_ir::IrDecomposeGroupedConvPass,
         )),
         // Slices as rc4 does (APU-135 P2, design §4.2-P).
         Ir(Box::new(
-            crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass {
-                layout: LayoutMode::Explicit,
-            },
+            crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass,
         )),
         // APM:698, then ComputeConstantOpsAOT and FuseConstantArgs (APM:699-700), which
         // also materialize the avg-pool zero points.
@@ -306,9 +301,7 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         // the data alone, sent the multihead attention op tests to stock
         // (`fx_fuse_equal_placeholders_ir`).
         Effectful(Box::new(
-            crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEffectPass {
-                layout: LayoutMode::Explicit,
-            },
+            crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEffectPass,
         )),
         Ir(Box::new(fx_remove_noop_ir::IrRemoveNoopPass)),
         Ir(Box::new(
@@ -345,9 +338,7 @@ fn phase6_steps(config: &PipelineConfig, in_region: bool) -> Vec<crate::fx_ir::P
         )),
         // RewriteMatmulPass (APM:724).
         Ir(Box::new(
-            crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass {
-                layout: LayoutMode::Explicit,
-            },
+            crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass,
         )),
         Ir(Box::new(
             crate::layout::fuse_view_copy::IrFuseViewCopyTransformPass,
@@ -771,40 +762,15 @@ mod tests {
         }
     }
 
-    /// APU-157: explicit mode used to merge as dim-order mode does, on the data
-    /// alone and before phase 6. That hands the Linear's bias users the int64 zero
-    /// point, and IrRewriteConv sends the graph to stock, as it did the multihead
+    /// APU-157: the pipeline lowers that Linear from the postprocessing block on
+    /// without a fallback, and its TOSA convolution ends up reading the int32 zero
+    /// constant, as rc4's reads `b__zero_point_1_common`. The int64 zero point stays
+    /// apart, as rc4's `b__zero_point_0_common` does. Merging equal placeholders on
+    /// their data alone, before phase 6, handed the Linear's bias users the int64 zero
+    /// point, and IrRewriteConv sent the graph to stock, as it did the multihead
     /// attention op tests.
     #[test]
-    fn merging_on_the_data_before_rewrite_conv_hands_the_linear_an_int64_bias() {
-        use crate::fx_fuse_equal_placeholders_ir::IrFuseEqualPlaceholdersEffectPass;
-        use crate::fx_ir::{EffectfulIrPass, IrPass};
-        use crate::layout::rewrite_conv::IrRewriteConvPass;
-
-        let mut graph = linear_with_a_zero_bias();
-        IrFuseEqualPlaceholdersEffectPass {
-            layout: LayoutMode::DimOrder,
-        }
-        .run(&mut graph);
-        crate::stock_fallback::take();
-        IrRewriteConvPass {
-            is_u55_subset: false,
-            in_region: false,
-        }
-        .run(&mut graph);
-        let reason = crate::stock_fallback::take().expect("a stock fallback");
-        assert!(
-            reason.contains("a torch.int64 bias for a torch.int32 accumulator"),
-            "{reason}"
-        );
-    }
-
-    /// Explicit mode lowers that Linear from the postprocessing block on (where
-    /// dim-order mode merges) without a fallback, and its TOSA convolution ends up
-    /// reading the int32 zero constant, as rc4's reads `b__zero_point_1_common`.
-    /// The int64 zero point stays apart, as rc4's `b__zero_point_0_common` does.
-    #[test]
-    fn explicit_mode_keeps_an_int64_zero_point_off_a_linears_zero_bias() {
+    fn keeps_an_int64_zero_point_off_a_linears_zero_bias() {
         let config = PipelineConfig::from_tosa_spec("TOSA-1.0+INT");
         let steps = lowering_steps(true, &config);
         let names = pass_names(lowering_steps(true, &config));

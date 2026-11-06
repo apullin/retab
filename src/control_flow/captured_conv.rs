@@ -16,10 +16,7 @@
 //! This runs after the boundary contracts have created those RESCALEs. The branch
 //! inputs stay, unused, so the branch keeps the cond's operand list.
 //!
-//! Two variants, one per layout model. Dim-order mode
-//! (`rewrite_captured_conv_operands`) matches aten convs, whose weight reaches them
-//! through the dim-order layout pass's TRANSPOSE. Explicit mode
-//! (`rewrite_explicit_captured_conv_operands`, APU-135 S8) matches the TOSA convs
+//! `rewrite_explicit_captured_conv_operands` (APU-135 S8) matches the TOSA convs
 //! IrRewriteConv makes, whose captured weight it gave rc4's layout change as runtime
 //! `permute_copy`/`view_copy` ops; it applies them to the data, and sends what rc4
 //! raises for to stock.
@@ -281,19 +278,7 @@ struct BiasRewrite {
     int48: bool,
 }
 
-fn plan_bias_rewrite(
-    parent: &IrGraph,
-    submodules: &BTreeMap<String, StashedPipeline>,
-    invocations: &BTreeMap<String, Invocation>,
-    region: &str,
-    conv: &IrNode,
-) -> Option<BiasRewrite> {
-    let bias = ConvArgs::parse(conv)?.bias?;
-    plan_captured_bias_rewrite(parent, submodules, invocations, region, conv, bias, false)
-}
-
-/// `_rewrite_control_flow_bias` for `conv`'s bias `bias`, an aten or a TOSA
-/// convolution's.
+/// `_rewrite_control_flow_bias` for `conv`'s bias `bias`, a TOSA convolution's.
 fn plan_captured_bias_rewrite(
     parent: &IrGraph,
     submodules: &BTreeMap<String, StashedPipeline>,
@@ -334,7 +319,7 @@ fn plan_captured_bias_rewrite(
     })
 }
 
-fn apply_bias_rewrite(ir: &mut IrGraph, rewrite: BiasRewrite, chain: ChainOps) {
+fn apply_bias_rewrite(ir: &mut IrGraph, rewrite: BiasRewrite) {
     let channels = rewrite.values.len() as i64;
     let mut meta = NodeMeta::tensor(vec![channels], "torch.int32");
     if rewrite.int48 {
@@ -360,181 +345,27 @@ fn apply_bias_rewrite(ir: &mut IrGraph, rewrite: BiasRewrite, chain: ChainOps) {
         },
     });
     ir.set_arg(rewrite.conv, ConvArgs::BIAS_INDEX, IrArg::Node(constant));
-    erase_dead_operand_chain(ir, rewrite.old_bias, chain);
-}
-
-/// The layout ops a replaced operand's chain holds besides RESCALEs and views:
-/// dim-order mode's TOSA TRANSPOSE, and explicit mode's `permute_copy` too,
-/// which IrRewriteConv puts on a captured weight (design §4.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChainOps {
-    DimOrder,
-    Explicit,
+    erase_dead_operand_chain(ir, rewrite.old_bias);
 }
 
 /// Erase the layout ops and RESCALEs that fed a replaced conv operand, back to the
-/// first node something else still uses. The branch input itself stays.
-fn erase_dead_operand_chain(ir: &mut IrGraph, start: NodeId, chain: ChainOps) {
+/// first node something else still uses: views, TRANSPOSEs and the `permute_copy`
+/// IrRewriteConv puts on a captured weight (design §4.3). The branch input itself
+/// stays.
+fn erase_dead_operand_chain(ir: &mut IrGraph, start: NodeId) {
     let mut dead = Some(start);
     while let Some(id) = dead {
         let node = ir.node(id);
         let removable = node.is_rescale()
             || is_view_like_target(&node.target)
             || is_tosa_transpose_target(&node.target)
-            || (chain == ChainOps::Explicit && is_permute_target(&node.target));
+            || is_permute_target(&node.target);
         if !removable || !ir.live_user_ids(id).is_empty() {
             break;
         }
         dead = node.first_node_arg();
         ir.erase(id);
     }
-}
-
-struct WeightRewrite {
-    region: String,
-    conv: NodeId,
-    old_weight: NodeId,
-    name: String,
-    /// The captured constant, reshaped to the weight's logical (OIHW) shape.
-    data: TensorData,
-    /// The physical layout: the TRANSPOSE the branch ran on the weight, or the
-    /// operand's own dim order when it had none.
-    dim_order: Option<Vec<usize>>,
-    /// The boundary RESCALEs to re-apply, outermost first.
-    rescales: Vec<BoundaryRescale>,
-}
-
-/// Upstream `_rewrite_weight` for a weight a cond branch captures. In the branch the
-/// conv reads `TRANSPOSE(reshape*(RESCALE*(branch input)))`, where the reshape is the
-/// conv1d unsqueeze and the TRANSPOSE the layout change to OHWI.
-fn plan_weight_rewrite(
-    parent: &IrGraph,
-    submodules: &BTreeMap<String, StashedPipeline>,
-    invocations: &BTreeMap<String, Invocation>,
-    region: &str,
-    conv: &IrNode,
-) -> Option<WeightRewrite> {
-    let ir = &submodules.get(region)?.0;
-    let args = ConvArgs::parse(conv)?;
-    // Plain convs only. The serializer lays out depthwise and transposed weights
-    // differently, and reads a conv with one input channel as depthwise.
-    if args.groups != 1 || args.transposed {
-        return None;
-    }
-    let operand = ir.node(args.weight);
-    let (logical, dim_order) = if is_tosa_transpose_target(&operand.target) {
-        let perm = operand.arg_int_list(1)?;
-        let order = perm
-            .iter()
-            .map(|&axis| usize::try_from(axis).ok())
-            .collect::<Option<Vec<_>>>()?;
-        (operand.first_node_arg()?, Some(order))
-    } else {
-        (args.weight, operand.meta.cloned_tosa_dim_order())
-    };
-    let shape = ir.node(logical).meta.val_shape()?.to_vec();
-    if shape.get(1).is_none_or(|&in_channels| in_channels < 2)
-        || dim_order.as_ref().is_some_and(|order| order.len() != shape.len())
-    {
-        return None;
-    }
-    let mut source = logical;
-    while is_view_like_target(&ir.node(source).target) {
-        source = ir.node(source).first_node_arg()?;
-    }
-    let source_node = ir.node(source);
-    if source_node.tensor.is_some()
-        || !(source_node.is_rescale() || source_node.op == NodeOp::Placeholder)
-    {
-        return None;
-    }
-    let captured = resolve_captured_constant(parent, submodules, invocations, region, source)?;
-    let numel = usize::try_from(shape.iter().product::<i64>()).ok()?;
-    if numel * captured.data.dtype.storage_size_bytes() != captured.data.data.len() {
-        return None;
-    }
-    let mut rescales = captured.rescales;
-    rescales.reverse();
-    Some(WeightRewrite {
-        region: region.to_string(),
-        conv: conv.id,
-        old_weight: args.weight,
-        name: format!("{}_captured_weight", conv.name),
-        data: TensorData {
-            data: captured.data.data,
-            shape,
-            dtype: captured.data.dtype,
-        },
-        dim_order,
-        rescales,
-    })
-}
-
-/// The new constant has the logical shape and the TRANSPOSE as its dim order, so the
-/// serializer writes it in OHWI. The re-applied RESCALEs keep that shape and order, as
-/// elementwise ops on an NHWC tensor do, and the conv reads the last one.
-fn apply_weight_rewrite(ir: &mut IrGraph, rewrite: WeightRewrite) {
-    let shape = rewrite.data.shape.clone();
-    let mut constant_meta = NodeMeta::tensor(shape.clone(), rewrite.data.dtype.torch_str());
-    constant_meta.replace_tosa_dim_order(rewrite.dim_order.clone());
-    let constant = ir.add_node(
-        NodeOp::GetAttr,
-        rewrite.name.clone(),
-        rewrite.name.clone(),
-        Vec::new(),
-        constant_meta,
-    );
-    ir.node_mut(constant).tensor = Some(NodeTensor {
-        source: TensorSource::GraphModuleAttr,
-        data: rewrite.data,
-    });
-    let mut weight = constant;
-    for (index, rescale) in rewrite.rescales.into_iter().enumerate() {
-        let mut args = rescale.args;
-        args[0] = IrArg::Node(weight);
-        let mut meta = rescale.meta.cloned_with_same_dtype_or(shape.clone(), "torch.int8");
-        meta.replace_tosa_dim_order(rewrite.dim_order.clone());
-        weight = ir.add_call_function(
-            format!("{}_rescale{index}", rewrite.name),
-            rescale.target,
-            args,
-            meta,
-        );
-    }
-    ir.set_arg(rewrite.conv, ConvArgs::WEIGHT_INDEX, IrArg::Node(weight));
-    erase_dead_operand_chain(ir, rewrite.old_weight, ChainOps::DimOrder);
-}
-
-/// Replace every captured conv weight and boundary-rescaled conv bias in the cond
-/// branches with branch-local constants. Returns the number of rewritten operands.
-pub(crate) fn rewrite_captured_conv_operands(
-    parent: &IrGraph,
-    submodules: &mut BTreeMap<String, StashedPipeline>,
-) -> u32 {
-    let invocations = cond_invocations(parent, submodules);
-    let mut biases = Vec::new();
-    let mut weights = Vec::new();
-    for (region, (ir, _)) in submodules.iter() {
-        for conv in ir
-            .live_nodes()
-            .filter(|node| ConvArgs::parse(node).is_some())
-        {
-            biases.extend(plan_bias_rewrite(parent, submodules, &invocations, region, conv));
-            weights.extend(plan_weight_rewrite(parent, submodules, &invocations, region, conv));
-        }
-    }
-    let count = (biases.len() + weights.len()) as u32;
-    for rewrite in biases {
-        if let Some((ir, _)) = submodules.get_mut(&rewrite.region) {
-            apply_bias_rewrite(ir, rewrite, ChainOps::DimOrder);
-        }
-    }
-    for rewrite in weights {
-        if let Some((ir, _)) = submodules.get_mut(&rewrite.region) {
-            apply_weight_rewrite(ir, rewrite);
-        }
-    }
-    count
 }
 
 /// The TOSA convolutions explicit mode's IrRewriteConv makes. Their weight is
@@ -756,7 +587,7 @@ fn apply_explicit_weight_rewrite(ir: &mut IrGraph, rewrite: ExplicitWeightRewrit
         weight = ir.add_call_function(rescale_name, rescale.target, args, meta);
     }
     ir.set_arg(rewrite.conv, ConvArgs::WEIGHT_INDEX, IrArg::Node(weight));
-    erase_dead_operand_chain(ir, rewrite.old_weight, ChainOps::Explicit);
+    erase_dead_operand_chain(ir, rewrite.old_weight);
 }
 
 /// Critique A10: rc4's TOSA convolution kernels require an int32 bias for a
@@ -921,7 +752,7 @@ pub(crate) fn rewrite_explicit_captured_conv_operands(
     let count = (biases.len() + weights.len()) as u32;
     for rewrite in biases {
         if let Some((ir, _)) = submodules.get_mut(&rewrite.region) {
-            apply_bias_rewrite(ir, rewrite, ChainOps::Explicit);
+            apply_bias_rewrite(ir, rewrite);
         }
     }
     for rewrite in weights {
@@ -1490,15 +1321,12 @@ mod tests {
     /// `apply_control_flow_contracts`, which returns the request for it to raise
     /// as `RETAB_STOCK_FALLBACK:`; nothing after it would read the request.
     #[test]
-    fn explicit_contracts_return_captured_convs_fallback_requests() {
-        use crate::pipeline_config::LayoutMode;
-
+    fn contracts_return_captured_convs_fallback_requests() {
         crate::stock_fallback::take();
         let mut parent = parent_graph(WHILE_LOOP, ["loop_cond", "loop_body"]);
         let mut submodules = regions(vec![("loop_body", conv1d_region(Some(4.0), Some(7.0), I8))]);
-        let reason =
-            crate::apply_control_flow_contracts(&mut parent, &mut submodules, LayoutMode::Explicit)
-                .expect_err("a stock fallback");
+        let reason = crate::apply_control_flow_contracts(&mut parent, &mut submodules)
+            .expect_err("a stock fallback");
         assert!(
             reason.starts_with(
                 "captured_conv: region loop_body: weight conv_weight_ohwi of conv_tosa is \
@@ -1514,7 +1342,7 @@ mod tests {
             conv1d_region(Some(4.0), Some(7.0), I8),
         )]);
         assert_eq!(
-            crate::apply_control_flow_contracts(&mut parent, &mut submodules, LayoutMode::Explicit),
+            crate::apply_control_flow_contracts(&mut parent, &mut submodules),
             Ok(())
         );
         let region = &submodules["true_graph"].0;

@@ -20,7 +20,6 @@ use crate::fx_ir::{
 use crate::graph::ir::{Arg, DType as IrDType, NodeMeta, OpTarget, OpType, TensorInfo};
 use crate::graph::Graph;
 use crate::lowering_effects::LoweringInputKind;
-use crate::pipeline_config::LayoutMode;
 use crate::store::{TensorData, TensorStore};
 use crate::test_ir::{call, call_default, output, placeholder};
 use smallvec::smallvec;
@@ -281,11 +280,10 @@ impl ConvCase {
 // Ingest, serialization and lookups
 // ---------------------------------------------------------------------------
 
-/// Ingest `ir` as `ingest_and_serialize` does: convert, set the layout, finalize.
-fn ingest(ir: &IrGraph, layout: LayoutMode) -> (Graph, TensorStore) {
+/// Ingest `ir` as `ingest_and_serialize` does: convert, then finalize.
+fn ingest(ir: &IrGraph) -> (Graph, TensorStore) {
     let mut store = TensorStore::new();
     let mut graph = crate::ingest::from_ir::graph_from_ir(ir, &mut store);
-    graph.layout = layout;
     crate::ingest::finalize::finalize_converted_graph(&mut graph);
     graph.rebuild_user_lists();
     (graph, store)
@@ -298,13 +296,9 @@ fn try_serialize_graph(graph: Graph, store: &TensorStore) -> Result<SerializedGr
     Ok(regions.remove(0).items)
 }
 
-fn serialize(ir: &IrGraph, layout: LayoutMode) -> SerializedGraphItems {
-    let (graph, store) = ingest(ir, layout);
-    try_serialize_graph(graph, &store).unwrap()
-}
-
 fn serialize_explicit(ir: &IrGraph) -> SerializedGraphItems {
-    serialize(ir, LayoutMode::Explicit)
+    let (graph, store) = ingest(ir);
+    try_serialize_graph(graph, &store).unwrap()
 }
 
 fn tensor<'a>(items: &'a SerializedGraphItems, name: &str) -> &'a TosaTensor {
@@ -480,7 +474,7 @@ fn conv3d_is_an_int32_accumulator_feeding_its_rescale() {
         activation: INT8,
     };
     let ir = case.build();
-    let (graph, store) = ingest(&ir, LayoutMode::Explicit);
+    let (graph, store) = ingest(&ir);
     let conv = graph
         .order
         .iter()
@@ -888,7 +882,7 @@ fn int8_bilinear_resize_stays_int32_into_its_rescale() {
         INT32,
         Some(1.0 / 16.0),
     );
-    let (graph, store) = ingest(&ir, LayoutMode::Explicit);
+    let (graph, store) = ingest(&ir);
     let resize = graph
         .order
         .iter()
@@ -978,7 +972,7 @@ fn aten_spatial_ops_send_explicit_graphs_to_stock() {
             INT8,
         );
         output(&mut ir, op);
-        let (graph, store) = ingest(&ir, LayoutMode::Explicit);
+        let (graph, store) = ingest(&ir);
         let error = try_serialize_graph(graph, &store).err().unwrap();
         assert!(
             error.starts_with("RETAB_STOCK_FALLBACK: aten spatial op in explicit layout: 'op' ("),
@@ -988,7 +982,6 @@ fn aten_spatial_ops_send_explicit_graphs_to_stock() {
 
     // No aten string maps to DepthwiseConv2d, so check it on a serializer graph.
     let mut graph = Graph::new();
-    graph.layout = LayoutMode::Explicit;
     graph.create_node(
         OpType::CallFunction,
         OpTarget::DepthwiseConv2d,
@@ -1003,8 +996,9 @@ fn aten_spatial_ops_send_explicit_graphs_to_stock() {
 }
 
 #[test]
-fn explicit_mode_keeps_the_layout_transposes_the_peephole_would_cancel() {
-    // G5: dim-order mode cancels the inverse pair after emission.
+fn explicit_mode_keeps_the_layout_transposes_a_peephole_would_cancel() {
+    // G5: no post-emission peephole cancels the inverse pair; the IR's layout passes own
+    // the TRANSPOSEs.
     let mut ir = IrGraph::empty();
     let x = placeholder(&mut ir, "x", [1, 2, 3, 4], FLOAT32);
     let nhwc = permute(&mut ir, "nhwc", x, &[0, 2, 3, 1], FLOAT32);
@@ -1018,8 +1012,6 @@ fn explicit_mode_keeps_the_layout_transposes_the_peephole_would_cancel() {
         FLOAT32,
     );
     output(&mut ir, neg);
-    let dim_order = serialize(&ir, LayoutMode::DimOrder);
-    assert!(ops_of(&dim_order, Op::Transpose).is_empty());
     let explicit = serialize_explicit(&ir);
     assert_eq!(ops_of(&explicit, Op::Transpose).len(), 2);
     assert_eq!(single_op(&explicit, Op::Negate).inputs[0], "nchw");
@@ -1027,8 +1019,8 @@ fn explicit_mode_keeps_the_layout_transposes_the_peephole_would_cancel() {
 
 #[test]
 fn explicit_main_outputs_get_no_inferred_layout_transpose() {
-    // G4: dim-order mode infers an output TRANSPOSE when a rank-4 output's shape and
-    // val disagree; in explicit mode IrNormalizeDelegateIOLayout owns the boundary.
+    // G4: no output TRANSPOSE is inferred when a rank-4 output's shape and val disagree;
+    // IrNormalizeDelegateIOLayout owns the boundary.
     let mut graph = Graph::new();
     let mut input = |name: &str| {
         graph.create_node(
@@ -1058,9 +1050,6 @@ fn explicit_main_outputs_get_no_inferred_layout_transpose() {
         "output".into(),
     );
     graph.inputs = vec![x, y];
-    let dim_order = try_serialize_graph(graph.clone(), &TensorStore::new()).unwrap();
-    assert_eq!(dim_order.output_names, ["add_output_layout"]);
-    graph.layout = LayoutMode::Explicit;
     let explicit = try_serialize_graph(graph, &TensorStore::new()).unwrap();
     assert_eq!(explicit.output_names, ["add"]);
     assert!(ops_of(&explicit, Op::Transpose).is_empty());
@@ -1068,8 +1057,8 @@ fn explicit_main_outputs_get_no_inferred_layout_transpose() {
 
 #[test]
 fn rank4_getitems_and_tosa_convs_keep_their_val_shapes() {
-    // B2: with no dim order, dim-order mode reads rank-4 getitems and TOSA conv/pool vals
-    // as logical NCHW and reorders them to [d0, d2, d3, d1].
+    // B2: rank-4 getitems and TOSA conv/pool vals are TOSA shapes, not logical NCHW ones
+    // to reorder to [d0, d2, d3, d1].
     let mut graph = Graph::new();
     let x = graph.create_node(
         OpType::Placeholder,
@@ -1101,21 +1090,15 @@ fn rank4_getitems_and_tosa_convs_keep_their_val_shapes() {
         "pool".into(),
     );
     let store = TensorStore::new();
-    for (layout, expected) in [
-        (LayoutMode::DimOrder, vec![1, 6, 5, 8]),
-        (LayoutMode::Explicit, vec![1, 8, 6, 5]),
-    ] {
-        graph.layout = layout;
-        visitors::shape_utils::clear_shape_cache();
-        for id in [getitem, pool] {
-            let node = graph.node(id).unwrap();
-            assert_eq!(
-                visitors::actual_tensor_shape(&graph, &store, node),
-                expected,
-                "{layout:?} {}",
-                node.name
-            );
-        }
+    visitors::shape_utils::clear_shape_cache();
+    for id in [getitem, pool] {
+        let node = graph.node(id).unwrap();
+        assert_eq!(
+            visitors::actual_tensor_shape(&graph, &store, node),
+            vec![1, 8, 6, 5],
+            "{}",
+            node.name
+        );
     }
 }
 
@@ -1156,7 +1139,6 @@ fn explicit_mode_drops_the_singleton_transposes_of_select_and_sum() {
 fn explicit_invariant_check_reports_dim_orders_and_stale_vals() {
     // D1, run under RETAB_DEBUG in explicit mode.
     let mut graph = Graph::new();
-    graph.layout = LayoutMode::Explicit;
     let x = graph.create_node(
         OpType::Placeholder,
         OpTarget::Other("x".into()),
@@ -1226,74 +1208,6 @@ fn assert_transposes_consistent(items: &SerializedGraphItems) {
 }
 
 #[test]
-fn explicit_mode_does_not_trust_dim_order_transpose_vals() {
-    // RETAB_LAYOUT=explicit still runs the dim-order pipeline until S6, and the
-    // control-flow contracts keep writing dim orders in explicit mode until S8. For
-    // `torch.cond(x.sum() > 0, flip, roll, [x])` on an int8 [1, 2, 3, 4] input lowered
-    // with TOSA-1.0+INT+cf, RETAB_FROM_IR_DEBUG shows this main graph at ded4277:
-    //   value_input_layout = TRANSPOSE(value, [0, 2, 3, 1])  val [1, 3, 4, 2], order [0, 2, 3, 1]
-    //   getitem = cond[0]                                     val [1, 2, 3, 4], order [0, 2, 3, 1]
-    //   getitem_output_layout = TRANSPOSE(getitem, [0, 3, 1, 2]) val [1, 4, 2, 3], order [0, 1, 2, 3]
-    // The last val follows dim-order semantics (the logical input permuted), not the
-    // TOSA shape. Trusting it declared the TRANSPOSE [1, 4, 2, 3] from a [1, 3, 4, 2]
-    // input, which the TOSA reference model rejects ("Invalid TOSA graph"); dim-order mode
-    // emits a valid [1, 2, 3, 4]. Explicit mode now sends graphs that carry dim orders to
-    // stock (`reject_dim_orders`), and a TRANSPOSE's shape always comes from its input
-    // (`explicit_transposes_take_their_shape_from_their_input`). Either passes this test.
-    // A unary stands in for cond + getitem.
-    let mut ir = IrGraph::empty();
-    let value = placeholder(&mut ir, "value", [1, 2, 3, 4], FLOAT32);
-    ir.node_mut(value).meta.set_tosa_dim_order(vec![0, 1, 2, 3]);
-    let input_layout = call(
-        &mut ir,
-        "value_input_layout",
-        "backend.tosa.TRANSPOSE.default",
-        vec![IrArg::Node(value), list(&[0, 2, 3, 1])],
-        [1, 3, 4, 2],
-        FLOAT32,
-    );
-    ir.node_mut(input_layout)
-        .meta
-        .set_tosa_dim_order(vec![0, 2, 3, 1]);
-    let getitem = call(
-        &mut ir,
-        "getitem",
-        "aten.neg.default",
-        vec![IrArg::Node(input_layout)],
-        [1, 2, 3, 4],
-        FLOAT32,
-    );
-    ir.node_mut(getitem)
-        .meta
-        .set_tosa_dim_order(vec![0, 2, 3, 1]);
-    let output_layout = call(
-        &mut ir,
-        "getitem_output_layout",
-        "backend.tosa.TRANSPOSE.default",
-        vec![IrArg::Node(getitem), list(&[0, 3, 1, 2])],
-        [1, 4, 2, 3],
-        FLOAT32,
-    );
-    ir.node_mut(output_layout)
-        .meta
-        .set_tosa_dim_order(vec![0, 1, 2, 3]);
-    output(&mut ir, output_layout);
-
-    let dim_order = serialize(&ir, LayoutMode::DimOrder);
-    assert_transposes_consistent(&dim_order);
-    assert_eq!(
-        tensor(&dim_order, "getitem_output_layout").shape,
-        [1, 2, 3, 4]
-    );
-
-    let (graph, store) = ingest(&ir, LayoutMode::Explicit);
-    match try_serialize_graph(graph, &store) {
-        Err(error) => assert!(error.starts_with("RETAB_STOCK_FALLBACK:"), "{error}"),
-        Ok(explicit) => assert_transposes_consistent(&explicit),
-    }
-}
-
-#[test]
 fn explicit_transposes_take_their_shape_from_their_input() {
     // A TRANSPOSE's val is not its TOSA shape when dim-order logic made it: it permutes the
     // logical input ([1, 2, 3, 4] here) rather than the [1, 3, 4, 2] the TRANSPOSE reads.
@@ -1310,7 +1224,7 @@ fn explicit_transposes_take_their_shape_from_their_input() {
         FLOAT32,
     );
     output(&mut ir, transpose);
-    let (graph, store) = ingest(&ir, LayoutMode::Explicit);
+    let (graph, store) = ingest(&ir);
     visitors::shape_utils::clear_shape_cache();
     let error = check_explicit_layout_invariants("main", &graph, &store).unwrap_err();
     assert!(
@@ -1328,8 +1242,7 @@ fn explicit_transposes_take_their_shape_from_their_input() {
 fn explicit_graphs_carrying_dim_orders_go_to_stock() {
     // Explicit graphs keep their layout in vals. A dim order means dim-order logic laid out
     // the graph: before S8 the control-flow contracts marked the rank-4 users of a cond
-    // NHWC in either mode (a neg stands in for the cond's getitem), and before S6
-    // RETAB_LAYOUT=explicit ran IrToTosaMemoryFormat. The explicit gates switch off the
+    // NHWC (a neg stands in for the cond's getitem). The explicit gates switch off the
     // dim-order rules such a graph needs, so it goes to stock in every build, not only
     // under RETAB_DEBUG (D1).
     let build = |spatial: bool| {
@@ -1355,16 +1268,15 @@ fn explicit_graphs_carrying_dim_orders_go_to_stock() {
         ir
     };
 
-    let (graph, store) = ingest(&build(false), LayoutMode::Explicit);
+    let (graph, store) = ingest(&build(false));
     assert_eq!(
         try_serialize_graph(graph, &store).err().unwrap(),
         "RETAB_STOCK_FALLBACK: dim order in explicit layout: 'getitem' (Neg) in region 'main' \
          has tosa_dim_order [0, 2, 3, 1]"
     );
 
-    // An aten spatial op is reported first (X5): until S6 every explicit graph carries the
-    // dim orders IrToTosaMemoryFormat writes.
-    let (graph, store) = ingest(&build(true), LayoutMode::Explicit);
+    // An aten spatial op is reported first (X5).
+    let (graph, store) = ingest(&build(true));
     let error = try_serialize_graph(graph, &store).err().unwrap();
     assert!(
         error.starts_with("RETAB_STOCK_FALLBACK: aten spatial op in explicit layout: "),
@@ -1426,7 +1338,6 @@ fn a_split_16_bit_table_serializes_its_table_alone() {
 
     let mut store = TensorStore::new();
     let mut graph = crate::ingest::from_ir::graph_from_ir(&ir, &mut store);
-    graph.layout = LayoutMode::Explicit;
     crate::ingest::from_ir::apply_effects(&mut graph, &mut store, &effects);
     crate::ingest::finalize::finalize_converted_graph(&mut graph);
     graph.rebuild_user_lists();

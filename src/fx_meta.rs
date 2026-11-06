@@ -317,6 +317,7 @@ impl NodeMeta {
         self.val_dtype_or("torch.float32")
     }
 
+    #[cfg(test)]
     pub fn rank(&self) -> Option<usize> {
         self.tensor.as_ref().map(|v| v.rank())
     }

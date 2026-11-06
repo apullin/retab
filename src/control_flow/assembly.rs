@@ -106,16 +106,11 @@ fn ordered_regions(
     order
 }
 
-/// Convert one stashed region like the parent: in the parent's layout mode, which
-/// finalize depends on.
-fn ingest_region(
-    (ir, effects): &StashedPipeline,
-    layout: crate::pipeline_config::LayoutMode,
-) -> (Graph, TensorStore) {
+/// Convert one stashed region like the parent.
+fn ingest_region((ir, effects): &StashedPipeline) -> (Graph, TensorStore) {
     let mut sub_store = TensorStore::new();
     let mut sub_graph =
         crate::ingest::from_ir::graph_from_ir_preserve_placeholders(ir, &mut sub_store);
-    sub_graph.layout = layout;
     crate::ingest::from_ir::apply_effects_preserve_placeholders(
         &mut sub_graph,
         &mut sub_store,
@@ -130,9 +125,8 @@ pub(crate) fn append_subgraphs_from_ir(
     store: &mut TensorStore,
     parent_ir: &fx_ir::IrGraph,
     submodules: &BTreeMap<String, StashedPipeline>,
-    layout: crate::pipeline_config::LayoutMode,
 ) -> PyResult<()> {
-    try_append_subgraphs_from_ir(graphs, store, parent_ir, submodules, layout)
+    try_append_subgraphs_from_ir(graphs, store, parent_ir, submodules)
         .map_err(PyRuntimeError::new_err)
 }
 
@@ -143,7 +137,6 @@ pub(crate) fn try_append_subgraphs_from_ir(
     store: &mut TensorStore,
     parent_ir: &fx_ir::IrGraph,
     submodules: &BTreeMap<String, StashedPipeline>,
-    layout: crate::pipeline_config::LayoutMode,
 ) -> Result<(), String> {
     let (_, while_body_input_counts) = collect_region_metadata(parent_ir, submodules);
 
@@ -157,7 +150,7 @@ pub(crate) fn try_append_subgraphs_from_ir(
             ));
         };
 
-        let (mut sub_graph, mut sub_store) = ingest_region(stashed, layout);
+        let (mut sub_graph, mut sub_store) = ingest_region(stashed);
         if let Some(counts) = while_body_input_counts.get(&region).copied() {
             append_while_body_passthrough_outputs(&mut sub_graph, counts);
         }
@@ -238,13 +231,12 @@ mod tests {
     }
 
     #[test]
-    fn regions_are_ingested_in_the_parent_layout_mode() {
+    fn region_resizes_keep_their_int32_val_through_finalize() {
         use crate::graph::ir::{DType, OpTarget};
-        use crate::pipeline_config::LayoutMode;
         use crate::test_ir::{call, output, placeholder, qparam};
 
-        // An explicit-mode RESIZE keeps its int32 val through finalize despite the int8
-        // qparams it inherits, so its dtype shows which mode finalize ran in.
+        // A TOSA RESIZE keeps its int32 val through finalize despite the int8 qparams it
+        // inherits, as rc4's RewriteUpsamplePass types it.
         let mut region = IrGraph::empty();
         let x = placeholder(&mut region, "x", [1, 5, 5, 3], "torch.int8");
         let resize = call(
@@ -262,18 +254,12 @@ mod tests {
         output(&mut region, resize);
         let region = stash(region);
 
-        for (layout, resize_dtype) in [
-            (LayoutMode::DimOrder, DType::Int8),
-            (LayoutMode::Explicit, DType::Int32),
-        ] {
-            let (graph, _) = ingest_region(&region, layout);
-            assert_eq!(graph.layout, layout);
-            let resize = graph
-                .nodes
-                .values()
-                .find(|node| node.target == OpTarget::TosaResize)
-                .unwrap();
-            assert_eq!(resize.meta.val.dtype, resize_dtype, "{layout:?}");
-        }
+        let (graph, _) = ingest_region(&region);
+        let resize = graph
+            .nodes
+            .values()
+            .find(|node| node.target == OpTarget::TosaResize)
+            .unwrap();
+        assert_eq!(resize.meta.val.dtype, DType::Int32);
     }
 }
