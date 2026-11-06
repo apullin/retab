@@ -82,8 +82,16 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(
             crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass,
         )),
-        // TODO(P3, APU-160): explicit mode's IrFuseIdenticalInputTransforms (APM:591),
-        // design §1a.
+    ]);
+    if explicit {
+        // FuseIdenticalInputTransformsPass(exported_program) (APM:591), right before
+        // DecomposeLinear (APM:592); design §1a. rc4 runs the whole manager, with the
+        // edge program, on each region too (tosa/backend.py), so regions get it as well.
+        steps.push(Ir(Box::new(
+            crate::layout::fuse_identical_input_transforms::IrFuseIdenticalInputTransformsPass,
+        )));
+    }
+    steps.extend(vec![
         Ir(Box::new(crate::fx_decompose_flip_ir::IrDecomposeFlipPass)),
         Ir(Box::new(crate::fx_decompose_roll_ir::IrDecomposeRollPass)),
         Ir(Box::new(
@@ -456,8 +464,15 @@ fn explicit_phase6_steps(
         Ir(Box::new(
             crate::layout::fuse_view_copy::IrFuseViewCopyTransformPass,
         )),
-        // TODO(P3, APU-159): PropagateViewCopyPermuteDownPass (APM:726).
-        // TODO(P3, APU-159): PropagateViewCopyPermuteUpPass (APM:727).
+        // PropagateViewCopyPermuteDownPass(compile_spec, exported_program), then the
+        // Up pass (APM:726-727): the TOSA overrides, with RemovePermutesAroundElementwise-
+        // TosaOps as the driver's vertical fusion (APU-159).
+        Ir(Box::new(
+            crate::layout::propagate::IrPropagateViewCopyPermutePass::ARM_DOWN,
+        )),
+        Ir(Box::new(
+            crate::layout::propagate::IrPropagateViewCopyPermutePass::ARM_UP,
+        )),
         Ir(Box::new(crate::fx_rewrite_pad_ir::IrRewritePadPass)),
         Ir(Box::new(
             crate::layout::move_data_movement::IrMoveDataMovementOpsToSmallerDtypePass,
@@ -660,12 +675,14 @@ mod tests {
 
     /// rc4's phase-6 block (APM:715-749) as explicit mode builds it, in
     /// IrToTosaMemoryFormat's slot right after the first late IrRemoveNoop.
-    const EXPLICIT_PHASE6: [&str; 18] = [
+    const EXPLICIT_PHASE6: [&str; 20] = [
         "IrRewriteUpsample",
         "IrRewriteMaxPool2d",
         "IrRewriteConv",
         "IrRewriteMatmulRescale",
         "IrFuseViewCopyTransform",
+        "IrPropagateViewCopyPermuteDown",
+        "IrPropagateViewCopyPermuteUp",
         "IrRewritePad",
         "IrMoveDataMovementOpsToSmallerDtype",
         "IrMatchArgRanks",
@@ -708,6 +725,7 @@ mod tests {
                 }
                 for pass in [
                     "IrNormalizeDelegateIOLayout",
+                    "IrFuseIdenticalInputTransforms",
                     "IrDecomposeRound",
                     "IrDecomposeSqrt",
                     "IrDecomposeSign",
@@ -717,6 +735,8 @@ mod tests {
                     "IrRewriteMaxPool2d",
                     "IrRewriteConv",
                     "IrFuseViewCopyTransform",
+                    "IrPropagateViewCopyPermuteDown",
+                    "IrPropagateViewCopyPermuteUp",
                     "IrMoveDataMovementOpsToSmallerDtype",
                     "IrMatchArgRanks",
                     "IrRewriteHighRankSingletonPermute",
@@ -763,6 +783,24 @@ mod tests {
                     assert_eq!(names[0], "IrNormalizeDelegateIOLayout", "{spec}");
                     assert_eq!(count("IrNormalizeDelegateIOLayout"), 1, "{spec}");
                 }
+
+                // APM:586-592: FuseConsecutiveClamps, FuseDuplicateUsers, then
+                // FuseIdenticalInputTransforms right before DecomposeLinear (RETAB
+                // decomposes flip and roll there too).
+                let fold = position("IrFoldQdq");
+                assert_eq!(
+                    &names[fold + 1..fold + 7],
+                    [
+                        "IrFuseConsecutiveClamps",
+                        "IrFuseDuplicateUsers",
+                        "IrFuseIdenticalInputTransforms",
+                        "IrDecomposeFlip",
+                        "IrDecomposeRoll",
+                        "IrDecomposeLinear"
+                    ],
+                    "{spec}"
+                );
+                assert_eq!(count("IrFuseIdenticalInputTransforms"), 1, "{spec}");
 
                 // APM:611, :617 and :629: after the fold, before the scalar rewrite.
                 let round = position("IrDecomposeRound");
@@ -824,6 +862,9 @@ mod tests {
                     "IrRewriteMatmulRescale",
                     "IrRewriteUpsample",
                     "IrRewriteMaxPool2d",
+                    "IrPropagateViewCopyPermuteDown",
+                    "IrPropagateViewCopyPermuteUp",
+                    "IrMoveDataMovementOpsToSmallerDtype",
                     "IrDecomposePermuteForU55",
                     "IrRewriteAvgPool2d",
                 ] {
@@ -866,6 +907,7 @@ mod tests {
     fn explicit_mode_keeps_every_other_pass_of_dim_order_mode() {
         let explicit_only = [
             "IrNormalizeDelegateIOLayout",
+            "IrFuseIdenticalInputTransforms",
             "IrDecomposeRound",
             "IrDecomposeSqrt",
             "IrDecomposeSign",
@@ -876,6 +918,8 @@ mod tests {
             "IrRewriteMaxPool2d",
             "IrRewriteConv",
             "IrFuseViewCopyTransform",
+            "IrPropagateViewCopyPermuteDown",
+            "IrPropagateViewCopyPermuteUp",
             "IrMoveDataMovementOpsToSmallerDtype",
             "IrRewriteHighRankSingletonPermute",
             "IrCanonicalizeViewCopyPermute",
