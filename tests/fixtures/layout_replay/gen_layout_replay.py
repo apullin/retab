@@ -1838,31 +1838,6 @@ def undo_remove_getitem(graph: Captured, source: Captured) -> Captured:
         raise AssertionError(f"{len(pools)} max_pool2d nodes, {len(pairs)} source pairs")
     new_nodes: list[DNode] = []
     remap: dict[int, int] = {}
-    for index, node in enumerate(graph.nodes):
-        if index not in pools:
-            remap[index] = len(new_nodes)
-            new_nodes.append(node.copy())
-            continue
-        pool_source, getitem_source = pairs[pools.index(index)]
-        pool = node.copy()
-        pool.target = "aten.max_pool2d_with_indices.default"
-        dims = ", ".join(map(str, node.shape))
-        pool.val = f"({node.val}, torch.int64[{dims}])"
-        pool.shape = None
-        pool.dim_order = None
-        pool.qin = pool_source.qin
-        pool.qout = pool_source.qout
-        new_nodes.append(pool)
-        getitem = DNode("call_function", f"{node.name}_getitem")
-        getitem.target = "<built-in function getitem>"
-        getitem.args = [Ref(len(new_nodes) - 1), 0]
-        getitem.val = node.val
-        getitem.shape = node.shape
-        getitem.dim_order = node.dim_order
-        getitem.qin = getitem_source.qin
-        getitem.qout = getitem_source.qout
-        remap[index] = len(new_nodes)
-        new_nodes.append(getitem)
 
     def renumber(arg):
         if isinstance(arg, Ref):
@@ -1871,11 +1846,34 @@ def undo_remove_getitem(graph: Captured, source: Captured) -> Captured:
             return [renumber(a) for a in arg]
         return arg
 
-    for node in new_nodes:
-        if node.target == "<built-in function getitem>" and node.name.endswith("_getitem"):
-            continue
+    # A node only reads earlier nodes, so its references are mapped already.
+    for index, node in enumerate(graph.nodes):
+        node = node.copy()
         node.args = renumber(node.args)
         node.kwargs = {k: renumber(v) for k, v in node.kwargs.items()}
+        if index not in pools:
+            remap[index] = len(new_nodes)
+            new_nodes.append(node)
+            continue
+        pool_source, getitem_source = pairs[pools.index(index)]
+        getitem = DNode("call_function", f"{node.name}_getitem")
+        getitem.target = "<built-in function getitem>"
+        getitem.args = [Ref(len(new_nodes)), 0]
+        getitem.val = node.val
+        getitem.shape = node.shape
+        getitem.dim_order = node.dim_order
+        getitem.qin = getitem_source.qin
+        getitem.qout = getitem_source.qout
+        pool = node
+        pool.target = "aten.max_pool2d_with_indices.default"
+        pool.val = f"({getitem.val}, torch.int64[{', '.join(map(str, getitem.shape))}])"
+        pool.shape = None
+        pool.dim_order = None
+        pool.qin = pool_source.qin
+        pool.qout = pool_source.qout
+        new_nodes.append(pool)
+        remap[index] = len(new_nodes)
+        new_nodes.append(getitem)
     return Captured(new_nodes, renumber(graph.output))
 
 
@@ -2545,22 +2543,22 @@ def pipeline_case_bodies(spec: PipelineSpec, case: ModelCase, cache: LoweringCac
     bodies = []
     for run, (before, after) in enumerate(zip(befores, afters)):
         name = case.name if len(befores) == 1 else f"{case.name}_run{run}"
-        for graph in (before,):
-            for node in graph.nodes:
-                if node.data is not None and node.data.startswith("sha256:"):
-                    raise AssertionError(
-                        f"{spec.name}/{name}: before-graph constant {node.name} is over "
-                        f"{DATA_HEX_LIMIT} bytes, so a replay can't import it"
-                    )
+        for node in before.nodes:
+            if node.data is not None and node.data.startswith("sha256:"):
+                raise AssertionError(
+                    f"{spec.name}/{name}: before-graph constant {node.name} is over "
+                    f"{DATA_HEX_LIMIT} bytes, so a replay can't import it"
+                )
         variants = [(name, before)]
         if spec.with_indices:
             if len(sources) != len(befores):
                 raise AssertionError(f"{name}: no RemoveGetItemPass capture to undo")
             variants.append((f"{name}_with_indices", undo_remove_getitem(before, sources[run])))
         after_lines = after.lines()
+        # The variants share rc4's flag: whether the pass changed its graph.
+        modified = before.lines() != after_lines
         for variant, graph in variants:
             before_lines = graph.lines()
-            modified = before.lines() != after_lines
             lines = ["before", *before_lines, f"after modified={str(modified).lower()}"]
             if after_lines == before_lines:
                 lines[-1] += " same"
