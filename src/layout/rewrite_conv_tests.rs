@@ -901,11 +901,30 @@ fn make_region_constant(graph: &mut IrGraph, id: NodeId) {
     node.tensor.as_mut().expect("a constant").source = TensorSource::GraphModuleAttr;
 }
 
-/// Every region conv falls back until S8 (see `control_flow_hazard`), even one
-/// whose weight and bias are region constants (`get_attr` nodes, design F4),
-/// and leaves the region as it was.
+/// Make operand `index` of `conv` a value the region computes, `neg` of the
+/// operand, which neither a region constant nor a captured operand is: rc4's
+/// `_resolve_control_flow_constant` raises for it (RCP:243-251).
+fn compute_in_region(graph: &mut IrGraph, conv: NodeId, index: usize) {
+    let operand = arg(graph, conv, index);
+    let name = format!("{}_neg", graph.node(operand).name);
+    let operand_shape = shape(graph, operand);
+    let dtype = graph.node_dtype(operand).expect("a dtype").to_string();
+    let negated = crate::test_ir::call(
+        graph,
+        &name,
+        "aten.neg.default",
+        vec![IrArg::Node(operand)],
+        operand_shape,
+        &dtype,
+    );
+    graph.set_arg(conv, index, IrArg::Node(negated));
+}
+
+/// A region conv whose weight and bias are region constants (`get_attr`
+/// nodes, design F4) is rewritten as in the parent, and its pre-permuted
+/// weight and zero bias are region constants too (`GraphScope::Region`).
 #[test]
-fn region_convs_fall_back_until_s8() {
+fn region_convs_with_region_constants_are_rewritten() {
     for name in ["conv2d_pt", "conv2d_nobias_pt", "cumsum_pt"] {
         let mut graph = imported(REWRITE_CONV, name);
         let conv = single_call(&graph, CONVOLUTION);
@@ -916,23 +935,262 @@ fn region_convs_fall_back_until_s8() {
         {
             make_region_constant(&mut graph, constant);
         }
-        let before = replay::snapshot(&graph).expect("a valid graph");
         let (modified, reason) = run_with(&region_pass(), &mut graph);
-        assert!(!modified, "{name}");
-        let reason = reason.expect("a fallback");
-        assert!(reason.contains("APU-135 S8"), "{name}: {reason}");
-        assert!(reason.contains("boundary contracts"), "{name}: {reason}");
-        assert_eq!(replay::snapshot(&graph).expect("a valid graph"), before);
+        assert_eq!((modified, reason), (true, None), "{name}");
+        let reference = rewritten(REWRITE_CONV, name);
+        let [tosa] = tosa_convs(&graph)[..] else {
+            panic!("{name}: one TOSA conv");
+        };
+        let [parent_tosa] = tosa_convs(&reference)[..] else {
+            panic!("{name}: one TOSA conv in the parent");
+        };
+        for index in [1, 2] {
+            let operand = graph.node(arg(&graph, tosa, index));
+            assert_eq!(operand.op, NodeOp::GetAttr, "{name}: {}", operand.name);
+            assert!(
+                matches!(
+                    operand.tensor.as_ref().map(|tensor| &tensor.source),
+                    Some(TensorSource::GraphModuleAttr)
+                ),
+                "{name}: {}",
+                operand.name
+            );
+        }
+        let (weight, parent_weight) = (
+            data(&graph, arg(&graph, tosa, 1)),
+            data(&reference, arg(&reference, parent_tosa, 1)),
+        );
+        assert_eq!(
+            (&weight.shape, &weight.data),
+            (&parent_weight.shape, &parent_weight.data),
+            "{name}"
+        );
+        assert_eq!(
+            format!("{:?}", &graph.node(tosa).args[3..]),
+            format!("{:?}", &reference.node(parent_tosa).args[3..]),
+            "{name}"
+        );
     }
 }
 
-/// Why region convs fall back: the output contract's qparam lookup
-/// (`extract_effective_qparam_ir`) walks the rewrite's qparam-less output
-/// permute to its RESCALE and reverse engineers it as a rescale of the TOSA
-/// conv's inherited output qparam. With a per-tensor weight that gives
-/// `s_out^2 / (s_in * s_w)` instead of the conv's `s_out`, so a cond branch
-/// ending in such a conv would get a wrong output RESCALE. When S8 fixes the
-/// lookup this test fails: lift the region fallback then.
+/// Make constant operand `index` of `conv` one a region captures from the
+/// parent graph, as RETAB's region IR has it at RewriteConvPass's slot: a
+/// branch input (a placeholder whose data stays in the parent) read through
+/// its boundary quantize, which the boundary contracts turn into the boundary
+/// RESCALE. Both are int8, as the branch quantizes the parent's operand.
+/// Returns the quantize.
+fn capture_from_parent(graph: &mut IrGraph, conv: NodeId, index: usize) -> NodeId {
+    let input = arg(graph, conv, index);
+    let input_shape = shape(graph, input);
+    let node = graph.node_mut(input);
+    node.tensor = None;
+    node.meta
+        .set_tensor_facts(TensorFacts::new(input_shape.clone(), "torch.int8"));
+    let name = format!("{}_boundary_quantize", node.name);
+    let quantize = crate::test_ir::call_with_meta(
+        graph,
+        &name,
+        "quantized_decomposed.quantize_per_tensor.default",
+        vec![
+            IrArg::Node(input),
+            IrArg::Float(0.25),
+            IrArg::Int(0),
+            IrArg::Int(-128),
+            IrArg::Int(127),
+            IrArg::Dtype("torch.int8".to_string()),
+        ],
+        crate::fx_meta::NodeMeta::tensor(input_shape, "torch.int8"),
+    );
+    assert!(graph.node(quantize).is_quantize(), "fixture: a quantize");
+    graph.set_arg(conv, index, IrArg::Node(quantize));
+    quantize
+}
+
+/// APU-135 S8 (design §2.9): a region weight captured from the parent graph
+/// gets its layout change as runtime ops on the branch input's quantize, a
+/// `permute_copy` and, for HWCM and conv1d, a `view_copy`; the last is named
+/// as rc4 names the constant, `{c}_weight_<suffix>`. A captured bias stays,
+/// unmarked: explicit mode's captured_conv folds both into region constants
+/// after the boundary contracts (`control_flow::captured_conv`). Everything
+/// else is the parent's rewrite.
+#[test]
+fn captured_region_weights_get_runtime_layout_ops() {
+    struct Kind {
+        case: &'static str,
+        target: &'static str,
+        dims: &'static [i64],
+        permuted: &'static [i64],
+        reshape: Option<&'static [i64]>,
+        suffix: &'static str,
+    }
+    #[rustfmt::skip]
+    let kinds = [
+        Kind { case: "conv2d_pt", target: CONV2D, dims: &[0, 2, 3, 1], permuted: &[4, 3, 3, 3], reshape: None, suffix: "ohwi" },
+        Kind { case: "conv1d_pt", target: CONV2D, dims: &[0, 2, 1], permuted: &[6, 3, 4], reshape: Some(&[6, 1, 3, 4]), suffix: "ohwi" },
+        Kind { case: "dw2d_pt", target: DEPTHWISE, dims: &[2, 3, 0, 1], permuted: &[3, 3, 8, 1], reshape: Some(&[3, 3, 4, 2]), suffix: "hwicm" },
+        Kind { case: "conv1d_dw_pt", target: DEPTHWISE, dims: &[1, 2, 0], permuted: &[1, 3, 8], reshape: Some(&[1, 3, 4, 2]), suffix: "hwicm" },
+        Kind { case: "tconv2d_pt", target: TRANSPOSE_CONV2D, dims: &[1, 2, 3, 0], permuted: &[4, 3, 3, 3], reshape: None, suffix: "ohwi" },
+        Kind { case: "conv3d_pt", target: CONV3D, dims: &[0, 2, 3, 4, 1], permuted: &[5, 3, 3, 3, 3], reshape: None, suffix: "odhwi" },
+    ];
+    for kind in kinds {
+        let label = kind.case;
+        let mut graph = imported(REWRITE_CONV, kind.case);
+        let conv = single_call(&graph, CONVOLUTION);
+        let conv_name = graph.node(conv).name.clone();
+        let weight = capture_from_parent(&mut graph, conv, 1);
+        let bias = capture_from_parent(&mut graph, conv, 2);
+        let (weight, bias) = (
+            graph.node(weight).name.clone(),
+            graph.node(bias).name.clone(),
+        );
+        let (modified, reason) = run_with(&region_pass(), &mut graph);
+        assert_eq!((modified, reason), (true, None), "{label}");
+        // A run renumbers the nodes (see `uses_of`).
+        let (weight, bias) = (named(&graph, &weight), named(&graph, &bias));
+
+        let tosa = single_call(&graph, kind.target);
+        assert_eq!(arg(&graph, tosa, 2), bias, "{label}: the bias stays");
+        assert_eq!(special_dtype(&graph.node(bias).meta), None, "{label}");
+        let operand = arg(&graph, tosa, 1);
+        assert_eq!(
+            graph.node(operand).name,
+            format!("{conv_name}_weight_{}", kind.suffix),
+            "{label}"
+        );
+        let permute = match kind.reshape {
+            Some(reshape) => {
+                assert_eq!(graph.node(operand).target, VIEW, "{label}");
+                assert_eq!(shape(&graph, operand), reshape, "{label}");
+                assert_eq!(ints(&graph, operand, 1), reshape, "{label}");
+                assert_eq!(
+                    graph.node(operand).name,
+                    format!("{conv_name}_weight_{}", kind.suffix),
+                    "{label}"
+                );
+                arg(&graph, operand, 0)
+            }
+            None => operand,
+        };
+        assert_eq!(graph.node(permute).target, PERMUTE, "{label}");
+        assert_eq!(arg(&graph, permute, 0), weight, "{label}");
+        assert_eq!(ints(&graph, permute, 1), kind.dims, "{label}");
+        assert_eq!(shape(&graph, permute), kind.permuted, "{label}");
+        for layout_op in [permute, operand] {
+            assert_eq!(graph.node_dtype(layout_op), Some("torch.int8"), "{label}");
+            assert_eq!(
+                graph
+                    .node(layout_op)
+                    .meta
+                    .input_qparams()
+                    .map(|map| map.is_empty()),
+                Some(true),
+                "{label}: no qparams, as RewriteConvPass's other created nodes"
+            );
+        }
+
+        let reference = rewritten(REWRITE_CONV, kind.case);
+        let parent_tosa = single_call(&reference, kind.target);
+        assert_eq!(
+            shape(&graph, operand),
+            data(&reference, arg(&reference, parent_tosa, 1)).shape,
+            "{label}: the parent's constant's shape"
+        );
+        assert_eq!(
+            format!("{:?}", &graph.node(tosa).args[3..]),
+            format!("{:?}", &reference.node(parent_tosa).args[3..]),
+            "{label}"
+        );
+        assert_eq!(
+            shape(&graph, tosa),
+            shape(&reference, parent_tosa),
+            "{label}"
+        );
+        assert_eq!(calls(&graph, RESCALE).len(), 1, "{label}");
+    }
+}
+
+/// A Linear in a cond: `IrDecomposeLinear` reads the captured weight through a
+/// view, which the captured chain allows, and the layout permute reads the
+/// view. An A16W8 conv's captured bias is not marked INT48 here: captured_conv
+/// marks the int32 bias it makes (RCP:323-325).
+#[test]
+fn captured_region_weights_read_through_views_and_unmarked_biases() {
+    let mut graph = imported(REWRITE_CONV, "linear_pt");
+    let conv = single_call(&graph, CONVOLUTION);
+    let conv_name = graph.node(conv).name.clone();
+    let weight = crate::test_ir::placeholder(&mut graph, "linear_weight", [4, 8], "torch.int8");
+    let quantize = crate::test_ir::call(
+        &mut graph,
+        "linear_weight_quantize",
+        "quantized_decomposed.quantize_per_tensor.default",
+        vec![
+            IrArg::Node(weight),
+            IrArg::Float(0.25),
+            IrArg::Int(0),
+            IrArg::Int(-128),
+            IrArg::Int(127),
+            IrArg::Dtype("torch.int8".to_string()),
+        ],
+        [4, 8],
+        "torch.int8",
+    );
+    let view = crate::test_ir::call(
+        &mut graph,
+        "linear_weight_view",
+        VIEW,
+        vec![
+            IrArg::Node(quantize),
+            crate::fx_ir::i64_list_arg(&[4, 8, 1, 1]),
+        ],
+        [4, 8, 1, 1],
+        "torch.int8",
+    );
+    graph.set_arg(conv, 1, IrArg::Node(view));
+    let bias = capture_from_parent(&mut graph, conv, 2);
+    let bias_name = graph.node(bias).name.clone();
+    let (modified, reason) = run_with(&region_pass(), &mut graph);
+    assert_eq!((modified, reason), (true, None));
+    // A run renumbers the nodes (see `uses_of`).
+    let (view, bias) = (
+        named(&graph, "linear_weight_view"),
+        named(&graph, &bias_name),
+    );
+    let tosa = single_call(&graph, CONV2D);
+    let permute = arg(&graph, tosa, 1);
+    assert_eq!(graph.node(permute).name, format!("{conv_name}_weight_ohwi"));
+    assert_eq!(graph.node(permute).target, PERMUTE);
+    assert_eq!(arg(&graph, permute, 0), view);
+    assert_eq!(ints(&graph, permute, 1), [0, 2, 3, 1]);
+    assert_eq!(shape(&graph, permute), [4, 1, 1, 8]);
+    assert_eq!(arg(&graph, tosa, 2), bias);
+
+    // A16W8: the captured bias stays unmarked; the accumulator is INT48.
+    let mut graph = imported(REWRITE_CONV_A16W8, "conv2d_a16w8");
+    let conv = single_call(&graph, CONVOLUTION);
+    let bias = capture_from_parent(&mut graph, conv, 2);
+    let bias_name = graph.node(bias).name.clone();
+    capture_from_parent(&mut graph, conv, 1);
+    let (modified, reason) = run_with(&region_pass(), &mut graph);
+    assert_eq!((modified, reason), (true, None));
+    let bias = named(&graph, &bias_name);
+    let tosa = single_call(&graph, CONV2D);
+    assert_eq!(arg(&graph, tosa, 2), bias);
+    assert_eq!(special_dtype(&graph.node(bias).meta), None);
+    assert_eq!(
+        special_dtype(&graph.node(tosa).meta),
+        Some(SpecialDtype::Int48)
+    );
+}
+
+/// The output contract's walk (`extract_effective_qparam_ir`) misreads the
+/// rewrite's qparam-less output permute: it reverse engineers the RESCALE as a
+/// rescale of the TOSA conv's inherited output qparam, which with a
+/// per-tensor weight gives `s_out^2 / (s_in * s_w)` instead of the conv's
+/// `s_out`. So explicit mode does not let a region output's contract take
+/// this walk: it records the output's qparam from the region's output
+/// dequantize, as rc4's FoldAndAnnotateQParamsPass does
+/// (`contracts::rewrite_output_dequantize_boundaries_ir`), and region convs
+/// are rewritten (APU-135 S8).
 #[test]
 fn boundary_contracts_misread_the_rewrites_rescale() {
     let mut graph = imported(REWRITE_CONV, "conv2d_pt");
@@ -1411,26 +1669,28 @@ fn rc4s_errors_and_unported_cases_fall_back_to_stock() {
             reason: "the rewrite would give [1, 4, 8, 8]",
         },
         Fallback {
-            label: "a region weight captured from the parent (S8)",
+            label: "a region weight computed in the region (RCP:243-251)",
             fixture: REWRITE_CONV,
             case: "conv2d_pt",
             region: true,
             edit: |graph, conv| {
                 let bias = arg(graph, conv, 2);
                 make_region_constant(graph, bias);
+                compute_in_region(graph, conv, 1);
             },
-            reason: "captured from the parent graph",
+            reason: "is neither a region constant nor captured from the parent graph",
         },
         Fallback {
-            label: "a region bias captured from the parent (S8)",
+            label: "a region bias computed in the region (RCP:263-326)",
             fixture: REWRITE_CONV,
             case: "conv2d_pt",
             region: true,
             edit: |graph, conv| {
                 let weight = arg(graph, conv, 1);
                 make_region_constant(graph, weight);
+                compute_in_region(graph, conv, 2);
             },
-            reason: "region conv biases need the explicit captured_conv",
+            reason: "bias b__frozen_param1_neg is neither a region constant nor captured",
         },
         Fallback {
             label: "A16W8 INT32 consumers (S4)",

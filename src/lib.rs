@@ -314,16 +314,17 @@ fn ingest_and_serialize_tosa_pybytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
     let explicit = layout == pipeline_config::LayoutMode::Explicit;
     let has_control_flow = ir_has_control_flow(&ir);
     if has_control_flow {
-        let changed = control_flow::apply_boundary_contracts(&mut ir, &mut stashed.submodules);
+        let changed =
+            control_flow::apply_boundary_contracts(&mut ir, &mut stashed.submodules, layout);
         if crate::config::from_ir_debug_enabled() && changed > 0 {
             eprintln!(
                 "[RETAB][cf-boundary-ir] applied {changed} parent/submodule boundary metadata update(s)"
             );
         }
     }
-    // Explicit mode can request a stock fallback at serialization time (P2's explicit
-    // captured_conv will run inside the contracts), so check here as well as after the
-    // pass pipelines (P2 critique B6).
+    // Explicit mode can request a stock fallback at serialization time (its captured_conv
+    // runs inside the contracts and sends unresolvable captured weights and non-int32
+    // biases to stock), so check here as well as after the pass pipelines (P2 critique B6).
     if explicit {
         fail_on_stock_fallback_request()?;
     }
