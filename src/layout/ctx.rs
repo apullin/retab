@@ -14,6 +14,9 @@
 //! - Every mutation made through the ctx bumps per-node version stamps.
 //! - An attempt memo records the node versions a failed rewrite read, so a
 //!   worklist driver retries it only after one of them changes.
+//! - `LayoutCtx::users_in_fx_order` is `node.users` in torch.fx's order, which
+//!   rc4's sweeps follow and which edits make differ from graph order until
+//!   the next retrace (`LayoutCtx::retraced`).
 //!
 //! `LayoutCtx::finish` writes the order back by renumbering the graph
 //! (`IrGraph::reorder_nodes`). Position anchors alone would not be enough: they
@@ -27,12 +30,13 @@
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::fx_ir::{
     IrArg, IrGraph, IrNode, NodeId, NodeMeta, NodeOp, NodeTensor, PlaceholderTensorBinding,
     TensorSource,
 };
+use crate::layout::fx_node;
 use crate::layout::shape::mark_contiguous;
 use crate::lowering_effects::LoweringInputKind;
 use crate::store::TensorData;
@@ -430,6 +434,13 @@ pub(crate) struct LayoutCtx<'g> {
     attempts: HashMap<(RuleId, NodeId), ReadSet>,
     /// Per base name, the lowest suffix `unique_name` may still find free.
     name_suffixes: RefCell<HashMap<String, u64>>,
+    /// When each node last took its place in its inputs' `users`, which
+    /// orders every user list (see `users_in_fx_order`).
+    arg_stamps: Vec<u64>,
+    next_arg_stamp: u64,
+    /// Nodes whose users may have left graph order since the order was last
+    /// reset: the inputs of every node restamped or moved since then.
+    user_order_dirty: HashSet<NodeId>,
 }
 
 impl<'g> LayoutCtx<'g> {
@@ -444,6 +455,8 @@ impl<'g> LayoutCtx<'g> {
     /// that order is not topological, which `finish` and torch.fx's `lint`
     /// require. The seed then falls back to a def-use order that keeps the
     /// anchored one wherever def-use allows, and says so in the debug log.
+    /// Every node's users start in that order, as after the retrace each rc4
+    /// pass that changes the graph ends with.
     pub(crate) fn with_scope(graph: &'g mut IrGraph, scope: GraphScope) -> Self {
         let anchored = graph.topological_live_node_ids();
         let seed = if is_topological_order(graph, &anchored) {
@@ -458,7 +471,7 @@ impl<'g> LayoutCtx<'g> {
         };
         let order = NodeOrder::new(&seed);
         let versions = vec![0; graph.nodes.len()];
-        Self {
+        let mut ctx = Self {
             graph,
             scope,
             order,
@@ -466,7 +479,12 @@ impl<'g> LayoutCtx<'g> {
             insert_point: InsertPoint::End,
             attempts: HashMap::new(),
             name_suffixes: RefCell::new(HashMap::new()),
-        }
+            arg_stamps: Vec::new(),
+            next_arg_stamp: 0,
+            user_order_dirty: HashSet::new(),
+        };
+        ctx.stamp_in_graph_order();
+        ctx
     }
 
     pub(crate) fn graph(&self) -> &IrGraph {
@@ -497,11 +515,57 @@ impl<'g> LayoutCtx<'g> {
     }
 
     /// `id`'s version stamp. It increases whenever, through this ctx, the
-    /// node's args, kwargs, target or meta change, it is moved or erased, or
-    /// a node starts, stops or rewrites a use of it. Inserting an unrelated
-    /// node next to it does not count.
+    /// node's args, kwargs, target or meta change, it is moved or erased, a
+    /// node starts, stops or rewrites a use of it, or its users change order
+    /// (see `users_in_fx_order`). Inserting an unrelated node next to it does
+    /// not count.
     pub(crate) fn version(&self, id: NodeId) -> u64 {
         self.versions.get(id).copied().unwrap_or(0)
+    }
+
+    /// `node.users` in torch.fx's order (torch 2.15).
+    ///
+    /// FX keeps each node's users in an insertion-ordered dict, and
+    /// `Node._update_args_kwargs` (torch/fx/node.py; C++ in torch 2.15) takes
+    /// a node out of every input's users and appends it again whenever its
+    /// args or kwargs are set: at creation, by the `args` and `kwargs`
+    /// setters, `update_arg`, `update_kwarg`, `replace_input_with` and, user
+    /// by user, `replace_all_uses_with`, even when nothing changes. So a
+    /// node's place in each of its inputs' users is the time of its last such
+    /// update, and one stamp per node orders every list. Erasing a user
+    /// removes it and moving a node changes nothing. A retrace rebuilds the
+    /// graph in node order, so the users of a ctx's graph start in graph
+    /// order and return to it at `retraced`. tests/fixtures/torch_fx_user_order.py
+    /// records torch.fx's own orders for random edit scripts.
+    ///
+    /// O(k log k) for k users.
+    pub(crate) fn users_in_fx_order(&self, id: NodeId) -> Vec<NodeId> {
+        let mut users = self.graph.live_user_ids(id);
+        users.sort_unstable_by_key(|&user| self.arg_stamps.get(user).copied().unwrap_or(u64::MAX));
+        users
+    }
+
+    /// The users of every node return to graph order, as after the
+    /// `ExportPass.call` retrace (exir/pass_base.py) a pass ends with when it
+    /// changed the graph, e.g. rc4's `RemovePermutesAroundElementwiseOps.call`
+    /// (backends/transforms/remove_permutes_around_elementwise_ops.py:453). A
+    /// node whose users this reorders gets a new version. O(N), plus O(k log k)
+    /// for each node whose k users may have left graph order since the last
+    /// reset.
+    pub(crate) fn retraced(&mut self) {
+        let dirty: Vec<NodeId> = self.user_order_dirty.drain().collect();
+        for id in dirty {
+            if !self.order.contains(id) {
+                continue;
+            }
+            let fx_order = self.users_in_fx_order(id);
+            let mut graph_order = fx_order.clone();
+            self.order.sort(&mut graph_order);
+            if graph_order != fx_order {
+                self.bump(id);
+            }
+        }
+        self.stamp_in_graph_order();
     }
 
     pub(crate) fn insert_point(&self) -> InsertPoint {
@@ -553,9 +617,10 @@ impl<'g> LayoutCtx<'g> {
     }
 
     /// Add a node at the insert point: `Graph.create_node`
-    /// (torch/fx/graph.py:1587-1663). The nodes it reads gain a user. Like FX's
-    /// `_graph_namespace.create_name`, a taken name gets a `_N` suffix: names
-    /// key `IrGraph`'s name index and become TOSA tensor names.
+    /// (torch/fx/graph.py:1587-1663). The nodes it reads gain a user, last in
+    /// their users. Like FX's `_graph_namespace.create_name`, a taken name
+    /// gets a `_N` suffix: names key `IrGraph`'s name index and become TOSA
+    /// tensor names.
     pub(crate) fn create_node(
         &mut self,
         op: NodeOp,
@@ -619,7 +684,8 @@ impl<'g> LayoutCtx<'g> {
         id
     }
 
-    /// Place a node the graph just added at the insert point.
+    /// Place a node the graph just added at the insert point; it becomes the
+    /// last user of each node it reads.
     fn place_new(&mut self, id: NodeId) {
         match self.insert_point {
             InsertPoint::End => self.order.push_back(id),
@@ -627,6 +693,7 @@ impl<'g> LayoutCtx<'g> {
             InsertPoint::Before(anchor) => self.order.insert_before(id, anchor),
             InsertPoint::After(anchor) => self.order.insert_after(id, anchor),
         }
+        self.restamp_args(id);
         self.bump_inputs_of(id);
     }
 
@@ -683,16 +750,20 @@ impl<'g> LayoutCtx<'g> {
         self.move_with(id, |order| order.insert_after(id, anchor));
     }
 
-    /// Replace `id`'s args: `node.args = ...` (torch/fx/node.py:467).
+    /// Replace `id`'s args: `node.args = ...` (torch/fx/node.py:467). Like
+    /// every args or kwargs update in FX, this moves `id` to the end of its
+    /// inputs' users, even when the args do not change.
     pub(crate) fn set_args(&mut self, id: NodeId, args: Vec<IrArg>) {
         self.bump_inputs_of(id);
         self.graph.set_args(id, args);
+        self.restamp_args(id);
         self.bump_inputs_of(id);
         self.bump(id);
     }
 
     /// Replace one positional arg: `Node.update_arg` (torch/fx/node.py:515-527),
-    /// which raises for an index past the end.
+    /// which raises for an index past the end and moves `id` to the end of its
+    /// inputs' users.
     pub(crate) fn set_arg(&mut self, id: NodeId, index: usize, value: IrArg) {
         assert!(
             index < self.graph.node(id).args.len(),
@@ -700,24 +771,29 @@ impl<'g> LayoutCtx<'g> {
         );
         self.bump_inputs_of(id);
         self.graph.set_arg(id, index, value);
+        self.restamp_args(id);
         self.bump_inputs_of(id);
         self.bump(id);
     }
 
-    /// Set a keyword arg: `Node.update_kwarg` (torch/fx/node.py:557).
+    /// Set a keyword arg: `Node.update_kwarg` (torch/fx/node.py:557), which
+    /// moves `id` to the end of its inputs' users.
     pub(crate) fn set_kwarg(&mut self, id: NodeId, key: impl Into<String>, value: IrArg) {
         self.bump_inputs_of(id);
         self.graph.set_kwarg(id, key, value);
+        self.restamp_args(id);
         self.bump_inputs_of(id);
         self.bump(id);
     }
 
     /// Replace `id`'s kwargs: `node.kwargs = ...` (torch/fx/node.py:490), as at
-    /// backends/transforms/fuse_identical_input_transforms_pass.py:241.
+    /// backends/transforms/fuse_identical_input_transforms_pass.py:241. Like
+    /// `set_args`, this moves `id` to the end of its inputs' users.
     pub(crate) fn set_kwargs(&mut self, id: NodeId, kwargs: HashMap<String, IrArg>) {
         self.bump_inputs_of(id);
         self.graph.node_mut(id).kwargs = kwargs;
         self.graph.sync_node_users(id);
+        self.restamp_args(id);
         self.bump_inputs_of(id);
         self.bump(id);
     }
@@ -737,15 +813,20 @@ impl<'g> LayoutCtx<'g> {
     }
 
     /// Point `user`'s uses of `old` at `new`: `Node.replace_input_with`
-    /// (torch/fx/node.py:868-884). Returns whether anything changed.
+    /// (torch/fx/node.py:868-884). Returns whether anything changed. FX
+    /// updates the args even when nothing changes, which moves `user` to the
+    /// end of its inputs' users either way.
     pub(crate) fn replace_input_with(&mut self, user: NodeId, old: NodeId, new: NodeId) -> bool {
-        if old == new {
+        if self.is_erased(user) {
             return false;
         }
         let inputs = self.input_ids(user);
-        if !self.graph.replace_input_use(user, old, new) {
+        if old == new || !self.graph.replace_input_use(user, old, new) {
+            // Only the order of the inputs' users can change.
+            self.bump_reordered(inputs, |ctx| ctx.restamp_args(user));
             return false;
         }
+        self.restamp_args(user);
         for input in inputs {
             self.bump(input);
         }
@@ -755,21 +836,38 @@ impl<'g> LayoutCtx<'g> {
     }
 
     /// Point every live use of `old` at `new`: `Node.replace_all_uses_with`
-    /// (torch/fx/node.py:712-756). Returns the rewired users in id order.
+    /// (torch/fx/node.py:712-756). Returns the rewired users in id order. FX
+    /// updates each user's args in turn, in `old.users` order, so the users
+    /// join `new`'s users in that order and each moves to the end of all its
+    /// inputs' users (also when `old` is `new`, which changes nothing else).
     pub(crate) fn replace_all_uses_with(&mut self, old: NodeId, new: NodeId) -> Vec<NodeId> {
+        let fx_users = self.users_in_fx_order(old);
         if old == new {
+            // Only the order of the users' inputs' users can change.
+            let mut watched: Vec<NodeId> = fx_users.iter().flat_map(|&user| self.input_ids(user)).collect();
+            watched.sort_unstable();
+            watched.dedup();
+            self.bump_reordered(watched, |ctx| {
+                for &user in &fx_users {
+                    ctx.restamp_args(user);
+                }
+            });
             return Vec::new();
         }
-        let users = self.graph.live_user_ids(old);
-        if users.is_empty() {
-            return users;
+        if fx_users.is_empty() {
+            return fx_users;
         }
-        for &user in &users {
+        for &user in &fx_users {
             self.bump_inputs_of(user);
             self.bump(user);
         }
         self.graph.replace_all_uses(old, new);
         self.bump(new);
+        for &user in &fx_users {
+            self.restamp_args(user);
+        }
+        let mut users = fx_users;
+        users.sort_unstable();
         users
     }
 
@@ -878,7 +976,47 @@ impl<'g> LayoutCtx<'g> {
         place(&mut self.order);
         if (self.order.prev(id), self.order.next(id)) != neighbours {
             self.bump(id);
+            // FX's users stay put, so graph order may now disagree with them.
+            let inputs = self.input_ids(id);
+            self.user_order_dirty.extend(inputs);
         }
+    }
+
+    /// `Node._update_args_kwargs` for `users_in_fx_order`: `id` becomes the
+    /// last user of each of its inputs.
+    fn restamp_args(&mut self, id: NodeId) {
+        if id >= self.arg_stamps.len() {
+            self.arg_stamps.resize(id + 1, u64::MAX);
+        }
+        self.arg_stamps[id] = self.next_arg_stamp;
+        self.next_arg_stamp += 1;
+        let inputs = self.input_ids(id);
+        self.user_order_dirty.extend(inputs);
+    }
+
+    /// Run `restamp`, which changes no args, and bump each `watched` node
+    /// whose users it reordered.
+    fn bump_reordered(&mut self, watched: Vec<NodeId>, restamp: impl FnOnce(&mut Self)) {
+        let before: Vec<Vec<NodeId>> = watched.iter().map(|&id| self.users_in_fx_order(id)).collect();
+        restamp(self);
+        for (id, users) in watched.into_iter().zip(before) {
+            if self.users_in_fx_order(id) != users {
+                self.bump(id);
+            }
+        }
+    }
+
+    /// Stamp every placed node in graph order, so every node's users are in
+    /// graph order.
+    fn stamp_in_graph_order(&mut self) {
+        self.arg_stamps.resize(self.graph.nodes.len(), u64::MAX);
+        let mut next = self.next_arg_stamp;
+        for id in self.order.iter() {
+            self.arg_stamps[id] = next;
+            next += 1;
+        }
+        self.next_arg_stamp = next;
+        self.user_order_dirty.clear();
     }
 
     fn input_ids(&self, id: NodeId) -> Vec<NodeId> {
@@ -910,20 +1048,12 @@ impl<'g> LayoutCtx<'g> {
 }
 
 /// The live nodes `node` reads, once each, in torch.fx's `Node.all_input_nodes`
-/// order (torch/fx/node.py: args depth-first, then kwargs). RETAB keeps kwargs
-/// in a map, so kwargs go by key.
+/// order ([`fx_node::all_input_nodes`]: args depth-first, then kwargs by key).
+/// Unlike that list, this one skips dead inputs: `IrGraph::erase` leaves a
+/// live node that still reads an erased one, which FX never has.
 pub(crate) fn all_input_nodes(graph: &IrGraph, node: &IrNode) -> Vec<NodeId> {
-    let mut ids = Vec::new();
-    for arg in &node.args {
-        arg.collect_node_ids(&mut ids);
-    }
-    let mut keys: Vec<&String> = node.kwargs.keys().collect();
-    keys.sort_unstable();
-    for key in keys {
-        node.kwargs[key].collect_node_ids(&mut ids);
-    }
-    let mut seen = std::collections::HashSet::new();
-    ids.retain(|&id| graph.node_opt(id).is_some_and(|input| input.alive) && seen.insert(id));
+    let mut ids = fx_node::all_input_nodes(node);
+    ids.retain(|&id| graph.node_opt(id).is_some_and(|input| input.alive));
     ids
 }
 
@@ -1359,6 +1489,234 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["n_2", "n_4", "n_5", "n_6"]);
+    }
+
+    const FX_USER_ORDER: &str = include_str!("../../tests/fixtures/torch_fx_user_order.txt");
+
+    /// A tests/fixtures/torch_fx_user_order.py argument: a node, `[a,b]` or
+    /// an integer. An empty list is `None`, as RETAB's importer spells it.
+    fn user_order_value(token: &str, ids: &HashMap<String, NodeId>) -> IrArg {
+        if let Some(inner) = token.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+            let items: Vec<IrArg> = inner
+                .split(',')
+                .filter(|name| !name.is_empty())
+                .map(|name| IrArg::Node(ids[name]))
+                .collect();
+            return if items.is_empty() { IrArg::None } else { IrArg::List(items) };
+        }
+        match token.parse::<i64>() {
+            Ok(value) => IrArg::Int(value),
+            Err(_) => IrArg::Node(ids[token]),
+        }
+    }
+
+    /// Positional args, then `key=value` kwargs.
+    fn user_order_args(
+        tokens: &[&str],
+        ids: &HashMap<String, NodeId>,
+    ) -> (Vec<IrArg>, HashMap<String, IrArg>) {
+        let mut args = Vec::new();
+        let mut kwargs = HashMap::new();
+        for token in tokens {
+            match token.split_once('=') {
+                Some((key, value)) if !token.starts_with('[') => {
+                    kwargs.insert(key.to_string(), user_order_value(value, ids));
+                }
+                _ => args.push(user_order_value(token, ids)),
+            }
+        }
+        (args, kwargs)
+    }
+
+    /// A `graph` line of tests/fixtures/torch_fx_user_order.txt.
+    fn user_order_graph(spec: &str) -> (IrGraph, HashMap<String, NodeId>) {
+        let mut graph = IrGraph::empty();
+        let mut ids = HashMap::new();
+        for item in spec.split(';') {
+            let words: Vec<&str> = item.split_whitespace().collect();
+            let (name, first) = match words[0].split_once('=') {
+                Some((name, first)) => (name, Some(first)),
+                None => (words[0], None),
+            };
+            let tokens: Vec<&str> = first.into_iter().chain(words[1..].iter().copied()).collect();
+            let id = if name == "output" {
+                let arg = user_order_value(tokens[0], &ids);
+                graph.add_node(
+                    NodeOp::Output,
+                    "output".into(),
+                    "output".into(),
+                    vec![arg],
+                    NodeMeta::default(),
+                )
+            } else if tokens.is_empty() {
+                f32_placeholder(&mut graph, name, [1])
+            } else {
+                let (args, kwargs) = user_order_args(&tokens, &ids);
+                graph.add_node_with_kwargs(
+                    NodeOp::CallFunction,
+                    name.into(),
+                    RELU.into(),
+                    args,
+                    kwargs,
+                    f32_meta([1]),
+                )
+            };
+            ids.insert(name.to_string(), id);
+        }
+        (graph, ids)
+    }
+
+    /// Replays tests/fixtures/torch_fx_user_order.txt, which
+    /// tests/fixtures/torch_fx_user_order.py generates by running the same
+    /// edit scripts through torch.fx (torch 2.15.0): at every checkpoint each
+    /// node's `users_in_fx_order` must be FX's `node.users`, and the nodes
+    /// must come in FX's order.
+    #[test]
+    fn ctx_replays_torch_fx_user_order_vectors() {
+        let mut scenarios = 0;
+        let mut checks = 0;
+        for block in FX_USER_ORDER.split("\nscenario ").skip(1) {
+            let mut lines = block.lines();
+            let title = lines.next().unwrap();
+            let spec = lines.next().unwrap().strip_prefix("graph ").unwrap();
+            let (mut graph, mut ids) = user_order_graph(spec);
+            let mut ctx = LayoutCtx::new(&mut graph);
+            let mut last_edit = "graph";
+            for line in lines {
+                let words: Vec<&str> = line.split_whitespace().collect();
+                match words[0] {
+                    "create" => {
+                        let (args, kwargs) = user_order_args(&words[3..], &ids);
+                        let point = match words[2].split_once('=') {
+                            None if words[2] == "end" => InsertPoint::End,
+                            None => InsertPoint::Start,
+                            Some(("before", anchor)) => InsertPoint::Before(ids[anchor]),
+                            Some((_, anchor)) => InsertPoint::After(ids[anchor]),
+                        };
+                        let id = ctx.with_insert_point(point, |ctx| {
+                            ctx.create_node(NodeOp::CallFunction, words[1], RELU, args, kwargs, f32_meta([1]))
+                        });
+                        assert_eq!(ctx.node(id).name, words[1]);
+                        ids.insert(words[1].to_string(), id);
+                    }
+                    "set_args" => {
+                        let (args, _) = user_order_args(&words[2..], &ids);
+                        ctx.set_args(ids[words[1]], args);
+                    }
+                    "set_arg" => {
+                        let value = user_order_value(words[3], &ids);
+                        ctx.set_arg(ids[words[1]], words[2].parse().unwrap(), value);
+                    }
+                    "set_kwarg" => {
+                        let value = user_order_value(words[3], &ids);
+                        ctx.set_kwarg(ids[words[1]], words[2], value);
+                    }
+                    "replace" => {
+                        ctx.replace_input_with(ids[words[1]], ids[words[2]], ids[words[3]]);
+                    }
+                    "rauw" => {
+                        ctx.replace_all_uses_with(ids[words[1]], ids[words[2]]);
+                    }
+                    "erase" => ctx.erase_node(ids.remove(words[1]).unwrap()),
+                    "prepend" => ctx.move_before(ids[words[2]], ids[words[1]]),
+                    "append" => ctx.move_after(ids[words[2]], ids[words[1]]),
+                    "retrace" => ctx.retraced(),
+                    "check" => {
+                        let actual: Vec<String> = ctx
+                            .order()
+                            .iter()
+                            .filter_map(|id| {
+                                let users = ctx.users_in_fx_order(id);
+                                let users = names(ctx.graph(), users).replace(' ', ",");
+                                (!users.is_empty()).then(|| format!("{}>{users}", ctx.node(id).name))
+                            })
+                            .collect();
+                        assert_eq!(
+                            actual.join(" "),
+                            words[1..].join(" "),
+                            "{title}: after `{last_edit}`"
+                        );
+                        checks += 1;
+                    }
+                    other => panic!("unknown fixture op {other}"),
+                }
+                if words[0] != "check" {
+                    last_edit = line;
+                }
+            }
+            // The scripts keep the graph topological, so the order writes back.
+            ctx.finish();
+            scenarios += 1;
+        }
+        assert_eq!(scenarios, 33);
+        assert!(checks > 2000, "{checks} checkpoints");
+    }
+
+    /// The memos rely on versions: a node whose users change order, which a
+    /// no-op `replace_input_with` or `replace_all_uses_with(n, n)` can do in
+    /// FX, or `retraced` when edits or moves left them out of graph order,
+    /// gets a new version, and only then.
+    #[test]
+    fn user_order_changes_bump_versions() {
+        let (mut graph, id) = build("x; y; a=x; b=x y; c=y");
+        let mut ctx = LayoutCtx::new(&mut graph);
+        let (x, y, a, b) = (id["x"], id["y"], id["a"], id["b"]);
+        let users = |ctx: &LayoutCtx<'_>, node| names(ctx.graph(), ctx.users_in_fx_order(node));
+        assert_eq!(users(&ctx, x), "a b", "users start in graph order");
+
+        let before = versions(&ctx);
+        assert!(!ctx.replace_input_with(a, y, x), "a does not read y");
+        assert_eq!(users(&ctx, x), "b a", "FX re-appends a anyway");
+        assert_eq!(bumped(&ctx, &before), "x");
+        let before = versions(&ctx);
+        assert!(!ctx.replace_input_with(a, x, x));
+        assert_eq!(bumped(&ctx, &before), "", "a was already last");
+
+        let before = versions(&ctx);
+        ctx.retraced();
+        assert_eq!(users(&ctx, x), "a b");
+        assert_eq!(bumped(&ctx, &before), "x");
+        let before = versions(&ctx);
+        ctx.retraced();
+        assert_eq!(bumped(&ctx, &before), "", "nothing left graph order");
+
+        let before = versions(&ctx);
+        ctx.move_after(a, b);
+        assert_eq!(users(&ctx, x), "a b", "moving a node keeps FX's users");
+        assert_eq!(bumped(&ctx, &before), "a");
+        let before = versions(&ctx);
+        ctx.retraced();
+        assert_eq!(users(&ctx, x), "b a", "graph order after the retrace");
+        assert_eq!(bumped(&ctx, &before), "x");
+
+        let before = versions(&ctx);
+        assert!(ctx.replace_all_uses_with(y, y).is_empty());
+        assert_eq!(users(&ctx, y), "b c", "b and c re-appended in y's order");
+        assert_eq!(users(&ctx, x), "a b", "b also moves to the end of x's users");
+        assert_eq!(bumped(&ctx, &before), "x");
+    }
+
+    /// `node.kwargs = ...` updates the args and kwargs like any setter
+    /// (`Node._update_args_kwargs`), so `set_kwargs` moves the node to the end
+    /// of every input's users, args included, as `set_kwarg` does.
+    #[test]
+    fn set_kwargs_moves_the_node_to_the_end_of_its_inputs_users() {
+        let (mut graph, id) = build("x; y; a=x; b=x; c=y");
+        let mut ctx = LayoutCtx::new(&mut graph);
+        let (x, y, a, b) = (id["x"], id["y"], id["a"], id["b"]);
+        let users = |ctx: &LayoutCtx<'_>, node| names(ctx.graph(), ctx.users_in_fx_order(node));
+        assert_eq!(users(&ctx, x), "a b");
+
+        let before = versions(&ctx);
+        ctx.set_kwargs(a, HashMap::from([("other".to_string(), IrArg::Node(y))]));
+        assert_eq!(users(&ctx, x), "b a");
+        assert_eq!(users(&ctx, y), "c a");
+        assert_eq!(bumped(&ctx, &before), "x y a");
+
+        let before = versions(&ctx);
+        ctx.set_kwargs(b, HashMap::new());
+        assert_eq!(users(&ctx, x), "a b", "unchanged kwargs still re-append b");
+        assert_eq!(bumped(&ctx, &before), "x b");
     }
 
     /// Nested insertion scopes and permanent or moving insert points; expected

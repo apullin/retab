@@ -1,14 +1,15 @@
 //! Replays ExecuTorch v1.6.0-rc4's layout passes against the RETAB ports
-//! (APU-135 P1, P2 and the P3 helpers of APU-160).
+//! (APU-135 P1, P2 and P3: the helpers of APU-160 and the remove-permutes
+//! pass of APU-158).
 //!
 //! `tests/fixtures/layout_replay/gen_layout_replay.py` records rc4 graphs
 //! before and after a pass, one fixture per pass (the format is in the
-//! generator's docstring). The P1 and APU-160 fixtures (format 1) run the real
-//! rc4 pass on hand-built edge graphs; the P2 fixtures (`format 2`) capture
-//! the graphs rc4's ArmPassManager pipeline hands to the pass and gets back
-//! while it lowers small quantized models. [`check`] rebuilds every "before"
-//! graph as an `IrGraph`, runs the port and compares the result with rc4's
-//! "after" graph:
+//! generator's docstring). The P1, APU-160 and APU-158 fixtures (format 1)
+//! run the real rc4 pass on hand-built edge graphs; the P2 fixtures
+//! (`format 2`) capture the graphs rc4's ArmPassManager pipeline hands to the
+//! pass and gets back while it lowers small quantized models. [`check`]
+//! rebuilds every "before" graph as an `IrGraph`, runs the port and compares
+//! the result with rc4's "after" graph:
 //!
 //! - nodes in graph order (`IrGraph::topological_live_node_ids`, which
 //!   `LayoutCtx::finish`'s renumbering makes the ctx order), with each node's
@@ -29,12 +30,13 @@
 //! The P1 fixtures predate the special dtypes, markers and targets in format
 //! 1, but their graphs hold none, so they read the same either way.
 //!
-//! A case where rc4's pass raised (`after raises=...`) matches when the port
-//! panics, as the P1 ports fail where rc4 raises. The `modified` flag the pass
-//! returns is compared only on request (`Options::modified`): the propagation
-//! driver loops on it, so its helpers check it, while the P1 replays predate
-//! the option (all agree with rc4 except IrRewriteHighRankSingletonPermute,
-//! which returns false in 18 cases where rc4 reports a change it didn't make).
+//! A case where rc4's pass raised (`after raises=<type>`) matches when the
+//! port panics, as RETAB's ports fail where rc4 raises; a port that returns
+//! instead is a `raises` mismatch. The `modified` flag the pass returns is
+//! compared only on request (`Options::modified`): the propagation driver
+//! loops on it, so its helpers check it, while the P1 replays predate the
+//! option (all agree with rc4 except IrRewriteHighRankSingletonPermute, which
+//! returns false in 18 cases where rc4 reports a change it didn't make).
 //! A format-2 case's flag is whether the pass changed the graph
 //! ([`Case::modified`]).
 //!
@@ -103,16 +105,23 @@
 //! that carries a qparam of that dtype or moves data. Every other dtype
 //! (accumulators, RESCALE outputs, placeholders, FP graphs) must match exactly.
 //!
+//! User order: a case may `touch` nodes before the pass runs (the generator
+//! re-sets their args, which moves each to the end of its inputs' torch.fx
+//! users). Only a [`Port`] that runs inside a `LayoutCtx` can replay that,
+//! with `LayoutCtx::set_args`; an `IrPass` port panics on such a case.
+//!
 //! Usage: a pass's replay test is one line,
 //! `replay::check(&IrFooPass, include_str!("../../tests/fixtures/layout_replay/foo.txt"))`.
 //! [`check_known`] names cases still expected to differ, with a reason, and
 //! fails once one matches, and [`check_known_with`] adds checks such as the
-//! `modified` flag; [`check_cases`] and [`check_cases_with`] replay chosen
-//! cases, as the ignored BUG tests in `p1_replay_tests` do. There,
-//! `replay_report` prints per-pass statistics under every comparison mode and
-//! `replay_external` replays fixtures too large to commit (a fuzzing run).
-//! `p2_replay_tests` holds the P2 fixtures' sanity tests and their replay
-//! hooks, and `fuse_helpers_replay_tests` the APU-160 replays.
+//! `modified` flag; [`check_port_known`], [`check_port_known_with`] and
+//! [`replay_port`] do the same for any [`Port`]. [`check_cases`] and
+//! [`check_cases_with`] replay chosen cases, as the ignored BUG tests in
+//! `p1_replay_tests` do. There, `replay_report` prints per-pass statistics
+//! under every comparison mode and `replay_external` replays fixtures too
+//! large to commit (a fuzzing run). `p2_replay_tests` holds the P2 fixtures'
+//! sanity tests and their replay hooks, `fuse_helpers_replay_tests` the
+//! APU-160 replays and `remove_permutes_replay_tests` the APU-158 ones.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Write as _};
@@ -265,9 +274,40 @@ pub(crate) struct Case {
     /// The `modified` flag rc4's pass returned (format 1) or whether the pass
     /// changed the graph (format 2, whose capture hooks can't see the flag).
     pub(crate) modified: bool,
-    /// The exception rc4's pass raised; `after` is then a copy of `before`.
+    /// The exception type rc4's pass raised (`after raises=<type>`), which the
+    /// port must answer with a panic; `after` is then a copy of `before`.
     pub(crate) raises: Option<String>,
     pub(crate) after: Graph,
+    /// Positions of the nodes the generator touched, in order, before running
+    /// the pass (`touch %N ..`): each moved to the end of its inputs' users.
+    pub(crate) touches: Vec<usize>,
+}
+
+/// How a replay runs a port on a case's "before" graph.
+pub(crate) trait Port {
+    fn name(&self) -> &str;
+
+    /// Run the port on `graph`, after touching `touches` in order (see
+    /// [`Case::touches`]); returns whether it changed the graph.
+    fn run(&self, graph: &mut IrGraph, touches: &[NodeId]) -> bool;
+}
+
+/// An `IrPass` as a [`Port`]. A pass builds its own `LayoutCtx`, whose users
+/// start in graph order, so it cannot replay touches.
+struct PassPort<'a>(&'a dyn IrPass);
+
+impl Port for PassPort<'_> {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn run(&self, graph: &mut IrGraph, touches: &[NodeId]) -> bool {
+        assert!(
+            touches.is_empty(),
+            "an IrPass cannot replay `touch`; replay this fixture through a ctx port"
+        );
+        self.0.run(graph)
+    }
 }
 
 /// Which dim orders [`compare`] checks; see the module docs.
@@ -344,7 +384,22 @@ pub(crate) fn check_known_with(
     known: &[(&str, &str)],
     options: Options,
 ) {
-    let results = replay(pass, fixture, options);
+    check_port_known_with(&PassPort(pass), fixture, known, options);
+}
+
+/// [`check_known`] for any [`Port`].
+pub(crate) fn check_port_known(port: &dyn Port, fixture: &str, known: &[(&str, &str)]) {
+    check_port_known_with(port, fixture, known, Options::default());
+}
+
+/// [`check_known_with`] for any [`Port`].
+pub(crate) fn check_port_known_with(
+    port: &dyn Port,
+    fixture: &str,
+    known: &[(&str, &str)],
+    options: Options,
+) {
+    let results = replay_port(port, fixture, options);
     let mut problems = Vec::new();
     for (name, _) in known {
         match results.iter().find(|result| result.name == *name) {
@@ -365,7 +420,7 @@ pub(crate) fn check_known_with(
     }
     let mut message = format!(
         "{}: {} of {} rc4 replay cases differ ({})\n",
-        pass.name(),
+        port.name(),
         failures.len(),
         results.len(),
         class_counts(failures.iter().copied())
@@ -411,10 +466,15 @@ pub(crate) fn check_cases_with(pass: &dyn IrPass, fixture: &str, names: &[&str],
 
 /// Replay every case of `fixture` through `pass`.
 pub(crate) fn replay(pass: &dyn IrPass, fixture: &str, options: Options) -> Vec<CaseResult> {
+    replay_port(&PassPort(pass), fixture, options)
+}
+
+/// Replay every case of `fixture` through `port`.
+pub(crate) fn replay_port(port: &dyn Port, fixture: &str, options: Options) -> Vec<CaseResult> {
     let cases = parse(fixture).unwrap_or_else(|error| panic!("bad replay fixture: {error}"));
     cases
         .iter()
-        .map(|case| replay_case(pass, case, options))
+        .map(|case| replay_case_with(port, case, options))
         .collect()
 }
 
@@ -422,6 +482,11 @@ pub(crate) fn replay(pass: &dyn IrPass, fixture: &str, options: Options) -> Vec<
 /// would build it, with the importer's special-dtype spelling in format 1 and
 /// RETAB's dtypes and spellings in format 2 (see the module docs).
 pub(crate) fn import(case: &Case) -> IrGraph {
+    import_with_ids(case).0
+}
+
+/// [`import`], with the id of each fixture position.
+fn import_with_ids(case: &Case) -> (IrGraph, Vec<NodeId>) {
     let special_prefix = if case.format >= 2 {
         ""
     } else {
@@ -461,8 +526,14 @@ pub(crate) fn compare_case(case: &Case, actual: &Graph, options: Options) -> Res
 }
 
 pub(crate) fn replay_case(pass: &dyn IrPass, case: &Case, options: Options) -> CaseResult {
-    let mut graph = import(case);
-    let run = catch_unwind(AssertUnwindSafe(|| pass.run(&mut graph)));
+    replay_case_with(&PassPort(pass), case, options)
+}
+
+/// Replay one case through `port`.
+pub(crate) fn replay_case_with(port: &dyn Port, case: &Case, options: Options) -> CaseResult {
+    let (mut graph, ids) = import_with_ids(case);
+    let touches: Vec<NodeId> = case.touches.iter().map(|&position| ids[position]).collect();
+    let run = catch_unwind(AssertUnwindSafe(|| port.run(&mut graph, &touches)));
     let (retab_modified, actual) = match run {
         Ok(modified) => (Some(modified), snapshot(&graph)),
         Err(payload) => (None, Err(panic_message(payload.as_ref()))),
@@ -511,8 +582,15 @@ pub(crate) fn replay_case(pass: &dyn IrPass, case: &Case, options: Options) -> C
                 Some(exception) => format!("    <raises {exception}>\n"),
                 None => case.after.to_string(),
             };
+            let touches = if case.touches.is_empty() {
+                String::new()
+            } else {
+                let positions: Vec<String> =
+                    case.touches.iter().map(|position| format!("%{position}")).collect();
+                format!("  touched first: {}\n", positions.join(" "))
+            };
             format!(
-                "case {} ({}): {}\n  before{note}:\n{}  rc4 after (modified={}):\n{}  RETAB after (modified={}):\n{}",
+                "case {} ({}): {}\n  before{note}:\n{}{touches}  rc4 after (modified={}):\n{}  RETAB after (modified={}):\n{}",
                 case.name,
                 mismatch.class,
                 mismatch.detail,
@@ -596,9 +674,23 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Case>, String> {
             None => return Err(format!("case {name}: missing `before`")),
         }
         let before = parse_graph(&mut lines).map_err(|(number, error)| at(number, error))?;
-        let (number, header) = lines
+        let (mut number, mut header) = lines
             .next()
             .ok_or_else(|| format!("case {name}: missing `after`"))?;
+        let mut touches = Vec::new();
+        if let Some(rest) = header.strip_prefix("touch ") {
+            for token in rest.split_whitespace() {
+                let position = token
+                    .strip_prefix('%')
+                    .and_then(|digits| digits.parse::<usize>().ok())
+                    .filter(|&position| position < before.nodes.len())
+                    .ok_or_else(|| at(number, format!("bad touched node {token:?}")))?;
+                touches.push(position);
+            }
+            (number, header) = lines
+                .next()
+                .ok_or_else(|| format!("case {name}: missing `after`"))?;
+        }
         if let Some(exception) = header.strip_prefix("after raises=") {
             match lines.next() {
                 Some((_, "end")) => {}
@@ -615,6 +707,7 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Case>, String> {
                 before,
                 modified: false,
                 raises: Some(exception.to_string()),
+                touches,
             });
             continue;
         }
@@ -655,6 +748,7 @@ pub(crate) fn parse(text: &str) -> Result<Vec<Case>, String> {
             modified,
             raises: None,
             after,
+            touches,
         });
     }
     Ok(cases)
@@ -1340,11 +1434,12 @@ const IMPORTED_SPECIAL_PREFIX: &str = "TosaSpecialDtype.";
 /// dtypes as they are and special dtypes in RETAB's spelling (`INT48`);
 /// [`import`] adds each format's dtypes and spellings.
 pub(crate) fn build(graph: &Graph) -> IrGraph {
-    build_with(graph, "")
+    build_with(graph, "").0
 }
 
-/// [`build`], with `special_prefix` before each special dtype's member name.
-fn build_with(graph: &Graph, special_prefix: &str) -> IrGraph {
+/// [`build`], with `special_prefix` before each special dtype's member name,
+/// and the id of each fixture position.
+fn build_with(graph: &Graph, special_prefix: &str) -> (IrGraph, Vec<NodeId>) {
     let mut ir = IrGraph::empty();
     let mut ids: Vec<NodeId> = Vec::with_capacity(graph.nodes.len());
     for (position, node) in graph.nodes.iter().enumerate() {
@@ -1401,7 +1496,7 @@ fn build_with(graph: &Graph, special_prefix: &str) -> IrGraph {
         vec![ir_arg(&graph.output, &ids)],
         NodeMeta::default(),
     );
-    ir
+    (ir, ids)
 }
 
 fn ir_arg(arg: &Arg, ids: &[NodeId]) -> IrArg {
@@ -2453,6 +2548,29 @@ end
                 Arg::Node(6)
             ])
         );
+    }
+
+    /// A `touch` line lists node positions between the before graph and
+    /// `after`; an `IrPass` port cannot replay it.
+    #[test]
+    fn touches_parse_and_need_a_ctx_port() {
+        let text = "\
+case touched
+before
+%0 = placeholder x : torch.float32[2] q=none
+%1 = aten.relu.default(%0) : torch.float32[2] q=none
+%2 = aten.neg.default(%0) : torch.float32[2] q=none
+output([%1, %2])
+touch %1 %2 %1
+after modified=false same
+end
+";
+        let cases = parse(text).unwrap();
+        assert_eq!(cases[0].touches, [1, 2, 1]);
+        let result = replay_case(&Noop, &cases[0], Options::default());
+        assert_eq!(result.mismatch.map(|mismatch| mismatch.class), Some("panic"));
+        assert!(parse(&text.replace("touch %1 %2 %1", "touch %3")).is_err());
+        assert!(parse(&text.replace("touch %1 %2 %1", "touch 1")).is_err());
     }
 
     #[test]

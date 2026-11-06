@@ -49,11 +49,12 @@
 //! - rc4 ends with an `ExportPass` retrace when it fused anything (`:147-151`),
 //!   which renames nodes and re-derives every value. A fusion changes no value,
 //!   so the port keeps names and meta.
-//! - rc4 groups a producer's users in `node.users` insertion order; RETAB keeps
-//!   no insertion order, so users go in graph order. Group order cannot change
-//!   the result: signatures include the target, so groups never share a
-//!   representative, and the representative is always the earliest user with
-//!   the signature in graph order.
+//! - rc4 groups a producer's users in `node.users` insertion order; the port
+//!   groups them in graph order, though the ctx tracks that order
+//!   (`LayoutCtx::users_in_fx_order`). Group order cannot change the result:
+//!   signatures include the target, so groups never share a representative,
+//!   and the representative is always the earliest user with the signature in
+//!   graph order.
 //! - Python compares a NaN argument equal only to the same float object;
 //!   [`PyValue`] has no value for one, so such a user is never fused (rc4 fuses
 //!   two users that share one NaN object, as with `math.nan`).

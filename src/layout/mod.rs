@@ -45,6 +45,8 @@ pub(crate) mod pending;
 #[allow(dead_code)]
 pub(crate) mod pointwise;
 #[allow(dead_code)]
+pub(crate) mod remove_permutes;
+#[allow(dead_code)]
 pub(crate) mod shape;
 
 // rc4's own tests for the P1 passes, ported (APU-135 P1).
@@ -81,3 +83,9 @@ mod fuse_helpers_scaling_tests;
 // Adversarial review of those three ports: rc4 behaviours they miss.
 #[cfg(test)]
 mod fuse_helpers_review_tests;
+// rc4 replays of RemovePermutesAroundElementwiseTosaOps (APU-158).
+#[cfg(test)]
+mod remove_permutes_replay_tests;
+// rc4's own tests for RemovePermutesAroundElementwise(Tosa)Ops (APU-158).
+#[cfg(test)]
+mod remove_permutes_upstream_tests;

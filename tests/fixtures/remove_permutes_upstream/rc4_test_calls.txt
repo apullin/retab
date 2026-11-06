@@ -1,0 +1,3018 @@
+# The graphs rc4's RemovePermutesAroundElementwiseOps tests hand the pass, and what it returns.
+# Recorded by tests/fixtures/remove_permutes_upstream/record_rc4_test_calls.py; don't edit by hand.
+case test_constant_input_cache_refreshes_for_reused_pass#0
+before
+%0 = placeholder first_constant : torch.float32[1] kind=param q=none
+output(%0)
+after modified=false same
+end
+case test_constant_input_cache_refreshes_for_reused_pass#1
+before
+%0 = placeholder second_constant : torch.float32[1] kind=param q=none
+output(%0)
+after modified=false same
+end
+case test_extra_permutable_ops_makes_op_permutable#0
+before
+%0 = placeholder x : torch.float32[1, 3, 4, 5] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 4, 5, 3] q=none
+%2 = tosa.RESCALE.default(%1, torch.int8, [1.0], 0, 0) : torch.float32[1, 4, 5, 3] q=none
+%3 = aten.permute_copy.default(%2, [0, 3, 1, 2]) : torch.float32[1, 3, 4, 5] q=none
+output(%3)
+after modified=false same
+end
+case test_extra_permutable_ops_makes_op_permutable#1
+before
+%0 = placeholder x : torch.float32[1, 3, 4, 5] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 4, 5, 3] q=none
+%2 = tosa.RESCALE.default(%1, torch.int8, [1.0], 0, 0) : torch.float32[1, 4, 5, 3] q=none
+%3 = aten.permute_copy.default(%2, [0, 3, 1, 2]) : torch.float32[1, 3, 4, 5] q=none
+output(%3)
+after modified=true
+%0 = placeholder x : torch.float32[1, 3, 4, 5] q=none
+%1 = tosa.RESCALE.default(%0, torch.int8, [1.0], 0, 0) : torch.int8[1, 3, 4, 5] q=none
+output(%1)
+end
+case test_remove_permutes_around_rescale_tosa_INT#0
+before
+%0 = placeholder x : torch.float32[1, 3, 4, 5] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 4, 5, 3] q=none
+%2 = tosa.RESCALE.default(%1, torch.int8, [1.0], 0, 0) : torch.int8[1, 4, 5, 3] q=none
+%3 = aten.permute_copy.default(%2, [0, 3, 1, 2]) : torch.int8[1, 3, 4, 5] q=none
+output(%3)
+after modified=true
+%0 = placeholder x : torch.float32[1, 3, 4, 5] q=none
+%1 = tosa.RESCALE.default(%0, torch.int8, [1.0], 0, 0) : torch.int8[1, 3, 4, 5] q=none
+output(%1)
+end
+case test_terminal_sink_view_broadcast_is_optimized_tosa_INT#0
+before
+%0 = placeholder x : torch.float32[1, 4, 1, 1] q=none
+%1 = placeholder direct : torch.float32[1, 8, 4] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 1, 1, 4] q=none
+%3 = aten.mul.Tensor(%2, %2) : torch.float32[1, 1, 1, 4] q=none
+%4 = aten.view_copy.default(%3, [1, 1, 4]) : torch.float32[1, 1, 4] q=none
+%5 = tosa.RESCALE.default(%4, torch.int8, [1.0], 0, 0) : torch.float32[1, 1, 4] q=none
+%6 = aten.sub.Tensor(%1, %5) : torch.float32[1, 8, 4] q=none
+output(%6)
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 1, 1] q=none
+%1 = placeholder direct : torch.float32[1, 8, 4] q=none
+%2 = aten.mul.Tensor(%0, %0) : torch.float32[1, 4, 1, 1] q=none
+%3 = aten.view_copy.default(%2, [1, 1, 4]) : torch.float32[1, 1, 4] q=none
+%4 = tosa.RESCALE.default(%3, torch.int8, [1.0], 0, 0) : torch.int8[1, 1, 4] q=none
+%5 = aten.sub.Tensor(%1, %4) : torch.float32[1, 8, 4] q=none
+output(%5)
+end
+case test_remove_permutes_around_singleton_view_and_gate_region_tosa_INT#0
+before
+%0 = placeholder x : torch.float32[1, 8, 4] q=none
+%1 = placeholder gate_source : torch.float32[1, 1, 1, 4] q=none
+%2 = placeholder skip : torch.float32[1, 8, 4] q=none
+%3 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 4, 8] q=none
+%4 = aten.clamp.default(%3, 0, None) : torch.float32[1, 4, 8] q=none
+%5 = aten.view_copy.default(%4, [1, 4, 8, 1]) : torch.float32[1, 4, 8, 1] q=none
+%6 = aten.permute_copy.default(%5, [0, 2, 3, 1]) : torch.float32[1, 8, 1, 4] q=none
+%7 = aten.view_copy.default(%1, [1, 4, 1]) : torch.float32[1, 4, 1] q=none
+%8 = aten.mul.Tensor(%4, %7) : torch.float32[1, 4, 8] q=none
+%9 = aten.permute_copy.default(%2, [0, 2, 1]) : torch.float32[1, 4, 8] q=none
+%10 = aten.add.Tensor(%8, %9) : torch.float32[1, 4, 8] q=none
+%11 = aten.permute_copy.default(%10, [0, 2, 1]) : torch.float32[1, 8, 4] q=none
+output([%6, %11])
+after modified=true
+%0 = placeholder x : torch.float32[1, 8, 4] q=none
+%1 = placeholder gate_source : torch.float32[1, 1, 1, 4] q=none
+%2 = placeholder skip : torch.float32[1, 8, 4] q=none
+%3 = aten.clamp.default(%0, 0, None) : torch.float32[1, 8, 4] q=none
+%4 = aten.view_copy.default(%3, [1, 8, 1, 4]) : torch.float32[1, 8, 1, 4] q=none
+%5 = aten.view_copy.default(%1, [1, 1, 4]) : torch.float32[1, 1, 4] q=none
+%6 = aten.mul.Tensor(%3, %5) : torch.float32[1, 8, 4] q=none
+%7 = aten.add.Tensor(%6, %2) : torch.float32[1, 8, 4] q=none
+output([%4, %7])
+end
+case test_remove_permutes_around_amax_reduction_region_tosa_INT#0
+before
+%0 = placeholder x : torch.float32[1, 8, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 4, 8] q=none
+%2 = aten.clamp.default(%1, 0, None) : torch.float32[1, 4, 8] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 1]) : torch.float32[1, 8, 4] q=none
+%4 = aten.amax.default(%2, 2, True) : torch.float32[1, 4, 1] q=none
+%5 = aten.sub.Tensor(%2, %4) : torch.float32[1, 4, 8] q=none
+%6 = aten.permute_copy.default(%5, [0, 2, 1]) : torch.float32[1, 8, 4] q=none
+output([%3, %6])
+after modified=true
+%0 = placeholder x : torch.float32[1, 8, 4] q=none
+%1 = aten.clamp.default(%0, 0, None) : torch.float32[1, 8, 4] q=none
+%2 = aten.amax.default(%1, 1, True) : torch.float32[1, 1, 4] q=none
+%3 = aten.sub.Tensor(%1, %2) : torch.float32[1, 8, 4] q=none
+output([%1, %3])
+end
+case test_remove_permutes_around_gelu_with_folded_scalar_constants_tosa_FP#0
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder c_scalar_0 : torch.float32[1, 1, 1, 1] q=none
+%2 = placeholder c_scalar_1 : torch.float32[1, 1, 1, 1] q=none
+%3 = placeholder c_scalar_2 : torch.float32[1, 1, 1, 1] q=none
+%4 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%5 = aten.mul.Tensor(%4, %1) : torch.float32[1, 3, 4, 2] q=none
+%6 = aten.erf.default(%5) : torch.float32[1, 3, 4, 2] q=none
+%7 = aten.add.Tensor(%6, %2) : torch.float32[1, 3, 4, 2] q=none
+%8 = aten.mul.Tensor(%7, %3) : torch.float32[1, 3, 4, 2] q=none
+%9 = aten.mul.Tensor(%4, %8) : torch.float32[1, 3, 4, 2] q=none
+%10 = aten.permute_copy.default(%9, [0, 3, 1, 2]) : torch.float32[1, 2, 3, 4] q=none
+output(%10)
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = placeholder c_scalar_0 : torch.float32[1, 1, 1, 1] q=none
+%2 = placeholder c_scalar_1 : torch.float32[1, 1, 1, 1] q=none
+%3 = placeholder c_scalar_2 : torch.float32[1, 1, 1, 1] q=none
+%4 = aten.mul.Tensor(%0, %1) : torch.float32[1, 2, 3, 4] q=none
+%5 = aten.erf.default(%4) : torch.float32[1, 2, 3, 4] q=none
+%6 = aten.add.Tensor(%5, %2) : torch.float32[1, 2, 3, 4] q=none
+%7 = aten.mul.Tensor(%6, %3) : torch.float32[1, 2, 3, 4] q=none
+%8 = aten.mul.Tensor(%0, %7) : torch.float32[1, 2, 3, 4] q=none
+output(%8)
+end
+case test_remove_permutes_skips_stale_shared_boundary_subgraph_tosa_FP#0
+before
+%0 = placeholder x : torch.float32[1, 16, 16, 8] q=none
+%1 = placeholder p_layer_norm_weight : torch.float32[1, 1, 1, 8] q=none
+%2 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 8, 16, 16] q=none
+%3 = aten.mul.Tensor(%2, %2) : torch.float32[1, 8, 16, 16] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.float32[1, 16, 16, 8] q=none
+%5 = aten.mul.Tensor(%4, %1) : torch.float32[1, 16, 16, 8] q=none
+%6 = aten.permute_copy.default(%5, [0, 3, 1, 2]) : torch.float32[1, 8, 16, 16] q=none
+output(%6)
+after modified=true
+%0 = placeholder x : torch.float32[1, 16, 16, 8] q=none
+%1 = placeholder p_layer_norm_weight : torch.float32[1, 1, 1, 8] q=none
+%2 = aten.mul.Tensor(%0, %0) : torch.float32[1, 16, 16, 8] q=none
+%3 = aten.mul.Tensor(%2, %1) : torch.float32[1, 16, 16, 8] q=none
+%4 = aten.permute_copy.default(%3, [0, 3, 1, 2]) : torch.float32[1, 8, 16, 16] q=none
+output(%4)
+end
+case test_4d_permute_squeeze_clamp_3d_permute#0
+before
+%0 = placeholder x : torch.float32[1, 1, 16, 128] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 128, 1, 16] q=none
+%2 = aten.view_copy.default(%1, [1, 128, 16]) : torch.float32[1, 128, 16] q=none
+%3 = aten.hardtanh.default(%2) : torch.float32[1, 128, 16] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[1, 16, 128] q=none
+output([%4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 1, 16, 128] q=none
+%1 = aten.view_copy.default(%0, [1, 16, 128]) : torch.float32[1, 16, 128] q=none
+%2 = aten.hardtanh.default(%1) : torch.float32[1, 16, 128] q=none
+output([%2])
+end
+case test_4d_permute_squeeze_copy_clamp_3d_permute#0
+before
+%0 = placeholder x : torch.float32[1, 1, 16, 128] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 128, 1, 16] q=none
+%2 = aten.view_copy.default(%1, [1, 128, 16]) : torch.float32[1, 128, 16] q=none
+%3 = aten.hardtanh.default(%2) : torch.float32[1, 128, 16] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[1, 16, 128] q=none
+output([%4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 1, 16, 128] q=none
+%1 = aten.view_copy.default(%0, [1, 16, 128]) : torch.float32[1, 16, 128] q=none
+%2 = aten.hardtanh.default(%1) : torch.float32[1, 16, 128] q=none
+output([%2])
+end
+case test_4d_permute_squeeze_view_slice_mul_3d_permute#0
+before
+%0 = placeholder x : torch.float32[10, 32, 1, 64] q=none
+%1 = aten.permute_copy.default(%0, [2, 0, 1, 3]) : torch.float32[1, 10, 32, 64] q=none
+%2 = aten.view_copy.default(%1, [10, 32, 64]) : torch.float32[10, 32, 64] q=none
+%3 = aten.slice_copy.Tensor(%2, 0, 0, 3) : torch.float32[3, 32, 64] q=none
+%4 = aten.mul.Tensor(%3, %3) : torch.float32[3, 32, 64] q=none
+%5 = aten.permute_copy.default(%4, [1, 0, 2]) : torch.float32[32, 3, 64] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[10, 32, 1, 64] q=none
+%1 = aten.view_copy.default(%0, [10, 32, 64]) : torch.float32[10, 32, 64] q=none
+%2 = aten.slice_copy.Tensor(%1, 0, 0, 3) : torch.float32[3, 32, 64] q=none
+%3 = aten.mul.Tensor(%2, %2) : torch.float32[3, 32, 64] q=none
+%4 = aten.permute_copy.default(%3, [1, 0, 2]) : torch.float32[32, 3, 64] q=none
+output([%4])
+end
+case test_broadcast_rank_increase_no_crash#0
+before
+%0 = placeholder x : torch.float32[1, 8] q=none
+%1 = aten.permute_copy.default(%0, [1, 0]) : torch.float32[8, 1] q=none
+%2 = aten.full.default([1, 1, 1], 1.0) : torch.float32[1, 1, 1] q=none
+%3 = aten.add.Tensor(%1, %2) : torch.float32[1, 8, 1] q=none
+%4 = aten.slice_copy.Tensor(%3, 2, 0, 1) : torch.float32[1, 8, 1] q=none
+%5 = aten.view_copy.default(%4, [8]) : torch.float32[8] q=none
+output([%5])
+after modified=false same
+end
+case test_no_fire_non_squeeze_view#0
+before
+%0 = placeholder x : torch.float32[1, 6, 8] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 8, 6] q=none
+%2 = aten.view_copy.default(%1, [1, 4, 12]) : torch.float32[1, 4, 12] q=none
+%3 = aten.mul.Tensor(%2, %2) : torch.float32[1, 4, 12] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[1, 12, 4] q=none
+output([%4])
+after modified=false same
+end
+case test_permutation_sink_view_preserves_cat_layout#0
+before
+%0 = placeholder x : torch.float32[1, 4, 1, 1] q=none
+%1 = placeholder direct : torch.float32[1, 7, 4] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 1, 1, 4] q=none
+%3 = aten.mul.Tensor(%2, %2) : torch.float32[1, 1, 1, 4] q=none
+%4 = aten.view_copy.default(%3, [1, 1, 4]) : torch.float32[1, 1, 4] q=none
+%5 = aten.cat.default([%1, %4], 1) : torch.float32[1, 8, 4] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 1, 1] q=none
+%1 = placeholder direct : torch.float32[1, 7, 4] q=none
+%2 = aten.mul.Tensor(%0, %0) : torch.float32[1, 4, 1, 1] q=none
+%3 = aten.view_copy.default(%2, [1, 1, 4]) : torch.float32[1, 1, 4] q=none
+%4 = aten.cat.default([%1, %3], 1) : torch.float32[1, 8, 4] q=none
+output([%4])
+end
+case test_permutation_sink_view_preserves_keyword_broadcast_layout#0
+before
+%0 = placeholder x : torch.float32[1, 4, 1, 1] q=none
+%1 = placeholder direct : torch.float32[1, 8, 4] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 1, 1, 4] q=none
+%3 = aten.mul.Tensor(%2, %2) : torch.float32[1, 1, 1, 4] q=none
+%4 = aten.view_copy.default(%3, [1, 1, 4]) : torch.float32[1, 1, 4] q=none
+%5 = aten.sub.Tensor(%4, other=%1) : torch.float32[1, 8, 4] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 1, 1] q=none
+%1 = placeholder direct : torch.float32[1, 8, 4] q=none
+%2 = aten.mul.Tensor(%0, %0) : torch.float32[1, 4, 1, 1] q=none
+%3 = aten.view_copy.default(%2, [1, 1, 4]) : torch.float32[1, 1, 4] q=none
+%4 = aten.sub.Tensor(%3, other=%1) : torch.float32[1, 8, 4] q=none
+output([%4])
+end
+case test_permutation_sink_view_splitting_the_non_unit_dim#0
+before
+%0 = placeholder x : torch.float32[1, 4, 1, 1] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 1, 1, 4] q=none
+%2 = aten.mul.Tensor(%1, %1) : torch.float32[1, 1, 1, 4] q=none
+%3 = aten.view_copy.default(%2, [1, 2, 2]) : torch.float32[1, 2, 2] q=none
+output([%3])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 1, 1] q=none
+%1 = aten.mul.Tensor(%0, %0) : torch.float32[1, 4, 1, 1] q=none
+%2 = aten.view_copy.default(%1, [1, 2, 2]) : torch.float32[1, 2, 2] q=none
+output([%2])
+end
+case test_permutation_sink_view_terminal_broadcast_is_optimized#0
+before
+%0 = placeholder x : torch.float32[1, 4, 1, 1] q=none
+%1 = placeholder direct : torch.float32[1, 8, 4] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 1, 1, 4] q=none
+%3 = aten.mul.Tensor(%2, %2) : torch.float32[1, 1, 1, 4] q=none
+%4 = aten.view_copy.default(%3, [1, 1, 4]) : torch.float32[1, 1, 4] q=none
+%5 = aten.sub.Tensor(%1, %4) : torch.float32[1, 8, 4] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 1, 1] q=none
+%1 = placeholder direct : torch.float32[1, 8, 4] q=none
+%2 = aten.mul.Tensor(%0, %0) : torch.float32[1, 4, 1, 1] q=none
+%3 = aten.view_copy.default(%2, [1, 1, 4]) : torch.float32[1, 1, 4] q=none
+%4 = aten.sub.Tensor(%1, %3) : torch.float32[1, 8, 4] q=none
+output([%4])
+end
+case test_permute_aten_pad_permute#0
+before
+%0 = placeholder x : torch.float32[1, 64, 64, 3] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 3, 64, 64] q=none
+%2 = aten.pad.default(%1, [0, 0, 0, 0, 0, 1], "constant", 0.0) : torch.float32[1, 4, 64, 64] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 64, 64, 4] q=none
+output([%3])
+after modified=true
+%0 = placeholder x : torch.float32[1, 64, 64, 3] q=none
+%1 = aten.pad.default(%0, [0, 1], "constant", 0.0) : torch.float32[1, 64, 64, 4] q=none
+output([%1])
+end
+case test_permute_constant_pad_nd_permute#0
+before
+%0 = placeholder x : torch.float32[1, 64, 64, 3] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 3, 64, 64] q=none
+%2 = aten.constant_pad_nd.default(%1, [0, 0, 0, 0, 0, 1], 0.0) : torch.float32[1, 4, 64, 64] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 64, 64, 4] q=none
+output([%3])
+after modified=true
+%0 = placeholder x : torch.float32[1, 64, 64, 3] q=none
+%1 = aten.constant_pad_nd.default(%0, [0, 1], 0.0) : torch.float32[1, 64, 64, 4] q=none
+output([%1])
+end
+case test_permute_squeeze_clamp_add_permute#0
+before
+%0 = placeholder x : torch.float32[1, 1, 16, 128] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 128, 1, 16] q=none
+%2 = aten.view_copy.default(%1, [1, 128, 16]) : torch.float32[1, 128, 16] q=none
+%3 = aten.hardtanh.default(%2) : torch.float32[1, 128, 16] q=none
+%4 = aten.add.Tensor(%3, %3) : torch.float32[1, 128, 16] q=none
+%5 = aten.permute_copy.default(%4, [0, 2, 1]) : torch.float32[1, 16, 128] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[1, 1, 16, 128] q=none
+%1 = aten.view_copy.default(%0, [1, 16, 128]) : torch.float32[1, 16, 128] q=none
+%2 = aten.hardtanh.default(%1) : torch.float32[1, 16, 128] q=none
+%3 = aten.add.Tensor(%2, %2) : torch.float32[1, 16, 128] q=none
+output([%3])
+end
+case test_permute_unsqueeze_cat_mul_squeeze_permute#0
+before
+%0 = placeholder x : torch.float32[1, 128, 16] q=none
+%1 = placeholder y : torch.float32[1, 128, 16] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 16, 128] q=none
+%3 = aten.permute_copy.default(%1, [0, 2, 1]) : torch.float32[1, 16, 128] q=none
+%4 = aten.view_copy.default(%2, [1, 16, 1, 128]) : torch.float32[1, 16, 1, 128] q=none
+%5 = aten.view_copy.default(%3, [1, 16, 1, 128]) : torch.float32[1, 16, 1, 128] q=none
+%6 = aten.cat.default([%4, %5], 2) : torch.float32[1, 16, 2, 128] q=none
+%7 = aten.mul.Tensor(%6, %6) : torch.float32[1, 16, 2, 128] q=none
+%8 = aten.view_copy.default(%7, [1, 16, 256]) : torch.float32[1, 16, 256] q=none
+%9 = aten.permute_copy.default(%8, [0, 2, 1]) : torch.float32[1, 256, 16] q=none
+output([%9])
+after modified=false same
+end
+case test_permute_unsqueeze_copy_mul_squeeze_copy_permute#0
+before
+%0 = placeholder x : torch.float32[1, 128, 16] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 16, 128] q=none
+%2 = aten.view_copy.default(%1, [1, 16, 1, 128]) : torch.float32[1, 16, 1, 128] q=none
+%3 = aten.mul.Tensor(%2, %2) : torch.float32[1, 16, 1, 128] q=none
+%4 = aten.view_copy.default(%3, [1, 16, 128]) : torch.float32[1, 16, 128] q=none
+%5 = aten.permute_copy.default(%4, [0, 2, 1]) : torch.float32[1, 128, 16] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[1, 128, 16] q=none
+%1 = aten.view_copy.default(%0, [1, 128, 1, 16]) : torch.float32[1, 128, 1, 16] q=none
+%2 = aten.mul.Tensor(%1, %1) : torch.float32[1, 128, 1, 16] q=none
+%3 = aten.view_copy.default(%2, [1, 128, 16]) : torch.float32[1, 128, 16] q=none
+output([%3])
+end
+case test_permute_unsqueeze_copy_neg_dim_mul_squeeze_copy_permute#0
+before
+%0 = placeholder x : torch.float32[1, 128, 16] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 16, 128] q=none
+%2 = aten.view_copy.default(%1, [1, 16, 128, 1]) : torch.float32[1, 16, 128, 1] q=none
+%3 = aten.mul.Tensor(%2, %2) : torch.float32[1, 16, 128, 1] q=none
+%4 = aten.view_copy.default(%3, [1, 16, 128]) : torch.float32[1, 16, 128] q=none
+%5 = aten.permute_copy.default(%4, [0, 2, 1]) : torch.float32[1, 128, 16] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[1, 128, 16] q=none
+%1 = aten.view_copy.default(%0, [1, 128, 16, 1]) : torch.float32[1, 128, 16, 1] q=none
+%2 = aten.mul.Tensor(%1, %1) : torch.float32[1, 128, 16, 1] q=none
+%3 = aten.view_copy.default(%2, [1, 128, 16]) : torch.float32[1, 128, 16] q=none
+output([%3])
+end
+case test_permute_view_add_sub_mul_view_permute#0
+before
+%0 = placeholder x : torch.float32[1, 128, 16] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 16, 128] q=none
+%2 = aten.view_copy.default(%1, [1, 16, 1, 128]) : torch.float32[1, 16, 1, 128] q=none
+%3 = aten.add.Tensor(%2, %2) : torch.float32[1, 16, 1, 128] q=none
+%4 = aten.sub.Tensor(%3, %2) : torch.float32[1, 16, 1, 128] q=none
+%5 = aten.mul.Tensor(%4, %4) : torch.float32[1, 16, 1, 128] q=none
+%6 = aten.view_copy.default(%5, [1, 16, 128]) : torch.float32[1, 16, 128] q=none
+%7 = aten.permute_copy.default(%6, [0, 2, 1]) : torch.float32[1, 128, 16] q=none
+output([%7])
+after modified=true
+%0 = placeholder x : torch.float32[1, 128, 16] q=none
+%1 = aten.view_copy.default(%0, [1, 128, 1, 16]) : torch.float32[1, 128, 1, 16] q=none
+%2 = aten.add.Tensor(%1, %1) : torch.float32[1, 128, 1, 16] q=none
+%3 = aten.sub.Tensor(%2, %1) : torch.float32[1, 128, 1, 16] q=none
+%4 = aten.mul.Tensor(%3, %3) : torch.float32[1, 128, 1, 16] q=none
+%5 = aten.view_copy.default(%4, [1, 128, 16]) : torch.float32[1, 128, 16] q=none
+output([%5])
+end
+case test_permute_view_squeeze_elementwise_view_unsqueeze_permute#0
+before
+%0 = placeholder x : torch.float32[1, 128, 16] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 16, 128] q=none
+%2 = aten.view_copy.default(%1, [1, 16, 1, 128]) : torch.float32[1, 16, 1, 128] q=none
+%3 = aten.mul.Tensor(%2, %2) : torch.float32[1, 16, 1, 128] q=none
+%4 = aten.view_copy.default(%3, [1, 16, 128]) : torch.float32[1, 16, 128] q=none
+%5 = aten.permute_copy.default(%4, [0, 2, 1]) : torch.float32[1, 128, 16] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[1, 128, 16] q=none
+%1 = aten.view_copy.default(%0, [1, 128, 1, 16]) : torch.float32[1, 128, 1, 16] q=none
+%2 = aten.mul.Tensor(%1, %1) : torch.float32[1, 128, 1, 16] q=none
+%3 = aten.view_copy.default(%2, [1, 128, 16]) : torch.float32[1, 128, 16] q=none
+output([%3])
+end
+case test_shared_singleton_view_boundaries_are_not_remapped#0
+before
+%0 = placeholder x : torch.float32[1, 4, 8] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 8, 4] q=none
+%2 = aten.view_copy.default(%1, [1, 8, 4, 1]) : torch.float32[1, 8, 4, 1] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 3, 1]) : torch.float32[1, 4, 1, 8] q=none
+%4 = aten.permute_copy.default(%2, [0, 3, 1, 2]) : torch.float32[1, 1, 8, 4] q=none
+output([%3, %4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 4, 8] q=none
+%1 = aten.view_copy.default(%0, [1, 4, 8, 1]) : torch.float32[1, 4, 8, 1] q=none
+%2 = aten.permute_copy.default(%1, [0, 1, 3, 2]) : torch.float32[1, 4, 1, 8] q=none
+%3 = aten.permute_copy.default(%1, [0, 3, 2, 1]) : torch.float32[1, 1, 8, 4] q=none
+output([%2, %3])
+end
+case test_split_sink_view_is_not_remapped_for_broadcast#0
+before
+%0 = placeholder x : torch.float32[1, 4, 2] q=none
+%1 = placeholder sink_source : torch.float32[1, 1, 1, 8] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 2, 4] q=none
+%3 = aten.view_copy.default(%1, [1, 2, 4]) : torch.float32[1, 2, 4] q=none
+%4 = aten.mul.Tensor(%2, %3) : torch.float32[1, 2, 4] q=none
+%5 = aten.permute_copy.default(%4, [0, 2, 1]) : torch.float32[1, 4, 2] q=none
+output([%5])
+after modified=false same
+end
+case test_squeeze_dims_multiple_unit_dims#0
+before
+%0 = placeholder x : torch.float32[1, 8, 16] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 16, 8] q=none
+%2 = aten.view_copy.default(%1, [1, 1, 16, 8]) : torch.float32[1, 1, 16, 8] q=none
+%3 = aten.view_copy.default(%2, [1, 1, 1, 16, 8]) : torch.float32[1, 1, 1, 16, 8] q=none
+%4 = aten.mul.Tensor(%3, %3) : torch.float32[1, 1, 1, 16, 8] q=none
+%5 = aten.view_copy.default(%4, [1, 16, 8]) : torch.float32[1, 16, 8] q=none
+%6 = aten.permute_copy.default(%5, [0, 2, 1]) : torch.float32[1, 8, 16] q=none
+output([%6])
+after modified=true
+%0 = placeholder x : torch.float32[1, 8, 16] q=none
+%1 = aten.view_copy.default(%0, [1, 1, 8, 16]) : torch.float32[1, 1, 8, 16] q=none
+%2 = aten.view_copy.default(%1, [1, 1, 1, 8, 16]) : torch.float32[1, 1, 1, 8, 16] q=none
+%3 = aten.mul.Tensor(%2, %2) : torch.float32[1, 1, 1, 8, 16] q=none
+%4 = aten.view_copy.default(%3, [1, 8, 16]) : torch.float32[1, 8, 16] q=none
+output([%4])
+end
+case test_squeeze_on_non_unit_dim_is_not_optimized#0
+before
+%0 = placeholder x : torch.float32[1, 8, 16] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 16, 8] q=none
+%2 = aten.mul.Tensor(%1, %1) : torch.float32[1, 16, 8] q=none
+%3 = aten.view_copy.default(%2, [1, 16, 8]) : torch.float32[1, 16, 8] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[1, 8, 16] q=none
+output([%4])
+after modified=false same
+end
+case test_squeeze_on_non_unit_dim_is_not_optimized#1
+before
+%0 = placeholder x : torch.float32[1, 8, 16] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 16, 8] q=none
+%2 = aten.mul.Tensor(%1, %1) : torch.float32[1, 16, 8] q=none
+%3 = aten.view_copy.default(%2, [1, 16, 8]) : torch.float32[1, 16, 8] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[1, 8, 16] q=none
+output([%4])
+after modified=false same
+end
+case test_target_filter_blocks_permutation#0
+before
+%0 = placeholder x : torch.float32[1, 128, 16] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 16, 128] q=none
+%2 = aten.mul.Tensor(%1, %1) : torch.float32[1, 16, 128] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 1]) : torch.float32[1, 128, 16] q=none
+output([%3])
+after modified=true
+%0 = placeholder x : torch.float32[1, 128, 16] q=none
+%1 = aten.mul.Tensor(%0, %0) : torch.float32[1, 128, 16] q=none
+output([%1])
+end
+case test_target_filter_blocks_permutation#1
+before
+%0 = placeholder x : torch.float32[1, 128, 16] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 16, 128] q=none
+%2 = aten.mul.Tensor(%1, %1) : torch.float32[1, 16, 128] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 1]) : torch.float32[1, 128, 16] q=none
+output([%3])
+after modified=false same
+end
+case test_unsqueeze_at_moved_position#0
+before
+%0 = placeholder x : torch.float32[1, 8, 16] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 16, 8] q=none
+%2 = aten.view_copy.default(%1, [1, 1, 16, 8]) : torch.float32[1, 1, 16, 8] q=none
+%3 = aten.mul.Tensor(%2, %2) : torch.float32[1, 1, 16, 8] q=none
+%4 = aten.view_copy.default(%3, [1, 16, 8]) : torch.float32[1, 16, 8] q=none
+%5 = aten.permute_copy.default(%4, [0, 2, 1]) : torch.float32[1, 8, 16] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[1, 8, 16] q=none
+%1 = aten.view_copy.default(%0, [1, 1, 8, 16]) : torch.float32[1, 1, 8, 16] q=none
+%2 = aten.mul.Tensor(%1, %1) : torch.float32[1, 1, 8, 16] q=none
+%3 = aten.view_copy.default(%2, [1, 8, 16]) : torch.float32[1, 8, 16] q=none
+output([%3])
+end
+case test_upstream_squeeze_view_rank_mismatch_no_crash#0
+before
+%0 = placeholder x : torch.float32[4, 8] q=none
+%1 = placeholder y : torch.float32[8, 4, 1] q=none
+%2 = aten.view_copy.default(%1, [8, 4]) : torch.float32[8, 4] q=none
+%3 = aten.permute_copy.default(%0, [1, 0]) : torch.float32[8, 4] q=none
+%4 = aten.add.Tensor(%3, %2) : torch.float32[8, 4] q=none
+%5 = aten.permute_copy.default(%4, [1, 0]) : torch.float32[4, 8] q=none
+output([%5])
+after modified=false same
+end
+case test_upstream_view_rank_mismatch_no_crash#0
+before
+%0 = placeholder x : torch.float32[1, 128, 16] q=none
+%1 = aten.full.default([16, 128], 1.0) : torch.float32[16, 128] q=none
+%2 = aten.view_copy.default(%1, [1, 16, 128]) : torch.float32[1, 16, 128] q=none
+%3 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 16, 128] q=none
+%4 = aten.add.Tensor(%3, %2) : torch.float32[1, 16, 128] q=none
+%5 = aten.permute_copy.default(%4, [0, 2, 1]) : torch.float32[1, 128, 16] q=none
+output([%5])
+after modified=false same
+end
+case test_view_copy_multi_unit_dim_rank_change#0
+before
+%0 = placeholder x : torch.float32[1, 8, 16] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 16, 8] q=none
+%2 = aten.view_copy.default(%1, [1, 1, 1, 16, 8]) : torch.float32[1, 1, 1, 16, 8] q=none
+%3 = aten.mul.Tensor(%2, %2) : torch.float32[1, 1, 1, 16, 8] q=none
+%4 = aten.view_copy.default(%3, [1, 16, 8]) : torch.float32[1, 16, 8] q=none
+%5 = aten.permute_copy.default(%4, [0, 2, 1]) : torch.float32[1, 8, 16] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[1, 8, 16] q=none
+%1 = aten.view_copy.default(%0, [1, 1, 1, 8, 16]) : torch.float32[1, 1, 1, 8, 16] q=none
+%2 = aten.mul.Tensor(%1, %1) : torch.float32[1, 1, 1, 8, 16] q=none
+%3 = aten.view_copy.default(%2, [1, 8, 16]) : torch.float32[1, 8, 16] q=none
+output([%3])
+end
+case test_expand_with_extra_user_is_not_optimized#0
+before
+%0 = placeholder x : torch.float32[1, 16, 20, 1] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 1, 16, 20] q=none
+%2 = aten.unsqueeze_copy.default(%1, 4) : torch.float32[1, 1, 16, 20, 1] q=none
+%3 = aten.expand_copy.default(%2, [1, 1, 16, 20, 2]) : torch.float32[1, 1, 16, 20, 2] q=none
+%4 = aten.view_copy.default(%3, [1, 1, 16, 40]) : torch.float32[1, 1, 16, 40] q=none
+%5 = aten.mul.Tensor(%3, %3) : torch.float32[1, 1, 16, 20, 2] q=none
+%6 = aten.permute_copy.default(%4, [0, 2, 3, 1]) : torch.float32[1, 16, 40, 1] q=none
+output([%6, %5])
+after modified=false same
+end
+case test_non_merging_view_after_expand_is_not_optimized#0
+before
+%0 = placeholder x : torch.float32[1, 16, 20, 1] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 1, 16, 20] q=none
+%2 = aten.unsqueeze_copy.default(%1, 4) : torch.float32[1, 1, 16, 20, 1] q=none
+%3 = aten.expand_copy.default(%2, [1, 1, 16, 20, 2]) : torch.float32[1, 1, 16, 20, 2] q=none
+%4 = aten.view_copy.default(%3, [1, 16, 20, 2]) : torch.float32[1, 16, 20, 2] q=none
+output([%4])
+after modified=false same
+end
+case test_removes_permutes_around_repeat_interleave#0
+before
+%0 = placeholder x : torch.float32[1, 16, 20, 1] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 1, 16, 20] q=none
+%2 = aten.unsqueeze_copy.default(%1, 4) : torch.float32[1, 1, 16, 20, 1] q=none
+%3 = aten.expand_copy.default(%2, [1, 1, 16, 20, 2]) : torch.float32[1, 1, 16, 20, 2] q=none
+%4 = aten.view_copy.default(%3, [1, 1, 16, 40]) : torch.float32[1, 1, 16, 40] q=none
+%5 = aten.permute_copy.default(%4, [0, 2, 3, 1]) : torch.float32[1, 16, 40, 1] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[1, 16, 20, 1] q=none
+%1 = aten.unsqueeze_copy.default(%0, 3) : torch.float32[1, 16, 20, 1, 1] q=none
+%2 = aten.expand_copy.default(%1, [1, 16, 20, 2, 1]) : torch.float32[1, 16, 20, 2, 1] q=none
+%3 = aten.view_copy.default(%2, [1, 16, 40, 1]) : torch.float32[1, 16, 40, 1] q=none
+output([%3])
+end
+case test_repeat_interleave_after_nop_stretch#0
+before
+%0 = placeholder x : torch.float32[1, 16, 20, 1] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 1, 16, 20] q=none
+%2 = aten.view_copy.default(%1, [1, 1, 16, 1, 20]) : torch.float32[1, 1, 16, 1, 20] q=none
+%3 = aten.view_copy.default(%2, [1, 1, 16, 20]) : torch.float32[1, 1, 16, 20] q=none
+%4 = aten.view_copy.default(%3, [1, 1, 16, 20, 1]) : torch.float32[1, 1, 16, 20, 1] q=none
+%5 = aten.expand_copy.default(%4, [1, 1, 16, 20, 2]) : torch.float32[1, 1, 16, 20, 2] q=none
+%6 = aten.view_copy.default(%5, [1, 1, 16, 40]) : torch.float32[1, 1, 16, 40] q=none
+%7 = aten.permute_copy.default(%6, [0, 2, 3, 1]) : torch.float32[1, 16, 40, 1] q=none
+output([%7])
+after modified=true
+%0 = placeholder x : torch.float32[1, 16, 20, 1] q=none
+%1 = aten.view_copy.default(%0, [1, 16, 20, 1, 1]) : torch.float32[1, 16, 20, 1, 1] q=none
+%2 = aten.view_copy.default(%1, [1, 16, 20, 1]) : torch.float32[1, 16, 20, 1] q=none
+%3 = aten.view_copy.default(%2, [1, 16, 20, 1, 1]) : torch.float32[1, 16, 20, 1, 1] q=none
+%4 = aten.expand_copy.default(%3, [1, 16, 20, 2, 1]) : torch.float32[1, 16, 20, 2, 1] q=none
+%5 = aten.view_copy.default(%4, [1, 16, 40, 1]) : torch.float32[1, 16, 40, 1] q=none
+output([%5])
+end
+case test_repeat_interleave_composes_with_elementwise#0
+before
+%0 = placeholder x : torch.float32[1, 16, 20, 1] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 1, 16, 20] q=none
+%2 = aten.mul.Tensor(%1, %1) : torch.float32[1, 1, 16, 20] q=none
+%3 = aten.unsqueeze_copy.default(%2, 4) : torch.float32[1, 1, 16, 20, 1] q=none
+%4 = aten.expand_copy.default(%3, [1, 1, 16, 20, 2]) : torch.float32[1, 1, 16, 20, 2] q=none
+%5 = aten.view_copy.default(%4, [1, 1, 16, 40]) : torch.float32[1, 1, 16, 40] q=none
+%6 = aten.hardtanh.default(%5) : torch.float32[1, 1, 16, 40] q=none
+%7 = aten.permute_copy.default(%6, [0, 2, 3, 1]) : torch.float32[1, 16, 40, 1] q=none
+output([%7])
+after modified=true
+%0 = placeholder x : torch.float32[1, 16, 20, 1] q=none
+%1 = aten.mul.Tensor(%0, %0) : torch.float32[1, 16, 20, 1] q=none
+%2 = aten.unsqueeze_copy.default(%1, 3) : torch.float32[1, 16, 20, 1, 1] q=none
+%3 = aten.expand_copy.default(%2, [1, 16, 20, 2, 1]) : torch.float32[1, 16, 20, 2, 1] q=none
+%4 = aten.view_copy.default(%3, [1, 16, 40, 1]) : torch.float32[1, 16, 40, 1] q=none
+%5 = aten.hardtanh.default(%4) : torch.float32[1, 16, 40, 1] q=none
+output([%5])
+end
+case test_repeat_interleave_rank_mismatch_is_not_rewritten#0
+before
+%0 = placeholder x : torch.float32[1, 16, 20, 1] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 1, 16, 20] q=none
+%2 = aten.unsqueeze_copy.default(%1, 4) : torch.float32[1, 1, 16, 20, 1] q=none
+%3 = aten.expand_copy.default(%2, [1, 1, 16, 20, 2]) : torch.float32[1, 1, 16, 20, 2] q=none
+%4 = aten.view_copy.default(%3, [1, 1, 16, 40]) : torch.float32[1, 1, 16, 40] q=none
+%5 = aten.permute_copy.default(%4, [0, 2, 3, 1]) : torch.float32[1, 16, 40, 1] q=none
+output([%5])
+after modified=false same
+end
+case test_repeat_interleave_scale_four_on_middle_dim#0
+before
+%0 = placeholder x : torch.float32[1, 16, 20, 3] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 3, 16, 20] q=none
+%2 = aten.unsqueeze_copy.default(%1, 3) : torch.float32[1, 3, 16, 1, 20] q=none
+%3 = aten.expand_copy.default(%2, [1, 3, 16, 4, 20]) : torch.float32[1, 3, 16, 4, 20] q=none
+%4 = aten.view_copy.default(%3, [1, 3, 64, 20]) : torch.float32[1, 3, 64, 20] q=none
+%5 = aten.permute_copy.default(%4, [0, 2, 3, 1]) : torch.float32[1, 64, 20, 3] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[1, 16, 20, 3] q=none
+%1 = aten.unsqueeze_copy.default(%0, 2) : torch.float32[1, 16, 1, 20, 3] q=none
+%2 = aten.expand_copy.default(%1, [1, 16, 4, 20, 3]) : torch.float32[1, 16, 4, 20, 3] q=none
+%3 = aten.view_copy.default(%2, [1, 64, 20, 3]) : torch.float32[1, 64, 20, 3] q=none
+output([%3])
+end
+case test_repeat_interleave_with_keyword_arguments#0
+before
+%0 = placeholder x : torch.float32[1, 16, 20, 1] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 1, 16, 20] q=none
+%2 = aten.unsqueeze_copy.default(%1, dim=4) : torch.float32[1, 1, 16, 20, 1] q=none
+%3 = aten.expand_copy.default(%2, size=[1, 1, 16, 20, 2]) : torch.float32[1, 1, 16, 20, 2] q=none
+%4 = aten.view_copy.default(%3, size=[1, 1, 16, 40]) : torch.float32[1, 1, 16, 40] q=none
+%5 = aten.permute_copy.default(%4, [0, 2, 3, 1]) : torch.float32[1, 16, 40, 1] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[1, 16, 20, 1] q=none
+%1 = aten.unsqueeze_copy.default(%0, dim=3) : torch.float32[1, 16, 20, 1, 1] q=none
+%2 = aten.expand_copy.default(%1, size=[1, 16, 20, 2, 1]) : torch.float32[1, 16, 20, 2, 1] q=none
+%3 = aten.view_copy.default(%2, size=[1, 16, 40, 1]) : torch.float32[1, 16, 40, 1] q=none
+output([%3])
+end
+case test_resnet_stretch_region#0
+before
+%0 = placeholder x : torch.float32[1, 8, 16] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 16, 8] q=none
+%2 = aten.view_copy.default(%1, [1, 1, 16, 8]) : torch.float32[1, 1, 16, 8] q=none
+%3 = aten.view_copy.default(%2, [1, 1, 16, 1, 8]) : torch.float32[1, 1, 16, 1, 8] q=none
+%4 = aten.view_copy.default(%3, [1, 1, 16, 8]) : torch.float32[1, 1, 16, 8] q=none
+%5 = aten.view_copy.default(%4, [1, 1, 16, 8, 1]) : torch.float32[1, 1, 16, 8, 1] q=none
+%6 = aten.expand_copy.default(%5, [1, 1, 16, 8, 4]) : torch.float32[1, 1, 16, 8, 4] q=none
+%7 = aten.view_copy.default(%6, [1, 1, 16, 32]) : torch.float32[1, 1, 16, 32] q=none
+%8 = aten.view_copy.default(%7, [1, 16, 32]) : torch.float32[1, 16, 32] q=none
+%9 = aten.permute_copy.default(%8, [0, 2, 1]) : torch.float32[1, 32, 16] q=none
+output([%9])
+after modified=true
+%0 = placeholder x : torch.float32[1, 8, 16] q=none
+%1 = aten.view_copy.default(%0, [1, 1, 8, 16]) : torch.float32[1, 1, 8, 16] q=none
+%2 = aten.view_copy.default(%1, [1, 1, 8, 1, 16]) : torch.float32[1, 1, 8, 1, 16] q=none
+%3 = aten.view_copy.default(%2, [1, 1, 8, 16]) : torch.float32[1, 1, 8, 16] q=none
+%4 = aten.view_copy.default(%3, [1, 1, 8, 1, 16]) : torch.float32[1, 1, 8, 1, 16] q=none
+%5 = aten.expand_copy.default(%4, [1, 1, 8, 4, 16]) : torch.float32[1, 1, 8, 4, 16] q=none
+%6 = aten.view_copy.default(%5, [1, 1, 32, 16]) : torch.float32[1, 1, 32, 16] q=none
+%7 = aten.view_copy.default(%6, [1, 32, 16]) : torch.float32[1, 32, 16] q=none
+output([%7])
+end
+case test_chained_regions_absorb_into_last_permute#0
+before
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [1, 2, 0]) : torch.float32[3, 4, 2] q=none
+%2 = aten.mul.Tensor(%1, %1) : torch.float32[3, 4, 2] q=none
+%3 = aten.permute_copy.default(%2, [1, 0, 2]) : torch.float32[4, 3, 2] q=none
+%4 = aten.add.Tensor(%3, %3) : torch.float32[4, 3, 2] q=none
+%5 = aten.permute_copy.default(%4, [0, 2, 1]) : torch.float32[4, 2, 3] q=none
+output([%5])
+after modified=true
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.mul.Tensor(%0, %0) : torch.float32[2, 3, 4] q=none
+%2 = aten.permute_copy.default(%1, [2, 1, 0]) : torch.float32[4, 3, 2] q=none
+%3 = aten.add.Tensor(%2, %2) : torch.float32[4, 3, 2] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[4, 2, 3] q=none
+output([%4])
+end
+case test_chained_regions_absorb_into_last_permute#1
+before
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.mul.Tensor(%0, %0) : torch.float32[2, 3, 4] q=none
+%2 = aten.permute_copy.default(%1, [2, 1, 0]) : torch.float32[4, 3, 2] q=none
+%3 = aten.add.Tensor(%2, %2) : torch.float32[4, 3, 2] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 1]) : torch.float32[4, 2, 3] q=none
+output([%4])
+after modified=true
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.mul.Tensor(%0, %0) : torch.float32[2, 3, 4] q=none
+%2 = aten.add.Tensor(%1, %1) : torch.float32[2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [2, 0, 1]) : torch.float32[4, 2, 3] q=none
+output([%3])
+end
+case test_chained_regions_absorb_into_last_permute#2
+before
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.mul.Tensor(%0, %0) : torch.float32[2, 3, 4] q=none
+%2 = aten.add.Tensor(%1, %1) : torch.float32[2, 3, 4] q=none
+%3 = aten.permute_copy.default(%2, [2, 0, 1]) : torch.float32[4, 2, 3] q=none
+output([%3])
+after modified=false same
+end
+case test_deep_elementwise_region_does_not_recurse#0
+before
+%0 = placeholder x : torch.float32[1, 2, 3] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 3, 2] q=none
+%2 = aten.hardtanh.default(%1) : torch.float32[1, 3, 2] q=none
+%3 = aten.hardtanh.default(%2) : torch.float32[1, 3, 2] q=none
+%4 = aten.hardtanh.default(%3) : torch.float32[1, 3, 2] q=none
+%5 = aten.hardtanh.default(%4) : torch.float32[1, 3, 2] q=none
+%6 = aten.hardtanh.default(%5) : torch.float32[1, 3, 2] q=none
+%7 = aten.hardtanh.default(%6) : torch.float32[1, 3, 2] q=none
+%8 = aten.hardtanh.default(%7) : torch.float32[1, 3, 2] q=none
+%9 = aten.hardtanh.default(%8) : torch.float32[1, 3, 2] q=none
+%10 = aten.hardtanh.default(%9) : torch.float32[1, 3, 2] q=none
+%11 = aten.hardtanh.default(%10) : torch.float32[1, 3, 2] q=none
+%12 = aten.hardtanh.default(%11) : torch.float32[1, 3, 2] q=none
+%13 = aten.hardtanh.default(%12) : torch.float32[1, 3, 2] q=none
+%14 = aten.hardtanh.default(%13) : torch.float32[1, 3, 2] q=none
+%15 = aten.hardtanh.default(%14) : torch.float32[1, 3, 2] q=none
+%16 = aten.hardtanh.default(%15) : torch.float32[1, 3, 2] q=none
+%17 = aten.hardtanh.default(%16) : torch.float32[1, 3, 2] q=none
+%18 = aten.hardtanh.default(%17) : torch.float32[1, 3, 2] q=none
+%19 = aten.hardtanh.default(%18) : torch.float32[1, 3, 2] q=none
+%20 = aten.hardtanh.default(%19) : torch.float32[1, 3, 2] q=none
+%21 = aten.hardtanh.default(%20) : torch.float32[1, 3, 2] q=none
+%22 = aten.hardtanh.default(%21) : torch.float32[1, 3, 2] q=none
+%23 = aten.hardtanh.default(%22) : torch.float32[1, 3, 2] q=none
+%24 = aten.hardtanh.default(%23) : torch.float32[1, 3, 2] q=none
+%25 = aten.hardtanh.default(%24) : torch.float32[1, 3, 2] q=none
+%26 = aten.hardtanh.default(%25) : torch.float32[1, 3, 2] q=none
+%27 = aten.hardtanh.default(%26) : torch.float32[1, 3, 2] q=none
+%28 = aten.hardtanh.default(%27) : torch.float32[1, 3, 2] q=none
+%29 = aten.hardtanh.default(%28) : torch.float32[1, 3, 2] q=none
+%30 = aten.hardtanh.default(%29) : torch.float32[1, 3, 2] q=none
+%31 = aten.hardtanh.default(%30) : torch.float32[1, 3, 2] q=none
+%32 = aten.hardtanh.default(%31) : torch.float32[1, 3, 2] q=none
+%33 = aten.hardtanh.default(%32) : torch.float32[1, 3, 2] q=none
+%34 = aten.hardtanh.default(%33) : torch.float32[1, 3, 2] q=none
+%35 = aten.hardtanh.default(%34) : torch.float32[1, 3, 2] q=none
+%36 = aten.hardtanh.default(%35) : torch.float32[1, 3, 2] q=none
+%37 = aten.hardtanh.default(%36) : torch.float32[1, 3, 2] q=none
+%38 = aten.hardtanh.default(%37) : torch.float32[1, 3, 2] q=none
+%39 = aten.hardtanh.default(%38) : torch.float32[1, 3, 2] q=none
+%40 = aten.hardtanh.default(%39) : torch.float32[1, 3, 2] q=none
+%41 = aten.hardtanh.default(%40) : torch.float32[1, 3, 2] q=none
+%42 = aten.hardtanh.default(%41) : torch.float32[1, 3, 2] q=none
+%43 = aten.hardtanh.default(%42) : torch.float32[1, 3, 2] q=none
+%44 = aten.hardtanh.default(%43) : torch.float32[1, 3, 2] q=none
+%45 = aten.hardtanh.default(%44) : torch.float32[1, 3, 2] q=none
+%46 = aten.hardtanh.default(%45) : torch.float32[1, 3, 2] q=none
+%47 = aten.hardtanh.default(%46) : torch.float32[1, 3, 2] q=none
+%48 = aten.hardtanh.default(%47) : torch.float32[1, 3, 2] q=none
+%49 = aten.hardtanh.default(%48) : torch.float32[1, 3, 2] q=none
+%50 = aten.hardtanh.default(%49) : torch.float32[1, 3, 2] q=none
+%51 = aten.hardtanh.default(%50) : torch.float32[1, 3, 2] q=none
+%52 = aten.hardtanh.default(%51) : torch.float32[1, 3, 2] q=none
+%53 = aten.hardtanh.default(%52) : torch.float32[1, 3, 2] q=none
+%54 = aten.hardtanh.default(%53) : torch.float32[1, 3, 2] q=none
+%55 = aten.hardtanh.default(%54) : torch.float32[1, 3, 2] q=none
+%56 = aten.hardtanh.default(%55) : torch.float32[1, 3, 2] q=none
+%57 = aten.hardtanh.default(%56) : torch.float32[1, 3, 2] q=none
+%58 = aten.hardtanh.default(%57) : torch.float32[1, 3, 2] q=none
+%59 = aten.hardtanh.default(%58) : torch.float32[1, 3, 2] q=none
+%60 = aten.hardtanh.default(%59) : torch.float32[1, 3, 2] q=none
+%61 = aten.hardtanh.default(%60) : torch.float32[1, 3, 2] q=none
+%62 = aten.hardtanh.default(%61) : torch.float32[1, 3, 2] q=none
+%63 = aten.hardtanh.default(%62) : torch.float32[1, 3, 2] q=none
+%64 = aten.hardtanh.default(%63) : torch.float32[1, 3, 2] q=none
+%65 = aten.hardtanh.default(%64) : torch.float32[1, 3, 2] q=none
+%66 = aten.hardtanh.default(%65) : torch.float32[1, 3, 2] q=none
+%67 = aten.hardtanh.default(%66) : torch.float32[1, 3, 2] q=none
+%68 = aten.hardtanh.default(%67) : torch.float32[1, 3, 2] q=none
+%69 = aten.hardtanh.default(%68) : torch.float32[1, 3, 2] q=none
+%70 = aten.hardtanh.default(%69) : torch.float32[1, 3, 2] q=none
+%71 = aten.hardtanh.default(%70) : torch.float32[1, 3, 2] q=none
+%72 = aten.hardtanh.default(%71) : torch.float32[1, 3, 2] q=none
+%73 = aten.hardtanh.default(%72) : torch.float32[1, 3, 2] q=none
+%74 = aten.hardtanh.default(%73) : torch.float32[1, 3, 2] q=none
+%75 = aten.hardtanh.default(%74) : torch.float32[1, 3, 2] q=none
+%76 = aten.hardtanh.default(%75) : torch.float32[1, 3, 2] q=none
+%77 = aten.hardtanh.default(%76) : torch.float32[1, 3, 2] q=none
+%78 = aten.hardtanh.default(%77) : torch.float32[1, 3, 2] q=none
+%79 = aten.hardtanh.default(%78) : torch.float32[1, 3, 2] q=none
+%80 = aten.hardtanh.default(%79) : torch.float32[1, 3, 2] q=none
+%81 = aten.hardtanh.default(%80) : torch.float32[1, 3, 2] q=none
+%82 = aten.hardtanh.default(%81) : torch.float32[1, 3, 2] q=none
+%83 = aten.hardtanh.default(%82) : torch.float32[1, 3, 2] q=none
+%84 = aten.hardtanh.default(%83) : torch.float32[1, 3, 2] q=none
+%85 = aten.hardtanh.default(%84) : torch.float32[1, 3, 2] q=none
+%86 = aten.hardtanh.default(%85) : torch.float32[1, 3, 2] q=none
+%87 = aten.hardtanh.default(%86) : torch.float32[1, 3, 2] q=none
+%88 = aten.hardtanh.default(%87) : torch.float32[1, 3, 2] q=none
+%89 = aten.hardtanh.default(%88) : torch.float32[1, 3, 2] q=none
+%90 = aten.hardtanh.default(%89) : torch.float32[1, 3, 2] q=none
+%91 = aten.hardtanh.default(%90) : torch.float32[1, 3, 2] q=none
+%92 = aten.hardtanh.default(%91) : torch.float32[1, 3, 2] q=none
+%93 = aten.hardtanh.default(%92) : torch.float32[1, 3, 2] q=none
+%94 = aten.hardtanh.default(%93) : torch.float32[1, 3, 2] q=none
+%95 = aten.hardtanh.default(%94) : torch.float32[1, 3, 2] q=none
+%96 = aten.hardtanh.default(%95) : torch.float32[1, 3, 2] q=none
+%97 = aten.hardtanh.default(%96) : torch.float32[1, 3, 2] q=none
+%98 = aten.hardtanh.default(%97) : torch.float32[1, 3, 2] q=none
+%99 = aten.hardtanh.default(%98) : torch.float32[1, 3, 2] q=none
+%100 = aten.hardtanh.default(%99) : torch.float32[1, 3, 2] q=none
+%101 = aten.hardtanh.default(%100) : torch.float32[1, 3, 2] q=none
+%102 = aten.hardtanh.default(%101) : torch.float32[1, 3, 2] q=none
+%103 = aten.hardtanh.default(%102) : torch.float32[1, 3, 2] q=none
+%104 = aten.hardtanh.default(%103) : torch.float32[1, 3, 2] q=none
+%105 = aten.hardtanh.default(%104) : torch.float32[1, 3, 2] q=none
+%106 = aten.hardtanh.default(%105) : torch.float32[1, 3, 2] q=none
+%107 = aten.hardtanh.default(%106) : torch.float32[1, 3, 2] q=none
+%108 = aten.hardtanh.default(%107) : torch.float32[1, 3, 2] q=none
+%109 = aten.hardtanh.default(%108) : torch.float32[1, 3, 2] q=none
+%110 = aten.hardtanh.default(%109) : torch.float32[1, 3, 2] q=none
+%111 = aten.hardtanh.default(%110) : torch.float32[1, 3, 2] q=none
+%112 = aten.hardtanh.default(%111) : torch.float32[1, 3, 2] q=none
+%113 = aten.hardtanh.default(%112) : torch.float32[1, 3, 2] q=none
+%114 = aten.hardtanh.default(%113) : torch.float32[1, 3, 2] q=none
+%115 = aten.hardtanh.default(%114) : torch.float32[1, 3, 2] q=none
+%116 = aten.hardtanh.default(%115) : torch.float32[1, 3, 2] q=none
+%117 = aten.hardtanh.default(%116) : torch.float32[1, 3, 2] q=none
+%118 = aten.hardtanh.default(%117) : torch.float32[1, 3, 2] q=none
+%119 = aten.hardtanh.default(%118) : torch.float32[1, 3, 2] q=none
+%120 = aten.hardtanh.default(%119) : torch.float32[1, 3, 2] q=none
+%121 = aten.hardtanh.default(%120) : torch.float32[1, 3, 2] q=none
+%122 = aten.hardtanh.default(%121) : torch.float32[1, 3, 2] q=none
+%123 = aten.hardtanh.default(%122) : torch.float32[1, 3, 2] q=none
+%124 = aten.hardtanh.default(%123) : torch.float32[1, 3, 2] q=none
+%125 = aten.hardtanh.default(%124) : torch.float32[1, 3, 2] q=none
+%126 = aten.hardtanh.default(%125) : torch.float32[1, 3, 2] q=none
+%127 = aten.hardtanh.default(%126) : torch.float32[1, 3, 2] q=none
+%128 = aten.hardtanh.default(%127) : torch.float32[1, 3, 2] q=none
+%129 = aten.hardtanh.default(%128) : torch.float32[1, 3, 2] q=none
+%130 = aten.hardtanh.default(%129) : torch.float32[1, 3, 2] q=none
+%131 = aten.hardtanh.default(%130) : torch.float32[1, 3, 2] q=none
+%132 = aten.hardtanh.default(%131) : torch.float32[1, 3, 2] q=none
+%133 = aten.hardtanh.default(%132) : torch.float32[1, 3, 2] q=none
+%134 = aten.hardtanh.default(%133) : torch.float32[1, 3, 2] q=none
+%135 = aten.hardtanh.default(%134) : torch.float32[1, 3, 2] q=none
+%136 = aten.hardtanh.default(%135) : torch.float32[1, 3, 2] q=none
+%137 = aten.hardtanh.default(%136) : torch.float32[1, 3, 2] q=none
+%138 = aten.hardtanh.default(%137) : torch.float32[1, 3, 2] q=none
+%139 = aten.hardtanh.default(%138) : torch.float32[1, 3, 2] q=none
+%140 = aten.hardtanh.default(%139) : torch.float32[1, 3, 2] q=none
+%141 = aten.hardtanh.default(%140) : torch.float32[1, 3, 2] q=none
+%142 = aten.hardtanh.default(%141) : torch.float32[1, 3, 2] q=none
+%143 = aten.hardtanh.default(%142) : torch.float32[1, 3, 2] q=none
+%144 = aten.hardtanh.default(%143) : torch.float32[1, 3, 2] q=none
+%145 = aten.hardtanh.default(%144) : torch.float32[1, 3, 2] q=none
+%146 = aten.hardtanh.default(%145) : torch.float32[1, 3, 2] q=none
+%147 = aten.hardtanh.default(%146) : torch.float32[1, 3, 2] q=none
+%148 = aten.hardtanh.default(%147) : torch.float32[1, 3, 2] q=none
+%149 = aten.hardtanh.default(%148) : torch.float32[1, 3, 2] q=none
+%150 = aten.hardtanh.default(%149) : torch.float32[1, 3, 2] q=none
+%151 = aten.hardtanh.default(%150) : torch.float32[1, 3, 2] q=none
+%152 = aten.hardtanh.default(%151) : torch.float32[1, 3, 2] q=none
+%153 = aten.hardtanh.default(%152) : torch.float32[1, 3, 2] q=none
+%154 = aten.hardtanh.default(%153) : torch.float32[1, 3, 2] q=none
+%155 = aten.hardtanh.default(%154) : torch.float32[1, 3, 2] q=none
+%156 = aten.hardtanh.default(%155) : torch.float32[1, 3, 2] q=none
+%157 = aten.hardtanh.default(%156) : torch.float32[1, 3, 2] q=none
+%158 = aten.hardtanh.default(%157) : torch.float32[1, 3, 2] q=none
+%159 = aten.hardtanh.default(%158) : torch.float32[1, 3, 2] q=none
+%160 = aten.hardtanh.default(%159) : torch.float32[1, 3, 2] q=none
+%161 = aten.hardtanh.default(%160) : torch.float32[1, 3, 2] q=none
+%162 = aten.hardtanh.default(%161) : torch.float32[1, 3, 2] q=none
+%163 = aten.hardtanh.default(%162) : torch.float32[1, 3, 2] q=none
+%164 = aten.hardtanh.default(%163) : torch.float32[1, 3, 2] q=none
+%165 = aten.hardtanh.default(%164) : torch.float32[1, 3, 2] q=none
+%166 = aten.hardtanh.default(%165) : torch.float32[1, 3, 2] q=none
+%167 = aten.hardtanh.default(%166) : torch.float32[1, 3, 2] q=none
+%168 = aten.hardtanh.default(%167) : torch.float32[1, 3, 2] q=none
+%169 = aten.hardtanh.default(%168) : torch.float32[1, 3, 2] q=none
+%170 = aten.hardtanh.default(%169) : torch.float32[1, 3, 2] q=none
+%171 = aten.hardtanh.default(%170) : torch.float32[1, 3, 2] q=none
+%172 = aten.hardtanh.default(%171) : torch.float32[1, 3, 2] q=none
+%173 = aten.hardtanh.default(%172) : torch.float32[1, 3, 2] q=none
+%174 = aten.hardtanh.default(%173) : torch.float32[1, 3, 2] q=none
+%175 = aten.hardtanh.default(%174) : torch.float32[1, 3, 2] q=none
+%176 = aten.hardtanh.default(%175) : torch.float32[1, 3, 2] q=none
+%177 = aten.hardtanh.default(%176) : torch.float32[1, 3, 2] q=none
+%178 = aten.hardtanh.default(%177) : torch.float32[1, 3, 2] q=none
+%179 = aten.hardtanh.default(%178) : torch.float32[1, 3, 2] q=none
+%180 = aten.hardtanh.default(%179) : torch.float32[1, 3, 2] q=none
+%181 = aten.hardtanh.default(%180) : torch.float32[1, 3, 2] q=none
+%182 = aten.hardtanh.default(%181) : torch.float32[1, 3, 2] q=none
+%183 = aten.hardtanh.default(%182) : torch.float32[1, 3, 2] q=none
+%184 = aten.hardtanh.default(%183) : torch.float32[1, 3, 2] q=none
+%185 = aten.hardtanh.default(%184) : torch.float32[1, 3, 2] q=none
+%186 = aten.hardtanh.default(%185) : torch.float32[1, 3, 2] q=none
+%187 = aten.hardtanh.default(%186) : torch.float32[1, 3, 2] q=none
+%188 = aten.hardtanh.default(%187) : torch.float32[1, 3, 2] q=none
+%189 = aten.hardtanh.default(%188) : torch.float32[1, 3, 2] q=none
+%190 = aten.hardtanh.default(%189) : torch.float32[1, 3, 2] q=none
+%191 = aten.hardtanh.default(%190) : torch.float32[1, 3, 2] q=none
+%192 = aten.hardtanh.default(%191) : torch.float32[1, 3, 2] q=none
+%193 = aten.hardtanh.default(%192) : torch.float32[1, 3, 2] q=none
+%194 = aten.hardtanh.default(%193) : torch.float32[1, 3, 2] q=none
+%195 = aten.hardtanh.default(%194) : torch.float32[1, 3, 2] q=none
+%196 = aten.hardtanh.default(%195) : torch.float32[1, 3, 2] q=none
+%197 = aten.hardtanh.default(%196) : torch.float32[1, 3, 2] q=none
+%198 = aten.hardtanh.default(%197) : torch.float32[1, 3, 2] q=none
+%199 = aten.hardtanh.default(%198) : torch.float32[1, 3, 2] q=none
+%200 = aten.hardtanh.default(%199) : torch.float32[1, 3, 2] q=none
+%201 = aten.hardtanh.default(%200) : torch.float32[1, 3, 2] q=none
+%202 = aten.hardtanh.default(%201) : torch.float32[1, 3, 2] q=none
+%203 = aten.hardtanh.default(%202) : torch.float32[1, 3, 2] q=none
+%204 = aten.hardtanh.default(%203) : torch.float32[1, 3, 2] q=none
+%205 = aten.hardtanh.default(%204) : torch.float32[1, 3, 2] q=none
+%206 = aten.hardtanh.default(%205) : torch.float32[1, 3, 2] q=none
+%207 = aten.hardtanh.default(%206) : torch.float32[1, 3, 2] q=none
+%208 = aten.hardtanh.default(%207) : torch.float32[1, 3, 2] q=none
+%209 = aten.hardtanh.default(%208) : torch.float32[1, 3, 2] q=none
+%210 = aten.hardtanh.default(%209) : torch.float32[1, 3, 2] q=none
+%211 = aten.hardtanh.default(%210) : torch.float32[1, 3, 2] q=none
+%212 = aten.hardtanh.default(%211) : torch.float32[1, 3, 2] q=none
+%213 = aten.hardtanh.default(%212) : torch.float32[1, 3, 2] q=none
+%214 = aten.hardtanh.default(%213) : torch.float32[1, 3, 2] q=none
+%215 = aten.hardtanh.default(%214) : torch.float32[1, 3, 2] q=none
+%216 = aten.hardtanh.default(%215) : torch.float32[1, 3, 2] q=none
+%217 = aten.hardtanh.default(%216) : torch.float32[1, 3, 2] q=none
+%218 = aten.hardtanh.default(%217) : torch.float32[1, 3, 2] q=none
+%219 = aten.hardtanh.default(%218) : torch.float32[1, 3, 2] q=none
+%220 = aten.hardtanh.default(%219) : torch.float32[1, 3, 2] q=none
+%221 = aten.hardtanh.default(%220) : torch.float32[1, 3, 2] q=none
+%222 = aten.hardtanh.default(%221) : torch.float32[1, 3, 2] q=none
+%223 = aten.hardtanh.default(%222) : torch.float32[1, 3, 2] q=none
+%224 = aten.hardtanh.default(%223) : torch.float32[1, 3, 2] q=none
+%225 = aten.hardtanh.default(%224) : torch.float32[1, 3, 2] q=none
+%226 = aten.hardtanh.default(%225) : torch.float32[1, 3, 2] q=none
+%227 = aten.hardtanh.default(%226) : torch.float32[1, 3, 2] q=none
+%228 = aten.hardtanh.default(%227) : torch.float32[1, 3, 2] q=none
+%229 = aten.hardtanh.default(%228) : torch.float32[1, 3, 2] q=none
+%230 = aten.hardtanh.default(%229) : torch.float32[1, 3, 2] q=none
+%231 = aten.hardtanh.default(%230) : torch.float32[1, 3, 2] q=none
+%232 = aten.hardtanh.default(%231) : torch.float32[1, 3, 2] q=none
+%233 = aten.hardtanh.default(%232) : torch.float32[1, 3, 2] q=none
+%234 = aten.hardtanh.default(%233) : torch.float32[1, 3, 2] q=none
+%235 = aten.hardtanh.default(%234) : torch.float32[1, 3, 2] q=none
+%236 = aten.hardtanh.default(%235) : torch.float32[1, 3, 2] q=none
+%237 = aten.hardtanh.default(%236) : torch.float32[1, 3, 2] q=none
+%238 = aten.hardtanh.default(%237) : torch.float32[1, 3, 2] q=none
+%239 = aten.hardtanh.default(%238) : torch.float32[1, 3, 2] q=none
+%240 = aten.hardtanh.default(%239) : torch.float32[1, 3, 2] q=none
+%241 = aten.hardtanh.default(%240) : torch.float32[1, 3, 2] q=none
+%242 = aten.hardtanh.default(%241) : torch.float32[1, 3, 2] q=none
+%243 = aten.hardtanh.default(%242) : torch.float32[1, 3, 2] q=none
+%244 = aten.hardtanh.default(%243) : torch.float32[1, 3, 2] q=none
+%245 = aten.hardtanh.default(%244) : torch.float32[1, 3, 2] q=none
+%246 = aten.hardtanh.default(%245) : torch.float32[1, 3, 2] q=none
+%247 = aten.hardtanh.default(%246) : torch.float32[1, 3, 2] q=none
+%248 = aten.hardtanh.default(%247) : torch.float32[1, 3, 2] q=none
+%249 = aten.hardtanh.default(%248) : torch.float32[1, 3, 2] q=none
+%250 = aten.hardtanh.default(%249) : torch.float32[1, 3, 2] q=none
+%251 = aten.hardtanh.default(%250) : torch.float32[1, 3, 2] q=none
+%252 = aten.hardtanh.default(%251) : torch.float32[1, 3, 2] q=none
+%253 = aten.hardtanh.default(%252) : torch.float32[1, 3, 2] q=none
+%254 = aten.hardtanh.default(%253) : torch.float32[1, 3, 2] q=none
+%255 = aten.hardtanh.default(%254) : torch.float32[1, 3, 2] q=none
+%256 = aten.hardtanh.default(%255) : torch.float32[1, 3, 2] q=none
+%257 = aten.hardtanh.default(%256) : torch.float32[1, 3, 2] q=none
+%258 = aten.hardtanh.default(%257) : torch.float32[1, 3, 2] q=none
+%259 = aten.hardtanh.default(%258) : torch.float32[1, 3, 2] q=none
+%260 = aten.hardtanh.default(%259) : torch.float32[1, 3, 2] q=none
+%261 = aten.hardtanh.default(%260) : torch.float32[1, 3, 2] q=none
+%262 = aten.hardtanh.default(%261) : torch.float32[1, 3, 2] q=none
+%263 = aten.hardtanh.default(%262) : torch.float32[1, 3, 2] q=none
+%264 = aten.hardtanh.default(%263) : torch.float32[1, 3, 2] q=none
+%265 = aten.hardtanh.default(%264) : torch.float32[1, 3, 2] q=none
+%266 = aten.hardtanh.default(%265) : torch.float32[1, 3, 2] q=none
+%267 = aten.hardtanh.default(%266) : torch.float32[1, 3, 2] q=none
+%268 = aten.hardtanh.default(%267) : torch.float32[1, 3, 2] q=none
+%269 = aten.hardtanh.default(%268) : torch.float32[1, 3, 2] q=none
+%270 = aten.hardtanh.default(%269) : torch.float32[1, 3, 2] q=none
+%271 = aten.hardtanh.default(%270) : torch.float32[1, 3, 2] q=none
+%272 = aten.hardtanh.default(%271) : torch.float32[1, 3, 2] q=none
+%273 = aten.hardtanh.default(%272) : torch.float32[1, 3, 2] q=none
+%274 = aten.hardtanh.default(%273) : torch.float32[1, 3, 2] q=none
+%275 = aten.hardtanh.default(%274) : torch.float32[1, 3, 2] q=none
+%276 = aten.hardtanh.default(%275) : torch.float32[1, 3, 2] q=none
+%277 = aten.hardtanh.default(%276) : torch.float32[1, 3, 2] q=none
+%278 = aten.hardtanh.default(%277) : torch.float32[1, 3, 2] q=none
+%279 = aten.hardtanh.default(%278) : torch.float32[1, 3, 2] q=none
+%280 = aten.hardtanh.default(%279) : torch.float32[1, 3, 2] q=none
+%281 = aten.hardtanh.default(%280) : torch.float32[1, 3, 2] q=none
+%282 = aten.hardtanh.default(%281) : torch.float32[1, 3, 2] q=none
+%283 = aten.hardtanh.default(%282) : torch.float32[1, 3, 2] q=none
+%284 = aten.hardtanh.default(%283) : torch.float32[1, 3, 2] q=none
+%285 = aten.hardtanh.default(%284) : torch.float32[1, 3, 2] q=none
+%286 = aten.hardtanh.default(%285) : torch.float32[1, 3, 2] q=none
+%287 = aten.hardtanh.default(%286) : torch.float32[1, 3, 2] q=none
+%288 = aten.hardtanh.default(%287) : torch.float32[1, 3, 2] q=none
+%289 = aten.hardtanh.default(%288) : torch.float32[1, 3, 2] q=none
+%290 = aten.hardtanh.default(%289) : torch.float32[1, 3, 2] q=none
+%291 = aten.hardtanh.default(%290) : torch.float32[1, 3, 2] q=none
+%292 = aten.hardtanh.default(%291) : torch.float32[1, 3, 2] q=none
+%293 = aten.hardtanh.default(%292) : torch.float32[1, 3, 2] q=none
+%294 = aten.hardtanh.default(%293) : torch.float32[1, 3, 2] q=none
+%295 = aten.hardtanh.default(%294) : torch.float32[1, 3, 2] q=none
+%296 = aten.hardtanh.default(%295) : torch.float32[1, 3, 2] q=none
+%297 = aten.hardtanh.default(%296) : torch.float32[1, 3, 2] q=none
+%298 = aten.hardtanh.default(%297) : torch.float32[1, 3, 2] q=none
+%299 = aten.hardtanh.default(%298) : torch.float32[1, 3, 2] q=none
+%300 = aten.hardtanh.default(%299) : torch.float32[1, 3, 2] q=none
+%301 = aten.hardtanh.default(%300) : torch.float32[1, 3, 2] q=none
+%302 = aten.hardtanh.default(%301) : torch.float32[1, 3, 2] q=none
+%303 = aten.hardtanh.default(%302) : torch.float32[1, 3, 2] q=none
+%304 = aten.hardtanh.default(%303) : torch.float32[1, 3, 2] q=none
+%305 = aten.hardtanh.default(%304) : torch.float32[1, 3, 2] q=none
+%306 = aten.hardtanh.default(%305) : torch.float32[1, 3, 2] q=none
+%307 = aten.hardtanh.default(%306) : torch.float32[1, 3, 2] q=none
+%308 = aten.hardtanh.default(%307) : torch.float32[1, 3, 2] q=none
+%309 = aten.hardtanh.default(%308) : torch.float32[1, 3, 2] q=none
+%310 = aten.hardtanh.default(%309) : torch.float32[1, 3, 2] q=none
+%311 = aten.hardtanh.default(%310) : torch.float32[1, 3, 2] q=none
+%312 = aten.hardtanh.default(%311) : torch.float32[1, 3, 2] q=none
+%313 = aten.hardtanh.default(%312) : torch.float32[1, 3, 2] q=none
+%314 = aten.hardtanh.default(%313) : torch.float32[1, 3, 2] q=none
+%315 = aten.hardtanh.default(%314) : torch.float32[1, 3, 2] q=none
+%316 = aten.hardtanh.default(%315) : torch.float32[1, 3, 2] q=none
+%317 = aten.hardtanh.default(%316) : torch.float32[1, 3, 2] q=none
+%318 = aten.hardtanh.default(%317) : torch.float32[1, 3, 2] q=none
+%319 = aten.hardtanh.default(%318) : torch.float32[1, 3, 2] q=none
+%320 = aten.hardtanh.default(%319) : torch.float32[1, 3, 2] q=none
+%321 = aten.hardtanh.default(%320) : torch.float32[1, 3, 2] q=none
+%322 = aten.hardtanh.default(%321) : torch.float32[1, 3, 2] q=none
+%323 = aten.hardtanh.default(%322) : torch.float32[1, 3, 2] q=none
+%324 = aten.hardtanh.default(%323) : torch.float32[1, 3, 2] q=none
+%325 = aten.hardtanh.default(%324) : torch.float32[1, 3, 2] q=none
+%326 = aten.hardtanh.default(%325) : torch.float32[1, 3, 2] q=none
+%327 = aten.hardtanh.default(%326) : torch.float32[1, 3, 2] q=none
+%328 = aten.hardtanh.default(%327) : torch.float32[1, 3, 2] q=none
+%329 = aten.hardtanh.default(%328) : torch.float32[1, 3, 2] q=none
+%330 = aten.hardtanh.default(%329) : torch.float32[1, 3, 2] q=none
+%331 = aten.hardtanh.default(%330) : torch.float32[1, 3, 2] q=none
+%332 = aten.hardtanh.default(%331) : torch.float32[1, 3, 2] q=none
+%333 = aten.hardtanh.default(%332) : torch.float32[1, 3, 2] q=none
+%334 = aten.hardtanh.default(%333) : torch.float32[1, 3, 2] q=none
+%335 = aten.hardtanh.default(%334) : torch.float32[1, 3, 2] q=none
+%336 = aten.hardtanh.default(%335) : torch.float32[1, 3, 2] q=none
+%337 = aten.hardtanh.default(%336) : torch.float32[1, 3, 2] q=none
+%338 = aten.hardtanh.default(%337) : torch.float32[1, 3, 2] q=none
+%339 = aten.hardtanh.default(%338) : torch.float32[1, 3, 2] q=none
+%340 = aten.hardtanh.default(%339) : torch.float32[1, 3, 2] q=none
+%341 = aten.hardtanh.default(%340) : torch.float32[1, 3, 2] q=none
+%342 = aten.hardtanh.default(%341) : torch.float32[1, 3, 2] q=none
+%343 = aten.hardtanh.default(%342) : torch.float32[1, 3, 2] q=none
+%344 = aten.hardtanh.default(%343) : torch.float32[1, 3, 2] q=none
+%345 = aten.hardtanh.default(%344) : torch.float32[1, 3, 2] q=none
+%346 = aten.hardtanh.default(%345) : torch.float32[1, 3, 2] q=none
+%347 = aten.hardtanh.default(%346) : torch.float32[1, 3, 2] q=none
+%348 = aten.hardtanh.default(%347) : torch.float32[1, 3, 2] q=none
+%349 = aten.hardtanh.default(%348) : torch.float32[1, 3, 2] q=none
+%350 = aten.hardtanh.default(%349) : torch.float32[1, 3, 2] q=none
+%351 = aten.hardtanh.default(%350) : torch.float32[1, 3, 2] q=none
+%352 = aten.hardtanh.default(%351) : torch.float32[1, 3, 2] q=none
+%353 = aten.hardtanh.default(%352) : torch.float32[1, 3, 2] q=none
+%354 = aten.hardtanh.default(%353) : torch.float32[1, 3, 2] q=none
+%355 = aten.hardtanh.default(%354) : torch.float32[1, 3, 2] q=none
+%356 = aten.hardtanh.default(%355) : torch.float32[1, 3, 2] q=none
+%357 = aten.hardtanh.default(%356) : torch.float32[1, 3, 2] q=none
+%358 = aten.hardtanh.default(%357) : torch.float32[1, 3, 2] q=none
+%359 = aten.hardtanh.default(%358) : torch.float32[1, 3, 2] q=none
+%360 = aten.hardtanh.default(%359) : torch.float32[1, 3, 2] q=none
+%361 = aten.hardtanh.default(%360) : torch.float32[1, 3, 2] q=none
+%362 = aten.hardtanh.default(%361) : torch.float32[1, 3, 2] q=none
+%363 = aten.hardtanh.default(%362) : torch.float32[1, 3, 2] q=none
+%364 = aten.hardtanh.default(%363) : torch.float32[1, 3, 2] q=none
+%365 = aten.hardtanh.default(%364) : torch.float32[1, 3, 2] q=none
+%366 = aten.hardtanh.default(%365) : torch.float32[1, 3, 2] q=none
+%367 = aten.hardtanh.default(%366) : torch.float32[1, 3, 2] q=none
+%368 = aten.hardtanh.default(%367) : torch.float32[1, 3, 2] q=none
+%369 = aten.hardtanh.default(%368) : torch.float32[1, 3, 2] q=none
+%370 = aten.hardtanh.default(%369) : torch.float32[1, 3, 2] q=none
+%371 = aten.hardtanh.default(%370) : torch.float32[1, 3, 2] q=none
+%372 = aten.hardtanh.default(%371) : torch.float32[1, 3, 2] q=none
+%373 = aten.hardtanh.default(%372) : torch.float32[1, 3, 2] q=none
+%374 = aten.hardtanh.default(%373) : torch.float32[1, 3, 2] q=none
+%375 = aten.hardtanh.default(%374) : torch.float32[1, 3, 2] q=none
+%376 = aten.hardtanh.default(%375) : torch.float32[1, 3, 2] q=none
+%377 = aten.hardtanh.default(%376) : torch.float32[1, 3, 2] q=none
+%378 = aten.hardtanh.default(%377) : torch.float32[1, 3, 2] q=none
+%379 = aten.hardtanh.default(%378) : torch.float32[1, 3, 2] q=none
+%380 = aten.hardtanh.default(%379) : torch.float32[1, 3, 2] q=none
+%381 = aten.hardtanh.default(%380) : torch.float32[1, 3, 2] q=none
+%382 = aten.hardtanh.default(%381) : torch.float32[1, 3, 2] q=none
+%383 = aten.hardtanh.default(%382) : torch.float32[1, 3, 2] q=none
+%384 = aten.hardtanh.default(%383) : torch.float32[1, 3, 2] q=none
+%385 = aten.hardtanh.default(%384) : torch.float32[1, 3, 2] q=none
+%386 = aten.hardtanh.default(%385) : torch.float32[1, 3, 2] q=none
+%387 = aten.hardtanh.default(%386) : torch.float32[1, 3, 2] q=none
+%388 = aten.hardtanh.default(%387) : torch.float32[1, 3, 2] q=none
+%389 = aten.hardtanh.default(%388) : torch.float32[1, 3, 2] q=none
+%390 = aten.hardtanh.default(%389) : torch.float32[1, 3, 2] q=none
+%391 = aten.hardtanh.default(%390) : torch.float32[1, 3, 2] q=none
+%392 = aten.hardtanh.default(%391) : torch.float32[1, 3, 2] q=none
+%393 = aten.hardtanh.default(%392) : torch.float32[1, 3, 2] q=none
+%394 = aten.hardtanh.default(%393) : torch.float32[1, 3, 2] q=none
+%395 = aten.hardtanh.default(%394) : torch.float32[1, 3, 2] q=none
+%396 = aten.hardtanh.default(%395) : torch.float32[1, 3, 2] q=none
+%397 = aten.hardtanh.default(%396) : torch.float32[1, 3, 2] q=none
+%398 = aten.hardtanh.default(%397) : torch.float32[1, 3, 2] q=none
+%399 = aten.hardtanh.default(%398) : torch.float32[1, 3, 2] q=none
+%400 = aten.hardtanh.default(%399) : torch.float32[1, 3, 2] q=none
+%401 = aten.hardtanh.default(%400) : torch.float32[1, 3, 2] q=none
+%402 = aten.hardtanh.default(%401) : torch.float32[1, 3, 2] q=none
+%403 = aten.hardtanh.default(%402) : torch.float32[1, 3, 2] q=none
+%404 = aten.hardtanh.default(%403) : torch.float32[1, 3, 2] q=none
+%405 = aten.hardtanh.default(%404) : torch.float32[1, 3, 2] q=none
+%406 = aten.hardtanh.default(%405) : torch.float32[1, 3, 2] q=none
+%407 = aten.hardtanh.default(%406) : torch.float32[1, 3, 2] q=none
+%408 = aten.hardtanh.default(%407) : torch.float32[1, 3, 2] q=none
+%409 = aten.hardtanh.default(%408) : torch.float32[1, 3, 2] q=none
+%410 = aten.hardtanh.default(%409) : torch.float32[1, 3, 2] q=none
+%411 = aten.hardtanh.default(%410) : torch.float32[1, 3, 2] q=none
+%412 = aten.hardtanh.default(%411) : torch.float32[1, 3, 2] q=none
+%413 = aten.hardtanh.default(%412) : torch.float32[1, 3, 2] q=none
+%414 = aten.hardtanh.default(%413) : torch.float32[1, 3, 2] q=none
+%415 = aten.hardtanh.default(%414) : torch.float32[1, 3, 2] q=none
+%416 = aten.hardtanh.default(%415) : torch.float32[1, 3, 2] q=none
+%417 = aten.hardtanh.default(%416) : torch.float32[1, 3, 2] q=none
+%418 = aten.hardtanh.default(%417) : torch.float32[1, 3, 2] q=none
+%419 = aten.hardtanh.default(%418) : torch.float32[1, 3, 2] q=none
+%420 = aten.hardtanh.default(%419) : torch.float32[1, 3, 2] q=none
+%421 = aten.hardtanh.default(%420) : torch.float32[1, 3, 2] q=none
+%422 = aten.hardtanh.default(%421) : torch.float32[1, 3, 2] q=none
+%423 = aten.hardtanh.default(%422) : torch.float32[1, 3, 2] q=none
+%424 = aten.hardtanh.default(%423) : torch.float32[1, 3, 2] q=none
+%425 = aten.hardtanh.default(%424) : torch.float32[1, 3, 2] q=none
+%426 = aten.hardtanh.default(%425) : torch.float32[1, 3, 2] q=none
+%427 = aten.hardtanh.default(%426) : torch.float32[1, 3, 2] q=none
+%428 = aten.hardtanh.default(%427) : torch.float32[1, 3, 2] q=none
+%429 = aten.hardtanh.default(%428) : torch.float32[1, 3, 2] q=none
+%430 = aten.hardtanh.default(%429) : torch.float32[1, 3, 2] q=none
+%431 = aten.hardtanh.default(%430) : torch.float32[1, 3, 2] q=none
+%432 = aten.hardtanh.default(%431) : torch.float32[1, 3, 2] q=none
+%433 = aten.hardtanh.default(%432) : torch.float32[1, 3, 2] q=none
+%434 = aten.hardtanh.default(%433) : torch.float32[1, 3, 2] q=none
+%435 = aten.hardtanh.default(%434) : torch.float32[1, 3, 2] q=none
+%436 = aten.hardtanh.default(%435) : torch.float32[1, 3, 2] q=none
+%437 = aten.hardtanh.default(%436) : torch.float32[1, 3, 2] q=none
+%438 = aten.hardtanh.default(%437) : torch.float32[1, 3, 2] q=none
+%439 = aten.hardtanh.default(%438) : torch.float32[1, 3, 2] q=none
+%440 = aten.hardtanh.default(%439) : torch.float32[1, 3, 2] q=none
+%441 = aten.hardtanh.default(%440) : torch.float32[1, 3, 2] q=none
+%442 = aten.hardtanh.default(%441) : torch.float32[1, 3, 2] q=none
+%443 = aten.hardtanh.default(%442) : torch.float32[1, 3, 2] q=none
+%444 = aten.hardtanh.default(%443) : torch.float32[1, 3, 2] q=none
+%445 = aten.hardtanh.default(%444) : torch.float32[1, 3, 2] q=none
+%446 = aten.hardtanh.default(%445) : torch.float32[1, 3, 2] q=none
+%447 = aten.hardtanh.default(%446) : torch.float32[1, 3, 2] q=none
+%448 = aten.hardtanh.default(%447) : torch.float32[1, 3, 2] q=none
+%449 = aten.hardtanh.default(%448) : torch.float32[1, 3, 2] q=none
+%450 = aten.hardtanh.default(%449) : torch.float32[1, 3, 2] q=none
+%451 = aten.hardtanh.default(%450) : torch.float32[1, 3, 2] q=none
+%452 = aten.hardtanh.default(%451) : torch.float32[1, 3, 2] q=none
+%453 = aten.hardtanh.default(%452) : torch.float32[1, 3, 2] q=none
+%454 = aten.hardtanh.default(%453) : torch.float32[1, 3, 2] q=none
+%455 = aten.hardtanh.default(%454) : torch.float32[1, 3, 2] q=none
+%456 = aten.hardtanh.default(%455) : torch.float32[1, 3, 2] q=none
+%457 = aten.hardtanh.default(%456) : torch.float32[1, 3, 2] q=none
+%458 = aten.hardtanh.default(%457) : torch.float32[1, 3, 2] q=none
+%459 = aten.hardtanh.default(%458) : torch.float32[1, 3, 2] q=none
+%460 = aten.hardtanh.default(%459) : torch.float32[1, 3, 2] q=none
+%461 = aten.hardtanh.default(%460) : torch.float32[1, 3, 2] q=none
+%462 = aten.hardtanh.default(%461) : torch.float32[1, 3, 2] q=none
+%463 = aten.hardtanh.default(%462) : torch.float32[1, 3, 2] q=none
+%464 = aten.hardtanh.default(%463) : torch.float32[1, 3, 2] q=none
+%465 = aten.hardtanh.default(%464) : torch.float32[1, 3, 2] q=none
+%466 = aten.hardtanh.default(%465) : torch.float32[1, 3, 2] q=none
+%467 = aten.hardtanh.default(%466) : torch.float32[1, 3, 2] q=none
+%468 = aten.hardtanh.default(%467) : torch.float32[1, 3, 2] q=none
+%469 = aten.hardtanh.default(%468) : torch.float32[1, 3, 2] q=none
+%470 = aten.hardtanh.default(%469) : torch.float32[1, 3, 2] q=none
+%471 = aten.hardtanh.default(%470) : torch.float32[1, 3, 2] q=none
+%472 = aten.hardtanh.default(%471) : torch.float32[1, 3, 2] q=none
+%473 = aten.hardtanh.default(%472) : torch.float32[1, 3, 2] q=none
+%474 = aten.hardtanh.default(%473) : torch.float32[1, 3, 2] q=none
+%475 = aten.hardtanh.default(%474) : torch.float32[1, 3, 2] q=none
+%476 = aten.hardtanh.default(%475) : torch.float32[1, 3, 2] q=none
+%477 = aten.hardtanh.default(%476) : torch.float32[1, 3, 2] q=none
+%478 = aten.hardtanh.default(%477) : torch.float32[1, 3, 2] q=none
+%479 = aten.hardtanh.default(%478) : torch.float32[1, 3, 2] q=none
+%480 = aten.hardtanh.default(%479) : torch.float32[1, 3, 2] q=none
+%481 = aten.hardtanh.default(%480) : torch.float32[1, 3, 2] q=none
+%482 = aten.hardtanh.default(%481) : torch.float32[1, 3, 2] q=none
+%483 = aten.hardtanh.default(%482) : torch.float32[1, 3, 2] q=none
+%484 = aten.hardtanh.default(%483) : torch.float32[1, 3, 2] q=none
+%485 = aten.hardtanh.default(%484) : torch.float32[1, 3, 2] q=none
+%486 = aten.hardtanh.default(%485) : torch.float32[1, 3, 2] q=none
+%487 = aten.hardtanh.default(%486) : torch.float32[1, 3, 2] q=none
+%488 = aten.hardtanh.default(%487) : torch.float32[1, 3, 2] q=none
+%489 = aten.hardtanh.default(%488) : torch.float32[1, 3, 2] q=none
+%490 = aten.hardtanh.default(%489) : torch.float32[1, 3, 2] q=none
+%491 = aten.hardtanh.default(%490) : torch.float32[1, 3, 2] q=none
+%492 = aten.hardtanh.default(%491) : torch.float32[1, 3, 2] q=none
+%493 = aten.hardtanh.default(%492) : torch.float32[1, 3, 2] q=none
+%494 = aten.hardtanh.default(%493) : torch.float32[1, 3, 2] q=none
+%495 = aten.hardtanh.default(%494) : torch.float32[1, 3, 2] q=none
+%496 = aten.hardtanh.default(%495) : torch.float32[1, 3, 2] q=none
+%497 = aten.hardtanh.default(%496) : torch.float32[1, 3, 2] q=none
+%498 = aten.hardtanh.default(%497) : torch.float32[1, 3, 2] q=none
+%499 = aten.hardtanh.default(%498) : torch.float32[1, 3, 2] q=none
+%500 = aten.hardtanh.default(%499) : torch.float32[1, 3, 2] q=none
+%501 = aten.hardtanh.default(%500) : torch.float32[1, 3, 2] q=none
+%502 = aten.hardtanh.default(%501) : torch.float32[1, 3, 2] q=none
+%503 = aten.hardtanh.default(%502) : torch.float32[1, 3, 2] q=none
+%504 = aten.hardtanh.default(%503) : torch.float32[1, 3, 2] q=none
+%505 = aten.hardtanh.default(%504) : torch.float32[1, 3, 2] q=none
+%506 = aten.hardtanh.default(%505) : torch.float32[1, 3, 2] q=none
+%507 = aten.hardtanh.default(%506) : torch.float32[1, 3, 2] q=none
+%508 = aten.hardtanh.default(%507) : torch.float32[1, 3, 2] q=none
+%509 = aten.hardtanh.default(%508) : torch.float32[1, 3, 2] q=none
+%510 = aten.hardtanh.default(%509) : torch.float32[1, 3, 2] q=none
+%511 = aten.hardtanh.default(%510) : torch.float32[1, 3, 2] q=none
+%512 = aten.hardtanh.default(%511) : torch.float32[1, 3, 2] q=none
+%513 = aten.hardtanh.default(%512) : torch.float32[1, 3, 2] q=none
+%514 = aten.hardtanh.default(%513) : torch.float32[1, 3, 2] q=none
+%515 = aten.hardtanh.default(%514) : torch.float32[1, 3, 2] q=none
+%516 = aten.hardtanh.default(%515) : torch.float32[1, 3, 2] q=none
+%517 = aten.hardtanh.default(%516) : torch.float32[1, 3, 2] q=none
+%518 = aten.hardtanh.default(%517) : torch.float32[1, 3, 2] q=none
+%519 = aten.hardtanh.default(%518) : torch.float32[1, 3, 2] q=none
+%520 = aten.hardtanh.default(%519) : torch.float32[1, 3, 2] q=none
+%521 = aten.hardtanh.default(%520) : torch.float32[1, 3, 2] q=none
+%522 = aten.hardtanh.default(%521) : torch.float32[1, 3, 2] q=none
+%523 = aten.hardtanh.default(%522) : torch.float32[1, 3, 2] q=none
+%524 = aten.hardtanh.default(%523) : torch.float32[1, 3, 2] q=none
+%525 = aten.hardtanh.default(%524) : torch.float32[1, 3, 2] q=none
+%526 = aten.hardtanh.default(%525) : torch.float32[1, 3, 2] q=none
+%527 = aten.hardtanh.default(%526) : torch.float32[1, 3, 2] q=none
+%528 = aten.hardtanh.default(%527) : torch.float32[1, 3, 2] q=none
+%529 = aten.hardtanh.default(%528) : torch.float32[1, 3, 2] q=none
+%530 = aten.hardtanh.default(%529) : torch.float32[1, 3, 2] q=none
+%531 = aten.hardtanh.default(%530) : torch.float32[1, 3, 2] q=none
+%532 = aten.hardtanh.default(%531) : torch.float32[1, 3, 2] q=none
+%533 = aten.hardtanh.default(%532) : torch.float32[1, 3, 2] q=none
+%534 = aten.hardtanh.default(%533) : torch.float32[1, 3, 2] q=none
+%535 = aten.hardtanh.default(%534) : torch.float32[1, 3, 2] q=none
+%536 = aten.hardtanh.default(%535) : torch.float32[1, 3, 2] q=none
+%537 = aten.hardtanh.default(%536) : torch.float32[1, 3, 2] q=none
+%538 = aten.hardtanh.default(%537) : torch.float32[1, 3, 2] q=none
+%539 = aten.hardtanh.default(%538) : torch.float32[1, 3, 2] q=none
+%540 = aten.hardtanh.default(%539) : torch.float32[1, 3, 2] q=none
+%541 = aten.hardtanh.default(%540) : torch.float32[1, 3, 2] q=none
+%542 = aten.hardtanh.default(%541) : torch.float32[1, 3, 2] q=none
+%543 = aten.hardtanh.default(%542) : torch.float32[1, 3, 2] q=none
+%544 = aten.hardtanh.default(%543) : torch.float32[1, 3, 2] q=none
+%545 = aten.hardtanh.default(%544) : torch.float32[1, 3, 2] q=none
+%546 = aten.hardtanh.default(%545) : torch.float32[1, 3, 2] q=none
+%547 = aten.hardtanh.default(%546) : torch.float32[1, 3, 2] q=none
+%548 = aten.hardtanh.default(%547) : torch.float32[1, 3, 2] q=none
+%549 = aten.hardtanh.default(%548) : torch.float32[1, 3, 2] q=none
+%550 = aten.hardtanh.default(%549) : torch.float32[1, 3, 2] q=none
+%551 = aten.hardtanh.default(%550) : torch.float32[1, 3, 2] q=none
+%552 = aten.hardtanh.default(%551) : torch.float32[1, 3, 2] q=none
+%553 = aten.hardtanh.default(%552) : torch.float32[1, 3, 2] q=none
+%554 = aten.hardtanh.default(%553) : torch.float32[1, 3, 2] q=none
+%555 = aten.hardtanh.default(%554) : torch.float32[1, 3, 2] q=none
+%556 = aten.hardtanh.default(%555) : torch.float32[1, 3, 2] q=none
+%557 = aten.hardtanh.default(%556) : torch.float32[1, 3, 2] q=none
+%558 = aten.hardtanh.default(%557) : torch.float32[1, 3, 2] q=none
+%559 = aten.hardtanh.default(%558) : torch.float32[1, 3, 2] q=none
+%560 = aten.hardtanh.default(%559) : torch.float32[1, 3, 2] q=none
+%561 = aten.hardtanh.default(%560) : torch.float32[1, 3, 2] q=none
+%562 = aten.hardtanh.default(%561) : torch.float32[1, 3, 2] q=none
+%563 = aten.hardtanh.default(%562) : torch.float32[1, 3, 2] q=none
+%564 = aten.hardtanh.default(%563) : torch.float32[1, 3, 2] q=none
+%565 = aten.hardtanh.default(%564) : torch.float32[1, 3, 2] q=none
+%566 = aten.hardtanh.default(%565) : torch.float32[1, 3, 2] q=none
+%567 = aten.hardtanh.default(%566) : torch.float32[1, 3, 2] q=none
+%568 = aten.hardtanh.default(%567) : torch.float32[1, 3, 2] q=none
+%569 = aten.hardtanh.default(%568) : torch.float32[1, 3, 2] q=none
+%570 = aten.hardtanh.default(%569) : torch.float32[1, 3, 2] q=none
+%571 = aten.hardtanh.default(%570) : torch.float32[1, 3, 2] q=none
+%572 = aten.hardtanh.default(%571) : torch.float32[1, 3, 2] q=none
+%573 = aten.hardtanh.default(%572) : torch.float32[1, 3, 2] q=none
+%574 = aten.hardtanh.default(%573) : torch.float32[1, 3, 2] q=none
+%575 = aten.hardtanh.default(%574) : torch.float32[1, 3, 2] q=none
+%576 = aten.hardtanh.default(%575) : torch.float32[1, 3, 2] q=none
+%577 = aten.hardtanh.default(%576) : torch.float32[1, 3, 2] q=none
+%578 = aten.hardtanh.default(%577) : torch.float32[1, 3, 2] q=none
+%579 = aten.hardtanh.default(%578) : torch.float32[1, 3, 2] q=none
+%580 = aten.hardtanh.default(%579) : torch.float32[1, 3, 2] q=none
+%581 = aten.hardtanh.default(%580) : torch.float32[1, 3, 2] q=none
+%582 = aten.hardtanh.default(%581) : torch.float32[1, 3, 2] q=none
+%583 = aten.hardtanh.default(%582) : torch.float32[1, 3, 2] q=none
+%584 = aten.hardtanh.default(%583) : torch.float32[1, 3, 2] q=none
+%585 = aten.hardtanh.default(%584) : torch.float32[1, 3, 2] q=none
+%586 = aten.hardtanh.default(%585) : torch.float32[1, 3, 2] q=none
+%587 = aten.hardtanh.default(%586) : torch.float32[1, 3, 2] q=none
+%588 = aten.hardtanh.default(%587) : torch.float32[1, 3, 2] q=none
+%589 = aten.hardtanh.default(%588) : torch.float32[1, 3, 2] q=none
+%590 = aten.hardtanh.default(%589) : torch.float32[1, 3, 2] q=none
+%591 = aten.hardtanh.default(%590) : torch.float32[1, 3, 2] q=none
+%592 = aten.hardtanh.default(%591) : torch.float32[1, 3, 2] q=none
+%593 = aten.hardtanh.default(%592) : torch.float32[1, 3, 2] q=none
+%594 = aten.hardtanh.default(%593) : torch.float32[1, 3, 2] q=none
+%595 = aten.hardtanh.default(%594) : torch.float32[1, 3, 2] q=none
+%596 = aten.hardtanh.default(%595) : torch.float32[1, 3, 2] q=none
+%597 = aten.hardtanh.default(%596) : torch.float32[1, 3, 2] q=none
+%598 = aten.hardtanh.default(%597) : torch.float32[1, 3, 2] q=none
+%599 = aten.hardtanh.default(%598) : torch.float32[1, 3, 2] q=none
+%600 = aten.hardtanh.default(%599) : torch.float32[1, 3, 2] q=none
+%601 = aten.hardtanh.default(%600) : torch.float32[1, 3, 2] q=none
+%602 = aten.hardtanh.default(%601) : torch.float32[1, 3, 2] q=none
+%603 = aten.hardtanh.default(%602) : torch.float32[1, 3, 2] q=none
+%604 = aten.hardtanh.default(%603) : torch.float32[1, 3, 2] q=none
+%605 = aten.hardtanh.default(%604) : torch.float32[1, 3, 2] q=none
+%606 = aten.hardtanh.default(%605) : torch.float32[1, 3, 2] q=none
+%607 = aten.hardtanh.default(%606) : torch.float32[1, 3, 2] q=none
+%608 = aten.hardtanh.default(%607) : torch.float32[1, 3, 2] q=none
+%609 = aten.hardtanh.default(%608) : torch.float32[1, 3, 2] q=none
+%610 = aten.hardtanh.default(%609) : torch.float32[1, 3, 2] q=none
+%611 = aten.hardtanh.default(%610) : torch.float32[1, 3, 2] q=none
+%612 = aten.hardtanh.default(%611) : torch.float32[1, 3, 2] q=none
+%613 = aten.hardtanh.default(%612) : torch.float32[1, 3, 2] q=none
+%614 = aten.hardtanh.default(%613) : torch.float32[1, 3, 2] q=none
+%615 = aten.hardtanh.default(%614) : torch.float32[1, 3, 2] q=none
+%616 = aten.hardtanh.default(%615) : torch.float32[1, 3, 2] q=none
+%617 = aten.hardtanh.default(%616) : torch.float32[1, 3, 2] q=none
+%618 = aten.hardtanh.default(%617) : torch.float32[1, 3, 2] q=none
+%619 = aten.hardtanh.default(%618) : torch.float32[1, 3, 2] q=none
+%620 = aten.hardtanh.default(%619) : torch.float32[1, 3, 2] q=none
+%621 = aten.hardtanh.default(%620) : torch.float32[1, 3, 2] q=none
+%622 = aten.hardtanh.default(%621) : torch.float32[1, 3, 2] q=none
+%623 = aten.hardtanh.default(%622) : torch.float32[1, 3, 2] q=none
+%624 = aten.hardtanh.default(%623) : torch.float32[1, 3, 2] q=none
+%625 = aten.hardtanh.default(%624) : torch.float32[1, 3, 2] q=none
+%626 = aten.hardtanh.default(%625) : torch.float32[1, 3, 2] q=none
+%627 = aten.hardtanh.default(%626) : torch.float32[1, 3, 2] q=none
+%628 = aten.hardtanh.default(%627) : torch.float32[1, 3, 2] q=none
+%629 = aten.hardtanh.default(%628) : torch.float32[1, 3, 2] q=none
+%630 = aten.hardtanh.default(%629) : torch.float32[1, 3, 2] q=none
+%631 = aten.hardtanh.default(%630) : torch.float32[1, 3, 2] q=none
+%632 = aten.hardtanh.default(%631) : torch.float32[1, 3, 2] q=none
+%633 = aten.hardtanh.default(%632) : torch.float32[1, 3, 2] q=none
+%634 = aten.hardtanh.default(%633) : torch.float32[1, 3, 2] q=none
+%635 = aten.hardtanh.default(%634) : torch.float32[1, 3, 2] q=none
+%636 = aten.hardtanh.default(%635) : torch.float32[1, 3, 2] q=none
+%637 = aten.hardtanh.default(%636) : torch.float32[1, 3, 2] q=none
+%638 = aten.hardtanh.default(%637) : torch.float32[1, 3, 2] q=none
+%639 = aten.hardtanh.default(%638) : torch.float32[1, 3, 2] q=none
+%640 = aten.hardtanh.default(%639) : torch.float32[1, 3, 2] q=none
+%641 = aten.hardtanh.default(%640) : torch.float32[1, 3, 2] q=none
+%642 = aten.hardtanh.default(%641) : torch.float32[1, 3, 2] q=none
+%643 = aten.hardtanh.default(%642) : torch.float32[1, 3, 2] q=none
+%644 = aten.hardtanh.default(%643) : torch.float32[1, 3, 2] q=none
+%645 = aten.hardtanh.default(%644) : torch.float32[1, 3, 2] q=none
+%646 = aten.hardtanh.default(%645) : torch.float32[1, 3, 2] q=none
+%647 = aten.hardtanh.default(%646) : torch.float32[1, 3, 2] q=none
+%648 = aten.hardtanh.default(%647) : torch.float32[1, 3, 2] q=none
+%649 = aten.hardtanh.default(%648) : torch.float32[1, 3, 2] q=none
+%650 = aten.hardtanh.default(%649) : torch.float32[1, 3, 2] q=none
+%651 = aten.hardtanh.default(%650) : torch.float32[1, 3, 2] q=none
+%652 = aten.hardtanh.default(%651) : torch.float32[1, 3, 2] q=none
+%653 = aten.hardtanh.default(%652) : torch.float32[1, 3, 2] q=none
+%654 = aten.hardtanh.default(%653) : torch.float32[1, 3, 2] q=none
+%655 = aten.hardtanh.default(%654) : torch.float32[1, 3, 2] q=none
+%656 = aten.hardtanh.default(%655) : torch.float32[1, 3, 2] q=none
+%657 = aten.hardtanh.default(%656) : torch.float32[1, 3, 2] q=none
+%658 = aten.hardtanh.default(%657) : torch.float32[1, 3, 2] q=none
+%659 = aten.hardtanh.default(%658) : torch.float32[1, 3, 2] q=none
+%660 = aten.hardtanh.default(%659) : torch.float32[1, 3, 2] q=none
+%661 = aten.hardtanh.default(%660) : torch.float32[1, 3, 2] q=none
+%662 = aten.hardtanh.default(%661) : torch.float32[1, 3, 2] q=none
+%663 = aten.hardtanh.default(%662) : torch.float32[1, 3, 2] q=none
+%664 = aten.hardtanh.default(%663) : torch.float32[1, 3, 2] q=none
+%665 = aten.hardtanh.default(%664) : torch.float32[1, 3, 2] q=none
+%666 = aten.hardtanh.default(%665) : torch.float32[1, 3, 2] q=none
+%667 = aten.hardtanh.default(%666) : torch.float32[1, 3, 2] q=none
+%668 = aten.hardtanh.default(%667) : torch.float32[1, 3, 2] q=none
+%669 = aten.hardtanh.default(%668) : torch.float32[1, 3, 2] q=none
+%670 = aten.hardtanh.default(%669) : torch.float32[1, 3, 2] q=none
+%671 = aten.hardtanh.default(%670) : torch.float32[1, 3, 2] q=none
+%672 = aten.hardtanh.default(%671) : torch.float32[1, 3, 2] q=none
+%673 = aten.hardtanh.default(%672) : torch.float32[1, 3, 2] q=none
+%674 = aten.hardtanh.default(%673) : torch.float32[1, 3, 2] q=none
+%675 = aten.hardtanh.default(%674) : torch.float32[1, 3, 2] q=none
+%676 = aten.hardtanh.default(%675) : torch.float32[1, 3, 2] q=none
+%677 = aten.hardtanh.default(%676) : torch.float32[1, 3, 2] q=none
+%678 = aten.hardtanh.default(%677) : torch.float32[1, 3, 2] q=none
+%679 = aten.hardtanh.default(%678) : torch.float32[1, 3, 2] q=none
+%680 = aten.hardtanh.default(%679) : torch.float32[1, 3, 2] q=none
+%681 = aten.hardtanh.default(%680) : torch.float32[1, 3, 2] q=none
+%682 = aten.hardtanh.default(%681) : torch.float32[1, 3, 2] q=none
+%683 = aten.hardtanh.default(%682) : torch.float32[1, 3, 2] q=none
+%684 = aten.hardtanh.default(%683) : torch.float32[1, 3, 2] q=none
+%685 = aten.hardtanh.default(%684) : torch.float32[1, 3, 2] q=none
+%686 = aten.hardtanh.default(%685) : torch.float32[1, 3, 2] q=none
+%687 = aten.hardtanh.default(%686) : torch.float32[1, 3, 2] q=none
+%688 = aten.hardtanh.default(%687) : torch.float32[1, 3, 2] q=none
+%689 = aten.hardtanh.default(%688) : torch.float32[1, 3, 2] q=none
+%690 = aten.hardtanh.default(%689) : torch.float32[1, 3, 2] q=none
+%691 = aten.hardtanh.default(%690) : torch.float32[1, 3, 2] q=none
+%692 = aten.hardtanh.default(%691) : torch.float32[1, 3, 2] q=none
+%693 = aten.hardtanh.default(%692) : torch.float32[1, 3, 2] q=none
+%694 = aten.hardtanh.default(%693) : torch.float32[1, 3, 2] q=none
+%695 = aten.hardtanh.default(%694) : torch.float32[1, 3, 2] q=none
+%696 = aten.hardtanh.default(%695) : torch.float32[1, 3, 2] q=none
+%697 = aten.hardtanh.default(%696) : torch.float32[1, 3, 2] q=none
+%698 = aten.hardtanh.default(%697) : torch.float32[1, 3, 2] q=none
+%699 = aten.hardtanh.default(%698) : torch.float32[1, 3, 2] q=none
+%700 = aten.hardtanh.default(%699) : torch.float32[1, 3, 2] q=none
+%701 = aten.hardtanh.default(%700) : torch.float32[1, 3, 2] q=none
+%702 = aten.hardtanh.default(%701) : torch.float32[1, 3, 2] q=none
+%703 = aten.hardtanh.default(%702) : torch.float32[1, 3, 2] q=none
+%704 = aten.hardtanh.default(%703) : torch.float32[1, 3, 2] q=none
+%705 = aten.hardtanh.default(%704) : torch.float32[1, 3, 2] q=none
+%706 = aten.hardtanh.default(%705) : torch.float32[1, 3, 2] q=none
+%707 = aten.hardtanh.default(%706) : torch.float32[1, 3, 2] q=none
+%708 = aten.hardtanh.default(%707) : torch.float32[1, 3, 2] q=none
+%709 = aten.hardtanh.default(%708) : torch.float32[1, 3, 2] q=none
+%710 = aten.hardtanh.default(%709) : torch.float32[1, 3, 2] q=none
+%711 = aten.hardtanh.default(%710) : torch.float32[1, 3, 2] q=none
+%712 = aten.hardtanh.default(%711) : torch.float32[1, 3, 2] q=none
+%713 = aten.hardtanh.default(%712) : torch.float32[1, 3, 2] q=none
+%714 = aten.hardtanh.default(%713) : torch.float32[1, 3, 2] q=none
+%715 = aten.hardtanh.default(%714) : torch.float32[1, 3, 2] q=none
+%716 = aten.hardtanh.default(%715) : torch.float32[1, 3, 2] q=none
+%717 = aten.hardtanh.default(%716) : torch.float32[1, 3, 2] q=none
+%718 = aten.hardtanh.default(%717) : torch.float32[1, 3, 2] q=none
+%719 = aten.hardtanh.default(%718) : torch.float32[1, 3, 2] q=none
+%720 = aten.hardtanh.default(%719) : torch.float32[1, 3, 2] q=none
+%721 = aten.hardtanh.default(%720) : torch.float32[1, 3, 2] q=none
+%722 = aten.hardtanh.default(%721) : torch.float32[1, 3, 2] q=none
+%723 = aten.hardtanh.default(%722) : torch.float32[1, 3, 2] q=none
+%724 = aten.hardtanh.default(%723) : torch.float32[1, 3, 2] q=none
+%725 = aten.hardtanh.default(%724) : torch.float32[1, 3, 2] q=none
+%726 = aten.hardtanh.default(%725) : torch.float32[1, 3, 2] q=none
+%727 = aten.hardtanh.default(%726) : torch.float32[1, 3, 2] q=none
+%728 = aten.hardtanh.default(%727) : torch.float32[1, 3, 2] q=none
+%729 = aten.hardtanh.default(%728) : torch.float32[1, 3, 2] q=none
+%730 = aten.hardtanh.default(%729) : torch.float32[1, 3, 2] q=none
+%731 = aten.hardtanh.default(%730) : torch.float32[1, 3, 2] q=none
+%732 = aten.hardtanh.default(%731) : torch.float32[1, 3, 2] q=none
+%733 = aten.hardtanh.default(%732) : torch.float32[1, 3, 2] q=none
+%734 = aten.hardtanh.default(%733) : torch.float32[1, 3, 2] q=none
+%735 = aten.hardtanh.default(%734) : torch.float32[1, 3, 2] q=none
+%736 = aten.hardtanh.default(%735) : torch.float32[1, 3, 2] q=none
+%737 = aten.hardtanh.default(%736) : torch.float32[1, 3, 2] q=none
+%738 = aten.hardtanh.default(%737) : torch.float32[1, 3, 2] q=none
+%739 = aten.hardtanh.default(%738) : torch.float32[1, 3, 2] q=none
+%740 = aten.hardtanh.default(%739) : torch.float32[1, 3, 2] q=none
+%741 = aten.hardtanh.default(%740) : torch.float32[1, 3, 2] q=none
+%742 = aten.hardtanh.default(%741) : torch.float32[1, 3, 2] q=none
+%743 = aten.hardtanh.default(%742) : torch.float32[1, 3, 2] q=none
+%744 = aten.hardtanh.default(%743) : torch.float32[1, 3, 2] q=none
+%745 = aten.hardtanh.default(%744) : torch.float32[1, 3, 2] q=none
+%746 = aten.hardtanh.default(%745) : torch.float32[1, 3, 2] q=none
+%747 = aten.hardtanh.default(%746) : torch.float32[1, 3, 2] q=none
+%748 = aten.hardtanh.default(%747) : torch.float32[1, 3, 2] q=none
+%749 = aten.hardtanh.default(%748) : torch.float32[1, 3, 2] q=none
+%750 = aten.hardtanh.default(%749) : torch.float32[1, 3, 2] q=none
+%751 = aten.hardtanh.default(%750) : torch.float32[1, 3, 2] q=none
+%752 = aten.hardtanh.default(%751) : torch.float32[1, 3, 2] q=none
+%753 = aten.hardtanh.default(%752) : torch.float32[1, 3, 2] q=none
+%754 = aten.hardtanh.default(%753) : torch.float32[1, 3, 2] q=none
+%755 = aten.hardtanh.default(%754) : torch.float32[1, 3, 2] q=none
+%756 = aten.hardtanh.default(%755) : torch.float32[1, 3, 2] q=none
+%757 = aten.hardtanh.default(%756) : torch.float32[1, 3, 2] q=none
+%758 = aten.hardtanh.default(%757) : torch.float32[1, 3, 2] q=none
+%759 = aten.hardtanh.default(%758) : torch.float32[1, 3, 2] q=none
+%760 = aten.hardtanh.default(%759) : torch.float32[1, 3, 2] q=none
+%761 = aten.hardtanh.default(%760) : torch.float32[1, 3, 2] q=none
+%762 = aten.hardtanh.default(%761) : torch.float32[1, 3, 2] q=none
+%763 = aten.hardtanh.default(%762) : torch.float32[1, 3, 2] q=none
+%764 = aten.hardtanh.default(%763) : torch.float32[1, 3, 2] q=none
+%765 = aten.hardtanh.default(%764) : torch.float32[1, 3, 2] q=none
+%766 = aten.hardtanh.default(%765) : torch.float32[1, 3, 2] q=none
+%767 = aten.hardtanh.default(%766) : torch.float32[1, 3, 2] q=none
+%768 = aten.hardtanh.default(%767) : torch.float32[1, 3, 2] q=none
+%769 = aten.hardtanh.default(%768) : torch.float32[1, 3, 2] q=none
+%770 = aten.hardtanh.default(%769) : torch.float32[1, 3, 2] q=none
+%771 = aten.hardtanh.default(%770) : torch.float32[1, 3, 2] q=none
+%772 = aten.hardtanh.default(%771) : torch.float32[1, 3, 2] q=none
+%773 = aten.hardtanh.default(%772) : torch.float32[1, 3, 2] q=none
+%774 = aten.hardtanh.default(%773) : torch.float32[1, 3, 2] q=none
+%775 = aten.hardtanh.default(%774) : torch.float32[1, 3, 2] q=none
+%776 = aten.hardtanh.default(%775) : torch.float32[1, 3, 2] q=none
+%777 = aten.hardtanh.default(%776) : torch.float32[1, 3, 2] q=none
+%778 = aten.hardtanh.default(%777) : torch.float32[1, 3, 2] q=none
+%779 = aten.hardtanh.default(%778) : torch.float32[1, 3, 2] q=none
+%780 = aten.hardtanh.default(%779) : torch.float32[1, 3, 2] q=none
+%781 = aten.hardtanh.default(%780) : torch.float32[1, 3, 2] q=none
+%782 = aten.hardtanh.default(%781) : torch.float32[1, 3, 2] q=none
+%783 = aten.hardtanh.default(%782) : torch.float32[1, 3, 2] q=none
+%784 = aten.hardtanh.default(%783) : torch.float32[1, 3, 2] q=none
+%785 = aten.hardtanh.default(%784) : torch.float32[1, 3, 2] q=none
+%786 = aten.hardtanh.default(%785) : torch.float32[1, 3, 2] q=none
+%787 = aten.hardtanh.default(%786) : torch.float32[1, 3, 2] q=none
+%788 = aten.hardtanh.default(%787) : torch.float32[1, 3, 2] q=none
+%789 = aten.hardtanh.default(%788) : torch.float32[1, 3, 2] q=none
+%790 = aten.hardtanh.default(%789) : torch.float32[1, 3, 2] q=none
+%791 = aten.hardtanh.default(%790) : torch.float32[1, 3, 2] q=none
+%792 = aten.hardtanh.default(%791) : torch.float32[1, 3, 2] q=none
+%793 = aten.hardtanh.default(%792) : torch.float32[1, 3, 2] q=none
+%794 = aten.hardtanh.default(%793) : torch.float32[1, 3, 2] q=none
+%795 = aten.hardtanh.default(%794) : torch.float32[1, 3, 2] q=none
+%796 = aten.hardtanh.default(%795) : torch.float32[1, 3, 2] q=none
+%797 = aten.hardtanh.default(%796) : torch.float32[1, 3, 2] q=none
+%798 = aten.hardtanh.default(%797) : torch.float32[1, 3, 2] q=none
+%799 = aten.hardtanh.default(%798) : torch.float32[1, 3, 2] q=none
+%800 = aten.hardtanh.default(%799) : torch.float32[1, 3, 2] q=none
+%801 = aten.hardtanh.default(%800) : torch.float32[1, 3, 2] q=none
+%802 = aten.hardtanh.default(%801) : torch.float32[1, 3, 2] q=none
+%803 = aten.hardtanh.default(%802) : torch.float32[1, 3, 2] q=none
+%804 = aten.hardtanh.default(%803) : torch.float32[1, 3, 2] q=none
+%805 = aten.hardtanh.default(%804) : torch.float32[1, 3, 2] q=none
+%806 = aten.hardtanh.default(%805) : torch.float32[1, 3, 2] q=none
+%807 = aten.hardtanh.default(%806) : torch.float32[1, 3, 2] q=none
+%808 = aten.hardtanh.default(%807) : torch.float32[1, 3, 2] q=none
+%809 = aten.hardtanh.default(%808) : torch.float32[1, 3, 2] q=none
+%810 = aten.hardtanh.default(%809) : torch.float32[1, 3, 2] q=none
+%811 = aten.hardtanh.default(%810) : torch.float32[1, 3, 2] q=none
+%812 = aten.hardtanh.default(%811) : torch.float32[1, 3, 2] q=none
+%813 = aten.hardtanh.default(%812) : torch.float32[1, 3, 2] q=none
+%814 = aten.hardtanh.default(%813) : torch.float32[1, 3, 2] q=none
+%815 = aten.hardtanh.default(%814) : torch.float32[1, 3, 2] q=none
+%816 = aten.hardtanh.default(%815) : torch.float32[1, 3, 2] q=none
+%817 = aten.hardtanh.default(%816) : torch.float32[1, 3, 2] q=none
+%818 = aten.hardtanh.default(%817) : torch.float32[1, 3, 2] q=none
+%819 = aten.hardtanh.default(%818) : torch.float32[1, 3, 2] q=none
+%820 = aten.hardtanh.default(%819) : torch.float32[1, 3, 2] q=none
+%821 = aten.hardtanh.default(%820) : torch.float32[1, 3, 2] q=none
+%822 = aten.hardtanh.default(%821) : torch.float32[1, 3, 2] q=none
+%823 = aten.hardtanh.default(%822) : torch.float32[1, 3, 2] q=none
+%824 = aten.hardtanh.default(%823) : torch.float32[1, 3, 2] q=none
+%825 = aten.hardtanh.default(%824) : torch.float32[1, 3, 2] q=none
+%826 = aten.hardtanh.default(%825) : torch.float32[1, 3, 2] q=none
+%827 = aten.hardtanh.default(%826) : torch.float32[1, 3, 2] q=none
+%828 = aten.hardtanh.default(%827) : torch.float32[1, 3, 2] q=none
+%829 = aten.hardtanh.default(%828) : torch.float32[1, 3, 2] q=none
+%830 = aten.hardtanh.default(%829) : torch.float32[1, 3, 2] q=none
+%831 = aten.hardtanh.default(%830) : torch.float32[1, 3, 2] q=none
+%832 = aten.hardtanh.default(%831) : torch.float32[1, 3, 2] q=none
+%833 = aten.hardtanh.default(%832) : torch.float32[1, 3, 2] q=none
+%834 = aten.hardtanh.default(%833) : torch.float32[1, 3, 2] q=none
+%835 = aten.hardtanh.default(%834) : torch.float32[1, 3, 2] q=none
+%836 = aten.hardtanh.default(%835) : torch.float32[1, 3, 2] q=none
+%837 = aten.hardtanh.default(%836) : torch.float32[1, 3, 2] q=none
+%838 = aten.hardtanh.default(%837) : torch.float32[1, 3, 2] q=none
+%839 = aten.hardtanh.default(%838) : torch.float32[1, 3, 2] q=none
+%840 = aten.hardtanh.default(%839) : torch.float32[1, 3, 2] q=none
+%841 = aten.hardtanh.default(%840) : torch.float32[1, 3, 2] q=none
+%842 = aten.hardtanh.default(%841) : torch.float32[1, 3, 2] q=none
+%843 = aten.hardtanh.default(%842) : torch.float32[1, 3, 2] q=none
+%844 = aten.hardtanh.default(%843) : torch.float32[1, 3, 2] q=none
+%845 = aten.hardtanh.default(%844) : torch.float32[1, 3, 2] q=none
+%846 = aten.hardtanh.default(%845) : torch.float32[1, 3, 2] q=none
+%847 = aten.hardtanh.default(%846) : torch.float32[1, 3, 2] q=none
+%848 = aten.hardtanh.default(%847) : torch.float32[1, 3, 2] q=none
+%849 = aten.hardtanh.default(%848) : torch.float32[1, 3, 2] q=none
+%850 = aten.hardtanh.default(%849) : torch.float32[1, 3, 2] q=none
+%851 = aten.hardtanh.default(%850) : torch.float32[1, 3, 2] q=none
+%852 = aten.hardtanh.default(%851) : torch.float32[1, 3, 2] q=none
+%853 = aten.hardtanh.default(%852) : torch.float32[1, 3, 2] q=none
+%854 = aten.hardtanh.default(%853) : torch.float32[1, 3, 2] q=none
+%855 = aten.hardtanh.default(%854) : torch.float32[1, 3, 2] q=none
+%856 = aten.hardtanh.default(%855) : torch.float32[1, 3, 2] q=none
+%857 = aten.hardtanh.default(%856) : torch.float32[1, 3, 2] q=none
+%858 = aten.hardtanh.default(%857) : torch.float32[1, 3, 2] q=none
+%859 = aten.hardtanh.default(%858) : torch.float32[1, 3, 2] q=none
+%860 = aten.hardtanh.default(%859) : torch.float32[1, 3, 2] q=none
+%861 = aten.hardtanh.default(%860) : torch.float32[1, 3, 2] q=none
+%862 = aten.hardtanh.default(%861) : torch.float32[1, 3, 2] q=none
+%863 = aten.hardtanh.default(%862) : torch.float32[1, 3, 2] q=none
+%864 = aten.hardtanh.default(%863) : torch.float32[1, 3, 2] q=none
+%865 = aten.hardtanh.default(%864) : torch.float32[1, 3, 2] q=none
+%866 = aten.hardtanh.default(%865) : torch.float32[1, 3, 2] q=none
+%867 = aten.hardtanh.default(%866) : torch.float32[1, 3, 2] q=none
+%868 = aten.hardtanh.default(%867) : torch.float32[1, 3, 2] q=none
+%869 = aten.hardtanh.default(%868) : torch.float32[1, 3, 2] q=none
+%870 = aten.hardtanh.default(%869) : torch.float32[1, 3, 2] q=none
+%871 = aten.hardtanh.default(%870) : torch.float32[1, 3, 2] q=none
+%872 = aten.hardtanh.default(%871) : torch.float32[1, 3, 2] q=none
+%873 = aten.hardtanh.default(%872) : torch.float32[1, 3, 2] q=none
+%874 = aten.hardtanh.default(%873) : torch.float32[1, 3, 2] q=none
+%875 = aten.hardtanh.default(%874) : torch.float32[1, 3, 2] q=none
+%876 = aten.hardtanh.default(%875) : torch.float32[1, 3, 2] q=none
+%877 = aten.hardtanh.default(%876) : torch.float32[1, 3, 2] q=none
+%878 = aten.hardtanh.default(%877) : torch.float32[1, 3, 2] q=none
+%879 = aten.hardtanh.default(%878) : torch.float32[1, 3, 2] q=none
+%880 = aten.hardtanh.default(%879) : torch.float32[1, 3, 2] q=none
+%881 = aten.hardtanh.default(%880) : torch.float32[1, 3, 2] q=none
+%882 = aten.hardtanh.default(%881) : torch.float32[1, 3, 2] q=none
+%883 = aten.hardtanh.default(%882) : torch.float32[1, 3, 2] q=none
+%884 = aten.hardtanh.default(%883) : torch.float32[1, 3, 2] q=none
+%885 = aten.hardtanh.default(%884) : torch.float32[1, 3, 2] q=none
+%886 = aten.hardtanh.default(%885) : torch.float32[1, 3, 2] q=none
+%887 = aten.hardtanh.default(%886) : torch.float32[1, 3, 2] q=none
+%888 = aten.hardtanh.default(%887) : torch.float32[1, 3, 2] q=none
+%889 = aten.hardtanh.default(%888) : torch.float32[1, 3, 2] q=none
+%890 = aten.hardtanh.default(%889) : torch.float32[1, 3, 2] q=none
+%891 = aten.hardtanh.default(%890) : torch.float32[1, 3, 2] q=none
+%892 = aten.hardtanh.default(%891) : torch.float32[1, 3, 2] q=none
+%893 = aten.hardtanh.default(%892) : torch.float32[1, 3, 2] q=none
+%894 = aten.hardtanh.default(%893) : torch.float32[1, 3, 2] q=none
+%895 = aten.hardtanh.default(%894) : torch.float32[1, 3, 2] q=none
+%896 = aten.hardtanh.default(%895) : torch.float32[1, 3, 2] q=none
+%897 = aten.hardtanh.default(%896) : torch.float32[1, 3, 2] q=none
+%898 = aten.hardtanh.default(%897) : torch.float32[1, 3, 2] q=none
+%899 = aten.hardtanh.default(%898) : torch.float32[1, 3, 2] q=none
+%900 = aten.hardtanh.default(%899) : torch.float32[1, 3, 2] q=none
+%901 = aten.hardtanh.default(%900) : torch.float32[1, 3, 2] q=none
+%902 = aten.hardtanh.default(%901) : torch.float32[1, 3, 2] q=none
+%903 = aten.hardtanh.default(%902) : torch.float32[1, 3, 2] q=none
+%904 = aten.hardtanh.default(%903) : torch.float32[1, 3, 2] q=none
+%905 = aten.hardtanh.default(%904) : torch.float32[1, 3, 2] q=none
+%906 = aten.hardtanh.default(%905) : torch.float32[1, 3, 2] q=none
+%907 = aten.hardtanh.default(%906) : torch.float32[1, 3, 2] q=none
+%908 = aten.hardtanh.default(%907) : torch.float32[1, 3, 2] q=none
+%909 = aten.hardtanh.default(%908) : torch.float32[1, 3, 2] q=none
+%910 = aten.hardtanh.default(%909) : torch.float32[1, 3, 2] q=none
+%911 = aten.hardtanh.default(%910) : torch.float32[1, 3, 2] q=none
+%912 = aten.hardtanh.default(%911) : torch.float32[1, 3, 2] q=none
+%913 = aten.hardtanh.default(%912) : torch.float32[1, 3, 2] q=none
+%914 = aten.hardtanh.default(%913) : torch.float32[1, 3, 2] q=none
+%915 = aten.hardtanh.default(%914) : torch.float32[1, 3, 2] q=none
+%916 = aten.hardtanh.default(%915) : torch.float32[1, 3, 2] q=none
+%917 = aten.hardtanh.default(%916) : torch.float32[1, 3, 2] q=none
+%918 = aten.hardtanh.default(%917) : torch.float32[1, 3, 2] q=none
+%919 = aten.hardtanh.default(%918) : torch.float32[1, 3, 2] q=none
+%920 = aten.hardtanh.default(%919) : torch.float32[1, 3, 2] q=none
+%921 = aten.hardtanh.default(%920) : torch.float32[1, 3, 2] q=none
+%922 = aten.hardtanh.default(%921) : torch.float32[1, 3, 2] q=none
+%923 = aten.hardtanh.default(%922) : torch.float32[1, 3, 2] q=none
+%924 = aten.hardtanh.default(%923) : torch.float32[1, 3, 2] q=none
+%925 = aten.hardtanh.default(%924) : torch.float32[1, 3, 2] q=none
+%926 = aten.hardtanh.default(%925) : torch.float32[1, 3, 2] q=none
+%927 = aten.hardtanh.default(%926) : torch.float32[1, 3, 2] q=none
+%928 = aten.hardtanh.default(%927) : torch.float32[1, 3, 2] q=none
+%929 = aten.hardtanh.default(%928) : torch.float32[1, 3, 2] q=none
+%930 = aten.hardtanh.default(%929) : torch.float32[1, 3, 2] q=none
+%931 = aten.hardtanh.default(%930) : torch.float32[1, 3, 2] q=none
+%932 = aten.hardtanh.default(%931) : torch.float32[1, 3, 2] q=none
+%933 = aten.hardtanh.default(%932) : torch.float32[1, 3, 2] q=none
+%934 = aten.hardtanh.default(%933) : torch.float32[1, 3, 2] q=none
+%935 = aten.hardtanh.default(%934) : torch.float32[1, 3, 2] q=none
+%936 = aten.hardtanh.default(%935) : torch.float32[1, 3, 2] q=none
+%937 = aten.hardtanh.default(%936) : torch.float32[1, 3, 2] q=none
+%938 = aten.hardtanh.default(%937) : torch.float32[1, 3, 2] q=none
+%939 = aten.hardtanh.default(%938) : torch.float32[1, 3, 2] q=none
+%940 = aten.hardtanh.default(%939) : torch.float32[1, 3, 2] q=none
+%941 = aten.hardtanh.default(%940) : torch.float32[1, 3, 2] q=none
+%942 = aten.hardtanh.default(%941) : torch.float32[1, 3, 2] q=none
+%943 = aten.hardtanh.default(%942) : torch.float32[1, 3, 2] q=none
+%944 = aten.hardtanh.default(%943) : torch.float32[1, 3, 2] q=none
+%945 = aten.hardtanh.default(%944) : torch.float32[1, 3, 2] q=none
+%946 = aten.hardtanh.default(%945) : torch.float32[1, 3, 2] q=none
+%947 = aten.hardtanh.default(%946) : torch.float32[1, 3, 2] q=none
+%948 = aten.hardtanh.default(%947) : torch.float32[1, 3, 2] q=none
+%949 = aten.hardtanh.default(%948) : torch.float32[1, 3, 2] q=none
+%950 = aten.hardtanh.default(%949) : torch.float32[1, 3, 2] q=none
+%951 = aten.hardtanh.default(%950) : torch.float32[1, 3, 2] q=none
+%952 = aten.hardtanh.default(%951) : torch.float32[1, 3, 2] q=none
+%953 = aten.hardtanh.default(%952) : torch.float32[1, 3, 2] q=none
+%954 = aten.hardtanh.default(%953) : torch.float32[1, 3, 2] q=none
+%955 = aten.hardtanh.default(%954) : torch.float32[1, 3, 2] q=none
+%956 = aten.hardtanh.default(%955) : torch.float32[1, 3, 2] q=none
+%957 = aten.hardtanh.default(%956) : torch.float32[1, 3, 2] q=none
+%958 = aten.hardtanh.default(%957) : torch.float32[1, 3, 2] q=none
+%959 = aten.hardtanh.default(%958) : torch.float32[1, 3, 2] q=none
+%960 = aten.hardtanh.default(%959) : torch.float32[1, 3, 2] q=none
+%961 = aten.hardtanh.default(%960) : torch.float32[1, 3, 2] q=none
+%962 = aten.hardtanh.default(%961) : torch.float32[1, 3, 2] q=none
+%963 = aten.hardtanh.default(%962) : torch.float32[1, 3, 2] q=none
+%964 = aten.hardtanh.default(%963) : torch.float32[1, 3, 2] q=none
+%965 = aten.hardtanh.default(%964) : torch.float32[1, 3, 2] q=none
+%966 = aten.hardtanh.default(%965) : torch.float32[1, 3, 2] q=none
+%967 = aten.hardtanh.default(%966) : torch.float32[1, 3, 2] q=none
+%968 = aten.hardtanh.default(%967) : torch.float32[1, 3, 2] q=none
+%969 = aten.hardtanh.default(%968) : torch.float32[1, 3, 2] q=none
+%970 = aten.hardtanh.default(%969) : torch.float32[1, 3, 2] q=none
+%971 = aten.hardtanh.default(%970) : torch.float32[1, 3, 2] q=none
+%972 = aten.hardtanh.default(%971) : torch.float32[1, 3, 2] q=none
+%973 = aten.hardtanh.default(%972) : torch.float32[1, 3, 2] q=none
+%974 = aten.hardtanh.default(%973) : torch.float32[1, 3, 2] q=none
+%975 = aten.hardtanh.default(%974) : torch.float32[1, 3, 2] q=none
+%976 = aten.hardtanh.default(%975) : torch.float32[1, 3, 2] q=none
+%977 = aten.hardtanh.default(%976) : torch.float32[1, 3, 2] q=none
+%978 = aten.hardtanh.default(%977) : torch.float32[1, 3, 2] q=none
+%979 = aten.hardtanh.default(%978) : torch.float32[1, 3, 2] q=none
+%980 = aten.hardtanh.default(%979) : torch.float32[1, 3, 2] q=none
+%981 = aten.hardtanh.default(%980) : torch.float32[1, 3, 2] q=none
+%982 = aten.hardtanh.default(%981) : torch.float32[1, 3, 2] q=none
+%983 = aten.hardtanh.default(%982) : torch.float32[1, 3, 2] q=none
+%984 = aten.hardtanh.default(%983) : torch.float32[1, 3, 2] q=none
+%985 = aten.hardtanh.default(%984) : torch.float32[1, 3, 2] q=none
+%986 = aten.hardtanh.default(%985) : torch.float32[1, 3, 2] q=none
+%987 = aten.hardtanh.default(%986) : torch.float32[1, 3, 2] q=none
+%988 = aten.hardtanh.default(%987) : torch.float32[1, 3, 2] q=none
+%989 = aten.hardtanh.default(%988) : torch.float32[1, 3, 2] q=none
+%990 = aten.hardtanh.default(%989) : torch.float32[1, 3, 2] q=none
+%991 = aten.hardtanh.default(%990) : torch.float32[1, 3, 2] q=none
+%992 = aten.hardtanh.default(%991) : torch.float32[1, 3, 2] q=none
+%993 = aten.hardtanh.default(%992) : torch.float32[1, 3, 2] q=none
+%994 = aten.hardtanh.default(%993) : torch.float32[1, 3, 2] q=none
+%995 = aten.hardtanh.default(%994) : torch.float32[1, 3, 2] q=none
+%996 = aten.hardtanh.default(%995) : torch.float32[1, 3, 2] q=none
+%997 = aten.hardtanh.default(%996) : torch.float32[1, 3, 2] q=none
+%998 = aten.hardtanh.default(%997) : torch.float32[1, 3, 2] q=none
+%999 = aten.hardtanh.default(%998) : torch.float32[1, 3, 2] q=none
+%1000 = aten.hardtanh.default(%999) : torch.float32[1, 3, 2] q=none
+%1001 = aten.hardtanh.default(%1000) : torch.float32[1, 3, 2] q=none
+%1002 = aten.hardtanh.default(%1001) : torch.float32[1, 3, 2] q=none
+%1003 = aten.hardtanh.default(%1002) : torch.float32[1, 3, 2] q=none
+%1004 = aten.hardtanh.default(%1003) : torch.float32[1, 3, 2] q=none
+%1005 = aten.hardtanh.default(%1004) : torch.float32[1, 3, 2] q=none
+%1006 = aten.hardtanh.default(%1005) : torch.float32[1, 3, 2] q=none
+%1007 = aten.hardtanh.default(%1006) : torch.float32[1, 3, 2] q=none
+%1008 = aten.hardtanh.default(%1007) : torch.float32[1, 3, 2] q=none
+%1009 = aten.hardtanh.default(%1008) : torch.float32[1, 3, 2] q=none
+%1010 = aten.hardtanh.default(%1009) : torch.float32[1, 3, 2] q=none
+%1011 = aten.hardtanh.default(%1010) : torch.float32[1, 3, 2] q=none
+%1012 = aten.hardtanh.default(%1011) : torch.float32[1, 3, 2] q=none
+%1013 = aten.hardtanh.default(%1012) : torch.float32[1, 3, 2] q=none
+%1014 = aten.hardtanh.default(%1013) : torch.float32[1, 3, 2] q=none
+%1015 = aten.hardtanh.default(%1014) : torch.float32[1, 3, 2] q=none
+%1016 = aten.hardtanh.default(%1015) : torch.float32[1, 3, 2] q=none
+%1017 = aten.hardtanh.default(%1016) : torch.float32[1, 3, 2] q=none
+%1018 = aten.hardtanh.default(%1017) : torch.float32[1, 3, 2] q=none
+%1019 = aten.hardtanh.default(%1018) : torch.float32[1, 3, 2] q=none
+%1020 = aten.hardtanh.default(%1019) : torch.float32[1, 3, 2] q=none
+%1021 = aten.hardtanh.default(%1020) : torch.float32[1, 3, 2] q=none
+%1022 = aten.hardtanh.default(%1021) : torch.float32[1, 3, 2] q=none
+%1023 = aten.hardtanh.default(%1022) : torch.float32[1, 3, 2] q=none
+%1024 = aten.hardtanh.default(%1023) : torch.float32[1, 3, 2] q=none
+%1025 = aten.hardtanh.default(%1024) : torch.float32[1, 3, 2] q=none
+%1026 = aten.hardtanh.default(%1025) : torch.float32[1, 3, 2] q=none
+%1027 = aten.hardtanh.default(%1026) : torch.float32[1, 3, 2] q=none
+%1028 = aten.hardtanh.default(%1027) : torch.float32[1, 3, 2] q=none
+%1029 = aten.hardtanh.default(%1028) : torch.float32[1, 3, 2] q=none
+%1030 = aten.hardtanh.default(%1029) : torch.float32[1, 3, 2] q=none
+%1031 = aten.hardtanh.default(%1030) : torch.float32[1, 3, 2] q=none
+%1032 = aten.hardtanh.default(%1031) : torch.float32[1, 3, 2] q=none
+%1033 = aten.hardtanh.default(%1032) : torch.float32[1, 3, 2] q=none
+%1034 = aten.hardtanh.default(%1033) : torch.float32[1, 3, 2] q=none
+%1035 = aten.hardtanh.default(%1034) : torch.float32[1, 3, 2] q=none
+%1036 = aten.hardtanh.default(%1035) : torch.float32[1, 3, 2] q=none
+%1037 = aten.hardtanh.default(%1036) : torch.float32[1, 3, 2] q=none
+%1038 = aten.hardtanh.default(%1037) : torch.float32[1, 3, 2] q=none
+%1039 = aten.hardtanh.default(%1038) : torch.float32[1, 3, 2] q=none
+%1040 = aten.hardtanh.default(%1039) : torch.float32[1, 3, 2] q=none
+%1041 = aten.hardtanh.default(%1040) : torch.float32[1, 3, 2] q=none
+%1042 = aten.hardtanh.default(%1041) : torch.float32[1, 3, 2] q=none
+%1043 = aten.hardtanh.default(%1042) : torch.float32[1, 3, 2] q=none
+%1044 = aten.hardtanh.default(%1043) : torch.float32[1, 3, 2] q=none
+%1045 = aten.hardtanh.default(%1044) : torch.float32[1, 3, 2] q=none
+%1046 = aten.hardtanh.default(%1045) : torch.float32[1, 3, 2] q=none
+%1047 = aten.hardtanh.default(%1046) : torch.float32[1, 3, 2] q=none
+%1048 = aten.hardtanh.default(%1047) : torch.float32[1, 3, 2] q=none
+%1049 = aten.hardtanh.default(%1048) : torch.float32[1, 3, 2] q=none
+%1050 = aten.hardtanh.default(%1049) : torch.float32[1, 3, 2] q=none
+%1051 = aten.hardtanh.default(%1050) : torch.float32[1, 3, 2] q=none
+%1052 = aten.hardtanh.default(%1051) : torch.float32[1, 3, 2] q=none
+%1053 = aten.hardtanh.default(%1052) : torch.float32[1, 3, 2] q=none
+%1054 = aten.hardtanh.default(%1053) : torch.float32[1, 3, 2] q=none
+%1055 = aten.hardtanh.default(%1054) : torch.float32[1, 3, 2] q=none
+%1056 = aten.hardtanh.default(%1055) : torch.float32[1, 3, 2] q=none
+%1057 = aten.hardtanh.default(%1056) : torch.float32[1, 3, 2] q=none
+%1058 = aten.hardtanh.default(%1057) : torch.float32[1, 3, 2] q=none
+%1059 = aten.hardtanh.default(%1058) : torch.float32[1, 3, 2] q=none
+%1060 = aten.hardtanh.default(%1059) : torch.float32[1, 3, 2] q=none
+%1061 = aten.hardtanh.default(%1060) : torch.float32[1, 3, 2] q=none
+%1062 = aten.hardtanh.default(%1061) : torch.float32[1, 3, 2] q=none
+%1063 = aten.hardtanh.default(%1062) : torch.float32[1, 3, 2] q=none
+%1064 = aten.hardtanh.default(%1063) : torch.float32[1, 3, 2] q=none
+%1065 = aten.hardtanh.default(%1064) : torch.float32[1, 3, 2] q=none
+%1066 = aten.hardtanh.default(%1065) : torch.float32[1, 3, 2] q=none
+%1067 = aten.hardtanh.default(%1066) : torch.float32[1, 3, 2] q=none
+%1068 = aten.hardtanh.default(%1067) : torch.float32[1, 3, 2] q=none
+%1069 = aten.hardtanh.default(%1068) : torch.float32[1, 3, 2] q=none
+%1070 = aten.hardtanh.default(%1069) : torch.float32[1, 3, 2] q=none
+%1071 = aten.hardtanh.default(%1070) : torch.float32[1, 3, 2] q=none
+%1072 = aten.hardtanh.default(%1071) : torch.float32[1, 3, 2] q=none
+%1073 = aten.hardtanh.default(%1072) : torch.float32[1, 3, 2] q=none
+%1074 = aten.hardtanh.default(%1073) : torch.float32[1, 3, 2] q=none
+%1075 = aten.hardtanh.default(%1074) : torch.float32[1, 3, 2] q=none
+%1076 = aten.hardtanh.default(%1075) : torch.float32[1, 3, 2] q=none
+%1077 = aten.hardtanh.default(%1076) : torch.float32[1, 3, 2] q=none
+%1078 = aten.hardtanh.default(%1077) : torch.float32[1, 3, 2] q=none
+%1079 = aten.hardtanh.default(%1078) : torch.float32[1, 3, 2] q=none
+%1080 = aten.hardtanh.default(%1079) : torch.float32[1, 3, 2] q=none
+%1081 = aten.hardtanh.default(%1080) : torch.float32[1, 3, 2] q=none
+%1082 = aten.hardtanh.default(%1081) : torch.float32[1, 3, 2] q=none
+%1083 = aten.hardtanh.default(%1082) : torch.float32[1, 3, 2] q=none
+%1084 = aten.hardtanh.default(%1083) : torch.float32[1, 3, 2] q=none
+%1085 = aten.hardtanh.default(%1084) : torch.float32[1, 3, 2] q=none
+%1086 = aten.hardtanh.default(%1085) : torch.float32[1, 3, 2] q=none
+%1087 = aten.hardtanh.default(%1086) : torch.float32[1, 3, 2] q=none
+%1088 = aten.hardtanh.default(%1087) : torch.float32[1, 3, 2] q=none
+%1089 = aten.hardtanh.default(%1088) : torch.float32[1, 3, 2] q=none
+%1090 = aten.hardtanh.default(%1089) : torch.float32[1, 3, 2] q=none
+%1091 = aten.hardtanh.default(%1090) : torch.float32[1, 3, 2] q=none
+%1092 = aten.hardtanh.default(%1091) : torch.float32[1, 3, 2] q=none
+%1093 = aten.hardtanh.default(%1092) : torch.float32[1, 3, 2] q=none
+%1094 = aten.hardtanh.default(%1093) : torch.float32[1, 3, 2] q=none
+%1095 = aten.hardtanh.default(%1094) : torch.float32[1, 3, 2] q=none
+%1096 = aten.hardtanh.default(%1095) : torch.float32[1, 3, 2] q=none
+%1097 = aten.hardtanh.default(%1096) : torch.float32[1, 3, 2] q=none
+%1098 = aten.hardtanh.default(%1097) : torch.float32[1, 3, 2] q=none
+%1099 = aten.hardtanh.default(%1098) : torch.float32[1, 3, 2] q=none
+%1100 = aten.hardtanh.default(%1099) : torch.float32[1, 3, 2] q=none
+%1101 = aten.hardtanh.default(%1100) : torch.float32[1, 3, 2] q=none
+%1102 = aten.permute_copy.default(%1101, [0, 2, 1]) : torch.float32[1, 2, 3] q=none
+output([%1102])
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3] q=none
+%1 = aten.hardtanh.default(%0) : torch.float32[1, 2, 3] q=none
+%2 = aten.hardtanh.default(%1) : torch.float32[1, 2, 3] q=none
+%3 = aten.hardtanh.default(%2) : torch.float32[1, 2, 3] q=none
+%4 = aten.hardtanh.default(%3) : torch.float32[1, 2, 3] q=none
+%5 = aten.hardtanh.default(%4) : torch.float32[1, 2, 3] q=none
+%6 = aten.hardtanh.default(%5) : torch.float32[1, 2, 3] q=none
+%7 = aten.hardtanh.default(%6) : torch.float32[1, 2, 3] q=none
+%8 = aten.hardtanh.default(%7) : torch.float32[1, 2, 3] q=none
+%9 = aten.hardtanh.default(%8) : torch.float32[1, 2, 3] q=none
+%10 = aten.hardtanh.default(%9) : torch.float32[1, 2, 3] q=none
+%11 = aten.hardtanh.default(%10) : torch.float32[1, 2, 3] q=none
+%12 = aten.hardtanh.default(%11) : torch.float32[1, 2, 3] q=none
+%13 = aten.hardtanh.default(%12) : torch.float32[1, 2, 3] q=none
+%14 = aten.hardtanh.default(%13) : torch.float32[1, 2, 3] q=none
+%15 = aten.hardtanh.default(%14) : torch.float32[1, 2, 3] q=none
+%16 = aten.hardtanh.default(%15) : torch.float32[1, 2, 3] q=none
+%17 = aten.hardtanh.default(%16) : torch.float32[1, 2, 3] q=none
+%18 = aten.hardtanh.default(%17) : torch.float32[1, 2, 3] q=none
+%19 = aten.hardtanh.default(%18) : torch.float32[1, 2, 3] q=none
+%20 = aten.hardtanh.default(%19) : torch.float32[1, 2, 3] q=none
+%21 = aten.hardtanh.default(%20) : torch.float32[1, 2, 3] q=none
+%22 = aten.hardtanh.default(%21) : torch.float32[1, 2, 3] q=none
+%23 = aten.hardtanh.default(%22) : torch.float32[1, 2, 3] q=none
+%24 = aten.hardtanh.default(%23) : torch.float32[1, 2, 3] q=none
+%25 = aten.hardtanh.default(%24) : torch.float32[1, 2, 3] q=none
+%26 = aten.hardtanh.default(%25) : torch.float32[1, 2, 3] q=none
+%27 = aten.hardtanh.default(%26) : torch.float32[1, 2, 3] q=none
+%28 = aten.hardtanh.default(%27) : torch.float32[1, 2, 3] q=none
+%29 = aten.hardtanh.default(%28) : torch.float32[1, 2, 3] q=none
+%30 = aten.hardtanh.default(%29) : torch.float32[1, 2, 3] q=none
+%31 = aten.hardtanh.default(%30) : torch.float32[1, 2, 3] q=none
+%32 = aten.hardtanh.default(%31) : torch.float32[1, 2, 3] q=none
+%33 = aten.hardtanh.default(%32) : torch.float32[1, 2, 3] q=none
+%34 = aten.hardtanh.default(%33) : torch.float32[1, 2, 3] q=none
+%35 = aten.hardtanh.default(%34) : torch.float32[1, 2, 3] q=none
+%36 = aten.hardtanh.default(%35) : torch.float32[1, 2, 3] q=none
+%37 = aten.hardtanh.default(%36) : torch.float32[1, 2, 3] q=none
+%38 = aten.hardtanh.default(%37) : torch.float32[1, 2, 3] q=none
+%39 = aten.hardtanh.default(%38) : torch.float32[1, 2, 3] q=none
+%40 = aten.hardtanh.default(%39) : torch.float32[1, 2, 3] q=none
+%41 = aten.hardtanh.default(%40) : torch.float32[1, 2, 3] q=none
+%42 = aten.hardtanh.default(%41) : torch.float32[1, 2, 3] q=none
+%43 = aten.hardtanh.default(%42) : torch.float32[1, 2, 3] q=none
+%44 = aten.hardtanh.default(%43) : torch.float32[1, 2, 3] q=none
+%45 = aten.hardtanh.default(%44) : torch.float32[1, 2, 3] q=none
+%46 = aten.hardtanh.default(%45) : torch.float32[1, 2, 3] q=none
+%47 = aten.hardtanh.default(%46) : torch.float32[1, 2, 3] q=none
+%48 = aten.hardtanh.default(%47) : torch.float32[1, 2, 3] q=none
+%49 = aten.hardtanh.default(%48) : torch.float32[1, 2, 3] q=none
+%50 = aten.hardtanh.default(%49) : torch.float32[1, 2, 3] q=none
+%51 = aten.hardtanh.default(%50) : torch.float32[1, 2, 3] q=none
+%52 = aten.hardtanh.default(%51) : torch.float32[1, 2, 3] q=none
+%53 = aten.hardtanh.default(%52) : torch.float32[1, 2, 3] q=none
+%54 = aten.hardtanh.default(%53) : torch.float32[1, 2, 3] q=none
+%55 = aten.hardtanh.default(%54) : torch.float32[1, 2, 3] q=none
+%56 = aten.hardtanh.default(%55) : torch.float32[1, 2, 3] q=none
+%57 = aten.hardtanh.default(%56) : torch.float32[1, 2, 3] q=none
+%58 = aten.hardtanh.default(%57) : torch.float32[1, 2, 3] q=none
+%59 = aten.hardtanh.default(%58) : torch.float32[1, 2, 3] q=none
+%60 = aten.hardtanh.default(%59) : torch.float32[1, 2, 3] q=none
+%61 = aten.hardtanh.default(%60) : torch.float32[1, 2, 3] q=none
+%62 = aten.hardtanh.default(%61) : torch.float32[1, 2, 3] q=none
+%63 = aten.hardtanh.default(%62) : torch.float32[1, 2, 3] q=none
+%64 = aten.hardtanh.default(%63) : torch.float32[1, 2, 3] q=none
+%65 = aten.hardtanh.default(%64) : torch.float32[1, 2, 3] q=none
+%66 = aten.hardtanh.default(%65) : torch.float32[1, 2, 3] q=none
+%67 = aten.hardtanh.default(%66) : torch.float32[1, 2, 3] q=none
+%68 = aten.hardtanh.default(%67) : torch.float32[1, 2, 3] q=none
+%69 = aten.hardtanh.default(%68) : torch.float32[1, 2, 3] q=none
+%70 = aten.hardtanh.default(%69) : torch.float32[1, 2, 3] q=none
+%71 = aten.hardtanh.default(%70) : torch.float32[1, 2, 3] q=none
+%72 = aten.hardtanh.default(%71) : torch.float32[1, 2, 3] q=none
+%73 = aten.hardtanh.default(%72) : torch.float32[1, 2, 3] q=none
+%74 = aten.hardtanh.default(%73) : torch.float32[1, 2, 3] q=none
+%75 = aten.hardtanh.default(%74) : torch.float32[1, 2, 3] q=none
+%76 = aten.hardtanh.default(%75) : torch.float32[1, 2, 3] q=none
+%77 = aten.hardtanh.default(%76) : torch.float32[1, 2, 3] q=none
+%78 = aten.hardtanh.default(%77) : torch.float32[1, 2, 3] q=none
+%79 = aten.hardtanh.default(%78) : torch.float32[1, 2, 3] q=none
+%80 = aten.hardtanh.default(%79) : torch.float32[1, 2, 3] q=none
+%81 = aten.hardtanh.default(%80) : torch.float32[1, 2, 3] q=none
+%82 = aten.hardtanh.default(%81) : torch.float32[1, 2, 3] q=none
+%83 = aten.hardtanh.default(%82) : torch.float32[1, 2, 3] q=none
+%84 = aten.hardtanh.default(%83) : torch.float32[1, 2, 3] q=none
+%85 = aten.hardtanh.default(%84) : torch.float32[1, 2, 3] q=none
+%86 = aten.hardtanh.default(%85) : torch.float32[1, 2, 3] q=none
+%87 = aten.hardtanh.default(%86) : torch.float32[1, 2, 3] q=none
+%88 = aten.hardtanh.default(%87) : torch.float32[1, 2, 3] q=none
+%89 = aten.hardtanh.default(%88) : torch.float32[1, 2, 3] q=none
+%90 = aten.hardtanh.default(%89) : torch.float32[1, 2, 3] q=none
+%91 = aten.hardtanh.default(%90) : torch.float32[1, 2, 3] q=none
+%92 = aten.hardtanh.default(%91) : torch.float32[1, 2, 3] q=none
+%93 = aten.hardtanh.default(%92) : torch.float32[1, 2, 3] q=none
+%94 = aten.hardtanh.default(%93) : torch.float32[1, 2, 3] q=none
+%95 = aten.hardtanh.default(%94) : torch.float32[1, 2, 3] q=none
+%96 = aten.hardtanh.default(%95) : torch.float32[1, 2, 3] q=none
+%97 = aten.hardtanh.default(%96) : torch.float32[1, 2, 3] q=none
+%98 = aten.hardtanh.default(%97) : torch.float32[1, 2, 3] q=none
+%99 = aten.hardtanh.default(%98) : torch.float32[1, 2, 3] q=none
+%100 = aten.hardtanh.default(%99) : torch.float32[1, 2, 3] q=none
+%101 = aten.hardtanh.default(%100) : torch.float32[1, 2, 3] q=none
+%102 = aten.hardtanh.default(%101) : torch.float32[1, 2, 3] q=none
+%103 = aten.hardtanh.default(%102) : torch.float32[1, 2, 3] q=none
+%104 = aten.hardtanh.default(%103) : torch.float32[1, 2, 3] q=none
+%105 = aten.hardtanh.default(%104) : torch.float32[1, 2, 3] q=none
+%106 = aten.hardtanh.default(%105) : torch.float32[1, 2, 3] q=none
+%107 = aten.hardtanh.default(%106) : torch.float32[1, 2, 3] q=none
+%108 = aten.hardtanh.default(%107) : torch.float32[1, 2, 3] q=none
+%109 = aten.hardtanh.default(%108) : torch.float32[1, 2, 3] q=none
+%110 = aten.hardtanh.default(%109) : torch.float32[1, 2, 3] q=none
+%111 = aten.hardtanh.default(%110) : torch.float32[1, 2, 3] q=none
+%112 = aten.hardtanh.default(%111) : torch.float32[1, 2, 3] q=none
+%113 = aten.hardtanh.default(%112) : torch.float32[1, 2, 3] q=none
+%114 = aten.hardtanh.default(%113) : torch.float32[1, 2, 3] q=none
+%115 = aten.hardtanh.default(%114) : torch.float32[1, 2, 3] q=none
+%116 = aten.hardtanh.default(%115) : torch.float32[1, 2, 3] q=none
+%117 = aten.hardtanh.default(%116) : torch.float32[1, 2, 3] q=none
+%118 = aten.hardtanh.default(%117) : torch.float32[1, 2, 3] q=none
+%119 = aten.hardtanh.default(%118) : torch.float32[1, 2, 3] q=none
+%120 = aten.hardtanh.default(%119) : torch.float32[1, 2, 3] q=none
+%121 = aten.hardtanh.default(%120) : torch.float32[1, 2, 3] q=none
+%122 = aten.hardtanh.default(%121) : torch.float32[1, 2, 3] q=none
+%123 = aten.hardtanh.default(%122) : torch.float32[1, 2, 3] q=none
+%124 = aten.hardtanh.default(%123) : torch.float32[1, 2, 3] q=none
+%125 = aten.hardtanh.default(%124) : torch.float32[1, 2, 3] q=none
+%126 = aten.hardtanh.default(%125) : torch.float32[1, 2, 3] q=none
+%127 = aten.hardtanh.default(%126) : torch.float32[1, 2, 3] q=none
+%128 = aten.hardtanh.default(%127) : torch.float32[1, 2, 3] q=none
+%129 = aten.hardtanh.default(%128) : torch.float32[1, 2, 3] q=none
+%130 = aten.hardtanh.default(%129) : torch.float32[1, 2, 3] q=none
+%131 = aten.hardtanh.default(%130) : torch.float32[1, 2, 3] q=none
+%132 = aten.hardtanh.default(%131) : torch.float32[1, 2, 3] q=none
+%133 = aten.hardtanh.default(%132) : torch.float32[1, 2, 3] q=none
+%134 = aten.hardtanh.default(%133) : torch.float32[1, 2, 3] q=none
+%135 = aten.hardtanh.default(%134) : torch.float32[1, 2, 3] q=none
+%136 = aten.hardtanh.default(%135) : torch.float32[1, 2, 3] q=none
+%137 = aten.hardtanh.default(%136) : torch.float32[1, 2, 3] q=none
+%138 = aten.hardtanh.default(%137) : torch.float32[1, 2, 3] q=none
+%139 = aten.hardtanh.default(%138) : torch.float32[1, 2, 3] q=none
+%140 = aten.hardtanh.default(%139) : torch.float32[1, 2, 3] q=none
+%141 = aten.hardtanh.default(%140) : torch.float32[1, 2, 3] q=none
+%142 = aten.hardtanh.default(%141) : torch.float32[1, 2, 3] q=none
+%143 = aten.hardtanh.default(%142) : torch.float32[1, 2, 3] q=none
+%144 = aten.hardtanh.default(%143) : torch.float32[1, 2, 3] q=none
+%145 = aten.hardtanh.default(%144) : torch.float32[1, 2, 3] q=none
+%146 = aten.hardtanh.default(%145) : torch.float32[1, 2, 3] q=none
+%147 = aten.hardtanh.default(%146) : torch.float32[1, 2, 3] q=none
+%148 = aten.hardtanh.default(%147) : torch.float32[1, 2, 3] q=none
+%149 = aten.hardtanh.default(%148) : torch.float32[1, 2, 3] q=none
+%150 = aten.hardtanh.default(%149) : torch.float32[1, 2, 3] q=none
+%151 = aten.hardtanh.default(%150) : torch.float32[1, 2, 3] q=none
+%152 = aten.hardtanh.default(%151) : torch.float32[1, 2, 3] q=none
+%153 = aten.hardtanh.default(%152) : torch.float32[1, 2, 3] q=none
+%154 = aten.hardtanh.default(%153) : torch.float32[1, 2, 3] q=none
+%155 = aten.hardtanh.default(%154) : torch.float32[1, 2, 3] q=none
+%156 = aten.hardtanh.default(%155) : torch.float32[1, 2, 3] q=none
+%157 = aten.hardtanh.default(%156) : torch.float32[1, 2, 3] q=none
+%158 = aten.hardtanh.default(%157) : torch.float32[1, 2, 3] q=none
+%159 = aten.hardtanh.default(%158) : torch.float32[1, 2, 3] q=none
+%160 = aten.hardtanh.default(%159) : torch.float32[1, 2, 3] q=none
+%161 = aten.hardtanh.default(%160) : torch.float32[1, 2, 3] q=none
+%162 = aten.hardtanh.default(%161) : torch.float32[1, 2, 3] q=none
+%163 = aten.hardtanh.default(%162) : torch.float32[1, 2, 3] q=none
+%164 = aten.hardtanh.default(%163) : torch.float32[1, 2, 3] q=none
+%165 = aten.hardtanh.default(%164) : torch.float32[1, 2, 3] q=none
+%166 = aten.hardtanh.default(%165) : torch.float32[1, 2, 3] q=none
+%167 = aten.hardtanh.default(%166) : torch.float32[1, 2, 3] q=none
+%168 = aten.hardtanh.default(%167) : torch.float32[1, 2, 3] q=none
+%169 = aten.hardtanh.default(%168) : torch.float32[1, 2, 3] q=none
+%170 = aten.hardtanh.default(%169) : torch.float32[1, 2, 3] q=none
+%171 = aten.hardtanh.default(%170) : torch.float32[1, 2, 3] q=none
+%172 = aten.hardtanh.default(%171) : torch.float32[1, 2, 3] q=none
+%173 = aten.hardtanh.default(%172) : torch.float32[1, 2, 3] q=none
+%174 = aten.hardtanh.default(%173) : torch.float32[1, 2, 3] q=none
+%175 = aten.hardtanh.default(%174) : torch.float32[1, 2, 3] q=none
+%176 = aten.hardtanh.default(%175) : torch.float32[1, 2, 3] q=none
+%177 = aten.hardtanh.default(%176) : torch.float32[1, 2, 3] q=none
+%178 = aten.hardtanh.default(%177) : torch.float32[1, 2, 3] q=none
+%179 = aten.hardtanh.default(%178) : torch.float32[1, 2, 3] q=none
+%180 = aten.hardtanh.default(%179) : torch.float32[1, 2, 3] q=none
+%181 = aten.hardtanh.default(%180) : torch.float32[1, 2, 3] q=none
+%182 = aten.hardtanh.default(%181) : torch.float32[1, 2, 3] q=none
+%183 = aten.hardtanh.default(%182) : torch.float32[1, 2, 3] q=none
+%184 = aten.hardtanh.default(%183) : torch.float32[1, 2, 3] q=none
+%185 = aten.hardtanh.default(%184) : torch.float32[1, 2, 3] q=none
+%186 = aten.hardtanh.default(%185) : torch.float32[1, 2, 3] q=none
+%187 = aten.hardtanh.default(%186) : torch.float32[1, 2, 3] q=none
+%188 = aten.hardtanh.default(%187) : torch.float32[1, 2, 3] q=none
+%189 = aten.hardtanh.default(%188) : torch.float32[1, 2, 3] q=none
+%190 = aten.hardtanh.default(%189) : torch.float32[1, 2, 3] q=none
+%191 = aten.hardtanh.default(%190) : torch.float32[1, 2, 3] q=none
+%192 = aten.hardtanh.default(%191) : torch.float32[1, 2, 3] q=none
+%193 = aten.hardtanh.default(%192) : torch.float32[1, 2, 3] q=none
+%194 = aten.hardtanh.default(%193) : torch.float32[1, 2, 3] q=none
+%195 = aten.hardtanh.default(%194) : torch.float32[1, 2, 3] q=none
+%196 = aten.hardtanh.default(%195) : torch.float32[1, 2, 3] q=none
+%197 = aten.hardtanh.default(%196) : torch.float32[1, 2, 3] q=none
+%198 = aten.hardtanh.default(%197) : torch.float32[1, 2, 3] q=none
+%199 = aten.hardtanh.default(%198) : torch.float32[1, 2, 3] q=none
+%200 = aten.hardtanh.default(%199) : torch.float32[1, 2, 3] q=none
+%201 = aten.hardtanh.default(%200) : torch.float32[1, 2, 3] q=none
+%202 = aten.hardtanh.default(%201) : torch.float32[1, 2, 3] q=none
+%203 = aten.hardtanh.default(%202) : torch.float32[1, 2, 3] q=none
+%204 = aten.hardtanh.default(%203) : torch.float32[1, 2, 3] q=none
+%205 = aten.hardtanh.default(%204) : torch.float32[1, 2, 3] q=none
+%206 = aten.hardtanh.default(%205) : torch.float32[1, 2, 3] q=none
+%207 = aten.hardtanh.default(%206) : torch.float32[1, 2, 3] q=none
+%208 = aten.hardtanh.default(%207) : torch.float32[1, 2, 3] q=none
+%209 = aten.hardtanh.default(%208) : torch.float32[1, 2, 3] q=none
+%210 = aten.hardtanh.default(%209) : torch.float32[1, 2, 3] q=none
+%211 = aten.hardtanh.default(%210) : torch.float32[1, 2, 3] q=none
+%212 = aten.hardtanh.default(%211) : torch.float32[1, 2, 3] q=none
+%213 = aten.hardtanh.default(%212) : torch.float32[1, 2, 3] q=none
+%214 = aten.hardtanh.default(%213) : torch.float32[1, 2, 3] q=none
+%215 = aten.hardtanh.default(%214) : torch.float32[1, 2, 3] q=none
+%216 = aten.hardtanh.default(%215) : torch.float32[1, 2, 3] q=none
+%217 = aten.hardtanh.default(%216) : torch.float32[1, 2, 3] q=none
+%218 = aten.hardtanh.default(%217) : torch.float32[1, 2, 3] q=none
+%219 = aten.hardtanh.default(%218) : torch.float32[1, 2, 3] q=none
+%220 = aten.hardtanh.default(%219) : torch.float32[1, 2, 3] q=none
+%221 = aten.hardtanh.default(%220) : torch.float32[1, 2, 3] q=none
+%222 = aten.hardtanh.default(%221) : torch.float32[1, 2, 3] q=none
+%223 = aten.hardtanh.default(%222) : torch.float32[1, 2, 3] q=none
+%224 = aten.hardtanh.default(%223) : torch.float32[1, 2, 3] q=none
+%225 = aten.hardtanh.default(%224) : torch.float32[1, 2, 3] q=none
+%226 = aten.hardtanh.default(%225) : torch.float32[1, 2, 3] q=none
+%227 = aten.hardtanh.default(%226) : torch.float32[1, 2, 3] q=none
+%228 = aten.hardtanh.default(%227) : torch.float32[1, 2, 3] q=none
+%229 = aten.hardtanh.default(%228) : torch.float32[1, 2, 3] q=none
+%230 = aten.hardtanh.default(%229) : torch.float32[1, 2, 3] q=none
+%231 = aten.hardtanh.default(%230) : torch.float32[1, 2, 3] q=none
+%232 = aten.hardtanh.default(%231) : torch.float32[1, 2, 3] q=none
+%233 = aten.hardtanh.default(%232) : torch.float32[1, 2, 3] q=none
+%234 = aten.hardtanh.default(%233) : torch.float32[1, 2, 3] q=none
+%235 = aten.hardtanh.default(%234) : torch.float32[1, 2, 3] q=none
+%236 = aten.hardtanh.default(%235) : torch.float32[1, 2, 3] q=none
+%237 = aten.hardtanh.default(%236) : torch.float32[1, 2, 3] q=none
+%238 = aten.hardtanh.default(%237) : torch.float32[1, 2, 3] q=none
+%239 = aten.hardtanh.default(%238) : torch.float32[1, 2, 3] q=none
+%240 = aten.hardtanh.default(%239) : torch.float32[1, 2, 3] q=none
+%241 = aten.hardtanh.default(%240) : torch.float32[1, 2, 3] q=none
+%242 = aten.hardtanh.default(%241) : torch.float32[1, 2, 3] q=none
+%243 = aten.hardtanh.default(%242) : torch.float32[1, 2, 3] q=none
+%244 = aten.hardtanh.default(%243) : torch.float32[1, 2, 3] q=none
+%245 = aten.hardtanh.default(%244) : torch.float32[1, 2, 3] q=none
+%246 = aten.hardtanh.default(%245) : torch.float32[1, 2, 3] q=none
+%247 = aten.hardtanh.default(%246) : torch.float32[1, 2, 3] q=none
+%248 = aten.hardtanh.default(%247) : torch.float32[1, 2, 3] q=none
+%249 = aten.hardtanh.default(%248) : torch.float32[1, 2, 3] q=none
+%250 = aten.hardtanh.default(%249) : torch.float32[1, 2, 3] q=none
+%251 = aten.hardtanh.default(%250) : torch.float32[1, 2, 3] q=none
+%252 = aten.hardtanh.default(%251) : torch.float32[1, 2, 3] q=none
+%253 = aten.hardtanh.default(%252) : torch.float32[1, 2, 3] q=none
+%254 = aten.hardtanh.default(%253) : torch.float32[1, 2, 3] q=none
+%255 = aten.hardtanh.default(%254) : torch.float32[1, 2, 3] q=none
+%256 = aten.hardtanh.default(%255) : torch.float32[1, 2, 3] q=none
+%257 = aten.hardtanh.default(%256) : torch.float32[1, 2, 3] q=none
+%258 = aten.hardtanh.default(%257) : torch.float32[1, 2, 3] q=none
+%259 = aten.hardtanh.default(%258) : torch.float32[1, 2, 3] q=none
+%260 = aten.hardtanh.default(%259) : torch.float32[1, 2, 3] q=none
+%261 = aten.hardtanh.default(%260) : torch.float32[1, 2, 3] q=none
+%262 = aten.hardtanh.default(%261) : torch.float32[1, 2, 3] q=none
+%263 = aten.hardtanh.default(%262) : torch.float32[1, 2, 3] q=none
+%264 = aten.hardtanh.default(%263) : torch.float32[1, 2, 3] q=none
+%265 = aten.hardtanh.default(%264) : torch.float32[1, 2, 3] q=none
+%266 = aten.hardtanh.default(%265) : torch.float32[1, 2, 3] q=none
+%267 = aten.hardtanh.default(%266) : torch.float32[1, 2, 3] q=none
+%268 = aten.hardtanh.default(%267) : torch.float32[1, 2, 3] q=none
+%269 = aten.hardtanh.default(%268) : torch.float32[1, 2, 3] q=none
+%270 = aten.hardtanh.default(%269) : torch.float32[1, 2, 3] q=none
+%271 = aten.hardtanh.default(%270) : torch.float32[1, 2, 3] q=none
+%272 = aten.hardtanh.default(%271) : torch.float32[1, 2, 3] q=none
+%273 = aten.hardtanh.default(%272) : torch.float32[1, 2, 3] q=none
+%274 = aten.hardtanh.default(%273) : torch.float32[1, 2, 3] q=none
+%275 = aten.hardtanh.default(%274) : torch.float32[1, 2, 3] q=none
+%276 = aten.hardtanh.default(%275) : torch.float32[1, 2, 3] q=none
+%277 = aten.hardtanh.default(%276) : torch.float32[1, 2, 3] q=none
+%278 = aten.hardtanh.default(%277) : torch.float32[1, 2, 3] q=none
+%279 = aten.hardtanh.default(%278) : torch.float32[1, 2, 3] q=none
+%280 = aten.hardtanh.default(%279) : torch.float32[1, 2, 3] q=none
+%281 = aten.hardtanh.default(%280) : torch.float32[1, 2, 3] q=none
+%282 = aten.hardtanh.default(%281) : torch.float32[1, 2, 3] q=none
+%283 = aten.hardtanh.default(%282) : torch.float32[1, 2, 3] q=none
+%284 = aten.hardtanh.default(%283) : torch.float32[1, 2, 3] q=none
+%285 = aten.hardtanh.default(%284) : torch.float32[1, 2, 3] q=none
+%286 = aten.hardtanh.default(%285) : torch.float32[1, 2, 3] q=none
+%287 = aten.hardtanh.default(%286) : torch.float32[1, 2, 3] q=none
+%288 = aten.hardtanh.default(%287) : torch.float32[1, 2, 3] q=none
+%289 = aten.hardtanh.default(%288) : torch.float32[1, 2, 3] q=none
+%290 = aten.hardtanh.default(%289) : torch.float32[1, 2, 3] q=none
+%291 = aten.hardtanh.default(%290) : torch.float32[1, 2, 3] q=none
+%292 = aten.hardtanh.default(%291) : torch.float32[1, 2, 3] q=none
+%293 = aten.hardtanh.default(%292) : torch.float32[1, 2, 3] q=none
+%294 = aten.hardtanh.default(%293) : torch.float32[1, 2, 3] q=none
+%295 = aten.hardtanh.default(%294) : torch.float32[1, 2, 3] q=none
+%296 = aten.hardtanh.default(%295) : torch.float32[1, 2, 3] q=none
+%297 = aten.hardtanh.default(%296) : torch.float32[1, 2, 3] q=none
+%298 = aten.hardtanh.default(%297) : torch.float32[1, 2, 3] q=none
+%299 = aten.hardtanh.default(%298) : torch.float32[1, 2, 3] q=none
+%300 = aten.hardtanh.default(%299) : torch.float32[1, 2, 3] q=none
+%301 = aten.hardtanh.default(%300) : torch.float32[1, 2, 3] q=none
+%302 = aten.hardtanh.default(%301) : torch.float32[1, 2, 3] q=none
+%303 = aten.hardtanh.default(%302) : torch.float32[1, 2, 3] q=none
+%304 = aten.hardtanh.default(%303) : torch.float32[1, 2, 3] q=none
+%305 = aten.hardtanh.default(%304) : torch.float32[1, 2, 3] q=none
+%306 = aten.hardtanh.default(%305) : torch.float32[1, 2, 3] q=none
+%307 = aten.hardtanh.default(%306) : torch.float32[1, 2, 3] q=none
+%308 = aten.hardtanh.default(%307) : torch.float32[1, 2, 3] q=none
+%309 = aten.hardtanh.default(%308) : torch.float32[1, 2, 3] q=none
+%310 = aten.hardtanh.default(%309) : torch.float32[1, 2, 3] q=none
+%311 = aten.hardtanh.default(%310) : torch.float32[1, 2, 3] q=none
+%312 = aten.hardtanh.default(%311) : torch.float32[1, 2, 3] q=none
+%313 = aten.hardtanh.default(%312) : torch.float32[1, 2, 3] q=none
+%314 = aten.hardtanh.default(%313) : torch.float32[1, 2, 3] q=none
+%315 = aten.hardtanh.default(%314) : torch.float32[1, 2, 3] q=none
+%316 = aten.hardtanh.default(%315) : torch.float32[1, 2, 3] q=none
+%317 = aten.hardtanh.default(%316) : torch.float32[1, 2, 3] q=none
+%318 = aten.hardtanh.default(%317) : torch.float32[1, 2, 3] q=none
+%319 = aten.hardtanh.default(%318) : torch.float32[1, 2, 3] q=none
+%320 = aten.hardtanh.default(%319) : torch.float32[1, 2, 3] q=none
+%321 = aten.hardtanh.default(%320) : torch.float32[1, 2, 3] q=none
+%322 = aten.hardtanh.default(%321) : torch.float32[1, 2, 3] q=none
+%323 = aten.hardtanh.default(%322) : torch.float32[1, 2, 3] q=none
+%324 = aten.hardtanh.default(%323) : torch.float32[1, 2, 3] q=none
+%325 = aten.hardtanh.default(%324) : torch.float32[1, 2, 3] q=none
+%326 = aten.hardtanh.default(%325) : torch.float32[1, 2, 3] q=none
+%327 = aten.hardtanh.default(%326) : torch.float32[1, 2, 3] q=none
+%328 = aten.hardtanh.default(%327) : torch.float32[1, 2, 3] q=none
+%329 = aten.hardtanh.default(%328) : torch.float32[1, 2, 3] q=none
+%330 = aten.hardtanh.default(%329) : torch.float32[1, 2, 3] q=none
+%331 = aten.hardtanh.default(%330) : torch.float32[1, 2, 3] q=none
+%332 = aten.hardtanh.default(%331) : torch.float32[1, 2, 3] q=none
+%333 = aten.hardtanh.default(%332) : torch.float32[1, 2, 3] q=none
+%334 = aten.hardtanh.default(%333) : torch.float32[1, 2, 3] q=none
+%335 = aten.hardtanh.default(%334) : torch.float32[1, 2, 3] q=none
+%336 = aten.hardtanh.default(%335) : torch.float32[1, 2, 3] q=none
+%337 = aten.hardtanh.default(%336) : torch.float32[1, 2, 3] q=none
+%338 = aten.hardtanh.default(%337) : torch.float32[1, 2, 3] q=none
+%339 = aten.hardtanh.default(%338) : torch.float32[1, 2, 3] q=none
+%340 = aten.hardtanh.default(%339) : torch.float32[1, 2, 3] q=none
+%341 = aten.hardtanh.default(%340) : torch.float32[1, 2, 3] q=none
+%342 = aten.hardtanh.default(%341) : torch.float32[1, 2, 3] q=none
+%343 = aten.hardtanh.default(%342) : torch.float32[1, 2, 3] q=none
+%344 = aten.hardtanh.default(%343) : torch.float32[1, 2, 3] q=none
+%345 = aten.hardtanh.default(%344) : torch.float32[1, 2, 3] q=none
+%346 = aten.hardtanh.default(%345) : torch.float32[1, 2, 3] q=none
+%347 = aten.hardtanh.default(%346) : torch.float32[1, 2, 3] q=none
+%348 = aten.hardtanh.default(%347) : torch.float32[1, 2, 3] q=none
+%349 = aten.hardtanh.default(%348) : torch.float32[1, 2, 3] q=none
+%350 = aten.hardtanh.default(%349) : torch.float32[1, 2, 3] q=none
+%351 = aten.hardtanh.default(%350) : torch.float32[1, 2, 3] q=none
+%352 = aten.hardtanh.default(%351) : torch.float32[1, 2, 3] q=none
+%353 = aten.hardtanh.default(%352) : torch.float32[1, 2, 3] q=none
+%354 = aten.hardtanh.default(%353) : torch.float32[1, 2, 3] q=none
+%355 = aten.hardtanh.default(%354) : torch.float32[1, 2, 3] q=none
+%356 = aten.hardtanh.default(%355) : torch.float32[1, 2, 3] q=none
+%357 = aten.hardtanh.default(%356) : torch.float32[1, 2, 3] q=none
+%358 = aten.hardtanh.default(%357) : torch.float32[1, 2, 3] q=none
+%359 = aten.hardtanh.default(%358) : torch.float32[1, 2, 3] q=none
+%360 = aten.hardtanh.default(%359) : torch.float32[1, 2, 3] q=none
+%361 = aten.hardtanh.default(%360) : torch.float32[1, 2, 3] q=none
+%362 = aten.hardtanh.default(%361) : torch.float32[1, 2, 3] q=none
+%363 = aten.hardtanh.default(%362) : torch.float32[1, 2, 3] q=none
+%364 = aten.hardtanh.default(%363) : torch.float32[1, 2, 3] q=none
+%365 = aten.hardtanh.default(%364) : torch.float32[1, 2, 3] q=none
+%366 = aten.hardtanh.default(%365) : torch.float32[1, 2, 3] q=none
+%367 = aten.hardtanh.default(%366) : torch.float32[1, 2, 3] q=none
+%368 = aten.hardtanh.default(%367) : torch.float32[1, 2, 3] q=none
+%369 = aten.hardtanh.default(%368) : torch.float32[1, 2, 3] q=none
+%370 = aten.hardtanh.default(%369) : torch.float32[1, 2, 3] q=none
+%371 = aten.hardtanh.default(%370) : torch.float32[1, 2, 3] q=none
+%372 = aten.hardtanh.default(%371) : torch.float32[1, 2, 3] q=none
+%373 = aten.hardtanh.default(%372) : torch.float32[1, 2, 3] q=none
+%374 = aten.hardtanh.default(%373) : torch.float32[1, 2, 3] q=none
+%375 = aten.hardtanh.default(%374) : torch.float32[1, 2, 3] q=none
+%376 = aten.hardtanh.default(%375) : torch.float32[1, 2, 3] q=none
+%377 = aten.hardtanh.default(%376) : torch.float32[1, 2, 3] q=none
+%378 = aten.hardtanh.default(%377) : torch.float32[1, 2, 3] q=none
+%379 = aten.hardtanh.default(%378) : torch.float32[1, 2, 3] q=none
+%380 = aten.hardtanh.default(%379) : torch.float32[1, 2, 3] q=none
+%381 = aten.hardtanh.default(%380) : torch.float32[1, 2, 3] q=none
+%382 = aten.hardtanh.default(%381) : torch.float32[1, 2, 3] q=none
+%383 = aten.hardtanh.default(%382) : torch.float32[1, 2, 3] q=none
+%384 = aten.hardtanh.default(%383) : torch.float32[1, 2, 3] q=none
+%385 = aten.hardtanh.default(%384) : torch.float32[1, 2, 3] q=none
+%386 = aten.hardtanh.default(%385) : torch.float32[1, 2, 3] q=none
+%387 = aten.hardtanh.default(%386) : torch.float32[1, 2, 3] q=none
+%388 = aten.hardtanh.default(%387) : torch.float32[1, 2, 3] q=none
+%389 = aten.hardtanh.default(%388) : torch.float32[1, 2, 3] q=none
+%390 = aten.hardtanh.default(%389) : torch.float32[1, 2, 3] q=none
+%391 = aten.hardtanh.default(%390) : torch.float32[1, 2, 3] q=none
+%392 = aten.hardtanh.default(%391) : torch.float32[1, 2, 3] q=none
+%393 = aten.hardtanh.default(%392) : torch.float32[1, 2, 3] q=none
+%394 = aten.hardtanh.default(%393) : torch.float32[1, 2, 3] q=none
+%395 = aten.hardtanh.default(%394) : torch.float32[1, 2, 3] q=none
+%396 = aten.hardtanh.default(%395) : torch.float32[1, 2, 3] q=none
+%397 = aten.hardtanh.default(%396) : torch.float32[1, 2, 3] q=none
+%398 = aten.hardtanh.default(%397) : torch.float32[1, 2, 3] q=none
+%399 = aten.hardtanh.default(%398) : torch.float32[1, 2, 3] q=none
+%400 = aten.hardtanh.default(%399) : torch.float32[1, 2, 3] q=none
+%401 = aten.hardtanh.default(%400) : torch.float32[1, 2, 3] q=none
+%402 = aten.hardtanh.default(%401) : torch.float32[1, 2, 3] q=none
+%403 = aten.hardtanh.default(%402) : torch.float32[1, 2, 3] q=none
+%404 = aten.hardtanh.default(%403) : torch.float32[1, 2, 3] q=none
+%405 = aten.hardtanh.default(%404) : torch.float32[1, 2, 3] q=none
+%406 = aten.hardtanh.default(%405) : torch.float32[1, 2, 3] q=none
+%407 = aten.hardtanh.default(%406) : torch.float32[1, 2, 3] q=none
+%408 = aten.hardtanh.default(%407) : torch.float32[1, 2, 3] q=none
+%409 = aten.hardtanh.default(%408) : torch.float32[1, 2, 3] q=none
+%410 = aten.hardtanh.default(%409) : torch.float32[1, 2, 3] q=none
+%411 = aten.hardtanh.default(%410) : torch.float32[1, 2, 3] q=none
+%412 = aten.hardtanh.default(%411) : torch.float32[1, 2, 3] q=none
+%413 = aten.hardtanh.default(%412) : torch.float32[1, 2, 3] q=none
+%414 = aten.hardtanh.default(%413) : torch.float32[1, 2, 3] q=none
+%415 = aten.hardtanh.default(%414) : torch.float32[1, 2, 3] q=none
+%416 = aten.hardtanh.default(%415) : torch.float32[1, 2, 3] q=none
+%417 = aten.hardtanh.default(%416) : torch.float32[1, 2, 3] q=none
+%418 = aten.hardtanh.default(%417) : torch.float32[1, 2, 3] q=none
+%419 = aten.hardtanh.default(%418) : torch.float32[1, 2, 3] q=none
+%420 = aten.hardtanh.default(%419) : torch.float32[1, 2, 3] q=none
+%421 = aten.hardtanh.default(%420) : torch.float32[1, 2, 3] q=none
+%422 = aten.hardtanh.default(%421) : torch.float32[1, 2, 3] q=none
+%423 = aten.hardtanh.default(%422) : torch.float32[1, 2, 3] q=none
+%424 = aten.hardtanh.default(%423) : torch.float32[1, 2, 3] q=none
+%425 = aten.hardtanh.default(%424) : torch.float32[1, 2, 3] q=none
+%426 = aten.hardtanh.default(%425) : torch.float32[1, 2, 3] q=none
+%427 = aten.hardtanh.default(%426) : torch.float32[1, 2, 3] q=none
+%428 = aten.hardtanh.default(%427) : torch.float32[1, 2, 3] q=none
+%429 = aten.hardtanh.default(%428) : torch.float32[1, 2, 3] q=none
+%430 = aten.hardtanh.default(%429) : torch.float32[1, 2, 3] q=none
+%431 = aten.hardtanh.default(%430) : torch.float32[1, 2, 3] q=none
+%432 = aten.hardtanh.default(%431) : torch.float32[1, 2, 3] q=none
+%433 = aten.hardtanh.default(%432) : torch.float32[1, 2, 3] q=none
+%434 = aten.hardtanh.default(%433) : torch.float32[1, 2, 3] q=none
+%435 = aten.hardtanh.default(%434) : torch.float32[1, 2, 3] q=none
+%436 = aten.hardtanh.default(%435) : torch.float32[1, 2, 3] q=none
+%437 = aten.hardtanh.default(%436) : torch.float32[1, 2, 3] q=none
+%438 = aten.hardtanh.default(%437) : torch.float32[1, 2, 3] q=none
+%439 = aten.hardtanh.default(%438) : torch.float32[1, 2, 3] q=none
+%440 = aten.hardtanh.default(%439) : torch.float32[1, 2, 3] q=none
+%441 = aten.hardtanh.default(%440) : torch.float32[1, 2, 3] q=none
+%442 = aten.hardtanh.default(%441) : torch.float32[1, 2, 3] q=none
+%443 = aten.hardtanh.default(%442) : torch.float32[1, 2, 3] q=none
+%444 = aten.hardtanh.default(%443) : torch.float32[1, 2, 3] q=none
+%445 = aten.hardtanh.default(%444) : torch.float32[1, 2, 3] q=none
+%446 = aten.hardtanh.default(%445) : torch.float32[1, 2, 3] q=none
+%447 = aten.hardtanh.default(%446) : torch.float32[1, 2, 3] q=none
+%448 = aten.hardtanh.default(%447) : torch.float32[1, 2, 3] q=none
+%449 = aten.hardtanh.default(%448) : torch.float32[1, 2, 3] q=none
+%450 = aten.hardtanh.default(%449) : torch.float32[1, 2, 3] q=none
+%451 = aten.hardtanh.default(%450) : torch.float32[1, 2, 3] q=none
+%452 = aten.hardtanh.default(%451) : torch.float32[1, 2, 3] q=none
+%453 = aten.hardtanh.default(%452) : torch.float32[1, 2, 3] q=none
+%454 = aten.hardtanh.default(%453) : torch.float32[1, 2, 3] q=none
+%455 = aten.hardtanh.default(%454) : torch.float32[1, 2, 3] q=none
+%456 = aten.hardtanh.default(%455) : torch.float32[1, 2, 3] q=none
+%457 = aten.hardtanh.default(%456) : torch.float32[1, 2, 3] q=none
+%458 = aten.hardtanh.default(%457) : torch.float32[1, 2, 3] q=none
+%459 = aten.hardtanh.default(%458) : torch.float32[1, 2, 3] q=none
+%460 = aten.hardtanh.default(%459) : torch.float32[1, 2, 3] q=none
+%461 = aten.hardtanh.default(%460) : torch.float32[1, 2, 3] q=none
+%462 = aten.hardtanh.default(%461) : torch.float32[1, 2, 3] q=none
+%463 = aten.hardtanh.default(%462) : torch.float32[1, 2, 3] q=none
+%464 = aten.hardtanh.default(%463) : torch.float32[1, 2, 3] q=none
+%465 = aten.hardtanh.default(%464) : torch.float32[1, 2, 3] q=none
+%466 = aten.hardtanh.default(%465) : torch.float32[1, 2, 3] q=none
+%467 = aten.hardtanh.default(%466) : torch.float32[1, 2, 3] q=none
+%468 = aten.hardtanh.default(%467) : torch.float32[1, 2, 3] q=none
+%469 = aten.hardtanh.default(%468) : torch.float32[1, 2, 3] q=none
+%470 = aten.hardtanh.default(%469) : torch.float32[1, 2, 3] q=none
+%471 = aten.hardtanh.default(%470) : torch.float32[1, 2, 3] q=none
+%472 = aten.hardtanh.default(%471) : torch.float32[1, 2, 3] q=none
+%473 = aten.hardtanh.default(%472) : torch.float32[1, 2, 3] q=none
+%474 = aten.hardtanh.default(%473) : torch.float32[1, 2, 3] q=none
+%475 = aten.hardtanh.default(%474) : torch.float32[1, 2, 3] q=none
+%476 = aten.hardtanh.default(%475) : torch.float32[1, 2, 3] q=none
+%477 = aten.hardtanh.default(%476) : torch.float32[1, 2, 3] q=none
+%478 = aten.hardtanh.default(%477) : torch.float32[1, 2, 3] q=none
+%479 = aten.hardtanh.default(%478) : torch.float32[1, 2, 3] q=none
+%480 = aten.hardtanh.default(%479) : torch.float32[1, 2, 3] q=none
+%481 = aten.hardtanh.default(%480) : torch.float32[1, 2, 3] q=none
+%482 = aten.hardtanh.default(%481) : torch.float32[1, 2, 3] q=none
+%483 = aten.hardtanh.default(%482) : torch.float32[1, 2, 3] q=none
+%484 = aten.hardtanh.default(%483) : torch.float32[1, 2, 3] q=none
+%485 = aten.hardtanh.default(%484) : torch.float32[1, 2, 3] q=none
+%486 = aten.hardtanh.default(%485) : torch.float32[1, 2, 3] q=none
+%487 = aten.hardtanh.default(%486) : torch.float32[1, 2, 3] q=none
+%488 = aten.hardtanh.default(%487) : torch.float32[1, 2, 3] q=none
+%489 = aten.hardtanh.default(%488) : torch.float32[1, 2, 3] q=none
+%490 = aten.hardtanh.default(%489) : torch.float32[1, 2, 3] q=none
+%491 = aten.hardtanh.default(%490) : torch.float32[1, 2, 3] q=none
+%492 = aten.hardtanh.default(%491) : torch.float32[1, 2, 3] q=none
+%493 = aten.hardtanh.default(%492) : torch.float32[1, 2, 3] q=none
+%494 = aten.hardtanh.default(%493) : torch.float32[1, 2, 3] q=none
+%495 = aten.hardtanh.default(%494) : torch.float32[1, 2, 3] q=none
+%496 = aten.hardtanh.default(%495) : torch.float32[1, 2, 3] q=none
+%497 = aten.hardtanh.default(%496) : torch.float32[1, 2, 3] q=none
+%498 = aten.hardtanh.default(%497) : torch.float32[1, 2, 3] q=none
+%499 = aten.hardtanh.default(%498) : torch.float32[1, 2, 3] q=none
+%500 = aten.hardtanh.default(%499) : torch.float32[1, 2, 3] q=none
+%501 = aten.hardtanh.default(%500) : torch.float32[1, 2, 3] q=none
+%502 = aten.hardtanh.default(%501) : torch.float32[1, 2, 3] q=none
+%503 = aten.hardtanh.default(%502) : torch.float32[1, 2, 3] q=none
+%504 = aten.hardtanh.default(%503) : torch.float32[1, 2, 3] q=none
+%505 = aten.hardtanh.default(%504) : torch.float32[1, 2, 3] q=none
+%506 = aten.hardtanh.default(%505) : torch.float32[1, 2, 3] q=none
+%507 = aten.hardtanh.default(%506) : torch.float32[1, 2, 3] q=none
+%508 = aten.hardtanh.default(%507) : torch.float32[1, 2, 3] q=none
+%509 = aten.hardtanh.default(%508) : torch.float32[1, 2, 3] q=none
+%510 = aten.hardtanh.default(%509) : torch.float32[1, 2, 3] q=none
+%511 = aten.hardtanh.default(%510) : torch.float32[1, 2, 3] q=none
+%512 = aten.hardtanh.default(%511) : torch.float32[1, 2, 3] q=none
+%513 = aten.hardtanh.default(%512) : torch.float32[1, 2, 3] q=none
+%514 = aten.hardtanh.default(%513) : torch.float32[1, 2, 3] q=none
+%515 = aten.hardtanh.default(%514) : torch.float32[1, 2, 3] q=none
+%516 = aten.hardtanh.default(%515) : torch.float32[1, 2, 3] q=none
+%517 = aten.hardtanh.default(%516) : torch.float32[1, 2, 3] q=none
+%518 = aten.hardtanh.default(%517) : torch.float32[1, 2, 3] q=none
+%519 = aten.hardtanh.default(%518) : torch.float32[1, 2, 3] q=none
+%520 = aten.hardtanh.default(%519) : torch.float32[1, 2, 3] q=none
+%521 = aten.hardtanh.default(%520) : torch.float32[1, 2, 3] q=none
+%522 = aten.hardtanh.default(%521) : torch.float32[1, 2, 3] q=none
+%523 = aten.hardtanh.default(%522) : torch.float32[1, 2, 3] q=none
+%524 = aten.hardtanh.default(%523) : torch.float32[1, 2, 3] q=none
+%525 = aten.hardtanh.default(%524) : torch.float32[1, 2, 3] q=none
+%526 = aten.hardtanh.default(%525) : torch.float32[1, 2, 3] q=none
+%527 = aten.hardtanh.default(%526) : torch.float32[1, 2, 3] q=none
+%528 = aten.hardtanh.default(%527) : torch.float32[1, 2, 3] q=none
+%529 = aten.hardtanh.default(%528) : torch.float32[1, 2, 3] q=none
+%530 = aten.hardtanh.default(%529) : torch.float32[1, 2, 3] q=none
+%531 = aten.hardtanh.default(%530) : torch.float32[1, 2, 3] q=none
+%532 = aten.hardtanh.default(%531) : torch.float32[1, 2, 3] q=none
+%533 = aten.hardtanh.default(%532) : torch.float32[1, 2, 3] q=none
+%534 = aten.hardtanh.default(%533) : torch.float32[1, 2, 3] q=none
+%535 = aten.hardtanh.default(%534) : torch.float32[1, 2, 3] q=none
+%536 = aten.hardtanh.default(%535) : torch.float32[1, 2, 3] q=none
+%537 = aten.hardtanh.default(%536) : torch.float32[1, 2, 3] q=none
+%538 = aten.hardtanh.default(%537) : torch.float32[1, 2, 3] q=none
+%539 = aten.hardtanh.default(%538) : torch.float32[1, 2, 3] q=none
+%540 = aten.hardtanh.default(%539) : torch.float32[1, 2, 3] q=none
+%541 = aten.hardtanh.default(%540) : torch.float32[1, 2, 3] q=none
+%542 = aten.hardtanh.default(%541) : torch.float32[1, 2, 3] q=none
+%543 = aten.hardtanh.default(%542) : torch.float32[1, 2, 3] q=none
+%544 = aten.hardtanh.default(%543) : torch.float32[1, 2, 3] q=none
+%545 = aten.hardtanh.default(%544) : torch.float32[1, 2, 3] q=none
+%546 = aten.hardtanh.default(%545) : torch.float32[1, 2, 3] q=none
+%547 = aten.hardtanh.default(%546) : torch.float32[1, 2, 3] q=none
+%548 = aten.hardtanh.default(%547) : torch.float32[1, 2, 3] q=none
+%549 = aten.hardtanh.default(%548) : torch.float32[1, 2, 3] q=none
+%550 = aten.hardtanh.default(%549) : torch.float32[1, 2, 3] q=none
+%551 = aten.hardtanh.default(%550) : torch.float32[1, 2, 3] q=none
+%552 = aten.hardtanh.default(%551) : torch.float32[1, 2, 3] q=none
+%553 = aten.hardtanh.default(%552) : torch.float32[1, 2, 3] q=none
+%554 = aten.hardtanh.default(%553) : torch.float32[1, 2, 3] q=none
+%555 = aten.hardtanh.default(%554) : torch.float32[1, 2, 3] q=none
+%556 = aten.hardtanh.default(%555) : torch.float32[1, 2, 3] q=none
+%557 = aten.hardtanh.default(%556) : torch.float32[1, 2, 3] q=none
+%558 = aten.hardtanh.default(%557) : torch.float32[1, 2, 3] q=none
+%559 = aten.hardtanh.default(%558) : torch.float32[1, 2, 3] q=none
+%560 = aten.hardtanh.default(%559) : torch.float32[1, 2, 3] q=none
+%561 = aten.hardtanh.default(%560) : torch.float32[1, 2, 3] q=none
+%562 = aten.hardtanh.default(%561) : torch.float32[1, 2, 3] q=none
+%563 = aten.hardtanh.default(%562) : torch.float32[1, 2, 3] q=none
+%564 = aten.hardtanh.default(%563) : torch.float32[1, 2, 3] q=none
+%565 = aten.hardtanh.default(%564) : torch.float32[1, 2, 3] q=none
+%566 = aten.hardtanh.default(%565) : torch.float32[1, 2, 3] q=none
+%567 = aten.hardtanh.default(%566) : torch.float32[1, 2, 3] q=none
+%568 = aten.hardtanh.default(%567) : torch.float32[1, 2, 3] q=none
+%569 = aten.hardtanh.default(%568) : torch.float32[1, 2, 3] q=none
+%570 = aten.hardtanh.default(%569) : torch.float32[1, 2, 3] q=none
+%571 = aten.hardtanh.default(%570) : torch.float32[1, 2, 3] q=none
+%572 = aten.hardtanh.default(%571) : torch.float32[1, 2, 3] q=none
+%573 = aten.hardtanh.default(%572) : torch.float32[1, 2, 3] q=none
+%574 = aten.hardtanh.default(%573) : torch.float32[1, 2, 3] q=none
+%575 = aten.hardtanh.default(%574) : torch.float32[1, 2, 3] q=none
+%576 = aten.hardtanh.default(%575) : torch.float32[1, 2, 3] q=none
+%577 = aten.hardtanh.default(%576) : torch.float32[1, 2, 3] q=none
+%578 = aten.hardtanh.default(%577) : torch.float32[1, 2, 3] q=none
+%579 = aten.hardtanh.default(%578) : torch.float32[1, 2, 3] q=none
+%580 = aten.hardtanh.default(%579) : torch.float32[1, 2, 3] q=none
+%581 = aten.hardtanh.default(%580) : torch.float32[1, 2, 3] q=none
+%582 = aten.hardtanh.default(%581) : torch.float32[1, 2, 3] q=none
+%583 = aten.hardtanh.default(%582) : torch.float32[1, 2, 3] q=none
+%584 = aten.hardtanh.default(%583) : torch.float32[1, 2, 3] q=none
+%585 = aten.hardtanh.default(%584) : torch.float32[1, 2, 3] q=none
+%586 = aten.hardtanh.default(%585) : torch.float32[1, 2, 3] q=none
+%587 = aten.hardtanh.default(%586) : torch.float32[1, 2, 3] q=none
+%588 = aten.hardtanh.default(%587) : torch.float32[1, 2, 3] q=none
+%589 = aten.hardtanh.default(%588) : torch.float32[1, 2, 3] q=none
+%590 = aten.hardtanh.default(%589) : torch.float32[1, 2, 3] q=none
+%591 = aten.hardtanh.default(%590) : torch.float32[1, 2, 3] q=none
+%592 = aten.hardtanh.default(%591) : torch.float32[1, 2, 3] q=none
+%593 = aten.hardtanh.default(%592) : torch.float32[1, 2, 3] q=none
+%594 = aten.hardtanh.default(%593) : torch.float32[1, 2, 3] q=none
+%595 = aten.hardtanh.default(%594) : torch.float32[1, 2, 3] q=none
+%596 = aten.hardtanh.default(%595) : torch.float32[1, 2, 3] q=none
+%597 = aten.hardtanh.default(%596) : torch.float32[1, 2, 3] q=none
+%598 = aten.hardtanh.default(%597) : torch.float32[1, 2, 3] q=none
+%599 = aten.hardtanh.default(%598) : torch.float32[1, 2, 3] q=none
+%600 = aten.hardtanh.default(%599) : torch.float32[1, 2, 3] q=none
+%601 = aten.hardtanh.default(%600) : torch.float32[1, 2, 3] q=none
+%602 = aten.hardtanh.default(%601) : torch.float32[1, 2, 3] q=none
+%603 = aten.hardtanh.default(%602) : torch.float32[1, 2, 3] q=none
+%604 = aten.hardtanh.default(%603) : torch.float32[1, 2, 3] q=none
+%605 = aten.hardtanh.default(%604) : torch.float32[1, 2, 3] q=none
+%606 = aten.hardtanh.default(%605) : torch.float32[1, 2, 3] q=none
+%607 = aten.hardtanh.default(%606) : torch.float32[1, 2, 3] q=none
+%608 = aten.hardtanh.default(%607) : torch.float32[1, 2, 3] q=none
+%609 = aten.hardtanh.default(%608) : torch.float32[1, 2, 3] q=none
+%610 = aten.hardtanh.default(%609) : torch.float32[1, 2, 3] q=none
+%611 = aten.hardtanh.default(%610) : torch.float32[1, 2, 3] q=none
+%612 = aten.hardtanh.default(%611) : torch.float32[1, 2, 3] q=none
+%613 = aten.hardtanh.default(%612) : torch.float32[1, 2, 3] q=none
+%614 = aten.hardtanh.default(%613) : torch.float32[1, 2, 3] q=none
+%615 = aten.hardtanh.default(%614) : torch.float32[1, 2, 3] q=none
+%616 = aten.hardtanh.default(%615) : torch.float32[1, 2, 3] q=none
+%617 = aten.hardtanh.default(%616) : torch.float32[1, 2, 3] q=none
+%618 = aten.hardtanh.default(%617) : torch.float32[1, 2, 3] q=none
+%619 = aten.hardtanh.default(%618) : torch.float32[1, 2, 3] q=none
+%620 = aten.hardtanh.default(%619) : torch.float32[1, 2, 3] q=none
+%621 = aten.hardtanh.default(%620) : torch.float32[1, 2, 3] q=none
+%622 = aten.hardtanh.default(%621) : torch.float32[1, 2, 3] q=none
+%623 = aten.hardtanh.default(%622) : torch.float32[1, 2, 3] q=none
+%624 = aten.hardtanh.default(%623) : torch.float32[1, 2, 3] q=none
+%625 = aten.hardtanh.default(%624) : torch.float32[1, 2, 3] q=none
+%626 = aten.hardtanh.default(%625) : torch.float32[1, 2, 3] q=none
+%627 = aten.hardtanh.default(%626) : torch.float32[1, 2, 3] q=none
+%628 = aten.hardtanh.default(%627) : torch.float32[1, 2, 3] q=none
+%629 = aten.hardtanh.default(%628) : torch.float32[1, 2, 3] q=none
+%630 = aten.hardtanh.default(%629) : torch.float32[1, 2, 3] q=none
+%631 = aten.hardtanh.default(%630) : torch.float32[1, 2, 3] q=none
+%632 = aten.hardtanh.default(%631) : torch.float32[1, 2, 3] q=none
+%633 = aten.hardtanh.default(%632) : torch.float32[1, 2, 3] q=none
+%634 = aten.hardtanh.default(%633) : torch.float32[1, 2, 3] q=none
+%635 = aten.hardtanh.default(%634) : torch.float32[1, 2, 3] q=none
+%636 = aten.hardtanh.default(%635) : torch.float32[1, 2, 3] q=none
+%637 = aten.hardtanh.default(%636) : torch.float32[1, 2, 3] q=none
+%638 = aten.hardtanh.default(%637) : torch.float32[1, 2, 3] q=none
+%639 = aten.hardtanh.default(%638) : torch.float32[1, 2, 3] q=none
+%640 = aten.hardtanh.default(%639) : torch.float32[1, 2, 3] q=none
+%641 = aten.hardtanh.default(%640) : torch.float32[1, 2, 3] q=none
+%642 = aten.hardtanh.default(%641) : torch.float32[1, 2, 3] q=none
+%643 = aten.hardtanh.default(%642) : torch.float32[1, 2, 3] q=none
+%644 = aten.hardtanh.default(%643) : torch.float32[1, 2, 3] q=none
+%645 = aten.hardtanh.default(%644) : torch.float32[1, 2, 3] q=none
+%646 = aten.hardtanh.default(%645) : torch.float32[1, 2, 3] q=none
+%647 = aten.hardtanh.default(%646) : torch.float32[1, 2, 3] q=none
+%648 = aten.hardtanh.default(%647) : torch.float32[1, 2, 3] q=none
+%649 = aten.hardtanh.default(%648) : torch.float32[1, 2, 3] q=none
+%650 = aten.hardtanh.default(%649) : torch.float32[1, 2, 3] q=none
+%651 = aten.hardtanh.default(%650) : torch.float32[1, 2, 3] q=none
+%652 = aten.hardtanh.default(%651) : torch.float32[1, 2, 3] q=none
+%653 = aten.hardtanh.default(%652) : torch.float32[1, 2, 3] q=none
+%654 = aten.hardtanh.default(%653) : torch.float32[1, 2, 3] q=none
+%655 = aten.hardtanh.default(%654) : torch.float32[1, 2, 3] q=none
+%656 = aten.hardtanh.default(%655) : torch.float32[1, 2, 3] q=none
+%657 = aten.hardtanh.default(%656) : torch.float32[1, 2, 3] q=none
+%658 = aten.hardtanh.default(%657) : torch.float32[1, 2, 3] q=none
+%659 = aten.hardtanh.default(%658) : torch.float32[1, 2, 3] q=none
+%660 = aten.hardtanh.default(%659) : torch.float32[1, 2, 3] q=none
+%661 = aten.hardtanh.default(%660) : torch.float32[1, 2, 3] q=none
+%662 = aten.hardtanh.default(%661) : torch.float32[1, 2, 3] q=none
+%663 = aten.hardtanh.default(%662) : torch.float32[1, 2, 3] q=none
+%664 = aten.hardtanh.default(%663) : torch.float32[1, 2, 3] q=none
+%665 = aten.hardtanh.default(%664) : torch.float32[1, 2, 3] q=none
+%666 = aten.hardtanh.default(%665) : torch.float32[1, 2, 3] q=none
+%667 = aten.hardtanh.default(%666) : torch.float32[1, 2, 3] q=none
+%668 = aten.hardtanh.default(%667) : torch.float32[1, 2, 3] q=none
+%669 = aten.hardtanh.default(%668) : torch.float32[1, 2, 3] q=none
+%670 = aten.hardtanh.default(%669) : torch.float32[1, 2, 3] q=none
+%671 = aten.hardtanh.default(%670) : torch.float32[1, 2, 3] q=none
+%672 = aten.hardtanh.default(%671) : torch.float32[1, 2, 3] q=none
+%673 = aten.hardtanh.default(%672) : torch.float32[1, 2, 3] q=none
+%674 = aten.hardtanh.default(%673) : torch.float32[1, 2, 3] q=none
+%675 = aten.hardtanh.default(%674) : torch.float32[1, 2, 3] q=none
+%676 = aten.hardtanh.default(%675) : torch.float32[1, 2, 3] q=none
+%677 = aten.hardtanh.default(%676) : torch.float32[1, 2, 3] q=none
+%678 = aten.hardtanh.default(%677) : torch.float32[1, 2, 3] q=none
+%679 = aten.hardtanh.default(%678) : torch.float32[1, 2, 3] q=none
+%680 = aten.hardtanh.default(%679) : torch.float32[1, 2, 3] q=none
+%681 = aten.hardtanh.default(%680) : torch.float32[1, 2, 3] q=none
+%682 = aten.hardtanh.default(%681) : torch.float32[1, 2, 3] q=none
+%683 = aten.hardtanh.default(%682) : torch.float32[1, 2, 3] q=none
+%684 = aten.hardtanh.default(%683) : torch.float32[1, 2, 3] q=none
+%685 = aten.hardtanh.default(%684) : torch.float32[1, 2, 3] q=none
+%686 = aten.hardtanh.default(%685) : torch.float32[1, 2, 3] q=none
+%687 = aten.hardtanh.default(%686) : torch.float32[1, 2, 3] q=none
+%688 = aten.hardtanh.default(%687) : torch.float32[1, 2, 3] q=none
+%689 = aten.hardtanh.default(%688) : torch.float32[1, 2, 3] q=none
+%690 = aten.hardtanh.default(%689) : torch.float32[1, 2, 3] q=none
+%691 = aten.hardtanh.default(%690) : torch.float32[1, 2, 3] q=none
+%692 = aten.hardtanh.default(%691) : torch.float32[1, 2, 3] q=none
+%693 = aten.hardtanh.default(%692) : torch.float32[1, 2, 3] q=none
+%694 = aten.hardtanh.default(%693) : torch.float32[1, 2, 3] q=none
+%695 = aten.hardtanh.default(%694) : torch.float32[1, 2, 3] q=none
+%696 = aten.hardtanh.default(%695) : torch.float32[1, 2, 3] q=none
+%697 = aten.hardtanh.default(%696) : torch.float32[1, 2, 3] q=none
+%698 = aten.hardtanh.default(%697) : torch.float32[1, 2, 3] q=none
+%699 = aten.hardtanh.default(%698) : torch.float32[1, 2, 3] q=none
+%700 = aten.hardtanh.default(%699) : torch.float32[1, 2, 3] q=none
+%701 = aten.hardtanh.default(%700) : torch.float32[1, 2, 3] q=none
+%702 = aten.hardtanh.default(%701) : torch.float32[1, 2, 3] q=none
+%703 = aten.hardtanh.default(%702) : torch.float32[1, 2, 3] q=none
+%704 = aten.hardtanh.default(%703) : torch.float32[1, 2, 3] q=none
+%705 = aten.hardtanh.default(%704) : torch.float32[1, 2, 3] q=none
+%706 = aten.hardtanh.default(%705) : torch.float32[1, 2, 3] q=none
+%707 = aten.hardtanh.default(%706) : torch.float32[1, 2, 3] q=none
+%708 = aten.hardtanh.default(%707) : torch.float32[1, 2, 3] q=none
+%709 = aten.hardtanh.default(%708) : torch.float32[1, 2, 3] q=none
+%710 = aten.hardtanh.default(%709) : torch.float32[1, 2, 3] q=none
+%711 = aten.hardtanh.default(%710) : torch.float32[1, 2, 3] q=none
+%712 = aten.hardtanh.default(%711) : torch.float32[1, 2, 3] q=none
+%713 = aten.hardtanh.default(%712) : torch.float32[1, 2, 3] q=none
+%714 = aten.hardtanh.default(%713) : torch.float32[1, 2, 3] q=none
+%715 = aten.hardtanh.default(%714) : torch.float32[1, 2, 3] q=none
+%716 = aten.hardtanh.default(%715) : torch.float32[1, 2, 3] q=none
+%717 = aten.hardtanh.default(%716) : torch.float32[1, 2, 3] q=none
+%718 = aten.hardtanh.default(%717) : torch.float32[1, 2, 3] q=none
+%719 = aten.hardtanh.default(%718) : torch.float32[1, 2, 3] q=none
+%720 = aten.hardtanh.default(%719) : torch.float32[1, 2, 3] q=none
+%721 = aten.hardtanh.default(%720) : torch.float32[1, 2, 3] q=none
+%722 = aten.hardtanh.default(%721) : torch.float32[1, 2, 3] q=none
+%723 = aten.hardtanh.default(%722) : torch.float32[1, 2, 3] q=none
+%724 = aten.hardtanh.default(%723) : torch.float32[1, 2, 3] q=none
+%725 = aten.hardtanh.default(%724) : torch.float32[1, 2, 3] q=none
+%726 = aten.hardtanh.default(%725) : torch.float32[1, 2, 3] q=none
+%727 = aten.hardtanh.default(%726) : torch.float32[1, 2, 3] q=none
+%728 = aten.hardtanh.default(%727) : torch.float32[1, 2, 3] q=none
+%729 = aten.hardtanh.default(%728) : torch.float32[1, 2, 3] q=none
+%730 = aten.hardtanh.default(%729) : torch.float32[1, 2, 3] q=none
+%731 = aten.hardtanh.default(%730) : torch.float32[1, 2, 3] q=none
+%732 = aten.hardtanh.default(%731) : torch.float32[1, 2, 3] q=none
+%733 = aten.hardtanh.default(%732) : torch.float32[1, 2, 3] q=none
+%734 = aten.hardtanh.default(%733) : torch.float32[1, 2, 3] q=none
+%735 = aten.hardtanh.default(%734) : torch.float32[1, 2, 3] q=none
+%736 = aten.hardtanh.default(%735) : torch.float32[1, 2, 3] q=none
+%737 = aten.hardtanh.default(%736) : torch.float32[1, 2, 3] q=none
+%738 = aten.hardtanh.default(%737) : torch.float32[1, 2, 3] q=none
+%739 = aten.hardtanh.default(%738) : torch.float32[1, 2, 3] q=none
+%740 = aten.hardtanh.default(%739) : torch.float32[1, 2, 3] q=none
+%741 = aten.hardtanh.default(%740) : torch.float32[1, 2, 3] q=none
+%742 = aten.hardtanh.default(%741) : torch.float32[1, 2, 3] q=none
+%743 = aten.hardtanh.default(%742) : torch.float32[1, 2, 3] q=none
+%744 = aten.hardtanh.default(%743) : torch.float32[1, 2, 3] q=none
+%745 = aten.hardtanh.default(%744) : torch.float32[1, 2, 3] q=none
+%746 = aten.hardtanh.default(%745) : torch.float32[1, 2, 3] q=none
+%747 = aten.hardtanh.default(%746) : torch.float32[1, 2, 3] q=none
+%748 = aten.hardtanh.default(%747) : torch.float32[1, 2, 3] q=none
+%749 = aten.hardtanh.default(%748) : torch.float32[1, 2, 3] q=none
+%750 = aten.hardtanh.default(%749) : torch.float32[1, 2, 3] q=none
+%751 = aten.hardtanh.default(%750) : torch.float32[1, 2, 3] q=none
+%752 = aten.hardtanh.default(%751) : torch.float32[1, 2, 3] q=none
+%753 = aten.hardtanh.default(%752) : torch.float32[1, 2, 3] q=none
+%754 = aten.hardtanh.default(%753) : torch.float32[1, 2, 3] q=none
+%755 = aten.hardtanh.default(%754) : torch.float32[1, 2, 3] q=none
+%756 = aten.hardtanh.default(%755) : torch.float32[1, 2, 3] q=none
+%757 = aten.hardtanh.default(%756) : torch.float32[1, 2, 3] q=none
+%758 = aten.hardtanh.default(%757) : torch.float32[1, 2, 3] q=none
+%759 = aten.hardtanh.default(%758) : torch.float32[1, 2, 3] q=none
+%760 = aten.hardtanh.default(%759) : torch.float32[1, 2, 3] q=none
+%761 = aten.hardtanh.default(%760) : torch.float32[1, 2, 3] q=none
+%762 = aten.hardtanh.default(%761) : torch.float32[1, 2, 3] q=none
+%763 = aten.hardtanh.default(%762) : torch.float32[1, 2, 3] q=none
+%764 = aten.hardtanh.default(%763) : torch.float32[1, 2, 3] q=none
+%765 = aten.hardtanh.default(%764) : torch.float32[1, 2, 3] q=none
+%766 = aten.hardtanh.default(%765) : torch.float32[1, 2, 3] q=none
+%767 = aten.hardtanh.default(%766) : torch.float32[1, 2, 3] q=none
+%768 = aten.hardtanh.default(%767) : torch.float32[1, 2, 3] q=none
+%769 = aten.hardtanh.default(%768) : torch.float32[1, 2, 3] q=none
+%770 = aten.hardtanh.default(%769) : torch.float32[1, 2, 3] q=none
+%771 = aten.hardtanh.default(%770) : torch.float32[1, 2, 3] q=none
+%772 = aten.hardtanh.default(%771) : torch.float32[1, 2, 3] q=none
+%773 = aten.hardtanh.default(%772) : torch.float32[1, 2, 3] q=none
+%774 = aten.hardtanh.default(%773) : torch.float32[1, 2, 3] q=none
+%775 = aten.hardtanh.default(%774) : torch.float32[1, 2, 3] q=none
+%776 = aten.hardtanh.default(%775) : torch.float32[1, 2, 3] q=none
+%777 = aten.hardtanh.default(%776) : torch.float32[1, 2, 3] q=none
+%778 = aten.hardtanh.default(%777) : torch.float32[1, 2, 3] q=none
+%779 = aten.hardtanh.default(%778) : torch.float32[1, 2, 3] q=none
+%780 = aten.hardtanh.default(%779) : torch.float32[1, 2, 3] q=none
+%781 = aten.hardtanh.default(%780) : torch.float32[1, 2, 3] q=none
+%782 = aten.hardtanh.default(%781) : torch.float32[1, 2, 3] q=none
+%783 = aten.hardtanh.default(%782) : torch.float32[1, 2, 3] q=none
+%784 = aten.hardtanh.default(%783) : torch.float32[1, 2, 3] q=none
+%785 = aten.hardtanh.default(%784) : torch.float32[1, 2, 3] q=none
+%786 = aten.hardtanh.default(%785) : torch.float32[1, 2, 3] q=none
+%787 = aten.hardtanh.default(%786) : torch.float32[1, 2, 3] q=none
+%788 = aten.hardtanh.default(%787) : torch.float32[1, 2, 3] q=none
+%789 = aten.hardtanh.default(%788) : torch.float32[1, 2, 3] q=none
+%790 = aten.hardtanh.default(%789) : torch.float32[1, 2, 3] q=none
+%791 = aten.hardtanh.default(%790) : torch.float32[1, 2, 3] q=none
+%792 = aten.hardtanh.default(%791) : torch.float32[1, 2, 3] q=none
+%793 = aten.hardtanh.default(%792) : torch.float32[1, 2, 3] q=none
+%794 = aten.hardtanh.default(%793) : torch.float32[1, 2, 3] q=none
+%795 = aten.hardtanh.default(%794) : torch.float32[1, 2, 3] q=none
+%796 = aten.hardtanh.default(%795) : torch.float32[1, 2, 3] q=none
+%797 = aten.hardtanh.default(%796) : torch.float32[1, 2, 3] q=none
+%798 = aten.hardtanh.default(%797) : torch.float32[1, 2, 3] q=none
+%799 = aten.hardtanh.default(%798) : torch.float32[1, 2, 3] q=none
+%800 = aten.hardtanh.default(%799) : torch.float32[1, 2, 3] q=none
+%801 = aten.hardtanh.default(%800) : torch.float32[1, 2, 3] q=none
+%802 = aten.hardtanh.default(%801) : torch.float32[1, 2, 3] q=none
+%803 = aten.hardtanh.default(%802) : torch.float32[1, 2, 3] q=none
+%804 = aten.hardtanh.default(%803) : torch.float32[1, 2, 3] q=none
+%805 = aten.hardtanh.default(%804) : torch.float32[1, 2, 3] q=none
+%806 = aten.hardtanh.default(%805) : torch.float32[1, 2, 3] q=none
+%807 = aten.hardtanh.default(%806) : torch.float32[1, 2, 3] q=none
+%808 = aten.hardtanh.default(%807) : torch.float32[1, 2, 3] q=none
+%809 = aten.hardtanh.default(%808) : torch.float32[1, 2, 3] q=none
+%810 = aten.hardtanh.default(%809) : torch.float32[1, 2, 3] q=none
+%811 = aten.hardtanh.default(%810) : torch.float32[1, 2, 3] q=none
+%812 = aten.hardtanh.default(%811) : torch.float32[1, 2, 3] q=none
+%813 = aten.hardtanh.default(%812) : torch.float32[1, 2, 3] q=none
+%814 = aten.hardtanh.default(%813) : torch.float32[1, 2, 3] q=none
+%815 = aten.hardtanh.default(%814) : torch.float32[1, 2, 3] q=none
+%816 = aten.hardtanh.default(%815) : torch.float32[1, 2, 3] q=none
+%817 = aten.hardtanh.default(%816) : torch.float32[1, 2, 3] q=none
+%818 = aten.hardtanh.default(%817) : torch.float32[1, 2, 3] q=none
+%819 = aten.hardtanh.default(%818) : torch.float32[1, 2, 3] q=none
+%820 = aten.hardtanh.default(%819) : torch.float32[1, 2, 3] q=none
+%821 = aten.hardtanh.default(%820) : torch.float32[1, 2, 3] q=none
+%822 = aten.hardtanh.default(%821) : torch.float32[1, 2, 3] q=none
+%823 = aten.hardtanh.default(%822) : torch.float32[1, 2, 3] q=none
+%824 = aten.hardtanh.default(%823) : torch.float32[1, 2, 3] q=none
+%825 = aten.hardtanh.default(%824) : torch.float32[1, 2, 3] q=none
+%826 = aten.hardtanh.default(%825) : torch.float32[1, 2, 3] q=none
+%827 = aten.hardtanh.default(%826) : torch.float32[1, 2, 3] q=none
+%828 = aten.hardtanh.default(%827) : torch.float32[1, 2, 3] q=none
+%829 = aten.hardtanh.default(%828) : torch.float32[1, 2, 3] q=none
+%830 = aten.hardtanh.default(%829) : torch.float32[1, 2, 3] q=none
+%831 = aten.hardtanh.default(%830) : torch.float32[1, 2, 3] q=none
+%832 = aten.hardtanh.default(%831) : torch.float32[1, 2, 3] q=none
+%833 = aten.hardtanh.default(%832) : torch.float32[1, 2, 3] q=none
+%834 = aten.hardtanh.default(%833) : torch.float32[1, 2, 3] q=none
+%835 = aten.hardtanh.default(%834) : torch.float32[1, 2, 3] q=none
+%836 = aten.hardtanh.default(%835) : torch.float32[1, 2, 3] q=none
+%837 = aten.hardtanh.default(%836) : torch.float32[1, 2, 3] q=none
+%838 = aten.hardtanh.default(%837) : torch.float32[1, 2, 3] q=none
+%839 = aten.hardtanh.default(%838) : torch.float32[1, 2, 3] q=none
+%840 = aten.hardtanh.default(%839) : torch.float32[1, 2, 3] q=none
+%841 = aten.hardtanh.default(%840) : torch.float32[1, 2, 3] q=none
+%842 = aten.hardtanh.default(%841) : torch.float32[1, 2, 3] q=none
+%843 = aten.hardtanh.default(%842) : torch.float32[1, 2, 3] q=none
+%844 = aten.hardtanh.default(%843) : torch.float32[1, 2, 3] q=none
+%845 = aten.hardtanh.default(%844) : torch.float32[1, 2, 3] q=none
+%846 = aten.hardtanh.default(%845) : torch.float32[1, 2, 3] q=none
+%847 = aten.hardtanh.default(%846) : torch.float32[1, 2, 3] q=none
+%848 = aten.hardtanh.default(%847) : torch.float32[1, 2, 3] q=none
+%849 = aten.hardtanh.default(%848) : torch.float32[1, 2, 3] q=none
+%850 = aten.hardtanh.default(%849) : torch.float32[1, 2, 3] q=none
+%851 = aten.hardtanh.default(%850) : torch.float32[1, 2, 3] q=none
+%852 = aten.hardtanh.default(%851) : torch.float32[1, 2, 3] q=none
+%853 = aten.hardtanh.default(%852) : torch.float32[1, 2, 3] q=none
+%854 = aten.hardtanh.default(%853) : torch.float32[1, 2, 3] q=none
+%855 = aten.hardtanh.default(%854) : torch.float32[1, 2, 3] q=none
+%856 = aten.hardtanh.default(%855) : torch.float32[1, 2, 3] q=none
+%857 = aten.hardtanh.default(%856) : torch.float32[1, 2, 3] q=none
+%858 = aten.hardtanh.default(%857) : torch.float32[1, 2, 3] q=none
+%859 = aten.hardtanh.default(%858) : torch.float32[1, 2, 3] q=none
+%860 = aten.hardtanh.default(%859) : torch.float32[1, 2, 3] q=none
+%861 = aten.hardtanh.default(%860) : torch.float32[1, 2, 3] q=none
+%862 = aten.hardtanh.default(%861) : torch.float32[1, 2, 3] q=none
+%863 = aten.hardtanh.default(%862) : torch.float32[1, 2, 3] q=none
+%864 = aten.hardtanh.default(%863) : torch.float32[1, 2, 3] q=none
+%865 = aten.hardtanh.default(%864) : torch.float32[1, 2, 3] q=none
+%866 = aten.hardtanh.default(%865) : torch.float32[1, 2, 3] q=none
+%867 = aten.hardtanh.default(%866) : torch.float32[1, 2, 3] q=none
+%868 = aten.hardtanh.default(%867) : torch.float32[1, 2, 3] q=none
+%869 = aten.hardtanh.default(%868) : torch.float32[1, 2, 3] q=none
+%870 = aten.hardtanh.default(%869) : torch.float32[1, 2, 3] q=none
+%871 = aten.hardtanh.default(%870) : torch.float32[1, 2, 3] q=none
+%872 = aten.hardtanh.default(%871) : torch.float32[1, 2, 3] q=none
+%873 = aten.hardtanh.default(%872) : torch.float32[1, 2, 3] q=none
+%874 = aten.hardtanh.default(%873) : torch.float32[1, 2, 3] q=none
+%875 = aten.hardtanh.default(%874) : torch.float32[1, 2, 3] q=none
+%876 = aten.hardtanh.default(%875) : torch.float32[1, 2, 3] q=none
+%877 = aten.hardtanh.default(%876) : torch.float32[1, 2, 3] q=none
+%878 = aten.hardtanh.default(%877) : torch.float32[1, 2, 3] q=none
+%879 = aten.hardtanh.default(%878) : torch.float32[1, 2, 3] q=none
+%880 = aten.hardtanh.default(%879) : torch.float32[1, 2, 3] q=none
+%881 = aten.hardtanh.default(%880) : torch.float32[1, 2, 3] q=none
+%882 = aten.hardtanh.default(%881) : torch.float32[1, 2, 3] q=none
+%883 = aten.hardtanh.default(%882) : torch.float32[1, 2, 3] q=none
+%884 = aten.hardtanh.default(%883) : torch.float32[1, 2, 3] q=none
+%885 = aten.hardtanh.default(%884) : torch.float32[1, 2, 3] q=none
+%886 = aten.hardtanh.default(%885) : torch.float32[1, 2, 3] q=none
+%887 = aten.hardtanh.default(%886) : torch.float32[1, 2, 3] q=none
+%888 = aten.hardtanh.default(%887) : torch.float32[1, 2, 3] q=none
+%889 = aten.hardtanh.default(%888) : torch.float32[1, 2, 3] q=none
+%890 = aten.hardtanh.default(%889) : torch.float32[1, 2, 3] q=none
+%891 = aten.hardtanh.default(%890) : torch.float32[1, 2, 3] q=none
+%892 = aten.hardtanh.default(%891) : torch.float32[1, 2, 3] q=none
+%893 = aten.hardtanh.default(%892) : torch.float32[1, 2, 3] q=none
+%894 = aten.hardtanh.default(%893) : torch.float32[1, 2, 3] q=none
+%895 = aten.hardtanh.default(%894) : torch.float32[1, 2, 3] q=none
+%896 = aten.hardtanh.default(%895) : torch.float32[1, 2, 3] q=none
+%897 = aten.hardtanh.default(%896) : torch.float32[1, 2, 3] q=none
+%898 = aten.hardtanh.default(%897) : torch.float32[1, 2, 3] q=none
+%899 = aten.hardtanh.default(%898) : torch.float32[1, 2, 3] q=none
+%900 = aten.hardtanh.default(%899) : torch.float32[1, 2, 3] q=none
+%901 = aten.hardtanh.default(%900) : torch.float32[1, 2, 3] q=none
+%902 = aten.hardtanh.default(%901) : torch.float32[1, 2, 3] q=none
+%903 = aten.hardtanh.default(%902) : torch.float32[1, 2, 3] q=none
+%904 = aten.hardtanh.default(%903) : torch.float32[1, 2, 3] q=none
+%905 = aten.hardtanh.default(%904) : torch.float32[1, 2, 3] q=none
+%906 = aten.hardtanh.default(%905) : torch.float32[1, 2, 3] q=none
+%907 = aten.hardtanh.default(%906) : torch.float32[1, 2, 3] q=none
+%908 = aten.hardtanh.default(%907) : torch.float32[1, 2, 3] q=none
+%909 = aten.hardtanh.default(%908) : torch.float32[1, 2, 3] q=none
+%910 = aten.hardtanh.default(%909) : torch.float32[1, 2, 3] q=none
+%911 = aten.hardtanh.default(%910) : torch.float32[1, 2, 3] q=none
+%912 = aten.hardtanh.default(%911) : torch.float32[1, 2, 3] q=none
+%913 = aten.hardtanh.default(%912) : torch.float32[1, 2, 3] q=none
+%914 = aten.hardtanh.default(%913) : torch.float32[1, 2, 3] q=none
+%915 = aten.hardtanh.default(%914) : torch.float32[1, 2, 3] q=none
+%916 = aten.hardtanh.default(%915) : torch.float32[1, 2, 3] q=none
+%917 = aten.hardtanh.default(%916) : torch.float32[1, 2, 3] q=none
+%918 = aten.hardtanh.default(%917) : torch.float32[1, 2, 3] q=none
+%919 = aten.hardtanh.default(%918) : torch.float32[1, 2, 3] q=none
+%920 = aten.hardtanh.default(%919) : torch.float32[1, 2, 3] q=none
+%921 = aten.hardtanh.default(%920) : torch.float32[1, 2, 3] q=none
+%922 = aten.hardtanh.default(%921) : torch.float32[1, 2, 3] q=none
+%923 = aten.hardtanh.default(%922) : torch.float32[1, 2, 3] q=none
+%924 = aten.hardtanh.default(%923) : torch.float32[1, 2, 3] q=none
+%925 = aten.hardtanh.default(%924) : torch.float32[1, 2, 3] q=none
+%926 = aten.hardtanh.default(%925) : torch.float32[1, 2, 3] q=none
+%927 = aten.hardtanh.default(%926) : torch.float32[1, 2, 3] q=none
+%928 = aten.hardtanh.default(%927) : torch.float32[1, 2, 3] q=none
+%929 = aten.hardtanh.default(%928) : torch.float32[1, 2, 3] q=none
+%930 = aten.hardtanh.default(%929) : torch.float32[1, 2, 3] q=none
+%931 = aten.hardtanh.default(%930) : torch.float32[1, 2, 3] q=none
+%932 = aten.hardtanh.default(%931) : torch.float32[1, 2, 3] q=none
+%933 = aten.hardtanh.default(%932) : torch.float32[1, 2, 3] q=none
+%934 = aten.hardtanh.default(%933) : torch.float32[1, 2, 3] q=none
+%935 = aten.hardtanh.default(%934) : torch.float32[1, 2, 3] q=none
+%936 = aten.hardtanh.default(%935) : torch.float32[1, 2, 3] q=none
+%937 = aten.hardtanh.default(%936) : torch.float32[1, 2, 3] q=none
+%938 = aten.hardtanh.default(%937) : torch.float32[1, 2, 3] q=none
+%939 = aten.hardtanh.default(%938) : torch.float32[1, 2, 3] q=none
+%940 = aten.hardtanh.default(%939) : torch.float32[1, 2, 3] q=none
+%941 = aten.hardtanh.default(%940) : torch.float32[1, 2, 3] q=none
+%942 = aten.hardtanh.default(%941) : torch.float32[1, 2, 3] q=none
+%943 = aten.hardtanh.default(%942) : torch.float32[1, 2, 3] q=none
+%944 = aten.hardtanh.default(%943) : torch.float32[1, 2, 3] q=none
+%945 = aten.hardtanh.default(%944) : torch.float32[1, 2, 3] q=none
+%946 = aten.hardtanh.default(%945) : torch.float32[1, 2, 3] q=none
+%947 = aten.hardtanh.default(%946) : torch.float32[1, 2, 3] q=none
+%948 = aten.hardtanh.default(%947) : torch.float32[1, 2, 3] q=none
+%949 = aten.hardtanh.default(%948) : torch.float32[1, 2, 3] q=none
+%950 = aten.hardtanh.default(%949) : torch.float32[1, 2, 3] q=none
+%951 = aten.hardtanh.default(%950) : torch.float32[1, 2, 3] q=none
+%952 = aten.hardtanh.default(%951) : torch.float32[1, 2, 3] q=none
+%953 = aten.hardtanh.default(%952) : torch.float32[1, 2, 3] q=none
+%954 = aten.hardtanh.default(%953) : torch.float32[1, 2, 3] q=none
+%955 = aten.hardtanh.default(%954) : torch.float32[1, 2, 3] q=none
+%956 = aten.hardtanh.default(%955) : torch.float32[1, 2, 3] q=none
+%957 = aten.hardtanh.default(%956) : torch.float32[1, 2, 3] q=none
+%958 = aten.hardtanh.default(%957) : torch.float32[1, 2, 3] q=none
+%959 = aten.hardtanh.default(%958) : torch.float32[1, 2, 3] q=none
+%960 = aten.hardtanh.default(%959) : torch.float32[1, 2, 3] q=none
+%961 = aten.hardtanh.default(%960) : torch.float32[1, 2, 3] q=none
+%962 = aten.hardtanh.default(%961) : torch.float32[1, 2, 3] q=none
+%963 = aten.hardtanh.default(%962) : torch.float32[1, 2, 3] q=none
+%964 = aten.hardtanh.default(%963) : torch.float32[1, 2, 3] q=none
+%965 = aten.hardtanh.default(%964) : torch.float32[1, 2, 3] q=none
+%966 = aten.hardtanh.default(%965) : torch.float32[1, 2, 3] q=none
+%967 = aten.hardtanh.default(%966) : torch.float32[1, 2, 3] q=none
+%968 = aten.hardtanh.default(%967) : torch.float32[1, 2, 3] q=none
+%969 = aten.hardtanh.default(%968) : torch.float32[1, 2, 3] q=none
+%970 = aten.hardtanh.default(%969) : torch.float32[1, 2, 3] q=none
+%971 = aten.hardtanh.default(%970) : torch.float32[1, 2, 3] q=none
+%972 = aten.hardtanh.default(%971) : torch.float32[1, 2, 3] q=none
+%973 = aten.hardtanh.default(%972) : torch.float32[1, 2, 3] q=none
+%974 = aten.hardtanh.default(%973) : torch.float32[1, 2, 3] q=none
+%975 = aten.hardtanh.default(%974) : torch.float32[1, 2, 3] q=none
+%976 = aten.hardtanh.default(%975) : torch.float32[1, 2, 3] q=none
+%977 = aten.hardtanh.default(%976) : torch.float32[1, 2, 3] q=none
+%978 = aten.hardtanh.default(%977) : torch.float32[1, 2, 3] q=none
+%979 = aten.hardtanh.default(%978) : torch.float32[1, 2, 3] q=none
+%980 = aten.hardtanh.default(%979) : torch.float32[1, 2, 3] q=none
+%981 = aten.hardtanh.default(%980) : torch.float32[1, 2, 3] q=none
+%982 = aten.hardtanh.default(%981) : torch.float32[1, 2, 3] q=none
+%983 = aten.hardtanh.default(%982) : torch.float32[1, 2, 3] q=none
+%984 = aten.hardtanh.default(%983) : torch.float32[1, 2, 3] q=none
+%985 = aten.hardtanh.default(%984) : torch.float32[1, 2, 3] q=none
+%986 = aten.hardtanh.default(%985) : torch.float32[1, 2, 3] q=none
+%987 = aten.hardtanh.default(%986) : torch.float32[1, 2, 3] q=none
+%988 = aten.hardtanh.default(%987) : torch.float32[1, 2, 3] q=none
+%989 = aten.hardtanh.default(%988) : torch.float32[1, 2, 3] q=none
+%990 = aten.hardtanh.default(%989) : torch.float32[1, 2, 3] q=none
+%991 = aten.hardtanh.default(%990) : torch.float32[1, 2, 3] q=none
+%992 = aten.hardtanh.default(%991) : torch.float32[1, 2, 3] q=none
+%993 = aten.hardtanh.default(%992) : torch.float32[1, 2, 3] q=none
+%994 = aten.hardtanh.default(%993) : torch.float32[1, 2, 3] q=none
+%995 = aten.hardtanh.default(%994) : torch.float32[1, 2, 3] q=none
+%996 = aten.hardtanh.default(%995) : torch.float32[1, 2, 3] q=none
+%997 = aten.hardtanh.default(%996) : torch.float32[1, 2, 3] q=none
+%998 = aten.hardtanh.default(%997) : torch.float32[1, 2, 3] q=none
+%999 = aten.hardtanh.default(%998) : torch.float32[1, 2, 3] q=none
+%1000 = aten.hardtanh.default(%999) : torch.float32[1, 2, 3] q=none
+%1001 = aten.hardtanh.default(%1000) : torch.float32[1, 2, 3] q=none
+%1002 = aten.hardtanh.default(%1001) : torch.float32[1, 2, 3] q=none
+%1003 = aten.hardtanh.default(%1002) : torch.float32[1, 2, 3] q=none
+%1004 = aten.hardtanh.default(%1003) : torch.float32[1, 2, 3] q=none
+%1005 = aten.hardtanh.default(%1004) : torch.float32[1, 2, 3] q=none
+%1006 = aten.hardtanh.default(%1005) : torch.float32[1, 2, 3] q=none
+%1007 = aten.hardtanh.default(%1006) : torch.float32[1, 2, 3] q=none
+%1008 = aten.hardtanh.default(%1007) : torch.float32[1, 2, 3] q=none
+%1009 = aten.hardtanh.default(%1008) : torch.float32[1, 2, 3] q=none
+%1010 = aten.hardtanh.default(%1009) : torch.float32[1, 2, 3] q=none
+%1011 = aten.hardtanh.default(%1010) : torch.float32[1, 2, 3] q=none
+%1012 = aten.hardtanh.default(%1011) : torch.float32[1, 2, 3] q=none
+%1013 = aten.hardtanh.default(%1012) : torch.float32[1, 2, 3] q=none
+%1014 = aten.hardtanh.default(%1013) : torch.float32[1, 2, 3] q=none
+%1015 = aten.hardtanh.default(%1014) : torch.float32[1, 2, 3] q=none
+%1016 = aten.hardtanh.default(%1015) : torch.float32[1, 2, 3] q=none
+%1017 = aten.hardtanh.default(%1016) : torch.float32[1, 2, 3] q=none
+%1018 = aten.hardtanh.default(%1017) : torch.float32[1, 2, 3] q=none
+%1019 = aten.hardtanh.default(%1018) : torch.float32[1, 2, 3] q=none
+%1020 = aten.hardtanh.default(%1019) : torch.float32[1, 2, 3] q=none
+%1021 = aten.hardtanh.default(%1020) : torch.float32[1, 2, 3] q=none
+%1022 = aten.hardtanh.default(%1021) : torch.float32[1, 2, 3] q=none
+%1023 = aten.hardtanh.default(%1022) : torch.float32[1, 2, 3] q=none
+%1024 = aten.hardtanh.default(%1023) : torch.float32[1, 2, 3] q=none
+%1025 = aten.hardtanh.default(%1024) : torch.float32[1, 2, 3] q=none
+%1026 = aten.hardtanh.default(%1025) : torch.float32[1, 2, 3] q=none
+%1027 = aten.hardtanh.default(%1026) : torch.float32[1, 2, 3] q=none
+%1028 = aten.hardtanh.default(%1027) : torch.float32[1, 2, 3] q=none
+%1029 = aten.hardtanh.default(%1028) : torch.float32[1, 2, 3] q=none
+%1030 = aten.hardtanh.default(%1029) : torch.float32[1, 2, 3] q=none
+%1031 = aten.hardtanh.default(%1030) : torch.float32[1, 2, 3] q=none
+%1032 = aten.hardtanh.default(%1031) : torch.float32[1, 2, 3] q=none
+%1033 = aten.hardtanh.default(%1032) : torch.float32[1, 2, 3] q=none
+%1034 = aten.hardtanh.default(%1033) : torch.float32[1, 2, 3] q=none
+%1035 = aten.hardtanh.default(%1034) : torch.float32[1, 2, 3] q=none
+%1036 = aten.hardtanh.default(%1035) : torch.float32[1, 2, 3] q=none
+%1037 = aten.hardtanh.default(%1036) : torch.float32[1, 2, 3] q=none
+%1038 = aten.hardtanh.default(%1037) : torch.float32[1, 2, 3] q=none
+%1039 = aten.hardtanh.default(%1038) : torch.float32[1, 2, 3] q=none
+%1040 = aten.hardtanh.default(%1039) : torch.float32[1, 2, 3] q=none
+%1041 = aten.hardtanh.default(%1040) : torch.float32[1, 2, 3] q=none
+%1042 = aten.hardtanh.default(%1041) : torch.float32[1, 2, 3] q=none
+%1043 = aten.hardtanh.default(%1042) : torch.float32[1, 2, 3] q=none
+%1044 = aten.hardtanh.default(%1043) : torch.float32[1, 2, 3] q=none
+%1045 = aten.hardtanh.default(%1044) : torch.float32[1, 2, 3] q=none
+%1046 = aten.hardtanh.default(%1045) : torch.float32[1, 2, 3] q=none
+%1047 = aten.hardtanh.default(%1046) : torch.float32[1, 2, 3] q=none
+%1048 = aten.hardtanh.default(%1047) : torch.float32[1, 2, 3] q=none
+%1049 = aten.hardtanh.default(%1048) : torch.float32[1, 2, 3] q=none
+%1050 = aten.hardtanh.default(%1049) : torch.float32[1, 2, 3] q=none
+%1051 = aten.hardtanh.default(%1050) : torch.float32[1, 2, 3] q=none
+%1052 = aten.hardtanh.default(%1051) : torch.float32[1, 2, 3] q=none
+%1053 = aten.hardtanh.default(%1052) : torch.float32[1, 2, 3] q=none
+%1054 = aten.hardtanh.default(%1053) : torch.float32[1, 2, 3] q=none
+%1055 = aten.hardtanh.default(%1054) : torch.float32[1, 2, 3] q=none
+%1056 = aten.hardtanh.default(%1055) : torch.float32[1, 2, 3] q=none
+%1057 = aten.hardtanh.default(%1056) : torch.float32[1, 2, 3] q=none
+%1058 = aten.hardtanh.default(%1057) : torch.float32[1, 2, 3] q=none
+%1059 = aten.hardtanh.default(%1058) : torch.float32[1, 2, 3] q=none
+%1060 = aten.hardtanh.default(%1059) : torch.float32[1, 2, 3] q=none
+%1061 = aten.hardtanh.default(%1060) : torch.float32[1, 2, 3] q=none
+%1062 = aten.hardtanh.default(%1061) : torch.float32[1, 2, 3] q=none
+%1063 = aten.hardtanh.default(%1062) : torch.float32[1, 2, 3] q=none
+%1064 = aten.hardtanh.default(%1063) : torch.float32[1, 2, 3] q=none
+%1065 = aten.hardtanh.default(%1064) : torch.float32[1, 2, 3] q=none
+%1066 = aten.hardtanh.default(%1065) : torch.float32[1, 2, 3] q=none
+%1067 = aten.hardtanh.default(%1066) : torch.float32[1, 2, 3] q=none
+%1068 = aten.hardtanh.default(%1067) : torch.float32[1, 2, 3] q=none
+%1069 = aten.hardtanh.default(%1068) : torch.float32[1, 2, 3] q=none
+%1070 = aten.hardtanh.default(%1069) : torch.float32[1, 2, 3] q=none
+%1071 = aten.hardtanh.default(%1070) : torch.float32[1, 2, 3] q=none
+%1072 = aten.hardtanh.default(%1071) : torch.float32[1, 2, 3] q=none
+%1073 = aten.hardtanh.default(%1072) : torch.float32[1, 2, 3] q=none
+%1074 = aten.hardtanh.default(%1073) : torch.float32[1, 2, 3] q=none
+%1075 = aten.hardtanh.default(%1074) : torch.float32[1, 2, 3] q=none
+%1076 = aten.hardtanh.default(%1075) : torch.float32[1, 2, 3] q=none
+%1077 = aten.hardtanh.default(%1076) : torch.float32[1, 2, 3] q=none
+%1078 = aten.hardtanh.default(%1077) : torch.float32[1, 2, 3] q=none
+%1079 = aten.hardtanh.default(%1078) : torch.float32[1, 2, 3] q=none
+%1080 = aten.hardtanh.default(%1079) : torch.float32[1, 2, 3] q=none
+%1081 = aten.hardtanh.default(%1080) : torch.float32[1, 2, 3] q=none
+%1082 = aten.hardtanh.default(%1081) : torch.float32[1, 2, 3] q=none
+%1083 = aten.hardtanh.default(%1082) : torch.float32[1, 2, 3] q=none
+%1084 = aten.hardtanh.default(%1083) : torch.float32[1, 2, 3] q=none
+%1085 = aten.hardtanh.default(%1084) : torch.float32[1, 2, 3] q=none
+%1086 = aten.hardtanh.default(%1085) : torch.float32[1, 2, 3] q=none
+%1087 = aten.hardtanh.default(%1086) : torch.float32[1, 2, 3] q=none
+%1088 = aten.hardtanh.default(%1087) : torch.float32[1, 2, 3] q=none
+%1089 = aten.hardtanh.default(%1088) : torch.float32[1, 2, 3] q=none
+%1090 = aten.hardtanh.default(%1089) : torch.float32[1, 2, 3] q=none
+%1091 = aten.hardtanh.default(%1090) : torch.float32[1, 2, 3] q=none
+%1092 = aten.hardtanh.default(%1091) : torch.float32[1, 2, 3] q=none
+%1093 = aten.hardtanh.default(%1092) : torch.float32[1, 2, 3] q=none
+%1094 = aten.hardtanh.default(%1093) : torch.float32[1, 2, 3] q=none
+%1095 = aten.hardtanh.default(%1094) : torch.float32[1, 2, 3] q=none
+%1096 = aten.hardtanh.default(%1095) : torch.float32[1, 2, 3] q=none
+%1097 = aten.hardtanh.default(%1096) : torch.float32[1, 2, 3] q=none
+%1098 = aten.hardtanh.default(%1097) : torch.float32[1, 2, 3] q=none
+%1099 = aten.hardtanh.default(%1098) : torch.float32[1, 2, 3] q=none
+%1100 = aten.hardtanh.default(%1099) : torch.float32[1, 2, 3] q=none
+output([%1100])
+end
+case test_no_permutes_is_noop#0
+before
+%0 = placeholder x : torch.float32[1, 4, 8, 8] q=none
+%1 = aten.mul.Tensor(%0, %0) : torch.float32[1, 4, 8, 8] q=none
+output([%1])
+after modified=false same
+end
+case test_non_matching_end_permute_is_composed#0
+before
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [1, 2, 0]) : torch.float32[3, 4, 2] q=none
+%2 = aten.mul.Tensor(%1, %1) : torch.float32[3, 4, 2] q=none
+%3 = aten.permute_copy.default(%2, [1, 0, 2]) : torch.float32[4, 3, 2] q=none
+output([%3])
+after modified=true
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = aten.mul.Tensor(%0, %0) : torch.float32[2, 3, 4] q=none
+%2 = aten.permute_copy.default(%1, [2, 1, 0]) : torch.float32[4, 3, 2] q=none
+output([%2])
+end
+case test_permute_bypassed_by_one_region_is_kept_by_another#0
+before
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = placeholder y : torch.float32[2, 4, 3] q=none
+%2 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[2, 4, 3] q=none
+%3 = aten.permute_copy.default(%1, [0, 2, 1]) : torch.float32[2, 3, 4] q=none
+%4 = aten.tanh.default(%3) : torch.float32[2, 3, 4] q=none
+%5 = aten.permute_copy.default(%4, [0, 2, 1]) : torch.float32[2, 4, 3] q=none
+%6 = aten.mul.Tensor(%2, %5) : torch.float32[2, 4, 3] q=none
+%7 = aten.permute_copy.default(%6, [0, 2, 1]) : torch.float32[2, 3, 4] q=none
+output([%7])
+after modified=true
+%0 = placeholder x : torch.float32[2, 3, 4] q=none
+%1 = placeholder y : torch.float32[2, 4, 3] q=none
+%2 = aten.permute_copy.default(%1, [0, 2, 1]) : torch.float32[2, 3, 4] q=none
+%3 = aten.tanh.default(%2) : torch.float32[2, 3, 4] q=none
+%4 = aten.mul.Tensor(%0, %3) : torch.float32[2, 3, 4] q=none
+output([%4])
+end
+case test_region_ending_in_permute_then_view#0
+before
+%0 = placeholder x : torch.float32[1, 3, 4] q=none
+%1 = aten.permute_copy.default(%0, [1, 2, 0]) : torch.float32[3, 4, 1] q=none
+%2 = aten.mul.Tensor(%1, %1) : torch.float32[3, 4, 1] q=none
+%3 = aten.permute_copy.default(%2, [0, 2, 1]) : torch.float32[3, 1, 4] q=none
+%4 = aten.view_copy.default(%3, [3, 4]) : torch.float32[3, 4] q=none
+output([%4])
+after modified=true
+%0 = placeholder x : torch.float32[1, 3, 4] q=none
+%1 = aten.mul.Tensor(%0, %0) : torch.float32[1, 3, 4] q=none
+%2 = aten.permute_copy.default(%1, [1, 0, 2]) : torch.float32[3, 1, 4] q=none
+%3 = aten.view_copy.default(%2, [3, 4]) : torch.float32[3, 4] q=none
+output([%3])
+end
+case test_view_seeded_region_with_shared_view#0
+before
+%0 = placeholder x : torch.float32[1, 6, 4] q=none
+%1 = aten.permute_copy.default(%0, [0, 2, 1]) : torch.float32[1, 4, 6] q=none
+%2 = aten.view_copy.default(%1, [4, 6]) : torch.float32[4, 6] q=none
+%3 = aten.slice_copy.Tensor(%2, 0, 0, 2) : torch.float32[2, 6] q=none
+%4 = aten.slice_copy.Tensor(%2, 0, 2, 4) : torch.float32[2, 6] q=none
+%5 = aten.permute_copy.default(%3, [1, 0]) : torch.float32[6, 2] q=none
+output([%5, %4])
+after modified=false same
+end
+case test_inverse_layout_copy_pair_around_elementwise_is_removed#0
+before
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = channels_last.permute_copy.default(%0, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 2] q=none
+%2 = aten.hardtanh.default(%1) : torch.float32[1, 3, 4, 2] q=none
+%3 = channels_last.permute_copy.default(%2, [0, 3, 1, 2]) : torch.float32[1, 2, 3, 4] q=none
+output([%3])
+after modified=true
+%0 = placeholder x : torch.float32[1, 2, 3, 4] q=none
+%1 = aten.hardtanh.default(%0) : torch.float32[1, 2, 3, 4] q=none
+output([%1])
+end
