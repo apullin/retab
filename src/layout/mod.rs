@@ -10,6 +10,14 @@ pub(crate) mod ctx;
 #[allow(dead_code)]
 pub(crate) mod dim_maps;
 #[allow(dead_code)]
+pub(crate) mod fuse_view_copy;
+#[allow(dead_code)]
+pub(crate) mod high_rank_singleton_permute;
+#[allow(dead_code)]
+pub(crate) mod match_arg_ranks;
+#[allow(dead_code)]
+pub(crate) mod normalize_delegate_io;
+#[allow(dead_code)]
 pub(crate) mod pointwise;
 #[allow(dead_code)]
 pub(crate) mod shape;

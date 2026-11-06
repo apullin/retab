@@ -165,6 +165,20 @@ impl LayoutGraph {
         );
     }
 
+    /// The name of `id`, which survives the renumbering `LayoutCtx::finish` does.
+    pub(crate) fn name(&self, id: NodeId) -> String {
+        self.graph().node(id).name.clone()
+    }
+
+    /// The current id of the node named `name`. A pass that runs in a
+    /// `LayoutCtx` renumbers the graph, so tests re-resolve the ids they held.
+    pub(crate) fn id(&self, name: &str) -> NodeId {
+        self.graph()
+            .by_name(name)
+            .unwrap_or_else(|| panic!("no node named {name}"))
+            .id
+    }
+
     pub(crate) fn graph(&self) -> &IrGraph {
         &self.graph
     }
