@@ -4,6 +4,8 @@ pub mod visitors;
 mod attribute_flatbuffer;
 mod collection;
 mod constant_pool;
+#[cfg(test)]
+mod explicit_layout_tests;
 mod flatbuffer;
 pub(crate) mod op_semantics;
 mod output_layout;

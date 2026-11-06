@@ -180,8 +180,9 @@ fn fixup_reshape_shapes(graph: &mut Graph) {
 // Post-ingestion dtype fixup
 // ---------------------------------------------------------------------------
 
-/// Returns true for ops that produce int32 accumulator outputs.
-fn is_accumulator_op(target: &OpTarget) -> bool {
+/// Returns true for ops that produce int32 accumulator outputs. TOSA CONV3D only
+/// reaches ingest in explicit layout mode, where it counts too (P2 design X1).
+fn is_accumulator_op(target: &OpTarget, explicit_layout: bool) -> bool {
     matches!(
         target,
         OpTarget::Conv2d
@@ -194,7 +195,7 @@ fn is_accumulator_op(target: &OpTarget) -> bool {
             | OpTarget::Matmul
             | OpTarget::Bmm
             | OpTarget::TosaMatmul
-    )
+    ) || (explicit_layout && *target == OpTarget::TosaConv3d)
 }
 
 /// Fix up `meta.val.dtype` on all nodes based on quantization parameters.
@@ -226,6 +227,7 @@ pub(crate) fn finalize_converted_graph(graph: &mut Graph) {
 }
 
 fn fixup_quantized_dtypes_once(graph: &mut Graph) {
+    let explicit_layout = graph.is_explicit_layout();
     let all_ids = graph.all_node_ids();
     for node_id in all_ids {
         let (
@@ -261,10 +263,19 @@ fn fixup_quantized_dtypes_once(graph: &mut Graph) {
                 }
                 continue;
             }
-            if is_accumulator_op(&target) && (has_input_qp || has_output_qp) {
+            if is_accumulator_op(&target, explicit_layout) && (has_input_qp || has_output_qp) {
                 if let Some(node) = graph.node_mut(node_id) {
                     node.meta.val.dtype = DType::Int32;
                 }
+                continue;
+            }
+
+            // rc4's TOSA RESIZE inherits the upsample's qparams, but its dtype is its own:
+            // int8 bilinear produces int32 (`tosa/dialect/ops/resize.py:28-36`). An
+            // integer explicit-mode IR val already carries it, so don't retype it from
+            // the inherited int8 output qparam (P2 design F10/X4). A float val (RETAB's
+            // usual typing of quantized compute nodes) still takes the qparam dtype.
+            if explicit_layout && target == OpTarget::TosaResize && current_dtype.is_integer() {
                 continue;
             }
 

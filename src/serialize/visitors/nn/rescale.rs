@@ -55,6 +55,11 @@ fn is_depthwise_aten_conv2d(graph: &Graph, store: &TensorStore, node: &Node) -> 
 }
 
 fn rescale_input_shape(graph: &Graph, store: &TensorStore, input_node: &Node) -> Vec<i32> {
+    // Explicit mode: a TOSA conv's val is its output shape; don't recompute it (P2
+    // design G3).
+    if graph.is_explicit_layout() {
+        return actual_tensor_shape(graph, store, input_node);
+    }
     match input_node.target {
         OpTarget::Conv2d if input_rank(graph, input_node) == 5 => {
             let stride = conv_stride_arg(input_node, 3);

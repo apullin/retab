@@ -386,6 +386,11 @@ fn depthwise_weight_perm(graph: &Graph, node: &Node, weight_node: &Node) -> Opti
 
 fn collect_weight_permutations(graph: &Graph) -> HashMap<String, WeightPermKind> {
     let mut perms = HashMap::new();
+    // Explicit-mode conv weights arrive already in OHWI/HWCM/ODHWI; permuting them again
+    // by the consumer's target would corrupt them (P2 design B1).
+    if graph.is_explicit_layout() {
+        return perms;
+    }
     for &nid in &graph.order {
         let Some(node) = graph.node(nid) else {
             continue;

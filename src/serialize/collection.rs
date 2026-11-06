@@ -9,7 +9,7 @@ use super::tensor_layout::TensorDeclarationContext;
 use super::tosa_types::{
     Attribute, ConstShapeAttribute, Op, ReshapeAttribute, TosaOperator, TosaShape, TosaTensor,
 };
-use super::{output_layout, tosa_types, visitors};
+use super::{op_semantics, output_layout, tosa_types, visitors};
 
 pub(super) struct SerializedGraphItems {
     pub(super) tensors: Vec<TosaTensor>,
@@ -42,7 +42,9 @@ fn collect_region(
     // Region outputs are only true external program outputs on the root graph.
     // Control-flow subgraphs feed COND_IF/WHILE_LOOP directly and must retain
     // their internal layout instead of normalizing back to user-facing shape.
-    let normalize_outputs = name == "main";
+    // In explicit mode IrNormalizeDelegateIOLayout owns the delegate boundary, so no
+    // TRANSPOSE is inferred from shapes (P2 design G4).
+    let normalize_outputs = name == "main" && !graph.is_explicit_layout();
     Ok(SerializedRegion {
         name: name.to_string(),
         items: collect_graph_items(name, graph, store, normalize_outputs)?,
@@ -60,6 +62,13 @@ fn collect_graph_items(
     if debug {
         eprintln!("[Serialize] using insertion order, {} nodes", sorted.len());
         validate_insertion_order(graph, &sorted);
+    }
+    if graph.is_explicit_layout() {
+        reject_aten_spatial_ops(region, graph)?;
+        reject_dim_orders(region, graph)?;
+        if debug {
+            check_explicit_layout_invariants(region, graph, store)?;
+        }
     }
 
     let tensor_decls = TensorDeclarationContext::new(graph);
@@ -155,15 +164,20 @@ fn collect_graph_items(
         }
     }
 
-    let simplified = super::transpose_peephole::simplify_transposes(
-        &mut tensors,
-        &mut shapes,
-        &mut operators,
-        &input_names,
-        &mut output_names,
-    );
-    if debug && simplified > 0 {
-        eprintln!("[Serialize] removed or relabeled {simplified} redundant TRANSPOSE op(s)");
+    // Explicit mode cleans up layout ops in the IR, as rc4 does
+    // (IrCanonicalizeViewCopyPermute); a post-emission peephole would hide its TRANSPOSEs
+    // (P2 design G5).
+    if !graph.is_explicit_layout() {
+        let simplified = super::transpose_peephole::simplify_transposes(
+            &mut tensors,
+            &mut shapes,
+            &mut operators,
+            &input_names,
+            &mut output_names,
+        );
+        if debug && simplified > 0 {
+            eprintln!("[Serialize] removed or relabeled {simplified} redundant TRANSPOSE op(s)");
+        }
     }
     match_scalar_operand_ranks(
         &mut tensors,
@@ -247,6 +261,96 @@ fn collect_graph_items(
         input_names,
         output_names,
     })
+}
+
+/// Explicit mode only (P2 design X5, critique B11): every aten conv, pool and upsample
+/// must have been rewritten to its TOSA op. Their visitors build the NHWC view from dim
+/// orders, which explicit graphs don't have, so a survivor (a rewrite declined it) sends
+/// the graph to stock, through the same seam as `control_flow::assembly`.
+pub(super) fn reject_aten_spatial_ops(region: &str, graph: &Graph) -> Result<(), String> {
+    let Some(node) = graph
+        .order
+        .iter()
+        .filter_map(|&id| graph.node(id))
+        .find(|node| {
+            node.op == OpType::CallFunction && op_semantics::is_aten_spatial_layout_op(&node.target)
+        })
+    else {
+        return Ok(());
+    };
+    Err(format!(
+        "RETAB_STOCK_FALLBACK: aten spatial op in explicit layout: '{}' ({:?}) in region \
+         '{}' has no explicit-layout lowering",
+        node.name, node.target, region
+    ))
+}
+
+/// Explicit mode, in every build: an explicit graph carries its layout in its vals and
+/// has no dim orders (P2 design §2.7, D1). A graph that has one was laid out, at least in
+/// part, by dim-order logic. `RETAB_LAYOUT=explicit` keeps running IrToTosaMemoryFormat
+/// until the explicit pipeline replaces it (S6), and the control-flow contracts keep
+/// writing rank-4 dim orders until S8. The explicit gates switch off the serializer's
+/// dim-order rules (the main-output TRANSPOSE, G4; the axis remap through a TOSA
+/// TRANSPOSE, G8; ...), so such a graph can serialize to invalid or wrong TOSA. It goes
+/// to stock instead, through the same seam as the aten spatial ops.
+pub(super) fn reject_dim_orders(region: &str, graph: &Graph) -> Result<(), String> {
+    let Some((node, order)) = graph
+        .order
+        .iter()
+        .filter_map(|&id| graph.node(id))
+        .filter(|node| node.op != OpType::Output)
+        .find_map(|node| Some((node, node.meta.tosa_dim_order.as_ref()?)))
+    else {
+        return Ok(());
+    };
+    Err(format!(
+        "RETAB_STOCK_FALLBACK: dim order in explicit layout: '{}' ({:?}) in region '{}' has \
+         tosa_dim_order {order:?}",
+        node.name, node.target, region
+    ))
+}
+
+/// Explicit mode under RETAB_DEBUG (P2 design D1): a node's val is its TOSA shape, so no
+/// node may carry a dim order and the serializer's re-derived shape must equal the val.
+/// This catches stale vals and implicit-layout logic that survived the explicit gates.
+/// (`collect_graph_items` sends graphs with dim orders to stock first, so there it
+/// reports stale vals.)
+pub(super) fn check_explicit_layout_invariants(
+    region: &str,
+    graph: &Graph,
+    store: &TensorStore,
+) -> Result<(), String> {
+    let mut violations = Vec::new();
+    for node in graph.order.iter().filter_map(|&id| graph.node(id)) {
+        if node.op == OpType::Output {
+            continue;
+        }
+        if let Some(order) = &node.meta.tosa_dim_order {
+            violations.push(format!("'{}' has tosa_dim_order {order:?}", node.name));
+            continue;
+        }
+        let val: Vec<i32> = node
+            .meta
+            .val
+            .shape_slice()
+            .iter()
+            .map(|&dim| dim as i32)
+            .collect();
+        let actual = visitors::actual_tensor_shape(graph, store, node);
+        if actual != val {
+            violations.push(format!(
+                "'{}' ({:?}) has val {val:?} but serializes as {actual:?}",
+                node.name, node.target
+            ));
+        }
+    }
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "explicit layout invariant broken in region '{region}': {}",
+        violations.join("; ")
+    ))
 }
 
 fn elementwise_data_input_count(op: Op) -> usize {
