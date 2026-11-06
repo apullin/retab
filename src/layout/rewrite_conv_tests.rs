@@ -995,6 +995,79 @@ fn convs_reading_control_flow_outputs_fall_back_until_s8() {
     }
 }
 
+/// Review of APU-155 S3 (minor; the cause is on layout/rc4-port, an S8
+/// follow-up). `control_flow_hazard` only inspects the conv's direct input.
+/// A strided conv that reads a cond output first gets explicit
+/// IrSizeAdjustInput slices. Those slices carry emptied qparam maps
+/// (`fx_size_adjust_input_ir.rs` module docs, rc4's `create_node(from_node=..)`),
+/// so the cond's output contract (`infer_output_qparams_map_ir`) finds no
+/// target among the getitem's direct consumers. That is the same misread
+/// `control_flow_hazard` documents for a getitem the conv reads directly. The
+/// pass still rewrites such a conv without the S8 fallback, so the module
+/// docs' claim that "a parent conv reading a cond or while output whose getitem
+/// has no output qparams" falls back does not hold for this case. Dim-order
+/// slices copy the conv's input qparam onto both maps, so only explicit mode
+/// loses the target. The test passes once a fallback is requested or a direct
+/// consumer of the getitem carries a qparam the contract can read.
+#[test]
+#[ignore = "BUG: a conv reading a cond output through IrSizeAdjustInput's qparam-less \
+            explicit slice is rewritten without the S8 fallback; the cond output \
+            contract then has no target qparam"]
+fn convs_reading_control_flow_outputs_through_size_adjust_slices_fall_back_until_s8() {
+    let mut graph = imported(REWRITE_CONV, "conv2d_s2p0_pt");
+    let conv = single_call(&graph, CONVOLUTION);
+    // Drop rc4's slices so RETAB's explicit IrSizeAdjustInput makes its own.
+    let slices = calls(&graph, "aten.slice_copy.Tensor");
+    let source = named(&graph, "quantized_decomposed_quantize_per_tensor_default");
+    let input_shape = shape(&graph, source);
+    let cond = crate::test_ir::call_with_meta(
+        &mut graph,
+        "cond",
+        "torch.ops.higher_order.cond",
+        vec![IrArg::Node(source)],
+        crate::fx_meta::NodeMeta::default(),
+    );
+    // A cond output's getitem has no output qparams: its DQ folds into the
+    // consumer's input qparams.
+    let getitem = crate::test_ir::call_with_meta(
+        &mut graph,
+        "getitem",
+        "<built-in function getitem>",
+        vec![IrArg::Node(cond), IrArg::Int(0)],
+        crate::fx_meta::NodeMeta::tensor(input_shape, "torch.int8"),
+    );
+    graph.set_arg(conv, 0, IrArg::Node(getitem));
+    for slice in slices.into_iter().rev() {
+        graph.erase(slice);
+    }
+    crate::stock_fallback::take();
+    assert!(crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass {
+        layout: crate::pipeline_config::LayoutMode::Explicit,
+    }
+    .run(&mut graph));
+    let sliced = crate::stock_fallback::take();
+    let (_, rewrite_fallback) = run_with(&parent_pass(), &mut graph);
+    let fallback = sliced.or(rewrite_fallback);
+
+    // `infer_output_qparams_map_ir`'s sources for the cond output's target.
+    let getitem = named(&graph, "getitem");
+    let target_found = graph.node(getitem).meta.output_qparam().is_some()
+        || graph
+            .live_user_ids(getitem)
+            .into_iter()
+            .any(|user| graph.node(user).meta.input_qparam().is_some());
+    let consumers: Vec<String> = graph
+        .live_user_ids(getitem)
+        .into_iter()
+        .map(|user| graph.node(user).name.clone())
+        .collect();
+    assert!(
+        fallback.is_some() || target_found,
+        "the conv was rewritten without a fallback, and the getitem's consumers \
+         {consumers:?} carry no qparam for the cond's output contract"
+    );
+}
+
 /// One stock fallback's trigger: an edit of rc4's graph `case` of `fixture`,
 /// and a fragment of the reason the pass gives.
 struct Fallback {
