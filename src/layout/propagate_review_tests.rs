@@ -334,3 +334,60 @@ fn down_pass_matches_rc4_when_sweeps_reorder_users() {
         WITH_FLAG,
     );
 }
+
+/// An NCHW permute, a clamp and a channel split whose first branch goes back
+/// to NHWC: the shape RewriteConv leaves around a channel split between two
+/// convolutions. Recorded in the venv by probe_channel_split.py (the review's
+/// scripts), with rc4's result: the slice cuts W instead of C.
+const CHANNEL_SPLIT: &str = "\
+case channel_split_after_clamp
+before
+%0 = placeholder y : torch.float32[1, 3, 5, 8] q=none
+%1 = aten.permute_copy.default(%0, [0, 3, 1, 2]) : torch.float32[1, 8, 3, 5] q=none
+%2 = aten.clamp.default(%1, 0.0, 6.0) : torch.float32[1, 8, 3, 5] q=none
+%3 = aten.slice_copy.Tensor(%2, 1, 0, 4) : torch.float32[1, 4, 3, 5] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.float32[1, 3, 5, 4] q=none
+%5 = aten.neg.default(%3) : torch.float32[1, 4, 3, 5] q=none
+output([%4, %5])
+after modified=true
+%0 = placeholder y : torch.float32[1, 3, 5, 8] q=none
+%1 = aten.clamp.default(%0, 0.0, 6.0) : torch.float32[1, 3, 5, 8] q=none
+%2 = aten.slice_copy.Tensor(%1, 2, 0, 4) : torch.float32[1, 3, 4, 8] q=none
+%3 = aten.permute_copy.default(%2, [0, 3, 1, 2]) : torch.float32[1, 8, 3, 4] q=none
+%4 = aten.permute_copy.default(%3, [0, 2, 3, 1]) : torch.float32[1, 3, 4, 8] q=none
+%5 = aten.neg.default(%3) : torch.float32[1, 8, 3, 4] q=none
+output([%4, %5])
+end
+";
+
+/// The port keeps the rc4 bug its module docs describe for reductions, and
+/// slices reach it too, which the Arm pipeline has at phase 6: the Down walk
+/// crosses the clamp and the slice, rewriting the slice's dim from 1 to 3
+/// (`:930-982` applies the args as it advances), finds the fork after the
+/// slice unsplittable (a permute branch isn't swappable), and falls back to a
+/// region move from the original permute (`:1031-1035`), which leaves the
+/// slice reading NCHW data with the NHWC dim; the next sweep moves the new
+/// permute past the slice and maps the dim again. Both graph outputs change
+/// shape, `[1, 3, 5, 4]` to `[1, 3, 4, 8]` and `[1, 4, 3, 5]` to
+/// `[1, 8, 3, 4]` (check_split_numerics.py runs both in torch), and the port
+/// replays rc4 exactly (`propagate_review_external` on the recorded case).
+/// Matching rc4 here means emitting a wrong model; the port could decline the
+/// fallback after an arg-update crossing instead.
+#[test]
+#[ignore = "BUG: kept rc4 miscompile: a slice crossed before an unsplittable fork keeps its rewritten dim and cuts the wrong axis (graph outputs change shape)"]
+fn down_pass_keeps_a_channel_split_on_the_channel_axis() {
+    let mut graph = before(CHANNEL_SPLIT, "channel_split_after_clamp");
+    IrPropagateViewCopyPermutePass::ARM_DOWN.run(&mut graph);
+    let output = graph.output_node().expect("an output node");
+    let mut ids = Vec::new();
+    output.args[0].collect_node_ids(&mut ids);
+    let shapes: Vec<Vec<i64>> = ids
+        .iter()
+        .map(|&id| graph.node_shape(id).expect("a tensor").to_vec())
+        .collect();
+    assert_eq!(
+        shapes,
+        [vec![1, 3, 5, 4], vec![1, 4, 3, 5]],
+        "the graph outputs must keep their shapes"
+    );
+}
