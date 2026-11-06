@@ -586,6 +586,11 @@ impl IrGraph {
     }
 
     /// Iterate placeholders.
+    /// Whether a node, live or erased, already has `name`.
+    pub(crate) fn contains_name(&self, name: &str) -> bool {
+        self.name_to_id.contains_key(name)
+    }
+
     pub fn placeholders(&self) -> impl Iterator<Item = &IrNode> {
         self.nodes.iter().filter(|n| n.op == NodeOp::Placeholder)
     }

@@ -438,7 +438,9 @@ impl<'g> LayoutCtx<'g> {
     }
 
     /// Add a node at the insert point: `Graph.create_node`
-    /// (torch/fx/graph.py:1587-1663). The nodes it reads gain a user.
+    /// (torch/fx/graph.py:1587-1663). The nodes it reads gain a user. Like FX's
+    /// `_graph_namespace.create_name`, a taken name gets a `_N` suffix: names
+    /// key `IrGraph`'s name index and become TOSA tensor names.
     pub(crate) fn create_node(
         &mut self,
         op: NodeOp,
@@ -448,9 +450,10 @@ impl<'g> LayoutCtx<'g> {
         kwargs: HashMap<String, IrArg>,
         meta: NodeMeta,
     ) -> NodeId {
-        let id =
-            self.graph
-                .add_node_with_kwargs(op, name.into(), target.into(), args, kwargs, meta);
+        let name = self.unique_name(name.into());
+        let id = self
+            .graph
+            .add_node_with_kwargs(op, name, target.into(), args, kwargs, meta);
         match self.insert_point {
             InsertPoint::End => self.order.push_back(id),
             InsertPoint::Start => self.order.push_front(id),
@@ -459,6 +462,17 @@ impl<'g> LayoutCtx<'g> {
         }
         self.bump_inputs_of(id);
         id
+    }
+
+    /// `name`, or the first of `name_1`, `name_2`, ... that no node has.
+    pub(crate) fn unique_name(&self, name: String) -> String {
+        if !self.graph.contains_name(&name) {
+            return name;
+        }
+        (1..)
+            .map(|n| format!("{name}_{n}"))
+            .find(|candidate| !self.graph.contains_name(candidate))
+            .expect("an unused suffix")
     }
 
     /// `graph.call_function(target, args)` at the insert point.
