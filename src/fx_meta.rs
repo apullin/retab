@@ -152,7 +152,6 @@ impl IndexMut<&usize> for QParamMap {
 struct LayoutFacts {
     val_dim_order: Option<Vec<usize>>,
     tosa_dim_order: Option<Vec<usize>>,
-    original_dim_orders: Option<Vec<Vec<usize>>>,
 }
 
 /// Metadata fields extracted from `node.meta`. The common fields are typed;
@@ -245,8 +244,6 @@ impl NodeMeta {
 
         let tosa_dim_order = meta_attrs.optional("tosa_dim_order");
 
-        let original_dim_orders = meta_attrs.optional("original_dim_orders");
-
         let pre_pass_arg_qparams = meta_attrs
             .value("_pre_pass_arg_qparams")
             .and_then(|v| extract_qparam_dict(&v));
@@ -287,7 +284,6 @@ impl NodeMeta {
             layout: LayoutFacts {
                 val_dim_order,
                 tosa_dim_order,
-                original_dim_orders,
             },
             extras,
         })
@@ -421,7 +417,6 @@ impl NodeMeta {
     pub fn copy_dim_order_facts_from(&mut self, other: &Self) {
         self.layout.val_dim_order = other.layout.val_dim_order.clone();
         self.layout.tosa_dim_order = other.layout.tosa_dim_order.clone();
-        self.layout.original_dim_orders = other.layout.original_dim_orders.clone();
     }
 
     pub fn tensor_facts(&self) -> Option<&TensorFacts> {
