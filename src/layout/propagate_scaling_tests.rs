@@ -170,7 +170,11 @@ fn down_splits_forks_on_a_large_graph() {
     let blocks = 1000;
     let mut g = fork_graph(blocks);
     assert!(run(&mut g, &IrPropagateViewCopyPermutePass::ARM_DOWN));
-    assert_eq!(g.count(ADD), blocks);
+    // Each block's permute was split over the fork and the two copies sank
+    // below the add as one: abs, neg, add, permute, mm.
+    let block = [ABS, NEG, ADD, PERMUTE, MM];
+    let expected: Vec<&str> = std::iter::repeat_n(block, blocks).flatten().collect();
+    assert_eq!(g.targets(), expected);
 }
 
 /// The stuck copies are walked once and then skipped on each later sweep.

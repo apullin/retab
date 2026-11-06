@@ -2031,7 +2031,6 @@ fn propagate_keeps_unit_slice_before_reordering_view() {
     let targets = run_targets(&mut g, arm(UP));
     assert_order(&targets, &[SLICE, VIEW]);
     let (slice, view) = (only(&g, SLICE), only(&g, VIEW));
-    assert_eq!(slice_args(&g, slice).1..=slice_args(&g, slice).3, 3..=3);
     assert_eq!((arg_int(&g, slice, 1), arg_int(&g, slice, 2), arg_int(&g, slice, 3)), (3, 2, 3));
     assert_eq!((arg_node(&g, view, 0), arg_ints(&g, view, 1)), (slice, vec![1, 1, 1, 3]));
 }
