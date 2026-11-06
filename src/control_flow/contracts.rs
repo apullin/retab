@@ -233,7 +233,7 @@ fn infer_output_qparams_map_ir(
     graph: &fx_ir::IrGraph,
     cf_id: fx_ir::NodeId,
 ) -> Vec<(usize, fx_ir::QParam)> {
-    let mut user_ids: Vec<fx_ir::NodeId> = graph.users(cf_id).to_vec();
+    let mut user_ids = graph.live_user_ids(cf_id);
     user_ids.sort_by(|&a, &b| {
         let ak = graph.node(a).args.get(1).and_then(|arg| match arg {
             fx_ir::IrArg::Int(i) => Some(*i),
@@ -254,9 +254,6 @@ fn infer_output_qparams_map_ir(
     let mut result = Vec::new();
     for user_id in user_ids {
         let user = graph.node(user_id);
-        if !user.alive {
-            continue;
-        }
         let idx = match user.args.get(1) {
             Some(fx_ir::IrArg::Int(i)) => *i as usize,
             _ => continue,
@@ -266,11 +263,8 @@ fn infer_output_qparams_map_ir(
             continue;
         }
         let mut found = false;
-        for &consumer_id in graph.users(user_id) {
+        for consumer_id in graph.live_user_ids(user_id) {
             let consumer = graph.node(consumer_id);
-            if !consumer.alive {
-                continue;
-            }
             if let Some(qparam) = consumer.meta.input_qparam() {
                 result.push((idx, qparam.clone()));
                 found = true;
@@ -280,9 +274,9 @@ fn infer_output_qparams_map_ir(
         if found {
             continue;
         }
-        for &consumer_id in graph.users(user_id) {
+        for consumer_id in graph.live_user_ids(user_id) {
             let consumer = graph.node(consumer_id);
-            if !consumer.alive || !consumer.is_dequantize() {
+            if !consumer.is_dequantize() {
                 continue;
             }
             if let Some(qparam) = consumer.parse_qdq_qparam() {
@@ -322,14 +316,11 @@ fn output_targets_ir(graph: &fx_ir::IrGraph, cf_id: fx_ir::NodeId) -> Vec<(usize
 fn recorded_output_targets_ir(graph: &fx_ir::IrGraph, cf_id: fx_ir::NodeId) -> fx_ir::QParamMap {
     let mut targets = fx_ir::QParamMap::new();
     let mut getitems: Vec<(usize, fx_ir::NodeId)> = graph
-        .users(cf_id)
-        .iter()
-        .filter_map(|&id| {
-            let node = graph.node(id);
-            match (node.alive, node.args.get(1)) {
-                (true, Some(fx_ir::IrArg::Int(index))) => Some((*index as usize, id)),
-                _ => None,
-            }
+        .live_user_ids(cf_id)
+        .into_iter()
+        .filter_map(|id| match graph.node(id).args.get(1) {
+            Some(fx_ir::IrArg::Int(index)) => Some((*index as usize, id)),
+            _ => None,
         })
         .collect();
     getitems.sort();
@@ -339,9 +330,9 @@ fn recorded_output_targets_ir(graph: &fx_ir::IrGraph, cf_id: fx_ir::NodeId) -> f
         }
         let node = graph.node(getitem);
         let quantized = node.meta.output_qparam().cloned().or_else(|| {
-            graph.users(getitem).iter().find_map(|&user| {
+            graph.live_user_ids(getitem).into_iter().find_map(|user| {
                 let user = graph.node(user);
-                (user.alive && user.is_quantize() && user.arg_node(0) == Some(getitem))
+                (user.is_quantize() && user.arg_node(0) == Some(getitem))
                     .then(|| user.parse_qdq_qparam())
                     .flatten()
             })
@@ -621,13 +612,13 @@ fn rewrite_output_dequantize_boundaries_ir(graph: &mut fx_ir::IrGraph) -> u32 {
         let Some(source_id) = graph.nodes[dq_id].first_node_arg() else {
             continue;
         };
-        let user_ids = graph.users(dq_id).to_vec();
+        let user_ids = graph.live_user_ids(dq_id);
         if user_ids.is_empty() {
             continue;
         }
         let all_rescale_or_output = user_ids.iter().all(|&uid| {
             let user = &graph.nodes[uid];
-            user.alive && (user.is_rescale() || user.op == fx_ir::NodeOp::Output)
+            user.is_rescale() || user.op == fx_ir::NodeOp::Output
         });
         if !all_rescale_or_output {
             continue;

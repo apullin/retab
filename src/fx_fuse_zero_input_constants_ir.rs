@@ -87,11 +87,8 @@ fn effective_int_qparam(graph: &IrGraph, start: usize) -> Option<QParam> {
 }
 
 fn infer_binary_full_qparam(graph: &IrGraph, full_id: usize) -> Option<QParam> {
-    for &user_id in graph.users(full_id) {
+    for user_id in graph.live_user_ids(full_id) {
         let user = graph.node(user_id);
-        if !user.alive {
-            continue;
-        }
         if let Some(qp) = effective_int_qparam(graph, user_id) {
             return Some(qp);
         }

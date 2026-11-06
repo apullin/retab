@@ -2207,8 +2207,8 @@ mod tests {
         assert_eq!(graph.node(3).args[0].as_node(), Some(2), "c reads a");
         assert_eq!(graph.node(3).kwargs["other"].as_node(), Some(1));
         assert_eq!(graph.live_user_ids(1), [2, 3]);
-        assert_eq!(graph.users(0), [1]);
-        assert_eq!(graph.users(2), [3]);
+        assert_eq!(graph.live_user_ids(0), [1]);
+        assert_eq!(graph.live_user_ids(2), [3]);
     }
 
     #[test]

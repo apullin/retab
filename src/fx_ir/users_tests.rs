@@ -1,15 +1,12 @@
 //! Tests for `IrGraph`'s incremental user index.
 //!
 //! Seeded random edits are checked against a from-scratch rebuild and against the
-//! user bookkeeping the graph had before the index became incremental (RETAB main
+//! full scans the user queries made before the index became incremental (RETAB main
 //! @ 5c911c8). An ignored test times `set_arg` on a 20k-node graph both ways.
 
 use std::time::{Duration, Instant};
 
-use super::{
-    build_user_edges, collect_users_from_arg, IrArg, IrGraph, NodeId, NodeMeta, NodeOp,
-    CHECK_USERS_AFTER_EDIT,
-};
+use super::{build_user_edges, IrArg, IrGraph, NodeId, NodeMeta, NodeOp, CHECK_USERS_AFTER_EDIT};
 
 /// SplitMix64, so the tests need no RNG crate.
 struct Rng(u64);
@@ -29,37 +26,6 @@ impl Rng {
 
     fn percent(&mut self, chance: u64) -> bool {
         self.next_u64() % 100 < chance
-    }
-}
-
-/// The user cache as `IrGraph` kept it before the index became incremental.
-/// `set_args`, `set_arg` (index in range), `replace_input_use` (when it changed
-/// something) and `eliminate_dead_code` (when it erased something) rebuilt it from
-/// scratch. `add_node` appended the new id to the lists of the nodes in its args.
-/// `replace_all_uses` moved the old id's list onto the end of the new id's list.
-/// Nothing else touched it.
-struct OldUserCache(Vec<Vec<NodeId>>);
-
-impl OldUserCache {
-    fn rebuild(&mut self, graph: &IrGraph) {
-        self.0 = build_user_edges(&graph.nodes);
-    }
-
-    /// Mirror `add_node`; call it before the graph creates node `id`.
-    fn add_node(&mut self, id: NodeId, args: &[IrArg]) {
-        for arg in args {
-            collect_users_from_arg(arg, id, &mut self.0);
-        }
-        self.0.push(Vec::new());
-    }
-
-    fn replace_all_uses(&mut self, old: NodeId, new: NodeId) {
-        let moved = std::mem::take(&mut self.0[old]);
-        for user in moved {
-            if !self.0[new].contains(&user) {
-                self.0[new].push(user);
-            }
-        }
     }
 }
 
@@ -85,14 +51,10 @@ fn scanned_getitem_users(graph: &IrGraph, id: NodeId) -> Vec<(NodeId, i64)> {
         .collect()
 }
 
-/// The index matches a from-scratch rebuild, `users(id)` matches the old cache for
-/// every id, and the queries for `ids` match the old full scans.
-fn assert_old_answers(graph: &IrGraph, old: &OldUserCache, ids: &[NodeId]) {
+/// The index matches a from-scratch rebuild, and the queries for `ids` match the old
+/// full scans.
+fn assert_old_answers(graph: &IrGraph, ids: &[NodeId]) {
     graph.assert_users_consistent();
-    assert_eq!(old.0.len(), graph.nodes.len());
-    for (id, cached) in old.0.iter().enumerate() {
-        assert_eq!(graph.users(id), cached.as_slice(), "users({id})");
-    }
     for &id in ids {
         let scanned = scanned_live_users(graph, id);
         assert_eq!(graph.live_user_ids(id), scanned, "live_user_ids({id})");
@@ -185,38 +147,31 @@ fn random_node(rng: &mut Rng, node_count: usize) -> (NodeOp, String, Vec<IrArg>)
     }
 }
 
-/// Apply one random edit to the graph and mirror it in the old cache.
-fn random_edit(rng: &mut Rng, graph: &mut IrGraph, old: &mut OldUserCache) {
+/// Apply one random edit to the graph.
+fn random_edit(rng: &mut Rng, graph: &mut IrGraph) {
     let node_count = graph.nodes.len();
     let name = format!("n{node_count}");
     match rng.below(100) {
         0..=15 => {
             let (op, target, args) = random_node(rng, node_count);
-            old.add_node(node_count, &args);
             graph.add_node(op, name, target, args, NodeMeta::default());
         }
         16..=21 => {
             let (op, target, args) = random_node(rng, node_count);
             let kwargs = random_kwargs(rng, node_count);
-            old.add_node(node_count, &args);
             graph.add_node_with_kwargs(op, name, target, args, kwargs, NodeMeta::default());
         }
         22..=37 => {
             let id = rng.below(node_count);
-            // One past the end now and then: the old code ignored that edit.
+            // One past the end now and then: `set_arg` ignores that edit.
             let index = rng.below(graph.nodes[id].args.len() + 1);
             let value = random_arg(rng, node_count, 0);
-            let in_range = index < graph.nodes[id].args.len();
             graph.set_arg(id, index, value);
-            if in_range {
-                old.rebuild(graph);
-            }
         }
         38..=42 => {
             let id = rng.below(node_count);
             let args = random_args(rng, node_count);
             graph.set_args(id, args);
-            old.rebuild(graph);
         }
         43..=48 => {
             let id = rng.below(node_count);
@@ -253,48 +208,37 @@ fn random_edit(rng: &mut Rng, graph: &mut IrGraph, old: &mut OldUserCache) {
                 rng.below(node_count)
             };
             let new_id = random_ref(rng, node_count);
-            if graph.replace_input_use(user, old_id, new_id) {
-                old.rebuild(graph);
-            }
+            graph.replace_input_use(user, old_id, new_id);
         }
         67..=72 => {
             let (old_id, new_id) = (rng.below(node_count), rng.below(node_count));
             graph.replace_all_uses(old_id, new_id);
-            old.replace_all_uses(old_id, new_id);
         }
         73..=80 => {
             let (old_id, new_id) = (rng.below(node_count), rng.below(node_count));
             graph.replace_and_erase(old_id, new_id);
-            old.replace_all_uses(old_id, new_id);
         }
         81..=84 => {
             let (old_id, new_id) = (rng.below(node_count), rng.below(node_count));
             let excluded = rng.below(node_count);
-            if graph.replace_live_uses_except(old_id, new_id, excluded) {
-                old.rebuild(graph);
-            }
+            graph.replace_live_uses_except(old_id, new_id, excluded);
         }
         85..=96 => graph.erase(rng.below(node_count)),
-        97 => {
-            graph.rebuild_users();
-            old.rebuild(graph);
-        }
+        97 => graph.rebuild_users(),
         _ => {
             // Dead-code elimination indexes every referenced id, so it cannot run
             // while a forward reference is outstanding (nor could it before).
-            if graph.pending_users.is_empty() && graph.eliminate_dead_code() {
-                old.rebuild(graph);
+            if graph.pending_users.is_empty() {
+                graph.eliminate_dead_code();
             }
         }
     }
 }
 
 /// A random starting graph: a few placeholders, random calls, and an output.
-fn random_graph(rng: &mut Rng) -> (IrGraph, OldUserCache) {
+fn random_graph(rng: &mut Rng) -> IrGraph {
     let mut graph = IrGraph::empty();
-    let mut old = OldUserCache(Vec::new());
     for index in 0..3 + rng.below(4) {
-        old.add_node(graph.nodes.len(), &[]);
         graph.add_node(
             NodeOp::Placeholder,
             format!("x{index}"),
@@ -308,7 +252,6 @@ fn random_graph(rng: &mut Rng) -> (IrGraph, OldUserCache) {
         let args: Vec<IrArg> = (0..1 + rng.below(3))
             .map(|_| IrArg::Node(rng.below(node_count)))
             .collect();
-        old.add_node(node_count, &args);
         graph.add_node(
             NodeOp::CallFunction,
             format!("n{node_count}"),
@@ -319,7 +262,6 @@ fn random_graph(rng: &mut Rng) -> (IrGraph, OldUserCache) {
     }
     let last = graph.nodes.len() - 1;
     let args = vec![IrArg::List(vec![IrArg::Node(last)])];
-    old.add_node(graph.nodes.len(), &args);
     graph.add_node(
         NodeOp::Output,
         "output".to_string(),
@@ -327,21 +269,20 @@ fn random_graph(rng: &mut Rng) -> (IrGraph, OldUserCache) {
         args,
         NodeMeta::default(),
     );
-    (graph, old)
+    graph
 }
 
 /// Thousands of seeded random edits keep the index equal to a from-scratch rebuild,
-/// `users(id)` equal to the old cache, and `live_user_ids` and friends equal to the
-/// old full scans (checked for a sample of ids after each edit and for every id after
-/// every 20th).
+/// and `live_user_ids` and friends equal to the old full scans (checked for a sample
+/// of ids after each edit and for every id after every 20th).
 #[test]
 fn random_edits_keep_user_queries_identical_to_the_old_bookkeeping() {
     let mut edits = 0;
     for seed in 0..24 {
         let mut rng = Rng(0x5EED_0000 + seed);
-        let (mut graph, mut old) = random_graph(&mut rng);
+        let mut graph = random_graph(&mut rng);
         for step in 0..400 {
-            random_edit(&mut rng, &mut graph, &mut old);
+            random_edit(&mut rng, &mut graph);
             // Ids up to two past the end cover forward references.
             let end = graph.nodes.len() + 3;
             let ids: Vec<NodeId> = if step % 20 == 0 {
@@ -349,122 +290,13 @@ fn random_edits_keep_user_queries_identical_to_the_old_bookkeeping() {
             } else {
                 (0..6).map(|_| rng.below(end)).collect()
             };
-            assert_old_answers(&graph, &old, &ids);
+            assert_old_answers(&graph, &ids);
             edits += 1;
         }
         let end = graph.nodes.len() + 3;
-        assert_old_answers(&graph, &old, &(0..end).collect::<Vec<_>>());
+        assert_old_answers(&graph, &(0..end).collect::<Vec<_>>());
     }
     assert_eq!(edits, 9_600);
-}
-
-#[test]
-fn users_keeps_erased_users_until_an_old_rebuild_point() {
-    let mut graph = IrGraph::empty();
-    let x = graph.add_node(
-        NodeOp::Placeholder,
-        "x".into(),
-        "x".into(),
-        Vec::new(),
-        NodeMeta::default(),
-    );
-    let a = graph.add_call_function(
-        "a",
-        "aten.neg.default",
-        vec![IrArg::Node(x)],
-        NodeMeta::default(),
-    );
-    let b = graph.add_call_function(
-        "b",
-        "aten.abs.default",
-        vec![IrArg::Node(x)],
-        NodeMeta::default(),
-    );
-
-    graph.erase(a);
-    assert_eq!(graph.users(x), &[a, b]);
-    assert_eq!(graph.live_user_ids(x), vec![b]);
-
-    // Any in-range `set_arg` rebuilt the old cache.
-    graph.set_arg(b, 0, IrArg::Node(x));
-    assert_eq!(graph.users(x), &[b]);
-}
-
-#[test]
-fn users_lists_replace_all_uses_moves_after_the_existing_users() {
-    // x feeds a no-op n and a later node v; z reads n.
-    let mut graph = IrGraph::empty();
-    let x = graph.add_node(
-        NodeOp::Placeholder,
-        "x".into(),
-        "x".into(),
-        Vec::new(),
-        NodeMeta::default(),
-    );
-    let n = graph.add_call_function(
-        "n",
-        "aten.clone.default",
-        vec![IrArg::Node(x)],
-        NodeMeta::default(),
-    );
-    let z = graph.add_call_function(
-        "z",
-        "aten.neg.default",
-        vec![IrArg::Node(n)],
-        NodeMeta::default(),
-    );
-    let v = graph.add_call_function(
-        "v",
-        "aten.abs.default",
-        vec![IrArg::Node(x)],
-        NodeMeta::default(),
-    );
-
-    graph.replace_and_erase(n, x);
-    assert_eq!(graph.users(x), &[n, v, z]);
-    assert_eq!(graph.live_user_ids(x), vec![z, v]);
-    assert_eq!(graph.users(n), &[] as &[NodeId]);
-
-    graph.set_args(v, vec![IrArg::Node(x)]);
-    assert_eq!(graph.users(x), &[z, v]);
-}
-
-#[test]
-fn users_ignores_kwargs_references_until_an_old_rebuild_point() {
-    let mut graph = IrGraph::empty();
-    let x = graph.add_node(
-        NodeOp::Placeholder,
-        "x".into(),
-        "x".into(),
-        Vec::new(),
-        NodeMeta::default(),
-    );
-    let y = graph.add_node(
-        NodeOp::Placeholder,
-        "y".into(),
-        "y".into(),
-        Vec::new(),
-        NodeMeta::default(),
-    );
-    let mut kwargs = std::collections::HashMap::new();
-    kwargs.insert("other".to_string(), IrArg::Node(y));
-    let add = graph.add_call_function_with_kwargs(
-        "add",
-        "aten.add.Tensor",
-        vec![IrArg::Node(x)],
-        kwargs,
-        NodeMeta::default(),
-    );
-    assert_eq!(graph.live_user_ids(y), vec![add]);
-    assert_eq!(graph.users(y), &[] as &[NodeId]);
-
-    graph.remove_kwarg(add, "other");
-    assert!(graph.live_user_ids(y).is_empty());
-    assert_eq!(graph.users(y), &[] as &[NodeId]);
-
-    graph.set_kwarg(add, "other", IrArg::Node(y));
-    graph.set_arg(add, 0, IrArg::Node(x));
-    assert_eq!(graph.users(y), &[add]);
 }
 
 #[test]
@@ -487,8 +319,6 @@ fn forward_and_self_references_match_a_rebuild() {
     );
     assert_eq!(graph.live_user_ids(a), vec![a]);
     assert_eq!(graph.live_user_ids(a + 1), vec![a]);
-    // The old cache skipped both references when `a` was added.
-    assert_eq!(graph.users(a), &[] as &[NodeId]);
 
     let b = graph.add_call_function(
         "b",
@@ -499,11 +329,10 @@ fn forward_and_self_references_match_a_rebuild() {
     assert_eq!(b, a + 1);
     assert!(graph.pending_users.is_empty());
     assert_eq!(graph.live_user_ids(b), vec![a]);
-    assert_eq!(graph.users(b), &[] as &[NodeId]);
 
     graph.set_arg(b, 0, IrArg::Node(x));
-    assert_eq!(graph.users(a), &[a]);
-    assert_eq!(graph.users(b), &[a]);
+    assert_eq!(graph.live_user_ids(a), vec![a]);
+    assert_eq!(graph.live_user_ids(b), vec![a]);
 }
 
 /// Switches off the per-edit index check while it lives.
