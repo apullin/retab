@@ -44,14 +44,28 @@ pub(crate) mod normalize_delegate_io;
 pub(crate) mod pending;
 #[allow(dead_code)]
 pub(crate) mod pointwise;
+// rc4's pool argument helpers; IrDecomposeAvgPoolPad shares the pad adjustment.
+#[allow(dead_code)]
+pub(crate) mod pool;
 #[allow(dead_code)]
 pub(crate) mod remove_permutes;
+// rc4's RewriteAvgPool2dPass, RewriteMaxPool2dPass and RewriteUpsamplePass for
+// explicit mode (APU-156, P2 S7).
+#[allow(dead_code)]
+pub(crate) mod rewrite_avg_pool2d;
+#[allow(dead_code)]
+pub(crate) mod rewrite_max_pool2d;
+#[allow(dead_code)]
+pub(crate) mod rewrite_upsample;
 #[allow(dead_code)]
 pub(crate) mod shape;
 
 // rc4's own tests for the P1 passes, ported (APU-135 P1).
 #[cfg(test)]
 mod p1_upstream_tests;
+// rc4's own tests for the pool and upsample rewrites, ported (APU-156, P2 S7).
+#[cfg(test)]
+mod p2_pool_upstream_tests;
 // rc4 graph dumps as test fixtures and expectations.
 #[cfg(test)]
 pub(crate) mod rc4_dump;

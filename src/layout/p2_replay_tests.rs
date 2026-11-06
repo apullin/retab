@@ -6,14 +6,18 @@
 //! RewriteUpsamplePass and RewriteAvgPool2dPass (alone and with the
 //! ComputeConstantOpsAOTPass after it) receive and return. The tests below pin
 //! what the fixtures hold, so a regeneration that drops a case or loses a
-//! detail fails here. The ports don't exist yet: each has a commented-out
-//! replay hook below for S3, S4 and S7 to enable, followed by the tests that
-//! pin the S1 review's findings.
+//! detail fails here. Each port's replay hook follows: S7's pool and upsample
+//! hooks run, and S3's and S4's conv hooks are commented out until their ports
+//! land. The tests that pin the S1 review's findings come last.
 
 use std::collections::BTreeSet;
 
 use crate::fx_ir::{IrGraph, IrPass};
+use crate::layout::constants::IrMaterializeConstantsPass;
 use crate::layout::replay::{self, Case, Data, DimOrders, Graph, Op, Options, QValue, Val};
+use crate::layout::rewrite_avg_pool2d::IrRewriteAvgPool2dPass;
+use crate::layout::rewrite_max_pool2d::IrRewriteMaxPool2dPass;
+use crate::layout::rewrite_upsample::IrRewriteUpsamplePass;
 
 const REWRITE_CONV: &str = include_str!("../../tests/fixtures/layout_replay/rewrite_conv.txt");
 const REWRITE_CONV_A16W8: &str =
@@ -281,6 +285,10 @@ fn p2_fixtures_cover_the_design_case_lists() {
         "bilinear_scale1_5_pc",
         "nearest_scale2_a16w8",
         "bilinear_scale2_a16w8",
+        // S7's additions: rc4's 6 -> 9 test vector and two downscales.
+        "nearest_size_6to9_pc",
+        "nearest_scale_half_pc",
+        "bilinear_size_8to3_pc",
     ] {
         assert!(upsample.contains(case), "{case}");
     }
@@ -289,7 +297,10 @@ fn p2_fixtures_cover_the_design_case_lists() {
         assert!(max_pool.contains(&case), "{case}");
         assert!(max_pool.contains(&format!("{case}_with_indices")), "{case}");
     }
+    // rc4's no-stride pass-test modules, in the pipeline (S7).
+    assert!(max_pool.contains("max_pool_no_stride_pc_with_indices"));
     assert_eq!(names(REWRITE_AVG_POOL2D), names(REWRITE_AVG_POOL2D_AOT));
+    assert!(names(REWRITE_AVG_POOL2D).contains("avg_pool_no_stride_pc"));
 }
 
 #[test]
@@ -690,25 +701,46 @@ fn a_port_that_does_nothing_matches_no_case() {
 // S7 (APU-156): IrRewriteMaxPool2d also does RemoveGetItemPass's work; the
 // `_with_indices` cases start from RETAB's max_pool2d_with_indices + getitem,
 // with the edge args (trailing defaults omitted).
-// #[test]
-// fn rewrite_max_pool2d_matches_rc4() {
-//     replay::check(&IrRewriteMaxPool2dPass, REWRITE_MAX_POOL2D);
-// }
+#[test]
+fn rewrite_max_pool2d_matches_rc4() {
+    replay::check(&IrRewriteMaxPool2dPass, REWRITE_MAX_POOL2D);
+}
 
 // S7 (APU-156): IrRewriteUpsample.
-// #[test]
-// fn rewrite_upsample_matches_rc4() {
-//     replay::check(&IrRewriteUpsamplePass, REWRITE_UPSAMPLE);
-// }
+#[test]
+fn rewrite_upsample_matches_rc4() {
+    replay::check(&IrRewriteUpsamplePass, REWRITE_UPSAMPLE);
+}
 
-// S7 (APU-156): IrRewriteAvgPool2d. Replay REWRITE_AVG_POOL2D if the port
-// emits `aten.full` zero points for IrFuseZeroInputConstantsEffectPass to
-// materialize (critique B2), REWRITE_AVG_POOL2D_AOT if it creates the
-// quantized zero-point constants itself.
-// #[test]
-// fn rewrite_avg_pool2d_matches_rc4() {
-//     replay::check(&IrRewriteAvgPool2dPass, REWRITE_AVG_POOL2D);
-// }
+// S7 (APU-156): IrRewriteAvgPool2d emits `aten.full` zero points, as rc4's
+// RewriteAvgPool2dPass does, for IrMaterializeConstantsPass to materialize as
+// rc4's ComputeConstantOpsAOTPass does (critique B2).
+#[test]
+fn rewrite_avg_pool2d_matches_rc4() {
+    replay::check(&IrRewriteAvgPool2dPass, REWRITE_AVG_POOL2D);
+}
+
+/// RewriteAvgPool2dPass then ComputeConstantOpsAOTPass, as rc4's pipeline runs
+/// them (`arm_pass_manager.py:698-699`): explicit mode's IrMaterializeConstants
+/// takes the second slot, so the two passes together give rc4's quantized
+/// zero-point buffers at the graph head (critique A7).
+#[test]
+fn rewrite_avg_pool2d_then_materialized_constants_match_rc4() {
+    struct RewriteThenMaterialize;
+
+    impl IrPass for RewriteThenMaterialize {
+        fn name(&self) -> &str {
+            "IrRewriteAvgPool2d+IrMaterializeConstants"
+        }
+
+        fn run(&self, graph: &mut IrGraph) -> bool {
+            let rewritten = IrRewriteAvgPool2dPass.run(graph);
+            IrMaterializeConstantsPass { in_region: false }.run(graph) || rewritten
+        }
+    }
+
+    replay::check(&RewriteThenMaterialize, REWRITE_AVG_POOL2D_AOT);
+}
 
 // ---------------------------------------------------------------------------
 // Adversarial review of S1 (APU-135): each test below pins one gap the review

@@ -18,6 +18,29 @@ use crate::store::TensorData;
 
 pub struct IrFuseZeroInputConstantsEffectPass;
 
+/// Which qparams quantize the fill value of a `full` the planners evaluate.
+/// The other factories already follow rc4: only their own output qparams
+/// quantize them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FullQParams {
+    /// The dim-order planners' rule, which the effect passes use: the node's
+    /// output qparam, else its input qparam, else one its users imply
+    /// ([`infer_binary_full_qparam`]).
+    Planner,
+    /// rc4's ComputeConstantOpsAOTPass (`fuse_constant_ops_pass.py:327-335`),
+    /// which explicit mode's IrMaterializeConstantsPass applies. rc4
+    /// quantizes a `full` only with its own output qparams; without them it
+    /// evaluates `full(*args, **kwargs)`, so the fill value stays as is, in
+    /// the dtype kwarg's dtype, input qparams or not. rc4's passes copy their
+    /// node's meta onto the `full` nodes they create (`ArmPass.call_scalar`,
+    /// `arm_pass.py:177-205`), so a `full` that carries qparam maps (even
+    /// empty ones, as rc4's `create_node` leaves them) gets that rule. A bare
+    /// `full`, with no maps, keeps the planners' inference: RETAB's own
+    /// decompositions create their `full` nodes bare and rely on it
+    /// (IrDecomposeAvgPoolPad's padding, for one).
+    Rc4,
+}
+
 fn parse_dtype_arg(arg: &IrArg) -> Option<DType> {
     match arg {
         IrArg::Dtype(name) | IrArg::Str(name) => Some(DType::from_torch_str(name)),
@@ -95,6 +118,21 @@ fn is_quant_decompose_helper_full(node: &IrNode) -> bool {
         && (node.name.ends_with("_sc") || node.name.ends_with("_zp"))
         && (node.name.contains("quantize_per_tensor")
             || node.name.contains("dequantize_per_tensor"))
+}
+
+/// The qparam a `full`'s fill value is quantized with under `rule`, if any.
+fn full_qparam(graph: &IrGraph, node: &IrNode, rule: FullQParams) -> Option<QParam> {
+    if is_quant_decompose_helper_full(node) {
+        return None;
+    }
+    if rule == FullQParams::Rc4 && node.meta.has_qparam_metadata() {
+        return node
+            .meta
+            .output_qparam()
+            .cloned()
+            .filter(QParam::is_integer_dtype);
+    }
+    int_qparam(node).or_else(|| infer_binary_full_qparam(graph, node.id))
 }
 
 fn explicit_zero_input_dtype(node: &IrNode) -> Option<DType> {
@@ -227,19 +265,14 @@ fn plan_zero_input_linspace(node: &IrNode) -> Option<TensorData> {
     Some(TensorData { data, shape, dtype })
 }
 
-fn full_bail_reason(graph: &IrGraph, node: &IrNode) -> &'static str {
+fn full_bail_reason(graph: &IrGraph, node: &IrNode, full_qparams: FullQParams) -> &'static str {
     if full_shape(node).is_none() {
         return "no_shape";
     }
     let Some(fill_value) = full_fill_value(node) else {
         return "no_fill_value";
     };
-    let qparam = if is_quant_decompose_helper_full(node) {
-        None
-    } else {
-        int_qparam(node).or_else(|| infer_binary_full_qparam(graph, node.id))
-    };
-    if let Some(qp) = qparam {
+    if let Some(qp) = full_qparam(graph, node, full_qparams) {
         if qp.is_per_channel() {
             return "qparam_per_channel";
         }
@@ -283,17 +316,15 @@ fn plan_zero_input_eye(node: &IrNode) -> Option<TensorData> {
     Some(TensorData { data, shape, dtype })
 }
 
-fn plan_zero_input_full(graph: &IrGraph, node: &IrNode) -> Option<TensorData> {
+fn plan_zero_input_full(
+    graph: &IrGraph,
+    node: &IrNode,
+    full_qparams: FullQParams,
+) -> Option<TensorData> {
     let shape = full_shape(node)?;
     let fill_value = full_fill_value(node)?;
 
-    let qparam = if is_quant_decompose_helper_full(node) {
-        None
-    } else {
-        int_qparam(node).or_else(|| infer_binary_full_qparam(graph, node.id))
-    };
-
-    let (dtype, scalar) = if let Some(qp) = qparam {
+    let (dtype, scalar) = if let Some(qp) = full_qparam(graph, node, full_qparams) {
         quantized_scalar_bytes(&qp, fill_value)?
     } else {
         let dtype = explicit_zero_input_dtype(node)?;
@@ -352,8 +383,18 @@ fn plan_zero_input_scalar_tensor(node: &IrNode) -> Option<TensorData> {
 /// scalar_tensor), shared by the materializing sweep and by the constant
 /// propagation in the other constant-folding passes.
 pub(crate) fn zero_input_tensor(graph: &IrGraph, node: &IrNode) -> Option<TensorData> {
+    zero_input_tensor_with(graph, node, FullQParams::Planner)
+}
+
+/// [`zero_input_tensor`] with `full_qparams` deciding how a `full` is
+/// quantized.
+pub(crate) fn zero_input_tensor_with(
+    graph: &IrGraph,
+    node: &IrNode,
+    full_qparams: FullQParams,
+) -> Option<TensorData> {
     match planned_zero_input_constant_target(node)? {
-        ZeroInputConstantTarget::Full => plan_zero_input_full(graph, node),
+        ZeroInputConstantTarget::Full => plan_zero_input_full(graph, node, full_qparams),
         ZeroInputConstantTarget::Arange => plan_zero_input_arange(node),
         ZeroInputConstantTarget::Linspace => plan_zero_input_linspace(node),
         ZeroInputConstantTarget::Eye => plan_zero_input_eye(node),
@@ -374,38 +415,48 @@ impl EffectfulIrPass for IrFuseZeroInputConstantsEffectPass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> EffectfulIrPassResult {
-        let mut effects = Vec::new();
-        for node in &graph.nodes {
-            let Some(target) = planned_zero_input_constant_target(node) else {
-                continue;
-            };
-            if let Some(tensor) = zero_input_tensor(graph, node) {
-                effects.push(LoweringEffect::MaterializeTensorNode(
-                    MaterializeTensorNodeEffect {
-                        node_name: node.name.clone(),
-                        data: tensor.data,
-                        shape: tensor.shape,
-                        dtype: tensor.dtype,
-                        allow_missing: true,
-                    },
-                ));
-                continue;
-            }
-            let why = if target == ZeroInputConstantTarget::Full {
-                full_bail_reason(graph, node)
-            } else {
-                "n/a"
-            };
-            crate::fold_fallback_log(&format!(
-                "ZeroInputConstantPrecomputeSkipped target={} kind={:?} why={}",
-                node.target, target, why
+        zero_input_constant_effects(graph, FullQParams::Planner)
+    }
+}
+
+/// IrFuseZeroInputConstantsEffectPass's plan, with `full_qparams` deciding
+/// how a `full` is quantized: a MaterializeTensorNode effect for every
+/// zero-input factory the planners can evaluate.
+pub(crate) fn zero_input_constant_effects(
+    graph: &IrGraph,
+    full_qparams: FullQParams,
+) -> EffectfulIrPassResult {
+    let mut effects = Vec::new();
+    for node in &graph.nodes {
+        let Some(target) = planned_zero_input_constant_target(node) else {
+            continue;
+        };
+        if let Some(tensor) = zero_input_tensor_with(graph, node, full_qparams) {
+            effects.push(LoweringEffect::MaterializeTensorNode(
+                MaterializeTensorNodeEffect {
+                    node_name: node.name.clone(),
+                    data: tensor.data,
+                    shape: tensor.shape,
+                    dtype: tensor.dtype,
+                    allow_missing: true,
+                },
             ));
+            continue;
         }
-        let modified = !effects.is_empty();
-        EffectfulIrPassResult {
-            modified,
-            effects: LoweringEffectBatch { items: effects },
-        }
+        let why = if target == ZeroInputConstantTarget::Full {
+            full_bail_reason(graph, node, full_qparams)
+        } else {
+            "n/a"
+        };
+        crate::fold_fallback_log(&format!(
+            "ZeroInputConstantPrecomputeSkipped target={} kind={:?} why={}",
+            node.target, target, why
+        ));
+    }
+    let modified = !effects.is_empty();
+    EffectfulIrPassResult {
+        modified,
+        effects: LoweringEffectBatch { items: effects },
     }
 }
 

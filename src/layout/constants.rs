@@ -25,7 +25,12 @@
 //!   and gives each planned node the tensor ingest would store under its name
 //!   (`ingest::from_ir::materialized_tensor`, which narrows int64 data to
 //!   int32 when it fits). The planners' rc4 quirks, such as quantizing a
-//!   factory with its output qparams, come along unchanged.
+//!   factory with its output qparams, come along. One rule is rc4's rather
+//!   than the planners': a `full` that carries qparam maps is quantized only
+//!   with its output qparams, as ComputeConstantOpsAOT does (`:327-335`),
+//!   where the dim-order planners fall back to its input qparams
+//!   ([`FullQParams::Rc4`]). Both planners apply it, so a fold over such a
+//!   `full` reads the bytes the `full` is materialized with.
 //! - **How** the IR changes follows rc4: the names, the constant kinds and
 //!   insert points, the special-dtype propagation, the folds rc4 skips or
 //!   abandons, the graph-wide dead-code elimination and the deletion of the
@@ -46,7 +51,7 @@
 use std::collections::HashMap;
 
 use crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEffectPass;
-use crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass;
+use crate::fx_fuse_zero_input_constants_ir::{zero_input_constant_effects, FullQParams};
 use crate::fx_ir::{
     EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, IrPass, MetaValue, NodeId, NodeOp,
     TensorSource,
@@ -142,8 +147,9 @@ struct Plan {
 }
 
 impl Plan {
-    /// Run the effect planners on `graph`, which they only read, and key
-    /// their MaterializeTensorNode effects by node.
+    /// Run the effect planners on `graph`, which they only read, with rc4's
+    /// rule for `full` ([`FullQParams::Rc4`]), and key their
+    /// MaterializeTensorNode effects by node.
     ///
     /// IrFuseShapeOnlyConstantsEffectPass needs no run of its own:
     /// IrFuseConstantInputsEffectPass plans every node it plans, with the same
@@ -152,8 +158,10 @@ impl Plan {
     /// reads only its first argument (a test pins this). matmul_only is
     /// likewise the subset of with_data_slices without slices.
     fn of(graph: &mut IrGraph) -> Self {
-        let factories = IrFuseZeroInputConstantsEffectPass.run(graph);
-        let folds = IrFuseConstantInputsEffectPass::with_data_slices().run(graph);
+        let factories = zero_input_constant_effects(graph, FullQParams::Rc4);
+        let folds = IrFuseConstantInputsEffectPass::with_data_slices()
+            .with_full_qparams(FullQParams::Rc4)
+            .run(graph);
 
         let ids = live_ids_by_name(graph);
         Self {
@@ -418,6 +426,7 @@ mod tests {
 
     use super::*;
     use crate::fx_fuse_shape_only_constants_ir::IrFuseShapeOnlyConstantsEffectPass;
+    use crate::fx_fuse_zero_input_constants_ir::IrFuseZeroInputConstantsEffectPass;
     use crate::fx_ir::{IrArg, NodeMeta, QParam};
     use crate::lowering_effects::LoweringEffectBatch;
     use crate::store::TensorStore;
@@ -874,6 +883,103 @@ mod tests {
         assert_eq!(
             pool.args[2].as_node(),
             Some(live(&graph, "aten_full_default_1_pre_computed"))
+        );
+    }
+
+    /// rc4's ComputeConstantOpsAOT quantizes a factory only with its own
+    /// output qparams and otherwise evaluates it with its kwargs (`:327-335`).
+    /// rc4's passes copy their node's meta, qparams included, onto the `full`
+    /// nodes they create (`ArmPass.call_scalar`), so the pass gives that rule
+    /// to every `full` with qparam maps, empty ones included
+    /// ([`FullQParams::Rc4`]). The dim-order planners, which the effect passes
+    /// keep, quantize such a `full` with its input qparams or, with empty
+    /// maps, with its users' (APU-156 review). A bare `full`, as RETAB's
+    /// decompositions create them, keeps that inference here too, and a fold
+    /// over a `full` holds the bytes the `full` gets.
+    #[test]
+    fn a_full_with_qparam_maps_is_quantized_only_with_its_output_qparams() {
+        /// `full((2,), 3.0, dtype=torch.int8)`, as `call_scalar` spells it.
+        fn int8_full(graph: &mut IrGraph, name: &str, meta: NodeMeta) -> NodeId {
+            let id = full(graph, name, &[2], 3.0, meta);
+            graph.set_kwarg(id, "dtype", IrArg::Dtype("torch.int8".to_string()));
+            id
+        }
+        let build = || {
+            let mut graph = IrGraph::empty();
+            let q = placeholder(&mut graph, "q", [2], "torch.int8");
+            graph
+                .node_mut(q)
+                .meta
+                .set_single_output_qparam(int8_qparam(0.25, 0));
+            let mut with_output = NodeMeta::tensor([2], "torch.int8");
+            with_output.set_single_output_qparam(int8_qparam(0.5, 1));
+            let mut with_input = NodeMeta::tensor([2], "torch.int8");
+            with_input.set_single_input_qparam(int8_qparam(0.5, 1));
+            let mut empty = NodeMeta::tensor([2], "torch.int8");
+            empty.set_empty_qparam_maps();
+            let bare = NodeMeta::tensor([2], "torch.int8");
+
+            let mut results = vec![
+                int8_full(&mut graph, "with_output", with_output),
+                int8_full(&mut graph, "with_input", with_input.clone()),
+            ];
+            let folded = int8_full(&mut graph, "folded", with_input);
+            results.push(call(
+                &mut graph,
+                "view",
+                VIEW,
+                vec![node(folded), ints(&[2, 1])],
+                [2, 1],
+                "torch.int8",
+            ));
+            // Each with a binary user whose other operand has qparams.
+            for (name, meta) in [("empty", empty), ("bare", bare)] {
+                let factory = int8_full(&mut graph, name, meta);
+                results.push(call_with_meta(
+                    &mut graph,
+                    &format!("add_{name}"),
+                    ADD,
+                    vec![node(factory), node(q)],
+                    NodeMeta::tensor([2], "torch.float32"),
+                ));
+            }
+            output(&mut graph, &results);
+            graph
+        };
+
+        // quantize(3.0, 0.5, 1) = 7 and quantize(3.0, 0.25, 0) = 12.
+        let mut graph = build();
+        let factories = effects_by_name(IrFuseZeroInputConstantsEffectPass.run(&mut graph));
+        let folds =
+            effects_by_name(IrFuseConstantInputsEffectPass::with_data_slices().run(&mut graph));
+        for (name, values) in [
+            ("with_output", [7, 7]),
+            ("with_input", [7, 7]),
+            ("empty", [12, 12]),
+            ("bare", [12, 12]),
+        ] {
+            assert_eq!(factories[name].0, values, "the dim-order planner: {name}");
+        }
+        assert_eq!(folds["view"].0, [7, 7], "the dim-order planner: view");
+
+        let mut graph = build();
+        assert!(run(&mut graph));
+        for (name, values) in [
+            ("with_output", [7, 7]),
+            ("with_input", [3, 3]),
+            ("empty", [3, 3]),
+            ("bare", [12, 12]),
+        ] {
+            assert_tensor_eq(
+                tensor(&graph, &format!("{name}_pre_computed")),
+                &int8_tensor(&[2], &values),
+                name,
+            );
+        }
+        assert_tensor_eq(
+            tensor(&graph, "view_fused_const"),
+            &int8_tensor(&[2, 1], &[3, 3]),
+            "the fold over `folded`",
         );
     }
 
@@ -1628,12 +1734,17 @@ mod tests {
         graph
     }
 
-    fn materialized_effects(graph: &mut IrGraph) -> LoweringEffectBatch {
+    /// The materializing planners' effects on `graph`, with `full_qparams`
+    /// deciding how a `full` is quantized: [`FullQParams::Planner`] for the
+    /// effect passes, [`FullQParams::Rc4`] for the pass's plan.
+    fn materialized_effects(graph: &mut IrGraph, full_qparams: FullQParams) -> LoweringEffectBatch {
         let mut effects = LoweringEffectBatch::default();
         for result in [
-            IrFuseZeroInputConstantsEffectPass.run(graph),
+            zero_input_constant_effects(graph, full_qparams),
             IrFuseShapeOnlyConstantsEffectPass.run(graph),
-            IrFuseConstantInputsEffectPass::with_data_slices().run(graph),
+            IrFuseConstantInputsEffectPass::with_data_slices()
+                .with_full_qparams(full_qparams)
+                .run(graph),
         ] {
             effects.items.extend(result.effects.items);
         }
@@ -1689,13 +1800,14 @@ mod tests {
     }
 
     /// The pass's constants hold exactly what ingest stores for the effects
-    /// the planners plan on the same graph, after `apply_effects` and the
-    /// int64 narrowing, with the same converted value, and every folded node
-    /// the outputs reach in the dim-order route is a constant here.
+    /// the planners plan on the same graph (with the pass's rule for `full`),
+    /// after `apply_effects` and the int64 narrowing, with the same converted
+    /// value, and every folded node the outputs reach in the dim-order route
+    /// is a constant here.
     #[test]
     fn constants_hold_what_ingest_stores_for_the_planners_effects() {
         let mut deferred = every_planner_graph();
-        let effects = materialized_effects(&mut deferred);
+        let effects = materialized_effects(&mut deferred, FullQParams::Rc4);
         let mut ingest_store = TensorStore::new();
         let mut ingested = crate::ingest::from_ir::graph_from_ir(&deferred, &mut ingest_store);
         crate::ingest::from_ir::apply_effects(&mut ingested, &mut ingest_store, &effects);
@@ -1785,7 +1897,7 @@ mod tests {
     #[test]
     fn effects_planned_under_folded_names_are_skipped_at_ingest() {
         let mut graph = every_planner_graph();
-        let early_effects = materialized_effects(&mut graph);
+        let early_effects = materialized_effects(&mut graph, FullQParams::Planner);
         assert!(run(&mut graph));
         let mut store = TensorStore::new();
         let mut converted = crate::ingest::from_ir::graph_from_ir(&graph, &mut store);
