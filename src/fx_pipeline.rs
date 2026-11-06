@@ -425,14 +425,17 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
             Ir(Box::new(
                 crate::fx_insert_conv_rescale_ir::IrInsertConvAccumulatorRescalePass,
             )),
+            // RETAB-only view cleanups. rc4 runs none after phase 6, whose
+            // CanonicalizeViewCopyPermute and FuseViewCopyTransform (APM:742-744) leave
+            // explicit mode nothing for them to fuse (APU-161).
+            Ir(Box::new(
+                crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
+            )),
+            Ir(Box::new(
+                crate::fx_fuse_cascaded_views_ir::IrFuseDuplicateViewsPass,
+            )),
         ]);
     }
-    steps.push(Ir(Box::new(
-        crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
-    )));
-    steps.push(Ir(Box::new(
-        crate::fx_fuse_cascaded_views_ir::IrFuseDuplicateViewsPass,
-    )));
     if explicit {
         // After every explicit pass: a control-flow output whose boundary-contract
         // target their qparam-less copies hide, and that has no recorded target,
@@ -686,6 +689,10 @@ mod tests {
         "IrInsertConvAccumulatorRescale",
     ];
 
+    /// RETAB-only passes, with no rc4 counterpart, which explicit mode leaves out:
+    /// there rc4's own passes leave them nothing to do (APU-161).
+    const RETAB_ONLY: [&str; 1] = ["IrFuseDuplicateViews"];
+
     /// rc4's phase-6 block (APM:715-749) as explicit mode builds it, in
     /// IrToTosaMemoryFormat's slot right after the first late IrRemoveNoop.
     const EXPLICIT_PHASE6: [&str; 20] = [
@@ -733,7 +740,7 @@ mod tests {
             let dim_order = PipelineConfig::from_tosa_spec(spec);
             for build in builders {
                 let names = pass_names(build(&dim_order));
-                for pass in DIM_ORDER_ONLY {
+                for pass in DIM_ORDER_ONLY.iter().chain(&RETAB_ONLY) {
                     assert!(names.iter().any(|name| name == pass), "{spec}: {pass}");
                 }
                 for pass in [
@@ -786,7 +793,7 @@ mod tests {
                         .position(|name| name == pass)
                         .unwrap_or_else(|| panic!("{spec}: {pass} missing"))
                 };
-                for pass in DIM_ORDER_ONLY {
+                for pass in DIM_ORDER_ONLY.iter().chain(&RETAB_ONLY) {
                     assert_eq!(count(pass), 0, "{spec}: {pass}");
                 }
 
@@ -908,7 +915,7 @@ mod tests {
                 );
                 let guard = position("IrExplicitControlFlowOutputGuard");
                 assert_eq!(count("IrExplicitControlFlowOutputGuard"), 1, "{spec}");
-                assert_eq!(names[guard - 1], "IrFuseDuplicateViews", "{spec}");
+                assert_eq!(names[guard - 1], "IrFuseDuplicateUsers", "{spec}");
                 assert!(
                     guard >= names.len() - 3,
                     "{spec}: the guard runs after every explicit pass"
@@ -920,9 +927,9 @@ mod tests {
         }
     }
 
-    /// Explicit mode changes only the layout passes: removing them from both modes'
-    /// lists, and the explicit additions, leaves the same pipeline (minus the moved
-    /// passes' positions).
+    /// Explicit mode changes only the layout passes and leaves out the RETAB-only ones:
+    /// removing them from both modes' lists, and the explicit additions, leaves the same
+    /// pipeline (minus the moved passes' positions).
     #[test]
     fn explicit_mode_keeps_every_other_pass_of_dim_order_mode() {
         let explicit_only = [
@@ -963,6 +970,7 @@ mod tests {
                 let mut shared: Vec<String> = dim_order_names
                     .into_iter()
                     .filter(|name| !DIM_ORDER_ONLY.contains(&name.as_str()))
+                    .filter(|name| !RETAB_ONLY.contains(&name.as_str()))
                     .filter(|name| !explicit_only.contains(&name.as_str()))
                     .collect();
                 let mut explicit_shared: Vec<String> = explicit_names
@@ -971,13 +979,13 @@ mod tests {
                     .collect();
                 shared.sort();
                 explicit_shared.sort();
-                // Dim-order mode's with_data_slices effect pass is the one
-                // IrFuseConstantInputsEp explicit mode drops.
-                let dropped = shared
-                    .iter()
-                    .position(|name| name == "IrFuseConstantInputsEp")
-                    .unwrap();
-                shared.remove(dropped);
+                // The steps of a pass that explicit mode drops in one place only: dim-order
+                // mode's with_data_slices IrFuseConstantInputsEp, and the IrFuseCascadedViews
+                // after phase 6.
+                for dropped in ["IrFuseConstantInputsEp", "IrFuseCascadedViews"] {
+                    let index = shared.iter().position(|name| name == dropped).unwrap();
+                    shared.remove(index);
+                }
                 assert_eq!(shared, explicit_shared, "{spec}");
             }
         }
