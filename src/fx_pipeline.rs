@@ -29,12 +29,14 @@ pub fn build_main_pipeline(config: &PipelineConfig) -> Vec<crate::fx_ir::Pipelin
 /// pipeline. Explicit mode is rc4's order (`backends/arm/_passes/arm_pass_manager.py`,
 /// "APM" below; P2 design §1 and §4.1 with its critique): every pass that writes or
 /// reads `tosa_dim_order` is off, rc4's layout passes take their APM slots, and
-/// IrToTosaMemoryFormat's slot holds the phase-6 block (APM:715-749). In a region
-/// (`!decompose_qdq`) explicit mode skips IrNormalizeDelegateIOLayout, which owns only
-/// the delegate's IO (critique A2), and its constants are `get_attr` nodes; a region
-/// conv's weight and bias captured from the parent are folded into region constants
-/// at serialization, after the boundary contracts (`layout::rewrite_conv`,
-/// `control_flow::captured_conv`; APU-135 S8).
+/// IrToTosaMemoryFormat's slot holds the phase-6 block (APM:715-749). The RETAB-only
+/// where-mask tiling is off too (SELECT broadcasts the rank-matched mask), and so are
+/// the RETAB-only view cleanups in and after phase 6, while IrFuseCascadedViews still
+/// runs before phase 6 (APU-161). In a region (`!decompose_qdq`) explicit mode skips
+/// IrNormalizeDelegateIOLayout, which owns only the delegate's IO (critique A2), and
+/// its constants are `get_attr` nodes; a region conv's weight and bias captured from
+/// the parent are folded into region constants at serialization, after the boundary
+/// contracts (`layout::rewrite_conv`, `control_flow::captured_conv`; APU-135 S8).
 fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx_ir::PipelineStep> {
     use crate::fx_ir::PipelineStep::{Effectful, Ir};
 
@@ -186,7 +188,14 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(
             crate::fx_decompose_strided_slice_ir::IrDecomposeStridedSlicePass,
         )),
-        Ir(Box::new(fx_expand_where_mask_ir::IrExpandWhereMaskPass)),
+    ]);
+    if !explicit {
+        // RETAB-only: tiles a broadcast `where` mask to the output shape. rc4 gives
+        // SELECT the mask as it is, rank-matched by MatchArgRanks (APM:664, :732), and
+        // so does explicit mode (APU-161).
+        steps.push(Ir(Box::new(fx_expand_where_mask_ir::IrExpandWhereMaskPass)));
+    }
+    steps.extend(vec![
         Ir(Box::new(fx_decompose_tril_ir::IrDecomposeTrilPass)),
         Ir(Box::new(fx_decompose_logit_ir::IrDecomposeLogitPass)),
         Ir(Box::new(fx_decompose_ne_ir::IrDecomposeNotEqualPass)),
@@ -308,6 +317,10 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
     }
     steps.extend(vec![
         Ir(Box::new(fx_rewrite_squeeze_ir::IrRewriteSqueezePass)),
+        // RETAB-only. rc4's FuseViewCopyTransform (APM:725) fuses overlapping chains
+        // (single-user only, also through unary ops) and keeps a chain's first view. In
+        // explicit mode, removing this pass only renamed tensors on the corpus, and on
+        // the op tests also reordered ops (APU-161).
         Ir(Box::new(
             crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
         )),
@@ -425,14 +438,17 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
             Ir(Box::new(
                 crate::fx_insert_conv_rescale_ir::IrInsertConvAccumulatorRescalePass,
             )),
+            // RETAB-only view cleanups. rc4 runs none after phase 6, whose
+            // CanonicalizeViewCopyPermute and FuseViewCopyTransform (APM:742-744) leave
+            // explicit mode nothing for them to fuse (APU-161).
+            Ir(Box::new(
+                crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
+            )),
+            Ir(Box::new(
+                crate::fx_fuse_cascaded_views_ir::IrFuseDuplicateViewsPass,
+            )),
         ]);
     }
-    steps.push(Ir(Box::new(
-        crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
-    )));
-    steps.push(Ir(Box::new(
-        crate::fx_fuse_cascaded_views_ir::IrFuseDuplicateViewsPass,
-    )));
     if explicit {
         // After every explicit pass: a control-flow output whose boundary-contract
         // target their qparam-less copies hide, and that has no recorded target,
@@ -508,10 +524,6 @@ fn explicit_phase6_steps(
             crate::fx_decompose_permute_for_u55_ir::IrDecomposePermuteForU55Pass {
                 split_permutes: config.u55_split_permutes.clone(),
             },
-        )),
-        // RETAB-only; kept through P2 (design §1b slot 12).
-        Ir(Box::new(
-            crate::fx_fuse_cascaded_views_ir::IrFuseCascadedViewsPass,
         )),
         Ir(Box::new(crate::fx_rewrite_slice_ir::IrRewriteSlicePass)),
         Ir(Box::new(
@@ -686,9 +698,13 @@ mod tests {
         "IrInsertConvAccumulatorRescale",
     ];
 
+    /// RETAB-only passes, with no rc4 counterpart, which explicit mode leaves out:
+    /// rc4's own passes cover what they did (APU-161).
+    const RETAB_ONLY: [&str; 2] = ["IrExpandWhereMask", "IrFuseDuplicateViews"];
+
     /// rc4's phase-6 block (APM:715-749) as explicit mode builds it, in
     /// IrToTosaMemoryFormat's slot right after the first late IrRemoveNoop.
-    const EXPLICIT_PHASE6: [&str; 20] = [
+    const EXPLICIT_PHASE6: [&str; 19] = [
         "IrRewriteUpsample",
         "IrRewriteMaxPool2d",
         "IrRewriteConv",
@@ -703,7 +719,6 @@ mod tests {
         "IrRewriteCatSlice",
         "IrFuseConsecutiveConcats",
         "IrDecomposePermuteForU55",
-        "IrFuseCascadedViews",
         "IrRewriteSlice",
         "IrFuseConsecutiveSlices",
         "IrRemoveNoop",
@@ -733,7 +748,7 @@ mod tests {
             let dim_order = PipelineConfig::from_tosa_spec(spec);
             for build in builders {
                 let names = pass_names(build(&dim_order));
-                for pass in DIM_ORDER_ONLY {
+                for pass in DIM_ORDER_ONLY.iter().chain(&RETAB_ONLY) {
                     assert!(names.iter().any(|name| name == pass), "{spec}: {pass}");
                 }
                 for pass in [
@@ -786,7 +801,7 @@ mod tests {
                         .position(|name| name == pass)
                         .unwrap_or_else(|| panic!("{spec}: {pass} missing"))
                 };
-                for pass in DIM_ORDER_ONLY {
+                for pass in DIM_ORDER_ONLY.iter().chain(&RETAB_ONLY) {
                     assert_eq!(count(pass), 0, "{spec}: {pass}");
                 }
 
@@ -890,6 +905,14 @@ mod tests {
                 ] {
                     assert_eq!(count(pass), 1, "{spec}: {pass}");
                 }
+                // The one RETAB-only view cleanup explicit mode keeps, right after
+                // IrRewriteSqueeze (APU-161).
+                assert_eq!(count("IrFuseCascadedViews"), 1, "{spec}");
+                assert_eq!(
+                    names[position("IrFuseCascadedViews") - 1],
+                    "IrRewriteSqueeze",
+                    "{spec}"
+                );
 
                 // After phase 6: the late constant effects, FuseEqualPlaceholders
                 // (APM:755), the cleanup, and EnsureUniqueOutputNodes last.
@@ -908,7 +931,7 @@ mod tests {
                 );
                 let guard = position("IrExplicitControlFlowOutputGuard");
                 assert_eq!(count("IrExplicitControlFlowOutputGuard"), 1, "{spec}");
-                assert_eq!(names[guard - 1], "IrFuseDuplicateViews", "{spec}");
+                assert_eq!(names[guard - 1], "IrFuseDuplicateUsers", "{spec}");
                 assert!(
                     guard >= names.len() - 3,
                     "{spec}: the guard runs after every explicit pass"
@@ -920,9 +943,9 @@ mod tests {
         }
     }
 
-    /// Explicit mode changes only the layout passes: removing them from both modes'
-    /// lists, and the explicit additions, leaves the same pipeline (minus the moved
-    /// passes' positions).
+    /// Explicit mode changes only the layout passes and leaves out the RETAB-only ones:
+    /// removing them from both modes' lists, and the explicit additions, leaves the same
+    /// pipeline (minus the moved passes' positions).
     #[test]
     fn explicit_mode_keeps_every_other_pass_of_dim_order_mode() {
         let explicit_only = [
@@ -963,6 +986,7 @@ mod tests {
                 let mut shared: Vec<String> = dim_order_names
                     .into_iter()
                     .filter(|name| !DIM_ORDER_ONLY.contains(&name.as_str()))
+                    .filter(|name| !RETAB_ONLY.contains(&name.as_str()))
                     .filter(|name| !explicit_only.contains(&name.as_str()))
                     .collect();
                 let mut explicit_shared: Vec<String> = explicit_names
@@ -971,16 +995,85 @@ mod tests {
                     .collect();
                 shared.sort();
                 explicit_shared.sort();
-                // Dim-order mode's with_data_slices effect pass is the one
-                // IrFuseConstantInputsEp explicit mode drops.
-                let dropped = shared
-                    .iter()
-                    .position(|name| name == "IrFuseConstantInputsEp")
-                    .unwrap();
-                shared.remove(dropped);
+                // The steps of a pass that explicit mode drops in some places only:
+                // dim-order mode's with_data_slices IrFuseConstantInputsEp, and the
+                // IrFuseCascadedViews in and after phase 6.
+                for dropped in [
+                    "IrFuseConstantInputsEp",
+                    "IrFuseCascadedViews",
+                    "IrFuseCascadedViews",
+                ] {
+                    let index = shared.iter().position(|name| name == dropped).unwrap();
+                    shared.remove(index);
+                }
                 assert_eq!(shared, explicit_shared, "{spec}");
             }
         }
+    }
+
+    /// A `where` whose mask has a lower rank than its operands, through the steps from
+    /// IrDecomposeStridedSlice to the constant effects after IrConvertFullLike, which
+    /// hold IrExpandWhereMask's slot and explicit mode's IrMatchArgRanks (APM:664).
+    /// Explicit mode only rank-matches the mask, as rc4 does for SELECT, which
+    /// broadcasts it; dim-order mode still tiles it to the output shape (APU-161).
+    #[test]
+    fn explicit_mode_rank_matches_a_where_mask_that_dim_order_mode_tiles() {
+        use crate::fx_ir::{IrArg, IrGraph, IrNode};
+        use crate::test_ir::{f32_call, f32_placeholder, live_node, output, placeholder};
+
+        fn step_name(step: &PipelineStep) -> &str {
+            match step {
+                PipelineStep::Ir(pass) => pass.name(),
+                PipelineStep::Effectful(pass) => pass.name(),
+            }
+        }
+        fn lower(config: &PipelineConfig) -> IrGraph {
+            let mut graph = IrGraph::empty();
+            let mask = placeholder(&mut graph, "mask", [2, 5], "torch.bool");
+            let x = f32_placeholder(&mut graph, "x", [3, 2, 5]);
+            let y = f32_placeholder(&mut graph, "y", [3, 2, 5]);
+            let select = f32_call(
+                &mut graph,
+                "where",
+                "aten.where.self",
+                vec![IrArg::Node(mask), IrArg::Node(x), IrArg::Node(y)],
+                [3, 2, 5],
+            );
+            output(&mut graph, select);
+
+            let steps = lowering_steps(true, config);
+            let position = |pass: &str, from: usize| {
+                from + steps[from..]
+                    .iter()
+                    .position(|step| step_name(step) == pass)
+                    .unwrap_or_else(|| panic!("{pass} missing"))
+            };
+            let start = position("IrDecomposeStridedSlice", 0);
+            let end = position("IrFuseZeroInputConstantsEp", start);
+            run_steps(&steps[start..end], &mut graph);
+            graph
+        }
+        fn where_mask(graph: &IrGraph) -> &IrNode {
+            let select = graph
+                .live_nodes()
+                .find(|node| node.target == "aten.where.self")
+                .expect("a where");
+            graph.node(select.arg_node(0).expect("a mask node"))
+        }
+
+        let graph = lower(&explicit("TOSA-1.0+INT"));
+        assert!(!graph
+            .live_nodes()
+            .any(|node| node.target == "aten.expand_copy.default"));
+        let mask = where_mask(&graph);
+        assert_eq!(mask.target, "aten.view_copy.default");
+        assert_eq!(graph.node_shape(mask.id), Some([1, 2, 5].as_slice()));
+        assert_eq!(mask.arg_node(0), Some(live_node(&graph, "mask").id));
+
+        let graph = lower(&PipelineConfig::from_tosa_spec("TOSA-1.0+INT"));
+        let mask = where_mask(&graph);
+        assert_eq!(mask.target, "aten.expand_copy.default");
+        assert_eq!(graph.node_shape(mask.id), Some([3, 2, 5].as_slice()));
     }
 
     /// rc4's `linear_pc` graph at RewriteConvPass, a per-channel quantized Linear,
