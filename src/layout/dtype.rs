@@ -233,7 +233,7 @@ pub(crate) fn resize_output_dtype(input: &str, bilinear: bool) -> Option<&'stati
 ///    RETAB's copy may hold its producer's float32 val.
 /// 5. Otherwise the val dtype.
 ///
-/// Rules 2-5 follow ingest's dtype fixup (`ingest/finalize.rs:225-415`), which
+/// Rules 2-5 follow ingest's dtype fixup (`ingest/finalize.rs:228-426`), which
 /// decides the dtypes RETAB serializes, without its RETAB-only heuristics.
 pub(crate) fn value_dtype(graph: &IrGraph, id: NodeId) -> Option<String> {
     let mut current = id;
@@ -596,13 +596,14 @@ mod tests {
         let relu = g.call(RELU, vec![node(x)]);
         meta_of(&mut g, relu).set_both_qparams(qparam(0.1, 0, I8));
         let w = g.typed_input("w", &[4, 3, 3, 3], I8);
+        let b = g.typed_input("b", &[4], I32);
         let conv = raw(
             &mut g,
             CONVOLUTION,
             vec![
                 node(relu),
                 node(w),
-                IrArg::None,
+                node(b),
                 i64_list_arg(&[1, 1]),
                 i64_list_arg(&[0, 0]),
                 i64_list_arg(&[1, 1]),
@@ -618,8 +619,11 @@ mod tests {
             .set_input_qparams_from([(0, qparam(0.1, 0, I16)), (1, qparam(0.2, 0, I8))]);
         assert_eq!(activation_dtype(g.graph(), conv).as_deref(), Some(I16));
         assert_eq!(operand_dtype(g.graph(), conv, 1).as_deref(), Some(I8));
-        // RCP:926-927: the bias test reads the bias's own fake dtype.
-        assert_eq!(operand_dtype(g.graph(), conv, 2), None);
+        // RCP:926-927 reads the bias's own fake dtype, which a float bias
+        // (BN-fused weights, critique B10) fails.
+        assert_eq!(value_dtype(g.graph(), b).as_deref(), Some(I32));
+        let float_bias = g.input("float_bias", &[4]);
+        assert_eq!(value_dtype(g.graph(), float_bias).as_deref(), Some(F32));
         assert_eq!(
             conv_output_dtype(&activation_dtype(g.graph(), conv).unwrap()),
             Some(I32)
