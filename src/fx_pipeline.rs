@@ -297,8 +297,11 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(
             crate::fx_fuse_duplicate_users_ir::IrFuseDuplicateUsersPass,
         )),
+        // Explicit mode types the accumulator as rc4's MATMUL (APU-135 P2).
         Ir(Box::new(
-            crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass,
+            crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass {
+                layout: config.layout,
+            },
         )),
         Ir(Box::new(
             crate::fx_insert_conv_rescale_ir::IrInsertConvAccumulatorRescalePass,

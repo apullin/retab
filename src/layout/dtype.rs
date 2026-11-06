@@ -22,12 +22,14 @@
 //! | `_is_per_tensor_rescale` there (`:89-98`) and in the TOSA propagation overrides (`propagate_view_copy_permute_pass.py:132-144`): the RESCALE and its input carry the same special dtype | [`special_dtype`] |
 //! | `TosaPropagationOverrides._node_or_inputs_are_int48` (`propagate_view_copy_permute_pass.py:82-89`), behind `blocks_moving` (`:48-60`) | [`node_or_inputs_are_int48`] |
 //! | RewriteUpsamplePass's `input_dtype` (`rewrite_upsample.py:258-263`) and RewriteAvgPool2dPass's accumulator choice (`rewrite_avg_pool2d_pass.py:66-72`): the input's fake dtype | [`operand_dtype`] at index 0 |
-//! | the TOSA fake kernels' output dtypes (`backends/arm/tosa/dialect/ops/conv2d.py:17-88`, `resize.py:28-55`) | [`conv_output_dtype`], [`resize_output_dtype`] |
+//! | the TOSA fake kernels' output dtypes (`backends/arm/tosa/dialect/ops/conv2d.py:17-88`, `resize.py:28-55`, `matmul.py:28-76`) | [`conv_output_dtype`], [`resize_output_dtype`], [`matmul_output_dtype`] |
 //!
 //! The values that passes *write* follow RETAB's representation, not these
 //! helpers: a created layout copy takes its producer's val dtype
 //! (`layout::shape`), and a created TOSA convolution, RESIZE or RESCALE
-//! records rc4's dtype in its val (design §2.7, §3.3).
+//! records rc4's dtype in its val (design §2.7, §3.3). So does the product
+//! explicit-mode `IrRewriteMatmulRescale` rescales, which is RETAB's MATMUL
+//! (`fx_rewrite_matmul_ir`).
 //!
 //! A special dtype is a separate fact in rc4 too: an INT48 accumulator's fake
 //! dtype is `torch.int32` and an INT4 weight's is `torch.int8`, while TOSA's
@@ -212,15 +214,36 @@ pub(crate) fn resize_output_dtype(input: &str, bilinear: bool) -> Option<&'stati
     })
 }
 
+/// The output dtype of rc4's MATMUL fake kernel for inputs of `input` dtype
+/// (`backends/arm/tosa/dialect/ops/matmul.py:28-76`): int8 and int16 accumulate
+/// in int32, float16, float32 and bfloat16 in float32, and fp8 in float16.
+/// `None` where rc4 raises for the input dtype; the kernel's same-dtype and
+/// profile checks judge legality and are not ported.
+pub(crate) fn matmul_output_dtype(input: &str) -> Option<&'static str> {
+    Some(match input {
+        "torch.int8" | "torch.int16" => "torch.int32",
+        "torch.float16" | "torch.float32" | "torch.bfloat16" => "torch.float32",
+        "torch.float8_e4m3fn" | "torch.float8_e5m2" => "torch.float16",
+        _ => return None,
+    })
+}
+
 /// The dtype rc4's fake tensor would give `id`'s value, from RETAB's
 /// representation, or `None` when the value is not a tensor (a `CONST_SHAPE`'s
 /// `int[]`, the tuple of `max_pool2d_with_indices`). In order:
 ///
 /// 1. A TOSA op whose fake kernel sets the dtype records it in its val: RESCALE
 ///    takes its dtype argument (RETAB vals already hold it), and the passes
-///    creating a convolution, RESIZE, MATMUL or TABLE write rc4's dtype into
-///    the val. These ops inherit the source's output qparams, which name the
-///    dtype after the RESCALE that follows, not theirs (critique A9; design F10).
+///    creating a convolution or RESIZE write rc4's dtype into the val. RETAB
+///    keeps `aten.mm`/`aten.bmm` where rc4's RewriteMatmulPass (APM:724) makes
+///    a MATMUL: explicit-mode `IrRewriteMatmulRescale` writes MATMUL's dtype,
+///    int32 for integer inputs, into the val of the product it rescales, so an
+///    mm or bmm whose val holds an integer dtype counts here. Before that
+///    rewrite its val is float32 (design F2), and rule 2 gives the dtype of
+///    rc4's quantized `aten.bmm`. These ops inherit the source's output
+///    qparams, which name the dtype after the RESCALE that follows, not theirs
+///    (critique A9; design F10). MATMUL and TABLE targets count too, though
+///    RETAB's IR has neither (TABLE is a lowering effect).
 /// 2. Output qparams: a quantized value has its output quantizer's dtype, as
 ///    FoldAndAnnotateQParamsPass's retrace gives it.
 /// 3. Input qparams, for a value RETAB keeps in a float dtype: a quantized node
@@ -235,6 +258,20 @@ pub(crate) fn resize_output_dtype(input: &str, bilinear: bool) -> Option<&'stati
 ///
 /// Rules 2-5 follow ingest's dtype fixup (`ingest/finalize.rs:228-426`), which
 /// decides the dtypes RETAB serializes, without its RETAB-only heuristics.
+///
+/// Two gaps remain for P3, which needs the val-dtype decision (design §6
+/// risk 1) before it ports `_uses_wider_dtype`:
+///
+/// - Rule 2 trusts a copy's qparams. rc4 refreshes a moved copy's val from its
+///   new producer (`refresh_permute_view_meta`) and keeps its qparams. On a
+///   quantized `bmm(a, b).permute(0, 2, 1)`, rc4's
+///   PropagateViewCopyPermuteUpPass leaves `MATMUL int32 -> permute_copy int32
+///   (int8 maps) -> RESCALE int8`, and MoveDataMovementOpsToSmallerDtypePass
+///   then moves the permute after the RESCALE (.venv-et16). Rule 2 would give
+///   that permute its stale int8.
+/// - A node RETAB creates without qparams over a quantized compute node keeps
+///   that node's float32 val, which rule 5 returns: U55 `IrBroadcastArgs`'
+///   `repeat` is one.
 pub(crate) fn value_dtype(graph: &IrGraph, id: NodeId) -> Option<String> {
     let mut current = id;
     // A copy chain cannot be longer than the graph; the bound keeps a
@@ -242,7 +279,7 @@ pub(crate) fn value_dtype(graph: &IrGraph, id: NodeId) -> Option<String> {
     for _ in 0..=graph.nodes.len() {
         let node = graph.node_opt(current)?;
         let facts = node.meta.tensor_facts()?;
-        if records_value_dtype(&node.target) {
+        if records_value_dtype(&node.target) || is_typed_matmul(node, &facts.dtype) {
             return Some(facts.dtype.clone());
         }
         if let Some(dtype) = first_qparam_dtype(node.meta.output_qparams()) {
@@ -276,6 +313,13 @@ fn records_value_dtype(target: &str) -> bool {
                 | "TABLE"
         )
     )
+}
+
+/// RETAB's MATMUL: an `aten.mm` or `aten.bmm` whose val holds an integer
+/// dtype, which explicit-mode `IrRewriteMatmulRescale` writes when it rescales
+/// the product; see [`value_dtype`].
+fn is_typed_matmul(node: &IrNode, val_dtype: &str) -> bool {
+    node.is_mm_or_bmm() && !is_float_dtype(val_dtype)
 }
 
 /// The input of a data-movement copy that preserves its input's dtype.
@@ -472,6 +516,20 @@ mod tests {
                 "{input} {bilinear}"
             );
         }
+        // MATMUL under TosaLoweringContext (TOSA-1.0+INT+int16,
+        // TOSA-1.0+FP+bf16, TOSA-1.1+FP+fp8e4m3+fp8e5m2) and FakeTensorMode.
+        for (input, output) in [
+            (I8, Some(I32)),
+            (I16, Some(I32)),
+            (F32, Some(F32)),
+            ("torch.float16", Some(F32)),
+            ("torch.bfloat16", Some(F32)),
+            ("torch.float8_e4m3fn", Some("torch.float16")),
+            ("torch.float8_e5m2", Some("torch.float16")),
+            (I32, None),
+        ] {
+            assert_eq!(matmul_output_dtype(input), output, "{input}");
+        }
     }
 
     #[test]
@@ -518,19 +576,21 @@ mod tests {
     /// rc4's RewriteMatmulPass (APM:724) replaces a quantized bmm with TOSA
     /// MATMUL, which inherits the bmm's maps, int8 output qparams included, and
     /// whose fake kernel gives int32 for int8 inputs
-    /// (`backends/arm/tosa/dialect/ops/matmul.py:33-38`); a RESCALE with empty
+    /// (`backends/arm/tosa/dialect/ops/matmul.py:33-39`); a RESCALE with empty
     /// maps follows. rc4 dump in .venv-et16: `tosa_matmul_default ::
     /// int32[1, 4, 3] iq={0:int8,1:int8} oq={0:int8}`. RETAB keeps the
-    /// `aten.bmm` with the same maps, and IrRewriteMatmulRescale (explicit
-    /// phase-6 slot 4, before P3's MoveDataMovementOpsToSmallerDtype) puts the
-    /// RESCALE after it; ingest types the bmm int32 (`is_accumulator_op`,
-    /// `ingest/finalize.rs`). `value_dtype` takes rule 2, the stale int8 output
-    /// qparam, so `_uses_wider_dtype` would see an int8 -> int8 RESCALE and
-    /// leave a permute between the bmm and its RESCALE on the int32 side.
+    /// `aten.bmm` with the same maps, and explicit-mode IrRewriteMatmulRescale
+    /// (phase-6 slot 4, before P3's MoveDataMovementOpsToSmallerDtype) puts the
+    /// RESCALE after it and writes MATMUL's int32 into the bmm's val, which
+    /// rule 1 reads. `_uses_wider_dtype` then sees rc4's int32 -> int8 RESCALE,
+    /// and a permute without qparams between the two is on the int32 side, as
+    /// rc4's is after PropagateViewCopyPermuteUpPass. Before the rewrite the
+    /// bmm has the dtype of rc4's quantized `aten.bmm`, int8.
     #[test]
-    #[ignore = "BUG: value_dtype gives a rescaled matmul accumulator its inherited int8 output-qparam dtype; rc4's MATMUL is int32"]
     fn a_rescaled_matmul_accumulator_has_rc4s_int32_dtype() {
         use crate::fx_ir::IrPass;
+        use crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass;
+        use crate::pipeline_config::LayoutMode;
 
         let mut g = LayoutGraph::new();
         let a = g.typed_input("a", &[1, 4, 8], I8);
@@ -548,7 +608,11 @@ mod tests {
             qparam(0.3, 4, I8),
         );
         g.output(&[bmm]);
-        assert!(crate::fx_rewrite_matmul_ir::IrRewriteMatmulRescalePass.run(g.graph_mut()));
+        assert_eq!(value_dtype(g.graph(), bmm).as_deref(), Some(I8));
+        let explicit = IrRewriteMatmulRescalePass {
+            layout: LayoutMode::Explicit,
+        };
+        assert!(explicit.run(g.graph_mut()));
         let rescale = g
             .graph()
             .live_nodes()
@@ -560,6 +624,9 @@ mod tests {
 
         assert_eq!(value_dtype(g.graph(), bmm).as_deref(), Some(I32));
         assert_eq!(operand_dtype(g.graph(), rescale, 0).as_deref(), Some(I32));
+        let permute = g.permute(bmm, &[0, 2, 1]);
+        meta_of(&mut g, permute).set_empty_qparam_maps();
+        assert_eq!(value_dtype(g.graph(), permute).as_deref(), Some(I32));
     }
 
     #[test]

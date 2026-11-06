@@ -1,7 +1,23 @@
+//! Pure Rust IrPass: rescale a quantized `aten.mm`/`aten.bmm` product to its
+//! output quantization, as rc4's RewriteMatmulPass does when it retargets a
+//! bmm to TOSA MATMUL (`backends/arm/_passes/rewrite_matmul.py:39-100`).
+//!
+//! RETAB keeps the aten target, which the serializer lowers to MATMUL, so the
+//! rescaled node is RETAB's MATMUL. In explicit layout mode (APU-135 P2) the
+//! pass also writes MATMUL's dtype into its val: int32 for int8 and int16
+//! inputs, from rc4's fake kernel (`backends/arm/tosa/dialect/ops/matmul.py:28-76`).
+//! Otherwise RETAB leaves a quantized compute node's val in float32 (design
+//! F2). `layout::dtype::value_dtype` reads that val, so the explicit layout
+//! passes see an int32 accumulator before the RESCALE, as rc4's
+//! MoveDataMovementOpsToSmallerDtypePass does. Ingest types the accumulator
+//! int32 in either mode (`is_accumulator_op`, `ingest/finalize.rs`).
+
 use crate::fx_ir::{IrGraph, IrPass, NodeId, NodeOp, RescaleRewrite};
+use crate::layout::dtype;
+use crate::pipeline_config::LayoutMode;
 use crate::runner_logging::log_line;
 
-fn insert_matmul_rescale(graph: &mut IrGraph, matmul_id: NodeId) -> bool {
+fn insert_matmul_rescale(graph: &mut IrGraph, matmul_id: NodeId, layout: LayoutMode) -> bool {
     let node = &graph.nodes[matmul_id];
     if !node.alive || node.op != NodeOp::CallFunction || !node.is_mm_or_bmm() {
         return false;
@@ -34,10 +50,25 @@ fn insert_matmul_rescale(graph: &mut IrGraph, matmul_id: NodeId) -> bool {
             rescale_meta,
         ))
     };
+    if layout == LayoutMode::Explicit {
+        let accumulator = dtype::operand_dtype(graph, matmul_id, 0)
+            .and_then(|input| dtype::matmul_output_dtype(&input));
+        if let Some(accumulator) = accumulator {
+            graph
+                .node_mut(matmul_id)
+                .meta
+                .set_val_dtype_for_existing_shape(accumulator);
+        }
+    }
     graph.replace_live_uses_except(matmul_id, rescale, rescale)
 }
 
-pub struct IrRewriteMatmulRescalePass;
+/// The layout mode decides whether the accumulator's val records its dtype;
+/// see the module docs.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IrRewriteMatmulRescalePass {
+    pub layout: LayoutMode,
+}
 
 impl IrPass for IrRewriteMatmulRescalePass {
     fn name(&self) -> &str {
@@ -45,7 +76,8 @@ impl IrPass for IrRewriteMatmulRescalePass {
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
-        let modified = graph.rewrite_live_call_functions(insert_matmul_rescale);
+        let modified = graph
+            .rewrite_live_call_functions(|graph, id| insert_matmul_rescale(graph, id, self.layout));
         if modified {
             log_line(format_args!(
                 "[IrRewriteMatmulRescale] inserted matmul output rescale ops"
@@ -94,7 +126,7 @@ mod tests {
         );
         output(&mut graph, user);
 
-        assert!(IrRewriteMatmulRescalePass.run(&mut graph));
+        assert!(IrRewriteMatmulRescalePass::default().run(&mut graph));
         let rescale = graph.by_name("mm_output_rescale").unwrap();
         assert_eq!(rescale.target, "backend.tosa.RESCALE.default");
         assert!(matches!(rescale.args[0], IrArg::Node(id) if id == matmul));
@@ -125,6 +157,103 @@ mod tests {
             [2, 4],
         );
 
-        assert!(!IrRewriteMatmulRescalePass.run(&mut graph));
+        assert!(!IrRewriteMatmulRescalePass::default().run(&mut graph));
+    }
+
+    /// A quantized `aten.bmm` as RETAB's IR holds it after IrFoldQdq: a
+    /// float32 val with integer maps (design F2; RETAB_DEBUG_NODE on a
+    /// quantized `torch.bmm` for TOSA-1.0+INT shows `dtype=torch.float32
+    /// out_qparam=(.., int8)` before and after this pass).
+    fn quantized_bmm(graph: &mut IrGraph, dtype: &str) -> NodeId {
+        let a = placeholder(graph, "a", [1, 4, 8], dtype);
+        let b = placeholder(graph, "b", [1, 8, 3], dtype);
+        let mut meta = NodeMeta::tensor([1, 4, 3], "torch.float32");
+        meta.set_binary_input_output_qparams(
+            qparam(0.1, 0, dtype),
+            qparam(0.2, 0, dtype),
+            qparam(0.3, 4, dtype),
+        );
+        let bmm = call_with_meta(
+            graph,
+            "bmm",
+            "aten.bmm.default",
+            vec![IrArg::Node(a), IrArg::Node(b)],
+            meta,
+        );
+        output(graph, bmm);
+        bmm
+    }
+
+    /// rc4's RewriteMatmulPass in .venv-et16, on a quantized `torch.bmm`:
+    /// `tosa_matmul_default :: int32[1, 4, 3] iq {0:int8,1:int8} oq {0:int8}`
+    /// for TOSA-1.0+INT and `int32[1, 4, 3] iq {0:int16,1:int16} oq {0:int16}`
+    /// with A16 on +int16, each followed by a RESCALE to the output dtype.
+    /// Explicit mode gives RETAB's accumulator that dtype and keeps its maps;
+    /// dim-order mode leaves its val alone.
+    #[test]
+    fn explicit_mode_gives_the_rescaled_accumulator_rc4s_matmul_dtype() {
+        for dtype in ["torch.int8", "torch.int16"] {
+            for (layout, expected) in [
+                (LayoutMode::Explicit, "torch.int32"),
+                (LayoutMode::DimOrder, "torch.float32"),
+            ] {
+                let mut graph = IrGraph::empty();
+                let bmm = quantized_bmm(&mut graph, dtype);
+                assert!(IrRewriteMatmulRescalePass { layout }.run(&mut graph));
+                let meta = &graph.node(bmm).meta;
+                assert_eq!(meta.val_dtype(), Some(expected), "{dtype} {layout:?}");
+                assert_eq!(meta.val_shape(), Some(&[1, 4, 3][..]));
+                assert_eq!(
+                    meta.output_qparam().map(|qparam| qparam.dtype_str.as_str()),
+                    Some(dtype)
+                );
+                let rescale = graph.by_name("bmm_output_rescale").unwrap();
+                assert_eq!(rescale.meta.val_dtype(), Some(dtype));
+            }
+        }
+    }
+
+    /// The main and region pipelines build the pass for their layout mode.
+    #[test]
+    fn pipelines_rescale_matmuls_as_their_layout_mode_says() {
+        use crate::fx_ir::PipelineStep;
+        use crate::fx_pipeline::{
+            build_ir_cond_submodule_pipeline, build_ir_while_submodule_pipeline,
+            build_main_pipeline,
+        };
+        use crate::pipeline_config::PipelineConfig;
+
+        for (layout, expected) in [
+            (LayoutMode::DimOrder, "torch.float32"),
+            (LayoutMode::Explicit, "torch.int32"),
+        ] {
+            let config = PipelineConfig {
+                layout,
+                ..PipelineConfig::from_tosa_spec("TOSA-1.0+INT")
+            };
+            for steps in [
+                build_main_pipeline(&config),
+                build_ir_cond_submodule_pipeline(&config),
+                build_ir_while_submodule_pipeline(&config),
+            ] {
+                let pass = steps
+                    .into_iter()
+                    .find_map(|step| match step {
+                        PipelineStep::Ir(pass) if pass.name() == "IrRewriteMatmulRescale" => {
+                            Some(pass)
+                        }
+                        _ => None,
+                    })
+                    .expect("the pipeline rescales matmuls");
+                let mut graph = IrGraph::empty();
+                let bmm = quantized_bmm(&mut graph, "torch.int8");
+                assert!(pass.run(&mut graph));
+                assert_eq!(
+                    graph.node(bmm).meta.val_dtype(),
+                    Some(expected),
+                    "{layout:?}"
+                );
+            }
+        }
     }
 }
