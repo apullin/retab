@@ -113,7 +113,7 @@
 //! O(R·N + I·T·log T) plus the rewrites and the retried walks, for R fusion
 //! rounds and I sweeps; rc4 is O((R + I)·N) re-traces on top of the same work.
 //! `propagate_scaling_tests` times both passes on 50-60k-node graphs at
-//! 0.2-0.45 s in a release test build, growing about linearly.
+//! 0.2-0.5 s in a release test build, growing about linearly with size.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
