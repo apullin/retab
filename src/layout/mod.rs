@@ -7,6 +7,9 @@
 
 #[allow(dead_code)]
 pub(crate) mod canonicalize;
+// rc4's ComputeConstantOpsAOT/FuseConstantArgs slot for explicit mode (P2 S0).
+#[allow(dead_code)]
+pub(crate) mod constants;
 #[cfg(test)]
 mod canonicalize_rc4_tests;
 #[cfg(test)]

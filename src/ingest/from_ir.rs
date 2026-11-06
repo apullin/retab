@@ -76,11 +76,14 @@ fn graph_from_ir_ext(
             continue;
         }
         // The branch/region args of a control-flow op reference region get_attr
-        // nodes; emit them as String region names, not graph nodes.
+        // nodes; emit them as String region names, not graph nodes. A get_attr
+        // holding tensor data is a constant (explicit mode's region constants,
+        // e.g. a folded cond predicate), not a region reference.
         for a in &n.args {
             if let IrArg::Node(id) = a {
                 if let Some(m) = ir.node_opt(*id) {
-                    if matches!(m.op, NodeOp::GetAttr) || m.name.contains("submodule") {
+                    let region_attr = m.op == NodeOp::GetAttr && m.tensor.is_none();
+                    if region_attr || m.name.contains("submodule") {
                         submodule_map.insert(*id, m.name.clone());
                     }
                 }
@@ -510,27 +513,36 @@ fn materialize_const(
     let Some(&nid) = name_map.get(name) else {
         return false;
     };
-    // TOSA has no int64; mirror ConvertInt64ConstOpsToInt32Pass by downcasting an
-    // int64 const to int32 when every value fits the int32 range.
-    let (data, dtype) = match (dtype, downcast_int64_le_to_int32(data)) {
-        (DType::Int64, Some(narrowed)) => (narrowed, DType::Int32),
-        _ => (data.to_vec(), dtype),
-    };
-    store.insert(
-        name.to_string(),
-        crate::store::TensorData {
-            data: data.clone(),
-            shape: shape.to_vec(),
-            dtype,
-        },
-    );
+    let tensor = materialized_tensor(data.to_vec(), shape.to_vec(), dtype);
+    let val = TensorInfo::new(&tensor.shape, tensor.dtype);
+    store.insert(name.to_string(), tensor);
     if let Some(n) = graph.nodes.get_mut(nid) {
         n.op = OpType::Placeholder;
         n.target = OpTarget::Other(name.to_string());
         n.args = SmallVec::new();
-        n.meta.val = TensorInfo::new(shape, dtype);
+        n.meta.val = val;
     }
     true
+}
+
+/// The constant a MaterializeTensorNode effect's data becomes, here and in
+/// explicit mode's in-IR materialization (`layout::constants`). TOSA has no
+/// int64; mirror ConvertInt64ConstOpsToInt32Pass by downcasting an int64 const
+/// to int32 when every value fits the int32 range.
+pub(crate) fn materialized_tensor(
+    data: Vec<u8>,
+    shape: Vec<i64>,
+    dtype: DType,
+) -> crate::store::TensorData {
+    let narrowed = match dtype {
+        DType::Int64 => downcast_int64_le_to_int32(&data),
+        _ => None,
+    };
+    let (data, dtype) = match narrowed {
+        Some(narrowed) => (narrowed, DType::Int32),
+        None => (data, dtype),
+    };
+    crate::store::TensorData { data, shape, dtype }
 }
 
 /// Append stock's `_{region}` suffix to every node name and store key of a
@@ -1126,5 +1138,93 @@ mod tests {
         let rescale_id = node_id_by_name(&graph, "late_rescale");
         let user_id = node_id_by_name(&graph, "user");
         assert!(graph.nodes[rescale_id].users.contains(&user_id));
+    }
+
+    /// A cond's branch args are get_attr nodes without data and become region
+    /// names. A get_attr holding data is a constant, so a predicate folded
+    /// into one (an explicit-mode region constant) stays a tensor operand.
+    #[test]
+    fn a_get_attr_with_data_is_a_cond_operand_not_a_region() {
+        use crate::fx_ir::{NodeTensor, TensorSource};
+
+        let mut ir = IrGraph::empty();
+        let input = ir.add_node(
+            NodeOp::Placeholder,
+            "x".to_string(),
+            "x".to_string(),
+            vec![],
+            ir_meta(),
+        );
+        let pred = ir.add_constant_node(
+            NodeOp::GetAttr,
+            "pred_pre_computed".to_string(),
+            "pred_pre_computed".to_string(),
+            NodeTensor {
+                source: TensorSource::GraphModuleAttr,
+                data: TensorData {
+                    data: vec![1],
+                    shape: vec![],
+                    dtype: DType::Bool,
+                },
+            },
+            IrNodeMeta::tensor(Vec::<i64>::new(), "torch.bool"),
+        );
+        let branches = ["true_graph_0", "false_graph_0"].map(|name| {
+            ir.add_node(
+                NodeOp::GetAttr,
+                name.to_string(),
+                name.to_string(),
+                vec![],
+                IrNodeMeta::default(),
+            )
+        });
+        let cond = ir.add_node(
+            NodeOp::CallFunction,
+            "cond".to_string(),
+            "torch.ops.higher_order.cond".to_string(),
+            vec![
+                IrArg::Node(pred),
+                IrArg::Node(branches[0]),
+                IrArg::Node(branches[1]),
+                IrArg::List(vec![IrArg::Node(input)]),
+            ],
+            ir_meta(),
+        );
+        ir.add_node(
+            NodeOp::Output,
+            "output".to_string(),
+            "output".to_string(),
+            vec![IrArg::Node(cond)],
+            ir_meta(),
+        );
+
+        let mut store = TensorStore::new();
+        let graph = graph_from_ir_preserve_placeholders(&ir, &mut store);
+
+        let cond = &graph.nodes[node_id_by_name(&graph, "cond")];
+        assert_eq!(
+            cond.args[..3],
+            [
+                Arg::Node(node_id_by_name(&graph, "pred_pre_computed")),
+                Arg::String("true_graph_0".to_string()),
+                Arg::String("false_graph_0".to_string()),
+            ]
+        );
+        assert_eq!(
+            store.get("pred_pre_computed").map(|tensor| &tensor.data),
+            Some(&vec![1])
+        );
+        let names: Vec<&str> = graph
+            .order
+            .iter()
+            .map(|&id| graph.nodes[id].name.as_str())
+            .collect();
+        assert_eq!(names, ["x", "pred_pre_computed", "cond", "output"]);
+        let inputs: Vec<&str> = graph
+            .inputs
+            .iter()
+            .map(|&id| graph.nodes[id].name.as_str())
+            .collect();
+        assert_eq!(inputs, ["x"], "the constant is not a runtime input");
     }
 }

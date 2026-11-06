@@ -20,11 +20,21 @@
 //! steer `IrGraph::topological_live_node_ids`, but the IR-to-serialize
 //! conversion (`ingest::from_ir::graph_from_ir`) never reads them; it seeds its
 //! def-use sort (`topo_order`) with node-id order.
+//!
+//! A ctx knows whether it edits the delegated graph or a control-flow region
+//! ([`GraphScope`]), because the two hold constants differently; see
+//! `LayoutCtx::create_constant`.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use crate::fx_ir::{IrArg, IrGraph, IrNode, NodeId, NodeMeta, NodeOp};
+use crate::fx_ir::{
+    IrArg, IrGraph, IrNode, NodeId, NodeMeta, NodeOp, NodeTensor, PlaceholderTensorBinding,
+    TensorSource,
+};
+use crate::layout::shape::mark_contiguous;
+use crate::lowering_effects::LoweringInputKind;
+use crate::store::TensorData;
 
 /// Link sentinel: no previous or next node.
 const NIL: NodeId = NodeId::MAX;
@@ -376,6 +386,35 @@ pub(crate) enum InsertPoint {
     After(NodeId),
 }
 
+/// Which graph a [`LayoutCtx`] edits. It decides what
+/// `LayoutCtx::create_constant` makes (P2 design F4, critique B2 and C8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GraphScope {
+    /// The delegated graph. A constant is a placeholder bound to the exported
+    /// program, which is what rc4's `create_constant_placeholder` makes:
+    /// ingest stores its data like any parameter's, and replay sees rc4's
+    /// constant kinds.
+    Parent,
+    /// A cond or while region. Ingest turns every region placeholder into a
+    /// runtime input and drops its data (`control_flow/assembly.rs:49-56`),
+    /// and the boundary contracts and captured_conv pair region placeholders
+    /// with the parent's operands by position. A constant is therefore a
+    /// `get_attr` node with `GraphModuleAttr` data, as captured_conv makes them
+    /// (`control_flow/captured_conv.rs:240-261`).
+    Region,
+}
+
+impl GraphScope {
+    /// The scope of a pass built with the pipeline's `in_region` flag.
+    pub(crate) fn of_region(in_region: bool) -> Self {
+        if in_region {
+            Self::Region
+        } else {
+            Self::Parent
+        }
+    }
+}
+
 /// The mutation context the ported rc4 layout passes run in.
 ///
 /// It borrows the graph for the whole pass, and every edit goes through it so
@@ -383,6 +422,7 @@ pub(crate) enum InsertPoint {
 /// the graph's order until `finish`.
 pub(crate) struct LayoutCtx<'g> {
     graph: &'g mut IrGraph,
+    scope: GraphScope,
     order: NodeOrder,
     versions: Vec<u64>,
     insert_point: InsertPoint,
@@ -390,13 +430,34 @@ pub(crate) struct LayoutCtx<'g> {
 }
 
 impl<'g> LayoutCtx<'g> {
-    /// Seed the order from `IrGraph::topological_live_node_ids` (fx_ir.rs),
-    /// which honours the position anchors RETAB's passes leave.
+    /// A ctx over the delegated graph; see [`LayoutCtx::with_scope`].
     pub(crate) fn new(graph: &'g mut IrGraph) -> Self {
-        let order = NodeOrder::new(&graph.topological_live_node_ids());
+        Self::with_scope(graph, GraphScope::Parent)
+    }
+
+    /// Seed the order from `IrGraph::topological_live_node_ids` (fx_ir.rs),
+    /// which honours the position anchors RETAB's passes leave. Anchors can
+    /// contradict def-use (a node anchored before one of its inputs), and then
+    /// that order is not topological, which `finish` and torch.fx's `lint`
+    /// require. The seed then falls back to a def-use order that keeps the
+    /// anchored one wherever def-use allows, and says so in the debug log.
+    pub(crate) fn with_scope(graph: &'g mut IrGraph, scope: GraphScope) -> Self {
+        let anchored = graph.topological_live_node_ids();
+        let seed = if is_topological_order(graph, &anchored) {
+            anchored
+        } else {
+            crate::runner_logging::log_line(format_args!(
+                "[LayoutCtx] position anchors contradict def-use; seeding {} live nodes in \
+                 def-use order instead",
+                anchored.len()
+            ));
+            def_use_order(graph, &anchored)
+        };
+        let order = NodeOrder::new(&seed);
         let versions = vec![0; graph.nodes.len()];
         Self {
             graph,
+            scope,
             order,
             versions,
             insert_point: InsertPoint::End,
@@ -406,6 +467,10 @@ impl<'g> LayoutCtx<'g> {
 
     pub(crate) fn graph(&self) -> &IrGraph {
         self.graph
+    }
+
+    pub(crate) fn scope(&self) -> GraphScope {
+        self.scope
     }
 
     pub(crate) fn node(&self, id: NodeId) -> &IrNode {
@@ -418,6 +483,13 @@ impl<'g> LayoutCtx<'g> {
 
     pub(crate) fn is_erased(&self, id: NodeId) -> bool {
         !self.graph.node(id).alive
+    }
+
+    /// `node.all_input_nodes`: the live nodes `id` reads, once each, args
+    /// before kwargs. rc4 inserts a folded constant before the first of them
+    /// (backends/arm/_passes/fuse_constant_ops_pass.py:192-199).
+    pub(crate) fn all_input_nodes(&self, id: NodeId) -> Vec<NodeId> {
+        all_input_nodes(self.graph, self.graph.node(id))
     }
 
     /// `id`'s version stamp. It increases whenever, through this ctx, the
@@ -493,6 +565,58 @@ impl<'g> LayoutCtx<'g> {
         let id = self
             .graph
             .add_node_with_kwargs(op, name, target.into(), args, kwargs, meta);
+        self.place_new(id);
+        id
+    }
+
+    /// Add a constant holding `data` at the insert point: rc4's
+    /// `create_constant_placeholder` (backends/transforms/utils.py:171-246),
+    /// which callers use under `graph.inserting_before/after`.
+    ///
+    /// - In the parent graph ([`GraphScope::Parent`]) it is a placeholder bound
+    ///   to the exported program as a `kind` input, with the node's name as its
+    ///   target (rc4 sets `node.target = node.name` and keys the state dict by
+    ///   it). rc4 requires constant placeholders to come before every user
+    ///   input; the callers' insert points (the graph start, or next to
+    ///   another constant) keep that true.
+    /// - In a region ([`GraphScope::Region`]) it is a `get_attr` node holding
+    ///   `GraphModuleAttr` data, and `kind` is unused.
+    ///
+    /// The meta is what rc4's fake tensor of `data` gives: the data's shape
+    /// and dtype, contiguous, and no qparams. A taken name, including that of
+    /// an erased node, gets a `_N` suffix like any created node, so no lowering
+    /// effect keyed by an old name can land on the constant (P2 design F9).
+    /// rc4 returns an existing placeholder with the same requested name
+    /// instead (`_find_placeholder`); the port never reuses a name.
+    pub(crate) fn create_constant(
+        &mut self,
+        name: impl Into<String>,
+        kind: LoweringInputKind,
+        data: TensorData,
+    ) -> NodeId {
+        let name = self.unique_name(name.into());
+        let mut meta = NodeMeta::tensor(data.shape.clone(), data.dtype.torch_str());
+        mark_contiguous(&mut meta);
+        let (op, source) = match self.scope {
+            GraphScope::Parent => (
+                NodeOp::Placeholder,
+                TensorSource::ExportedProgramInput(PlaceholderTensorBinding {
+                    input_kind: kind,
+                    target_name: name.clone(),
+                }),
+            ),
+            GraphScope::Region => (NodeOp::GetAttr, TensorSource::GraphModuleAttr),
+        };
+        let tensor = NodeTensor { source, data };
+        let id = self
+            .graph
+            .add_constant_node(op, name.clone(), name, tensor, meta);
+        self.place_new(id);
+        id
+    }
+
+    /// Place a node the graph just added at the insert point.
+    fn place_new(&mut self, id: NodeId) {
         match self.insert_point {
             InsertPoint::End => self.order.push_back(id),
             InsertPoint::Start => self.order.push_front(id),
@@ -500,7 +624,6 @@ impl<'g> LayoutCtx<'g> {
             InsertPoint::After(anchor) => self.order.insert_after(id, anchor),
         }
         self.bump_inputs_of(id);
-        id
     }
 
     /// `name`, or the first of `name_1`, `name_2`, ... that no node has.
@@ -760,6 +883,83 @@ impl<'g> LayoutCtx<'g> {
         }
         self.versions[id] += 1;
     }
+}
+
+/// The live nodes `node` reads, once each, in torch.fx's `Node.all_input_nodes`
+/// order (torch/fx/node.py: args depth-first, then kwargs). RETAB keeps kwargs
+/// in a map, so kwargs go by key.
+pub(crate) fn all_input_nodes(graph: &IrGraph, node: &IrNode) -> Vec<NodeId> {
+    let mut ids = Vec::new();
+    for arg in &node.args {
+        arg.collect_node_ids(&mut ids);
+    }
+    let mut keys: Vec<&String> = node.kwargs.keys().collect();
+    keys.sort_unstable();
+    for key in keys {
+        node.kwargs[key].collect_node_ids(&mut ids);
+    }
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|&id| graph.node_opt(id).is_some_and(|input| input.alive) && seen.insert(id));
+    ids
+}
+
+/// Whether each node in `order` comes after the nodes of `order` it reads, the
+/// check `LayoutCtx::is_topological` makes. Every `LayoutCtx::new` runs it, so
+/// it reuses one buffer instead of building `all_input_nodes` per node.
+fn is_topological_order(graph: &IrGraph, order: &[NodeId]) -> bool {
+    let mut position = vec![usize::MAX; graph.nodes.len()];
+    for (index, &id) in order.iter().enumerate() {
+        position[id] = index;
+    }
+    let mut inputs = Vec::new();
+    order.iter().enumerate().all(|(index, &id)| {
+        let node = graph.node(id);
+        inputs.clear();
+        for arg in node.args.iter().chain(node.kwargs.values()) {
+            arg.collect_node_ids(&mut inputs);
+        }
+        // Nodes outside `order` (dead ones) are not constrained.
+        inputs.iter().all(|&input| {
+            position
+                .get(input)
+                .is_none_or(|&at| at == usize::MAX || at < index)
+        })
+    })
+}
+
+/// The nodes of `preferred` in a def-use topological order: a depth-first
+/// post-order over each node's inputs, taking roots in `preferred` order, so a
+/// node moves only to follow an input it reads.
+fn def_use_order(graph: &IrGraph, preferred: &[NodeId]) -> Vec<NodeId> {
+    let mut listed = vec![false; graph.nodes.len()];
+    for &id in preferred {
+        listed[id] = true;
+    }
+    let mut visited = vec![false; graph.nodes.len()];
+    let mut order = Vec::with_capacity(preferred.len());
+    for &root in preferred {
+        let mut stack = vec![(root, false)];
+        while let Some((id, post)) = stack.pop() {
+            if post {
+                order.push(id);
+                continue;
+            }
+            if visited[id] {
+                continue;
+            }
+            visited[id] = true;
+            stack.push((id, true));
+            let inputs = all_input_nodes(graph, graph.node(id));
+            stack.extend(
+                inputs
+                    .into_iter()
+                    .rev()
+                    .filter(|&input| listed[input] && !visited[input])
+                    .map(|input| (input, false)),
+            );
+        }
+    }
+    order
 }
 
 #[cfg(test)]
@@ -1642,5 +1842,257 @@ mod tests {
     fn reorder_nodes_rejects_a_repeated_node() {
         let (mut graph, id) = build("x; a=x; output=a");
         graph.reorder_nodes(&[id["x"], id["a"], id["a"], id["output"]]);
+    }
+
+    fn i8_tensor(shape: &[i64], values: &[i8]) -> TensorData {
+        TensorData {
+            data: values.iter().map(|&value| value as u8).collect(),
+            shape: shape.to_vec(),
+            dtype: crate::graph::ir::DType::Int8,
+        }
+    }
+
+    fn binding(node: &IrNode) -> &PlaceholderTensorBinding {
+        match &node.tensor.as_ref().expect("a constant").source {
+            TensorSource::ExportedProgramInput(binding) => binding,
+            other => panic!("{} is bound as {other:?}", node.name),
+        }
+    }
+
+    /// In the parent graph a constant is a placeholder bound to the exported
+    /// program under its own name, with the meta rc4's fake tensor gives (the
+    /// data's value, contiguous, no qparams), placed at the insert point like
+    /// any created node. Taken names, erased ones included, get a suffix.
+    #[test]
+    fn create_constant_in_the_parent_makes_a_bound_placeholder() {
+        let (mut graph, id) = build("x; a=x; output=a");
+        let mut ctx = LayoutCtx::new(&mut graph);
+        assert_eq!(ctx.scope(), GraphScope::Parent);
+        let (x, a) = (id["x"], id["a"]);
+        let data = i8_tensor(&[2, 3], &[1, 2, 3, 4, 5, 6]);
+        let w = ctx.inserting_before(x, |ctx| {
+            ctx.create_constant("w", LoweringInputKind::Buffer, data.clone())
+        });
+        let head = ctx.with_insert_point(InsertPoint::Start, |ctx| {
+            ctx.create_constant("head", LoweringInputKind::Parameter, i8_tensor(&[1], &[7]))
+        });
+        let w_1 = ctx.inserting_after(w, |ctx| {
+            ctx.create_constant(
+                "w",
+                LoweringInputKind::LiftedTensorConstant,
+                i8_tensor(&[1], &[8]),
+            )
+        });
+        assert_eq!(ctx_names(&ctx), "head w w_1 x a output");
+
+        let node = ctx.node(w);
+        assert_eq!(
+            (node.op, node.target.as_str(), node.args.len()),
+            (NodeOp::Placeholder, "w", 0)
+        );
+        assert_eq!(
+            binding(node),
+            &PlaceholderTensorBinding {
+                input_kind: LoweringInputKind::Buffer,
+                target_name: "w".to_string(),
+            }
+        );
+        assert_eq!(node.tensor.as_ref().unwrap().data.data, data.data);
+        assert_eq!(node.meta.val_shape(), Some(&[2, 3][..]));
+        assert_eq!(node.meta.val_dtype(), Some("torch.int8"));
+        assert_eq!(node.meta.val_dim_order(), Some(&[0, 1][..]));
+        assert!(node.meta.input_qparams().is_none() && node.meta.output_qparams().is_none());
+        assert!(node.meta.extras.is_empty());
+        assert_eq!(ctx.node(w_1).target, "w_1");
+        assert_eq!(binding(ctx.node(w_1)).target_name, "w_1");
+        assert_eq!(
+            binding(ctx.node(w_1)).input_kind,
+            LoweringInputKind::LiftedTensorConstant
+        );
+        assert_eq!(
+            binding(ctx.node(head)).input_kind,
+            LoweringInputKind::Parameter
+        );
+
+        // A name an erased node had is never reused (P2 design F9).
+        let user = ctx.inserting_before(id["output"], |ctx| {
+            ctx.call_function(
+                "user",
+                RELU,
+                vec![
+                    IrArg::Node(x),
+                    IrArg::Node(w),
+                    IrArg::Node(w_1),
+                    IrArg::Node(head),
+                ],
+                f32_meta([1]),
+            )
+        });
+        ctx.replace_all_uses_with(a, user);
+        ctx.erase_node(a);
+        let fresh = ctx.create_constant("a", LoweringInputKind::Buffer, i8_tensor(&[1], &[0]));
+        assert_eq!(ctx.node(fresh).name, "a_1");
+        assert_eq!(ctx_names(&ctx), "head w w_1 x user output a_1");
+        ctx.finish();
+
+        let mut store = TensorStore::new();
+        crate::ingest::from_ir::graph_from_ir(&graph, &mut store);
+        assert_eq!(store.get("w").unwrap().data, data.data);
+        assert!(store.get("w_1").is_some() && store.get("head").is_some());
+    }
+
+    /// In a region a constant is a `get_attr` node: the placeholders, which
+    /// ingest turns into the region's runtime inputs, stay as they were.
+    #[test]
+    fn create_constant_in_a_region_makes_a_get_attr() {
+        assert_eq!(GraphScope::of_region(true), GraphScope::Region);
+        assert_eq!(GraphScope::of_region(false), GraphScope::Parent);
+        let (mut graph, id) = build("x; y; a=x y; output=a");
+        let mut ctx = LayoutCtx::with_scope(&mut graph, GraphScope::Region);
+        assert_eq!(ctx.scope(), GraphScope::Region);
+        let c = ctx.inserting_before(id["a"], |ctx| {
+            ctx.create_constant("c", LoweringInputKind::Parameter, i8_tensor(&[1], &[3]))
+        });
+        ctx.set_arg(id["a"], 1, IrArg::Node(c));
+        let node = ctx.node(c);
+        assert_eq!((node.op, node.target.as_str()), (NodeOp::GetAttr, "c"));
+        assert!(matches!(
+            node.tensor.as_ref().unwrap().source,
+            TensorSource::GraphModuleAttr
+        ));
+        assert_eq!(ctx_names(&ctx), "x y c a output");
+        ctx.finish();
+        assert_eq!(names(&graph, graph.live_placeholder_ids()), "x y");
+
+        let mut store = TensorStore::new();
+        let converted =
+            crate::ingest::from_ir::graph_from_ir_preserve_placeholders(&graph, &mut store);
+        let inputs: Vec<&str> = converted
+            .inputs
+            .iter()
+            .map(|&nid| converted.nodes[nid].name.as_str())
+            .collect();
+        assert_eq!(inputs, ["x", "y"]);
+        assert_eq!(store.get("c").unwrap().data, vec![3]);
+    }
+
+    /// Anchors that put a node before one of its inputs make the anchored
+    /// order non-topological. The ctx then seeds a def-use order (a node moves
+    /// only to follow an input) instead of failing in `finish`.
+    #[test]
+    fn a_seed_that_contradicts_def_use_falls_back_to_def_use_order() {
+        let (mut graph, id) = build("x; a=x; b=a; c=x; output=[b c]");
+        graph.anchor_to(id["c"], id["a"]);
+        graph.anchor_to(id["b"], id["a"]);
+        let anchored = graph.topological_live_node_ids();
+        assert_eq!(names(&graph, anchored.clone()), "x b c a output");
+        assert!(!is_topological_order(&graph, &anchored));
+
+        let ctx = LayoutCtx::new(&mut graph);
+        assert!(ctx.is_topological());
+        assert_eq!(ctx_names(&ctx), "x a b c output");
+        ctx.finish();
+        assert_written_back(&graph, "x a b c output");
+    }
+
+    #[test]
+    fn the_order_helpers_follow_def_use() {
+        let (graph, id) = build("x; a=x; b=a x; output=b");
+        let (x, a, b, output) = (id["x"], id["a"], id["b"], id["output"]);
+        assert_eq!(all_input_nodes(&graph, graph.node(b)), [a, x]);
+        assert!(is_topological_order(&graph, &[x, a, b, output]));
+        assert!(!is_topological_order(&graph, &[x, b, a, output]));
+        assert_eq!(def_use_order(&graph, &[b, output, x, a]), [x, a, b, output]);
+        assert_eq!(def_use_order(&graph, &[x, a, b, output]), [x, a, b, output]);
+    }
+
+    /// `placeholders()` lists dead placeholders too, so `finish` keeps each
+    /// one behind the live placeholder it followed, or ahead of the first live
+    /// one when none did, while other dead nodes follow the live ones.
+    #[test]
+    fn finish_keeps_dead_placeholders_among_the_placeholders() {
+        let (mut graph, id) = build("d0; p0; d1; d2; p1; a=p0 p1; dead=p0; output=a");
+        graph.erase(id["dead"]);
+        for name in ["d0", "d1", "d2"] {
+            graph.erase(id[name]);
+        }
+        let mut ctx = LayoutCtx::new(&mut graph);
+        ctx.with_insert_point(InsertPoint::Start, |ctx| {
+            ctx.create_constant("k", LoweringInputKind::Buffer, i8_tensor(&[1], &[1]))
+        });
+        ctx.finish();
+
+        let placeholders: Vec<(&str, bool)> = graph
+            .placeholders()
+            .map(|node| (node.name.as_str(), node.alive))
+            .collect();
+        assert_eq!(
+            placeholders,
+            [
+                ("k", true),
+                ("d0", false),
+                ("p0", true),
+                ("d1", false),
+                ("d2", false),
+                ("p1", true)
+            ]
+        );
+        assert_eq!(names(&graph, graph.live_node_ids()), "k p0 p1 a output");
+        assert_eq!(
+            names(&graph, graph.topological_live_node_ids()),
+            "k p0 p1 a output"
+        );
+        let last = graph.nodes.last().unwrap();
+        assert_eq!((last.name.as_str(), last.alive), ("dead", false));
+
+        // Without a live placeholder the dead ones lead the dead nodes.
+        let (mut graph, id) = build("d; a; b=a; output=b");
+        graph.erase(id["d"]);
+        graph.erase(id["b"]);
+        graph.erase(id["a"]);
+        graph.reorder_nodes(&[id["output"]]);
+        let order: Vec<&str> = graph.nodes.iter().map(|node| node.name.as_str()).collect();
+        assert_eq!(order, ["output", "d", "a", "b"]);
+    }
+
+    /// A while body pairs its placeholders with the loop-carried outputs by
+    /// position, dead placeholders included
+    /// (`IrInsertCarriedOutputRescalePass`). After a ctx round trip the
+    /// carried RESCALE still lands on the output whose qparams differ from its
+    /// placeholder's; had the dead placeholder moved to the end, `p2` would
+    /// pair with `o1` instead.
+    #[test]
+    fn a_ctx_round_trip_keeps_while_body_placeholder_pairs() {
+        let qparam =
+            |scale| crate::fx_ir::QParam::per_tensor(scale, 0, -128, 127, "torch.int8".into());
+        let (mut graph, id) = build("p0; p1; p2; o0=p0; o1=p0; o2=p2; output=[o0 o1 o2]");
+        for (name, scale) in [
+            ("p0", 1.0),
+            ("p2", 2.0),
+            ("o0", 1.0),
+            ("o1", 1.0),
+            ("o2", 4.0),
+        ] {
+            graph
+                .node_mut(id[name])
+                .meta
+                .set_single_output_qparam(qparam(scale));
+        }
+        graph.erase(id["p1"]);
+        LayoutCtx::new(&mut graph).finish();
+
+        use crate::fx_ir::IrPass;
+        assert!(crate::control_flow::IrInsertCarriedOutputRescalePass.run(&mut graph));
+        let rescales: Vec<&IrNode> = graph
+            .live_nodes()
+            .filter(|node| node.is_rescale())
+            .collect();
+        assert_eq!(rescales.len(), 1);
+        let o2 = graph.by_name("o2").unwrap().id;
+        assert_eq!(rescales[0].args[0].as_node(), Some(o2));
+        let IrArg::List(scales) = &rescales[0].args[2] else {
+            panic!("a scale list")
+        };
+        assert_eq!(scales[0].as_float(), Some(2.0));
     }
 }
