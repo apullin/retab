@@ -407,72 +407,25 @@ def _has_registered_pass_insertions() -> bool:
 
 
 def _build_pipeline_config(compile_spec: TosaCompileSpec) -> dict:
-    """The compile spec's pipeline settings, plus the layout model from RETAB_LAYOUT."""
-    layout = _env_get("RETAB_LAYOUT", default="explicit")
-    if layout not in ("dim_order", "explicit"):
-        raise ValueError(f"RETAB_LAYOUT must be 'dim_order' or 'explicit', got {layout!r}")
+    """The compile spec's pipeline settings."""
     return {
         "tosa_spec": str(compile_spec.tosa_spec),
         "tosa_dev_mode": bool(compile_spec.tosa_dev_mode),
         **compile_spec._get_pass_pipeline_config().to_dict(),
-        "layout": layout,
     }
-
-
-def _u55_permutes_to_split(edge_program: ExportedProgram, compile_spec: TosaCompileSpec) -> list[str]:
-    """Permutes that rc4's DecomposePermuteForU55Pass splits on U55, for dim-order mode.
-
-    Their input shape fails U55's worst-case TRANSPOSE rule and stock's exact check, a Vela
-    compile of a one-TRANSPOSE probe, rejects them. RETAB's Rust pass then splits these
-    nodes with upstream's chunk plan. Called here, outside a lowering context, the exact
-    check can't build its probe and rejects every permute, so the list holds every edge
-    permute that breaks the worst-case rule. Explicit mode asks the exact check at the
-    pass instead (_u55_transpose_probe).
-    """
-    if not compile_spec.tosa_spec.is_U55_subset:
-        return []
-    from executorch.backends.arm._passes.decompose_permute_for_u55_pass import (
-        DecomposePermuteForU55Pass,
-    )
-    from executorch.backends.arm.constants import DQ_OPS
-    from executorch.exir.graph_module import get_cond_while_submodules
-
-    names = []
-
-    def visit(graph_module) -> None:
-        for node in graph_module.graph.nodes:
-            if node.op != "call_function" or node.target not in DecomposePermuteForU55Pass._PERMUTE_OPS:
-                continue
-            producer = node.args[0]
-            val = producer.meta.get("val")
-            if val is None:
-                continue
-            shape = tuple(val.shape)
-            if not DecomposePermuteForU55Pass._violates_u55_worst_case_constraint(shape):
-                continue
-            # The TRANSPOSE runs on the quantized tensor, not the dequantized float.
-            dtype = producer.args[-1] if producer.target in DQ_OPS else val.dtype
-            permutation = tuple(dim % len(shape) for dim in node.args[1])
-            if DecomposePermuteForU55Pass._violates_exact_constraint(shape, permutation, dtype):
-                names.append(node.name)
-        for _, submodule, _ in get_cond_while_submodules(graph_module):
-            visit(submodule)
-
-    visit(edge_program.graph_module)
-    return names
 
 
 def _u55_transpose_probe(
     compile_spec: TosaCompileSpec,
 ) -> Callable[[list[int], list[int], str], bool] | None:
-    """rc4's exact U55 TRANSPOSE check, for explicit mode's IrDecomposePermuteForU55Pass.
+    """rc4's exact U55 TRANSPOSE check, for RETAB's IrDecomposePermuteForU55Pass.
 
     rc4's DecomposePermuteForU55Pass asks it about every permute alive at its slot whose
-    input breaks U55's worst-case rule. In explicit mode RETAB's passes create most of
-    those permutes, so the Rust pass calls this under the GIL with the permute's input
-    shape, its dims and the torch name of the TRANSPOSE's dtype, once per question. The
-    check builds its probe TOSA for the lowering context's TOSA version, so this enters
-    a context, as stock's pass manager does.
+    input breaks U55's worst-case rule. RETAB's passes create most of those permutes, so
+    the Rust pass calls this under the GIL with the permute's input shape, its dims and
+    the torch name of the TRANSPOSE's dtype, once per question. The check builds its
+    probe TOSA for the lowering context's TOSA version, so this enters a context, as
+    stock's pass manager does.
     """
     if not compile_spec.tosa_spec.is_U55_subset:
         return None
@@ -589,14 +542,8 @@ def _all_rust_preprocess(
     from retab import _native as _rust
 
     pipeline_config = _build_pipeline_config(_compile_spec)
-    # Explicit mode judges the permutes alive at the U55 split's slot, as rc4 does;
-    # dim-order mode splits the edge permutes named here.
-    u55_transpose_probe = None
-    if pipeline_config["layout"] == "explicit":
-        u55_transpose_probe = _u55_transpose_probe(_compile_spec)
-    pipeline_config["u55_split_permutes"] = (
-        [] if u55_transpose_probe else _u55_permutes_to_split(edge_program, _compile_spec)
-    )
+    # The U55 split judges the permutes alive at its slot, as rc4 does.
+    u55_transpose_probe = _u55_transpose_probe(_compile_spec)
     try:
         _rust.run_fx_passes(
             gm,

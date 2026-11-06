@@ -29,8 +29,7 @@ pytestmark = [pytest.mark.native, pytest.mark.executorch]
         ("ethos-u85-256", "TOSA-1.0+INT+int16+int4+cf", "MASKED"),
     ],
 )
-def test_pipeline_config_from_ethosu_compile_spec(monkeypatch, target, tosa_spec, softmax):
-    monkeypatch.delenv("RETAB_LAYOUT", raising=False)
+def test_pipeline_config_from_ethosu_compile_spec(target, tosa_spec, softmax):
     compile_spec = EthosUCompileSpec(target)
     assert rp._build_pipeline_config(compile_spec) == {
         "tosa_spec": tosa_spec,
@@ -39,27 +38,10 @@ def test_pipeline_config_from_ethosu_compile_spec(monkeypatch, target, tosa_spec
         "leaky_relu": "DECOMPOSE",
         "quantize_inf": {"neg_inf": -256.0, "pos_inf": 255.0},
         "sdpa_safe_softmax_guard": "PRESERVE",
-        "layout": "explicit",
     }
     assert not rp._has_non_default_pipeline_config(compile_spec)
     compile_spec._set_tosa_dev_mode(True)
     assert rp._build_pipeline_config(compile_spec)["tosa_dev_mode"] is True
-
-
-@pytest.mark.parametrize("layout", ["dim_order", "explicit"])
-def test_retab_layout_sets_the_layout_without_sending_graphs_to_stock(monkeypatch, layout):
-    monkeypatch.setenv("RETAB_LAYOUT", layout)
-    compile_spec = EthosUCompileSpec("ethos-u55-128")
-    program = torch.export.export(torch.nn.ReLU(), (torch.ones(2),))
-    assert rp._build_pipeline_config(compile_spec)["layout"] == layout
-    assert rp.stock_fallback_reason(program, compile_spec) is None
-
-
-@pytest.mark.parametrize("value", ["", "DIM_ORDER", "Explicit", "dim-order", " explicit"])
-def test_unknown_retab_layout_is_an_error(monkeypatch, value):
-    monkeypatch.setenv("RETAB_LAYOUT", value)
-    with pytest.raises(ValueError, match="RETAB_LAYOUT must be 'dim_order' or 'explicit'"):
-        rp._build_pipeline_config(EthosUCompileSpec("ethos-u55-128"))
 
 
 @pytest.mark.parametrize(
@@ -155,7 +137,6 @@ def test_missing_layout_means_explicit_and_explicit_mode_rewrites_the_conv():
     module = torch.nn.Sequential(torch.nn.Conv2d(2, 4, 3), torch.nn.ReLU()).requires_grad_(False)
     program = torch.export.export(module, (torch.ones(1, 2, 8, 8),)).run_decompositions()
     config = rp._build_pipeline_config(TosaCompileSpec("TOSA-1.0+INT"))
-    del config["layout"]
     tosa = []
     for layout in [None, "explicit", "dim_order"]:
         layout_config = config if layout is None else {**config, "layout": layout}
@@ -242,7 +223,7 @@ def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch, r
     assert result.processed_bytes == b"tosa"
     assert calls[0][:4] == ("run_fx_passes", program.graph_module, program, None)
     config = calls[0][4]
-    assert config == {**rp._build_pipeline_config(compile_spec), "u55_split_permutes": []}
+    assert config == rp._build_pipeline_config(compile_spec)
     assert all(call[2] is program and call[4] is config for call in calls)
     assert [(kind, region) for kind, _, _, region, _ in calls if region is not None] == [
         ("run_fx_cond_passes", "true_graph"),
@@ -252,22 +233,18 @@ def test_main_and_nested_regions_receive_the_same_pipeline_config(monkeypatch, r
     assert sum(call[0] == "run_fx_passes" for call in calls) == (4 if recursive else 1)
 
 
-@pytest.mark.parametrize("layout", ["dim_order", "explicit"])
-def test_explicit_mode_hands_the_u55_split_rc4s_exact_check(monkeypatch, layout):
-    """Explicit mode on U55 gives run_fx_passes rc4's exact TRANSPOSE check, which the
-    U55 split asks about the permutes alive at its slot, and no edge names; dim-order
-    mode gives it the edge names and no check (APU-160). The check runs Vela in a
-    lowering context: a batch-1 NCHW-to-NHWC transpose of a 320x320 image passes, which
-    rc4's check called outside one would reject."""
+def test_u55_split_gets_rc4s_exact_check(monkeypatch):
+    """On U55 run_fx_passes gets rc4's exact TRANSPOSE check, which the U55 split asks
+    about the permutes alive at its slot; off U55 it gets none (APU-160). The check runs
+    Vela in a lowering context: a batch-1 NCHW-to-NHWC transpose of a 320x320 image
+    passes, which rc4's check called outside one would reject."""
     from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
 
-    monkeypatch.setenv("RETAB_LAYOUT", layout)
     monkeypatch.setattr(rp, "stock_fallback_reason", lambda ep, spec: None)
-    monkeypatch.setattr(rp, "_u55_permutes_to_split", lambda ep, spec: ["edge_permute"])
     calls = []
 
     def run(gm, ep, *, pipeline_config, u55_transpose_probe=None):
-        calls.append((pipeline_config["u55_split_permutes"], u55_transpose_probe))
+        calls.append(u55_transpose_probe)
 
     monkeypatch.setattr(_native, "run_fx_passes", run)
     monkeypatch.setattr(_native, "ingest_and_serialize", lambda: b"tosa")
@@ -275,12 +252,8 @@ def test_explicit_mode_hands_the_u55_split_rc4s_exact_check(monkeypatch, layout)
     for spec in ["TOSA-1.0+INT+int16+int4+u55", "TOSA-1.0+INT+int16+int4+cf"]:
         rp._all_rust_preprocess(program, TosaCompileSpec(spec))
 
-    (u55_names, probe), (u85_names, u85_probe) = calls
-    assert u85_names == ["edge_permute"] and u85_probe is None
-    if layout == "dim_order":
-        assert u55_names == ["edge_permute"] and probe is None
-        return
-    assert u55_names == [] and probe is not None
+    probe, u85_probe = calls
+    assert u85_probe is None and probe is not None
     pytest.importorskip("ethosu.vela")
     assert probe([2, 2, 257, 257], [0, 2, 3, 1], "torch.int8") is True
     assert probe([1, 3, 320, 320], [0, 2, 3, 1], "torch.int8") is False

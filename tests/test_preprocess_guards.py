@@ -147,8 +147,7 @@ def _edge_program(graph_module):
     return types.SimpleNamespace(graph_module=graph_module, graph_signature=signature)
 
 
-@pytest.mark.parametrize("layout", ["dim_order", "explicit"])
-def test_dynamic_shape_export_goes_to_stock_in_every_layout_mode(monkeypatch, layout):
+def test_dynamic_shape_export_goes_to_stock(monkeypatch):
     """A batch/H/W-dynamic upsample, as in rc4's tosa_INT_dynamic_* op tests, stays on stock.
 
     RETAB's IR is static. Without this fallback it lowers the graph with the example
@@ -166,7 +165,6 @@ def test_dynamic_shape_export_goes_to_stock_in_every_layout_mode(monkeypatch, la
         dynamic_shapes=({0: batch, 2: height, 3: width},),
     )
     stock_result = object()
-    monkeypatch.setenv("RETAB_LAYOUT", layout)
     monkeypatch.setattr(rp, "stock_preprocess", lambda edge_program, compile_spec: stock_result)
     before = rp._stock_fallback_counts["symbolic shapes"]
 

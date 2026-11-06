@@ -1,15 +1,15 @@
-"""Explicit mode splits the U55 permutes rc4 splits, by asking rc4's exact check (APU-160).
+"""RETAB splits the U55 permutes rc4 splits, by asking rc4's exact check (APU-160).
 
 rc4's DecomposePermuteForU55Pass judges every permute alive at its slot. A batch-2 conv
 over a 1x32769 signal gets an NHWC and an NCHW permute from IrRewriteConv that break U55's
 worst-case TRANSPOSE rule (2 * 32769 > 2**16) and that Vela rejects, so rc4 splits both
-into SLICE -> TRANSPOSE -> CONCAT. Without the probe, explicit mode split only permutes
-named on the edge program, left these two whole, and Vela failed with "Non-passthrough
-operation (Transpose) could not run on NPU".
+into SLICE -> TRANSPOSE -> CONCAT. Without the probe, RETAB split only permutes named on
+the edge program, left these two whole, and Vela failed with "Non-passthrough operation
+(Transpose) could not run on NPU".
 
 The other way round, a permute that breaks the worst-case rule but that Vela accepts stays
 whole. Python's edge list named every permute that breaks the rule, as its exact check
-can't run Vela outside a lowering context, so explicit mode used to split those too.
+can't run Vela outside a lowering context, so RETAB used to split those too.
 """
 
 import copy
@@ -61,12 +61,11 @@ def _reference_outputs(tosa: bytes, inputs: list[np.ndarray]) -> list[np.ndarray
 
 @pytest.fixture
 def stock_and_retab(monkeypatch):
-    """Lower with RETAB in explicit mode, recording stock's and RETAB's TOSA of each
-    delegate (stock runs on a copy of the edge program)."""
+    """Lower with RETAB, recording stock's and RETAB's TOSA of each delegate (stock runs
+    on a copy of the edge program)."""
     from executorch.backends.arm.tosa.backend import TOSABackend
     from retab.preprocess import _all_rust_preprocess, stock_preprocess
 
-    monkeypatch.setenv("RETAB_LAYOUT", "explicit")
     records = []
 
     def differential(edge_program, compile_spec):
@@ -135,8 +134,8 @@ def test_tosa_u55_pixel_unshuffle_keeps_the_transpose_vela_accepts(stock_and_ret
     (test_pixel_shuffling.py, "rand_4d_contiguous"). Its permute of the
     (1, 12, 135, 2, 240, 2) view breaks U55's worst-case rule (12 * 135 * 2 * 240 >
     2**16), but Vela accepts the TRANSPOSE, so rc4 keeps it whole: one TRANSPOSE, as
-    stock emits. Explicit mode split it into 12 along the 240 axis while Python's edge
-    list decided. Vela's own compile of the whole graph overruns U55's scratch arena,
+    stock emits. RETAB split it into 12 along the 240 axis while Python's edge list
+    decided. Vela's own compile of the whole graph overruns U55's scratch arena,
     for stock as for RETAB, so the TOSA pipeline stands in for the Ethos-U55 one."""
     from executorch.backends.arm.test.tester.test_pipeline import TosaPipelineINT
 
