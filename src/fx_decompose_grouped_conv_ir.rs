@@ -4,10 +4,18 @@
 //!   slice_copy(input) + slice_copy(weight) + slice_copy(bias)
 //!   convolution/conv2d(groups=1) per group
 //!   cat(outputs, dim=1)
+//!
+//! A depthwise convolution stays grouped for DEPTHWISE_CONV2D. In explicit
+//! layout mode (APU-135 P2; design §4.2-P) a rank-5 one is split too, as
+//! rc4's DecomposeGroupedConvPass splits it, since TOSA has no
+//! DEPTHWISE_CONV3D (`backends/arm/_passes/decompose_grouped_conv_pass.py:258-263`).
+//! Dim-order mode keeps it grouped, and its serializer emits a CONV3D that
+//! ignores the groups.
 
 use crate::fx_conv_args::{ConvArgKind, ConvArgs};
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::fx_target::is_boundary_rescale_target;
+use crate::pipeline_config::LayoutMode;
 use crate::runner_logging::log_line;
 
 fn slice_meta(graph: &IrGraph, id: NodeId, dim: usize, start: i64, stop: i64) -> Option<NodeMeta> {
@@ -145,7 +153,7 @@ fn bypass_redundant_output_boundaries(graph: &mut IrGraph, cat_id: NodeId) {
     }
 }
 
-fn parse_grouped_conv(graph: &IrGraph, id: NodeId) -> Option<ConvArgs> {
+fn parse_grouped_conv(graph: &IrGraph, id: NodeId, layout: LayoutMode) -> Option<ConvArgs> {
     let node = &graph.nodes[id];
     if !node.alive || node.op != NodeOp::CallFunction {
         return None;
@@ -160,8 +168,13 @@ fn parse_grouped_conv(graph: &IrGraph, id: NodeId) -> Option<ConvArgs> {
     if spec.groups <= 1 {
         return None;
     }
-    let in_channels = graph.node_shape(spec.input)?.get(1).copied().unwrap_or(0);
-    if !spec.transposed && in_channels == spec.groups {
+    let input_shape = graph.node_shape(spec.input)?;
+    let in_channels = input_shape.get(1).copied().unwrap_or(0);
+    // `_is_depthwise_conv` (`decompose_grouped_conv_pass.py:91-92`); see the
+    // module docs for rank 5.
+    let depthwise = !spec.transposed && in_channels == spec.groups;
+    let split_depthwise = layout == LayoutMode::Explicit && input_shape.len() == 5;
+    if depthwise && !split_depthwise {
         return None;
     }
 
@@ -299,7 +312,12 @@ fn decompose_grouped_conv(graph: &mut IrGraph, id: NodeId, spec: ConvArgs) -> bo
     true
 }
 
-pub struct IrDecomposeGroupedConvPass;
+/// The layout mode decides whether a rank-5 depthwise convolution is split;
+/// see the module docs.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IrDecomposeGroupedConvPass {
+    pub layout: LayoutMode,
+}
 
 impl IrPass for IrDecomposeGroupedConvPass {
     fn name(&self) -> &str {
@@ -308,7 +326,7 @@ impl IrPass for IrDecomposeGroupedConvPass {
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         let modified = graph.rewrite_live_call_functions(|graph, id| {
-            let Some(spec) = parse_grouped_conv(graph, id) else {
+            let Some(spec) = parse_grouped_conv(graph, id, self.layout) else {
                 return false;
             };
             decompose_grouped_conv(graph, id, spec)
@@ -395,7 +413,7 @@ mod tests {
         let conv = conv_call(&mut graph, input, weight, Some(bias), 3, conv_meta);
         output(&mut graph, conv);
 
-        assert!(IrDecomposeGroupedConvPass.run(&mut graph));
+        assert!(IrDecomposeGroupedConvPass::default().run(&mut graph));
         assert!(!graph.nodes[conv].alive);
         let cat = graph.by_name("conv_cat").unwrap();
         assert_eq!(cat.target, "aten.cat.default");
@@ -408,39 +426,40 @@ mod tests {
         assert_eq!(qparams[&2].per_channel_scales, vec![1.1, 1.2, 1.3, 1.4]);
     }
 
+    const EXPLICIT: IrDecomposeGroupedConvPass = IrDecomposeGroupedConvPass {
+        layout: LayoutMode::Explicit,
+    };
+    const DIM_ORDER: IrDecomposeGroupedConvPass = IrDecomposeGroupedConvPass {
+        layout: LayoutMode::DimOrder,
+    };
+
+    /// Both modes keep a rank-4 depthwise conv for DEPTHWISE_CONV2D, as rc4
+    /// does (`Conv2d(2, 2, 1, groups=2)` stays grouped in .venv-et16).
     #[test]
     fn skips_depthwise_conv() {
-        let mut graph = IrGraph::empty();
-        let input = placeholder(&mut graph, "input", [1, 4, 8, 8], "torch.int8");
-        let weight = placeholder(&mut graph, "weight", [4, 1, 3, 3], "torch.int8");
-        conv_call(
-            &mut graph,
-            input,
-            weight,
-            None,
-            4,
-            NodeMeta::tensor([1, 4, 6, 6], "torch.int8"),
-        );
+        for pass in [DIM_ORDER, EXPLICIT] {
+            let mut graph = IrGraph::empty();
+            let input = placeholder(&mut graph, "input", [1, 4, 8, 8], "torch.int8");
+            let weight = placeholder(&mut graph, "weight", [4, 1, 3, 3], "torch.int8");
+            conv_call(
+                &mut graph,
+                input,
+                weight,
+                None,
+                4,
+                NodeMeta::tensor([1, 4, 6, 6], "torch.int8"),
+            );
 
-        assert!(!IrDecomposeGroupedConvPass.run(&mut graph));
+            assert!(!pass.run(&mut graph), "{:?}", pass.layout);
+        }
     }
 
-    /// Design §4.2-P, part of step S5: rc4 keeps rank-4 depthwise convs for
-    /// RewriteConvPass but decomposes rank-5 ones, as TOSA has no
-    /// DEPTHWISE_CONV3D (`decompose_grouped_conv_pass.py:256-263`). rc4's
-    /// DecomposeGroupedConvPass, run in .venv-et16, turns `Conv3d(2, 2, 1,
-    /// groups=2)` on `[1, 2, 3, 4, 4]` into two groups=1 convolutions on
-    /// `[1, 1, 3, 4, 4]` with `[1, 1, 1, 1, 1]` weights. RETAB skips depthwise
-    /// at every rank, so the conv stays grouped, and the explicit IrRewriteConv
-    /// would see CONV3D with groups != 1 (RCP:147-158).
-    #[test]
-    #[ignore = "BUG: S5 is incomplete: IrDecomposeGroupedConv still skips rank-5 depthwise convs, which rc4 decomposes"]
-    fn decomposes_rank5_depthwise_conv_like_rc4() {
-        let mut graph = IrGraph::empty();
-        let input = placeholder(&mut graph, "input", [1, 2, 3, 4, 4], "torch.int8");
-        let weight = placeholder(&mut graph, "weight", [2, 1, 1, 1, 1], "torch.int8");
+    /// A depthwise `Conv3d(2, 2, 1, groups=2)` on `[1, 2, 3, 4, 4]`.
+    fn rank5_depthwise_conv(graph: &mut IrGraph) -> NodeId {
+        let input = placeholder(graph, "input", [1, 2, 3, 4, 4], "torch.int8");
+        let weight = placeholder(graph, "weight", [2, 1, 1, 1, 1], "torch.int8");
         let conv = call_with_meta(
-            &mut graph,
+            graph,
             "conv",
             "aten.convolution.default",
             vec![
@@ -456,9 +475,26 @@ mod tests {
             ],
             NodeMeta::tensor([1, 2, 3, 4, 4], "torch.int8"),
         );
-        output(&mut graph, conv);
+        output(graph, conv);
+        conv
+    }
 
-        assert!(IrDecomposeGroupedConvPass.run(&mut graph));
+    /// Design §4.2-P, part of step S5: rc4 keeps rank-4 depthwise convs for
+    /// RewriteConvPass but decomposes rank-5 ones, as TOSA has no
+    /// DEPTHWISE_CONV3D (`decompose_grouped_conv_pass.py:258-263`). rc4's
+    /// DecomposeGroupedConvPass, run in .venv-et16, turns `Conv3d(2, 2, 1,
+    /// groups=2)` on `[1, 2, 3, 4, 4]` into two groups=1 convolutions on
+    /// `[1, 1, 3, 4, 4]` with `[1, 1, 1, 1, 1]` weights. Explicit mode does the
+    /// same, so its IrRewriteConv never meets CONV3D with groups != 1
+    /// (RCP:147-158); dim-order mode keeps the conv grouped.
+    #[test]
+    fn decomposes_rank5_depthwise_conv_like_rc4() {
+        let mut graph = IrGraph::empty();
+        let conv = rank5_depthwise_conv(&mut graph);
+        assert!(!DIM_ORDER.run(&mut graph));
+        assert!(graph.nodes[conv].alive);
+
+        assert!(EXPLICIT.run(&mut graph));
         assert!(!graph.nodes[conv].alive);
         let groups: Vec<_> = graph
             .live_nodes()
@@ -477,5 +513,42 @@ mod tests {
             Some(vec![1, 1, 1, 1, 1]),
         );
         assert_eq!(groups, [group.clone(), group]);
+    }
+
+    /// The main and region pipelines build the pass for their layout mode.
+    #[test]
+    fn pipelines_split_rank5_depthwise_convs_as_their_layout_mode_says() {
+        use crate::fx_ir::PipelineStep;
+        use crate::fx_pipeline::{
+            build_ir_cond_submodule_pipeline, build_ir_while_submodule_pipeline,
+            build_main_pipeline,
+        };
+        use crate::pipeline_config::PipelineConfig;
+
+        for layout in [LayoutMode::DimOrder, LayoutMode::Explicit] {
+            let config = PipelineConfig {
+                layout,
+                ..PipelineConfig::from_tosa_spec("TOSA-1.0+INT")
+            };
+            for steps in [
+                build_main_pipeline(&config),
+                build_ir_cond_submodule_pipeline(&config),
+                build_ir_while_submodule_pipeline(&config),
+            ] {
+                let pass = steps
+                    .into_iter()
+                    .find_map(|step| match step {
+                        PipelineStep::Ir(pass) if pass.name() == "IrDecomposeGroupedConv" => {
+                            Some(pass)
+                        }
+                        _ => None,
+                    })
+                    .expect("the pipeline decomposes grouped convs");
+                let mut graph = IrGraph::empty();
+                rank5_depthwise_conv(&mut graph);
+                let split = pass.run(&mut graph);
+                assert_eq!(split, layout == LayoutMode::Explicit, "{layout:?}");
+            }
+        }
     }
 }

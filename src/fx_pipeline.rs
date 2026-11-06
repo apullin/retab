@@ -202,8 +202,11 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
             crate::fx_insert_table_ops_ir::IrInsertTableOpsEffectPass,
         )),
         // -- ATen -> TOSA --
+        // Explicit mode also splits rank-5 depthwise convs (APU-135 P2, design §4.2-P).
         Ir(Box::new(
-            crate::fx_decompose_grouped_conv_ir::IrDecomposeGroupedConvPass,
+            crate::fx_decompose_grouped_conv_ir::IrDecomposeGroupedConvPass {
+                layout: config.layout,
+            },
         )),
         Effectful(Box::new(
             crate::fx_fuse_constant_inputs_ir::IrFuseConstantInputsEffectPass::with_data_slices(),
