@@ -29,3 +29,6 @@ pub(crate) mod table;
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) mod testing;
+// Fidelity review of the P1 ports against rc4.
+#[cfg(test)]
+mod p1_review_tests;
