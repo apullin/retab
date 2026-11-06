@@ -140,6 +140,11 @@ pub(crate) fn is_avg_pool(target: &OpTarget) -> bool {
 /// TOSA-dialect ops whose shape the serializer recomputes (or reorders) in dim-order
 /// mode. In explicit layout mode their val is the TOSA shape, so the serializer reads
 /// it as-is (P2 design §4.2 G1, critique B1).
+///
+/// TRANSPOSE is not one of them. No explicit pass creates one (permutes stay
+/// `aten.permute_copy`, design §1c), so the only TRANSPOSEs an explicit graph can hold come
+/// from dim-order logic (IrToTosaMemoryFormat), whose vals are not TOSA shapes. Recomputing
+/// a TRANSPOSE's shape from its input is right for both kinds of val.
 pub(crate) fn has_explicit_tosa_shape_val(target: &OpTarget) -> bool {
     matches!(
         target,
@@ -150,7 +155,6 @@ pub(crate) fn has_explicit_tosa_shape_val(target: &OpTarget) -> bool {
             | OpTarget::TosaMaxPool2d
             | OpTarget::TosaAvgPool2d
             | OpTarget::TosaResize
-            | OpTarget::TosaTranspose
     )
 }
 

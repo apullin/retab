@@ -922,11 +922,7 @@ pub(super) fn emit_transpose(ctx: &EmitContext) -> EmitResult {
     let node = ctx.node;
     let store = ctx.store;
     let mut spec = ParsedShapeTransformSpec::parse(graph, store, node);
-    // In explicit mode `spec.output_shape` is already the TRANSPOSE's val.
-    if !graph.is_explicit_layout() {
-        spec.output_shape =
-            transposed_tensor_shape(graph, store, node).unwrap_or(spec.output_shape);
-    }
+    spec.output_shape = transposed_tensor_shape(graph, store, node).unwrap_or(spec.output_shape);
     emit_shape_transform(
         spec,
         Op::Transpose,

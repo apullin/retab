@@ -364,7 +364,8 @@ fn assert_shape_operands_declared(items: &SerializedGraphItems) {
 
 #[test]
 fn conv2d_serializes_ohwi_weights_val_shapes_and_pads_as_given() {
-    // OHWI [8, 3, 5, 3]: dim-order mode would permute it again to [8, 5, 3, 3] (B1).
+    // rc4's CONV2D for Conv2d(3, 8, (3, 5), padding=(1, 2)) on [1, 3, 6, 10]. OHWI
+    // [8, 3, 5, 3]: dim-order mode would permute it again to [8, 5, 3, 3] (B1).
     let case = ConvCase {
         target: "backend.tosa.CONV2D.default",
         input: &[1, 6, 10, 3],
@@ -389,25 +390,48 @@ fn conv2d_serializes_ohwi_weights_val_shapes_and_pads_as_given() {
 fn depthwise_hwcm_weights_keep_their_layout_and_the_val_shape() {
     // KW == 1 weights match the serializer's OIHW guess (B3): [3, 1, 4, 2] would give a
     // [1, 7, 5, 3] output, [1, 1, 4, 2] a [1, 2, 4, 1] one. [4, 1, 2, 2] (KH % C == 0)
-    // is also re-permuted as OIHW by dim-order's weight plan (B1).
+    // is also re-permuted as OIHW by dim-order's weight plan (B1). IrRewriteConv makes
+    // KW == 1 weights routinely through the Cin = 1 depthwise rule (design §2.4, Risk 4):
+    // cumsum's [K, 1, 1, 1] and Linear(in=1)'s [1, 1, 1, Co]. Dim-order logic gets both
+    // wrong: [5, 1, 1, 1] becomes [1, 1, 1, 5] with a [3, 13, 4, 5] output, and
+    // [1, 1, 1, 6] becomes [1, 6, 1, 1] with a [1, 4, 6, 1] output. Each case is the
+    // DEPTHWISE_CONV2D rc4 emits for the module in its comment.
     for (input, weight, params, val) in [
+        // Conv2d(4, 8, (3, 1), groups=4, stride=2, padding=(1, 0)) on [1, 4, 16, 11]
         (
             &[1, 16, 11, 4][..],
             &[3, 1, 4, 2][..],
             vec![list(&[2, 2]), list(&[1, 0, 0, 0]), list(&[1, 1])],
             &[1, 8, 6, 8][..],
         ),
+        // Conv2d(4, 8, 1, groups=4) on [1, 4, 5, 5]
         (
             &[1, 5, 5, 4][..],
             &[1, 1, 4, 2][..],
             vec![list(&[1, 1]), list(&[0, 0, 0, 0]), list(&[1, 1])],
             &[1, 5, 5, 8][..],
         ),
+        // Conv2d(2, 4, (4, 1), groups=2, padding=(2, 0)) on [1, 2, 8, 8]; at stride 1 the
+        // pad needs no adjustment.
         (
             &[1, 8, 8, 2][..],
             &[4, 1, 2, 2][..],
-            vec![list(&[1, 1]), list(&[2, 1, 0, 0]), list(&[1, 1])],
-            &[1, 8, 8, 4][..],
+            vec![list(&[1, 1]), list(&[2, 2, 0, 0]), list(&[1, 1])],
+            &[1, 9, 8, 4][..],
+        ),
+        // torch.cumsum(x, dim=2) on [1, 3, 5, 4], whose input is reshaped to [3, 5, 4, 1]
+        (
+            &[3, 5, 4, 1][..],
+            &[5, 1, 1, 1][..],
+            vec![list(&[1, 1]), list(&[4, 4, 0, 0]), list(&[1, 1])],
+            &[3, 9, 4, 1][..],
+        ),
+        // Linear(1, 6) on [4, 1], whose input is reshaped to [1, 1, 4, 1]
+        (
+            &[1, 1, 4, 1][..],
+            &[1, 1, 1, 6][..],
+            vec![list(&[1, 1]), list(&[0, 0, 0, 0]), list(&[1, 1])],
+            &[1, 1, 4, 6][..],
         ),
     ] {
         let case = ConvCase {
@@ -517,6 +541,102 @@ fn int16_conv_accumulates_in_int48_and_rescales_with_16_bit_multipliers() {
     assert_eq!(tensor(&items, &rescale.inputs[1]).dtype, DType::Int16);
 }
 
+#[test]
+fn conv1d_chain_reshapes_around_its_conv2d() {
+    // rc4's conv1d form, for Conv1d(3, 5, 3, padding=1) on [1, 3, 10]: permute and view
+    // the input to [N, 1, L, C], CONV2D with an OHWI [O, 1, K, I] weight and pad
+    // [0, 0, p, p], RESCALE, then view back to [N, Lout, O] and permute.
+    let mut ir = IrGraph::empty();
+    let x = placeholder(&mut ir, "x", [1, 3, 10], INT8);
+    let x_nlc = permute(&mut ir, "x_nlc", x, &[0, 2, 1], INT8);
+    let x_nhwc = call(
+        &mut ir,
+        "x_nhwc",
+        "aten.view_copy.default",
+        vec![IrArg::Node(x_nlc), list(&[1, 1, 10, 3])],
+        [1, 1, 10, 3],
+        INT8,
+    );
+    let weight = [5, 1, 3, 3];
+    let w = constant(&mut ir, "w", &weight, IrDType::Int8, ramp(numel(&weight)));
+    let b = constant(
+        &mut ir,
+        "b",
+        &[5],
+        IrDType::Int32,
+        (0..5i32).flat_map(i32::to_le_bytes).collect(),
+    );
+    let conv = call(
+        &mut ir,
+        "conv",
+        "backend.tosa.CONV2D.default",
+        vec![
+            IrArg::Node(x_nhwc),
+            IrArg::Node(w),
+            IrArg::Node(b),
+            list(&[1, 1]),
+            list(&[0, 0, 1, 1]),
+            list(&[1, 1]),
+        ],
+        [1, 1, 10, 5],
+        INT32,
+    );
+    let meta = &mut ir.node_mut(conv).meta;
+    meta.set_input_qparams_from([(0, qp(0.05, -3, INT8)), (1, qp(0.02, 0, INT8))]);
+    meta.set_single_output_qparam(qp(0.1, 5, INT8));
+    let rescaled = rescale(&mut ir, "rescale", conv, INT8, 0.01, 0, 5, &[1, 1, 10, 5]);
+    let y_nlc = call(
+        &mut ir,
+        "y_nlc",
+        "aten.view_copy.default",
+        vec![IrArg::Node(rescaled), list(&[1, 10, 5])],
+        [1, 10, 5],
+        INT8,
+    );
+    let y = permute(&mut ir, "y", y_nlc, &[0, 2, 1], INT8);
+    output(&mut ir, y);
+
+    let items = serialize_explicit(&ir);
+    let weight_tensor = tensor(&items, "w");
+    assert_eq!(weight_tensor.shape, i32s(&weight));
+    assert_eq!(
+        weight_tensor.data.as_deref(),
+        Some(&ramp(numel(&weight))[..])
+    );
+    let conv = single_op(&items, Op::Conv2d);
+    assert_eq!(&conv.inputs[..3], ["x_nhwc", "w", "b"]);
+    let Attribute::Conv2d(attribute) = &conv.attribute else {
+        panic!("expected a CONV2D attribute");
+    };
+    assert_eq!(attribute.pad, [0, 0, 1, 1]);
+    assert_eq!(attribute.stride, [1, 1]);
+    assert_eq!(attribute.dilation, [1, 1]);
+    let conv_output = tensor(&items, &conv.outputs[0]);
+    assert_eq!(conv_output.shape, [1, 1, 10, 5]);
+    assert_eq!(conv_output.dtype, DType::Int32);
+    let rescale = single_op(&items, Op::Rescale);
+    assert_eq!(rescale.inputs[0], conv.outputs[0]);
+    assert_eq!(tensor(&items, &rescale.inputs[3]).dtype, DType::Int32);
+    assert_eq!(tensor(&items, "rescale").shape, [1, 1, 10, 5]);
+    assert_eq!(tensor(&items, "rescale").dtype, DType::Int8);
+
+    let reshapes = ops_of(&items, Op::Reshape);
+    assert_eq!(reshapes.len(), 2);
+    assert_eq!(reshapes[0].inputs[0], "x_nlc");
+    assert_eq!(reshapes[1].inputs[0], "rescale");
+    assert_eq!(ops_of(&items, Op::Transpose).len(), 2);
+    assert_transposes_consistent(&items);
+    for (name, shape) in [
+        ("x_nlc", &[1, 10, 3][..]),
+        ("x_nhwc", &[1, 1, 10, 3][..]),
+        ("y_nlc", &[1, 10, 5][..]),
+        ("y", &[1, 5, 10][..]),
+    ] {
+        assert_eq!(tensor(&items, name).shape, shape, "{name}");
+    }
+    assert_eq!(items.output_names, ["y"]);
+}
+
 // ---------------------------------------------------------------------------
 // Pools
 // ---------------------------------------------------------------------------
@@ -571,15 +691,18 @@ fn max_pool2d_reads_rc4_positional_arguments() {
 
 #[test]
 fn avg_pool2d_reads_rc4_arguments_and_zero_point_operands() {
-    // X3: the zero points are graph constants (quantized like rc4's
-    // ComputeConstantOpsAOTPass does), and kernel/stride/pad/acc_type are arguments 3-6.
+    // X3: the zero points are graph constants, and kernel/stride/pad/acc_type are
+    // arguments 3-6. rc4 materializes each zero point as `full((1,), zp)` carrying the
+    // pool's meta, and ComputeConstantOpsAOTPass quantizes it with the pool's output
+    // qparams: zp -4 at scale 0.05 becomes round(-4 / 0.05) - 4 = -84.
     // B1: the TRANSPOSE that consumes AVG_POOL2D sees the val, not a shape recomputed from
     // the zero-point operands ([1, 7, 7, 4]).
+    const ZP: u8 = -84i8 as u8;
     let ir = pool_chain(
         "backend.tosa.AVG_POOL2D.default",
         |ir| {
-            let input_zp = constant(ir, "input_zp", &[1], IrDType::Int8, vec![0x80]);
-            let output_zp = constant(ir, "output_zp", &[1], IrDType::Int8, vec![0x80]);
+            let input_zp = constant(ir, "input_zp", &[1], IrDType::Int8, vec![ZP]);
+            let output_zp = constant(ir, "output_zp", &[1], IrDType::Int8, vec![ZP]);
             vec![
                 IrArg::Node(input_zp),
                 IrArg::Node(output_zp),
@@ -602,7 +725,7 @@ fn avg_pool2d_reads_rc4_arguments_and_zero_point_operands() {
     assert_eq!(attribute.acc_type, DType::Int32);
     assert_eq!(pool.inputs, ["x_nhwc", "input_zp", "output_zp"]);
     for zp in ["input_zp", "output_zp"] {
-        assert_eq!(tensor(&items, zp).data.as_deref(), Some(&[0x80u8][..]));
+        assert_eq!(tensor(&items, zp).data.as_deref(), Some(&[ZP][..]));
     }
     assert_eq!(tensor(&items, "pool").shape, [1, 5, 5, 4]);
     assert_eq!(tensor(&items, "pool").dtype, DType::Int8);
@@ -1103,7 +1226,6 @@ fn assert_transposes_consistent(items: &SerializedGraphItems) {
 }
 
 #[test]
-#[ignore = "BUG: explicit mode trusts the vals of dim-order TRANSPOSEs: invalid TOSA, no stock fallback"]
 fn explicit_mode_does_not_trust_dim_order_transpose_vals() {
     // RETAB_LAYOUT=explicit still runs the dim-order pipeline until S6, and the
     // control-flow contracts keep writing dim orders in explicit mode until S8. For
@@ -1113,15 +1235,12 @@ fn explicit_mode_does_not_trust_dim_order_transpose_vals() {
     //   getitem = cond[0]                                     val [1, 2, 3, 4], order [0, 2, 3, 1]
     //   getitem_output_layout = TRANSPOSE(getitem, [0, 3, 1, 2]) val [1, 4, 2, 3], order [0, 1, 2, 3]
     // The last val follows dim-order semantics (the logical input permuted), not the
-    // TOSA shape. `has_explicit_tosa_shape_val` (TosaTranspose) and the explicit
-    // `emit_transpose` trust it, so the TRANSPOSE is declared [1, 4, 2, 3] from a
-    // [1, 3, 4, 2] input and the TOSA reference model rejects the flatbuffer ("Invalid
-    // TOSA graph"). Dim-order mode, and explicit mode before S2, emit a valid
-    // [1, 2, 3, 4]. No explicit pass creates a TOSA TRANSPOSE (permutes stay
-    // aten.permute_copy, design §1c), so the only ones explicit mode can see are
-    // dim-order ones. Fix: drop TosaTranspose from the val rule and the emit_transpose
-    // override, and/or send explicit graphs that carry tosa_dim_order to stock outside
-    // RETAB_DEBUG (D1 already detects them). A unary stands in for cond + getitem.
+    // TOSA shape. Trusting it declared the TRANSPOSE [1, 4, 2, 3] from a [1, 3, 4, 2]
+    // input, which the TOSA reference model rejects ("Invalid TOSA graph"); dim-order mode
+    // emits a valid [1, 2, 3, 4]. Explicit mode now sends graphs that carry dim orders to
+    // stock (`reject_dim_orders`), and a TRANSPOSE's shape always comes from its input
+    // (`explicit_transposes_take_their_shape_from_their_input`). Either passes this test.
+    // A unary stands in for cond + getitem.
     let mut ir = IrGraph::empty();
     let value = placeholder(&mut ir, "value", [1, 2, 3, 4], FLOAT32);
     ir.node_mut(value).meta.set_tosa_dim_order(vec![0, 1, 2, 3]);
@@ -1172,4 +1291,83 @@ fn explicit_mode_does_not_trust_dim_order_transpose_vals() {
         Err(error) => assert!(error.starts_with("RETAB_STOCK_FALLBACK:"), "{error}"),
         Ok(explicit) => assert_transposes_consistent(&explicit),
     }
+}
+
+#[test]
+fn explicit_transposes_take_their_shape_from_their_input() {
+    // A TRANSPOSE's val is not its TOSA shape when dim-order logic made it: it permutes the
+    // logical input ([1, 2, 3, 4] here) rather than the [1, 3, 4, 2] the TRANSPOSE reads.
+    // The serializer recomputes the shape from the input, as it does for a permute, which
+    // is also right for a val that is the TOSA shape. D1 now sees such a stale val.
+    let mut ir = IrGraph::empty();
+    let x = placeholder(&mut ir, "x", [1, 3, 4, 2], FLOAT32);
+    let transpose = call(
+        &mut ir,
+        "transpose",
+        "backend.tosa.TRANSPOSE.default",
+        vec![IrArg::Node(x), list(&[0, 3, 1, 2])],
+        [1, 4, 2, 3],
+        FLOAT32,
+    );
+    output(&mut ir, transpose);
+    let (graph, store) = ingest(&ir, LayoutMode::Explicit);
+    visitors::shape_utils::clear_shape_cache();
+    let error = check_explicit_layout_invariants("main", &graph, &store).unwrap_err();
+    assert!(
+        error.contains(
+            "'transpose' (TosaTranspose) has val [1, 4, 2, 3] but serializes as [1, 2, 3, 4]"
+        ),
+        "{error}"
+    );
+    let items = try_serialize_graph(graph, &store).unwrap();
+    assert_transposes_consistent(&items);
+    assert_eq!(tensor(&items, "transpose").shape, [1, 2, 3, 4]);
+}
+
+#[test]
+fn explicit_graphs_carrying_dim_orders_go_to_stock() {
+    // Explicit graphs keep their layout in vals. A dim order means dim-order logic laid out
+    // the graph: until S8 the control-flow contracts mark the rank-4 users of a cond NHWC in
+    // either mode (a neg stands in for the cond's getitem), and until S6
+    // RETAB_LAYOUT=explicit runs IrToTosaMemoryFormat. The explicit gates switch off the
+    // dim-order rules such a graph needs, so it goes to stock in every build, not only
+    // under RETAB_DEBUG (D1).
+    let build = |spatial: bool| {
+        let mut ir = IrGraph::empty();
+        let x = placeholder(&mut ir, "x", [1, 2, 3, 4], FLOAT32);
+        let target = if spatial {
+            "aten.convolution.default"
+        } else {
+            "aten.neg.default"
+        };
+        let getitem = call(
+            &mut ir,
+            "getitem",
+            target,
+            vec![IrArg::Node(x)],
+            [1, 2, 3, 4],
+            FLOAT32,
+        );
+        ir.node_mut(getitem)
+            .meta
+            .set_tosa_dim_order(vec![0, 2, 3, 1]);
+        output(&mut ir, getitem);
+        ir
+    };
+
+    let (graph, store) = ingest(&build(false), LayoutMode::Explicit);
+    assert_eq!(
+        try_serialize_graph(graph, &store).err().unwrap(),
+        "RETAB_STOCK_FALLBACK: dim order in explicit layout: 'getitem' (Neg) in region 'main' \
+         has tosa_dim_order [0, 2, 3, 1]"
+    );
+
+    // An aten spatial op is reported first (X5): until S6 every explicit graph carries the
+    // dim orders IrToTosaMemoryFormat writes.
+    let (graph, store) = ingest(&build(true), LayoutMode::Explicit);
+    let error = try_serialize_graph(graph, &store).err().unwrap();
+    assert!(
+        error.starts_with("RETAB_STOCK_FALLBACK: aten spatial op in explicit layout: "),
+        "{error}"
+    );
 }

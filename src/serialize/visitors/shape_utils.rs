@@ -65,8 +65,10 @@ pub(super) fn map_axis_to_tosa_dim_order(graph: &Graph, node: &Node, axis: i32) 
         return axis;
     }
 
-    // Dim-order mode's generated TRANSPOSEs keep logical vals; an explicit-mode TRANSPOSE's
-    // val is already physical (P2 design G8).
+    // Dim-order mode's generated TRANSPOSEs keep logical vals. IrToTosaMemoryFormat stamps
+    // a dim order on each, so an explicit graph holding one goes to stock before
+    // serialization (`reject_dim_orders`); any other TRANSPOSE permutes its axes like a
+    // permute (P2 design G8).
     if matches!(node.target, OpTarget::TosaTranspose) && !graph.is_explicit_layout() {
         if let Some(input_node) = first_input_node(graph, node) {
             let input_axis = map_axis_to_tosa_dim_order(graph, input_node, normalized);
@@ -497,10 +499,10 @@ pub(crate) fn actual_tensor_shape(graph: &Graph, store: &TensorStore, node: &Nod
 }
 
 fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> Vec<i32> {
-    // In explicit layout mode a TOSA conv/pool/resize/transpose val is its TOSA shape.
-    // The rules below would misread it: `pool_tensor_shape` takes AVG_POOL2D's zero-point
-    // operands for its kernel and stride (critique B1), and the broadcast and NHWC rules
-    // were written for logical NCHW vals.
+    // In explicit layout mode a TOSA conv/pool/resize val is its TOSA shape. The rules
+    // below would misread it: `pool_tensor_shape` takes AVG_POOL2D's zero-point operands
+    // for its kernel and stride (critique B1), and the broadcast and NHWC rules were
+    // written for logical NCHW vals. A TRANSPOSE keeps the input-permuting rule below.
     if graph.is_explicit_layout() && op_semantics::has_explicit_tosa_shape_val(&node.target) {
         return raw_i32_shape(node);
     }
