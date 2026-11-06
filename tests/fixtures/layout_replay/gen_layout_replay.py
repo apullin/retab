@@ -68,9 +68,13 @@ TOSAPartitioner, and capture passes registered with
 `register_pass_insertions_before/after` (arm_pass_manager.py:278-296) record
 the graph the real ArmPassManager pipeline hands to the target pass and the
 graph it gets back. `modified` is whether the pass changed the graph (the
-hooks can't see the flag the pass returned). Every case seeds torch with
-`SEED` before it builds the model and its inputs, so the output is stable for
-a given torch, torchao and ExecuTorch.
+hooks can't see the flag the pass returned). No captured graph holds dead code
+(rc4's P2 passes erase what they replace, and the passes before them clean up
+after themselves; an ExportPass retrace alone would keep a dead node), so the
+replay compares these graphs whole, dead nodes included, and p2_replay_tests
+pins that none appears. Every case seeds torch with `SEED` before it builds
+the model and its inputs, so the output is stable for a given torch, torchao
+and ExecuTorch.
 
 - `rewrite_conv.txt`: RewriteConvPass on INT8 (per-tensor `_pt`, per-channel
   `_pc`) and A8W4 (`_a8w4`) models; `rewrite_conv_a16w8.txt` and
@@ -83,8 +87,11 @@ a given torch, torchao and ExecuTorch.
   RemoveGetItemPass and keeps `max_pool2d_with_indices` + `getitem(0)`, so
   each case also comes as `<case>_with_indices`: the same rc4 before graph
   with RemoveGetItem undone (the pool becomes `max_pool2d_with_indices` with
-  the qparam maps rc4 gave it before RemoveGetItem, followed by a getitem with
-  the getitem's maps), and the same after graph.
+  the edge args and qparam maps it had before RemoveGetItem, followed by a
+  getitem with the getitem's maps), and the same after graph. The edge args
+  are the ones RETAB keeps, with trailing defaults omitted; rc4's
+  DecomposeMaxPool2dPass spells them out (`0, 1, False`) before
+  RewriteMaxPool2dPass, which fills in the same defaults for either form.
 - `rewrite_upsample.txt`: RewriteUpsamplePass.
 - `rewrite_avg_pool2d.txt`: RewriteAvgPool2dPass alone (the zero points are
   still `aten.full` nodes); `rewrite_avg_pool2d_aot.txt`: the graph before
@@ -1818,7 +1825,12 @@ def undo_remove_getitem(graph: Captured, source: Captured) -> Captured:
     """`graph` with each `max_pool2d` turned back into the
     `max_pool2d_with_indices` + `getitem(0)` pair RETAB keeps. The pair takes
     its qparam maps from `source`, the graph RemoveGetItemPass received, pool
-    for pool in graph order."""
+    for pool in graph order, and the pool keeps `graph`'s input but takes the
+    rest of its args and its kwargs from `source`: the edge args, which RETAB
+    keeps up to IrRewriteMaxPool2d (IrNormalizeMaxPool2dInputRank only lifts
+    the input, IrDecomposeMaxPoolDilation skips undilated pools and
+    IrSizeAdjustInput only replaces the input), while rc4's
+    DecomposeMaxPool2dPass spells the omitted defaults out (`0, 1, False`)."""
     pairs = []
     for index, node in enumerate(source.nodes):
         if node.target != "aten.max_pool2d_with_indices.default":
@@ -1856,6 +1868,11 @@ def undo_remove_getitem(graph: Captured, source: Captured) -> Captured:
             new_nodes.append(node)
             continue
         pool_source, getitem_source = pairs[pools.index(index)]
+        edge_args = pool_source.args[1:]
+        edge_refs: list[int] = []
+        captured_refs([edge_args, list(pool_source.kwargs.values())], edge_refs)
+        if edge_refs:
+            raise AssertionError(f"{pool_source.name}: a node among the pool's edge args")
         getitem = DNode("call_function", f"{node.name}_getitem")
         getitem.target = "<built-in function getitem>"
         getitem.args = [Ref(len(new_nodes)), 0]
@@ -1866,6 +1883,8 @@ def undo_remove_getitem(graph: Captured, source: Captured) -> Captured:
         getitem.qout = getitem_source.qout
         pool = node
         pool.target = "aten.max_pool2d_with_indices.default"
+        pool.args = [node.args[0], *edge_args]
+        pool.kwargs = dict(pool_source.kwargs)
         pool.val = f"({getitem.val}, torch.int64[{', '.join(map(str, getitem.shape))}])"
         pool.shape = None
         pool.dim_order = None
@@ -2023,8 +2042,16 @@ class TwoConvsOneInput(NN.Module):
         return self.a(x) + self.b(x)
 
 
-class DWConvsSharedWeights(NN.Module):
-    """rc4's test_dw_convs_with_shared_weights shape: one depthwise conv used twice."""
+class DWConvsModule(NN.Module):
+    """rc4's DWConvsModule (test_dw_convs_with_shared_weights.py): one
+    depthwise conv module used twice. In INT nothing is shared by the time
+    RewriteConvPass runs: the quantizer freezes one quantized weight per conv
+    (even for one nn.Parameter read by two F.conv2d calls on the same input),
+    so the convs read two placeholders with equal data. RewriteConvPass's
+    shared-weight handling (design §2.6, "the second lands before the first")
+    is reachable only in FP, which RETAB doesn't lower; rc4's pass test runs
+    this module through RewriteConvPass alone in FP
+    (test_rewrite_conv_pass.py, test_rewrite_conv_tosa_FP)."""
 
     def __init__(self):
         super().__init__()
@@ -2176,12 +2203,22 @@ def shape_input(*shape):
     return lambda: (torch.randn(*shape),)
 
 
+def float32(value: float) -> float:
+    """`value` rounded to float32, as a quantized export can carry a scale
+    factor (1.6 becomes 1.600000023841858; rewrite_upsample.py:101-108)."""
+    return float(torch.tensor(value, dtype=torch.float32))
+
+
 # `name -> (model factory, input factory)`.
 CONV_MODELS = {
     "conv2d": (lambda: Conv2dM(), shape_input(1, 3, 8, 8)),
     "conv2d_nobias": (lambda: Conv2dM(bias=False), shape_input(1, 3, 8, 8)),
     "conv2d_s2p1": (lambda: Conv2dM(stride=2, padding=1), shape_input(1, 3, 8, 8)),
     "conv2d_s3p2": (lambda: Conv2dM(stride=3, padding=2), shape_input(1, 3, 10, 11)),
+    # The stride leaves a remainder larger than the padding, so
+    # SizeAdjustInputPass slices the input (to 7x7) ahead of RewriteConvPass.
+    "conv2d_s2p0": (lambda: Conv2dM(stride=2, padding=0), shape_input(1, 3, 8, 8)),
+    "conv2d_1x1_s2": (lambda: Conv2dM(k=1, stride=2, padding=0), shape_input(1, 3, 8, 8)),
     "conv2d_dilation2": (lambda: Conv2dM(padding=2, dilation=2), shape_input(1, 3, 8, 8)),
     "conv2d_relu": (lambda: ConvActM("relu"), shape_input(1, 3, 8, 8)),
     "conv2d_hardtanh": (lambda: ConvActM("hardtanh"), shape_input(1, 3, 8, 8)),
@@ -2198,6 +2235,9 @@ CONV_MODELS = {
     "conv1d": (lambda: Conv1dM(), shape_input(1, 4, 9)),
     "conv1d_nobias": (lambda: Conv1dM(bias=False), shape_input(1, 4, 9)),
     "conv1d_dw": (lambda: Conv1dM(4, 8, groups=4), shape_input(1, 4, 9)),
+    # Sliced to length 7 like conv2d_s2p0; RewriteConvPass emits slice ->
+    # permute -> view -> CONV2D (design C7).
+    "conv1d_s2p0": (lambda: Conv1dM(padding=0), shape_input(1, 4, 8)),
     "conv3d": (lambda: Conv3dM(), shape_input(1, 3, 4, 6, 6)),
     "linear": (lambda: LinearM(), shape_input(2, 8)),
     "linear_rank3": (lambda: LinearM(8, 5), shape_input(2, 3, 8)),
@@ -2207,7 +2247,7 @@ CONV_MODELS = {
     "conv3d_cin1": (lambda: Conv3dM(1, 4, stride=1), shape_input(1, 1, 4, 6, 6)),
     "two_convs_no_bias": (lambda: TwoConvsNoBias(), shape_input(1, 3, 8, 8)),
     "two_convs_one_input": (lambda: TwoConvsOneInput(), shape_input(1, 3, 8, 8)),
-    "dw_shared_weights": (lambda: DWConvsSharedWeights(), shape_input(1, 6, 24, 24)),
+    "dw_reused_module": (lambda: DWConvsModule(), shape_input(1, 6, 24, 24)),
     "cumsum": (lambda: CumsumM(), shape_input(1, 4, 5)),
 }
 
@@ -2281,6 +2321,17 @@ UPSAMPLE_MODELS = {
     "nearest_scale1_6": (lambda: UpsampleM("nearest", scale=1.6), shape_input(1, 3, 5, 5)),
     "nearest_scale2_5": (lambda: UpsampleM("nearest", scale=2.5), shape_input(1, 3, 4, 4)),
     "nearest_scale_third": (lambda: UpsampleM("nearest", scale=1 / 3), shape_input(1, 3, 9, 9)),
+    # Float32-rounded factors: only nsimplify's 1e-6 tolerance recovers 8/5
+    # and 1/3 from them (design risk 6). 1.6 and 1/3 above are doubles within
+    # 1e-16 of their rationals.
+    "nearest_scale1_6_f32": (
+        lambda: UpsampleM("nearest", scale=float32(1.6)),
+        shape_input(1, 3, 5, 5),
+    ),
+    "nearest_scale_third_f32": (
+        lambda: UpsampleM("nearest", scale=float32(1 / 3)),
+        shape_input(1, 3, 9, 9),
+    ),
     "nearest_scale2x3": (lambda: UpsampleM("nearest", scale=(2.0, 3.0)), shape_input(1, 3, 4, 4)),
     "bilinear_scale2": (
         lambda: UpsampleM("bilinear", scale=2.0, align_corners=False),
@@ -2357,6 +2408,10 @@ MAX_POOL_SOURCES = [
     "backends/arm/_passes/rewrite_max_pool2d_pass.py",
     "backends/arm/_passes/remove_getitem_pass.py",
     "backends/transforms/remove_getitem_op.py",
+    # They reshape the pool between RemoveGetItemPass and RewriteMaxPool2dPass
+    # (arm_pass_manager.py:692-693).
+    "backends/arm/_passes/normalize_max_pool2d_input_rank_pass.py",
+    "backends/arm/_passes/decompose_maxpool2d_with_dilation_pass.py",
     "backends/arm/tosa/dialect/ops/max_pool2d.py",
 ]
 AVG_POOL_SOURCES = [

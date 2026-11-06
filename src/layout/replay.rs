@@ -32,13 +32,19 @@
 //! strided view whenever it can: its dim order then stays non-identity, and
 //! which one depends on the strides of size-1 dims, which no `IrGraph` keeps.
 //!
-//! Dead code: rc4 often leaves dead nodes for a later pass to remove (the pass
-//! manager runs no DCE between passes, and MatchArgRanks leaves a dead view
-//! behind for a repeated argument), while a port may never create them. By
-//! default both graphs are compared after dropping every call node the output
-//! doesn't reach, so dead code alone is never a mismatch; placeholders and
-//! `get_attr` nodes always stay. `Options::dead_nodes` compares the whole
-//! graphs instead.
+//! Dead code: rc4's P1 passes often leave dead nodes for a later pass to
+//! remove (the pass manager runs no DCE between passes, and MatchArgRanks
+//! leaves a dead view behind for a repeated argument), while a port may never
+//! create them. By default format-1 graphs are compared after dropping every
+//! call node the output doesn't reach, so dead code alone is never a mismatch;
+//! placeholders and `get_attr` nodes always stay. `Options::dead_nodes`
+//! compares the whole graphs instead, and format 2 always does: rc4's P2
+//! passes erase what they replace and the pipeline hands them dead-free graphs,
+//! so no pipeline-captured graph holds a dead node (`p2_replay_tests` pins
+//! that), and a node a port leaves dead, such as the rewritten aten conv, is a
+//! real difference. Nothing later in RETAB's pipeline reliably removes it
+//! (`LayoutCtx::finish` doesn't DCE, and ingest drops dead calls only after
+//! applying an effect).
 //!
 //! Import emulation: the "before" graph looks like what RETAB's importer
 //! builds. An empty list or tuple becomes `IrArg::None` (`resolve_arg` in
@@ -54,9 +60,13 @@
 //! fixture's keys; empty maps stay empty (the importer drops them, but RETAB
 //! passes create them), so the ports' handling of both is visible. In format 1
 //! the values are placeholders; in format 2 they are rc4's, built the way
-//! `QParam::from_py` reads a `QuantArgs` (a per-channel qparam has scale 1.0
-//! and zero point 0 besides its lists). Special dtypes import in RETAB's own
-//! spelling (`INT48`, as RETAB's passes write it).
+//! IrFoldQdq builds the qparams RETAB's IR holds at the P2 slots (a per-channel
+//! qparam keeps its first scale and zero point in `scale` and `zp` besides its
+//! lists, `resolve_per_channel_qparam` in src/fx_fold_qdq_ir.rs). Special
+//! dtypes import in RETAB's own spelling (`INT48`, as RETAB's passes write it),
+//! and so do the TOSA targets of format-2 before graphs: RETAB's passes create
+//! `backend.tosa.X` (`IrGraph::add_rescale`, for one), where rc4's capture
+//! prints `tosa.X`.
 //!
 //! Dtypes (format 2, design F2 and critique A11): rc4 types a quantized
 //! activation int8 or int16 while RETAB's IR keeps it float32 and carries the
@@ -223,7 +233,8 @@ pub(crate) enum DimOrders {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Options {
     pub(crate) dim_orders: DimOrders,
-    /// Compare dead nodes too instead of dropping them from both graphs.
+    /// Compare dead nodes too instead of dropping them from both graphs; set
+    /// for every format-2 case, whose graphs hold no dead code.
     pub(crate) dead_nodes: bool,
     /// Accept RETAB's float32 for rc4's quantized activations (design F2);
     /// set for every format-2 case.
@@ -262,7 +273,8 @@ impl Node {
 // Entry points
 // ---------------------------------------------------------------------------
 
-/// Replay every case of `fixture` through `pass`; every case must match rc4.
+/// Replay every case of `fixture` through `pass`; every case must match rc4
+/// (whole graphs in format 2, see [`compare_case`]).
 pub(crate) fn check(pass: &dyn IrPass, fixture: &str) {
     check_known(pass, fixture, &[]);
 }
@@ -345,22 +357,29 @@ pub(crate) fn replay(pass: &dyn IrPass, fixture: &str, options: Options) -> Vec<
 }
 
 /// The graph a replay hands the port: `case.before` as RETAB's importer
-/// would build it, with RETAB's dtypes in format 2.
+/// would build it, with RETAB's dtypes and TOSA target spelling in format 2.
 pub(crate) fn import(case: &Case) -> IrGraph {
+    build(&as_imported(case))
+}
+
+/// [`import`]'s graph in fixture form.
+pub(crate) fn as_imported(case: &Case) -> Graph {
     if case.format >= 2 {
-        build(&retab_dtypes(&case.before))
+        retab_targets(&retab_dtypes(&case.before))
     } else {
-        build(&case.before)
+        case.before.clone()
     }
 }
 
 /// Compare RETAB's graph after a replay of `case` with rc4's: [`compare`],
-/// with format 2's float32 activations, or without the details format 1
-/// doesn't record.
+/// with format 2's float32 activations and dead nodes (its graphs hold no
+/// dead code, so one RETAB leaves is a difference), or without the details
+/// format 1 doesn't record.
 pub(crate) fn compare_case(case: &Case, actual: &Graph, options: Options) -> Result<(), Mismatch> {
     if case.format >= 2 {
         let options = Options {
             float32_activations: true,
+            dead_nodes: true,
             ..options
         };
         compare(&case.after, actual, options)
@@ -401,14 +420,12 @@ pub(crate) fn replay_case(pass: &dyn IrPass, case: &Case, options: Options) -> C
                 Ok(graph) => graph.to_string(),
                 Err(error) => format!("    <{error}>\n"),
             };
-            let (before, note) = if case.format >= 2 {
-                (
-                    retab_dtypes(&case.before),
-                    " (as imported, with RETAB's float32 activations)",
-                )
+            let note = if case.format >= 2 {
+                " (as imported, with RETAB's float32 activations and TOSA targets)"
             } else {
-                (case.before.clone(), "")
+                ""
             };
+            let before = as_imported(case);
             format!(
                 "case {} ({}): {}\n  before{note}:\n{}  rc4 after (modified={}):\n{}  RETAB after (modified={}):\n{}",
                 case.name,
@@ -1119,6 +1136,22 @@ pub(crate) fn retab_dtypes(graph: &Graph) -> Graph {
     retab
 }
 
+/// rc4's `graph` with TOSA targets in the spelling RETAB's passes create,
+/// `backend.tosa.X` for rc4's `tosa.X`. RETAB's IR only holds TOSA ops its own
+/// passes made (IrInsertInt32Rescale's RESCALEs, the P2 rewrites' pools), and
+/// they all use that spelling; [`compare`] treats the two as one target.
+fn retab_targets(graph: &Graph) -> Graph {
+    let mut retab = graph.clone();
+    for node in &mut retab.nodes {
+        if let Op::Call { target, .. } = &mut node.op {
+            if target.starts_with("tosa.") {
+                target.insert_str(0, "backend.");
+            }
+        }
+    }
+    retab
+}
+
 /// RETAB's `got` dtype stands for rc4's `want` dtype on `node`.
 fn dtype_matches(node: &Node, want: &str, got: &str, float32_activations: bool) -> bool {
     want == got
@@ -1251,14 +1284,17 @@ fn qparam_map(map: &QMap) -> QParamMap {
     }))
 }
 
-/// The `QParam` `QParam::from_py` reads from rc4's `QuantArgs`: a per-channel
-/// one keeps its lists, and its scalar scale and zero point fall back to 1.0
-/// and 0 because the lists don't extract as numbers.
+/// The `QParam` IrFoldQdq builds for rc4's `QuantArgs`
+/// (`resolve_per_channel_qparam` in src/fx_fold_qdq_ir.rs): a per-channel one
+/// keeps its lists and repeats their first scale and zero point in `scale`
+/// and `zp`. At the P2 slots RETAB's qparams come from that fold of the
+/// graph's q/dq nodes, not from `QParam::from_py`, which would read 1.0 and 0
+/// there.
 fn qparam(value: &QValue) -> QParam {
     let mut qparam = if value.per_channel {
         QParam {
-            scale: 1.0,
-            zp: 0,
+            scale: value.scales.first().copied().unwrap_or(1.0),
+            zp: value.zps.first().copied().unwrap_or(0),
             qmin: value.qmin,
             qmax: value.qmax,
             dtype_str: value.dtype.clone(),
@@ -2145,7 +2181,7 @@ before
 %1 = placeholder z : torch.int64[2] kind=buffer data=hex:0300000000000000fdffffffffffffff q=none
 %2 = get_attr c : torch.float32[1] data=hex:0000803f q=none
 %3 = placeholder x : torch.int8[1, 1, 2, 2] q=none
-%4 = aten.convolution.default(%3, %0, None, [1, 1], [0, 0], [1, 1], False, [0, 0], 1) : torch.int8[1, 2, 2, 2] q=in{0:torch.int8(0.5,-3,-128,127),1:torch.int8([0.25,0.125],[0,0],-7,7,axis=0)}/out{0:torch.int8(0.75,1,-128,127)}
+%4 = aten.convolution.default(%3, %0, None, [1, 1], [0, 0], [1, 1], False, [0, 0], 1) : torch.int8[1, 2, 2, 2] q=in{0:torch.int8(0.5,-3,-128,127),1:torch.int8([0.25,0.125],[2,0],-7,7,axis=0)}/out{0:torch.int8(0.75,1,-128,127)}
 %5 = aten.permute_copy.default(%4, [0, 2, 3, 1]) : torch.int8[1, 2, 2, 2] q=in{}/out{}
 %6 = aten.full.default([1], 3, device=device:cpu, dtype=torch.int8) : torch.int8[1] q=none
 %7 = aten.max_pool2d_with_indices.default(%5, [1, 1]) : (torch.int8[1, 2, 2, 2], torch.int64[1, 2, 2, 2]) q=in{0:torch.int8(0.75,1,-128,127)}/out{}
@@ -2222,7 +2258,7 @@ end
                 dtype: "torch.int8".to_string(),
                 per_channel: true,
                 scales: vec![0.25, 0.125],
-                zps: vec![0, 0],
+                zps: vec![2, 0],
                 qmin: -7,
                 qmax: 7,
                 axis: 0,
@@ -2313,11 +2349,13 @@ end
         let conv = graph.node(4);
         let input = conv.meta.input_qparam_at(0).unwrap();
         assert_eq!((input.scale, input.zp, input.qmin), (0.5, -3, -128));
-        // `QParam::from_py` on a per-channel QuantArgs.
+        // IrFoldQdq's per-channel QParam: the first scale and zero point
+        // besides the lists.
         let weight = conv.meta.input_qparam_at(1).unwrap();
         assert!(weight.is_per_channel());
-        assert_eq!((weight.scale, weight.zp), (1.0, 0));
+        assert_eq!((weight.scale, weight.zp), (0.25, 2));
         assert_eq!(weight.per_channel_scales, vec![0.25, 0.125]);
+        assert_eq!(weight.per_channel_zps, vec![2, 0]);
         assert_eq!((weight.qmin, weight.qmax), (-7, 7));
         // A device kwarg imports as None; a tuple val as no val.
         assert!(matches!(graph.node(6).kwargs["device"], IrArg::None));
@@ -2482,8 +2520,44 @@ end
         let results = replay(&Noop, DETAILED, Options::default());
         let report = &results[0].report;
         assert_eq!(results[0].mismatch.as_ref().map(|m| m.class), Some("op"));
-        assert!(report.contains("before (as imported, with RETAB's float32 activations)"));
+        assert!(report
+            .contains("before (as imported, with RETAB's float32 activations and TOSA targets)"));
         assert!(report.contains("aten.convolution.default(%3, %0, None, [1, 1], [0, 0], [1, 1], False, [0, 0], 1) : torch.float32[1, 2, 2, 2]"), "{report}");
+        assert!(
+            report.contains("%10 = backend.tosa.RESCALE.default(%8, "),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn format_2_imports_tosa_targets_in_retab_spelling() {
+        let case = &parse(DETAILED).unwrap()[0];
+        let graph = import(case);
+        assert_eq!(graph.node(9).target, "backend.tosa.CONST_SHAPE.default");
+        assert_eq!(graph.node(10).target, "backend.tosa.RESCALE.default");
+        assert_eq!(graph.node(4).target, "aten.convolution.default");
+        // Format 1 keeps the fixture's spelling.
+        let mut format_1 = case.clone();
+        format_1.format = 1;
+        assert_eq!(import(&format_1).node(10).target, "tosa.RESCALE.default");
+    }
+
+    #[test]
+    fn format_2_always_compares_dead_nodes() {
+        // The first case's rc4 graphs keep a dead neg, which RETAB erases.
+        let mut case = parse(FIXTURE).unwrap().remove(0);
+        let mut graph = build(&case.before);
+        assert!(EraseOneDeadNode.run(&mut graph));
+        let actual = snapshot(&graph).unwrap();
+        assert_eq!(compare_case(&case, &actual, Options::default()), Ok(()));
+        case.format = 2;
+        let mismatch = compare_case(&case, &actual, Options::default()).unwrap_err();
+        assert_eq!(mismatch.class, "target");
+        assert!(
+            mismatch.detail.contains("rc4 aten.neg.default"),
+            "{}",
+            mismatch.detail
+        );
     }
 
     #[test]

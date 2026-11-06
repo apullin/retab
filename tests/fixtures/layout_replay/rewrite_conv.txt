@@ -3,7 +3,7 @@
 # Regenerate with the rc4 environment, from a neutral directory:
 #   cd /tmp && <venv>/bin/python -P <retab>/tests/fixtures/layout_replay/gen_layout_replay.py --pass rewrite_conv
 # executorch 1.6.0 (git 4776f71b6f0daa5dfc7d758d5836fc1cc0d40154), torch 2.15.0, torchao 0.18.0+cpu, python 3.12.8
-# seed 135: 60 cases; format 2: see the generator's docstring.
+# seed 135: 66 cases; format 2: see the generator's docstring.
 # rc4-source sha256 dcaa17134fac980261be8172e6e612171105c18db51e65a729f7a50a197eb826 backends/arm/_passes/rewrite_conv_pass.py
 # rc4-source sha256 9910ce1a359088c2f70b3dde685248917ae4f90eeacef48bfbbbb4752ccf3836 backends/arm/_passes/decompose_grouped_conv_pass.py
 # rc4-source sha256 00f06e920c46c268c09e80073886364ea8cf512a4ac2192a7eed3e172a487df0 backends/arm/_passes/decompose_linear_pass.py
@@ -190,6 +190,110 @@ after modified=true
 %10 = tosa.RESCALE.default(%9, torch.int8, [0.00245307268094125, 0.0025251124574714816, 0.0024718098780073545, 0.0024371242640788856], 0, -34) : torch.int8[1, 4, 5, 4] q=in{}/out{}
 %11 = aten.permute_copy.default(%10, [0, 3, 1, 2]) : torch.int8[1, 4, 4, 5] q=in{}/out{}
 output([%11])
+end
+case conv2d_s2p0_pt
+before
+%0 = placeholder b__frozen_param0 : torch.int8[4, 3, 3, 3] kind=buffer data=hex:cc45656a85226dc1b95fd448c66d46d9f4d0a52212b02fe2c9f00f90f9e64caccb81e419050c4744af66c09d156a7f708e5a4fffaee061743e233fdc41b85ebffaf88972e97209f9b909a68fc804b1846b68b3c23752926419ca1c1d194419d6aa7520e5631558987bdb6a07 q=none
+%1 = placeholder b__frozen_param1 : torch.int32[4] kind=buffer data=hex:c716000092150000a5010000c9faffff q=none
+%2 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 3, 8, 8] q=none
+%3 = aten.slice_copy.Tensor(%2, 2, 0, 7) : torch.int8[1, 3, 7, 8] q=in{}/out{}
+%4 = aten.slice_copy.Tensor(%3, 3, 0, 7) : torch.int8[1, 3, 7, 7] q=in{}/out{}
+%5 = aten.convolution.default(%4, %0, %1, [2, 2], [0, 0], [1, 1], False, [0, 0], 1) : torch.int8[1, 4, 3, 3] q=in{0:torch.int8(0.01860782690346241,4,-128,127),1:torch.int8(0.0014914281200617552,0,-127,127),2:torch.int32(2.7752235837397166e-05,0,-2147483647,2147483647)}/out{0:torch.int8(0.01105322316288948,-13,-128,127)}
+output([%5])
+after modified=true
+%0 = placeholder b__frozen_param0 : torch.int8[4, 3, 3, 3] kind=buffer data=hex:cc45656a85226dc1b95fd448c66d46d9f4d0a52212b02fe2c9f00f90f9e64caccb81e419050c4744af66c09d156a7f708e5a4fffaee061743e233fdc41b85ebffaf88972e97209f9b909a68fc804b1846b68b3c23752926419ca1c1d194419d6aa7520e5631558987bdb6a07 q=none
+%1 = placeholder aten_convolution_default_weight_ohwi : torch.int8[4, 3, 3, 3] kind=buffer data=hex:cc5fa545d4226548126ac6b0856d2f2246e26dd9c9c1f4f0b9d00f90056af90c7fe647704c448eacaf5acb664f81c0ffe49dae1915e061bfb974fa093ef8a623898f3f72c8dce9044172b1b809845ef96b681ce5b31d63c2191537445852199892d67b64aadb19756aca2007 q=none
+%2 = placeholder b__frozen_param1 : torch.int32[4] kind=buffer data=hex:c716000092150000a5010000c9faffff q=none
+%3 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 3, 8, 8] q=none
+%4 = aten.slice_copy.Tensor(%3, 2, 0, 7) : torch.int8[1, 3, 7, 8] q=in{}/out{}
+%5 = aten.slice_copy.Tensor(%4, 3, 0, 7) : torch.int8[1, 3, 7, 7] q=in{}/out{}
+%6 = aten.permute_copy.default(%5, [0, 2, 3, 1]) : torch.int8[1, 7, 7, 3] q=in{}/out{}
+%7 = tosa.CONV2D.default(%6, %1, %2, [2, 2], [0, 0, 0, 0], [1, 1]) : torch.int32[1, 3, 3, 4] q=in{0:torch.int8(0.01860782690346241,4,-128,127),1:torch.int8(0.0014914281200617552,0,-127,127),2:torch.int32(2.7752235837397166e-05,0,-2147483647,2147483647)}/out{0:torch.int8(0.01105322316288948,-13,-128,127)}
+%8 = tosa.RESCALE.default(%7, torch.int8, [0.0025107822295890965], 0, -13) : torch.int8[1, 3, 3, 4] q=in{}/out{}
+%9 = aten.permute_copy.default(%8, [0, 3, 1, 2]) : torch.int8[1, 4, 3, 3] q=in{}/out{}
+output([%9])
+end
+case conv2d_s2p0_pc
+before
+%0 = placeholder b__scale_0 : torch.float32[4] kind=buffer data=hex:4de8bd3a067cc33aa55bbf3a3aacbc3a q=none
+%1 = placeholder b__zero_point_0 : torch.int64[4] kind=buffer data=hex:0000000000000000000000000000000000000000000000000000000000000000 q=none
+%2 = placeholder b__scale_1 : torch.float32[4] kind=buffer data=hex:3329e23779cde8376ee3e337c9b0e037 q=none
+%3 = placeholder b__zero_point_1 : torch.int32[4] kind=buffer data=hex:00000000000000000000000000000000 q=none
+%4 = placeholder b__frozen_param0 : torch.int8[4, 3, 3, 3] kind=buffer data=hex:cb47686d812370bfb762d34ac47048d8f4cfa22313ae30e1c7ef1090f9e64caccb81e419050c4744af66c09d156a7f708e5a4fffaee064763f2341db42b761bdfaf78675e97409f9b709a48cc704af816d6bb0c039558e671ac81d1f1a461ad5a77922e566165b947fda6d07 q=none
+%5 = placeholder b__frozen_param1 : torch.int32[4] kind=buffer data=hex:7217000092150000ae01000098faffff q=none
+%6 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 3, 8, 8] q=none
+%7 = aten.slice_copy.Tensor(%6, 2, 0, 7) : torch.int8[1, 3, 7, 8] q=in{}/out{}
+%8 = aten.slice_copy.Tensor(%7, 3, 0, 7) : torch.int8[1, 3, 7, 7] q=in{}/out{}
+%9 = aten.convolution.default(%8, %4, %5, [2, 2], [0, 0], [1, 1], False, [0, 0], 1) : torch.int8[1, 4, 3, 3] q=in{0:torch.int8(0.01860782690346241,4,-128,127),1:torch.int8([0.001448878669179976,0.0014914281200617552,0.0014599455753341317,0.0014394589234143496],[0,0,0,0],-127,127,axis=0),2:torch.int32([2.696048431971576e-05,2.7752235837397166e-05,2.716641392908059e-05,2.6785202862811275e-05],[0,0,0,0],-2147483647,2147483647,axis=0)}/out{0:torch.int8(0.01105322316288948,-13,-128,127)}
+output([%9])
+after modified=true
+%0 = placeholder b__scale_0 : torch.float32[4] kind=buffer data=hex:4de8bd3a067cc33aa55bbf3a3aacbc3a q=none
+%1 = placeholder b__zero_point_0 : torch.int64[4] kind=buffer data=hex:0000000000000000000000000000000000000000000000000000000000000000 q=none
+%2 = placeholder b__scale_1 : torch.float32[4] kind=buffer data=hex:3329e23779cde8376ee3e337c9b0e037 q=none
+%3 = placeholder b__zero_point_1 : torch.int32[4] kind=buffer data=hex:00000000000000000000000000000000 q=none
+%4 = placeholder b__frozen_param0 : torch.int8[4, 3, 3, 3] kind=buffer data=hex:cb47686d812370bfb762d34ac47048d8f4cfa22313ae30e1c7ef1090f9e64caccb81e419050c4744af66c09d156a7f708e5a4fffaee064763f2341db42b761bdfaf78675e97409f9b709a48cc704af816d6bb0c039558e671ac81d1f1a461ad5a77922e566165b947fda6d07 q=none
+%5 = placeholder aten_convolution_default_weight_ohwi : torch.int8[4, 3, 3, 3] kind=buffer data=hex:cb62a247d323684a136dc4ae8170302348e170d8c7bff4efb7cf1090056af90c7fe647704c448eacaf5acb664f81c0ffe49dae1915e064bdb776fa093ff7a423868c4175c7dbe9044274afb7098161f96d6b1de5b01f66c01a1639465b551a948ed57f67a7da1a796dc82207 q=none
+%6 = placeholder b__frozen_param1 : torch.int32[4] kind=buffer data=hex:7217000092150000ae01000098faffff q=none
+%7 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 3, 8, 8] q=none
+%8 = aten.slice_copy.Tensor(%7, 2, 0, 7) : torch.int8[1, 3, 7, 8] q=in{}/out{}
+%9 = aten.slice_copy.Tensor(%8, 3, 0, 7) : torch.int8[1, 3, 7, 7] q=in{}/out{}
+%10 = aten.permute_copy.default(%9, [0, 2, 3, 1]) : torch.int8[1, 7, 7, 3] q=in{}/out{}
+%11 = tosa.CONV2D.default(%10, %5, %6, [2, 2], [0, 0, 0, 0], [1, 1]) : torch.int32[1, 3, 3, 4] q=in{0:torch.int8(0.01860782690346241,4,-128,127),1:torch.int8([0.001448878669179976,0.0014914281200617552,0.0014599455753341317,0.0014394589234143496],[0,0,0,0],-127,127,axis=0),2:torch.int32([2.696048431971576e-05,2.7752235837397166e-05,2.716641392908059e-05,2.6785202862811275e-05],[0,0,0,0],-2147483647,2147483647,axis=0)}/out{0:torch.int8(0.01105322316288948,-13,-128,127)}
+%12 = tosa.RESCALE.default(%11, torch.int8, [0.0024391512849155296, 0.0025107822295890965, 0.0024577821467952382, 0.0024232933766748007], 0, -13) : torch.int8[1, 3, 3, 4] q=in{}/out{}
+%13 = aten.permute_copy.default(%12, [0, 3, 1, 2]) : torch.int8[1, 4, 3, 3] q=in{}/out{}
+output([%13])
+end
+case conv2d_1x1_s2_pt
+before
+%0 = placeholder b__frozen_param0 : torch.int8[4, 3, 1, 1] kind=buffer data=hex:cb47686d812370bfb762d34a q=none
+%1 = placeholder b__frozen_param1 : torch.int32[4] kind=buffer data=hex:a3f3ffff2e170000fc0e0000a0f7ffff q=none
+%2 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 3, 8, 8] q=none
+%3 = aten.slice_copy.Tensor(%2, 2, 0, 7) : torch.int8[1, 3, 7, 8] q=in{}/out{}
+%4 = aten.slice_copy.Tensor(%3, 3, 0, 7) : torch.int8[1, 3, 7, 7] q=in{}/out{}
+%5 = aten.convolution.default(%4, %0, %1, [2, 2], [0, 0], [1, 1], False, [0, 0], 1) : torch.int8[1, 4, 4, 4] q=in{0:torch.int8(0.018880348652601242,-2,-128,127),1:torch.int8(0.0043466356582939625,0,-127,127),2:torch.int32(8.206599886761978e-05,0,-2147483647,2147483647)}/out{0:torch.int8(0.014637080952525139,-43,-128,127)}
+output([%5])
+after modified=true
+%0 = placeholder b__frozen_param0 : torch.int8[4, 3, 1, 1] kind=buffer data=hex:cb47686d812370bfb762d34a q=none
+%1 = placeholder aten_convolution_default_weight_ohwi : torch.int8[4, 1, 1, 3] dim_order=[0,3,1,2] kind=buffer data=hex:cb47686d812370bfb762d34a q=none
+%2 = placeholder b__frozen_param1 : torch.int32[4] kind=buffer data=hex:a3f3ffff2e170000fc0e0000a0f7ffff q=none
+%3 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 3, 8, 8] q=none
+%4 = aten.slice_copy.Tensor(%3, 2, 0, 7) : torch.int8[1, 3, 7, 8] q=in{}/out{}
+%5 = aten.slice_copy.Tensor(%4, 3, 0, 7) : torch.int8[1, 3, 7, 7] q=in{}/out{}
+%6 = aten.permute_copy.default(%5, [0, 2, 3, 1]) : torch.int8[1, 7, 7, 3] q=in{}/out{}
+%7 = tosa.CONV2D.default(%6, %1, %2, [2, 2], [0, 0, 0, 0], [1, 1]) : torch.int32[1, 4, 4, 4] q=in{0:torch.int8(0.018880348652601242,-2,-128,127),1:torch.int8(0.0043466356582939625,0,-127,127),2:torch.int32(8.206599886761978e-05,0,-2147483647,2147483647)}/out{0:torch.int8(0.014637080952525139,-43,-128,127)}
+%8 = tosa.RESCALE.default(%7, torch.int8, [0.005606718782289797], 0, -43) : torch.int8[1, 4, 4, 4] q=in{}/out{}
+%9 = aten.permute_copy.default(%8, [0, 3, 1, 2]) : torch.int8[1, 4, 4, 4] q=in{}/out{}
+output([%9])
+end
+case conv2d_1x1_s2_pc
+before
+%0 = placeholder b__scale_0 : torch.float32[4] kind=buffer data=hex:244b683b396e8e3bd2547c3bd9ca5b3b q=none
+%1 = placeholder b__zero_point_0 : torch.int64[4] kind=buffer data=hex:0000000000000000000000000000000000000000000000000000000000000000 q=none
+%2 = placeholder b__scale_1 : torch.float32[4] kind=buffer data=hex:55588c38d91aac3889739838ceca8438 q=none
+%3 = placeholder b__zero_point_1 : torch.int32[4] kind=buffer data=hex:00000000000000000000000000000000 q=none
+%4 = placeholder b__frozen_param0 : torch.int8[4, 3, 1, 1] kind=buffer data=hex:bf577f6d81237fb6ae7fc660 q=none
+%5 = placeholder b__frozen_param1 : torch.int32[4] kind=buffer data=hex:d7f0ffff2e170000eb10000025f5ffff q=none
+%6 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 3, 8, 8] q=none
+%7 = aten.slice_copy.Tensor(%6, 2, 0, 7) : torch.int8[1, 3, 7, 8] q=in{}/out{}
+%8 = aten.slice_copy.Tensor(%7, 3, 0, 7) : torch.int8[1, 3, 7, 7] q=in{}/out{}
+%9 = aten.convolution.default(%8, %4, %5, [2, 2], [0, 0], [1, 1], False, [0, 0], 1) : torch.int8[1, 4, 4, 4] q=in{0:torch.int8(0.018880348652601242,-2,-128,127),1:torch.int8([0.003544517792761326,0.0043466356582939625,0.0038502705283463,0.003353765467181802],[0,0,0,0],-127,127,axis=0),2:torch.int32([6.692173337796703e-05,8.206599886761978e-05,7.26944490452297e-05,6.332025805022568e-05],[0,0,0,0],-2147483647,2147483647,axis=0)}/out{0:torch.int8(0.014637080952525139,-43,-128,127)}
+output([%9])
+after modified=true
+%0 = placeholder b__scale_0 : torch.float32[4] kind=buffer data=hex:244b683b396e8e3bd2547c3bd9ca5b3b q=none
+%1 = placeholder b__zero_point_0 : torch.int64[4] kind=buffer data=hex:0000000000000000000000000000000000000000000000000000000000000000 q=none
+%2 = placeholder b__scale_1 : torch.float32[4] kind=buffer data=hex:55588c38d91aac3889739838ceca8438 q=none
+%3 = placeholder b__zero_point_1 : torch.int32[4] kind=buffer data=hex:00000000000000000000000000000000 q=none
+%4 = placeholder b__frozen_param0 : torch.int8[4, 3, 1, 1] kind=buffer data=hex:bf577f6d81237fb6ae7fc660 q=none
+%5 = placeholder aten_convolution_default_weight_ohwi : torch.int8[4, 1, 1, 3] dim_order=[0,3,1,2] kind=buffer data=hex:bf577f6d81237fb6ae7fc660 q=none
+%6 = placeholder b__frozen_param1 : torch.int32[4] kind=buffer data=hex:d7f0ffff2e170000eb10000025f5ffff q=none
+%7 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 3, 8, 8] q=none
+%8 = aten.slice_copy.Tensor(%7, 2, 0, 7) : torch.int8[1, 3, 7, 8] q=in{}/out{}
+%9 = aten.slice_copy.Tensor(%8, 3, 0, 7) : torch.int8[1, 3, 7, 7] q=in{}/out{}
+%10 = aten.permute_copy.default(%9, [0, 2, 3, 1]) : torch.int8[1, 7, 7, 3] q=in{}/out{}
+%11 = tosa.CONV2D.default(%10, %5, %6, [2, 2], [0, 0, 0, 0], [1, 1]) : torch.int32[1, 4, 4, 4] q=in{0:torch.int8(0.018880348652601242,-2,-128,127),1:torch.int8([0.003544517792761326,0.0043466356582939625,0.0038502705283463,0.003353765467181802],[0,0,0,0],-127,127,axis=0),2:torch.int32([6.692173337796703e-05,8.206599886761978e-05,7.26944490452297e-05,6.332025805022568e-05],[0,0,0,0],-2147483647,2147483647,axis=0)}/out{0:torch.int8(0.014637080952525139,-43,-128,127)}
+%12 = tosa.RESCALE.default(%11, torch.int8, [0.004572068156877777, 0.005606718782289797, 0.004966458149530993, 0.004326017019706563], 0, -43) : torch.int8[1, 4, 4, 4] q=in{}/out{}
+%13 = aten.permute_copy.default(%12, [0, 3, 1, 2]) : torch.int8[1, 4, 4, 4] q=in{}/out{}
+output([%13])
 end
 case conv2d_dilation2_pt
 before
@@ -793,6 +897,58 @@ after modified=true
 %13 = aten.permute_copy.default(%12, [0, 2, 1]) : torch.int8[1, 8, 5] q=in{}/out{}
 output([%13])
 end
+case conv1d_s2p0_pt
+before
+%0 = placeholder b__frozen_param0 : torch.int8[6, 4, 3] kind=buffer data=hex:cc45656a85226dc1b95fd448c66d46d9f4d0a52212b02fe2c9f00f90f9e64caccb81e419050c4744af66c09d156a7f708e5a4fffaee061743e233fdc41b85ebffaf88972e97209f9 q=none
+%1 = placeholder b__frozen_param1 : torch.int32[6] kind=buffer data=hex:ebedffff430200000ce9ffff35e3ffffbef1ffff09010000 q=none
+%2 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 4, 8] q=none
+%3 = aten.slice_copy.Tensor(%2, 2, 0, 7) : torch.int8[1, 4, 7] q=in{}/out{}
+%4 = aten.convolution.default(%3, %0, %1, [2], [0], [1], False, [0], 1) : torch.int8[1, 6, 3] q=in{0:torch.int8(0.015360727906227112,-8,-128,127),1:torch.int8(0.002237142063677311,0,-127,127),2:torch.int32(3.4364129533059895e-05,0,-2147483647,2147483647)}/out{0:torch.int8(0.006559147499501705,57,-128,127)}
+output([%4])
+after modified=true
+%0 = placeholder b__frozen_param0 : torch.int8[6, 4, 3] kind=buffer data=hex:cc45656a85226dc1b95fd448c66d46d9f4d0a52212b02fe2c9f00f90f9e64caccb81e419050c4744af66c09d156a7f708e5a4fffaee061743e233fdc41b85ebffaf88972e97209f9 q=none
+%1 = placeholder aten_convolution_default_weight_ohwi : torch.int8[6, 1, 3, 4] kind=buffer data=hex:cc6a6d5f4585c1d46522b948c6d9a5b06df4222f46d012e2c9904c81f0f9ace40fe6cb190544c06a0caf9d7f476615708eff61235aae743f4fe03edc41bf8972b8fa72095ef8e9f9 q=none
+%2 = placeholder b__frozen_param1 : torch.int32[6] kind=buffer data=hex:ebedffff430200000ce9ffff35e3ffffbef1ffff09010000 q=none
+%3 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 4, 8] q=none
+%4 = aten.slice_copy.Tensor(%3, 2, 0, 7) : torch.int8[1, 4, 7] q=in{}/out{}
+%5 = aten.permute_copy.default(%4, [0, 2, 1]) : torch.int8[1, 7, 4] q=in{}/out{}
+%6 = aten.view_copy.default(%5, [1, 1, 7, 4]) : torch.int8[1, 1, 7, 4] q=in{}/out{}
+%7 = tosa.CONV2D.default(%6, %1, %2, [1, 2], [0, 0, 0, 0], [1, 1]) : torch.int32[1, 1, 3, 6] q=in{0:torch.int8(0.015360727906227112,-8,-128,127),1:torch.int8(0.002237142063677311,0,-127,127),2:torch.int32(3.4364129533059895e-05,0,-2147483647,2147483647)}/out{0:torch.int8(0.006559147499501705,57,-128,127)}
+%8 = tosa.RESCALE.default(%7, torch.int8, [0.005239115377468368], 0, 57) : torch.int8[1, 1, 3, 6] q=in{}/out{}
+%9 = aten.view_copy.default(%8, [1, 3, 6]) : torch.int8[1, 3, 6] q=in{}/out{}
+%10 = aten.permute_copy.default(%9, [0, 2, 1]) : torch.int8[1, 6, 3] q=in{}/out{}
+output([%10])
+end
+case conv1d_s2p0_pc
+before
+%0 = placeholder b__scale_0 : torch.float32[6] kind=buffer data=hex:396e0e3b9c48fb3a2b2f123b049d123b19e0053bc184093b q=none
+%1 = placeholder b__zero_point_0 : torch.int64[6] kind=buffer data=hex:000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 q=none
+%2 = placeholder b__scale_1 : torch.float32[6] kind=buffer data=hex:86050c389808f73737b60f3834221038719c033852310738 q=none
+%3 = placeholder b__zero_point_1 : torch.int32[6] kind=buffer data=hex:000000000000000000000000000000000000000000000000 q=none
+%4 = placeholder b__frozen_param0 : torch.int8[6, 4, 3] kind=buffer data=hex:cb47686d812370bfb762d34abc7f52d2f2c8962815a337ddc9f00f90f9e64caccb81e419050c4744af66c09d156a7f70836256ffa6dc6b7f442646d945b365bbfaf7817ae87a09f9 q=none
+%5 = placeholder b__frozen_param1 : torch.int32[6] kind=buffer data=hex:63edffffa3020000fae8ffff35e3ffff63f0ffff1b010000 q=none
+%6 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 4, 8] q=none
+%7 = aten.slice_copy.Tensor(%6, 2, 0, 7) : torch.int8[1, 4, 7] q=in{}/out{}
+%8 = aten.convolution.default(%7, %4, %5, [2], [0], [1], False, [0], 1) : torch.int8[1, 6, 3] q=in{0:torch.int8(0.015360727906227112,-8,-128,127),1:torch.int8([0.0021733178291469812,0.001917141955345869,0.0022305946331471205,0.002237142063677311,0.002042776206508279,0.0020983668509870768],[0,0,0,0,0,0],-127,127,axis=0),2:torch.int32([3.338374517625198e-05,2.944869629573077e-05,3.4263557608937845e-05,3.4364129533059895e-05,3.1378531275549904e-05,3.223244129912928e-05],[0,0,0,0,0,0],-2147483647,2147483647,axis=0)}/out{0:torch.int8(0.006559147499501705,57,-128,127)}
+output([%8])
+after modified=true
+%0 = placeholder b__scale_0 : torch.float32[6] kind=buffer data=hex:396e0e3b9c48fb3a2b2f123b049d123b19e0053bc184093b q=none
+%1 = placeholder b__zero_point_0 : torch.int64[6] kind=buffer data=hex:000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 q=none
+%2 = placeholder b__scale_1 : torch.float32[6] kind=buffer data=hex:86050c389808f73737b60f3834221038719c033852310738 q=none
+%3 = placeholder b__zero_point_1 : torch.int32[6] kind=buffer data=hex:000000000000000000000000000000000000000000000000 q=none
+%4 = placeholder b__frozen_param0 : torch.int8[6, 4, 3] kind=buffer data=hex:cb47686d812370bfb762d34abc7f52d2f2c8962815a337ddc9f00f90f9e64caccb81e419050c4744af66c09d156a7f70836256ffa6dc6b7f442646d945b365bbfaf7817ae87a09f9 q=none
+%5 = placeholder aten_convolution_default_weight_ohwi : torch.int8[6, 1, 3, 4] kind=buffer data=hex:cb6d70624781bfd36823b74abcd296a37ff2283752c815ddc9904c81f0f9ace40fe6cb190544c06a0caf9d7f4766157083ff6b2662a67f4656dc44d945bb817ab3fa7a0965f7e8f9 q=none
+%6 = placeholder b__frozen_param1 : torch.int32[6] kind=buffer data=hex:63edffffa3020000fae8ffff35e3ffff63f0ffff1b010000 q=none
+%7 = placeholder quantized_decomposed_quantize_per_tensor_default : torch.int8[1, 4, 8] q=none
+%8 = aten.slice_copy.Tensor(%7, 2, 0, 7) : torch.int8[1, 4, 7] q=in{}/out{}
+%9 = aten.permute_copy.default(%8, [0, 2, 1]) : torch.int8[1, 7, 4] q=in{}/out{}
+%10 = aten.view_copy.default(%9, [1, 1, 7, 4]) : torch.int8[1, 1, 7, 4] q=in{}/out{}
+%11 = tosa.CONV2D.default(%10, %5, %6, [1, 2], [0, 0, 0, 0], [1, 1]) : torch.int32[1, 1, 3, 6] q=in{0:torch.int8(0.015360727906227112,-8,-128,127),1:torch.int8([0.0021733178291469812,0.001917141955345869,0.0022305946331471205,0.002237142063677311,0.002042776206508279,0.0020983668509870768],[0,0,0,0,0,0],-127,127,axis=0),2:torch.int32([3.338374517625198e-05,2.944869629573077e-05,3.4263557608937845e-05,3.4364129533059895e-05,3.1378531275549904e-05,3.223244129912928e-05],[0,0,0,0,0,0],-2147483647,2147483647,axis=0)}/out{0:torch.int8(0.006559147499501705,57,-128,127)}
+%12 = tosa.RESCALE.default(%11, torch.int8, [0.005089646761231564, 0.004489713935525509, 0.005223782089283155, 0.005239115377468368, 0.004783934113979337, 0.004914120660940736], 0, 57) : torch.int8[1, 1, 3, 6] q=in{}/out{}
+%13 = aten.view_copy.default(%12, [1, 3, 6]) : torch.int8[1, 3, 6] q=in{}/out{}
+%14 = aten.permute_copy.default(%13, [0, 2, 1]) : torch.int8[1, 6, 3] q=in{}/out{}
+output([%14])
+end
 case conv3d_pt
 before
 %0 = placeholder b__frozen_param0 : torch.int8[5, 3, 3, 3, 3] kind=buffer data=hex:cd44636886226cc1ba5ed547c76b45d9f4d1a62212b12ee2caf00f92f9e74badcc83e518050b4643b064c19f15697d6e90584dffafe060723d223fdd40b95dc0fbf88b71ea7009faba09a790c904b2866966b4c33651936219cb1c1d194319d7ab7320e66115569979dc68076b6508e8e3e866b9508fc2860b2d28a2572847f719ff0dafff237b8f1edaca811aa6657fe6cb03144136d1829fa4578b2e000a0acabf74006920ea6f7d344d15307d90deb9a2633136708ddcd86fc515aaf2fed056add4ee3d82ea2fa43ad046980c52f1b8b091f082d9d18e185efe3a2cc130a1ce5ba929fa8987fc7c60adae209ebaa04f961a82541e6f5c5902d6c44a52727d11566c88b5030da504fd697e37ca175f43d29ccce163365cbafd158c163c64930ddc8f98746eb5897220bead484cfb393d8b7d316f47259e0311ebd142d15bedf3c90f8cbbb572dc6e6a1f9ebb552030337d3e98ec024832e19eea4acfddcc0e97fb7564efd7c078b4550b0f084183104f00fff6c386e30fd5137de1f76ef7ad10e40085ab79a203f3d9effd03f89ce89a8e0eb40b q=none
@@ -1301,7 +1457,7 @@ after modified=true
 %26 = tosa.RESCALE.default(%25, torch.int8, [1.4839216747595666e-06], 0, -19) : torch.int8[1, 4, 8, 8] q=in{}/out{}
 output([%26])
 end
-case dw_shared_weights_pt
+case dw_reused_module_pt
 before
 %0 = placeholder b__frozen_param0 : torch.int8[6, 1, 2, 2] kind=buffer data=hex:cb47686d812370bfb762d34ac47048d8f4cfa22313ae30e1 q=none
 %1 = placeholder b__frozen_param1 : torch.int32[6] kind=buffer data=hex:98f7ffff90fdffff53020000faeeffffe5feffff14fcffff q=none
@@ -1329,7 +1485,7 @@ after modified=true
 %14 = aten.permute_copy.default(%13, [0, 3, 1, 2]) : torch.int8[1, 6, 22, 22] q=in{}/out{}
 output([%14])
 end
-case dw_shared_weights_pc
+case dw_reused_module_pc
 before
 %0 = placeholder b__scale_0 : torch.float32[6] kind=buffer data=hex:6deb533b6db2763b85583e3b369e593b16ea353b8fc61f3b q=none
 %1 = placeholder b__zero_point_0 : torch.int64[6] kind=buffer data=hex:000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 q=none

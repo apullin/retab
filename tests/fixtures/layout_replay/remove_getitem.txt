@@ -7,6 +7,8 @@
 # rc4-source sha256 955b9cae8766124854386cbf7d60a8d6216fa66a38bb298e569fbacbf8c12368 backends/arm/_passes/rewrite_max_pool2d_pass.py
 # rc4-source sha256 ed20248a3da65a6af39218ff5153b1f1a10585f2c9b8a4e27f49ab5bc4bb8fa1 backends/arm/_passes/remove_getitem_pass.py
 # rc4-source sha256 91bf1a6cfcca25ad912cc02b769a55e57f2d25a3d27a94a1920a92daeb650b19 backends/transforms/remove_getitem_op.py
+# rc4-source sha256 d2e60df24eaa5098a8b5ce8db1f48cc443fad24972295072766304107107d03b backends/arm/_passes/normalize_max_pool2d_input_rank_pass.py
+# rc4-source sha256 50f46ee71ef4d7ae69e664b39ac51a70ea8f1f44d4613d72a484b72fe34a1a25 backends/arm/_passes/decompose_maxpool2d_with_dilation_pass.py
 # rc4-source sha256 533b46cbfab2df07c6e2cd690982a3bcf1064e586e6b96277022874e45f4c26e backends/arm/tosa/dialect/ops/max_pool2d.py
 # rc4-source sha256 e378c6100aa376ca5241bb4691fa99e6646071c96bde192fdae375ef4246b51a backends/arm/_passes/arm_pass_manager.py
 # rc4-source sha256 fda38042dabc4ffb3186d95c622c00953fadb1a61f87c758909585a16be68ea5 backends/arm/_passes/arm_pass_utils.py
