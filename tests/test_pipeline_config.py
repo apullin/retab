@@ -135,8 +135,10 @@ def test_native_entry_points_refuse_unknown_layouts(entry_point):
         getattr(_native, entry_point)(None, pipeline_config=config)
 
 
-def test_layout_modes_lower_to_identical_tosa_until_explicit_mode_has_passes():
-    """Explicit mode builds the dim-order pipeline in P0; a missing key means dim_order."""
+def test_missing_layout_means_dim_order_and_explicit_mode_sends_aten_convs_to_stock():
+    """A missing key means dim_order. Explicit mode still builds the dim-order pipeline
+    until APU-157 wires its passes, so its aten conv reaches the explicit-layout
+    serializer, which hands the graph to stock (P2 design X5)."""
     from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
 
     program = torch.export.export(
@@ -146,11 +148,17 @@ def test_layout_modes_lower_to_identical_tosa_until_explicit_mode_has_passes():
     config = rp._build_pipeline_config(TosaCompileSpec("TOSA-1.0+INT"))
     del config["layout"]
     tosa = []
-    for layout in [None, "dim_order", "explicit"]:
+    for layout in [None, "dim_order"]:
         layout_config = config if layout is None else {**config, "layout": layout}
         _native.run_fx_passes(program.graph_module, program, pipeline_config=layout_config)
         tosa.append(_native.ingest_and_serialize())
-    assert tosa[0] and tosa[0] == tosa[1] == tosa[2]
+    assert tosa[0] and tosa[0] == tosa[1]
+
+    explicit = {**config, "layout": "explicit"}
+    _native.run_fx_passes(program.graph_module, program, pipeline_config=explicit)
+    with pytest.raises(RuntimeError) as error:
+        _native.ingest_and_serialize()
+    assert rp._native_fallback_reason(error.value) == "aten spatial op in explicit layout"
 
 
 @pytest.mark.parametrize("recursive", [False, True])

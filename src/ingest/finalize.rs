@@ -271,10 +271,11 @@ fn fixup_quantized_dtypes_once(graph: &mut Graph) {
             }
 
             // rc4's TOSA RESIZE inherits the upsample's qparams, but its dtype is its own:
-            // int8 bilinear produces int32 (`tosa/dialect/ops/resize.py:28-36`). The
-            // explicit-mode IR val already carries it, so don't retype it from the
-            // inherited int8 output qparam (P2 design F10/X4).
-            if explicit_layout && target == OpTarget::TosaResize {
+            // int8 bilinear produces int32 (`tosa/dialect/ops/resize.py:28-36`). An
+            // integer explicit-mode IR val already carries it, so don't retype it from
+            // the inherited int8 output qparam (P2 design F10/X4). A float val (RETAB's
+            // usual typing of quantized compute nodes) still takes the qparam dtype.
+            if explicit_layout && target == OpTarget::TosaResize && current_dtype.is_integer() {
                 continue;
             }
 

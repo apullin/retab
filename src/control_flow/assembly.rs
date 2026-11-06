@@ -106,6 +106,25 @@ fn ordered_regions(
     order
 }
 
+/// Convert one stashed region like the parent: in the parent's layout mode, which
+/// finalize depends on.
+fn ingest_region(
+    (ir, effects): &StashedPipeline,
+    layout: crate::pipeline_config::LayoutMode,
+) -> (Graph, TensorStore) {
+    let mut sub_store = TensorStore::new();
+    let mut sub_graph =
+        crate::ingest::from_ir::graph_from_ir_preserve_placeholders(ir, &mut sub_store);
+    sub_graph.layout = layout;
+    crate::ingest::from_ir::apply_effects_preserve_placeholders(
+        &mut sub_graph,
+        &mut sub_store,
+        effects,
+    );
+    crate::ingest::finalize::finalize_converted_graph(&mut sub_graph);
+    (sub_graph, sub_store)
+}
+
 pub(crate) fn append_subgraphs_from_ir(
     graphs: &mut Vec<(String, Graph)>,
     store: &mut TensorStore,
@@ -119,23 +138,13 @@ pub(crate) fn append_subgraphs_from_ir(
         if graphs.iter().any(|(name, _)| name == &region) {
             continue;
         }
-        let Some((ir, effects)) = submodules.get(&region) else {
+        let Some(stashed) = submodules.get(&region) else {
             return Err(PyRuntimeError::new_err(format!(
                 "missing stashed IrGraph for control-flow region '{region}'"
             )));
         };
 
-        let mut sub_store = TensorStore::new();
-        let mut sub_graph =
-            crate::ingest::from_ir::graph_from_ir_preserve_placeholders(ir, &mut sub_store);
-        // Regions are lowered in the parent's mode; finalize already depends on it.
-        sub_graph.layout = layout;
-        crate::ingest::from_ir::apply_effects_preserve_placeholders(
-            &mut sub_graph,
-            &mut sub_store,
-            effects,
-        );
-        crate::ingest::finalize::finalize_converted_graph(&mut sub_graph);
+        let (mut sub_graph, mut sub_store) = ingest_region(stashed, layout);
         if let Some(counts) = while_body_input_counts.get(&region).copied() {
             append_while_body_passthrough_outputs(&mut sub_graph, counts);
         }
@@ -213,5 +222,45 @@ mod tests {
                 "a_branch".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn regions_are_ingested_in_the_parent_layout_mode() {
+        use crate::graph::ir::{DType, OpTarget};
+        use crate::pipeline_config::LayoutMode;
+        use crate::test_ir::{call, output, placeholder, qparam};
+
+        // An explicit-mode RESIZE keeps its int32 val through finalize despite the int8
+        // qparams it inherits, so its dtype shows which mode finalize ran in.
+        let mut region = IrGraph::empty();
+        let x = placeholder(&mut region, "x", [1, 5, 5, 3], "torch.int8");
+        let resize = call(
+            &mut region,
+            "resize",
+            "backend.tosa.RESIZE.default",
+            vec![IrArg::Node(x)],
+            [1, 9, 9, 3],
+            "torch.int32",
+        );
+        region
+            .node_mut(resize)
+            .meta
+            .set_both_qparams(qparam(0.05, 0, "torch.int8"));
+        output(&mut region, resize);
+        let region = stash(region);
+
+        for (layout, resize_dtype) in [
+            (LayoutMode::DimOrder, DType::Int8),
+            (LayoutMode::Explicit, DType::Int32),
+        ] {
+            let (graph, _) = ingest_region(&region, layout);
+            assert_eq!(graph.layout, layout);
+            let resize = graph
+                .nodes
+                .values()
+                .find(|node| node.target == OpTarget::TosaResize)
+                .unwrap();
+            assert_eq!(resize.meta.val.dtype, resize_dtype, "{layout:?}");
+        }
     }
 }

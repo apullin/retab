@@ -475,3 +475,169 @@ pub(super) fn adjusted_tosa_pad_for_emitted_conv3d(
     // TOSA has no depthwise conv3d.
     adjusted_tosa_pad_for_emitted_conv_spatial(graph, store, node, pad, stride, dilation, 3, false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::ir::{DType as IrDType, NodeMeta, TensorInfo};
+    use crate::pipeline_config::LayoutMode;
+    use smallvec::{smallvec, SmallVec};
+
+    fn add(
+        graph: &mut Graph,
+        name: &str,
+        op: OpType,
+        target: OpTarget,
+        args: SmallVec<[Arg; 4]>,
+        shape: &[i64],
+    ) -> NodeId {
+        graph.create_node(
+            op,
+            target,
+            args,
+            Vec::new(),
+            NodeMeta::new(TensorInfo::new(shape, IrDType::Int8)),
+            name.into(),
+        )
+    }
+
+    fn input(graph: &mut Graph, name: &str, shape: &[i64]) -> NodeId {
+        add(
+            graph,
+            name,
+            OpType::Placeholder,
+            OpTarget::Other(name.into()),
+            smallvec![],
+            shape,
+        )
+    }
+
+    fn list(values: &[i64]) -> Arg {
+        Arg::IntList(values.iter().copied().collect())
+    }
+
+    /// `<target>(x', w, b, stride, pad, [1, 1])` on a channels-last input.
+    fn tosa_conv(
+        target: OpTarget,
+        input_shape: &[i64],
+        weight: &[i64],
+        stride: &[i64],
+        pad: &[i64],
+        val: &[i64],
+    ) -> (Graph, NodeId) {
+        let mut graph = Graph::new();
+        let x = input(&mut graph, "x", input_shape);
+        let w = input(&mut graph, "w", weight);
+        let b = input(&mut graph, "b", &val[3..]);
+        let conv = add(
+            &mut graph,
+            "conv",
+            OpType::CallFunction,
+            target,
+            smallvec![
+                Arg::Node(x),
+                Arg::Node(w),
+                Arg::Node(b),
+                list(stride),
+                list(pad),
+                list(&[1, 1])
+            ],
+            val,
+        );
+        (graph, conv)
+    }
+
+    #[test]
+    fn explicit_depthwise_kernels_come_from_hwcm_weights() {
+        // P2 design B3: a KW == 1 HWCM weight [3, 1, 4, 2] also reads as OIHW [O, 1, KH, KW].
+        let (mut graph, conv) = tosa_conv(
+            OpTarget::TosaDepthwiseConv2d,
+            &[1, 16, 11, 4],
+            &[3, 1, 4, 2],
+            &[2, 2],
+            &[1, 0, 0, 0],
+            &[1, 8, 6, 8],
+        );
+        let store = TensorStore::new();
+        for (layout, kernels) in [
+            (LayoutMode::DimOrder, vec![4, 2]),
+            (LayoutMode::Explicit, vec![3, 1]),
+        ] {
+            graph.layout = layout;
+            clear_shape_cache();
+            let node = graph.node(conv).unwrap();
+            assert_eq!(
+                conv_spatial_inputs_and_kernels(&graph, &store, node, 2, true),
+                Some((vec![16, 11], kernels)),
+                "{layout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_conv_pads_are_used_as_given() {
+        // P2 design G2: rc4 already adjusted the pad. Dim-order mode trims any pad whose
+        // remainder fits: [1, 1, 2, 2] becomes [1, 0, 2, 1] here.
+        let (mut graph, conv) = tosa_conv(
+            OpTarget::TosaConv2d,
+            &[1, 6, 10, 3],
+            &[8, 3, 5, 3],
+            &[2, 2],
+            &[1, 1, 2, 2],
+            &[1, 3, 5, 8],
+        );
+        let store = TensorStore::new();
+        for (layout, pad) in [
+            (LayoutMode::DimOrder, vec![1, 0, 2, 1]),
+            (LayoutMode::Explicit, vec![1, 1, 2, 2]),
+        ] {
+            graph.layout = layout;
+            clear_shape_cache();
+            let node = graph.node(conv).unwrap();
+            assert_eq!(
+                adjusted_tosa_pad_for_emitted_conv2d(
+                    &graph,
+                    &store,
+                    node,
+                    &[1, 1, 2, 2],
+                    &[2, 2],
+                    &[1, 1],
+                    false
+                ),
+                pad,
+                "{layout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_pool_outputs_are_the_val() {
+        // P2 design G1: dim-order mode recomputes the output from the parsed arguments.
+        let mut graph = Graph::new();
+        let x = input(&mut graph, "x", &[1, 9, 9, 4]);
+        let pool = add(
+            &mut graph,
+            "pool",
+            OpType::CallFunction,
+            OpTarget::TosaMaxPool2d,
+            smallvec![
+                Arg::Node(x),
+                list(&[3, 3]),
+                list(&[2, 2]),
+                list(&[1, 1, 1, 1])
+            ],
+            &[1, 5, 5, 4],
+        );
+        let store = TensorStore::new();
+        for (layout, shape) in [
+            (LayoutMode::DimOrder, vec![1, 4, 4, 4]),
+            (LayoutMode::Explicit, vec![1, 5, 5, 4]),
+        ] {
+            graph.layout = layout;
+            clear_shape_cache();
+            let node = graph.node(pool).unwrap();
+            let output = compute_pool_nhwc_output(&graph, &store, node, &[2, 2], &[2, 2], &[0; 4]);
+            assert_eq!(output.shape, shape, "{layout:?}");
+        }
+    }
+}

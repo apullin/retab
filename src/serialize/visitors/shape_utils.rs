@@ -741,6 +741,41 @@ mod tests {
     }
 
     #[test]
+    fn explicit_transposes_do_not_remap_axes() {
+        // P2 design G8: dim-order mode's generated TRANSPOSEs keep logical vals, so an axis
+        // maps through the TRANSPOSE's input; an explicit-mode TRANSPOSE's val is physical.
+        let mut graph = Graph::new();
+        let x = graph.create_node(
+            OpType::Placeholder,
+            OpTarget::Other("x".into()),
+            smallvec![],
+            Vec::new(),
+            meta(&[2, 3, 4], DType::Float32),
+            "x".into(),
+        );
+        let transpose = graph.create_node(
+            OpType::CallFunction,
+            OpTarget::TosaTranspose,
+            smallvec![Arg::Node(x), Arg::IntList(smallvec![2, 0, 1])],
+            Vec::new(),
+            meta(&[4, 2, 3], DType::Float32),
+            "transpose".into(),
+        );
+        for (layout, axis) in [
+            (crate::pipeline_config::LayoutMode::DimOrder, 1),
+            (crate::pipeline_config::LayoutMode::Explicit, 0),
+        ] {
+            graph.layout = layout;
+            let node = graph.node(transpose).unwrap();
+            assert_eq!(
+                map_axis_to_tosa_dim_order(&graph, node, 0),
+                axis,
+                "{layout:?}"
+            );
+        }
+    }
+
+    #[test]
     fn reciprocal_uses_input_shape_when_meta_is_stale_scalar() {
         clear_shape_cache();
 

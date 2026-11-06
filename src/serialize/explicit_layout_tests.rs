@@ -266,7 +266,10 @@ impl ConvCase {
         // inferred output-layout TRANSPOSE.
         let (to_first, _) = layout_dims(self.input.len());
         assert_eq!(ops_of(items, Op::Transpose).len(), 2);
-        assert_eq!(tensor(items, "out").shape, i32s(&permuted(self.val, &to_first)));
+        assert_eq!(
+            tensor(items, "out").shape,
+            i32s(&permuted(self.val, &to_first))
+        );
         assert_eq!(items.output_names, ["out"]);
         conv
     }
@@ -326,11 +329,9 @@ fn shape_values(items: &SerializedGraphItems, name: &str) -> Vec<i64> {
         .iter()
         .find(|shape| shape.name == name)
         .unwrap_or_else(|| panic!("no shape named {name}"));
-    shape
-        .data
-        .chunks_exact(8)
-        .map(|chunk| i64::from_le_bytes(chunk.try_into().unwrap()))
-        .collect()
+    let (values, rest) = shape.data.as_chunks::<8>();
+    assert!(rest.is_empty());
+    values.iter().copied().map(i64::from_le_bytes).collect()
 }
 
 /// Every operand that names a shape is declared by an earlier CONST_SHAPE.
@@ -347,7 +348,11 @@ fn assert_shape_operands_declared(items: &SerializedGraphItems) {
         }
     }
     for shape in &items.shapes {
-        assert!(declared.contains(&shape.name), "{} is never declared", shape.name);
+        assert!(
+            declared.contains(&shape.name),
+            "{} is never declared",
+            shape.name
+        );
     }
 }
 
@@ -515,16 +520,18 @@ fn int16_conv_accumulates_in_int48_and_rescales_with_16_bit_multipliers() {
 // ---------------------------------------------------------------------------
 
 /// `x -> permute -> <pool> -> permute -> output`, as rc4's pool rewrites leave it.
-fn pool_chain(target: &str, extra: impl FnOnce(&mut IrGraph) -> Vec<IrArg>, val: &[i64]) -> IrGraph {
+fn pool_chain(
+    target: &str,
+    extra: impl FnOnce(&mut IrGraph) -> Vec<IrArg>,
+    val: &[i64],
+) -> IrGraph {
     let mut ir = IrGraph::empty();
     let x = placeholder(&mut ir, "x", [1, 4, 9, 9], INT8);
     let x_nhwc = permute(&mut ir, "x_nhwc", x, &[0, 2, 3, 1], INT8);
     let mut args = vec![IrArg::Node(x_nhwc)];
     args.extend(extra(&mut ir));
     let pool = call(&mut ir, "pool", target, args, val.to_vec(), INT8);
-    ir.node_mut(pool)
-        .meta
-        .set_both_qparams(qp(0.05, -4, INT8));
+    ir.node_mut(pool).meta.set_both_qparams(qp(0.05, -4, INT8));
     let out = permute(&mut ir, "out", pool, &[0, 3, 1, 2], INT8);
     output(&mut ir, out);
     ir
@@ -697,33 +704,41 @@ fn resize_chain(
 #[test]
 fn nearest_resize_serializes_rc4_parameters() {
     // X4: rc4's nearest 5 -> 8 is scale [16, 10], offset -8, border -2 per axis; the
-    // dim-order emitter recomputes offset -3, border 3.
-    let ir = resize_chain(
-        "nearest",
-        INT8,
-        5,
-        8,
-        [&[16, 10, 16, 10], &[-8, -8], &[-2, -2]],
-        INT8,
-        None,
-    );
-    let items = serialize_explicit(&ir);
-    let resize = single_op(&items, Op::Resize);
-    assert_eq!(resize.inputs, ["x_nhwc", "scale", "offset", "border"]);
-    assert_eq!(shape_values(&items, "scale"), [16, 10, 16, 10]);
-    assert_eq!(shape_values(&items, "offset"), [-8, -8]);
-    assert_eq!(shape_values(&items, "border"), [-2, -2]);
-    let Attribute::Resize(attribute) = &resize.attribute else {
-        panic!("expected a RESIZE attribute");
-    };
-    assert_eq!(attribute.mode, ResizeMode::Nearest);
-    assert_eq!(tensor(&items, "resize").shape, [1, 8, 8, 3]);
-    assert_eq!(tensor(&items, "resize").dtype, DType::Int8);
-    assert!(ops_of(&items, Op::Rescale).is_empty());
-    assert_eq!(tensor(&items, "y").shape, [1, 3, 8, 8]);
-    // No orphaned or duplicated parameter shapes.
-    assert_eq!(ops_of(&items, Op::ConstShape).len(), 3);
-    assert_shape_operands_declared(&items);
+    // dim-order emitter recomputes offset -3, border 3. A float32 val (RETAB's usual
+    // typing of quantized compute nodes) takes the inherited qparam's int8.
+    for resize_dtype in [INT8, FLOAT32] {
+        let ir = resize_chain(
+            "nearest",
+            INT8,
+            5,
+            8,
+            [&[16, 10, 16, 10], &[-8, -8], &[-2, -2]],
+            resize_dtype,
+            None,
+        );
+        let items = serialize_explicit(&ir);
+        let resize = single_op(&items, Op::Resize);
+        assert_eq!(resize.inputs, ["x_nhwc", "scale", "offset", "border"]);
+        assert_eq!(shape_values(&items, "scale"), [16, 10, 16, 10]);
+        assert_eq!(shape_values(&items, "offset"), [-8, -8]);
+        assert_eq!(shape_values(&items, "border"), [-2, -2]);
+        let Attribute::Resize(attribute) = &resize.attribute else {
+            panic!("expected a RESIZE attribute");
+        };
+        assert_eq!(attribute.mode, ResizeMode::Nearest);
+        assert_eq!(tensor(&items, "resize").shape, [1, 8, 8, 3]);
+        assert_eq!(
+            tensor(&items, "resize").dtype,
+            DType::Int8,
+            "{resize_dtype}"
+        );
+        assert!(ops_of(&items, Op::Rescale).is_empty());
+        assert_eq!(tensor(&items, "y").shape, [1, 3, 8, 8]);
+        assert_eq!(tensor(&items, "y").dtype, DType::Int8, "{resize_dtype}");
+        // No orphaned or duplicated parameter shapes.
+        assert_eq!(ops_of(&items, Op::ConstShape).len(), 3);
+        assert_shape_operands_declared(&items);
+    }
 }
 
 #[test]
@@ -753,9 +768,10 @@ fn int8_bilinear_resize_stays_int32_into_its_rescale() {
     let resize = single_op(&items, Op::Resize);
     assert_eq!(resize.inputs[0], "x_nhwc");
     // Offset and border hold the same values, so they share one pooled CONST_SHAPE.
-    for (input, values) in resize.inputs[1..]
-        .iter()
-        .zip([&[4, 2, 4, 2][..], &[0, 0][..], &[0, 0][..]])
+    for (input, values) in
+        resize.inputs[1..]
+            .iter()
+            .zip([&[4, 2, 4, 2][..], &[0, 0][..], &[0, 0][..]])
     {
         assert_eq!(shape_values(&items, input), values);
     }
@@ -820,7 +836,14 @@ fn aten_spatial_ops_send_explicit_graphs_to_stock() {
     ] {
         let mut ir = IrGraph::empty();
         let x = placeholder(&mut ir, "x", [1, 2, 4, 4], INT8);
-        let op = call(&mut ir, "op", target, vec![IrArg::Node(x)], [1, 2, 4, 4], INT8);
+        let op = call(
+            &mut ir,
+            "op",
+            target,
+            vec![IrArg::Node(x)],
+            [1, 2, 4, 4],
+            INT8,
+        );
         output(&mut ir, op);
         let (graph, store) = ingest(&ir, LayoutMode::Explicit);
         let error = try_serialize_graph(graph, &store).err().unwrap();
@@ -1019,7 +1042,10 @@ fn explicit_invariant_check_reports_dim_orders_and_stale_vals() {
     );
     let store = TensorStore::new();
     visitors::shape_utils::clear_shape_cache();
-    assert_eq!(check_explicit_layout_invariants("main", &graph, &store), Ok(()));
+    assert_eq!(
+        check_explicit_layout_invariants("main", &graph, &store),
+        Ok(())
+    );
 
     graph.node_mut(nhwc).unwrap().meta.tosa_dim_order = Some(smallvec![0, 2, 3, 1]);
     // IrSizeAdjustInput's slices keep the unsliced val (design F5).
@@ -1034,7 +1060,10 @@ fn explicit_invariant_check_reports_dim_orders_and_stale_vals() {
     visitors::shape_utils::clear_shape_cache();
     let error = check_explicit_layout_invariants("main", &graph, &store).unwrap_err();
     assert!(error.starts_with("explicit layout invariant broken in region 'main': "));
-    assert!(error.contains("'nhwc' has tosa_dim_order [0, 2, 3, 1]"), "{error}");
+    assert!(
+        error.contains("'nhwc' has tosa_dim_order [0, 2, 3, 1]"),
+        "{error}"
+    );
     assert!(
         error.contains("'slice' (Slice) has val [1, 4, 4, 3] but serializes as [1, 2, 4, 3]"),
         "{error}"
