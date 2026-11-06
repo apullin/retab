@@ -30,13 +30,22 @@
 //! line; each function names the rc4 lines it mirrors. rc4's region search
 //! defers nested visits onto a stack (`visit`, `:457-485`), which is not a
 //! recursive DFS, and that order decides which permutation a node reached on
-//! two paths gets; [`Detector::visit`] keeps the same stack discipline. torch.fx
-//! iterates `node.users` in insertion order, which after a retrace is graph
-//! order, so users are visited in graph order. (rc4's propagation passes do not
-//! retrace between their propagation steps, so when they call this pass FX's
-//! order can differ; that changes the result only for a node a search reaches
-//! on two paths with different permutations.) `all_input_nodes` is positional
-//! args, then kwargs sorted by name (RETAB keeps kwargs in a map).
+//! two paths gets; [`Detector::visit`] keeps the same stack discipline.
+//!
+//! Users are visited in torch.fx's order, as rc4 iterates `node.users`
+//! (`:433`, `:566`), which the ctx tracks (`LayoutCtx::users_in_fx_order`).
+//! That order is graph order after a retrace. rc4's propagation passes, this
+//! pass's only caller in the Arm pipeline, rewire nodes between their calls of
+//! it without one, and every rewire moves the rewired node to the end of its
+//! inputs' users. The order then decides more than which permutation a node
+//! reached on two paths gets: the sweep visits each permute's users in that
+//! order, so it also decides which of two regions sharing a boundary permute
+//! is found first and rewritten (`review_tests::a_rewired_user_order_decides_which_region_is_rewritten`;
+//! tests/fixtures/layout_replay/remove_permutes_user_order.txt replays rc4 on
+//! graphs whose users were reordered). A call that changes the graph ends
+//! with rc4's retrace (`:453`), which puts every node's users back in graph
+//! order (`LayoutCtx::retraced`). `all_input_nodes` is positional args, then
+//! kwargs sorted by name (RETAB keeps kwargs in a map).
 //!
 //! Where RETAB's IR differs from rc4's at this point of the pipeline:
 //!
@@ -325,6 +334,9 @@ pub(crate) fn remove_permutes_in_ctx(
         DeadCode::Local => eliminate_dead_from(ctx, rewrite.unused.iter().copied()),
     }
     refresh(ctx, &rewrite);
+    // rc4's retrace (`:453`) rebuilds the graph in node order, so every
+    // node's users are in graph order again.
+    ctx.retraced();
     true
 }
 
@@ -1412,12 +1424,9 @@ fn live_user_count(ctx: &LayoutCtx<'_>, id: NodeId) -> usize {
     ctx.graph().live_user_ids(id).len()
 }
 
-/// `node.users`, in graph order: torch.fx keeps users in insertion order,
-/// which is graph order after a retrace.
+/// `node.users`, in torch.fx's insertion order (see the module docs).
 fn users(ctx: &LayoutCtx<'_>, id: NodeId) -> Vec<NodeId> {
-    let mut users = ctx.graph().live_user_ids(id);
-    ctx.order().sort(&mut users);
-    users
+    ctx.users_in_fx_order(id)
 }
 
 /// `node.all_input_nodes`: positional args, then kwargs by name, each node

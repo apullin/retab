@@ -58,10 +58,9 @@ fn a_none_reduction_dim_fails_like_rc4() {
 /// invalidates the other. rc4 (tests/fixtures/remove_permutes_review/user_order.py):
 /// with users [relu, add] it leaves 2 permutes; with [add, relu] it rewrites
 /// U2's region and leaves 1 permute: `relu(P)`, `add(x, relu)`. No node is
-/// reached on two paths, which the module docs give as the only case where
-/// the order matters. The port sorts users by graph order and leaves 2.
+/// reached on two paths. The port visits users in the order the ctx tracks
+/// (`LayoutCtx::users_in_fx_order`) and matches rc4.
 #[test]
-#[ignore = "BUG: users are visited in graph order, not FX insertion order; after a rewire in the caller's ctx the port rewrites a different region than rc4"]
 fn a_rewired_user_order_decides_which_region_is_rewritten() {
     let mut g = LayoutGraph::new();
     let x = g.input("x", &[4, 4]);
@@ -91,6 +90,30 @@ fn a_rewired_user_order_decides_which_region_is_rewritten() {
     let args = |id| g.graph().node(id).args.iter().filter_map(IrArg::as_node).collect::<Vec<_>>();
     assert_eq!(args(u2), [x, u1], "rc4: add(x, relu)");
     assert_eq!(args(u1), [p], "rc4: relu(P)");
+}
+
+/// The same graph built with U1 reading P from the start, so P's users are
+/// in graph order, [relu, add]: rc4 (user_order.py, `rewire=False`) rewrites
+/// U1's region first, which takes E1 away from U2's, and leaves 2 permutes:
+/// `relu(x)`, `add(P, relu)` and U2's exit.
+#[test]
+fn users_in_graph_order_rewrite_the_first_region() {
+    let mut g = LayoutGraph::new();
+    let x = g.input("x", &[4, 4]);
+    g.input("y", &[4, 4]);
+    let p = g.permute(x, &[1, 0]);
+    let u1 = g.call(RELU, vec![node(p)]);
+    let e1 = g.permute(u1, &[1, 0]);
+    let u2 = g.call(ADD, vec![node(p), node(e1)]);
+    let e2 = g.permute(u2, &[1, 0]);
+    g.output(&[e2]);
+    let names = [x, p, u1, u2].map(|id| g.name(id));
+    assert!(IrRemovePermutesAroundElementwiseTosaOpsPass.run(g.graph_mut()));
+    let [x, p, u1, u2] = names.map(|name| g.id(&name));
+    assert_eq!(g.count(PERMUTE), 2, "rc4 leaves two permutes");
+    let args = |id| g.graph().node(id).args.iter().filter_map(IrArg::as_node).collect::<Vec<_>>();
+    assert_eq!(args(u1), [x], "rc4: relu(x)");
+    assert_eq!(args(u2), [p, u1], "rc4: add(P, relu)");
 }
 
 /// A residual stream like `tests::residual_stream`, with a squeeze/unsqueeze
