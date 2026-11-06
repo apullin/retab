@@ -135,30 +135,41 @@ def test_native_entry_points_refuse_unknown_layouts(entry_point):
         getattr(_native, entry_point)(None, pipeline_config=config)
 
 
-def test_missing_layout_means_dim_order_and_explicit_mode_sends_aten_convs_to_stock():
-    """A missing key means dim_order. Explicit mode still builds the dim-order pipeline
-    until APU-157 wires its passes, so its aten conv reaches the explicit-layout
-    serializer, which hands the graph to stock (P2 design X5)."""
-    from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
+def _main_block_ops(tosa: bytes) -> list[int]:
+    from tosa import TosaGraph
 
-    program = torch.export.export(
-        torch.nn.Sequential(torch.nn.Conv2d(2, 4, 3), torch.nn.ReLU()),
-        (torch.ones(1, 2, 8, 8),),
-    ).run_decompositions()
+    block = TosaGraph.TosaGraph.GetRootAs(bytearray(tosa), 0).Regions(0).Blocks(0)
+    return [block.Operators(i).Op() for i in range(block.OperatorsLength())]
+
+
+def test_missing_layout_means_dim_order_and_explicit_mode_rewrites_the_conv():
+    """A missing key means dim_order. Explicit mode builds rc4's pipeline (APU-157): the
+    conv becomes a channels-last TOSA CONV2D on a pre-permuted weight between explicit
+    TRANSPOSEs, so nothing reaches the serializer's aten-conv guard (P2 design X5) and
+    the graph stays with RETAB."""
+    from executorch.backends.arm.tosa.compile_spec import TosaCompileSpec
+    from tosa import Op
+
+    # Frozen parameters, as a lowered program has them: the importer reads the weight's
+    # data, which IrRewriteConv pre-permutes.
+    module = torch.nn.Sequential(torch.nn.Conv2d(2, 4, 3), torch.nn.ReLU()).requires_grad_(False)
+    program = torch.export.export(module, (torch.ones(1, 2, 8, 8),)).run_decompositions()
     config = rp._build_pipeline_config(TosaCompileSpec("TOSA-1.0+INT"))
     del config["layout"]
     tosa = []
-    for layout in [None, "dim_order"]:
+    for layout in [None, "dim_order", "explicit"]:
         layout_config = config if layout is None else {**config, "layout": layout}
         _native.run_fx_passes(program.graph_module, program, pipeline_config=layout_config)
         tosa.append(_native.ingest_and_serialize())
     assert tosa[0] and tosa[0] == tosa[1]
 
-    explicit = {**config, "layout": "explicit"}
-    _native.run_fx_passes(program.graph_module, program, pipeline_config=explicit)
-    with pytest.raises(RuntimeError) as error:
-        _native.ingest_and_serialize()
-    assert rp._native_fallback_reason(error.value) == "aten spatial op in explicit layout"
+    ops = _main_block_ops(tosa[2])
+    assert tosa[2] != tosa[0]
+    assert ops.count(Op.Op.CONV2D) == 1
+    # The input permute to NHWC and the output permute back; the weight is a constant.
+    assert ops.count(Op.Op.TRANSPOSE) == 2
+    conv = ops.index(Op.Op.CONV2D)
+    assert ops.index(Op.Op.TRANSPOSE) < conv < len(ops) - 1 - ops[::-1].index(Op.Op.TRANSPOSE)
 
 
 @pytest.mark.parametrize("recursive", [False, True])

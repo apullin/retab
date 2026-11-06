@@ -41,7 +41,7 @@
 //! for them. Like every `ArmOpTargetedPass`, each skips a graph without its
 //! target.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeId, NodeMeta, NodeOp};
 use crate::fx_meta::TensorFacts;
@@ -116,7 +116,7 @@ fn decompose_each(
     rewrite: impl Fn(&mut LayoutCtx<'_>, NodeId, &Decomposed) -> NodeId,
 ) -> bool {
     // `ArmOpTargetedPass` skips a graph without a target op.
-    let candidates: Vec<NodeId> = graph
+    let candidates: HashSet<NodeId> = graph
         .live_call_function_ids()
         .into_iter()
         .filter(|&id| is_call_of(graph, id, target) && wanted(&graph.node(id).meta))
