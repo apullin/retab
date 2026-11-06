@@ -750,9 +750,8 @@ fn apply_explicit_weight_rewrite(ir: &mut IrGraph, rewrite: ExplicitWeightRewrit
 /// RESCALE, so it is not requantized and stays the branch's int8 input, which
 /// rc4's kernel rejects; one behind a RESCALE that does not resolve to a
 /// constant makes rc4 raise in `_resolve_control_flow_constant`. A runtime
-/// int32 bias, which only a raw int32 operand can give, goes to stock as well:
-/// rc4 would lower it as a runtime bias, which Vela rejects, and stock gives
-/// the delegate rc4's lowering either way.
+/// int32 bias (a raw int32 operand, say) goes to stock as well: rc4 would
+/// lower it as a runtime bias, and stock gives the delegate rc4's lowering.
 fn non_int32_bias(ir: &IrGraph, conv: &IrNode) -> Option<String> {
     if !is_quantized_conv(&conv.meta) {
         return None;
@@ -805,13 +804,15 @@ fn non_int32_bias(ir: &IrGraph, conv: &IrNode) -> Option<String> {
 /// Captures of a while loop's regions go to stock too (critique B7): only cond
 /// invocations are followed. rc4 resolves while-loop captures as well, through
 /// the operand `_regularize_submodule` records on every region placeholder
-/// (`tosa/backend.py:222-238`), so stock lowers such a delegate exactly as rc4
-/// does. Resolving them here would take while semantics rc4 does not model:
+/// (`tosa/backend.py:222-238`), so stock gives such a delegate exactly rc4's
+/// outcome. Resolving them here would take while semantics rc4 does not model:
 /// torch.export makes a body's captured parameters carried inputs, which the
 /// body hands back through a clone, and a carried input holds its initial
 /// value on every iteration only if each one passes it through unchanged. rc4
 /// resolves any carried input to its initial value; RETAB would have to prove
-/// the pass-through. No rc4 op test has a conv in a while body.
+/// the pass-through. For that form rc4 then raises anyway: RewriteConvPass
+/// cannot put the rewritten weight ahead of the region's user inputs. No rc4
+/// op test has a conv in a while body.
 pub(crate) fn rewrite_explicit_captured_conv_operands(
     parent: &IrGraph,
     submodules: &mut BTreeMap<String, StashedPipeline>,
