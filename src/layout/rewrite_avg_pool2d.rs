@@ -21,15 +21,19 @@
 //! - **Zero points** (`:57-67`): rc4's `call_scalar` materializes each as
 //!   `full((1,), zp, dtype=val.dtype, device=val.device)` carrying the pool's
 //!   meta (`arm_pass.py:177-205`), input zero point first. The port does the
-//!   same (critique B2, A7): IrMaterializeConstantsPass, at rc4's
-//!   ComputeConstantOpsAOTPass slot right after this pass (`:699`), or else
-//!   IrFuseZeroInputConstantsEffectPass's effect at ingest, then folds each
-//!   `full` into a constant quantized with the pool's output qparams, which is
-//!   rc4's quirk (`fuse_constant_ops_pass.py:327-332`). Because the zero points
-//!   are call nodes, the rewrite needs no constant of its own and works
-//!   unchanged in a control-flow region. `dtype` is the pool's val dtype as
-//!   rc4's fake tensor has it ([`dtype::value_dtype`]); the device, which
-//!   RETAB's importer reads as None, is left out.
+//!   same (critique B2, A7). IrMaterializeConstantsPass, which takes rc4's
+//!   ComputeConstantOpsAOTPass slot right after this pass (`:699`), then folds
+//!   each `full` into a constant as that pass does
+//!   (`fuse_constant_ops_pass.py:327-335`, [`FullQParams::Rc4`]): quantized
+//!   with the pool's output qparams when it has them, which is rc4's quirk,
+//!   and holding the zero point itself when it has none, input qparams or
+//!   not. Explicit mode needs that pass after this one: dim-order's
+//!   IrFuseZeroInputConstantsEffectPass, at ingest, would quantize the zero
+//!   points of a pool without output qparams with its input qparams. Because
+//!   the zero points are call nodes, the rewrite needs no constant of its own
+//!   and works unchanged in a control-flow region. `dtype` is the pool's val
+//!   dtype as rc4's fake tensor has it ([`dtype::value_dtype`]); the device,
+//!   which RETAB's importer reads as None, is left out.
 //! - **Accumulator** (`:69-75`): int32 for an int8 or int16 input, float16 for
 //!   fp8 and float32 otherwise, from the input dtype rc4's fake tensor has
 //!   ([`dtype::operand_dtype`]).
@@ -54,6 +58,7 @@
 //! other passes create TOSA ops (`IrGraph::add_rescale`).
 //!
 //! [`adjust_pooling_pad_if_needed`]: crate::layout::pool::adjust_pooling_pad_if_needed
+//! [`FullQParams::Rc4`]: crate::fx_fuse_zero_input_constants_ir::FullQParams::Rc4
 //! [`dtype::value_dtype`]: crate::layout::dtype::value_dtype
 //! [`dtype::operand_dtype`]: crate::layout::dtype::operand_dtype
 //! [`meta::call_operator`]: crate::layout::meta::call_operator
@@ -307,7 +312,7 @@ fn rewrite(ctx: &mut LayoutCtx<'_>, id: NodeId, plan: &Plan) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx_ir::{NodeMeta, QParam, TensorSource};
+    use crate::fx_ir::{NodeMeta, QParam, QParamMap, TensorSource};
     use crate::graph::ir::DType;
     use crate::layout::constants::IrMaterializeConstantsPass;
     use crate::layout::testing::{ints, node, LayoutGraph, PERMUTE};
@@ -585,36 +590,63 @@ mod tests {
     }
 
     /// rc4's ComputeConstantOpsAOTPass quantizes a `full` only when the node
-    /// has output qparams (`fuse_constant_ops_pass.py:325-334`); otherwise it
+    /// has output qparams (`fuse_constant_ops_pass.py:327-335`); otherwise it
     /// evaluates `full((1,), zp, dtype=int8)` as it is. rc4's
     /// RewriteAvgPool2dPass then ComputeConstantOpsAOTPass on an int8 pool
-    /// with input qparams (0.1, -3) and an empty output map gives the zero
-    /// points int8 [-3] and [0] (run in .venv-et16, review of APU-156).
-    /// IrMaterializeConstants' planner (`plan_zero_input_full`'s `int_qparam`)
-    /// falls back to the input qparams instead and quantizes both:
-    /// round(-3 / 0.1) - 3 = -33 and round(0 / 0.1) - 3 = -3. The module docs'
-    /// "quantized with the pool's output qparams, which is rc4's quirk" holds
-    /// only when the pool has output qparams.
+    /// give (run in .venv-et16, review of APU-156):
+    ///
+    /// - input qparams (0.1, -3) and an empty output map: int8 [-3] and [0];
+    /// - output qparams (0.2, 5) and an empty input map: q(0) = 5 and
+    ///   q(5) = 30.
+    ///
+    /// IrMaterializeConstants gives the same, with the output map empty or
+    /// absent (RETAB's import leaves it out) and in a region. The dim-order
+    /// planner would quantize the first pool's zero points with its input
+    /// qparams: round(-3 / 0.1) - 3 = -33 and round(0 / 0.1) - 3 = -3.
     #[test]
-    #[ignore = "BUG: a pool without output qparams gets zero points quantized with its input \
-                qparams; rc4 leaves them unquantized"]
     fn zero_points_of_a_pool_without_output_qparams_stay_unquantized() {
-        let (mut g, name) = pool_graph(
-            &[1, 3, 8, 8],
-            I8,
-            vec![ints(&[2, 2]), ints(&[2, 2])],
-            &[1, 3, 4, 4],
-            Some(qparam(0.1, -3, I8)),
-            None,
-        );
-        assert!(IrRewriteAvgPool2dPass.run(g.graph_mut()));
-        assert!(IrMaterializeConstantsPass { in_region: false }.run(g.graph_mut()));
-        let pool = by_name(&g, &format!("{name}_tosa"));
-        for (index, value) in [(1, -3i8), (2, 0i8)] {
-            let id = pool.args[index].as_node().unwrap();
-            let tensor = g.graph().node(id).tensor.as_ref().expect("constant data");
-            assert_eq!(tensor.data.dtype, DType::Int8);
-            assert_eq!(tensor.data.data, vec![value as u8], "zero point {index}");
+        let zero_points = |iq: Option<QParam>, oq: Option<QParam>, empty_map, in_region| {
+            let (mut g, name) = pool_graph(
+                &[1, 3, 8, 8],
+                I8,
+                vec![ints(&[2, 2]), ints(&[2, 2])],
+                &[1, 3, 4, 4],
+                iq,
+                oq,
+            );
+            if empty_map {
+                let id = g.id(&name);
+                let meta = &mut g.graph_mut().node_mut(id).meta;
+                if meta.input_qparams().is_none() {
+                    meta.set_input_qparams(QParamMap::new());
+                }
+                if meta.output_qparams().is_none() {
+                    meta.set_output_qparams(QParamMap::new());
+                }
+            }
+            assert!(IrRewriteAvgPool2dPass.run(g.graph_mut()));
+            assert!(IrMaterializeConstantsPass { in_region }.run(g.graph_mut()));
+            let pool = by_name(&g, &format!("{name}_tosa"));
+            [1, 2].map(|index| {
+                let id = pool.args[index].as_node().unwrap();
+                let tensor = g.graph().node(id).tensor.as_ref().expect("constant data");
+                let data = &tensor.data;
+                assert_eq!(
+                    (data.dtype, data.shape.as_slice(), data.data.len()),
+                    (DType::Int8, &[1][..], 1),
+                    "zero point {index}"
+                );
+                data.data[0] as i8
+            })
+        };
+        for empty_map in [false, true] {
+            for in_region in [false, true] {
+                let case = format!("empty_map={empty_map} in_region={in_region}");
+                let input_only = zero_points(Some(qparam(0.1, -3, I8)), None, empty_map, in_region);
+                assert_eq!(input_only, [-3, 0], "input qparams only, {case}");
+                let output_only = zero_points(None, Some(qparam(0.2, 5, I8)), empty_map, in_region);
+                assert_eq!(output_only, [5, 30], "output qparams only, {case}");
+            }
         }
     }
 

@@ -712,8 +712,8 @@ fn rewrite_upsample_matches_rc4() {
 }
 
 // S7 (APU-156): IrRewriteAvgPool2d emits `aten.full` zero points, as rc4's
-// RewriteAvgPool2dPass does, for IrMaterializeConstantsPass (or
-// IrFuseZeroInputConstantsEffectPass at ingest) to materialize (critique B2).
+// RewriteAvgPool2dPass does, for IrMaterializeConstantsPass to materialize as
+// rc4's ComputeConstantOpsAOTPass does (critique B2).
 #[test]
 fn rewrite_avg_pool2d_matches_rc4() {
     replay::check(&IrRewriteAvgPool2dPass, REWRITE_AVG_POOL2D);
