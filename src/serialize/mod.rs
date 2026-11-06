@@ -5,6 +5,8 @@ mod attribute_flatbuffer;
 mod collection;
 mod constant_pool;
 #[cfg(test)]
+mod explicit_control_flow_tests;
+#[cfg(test)]
 mod explicit_layout_tests;
 #[cfg(test)]
 mod explicit_pool_rewrite_tests;

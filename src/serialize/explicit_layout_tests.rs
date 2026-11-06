@@ -1327,9 +1327,9 @@ fn explicit_transposes_take_their_shape_from_their_input() {
 #[test]
 fn explicit_graphs_carrying_dim_orders_go_to_stock() {
     // Explicit graphs keep their layout in vals. A dim order means dim-order logic laid out
-    // the graph: until S8 the control-flow contracts mark the rank-4 users of a cond NHWC in
-    // either mode (a neg stands in for the cond's getitem), and until S6
-    // RETAB_LAYOUT=explicit runs IrToTosaMemoryFormat. The explicit gates switch off the
+    // the graph: before S8 the control-flow contracts marked the rank-4 users of a cond
+    // NHWC in either mode (a neg stands in for the cond's getitem), and before S6
+    // RETAB_LAYOUT=explicit ran IrToTosaMemoryFormat. The explicit gates switch off the
     // dim-order rules such a graph needs, so it goes to stock in every build, not only
     // under RETAB_DEBUG (D1).
     let build = |spatial: bool| {
