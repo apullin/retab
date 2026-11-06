@@ -161,7 +161,7 @@ pub struct NodeMeta {
     tensor: Option<TensorFacts>,
     quant: QuantFacts,
     layout: LayoutFacts,
-    /// Arbitrary extra meta keys for passthrough (skip_size_adjust, arm_constant_placeholder, etc).
+    /// Arbitrary extra meta keys for passthrough (skip_size_adjust, do_not_fuse_duplicate, etc).
     pub extras: HashMap<String, MetaValue>,
 }
 
@@ -250,7 +250,6 @@ impl NodeMeta {
 
         let mut extras = HashMap::new();
         for key in [
-            "arm_constant_placeholder",
             "arm_control_flow_placeholder",
             "arm_control_flow_parent_output_user",
             "do_not_fuse_duplicate",
