@@ -9,6 +9,9 @@ mod contracts;
 mod metadata;
 
 pub(crate) use assembly::append_subgraphs_from_ir;
+// Explicit-mode serializer tests convert regions without linking Python (APU-135 S8).
+#[cfg(test)]
+pub(crate) use assembly::try_append_subgraphs_from_ir;
 pub(crate) use contracts::{
     apply_boundary_contracts, apply_pre_submodule_qparam_propagation_ir,
     snapshot_pre_pass_qparams_ir,
@@ -89,6 +92,81 @@ pub(crate) fn collect_region_metadata(
     }
 
     (while_cond_graph_names, while_body_input_counts)
+}
+
+/// Control-flow hierarchies for the contract tests below and the explicit-mode
+/// serializer tests (APU-135 S8).
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use std::collections::BTreeMap;
+
+    use crate::fx_ir::{IrArg, IrGraph};
+    use crate::lowering_effects::LoweringEffectBatch;
+    use crate::test_ir::{call, output, placeholder, qparam};
+    use crate::StashedPipeline;
+
+    /// The val of every tensor in [`rank4_hierarchy`].
+    pub(crate) const RANK4: [i64; 4] = [2, 3, 2, 2];
+
+    /// rc4's test_cond.py and test_while.py cases with rank-4 inputs, reduced to the
+    /// boundary: `x` (int8, quantized) feeds a cond or a while loop whose rank-4 output,
+    /// `getitem`, is the parent's output. Each region returns its input, `arg0_1`.
+    pub(crate) fn rank4_hierarchy(
+        while_loop: bool,
+    ) -> (IrGraph, BTreeMap<String, StashedPipeline>) {
+        let qp = qparam(0.25, 3, "torch.int8");
+        let mut parent = IrGraph::empty();
+        let x = placeholder(&mut parent, "x", RANK4, "torch.int8");
+        parent.node_mut(x).meta.set_both_qparams(qp.clone());
+        let (target, args, regions) = if while_loop {
+            (
+                "while_loop",
+                vec![
+                    IrArg::Str("cond_fn".into()),
+                    IrArg::Str("body_fn".into()),
+                    IrArg::List(vec![IrArg::Node(x)]),
+                    IrArg::List(Vec::new()),
+                ],
+                ["cond_fn", "body_fn"],
+            )
+        } else {
+            let pred = placeholder(&mut parent, "pred", [1], "torch.bool");
+            (
+                "torch.ops.higher_order.cond",
+                vec![
+                    IrArg::Node(pred),
+                    IrArg::Str("true_graph_0".into()),
+                    IrArg::Str("false_graph_0".into()),
+                    IrArg::List(vec![IrArg::Node(x)]),
+                ],
+                ["true_graph_0", "false_graph_0"],
+            )
+        };
+        let cf = call(&mut parent, "cf", target, args, RANK4, "torch.int8");
+        assert!(parent.node(cf).is_control_flow(), "fixture: {target}");
+        let getitem = call(
+            &mut parent,
+            "getitem",
+            "getitem",
+            vec![IrArg::Node(cf), IrArg::Int(0)],
+            RANK4,
+            "torch.int8",
+        );
+        parent.node_mut(getitem).meta.set_both_qparams(qp.clone());
+        output(&mut parent, getitem);
+
+        let submodules = regions
+            .into_iter()
+            .map(|name| {
+                let mut region = IrGraph::empty();
+                let arg = placeholder(&mut region, "arg0_1", RANK4, "torch.int8");
+                region.node_mut(arg).meta.set_both_qparams(qp.clone());
+                output(&mut region, arg);
+                (name.to_string(), (region, LoweringEffectBatch::default()))
+            })
+            .collect();
+        (parent, submodules)
+    }
 }
 
 #[cfg(test)]
@@ -185,58 +263,75 @@ mod tests {
         assert_eq!((inner.carried, inner.additional), (2, 1));
     }
 
-    #[test]
-    fn region_boundaries_keep_logical_shapes_through_layout_transposes() {
+    /// A parent that runs a while loop over a layout TRANSPOSE of `x` (rank 4, int8,
+    /// quantized at the returned qparam), laid out as dim-order mode lays it out: the
+    /// TRANSPOSE to NHWC, then, if `restore_logical_layout`, one back to NCHW. Returns
+    /// the parent, the qparam and the val of the loop's operand.
+    fn while_over_layout_transposes(
+        restore_logical_layout: bool,
+    ) -> (IrGraph, crate::fx_ir::QParam, Vec<i64>) {
         use crate::test_ir::{call, placeholder, qparam};
 
-        for restore_logical_layout in [false, true] {
-            let mut parent = IrGraph::empty();
-            let x = placeholder(&mut parent, "x", [2, 3, 4, 5], "torch.int8");
-            let qp = qparam(0.25, 3, "torch.int8");
-            parent.node_mut(x).meta.set_both_qparams(qp.clone());
-            parent.node_mut(x).meta.set_tosa_dim_order(vec![0, 1, 2, 3]);
-            let mut input = call(
+        let mut parent = IrGraph::empty();
+        let x = placeholder(&mut parent, "x", [2, 3, 4, 5], "torch.int8");
+        let qp = qparam(0.25, 3, "torch.int8");
+        parent.node_mut(x).meta.set_both_qparams(qp.clone());
+        parent.node_mut(x).meta.set_tosa_dim_order(vec![0, 1, 2, 3]);
+        let mut input = call(
+            &mut parent,
+            "x_input_layout",
+            "backend.tosa.TRANSPOSE.default",
+            vec![IrArg::Node(x), crate::fx_ir::i64_list_arg(&[0, 2, 3, 1])],
+            [2, 4, 5, 3],
+            "torch.int8",
+        );
+        parent.node_mut(input).meta.set_both_qparams(qp.clone());
+        parent
+            .node_mut(input)
+            .meta
+            .set_tosa_dim_order(vec![0, 2, 3, 1]);
+        if restore_logical_layout {
+            input = call(
                 &mut parent,
-                "x_input_layout",
+                "restore_layout",
                 "backend.tosa.TRANSPOSE.default",
-                vec![IrArg::Node(x), crate::fx_ir::i64_list_arg(&[0, 2, 3, 1])],
-                [2, 4, 5, 3],
+                vec![
+                    IrArg::Node(input),
+                    crate::fx_ir::i64_list_arg(&[0, 3, 1, 2]),
+                ],
+                [2, 3, 4, 5],
                 "torch.int8",
             );
             parent.node_mut(input).meta.set_both_qparams(qp.clone());
             parent
                 .node_mut(input)
                 .meta
-                .set_tosa_dim_order(vec![0, 2, 3, 1]);
+                .set_tosa_dim_order(vec![0, 1, 2, 3]);
+        }
+        let operand_shape = parent.node_shape(input).unwrap().to_vec();
+        add_while(
+            &mut parent,
+            "loop",
+            "cond",
+            "body",
+            vec![IrArg::Node(input)],
+            Vec::new(),
+        );
+        (parent, qp, operand_shape)
+    }
+
+    #[test]
+    fn region_boundaries_keep_logical_shapes_through_layout_transposes() {
+        use crate::pipeline_config::LayoutMode;
+        use crate::test_ir::placeholder;
+
+        for restore_logical_layout in [false, true] {
+            let (parent, qp, _) = while_over_layout_transposes(restore_logical_layout);
             let expected_order = if restore_logical_layout {
-                input = call(
-                    &mut parent,
-                    "restore_layout",
-                    "backend.tosa.TRANSPOSE.default",
-                    vec![
-                        IrArg::Node(input),
-                        crate::fx_ir::i64_list_arg(&[0, 3, 1, 2]),
-                    ],
-                    [2, 3, 4, 5],
-                    "torch.int8",
-                );
-                parent.node_mut(input).meta.set_both_qparams(qp.clone());
-                parent
-                    .node_mut(input)
-                    .meta
-                    .set_tosa_dim_order(vec![0, 1, 2, 3]);
                 vec![0, 1, 2, 3]
             } else {
                 vec![0, 2, 3, 1]
             };
-            add_while(
-                &mut parent,
-                "loop",
-                "cond",
-                "body",
-                vec![IrArg::Node(input)],
-                Vec::new(),
-            );
             let parent = (parent, LoweringEffectBatch::default());
             let mut region = IrGraph::empty();
             let ph = placeholder(&mut region, "arg", [2, 3, 4, 5], "torch.float32");
@@ -246,6 +341,7 @@ mod tests {
                     &mut region,
                     Some(&parent),
                     &BTreeMap::new(),
+                    LayoutMode::DimOrder,
                 ) > 0
             );
             assert_eq!(region.node_shape(ph), Some([2, 3, 4, 5].as_slice()));
@@ -260,6 +356,131 @@ mod tests {
                 .output_qparam()
                 .unwrap()
                 .same_exact_affine_dtype(&qp));
+        }
+    }
+
+    /// Explicit mode (APU-135 P2 design §4.3.1): a region placeholder takes the val of
+    /// the operand bound to it, as rc4's `_regularize_submodule` does, and the boundary
+    /// writes no dim order, before the region's pipeline and at serialization alike. The
+    /// parent is the dim-order fixture above, dim orders and TOSA TRANSPOSEs included,
+    /// which explicit graphs never have: explicit mode neither reconstructs a logical
+    /// shape through a TRANSPOSE nor copies an operand's dim order.
+    #[test]
+    fn explicit_region_boundaries_take_operand_vals_without_dim_orders() {
+        use crate::pipeline_config::LayoutMode;
+        use crate::test_ir::{output, placeholder};
+
+        let region_with_input = || {
+            let mut region = IrGraph::empty();
+            let ph = placeholder(&mut region, "arg", [2, 3, 4, 5], "torch.float32");
+            output(&mut region, ph);
+            (region, ph)
+        };
+        for restore_logical_layout in [false, true] {
+            let (parent, qp, operand_shape) = while_over_layout_transposes(restore_logical_layout);
+            let check = |region: &IrGraph, ph, stage: &str| {
+                let meta = &region.node(ph).meta;
+                assert_eq!(meta.val_shape(), Some(operand_shape.as_slice()), "{stage}");
+                assert_eq!(meta.val_dtype(), Some("torch.int8"), "{stage}");
+                assert_eq!(meta.tosa_dim_order(), None, "{stage}");
+                assert_eq!(meta.val_dim_order(), None, "{stage}");
+                assert!(
+                    meta.output_qparam().unwrap().same_exact_affine_dtype(&qp),
+                    "{stage}"
+                );
+            };
+
+            // Before the region's pipeline runs.
+            let stashed_parent = (parent, LoweringEffectBatch::default());
+            let (mut region, ph) = region_with_input();
+            assert!(
+                apply_pre_submodule_qparam_propagation_ir(
+                    Some("cond"),
+                    &mut region,
+                    Some(&stashed_parent),
+                    &BTreeMap::new(),
+                    LayoutMode::Explicit,
+                ) > 0
+            );
+            check(&region, ph, "pre-pass propagation");
+
+            // At serialization.
+            let (mut parent, _, _) = while_over_layout_transposes(restore_logical_layout);
+            let mut submodules: BTreeMap<String, StashedPipeline> = ["cond", "body"]
+                .into_iter()
+                .map(|name| {
+                    let (region, _) = region_with_input();
+                    (name.to_string(), (region, LoweringEffectBatch::default()))
+                })
+                .collect();
+            assert!(
+                apply_boundary_contracts(&mut parent, &mut submodules, LayoutMode::Explicit) > 0
+            );
+            for (name, (region, _)) in &submodules {
+                let ph = region.live_placeholder_ids()[0];
+                check(region, ph, &format!("serialization, {name}"));
+            }
+        }
+    }
+
+    /// Dim-order mode lays a region's rank-4 tensors out channels-last, so the boundary
+    /// contracts give a parent's rank-4 cond or while output the NHWC dim order. Explicit
+    /// mode keeps it in its val, as rc4 does (APU-135 P2 design §4.3.1): no node in the
+    /// hierarchy gets a dim order, which explicit serialization would send to stock. The
+    /// rest of the contract still applies in both modes.
+    #[test]
+    fn only_dim_order_mode_lays_rank4_control_flow_outputs_out_nhwc() {
+        use crate::pipeline_config::LayoutMode;
+        use crate::test_ir::live_node;
+        use fixtures::RANK4;
+
+        for while_loop in [false, true] {
+            for layout in [LayoutMode::DimOrder, LayoutMode::Explicit] {
+                let case = format!("while_loop={while_loop} {layout:?}");
+                let (mut parent, mut submodules) = fixtures::rank4_hierarchy(while_loop);
+                apply_boundary_contracts(&mut parent, &mut submodules, layout);
+
+                let getitem = &live_node(&parent, "getitem").meta;
+                assert_eq!(getitem.val_shape(), Some(RANK4.as_slice()), "{case}");
+                let parent_output_user = getitem.extra_bool("arm_control_flow_parent_output_user");
+                match layout {
+                    LayoutMode::DimOrder => {
+                        assert_eq!(
+                            getitem.tosa_dim_order(),
+                            Some([0, 2, 3, 1].as_slice()),
+                            "{case}"
+                        );
+                        assert_eq!(parent_output_user, Some(true), "{case}");
+                    }
+                    LayoutMode::Explicit => {
+                        assert_eq!(parent_output_user, None, "{case}");
+                        let graphs = std::iter::once(("main", &parent)).chain(
+                            submodules
+                                .iter()
+                                .map(|(name, (region, _))| (name.as_str(), region)),
+                        );
+                        for (graph_name, graph) in graphs {
+                            for node in graph.live_nodes() {
+                                assert_eq!(
+                                    node.meta.tosa_dim_order(),
+                                    None,
+                                    "{case}: {graph_name} {}",
+                                    node.name
+                                );
+                            }
+                        }
+                    }
+                }
+                for (name, (region, _)) in &submodules {
+                    let arg = &live_node(region, "arg0_1").meta;
+                    assert_eq!(
+                        arg.extra_bool("arm_control_flow_placeholder"),
+                        Some(true),
+                        "{case}: {name}"
+                    );
+                    assert_eq!(arg.val_shape(), Some(RANK4.as_slice()), "{case}");
+                }
+            }
         }
     }
 

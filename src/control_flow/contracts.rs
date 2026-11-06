@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::fx_ir;
 use crate::fx_target::is_tosa_transpose_target;
 use crate::graph::ir::DType;
+use crate::pipeline_config::LayoutMode;
 use crate::StashedPipeline;
 
 use super::{collect_region_metadata, metadata, region_name_from_ir_arg};
@@ -165,11 +166,25 @@ fn resolve_parent_arg_ids_ir(node: &fx_ir::IrNode) -> Vec<fx_ir::NodeId> {
     Vec::new()
 }
 
+/// The meta a region placeholder takes from the operand bound to it, and the dim order
+/// that the boundary gives it.
+///
+/// Explicit mode: a val is the tensor as TOSA sees it, on both sides of the boundary,
+/// and no node has a dim order. The placeholder takes the operand's val as it is, as
+/// rc4's `_regularize_submodule` gives region IO the parent's post-pass vals
+/// (`backends/arm/tosa/backend.py:204-249`), and the boundary writes no dim order. The
+/// TOSA TRANSPOSE case below reconstructs a logical shape under a physical dim order,
+/// which is dim-order logic; it is inert in explicit mode, where permutes stay
+/// `aten.permute_copy` until the serializer (P2 design §1c, §4.3.1).
 fn boundary_placeholder_meta(
     ir: &fx_ir::IrGraph,
     parent_id: fx_ir::NodeId,
+    layout: LayoutMode,
 ) -> (fx_ir::NodeMeta, Option<Vec<usize>>) {
     let parent_arg = ir.node(parent_id);
+    if layout == LayoutMode::Explicit {
+        return (parent_arg.meta.clone(), None);
+    }
     let fallback = (
         parent_arg.meta.clone(),
         parent_arg.meta.cloned_tosa_dim_order(),
@@ -181,7 +196,7 @@ fn boundary_placeholder_meta(
     else {
         return fallback;
     };
-    let (input_meta, input_order) = boundary_placeholder_meta(ir, input_id);
+    let (input_meta, input_order) = boundary_placeholder_meta(ir, input_id, layout);
     let Some(shape) = input_meta.val_shape() else {
         return fallback;
     };
@@ -212,6 +227,7 @@ fn collect_boundary_contracts_for_graph(
     parent_region: Option<&str>,
     contracts: &mut Vec<BoundaryContract>,
     while_body_regions: &mut BTreeSet<String>,
+    layout: LayoutMode,
 ) {
     for node_id in ir.live_node_ids() {
         let node = ir.node(node_id);
@@ -256,7 +272,7 @@ fn collect_boundary_contracts_for_graph(
                         })
                         .or_else(|| metadata::extract_effective_qparam_ir(ir, arg_id))
                 };
-                let (meta, boundary_dim_order) = boundary_placeholder_meta(ir, arg_id);
+                let (meta, boundary_dim_order) = boundary_placeholder_meta(ir, arg_id, layout);
                 Some(BoundaryInputMeta {
                     meta,
                     boundary_dim_order,
@@ -431,6 +447,11 @@ pub(crate) fn snapshot_pre_pass_qparams_ir(graph: &mut fx_ir::IrGraph) -> u32 {
     saved
 }
 
+/// Dim-order mode lays a region's rank-4 tensors out channels-last, so a parent's rank-4
+/// cond or while output arrives NHWC: give each such getitem that dim order, and mark it
+/// for the main-output TRANSPOSE back to the user's layout (`serialize::output_layout`).
+/// Explicit mode never calls this: there a region's outputs keep their vals, as rc4's do
+/// (P2 design §4.3.1).
 fn annotate_parent_rank4_dim_order_ir(graph: &mut fx_ir::IrGraph) -> u32 {
     const NHWC_DIM_ORDER: [usize; 4] = [0, 2, 3, 1];
 
@@ -524,6 +545,7 @@ fn find_boundary_contract_for_region(
     region_name: &str,
     parent: Option<&StashedPipeline>,
     submodules: &BTreeMap<String, StashedPipeline>,
+    layout: LayoutMode,
 ) -> Option<(BoundaryContract, bool)> {
     let mut contracts = Vec::new();
     let mut while_body_regions = BTreeSet::new();
@@ -534,6 +556,7 @@ fn find_boundary_contract_for_region(
             None,
             &mut contracts,
             &mut while_body_regions,
+            layout,
         );
     }
     for (region, (ir, _)) in submodules.iter() {
@@ -542,6 +565,7 @@ fn find_boundary_contract_for_region(
             Some(region.as_str()),
             &mut contracts,
             &mut while_body_regions,
+            layout,
         );
     }
 
@@ -554,17 +578,22 @@ fn find_boundary_contract_for_region(
         })
 }
 
+/// Before a region's pipeline runs: give its placeholders the vals and qparams of the
+/// operands bound to them, read from the stashed post-pipeline graphs that invoke it.
+/// `layout` is the hierarchy's layout mode (Python passes one pipeline config to the
+/// parent and to every region).
 pub(crate) fn apply_pre_submodule_qparam_propagation_ir(
     region_name: Option<&str>,
     graph: &mut fx_ir::IrGraph,
     parent: Option<&StashedPipeline>,
     submodules: &BTreeMap<String, StashedPipeline>,
+    layout: LayoutMode,
 ) -> u32 {
     let Some(region_name) = region_name else {
         return 0;
     };
     let Some((contract, is_while_body)) =
-        find_boundary_contract_for_region(region_name, parent, submodules)
+        find_boundary_contract_for_region(region_name, parent, submodules, layout)
     else {
         return 0;
     };
@@ -783,15 +812,25 @@ fn strip_while_cond_output_rescales_ir(graph: &mut fx_ir::IrGraph) -> u32 {
     stripped
 }
 
+/// At serialization: align every control-flow region's IO with the graph that invokes
+/// it (boundary vals, qparams and RESCALEs), then resolve the conv constants the cond
+/// branches capture. `layout` is the hierarchy's layout mode.
 pub(crate) fn apply_boundary_contracts(
     parent_ir: &mut fx_ir::IrGraph,
     submodules: &mut BTreeMap<String, StashedPipeline>,
+    layout: LayoutMode,
 ) -> u32 {
     let mut contracts = Vec::new();
     let mut output_contracts = Vec::new();
     let mut while_body_regions = BTreeSet::new();
     let (while_cond_regions, _) = collect_region_metadata(parent_ir, submodules);
-    collect_boundary_contracts_for_graph(parent_ir, None, &mut contracts, &mut while_body_regions);
+    collect_boundary_contracts_for_graph(
+        parent_ir,
+        None,
+        &mut contracts,
+        &mut while_body_regions,
+        layout,
+    );
     collect_output_contracts_for_graph(parent_ir, None, &mut output_contracts);
     for (region, (ir, _)) in submodules.iter() {
         collect_boundary_contracts_for_graph(
@@ -799,13 +838,17 @@ pub(crate) fn apply_boundary_contracts(
             Some(region.as_str()),
             &mut contracts,
             &mut while_body_regions,
+            layout,
         );
         collect_output_contracts_for_graph(ir, Some(region.as_str()), &mut output_contracts);
     }
     contracts.sort_by(|a, b| a.region.cmp(&b.region));
     output_contracts.sort_by(|a, b| a.region.cmp(&b.region));
 
-    let mut changed = annotate_parent_rank4_dim_order_ir(parent_ir);
+    let mut changed = match layout {
+        LayoutMode::DimOrder => annotate_parent_rank4_dim_order_ir(parent_ir),
+        LayoutMode::Explicit => 0,
+    };
     let cf_debug = crate::config::from_ir_debug_enabled();
     for (region, (ir, _)) in submodules.iter_mut() {
         if while_cond_regions.contains(region) {
