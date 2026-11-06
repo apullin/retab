@@ -79,3 +79,6 @@ mod remove_permutes_replay_tests;
 // rc4's own tests for RemovePermutesAroundElementwise(Tosa)Ops (APU-158).
 #[cfg(test)]
 mod remove_permutes_upstream_tests;
+// rc4 replays of the propagation passes (APU-159).
+#[cfg(test)]
+mod propagate_replay_tests;

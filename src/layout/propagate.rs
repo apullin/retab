@@ -253,6 +253,12 @@ impl IrPass for IrPropagateViewCopyPermutePass {
 
 #[cfg(test)]
 thread_local! {
+    /// Which rewrite branches ran on this thread, for the replay coverage test.
+    pub(crate) static COVERAGE: std::cell::RefCell<HashMap<&'static str, usize>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// Whether a sweep re-runs each walk the memo skips, to check it fails
+    /// (on in test builds; the scaling tests turn it off).
+    pub(crate) static CHECK_SKIPPED_WALKS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
     /// `_retrace` calls (`:158-162`) on this thread, for rc4's retrace-count test.
     pub(crate) static RETRACES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// `_refresh_propagation_meta` calls on this thread.
@@ -323,6 +329,13 @@ pub(crate) fn move_node(
 /// TOSA overrides, as rc4 raises.
 pub(crate) fn is_swappable(ctx: &LayoutCtx<'_>, config: &PropagateConfig, node: NodeId) -> bool {
     Propagator::new(config).is_swappable(ctx, node, &mut Reads::default())
+}
+
+/// Count a branch in [`COVERAGE`] (test builds only).
+#[inline]
+fn cover(_branch: &'static str) {
+    #[cfg(test)]
+    COVERAGE.with(|coverage| *coverage.borrow_mut().entry(_branch).or_default() += 1);
 }
 
 /// The nodes a walk read. A walk that fails changes nothing and depends on
@@ -483,6 +496,15 @@ impl<'c> Propagator<'c> {
                 continue;
             }
             if !ctx.should_retry(rule, node) {
+                cover("memo.skip");
+                #[cfg(test)]
+                if CHECK_SKIPPED_WALKS.with(std::cell::Cell::get) {
+                    assert!(
+                        !self.propagate(ctx, node, &mut Reads::default()),
+                        "the memo skipped a walk from {} that changes the graph",
+                        ctx.node(node).name
+                    );
+                }
                 continue;
             }
             #[cfg(test)]
@@ -551,6 +573,9 @@ impl<'c> Propagator<'c> {
             };
             if next_nodes.len() > 1 {
                 if !self.maybe_split_fork(ctx, node, frontier, previous_frontier, &next_nodes.nodes, reads) {
+                    if next_nodes.table_constant {
+                        cover("up.stop.table_constant");
+                    }
                     break;
                 }
                 self.refresh_propagation_meta(ctx, node, &path);
@@ -566,6 +591,7 @@ impl<'c> Propagator<'c> {
             }
             // Concats are a special case since they branch the graph.
             if self.maybe_split_upwards_cat_fanout(ctx, node, next_node, reads) {
+                cover("up.cat_fanout");
                 self.refresh_propagation_meta(ctx, node, &path);
                 return true;
             }
@@ -575,6 +601,7 @@ impl<'c> Propagator<'c> {
             return false;
         }
         let previous_frontier = previous_frontier.expect("a moved walk has a previous frontier");
+        cover(if self.up() { "up.move" } else { "down.move" });
         self.move_node(ctx, node, frontier, previous_frontier);
         self.refresh_propagation_meta(ctx, node, &path);
         true
@@ -591,6 +618,7 @@ impl<'c> Propagator<'c> {
         let graph = ctx.graph();
         let next_nodes = self.next_nodes(ctx, frontier, reads);
         if next_nodes.len() == 0 {
+            cover("endpoint");
             let op = graph.node(frontier).op;
             assert!(
                 matches!(op, NodeOp::Placeholder | NodeOp::Output),
@@ -604,6 +632,7 @@ impl<'c> Propagator<'c> {
             return None;
         }
         if self.blocks_moving(ctx, node, frontier, &next_nodes.nodes, reads) {
+            cover("blocks_moving");
             return None;
         }
         Some(next_nodes)
@@ -638,6 +667,7 @@ impl<'c> Propagator<'c> {
         let users = graph.live_user_ids(frontier);
         reads.extend(users.iter().copied());
         if users.iter().any(|&user| self.blocks_crossing(ctx, user)) {
+            cover("up.blocks_crossing");
             return false;
         }
         next_nodes.nodes.iter().all(|&next_node| {
@@ -769,7 +799,11 @@ impl<'c> Propagator<'c> {
         if !self.tosa() || !is_table(graph, next_node) {
             return true;
         }
-        !shape.is_some_and(|shape| shape.len() == 4 && shape[0] > 1 && shape[1] == 1 && shape[2] == 1)
+        let unsafe_shape = shape.is_some_and(|shape| shape.len() == 4 && shape[0] > 1 && shape[1] == 1 && shape[2] == 1);
+        if unsafe_shape {
+            cover("table_guard");
+        }
+        !unsafe_shape
     }
 
     /// `is_swappable` (`:472-476`); TOSA's raises for a reduction that isn't
@@ -842,7 +876,11 @@ impl<'c> Propagator<'c> {
         let Some(rank) = graph.node_shape(next_node).map(<[i64]>::len) else {
             return false;
         };
-        self.layout_dependent_input_count(ctx, next_node, rank, reads) == 1
+        let one = self.layout_dependent_input_count(ctx, next_node, rank, reads) == 1;
+        if one {
+            cover("up.one_layout_dependent_input");
+        }
+        one
     }
 
     fn base_can_move_through_elementwise(&self, ctx: &LayoutCtx<'_>, moving: NodeId, next_node: NodeId, reads: &mut Reads) -> bool {
@@ -861,6 +899,7 @@ impl<'c> Propagator<'c> {
                 return false;
             }
             if self.is_transparent(ctx, next_node) && view_map.source_rank() != view_map.target_rank() {
+                cover("view.transparent_rank_change");
                 return false;
             }
         }
@@ -902,10 +941,14 @@ impl<'c> Propagator<'c> {
         };
         let inputs = all_input_nodes(graph.node(next_node));
         reads.extend(inputs.iter().copied());
-        !self.has_table_constant(ctx, next_node)
+        let split = !self.has_table_constant(ctx, next_node)
             && inputs
                 .iter()
-                .all(|&input| input == frontier || is_layout_invariant(graph, input, rank))
+                .all(|&input| input == frontier || is_layout_invariant(graph, input, rank));
+        if split {
+            cover("down.split_through_elementwise");
+        }
+        split
     }
 
     /// `_propagation_input` (`:541-558`): the one input a copy moving up
@@ -939,8 +982,10 @@ impl<'c> Propagator<'c> {
             .map(|axis| axis as i64)
             .collect();
         let dims = if old_rank < new_rank {
+            cover("broadcast.lift");
             permute_map.lift_to_rank(&retained_axes, new_rank)
         } else {
+            cover("broadcast.project");
             permute_map.project_to_axes(&retained_axes, true)
         }?;
         Some(with_arg(args, 1, i64_list_arg(&to_i64(&dims))))
@@ -962,6 +1007,7 @@ impl<'c> Propagator<'c> {
             let producer = self.propagation_input(ctx, next_node, reads)?;
             let producer_rank = graph.node_shape(producer)?.len();
             let node_args = self.remap_permute_for_broadcast_rank(ctx, node, producer_rank)?;
+            cover("up.permute.elementwise");
             return Some((node_args, next.args.clone()));
         }
         let permute_map = permute_map(graph, node);
@@ -991,11 +1037,13 @@ impl<'c> Propagator<'c> {
                 .collect();
             let node_args = with_arg(&graph.node(node).args, 1, i64_list_arg(&to_i64(&dims)));
             let next_args = with_arg(&next.args, 1, args.rebuild(&mapped));
+            cover("up.permute.reduction_dropped");
             return Some((node_args, next_args));
         }
         let mapped = permute_map
             .map_dims(&args.dims())
             .unwrap_or_else(|error| panic!("AssertionError: {error:?}"));
+        cover(if next.target == SLICE_COPY { "up.permute.slice" } else { "up.permute.reduction" });
         Some((graph.node(node).args.clone(), with_arg(&next.args, 1, args.rebuild(&mapped))))
     }
 
@@ -1007,6 +1055,7 @@ impl<'c> Propagator<'c> {
             if !self.can_move_through_elementwise(ctx, node, next_node, reads) {
                 return None;
             }
+            cover("up.view.elementwise");
             return Some((graph.node(node).args.clone(), next.args.clone()));
         }
         let view_map = view_map(graph, node, reads);
@@ -1044,6 +1093,7 @@ impl<'c> Propagator<'c> {
         }
         let reduction_dims = dim_arg(&next.args[1]).unwrap_or_else(|| panic!("TypeError: reduction dims {:?}", next.args[1]));
         let (new_shape, new_dims) = view_map.map_reduction_after_view(input_shape, &reduction_dims.dims())?;
+        cover("up.view.reduction");
         let next_args = with_arg(&next.args, 1, i64_list_arg(&to_i64(&new_dims)));
         Some((view_args(graph, node, &new_shape), next_args))
     }
@@ -1081,6 +1131,7 @@ impl<'c> Propagator<'c> {
             if !valid_slice_interval(&new_shape, new_dim as i64, Some(new_start), Some(new_end)) {
                 return None;
             }
+            cover("up.view.unit_slice");
             let mut next_args = vec![next.args[0].clone(), IrArg::Int(new_dim as i64), IrArg::Int(new_start), IrArg::Int(new_end)];
             next_args.extend(next.args.iter().skip(4).cloned());
             return Some((view_args(graph, node, &new_shape), next_args));
@@ -1092,6 +1143,7 @@ impl<'c> Propagator<'c> {
             return None;
         }
         let next_args = with_arg(&next.args, 1, IrArg::Int(mapped_dim as i64));
+        cover("up.view.slice");
         Some((view_args(graph, node, &new_shape), next_args))
     }
 
@@ -1109,6 +1161,7 @@ impl<'c> Propagator<'c> {
             }
             let next_rank = graph.node_shape(next_node)?.len();
             let node_args = self.remap_permute_for_broadcast_rank(ctx, node, next_rank)?;
+            cover("down.permute.elementwise");
             return Some((node_args, next.args.clone()));
         }
         let permute_map = permute_map(graph, node);
@@ -1124,6 +1177,13 @@ impl<'c> Propagator<'c> {
             .map_dims_inverse(&reduction_dims)
             .unwrap_or_else(|error| panic!("AssertionError: {error:?}"));
         let next_args = with_arg(&next.args, 1, args.rebuild(&mapped));
+        cover(if next.target == SLICE_COPY {
+            "down.permute.slice"
+        } else if reduces {
+            "down.permute.reduction_dropped"
+        } else {
+            "down.permute.reduction"
+        });
         let mut node_args = graph.node(node).args.clone();
         if reduces {
             let retained_axes: Vec<i64> = (0..rank).filter(|dim| !mapped.contains(dim)).map(|dim| dim as i64).collect();
@@ -1141,6 +1201,7 @@ impl<'c> Propagator<'c> {
             if !self.can_move_through_elementwise(ctx, node, next_node, reads) {
                 return None;
             }
+            cover("down.view.elementwise");
             return Some((graph.node(node).args.clone(), next.args.clone()));
         }
         let view_map = view_map(graph, node, reads);
@@ -1155,6 +1216,7 @@ impl<'c> Propagator<'c> {
             let (new_dims, output_shape) = view_map
                 .map_reduction_before_view(&dims.dims())
                 .unwrap_or_else(|error| panic!("AssertionError: {error:?}"))?;
+            cover("down.view.reduction");
             (i64_list_arg(&to_i64(&new_dims)), output_shape)
         } else if next.target == SLICE_COPY {
             let dim = python_int(next_arg(graph, next_node, 1)).unwrap_or_else(|| panic!("TypeError: slice dim"));
@@ -1167,6 +1229,7 @@ impl<'c> Propagator<'c> {
             let output_shape = graph
                 .node_shape_vec(next_node)
                 .unwrap_or_else(|| panic!("KeyError: 'val' on {}", next.name));
+            cover("down.view.slice");
             (IrArg::Int(new_dims[0] as i64), output_shape)
         } else {
             return None;
@@ -1196,10 +1259,15 @@ impl<'c> Propagator<'c> {
             return false;
         }
         if let Some((producer, branch_splits)) = self.plan_fork_split(ctx, node, frontier, next_nodes, reads) {
+            cover(if frontier == node { "down.fork_split" } else { "down.fork_split.after_crossing" });
+            if branch_splits.iter().any(|split| split.arg_update.is_some()) {
+                cover("down.fork_split.arg_update");
+            }
             self.apply_fork_split(ctx, node, frontier, producer, branch_splits);
             return true;
         }
         if let Some(plan) = self.plan_pointwise_region_move(ctx, node, reads) {
+            cover("down.region_move");
             self.apply_pointwise_region_move(ctx, node, plan);
             return true;
         }
@@ -1341,9 +1409,11 @@ impl<'c> Propagator<'c> {
             .filter(|(parent, user)| region.contains(parent) && !region.contains(user))
             .collect();
         if exits.len() != 1 {
+            cover("down.region.exits");
             return None;
         }
         if !self.pointwise_region_inputs_are_safe(ctx, &region, node, rank, reads) {
+            cover("down.region.unsafe_input");
             return None;
         }
         let mut ordered: Vec<NodeId> = region.into_iter().collect();
@@ -1395,6 +1465,7 @@ impl<'c> Propagator<'c> {
                 continue;
             }
             if exit_users.contains(&candidate) {
+                cover("down.region.path_conflict");
                 return None;
             }
             region.insert(candidate);
@@ -1744,6 +1815,7 @@ fn pending_table_has_rescale(graph: &IrGraph, id: NodeId) -> bool {
 fn node_or_inputs_are_int48(graph: &IrGraph, id: NodeId, reads: &mut Reads) -> bool {
     reads.add(id);
     if special_dtype(&graph.node(id).meta) == Some("INT48") {
+        cover("int48");
         return true;
     }
     let inputs = all_input_nodes(graph.node(id));
