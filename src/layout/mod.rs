@@ -53,6 +53,9 @@ pub(crate) mod shape;
 // rc4's own tests for the P1 passes, ported (APU-135 P1).
 #[cfg(test)]
 mod p1_upstream_tests;
+// rc4's own tests for the pool and upsample rewrites, ported (APU-156, P2 S7).
+#[cfg(test)]
+mod p2_pool_upstream_tests;
 // rc4 graph dumps as test fixtures and expectations.
 #[cfg(test)]
 pub(crate) mod rc4_dump;

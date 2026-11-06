@@ -67,7 +67,9 @@ pub(crate) fn ceil_mode_arg(node: &IrNode, index: usize) -> Option<bool> {
 /// argument with a value would be dropped silently there; exported graphs
 /// never carry one, and the ports decline instead.
 pub(crate) fn has_no_valued_kwargs(node: &IrNode) -> bool {
-    node.kwargs.values().all(|value| matches!(value, IrArg::None))
+    node.kwargs
+        .values()
+        .all(|value| matches!(value, IrArg::None))
 }
 
 /// rc4's `adjust_pooling_pad_if_needed`

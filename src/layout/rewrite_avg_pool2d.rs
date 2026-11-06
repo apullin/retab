@@ -66,8 +66,8 @@ use crate::layout::ctx::LayoutCtx;
 use crate::layout::dtype::{operand_dtype, value_dtype};
 use crate::layout::meta;
 use crate::layout::pool::{
-    adjust_pooling_pad_if_needed, ceil_mode_arg, has_no_valued_kwargs, stride_or_kernel,
-    to_2tuple, NHWC_INVERSE_ORDER, NHWC_ORDER,
+    adjust_pooling_pad_if_needed, ceil_mode_arg, has_no_valued_kwargs, stride_or_kernel, to_2tuple,
+    NHWC_INVERSE_ORDER, NHWC_ORDER,
 };
 use crate::layout::shape::permute_shape;
 use crate::layout::shape::tosa::pool2d_shape;
@@ -157,7 +157,10 @@ fn plan(graph: &IrGraph, id: NodeId) -> Result<Plan, String> {
         .tensor_facts()
         .ok_or("the input has no value")?;
     let &[_, _, height, width] = x_facts.shape.as_slice() else {
-        return Err(format!("a rank-{} input; rc4 reads shape[2:4]", x_facts.rank()));
+        return Err(format!(
+            "a rank-{} input; rc4 reads shape[2:4]",
+            x_facts.rank()
+        ));
     };
 
     let kernel = node
@@ -185,9 +188,7 @@ fn plan(graph: &IrGraph, id: NodeId) -> Result<Plan, String> {
     // `:57-67`: `get_zp_per_tensor` raises for a per-channel zero point.
     let zero_point = |qparam: Option<&crate::fx_ir::QParam>, which: &str| match qparam {
         None => Ok(0),
-        Some(qparam) if qparam.is_per_channel() => {
-            Err(format!("a per-channel {which} qparam"))
-        }
+        Some(qparam) if qparam.is_per_channel() => Err(format!("a per-channel {which} qparam")),
         Some(qparam) => Ok(qparam.zp),
     };
     let input_zp = zero_point(
@@ -259,10 +260,8 @@ fn rewrite(ctx: &mut LayoutCtx<'_>, id: NodeId, plan: &Plan) {
     let post = ctx.inserting_before(id, |ctx| {
         let mut zero_point = |which: &str, value: i64| {
             // `call_scalar` (`arm_pass.py:177-205`).
-            let kwargs = HashMap::from([(
-                "dtype".to_string(),
-                IrArg::Dtype(plan.zp_dtype.clone()),
-            )]);
+            let kwargs =
+                HashMap::from([("dtype".to_string(), IrArg::Dtype(plan.zp_dtype.clone()))]);
             ctx.create_node(
                 NodeOp::CallFunction,
                 format!("{name}_{which}_zero_point"),
@@ -381,7 +380,13 @@ mod tests {
         let (mut g, name) = pool_graph(
             &[1, 3, 8, 8],
             I8,
-            vec![ints(&[3, 3]), ints(&[2, 2]), ints(&[1, 1]), IrArg::Bool(false), IrArg::Bool(false)],
+            vec![
+                ints(&[3, 3]),
+                ints(&[2, 2]),
+                ints(&[1, 1]),
+                IrArg::Bool(false),
+                IrArg::Bool(false),
+            ],
             &[1, 3, 4, 4],
             Some(iq.clone()),
             Some(oq.clone()),
@@ -394,7 +399,10 @@ mod tests {
         let output_zp = by_name(&g, &format!("{name}_output_zero_point"));
         for (zp, value) in [(input_zp, -3), (output_zp, 5)] {
             assert_args(&zp.args, &[ints(&[1]), IrArg::Int(value)]);
-            assert_eq!(format!("{:?}", zp.kwarg("dtype")), format!("{:?}", Some(IrArg::Dtype(I8.into()))));
+            assert_eq!(
+                format!("{:?}", zp.kwarg("dtype")),
+                format!("{:?}", Some(IrArg::Dtype(I8.into())))
+            );
             assert_eq!((g.shape(zp.id), g.dtype(zp.id)), (&[1][..], I8));
             assert_eq!(zp.meta.input_qparam(), Some(&iq));
             assert_eq!(zp.meta.output_qparam(), Some(&oq));
@@ -416,10 +424,16 @@ mod tests {
             ],
         );
         // The input dtype rc4's kernel keeps, from the input qparam.
-        assert_eq!((g.shape(pool.id), g.dtype(pool.id)), (&[1, 4, 4, 3][..], I8));
+        assert_eq!(
+            (g.shape(pool.id), g.dtype(pool.id)),
+            (&[1, 4, 4, 3][..], I8)
+        );
         let post = by_name(&g, &format!("{name}_nchw"));
         assert_args(&post.args, &[node(pool.id), ints(&[0, 3, 1, 2])]);
-        assert_eq!((g.shape(post.id), g.dtype(post.id)), (&[1, 3, 4, 4][..], I8));
+        assert_eq!(
+            (g.shape(post.id), g.dtype(post.id)),
+            (&[1, 3, 4, 4][..], I8)
+        );
         for id in [pre.id, pool.id, post.id] {
             let meta = &g.graph().node(id).meta;
             assert_eq!(meta.input_qparam(), Some(&iq));
@@ -434,7 +448,12 @@ mod tests {
     /// any falsy one: RETAB's import spells `[]` as None.
     #[test]
     fn a_falsy_stride_is_the_kernel() {
-        for stride in [None, Some(IrArg::None), Some(IrArg::List(vec![])), Some(IrArg::Int(0))] {
+        for stride in [
+            None,
+            Some(IrArg::None),
+            Some(IrArg::List(vec![])),
+            Some(IrArg::Int(0)),
+        ] {
             let mut args = vec![ints(&[2, 3])];
             args.extend(stride.clone());
             let (mut g, name) = pool_graph(&[1, 3, 8, 9], F32, args, &[1, 3, 4, 3], None, None);
@@ -484,7 +503,14 @@ mod tests {
         assert_eq!(g.dtype(pool.id), I16);
         assert_eq!(g.dtype(g.id(&format!("{name}_input_zero_point"))), I16);
 
-        let (mut g, name) = pool_graph(&[1, 3, 8, 8], F32, vec![ints(&[2, 2])], &[1, 3, 4, 4], None, None);
+        let (mut g, name) = pool_graph(
+            &[1, 3, 8, 8],
+            F32,
+            vec![ints(&[2, 2])],
+            &[1, 3, 4, 4],
+            None,
+            None,
+        );
         assert!(IrRewriteAvgPool2dPass.run(g.graph_mut()));
         let pool = by_name(&g, &format!("{name}_tosa"));
         assert_eq!(format!("{:?}", pool.args[6]), "Dtype(\"torch.float32\")");
@@ -548,7 +574,10 @@ mod tests {
                 let id = pool.args[index].as_node().unwrap();
                 order.iter().position(|&live| live == id).unwrap()
             };
-            assert!(position(2) < position(1), "rc4 puts the output zero point first");
+            assert!(
+                position(2) < position(1),
+                "rc4 puts the output zero point first"
+            );
             if in_region {
                 assert_eq!(placeholders(&g), before);
             }
@@ -565,13 +594,25 @@ mod tests {
         let mut per_channel = qparam(0.1, 0, I8);
         per_channel.per_channel_scales = vec![0.1, 0.2, 0.3];
         per_channel.per_channel_zps = vec![0, 0, 0];
-        let mut g = pool(&[1, 3, 8, 8], vec![ints(&[2, 2])], &[1, 3, 4, 4], q(), Some(per_channel));
+        let mut g = pool(
+            &[1, 3, 8, 8],
+            vec![ints(&[2, 2])],
+            &[1, 3, 4, 4],
+            q(),
+            Some(per_channel),
+        );
         assert_declined(&mut g, "per-channel");
         // rc4 reads `x.data.shape[3]`.
         let mut g = pool(&[3, 8, 8], vec![ints(&[2, 2])], &[3, 4, 4], q(), q());
         assert_declined(&mut g, "rank-3");
         // A kernel that doesn't unpack as two values.
-        let mut g = pool(&[1, 3, 8, 8], vec![ints(&[2, 2, 2])], &[1, 3, 4, 4], q(), q());
+        let mut g = pool(
+            &[1, 3, 8, 8],
+            vec![ints(&[2, 2, 2])],
+            &[1, 3, 4, 4],
+            q(),
+            q(),
+        );
         assert_declined(&mut g, "kernel");
         // AVG_POOL2D's zero points must have the input's dtype.
         let mut g = pool(
@@ -588,7 +629,8 @@ mod tests {
         // A keyword argument with a value, which rc4 would drop.
         let mut g = pool(&[1, 3, 8, 8], vec![ints(&[2, 2])], &[1, 3, 4, 4], q(), q());
         let id = g.id("avg_pool2d");
-        g.graph_mut().set_kwarg(id, "divisor_override", IrArg::Int(2));
+        g.graph_mut()
+            .set_kwarg(id, "divisor_override", IrArg::Int(2));
         assert_declined(&mut g, "keyword");
     }
 
@@ -598,7 +640,14 @@ mod tests {
     fn a_declined_pool_stops_the_pass() {
         crate::stock_fallback::take();
         let q = qparam(0.1, 0, I8);
-        let (mut g, first) = pool_graph(&[1, 3, 8, 8], I8, vec![ints(&[2, 2])], &[1, 3, 4, 4], Some(q.clone()), Some(q.clone()));
+        let (mut g, first) = pool_graph(
+            &[1, 3, 8, 8],
+            I8,
+            vec![ints(&[2, 2])],
+            &[1, 3, 4, 4],
+            Some(q.clone()),
+            Some(q.clone()),
+        );
         let first_id = g.id(&first);
         let second = g.add_unrefreshed(AVG_POOL2D, vec![node(first_id), ints(&[2, 2, 2])]);
         let mut meta = NodeMeta::tensor(vec![1, 3, 2, 2], F32);

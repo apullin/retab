@@ -59,8 +59,8 @@ use crate::layout::ctx::LayoutCtx;
 use crate::layout::dtype::operand_dtype;
 use crate::layout::meta;
 use crate::layout::pool::{
-    adjust_pooling_pad_if_needed, ceil_mode_arg, has_no_valued_kwargs, stride_or_kernel,
-    to_2tuple, NHWC_INVERSE_ORDER, NHWC_ORDER,
+    adjust_pooling_pad_if_needed, ceil_mode_arg, has_no_valued_kwargs, stride_or_kernel, to_2tuple,
+    NHWC_INVERSE_ORDER, NHWC_ORDER,
 };
 use crate::layout::shape::permute_shape;
 use crate::layout::shape::tosa::pool2d_shape;
@@ -181,7 +181,10 @@ fn plan(graph: &IrGraph, id: NodeId) -> Result<Plan, String> {
         .tensor_facts()
         .ok_or("the input has no value")?;
     let &[_, _, height, width] = x_facts.shape.as_slice() else {
-        return Err(format!("a rank-{} input; rc4 reads shape[2:4]", x_facts.rank()));
+        return Err(format!(
+            "a rank-{} input; rc4 reads shape[2:4]",
+            x_facts.rank()
+        ));
     };
 
     // `kernel = args[1]`: rc4 indexes it as `kernel[0]`, `kernel[1]`.
@@ -324,7 +327,12 @@ mod tests {
 
     /// `x -> max_pool2d(x, args...) -> output`, as rc4's RemoveGetItemPass
     /// leaves it: input qparams and an empty output map.
-    fn plain_graph(input: &[i64], args: Vec<IrArg>, output: &[i64], iq: QParam) -> (LayoutGraph, String) {
+    fn plain_graph(
+        input: &[i64],
+        args: Vec<IrArg>,
+        output: &[i64],
+        iq: QParam,
+    ) -> (LayoutGraph, String) {
         let mut g = LayoutGraph::new();
         let x = g.typed_input("x", input, I8);
         let mut all_args = vec![node(x)];
@@ -354,7 +362,10 @@ mod tests {
         let mut all_args = vec![node(x)];
         all_args.extend(args);
         let pool = g.add_unrefreshed(MAX_POOL2D_WITH_INDICES, all_args);
-        g.graph_mut().node_mut(pool).meta.set_single_input_qparam(q.clone());
+        g.graph_mut()
+            .node_mut(pool)
+            .meta
+            .set_single_input_qparam(q.clone());
         let getitem = g.add_unrefreshed(GETITEM, vec![node(pool), IrArg::Int(0)]);
         let mut meta = NodeMeta::tensor(output.to_vec(), F32);
         meta.set_single_output_qparam(q);
@@ -381,7 +392,13 @@ mod tests {
         let q = qparam(0.019, -2, I8);
         let (mut g, name) = plain_graph(
             &[1, 3, 8, 8],
-            vec![ints(&[3, 3]), ints(&[2, 2]), ints(&[1, 1]), IrArg::Int(1), IrArg::Bool(false)],
+            vec![
+                ints(&[3, 3]),
+                ints(&[2, 2]),
+                ints(&[1, 1]),
+                IrArg::Int(1),
+                IrArg::Bool(false),
+            ],
             &[1, 3, 4, 4],
             q.clone(),
         );
@@ -394,12 +411,23 @@ mod tests {
         let pool = by_name(&g, &format!("{name}_tosa"));
         assert_args(
             &pool.args,
-            &[node(pre.id), ints(&[3, 3]), ints(&[2, 2]), ints(&[1, 0, 1, 0])],
+            &[
+                node(pre.id),
+                ints(&[3, 3]),
+                ints(&[2, 2]),
+                ints(&[1, 0, 1, 0]),
+            ],
         );
-        assert_eq!((g.shape(pool.id), g.dtype(pool.id)), (&[1, 4, 4, 3][..], I8));
+        assert_eq!(
+            (g.shape(pool.id), g.dtype(pool.id)),
+            (&[1, 4, 4, 3][..], I8)
+        );
         let post = by_name(&g, &format!("{name}_nchw"));
         assert_args(&post.args, &[node(pool.id), ints(&[0, 3, 1, 2])]);
-        assert_eq!((g.shape(post.id), g.dtype(post.id)), (&[1, 3, 4, 4][..], I8));
+        assert_eq!(
+            (g.shape(post.id), g.dtype(post.id)),
+            (&[1, 3, 4, 4][..], I8)
+        );
         for id in [pre.id, pool.id, post.id] {
             let meta = &g.graph().node(id).meta;
             assert_eq!(meta.input_qparam(), Some(&q));
@@ -417,24 +445,49 @@ mod tests {
     #[test]
     fn with_indices_pool_takes_the_getitems_place() {
         let q = qparam(0.0056, -128, I8);
-        let (mut g, pool, getitem) =
-            with_indices_graph(&[1, 3, 8, 8], F32, vec![ints(&[2, 2]), ints(&[2, 2])], &[1, 3, 4, 4], q.clone());
+        let (mut g, pool, getitem) = with_indices_graph(
+            &[1, 3, 8, 8],
+            F32,
+            vec![ints(&[2, 2]), ints(&[2, 2])],
+            &[1, 3, 4, 4],
+            q.clone(),
+        );
         assert!(IrRewriteMaxPool2dPass.run(g.graph_mut()));
         g.assert_targets(&[PERMUTE, TOSA_MAX_POOL2D, PERMUTE]);
         for gone in [&pool, &getitem] {
-            assert!(g.graph().by_name(gone).is_none_or(|node| !node.alive), "{gone}");
+            assert!(
+                g.graph().by_name(gone).is_none_or(|node| !node.alive),
+                "{gone}"
+            );
         }
         let pre = by_name(&g, &format!("{pool}_nhwc"));
         assert_eq!(g.dtype(pre.id), F32);
         let tosa = by_name(&g, &format!("{pool}_tosa"));
-        assert_args(&tosa.args, &[node(pre.id), ints(&[2, 2]), ints(&[2, 2]), ints(&[0, 0, 0, 0])]);
-        assert_eq!((g.shape(tosa.id), g.dtype(tosa.id)), (&[1, 4, 4, 3][..], I8));
+        assert_args(
+            &tosa.args,
+            &[
+                node(pre.id),
+                ints(&[2, 2]),
+                ints(&[2, 2]),
+                ints(&[0, 0, 0, 0]),
+            ],
+        );
+        assert_eq!(
+            (g.shape(tosa.id), g.dtype(tosa.id)),
+            (&[1, 4, 4, 3][..], I8)
+        );
         let post = by_name(&g, &format!("{pool}_nchw"));
-        assert_eq!((g.shape(post.id), g.dtype(post.id)), (&[1, 3, 4, 4][..], I8));
+        assert_eq!(
+            (g.shape(post.id), g.dtype(post.id)),
+            (&[1, 3, 4, 4][..], I8)
+        );
         for id in [pre.id, tosa.id, post.id] {
             let meta = &g.graph().node(id).meta;
             assert_eq!(meta.input_qparam(), Some(&q));
-            assert!(meta.output_qparams().is_none(), "the getitem's output qparams are dropped");
+            assert!(
+                meta.output_qparams().is_none(),
+                "the getitem's output qparams are dropped"
+            );
         }
         assert!(g.graph().output_node().unwrap().args[0].contains_node(post.id));
     }
@@ -447,7 +500,8 @@ mod tests {
         for stride in [None, Some(IrArg::None), Some(IrArg::List(vec![]))] {
             let mut args = vec![ints(&[2, 2])];
             args.extend(stride.clone());
-            let (mut g, pool, _) = with_indices_graph(&[1, 3, 8, 8], I8, args, &[1, 3, 4, 4], qparam(0.1, 0, I8));
+            let (mut g, pool, _) =
+                with_indices_graph(&[1, 3, 8, 8], I8, args, &[1, 3, 4, 4], qparam(0.1, 0, I8));
             assert!(IrRewriteMaxPool2dPass.run(g.graph_mut()), "{stride:?}");
             let tosa = by_name(&g, &format!("{pool}_tosa"));
             assert_eq!(tosa.arg_int_list(2), Some(vec![2, 2]), "{stride:?}");
@@ -460,7 +514,13 @@ mod tests {
         let (mut g, pool, _) = with_indices_graph(
             &[1, 3, 8, 8],
             I8,
-            vec![ints(&[3, 3]), ints(&[2, 2]), ints(&[0, 0]), ints(&[1, 1]), IrArg::Bool(true)],
+            vec![
+                ints(&[3, 3]),
+                ints(&[2, 2]),
+                ints(&[0, 0]),
+                ints(&[1, 1]),
+                IrArg::Bool(true),
+            ],
             &[1, 3, 4, 4],
             qparam(0.1, 0, I8),
         );
@@ -478,8 +538,14 @@ mod tests {
         let x = g.typed_input("x", &[3, 8, 8], I8);
         let unsqueeze = g.add_unrefreshed(UNSQUEEZE, vec![node(x), IrArg::Int(0)]);
         g.graph_mut().node_mut(unsqueeze).meta = NodeMeta::tensor(vec![1, 3, 8, 8], I8);
-        let pool = g.add_unrefreshed(MAX_POOL2D_WITH_INDICES, vec![node(unsqueeze), ints(&[2, 2]), ints(&[2, 2])]);
-        g.graph_mut().node_mut(pool).meta.set_single_input_qparam(q.clone());
+        let pool = g.add_unrefreshed(
+            MAX_POOL2D_WITH_INDICES,
+            vec![node(unsqueeze), ints(&[2, 2]), ints(&[2, 2])],
+        );
+        g.graph_mut()
+            .node_mut(pool)
+            .meta
+            .set_single_input_qparam(q.clone());
         let getitem = g.add_unrefreshed(GETITEM, vec![node(pool), IrArg::Int(0)]);
         let mut meta = NodeMeta::tensor(vec![1, 3, 4, 4], F32);
         meta.set_single_output_qparam(q);
@@ -504,13 +570,15 @@ mod tests {
         );
         assert_declined(&mut g, "dilation");
         // rc4 indexes `kernel[1]`.
-        let (mut g, ..) = with_indices_graph(&[1, 3, 8, 8], I8, vec![ints(&[2])], &[1, 3, 4, 4], q());
+        let (mut g, ..) =
+            with_indices_graph(&[1, 3, 8, 8], I8, vec![ints(&[2])], &[1, 3, 4, 4], q());
         assert_declined(&mut g, "kernel");
         // A rank-3 input that IrNormalizeMaxPool2dInputRank didn't lift.
         let (mut g, _) = plain_graph(&[3, 8, 8], vec![ints(&[2, 2])], &[3, 4, 4], q());
         assert_declined(&mut g, "rank-3");
         // An output the getitem's val contradicts.
-        let (mut g, ..) = with_indices_graph(&[1, 3, 8, 8], I8, vec![ints(&[2, 2])], &[1, 3, 5, 5], q());
+        let (mut g, ..) =
+            with_indices_graph(&[1, 3, 8, 8], I8, vec![ints(&[2, 2])], &[1, 3, 5, 5], q());
         assert_declined(&mut g, "value");
     }
 
@@ -520,21 +588,25 @@ mod tests {
     fn remove_getitem_user_patterns_go_to_stock() {
         let q = || qparam(0.1, 0, I8);
         // The indices are read.
-        let (mut g, _, getitem) = with_indices_graph(&[1, 3, 8, 8], I8, vec![ints(&[2, 2])], &[1, 3, 4, 4], q());
+        let (mut g, _, getitem) =
+            with_indices_graph(&[1, 3, 8, 8], I8, vec![ints(&[2, 2])], &[1, 3, 4, 4], q());
         let id = g.id(&getitem);
         g.graph_mut().set_arg(id, 1, IrArg::Int(1));
         assert_declined(&mut g, "getitem index");
         // Values and indices both.
-        let (mut g, pool, getitem) = with_indices_graph(&[1, 3, 8, 8], I8, vec![ints(&[2, 2])], &[1, 3, 4, 4], q());
+        let (mut g, pool, getitem) =
+            with_indices_graph(&[1, 3, 8, 8], I8, vec![ints(&[2, 2])], &[1, 3, 4, 4], q());
         let pool_id = g.id(&pool);
         let indices = g.add_unrefreshed(GETITEM, vec![node(pool_id), IrArg::Int(1)]);
         g.graph_mut().node_mut(indices).meta = NodeMeta::tensor(vec![1, 3, 4, 4], "torch.int64");
         let output = g.graph().output_node().unwrap().id;
         let values = g.id(&getitem);
-        g.graph_mut().set_args(output, vec![IrArg::List(vec![node(values), node(indices)])]);
+        g.graph_mut()
+            .set_args(output, vec![IrArg::List(vec![node(values), node(indices)])]);
         assert_declined(&mut g, "2 users");
         // A user that isn't a getitem.
-        let (mut g, pool, getitem) = with_indices_graph(&[1, 3, 8, 8], I8, vec![ints(&[2, 2])], &[1, 3, 4, 4], q());
+        let (mut g, pool, getitem) =
+            with_indices_graph(&[1, 3, 8, 8], I8, vec![ints(&[2, 2])], &[1, 3, 4, 4], q());
         let (pool_id, getitem_id) = (g.id(&pool), g.id(&getitem));
         g.graph_mut().node_mut(getitem_id).target = "aten.relu.default".to_string();
         g.graph_mut().set_args(getitem_id, vec![node(pool_id)]);

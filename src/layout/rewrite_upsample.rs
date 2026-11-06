@@ -126,9 +126,8 @@ pub(crate) fn resize_parameters_1d(
         (ResizeMode::Nearest, Some(factor)) => nsimplify_scale_factor(factor)?,
         // `nsimplify(simplify(scale_n / scale_d))` of two sympy Integers is the
         // reduced Rational (checked against sympy for sizes up to 300).
-        _ => reduced(scale_n, scale_d).ok_or_else(|| {
-            format!("resize ratio {scale_n}/{scale_d} is not a number")
-        })?,
+        _ => reduced(scale_n, scale_d)
+            .ok_or_else(|| format!("resize ratio {scale_n}/{scale_d} is not a number"))?,
     };
     let (scale_n, scale_d) = (2 * num, 2 * den);
     let offset = match mode {
@@ -186,8 +185,8 @@ pub(crate) fn nsimplify_scale_factor(factor: f64) -> Result<(i128, i128), String
     if !factor.is_finite() || factor <= 0.0 {
         return Err(format!("scale factor {factor}"));
     }
-    let (num, den) = exact_fraction(factor)
-        .ok_or_else(|| format!("scale factor {factor} is out of range"))?;
+    let (num, den) =
+        exact_fraction(factor).ok_or_else(|| format!("scale factor {factor} is out of range"))?;
     Ok(limit_denominator(num, den, SCALE_FACTOR_MAX_DENOMINATOR))
 }
 
@@ -326,7 +325,11 @@ struct Plan {
 /// align_corners, scale_factors` for bilinear and `x, output_size,
 /// scale_factors` for nearest, whose `align_corners` is False.
 fn unpack(node: &IrNode) -> Result<(NodeId, ResizeMode, bool, &IrArg), String> {
-    if node.kwargs.values().any(|value| !matches!(value, IrArg::None)) {
+    if node
+        .kwargs
+        .values()
+        .any(|value| !matches!(value, IrArg::None))
+    {
         return Err("keyword arguments; rc4 unpacks node.args".into());
     }
     let x = |arg: &IrArg| arg.as_node().ok_or_else(|| "no input node".to_string());
@@ -337,7 +340,12 @@ fn unpack(node: &IrNode) -> Result<(NodeId, ResizeMode, bool, &IrArg), String> {
                 IrArg::None => false,
                 other => return Err(format!("align_corners {other:?}")),
             };
-            Ok((x(input)?, ResizeMode::Bilinear, align_corners, scale_factors))
+            Ok((
+                x(input)?,
+                ResizeMode::Bilinear,
+                align_corners,
+                scale_factors,
+            ))
         }
         (UPSAMPLE_NEAREST2D_VEC, [input, _, scale_factors]) => {
             Ok((x(input)?, ResizeMode::Nearest, false, scale_factors))
@@ -523,6 +531,7 @@ mod tests {
     use crate::layout::dtype::special_dtype;
     use crate::layout::testing::{ints, node, LayoutGraph, PERMUTE, RESCALE};
     use crate::test_ir::qparam;
+    use std::f64::consts::{E, PI, SQRT_2};
 
     const I8: &str = "torch.int8";
     const I16: &str = "torch.int16";
@@ -585,12 +594,19 @@ mod tests {
 
     fn assert_declined(g: &mut LayoutGraph, reason: &str) {
         crate::stock_fallback::take();
-        let before = g.targets().into_iter().map(str::to_string).collect::<Vec<_>>();
+        let before = g
+            .targets()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
         assert!(!IrRewriteUpsamplePass.run(g.graph_mut()));
         assert_eq!(g.targets(), before, "a declined rewrite changes nothing");
         let request = crate::stock_fallback::take().expect("a stock fallback request");
         assert!(request.contains(reason), "{request}");
     }
+
+    /// `(input, output, align_corners, mode, scale_factor, expected)`.
+    type ParityRow = (i64, i64, bool, ResizeMode, Option<f64>, ResizeAxis);
 
     /// `get_resize_parameters_1d` against rc4's own function, run in
     /// .venv-et16 (sympy 1.14): every branch (nearest integer upscale,
@@ -598,12 +614,14 @@ mod tests {
     /// including its size-1 fallback to `out / in`), and nearest scale factors
     /// as doubles and float32 values, near-integers and irrationals, whose
     /// `nsimplify(tolerance=1e-6)` takes `limit_denominator`'s semiconvergent
-    /// path. Regenerate with the loop in `get_resize_parameters_1d`'s rc4
-    /// tests over these `(in, out, align_corners, mode, scale_factor)` rows.
+    /// path. Each row's expectation is
+    /// `RewriteUpsamplePass.get_resize_parameters_1d(input, output,
+    /// align_corners, mode, scale_factor)` evaluated there; a scale-factor row
+    /// has `output = int(input * scale_factor)`, as torch sizes it.
     #[test]
     fn resize_parameters_match_rc4() {
         #[rustfmt::skip]
-        let rows: &[(i64, i64, bool, ResizeMode, Option<f64>, ResizeAxis)] = &[
+        let rows: &[ParityRow] = &[
         (1, 1, false, N, None, [2, 2, 0, 0]),
         (1, 2, false, N, None, [4, 2, -1, 1]),
         (1, 5, false, N, None, [10, 2, -4, 4]),
@@ -739,10 +757,10 @@ mod tests {
         (3, 7, false, N, Some(2.3333333333333335), [14, 6, -7, 1]),
         (3, 6, false, N, Some(2.3333332538604736), [14, 6, -7, -5]),
         (2, 8, false, N, Some(4.0), [8, 2, -3, 3]),
-        (3, 9, false, N, Some(3.141592653589793), [6253070, 1990414, -3126535, 290637]),
-        (3, 8, false, N, Some(2.718281828459045), [2168966, 797918, -1084483, 163011]),
+        (3, 9, false, N, Some(PI), [6253070, 1990414, -3126535, 290637]),
+        (3, 8, false, N, Some(E), [2168966, 797918, -1084483, 163011]),
         (9, 9, false, N, Some(1.0000001), [2, 2, 0, 0]),
-        (7, 9, false, N, Some(1.4142135623730951), [1331714, 941664, -665857, -1122829]),
+        (7, 9, false, N, Some(SQRT_2), [1331714, 941664, -665857, -1122829]),
         (9, 8, false, N, Some(0.999999), [1999998, 2000000, -999999, -2999983]),
         (7, 9, false, N, Some(1.4142135381698608), [109726, 77588, -54863, -92515]),
         (9, 9, false, N, Some(1.0000005), [2000002, 2000000, -1000001, -1000017]),
@@ -761,7 +779,7 @@ mod tests {
     /// float32 scale factors design risk 6 names.
     #[test]
     fn limit_denominator_and_nsimplify_match_python() {
-        let pi = exact_fraction(3.141592653589793).unwrap();
+        let pi = exact_fraction(PI).unwrap();
         assert_eq!(limit_denominator(pi.0, pi.1, 10), (22, 7));
         assert_eq!(limit_denominator(pi.0, pi.1, 100), (311, 99));
         assert_eq!(limit_denominator(4321, 8765, 10000), (4321, 8765));
@@ -826,24 +844,38 @@ mod tests {
         // Critique A1: only the RESIZE keeps the upsample's qparams.
         assert_eq!(qparam_keys(pre.meta.input_qparams()), Some(vec![]));
         let resize = by_name(&g, &format!("{name}_tosa"));
-        assert_args(&resize.args, &[
+        assert_args(
+            &resize.args,
+            &[
                 node(pre.id),
                 node(g.id(&format!("{name}_scale"))),
                 node(g.id(&format!("{name}_offset"))),
                 node(g.id(&format!("{name}_border"))),
-            ]
+            ],
         );
-        assert_eq!(resize.kwarg("resize_mode").and_then(IrArg::as_str), Some("nearest"));
-        assert_eq!((g.shape(resize.id), g.dtype(resize.id)), (&[1, 8, 8, 3][..], I8));
+        assert_eq!(
+            resize.kwarg("resize_mode").and_then(IrArg::as_str),
+            Some("nearest")
+        );
+        assert_eq!(
+            (g.shape(resize.id), g.dtype(resize.id)),
+            (&[1, 8, 8, 3][..], I8)
+        );
         assert_eq!(resize.meta.input_qparam(), Some(&q));
         assert_eq!(resize.meta.output_qparam(), Some(&q));
         assert_eq!(special_dtype(&resize.meta), None);
         let post = by_name(&g, &format!("{name}_nchw"));
         assert_args(&post.args, &[node(resize.id), ints(&[0, 3, 1, 2])]);
-        assert_eq!((g.shape(post.id), g.dtype(post.id)), (&[1, 3, 8, 8][..], I8));
+        assert_eq!(
+            (g.shape(post.id), g.dtype(post.id)),
+            (&[1, 3, 8, 8][..], I8)
+        );
         assert_eq!(qparam_keys(post.meta.output_qparams()), Some(vec![]));
         for id in [pre.id, resize.id, post.id] {
-            assert_eq!(g.graph().node(id).meta.val_dim_order(), Some(&[0, 1, 2, 3][..]));
+            assert_eq!(
+                g.graph().node(id).meta.val_dim_order(),
+                Some(&[0, 1, 2, 3][..])
+            );
         }
         let output = g.graph().output_node().unwrap();
         assert!(output.args[0].contains_node(post.id));
@@ -874,27 +906,50 @@ mod tests {
             PERMUTE,
         ]);
         let resize = by_name(&g, &format!("{name}_tosa"));
-        assert_args(&by_name(&g, &format!("{name}_scale")).args, &[ints(&[4, 2, 4, 2])]);
-        assert_args(&by_name(&g, &format!("{name}_offset")).args, &[ints(&[-1, -1])]);
-        assert_args(&by_name(&g, &format!("{name}_border")).args, &[ints(&[1, 1])]);
-        assert_eq!(resize.kwarg("resize_mode").and_then(IrArg::as_str), Some("bilinear"));
-        assert_eq!((g.shape(resize.id), g.dtype(resize.id)), (&[1, 8, 8, 3][..], I32));
+        assert_args(
+            &by_name(&g, &format!("{name}_scale")).args,
+            &[ints(&[4, 2, 4, 2])],
+        );
+        assert_args(
+            &by_name(&g, &format!("{name}_offset")).args,
+            &[ints(&[-1, -1])],
+        );
+        assert_args(
+            &by_name(&g, &format!("{name}_border")).args,
+            &[ints(&[1, 1])],
+        );
+        assert_eq!(
+            resize.kwarg("resize_mode").and_then(IrArg::as_str),
+            Some("bilinear")
+        );
+        assert_eq!(
+            (g.shape(resize.id), g.dtype(resize.id)),
+            (&[1, 8, 8, 3][..], I32)
+        );
         assert_eq!(special_dtype(&resize.meta), None);
         let rescale = by_name(&g, &format!("{name}_rescale"));
-        assert_args(&rescale.args, &[
+        assert_args(
+            &rescale.args,
+            &[
                 node(resize.id),
                 IrArg::Dtype(I8.into()),
                 IrArg::List(vec![IrArg::Float(0.0625)]),
                 IrArg::Int(0),
                 IrArg::Int(0),
-            ]
+            ],
         );
-        assert_eq!((g.shape(rescale.id), g.dtype(rescale.id)), (&[1, 8, 8, 3][..], I8));
+        assert_eq!(
+            (g.shape(rescale.id), g.dtype(rescale.id)),
+            (&[1, 8, 8, 3][..], I8)
+        );
         assert_eq!(qparam_keys(rescale.meta.input_qparams()), Some(vec![]));
         assert_eq!(qparam_keys(rescale.meta.output_qparams()), Some(vec![]));
         let post = by_name(&g, &format!("{name}_nchw"));
         assert_arg(post.args.first(), &node(rescale.id));
-        assert_eq!((g.shape(post.id), g.dtype(post.id)), (&[1, 3, 8, 8][..], I8));
+        assert_eq!(
+            (g.shape(post.id), g.dtype(post.id)),
+            (&[1, 3, 8, 8][..], I8)
+        );
     }
 
     /// `:274-277`: an int16 bilinear RESIZE stays int16 but accumulates in
@@ -931,11 +986,23 @@ mod tests {
             Some(qparam(0.017, 4, I8)),
         );
         assert!(IrRewriteUpsamplePass.run(g.graph_mut()));
-        assert_args(&by_name(&g, &format!("{name}_scale")).args, &[ints(&[4, 2, 4, 2])]);
-        assert_args(&by_name(&g, &format!("{name}_offset")).args, &[ints(&[0, 0])]);
-        assert_args(&by_name(&g, &format!("{name}_border")).args, &[ints(&[0, 0])]);
+        assert_args(
+            &by_name(&g, &format!("{name}_scale")).args,
+            &[ints(&[4, 2, 4, 2])],
+        );
+        assert_args(
+            &by_name(&g, &format!("{name}_offset")).args,
+            &[ints(&[0, 0])],
+        );
+        assert_args(
+            &by_name(&g, &format!("{name}_border")).args,
+            &[ints(&[0, 0])],
+        );
         let rescale = by_name(&g, &format!("{name}_rescale"));
-        assert_arg(rescale.args.get(2), &IrArg::List(vec![IrArg::Float(1.0 / 16.0)]));
+        assert_arg(
+            rescale.args.get(2),
+            &IrArg::List(vec![IrArg::Float(1.0 / 16.0)]),
+        );
     }
 
     /// A float32-rounded nearest factor gives the same compact rational as the
@@ -952,10 +1019,18 @@ mod tests {
             Some(qparam(0.017, 4, I8)),
         );
         assert!(IrRewriteUpsamplePass.run(g.graph_mut()));
-        assert_args(&by_name(&g, &format!("{name}_scale")).args, &[ints(&[16, 10, 16, 10])]
+        assert_args(
+            &by_name(&g, &format!("{name}_scale")).args,
+            &[ints(&[16, 10, 16, 10])],
         );
-        assert_args(&by_name(&g, &format!("{name}_offset")).args, &[ints(&[-8, -8])]);
-        assert_args(&by_name(&g, &format!("{name}_border")).args, &[ints(&[-2, -2])]);
+        assert_args(
+            &by_name(&g, &format!("{name}_offset")).args,
+            &[ints(&[-8, -8])],
+        );
+        assert_args(
+            &by_name(&g, &format!("{name}_border")).args,
+            &[ints(&[-2, -2])],
+        );
     }
 
     /// A float bilinear upsample needs no RESCALE (rc4's FP path; RETAB lowers
@@ -994,7 +1069,12 @@ mod tests {
         let first_id = g.id(&first);
         let second = g.add_unrefreshed(
             UPSAMPLE_BILINEAR2D_VEC,
-            vec![node(first_id), IrArg::None, IrArg::Bool(false), floats(&[2.0, 2.0])],
+            vec![
+                node(first_id),
+                IrArg::None,
+                IrArg::Bool(false),
+                floats(&[2.0, 2.0]),
+            ],
         );
         let mut meta = NodeMeta::tensor(vec![1, 3, 16, 16], F32);
         meta.set_both_qparams(q);
@@ -1005,8 +1085,14 @@ mod tests {
         assert!(IrRewriteUpsamplePass.run(g.graph_mut()));
         assert_eq!(g.count(TOSA_RESIZE), 2);
         let second_pre = by_name(&g, &format!("{second}_nhwc"));
-        assert_arg(second_pre.args.first(), &node(g.id(&format!("{first}_nchw"))));
-        assert_eq!(g.shape(by_name(&g, &format!("{second}_tosa")).id), [1, 16, 16, 3]);
+        assert_arg(
+            second_pre.args.first(),
+            &node(g.id(&format!("{first}_nchw"))),
+        );
+        assert_eq!(
+            g.shape(by_name(&g, &format!("{second}_tosa")).id),
+            [1, 16, 16, 3]
+        );
     }
 
     /// RESIZE parameters rc4's validation rejects go to stock (critique B10):
