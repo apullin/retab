@@ -1,25 +1,28 @@
-//! End-to-end checks of `IrRewriteConvPass` (APU-135 P2 S3) through explicit-mode
+//! End-to-end checks of `IrRewriteConvPass` (APU-135 P2 S3, S4) through explicit-mode
 //! ingest and serialization: rc4's captured graphs (`rewrite_conv*.txt`), rewritten
 //! by the pass, serialize to the TOSA rc4's form implies. Each TOSA conv reads its
 //! pre-permuted weight as given (no second permutation, design B1) and declares the
 //! val's shape with the accumulator's dtype (G1, A9); the RESCALE reads the
 //! accumulator; the only layout ops are the rewrite's TRANSPOSEs (and conv1d's
 //! RESHAPEs), with no peephole folding them away (G5); and no node carries a dim
-//! order or serializes at a shape other than its val's (D1).
+//! order or serializes at a shape other than its val's (D1). A16W8 convs whose
+//! INT48 accumulators branch to int32 consumers, U55 clones included, serialize too.
 
 use super::collection::{check_explicit_layout_invariants, collect_regions, SerializedGraphItems};
-use super::tosa_types::{DType, Op, TosaTensor};
+use super::tosa_types::{Attribute, DType, Op, TosaTensor};
 use super::visitors;
-use crate::fx_ir::{IrGraph, IrPass, NodeOp};
+use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeOp};
 use crate::graph::Graph;
 use crate::layout::replay;
 use crate::layout::rewrite_conv::IrRewriteConvPass;
-use crate::pipeline_config::LayoutMode;
+use crate::pipeline_config::{LayoutMode, PipelineConfig};
 use crate::store::TensorStore;
 
 const REWRITE_CONV: &str = include_str!("../../tests/fixtures/layout_replay/rewrite_conv.txt");
 const REWRITE_CONV_A16W8: &str =
     include_str!("../../tests/fixtures/layout_replay/rewrite_conv_a16w8.txt");
+const REWRITE_CONV_A16W8_U55: &str =
+    include_str!("../../tests/fixtures/layout_replay/rewrite_conv_a16w8_u55.txt");
 
 const TOSA_CONVS: [&str; 4] = [
     "backend.tosa.CONV2D.default",
@@ -30,6 +33,15 @@ const TOSA_CONVS: [&str; 4] = [
 
 /// rc4's before graph of `name`, rewritten by the pass.
 fn rewritten(fixture: &str, name: &str) -> IrGraph {
+    let pass = IrRewriteConvPass {
+        is_u55_subset: false,
+        in_region: false,
+    };
+    rewritten_with(&pass, fixture, name)
+}
+
+/// rc4's before graph of `name`, rewritten by `pass`.
+fn rewritten_with(pass: &IrRewriteConvPass, fixture: &str, name: &str) -> IrGraph {
     let case = replay::parse(fixture)
         .expect("a valid fixture")
         .into_iter()
@@ -37,10 +49,6 @@ fn rewritten(fixture: &str, name: &str) -> IrGraph {
         .unwrap_or_else(|| panic!("no case {name}"));
     let mut graph = replay::import(&case);
     crate::stock_fallback::take();
-    let pass = IrRewriteConvPass {
-        is_u55_subset: false,
-        in_region: false,
-    };
     assert!(pass.run(&mut graph), "{name}");
     assert_eq!(crate::stock_fallback::take(), None, "{name}");
     graph
@@ -219,5 +227,117 @@ fn rewritten_convs_serialize_in_explicit_mode() {
         if rank3 {
             assert_eq!(count(&items, Op::Reshape), 2, "{name}");
         }
+    }
+}
+
+/// A16W8 convs with INT32 consumers (APU-135 P2 S4, design §2.8) serialize in
+/// explicit mode, standing in for the whole lowering rc4's
+/// `test_rewrite_conv_a16w8_mixed_consumers_restore_int16` runs first
+/// (`_lower_a16w8_to_tosa`): every TOSA conv, U55 clones included, declares an
+/// INT48 accumulator; each RESCALE of one reads it as INT48 (scale32 off) and
+/// narrows to the int16 or int32 its IR node asks for; on U55 each accumulator
+/// feeds exactly one operator; and the only TRANSPOSEs are the graph's
+/// permutes.
+#[test]
+fn a16w8_branches_serialize_in_explicit_mode() {
+    let generic =
+        IrRewriteConvPass::new(&PipelineConfig::from_tosa_spec("TOSA-1.0+INT+int16"), false);
+    let u55 = IrRewriteConvPass::new(
+        &PipelineConfig::from_tosa_spec("TOSA-1.0+INT+int16+int4+u55"),
+        false,
+    );
+    let cases = [
+        (REWRITE_CONV_A16W8, "conv_add_a16w8"),
+        (REWRITE_CONV_A16W8, "conv_add_sub_a16w8"),
+        (REWRITE_CONV_A16W8, "permuted_int32_a16w8"),
+        (REWRITE_CONV_A16W8, "mixed_chain_conv_a16w8"),
+        (REWRITE_CONV_A16W8, "mixed_chain_dw_a16w8"),
+        (REWRITE_CONV_A16W8, "mixed_chain_avg_pool_a16w8"),
+        (REWRITE_CONV_A16W8, "mixed_chain_max_pool_a16w8"),
+        (REWRITE_CONV_A16W8, "mixed_conv3d_a16w8"),
+        (REWRITE_CONV_A16W8, "mixed_tconv_a16w8"),
+        (REWRITE_CONV_A16W8_U55, "conv_add_sub_a16w8_u55"),
+        (REWRITE_CONV_A16W8_U55, "permuted_int32_a16w8_u55"),
+        (REWRITE_CONV_A16W8_U55, "mixed_chain_conv_a16w8_u55"),
+        (REWRITE_CONV_A16W8_U55, "mixed_chain_avg_pool_a16w8_u55"),
+        (REWRITE_CONV_A16W8_U55, "mixed_tconv_a16w8_u55"),
+    ];
+    for (fixture, name) in cases {
+        let on_u55 = name.ends_with("_u55");
+        let ir = rewritten_with(if on_u55 { &u55 } else { &generic }, fixture, name);
+        let items = serialize_explicit(&ir).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let convs: Vec<_> = ir
+            .topological_live_node_ids()
+            .into_iter()
+            .filter(|&id| {
+                let node = ir.node(id);
+                node.op == NodeOp::CallFunction && TOSA_CONVS.contains(&node.target.as_str())
+            })
+            .collect();
+        let conv_ops = [
+            Op::Conv2d,
+            Op::DepthwiseConv2d,
+            Op::TransposeConv2d,
+            Op::Conv3d,
+        ];
+        let mut widened = 0;
+        for &conv in &convs {
+            let node = ir.node(conv);
+            let operator = items
+                .operators
+                .iter()
+                .find(|o| conv_ops.contains(&o.op) && o.outputs.first() == Some(&node.name))
+                .unwrap_or_else(|| panic!("{name}: no TOSA op for {}", node.name));
+            assert_eq!(
+                tensor(&items, &operator.outputs[0]).dtype,
+                DType::Int48,
+                "{name}"
+            );
+            let readers: Vec<_> = items
+                .operators
+                .iter()
+                .filter(|o| o.inputs.contains(&node.name))
+                .collect();
+            if on_u55 {
+                assert_eq!(readers.len(), 1, "{name}: {} feeds one operator", node.name);
+            }
+            for user in ir.live_user_ids(conv) {
+                let rescale = ir.node(user);
+                assert_eq!(rescale.target, "backend.tosa.RESCALE.default", "{name}");
+                let narrowed = match &rescale.args[1] {
+                    IrArg::Dtype(dtype) if dtype == "torch.int16" => DType::Int16,
+                    IrArg::Dtype(dtype) if dtype == "torch.int32" => DType::Int32,
+                    other => panic!("{name}: a RESCALE to {other:?}"),
+                };
+                let operator = readers
+                    .iter()
+                    .find(|o| o.op == Op::Rescale && o.outputs.first() == Some(&rescale.name))
+                    .unwrap_or_else(|| panic!("{name}: no RESCALE op for {}", rescale.name));
+                assert_eq!(
+                    tensor(&items, &operator.inputs[3]).dtype,
+                    DType::Int48,
+                    "{name}"
+                );
+                assert_eq!(
+                    tensor(&items, &operator.outputs[0]).dtype,
+                    narrowed,
+                    "{name}"
+                );
+                let Attribute::Rescale(attribute) = &operator.attribute else {
+                    panic!("{name}: expected a RESCALE attribute");
+                };
+                assert!(!attribute.scale32, "{name}");
+                widened += usize::from(narrowed == DType::Int32);
+            }
+        }
+        assert!(
+            widened > 0,
+            "{name}: no RESCALE to int32 reads an accumulator"
+        );
+        let transposes = ir
+            .live_nodes()
+            .filter(|node| node.target == "aten.permute_copy.default")
+            .count();
+        assert_eq!(count(&items, Op::Transpose), transposes, "{name}");
     }
 }
