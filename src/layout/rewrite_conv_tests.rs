@@ -529,7 +529,13 @@ fn zero_biases_go_first_in_reverse_conv_order() {
 /// and stays one int8 byte per element (packing happens at serialization).
 #[test]
 fn int4_weights_keep_their_marker() {
-    for name in ["conv2d_a8w4", "dw2d_a8w4", "conv1d_a8w4", "linear_a8w4"] {
+    for name in [
+        "conv2d_a8w4",
+        "dw2d_a8w4",
+        "conv1d_a8w4",
+        "linear_a8w4",
+        "tconv2d_nobias_a8w4",
+    ] {
         let graph = rewritten(REWRITE_CONV, name);
         let [tosa] = tosa_convs(&graph)[..] else {
             panic!("{name}: one TOSA conv");
@@ -681,11 +687,17 @@ fn created_nodes_take_rc4s_meta_and_names() {
 // Quantization details
 // ---------------------------------------------------------------------------
 
-/// RCP:481-488: `(s_in * s_w[i]) / s_out` per output channel, with exactly
+/// RCP:481-488: `(s_in * s_w[i]) / s_out` per weight scale, with exactly
 /// this association, and the output zero point.
 #[test]
 fn rescale_scales_combine_in_rc4s_order() {
-    for name in ["conv2d_pt", "conv2d_pc", "tconv2d_pc", "dw2d_pc"] {
+    for name in [
+        "conv2d_pt",
+        "conv2d_pc",
+        "tconv2d_pc",
+        "dw2d_pc",
+        "tconv2d_nobias_a8w4",
+    ] {
         let mut graph = imported(REWRITE_CONV, name);
         let conv = single_call(&graph, CONVOLUTION);
         let meta = graph.node(conv).meta.clone();
@@ -706,6 +718,65 @@ fn rescale_scales_combine_in_rc4s_order() {
         assert_eq!(float_list(&rescale.args[2]), expected, "{name}");
         assert_eq!(rescale.args[3].as_int(), Some(0), "{name}");
         assert_eq!(rescale.args[4].as_int(), Some(output.zp), "{name}");
+    }
+}
+
+/// rc4 zips the weight's scales with the cycled input and output scales
+/// (RCP:481-488), so the RESCALE carries one scale per weight scale, not one
+/// per output channel. rc4's quantizer leaves an A8W4 transposed conv's IOHW
+/// weight on axis 0 (`quantization_annotator.py:136-138`): its 3 input-channel
+/// scales go into the RESCALE of a 4-channel accumulator, which TOSA's
+/// reference model rejects, so rc4 xfails those op tests
+/// (`test_transpose_conv2d.py:497-501`). The port reproduces that graph instead
+/// of falling back to stock; a weight with fewer or more scales than output
+/// channels likewise keeps its count.
+#[test]
+fn rescales_take_one_scale_per_weight_scale() {
+    let mut graph = imported(REWRITE_CONV, "tconv2d_nobias_a8w4");
+    let conv = single_call(&graph, CONVOLUTION);
+    let weight = graph
+        .node(conv)
+        .meta
+        .input_qparam_at(1)
+        .cloned()
+        .expect("weight");
+    assert_eq!((weight.axis, weight.per_channel_scales.len()), (0, 3));
+    rewrite(&mut graph);
+    let tosa = single_call(&graph, TRANSPOSE_CONV2D);
+    assert_eq!(shape(&graph, tosa), [1, 12, 12, 4]);
+    let rescale = graph.node(single_call(&graph, RESCALE));
+    assert_eq!(arg(&graph, rescale.id, 0), tosa);
+    assert_eq!(float_list(&rescale.args[2]).len(), 3);
+
+    for name in ["tconv2d_nobias_pc", "conv2d_pc"] {
+        for count in [2, 6] {
+            let mut graph = imported(REWRITE_CONV, name);
+            let conv = single_call(&graph, CONVOLUTION);
+            let meta = &graph.node(conv).meta;
+            let input = meta.input_qparam_at(0).expect("activation").scale;
+            let output = meta.output_qparam().expect("output").scale;
+            let mut weight = meta.input_qparam_at(1).cloned().expect("weight");
+            weight.per_channel_scales = (1..=count).map(|i| 0.001 * f64::from(i)).collect();
+            weight.per_channel_zps = vec![0; count as usize];
+            let expected: Vec<f64> = weight
+                .per_channel_scales
+                .iter()
+                .map(|&scale| (input * scale) / output)
+                .collect();
+            let qparams: Vec<(usize, QParam)> = graph
+                .node(conv)
+                .meta
+                .sorted_input_qparams()
+                .into_iter()
+                .map(|(index, qparam)| (index, if index == 1 { weight.clone() } else { qparam }))
+                .collect();
+            graph.node_mut(conv).meta.set_input_qparams_from(qparams);
+            rewrite(&mut graph);
+            let tosa = tosa_convs(&graph)[0];
+            assert_eq!(shape(&graph, tosa).last(), Some(&4), "{name}");
+            let rescale = graph.node(single_call(&graph, RESCALE));
+            assert_eq!(float_list(&rescale.args[2]), expected, "{name}: {count}");
+        }
     }
 }
 

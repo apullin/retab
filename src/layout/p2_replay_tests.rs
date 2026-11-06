@@ -250,7 +250,7 @@ fn p2_fixtures_cover_the_design_case_lists() {
             assert!(conv.contains(&format!("{model}_{quant}")), "{model}_{quant}");
         }
     }
-    for model in ["conv2d", "dw2d", "conv1d", "linear"] {
+    for model in ["conv2d", "dw2d", "conv1d", "linear", "tconv2d_nobias"] {
         assert!(conv.contains(&format!("{model}_a8w4")), "{model}_a8w4");
     }
     let a16w8 = names(REWRITE_CONV_A16W8);
@@ -348,15 +348,17 @@ fn conv_fixtures_record_real_qparams() {
                     let Val::Tensor { shape, .. } = &w.val else {
                         panic!("weight without a tensor val");
                     };
-                    let channels = if args(conv)[6] == replay::Arg::Bool(true) {
-                        // Transposed: IOHW, per-channel along O (axis 1).
-                        assert_eq!(weight.axis, 1, "{}", case.name);
-                        shape[1]
+                    let transposed = args(conv)[6] == replay::Arg::Bool(true);
+                    let axis: usize = if transposed && !case.name.ends_with("_a8w4") {
+                        // Transposed: IOHW, per-channel along O (axis 1), except
+                        // for int4 weights, which rc4's quantizer leaves on I
+                        // (see `a8w4_transposed_conv_rescales_take_input_channel_scales`).
+                        1
                     } else {
-                        assert_eq!(weight.axis, 0, "{}", case.name);
-                        shape[0]
+                        0
                     };
-                    assert_eq!(weight.scales.len() as i64, channels, "{}", case.name);
+                    assert_eq!(weight.axis, axis as i64, "{}", case.name);
+                    assert_eq!(weight.scales.len() as i64, shape[axis], "{}", case.name);
                 }
             }
             for tosa in case
@@ -371,6 +373,51 @@ fn conv_fixtures_record_real_qparams() {
             }
         }
     }
+}
+
+/// rc4's quantizer skips the transposed-conv axis fix for int4 weights
+/// (`_adjust_weight_qspec_for_conv_transpose`, quantization_annotator.py:136-138),
+/// so an A8W4 transposed conv's IOHW weight is quantized per input channel, and
+/// RewriteConvPass zips those scales into the RESCALE (rewrite_conv_pass.py:481-488):
+/// 3 scales for a 4-channel accumulator, which TOSA's reference model rejects.
+/// That is what rc4 records; IrRewriteConv reproduces it rather than fall back.
+#[test]
+fn a8w4_transposed_conv_rescales_take_input_channel_scales() {
+    let conv_cases = cases(REWRITE_CONV);
+    let case = case(&conv_cases, "tconv2d_nobias_a8w4");
+    let conv = nodes_of(&case.before, CONVOLUTION).next().expect("a conv");
+    let Val::Tensor { shape, .. } = &node_arg(&case.before, conv, 1).val else {
+        panic!("weight without a tensor val");
+    };
+    let (in_channels, out_channels) = (shape[0], shape[1]);
+    assert_ne!(in_channels, out_channels);
+    let input = qvalue(&conv.q_in, 0).expect("input qparam");
+    let weight = qvalue(&conv.q_in, 1).expect("weight qparam");
+    let output = qvalue(&conv.q_out, 0).expect("output qparam");
+    assert!(weight.per_channel);
+    assert_eq!((weight.axis, weight.scales.len() as i64), (0, in_channels));
+    assert_eq!((weight.qmin, weight.qmax), (-7, 7), "int4");
+
+    let tosa = nodes_of(&case.after, "tosa.TRANSPOSE_CONV2D.default")
+        .next()
+        .expect("a TRANSPOSE_CONV2D");
+    let Val::Tensor { shape, .. } = &tosa.val else {
+        panic!("TRANSPOSE_CONV2D without a tensor val");
+    };
+    assert_eq!(shape.last(), Some(&out_channels));
+    let rescale = nodes_of(&case.after, "tosa.RESCALE.default")
+        .next()
+        .expect("a RESCALE");
+    assert_eq!(node_arg(&case.after, rescale, 0), tosa);
+    let replay::Arg::List(scales) = &args(rescale)[2] else {
+        panic!("RESCALE scales");
+    };
+    let expected: Vec<replay::Arg> = weight
+        .scales
+        .iter()
+        .map(|&scale| replay::Arg::Float((input.scales[0] * scale) / output.scales[0]))
+        .collect();
+    assert_eq!(scales, &expected);
 }
 
 /// A8W4 weights carry INT4 into the rewritten weights; A16W8 TOSA convs and

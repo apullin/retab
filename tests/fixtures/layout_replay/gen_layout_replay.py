@@ -4143,9 +4143,23 @@ UPSAMPLE_SOURCES = [
 
 
 def conv_cases():
+    # A8W4 transposed conv: rc4's quantizer skips the transposed-conv axis fix
+    # for int4 weights (`_adjust_weight_qspec_for_conv_transpose`,
+    # quantization_annotator.py:136-138), so the IOHW weight is quantized per
+    # input channel (axis 0) and RewriteConvPass zips those Cin scales into the
+    # RESCALE (rewrite_conv_pass.py:481-488) whatever Cout is. Only the
+    # bias-free model gets that far: with a bias, the quantizer itself fails
+    # (the bias qspec takes the weight's Cin scales for Cout values), which is
+    # why rc4's op tests xfail every per-channel A8W4 transposed conv
+    # (test_transpose_conv2d.py:497-501).
     return (
         model_cases("", CONV_MODELS, ["pt", "pc"])
-        + model_cases("", CONV_MODELS, ["a8w4"], only=["conv2d", "dw2d", "conv1d", "linear"])
+        + model_cases(
+            "",
+            CONV_MODELS,
+            ["a8w4"],
+            only=["conv2d", "dw2d", "conv1d", "linear", "tconv2d_nobias"],
+        )
     )
 
 

@@ -54,9 +54,10 @@
 //! its output dtype, and a layout copy its producer's val dtype.
 //!
 //! **Output RESCALE** (RCP:464-509). `scales[i] = (s_in * s_w[i]) / s_out` in
-//! f64, one per output channel for a per-channel weight; the output qparams
-//! are the conv's own, else those of a sole `view_copy` or `clamp` user
-//! (RCP:420-450). An int16 activation (A16W8) marks the TOSA convolution and
+//! f64, one per weight scale as rc4 zips them (normally one per output channel;
+//! an A8W4 transposed conv's weight is quantized per input channel, and rc4
+//! keeps those scales); the output qparams are the conv's own, else those of a
+//! sole `view_copy` or `clamp` user (RCP:420-450). An int16 activation (A16W8) marks the TOSA convolution and
 //! its bias INT48 (RCP:414-418, :856).
 //!
 //! **Not here yet.** A16W8's INT32 branching and U55 separation (design §2.8)
@@ -903,15 +904,16 @@ fn plan(graph: &IrGraph, scope: GraphScope, conv: NodeId) -> Result<Option<ConvR
         } else {
             vec![weight.scale]
         };
-        // A per-channel RESCALE needs one scale per output channel.
-        let channels = *tosa_shape.last().expect("a rank-4 or rank-5 accumulator");
-        if weight_scales.len() != 1 && weight_scales.len() as i64 != channels {
-            return Err(format!(
-                "{} weight scales for {channels} output channels",
-                weight_scales.len()
-            ));
-        }
-        // RCP:481-488, with exactly this association.
+        // RCP:481-488, with exactly this association. rc4 zips the weight's
+        // scales with the cycled input and output scales, so the RESCALE gets
+        // one scale per weight scale, which need not be one per output channel:
+        // rc4's quantizer leaves an int4 transposed conv's per-channel weight on
+        // IOHW axis 0 (`_adjust_weight_qspec_for_conv_transpose`,
+        // `quantization_annotator.py:136-138`), so its scales are per input
+        // channel. rc4 emits them as they are, and TOSA's reference model
+        // rejects the RESCALE (rc4 xfails those op tests,
+        // `test_transpose_conv2d.py:497-501`); dim-order mode's
+        // IrInsertConvAccumulatorRescale does the same.
         let scales = weight_scales
             .iter()
             .map(|&weight_scale| (input_scale * weight_scale) / output_scale)
