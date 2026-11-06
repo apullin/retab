@@ -94,6 +94,81 @@ pub(crate) fn collect_region_metadata(
     (while_cond_graph_names, while_body_input_counts)
 }
 
+/// Control-flow hierarchies for the contract tests below and the explicit-mode
+/// serializer tests (APU-135 S8).
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use std::collections::BTreeMap;
+
+    use crate::fx_ir::{IrArg, IrGraph};
+    use crate::lowering_effects::LoweringEffectBatch;
+    use crate::test_ir::{call, output, placeholder, qparam};
+    use crate::StashedPipeline;
+
+    /// The val of every tensor in [`rank4_hierarchy`].
+    pub(crate) const RANK4: [i64; 4] = [2, 3, 2, 2];
+
+    /// rc4's test_cond.py and test_while.py cases with rank-4 inputs, reduced to the
+    /// boundary: `x` (int8, quantized) feeds a cond or a while loop whose rank-4 output,
+    /// `getitem`, is the parent's output. Each region returns its input, `arg0_1`.
+    pub(crate) fn rank4_hierarchy(
+        while_loop: bool,
+    ) -> (IrGraph, BTreeMap<String, StashedPipeline>) {
+        let qp = qparam(0.25, 3, "torch.int8");
+        let mut parent = IrGraph::empty();
+        let x = placeholder(&mut parent, "x", RANK4, "torch.int8");
+        parent.node_mut(x).meta.set_both_qparams(qp.clone());
+        let (target, args, regions) = if while_loop {
+            (
+                "while_loop",
+                vec![
+                    IrArg::Str("cond_fn".into()),
+                    IrArg::Str("body_fn".into()),
+                    IrArg::List(vec![IrArg::Node(x)]),
+                    IrArg::List(Vec::new()),
+                ],
+                ["cond_fn", "body_fn"],
+            )
+        } else {
+            let pred = placeholder(&mut parent, "pred", [1], "torch.bool");
+            (
+                "torch.ops.higher_order.cond",
+                vec![
+                    IrArg::Node(pred),
+                    IrArg::Str("true_graph_0".into()),
+                    IrArg::Str("false_graph_0".into()),
+                    IrArg::List(vec![IrArg::Node(x)]),
+                ],
+                ["true_graph_0", "false_graph_0"],
+            )
+        };
+        let cf = call(&mut parent, "cf", target, args, RANK4, "torch.int8");
+        assert!(parent.node(cf).is_control_flow(), "fixture: {target}");
+        let getitem = call(
+            &mut parent,
+            "getitem",
+            "getitem",
+            vec![IrArg::Node(cf), IrArg::Int(0)],
+            RANK4,
+            "torch.int8",
+        );
+        parent.node_mut(getitem).meta.set_both_qparams(qp.clone());
+        output(&mut parent, getitem);
+
+        let submodules = regions
+            .into_iter()
+            .map(|name| {
+                let mut region = IrGraph::empty();
+                let arg = placeholder(&mut region, "arg0_1", RANK4, "torch.int8");
+                region.node_mut(arg).meta.set_both_qparams(qp.clone());
+                output(&mut region, arg);
+                (name.to_string(), (region, LoweringEffectBatch::default()))
+            })
+            .collect();
+        (parent, submodules)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -348,69 +423,6 @@ mod tests {
         }
     }
 
-    /// The parent of rc4's test_cond.py and test_while.py cases with rank-4 inputs: `x`
-    /// (int8, quantized) feeds a cond or a while loop whose rank-4 output, `getitem`, is
-    /// the graph's output. Each region returns its input.
-    fn rank4_control_flow_hierarchy(
-        while_loop: bool,
-    ) -> (IrGraph, BTreeMap<String, StashedPipeline>) {
-        use crate::test_ir::{call, output, placeholder, qparam};
-
-        let shape = [2, 3, 2, 2];
-        let qp = qparam(0.25, 3, "torch.int8");
-        let mut parent = IrGraph::empty();
-        let x = placeholder(&mut parent, "x", shape, "torch.int8");
-        parent.node_mut(x).meta.set_both_qparams(qp.clone());
-        let (target, args, regions) = if while_loop {
-            (
-                "while_loop",
-                vec![
-                    IrArg::Str("cond_fn".into()),
-                    IrArg::Str("body_fn".into()),
-                    IrArg::List(vec![IrArg::Node(x)]),
-                    IrArg::List(Vec::new()),
-                ],
-                ["cond_fn", "body_fn"],
-            )
-        } else {
-            let pred = placeholder(&mut parent, "pred", [1], "torch.bool");
-            (
-                "torch.ops.higher_order.cond",
-                vec![
-                    IrArg::Node(pred),
-                    IrArg::Str("true_graph_0".into()),
-                    IrArg::Str("false_graph_0".into()),
-                    IrArg::List(vec![IrArg::Node(x)]),
-                ],
-                ["true_graph_0", "false_graph_0"],
-            )
-        };
-        let cf = call(&mut parent, "cf", target, args, shape, "torch.int8");
-        assert!(parent.node(cf).is_control_flow(), "fixture: {target}");
-        let getitem = call(
-            &mut parent,
-            "getitem",
-            "getitem",
-            vec![IrArg::Node(cf), IrArg::Int(0)],
-            shape,
-            "torch.int8",
-        );
-        parent.node_mut(getitem).meta.set_both_qparams(qp.clone());
-        output(&mut parent, getitem);
-
-        let submodules = regions
-            .into_iter()
-            .map(|name| {
-                let mut region = IrGraph::empty();
-                let arg = placeholder(&mut region, "arg0_1", shape, "torch.int8");
-                region.node_mut(arg).meta.set_both_qparams(qp.clone());
-                output(&mut region, arg);
-                (name.to_string(), (region, LoweringEffectBatch::default()))
-            })
-            .collect();
-        (parent, submodules)
-    }
-
     /// Dim-order mode lays a region's rank-4 tensors out channels-last, so the boundary
     /// contracts give a parent's rank-4 cond or while output the NHWC dim order. Explicit
     /// mode keeps it in its val, as rc4 does (APU-135 P2 design §4.3.1): no node in the
@@ -420,15 +432,16 @@ mod tests {
     fn only_dim_order_mode_lays_rank4_control_flow_outputs_out_nhwc() {
         use crate::pipeline_config::LayoutMode;
         use crate::test_ir::live_node;
+        use fixtures::RANK4;
 
         for while_loop in [false, true] {
             for layout in [LayoutMode::DimOrder, LayoutMode::Explicit] {
                 let case = format!("while_loop={while_loop} {layout:?}");
-                let (mut parent, mut submodules) = rank4_control_flow_hierarchy(while_loop);
+                let (mut parent, mut submodules) = fixtures::rank4_hierarchy(while_loop);
                 apply_boundary_contracts(&mut parent, &mut submodules, layout);
 
                 let getitem = &live_node(&parent, "getitem").meta;
-                assert_eq!(getitem.val_shape(), Some([2, 3, 2, 2].as_slice()), "{case}");
+                assert_eq!(getitem.val_shape(), Some(RANK4.as_slice()), "{case}");
                 let parent_output_user = getitem.extra_bool("arm_control_flow_parent_output_user");
                 match layout {
                     LayoutMode::DimOrder => {
@@ -465,7 +478,7 @@ mod tests {
                         Some(true),
                         "{case}: {name}"
                     );
-                    assert_eq!(arg.val_shape(), Some([2, 3, 2, 2].as_slice()), "{case}");
+                    assert_eq!(arg.val_shape(), Some(RANK4.as_slice()), "{case}");
                 }
             }
         }
