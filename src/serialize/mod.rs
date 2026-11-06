@@ -14,9 +14,7 @@ mod explicit_pool_rewrite_tests;
 mod explicit_rewrite_conv_tests;
 mod flatbuffer;
 pub(crate) mod op_semantics;
-mod output_layout;
 pub(crate) mod tensor_layout;
-mod transpose_peephole;
 
 use crate::graph::Graph;
 use crate::pipeline_config::PipelineConfig;

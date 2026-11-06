@@ -486,7 +486,6 @@ pub struct NodeMeta {
     pub output_qparams: SmallVec<[(u32, QuantArgs); 1]>,
     pub tosa_dim_order: Option<SmallVec<[u8; 6]>>,
     pub tosa_special_dtype: Option<DType>,
-    pub arm_control_flow_parent_output_user: bool,
     /// A 16-bit pending table whose shift RESCALE is its own node, because an
     /// explicit layout pass put a node between the two, as rc4 does with its
     /// TABLE and RESCALE (`layout::pending`): ingest emits the TABLE alone.
@@ -501,7 +500,6 @@ impl NodeMeta {
             output_qparams: SmallVec::new(),
             tosa_dim_order: None,
             tosa_special_dtype: None,
-            arm_control_flow_parent_output_user: false,
             table_rescale_split: false,
         }
     }

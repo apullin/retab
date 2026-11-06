@@ -9,7 +9,7 @@ use super::tensor_layout::TensorDeclarationContext;
 use super::tosa_types::{
     Attribute, ConstShapeAttribute, Op, ReshapeAttribute, TosaOperator, TosaShape, TosaTensor,
 };
-use super::{op_semantics, output_layout, tosa_types, visitors};
+use super::{op_semantics, tosa_types, visitors};
 
 pub(super) struct SerializedGraphItems {
     pub(super) tensors: Vec<TosaTensor>,
@@ -39,23 +39,36 @@ fn collect_region(
     graph: &Graph,
     store: &TensorStore,
 ) -> Result<SerializedRegion, String> {
-    // Region outputs are only true external program outputs on the root graph.
-    // Control-flow subgraphs feed COND_IF/WHILE_LOOP directly and must retain
-    // their internal layout instead of normalizing back to user-facing shape.
-    // In explicit mode IrNormalizeDelegateIOLayout owns the delegate boundary, so no
-    // TRANSPOSE is inferred from shapes (P2 design G4).
-    let normalize_outputs = name == "main" && !graph.is_explicit_layout();
     Ok(SerializedRegion {
         name: name.to_string(),
-        items: collect_graph_items(name, graph, store, normalize_outputs)?,
+        items: collect_graph_items(name, graph, store)?,
     })
+}
+
+/// The names of the tensors a region returns. IrNormalizeDelegateIOLayout owns the
+/// delegate boundary's layout, so each output is the node's own tensor (P2 design G4).
+fn append_output_names(graph: &Graph, arg: &Arg, output_names: &mut Vec<String>) {
+    match arg {
+        Arg::Node(id) => {
+            if let Some(node) = graph.node(*id) {
+                output_names.push(node.name.clone());
+            }
+        }
+        Arg::NodeList(ids) => {
+            for id in ids {
+                if let Some(node) = graph.node(*id) {
+                    output_names.push(node.name.clone());
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn collect_graph_items(
     region: &str,
     graph: &Graph,
     store: &TensorStore,
-    normalize_outputs: bool,
 ) -> Result<SerializedGraphItems, String> {
     let debug = crate::config::retab_debug_enabled();
     let sorted = graph.all_node_ids();
@@ -135,18 +148,7 @@ fn collect_graph_items(
             }
             OpType::Output => {
                 for arg in &node.args {
-                    if normalize_outputs {
-                        output_layout::append_normalized_output_names(
-                            graph,
-                            store,
-                            arg,
-                            &mut tensors,
-                            &mut operators,
-                            &mut output_names,
-                        );
-                    } else {
-                        output_layout::append_output_names(graph, arg, &mut output_names);
-                    }
+                    append_output_names(graph, arg, &mut output_names);
                 }
             }
         }
@@ -164,21 +166,6 @@ fn collect_graph_items(
         }
     }
 
-    // Explicit mode cleans up layout ops in the IR, as rc4 does
-    // (IrCanonicalizeViewCopyPermute); a post-emission peephole would hide its TRANSPOSEs
-    // (P2 design G5).
-    if !graph.is_explicit_layout() {
-        let simplified = super::transpose_peephole::simplify_transposes(
-            &mut tensors,
-            &mut shapes,
-            &mut operators,
-            &input_names,
-            &mut output_names,
-        );
-        if debug && simplified > 0 {
-            eprintln!("[Serialize] removed or relabeled {simplified} redundant TRANSPOSE op(s)");
-        }
-    }
     match_scalar_operand_ranks(
         &mut tensors,
         &mut shapes,
@@ -604,7 +591,7 @@ mod tests {
         crate::ingest::finalize::finalize_converted_graph(&mut converted);
         visitors::shape_utils::clear_shape_cache();
         visitors::dtype_quant::clear_dtype_cache();
-        collect_graph_items("region", &converted, &store, false).unwrap()
+        collect_graph_items("region", &converted, &store).unwrap()
     }
 
     #[test]
@@ -779,7 +766,7 @@ mod tests {
             NodeMeta::new(TensorInfo::new(&[], DType::Int32)),
             "select".into(),
         );
-        let error = collect_graph_items("cond", &graph, &TensorStore::new(), false)
+        let error = collect_graph_items("cond", &graph, &TensorStore::new())
             .err()
             .unwrap();
         assert_eq!(
@@ -1291,7 +1278,7 @@ mod tests {
                     );
                 }
                 assert_eq!(
-                    collect_graph_items("branch", &graph, &store, false).err(),
+                    collect_graph_items("branch", &graph, &store).err(),
                     Some(format!(
                         "TOSA INT profile does not support {name} tensor 'x' in region 'branch'"
                     )),
@@ -1311,7 +1298,7 @@ mod tests {
             NodeMeta::new(TensorInfo::new(&[1], DType::Float32)),
             "x".into(),
         );
-        assert!(collect_graph_items("main", &graph, &TensorStore::new(), false).is_ok());
+        assert!(collect_graph_items("main", &graph, &TensorStore::new()).is_ok());
     }
 
     #[test]
@@ -1342,7 +1329,7 @@ mod tests {
             NodeMeta::new(TensorInfo::new(&[2], DType::Float32)),
             "dq".into(),
         );
-        let error = collect_graph_items("main", &graph, &TensorStore::new(), true)
+        let error = collect_graph_items("main", &graph, &TensorStore::new())
             .err()
             .unwrap();
         assert!(error.contains("TOSA INT profile does not support FP32 tensor 'dq_cast'"));
@@ -1437,7 +1424,7 @@ mod tests {
                 visitors::actual_tensor_shape(&graph, &store, graph.node(input).unwrap())
                     .is_empty()
             );
-            let items = collect_graph_items("main", &graph, &TensorStore::new(), false).unwrap();
+            let items = collect_graph_items("main", &graph, &TensorStore::new()).unwrap();
             let shape = |name: &str| {
                 &items
                     .tensors
@@ -1508,7 +1495,7 @@ mod tests {
                 "argmax".into(),
             );
             assert_eq!(
-                collect_graph_items("branch", &graph, &TensorStore::new(), false).err(),
+                collect_graph_items("branch", &graph, &TensorStore::new()).err(),
                 Some("argmax node 'argmax' in region 'branch' requires an explicit dim".into())
             );
         }
@@ -1534,7 +1521,7 @@ mod tests {
                 NodeMeta::new(TensorInfo::new(&[1], DType::Int32)),
                 "unknown".to_string(),
             );
-            let result = collect_graph_items("main", &graph, &TensorStore::new(), true);
+            let result = collect_graph_items("main", &graph, &TensorStore::new());
             assert_eq!(
                 result.err(),
                 Some(format!(

@@ -109,10 +109,6 @@ pub(crate) fn is_qdq_shape_passthrough(target: &OpTarget) -> bool {
     }
 }
 
-pub(crate) fn is_tosa_transpose(target: &OpTarget) -> bool {
-    matches!(target, OpTarget::TosaTranspose)
-}
-
 pub(crate) fn is_transpose_shape_op(target: &OpTarget) -> bool {
     matches!(target, OpTarget::TosaTranspose | OpTarget::Permute)
 }

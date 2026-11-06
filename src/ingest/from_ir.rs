@@ -873,10 +873,6 @@ fn map_meta(m: &IrNodeMeta) -> NodeMeta {
         .tosa_dim_order()
         .map(|v| v.iter().map(|&x| x as u8).collect());
     meta.tosa_special_dtype = special_dtype_from_extras(m);
-    meta.arm_control_flow_parent_output_user = matches!(
-        m.extras.get("arm_control_flow_parent_output_user"),
-        Some(MetaValue::Bool(true))
-    );
     meta
 }
 

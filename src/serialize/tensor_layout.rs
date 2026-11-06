@@ -58,44 +58,6 @@ pub(super) fn raw_i32_shape(node: &Node) -> Vec<i32> {
         .collect()
 }
 
-pub(super) fn node_tensor_dtype(node: &Node) -> DType {
-    node.meta
-        .tosa_special_dtype
-        .map(ir_dtype_to_tosa)
-        .unwrap_or_else(|| ir_dtype_to_tosa(node.meta.val.dtype))
-}
-
-pub(super) fn inverse_tosa_dim_order(order: &[u8]) -> Option<Vec<i32>> {
-    let mut inverse = vec![0i32; order.len()];
-    for (idx, &axis) in order.iter().enumerate() {
-        let axis = axis as usize;
-        if axis >= order.len() {
-            return None;
-        }
-        inverse[axis] = idx as i32;
-    }
-    Some(inverse)
-}
-
-pub(super) fn infer_shape_permutation(actual_shape: &[i32], raw_shape: &[i32]) -> Option<Vec<i32>> {
-    if actual_shape.len() != raw_shape.len() {
-        return None;
-    }
-
-    let mut used = vec![false; actual_shape.len()];
-    let mut perms = Vec::with_capacity(raw_shape.len());
-    for &raw_dim in raw_shape {
-        let pos = actual_shape
-            .iter()
-            .enumerate()
-            .find_map(|(idx, &actual_dim)| (!used[idx] && actual_dim == raw_dim).then_some(idx))?;
-        used[pos] = true;
-        perms.push(pos as i32);
-    }
-
-    Some(perms)
-}
-
 pub(super) fn permute_shape(shape: &[i32], perms: &[i32]) -> Option<Vec<i32>> {
     permute_shape_by_order(shape, perms)
 }
