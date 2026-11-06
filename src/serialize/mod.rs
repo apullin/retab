@@ -6,6 +6,8 @@ mod collection;
 mod constant_pool;
 #[cfg(test)]
 mod explicit_layout_tests;
+#[cfg(test)]
+mod explicit_rewrite_conv_tests;
 mod flatbuffer;
 pub(crate) mod op_semantics;
 mod output_layout;

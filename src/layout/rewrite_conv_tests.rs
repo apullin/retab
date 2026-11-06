@@ -1280,3 +1280,233 @@ fn created_names_are_unique() {
     let tosa = single_call(&graph, CONV2D);
     assert_eq!(graph.node(tosa).name, format!("{conv_name}_tosa_1"));
 }
+
+// ---------------------------------------------------------------------------
+// After RETAB's own passes
+// ---------------------------------------------------------------------------
+
+/// A per-tensor int8 qparam.
+fn int8(scale: f64, zp: i64) -> QParam {
+    QParam::per_tensor(scale, zp, -128, 127, "torch.int8".to_string())
+}
+
+/// A per-channel qparam on axis 0.
+fn per_channel(scales: &[f64], dtype: &str, (qmin, qmax): (i64, i64)) -> QParam {
+    QParam {
+        scale: scales[0],
+        zp: 0,
+        qmin,
+        qmax,
+        dtype_str: dtype.to_string(),
+        per_channel_scales: scales.to_vec(),
+        per_channel_zps: vec![0; scales.len()],
+        axis: 0,
+    }
+}
+
+/// Distinct int8 bytes for a constant of `shape`.
+fn ramp(shape: &[i64], dtype: DType) -> TensorData {
+    let count: i64 = shape.iter().product();
+    let size = dtype.storage_size_bytes();
+    let data = (0..count as usize * size)
+        .map(|index| (index * 37 % 251) as u8)
+        .collect();
+    TensorData {
+        data,
+        shape: shape.to_vec(),
+        dtype,
+    }
+}
+
+/// A constant placeholder, as RETAB imports a frozen parameter.
+fn constant(graph: &mut IrGraph, name: &str, data: TensorData) -> NodeId {
+    let shape = data.shape.clone();
+    let dtype = data.dtype.torch_str();
+    let id = crate::test_ir::placeholder(graph, name, shape, dtype);
+    graph.node_mut(id).tensor = Some(constant_tensor(name, data));
+    id
+}
+
+/// Run the passes between RETAB's IR import and IrRewriteConv that `graph`
+/// needs, then IrRewriteConv; the weights reach it as constants.
+fn rewrite_after(graph: &mut IrGraph, upstream: &dyn IrPass) {
+    crate::stock_fallback::take();
+    assert!(upstream.run(graph), "{}", upstream.name());
+    assert!(crate::layout::constants::IrMaterializeConstantsPass { in_region: false }.run(graph));
+    assert_eq!(crate::stock_fallback::take(), None);
+    rewrite(graph);
+}
+
+/// A grouped conv: IrDecomposeGroupedConv slices it per group, with the
+/// group's per-channel qparams; IrMaterializeConstants folds the weight and
+/// bias slices to constants; each piece then rewrites to a CONV2D whose OHWI
+/// weight is its slice of the source, permuted, and whose RESCALE takes the
+/// group's scales.
+#[test]
+fn grouped_convs_after_retabs_decomposition() {
+    let mut graph = IrGraph::empty();
+    let x = crate::test_ir::placeholder(&mut graph, "x", [1, 4, 8, 8], "torch.int8");
+    let weight_data = ramp(&[6, 2, 3, 3], DType::Int8);
+    let weight = constant(&mut graph, "w", weight_data.clone());
+    let bias = constant(&mut graph, "b", ramp(&[6], DType::Int32));
+    let weight_scales = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06];
+    let mut meta = crate::fx_meta::NodeMeta::tensor([1, 6, 8, 8], "torch.float32");
+    meta.set_input_qparams_from([
+        (0, int8(0.5, 3)),
+        (1, per_channel(&weight_scales, "torch.int8", (-127, 127))),
+        (
+            2,
+            per_channel(
+                &weight_scales.map(|scale| scale * 0.5),
+                "torch.int32",
+                (-2147483647, 2147483647),
+            ),
+        ),
+    ]);
+    meta.set_single_output_qparam(int8(0.25, -2));
+    let conv = crate::test_ir::call_with_meta(
+        &mut graph,
+        "conv",
+        CONVOLUTION,
+        vec![
+            IrArg::Node(x),
+            IrArg::Node(weight),
+            IrArg::Node(bias),
+            crate::fx_ir::i64_list_arg(&[1, 1]),
+            crate::fx_ir::i64_list_arg(&[1, 1]),
+            crate::fx_ir::i64_list_arg(&[1, 1]),
+            IrArg::Bool(false),
+            crate::fx_ir::i64_list_arg(&[0, 0]),
+            IrArg::Int(2),
+        ],
+        meta,
+    );
+    crate::test_ir::output(&mut graph, conv);
+    rewrite_after(
+        &mut graph,
+        &crate::fx_decompose_grouped_conv_ir::IrDecomposeGroupedConvPass {
+            layout: crate::pipeline_config::LayoutMode::Explicit,
+        },
+    );
+
+    let convs = calls(&graph, CONV2D);
+    assert_eq!(convs.len(), 2);
+    assert!(calls(&graph, CONVOLUTION).is_empty());
+    for (group, &tosa) in convs.iter().enumerate() {
+        let piece = TensorData {
+            data: weight_data.data[group * 54..(group + 1) * 54].to_vec(),
+            shape: vec![3, 2, 3, 3],
+            dtype: DType::Int8,
+        };
+        let rewritten_weight = data(&graph, arg(&graph, tosa, 1));
+        assert_eq!(rewritten_weight.shape, [3, 3, 3, 2]);
+        assert_eq!(
+            rewritten_weight.data,
+            reference_permute(&piece, &[0, 2, 3, 1])
+        );
+        let bias = data(&graph, arg(&graph, tosa, 2));
+        assert_eq!(bias.shape, [3]);
+        let [rescale] = graph.live_user_ids(tosa)[..] else {
+            panic!("one RESCALE per group");
+        };
+        let expected: Vec<f64> = weight_scales[group * 3..group * 3 + 3]
+            .iter()
+            .map(|&scale| (0.5 * scale) / 0.25)
+            .collect();
+        assert_eq!(float_list(&graph.node(rescale).args[2]), expected);
+        assert_eq!(graph.node(rescale).args[4].as_int(), Some(-2));
+    }
+}
+
+/// Linear: IrDecomposeLinear's 1x1 conv reads `view_copy(weight)`, which
+/// IrMaterializeConstants folds; the rewrite then gives rc4's OHWI
+/// `[Co, 1, 1, Ci]` weight, and Linear(1, Co) the depthwise HWCM one.
+#[test]
+fn linears_after_retabs_decomposition() {
+    for (inputs, outputs, target, weight_shape) in [
+        (8, 4, CONV2D, [4, 1, 1, 8]),
+        (1, 4, DEPTHWISE, [1, 1, 1, 4]),
+    ] {
+        let mut graph = IrGraph::empty();
+        let x = crate::test_ir::placeholder(&mut graph, "x", [2, inputs], "torch.int8");
+        let weight_data = ramp(&[outputs, inputs], DType::Int8);
+        let weight = constant(&mut graph, "w", weight_data.clone());
+        let bias = constant(&mut graph, "b", ramp(&[outputs], DType::Int32));
+        let mut meta = crate::fx_meta::NodeMeta::tensor([2, outputs], "torch.float32");
+        meta.set_input_qparams_from([
+            (0, int8(0.5, 3)),
+            (
+                1,
+                QParam::per_tensor(0.02, 0, -127, 127, "torch.int8".into()),
+            ),
+            (
+                2,
+                QParam::per_tensor(0.01, 0, -2147483647, 2147483647, "torch.int32".into()),
+            ),
+        ]);
+        meta.set_single_output_qparam(int8(0.25, -2));
+        let linear = crate::test_ir::call_with_meta(
+            &mut graph,
+            "linear",
+            "aten.linear.default",
+            vec![IrArg::Node(x), IrArg::Node(weight), IrArg::Node(bias)],
+            meta,
+        );
+        crate::test_ir::output(&mut graph, linear);
+        rewrite_after(
+            &mut graph,
+            &crate::fx_decompose_linear_ir::IrDecomposeLinearPass,
+        );
+
+        let tosa = single_call(&graph, target);
+        let rewritten_weight = data(&graph, arg(&graph, tosa, 1));
+        assert_eq!(
+            rewritten_weight.shape, weight_shape,
+            "Linear({inputs}, {outputs})"
+        );
+        // [Co, Ci] -> [Co, Ci, 1, 1] -> OHWI or HWCM keeps the element order.
+        assert_eq!(rewritten_weight.data, weight_data.data);
+        assert_eq!(arg(&graph, tosa, 2), named(&graph, "b"));
+    }
+}
+
+/// cumsum: IrDecomposeCumsum's `aten.full` kernel becomes a constant at
+/// IrMaterializeConstants (ComputeConstantOpsAOT's share, quantized with its
+/// own int8 qparam), and the conv rewrites to rc4's Cin = 1 depthwise form
+/// with a zero bias.
+#[test]
+fn cumsum_after_retabs_decomposition() {
+    let mut graph = IrGraph::empty();
+    let x = crate::test_ir::placeholder(&mut graph, "x", [1, 4, 5], "torch.int8");
+    let mut meta = crate::fx_meta::NodeMeta::tensor([1, 4, 5], "torch.float32");
+    meta.set_single_input_qparam(int8(0.5, 3));
+    meta.set_single_output_qparam(int8(0.75, -1));
+    let cumsum = crate::test_ir::call_with_meta(
+        &mut graph,
+        "cumsum",
+        "aten.cumsum.default",
+        vec![IrArg::Node(x), IrArg::Int(1)],
+        meta,
+    );
+    crate::test_ir::output(&mut graph, cumsum);
+    rewrite_after(
+        &mut graph,
+        &crate::fx_decompose_cumsum_ir::IrDecomposeCumsumPass,
+    );
+
+    let tosa = single_call(&graph, DEPTHWISE);
+    let weight = data(&graph, arg(&graph, tosa, 1));
+    assert_eq!(
+        (weight.shape.as_slice(), weight.dtype),
+        (&[4, 1, 1, 1][..], DType::Int8)
+    );
+    assert_eq!(weight.data, [1, 1, 1, 1]);
+    assert_eq!(ints(&graph, tosa, 4), [3, 3, 0, 0]);
+    let bias = data(&graph, arg(&graph, tosa, 2));
+    assert_eq!(
+        (bias.shape.as_slice(), bias.dtype),
+        (&[1][..], DType::Int32)
+    );
+    let rescale = graph.node(single_call(&graph, RESCALE));
+    assert_eq!(float_list(&rescale.args[2]), [(0.5 * 1.0) / 0.75]);
+}
