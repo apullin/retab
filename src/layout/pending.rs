@@ -107,9 +107,19 @@ const RESCALE_TARGET: &str = "tosa.RESCALE.default";
 /// What TABLE returns for an int16 input (tosa/dialect/ops/table.py:36-51).
 const TABLE_INT16_RESULT: &str = "torch.int32";
 
-/// Whether `node` is a pending table whose RESCALE has been split off.
+/// Whether `node` is a pending table whose RESCALE has been split off. Only a
+/// pending table counts: the walks copy a crossed node's meta onto the copies
+/// they create (`_apply_fork_split`, `:1385`), markers included.
 pub(crate) fn has_split_rescale(node: &IrNode) -> bool {
-    node.meta.extra_bool(SPLIT_RESCALE_KEY) == Some(true)
+    node.meta.extra_bool(SPLIT_RESCALE_KEY) == Some(true) && is_pending_table(node)
+}
+
+/// Whether `node` is the RESCALE [`split_table_rescales`] made for a table,
+/// and that table's name.
+fn split_rescale_of(node: &IrNode) -> Option<&str> {
+    node.meta
+        .extra_str(TABLE_RESCALE_OF_KEY)
+        .filter(|_| node.op == NodeOp::CallFunction && node.target == RESCALE_TARGET)
 }
 
 /// The RESCALE rc4 puts after this pending table and RETAB still holds inside
@@ -172,18 +182,29 @@ pub(crate) fn split_table_rescales(ctx: &mut LayoutCtx<'_>) -> Vec<NodeId> {
 
 /// Fold each split table whose only user is its RESCALE, reading only the
 /// table, back into one pending table that takes the RESCALE's place and
-/// value; see the module docs. Returns how many tables stay split. O(N).
+/// value; see the module docs. A marker a walk copied onto another node is
+/// dropped. Returns how many tables stay split. O(N).
 pub(crate) fn merge_table_rescales(ctx: &mut LayoutCtx<'_>) -> usize {
-    let split: Vec<NodeId> = ctx
-        .order()
-        .iter()
-        .filter(|&id| has_split_rescale(ctx.node(id)))
-        .collect();
+    let mut split = Vec::new();
     let mut rescale_of: HashMap<String, NodeId> = HashMap::new();
+    let mut stray: Vec<(NodeId, &'static str)> = Vec::new();
     for id in ctx.order().iter() {
-        if let Some(table) = ctx.node(id).meta.extra_str(TABLE_RESCALE_OF_KEY) {
-            rescale_of.insert(table.to_string(), id);
+        let node = ctx.node(id);
+        if has_split_rescale(node) {
+            split.push(id);
+        } else if node.meta.extras.contains_key(SPLIT_RESCALE_KEY) {
+            stray.push((id, SPLIT_RESCALE_KEY));
         }
+        match split_rescale_of(node) {
+            Some(table) => {
+                rescale_of.insert(table.to_string(), id);
+            }
+            None if node.meta.extras.contains_key(TABLE_RESCALE_OF_KEY) => stray.push((id, TABLE_RESCALE_OF_KEY)),
+            None => {}
+        }
+    }
+    for (id, key) in stray {
+        ctx.meta_mut(id).extras.remove(key);
     }
     let mut kept = 0;
     for table in split {
@@ -217,10 +238,124 @@ pub(crate) fn merge_table_rescales(ctx: &mut LayoutCtx<'_>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fx_ir::QParam;
+    use crate::layout::replay;
+    use crate::layout::testing::*;
 
     #[test]
     fn the_table_op_list_is_rc4s_sorted_34() {
         assert_eq!(TABLE_OPS.len(), 34);
         assert!(TABLE_OPS.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    const INT16: &str = "torch.int16";
+
+    fn qparam(scale: f64, dtype: &str) -> QParam {
+        let (qmin, qmax) = if dtype == INT16 { (-32768, 32767) } else { (-128, 127) };
+        QParam::per_tensor(scale, 0, qmin, qmax, dtype.to_string())
+    }
+
+    /// A quantized sigmoid as RETAB holds it where rc4 has a TABLE.
+    fn table(g: &mut LayoutGraph, x: NodeId, dtype: &str, input_scale: f64, output_scale: f64) -> NodeId {
+        let id = g.call(SIGMOID, vec![node(x)]);
+        let meta = &mut g.graph_mut().node_mut(id).meta;
+        meta.set_unary_input_output_qparams(qparam(input_scale, dtype), qparam(output_scale, dtype));
+        meta.set_val_dtype_for_existing_shape(dtype);
+        id
+    }
+
+    /// x -> sigmoid (a 16-bit table needing a shift of -7) -> neg and abs.
+    fn sixteen_bit_graph() -> (LayoutGraph, NodeId) {
+        let mut g = LayoutGraph::new();
+        let x = g.typed_input("x", &[2, 3], INT16);
+        let t = table(&mut g, x, INT16, 1.0 / 1024.0, 1.0 / 32768.0);
+        let n = g.call(NEG, vec![node(t)]);
+        let a = g.call(ABS, vec![node(t)]);
+        g.output(&[n, a]);
+        (g, t)
+    }
+
+    /// insert_table_ops.py:400-421: TABLE (int32 for an int16 input,
+    /// tosa/dialect/ops/table.py:36-51), then `RESCALE(table, int16, [2**-7],
+    /// 0, 0)`, which takes the table's users in their order; the venv's rc4
+    /// gives this graph `tosa.RESCALE.default(tosa_table, torch.int16,
+    /// [0.0078125], 0, 0)`.
+    #[test]
+    fn a_split_gives_rc4s_table_and_rescale() {
+        let (mut g, t) = sixteen_bit_graph();
+        let users = g.graph().live_user_ids(t);
+        let mut ctx = LayoutCtx::new(g.graph_mut());
+        assert_eq!(split_table_rescales(&mut ctx), [t]);
+        let rescale = ctx.order().next(t).expect("the RESCALE follows the table");
+        let node = ctx.node(rescale);
+        assert_eq!(node.target, "tosa.RESCALE.default");
+        assert!(
+            matches!(
+                node.args.as_slice(),
+                [IrArg::Node(input), IrArg::Dtype(dtype), IrArg::List(scales), IrArg::Int(0), IrArg::Int(0)]
+                    if *input == t && dtype == INT16 && matches!(scales.as_slice(), [IrArg::Float(scale)] if *scale == 0.0078125)
+            ),
+            "{:?}",
+            node.args
+        );
+        assert_eq!(node.meta.val_dtype(), Some(INT16));
+        assert_eq!(node.meta.val_shape(), Some(&[2, 3][..]));
+        assert!(node.meta.input_qparams().is_none() && node.meta.output_qparams().is_none());
+        assert_eq!(node.meta.extra_str(TABLE_RESCALE_OF_KEY), Some(ctx.node(t).name.as_str()));
+        assert_eq!(ctx.users_in_fx_order(rescale), users);
+        assert_eq!(ctx.graph().live_user_ids(t), [rescale]);
+        let table = ctx.node(t);
+        assert!(has_split_rescale(table) && is_pending_table(table));
+        assert_eq!(table.meta.val_dtype(), Some("torch.int32"));
+        assert!(implicit_rescale(table).is_none(), "a split table is not split again");
+        assert!(split_table_rescales(&mut ctx).is_empty());
+    }
+
+    #[test]
+    fn a_fold_restores_the_pending_table() {
+        let (mut g, t) = sixteen_bit_graph();
+        let before = replay::snapshot(g.graph()).expect("a valid graph");
+        {
+            let mut ctx = LayoutCtx::new(g.graph_mut());
+            split_table_rescales(&mut ctx);
+            assert_eq!(merge_table_rescales(&mut ctx), 0);
+            ctx.finish();
+        }
+        assert_eq!(replay::snapshot(g.graph()).expect("a valid graph"), before);
+        let t = g.id(&g.name(t));
+        assert!(!has_split_rescale(g.graph().node(t)));
+    }
+
+    /// A view between the TABLE and its RESCALE, as rc4's Down pass parks
+    /// one, keeps the table split.
+    #[test]
+    fn a_node_between_keeps_the_table_split() {
+        let (mut g, t) = sixteen_bit_graph();
+        let mut ctx = LayoutCtx::new(g.graph_mut());
+        split_table_rescales(&mut ctx);
+        let rescale = ctx.graph().live_user_ids(t)[0];
+        let meta = ctx.node(t).meta.cloned_with_val(vec![6], "torch.int32");
+        let view = ctx.inserting_after(t, |ctx| {
+            ctx.call_function("view", VIEW, vec![node(t), ints(&[6])], meta)
+        });
+        ctx.replace_input_with(rescale, t, view);
+        assert_eq!(merge_table_rescales(&mut ctx), 1);
+        assert!(has_split_rescale(ctx.node(t)));
+        assert!(!ctx.is_erased(rescale));
+        // The view copied the table's meta, marker included, as rc4's walks
+        // copy a crossed node's meta; the fold drops the copy.
+        assert!(!ctx.node(view).meta.extras.contains_key(SPLIT_RESCALE_KEY));
+    }
+
+    /// An 8-bit table has no RESCALE in rc4 (insert_table_ops.py:410).
+    #[test]
+    fn an_8_bit_table_stays_whole() {
+        let mut g = LayoutGraph::new();
+        let x = g.typed_input("x", &[2, 3], "torch.int8");
+        let t = table(&mut g, x, "torch.int8", 0.5, 0.25);
+        g.output(&[t]);
+        let mut ctx = LayoutCtx::new(g.graph_mut());
+        assert!(implicit_rescale(ctx.node(t)).is_none());
+        assert!(split_table_rescales(&mut ctx).is_empty());
     }
 }

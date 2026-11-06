@@ -298,7 +298,7 @@ thread_local! {
     /// Whether a sweep re-runs each walk the memo skips, to check it fails
     /// (on in test builds; the scaling tests turn it off).
     pub(crate) static CHECK_SKIPPED_WALKS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
-    /// `_retrace` calls (`:158-162`) on this thread, for rc4's retrace-count test.
+    /// `_retrace` calls (`:159-162`) on this thread, for rc4's retrace-count test.
     pub(crate) static RETRACES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// `_refresh_propagation_meta` calls on this thread.
     pub(crate) static LOCAL_REFRESHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -640,7 +640,7 @@ impl<'c> Propagator<'c> {
         modified
     }
 
-    /// `_retrace` (`:158-162`): dead-code elimination, then the re-trace,
+    /// `_retrace` (`:159-162`): dead-code elimination, then the re-trace,
     /// which puts every node's users back in graph order; see the module docs.
     fn retrace(&mut self, ctx: &mut LayoutCtx<'_>) {
         #[cfg(test)]
