@@ -186,7 +186,14 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         Ir(Box::new(
             crate::fx_decompose_strided_slice_ir::IrDecomposeStridedSlicePass,
         )),
-        Ir(Box::new(fx_expand_where_mask_ir::IrExpandWhereMaskPass)),
+    ]);
+    if !explicit {
+        // RETAB-only: tiles a broadcast `where` mask to the output shape. rc4 gives
+        // SELECT the mask as it is, rank-matched by MatchArgRanks (APM:664, :732), and
+        // so does explicit mode (APU-161).
+        steps.push(Ir(Box::new(fx_expand_where_mask_ir::IrExpandWhereMaskPass)));
+    }
+    steps.extend(vec![
         Ir(Box::new(fx_decompose_tril_ir::IrDecomposeTrilPass)),
         Ir(Box::new(fx_decompose_logit_ir::IrDecomposeLogitPass)),
         Ir(Box::new(fx_decompose_ne_ir::IrDecomposeNotEqualPass)),
@@ -690,8 +697,8 @@ mod tests {
     ];
 
     /// RETAB-only passes, with no rc4 counterpart, which explicit mode leaves out:
-    /// there rc4's own passes leave them nothing to do (APU-161).
-    const RETAB_ONLY: [&str; 1] = ["IrFuseDuplicateViews"];
+    /// rc4's own passes cover what they did (APU-161).
+    const RETAB_ONLY: [&str; 2] = ["IrExpandWhereMask", "IrFuseDuplicateViews"];
 
     /// rc4's phase-6 block (APM:715-749) as explicit mode builds it, in
     /// IrToTosaMemoryFormat's slot right after the first late IrRemoveNoop.
@@ -1000,6 +1007,71 @@ mod tests {
                 assert_eq!(shared, explicit_shared, "{spec}");
             }
         }
+    }
+
+    /// A `where` whose mask has a lower rank than its operands, through the steps from
+    /// IrDecomposeStridedSlice to the constant effects after IrConvertFullLike, which
+    /// hold IrExpandWhereMask's slot and explicit mode's IrMatchArgRanks (APM:664).
+    /// Explicit mode only rank-matches the mask, as rc4 does for SELECT, which
+    /// broadcasts it; dim-order mode still tiles it to the output shape (APU-161).
+    #[test]
+    fn explicit_mode_rank_matches_a_where_mask_that_dim_order_mode_tiles() {
+        use crate::fx_ir::{IrArg, IrGraph, IrNode};
+        use crate::test_ir::{f32_call, f32_placeholder, live_node, output, placeholder};
+
+        fn step_name(step: &PipelineStep) -> &str {
+            match step {
+                PipelineStep::Ir(pass) => pass.name(),
+                PipelineStep::Effectful(pass) => pass.name(),
+            }
+        }
+        fn lower(config: &PipelineConfig) -> IrGraph {
+            let mut graph = IrGraph::empty();
+            let mask = placeholder(&mut graph, "mask", [2, 5], "torch.bool");
+            let x = f32_placeholder(&mut graph, "x", [3, 2, 5]);
+            let y = f32_placeholder(&mut graph, "y", [3, 2, 5]);
+            let select = f32_call(
+                &mut graph,
+                "where",
+                "aten.where.self",
+                vec![IrArg::Node(mask), IrArg::Node(x), IrArg::Node(y)],
+                [3, 2, 5],
+            );
+            output(&mut graph, select);
+
+            let steps = lowering_steps(true, config);
+            let position = |pass: &str, from: usize| {
+                from + steps[from..]
+                    .iter()
+                    .position(|step| step_name(step) == pass)
+                    .unwrap_or_else(|| panic!("{pass} missing"))
+            };
+            let start = position("IrDecomposeStridedSlice", 0);
+            let end = position("IrFuseZeroInputConstantsEp", start);
+            run_steps(&steps[start..end], &mut graph);
+            graph
+        }
+        fn where_mask(graph: &IrGraph) -> &IrNode {
+            let select = graph
+                .live_nodes()
+                .find(|node| node.target == "aten.where.self")
+                .expect("a where");
+            graph.node(select.arg_node(0).expect("a mask node"))
+        }
+
+        let graph = lower(&explicit("TOSA-1.0+INT"));
+        assert!(!graph
+            .live_nodes()
+            .any(|node| node.target == "aten.expand_copy.default"));
+        let mask = where_mask(&graph);
+        assert_eq!(mask.target, "aten.view_copy.default");
+        assert_eq!(graph.node_shape(mask.id), Some([1, 2, 5].as_slice()));
+        assert_eq!(mask.arg_node(0), Some(live_node(&graph, "mask").id));
+
+        let graph = lower(&PipelineConfig::from_tosa_spec("TOSA-1.0+INT"));
+        let mask = where_mask(&graph);
+        assert_eq!(mask.target, "aten.expand_copy.default");
+        assert_eq!(graph.node_shape(mask.id), Some([3, 2, 5].as_slice()));
     }
 
     /// rc4's `linear_pc` graph at RewriteConvPass, a per-channel quantized Linear,
