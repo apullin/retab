@@ -125,8 +125,7 @@
 //!
 //! The rewrite touches only the region and its boundary, the value refresh only
 //! the nodes whose value can change, and dead code goes in one sweep (O(N),
-//! as rc4's `eliminate_dead_code`) or, inside a caller that keeps the graph free
-//! of dead code, only from the nodes the call stopped using ([`DeadCode`]).
+//! as rc4's `eliminate_dead_code`; [`DeadCode`]).
 //! Putting users back in graph order after a call that changed the graph is
 //! O(N), like the permute scan.
 //!
@@ -148,10 +147,14 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::hash::Hash;
 use std::rc::Rc;
 
-use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrNode, IrPass, NodeId, NodeMeta, NodeOp};
+#[cfg(test)]
+use crate::fx_ir::IrPass;
+use crate::fx_ir::{i64_list_arg, IrArg, IrGraph, IrNode, NodeId, NodeMeta, NodeOp};
 use crate::fx_meta::TensorFacts;
 use crate::fx_target::{classify_ir_target, IrTargetKind};
-use crate::layout::ctx::{is_impure_call, LayoutCtx};
+#[cfg(test)]
+use crate::layout::ctx::is_impure_call;
+use crate::layout::ctx::LayoutCtx;
 use crate::layout::fx_node::{all_input_nodes, rc4_target};
 use crate::layout::pending::{is_pending_table, TABLE_OPS};
 use crate::layout::pointwise::is_pointwise;
@@ -229,7 +232,9 @@ pub(crate) struct RemovePermutesConfig {
 }
 
 impl RemovePermutesConfig {
-    /// `RemovePermutesAroundElementwiseOps()`.
+    /// `RemovePermutesAroundElementwiseOps()`, which rc4's tests of the base
+    /// pass construct.
+    #[cfg(test)]
     pub(crate) fn base() -> Self {
         Self::default()
     }
@@ -282,12 +287,18 @@ pub(crate) enum DeadCode {
     /// Only the nodes this call stopped using, and what only they used. The
     /// same result as `Full` when the graph had no dead code before the call,
     /// which a caller that eliminates dead code after every change can promise.
+    /// No caller does yet; the replay tests check it against `Full`.
+    #[cfg(test)]
     Local,
 }
 
-/// rc4's pass as constructed for the Arm pipeline.
+/// rc4's pass as constructed for the Arm pipeline, standalone, for the replay
+/// and review tests; the pipeline runs it inside the propagation passes
+/// (`remove_permutes_in_ctx`).
+#[cfg(test)]
 pub(crate) struct IrRemovePermutesAroundElementwiseTosaOpsPass;
 
+#[cfg(test)]
 impl IrPass for IrRemovePermutesAroundElementwiseTosaOpsPass {
     fn name(&self) -> &str {
         "IrRemovePermutesAroundElementwiseTosaOps"
@@ -299,10 +310,12 @@ impl IrPass for IrRemovePermutesAroundElementwiseTosaOpsPass {
 }
 
 /// rc4's base pass with an explicit configuration, for the base pass's tests.
+#[cfg(test)]
 pub(crate) struct IrRemovePermutesAroundElementwiseOpsPass {
     pub(crate) config: RemovePermutesConfig,
 }
 
+#[cfg(test)]
 impl IrPass for IrRemovePermutesAroundElementwiseOpsPass {
     fn name(&self) -> &str {
         if self.config.tosa {
@@ -317,6 +330,7 @@ impl IrPass for IrRemovePermutesAroundElementwiseOpsPass {
     }
 }
 
+#[cfg(test)]
 fn run_standalone(graph: &mut IrGraph, config: &RemovePermutesConfig) -> bool {
     if !graph
         .live_call_function_ids()
@@ -366,6 +380,7 @@ pub(crate) fn remove_permutes_in_ctx(
         DeadCode::Full => {
             ctx.eliminate_dead_code();
         }
+        #[cfg(test)]
         DeadCode::Local => eliminate_dead_from(ctx, rewrite.unused.iter().copied()),
     }
     refresh(ctx, &rewrite);
@@ -442,10 +457,6 @@ impl<T: Copy + Eq + Hash> OrderedSet<T> {
 
     fn iter(&self) -> impl Iterator<Item = &T> {
         self.items.iter()
-    }
-
-    fn len(&self) -> usize {
-        self.items.len()
     }
 
     fn is_empty(&self) -> bool {
@@ -1376,11 +1387,13 @@ impl RemovePermutesMemo {
     }
 
     /// How many failed searches are remembered.
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.failed.len()
     }
 
     /// Read-set entries the memo holds, counting each shared set once.
+    #[cfg(test)]
     pub(crate) fn entries(&self) -> usize {
         let mut seen = HashSet::new();
         self.failed
@@ -1713,7 +1726,8 @@ struct Rewrite {
     /// `(user, input)` pairs where `user` now reads `input` in place of a
     /// node whose value was this.
     seen_values: HashMap<(NodeId, NodeId), Option<TensorFacts>>,
-    /// Nodes that lost users: the bypassed permutes.
+    /// Nodes that lost users: the bypassed permutes, for `DeadCode::Local`.
+    #[cfg(test)]
     unused: Vec<NodeId>,
 }
 
@@ -1813,6 +1827,7 @@ fn permute_subgraph(
             .or_else(|| ctx.node(input).kwargs.get("input").and_then(IrArg::as_node))
             .unwrap_or_else(|| panic!("permute {} reads no node", ctx.node(input).name));
         ctx.replace_input_with(out, input, source);
+        #[cfg(test)]
         rewrite.unused.push(input);
     }
 
@@ -1862,6 +1877,7 @@ fn permute_subgraph(
         for user in ctx.replace_all_uses_with(out, input) {
             rewrite.seen_values.insert((user, input), value.clone());
         }
+        #[cfg(test)]
         rewrite.unused.push(out);
     }
 
@@ -2074,6 +2090,7 @@ fn update_interleave(ctx: &mut LayoutCtx<'_>, head: NodeId, triple: Triple, perm
 // ---------------------------------------------------------------------------
 
 /// Erase the `candidates` nothing uses, and then whatever only they used.
+#[cfg(test)]
 fn eliminate_dead_from(ctx: &mut LayoutCtx<'_>, candidates: impl IntoIterator<Item = NodeId>) {
     let mut stack: Vec<NodeId> = candidates.into_iter().collect();
     while let Some(id) = stack.pop() {

@@ -274,6 +274,7 @@ impl ViewMap {
         self.groups.is_some()
     }
 
+    #[cfg(test)]
     pub fn source_shape(&self) -> &[i64] {
         &self.source_shape
     }
