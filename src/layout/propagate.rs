@@ -136,7 +136,8 @@
 //! for R fusion rounds and I sweeps; rc4 is O((R + I)·N) re-traces on top of
 //! the same work.
 //! `propagate_scaling_tests` times both passes on 50-60k-node graphs at
-//! 0.2-0.5 s in a release test build, growing about linearly with size.
+//! 0.06-0.4 s in a release test build on a loaded machine (load average
+//! about 50 on 12 cores), 4.5-6 times the time of graphs a quarter the size.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -2222,7 +2223,7 @@ fn same_op_args(graph: &IrGraph, id: NodeId, lhs: &[IrArg], rhs: &[IrArg]) -> bo
     }
     if target == SLICE_COPY {
         let whole = |axis: usize| {
-            python_int(&lhs[2]) == Some(0)
+            lhs.get(2).and_then(python_int) == Some(0)
                 && lhs.get(3).and_then(python_int).is_some_and(|end| end >= shape[axis])
                 && lhs.get(4).is_none_or(|step| python_int(step) == Some(1))
         };
@@ -2364,6 +2365,31 @@ mod tests {
         assert!(run(&mut g, PropagateConfig::arm_without_program(Direction::Up)));
         g.assert_targets(&[PERMUTE, RELU, NEG]);
         assert_eq!(g.shape(g.id("relu")), [1, 3, 4, 2]);
+    }
+
+    /// The undo before a region move runs only where the walk's args change
+    /// what a crossed mean or slice computes.
+    #[test]
+    fn same_op_args_reads_dims_as_axes_of_the_input() {
+        let mut g = LayoutGraph::new();
+        let x = g.input("x", &[2, 3, 1, 4]);
+        let mean = g.call(MEAN, vec![node(x), ints(&[0, 2, -1]), IrArg::Bool(true)]);
+        let part = g.slice(x, 1, 0, 2);
+        let whole = g.slice(x, 1, 0, 3);
+        let graph = g.graph();
+        let with_dims = |id: NodeId, dims: IrArg| with_arg(&graph.node(id).args, 1, dims);
+        let mean_args = graph.node(mean).args.clone();
+        // The same axes in another order, and size-1 axis 2 dropped.
+        assert!(same_op_args(graph, mean, &mean_args, &with_dims(mean, ints(&[3, 0, 2]))));
+        assert!(same_op_args(graph, mean, &mean_args, &with_dims(mean, ints(&[3, 0]))));
+        assert!(!same_op_args(graph, mean, &mean_args, &with_dims(mean, ints(&[1, 2, 3]))));
+        // A slice on the same axis, or keeping the whole of both axes.
+        let part_args = graph.node(part).args.clone();
+        assert!(same_op_args(graph, part, &part_args, &with_dims(part, IrArg::Int(-3))));
+        assert!(!same_op_args(graph, part, &part_args, &with_dims(part, IrArg::Int(0))));
+        let whole_args = graph.node(whole).args.clone();
+        assert!(same_op_args(graph, whole, &whole_args, &with_dims(whole, IrArg::Int(2))));
+        assert!(!same_op_args(graph, whole, &whole_args, &with_dims(whole, IrArg::Int(3))));
     }
 
     #[test]
