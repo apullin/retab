@@ -101,7 +101,9 @@ plus deferred lowering effects. `PipelineStep` combines these pass kinds,
 and `run_hybrid_pipeline_ext_with_initial_ir` runs them over one persistent
 IR. [../src/fx_pipeline.rs](../src/fx_pipeline.rs) defines the ordered parent,
 cond, and while pipelines; implementations live in `src/fx_*_ir.rs` and
-related domain modules.
+related domain modules. [pipeline_vs_rc4.md](pipeline_vs_rc4.md) maps each
+step to its slot in rc4's ArmPassManager and explains the RETAB-only steps
+and the order differences.
 
 `IrRewriteCursor` expresses anchored chains of inserted operations.
 `IrGraph` also provides explicit node insertion, anchoring, use replacement,
