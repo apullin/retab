@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use super::collection::{check_explicit_layout_invariants, collect_regions, SerializedRegion};
+use super::collection::{check_layout_invariants, collect_regions, SerializedRegion};
 use super::tosa_types::{Op, TosaTensor};
 use super::visitors;
 use crate::control_flow::fixtures::{rank4_hierarchy, RANK4};
@@ -39,7 +39,7 @@ fn serialize_contracted(
     visitors::shape_utils::clear_shape_cache();
     visitors::dtype_quant::clear_dtype_cache();
     for (name, graph) in &graphs {
-        check_explicit_layout_invariants(name, graph, &store)?;
+        check_layout_invariants(name, graph, &store)?;
     }
     collect_regions(&graphs, &store)
 }

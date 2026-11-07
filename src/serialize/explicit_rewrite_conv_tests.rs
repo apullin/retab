@@ -8,7 +8,7 @@
 //! shape other than its val's (D1). A16W8 convs whose
 //! INT48 accumulators branch to int32 consumers, U55 clones included, serialize too.
 
-use super::collection::{check_explicit_layout_invariants, collect_regions, SerializedGraphItems};
+use super::collection::{check_layout_invariants, collect_regions, SerializedGraphItems};
 use super::tosa_types::{Attribute, DType, Op, TosaTensor};
 use super::visitors;
 use crate::fx_ir::{IrArg, IrGraph, IrPass, NodeOp};
@@ -55,7 +55,7 @@ fn rewritten_with(pass: &IrRewriteConvPass, fixture: &str, name: &str) -> IrGrap
 }
 
 /// Ingest and serialize `ir` as `ingest_and_serialize` does.
-fn serialize_explicit(ir: &IrGraph) -> Result<SerializedGraphItems, String> {
+fn serialize(ir: &IrGraph) -> Result<SerializedGraphItems, String> {
     let mut store = TensorStore::new();
     let mut graph: Graph = crate::ingest::from_ir::graph_from_ir(ir, &mut store);
     crate::ingest::finalize::finalize_converted_graph(&mut graph);
@@ -63,7 +63,7 @@ fn serialize_explicit(ir: &IrGraph) -> Result<SerializedGraphItems, String> {
     visitors::shape_utils::clear_shape_cache();
     visitors::dtype_quant::clear_dtype_cache();
     // D1: every node serializes at its val's shape.
-    check_explicit_layout_invariants("main", &graph, &store)?;
+    check_layout_invariants("main", &graph, &store)?;
     let mut regions = collect_regions(&[("main".to_string(), graph)], &store)?;
     Ok(regions.remove(0).items)
 }
@@ -88,7 +88,7 @@ fn i32s(shape: &[i64]) -> Vec<i32> {
 /// their vals' shapes and dtypes, one RESCALE per conv reading its accumulator, and
 /// exactly the rewrite's layout ops. A8W4 weights are INT4, A16W8 accumulators INT48.
 #[test]
-fn rewritten_convs_serialize_in_explicit_mode() {
+fn rewritten_convs_serialize() {
     for (fixture, name, op, accumulator) in [
         (REWRITE_CONV, "conv2d_pc", Op::Conv2d, DType::Int32),
         (REWRITE_CONV, "conv2d_nobias_pt", Op::Conv2d, DType::Int32),
@@ -165,7 +165,7 @@ fn rewritten_convs_serialize_in_explicit_mode() {
                 .meta
                 .set_val_dtype_for_existing_shape("torch.int8");
         }
-        let items = serialize_explicit(&ir).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let items = serialize(&ir).unwrap_or_else(|error| panic!("{name}: {error}"));
         let convs: Vec<_> = ir
             .topological_live_node_ids()
             .into_iter()
@@ -244,7 +244,7 @@ fn rewritten_convs_serialize_in_explicit_mode() {
 /// feeds exactly one operator; and the only TRANSPOSEs are the graph's
 /// permutes.
 #[test]
-fn a16w8_branches_serialize_in_explicit_mode() {
+fn a16w8_branches_serialize() {
     let generic =
         IrRewriteConvPass::new(&PipelineConfig::from_tosa_spec("TOSA-1.0+INT+int16"), false);
     let u55 = IrRewriteConvPass::new(
@@ -270,7 +270,7 @@ fn a16w8_branches_serialize_in_explicit_mode() {
     for (fixture, name) in cases {
         let on_u55 = name.ends_with("_u55");
         let ir = rewritten_with(if on_u55 { &u55 } else { &generic }, fixture, name);
-        let items = serialize_explicit(&ir).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let items = serialize(&ir).unwrap_or_else(|error| panic!("{name}: {error}"));
         let convs: Vec<_> = ir
             .topological_live_node_ids()
             .into_iter()
@@ -355,7 +355,7 @@ fn a16w8_branches_serialize_in_explicit_mode() {
 #[test]
 fn a8w4_transposed_conv_rescales_serialize_one_multiplier_per_scale() {
     let ir = rewritten(REWRITE_CONV, "tconv2d_nobias_a8w4");
-    let items = serialize_explicit(&ir).unwrap_or_else(|error| panic!("{error}"));
+    let items = serialize(&ir).unwrap_or_else(|error| panic!("{error}"));
     let conv = items
         .operators
         .iter()

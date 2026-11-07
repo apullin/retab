@@ -78,7 +78,7 @@ fn collect_graph_items(
     }
     reject_aten_spatial_ops(region, graph)?;
     if debug {
-        check_explicit_layout_invariants(region, graph, store)?;
+        check_layout_invariants(region, graph, store)?;
     }
 
     let tensor_decls = TensorDeclarationContext::new(graph);
@@ -262,15 +262,15 @@ fn reject_aten_spatial_ops(region: &str, graph: &Graph) -> Result<(), String> {
         return Ok(());
     };
     Err(format!(
-        "RETAB_STOCK_FALLBACK: aten spatial op in explicit layout: '{}' ({:?}) in region \
-         '{}' has no explicit-layout lowering",
+        "RETAB_STOCK_FALLBACK: aten spatial op not rewritten to a TOSA op: '{}' ({:?}) in \
+         region '{}'",
         node.name, node.target, region
     ))
 }
 
 /// Under RETAB_DEBUG (P2 design D1): a node's val is its TOSA shape, so the serializer's
 /// re-derived shape must equal the val. This catches stale vals.
-pub(super) fn check_explicit_layout_invariants(
+pub(super) fn check_layout_invariants(
     region: &str,
     graph: &Graph,
     store: &TensorStore,
@@ -299,7 +299,7 @@ pub(super) fn check_explicit_layout_invariants(
         return Ok(());
     }
     Err(format!(
-        "explicit layout invariant broken in region '{region}': {}",
+        "layout invariant broken in region '{region}': {}",
         violations.join("; ")
     ))
 }

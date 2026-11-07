@@ -310,7 +310,7 @@ fn lowering_steps(decompose_qdq: bool, config: &PipelineConfig) -> Vec<crate::fx
         // After every layout pass: a control-flow output whose boundary-contract target
         // their qparam-less copies hide, and that has no recorded target, goes to stock.
         Ir(Box::new(
-            crate::layout::control_flow_guard::IrExplicitControlFlowOutputGuardPass,
+            crate::layout::control_flow_guard::IrControlFlowOutputGuardPass,
         )),
         // rc4 runs EnsureUniqueOutputNodes last; the while pipeline relies on that.
         Ir(Box::new(
@@ -655,8 +655,8 @@ mod tests {
                     ],
                     "{spec}"
                 );
-                let guard = position("IrExplicitControlFlowOutputGuard");
-                assert_eq!(count("IrExplicitControlFlowOutputGuard"), 1, "{spec}");
+                let guard = position("IrControlFlowOutputGuard");
+                assert_eq!(count("IrControlFlowOutputGuard"), 1, "{spec}");
                 assert_eq!(names[guard - 1], "IrFuseDuplicateUsers", "{spec}");
                 assert!(
                     guard >= names.len() - 3,

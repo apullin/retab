@@ -120,7 +120,7 @@ pub(crate) fn is_aten_sum(target: &OpTarget) -> bool {
 
 /// TOSA-dialect ops whose val is their TOSA shape, so the serializer reads it as is
 /// rather than recomputing it from their arguments (P2 design §4.2 G1, critique B1).
-pub(crate) fn has_explicit_tosa_shape_val(target: &OpTarget) -> bool {
+pub(crate) fn has_tosa_shape_val(target: &OpTarget) -> bool {
     matches!(
         target,
         OpTarget::TosaConv2d

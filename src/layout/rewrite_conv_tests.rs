@@ -1410,7 +1410,7 @@ fn drop_rc4_slices(graph: &mut IrGraph) {
 }
 
 /// IrSizeAdjustInput, which must slice without a fallback.
-fn size_adjust_explicitly(graph: &mut IrGraph) {
+fn size_adjust(graph: &mut IrGraph) {
     crate::stock_fallback::take();
     assert!(crate::fx_size_adjust_input_ir::IrSizeAdjustInputPass.run(graph));
     assert_eq!(crate::stock_fallback::take(), None);
@@ -1455,7 +1455,7 @@ fn convs_reading_control_flow_outputs_through_size_adjust_slices_fall_back_until
             let conv_name = graph.node(single_call(&graph, CONVOLUTION)).name.clone();
             drop_rc4_slices(&mut graph);
             read_through_control_flow(&mut graph, target, None);
-            size_adjust_explicitly(&mut graph);
+            size_adjust(&mut graph);
             let slices: Vec<String> = sliced_dims
                 .iter()
                 .map(|dim| format!("{conv_name}_adj_d{dim}"))
@@ -1532,7 +1532,7 @@ fn convs_reading_control_flow_outputs_with_a_target_qparam_are_rewritten() {
             );
             graph.set_arg(conv, 0, IrArg::Node(view));
         }
-        size_adjust_explicitly(&mut graph);
+        size_adjust(&mut graph);
         assert!(
             output_contract_finds_a_target(&graph, getitem),
             "{qualified}"

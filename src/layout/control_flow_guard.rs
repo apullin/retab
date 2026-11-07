@@ -40,16 +40,16 @@ use crate::fx_target::{
 };
 
 /// See the module docs. It never changes the graph.
-pub(crate) struct IrExplicitControlFlowOutputGuardPass;
+pub(crate) struct IrControlFlowOutputGuardPass;
 
-impl IrPass for IrExplicitControlFlowOutputGuardPass {
+impl IrPass for IrControlFlowOutputGuardPass {
     fn name(&self) -> &str {
-        "IrExplicitControlFlowOutputGuard"
+        "IrControlFlowOutputGuard"
     }
 
     fn run(&self, graph: &mut IrGraph) -> bool {
         if let Some(reason) = hidden_output_target(graph) {
-            crate::stock_fallback::request(format!("IrExplicitControlFlowOutputGuard: {reason}"));
+            crate::stock_fallback::request(format!("IrControlFlowOutputGuard: {reason}"));
         }
         false
     }
@@ -224,7 +224,7 @@ mod tests {
 
     fn guard(graph: &mut IrGraph) -> Option<String> {
         crate::stock_fallback::take();
-        assert!(!IrExplicitControlFlowOutputGuardPass.run(graph));
+        assert!(!IrControlFlowOutputGuardPass.run(graph));
         crate::stock_fallback::take()
     }
 
@@ -246,9 +246,7 @@ mod tests {
         output(&mut graph, add);
         let reason = guard(&mut graph).expect("a fallback");
         assert!(
-            reason.starts_with(
-                "IrExplicitControlFlowOutputGuard: control-flow output getitem reaches add"
-            ),
+            reason.starts_with("IrControlFlowOutputGuard: control-flow output getitem reaches add"),
             "{reason}"
         );
     }

@@ -916,8 +916,7 @@ pub(crate) fn apply_boundary_contracts(
         }
         changed += inserts;
     }
-    let rewritten =
-        super::captured_conv::rewrite_explicit_captured_conv_operands(parent_ir, submodules);
+    let rewritten = super::captured_conv::rewrite_captured_conv_operands(parent_ir, submodules);
     if rewritten > 0 && cf_debug {
         eprintln!("[RETAB][cf-boundary-ir] rewrote {rewritten} captured conv weight(s)/bias(es)");
     }
@@ -1270,7 +1269,7 @@ mod tests {
     /// unlike rc4's zero_args_one_output, whose RESCALEs move nothing visibly
     /// (the zeros sit at the zero point and the ones' scale is 1.0005).
     #[test]
-    fn explicit_constant_branch_outputs_rescale_to_the_recorded_target() {
+    fn constant_branch_outputs_rescale_to_the_recorded_target() {
         let mut parent = constant_branch_parent();
         assert_eq!(record_control_flow_output_targets_ir(&mut parent), 1);
         // IrFoldQdq then folds the getitem's quantize away, and RETAB's fold need

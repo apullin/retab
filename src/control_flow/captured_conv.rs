@@ -16,7 +16,7 @@
 //! This runs after the boundary contracts have created those RESCALEs. The branch
 //! inputs stay, unused, so the branch keeps the cond's operand list.
 //!
-//! `rewrite_explicit_captured_conv_operands` (APU-135 S8) matches the TOSA convs
+//! `rewrite_captured_conv_operands` (APU-135 S8) matches the TOSA convs
 //! IrRewriteConv makes, whose captured weight it gave rc4's layout change as runtime
 //! `permute_copy`/`view_copy` ops; it applies them to the data, and sends what rc4
 //! raises for to stock.
@@ -121,7 +121,7 @@ impl Unresolved {
     /// Critique B7: the while-loop region (in `while_regions`) at one of whose inputs
     /// the walk stopped, if it stopped at one. A while loop's captures are carried
     /// inputs, which RETAB does not resolve (see
-    /// [`rewrite_explicit_captured_conv_operands`]).
+    /// [`rewrite_captured_conv_operands`]).
     fn while_loop_input<'a>(
         &'a self,
         submodules: &BTreeMap<String, StashedPipeline>,
@@ -385,7 +385,7 @@ enum LayoutOp {
 }
 
 /// Explicit mode's `_rewrite_weight` for a captured weight (RCP:328-403).
-struct ExplicitWeightRewrite {
+struct WeightRewrite {
     region: String,
     conv: NodeId,
     old_weight: NodeId,
@@ -400,7 +400,7 @@ struct ExplicitWeightRewrite {
 /// Plan the rewrite of `conv`'s weight: `None` when it is a region constant
 /// already, `Err` (a stock fallback's reason) when it does not resolve to a
 /// constant, which is where rc4 raises (RCP:243-251), or when a while loop
-/// captures it (`while_regions`, see [`rewrite_explicit_captured_conv_operands`]).
+/// captures it (`while_regions`, see [`rewrite_captured_conv_operands`]).
 ///
 /// IrRewriteConv gave a captured weight its layout change as `permute_copy`
 /// and `view_copy` ops, and the boundary contracts have put the boundary
@@ -411,14 +411,14 @@ struct ExplicitWeightRewrite {
 /// the data innermost first. The RESCALEs, all per-tensor, are rebuilt after
 /// the constant in data-flow order: the outermost region's first, this
 /// region's last.
-fn plan_explicit_weight_rewrite(
+fn plan_weight_rewrite(
     parent: &IrGraph,
     submodules: &BTreeMap<String, StashedPipeline>,
     invocations: &BTreeMap<String, Invocation>,
     while_regions: &BTreeSet<String>,
     region: &str,
     conv: &IrNode,
-) -> Result<Option<ExplicitWeightRewrite>, String> {
+) -> Result<Option<WeightRewrite>, String> {
     let ir = &submodules
         .get(region)
         .ok_or_else(|| format!("no region {region}"))?
@@ -529,7 +529,7 @@ fn plan_explicit_weight_rewrite(
             rescale.args.get(2)
         ));
     }
-    Ok(Some(ExplicitWeightRewrite {
+    Ok(Some(WeightRewrite {
         region: region.to_string(),
         conv: conv.id,
         old_weight: weight,
@@ -554,7 +554,7 @@ fn unique_name(ir: &IrGraph, name: String) -> String {
 /// The region constant's val is its physical shape, as every val is; the
 /// rebuilt RESCALEs keep their arguments and meta with that shape, and the
 /// conv reads the last one.
-fn apply_explicit_weight_rewrite(ir: &mut IrGraph, rewrite: ExplicitWeightRewrite) {
+fn apply_weight_rewrite(ir: &mut IrGraph, rewrite: WeightRewrite) {
     let shape = rewrite.data.shape.clone();
     let name = unique_name(ir, rewrite.name);
     let mut meta = NodeMeta::tensor(shape.clone(), rewrite.data.dtype.torch_str());
@@ -650,7 +650,7 @@ fn while_captured_bias(
 /// - The weight becomes a region constant (`get_attr`) in TOSA's layout, the
 ///   parent's constant with the layout ops applied, followed by the boundary
 ///   RESCALEs: RESCALE is elementwise, so it commutes with the layout change
-///   (`plan_explicit_weight_rewrite`, `_rewrite_weight`).
+///   (`plan_weight_rewrite`, `_rewrite_weight`).
 /// - A bias that reaches the conv through a boundary RESCALE is requantized
 ///   into the int32 bias TOSA needs, marked INT48 for an int16 activation
 ///   (`_rewrite_control_flow_bias`, RCP:263-326).
@@ -673,7 +673,7 @@ fn while_captured_bias(
 /// value; RETAB would have to prove the pass-through. For that form rc4 then
 /// raises anyway: RewriteConvPass cannot put the rewritten weight ahead of the
 /// region's user inputs. No rc4 op test has a conv in a while body.
-pub(crate) fn rewrite_explicit_captured_conv_operands(
+pub(crate) fn rewrite_captured_conv_operands(
     parent: &IrGraph,
     submodules: &mut BTreeMap<String, StashedPipeline>,
 ) -> u32 {
@@ -702,7 +702,7 @@ pub(crate) fn rewrite_explicit_captured_conv_operands(
                     int48,
                 ));
             }
-            match plan_explicit_weight_rewrite(
+            match plan_weight_rewrite(
                 parent,
                 submodules,
                 &invocations,
@@ -754,7 +754,7 @@ pub(crate) fn rewrite_explicit_captured_conv_operands(
     }
     for rewrite in weights {
         if let Some((ir, _)) = submodules.get_mut(&rewrite.region) {
-            apply_explicit_weight_rewrite(ir, rewrite);
+            apply_weight_rewrite(ir, rewrite);
         }
     }
     count
@@ -993,12 +993,12 @@ mod tests {
 
     /// Run the explicit captured_conv; returns its count and the fallback it
     /// requested.
-    fn rewrite_explicitly(
+    fn rewrite_captured(
         parent: &IrGraph,
         submodules: &mut BTreeMap<String, StashedPipeline>,
     ) -> (u32, Option<String>) {
         crate::stock_fallback::take();
-        let count = rewrite_explicit_captured_conv_operands(parent, submodules);
+        let count = rewrite_captured_conv_operands(parent, submodules);
         (count, crate::stock_fallback::take())
     }
 
@@ -1029,14 +1029,14 @@ mod tests {
     /// `s_in * s_w` (`_rewrite_control_flow_bias`). The layout ops and the
     /// RESCALEs that fed them go; the branch inputs stay.
     #[test]
-    fn explicit_captured_operands_become_region_constants() {
+    fn captured_operands_become_region_constants() {
         let parent = parent_graph(COND, ["true_graph", "false_graph"]);
         let mut submodules = regions(vec![(
             "true_graph",
             conv1d_region(Some(4.0), Some(7.0), I8),
         )]);
         let rescale_args = scale_args(live_node(&submodules["true_graph"].0, "w_rescale"));
-        assert_eq!(rewrite_explicitly(&parent, &mut submodules), (2, None));
+        assert_eq!(rewrite_captured(&parent, &mut submodules), (2, None));
         let region = &submodules["true_graph"].0;
         let conv = live_node(region, "conv_tosa");
 
@@ -1083,13 +1083,13 @@ mod tests {
 
     /// RCP:323-325: an int16 activation's int32 bias is INT48 to TOSA.
     #[test]
-    fn explicit_captured_biases_of_int16_activations_are_int48() {
+    fn captured_biases_of_int16_activations_are_int48() {
         let parent = parent_graph(COND, ["true_graph", "false_graph"]);
         let mut submodules = regions(vec![(
             "true_graph",
             conv1d_region(Some(4.0), Some(7.0), I16),
         )]);
-        assert_eq!(rewrite_explicitly(&parent, &mut submodules), (2, None));
+        assert_eq!(rewrite_captured(&parent, &mut submodules), (2, None));
         let region = &submodules["true_graph"].0;
         let bias = live_node(region, "conv_tosa").arg_node(2).expect("a bias");
         assert_eq!(
@@ -1102,7 +1102,7 @@ mod tests {
     /// boundaries, each with its RESCALE. The constant gets both, in data-flow
     /// order: the outer branch's first.
     #[test]
-    fn explicit_nested_captured_weights_rebuild_every_boundary_outermost_first() {
+    fn nested_captured_weights_rebuild_every_boundary_outermost_first() {
         let parent = parent_graph(COND, ["outer_true", "outer_false"]);
         let mut outer = IrGraph::empty();
         let x = placeholder(&mut outer, "x_ph", [1, 2, 8], I8);
@@ -1137,7 +1137,7 @@ mod tests {
             ("outer_true", outer),
             ("outer_true__inner_true", inner),
         ]);
-        assert_eq!(rewrite_explicitly(&parent, &mut submodules), (2, None));
+        assert_eq!(rewrite_captured(&parent, &mut submodules), (2, None));
 
         let region = &submodules["outer_true__inner_true"].0;
         let conv = live_node(region, "conv_tosa");
@@ -1197,7 +1197,7 @@ mod tests {
     /// (critique A10). So do a while body's captured weight and captured int8
     /// bias, which only cond invocations would resolve (critique B7).
     #[test]
-    fn explicit_captured_conv_falls_back_where_rc4_raises() {
+    fn captured_conv_falls_back_where_rc4_raises() {
         struct Case {
             label: &'static str,
             parent: IrGraph,
@@ -1276,7 +1276,7 @@ mod tests {
             let label = case.label;
             let before = crate::layout::replay::snapshot(&case.graph).expect("a valid graph");
             let mut submodules = regions(vec![(case.region, case.graph)]);
-            let (count, reason) = rewrite_explicitly(&case.parent, &mut submodules);
+            let (count, reason) = rewrite_captured(&case.parent, &mut submodules);
             assert_eq!(count, 0, "{label}");
             let reason = reason.unwrap_or_else(|| panic!("{label}: no fallback"));
             assert!(reason.starts_with("captured_conv: "), "{label}: {reason}");
@@ -1294,7 +1294,7 @@ mod tests {
     /// branch's captured weight is rewritten, and its int32 branch input stays
     /// the bias. (`explicit_region_constants_stay` keeps a constant one.)
     #[test]
-    fn explicit_captured_conv_keeps_a_runtime_int32_bias() {
+    fn captured_conv_keeps_a_runtime_int32_bias() {
         let parent = parent_graph(COND, ["true_graph", "false_graph"]);
         let mut region = conv1d_region(Some(4.0), None, I8);
         let b = live_node(&region, "b_ph").id;
@@ -1303,7 +1303,7 @@ mod tests {
             .meta
             .set_tensor_facts(crate::fx_meta::TensorFacts::new([4], "torch.int32"));
         let mut submodules = regions(vec![("true_graph", region)]);
-        assert_eq!(rewrite_explicitly(&parent, &mut submodules), (1, None));
+        assert_eq!(rewrite_captured(&parent, &mut submodules), (1, None));
         let region = &submodules["true_graph"].0;
         let conv = live_node(region, "conv_tosa");
         assert_eq!(conv.arg_node(2), Some(b));
@@ -1353,7 +1353,7 @@ mod tests {
     /// A region conv IrRewriteConv gave region constants (its own pre-permuted
     /// weight and an int32 bias) has nothing captured: it stays as it is.
     #[test]
-    fn explicit_region_constants_stay() {
+    fn region_constants_stay() {
         let parent = parent_graph(COND, ["true_graph", "false_graph"]);
         let mut region = conv1d_region(Some(4.0), Some(7.0), I8);
         let conv = live_node(&region, "conv_tosa").id;
@@ -1387,7 +1387,7 @@ mod tests {
         region.set_arg(conv, 2, IrArg::Node(bias));
         let before = crate::layout::replay::snapshot(&region).expect("a valid graph");
         let mut submodules = regions(vec![("true_graph", region)]);
-        assert_eq!(rewrite_explicitly(&parent, &mut submodules), (0, None));
+        assert_eq!(rewrite_captured(&parent, &mut submodules), (0, None));
         assert_eq!(
             crate::layout::replay::snapshot(&submodules["true_graph"].0).expect("a valid graph"),
             before

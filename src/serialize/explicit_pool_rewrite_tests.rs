@@ -30,7 +30,7 @@ fn qp(scale: f64, zp: i64, dtype: &str) -> QParam {
     QParam::per_tensor(scale, zp, qmin, qmax, dtype.to_string())
 }
 
-fn serialize_explicit(ir: &IrGraph) -> SerializedGraphItems {
+fn serialize(ir: &IrGraph) -> SerializedGraphItems {
     let mut store = TensorStore::new();
     let mut graph: Graph = crate::ingest::from_ir::graph_from_ir(ir, &mut store);
     crate::ingest::finalize::finalize_converted_graph(&mut graph);
@@ -127,7 +127,7 @@ fn rewritten_avg_pool_serializes_with_materialized_zero_points() {
     );
     assert!(IrRewriteAvgPool2dPass.run(&mut ir));
     assert!(IrMaterializeConstantsPass { in_region: false }.run(&mut ir));
-    let items = serialize_explicit(&ir);
+    let items = serialize(&ir);
 
     let pool = single_op(&items, Op::AvgPool2d);
     let Attribute::AvgPool2d(attribute) = &pool.attribute else {
@@ -187,7 +187,7 @@ fn rewritten_max_pool_with_indices_serializes() {
     ir.node_mut(getitem).meta.set_single_output_qparam(q);
     output(&mut ir, getitem);
     assert!(IrRewriteMaxPool2dPass.run(&mut ir));
-    let items = serialize_explicit(&ir);
+    let items = serialize(&ir);
 
     let pool = single_op(&items, Op::MaxPool2d);
     let Attribute::MaxPool2d(attribute) = &pool.attribute else {
@@ -220,7 +220,7 @@ fn rewritten_nearest_upsample_serializes_rc4_parameters() {
         qp(0.05, -4, INT8),
     );
     assert!(IrRewriteUpsamplePass.run(&mut ir));
-    let items = serialize_explicit(&ir);
+    let items = serialize(&ir);
     let resize = single_op(&items, Op::Resize);
     let Attribute::Resize(attribute) = &resize.attribute else {
         panic!("expected a RESIZE attribute");
@@ -263,7 +263,7 @@ fn rewritten_bilinear_upsamples_serialize_their_accumulators() {
             qp(0.05, zp, dtype),
         );
         assert!(IrRewriteUpsamplePass.run(&mut ir));
-        let items = serialize_explicit(&ir);
+        let items = serialize(&ir);
         let activation = visitors::ir_dtype_to_tosa(IrDType::from_torch_str(dtype));
         let resize = single_op(&items, Op::Resize);
         assert_eq!(shape_values(&items, &resize.inputs[1]), [4, 2, 4, 2]);

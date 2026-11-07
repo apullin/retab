@@ -7,7 +7,7 @@
 //! ingest (design F2). The nodes these rewrites create carry rc4's dtypes instead: a TOSA
 //! conv is int32 and inherits the aten conv's qparams, and its layout permutes have none.
 
-use super::collection::{check_explicit_layout_invariants, collect_regions, SerializedGraphItems};
+use super::collection::{check_layout_invariants, collect_regions, SerializedGraphItems};
 use super::tosa_types::{Attribute, DType, Op, ResizeMode, TosaOperator, TosaTensor};
 use super::visitors;
 use crate::fx_ir::{
@@ -293,7 +293,7 @@ fn try_serialize_graph(graph: Graph, store: &TensorStore) -> Result<SerializedGr
     Ok(regions.remove(0).items)
 }
 
-fn serialize_explicit(ir: &IrGraph) -> SerializedGraphItems {
+fn serialize(ir: &IrGraph) -> SerializedGraphItems {
     let (graph, store) = ingest(ir);
     try_serialize_graph(graph, &store).unwrap()
 }
@@ -365,7 +365,7 @@ fn conv2d_serializes_ohwi_weights_val_shapes_and_pads_as_given() {
         val: &[1, 6, 10, 8],
         activation: INT8,
     };
-    let items = serialize_explicit(&case.build());
+    let items = serialize(&case.build());
     let conv = case.check(&items, Op::Conv2d);
     let Attribute::Conv2d(attribute) = &conv.attribute else {
         panic!("expected a CONV2D attribute");
@@ -433,7 +433,7 @@ fn depthwise_hwcm_weights_keep_their_layout_and_the_val_shape() {
             val,
             activation: INT8,
         };
-        let items = serialize_explicit(&case.build());
+        let items = serialize(&case.build());
         let conv = case.check(&items, Op::DepthwiseConv2d);
         let Attribute::DepthwiseConv2d(attribute) = &conv.attribute else {
             panic!("expected a DEPTHWISE_CONV2D attribute");
@@ -499,7 +499,7 @@ fn transpose_conv2d_serializes_rc4_arguments() {
         val: &[1, 7, 7, 5],
         activation: INT8,
     };
-    let items = serialize_explicit(&case.build());
+    let items = serialize(&case.build());
     let conv = case.check(&items, Op::TransposeConv2d);
     let Attribute::TransposeConv2d(attribute) = &conv.attribute else {
         panic!("expected a TRANSPOSE_CONV2D attribute");
@@ -519,7 +519,7 @@ fn int16_conv_accumulates_in_int48_and_rescales_with_16_bit_multipliers() {
         val: &[1, 4, 4, 3],
         activation: INT16,
     };
-    let items = serialize_explicit(&case.build());
+    let items = serialize(&case.build());
     let conv = case.check(&items, Op::Conv2d);
     let Attribute::Conv2d(attribute) = &conv.attribute else {
         panic!("expected a CONV2D attribute");
@@ -587,7 +587,7 @@ fn conv1d_chain_reshapes_around_its_conv2d() {
     let y = permute(&mut ir, "y", y_nlc, &[0, 2, 1], INT8);
     output(&mut ir, y);
 
-    let items = serialize_explicit(&ir);
+    let items = serialize(&ir);
     let weight_tensor = tensor(&items, "w");
     assert_eq!(weight_tensor.shape, i32s(&weight));
     assert_eq!(
@@ -665,7 +665,7 @@ fn max_pool2d_reads_rc4_positional_arguments() {
             let pool = ir.by_name("pool").unwrap().id;
             ir.node_mut(pool).meta.set_output_qparams(QParamMap::new());
         }
-        let items = serialize_explicit(&ir);
+        let items = serialize(&ir);
         let pool = single_op(&items, Op::MaxPool2d);
         let Attribute::MaxPool2d(attribute) = &pool.attribute else {
             panic!("expected a MAX_POOL2D attribute");
@@ -705,7 +705,7 @@ fn avg_pool2d_reads_rc4_arguments_and_zero_point_operands() {
         },
         &[1, 5, 5, 4],
     );
-    let items = serialize_explicit(&ir);
+    let items = serialize(&ir);
     let pool = single_op(&items, Op::AvgPool2d);
     let Attribute::AvgPool2d(attribute) = &pool.attribute else {
         panic!("expected an AVG_POOL2D attribute");
@@ -799,7 +799,7 @@ fn nearest_resize_serializes_rc4_parameters() {
             resize_dtype,
             None,
         );
-        let items = serialize_explicit(&ir);
+        let items = serialize(&ir);
         let resize = single_op(&items, Op::Resize);
         assert_eq!(resize.inputs, ["x_nhwc", "scale", "offset", "border"]);
         assert_eq!(shape_values(&items, "scale"), [16, 10, 16, 10]);
@@ -888,7 +888,7 @@ fn int16_bilinear_resize_is_int48_into_its_rescale() {
         INT16,
         Some(1.0 / 16.0),
     );
-    let items = serialize_explicit(&ir);
+    let items = serialize(&ir);
     assert_eq!(tensor(&items, "resize").dtype, DType::Int48);
     let rescale = single_op(&items, Op::Rescale);
     assert_eq!(tensor(&items, &rescale.inputs[3]).dtype, DType::Int48);
@@ -904,7 +904,7 @@ fn int16_bilinear_resize_is_int48_into_its_rescale() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn aten_spatial_ops_send_explicit_graphs_to_stock() {
+fn aten_spatial_ops_send_the_graph_to_stock() {
     // X5 and critique B11: aten convs, pools and upsamples have no visitor.
     for target in [
         "aten.convolution.default",
@@ -931,7 +931,9 @@ fn aten_spatial_ops_send_explicit_graphs_to_stock() {
         let (graph, store) = ingest(&ir);
         let error = try_serialize_graph(graph, &store).err().unwrap();
         assert!(
-            error.starts_with("RETAB_STOCK_FALLBACK: aten spatial op in explicit layout: 'op' ("),
+            error.starts_with(
+                "RETAB_STOCK_FALLBACK: aten spatial op not rewritten to a TOSA op: 'op' ("
+            ),
             "{target}: {error}"
         );
     }
@@ -962,13 +964,13 @@ fn select_and_sum_serialize_at_their_val_shapes() {
         out,
         vec![IrArg::List(vec![IrArg::Node(select), IrArg::Node(sum)])],
     );
-    let explicit = serialize_explicit(&ir);
-    assert_eq!(tensor(&explicit, "select").shape, [3, 4]);
-    assert_eq!(tensor(&explicit, "sum").shape, [3, 4]);
+    let items = serialize(&ir);
+    assert_eq!(tensor(&items, "select").shape, [3, 4]);
+    assert_eq!(tensor(&items, "sum").shape, [3, 4]);
 }
 
 #[test]
-fn explicit_invariant_check_reports_stale_vals() {
+fn invariant_check_reports_stale_vals() {
     // D1, run under RETAB_DEBUG.
     let mut graph = Graph::new();
     let x = graph.create_node(
@@ -989,10 +991,7 @@ fn explicit_invariant_check_reports_stale_vals() {
     );
     let store = TensorStore::new();
     visitors::shape_utils::clear_shape_cache();
-    assert_eq!(
-        check_explicit_layout_invariants("main", &graph, &store),
-        Ok(())
-    );
+    assert_eq!(check_layout_invariants("main", &graph, &store), Ok(()));
 
     // IrSizeAdjustInput's slices keep the unsliced val (design F5).
     graph.create_node(
@@ -1004,10 +1003,10 @@ fn explicit_invariant_check_reports_stale_vals() {
         "slice".into(),
     );
     visitors::shape_utils::clear_shape_cache();
-    let error = check_explicit_layout_invariants("main", &graph, &store).unwrap_err();
+    let error = check_layout_invariants("main", &graph, &store).unwrap_err();
     assert_eq!(
         error,
-        "explicit layout invariant broken in region 'main': 'slice' (Slice) has val \
+        "layout invariant broken in region 'main': 'slice' (Slice) has val \
          [1, 4, 4, 3] but serializes as [1, 2, 4, 3]"
     );
 }

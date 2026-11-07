@@ -279,7 +279,7 @@ fn actual_tensor_shape_impl(graph: &Graph, store: &TensorStore, node: &Node) -> 
     // A TOSA conv/pool/resize val is its TOSA shape (P2 design G1). The generic rules
     // below don't know these ops' operands: the broadcast rule would combine a conv's
     // input, weight and bias, or AVG_POOL2D's input and zero points (critique B1).
-    if op_semantics::has_explicit_tosa_shape_val(&node.target) {
+    if op_semantics::has_tosa_shape_val(&node.target) {
         return raw_i32_shape(node);
     }
 
