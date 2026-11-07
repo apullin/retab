@@ -1,4 +1,8 @@
-"""Decomposition hook installation helpers for fast_preprocess_pipeline."""
+"""RETAB's opt-in edge-manager and torch run_decompositions fast paths.
+
+Each fast path monkeypatches a private ExecuTorch or torch function and restores it
+on uninstall.
+"""
 
 import logging
 
@@ -37,7 +41,7 @@ def _install_patch_once(slot: str, module, attr: str, wrap):
     original = getattr(module, attr, None)
     if original is None:
         logger.warning(
-            "[fast_preprocess] skipping patch %s: %s.%s not found in this build",
+            "[retab] skipping patch %s: %s.%s not found in this build",
             slot,
             getattr(module, "__name__", module),
             attr,
@@ -123,7 +127,7 @@ def _latch_off_nn_module_stack_fast_path(exc: Exception) -> None:
     global _NN_MODULE_STACK_FAST_PATH_UNSAFE
     _NN_MODULE_STACK_FAST_PATH_UNSAFE = True
     logger.warning(
-        "[fast_preprocess] decomposition produced a node without nn_module_stack "
+        "[retab] decomposition produced a node without nn_module_stack "
         "(%s); disabling the nn_module_stack fast path and retracing with "
         "ModuleStackTracer. Lowering is correct but slower.",
         exc,
@@ -312,12 +316,12 @@ def _install_edge_decomp_fast_path() -> None:
 
             if skipped_second_passes:
                 logger.info(
-                    "[fast_preprocess] skipped %d redundant EDGE_DO_NOT_DECOMP cleanup passes",
+                    "[retab] skipped %d redundant EDGE_DO_NOT_DECOMP cleanup passes",
                     skipped_second_passes,
                 )
             if skipped_initial_functionalize:
                 logger.info(
-                    "[fast_preprocess] skipped %d upfront empty decomposition passes",
+                    "[retab] skipped %d upfront empty decomposition passes",
                     skipped_initial_functionalize,
                 )
 
@@ -715,7 +719,7 @@ def _install_run_decomp_fast_path() -> None:
         ]
     except (AttributeError, KeyError) as exc:
         logger.warning(
-            "[fast_preprocess] skipping run_decomp fast path; torch internals differ: %s",
+            "[retab] skipping run_decomp fast path; torch internals differ: %s",
             exc,
         )
         return
