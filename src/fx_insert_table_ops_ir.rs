@@ -1,5 +1,6 @@
 use crate::fx_activation::EluParams;
-use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, QParam};
+use crate::fx_ir::{EffectfulIrPass, EffectfulIrPassResult, IrGraph, IrNode, MetaValue, QParam};
+use crate::fx_meta::POW_LOG_POSITIVE_LOWER_BOUND;
 use crate::fx_target::{table_op_target_kind, EluTargetKind, TableOpTargetKind};
 use crate::graph::ir::DType;
 use crate::lowering_effects::{
@@ -129,6 +130,49 @@ fn quantize_to_spec(value: f64, spec: &TableTensorSpec) -> Option<i64> {
 
 fn dequantize_code(code: i64, zp: i64, scale: f64) -> f64 {
     ((code - zp) as f32 * scale as f32) as f64
+}
+
+/// rc4's InsertTableOpsPass._validate_pow_log_positive_lower_bound. A LOG made from
+/// `pow(base, exp)` carries the base's proven lower bound
+/// (`fx_meta::POW_LOG_POSITIVE_LOWER_BOUND`), and LOG needs a positive input, so the
+/// bound must stay positive after QDQ with the LOG input's qparams. `Err` holds a stock
+/// fallback reason wherever rc4 raises.
+fn check_pow_log_lower_bound(node: &IrNode) -> Result<(), String> {
+    let bound = match node.meta.extras.get(POW_LOG_POSITIVE_LOWER_BOUND) {
+        None => return Ok(()),
+        Some(MetaValue::Float(bound)) => *bound,
+        Some(invalid) => {
+            return Err(format!(
+                "invalid POW LOG lower bound: {}: {invalid:?}",
+                node.name
+            ))
+        }
+    };
+    let Some(input) = node.meta.input_qparam() else {
+        return Ok(());
+    };
+    if input.is_per_channel() {
+        return Err(format!(
+            "per-channel POW LOG input: {}: the lower-bound check needs per-tensor qparams",
+            node.name
+        ));
+    }
+    let code = crate::constant_materialization::quantize_value_stock(
+        bound,
+        input.scale,
+        input.zp,
+        input.qmin,
+        input.qmax,
+    );
+    let dequantized = dequantize_code(code, input.zp, input.scale);
+    if dequantized.is_finite() && dequantized > 0.0 {
+        return Ok(());
+    }
+    Err(format!(
+        "POW LOG lower bound not positive after quantization: {}: the base's proven lower \
+         bound {bound} becomes {dequantized} at the LOG input (scale={}, zero_point={})",
+        node.name, input.scale, input.zp
+    ))
 }
 
 fn sigmoid(x: f64) -> f64 {
@@ -484,6 +528,11 @@ impl EffectfulIrPass for IrInsertTableOpsEffectPass {
                     return None;
                 }
                 let spec = table_op_spec(node)?;
+                // Stock raises here; let it.
+                if let Err(reason) = check_pow_log_lower_bound(node) {
+                    crate::stock_fallback::request(reason);
+                    return None;
+                }
                 if let Some(effect) = plan_precomputed_table(node, &spec) {
                     return Some(LoweringEffect::InsertPrecomputedTableOp(effect));
                 }
@@ -1041,5 +1090,167 @@ mod tests {
             }
             other => panic!("unexpected effect: {other:?}"),
         }
+    }
+
+    fn pow_log_node(graph: &mut IrGraph, input: QParam, output: QParam, bound: MetaValue) -> usize {
+        let id = table_node_with_io_qparams(
+            graph,
+            "aten_log_default",
+            "aten.log.default",
+            Vec::new(),
+            input,
+            output,
+        );
+        graph
+            .node_mut(id)
+            .meta
+            .set_extra(POW_LOG_POSITIVE_LOWER_BOUND, bound);
+        id
+    }
+
+    fn run_and_take_fallback(graph: &mut IrGraph) -> (EffectfulIrPassResult, Option<String>) {
+        crate::stock_fallback::take();
+        let result = IrInsertTableOpsEffectPass.run(graph);
+        (result, crate::stock_fallback::take())
+    }
+
+    fn planned_names(result: &EffectfulIrPassResult) -> Vec<&str> {
+        result
+            .effects
+            .items
+            .iter()
+            .filter_map(|effect| match effect {
+                LoweringEffect::InsertPrecomputedTableOp(effect) => Some(effect.node_name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// rc4 test_pow.py::test_pow_tensor_tensor_int_rejects_base_lower_bound_quantized_to_zero,
+    /// with the LOG qparams stock derives for it. abs(x) + 0.25 is at least 0.25 by
+    /// construction, but calibrating x on [0, 128] gives the LOG input an INT8 scale that
+    /// maps 0.25 to the zero code. rc4 raises there; RETAB plans no table and asks for
+    /// stock, which raises its own error.
+    #[test]
+    fn pow_log_rejects_base_lower_bound_quantized_to_zero() {
+        let mut graph = IrGraph::empty();
+        pow_log_node(
+            &mut graph,
+            int8_io_qparam(0.5026960968971252, -128, -128, 127),
+            int8_io_qparam(0.0244597215205431, -71, -128, 127),
+            MetaValue::Float(0.25),
+        );
+
+        let (result, fallback) = run_and_take_fallback(&mut graph);
+
+        assert!(!result.modified);
+        assert!(result.effects.items.is_empty());
+        assert_eq!(
+            fallback.as_deref(),
+            Some(
+                "POW LOG lower bound not positive after quantization: aten_log_default: the \
+                 base's proven lower bound 0.25 becomes 0 at the LOG input \
+                 (scale=0.5026960968971252, zero_point=-128)"
+            )
+        );
+    }
+
+    /// test_pow.py's tosa_INT positive-base case, with stock's LOG qparams for base
+    /// samples on [0.25, 1.75]: 0.25 dequantizes positive, so the LOG becomes a TABLE.
+    #[test]
+    fn pow_log_lowers_when_the_lower_bound_stays_positive() {
+        let mut graph = IrGraph::empty();
+        pow_log_node(
+            &mut graph,
+            int8_io_qparam(0.007840264588594437, -128, -128, 127),
+            int8_io_qparam(0.0054337941110134125, 0, -128, 127),
+            MetaValue::Float(0.25),
+        );
+
+        let (result, fallback) = run_and_take_fallback(&mut graph);
+
+        assert_eq!(fallback, None);
+        assert_eq!(planned_names(&result), vec!["aten_log_default"]);
+    }
+
+    /// The check quantizes in float32 and rounds half to even, as torch's
+    /// quantize_per_tensor does: at scale 0.5, 0.25 sits on a half step and rounds to
+    /// the zero code, while 0.2500001 and 0.75 round to positive codes.
+    #[test]
+    fn pow_log_bound_rounds_half_steps_like_torch() {
+        for (bound, rejected) in [(0.25, true), (0.250_000_1, false), (0.75, false)] {
+            let mut graph = IrGraph::empty();
+            pow_log_node(
+                &mut graph,
+                int8_io_qparam(0.5, -128, -128, 127),
+                int8_io_qparam(0.5, -128, -128, 127),
+                MetaValue::Float(bound),
+            );
+            let (_, fallback) = run_and_take_fallback(&mut graph);
+            assert_eq!(fallback.is_some(), rejected, "bound {bound}: {fallback:?}");
+        }
+    }
+
+    /// Like rc4, the check skips a LOG without the bound and an unquantized LOG.
+    #[test]
+    fn pow_log_check_needs_the_bound_and_a_quantized_log() {
+        let mut graph = IrGraph::empty();
+        table_node_with_io_qparams(
+            &mut graph,
+            "plain_log",
+            "aten.log.default",
+            Vec::new(),
+            int8_io_qparam(0.5026960968971252, -128, -128, 127),
+            int8_io_qparam(0.0244597215205431, -71, -128, 127),
+        );
+        let unquantized = call_default(&mut graph, "float_log", "aten.log.default", Vec::new());
+        graph
+            .node_mut(unquantized)
+            .meta
+            .set_extra(POW_LOG_POSITIVE_LOWER_BOUND, MetaValue::Float(0.0));
+
+        let (result, fallback) = run_and_take_fallback(&mut graph);
+
+        assert_eq!(fallback, None);
+        assert_eq!(planned_names(&result), vec!["plain_log"]);
+    }
+
+    /// rc4 also raises for a bound that isn't a number and for a per-channel LOG input.
+    #[test]
+    fn pow_log_with_invalid_bound_or_per_channel_input_asks_for_stock() {
+        let mut graph = IrGraph::empty();
+        pow_log_node(
+            &mut graph,
+            int8_io_qparam(0.01, -128, -128, 127),
+            int8_io_qparam(0.01, 0, -128, 127),
+            MetaValue::Str("True".to_string()),
+        );
+        let (result, fallback) = run_and_take_fallback(&mut graph);
+        assert!(result.effects.items.is_empty());
+        assert_eq!(
+            fallback.as_deref(),
+            Some(r#"invalid POW LOG lower bound: aten_log_default: Str("True")"#)
+        );
+
+        let per_channel = QParam {
+            per_channel_scales: vec![0.01, 0.02],
+            per_channel_zps: vec![-128, -128],
+            ..int8_io_qparam(0.01, -128, -128, 127)
+        };
+        let mut graph = IrGraph::empty();
+        pow_log_node(
+            &mut graph,
+            per_channel,
+            int8_io_qparam(0.01, 0, -128, 127),
+            MetaValue::Float(0.25),
+        );
+        let (result, fallback) = run_and_take_fallback(&mut graph);
+        assert!(result.effects.items.is_empty());
+        assert!(
+            fallback.as_deref().is_some_and(
+                |reason| reason.starts_with("per-channel POW LOG input: aten_log_default")
+            ),
+            "{fallback:?}"
+        );
     }
 }

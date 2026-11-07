@@ -51,7 +51,51 @@ impl TensorFacts {
 #[derive(Debug, Clone)]
 pub enum MetaValue {
     Bool(bool),
+    Float(f64),
     Str(String),
+}
+
+/// rc4's `POW_LOG_POSITIVE_LOWER_BOUND_META` (`arm_pass_utils.py`): a lower bound that
+/// proves a pow base strictly positive. DecomposePowTensorTensorPass finds it on the
+/// quantizer side and stamps it on the LOG it makes from `pow(base, exp)`. The extra
+/// holds `MetaValue::Float`, or `MetaValue::Str` with the value's repr when the value
+/// is not a number. IrInsertTableOps checks it against the LOG input's qparams
+/// (`fx_insert_table_ops_ir`).
+pub(crate) const POW_LOG_POSITIVE_LOWER_BOUND: &str = "pow_log_positive_lower_bound";
+
+/// The POW LOG lower bound, from where rc4's InsertTableOpsPass reads it: from
+/// `meta["custom"]`, which survives the re-export after quantization, else from `meta`
+/// itself. `None` when neither holds a value. rc4 rejects a bool or a value that is not
+/// an int or a float, so those come back as their repr.
+fn pow_log_positive_lower_bound(meta: &Bound<'_, PyAny>) -> Option<MetaValue> {
+    use pyo3::types::{PyBool, PyFloat, PyInt};
+
+    let custom = meta_view(meta).value("custom").filter(|custom| {
+        custom
+            .contains(POW_LOG_POSITIVE_LOWER_BOUND)
+            .unwrap_or(false)
+    });
+    let value = match custom {
+        Some(custom) => custom.get_item(POW_LOG_POSITIVE_LOWER_BOUND).ok()?,
+        None => meta_view(meta).value(POW_LOG_POSITIVE_LOWER_BOUND)?,
+    };
+    if value.is_none() {
+        return None;
+    }
+    if !value.is_instance_of::<PyBool>()
+        && (value.is_instance_of::<PyInt>() || value.is_instance_of::<PyFloat>())
+    {
+        // An int too large for a float fails here, as rc4's float() raises on it.
+        if let Ok(bound) = value.extract::<f64>() {
+            return Some(MetaValue::Float(bound));
+        }
+    }
+    Some(MetaValue::Str(
+        value
+            .repr()
+            .map(|repr| repr.to_string())
+            .unwrap_or_default(),
+    ))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -254,6 +298,9 @@ impl NodeMeta {
         }
         if let Some(s) = meta_attrs.display_optional("tosa_special_dtype") {
             extras.insert("tosa_special_dtype".into(), MetaValue::Str(s));
+        }
+        if let Some(bound) = pow_log_positive_lower_bound(&meta) {
+            extras.insert(POW_LOG_POSITIVE_LOWER_BOUND.into(), bound);
         }
 
         Ok(Self {
