@@ -1,14 +1,10 @@
 [executorch]
 mode = "stock"
-reason = "RETAB patches TOSABackend._preprocess at runtime and falls back to stock preprocess outside its scope, so released ExecuTorch wheels work. Fork seams are used when present but are not required."
+reason = "RETAB patches TOSABackend._preprocess at runtime and falls back to stock preprocess outside its scope, so released ExecuTorch wheels work without a fork."
 tested = ["executorch 1.6.0 (v1.6.0-rc4, 4776f71b6)"]
 
 [executorch.required_seams]
 preprocess = "executorch.backends.arm.tosa.backend.TOSABackend._preprocess"
-
-[executorch.optional_seams]
-preprocess_override = "executorch.backends.arm.tosa.backend.TOSABackend.set_preprocess_override"
-edge_manager_override = "executorch.exir.program.set_edge_manager_for_partitioners_override"
 
 [python]
 requires = ">=3.10"

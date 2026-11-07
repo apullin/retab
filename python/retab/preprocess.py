@@ -10,7 +10,7 @@ dedicated path is:
 
 The call chain is:
   EthosUBackend.preprocess(ep, compile_specs)
-    -> TOSABackend._preprocess(ep, tosa_compile_spec)  <-- override or patch
+    -> TOSABackend._preprocess(ep, tosa_compile_spec)  <-- RETAB replaces this
     -> EthosUBackend._compile_tosa_flatbuffer(tosa_bytes, ...)  (Vela)
 
 By overriding the TOSA preprocess stage, we only swap the TOSA generation
@@ -647,33 +647,13 @@ def _restore_ethos_u_unused_input_guard() -> None:
     EthosUBackend.preprocess = original
 
 
-def _install_backend_preprocess_override() -> bool:
-    from executorch.backends.arm.tosa.backend import TOSABackend
-
-    install_override = getattr(TOSABackend, "set_preprocess_override", None)
-    if callable(install_override):
-        install_override(_all_rust_preprocess)
-        return True
-    return False
-
-
-def _restore_backend_preprocess_override() -> bool:
-    from executorch.backends.arm.tosa.backend import TOSABackend
-
-    clear_override = getattr(TOSABackend, "clear_preprocess_override", None)
-    if callable(clear_override):
-        clear_override()
-        return True
-    return False
-
-
 def patch_tosa_backend(*, fast_paths: bool = False):
     """Install the dedicated Rust path into ExecuTorch Arm lowering.
 
-    Prefer the native ExecuTorch override seam when available. Fall back to the
-    legacy monkey-patch for older trees that do not expose it yet. `fast_paths`
-    also replaces parts of ExecuTorch's edge-manager and run_decompositions flow;
-    those paths have no test coverage on rc4, so they are opt-in.
+    Stock ExecuTorch has no preprocess override hook, so this replaces
+    TOSABackend._preprocess in place. `fast_paths` also replaces parts of
+    ExecuTorch's edge-manager and run_decompositions flow; those paths have no
+    test coverage on rc4, so they are opt-in.
     """
     from executorch.backends.arm.tosa.backend import TOSABackend
 
@@ -682,13 +662,6 @@ def patch_tosa_backend(*, fast_paths: bool = False):
     if fast_paths:
         _install_edge_decomp_fast_path()
         _install_run_decomp_fast_path()
-
-    if _install_backend_preprocess_override():
-        _install_parallel_backend_preprocess_multimethods()
-        logger.info(
-            "[retab] Installed TOSABackend preprocess override (all_rust mode)"
-        )
-        return
 
     # Stock TOSABackend.preprocess and EthosUBackend both call TOSABackend._preprocess,
     # so swapping that one attribute (keeping its name) routes every TOSA lowering here.
@@ -704,10 +677,6 @@ def unpatch_tosa_backend():
     _uninstall_edge_decomp_fast_path()
     _restore_parallel_backend_preprocess_multimethods()
     _restore_ethos_u_unused_input_guard()
-
-    if _restore_backend_preprocess_override():
-        logger.info("[retab] Cleared TOSABackend preprocess override")
-        return
 
     # Restore the stock attributes in place. importlib.reload would create a second
     # TOSABackend class while other modules keep the patched one.

@@ -43,8 +43,8 @@ restores the captured originals.
 
 [../python/retab/preprocess.py](../python/retab/preprocess.py) captures stock
 `TOSABackend` attributes before replacing `_preprocess`. Both stock TOSA and
-Ethos-U backends call that entry point. Optional fork override setters are
-supported when present, but `compat/executorch.toml` uses `mode = "stock"`.
+Ethos-U backends call that entry point, and no ExecuTorch fork or override
+hook is involved (`compat/executorch.toml` records `mode = "stock"`).
 Activation also installs guarded decomposition fast paths from
 [../python/retab/_decomp_hooks.py](../python/retab/_decomp_hooks.py) against
 available upstream helpers.

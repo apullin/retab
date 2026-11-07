@@ -63,21 +63,6 @@ def _restore_patch(slot: str, module, attr: str) -> None:
         setattr(module, attr, original)
 
 
-def _install_override_once(slot: str, getter, setter, value) -> None:
-    if slot in _ORIGINAL_PATCHES:
-        return
-
-    _ORIGINAL_PATCHES[slot] = getter()
-    setter(value)
-
-
-def _restore_override(slot: str, setter) -> None:
-    if slot not in _ORIGINAL_PATCHES:
-        return
-
-    setter(_ORIGINAL_PATCHES.pop(slot))
-
-
 def _iter_graph_modules(gm):
     import torch
 
@@ -366,38 +351,6 @@ def _install_edge_decomp_fast_path() -> None:
         optimized_gen_edge_manager_for_partitioners.__retab_patched__ = True
         optimized_gen_edge_manager_for_partitioners.__wrapped__ = current
         return optimized_gen_edge_manager_for_partitioners
-
-    def override_gen_edge_manager_for_partitioners(
-        current,
-        partitioner,
-        aten_programs,
-        config,
-        constant_methods,
-        generate_etrecord=False,
-    ):
-        optimized = wrap_gen_edge_manager_for_partitioners(current)
-        return optimized(
-            partitioner,
-            aten_programs,
-            config,
-            constant_methods,
-            generate_etrecord,
-        )
-
-    set_override = getattr(
-        program_mod, "set_edge_manager_for_partitioners_override", None
-    )
-    get_override = getattr(
-        program_mod, "get_edge_manager_for_partitioners_override", None
-    )
-    if callable(set_override) and callable(get_override):
-        _install_override_once(
-            "edge_manager_for_partitioners_override",
-            get_override,
-            set_override,
-            override_gen_edge_manager_for_partitioners,
-        )
-        return
 
     _install_patch_once(
         "gen_edge_manager_for_partitioners",
@@ -863,12 +816,6 @@ def _install_run_decomp_fast_path() -> None:
 
 def _uninstall_edge_decomp_fast_path() -> None:
     from executorch.exir.program import _program as program_mod
-
-    set_override = getattr(
-        program_mod, "set_edge_manager_for_partitioners_override", None
-    )
-    if callable(set_override):
-        _restore_override("edge_manager_for_partitioners_override", set_override)
 
     _restore_patch(
         "gen_edge_manager_for_partitioners",

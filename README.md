@@ -39,9 +39,9 @@ torch.export -> quantize -> Arm partitioner -> TOSABackend._preprocess
 
 [python/retab/preprocess.py](python/retab/preprocess.py) replaces
 `TOSABackend._preprocess` at runtime and preserves the stock implementation
-for fallback and restoration. Optional fork override hooks are used when
-present. Activation also installs guarded decomposition fast paths from
-`_decomp_hooks.py` against available ExecuTorch and torch helpers.
+for fallback and restoration. Activation also installs guarded decomposition
+fast paths from `_decomp_hooks.py` against available ExecuTorch and torch
+helpers.
 
 RETAB handles TOSA 1.0 INT graphs with the target's default pass pipeline.
 It hands these cases to stock preprocessing:
@@ -183,7 +183,7 @@ retab/
 │   ├── preprocess.py            # Backend scope, orchestration, and counters
 │   ├── _cf_ctx.py               # Delegate metadata reads
 │   └── _decomp_hooks.py          # Guarded decomposition fast paths
-├── compat/executorch.toml       # Tested stock stack and optional hooks
+├── compat/executorch.toml       # Tested stock stack and the seams RETAB uses
 └── tests/                       # Python integration tests and rc4 inventories
 ```
 
