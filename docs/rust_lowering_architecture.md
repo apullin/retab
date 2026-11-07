@@ -55,12 +55,12 @@ insertions, delegate-owned mutable buffers, and symbolic shapes to the
 captured stock implementation. `preprocess_stats()` returns process-local
 RETAB counts and stock fallback counts by reason.
 
-For an in-scope graph, Python copies the original state dictionary, calls
-the Rust parent and submodule pass entry points, aligns graph-signature
-input specs with placeholder order, and invokes `ingest_and_serialize()`.
-It also handles requested artifact dumps and delegate metadata through
-`_cf_ctx.py`. Serialization consumes the stashed IR; its compatibility
-arguments do not cause a second Python graph import.
+For an in-scope graph, Python calls the Rust parent and submodule pass entry
+points, which read the FX graph and state dictionary without modifying them,
+then `ingest_and_serialize()`, which consumes the stashed IR without a second
+Python graph import. Python also writes requested artifact dumps and, under
+Ethos-U, raises stock's error for a delegate input that no TOSA operator
+reads. Like stock's `_preprocess`, it returns only the TOSA bytes.
 
 Experimental parallel backend preprocessing patches `preprocess_multimethod`
 only when workers are explicitly enabled. It uses fork workers for multiple

@@ -31,7 +31,6 @@ from executorch.exir.backend.backend_details import PreprocessResult
 from executorch.exir.backend.compile_spec_schema import CompileSpec
 from torch.export.exported_program import ExportedProgram
 
-from retab._cf_ctx import _collect_delegate_info_meta
 from retab._decomp_hooks import (
     _install_edge_decomp_fast_path,
     _install_run_decomp_fast_path,
@@ -583,10 +582,8 @@ def _all_rust_preprocess(
         f"[retab] passes={t_passes:.3f}s, serialize={t_total-t_passes:.3f}s, total={t_total:.3f}s"
     )
 
-    return PreprocessResult(
-        processed_bytes=tosa_bytes,
-        _delegate_info_meta=_collect_delegate_info_meta(gm),
-    )
+    # Like stock's _preprocess: the TOSA bytes and nothing else.
+    return PreprocessResult(processed_bytes=tosa_bytes)
 
 
 _all_rust_preprocess._retab_override = True

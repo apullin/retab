@@ -181,8 +181,7 @@ retab/
 ├── python/retab/
 │   ├── integration/             # Stable ExecuTorch install/activation API
 │   ├── preprocess.py            # Backend scope, orchestration, and counters
-│   ├── _cf_ctx.py               # Delegate metadata reads
-│   └── _decomp_hooks.py          # Guarded decomposition fast paths
+│   └── _decomp_hooks.py         # Guarded decomposition fast paths
 ├── compat/executorch.toml       # Tested stock stack and the seams RETAB uses
 └── tests/                       # Python integration tests and rc4 inventories
 ```
